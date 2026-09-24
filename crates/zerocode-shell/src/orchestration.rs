@@ -3031,12 +3031,28 @@ fn note_pointer_stale(run: &str, address: &str, newest: &str) {
 /// A new turn began in this pane: it is not idle, and whatever pointer state
 /// it carried is stale.
 /// Terminals the window has HEARD since the last beat — a turn beginning or
-/// ending, either is a sound. Only the window sees beginnings, so only the
-/// window can carry them; the readiness sweep drains this on the beat and
-/// hands it to the actor, whose seat table knows whose worker each is.
-fn spoken_terms() -> &'static Mutex<std::collections::HashSet<u32>> {
-    static SPOKEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
-    SPOKEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+/// ending, either is a sound — each with when the latest sound's state
+/// began, on the pane's own clock ([`zerocode_core::hook::state_clock`]).
+/// Only the window sees beginnings, so only the window can carry them; the
+/// readiness sweep drains this on the beat and hands it to the actor, whose
+/// seat table knows whose worker each is and whose ledger reads each sound
+/// as the seat stood when it began — a late sound from a pane's last
+/// occupant is never its next one's (t-6740 r3).
+fn spoken_terms() -> &'static Mutex<std::collections::HashMap<u32, i64>> {
+    static SPOKEN: OnceLock<Mutex<std::collections::HashMap<u32, i64>>> = OnceLock::new();
+    SPOKEN.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Write a sound down for the beat's sweep. A later sound in the same beat
+/// stands for the terminal: it is the one the pane's present occupant is
+/// likelier to have made, and one sound is all the window ever asks for.
+fn heard(term: u32, began_ms: i64) {
+    spoken_terms()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .entry(term)
+        .and_modify(|held| *held = (*held).max(began_ms))
+        .or_insert(began_ms);
 }
 
 /// What the hooks last said about each terminal's need for a PERSON —
@@ -3053,11 +3069,37 @@ fn pane_attention() -> &'static Mutex<std::collections::HashMap<u32, Option<i64>
 }
 
 /// A hook report said whether this terminal is waiting on the person.
-pub(crate) fn pane_attention_noted(term: u32, waiting_since: Option<i64>) {
+///
+/// The map records what the window SAW; it is not the record of what the
+/// ledger was TOLD (t-6740). Every sighting of a wait goes to the actor, and
+/// the ledger's own lines decide whether it is news: the same wait — the
+/// same seat, word and `since` — is one line however often it is seen
+/// ([`zerocode_core::orchestration::ReceiverNews`]). So a sighting the
+/// ledger could not write down — a degraded window, a runtime not up yet, a
+/// store that refused the write — is told on the next sighting of the same
+/// wait, with nothing in this window's memory standing in its way. Only a
+/// report that says the pane waits on the person reaches the actor — that
+/// wait's own events (the question, its permission request, its
+/// notification), never a working turn's tool events — and a look at a
+/// fact already told writes nothing.
+pub(crate) fn pane_attention_noted(term: u32, waiting_since: Option<i64>, now_ms: i64) {
     pane_attention()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .insert(term, waiting_since);
+    let Some(since_ms) = waiting_since else {
+        return;
+    };
+    // A hook event, not a verb: as in [`pane_turn_ended`], a degraded
+    // window has nobody to refuse and simply does not tell — this time.
+    if unavailable().is_some() {
+        return;
+    }
+    if let Some(held) = runtime()
+        && let Ok((moved, _)) = held.actor.pane_attention(term, since_ms, now_ms)
+    {
+        rang(moved);
+    }
 }
 
 /// The terminal is gone; its number's next life starts unevaluated.
@@ -3538,11 +3580,10 @@ pub(crate) fn forget_taken_term(term: u32) {
         .remove(&term);
 }
 
-pub(crate) fn pane_turn_began(term: u32) {
-    spoken_terms()
-        .lock()
-        .unwrap_or_else(|held| held.into_inner())
-        .insert(term);
+/// `began_ms` is when the pane's present state began — the pane's own clock
+/// ([`zerocode_core::hook::state_clock`]), unmoved while the state repeats.
+pub(crate) fn pane_turn_began(term: u32, began_ms: i64) {
+    heard(term, began_ms);
     /* Written down as RUNNING rather than struck out. Both readings refuse to
      * type here, so the old erasure looked equivalent — but it threw away the
      * one fact that separates a pane which will be measured at rest in a
@@ -3568,14 +3609,16 @@ pub(crate) fn pane_turn_began(term: u32) {
 /// settled") is structural there, and reports arrive for every pane in the
 /// window — most of them nobody's worker — so a seat that resolves to nothing
 /// is the ordinary case and not a failure.
-pub(crate) fn pane_turn_ended(term: u32, turn_started_ms: i64, interrupted: bool, now_ms: i64) {
+///
+/// `turn_ended_ms` is the pane's own clock for the rest it came to
+/// ([`zerocode_core::hook::state_clock`]): when the turn ended, unmoved
+/// while the rest is reported again.
+pub(crate) fn pane_turn_ended(term: u32, turn_ended_ms: i64, interrupted: bool, now_ms: i64) {
     // A sound is a sound: the actor road below also retires the readiness
     // window, but it does not run in a degraded window — the beat's sweep
-    // still must not report a pane the window plainly heard.
-    spoken_terms()
-        .lock()
-        .unwrap_or_else(|held| held.into_inner())
-        .insert(term);
+    // still must not report a pane the window plainly heard. Heard at the
+    // moment the turn ended, the moment the actor road reads it at too.
+    heard(term, turn_ended_ms);
     // Nobody to refuse on this road — it is a hook event, not a verb — so it
     // simply does not run in a degraded window. See [`unavailable`]; the
     // window already said why, once, at boot. A silence the store refuses is
@@ -3597,7 +3640,7 @@ pub(crate) fn pane_turn_ended(term: u32, turn_started_ms: i64, interrupted: bool
         return;
     };
     let actor = &held.actor;
-    if let Ok((moved, _)) = actor.pane_turn_ended(term, turn_started_ms, interrupted, now_ms) {
+    if let Ok((moved, _)) = actor.pane_turn_ended(term, turn_ended_ms, interrupted, now_ms) {
         rang(moved);
     }
 }
@@ -4955,7 +4998,7 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // The readiness sweep, on the beat that already exists: the sounds heard
     // since the last one retire their windows, and whoever stayed silent past
     // their own is reported to their coordinator — once, as news (§7.2).
-    let spoken: Vec<u32> = spoken_terms()
+    let spoken: Vec<(u32, i64)> = spoken_terms()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .drain()
@@ -6964,6 +7007,34 @@ fn carried(
                         Err(why) => return refused_by_runtime(why),
                     }
                     if std::time::Instant::now() >= deadline {
+                        /* A question's deadline is settled by ONE look
+                         * (t-6740): the woken look once more — an answer
+                         * that landed after the last empty look above is
+                         * the answer, then a closing, then a receiver
+                         * gone — and only a question still waiting goes
+                         * home timed out, with the last word about its
+                         * receiver. What that look answers is what this
+                         * caller goes home with AND what its receipt
+                         * holds, filed in the same transition: a replay of
+                         * the same ask says what the caller was told, never
+                         * the first look this wait began from. */
+                        if waiting.thread.is_some() {
+                            match actor.deadline_look(
+                                waiting.clone(),
+                                decided.receipt.clone(),
+                                now_ms,
+                            ) {
+                                Ok((Some(settled), _)) => {
+                                    rang(decided.receipt.is_some());
+                                    return answer(settled.reply);
+                                }
+                                // The question is not in the ledger any more
+                                // (its run went away): the first answer
+                                // stands, as for any other wait.
+                                Ok((None, _)) => {}
+                                Err(why) => return refused_by_runtime(why),
+                            }
+                        }
                         // Silence is not failure — the ninth invariant, and
                         // the reason this is the answer the first look
                         // already wrote rather than a refusal. A coordinator

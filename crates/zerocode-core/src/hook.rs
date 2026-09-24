@@ -581,6 +581,26 @@ pub fn done_provenance(state: HookState, flag: bool) -> bool {
     flag && state == HookState::Done
 }
 
+/// When a pane's reported state BEGAN — its own clock, which the window
+/// keeps beside every row it records.
+///
+/// It moves only when the STATE does: a repeated `working` is the same
+/// stretch of work however many tool events arrive inside it, and a
+/// repeated `done` is the same rest. So on a `done` report this is the
+/// moment the turn ENDED — not when it began, and not when the report
+/// landed — and it stays that moment while the rest is reported again,
+/// which is what lets the ledger write one turn's end once
+/// (`Ledger::worker_fell_silent`, `Ledger::receivers_told_turn_ended`).
+/// `prior` is the pane's last recorded state with its clock, `None` for a
+/// pane never heard from.
+#[must_use]
+pub fn state_clock(prior: Option<(HookState, i64)>, state: HookState, now_ms: i64) -> i64 {
+    match prior {
+        Some((held, since_ms)) if held == state => since_ms,
+        _ => now_ms,
+    }
+}
+
 /// Whether this event is a HELPER's rather than the lead's.
 ///
 /// Orca's whole vocabulary for this is one field read two ways

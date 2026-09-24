@@ -357,9 +357,12 @@ pub enum RuntimeRequest {
         now_ms: i64,
     },
     /// A turn ended in a seat: write the worker's silence down, once.
+    /// `turn_ended_ms` is when it ended — the pane's own clock for the rest
+    /// it came to (`zerocode_core::hook::state_clock`), unmoved while the
+    /// rest is reported again.
     PaneTurnEnded {
         term: u32,
-        turn_started_ms: i64,
+        turn_ended_ms: i64,
         interrupted: bool,
         now_ms: i64,
     },
@@ -443,10 +446,13 @@ pub enum RuntimeRequest {
     },
     /// The beat's readiness sweep — a fourth host fact: which TERMINALS the
     /// window heard since the last beat (a turn beginning counts, and only
-    /// the window sees beginnings), which installed hook scripts left a
-    /// failed-delivery marker, and the clock to judge silence by.
+    /// the window sees beginnings), each with when the sound's state began
+    /// (the pane's own clock, `zerocode_core::hook::state_clock`) so a
+    /// sound is the worker's that sat there then, which installed hook
+    /// scripts left a failed-delivery marker, and the clock to judge
+    /// silence by.
     ReadinessSweep {
-        spoken: Vec<u32>,
+        spoken: Vec<(u32, i64)>,
         delivery_failures: Vec<(u32, i64)>,
         now_ms: i64,
     },
@@ -484,6 +490,25 @@ pub enum RuntimeRequest {
     /// A person's hand landed real keys in a terminal — the fifth host
     /// fact. From that moment the pane is theirs, durably.
     PaneTakenOver { term: u32, now_ms: i64 },
+    /// A hook report said a seat's composer holds a question for the
+    /// person since `since_ms` (t-6740): every asker waiting on that seat
+    /// is told, once per wait.
+    PaneAttention {
+        term: u32,
+        since_ms: i64,
+        now_ms: i64,
+    },
+    /// A blocking `ask` reached its deadline: look once more, in the woken
+    /// look's order — an answer, a closing, a receiver gone, and only then a
+    /// timeout carrying the last thing the ledger observed about the
+    /// receiver — and remember THAT answer under `receipt`, in the same
+    /// transition, so a replay of the ask says what its caller went home
+    /// with.
+    DeadlineLook {
+        waiting: Box<Waiting>,
+        receipt: Option<Box<ReceiptKey>>,
+        now_ms: i64,
+    },
     /// The window is on its way out and every pane goes with it (t-3058):
     /// seated workers sleep now, before their panes' own deaths can settle
     /// them.
@@ -673,13 +698,13 @@ impl std::fmt::Debug for RuntimeRequest {
                 .finish(),
             Self::PaneTurnEnded {
                 term,
-                turn_started_ms,
+                turn_ended_ms,
                 interrupted,
                 now_ms,
             } => formatter
                 .debug_struct("RuntimeRequest::PaneTurnEnded")
                 .field("term", term)
-                .field("turn_started_ms", turn_started_ms)
+                .field("turn_ended_ms", turn_ended_ms)
                 .field("interrupted", interrupted)
                 .field("now_ms", now_ms)
                 .finish(),
@@ -816,6 +841,27 @@ impl std::fmt::Debug for RuntimeRequest {
             Self::PaneTakenOver { term, now_ms } => formatter
                 .debug_struct("RuntimeRequest::PaneTakenOver")
                 .field("term", term)
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::PaneAttention {
+                term,
+                since_ms,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::PaneAttention")
+                .field("term", term)
+                .field("since_ms", since_ms)
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::DeadlineLook {
+                waiting,
+                receipt,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::DeadlineLook")
+                .field("run_bytes", &waiting.run.len())
+                .field("thread", &waiting.thread.is_some())
+                .field("receipt", &receipt.is_some())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::WindowExiting { now_ms } => formatter
@@ -1661,13 +1707,13 @@ impl RuntimeActor {
     pub fn pane_turn_ended(
         &self,
         term: u32,
-        turn_started_ms: i64,
+        turn_ended_ms: i64,
         interrupted: bool,
         now_ms: i64,
     ) -> Result<(bool, u64), RuntimeError> {
         match self.request(RuntimeRequest::PaneTurnEnded {
             term,
-            turn_started_ms,
+            turn_ended_ms,
             interrupted,
             now_ms,
         })? {
@@ -1864,10 +1910,11 @@ impl RuntimeActor {
 
     /// The beat's readiness sweep. Answers whether anybody was told, and the
     /// revision that answer speaks for. Delivery failures are level-triggered;
-    /// the ledger transition makes repeated markers a no-op.
+    /// the ledger transition makes repeated markers a no-op. `spoken` pairs
+    /// each terminal heard with when that sound's state began.
     pub fn readiness_sweep(
         &self,
-        spoken: Vec<u32>,
+        spoken: Vec<(u32, i64)>,
         delivery_failures: Vec<(u32, i64)>,
         now_ms: i64,
     ) -> Result<(bool, u64), RuntimeError> {
@@ -1968,6 +2015,45 @@ impl RuntimeActor {
     pub fn pane_taken_over(&self, term: u32, now_ms: i64) -> Result<(bool, u64), RuntimeError> {
         match self.request(RuntimeRequest::PaneTakenOver { term, now_ms })? {
             RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// A hook report said a seat's composer is waiting on the person since
+    /// `since_ms`. Answers whether any asker was told, and the revision
+    /// that answer speaks for.
+    pub fn pane_attention(
+        &self,
+        term: u32,
+        since_ms: i64,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::PaneAttention {
+            term,
+            since_ms,
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// A blocking `ask` reached its deadline: one look settles it, and the
+    /// answer it goes home with is remembered under `receipt` in the same
+    /// transition. `Some` is that answer, `None` when the wait was not a
+    /// question's (or its question is no longer in the ledger).
+    pub fn deadline_look(
+        &self,
+        waiting: Waiting,
+        receipt: Option<ReceiptKey>,
+        now_ms: i64,
+    ) -> Result<(Option<Box<Decided>>, u64), RuntimeError> {
+        match self.request(RuntimeRequest::DeadlineLook {
+            waiting: Box::new(waiting),
+            receipt: receipt.map(Box::new),
+            now_ms,
+        })? {
+            RuntimeReply::Looked { found, revision } => Ok((found, revision)),
             _ => Err(RuntimeError::AuthorityRejected),
         }
     }
@@ -2822,10 +2908,10 @@ impl RuntimeState {
             } => self.seat_gone(term, screen, now_ms),
             RuntimeRequest::PaneTurnEnded {
                 term,
-                turn_started_ms,
+                turn_ended_ms,
                 interrupted,
                 now_ms,
-            } => self.turn_ended(term, turn_started_ms, interrupted, now_ms),
+            } => self.turn_ended(term, turn_ended_ms, interrupted, now_ms),
             RuntimeRequest::QuietSweep { stalled, now_ms } => self.quiet_swept(&stalled, now_ms),
             RuntimeRequest::QuotaWalls { walled, now_ms } => self.quota_walled(&walled, now_ms),
             RuntimeRequest::QuotaLifts { lifted, now_ms } => self.quota_lifted(&lifted, now_ms),
@@ -2880,6 +2966,16 @@ impl RuntimeState {
             } => self.observed(&to, &body, receipt.as_deref(), now_ms),
             RuntimeRequest::RetentionSweep { now_ms } => self.retention_swept(now_ms),
             RuntimeRequest::PaneTakenOver { term, now_ms } => self.pane_taken(term, now_ms),
+            RuntimeRequest::PaneAttention {
+                term,
+                since_ms,
+                now_ms,
+            } => self.pane_attention(term, since_ms, now_ms),
+            RuntimeRequest::DeadlineLook {
+                waiting,
+                receipt,
+                now_ms,
+            } => self.deadline_look(&waiting, receipt.as_deref(), now_ms),
             RuntimeRequest::WindowExiting { now_ms } => self.window_exiting(now_ms),
             RuntimeRequest::WorkerPaneResumed {
                 term,
@@ -3052,6 +3148,7 @@ impl RuntimeState {
                 let state = settled
                     .ok_or(RuntimeError::AuthorityRejected)?
                     .map_err(|_| RuntimeError::AuthorityRejected)?;
+                self.ledger.receivers_reconciled(settled_at_ms);
                 let revision = self.write_through(settled_at_ms)?;
                 Ok(RuntimeReply::Release { state, revision })
             }
@@ -3106,7 +3203,9 @@ impl RuntimeState {
                     .ok_or(RuntimeError::AuthorityRejected)?;
                 let state = worker.state;
                 let state = if state == WorkerState::ReleasePending {
-                    self.ledger.release_unknown(&seat.worker)
+                    let state = self.ledger.release_unknown(&seat.worker);
+                    self.ledger.receivers_reconciled(now_ms);
+                    state
                 } else {
                     state
                 };
@@ -3178,14 +3277,22 @@ impl RuntimeState {
     }
 
     /// A turn ended in a seat: write the worker's silence down, once.
+    ///
+    /// One fact, read by three rules under one transition — the sound that
+    /// retires a readiness window, the silence of an attempt, and the line
+    /// to whoever waits on the seat — and all three read it as the seat
+    /// stood when the turn ENDED (t-6740 r3): the worker already sitting
+    /// there then, and the attempt it was carrying. A late report is never
+    /// split between the attempt it ended in and the one the pane carries
+    /// when it lands, and it never moves the pane's next occupant at all.
     fn turn_ended(
         &mut self,
         term: u32,
-        turn_started_ms: i64,
+        turn_ended_ms: i64,
         interrupted: bool,
         now_ms: i64,
     ) -> Result<RuntimeReply, RuntimeError> {
-        if now_ms < 0 || turn_started_ms < 0 {
+        if now_ms < 0 || turn_ended_ms < 0 {
             return Err(RuntimeError::InvalidInput);
         }
         if !self.recovery_permits.is_empty() {
@@ -3197,11 +3304,20 @@ impl RuntimeState {
             if let Some((team, pane)) = seat {
                 // Any sound retires the readiness window — an interrupted
                 // turn is still an agent that was THERE for it.
-                let spoke = ledger.worker_spoke((team, pane));
-                moved = ledger
-                    .worker_fell_silent((team, pane), turn_started_ms, interrupted, now_ms)
-                    .is_some()
-                    || spoke;
+                let spoke = ledger.worker_spoke((team, pane), turn_ended_ms);
+                let quiet = ledger
+                    .worker_fell_silent((team, pane), turn_ended_ms, interrupted, now_ms)
+                    .is_some();
+                // And whoever is waiting on this seat is told (t-6740) —
+                // under the same transition, so the notice and the silence
+                // reach the disk together or not at all.
+                let told = ledger.receivers_told_turn_ended(
+                    (team, pane),
+                    turn_ended_ms,
+                    interrupted,
+                    now_ms,
+                ) > 0;
+                moved = quiet || spoke || told;
             }
         });
         if !moved {
@@ -3230,7 +3346,9 @@ impl RuntimeState {
         let mut moved = false;
         self.panes.with_seat_of_term(term, &mut |seat| {
             if let Some((team, pane)) = seat {
-                moved = ledger.worker_taken_over((team, pane));
+                let taken = ledger.worker_taken_over((team, pane));
+                let told = ledger.receivers_told_taken_over((team, pane), now_ms) > 0;
+                moved = taken || told;
             }
         });
         if !moved {
@@ -3242,6 +3360,80 @@ impl RuntimeState {
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Settled {
             moved: true,
+            revision,
+        })
+    }
+
+    /// A seat's composer holds a question for the person: tell whoever is
+    /// waiting on that seat, once per wait.
+    fn pane_attention(
+        &mut self,
+        term: u32,
+        since_ms: i64,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0 || since_ms < 0 {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let ledger = &mut self.ledger;
+        let mut moved = false;
+        self.panes.with_seat_of_term(term, &mut |seat| {
+            if let Some((team, pane)) = seat {
+                moved = ledger.receivers_told_awaiting_input((team, pane), since_ms, now_ms) > 0;
+            }
+        });
+        if !moved {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// A blocking `ask` reached its deadline: ONE look settles it — an
+    /// answer that landed after the sleeper's last empty look, a closing, a
+    /// receiver gone, and only then a timeout — and the answer that look
+    /// gives is the receipt, filed in the same transition as the look, so a
+    /// replay of the same named ask says exactly what its caller was told.
+    fn deadline_look(
+        &mut self,
+        waiting: &Waiting,
+        receipt: Option<&ReceiptKey>,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0 {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let Some(settled) = zerocode_core::orchestration::deadline_look(&self.ledger, waiting)
+        else {
+            return Ok(RuntimeReply::Looked {
+                found: None,
+                revision: self.revision,
+            });
+        };
+        let Some(key) = receipt else {
+            /* An unnamed ask files nothing: the answer is a read, and a read
+             * that wrote nothing speaks for the revision it read. */
+            return Ok(RuntimeReply::Looked {
+                found: Some(Box::new(settled)),
+                revision: self.revision,
+            });
+        };
+        self.ledger.remember_answer(key, &settled, now_ms);
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Looked {
+            found: Some(Box::new(settled)),
             revision,
         })
     }
@@ -3711,11 +3903,14 @@ impl RuntimeState {
     /// report. `spoken` carries panes the window heard since the last beat.
     fn readiness_swept(
         &mut self,
-        spoken: &[u32],
+        spoken: &[(u32, i64)],
         delivery_failures: &[(u32, i64)],
         now_ms: i64,
     ) -> Result<RuntimeReply, RuntimeError> {
-        if now_ms < 0 || delivery_failures.iter().any(|(_, since_ms)| *since_ms < 0) {
+        if now_ms < 0
+            || spoken.iter().any(|(_, heard_ms)| *heard_ms < 0)
+            || delivery_failures.iter().any(|(_, since_ms)| *since_ms < 0)
+        {
             return Err(RuntimeError::InvalidInput);
         }
         if !self.recovery_permits.is_empty() {
@@ -3735,11 +3930,14 @@ impl RuntimeState {
         }
         // The window speaks in terminals; the seat table turns each into a
         // `(team, pane)` the ledger knows — the same turning `turn_ended`
-        // does, under the same lock.
-        for term in spoken {
+        // does, under the same lock — and the ledger reads each sound at the
+        // moment its state began, as `turn_ended` reads the turn's end: a
+        // late sound from a pane's last occupant never retires the next
+        // one's window (t-6740 r3).
+        for (term, heard_ms) in spoken {
             self.panes.with_seat_of_term(*term, &mut |seat| {
                 if let Some((team, pane)) = seat {
-                    ledger.worker_spoke((team, pane));
+                    ledger.worker_spoke((team, pane), *heard_ms);
                 }
             });
         }
@@ -3771,7 +3969,8 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
-        let told = self.ledger.workers_stalled(stalled, now_ms);
+        let told = self.ledger.workers_stalled(stalled, now_ms)
+            + self.ledger.receivers_told_stalled(stalled, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,
@@ -3936,7 +4135,8 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
-        let told = self.ledger.stall_causes_judged(judged, now_ms);
+        let told = self.ledger.stall_causes_judged(judged, now_ms)
+            + self.ledger.receivers_told_judged(judged, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,
@@ -4658,6 +4858,8 @@ impl RuntimeState {
             Some(screen) => self.ledger.finish_release(worker, Some(screen)),
             None => self.ledger.release_unknown(worker),
         };
+        // A release ends a reader: whoever asked it something is told (t-6740).
+        self.ledger.receivers_reconciled(now_ms);
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Release { state, revision })
     }
@@ -6700,6 +6902,691 @@ mod tests {
         actor.shutdown().expect("join quiet actor");
     }
 
+    /// A seat somebody has a question open to (t-6740): an interrupted
+    /// turn writes no silence and still moves the ledger, because the asker
+    /// is told; a wait on the person is told once per wait; and the
+    /// deadline answer reads the last word back without moving anything.
+    #[test]
+    fn a_receivers_state_moves_the_ledger_for_its_asker_and_the_deadline_reads_it() {
+        let fixture = Fixture::new();
+        let mut legacy = Ledger::new();
+        let run = legacy.create_run("asking", 5);
+        let seated = legacy
+            .start_worker(&run, "codex", ("team-1", "%2"), None, 6)
+            .expect("a seated worker");
+        let run_address = legacy.run(&run).expect("the run").address();
+        let question = legacy
+            .post(
+                &run,
+                zerocode_core::orchestration::Draft {
+                    from: run_address.clone(),
+                    to: zerocode_core::orchestration::worker_address(&seated.worker),
+                    kind: zerocode_core::orchestration::MessageKind::Question,
+                    body: "which branch?".into(),
+                    subject: Default::default(),
+                    priority: zerocode_core::orchestration::Priority::Normal,
+                    payload: Default::default(),
+                    thread: None,
+                    task: None,
+                    dispatch: None,
+                },
+                7,
+            )
+            .expect("the coordinator's question");
+        let actor = start_with(
+            &fixture,
+            cutover(Some(legacy.export()), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        assert_eq!(
+            actor
+                .pane_turn_ended(7, 15, true, 20)
+                .expect("an interrupted turn"),
+            (true, 1),
+            "the asker was not told the receiver's turn was interrupted"
+        );
+        assert_eq!(
+            actor
+                .pane_attention(7, 30, 31)
+                .expect("a wait on the person"),
+            (true, 2)
+        );
+        assert_eq!(
+            actor
+                .pane_attention(7, 30, 32)
+                .expect("the same wait again"),
+            (false, 2),
+            "one wait was told twice"
+        );
+        let waiting = Waiting {
+            run: run.clone(),
+            address: run_address,
+            kinds: Vec::new(),
+            peek: false,
+            deadline_ms: None,
+            acked: false,
+            format: false,
+            thread: Some(question),
+            seat: "team-1/%1".to_string(),
+        };
+        let (timed, revision) = actor
+            .deadline_look(waiting.clone(), None, 40)
+            .expect("a deadline answer");
+        assert_eq!(revision, 2, "a deadline read moved the ledger");
+        let timed: serde_json::Value =
+            serde_json::from_str(&timed.expect("a question's wait has an answer").reply.stdout)
+                .expect("JSON");
+        assert_eq!(timed["timedOut"], true, "{timed}");
+        assert_eq!(timed["receiver"]["reason"], "awaiting_input", "{timed}");
+        assert_eq!(timed["receiver"]["factMs"], 30);
+        let inbox_wait = Waiting {
+            thread: None,
+            ..waiting
+        };
+        let (none, _) = actor
+            .deadline_look(inbox_wait, None, 41)
+            .expect("an inbox wait's deadline");
+        assert!(none.is_none(), "an inbox wait spoke of a receiver");
+        actor.shutdown().expect("join receiver actor");
+    }
+
+    /// A legacy ledger with a worker seated at ("team-1", "%2") and nothing
+    /// else: the receiver a coordinator's question is put to.
+    fn a_receiver_at_the_second_seat() -> (LedgerProjectionV1, String, String) {
+        let mut legacy = Ledger::new();
+        let run = legacy.create_run("asking", 5);
+        let seated = legacy
+            .start_worker(&run, "codex", ("team-1", "%2"), None, 6)
+            .expect("a seated worker");
+        (legacy.export(), run, seated.worker)
+    }
+
+    /// The deadline is settled in ONE transition (astra R2, t-6740 r2). The
+    /// sleeper's last look finds nothing; the worker replies before the
+    /// deadline is read; the deadline's look answers the REPLY — never a
+    /// timeout over an answer already in the log — and files that answer as
+    /// the ask's receipt, so the same named ask replays those bytes. A
+    /// question nobody answers times out and replays its timeout the same
+    /// way.
+    #[test]
+    fn the_deadline_look_settles_a_late_reply_and_files_what_it_served() {
+        let fixture = Fixture::new();
+        let (legacy, run, worker) = a_receiver_at_the_second_seat();
+        let actor = start_with(
+            &fixture,
+            cutover(Some(legacy), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        let to = zerocode_core::orchestration::worker_address(&worker);
+        let ask = |name: &str, body: &str, at: i64| {
+            let (asked, _) = actor
+                .plan(a_command(
+                    &[
+                        "ask",
+                        "--run",
+                        &run,
+                        "--to",
+                        &to,
+                        "--body",
+                        body,
+                        "--timeout-ms",
+                        "1000",
+                        "--retry-request",
+                        name,
+                    ],
+                    at,
+                ))
+                .expect("the ask");
+            assert_eq!(asked.reply.exit_code, 0, "{}", asked.reply.stderr);
+            asked
+        };
+
+        let asked = ask("r-late", "which-branch", 11);
+        let waiting = asked.waiting.clone().expect("an unanswered ask waits");
+        let receipt = asked.receipt.clone().expect("a named ask has a key");
+        let question = waiting.thread.clone().expect("a question's wait");
+        let (found, _) = actor
+            .look_again(waiting.clone(), Some(receipt.clone()), 12)
+            .expect("the last look");
+        assert!(found.is_none(), "the last look found an answer nobody gave");
+        let (replied, _) = actor
+            .plan(
+                PlanCommand::checked(
+                    [
+                        "reply",
+                        "--run",
+                        run.as_str(),
+                        "--to-message",
+                        question.as_str(),
+                        "--body",
+                        "main",
+                        "--retry-request",
+                        "r-answer",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                    "team-1",
+                    "%2",
+                    capability_of("%2"),
+                    Some(format!("actor-v1:{}", "b".repeat(64))),
+                    13,
+                )
+                .expect("a reply inside the door's bounds"),
+            )
+            .expect("the reply lands");
+        assert_eq!(replied.reply.exit_code, 0, "{}", replied.reply.stderr);
+
+        let (settled, _) = actor
+            .deadline_look(waiting, Some(receipt), 14)
+            .expect("the deadline's look");
+        let settled = settled.expect("a question's deadline answers");
+        let said: serde_json::Value = serde_json::from_str(&settled.reply.stdout).expect("JSON");
+        assert_eq!(
+            said["answered"], true,
+            "a reply in the log went home as {said}"
+        );
+        assert_eq!(said["answer"]["body"], "main", "{said}");
+        let replayed = ask("r-late", "which-branch", 15);
+        assert!(replayed.waiting.is_none(), "a replay slept again");
+        assert_eq!(
+            replayed.reply.stdout, settled.reply.stdout,
+            "the named ask replayed another answer than the one it went home with"
+        );
+
+        let asked = ask("r-plain", "which-tag", 16);
+        let (timed, _) = actor
+            .deadline_look(
+                asked.waiting.clone().expect("an unanswered ask waits"),
+                asked.receipt.clone(),
+                17,
+            )
+            .expect("the deadline's look");
+        let timed = timed.expect("a question's deadline answers");
+        let said: serde_json::Value = serde_json::from_str(&timed.reply.stdout).expect("JSON");
+        assert_eq!(said["timedOut"], true, "{said}");
+        assert_eq!(said["answered"], false, "{said}");
+        let replayed = ask("r-plain", "which-tag", 18);
+        assert_eq!(
+            replayed.reply.stdout, timed.reply.stdout,
+            "the named ask replayed another answer than its timeout"
+        );
+        actor.shutdown().expect("join deadline actor");
+    }
+
+    /// A turn end is told at the moment the turn ENDED (astra R3, t-6740
+    /// r2), from the window's clock to the asker's inbox and the deadline
+    /// answer: a turn that began at 100 and ended at 1_000 goes home as
+    /// ended at 1_000, seen at 1_000 — and reported again at 1_500, the same
+    /// rest, it is not told twice and its time does not move.
+    #[test]
+    fn a_turn_end_goes_home_at_the_moment_the_turn_ended() {
+        use zerocode_core::hook::{HookState, state_clock};
+        let fixture = Fixture::new();
+        let (legacy, run, worker) = a_receiver_at_the_second_seat();
+        let actor = start_with(
+            &fixture,
+            cutover(Some(legacy), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        let to = zerocode_core::orchestration::worker_address(&worker);
+        let (asked, _) = actor
+            .plan(a_command(
+                &[
+                    "ask",
+                    "--run",
+                    &run,
+                    "--to",
+                    &to,
+                    "--body",
+                    "which-branch",
+                    "--retry-request",
+                    "r-turn",
+                ],
+                11,
+            ))
+            .expect("the ask");
+        assert_eq!(asked.reply.exit_code, 0, "{}", asked.reply.stderr);
+        let waiting = asked.waiting.clone().expect("an unanswered ask waits");
+
+        // The window's clock for the pane: working from 100, at rest from
+        // 1_000, the rest reported again at 1_500.
+        let began = state_clock(None, HookState::Working, 100);
+        let ended = state_clock(Some((HookState::Working, began)), HookState::Done, 1_000);
+        let again = state_clock(Some((HookState::Done, ended)), HookState::Done, 1_500);
+        assert_eq!(
+            (began, ended, again),
+            (100, 1_000, 1_000),
+            "the rest's clock moved"
+        );
+        let (moved, revision) = actor
+            .pane_turn_ended(7, ended, false, 1_000)
+            .expect("the turn end");
+        assert!(moved, "the asker was not told the receiver's turn ended");
+        assert_eq!(
+            actor
+                .pane_turn_ended(7, again, false, 1_500)
+                .expect("the same rest again"),
+            (false, revision),
+            "one turn end was told twice"
+        );
+
+        let image = actor.view().expect("the image");
+        let told: Vec<serde_json::Value> = image
+            .projection()
+            .messages
+            .iter()
+            .filter(|row| row.from == zerocode_core::orchestration::LEDGER_ITSELF)
+            .filter(|row| row.thread == waiting.thread)
+            .map(|row| serde_json::from_str(row.body.as_str()).expect("a notice is JSON"))
+            .collect();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0]["reason"], "turn_ended");
+        assert_eq!(
+            told[0]["factMs"], 1_000,
+            "the turn's end went home as {}",
+            told[0]
+        );
+        assert_eq!(told[0]["observedAtMs"], 1_000);
+
+        let (timed, _) = actor
+            .deadline_look(waiting, None, 2_000)
+            .expect("the deadline's look");
+        let timed: serde_json::Value =
+            serde_json::from_str(&timed.expect("a question's deadline answers").reply.stdout)
+                .expect("JSON");
+        assert_eq!(timed["receiver"]["reason"], "turn_ended", "{timed}");
+        assert_eq!(timed["receiver"]["factMs"], 1_000, "{timed}");
+        assert_eq!(timed["receiver"]["observedAtMs"], 1_000, "{timed}");
+        actor.shutdown().expect("join turn-end actor");
+    }
+
+    /// A verb from the worker's own pane (`%2`), as its shim sends one.
+    fn a_worker_command(argv: &[&str], now_ms: i64) -> PlanCommand {
+        PlanCommand::checked(
+            argv.iter().map(|word| (*word).to_string()).collect(),
+            "team-1",
+            "%2",
+            capability_of("%2"),
+            Some(format!("actor-v1:{}", "b".repeat(64))),
+            now_ms,
+        )
+        .expect("a worker's command inside the door's bounds")
+    }
+
+    /// The ledger's turn-end lines in one question's thread, as
+    /// `(factMs, the attempt the line names)`.
+    fn turn_end_lines(actor: &RuntimeActor, question: &str) -> Vec<(i64, String)> {
+        actor
+            .view()
+            .expect("the image")
+            .projection()
+            .messages
+            .iter()
+            .filter(|row| row.from == zerocode_core::orchestration::LEDGER_ITSELF)
+            .filter(|row| row.thread.as_deref() == Some(question))
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(row.body.as_str())
+                    .expect("a notice is JSON")
+            })
+            .filter(|body| body["reason"] == "turn_ended")
+            .map(|body| {
+                (
+                    body["factMs"].as_i64().expect("a fact time"),
+                    body["receiverSeat"]["dispatchId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// What the ledger holds about one worker's silence and hearing:
+    /// the `went_quiet` rows naming `attempt`, its quiet watermark, and its
+    /// readiness window and channel mark.
+    fn quiet_and_heard(
+        actor: &RuntimeActor,
+        worker: &str,
+        attempt: &str,
+    ) -> (usize, Option<i64>, Option<i64>, Option<i64>) {
+        let image = actor.view().expect("the image");
+        let rows = image.projection();
+        let quiet = rows
+            .messages
+            .iter()
+            .filter(|row| row.kind == zerocode_core::orchestration::MessageKind::WentQuiet)
+            .filter(|row| row.dispatch.as_deref() == Some(attempt))
+            .count();
+        let held = rows
+            .workers
+            .iter()
+            .find(|row| row.id == worker)
+            .expect("the worker's row");
+        (
+            quiet,
+            held.quiet_at,
+            held.ready_by_ms,
+            held.hook_unreachable_since_ms,
+        )
+    }
+
+    /// One turn end is one attempt's, on the actor's own road (astra R3,
+    /// t-6740 r3 — the coordinator's case, verbatim). A worker carries D1;
+    /// Q1 is asked of it; a turn ends inside D1 and its report is late: D1
+    /// ends, the same pane takes D2, Q2 is asked — and only then does the
+    /// turn end arrive. It is D1's alone: no `went_quiet` names D2 and D2's
+    /// quiet watermark does not move; Q1 hears it labelled D1; Q2, asked
+    /// after D1 was over, does not hear it. D2's own turn end is D2's: its
+    /// silence, and both askers' news, labelled D2.
+    #[test]
+    fn a_late_turn_end_is_one_attempts_news_on_the_actor_road() {
+        let fixture = Fixture::new();
+        let mut legacy = Ledger::new();
+        let run = legacy.create_run("attempts", 5);
+        let first = legacy
+            .create_task(
+                &run,
+                "first".to_string(),
+                "first".to_string(),
+                Vec::new(),
+                None,
+                5,
+            )
+            .expect("the first task");
+        let second = legacy
+            .create_task(
+                &run,
+                "second".to_string(),
+                "second".to_string(),
+                Vec::new(),
+                None,
+                5,
+            )
+            .expect("the second task");
+        let seated = legacy
+            .start_worker(&run, "codex", ("team-1", "%2"), Some(&first), 6)
+            .expect("a seated worker");
+        let worker = seated.worker;
+        let d1 = seated.dispatch.expect("the first attempt");
+        let actor = start_with(
+            &fixture,
+            cutover(Some(legacy.export()), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        let to = zerocode_core::orchestration::worker_address(&worker);
+        let ask = |name: &str, now_ms: i64| {
+            let (asked, _) = actor
+                .plan(a_command(
+                    &[
+                        "ask",
+                        "--run",
+                        &run,
+                        "--to",
+                        &to,
+                        "--body",
+                        "which-branch",
+                        "--retry-request",
+                        name,
+                    ],
+                    now_ms,
+                ))
+                .expect("the ask");
+            assert_eq!(asked.reply.exit_code, 0, "{}", asked.reply.stderr);
+            asked
+                .waiting
+                .and_then(|waiting| waiting.thread)
+                .expect("an unanswered ask waits on its question")
+        };
+        let q1 = ask("r-q1", 11);
+
+        // The turn ends inside D1 at 12; its report will be late.
+        let ended = 12;
+        let (done, _) = actor
+            .plan(a_worker_command(
+                &[
+                    "send",
+                    "--run",
+                    &run,
+                    "--type",
+                    "worker_done",
+                    "--body",
+                    r#"{"ok":true}"#,
+                    "--retry-request",
+                    "r-done",
+                ],
+                13,
+            ))
+            .expect("the report");
+        assert_eq!(done.reply.exit_code, 0, "{}", done.reply.stderr);
+        let (dispatched, _) = actor
+            .plan(a_command(
+                &[
+                    "dispatch",
+                    "--run",
+                    &run,
+                    "--task",
+                    &second,
+                    "--to",
+                    "%2",
+                    "--retry-request",
+                    "r-dispatch",
+                ],
+                14,
+            ))
+            .expect("the dispatch");
+        assert_eq!(dispatched.reply.exit_code, 0, "{}", dispatched.reply.stderr);
+        let d2: serde_json::Value =
+            serde_json::from_str(&dispatched.reply.stdout).expect("the dispatch answers JSON");
+        let d2 = d2["dispatchId"].as_str().expect("D2").to_string();
+        assert_ne!(d1, d2);
+        let q2 = ask("r-q2", 15);
+        let before = quiet_and_heard(&actor, &worker, &d2);
+
+        actor
+            .pane_turn_ended(7, ended, false, 16)
+            .expect("the late turn end");
+        let mut missed = Vec::new();
+        let after = quiet_and_heard(&actor, &worker, &d2);
+        if (after.0, after.1) != (before.0, before.1) {
+            missed.push(format!(
+                "D1's late turn end moved D2's silence: {before:?} → {after:?}"
+            ));
+        }
+        if turn_end_lines(&actor, &q1) != vec![(ended, d1.clone())] {
+            missed.push(format!(
+                "Q1 heard {:?}, not D1's turn end labelled D1",
+                turn_end_lines(&actor, &q1)
+            ));
+        }
+        if !turn_end_lines(&actor, &q2).is_empty() {
+            missed.push(format!(
+                "Q2, asked after D1 was over, heard {:?}",
+                turn_end_lines(&actor, &q2)
+            ));
+        }
+        assert!(missed.is_empty(), "{missed:#?}");
+
+        // D2's own turn end is D2's.
+        let own = 20;
+        let (moved, _) = actor
+            .pane_turn_ended(7, own, false, 21)
+            .expect("D2's turn end");
+        assert!(moved, "D2's own turn end moved nothing");
+        let (quiet, quiet_at, _, _) = quiet_and_heard(&actor, &worker, &d2);
+        assert_eq!((quiet, quiet_at), (1, Some(own)), "D2's silence");
+        assert_eq!(
+            turn_end_lines(&actor, &q1),
+            vec![(ended, d1), (own, d2.clone())]
+        );
+        assert_eq!(turn_end_lines(&actor, &q2), vec![(own, d2)]);
+        actor.shutdown().expect("join attempts actor");
+    }
+
+    /// A legacy ledger whose `%2` (term 7) changed hands: the last occupant,
+    /// on the first task, came to rest at 7 and was stopped at 8; the next
+    /// was seated at 9 on the second task, and the window has not heard from
+    /// it — its readiness window open until [`A_FRESH_WINDOW`] and its
+    /// channel marked at 9, as such a row reads. Answers the rows, the run,
+    /// the next worker, its attempt, and when the last one rested.
+    fn a_pane_seated_again() -> (LedgerProjectionV1, String, String, String, i64) {
+        let mut legacy = Ledger::new();
+        let run = legacy.create_run("occupants", 5);
+        let mut task = |spec: &str| {
+            legacy
+                .create_task(
+                    &run,
+                    spec.to_string(),
+                    spec.to_string(),
+                    Vec::new(),
+                    None,
+                    5,
+                )
+                .expect("a task")
+        };
+        let (first, second) = (task("first"), task("second"));
+        let last = legacy
+            .start_worker(&run, "codex", ("team-1", "%2"), Some(&first), 6)
+            .expect("the last occupant")
+            .worker;
+        let rested = 7;
+        legacy
+            .end_attempt(
+                &last,
+                zerocode_core::orchestration::Ending::Stopped,
+                "moved",
+                8,
+            )
+            .expect("the last occupant stopped");
+        let next = legacy
+            .start_worker(&run, "codex", ("team-1", "%2"), Some(&second), 9)
+            .expect("the pane seated again");
+        let attempt = next.dispatch.clone().expect("the next attempt");
+        let mut rows = legacy.export();
+        for row in rows.workers.iter_mut().filter(|row| row.id == next.worker) {
+            row.ready_by_ms = Some(A_FRESH_WINDOW);
+            row.hook_unreachable_since_ms = Some(9);
+        }
+        (rows, run, next.worker, attempt, rested)
+    }
+
+    /// The readiness deadline [`a_pane_seated_again`] gives its next
+    /// occupant.
+    const A_FRESH_WINDOW: i64 = 9 + 60_000;
+
+    /// A pane's next occupant is never moved by the last one's late turn
+    /// end, on the actor's own road (astra R3): the turn ended before it was
+    /// summoned, so its readiness window stays open, its channel mark
+    /// stands, no `went_quiet` names its attempt and its asker is told
+    /// nothing — the whole report moves nothing. Its own turn end retires
+    /// the window, is its silence and is its asker's news.
+    #[test]
+    fn a_late_turn_end_never_moves_the_panes_next_occupant() {
+        let fixture = Fixture::new();
+        let (rows, run, next, attempt, rested) = a_pane_seated_again();
+        let actor = start_with(
+            &fixture,
+            cutover(Some(rows), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        let to = zerocode_core::orchestration::worker_address(&next);
+        let (asked, _) = actor
+            .plan(a_command(
+                &[
+                    "ask",
+                    "--run",
+                    &run,
+                    "--to",
+                    &to,
+                    "--body",
+                    "which-tag",
+                    "--retry-request",
+                    "r-next",
+                ],
+                11,
+            ))
+            .expect("the ask");
+        assert_eq!(asked.reply.exit_code, 0, "{}", asked.reply.stderr);
+        let question = asked
+            .waiting
+            .and_then(|waiting| waiting.thread)
+            .expect("an unanswered ask waits on its question");
+        let before = quiet_and_heard(&actor, &next, &attempt);
+        assert_eq!(before, (0, None, Some(A_FRESH_WINDOW), Some(9)));
+
+        let (moved, _) = actor
+            .pane_turn_ended(7, rested, false, 12)
+            .expect("the last occupant's late turn end");
+        let after = quiet_and_heard(&actor, &next, &attempt);
+        let told = turn_end_lines(&actor, &question);
+        assert_eq!(
+            (moved, after, told.len()),
+            (false, before, 0),
+            "the last occupant's late turn end moved the next one"
+        );
+
+        let own = 20;
+        let (moved, _) = actor
+            .pane_turn_ended(7, own, false, 21)
+            .expect("the next occupant's turn end");
+        assert!(moved, "the next occupant's own turn end moved nothing");
+        assert_eq!(
+            quiet_and_heard(&actor, &next, &attempt),
+            (1, Some(own), None, None),
+            "its own turn end is its silence and its sound"
+        );
+        assert_eq!(turn_end_lines(&actor, &question), vec![(own, attempt)]);
+        actor.shutdown().expect("join occupants actor");
+    }
+
+    /// The beat's readiness sweep reads a sound as the seat stood when the
+    /// sound's state began (t-6740 r3), the way the turn's own road reads its
+    /// end: the last occupant's late sound, drained on the next beat, never
+    /// retires the next one's window or clears its channel mark — and the
+    /// next one's own sound does.
+    #[test]
+    fn the_readiness_sweep_hears_a_sound_as_the_seat_stood_when_it_began() {
+        let fixture = Fixture::new();
+        let (rows, _run, next, attempt, rested) = a_pane_seated_again();
+        let actor = start_with(
+            &fixture,
+            cutover(Some(rows), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        let before = quiet_and_heard(&actor, &next, &attempt);
+        assert_eq!(before, (0, None, Some(A_FRESH_WINDOW), Some(9)));
+
+        actor
+            .readiness_sweep(vec![(7, rested)], Vec::new(), 12)
+            .expect("the beat after the late sound");
+        assert_eq!(
+            quiet_and_heard(&actor, &next, &attempt),
+            before,
+            "the last occupant's late sound retired the next one's window"
+        );
+
+        actor
+            .readiness_sweep(vec![(7, 13)], Vec::new(), 14)
+            .expect("the beat after its own sound");
+        assert_eq!(
+            quiet_and_heard(&actor, &next, &attempt),
+            (0, None, None, None),
+            "the next occupant's own sound did not retire its window"
+        );
+        assert_eq!(
+            actor.readiness_sweep(vec![(7, -1)], Vec::new(), 15),
+            Err(RuntimeError::InvalidInput),
+            "a sound from before the epoch was taken"
+        );
+        actor.shutdown().expect("join sweep actor");
+    }
+
     #[test]
     fn readiness_records_a_failed_delivery_and_a_sound_on_the_same_beat_wins() {
         let fixture = Fixture::new();
@@ -6722,7 +7609,7 @@ mod tests {
             Some(15)
         );
         actor
-            .readiness_sweep(vec![7], vec![(7, 15)], 21)
+            .readiness_sweep(vec![(7, 21)], vec![(7, 15)], 21)
             .expect("sound after the stale marker");
         assert_eq!(
             actor.view().expect("recovered image").projection().workers[0]

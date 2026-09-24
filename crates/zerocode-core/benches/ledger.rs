@@ -17,7 +17,8 @@ use std::hint::black_box;
 use zerocode_core::SessionKey;
 use zerocode_core::agent_teams::{LEADER_PANE, Team};
 use zerocode_core::orchestration::{
-    Launcher, Ledger, Message, MessageKind, newest_wall, next_dispatch, plan, receipt_actor,
+    Draft, Ending, Launcher, Ledger, Message, MessageKind, Priority, Waiting, deadline_look,
+    look_again, newest_wall, next_dispatch, plan, receipt_actor, worker_address,
 };
 
 /// A launcher that knows every agent. Arming a standing order validates the
@@ -281,6 +282,145 @@ fn a_wallless_attempt_reads_its_wall_in_one_scan(bench: &mut Criterion) {
     });
 }
 
+/// A run with ten thousand rows of mail, one worker seated at `%2`, and one
+/// open question to it from the coordinator — the shape every receiver
+/// notice (t-6740) is written against. Answers the ledger, the seat, the
+/// question's id and the asker's wait.
+fn a_busy_run_with_one_open_question() -> (Ledger, (String, String), String, Waiting) {
+    let (mut ledger, team, run_id, _) = a_bound_run("receiver");
+    let seat = (team.id.clone(), "%2".to_string());
+    let started = ledger
+        .start_worker(&run_id, "claude", (&seat.0, &seat.1), None, 0)
+        .expect("a seated receiver");
+    let address = format!("run:{run_id}");
+    for at in 0..10_000u32 {
+        ledger
+            .send(
+                &run_id,
+                Message {
+                    id: format!("mail{at}"),
+                    from: "worker:w-9".to_string(),
+                    to: address.clone(),
+                    kind: MessageKind::Status,
+                    body: String::from("a line of report").into(),
+                    subject: Default::default(),
+                    priority: Default::default(),
+                    payload: Default::default(),
+                    thread: None,
+                    task: None,
+                    dispatch: Some(format!("dp-{}", at % 7)),
+                    author_seat: None,
+                    created_ms: i64::from(at),
+                },
+            )
+            .expect("seeded mail");
+    }
+    let question = ledger
+        .post(
+            &run_id,
+            Draft {
+                from: address.clone(),
+                to: worker_address(&started.worker),
+                kind: MessageKind::Question,
+                body: String::from("which branch?").into(),
+                subject: Default::default(),
+                priority: Priority::Normal,
+                payload: Default::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            },
+            10_001,
+        )
+        .expect("the coordinator's question");
+    let waiting = Waiting {
+        run: run_id,
+        address,
+        kinds: Vec::new(),
+        peek: false,
+        deadline_ms: None,
+        acked: false,
+        format: false,
+        thread: Some(question.clone()),
+        seat: format!("{}/{LEADER_PANE}", team.id),
+    };
+    (ledger, seat, question, waiting)
+}
+
+/// The road every turn end in the window pays for once the seat has an
+/// asker (t-6740): the receivers at the seat are found, the open questions
+/// to them walked, and — the common beat — the same fact already told, so
+/// nothing is written.
+fn a_receivers_turn_end_is_told_once_against_ten_thousand_rows(bench: &mut Criterion) {
+    let (mut ledger, seat, _, _) = a_busy_run_with_one_open_question();
+    assert_eq!(
+        ledger.receivers_told_turn_ended((&seat.0, &seat.1), 20_000, false, 20_001),
+        1,
+        "the first turn end tells the asker"
+    );
+    bench.bench_function(
+        "a_receivers_turn_end_is_told_once_against_ten_thousand_rows",
+        |timed| {
+            timed.iter(|| {
+                black_box(ledger.receivers_told_turn_ended(
+                    (&seat.0, &seat.1),
+                    black_box(20_000),
+                    false,
+                    black_box(20_002),
+                ))
+            })
+        },
+    );
+}
+
+/// The rare beat: a fresh fact, and one line written for the asker.
+fn a_receivers_fresh_fact_writes_one_line(bench: &mut Criterion) {
+    let (ledger, seat, _, _) = a_busy_run_with_one_open_question();
+    let projected = ledger.export();
+    bench.bench_function("a_receivers_fresh_fact_writes_one_line", |timed| {
+        timed.iter_batched(
+            || Ledger::rebuild(projected.clone()).expect("the seeded run rebuilds"),
+            |mut fresh| {
+                black_box(fresh.receivers_told_turn_ended(
+                    (&seat.0, &seat.1),
+                    black_box(20_000),
+                    false,
+                    black_box(20_001),
+                ))
+            },
+            criterion::BatchSize::LargeInput,
+        )
+    });
+}
+
+/// The woken look of a blocked `ask` whose receiver is gone (t-6740): a
+/// read that ends the wait, paid once per bell.
+fn a_gone_receiver_wakes_the_asker_in_one_look(bench: &mut Criterion) {
+    let (mut ledger, seat, _, waiting) = a_busy_run_with_one_open_question();
+    let worker = ledger
+        .run(&waiting.run)
+        .and_then(|run| run.worker_in_pane(&seat.0, &seat.1))
+        .map(|held| held.id.clone())
+        .expect("the receiver");
+    ledger
+        .end_attempt(&worker, Ending::Stopped, "bench", 20_000)
+        .expect("the receiver stopped");
+    assert!(look_again(&mut ledger, &waiting).is_some(), "the wake");
+    bench.bench_function("a_gone_receiver_wakes_the_asker_in_one_look", |timed| {
+        timed.iter(|| black_box(look_again(&mut ledger, black_box(&waiting))))
+    });
+}
+
+/// The deadline answer of a blocked `ask`: the woken look once more, then
+/// the last word about the receiver, read off the thread.
+fn a_timed_out_ask_reads_its_receivers_last_word(bench: &mut Criterion) {
+    let (mut ledger, seat, _, waiting) = a_busy_run_with_one_open_question();
+    ledger.receivers_told_turn_ended((&seat.0, &seat.1), 20_000, false, 20_001);
+    bench.bench_function("a_timed_out_ask_reads_its_receivers_last_word", |timed| {
+        timed.iter(|| black_box(deadline_look(&ledger, black_box(&waiting))))
+    });
+}
+
 criterion_group!(
     ledger,
     an_empty_check_answers,
@@ -289,6 +429,10 @@ criterion_group!(
     an_armed_tick_picks_the_oldest_of_a_thousand,
     a_replayed_mutation_answers_from_its_receipt,
     a_boot_validates_a_big_ledger,
-    a_wallless_attempt_reads_its_wall_in_one_scan
+    a_wallless_attempt_reads_its_wall_in_one_scan,
+    a_receivers_turn_end_is_told_once_against_ten_thousand_rows,
+    a_receivers_fresh_fact_writes_one_line,
+    a_gone_receiver_wakes_the_asker_in_one_look,
+    a_timed_out_ask_reads_its_receivers_last_word
 );
 criterion_main!(ledger);

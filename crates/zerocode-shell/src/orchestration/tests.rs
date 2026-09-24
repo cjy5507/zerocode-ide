@@ -5908,7 +5908,7 @@ fn a_stop_nobody_declared_one_a_person_or_a_question_holds_and_a_wall_are_never_
         let stood = StoppedWorker::stand(96_220, "--on-transient-error resume", Vec::new());
         stood.stops_on(&stopped, stood.began + 9_000);
         // Its own question parked in the composer: the hook said so.
-        super::pane_turn_began(stood.host.worker_term);
+        super::pane_turn_began(stood.host.worker_term, stood.began + 9_000);
         silent(&stood, "a question of its own");
     }
     {
@@ -7007,7 +7007,7 @@ fn a_turn_start_retires_the_workers_never_spoke_window() {
         .and_then(|row| row.ready_by_ms)
         .expect("the worker's readiness deadline");
 
-    pane_turn_began(WORKER_TERM);
+    pane_turn_began(WORKER_TERM, clock());
     tick(&Nowhere, &[], deadline.saturating_add(1));
 
     let rows = the_rows();
@@ -10927,12 +10927,12 @@ fn a_worker_observation_carries_the_windows_wait_verdict() {
     );
     // Evaluated and quiet: an explicit null, which must not print the
     // same as never-looked.
-    super::pane_attention_noted(WORKER, None);
+    super::pane_attention_noted(WORKER, None, 4_000);
     let seen = show();
     assert!(seen.get("agentWait").is_some());
     assert!(seen["agentWait"].is_null());
     // Waiting on the person: the evidence and its clock.
-    super::pane_attention_noted(WORKER, Some(4_242));
+    super::pane_attention_noted(WORKER, Some(4_242), 4_300);
     let seen = show();
     assert_eq!(seen["agentWait"]["source"], "hook");
     assert_eq!(seen["agentWait"]["since"], 4_242);
@@ -11094,7 +11094,7 @@ fn a_zo_workers_wait_names_the_event_channel_as_its_source() {
     let started: serde_json::Value = serde_json::from_str(&started.stdout).expect("a worker");
     let worker = started["workerId"].as_str().expect("a worker id");
 
-    super::pane_attention_noted(WORKER, Some(4_243));
+    super::pane_attention_noted(WORKER, Some(4_243), 4_300);
     let shown = run(
         &host,
         Vec::new(),
@@ -11275,7 +11275,7 @@ fn the_beat_points_an_idle_coordinator_at_its_mail_and_enters_once() {
     super::tick(&host, &[], clock());
     assert_eq!(typed(&host).len(), before, "a leased batch was pointed at");
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -11399,7 +11399,7 @@ fn a_pointer_that_reached_enter_is_not_typed_again_after_a_restart() {
         "fresh mail after the restart was not pointed at"
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -11512,7 +11512,7 @@ fn mail_older_than_the_news_window_is_left_to_check() {
         ]
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -11627,7 +11627,7 @@ fn the_pointer_yields_to_people_sleepers_and_self_submitting_composers() {
         "a self-submitting composer was handed an Enter"
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -11749,7 +11749,7 @@ fn the_pointer_is_never_typed_into_a_shell_its_agent_has_left() {
     // An agent holds the terminal again and ends a turn: pointed, once.
     host.shell_in_front
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     super::pane_turn_ended(LEADER, 151, false, clock());
     super::tick(&host, &[], clock());
     let advice = zerocode_core::orchestration::pointer_text(1);
@@ -11759,7 +11759,7 @@ fn the_pointer_is_never_typed_into_a_shell_its_agent_has_left() {
         "the returned agent was not told about its mail"
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -11926,7 +11926,7 @@ fn a_report_that_lands_behind_an_unacknowledged_lease_is_still_pointed_at() {
              not hand over"
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(FIRST);
     crate::agent_teams::forget_term(SECOND);
@@ -12060,7 +12060,7 @@ fn a_pointer_no_road_will_carry_is_retried_and_written_down_once() {
     assert_eq!(tried(&host).len(), 4, "a settled pointer kept typing");
     assert_eq!(complaints(), 1);
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -12157,7 +12157,7 @@ fn a_coordinator_that_came_back_under_a_new_session_is_still_seated() {
     );
     assert!(!run_id.is_empty());
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -12370,7 +12370,7 @@ fn a_pane_the_window_never_heard_is_told_apart_from_one_at_work() {
     // Now the window HEARS the pane, at work. That is a different fact:
     // this turn will end and be measured, so the pointer waits — and the
     // black box is not told, because a working pane is not an alarm.
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     for _ in 0..5 {
         super::tick(&host, &[], clock());
     }
@@ -12398,7 +12398,7 @@ fn a_pane_the_window_never_heard_is_told_apart_from_one_at_work() {
         "a pane that was pointed at was complained about"
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -12499,7 +12499,7 @@ fn a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_compos
     };
 
     // The pane is at work when the worker's report lands.
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
     let done = run(
@@ -12627,7 +12627,7 @@ fn a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_compos
         "acknowledged mail was still being pointed at"
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
     crate::orchestration_pointer_mailbox::forget_term(LEADER);
@@ -12695,7 +12695,7 @@ impl AtItsWall {
         else {
             return;
         };
-        super::pane_turn_began(self.term);
+        super::pane_turn_began(self.term, clock());
         let _ = settle.send(zerocode_pty::DeliveryOutcome::Delivered);
         super::pane_turn_ended(self.term, clock(), false, clock());
         if meets_the_wall {
@@ -12828,7 +12828,7 @@ fn a_pane_at_its_wall_is_told_once_while_it_stands_and_once_when_it_lifts() {
     let lifted_line = format!("terminal {LEADER}'s quota wall stopped standing");
 
     // The coordinator finished a turn in the ordinary way; nothing walls it.
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     super::pane_turn_ended(LEADER, clock(), false, clock());
 
     // The first letter finds a pane nobody knows is walled — and the line
@@ -12913,7 +12913,7 @@ fn a_pane_at_its_wall_is_told_once_while_it_stands_and_once_when_it_lifts() {
         "read mail was pointed at again"
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
     crate::orchestration_pointer_mailbox::forget_term(LEADER);
@@ -12938,7 +12938,7 @@ fn mail_for_a_pane_already_at_its_login_wall_waits_for_its_next_answer() {
     let host = AtItsWall::new(LEADER, crate::quota_wall::StallCause::LoginWall, true);
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     super::pane_turn_ended(LEADER, clock(), false, clock());
 
     for n in 1..=5 {
@@ -12979,7 +12979,7 @@ fn mail_for_a_pane_already_at_its_login_wall_waits_for_its_next_answer() {
     // The person signs in and their own turn goes through: the turn begins,
     // ends, and its last answer is no wall. The next beat at rest speaks.
     host.wall_lifts();
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     super::pane_turn_ended(LEADER, clock(), false, clock());
     for _ in 0..3 {
         super::tick(&host, &[], clock());
@@ -12990,7 +12990,7 @@ fn mail_for_a_pane_already_at_its_login_wall_waits_for_its_next_answer() {
         "the pane was not told once its login answered again"
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
     crate::orchestration_pointer_mailbox::forget_term(LEADER);
@@ -13119,7 +13119,7 @@ fn mail_behind_an_interrupted_turn_is_named_and_still_never_typed_at() {
         "the black box was told twice about one watermark"
     );
 
-    super::pane_turn_began(LEADER);
+    super::pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -13247,7 +13247,7 @@ fn confirmed_native_pointer_suppresses_pty_and_unknown_falls_back_without_retry(
     );
 
     drop(unknown_lease);
-    pane_turn_began(LEADER);
+    pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 }
@@ -13521,7 +13521,7 @@ fn the_goodbye_names_its_road_and_what_it_cuts_under_each_worker() {
     };
     let (_team, _task, worker) =
         a_seated_worker_with_a_session(&host, LEADER, WORKER, "session-goodbye");
-    super::pane_turn_began(WORKER);
+    super::pane_turn_began(WORKER, clock());
     let listing = format!(
         "501 {ROOT} 1 {ROOT} 0 1 Thu Sep 24 01:00:00 2026 node /opt/homebrew/bin/codex resume s\n\
          501 64281 {ROOT} {ROOT} 0 1 Thu Sep 24 01:00:00 2026 /opt/codex/vendor/bin/codex resume s\n\
@@ -18241,7 +18241,7 @@ fn a_turn_runs_then_ends(stood: &StoppedWorker, rows: &[String], began_at: i64, 
     std::fs::write(&stood.host.transcript, format!("{}\n", rows.join("\n")))
         .expect("the transcript");
     *stood.host.busy.lock().unwrap() = true;
-    super::pane_turn_began(stood.host.worker_term);
+    super::pane_turn_began(stood.host.worker_term, began_at);
     tick(&stood.host, &[], began_at);
     let owned: Vec<&str> = rows.iter().map(String::as_str).collect();
     stood.stops_on(&owned, at);
@@ -18454,7 +18454,7 @@ fn a_busy_composer_and_a_taken_over_pane_get_no_effort_keys() {
     std::fs::write(&stood.host.transcript, format!("{}\n", next.join("\n")))
         .expect("the transcript");
     *stood.host.busy.lock().unwrap() = true;
-    super::pane_turn_began(stood.host.worker_term);
+    super::pane_turn_began(stood.host.worker_term, began + 3_000);
     tick(&stood.host, &[], began + 3_000);
     tick(&stood.host, &[], began + 4_000);
     assert!(
@@ -18656,4 +18656,320 @@ fn a_workers_claimed_merge_reaches_the_roster_row_as_a_claim() {
             "{which}"
         );
     }
+}
+
+/// What the window SAW is not what the ledger was TOLD (astra R1a,
+/// t-6740 r2). A wait on the person that the disk refused to write down is
+/// told on the next sighting of the same wait — the window's map of what it
+/// saw no longer stands between that sighting and the actor — and it is
+/// told ONCE: the ledger's own record of the fact, not the window's memory,
+/// answers every sighting after that.
+#[test]
+fn a_refused_attention_notice_is_told_on_the_next_sighting() {
+    const LEADER: u32 = 11_116;
+    const WORKER: u32 = 11_117;
+    let (window, store) = PrivateWindow::boot();
+    let team = format!("team-attention-retry-{LEADER}");
+    let (_run, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    // The coordinator asks the worker; the shortest budget runs out and the
+    // question stands, unanswered.
+    let asked = run(
+        &Nowhere,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "ask --to worker:{worker} --body which-branch --timeout-ms {}",
+            zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+        )),
+        clock(),
+    );
+    assert_eq!(asked.exit_code, 0, "{}", asked.stderr);
+    let asked: serde_json::Value = serde_json::from_str(&asked.stdout).expect("an answer");
+    let question = asked["questionId"]
+        .as_str()
+        .expect("a question")
+        .to_string();
+    let told = || -> Vec<serde_json::Value> {
+        the_rows()
+            .messages
+            .iter()
+            .filter(|row| {
+                row.from == zerocode_core::orchestration::LEDGER_ITSELF
+                    && row.thread.as_deref() == Some(question.as_str())
+            })
+            .map(|row| serde_json::from_str(row.body.as_str()).expect("a notice is JSON"))
+            .collect()
+    };
+
+    let connection = store
+        .fault_connection_for_tests()
+        .expect("fault connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER refuse_attention_write
+                    AFTER UPDATE OF revision ON orchestration_ledger_heads
+                    BEGIN SELECT RAISE(ABORT, 'injected attention refusal'); END;",
+        )
+        .expect("the disk refuses the notice");
+    let since = clock();
+    super::pane_attention_noted(WORKER, Some(since), since + 1);
+    assert!(
+        told().is_empty(),
+        "a notice the disk refused stood in the rows"
+    );
+
+    connection
+        .execute_batch("DROP TRIGGER refuse_attention_write;")
+        .expect("the disk comes back");
+    super::pane_attention_noted(WORKER, Some(since), since + 2);
+    let lines = told();
+    assert_eq!(
+        lines.len(),
+        1,
+        "a wait the disk refused was never told: {lines:?}"
+    );
+    assert_eq!(
+        lines[0]["reason"],
+        zerocode_core::orchestration::ReceiverNews::AwaitingInput.word()
+    );
+    assert_eq!(lines[0]["factMs"], since);
+    // Seen again: the ledger's record answers, and nothing is added.
+    super::pane_attention_noted(WORKER, Some(since), since + 3);
+    assert_eq!(told().len(), 1, "one wait was told twice");
+
+    // The terminal changes hands: its worker is stopped and the terminal is
+    // gone, and another worker is seated in a pane that reuses the number.
+    // The last owner's wait, sighted again late, is not the new owner's —
+    // and the new owner's own wait is its asker's news.
+    let host = Splitting::onto(WORKER);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let stopped = run(
+        &host,
+        Vec::new(),
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &words(&format!("worker-stop --worker {worker} --reason moved")),
+        clock(),
+    );
+    assert_eq!(stopped.exit_code, 0, "{}", stopped.stderr);
+    crate::agent_teams::forget_term(WORKER);
+    let started = run(
+        &host,
+        Vec::new(),
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &words("worker-start --agent claude"),
+        clock(),
+    );
+    assert_eq!(started.exit_code, 0, "{}", started.stderr);
+    let started: serde_json::Value = serde_json::from_str(&started.stdout).expect("a worker");
+    let next = started["workerId"].as_str().expect("a worker id");
+    let asked = run(
+        &Nowhere,
+        Vec::new(),
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "ask --to worker:{next} --body which-tag --timeout-ms {}",
+            zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+        )),
+        clock(),
+    );
+    assert_eq!(asked.exit_code, 0, "{}", asked.stderr);
+    let asked: serde_json::Value = serde_json::from_str(&asked.stdout).expect("an answer");
+    let next_question = asked["questionId"]
+        .as_str()
+        .expect("a question")
+        .to_string();
+    let told_next = || {
+        the_rows()
+            .messages
+            .iter()
+            .filter(|row| {
+                row.from == zerocode_core::orchestration::LEDGER_ITSELF
+                    && row.thread.as_deref() == Some(next_question.as_str())
+            })
+            .count()
+    };
+    super::pane_attention_noted(WORKER, Some(since), clock());
+    assert_eq!(
+        told_next(),
+        0,
+        "the new owner was told the last owner's wait"
+    );
+    let own = clock();
+    super::pane_attention_noted(WORKER, Some(own), own + 1);
+    assert_eq!(told_next(), 1, "the new owner's own wait was not told");
+
+    super::forget_pane_attention(WORKER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+    drop(window);
+}
+
+/// The deadline's answer and the ask's receipt are ONE result (astra R2,
+/// t-6740 r2): the caller went home with the timed-out answer, so the same
+/// request asked again replays those bytes — never the first empty look the
+/// wait began from, which said nothing about a deadline.
+#[test]
+fn a_timed_out_ask_replays_the_answer_it_went_home_with() {
+    const LEADER: u32 = 11_118;
+    const WORKER: u32 = 11_119;
+    let (window, _store) = PrivateWindow::boot();
+    let team = format!("team-ask-deadline-{LEADER}");
+    let (_run, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let line = format!(
+        "ask --to worker:{worker} --body which-branch --timeout-ms {} \
+         --retry-request ask-deadline-{LEADER}",
+        zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+    );
+    let ask = || {
+        run(
+            &Nowhere,
+            Vec::new(),
+            &team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&line),
+            clock(),
+        )
+    };
+    let first = ask();
+    assert_eq!(first.exit_code, 0, "{}", first.stderr);
+    let said: serde_json::Value = serde_json::from_str(&first.stdout).expect("an answer");
+    assert_eq!(said["timedOut"], true, "{said}");
+    let again = ask();
+    assert_eq!(again.exit_code, 0, "{}", again.stderr);
+    assert_eq!(
+        again.stdout, first.stdout,
+        "the same request replayed another answer than the one its caller went home with"
+    );
+
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+    drop(window);
+}
+
+/// A late turn end is never the next occupant's sound (astra R3, t-6740
+/// r3) — on either road the window hears it by: the turn-end report
+/// itself, and the beat's readiness sweep, which drains the same sound.
+/// The last worker in a terminal comes to rest; it is stopped, and a new
+/// worker on work of its own is seated in a pane that reuses the number;
+/// only then is the rest reported. The new worker's readiness window stays
+/// open through the report and the beat after it, no `went_quiet` names its
+/// attempt, and its asker hears nothing — until its own turn ends.
+#[test]
+fn a_late_turn_end_is_never_the_next_occupants_sound() {
+    const LEADER: u32 = 11_160;
+    const WORKER: u32 = 11_161;
+    let (window, _store) = PrivateWindow::boot();
+    let _beat = one_beat_at_a_time();
+    let team = format!("team-late-sound-{LEADER}");
+    let (_run, last, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let host = Splitting::onto(WORKER);
+    // Every step on its own millisecond, so "after" is never "the same".
+    let base = clock() + 1_000;
+    let verb = |line: &str, at: i64| -> serde_json::Value {
+        let said = run(
+            &host,
+            Vec::new(),
+            &team,
+            leader,
+            TEST_CAPABILITY,
+            &words(line),
+            at,
+        );
+        assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+        serde_json::from_str(&said.stdout).expect("JSON")
+    };
+
+    // The last occupant comes to rest at `rested`; the report will be late.
+    let rested = base + 1;
+    verb(
+        &format!("worker-stop --worker {last} --reason moved"),
+        base + 2,
+    );
+    crate::agent_teams::forget_term(WORKER);
+    let task = verb("task-create --spec next", base + 3)["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let started = verb(
+        &format!("worker-start --agent claude --task {task}"),
+        base + 4,
+    );
+    let next = started["workerId"]
+        .as_str()
+        .expect("a worker id")
+        .to_string();
+    let asked = verb(
+        &format!(
+            "ask --to worker:{next} --body which-tag --timeout-ms {}",
+            zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+        ),
+        base + 5,
+    );
+    let question = asked["questionId"]
+        .as_str()
+        .expect("a question")
+        .to_string();
+    let standing = || {
+        let rows = the_rows();
+        let held = rows
+            .workers
+            .iter()
+            .find(|row| row.id == next)
+            .expect("the next occupant's row")
+            .clone();
+        let attempt = held.dispatch.clone().expect("the next occupant's attempt");
+        let quiet = rows
+            .messages
+            .iter()
+            .filter(|row| {
+                row.kind == zerocode_core::orchestration::MessageKind::WentQuiet
+                    && row.dispatch.as_deref() == Some(attempt.as_str())
+            })
+            .count();
+        let told = rows
+            .messages
+            .iter()
+            .filter(|row| {
+                row.from == zerocode_core::orchestration::LEDGER_ITSELF
+                    && row.thread.as_deref() == Some(question.as_str())
+                    && row.body.as_str().contains("\"turn_ended\"")
+            })
+            .count();
+        (held.ready_by_ms, held.quiet_at, quiet, told)
+    };
+    let before = standing();
+    assert!(
+        before.0.is_some(),
+        "the next occupant has no readiness window"
+    );
+    assert_eq!(before, (before.0, None, 0, 0));
+
+    super::pane_turn_ended(WORKER, rested, false, base + 6);
+    let after_report = standing();
+    tick(&Nowhere, &[], base + 7);
+    let after_beat = standing();
+    assert_eq!(
+        (after_report, after_beat),
+        (before, before),
+        "the last occupant's late rest moved the next one"
+    );
+
+    // Its own turn end is its sound, its silence and its asker's news.
+    let own = base + 8;
+    super::pane_turn_ended(WORKER, own, false, base + 9);
+    assert_eq!(standing(), (None, Some(own), 1, 1));
+
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+    drop(window);
 }

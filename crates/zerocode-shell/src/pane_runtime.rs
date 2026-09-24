@@ -1074,10 +1074,11 @@ pub(super) fn note_pane_state(
             let _ = waiting.send(());
         }
     }
-    // Answers the turn that just ENDED, for the supervision road below — the
-    // two facts it needs are merged here and nowhere else, and recomputing them
-    // after the borrow closes would be the same merge written twice.
-    let ended = {
+    // Answers the state's own clock, and the turn that just ENDED, for the
+    // supervision road below — the facts it needs are merged here and nowhere
+    // else, and recomputing them after the borrow closes would be the same
+    // merge written twice.
+    let (began_ms, ended) = {
         let state = app.state::<AppState>();
         let mut states = state.pane_states();
         let prior = states.get(&report.term);
@@ -1135,11 +1136,12 @@ pub(super) fn note_pane_state(
         let now = epoch_ms_now();
         // The state's own clock moves only when the STATE does — a repeated
         // `working` is the same stretch of work, however many tool events
-        // arrive inside it.
-        let state_started_at = match prior {
-            Some(held) if held.state == report.state => held.state_started_at,
-            _ => now,
-        };
+        // arrive inside it, and on a `done` it is when the turn ENDED.
+        let state_started_at = zerocode_core::hook::state_clock(
+            prior.map(|held| (held.state, held.state_started_at)),
+            report.state,
+            now,
+        );
         // 도우미의 기다림은 리드의 말을 **밀어낸다**. 그리고 리드는 제
         // 도우미가 답을 받았다는 이유로 다시 말하지 않으므로, 밀려나는 이
         // 순간을 놓치면 되돌릴 말이 남지 않는다. 규칙은 코어가 쥔다
@@ -1272,12 +1274,16 @@ pub(super) fn note_pane_state(
             report.term,
             (report.state == zerocode_core::hook::HookState::NeedsAttention)
                 .then_some(state_started_at),
-        );
-        (report.state == zerocode_core::hook::HookState::Done).then_some((
-            state_started_at,
-            interrupted,
             now,
-        ))
+        );
+        (
+            state_started_at,
+            (report.state == zerocode_core::hook::HookState::Done).then_some((
+                state_started_at,
+                interrupted,
+                now,
+            )),
+        )
     };
     // A supervised worker that ends a turn saying nothing leaves its task
     // dispatched forever, because the only automatic completion is a
@@ -1285,14 +1291,15 @@ pub(super) fn note_pane_state(
     // news — an interrupted turn is not, and neither is a worker waiting on an
     // answer it asked for.
     match ended {
-        Some((turn_started_ms, interrupted, now)) => {
-            orchestration::pane_turn_ended(report.term, turn_started_ms, interrupted, now);
+        Some((turn_ended_ms, interrupted, now)) => {
+            orchestration::pane_turn_ended(report.term, turn_ended_ms, interrupted, now);
         }
         // Anything but a finished turn means the pane is NOT at rest: an
         // agent working, or one stopped at a question of its own — and the
         // mail pointer must not type into either. `NeedsAttention` above all:
-        // that composer is holding a question for the PERSON.
-        None => orchestration::pane_turn_began(report.term),
+        // that composer is holding a question for the PERSON. Heard at the
+        // moment that state began, as a finished turn is heard at its end.
+        None => orchestration::pane_turn_began(report.term, began_ms),
     }
     let _ = app.emit("hook:agent", report.clone());
     if report.state == zerocode_core::hook::HookState::Done
