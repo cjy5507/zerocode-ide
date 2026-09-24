@@ -2164,4 +2164,151 @@ mod tests {
         assert_eq!(slugs(&after), ["wiki/b", "wiki/c", "wiki/a"], "the raised seat did not act");
         assert_eq!(applied, Some(true), "the row of the raised seat's reading does not say it applied");
     }
+
+    /* ---- what the turn was shown, note by note (t-6264) ------------------ */
+
+    /// A vault whose hub three pages cite — the shape of
+    /// `runtime::memory::recall`'s own demand test, written to disk so the
+    /// production loader scans it the way a session's is scanned.
+    fn vault_with_a_hub(dir: &Path) -> PathBuf {
+        let vault = dir.join("vault");
+        let wiki = vault.join("wiki");
+        std::fs::create_dir_all(&wiki).expect("a wiki");
+        let page = |name: &str, body: &str| {
+            std::fs::write(wiki.join(format!("{name}.md")), body).expect("a page");
+        };
+        page("seed", "---\ntitle: seed\nrelated: [[[wiki/a-quiet]], [[wiki/z-hub]]]\n---\n\nvellichor\n");
+        page("a-quiet", "---\ntitle: a-quiet\n---\n\nsonder\n");
+        page("z-hub", "---\ntitle: z-hub\n---\n\nhiraeth\n");
+        for cite in ["cite-1", "cite-2", "cite-3"] {
+            page(cite, &format!("---\ntitle: {cite}\nrelated: [[wiki/z-hub]]\n---\n\nkomorebi\n"));
+        }
+        vault
+    }
+
+    /// The vault the environment names, for the body of a `machine` — which
+    /// holds the crate's environment lock already, so this restores the word
+    /// itself rather than taking a second guard.
+    struct VaultEnv(Option<std::ffi::OsString>);
+
+    impl VaultEnv {
+        fn point_at(vault: &Path) -> Self {
+            let previous = std::env::var_os(runtime::second_brain::VAULT_ENV);
+            std::env::set_var(runtime::second_brain::VAULT_ENV, vault);
+            Self(previous)
+        }
+    }
+
+    impl Drop for VaultEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => std::env::set_var(runtime::second_brain::VAULT_ENV, previous),
+                None => std::env::remove_var(runtime::second_brain::VAULT_ENV),
+            }
+        }
+    }
+
+    /// Every row of this project's ledger as the reader sees it.
+    fn values(cwd: &Path) -> Vec<serde_json::Value> {
+        super::super::shadow_ledger::read_shadow_rows(&rerank_shadow_path(cwd))
+    }
+
+    /// The label row names each note the turn was shown, in the order it
+    /// read them, and says of each whether a successful read named its path
+    /// and whether the assistant's own words cited it — two observations,
+    /// kept apart. A read of some other file, and a citation the person
+    /// typed, are neither.
+    #[test]
+    fn a_label_names_each_note_the_turn_was_shown_and_what_the_turn_did_with_it() {
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let hits = three();
+        let rows = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (shown, on)", hits.to_vec());
+            assert_eq!(slugs(&read), ["wiki/b", "wiki/c", "wiki/a"], "the judgment's order is what the turn read");
+            let c = read[1].entry.path.clone();
+            let mut messages = turn(vec![read_of(&c), read_of("/somewhere/else.md"), said("see [[wiki/a]]")]);
+            messages.push(ConversationMessage::user_text("[[wiki/b]] typed by the person"));
+            assert!(note_recall_read(cwd, &messages));
+            values(cwd)
+        });
+        let label = rows.iter().find(|row| row.get("label").is_some()).expect("a label row");
+        assert_eq!(
+            label["shown"],
+            serde_json::json!([
+                {"slug": "wiki/b", "rank": 0, "read": false, "cited": false},
+                {"slug": "wiki/c", "rank": 1, "read": true, "cited": false},
+                {"slug": "wiki/a", "rank": 2, "read": false, "cited": true},
+            ]),
+            "{label}"
+        );
+        assert!(label["shownAt"].as_u64().is_some_and(|at| at > 0), "{label}");
+        // And the mark the judge reads is what it was: the first note was
+        // not touched, the first touched sat second.
+        assert_eq!((&label["agreed"], &label["rank"]), (&serde_json::json!(false), &serde_json::json!(1)));
+    }
+
+    /// A reading whose judgment never settled — the reply broke the contract
+    /// — still put notes in front of the turn, and the row says which and
+    /// what became of them; it carries no mark, because there was no order
+    /// to compare, and the judge counts nothing for it.
+    #[test]
+    fn a_reading_with_no_judgment_still_says_what_the_turn_was_shown() {
+        let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());
+        let hits = three();
+        let rows = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (shown, no judgment)", hits.to_vec());
+            assert_eq!(slugs(&read), slugs(&hits), "recall's order stands when the reply fails its checks");
+            assert!(note_recall_read(cwd, &turn(vec![read_of(&read[0].entry.path)])), "no row was written");
+            values(cwd)
+        });
+        let label = rows.iter().find(|row| row.get("label").is_some()).expect("a label row");
+        assert_eq!(
+            label["shown"],
+            serde_json::json!([
+                {"slug": "wiki/a", "rank": 0, "read": true, "cited": false},
+                {"slug": "wiki/b", "rank": 1, "read": false, "cited": false},
+                {"slug": "wiki/c", "rank": 2, "read": false, "cited": false},
+            ]),
+            "{label}"
+        );
+        for key in [
+            zerocode_core::jev::summary::AGREED.canonical,
+            zerocode_core::jev::summary::NOT_COMPARED.canonical,
+            zerocode_core::jev::summary::BASELINE_AGREED.canonical,
+        ] {
+            assert!(label.get(key).is_none(), "{key} on a row with no judgment: {label}");
+        }
+        let agreement = zerocode_core::jev::summary::agreement_since(&rows, 0);
+        assert_eq!((agreement.compared, agreement.not_compared), (0, 0), "the judge counted a showing as a comparison");
+    }
+
+    /// Five label rows say readers were shown the hub and none opened it:
+    /// the retriever a session is built with reads them, and the graph no
+    /// longer brings the hub in on the seed's words — the demand seam of
+    /// `runtime::memory::recall` (93db31bf), fed by this seat's rows.
+    #[test]
+    fn readers_who_left_a_hub_unopened_five_times_change_what_the_next_recall_reads() {
+        let mock = Mock::silent();
+        let order = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let vault = vault_with_a_hub(cwd);
+            let _vault = VaultEnv::point_at(&vault);
+            let ledger = rerank_shadow_path(cwd);
+            for at in 0..runtime::memory::recall::UNADDRESSED_AFTER_RECALLS {
+                let row = serde_json::json!({
+                    "at": 1_000 + u64::from(at), "label": format!("{at}:{at}"), "query": at, "notes": at, "applied": false,
+                    "shownAt": 900 + u64::from(at),
+                    "vault": super::super::probe_exec::task_fingerprint("", &vault.to_string_lossy()),
+                    "shown": [
+                        {"slug": "wiki/seed", "rank": 0, "read": true, "cited": false},
+                        {"slug": "wiki/z-hub", "rank": 1, "read": false, "cited": false},
+                        {"slug": "wiki/a-quiet", "rank": 2, "read": false, "cited": false},
+                    ],
+                });
+                append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            }
+            let retriever = runtime::load_memory_retriever(cwd, None).expect("a vault to recall from");
+            slugs(&retriever.recall("vellichor", 5))
+        });
+        assert_eq!(order, ["wiki/seed", "wiki/a-quiet"], "five readers left the hub unopened and the graph still brought it in");
+    }
 }

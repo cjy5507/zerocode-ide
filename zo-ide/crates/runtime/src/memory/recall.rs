@@ -2648,6 +2648,23 @@ mod tests {
         );
     }
 
+    /// The seat's rows name a page once per turn it was shown, and a demand
+    /// built from them has to ADD those rows up: a reader that kept only the
+    /// last row about a page would call a page shown fifty times and opened
+    /// once "shown once and opened once", and never sink anything.
+    #[test]
+    fn a_page_named_by_several_rows_is_the_sum_of_them() {
+        let demand = RecallDemand::from_rows(
+            std::iter::repeat_n(("wiki/z-hub".to_string(), 1, 0), usize::try_from(UNADDRESSED_AFTER_RECALLS).unwrap()),
+        );
+        assert!(demand.unaddressed("wiki/z-hub"), "five rows of one showing each are five showings");
+        let demand = RecallDemand::from_rows([
+            ("wiki/z-hub".to_string(), UNADDRESSED_AFTER_RECALLS, 0),
+            ("wiki/z-hub".to_string(), 1, 1),
+        ]);
+        assert!(!demand.unaddressed("wiki/z-hub"), "one opening in a later row is an answer");
+    }
+
     #[test]
     fn the_hub_prior_is_a_log_and_stops_climbing() {
         use crate::second_brain::corpus::RelationKind;
