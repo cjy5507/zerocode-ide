@@ -77,6 +77,9 @@ fn cut_pane_for(tmux: &Tmux, job: AgentJob, first_turn: Option<u32>) -> Result<(
         let _ = std::fs::remove_file(directory.join(runtime::subagent_panes::RESULT_FINAL_FILE));
         let _ = std::fs::remove_file(directory.join(CHANNEL_FILE));
     }
+    // A bound verifier's watch over what it reads, opened before its pane
+    // exists (t-6263).
+    let source_watch = super::spawn::watch_judged_source(&job);
     let mut brief = brief_for(&job);
     brief.first_turn = first_turn;
     brief.write(&directory).map_err(|error| {
@@ -111,7 +114,7 @@ fn cut_pane_for(tmux: &Tmux, job: AgentJob, first_turn: Option<u32>) -> Result<(
     let tmux = tmux.clone();
     std::thread::Builder::new()
         .name(thread_name)
-        .spawn(move || watch_pane(&job, &tmux, &directory, &pane, turn))
+        .spawn(move || watch_pane(&job, &tmux, &directory, &pane, turn, source_watch))
         .map(|_| ())
         .map_err(|error| ToolError::Execution(error.to_string()))
 }
@@ -135,6 +138,8 @@ fn resume_pane_job_with(tmux: &Tmux, job: AgentJob) -> Result<(), ToolError> {
     let limits = Limits::load();
     let channel_file = directory.join(CHANNEL_FILE);
     if channel_file.is_file() {
+        // Opened before the next turn is sent, as a new pane's is before it is cut.
+        let source_watch = super::spawn::watch_judged_source(&job);
         let outcome = steer_over_channel(&channel_file, &job.prompt, limits.channel_timeout);
         record_receipt(&job.manifest, &outcome);
         if outcome.delivered() {
@@ -147,7 +152,7 @@ fn resume_pane_job_with(tmux: &Tmux, job: AgentJob) -> Result<(), ToolError> {
             let tmux = tmux.clone();
             return std::thread::Builder::new()
                 .name(thread_name)
-                .spawn(move || watch_pane(&job, &tmux, &directory, &pane, turn))
+                .spawn(move || watch_pane(&job, &tmux, &directory, &pane, turn, source_watch))
                 .map(|_| ())
                 .map_err(|error| ToolError::Execution(error.to_string()));
         }
@@ -374,13 +379,22 @@ fn siblings_started_before(stores: &[PathBuf], parent_session_id: Option<&str>, 
         .count()
 }
 
-/// Sit with one pane until it answers turn `turn`, then publish what it said.
+/// Sit with one pane until it answers turn `turn`, then publish what it said
+/// — and, for a watched verifier, the source it read over the turn
+/// (`source_watch`, closed the moment the answer is in).
 ///
 /// While waiting, the child's channel file is copied onto the manifest the
 /// moment it appears, so a `SendMessage` mid-turn can reach the child and a
 /// window can find its channel — the child boots after the pane is cut, so
 /// this is the first place the parent can learn where it listens.
-fn watch_pane(job: &AgentJob, tmux: &Tmux, directory: &std::path::Path, pane: &str, turn: u32) {
+fn watch_pane(
+    job: &AgentJob,
+    tmux: &Tmux,
+    directory: &std::path::Path,
+    pane: &str,
+    turn: u32,
+    source_watch: Option<crate::misc_tools::smart_router::ChallengerSourceWatch>,
+) {
     let _registration = super::spawn::pane_worker_registration(job);
     let limits = Limits::load();
     let budget = job.time_budget.unwrap_or(limits.pane_budget);
@@ -403,6 +417,7 @@ fn watch_pane(job: &AgentJob, tmux: &Tmux, directory: &std::path::Path, pane: &s
         );
     };
     let outcome = wait_for_turn_result(tmux, directory, pane, turn, budget, &cancelled, &close);
+    let seen_source = source_watch.and_then(crate::misc_tools::smart_router::ChallengerSourceWatch::seen);
     // A lane's answer is the last thing asked of it: once it is read, the
     // pane is released — after the completion is published, so the parent's
     // collection never waits on the door (`close_grace`).
@@ -452,7 +467,7 @@ fn watch_pane(job: &AgentJob, tmux: &Tmux, directory: &std::path::Path, pane: &s
             )),
         ),
     };
-    super::spawn::publish_pane_completion(job, completion);
+    super::spawn::publish_pane_completion(job, completion, seen_source);
     if lane_done {
         close_pane_child(
             directory,

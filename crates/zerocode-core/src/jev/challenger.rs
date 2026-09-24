@@ -803,6 +803,20 @@ pub fn label_row(
     Value::Object(row)
 }
 
+/// The source a label row names as the one its receipt judged
+/// ([`VERIFIED_SOURCE`]) — `None` for a label that names none, written
+/// before labels carried one or left blank: a label no reader can hold to
+/// the work it was about, which every reader reads as no label at all
+/// (t-6263). Kept as written; a label on the source may join it later.
+#[must_use]
+pub fn label_source(row: &Value) -> Option<&str> {
+    VERIFIED_SOURCE
+        .read(row)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+}
+
 /// The row an attempt the arm held writes: no `outcome`, so it is no
 /// request and sits outside every window and share
 /// ([`crate::jev::summary::asked_something`]); just the word, for a reader
@@ -850,7 +864,8 @@ impl Standing {
 /// The challenger `challenger_model`'s standing for `role`, read from a
 /// ledger: one word per attempt, the latest — a request row's comparison
 /// until a label row's receipt outranks it — over the pair's own rows and
-/// the labels that name them.
+/// the labels that name them. A label that names no source
+/// ([`label_source`]) outranks nothing: the comparison's own word stands.
 #[must_use]
 pub fn standing(rows: &[Value], role: &str, challenger_model: &str) -> Standing {
     let of_pair = |row: &Value| {
@@ -867,6 +882,7 @@ pub fn standing(rows: &[Value], role: &str, challenger_model: &str) -> Standing 
                 word_of.insert(attempt, won);
             }
         } else if let Some(attempt) = LABEL.read(row).and_then(Value::as_str)
+            && label_source(row).is_some()
             && word_of.contains_key(attempt)
         {
             word_of.insert(attempt, won);

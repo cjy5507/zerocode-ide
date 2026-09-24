@@ -471,6 +471,141 @@ fn write_worktree_tree(git_root: &Path) -> Result<String, io::Error> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Every change the files of a worktree tree ([`compute_worktree_tree`])
+/// could take, stamped: one digest over the working tree's source files —
+/// the tracked, the changed and the new alike, as `git ls-files` lists them
+/// past the ignores — each with what its `lstat` says (device, inode, mode,
+/// size, and the modification and status-change times), and over every
+/// directory that holds one. The same stamp twice says no file of the tree
+/// was written, replaced, created or removed in between — even one written
+/// and then put back to its old bytes, which a second tree hash cannot see:
+/// a write moves the status-change time, and nothing but the clock sets it.
+/// An entry created or removed beside a source file, ignored or not, moves
+/// its directory's times too: the stamp errs toward "changed", never toward
+/// "the same" (t-6263).
+///
+/// Unix only: elsewhere a file keeps no status-change time, and
+/// [`worktree_stamp`] refuses ([`io::ErrorKind::Unsupported`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeStamp {
+    digest: [u8; 32],
+    /// Whether every entry's status-change time was already out of the
+    /// clock's tick when the stamp was taken ([`Self::vouches_until`]).
+    settled: bool,
+}
+
+impl WorktreeStamp {
+    /// Whether this stamp, taken first, vouches that nothing in the tree
+    /// changed until `later` was taken: the same digest, and no entry whose
+    /// status-change time sat in a tick a later write could still share
+    /// unseen — a filesystem keeping whole seconds, an entry changed in the
+    /// second the stamp was taken.
+    #[must_use]
+    pub fn vouches_until(&self, later: &Self) -> bool {
+        self.settled && self.digest == later.digest
+    }
+}
+
+/// The stamp of the worktree at `git_root` as it stands ([`WorktreeStamp`]):
+/// one `git ls-files` and one `lstat` per file and per directory.
+///
+/// # Errors
+/// `git` could not list the tree's files, or this platform keeps no
+/// status-change time.
+#[cfg(unix)]
+pub fn worktree_stamp(git_root: &Path) -> Result<WorktreeStamp, io::Error> {
+    use sha2::{Digest as _, Sha256};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let taken_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| io::Error::other(format!("system clock before unix epoch: {error}")))?
+        .as_secs();
+    let listed = git_output(
+        git_root,
+        &["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+    )?;
+    let mut hasher = Sha256::new();
+    let mut settled = true;
+    let mut dirs = std::collections::BTreeSet::new();
+    for name in listed.split(|byte| *byte == 0).filter(|name| !name.is_empty()) {
+        let relative = Path::new(std::ffi::OsStr::from_bytes(name));
+        hasher.update(name);
+        hasher.update([0]);
+        settled &= stamp_entry(&mut hasher, &git_root.join(relative), taken_secs);
+        let mut parent = relative.parent();
+        while let Some(dir) = parent {
+            if !dirs.insert(dir.to_path_buf()) {
+                break;
+            }
+            parent = dir.parent();
+        }
+    }
+    for dir in &dirs {
+        hasher.update(dir.as_os_str().as_bytes());
+        hasher.update([0]);
+        settled &= stamp_entry(&mut hasher, &git_root.join(dir), taken_secs);
+    }
+    Ok(WorktreeStamp {
+        digest: hasher.finalize().into(),
+        settled,
+    })
+}
+
+/// See the Unix twin: nothing here keeps a status-change time, so no stamp
+/// can vouch for a tree.
+///
+/// # Errors
+/// Always [`io::ErrorKind::Unsupported`].
+#[cfg(not(unix))]
+pub fn worktree_stamp(_git_root: &Path) -> Result<WorktreeStamp, io::Error> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no status-change time on this platform",
+    ))
+}
+
+/// Fold one entry's `lstat` into `hasher`; answers whether its
+/// status-change time is out of the clock's open tick
+/// ([`in_an_open_tick`]). A missing entry is stamped as missing; one whose
+/// times cannot be read is never settled.
+#[cfg(unix)]
+fn stamp_entry(hasher: &mut sha2::Sha256, path: &Path, taken_secs: u64) -> bool {
+    use sha2::Digest as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            for word in [meta.dev(), meta.ino(), u64::from(meta.mode()), meta.size()] {
+                hasher.update(word.to_le_bytes());
+            }
+            for word in [meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec()] {
+                hasher.update(word.to_le_bytes());
+            }
+            !in_an_open_tick(meta.ctime(), meta.ctime_nsec(), taken_secs)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            hasher.update(b"missing");
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The widest tick a filesystem's clock keeps (FAT's two seconds).
+#[cfg(unix)]
+const COARSEST_TICK_SECS: i64 = 2;
+
+/// Whether a status-change time could still be shared by a later write the
+/// stamp would not see: one with no fraction of a second — the mark of a
+/// clock that keeps whole seconds — inside the coarsest tick of the moment
+/// the stamp was taken. A clock that keeps fractions is never in doubt.
+#[cfg(unix)]
+fn in_an_open_tick(ctime: i64, ctime_nsec: i64, taken_secs: u64) -> bool {
+    ctime_nsec == 0
+        && ctime.saturating_add(COARSEST_TICK_SECS) >= i64::try_from(taken_secs).unwrap_or(i64::MAX)
+}
+
 fn restore_tree(git_root: &Path, current_tree: &str, target_tree: &str) -> Result<(), io::Error> {
     let changed_paths = changed_paths_between(git_root, current_tree, target_tree)?;
     for path in &changed_paths {
@@ -761,6 +896,62 @@ fn set_executable(_path: &Path, _executable: bool) -> Result<(), io::Error> {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// A repository of the test's own: an ignored build folder already
+    /// there, and one source file.
+    #[cfg(unix)]
+    fn stamped_repository() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        assert!(Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap().success());
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("lib.rs"), "fn a() {}\n").unwrap();
+        (dir, root)
+    }
+
+    /// A worktree's stamp moves with every change its source files can take
+    /// — a write, even one put back to its old bytes (which leaves the tree
+    /// hash as it was), a file come and gone, a removal — and stands still
+    /// over reads and over what the ignores leave out (t-6263).
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_stamp_sees_a_write_even_one_put_back_to_its_old_bytes() {
+        let (_dir, root) = stamped_repository();
+        let lib = root.join("src").join("lib.rs");
+        let first = worktree_stamp(&root).unwrap();
+        let _ = fs::read(&lib).unwrap();
+        fs::write(root.join("target").join("out.o"), "built").unwrap();
+        assert!(first.vouches_until(&worktree_stamp(&root).unwrap()), "a read and an ignored file change nothing");
+
+        let tree = compute_worktree_tree(&root).unwrap();
+        let before = worktree_stamp(&root).unwrap();
+        fs::write(&lib, "fn b() {}\n").unwrap();
+        fs::write(&lib, "fn a() {}\n").unwrap();
+        assert_eq!(compute_worktree_tree(&root).unwrap(), tree, "the tree hash cannot see the round trip");
+        assert!(!before.vouches_until(&worktree_stamp(&root).unwrap()), "the stamp can");
+
+        let before = worktree_stamp(&root).unwrap();
+        fs::write(root.join("src").join("new.rs"), "fn c() {}\n").unwrap();
+        fs::remove_file(root.join("src").join("new.rs")).unwrap();
+        assert!(!before.vouches_until(&worktree_stamp(&root).unwrap()), "a file come and gone moves its folder");
+
+        let before = worktree_stamp(&root).unwrap();
+        fs::remove_file(&lib).unwrap();
+        assert!(!before.vouches_until(&worktree_stamp(&root).unwrap()), "a removal");
+    }
+
+    /// A whole-second status-change time inside the coarsest tick of the
+    /// stamp's own moment is in doubt; a fraction, or an older second, is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_whole_second_change_in_the_stamps_own_tick_is_in_doubt() {
+        assert!(in_an_open_tick(100, 0, 101));
+        assert!(in_an_open_tick(100, 0, 102));
+        assert!(!in_an_open_tick(100, 1, 101), "a clock that keeps fractions is never in doubt");
+        assert!(!in_an_open_tick(97, 0, 101), "long past its tick");
+    }
 
     /// A directory with no `.git` on itself or any ancestor is answered
     /// without a `git` process (t-2902): the ancestry precheck says "not a

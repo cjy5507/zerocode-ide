@@ -60,7 +60,7 @@ pub(crate) use canonical::canonicalize_route_model_id;
 pub(crate) use challenger::{
     first_design_text as first_challenger_design_text, hands_in_a_source as challenger_hands_in_a_source,
     judges_a_source as challenger_judges_a_source, source_of as challenger_source_of, Arm as ChallengerArm,
-    AttemptFacts as ChallengerAttemptFacts, Drawn as ChallengerDrawn,
+    AttemptFacts as ChallengerAttemptFacts, Drawn as ChallengerDrawn, SourceWatch as ChallengerSourceWatch,
 };
 pub use challenger::{
     challenger_path, note_challenger_verdicts, read_learning_outcomes, ChallengerRow, CHALLENGER_FILE,
@@ -68,8 +68,7 @@ pub use challenger::{
 };
 #[cfg(test)]
 pub(crate) use challenger::tests::{
-    a_key_that_draws as challenger_key_that_draws, jev_answer as challenger_jev_answer,
-    rows_after as challenger_rows_after, DoorWords as ChallengerDoorWords, Rig as ChallengerRig,
+    jev_answer as challenger_jev_answer, DoorWords as ChallengerDoorWords, Rig as ChallengerRig,
     Scripted as ChallengerScripted, INCUMBENT as CHALLENGER_TEST_INCUMBENT, NEWCOMER as CHALLENGER_TEST_NEWCOMER,
 };
 pub use decision_report::{

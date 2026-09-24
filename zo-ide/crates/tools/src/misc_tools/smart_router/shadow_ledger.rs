@@ -163,12 +163,25 @@ pub fn judge_seat_ledger(
     ledger: &Path,
     now_ms: i64,
 ) -> Option<zerocode_core::jev::promote::Verdict> {
-    use zerocode_core::jev::promote;
     let rows: Vec<serde_json::Value> = read_shadow_rows(ledger);
-    if !promote::judgment_due(seat, &rows) {
+    judge_seat_rows(seat, ledger, &rows, now_ms)
+}
+
+/// [`judge_seat_ledger`] on `ledger`'s rows as the seat's own readers read
+/// them — the challenger arm's leave out every label the record does not
+/// bind (t-6263) — writing the rise or fall to `ledger` itself.
+#[must_use]
+pub fn judge_seat_rows(
+    seat: &zerocode_core::jev::JevUse,
+    ledger: &Path,
+    rows: &[serde_json::Value],
+    now_ms: i64,
+) -> Option<zerocode_core::jev::promote::Verdict> {
+    use zerocode_core::jev::promote;
+    if !promote::judgment_due(seat, rows) {
         return None;
     }
-    let judged = promote::judge_seat(seat, &rows)?;
+    let judged = promote::judge_seat(seat, rows)?;
     if let Some(row) = promote::transition_row(now_ms, judged.verdict, &judged.window) {
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }

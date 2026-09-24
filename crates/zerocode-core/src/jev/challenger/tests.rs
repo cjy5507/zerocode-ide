@@ -586,6 +586,35 @@ fn a_standing_reads_one_latest_word_per_attempt_of_its_own_pair() {
     assert_eq!(Standing::default().lower_bound(), None);
 }
 
+/// source를 적지 않은 라벨(옛 형식, 또는 빈 source)은 판정할 수 없는 라벨이라 전적의 말을 바꾸지 않는다(t-6263 R4c): 그
+/// 시도의 말은 비교 자신의 것이고, source를 적은 라벨만 비교를 덮는다.
+#[test]
+fn a_label_that_names_no_source_leaves_the_comparisons_word_standing() {
+    let unsourced = |attempt: &str, at: i64| {
+        let mut row = label_row(attempt, Receipt::Passed, Preferred::Challenger, "tree", at);
+        row.as_object_mut()
+            .expect("a row")
+            .remove(VERIFIED_SOURCE.canonical);
+        row
+    };
+    let rows = vec![
+        request_row("dp-1", 1, Some(Preferred::Challenger)),
+        request_row("dp-2", 2, Some(Preferred::Challenger)),
+        request_row("dp-3", 3, Some(Preferred::Challenger)),
+        unsourced("dp-1", 4),
+        label_row("dp-2", Receipt::Passed, Preferred::Challenger, "", 5),
+        label_row("dp-3", Receipt::Passed, Preferred::Challenger, "tree-3", 6),
+    ];
+    assert_eq!(
+        standing(&rows, "coding", "claude-opus-5-2"),
+        Standing {
+            compared: 3,
+            won: 2
+        },
+        "dp-1 and dp-2 keep their comparisons' words; dp-3's label, bound to its source, outranks its own"
+    );
+}
+
 /// 역할의 모델이 움직이는 선: 한 창만큼의 비교 위에서 Wilson 하한이 현직의 비율을 넘을 때만.
 #[test]
 fn a_standing_passes_only_on_a_window_of_comparisons_whose_lower_bound_clears_the_incumbent() {

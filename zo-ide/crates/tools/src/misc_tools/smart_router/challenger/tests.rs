@@ -107,7 +107,7 @@ impl Scripted {
     /// Answering — once the returned sender lets the answer go. The request
     /// has left by then: what happens meanwhile happens to a design in
     /// flight.
-    fn answering_when_let_go(text: &str) -> (Arc<Self>, mpsc::Sender<()>) {
+    pub(crate) fn answering_when_let_go(text: &str) -> (Arc<Self>, mpsc::Sender<()>) {
         let (let_go, gate) = mpsc::channel();
         let scripted = Self::new(Some(text), Some(Self::billed()), true, runtime::OUTCOME_COMPLETED);
         *scripted.gate.lock().expect("gate") = Some(gate);
@@ -133,7 +133,7 @@ impl Scripted {
     }
 
     /// Wait until a design request is on the wire.
-    fn wait_until_asked(&self) {
+    pub(crate) fn wait_until_asked(&self) {
         let started = Instant::now();
         while self.calls() == 0 && started.elapsed() < Duration::from_secs(20) {
             std::thread::sleep(Duration::from_millis(5));
@@ -466,19 +466,6 @@ fn noon_of(day: &str) -> impl Fn() -> Today {
     let noon = zerocode_core::civil::epoch_ms_of_iso(&format!("{day}T12:00:00+09:00")).expect("a day");
     let noon = u64::try_from(noon).expect("after the epoch");
     move || Today::at(noon, SEOUL_MINUTES)
-}
-
-/// The rows of `rig`'s ledger, waited for until `count` are there — the
-/// arm writes on its own threads.
-pub(crate) fn rows_after(rig: &Rig, count: usize) -> Vec<Value> {
-    let started = Instant::now();
-    loop {
-        let rows = rig.rows();
-        if rows.len() >= count || started.elapsed() > Duration::from_secs(10) {
-            return rows;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 /// The body the judge was sent in `request`, parsed.
@@ -1266,7 +1253,7 @@ fn a_receipt_is_the_first_settled_verdict_on_the_attempts_work_and_never_a_compl
     let run = || handed_in(attempt, Some(HANDED_IN));
     let receipt = |verdicts: &[RouteOutcomeRecord]| {
         let records: Vec<RouteOutcomeRecord> = std::iter::once(run()).chain(verdicts.iter().cloned()).collect();
-        receipt_for(&records, attempt).map(|(receipt, _)| receipt)
+        OnRecord::of(&records).receipt(attempt).map(|(receipt, _)| receipt)
     };
     assert_eq!(receipt(&[]), None, "a finished attempt is not a receipt");
     assert_eq!(
@@ -1304,7 +1291,7 @@ fn a_receipt_is_bound_to_the_source_the_attempt_handed_in() {
     let with = |run: Option<&str>, verdicts: &[RouteOutcomeRecord]| {
         let records: Vec<RouteOutcomeRecord> =
             std::iter::once(handed_in(attempt, run)).chain(verdicts.iter().cloned()).collect();
-        receipt_for(&records, attempt)
+        OnRecord::of(&records).receipt(attempt)
     };
     let seen = |source: Option<&str>, status: &str, at: u64| verdict_on(attempt, status, VerdictSubject::Work, at, source);
     assert_eq!(
@@ -1647,6 +1634,192 @@ fn a_label_whose_sample_was_lost_gets_it_from_the_next_call_once() {
         racer.join().expect("a racer");
     }
     assert_eq!(rig.samples(), 1, "and never twice");
+}
+
+/* ---- a label's source ---------------------------------------------------- */
+
+/// A label as the arm wrote it before labels named the source their receipt
+/// judged: every word of today's but that one.
+fn unsourced_label(attempt: &str, receipt: Receipt, preferred: Preferred, at: i64) -> Value {
+    let mut label = arm::label_row(attempt, receipt, preferred, HANDED_IN, at);
+    label.as_object_mut().expect("a row").remove(arm::VERIFIED_SOURCE.canonical);
+    label
+}
+
+/// The samples of `cwd`'s route-outcome ledger the router may learn from
+/// now, as the router's own reader marks them.
+fn admitted(cwd: &Path) -> Vec<String> {
+    read_learning_outcomes(cwd)
+        .expect("records")
+        .into_iter()
+        .filter(|record| record.is_seat_sample() && record.admitted)
+        .filter_map(|record| record.run_id)
+        .collect()
+}
+
+/// source를 적지 않은 라벨(옛 형식)은 판정할 수 없다(t-6263 R4c): 행동하는 자리·통과하는 전적·옛 라벨이 써 둔 표본이 다 있어도
+/// 그 표본은 하나도 인정되지 않고, 새 표본도 쓰이지 않으며, 라우터는 도전자를 배우지 않는다 — 옛 행은 그대로 남는다. 그 시도가
+/// 넘긴 source에 묶인 영수증이 기록에 있으면 새 라벨이 옛 행 옆에 보태지고, 그 시도만 다시 표본이 된다.
+#[test]
+fn a_label_that_names_no_source_teaches_nothing_until_a_receipt_on_its_source_supplements_it() {
+    let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+    rig.seed_a_standing_window(false);
+    let ledger = challenger_path(&rig.cwd);
+    for n in 0..A_WINDOW_OF_COMPARISONS {
+        let attempt = format!("window-{n}#1");
+        let label = unsourced_label(&attempt, Receipt::Failed, Preferred::Challenger, 1);
+        append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("an old label");
+        let sample = sample_of(&Labelled { attempt, ..labelled("") }).expect("an agreeing label");
+        runtime::record_route_outcome(&rig.cwd, &sample).expect("the sample it was given");
+    }
+    let old = rig.rows();
+    assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS);
+    assert!(admitted(&rig.cwd).is_empty(), "a label that names no source is not evaluable: none of its samples is admitted");
+    assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 0, "no receipt on record: nothing to label");
+    assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS, "and no sample is written from an old label");
+    let learned = LearnedSpecialtyHint::compute(
+        &read_learning_outcomes(&rig.cwd).expect("records"),
+        now_ms() / 1_000,
+        super::super::canonicalize_route_model_id,
+    );
+    assert!(learned.entry_for(RouteRole::Coding, NEWCOMER).is_none(), "the router learns nothing of the challenger from them");
+
+    // A receipt on the source the attempt handed in, on record now.
+    let now = now_ms() / 1_000;
+    runtime::record_route_outcome(&rig.cwd, &handed_in("window-0#1", Some(HANDED_IN))).expect("a run");
+    runtime::record_route_outcome(&rig.cwd, &verdict("window-0#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, now))
+        .expect("a verdict");
+    assert_eq!(
+        note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)),
+        1,
+        "a label on the source it judged supplements the old one"
+    );
+    let rows = rig.rows();
+    assert_eq!(&rows[..old.len()], old.as_slice(), "every old row stands as it was written");
+    assert_eq!(word(&rows[old.len()], &LABEL).as_deref(), Some("window-0#1"));
+    assert_eq!(word(&rows[old.len()], &arm::VERIFIED_SOURCE).as_deref(), Some(HANDED_IN));
+    assert_eq!(admitted(&rig.cwd), [sample_attempt_key("window-0#1")], "that attempt, and only it, is a sample again");
+    assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS, "its sample was there already: none is written twice");
+}
+
+/// 라벨이 적은 source를 기록이 반박하면 그 라벨은 판정할 수 없다(t-6263 R4c): 시도의 실행 행이 다른 source를 넘겼거나, 넘긴
+/// source의 첫 영수증이 라벨과 다른 말을 하거나, 영수증이 아예 없으면 그 시도의 표본은 인정되지 않는다 — 기록이 옳은 영수증을
+/// 들고 있으면 그것이 새 라벨이 된다. 시도가 보존 한도로 기록에서 빠진 뒤에는 라벨이 쓰일 때 검사받은 결합이 그대로 선다.
+#[test]
+fn a_label_whose_source_the_record_contradicts_is_no_label() {
+    let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+    rig.seed_a_standing_window(true);
+    for labelled in labelled_in(&rig.rows()) {
+        runtime::record_route_outcome(&rig.cwd, &sample_of(&labelled).expect("an agreeing label")).expect("a sample");
+    }
+    assert_eq!(
+        admitted(&rig.cwd).len(),
+        A_WINDOW_OF_COMPARISONS,
+        "attempts no longer on record: each label stands on the source it was bound to when it was written"
+    );
+    let now = now_ms() / 1_000;
+    let record = |row: RouteOutcomeRecord| runtime::record_route_outcome(&rig.cwd, &row).expect("a row");
+    // Its run handed in another source.
+    record(handed_in("window-0#1", Some("tree-another")));
+    // The first receipt on its source passed the work; the label says it failed.
+    record(handed_in("window-1#1", Some(HANDED_IN)));
+    record(verdict("window-1#1", runtime::OUTCOME_COMPLETED, VerdictSubject::Work, now));
+    // It handed in the label's source, and no verdict on it is on record.
+    record(handed_in("window-2#1", Some(HANDED_IN)));
+    // The record says what the label says.
+    record(handed_in("window-3#1", Some(HANDED_IN)));
+    record(verdict("window-3#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, now));
+    let now_admitted = admitted(&rig.cwd);
+    for contradicted in ["window-0#1", "window-1#1", "window-2#1"] {
+        assert!(!now_admitted.contains(&sample_attempt_key(contradicted)), "{contradicted}: the record contradicts its label");
+    }
+    assert!(now_admitted.contains(&sample_attempt_key("window-3#1")), "the record confirms this one");
+    assert_eq!(now_admitted.len(), A_WINDOW_OF_COMPARISONS - 3);
+
+    let before = rig.rows().len();
+    assert_eq!(
+        note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)),
+        1,
+        "the record's own receipt labels window-1 anew, beside the label it contradicts"
+    );
+    let rows = rig.rows();
+    assert_eq!(word(&rows[before], &LABEL).as_deref(), Some("window-1#1"));
+    assert_eq!(word(&rows[before], &arm::VERIFIED).as_deref(), Some(Receipt::Passed.token()));
+    assert!(
+        !admitted(&rig.cwd).contains(&sample_attempt_key("window-1#1")),
+        "a passing incumbent says nothing of a challenger the judge preferred: the old sample stays unadmitted"
+    );
+    assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS, "and nothing new is sampled");
+}
+
+/// 라벨이 기록에 서는 방식은 한 곳에서 읽는다(t-6263 R4c): source를 적지 않은 라벨은 「source 없음」이고, 기록이 그 시도의
+/// 실행 행을 들고 있으면 넘긴 source의 첫 영수증과 같을 때만 서며 아니면 반박된다; 기록에서 빠진 시도의 라벨은 쓰일 때 검사받은
+/// 결합으로 선다. 독자가 읽는 원장은 서는 라벨만 남긴다 — 파일은 그대로다.
+#[test]
+fn a_labels_binding_is_read_against_the_record_in_one_place() {
+    let records = vec![
+        handed_in("ran#1", Some(HANDED_IN)),
+        verdict("ran#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, 5),
+        handed_in("ran-elsewhere#1", Some("tree-another")),
+        handed_in("ran-unverified#1", Some(HANDED_IN)),
+    ];
+    let on_record = OnRecord::of(&records);
+    let label = |attempt: &str, receipt: Receipt| arm::label_row(attempt, receipt, Preferred::Challenger, HANDED_IN, 1);
+    let unsourced = unsourced_label("ran#1", Receipt::Failed, Preferred::Challenger, 1);
+    assert_eq!(binding(&unsourced, "ran#1", &on_record), Binding::Unsourced);
+    assert_eq!(binding(&label("ran#1", Receipt::Failed), "ran#1", &on_record), Binding::Bound);
+    assert_eq!(binding(&label("ran#1", Receipt::Passed), "ran#1", &on_record), Binding::Contradicted, "another receipt");
+    for attempt in ["ran-elsewhere#1", "ran-unverified#1"] {
+        assert_eq!(binding(&label(attempt, Receipt::Failed), attempt, &on_record), Binding::Contradicted, "{attempt}");
+    }
+    assert_eq!(
+        binding(&label("aged-out#1", Receipt::Failed), "aged-out#1", &on_record),
+        Binding::Bound,
+        "no longer on record: the binding it was written on stands"
+    );
+    let mut rows = vec![request_row("ran#1", Preferred::Challenger), unsourced, label("ran#1", Receipt::Failed), label("ran-elsewhere#1", Receipt::Failed)];
+    keep_bound_labels(&mut rows, &on_record);
+    assert_eq!(rows.len(), 2, "the comparison and the one label that stands: {rows:?}");
+    assert_eq!(word(&rows[1], &arm::VERIFIED_SOURCE).as_deref(), Some(HANDED_IN));
+}
+
+/// source 없는 라벨의 합의 표식은 자리를 세우지 못한다(t-6263 R4c): 자리 판정기가 세울 원장이라도 라벨이 source를 적지
+/// 않았으면 그 표식은 판정에 들지 않아 자리는 오르지 않는다; 같은 원장의 라벨이 source를 적었으면 오른다.
+#[test]
+fn marks_of_labels_that_name_no_source_never_raise_the_seat() {
+    let window = zerocode_core::jev::promote::window_wanted_for(&CHALLENGER).expect("the seat rises");
+    // A judgment falls due every window's-worth of rows past the first window.
+    let requests =
+        window + A_WINDOW_OF_COMPARISONS * 80usize.saturating_sub(window).div_ceil(A_WINDOW_OF_COMPARISONS);
+    let labels = 45;
+    let rose = |sourced: bool| {
+        let rig = Rig::new(JevMode::Auto, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+        let ledger = challenger_path(&rig.cwd);
+        for n in 0..requests {
+            append_shadow_row(&ledger, &request_row(&format!("seat-{n}#1"), Preferred::Challenger), SHADOW_LEDGER_MAX_BYTES)
+                .expect("a comparison");
+        }
+        for n in requests - labels..requests {
+            // Three the judge got wrong: the receipt failed the incumbent it preferred.
+            let preferred = if n - (requests - labels) < zerocode_core::jev::NEGATIVES_WANTED {
+                Preferred::Incumbent
+            } else {
+                Preferred::Challenger
+            };
+            let at = i64::try_from(requests + n).expect("small");
+            let attempt = format!("seat-{n}#1");
+            let label = if sourced {
+                arm::label_row(&attempt, Receipt::Failed, preferred, HANDED_IN, at)
+            } else {
+                unsourced_label(&attempt, Receipt::Failed, preferred, at)
+            };
+            append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+        }
+        let _ = note_verdicts_in(&rig.cwd, Some(JevMode::Auto), &feed_into(&rig.cwd));
+        rig.rows().iter().any(|row| word(row, &TRANSITION).as_deref() == Some(ROSE))
+    };
+    assert!(rose(true), "labels bound to their sources raise the seat: a ledger the judge raises");
+    assert!(!rose(false), "the same marks from labels that name no source raise nothing");
 }
 
 /* ---- the dashboard ----------------------------------------------------- */
