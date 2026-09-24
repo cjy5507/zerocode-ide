@@ -47582,9 +47582,31 @@ const activeHistory = await page.evaluate(async () => {
         claimed_verified: true, claimed_merged: true, claimed_deployed: false, author: "worker" },
     });
     const claimed = makeAgentRow(rows.find((row) => row.term === 7912 && !row.sub), true);
-    // The observed word rides in the report, so a miss says what stood there.
+    // Keep the actual state and served renderer beside the assertion: the
+    // first whole-window pass once missed only this claim, without recording
+    // which side of the comparison was wrong (t-6815 E1).
+    const fingerprint = (value) => {
+      let hash = 2166136261;
+      for (const byte of new TextEncoder().encode(value)) {
+        hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+      }
+      return hash.toString(16).padStart(8, "0");
+    };
     seen.claimWord = claimed.querySelector(".wt-agent-state")?.textContent ?? null;
     seen.claimExpected = t("board.claimedMerged", "병합됐다 함");
+    seen.claimClass = claimed.className;
+    seen.claimState = claimed.querySelector(".wt-agent-state")?.outerHTML ?? null;
+    seen.claimReview = paneLedger.get(7912)?.review ?? null;
+    seen.claimWordFunction = typeof ledgerReviewWord === "function"
+      ? fingerprint(ledgerReviewWord.toString()) : "missing";
+    try {
+      const served = await fetch("/shell.js", { cache: "no-store" });
+      seen.claimServedShell = served.ok ? fingerprint(await served.text()) : `http-${served.status}`;
+      const servedI18n = await fetch("/shell-i18n.js", { cache: "no-store" });
+      seen.claimServedI18n = servedI18n.ok ? fingerprint(await servedI18n.text()) : `http-${servedI18n.status}`;
+    } catch (error) {
+      seen.claimServedShell = `fetch-error:${String(error)}`;
+    }
     seen.claimIsNotVerified =
       seen.claimWord === seen.claimExpected && !claimed.classList.contains("is-verified");
     // A pane the ledger never seated keeps the vendor as its second word
@@ -47601,14 +47623,26 @@ const activeHistory = await page.evaluate(async () => {
     window.__LEDGER__ = [{
       run: "run-2", worker: "w-2", agent: "claude", state: "working", ledger: "active",
       hearing: "heard", hearing_at: 1, checkout: "/tmp/history-proj", task: "wire the beat",
-      task_id: "t-10", reported: false,
-      review: { verified: false, merged: false, deployed: false, written: false }, term: 7911, at: 1,
+      task_id: "t-10", reported: true,
+      review: { verified: false, merged: false, deployed: false, written: false,
+        claimed_verified: true, claimed_merged: true, author: "worker" }, term: 7911, at: 1,
     }];
     for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 7 });
-    for (let tries = 0; tries < 40 && !paneLedger.has(7911); tries += 1) {
+    // Await the refresh EFFECT, not just the event dispatch. The backend
+    // answer must reach paneLedger before a claim word is asserted.
+    for (let tries = 0; tries < 40 &&
+      !(paneLedger.get(7911)?.task === "wire the beat" &&
+        paneLedger.get(7911)?.review?.claimed_merged); tries += 1) {
       await new Promise((done) => setTimeout(done, 25));
     }
     seen.ledgerFollows = paneLedger.get(7911)?.task === "wire the beat";
+    const refreshedRow = worktreeAgentRows("/tmp/history-proj")
+      .find((row) => row.term === 7911 && !row.sub);
+    const refreshed = refreshedRow ? makeAgentRow(refreshedRow, true) : null;
+    seen.effectWord = refreshed?.querySelector(".wt-agent-state")?.textContent ?? null;
+    seen.effectClass = refreshed?.className ?? null;
+    seen.claimAfterLedgerEffect =
+      seen.effectWord === seen.claimExpected && !refreshed?.classList.contains("is-verified");
   } finally {
     window.__LEDGER__ = [];
     paneLedger.delete(7911);
@@ -47625,6 +47659,20 @@ const activeHistory = await page.evaluate(async () => {
   }
   return seen;
 });
+console.log(`T6815_CLAIM_DIAG ${JSON.stringify({
+  word: activeHistory.claimWord,
+  expected: activeHistory.claimExpected,
+  className: activeHistory.claimClass,
+  state: activeHistory.claimState,
+  review: activeHistory.claimReview,
+  wordFunction: activeHistory.claimWordFunction,
+  servedShell: activeHistory.claimServedShell,
+  servedI18n: activeHistory.claimServedI18n,
+  assertion: activeHistory.claimIsNotVerified,
+  effectWord: activeHistory.effectWord,
+  effectClass: activeHistory.effectClass,
+  effectAssertion: activeHistory.claimAfterLedgerEffect,
+})}`);
 ok(
   "a live descendant survives its parent's fold, settled history folds to an exact count, and verified/merged come only from the ledger — a worker's claim is a claim",
   activeHistory.historyFolded && activeHistory.historyDrawn && activeHistory.historyOpens &&
@@ -47632,7 +47680,8 @@ ok(
     activeHistory.liveSurvivesFold && activeHistory.ancestryDrawn &&
     activeHistory.groupLiveByMembers && activeHistory.taskTitleFirst &&
     activeHistory.mergedFromLedger && activeHistory.doneIsNotVerified &&
-    activeHistory.claimIsNotVerified && activeHistory.ledgerFollows,
+    activeHistory.claimIsNotVerified && activeHistory.ledgerFollows &&
+    activeHistory.claimAfterLedgerEffect,
   JSON.stringify(activeHistory),
 );
 

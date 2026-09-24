@@ -775,6 +775,7 @@ mod tests {
                         seat: "team-desk/%1".to_string(),
                         generation: Some(1),
                         attempt: None,
+                        source: None,
                     },
                 )
                 .expect("an update");

@@ -612,17 +612,21 @@ pub enum ResultAuthor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dispatch: Option<String>,
     },
-    /// The run's coordinator seat wrote it by `task-update`. `generation` is
-    /// the seat's sitting, `None` for a run coordinated under the legacy
-    /// leader-pane rule; `attempt` is the newest dispatch the task had when
-    /// the correction was written, so a review is bound to the attempt it
-    /// reviewed and a later attempt does not inherit it.
+    /// The run's live coordinator seat wrote it by `task-update`.
+    /// `generation` is the seat's sitting (`None` only on a row written
+    /// before a correction needed a live seat); `attempt` is the newest
+    /// dispatch the task had when the correction was written, and `source`
+    /// the commit or report the correction named with `--source` — a
+    /// review is bound to both, so neither a later attempt nor a later
+    /// hand-in on the same attempt inherits it ([`Run::review_of`]).
     Coordinator {
         seat: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         generation: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     /// The ledger's own note — a stop, an abandon, a death it witnessed.
     Ledger,
@@ -706,6 +710,16 @@ pub struct ReviewFacts {
     /// ([`Run::review_of`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// The source a coordinator's review named — the commit, or the report,
+    /// it looked at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// What the reviewed attempt has handed in, when that is not the source
+    /// the review named — the facts above are then withheld too: a review
+    /// of one commit says nothing about the next, however the task and the
+    /// attempt are spelled ([`Run::review_of`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_now: Option<String>,
 }
 
 impl ReviewFacts {
@@ -720,9 +734,12 @@ impl ReviewFacts {
     pub fn written_by(result: &str, author: Option<&ResultAuthor>) -> Self {
         let read = Self::from_result(result);
         match author {
-            Some(ResultAuthor::Coordinator { attempt, .. }) => Self {
+            Some(ResultAuthor::Coordinator {
+                attempt, source, ..
+            }) => Self {
                 author: ReviewAuthor::Coordinator,
                 attempt: attempt.clone(),
+                source: source.clone(),
                 ..read
             },
             other => Self {
@@ -749,13 +766,7 @@ impl ReviewFacts {
                 .as_str()
                 .is_some_and(|text| !text.trim().is_empty() && text.trim() != "false")
         };
-        let sha = |value: &serde_json::Value| {
-            value
-                .as_str()
-                .map(str::trim)
-                .filter(|text| text.len() >= 7 && text.chars().all(|c| c.is_ascii_hexdigit()))
-                .map(str::to_string)
-        };
+        let sha = |value: &serde_json::Value| value.as_str().and_then(commit_named);
         let verified_keys = ["verified", "reviewedBy", "coordinatorTests", "testedHead"];
         let merged_keys = ["merged", "mergeHead", "mergedInto"];
         // Explicit decisions override older metadata left on the result.
@@ -786,6 +797,49 @@ impl ReviewFacts {
             ..Self::default()
         }
     }
+}
+
+/// The key a worker's report names the commit it hands in under — read by
+/// the ledger when the report lands ([`handed_in_source`]) and spelled in the
+/// briefing that asks for it ([`worker_briefing`]), from this one place.
+pub const HANDED_IN_HEAD: &str = "head";
+
+/// The `--attempt` word for "this task has no attempt": a correction of work
+/// nobody was dispatched on still names what it looked at, and the word is
+/// refused the moment an attempt exists.
+pub const NO_ATTEMPT: &str = "none";
+
+/// A commit, as a person or an agent writes one: seven hex digits or more.
+/// Anything else is not a commit — a report id, a branch name, a sentence.
+fn commit_named(text: &str) -> Option<String> {
+    let text = text.trim();
+    (text.len() >= 7 && text.chars().all(|c| c.is_ascii_hexdigit())).then(|| text.to_string())
+}
+
+/// Whether two source names are the same. An abbreviated hash is a different
+/// name until git has resolved it; a shared prefix alone does not prove that
+/// two reports refer to the same commit.
+fn same_source(one: &str, other: &str) -> bool {
+    match (commit_named(one), commit_named(other)) {
+        (Some(one), Some(other)) => one.eq_ignore_ascii_case(&other),
+        _ => one.trim() == other.trim(),
+    }
+}
+
+/// What an attempt handed in for review, as the ledger names it (t-6815):
+/// the commit its report named under [`HANDED_IN_HEAD`], or — for work that
+/// is not a commit, and for a report that named none — the report itself,
+/// by the message id this ledger minted for it. Written when the report
+/// lands, from the host-authenticated road, so a review can be bound to it.
+fn handed_in_source(body: &str, report: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|said| {
+            said.get(HANDED_IN_HEAD)
+                .and_then(serde_json::Value::as_str)
+                .and_then(commit_named)
+        })
+        .unwrap_or_else(|| report.to_string())
 }
 
 impl Task {
@@ -861,6 +915,13 @@ pub struct Dispatch {
     /// dispatch written before federation existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteSeat>,
+    /// What this attempt handed in for review — [`handed_in_source`] of the
+    /// report that ended it: the commit it named, or the report's own id.
+    /// `None` while nothing has been handed in (open, or ended without a
+    /// report), and on every row written before hand-ins were recorded. A
+    /// coordinator's review is bound to it ([`Run::review_of`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl Dispatch {
@@ -2957,33 +3018,50 @@ impl Run {
     }
 
     /// What stands about a task's outcome NOW: the coordinator's facts while
-    /// the attempt they were written against is still the task's newest, the
-    /// worker's claims kept apart from them, and nothing inherited across
-    /// attempts — a task id staying the same is not a reason for a review of
-    /// one attempt to dress the next ([`ReviewFacts::written_by`], t-6815).
+    /// the attempt AND the source they were written against are still what
+    /// the task's newest attempt is and handed in, the worker's claims kept
+    /// apart from them, and nothing inherited — a task id, an author or an
+    /// attempt staying the same is not a reason for a review of one thing to
+    /// dress another ([`ReviewFacts::written_by`], t-6815).
     ///
-    /// The one reader. `Task` alone cannot answer, because the attempts are
-    /// the run's rows; a reading that skipped them would be the inheritance
-    /// this exists to refuse.
+    /// The one reader. `Task` alone cannot answer, because the attempts and
+    /// what they handed in are the run's rows; a reading that skipped them
+    /// would be the inheritance this exists to refuse.
     #[must_use]
     pub fn review_of(&self, task: &Task) -> ReviewFacts {
         let facts = ReviewFacts::written_by(&task.result, task.result_author.as_ref());
-        let newest = self.newest_attempt(&task.id).map(|one| one.id.as_str());
-        if facts.author == ReviewAuthor::Coordinator
-            && newest.is_some()
-            && facts.attempt.as_deref() != newest
-        {
-            return ReviewFacts {
-                verified: false,
-                merged: false,
-                merge_head: None,
-                deployed: false,
-                written: false,
-                superseded_by: newest.map(str::to_string),
-                ..facts
-            };
+        if facts.author != ReviewAuthor::Coordinator {
+            return facts;
         }
-        facts
+        let newest = self.newest_attempt(&task.id);
+        let newest_id = newest.map(|one| one.id.as_str());
+        let attempt_moved = newest.is_some() && facts.attempt.as_deref() != newest_id;
+        /* A hand-in the review did not name: the attempt handed in a commit
+         * or a report, and the review named another one — or none. Before
+         * anything is handed in, the source the review named is the only
+         * witness, and it stands. */
+        let handed = newest.and_then(|one| one.source.as_deref());
+        let source_moved = handed.is_some_and(|now| {
+            !facts
+                .source
+                .as_deref()
+                .is_some_and(|named| same_source(named, now))
+        });
+        if !attempt_moved && !source_moved {
+            return facts;
+        }
+        ReviewFacts {
+            verified: false,
+            merged: false,
+            merge_head: None,
+            deployed: false,
+            written: false,
+            superseded_by: attempt_moved
+                .then(|| newest_id.map(str::to_string))
+                .flatten(),
+            source_now: source_moved.then(|| handed.map(str::to_string)).flatten(),
+            ..facts
+        }
     }
 
     /// The seat somebody is sitting in right now, or `None` for a run whose
@@ -5321,6 +5399,19 @@ impl Ledger {
                 },
             };
             if let Some(dispatch_id) = message.dispatch.clone() {
+                /* What the attempt handed in — the commit its report named,
+                 * or the report itself — written on the attempt the report
+                 * ends, so a coordinator's review is bound to the thing it
+                 * looked at and not merely to the task's name (t-6815). Only
+                 * an OPEN attempt takes one: the report that ended it is the
+                 * hand-in, and nothing after can rewrite it. */
+                if let Some(held) = run
+                    .dispatches
+                    .iter_mut()
+                    .find(|one| one.id == dispatch_id && one.is_open())
+                {
+                    held.source = Some(handed_in_source(message.body.as_str(), &id));
+                }
                 Self::close_dispatch(run, &dispatch_id, Some(ok), ended);
             }
             if let Some(task_id) = message.task.clone() {
@@ -6365,6 +6456,7 @@ impl Ledger {
             succeeded: None,
             retry_of: None,
             remote: None,
+            source: None,
         });
         let at = run
             .workers
@@ -6539,6 +6631,7 @@ impl Ledger {
                 succeeded: None,
                 retry_of: tuning.retry_of,
                 remote: None,
+                source: None,
             });
             // The set half of the compare-and-set above. Unconditional here is
             // right BECAUSE the compare already happened, under this same
@@ -10303,6 +10396,7 @@ impl Ledger {
                 outbox: Vec::new(),
                 exported_seq: 0,
             }),
+            source: None,
         });
         if let Some(one) = run.tasks.iter_mut().find(|task| task.id == task_id) {
             one.status = TaskStatus::Dispatched;
@@ -13835,9 +13929,11 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "task-update",
-        "--task <id> [--status <s>] [--result <json>] [--attempt <dispatch>] · correct the \
-         record, as the run's coordinator; --attempt names the attempt the correction was \
-         made against and is refused when the task has moved past it",
+        "--task <id> [--status <s>] [--result <json>] [--attempt <dispatch|none> --source \
+         <commit|report>] · correct the record, from the run's live coordinator seat; a \
+         result carrying a review (verified, merged, deployed…) names the attempt and the \
+         source it reviewed — task-list shows both — and is refused when either is missing \
+         or has moved",
         Doing::Mutation,
     ),
     (
@@ -14518,8 +14614,9 @@ pub fn worker_briefing(task: &str, title: &str) -> String {
         "You are a worker in this window's orchestration, carrying task {carrying}. \
 When your work is done, run: zerocode-orc send --type worker_done \
 --retry-request done-{task} --body \
-'{{\"ok\":true,\"summary\":\"<what changed and how you verified it>\"}}' \
-— with \"ok\":false instead if you could not finish. If you are blocked, run: \
+'{{\"ok\":true,\"summary\":\"<what changed and how you verified it>\",\"{head}\":\"<the commit you hand in, when the work is code>\"}}' \
+— with \"ok\":false instead if you could not finish; the coordinator reviews \
+the commit you name. If you are blocked, run: \
 zerocode-orc ask --retry-request <a name of your own> --body '<your question>' \
 — it waits for the answer itself (ten minutes; on a timeout, return with \
 `ask --resume <questionId>`) rather than asking the person, whose screen \
@@ -14537,6 +14634,7 @@ a new request. `zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{w
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
+        head = HANDED_IN_HEAD,
     )
 }
 
@@ -14564,8 +14662,9 @@ pub fn federated_briefing(home_dispatch: &str) -> String {
         "You are a worker borrowed by another window's orchestration \
 (remote dispatch {home_dispatch}). When your work is done, run: zerocode-orc \
 send --type worker_done --retry-request done-{home_dispatch} --body \
-\'{{\"ok\":true,\"summary\":\"<what changed and how you verified it>\"}}\' \
-— with \"ok\":false instead if you could not finish. If you are blocked, run: \
+\'{{\"ok\":true,\"summary\":\"<what changed and how you verified it>\",\"{head}\":\"<the commit you hand in, when the work is code>\"}}\' \
+— with \"ok\":false instead if you could not finish; the coordinator reviews \
+the commit you name. If you are blocked, run: \
 zerocode-orc ask --retry-request <a name of your own> --body '<your question>' \
 — it waits for the answer itself; your questions and reports travel to the \
 home window on their own. Never raise your own CLI's question prompt: \
@@ -14578,6 +14677,7 @@ worktree, because the home window is not on this machine. Every command that CHA
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
+        head = HANDED_IN_HEAD,
     )
 }
 
@@ -16201,6 +16301,7 @@ fn plan_inner(
                 "--status",
                 "--result",
                 "--attempt",
+                "--source",
                 "--run",
                 "--retry-request",
             ];
@@ -16228,6 +16329,27 @@ fn plan_inner(
                 None => None,
             };
             let result = words.value("--result").map(str::to_string);
+            /* Whether this correction vouches for anything is read with the
+             * same keys the board reads it with ([`ReviewFacts::from_result`]
+             * `written`): one table, so a key the reader believes is a key
+             * the writer asks about. */
+            let observed = Observed {
+                attempt: words.value("--attempt"),
+                source: words
+                    .value("--source")
+                    .filter(|named| !named.trim().is_empty()),
+                review: result
+                    .as_deref()
+                    .is_some_and(|said| ReviewFacts::from_result(said).written),
+                tested_head: result
+                    .as_deref()
+                    .and_then(|said| serde_json::from_str::<serde_json::Value>(said).ok())
+                    .and_then(|said| {
+                        said.get("testedHead")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    }),
+            };
             // Asked before anything moves: a refusal here leaves the run
             // exactly as it found it, and files no receipt.
             let author = correction_author(
@@ -16236,7 +16358,7 @@ fn plan_inner(
                 &run_id,
                 task_id,
                 (&team.id, pane),
-                words.value("--attempt"),
+                observed,
             )?;
             let signed = author.kind();
             let now = ledger.update_task(&run_id, task_id, status, result, author)?;
@@ -18029,81 +18151,72 @@ fn inbox_of(ledger: &Ledger, leader_pane: &str, run_id: &str, seat: (&str, &str)
     sender(ledger, leader_pane, run_id, seat)
 }
 
+/// What a `task-update` says it looked at: the attempt and the source.
+///
+/// A correction that carries a review — any of the keys [`ReviewFacts`]
+/// reads — is a coordinator vouching for one thing it saw, so it has to say
+/// which: `--attempt` the dispatch (or [`NO_ATTEMPT`] for work nobody was
+/// dispatched on) and `--source` the commit, or the report, it reviewed. A
+/// status or a progress note vouches for nothing and may name neither.
+#[derive(Debug, Clone, Default)]
+struct Observed<'a> {
+    attempt: Option<&'a str>,
+    source: Option<&'a str>,
+    /// Whether the correction's result carries a review.
+    review: bool,
+    tested_head: Option<String>,
+}
+
 /// Who may correct a task's record with `task-update`, and as whom.
 ///
 /// The independent audit of 2026-09-24 (t-6780, F2) found the verb read
 /// `bound` and wrote: any pane that could name the run — a worker of it, a
 /// worker of another run, a former coordinator whose pane outlived a
 /// takeover — could settle somebody else's attempt and free its dependents.
-/// The record is the coordinator's, so the correction is the coordinator's
-/// verb and nobody else's: the seat [`sender`] signs `run:` for, which is
-/// the run's live seat where it has one and the leader pane under the
-/// legacy rule where it does not. A worker — even the one carrying the task
-/// — has one road onto the record, its `worker_done`; once its attempt has
-/// ended it says what it has to say in a status mail, and the coordinator
-/// corrects. Everybody else is refused by name, before anything moves, and
-/// the refusal files no receipt (the acceptance of m-7276: the audit's
-/// "without mutation or receipt").
+/// The record is the coordinator's, so the correction is the LIVE
+/// coordinator seat's verb and nobody else's. A run whose seat is empty or
+/// vacated has nobody to correct it until somebody sits: the legacy
+/// leader-pane rule [`sender`] still keeps for signing mail is not an
+/// authority over the record, because it cannot tell the run's own leader
+/// from any other team's never-worker leader naming the run with `--run`
+/// (astra's R1 on a5cb2793). The road back is explicit and leaves a record:
+/// `run-use` sits the caller in the empty or vacated seat under a new
+/// generation, and the correction follows from the seat. A worker — even
+/// the one carrying the task — has one road onto the record, its
+/// `worker_done`; once its attempt has ended it says what it has to say in
+/// a status mail, and the coordinator corrects. Everybody else is refused
+/// by name, before anything moves, and the refusal files no receipt (the
+/// acceptance of m-7276: the audit's "without mutation or receipt").
 ///
-/// One identity rule, not two: this asks [`sender`] rather than repeating
-/// its seat arithmetic, so a pane that cannot sign as the coordinator cannot
-/// correct as one either.
+/// Asked of [`sender`] as well as of the seat, so a pane that cannot sign
+/// as the coordinator cannot correct as one either.
 ///
-/// `expected` is the attempt the coordinator made its correction against,
-/// when it names one. A review is of an attempt, and a coordinator that read
-/// the result while a retry was starting would otherwise approve the new
-/// attempt with its observation of the old — so the correction is refused
-/// when the task's newest attempt is not the named one.
+/// And the correction is checked against what it says it looked at, here —
+/// at the commit point, after whatever else the actor did first
+/// ([`Observed`]). A review is of one attempt and one source: a
+/// coordinator that read the result while a retry started, or before the
+/// attempt handed in what it handed in, would otherwise approve the new
+/// thing with its observation of the old. A review that does not say what
+/// it looked at is refused rather than filled in with whatever is newest
+/// now (astra's R2 on a5cb2793): filling it in is exactly how a stale
+/// observation became the newest approval.
 fn correction_author(
     ledger: &Ledger,
     leader_pane: &str,
     run_id: &str,
     task_id: &str,
     seat: (&str, &str),
-    expected: Option<&str>,
+    observed: Observed<'_>,
 ) -> Result<ResultAuthor, String> {
     let run = ledger.run(run_id).ok_or_else(|| unknown_run(run_id))?;
     if run.task(task_id).is_none() {
         return Err(format!("unknown task: {task_id}"));
     }
     let signed = sender(ledger, leader_pane, run_id, seat);
-    let newest = run.newest_attempt(task_id).map(|one| one.id.clone());
-    if signed == run.address() {
-        if let Some(named) = expected
-            && newest.as_deref() != Some(named)
-        {
-            return Err(format!(
-                "task-update names attempt {named}, and task {task_id}'s newest attempt is {} \
-                 — a correction made against an attempt the task has moved past would dress \
-                 the new attempt in the old observation; look at the newest attempt and \
-                 correct against that",
-                newest.as_deref().unwrap_or("none")
-            ));
-        }
-        return Ok(ResultAuthor::Coordinator {
-            seat: format!("{}/{}", seat.0, seat.1),
-            generation: run.coordinator_live().map(|held| held.generation),
-            attempt: newest,
-        });
-    }
     let carrier = run
         .dispatches
         .iter()
         .find(|one| one.task == task_id && one.is_open());
-    let coordinated = match run.coordinator_live() {
-        Some(held) => format!(
-            "coordinated from {} (generation {})",
-            held.seat, held.generation
-        ),
-        None => "coordinated from its leader pane, having no seat".to_string(),
-    };
-    let carried = match carrier {
-        Some(held) => format!(
-            "carried by worker {} under dispatch {}",
-            held.worker, held.id
-        ),
-        None => "carried by nobody".to_string(),
-    };
     let who = match signed.strip_prefix(WORKER_ADDRESS_PREFIX) {
         Some(worker) if carrier.is_some_and(|held| held.worker == worker) => format!(
             "worker {worker}, which is carrying it and reports it with `send --type \
@@ -18112,12 +18225,103 @@ fn correction_author(
         Some(worker) => format!("worker {worker}"),
         None => format!("pane {}/{}", seat.0, seat.1),
     };
-    Err(format!(
-        "task-update is the coordinator's verb: run {run_id} is {coordinated}, task {task_id} is \
-         {carried}, and {who} is not that seat — a worker's word on its own work is its \
-         `worker_done` (a status mail once its attempt has ended), and the coordinator corrects \
-         the record"
-    ))
+    let Some(held) = run.coordinator_live() else {
+        let last = match run.coordinator.as_ref() {
+            Some(gone) => format!(
+                "its seat {} (generation {}) was vacated",
+                gone.seat, gone.generation
+            ),
+            None => "it has never had a seat".to_string(),
+        };
+        return Err(format!(
+            "task-update is the live coordinator seat's verb, and run {run_id} has nobody \
+             sitting: {last} — {who} corrects nothing from outside the seat; sit first with \
+             `run-use {run_id}` (an empty or vacated seat takes its caller under a new \
+             generation) and correct from there"
+        ));
+    };
+    if signed != run.address() {
+        let carried = match carrier {
+            Some(open) => format!(
+                "carried by worker {} under dispatch {}",
+                open.worker, open.id
+            ),
+            None => "carried by nobody".to_string(),
+        };
+        return Err(format!(
+            "task-update is the coordinator's verb: run {run_id} is coordinated from {} \
+             (generation {}), task {task_id} is {carried}, and {who} is not that seat — a \
+             worker's word on its own work is its `worker_done` (a status mail once its \
+             attempt has ended), and the coordinator corrects the record",
+            held.seat, held.generation
+        ));
+    }
+    let newest = run.newest_attempt(task_id);
+    let newest_id = newest.map(|one| one.id.as_str());
+    let handed = newest.and_then(|one| one.source.as_deref());
+    let standing = format!(
+        "task {task_id} is at attempt {}{}",
+        newest_id.unwrap_or(NO_ATTEMPT),
+        handed.map_or_else(
+            || ", which has handed nothing in".to_string(),
+            |source| format!(", which handed in {source}")
+        )
+    );
+    if observed.review && (observed.attempt.is_none() || observed.source.is_none()) {
+        return Err(format!(
+            "a review names what it reviewed — `--attempt <dispatch|{NO_ATTEMPT}>` and \
+             `--source <commit|report>` — and this one named {}: {standing}; look at that and \
+             write the review against it, because a review with the blanks filled in by \
+             whatever is newest now approves what nobody looked at",
+            match (observed.attempt, observed.source) {
+                (None, None) => "neither",
+                (None, Some(_)) => "no attempt",
+                _ => "no source",
+            }
+        ));
+    }
+    if let (Some(tested), Some(named)) = (observed.tested_head.as_deref(), observed.source)
+        && !same_source(tested, named)
+    {
+        return Err(format!(
+            "task-update result says testedHead {tested}, but --source names {named} — \
+             the tested commit must be the source reviewed"
+        ));
+    }
+    if let Some(named) = observed.attempt {
+        let same = match named {
+            NO_ATTEMPT => newest.is_none(),
+            _ => newest_id == Some(named),
+        };
+        if !same {
+            return Err(format!(
+                "task-update names attempt {named}, and {standing} — a correction made \
+                 against an attempt the task has moved past would dress the new attempt in \
+                 the old observation; look at the newest attempt and correct against that"
+            ));
+        }
+    }
+    if let Some(named) = observed.source
+        && let Some(now) = handed
+        && !same_source(named, now)
+    {
+        return Err(format!(
+            "task-update names source {named}, and {standing} — a review of one source \
+             says nothing about another, whatever the task and the attempt are called; \
+             look at what was handed in and review that"
+        ));
+    }
+    if observed.review && newest.is_some() && handed.is_none() {
+        return Err(format!(
+            "task-update cannot review {standing}: the attempt has not handed in a source yet"
+        ));
+    }
+    Ok(ResultAuthor::Coordinator {
+        seat: held.seat.clone(),
+        generation: Some(held.generation),
+        attempt: newest_id.map(str::to_string),
+        source: observed.source.map(|named| named.trim().to_string()),
+    })
 }
 
 /// The task and dispatch the pane's worker is currently carrying.
@@ -18142,6 +18346,7 @@ fn carried_by(
 }
 
 fn task_json(run: &Run, task: &Task) -> serde_json::Value {
+    let newest = run.newest_attempt(&task.id);
     serde_json::json!({
         "taskId": task.id,
         "title": task.display_name(),
@@ -18160,6 +18365,10 @@ fn task_json(run: &Run, task: &Task) -> serde_json::Value {
         // facts, or a worker's claims kept apart from them (t-6815).
         "resultAuthor": task.result_author,
         "review": run.review_of(task),
+        // What a review of this task names (t-6815): its newest attempt, and
+        // what that attempt handed in — `null` while nothing has been.
+        "attempt": newest.map(|one| one.id.as_str()),
+        "source": newest.and_then(|one| one.source.as_deref()),
         "failures": task.failures,
     })
 }
@@ -18695,6 +18904,10 @@ pub struct DispatchRow {
     pub retry_of: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteSeat>,
+    /// What the attempt handed in, on the same posture: absent from every
+    /// store written before hand-ins were recorded (t-6815).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19037,6 +19250,7 @@ impl Ledger {
                     succeeded: dispatch.succeeded,
                     retry_of: dispatch.retry_of.clone(),
                     remote: dispatch.remote.clone(),
+                    source: dispatch.source.clone(),
                 });
             }
             for worker in &run.workers {
@@ -19246,6 +19460,7 @@ impl Ledger {
                     succeeded: row.succeeded,
                     retry_of: row.retry_of,
                     remote: row.remote,
+                    source: row.source,
                 });
         }
         for row in projected.attachments {

@@ -16341,6 +16341,14 @@ fn a_workers_claimed_merge_reaches_the_roster_row_as_a_claim() {
     }
 
     // The coordinator's correction, against the attempt it reviewed, is the fact.
+    let source = ledger
+        .run(&run)
+        .and_then(|held| {
+            held.dispatches
+                .iter()
+                .find(|one| Some(one.id.as_str()) == started.dispatch.as_deref())
+        })
+        .and_then(|one| one.source.clone());
     ledger
         .update_task(
             &run,
@@ -16351,6 +16359,7 @@ fn a_workers_claimed_merge_reaches_the_roster_row_as_a_claim() {
                 seat: "team-claims/%1".to_string(),
                 generation: Some(1),
                 attempt: started.dispatch.clone(),
+                source,
             },
         )
         .expect("the coordinator corrects");

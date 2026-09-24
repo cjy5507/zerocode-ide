@@ -186,6 +186,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         succeeded INTEGER CHECK (succeeded IS NULL OR succeeded IN (0, 1)),
         retry_of TEXT,
         remote TEXT,
+        source TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -430,6 +431,7 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * existed (t-2512). */
         ("ledger_workers", "adopted_by", "INTEGER"),
         ("ledger_dispatches", "remote", "TEXT"),
+        ("ledger_dispatches", "source", "TEXT"),
         /* Who holds the open batch, and since when. Additive with NULL for
          * both, because a lease written before they were recorded has no
          * honest holder to invent — and `Ledger::deliver` reads that NULL as
@@ -636,6 +638,7 @@ fn bytes_held(projection: &LedgerProjectionV1) -> u64 {
         .iter()
         .map(|row| {
             plain(&row.retry_of)
+                + plain(&row.source)
                 + row.remote.as_ref().map_or(0, |seat| {
                     seat.outbox
                         .iter()
@@ -1597,8 +1600,8 @@ fn write_rows(
                 .execute(
                     "INSERT INTO ledger_dispatches (
                         ledger_id, ordinal, run, id, task, worker, started_ms,
-                        ended_ms, succeeded, retry_of, remote
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        ended_ms, succeeded, retry_of, remote, source
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         ledger_id,
                         ordinal(at)?,
@@ -1615,6 +1618,7 @@ fn write_rows(
                             .map(serde_json::to_string)
                             .transpose()
                             .map_err(|_| EffectJournalError::Corrupt)?,
+                        row.source,
                     ],
                 )
                 .map_err(|_| EffectJournalError::Database)?;
@@ -2313,7 +2317,7 @@ fn read_repairable_from_head(
     let mut dispatches = Vec::new();
     each(
         connection,
-        "SELECT run, id, task, worker, started_ms, ended_ms, succeeded, retry_of, remote
+        "SELECT run, id, task, worker, started_ms, ended_ms, succeeded, retry_of, remote, source
            FROM ledger_dispatches WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2328,6 +2332,7 @@ fn read_repairable_from_head(
                     succeeded: row.get(6)?,
                     retry_of: row.get(7)?,
                     remote: None,
+                    source: row.get(9)?,
                 },
                 row.get::<_, Option<String>>(8)?,
             ));
@@ -2886,6 +2891,7 @@ mod tests {
                 // The grown link, loaded: a round trip that only carried the
                 // default would pin nothing about the retry lineage.
                 retry_of: Some("dp-3".to_string()),
+                source: None,
                 // And the federated seat whole — queue bytes included, so a
                 // store that dropped the outbox would fail the byte check.
                 remote: Some(zerocode_core::orchestration::RemoteSeat {
@@ -3124,12 +3130,14 @@ mod tests {
     fn a_result_author_written_to_the_table_comes_back_and_an_older_row_stays_unknown() {
         let store = a_store();
         let mut projection = a_ledger_where_order_is_load_bearing();
+        projection.dispatches[0].source = Some("abc1234".to_string());
         let mut reviewed = projection.tasks[0].clone();
         reviewed.id = "t-10".to_string();
         reviewed.result_author = Some(ResultAuthor::Coordinator {
             seat: "team-2/%1".to_string(),
             generation: Some(3),
             attempt: Some("dp-9".to_string()),
+            source: Some("abc1234".to_string()),
         });
         let mut reported = projection.tasks[0].clone();
         reported.id = "t-11".to_string();
@@ -3144,6 +3152,10 @@ mod tests {
         let held = read(&store, "one", projection.schema)
             .expect("it reads")
             .expect("it is there");
+        assert_eq!(
+            held.projection.dispatches[0].source.as_deref(),
+            Some("abc1234")
+        );
         let authors: Vec<Option<&ResultAuthor>> = held
             .projection
             .tasks

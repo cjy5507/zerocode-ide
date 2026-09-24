@@ -74,6 +74,7 @@ fn a_projection() -> LedgerProjectionV1 {
                 succeeded: Some(true),
                 retry_of: None,
                 remote: None,
+                source: None,
             })
             .collect(),
         workers: (0..WORKER_COUNT)

@@ -75,6 +75,7 @@ fn review_facts_read_only_what_a_coordinator_wrote() {
             seat: "team-1/%1".into(),
             generation: Some(1),
             attempt: Some("dp-1".into()),
+            source: None,
         }),
     };
     let facts = ReviewFacts::written_by(task.result.as_str(), task.result_author.as_ref());
@@ -20963,16 +20964,14 @@ fn a_task_update_from_a_worker_pane_is_refused_by_name() {
         "send --type status --body the-work-landed-before-the-pane-died",
     );
     assert_eq!(told.reply.exit_code, 0, "{}", told.reply.stderr);
-    let ended = bench.json(&format!(
-        "task-update --task {first} --status completed --result {{\"verified\":true}}"
-    ));
+    let ended = bench.json(&format!("task-update --task {first} --status completed"));
     assert_eq!(ended["status"], "completed", "{ended}");
     assert_eq!(ended["author"], "coordinator", "{ended}");
     let run = &bench.ledger.runs()[0];
     let held = run.task(&first).expect("the task");
     assert!(
-        run.review_of(held).verified,
-        "the coordinator's own correction is the fact"
+        !run.review_of(held).verified,
+        "a status correction is no review"
     );
     bench
         .ledger
@@ -21045,7 +21044,7 @@ fn a_former_coordinator_or_another_runs_worker_cannot_correct_the_record() {
     // The live seat corrects, and the correction says which sitting wrote it.
     std::mem::swap(&mut bench.team, &mut other);
     let ended = bench.json(&format!(
-        "task-update --run {run_id} --task {task} --status completed --result {{\"verified\":true}}"
+        "task-update --run {run_id} --task {task} --status completed --result {{\"verified\":true}} --attempt none --source abc1234"
     ));
     assert_eq!(ended["author"], "coordinator", "{ended}");
     let run = bench.ledger.run(&run_id).expect("the run");
@@ -21056,9 +21055,101 @@ fn a_former_coordinator_or_another_runs_worker_cannot_correct_the_record() {
             seat: "team-2/%1".to_string(),
             generation: Some(2),
             attempt: None,
+            source: Some("abc1234".to_string()),
         })
     );
     assert!(run.review_of(held).verified);
+}
+
+/// Mail's legacy leader signature cannot stand in for a live task-correction
+/// seat. In particular another team's never-worker leader used to satisfy
+/// that signature on a vacated run named with --run (astra R1).
+#[test]
+fn a_seatless_run_refuses_every_leader_until_one_sits() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name seatless")["runId"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    let task = bench.json("task-create --spec work")["taskId"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+    let mut other = Team::new("team-2", "stranger", 70);
+
+    // A run written before coordinator seats existed.
+    bench.ledger.run_mut(&run_id).expect("run").coordinator = None;
+    let before = bench.ledger.export();
+    std::mem::swap(&mut bench.team, &mut other);
+    let denied = bench.run(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_ne!(denied.reply.exit_code, 0);
+    assert!(
+        denied.reply.stderr.contains("nobody sitting"),
+        "{}",
+        denied.reply.stderr
+    );
+    assert_eq!(
+        bench.ledger.export(),
+        before,
+        "a refused correction left a success receipt"
+    );
+    std::mem::swap(&mut bench.team, &mut other);
+    let denied = bench.run(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_ne!(
+        denied.reply.exit_code, 0,
+        "the former leader is no seat either"
+    );
+    assert_eq!(bench.ledger.export(), before);
+
+    bench.json("run-create --name other-work");
+    let other_task = bench.json("task-create --spec elsewhere")["taskId"]
+        .as_str()
+        .expect("other task")
+        .to_string();
+    let (_, worker_pane) = bench.seat(&format!("worker-start --agent claude --task {other_task}"));
+    let before = bench.ledger.export();
+    let denied = bench.at(
+        &worker_pane,
+        &format!("task-update --run {run_id} --task {task} --status completed"),
+    );
+    assert_ne!(
+        denied.reply.exit_code, 0,
+        "a worker cannot repair the vacant seat"
+    );
+    assert_eq!(bench.ledger.export(), before);
+
+    // Vacating a known seat is the same authority boundary.
+    bench.json(&format!("run-use {run_id}"));
+    bench.ledger.team_dissolved("team-1", 5_000);
+    let before = bench.ledger.export();
+    std::mem::swap(&mut bench.team, &mut other);
+    let denied = bench.run(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_ne!(denied.reply.exit_code, 0);
+    assert!(denied.reply.stderr.contains("vacated"));
+    assert_eq!(bench.ledger.export(), before);
+    std::mem::swap(&mut bench.team, &mut other);
+    let denied = bench.run(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_ne!(
+        denied.reply.exit_code, 0,
+        "the vacated coordinator has no seat"
+    );
+    assert_eq!(bench.ledger.export(), before);
+    std::mem::swap(&mut bench.team, &mut other);
+    // The explicit recovery creates a live generation, which can correct.
+    let seated = bench.json(&format!("run-use {run_id}"));
+    assert_eq!(seated["seated"], true);
+    let corrected = bench.json(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_eq!(corrected["author"], "coordinator");
 }
 
 /// A worker's `verified`/`merged`/`deployed` are its claim, shown as one —
@@ -21139,8 +21230,12 @@ fn a_workers_claimed_verification_is_shown_as_a_claim() {
 
     // The coordinator's own word, and only that, makes the fact — bound to
     // the attempt it reviewed — and it too survives a rebuild.
+    let source = bench.ledger.runs()[0].dispatches[0]
+        .source
+        .clone()
+        .expect("hand-in");
     bench.json(&format!(
-        "task-update --task {task} --result {{\"verified\":true,\"mergeHead\":\"3a0a289bb5f3\"}}"
+        "task-update --task {task} --result {{\"verified\":true,\"mergeHead\":\"3a0a289bb5f3\"}} --attempt {dispatch} --source {source}"
     ));
     for ledger in [
         &bench.ledger,
@@ -21162,6 +21257,7 @@ fn a_workers_claimed_verification_is_shown_as_a_claim() {
                 seat: "team-1/%1".to_string(),
                 generation: Some(1),
                 attempt: Some(dispatch.clone()),
+                source: Some(source.clone()),
             })
         );
     }
@@ -21188,9 +21284,12 @@ fn a_coordinators_review_is_bound_to_the_attempt_it_reviewed_and_a_new_attempt_i
         .to_string();
     let (_, first_pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
     let first = bench.ledger.runs()[0].dispatches[0].id.clone();
-    bench.json_at(&first_pane, "send --type worker_done --body {\"ok\":true}");
+    bench.json_at(
+        &first_pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"abc1234\"}",
+    );
     bench.json(&format!(
-        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"abc1234\"}} --attempt {first}"
+        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"abc1234\"}} --attempt {first} --source abc1234"
     ));
     let facts = {
         let run = &bench.ledger.runs()[0];
@@ -21234,7 +21333,7 @@ fn a_coordinators_review_is_bound_to_the_attempt_it_reviewed_and_a_new_attempt_i
     // point, by name, and moves nothing.
     let before = bench.ledger.export();
     let stale = bench.run(&format!(
-        "task-update --task {task} --result {{\"verified\":true}} --attempt {first}"
+        "task-update --task {task} --result {{\"verified\":true}} --attempt {first} --source abc1234"
     ));
     assert_ne!(stale.reply.exit_code, 0, "{:?}", stale.reply);
     assert!(
@@ -21244,9 +21343,13 @@ fn a_coordinators_review_is_bound_to_the_attempt_it_reviewed_and_a_new_attempt_i
     );
     assert_eq!(bench.ledger.export().tasks, before.tasks);
 
-    // Against the newest attempt it goes through, and the facts stand again.
+    // Against the newest attempt's hand-in it goes through, and the facts stand again.
+    bench.json_at(
+        &second_pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"def5678\"}",
+    );
     bench.json(&format!(
-        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"def5678\"}} --attempt {second}"
+        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"def5678\"}} --attempt {second} --source def5678"
     ));
     let facts = {
         let run = &bench.ledger.runs()[0];
@@ -21255,20 +21358,77 @@ fn a_coordinators_review_is_bound_to_the_attempt_it_reviewed_and_a_new_attempt_i
     assert!(facts.verified && facts.superseded_by.is_none(), "{facts:?}");
     assert_eq!(facts.attempt.as_deref(), Some(second.as_str()));
 
-    // And the second worker's own report, whatever it says, is its claim.
+    // A review cannot be pasted onto the other source even under the same attempt.
+    let stale = bench.run(&format!(
+        "task-update --task {task} --result {{\"verified\":true}} --attempt {second} --source abc1234"
+    ));
+    assert_ne!(stale.reply.exit_code, 0);
+}
+
+/// A request queued before a hand-in or a retry must carry the source it
+/// actually saw. The actor checks both observations when it applies the
+/// correction; it never fills either blank with the newest row (astra R2).
+#[test]
+fn a_review_needs_the_observed_attempt_and_source_at_commit() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name source-check");
+    let task = bench.json("task-create --spec code-change")["taskId"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+    let (_, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let attempt = bench.ledger.runs()[0].dispatches[0].id.clone();
+    let review = format!(
+        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"abc1234\"}}"
+    );
+    let before = bench.ledger.export();
+    for line in [
+        review.clone(),
+        format!("{review} --attempt {attempt}"),
+        format!("{review} --source abc1234"),
+        format!("{review} --attempt {attempt} --source abc1234"),
+    ] {
+        let denied = bench.run(&line);
+        assert_ne!(denied.reply.exit_code, 0, "{line}: {:?}", denied.reply);
+        assert_eq!(bench.ledger.export(), before, "{line} changed the ledger");
+    }
+
     bench.json_at(
-        &second_pane,
-        "send --type worker_done --body {\"ok\":true,\"verified\":true,\"merged\":true}",
+        &pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"def5678\"}",
     );
-    let facts = {
-        let run = &bench.ledger.runs()[0];
-        run.review_of(run.task(&task).expect("the task"))
-    };
-    assert!(
-        !facts.verified && !facts.merged && facts.claimed_merged,
-        "{facts:?}"
-    );
-    assert_eq!(facts.author, ReviewAuthor::Worker);
+    let before = bench.ledger.export();
+    for line in [
+        review.clone(),
+        format!("{review} --attempt {attempt}"),
+        format!("{review} --attempt {attempt} --source abc1234"),
+        format!("{review} --attempt {attempt} --source def5678"),
+    ] {
+        let denied = bench.run(&line);
+        assert_ne!(denied.reply.exit_code, 0, "{line}: {:?}", denied.reply);
+        assert_eq!(bench.ledger.export(), before, "{line} changed the ledger");
+    }
+    let accepted = bench.json(&format!(
+        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"def5678\"}} --attempt {attempt} --source def5678"
+    ));
+    assert_eq!(accepted["author"], "coordinator");
+    let run = &bench.ledger.runs()[0];
+    assert!(run.review_of(run.task(&task).expect("task")).verified);
+
+    // A newer source on the SAME attempt invalidates the old review even
+    // when the task id, author, and dispatch id have stayed the same.
+    let mut moved = bench.ledger.export();
+    moved
+        .dispatches
+        .iter_mut()
+        .find(|row| row.id == attempt)
+        .expect("attempt")
+        .source = Some("123abcd".to_string());
+    let moved = Ledger::rebuild(moved).expect("a readable changed hand-in");
+    let run = &moved.runs()[0];
+    let facts = run.review_of(run.task(&task).expect("task"));
+    assert!(!facts.verified && !facts.written, "{facts:?}");
+    assert_eq!(facts.source_now.as_deref(), Some("123abcd"));
 }
 
 /// A result nobody is known to have written is a claim, however it is
@@ -21293,7 +21453,7 @@ fn a_legacy_result_with_no_author_reads_as_a_claim_and_a_coordinators_row_surviv
         .to_string();
     for id in [&legacy, &reviewed] {
         bench.json(&format!(
-            "task-update --task {id} --status completed --result {{\"verified\":true,\"mergeHead\":\"3a0a289bb5f3\",\"deployed\":true}}"
+            "task-update --task {id} --status completed --result {{\"verified\":true,\"mergeHead\":\"3a0a289bb5f3\",\"deployed\":true}} --attempt none --source 3a0a289bb5f3"
         ));
     }
     // The store as an older window wrote it: the same bytes, no author.
