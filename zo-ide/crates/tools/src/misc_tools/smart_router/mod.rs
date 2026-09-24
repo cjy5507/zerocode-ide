@@ -25,6 +25,11 @@ mod probe_gate;
 mod settings;
 mod shadow_ledger;
 mod rerank_shadow;
+#[cfg(test)]
+mod roads_tests;
+mod route_label;
+#[cfg(test)]
+mod routing_replay;
 mod skill_search;
 mod shape;
 mod shape_words;

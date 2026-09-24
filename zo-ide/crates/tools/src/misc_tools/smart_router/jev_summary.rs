@@ -169,6 +169,14 @@ pub fn read_rows(path: &Path) -> Vec<Value> {
     text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect()
 }
 
+/// Whether a seat's ledger says it has been raised to acting: its last
+/// transition a rise, read with only the transition lines parsed
+/// ([`promote::stand_in`]). A ledger that cannot be read never rose.
+#[must_use]
+pub fn raised_in(ledger: &Path) -> bool {
+    std::fs::read_to_string(ledger).is_ok_and(|text| promote::stand_in(&text) == Stand::Applying)
+}
+
 /// Count every seat in the table, looking for each seat's ledger under the
 /// given roots.
 ///

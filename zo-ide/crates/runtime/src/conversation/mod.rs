@@ -74,7 +74,7 @@ pub use reminders::{
     build_design_guidance_reminder, DESIGN_GUIDANCE_REMINDER_PREFIX, PRELUDE_FANNED_OUT_REMINDER,
     ROUTE_HINT_REMINDER_PREFIX,
 };
-pub use tool::{ConcurrentDispatchFn, LongRunningPredicate, StaticToolExecutor, ToolExecutor};
+pub use tool::{is_fan_out_tool, ConcurrentDispatchFn, LongRunningPredicate, StaticToolExecutor, ToolExecutor};
 use tool::rides_a_wave;
 
 use helpers::{

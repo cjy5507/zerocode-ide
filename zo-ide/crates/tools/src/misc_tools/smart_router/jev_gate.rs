@@ -435,6 +435,10 @@ mod tests {
             loser_ms: None,
             probe: super::super::decision_shadow::ProbeCell::Failed("timeout".to_string()),
             jev: None,
+            band: None,
+            reading: None,
+            rule: None,
+            hangul_permille: None,
         }
     }
 

@@ -4042,16 +4042,15 @@
             </label>
             <!-- The gate in front of the routing seat.
                  `smart.autoClassifier` decides how a spawn's difficulty is read,
-                 and — as nothing on this card used to say — whether the routing
-                 feature is asked anything at all: zo fires the decision shadow
-                 only from inside the routing probe, and calls that probe only
-                 under the probing word. The four words and the coupling are
-                 `zerocode_core::jev`'s (`ClassifierMode`, `ClassifierRow.gates`);
-                 this card spells neither. -->
+                 whether the chat probe is called (the probing word only), and
+                 whether the routing feature is asked at all (every word but
+                 `off`, t-6346). The four words and the coupling are
+                 `zerocode_core::jev`'s (`ClassifierMode`, `ClassifierRow.reaches`,
+                 `ClassifierRow.gates`); this card spells neither. -->
             <div class="settings-jev-classifier" id="route-classifier-card">
               <h4 class="settings-jev-advanced-title" data-i18n="settings.classifier.title">라우팅 분류기</h4>
               <p class="settings-row-desc" data-i18n="settings.classifier.about">
-                zo가 과업의 난이도를 무엇으로 정할지 고릅니다. 「모델 선택 판단」은 모델에게도 묻는 방식에서만 판단을 요청합니다.
+                zo가 과업의 난이도를 무엇으로 정할지 고릅니다. 「모델 선택 판단」은 「끔」이 아닌 모든 방식에서 판단을 요청합니다.
               </p>
               <label class="settings-field" data-field="md" for="route-classifier-select">
                 <span class="settings-field-copy">
@@ -4067,16 +4066,16 @@
               <details class="settings-fold">
                 <summary data-i18n="settings.status.evidence">자세히</summary>
                 <p data-i18n="settings.classifier.detail">
-                  낱말 표는 어느 방식에서나 먼저 돌고, 어느 방식에서도 대체되지 않습니다. 「낱말만」은 거기서 끝냅니다. 「표식까지」는 과업 글에 사람이 적어 둔 레인·형태 표식을 함께 읽습니다 — 어디에도 묻지 않습니다. 「모델에게도」는 그 위에 빠른 등급 모델 프로브 하나(출력 200토큰 안팎)를 얹어 융합하며, 실패하거나 늦으면 낱말 표의 판정이 그대로 섭니다. zo가 라우팅 판단을 TypeSafe에 묻는 것도 이 프로브 안에서만 일어납니다. 「끔」은 자동 라우팅 자체를 쓰지 않습니다.
+                  낱말 표는 어느 방식에서나 먼저 돌고, 어느 방식에서도 대체되지 않습니다. 「낱말만」은 거기서 끝냅니다. 「표식까지」는 과업 글에 사람이 적어 둔 레인·형태 표식을 함께 읽습니다 — 이 방식 자체는 어디에도 묻지 않습니다. 「모델에게도」는 그 위에 빠른 등급 모델 프로브 하나(출력 200토큰 안팎)를 얹어 융합하며, 실패하거나 늦으면 낱말 표의 판정이 그대로 섭니다. zo가 TypeSafe에 묻는 라우팅 판단은 이와 따로 「끔」이 아닌 모든 방식에서 턴과 하위 에이전트마다 한 번 일어나고, 그 판단이 적용되는 동안에는 판단이 확신하지 못할 때만 프로브를 부릅니다. 「끔」은 자동 라우팅 자체를 쓰지 않습니다.
                 </p>
               </details>
               <!-- Shown by `paintClassifierGate` when the feature this
-                   classifier gates asks while nothing calls a probe: its
-                   mode is one nothing can reach. Which feature that is, is
+                   classifier gates asks while automatic routing is off: its
+                   mode is one nothing can reach (`ClassifierRow.reaches`). Which feature that is, is
                    the backend's answer (`classifier.gates`). -->
               <p class="settings-notice settings-notice--row" id="route-classifier-unreachable" data-jev-unreachable
                  data-i18n="settings.typesafe.routingUnreachable" hidden>
-                지금 분류 방식이 모델에게 묻지 않아 「모델 선택 판단」은 판단을 요청하지 않습니다. 모델에게도 묻는 방식으로 바꾸면 요청합니다.
+                자동 라우팅이 꺼져 있어 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다.
               </p>
             </div>
           </details>
@@ -4110,8 +4109,8 @@
         <template id="jev-features">
           <div data-jev-feature="routing">
             <span data-jev-name data-i18n="settings.typesafe.shadow">모델 선택 판단</span>
-            <span data-jev-summary data-i18n="settings.typesafe.shadowSummary">과업의 난이도·위험도·의도를 판단합니다. 켜면 그 판단을 과업에 맞는 모델을 고르는 데 반영합니다.</span>
-            <p data-jev-hint data-i18n="settings.typesafe.shadowHint">과업 설명을 읽고 난이도·위험도·의도를 판단합니다. 켜면 그 판단을 모델 고르기에 보수적으로 반영하고, 오류가 나거나 1.5초 안에 응답이 없으면 기존 방식으로 고릅니다. 보내는 것은 과업 설명 앞 2,000자뿐이고 api.typesafe.ai로 갑니다. 보내기는 동의한 폴더(settings.json의 smart.jev.workspaces)에서만 하며, 비밀번호·키일 수 있는 줄은 보내기 전에 가립니다. 정확도는 기존 방식이 같은 과업에 내린 판단과 견주어 잽니다.</p>
+            <span data-jev-summary data-i18n="settings.typesafe.shadowSummary">과업의 난이도·위험도·의도와 몇 가지 사실을 판단합니다. 켜면 확신하는 판단을 과업에 맞는 모델을 고르는 데 반영합니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.shadowHint">과업 설명을 읽고 한 번의 요청으로 난이도와 위험도(각각 네 단계), 의도(열 가지 중 하나), 가장 어려운 부분에 필요한 생각의 종류, 사실 여섯 가지(먼저 계획할 일인지, 화면을 봐야 하는지, 측정해야 하는지, 코드를 고치는지, 사람에게 먼저 물을 것이 있는지, 앞선 일을 가리키는지)를 판단합니다. 켜면 확신하는 판단만 모델 고르기에 반영하고(확신이 높으면 난이도를 한 단계까지 올리거나 내리고, 중간이면 올리기만 합니다), 확신하지 못하거나 오류가 나거나 1.5초 안에 응답이 없으면 기존 방식으로 고릅니다. 보내는 것은 과업 설명 앞 2,000자와 이전 시도가 실패했는지 여부뿐이고, api.typesafe.ai로 갑니다. 보내기는 동의한 폴더(settings.json의 smart.jev.workspaces)에서만 하며, 비밀번호·키일 수 있는 줄은 보내기 전에 가립니다. 정확도는 기존 방식이 같은 과업에 내린 판단, 그리고 그 턴이 실제로 한 일(도구 호출·고친 파일·띄운 에이전트)과 견주어 잽니다.</p>
           </div>
           <div data-jev-feature="recall">
             <span data-jev-name data-i18n="settings.typesafe.recall">기억 검색 순서</span>

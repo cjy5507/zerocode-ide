@@ -133,6 +133,20 @@ pub fn assess_turn_deterministic(user_text: &str) -> TurnProbeAssessment {
     deterministic_assessment(metadata.complexity)
 }
 
+/// The keyword tables' reading of a task's words — today's rule, the routing
+/// seat's baseline (t-6342, t-6346): complexity and risk from the metadata
+/// tables, and the neutral intent they never assign. A turn reads its own
+/// words as the prompt, a spawn its description and prompt, as the judgment
+/// reads them.
+pub(super) fn todays_rule(
+    description: &str,
+    prompt: &str,
+) -> (RouteTaskComplexity, runtime::RouteTaskRisk, runtime::RouteTaskIntent) {
+    let role = infer_route_role(None, description, prompt);
+    let metadata = classify_task_metadata(&TaskMetadataInput::new(None, description, prompt), role);
+    (metadata.complexity, metadata.risk, deterministic_assessment(metadata.complexity).intent)
+}
+
 fn deterministic_assessment(
     complexity: runtime::RouteTaskComplexity,
 ) -> TurnProbeAssessment {
@@ -185,7 +199,7 @@ fn note_gate(gate: ProbeGate) {
 ///
 /// So the probe runs where a wrong "easy" costs something — `Trivial`/`Small`,
 /// the bands it may authorize a lower floor for — plus the `Medium` turns
-/// admitted for their intent read alone (see `probe_admission`), which may
+/// admitted for their intent read alone (see `TURN_GATES`), which may
 /// not spend less than the tables already decided. An ordinary verb-matched
 /// `Medium`, `Large`, and `Unknown` are returned untouched, paying nothing.
 /// Fusion stays bounded by
@@ -270,10 +284,11 @@ pub struct AssessmentReaders {
 }
 
 /// Whether anyone reads the verdict this turn: an armed deep gate, or an exec
-/// contract the settings arm for this main model.
+/// contract the settings arm for this main model — asked second, because
+/// asking it builds the model list.
 #[must_use]
-fn assessment_has_a_reader(readers: AssessmentReaders, exec_contract_armed: bool) -> bool {
-    readers.verify_leg || exec_contract_armed
+fn assessment_has_a_reader(readers: AssessmentReaders, exec_contract_armed: impl FnOnce() -> bool) -> bool {
+    readers.verify_leg || exec_contract_armed()
 }
 
 /// Any admission is worth its round-trip only when someone reads the verdict.
@@ -286,10 +301,41 @@ fn admission_for_readers(admission: ProbeAdmission, verdict_read: bool) -> Probe
     }
 }
 
-/// Whether the keyword verdict for this turn is worth a probe round-trip, and
-/// how much of it the probe may then replace.
-///
-/// Three classes qualify:
+/// How the keyword tables read a turn, as far as the gates in front of the
+/// routing readers care.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BandRead {
+    /// `Trivial` or `Small` — the bands a second opinion may move down.
+    Easy,
+    /// `Medium` by length alone, or one that mentions design: the band is
+    /// already the heavy default, and only the intent read is worth buying.
+    MediumForIntent,
+    /// An ordinary verb-matched `Medium` ("fix the auth module").
+    MediumByVerb,
+    /// `Large` — every orchestration brief.
+    Large,
+    /// The tables could not say.
+    Unknown,
+}
+
+/// Who is asked about a turn before it routes, by how the tables read it —
+/// the one table of the routing readers' gates (t-4727, t-6346).
+struct TurnGate {
+    read: BandRead,
+    /// What the chat probe may replace: its cost gate. A Fast-tier
+    /// round-trip on the first request's path is worth it only where the
+    /// tables' band may be wrong in the direction that spends less, or where
+    /// the intent read is the one thing nothing else supplies.
+    probe: ProbeAdmission,
+    /// Whether the routing seat is asked, when its mode asks anything. Every
+    /// band: its answer costs a fraction of the probe's, and the bands the
+    /// probe declines — a `Large` brief, a verb-matched `Medium` — are the
+    /// turns routing matters most for, which the judgment never saw while it
+    /// sat behind the probe's gate (0 of 25 rows applied, 2026-09-18).
+    seat: bool,
+}
+
+/// The probe's column is its cost gate. Three classes qualify:
 /// - `Trivial`/`Small` — the candidate bands a trusted probe may move DOWN, so
 ///   the table verdict needs a second opinion before it can spend less. This is
 ///   the only class where the probe owns the complexity axis
@@ -329,23 +375,48 @@ fn admission_for_readers(admission: ProbeAdmission, verdict_read: bool) -> Probe
 /// same collapse one level down, and reading the role here would have closed
 /// the gate on exactly the turns it was opened for. Both questions read one
 /// keyword list, so neither can drift from the other.
-fn probe_admission(
+const TURN_GATES: [TurnGate; 5] = [
+    TurnGate { read: BandRead::Easy, probe: ProbeAdmission::FullVerdict, seat: true },
+    TurnGate { read: BandRead::MediumForIntent, probe: ProbeAdmission::IntentOnly, seat: true },
+    TurnGate { read: BandRead::MediumByVerb, probe: ProbeAdmission::Declined, seat: true },
+    TurnGate { read: BandRead::Large, probe: ProbeAdmission::Declined, seat: true },
+    TurnGate { read: BandRead::Unknown, probe: ProbeAdmission::Declined, seat: true },
+];
+
+/// The row of [`TURN_GATES`] for a reading; a reading the table left out
+/// admits nobody.
+fn turn_gate(read: BandRead) -> &'static TurnGate {
+    const NOBODY: TurnGate = TurnGate { read: BandRead::Unknown, probe: ProbeAdmission::Declined, seat: false };
+    TURN_GATES.iter().find(|gate| gate.read == read).unwrap_or(&NOBODY)
+}
+
+/// Whether the chat probe's own gate admits a turn's words by band — its
+/// cost gate alone, before a reader is asked about (the routing replay reads
+/// the probe's calls by it).
+#[cfg(test)]
+pub(super) fn probe_gate_admits(user_text: &str) -> bool {
+    let input = TaskMetadataInput::new(None, "", user_text);
+    let metadata = classify_task_metadata(&input, infer_route_role(None, "", user_text));
+    turn_gate(band_read(metadata.complexity, &input, user_text)).probe != ProbeAdmission::Declined
+}
+
+/// How the tables read a turn: the band, and for a `Medium` whether an
+/// implementation verb put it there without a design mention.
+fn band_read(
     complexity: runtime::RouteTaskComplexity,
     input: &TaskMetadataInput<'_>,
     user_text: &str,
-) -> ProbeAdmission {
+) -> BandRead {
     match complexity {
-        runtime::RouteTaskComplexity::Trivial | runtime::RouteTaskComplexity::Small => {
-            ProbeAdmission::FullVerdict
-        }
+        runtime::RouteTaskComplexity::Trivial | runtime::RouteTaskComplexity::Small => BandRead::Easy,
         runtime::RouteTaskComplexity::Medium
             if !task_complexity_verb_matched(input) || mentions_design(None, "", user_text) =>
         {
-            ProbeAdmission::IntentOnly
+            BandRead::MediumForIntent
         }
-        runtime::RouteTaskComplexity::Medium
-        | runtime::RouteTaskComplexity::Large
-        | runtime::RouteTaskComplexity::Unknown => ProbeAdmission::Declined,
+        runtime::RouteTaskComplexity::Medium => BandRead::MediumByVerb,
+        runtime::RouteTaskComplexity::Large => BandRead::Large,
+        runtime::RouteTaskComplexity::Unknown => BandRead::Unknown,
     }
 }
 
@@ -354,7 +425,7 @@ fn probe_admission(
 ///
 /// [`ProbeAdmission::IntentOnly`] keeps the deterministic band against a
 /// DOWNGRADE and takes a raise unchanged. Both `Medium` admissions say the same
-/// thing in [`probe_admission`]'s doc — the band is already the heavy default,
+/// thing in [`TURN_GATES`]'s doc — the band is already the heavy default,
 /// so the round-trip buys the intent read — but until the clamp existed, saying
 /// it was not enough: admission alone flipped `provenance` to `TrustedProbe`,
 /// and a High-confidence `{small}` verdict then demoted `Medium` → `Small`,
@@ -383,12 +454,41 @@ fn resolve_probed_complexity(
     fusion.complexity
 }
 
-/// [`assess_turn_complexity_probed`] plus the probe's intent read. Same gates,
-/// same fail-open contract: every failure path — Smart routing off, classifier
-/// off, no inventory, timeout, malformed JSON, or a probe below the confidence
-/// gate — returns the deterministic complexity and neutral `Other` fallback. A
-/// trusted probe replaces that seed verbatim on the axes its admission bought
-/// (`resolve_probed_complexity`).
+/// The band a judged turn carries out of fusion (t-6346): the answer's own
+/// band decides how far it may move — except that a turn whose person named
+/// the model in its words is never lowered. The Architect's implementer is
+/// walked down by the band, so a judgment that spent less than the tables
+/// would route the person's own pick below itself; a raise costs the pick
+/// nothing and stands.
+fn resolve_judged_complexity(
+    pinned: bool,
+    deterministic: runtime::RouteTaskComplexity,
+    fusion: runtime::ProbeFusion,
+) -> runtime::RouteTaskComplexity {
+    if pinned && fusion.effect == runtime::ProbeFusionEffect::LoweredComplexity {
+        return deterministic;
+    }
+    fusion.complexity
+}
+
+/// [`assess_turn_complexity_probed`] plus the probe's intent read, and the
+/// routing seat's judgment of every turn it is asked about (t-4727, t-6346).
+///
+/// Two readers, two gates. The chat probe keeps its own: the band table
+/// (`TURN_GATES`) and a reader for its verdict — a Fast-tier
+/// round-trip is worth holding the first request for only there. The
+/// routing seat's judgment has none of that probe's gate: when the seat
+/// asks (any mode but `off`), every turn is judged once, a `Large` brief
+/// and a verb-matched `Medium` included — the turns an orchestration brief
+/// is, which the probe's gate never let the judgment see. Whether its
+/// answer routes is the seat's mode and the turn's reader
+/// (`probe_exec::Admitted`); when it acts it is asked first, and
+/// the chat probe runs only where it abstains.
+///
+/// Same fail-open contract: every failure path — Smart routing off,
+/// classifier off, no inventory, timeout, malformed JSON, a probe below the
+/// confidence gate, an abstaining judgment the probe's gate declines —
+/// returns the deterministic complexity and neutral `Other` fallback.
 #[must_use]
 pub fn assess_turn_probed(
     user_text: &str,
@@ -400,20 +500,21 @@ pub fn assess_turn_probed(
     let input = TaskMetadataInput::new(None, "", user_text);
     let metadata = classify_task_metadata(&input, role);
     let deterministic = deterministic_assessment(metadata.complexity);
-    // The three gates below return the deterministic verdict without ever
-    // reaching `probe_exec`, so nothing downstream would record them. Attesting
-    // them here is what turns the probe's admission rate into a standing
-    // observation instead of something measured by hand once: a table showing
-    // `not_worth_it` on every turn says the cost gate is the reason a
-    // probe-owned axis never armed, which is not a conclusion the probe's own
-    // success/failure counters can reach.
+    // The gates below return the deterministic verdict without ever reaching
+    // `probe_exec`, so nothing downstream would record them. Attesting them
+    // here is what turns the probe's admission rate into a standing
+    // observation instead of something measured by hand once.
     //
-    // Two of the three are DECLINES — a cost gate and a user setting choosing
-    // not to probe are normal operation and must never read as a defect. An
-    // unreadable settings file is the odd one out: nothing chose that, so it
-    // escalates as a failure.
-    let admission = probe_admission(metadata.complexity, &input, user_text);
-    if admission == ProbeAdmission::Declined {
+    // A cost gate and a user's own setting declining are normal operation
+    // and must never read as a defect. An unreadable settings file is the
+    // odd one out: nothing chose that, so it escalates as a failure.
+    let gate = turn_gate(band_read(metadata.complexity, &input, user_text));
+    let admission = gate.probe;
+    // The seat's column, then its word: a turn nobody would ask about pays
+    // one settings read and nothing else.
+    let seat = if gate.seat { super::decision_shadow::mode_here() } else { None };
+    let seat_asks = seat.is_some_and(zerocode_core::jev::JevMode::asks);
+    if admission == ProbeAdmission::Declined && !seat_asks {
         note_gate(ProbeGate::NotWorthIt);
         return deterministic;
     }
@@ -421,30 +522,51 @@ pub fn assess_turn_probed(
         note_gate(ProbeGate::SettingsUnavailable);
         return deterministic;
     };
+    // Automatic routing off is nobody's judgment to ask for — the seat's
+    // included.
     if !settings.enabled || settings.auto_classifier == RouteAutoClassifierMode::Off {
         note_gate(ProbeGate::ClassifierOff);
         return deterministic;
     }
     // The verdict is read by the deep-gate verify leg and the exec contract
-    // only; with neither armed the round-trip is pure first-token latency. A
-    // decline, attested like the cost gate above.
-    let verdict_read = assessment_has_a_reader(
-        readers,
-        super::settings::exec_impl_model_armed(parent_model, &settings),
-    );
-    let admission = admission_for_readers(admission, verdict_read);
-    if admission == ProbeAdmission::Declined {
-        note_gate(ProbeGate::VerdictUnread);
+    // only; with neither armed the probe's round-trip is pure first-token
+    // latency, and an acting judgment records instead of routing. Whether
+    // they read is asked only where an answer could be bought — a probe the
+    // gate admits, or a seat whose word lets it act.
+    let seat_acts = seat.is_some_and(super::decision_shadow::acts_here);
+    let verdict_read = (admission != ProbeAdmission::Declined || seat_acts)
+        && assessment_has_a_reader(readers, || super::settings::exec_impl_model_armed(parent_model, &settings));
+    let probe = admission_for_readers(admission, verdict_read);
+    note_gate(match (admission, probe) {
+        (ProbeAdmission::Declined, _) => ProbeGate::NotWorthIt,
+        (_, ProbeAdmission::Declined) => ProbeGate::VerdictUnread,
+        _ => ProbeGate::Admitted,
+    });
+    // Nothing on this turn reads an answer and no probe is bought: the
+    // seat's question leaves detached, and the turn pays for neither the
+    // exec contract's check nor the model list — 15.1 ms at the start of
+    // every such turn when it did (t-6346, `roads_tests`).
+    if probe == ProbeAdmission::Declined && !(seat_acts && verdict_read) {
+        if seat_asks {
+            let _ = super::decision_shadow::fire(
+                &[("", user_text)],
+                &[runtime::RoutingFacts::default()],
+                &[],
+                attempt,
+                super::decision_shadow::DECISION_SHADOW_DEADLINE,
+            );
+        }
         return deterministic;
     }
-    note_gate(ProbeGate::Admitted);
     let inventory = runtime::connected_model_inventory(parent_model);
     let Some(probed) = super::probe_exec::route_probe_assessment_judged(
         &inventory,
         parent_model,
         "",
         user_text,
+        runtime::RoutingFacts::default(),
         attempt,
+        super::probe_exec::Admitted { probe: probe != ProbeAdmission::Declined, read: verdict_read },
     ) else {
         return deterministic;
     };
@@ -455,7 +577,13 @@ pub fn assess_turn_probed(
         &probed.assessment,
     );
     TurnProbeAssessment {
-        complexity: resolve_probed_complexity(admission, metadata.complexity, fusion),
+        // The probe's admission bought what it bought; the judgment's
+        // authority is its own band's (`runtime::RoutingReading::assessment`).
+        complexity: if probed.judged {
+            resolve_judged_complexity(user_named_model(user_text).is_some(), metadata.complexity, fusion)
+        } else {
+            resolve_probed_complexity(probe, metadata.complexity, fusion)
+        },
         intent: fusion.intent,
         provenance: fusion.provenance,
         judged: probed.judged,
@@ -840,13 +968,13 @@ mod host_prelude_tests {
 #[cfg(test)]
 mod probe_gate_tests {
     use super::{
-        admission_for_readers, assessment_has_a_reader, probe_admission, resolve_probed_complexity,
+        admission_for_readers, assessment_has_a_reader, band_read, resolve_probed_complexity, turn_gate,
         AssessmentReaders, ProbeAdmission, TaskMetadataInput,
     };
     use runtime::RouteTaskComplexity as C;
 
     fn admission(user_text: &str, complexity: C) -> ProbeAdmission {
-        probe_admission(complexity, &TaskMetadataInput::new(None, "", user_text), user_text)
+        turn_gate(band_read(complexity, &TaskMetadataInput::new(None, "", user_text), user_text)).probe
     }
 
     fn gate(user_text: &str, complexity: C) -> bool {
@@ -953,9 +1081,10 @@ mod probe_gate_tests {
     fn a_probe_runs_only_when_something_reads_its_verdict() {
         let none = AssessmentReaders::default();
         let verify = AssessmentReaders { verify_leg: true };
-        assert!(!assessment_has_a_reader(none, false));
-        assert!(assessment_has_a_reader(verify, false));
-        assert!(assessment_has_a_reader(none, true));
+        assert!(!assessment_has_a_reader(none, || false));
+        assert!(assessment_has_a_reader(verify, || false));
+        assert!(assessment_has_a_reader(none, || true));
+        assert!(assessment_has_a_reader(verify, || unreachable!("an armed gate already reads it")));
         assert_eq!(
             admission_for_readers(ProbeAdmission::IntentOnly, false),
             ProbeAdmission::Declined
@@ -1090,10 +1219,25 @@ mod probe_gate_tests {
         }
     }
 
+    /// A machine that has never met Jev: an empty config home, no key. The
+    /// routing seat reads its settings on every turn now (t-6346), so a case
+    /// that means "nothing asks" says whose settings are read.
+    fn quiet_machine() -> (tempfile::TempDir, crate::tests::EnvGuard) {
+        let home = tempfile::tempdir().expect("a config home");
+        let env = crate::tests::EnvGuard::set(core_types::paths::ZO_CONFIG_HOME_ENV, &home.path().to_string_lossy())
+            .set_also(core_types::paths::ZO_HOME_ENV, home.path())
+            .set_also("HOME", home.path())
+            .set_also(core_types::paths::ZO_STATE_DIR_ENV, home.path())
+            .set_also(api::SYSTEMONE_API_KEY_ENV, "");
+        (home, env)
+    }
+
     #[test]
     fn a_verb_matched_medium_returns_the_neutral_deterministic_verdict() {
-        // Gated out before any settings read, inventory load, or round-trip, so
-        // this is provider-free and the fail-open contract is observable.
+        // Gated out before any inventory load or round-trip: the probe's gate
+        // declines the band and no seat asks on a machine that never met Jev,
+        // so this is provider-free and the fail-open contract is observable.
+        let _machine = quiet_machine();
         let assessment = super::assess_turn_probed(
             "이 함수의 버그를 수정해줘",
             "claude-opus-5",
@@ -1110,6 +1254,7 @@ mod probe_gate_tests {
 
     #[test]
     fn a_large_design_turn_outside_the_probe_gate_stays_keyword_neutral() {
+        let _machine = quiet_machine();
         let assessment = super::assess_turn_probed(
             "design and build a landing page across the whole repo",
             "claude-opus-5",

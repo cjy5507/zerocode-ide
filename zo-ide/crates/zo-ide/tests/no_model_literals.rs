@@ -92,8 +92,13 @@ fn branches_on_family_word(line: &str) -> Option<&'static str> {
 }
 
 fn is_test_source(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == "tests.rs")
-        || path.components().any(|part| part.as_os_str() == "tests")
+    // `tests.rs`, anything under a `tests` directory, and a `*_tests.rs`
+    // module file — the crates' convention for a test module too large for
+    // the bottom of its file (`roads_tests.rs`, `label_audit_tests.rs`),
+    // declared under `#[cfg(test)]` beside `tests.rs`.
+    path.file_name().is_some_and(|name| {
+        name == "tests.rs" || name.to_str().is_some_and(|name| name.ends_with("_tests.rs"))
+    }) || path.components().any(|part| part.as_os_str() == "tests")
 }
 
 /// Source lines before the file's first `#[cfg(test)]` — test modules sit at

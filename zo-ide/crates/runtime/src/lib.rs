@@ -139,7 +139,7 @@ pub use config::{
     TRUSTED_MCP_SERVERS_FILE, ZO_SETTINGS_SCHEMA_NAME,
     persist_allow_always_rules, remove_mcp_server, trust_mcp_server, write_mcp_server,
 };
-pub use conversation::{ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
+pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{
     decide_step_effort, shift_step_effort, EffortStep, RungMove, StepAsk, StepAskContext,
     StepBatch, StepDecision, StepEffortConfig, StepEffortObserver, StepEffortSeat, StepEvent,
@@ -238,7 +238,8 @@ pub use model_router::{
     spawn_attempt_key, turn_attempt_key,
     orchestration_accuracy,
     preferred_agent_for_route, read_orchestration_accuracy,
-    classify_model_tiers, deep_tier_model_matches, default_deep_tier_models, dynamic_deep_tier_models,
+    classify_model_tiers, deep_tier_model_matches, default_deep_tier_models, default_difficulty_tier,
+    dynamic_deep_tier_models,
     exploration_slot_for_route, ImplRung, ModelBand, ModelTierAssignment,
     fuse_probe_assessment, implementation_route_model_allowed, is_deep_tier_model,
     is_reserved_orchestrator_model,
@@ -246,7 +247,9 @@ pub use model_router::{
     ProbeAssessment, ProbeFusion, ProbeFusionEffect, RouteAssessmentProvenance, RouteTaskIntent,
     rubric_task_text, rubric_task_whole, RubricAxis, COMPLEXITY_AXIS, CONFIDENCE_AXIS, DECISION_RUBRIC_VERSION,
     INTENT_AXIS, RISK_AXIS, ROUTING_RUBRIC, RUBRIC_TASK_CHAR_CAP,
-    axis_metrics, decision_questions, decision_request, judged_axes, validate_decision,
+    axis_metrics, decision_questions, decision_request, judged_axes, routing_questions, routing_request,
+    routing_state, validate_decision, validate_routing, LevelReading, OptionReading, RoutingFacts,
+    RoutingReading,
     AxisMetrics, AxisReading, AxisSample, DecisionAnswer, DecisionRejection, DecisionVerdict, ROUTE_TRUST_FLOOR,
     CALIBRATION_BINS, PROBABILITY_SUM_TOLERANCE,
     read_route_outcome_summary, read_route_outcomes, read_route_outcomes_across_projects,

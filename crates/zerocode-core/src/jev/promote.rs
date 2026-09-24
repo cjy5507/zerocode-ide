@@ -802,12 +802,37 @@ pub fn labels_path_in(root: &Value) -> Option<&str> {
 pub fn stand_from(rows: &[Value]) -> Stand {
     rows.iter()
         .rev()
-        .find_map(|row| match TRANSITION.read(row).and_then(Value::as_str) {
-            Some(ROSE) => Some(Stand::Applying),
-            Some(FELL) => Some(Stand::Recording),
-            _ => None,
-        })
+        .find_map(stand_of)
         .unwrap_or(Stand::Recording)
+}
+
+/// [`stand_from`] read off a ledger's text, parsing only the lines that
+/// carry a transition's key, newest first. An `auto` seat reads its standing
+/// on every turn it is asked about, and a full ledger is thousands of
+/// request rows around a transition or two: parsing every row cost 35.6 ms
+/// at the 8 MiB cap (4,720 routing rows of the second version, 2026-09-24,
+/// t-6346).
+#[must_use]
+pub fn stand_in(text: &str) -> Stand {
+    let keys: Vec<String> = TRANSITION
+        .spellings()
+        .map(|name| format!("\"{name}\""))
+        .collect();
+    text.lines()
+        .rev()
+        .filter(|line| keys.iter().any(|key| line.contains(key.as_str())))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|row| stand_of(&row))
+        .unwrap_or(Stand::Recording)
+}
+
+/// What one row says of a seat's standing: a rise, a fall, or nothing.
+fn stand_of(row: &Value) -> Option<Stand> {
+    match TRANSITION.read(row).and_then(Value::as_str) {
+        Some(ROSE) => Some(Stand::Applying),
+        Some(FELL) => Some(Stand::Recording),
+        _ => None,
+    }
 }
 
 /// The row a rise or a fall appends. `None` for a verdict that changed

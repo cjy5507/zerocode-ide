@@ -225,7 +225,8 @@ pub(super) fn is_long_running(tool_name: &str) -> bool {
 /// model order. Four `Agent` calls in one message ran one after another
 /// before, each waiting for the previous to finish ("병렬로 돌리지 않음",
 /// 2026-09-03).
-pub(super) fn is_fan_out_tool(tool_name: &str) -> bool {
+#[must_use]
+pub fn is_fan_out_tool(tool_name: &str) -> bool {
     matches!(tool_name, "Agent" | "Task" | "SpawnMultiAgent" | "Workflow")
 }
 

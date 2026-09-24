@@ -35,14 +35,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use api::{SystemOneCall, SystemOneClient, SystemOneConfig, SystemOneFailure, SYSTEMONE_MODEL};
 use zerocode_core::jev::door::Refused;
 use runtime::{
-    DecisionVerdict, ProbeAssessment, RubricAxis, SwitchTrigger,
-    DECISION_RUBRIC_VERSION,
+    DecisionVerdict, ProbeAssessment, RouteConfidence, RoutingFacts, RoutingReading, RubricAxis,
+    SwitchTrigger,
 };
 use serde::{Deserialize, Serialize};
+use zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION;
 
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::{remember_bounded, ProbeSlot, ProbeUse, PROBE_TIMEOUT};
-use super::settings::decision_shadow_mode_from;
+use super::settings::{decision_shadow_mode_from, DecisionShadowMode};
 use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
 use zerocode_core::jev::summary::{self as jev_ledger};
@@ -132,8 +133,34 @@ pub fn raised_here(cwd: &Path) -> bool {
 /// pin that would be racing every other test in this binary for it.
 #[must_use]
 pub fn raised_at(ledger: &Path) -> bool {
-    let rows = super::jev_summary::read_rows(ledger);
-    zerocode_core::jev::promote::stand_from(&rows) == zerocode_core::jev::promote::Stand::Applying
+    super::jev_summary::raised_in(ledger)
+}
+
+/// The routing seat's word under the working directory's settings (t-6346),
+/// read where a caller decides whether a judgment is worth reading anything
+/// for at all; `None` where the settings cannot be read.
+#[must_use]
+pub(super) fn mode_here() -> Option<DecisionShadowMode> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| decision_shadow_mode_from(&runtime::ConfigLoader::default_for(&cwd)))
+}
+
+/// Whether the routing seat asks anything here — every word but `off`; a
+/// settings file that cannot be read asks nothing.
+#[must_use]
+pub(super) fn asks_here() -> bool {
+    mode_here().is_some_and(DecisionShadowMode::asks)
+}
+
+/// Whether the seat's word lets its answer act here: a person's `on`, or an
+/// `auto` its own ledger raised — the ledger read only for `auto`.
+#[must_use]
+pub(super) fn acts_here(mode: DecisionShadowMode) -> bool {
+    match mode {
+        DecisionShadowMode::Auto => std::env::current_dir().is_ok_and(|cwd| raised_here(&cwd)),
+        other => other.applies(),
+    }
 }
 
 /// Where a project's decision shadow ledger lives.
@@ -197,8 +224,8 @@ pub async fn check_system_one() -> SystemOneCheck {
         key_source,
     };
     let client = config.map(SystemOneConfig::into_client);
-    let state = runtime::rubric_task_text("", KEY_CHECK_TASK);
-    let request = runtime::decision_request(SYSTEMONE_MODEL, &state);
+    let state = runtime::routing_state(&runtime::rubric_task_whole("", KEY_CHECK_TASK), RoutingFacts::default());
+    let request = runtime::routing_request(SYSTEMONE_MODEL, &state);
     let Some(body) = jev_gate::body_of(&request) else {
         return unsent(CheckFailure::Wire(SystemOneFailure::InvalidRequest));
     };
@@ -211,7 +238,7 @@ pub async fn check_system_one() -> SystemOneCheck {
         (passed, _) => return unsent(CheckFailure::Refused(passed.err().unwrap_or(Refused::NoKey))),
     };
     let outcome = call.outcome.map_err(CheckFailure::Wire).and_then(|response| {
-        runtime::validate_decision(&response)
+        runtime::validate_routing(&response)
             .map(|_| response.model)
             .map_err(|_| CheckFailure::Wire(SystemOneFailure::Schema))
     });
@@ -272,6 +299,11 @@ pub enum DecisionRouteUse {
     /// judgment an `applied` row already acted on. It routed nothing and its
     /// outcome is `OUTCOME_CONTROL`, not a judgment's.
     Control,
+    /// The judgment answered, and its own confidence put it under the seat's
+    /// abstain line: the chat probe was asked in its place, where its gate
+    /// admits the task, and the keyword tables stood elsewhere (t-6346,
+    /// [`zerocode_core::jev::ROUTE_USE_ABSTAINED`]).
+    Abstained,
 }
 
 /// One task of the decision judgment ledger.
@@ -339,6 +371,27 @@ pub struct DecisionShadowRow {
     /// The typed judgment, axis by axis, when it answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev: Option<BTreeMap<String, JudgedAxis>>,
+    /// The band the answer's own confidence put it in (`abstain`, `confirm`,
+    /// `act`, [`zerocode_core::jev::Band::word`]) — written on every answered
+    /// row, whatever the seat's mode, so a recording seat's rows say what
+    /// acting would have done (t-6346).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band: Option<String>,
+    /// Every answer of the judgment as it came — the Scores' positions and
+    /// spreads, the Choices' spreads, each fact's probability — for the
+    /// reader that will weigh them (t-6324 P7). Absent on a row asked under
+    /// the first version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading: Option<RoutingReading>,
+    /// The keyword tables' reading of the same words, axis by axis — today's
+    /// rule, the seat's baseline (t-6342) — so the facts that grade the
+    /// judgment grade the tables beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<BTreeMap<String, String>>,
+    /// Hangul's share of the task's letters, per thousand
+    /// ([`zerocode_core::jev::hangul_share_permille`]) — the language column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hangul_permille: Option<u16>,
 }
 
 impl DecisionShadowRow {
@@ -394,7 +447,7 @@ impl DecisionShadowRow {
             at: unix_millis(),
             attempt: attempt.map(str::to_string),
             task: format!("{task:016x}"),
-            rubric_version: DECISION_RUBRIC_VERSION,
+            rubric_version: ROUTING_RUBRIC_VERSION,
             model: None,
             outcome,
             elapsed_ms: 0,
@@ -410,7 +463,19 @@ impl DecisionShadowRow {
             loser_ms: None,
             probe,
             jev: None,
+            band: None,
+            reading: None,
+            rule: None,
+            hangul_permille: None,
         }
+    }
+
+    /// The row's columns that describe the task rather than the call — the
+    /// keyword tables' reading and the language share — copied from its shot.
+    fn about(mut self, shot: &Shot) -> Self {
+        self.rule = Some(shot.rule.clone());
+        self.hangul_permille = shot.hangul_permille;
+        self
     }
 }
 
@@ -445,18 +510,22 @@ pub(super) fn judged_axes(verdict: &DecisionVerdict) -> BTreeMap<String, JudgedA
 /// A task's judgment as this process remembers it. The key carries the rubric
 /// version and the requested model — the door's, pinned or not
 /// ([`jev_gate::model_key`]) — so a judgment made under other words or by
-/// another model is never recalled for this one.
+/// another model is never recalled for this one; and the facts the state
+/// carries beside the words (`RoutingFacts`), because the question reads
+/// them: a retry of a failed attempt with the same words is a different
+/// state, and the first attempt's answer is not its answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MemoKey {
     task: u64,
     rubric: u32,
     model: u64,
+    facts: RoutingFacts,
 }
 
 #[derive(Debug, Clone)]
 struct Remembered {
     model: String,
-    verdict: DecisionVerdict,
+    reading: RoutingReading,
     jev: BTreeMap<String, JudgedAxis>,
 }
 
@@ -465,27 +534,56 @@ fn memo() -> &'static Mutex<HashMap<MemoKey, Remembered>> {
     MEMO.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Jev's distribution confidence is not calibrated accuracy. Active mode
-/// therefore gives a validated verdict at most the conservative Medium fusion
-/// authority — risk cannot fall, complexity cannot fall, and complexity can
-/// rise by at most one band — and only when the verdict is more likely than
-/// not on every axis ([`runtime::ROUTE_TRUST_FLOOR`]); under that it is a
-/// guess the reader does not back, and the deterministic assessment stands.
-fn active_assessment(verdict: &DecisionVerdict) -> ProbeAssessment {
-    ProbeAssessment {
-        complexity: verdict.complexity.choice,
-        risk: verdict.risk.choice,
-        confidence: verdict.route_confidence(),
-        intent: verdict.intent.choice,
-    }
-}
+/// The probe cell of a task the chat probe was not asked about: its own gate
+/// declined the task, or the person's classifier word calls no probe — the
+/// judgment was asked all the same (t-6346). An explicit absence, like
+/// `not_run`, that no comparison reads.
+const PROBE_NOT_ASKED: &str = "not_asked";
 
 /// One task of a batch, owned: it outlives the caller's borrow. `state` is the
-/// whole task, which the door withholds from and cuts.
+/// whole task, which the door withholds from and cuts; `facts` are what code
+/// knows about it; `rule` and `hangul_permille` describe it for the row.
 struct Shot {
     task: u64,
     state: String,
+    facts: RoutingFacts,
+    rule: BTreeMap<String, String>,
+    hangul_permille: Option<u16>,
     probe: ProbeCell,
+}
+
+impl Shot {
+    fn of(description: &str, prompt: &str, facts: RoutingFacts, probe: ProbeCell) -> Self {
+        let state = runtime::rubric_task_whole(description, prompt);
+        Self {
+            task: super::probe_exec::task_fingerprint(description, prompt),
+            hangul_permille: zerocode_core::jev::hangul_share_permille(&state),
+            rule: todays_rule(description, prompt),
+            state,
+            facts,
+            probe,
+        }
+    }
+}
+
+/// The keyword tables' reading of a task's words on every judged axis — the
+/// routing seat's baseline, today's rule (t-6342) — in the tokens a probe
+/// cell and a judged axis carry, so a later fact grades all three on one
+/// spelling.
+pub(super) fn todays_rule(description: &str, prompt: &str) -> BTreeMap<String, String> {
+    let (complexity, risk, intent) = super::turn::todays_rule(description, prompt);
+    ProbeAssessment { complexity, risk, confidence: RouteConfidence::Low, intent }
+        .tokens()
+        .iter()
+        .filter(|(axis, _)| !axis.self_report)
+        .map(|(axis, token)| (axis.name.to_string(), (*token).to_string()))
+        .collect()
+}
+
+/// The fact the state carries for task `index` of a batch: the caller's,
+/// when it named one; none known otherwise.
+fn facts_at(facts: &[RoutingFacts], index: usize) -> RoutingFacts {
+    facts.get(index).copied().unwrap_or_default()
 }
 
 struct Judgment {
@@ -514,7 +612,14 @@ struct ControlShot {
     description: String,
     prompt: String,
     jev: BTreeMap<String, JudgedAxis>,
+    /// The keyword tables' reading, copied like the judgment: the control
+    /// row marks today's rule on the probe's answer too.
+    rule: Option<BTreeMap<String, String>>,
 }
+
+/// What a sampled task's control row copies from the row it was drawn
+/// from: the judgment, and the keyword tables' reading beside it.
+type SampledJudgment = (BTreeMap<String, JudgedAxis>, Option<BTreeMap<String, String>>);
 
 /// Everything one active batch's control sample carries off the calling
 /// thread. As with `ShadowBatch`, every path is resolved before it detaches.
@@ -549,11 +654,12 @@ fn is_blank_task(description: &str, prompt: &str) -> bool {
 /// working directory — where the settings and the ledger are — cannot be read.
 pub(super) fn fire(
     tasks: &[(&str, &str)],
+    facts: &[RoutingFacts],
     probed: &[Option<ProbeSlot>],
     attempt: &str,
     deadline: Duration,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if probed.iter().all(Option::is_none) {
+    if tasks.iter().all(|(description, prompt)| is_blank_task(description, prompt)) {
         return None;
     }
     if telemetry::attest_ablated(telemetry::HarnessFeature::DecisionShadow) {
@@ -561,17 +667,22 @@ pub(super) fn fire(
     }
     // A task the batch names twice is judged once: both calls would start
     // before either could be recalled, and the second only bills the same words.
-    let mut named = HashSet::with_capacity(probed.len());
+    // A task the probe was not asked about is judged all the same — the seat
+    // is asked about every task it can be (t-6346) — and its row says so.
+    let mut named = HashSet::with_capacity(tasks.len());
     let shots: Vec<Shot> = tasks
         .iter()
-        .zip(probed)
-        .filter_map(|((description, prompt), slot)| {
-            let slot = slot.as_ref().filter(|slot| named.insert(slot.fingerprint))?;
-            Some(Shot {
-                task: slot.fingerprint,
-                state: runtime::rubric_task_whole(description, prompt),
-                probe: ProbeCell::from_verdict(slot.verdict),
-            })
+        .enumerate()
+        .filter_map(|(index, (description, prompt))| {
+            if is_blank_task(description, prompt) {
+                return None;
+            }
+            let probe = match probed.get(index).copied().flatten() {
+                Some(slot) => ProbeCell::from_verdict(slot.verdict),
+                None => ProbeCell::Failed(PROBE_NOT_ASKED.to_string()),
+            };
+            let shot = Shot::of(description, prompt, facts_at(facts, index), probe);
+            named.insert(shot.task).then_some(shot)
         })
         .collect();
     let Ok(cwd) = std::env::current_dir() else {
@@ -606,6 +717,7 @@ pub(super) fn fire(
 /// ([`fire_control`]).
 pub(super) fn active_assessments(
     tasks: &[(&str, &str)],
+    facts: &[RoutingFacts],
     attempt: &str,
     deadline: Duration,
 ) -> Option<Active> {
@@ -628,16 +740,18 @@ pub(super) fn active_assessments(
     let mut named = HashSet::with_capacity(tasks.len());
     let shots: Vec<Shot> = tasks
         .iter()
-        .filter_map(|(description, prompt)| {
+        .enumerate()
+        .filter_map(|(index, (description, prompt))| {
             if is_blank_task(description, prompt) {
                 return None;
             }
-            let task = super::probe_exec::task_fingerprint(description, prompt);
-            named.insert(task).then(|| Shot {
-                task,
-                state: runtime::rubric_task_whole(description, prompt),
-                probe: ProbeCell::Failed(PROBE_NOT_RUN.to_string()),
-            })
+            let shot = Shot::of(
+                description,
+                prompt,
+                facts_at(facts, index),
+                ProbeCell::Failed(PROBE_NOT_RUN.to_string()),
+            );
+            named.insert(shot.task).then_some(shot)
         })
         .collect();
     if shots.is_empty() {
@@ -660,14 +774,17 @@ pub(super) fn active_assessments(
     // The sample is drawn from what was judged, not from what was asked: a
     // control row compares the probe with a judgment, and a task the judgment
     // failed on has nothing for it to stand beside.
-    let mut sampled: HashMap<u64, BTreeMap<String, JudgedAxis>> = HashMap::new();
+    let mut sampled: HashMap<u64, SampledJudgment> = HashMap::new();
     let rows: Vec<DecisionShadowRow> = judgments
         .into_iter()
         .map(|judgment| {
             by_task.insert(judgment.task, judgment.assessment);
-            if control_sampled(judgment.task) {
+            // Drawn from what acted: a control row measures how many routes
+            // applying the judgment moved, and an abstained answer moved none
+            // — the probe already ran for it, on the routing road.
+            if control_sampled(judgment.task) && judgment.row.route_use == DecisionRouteUse::Applied {
                 if let Some(jev) = judgment.row.jev.clone() {
-                    sampled.insert(judgment.task, jev);
+                    sampled.insert(judgment.task, (jev, judgment.row.rule.clone()));
                 }
             }
             judgment.row
@@ -690,12 +807,13 @@ pub(super) fn active_assessments(
         .iter()
         .filter_map(|(description, prompt)| {
             let task = super::probe_exec::task_fingerprint(description, prompt);
-            let jev = sampled.remove(&task)?;
+            let (jev, rule) = sampled.remove(&task)?;
             Some(ControlShot {
                 task,
                 description: (*description).to_string(),
                 prompt: (*prompt).to_string(),
                 jev,
+                rule,
             })
         })
         .collect();
@@ -725,9 +843,11 @@ async fn run_shadow_batch(batch: ShadowBatch) {
         }
         return;
     };
-    // Record-only modes judge here; `off` asks nothing, and `on` is the active
-    // path's, so a mode that turned `on` since the funnel looked is declined.
-    let Some(door) = door.filter(|_| !mode.applies()) else {
+    // Every mode that asks records here: the funnel sends a batch this way
+    // when the seat only records, and when it acts but nothing this time
+    // reads the verdict (t-6346) — a verdict nobody reads is not worth
+    // holding the request for. `off` asks nothing.
+    let Some(door) = door else {
         for _ in &shots {
             telemetry::attest_declined(telemetry::HarnessFeature::DecisionShadow, mode.key());
         }
@@ -795,6 +915,7 @@ async fn run_control_batch(
                 DecisionRouteUse::Control,
             );
             row.jev = Some(shot.jev);
+            row.rule = shot.rule;
             Some(row)
         })
         .collect();
@@ -846,10 +967,38 @@ pub struct RouteLabelRow {
     pub attempt: String,
     /// [`ROUTE_STOOD`], or the door the wire left through
     /// (`SwitchTrigger::as_str`): `quota`, `refusal`, `starvation`, `person`.
+    /// What became of the route — kept beside the mark, no longer the mark:
+    /// it said yes ten times in ten (t-6324 §3).
     pub followed: String,
-    /// The mark the judge counts: the route stood.
-    pub agreed: bool,
+    /// The judgment the mark grades: the turn's own, by the fingerprint of
+    /// the words it was asked about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// What the turn did (`route_label::turn_work`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<super::route_label::TurnWork>,
+    /// The level that work reads as (`route_label::observed_level`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<String>,
+    /// The mark the judge counts: the router, reading the level the
+    /// judgment answered, would have picked the tier the work turned out to
+    /// need (`route_label::same_tier`, t-6346).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agreed: Option<bool>,
+    /// The keyword tables' mark on the same facts
+    /// ([`zerocode_core::jev::summary::BASELINE_AGREED`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_agreed: Option<bool>,
+    /// Why the label compares nothing
+    /// ([`zerocode_core::jev::summary::NOT_COMPARED`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_compared: Option<String>,
 }
+
+/// The word a label writes when the turn's own words met no answered
+/// judgment — a refusal, a failure, or a turn whose words the host changed
+/// before it ran.
+const UNANSWERED: &str = "unanswered";
 
 /// Whether a model switch says the route the judgment took part in did not
 /// stand: the model it routed to could not serve ([`SwitchTrigger::forced`]
@@ -862,15 +1011,23 @@ pub fn route_unseated_by(trigger: SwitchTrigger) -> bool {
     trigger.forced() || trigger == SwitchTrigger::Person
 }
 
-/// Write the routing seat's `agreed` mark for the turn `attempt` names: the
-/// route stood, or `unseated` moved the wire off it first.
+/// Write the routing seat's label for the turn `attempt` names (t-5806,
+/// t-6346): what became of its route (`followed`), and — when the turn's own
+/// words met an answered judgment — whether the level that judgment answered
+/// routes to the tier what the turn's messages say it did needed, beside the
+/// same mark for the keyword tables.
 ///
 /// Nothing is written when the ledger's tail holds no judgment of that
 /// attempt — a turn the seat was never asked about is not one it agreed or
-/// disagreed with — and nothing is written twice: a label already standing
-/// for the attempt is left as it is. Answers whether a row was written.
+/// disagreed with — and nothing is written twice. Answers whether a row was
+/// written.
 #[must_use]
-pub fn note_route_followed(cwd: &Path, attempt: &str, unseated: Option<SwitchTrigger>) -> bool {
+pub fn note_route_followed(
+    cwd: &Path,
+    attempt: &str,
+    unseated: Option<SwitchTrigger>,
+    turn: Option<&[runtime::ConversationMessage]>,
+) -> bool {
     let attempt = attempt.trim();
     if attempt.is_empty() {
         return false;
@@ -886,14 +1043,68 @@ pub fn note_route_followed(cwd: &Path, attempt: &str, unseated: Option<SwitchTri
     if !judged || labeled {
         return false;
     }
-    let row = RouteLabelRow {
+    let mut row = RouteLabelRow {
         at: u64::try_from(now_ms()).unwrap_or_default(),
         label: attempt.to_string(),
         attempt: attempt.to_string(),
         followed: unseated.map_or(ROUTE_STOOD, SwitchTrigger::as_str).to_string(),
-        agreed: unseated.is_none(),
+        task: None,
+        work: None,
+        observed: None,
+        agreed: None,
+        baseline_agreed: None,
+        not_compared: Some(UNANSWERED.to_string()),
     };
+    if let Some(turn) = turn {
+        grade(&mut row, turn, tail.iter().filter(|row| of_attempt(row)));
+    }
     append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok()
+}
+
+/// Grade `label` on what `turn` did: the turn's own judgment — the answered
+/// row among `rows` asked about the turn's first words — against the level
+/// its work reads as, and the keyword tables' reading on that row against
+/// the same level.
+fn grade<'a>(
+    label: &mut RouteLabelRow,
+    turn: &[runtime::ConversationMessage],
+    rows: impl Iterator<Item = &'a serde_json::Value>,
+) {
+    let work = super::route_label::turn_work(turn);
+    let observed = super::route_label::observed_level(&work);
+    label.work = Some(work);
+    label.observed = Some(observed.as_label().to_string());
+    let Some(words) = first_words(turn) else {
+        return;
+    };
+    let task = format!("{:016x}", super::probe_exec::task_fingerprint("", words));
+    let answered = rows
+        .filter_map(|row| serde_json::from_value::<DecisionShadowRow>(row.clone()).ok())
+        .find(|row| row.task == task && row.answered() && row.jev.is_some());
+    label.task = Some(task);
+    let Some(answered) = answered else {
+        return;
+    };
+    let level = |token: Option<&str>| token.and_then(runtime::RouteTaskComplexity::from_label);
+    let axis = runtime::COMPLEXITY_AXIS.name;
+    let said = level(answered.jev.as_ref().and_then(|jev| jev.get(axis)).map(|judged| judged.choice.as_str()));
+    let rule = level(answered.rule.as_ref().and_then(|rule| rule.get(axis)).map(String::as_str));
+    label.agreed = said.and_then(|said| super::route_label::same_tier(said, observed));
+    label.baseline_agreed = rule.and_then(|rule| super::route_label::same_tier(rule, observed));
+    label.not_compared = label.agreed.is_none().then(|| UNANSWERED.to_string());
+}
+
+/// The words a turn was asked about: its person's first message, as the
+/// host handed it to the routing readers.
+fn first_words(turn: &[runtime::ConversationMessage]) -> Option<&str> {
+    turn.iter()
+        .find(|message| message.role == runtime::MessageRole::User)?
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            runtime::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
 }
 
 /// The routing row's attempt column, as the row spells it.
@@ -995,6 +1206,7 @@ pub use zerocode_core::jev::promote::Judged;
 /// 2026-09-20). `None` for a ledger of a seat that never rises.
 #[must_use]
 pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Value>) -> Option<Judged> {
+    let rows = &on_this_rubric(rows)[..];
     let floor = ROUTING.answer_floor_permille?;
     let agreement_floor = ROUTING.agreement_floor_permille?;
     let deadline_ms = ROUTING.apply_deadline_ms?;
@@ -1040,6 +1252,37 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
     })
 }
 
+/// The routing ledger's rows asked under the words the seat asks now, and
+/// what grades them (t-6346): a request or a control row of another rubric
+/// version is left out — its answer meant something else — and a label that
+/// grades only such a turn goes with it. A transition stays: where the seat
+/// stands is the whole ledger's ([`promote::stand_from`]).
+fn on_this_rubric(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let version = |row: &serde_json::Value| row.get(RUBRIC_VERSION).and_then(serde_json::Value::as_u64);
+    let current = |row: &serde_json::Value| version(row).is_none_or(|version| version == u64::from(ROUTING_RUBRIC_VERSION));
+    let attempts: HashSet<&str> = rows
+        .iter()
+        .filter(|row| version(row).is_some() && current(row))
+        .filter_map(|row| row.get(ATTEMPT).and_then(serde_json::Value::as_str))
+        .collect();
+    rows.iter()
+        .filter(|row| {
+            if version(row).is_some() {
+                return current(row);
+            }
+            jev_ledger::LABEL.read(row).is_none()
+                || row
+                    .get(ATTEMPT)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|attempt| attempts.contains(attempt))
+        })
+        .cloned()
+        .collect()
+}
+
+/// The key a routing row's rubric version is written under.
+const RUBRIC_VERSION: &str = "rubricVersion";
+
 /// The window's rows and, after them, every row joined to them for the
 /// agreement — the control row of a task the window holds, and the turn
 /// label of an attempt it holds ([`RouteLabelRow`]) — with how many control
@@ -1072,7 +1315,7 @@ fn with_control_rows<'a>(
             }
             continue;
         }
-        let is_label = jev_ledger::LABEL.read(row).is_some() && jev_ledger::AGREED.read(row).is_some();
+        let is_label = jev_ledger::LABEL.read(row).is_some();
         if is_label
             && row
                 .get(ATTEMPT)
@@ -1103,6 +1346,14 @@ pub fn agreement_in(rows: &[&serde_json::Value]) -> promote::Agreement {
         if let Some(agreed) = jev_ledger::AGREED.read(row).and_then(serde_json::Value::as_bool) {
             agreement.compared += 1;
             agreement.agreed += usize::from(agreed);
+            if let Some(baseline) = jev_ledger::BASELINE_AGREED.read(row).and_then(serde_json::Value::as_bool) {
+                agreement.baseline_compared += 1;
+                agreement.baseline_agreed += usize::from(baseline);
+            }
+            continue;
+        }
+        if jev_ledger::NOT_COMPARED.read(row).is_some() {
+            agreement.not_compared += 1;
             continue;
         }
         let Ok(row) = serde_json::from_value::<DecisionShadowRow>((*row).clone()) else {
@@ -1117,6 +1368,12 @@ pub fn agreement_in(rows: &[&serde_json::Value]) -> promote::Agreement {
             };
             agreement.compared += 1;
             agreement.agreed += usize::from(judged.choice == probe);
+            // Today's rule on the same answer of the probe's, where the row
+            // carries the tables' reading (every second-version row does).
+            if let Some(rule) = row.rule.as_ref().and_then(|rule| rule.get(axis.name)) {
+                agreement.baseline_compared += 1;
+                agreement.baseline_agreed += usize::from(rule == probe);
+            }
         }
     }
     agreement
@@ -1155,6 +1412,12 @@ pub(super) fn now_ms() -> i64 {
 
 /// One task's row and reusable typed assessment: recalled from the memo,
 /// refused at the door, or asked and checked.
+///
+/// `active` is the road: on the acting one an answer routes by its band —
+/// `Applied` when it acts or confirms, `Abstained` when it falls under the
+/// abstain line and the chat probe is asked in its place — and a failure
+/// is `Fallback`; on the recording one every row is `RecordOnly`, and its
+/// band says what acting would have done.
 async fn judge(
     door: &JevDoor,
     client: Option<&SystemOneClient>,
@@ -1163,30 +1426,29 @@ async fn judge(
     deadline: Duration,
     active: bool,
 ) -> Judgment {
-    let key = MemoKey { task: shot.task, rubric: DECISION_RUBRIC_VERSION, model: door.model_key() };
+    let key = MemoKey {
+        task: shot.task,
+        rubric: ROUTING_RUBRIC_VERSION,
+        model: door.model_key(),
+        facts: shot.facts,
+    };
     let recalled = memo().lock().ok().and_then(|memo| memo.get(&key).cloned());
     if let Some(remembered) = recalled {
         telemetry::attest_fired(telemetry::HarnessFeature::DecisionShadow);
-        let assessment = active.then(|| active_assessment(&remembered.verdict));
-        let route_use = if active { DecisionRouteUse::Applied } else { DecisionRouteUse::RecordOnly };
-        let mut row = DecisionShadowRow::new(
-            shot.task,
-            shot.probe,
-            attempt,
-            OUTCOME_ANSWERED.to_string(),
-            route_use,
-        );
+        let (route_use, assessment) = routed(&remembered.reading, active);
+        let mut row =
+            answered_row(&shot, attempt, route_use, remembered.model, remembered.jev, remembered.reading);
         row.cached = true;
-        row.model = Some(remembered.model);
-        row.jev = Some(remembered.jev);
         return Judgment { task: shot.task, row, assessment };
     }
     let not_applied = if active { DecisionRouteUse::Fallback } else { DecisionRouteUse::RecordOnly };
-    let request = runtime::decision_request(SYSTEMONE_MODEL, &shot.state);
+    let state = runtime::routing_state(&shot.state, shot.facts);
+    let request = runtime::routing_request(SYSTEMONE_MODEL, &state);
     let Some(body) = jev_gate::body_of(&request) else {
         let failure = SystemOneFailure::InvalidRequest;
         telemetry::attest_failed(telemetry::HarnessFeature::DecisionShadow, failure.token());
-        let row = DecisionShadowRow::new(shot.task, shot.probe, attempt, failure.ledger_token(), not_applied);
+        let row = DecisionShadowRow::new(shot.task, shot.probe.clone(), attempt, failure.ledger_token(), not_applied)
+            .about(&shot);
         return Judgment { task: shot.task, row, assessment: None };
     };
     let (cleared, client) = match (door.pass(&ROUTING, client.is_some(), body), client) {
@@ -1195,7 +1457,8 @@ async fn judge(
         (passed, _) => {
             let refused = passed.err().unwrap_or(Refused::NoKey);
             telemetry::attest_declined(telemetry::HarnessFeature::DecisionShadow, refused.token());
-            let row = DecisionShadowRow::new(shot.task, shot.probe, attempt, refused.token().to_string(), not_applied);
+            let row = DecisionShadowRow::new(shot.task, shot.probe.clone(), attempt, refused.token().to_string(), not_applied)
+                .about(&shot);
             return Judgment { task: shot.task, row, assessment: None };
         }
     };
@@ -1207,16 +1470,16 @@ async fn judge(
     // cost than the answer does.
     let judged = match &call.outcome {
         Err(failure) => Err((*failure, None)),
-        Ok(response) => match runtime::validate_decision(response) {
-            Ok(verdict) => {
-                let jev = judged_axes(&verdict);
-                Ok((response, verdict, jev))
+        Ok(response) => match runtime::validate_routing(response) {
+            Ok(reading) => {
+                let jev = judged_axes(&reading.verdict());
+                Ok((response, reading, jev))
             }
             Err(_) => Err((SystemOneFailure::Schema, Some(response))),
         },
     };
     let (mut row, assessment) = match judged {
-        Ok((response, verdict, jev)) => {
+        Ok((response, reading, jev)) => {
             telemetry::attest_fired(telemetry::HarnessFeature::DecisionShadow);
             if let Ok(mut memo) = memo().lock() {
                 remember_bounded(
@@ -1225,35 +1488,27 @@ async fn judge(
                         key,
                         Remembered {
                             model: response.model.clone(),
-                            verdict: verdict.clone(),
+                            reading: reading.clone(),
                             jev: jev.clone(),
                         },
                     )],
                 );
             }
-            let assessment = active.then(|| active_assessment(&verdict));
-            let route_use = if active { DecisionRouteUse::Applied } else { DecisionRouteUse::RecordOnly };
-            let mut row = DecisionShadowRow::new(
-                shot.task,
-                shot.probe,
-                attempt,
-                OUTCOME_ANSWERED.to_string(),
-                route_use,
-            );
-            row.model = Some(response.model.clone());
+            let (route_use, assessment) = routed(&reading, active);
+            let mut row = answered_row(&shot, attempt, route_use, response.model.clone(), jev, reading);
             row.input_tokens = Some(response.usage.input_tokens);
-            row.jev = Some(jev);
             (row, assessment)
         }
         Err((failure, response)) => {
             telemetry::attest_failed(telemetry::HarnessFeature::DecisionShadow, failure.token());
             let mut row = DecisionShadowRow::new(
                 shot.task,
-                shot.probe,
+                shot.probe.clone(),
                 attempt,
                 failure.ledger_token(),
                 not_applied,
-            );
+            )
+            .about(&shot);
             // A response that arrived and failed its checks still billed.
             if let Some(response) = response {
                 row.model = Some(response.model.clone());
@@ -1264,4 +1519,40 @@ async fn judge(
     };
     row.spent(&call, hedge, withheld);
     Judgment { task: shot.task, row, assessment }
+}
+
+/// An answered row: the model that answered, the judgment's axes in the
+/// router's words, the band its own confidence put it in and every answer
+/// beside them — one shape for an answer fresh from the wire and one
+/// recalled from the memo.
+fn answered_row(
+    shot: &Shot,
+    attempt: Option<&str>,
+    route_use: DecisionRouteUse,
+    model: String,
+    jev: BTreeMap<String, JudgedAxis>,
+    reading: RoutingReading,
+) -> DecisionShadowRow {
+    let mut row =
+        DecisionShadowRow::new(shot.task, shot.probe.clone(), attempt, OUTCOME_ANSWERED.to_string(), route_use)
+            .about(shot);
+    row.model = Some(model);
+    row.jev = Some(jev);
+    row.band = Some(reading.band().word().to_string());
+    row.reading = Some(reading);
+    row
+}
+
+/// How an answered judgment takes part in routing on its road: on the
+/// acting road it routes by its band — the assessment when it acts or
+/// confirms, none when it abstains (the caller asks the chat probe in its
+/// place); on the recording road it routes nothing.
+fn routed(reading: &RoutingReading, active: bool) -> (DecisionRouteUse, Option<ProbeAssessment>) {
+    if !active {
+        return (DecisionRouteUse::RecordOnly, None);
+    }
+    match reading.assessment() {
+        Some(assessment) => (DecisionRouteUse::Applied, Some(assessment)),
+        None => (DecisionRouteUse::Abstained, None),
+    }
 }

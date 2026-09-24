@@ -99,14 +99,22 @@ pub fn tokenize(text: &str) -> BTreeSet<String> {
 /// entire word into one token that never overlaps a query phrased even
 /// slightly differently.
 fn is_cjk(ch: char) -> bool {
+    is_hangul(ch)
+        || matches!(u32::from(ch),
+            0x4E00..=0x9FFF      // CJK Unified Ideographs
+            | 0x3400..=0x4DBF    // CJK Unified Ideographs Extension A
+            | 0x3040..=0x309F    // Hiragana
+            | 0x30A0..=0x30FF) // Katakana
+}
+
+/// Whether a character is Hangul — a syllable, a Jamo, or a compatibility
+/// Jamo. One table for the tokenizer above and the Jev rows' language
+/// column (`crate::jev::hangul_share_permille`).
+pub(crate) fn is_hangul(ch: char) -> bool {
     matches!(u32::from(ch),
         0xAC00..=0xD7A3      // Hangul syllables
         | 0x1100..=0x11FF    // Hangul Jamo
-        | 0x3130..=0x318F    // Hangul Compatibility Jamo
-        | 0x4E00..=0x9FFF    // CJK Unified Ideographs
-        | 0x3400..=0x4DBF    // CJK Unified Ideographs Extension A
-        | 0x3040..=0x309F    // Hiragana
-        | 0x30A0..=0x30FF) // Katakana
+        | 0x3130..=0x318F) // Hangul Compatibility Jamo
 }
 
 fn flush_ascii_run(run: &mut String, tokens: &mut BTreeSet<String>) {

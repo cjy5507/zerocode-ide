@@ -50,7 +50,9 @@ pub use agent_route::{
 };
 pub use completion::{completion_ceiling_for, completion_loop_step, CompletionStep};
 pub use decision::{
-    axis_metrics, decision_questions, decision_request, judged_axes, validate_decision,
+    axis_metrics, decision_questions, decision_request, judged_axes, routing_questions, routing_request,
+    routing_state, validate_decision, validate_routing, LevelReading, OptionReading, RoutingFacts,
+    RoutingReading,
     AxisMetrics, AxisReading, AxisSample, DecisionAnswer, DecisionRejection, DecisionVerdict, ROUTE_TRUST_FLOOR,
     CALIBRATION_BINS, PROBABILITY_SUM_TOLERANCE,
 };
@@ -66,7 +68,7 @@ pub use outcome::{
     OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STOPPED,
 };
 pub use policy::{
-    deep_tier_model_matches, default_deep_tier_models, dynamic_deep_tier_models,
+    deep_tier_model_matches, default_deep_tier_models, default_difficulty_tier, dynamic_deep_tier_models,
     escalate_complexity, exploration_slot_for_route,
     implementation_escalation_allowed, implementation_route_model_allowed, is_deep_tier_model, is_reserved_orchestrator_model,
     recommended_effort_for,

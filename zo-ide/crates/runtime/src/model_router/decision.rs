@@ -23,10 +23,21 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use api::{SystemOneQuestion, SystemOneQuestionKind, SystemOneRequest, SystemOneResponse};
+use serde::{Deserialize, Serialize};
+use zerocode_core::jev::noul::{self, NoulRefusal};
+use zerocode_core::jev::questions::{
+    fold_intent, Contrast, ROUTER_INTENT_OTHER, ROUTING_COMPLEXITY_ID, ROUTING_COMPLEXITY_LEVELS,
+    ROUTING_COMPLEXITY_QUESTION, ROUTING_FACTS, ROUTING_FACT_RETRY, ROUTING_INTENTS, ROUTING_INTENT_ID,
+    ROUTING_INTENT_QUESTION, ROUTING_REASONING, ROUTING_REASONING_ID, ROUTING_REASONING_QUESTION,
+    ROUTING_RISK_ID, ROUTING_RISK_LEVELS, ROUTING_RISK_QUESTION, ROUTING_STATE_FACTS, ROUTING_STATE_TASK,
+};
+use zerocode_core::jev::{Band, ROUTING};
 
 use super::outcome::rate;
 use super::policy::{RouteConfidence, RouteTaskComplexity, RouteTaskRisk};
-use super::probe::{RouteTaskIntent, RubricAxis, COMPLEXITY_AXIS, INTENT_AXIS, RISK_AXIS, ROUTING_RUBRIC};
+use super::probe::{
+    ProbeAssessment, RouteTaskIntent, RubricAxis, COMPLEXITY_AXIS, INTENT_AXIS, RISK_AXIS, ROUTING_RUBRIC,
+};
 
 /// How far a choice answer's probabilities may sum from one: rounding in
 /// transit, not a second distribution.
@@ -168,6 +179,12 @@ pub enum DecisionRejection {
     ProbabilitySum(&'static str),
     /// `confidence` outside `[0, 1]`.
     ConfidenceRange(&'static str),
+    /// An asked Score has an answer that is not score-shaped.
+    NotAScore(&'static str),
+    /// A score's position is not on its own levels.
+    ScoreOutsideLevels(&'static str),
+    /// A fact's answer is not a Noul in `[0, 1]`, by the Noul's own rule.
+    Noul(&'static str, NoulRefusal),
 }
 
 /// Check a response against the questions [`decision_questions`] asked and
@@ -218,6 +235,321 @@ fn read_answer<T>(
         return Err(DecisionRejection::ConfidenceRange(name));
     }
     Ok(DecisionAnswer { choice, position, probabilities, confidence: answer.confidence })
+}
+
+// ---- the routing seat's second version (t-6346) ---------------------------
+//
+// Version 1 asked the probe's rubric as three Choices (above, and still what
+// the step governor asks). The routing seat now asks the core catalog's
+// questions (`zerocode_core::jev::questions`) — two Scores, two contrastive
+// Choices and the facts — in one request, and code turns the answers into
+// the router's words and the authority they route with. Nothing here asks a
+// model what to route to: every question is a fact about the task.
+
+/// The routing seat's questions, built once from the core catalog: every
+/// call asks the same words, and those words are the catalog's alone.
+#[must_use]
+pub fn routing_questions() -> &'static BTreeMap<String, SystemOneQuestion> {
+    static QUESTIONS: OnceLock<BTreeMap<String, SystemOneQuestion>> = OnceLock::new();
+    QUESTIONS.get_or_init(|| {
+        let contrasted = |question: &str, options: &mut dyn Iterator<Item = &'static Contrast>| {
+            SystemOneQuestion::contrastive_choice(
+                question,
+                options.map(|option| (option.word, option.what, option.not_for, option.examples)),
+            )
+        };
+        let mut asked = BTreeMap::from([
+            (
+                ROUTING_COMPLEXITY_ID.to_string(),
+                SystemOneQuestion::score(ROUTING_COMPLEXITY_QUESTION, ROUTING_COMPLEXITY_LEVELS),
+            ),
+            (ROUTING_RISK_ID.to_string(), SystemOneQuestion::score(ROUTING_RISK_QUESTION, ROUTING_RISK_LEVELS)),
+            (
+                ROUTING_INTENT_ID.to_string(),
+                contrasted(ROUTING_INTENT_QUESTION, &mut ROUTING_INTENTS.iter().map(|intent| &intent.option)),
+            ),
+            (
+                ROUTING_REASONING_ID.to_string(),
+                contrasted(ROUTING_REASONING_QUESTION, &mut ROUTING_REASONING.iter()),
+            ),
+        ]);
+        asked.extend(ROUTING_FACTS.iter().map(|fact| {
+            (fact.id.to_string(), SystemOneQuestion::noul(fact.instructions, fact.yes, fact.no))
+        }));
+        asked
+    })
+}
+
+/// What code knows about a task beside its words — the facts the state
+/// carries and a question reads by path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RoutingFacts {
+    /// An earlier attempt at this same task already failed (a spawn's
+    /// `prior_failures`). A person's turn is never marked: nothing says which
+    /// earlier turn it retries.
+    pub retry_of_failed_attempt: bool,
+}
+
+/// The routing seat's state for one task: the task as it stands — the door
+/// withholds and cuts it by its own pointer — and the facts, under the
+/// catalog's keys.
+#[must_use]
+pub fn routing_state(task: &str, facts: RoutingFacts) -> serde_json::Value {
+    serde_json::json!({
+        ROUTING_STATE_TASK: task,
+        ROUTING_STATE_FACTS: { ROUTING_FACT_RETRY: facts.retry_of_failed_attempt },
+    })
+}
+
+/// The routing seat's request for one task's state.
+#[must_use]
+pub fn routing_request<'a>(model: &'a str, state: &'a serde_json::Value) -> SystemOneRequest<'a, serde_json::Value> {
+    SystemOneRequest { state, model, questions: routing_questions() }
+}
+
+/// A Score answer read along its levels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LevelReading {
+    /// The position along the levels, which can fall between two.
+    pub score: f64,
+    /// The level the position rounds to — the one a route reads (the vendor's
+    /// guide rounds a score; no line fitted to one version sits here).
+    pub level: usize,
+    /// Every level's probability, the low end first.
+    pub probabilities: Vec<f64>,
+    pub confidence: f64,
+}
+
+/// A Choice answer read on the options it was offered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OptionReading {
+    pub chosen: String,
+    /// Every offered option's probability, by option.
+    pub probabilities: BTreeMap<String, f64>,
+    pub confidence: f64,
+}
+
+/// Every answer of one routing judgment as it came — what the ledger keeps
+/// for a later reader to weigh (t-6324 P7), and what code reads the route
+/// from ([`Self::verdict`], [`Self::assessment`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutingReading {
+    pub complexity: LevelReading,
+    pub risk: LevelReading,
+    pub intent: OptionReading,
+    pub reasoning: OptionReading,
+    /// Each fact's probability of yes, by the catalog's id.
+    pub facts: BTreeMap<String, f64>,
+}
+
+/// Check a response against the questions [`routing_questions`] asked, and
+/// read every answer. An answer that breaks any rule is discarded whole.
+///
+/// # Errors
+/// The first rule the answer breaks, in the catalog's order.
+pub fn validate_routing(response: &SystemOneResponse) -> Result<RoutingReading, DecisionRejection> {
+    let answers = serde_json::Value::Object(response.answers.clone().into_iter().collect());
+    let intents: Vec<&'static str> = ROUTING_INTENTS.iter().map(|intent| intent.option.word).collect();
+    let kinds: Vec<&'static str> = ROUTING_REASONING.iter().map(|kind| kind.word).collect();
+    Ok(RoutingReading {
+        complexity: read_level(response, ROUTING_COMPLEXITY_ID, ROUTING_COMPLEXITY_LEVELS.len())?,
+        risk: read_level(response, ROUTING_RISK_ID, ROUTING_RISK_LEVELS.len())?,
+        intent: read_option(response, ROUTING_INTENT_ID, &intents)?,
+        reasoning: read_option(response, ROUTING_REASONING_ID, &kinds)?,
+        facts: ROUTING_FACTS
+            .iter()
+            .map(|fact| {
+                noul::read(&answers, fact.id)
+                    .map(|yes| (fact.id.to_string(), yes))
+                    .map_err(|refusal| DecisionRejection::Noul(fact.id, refusal))
+            })
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+/// One Score answer, checked against the `levels` it was offered.
+fn read_level(response: &SystemOneResponse, id: &'static str, levels: usize) -> Result<LevelReading, DecisionRejection> {
+    let answer = response
+        .score_answer(id)
+        .ok_or(DecisionRejection::MissingAnswer(id))?
+        .ok()
+        .filter(|answer| answer.kind == SystemOneQuestionKind::Score)
+        .ok_or(DecisionRejection::NotAScore(id))?;
+    if answer.probabilities.len() != levels {
+        return Err(DecisionRejection::ProbabilityKeys(id));
+    }
+    let probabilities = (0..levels)
+        .map(|level| answer.probabilities.get(&level.to_string()).copied().ok_or(DecisionRejection::ProbabilityKeys(id)))
+        .collect::<Result<Vec<f64>, _>>()?;
+    check_distribution(id, &probabilities, answer.confidence)?;
+    #[allow(clippy::cast_precision_loss)]
+    let last = (levels - 1) as f64;
+    if !(0.0..=last).contains(&answer.score) {
+        return Err(DecisionRejection::ScoreOutsideLevels(id));
+    }
+    // In `0.0..=last` after the check above, so the cast neither truncates a
+    // meaningful part nor loses a sign.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let level = answer.score.round() as usize;
+    Ok(LevelReading { score: answer.score, level, probabilities, confidence: answer.confidence })
+}
+
+/// One Choice answer, checked against the `options` it was offered.
+fn read_option(
+    response: &SystemOneResponse,
+    id: &'static str,
+    options: &[&'static str],
+) -> Result<OptionReading, DecisionRejection> {
+    let answer = response
+        .choice_answer(id)
+        .ok_or(DecisionRejection::MissingAnswer(id))?
+        .ok()
+        .filter(|answer| answer.kind == SystemOneQuestionKind::Choice)
+        .ok_or(DecisionRejection::NotAChoice(id))?;
+    if !options.contains(&answer.choice.as_str()) {
+        return Err(DecisionRejection::ChoiceOutsideCriteria(id));
+    }
+    if answer.probabilities.len() != options.len()
+        || !options.iter().all(|option| answer.probabilities.contains_key(*option))
+    {
+        return Err(DecisionRejection::ProbabilityKeys(id));
+    }
+    let shares: Vec<f64> = answer.probabilities.values().copied().collect();
+    check_distribution(id, &shares, answer.confidence)?;
+    Ok(OptionReading { chosen: answer.choice, probabilities: answer.probabilities, confidence: answer.confidence })
+}
+
+/// A distribution's rules, one place for both primitives: every share in
+/// `[0, 1]`, the sum one within the wire's rounding (the core's tolerance for
+/// that many options), and the confidence in `[0, 1]`.
+fn check_distribution(id: &'static str, shares: &[f64], confidence: f64) -> Result<(), DecisionRejection> {
+    if !shares.iter().all(|share| (0.0..=1.0).contains(share)) {
+        return Err(DecisionRejection::ProbabilityRange(id));
+    }
+    let tolerance = zerocode_core::jev::choice::probability_sum_tolerance(shares.len());
+    if (shares.iter().sum::<f64>() - 1.0).abs() > tolerance {
+        return Err(DecisionRejection::ProbabilitySum(id));
+    }
+    if !(0.0..=1.0).contains(&confidence) {
+        return Err(DecisionRejection::ConfidenceRange(id));
+    }
+    Ok(())
+}
+
+impl RoutingReading {
+    /// The judgment in the router's words, as answered: complexity and risk
+    /// at the level each rounds to, the intent folded into the router's four
+    /// with its probabilities. What a ledger lays beside the probe's answer.
+    #[must_use]
+    pub fn verdict(&self) -> DecisionVerdict {
+        DecisionVerdict {
+            complexity: level_answer(&COMPLEXITY_AXIS, &self.complexity, RouteTaskComplexity::from_label)
+                .unwrap_or(RouteTaskComplexity::Unknown),
+            risk: level_answer(&RISK_AXIS, &self.risk, RouteTaskRisk::from_label).unwrap_or(RouteTaskRisk::Unknown),
+            intent: self.folded_intent(),
+        }
+    }
+
+    /// The ten intents' probabilities summed into the router's four, and the
+    /// router word that holds the most — a judgment torn between reviewing
+    /// and investigating is sure it is analysis.
+    fn folded_intent(&self) -> DecisionAnswer<RouteTaskIntent> {
+        let mut probabilities = vec![0.0; INTENT_AXIS.tokens.len()];
+        for intent in &ROUTING_INTENTS {
+            if let (Some(position), Some(share)) =
+                (INTENT_AXIS.position(intent.folds_to), self.intent.probabilities.get(intent.option.word))
+            {
+                probabilities[position] += share;
+            }
+        }
+        // From the chosen option's own fold, moved only by a strictly larger
+        // share, so a tie keeps what the judgment chose.
+        let chosen = fold_intent(&self.intent.chosen).unwrap_or(ROUTER_INTENT_OTHER);
+        let mut position = INTENT_AXIS.position(chosen).unwrap_or_default();
+        for (candidate, share) in probabilities.iter().enumerate() {
+            if *share > probabilities[position] {
+                position = candidate;
+            }
+        }
+        DecisionAnswer {
+            choice: RouteTaskIntent::from_label(INTENT_AXIS.tokens[position]).unwrap_or_default(),
+            position,
+            probabilities,
+            confidence: self.intent.confidence,
+        }
+    }
+
+    /// The band the complexity answer's own confidence falls in — the seat's
+    /// lines ([`zerocode_core::jev::ConfidenceBands::ROUTED`]), read on the
+    /// axis the route moves. A reading outside `[0, 1]` never passed its
+    /// checks, and abstains.
+    #[must_use]
+    pub fn band(&self) -> Band {
+        ROUTING.band_of(self.complexity.confidence).unwrap_or(Band::Abstain)
+    }
+
+    /// What the apply stage routes on, or `None` when the judgment abstains
+    /// and the chat probe is to be asked instead (t-6346: the probe only in
+    /// the abstain band).
+    ///
+    /// The band is the authority, in the words the router's fusion already
+    /// reads for the probe: acting alone is `High` (one band either way),
+    /// wanting a confirmation is `Medium` (up only — the keyword tables are
+    /// the confirmation a lower band does not get). Risk and intent speak
+    /// only past their own abstain line: a timid risk raises nothing
+    /// (`Unknown`), a timid intent is the router's neutral `Other`.
+    #[must_use]
+    pub fn assessment(&self) -> Option<ProbeAssessment> {
+        let confidence = match self.band() {
+            Band::Act => RouteConfidence::High,
+            Band::Confirm => RouteConfidence::Medium,
+            Band::Abstain => return None,
+        };
+        let speaks = |confidence: f64| ROUTING.band_of(confidence).is_some_and(|band| band != Band::Abstain);
+        let verdict = self.verdict();
+        Some(ProbeAssessment {
+            complexity: verdict.complexity.choice,
+            risk: if speaks(self.risk.confidence) { verdict.risk.choice } else { RouteTaskRisk::Unknown },
+            confidence,
+            intent: if speaks(self.intent.confidence) { verdict.intent.choice } else { RouteTaskIntent::Other },
+        })
+    }
+
+    /// Whether the fact `id` reads true on its own yes line
+    /// ([`zerocode_core::jev::questions::Fact::yes_from_permille`]); `None`
+    /// for a fact the seat never asked.
+    #[must_use]
+    pub fn holds(&self, id: &str) -> Option<bool> {
+        let fact = ROUTING_FACTS.iter().find(|fact| fact.id == id)?;
+        let yes = self.facts.get(id)?;
+        Some(*yes >= f64::from(fact.yes_from_permille) / 1_000.0)
+    }
+}
+
+/// One Score reading in an ordered axis's words: the token at its level.
+fn level_answer<T>(
+    axis: &RubricAxis,
+    reading: &LevelReading,
+    read: fn(&str) -> Option<T>,
+) -> DecisionAnswer<Option<T>> {
+    DecisionAnswer {
+        choice: axis.tokens.get(reading.level).copied().and_then(read),
+        position: reading.level,
+        probabilities: reading.probabilities.clone(),
+        confidence: reading.confidence,
+    }
+}
+
+impl<T> DecisionAnswer<Option<T>> {
+    /// The answer with `absent` where its token did not read.
+    fn unwrap_or(self, absent: T) -> DecisionAnswer<T> {
+        DecisionAnswer {
+            choice: self.choice.unwrap_or(absent),
+            position: self.position,
+            probabilities: self.probabilities,
+            confidence: self.confidence,
+        }
+    }
 }
 
 /// One labelled judgment on one axis, as positions in the axis's token order.
@@ -553,5 +885,247 @@ mod tests {
             AxisSample { label: 0, predicted: 0, probabilities: Some(&short) },
         ];
         assert_eq!(axis_metrics(&RISK_AXIS, &unfit).samples, 0);
+    }
+
+    // ---- the routing seat's second version (t-6346) ----------------------
+
+    use zerocode_core::jev::questions::{
+        ROUTING_COMPLEXITY_ID, ROUTING_COMPLEXITY_LEVELS, ROUTING_COMPLEXITY_QUESTION, ROUTING_FACTS,
+        ROUTING_INTENTS, ROUTING_INTENT_ID, ROUTING_INTENT_QUESTION, ROUTING_REASONING,
+        ROUTING_REASONING_ID, ROUTING_REASONING_QUESTION, ROUTING_RISK_ID, ROUTING_RISK_LEVELS,
+        ROUTING_RISK_QUESTION,
+    };
+
+    /// A Score answer spread over four levels as the contract writes one: the
+    /// position is the levels weighted by their probabilities, on the wire's
+    /// grid.
+    fn level_answer(probabilities: [f64; 4], confidence: f64) -> serde_json::Value {
+        #[allow(clippy::cast_precision_loss)]
+        let score: f64 = probabilities.iter().enumerate().map(|(level, share)| level as f64 * share).sum();
+        json!({
+            "type": "score",
+            "score": (score * 100.0).round() / 100.0,
+            "confidence": confidence,
+            "legend": {"0": "a", "1": "b", "2": "c", "3": "d"},
+            "probabilities": {
+                "0": probabilities[0], "1": probabilities[1], "2": probabilities[2], "3": probabilities[3],
+            },
+        })
+    }
+
+    /// A choice over `options` that gives `chosen` the share `leading` and
+    /// splits the rest evenly.
+    fn option_answer(options: &[&str], chosen: &str, leading: f64, confidence: f64) -> serde_json::Value {
+        #[allow(clippy::cast_precision_loss)]
+        let rest = (1.0 - leading) / (options.len() - 1) as f64;
+        let probabilities: serde_json::Map<String, serde_json::Value> = options
+            .iter()
+            .map(|option| ((*option).to_string(), json!(if *option == chosen { leading } else { rest })))
+            .collect();
+        json!({"type": "choice", "choice": chosen, "probabilities": probabilities, "confidence": confidence})
+    }
+
+    fn intents() -> Vec<&'static str> {
+        ROUTING_INTENTS.iter().map(|intent| intent.option.word).collect()
+    }
+
+    fn kinds() -> Vec<&'static str> {
+        ROUTING_REASONING.iter().map(|kind| kind.word).collect()
+    }
+
+    /// Every answer of a second-version judgment: a medium task (level 2, sure
+    /// enough to act), a low risk, a debugging task, a search, and every fact
+    /// a clear no but a plan asked for.
+    fn routing_answers() -> serde_json::Value {
+        let mut answers = json!({
+            ROUTING_COMPLEXITY_ID: level_answer([0.02, 0.06, 0.88, 0.04], 0.9),
+            ROUTING_RISK_ID: level_answer([0.1, 0.8, 0.07, 0.03], 0.7),
+            ROUTING_INTENT_ID: option_answer(&intents(), "debugging", 0.82, 0.8),
+            ROUTING_REASONING_ID: option_answer(&kinds(), "search", 0.7, 0.66),
+        });
+        for fact in &ROUTING_FACTS {
+            answers[fact.id] = json!({"type": "noul", "noul": 0.05});
+        }
+        answers["plan_first"] = json!({"type": "noul", "noul": 0.81});
+        answers
+    }
+
+    #[test]
+    fn the_routing_questions_are_the_catalogs_asked_in_one_request() {
+        let asked = routing_questions();
+        assert_eq!(asked.len(), 4 + ROUTING_FACTS.len(), "two scores, two choices and every fact, one request");
+        for (id, question, levels) in [
+            (ROUTING_COMPLEXITY_ID, ROUTING_COMPLEXITY_QUESTION, ROUTING_COMPLEXITY_LEVELS),
+            (ROUTING_RISK_ID, ROUTING_RISK_QUESTION, ROUTING_RISK_LEVELS),
+        ] {
+            assert_eq!(asked[id].kind, SystemOneQuestionKind::Score, "{id} is ordered");
+            assert_eq!(asked[id].instructions, question);
+            assert_eq!(asked[id].criteria.levels().map(<[String]>::to_vec), Some(levels.map(str::to_string).to_vec()));
+        }
+        for (id, question, mut options) in [
+            (ROUTING_INTENT_ID, ROUTING_INTENT_QUESTION, intents()),
+            (ROUTING_REASONING_ID, ROUTING_REASONING_QUESTION, kinds()),
+        ] {
+            assert_eq!(asked[id].kind, SystemOneQuestionKind::Choice);
+            assert_eq!(asked[id].instructions, question);
+            assert!(matches!(asked[id].criteria, api::SystemOneCriteria::Contrastive(_)), "{id} contrasts its options");
+            options.sort_unstable();
+            assert_eq!(asked[id].criteria.options().collect::<Vec<_>>(), options);
+        }
+        for fact in &ROUTING_FACTS {
+            assert_eq!(asked[fact.id].kind, SystemOneQuestionKind::Noul, "{}", fact.id);
+            assert_eq!(asked[fact.id].instructions, fact.instructions);
+        }
+        // The probe's axes are named by the catalog's ids, so a ledger row
+        // lays the two readers side by side under one spelling.
+        assert_eq!(
+            [COMPLEXITY_AXIS.name, RISK_AXIS.name, INTENT_AXIS.name],
+            [ROUTING_COMPLEXITY_ID, ROUTING_RISK_ID, ROUTING_INTENT_ID]
+        );
+        let state = routing_state("fix the login", RoutingFacts { retry_of_failed_attempt: true });
+        assert_eq!(state, json!({"task": "fix the login", "facts": {"retry_of_failed_attempt": true}}));
+        let request = routing_request("jev-latest", &state);
+        assert!(std::ptr::eq(request.questions, asked));
+        assert_eq!(request.state, &state);
+    }
+
+    /// Complexity is a Score now: its answer is read as a position along the
+    /// levels, the level it rounds to is the router's band, and version 1's
+    /// reader refuses the same answer, since a Score is not a Choice.
+    /// The catalog folds into the router's own four words, spelled where the
+    /// router spells them: a word only one side knew would fold an intent
+    /// into nothing.
+    #[test]
+    fn the_catalogs_router_words_are_the_routers_own() {
+        let router: Vec<&str> = RouteTaskIntent::ALL.iter().map(|intent| intent.as_str()).collect();
+        assert_eq!(router, zerocode_core::jev::questions::ROUTER_INTENTS.to_vec());
+        assert_eq!(INTENT_AXIS.tokens.to_vec(), router);
+        assert_eq!(ROUTING_COMPLEXITY_LEVELS.len(), COMPLEXITY_AXIS.tokens.len(), "a level per band");
+        assert_eq!(ROUTING_RISK_LEVELS.len(), RISK_AXIS.tokens.len(), "a level per risk");
+    }
+
+    #[test]
+    fn a_score_answer_for_complexity_is_read() {
+        let reading = validate_routing(&response(routing_answers())).expect("a valid answer");
+        assert_eq!(reading.complexity.level, 2);
+        assert_eq!(reading.complexity.probabilities, vec![0.02, 0.06, 0.88, 0.04]);
+        assert!((reading.complexity.score - 1.94).abs() < 1e-9);
+        assert!((reading.complexity.confidence - 0.9).abs() < f64::EPSILON);
+        let verdict = reading.verdict();
+        assert_eq!(verdict.complexity.choice, RouteTaskComplexity::Medium);
+        assert_eq!(verdict.complexity.position, 2);
+        assert_eq!(verdict.risk.choice, RouteTaskRisk::Medium);
+        assert_eq!(verdict.intent.choice, RouteTaskIntent::Implementation, "debugging folds into implementation");
+        assert_eq!(reading.intent.chosen, "debugging");
+        assert_eq!(reading.reasoning.chosen, "search");
+        assert_eq!(
+            validate_decision(&response(routing_answers())),
+            Err(DecisionRejection::NotAChoice("complexity")),
+            "the probe rubric's reader asks for a Choice"
+        );
+    }
+
+    /// The band the complexity answer's own confidence falls in decides the
+    /// authority it routes with — the seat's own lines (600‰ / 850‰): act
+    /// alone (the router's High: one band either way), confirm (Medium: up
+    /// only, the tables stand against a lower band), or abstain — no
+    /// assessment, and the caller asks the chat probe instead.
+    #[test]
+    fn a_verdict_acts_by_its_band() {
+        for (confidence, band, authority) in [
+            (0.97, Band::Act, Some(RouteConfidence::High)),
+            (0.85, Band::Act, Some(RouteConfidence::High)),
+            (0.849, Band::Confirm, Some(RouteConfidence::Medium)),
+            (0.6, Band::Confirm, Some(RouteConfidence::Medium)),
+            (0.599, Band::Abstain, None),
+            (0.1, Band::Abstain, None),
+        ] {
+            let mut answers = routing_answers();
+            answers[ROUTING_COMPLEXITY_ID]["confidence"] = json!(confidence);
+            let reading = validate_routing(&response(answers)).expect("valid");
+            assert_eq!(reading.band(), band, "{confidence}");
+            assert_eq!(reading.assessment().map(|assessment| assessment.confidence), authority, "{confidence}");
+        }
+    }
+
+    /// An axis whose own answer is under the abstain line routes nothing — the
+    /// intent stays the router's neutral `Other`, the risk moves nothing —
+    /// while the verdict the ledger keeps is still what was answered.
+    #[test]
+    fn an_axis_under_its_abstain_line_says_nothing_while_the_ledger_keeps_what_it_said() {
+        let mut answers = routing_answers();
+        answers[ROUTING_INTENT_ID]["confidence"] = json!(0.4);
+        answers[ROUTING_RISK_ID] = level_answer([0.0, 0.1, 0.2, 0.7], 0.3);
+        let reading = validate_routing(&response(answers)).expect("valid");
+        let assessment = reading.assessment().expect("complexity acts");
+        assert_eq!(assessment.intent, RouteTaskIntent::Other);
+        assert_eq!(assessment.risk, RouteTaskRisk::Unknown, "a timid risk raises nothing");
+        assert_eq!(assessment.complexity, RouteTaskComplexity::Medium);
+        let verdict = reading.verdict();
+        assert_eq!(verdict.intent.choice, RouteTaskIntent::Implementation);
+        assert_eq!(verdict.risk.choice, RouteTaskRisk::Critical);
+    }
+
+    /// The ten intents fold into the router's four with their probabilities:
+    /// a judgment torn between reviewing and investigating is sure it is
+    /// analysis.
+    #[test]
+    fn an_intent_folds_with_its_probability_into_the_routers_four() {
+        let mut answers = routing_answers();
+        let mut torn = option_answer(&intents(), "review_or_verification", 0.45, 0.35);
+        torn["probabilities"]["investigation"] = json!(0.4);
+        let rest = (1.0 - 0.45 - 0.4) / 8.0;
+        for word in intents() {
+            if word != "review_or_verification" && word != "investigation" {
+                torn["probabilities"][word] = json!(rest);
+            }
+        }
+        answers[ROUTING_INTENT_ID] = torn;
+        let verdict = validate_routing(&response(answers)).expect("valid").verdict();
+        assert_eq!(verdict.intent.choice, RouteTaskIntent::Analysis);
+        let analysis = INTENT_AXIS.position("analysis").expect("a router word");
+        assert!(verdict.intent.probabilities[analysis] > 0.85, "{:?}", verdict.intent.probabilities);
+        assert!((verdict.intent.probabilities.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        assert_eq!(verdict.intent.probabilities.len(), INTENT_AXIS.tokens.len());
+    }
+
+    /// A fact reads true from its own yes line (the seat's table), and a fact
+    /// the seat never asked reads as nothing.
+    #[test]
+    fn a_fact_reads_true_from_its_own_line() {
+        let line = ROUTING_FACTS.iter().find(|fact| fact.id == "plan_first").expect("asked").yes_from_permille;
+        for (yes, holds) in [(0.81, true), (f64::from(line) / 1_000.0, true), (f64::from(line) / 1_000.0 - 0.01, false), (0.05, false)] {
+            let mut answers = routing_answers();
+            answers["plan_first"] = json!({"type": "noul", "noul": yes});
+            let reading = validate_routing(&response(answers)).expect("valid");
+            assert_eq!(reading.holds("plan_first"), Some(holds), "{yes}");
+        }
+        let reading = validate_routing(&response(routing_answers())).expect("valid");
+        assert_eq!(reading.holds("a fact nobody asked"), None);
+        assert_eq!(reading.holds("changes_code"), Some(false));
+    }
+
+    #[test]
+    fn every_broken_routing_rule_discards_the_whole_answer() {
+        let cases: Vec<(&str, &str, serde_json::Value, DecisionRejection)> = vec![
+            ("missing score", ROUTING_COMPLEXITY_ID, json!(null), DecisionRejection::MissingAnswer("complexity")),
+            ("a choice where a score was asked", ROUTING_RISK_ID, option_answer(&["a", "b"], "a", 0.9, 0.9), DecisionRejection::NotAScore("risk")),
+            ("a score past the last level", ROUTING_RISK_ID, json!({"type": "score", "score": 3.5, "confidence": 0.5, "legend": {}, "probabilities": {"0": 0.25, "1": 0.25, "2": 0.25, "3": 0.25}}), DecisionRejection::ScoreOutsideLevels("risk")),
+            ("a level missing", ROUTING_RISK_ID, json!({"type": "score", "score": 1.0, "confidence": 0.5, "legend": {}, "probabilities": {"0": 0.5, "1": 0.5, "2": 0.0}}), DecisionRejection::ProbabilityKeys("risk")),
+            ("levels short of one", ROUTING_RISK_ID, json!({"type": "score", "score": 1.0, "confidence": 0.5, "legend": {}, "probabilities": {"0": 0.2, "1": 0.2, "2": 0.2, "3": 0.2}}), DecisionRejection::ProbabilitySum("risk")),
+            ("an intent nobody offered", ROUTING_INTENT_ID, json!({"type": "choice", "choice": "chitchat", "probabilities": {}, "confidence": 0.5}), DecisionRejection::ChoiceOutsideCriteria("intent")),
+            ("a kind with a missing key", ROUTING_REASONING_ID, option_answer(&kinds()[1..], "search", 0.7, 0.6), DecisionRejection::ProbabilityKeys("reasoning")),
+            ("a fact unanswered", "needs_measurement", json!(null), DecisionRejection::Noul("needs_measurement", zerocode_core::jev::noul::NoulRefusal::NoAnswer)),
+            ("a fact past one", "refers_to_earlier", json!({"type": "noul", "noul": 1.2}), DecisionRejection::Noul("refers_to_earlier", zerocode_core::jev::noul::NoulRefusal::OutOfRange)),
+        ];
+        for (case, id, answer, rejection) in cases {
+            let mut answers = routing_answers();
+            if answer.is_null() {
+                answers.as_object_mut().expect("an object").remove(id);
+            } else {
+                answers[id] = answer;
+            }
+            assert_eq!(validate_routing(&response(answers)), Err(rejection), "{case}");
+        }
     }
 }

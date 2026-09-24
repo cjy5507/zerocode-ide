@@ -212,6 +212,13 @@ pub const ROUTE_USE_APPLIED: &str = "applied";
 /// answer that did not clear the seat's floor.
 pub const ROUTE_USE_FALLBACK: &str = "fallback";
 
+/// The word a row's `routeUse` carries when the seat answered, well formed
+/// and in time, and its own confidence put the answer under the abstain line
+/// ([`Band::Abstain`], t-6346): the product asked its own reader instead, as
+/// if the seat had not been asked. Not a failure — the answer is counted as
+/// answered — and not an act.
+pub const ROUTE_USE_ABSTAINED: &str = "abstained";
+
 /// What a person set a use to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JevMode {
@@ -789,25 +796,48 @@ pub const JUDGMENT_MEMO_DEADLINE_MS: u64 = 50;
 /// zo's routing judgment: a task's complexity, risk and intent beside the
 /// chat probe's (docs/design/jev-decision-shadow-20260917.md).
 ///
-/// The `agreed` rule (t-5806): a routing judgment agreed when the turn it
-/// routed STOOD — no quota wall, refusal fallback or overload demotion moved
-/// the wire to another model, and the person did not name one themselves —
-/// and disagreed when any of those unseated the route before the turn ended.
-/// The label is one row per turn, keyed by the turn's attempt, written by
-/// the host when the turn ends (`decision_shadow::note_route_followed`); a
-/// turn the person cancelled is not judged, and a turn the seat was never
-/// asked about leaves no label. The judge counts it beside the probe's axis
-/// agreement, one comparison per label row.
+/// The second version (t-6346) asks the catalog's words
+/// ([`questions::ROUTING_RUBRIC_VERSION`]) — two Scores, two contrastive
+/// Choices and six facts in one request — about every turn and every spawn
+/// the seat is asked about, whatever the chat probe's own gate says; the
+/// probe is asked only where the answer abstains ([`JevUse::confidence_bands`]).
+///
+/// The `agreed` rule (t-6346, after t-5806): a routing judgment agreed when
+/// the router, reading the complexity it answered, would have picked the
+/// tier the turn it was asked about turned out to need — the turn's own
+/// calls, the files it wrote and the agents it started, read as a level by
+/// one table (zo's `route_label`), and both levels read through the router's
+/// own complexity-to-tier table (zo's `runtime::default_difficulty_tier`:
+/// trivial and small the fast tier, medium the balanced, large the strong).
+/// "Within one band of the work" was the rule first written and was dropped
+/// on the replay: a reader that always said small agreed on 401 of 488
+/// turns. The first rule — the route STOOD, no wall, refusal or person moved
+/// the model — said yes ten times in ten; what became of the route is kept
+/// beside the mark as `followed`. The label is one row per turn, keyed by
+/// the turn's attempt, written by the host when the turn ends
+/// (`decision_shadow::note_route_followed`); a turn the person cancelled is
+/// not judged, and a turn the seat was never asked about leaves no label.
+/// The judge counts it beside the probe's axis agreement, one comparison per
+/// label row, and marks the keyword tables on the same facts.
 pub const ROUTING: JevUse = JevUse {
     id: "routing",
     setting: "decisionShadow",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
     repeat: None,
-    sends: &[Sent {
-        at: "/state",
-        cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
-    }],
+    // The second version's state is an object (t-6346): the task's head,
+    // cut here by its own pointer, and the facts code wrote — booleans,
+    // nothing a person typed (`questions::ROUTING_STATE_*`).
+    sends: &[
+        Sent {
+            at: "/state/task",
+            cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/facts",
+            cap: Cap::Uncut,
+        },
+    ],
     ledger: "decision-shadow.jsonl",
     promotes: true,
     answer_floor_permille: Some(950),
@@ -817,9 +847,10 @@ pub const ROUTING: JevUse = JevUse {
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
-    // The keyword tables that route a turn with no judgment at all; the
-    // chat probe is the second reader both are graded by. Its writer stamps
-    // no baseline mark yet, so the seat holds at `too_few_baseline`.
+    // The keyword tables that route a turn with no judgment at all, graded
+    // on every mark the seat is (t-6346): the chat probe's answer, axis by
+    // axis, on a row that carries the tables' reading, and the turn's work
+    // on its label row.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
@@ -3318,16 +3349,16 @@ pub fn jev_use(id: &str) -> Option<&'static JevUse> {
 /// ---- the gate in front of the routing seat --------------------------------
 ///
 /// The key under [`SMART_SETTINGS_KEY`] that decides how a spawn's difficulty
-/// is classified — and, as a consequence nobody reading the routing row would
-/// guess, whether the routing seat is asked anything at all.
+/// is classified — and whether the routing seat is asked anything at all.
 ///
-/// The chain, read in zo's own source: the decision shadow is fired only by
-/// `probe_and_shadow` (`smart_router/probe_exec.rs`), which is reached only
-/// through `route_probe_assessment(s)`, which `smart_router/apply.rs` calls
-/// only when this setting reads as [`ClassifierMode::Probed`]. So under the
-/// other three words `smart.decisionShadow` may say `on` and there is nothing
-/// the seat can ask — the switch a person CAN see promises a judgment the one
-/// they cannot see has already refused.
+/// Until t-6346 only the probing word reached the seat: the decision shadow
+/// was fired only from inside the chat probe's road, which the spawn road took
+/// only under [`ClassifierMode::Probed`] and the turn road only past the
+/// probe's own band gate — so `smart.decisionShadow` could say `on` while
+/// nothing was ever asked (0 of 25 rows applied, t-4727). Now the seat is
+/// asked under every word but `off` ([`ClassifierMode::reaches`]); the probe
+/// still waits on the probing word, and where the seat acts it is called only
+/// for an answer that abstains.
 ///
 /// It lives here rather than beside zo's own `RouteAutoClassifierMode` for the
 /// reason this module exists: two programs now read it — zo to route, and the
@@ -3348,7 +3379,7 @@ pub enum ClassifierMode {
     Assisted,
     /// The keyword tables, plus one bounded Fast-tier probe (~200 output
     /// tokens) whose verdict is fused on top of them — refining, never
-    /// replacing. The only word under which the routing seat is asked.
+    /// replacing. The only word under which the chat probe is called.
     Probed,
 }
 
@@ -3380,11 +3411,18 @@ impl ClassifierMode {
         matches!(self, Self::Assisted)
     }
 
-    /// Whether a probe is called — which is also whether the routing seat is
-    /// ever asked.
+    /// Whether the chat probe is called.
     #[must_use]
     pub const fn probes(self) -> bool {
         matches!(self, Self::Probed)
+    }
+
+    /// Whether the routing seat can be asked under this word: wherever
+    /// automatic routing runs (t-6346) — `off` routes nothing, so nothing is
+    /// judged for it.
+    #[must_use]
+    pub const fn reaches(self) -> bool {
+        self.runs()
     }
 
     /// The mode `value` names: one of the four words, trimmed, in any case.
@@ -3491,6 +3529,25 @@ fn hex_of(bytes: &[u8]) -> String {
 #[must_use]
 pub fn rubric_fingerprint(words: impl FnOnce() -> String) -> String {
     fingerprint_of(&words())
+}
+
+/// Hangul's share of a text's letters, per thousand — the language column a
+/// seat's rows carry so its agreement can be read apart by language (the
+/// vendor's models page: CJK scripts "are handled but not equally well";
+/// t-6324 §6-1). Counted by code on the words a request carries, which are
+/// never kept. `None` for a text with no letters at all.
+#[must_use]
+pub fn hangul_share_permille(text: &str) -> Option<u16> {
+    let (letters, hangul) = text.chars().filter(|glyph| glyph.is_alphabetic()).fold(
+        (0_u64, 0_u64),
+        |(letters, hangul), glyph| {
+            (
+                letters + 1,
+                hangul + u64::from(crate::second_brain_related::is_hangul(glyph)),
+            )
+        },
+    );
+    (letters > 0).then(|| u16::try_from(hangul * 1_000 / letters).unwrap_or(1_000))
 }
 
 #[cfg(test)]

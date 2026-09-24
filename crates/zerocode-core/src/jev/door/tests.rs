@@ -8,6 +8,7 @@ use super::super::{
     STALL_TRANSCRIPT_BYTE_CAP,
 };
 use super::*;
+use crate::jev::questions::{ROUTING_FACT_RETRY, ROUTING_STATE_FACTS, ROUTING_STATE_TASK};
 use crate::screen_action::{ActionLook, Errand, Where, ask};
 
 const APP: &str = "/work/app";
@@ -30,8 +31,17 @@ fn asking<'a>(settings: &'a JevSettings, workspace: Option<&'a str>, sent: u64) 
     }
 }
 
+/// A routing request's body as the seat builds it (t-6346): the task's head
+/// and the facts code knows, under the catalog's own keys.
 fn routing_body(task: &str) -> Value {
-    json!({ "state": task, "model": "jev-latest", "questions": {} })
+    json!({
+        "state": {
+            ROUTING_STATE_TASK: task,
+            ROUTING_STATE_FACTS: { ROUTING_FACT_RETRY: false },
+        },
+        "model": "jev-latest",
+        "questions": {},
+    })
 }
 
 #[test]
@@ -540,13 +550,42 @@ fn an_honest_task_leaves_the_door_as_the_probe_cuts_it() {
     .expect("consented");
     let body: Value = serde_json::from_slice(cleared.bytes()).expect("json");
     assert_eq!(
-        body["state"],
+        body["state"][ROUTING_STATE_TASK],
         json!(task.chars().take(ROUTING_TASK_CHAR_CAP).collect::<String>())
     );
     assert_eq!(cleared.withheld_lines(), 0);
     assert_eq!(
         body["model"], "jev-latest",
         "the product's own words pass as they were"
+    );
+}
+
+/// The routing state is an object (t-6346): the door reaches the task by its
+/// own pointer, withholds a line that may carry a credential and cuts the
+/// rest to the cap, and passes the facts — booleans code wrote — whole. An
+/// object at a pointer that names a string is passed over uncut, so a table
+/// that still said `/state` would send the whole task.
+#[test]
+fn the_routing_task_is_cleared_by_its_own_pointer_and_its_facts_pass_whole() {
+    let task = format!(
+        "fix the login flow\ntoken=sk-live-000\n{}",
+        "가".repeat(ROUTING_TASK_CHAR_CAP)
+    );
+    let mut asked = routing_body(&task);
+    asked["state"][ROUTING_STATE_FACTS][ROUTING_FACT_RETRY] = json!(true);
+    let cleared =
+        may_send(&ROUTING, &asking(&settings(None), Some(APP), 0), asked).expect("consented");
+    let body: Value = serde_json::from_slice(cleared.bytes()).expect("json");
+    let sent = body["state"][ROUTING_STATE_TASK]
+        .as_str()
+        .expect("the task");
+    assert!(!sent.contains("sk-live"), "{sent}");
+    assert_eq!(cleared.withheld_lines(), 1);
+    assert_eq!(sent.chars().count(), ROUTING_TASK_CHAR_CAP);
+    assert!(sent.starts_with("fix the login flow\n"));
+    assert_eq!(
+        body["state"][ROUTING_STATE_FACTS],
+        json!({ ROUTING_FACT_RETRY: true })
     );
 }
 

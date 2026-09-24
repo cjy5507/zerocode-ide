@@ -940,7 +940,8 @@ impl PlainSession {
                 .unwrap_or(0)
         };
         // Whether a row was written is the ledger's business, not the turn's.
-        let _ = tools::note_route_followed(&self.cwd, &attempt, unseated);
+        // The routing seat's label reads what the turn did (t-6346).
+        let _ = tools::note_route_followed(&self.cwd, &attempt, unseated, Some(&messages[from..]));
         let _ = tools::note_recall_read(&self.cwd, &attempt, Some(&messages[from..]));
         // And the compaction seat's: whether a block a compaction dropped was
         // read again inside its window (t-6039).

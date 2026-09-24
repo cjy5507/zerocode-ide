@@ -5495,10 +5495,14 @@ function initTypeSafeEvents() {
   });
   el("route-classifier-select")?.addEventListener("change", (event) => {
     const mode = event.target.value;
-    void runTypeSafe(() => invoke("set_route_classifier", { mode }), (state) =>
-      state.classifier?.probes
-        ? t("settings.classifier.nowProbes", "이제 모델에게도 묻습니다 — 「모델 선택 판단」도 이제 판단을 요청할 수 있습니다.")
-        : t("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 어디에도 묻지 않습니다."));
+    void runTypeSafe(() => invoke("set_route_classifier", { mode }), (state) => {
+      if (!state.classifier?.reaches) {
+        return t("settings.classifier.nowOff", "자동 라우팅을 껐습니다 — 「모델 선택 판단」도 판단을 요청하지 않습니다.");
+      }
+      return state.classifier.probes
+        ? t("settings.classifier.nowProbes", "이제 빠른 등급 모델에게도 묻습니다.")
+        : t("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 빠른 등급 모델에게 묻지 않습니다.");
+    });
   });
   // The model pin (`smart.jevModel`): an empty field unpins. The backend
   // refuses a pin its door would not read, and the refusal is said here.
@@ -5575,8 +5579,10 @@ function paintClassifierGate(state) {
   }
   const notice = el("route-classifier-unreachable");
   if (notice) {
+    // The feature is reached under every word but `off` (t-6346); the
+    // probe is a separate question the warning does not ask.
     const asks = Boolean(classifier) && (jevSeatChoice(state, classifier.gates)?.asks ?? false);
-    notice.hidden = !(asks && !classifier.probes);
+    notice.hidden = !(asks && !classifier.reaches);
   }
 }
 

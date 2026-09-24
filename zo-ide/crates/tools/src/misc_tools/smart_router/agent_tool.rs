@@ -739,10 +739,7 @@ fn read_reply(asking: &Asking, response: &api::SystemOneResponse) -> Result<Read
         let (id, offered): (&str, BTreeSet<String>) = match asking.questions.iter().next() {
             Some((id, question)) => (
                 id.as_str(),
-                match &question.criteria {
-                    api::SystemOneCriteria::Named(names) => names.keys().cloned().collect(),
-                    api::SystemOneCriteria::Ordered(_) => BTreeSet::new(),
-                },
+                question.criteria.options().map(str::to_string).collect(),
             ),
             None => return Err(schema("no_question".to_string())),
         };
@@ -761,10 +758,8 @@ fn read_reply(asking: &Asking, response: &api::SystemOneResponse) -> Result<Read
         .questions
         .values()
         .next()
-        .and_then(|question| match &question.criteria {
-            api::SystemOneCriteria::Ordered(levels) => Some(levels.iter().map(String::as_str).collect()),
-            api::SystemOneCriteria::Named(_) => None,
-        })
+        .and_then(|question| question.criteria.levels())
+        .map(|levels| levels.iter().map(String::as_str).collect())
         .ok_or_else(|| schema("no_levels".to_string()))?;
     let scale = Scale::new(&levels);
     asking

@@ -274,7 +274,8 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
 fn compared(at: i64, jev: [&str; 3], probe: Option<[&str; 3]>) -> Value {
     let axis = |choice: &str| json!({"choice": choice, "probabilities": {}, "confidence": 0.9});
     let mut row = json!({
-        "at": at, "task": format!("{at:016x}"), "rubricVersion": 1, "outcome": "answered",
+        "at": at, "task": format!("{at:016x}"),
+        "rubricVersion": zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION, "outcome": "answered",
         "elapsedMs": 400, "retries": 0, "cached": false, "requests": 1,
         "jev": {"complexity": axis(jev[0]), "risk": axis(jev[1]), "intent": axis(jev[2])},
     });
@@ -766,12 +767,14 @@ fn attempted(at: i64, attempt: &str) -> Value {
     row
 }
 
-/// The turn label the host writes when the turn ends (t-5806): the route
-/// stood, or a door moved the wire off it first. Written once, only for a
-/// turn the seat was asked about, and read by the judge beside the probe's
-/// axes.
+/// The turn label the host writes when the turn ends (t-5806, t-6346): what
+/// the turn DID — its calls, the files it wrote, the agents it started —
+/// read as a level, against the level the turn's own judgment answered and
+/// the level the keyword tables read. Written once, only for a turn the seat
+/// was asked about; what became of the route stays beside it as `followed`.
 #[test]
-fn a_turn_the_seat_routed_is_labeled_once_with_what_became_of_its_route() {
+fn a_turn_label_grades_the_turns_own_judgment_on_what_the_turn_did() {
+    use runtime::{ContentBlock, ConversationMessage};
     use super::super::decision_shadow::{decision_shadow_path, note_route_followed, RouteLabelRow, ROUTE_STOOD};
     let state = tempfile::tempdir().expect("a state home");
     let work = tempfile::tempdir().expect("a workspace");
@@ -779,34 +782,111 @@ fn a_turn_the_seat_routed_is_labeled_once_with_what_became_of_its_route() {
     let ledger = decision_shadow_path(work.path());
     let dir = ledger.parent().expect("a ledger dir").to_path_buf();
     let name = ledger.file_name().and_then(|name| name.to_str()).expect("a ledger name");
-    write(&dir, name, &[attempted(1, "s@1"), attempted(2, "s@1"), attempted(3, "s@2")]);
+    let judged = |at: i64, attempt: &str, words: &str, complexity: &str, rule: &str| {
+        let mut row = attempted(at, attempt);
+        row["task"] = json!(format!("{:016x}", super::super::probe_exec::task_fingerprint("", words)));
+        row["jev"]["complexity"]["choice"] = json!(complexity);
+        row["rule"] = json!({"complexity": rule, "risk": "low", "intent": "other"});
+        row
+    };
+    write(
+        &dir,
+        name,
+        &[
+            judged(1, "s@1", "fix the typo", "large", "trivial"),
+            judged(2, "s@2", "trace the slow start", "medium", "trivial"),
+            judged(3, "s@3", "words nobody typed", "small", "small"),
+            judged(4, "s@4", "port the settings page", "medium", "large"),
+        ],
+    );
+    let edited = |path: &str| {
+        let mut result = ConversationMessage::user_text("");
+        result.role = runtime::MessageRole::Tool;
+        result.blocks = vec![ContentBlock::ToolResult {
+            tool_use_id: "toolu-edit".to_string(),
+            tool_name: "edit_file".to_string(),
+            output: format!("{{\n  \"type\": \"update\",\n  \"filePath\": \"{path}\"\n}}"),
+            is_error: false,
+            images: Vec::new(),
+        }];
+        result
+    };
+    let call = |name: &str| ContentBlock::ToolUse { id: format!("toolu-{name}"), name: name.to_string(), input: "{}".to_string() };
+    // One call, one file: a small change in one place.
+    let typo = vec![
+        ConversationMessage::user_text("fix the typo"),
+        ConversationMessage::assistant(vec![call("edit_file")]),
+        edited("/work/app/README.md"),
+    ];
+    // Four calls, no edit: an investigation that ran and read several things.
+    let trace = vec![
+        ConversationMessage::user_text("trace the slow start"),
+        ConversationMessage::assistant(vec![call("bash"), call("read_file"), call("read_file"), call("bash")]),
+    ];
+    // An agent started: work across parts.
+    let fanned = vec![
+        ConversationMessage::user_text("port the settings page"),
+        ConversationMessage::assistant(vec![call("Agent")]),
+    ];
 
     // A turn nobody routed leaves no label; an empty attempt asks nothing.
-    assert!(!note_route_followed(work.path(), "s@9", None), "a turn the seat never judged was labeled");
-    assert!(!note_route_followed(work.path(), "  ", None));
-    assert!(read_rows(&ledger).len() == 3);
+    assert!(!note_route_followed(work.path(), "s@9", None, Some(&typo)), "a turn the seat never judged was labeled");
+    assert!(!note_route_followed(work.path(), "  ", None, Some(&typo)));
 
-    // The route stood: the label agrees. Written once.
-    assert!(note_route_followed(work.path(), "s@1", None));
-    assert!(!note_route_followed(work.path(), "s@1", Some(runtime::SwitchTrigger::Quota)), "a second label for one turn");
-    // Another turn's quota wall unseated its route: the label disagrees and
-    // names the door.
-    assert!(note_route_followed(work.path(), "s@2", Some(runtime::SwitchTrigger::Quota)));
+    // Judged large, and it was one small edit: the strong tier for the fast
+    // tier's work, the label says no — while the tables' trivial routed to
+    // the tier it needed. Written once.
+    assert!(note_route_followed(work.path(), "s@1", None, Some(&typo)));
+    assert!(!note_route_followed(work.path(), "s@1", None, Some(&typo)), "a second label for one turn");
+    // Judged medium, and it was an investigation: the label agrees, the
+    // tables' trivial does not; the quota wall that moved the route is kept.
+    assert!(note_route_followed(work.path(), "s@2", Some(runtime::SwitchTrigger::Quota), Some(&trace)));
+    // A turn whose words the judgment never read compares nothing, and says why.
+    assert!(note_route_followed(work.path(), "s@3", None, Some(&typo)));
+    // Judged medium, and it started an agent: one band off, but the ordinary
+    // tier for work across parts — the label says no; the tables' large agrees.
+    assert!(note_route_followed(work.path(), "s@4", None, Some(&fanned)));
 
     let labels: Vec<RouteLabelRow> = super::super::shadow_ledger::read_shadow_rows(&ledger);
-    assert_eq!(labels.len(), 2, "{labels:?}");
+    assert_eq!(labels.len(), 4, "{labels:?}");
     assert_eq!((labels[0].label.as_str(), labels[0].attempt.as_str()), ("s@1", "s@1"));
-    assert_eq!((labels[0].followed.as_str(), labels[0].agreed), (ROUTE_STOOD, true));
-    assert_eq!((labels[1].attempt.as_str(), labels[1].followed.as_str(), labels[1].agreed), ("s@2", "quota", false));
+    assert_eq!(labels[0].followed, ROUTE_STOOD);
+    assert_eq!(labels[0].observed.as_deref(), Some("small"));
+    assert_eq!((labels[0].agreed, labels[0].baseline_agreed), (Some(false), Some(true)));
+    assert_eq!(labels[0].work.map(|work| (work.tool_calls, work.files_edited, work.spawns)), Some((1, 1, 0)));
+    assert_eq!(labels[1].followed, "quota");
+    assert_eq!(labels[1].observed.as_deref(), Some("medium"));
+    assert_eq!((labels[1].agreed, labels[1].baseline_agreed), (Some(true), Some(false)));
+    assert_eq!((labels[2].agreed, labels[2].not_compared.as_deref()), (None, Some("unanswered")));
+    assert_eq!(labels[3].observed.as_deref(), Some("large"));
+    assert_eq!((labels[3].agreed, labels[3].baseline_agreed), (Some(false), Some(true)));
     // A label is not a request: the counter leaves it out of every window.
     let rows = read_rows(&ledger);
-    assert_eq!(rows.iter().filter(|row| asked_something(row).is_some()).count(), 3);
+    assert_eq!(rows.iter().filter(|row| asked_something(row).is_some()).count(), 4);
     for key in zerocode_core::jev::summary::LEDGER_KEYS {
         let row = rows.last().expect("the label");
         if let Some(read) = key.read(row) {
             assert_eq!(Some(read), row.get(key.canonical), "`{}` read from a spelling the label does not write", key.canonical);
         }
     }
+}
+
+/// A row where the probe answered beside the judgment marks both readers on
+/// the probe's answer, axis by axis: the judgment's `agreed` and, from the
+/// keyword tables' reading on the same row, the baseline's — so the seat is
+/// held against today's rule on exactly its own marks (t-6342, t-6346).
+#[test]
+fn a_comparison_row_marks_the_keyword_tables_on_the_probes_answer() {
+    let mut row = compared(1, ["large", "high", "design"], Some(["large", "low", "implementation"]));
+    row["rule"] = json!({"complexity": "large", "risk": "low", "intent": "other"});
+    let unruled = compared(2, ["small", "low", "other"], Some(["small", "low", "other"]));
+    let agreement = super::super::decision_shadow::agreement_in(&[&row, &unruled]);
+    assert_eq!((agreement.compared, agreement.agreed), (6, 4), "three axes a row");
+    assert_eq!(
+        (agreement.baseline_compared, agreement.baseline_agreed),
+        (3, 2),
+        "the tables marked on the row that carries their reading: complexity and risk right, intent wrong"
+    );
 }
 
 /// Which doors unseat a route: a wall, a refusal, a shed tier, the person —
@@ -936,7 +1016,7 @@ fn measure_what_a_label_and_a_judge_cost_on_this_machines_ledgers() {
     timed(
         "note_route_followed (tail read, label standing after the first)",
         Box::new(move || {
-            let _ = note_route_followed(&cwd, &key, None);
+            let _ = note_route_followed(&cwd, &key, None, None);
         }),
     );
     let held = rows.clone();

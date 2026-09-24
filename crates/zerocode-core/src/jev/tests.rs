@@ -845,6 +845,28 @@ fn the_skill_seat_rises_on_its_own_lines() {
     }
 }
 
+/// The routing seat sends the head of the task under its cap, by the
+/// pointer the catalog's own state key makes, and the facts code wrote whole
+/// (t-6346) — the door cuts a string only where a pointer names it.
+#[test]
+fn the_routing_seat_sends_the_task_under_its_cap_and_its_facts_whole() {
+    use crate::jev::questions::{ROUTING_STATE_FACTS, ROUTING_STATE_TASK};
+    let sent: Vec<(&str, Cap)> = ROUTING
+        .sends
+        .iter()
+        .map(|sent| (sent.at, sent.cap))
+        .collect();
+    let task = format!("/state/{ROUTING_STATE_TASK}");
+    let facts = format!("/state/{ROUTING_STATE_FACTS}");
+    assert_eq!(
+        sent,
+        vec![
+            (task.as_str(), Cap::Chars(ROUTING_TASK_CHAR_CAP)),
+            (facts.as_str(), Cap::Uncut),
+        ]
+    );
+}
+
 /// The step governor's seat sends the same head of a turn the routing seat
 /// sends, rises on its own progress marks, and offers every word — a seat
 /// whose answer moves a request field is one a person can switch on and one
@@ -852,7 +874,22 @@ fn the_skill_seat_rises_on_its_own_lines() {
 #[test]
 fn the_step_effort_seat_reads_the_turn_like_routing_and_rises_on_its_own_marks() {
     assert_eq!(jev_use("step_effort"), Some(&ZO_STEP_EFFORT));
-    assert_eq!(ZO_STEP_EFFORT.sends, ROUTING.sends);
+    // The same head of the turn under the same cap — as the probe rubric's
+    // plain string, where the routing seat's second version sends it inside
+    // an object beside its facts (t-6346).
+    assert_eq!(
+        ZO_STEP_EFFORT.sends,
+        &[Sent {
+            at: "/state",
+            cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
+        }]
+    );
+    assert!(
+        ROUTING
+            .sends
+            .iter()
+            .any(|sent| sent.cap == Cap::Chars(ROUTING_TASK_CHAR_CAP))
+    );
     const { assert!(ZO_STEP_EFFORT.promotes) };
     assert_eq!(
         ZO_STEP_EFFORT.answer_floor_permille,
@@ -1288,14 +1325,17 @@ fn the_classifier_words_are_the_ones_zo_routes_on() {
     );
 }
 
-/// Only the probing word asks the routing seat anything.
+/// Every word but `off` asks the routing seat; only the probing word calls
+/// the chat probe (t-4727, t-6346).
 ///
 /// This is the fact the card has to say out loud, so it is held to zo's
-/// source: the decision shadow is fired from `probe_and_shadow` alone, and the
-/// probe is called only under `Probed`. If zo ever fires the shadow from
-/// somewhere else, the card's notice becomes a lie and this goes red first.
+/// source: the decision shadow is fired from `probe_and_shadow` alone, the
+/// spawn road reads a task whenever automatic routing runs and the seat asks
+/// (`spawn_is_read`), and the probe inside that road waits on `Probed`. If zo
+/// ever gates the judgment on the probe again, the card's notice becomes a lie
+/// and this goes red first.
 #[test]
-fn the_routing_seat_is_only_asked_under_the_probing_word() {
+fn the_routing_seat_is_asked_under_every_word_but_off() {
     let probe_exec =
         include_str!("../../../../zo-ide/crates/tools/src/misc_tools/smart_router/probe_exec.rs");
     let apply =
@@ -1315,15 +1355,32 @@ fn the_routing_seat_is_only_asked_under_the_probing_word() {
         1,
         "the shadow's active road has more than one entrance"
     );
+    let reads = &product(apply)[product(apply)
+        .find("fn spawn_is_read(")
+        .expect("the spawn road's one gate")..];
+    let reads = &reads[..reads.find("\n}\n").expect("the gate closes")];
+    assert!(
+        reads.contains("RouteAutoClassifierMode::Off") && reads.contains("asks_here()"),
+        "the spawn road reads a task for the seat under a word other than `off`:\n{reads}"
+    );
     for entry in ["route_probe_assessment(", "route_probe_assessments("] {
         for at in product(apply).match_indices(entry).map(|(at, _)| at) {
             let before = &product(apply)[..at];
             let gate = before
-                .rfind("RouteAutoClassifierMode::Probed")
-                .expect("a probe call with no Probed gate above it");
+                .rfind("spawn_is_read(")
+                .expect("a spawn read with no gate above it");
             assert!(
                 before.len() - gate < 800,
-                "a `{entry}` call is not under a Probed gate"
+                "a `{entry}` call is not under the spawn road's gate"
+            );
+            let admitted = &product(apply)[at..];
+            let admitted = &admitted[..admitted
+                .find(')')
+                .map_or(admitted.len(), |close| close + 200)
+                .min(admitted.len())];
+            assert!(
+                admitted.contains("Admitted::spawn(probes)"),
+                "a spawn read lets the probe run without the probing word"
             );
         }
     }
@@ -1335,6 +1392,14 @@ fn the_routing_seat_is_only_asked_under_the_probing_word() {
             == 1,
         "more than one word claims to probe"
     );
+    for mode in ClassifierMode::ALL {
+        assert_eq!(
+            mode.reaches(),
+            mode.runs(),
+            "`{}`: the seat is asked exactly where routing runs",
+            mode.key()
+        );
+    }
     assert!(ROUTING.modes.iter().copied().any(JevMode::applies));
 }
 
@@ -1928,4 +1993,51 @@ fn an_answer_falls_in_one_band_by_its_confidence() {
     );
     // A seat that never rises reads no band.
     assert_eq!(AGENT_TOOL.band_of(0.99), None);
+}
+
+/// The language column (t-6324 §6-1, t-6346): how much of a request's
+/// letters are Hangul, per thousand — counted by code, so a seat's agreement
+/// can be read apart by language without keeping a word of the text.
+#[test]
+fn a_requests_hangul_share_is_counted_over_its_letters() {
+    assert_eq!(
+        hangul_share_permille("이 함수의 버그를 수정해줘"),
+        Some(1_000)
+    );
+    assert_eq!(hangul_share_permille("fix the bug"), Some(0));
+    assert_eq!(
+        hangul_share_permille("fix 버그"),
+        Some(400),
+        "two of five letters"
+    );
+    assert_eq!(
+        hangul_share_permille("ㄱㄴ ab"),
+        Some(500),
+        "jamo are Hangul too"
+    );
+    assert_eq!(
+        hangul_share_permille("123 !? -"),
+        None,
+        "no letters, no share"
+    );
+    assert_eq!(hangul_share_permille(""), None);
+}
+
+/// A seat that never rises names no apply wall (the column's own contract,
+/// [`JevUse::apply_deadline_ms`]): the wall is the latency line a rising seat
+/// is judged against, and a number nobody is judged on only tells a screen
+/// there is a stage to time. zo's summary already held every row to it; the
+/// vault-pair seat broke it on arrival (t-6345) and no core test said so.
+#[test]
+fn a_seat_that_never_rises_names_no_apply_wall() {
+    for row in &JEV_USES {
+        assert_eq!(
+            row.apply_deadline_ms.is_some(),
+            row.promotes,
+            "{} promotes={} wall={:?}",
+            row.id,
+            row.promotes,
+            row.apply_deadline_ms
+        );
+    }
 }
