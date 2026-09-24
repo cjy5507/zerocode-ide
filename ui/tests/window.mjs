@@ -68,7 +68,7 @@ import { testComposerAttach } from "./attach.mjs";
 import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
-import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease } from "./conversation-parity.mjs";
+import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -228,6 +228,7 @@ suite("conversation-paths", ({ browser, origin, ok }) => testConversationPaths(b
 suite("conversation-keys", ({ browser, origin, ok }) => testConversationKeys(browser, origin, ok));
 suite("conversation-status", ({ browser, origin, ok }) => testConversationStatus(browser, origin, ok));
 suite("conversation-scroll", ({ browser, origin, ok }) => testConversationScroll(browser, origin, ok));
+suite("conversation-foot", ({ browser, origin, ok }) => testConversationFoot(browser, origin, ok));
 suite("conversation-agents", ({ browser, origin, ok }) => testConversationAgents(browser, origin, ok));
 suite("conversation-todos", ({ browser, origin, ok }) => testConversationTodos(browser, origin, ok));
 suite("conversation-images", ({ browser, origin, ok }) => testConversationImages(browser, origin, ok));

@@ -331,10 +331,18 @@ function revealStatusVerb(word, to, width) {
  * touch that a box inside the list can still scroll (a tool's well, a diff,
  * a code block) is that box's. Sending comes back as well and glides home
  * (`scrollToBottomOnSend`, on by default), and while the glide is young
- * (`g25`) new words keep it gliding. The extension grows no "jump to latest"
- * button, and neither does this page. The numbers, the keys and what keeps a
+ * (`g25`) new words keep it gliding. The numbers, the keys and what keeps a
  * Space for itself are the panel's own, held to its snapshot by
- * `the_conversation_wears_the_extensions_own_measures`. */
+ * `the_conversation_wears_the_extensions_own_measures`.
+ *
+ * Where this page parts from the panel, because the person asked (t-6824,
+ * 2026-09-24: 「대화를 누르면 맨 아래부터 — CC처럼 지금 보던 화면부터. 위쪽에
+ * 있으면 맨 아래로 가기가 있음 좋겠어」): a list opens at its foot the first
+ * time it has a box — a page built while its leaf was off screen had no
+ * height to go to the foot of, and opened at its top — and keeps to it when
+ * its box changes size; a conversation looked at again stands on the row its
+ * reader left it on; and a reader who is not following gets a button back
+ * to the foot (`chatFootDoorNode`). The extension grows no such button. */
 const CHAT_FOLLOW = Object.freeze({ slack: 50, intent: 300, glide: 2000 });
 const CHAT_FOLLOW_KEYS = Object.freeze({ up: new Set(["ArrowUp", "PageUp", "Home"]), down: new Set(["ArrowDown", "PageDown", "End"]) });
 const CHAT_FOLLOW_CONTROL = "button, [role=\"button\"], input, textarea, [contenteditable]:not([contenteditable=\"false\"])";
@@ -355,7 +363,7 @@ function chatFootGap(list) {
  * list. */
 function chatFollowState(list) {
   list.__follow ??= {
-    away: false, top: list.scrollTop, height: list.scrollHeight, intent: null, at: 0, touch: null, gliding: null,
+    away: false, top: list.scrollTop, height: list.scrollHeight, intent: null, at: 0, touch: null, gliding: null, placed: false,
   };
   noteChatScroll(list, list.__follow);
   return list.__follow;
@@ -365,10 +373,11 @@ function chatFollowState(list) {
  * leaving — unless the list only shrank under a reader who never asked to go
  * up, or it stands at its very foot — and down into the last 50px is coming
  * back, unless the person was on the way up or the move only kept pace with
- * rows that grew above. */
+ * rows that grew above. A list with no box (its page off screen) reads a top
+ * of 0 that is no move of anyone's, and is not read. */
 function noteChatScroll(list, state) {
   const top = list.scrollTop;
-  if (top === state.top) return;
+  if (top === state.top || list.clientHeight === 0) return;
   const height = list.scrollHeight;
   const gap = height - top - list.clientHeight;
   const intent = Date.now() - state.at < CHAT_FOLLOW.intent ? state.intent : null;
@@ -421,6 +430,87 @@ function returnToFoot(list) {
   state.away = false;
   if (chatFootGap(list) >= CHAT_FOLLOW.slack) state.gliding = Date.now();
   carryToFoot(list);
+  paintFootDoor(list);
+}
+
+/* Whether the list is not following its words — the reader left, or it
+ * stands beyond the slack with no glide on the way: what the foot's button
+ * is shown for. */
+function chatOffFoot(list) {
+  const state = chatFollowState(list);
+  return state.away || (state.gliding === null && chatFootGap(list) >= CHAT_FOLLOW.slack);
+}
+
+/* The foot's button worn as the list stands: one class, and no write when
+ * it already says so. */
+function paintFootDoor(list) {
+  list.__door?.classList.toggle("is-shown", chatOffFoot(list));
+}
+
+/* The way back to the foot (t-6824): a button over the list's lower right,
+ * shown while the list is not following its words, that glides home and
+ * follows again. Named by the words it shows; no tooltip. */
+function chatFootDoorNode(list) {
+  const door = document.createElement("button");
+  door.type = "button";
+  door.className = "chat-foot-door";
+  const words = t("worker.toFoot", "맨 아래로");
+  door.setAttribute("aria-label", words);
+  // Enter and Space, while it has focus, are its own — the window's key
+  // sink (`rearmKeySink`) would otherwise take them for the terminal.
+  door.dataset.keyboardOwner = "true";
+  const said = document.createElement("span");
+  said.textContent = words;
+  door.append(iconNode("arrow-down"), said);
+  door.addEventListener("click", () => {
+    returnToFoot(list);
+    // Pressed from the keyboard, the button hides under the focus: the keys
+    // go on to the list it brought home. A pointer's press leaves the focus
+    // where it was (the composer, as often as not).
+    if (document.activeElement === door) list.focus({ preventScroll: true });
+  });
+  list.__door = door;
+  paintFootDoor(list);
+  return door;
+}
+
+/* Where the list stands the first time it has a box: on the row its reader
+ * was reading when the page last left the host (`keepChatPlace`), as far
+ * under the list's top as it stood — or, never left or that row gone, at
+ * its foot. A list with no box yet is placed by its watch (`keepToFoot`)
+ * when it gets one. */
+function standChatPlace(list) {
+  if (list.clientHeight === 0) return;
+  const state = chatFollowState(list);
+  state.placed = true;
+  const place = list.__run?.chatPlace ?? null;
+  const row = place === null ? null : list.querySelector(`:scope > [data-turn="${place.turn}"]`);
+  if (row) {
+    state.away = true;
+    list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top - place.offset;
+  } else {
+    state.away = false;
+    list.scrollTop = list.scrollHeight;
+  }
+  paintFootDoor(list);
+}
+
+/* The reader's place, kept on the run as its page leaves the host: nothing
+ * while the list follows its foot, else the first row under the list's top
+ * (a person's words stuck there are not where they read) and how far under
+ * it that row stands. A list with no box keeps the place it had. */
+function keepChatPlace(list) {
+  const run = list?.__run;
+  if (!run || list.clientHeight === 0) return;
+  run.chatPlace = null;
+  if (!chatAway(list)) return;
+  const top = list.getBoundingClientRect().top;
+  for (const row of list.querySelectorAll(":scope > [data-turn]:not(.is-user)")) {
+    const box = row.getBoundingClientRect();
+    if (box.bottom <= top) continue;
+    run.chatPlace = { turn: row.dataset.turn, offset: box.top - top };
+    return;
+  }
 }
 
 /* The conversation list of the page `node` stands on, or null. */
@@ -485,7 +575,25 @@ function keepToFoot(list) {
     } else if (CHAT_FOLLOW_KEYS.up.has(event.key)) leave();
     else if (CHAT_FOLLOW_KEYS.down.has(event.key)) toward();
   });
-  list.addEventListener("scroll", () => noteChatScroll(list, state), { passive: true });
+  list.addEventListener("scroll", () => {
+    noteChatScroll(list, state);
+    paintFootDoor(list);
+  }, { passive: true });
+  // The list's own box: the first one places it (`standChatPlace`), and a
+  // list that follows its foot keeps to it when the box changes size — a
+  // shorter window, a notice standing over it. Its border box: the room kept
+  // under the words for the dock is padding the dock's own watch writes and
+  // answers for (`chatDockNode`), and a content box would be asked again in
+  // the same frame — WebKit's "ResizeObserver loop" error.
+  if (typeof ResizeObserver === "function") {
+    list.__footWatch = new ResizeObserver(() => {
+      if (list.clientHeight === 0) return;
+      if (!state.placed) standChatPlace(list);
+      else if (!state.away) carryToFoot(list);
+      paintFootDoor(list);
+    });
+    list.__footWatch.observe(list, { box: "border-box" });
+  }
 }
 
 /* ---- a helper at work (t-6323 A6) ------------------------------------------

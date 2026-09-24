@@ -4,8 +4,10 @@
  * each pinned where a person would see it (t-6323). The checks read the page
  * a browser actually laid out — a font is the face the engine drew with, a
  * fold is the height the row stood at — never the source's own spelling. */
-import { openWindowTestPage } from "./window-boot.mjs";
-import { FIXTURE_PNG, conversationFixture, openFixtureConversation } from "./conversation-perf.mjs";
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { FIXTURE_PNG, conversationFixture, openFixtureConversation, webkitType } from "./conversation-perf.mjs";
 
 /* A wire session's page opened on `history` — the page with the most roads
  * on it (turns, a live answer, the composer's wire) — painted once. */
@@ -618,7 +620,8 @@ export async function testConversationStatus(browser, origin, ok) {
  * back into the last 50px comes back. A wheel a box inside the list can still
  * scroll is that box's. Sending comes back and takes the list to its foot
  * (`scrollToBottomOnSend`, on by default). The extension grows no "jump to
- * latest" button, so this page grows none either. */
+ * latest" button; this page grows one because the person asked for it
+ * (사용자 요청 09-24, t-6824 — `testConversationFoot`), hidden at the foot. */
 export async function testConversationScroll(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -714,8 +717,12 @@ export async function testConversationScroll(browser, origin, ok) {
       face.querySelector(".worker-composer").requestSubmit();
     });
     seen.afterSend = await still();
-    seen.noLatestDoor = await page.evaluate(() =>
-      document.querySelector("#worker-view").querySelectorAll("[class*='latest'], [class*='jump']").length === 0);
+    // The one way back to the foot is the person's button (사용자 요청 09-24),
+    // and at the foot it is not shown.
+    seen.footDoor = await page.evaluate(() => {
+      const doors = document.querySelector("#worker-view").querySelectorAll(".chat-foot-door, [class*='latest'], [class*='jump']");
+      return { doors: doors.length, shown: doors[0]?.classList.contains("is-shown") ?? null };
+    });
     ok(
       "A5: new words keep a list at its foot there; a wheel upward — even inside the last 50px — leaves at once and later words leave it where it stands; a wheel back to the foot comes back",
       seen.start.gap <= 1 && seen.wheeledUp.gap > 1 && seen.afterWheelUp.top === seen.wheeledUp.top &&
@@ -730,11 +737,233 @@ export async function testConversationScroll(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A5: sending takes the list to its foot, and no jump-to-latest door stands on the page — the extension has none",
-      seen.afterSend.gap <= 1 && seen.noLatestDoor,
+      "A5: sending takes the list to its foot, and the one way back to it — the person's button (사용자 요청 09-24; the extension has none) — is not shown there",
+      seen.afterSend.gap <= 1 && seen.footDoor.doors === 1 && seen.footDoor.shown === false,
       JSON.stringify(seen),
     );
     ok("A5: the scroll raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A5, the person's own ask (t-6824, 2026-09-24): 「지금 대화를 누르면 대화
+ * 목록 맨 아래부터 시작하면 좋을 것 같아 — CC처럼 지금 보던 화면부터. 아니면
+ * 위쪽에 있으면 맨 아래로 가기가 있음 좋겠어.」 A conversation opens at its
+ * foot — also when its page was built before the list had a box (a leaf not
+ * yet on screen), and it stays there when the list's box changes size. A
+ * reader who left the foot gets a button back to it, gone again at the foot;
+ * a conversation looked at again stands where its reader left it. The
+ * extension has no such button; this page grows one because the person asked
+ * for it. */
+export async function testConversationFoot(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const history = (said) => {
+      const rows = [];
+      for (let at = 0; at < 40; at += 1) {
+        rows.push({ role: "user", text: `${said} ${at}` });
+        rows.push({ role: "assistant", text: `답 ${at}: ${"긴 문장이 여러 줄로 이어진다. ".repeat(6)}` });
+      }
+      return rows;
+    };
+    await page.evaluate(() => {
+      let wire = 40;
+      window.__NEXT_WIRE__ = () => {
+        wire += 1;
+        window.__ANSWER__.wire_start = (args) => ({ id: wire, agent: args.agent, protocol: "claude-stream", version: "2.1.280", model: null, session: null });
+      };
+      // The list on screen, its door, and where both stand once the list has
+      // stopped moving (the door's glide included).
+      window.__FOOT__ = {
+        list: () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility()) ?? null,
+        door: () => window.__FOOT__.list()?.parentElement.querySelector(":scope > .chat-foot-door") ?? null,
+        async still() {
+          const list = window.__FOOT__.list();
+          let last = -1;
+          let same = 0;
+          for (let beat = 0; beat < 240 && same < 5; beat += 1) {
+            await new Promise((done) => requestAnimationFrame(done));
+            same = list.scrollTop === last ? same + 1 : 0;
+            last = list.scrollTop;
+          }
+          const door = window.__FOOT__.door();
+          return {
+            top: Math.round(list.scrollTop),
+            gap: Math.round(list.scrollHeight - list.scrollTop - list.clientHeight),
+            door: door === null ? null : door.classList.contains("is-shown") && door.checkVisibility({ visibilityProperty: true }),
+          };
+        },
+        // The row the reader is reading: the first one under the list's top
+        // edge that is not a person's words stuck there.
+        reading() {
+          const list = window.__FOOT__.list();
+          const top = list.getBoundingClientRect().top;
+          const row = [...list.querySelectorAll(":scope > [data-turn]:not(.is-user)")]
+            .find((one) => one.getBoundingClientRect().bottom > top);
+          return row ? { turn: row.dataset.turn, offset: Math.round(row.getBoundingClientRect().top - top) } : null;
+        },
+      };
+    });
+    const still = () => page.evaluate(() => window.__FOOT__.still());
+    const reading = () => page.evaluate(() => window.__FOOT__.reading());
+    const wheelOver = async (dy) => {
+      const box = await page.evaluate(() => {
+        const rect = window.__FOOT__.list().getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 3 };
+      });
+      await page.mouse.move(box.x, box.y);
+      await page.mouse.wheel(0, dy);
+      return still();
+    };
+    let grown = 0;
+    const grow = async () => {
+      grown += 1;
+      await page.evaluate(async (grown) => {
+        window.__CONVERSATION__.live = [{ role: "assistant", text: `흐르는 ${"새로 온 말이 한 줄 더 붙는다. ".repeat(30 * grown)}` }];
+        await pollHelperPages();
+        for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      }, grown);
+      return still();
+    };
+    const seen = {};
+
+    // --- a_conversation_opens_at_its_foot --------------------------------
+    // Built while its leaf had no box (the page is painted, then the leaf
+    // shows it): the list has no height to go to the foot of until then.
+    await page.evaluate(() => {
+      window.__NEXT_WIRE__();
+      const veil = document.createElement("style");
+      veil.id = "foot-veil";
+      veil.textContent = ".worker-view { display: none !important; }";
+      document.head.append(veil);
+    });
+    await openConversation(page, history("가"), { status: "working", live: [{ role: "assistant", text: "흐르는" }] });
+    seen.first = await page.evaluate(() => activeTabId);
+    await page.evaluate(() => document.getElementById("foot-veil").remove());
+    seen.openedUnseen = await still();
+    // Another conversation, opened on screen.
+    await page.evaluate(async (rows) => {
+      window.__NEXT_WIRE__();
+      await openWirePage("claude", "/tmp/zerocode-window-test", { history: rows });
+      await pollHelperPages();
+    }, history("나"));
+    seen.second = await page.evaluate(() => activeTabId);
+    seen.openedSecond = await still();
+    // The window grows shorter: a list at its foot stays there.
+    const size = page.viewportSize();
+    await page.setViewportSize({ width: size.width, height: size.height - 240 });
+    seen.shrunk = await still();
+    await page.setViewportSize(size);
+    seen.regrown = await still();
+    ok(
+      "a_conversation_opens_at_its_foot: a conversation opens at its foot — one whose page was built before its leaf was on screen too — and a list at its foot stays there when the window changes its height",
+      seen.openedUnseen.gap <= 1 && seen.openedSecond.gap <= 1 && seen.shrunk.gap <= 1 && seen.regrown.gap <= 1,
+      JSON.stringify(seen),
+    );
+
+    // --- a_reader_who_left_the_foot_gets_a_way_back_and_the_button_hides_at_the_foot
+    await page.evaluate((id) => setActiveTab(id), seen.first);
+    seen.backAtFoot = await still();
+    seen.doorShape = await page.evaluate(() => {
+      const door = window.__FOOT__.door();
+      return door && { tag: door.tagName, type: door.type, label: door.getAttribute("aria-label"), words: door.textContent.trim() };
+    });
+    seen.left = await wheelOver(-900);
+    seen.leftGrown = await grow();
+    const doorAt = await page.evaluate(() => {
+      const rect = window.__FOOT__.door()?.getBoundingClientRect();
+      return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+    });
+    if (doorAt) await page.mouse.click(doorAt.x, doorAt.y);
+    seen.pressed = await still();
+    seen.followsAgain = await grow();
+    // The keyboard reaches it too: a button, focused, answers Enter.
+    seen.leftAgain = await wheelOver(-900);
+    await page.evaluate(() => window.__FOOT__.door()?.focus());
+    await page.keyboard.press("Enter");
+    seen.entered = await still();
+    ok(
+      "a_reader_who_left_the_foot_gets_a_way_back_and_the_button_hides_at_the_foot: at the foot the button is not shown; a reader who wheels up gets it — a button with its own name — and new words leave them where they stand with it shown; pressing it (the pointer, or Enter) takes the list to its foot, hides it and the words are followed again",
+      seen.backAtFoot.gap <= 1 && seen.backAtFoot.door === false &&
+        seen.doorShape?.tag === "BUTTON" && seen.doorShape.type === "button" && Boolean(seen.doorShape.label) &&
+        seen.left.gap > 50 && seen.left.door === true &&
+        seen.leftGrown.top === seen.left.top && seen.leftGrown.door === true &&
+        seen.pressed.gap <= 1 && seen.pressed.door === false && seen.followsAgain.gap <= 1 && seen.followsAgain.door === false &&
+        seen.leftAgain.door === true && seen.entered.gap <= 1 && seen.entered.door === false,
+      JSON.stringify(seen),
+    );
+
+    // --- reopening_the_same_conversation_keeps_the_readers_place ----------
+    seen.readerLeft = await wheelOver(-1500);
+    seen.place = await reading();
+    await page.evaluate((id) => setActiveTab(id), seen.second);
+    seen.otherAtFoot = await still();
+    await page.evaluate((id) => setActiveTab(id), seen.first);
+    seen.returned = await still();
+    seen.returnedPlace = await reading();
+    // Looked away from and back to once more, it is still where it was left.
+    await page.evaluate((id) => setActiveTab(id), seen.second);
+    await page.evaluate((id) => setActiveTab(id), seen.first);
+    seen.stillAway = await still();
+    // A pane's own conversation turned to its terminal and back.
+    await page.evaluate(async (turns) => {
+      const term = await openTermTab({ placement: "tab" });
+      paneAgents.set(term, "zo");
+      hookStates.set(term, "idle");
+      window.__FOOT_TERM__ = term;
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns, skipped: false, more: false, folded: false, model: "claude-opus-5" });
+      await setPaneChat(term, true);
+      await pollHelperPages();
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [], skipped: false, more: false, folded: false, model: "claude-opus-5" });
+    }, history("다"));
+    seen.paneOpened = await still();
+    seen.paneLeft = await wheelOver(-1500);
+    seen.panePlace = await reading();
+    await page.evaluate(async () => {
+      await setPaneChat(window.__FOOT_TERM__, false);
+      for (let beat = 0; beat < 2; beat += 1) await window.__PAINTED__();
+      await setPaneChat(window.__FOOT_TERM__, true);
+      await pollHelperPages();
+    });
+    seen.paneReturned = await still();
+    seen.paneReturnedPlace = await reading();
+    const near = (a, b) => a !== null && b !== null && a.turn === b.turn && Math.abs(a.offset - b.offset) <= 2;
+    ok(
+      "reopening_the_same_conversation_keeps_the_readers_place: a conversation looked away from and back to stands at the row its reader left it on, the button shown — the other one, left at its foot, opens at its foot — and a pane's conversation turned to its terminal and back does the same",
+      seen.readerLeft.gap > 50 && seen.otherAtFoot.gap <= 1 &&
+        near(seen.place, seen.returnedPlace) && seen.returned.door === true &&
+        seen.stillAway.top === seen.returned.top && seen.stillAway.door === true && seen.paneOpened.gap <= 1 &&
+        seen.paneLeft.gap > 50 && near(seen.panePlace, seen.paneReturnedPlace) && seen.paneReturned.door === true,
+      JSON.stringify(seen),
+    );
+
+    // --- the_button_names_itself_in_five_languages_without_a_title --------
+    await page.evaluate((id) => setActiveTab(id), seen.first);
+    seen.words = await page.evaluate(async () => {
+      const words = {};
+      for (const code of ["ko", "en", "ja", "zh", "es"]) {
+        setLocale(code, { refresh: false, persist: false });
+        paintWorkerView(tabs.find((tab) => tab.id === activeTabId));
+        await window.__PAINTED__();
+        const door = window.__FOOT__.door();
+        words[code] = door && {
+          label: door.getAttribute("aria-label"),
+          said: door.textContent.trim(),
+          titled: door.hasAttribute("title") || door.querySelector("[title]") !== null,
+        };
+      }
+      setLocale("ko", { refresh: false, persist: false });
+      return words;
+    });
+    const spoken = Object.values(seen.words);
+    ok(
+      "the_button_names_itself_in_five_languages_without_a_title: the button says its name in ko, en, ja, zh and es — five different sentences, the words it shows the same as the name it is read by — and carries no title tooltip",
+      spoken.every((one) => one && one.label && one.said === one.label && !one.titled) &&
+        new Set(spoken.map((one) => one?.label)).size === 5,
+      JSON.stringify(seen.words),
+    );
+    ok("A5: the foot and its button raised no page errors", faults.length === 0, JSON.stringify(faults));
   } finally {
     await page.close();
   }
@@ -1358,4 +1587,37 @@ export async function testConversationRelease(browser, origin, ok) {
   } finally {
     await page.close();
   }
+}
+
+/* Run by itself (`node ui/tests/conversation-parity.mjs [--engine webkit]
+ * [name…]`): every check above in file order, or only those whose function
+ * names contain one of the words given, in Chromium or in WebKit (the
+ * installed window's engine). The window gate runs the same checks as its
+ * `conversation-*` suites. */
+if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const all = {
+    testConversationFont, testConversationFolds, testConversationPaths, testConversationKeys, testConversationStatus,
+    testConversationScroll, testConversationFoot, testConversationAgents, testConversationTodos, testConversationImages,
+    testConversationCopies, testConversationShelf, testConversationRelease,
+  };
+  const argv = process.argv.slice(2);
+  const at = argv.indexOf("--engine");
+  const engine = at >= 0 ? argv.splice(at, 2)[1] : "chromium";
+  const wanted = argv.map((word) => word.toLowerCase());
+  const { files, origin } = await createWindowServer();
+  const browser = await (engine === "webkit" ? webkitType() : chromium).launch({ headless: true });
+  let failed = 0;
+  try {
+    for (const [name, check] of Object.entries(all)) {
+      if (wanted.length && !wanted.some((word) => name.toLowerCase().includes(word))) continue;
+      await check(browser, origin, (said, pass, details = "") => {
+        console.log(`${pass ? "PASS" : "FAIL"} ${said}${!pass ? `\n  ${details}` : ""}`);
+        if (!pass) failed += 1;
+      });
+    }
+  } finally {
+    await browser.close();
+    files.close();
+  }
+  if (failed) process.exitCode = 1;
 }

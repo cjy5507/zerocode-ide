@@ -14855,6 +14855,67 @@ details[open] > .helper-cap::after {
   margin: 0 auto;
 }
 
+/* The way back to the foot (t-6824, the person's ask — the extension has
+ * none): a pill over the list's lower right, above the dock when there is
+ * one, shown while the list is not following its words. One class shows it
+ * (`is-shown`); hidden it is out of the tab order and the reader's way. */
+.chat-foot-door {
+  position: absolute;
+  right: var(--helper-gutter);
+  bottom: calc(var(--chat-dock-h) + var(--chat-dock-inset) + var(--space-2));
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--chat-send-size);
+  padding: 0 var(--space-3) 0 var(--space-2);
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--radius-pill);
+  background: var(--chat-composer-bg);
+  box-shadow: var(--chat-shadow);
+  color: var(--ink-chalk);
+  font: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(var(--space-1));
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    visibility 0s linear var(--motion-fast);
+}
+
+.chat-foot-door.is-shown {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard);
+}
+
+.chat-foot-door:hover,
+.chat-foot-door:focus-visible {
+  border-color: var(--chat-accent);
+}
+
+.chat-foot-door:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 var(--chat-focus-ring) color-mix(in srgb, var(--chat-accent) 12%, transparent),
+    var(--chat-shadow);
+}
+
+.chat-foot-door > .icon {
+  flex: none;
+  width: 1.1em;
+  height: 1.1em;
+}
+
 /* The list's last stretch fades under the dock (`messageGradient`). */
 .worker-view.is-chat-page:has(> .chat-dock)::after {
   content: "";
