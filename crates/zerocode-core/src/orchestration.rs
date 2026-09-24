@@ -9112,6 +9112,19 @@ impl Ledger {
                 if wall.wall != lift.wall || phase != WallPhase::Lifting {
                     return None;
                 }
+                if !matches!(
+                    read_lift(
+                        &worker.id,
+                        &wall,
+                        lift.since_ms,
+                        Some(lift.marker.clone()),
+                        Some(&lift.headroom),
+                        now_ms,
+                    ),
+                    LiftReading::Lifted(_)
+                ) {
+                    return None;
+                }
                 Some((
                     run.id.clone(),
                     serde_json::json!({
@@ -11790,12 +11803,12 @@ pub struct QuotaWaitPolicy {
 /// The table as measured on this machine (2026-09-24, the ledger's seven
 /// `quota_walled` rows and their workers' transcripts).
 ///
-/// - `slack_ms` — the stall grace. All seven walls were Claude Code
-///   2.1.270–2.1.280, which waits out its own reset and types its own
-///   continuation (a user record with `origin.kind: "auto-continuation"`):
-///   49–78 s after the reset on the four that recorded one, its first answer
-///   3–113 s after on all seven. The grace is longer than the longest of
-///   them, and it is already the window's measure of a pane that stalled.
+/// - `slack_ms` — the stall grace. Four of seven observed Claude Code
+///   2.1.270–2.1.280 episodes recorded `origin.kind: "auto-continuation"`,
+///   49–78 s after reset. All seven had a non-error answer 3–113 s after
+///   reset, but three also answered before it: those observations do not
+///   establish seven automatic resumptions. The grace exceeds the latest
+///   observed post-reset answer and is already the window's stall measure.
 /// - `max_wait_ms` — six hours. A session window is five, so a session wall
 ///   always resets inside it; a weekly or monthly wall never does. Traycer's
 ///   fallback ladder waits the same by default (`fallback-policy.ts:365-379`).
@@ -12013,8 +12026,13 @@ pub fn read_lift(
         return LiftReading::MovedOn;
     };
     let Some(held) = headroom.filter(|held| {
-        wall.resets_at_ms
-            .is_some_and(|at| held.updated_at_ms >= at && held.updated_at_ms <= now_ms)
+        // A failed refresh may carry a retained figure. Its fresh error
+        // timestamp is not a new observation of available quota.
+        held.status == "ok"
+            && held.failure_kind.is_none()
+            && wall
+                .resets_at_ms
+                .is_some_and(|at| held.updated_at_ms >= at && held.updated_at_ms <= now_ms)
     }) else {
         return LiftReading::Unread;
     };

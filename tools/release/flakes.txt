@@ -9,6 +9,10 @@ root:codex_queue::tests::installed_codex_starts_and_cleans_an_explicit_worker_si
 # 2026-09-14 (coordinator gate for t-3993 on a loaded machine, load 11-19): the sidecar probe read `Unknown` where
 # `Confirmed` was expected in one of three full `--bins` runs, green solo x3 — the same codex-sidecar timing family as
 # the line above; the two fake-Codex nudge tests below flaked in the other two runs, also green solo x3.
+# 2026-09-24 t-6671 audit at e41bb0c7: full shell-test repeats this and the hook-pointer flake below;
+# both 3 s limits and their implementations are unchanged since v1.1.20. Solo x3: queue 0.26-0.46 s,
+# hook-pointer 2.62-2.84 s at load 80-96; every run passed. The new desk projection plus JSON costs
+# p50 0.026 ms / p95 0.094 ms for 60 tasks, 5 workers and 20 letters in a release build.
 root:codex_queue::tests::bound_queue_process_receives_the_fixed_pointer_and_minimal_environment
 zo:preferences::tests::persisted_fast_models_are_normalized_to_the_bare_family
 zo:a_pane_shrunk_without_sigwinch_loses_no_rows

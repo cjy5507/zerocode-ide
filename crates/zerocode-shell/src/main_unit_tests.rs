@@ -12043,7 +12043,7 @@ fn the_shared_usage_door_keeps_every_reason_a_snapshot_is_dropped() {
 
 /// A usage read in the window's log is one line of closed words: the road
 /// that answered, what the road before it failed of, the time it took, and
-/// this window's own sentence for why — never whose login it was.
+/// its typed failure kind — never a failure message or whose login it was.
 ///
 /// The live window had no such line at all (t-6583), so "the gauge is slow"
 /// could not be told apart into "the terminal ran" and "the API was slow".
@@ -12097,11 +12097,9 @@ fn a_usage_read_line_names_its_road_and_never_whose_login_it_was() {
     );
     assert_eq!(
         refused,
-        "usage claude road=oauth login=file ms=301 status=error kind=stale-token \
-         reason=HTTP 401"
+        "usage claude road=oauth login=file ms=301 status=error kind=stale-token"
     );
-    // The slow road names what the fast one failed of, and a sentence with a
-    // newline in it is still one line.
+    // The slow road names what the fast one failed of without copying prose.
     let slow = usage_read_line(
         "claude",
         UsageRoad::Terminal {
@@ -12117,14 +12115,13 @@ fn a_usage_read_line_names_its_road_and_never_whose_login_it_was() {
     );
     assert_eq!(
         slow,
-        "usage claude road=terminal oauth=network ms=24312 status=error \
-         reason=/usage 화면이 렌더되지 않았습니다"
+        "usage claude road=terminal oauth=network ms=24312 status=error"
     );
     // A press that found a read already out went nowhere of its own.
     let joined = usage_read_line("codex", UsageRoad::Cache, 0, None, true);
     assert_eq!(joined, "usage codex road=cache ms=0 status=none forced");
-    // A reason is bounded.
-    let long = "x".repeat(USAGE_LOG_REASON_CHARS * 2);
+    // Long messages are omitted in full, just like short ones.
+    let long = "x".repeat(1024);
     let bounded = usage_read_line(
         "kimi",
         UsageRoad::Api,
@@ -12132,16 +12129,29 @@ fn a_usage_read_line_names_its_road_and_never_whose_login_it_was() {
         Some(&read("error", None, Some(&long))),
         false,
     );
-    assert!(
-        bounded.ends_with(&format!(" reason={}", "x".repeat(USAGE_LOG_REASON_CHARS))),
-        "{bounded}"
-    );
+    assert_eq!(bounded, "usage kimi road=api ms=5 status=error");
     for line in [&answered, &refused, &slow, &joined, &bounded] {
         assert!(
             !line.contains(WHOSE),
             "a log line named the account: {line}"
         );
         assert!(!line.contains('\n'), "a log line broke in two: {line}");
+    }
+    // Transport errors can quote a redirected URL, a proxy login or a file
+    // path. A length bound does not make any part of that sentence public.
+    for reason in [
+        "request to https://example.invalid/?access_token=fixture-secret failed",
+        "proxy login fixture-account@example.invalid refused",
+        "credential file /Users/dev/private-login could not be read",
+    ] {
+        let line = usage_read_line(
+            "kimi",
+            UsageRoad::Api,
+            5,
+            Some(&read("error", Some(FailureKind::Network), Some(reason))),
+            false,
+        );
+        assert_eq!(line, "usage kimi road=api ms=5 status=error kind=network");
     }
     // One spelling per kind: the log says the word the snapshot file says.
     let on_file = serde_json::to_value(FailureKind::MissingCredentials).expect("a kind serialises");

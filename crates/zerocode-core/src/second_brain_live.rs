@@ -241,13 +241,21 @@ fn keep_tail_lines(path: &Path, keep: usize) -> io::Result<()> {
 /// Temp beside, then rename: a reader never sees half a trace, and a crash
 /// mid-write leaves the old file whole.
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    /* 옆자리의 임시 파일은 원래 확장자 뒤에 `.tmp`를 단다 — `.md`도 `.jsonl`도 같은 손(t-4140 S5). */
-    let temp = path.with_extension(match path.extension().and_then(|held| held.to_str()) {
-        Some(held) => format!("{held}.tmp"),
-        None => "tmp".to_string(),
-    });
-    fs::write(&temp, bytes)?;
-    fs::rename(&temp, path)
+    // An existing temporary path may be a link to a page or raw source.
+    // Each writer owns a fresh sibling; create_new refuses even a dangling
+    // link and keeps simultaneous snapshot writers from sharing a buffer.
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let written = file.write_all(bytes);
+    drop(file);
+    let result = written.and_then(|()| fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 /// The last `budget` bytes of a file as text, starting at the first whole line

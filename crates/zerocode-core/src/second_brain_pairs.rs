@@ -75,12 +75,16 @@ pub fn save_proposals(root: &Path, rows: &[ProposalRecord]) -> std::io::Result<(
         return Err(std::io::Error::other("no parent"));
     };
     fs::create_dir_all(parent)?;
-    let temp = path.with_extension("tmp");
-    fs::write(
-        &temp,
-        serde_json::to_vec_pretty(rows).map_err(std::io::Error::other)?,
-    )?;
-    fs::rename(temp, path)
+    // The derived cache must not be redirected into wiki/ or raw/.
+    if fs::symlink_metadata(parent)?.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "proposal directory is a symbolic link",
+        ));
+    }
+    crate::second_brain_live::write_atomically(
+        &path,
+        &serde_json::to_vec_pretty(rows).map_err(std::io::Error::other)?,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +336,39 @@ mod tests {
                     .iter()
                     .any(|pair| pair.proposal.as_deref() == Some("merge")))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_proposal_snapshot_cannot_follow_a_temporary_link_into_raw() {
+        let vault = tempfile::tempdir().expect("vault");
+        let source = vault.path().join("source.md");
+        fs::write(&source, "immutable source").expect("source");
+        let path = vault.path().join(PROPOSALS_FILE);
+        fs::create_dir_all(path.parent().expect("parent")).expect("cache directory");
+        std::os::unix::fs::symlink(&source, path.with_extension("tmp")).expect("link");
+        let _ = save_proposals(vault.path(), &[]);
+        assert_eq!(
+            fs::read_to_string(source).expect("source remains"),
+            "immutable source"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_proposal_snapshot_refuses_a_cache_directory_linked_into_raw() {
+        let vault = tempfile::tempdir().expect("vault");
+        let raw = vault.path().join("raw");
+        fs::create_dir(&raw).expect("raw");
+        let parent = vault
+            .path()
+            .join(PROPOSALS_FILE)
+            .parent()
+            .expect("parent")
+            .to_path_buf();
+        std::os::unix::fs::symlink(&raw, parent).expect("linked directory");
+        assert!(save_proposals(vault.path(), &[]).is_err());
+        assert_eq!(fs::read_dir(raw).expect("raw unchanged").count(), 0);
     }
 
     #[test]

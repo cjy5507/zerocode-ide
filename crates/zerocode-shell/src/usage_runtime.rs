@@ -1134,11 +1134,6 @@ impl Scanned {
     }
 }
 
-/// How much of a failure's sentence a log line keeps. The sentences are this
-/// window's own and short; the bound is for the one that is not — a transport
-/// error that quotes a URL and its whole cause chain.
-pub(super) const USAGE_LOG_REASON_CHARS: usize = 160;
-
 /// A failure kind in its one spelling: the wire's, which the snapshot file and
 /// Orca already share — not a second list of words that could drift from it.
 pub(super) fn failure_word(kind: zerocode_core::usage_limit::FailureKind) -> String {
@@ -1150,11 +1145,11 @@ pub(super) fn failure_word(kind: zerocode_core::usage_limit::FailureKind) -> Str
 
 /// One usage read, as the window's log says it:
 /// `usage <provider> road=<road> [login=<where>|oauth=<kind>] ms=<ms>
-/// status=<status> [kind=<kind>] [forced] [reason=<sentence>]`.
+/// status=<status> [kind=<kind>] [forced]`.
 ///
-/// Closed words, the elapsed time and this window's own sentence for why —
-/// never a token and never whose login it was. The line exists to tell a slow
-/// road from a fast one, and neither of those helps with that.
+/// Closed words and elapsed time only. Failure messages may quote a URL,
+/// credential or private path, so even a shortened message never enters this
+/// durable log. The typed failure kind carries the diagnostic category.
 pub(super) fn usage_read_line(
     provider: &str,
     road: UsageRoad,
@@ -1183,15 +1178,6 @@ pub(super) fn usage_read_line(
     }
     if forced {
         line.push_str(" forced");
-    }
-    // Last, because it is the one field that may hold spaces.
-    if let Some(reason) = read.and_then(|held| held.error.as_deref()) {
-        let said: String = reason
-            .replace(['\r', '\n'], " ")
-            .chars()
-            .take(USAGE_LOG_REASON_CHARS)
-            .collect();
-        let _ = write!(line, " reason={said}");
     }
     line
 }
