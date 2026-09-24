@@ -7,7 +7,7 @@
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
-import { FIXTURE_PNG, conversationFixture, openFixtureConversation } from "./conversation-perf.mjs";
+import { FIXTURE_PNG, conversationFixture, openFixtureConversation, webkitType } from "./conversation-perf.mjs";
 
 /* A wire session's page opened on `history` — the page with the most roads
  * on it (turns, a live answer, the composer's wire) — painted once. */
@@ -620,7 +620,8 @@ export async function testConversationStatus(browser, origin, ok) {
  * back into the last 50px comes back. A wheel a box inside the list can still
  * scroll is that box's. Sending comes back and takes the list to its foot
  * (`scrollToBottomOnSend`, on by default). The extension grows no "jump to
- * latest" button, so this page grows none either. */
+ * latest" button; this page grows one because the person asked for it
+ * (사용자 요청 09-24, t-6824 — `testConversationFoot`), hidden at the foot. */
 export async function testConversationScroll(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -716,8 +717,12 @@ export async function testConversationScroll(browser, origin, ok) {
       face.querySelector(".worker-composer").requestSubmit();
     });
     seen.afterSend = await still();
-    seen.noLatestDoor = await page.evaluate(() =>
-      document.querySelector("#worker-view").querySelectorAll("[class*='latest'], [class*='jump']").length === 0);
+    // The one way back to the foot is the person's button (사용자 요청 09-24),
+    // and at the foot it is not shown.
+    seen.footDoor = await page.evaluate(() => {
+      const doors = document.querySelector("#worker-view").querySelectorAll(".chat-foot-door, [class*='latest'], [class*='jump']");
+      return { doors: doors.length, shown: doors[0]?.classList.contains("is-shown") ?? null };
+    });
     ok(
       "A5: new words keep a list at its foot there; a wheel upward — even inside the last 50px — leaves at once and later words leave it where it stands; a wheel back to the foot comes back",
       seen.start.gap <= 1 && seen.wheeledUp.gap > 1 && seen.afterWheelUp.top === seen.wheeledUp.top &&
@@ -732,8 +737,8 @@ export async function testConversationScroll(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A5: sending takes the list to its foot, and no jump-to-latest door stands on the page — the extension has none",
-      seen.afterSend.gap <= 1 && seen.noLatestDoor,
+      "A5: sending takes the list to its foot, and the one way back to it — the person's button (사용자 요청 09-24; the extension has none) — is not shown there",
+      seen.afterSend.gap <= 1 && seen.footDoor.doors === 1 && seen.footDoor.shown === false,
       JSON.stringify(seen),
     );
     ok("A5: the scroll raised no page errors", faults.length === 0, faults.join("\n"));
@@ -897,7 +902,7 @@ export async function testConversationFoot(browser, origin, ok) {
     await page.evaluate((id) => setActiveTab(id), seen.first);
     seen.returned = await still();
     seen.returnedPlace = await reading();
-    // Left at the foot, it opens at the foot again.
+    // Looked away from and back to once more, it is still where it was left.
     await page.evaluate((id) => setActiveTab(id), seen.second);
     await page.evaluate((id) => setActiveTab(id), seen.first);
     seen.stillAway = await still();
@@ -928,7 +933,7 @@ export async function testConversationFoot(browser, origin, ok) {
       "reopening_the_same_conversation_keeps_the_readers_place: a conversation looked away from and back to stands at the row its reader left it on, the button shown — the other one, left at its foot, opens at its foot — and a pane's conversation turned to its terminal and back does the same",
       seen.readerLeft.gap > 50 && seen.otherAtFoot.gap <= 1 &&
         near(seen.place, seen.returnedPlace) && seen.returned.door === true &&
-        seen.stillAway.door === true && seen.paneOpened.gap <= 1 &&
+        seen.stillAway.top === seen.returned.top && seen.stillAway.door === true && seen.paneOpened.gap <= 1 &&
         seen.paneLeft.gap > 50 && near(seen.panePlace, seen.paneReturnedPlace) && seen.paneReturned.door === true,
       JSON.stringify(seen),
     );
@@ -958,7 +963,7 @@ export async function testConversationFoot(browser, origin, ok) {
         new Set(spoken.map((one) => one?.label)).size === 5,
       JSON.stringify(seen.words),
     );
-    ok("A5: the foot and its button raised no page errors", faults.length === 0, faults.join("\n"));
+    ok("A5: the foot and its button raised no page errors", faults.length === 0, JSON.stringify(faults));
   } finally {
     await page.close();
   }
@@ -1584,9 +1589,10 @@ export async function testConversationRelease(browser, origin, ok) {
   }
 }
 
-/* Run by itself (`node ui/tests/conversation-parity.mjs [name…]`): every
- * check above in file order, or only those whose function names contain one
- * of the words given. The window gate runs the same checks as its
+/* Run by itself (`node ui/tests/conversation-parity.mjs [--engine webkit]
+ * [name…]`): every check above in file order, or only those whose function
+ * names contain one of the words given, in Chromium or in WebKit (the
+ * installed window's engine). The window gate runs the same checks as its
  * `conversation-*` suites. */
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const all = {
@@ -1594,9 +1600,12 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     testConversationScroll, testConversationFoot, testConversationAgents, testConversationTodos, testConversationImages,
     testConversationCopies, testConversationShelf, testConversationRelease,
   };
-  const wanted = process.argv.slice(2).map((word) => word.toLowerCase());
+  const argv = process.argv.slice(2);
+  const at = argv.indexOf("--engine");
+  const engine = at >= 0 ? argv.splice(at, 2)[1] : "chromium";
+  const wanted = argv.map((word) => word.toLowerCase());
   const { files, origin } = await createWindowServer();
-  const browser = await chromium.launch({ headless: true });
+  const browser = await (engine === "webkit" ? webkitType() : chromium).launch({ headless: true });
   let failed = 0;
   try {
     for (const [name, check] of Object.entries(all)) {

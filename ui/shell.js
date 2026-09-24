@@ -13071,6 +13071,9 @@ function paintHelperPage(host, tab) {
     if (run.wire) paintWireAsk(host, run);
     return;
   }
+  // The page that stood here keeps its reader's place for when it is looked
+  // at again (t-6824).
+  keepChatPlace(held?.turns);
   dropWorkerScreen(tab.pane);
   host.__dockWatch?.disconnect();
   host.classList.add("is-chat-page");
@@ -13082,7 +13085,7 @@ function paintHelperPage(host, tab) {
   // and stands under the last of them.
   const status = helperStatusNode(run);
   turns.appendChild(status);
-  host.append(head, turns);
+  host.append(head, turns, chatFootDoorNode(turns));
   // 문맥은 입력줄의 알약이 말한다. 부모가 없으면 입력줄도 없으므로 그 사실
   // 한 줄만 남는다 — 선 위의 세션은 부모 없이도 제 입력줄을 가진다(보내기가
   // 선으로 간다). The composer floats over the list's foot in the
@@ -13090,8 +13093,9 @@ function paintHelperPage(host, tab) {
   if (owner || run.wire) host.appendChild(chatDockNode(host, workerComposerNode(run, owner)));
   else host.insertBefore(workerWhereNode(run, null), turns);
   if (run.wire) paintWireAsk(host, run);
-  // 처음 서는 페이지는 끝에서 연다 — 사람이 읽는 것은 언제나 끝이다.
-  turns.scrollTop = turns.scrollHeight;
+  // 처음 서는 페이지는 끝에서 연다 — 사람이 읽는 것은 언제나 끝이다. 읽던
+  // 사람이 위에 두고 간 페이지는 그 행에서 연다(t-6824).
+  standChatPlace(turns);
   host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run };
   // A plain Esc on the page interrupts its turn (t-6323 A3).
   interruptOnEscape(host);
@@ -13115,6 +13119,7 @@ function releaseWorkerPage(tab) {
   stopStatusCycle(held.status);
   held.turns.__shelf?.disconnect();
   held.turns.__imageWatch?.disconnect();
+  held.turns.__footWatch?.disconnect();
   host.__dockWatch?.disconnect();
   host.__dockWatch = null;
   host.__helperPage = null;
@@ -13162,6 +13167,7 @@ function paintWorkerView(tab) {
   // 앞 그림이 이 호스트에 걸어 둔 것을 먼저 놓아 준다 — 노드가 사라지는 줄이
   // 바로 다음 줄이다. 헬퍼의 뼈대도 같은 순간에 놓인다: 이 호스트는 이제
   // 다른 페이지의 것이다.
+  keepChatPlace(host.__helperPage?.turns);
   dropWorkerScreen(tab.pane);
   host.__helperPage = null;
   host.classList.remove("is-chat-page");

@@ -406,7 +406,7 @@ export async function measureRounds({ engine = "chromium", rounds = 5 } = {}) {
   return { summary, taken };
 }
 
-function webkitType() {
+export function webkitType() {
   // The same resolution `window-boot.mjs` walks for chromium, for webkit.
   const require = createRequire(import.meta.url);
   let entry;
