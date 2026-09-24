@@ -3768,6 +3768,79 @@ mod tests {
         );
     }
 
+    /// A label closes its run, but not every turn of it: A and B asked one
+    /// question at 100 and 200, A's label came at 300 while B still ran, C
+    /// asked it once more at 400 and was cancelled, and B's label came at
+    /// 500. The rows cannot say whether 500 is B's or C's, so it is no
+    /// confirmed showing — and taken for C's at 400, it ranks page x after
+    /// five unopened turns when B's showing met four. Nor is a request two
+    /// runs on, and a run every label answered carries nothing on: its next
+    /// run of one request is confirmed (astra R3, r4).
+    #[test]
+    fn a_label_a_closed_run_still_owes_is_no_confirmed_showing() {
+        let window = runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
+        let untouched = serde_json::json!({"notCompared": NO_NOTE_TOUCHED});
+        // Four turns left page x unopened, each naming its own showing.
+        let named: Vec<serde_json::Value> = (0..u64::from(window) - 1).map(|n| named_showing(1, 10 + n, 5 + n, false)).collect();
+        let reading = |at: u64| older_reading(at, 7, XY);
+        let label = |at: u64| older_label(at, 7, &untouched);
+        let crossed = [reading(100), reading(200), label(300), reading(400), label(500)];
+        let rows: Vec<_> = named.iter().cloned().chain(crossed.iter().cloned()).collect();
+        let replayed = replay_at(&rows, window);
+        assert_eq!(replayed.named.exposures, named.len(), "{replayed:?}");
+        assert_eq!(
+            (replayed.confirmed.exposures, replayed.confirmed.changed, replayed.conditional.exposures),
+            (0, 0, 2),
+            "a label a run of two requests may still owe was confirmed on the next run's request: {replayed:?}"
+        );
+        // B's label two runs on: C's came at 500, D asked at 600, B's at 700.
+        let rows: Vec<_> = named.iter().cloned().chain(crossed.iter().cloned()).chain([reading(600), label(700)]).collect();
+        let replayed = replay_at(&rows, window);
+        assert_eq!(
+            (replayed.confirmed.exposures, replayed.conditional.exposures),
+            (0, 3),
+            "a request a closed run may still owe was forgotten after one more run: {replayed:?}"
+        );
+        // Two labels on the run of two requests: nothing is owed on, and C's
+        // one request with its one label is C's showing.
+        let settled = [reading(100), reading(200), label(300), label(310), reading(400), label(500)];
+        let replayed = replay_at(&settled, window);
+        assert_eq!(
+            (replayed.confirmed.exposures, replayed.ambiguous),
+            (1, 2),
+            "a run every label answered still held back the next run's showing: {replayed:?}"
+        );
+    }
+
+    /// The same crossing, with the readings apart: the run of two requests
+    /// judged x before y, the later one y before x — and the other way
+    /// round. The late label's mark (`rank` 0, the judgment's first opened)
+    /// names x if it is B's and y if it is C's, so it names no page at all,
+    /// and nothing it says is folded — whichever turn's label came first,
+    /// and whichever order came first. What the rows hold is only A's or
+    /// B's label at 300, which names one page either way (astra R3, r4).
+    #[test]
+    fn a_late_label_folds_only_what_every_turn_it_may_be_would_say() {
+        let window = runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
+        let first_touched = serde_json::json!({"agreed": true, "rank": 0});
+        let yx = ["wiki/y", "wiki/x"];
+        for (owed, later) in [(XY, yx), (yx, XY)] {
+            let rows = [
+                older_reading(100, 7, owed),
+                older_reading(200, 7, owed),
+                older_label(300, 7, &first_touched),
+                older_reading(400, 7, later),
+                older_label(500, 7, &first_touched),
+            ];
+            let replayed = replay_at(&rows, window);
+            assert_eq!(
+                (replayed.confirmed.exposures, replayed.undetermined, replayed.observed),
+                (0, 1, 1),
+                "{owed:?} then {later:?}: the late label was read off the later request's order alone: {replayed:?}"
+            );
+        }
+    }
+
     /// What the demand costs a recall on this machine, printed: the first
     /// fold of a ledger the size of this machine's
     /// (`ZO_RERANK_REPLAY_LEDGER`, copied; else 1,300 synthetic rows), a
