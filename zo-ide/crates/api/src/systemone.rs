@@ -165,6 +165,46 @@ pub enum SystemOneCriteria {
     /// Level descriptions, the low end of the scale first. A level's number is
     /// its place here, counted from zero.
     Ordered(Vec<String>),
+    /// Option name → what it covers, what belongs to another option, and
+    /// examples: a choice whose options are easily confused, each described
+    /// by the same three keys so the model compares them directly
+    /// (docs.typesafe.ai, how-to-build: "define contrastive Choice criteria").
+    Contrastive(BTreeMap<String, SystemOneContrast>),
+}
+
+/// One option of a [`SystemOneCriteria::Contrastive`] choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SystemOneContrast {
+    pub what: String,
+    pub not_for: String,
+    pub examples: Vec<String>,
+}
+
+impl SystemOneCriteria {
+    /// The option names a choice offers, in name order — none for a score.
+    /// One reading for both kinds of choice, so a reader of the answer never
+    /// matches on how the options were described.
+    pub fn options(&self) -> impl Iterator<Item = &str> + '_ {
+        let (named, contrastive) = match self {
+            Self::Named(options) => (Some(options), None),
+            Self::Contrastive(options) => (None, Some(options)),
+            Self::Ordered(_) => (None, None),
+        };
+        named
+            .into_iter()
+            .flat_map(BTreeMap::keys)
+            .chain(contrastive.into_iter().flat_map(BTreeMap::keys))
+            .map(String::as_str)
+    }
+
+    /// A score's levels, the low end first — `None` for a choice.
+    #[must_use]
+    pub fn levels(&self) -> Option<&[String]> {
+        match self {
+            Self::Ordered(levels) => Some(levels),
+            Self::Named(_) | Self::Contrastive(_) => None,
+        }
+    }
 }
 
 /// One named question.
@@ -212,6 +252,34 @@ impl SystemOneQuestion {
                 (NOUL_YES.to_string(), Some(yes.to_string())),
                 (NOUL_NO.to_string(), Some(no.to_string())),
             ])),
+        }
+    }
+
+    /// A choice question whose options are described by contrast: each is
+    /// `(name, what it covers, what it is not for, examples)`.
+    #[must_use]
+    pub fn contrastive_choice<'a>(
+        instructions: &str,
+        options: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'a [&'a str])>,
+    ) -> Self {
+        Self {
+            kind: SystemOneQuestionKind::Choice,
+            instructions: instructions.to_string(),
+            criteria: SystemOneCriteria::Contrastive(
+                options
+                    .into_iter()
+                    .map(|(name, what, not_for, examples)| {
+                        (
+                            name.to_string(),
+                            SystemOneContrast {
+                                what: what.to_string(),
+                                not_for: not_for.to_string(),
+                                examples: examples.iter().map(|example| (*example).to_string()).collect(),
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -822,6 +890,46 @@ mod tests {
             body["questions"]["relevance"]["criteria"],
             serde_json::json!(["nothing to do with it", "same background only", "answers it"]),
             "a level's number is its place in the array, so the order IS the question"
+        );
+    }
+
+    /// A contrastive choice writes each option as an object — what it covers,
+    /// what belongs to another option, examples — under the same three keys
+    /// on every option, the shape the vendor's guide gives for options that
+    /// are easily confused (how-to-build, "define contrastive Choice
+    /// criteria"). Its answer is an ordinary choice answer.
+    #[test]
+    fn a_contrastive_choice_writes_what_each_option_covers_is_not_for_and_shows() {
+        let questions = BTreeMap::from([(
+            "intent".to_string(),
+            SystemOneQuestion::contrastive_choice(
+                "What does `task` mainly ask the agent to produce or do?",
+                [
+                    ("debugging", "Finding and fixing a failure.", "A new feature.", &["Fix the flaky test"][..]),
+                    ("other", "Anything else.", "Anything the others describe.", &["Thanks"][..]),
+                ],
+            ),
+        )]);
+
+        let body = serde_json::to_value(SystemOneRequest {
+            state: "a task",
+            model: SYSTEMONE_MODEL,
+            questions: &questions,
+        })
+        .expect("a serialisable request");
+
+        assert_eq!(body["questions"]["intent"]["type"], "choice");
+        assert_eq!(
+            body["questions"]["intent"]["criteria"],
+            serde_json::json!({
+                "debugging": {"what": "Finding and fixing a failure.", "not_for": "A new feature.", "examples": ["Fix the flaky test"]},
+                "other": {"what": "Anything else.", "not_for": "Anything the others describe.", "examples": ["Thanks"]},
+            })
+        );
+        assert_eq!(
+            questions["intent"].criteria.options().collect::<Vec<_>>(),
+            vec!["debugging", "other"],
+            "a contrastive choice offers its option names like any choice"
         );
     }
 
