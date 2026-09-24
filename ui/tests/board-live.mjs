@@ -527,6 +527,97 @@ async function testLiveMap(browser, origin, ok) {
       && reordered.next.added === 1 && reordered.drawn && reordered.said === null,
       JSON.stringify(reordered));
 
+    /* 같은 시각의 **이미 본** 사건이 다시 와도 수의 기준선은 내려가지 않는다. 옛
+     * stamp만 막으면 같은 시각의 옛 ID가 그 문을 지난다 — 같은 밀리초의 두 실제
+     * 사건을 받는 양성(`two_real_events_at_one_timestamp_are_not_merged`)이 바로 그
+     * 길을 연다.
+     *
+     *   m3@T/3통 → m8@T/8통 → (다시) m3@T/3통 → m9@T+1/9통
+     *
+     * 재전달이 기준선을 3으로 내리면 마지막 판은 「이번 판에 6통」이라 말한다.
+     * 최신 관측 8 이후 실제로 는 것은 1통이다. 그리고 수가 **줄어든** 새 사건은
+     * (보존 기간·주소 재배치) 증가를 추정하지 않고 모름으로 서며, 그 뒤로는 새
+     * 수에서 다시 센다. 모두 실제 그리기 문을 지나고, 인스펙터가 쓴 낱말을 읽는다. */
+    const replayed = await page.evaluate(async () => {
+      const now = window.__LIVE_NOW__;
+      const view = document.querySelector("#board-view");
+      const T = now + 11_000;
+      const step = async (id, at, count) => {
+        window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+          { from: "term:307", to: "term:301", count, unread: 0, at, verb: "mail",
+            last_message: { id, run: "run-1", from: "worker:w-child", to: "run:run-1",
+              kind: "status", created_ms: at } },
+        ] });
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        const [head] = agentGraphLiveRecentEvents();
+        return head ? { key: head.key, added: head.added } : null;
+      };
+      /* 그 줄이 화면에 쓴 증가의 낱말 — 없으면 `null`. */
+      const said = (id) => {
+        selectAgentGraphEntity(view, "agent:term:301");
+        const row = [...view.querySelectorAll(".agent-live-event-main")]
+          .find((one) => one.dataset.liveEvent.endsWith(id));
+        return { drawn: Boolean(row),
+          added: row?.querySelector(".agent-live-event-added")?.textContent ?? null };
+      };
+      const first = await step("m-replay-3", T, 3);
+      const second = await step("m-replay-8", T, 8);
+      const again = await step("m-replay-3", T, 3);
+      const next = await step("m-replay-9", T + 1, 9);
+      const nextSaid = said("m-replay-9");
+      const shrunk = await step("m-replay-shrunk", T + 2, 7);
+      const shrunkSaid = said("m-replay-shrunk");
+      const resumed = await step("m-replay-11", T + 3, 9);
+      return { first, second, again, next, nextSaid, shrunk, shrunkSaid, resumed,
+        wrong: t("board.live.added", "이번 판에 {{count}}통 늘었습니다", { count: 6 }) };
+    });
+    ok("a_replayed_event_at_the_same_timestamp_does_not_lower_the_count_baseline",
+      replayed.second?.key.endsWith("m-replay-8") === true && replayed.second.added === 5
+      && replayed.again?.key === replayed.second.key
+      && replayed.next?.key.endsWith("m-replay-9") === true && replayed.next.added === 1
+      && replayed.nextSaid.drawn && replayed.nextSaid.added === null,
+      JSON.stringify(replayed));
+    ok("a_new_event_whose_count_shrank_says_no_increase_and_counts_on_from_there",
+      replayed.shrunk?.key.endsWith("m-replay-shrunk") === true && replayed.shrunk.added === null
+      && replayed.shrunkSaid.drawn && replayed.shrunkSaid.added === null
+      && replayed.resumed?.key.endsWith("m-replay-11") === true && replayed.resumed.added === 2,
+      JSON.stringify(replayed));
+
+    /* 가릴 수 없는 판(`adopt` — 같은 시각의 기억이 온전하지 않은 관계의 모르는
+     * 사건)의 수도 기준선이 되지 않는다. 그 사건은 새 것일 수도 기억에서 밀려난
+     * 옛것일 수도 있으므로, 그 뒤 첫 새 사건의 증가는 추정하지 않고 모름이다. */
+    const adopted = await page.evaluate(async () => {
+      const now = window.__LIVE_NOW__;
+      const T = now + 12_000;
+      /* 장부에 바로 먹이는 판도 **그리는 판과 같은** 카드·자리·원장 행을 든다 — 빈
+       * 자리를 주면 두 끝의 주체가 달라져 기준선이 어느 제품에서든 끊기고, 이
+       * 사례는 아무것도 재지 못한다. */
+      const model = agentGraphFullModel(document.querySelector("#board-view"));
+      const mail = (id, at, count) => ({ columns: model.source.columns, overlays: { mail: [
+        { from: "term:304", to: "term:303", count, unread: 0, at, verb: "mail",
+          last_message: { id, run: "run-1", from: "worker:w-wall", to: "worker:w-verify",
+            kind: "status", created_ms: at } },
+      ] } });
+      const feed = (answer) => agentGraphLiveObserve(answer, model.source.places, Date.now(),
+        { ledger: model.source.ledger });
+      const keep = agentGraphLiveCoverage().sameStampKeep;
+      /* 그 시각의 기억을 넘치게 채운다 — 넘친 것부터는 조용히 맞춘다. */
+      for (let at = 0; at <= keep; at += 1) feed(mail(`m-adopt-${at}`, T, 20 + at));
+      /* 넘친 뒤에 온, 더 작은 수의 모르는 사건. */
+      feed(mail("m-adopt-low", T, 12));
+      /* 시각이 지나간 첫 새 사건 — 실제 그리기 문으로. */
+      window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, mail("m-adopt-next", T + 1, 40).overlays);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      const [head] = agentGraphLiveRecentEvents();
+      return { head: head ? { key: head.key, added: head.added } : null,
+        truncated: agentGraphLiveCoverage().truncated };
+    });
+    ok("an_adopted_event_does_not_become_the_count_baseline",
+      adopted.head?.key.endsWith("m-adopt-next") === true && adopted.head.added === null,
+      JSON.stringify(adopted));
+
     /* 재시작·처음 판은 활동이 아니다. */
     ok("old_initial_snapshot_and_restart_do_not_invent_events", await page.evaluate(async () => {
       boardBroken = true;
@@ -953,6 +1044,102 @@ async function testLiveMap(browser, origin, ok) {
       && timed.assignment !== null && timed.assignment.at > 0
       && timed.assignment.said === timed.recorded.assignment,
       JSON.stringify(timed));
+
+    /* **같은 시도**(같은 run/worker/dispatch, 같은 판)라도 사건의 근거는 바뀐다. 자리
+     * 셋이 같다고 지금의 판으로 가면, 누른 줄은 옛 사유·옛 사실을 말하는데 열린
+     * 판은 그 뒤의 것을 말한다 — 누른 사건의 근거가 지금 스냅샷에 **같은 사실로**
+     * 남아 있을 때만 지금의 문으로 간다.
+     *
+     * 기다림: 한도 벽@T1 → 잠듦@T2. 옛 벽 사건은 제 사유와 그 사유가 적힌 때를 편다. */
+    const rewaited = await page.evaluate(async () => {
+      const now = window.__LIVE_NOW__;
+      const at = window.__LEDGER__.findIndex((one) => one.worker === "w-wall");
+      const held = window.__LEDGER__[at];
+      const T1 = now + 66_000;
+      const T2 = now + 67_000;
+      const write = async (over) => {
+        window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? { ...held, ...over } : row);
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+      };
+      await write({ wall: { ...held.wall, wall: "m-wall-t1", observed_at_ms: T1 } });
+      await write({ wall: null, ledger: "sleeping", quiet_at: T2 });
+      const wait = (since) => (event) => event.kind === "wait" && event.evidence?.since === since;
+      const old = window.__PRESS_EVENT__(wait(T1));
+      const latest = window.__PRESS_EVENT__(wait(T2));
+      window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? held : row);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      const word = (id) => { const health = DESK_HEALTH.find((one) => one.id === id); return t(health.key, health.word); };
+      return { old, latest, walled: word("walled"), asleep: word("asleep"),
+        words: window.__LIVE_WORDS__() };
+    });
+    ok("a_past_wait_of_the_same_attempt_opens_its_own_cause_not_the_current_one",
+      rewaited.old.found && rewaited.old.selectedKey === "agent:term:301"
+      && rewaited.old.detail.includes(rewaited.walled) && !rewaited.old.detail.includes(rewaited.asleep)
+      && rewaited.old.detail.includes(rewaited.words.notLatest) && rewaited.old.pressed === "true",
+      JSON.stringify(rewaited));
+    ok("the_current_wait_of_that_attempt_opens_its_seat",
+      rewaited.latest.found && rewaited.latest.selectedKey === "agent:term:304"
+      && rewaited.latest.detail === "",
+      JSON.stringify(rewaited));
+
+    /* 결과: 같은 시도에서 코디네이터의 「검증됨」이 **철회되고** 워커의 주장만 남는다.
+     * 옛 검증 사건은 지금의 판으로 가지 않고 그때의 사실을 편다. 옛 사실이 지금도
+     * 참인 판(검증된 뒤 병합됨 — 검증은 그대로 남는다)은 지금의 판으로 가도 누른
+     * 줄과 열린 판이 서로 다른 것을 말하지 않는다. */
+    const retracted = await page.evaluate(async () => {
+      const now = window.__LIVE_NOW__;
+      const base = window.__LEDGER__[0];
+      const verified = { verified: true, merged: false, deployed: false, written: true,
+        claimed_verified: false, claimed_merged: false, claimed_deployed: false,
+        author: "coordinator", source: "0123abc" };
+      const seat = (term, worker, dispatch) => ({
+        pane: { term, agent: "codex", state: "working", at: now, state_started_at: now, resumable: false },
+        row: { ...base, worker, task: `시도 ${dispatch}`, task_id: `t-${dispatch}`, dispatch_id: dispatch,
+          dispatch_started_ms: now + 68_000, term, reported: true, review: { ...verified, attempt: dispatch } },
+        card: { ...window.__COLUMNS__[0].cards[1], pane: `term:${term}`, heading: `시도 ${dispatch}`,
+          task: `시도 ${dispatch}`, parent: "" },
+      });
+      const seats = [seat(323, "w-retract", "dp-retract"), seat(324, "w-land", "dp-land")];
+      const held = { panes: window.__PANES__, ledger: window.__LEDGER__,
+        columns: structuredClone(window.__COLUMNS__) };
+      window.__PANES__ = [...held.panes, ...seats.map((one) => one.pane)];
+      window.__LEDGER__ = [...held.ledger, ...seats.map((one) => one.row)];
+      window.__COLUMNS__[0].cards = [...window.__COLUMNS__[0].cards, ...seats.map((one) => one.card)];
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-retract"
+        ? { ...row, review: { ...row.review, verified: false, claimed_verified: true, author: "worker" } }
+        : row.worker === "w-land" ? { ...row, review: { ...row.review, merged: true } } : row);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      const result = (dispatch, stage) => (event) => event.kind === "result"
+        && event.evidence?.dispatchId === dispatch && event.evidence.stage === stage;
+      const old = window.__PRESS_EVENT__(result("dp-retract", "verified"));
+      const latest = window.__PRESS_EVENT__(result("dp-retract", "claimed-verified"));
+      const landed = window.__PRESS_EVENT__(result("dp-land", "verified"));
+      window.__PANES__ = held.panes;
+      window.__LEDGER__ = held.ledger;
+      window.__COLUMNS__ = held.columns;
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      return { old, latest, landed, words: { ...window.__LIVE_WORDS__(),
+        verified: t("board.verified", "검증됨"), claimed: t("board.claimedVerified", "검증됐다 함") } };
+    });
+    ok("a_retracted_result_of_the_same_attempt_opens_the_fact_it_recorded",
+      retracted.old.found && retracted.old.selectedKey === "agent:term:301"
+      && retracted.old.detail.includes(retracted.words.verified)
+      && !retracted.old.detail.includes(retracted.words.claimed)
+      && retracted.old.detail.includes("dp-retract")
+      && retracted.old.detail.includes(retracted.words.notLatest),
+      JSON.stringify(retracted));
+    ok("the_current_result_and_a_fact_the_present_still_holds_open_their_seat",
+      retracted.latest.found && retracted.latest.selectedKey === "agent:term:323"
+      && retracted.latest.detail === ""
+      && retracted.landed.found && retracted.landed.selectedKey === "agent:term:324"
+      && retracted.landed.detail === "",
+      JSON.stringify(retracted));
 
     /* ---- ④ 보는 일은 아무것도 소비하지 않는다 --------------------------- */
 
@@ -1455,6 +1642,11 @@ async function testLiveLedgerBounds(browser, origin, ok) {
         await paintBoardView(undefined, { force: true });
         await window.__BOARD_SETTLED__();
       };
+      /* 숨었다 돌아온 판은 그 한 판을 기준선으로 받는다 — 범위를 옮긴 판과 같다. */
+      const returned = async () => {
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+      };
       try {
         for (let cycle = 0; cycle < 2; cycle += 1) {
           const at = {};
@@ -1464,12 +1656,15 @@ async function testLiveLedgerBounds(browser, origin, ok) {
           at.off = await left();
           view.querySelector(".agent-graph-live").click();
           at.on = await left();
-          /* ② 작업 목록으로 갔다 관계로 돌아온다. */
+          /* ② 작업 목록으로 갔다 관계로 돌아온다. 돌아온 첫 판은 기준선이다 — 그 한
+           *    판을 받아 두어야 뒤의 사건이 실제 사건으로 선다(아래 `returned`가 그
+           *    계약 자체를 잰다). */
           at.tasksLit = await light();
           view.querySelector('[data-board-mode="tasks"]').click();
           at.tasks = await left();
           view.querySelector('[data-board-mode="graph"]').click();
           await window.__BOARD_SETTLED__();
+          await returned();
           /* ③ 판을 닫았다 다시 연다. */
           at.closeLit = await light();
           dropTab("board");
@@ -1511,6 +1706,7 @@ async function testLiveLedgerBounds(browser, origin, ok) {
           at.hidden = await left({ settle: false });
           view.parentElement.hidden = false;
           await window.__BOARD_SETTLED__();
+          await returned();
           at.heard = heard;
           record[`cycle${cycle}`] = at;
         }
@@ -1542,6 +1738,87 @@ async function testLiveLedgerBounds(browser, origin, ok) {
       JSON.stringify({ listeners: doors.listeners,
         heard: [doors.record.cycle0.heard, doors.record.cycle1.heard] }));
 
+    /* 마지막으로 보이던 지도를 떠났다 **돌아온 첫 판**은 조용한 기준선이다. 문서는
+     * 앞에 있는 채로 — 판을 품은 자리가 숨거나, 작업 목록으로 가거나, 판을 닫는다.
+     * 떠난 사이 원장에 사건이 적히고, 제품이 떠난 뒤에도 그리는 문(숨김·작업 목록)
+     * 에서는 한 판이 그것을 읽는다. 그 뒤로 사건이 하나 더 적히고, 이 지도는 그것을
+     * 아직 읽지 않았다. 돌아온 첫 판이 그 backlog를 새 활동으로 세우면 오래전에
+     * 일어난 일이 지금 막 뛴다.
+     *
+     * 떠난 사이의 판도, 돌아온 첫 판도 목록의 머리·맥박·화면의 박자를 움직이지
+     * 않는다. 그리고 그 다음 **실제** 새 사건은 한 번 뛴다 — 조용함이 먹통이 아니다. */
+    const returning = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const now = window.__LIVE_NOW__;
+      let stamp = now + 700_000;
+      const frames = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const record = (name) => {
+        stamp += 1_000;
+        const id = `${name}-${stamp}`;
+        window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+          { from: "term:303", to: "term:302", count: 1, unread: 0, at: stamp, verb: "mail",
+            last_message: { id, run: "run-1", from: "worker:w-verify", to: "worker:w-impl",
+              kind: "status", created_ms: stamp } },
+        ] });
+        return id;
+      };
+      const paint = async () => {
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        await frames();
+      };
+      const read = () => {
+        const handles = agentGraphLiveHandles();
+        return { head: agentGraphLiveRecentEvents()[0]?.key ?? null, timers: handles.timers,
+          pulses: handles.pulses, beats: document.querySelectorAll(".agent-board [data-live-beat]").length };
+      };
+      const doors = {
+        hidden: {
+          leave: async () => { view.parentElement.hidden = true; await frames(); },
+          back: async () => { view.parentElement.hidden = false; await frames(); },
+          painting: true },
+        tasks: {
+          leave: async () => { view.querySelector('[data-board-mode="tasks"]').click(); await frames(); },
+          back: async () => { view.querySelector('[data-board-mode="graph"]').click(); await frames(); },
+          painting: true },
+        /* 닫힌 판은 그리지 않는다(`boardIsOpen`) — 다시 연 판이 그 자리에서 그린다. */
+        closed: {
+          leave: async () => { dropTab("board"); await frames(); },
+          back: async () => { openBoard(); await window.__BOARD_SETTLED__(); await frames(); },
+          painting: false },
+      };
+      const out = {};
+      for (const [name, door] of Object.entries(doors)) {
+        record("m-shown");
+        await paint();
+        const before = read();
+        await door.leave();
+        record("m-away");
+        if (door.painting) await paint();
+        const away = read();
+        const late = record("m-away-late");
+        await door.back();
+        await paint();
+        const first = read();
+        const after = record("m-after");
+        await paint();
+        const next = read();
+        out[name] = { before, away, late, first, after, next };
+      }
+      return out;
+    });
+    for (const [door, seen] of Object.entries(returning)) {
+      ok(`a_hidden_map_adopts_the_changed_return_snapshot_without_new_activity (${door})`,
+        seen.away.head === seen.before.head && seen.away.pulses === 0 && seen.away.beats === 0
+        && seen.first.head === seen.before.head && seen.first.pulses === 0
+        && seen.first.timers === 0 && seen.first.beats === 0,
+        JSON.stringify(seen));
+      ok(`after_the_quiet_return_the_next_real_event_pulses_once (${door})`,
+        seen.next.head?.endsWith(seen.after) === true && seen.next.pulses === 1
+        && seen.next.timers === 1 && seen.next.beats === 1,
+        JSON.stringify(seen));
+    }
+
     ok("the bounded ledger page raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
@@ -1571,8 +1848,11 @@ async function testLateAnswers(browser, origin, ok) {
         window.__ANSWER__.board_snapshot = held;
         return asked.then((answer) => {
           const frozen = structuredClone(answer);
-          return new Promise((release) => {
-            window.__PARKED_SNAPSHOTS__.push({ release: () => release(frozen) });
+          /* 붙잡은 답은 풀어 줄 수도, **거절할** 수도 있다 — 늦게 온 실패도 늦게 온
+           * 성공과 같은 문을 지나야 하기 때문이다. */
+          return new Promise((release, refuse) => {
+            window.__PARKED_SNAPSHOTS__.push({ release: () => release(frozen),
+              refuse: () => refuse(new Error("board_snapshot refused while held")) });
           });
         });
       };
@@ -1581,6 +1861,56 @@ async function testLateAnswers(browser, origin, ok) {
         else delete window.__ANSWER__.board_snapshot;
       };
       window.__RELEASE_SNAPSHOT__ = (index) => window.__PARKED_SNAPSHOTS__[index].release();
+      window.__REFUSE_SNAPSHOT__ = (index) => window.__PARKED_SNAPSHOTS__[index].refuse();
+      /* 판을 모으는 앞 절반(`pane_agents`)도 같은 방법으로 붙잡는다. */
+      window.__PARKED_PANES__ = [];
+      window.__HOLD_PANES__ = (on) => {
+        if (!on) {
+          delete window.__ANSWER__.pane_agents;
+          return;
+        }
+        window.__ANSWER__.pane_agents = () => new Promise((release, refuse) => {
+          window.__PARKED_PANES__.push({ release: () => release(window.__PANES__ ?? []),
+            refuse: () => refuse(new Error("pane_agents refused while held")) });
+        });
+      };
+      /* 판이 사람에게 띄운 오류 — 문장 그대로, 띄운 차례로. */
+      window.__SHOWN_ERRORS__ = [];
+      const shown = window.showError;
+      window.showError = (error) => {
+        window.__SHOWN_ERRORS__.push(String(error));
+        return shown(error);
+      };
+      /* 멈춘 판의 복구 카드가 서 있는가. */
+      window.__BROKEN__ = () => {
+        const view = document.querySelector("#board-view");
+        return { flag: boardBroken, card: view.querySelector(".board-broken")?.hidden === false,
+          layout: view.querySelector(".agent-graph-layout")?.hidden === false,
+          retry: view.querySelector(".board-broken .board-retry")?.onclick === retryBoardPaint };
+      };
+      /* 붙잡은 것을 모두 풀고 범위를 거둔 뒤 지금 판으로 한 번 — 다음 사례의 출발점.
+       * 앞 사례가 판을 멈춰 세웠으면(고치기 전 제품) 다시 시도로 세운다: 그러지
+       * 않으면 뒤 사례는 멈춘 판 앞에서 붙잡기를 기다리다 시간이 다 되고, 그 빨강은
+       * 그 사례의 결함이 아니라 앞 사례가 남긴 자국이다. */
+      window.__UNPARK_ALL__ = async () => {
+        window.__HOLD_SNAPSHOTS__(false);
+        window.__HOLD_PANES__(false);
+        await window.__FRAMES__();
+        for (const parked of window.__PARKED_SNAPSHOTS__.splice(0)) parked.release();
+        for (const parked of window.__PARKED_PANES__.splice(0)) parked.release();
+        await window.__BOARD_SETTLED__();
+        if (boardBroken) {
+          document.querySelector("#board-view .board-broken .board-retry")?.click();
+          await window.__BOARD_SETTLED__();
+        }
+        const scope = document.querySelector("#board-view .agent-graph-scope");
+        if (scope.value !== "") {
+          scope.value = "";
+          scope.dispatchEvent(new Event("change"));
+        }
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+      };
       /* 지금 화면이 무엇을 쓰고 있는가 — 늦은 답이 쓸 수 있는 모든 자리. */
       window.__BOARD_WROTE__ = () => {
         const view = document.querySelector("#board-view");
@@ -1774,6 +2104,136 @@ async function testLateAnswers(browser, origin, ok) {
       && bundle.asA.chip.classes?.includes("is-walled") === true && bundle.asA.wall === "m-wall-a"
       && bundle.asB.chip.classes?.includes("is-walled") === false && bundle.asB.wall === null,
       JSON.stringify(bundle));
+
+    /* ④ 늦게 온 **실패**. 늦은 성공만 조용히 버려서는 「늦은 답은 아무것도 쓰지
+     *    않는다」가 완성되지 않는다 — 옛 범위에서 떠난 요청이 넘어지면 그 실패도
+     *    옛것이다: 판을 멈춰 세우지도(`boardBroken`), 복구 카드를 세우지도, 오류를
+     *    띄우지도 않는다. 넷을 본다: 범위를 옮긴 뒤 **새 답 없이** 옛 요청이 거절됨,
+     *    새 답이 들어간 뒤 옛 요청이 거절됨, 옛 요청의 판 모으기(`pane_agents`)가
+     *    거절됨, 훅의 박자가 물은 옛 요청이 거절됨. */
+    const stale = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const scope = view.querySelector(".agent-graph-scope");
+      const key = [...scope.options].map((option) => option.value).find((value) => value !== "");
+      const move = async () => {
+        scope.value = key;
+        scope.dispatchEvent(new Event("change"));
+        await window.__FRAMES__();
+      };
+      /* 붙잡은 답이 넘어지기 전과 뒤에 판이 쓴 모든 것, 멈춤 상태, 띄운 오류. */
+      const across = async (fall) => {
+        window.__SHOWN_ERRORS__.length = 0;
+        const committed = { ...window.__BOARD_WROTE__(), broken: window.__BROKEN__() };
+        const late = await fall();
+        await window.__FRAMES__();
+        const after = { ...window.__BOARD_WROTE__(), broken: window.__BROKEN__() };
+        return { late, changed: window.__SAME_WRITES__(committed, after), broken: after.broken,
+          shown: [...window.__SHOWN_ERRORS__] };
+      };
+      const out = {};
+      /* ⓐ A가 옛 범위에서 기다리는 사이 범위를 옮기고, 새 답 없이 A가 넘어진다. */
+      window.__HOLD_SNAPSHOTS__(true);
+      window.__A__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 1, "A parked", 5_000);
+      await move();
+      out.alone = await across(async () => {
+        window.__REFUSE_SNAPSHOT__(0);
+        return window.__A__;
+      });
+      await window.__UNPARK_ALL__();
+      /* ⓑ A가 기다리는 사이 범위를 옮기고, 새 범위의 B가 먼저 들어간 뒤 A가 넘어진다. */
+      window.__HOLD_SNAPSHOTS__(true);
+      window.__A__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 1, "A parked", 5_000);
+      await move();
+      window.__B__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 2, "B parked", 5_000);
+      window.__RELEASE_SNAPSHOT__(1);
+      await window.__B__;
+      await window.__FRAMES__();
+      out.afterB = await across(async () => {
+        window.__REFUSE_SNAPSHOT__(0);
+        return window.__A__;
+      });
+      await window.__UNPARK_ALL__();
+      /* ⓒ A의 판 모으기가 기다리는 사이 범위를 옮기고, 그 모으기가 넘어진다. */
+      window.__HOLD_PANES__(true);
+      window.__A__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_PANES__.length === 1, "A gather parked", 5_000);
+      await move();
+      out.gather = await across(async () => {
+        window.__PARKED_PANES__[0].refuse();
+        return window.__A__;
+      });
+      await window.__UNPARK_ALL__();
+      /* ⓓ 훅의 박자가 묻는 사이 범위를 옮기고, 그 답이 넘어진다. */
+      window.__HOLD_SNAPSHOTS__(true);
+      const hook = refreshAgentGraphSurfaces({ badge: false, graph: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 1, "hook parked", 5_000);
+      await move();
+      out.hook = await across(async () => {
+        window.__REFUSE_SNAPSHOT__(0);
+        return hook;
+      });
+      await window.__UNPARK_ALL__();
+      return out;
+    });
+    for (const [road, seen] of Object.entries(stale)) {
+      ok(`a_stale_request_that_fails_writes_nothing (${road})`,
+        seen.changed.length === 0 && seen.broken.flag === false && seen.broken.card === false
+        && seen.broken.layout === true && seen.shown.length === 0 && (seen.late ?? null) === null,
+        JSON.stringify(seen));
+    }
+
+    /* ⑤ 지금 세대의 **진짜** 실패는 그대로 말한다. 판은 멈춘 판의 복구 카드를
+     *    세우고, 그 카드는 이미 떠나 있던 다른 답이 늦게 성공해도 덮이지 않는다 —
+     *    멈춘 판을 여는 것은 다시 시도뿐이다. 다시 시도하면 판이 선다. 훅의 박자가
+     *    물은 지금의 실패도 예전처럼 오류로 뜬다. */
+    const current = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      window.__SHOWN_ERRORS__.length = 0;
+      window.__HOLD_SNAPSHOTS__(true);
+      window.__A__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 1, "A parked", 5_000);
+      window.__B__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 2, "B parked", 5_000);
+      window.__REFUSE_SNAPSHOT__(0);
+      const late = await window.__A__;
+      await window.__FRAMES__();
+      const broke = window.__BROKEN__();
+      window.__RELEASE_SNAPSHOT__(1);
+      const other = await window.__B__;
+      await window.__FRAMES__();
+      const held = window.__BROKEN__();
+      window.__HOLD_SNAPSHOTS__(false);
+      view.querySelector(".board-broken .board-retry").click();
+      await window.__BOARD_SETTLED__();
+      const retried = { ...window.__BROKEN__(),
+        cards: view.querySelectorAll(".agent-graph-node.is-agent").length };
+      /* 훅의 박자가 물은 지금의 실패. */
+      window.__HOLD_SNAPSHOTS__(true);
+      const hook = refreshAgentGraphSurfaces({ badge: false, graph: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 3, "hook parked", 5_000);
+      window.__REFUSE_SNAPSHOT__(2);
+      await hook;
+      const hookShown = [...window.__SHOWN_ERRORS__];
+      await window.__UNPARK_ALL__();
+      return { late, broke, other, held, retried, hookShown, after: window.__BROKEN__() };
+    });
+    ok("a_current_failure_still_stands_the_recovery_card",
+      current.late === null && current.broke.flag === true && current.broke.card === true
+      && current.broke.layout === false && current.broke.retry === true,
+      JSON.stringify(current));
+    ok("an_answer_already_in_flight_does_not_paint_over_the_recovery_card",
+      current.other === null && current.held.flag === true && current.held.card === true
+      && current.held.layout === false,
+      JSON.stringify(current));
+    ok("retrying_a_broken_board_stands_it_again_and_a_current_hook_failure_still_says_so",
+      current.retried.flag === false && current.retried.card === false && current.retried.layout === true
+      && current.retried.cards > 0 && current.hookShown.length === 1
+      && current.hookShown[0].includes("board_snapshot refused while held")
+      && current.after.flag === false && current.after.layout === true,
+      JSON.stringify(current));
 
     ok("the late answers page raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
