@@ -4415,11 +4415,6 @@ struct HeldScan {
     /// which a rotation could have replaced by then, and the switch was in
     /// the ledger never.
     pending: Option<PendingSwitches>,
-    /// How many beats this scan has read: the turn that names which window
-    /// of what the cursor counted the next reading checks again
-    /// ([`crate::quota_wall::scan_fallbacks`]), so every window is checked
-    /// in turn (t-7153, R3).
-    turn: u64,
 }
 
 /// Switches read and not yet held, each bound to the attempt and the file
@@ -4503,20 +4498,20 @@ fn note_model_deviations(host: &dyn Host, now_ms: i64) {
         }) else {
             continue;
         };
-        let (cursor, pending, turn) = deviation_scans()
+        let (cursor, pending) = deviation_scans()
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .get(&worker)
             .filter(|standing| standing.dispatch == dispatch)
             .map_or_else(
-                || (crate::quota_wall::ScanCursor::default(), None, 0),
+                || (crate::quota_wall::ScanCursor::default(), None),
                 |standing| {
                     let cursor = if standing.path == path {
                         standing.cursor.clone()
                     } else {
                         crate::quota_wall::ScanCursor::default()
                     };
-                    (cursor, standing.pending.clone(), standing.turn)
+                    (cursor, standing.pending.clone())
                 },
             );
         let binding = SwitchBinding {
@@ -4529,7 +4524,6 @@ fn note_model_deviations(host: &dyn Host, now_ms: i64) {
             &binding,
             Path::new(&path),
             cursor,
-            turn,
             pending,
             &mut |switches| {
                 held.actor
@@ -4548,7 +4542,6 @@ fn note_model_deviations(host: &dyn Host, now_ms: i64) {
                     dispatch,
                     cursor,
                     pending,
-                    turn: turn.wrapping_add(1),
                 },
             );
     }
@@ -4566,15 +4559,13 @@ fn note_model_deviations(host: &dyn Host, now_ms: i64) {
 /// ended, in the file it read, and the beat reads on from there — the file
 /// at `path` now, when it is another, from its start
 /// ([`crate::quota_wall::scan_fallbacks`]), its own cursor untouched by a
-/// reading of another path; `turn` is this scan's count of its readings,
-/// which names the window of what the cursor counted that the reading
-/// checks again. Answers the cursor to keep, what still waits, and whether
-/// a row moved.
+/// reading of another path. Answers the cursor to keep — with the round of
+/// its checks the reading walked on — what still waits, and whether a row
+/// moved.
 fn scan_switches_a_beat(
     binding: &SwitchBinding<'_>,
     path: &Path,
     cursor: crate::quota_wall::ScanCursor,
-    turn: u64,
     pending: Option<PendingSwitches>,
     record: &mut dyn FnMut(
         Vec<zerocode_core::orchestration::ModelDeviation>,
@@ -4603,7 +4594,7 @@ fn scan_switches_a_beat(
         }
         None => cursor,
     };
-    let scan = crate::quota_wall::scan_fallbacks(path, &cursor, turn);
+    let scan = crate::quota_wall::scan_fallbacks(path, &cursor);
     let (keep, pending, moved_here) = record_scanned_switches(binding, scan, cursor, record);
     (keep, pending, moved || moved_here)
 }

@@ -1421,7 +1421,6 @@ fn the_switch_scans_cursor_moves_only_past_what_the_ledger_holds() {
             &binding,
             nowhere,
             at(700),
-            0,
             waiting(longer, 12_000),
             &mut listed
         ),
@@ -5248,7 +5247,7 @@ fn a_reading_the_ledger_moved_past_between_the_scan_and_the_fence_is_written_now
     let source = stood.host.transcript.to_string_lossy().into_owned();
     let first = stood.attempt();
     let held = super::runtime().expect("the runtime");
-    let scan = scan_fallbacks(&stood.host.transcript, &ScanCursor::default(), 0);
+    let scan = scan_fallbacks(&stood.host.transcript, &ScanCursor::default());
     assert_eq!(scan.switches.len(), 1);
     let binding = super::SwitchBinding {
         worker: &stood.worker,
@@ -5277,7 +5276,7 @@ fn a_reading_the_ledger_moved_past_between_the_scan_and_the_fence_is_written_now
 
     // The second attempt's own reading lands, bound to it.
     stood.appends(&switch("switch-2", stood.began + 14_000));
-    let scan = scan_fallbacks(&stood.host.transcript, &keep, 0);
+    let scan = scan_fallbacks(&stood.host.transcript, &keep);
     let binding = super::SwitchBinding {
         worker: &stood.worker,
         dispatch: &second.id,
@@ -5301,7 +5300,7 @@ fn a_reading_the_ledger_moved_past_between_the_scan_and_the_fence_is_written_now
     // the worker's CLI now writes another conversation, and the reading of
     // the file it left is written nowhere.
     stood.appends(&switch("switch-3", stood.began + 16_000));
-    let scan = scan_fallbacks(&stood.host.transcript, &keep, 0);
+    let scan = scan_fallbacks(&stood.host.transcript, &keep);
     assert_eq!(scan.switches.len(), 1);
     let (_, waiting, moved) =
         super::record_scanned_switches(&binding, scan, keep.clone(), &mut |switches| {
@@ -5446,7 +5445,6 @@ fn a_waiting_reading_is_asked_under_its_own_file_when_the_session_moves() {
         &bound(&first_source),
         &first,
         ScanCursor::default(),
-        0,
         None,
         &mut record(true),
     );
@@ -5459,7 +5457,6 @@ fn a_waiting_reading_is_asked_under_its_own_file_when_the_session_moves() {
         &bound(&second_source),
         &second,
         ScanCursor::default(),
-        1,
         waiting,
         &mut record(false),
     );
@@ -5648,7 +5645,9 @@ fn a_waiting_reading_dies_with_its_attempt_and_is_never_the_next_attempts() {
 #[test]
 fn a_refused_readings_switches_wait_and_land_before_the_rotation_is_read() {
     use crate::quota_wall::ScanCursor;
-    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD, a_transcript_as_long_as};
+    use crate::quota_wall::tests::{
+        CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD, a_transcript_as_long_as, placed,
+    };
     use std::io::Write;
     let dir = tempfile::tempdir().expect("a dir");
     let path = dir.path().join("session.jsonl");
@@ -5678,7 +5677,6 @@ fn a_refused_readings_switches_wait_and_land_before_the_rotation_is_read() {
             &binding,
             &path,
             cursor.clone(),
-            0,
             pending,
             &mut |switches| {
                 if refuse {
@@ -5742,8 +5740,8 @@ fn a_refused_readings_switches_wait_and_land_before_the_rotation_is_read() {
     );
     let (after, nothing) = beat(&rotated, None, false);
     assert_eq!(
-        (after, nothing),
-        (rotated, None),
+        (placed(&after), nothing),
+        (placed(&rotated), None),
         "an unchanged file moved the cursor"
     );
 }
