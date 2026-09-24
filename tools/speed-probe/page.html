@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><title>Speed probe</title>
+<style>body{font:24px system-ui;margin:40px}button,input{font:inherit;padding:15px;margin:10px}#board{display:grid;grid-template-columns:repeat(4,80px);gap:12px}.cell{height:70px}</style>
+<h1>Speed probe</h1><main><label>Destination <input id="destination" placeholder="City"></label>
+<button id="advance">Advance</button><output id="status">Ready 0</output><div id="board"></div></main>
+<script>
+window.probe={count:0,clicked:0,painted:0};
+for(let i=0;i<16;i++){const c=document.createElement('div');c.className='cell';c.style.background=['red','green','blue','yellow'][i%4];c.textContent=1+i%4;board.append(c)}
+advance.onclick=()=>{probe.count++;probe.clicked=performance.now();statusNode.textContent='Ready '+probe.count;requestAnimationFrame(()=>requestAnimationFrame(()=>probe.painted=performance.now()))};
+const statusNode=document.querySelector('#status');
+</script>
