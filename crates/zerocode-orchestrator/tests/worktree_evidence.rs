@@ -11,7 +11,10 @@ use std::process::Command;
 
 use rusqlite::params;
 use tempfile::TempDir;
-use zerocode_core::orchestration::{Ledger, LedgerProjectionV1};
+use zerocode_core::agent_teams::{LEADER_PANE, Team};
+use zerocode_core::orchestration::{
+    Ledger, LedgerProjectionV1, NoLauncher, ResultAuthor, ReviewAuthor, incarnation_actor, plan,
+};
 use zerocode_orchestrator::handoff::{HandoffLineage, HandoffManifestV1, TestReceipt};
 use zerocode_orchestrator::workflow::{NewAssignment, WorkflowRecord};
 use zerocode_orchestrator::workflow_store::{ReadOnlyWorkflows, WorkflowStore, WorkflowStoreError};
@@ -123,13 +126,163 @@ fn one_run(checkout: &str, result: &str) -> serde_json::Value {
             "started_ms": 12, "ended_ms": 30, "succeeded": true, "retry_of": "d-0",
         }],
         "workers": [{
-            "run": "run-1", "id": "w-1", "team": "team-1", "agent": "codex", "pane": "%1",
+            "run": "run-1", "id": "w-1", "team": TEAM, "agent": "codex", "pane": WORKER_PANE,
             "state": "released", "started_ms": 12, "dispatch": null,
             "checkout": checkout, "quiet_at": null, "archive": null,
         }],
         "messages": [], "inboxes": [], "bound": [], "served": [], "acked": [],
         "gates": [], "attachments": [],
     })
+}
+
+/// The window the fixture's run lives in: the leader's pane, and the pane
+/// beside it that the worker was started in — never the leader's own, as no
+/// worker the window starts is.
+const TEAM: &str = "team-1";
+const WORKER_PANE: &str = "%2";
+
+/// The commit the worker's `worker_done` named, and so the source a review of
+/// its attempt has to name.
+const HANDED_IN: &str = "abc1234";
+
+/// What the coordinator writes when it has looked.
+const COORDINATOR_REVIEW: &str = r#"{"verified":true,"reviewedBy":"coordinator","merged":true}"#;
+
+/// Every review key a worker could put in its own report, a forged author
+/// included. The body is the worker's to send; none of it is the host's word
+/// about who wrote it.
+fn a_workers_review_keys() -> String {
+    serde_json::json!({
+        "ok": true,
+        "head": HANDED_IN,
+        "verified": true,
+        "reviewedBy": "coordinator",
+        "merged": true,
+        "author": "coordinator",
+        "resultAuthor": { "kind": "coordinator", "seat": format!("{TEAM}/{LEADER_PANE}") },
+    })
+    .to_string()
+}
+
+/// One verb through the planner the window runs, from `pane`, with the
+/// receipt filed the way the window files it — so a row it leaves is a row
+/// the ledger wrote, never one this test spelled. Answers what the verb
+/// printed.
+fn carry_out(ledger: &mut Ledger, pane: &str, argv: &[&str], now_ms: i64) -> serde_json::Value {
+    let mut team = Team::new(TEAM, "token", 7);
+    let argv: Vec<String> = argv.iter().map(|word| (*word).to_string()).collect();
+    let actor = incarnation_actor("worktree-evidence", &format!("{TEAM}/{pane}"));
+    let decided = plan(
+        ledger,
+        &mut team,
+        &NoLauncher,
+        &argv,
+        pane,
+        now_ms,
+        Some(&actor),
+    );
+    assert_eq!(
+        decided.reply.exit_code, 0,
+        "`{argv:?}` was refused: {}",
+        decided.reply.stderr
+    );
+    ledger.file_receipt(&decided, now_ms);
+    serde_json::from_str(&decided.reply.stdout).expect("the verb answers JSON")
+}
+
+/// The fixture's run one step earlier — its worker still carrying the
+/// attempt — and then the worker's own `worker_done`, naming the commit it
+/// handed in and carrying every review key it could think of.
+fn handed_in(checkout: &str) -> Ledger {
+    let mut rows = one_run(checkout, "");
+    rows["tasks"][0]["status"] = "dispatched".into();
+    rows["dispatches"][0]["ended_ms"] = serde_json::Value::Null;
+    rows["dispatches"][0]["succeeded"] = serde_json::Value::Null;
+    rows["workers"][0]["state"] = "active".into();
+    rows["workers"][0]["dispatch"] = "d-1".into();
+    let mut ledger = ledger_with(rows);
+    let body = a_workers_review_keys();
+    carry_out(
+        &mut ledger,
+        WORKER_PANE,
+        &[
+            "send",
+            "--run",
+            "run-1",
+            "--type",
+            "worker_done",
+            "--body",
+            &body,
+            "--retry-request",
+            "hand-in",
+        ],
+        31,
+    );
+    ledger
+}
+
+/// The run's coordinator sits down in its leader pane and writes its review
+/// through the one correction verb, naming the attempt and the source it
+/// looked at.
+fn reviewed_by_the_coordinator(ledger: &mut Ledger, attempt: &str, source: &str) {
+    let seated = carry_out(
+        ledger,
+        LEADER_PANE,
+        &["run-use", "run-1", "--retry-request", "sit"],
+        40,
+    );
+    assert_eq!(seated["seated"], true, "{seated}");
+    let corrected = carry_out(
+        ledger,
+        LEADER_PANE,
+        &[
+            "task-update",
+            "--run",
+            "run-1",
+            "--task",
+            "t-1",
+            "--result",
+            COORDINATOR_REVIEW,
+            "--attempt",
+            attempt,
+            "--source",
+            source,
+            "--retry-request",
+            "review",
+        ],
+        41,
+    );
+    assert_eq!(corrected["author"], "coordinator", "{corrected}");
+}
+
+/// The same ledger, stored and read back with one row changed through the
+/// projection the store persists — so the change is one its loader accepts.
+fn rebuilt_with(ledger: &Ledger, change: impl FnOnce(&mut serde_json::Value)) -> Ledger {
+    let mut rows = serde_json::to_value(ledger.export()).expect("the projection serializes");
+    change(&mut rows);
+    ledger_with(rows)
+}
+
+/// What a read that believed nothing it should not has to show. The task is
+/// still listed — `coordinator_report` is the reports section's fixed kind and
+/// the summary counts its rows — but none of its review facts is on, and no
+/// test receipt came out of it.
+fn assert_no_review_facts(read: &Read) {
+    let report = &read.evidence.reports.data[0];
+    assert_eq!(report.kind, "coordinator_report");
+    assert!(
+        !report.verified
+            && !report.merged
+            && !report.deployed
+            && !report.written
+            && report.merge_head.is_none(),
+        "a review nobody may stand behind was read as the coordinator's facts: {}",
+        read.json
+    );
+    assert_eq!(read.evidence.verification.data.len(), 0);
+    assert_eq!(read.evidence.verification.state, SourceState::Missing);
+    assert_eq!(read.evidence.summary.receipts_current, 0);
+    assert_eq!(read.evidence.summary.receipts_current_passing, 0);
 }
 
 /* ---- a store with rows in it ------------------------------------------- */
@@ -335,30 +488,145 @@ fn an_observation_with_gaps_answers_unknown_and_never_current() {
     assert_eq!(read.evidence.summary.receipts_unknown, 1);
 }
 
-/// `verified: true` on a task result is a COORDINATOR saying it looked. It is
-/// carried, labelled, and never counted among the test receipts.
+/// `verified: true` on a task result is a COORDINATOR saying it looked — the
+/// run's live seat, through `task-update`, naming the attempt and the source
+/// it reviewed. It is carried, labelled, and never counted among the test
+/// receipts; and it survives the store and the rebuild as the same fact.
 #[test]
 fn a_coordinator_report_is_labelled_and_never_counted_as_a_test() {
     let root = repository();
     let checkout = root.path().to_string_lossy().into_owned();
-    let ledger = ledger_with(one_run(
-        &checkout,
-        r#"{"verified":true,"reviewedBy":"coordinator","merged":true}"#,
-    ));
+    let mut ledger = handed_in(&checkout);
+    reviewed_by_the_coordinator(&mut ledger, "d-1", HANDED_IN);
+    // The author is the one the ledger wrote down from the seat, bound to
+    // what the review named — not a word in anybody's body.
+    assert!(
+        matches!(
+            &ledger.runs()[0].tasks[0].result_author,
+            Some(ResultAuthor::Coordinator {
+                generation: Some(_),
+                attempt: Some(attempt),
+                source: Some(source),
+                ..
+            }) if attempt == "d-1" && source == HANDED_IN
+        ),
+        "{:?}",
+        ledger.runs()[0].tasks[0].result_author
+    );
+    let rebuilt = rebuilt_with(&ledger, |_| {});
+
+    for ledger in [&ledger, &rebuilt] {
+        let read = observe(root.path(), Some(ledger), None, 5);
+
+        let report = &read.evidence.reports.data[0];
+        assert_eq!(report.kind, "coordinator_report");
+        assert!(
+            report.verified && report.merged && report.written,
+            "{}",
+            read.json
+        );
+        assert_eq!(read.evidence.summary.coordinator_reports, 1);
+
+        // And nothing reached the receipts.
+        assert_eq!(read.evidence.verification.data.len(), 0);
+        assert_eq!(read.evidence.summary.receipts_current_passing, 0);
+        assert_eq!(read.evidence.summary.receipts_current, 0);
+        // The store was never offered, so its sections say so rather than
+        // "none".
+        assert_eq!(read.evidence.verification.state, SourceState::Missing);
+        assert_eq!(read.evidence.verification.freshness, Freshness::Unobserved);
+    }
+}
+
+/// A row written before authorship was recorded is a claim by nobody known,
+/// whatever its body says about who reviewed it (t-6815).
+#[test]
+fn a_result_nobody_is_known_to_have_written_is_not_a_coordinator_report() {
+    let root = repository();
+    let checkout = root.path().to_string_lossy().into_owned();
+    let ledger = ledger_with(one_run(&checkout, &a_workers_review_keys()));
+    assert_eq!(ledger.runs()[0].tasks[0].result_author, None);
+
     let read = observe(root.path(), Some(&ledger), None, 5);
+    assert_no_review_facts(&read);
+}
 
-    let report = &read.evidence.reports.data[0];
-    assert_eq!(report.kind, "coordinator_report");
-    assert!(report.verified && report.merged && report.written);
-    assert_eq!(read.evidence.summary.coordinator_reports, 1);
+/// The worker's own `worker_done` — `reviewedBy: "coordinator"`, a forged
+/// author and all — is its claim. The one word of it this read carries is
+/// the attempt's own success, where it has always been: on the execution.
+#[test]
+fn a_workers_own_review_keys_are_not_a_coordinator_report() {
+    let root = repository();
+    let checkout = root.path().to_string_lossy().into_owned();
+    let ledger = handed_in(&checkout);
+    assert_eq!(
+        ledger.runs()[0].tasks[0].result_author,
+        Some(ResultAuthor::Worker {
+            worker: "w-1".to_string(),
+            dispatch: Some("d-1".to_string()),
+        }),
+        "the host wrote down the pane that reported, not the body's author"
+    );
 
-    // And nothing reached the receipts.
-    assert_eq!(read.evidence.verification.data.len(), 0);
-    assert_eq!(read.evidence.summary.receipts_current_passing, 0);
-    assert_eq!(read.evidence.summary.receipts_current, 0);
-    // The store was never offered, so its sections say so rather than "none".
-    assert_eq!(read.evidence.verification.state, SourceState::Missing);
-    assert_eq!(read.evidence.verification.freshness, Freshness::Unobserved);
+    let read = observe(root.path(), Some(&ledger), None, 5);
+    assert_no_review_facts(&read);
+    let execution = &read.evidence.executions.data[0];
+    assert_eq!(execution.dispatch_id, "d-1");
+    assert_eq!(execution.worker_reported_success, Some(true));
+}
+
+/// A coordinator's review is of the attempt it named. A retry of the same
+/// task — handing in the very same commit — inherits none of it; the reader
+/// keeps who wrote it and names the attempt that moved past it.
+#[test]
+fn a_review_of_an_earlier_attempt_is_not_a_report_on_the_next() {
+    let root = repository();
+    let checkout = root.path().to_string_lossy().into_owned();
+    let mut reviewed = handed_in(&checkout);
+    reviewed_by_the_coordinator(&mut reviewed, "d-1", HANDED_IN);
+    let ledger = rebuilt_with(&reviewed, |rows| {
+        let dispatches = rows["dispatches"].as_array_mut().expect("the attempts");
+        let mut retry = dispatches[0].clone();
+        retry["id"] = "d-2".into();
+        retry["retry_of"] = "d-1".into();
+        retry["started_ms"] = 50.into();
+        retry["ended_ms"] = 60.into();
+        dispatches.push(retry);
+    });
+
+    let read = observe(root.path(), Some(&ledger), None, 5);
+    assert_no_review_facts(&read);
+
+    let run = &ledger.runs()[0];
+    let facts = run.review_of(&run.tasks[0]);
+    assert_eq!(facts.author, ReviewAuthor::Coordinator, "{facts:?}");
+    assert_eq!(facts.attempt.as_deref(), Some("d-1"), "{facts:?}");
+    assert_eq!(facts.superseded_by.as_deref(), Some("d-2"), "{facts:?}");
+}
+
+/// A coordinator's review is of the source it named. The same attempt
+/// standing on another hand-in than the one reviewed is not reported on;
+/// the reader keeps the source it named beside the one handed in now.
+#[test]
+fn a_review_of_another_hand_in_is_not_a_report_on_this_one() {
+    let root = repository();
+    let checkout = root.path().to_string_lossy().into_owned();
+    let mut reviewed = handed_in(&checkout);
+    reviewed_by_the_coordinator(&mut reviewed, "d-1", HANDED_IN);
+    let other = "def5678";
+    let ledger = rebuilt_with(&reviewed, |rows| {
+        rows["dispatches"][0]["source"] = other.into();
+    });
+
+    let read = observe(root.path(), Some(&ledger), None, 5);
+    assert_no_review_facts(&read);
+
+    let run = &ledger.runs()[0];
+    let facts = run.review_of(&run.tasks[0]);
+    assert_eq!(facts.author, ReviewAuthor::Coordinator, "{facts:?}");
+    assert_eq!(facts.source.as_deref(), Some(HANDED_IN), "{facts:?}");
+    assert_eq!(facts.source_now.as_deref(), Some(other), "{facts:?}");
+    assert_eq!(facts.superseded_by, None, "{facts:?}");
 }
 
 /// Two checkouts of one repository are two checkouts. A dispatch that ran next

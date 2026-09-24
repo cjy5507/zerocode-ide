@@ -60,6 +60,7 @@ fn a_projection() -> LedgerProjectionV1 {
                 result: Text::from("done"),
                 failures: 0,
                 created_ms: at as i64,
+                result_author: None,
             })
             .collect(),
         dispatches: (0..DISPATCH_COUNT)
@@ -73,6 +74,7 @@ fn a_projection() -> LedgerProjectionV1 {
                 succeeded: Some(true),
                 retry_of: None,
                 remote: None,
+                source: None,
             })
             .collect(),
         workers: (0..WORKER_COUNT)

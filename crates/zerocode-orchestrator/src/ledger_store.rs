@@ -31,8 +31,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use zerocode_core::orchestration::{
     AckedRow, AttachmentRow, Auto, BoundRow, CHECK_RENDERER, CheckV1, CoordinatorSeat, Delivery,
-    DispatchRow, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1, MessageRow, Pinned, RunRow,
-    RunSummary, ServedAnswer, ServedRow, TaskRow, Text, WorkerRow,
+    DispatchRow, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1, MessageRow, Pinned,
+    ResultAuthor, RunRow, RunSummary, ServedAnswer, ServedRow, TaskRow, Text, WorkerRow,
 };
 
 use crate::effect_journal::{EffectJournalError, from_sql_u64, to_sql_u64};
@@ -116,6 +116,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         result TEXT NOT NULL,
         failures INTEGER NOT NULL CHECK (failures >= 0),
         created_ms INTEGER NOT NULL,
+        result_author TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -185,6 +186,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         succeeded INTEGER CHECK (succeeded IS NULL OR succeeded IN (0, 1)),
         retry_of TEXT,
         remote TEXT,
+        source TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -402,6 +404,10 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
         // has no author to name, and `NULL` says exactly that. It reads back
         // as "nobody knows", which is how those rows already behaved.
         ("ledger_messages", "author_seat", "TEXT"),
+        /* Who wrote a task's result, as one JSON document like the seat —
+         * and NULL for every row written before authorship was recorded,
+         * which the review reads as a claim by nobody known (t-6815). */
+        ("ledger_tasks", "result_author", "TEXT"),
         ("ledger_dispatches", "retry_of", "TEXT"),
         ("ledger_workers", "model", "TEXT"),
         ("ledger_workers", "effort", "TEXT"),
@@ -425,6 +431,7 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * existed (t-2512). */
         ("ledger_workers", "adopted_by", "INTEGER"),
         ("ledger_dispatches", "remote", "TEXT"),
+        ("ledger_dispatches", "source", "TEXT"),
         /* Who holds the open batch, and since when. Additive with NULL for
          * both, because a lease written before they were recorded has no
          * honest holder to invent — and `Ledger::deliver` reads that NULL as
@@ -631,6 +638,7 @@ fn bytes_held(projection: &LedgerProjectionV1) -> u64 {
         .iter()
         .map(|row| {
             plain(&row.retry_of)
+                + plain(&row.source)
                 + row.remote.as_ref().map_or(0, |seat| {
                     seat.outbox
                         .iter()
@@ -1488,8 +1496,8 @@ fn write_rows(
                 .execute(
                     "INSERT INTO ledger_tasks (
                         ledger_id, ordinal, run, id, spec, title, parent, status,
-                        result, failures, created_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        result, failures, created_ms, result_author
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         ledger_id,
                         at,
@@ -1502,6 +1510,11 @@ fn write_rows(
                         row.result.as_str(),
                         i64::from(row.failures),
                         row.created_ms,
+                        row.result_author
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(|_| EffectJournalError::Corrupt)?,
                     ],
                 )
                 .map_err(|_| EffectJournalError::Database)?;
@@ -1587,8 +1600,8 @@ fn write_rows(
                 .execute(
                     "INSERT INTO ledger_dispatches (
                         ledger_id, ordinal, run, id, task, worker, started_ms,
-                        ended_ms, succeeded, retry_of, remote
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        ended_ms, succeeded, retry_of, remote, source
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         ledger_id,
                         ordinal(at)?,
@@ -1605,6 +1618,7 @@ fn write_rows(
                             .map(serde_json::to_string)
                             .transpose()
                             .map_err(|_| EffectJournalError::Corrupt)?,
+                        row.source,
                     ],
                 )
                 .map_err(|_| EffectJournalError::Database)?;
@@ -2195,7 +2209,8 @@ fn read_repairable_from_head(
     let mut task_words = Vec::new();
     each(
         connection,
-        "SELECT ordinal, run, id, spec, title, parent, status, result, failures, created_ms
+        "SELECT ordinal, run, id, spec, title, parent, status, result, failures, created_ms,
+                result_author
            FROM ledger_tasks WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2211,6 +2226,7 @@ fn read_repairable_from_head(
                 row.get::<_, String>(7)?,
                 row.get::<_, i64>(8)?,
                 row.get::<_, i64>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ));
             Ok(())
         },
@@ -2219,7 +2235,7 @@ fn read_repairable_from_head(
         .into_iter()
         .zip(task_words)
         .map(
-            |((at, run, id, spec, title, parent, result, failures, created_ms), status)| {
+            |((at, run, id, spec, title, parent, result, failures, created_ms, author), status)| {
                 Ok(TaskRow {
                     run,
                     id,
@@ -2231,6 +2247,13 @@ fn read_repairable_from_head(
                     result: Text::from(result),
                     failures: u32::try_from(failures).map_err(|_| EffectJournalError::Corrupt)?,
                     created_ms,
+                    // A word this window does not know is refused, not
+                    // guessed at — the same door the status column has.
+                    result_author: author
+                        .as_deref()
+                        .map(serde_json::from_str::<ResultAuthor>)
+                        .transpose()
+                        .map_err(|_| EffectJournalError::Corrupt)?,
                 })
             },
         )
@@ -2294,7 +2317,7 @@ fn read_repairable_from_head(
     let mut dispatches = Vec::new();
     each(
         connection,
-        "SELECT run, id, task, worker, started_ms, ended_ms, succeeded, retry_of, remote
+        "SELECT run, id, task, worker, started_ms, ended_ms, succeeded, retry_of, remote, source
            FROM ledger_dispatches WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2309,6 +2332,7 @@ fn read_repairable_from_head(
                     succeeded: row.get(6)?,
                     retry_of: row.get(7)?,
                     remote: None,
+                    source: row.get(9)?,
                 },
                 row.get::<_, Option<String>>(8)?,
             ));
@@ -2854,6 +2878,7 @@ mod tests {
                 result: Text::from(String::new()),
                 failures: 2,
                 created_ms: 7,
+                result_author: None,
             }],
             dispatches: vec![DispatchRow {
                 run: "run-2".to_string(),
@@ -2866,6 +2891,7 @@ mod tests {
                 // The grown link, loaded: a round trip that only carried the
                 // default would pin nothing about the retry lineage.
                 retry_of: Some("dp-3".to_string()),
+                source: None,
                 // And the federated seat whole — queue bytes included, so a
                 // store that dropped the outbox would fail the byte check.
                 remote: Some(zerocode_core::orchestration::RemoteSeat {
@@ -3091,6 +3117,75 @@ mod tests {
             .expect("it is there");
         assert_eq!(held.revision, 1);
         assert_eq!(held.projection, projection);
+    }
+
+    /// Who wrote a task's result survives the trip through SQLite, and an
+    /// old row still reads back as one nobody is known to have written —
+    /// which `Run::review_of` reads as a claim, never a fact (t-6815).
+    ///
+    /// Kept apart from the canonical fixture for the reason the summoner's
+    /// test below is: the pin must stay byte-identical across this column's
+    /// arrival.
+    #[test]
+    fn a_result_author_written_to_the_table_comes_back_and_an_older_row_stays_unknown() {
+        let store = a_store();
+        let mut projection = a_ledger_where_order_is_load_bearing();
+        projection.dispatches[0].source = Some("abc1234".to_string());
+        let mut reviewed = projection.tasks[0].clone();
+        reviewed.id = "t-10".to_string();
+        reviewed.result_author = Some(ResultAuthor::Coordinator {
+            seat: "team-2/%1".to_string(),
+            generation: Some(3),
+            attempt: Some("dp-9".to_string()),
+            source: Some("abc1234".to_string()),
+        });
+        let mut reported = projection.tasks[0].clone();
+        reported.id = "t-11".to_string();
+        reported.result_author = Some(ResultAuthor::Worker {
+            worker: "w-9".to_string(),
+            dispatch: Some("dp-9".to_string()),
+        });
+        projection.tasks.push(reviewed.clone());
+        projection.tasks.push(reported.clone());
+        write(&store, "one", 0, 1, &projection, 10).expect("it writes");
+
+        let held = read(&store, "one", projection.schema)
+            .expect("it reads")
+            .expect("it is there");
+        assert_eq!(
+            held.projection.dispatches[0].source.as_deref(),
+            Some("abc1234")
+        );
+        let authors: Vec<Option<&ResultAuthor>> = held
+            .projection
+            .tasks
+            .iter()
+            .map(|task| task.result_author.as_ref())
+            .collect();
+        assert_eq!(
+            authors,
+            vec![
+                None,
+                reviewed.result_author.as_ref(),
+                reported.result_author.as_ref()
+            ],
+            "the row written before authorship was recorded stays unknown, and \
+             the coordinator's and the worker's rows come back as written"
+        );
+
+        // A word this window does not know is refused, not guessed at — the
+        // same door the status column has.
+        store
+            .execute(
+                "UPDATE ledger_tasks SET result_author = '{\"kind\":\"nobody\"}' WHERE id = 't-10'",
+                [],
+            )
+            .expect("the tamper");
+        let refused = read(&store, "one", projection.schema).expect_err("must refuse");
+        assert!(
+            matches!(refused, EffectJournalError::Corrupt),
+            "{refused:?}"
+        );
     }
 
     /// Lineage survives the trip through SQLite, and an old row still reads

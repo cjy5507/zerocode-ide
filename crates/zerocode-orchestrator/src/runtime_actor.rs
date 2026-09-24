@@ -5739,6 +5739,137 @@ mod tests {
         ));
     }
 
+    /// The coordinator made its review command while the actor was waiting;
+    /// the worker's hand-in entered the mailbox first. The actor must compare
+    /// the review with the source it has WHEN it commits the command (t-6815).
+    #[test]
+    fn a_queued_review_cannot_approve_the_source_that_preceded_a_hand_in() {
+        let fixture = Fixture::new();
+        let actor = start_with(
+            &fixture,
+            cutover(Some(a_seated_legacy()), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        let image = actor.view().expect("the seated run");
+        let run = image.projection().runs[0].id.clone();
+        let task = image.projection().tasks[0].id.clone();
+        let attempt = image.projection().dispatches[0].id.clone();
+        let (seated, _) = actor
+            .plan(a_command(
+                &["run-use", &run, "--retry-request", "seat-for-review"],
+                11,
+            ))
+            .expect("the leader seats the legacy run");
+        assert_eq!(seated.reply.exit_code, 0, "{}", seated.reply.stderr);
+        let stale_review = a_command(
+            &[
+                "task-update",
+                "--run",
+                &run,
+                "--task",
+                &task,
+                "--result",
+                r#"{"verified":true,"testedHead":"abc1234"}"#,
+                "--attempt",
+                &attempt,
+                "--source",
+                "abc1234",
+                "--retry-request",
+                "queued-review",
+            ],
+            31,
+        );
+        let hand_in = PlanCommand::checked(
+            vec![
+                "send".to_string(),
+                "--run".to_string(),
+                run.clone(),
+                "--type".to_string(),
+                "worker_done".to_string(),
+                "--body".to_string(),
+                r#"{"ok":true,"head":"def5678"}"#.to_string(),
+                "--retry-request".to_string(),
+                "queued-hand-in".to_string(),
+            ],
+            "team-1",
+            "%2",
+            capability_of("%2"),
+            Some(format!("actor-v1:{}", "b".repeat(64))),
+            30,
+        )
+        .expect("the worker's command");
+
+        let sender = actor.sender.as_ref().expect("actor sender");
+        let (entered, entered_rx) = mpsc::sync_channel(1);
+        let (release, release_rx) = mpsc::sync_channel(1);
+        let (finished, finished_rx) = mpsc::sync_channel(1);
+        sender
+            .try_send(ActorCommand::Hold {
+                entered,
+                release: release_rx,
+                finished,
+            })
+            .expect("hold the actor");
+        entered_rx.recv().expect("actor is held");
+        let (report_reply, reported) = mpsc::sync_channel(1);
+        sender
+            .try_send(ActorCommand::Request {
+                request: Box::new(RuntimeRequest::Plan(hand_in)),
+                reply: report_reply,
+            })
+            .expect("the hand-in stands first");
+        let (review_reply, reviewed) = mpsc::sync_channel(1);
+        sender
+            .try_send(ActorCommand::Request {
+                request: Box::new(RuntimeRequest::Plan(stale_review)),
+                reply: review_reply,
+            })
+            .expect("the earlier observation stands second");
+        release.send(()).expect("release the actor");
+        finished_rx.recv().expect("actor has resumed");
+        let RuntimeReply::Planned {
+            decided: report,
+            revision: report_revision,
+        } = reported
+            .recv()
+            .expect("hand-in reply")
+            .expect("hand-in decision")
+        else {
+            panic!("the hand-in was not planned");
+        };
+        assert_eq!(report.reply.exit_code, 0, "{}", report.reply.stderr);
+        let RuntimeReply::Planned {
+            decided: review,
+            revision: review_revision,
+        } = reviewed
+            .recv()
+            .expect("review reply")
+            .expect("review decision")
+        else {
+            panic!("the review was not planned");
+        };
+        assert_ne!(review.reply.exit_code, 0, "the old source was accepted");
+        assert!(
+            review.reply.stderr.contains("source"),
+            "{}",
+            review.reply.stderr
+        );
+        assert_eq!(
+            review_revision, report_revision,
+            "a refusal wrote a success receipt"
+        );
+        let image = actor.view().expect("the ledger after both requests");
+        let task_row = image
+            .projection()
+            .tasks
+            .iter()
+            .find(|one| one.id == task)
+            .expect("the task");
+        assert!(task_row.result.as_str().contains("def5678"));
+        actor.shutdown().expect("join the actor");
+    }
+
     #[test]
     fn a_live_actor_fences_external_authority_claims() {
         let fixture = Fixture::new();
@@ -7394,6 +7525,7 @@ mod tests {
                 &task,
                 None,
                 Some(r#"{"note":"original","ok":false}"#.into()),
+                zerocode_core::orchestration::ResultAuthor::Ledger,
             )
             .expect("prior result");
         let other = ledger

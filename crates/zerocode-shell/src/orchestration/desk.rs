@@ -232,8 +232,9 @@ pub(crate) const STAGE_ROWS: usize = 24;
 /// task will not move until it is answered — and a task waiting on a
 /// dependency that failed is held back, not merely pending: it will never
 /// become ready by itself. A completed task is merged only where a
-/// coordinator wrote so (`ReviewFacts::merged`); a worker's report alone is
-/// "reported".
+/// coordinator wrote so against the task's newest attempt
+/// (`Run::review_of`, `ReviewFacts::merged`); a worker's report alone —
+/// whatever keys its body carries — is "reported".
 fn stage_of(run: &Run, task: &Task) -> &'static str {
     if run.pending_gate_on(&task.id).is_some() {
         return "gate";
@@ -243,7 +244,7 @@ fn stage_of(run: &Run, task: &Task) -> &'static str {
         TaskStatus::Pending | TaskStatus::Blocked => "blocked",
         TaskStatus::Ready => "ready",
         TaskStatus::Dispatched => "dispatched",
-        TaskStatus::Completed if task.review().merged => "merged",
+        TaskStatus::Completed if run.review_of(task).merged => "merged",
         TaskStatus::Completed => "reported",
         TaskStatus::Failed => "failed",
     }
@@ -523,7 +524,9 @@ pub(crate) fn machine_load(ledger_volume: &Path) -> MachineLoad {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zerocode_core::orchestration::{AckedRow, Draft, Priority, TaskStatus};
+    use zerocode_core::orchestration::{
+        AckedRow, Draft, Priority, ResultAuthor, TaskStatus, Text, worker_address,
+    };
 
     #[test]
     fn a_question_the_ledger_would_refuse_to_answer_is_not_owed_on_the_desk() {
@@ -728,9 +731,34 @@ mod tests {
         let stranded = task(&mut ledger, "stranded", vec![failed.clone()], 16);
         let held = task(&mut ledger, "held", vec![], 17);
         let gated = task(&mut ledger, "gated", vec![], 18);
+        let claimed = task(&mut ledger, "claimed", vec![], 19);
         ledger
             .start_worker(&run, "codex", ("team-desk", "%2"), Some(&carried), 20)
             .expect("a worker carries one");
+        /* The real road (t-6815): a worker's own `worker_done`, its body
+         * saying merged, through `Ledger::post` — stored as the worker's
+         * claim, so the desk reads "reported", never "merged". */
+        let claimer = ledger
+            .start_worker(&run, "claude", ("team-desk", "%3"), Some(&claimed), 21)
+            .expect("a worker carries the claimed one");
+        ledger
+            .post(
+                &run,
+                Draft {
+                    from: worker_address(&claimer.worker),
+                    to: ledger.run(&run).expect("the run").address(),
+                    kind: MessageKind::WorkerDone,
+                    body: Text::from(r#"{"ok":true,"merged":true,"verified":true}"#.to_string()),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(claimed.clone()),
+                    dispatch: claimer.dispatch.clone(),
+                },
+                22,
+            )
+            .expect("the worker's report");
         for (id, status, result) in [
             (&reported, TaskStatus::Completed, "{}"),
             (&merged, TaskStatus::Completed, r#"{"merged":true}"#),
@@ -738,7 +766,18 @@ mod tests {
             (&held, TaskStatus::Blocked, ""),
         ] {
             ledger
-                .update_task(&run, id, Some(status), Some(result.to_string()))
+                .update_task(
+                    &run,
+                    id,
+                    Some(status),
+                    Some(result.to_string()),
+                    ResultAuthor::Coordinator {
+                        seat: "team-desk/%1".to_string(),
+                        generation: Some(1),
+                        attempt: None,
+                        source: None,
+                    },
+                )
                 .expect("an update");
         }
         let gate = ledger
@@ -769,6 +808,7 @@ mod tests {
             (&ready, "ready"),
             (&carried, "dispatched"),
             (&reported, "reported"),
+            (&claimed, "reported"),
             (&merged, "merged"),
             (&failed, "failed"),
             (&waiting, "pending"),
@@ -804,7 +844,7 @@ mod tests {
                 ("pending", 1),
                 ("ready", 1),
                 ("dispatched", 1),
-                ("reported", 1),
+                ("reported", 2),
                 ("merged", 1),
                 ("gate", 1),
                 ("blocked", 2),
@@ -832,7 +872,13 @@ mod tests {
         }
         for id in &made[..10] {
             ledger
-                .update_task(&run, id, Some(TaskStatus::Completed), None)
+                .update_task(
+                    &run,
+                    id,
+                    Some(TaskStatus::Completed),
+                    None,
+                    ResultAuthor::Ledger,
+                )
                 .expect("done");
         }
         let desk = desk_snapshot(&ledger, |_| true);

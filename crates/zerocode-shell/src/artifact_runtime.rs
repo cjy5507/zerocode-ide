@@ -2151,6 +2151,7 @@ mod tests {
                 succeeded: Some(true),
                 retry_of: None,
                 remote: None,
+                source: None,
             };
         let history = vec![
             dispatch("d1", "w1", "old", 1),

@@ -71,8 +71,21 @@ fn review_facts_read_only_what_a_coordinator_wrote() {
         result: r#"{"merged":true}"#.into(),
         failures: 0,
         created_ms: 0,
+        result_author: Some(ResultAuthor::Coordinator {
+            seat: "team-1/%1".into(),
+            generation: Some(1),
+            attempt: Some("dp-1".into()),
+            source: None,
+        }),
     };
-    assert!(task.review().merged);
+    let facts = ReviewFacts::written_by(task.result.as_str(), task.result_author.as_ref());
+    assert!(facts.merged && !facts.claimed_merged);
+    assert_eq!(facts.author, ReviewAuthor::Coordinator);
+    assert_eq!(facts.attempt.as_deref(), Some("dp-1"));
+    // The same bytes with nobody known to have written them are a claim.
+    let facts = ReviewFacts::written_by(task.result.as_str(), None);
+    assert!(!facts.merged && facts.claimed_merged && !facts.written);
+    assert_eq!(facts.author, ReviewAuthor::Unknown);
 }
 
 /// A launcher that starts exactly the agents a test says exist.
@@ -1853,6 +1866,7 @@ fn worker_worktree_titles_keep_the_id_across_free_form_task_titles() {
         result: Text::default(),
         failures: 0,
         created_ms: 0,
+        result_author: None,
     };
 
     let korean = task(
@@ -2840,6 +2854,7 @@ fn a_task_ended_by_hand_leaves_a_ledger_this_window_still_opens() {
                 &task,
                 Some(ending),
                 Some("somebody finished it by hand".into()),
+                ResultAuthor::Ledger,
             )
             .expect("a hand ending");
         if let Err(wrong) = bench.ledger.validate_loaded() {
@@ -6089,6 +6104,7 @@ fn an_agents_words_never_reach_a_debug_rendering() {
                 result: Text::default(),
                 failures: 0,
                 created_ms: 1,
+                result_author: None,
             },
         }
     );
@@ -8301,6 +8317,7 @@ fn boot_repair_respects_unfinished_failed_and_missing_dependencies() {
                 &dependency,
                 Some(dependency_status.unwrap_or(TaskStatus::Completed)),
                 None,
+                ResultAuthor::Ledger,
             )
             .unwrap();
         let task = ledger
@@ -8352,7 +8369,13 @@ fn boot_repair_respects_unfinished_failed_and_missing_dependencies() {
             assert_eq!(rebuilt.export(), before, "refused start changed the ledger");
             if dependency_run == run {
                 rebuilt
-                    .update_task(&run, &dependency, Some(TaskStatus::Completed), None)
+                    .update_task(
+                        &run,
+                        &dependency,
+                        Some(TaskStatus::Completed),
+                        None,
+                        ResultAuthor::Ledger,
+                    )
                     .unwrap();
                 rebuilt
                     .start_worker(&run, "codex", ("team", "%2"), Some(&task), 6)
@@ -20825,4 +20848,649 @@ fn a_pinned_model_offers_only_agents_that_run_it_and_asks_nothing_when_one_remai
         crate::summon_choice::ask(&look, &options).is_none(),
         "one agent left is not a question"
     );
+}
+
+/* ---- t-6815: the record is the coordinator's (audit t-6780 F2·F3) ----- */
+
+/// The record is the coordinator's, and a worker has no `task-update` at all.
+///
+/// The independent audit of 2026-09-24 (t-6780, F2): `task-update` read
+/// `bound` and wrote, so any pane that could name the run — worker A about
+/// worker B's task, A about its own, a worker whose attempt had already
+/// ended — could settle an attempt and free its dependents. The acceptance
+/// (m-7276, `result.refined`): only the run's live coordinator seat corrects;
+/// a worker's word on its own work is its `worker_done`, and once its
+/// attempt has ended it says what it has to say in a status mail and the
+/// coordinator corrects. Refused by name, and the run is asserted unchanged
+/// rather than merely refused: a refusal that half-happened is the failure
+/// mode this family of gates exists to prevent.
+#[test]
+fn a_task_update_from_a_worker_pane_is_refused_by_name() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name authority");
+    let first = bench.json("task-create --spec first")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let second = bench.json("task-create --spec second")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let follower = bench.json(&format!("task-create --spec follower --deps {second}"))["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (a, a_pane) = bench.seat(&format!("worker-start --agent claude --task {first}"));
+    let (b, _) = bench.seat(&format!("worker-start --agent codex --task {second}"));
+    let before = bench.ledger.export();
+    let unchanged = |bench: &Bench, what: &str| {
+        let after = bench.ledger.export();
+        assert_eq!(
+            after.tasks, before.tasks,
+            "{what}: a refused correction moved a task"
+        );
+        assert_eq!(
+            after.dispatches, before.dispatches,
+            "{what}: a refused correction moved an attempt"
+        );
+        assert_eq!(
+            after.served, before.served,
+            "{what}: a refusal filed a receipt"
+        );
+    };
+
+    // Worker A, about worker B's task: refused, naming everybody involved.
+    let refused = bench.at(
+        &a_pane,
+        &format!("task-update --task {second} --status completed"),
+    );
+    assert_ne!(refused.reply.exit_code, 0, "{:?}", refused.reply);
+    for named in [a.as_str(), b.as_str(), "team-1/%1", second.as_str()] {
+        assert!(
+            refused.reply.stderr.contains(named),
+            "the refusal did not name {named}: {}",
+            refused.reply.stderr
+        );
+    }
+    unchanged(&bench, "another worker's task");
+    assert_eq!(
+        bench.ledger.runs()[0]
+            .task(&follower)
+            .expect("the follower")
+            .status,
+        TaskStatus::Pending,
+        "a refused completion freed its dependents"
+    );
+
+    // Worker A about its OWN task — status or result — is refused too: its
+    // word on its own work is `worker_done`, and the refusal says so.
+    for line in [
+        format!("task-update --task {first} --status completed"),
+        format!("task-update --task {first} --result {{\"verified\":true}}"),
+    ] {
+        let refused = bench.at(&a_pane, &line);
+        assert_ne!(refused.reply.exit_code, 0, "`{line}`: {:?}", refused.reply);
+        assert!(
+            refused
+                .reply
+                .stderr
+                .contains(&format!("worker {a}, which is carrying it"))
+                && refused.reply.stderr.contains("worker_done"),
+            "`{line}`: {}",
+            refused.reply.stderr
+        );
+        unchanged(&bench, &line);
+    }
+
+    // A worker whose attempt ended carries nothing; the road back is the
+    // worker_died shape — a status mail from the pane, then the coordinator
+    // corrects the record.
+    bench.json(&format!(
+        "worker-stop --worker {a} --reason ended-elsewhere"
+    ));
+    let refused = bench.at(
+        &a_pane,
+        &format!("task-update --task {first} --status completed"),
+    );
+    assert_ne!(refused.reply.exit_code, 0, "{:?}", refused.reply);
+    assert!(
+        refused.reply.stderr.contains("carried by nobody")
+            && refused.reply.stderr.contains("is not that seat"),
+        "{}",
+        refused.reply.stderr
+    );
+    let told = bench.at(
+        &a_pane,
+        "send --type status --body the-work-landed-before-the-pane-died",
+    );
+    assert_eq!(told.reply.exit_code, 0, "{}", told.reply.stderr);
+    let ended = bench.json(&format!("task-update --task {first} --status completed"));
+    assert_eq!(ended["status"], "completed", "{ended}");
+    assert_eq!(ended["author"], "coordinator", "{ended}");
+    let run = &bench.ledger.runs()[0];
+    let held = run.task(&first).expect("the task");
+    assert!(
+        !run.review_of(held).verified,
+        "a status correction is no review"
+    );
+    bench
+        .ledger
+        .validate_loaded()
+        .expect("every refusal above left a ledger this window rebuilds");
+}
+
+/// A former coordinator and another run's worker are nonholders too.
+///
+/// The audit's narrow fix: authorize against the ACTUAL live seat of the
+/// named run, not against "is this pane a worker of the run" — a former
+/// coordinator whose pane outlived a takeover, and a worker of some other
+/// run naming this one with `--run`, are both strangers at the record.
+#[test]
+fn a_former_coordinator_or_another_runs_worker_cannot_correct_the_record() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name first-run")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let task = bench.json("task-create --spec the-work")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+
+    // Another run's worker, naming this run by hand.
+    bench.json("run-create --name other-run");
+    let elsewhere = bench.json("task-create --spec elsewhere")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (_, stranger_pane) = bench.seat(&format!("worker-start --agent claude --task {elsewhere}"));
+    let before = bench.ledger.export();
+    let refused = bench.at(
+        &stranger_pane,
+        &format!("task-update --run {run_id} --task {task} --status completed"),
+    );
+    assert_ne!(refused.reply.exit_code, 0, "{:?}", refused.reply);
+    assert!(
+        refused
+            .reply
+            .stderr
+            .contains(&format!("pane team-1/{stranger_pane}")),
+        "{}",
+        refused.reply.stderr
+    );
+    assert_eq!(bench.ledger.export().tasks, before.tasks);
+
+    // The first coordinator, after a takeover: its pane is alive, still
+    // bound, and no longer the seat.
+    let mut other = Team::new("team-2", "second", 70);
+    std::mem::swap(&mut bench.team, &mut other);
+    let taken = bench.json(&format!(
+        "run-takeover --run {run_id} --from %1 --reason the-first-stalled-on-quota"
+    ));
+    assert_eq!(taken["generation"], 2, "{taken}");
+    std::mem::swap(&mut bench.team, &mut other);
+    let refused = bench.at(
+        agent_teams::LEADER_PANE,
+        &format!("task-update --run {run_id} --task {task} --status completed"),
+    );
+    assert_ne!(refused.reply.exit_code, 0, "{:?}", refused.reply);
+    assert!(
+        refused.reply.stderr.contains("team-2/%1") && refused.reply.stderr.contains("generation 2"),
+        "the refusal did not name the live seat: {}",
+        refused.reply.stderr
+    );
+    assert_eq!(bench.ledger.export().tasks, before.tasks);
+
+    // The live seat corrects, and the correction says which sitting wrote it.
+    std::mem::swap(&mut bench.team, &mut other);
+    let ended = bench.json(&format!(
+        "task-update --run {run_id} --task {task} --status completed --result {{\"verified\":true}} --attempt none --source abc1234"
+    ));
+    assert_eq!(ended["author"], "coordinator", "{ended}");
+    let run = bench.ledger.run(&run_id).expect("the run");
+    let held = run.task(&task).expect("the task");
+    assert_eq!(
+        held.result_author,
+        Some(ResultAuthor::Coordinator {
+            seat: "team-2/%1".to_string(),
+            generation: Some(2),
+            attempt: None,
+            source: Some("abc1234".to_string()),
+        })
+    );
+    assert!(run.review_of(held).verified);
+}
+
+/// Mail's legacy leader signature cannot stand in for a live task-correction
+/// seat. In particular another team's never-worker leader used to satisfy
+/// that signature on a vacated run named with --run (astra R1).
+#[test]
+fn a_seatless_run_refuses_every_leader_until_one_sits() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name seatless")["runId"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    let task = bench.json("task-create --spec work")["taskId"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+    let mut other = Team::new("team-2", "stranger", 70);
+
+    // A run written before coordinator seats existed.
+    bench.ledger.run_mut(&run_id).expect("run").coordinator = None;
+    let before = bench.ledger.export();
+    std::mem::swap(&mut bench.team, &mut other);
+    let denied = bench.run(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_ne!(denied.reply.exit_code, 0);
+    assert!(
+        denied.reply.stderr.contains("nobody sitting"),
+        "{}",
+        denied.reply.stderr
+    );
+    assert_eq!(
+        bench.ledger.export(),
+        before,
+        "a refused correction left a success receipt"
+    );
+    std::mem::swap(&mut bench.team, &mut other);
+    let denied = bench.run(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_ne!(
+        denied.reply.exit_code, 0,
+        "the former leader is no seat either"
+    );
+    assert_eq!(bench.ledger.export(), before);
+
+    bench.json("run-create --name other-work");
+    let other_task = bench.json("task-create --spec elsewhere")["taskId"]
+        .as_str()
+        .expect("other task")
+        .to_string();
+    let (_, worker_pane) = bench.seat(&format!("worker-start --agent claude --task {other_task}"));
+    let before = bench.ledger.export();
+    let denied = bench.at(
+        &worker_pane,
+        &format!("task-update --run {run_id} --task {task} --status completed"),
+    );
+    assert_ne!(
+        denied.reply.exit_code, 0,
+        "a worker cannot repair the vacant seat"
+    );
+    assert_eq!(bench.ledger.export(), before);
+
+    // Vacating a known seat is the same authority boundary.
+    bench.json(&format!("run-use {run_id}"));
+    bench.ledger.team_dissolved("team-1", 5_000);
+    let before = bench.ledger.export();
+    std::mem::swap(&mut bench.team, &mut other);
+    let denied = bench.run(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_ne!(denied.reply.exit_code, 0);
+    assert!(denied.reply.stderr.contains("vacated"));
+    assert_eq!(bench.ledger.export(), before);
+    std::mem::swap(&mut bench.team, &mut other);
+    let denied = bench.run(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_ne!(
+        denied.reply.exit_code, 0,
+        "the vacated coordinator has no seat"
+    );
+    assert_eq!(bench.ledger.export(), before);
+    std::mem::swap(&mut bench.team, &mut other);
+    // The explicit recovery creates a live generation, which can correct.
+    let seated = bench.json(&format!("run-use {run_id}"));
+    assert_eq!(seated["seated"], true);
+    let corrected = bench.json(&format!(
+        "task-update --run {run_id} --task {task} --status completed"
+    ));
+    assert_eq!(corrected["author"], "coordinator");
+}
+
+/// A worker's `verified`/`merged`/`deployed` are its claim, shown as one —
+/// through the real road: `worker_done` → stored → rebuilt → read.
+///
+/// The independent audit of 2026-09-24 (t-6780, F3): a legitimate worker
+/// carrying its own dispatch reported `{"ok":true,"verified":true,
+/// "merged":true,"deployed":true}` and every review label came on with no
+/// coordinator having looked. The body is still stored verbatim — it is the
+/// worker's report — but the ledger writes down WHO wrote it, from the pane
+/// the host authenticated and never from a key in the body, and the review
+/// reads the keys as claims until the coordinator seat writes its own, bound
+/// to the attempt it reviewed. Both survive a rebuild: the claim as a claim,
+/// the coordinator's row as the fact.
+#[test]
+fn a_workers_claimed_verification_is_shown_as_a_claim() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name claims");
+    let task = bench.json("task-create --spec ship-it")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let dispatch = bench.ledger.runs()[0].dispatches[0].id.clone();
+
+    // Every review key a worker could think of, old and new — including a
+    // forged author — in the body it is entitled to send.
+    bench.json_at(
+        &pane,
+        "send --type worker_done --body {\"ok\":true,\"summary\":\"checked-locally\",\"verified\":true,\"reviewedBy\":\"me\",\"merged\":true,\"deployed\":true,\"author\":\"coordinator\",\"resultAuthor\":{\"kind\":\"coordinator\"}}",
+    );
+    let (status, author, facts) = {
+        let run = &bench.ledger.runs()[0];
+        let held = run.task(&task).expect("the task");
+        (held.status, held.result_author.clone(), run.review_of(held))
+    };
+    assert_eq!(
+        status,
+        TaskStatus::Completed,
+        "the report is still the completion"
+    );
+    assert_eq!(
+        author,
+        Some(ResultAuthor::Worker {
+            worker: worker.clone(),
+            dispatch: Some(dispatch.clone()),
+        })
+    );
+    assert!(
+        !facts.verified && !facts.merged && !facts.deployed && !facts.written,
+        "a worker's keys were read as the coordinator's facts: {facts:?}"
+    );
+    assert!(
+        facts.claimed_verified && facts.claimed_merged && facts.claimed_deployed,
+        "the worker's claim was dropped rather than kept apart: {facts:?}"
+    );
+    assert_eq!(facts.author, ReviewAuthor::Worker);
+
+    // The roster reads the same row the board does.
+    let listed = bench.json("task-list");
+    let row = listed["tasks"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["taskId"] == task.as_str())
+        .expect("the task's row")
+        .clone();
+    assert_eq!(row["review"]["verified"], false, "{row}");
+    assert_eq!(row["review"]["claimed_verified"], true, "{row}");
+    assert_eq!(row["resultAuthor"]["kind"], "worker", "{row}");
+
+    // Stored and rebuilt, the claim is still a claim.
+    let carried = Ledger::rebuild(bench.ledger.export()).expect("a readable ledger");
+    let run = &carried.runs()[0];
+    let held = run.task(&task).expect("the task");
+    assert_eq!(held.result_author, author);
+    assert!(!run.review_of(held).verified && run.review_of(held).claimed_verified);
+
+    // The coordinator's own word, and only that, makes the fact — bound to
+    // the attempt it reviewed — and it too survives a rebuild.
+    let source = bench.ledger.runs()[0].dispatches[0]
+        .source
+        .clone()
+        .expect("hand-in");
+    bench.json(&format!(
+        "task-update --task {task} --result {{\"verified\":true,\"mergeHead\":\"3a0a289bb5f3\"}} --attempt {dispatch} --source {source}"
+    ));
+    for ledger in [
+        &bench.ledger,
+        &Ledger::rebuild(bench.ledger.export()).expect("readable"),
+    ] {
+        let run = &ledger.runs()[0];
+        let held = run.task(&task).expect("the task");
+        let facts = run.review_of(held);
+        assert!(facts.verified && facts.merged && facts.written, "{facts:?}");
+        assert!(
+            !facts.claimed_verified && !facts.claimed_merged,
+            "{facts:?}"
+        );
+        assert_eq!(facts.author, ReviewAuthor::Coordinator);
+        assert_eq!(facts.attempt.as_deref(), Some(dispatch.as_str()));
+        assert_eq!(
+            held.result_author,
+            Some(ResultAuthor::Coordinator {
+                seat: "team-1/%1".to_string(),
+                generation: Some(1),
+                attempt: Some(dispatch.clone()),
+                source: Some(source.clone()),
+            })
+        );
+    }
+}
+
+/// A review is of an attempt; the next attempt inherits nothing.
+///
+/// The acceptance (m-7276): when the attempt changes, the old accepted facts
+/// do not attach to the new result — a task id staying the same is not a
+/// reason. Two doors: the reading withholds a coordinator's facts once the
+/// task has a newer attempt than the one reviewed, and the writing refuses
+/// a correction that names an attempt the task has moved past, so a
+/// coordinator that read the old result while a retry was starting cannot
+/// approve the new attempt with its observation of the old. A correction of
+/// the record that names no attempt — a status, a progress note — is not a
+/// review of a source and goes through as it always did.
+#[test]
+fn a_coordinators_review_is_bound_to_the_attempt_it_reviewed_and_a_new_attempt_inherits_nothing() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name attempts");
+    let task = bench.json("task-create --spec flaky-build")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (_, first_pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let first = bench.ledger.runs()[0].dispatches[0].id.clone();
+    bench.json_at(
+        &first_pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"abc1234\"}",
+    );
+    bench.json(&format!(
+        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"abc1234\"}} --attempt {first} --source abc1234"
+    ));
+    let facts = {
+        let run = &bench.ledger.runs()[0];
+        run.review_of(run.task(&task).expect("the task"))
+    };
+    assert!(facts.verified && facts.superseded_by.is_none(), "{facts:?}");
+
+    // Sent again: the review stood for the first attempt only.
+    bench.json(&format!("task-update --task {task} --status ready"));
+    let (_, second_pane) = bench.seat(&format!("worker-start --agent codex --task {task}"));
+    let second = bench.ledger.runs()[0].dispatches[1].id.clone();
+    assert_ne!(first, second);
+    let (facts, author) = {
+        let run = &bench.ledger.runs()[0];
+        let held = run.task(&task).expect("the task");
+        (run.review_of(held), held.result_author.clone())
+    };
+    assert!(
+        !facts.verified && !facts.written,
+        "a review of the first attempt dressed the second: {facts:?}"
+    );
+    assert_eq!(facts.superseded_by.as_deref(), Some(second.as_str()));
+    assert_eq!(facts.attempt.as_deref(), Some(first.as_str()));
+    assert_eq!(facts.author, ReviewAuthor::Coordinator);
+    assert!(
+        matches!(author, Some(ResultAuthor::Coordinator { .. })),
+        "the record itself is untouched — only the reading withholds: {author:?}"
+    );
+    let listed = bench.json("task-list");
+    let row = listed["tasks"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["taskId"] == task.as_str())
+        .expect("the task's row")
+        .clone();
+    assert_eq!(row["review"]["verified"], false, "{row}");
+    assert_eq!(row["review"]["superseded_by"], second.as_str(), "{row}");
+
+    // A correction made against the first attempt is refused at the commit
+    // point, by name, and moves nothing.
+    let before = bench.ledger.export();
+    let stale = bench.run(&format!(
+        "task-update --task {task} --result {{\"verified\":true}} --attempt {first} --source abc1234"
+    ));
+    assert_ne!(stale.reply.exit_code, 0, "{:?}", stale.reply);
+    assert!(
+        stale.reply.stderr.contains(&first) && stale.reply.stderr.contains(&second),
+        "{}",
+        stale.reply.stderr
+    );
+    assert_eq!(bench.ledger.export().tasks, before.tasks);
+
+    // Against the newest attempt's hand-in it goes through, and the facts stand again.
+    bench.json_at(
+        &second_pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"def5678\"}",
+    );
+    bench.json(&format!(
+        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"def5678\"}} --attempt {second} --source def5678"
+    ));
+    let facts = {
+        let run = &bench.ledger.runs()[0];
+        run.review_of(run.task(&task).expect("the task"))
+    };
+    assert!(facts.verified && facts.superseded_by.is_none(), "{facts:?}");
+    assert_eq!(facts.attempt.as_deref(), Some(second.as_str()));
+
+    // A review cannot be pasted onto the other source even under the same attempt.
+    let stale = bench.run(&format!(
+        "task-update --task {task} --result {{\"verified\":true}} --attempt {second} --source abc1234"
+    ));
+    assert_ne!(stale.reply.exit_code, 0);
+}
+
+/// A request queued before a hand-in or a retry must carry the source it
+/// actually saw. The actor checks both observations when it applies the
+/// correction; it never fills either blank with the newest row (astra R2).
+#[test]
+fn a_review_needs_the_observed_attempt_and_source_at_commit() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name source-check");
+    let task = bench.json("task-create --spec code-change")["taskId"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+    let (_, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let attempt = bench.ledger.runs()[0].dispatches[0].id.clone();
+    let review = format!(
+        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"abc1234\"}}"
+    );
+    let before = bench.ledger.export();
+    for line in [
+        review.clone(),
+        format!("{review} --attempt {attempt}"),
+        format!("{review} --source abc1234"),
+        format!("{review} --attempt {attempt} --source abc1234"),
+    ] {
+        let denied = bench.run(&line);
+        assert_ne!(denied.reply.exit_code, 0, "{line}: {:?}", denied.reply);
+        assert_eq!(bench.ledger.export(), before, "{line} changed the ledger");
+    }
+
+    bench.json_at(
+        &pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"def5678\"}",
+    );
+    let before = bench.ledger.export();
+    for line in [
+        review.clone(),
+        format!("{review} --attempt {attempt}"),
+        format!("{review} --attempt {attempt} --source abc1234"),
+        format!("{review} --attempt {attempt} --source def5678"),
+    ] {
+        let denied = bench.run(&line);
+        assert_ne!(denied.reply.exit_code, 0, "{line}: {:?}", denied.reply);
+        assert_eq!(bench.ledger.export(), before, "{line} changed the ledger");
+    }
+    let accepted = bench.json(&format!(
+        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"def5678\"}} --attempt {attempt} --source def5678"
+    ));
+    assert_eq!(accepted["author"], "coordinator");
+    let run = &bench.ledger.runs()[0];
+    assert!(run.review_of(run.task(&task).expect("task")).verified);
+
+    // A newer source on the SAME attempt invalidates the old review even
+    // when the task id, author, and dispatch id have stayed the same.
+    let mut moved = bench.ledger.export();
+    moved
+        .dispatches
+        .iter_mut()
+        .find(|row| row.id == attempt)
+        .expect("attempt")
+        .source = Some("123abcd".to_string());
+    let moved = Ledger::rebuild(moved).expect("a readable changed hand-in");
+    let run = &moved.runs()[0];
+    let facts = run.review_of(run.task(&task).expect("task"));
+    assert!(!facts.verified && !facts.written, "{facts:?}");
+    assert_eq!(facts.source_now.as_deref(), Some("123abcd"));
+}
+
+/// A result nobody is known to have written is a claim, however it is
+/// spelled — and a coordinator's row stays the fact across a rebuild.
+///
+/// The acceptance (m-7276): no serde default or migration may promote a
+/// legacy result to coordinator authorship. The rows this machine wrote
+/// before authorship was recorded carry `verified`/`merged` in the
+/// coordinator's own spelling, and the ledger still cannot say who wrote
+/// them, so it does not.
+#[test]
+fn a_legacy_result_with_no_author_reads_as_a_claim_and_a_coordinators_row_survives_a_rebuild() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name legacy");
+    let legacy = bench.json("task-create --spec old-work")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let reviewed = bench.json("task-create --spec new-work")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    for id in [&legacy, &reviewed] {
+        bench.json(&format!(
+            "task-update --task {id} --status completed --result {{\"verified\":true,\"mergeHead\":\"3a0a289bb5f3\",\"deployed\":true}} --attempt none --source 3a0a289bb5f3"
+        ));
+    }
+    // The store as an older window wrote it: the same bytes, no author.
+    let mut projection = bench.ledger.export();
+    let row = projection
+        .tasks
+        .iter_mut()
+        .find(|row| row.id == legacy)
+        .expect("the legacy row");
+    assert!(
+        row.result_author.is_some(),
+        "the fixture wrote as the coordinator"
+    );
+    row.result_author = None;
+    let carried = Ledger::rebuild(projection).expect("a readable ledger");
+    let run = &carried.runs()[0];
+
+    let old = run.review_of(run.task(&legacy).expect("the legacy task"));
+    assert!(
+        !old.verified && !old.merged && !old.deployed && !old.written,
+        "a legacy result was promoted to the coordinator's facts: {old:?}"
+    );
+    assert!(
+        old.claimed_verified && old.claimed_merged && old.claimed_deployed,
+        "{old:?}"
+    );
+    assert_eq!(old.author, ReviewAuthor::Unknown);
+    assert_eq!(
+        run.task(&legacy).expect("the legacy task").result_author,
+        None
+    );
+
+    let new = run.review_of(run.task(&reviewed).expect("the reviewed task"));
+    assert!(
+        new.verified && new.merged && new.deployed && new.written,
+        "{new:?}"
+    );
+    assert_eq!(new.merge_head.as_deref(), Some("3a0a289bb5f3"));
+    assert_eq!(new.author, ReviewAuthor::Coordinator);
 }

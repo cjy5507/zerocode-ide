@@ -1393,9 +1393,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
             let dispatch_id = dispatch.map(|one| one.id.clone()).unwrap_or_default();
             let dispatch_started_ms = dispatch.map_or(0, |one| one.started_ms);
             let retry_of = dispatch.and_then(|one| one.retry_of.clone());
-            let review = carried
-                .map(zerocode_core::orchestration::Task::review)
-                .unwrap_or_default();
+            let review = carried.map(|held| run.review_of(held)).unwrap_or_default();
             listed.push(LedgerAgent {
                 run: run.id.clone(),
                 worker: worker.id.clone(),
