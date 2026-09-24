@@ -628,12 +628,13 @@ pub(crate) struct ScanCursor {
 /// window more, each in turn: a file truncated and rewritten under its own
 /// inode, its first line kept, no longer holds them — found at once when
 /// the rewrite reached the bytes just before the cursor, and within one
-/// round of the readings (as many as the windows the cursor counted: a
-/// 12 MB transcript's 47) when it changed only a record further back, where
-/// before the last few alone were read and such a rewrite stood as the file
-/// it replaced for good. On a file the platform cannot name nothing is taken
-/// on faith, and every window is read again and compared before the cursor
-/// is trusted. A bare fingerprint counted nothing.
+/// round of the readings (as many as the windows the cursor counted: 46
+/// for the 11.8 MB transcript a worker wrote here) when it changed only a
+/// record further back, where before the last few alone were read and such
+/// a rewrite stood as the file it replaced for good. On a file the platform
+/// cannot name nothing is taken on faith, and every window is read again
+/// and compared before the cursor is trusted. A bare fingerprint counted
+/// nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Counted {
     /// Each whole window the cursor counted, oldest first.
