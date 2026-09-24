@@ -10,7 +10,24 @@ fields and names the input, the host time and the expected verdict. Rust and
 Swift feed every case to their real `permits` and `observe` methods; the
 tests hold no second copy of the rules. Plan parity and lease parity are
 separate claims: the plan cases say nothing about leases, and the lease cases
-say nothing about plans.
+say nothing about plans. `observation_cases.json` does the same for what a
+perception kernel answers (below). `limits.json` is the reflex table exactly
+as `limits_wire` sends it to the helper (plus the newline).
+
+## Version 2: a colour detector carries its spec
+
+A colour detector carries its `color` spec (`game_state::ColorSpec`, R5's
+`fixtures/game-state`) inside the plan, so the plan hash covers what the
+kernel reads. A colour detector without one, or with a spec
+`game_state::validate_color` refuses, is `perception`; a colour detector's
+structure is its spec's layout, so its `patches` is 1 and its `scale` 1/1
+(`unsupported` otherwise). These checks come after the detector's own ROI and
+work checks, so every version-1 case keeps its verdict: the 32 cases were
+re-hashed under version 2 with a valid spec on each colour detector, and
+`bad_version` is now the version-1 document. `future_version`,
+`color_missing`, `color_spec_refused`, `color_patches`, `color_scale` and
+`valid_cells` are the cases version 2 adds. A version-1 plan is refused,
+never read as a colour detector with nothing to read its ROI with.
 
 ## Canonical wire
 
@@ -66,3 +83,30 @@ reference to a macro, be acyclic, have at most `max_macro_depth` nested macro
 calls on any path below it and expand to at most `max_expanded_actions`
 actions. Unused valid macros are allowed. Rule roots additionally multiply
 by `max_fires` in the total executable action budget.
+
+## Observations
+
+What a kernel answers for one detector on one frame is data, never
+permission. `admissible` is true only when all of these hold:
+
+- it names the detector, and exactly the frame the runtime handed over —
+  run, stream, capture, repaint, geometry, plan and owner epochs, clock and
+  capture time (the runtime observes only frames its cursor accepted, so the
+  capture time is known);
+- known and unknown exclude each other: a value exactly when no reason is
+  given, and a known value is never negative (0 means nothing is there);
+- the detector's ROI has a place in the frame (`game_state::frame_roi`, the
+  one placement). Without one only an unknown answer with no target and no
+  cells is honest; with one, the observation's scale is that placement's;
+- a target only on a known nonzero value, with a nonzero track, a non-empty
+  pixel hitbox inside the placed ROI and the aim point inside the hitbox;
+- cells only for a cells layout, one per cell, each a class of the palette or
+  0 with a reason — never both — and a share of at most 1000 permille;
+- no more samples than the tick allowed.
+
+`aim` carries the point forward by the velocity (pixels a second, integer
+division toward zero) from the capture time to the asked time, and answers
+it only while the time does not run backwards or past the frame-age limit,
+no carry overflows, and the square of the uncertainty around the point stays
+inside the hitbox carried the same way. A lease's time proof is the
+runtime's: never later than the capture time plus `max_frame_age_ns`.

@@ -88,7 +88,8 @@ fn shared_golden_runs_through_the_real_validator() {
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
-    assert_eq!(cases.len(), 32);
+    // R1's 32 cases under v2, and the six v2 adds.
+    assert_eq!(cases.len(), 38);
     for name in manifest["wire_negative"].as_array().unwrap() {
         let name = name.as_str().unwrap();
         let path = format!(
@@ -349,7 +350,7 @@ fn canonical_wire_is_strict_and_preserves_the_validated_plan() {
     assert_eq!(decode_wire(&bytes).unwrap().plan(), &typed);
     let duplicate = String::from_utf8(bytes.clone())
         .unwrap()
-        .replace("\"version\":1", "\"version\":1,\"version\":1");
+        .replace("\"version\":2", "\"version\":2,\"version\":2");
     assert_eq!(
         decode_wire(duplicate.as_bytes()).unwrap_err(),
         ReflexError::Wire
@@ -435,4 +436,99 @@ fn duplicate_or_regressed_capture_is_not_fresh_even_if_repaint_is_unchanged() {
         stream_epoch: 2,
         ..base
     }));
+}
+
+#[test]
+fn a_colour_detector_carries_its_spec_inside_the_plan_hash() {
+    let row = golden("valid_basic");
+    let typed: ReflexPlan = serde_json::from_value(row.plan).unwrap();
+    assert!(validate(typed.clone()).is_ok());
+    // Without its spec a colour detector has nothing to read the ROI with.
+    let mut bare = typed.clone();
+    bare.detectors[0].color = None;
+    bare.plan_hash = plan_hash(&bare);
+    assert_eq!(validate(bare).unwrap_err(), ReflexError::Perception);
+    // The spec is covered by the hash: the same digest over another spec is refused.
+    let mut other = typed.clone();
+    if let Some(color) = other.detectors[0].color.as_mut() {
+        color.confirm += 1;
+    }
+    assert_eq!(validate(other.clone()).unwrap_err(), ReflexError::Hash);
+    other.plan_hash = plan_hash(&other);
+    assert!(validate(other).is_ok());
+    // A version-1 document is refused, whatever it holds.
+    let mut old = typed;
+    old.version = 1;
+    old.plan_hash = plan_hash(&old);
+    assert_eq!(validate(old).unwrap_err(), ReflexError::Version);
+}
+
+#[test]
+fn the_reflex_table_the_window_sends_is_the_one_table() {
+    let file = include_str!("../../../fixtures/reflex-contract/limits.json");
+    assert_eq!(limits_wire(), file.trim_end().as_bytes());
+    let longest_glide = LIMITS.max_pointer_duration_ms * 1_000_000 / LIMITS.pointer_tick_ns;
+    assert!(longest_glide + 2 <= LIMITS.max_expanded_actions);
+}
+
+#[test]
+fn shared_observation_cases_run_through_admissible_and_aim() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/reflex-contract/observation_cases.json"
+    ))
+    .unwrap();
+    // A case replaces top-level fields; a null removes an optional one.
+    let patched = |base: &serde_json::Value, patch: &serde_json::Value| {
+        let mut value = base.clone();
+        let object = value.as_object_mut().unwrap();
+        for (key, item) in patch.as_object().unwrap() {
+            if item.is_null() && key != "captured_host_ns" {
+                object.remove(key);
+            } else {
+                object.insert(key.clone(), item.clone());
+            }
+        }
+        value
+    };
+    let samples = fixture["samples"].as_u64().unwrap();
+    let mut mismatches = Vec::new();
+    for case in fixture["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let detector: Detector =
+            serde_json::from_value(patched(&fixture["detector"], &case["detector"])).unwrap();
+        let frame: FrameFacts =
+            serde_json::from_value(patched(&fixture["frame"], &case["frame"])).unwrap();
+        let observation: Observation =
+            serde_json::from_value(patched(&fixture["observation"], &case["observation"])).unwrap();
+        // Each observation's own canonical wire decodes back to itself.
+        let wire = canonical_json(&serde_json::to_value(&observation).unwrap());
+        assert_eq!(
+            serde_json::from_slice::<Observation>(&wire).unwrap(),
+            observation,
+            "{name}"
+        );
+        let got = observation.admissible(&detector, &frame, samples);
+        if got != case["expected"].as_bool().unwrap() {
+            mismatches.push(format!("admissible {name}: got {got}"));
+        }
+    }
+    for case in fixture["aim_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let target: Target =
+            serde_json::from_value(patched(&fixture["target"], &case["target"])).unwrap();
+        let got = target.aim(
+            case["at_host_ns"].as_u64().unwrap(),
+            case["captured_host_ns"].as_u64().unwrap(),
+            case["max_age_ns"].as_u64().unwrap(),
+        );
+        let expected = case["expected"]
+            .as_array()
+            .map(|point| (point[0].as_i64().unwrap(), point[1].as_i64().unwrap()));
+        if got != expected {
+            mismatches.push(format!("aim {name}: got {got:?}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    assert_eq!(fixture["cases"].as_array().unwrap().len(), 34);
+    assert_eq!(fixture["aim_cases"].as_array().unwrap().len(), 9);
 }

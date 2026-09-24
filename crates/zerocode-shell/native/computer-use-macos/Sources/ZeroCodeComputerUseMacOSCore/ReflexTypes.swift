@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 /// Wire values have no input authority until `ReflexContract.validate` succeeds.
-public struct ReflexPlan: Codable {
+public struct ReflexPlan: Codable, Sendable {
     public let version: UInt32
     public let plan_hash: String
     public let scope: ReflexScope
@@ -12,33 +12,48 @@ public struct ReflexPlan: Codable {
     public let pointer: ReflexPointerStyle
 }
 
-public struct ReflexScope: Codable {
+public struct ReflexScope: Codable, Sendable {
     public let surface: ReflexSurface
     public let target: String
 }
-public enum ReflexSurface: String, Codable { case macos_desktop, ios_device, windows_desktop }
-public enum ReflexCoordinateSpace: String, Codable { case pixel, point, css, device }
-public struct ReflexRoi: Codable {
+public enum ReflexSurface: String, Codable, Sendable { case macos_desktop, ios_device, windows_desktop }
+public enum ReflexCoordinateSpace: String, Codable, Sendable { case pixel, point, css, device }
+public struct ReflexRoi: Codable, Equatable, Sendable {
     public let x: Int64
     public let y: Int64
     public let width: Int64
     public let height: Int64
     public let space: ReflexCoordinateSpace
+
+    public init(x: Int64, y: Int64, width: Int64, height: Int64, space: ReflexCoordinateSpace) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.space = space
+    }
 }
-public struct ReflexScale: Codable {
+public struct ReflexScale: Codable, Equatable, Sendable {
     public let numerator: UInt64
     public let denominator: UInt64
+
+    public init(numerator: UInt64, denominator: UInt64) {
+        self.numerator = numerator
+        self.denominator = denominator
+    }
 }
-public enum ReflexDetectorKind: String, Codable { case color, template, motion }
-public struct ReflexDetector: Codable {
+public enum ReflexDetectorKind: String, Codable, Sendable { case color, template, motion }
+public struct ReflexDetector: Codable, Sendable {
     public let id: String
     public let kind: ReflexDetectorKind
     public let roi: ReflexRoi
     public let patches: UInt64
     public let scale: ReflexScale
+    /// What a colour detector reads its ROI with (`game_state::ColorSpec`); required for `color`.
+    public let color: PerceptionColorSpec?
 }
-public enum ReflexPredicateOp: String, Codable { case known, eq, not, any, all }
-public final class ReflexPredicate: Codable {
+public enum ReflexPredicateOp: String, Codable, Sendable { case known, eq, not, any, all }
+public final class ReflexPredicate: Codable, Sendable {
     public let op: ReflexPredicateOp
     public let value: Int64?
     public let child: ReflexPredicate?
@@ -67,8 +82,8 @@ public final class ReflexPredicate: Codable {
         }
     }
 }
-public enum ReflexTruth { case yes, no, unknown }
-public struct ReflexRule: Codable {
+public enum ReflexTruth: Sendable { case yes, no, unknown }
+public struct ReflexRule: Codable, Sendable {
     public let id: String
     public let detector: String
     public let predicate: ReflexPredicate
@@ -77,19 +92,19 @@ public struct ReflexRule: Codable {
     public let cooldown_ms: UInt64
     public let max_fires: UInt64
 }
-public enum ReflexActionKind: String, Codable { case move, click, key, macro }
-public struct ReflexAction: Codable {
+public enum ReflexActionKind: String, Codable, Sendable { case move, click, key, macro }
+public struct ReflexAction: Codable, Sendable {
     public let id: String
     public let kind: ReflexActionKind
     public let target: String
 }
-public struct ReflexMacro: Codable {
+public struct ReflexMacro: Codable, Sendable {
     public let id: String
     public let `repeat`: UInt64
     public let actions: [ReflexAction]
 }
-public enum ReflexPointerCurve: String, Codable { case linear, cosine }
-public struct ReflexPointerStyle: Codable {
+public enum ReflexPointerCurve: String, Codable, Sendable { case linear, cosine }
+public struct ReflexPointerStyle: Codable, Sendable {
     public let duration_ms: UInt64
     public let curve: ReflexPointerCurve
     public let instant: Bool
@@ -111,21 +126,63 @@ public struct ReflexLimits: Codable, Equatable, Sendable {
     public let max_pointer_duration_ms: UInt64
     public let instant_duration_ms: UInt64
     public let max_frame_age_ns: UInt64
+    public let frames_per_second: UInt64
+    public let pointer_tick_ns: UInt64
 }
 
-public enum ReflexContractError: String, Error { case wire, version, hash, scope, id, duplicate, reference, cycle, budget, unsupported }
+// MARK: - The window's reflex table
+
+/// The window's reflex table as a run receives it (`ReflexLimits`, the core's
+/// `LIMITS` through the start message), read once before a run leans on it.
+/// The helper keeps no copy of these numbers.
+public enum ReflexTable {
+    /// Every bound a run waits or divides by is positive, and the longest
+    /// glide plus a press and its release fit one lease's children.
+    public static func check(_ limits: ReflexLimits) throws {
+        guard limits.max_frame_age_ns > 0, limits.max_lease_ns > 0,
+              limits.frames_per_second > 0, limits.pointer_tick_ns > 0,
+              maxGlideWaypoints(limits) < limits.max_expanded_actions,
+              limits.max_expanded_actions - maxGlideWaypoints(limits) >= 2
+        else { throw ReflexContractError.budget }
+    }
+
+    /// The most waypoints one glide can have under the table.
+    public static func maxGlideWaypoints(_ limits: ReflexLimits) -> UInt64 {
+        let longest = limits.max_pointer_duration_ms.multipliedReportingOverflow(by: 1_000_000)
+        guard !longest.overflow, limits.pointer_tick_ns > 0 else { return .max }
+        let (whole, part) = longest.partialValue.quotientAndRemainder(dividingBy: limits.pointer_tick_ns)
+        return whole + (part > 0 ? 1 : 0)
+    }
+}
+
+public enum ReflexContractError: String, Error { case wire, version, hash, scope, id, duplicate, reference, cycle, budget, unsupported, perception }
 
 /// A helper must use this return type, never a decoded `ReflexPlan`, for input.
-public struct ValidatedReflexPlan {
+public struct ValidatedReflexPlan: Sendable {
     public let plan: ReflexPlan
     fileprivate init(_ plan: ReflexPlan) { self.plan = plan }
 }
 
 public enum ReflexContract {
-    public static let version: UInt32 = 1
+    /// 2: a colour detector carries its spec inside the plan and its hash.
+    public static let version: UInt32 = 2
+    /// The clock a macOS frame, lease and observation are stamped in: host uptime
+    /// nanoseconds (`mach_absolute_time`), the clock ScreenCaptureKit reports a frame's
+    /// display time in (`reflex::HOST_UPTIME_CLOCK`).
+    public static let hostUptimeClockDomain: UInt64 = 1
 
+    /// The reflex table as the window sends it (`reflex::limits_wire`): only the canonical
+    /// form is read, so a field the helper does not know cannot be dropped silently.
+    public static func decodeLimits(_ data: Data) throws -> ReflexLimits {
+        guard let limits = try? JSONDecoder().decode(ReflexLimits.self, from: data),
+              let object = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(limits)),
+              let canonical = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]),
+              canonical == data
+        else { throw ReflexContractError.wire }
+        return limits
+    }
 
-    public static func decodeAndValidate(_ data: Data, limits: ReflexLimits) throws -> ValidatedReflexPlan {
+    public static func decodeAndValidate(_ data: Data, limits: ReflexLimits, perception: PerceptionLimits) throws -> ValidatedReflexPlan {
         guard let object = try? JSONSerialization.jsonObject(with: data),
               let canonical = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]),
               canonical == data,
@@ -133,7 +190,7 @@ public enum ReflexContract {
         else { throw ReflexContractError.wire }
         guard let typedWire = try? wireBytes(plan), typedWire == data else { throw ReflexContractError.wire }
         for rule in plan.rules { try predicateShape(rule.predicate) }
-        return try validate(plan, limits: limits)
+        return try validate(plan, limits: limits, perception: perception)
     }
 
     private static func identifier(_ text: String) -> Bool {
@@ -197,7 +254,7 @@ public enum ReflexContract {
         }
     }
 
-    public static func validate(_ plan: ReflexPlan, limits: ReflexLimits) throws -> ValidatedReflexPlan {
+    public static func validate(_ plan: ReflexPlan, limits: ReflexLimits, perception: PerceptionLimits) throws -> ValidatedReflexPlan {
         if plan.version != version { throw ReflexContractError.version }
         if try hash(plan) != plan.plan_hash { throw ReflexContractError.hash }
         if plan.scope.target.isEmpty || plan.scope.target.utf8.count > 128 || !plan.scope.target.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95 }) { throw ReflexContractError.scope }
@@ -219,6 +276,17 @@ public enum ReflexContract {
             let scaled = try plus(numerator, item.scale.denominator - 1) / item.scale.denominator
             work = try plus(work, scaled)
             if work > limits.max_work_pixels { throw ReflexContractError.budget }
+            // A colour detector's structure is its spec's layout: one patch at the scale it
+            // was written at, and the spec's own samples bound (`game_state::validate_color`).
+            guard let color = item.color else { throw ReflexContractError.perception }
+            if item.patches != 1 || item.scale.numerator != 1 || item.scale.denominator != 1 {
+                throw ReflexContractError.unsupported
+            }
+            do {
+                _ = try PerceptionSpecs.validate(color, roi: item.roi, limits: perception)
+            } catch {
+                throw ReflexContractError.perception
+            }
         }
         var macroIds = Set<String>()
         var actionIds = Set<String>()
@@ -270,20 +338,31 @@ public enum ReflexContract {
     }
 }
 
-public struct ReflexPixelExtent: Codable {
+public struct ReflexPixelExtent: Codable, Equatable, Sendable {
     public let width: UInt32
     public let height: UInt32
+
+    public init(width: UInt32, height: UInt32) {
+        self.width = width
+        self.height = height
+    }
 }
-public struct ReflexPointTransform: Codable {
+public struct ReflexPointTransform: Codable, Equatable, Sendable {
     public let origin_x: Int64
     public let origin_y: Int64
     public let points_per_pixel: ReflexScale
-}
-public enum ReflexOrientation: String, Codable { case up, right, down, left }
-public enum ReflexColorSpace: String, Codable { case srgb, display_p3, unknown }
-public enum ReflexFrameStatus: String, Codable { case ready, stale, interrupted }
 
-public struct ReflexFrameFacts: Codable {
+    public init(origin_x: Int64, origin_y: Int64, points_per_pixel: ReflexScale) {
+        self.origin_x = origin_x
+        self.origin_y = origin_y
+        self.points_per_pixel = points_per_pixel
+    }
+}
+public enum ReflexOrientation: String, Codable, Sendable { case up, right, down, left }
+public enum ReflexColorSpace: String, Codable, Sendable { case srgb, display_p3, unknown }
+public enum ReflexFrameStatus: String, Codable, Sendable { case ready, stale, interrupted }
+
+public struct ReflexFrameFacts: Codable, Equatable, Sendable {
     public let run_id: String
     public let display_id: String
     public let region: ReflexRoi
@@ -305,9 +384,9 @@ public struct ReflexFrameFacts: Codable {
     public let captured_host_ns: UInt64?
 }
 
-public enum ReflexLeaseInput: String, Codable { case pointer_move, left_click }
+public enum ReflexLeaseInput: String, Codable, Sendable { case pointer_move, left_click }
 
-public struct ReflexActionLease: Codable {
+public struct ReflexActionLease: Codable, Equatable, Sendable {
     public let run_id: String
     public let action_id: String
     public let target_id: String
@@ -387,4 +466,234 @@ public struct ReflexFrameCursor {
         repaintSeq = frame.repaint_seq
         return true
     }
+}
+
+// MARK: - What a perception kernel answers (v2, with R5's kernel)
+
+/// Why a detector's value is unknown on a frame (`reflex::Unknown`). Unknown never
+/// authorizes input, and `not(unknown)` is unknown too.
+public enum ReflexUnknown: String, Codable, Sendable {
+    case frame, color_space, extent, orientation, budget, ambiguous, occluded, scene, unconfirmed
+}
+
+/// The frame an observation was made on, as the runtime handed it over. The runtime
+/// observes only frames its `ReflexFrameCursor` accepted, so the capture time is known.
+public struct ReflexFrameRef: Codable, Equatable, Sendable {
+    public let run_id: String
+    public let stream_epoch: UInt64
+    public let capture_seq: UInt64
+    public let repaint_seq: UInt64
+    public let geometry_epoch: UInt64
+    public let plan_epoch: UInt64
+    public let owner_epoch: UInt64
+    public let clock_domain: UInt64
+    public let captured_host_ns: UInt64
+
+    /// The reference to `frame`, or nil when its capture time is unknown.
+    public init?(_ frame: ReflexFrameFacts) {
+        guard let captured = frame.captured_host_ns else { return nil }
+        run_id = frame.run_id
+        stream_epoch = frame.stream_epoch
+        capture_seq = frame.capture_seq
+        repaint_seq = frame.repaint_seq
+        geometry_epoch = frame.geometry_epoch
+        plan_epoch = frame.plan_epoch
+        owner_epoch = frame.owner_epoch
+        clock_domain = frame.clock_domain
+        captured_host_ns = captured
+    }
+}
+
+/// What a sighting points at (`reflex::Target`): a track that keeps its number while the
+/// target moves and changes it on another scene, its hitbox in frame pixels (the spatial
+/// proof), the point to aim at, its velocity in pixels a second and the kernel's
+/// uncertainty about the point in pixels.
+public struct ReflexTarget: Codable, Equatable, Sendable {
+    public let track_id: UInt64
+    public let roi: ReflexRoi
+    public let point_x: Int64
+    public let point_y: Int64
+    public let velocity_x: Int64
+    public let velocity_y: Int64
+    public let uncertainty: UInt64
+
+    public init(track_id: UInt64, roi: ReflexRoi, point_x: Int64, point_y: Int64, velocity_x: Int64, velocity_y: Int64, uncertainty: UInt64) {
+        self.track_id = track_id
+        self.roi = roi
+        self.point_x = point_x
+        self.point_y = point_y
+        self.velocity_x = velocity_x
+        self.velocity_y = velocity_y
+        self.uncertainty = uncertainty
+    }
+
+    /// Where to press at `atHostNs` (`reflex::Target::aim`): the point carried forward by the
+    /// velocity since `capturedHostNs`, while the square of the uncertainty around it stays
+    /// inside the hitbox carried the same way. Nil — do not press — when time runs backwards
+    /// or past `maxAgeNs`, a carry overflows, or the square leaves the hitbox.
+    public func aim(atHostNs: UInt64, capturedHostNs: UInt64, maxAgeNs: UInt64) -> (x: Int64, y: Int64)? {
+        guard atHostNs >= capturedHostNs, atHostNs - capturedHostNs <= maxAgeNs,
+              let elapsed = Int64(exactly: atHostNs - capturedHostNs) else { return nil }
+        func carry(_ velocity: Int64) -> Int64? {
+            let moved = velocity.multipliedReportingOverflow(by: elapsed)
+            return moved.overflow ? nil : moved.partialValue / 1_000_000_000
+        }
+        func add(_ lhs: Int64, _ rhs: Int64) -> Int64? {
+            let sum = lhs.addingReportingOverflow(rhs)
+            return sum.overflow ? nil : sum.partialValue
+        }
+        func less(_ lhs: Int64, _ rhs: Int64) -> Int64? {
+            let difference = lhs.subtractingReportingOverflow(rhs)
+            return difference.overflow ? nil : difference.partialValue
+        }
+        guard let dx = carry(velocity_x), let dy = carry(velocity_y),
+              let x = add(point_x, dx), let y = add(point_y, dy),
+              let reach = Int64(exactly: uncertainty),
+              let left = add(roi.x, dx), let top = add(roi.y, dy),
+              let right = add(left, roi.width), let bottom = add(top, roi.height),
+              let west = less(x, reach), let east = add(x, reach),
+              let north = less(y, reach), let south = add(y, reach)
+        else { return nil }
+        return west >= left && east < right && north >= top && south < bottom ? (x, y) : nil
+    }
+}
+
+/// One cell of a cells layout (`reflex::Cell`): its class numbered from 1 in palette
+/// order, or 0 with the reason it is unknown, and the share its winner holds.
+public struct ReflexCell: Codable, Equatable, Sendable {
+    public let `class`: UInt64
+    public let unknown: ReflexUnknown?
+    public let share_permille: UInt64
+
+    public init(class klass: UInt64, unknown: ReflexUnknown?, share_permille: UInt64) {
+        self.class = klass
+        self.unknown = unknown
+        self.share_permille = share_permille
+    }
+}
+
+/// A detector's reading of one frame as the kernel answers it (`reflex::Observation`):
+/// data, never permission. The runtime reads it only when `admissible`, and issues any
+/// lease itself.
+public struct ReflexObservation: Codable, Equatable, Sendable {
+    public let detector_id: String
+    public let frame: ReflexFrameRef
+    public let unknown: ReflexUnknown?
+    /// The predicate's input: known exactly when `unknown` is nil; zero means nothing is there.
+    public let value: Int64?
+    public let target: ReflexTarget?
+    /// The frame's scale over the spec's reference extent.
+    public let scale: ReflexScale
+    public let cells: [ReflexCell]?
+    /// Samples this observation read.
+    public let samples: UInt64
+
+    public init(detector_id: String, frame: ReflexFrameRef, unknown: ReflexUnknown?, value: Int64?, target: ReflexTarget?, scale: ReflexScale, cells: [ReflexCell]?, samples: UInt64) {
+        self.detector_id = detector_id
+        self.frame = frame
+        self.unknown = unknown
+        self.value = value
+        self.target = target
+        self.scale = scale
+        self.cells = cells
+        self.samples = samples
+    }
+
+    /// Whether the runtime may take this as the kernel's word about `frame` for `detector`
+    /// (`reflex::Observation::admissible`, pinned for both by `observation_cases.json`).
+    public func admissible(for detector: ReflexDetector, frame: ReflexFrameFacts, budgetSamples: UInt64) -> Bool {
+        guard let color = detector.color else { return false }
+        if detector_id != detector.id || ReflexFrameRef(frame) != self.frame || samples > budgetSamples ||
+            (unknown != nil) == (value != nil) || (value.map { $0 < 0 } ?? false) {
+            return false
+        }
+        guard let placed = PerceptionSpecs.frameRoi(detector.roi, spec: color, frame: frame.pixel_extent) else {
+            return value == nil && target == nil && cells == nil
+        }
+        if scale != placed.scale { return false }
+        if let target {
+            guard let value, value != 0, target.track_id != 0,
+                  Self.within(target.roi, placed.roi),
+                  Self.holds(target.roi, x: target.point_x, y: target.point_y)
+            else { return false }
+        }
+        if let cells {
+            guard case let .cells(layout) = color.layout else { return false }
+            let product = layout.rows.multipliedReportingOverflow(by: layout.columns)
+            let classes = UInt64(color.classes.count)
+            if product.overflow || product.partialValue != UInt64(cells.count) ||
+                cells.contains(where: { $0.share_permille > 1000 || $0.class > classes || ($0.class == 0) != ($0.unknown != nil) }) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func within(_ inner: ReflexRoi, _ outer: ReflexRoi) -> Bool {
+        guard inner.space == .pixel, outer.space == .pixel, inner.width > 0, inner.height > 0,
+              inner.x >= outer.x, inner.y >= outer.y else { return false }
+        let innerRight = inner.x.addingReportingOverflow(inner.width), outerRight = outer.x.addingReportingOverflow(outer.width)
+        let innerBottom = inner.y.addingReportingOverflow(inner.height), outerBottom = outer.y.addingReportingOverflow(outer.height)
+        return !innerRight.overflow && !outerRight.overflow && !innerBottom.overflow && !outerBottom.overflow &&
+            innerRight.partialValue <= outerRight.partialValue && innerBottom.partialValue <= outerBottom.partialValue
+    }
+
+    private static func holds(_ roi: ReflexRoi, x: Int64, y: Int64) -> Bool {
+        let right = roi.x.addingReportingOverflow(roi.width), bottom = roi.y.addingReportingOverflow(roi.height)
+        return !right.overflow && !bottom.overflow && x >= roi.x && y >= roi.y && x < right.partialValue && y < bottom.partialValue
+    }
+}
+
+/// The pixels of one frame, lent for one `observe` call: BGRA, `bytesPerRow` at least
+/// `width * 4`, the frame's own buffer as the runtime locked it — never kept past the call.
+public struct ReflexPixels {
+    public let base: UnsafeRawPointer
+    public let width: Int
+    public let height: Int
+    public let bytesPerRow: Int
+
+    public init(base: UnsafeRawPointer, width: Int, height: Int, bytesPerRow: Int) {
+        self.base = base
+        self.width = width
+        self.height = height
+        self.bytesPerRow = bytesPerRow
+    }
+}
+
+/// How much one tick may read (`PerceptionLimits.max_tick_samples` and `max_tick_ns`, the
+/// window's table): a kernel spends a detector's samples before reading them, and a
+/// detector the budget cannot pay for — and every one after it — is `unknown(budget)`.
+public struct ReflexPerceptionBudget {
+    public private(set) var samples: UInt64
+    public let deadlineHostNs: UInt64
+    public let now: @Sendable () -> UInt64
+
+    public init(samples: UInt64, deadlineHostNs: UInt64, now: @escaping @Sendable () -> UInt64) {
+        self.samples = samples
+        self.deadlineHostNs = deadlineHostNs
+        self.now = now
+    }
+
+    /// Spend `cost` samples if the tick can still pay for them before its deadline; false
+    /// leaves the budget as it was.
+    public mutating func spend(_ cost: UInt64) -> Bool {
+        guard cost <= samples, now() < deadlineHostNs else { return false }
+        samples -= cost
+        return true
+    }
+}
+
+/// One run's perception: made on the runtime's evaluating thread when the run starts and
+/// called only there, one frame at a time, so it may keep what it tracks across frames.
+public protocol ReflexPerceptionSession: AnyObject {
+    /// The plan's detectors on `frame`, in plan order. `frame` is one the runtime's cursor
+    /// accepted; `pixels` are its buffer, lent for the call.
+    func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation]
+}
+
+/// A kernel that reads a validated plan's detectors (R5's `Perception/`). It never issues
+/// a lease or posts input: what it answers is data.
+public protocol ReflexPerceptionKernel: Sendable {
+    /// A session for one run; throws when the plan asks for what the kernel cannot read.
+    func session(for plan: ValidatedReflexPlan, limits: PerceptionLimits) throws -> any ReflexPerceptionSession
 }
