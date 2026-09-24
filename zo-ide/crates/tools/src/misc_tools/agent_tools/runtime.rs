@@ -334,6 +334,60 @@ pub(super) fn build_agent_runtime(
     token_history: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
     output_tokens_total: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<ConversationRuntime<ProviderRuntimeClient, SubagentToolExecutor>, String> {
+    build_agent_runtime_on(job, |harness, model, mcp_tools| {
+        Ok(ProviderRuntimeClient::new_with_history(
+            model,
+            harness.allowed_tools.clone(),
+            token_history,
+            output_tokens_total,
+            job.workflow_member,
+            job.thinking_budget_tokens,
+            job.route_effort,
+            job.api_concurrency,
+            job.route_fallback_models.clone(),
+            Some(job.cancel_signal.clone()),
+        )?
+        .with_mcp_tools(
+            mcp_tools
+                .iter()
+                .map(|definition| api::ToolDefinition {
+                    name: definition.name.clone(),
+                    description: definition.description.clone(),
+                    input_schema: definition.input_schema.clone(),
+                })
+                .collect(),
+        )
+        // Live activity: the provider client stamps wait-phases (governor queue,
+        // rate-limit cool-down) and the streamed output tail onto the same
+        // manifest the tool executor stamps `currentTool` on.
+        .with_manifest_path(std::path::PathBuf::from(&job.manifest.manifest_file))
+        .with_run_generation(job.manifest.run_generation)
+        .with_structured_schema(harness.schema.clone())
+        // W9-3: identity for the one-shot starvation notice on the parent
+        // transcript (label wins over the raw name, mirroring the HUD).
+        .with_agent_identity(
+            job.manifest.agent_id.clone(),
+            job.manifest
+                .label
+                .clone()
+                .unwrap_or_else(|| job.manifest.name.clone()),
+        ))
+    })
+}
+
+/// A spawned agent's runtime on the model client `client` builds for it —
+/// everything the agent is (its harness, permissions, tools, session,
+/// steering and attempt) around the one thing that talks to a model. The
+/// product's client is the provider's ([`build_agent_runtime`]); the spawn
+/// path's end-to-end test hands in a script, and so runs the rest as it is.
+pub(super) fn build_agent_runtime_on<C: runtime::ApiClient>(
+    job: &AgentJob,
+    client: impl FnOnce(
+        &runtime::subagent_panes::ResolvedHarness,
+        &str,
+        &[crate::registry::RuntimeToolDefinition],
+    ) -> Result<C, String>,
+) -> Result<ConversationRuntime<C, SubagentToolExecutor>, String> {
     // THE harness, resolved once by `AgentJob::harness` (t-2513 contract 1).
     // Everything the model is shown and allowed below comes off this value —
     // the same value the pane executor writes into a child's brief — so an
@@ -370,43 +424,7 @@ pub(super) fn build_agent_runtime(
                 .collect()
         })
         .unwrap_or_default();
-    let api_client = ProviderRuntimeClient::new_with_history(
-        &model,
-        allowed_tools.clone(),
-        token_history,
-        output_tokens_total,
-        job.workflow_member,
-        job.thinking_budget_tokens,
-        job.route_effort,
-        job.api_concurrency,
-        job.route_fallback_models.clone(),
-        Some(job.cancel_signal.clone()),
-    )?
-    .with_mcp_tools(
-        mcp_tools
-            .iter()
-            .map(|definition| api::ToolDefinition {
-                name: definition.name.clone(),
-                description: definition.description.clone(),
-                input_schema: definition.input_schema.clone(),
-            })
-            .collect(),
-    )
-    // Live activity: the provider client stamps wait-phases (governor queue,
-    // rate-limit cool-down) and the streamed output tail onto the same
-    // manifest the tool executor stamps `currentTool` on.
-    .with_manifest_path(std::path::PathBuf::from(&job.manifest.manifest_file))
-    .with_run_generation(job.manifest.run_generation)
-    .with_structured_schema(harness.schema.clone())
-    // W9-3: identity for the one-shot starvation notice on the parent
-    // transcript (label wins over the raw name, mirroring the HUD).
-    .with_agent_identity(
-        job.manifest.agent_id.clone(),
-        job.manifest
-            .label
-            .clone()
-            .unwrap_or_else(|| job.manifest.name.clone()),
-    );
+    let api_client = client(&harness, &model, &mcp_tools)?;
     let permission_rules = harness
         .permission_rules
         .as_ref()
@@ -470,10 +488,10 @@ pub(super) fn build_agent_runtime(
 /// (`provider_client::prompt_cache_session_id`), so both the key and the scope
 /// have to come from the manifest. A manifest with no agent id names no
 /// attempt, and the runtime is left as it was.
-fn bind_runtime_to_spawn_attempt(
-    runtime: ConversationRuntime<ProviderRuntimeClient, SubagentToolExecutor>,
+fn bind_runtime_to_spawn_attempt<C: runtime::ApiClient>(
+    runtime: ConversationRuntime<C, SubagentToolExecutor>,
     job: &AgentJob,
-) -> ConversationRuntime<ProviderRuntimeClient, SubagentToolExecutor> {
+) -> ConversationRuntime<C, SubagentToolExecutor> {
     match runtime::spawn_attempt_key(&job.manifest.agent_id, job.manifest.run_generation) {
         Some(attempt) => runtime.with_inherited_attempt(attempt, job.manifest.agent_id.clone()),
         None => runtime,

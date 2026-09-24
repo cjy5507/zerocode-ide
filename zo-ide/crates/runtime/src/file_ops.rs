@@ -591,6 +591,11 @@ static ATOMIC_REPLACE_COUNTER: std::sync::atomic::AtomicU64 =
 /// every writer must take this lock or a concurrent save silently drops the
 /// other's section. The lock is a `create_new` sibling (`settings.json.lock`)
 /// holding the owning pid, polled for up to ~2 s and released on drop.
+///
+/// A lock whose owner died holding it is taken back (`reclaim_from_a_dead_owner`):
+/// a killed process never runs its drop, and before this every later writer
+/// of that file waited out its poll and gave up, for good (t-6263 — the
+/// challenger arm's day book and ledger take this lock too).
 #[derive(Debug)]
 pub struct SettingsFileLock(PathBuf);
 
@@ -619,7 +624,9 @@ impl SettingsFileLock {
                     return Ok(Self(path));
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    if !reclaim_from_a_dead_owner(&path) {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                 }
                 Err(error) => return Err(error),
             }
@@ -635,6 +642,84 @@ impl Drop for SettingsFileLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
+}
+
+/// Remove the lock file `lock` when the process it names has died holding it
+/// — the one way a lock outlives its owner, since a live owner removes its
+/// own on drop. Answers whether it removed one.
+///
+/// Reclaimers take turns on the lock file itself — an advisory lock on the
+/// very file they found, which the kernel drops with whoever holds it — and
+/// each checks that the path still names that file before reading whose it
+/// is. So one that waited behind another finds the file it came for already
+/// gone, and never removes the fresh lock a live owner took in its place.
+/// An owner still writing its pid (an empty file) is alive; so is a pid this
+/// cannot read, and every pid [`process_alive`] cannot see die.
+#[cfg(unix)]
+fn reclaim_from_a_dead_owner(lock: &Path) -> bool {
+    use io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Ok(mut file) = fs::File::open(lock) else {
+        return false;
+    };
+    if file.try_lock().is_err() {
+        return false;
+    }
+    let still_this_file = match (file.metadata(), fs::metadata(lock)) {
+        (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+        _ => false,
+    };
+    let mut owner = String::new();
+    if !still_this_file || file.read_to_string(&mut owner).is_err() {
+        return false;
+    }
+    owner
+        .trim()
+        .parse::<u32>()
+        .is_ok_and(|owner| !process_alive(owner))
+        && fs::remove_file(lock).is_ok()
+}
+
+/// Nowhere else is a dead owner seen dying ([`process_alive`]): a lock is
+/// never taken from one.
+#[cfg(not(unix))]
+fn reclaim_from_a_dead_owner(_lock: &Path) -> bool {
+    false
+}
+
+/// Whether `pid` is a live process. Unix signal 0 reports `EPERM` for a live
+/// process owned by another user, which must stay alive rather than be
+/// mistaken for a dead holder; every other answer but "no such process"
+/// stays alive too. Where liveness cannot be asked, every pid is alive: a
+/// lock or a lease is never taken from an owner this cannot see die.
+///
+/// One reader for every holder a crash can strand — a write lease
+/// (`tools::file_write_lease`) and a settings lock ([`SettingsFileLock`]).
+#[cfg(unix)]
+#[must_use]
+pub fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return true;
+    };
+    process_alive_from_probe(nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        None,
+    ))
+}
+
+/// [`process_alive`]'s reading of one signal-0 probe.
+#[cfg(unix)]
+#[must_use]
+pub fn process_alive_from_probe(result: Result<(), nix::errno::Errno>) -> bool {
+    !matches!(result, Err(nix::errno::Errno::ESRCH))
+}
+
+/// See the Unix twin: an owner this cannot see die is alive.
+#[cfg(not(unix))]
+#[must_use]
+pub fn process_alive(_pid: u32) -> bool {
+    true
 }
 
 /// Atomically replaces a file through a unique sibling temp while preserving
@@ -2729,5 +2814,43 @@ needle b
             .content
             .unwrap_or_default()
             .contains("func (runner localScanRunner"));
+    }
+
+    /// 잠금을 쥔 채 죽은 주인의 잠금은 되찾는다: 살아 있는 주인의 것은 폴 예산만큼 기다린 뒤 비켜서고, pid를 아직 적지 않은
+    /// 빈 잠금은 살아 있는 주인의 것으로 둔다; 죽은 뒤에는 바로 잡힌다(t-6263).
+    #[cfg(unix)]
+    #[test]
+    fn a_settings_lock_is_taken_back_only_from_an_owner_that_died_holding_it() {
+        let dir = temp_path("settings-lock-owner");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let settings = dir.join("settings.json");
+        let lock = settings.with_extension("json.lock");
+        let mut owner = std::process::Command::new("sleep").arg("60").spawn().expect("an owner process");
+        std::fs::write(&lock, format!("{}\n", owner.id())).expect("its lock");
+        let waited = std::time::Instant::now();
+        let refused = super::SettingsFileLock::acquire(&settings).expect_err("a live owner keeps its lock");
+        assert_eq!(refused.kind(), io::ErrorKind::WouldBlock);
+        assert!(waited.elapsed() >= std::time::Duration::from_millis(1_500), "after the whole poll");
+        assert!(lock.exists(), "the live owner's lock stands");
+
+        owner.kill().expect("kill the owner");
+        owner.wait().expect("the owner is gone");
+        let started = std::time::Instant::now();
+        let taken = super::SettingsFileLock::acquire(&settings).expect("a dead owner's lock is taken back");
+        assert!(started.elapsed() < std::time::Duration::from_millis(500), "at once, not after the poll");
+        assert_eq!(
+            std::fs::read_to_string(&lock).expect("the new lock").trim(),
+            std::process::id().to_string(),
+            "and it is this process's now"
+        );
+        drop(taken);
+        assert!(!lock.exists(), "released as ever");
+
+        std::fs::write(&lock, "").expect("an owner still writing its pid");
+        assert!(
+            super::SettingsFileLock::acquire(&settings).is_err(),
+            "an owner that has not written its pid yet is alive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

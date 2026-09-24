@@ -1,5 +1,5 @@
 use runtime::{
-    connected_model_inventory, exploration_slot_for_route, read_route_outcomes, route_model,
+    connected_model_inventory, exploration_slot_for_route, route_model,
     route_model_fallback_candidates, summarize_route_outcomes_with_canonicalizer, EffortCeiling,
     LaneRouteMetadata, LearnedSpecialtyHint, ModelInventory, RouteAutoClassifierMode,
     RouteDecision, RouteDecisionSource, RouteFeedbackHint, RouteOutcomeSummary,
@@ -112,11 +112,13 @@ impl SmartRouteContext {
         let need_raw_records = settings.feedback_informed_auto
             || settings.learned_specialty != LearnedSpecialtyMode::Off
             || route_calibration_enabled();
+        // As every learner reads them: the challenger arm's samples count
+        // only while its seat stands behind them now (t-6263).
         let raw_records = need_raw_records
             .then(|| {
                 std::env::current_dir()
                     .ok()
-                    .and_then(|cwd| read_route_outcomes(&cwd).ok())
+                    .and_then(|cwd| super::read_learning_outcomes(&cwd).ok())
             })
             .flatten();
         // P3 canonicalization-at-read: summarize through the injected

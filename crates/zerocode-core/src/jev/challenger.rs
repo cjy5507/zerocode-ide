@@ -634,6 +634,15 @@ pub const VERIFIED: LedgerKey = LedgerKey {
     canonical: "verified",
     also: &[],
 };
+/// The source the receipt judged, on the label row that carried it: the
+/// state the attempt handed in, which the verifier's verdict named as the
+/// state it saw — one identity, or there is no receipt. What was verified is
+/// kept beside what it said, so a reader never has to take a verdict's word
+/// for which work it was about.
+pub const VERIFIED_SOURCE: LedgerKey = LedgerKey {
+    canonical: "verifiedSource",
+    also: &[],
+};
 /// Whether the challenger won ([`Quality::won`]). On the request row by the
 /// comparison alone; a label row for the same attempt writes it again by
 /// the receipt, and the later word is the one that counts.
@@ -680,6 +689,7 @@ pub const CHALLENGER_KEYS: &[LedgerKey] = &[
     BLIND,
     PREFERRED,
     VERIFIED,
+    VERIFIED_SOURCE,
     WON,
     HELD,
     COST_MICROS,
@@ -759,16 +769,24 @@ impl Comparison<'_> {
 
 /// The row a receipt writes for the attempt it grades, once the
 /// verification loop has spoken: named after the request row's attempt
-/// ([`crate::jev::summary::LABEL`]), carrying the receipt, the challenger's
-/// word by it, and — where the receipt can say — whether the judge named
-/// what it vindicated ([`crate::jev::summary::AGREED`]).
+/// ([`crate::jev::summary::LABEL`]), carrying the receipt, the source it
+/// judged ([`VERIFIED_SOURCE`]), the challenger's word by it, and — where
+/// the receipt can say — whether the judge named what it vindicated
+/// ([`crate::jev::summary::AGREED`]).
 #[must_use]
-pub fn label_row(attempt: &str, receipt: Receipt, preferred: Preferred, at_ms: i64) -> Value {
+pub fn label_row(
+    attempt: &str,
+    receipt: Receipt,
+    preferred: Preferred,
+    source: &str,
+    at_ms: i64,
+) -> Value {
     let graded = quality(Some(receipt), preferred);
     let mut row = Map::from_iter([
         (AT.canonical.to_string(), Value::from(at_ms)),
         (LABEL.canonical.to_string(), Value::from(attempt)),
         (VERIFIED.canonical.to_string(), Value::from(receipt.token())),
+        (VERIFIED_SOURCE.canonical.to_string(), Value::from(source)),
         (WON.canonical.to_string(), Value::from(graded.won)),
     ]);
     if let Some(agreed) = graded.agreed {

@@ -1,14 +1,20 @@
 //! The arm, held to its contract on a fake wire and a scripted challenger:
 //! off is today to the byte, every hold writes its word and spends nothing,
-//! the share is read and reserved as one step and settled in the day it was
-//! charged, the judge sees two designs under no name and the answer comes
-//! back to the right side, a missing plan is compared with nothing, a
-//! receipt labels and a completion never does, and a role's model moves
-//! only when the seat stands AND the standing passes.
+//! the words a design request carries are the door's and the door is asked
+//! as it stands the moment they leave, the share is read and reserved as one
+//! step and settled in the day it was charged — never in a day that has
+//! ended, never from a book that could not be read, and never behind the
+//! lock of a holder that died — the judge sees two designs under no name,
+//! asked of the door and the person's word as they stand when the
+//! comparison is made, and the answer comes back to the right side, a
+//! missing plan is compared with nothing, a receipt labels only when its
+//! verifier saw the source the attempt handed in and a completion never
+//! does, a label's sample follows it once however a write failed, and the
+//! router learns from a sample only while the seat stands behind it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use api::{ModelPrice, SystemOneClient, Usage};
@@ -20,8 +26,12 @@ use serde_json::{json, Value};
 use zerocode_core::jev::challenger::spend;
 use zerocode_core::jev::challenger::{draws, Blind, Held, Preferred, Receipt, Side};
 use zerocode_core::jev::door::JevSettings;
-use zerocode_core::jev::summary::{AGREED, LABEL, OUTCOME};
-use zerocode_core::jev::{fingerprint_of, JevMode, A_WINDOW_OF_COMPARISONS, CHALLENGER};
+use zerocode_core::jev::promote::{FELL, ROSE};
+use zerocode_core::jev::summary::{AGREED, LABEL, OUTCOME, TRANSITION};
+use zerocode_core::jev::{
+    fingerprint_of, JevMode, A_WINDOW_OF_COMPARISONS, CHALLENGER, CHALLENGER_TASK_CHAR_CAP, MODEL_SETTING,
+    SMART_SETTINGS_KEY,
+};
 
 use super::super::jev_gate::JevDoor;
 use super::super::jev_mock::Mock;
@@ -31,6 +41,10 @@ use super::*;
 pub(crate) const INCUMBENT: &str = "claude-fable-5-1";
 pub(crate) const NEWCOMER: &str = "claude-opus-5-2";
 const RIVAL: &str = "gpt-5.6-sol";
+
+/// The source the attempts of these tests hand in, and the one their
+/// verifiers saw.
+const HANDED_IN: &str = "tree-handed-in";
 
 /// The one price every test model lists at — and none for a model named
 /// unpriced, which the table does not name.
@@ -50,15 +64,17 @@ fn nothing_priced(_: &str) -> Option<ModelPrice> {
 /// What the scripted challenger reports it cost: 400 in, 120 out.
 const DESIGN_BILL: u64 = 400 * 5 + 120 * 25;
 
-/// A challenger that answers from a script and counts how often it was
-/// asked.
+/// A challenger that answers from a script, counts how often it was asked,
+/// and — when the test holds it — keeps its answer on the wire until it is
+/// let go.
 pub(crate) struct Scripted {
     text: Option<String>,
     usage: Option<Usage>,
     left: bool,
     status: &'static str,
     asked: AtomicUsize,
-    seen: std::sync::Mutex<Vec<DesignRequest>>,
+    seen: Mutex<Vec<DesignRequest>>,
+    gate: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
 impl Scripted {
@@ -69,23 +85,33 @@ impl Scripted {
             left,
             status,
             asked: AtomicUsize::new(0),
-            seen: std::sync::Mutex::new(Vec::new()),
+            seen: Mutex::new(Vec::new()),
+            gate: Mutex::new(None),
         })
     }
 
+    fn billed() -> Usage {
+        Usage {
+            input_tokens: 400,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            output_tokens: 120,
+            output_tokens_details: None,
+        }
+    }
+
     pub(crate) fn answering(text: &str) -> Arc<Self> {
-        Self::new(
-            Some(text),
-            Some(Usage {
-                input_tokens: 400,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 120,
-                output_tokens_details: None,
-            }),
-            true,
-            runtime::OUTCOME_COMPLETED,
-        )
+        Self::new(Some(text), Some(Self::billed()), true, runtime::OUTCOME_COMPLETED)
+    }
+
+    /// Answering — once the returned sender lets the answer go. The request
+    /// has left by then: what happens meanwhile happens to a design in
+    /// flight.
+    fn answering_when_let_go(text: &str) -> (Arc<Self>, mpsc::Sender<()>) {
+        let (let_go, gate) = mpsc::channel();
+        let scripted = Self::new(Some(text), Some(Self::billed()), true, runtime::OUTCOME_COMPLETED);
+        *scripted.gate.lock().expect("gate") = Some(gate);
+        (scripted, let_go)
     }
 
     /// Left, and no answer came back inside the wall.
@@ -101,13 +127,30 @@ impl Scripted {
     pub(crate) fn calls(&self) -> usize {
         self.asked.load(Ordering::SeqCst)
     }
+
+    fn seen(&self) -> Vec<DesignRequest> {
+        self.seen.lock().map(|seen| seen.clone()).unwrap_or_default()
+    }
+
+    /// Wait until a design request is on the wire.
+    fn wait_until_asked(&self) {
+        let started = Instant::now();
+        while self.calls() == 0 && started.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(self.calls() > 0, "the design request never left");
+    }
 }
 
 impl Designer for Scripted {
     fn design(&self, request: &DesignRequest) -> DesignReply {
-        self.asked.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut seen) = self.seen.lock() {
             seen.push(request.clone());
+        }
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        let gate = self.gate.lock().ok().and_then(|mut gate| gate.take());
+        if let Some(gate) = gate {
+            let _ = gate.recv_timeout(Duration::from_secs(20));
         }
         DesignReply {
             text: self.text.clone(),
@@ -151,17 +194,35 @@ pub(crate) fn jev_answer(chosen: &str) -> String {
 
 const SEOUL_MINUTES: i32 = 540;
 
-/// A machine of the test's own: a temp config home holding the seat's mode
-/// word and one consented workspace, the Jev wire on a loopback mock, a
-/// scripted challenger, and a clock the test may hold still — the
-/// environment held for the rig's life. Shared with the spawn path's own
-/// end-to-end test (`agent_tools::spawn`).
+/// What the rig's settings file tells the door: its switch, the workspace's
+/// consent, and the judge a person pinned.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DoorWords {
+    pub(crate) enabled: bool,
+    pub(crate) consented: bool,
+    pub(crate) pin: Option<&'static str>,
+}
+
+impl DoorWords {
+    pub(crate) const OPEN: Self = Self {
+        enabled: true,
+        consented: true,
+        pin: None,
+    };
+}
+
+/// A machine of the test's own: a temp config home holding the person's
+/// settings file — the seat's word, the door's switch and consent — which
+/// the arm reads the way the product does, through the product's own
+/// readers, every time it asks; the Jev wire on a loopback mock; a scripted
+/// challenger; and a clock the test may hold still — the environment held
+/// for the rig's life. Shared with the spawn path's own end-to-end test
+/// (`agent_tools::spawn`).
 pub(crate) struct Rig {
     pub(crate) cwd: PathBuf,
     pub(crate) home: PathBuf,
     mock: Mock,
     pub(crate) designer: Arc<Scripted>,
-    pub(crate) mode: JevMode,
     clock: Arc<AtomicU64>,
     _work: Option<tempfile::TempDir>,
     _home: tempfile::TempDir,
@@ -177,7 +238,9 @@ impl Rig {
     }
 
     /// A rig whose workspace is `cwd` — the process's own folder, for a test
-    /// that goes through a recorder that reads the process's cwd.
+    /// that goes through a recorder that reads the process's cwd. No
+    /// verification loop is started behind a finished spawn here: its
+    /// verifier would be a real provider's call.
     pub(crate) fn at(
         cwd: PathBuf,
         work: Option<tempfile::TempDir>,
@@ -187,61 +250,77 @@ impl Rig {
     ) -> Self {
         let mock = Mock::serving(200, jev_body.to_string());
         let home_dir = tempfile::tempdir().expect("a config home");
-        let home = home_dir.path().to_path_buf();
-        std::fs::write(
-            home.join("settings.json"),
-            json!({
-                zerocode_core::jev::SMART_SETTINGS_KEY: {
-                    CHALLENGER.setting: mode.key(),
-                    "jev": {"enabled": true, "workspaces": [door::resolved_path(&cwd)]},
-                }
-            })
-            .to_string(),
-        )
-        .expect("a settings file");
+        let home = std::fs::canonicalize(home_dir.path()).expect("the home resolved");
         let env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", &home.to_string_lossy())
             .set_also("ZO_HOME", &home)
             .set_also(core_types::paths::ZO_STATE_DIR_ENV, &home)
             .set_also("HOME", &home)
             .set_also(api::SYSTEMONE_API_KEY_ENV, "test-key")
-            .set_also(api::SYSTEMONE_BASE_URL_ENV, &mock.base_url);
-        Self {
+            .set_also(api::SYSTEMONE_BASE_URL_ENV, &mock.base_url)
+            .set_also("ZO_AUTO_VERIFY", "0");
+        let rig = Self {
             cwd,
             home,
             mock,
             designer,
-            mode,
             clock: Arc::new(AtomicU64::new(0)),
             _work: work,
             _home: home_dir,
             _env: env,
+        };
+        rig.write_settings(Some(mode), DoorWords::OPEN);
+        rig
+    }
+
+    /// Write the person's settings file: the seat's word (none: the switch
+    /// decides), and what the door is told.
+    pub(crate) fn write_settings(&self, mode: Option<JevMode>, door: DoorWords) {
+        let workspaces: Vec<String> = if door.consented { vec![door::resolved_path(&self.cwd)] } else { Vec::new() };
+        let mut smart = json!({ "jev": { "enabled": door.enabled, "workspaces": workspaces } });
+        if let Some(mode) = mode {
+            smart[CHALLENGER.setting] = json!(mode.key());
         }
+        if let Some(pin) = door.pin {
+            smart[MODEL_SETTING] = json!(pin);
+        }
+        std::fs::write(self.home.join("settings.json"), json!({ SMART_SETTINGS_KEY: smart }).to_string())
+            .expect("a settings file");
     }
 
-    /// The arm this rig stands, in the rig's mode.
+    /// A settings file nobody can read.
+    fn write_unreadable_settings(&self) {
+        std::fs::write(self.home.join("settings.json"), "{ not a settings file").expect("a settings file");
+    }
+
+    /// The arm this rig stands.
     pub(crate) fn arm(&self) -> Arm {
-        self.arm_with(Some(self.mode), &self.mock.base_url, true)
+        self.arm_on(&self.mock.base_url, Box::new(|_| inventory()))
     }
 
-    fn arm_with(&self, mode: Option<JevMode>, wire: &str, door_enabled: bool) -> Arm {
-        let (door_cwd, door_home) = (self.cwd.clone(), self.home.clone());
+    /// The arm, with `picking` run while it picks its challenger — after the
+    /// task's words were first cleared, before the share is reserved and the
+    /// design leaves: the moment a person takes a word back mid-draw.
+    fn arm_picking(&self, picking: impl Fn() + Send + Sync + 'static) -> Arm {
+        self.arm_on(
+            &self.mock.base_url,
+            Box::new(move |_| {
+                picking();
+                inventory()
+            }),
+        )
+    }
+
+    fn arm_on(&self, wire: &str, inventory: Box<dyn Fn(&str) -> ModelInventory + Send + Sync>) -> Arm {
+        let (mode_cwd, door_cwd) = (self.cwd.clone(), self.cwd.clone());
         let url = wire.to_string();
         let clock = Arc::clone(&self.clock);
         Arm::with(Scene {
             cwd: self.cwd.clone(),
             config_home: self.home.clone(),
-            mode,
+            mode: Box::new(move || jev_challenger_mode_from(&runtime::ConfigLoader::default_for(&mode_cwd))),
             designer: Arc::clone(&self.designer) as Arc<dyn Designer>,
-            inventory: inventory(),
-            door: Box::new(move || {
-                let settings = JevSettings {
-                    enabled: door_enabled,
-                    workspaces: vec![door::resolved_path(&door_cwd)],
-                    daily_requests: None,
-                    model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
-                };
-                JevDoor::at(settings, &door_cwd, &door_home)
-            }),
+            inventory,
+            door: Box::new(move || JevDoor::open(&door_cwd)),
             client: Box::new(move || Some(SystemOneClient::new(&url, "test-key"))),
             clock: Box::new(move || match clock.load(Ordering::SeqCst) {
                 0 => Today::now(),
@@ -266,6 +345,35 @@ impl Rig {
                          "cache_creation": 0, "cache_read": 0, "input_uncached": 1_000_000, "output": 0,
                          "message_count": 1, "broke": false});
         std::fs::write(dir.join("requests.jsonl"), format!("{row}\n")).expect("a request ledger");
+    }
+
+    /// A window of comparisons the challenger won for the coding role — each
+    /// labelled, when `labelled`, by a failing receipt the judge agreed with
+    /// — and the incumbent's own eight runs at one half: a standing that
+    /// passes the incumbent's rate. Written straight to the ledgers, so no
+    /// judgment of the seat is taken on the way.
+    pub(crate) fn seed_a_standing_window(&self, labelled: bool) {
+        let ledger = challenger_path(&self.cwd);
+        for n in 0..A_WINDOW_OF_COMPARISONS {
+            let attempt = format!("window-{n}#1");
+            append_shadow_row(&ledger, &request_row(&attempt, Preferred::Challenger), SHADOW_LEDGER_MAX_BYTES)
+                .expect("a comparison");
+            if labelled {
+                let label = arm::label_row(&attempt, Receipt::Failed, Preferred::Challenger, HANDED_IN, 1);
+                append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            }
+        }
+        let now = now_ms() / 1_000;
+        for n in 0..8 {
+            runtime::record_route_outcome(&self.cwd, &incumbent_run(n, now)).expect("a peer");
+        }
+    }
+
+    /// Mark the seat's own ledger with a transition, as its judgment writes
+    /// one.
+    fn transition(&self, word: &str) {
+        let row = json!({ "at": now_ms(), (TRANSITION.canonical): word });
+        append_shadow_row(&challenger_path(&self.cwd), &row, SHADOW_LEDGER_MAX_BYTES).expect("a transition");
     }
 
     pub(crate) fn rows(&self) -> Vec<Value> {
@@ -296,6 +404,24 @@ impl Rig {
 
     fn spend_on(&self, day: &str) -> String {
         std::fs::read_to_string(spend::spend_path(&self.home, day)).unwrap_or_default()
+    }
+
+    /// Whether the arm has written `attempt`'s sample.
+    fn sampled(&self, attempt: &str) -> bool {
+        let key = sample_attempt_key(attempt);
+        runtime::read_route_outcomes(&self.cwd)
+            .expect("records")
+            .iter()
+            .any(|record| record.run_id.as_deref() == Some(key.as_str()))
+    }
+
+    /// The samples the arm has written to the route-outcome ledger.
+    pub(crate) fn samples(&self) -> usize {
+        runtime::read_route_outcomes(&self.cwd)
+            .expect("records")
+            .iter()
+            .filter(|record| record.is_seat_sample())
+            .count()
     }
 }
 
@@ -335,6 +461,13 @@ fn now_ms() -> u64 {
     Today::now().now_ms
 }
 
+/// A clock that reads noon of `day`, in Seoul.
+fn noon_of(day: &str) -> impl Fn() -> Today {
+    let noon = zerocode_core::civil::epoch_ms_of_iso(&format!("{day}T12:00:00+09:00")).expect("a day");
+    let noon = u64::try_from(noon).expect("after the epoch");
+    move || Today::at(noon, SEOUL_MINUTES)
+}
+
 /// The rows of `rig`'s ledger, waited for until `count` are there — the
 /// arm writes on its own threads.
 pub(crate) fn rows_after(rig: &Rig, count: usize) -> Vec<Value> {
@@ -353,14 +486,34 @@ fn body_of(request: &str) -> Value {
     serde_json::from_str(request.split("\r\n\r\n").last().expect("a body")).expect("json")
 }
 
-pub(crate) fn verdict(attempt: &str, status: &str, subject: VerdictSubject, at: u64) -> RouteOutcomeRecord {
+/// A verifier's verdict about `attempt`'s work, naming the source it saw.
+fn verdict_on(attempt: &str, status: &str, subject: VerdictSubject, at: u64, seen: Option<&str>) -> RouteOutcomeRecord {
     let mut record = RouteOutcomeRecord::new("subagent", "general-purpose", INCUMBENT, status)
         .with_signal("verdict")
         .with_decision(DecisionKind::Verify)
         .with_verdict_subject(subject)
-        .with_attempt_key(attempt);
+        .with_attempt_key(attempt)
+        .with_source(seen.map(str::to_string));
     record.recorded_at = at;
     record
+}
+
+/// A verdict about `attempt`'s work, its verifier having seen what the
+/// attempt handed in.
+pub(crate) fn verdict(attempt: &str, status: &str, subject: VerdictSubject, at: u64) -> RouteOutcomeRecord {
+    verdict_on(attempt, status, subject, at, Some(HANDED_IN))
+}
+
+/// `attempt`'s own run row, naming the source it handed in.
+fn handed_in(attempt: &str, source: Option<&str>) -> RouteOutcomeRecord {
+    RouteOutcomeRecord::new("subagent", "general-purpose", INCUMBENT, runtime::OUTCOME_COMPLETED)
+        .with_attempt_key(attempt)
+        .with_source(source.map(str::to_string))
+}
+
+/// The product's sample writer, for `cwd`.
+fn feed_into(cwd: &Path) -> impl Fn(&RouteOutcomeRecord) -> std::io::Result<()> + '_ {
+    move |sample| runtime::record_route_outcome(cwd, sample)
 }
 
 /* ---- off, holds, the door -------------------------------------------- */
@@ -372,12 +525,14 @@ fn off_draws_nothing_designs_nothing_and_writes_nothing() {
     rig.spent_today(now_ms());
     let key = a_key_that_draws(Side::Challenger);
     assert!(rig.arm().open(facts(&key, "rename the flag")).is_none());
-    assert!(rig.arm_with(None, &rig.mock.base_url, true).open(facts(&key, "t")).is_none(), "an unreadable setting is off");
+    rig.write_unreadable_settings();
+    assert!(rig.arm().open(facts(&key, "t")).is_none(), "an unreadable setting is off");
     assert!(!challenger_path(&rig.cwd).exists(), "off writes no ledger");
     assert_eq!(rig.spend(), "", "off reserves nothing");
     assert_eq!(rig.designer.calls(), 0, "off asks no challenger");
     assert!(rig.mock.requests().is_empty(), "off asks the door nothing");
     assert!(runtime::read_route_outcomes(&rig.cwd).expect("records").is_empty(), "off files no tax");
+    assert_eq!(note_challenger_verdicts(&rig.cwd), 0, "and labels nothing");
 }
 
 /// 붙들린 시도는 뽑혔을 때만 제 낱말을 적고 아무것도 쓰지 않는다 — 안 뽑힌 시도는 역할이 무엇이든 행이 없다.
@@ -423,11 +578,9 @@ fn a_drawn_attempt_held_writes_its_word_and_an_undrawn_one_writes_nothing() {
 fn a_door_that_would_refuse_spends_nothing_on_a_design() {
     let rig = Rig::new(JevMode::Shadow, &jev_answer("first"), Scripted::answering("plan"));
     rig.spent_today(now_ms());
+    rig.write_settings(Some(JevMode::Shadow), DoorWords { enabled: false, ..DoorWords::OPEN });
     let key = a_key_that_draws(Side::Challenger);
-    rig.arm_with(Some(JevMode::Shadow), &rig.mock.base_url, false)
-        .open(facts(&key, "t"))
-        .expect("the cheap holds clear")
-        .finish(Some("INCUMBENT: a plan".to_string()));
+    rig.arm().open(facts(&key, "t")).expect("the cheap holds clear").finish(Some("INCUMBENT: a plan".to_string()));
     let rows = rig.rows();
     assert_eq!(rows.len(), 1);
     assert_eq!(word(&rows[0], &OUTCOME).as_deref(), Some(JevMode::Off.key()));
@@ -498,6 +651,128 @@ fn a_challenger_is_the_newest_under_evidenced_model_the_router_could_route_to() 
     assert_eq!(pick(&evidenced, &[]), RIVAL, "a model with a learned entry is no longer short of evidence");
 }
 
+/* ---- what leaves for the challenger's provider ---------------------------- */
+
+/// 설계 요청이 공급자에게 싣는 과업은 문이 지운 말이다: 자격 증명 줄은 빠지고 캡에서 잘리며, 판정자에게 가는 과업도 같은 말이다.
+/// 자격 증명이 없는 과업은 그대로 간다.
+#[test]
+fn a_design_request_masks_the_task_that_reaches_its_provider() {
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    let task = format!("make the parser stricter\nexport OPENAI_API_KEY={secret}\nthen add a test for unknown keys");
+    let rig = Rig::new(JevMode::Shadow, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+    rig.spent_today(now_ms());
+    let key = a_key_that_draws(Side::Challenger);
+    rig.arm().open(facts(&key, &task)).expect("drawn").finish(Some("INCUMBENT: a plan".to_string()));
+
+    let seen = rig.designer.seen();
+    assert_eq!(seen.len(), 1, "one design request");
+    let sent = &seen[0].task_head;
+    assert!(!sent.contains(secret), "the credential reached the challenger's provider: {sent}");
+    assert!(sent.contains(door::WITHHELD_LINE), "the line is withheld in its place: {sent}");
+    assert!(
+        sent.starts_with("make the parser stricter\n") && sent.ends_with("then add a test for unknown keys"),
+        "the rest of the task is the person's words: {sent}"
+    );
+    let judged = rig.mock.requests();
+    assert_eq!(judged.len(), 1);
+    assert!(!judged[0].contains(secret), "nor did it reach the judge");
+    assert_eq!(body_of(&judged[0])["state"]["task"], json!(sent), "the judge reads the words the design was asked of");
+
+    let long = "가".repeat(CHALLENGER_TASK_CHAR_CAP + 50);
+    let door = JevDoor::open(&rig.cwd);
+    let (cut, withheld) = cleared_task(&door, true, &long).expect("cleared");
+    assert_eq!((cut.chars().count(), withheld), (CHALLENGER_TASK_CHAR_CAP, 0), "cut to the task's cap");
+    assert_eq!(cleared_task(&door, true, "rename the flag").expect("cleared").0, "rename the flag");
+}
+
+/// 설계가 떠나기 직전에 문과 사람의 말을 다시 묻는다: 뽑는 사이에 동의를 거두거나, 자리를 끄거나, Jev를 끄면 설계 요청은
+/// 떠나지 않고 예약은 풀리며 거절 낱말이 행에 남는다.
+#[test]
+fn a_word_taken_back_while_the_draw_picks_stops_the_design_before_it_leaves() {
+    let cases: [(&str, Option<JevMode>, DoorWords, &str); 3] = [
+        ("consent withdrawn", Some(JevMode::Shadow), DoorWords { consented: false, ..DoorWords::OPEN }, "not_consented"),
+        ("the seat switched off", Some(JevMode::Off), DoorWords::OPEN, JevMode::Off.key()),
+        ("Jev switched off", Some(JevMode::Shadow), DoorWords { enabled: false, ..DoorWords::OPEN }, JevMode::Off.key()),
+    ];
+    for (case, mode, door, refused) in cases {
+        let rig = Rig::new(JevMode::Shadow, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+        rig.spent_today(now_ms());
+        let settings = rig.home.join("settings.json");
+        let cwd = rig.cwd.clone();
+        let taken_back = move || {
+            let workspaces: Vec<String> = if door.consented { vec![door::resolved_path(&cwd)] } else { Vec::new() };
+            let mut smart = json!({ "jev": { "enabled": door.enabled, "workspaces": workspaces } });
+            if let Some(mode) = mode {
+                smart[CHALLENGER.setting] = json!(mode.key());
+            }
+            std::fs::write(&settings, json!({ SMART_SETTINGS_KEY: smart }).to_string()).expect("settings");
+        };
+        let key = a_key_that_draws(Side::Challenger);
+        let drawn = rig.arm_picking(taken_back).open(facts(&key, "make the parser stricter")).expect("drawn");
+        drawn.finish(Some("INCUMBENT: a plan".to_string()));
+        assert_eq!(rig.designer.calls(), 0, "{case}: the design request did not leave");
+        let book = spend::fold(&rig.spend());
+        assert_eq!((book.reserved, book.settled, book.spent_micros), (0, 0, 0), "{case}: the reservation is released");
+        let rows = rig.rows();
+        assert_eq!(rows.len(), 1, "{case}: {rows:?}");
+        assert_eq!(word(&rows[0], &OUTCOME).as_deref(), Some(refused), "{case}");
+        assert_eq!(rows[0]["requests"], json!(0), "{case}");
+        assert!(rig.mock.requests().is_empty(), "{case}: nothing reached the judge");
+        assert!(runtime::read_route_outcomes(&rig.cwd).expect("records").is_empty(), "{case}: no tax for a request never sent");
+    }
+}
+
+/// 설계가 나간 뒤 사람이 말을 거두면: 나간 설계는 치른 값으로 정산하되 비교도 표본도 보내지 않는다. 판정자 모델을 바꿨으면
+/// 비교는 바뀐 모델에게 간다. 아무것도 안 바꿨으면 오늘처럼 비교한다.
+#[test]
+fn a_draw_finishing_after_off_or_consent_revocation_sends_no_comparison_or_sample() {
+    // What the person changes while the design is on the wire, if anything.
+    type Change = Option<(Option<JevMode>, DoorWords)>;
+    let cases: [(&str, Change, Option<&str>); 5] = [
+        ("nothing changed", None, Some(zerocode_core::jev::DEFAULT_MODEL)),
+        ("the seat switched off", Some((Some(JevMode::Off), DoorWords::OPEN)), None),
+        ("consent withdrawn", Some((Some(JevMode::On), DoorWords { consented: false, ..DoorWords::OPEN })), None),
+        ("Jev switched off", Some((Some(JevMode::On), DoorWords { enabled: false, ..DoorWords::OPEN })), None),
+        ("another judge pinned", Some((Some(JevMode::On), DoorWords { pin: Some("jev-1.14.0"), ..DoorWords::OPEN })), Some("jev-1.14.0")),
+    ];
+    for (case, change, asked) in cases {
+        let (designer, let_go) = Scripted::answering_when_let_go("CHALLENGER: split the parser");
+        let rig = Rig::new(JevMode::On, &jev_answer("first"), designer);
+        rig.spent_today(now_ms());
+        rig.seed_a_standing_window(true);
+        let key = a_key_that_draws(Side::Challenger); // "first" → the challenger is preferred
+        runtime::record_route_outcome(&rig.cwd, &handed_in(&key, Some(HANDED_IN))).expect("the attempt's run");
+        runtime::record_route_outcome(&rig.cwd, &verdict(&key, runtime::OUTCOME_FAILED, VerdictSubject::Work, 5))
+            .expect("its verdict");
+        let drawn = rig.arm().open(facts(&key, "make the parser stricter")).expect("drawn");
+        rig.designer.wait_until_asked();
+        if let Some((mode, door)) = change {
+            rig.write_settings(mode, door);
+        }
+        let_go.send(()).expect("let the design come back");
+        drawn.finish(Some("INCUMBENT: reject unknown fields".to_string()));
+
+        let book = spend::fold(&rig.spend());
+        assert_eq!((book.reserved, book.settled), (0, 1), "{case}: a design that left is settled");
+        assert!(book.spent_micros >= DESIGN_BILL, "{case}: at what it cost");
+        let row = rig.rows().into_iter().find(|row| word(row, &arm::ATTEMPT).as_deref() == Some(key.as_str()));
+        let row = row.expect("the attempt's row");
+        let sent = rig.mock.requests();
+        if let Some(model) = asked {
+            assert_eq!(sent.len(), 1, "{case}: compared");
+            assert_eq!(body_of(&sent[0])["model"], json!(model), "{case}: the judge pinned when it was asked");
+            assert_eq!(word(&row, &OUTCOME).as_deref(), Some(door::ANSWERED_OUTCOME), "{case}");
+            assert!(rig.sampled(&key), "{case}: an acting seat feeds the agreeing label");
+        } else {
+            assert!(sent.is_empty(), "{case}: no comparison was sent");
+            assert_eq!(row["requests"], json!(0), "{case}");
+            assert!(arm::PREFERRED.read(&row).is_none(), "{case}: nothing was preferred");
+            assert_eq!(row[COST_MICROS.canonical].as_u64(), Some(book.spent_micros), "{case}: the design's cost, on its row");
+            assert!(!rig.sampled(&key), "{case}: and no sample was written");
+        }
+    }
+}
+
 /* ---- the share --------------------------------------------------------- */
 
 /// 같은 몫을 본 여럿이 둘 다 통과하지 않는다: 읽기→검사→예약은 한 걸음이다.
@@ -508,7 +783,7 @@ fn the_share_admits_one_of_eight_draws_that_race_for_the_last_place() {
         .map(|n| {
             let book = Reservation::for_day(home.path(), "2026-09-24");
             // A day that has bought a share of exactly one design: 10% of 100,000.
-            std::thread::spawn(move || book.reserve(&format!("agent-{n}#1"), 10_000, 100_000).is_ok())
+            std::thread::spawn(move || book.reserve(&format!("agent-{n}#1"), 10_000, 100_000, &noon_of("2026-09-24")).is_ok())
         })
         .collect();
     let admitted = racers
@@ -517,7 +792,7 @@ fn the_share_admits_one_of_eight_draws_that_race_for_the_last_place() {
         .filter(|admitted| *admitted)
         .count();
     assert_eq!(admitted, 1, "the share had room for one design and admitted {admitted}");
-    let book = Reservation::for_day(home.path(), "2026-09-24").book();
+    let book = Reservation::for_day(home.path(), "2026-09-24").book().expect("readable");
     assert_eq!((book.reserved, book.reserved_micros), (1, 10_000));
 }
 
@@ -525,36 +800,40 @@ fn the_share_admits_one_of_eight_draws_that_race_for_the_last_place() {
 #[test]
 fn an_attempt_is_reserved_once_and_a_second_opening_is_a_retry() {
     let home = tempfile::tempdir().expect("a home");
+    let today = noon_of("2026-09-24");
     let book = Reservation::for_day(home.path(), "2026-09-24");
-    book.reserve("agent-1#1", 10, 1_000_000).expect("room");
-    assert_eq!(book.reserve("agent-1#1", 10, 1_000_000).err(), Some(Held::Retry));
+    book.reserve("agent-1#1", 10, 1_000_000, &today).expect("room");
+    assert_eq!(book.reserve("agent-1#1", 10, 1_000_000, &today).err(), Some(Held::Retry));
     book.settle("agent-1#1", 7);
-    assert_eq!(book.reserve("agent-1#1", 10, 1_000_000).err(), Some(Held::Retry), "settled is still named");
-    assert_eq!(book.book().spent_micros, 7);
-    assert_eq!(book.book().reserved, 0);
+    assert_eq!(book.reserve("agent-1#1", 10, 1_000_000, &today).err(), Some(Held::Retry), "settled is still named");
+    let read = book.book().expect("readable");
+    assert_eq!((read.spent_micros, read.reserved), (7, 0));
 }
 
 /// 정산은 예약을 끝내고 실비를 적는다; 같은 정산이 두 번 와도 한 번; 해제는 몫을 돌려준다; 재시작해도 장부는 같다.
 #[test]
 fn a_settlement_ends_the_reservation_and_a_restart_reads_the_same_book() {
     let home = tempfile::tempdir().expect("a home");
+    let today = noon_of("2026-09-24");
     let book = Reservation::for_day(home.path(), "2026-09-24");
-    book.reserve("agent-1#1", 10_000, 1_000_000).expect("room");
-    book.reserve("agent-2#1", 10_000, 1_000_000).expect("room");
+    book.reserve("agent-1#1", 10_000, 1_000_000, &today).expect("room");
+    book.reserve("agent-2#1", 10_000, 1_000_000, &today).expect("room");
     book.settle("agent-1#1", 6_000);
     // A new process reading the same day: agent-2 died mid-draw and its
     // reservation still binds the share until the day ends.
-    let restarted = Reservation::for_day(home.path(), "2026-09-24").book();
+    let restarted = Reservation::for_day(home.path(), "2026-09-24").book().expect("readable");
     assert_eq!((restarted.reserved_micros, restarted.spent_micros), (10_000, 6_000));
     let day = spend::day_spend(&restarted, 1_000_000);
     assert_eq!(day.day_micros, 1_006_000, "the arm's spend enters the whole once");
     book.settle("agent-1#1", 6_000);
-    assert_eq!(book.book().spent_micros, 6_000, "a settlement written twice counts once");
+    assert_eq!(book.book().expect("readable").spent_micros, 6_000, "a settlement written twice counts once");
     book.release("agent-2#1");
-    assert_eq!((book.book().reserved_micros, book.book().spent_micros), (0, 6_000));
+    let released = book.book().expect("readable");
+    assert_eq!((released.reserved_micros, released.spent_micros), (0, 6_000));
 }
 
-/// 자정: 23:59:59에 잡은 예약은 00:00:01에 돌아온 정산도 그날 장부에 적힌다; 다음 날 장부는 비어 있고, 다음 날 첫 예약이 지난날을 치운다.
+/// 자정: 23:59:59에 잡은 예약은 00:00:01에 돌아온 정산도 그날 장부에 적힌다; 다음 날 장부는 비어 있고, 다음 날 첫 예약이 정산이
+/// 끝난 지난날을 치운다.
 #[test]
 fn a_draw_across_midnight_settles_in_the_day_it_was_charged() {
     let rig = Rig::new(JevMode::Shadow, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
@@ -578,10 +857,121 @@ fn a_draw_across_midnight_settles_in_the_day_it_was_charged() {
     assert_eq!((charged.reserved, charged.settled), (0, 1), "reserved and settled in the day it was drawn");
     assert_eq!(rig.spend_on(&after.day), "", "the next day's book holds nothing of it");
 
+    let next = after.clone();
     Reservation::for_day(&rig.home, &after.day)
-        .reserve("agent-next#1", 1, 1_000_000)
+        .reserve("agent-next#1", 1, 1_000_000, &move || next.clone())
         .expect("room");
-    assert_eq!(rig.spend_on(&before.day), "", "the next day's first reservation forgets the day before");
+    assert_eq!(rig.spend_on(&before.day), "", "the next day's first reservation forgets a settled day before");
+}
+
+/// 늦은 전날 예약은 새날 장부를 지우지 못한다: 자정 전에 날을 정한 뽑기가 자정 뒤에 장부에 닿으면, 끝난 날에는 적지 않고
+/// 거절하며, 새날의 첫 예약과 그 몫은 그대로다.
+#[test]
+fn a_late_previous_day_reservation_cannot_delete_todays_book() {
+    let home = tempfile::tempdir().expect("a home");
+    let (ended, begun) = ("2026-09-24", "2026-09-25");
+    Reservation::for_day(home.path(), begun)
+        .reserve("agent-b#1", 10_000, 1_000_000, &noon_of(begun))
+        .expect("the new day's first reservation");
+    // A draw that read its day before midnight reaches the book after it.
+    assert_eq!(
+        Reservation::for_day(home.path(), ended).reserve("agent-a#1", 10_000, 1_000_000, &noon_of(begun)).err(),
+        Some(Held::DayBudget),
+        "a day that has ended is not charged"
+    );
+    let today = Reservation::for_day(home.path(), begun).book().expect("the new day's book");
+    assert_eq!((today.reserved, today.reserved_micros), (1, 10_000), "the new day's book is as it was");
+    // The new day's share is 100,000 of which 10,000 is taken: 95,000 more does not fit.
+    assert_eq!(
+        Reservation::for_day(home.path(), begun).reserve("agent-c#1", 95_000, 1_000_000, &noon_of(begun)).err(),
+        Some(Held::DayBudget),
+        "the reservation taken in the new day still binds its share"
+    );
+    assert!(
+        Reservation::for_day(home.path(), begun).reserve("agent-d#1", 90_000, 1_000_000, &noon_of(begun)).is_ok(),
+        "and what is left of it is still there"
+    );
+}
+
+/// 읽을 수 없는 장부는 빈 예산이 아니다: 예약을 거절하고, 읽을 수 없는 동안 아무것도 청구하지 않는다.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_spend_book_never_becomes_an_empty_budget() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().expect("a home");
+    let day = "2026-09-24";
+    let book = Reservation::for_day(home.path(), day);
+    // A share of 100,000; 90,000 of it taken.
+    book.reserve("agent-1#1", 90_000, 1_000_000, &noon_of(day)).expect("room");
+    let path = spend::spend_path(home.path(), day);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).expect("write-only");
+    let refused = book.reserve("agent-2#1", 50_000, 1_000_000, &noon_of(day));
+    let unread = book.book();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("readable again");
+    assert_eq!(refused.err(), Some(Held::DayBudget), "a book that cannot be read is not an empty day");
+    assert!(unread.is_none(), "and reads as no book, not as an empty one");
+    let after = book.book().expect("readable");
+    assert_eq!((after.reserved, after.reserved_micros), (1, 90_000), "nothing was charged while it could not be read");
+}
+
+/// The name the test harness knows the lock holder by.
+const LOCK_HOLDER_TEST: &str = "hold_a_spend_book_lock_until_killed";
+/// Where the holder is told which book to lock, and where to say it holds it.
+const HOLD_BOOK_ENV: &str = "ZO_TEST_CHALLENGER_HOLD_BOOK";
+const HOLD_MARK_ENV: &str = "ZO_TEST_CHALLENGER_HOLD_MARK";
+
+/// 장부의 잠금을 잡은 채 죽은 프로세스: 살아 있는 동안은 예약이 기다리다 거절하고, 실제로 죽인 뒤에는 잠금을 되찾아 같은
+/// 장부를 그대로 읽는다 — 미결 예약은 그날 끝까지 몫을 물고, 죽은 잠금은 몫을 막지 않는다.
+#[cfg(unix)]
+#[test]
+fn a_book_whose_holder_was_killed_is_taken_back_and_reads_the_same() {
+    let home = tempfile::tempdir().expect("a home");
+    let day = "2026-09-24";
+    let book = Reservation::for_day(home.path(), day);
+    book.reserve("agent-1#1", 10_000, 1_000_000, &noon_of(day)).expect("room");
+    let path = spend::spend_path(home.path(), day);
+    let lock = path.with_extension("json.lock");
+    let mark = home.path().join("holding");
+    let test_path = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    let mut holder = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([format!("{test_path}::{LOCK_HOLDER_TEST}").as_str(), "--exact", "--ignored", "--test-threads=1"])
+        .env(HOLD_BOOK_ENV, &path)
+        .env(HOLD_MARK_ENV, &mark)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("a holder process");
+    let started = Instant::now();
+    while !mark.exists() && started.elapsed() < Duration::from_secs(60) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(mark.exists(), "the holder took the lock");
+    assert_eq!(
+        book.reserve("agent-2#1", 10_000, 1_000_000, &noon_of(day)).err(),
+        Some(Held::DayBudget),
+        "a live holder's lock is not taken: the share cannot be kept while another holds the book"
+    );
+    holder.kill().expect("kill the holder");
+    holder.wait().expect("the holder is gone");
+    assert!(lock.exists(), "a killed holder never lets go of its own accord");
+    let taken = book
+        .reserve("agent-3#1", 10_000, 1_000_000, &noon_of(day))
+        .expect("a dead holder's lock is taken back");
+    assert_eq!((taken.reserved, taken.reserved_micros), (2, 20_000), "the book reads as it stood, and this one on it");
+    assert!(!lock.exists(), "and let go again");
+}
+
+/// The other half of the test above: run as a child process, it takes the
+/// book's lock, says so, and holds it until it is killed.
+#[test]
+#[ignore = "a child of a_book_whose_holder_was_killed_is_taken_back_and_reads_the_same: holds a lock until killed"]
+fn hold_a_spend_book_lock_until_killed() {
+    let (Some(book), Some(mark)) = (std::env::var_os(HOLD_BOOK_ENV), std::env::var_os(HOLD_MARK_ENV)) else {
+        return;
+    };
+    let _held = runtime::SettingsFileLock::acquire(Path::new(&book)).expect("the book's lock");
+    std::fs::write(mark, "").expect("say it is held");
+    std::thread::sleep(Duration::from_secs(120));
 }
 
 /// 하루의 다른 지출은 오늘 건드린 세션의 요청 원장을 한 가격표로 값 매긴 합이다; 어제 행과 가격 없는 행은 들지 않는다.
@@ -610,8 +1000,9 @@ fn the_days_other_spend_is_todays_request_rows_priced_by_the_one_table() {
 /// 예약은 천장(바이트마다 한 토큰 + `max_tokens` 전부 + 비교의 상한)이고, 정산은 청구서다 — 청구서가 없으면 천장으로.
 #[test]
 fn the_reservation_is_a_ceiling_and_the_settlement_is_the_bill() {
+    let rig = Rig::new(JevMode::Shadow, &jev_answer("first"), Scripted::answering("plan"));
     let price = priced("x").expect("a price");
-    let head = task_head(&"가".repeat(3_000));
+    let (head, _) = cleared_task(&JevDoor::open(&rig.cwd), true, &"가".repeat(3_000)).expect("cleared");
     assert_eq!(head.chars().count(), CHALLENGER_TASK_CHAR_CAP);
     let expected = expected_design_micros(&price, &head);
     let input_bound = u64::try_from(head.len() + DESIGN_INSTRUCTION.len()).expect("small");
@@ -642,6 +1033,35 @@ fn the_reservation_is_a_ceiling_and_the_settlement_is_the_bill() {
     assert!(judge > 0);
 }
 
+/// 비교는 나간 전송마다 정산한다: 답한 전송은 보고된 입력으로, 보고 없이 나간 나머지(선이 다시 보낸 실패·돌아오지 않은 요청)는
+/// 보낸 바이트로 — 미상은 0이 아니다; 문이 내보내지 않은 비교는 0. 다시 보낸 비교는 한 요청의 천장인 예약을 넘을 수 있다.
+#[test]
+fn a_comparison_is_settled_send_by_send_and_an_unreported_send_at_its_bytes() {
+    let rate = api::systemone_rate(zerocode_core::jev::DEFAULT_MODEL).expect("the judge is priced");
+    let micros = |tokens: u64| arm::expected_micros(tokens, 0, rate.input, 0.0);
+    let wire = |requests: u32, retries: u32, input_tokens: Option<u64>| {
+        let mut wire = Wire::silent(String::new());
+        wire.requests = requests;
+        wire.retries = retries;
+        wire.input_tokens = input_tokens;
+        wire.sent_bytes = 1_000;
+        wire
+    };
+    assert_eq!(settled_comparison_micros(&rate, &wire(0, 0, None)), 0, "nothing left, nothing charged");
+    assert_eq!(settled_comparison_micros(&rate, &wire(1, 0, Some(300))), micros(300), "one send: the input it reported");
+    assert_eq!(settled_comparison_micros(&rate, &wire(1, 0, None)), micros(1_000), "one send that reported nothing: its bytes");
+    assert_eq!(
+        settled_comparison_micros(&rate, &wire(3, 2, Some(300))),
+        micros(300 + 2 * 1_000),
+        "two failed tries re-sent before the answer: each at the bytes it carried"
+    );
+    assert_eq!(settled_comparison_micros(&rate, &wire(3, 2, None)), micros(3 * 1_000), "three sends and no answer: every one at its bytes");
+    assert!(
+        settled_comparison_micros(&rate, &wire(3, 2, Some(300))) > settled_comparison_micros(&rate, &wire(1, 0, Some(300))),
+        "a re-sent comparison costs more than the one request its reservation was the ceiling of"
+    );
+}
+
 /* ---- the comparison ---------------------------------------------------- */
 
 /// 뽑힌 시도: 설계 요청 하나·예약·이름 없는 두 설계·자리 낱말로 온 답이 제 쪽으로 풀리고, 설계+비교의 실비로 정산한다 — 네 칸 모두.
@@ -662,7 +1082,7 @@ fn a_drawn_attempt_is_designed_reserved_compared_blind_and_read_back_to_its_side
         rig.arm().open(facts(&key, task)).expect("a drawn attempt").finish(Some(incumbent_plan.to_string()));
 
         assert_eq!(rig.designer.calls(), 1, "one design request");
-        let seen = rig.designer.seen.lock().expect("seen").clone();
+        let seen = rig.designer.seen();
         assert_eq!(seen[0].model, NEWCOMER);
         assert_eq!(seen[0].task_head, task);
         assert_eq!(seen[0].max_tokens, u32::try_from(CHALLENGER_DESIGN_MAX_TOKENS).expect("small"));
@@ -757,7 +1177,7 @@ fn a_comparison_that_misses_its_wall_prefers_nothing_and_is_never_labelled() {
     rig.spent_today(now_ms());
     let silent = Mock::silent();
     let key = a_key_that_draws(Side::Challenger);
-    rig.arm_with(Some(JevMode::Shadow), &silent.base_url, true)
+    rig.arm_on(&silent.base_url, Box::new(|_| inventory()))
         .open(facts(&key, "t"))
         .expect("drawn")
         .finish(Some("INCUMBENT: a plan".to_string()));
@@ -766,8 +1186,9 @@ fn a_comparison_that_misses_its_wall_prefers_nothing_and_is_never_labelled() {
     assert_ne!(word(&rows[0], &OUTCOME).as_deref(), Some(door::ANSWERED_OUTCOME));
     assert!(arm::PREFERRED.read(&rows[0]).is_none() && arm::WON.read(&rows[0]).is_none());
     assert!(rows[0][COST_MICROS.canonical].as_u64().expect("cost") > DESIGN_BILL, "the bytes that left are charged");
+    runtime::record_route_outcome(&rig.cwd, &handed_in(&key, Some(HANDED_IN))).expect("the run");
     runtime::record_route_outcome(&rig.cwd, &verdict(&key, runtime::OUTCOME_FAILED, VerdictSubject::Work, 5)).expect("a verdict");
-    assert_eq!(note_verdicts_in(&rig.cwd, &challenger_path(&rig.cwd), JevMode::Shadow), 0, "no preference, no label");
+    assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::Shadow), &feed_into(&rig.cwd)), 0, "no preference, no label");
 }
 
 /// 현직이 계획 없이 도구부터 썼으면 비교하지 않는다 — 빈 문자열과 견주어 이기는 쪽은 없고, 산 설계 값은 정산한다.
@@ -842,16 +1263,19 @@ fn the_incumbents_design_is_its_first_words_before_any_tool_call() {
 #[test]
 fn a_receipt_is_the_first_settled_verdict_on_the_attempts_work_and_never_a_completion() {
     let attempt = "agent-9#1";
-    let completion = RouteOutcomeRecord::new("subagent", "general-purpose", INCUMBENT, runtime::OUTCOME_COMPLETED)
-        .with_attempt_key(attempt);
-    assert_eq!(receipt_for(&[completion], attempt), None, "a finished attempt is not a receipt");
+    let run = || handed_in(attempt, Some(HANDED_IN));
+    let receipt = |verdicts: &[RouteOutcomeRecord]| {
+        let records: Vec<RouteOutcomeRecord> = std::iter::once(run()).chain(verdicts.iter().cloned()).collect();
+        receipt_for(&records, attempt).map(|(receipt, _)| receipt)
+    };
+    assert_eq!(receipt(&[]), None, "a finished attempt is not a receipt");
     assert_eq!(
-        receipt_for(&[verdict(attempt, runtime::OUTCOME_FAILED, VerdictSubject::Validator, 1)], attempt),
+        receipt(&[verdict(attempt, runtime::OUTCOME_FAILED, VerdictSubject::Validator, 1)]),
         None,
         "the verifier's own fault says nothing of the work"
     );
     assert_eq!(
-        receipt_for(&[verdict(attempt, runtime::OUTCOME_STOPPED, VerdictSubject::Work, 1)], attempt),
+        receipt(&[verdict(attempt, runtime::OUTCOME_STOPPED, VerdictSubject::Work, 1)]),
         None,
         "a verifier that settled nothing labels nothing"
     );
@@ -859,41 +1283,79 @@ fn a_receipt_is_the_first_settled_verdict_on_the_attempts_work_and_never_a_compl
         verdict(attempt, runtime::OUTCOME_FAILED, VerdictSubject::Work, 5),
         verdict(attempt, runtime::OUTCOME_COMPLETED, VerdictSubject::Work, 9),
     ];
-    assert_eq!(receipt_for(&failed_first, attempt), Some(Receipt::Failed), "the first verdict binds");
+    assert_eq!(receipt(&failed_first), Some(Receipt::Failed), "the first verdict binds");
     let out_of_order = [
         verdict(attempt, runtime::OUTCOME_COMPLETED, VerdictSubject::Work, 9),
         verdict(attempt, runtime::OUTCOME_FAILED, VerdictSubject::Work, 5),
     ];
-    assert_eq!(receipt_for(&out_of_order, attempt), Some(Receipt::Failed), "by the clock, not by the file's order");
+    assert_eq!(receipt(&out_of_order), Some(Receipt::Failed), "by the clock, not by the file's order");
     assert_eq!(
-        receipt_for(&[verdict("agent-8#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, 1)], attempt),
+        receipt(&[verdict("agent-8#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, 1)]),
         None,
         "another attempt's receipt is not this one's"
     );
 }
 
-/// 라벨은 영수증이 든 뒤 한 번: 완료만으로는 0, verdict가 오면 1, 다시·충돌하는 verdict·동시 호출이 와도 1.
+/// 영수증은 검증자가 본 source가 그 시도가 넘긴 source와 같을 때만이다: 다른 source·source 없는 verdict는 판정 불가이고,
+/// 넘긴 source를 모르는 시도에는 영수증이 없다. 맞는 첫 verdict가 묶고, 앞선 다른 source의 verdict는 그것을 막지 않는다.
+#[test]
+fn a_receipt_is_bound_to_the_source_the_attempt_handed_in() {
+    let attempt = "agent-7#1";
+    let with = |run: Option<&str>, verdicts: &[RouteOutcomeRecord]| {
+        let records: Vec<RouteOutcomeRecord> =
+            std::iter::once(handed_in(attempt, run)).chain(verdicts.iter().cloned()).collect();
+        receipt_for(&records, attempt)
+    };
+    let seen = |source: Option<&str>, status: &str, at: u64| verdict_on(attempt, status, VerdictSubject::Work, at, source);
+    assert_eq!(
+        with(Some(HANDED_IN), &[seen(Some(HANDED_IN), runtime::OUTCOME_FAILED, 5)]),
+        Some((Receipt::Failed, HANDED_IN.to_string())),
+        "the same source: a receipt, and what it judged"
+    );
+    assert_eq!(
+        with(Some(HANDED_IN), &[seen(Some("tree-after-another-edit"), runtime::OUTCOME_FAILED, 5)]),
+        None,
+        "a verdict about another source of the same attempt is not evaluable"
+    );
+    assert_eq!(
+        with(Some(HANDED_IN), &[seen(None, runtime::OUTCOME_FAILED, 5)]),
+        None,
+        "a verdict that names no source is not evaluable"
+    );
+    assert_eq!(
+        with(None, &[seen(Some(HANDED_IN), runtime::OUTCOME_FAILED, 5)]),
+        None,
+        "an attempt whose source nobody named has no receipt"
+    );
+    assert_eq!(
+        with(
+            Some(HANDED_IN),
+            &[seen(Some("tree-elsewhere"), runtime::OUTCOME_COMPLETED, 3), seen(Some(HANDED_IN), runtime::OUTCOME_FAILED, 5)]
+        ),
+        Some((Receipt::Failed, HANDED_IN.to_string())),
+        "the first verdict on the work handed in binds; one about other work does not stand in its way"
+    );
+}
+
+/// 라벨은 영수증이 든 뒤 한 번: 완료만으로는 0, verdict가 오면 1(판정한 source와 함께), 다시·충돌하는 verdict·동시 호출이 와도 1.
 #[test]
 fn a_verdict_labels_a_comparison_once_and_a_completion_labels_it_never() {
     let rig = Rig::new(JevMode::Shadow, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
     rig.spent_today(now_ms());
     let key = a_key_that_draws(Side::Challenger); // "first" → the challenger is preferred
     rig.arm().open(facts(&key, "t")).expect("drawn").finish(Some("INCUMBENT: a plan".to_string()));
-    let ledger = challenger_path(&rig.cwd);
     assert_eq!(rig.rows().len(), 1);
 
-    let finished =
-        RouteOutcomeRecord::new("subagent", "general-purpose", INCUMBENT, runtime::OUTCOME_COMPLETED).with_attempt_key(&key);
-    runtime::record_route_outcome(&rig.cwd, &finished).expect("a completion");
-    assert_eq!(note_verdicts_in(&rig.cwd, &ledger, JevMode::Shadow), 0);
+    runtime::record_route_outcome(&rig.cwd, &handed_in(&key, Some(HANDED_IN))).expect("a completion");
+    assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::Shadow), &feed_into(&rig.cwd)), 0);
     assert_eq!(rig.rows().len(), 1, "completion is not a receipt");
 
     runtime::record_route_outcome(&rig.cwd, &verdict(&key, runtime::OUTCOME_FAILED, VerdictSubject::Work, 5)).expect("a verdict");
     runtime::record_route_outcome(&rig.cwd, &verdict(&key, runtime::OUTCOME_COMPLETED, VerdictSubject::Work, 9)).expect("a later verdict");
     let racers: Vec<_> = (0..4)
         .map(|_| {
-            let (cwd, ledger) = (rig.cwd.clone(), ledger.clone());
-            std::thread::spawn(move || note_verdicts_in(&cwd, &ledger, JevMode::Shadow))
+            let cwd = rig.cwd.clone();
+            std::thread::spawn(move || note_verdicts_in(&cwd, Some(JevMode::Shadow), &feed_into(&cwd)))
         })
         .collect();
     let labelled: usize = racers.into_iter().map(|racer| racer.join().expect("a racer")).sum();
@@ -902,15 +1364,11 @@ fn a_verdict_labels_a_comparison_once_and_a_completion_labels_it_never() {
     assert_eq!(rows.len(), 2);
     assert_eq!(word(&rows[1], &LABEL).as_deref(), Some(key.as_str()));
     assert_eq!(word(&rows[1], &arm::VERIFIED).as_deref(), Some(Receipt::Failed.token()), "the first verdict, not the later pass");
+    assert_eq!(word(&rows[1], &arm::VERIFIED_SOURCE).as_deref(), Some(HANDED_IN), "and the source it judged");
     assert_eq!(rows[1][arm::WON.canonical], json!(true));
     assert_eq!(rows[1][AGREED.canonical], json!(true));
-    assert_eq!(note_verdicts_in(&rig.cwd, &ledger, JevMode::Shadow), 0, "and again, nothing");
-
-    let records = runtime::read_route_outcomes(&rig.cwd).expect("records");
-    assert!(
-        records.iter().all(|record| record.route_source.as_deref() != Some(CHALLENGER_ROUTE_SOURCE)),
-        "shadow feeds no sample"
-    );
+    assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::Shadow), &feed_into(&rig.cwd)), 0, "and again, nothing");
+    assert_eq!(rig.samples(), 0, "shadow feeds no sample");
 }
 
 fn request_row(attempt: &str, preferred: Preferred) -> Value {
@@ -934,25 +1392,29 @@ fn request_row(attempt: &str, preferred: Preferred) -> Value {
     row
 }
 
-/// 영수증 셋 × 선호 셋의 표 전체를 실제 독자 `labels_due`가 핵심 규칙 `quality` 그대로 읽는다: 영수증 없음은 라벨 없음,
-/// 「현직 통과 + 도전자 선호」는 판정 불가(agreed 없음), 표본은 판정자와 영수증이 맞은 칸에서만.
+/// 영수증 셋 × 선호 셋의 표 전체를 실제 독자 `labels_due`·`labelled_in`이 핵심 규칙 `quality` 그대로 읽는다: 영수증 없음은 라벨
+/// 없음, 「현직 통과 + 도전자 선호」는 판정 불가(agreed 없음), 표본은 판정자와 영수증이 맞은 칸에서만.
 #[test]
 fn the_whole_truth_table_is_read_through_the_labeller_and_only_agreeing_cells_feed_the_router() {
     for receipt in [None, Some(Receipt::Passed), Some(Receipt::Failed)] {
         for preferred in [Preferred::Incumbent, Preferred::Challenger, Preferred::Neither] {
-            let rows = vec![request_row("agent-1#1", preferred)];
-            let due = labels_due(&rows, |_| receipt, 7);
+            let mut rows = vec![request_row("agent-1#1", preferred)];
+            let due = labels_due(&rows, |_| receipt.map(|receipt| (receipt, HANDED_IN.to_string())), 7);
             let Some(receipt) = receipt else {
                 assert!(due.is_empty(), "no receipt, no label ({preferred:?})");
                 continue;
             };
             assert_eq!(due.len(), 1);
-            let (label, labelled) = &due[0];
+            let label = &due[0];
             let graded = arm::quality(Some(receipt), preferred);
             assert_eq!(label[arm::WON.canonical], json!(graded.won), "{receipt:?} {preferred:?}");
             assert_eq!(AGREED.read(label).and_then(Value::as_bool), graded.agreed, "{receipt:?} {preferred:?}");
-            assert_eq!((labelled.won, labelled.agreed), (graded.won, graded.agreed));
-            let sample = sample_of(labelled);
+            rows.extend(due);
+            let labelled = labelled_in(&rows);
+            assert_eq!(labelled.len(), 1);
+            assert_eq!((labelled[0].won, labelled[0].agreed), (graded.won, graded.agreed));
+            assert_eq!((labelled[0].incumbent.as_str(), labelled[0].challenger.as_str()), (INCUMBENT, NEWCOMER));
+            let sample = sample_of(&labelled[0]);
             let fed = matches!(
                 (receipt, preferred),
                 (Receipt::Failed, Preferred::Challenger) | (Receipt::Passed, Preferred::Incumbent)
@@ -964,9 +1426,10 @@ fn the_whole_truth_table_is_read_through_the_labeller_and_only_agreeing_cells_fe
             }
         }
     }
-    let passed_challenger = labels_due(&[request_row("agent-2#1", Preferred::Challenger)], |_| Some(Receipt::Passed), 7);
-    assert!(AGREED.read(&passed_challenger[0].0).is_none(), "undecidable: no agreed mark");
-    assert_eq!(passed_challenger[0].0[arm::WON.canonical], json!(false));
+    let passed_challenger =
+        labels_due(&[request_row("agent-2#1", Preferred::Challenger)], |_| Some((Receipt::Passed, HANDED_IN.to_string())), 7);
+    assert!(AGREED.read(&passed_challenger[0]).is_none(), "undecidable: no agreed mark");
+    assert_eq!(passed_challenger[0][arm::WON.canonical], json!(false));
 }
 
 /* ---- acting ------------------------------------------------------------ */
@@ -1008,6 +1471,7 @@ fn a_roles_model_moves_only_when_the_seat_stands_and_the_standing_passes() {
     assert_eq!(sample.run_id.as_deref(), Some(sample_attempt_key("agent-0#1").as_str()));
     assert_eq!(sample.decision_kind(), DecisionKind::Model);
     assert!(!sample.decision_kind().is_bookkeeping(), "a verified sample is what the learner reads");
+    assert!(sample.is_seat_sample(), "and one a seat stands behind or not");
 }
 
 fn incumbent_run(n: usize, now_secs: u64) -> RouteOutcomeRecord {
@@ -1020,9 +1484,10 @@ fn incumbent_run(n: usize, now_secs: u64) -> RouteOutcomeRecord {
     record
 }
 
-/// 학습기는 도전자 표본을 기존 learned 문 그대로 읽고, 도전 설계의 세금 행은 읽지 않는다; 현직 비율은 학습기의 바닥을 따른다.
+/// 학습기는 자리가 세운 도전자 표본만 기존 learned 문 그대로 읽는다: 세운 표본은 표본이고, 세우지 않은 표본과 도전 설계의 세금
+/// 행은 아무것도 가르치지 않는다; 현직 비율은 학습기의 바닥을 따르며 표본에 흔들리지 않는다.
 #[test]
-fn the_learner_reads_the_arms_samples_and_skips_its_tax() {
+fn the_learner_reads_the_samples_its_seat_stands_behind_and_never_the_tax() {
     let now = 2_000_000_000;
     let peers: Vec<RouteOutcomeRecord> = (0..8).map(|n| incumbent_run(n, now)).collect();
     let tax: Vec<RouteOutcomeRecord> = (0..8)
@@ -1033,25 +1498,33 @@ fn the_learner_reads_the_arms_samples_and_skips_its_tax() {
             record
         })
         .collect();
-    let samples: Vec<RouteOutcomeRecord> = (0..4)
-        .map(|n| {
-            let mut record = sample_of(&labelled(&format!("agent-{n}#1"))).expect("a sample");
-            record.recorded_at = now;
-            record
-        })
-        .collect();
+    let samples = |admitted: bool| -> Vec<RouteOutcomeRecord> {
+        (0..4)
+            .map(|n| {
+                let mut record = sample_of(&labelled(&format!("agent-{n}#1"))).expect("a sample");
+                record.recorded_at = now;
+                record.admitted = admitted;
+                record
+            })
+            .collect()
+    };
     let canonical = super::super::canonicalize_route_model_id;
+    let entry = |records: &[RouteOutcomeRecord]| {
+        LearnedSpecialtyHint::compute(records, now, canonical).entry_for(RouteRole::Coding, NEWCOMER)
+    };
     let with_tax: Vec<RouteOutcomeRecord> = peers.iter().chain(&tax).cloned().collect();
-    assert!(
-        LearnedSpecialtyHint::compute(&with_tax, now, canonical).entry_for(RouteRole::Coding, NEWCOMER).is_none(),
-        "tax teaches nothing"
-    );
-    let with_samples: Vec<RouteOutcomeRecord> = peers.iter().chain(&tax).chain(&samples).cloned().collect();
-    let entry = LearnedSpecialtyHint::compute(&with_samples, now, canonical)
-        .entry_for(RouteRole::Coding, NEWCOMER)
-        .expect("four verified samples (weight 2 each) clear the learner's floor");
-    assert!(entry.model_adjustment > 0, "wins against a peer at one half: {entry:?}");
+    assert!(entry(&with_tax).is_none(), "tax teaches nothing");
+    let unadmitted: Vec<RouteOutcomeRecord> = peers.iter().chain(&tax).chain(&samples(false)).cloned().collect();
+    assert!(entry(&unadmitted).is_none(), "a sample no reader admitted teaches nothing");
+    let admitted: Vec<RouteOutcomeRecord> = peers.iter().chain(&tax).chain(&samples(true)).cloned().collect();
+    let learned = entry(&admitted).expect("four verified samples (weight 2 each) clear the learner's floor");
+    assert!(learned.model_adjustment > 0, "wins against a peer at one half: {learned:?}");
     assert_eq!(runtime::learned_rate(&peers, now, RouteRole::Coding, INCUMBENT, canonical), Some(0.5));
+    assert_eq!(
+        runtime::learned_rate(&admitted, now, RouteRole::Coding, INCUMBENT, canonical),
+        Some(0.5),
+        "the incumbent's rate is its own runs"
+    );
     assert_eq!(
         runtime::learned_rate(&peers[..3], now, RouteRole::Coding, INCUMBENT, canonical),
         None,
@@ -1059,34 +1532,121 @@ fn the_learner_reads_the_arms_samples_and_skips_its_tax() {
     );
 }
 
-/// 행동하는 자리에서 동의 칸 라벨은 표본 하나가 되고, 다시 불러도 하나다; 기록만 하는 자리는 표본이 없다.
+/// 라우팅 소비자가 읽는 순간의 자리 자격이 도전자 표본의 영향을 정한다(m-7953): on이면 들고, off면 0, auto는 원장이 세웠을
+/// 때만, 떨어지면 0, 다시 세우면 같은 행이 같은 감쇠 그대로 돌아온다; 전적이 현직을 못 넘으면 0; 다른 출처의 학습은 늘 그대로.
+#[test]
+fn the_arms_samples_teach_the_router_only_while_the_seat_stands_behind_them() {
+    let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+    rig.seed_a_standing_window(true);
+    for labelled in labelled_in(&rig.rows()) {
+        runtime::record_route_outcome(&rig.cwd, &sample_of(&labelled).expect("an agreeing label")).expect("a sample");
+    }
+    let canonical = super::super::canonicalize_route_model_id;
+    let read = || {
+        let records = read_learning_outcomes(&rig.cwd).expect("records");
+        let now = now_ms() / 1_000;
+        let challenger = LearnedSpecialtyHint::compute(&records, now, canonical)
+            .entry_for(RouteRole::Coding, NEWCOMER)
+            .map(|entry| entry.model_adjustment);
+        let others: Vec<RouteOutcomeRecord> = records.into_iter().filter(|record| !record.is_seat_sample()).collect();
+        (challenger, others)
+    };
+    let (acting, others) = read();
+    let moved = acting.expect("a person's on: the samples teach");
+    assert!(moved > 0, "the challenger won its window: {moved}");
+
+    rig.write_settings(Some(JevMode::Off), DoorWords::OPEN);
+    let (off, off_others) = read();
+    assert_eq!(off, None, "switched off: the samples stay in the ledger and teach nothing");
+    assert_eq!(off_others, others, "and every other source's learning is as it was");
+
+    rig.write_settings(Some(JevMode::Shadow), DoorWords::OPEN);
+    assert_eq!(read().0, None, "recording: nothing");
+    rig.write_settings(Some(JevMode::Auto), DoorWords::OPEN);
+    assert_eq!(read().0, None, "an auto its ledger has not raised: nothing");
+    rig.transition(ROSE);
+    assert_eq!(read().0, Some(moved), "raised: the same rows, under their own decay");
+    rig.transition(FELL);
+    assert_eq!(read().0, None, "fallen: nothing");
+    rig.transition(ROSE);
+    assert_eq!(read().0, Some(moved), "raised again: back, as they were");
+}
+
+/// 전적이 현직 비율을 못 넘는 도전자의 표본은 자리가 행동해도 아무것도 가르치지 않는다 — 학습기는 그 도전자를 모른다.
+#[test]
+fn a_standing_under_the_incumbents_rate_admits_no_sample() {
+    let losing = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+    losing.seed_a_standing_window(false);
+    let ledger = challenger_path(&losing.cwd);
+    for n in 0..A_WINDOW_OF_COMPARISONS {
+        let attempt = format!("window-{n}#1");
+        let label = arm::label_row(&attempt, Receipt::Passed, Preferred::Incumbent, HANDED_IN, 2);
+        append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+    }
+    for labelled in labelled_in(&losing.rows()) {
+        runtime::record_route_outcome(&losing.cwd, &sample_of(&labelled).expect("an agreeing label")).expect("a sample");
+    }
+    let records = read_learning_outcomes(&losing.cwd).expect("records");
+    assert_eq!(records.iter().filter(|record| record.is_seat_sample()).count(), A_WINDOW_OF_COMPARISONS);
+    assert!(
+        records.iter().filter(|record| record.is_seat_sample()).all(|record| !record.admitted),
+        "a standing under the incumbent's rate stands behind no sample"
+    );
+    let learned = LearnedSpecialtyHint::compute(&records, now_ms() / 1_000, super::super::canonicalize_route_model_id);
+    assert!(
+        learned.entry_for(RouteRole::Coding, NEWCOMER).is_none(),
+        "and the router learns nothing of the challenger from them, for or against"
+    );
+}
+
+/// 행동하는 자리에서 동의 칸 라벨은 표본 하나가 된다 — 기록만 하던 때 붙은 라벨도, 자리가 이제 세우면; 다시 불러도 하나다.
 #[test]
 fn an_acting_seat_feeds_one_sample_per_agreeing_label_and_a_recording_one_feeds_none() {
     let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
-    let ledger = challenger_path(&rig.cwd);
-    for n in 0..A_WINDOW_OF_COMPARISONS {
-        append_shadow_row(&ledger, &request_row(&format!("agent-{n}#1"), Preferred::Challenger), SHADOW_LEDGER_MAX_BYTES)
-            .expect("a row");
-    }
+    rig.seed_a_standing_window(false);
     let now = now_ms() / 1_000;
-    for n in 0..8 {
-        runtime::record_route_outcome(&rig.cwd, &incumbent_run(n, now)).expect("a peer");
+    for attempt in ["window-0#1", "window-1#1"] {
+        runtime::record_route_outcome(&rig.cwd, &handed_in(attempt, Some(HANDED_IN))).expect("a run");
     }
-    let fed = |cwd: &Path| {
-        runtime::read_route_outcomes(cwd)
-            .expect("records")
-            .into_iter()
-            .filter(|record| record.route_source.as_deref() == Some(CHALLENGER_ROUTE_SOURCE))
-            .count()
-    };
-    runtime::record_route_outcome(&rig.cwd, &verdict("agent-0#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, now)).expect("a verdict");
-    assert_eq!(note_verdicts_in(&rig.cwd, &ledger, JevMode::Shadow), 1, "recording labels");
-    assert_eq!(fed(&rig.cwd), 0, "and feeds nothing");
-    runtime::record_route_outcome(&rig.cwd, &verdict("agent-1#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, now)).expect("a verdict");
-    assert_eq!(note_verdicts_in(&rig.cwd, &ledger, JevMode::On), 1);
-    assert_eq!(fed(&rig.cwd), 1, "an acting seat feeds the agreeing label");
-    assert_eq!(note_verdicts_in(&rig.cwd, &ledger, JevMode::On), 0);
-    assert_eq!(fed(&rig.cwd), 1, "once");
+    runtime::record_route_outcome(&rig.cwd, &verdict("window-0#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, now)).expect("a verdict");
+    assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::Shadow), &feed_into(&rig.cwd)), 1, "recording labels");
+    assert_eq!(rig.samples(), 0, "and feeds nothing");
+    runtime::record_route_outcome(&rig.cwd, &verdict("window-1#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, now)).expect("a verdict");
+    assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 1);
+    assert_eq!(rig.samples(), 2, "an acting seat feeds every agreeing label it stands behind — the one labelled while recording too");
+    assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 0);
+    assert_eq!(rig.samples(), 2, "once");
+}
+
+/// 라벨이 먼저 남고 표본은 따라온다: 표본 쓰기가 거절되거나 라벨을 쓴 직후 멈췄어도, 다음 부름(재시작 뒤 포함)이 그 표본을 정확히
+/// 한 번 쓰고, 이미 쓴 표본은 몇이 동시에 불러도 다시 쓰지 않는다.
+#[test]
+fn a_label_whose_sample_was_lost_gets_it_from_the_next_call_once() {
+    let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+    rig.seed_a_standing_window(false);
+    let now = now_ms() / 1_000;
+    runtime::record_route_outcome(&rig.cwd, &handed_in("window-0#1", Some(HANDED_IN))).expect("a run");
+    runtime::record_route_outcome(&rig.cwd, &verdict("window-0#1", runtime::OUTCOME_FAILED, VerdictSubject::Work, now)).expect("a verdict");
+    let refused = |_: &RouteOutcomeRecord| Err(std::io::Error::other("the outcome ledger refused the write"));
+    assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &refused), 1, "the label is the durable fact");
+    assert_eq!(rig.samples(), 0, "its sample was refused — or the process stopped right after the label");
+    assert!(
+        rig.rows().iter().any(|row| word(row, &LABEL).as_deref() == Some("window-0#1")),
+        "the label stands"
+    );
+    // A new call is a restart: everything it reads is on disk.
+    assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 0, "no second label");
+    assert_eq!(rig.samples(), 1, "the lost sample is written now");
+    let racers: Vec<_> = (0..4)
+        .map(|_| {
+            let cwd = rig.cwd.clone();
+            std::thread::spawn(move || note_verdicts_in(&cwd, Some(JevMode::On), &feed_into(&cwd)))
+        })
+        .collect();
+    for racer in racers {
+        racer.join().expect("a racer");
+    }
+    assert_eq!(rig.samples(), 1, "and never twice");
 }
 
 /* ---- the dashboard ----------------------------------------------------- */
@@ -1174,10 +1734,11 @@ fn the_days_share_and_the_arms_reads_on_this_machine() {
         api::model_price,
     );
     let pick_ms = started.elapsed().as_millis();
+    // The cap's worth of plain words clears to itself.
     let ceiling = picked
         .as_ref()
         .ok()
-        .map(|(_, price)| expected_design_micros(price, &task_head(&"x".repeat(CHALLENGER_TASK_CHAR_CAP))));
+        .map(|(_, price)| expected_design_micros(price, &"x".repeat(CHALLENGER_TASK_CHAR_CAP)));
     let judge = api::systemone_rate(zerocode_core::jev::DEFAULT_MODEL)
         .map(|rate| expected_comparison_micros(&rate, 1_024));
     let share = spend::day_spend(&spend::Book::default(), other).day_micros / 10;

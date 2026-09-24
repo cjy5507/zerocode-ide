@@ -101,13 +101,31 @@ pub fn names(text: &str, attempt: &str) -> bool {
         .any(|event| event.get(ATTEMPT_KEY).and_then(Value::as_str) == Some(attempt))
 }
 
-/// Remove the day files of every other day beside `today` — what the first
-/// reservation of a day does, as the door's count does
-/// ([`crate::jev::count::forget_other_days`]). A settlement for an attempt
-/// drawn before midnight still lands in its own day's file, which a later
-/// day's first reservation clears again.
-pub fn forget_other_days(today: &Path) {
-    crate::jev::count::forget_other_days(today, SPEND_FILE_PREFIX, SPEND_FILE_SUFFIX);
+/// Forget the books of days before `today`'s that nothing will settle into
+/// again — what the first reservation of a day does, under the door's own
+/// rule for what a past day leaves behind
+/// ([`crate::jev::count::forget_earlier_days`]: never today's book, never a
+/// later day's).
+///
+/// Yesterday's book is kept while it holds a reservation nothing has settled
+/// or released: a draw charged before midnight whose design is still out
+/// settles into its own day, and its book is where that settlement belongs.
+/// A book that cannot be read is kept too — what this cannot read, it
+/// cannot call settled. Two days back, a reservation still live is a draw
+/// that died before it settled: it held its day's share until that day
+/// ended, which is the arm's whole rule for a crash, and the day is over.
+pub fn forget_settled_days(today: &Path) {
+    let yesterday = crate::jev::count::day_named(today, SPEND_FILE_PREFIX, SPEND_FILE_SUFFIX)
+        .and_then(|day| crate::jev::count::day_before(&day));
+    crate::jev::count::forget_earlier_days(
+        today,
+        SPEND_FILE_PREFIX,
+        SPEND_FILE_SUFFIX,
+        |day, book| {
+            yesterday.as_deref() == Some(day)
+                && !std::fs::read_to_string(book).is_ok_and(|text| fold(&text).reserved == 0)
+        },
+    );
 }
 
 /// A day's book, folded from its lines.

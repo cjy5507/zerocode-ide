@@ -5,8 +5,9 @@ use super::{
     ATTEMPT, Attempt, BLIND, Blind, CHALLENGED_ROLES, CHALLENGER_DESIGN, CHALLENGER_KEYS,
     CHALLENGER_MODEL, COST_MICROS, Comparison, DaySpend, Designs, EXPECTED_MICROS, HELD, Held,
     INCUMBENT_DESIGN, INCUMBENT_MODEL, OPTIONS, PREFERRED, Preferred, ROLE, Receipt, Side,
-    Standing, VERIFIED, WON, ask, challenges, draws, eligible as eligible_line, expected_micros,
-    held_row, label_row, quality, role_may_be_challenged, standing, within_day_budget,
+    Standing, VERIFIED, VERIFIED_SOURCE, WON, ask, challenges, draws, eligible as eligible_line,
+    expected_micros, held_row, label_row, quality, role_may_be_challenged, standing,
+    within_day_budget,
 };
 use crate::jev::choice::ChoiceRefusal;
 use crate::jev::promote::{Verdict, judge_seat};
@@ -484,7 +485,7 @@ fn a_request_row_spells_its_columns_from_the_table_and_none_of_the_wires() {
 /// 라벨 행은 요청 행을 시도 이름으로 가리키고, 영수증이 말할 수 있을 때만 합의 표식을 단다.
 #[test]
 fn a_label_row_names_its_attempt_and_marks_agreement_only_where_the_receipt_can_say() {
-    let vindicated = label_row("dp-1", Receipt::Failed, Preferred::Challenger, 7);
+    let vindicated = label_row("dp-1", Receipt::Failed, Preferred::Challenger, "tree-1", 7);
     assert_eq!(
         LABEL.read(&vindicated).and_then(Value::as_str),
         Some("dp-1")
@@ -493,6 +494,11 @@ fn a_label_row_names_its_attempt_and_marks_agreement_only_where_the_receipt_can_
     assert_eq!(
         VERIFIED.read(&vindicated).and_then(Value::as_str),
         Some(Receipt::Failed.token())
+    );
+    assert_eq!(
+        VERIFIED_SOURCE.read(&vindicated).and_then(Value::as_str),
+        Some("tree-1"),
+        "what was verified stands beside what it said"
     );
     assert_eq!(WON.read(&vindicated).and_then(Value::as_bool), Some(true));
     assert_eq!(
@@ -504,7 +510,7 @@ fn a_label_row_names_its_attempt_and_marks_agreement_only_where_the_receipt_can_
         "a label row is not a request"
     );
 
-    let undecidable = label_row("dp-2", Receipt::Passed, Preferred::Challenger, 8);
+    let undecidable = label_row("dp-2", Receipt::Passed, Preferred::Challenger, "tree-2", 8);
     assert_eq!(WON.read(&undecidable).and_then(Value::as_bool), Some(false));
     assert!(AGREED.read(&undecidable).is_none());
 }
@@ -551,9 +557,15 @@ fn a_standing_reads_one_latest_word_per_attempt_of_its_own_pair() {
         request_row("dp-4", 4, None),
         Value::Object(other_row),
         // dp-2의 영수증: 현직이 통과했으니 도전자의 승리는 취소된다.
-        label_row("dp-2", Receipt::Passed, Preferred::Challenger, 5),
+        label_row("dp-2", Receipt::Passed, Preferred::Challenger, "tree-2", 5),
         // 모르는 시도의 라벨은 세지 않는다.
-        label_row("dp-nobody", Receipt::Failed, Preferred::Challenger, 6),
+        label_row(
+            "dp-nobody",
+            Receipt::Failed,
+            Preferred::Challenger,
+            "tree-x",
+            6,
+        ),
     ];
     let record = standing(&rows, "coding", "claude-opus-5-2");
     assert_eq!(
@@ -636,6 +648,7 @@ fn the_seat_judge_reads_the_rows_this_module_writes_and_raises_the_seat_on_recei
             &format!("dp-{n}"),
             Receipt::Failed,
             preferred,
+            "tree",
             i64::try_from(requests + n).expect("small"),
         ));
     }
@@ -776,19 +789,107 @@ fn an_attempt_is_named_once_a_day_and_the_first_reservation_forgets_past_days() 
     assert!(!spend::names("{torn", "dp-a"));
 
     let home = tempfile::tempdir().expect("a home");
-    let yesterday = spend::spend_path(home.path(), "2026-09-23");
-    let today = spend::spend_path(home.path(), "2026-09-24");
+    let book = |day: &str| spend::spend_path(home.path(), day);
+    let write = |day: &str, text: String| std::fs::write(book(day), text).expect("a book");
+    std::fs::create_dir_all(book("x").parent().expect("a folder")).expect("folder");
+    let settled = spend::line("dp-old", Op::Reserve, 9) + &spend::line("dp-old", Op::Settle, 7);
+    write("2026-09-23", settled);
+    write("2026-09-24", spend::line("dp-new", Op::Reserve, 1));
+    write("2026-09-25", spend::line("dp-next", Op::Reserve, 1));
     let count = crate::jev::count::requests_path(home.path(), "2026-09-23");
-    std::fs::create_dir_all(yesterday.parent().expect("a folder")).expect("folder");
-    std::fs::write(&yesterday, spend::line("dp-old", Op::Reserve, 9)).expect("yesterday");
     std::fs::write(&count, "...").expect("the door's own count");
-    std::fs::write(&today, spend::line("dp-new", Op::Reserve, 1)).expect("today");
-    spend::forget_other_days(&today);
-    assert!(!yesterday.exists(), "yesterday's book is forgotten");
-    assert!(today.exists(), "today's is kept");
+    spend::forget_settled_days(&book("2026-09-24"));
+    assert!(
+        !book("2026-09-23").exists(),
+        "yesterday's settled book is forgotten"
+    );
+    assert!(book("2026-09-24").exists(), "today's is kept");
+    assert!(
+        book("2026-09-25").exists(),
+        "a later day's book is never an earlier day's to forget"
+    );
     assert!(
         count.exists(),
         "the door's count is not the book's to forget"
+    );
+
+    // A reservation charged before midnight and still out keeps yesterday's
+    // book for its settlement; two days back, a live reservation is a draw
+    // that died, and its day is over.
+    write("2026-09-24", spend::line("dp-late", Op::Reserve, 5));
+    write("2026-09-23", spend::line("dp-dead", Op::Reserve, 5));
+    spend::forget_settled_days(&book("2026-09-25"));
+    assert!(
+        book("2026-09-24").exists(),
+        "yesterday is kept while it can still be settled into"
+    );
+    assert!(
+        !book("2026-09-23").exists(),
+        "two days back is forgotten, live or not"
+    );
+    write(
+        "2026-09-24",
+        spend::line("dp-late", Op::Reserve, 5) + &spend::line("dp-late", Op::Settle, 4),
+    );
+    spend::forget_settled_days(&book("2026-09-25"));
+    assert!(!book("2026-09-24").exists(), "settled, it goes");
+}
+
+/// 날짜 경계의 늦은 쓰기: 자정 전에 날을 정한 프로그램이 자정 뒤에 옛날 파일에 처음 쓰더라도, 이미 시작된 새날의 파일은
+/// 지우지 않는다 — 문의 셈과 도전 장부가 같은 규칙 하나로.
+#[test]
+fn a_late_write_into_an_ended_day_never_forgets_the_day_that_began() {
+    let home = tempfile::tempdir().expect("a home");
+    let today = crate::jev::count::requests_path(home.path(), "2026-09-25");
+    let ended = crate::jev::count::requests_path(home.path(), "2026-09-24");
+    assert_eq!(
+        crate::jev::count::count_one(&today).expect("today's first"),
+        1
+    );
+    assert_eq!(crate::jev::count::count_one(&ended).expect("a late one"), 1);
+    assert_eq!(
+        crate::jev::count::sent(&today),
+        1,
+        "the day that began keeps its count"
+    );
+    assert_eq!(
+        crate::jev::count::count_one(&today).expect("today's second"),
+        2
+    );
+
+    let book = |day: &str| spend::spend_path(home.path(), day);
+    std::fs::write(book("2026-09-25"), spend::line("dp-new", Op::Reserve, 3)).expect("today");
+    std::fs::write(book("2026-09-24"), spend::line("dp-late", Op::Reserve, 5)).expect("late");
+    spend::forget_settled_days(&book("2026-09-24"));
+    assert_eq!(
+        spend::fold(&std::fs::read_to_string(book("2026-09-25")).expect("today's book"))
+            .reserved_micros,
+        3,
+        "a late first reservation of an ended day leaves the new day's book as it was"
+    );
+
+    assert_eq!(
+        crate::jev::count::day_before("2026-03-01").as_deref(),
+        Some("2026-02-28")
+    );
+    assert_eq!(
+        crate::jev::count::day_before("2028-03-01").as_deref(),
+        Some("2028-02-29")
+    );
+    assert_eq!(
+        crate::jev::count::day_before("2026-01-01").as_deref(),
+        Some("2025-12-31")
+    );
+    assert_eq!(crate::jev::count::day_before("not a day"), None);
+    let odd = home
+        .path()
+        .join(crate::jev::count::REQUESTS_DIR)
+        .join("challenger-spend-latest.jsonl");
+    std::fs::write(&odd, "").expect("a name that is not a day");
+    spend::forget_settled_days(&book("2026-09-26"));
+    assert!(
+        odd.exists(),
+        "a name this cannot place is not its to forget"
     );
 }
 
@@ -884,6 +985,7 @@ fn a_replay_rederives_the_draw_and_the_blind_and_reads_one_word_per_attempt() {
         &drawn[0],
         Receipt::Passed,
         Preferred::Incumbent,
+        "tree",
         10,
     ));
     // A held attempt, and a row whose blind was written wrong.

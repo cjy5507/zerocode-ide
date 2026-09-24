@@ -58,18 +58,19 @@ pub(crate) use apply::{
 pub(crate) use apply::route_source_is_a_persons;
 pub(crate) use canonical::canonicalize_route_model_id;
 pub(crate) use challenger::{
-    first_design_text as first_challenger_design_text, Arm as ChallengerArm,
+    first_design_text as first_challenger_design_text, hands_in_a_source as challenger_hands_in_a_source,
+    judges_a_source as challenger_judges_a_source, source_of as challenger_source_of, Arm as ChallengerArm,
     AttemptFacts as ChallengerAttemptFacts, Drawn as ChallengerDrawn,
 };
 pub use challenger::{
-    challenger_path, note_challenger_verdicts, ChallengerRow, CHALLENGER_FILE, CHALLENGER_ROUTE_SOURCE,
-    CHALLENGER_RUBRIC_VERSION,
+    challenger_path, note_challenger_verdicts, read_learning_outcomes, ChallengerRow, CHALLENGER_FILE,
+    CHALLENGER_ROUTE_SOURCE, CHALLENGER_RUBRIC_VERSION,
 };
 #[cfg(test)]
 pub(crate) use challenger::tests::{
     a_key_that_draws as challenger_key_that_draws, jev_answer as challenger_jev_answer,
-    rows_after as challenger_rows_after, Rig as ChallengerRig, Scripted as ChallengerScripted,
-    INCUMBENT as CHALLENGER_TEST_INCUMBENT,
+    rows_after as challenger_rows_after, DoorWords as ChallengerDoorWords, Rig as ChallengerRig,
+    Scripted as ChallengerScripted, INCUMBENT as CHALLENGER_TEST_INCUMBENT, NEWCOMER as CHALLENGER_TEST_NEWCOMER,
 };
 pub use decision_report::{
     basis_points, evaluate_decision_labels, summarize_decision_shadow, AxisAgreement,

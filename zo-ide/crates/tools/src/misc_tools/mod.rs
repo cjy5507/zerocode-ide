@@ -52,8 +52,9 @@ pub use smart_router::{
     FILE_PICK_OUTCOME_ANSWERED,
 };
 pub use smart_router::{
-    challenger_path, jev_challenger_mode_from, note_challenger_verdicts, ChallengerRow, CHALLENGER_FILE,
-    CHALLENGER_ROUTE_SOURCE, CHALLENGER_RUBRIC_VERSION, JEV_CHALLENGER_SETTING,
+    challenger_path, jev_challenger_mode_from, note_challenger_verdicts, read_learning_outcomes,
+    ChallengerRow, CHALLENGER_FILE, CHALLENGER_ROUTE_SOURCE, CHALLENGER_RUBRIC_VERSION,
+    JEV_CHALLENGER_SETTING,
 };
 pub use smart_router::{
     command_guard_path, jev_command_guard_mode_from, jev_tool_text_guard_mode_from,

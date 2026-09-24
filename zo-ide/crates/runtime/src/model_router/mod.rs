@@ -65,7 +65,7 @@ pub use outcome::{
     weighted_feedback_hint_for_route_key, DecisionKind, DecisionOutcomeStat, PlanShape,
     RouteOutcomeBucket, RouteOutcomeRecord, RouteOutcomeSummary, VerdictBasis, VerdictSubject,
     VerifyMetrics, RouteTaxCall, CONFIDENT_DECISIVE_SAMPLES, ROUTE_TAX_ROUTE_KEY,
-    OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STOPPED,
+    OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STOPPED, SEAT_SAMPLE_SOURCE,
 };
 pub use policy::{
     deep_tier_model_matches, default_deep_tier_models, default_difficulty_tier, dynamic_deep_tier_models,

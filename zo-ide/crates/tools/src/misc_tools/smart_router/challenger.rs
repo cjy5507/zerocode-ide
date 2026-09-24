@@ -9,39 +9,50 @@
 //!    the cheap holds — a retry, a guarded flow, a person's pin, a role the
 //!    arm does not touch, the four attempts in five that do not draw — read
 //!    on the spawn's thread, which is all the spawn ever pays. Everything
-//!    else runs on a thread of its own ([`Arm::draw`]): the door asked
-//!    whether it WOULD admit the comparison (no key, no consent, no budget:
-//!    nothing is spent on a design nobody will judge), the challenger chosen
-//!    from the connected inventory ([`pick_challenger`]), priced from the one
+//!    else runs on a thread of its own ([`Arm::draw`]): the task's head
+//!    cleared by the seat's own door (no key, no consent, no budget: nothing
+//!    is spent on a design nobody will judge), the challenger chosen from
+//!    the connected inventory ([`pick_challenger`]), priced from the one
 //!    price table, the day's share read and reserved under one lock
-//!    ([`Reservation`]), and the design requested.
+//!    ([`Reservation`]) — and then, the moment before the design request
+//!    leaves, the person's word and the door asked again as they stand NOW,
+//!    and only the words that door cleared sent ([`cleared_task`]).
 //! 2. **After the attempt's first turn** ([`Drawn::designs_ready`]): the
 //!    incumbent's design is its own first plan — the first text it wrote
 //!    before its first tool call ([`first_design_text`]) — frozen once. The
-//!    challenger's design is joined, both are put to the judge under no name
-//!    in the blind's order, the reservation is settled at what the design
-//!    and the comparison actually cost, and the row is written. Nothing the
-//!    attempt does waits on any of it: the incumbent's design is what runs,
-//!    every time.
+//!    challenger's design is joined, and — the person's word, the door and
+//!    the key read again, a first turn after the draw read them — both are
+//!    put to the judge under no name in the blind's order; the reservation
+//!    is settled at what the design and the comparison actually cost, and
+//!    the row is written. A design that left before the person took the
+//!    word back is settled at what it cost, and nothing more is sent.
+//!    Nothing the attempt does waits on any of it: the incumbent's design is
+//!    what runs, every time.
 //! 3. **When a verdict lands** ([`note_challenger_verdicts`]): the
-//!    verification loop's receipt for the attempt — a `verdict` row in the
-//!    route-outcome ledger about that attempt's work — writes the label. A
-//!    finished attempt is not a receipt; a verifier that settled nothing
-//!    labels nothing.
+//!    verification loop's receipt for the attempt — a `verdict` row about
+//!    that attempt's work, naming as the source it saw the very source the
+//!    attempt handed in ([`receipt_for`]) — writes the label. A finished
+//!    attempt is not a receipt; a verifier that settled nothing, or that
+//!    judged some other source, labels nothing.
 //! 4. **Acting** (`auto` once the seat's own evidence has raised it, or a
-//!    person's `on`): a labelled comparison whose challenger's standing for
-//!    the role passes the incumbent's own learned rate becomes one verified
-//!    sample of the challenger in the route-outcome ledger, under a
-//!    `challenger` source and an attempt key of its own — the learner's own
-//!    admission line then moves the role's model, and stops moving it when
-//!    the samples stop. A seat only recording writes no sample.
+//!    person's `on`): a labelled comparison whose receipt and judge agree
+//!    becomes one verified sample of the challenger in the route-outcome
+//!    ledger, under a `challenger` source and an attempt key of its own,
+//!    while the seat acts and the challenger's standing for the role passes
+//!    the incumbent's own learned rate — written once, and written late by
+//!    the next call when a crash or a refused write left it out
+//!    ([`note_verdicts_in`]). Every learner reads a sample only while that
+//!    stays true at the moment it reads ([`admit_samples`]): switched off or
+//!    fallen, the samples stay in the ledger and teach nothing; raised
+//!    again, the same rows count under their own decay.
 //!
-//! What leaves the machine: the head of the task and one design, to the
-//! challenger, on the person's own provider credentials — a model the
-//! router could have routed the role to, from the same connected inventory
-//! — and the task's head with two designs, to the door. The design request
-//! is filed in the route-outcome ledger as tax ([`RouteTaxCall::Challenger`]),
-//! which the learner already skips, so a paragraph never teaches the router.
+//! What leaves the machine: the head of the task, as the door clears it,
+//! and one design, to the challenger, on the person's own provider
+//! credentials — a model the router could have routed the role to, from the
+//! same connected inventory — and the task's head with two designs, to the
+//! door. The design request is filed in the route-outcome ledger as tax
+//! ([`RouteTaxCall::Challenger`]), which the learner already skips, so a
+//! paragraph never teaches the router.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -65,12 +76,11 @@ use zerocode_core::jev::challenger::{
     COST_MICROS, INCUMBENT_MODEL, ROLE,
 };
 use zerocode_core::jev::door::Refused;
-use zerocode_core::jev::promote;
-use zerocode_core::jev::summary::{LABEL, OUTCOME};
+use zerocode_core::jev::summary::{AGREED, LABEL, OUTCOME};
 use zerocode_core::jev::{
-    count, digest_of, door, fingerprint_of, Cap, JevMode, CHALLENGER, CHALLENGER_APPLY_DEADLINE_MS,
+    count, digest_of, door, fingerprint_of, JevMode, CHALLENGER, CHALLENGER_APPLY_DEADLINE_MS,
     CHALLENGER_DESIGN_BYTE_CAP, CHALLENGER_DESIGN_CAP, CHALLENGER_DESIGN_MAX_TOKENS,
-    CHALLENGER_DESIGN_WALL_MS, CHALLENGER_TASK_CHAR_CAP,
+    CHALLENGER_DESIGN_WALL_MS,
 };
 
 use super::jev_gate::{self, JevDoor};
@@ -157,7 +167,7 @@ pub(crate) struct AttemptFacts {
 }
 
 impl AttemptFacts {
-    fn attempt(&self) -> Attempt<'_> {
+    pub(crate) fn attempt(&self) -> Attempt<'_> {
         Attempt {
             key: &self.key,
             role: self.role.as_deref().unwrap_or_default(),
@@ -178,7 +188,10 @@ impl AttemptFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DesignRequest {
     pub model: String,
-    /// The head of the task ([`CHALLENGER_TASK_CHAR_CAP`] characters).
+    /// The head of the task exactly as the seat's door cleared it the
+    /// moment before it left ([`cleared_task`]): every line that may carry a
+    /// credential withheld, cut to [`zerocode_core::jev::CHALLENGER_TASK_CHAR_CAP`]
+    /// characters. No other words of the person's are in a design request.
     pub task_head: String,
     pub effort: Option<api::EffortLevel>,
     pub max_tokens: u32,
@@ -284,11 +297,28 @@ impl Designer for WireDesigner {
     }
 }
 
-/// The head of a task as the challenger reads it and the judge is shown
-/// it: the seat's own cap, cut as the door cuts.
-#[must_use]
-pub(crate) fn task_head(task: &str) -> String {
-    door::cut(task, Cap::Chars(CHALLENGER_TASK_CHAR_CAP))
+/// The key a request body keeps what the seat's `sends` describe under —
+/// the `/state/…` of every pointer in the seat's row.
+const STATE_KEY: &str = "state";
+
+/// The head of `task` as it may leave for the challenger's provider, asked
+/// of `door` as it stands: the seat's own door and the seat's own row, so
+/// the words a design request carries are cleared exactly as the
+/// comparison's are — the key, the switch, the workspace's consent and the
+/// day's budget asked, every line that may carry a credential withheld
+/// (the one table every such road reads), the rest cut to the task's cap.
+/// Nothing is counted in the day: the request goes to the person's own
+/// provider, not to the judge. Answers the words and how many lines were
+/// withheld from them.
+///
+/// # Errors
+/// The door's refusal: nothing may leave.
+pub(crate) fn cleared_task(door: &JevDoor, key: bool, task: &str) -> Result<(String, usize), Refused> {
+    let body = json!({ STATE_KEY: { arm::STATE_KEYS[0]: task } });
+    let cleared = door.clear(&CHALLENGER, key, body)?;
+    let body: Value = serde_json::from_slice(cleared.bytes()).unwrap_or(Value::Null);
+    let words = body[STATE_KEY][arm::STATE_KEYS[0]].as_str().unwrap_or_default().to_string();
+    Ok((words, cleared.withheld_lines()))
 }
 
 /// What a design of `task_head` is expected to cost at `price`, as the
@@ -313,17 +343,26 @@ pub(crate) fn expected_comparison_micros(rate: &SystemOneRate, empty_request_byt
     arm::expected_micros(u64::try_from(bound).unwrap_or(u64::MAX), 0, rate.input, 0.0)
 }
 
-/// What the comparison cost at `rate`: the input the judge reported, or —
-/// for a request that left and reported nothing — the bytes that left, a
-/// byte a token; nothing for one the door never let out.
+/// What the comparison cost at `rate`, one send at a time: the send the
+/// judge answered at the input it reported, and every other send that left
+/// — a failed try the wire re-sent, a request that never came back — at the
+/// bytes that left, a byte a token. A send whose bill nobody reported is
+/// charged what it could have cost, never nothing: whether a refused or
+/// failed request is billed is the vendor's to say, and it does not say.
+/// Nothing for a comparison the door never let out. The reservation is one
+/// request's ceiling, so a comparison the wire had to re-send settles above
+/// it, and the next draw's share reads what it cost.
 #[must_use]
 fn settled_comparison_micros(rate: &SystemOneRate, wire: &Wire) -> u64 {
     if wire.requests == 0 {
         return 0;
     }
-    let tokens = wire
-        .input_tokens
-        .unwrap_or_else(|| u64::try_from(wire.sent_bytes).unwrap_or(u64::MAX));
+    let sent = u64::try_from(wire.sent_bytes).unwrap_or(u64::MAX);
+    let (answered, unreported) = match wire.input_tokens {
+        Some(tokens) => (tokens, wire.requests - 1),
+        None => (0, wire.requests),
+    };
+    let tokens = answered.saturating_add(sent.saturating_mul(u64::from(unreported)));
     arm::expected_micros(tokens, 0, rate.input, 0.0)
 }
 
@@ -512,6 +551,7 @@ fn touched_since(path: &Path, start_ms: u64) -> bool {
 /// lock — so two attempts drawn in the same moment cannot each see a share
 /// with room for one and both take it.
 pub(crate) struct Reservation {
+    day: String,
     path: PathBuf,
 }
 
@@ -520,45 +560,79 @@ impl Reservation {
     #[must_use]
     pub(crate) fn for_day(config_home: &Path, day: &str) -> Self {
         Self {
+            day: day.to_string(),
             path: spend::spend_path(config_home, day),
         }
     }
 
-    /// The day's book as it stands.
+    /// The day's book as it stands: `None` when it cannot be read — which
+    /// is not an empty day.
+    #[cfg(test)]
     #[must_use]
-    pub(crate) fn book(&self) -> Book {
-        spend::fold(&std::fs::read_to_string(&self.path).unwrap_or_default())
+    pub(crate) fn book(&self) -> Option<Book> {
+        self.text().ok().map(|text| spend::fold(&text))
+    }
+
+    /// The book's lines: none for a day nothing has been written in yet,
+    /// and an error for a book that is there and cannot be read.
+    fn text(&self) -> io::Result<String> {
+        match std::fs::read_to_string(&self.path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            read => read,
+        }
     }
 
     /// Read the book, ask the share, and reserve `expected` for `attempt` if
     /// it fits — one critical section, under the cross-process lock the
-    /// settings file already uses ([`runtime::SettingsFileLock`]), so the
-    /// read and the write are one step. `other_micros` is the day's spend
-    /// outside the arm, summed by the caller before the lock is taken. The
-    /// first reservation of a day forgets the books of earlier days.
+    /// settings file already uses ([`runtime::SettingsFileLock`], which takes
+    /// a lock back from an owner that died holding it), so the read and the
+    /// write are one step. `other_micros` is the day's spend outside the arm,
+    /// summed by the caller for this book's day before the lock is taken.
+    ///
+    /// The day is asked again under the lock (`clock`): a draw that read its
+    /// day before midnight and reaches the book after it would be charging a
+    /// day that has ended against a spend summed for it, so it refuses —
+    /// the day that began has its own share, which nothing was summed for.
+    /// The first reservation of a day forgets the books of earlier days that
+    /// nothing will settle into again ([`spend::forget_settled_days`]), and
+    /// never a later day's.
     ///
     /// # Errors
     /// [`Held::Retry`] for an attempt the book already names — a second
     /// opening of the same attempt is not a second draw; [`Held::DayBudget`]
-    /// when the share has no room, or the lock or the file could not be
-    /// taken — a budget that cannot be kept refuses.
-    pub(crate) fn reserve(&self, attempt: &str, expected: u64, other_micros: u64) -> Result<Book, Held> {
+    /// when the share has no room, the day has moved on, or the lock or the
+    /// book could not be taken or read — a budget that cannot be kept
+    /// refuses, and a book that cannot be read is not an empty day.
+    pub(crate) fn reserve(
+        &self,
+        attempt: &str,
+        expected: u64,
+        other_micros: u64,
+        clock: &dyn Fn() -> Today,
+    ) -> Result<Book, Held> {
         let _lock = runtime::SettingsFileLock::acquire(&self.path).map_err(|_| Held::DayBudget)?;
-        let first_of_the_day = !self.path.exists();
-        let text = std::fs::read_to_string(&self.path).unwrap_or_default();
+        if clock().day != self.day {
+            return Err(Held::DayBudget);
+        }
+        let text = self.text().map_err(|_| Held::DayBudget)?;
         if spend::names(&text, attempt) {
             return Err(Held::Retry);
         }
-        let day = spend::day_spend(&spend::fold(&text), other_micros);
+        let before = spend::fold(&text);
+        let day = spend::day_spend(&before, other_micros);
         if !arm::within_day_budget(&day, expected) {
             return Err(Held::DayBudget);
         }
         self.append(&spend::line(attempt, Op::Reserve, expected))
             .map_err(|_| Held::DayBudget)?;
-        if first_of_the_day {
-            spend::forget_other_days(&self.path);
+        if text.is_empty() {
+            spend::forget_settled_days(&self.path);
         }
-        Ok(self.book())
+        Ok(Book {
+            reserved_micros: before.reserved_micros.saturating_add(expected),
+            reserved: before.reserved.saturating_add(1),
+            ..before
+        })
     }
 
     /// Settle `attempt` at what it cost. Appends only: a settlement checks
@@ -595,10 +669,17 @@ pub(crate) struct Arm {
 
 pub(crate) type Clock = Box<dyn Fn() -> Today + Send + Sync>;
 
+/// The person's mode word for the seat, as it stands at the moment it is
+/// read — `None` when the settings cannot be read, which is off.
+pub(crate) type ModeWord = Box<dyn Fn() -> Option<JevMode> + Send + Sync>;
+
 struct Inner {
     cwd: PathBuf,
     config_home: PathBuf,
-    mode: Option<JevMode>,
+    /// Read at the attempt's start, again before a design leaves, again
+    /// before a comparison does, and again before a sample is written: a
+    /// word taken back mid-draw stops everything that has not left yet.
+    mode: ModeWord,
     designer: Arc<dyn Designer>,
     inventory: Box<dyn Fn(&str) -> ModelInventory + Send + Sync>,
     discovered: Vec<String>,
@@ -625,8 +706,9 @@ impl Arm {
     /// mode word and nothing else.
     #[must_use]
     pub(crate) fn live(cwd: &Path) -> Self {
-        let mode = jev_challenger_mode_from(&runtime::ConfigLoader::default_for(cwd));
-        let discovered = if mode.is_some_and(JevMode::asks) {
+        let mode_cwd = cwd.to_path_buf();
+        let mode: ModeWord = Box::new(move || jev_challenger_mode_from(&runtime::ConfigLoader::default_for(&mode_cwd)));
+        let discovered = if mode().is_some_and(JevMode::asks) {
             runtime::model_discovery::current()
                 .map(|catalog| {
                     runtime::model_discovery::new_models(&catalog)
@@ -661,7 +743,6 @@ impl Arm {
     /// machine.
     #[cfg(test)]
     pub(crate) fn with(scene: Scene) -> Self {
-        let inventory = scene.inventory;
         Self {
             inner: Arc::new(Inner {
                 prompt_cache_roots: vec![scene.config_home.join("cache").join("prompt-cache")],
@@ -669,7 +750,7 @@ impl Arm {
                 config_home: scene.config_home,
                 mode: scene.mode,
                 designer: scene.designer,
-                inventory: Box::new(move |_| inventory.clone()),
+                inventory: scene.inventory,
                 discovered: Vec::new(),
                 price_of: tests::priced,
                 judge_rate_of: api::systemone_rate,
@@ -692,6 +773,12 @@ impl Arm {
         (self.inner.clock)().now_ms
     }
 
+    /// The person's word for the seat as it stands now, when it asks
+    /// anything at all.
+    fn asking_now(&self) -> Option<JevMode> {
+        (self.inner.mode)().filter(|mode| mode.asks())
+    }
+
     /// The attempt's start, on the spawn's own thread: the mode word and the
     /// cheap holds, and — for an attempt that clears them — the draw handed
     /// to a thread of its own. `None` for an attempt the arm does nothing
@@ -700,7 +787,7 @@ impl Arm {
     /// the arm never touches unless its attempt drew — one row per drawn
     /// attempt, never one per spawn.
     pub(crate) fn open(&self, facts: AttemptFacts) -> Option<Drawn> {
-        let mode = self.inner.mode.filter(|mode| mode.asks())?;
+        self.asking_now()?;
         let attempt = facts.attempt();
         if let Err(held) = arm::eligible(&attempt) {
             if held != Held::NotDrawn && arm::draws(attempt.key) {
@@ -717,14 +804,16 @@ impl Arm {
         Some(Drawn {
             arm: self.clone(),
             facts,
-            mode,
             work,
         })
     }
 
-    /// Everything after the cheap holds, off the spawn's thread: the door's
-    /// word, the challenger, the price, the share, and the design itself.
-    /// `None` for a draw the arm held — its word is already in the ledger.
+    /// Everything after the cheap holds, off the spawn's thread: the words
+    /// the door would let out, the challenger, the price, the share, and —
+    /// the person's word and the door asked once more as they stand at that
+    /// moment — the design itself. `None` for a draw the arm held or the
+    /// door refused: its word is already in the ledger, and a reservation it
+    /// took is released.
     fn draw(&self, facts: &AttemptFacts) -> Option<Designed> {
         let attempt = facts.attempt();
         let at = unix_millis_i64(self.now_ms());
@@ -732,19 +821,22 @@ impl Arm {
             self.write(&arm::held_row(&attempt, why, at));
             None
         };
-        let door = (self.inner.door)();
-        let client = (self.inner.client)();
-        if let Err(refused) = door.would_admit(&CHALLENGER, client.is_some()) {
+        let refuse = |refused: Refused| {
             self.write(&refused_row(&attempt, &facts.incumbent_model, refused, self.now_ms()));
-            return None;
-        }
+            None
+        };
+        let door = (self.inner.door)();
+        let (task_head, _) = match cleared_task(&door, (self.inner.client)().is_some(), &facts.task) {
+            Ok(cleared) => cleared,
+            Err(refused) => return refuse(refused),
+        };
         let Some(judge_rate) = (self.inner.judge_rate_of)(door.model()) else {
             return hold(Held::Unpriced);
         };
         let role = RouteRole::from_key(attempt.role)?;
-        let records = runtime::read_route_outcomes(&self.inner.cwd).unwrap_or_default();
-        let inventory = (self.inner.inventory)(&facts.incumbent_model);
         let today = (self.inner.clock)();
+        let records = learning_records_in(&self.inner.cwd, || (self.inner.mode)(), today.now_ms / 1_000);
+        let inventory = (self.inner.inventory)(&facts.incumbent_model);
         let (challenger, price) = match pick_challenger(
             &inventory,
             &records,
@@ -757,16 +849,29 @@ impl Arm {
             Ok(picked) => picked,
             Err(why) => return hold(why),
         };
-        let task_head = task_head(&facts.task);
         let design_expected = expected_design_micros(&price, &task_head);
         let empty = arm::ask(&facts.key, &task_head, &Designs { incumbent: "", challenger: "" });
         let comparison_expected = expected_comparison_micros(&judge_rate, request_body(&empty).to_string().len());
         let expected = design_expected.saturating_add(comparison_expected);
         let other_micros = day_request_micros(&self.inner.prompt_cache_roots, today.start_ms, self.inner.price_of);
         let reservation = Reservation::for_day(&self.inner.config_home, &today.day);
-        if let Err(why) = reservation.reserve(&facts.key, expected, other_micros) {
+        if let Err(why) = reservation.reserve(&facts.key, expected, other_micros, &*self.inner.clock) {
             return hold(why);
         }
+        // The moment before the design leaves: the person's word and the door
+        // as they stand now — a draw is a pick and a reservation older than
+        // the words it is about to send — and only what that door cleared.
+        let leaving = match self.asking_now() {
+            Some(_) => cleared_task(&(self.inner.door)(), (self.inner.client)().is_some(), &facts.task),
+            None => Err(Refused::Off),
+        };
+        let task_head = match leaving {
+            Ok((words, _)) => words,
+            Err(refused) => {
+                reservation.release(&facts.key);
+                return refuse(refused);
+            }
+        };
         let request = DesignRequest {
             model: challenger.clone(),
             task_head: task_head.clone(),
@@ -780,9 +885,6 @@ impl Arm {
             return hold(Held::NoDesign);
         }
         Some(Designed {
-            door,
-            client,
-            judge_rate,
             challenger,
             price,
             design_expected,
@@ -799,23 +901,25 @@ impl Arm {
 pub(crate) struct Scene {
     pub cwd: PathBuf,
     pub config_home: PathBuf,
-    pub mode: Option<JevMode>,
+    pub mode: ModeWord,
     pub designer: Arc<dyn Designer>,
-    pub inventory: ModelInventory,
+    /// Read when the draw picks its challenger — after the words were first
+    /// cleared, before the share is reserved and the design leaves.
+    pub inventory: Box<dyn Fn(&str) -> ModelInventory + Send + Sync>,
     pub door: Box<dyn Fn() -> JevDoor + Send + Sync>,
     pub client: Box<dyn Fn() -> Option<SystemOneClient> + Send + Sync>,
     pub clock: Clock,
 }
 
-/// A draw that bought a design: what the comparison and the settlement need.
+/// A draw that bought a design: what the comparison and the settlement
+/// need. No door, key or word of the person's is kept here — the comparison
+/// asks them again when it is made.
 struct Designed {
-    door: JevDoor,
-    client: Option<SystemOneClient>,
-    judge_rate: SystemOneRate,
     challenger: String,
     price: ModelPrice,
     design_expected: u64,
     expected: u64,
+    /// The words the design request carried, as the door cleared them.
     task_head: String,
     /// The day the share was charged in — where the settlement goes, even
     /// when it lands after midnight.
@@ -829,7 +933,6 @@ struct Designed {
 pub(crate) struct Drawn {
     arm: Arm,
     facts: AttemptFacts,
-    mode: JevMode,
     work: JoinHandle<Option<Designed>>,
 }
 
@@ -842,40 +945,47 @@ impl Drawn {
             .spawn(move || self.finish(incumbent_design));
     }
 
-    /// Join the draw; put the two designs to the judge under no name; settle
-    /// the share at what the design and the comparison cost; write the row;
-    /// and label whatever receipts are already in. On the calling thread —
-    /// the seam a test holds to await the row.
+    /// Join the draw; ask the person's word, the door and the key as they
+    /// stand now, a first turn after the draw read them; put the two designs
+    /// to the judge under no name; settle the share at what the design and
+    /// the comparison cost; write the row; and label whatever receipts are
+    /// already in, writing samples only as the seat stands now. A design
+    /// that left and cannot be compared — the word taken back, consent
+    /// withdrawn, the judge's model no longer priced — is settled at what it
+    /// cost, and nothing more is sent. On the calling thread — the seam a
+    /// test holds to await the row.
     pub(crate) fn finish(self, incumbent_design: Option<String>) {
-        let Ok(Some(designed)) = self.work.join() else {
+        let Self { arm, facts, work } = self;
+        let Ok(Some(designed)) = work.join() else {
             return;
         };
-        let arm = &self.arm;
-        let attempt = self.facts.attempt();
+        let arm = &arm;
         let reservation = Reservation::for_day(&arm.inner.config_home, &designed.day);
         let design_cost = settled_design_micros(&designed.price, &designed.reply, designed.design_expected);
-        let now_ms = arm.now_ms();
         let (Some(incumbent), Some(challenger)) = (incumbent_design, designed.reply.text.as_deref()) else {
-            reservation.settle(&self.facts.key, design_cost);
-            let mut row = arm::held_row(&attempt, Held::NoDesign, unix_millis_i64(now_ms));
-            row[INCUMBENT_MODEL.canonical] = Value::from(self.facts.incumbent_model.as_str());
-            row[CHALLENGER_MODEL.canonical] = Value::from(designed.challenger.as_str());
-            row[COST_MICROS.canonical] = Value::from(design_cost);
-            arm.write(&row);
+            held_after_the_design(arm, &facts, &reservation, &designed, Held::NoDesign, design_cost);
+            return;
+        };
+        let door = (arm.inner.door)();
+        let Some(judge_rate) = (arm.inner.judge_rate_of)(door.model()) else {
+            held_after_the_design(arm, &facts, &reservation, &designed, Held::Unpriced, design_cost);
             return;
         };
         let designs = Designs {
             incumbent: &incumbent,
             challenger,
         };
-        let asked = arm::ask(&self.facts.key, &designed.task_head, &designs);
-        let wire = compare(&designed.door, designed.client.as_ref(), &asked);
-        let cost = design_cost.saturating_add(settled_comparison_micros(&designed.judge_rate, &wire));
-        reservation.settle(&self.facts.key, cost);
+        let asked = arm::ask(&facts.key, &designed.task_head, &designs);
+        let wire = match arm.asking_now() {
+            Some(_) => compare(&door, (arm.inner.client)().as_ref(), &asked),
+            None => Wire::silent(Refused::Off.token().to_string()),
+        };
+        let cost = design_cost.saturating_add(settled_comparison_micros(&judge_rate, &wire));
+        reservation.settle(&facts.key, cost);
         let comparison = Comparison {
-            attempt: &self.facts.key,
-            role: attempt.role,
-            incumbent_model: &self.facts.incumbent_model,
+            attempt: &facts.key,
+            role: facts.attempt().role,
+            incumbent_model: &facts.incumbent_model,
             challenger_model: &designed.challenger,
             expected_micros: designed.expected,
             cost_micros: cost,
@@ -899,10 +1009,28 @@ impl Drawn {
             comparison: comparison.columns(),
         };
         arm.write(&row);
-        let ledger = arm.ledger();
-        let _ = judge_seat_ledger(&CHALLENGER, &ledger, unix_millis_i64(now_ms));
-        let _ = note_verdicts_in(&arm.inner.cwd, &ledger, self.mode);
+        let cwd = &arm.inner.cwd;
+        let _ = judge_seat_ledger(&CHALLENGER, &arm.ledger(), unix_millis_i64(arm.now_ms()));
+        let _ = note_verdicts_in(cwd, (arm.inner.mode)(), &|sample| runtime::record_route_outcome(cwd, sample));
     }
+}
+
+/// A design that left and will not be compared: settled at what it cost,
+/// and its word written beside the two models and the price.
+fn held_after_the_design(
+    arm: &Arm,
+    facts: &AttemptFacts,
+    reservation: &Reservation,
+    designed: &Designed,
+    why: Held,
+    cost: u64,
+) {
+    reservation.settle(&facts.key, cost);
+    let mut row = arm::held_row(&facts.attempt(), why, unix_millis_i64(arm.now_ms()));
+    row[INCUMBENT_MODEL.canonical] = Value::from(facts.incumbent_model.as_str());
+    row[CHALLENGER_MODEL.canonical] = Value::from(designed.challenger.as_str());
+    row[COST_MICROS.canonical] = Value::from(cost);
+    arm.write(&row);
 }
 
 fn unix_millis_i64(now_ms: u64) -> i64 {
@@ -1024,7 +1152,7 @@ impl Wire {
 /// The request body a comparison is asked with, before the door clears it.
 fn request_body(asked: &arm::ComparisonAsk) -> Value {
     json!({
-        "state": asked.state,
+        STATE_KEY: asked.state,
         "model": SYSTEMONE_MODEL,
         "questions": asked.questions,
     })
@@ -1106,28 +1234,86 @@ pub(crate) fn first_design_text(assistant_messages: &[ConversationMessage]) -> O
     None
 }
 
+/* ---- the source a receipt is about --------------------------------------- */
+
+/// Whether an attempt's own run row should name the source it handed in
+/// ([`source_of`]): the draw picked it and it cleared every cheap hold — the
+/// only attempts a comparison is ever made for — and the seat asks. The pure
+/// questions first and the settings only then, so an off seat's rows stay
+/// as they were, to the byte, and cost nothing to leave so; a tree is
+/// written for no attempt the arm held.
+#[must_use]
+pub(crate) fn hands_in_a_source(cwd: &Path, facts: &AttemptFacts) -> bool {
+    arm::eligible(&facts.attempt()).is_ok() && asks_in(cwd)
+}
+
+/// Whether a verdict about `attempt` should name the source its verifier
+/// saw: the seat asks and its ledger holds a comparison of that attempt —
+/// the one kind of row a receipt is read for. Pure first, the settings
+/// next, the ledger last.
+#[must_use]
+pub(crate) fn judges_a_source(cwd: &Path, attempt: &str) -> bool {
+    arm::draws(attempt)
+        && asks_in(cwd)
+        && read_shadow_rows::<Value>(&challenger_path(cwd)).iter().any(|row| {
+            OUTCOME.read(row).is_some() && ATTEMPT.read(row).and_then(Value::as_str) == Some(attempt)
+        })
+}
+
+/// Whether the person's word for the seat under `cwd` asks anything.
+fn asks_in(cwd: &Path) -> bool {
+    jev_challenger_mode_from(&runtime::ConfigLoader::default_for(cwd)).is_some_and(JevMode::asks)
+}
+
+/// The source state of the work under `work_dir`: the git tree of its whole
+/// working state — tracked, changed and new files alike, written the way
+/// the undo snapshot writes it (`runtime::git_snapshot::compute_worktree_tree`) — or
+/// `None` outside a repository or when git cannot say. What an attempt hands
+/// in and what a verifier sees, in one spelling, so a receipt can hold the
+/// two to be the same work ([`receipt_for`]).
+#[must_use]
+pub fn source_of(work_dir: &Path) -> Option<String> {
+    let root = runtime::git_snapshot::read_git_root(work_dir)?;
+    runtime::git_snapshot::compute_worktree_tree(&root).ok()
+}
+
 /* ---- the receipt and the label ----------------------------------------- */
 
-/// The verification loop's word on `attempt`'s work, read off the
-/// route-outcome ledger: the first settled `verdict` about that attempt —
-/// a verifier's pass or failure of the WORK, never the verifier's own fault
-/// and never a verifier that settled nothing. Completion is not here: a
-/// spawn's own `completed` row is not a verdict.
+/// What the verification loop said of `attempt`'s work, read off the
+/// route-outcome ledger, and the source it said it of: the first settled
+/// `verdict` about that attempt whose verifier saw the very source the
+/// attempt handed in — the source the attempt's own run row names. A
+/// verifier's pass or failure of the WORK: never the verifier's own fault,
+/// never a verifier that settled nothing, and never a verdict about another
+/// source of the same attempt or about a source nobody named — what a
+/// verdict judged is half of what it says, and a verdict that cannot say it
+/// judged this work is no receipt for it. Completion is not here: a spawn's
+/// own `completed` row is not a verdict.
 #[must_use]
-pub(crate) fn receipt_for(records: &[RouteOutcomeRecord], attempt: &str) -> Option<Receipt> {
+pub(crate) fn receipt_for(records: &[RouteOutcomeRecord], attempt: &str) -> Option<(Receipt, String)> {
+    let of_the_attempt = |record: &&RouteOutcomeRecord| record.run_id.as_deref() == Some(attempt);
+    let handed_in = records
+        .iter()
+        .filter(of_the_attempt)
+        .filter(|record| record.decision_kind() == DecisionKind::Model && record.signal.is_none())
+        .find_map(|record| record.source.as_deref())?;
     let mut verdicts: Vec<&RouteOutcomeRecord> = records
         .iter()
-        .filter(|record| record.run_id.as_deref() == Some(attempt))
+        .filter(of_the_attempt)
         .filter(|record| record.signal.as_deref() == Some(VERDICT_SIGNAL))
         .filter(|record| record.decision_kind() == DecisionKind::Verify)
         .filter(|record| record.verdict_subject_kind() == VerdictSubject::Work)
+        .filter(|record| record.source.as_deref() == Some(handed_in))
         .collect();
     verdicts.sort_by_key(|record| record.recorded_at);
-    verdicts.into_iter().find_map(|record| match record.status.as_str() {
-        runtime::OUTCOME_COMPLETED => Some(Receipt::Passed),
-        runtime::OUTCOME_FAILED => Some(Receipt::Failed),
-        _ => None,
-    })
+    verdicts
+        .into_iter()
+        .find_map(|record| match record.status.as_str() {
+            runtime::OUTCOME_COMPLETED => Some(Receipt::Passed),
+            runtime::OUTCOME_FAILED => Some(Receipt::Failed),
+            _ => None,
+        })
+        .map(|receipt| (receipt, handed_in.to_string()))
 }
 
 /// The `signal` word a verdict row carries, as the attribution recorders
@@ -1149,13 +1335,14 @@ pub(crate) struct Labelled {
 }
 
 /// The label rows due on `rows`: one per answered comparison whose attempt
-/// has a receipt and no label yet. Pure; the caller appends them.
+/// has a receipt and no label yet, carrying the source the receipt judged.
+/// Pure; the caller appends them.
 #[must_use]
 pub(crate) fn labels_due(
     rows: &[Value],
-    receipt_of: impl Fn(&str) -> Option<Receipt>,
+    receipt_of: impl Fn(&str) -> Option<(Receipt, String)>,
     now_ms: i64,
-) -> Vec<(Value, Labelled)> {
+) -> Vec<Value> {
     let mut labelled: std::collections::BTreeSet<&str> = rows
         .iter()
         .filter_map(|row| LABEL.read(row).and_then(Value::as_str))
@@ -1175,34 +1362,51 @@ pub(crate) fn labels_due(
         else {
             continue;
         };
-        let Some(receipt) = receipt_of(attempt) else {
+        let Some((receipt, source)) = receipt_of(attempt) else {
             continue;
         };
         labelled.insert(attempt);
-        let graded = arm::quality(Some(receipt), preferred);
-        let text = |key: &zerocode_core::jev::summary::LedgerKey| {
-            key.read(row).and_then(Value::as_str).unwrap_or_default().to_string()
-        };
-        due.push((
-            arm::label_row(attempt, receipt, preferred, now_ms),
-            Labelled {
+        due.push(arm::label_row(attempt, receipt, preferred, &source, now_ms));
+    }
+    due
+}
+
+/// Every labelled comparison in `rows`: each label row read beside the
+/// request row it names — the role and the two models from the request,
+/// the challenger's word and the agreement from the label. A label naming
+/// no request in the ledger says nothing.
+#[must_use]
+pub(crate) fn labelled_in(rows: &[Value]) -> Vec<Labelled> {
+    let requests: std::collections::BTreeMap<&str, &Value> = rows
+        .iter()
+        .filter(|row| OUTCOME.read(row).is_some())
+        .filter_map(|row| ATTEMPT.read(row).and_then(Value::as_str).map(|attempt| (attempt, row)))
+        .collect();
+    rows.iter()
+        .filter_map(|label| {
+            let attempt = LABEL.read(label).and_then(Value::as_str)?;
+            let request = requests.get(attempt)?;
+            let text = |key: &zerocode_core::jev::summary::LedgerKey| {
+                key.read(request).and_then(Value::as_str).unwrap_or_default().to_string()
+            };
+            Some(Labelled {
                 attempt: attempt.to_string(),
                 role: text(&ROLE),
                 incumbent: text(&INCUMBENT_MODEL),
                 challenger: text(&CHALLENGER_MODEL),
-                won: graded.won,
-                agreed: graded.agreed,
-            },
-        ));
-    }
-    due
+                won: arm::WON.read(label).and_then(Value::as_bool).unwrap_or(false),
+                agreed: AGREED.read(label).and_then(Value::as_bool),
+            })
+        })
+        .collect()
 }
 
 /// Whether the arm may move a role's model right now: the seat acts (a
 /// person's `on`, or an `auto` its own ledger has raised to applying — the
 /// standing, read back from the transitions, not this window's verdict) AND
 /// the challenger's record for the role passes the incumbent's own learned
-/// rate. Either alone moves nothing.
+/// rate. Either alone moves nothing. The one line a sample is written on
+/// ([`note_verdicts_in`]) and read on ([`admit_samples`]).
 #[must_use]
 pub(crate) fn may_move(
     mode: JevMode,
@@ -1218,6 +1422,49 @@ pub(crate) fn may_move(
         return false;
     };
     arm::standing(rows, &labelled.role, &labelled.challenger).passes(rate)
+}
+
+/// The mode word a seat acts under right now, and whether its `auto` stands
+/// raised — read back from its ledger's transitions by the one reader every
+/// seat's standing is read with ([`runtime::jev_seat_applies`]), and only for
+/// an `auto`, the one word the standing decides. `None` for a seat that asks
+/// nothing, or acts on nothing.
+fn acting_now(cwd: &Path, mode: Option<JevMode>) -> Option<(JevMode, bool)> {
+    let mode = mode.filter(|mode| mode.asks())?;
+    let raised = mode.automatic() && runtime::jev_seat_applies(cwd, &CHALLENGER);
+    mode.applies_with(raised).then_some((mode, raised))
+}
+
+/// The incumbent's own learned rate for the labelled comparison's role:
+/// read from `records` as the learner weighs them — the arm's samples
+/// unadmitted, so the bar is the incumbent's own runs, never the evidence it
+/// is the bar for.
+fn incumbent_rate(records: &[RouteOutcomeRecord], labelled: &Labelled, now_secs: u64) -> Option<f64> {
+    let role = RouteRole::from_key(&labelled.role)?;
+    runtime::learned_rate(records, now_secs, role, &labelled.incumbent, super::canonicalize_route_model_id)
+}
+
+/// The labelled comparisons of `rows` the seat stands behind now: [`may_move`]
+/// asked once for each role, incumbent and challenger the labels name — a
+/// reading of the whole ledger and the whole outcome log each, so once per
+/// pair and not once per label.
+fn stood_behind(
+    acting: JevMode,
+    raised: bool,
+    rows: &[Value],
+    records: &[RouteOutcomeRecord],
+    now_secs: u64,
+) -> Vec<Labelled> {
+    let mut asked: std::collections::BTreeMap<(String, String, String), bool> = std::collections::BTreeMap::new();
+    labelled_in(rows)
+        .into_iter()
+        .filter(|labelled| {
+            let pair = (labelled.role.clone(), labelled.incumbent.clone(), labelled.challenger.clone());
+            *asked.entry(pair).or_insert_with(|| {
+                may_move(acting, raised, rows, labelled, incumbent_rate(records, labelled, now_secs))
+            })
+        })
+        .collect()
 }
 
 /// The verified sample a labelled comparison becomes when the arm acts —
@@ -1252,74 +1499,156 @@ pub(crate) fn sample_of(labelled: &Labelled) -> Option<RouteOutcomeRecord> {
     })
 }
 
-/// Whether `attempt`'s sample is already in the ledger.
-fn already_fed(records: &[RouteOutcomeRecord], attempt: &str) -> bool {
-    let key = sample_attempt_key(attempt);
-    records.iter().any(|record| record.run_id.as_deref() == Some(key.as_str()))
-}
-
-/// Label every comparison of `cwd`'s whose receipt is in, and — where the
-/// arm acts — write its sample. Called where a verdict is recorded and
-/// where a comparison's row is written, so a receipt that came before the
-/// row and one that comes after both land. Answers how many labels were
+/// Bring the route-outcome ledger's samples up to what the seat stands
+/// behind now: one sample for every labelled comparison whose receipt and
+/// judge agree ([`sample_of`]), while the seat acts and the challenger's
+/// standing passes ([`may_move`]) — the one already there never written
+/// again, and the one a crash or a refused write left out written now. The
+/// label is the durable fact; the sample follows it, and nothing is ever
+/// taken back — a sample the seat no longer stands behind stays in the
+/// ledger and teaches nothing ([`admit_samples`]). Answers how many were
 /// written.
-#[must_use]
-pub fn note_challenger_verdicts(cwd: &Path) -> usize {
-    let Some(mode) = jev_challenger_mode_from(&runtime::ConfigLoader::default_for(cwd)) else {
+fn feed_samples(
+    cwd: &Path,
+    mode: Option<JevMode>,
+    rows: &[Value],
+    records: &[RouteOutcomeRecord],
+    now_secs: u64,
+    feed: &dyn Fn(&RouteOutcomeRecord) -> io::Result<()>,
+) -> usize {
+    let Some((acting, raised)) = acting_now(cwd, mode) else {
         return 0;
     };
-    if !mode.asks() {
-        return 0;
-    }
-    note_verdicts_in(cwd, &challenger_path(cwd), mode)
-}
-
-/// [`note_challenger_verdicts`] on `ledger` — the seam a test hands a path
-/// of its own. Under the ledger's lock: a verdict landing while a
-/// comparison's row is being written reads the rows once, and one attempt
-/// is labelled once and fed once however many callers race for it.
-pub(crate) fn note_verdicts_in(cwd: &Path, ledger: &Path, mode: JevMode) -> usize {
-    if !ledger.exists() {
-        return 0;
-    }
-    let Ok(_lock) = runtime::SettingsFileLock::acquire(ledger) else {
-        return 0;
-    };
-    let records = runtime::read_route_outcomes(cwd).unwrap_or_default();
-    let mut rows: Vec<Value> = read_shadow_rows(ledger);
-    let now = Today::now();
-    let due = labels_due(&rows, |attempt| receipt_for(&records, attempt), unix_millis_i64(now.now_ms));
-    if due.is_empty() {
-        return 0;
-    }
-    let seat_applies = mode.automatic() && promote::stand_from(&rows) == promote::Stand::Applying;
+    let mut sampled: std::collections::BTreeSet<String> = records
+        .iter()
+        .filter(|record| record.is_seat_sample())
+        .filter_map(|record| record.run_id.clone())
+        .collect();
     let mut written = 0;
-    for (label, labelled) in due {
-        if append_shadow_row(ledger, &label, SHADOW_LEDGER_MAX_BYTES).is_err() {
-            continue;
-        }
-        written += 1;
-        rows.push(label);
-        let incumbent_rate = RouteRole::from_key(&labelled.role).and_then(|role| {
-            runtime::learned_rate(
-                &records,
-                now.now_ms / 1_000,
-                role,
-                &labelled.incumbent,
-                super::canonicalize_route_model_id,
-            )
-        });
-        if !may_move(mode, seat_applies, &rows, &labelled, incumbent_rate)
-            || already_fed(&records, &labelled.attempt)
-        {
+    for labelled in stood_behind(acting, raised, rows, records, now_secs) {
+        let key = sample_attempt_key(&labelled.attempt);
+        if sampled.contains(&key) {
             continue;
         }
         if let Some(sample) = sample_of(&labelled) {
-            let _ = runtime::record_route_outcome(cwd, &sample);
+            if feed(&sample).is_ok() {
+                sampled.insert(key);
+                written += 1;
+            }
         }
     }
-    let _ = judge_seat_ledger(&CHALLENGER, ledger, unix_millis_i64(now.now_ms));
     written
+}
+
+/// Label every comparison of `cwd`'s whose receipt is in, and — where the
+/// arm acts now — bring its samples up to date. Called where a verdict is
+/// recorded and where a comparison's row is written, so a receipt that came
+/// before the row and one that comes after both land. Answers how many
+/// labels were written.
+#[must_use]
+pub fn note_challenger_verdicts(cwd: &Path) -> usize {
+    let mode = jev_challenger_mode_from(&runtime::ConfigLoader::default_for(cwd));
+    note_verdicts_in(cwd, mode, &|sample| runtime::record_route_outcome(cwd, sample))
+}
+
+/// [`note_challenger_verdicts`] with the mode word as it stands and the
+/// sample writer handed in — the seam a test hands a refusing writer to.
+/// Under the ledger's lock: a verdict landing while a comparison's row is
+/// being written reads the rows once, one attempt is labelled once, and one
+/// sample is written once however many callers race for it.
+pub(crate) fn note_verdicts_in(
+    cwd: &Path,
+    mode: Option<JevMode>,
+    feed: &dyn Fn(&RouteOutcomeRecord) -> io::Result<()>,
+) -> usize {
+    if !mode.is_some_and(JevMode::asks) {
+        return 0;
+    }
+    let ledger = challenger_path(cwd);
+    if !ledger.exists() {
+        return 0;
+    }
+    let Ok(_lock) = runtime::SettingsFileLock::acquire(&ledger) else {
+        return 0;
+    };
+    let records = runtime::read_route_outcomes(cwd).unwrap_or_default();
+    let mut rows: Vec<Value> = read_shadow_rows(&ledger);
+    let now = Today::now();
+    let mut written = 0;
+    for label in labels_due(&rows, |attempt| receipt_for(&records, attempt), unix_millis_i64(now.now_ms)) {
+        if append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).is_ok() {
+            written += 1;
+            rows.push(label);
+        }
+    }
+    let _fed = feed_samples(cwd, mode, &rows, &records, now.now_ms / 1_000, feed);
+    let _ = judge_seat_ledger(&CHALLENGER, &ledger, unix_millis_i64(now.now_ms));
+    written
+}
+
+/* ---- what the learners read ------------------------------------------------ */
+
+/// Mark which of the arm's samples in `records` the router may learn from
+/// right now ([`RouteOutcomeRecord::admitted`]) — the reading every
+/// learner's records pass through (t-6263; the coordinator's m-7953): a
+/// sample counts while its seat acts NOW and its challenger's standing for
+/// the role passes the incumbent's own learned rate — [`may_move`], the same
+/// line it was written on. Switched off or fallen, none is admitted, and the
+/// router learns as if the arm had never written; raised again, the same
+/// rows count under their own decay. Nothing is removed from the ledger. A
+/// record set with no sample in it asks nothing more, not even the mode
+/// word (`mode_of`).
+pub(crate) fn admit_samples(
+    cwd: &Path,
+    mode_of: impl FnOnce() -> Option<JevMode>,
+    records: &mut [RouteOutcomeRecord],
+    now_secs: u64,
+) {
+    if !records.iter().any(RouteOutcomeRecord::is_seat_sample) {
+        return;
+    }
+    let Some((acting, raised)) = acting_now(cwd, mode_of()) else {
+        return;
+    };
+    let rows: Vec<Value> = read_shadow_rows(&challenger_path(cwd));
+    let behind: std::collections::BTreeSet<String> = stood_behind(acting, raised, &rows, records, now_secs)
+        .into_iter()
+        .map(|labelled| sample_attempt_key(&labelled.attempt))
+        .collect();
+    for record in records.iter_mut().filter(|record| record.is_seat_sample()) {
+        record.admitted = record.run_id.as_deref().is_some_and(|key| behind.contains(key));
+    }
+}
+
+/// The route-outcome ledger of `cwd` as every learner reads it: every row,
+/// the arm's samples admitted only as the seat stands now
+/// ([`admit_samples`]).
+fn learning_records_in(
+    cwd: &Path,
+    mode_of: impl FnOnce() -> Option<JevMode>,
+    now_secs: u64,
+) -> Vec<RouteOutcomeRecord> {
+    let mut records = runtime::read_route_outcomes(cwd).unwrap_or_default();
+    admit_samples(cwd, mode_of, &mut records, now_secs);
+    records
+}
+
+/// `learning_records_in` with the person's own mode word, read only when
+/// the ledger holds a sample, and this machine's clock — what the router's
+/// outcome learning reads (`apply::SmartRouteContext`), and the plan
+/// scorer's shadow.
+///
+/// # Errors
+/// The ledger could not be read.
+pub fn read_learning_outcomes(cwd: &Path) -> io::Result<Vec<RouteOutcomeRecord>> {
+    let mut records = runtime::read_route_outcomes(cwd)?;
+    admit_samples(
+        cwd,
+        || jev_challenger_mode_from(&runtime::ConfigLoader::default_for(cwd)),
+        &mut records,
+        Today::now().now_ms / 1_000,
+    );
+    Ok(records)
 }
 
 #[cfg(test)]

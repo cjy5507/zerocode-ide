@@ -276,7 +276,7 @@ fn weighted_tallies(
 /// The weighted win rate of `model_id` for `role` — the incumbent's own
 /// record, as the learner weighs it — or `None` while the pair has fewer
 /// weighted decisive samples than the learner itself requires before it
-/// says anything ([`MIN_WEIGHTED_DECISIVE_SAMPLES`]).
+/// says anything (`MIN_WEIGHTED_DECISIVE_SAMPLES`).
 ///
 /// This is the line a challenger's standing must clear before its evidence
 /// may move the role's model (`zerocode_core::jev::challenger::Standing::passes`):

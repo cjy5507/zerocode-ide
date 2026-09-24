@@ -354,6 +354,8 @@ fn run_fix_until_verified(
                         true,
                         attribution::VerdictKind::PassFail,
                         runtime::VerdictBasis::Model,
+                        // The reverify's tree is not one this road names.
+                        None,
                     );
                     if let Some(sink) = opts.progress {
                         sink.emit(ProgressEvent::ItemCarried {
@@ -379,6 +381,8 @@ fn run_fix_until_verified(
                             false,
                             attribution::VerdictKind::PassFail,
                             runtime::VerdictBasis::Model,
+                            // The reverify's tree is not one this road names.
+                            None,
                         );
                     }
                     let reason = if repeated {
