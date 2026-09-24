@@ -1022,17 +1022,13 @@ fn is_base64(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
 }
 
-/// `bytes` with every inline payload of at least [`PAYLOAD_ELIDE_MIN`]
-/// base64 bytes set aside: `"data":"<base64>"` becomes `"data":"",
-/// "zerocode_at":"<offset>:<len>"`, the offset counted from the start of the
-/// file (`base` is where `bytes` begins there). A payload is a JSON string
-/// of base64 alone under a `data` or `base64` key, so the text around it
-/// stays valid JSON; a quote inside a string is escaped (`\"`) and never
-/// looks like a key. Borrowed when there is nothing to set aside.
+/// Set aside large base64 strings only in the transcript's image blocks
+/// and its duplicate image file. Tool inputs named `data` or `base64` remain
+/// evidence. The compact candidate is parsed to prove each field's image
+/// context without allocating or parsing the large payload itself.
 #[must_use]
 pub fn elide_payloads(bytes: &[u8], base: u64) -> std::borrow::Cow<'_, [u8]> {
-    let mut out: Option<Vec<u8>> = None;
-    let mut kept = 0;
+    let mut payloads = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
         let Some((key, hit)) = PAYLOAD_KEYS
@@ -1049,24 +1045,90 @@ pub fn elide_payloads(bytes: &[u8], base: u64) -> std::borrow::Cow<'_, [u8]> {
                 .take_while(|byte| is_base64(**byte))
                 .count();
         if end < bytes.len() && bytes[end] == b'"' && end - start >= PAYLOAD_ELIDE_MIN {
-            let out = out.get_or_insert_with(|| Vec::with_capacity(bytes.len() / 4));
-            out.extend_from_slice(&bytes[kept..start]);
-            let offset = base + start as u64;
-            out.extend_from_slice(
-                format!("\",\"{PAYLOAD_AT_KEY}\":\"{offset}:{}", end - start).as_bytes(),
-            );
-            kept = end;
+            payloads.push(start..end);
             at = end + 1;
         } else {
             at = start;
         }
     }
-    match out {
-        Some(mut out) => {
-            out.extend_from_slice(&bytes[kept..]);
-            std::borrow::Cow::Owned(out)
+    if payloads.is_empty() {
+        return std::borrow::Cow::Borrowed(bytes);
+    }
+    let compact = with_payload_places(bytes, base, &payloads);
+    let mut images = std::collections::HashSet::new();
+    for line in compact.split(|byte| *byte == b'\n') {
+        let Ok(row) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        image_payload_places(row.pointer("/message/content"), &mut images);
+        if let Some(file) = row
+            .get("toolUseResult")
+            .filter(|result| result["type"] == "image")
+            .and_then(|result| result.get("file"))
+            && file["type"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("image/"))
+            && let Some(place) = file[PAYLOAD_AT_KEY].as_str()
+        {
+            images.insert(place.to_string());
         }
-        None => std::borrow::Cow::Borrowed(bytes),
+    }
+    let candidates = payloads.len();
+    payloads
+        .retain(|range| images.contains(&format!("{}:{}", base + range.start as u64, range.len())));
+    if payloads.is_empty() {
+        std::borrow::Cow::Borrowed(bytes)
+    } else if payloads.len() == candidates {
+        std::borrow::Cow::Owned(compact)
+    } else {
+        std::borrow::Cow::Owned(with_payload_places(bytes, base, &payloads))
+    }
+}
+
+fn with_payload_places(bytes: &[u8], base: u64, payloads: &[std::ops::Range<usize>]) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(bytes.len() - payloads.iter().map(std::ops::Range::len).sum::<usize>());
+    let mut kept = 0;
+    for range in payloads {
+        out.extend_from_slice(&bytes[kept..range.start]);
+        out.extend_from_slice(
+            format!(
+                "\",\"{PAYLOAD_AT_KEY}\":\"{}:{}",
+                base + range.start as u64,
+                range.len()
+            )
+            .as_bytes(),
+        );
+        kept = range.end;
+    }
+    out.extend_from_slice(&bytes[kept..]);
+    out
+}
+
+fn image_payload_places(
+    parts: Option<&serde_json::Value>,
+    images: &mut std::collections::HashSet<String>,
+) {
+    for part in parts
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match part["type"].as_str() {
+            Some("image") => {
+                let source = &part["source"];
+                if source["type"] == "base64"
+                    && source["media_type"]
+                        .as_str()
+                        .is_some_and(|kind| kind.starts_with("image/"))
+                    && let Some(place) = source[PAYLOAD_AT_KEY].as_str()
+                {
+                    images.insert(place.to_string());
+                }
+            }
+            Some("tool_result") => image_payload_places(part.get("content"), images),
+            _ => {}
+        }
     }
 }
 
@@ -1630,6 +1692,29 @@ mod tests {
         ));
         let quoted = format!(r#"{{"text":"say \"data\":\"{payload}\" here"}}"#);
         assert_eq!(&*elide_payloads(quoted.as_bytes(), 0), quoted.as_bytes());
+    }
+
+    #[test]
+    fn non_image_data_survives_payload_elision_even_beside_an_image() {
+        let payload = "iVBORw0KGgo".repeat(40);
+        for key in ["data", "base64"] {
+            let line = serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "name": "Write", "id": "t1", "input": {key: payload}},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": payload}}
+                ]}
+            }).to_string();
+            let elided = elide_payloads(line.as_bytes(), 0);
+            let row: serde_json::Value = serde_json::from_slice(&elided).expect("JSON");
+            assert_eq!(row["message"]["content"][0]["input"][key], payload);
+            assert_eq!(row["message"]["content"][1]["source"]["data"], "");
+        }
+        let ordinary = serde_json::json!({"data": "a".repeat(PAYLOAD_ELIDE_MIN * 2)}).to_string();
+        assert_eq!(
+            &*elide_payloads(ordinary.as_bytes(), 0),
+            ordinary.as_bytes()
+        );
     }
 
     /// A person's pasted image is on their turn, and a message that is only
