@@ -3285,6 +3285,63 @@ mod tests {
         );
     }
 
+    /// A quote runs past the lines that open with `>`: a line that carries
+    /// the quoted paragraph on without one — a lazy continuation, in
+    /// CommonMark and in the renderer that draws the answer — is still the
+    /// quoted words, and so is one that carries on a quote inside a quote,
+    /// and a fence the quote holds. The quote ends with its paragraph: after
+    /// a blank line the words are the assistant's own again (astra R1c, r3).
+    #[test]
+    fn a_quote_runs_on_through_its_lazy_lines_and_ends_at_a_blank_line() {
+        let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());
+        let five = ["wiki/a", "wiki/b", "wiki/c", "wiki/d", "wiki/e"].map(|slug| hit(slug, "one of five"));
+        let label = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let _read = settle(cwd, "which note answers this (lazy quote)", five.to_vec());
+            let reply = "The page puts it this way:\n\
+                         > the old rule lives in [[wiki/a]], and it\n\
+                         was moved by [[wiki/b]] later.\n\
+                         \n\
+                         > > the note before that one\n\
+                         > > said\n\
+                         [[wiki/c]] was its source,\n\
+                         > ```text\n\
+                         > [[wiki/d]]\n\
+                         > ```\n\
+                         \n\
+                         so I follow [[wiki/e]].";
+            assert!(note_recall_read(cwd, &turn(vec![said(reply)])));
+            labels(cwd).pop().expect("a label row")
+        });
+        let cited: Vec<(&str, bool)> = label.shown.iter().map(|note| (note.slug.as_str(), note.cited)).collect();
+        assert_eq!(
+            cited,
+            [("wiki/a", false), ("wiki/b", false), ("wiki/c", false), ("wiki/d", false), ("wiki/e", true)],
+            "a quote's lazy lines were read as the assistant's own citations"
+        );
+    }
+
+    /// The assistant's own words, block by block, as CommonMark reads an
+    /// answer: a quote's lazy line quotes a path as much as a link, and an
+    /// indented block is code; a line that opens a list item or a heading
+    /// is no lazy line — it ends the quoted paragraph — and neither is one
+    /// after a blank line, so what they cite is the assistant's own
+    /// (astra R1c, r3).
+    #[test]
+    fn own_citations_read_an_answer_the_way_commonmark_renders_it() {
+        let answers: [(&str, &[&str]); 7] = [
+            ("> quoted\nwiki/lazy.md carries the quote on", &[]),
+            ("> > nested\ncarries it on to [[wiki/nested]]", &[]),
+            ("my words\n\n    [[wiki/indented]] is code\n", &[]),
+            ("```\n[[wiki/fenced]]\n```\nthen [[wiki/own]]", &["wiki/own"]),
+            ("> quoted\n- my pick is [[wiki/item]]", &["wiki/item"]),
+            ("> quoted\n# [[wiki/heading]]", &["wiki/heading"]),
+            ("> quoted [[wiki/quoted]]\n\nso [[wiki/after]]", &["wiki/after"]),
+        ];
+        for (answer, cited) in answers {
+            assert_eq!(own_citations(answer), cited, "{answer:?}");
+        }
+    }
+
     /// A ledger replaced by another of the very same length — a restore, a
     /// copy, a cut grown back to the length it had — is another ledger: the
     /// demand a warm reader folded and the standing it read are not the new
@@ -3358,14 +3415,175 @@ mod tests {
         });
     }
 
+    /// One label row's line, as a turn wrote it: shown the seed, which it
+    /// read, and `page`, `opened` or not — the same length for any page
+    /// whose name is as long.
+    fn showing_line(at: u64, page: &str, opened: bool, vault: &Path) -> String {
+        let mut row = hub_unopened(at, vault);
+        row.shown[1].slug = page.to_string();
+        row.shown[1].read = opened;
+        serde_json::to_string(&row).expect("a row") + "\n"
+    }
+
+    /// This project's demand as the seat folds it, warm: the fold this
+    /// process keeps, caught up now — before any setting is read.
+    fn folded(cwd: &Path) -> RecallDemand {
+        let ledger = rerank_shadow_path(cwd);
+        let mut book = demand_book().lock().expect("the fold's book");
+        RecallDemand::clone(&book.entry(ledger.clone()).or_default().catch_up(&ledger, vault_fingerprint()))
+    }
+
+    /// The same ledger's demand read cold, by a reader that never saw it.
+    fn folded_cold(cwd: &Path) -> RecallDemand {
+        recall_demand_from(&labels(cwd), vault_fingerprint())
+    }
+
+    /// Append `text` to `ledger` as a writer appends a row.
+    fn appended(ledger: &Path, text: &str) {
+        let mut file = std::fs::OpenOptions::new().append(true).open(ledger).expect("a ledger to append to");
+        std::io::Write::write_all(&mut file, text.as_bytes()).expect("appended");
+    }
+
+    /// Rewrite `ledger`, which holds `held`, in place — the same file,
+    /// truncated and written again — to `text`, the very length, keeping
+    /// its first row's worth and the row's worth where it ended; then grow
+    /// it by `grown`. Every mark a fold that trusted its birth, its first
+    /// bytes and the row where it stopped would read is the ledger's before
+    /// the rewrite (astra R2, r3).
+    fn rewrite_in_place_then_grow(ledger: &Path, held: &str, text: &str, grown: &str) {
+        let row = usize::try_from(TAIL_ROW_BYTES).expect("a row's worth");
+        assert_eq!(text.len(), held.len(), "a rewrite of the very length");
+        assert_eq!(text[..row], held[..row], "the first row's worth kept");
+        assert_eq!(text[text.len() - row..], held[held.len() - row..], "the row's worth where the fold stopped kept");
+        #[cfg(unix)]
+        let file = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(ledger).expect("a ledger"));
+        std::fs::write(ledger, text).expect("rewritten in place");
+        appended(ledger, grown);
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(ledger).expect("a ledger")),
+            file,
+            "the same file, rewritten"
+        );
+    }
+
+    /// A ledger rewritten in place — the same file, its first row and the
+    /// rows up to where the fold stopped kept byte for byte, five rows
+    /// between them now about another page — and then grown is not a ledger
+    /// that only grew: a fold that took it for one went on ranking on the
+    /// rewritten rows' old answers, where a reader that never saw the old
+    /// ledger ranks on the new. What the fold read is checked, window by
+    /// window, against the ledger now there, and a window that no longer
+    /// holds starts the fold again from the start; what is appended after is
+    /// folded on from there (astra R2, r3).
+    #[test]
+    fn a_ledger_rewritten_in_place_then_grown_is_folded_again() {
+        let mock = Mock::silent();
+        machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let vault = vault_with_a_hub(cwd);
+            let _vault = VaultEnv::point_at(&vault);
+            let ledger = rerank_shadow_path(cwd);
+            std::fs::create_dir_all(ledger.parent().expect("a ledger dir")).expect("a ledger dir");
+            let line = |at: u64, page: &str, opened: bool| showing_line(at, page, opened, &vault);
+            // A page every reader opened, a row's worth and more on either
+            // side of five turns that left one page unopened.
+            let opened = |from: u64| (from..from + 12).map(|at| line(at, "wiki/a-quiet", true)).collect::<String>();
+            let unopened = |page: &str| (50..55).map(|at| line(at, page, false)).collect::<String>();
+            let retriever = session_retriever(cwd);
+            let order = || slugs(&retriever.recall("vellichor", 5));
+            let (hub_in, hub_out) = (["wiki/seed", "wiki/z-hub", "wiki/a-quiet"], ["wiki/seed", "wiki/a-quiet"]);
+            let held = opened(0) + &unopened("wiki/z-hub") + &opened(100);
+            std::fs::write(&ledger, &held).expect("a ledger");
+            assert_eq!(order(), hub_out, "five unopened showings sink the hub");
+            assert_eq!(folded(cwd), folded_cold(cwd));
+            // The five rows now about a page the vault does not hold, and a
+            // row appended past where the fold stopped.
+            let rewritten = opened(0) + &unopened("wiki/y-hub") + &opened(100);
+            rewrite_in_place_then_grow(&ledger, &held, &rewritten, &line(200, "wiki/a-quiet", true));
+            assert_eq!(folded(cwd), folded_cold(cwd), "a warm fold kept the rewritten rows' old answers");
+            assert_eq!(order(), hub_in, "no reader left the hub unopened in the ledger now there");
+            // And what is appended is folded on: four turns more leave the
+            // hub in, the fifth sinks it.
+            for at in 300..305 {
+                appended(&ledger, &line(at, "wiki/z-hub", false));
+                assert_eq!(folded(cwd), folded_cold(cwd), "row {at} appended");
+                assert_eq!(order(), if at < 304 { hub_in.as_slice() } else { hub_out.as_slice() }, "row {at} appended");
+            }
+        });
+    }
+
+    /// The standing an `auto` seat reads and the demand it would rank on are
+    /// read off one ledger: rewritten in place and grown, both answer the
+    /// ledger now there — whichever way the rewrite turned its last
+    /// transition, and whichever page it left unopened (astra R2, r3).
+    #[test]
+    fn after_an_in_place_rewrite_the_standing_and_the_demand_read_one_ledger() {
+        use zerocode_core::jev::promote::{FELL, ROSE};
+        let mock = Mock::silent();
+        machine(zerocode_core::jev::JevMode::Auto.key(), &mock.base_url, |cwd| {
+            let vault = vault_with_a_hub(cwd);
+            let _vault = VaultEnv::point_at(&vault);
+            let ledger = rerank_shadow_path(cwd);
+            std::fs::create_dir_all(ledger.parent().expect("a ledger dir")).expect("a ledger dir");
+            let line = |at: u64, page: &str, opened: bool| showing_line(at, page, opened, &vault);
+            let opened = |from: u64| (from..from + 12).map(|at| line(at, "wiki/a-quiet", true)).collect::<String>();
+            // `rise` and `fall` are one length, as the two pages' names are.
+            let middle = |word: &str, page: &str| {
+                format!("{{\"at\":9000,\"transition\":\"{word}\"}}\n") + &(50..55).map(|at| line(at, page, false)).collect::<String>()
+            };
+            let warm = || (raised_now(cwd), folded(cwd));
+            let cold = || (runtime::jev_seat_applies(cwd, &RECALL), folded_cold(cwd));
+            for (grown, (from, to)) in (200..).zip([(ROSE, FELL), (FELL, ROSE)]) {
+                let held = opened(0) + &middle(from, "wiki/z-hub") + &opened(100);
+                std::fs::write(&ledger, &held).expect("a ledger");
+                assert_eq!(warm(), cold(), "{from}");
+                let rewritten = opened(0) + &middle(to, "wiki/y-hub") + &opened(100);
+                rewrite_in_place_then_grow(&ledger, &held, &rewritten, &line(grown, "wiki/a-quiet", true));
+                assert_eq!(warm(), cold(), "{from} → {to}: the standing or the demand read the ledger the rewrite replaced");
+            }
+        });
+    }
+
     /// A label that names its own showing (`shown`, `shownAt`), for the
-    /// replay's fixtures: one page, shown at `shown_at`, its label written
-    /// at `at`.
-    fn named_showing(at: u64, shown_at: u64, opened: bool) -> serde_json::Value {
+    /// replay's fixtures: one page, shown at `shown_at` on a reading `key`
+    /// names, its label written at `at`.
+    fn named_showing(key: u64, at: u64, shown_at: u64, opened: bool) -> serde_json::Value {
         serde_json::json!({
-            "at": at, "label": "7:7", "query": 7, "notes": 7, "applied": false, "shownAt": shown_at,
+            "at": at, "label": format!("{key}:{key}"), "query": key, "notes": key, "applied": false, "shownAt": shown_at,
             "shown": [{"slug": "wiki/x", "rank": 0, "read": opened, "cited": false}],
         })
+    }
+
+    /// Recall's order of the two pages the replay's older readings are about.
+    const XY: [&str; 2] = ["wiki/x", "wiki/y"];
+
+    /// A reading's row as the ledger held it before labels named their
+    /// showings, for the replay's fixtures: one question over pages x and y,
+    /// `key` naming both fingerprints, judged into `proposed` and recorded
+    /// beside recall's order.
+    fn older_reading(at: u64, key: u64, proposed: [&str; 2]) -> serde_json::Value {
+        serde_json::json!({
+            "at": at, "query": key, "notes": key, "rubric_version": RERANK_RUBRIC_VERSION,
+            "outcome": RERANK_OUTCOME_ANSWERED, "candidates": 2, "applied": false,
+            "judged": {"recalled": XY, "proposed": proposed, "moved": 0,
+                       "top_changed": false, "held_by_graph": [], "readings": [[1.0, 0.9], [0.5, 0.9]]},
+        })
+    }
+
+    /// A label from before labels named their showings: the reading it
+    /// grades, by the fingerprints `key` names, and its `marks`.
+    fn older_label(at: u64, key: u64, marks: &serde_json::Value) -> serde_json::Value {
+        let mut label = serde_json::json!({"at": at, "label": format!("{key}:{key}"), "query": key, "notes": key, "applied": false});
+        if let (Some(label), Some(marks)) = (label.as_object_mut(), marks.as_object()) {
+            label.extend(marks.clone());
+        }
+        label
+    }
+
+    /// An older label's marks for a turn that touched the judgment's first
+    /// note, or `agreed: false` ones for a turn that did not.
+    fn agreed(agreed: bool) -> serde_json::Value {
+        serde_json::json!({"agreed": agreed, "rank": 0, "baselineAgreed": agreed})
     }
 
     /// A showing is ranked on what was known when it was shown. Turn A
@@ -3375,20 +3593,20 @@ mod tests {
     #[test]
     fn a_late_label_cannot_change_an_earlier_showings_demand() {
         let window = runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
-        let mut rows: Vec<serde_json::Value> = (0..u64::from(window) - 1).map(|n| named_showing(100 + n, 50 + n, false)).collect();
+        let mut rows: Vec<serde_json::Value> = (0..u64::from(window) - 1).map(|n| named_showing(7, 100 + n, 50 + n, false)).collect();
         // B: shown at 1,500, labeled at 2,000 — the fifth unopened showing.
-        rows.push(named_showing(2_000, 1_500, false));
+        rows.push(named_showing(7, 2_000, 1_500, false));
         // A: shown at 1,000, before B was; labeled at 3,000, after B was.
-        rows.push(named_showing(3_000, 1_000, false));
+        rows.push(named_showing(7, 3_000, 1_000, false));
         let replayed = replay_at(&rows, window);
-        assert_eq!(replayed.exact.exposures, rows.len(), "{replayed:?}");
+        assert_eq!(replayed.named.exposures, rows.len(), "{replayed:?}");
         assert_eq!(
-            replayed.exact.changed, 0,
+            replayed.named.changed, 0,
             "a label written after a showing changed what that showing was ranked on: {replayed:?}"
         );
         // The one that follows both is ranked on all five.
-        rows.push(named_showing(4_000, 3_500, false));
-        assert_eq!(replay_at(&rows, window).exact.changed, 1);
+        rows.push(named_showing(7, 4_000, 3_500, false));
+        assert_eq!(replay_at(&rows, window).named.changed, 1);
     }
 
     /// Two turns that asked one question over the same notes — two windows
@@ -3397,33 +3615,83 @@ mod tests {
     /// requests the replay cannot say which is whose, and counts both apart
     /// rather than joining one and dropping the other; a label that names
     /// its own showing is its own, however alike the readings (astra R3).
+    /// And one label on a run of two requests is no more one turn's than
+    /// two's: it is ranked only on the assumption that it was, apart from
+    /// the confirmed showings (astra R3, r3).
     #[test]
     fn two_turns_with_the_same_reading_are_not_one_exposure() {
         let window = runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
-        let reading = |at: u64| {
-            serde_json::json!({
-                "at": at, "query": 7, "notes": 7, "rubric_version": RERANK_RUBRIC_VERSION,
-                "outcome": RERANK_OUTCOME_ANSWERED, "candidates": 2, "applied": false,
-                "judged": {"recalled": ["wiki/x", "wiki/y"], "proposed": ["wiki/x", "wiki/y"], "moved": 0,
-                           "top_changed": false, "held_by_graph": [], "readings": [[1.0, 0.9], [0.5, 0.9]]},
-            })
-        };
-        let older_label = |at: u64, agreed: bool| {
-            serde_json::json!({"at": at, "label": "7:7", "query": 7, "notes": 7, "applied": false,
-                               "agreed": agreed, "rank": 0, "baselineAgreed": agreed})
-        };
-        let rows = [reading(1_000), reading(1_100), older_label(2_000, true), older_label(2_100, false)];
+        let reading = |at: u64| older_reading(at, 7, XY);
+        let rows = [reading(1_000), reading(1_100), older_label(2_000, 7, &agreed(true)), older_label(2_100, 7, &agreed(false))];
         let replayed = replay_at(&rows, window);
         assert_eq!(
-            (replayed.legacy.exposures, replayed.ambiguous, replayed.orphan),
+            (replayed.confirmed.exposures + replayed.conditional.exposures, replayed.ambiguous, replayed.orphan),
             (0, 2, 0),
             "two turns' labels were joined as one showing: {replayed:?}"
         );
-        // One turn's requests, one label: the run is one showing.
-        let replayed = replay_at(&[reading(1_000), reading(1_100), older_label(2_000, true)], window);
-        assert_eq!((replayed.legacy.exposures, replayed.repeated, replayed.ambiguous), (1, 1, 0), "{replayed:?}");
-        let rows = [reading(1_000), reading(1_100), named_showing(2_000, 1_000, true), named_showing(2_100, 1_100, false)];
-        assert_eq!(replay_at(&rows, window).exact.exposures, 2);
+        // One label on a run of two requests: one turn's, or two turns' with
+        // one label lost — ranked only as the assumption it is.
+        let replayed = replay_at(&[reading(1_000), reading(1_100), older_label(2_000, 7, &agreed(true))], window);
+        assert_eq!(
+            (replayed.confirmed.exposures, replayed.conditional.exposures, replayed.repeated, replayed.ambiguous),
+            (0, 1, 1, 0),
+            "a run of requests and one label was confirmed as one turn's showing: {replayed:?}"
+        );
+        let rows = [reading(1_000), reading(1_100), named_showing(7, 2_000, 1_000, true), named_showing(7, 2_100, 1_100, false)];
+        assert_eq!(replay_at(&rows, window).named.exposures, 2);
+    }
+
+    /// Two turns asked one question over the same notes; one was cancelled
+    /// and wrote no label, the other did. An older label names its reading
+    /// by two fingerprints only, so which request of the run it answers was
+    /// its showing cannot be told — and taken for the run's first, the
+    /// showing is ranked before a label its real showing came after, on a
+    /// demand it never met. So a run of more than one request is no
+    /// confirmed showing: the replay that takes each run for one turn's
+    /// ranks it apart, as the assumption it is, and one request with its one
+    /// label is confirmed (astra R3, r3).
+    #[test]
+    fn one_label_left_of_two_turns_is_not_a_confirmed_showing() {
+        let window = runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
+        let untouched = serde_json::json!({"notCompared": NO_NOTE_TOUCHED});
+        // Four turns left page x unopened, each naming its own showing.
+        let mut rows: Vec<serde_json::Value> = (0..u64::from(window) - 1).map(|n| named_showing(1, 10 + n, 5 + n, false)).collect();
+        // A asks at 100 and is cancelled — no label; B asks the same at 200.
+        rows.extend([older_reading(100, 7, XY), older_reading(200, 7, XY)]);
+        // Another turn's label, at 150, leaves x unopened a fifth time.
+        rows.push(named_showing(2, 150, 120, false));
+        // B's label, at 300, from before labels named their showings.
+        rows.push(older_label(300, 7, &untouched));
+        // C asks another question once, at 400, and labels it at 500.
+        rows.extend([older_reading(400, 8, XY), older_label(500, 8, &untouched)]);
+        let replayed = replay_at(&rows, window);
+        assert_eq!(
+            (replayed.confirmed.exposures, replayed.conditional.exposures, replayed.ambiguous),
+            (1, 1, 0),
+            "one label on a run of two requests was confirmed as one turn's showing: {replayed:?}"
+        );
+        // C was shown x after five turns and B had left it unopened: the
+        // demand sinks it there.
+        assert_eq!(replayed.confirmed.changed, 1, "{replayed:?}");
+    }
+
+    /// An older label's marks point into its reading's order — `rank` a
+    /// place in the judgment's list, `agreed` its first — so when the
+    /// requests of the run it answers were judged in two orders it does not
+    /// say which page its turn opened, and nothing it says is folded: the
+    /// run's first order named a page opened that the turn may never have
+    /// read (astra R3, r3).
+    #[test]
+    fn a_label_on_requests_judged_in_two_orders_names_no_page() {
+        let window = runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
+        let first_touched = serde_json::json!({"agreed": true, "rank": 0});
+        let rows = [older_reading(100, 7, XY), older_reading(200, 7, ["wiki/y", "wiki/x"]), older_label(300, 7, &first_touched)];
+        let replayed = replay_at(&rows, window);
+        assert_eq!(
+            (replayed.undetermined, replayed.observed),
+            (1, 0),
+            "a page was folded as opened off one of two orders the label may have graded: {replayed:?}"
+        );
     }
 
     /// What the demand costs a recall on this machine, printed: the first
@@ -3603,10 +3871,19 @@ mod tests {
     #[derive(Debug, Default, Clone, PartialEq, Eq)]
     struct Replayed {
         window: u32,
-        /// Labels that name their own showing (`shown`, `shownAt`).
-        exact: Population,
-        /// Older labels, joined to a reading by its two fingerprints.
-        legacy: Population,
+        /// Labels that name their own showing (`shown`, `shownAt`), each
+        /// timed by its turn's first showing — a note a later request of the
+        /// turn added is ranked at that time too, since the row says the
+        /// turn saw it and not when.
+        named: Population,
+        /// Older labels on a run of one request: that request was the
+        /// showing, confirmed.
+        confirmed: Population,
+        /// Older labels on a run of several requests, ranked at the run's
+        /// first as though the run were one turn's — which a turn that was
+        /// cancelled or failed, and wrote no label, makes untrue. The
+        /// assumption's replay, counted apart from the confirmed.
+        conditional: Population,
         /// Runs of one reading's requests.
         bundles: usize,
         /// Requests folded into a run after its first.
@@ -3617,6 +3894,10 @@ mod tests {
         /// run another label claims too, or a named showing with no time.
         /// What they say is folded; they rank nothing.
         ambiguous: usize,
+        /// Older labels on a run whose requests were judged in different
+        /// orders: which page their marks name cannot be told, so nothing
+        /// they say is folded, and they rank nothing.
+        undetermined: usize,
         /// Older labels naming no reading written before them.
         orphan: usize,
         /// Older labels with no mark to read.
@@ -3641,11 +3922,15 @@ mod tests {
             let product = self.window == runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
             println!("\n  survival window {}{}", self.window, if product { "  <- the product's" } else { "" });
             println!(
-                "    reading runs {} ({} repeated requests folded in); unlabeled runs {}; labels that cannot be placed {}; older labels joining no reading {}, with no mark {}",
-                self.bundles, self.repeated, self.unlabeled, self.ambiguous, self.orphan, self.unmarked
+                "    reading runs {} ({} repeated requests folded in); unlabeled runs {}; labels that cannot be placed {}; older labels whose run was judged in two orders {}, joining no reading {}, with no mark {}",
+                self.bundles, self.repeated, self.unlabeled, self.ambiguous, self.undetermined, self.orphan, self.unmarked
             );
-            println!("    older showings a label may have come between the showing and its request row: {}", self.unsure);
-            for (name, counted) in [("named showings (exact time)", &self.exact), ("older labels (joined)", &self.legacy)] {
+            println!("    confirmed older showings a label may have come between the showing and its request row: {}", self.unsure);
+            for (name, counted) in [
+                ("named showings (at the turn's first showing)", &self.named),
+                ("older labels, one request's showing (confirmed)", &self.confirmed),
+                ("older labels, a run of requests taken for one turn's (conditional — an assumption, not a result)", &self.conditional),
+            ] {
                 println!("    {name}: {} (complete {}, partial {})", counted.exposures, counted.complete, counted.partial);
                 println!(
                     "      showings the demand changed        {}/{} = {:5.1}%   slots sunk {}/{}",
@@ -3847,7 +4132,7 @@ mod tests {
                 }
                 continue;
             }
-            let counted = if ranked.is_some_and(|(_, exact)| exact) { &mut replayed.exact } else { &mut replayed.legacy };
+            let counted = if ranked.is_some_and(|(_, exact)| exact) { &mut replayed.named } else { &mut replayed.confirmed };
             counted.exposures += 1;
             if *whole {
                 counted.complete += 1;
