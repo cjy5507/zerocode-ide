@@ -1,5 +1,58 @@
 # Changelog
 
+## [1.1.21] — 2026-09-24
+
+_since v1.1.20 (48 commits)_
+
+### feat
+- feat(jev): record versioned vault pair proposals for review
+- feat(board): the desk's worker roster answers worker-list — every worker the ledger still summons, unhealthy first, by one health word from the ledger's own facts (pane gone, quota wall with its reset, waiting for an answer, asleep) or its pane's own state (in a turn, idle), with its last activity, agent, model and effort, pane, checkout, commits past its base and changed files (t-6588)
+- feat(crash): a hang first seen unanswered says how long it really lasted when it ends (t-6388)
+- feat(board): the desk answers check --peek — the mail each run's coordinator owes, oldest first, with where each letter stands in its inbox; a question is answered where it stands and a held batch acknowledged whole, both as the coordinator seat through the ledger's own verbs, and the screen invents neither (t-6588)
+- feat(board): the desk's task flow answers task-list — every task of the runs in play by one stage word from the ledger's own facts, counted by the backend, the stuck stages (gate with its id and question, blocked with the failed prerequisite, failed) in their signal and opened first (t-6588)
+- feat(board): the desk's machine strip answers df, uptime and simctl — the ledger's volume with the verdict the next --worktree summons would meet, the load against the cores, the booted simulators and emulators, and the status bar's own loan sentence (t-6588)
+- feat(board): the task board's coordinator desk opens with the release lane's own status — version, sha, the phase running and for how long, the lane's verdict and why a phase was skipped (t-6588)
+- feat(usage): every usage read leaves one line in the window's log — the road that answered, what the fast road failed of, how long it took and why, never a token or whose login (t-6583)
+- feat(settings): describe claim check in five locales
+- feat(zo): record claim checks and next-turn labels
+- feat(zo): select same-turn evidence for completion claims
+- feat(jev): register bounded completion claim seat
+- feat(restart-nudge): a resumed worker is told which commands the restart cut under its pane — 「Commands still running under you when the window restarted were cut: `…` — run again whichever you still need」 (t-6428 5)
+- feat(exit): closing the window asks the same census — 「지금 닫으면 도는 일이 끊깁니다 — [끝나면 종료] [지금 종료]」 — and a close nobody answers still closes after a minute (t-6428 5)
+- feat(exit): every restart door asks the one census first — 「워커 N명 턴 중 · 배경 작업 M개 — [끝나면 다시 시작] [지금 다시 시작]」 — and a wait stands as one line the beat keeps true (t-6428 3)
+- feat(exit): 「끝나면」 waits on the beat for the first gap — nothing running under any worker's pane, nothing unread — and asks again or goes when its road's one table says (t-6428 4)
+- feat(exit): the 「새 빌드 준비됨」 notice says the one census — workers mid-turn, background jobs, workers nobody could read — instead of counting live workers a second way (t-6428 2)
+- feat(orchestration): under a declared wait, a worker still stopped at its wall after the wall lifted is the coordinator's news, once — the wall's follow-up on the same two-witness rule, and nothing is typed (t-6427)
+- feat(orchestration): `--on-quota-wall` takes the closed word `wait`, and a wall's order is walked as a ladder — the wait for a verified reset before any handover (t-6427)
+- feat(exit): the window's goodbye names the road it leaves by and, for every live worker, the turn and the commands it cuts (t-6428 1)
+
+### fix
+- fix(orchestration): the mail pointer holds its line at a pane whose own last answer was a wall — once while it stands, once when it lifts (t-6560)
+- fix(board): the desk fits the first screen — a letter and a worker are two lines, the inbox state is a short word with its sentence as the tip, the seat note stands once, and the task flow breaks between its flow and its stuck stages (t-6588)
+- fix(jev): the claim seat recommends `auto` like every seat that promotes, and the Hindsight inventory names it (t-6343 follow-up)
+- fix(status): a usage read that lands in half a second is on the bar in half a second — the gauge asks every 250 ms for the first two seconds a read is out, then on the old two-second ticks (t-6583)
+- fix(usage): a Codex usage read asks with the copy the panes refreshed — the shared runtime home's, when it holds the same login provably fresher (t-6583)
+- fix(usage): the Claude OAuth read asks with the login the CLI keeps refreshing — the selected store's scoped keychain item, through `keychain_says` — before the copy the last switch wrote (t-6583)
+- fix(awake): the awake standing is asked off the main thread — it waits on the keeper, and the window asks on every resume (t-6388)
+- fix(crash): the hang sampler finds the main thread by its dyld root when the queue label is not the main queue's (t-6388)
+- fix(crash): the hang watchdog testifies only for time it was there for — a late nap, a sleep between beats or no screen awake withdraws the judgment (t-6388)
+- fix(orchestration): a quota wall stands until its reset and the stall grace after it, not for the rest of the attempt — a walled attempt's later silence is news again, and the next window's wall is walled news again (t-6427)
+
+### perf
+- perf(board): the desk stands in the board's first frame — its ledger reading is asked before the board awaits its own two, so the task list never jumps down under a person's eye (first task row shift 1170 → 0 px) (t-6588)
+- perf(board): a board repaint writes only what moved — a quiet ledger beat 3 → 0 mutations, a beat that moved one worker's words 32 → 2 (t-6588)
+
+### docs
+- docs(orchestration): `WorktreeRoom`'s doc names its private reader in code font instead of linking it — rustdoc under `-D warnings` refuses a public doc that links a private item (t-6588 follow-up)
+- docs(orchestration): the closed-word parse names its private checker in plain code — rustdoc refuses a public page that links a private item (t-6427)
+
+### test
+- test(quota-wall): replay a transcript's typed pointers through the wall hold (t-6560)
+- test(board): the task board's weight on one fixture — sixty tasks, five workers, twenty letters: first paint, paint per poll, mutations per poll, elements (t-6588)
+- test(jev): seed completion claim transcript replay
+- test(orchestration): the wait rung's `lift_read_ms` is the window's usage refetch floor, pinned — the ledger's table and the gauge's floor are one number (t-6427)
+- test(orchestration): a bench for the stall sweep's wall question on an attempt that never walled — one newest-first scan of ten thousand rows (t-6427)
+
 ## [1.1.20] — 2026-09-24
 
 _since v1.1.19 (47 commits)_
