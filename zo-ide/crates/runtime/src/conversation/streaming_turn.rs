@@ -169,6 +169,43 @@ fn permission_prompt_expired_reason(tool_name: &str, budget: std::time::Duration
     )
 }
 
+/// What came of a refusal question ([`ConversationRuntime::ask_refusal_question`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusalAnswer {
+    /// The person decided.
+    Decided(AsyncPermissionDecision),
+    /// Nobody answered within the prompt ceiling: a bound on the wait, not
+    /// a decision.
+    Unanswered,
+    /// The turn's abort rose while the question stood — or before its
+    /// answer was taken (t-7153): a question the person cancelled is
+    /// closed, and an answer that lands after the cancel — the prompt's
+    /// yes typed a moment too late, a responder released after the turn was
+    /// stopped — is an answer to a question that no longer stands, and
+    /// consents to nothing for this turn or the session.
+    Cancelled,
+}
+
+/// `asked`'s answer, unless the turn's abort flag rises first — or by the
+/// time the answer lands (t-7153): a decision is taken only while the
+/// question it answers still stands. Polled on the same slice as
+/// [`crate::retry::cancellable_sleep`], the way every wait of this turn
+/// watches its cancel flag.
+async fn until_answered_or_aborted<F: std::future::Future>(
+    asked: F,
+    abort: &crate::hooks::HookAbortSignal,
+) -> Option<F::Output> {
+    tokio::pin!(asked);
+    loop {
+        if abort.is_aborted() {
+            return None;
+        }
+        if let Ok(answered) = tokio::time::timeout(crate::retry::CANCEL_POLL_SLICE, &mut asked).await {
+            return (!abort.is_aborted()).then_some(answered);
+        }
+    }
+}
+
 // ============================================================================
 // Mid-generation steering re-issue (gen-abort)
 // ============================================================================
@@ -797,13 +834,14 @@ where
 
     /// Put one question of the refusal ladder to the person (t-6747) through
     /// the prompt every permission question uses — with the Notification hook
-    /// that pings them, and the prompt ceiling. `Ok(None)` is a question
-    /// nobody answered within the ceiling.
+    /// that pings them, and the prompt ceiling — and hear what came of it
+    /// ([`RefusalAnswer`]): their decision, nobody's within the ceiling, or
+    /// the turn's abort closing the question while it stood.
     async fn ask_refusal_question(
         &mut self,
         question: crate::permission::PermissionRequest,
         prompter: &dyn AsyncPermissionPrompter,
-    ) -> Result<Option<AsyncPermissionDecision>, crate::permission::PermissionError> {
+    ) -> Result<RefusalAnswer, crate::permission::PermissionError> {
         self.fire_lifecycle_hook(
             HookEvent::Notification,
             &serde_json::json!({
@@ -811,13 +849,26 @@ where
                 "tool_name": question.tool,
             }),
         );
-        match permission_prompt_timeout() {
-            Some(budget) => match tokio::time::timeout(budget, prompter.decide(question)).await {
-                Ok(answered) => answered.map(Some),
-                Err(_) => Ok(None),
+        let abort = self.hook_abort_signal.clone();
+        let asked = until_answered_or_aborted(prompter.decide(question), &abort);
+        let answered = match permission_prompt_timeout() {
+            Some(budget) => match tokio::time::timeout(budget, asked).await {
+                Ok(answered) => answered,
+                Err(_) => return Ok(RefusalAnswer::Unanswered),
             },
-            None => prompter.decide(question).await.map(Some),
+            None => asked.await,
+        };
+        match answered {
+            None => Ok(RefusalAnswer::Cancelled),
+            Some(answered) => answered.map(RefusalAnswer::Decided),
         }
+    }
+
+    /// A refusal question the turn's abort closed while it stood (t-7153):
+    /// the person's cancellation, settled as one — with nothing of the
+    /// question's answer, if one came, kept.
+    fn refusal_question_cancelled(&mut self, iteration: usize) -> StreamingTurnError {
+        self.settle_streaming_abort(iteration, "refusal question cancelled by abort signal")
     }
 
     /// A refusal question the host abandoned: an abort is the person's
@@ -1833,7 +1884,9 @@ where
                         }
                     };
                     match answer {
-                        Some(AsyncPermissionDecision::Allow | AsyncPermissionDecision::AllowOnce) => {
+                        RefusalAnswer::Decided(
+                            AsyncPermissionDecision::Allow | AsyncPermissionDecision::AllowOnce,
+                        ) => {
                             let withheld = self.withhold_declined_request_images();
                             if let Some(usage) = refused_usage {
                                 self.usage_tracker.record(usage);
@@ -1850,7 +1903,10 @@ where
                                 .await;
                             continue 'outer;
                         }
-                        Some(AsyncPermissionDecision::Deny) | None => {}
+                        RefusalAnswer::Decided(AsyncPermissionDecision::Deny) | RefusalAnswer::Unanswered => {}
+                        RefusalAnswer::Cancelled => {
+                            return Err(self.refusal_question_cancelled(iterations));
+                        }
                     }
                 }
                 // The ladder, with the person asked before a rung leaves the
@@ -1879,17 +1935,17 @@ where
                                     }
                                 };
                             match answer {
-                                Some(AsyncPermissionDecision::Allow) => {
+                                RefusalAnswer::Decided(AsyncPermissionDecision::Allow) => {
                                     self.consent_to_refusal_switch(true);
                                 }
-                                Some(AsyncPermissionDecision::AllowOnce) => {
+                                RefusalAnswer::Decided(AsyncPermissionDecision::AllowOnce) => {
                                     self.consent_to_refusal_switch(false);
                                 }
                                 // Nobody answered within the prompt ceiling
                                 // (t-7153): the ceiling bounds the wait, it
                                 // decides nothing — the turn stays on the
                                 // model the person chose, and says why.
-                                None => {
+                                RefusalAnswer::Unanswered => {
                                     self.refuse_refusal_switch();
                                     let _ = render_tx
                                         .send(RenderBlock::System {
@@ -1904,7 +1960,12 @@ where
                                         })
                                         .await;
                                 }
-                                Some(AsyncPermissionDecision::Deny) => self.refuse_refusal_switch(),
+                                RefusalAnswer::Decided(AsyncPermissionDecision::Deny) => {
+                                    self.refuse_refusal_switch();
+                                }
+                                RefusalAnswer::Cancelled => {
+                                    return Err(self.refusal_question_cancelled(iterations));
+                                }
                             }
                         }
                         other => break other,

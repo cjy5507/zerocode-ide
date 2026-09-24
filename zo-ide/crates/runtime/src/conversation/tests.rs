@@ -17083,6 +17083,231 @@ fn an_unattended_ask_leaves_the_chosen_model_where_it_is() {
     decline_to_the_route(&mut auto);
 }
 
+/// A prompter that says when its first question was put and answers it
+/// `answer` only once released (t-7153): the question stands in between,
+/// as a real prompt does while a person reads it. A later question — only
+/// a turn that went on past the person's stop ever puts one — is answered
+/// `Deny` at once, so such a turn ends and says what it did.
+struct ReleasedPrompter {
+    answer: crate::permission::PermissionDecision,
+    asked: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    put: std::sync::Mutex<usize>,
+}
+
+impl crate::permission::PermissionPrompter for ReleasedPrompter {
+    fn decide<'a>(
+        &'a self,
+        _request: crate::permission::PermissionRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::permission::PermissionDecision,
+                        crate::permission::PermissionError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let first = {
+            let mut put = self.put.lock().expect("lock");
+            *put += 1;
+            *put == 1
+        };
+        if !first {
+            return Box::pin(async { Ok(crate::permission::PermissionDecision::Deny) });
+        }
+        self.asked.notify_one();
+        Box::pin(async move {
+            self.release.notified().await;
+            Ok(self.answer)
+        })
+    }
+}
+
+/// One declined streaming turn whose first refusal question the person
+/// cancels (t-7153, R2): the question stands, the turn's abort rises, and
+/// only then does the prompt's `late` answer land. A person at the keyboard
+/// under `ask`; every request declined in `cyber`. Answers how the turn
+/// ended, what it rendered, how many questions were put, and the runtime.
+fn cancel_the_first_refusal_question(
+    images: Vec<(String, String)>,
+    late: crate::permission::PermissionDecision,
+) -> (
+    Result<TurnSummary, super::StreamingTurnError>,
+    Vec<crate::message_stream::types::RenderBlock>,
+    usize,
+    ConversationRuntime<StopApiClient, StaticToolExecutor>,
+) {
+    let abort = crate::hooks::HookAbortSignal::new();
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        StopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_async_api_client(Arc::new(RefuseOnceAsyncClient {
+        calls: AtomicUsize::new(0),
+        refusals: 4,
+    }))
+    .with_hook_abort_signal(abort.clone());
+    runtime.set_context_model("claude-fable-5-1");
+    runtime.set_attendance(crate::Attendance::Attended);
+    runtime.set_classifier_fallback(crate::ClassifierFallback::Ask);
+    let prompter = Arc::new(ReleasedPrompter {
+        answer: late,
+        asked: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        put: std::sync::Mutex::new(0),
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let (ended, blocks) = rt.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+        let drained = tokio::spawn(async move {
+            let mut blocks = Vec::new();
+            while let Some(block) = render_rx.recv().await {
+                blocks.push(block);
+            }
+            blocks
+        });
+        let turn =
+            runtime.run_turn_streaming_maybe_deep("say hello", images, render_tx, prompter.clone());
+        // The person stops the turn while the question stands; the prompt's
+        // answer lands after the stop.
+        let stop = async {
+            prompter.asked.notified().await;
+            abort.abort();
+            prompter.release.notify_one();
+        };
+        let (ended, ()) = tokio::join!(turn, stop);
+        (ended, drained.await.expect("the render drain"))
+    });
+    let put = *prompter.put.lock().expect("lock");
+    (ended, blocks, put, runtime)
+}
+
+/// Every request the turn sent went to the model the person chose.
+fn only_the_chosen_model_was_asked(blocks: &[crate::message_stream::types::RenderBlock]) -> bool {
+    use crate::message_stream::types::{RenderBlock, WireModelSource};
+    let mut wire = blocks.iter().filter_map(|block| match block {
+        RenderBlock::WireModel(wire) => Some(wire),
+        _ => None,
+    });
+    let mut any = false;
+    let all = wire.all(|wire| {
+        any = true;
+        wire.model == "claude-fable-5-1" && wire.source == WireModelSource::Session
+    });
+    any && all
+}
+
+/// A cancelled question is not answered by a late yes (t-7153, R2): the
+/// switch question stands, the person stops the turn, and the prompt's
+/// answer — `Allow`, or `AllowOnce` — lands after the stop. Nothing is
+/// recorded as consented for the turn or the session, no request goes to
+/// the route, the turn ends cancelled, and the next turn on the same model
+/// asks again: the late answer was to a question that no longer stood.
+/// Before this, the late `Allow` was taken as the session's consent, a
+/// third request went to the route after the stop, and the next turn
+/// switched without asking.
+#[test]
+fn a_switch_question_the_person_cancelled_is_not_answered_by_a_late_yes() {
+    use crate::permission::PermissionDecision;
+
+    for late in [PermissionDecision::Allow, PermissionDecision::AllowOnce] {
+        let _todo_store = HermeticTodoStore::pin();
+        let (ended, blocks, put, mut runtime) = cancel_the_first_refusal_question(Vec::new(), late);
+        assert_eq!(put, 1, "{late:?}: one question");
+        assert!(
+            !runtime.refusal_switch_consented_for_turn
+                && !runtime.refusal_switch_consented_for_session,
+            "{late:?}: an answer to a cancelled question was taken as consent"
+        );
+        assert!(
+            only_the_chosen_model_was_asked(&blocks),
+            "{late:?}: a request went to the route after the cancel: {blocks:?}"
+        );
+        assert!(
+            matches!(ended, Err(super::StreamingTurnError::Cancelled)),
+            "{late:?}: a cancelled turn ended otherwise: {ended:?}"
+        );
+
+        // The next turn on the same model: the question is put again.
+        runtime.set_hook_abort_signal(crate::hooks::HookAbortSignal::new());
+        let again = Arc::new(RecordingPrompter {
+            answer: PermissionDecision::Deny,
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+            tokio::spawn(async move { while render_rx.recv().await.is_some() {} });
+            runtime
+                .run_turn_streaming_maybe_deep("say hello again", Vec::new(), render_tx, again.clone())
+                .await
+                .expect("the next declined turn surfaces on the chosen model");
+        });
+        assert_eq!(
+            again.asked.lock().expect("lock").len(),
+            1,
+            "{late:?}: the next turn switched on a consent the cancelled question never gave"
+        );
+    }
+}
+
+/// The images question keeps the same rule (t-7153, R2): a yes that lands
+/// after the person stopped the turn lets no image go — the declined
+/// request's images stay the person's, the turn asks nothing again of the
+/// model, and ends cancelled. Before this, the late yes withheld the images
+/// and sent the request again without them after the stop.
+#[test]
+fn an_images_question_the_person_cancelled_lets_no_image_go_on_a_late_yes() {
+    use crate::permission::PermissionDecision;
+
+    for late in [PermissionDecision::Allow, PermissionDecision::AllowOnce] {
+        let _todo_store = HermeticTodoStore::pin();
+        let screenshot = vec![("image/png".to_string(), "c2NyZWVuc2hvdA==".to_string())];
+        let (ended, blocks, put, runtime) = cancel_the_first_refusal_question(screenshot, late);
+        let (images, placeholders) = runtime
+            .session
+            .messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .fold((0, 0), |(images, placeholders), block| match block {
+                ContentBlock::Image { .. } => (images + 1, placeholders),
+                ContentBlock::Text { text } if text == super::fallback::DECLINED_IMAGE_PLACEHOLDER => {
+                    (images, placeholders + 1)
+                }
+                _ => (images, placeholders),
+            });
+        assert_eq!(
+            (images, placeholders),
+            (1, 0),
+            "{late:?}: an answer to a cancelled question let the images go"
+        );
+        assert_eq!(put, 1, "{late:?}: one question");
+        let requests = blocks
+            .iter()
+            .filter(|block| matches!(block, crate::message_stream::types::RenderBlock::WireModel(_)))
+            .count();
+        assert_eq!(requests, 1, "{late:?}: the request was sent again after the cancel: {blocks:?}");
+        assert!(
+            matches!(ended, Err(super::StreamingTurnError::Cancelled)),
+            "{late:?}: a cancelled turn ended otherwise: {ended:?}"
+        );
+    }
+}
+
 /// A picture of a declined screen is sent again only if the person keeps it
 /// (t-6747): the declined request's images are asked about once, a person
 /// at the keyboard, and on the yes they leave the conversation for good —
