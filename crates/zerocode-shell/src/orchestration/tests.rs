@@ -19657,11 +19657,14 @@ struct SwitchWorld {
     logins: Mutex<std::collections::HashMap<String, String>>,
     /// Run once, right after a select lands — the world moving under the
     /// switch between its selection and its panes (astra R2).
-    after_select: Mutex<Option<Box<dyn FnOnce(&SwitchWorld) + Send>>>,
+    after_select: Mutex<Option<WorldMove>>,
     /// Run once, right before the first receipt is written — the ledger's
     /// disk refusing writes from there on (astra R4).
     before_receipt: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
+
+/// One change a test makes to the switch's world from inside the switch.
+type WorldMove = Box<dyn FnOnce(&SwitchWorld) + Send>;
 
 impl SwitchWorld {
     fn new(host: &Switching, mode: zerocode_core::account_autoswitch::AutoSwitchMode) -> Self {
@@ -20968,7 +20971,7 @@ fn a_rest_is_written_only_while_the_window_sees_the_wall_now() {
 #[test]
 fn a_pane_moves_only_by_the_policy_as_it_stands_at_its_last_door() {
     use zerocode_core::account_autoswitch::AutoSwitchMode;
-    let cases: [(u32, &str, Box<dyn FnOnce(&SwitchWorld) + Send>); 2] = [
+    let cases: [(u32, &str, WorldMove); 2] = [
         (
             89_300,
             "turned off",
