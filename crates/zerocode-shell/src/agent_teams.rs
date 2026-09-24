@@ -871,7 +871,7 @@ pub trait Host {
 
     /// The live pane already holding this conversation, if one does
     /// (t-7812) — the judgment every resume door asks
-    /// (`conversation_wake::claim_for_wake`), put to the ledger's reseat
+    /// (`conversation_wake::claim_among`), put to the ledger's reseat
     /// before it cuts a pane. Test and tmux-only hosts hold none.
     fn conversation_standing(
         &self,

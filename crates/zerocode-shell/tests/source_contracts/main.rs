@@ -18236,7 +18236,7 @@ mod tests {
         //     window restart resumes its leaders, and a leader that split
         //     panes yesterday and backgrounds its teammates the morning after
         //     ("소넷은 왜 안보이는거지") reads as broken, not as off.
-        for road in ["fn resume_session(", "fn spawn_shell("] {
+        for road in ["impl WakeWindow for ResumeDoor<'_> {", "fn spawn_shell("] {
             let there = block_after(shipped, road);
             assert!(
                 there.contains("state.local_data_root(),")
@@ -19098,7 +19098,10 @@ mod tests {
     fn the_trust_menu_is_answered_before_the_prompt_can_reach_it() {
         let backend = shipped_backend();
         let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
-        for road in ["fn launch_agent_tab(", "fn resume_session("] {
+        for road in [
+            "fn launch_agent_tab(",
+            "impl WakeWindow for ResumeDoor<'_> {",
+        ] {
             let walking = block_after(shipped, road);
             let marked = walking
                 .find("agent_trust_presets::mark_workspace_trusted(")
@@ -19288,17 +19291,19 @@ mod tests {
         );
         let shell = include_str!("../../src/orchestration.rs");
         let walking = block_after(shell, "Effect::Split {");
+        // The continuation spends the goodbye's word about this very worker
+        // as it is handed over (t-7812 R2), so the call names the worker.
+        let continuing = "deliver_continuation(host, term, &prepared.prompt, &prepared.worker)";
         assert!(
             walking.contains("prepared_worker_reseat")
                 && walking.contains("WorkerHostPlacement::Existing")
                 && walking.contains("actor.worker_reseated(")
-                && walking.contains("deliver_continuation(host, term, &prepared.prompt)")
+                && walking.contains(continuing)
                 && walking.contains("host.announce_reseated_worker("),
             "the sleeping worker bypasses the split fence or announces before rebind:\n{walking}"
         );
         assert!(
-            walking.find("actor.worker_reseated(")
-                < walking.find("deliver_continuation(host, term, &prepared.prompt)"),
+            walking.find("actor.worker_reseated(") < walking.find(continuing),
             "the restored worker sees its task before its durable seat moves:\n{walking}"
         );
         let spawning = block_after(shipped_backend(), "let readiness = worker_host");
@@ -23413,10 +23418,12 @@ mod tests {
              measured table and launch plan:\n{command}"
         );
 
-        // The Tauri wrapper still owns reporting identity, cwd, account/team
-        // environment and the actual spawn. Its Codex mirror lease must live
-        // across that spawn, not be dropped by an env-only helper.
-        let reopening = block_after(source, "pub(crate) fn resume_session(");
+        // The Tauri command's own window still owns reporting identity, cwd,
+        // account/team environment and the actual spawn (t-7812: the wake's
+        // decisions are `wake_conversation`'s, its effects this impl's). Its
+        // Codex mirror lease must live across that spawn, not be dropped by an
+        // env-only helper: it rides the prepared launch into the spawn.
+        let reopening = block_after(source, "impl WakeWindow for ResumeDoor<'_> {");
         assert!(
             reopening.contains("hooks::pty_env(")
                 && reopening.contains("&hooks::pane_key_of(term)")
@@ -23435,11 +23442,17 @@ mod tests {
     #[test]
     fn a_provider_session_never_enters_a_spawn_log() {
         let board = include_str!("../../src/cmd/board.rs");
-        let interactive = block_after(board, "pub(crate) fn resume_session(");
-        assert!(
-            !interactive.contains("{args:?}"),
-            "interactive resume logs its raw session argv:\n{interactive}"
-        );
+        for road in [
+            "pub(crate) fn resume_session(",
+            "pub(crate) fn wake_conversation<",
+            "impl WakeWindow for ResumeDoor<'_> {",
+        ] {
+            let interactive = block_after(board, road);
+            assert!(
+                !interactive.contains("{args:?}"),
+                "interactive resume logs its raw session argv:\n{interactive}"
+            );
+        }
 
         let host = block_after(shipped_backend(), "impl agent_teams::Host for TeamWindow {");
         assert!(
@@ -27438,7 +27451,10 @@ mod tests {
                 "fn launch_agent_tab(",
                 include_str!("../../src/cmd/terminal.rs"),
             ),
-            ("fn resume_session(", include_str!("../../src/cmd/board.rs")),
+            (
+                "impl WakeWindow for ResumeDoor<'_> {",
+                include_str!("../../src/cmd/board.rs"),
+            ),
         ] {
             let body = block_after(file, road);
             let replay_at = body.find("replay_stored_screen(");
@@ -27644,7 +27660,7 @@ mod tests {
 
         for (source, road) in [
             (terminal, "pub(crate) fn launch_agent_tab("),
-            (board, "pub(crate) fn resume_session("),
+            (board, "impl WakeWindow for ResumeDoor<'_> {"),
         ] {
             let there = block_after(source, road);
             let team_at = there
@@ -35154,10 +35170,16 @@ mod tests {
     #[test]
     fn restart_nudges_share_the_live_prompt_door_and_leave_one_receipt_line() {
         let backend = shipped_backend();
-        let resumed = block_after(backend, "fn resume_session(");
+        let resumed = block_after(backend, "fn wake_conversation<");
         assert!(
-            resumed.contains("restart_nudge_runtime::register_wake("),
-            "resume_session no longer registers a receipt before returning:\n{resumed}"
+            resumed.contains("restart_nudge_runtime::place_words(")
+                && resumed.contains("window.arm(term, pending, delivery);"),
+            "the resume road no longer registers a receipt before returning:\n{resumed}"
+        );
+        assert!(
+            block_after(backend, "impl WakeWindow for ResumeDoor<'_> {")
+                .contains("restart_nudge_runtime::arm_in_window("),
+            "the window's own wake no longer watches its receipt"
         );
         let noting = block_after(backend, "fn note_pane_state(");
         assert!(
@@ -35188,10 +35210,25 @@ mod tests {
         );
         let nudge = block_after(backend, "fn deliver_composer(");
         assert!(
-            nudge.contains("type_prompt_at_term(")
-                && nudge.contains("PromptReadiness::Mounting")
-                && nudge.contains("PromptReadiness::Resting"),
+            nudge.contains("type_prompt_at_term(") && nudge.contains("PromptReadiness::Mounting"),
             "restart delivery left the shared ready/composer road:\n{nudge}"
+        );
+        // The one fallback rides the same door, at rest and beside whatever
+        // a person left on the line — never clearing it (t-7812 R2).
+        let fallback = backend
+            .split_once("impl WakeReceipts for WindowReceipts {")
+            .expect("the window's own receipts")
+            .1
+            .split_once("fn type_again(")
+            .expect("the one fallback")
+            .1
+            .split_once("fn note(")
+            .expect("the next receipts method")
+            .0;
+        assert!(
+            fallback.contains("type_prompt_at_term(")
+                && fallback.contains("PromptReadiness::RestingBesideADraft"),
+            "the restart fallback left the shared composer road, or clears a person's line:\n{fallback}"
         );
 
         let constants = block_after(backend, "const RESUME_NUDGE_RECEIPT_MS:");

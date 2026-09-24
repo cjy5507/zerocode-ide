@@ -12741,7 +12741,8 @@ fn a_wake_with_nothing_written_starts_what_the_launch_button_starts() {
     );
 
     let board = include_str!("cmd/board.rs");
-    let waking = block_after(board, "pub(crate) fn resume_session(");
+    // The road every door takes: `resume_session` hands the window to it.
+    let waking = block_after(board, "pub(crate) fn wake_conversation<");
     let judged = waking
         .find("zerocode_core::conversation_never_written(")
         .expect("the wake no longer asks whether anything was written");
@@ -12750,18 +12751,30 @@ fn a_wake_with_nothing_written_starts_what_the_launch_button_starts() {
     let nudged = waking
         .find("restart_nudge_runtime::worker_nudge(")
         .expect("the nudge");
-    let chosen = waking.find("fresh_command(&agent").expect("the fresh road");
+    let chosen = waking.find("fresh_command(agent").expect("the fresh road");
     assert!(
         judged < nudged && nudged < chosen,
         "the verdict must precede the nudge and the command:\n{waking}"
     );
+    // A fresh wake is nobody's sleeper, so the seat — written before the
+    // spawn, and only for a sleeper (t-7812 R1) — is never asked for it.
+    assert!(
+        waking.contains("let fresh = reseating.is_none()"),
+        "a sleeper's conversation can take the fresh road:\n{waking}"
+    );
+    let seat = waking
+        .find("if let Some(worker) = reseating.as_deref() {\n        let seated = crate::orchestration::pane_resumed(")
+        .expect("the seat is no longer a sleeper's alone");
     let returned = waking
         .find("return Ok(ConversationWake::opened(term));")
         .expect("a fresh pane returns early");
+    assert!(
+        seat < returned,
+        "the seat is written after the pane runs:\n{waking}"
+    );
     for resumed_only in [
-        "state.pane_sessions().insert(term, session)",
-        "crate::orchestration::pane_resumed(",
-        "restart_nudge_runtime::register_wake(",
+        "window.record(term, session)",
+        "restart_nudge_runtime::place_words(",
     ] {
         let at = waking
             .find(resumed_only)
@@ -12782,9 +12795,19 @@ fn a_wake_with_nothing_written_starts_what_the_launch_button_starts() {
 #[test]
 fn a_resume_is_judged_before_anything_of_the_wake_happens() {
     let board = include_str!("cmd/board.rs");
-    let waking = block_after(board, "pub(crate) fn resume_session(");
+    let door = block_after(board, "pub(crate) fn resume_session(");
+    assert_eq!(
+        door.matches("state.take_term_id()").count(),
+        1,
+        "the claim names a different term than the pane is opened under"
+    );
+    assert!(
+        door.contains("wake_conversation(&door, term, &agent, session, rows, cols)"),
+        "the door no longer takes the one road:\n{door}"
+    );
+    let waking = block_after(board, "pub(crate) fn wake_conversation<");
     let judged = waking
-        .find("conversation_wake::claim_for_wake(&state, &agent, &session, term)")
+        .find("conversation_wake::claim_among(agent, &session, term, |held| window.standing(held))")
         .expect("the resume road no longer asks whether the conversation is already held");
     let answered = waking
         .find("return Ok(ConversationWake::standing(holder))")
@@ -12792,10 +12815,8 @@ fn a_resume_is_judged_before_anything_of_the_wake_happens() {
     for effect in [
         "restart_nudge_runtime::worker_nudge(",
         "resume_command(",
-        "account_env_for(",
-        "agent_trust_presets::mark_workspace_trusted(",
-        "open_zo_pane_process(",
-        "PtyLane::spawn(",
+        "window.prepare(",
+        "window.start(",
     ] {
         let at = waking
             .find(effect)
@@ -12805,11 +12826,20 @@ fn a_resume_is_judged_before_anything_of_the_wake_happens() {
             "{effect} happens before the conversation is judged:\n{waking}"
         );
     }
-    assert_eq!(
-        waking.matches("state.take_term_id()").count(),
-        1,
-        "the claim names a different term than the pane is opened under"
-    );
+    // The window's own effects happen only through those two, after the
+    // judgment: the keychain, the trust mark, the spawn.
+    let window_effects = block_after(board, "impl WakeWindow for ResumeDoor<'_> {");
+    for effect in [
+        "account_env_for(",
+        "agent_trust_presets::mark_workspace_trusted(",
+        "open_zo_pane_process(",
+        "PtyLane::spawn(",
+    ] {
+        assert!(
+            !waking.contains(effect) && window_effects.contains(effect),
+            "{effect} is reached some other way than the window's launch:\n{waking}"
+        );
+    }
     let window = window_source();
     for second_rule in [
         "wakesInFlight",
@@ -12835,30 +12865,31 @@ fn a_resume_is_judged_before_anything_of_the_wake_happens() {
 #[test]
 fn a_wake_is_told_to_go_on_only_by_the_goodbyes_word_about_a_worker() {
     let board = include_str!("cmd/board.rs");
-    let resuming = block_after(board, "pub(crate) fn resume_session(");
-    let (signature, _) = resuming
+    let door = block_after(board, "pub(crate) fn resume_session(");
+    let (signature, _) = door
         .split_once(") -> Result<ConversationWake, String> {")
         .expect("the resume command's signature");
     assert!(
         !signature.contains("interrupted"),
         "the door's mid-turn mark is a wire field of the resume road again:\n{signature}"
     );
+    let resuming = block_after(board, "pub(crate) fn wake_conversation<");
     let sleeper = resuming
         .find("crate::orchestration::sleeper_awaiting(")
         .expect("the wake no longer asks which sleeper this conversation is");
     let nudge = resuming
         .find("let nudge = reseating.as_deref().and_then(|worker| {\n        restart_nudge_runtime::worker_nudge(")
         .expect("the nudge is no longer the one policy, asked for a sleeper only");
-    let armed = resuming
-        .find("restart_nudge_runtime::register_wake(")
-        .expect("the receipt is no longer armed on the resume road");
+    let placed = resuming
+        .find("restart_nudge_runtime::place_words(")
+        .expect("the words are no longer placed on the resume road");
     assert!(
-        sleeper < nudge && nudge < armed,
-        "the sleeper must be known before the nudge, and the nudge before the receipt:\n{resuming}"
+        sleeper < nudge && nudge < placed,
+        "the sleeper must be known before the nudge, and the nudge before it is placed:\n{resuming}"
     );
     assert!(
-        resuming.contains("let marked = nudge.is_some();"),
-        "the receipt is armed on something other than the words:\n{resuming}"
+        resuming.contains("(Some(worker), Some(words)) => {"),
+        "words are placed for something other than a sleeper's goodbye:\n{resuming}"
     );
     let orchestration = include_str!("orchestration.rs");
     let reseating = block_after(orchestration, "pub(crate) fn reseat_sleeping(");
@@ -12870,7 +12901,7 @@ fn a_wake_is_told_to_go_on_only_by_the_goodbyes_word_about_a_worker() {
     let nudging = include_str!("restart_nudge_runtime.rs");
     let policy = block_after(nudging, "pub(super) fn worker_nudge(");
     assert!(
-        policy.contains("restart_census::take_cut(root, worker)")
+        policy.contains("restart_census::peek_cut(root, worker)")
             && policy.contains("if !cut.any() {\n        return None;"),
         "the policy reads something other than the goodbye's note:\n{policy}"
     );
@@ -13069,12 +13100,12 @@ fn a_restored_zo_pane_reopens_its_private_channel() {
             && fresh.contains("attach_zo_pane_channel("),
         "an old durable record still relaunches bare `zo`:\n{fresh}"
     );
-    let resumed = block_after(board, "pub(crate) fn resume_session(");
+    let resumed = block_after(board, "impl WakeWindow for ResumeDoor<'_> {");
     assert!(
         resumed.contains("caps.spawn == SpawnRoad::SocketPane")
             && resumed.contains("open_zo_pane_process(")
             && resumed.contains("attach_zo_pane_channel(")
-            && resumed.contains("Some(&session.id)"),
+            && resumed.contains("Some(&session_id)"),
         "a durable Zo session still resumes without its private channel:\n{resumed}"
     );
     let closing = block_after(shipped_backend(), "fn forget_term_state(");

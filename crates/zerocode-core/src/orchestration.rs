@@ -3888,12 +3888,12 @@ pub const NOT_RESUMED: &str =
     "the window restarted and nothing resumed this worker's conversation within the grace";
 
 /// The final word an ending is to the askers of the worker it ended: a
-/// terminal that died or a sleeper nobody resumed EXITED, and everything
+/// terminal that died or a sleeper the restart lost EXITED, and everything
 /// else — a stop, an abandon — is its coordinator CANCELLING it. Read off
 /// the ending's own sentence, which is the one fact both roads already
 /// carry, so a third spelling of "why" never has to be kept in step.
 fn ending_news(reason: &str) -> ReceiverNews {
-    if reason == TERMINAL_EXITED || reason == NOT_RESUMED {
+    if reason == TERMINAL_EXITED || RESTART_LOSSES.contains(&reason) {
         ReceiverNews::Exited
     } else {
         ReceiverNews::Cancelled
@@ -3905,6 +3905,29 @@ fn ending_news(reason: &str) -> ReceiverNews {
 /// launch in its place would be an empty conversation where the work was.
 pub const NO_SESSION_RECORDED: &str = "the window restarted and this worker's conversation was \
      never recorded, so there was nothing to resume";
+
+/// Why a sleeper whose recorded conversation file is not on disk is written
+/// down as it is (t-7812): its agent would be resumed into a conversation it
+/// cannot find, and the pane would die a second later or come up empty.
+pub const CONVERSATION_FILE_GONE: &str = "the window restarted and this worker's conversation \
+     file is not on disk, so there was nothing to resume";
+
+/// Why a sleeper whose conversation this window has no way to resume is
+/// written down as it is (t-7812): a fresh launch in its place would be a new
+/// conversation where the work was, told nothing of it.
+pub const RESUME_UNSUPPORTED: &str = "the window restarted and this worker's conversation is \
+     one this window cannot resume";
+
+/// Every ending a window restart gives a sleeper it could not bring back
+/// (t-3058, t-7812) — in one table, because an asker waiting on that worker
+/// hears each of them the same way ([`ending_news`]): the restart lost it,
+/// nobody cancelled it.
+const RESTART_LOSSES: [&str; 4] = [
+    NOT_RESUMED,
+    NO_SESSION_RECORDED,
+    CONVERSATION_FILE_GONE,
+    RESUME_UNSUPPORTED,
+];
 
 /// Whether a `worker_done` says the work succeeded.
 ///
@@ -11394,6 +11417,41 @@ impl Ledger {
         worker.adopted_by = adopted_by.or(worker.adopted_by);
         self.bind(&new_binding, &run_id);
         Some(worker_id)
+    }
+
+    /// The pane a witness seated a sleeper in never started (t-7812): the
+    /// sleeper goes back to sleep as the goodbye left it — dispatch open,
+    /// task dispatched, attempt unspent — so the next road that asks, the
+    /// ledger's reseat or another door, brings it back.
+    ///
+    /// The window seats a sleeper's conversation before its process starts
+    /// ([`Self::worker_pane_resumed`]), so nothing in that pane can type or
+    /// report before the seat is durable; a spawn the host then refused
+    /// leaves a seat nobody sits in, and a worker written down as seated in
+    /// it would be ended by the reconciler for a pane that never was. Only
+    /// that seat goes: the row must still be active in it. Whether the seat
+    /// is open is the caller's question to answer first — the pane table is
+    /// not the ledger's to read.
+    ///
+    /// Answers whether the sleeper went back.
+    pub fn resumed_pane_never_started(&mut self, worker_id: &str) -> bool {
+        let Ok((run_at, worker_at)) = self.locate(worker_id) else {
+            return false;
+        };
+        let run_id = self.runs[run_at].id.clone();
+        let worker = &mut self.runs[run_at].workers[worker_at];
+        if worker.state != WorkerState::Active {
+            return false;
+        }
+        worker.state = WorkerState::Sleeping;
+        let seat = format!("{}/{}", worker.team, worker.pane);
+        // The seat's address named this run only for the pane that never
+        // started; a later occupant's binding is not this road's to drop.
+        if self.bound_run(&seat) == Some(run_id.as_str()) {
+            self.bound.retain(|(caller, _)| caller != &seat);
+            self.binding_revisions.retain(|(caller, _)| caller != &seat);
+        }
+        true
     }
 
     /// A sleeper the grace ran out on: nothing resumed its conversation, so

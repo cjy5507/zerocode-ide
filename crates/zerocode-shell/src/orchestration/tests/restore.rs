@@ -6,13 +6,47 @@
 //! typed at a worker whose turn had ended.
 //!
 //! Everything here drives the production doors of a private window — its
-//! real actor and store — through a host that writes down what the roads did
-//! through it. It speaks only the host surface every window has, so the same
-//! file runs against the product before t-7812: that run is the red.
+//! real actor and store — through hosts that write down what the roads did
+//! through them: the ledger's reseat through [`Restoring`], a door's wake
+//! (`wake_conversation`, the body of `resume_session`) through the fake
+//! launcher in `restore_door.rs`. A CLI counted here is one a real entry
+//! point started (t-7812 r2): nothing is seated or resumed by hand.
 
+use super::restore_door::{Door, coordinator_back, the_next_boot};
 use super::*;
+use crate::conversation_wake::ConversationWake;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+/// The order things happened in across every road of one restore (t-7812
+/// F): each host's events on one line, in the order they landed.
+#[derive(Default)]
+pub(super) struct Timeline(Mutex<Vec<String>>);
+
+impl Timeline {
+    pub(super) fn mark(&self, what: String) {
+        self.0.lock().unwrap().push(what);
+    }
+
+    pub(super) fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// The worker the ledger holds live in the seat `term` is, if any — read at
+/// the moment a host sees something happen there.
+pub(super) fn worker_on(term: u32) -> Option<String> {
+    let seat = crate::agent_teams::teams().iter().find_map(|(id, team)| {
+        team.panes()
+            .find(|pane| pane.term == term)
+            .map(|pane| (id.clone(), pane.id.clone()))
+    })?;
+    the_rows()
+        .workers
+        .into_iter()
+        .find(|worker| worker.team == seat.0 && worker.pane == seat.1 && worker.state.is_live())
+        .map(|worker| worker.id)
+}
 
 /// A host that writes down what the restore roads did through it: the panes
 /// cut, and the words typed into each. `during_split` runs inside a cut,
@@ -22,8 +56,14 @@ pub(super) struct Restoring {
     returned_actor: Option<(u32, String)>,
     next: AtomicU32,
     pub(super) cut: Mutex<Vec<(u32, String)>>,
-    typed: Mutex<Vec<(u32, String)>>,
+    pub(super) typed: Mutex<Vec<(u32, String)>>,
     pub(super) during_split: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// How many of the next cuts the host refuses — a pty table that is
+    /// full, a fork the kernel will not make: nothing starts.
+    refusing: AtomicU32,
+    /// Where this host's cuts and keys are written in order, beside the
+    /// other roads' (t-7812 F).
+    pub(super) timeline: Mutex<Option<Arc<Timeline>>>,
 }
 
 impl Restoring {
@@ -39,6 +79,14 @@ impl Restoring {
             cut: Mutex::new(Vec::new()),
             typed: Mutex::new(Vec::new()),
             during_split: Mutex::new(None),
+            refusing: AtomicU32::new(0),
+            timeline: Mutex::new(None),
+        }
+    }
+
+    fn mark(&self, what: String) {
+        if let Some(timeline) = self.timeline.lock().unwrap().as_ref() {
+            timeline.mark(what);
         }
     }
 
@@ -46,7 +94,12 @@ impl Restoring {
         self.cut.lock().unwrap().clone()
     }
 
-    fn typed_at(&self, term: u32) -> Vec<String> {
+    /// Refuse the next `count` cuts.
+    pub(super) fn refuse_splits(&self, count: u32) {
+        self.refusing.store(count, Ordering::SeqCst);
+    }
+
+    pub(super) fn typed_at(&self, term: u32) -> Vec<String> {
         self.typed
             .lock()
             .unwrap()
@@ -69,16 +122,29 @@ impl Host for Restoring {
         token: &str,
     ) -> Option<u32> {
         let _ = crate::agent_teams::take_worker_host_ask(token);
+        if self
+            .refusing
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return None;
+        }
         crate::agent_teams::place_seat_checkout(token, self.checkout.clone());
         if let Some(during) = self.during_split.lock().unwrap().as_ref() {
             during();
         }
         let term = self.next.fetch_add(1, Ordering::SeqCst);
         self.cut.lock().unwrap().push((term, command.to_string()));
+        self.mark(format!("cut t{term}"));
         Some(term)
     }
     fn send(&self, term: u32, text: &str) -> bool {
         self.typed.lock().unwrap().push((term, text.to_string()));
+        if self.timeline.lock().unwrap().is_some() {
+            self.mark(format!("typed t{term} seated={:?}", worker_on(term)));
+        }
         true
     }
     fn capture(&self, _term: u32) -> Option<String> {
@@ -320,11 +386,15 @@ fn a_taken_over_sleeper_comes_back_through_the_ledgers_reseat_as_the_same_worker
 }
 
 /// t-7812 A/B, astra's rendezvous: one conversation comes back once when a
-/// door (a sidebar row, a restored tab — `resume_session`) and the ledger's
-/// reseat reach it together, in either order. The door's wake claims the
-/// conversation before it spawns; the reseat asks the same claim. Before,
-/// the reseat never asked, and whichever came second put a second process
-/// on the transcript.
+/// door (a sidebar row, a restored tab — `resume_session`'s own road,
+/// `wake_conversation`) and the ledger's reseat reach it together, in either
+/// order, each arriving inside the other's run. Door first: the coordinator
+/// comes back while the door's wake is building its pane — after its claim,
+/// before its seat — and its reseat cuts nothing; the door's pane is the
+/// worker, seated before its process starts. Ledger first: a door arrives
+/// while the reseat is cutting the pane, is told the conversation is
+/// already coming back, and starts nothing. Before, the reseat never asked,
+/// and whichever came second put a second process on the transcript.
 #[test]
 fn a_door_and_the_ledgers_reseat_bring_one_conversation_back_once_in_either_order() {
     const OLD_LEADER: u32 = 278_140;
@@ -334,13 +404,13 @@ fn a_door_and_the_ledgers_reseat_bring_one_conversation_back_once_in_either_orde
     for door_first in [true, false] {
         let (_window, _store) = PrivateWindow::boot();
         let checkout = tempfile::tempdir().expect("the worker's checkout");
-        let host = Restoring::new(
+        let host = Arc::new(Restoring::new(
             checkout.path(),
             WORKER,
             (NEW_LEADER, test_actor(OLD_LEADER)),
-        );
+        ));
         let name = if door_first { "door" } else { "ledger" };
-        let (team, _run) = a_run(&host, OLD_LEADER, name);
+        let (team, _run) = a_run(&*host, OLD_LEADER, name);
         let session = if door_first {
             "session-t7812-door-first"
         } else {
@@ -349,98 +419,64 @@ fn a_door_and_the_ledgers_reseat_bring_one_conversation_back_once_in_either_orde
         let (_task, worker, term) = a_worker(&host, &team, "--agent codex", Some(session));
         let before = row(&worker);
         the_window_goes(&census_without_commands, &[term]);
+        the_next_boot(OLD_LEADER);
         host.cut.lock().unwrap().clear();
-        let key = zerocode_core::conversation_key(
-            "codex",
-            &zerocode_core::ProviderSession {
-                key: zerocode_core::SessionKey::SessionId,
-                id: session.to_string(),
-                transcript_path: None,
-            },
-        )
-        .expect("a codex conversation");
+        let door = Arc::new(Door::new(checkout.path()));
 
         if door_first {
-            let door = crate::conversation_wake::WAKES
-                .claim(key, DOOR, |_| None)
-                .expect("the door's claim");
+            let reseating = Arc::clone(&host);
+            let reseated: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+            let counted = Arc::clone(&reseated);
+            *door.during_prepare.lock().unwrap() = Some(Box::new(move || {
+                *counted.lock().unwrap() =
+                    Some(coordinator_back(&*reseating, name, OLD_LEADER, NEW_LEADER));
+            }));
             assert_eq!(
-                the_coordinator_returns(&host, name, OLD_LEADER, NEW_LEADER),
-                0,
+                door.wake(DOOR, "codex", session),
+                Ok(ConversationWake::opened(DOOR))
+            );
+            assert_eq!(
+                *reseated.lock().unwrap(),
+                Some(0),
                 "the ledger cut a pane for a conversation a door was opening"
             );
             assert!(host.cuts().is_empty(), "{:?}", host.cuts());
-            assert_eq!(row(&worker).state, WorkerState::Sleeping);
-            drop(door);
-            // The door's pane is up: it seats the sleeper as its witness.
-            seat_a_team(&format!("team-t7812-door-{DOOR}"), DOOR);
             assert_eq!(
-                super::super::pane_resumed(
-                    DOOR,
-                    &checkout.path().to_string_lossy(),
-                    "codex",
-                    session,
-                    clock()
-                )
-                .as_deref(),
-                Some(worker.as_str())
+                door.seated_at_start(DOOR).as_deref(),
+                Some(worker.as_str()),
+                "the door's process started before its seat"
             );
-            assert_eq!(
-                super::super::reseat_sleeping(
-                    &host,
-                    Vec::new(),
-                    NEW_LEADER,
-                    Some(&test_actor(OLD_LEADER))
-                ),
-                0
-            );
-            crate::agent_teams::forget_term(DOOR);
         } else {
-            let asked: Arc<Mutex<Option<Result<(), u32>>>> = Arc::new(Mutex::new(None));
-            let asking = Arc::clone(&asked);
+            let asking = Arc::clone(&door);
+            let asked: Arc<Mutex<Option<Result<ConversationWake, String>>>> =
+                Arc::new(Mutex::new(None));
+            let answered = Arc::clone(&asked);
             *host.during_split.lock().unwrap() = Some(Box::new(move || {
-                *asking.lock().unwrap() = Some(
-                    crate::conversation_wake::WAKES
-                        .claim(key.clone(), DOOR, |_| None)
-                        .map(drop),
-                );
+                *answered.lock().unwrap() = Some(asking.wake(DOOR, "codex", session));
             }));
+            assert_eq!(coordinator_back(&*host, name, OLD_LEADER, NEW_LEADER), 1);
             assert_eq!(
-                the_coordinator_returns(&host, name, OLD_LEADER, NEW_LEADER),
-                1
+                *asked.lock().unwrap(),
+                Some(Ok(ConversationWake::standing(0))),
+                "a door asking while the ledger cut the pane was not told it was coming back"
             );
-            assert!(
-                matches!(*asked.lock().unwrap(), Some(Err(_))),
-                "a door asking while the ledger cut the pane was told the conversation was free: {:?}",
-                asked.lock().unwrap()
-            );
-            // The door that asks after the reseat finds its witness taken.
-            seat_a_team(&format!("team-t7812-door-{DOOR}"), DOOR);
-            assert_eq!(
-                super::super::pane_resumed(
-                    DOOR,
-                    &checkout.path().to_string_lossy(),
-                    "codex",
-                    session,
-                    clock()
-                ),
-                None
-            );
-            crate::agent_teams::forget_term(DOOR);
+            assert!(door.started().is_empty(), "{:?}", door.started());
         }
         let back = row(&worker);
         assert_eq!(back.state, WorkerState::Active, "door first: {door_first}");
         assert_eq!(back.dispatch, before.dispatch);
         assert_eq!(
-            host.cuts().len(),
-            usize::from(!door_first),
-            "door first: {door_first}: {:?}",
-            host.cuts()
+            host.cuts().len() + door.started().len(),
+            1,
+            "door first: {door_first}: one conversation, one process: {:?} {:?}",
+            host.cuts(),
+            door.started()
         );
         assert!(deaths_of(&worker).is_empty());
         for (term, _) in host.cuts() {
             crate::agent_teams::forget_term(term);
         }
+        crate::agent_teams::forget_term(DOOR);
         crate::agent_teams::forget_term(NEW_LEADER);
     }
 }
@@ -472,11 +508,11 @@ fn a_reseated_worker_is_told_to_go_on_only_when_the_goodbye_cut_its_turn() {
         );
         match shape {
             "mid-turn" => {
-                super::super::pane_turn_began(term);
+                super::super::pane_turn_began(term, clock());
                 the_window_goes(&census_without_commands, &[term]);
             }
             "at-rest" => {
-                super::super::pane_turn_began(term);
+                super::super::pane_turn_began(term, clock());
                 super::super::pane_turn_ended(term, clock(), false, clock());
                 the_window_goes(&census_without_commands, &[term]);
             }
@@ -489,6 +525,7 @@ fn a_reseated_worker_is_told_to_go_on_only_when_the_goodbye_cut_its_turn() {
                         .get()
                         .expect("the window's data root"),
                     &restart_census::RestartCensus::default(),
+                    &|_| false,
                 )
                 .expect("no note left");
                 crate::agent_teams::forget_term(term);
@@ -583,37 +620,61 @@ fn a_sleeper_that_recorded_no_conversation_is_told_once_and_nothing_starts_in_it
     crate::agent_teams::forget_term(NEW_LEADER);
 }
 
+/// The road a manifest row comes back by (t-7812 F).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum Road {
+    /// The ledger's reseat cuts it a pane.
+    Ledger,
+    /// A door — a restored tab, a sidebar row — wakes it.
+    Door,
+    /// Nothing can: its run is told why, once.
+    Told,
+}
+
 /// One row of the restore manifest (t-7812 F).
 struct Leaf {
     agent: &'static str,
     session: Option<&'static str>,
     /// `None` for a person's own tab.
     worker: Option<String>,
+    road: Road,
 }
 
 /// t-7812 F: eight agent tabs before the restart — Claude 4, Codex 3, one
 /// worker whose conversation was never recorded; five of them workers —
 /// and one finished worker whose conversation a person's tab still holds.
-/// After it: seven conversations resumed, no empty CLI, the four workers
-/// with a conversation bound as themselves, the fifth told once, the
-/// finished dispatch not revived, and the continuation typed only where
-/// the goodbye cut something. The tally is printed for the report before
-/// anything is asserted, so the run before the fix prints its own numbers.
+/// Every tab comes back by a real road: the ledger's reseat for the panes
+/// it seated (`reseat_sleeping`, cutting through [`Restoring`]), and a door
+/// for the tabs the window kept (`wake_conversation`, the whole of
+/// `resume_session` but the terminal, through `restore_door`'s fake
+/// launcher) — and the two race, the coordinator returning while W4's door
+/// is building its pane. After it: seven conversations resumed, every one
+/// started by a real entry point and none made by hand, no empty CLI and no
+/// pane outside the layout, the four workers with a conversation bound as
+/// themselves and each seated before its words, the fifth told once, the
+/// finished dispatch not revived, and the continuation typed only where the
+/// goodbye cut something. The tally and the order of events are printed for
+/// the report before anything is asserted, so a red run prints its own.
 #[test]
 fn eight_tabs_come_back_as_seven_conversations_and_one_notice() {
     const OLD_LEADER: u32 = 278_200;
     const FIRST_WORKER: u32 = 278_201;
     const NEW_LEADER: u32 = 278_220;
-    const PERSON: u32 = 278_230;
+    const W4_DOOR: u32 = 278_233;
+    const P1_DOOR: u32 = 278_234;
+    const P2_DOOR: u32 = 278_235;
+    const W6_DOOR: u32 = 278_236;
     const ROOT: u32 = 78_120;
     let (_window, _store) = PrivateWindow::boot();
+    let _beat = one_beat_at_a_time();
     let checkout = tempfile::tempdir().expect("the workers' checkout");
-    let host = Restoring::new(
+    let timeline = Arc::new(Timeline::default());
+    let host = Arc::new(Restoring::new(
         checkout.path(),
         FIRST_WORKER,
         (NEW_LEADER, test_actor(OLD_LEADER)),
-    );
-    let (team, _run) = a_run(&host, OLD_LEADER, "manifest");
+    ));
+    let (team, _run) = a_run(&*host, OLD_LEADER, "manifest");
     let claude = "--agent claude --model claude-fable-5-1 --effort xhigh";
     let codex = "--agent codex --model gpt-6-sol --effort high";
     let summon =
@@ -631,7 +692,7 @@ fn eight_tabs_come_back_as_seven_conversations_and_one_notice() {
     super::super::pane_taken_over(w1.2, clock());
     super::super::pane_taken_over(w4.2, clock());
     say(
-        &host,
+        &*host,
         &team,
         &format!("worker-stop --worker {} --reason finished", w6.1),
     );
@@ -641,41 +702,49 @@ fn eight_tabs_come_back_as_seven_conversations_and_one_notice() {
             agent: "claude",
             session: Some("7812a0c1-0000-4000-8000-0000000000a1"),
             worker: Some(w1.1.clone()),
+            road: Road::Ledger,
         },
         Leaf {
             agent: "claude",
             session: Some("7812a0c1-0000-4000-8000-0000000000a2"),
             worker: Some(w2.1.clone()),
+            road: Road::Ledger,
         },
         Leaf {
             agent: "codex",
             session: Some("session-t7812-manifest-w3"),
             worker: Some(w3.1.clone()),
+            road: Road::Ledger,
         },
         Leaf {
             agent: "codex",
             session: Some("session-t7812-manifest-w4"),
             worker: Some(w4.1.clone()),
+            road: Road::Door,
         },
         Leaf {
             agent: "codex",
             session: None,
             worker: Some(w5.1.clone()),
+            road: Road::Told,
         },
         Leaf {
             agent: "claude",
             session: Some("7812a0c1-0000-4000-8000-0000000000p1"),
             worker: None,
+            road: Road::Door,
         },
         Leaf {
             agent: "claude",
             session: Some("7812a0c1-0000-4000-8000-0000000000p2"),
             worker: None,
+            road: Road::Door,
         },
         Leaf {
             agent: "codex",
             session: Some("session-t7812-manifest-w6"),
             worker: None,
+            road: Road::Door,
         },
     ];
     let dispatches: Vec<Option<String>> = [&w1, &w2, &w3, &w4]
@@ -684,7 +753,7 @@ fn eight_tabs_come_back_as_seven_conversations_and_one_notice() {
         .collect();
 
     // The goodbye reads W2 mid-turn and a gate running under W3's pane.
-    super::super::pane_turn_began(w2.2);
+    super::super::pane_turn_began(w2.2, clock());
     let listing = format!(
         "501 {ROOT} 1 {ROOT} 0 1 Thu Sep 24 01:00:00 2026 node /opt/homebrew/bin/codex resume s\n\
          501 78121 {ROOT} {ROOT} 0 1 Thu Sep 24 01:00:00 2026 /opt/codex/vendor/bin/codex resume s\n\
@@ -698,58 +767,82 @@ fn eight_tabs_come_back_as_seven_conversations_and_one_notice() {
             ))
         })
     };
+    timeline.mark("goodbye".to_string());
     the_window_goes(&census, &[w1.2, w2.2, w3.2, w4.2, w5.2, w6.2]);
+    the_next_boot(OLD_LEADER);
+    timeline.mark("boot".to_string());
     host.cut.lock().unwrap().clear();
     host.typed.lock().unwrap().clear();
+    *host.timeline.lock().unwrap() = Some(Arc::clone(&timeline));
+    let door = Door::new(checkout.path());
+    *door.timeline.lock().unwrap() = Some(Arc::clone(&timeline));
 
-    // A person's door reopens W4's conversation before the coordinator is
-    // back: its wake holds the conversation while its pane opens.
-    let w4_key = zerocode_core::conversation_key(
-        "codex",
-        &zerocode_core::ProviderSession {
-            key: zerocode_core::SessionKey::SessionId,
-            id: "session-t7812-manifest-w4".to_string(),
-            transcript_path: None,
-        },
-    )
-    .expect("a codex conversation");
-    let door = crate::conversation_wake::WAKES
-        .claim(w4_key, PERSON + 3, |_| None)
-        .expect("the door's claim");
-    let reseated = the_coordinator_returns(&host, "manifest", OLD_LEADER, NEW_LEADER);
-    drop(door);
-    // The window's own roads for the tabs it kept: the door's pane for W4,
-    // and the person's three tabs, each resumed and each asked as a witness.
-    let checkout_words = checkout.path().to_string_lossy().into_owned();
-    let mut window_resumed = Vec::new();
-    let mut witnessed = Vec::new();
-    for (at, (agent, session)) in [
-        ("codex", "session-t7812-manifest-w4"),
-        ("claude", "7812a0c1-0000-4000-8000-0000000000p1"),
-        ("claude", "7812a0c1-0000-4000-8000-0000000000p2"),
-        ("codex", "session-t7812-manifest-w6"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let term = PERSON + u32::try_from(at).expect("four tabs") + 3;
-        seat_a_team(&format!("team-t7812-person-{term}"), term);
-        window_resumed.push(session);
-        witnessed.push(super::super::pane_resumed(
-            term,
-            &checkout_words,
-            agent,
-            session,
-            clock(),
+    // The window's doors for the four tabs it kept, and the coordinator
+    // coming back while W4's is building its pane: the two roads race in
+    // one run.
+    let reseating = Arc::clone(&host);
+    let noting = Arc::clone(&timeline);
+    let reseated: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+    let counted = Arc::clone(&reseated);
+    let w5_worker = w5.1.clone();
+    *door.during_prepare.lock().unwrap() = Some(Box::new(move || {
+        noting.mark("coordinator back".to_string());
+        *counted.lock().unwrap() = Some(coordinator_back(
+            &*reseating,
+            "manifest",
+            OLD_LEADER,
+            NEW_LEADER,
         ));
+        for told in deaths_of(&w5_worker) {
+            noting.mark(format!("told {w5_worker}: {}", told["reason"]));
+        }
+    }));
+    let mut woke = Vec::new();
+    for (at, (agent, session)) in [
+        (W4_DOOR, ("codex", "session-t7812-manifest-w4")),
+        (P1_DOOR, ("claude", "7812a0c1-0000-4000-8000-0000000000p1")),
+        (P2_DOOR, ("claude", "7812a0c1-0000-4000-8000-0000000000p2")),
+        (W6_DOOR, ("codex", "session-t7812-manifest-w6")),
+    ] {
+        woke.push((at, door.wake(at, agent, session)));
     }
+    door.settle();
+    // The grace comes and finds nobody left asleep.
+    let _boot = BootedHere::at(clock() - zerocode_core::orchestration::RESEAT_GRACE_MS);
+    super::super::tick(&*host, &[], clock());
+    timeline.mark("grace".to_string());
 
     let rows = the_rows();
     let cuts = host.cuts();
-    let blank = cuts
+    let started: Vec<(u32, String, Road)> = cuts
         .iter()
-        .filter(|(_, command)| !(command.contains("--resume") || command.contains(" resume ")))
+        .map(|(term, command)| (*term, command.clone(), Road::Ledger))
+        .chain(
+            door.started()
+                .into_iter()
+                .map(|(term, command)| (term, command, Road::Door)),
+        )
+        .collect();
+    let resumed = |command: &str| command.contains("--resume") || command.contains(" resume ");
+    let blank = started
+        .iter()
+        .filter(|(_, command, _)| !resumed(command))
         .count();
+    let of_row = |command: &str| {
+        manifest.iter().position(|leaf| {
+            leaf.session
+                .is_some_and(|session| command.contains(session))
+        })
+    };
+    let outside = started
+        .iter()
+        .filter(|(_, command, _)| of_row(command).is_none())
+        .count();
+    let sessions: Vec<usize> = started
+        .iter()
+        .filter_map(|(_, command, _)| of_row(command))
+        .collect();
+    let distinct: std::collections::HashSet<usize> = sessions.iter().copied().collect();
     let bound: Vec<bool> = [&w1, &w2, &w3, &w4]
         .iter()
         .zip(&dispatches)
@@ -758,113 +851,157 @@ fn eight_tabs_come_back_as_seven_conversations_and_one_notice() {
             now.state == WorkerState::Active && &now.dispatch == dispatch
         })
         .collect();
-    // The pane that came back as W4 reports as W4; a person's own tab,
-    // which no sleeper was, cannot report for anybody.
-    let done_from = |term: u32| {
-        run(
-            &host,
-            Vec::new(),
-            &format!("team-t7812-person-{term}"),
-            zerocode_core::agent_teams::LEADER_PANE,
-            TEST_CAPABILITY,
-            &words("send --type worker_done --body {\"ok\":true,\"summary\":\"landed\"}"),
-            clock(),
-        )
-        .exit_code
+    let term_of = |at: usize| {
+        started
+            .iter()
+            .find(|(_, command, _)| of_row(command) == Some(at))
+            .map(|(term, _, road)| (*term, *road))
     };
-    let done_accepted = done_from(PERSON + 3) == 0;
-    let done_refused = done_from(PERSON + 4) != 0;
-
-    let sessions: Vec<&str> = cuts
-        .iter()
-        .flat_map(|(_, command)| {
-            manifest
+    // Words typed at each row's pane that reached it, by whichever road.
+    let told_at = |term: u32| host.typed_at(term).len() + door.typed(term).1.len();
+    let nudged: Vec<Option<usize>> = (0..manifest.len())
+        .map(|at| term_of(at).map(|(term, _)| told_at(term)))
+        .collect();
+    // The door's worker: seated before its process started. The ledger's:
+    // typed at only once the pane was already its seat.
+    let seated_first: Vec<bool> = std::iter::once(
+        term_of(3).is_some_and(|(term, _)| door.seated_at_start(term) == manifest[3].worker),
+    )
+    .chain([1usize, 2].iter().map(|&at| {
+        term_of(at).is_some_and(|(term, _)| {
+            let seated = format!(
+                "seated={:?}",
+                manifest[at].worker.as_deref().map(str::to_string)
+            );
+            timeline
+                .lines()
                 .iter()
-                .filter_map(|leaf| leaf.session)
-                .filter(move |session| command.contains(session))
+                .filter(|line| line.starts_with(&format!("typed t{term} ")))
+                .all(|line| line.ends_with(&seated))
         })
-        .chain(window_resumed.iter().copied())
-        .collect();
-    let distinct: std::collections::HashSet<&str> = sessions.iter().copied().collect();
-    let nudged: Vec<usize> = cuts
-        .iter()
-        .map(|(term, _)| host.typed_at(*term).len())
-        .collect();
+    }))
+    .collect();
     let died_now: usize = [&w1, &w2, &w3, &w4, &w5]
         .iter()
         .map(|(_, worker, _)| deaths_of(worker).len())
         .sum();
     let finished = row(&w6.1);
     let finished_revived = finished.state.is_live() || finished.dispatch != w6_dispatch;
+    let order: std::collections::BTreeMap<String, Vec<String>> = manifest
+        .iter()
+        .enumerate()
+        .map(|(at, leaf)| {
+            let label = leaf
+                .worker
+                .clone()
+                .unwrap_or_else(|| format!("person-{at}"));
+            let mine: Vec<String> = match term_of(at) {
+                Some((term, _)) => timeline
+                    .lines()
+                    .into_iter()
+                    .filter(|line| {
+                        line.contains(&format!("t{term} ")) || line.ends_with(&format!("t{term}"))
+                    })
+                    .collect(),
+                None => timeline
+                    .lines()
+                    .into_iter()
+                    .filter(|line| {
+                        leaf.worker
+                            .as_ref()
+                            .is_some_and(|worker| line.contains(worker.as_str()))
+                    })
+                    .collect(),
+            };
+            (label, mine)
+        })
+        .collect();
     let tally = serde_json::json!({
         "tabsBefore": manifest.len(),
         "workersBefore": manifest.iter().filter(|leaf| leaf.worker.is_some()).count(),
         "claude": manifest.iter().filter(|leaf| leaf.agent == "claude" && leaf.session.is_some()).count(),
         "codex": manifest.iter().filter(|leaf| leaf.agent == "codex" && leaf.session.is_some()).count(),
         "unrecorded": manifest.iter().filter(|leaf| leaf.session.is_none()).count(),
-        "ledgerReseated": reseated,
+        "roads": manifest.iter().map(|leaf| leaf.road).collect::<Vec<_>>(),
+        "ledgerReseated": *reseated.lock().unwrap(),
         "ledgerCuts": cuts.len(),
-        "windowResumed": window_resumed.len(),
-        "resumedCli": cuts.len() - blank + window_resumed.len(),
+        "doorSpawns": door.started().len(),
+        "doorAnswers": woke.iter().map(|(at, answer)| format!("t{at}: {answer:?}")).collect::<Vec<_>>(),
+        "synthetic": 0,
+        "resumedCli": started.len() - blank,
         "blankCli": blank,
+        "outsideLayout": outside,
+        "agentsStarted": started.len(),
         "bound": bound.iter().filter(|kept| **kept).count(),
-        "witnessSeated": witnessed.iter().filter(|seated| seated.is_some()).count(),
+        "seatedBeforeWords": seated_first,
         "diedNow": died_now,
         "unrecordedTold": deaths_of(&w5.1).len(),
         "duplicateSessions": sessions.len() - distinct.len(),
         "finishedRevived": usize::from(finished_revived),
-        "nudgedPerCut": nudged,
-        "workerDoneAccepted": usize::from(done_accepted),
-        "workerDoneRefused": usize::from(done_refused),
+        "nudgedPerRow": nudged,
         "gates": rows.gates.len(),
+        "order": order,
+        "timeline": timeline.lines(),
     });
     eprintln!("t-7812 F tally: {tally}");
 
+    // Reports, asked last — a report ends a task: every worker that came
+    // back reports done from its own pane; a person's tab reports for
+    // nobody.
+    let report_from = |term: u32| {
+        let seat = crate::agent_teams::teams().iter().find_map(|(id, team)| {
+            team.panes()
+                .find(|pane| pane.term == term)
+                .map(|pane| (id.clone(), pane.id.clone()))
+        });
+        seat.map_or(-1, |(team, pane)| {
+            let capability = crate::agent_teams::current_pane_capability(&team, &pane)
+                .unwrap_or_else(|| TEST_CAPABILITY.to_string());
+            super::restore_door::done_from(&*host, &team, &pane, &capability)
+        })
+    };
+    let accepted: Vec<i32> = [0usize, 1, 2, 3]
+        .iter()
+        .map(|&at| term_of(at).map_or(-1, |(term, _)| report_from(term)))
+        .collect();
+    let refused: Vec<i32> = [5usize, 6, 7]
+        .iter()
+        .map(|&at| term_of(at).map_or(0, |(term, _)| report_from(term)))
+        .collect();
+    eprintln!("t-7812 F reports: accepted {accepted:?} refused {refused:?}");
+
     assert_eq!(tally["resumedCli"], 7, "{tally}");
     assert_eq!(tally["blankCli"], 0, "{tally}");
+    assert_eq!(tally["outsideLayout"], 0, "{tally}");
+    assert_eq!(tally["ledgerCuts"], 3, "{tally}");
+    assert_eq!(tally["doorSpawns"], 4, "{tally}");
     assert_eq!(tally["bound"], 4, "{tally}");
     assert_eq!(
-        tally["witnessSeated"], 1,
-        "only W4's door is a sleeper's witness: {tally}"
+        tally["seatedBeforeWords"],
+        serde_json::json!([true, true, true]),
+        "a pane ran or was typed at before its seat: {tally}"
     );
     assert_eq!(tally["unrecordedTold"], 1, "{tally}");
     assert_eq!(tally["diedNow"], 1, "{tally}");
     assert_eq!(tally["duplicateSessions"], 0, "{tally}");
     assert_eq!(tally["finishedRevived"], 0, "{tally}");
-    assert_eq!(tally["workerDoneAccepted"], 1, "{tally}");
-    assert_eq!(tally["workerDoneRefused"], 1, "{tally}");
-    // W1 at rest, W2 mid-turn, W3 with its gate cut: two continuations.
-    let by_worker = |worker: &str| {
-        cuts.iter()
-            .find(|(_, command)| {
-                manifest
-                    .iter()
-                    .find(|leaf| leaf.worker.as_deref() == Some(worker))
-                    .and_then(|leaf| leaf.session)
-                    .is_some_and(|session| command.contains(session))
-            })
-            .map(|(term, _)| host.typed_at(*term).len())
-    };
+    // W1 at rest, W2 mid-turn, W3 with its gate cut, W4 at rest: two
+    // continuations; the persons' tabs none.
     assert_eq!(
-        by_worker(&w1.1),
-        Some(0),
-        "an idle worker was typed at: {tally}"
+        tally["nudgedPerRow"],
+        serde_json::json!([0, 1, 1, 0, null, 0, 0, 0]),
+        "{tally}"
     );
-    assert_eq!(
-        by_worker(&w2.1),
-        Some(1),
-        "the cut turn was not continued: {tally}"
+    assert!(
+        accepted.iter().all(|code| *code == 0),
+        "a worker that came back could not report done: {accepted:?}"
     );
-    assert_eq!(
-        by_worker(&w3.1),
-        Some(1),
-        "the cut gate was not named: {tally}"
+    assert!(
+        refused.iter().all(|code| *code != 0),
+        "a person's tab reported for a worker: {refused:?}"
     );
-    for (term, _) in &cuts {
+    for (term, _, _) in &started {
         crate::agent_teams::forget_term(*term);
-    }
-    for at in 0..4 {
-        crate::agent_teams::forget_term(PERSON + at + 3);
     }
     crate::agent_teams::forget_term(NEW_LEADER);
 }

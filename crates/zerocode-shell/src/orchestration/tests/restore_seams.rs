@@ -154,7 +154,8 @@ fn a_conversation_a_live_pane_already_holds_gets_no_second_pane() {
 }
 
 /// The one policy both roads ask (t-7812 E): words only for what the
-/// goodbye cut, and the note spent by the first wake that reads it.
+/// goodbye cut — and read, not spent (t-7812 R2): the note is spent by the
+/// wake that hands the words to a pane, and by nothing before it.
 #[test]
 fn a_wake_hears_only_what_the_goodbye_cut_and_hears_it_once() {
     let root = tempfile::tempdir().expect("a data root");
@@ -184,7 +185,7 @@ fn a_wake_hears_only_what_the_goodbye_cut_and_hears_it_once() {
         ],
         took_ms: 0,
     };
-    restart_census::leave_cut(root.path(), &census).expect("the goodbye's note");
+    restart_census::leave_cut(root.path(), &census, &|_| false).expect("the goodbye's note");
     let turn = crate::restart_nudge_runtime::worker_nudge(root.path(), "w-turn", None)
         .expect("the cut turn is continued");
     assert!(turn.starts_with(crate::RESTART_NUDGE), "{turn}");
@@ -204,6 +205,12 @@ fn a_wake_hears_only_what_the_goodbye_cut_and_hears_it_once() {
         "a turn that had ended was continued: {gate}"
     );
     assert!(gate.contains("`just gate`"), "{gate}");
+    assert_eq!(
+        crate::restart_nudge_runtime::worker_nudge(root.path(), "w-turn", None).as_deref(),
+        Some(turn.as_str()),
+        "reading the words spent them before any pane was told"
+    );
+    crate::restart_nudge_runtime::nudge_spent(root.path(), "w-turn");
     assert_eq!(
         crate::restart_nudge_runtime::worker_nudge(root.path(), "w-turn", None),
         None,
@@ -243,11 +250,13 @@ fn a_wake_hears_only_what_the_goodbye_cut_and_hears_it_once() {
         fn close(&self, _term: u32) {}
     }
     let keys = Keys(Mutex::new(Vec::new()));
-    assert!(super::super::deliver_continuation(&keys, 1, ""));
+    assert!(super::super::deliver_continuation(&keys, 1, "", "w-rest"));
     assert!(
         keys.0.lock().unwrap().is_empty(),
         "an empty continuation was typed"
     );
-    assert!(super::super::deliver_continuation(&keys, 1, "go on"));
+    assert!(super::super::deliver_continuation(
+        &keys, 1, "go on", "w-gate"
+    ));
     assert_eq!(*keys.0.lock().unwrap(), vec!["go on".to_string()]);
 }
