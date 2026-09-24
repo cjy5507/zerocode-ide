@@ -2324,22 +2324,9 @@ pub(crate) fn usage_login(env: &[(String, String)]) -> Option<(String, LoginFrom
     )
 }
 
-/// The same walk for ONE account that is not the selected one (t-7538).
-///
-/// Its own store, and only its own: the keychain item scoped to the
-/// account's directory, then the credentials file IN that directory. Never
-/// the runtime home — the runtime home's file is the copy [`materialize`]
-/// wrote for the SELECTED account, and a read of account B that fell back
-/// to it would ask the endpoint with A's token and file the answer under
-/// B's name (astra A1). A read that finds nothing answers `None`, and the
-/// caller reports the account as unreadable rather than as anybody's
-/// number.
-///
-/// A look, and only a look, like [`usage_login`]: nothing is seeded or
-/// written for an inactive account — the scan's [`prepare_selected_store`]
-/// seeds the selected store only, and a poll that wrote every account's
-/// keychain item on a timer is the dialog storm this file has already paid
-/// for once.
+/// [`account_login`]'s answer in the shape the selected account's reader
+/// gives, for the tests that compare the two readers.
+#[cfg(test)]
 pub(crate) fn usage_login_of_account(account: &ClaudeAccount) -> Option<(String, LoginFrom)> {
     match account_login(account) {
         AccountLogin::Found(login, from) => Some((login, from)),
@@ -2362,8 +2349,23 @@ pub(crate) enum AccountLogin {
     Missing,
 }
 
-/// [`usage_login_of_account`], with the refusal kept apart from the
-/// absence.
+/// The same walk as [`usage_login`], for ONE account that is not the
+/// selected one (t-7538).
+///
+/// Its own store, and only its own: the keychain item scoped to the
+/// account's directory, then the credentials file IN that directory. Never
+/// the runtime home — the runtime home's file is the copy [`materialize`]
+/// wrote for the SELECTED account, and a read of account B that fell back
+/// to it would ask the endpoint with A's token and file the answer under
+/// B's name (astra A1). A read that finds nothing says whether the keychain
+/// refused or the store is empty, and the caller reports the account as
+/// unreadable rather than as anybody's number.
+///
+/// A look, and only a look, like [`usage_login`]: nothing is seeded or
+/// written for an inactive account — the scan's [`prepare_selected_store`]
+/// seeds the selected store only, and a poll that wrote every account's
+/// keychain item on a timer is the dialog storm this file has already paid
+/// for once.
 pub(crate) fn account_login(account: &ClaudeAccount) -> AccountLogin {
     let dir = Path::new(&account.config_dir);
     let said = keychain_says(dir);

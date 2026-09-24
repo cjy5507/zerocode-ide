@@ -257,9 +257,7 @@ fn relaunch_keeps_permission(
         .permission_modes
         .iter()
         .find(|mode| mode.mode == starts_in)
-        .is_some_and(|mode| {
-            mode.mode == pane_mode || mode.aliases.iter().any(|alias| *alias == pane_mode)
-        });
+        .is_some_and(|mode| mode.mode == pane_mode || mode.aliases.contains(&pane_mode));
     if same {
         Ok(())
     } else {
