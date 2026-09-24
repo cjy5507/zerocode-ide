@@ -144,6 +144,24 @@ pub const fn verb(ring: Ring, interrupted: bool) -> &'static str {
     }
 }
 
+/// The ring a verb names — the verb table read backwards. `interrupted`
+/// is lost on the way back, as it is only a completion's one bit
+/// ([`verb`]): both `finished` and `stopped` name a completion. `None` for a
+/// word that is no verb of this table.
+///
+/// One reading for every replay that rebuilds a ring from a seed's verb
+/// (the notify seat's, the question search's): a second match on the four
+/// words would be a second table.
+#[must_use]
+pub fn from_verb(verb: &str) -> Option<Ring> {
+    match verb {
+        VERB_ATTENTION => Some(Ring::Attention),
+        VERB_FINISHED | VERB_STOPPED => Some(Ring::Completion),
+        VERB_PUSH => Some(Ring::Push),
+        _ => None,
+    }
+}
+
 /// Build the notice. Title is Orca's own sentence shape —
 /// "`{worktree} - {agent} needs input|finished|stopped`"
 /// (`main/ipc/notification-options.ts:56-71`) — and the body is the agent's
@@ -280,6 +298,20 @@ pub fn suppressed(pane_worktree: &str, active_worktree: &str, window_focused: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_verb_reads_back_to_the_ring_that_wore_it() {
+        for ring in Ring::ALL {
+            for interrupted in [false, true] {
+                assert_eq!(
+                    from_verb(verb(ring, interrupted)),
+                    Some(ring),
+                    "{ring:?} interrupted={interrupted}"
+                );
+            }
+        }
+        assert_eq!(from_verb("working"), None);
+    }
 
     /// Working rings nothing — progress is the board's job, and a ring per
     /// tool call is how notifications get turned off.

@@ -29,6 +29,8 @@ mod rerank_shadow;
 mod roads_tests;
 mod route_label;
 #[cfg(test)]
+mod question_discovery;
+#[cfg(test)]
 mod routing_replay;
 mod skill_search;
 mod shape;
