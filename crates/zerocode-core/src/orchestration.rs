@@ -9112,6 +9112,19 @@ impl Ledger {
                 if wall.wall != lift.wall || phase != WallPhase::Lifting {
                     return None;
                 }
+                if !matches!(
+                    read_lift(
+                        &worker.id,
+                        &wall,
+                        lift.since_ms,
+                        Some(lift.marker.clone()),
+                        Some(&lift.headroom),
+                        now_ms,
+                    ),
+                    LiftReading::Lifted(_)
+                ) {
+                    return None;
+                }
                 Some((
                     run.id.clone(),
                     serde_json::json!({
@@ -11994,8 +12007,13 @@ pub fn read_lift(
         return LiftReading::MovedOn;
     };
     let Some(held) = headroom.filter(|held| {
-        wall.resets_at_ms
-            .is_some_and(|at| held.updated_at_ms >= at && held.updated_at_ms <= now_ms)
+        // A failed refresh may carry a retained figure. Its fresh error
+        // timestamp is not a new observation of available quota.
+        held.status == "ok"
+            && held.failure_kind.is_none()
+            && wall
+                .resets_at_ms
+                .is_some_and(|at| held.updated_at_ms >= at && held.updated_at_ms <= now_ms)
     }) else {
         return LiftReading::Unread;
     };

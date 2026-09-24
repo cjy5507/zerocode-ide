@@ -12701,6 +12701,14 @@ fn a_lifted_wall_its_worker_stayed_stopped_at_is_told_once_under_a_wait() {
         ),
         LiftReading::StillWalled
     );
+    let mut failed = gauge("codex", 3, reset + 60_000, next_window);
+    failed.status = "error".into();
+    failed.failure_kind = Some(crate::usage_limit::FailureKind::Network);
+    assert_eq!(
+        read(words(), Some(failed)),
+        LiftReading::Unread,
+        "a failed usage read cannot prove that the provider lifted its wall"
+    );
     let LiftReading::Lifted(lift) = read(
         words(),
         Some(gauge("codex", 3, reset + 60_000, next_window)),
@@ -12708,6 +12716,14 @@ fn a_lifted_wall_its_worker_stayed_stopped_at_is_told_once_under_a_wait() {
         panic!("a number under the wall, read after the reset, did not lift it");
     };
     assert_eq!(lift.wall, wall.wall);
+    // A queued observation is rechecked at the ledger's own clock.
+    let mut future = lift.clone();
+    future.headroom.updated_at_ms = stops_standing + 1;
+    assert_eq!(
+        bench.ledger.workers_quota_lifted(&[future], stops_standing),
+        0,
+        "the ledger accepted a lift its usage witness cannot establish"
+    );
 
     assert_eq!(
         bench
