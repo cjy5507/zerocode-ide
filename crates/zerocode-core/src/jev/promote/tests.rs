@@ -1796,3 +1796,114 @@ fn a_ledgers_text_stands_where_its_series_does() {
     let torn = format!("{}{{\"at\": 9, \"transition\": \"fa", text(&named));
     assert_eq!(standing_in(second, &torn), Stand::Applying);
 }
+
+/// A rollback starts its own series and can rise again on it (t-6877, the
+/// brief precheck's exit): the guard's words went 1 → 2 → 1 — version 1's
+/// window, marks and rise, then version 2's, then the seat asks version 1
+/// again. Nothing of the old run revives: not its rise, not its requests,
+/// not its marks, not a late label of one of its requests — the series
+/// starts after version 2's newest request, where the seat records. Once the
+/// rolled-back words have a window and marks of their own the judge is due
+/// and says rise, on those alone.
+#[test]
+fn a_rollback_starts_its_own_series_and_can_rise_again_on_it() {
+    let seat = &JevUse {
+        rubric_versions: &[1],
+        ..*guard()
+    };
+    let wanted = window_wanted_for(seat).expect("the guard rises");
+    let marks = marks_that_can_clear(seat).expect("a width");
+    let mut rows = guard_window_that_rises(seat, 1, 1, 0);
+    rows.push(rise_on(5_000, &[1]));
+    rows.extend(guard_window_that_rises(seat, 2, 1_000, 10_000));
+    rows.push(rise_on(15_000, &[2]));
+    assert_eq!(
+        standing(seat, &rows),
+        Stand::Recording,
+        "version 1's old rise is behind version 2's requests"
+    );
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(
+        (
+            judged.verdict,
+            judged.window.rows,
+            judged.agreement.compared
+        ),
+        (Verdict::Hold(Line::TooFewRows { rows: 0, wanted }), 0, 0),
+        "none of version 1's old rows or marks is the rolled-back series': {judged:?}"
+    );
+
+    // A late label of an old version 1 request, after the rollback: its
+    // request is behind the series' start, so it grades nothing here.
+    rows.push(guard_label(16_000, 1, false));
+    // The rolled-back words' own window and marks.
+    rows.extend(guard_window_that_rises(seat, 1, 50_000, 20_000));
+    assert!(
+        judgment_due(seat, &rows),
+        "the rolled-back words' own window is full"
+    );
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(judged.verdict, Verdict::Rise, "{judged:?}");
+    assert_eq!(
+        (judged.window.rows, judged.agreement.compared),
+        (wanted, marks),
+        "their own window and marks, and nothing of the old run"
+    );
+    assert_eq!(
+        standing_in(seat, &text_of(&rows)),
+        standing(seat, &rows),
+        "the text reads the rollback as the rows do"
+    );
+}
+
+/// A request that names something that is not a version is nobody's
+/// evidence and cuts nothing (t-6877, the brief precheck: absent is not
+/// malformed) — null, a word, a negative, a zero — whichever words the seat
+/// asks; and an empty ledger is a seat that records.
+#[test]
+fn a_malformed_rubric_is_nobodys_evidence_and_an_empty_ledger_records() {
+    use serde_json::json;
+    let second = guard();
+    let first = &JevUse {
+        rubric_versions: &[1],
+        ..*second
+    };
+    for seat in [first, second] {
+        let wanted = window_wanted_for(seat).expect("the guard rises");
+        assert_eq!(standing(seat, &[]), Stand::Recording);
+        assert_eq!(standing_in(seat, ""), Stand::Recording);
+        assert_eq!(
+            judge_seat(seat, &[]).expect("judged").verdict,
+            Verdict::Hold(Line::TooFewRows { rows: 0, wanted })
+        );
+        let own = seat.rubric_versions[0];
+        let mut rows = guard_requests(3, own, 100, 0);
+        for (n, spelled) in [json!(null), json!("2"), json!(-1), json!(0), json!(1.5)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut row = guard_request(10 + n, 900 + n as u64, own, Some("jev-0.1.0"), "answered");
+            row["rubricVersion"] = spelled;
+            rows.push(row);
+        }
+        rows.extend(guard_requests(2, own, 200, 20));
+        let version = on_the_newest_version(seat, &rows);
+        assert_eq!(
+            (version.asked(), version.model, version.cut),
+            (5, Some(ANSWERING), None),
+            "{}: the malformed rows are neither counted nor a model to cut at",
+            seat.id
+        );
+        assert_eq!(
+            standing_in(seat, &text_of(&rows)),
+            Stand::Recording,
+            "{}: nor, read off the text, words newer than the seat's",
+            seat.id
+        );
+    }
+}
+
+/// A ledger's text, one row a line, as a writer appends it.
+fn text_of(rows: &[Value]) -> String {
+    rows.iter().map(|row| format!("{row}\n")).collect()
+}
