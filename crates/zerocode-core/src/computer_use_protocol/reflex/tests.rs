@@ -1,17 +1,65 @@
 use super::*;
 
-#[derive(Deserialize)]
 struct Golden {
     expected: String,
     plan: serde_json::Value,
+    /// The plan's canonical bytes exactly as the shared file holds them.
+    wire: Vec<u8>,
 }
 
 fn golden(name: &str) -> Golden {
+    #[derive(Deserialize)]
+    struct Row {
+        expected: String,
+        plan: serde_json::Value,
+    }
     let path = format!(
         "{}/fixtures/reflex-contract/{name}.json",
         env!("CARGO_MANIFEST_DIR")
     );
-    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    let raw = std::fs::read(path).unwrap();
+    let row: Row = serde_json::from_slice(&raw).unwrap();
+    // Every file is canonical JSON and a final newline, so the plan's wire is
+    // the file's own bytes inside the envelope: the expected bytes never pass
+    // through a serializer whose map order the build decides.
+    let prefix = format!("{{\"expected\":\"{}\",\"plan\":", row.expected);
+    let wire = raw
+        .strip_prefix(prefix.as_bytes())
+        .and_then(|rest| rest.strip_suffix(b"}\n"))
+        .unwrap_or_else(|| panic!("{name} is not written canonical"))
+        .to_vec();
+    Golden {
+        expected: row.expected,
+        plan: row.plan,
+        wire,
+    }
+}
+
+/// With serde_json's `preserve_order` a `Map` keeps insertion order; without
+/// it the map sorts. Cargo turns the feature on for a whole workspace build.
+fn map_keeps_insertion_order() -> bool {
+    let probe: serde_json::Map<String, serde_json::Value> = [("b", 0), ("a", 0)]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.into()))
+        .collect();
+    probe.keys().next().map(String::as_str) == Some("b")
+}
+
+/// The same value with every object's keys inserted in reverse order, at
+/// every depth; arrays keep their order.
+fn reversed(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .rev()
+                .map(|(key, item)| (key.clone(), reversed(item)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(reversed).collect())
+        }
+        leaf => leaf.clone(),
+    }
 }
 
 #[test]
@@ -26,9 +74,13 @@ fn shared_golden_runs_through_the_real_validator() {
     for name in cases {
         let name = name.as_str().unwrap();
         let row = golden(name);
-        let bytes = serde_json::to_vec(&row.plan).unwrap();
-        let got = match decode_wire(&bytes) {
-            Ok(_) => "ok".to_string(),
+        let got = match decode_wire(&row.wire) {
+            Ok(validated) => {
+                if wire_bytes(validated.plan()) != row.wire {
+                    mismatches.push(format!("{name}: re-encoded wire differs"));
+                }
+                "ok".to_string()
+            }
             Err(err) => format!("{err:?}").to_lowercase(),
         };
         if got != row.expected {
@@ -36,7 +88,7 @@ fn shared_golden_runs_through_the_real_validator() {
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
-    assert_eq!(cases.len(), 31);
+    assert_eq!(cases.len(), 32);
     for name in manifest["wire_negative"].as_array().unwrap() {
         let name = name.as_str().unwrap();
         let path = format!(
@@ -49,7 +101,36 @@ fn shared_golden_runs_through_the_real_validator() {
             "{name}"
         );
     }
-    assert_eq!(manifest["wire_negative"].as_array().unwrap().len(), 9);
+    assert_eq!(manifest["wire_negative"].as_array().unwrap().len(), 11);
+}
+
+#[test]
+fn map_insertion_order_never_reaches_the_wire_or_the_hash() {
+    let keeps_order = map_keeps_insertion_order();
+    for name in ["valid_basic", "valid_nested_predicate"] {
+        let row = golden(name);
+        let turned = reversed(&row.plan);
+        assert_eq!(canonical_json(&row.plan), row.wire, "{name}");
+        assert_eq!(canonical_json(&turned), row.wire, "{name}");
+        let typed: ReflexPlan = serde_json::from_value(turned.clone()).unwrap();
+        assert_eq!(wire_bytes(&typed), row.wire, "{name}");
+        assert_eq!(plan_hash(&typed), typed.plan_hash, "{name}");
+        // Written as the map holds it: reordered when the build keeps insertion
+        // order, and then refused rather than normalized and run.
+        let as_held = serde_json::to_vec(&turned).unwrap();
+        if keeps_order {
+            assert_ne!(as_held, row.wire, "{name}");
+            assert_eq!(decode_wire(&as_held).unwrap_err(), ReflexError::Wire);
+        } else {
+            assert_eq!(as_held, row.wire, "{name}");
+        }
+    }
+    // Inserted out of order at both depths; integers at both ends stay exact.
+    let exact = serde_json::json!({"z": u64::MAX, "a": [i64::MIN, {"y": 0, "b": -1}]});
+    assert_eq!(
+        canonical_json(&exact),
+        br#"{"a":[-9223372036854775808,{"b":-1,"y":0}],"z":18446744073709551615}"#
+    );
 }
 
 #[test]
@@ -262,10 +343,9 @@ fn windows_reflex_is_unsupported_without_a_live_frame_provider() {
 #[test]
 fn canonical_wire_is_strict_and_preserves_the_validated_plan() {
     let row = golden("valid_basic");
-    let original = serde_json::to_vec(&row.plan).unwrap();
     let typed: ReflexPlan = serde_json::from_value(row.plan).unwrap();
     let bytes = wire_bytes(&typed);
-    assert_eq!(bytes, original);
+    assert_eq!(bytes, row.wire);
     assert_eq!(decode_wire(&bytes).unwrap().plan(), &typed);
     let duplicate = String::from_utf8(bytes.clone())
         .unwrap()

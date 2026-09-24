@@ -299,17 +299,45 @@ fn identifier(s: &str) -> bool {
 pub fn plan_hash(plan: &ReflexPlan) -> String {
     let mut without = plan.clone();
     without.plan_hash.clear();
-    let value = serde_json::to_value(&without).expect("typed plan serializes");
-    let bytes = serde_json::to_vec(&value).expect("canonical plan serializes");
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", Sha256::digest(wire_bytes(&without)))
+}
+
+/// Canonical JSON: compact, integer-only, every object's keys in byte order
+/// at every depth and arrays in their own order. A `serde_json::Map` promises
+/// no order — Cargo turns serde_json's `preserve_order` on for every crate in a
+/// build that includes one asking for it (the shell, hookd), and the map then
+/// keeps insertion order — so the keys are sorted here, and the hash, the wire
+/// and the receiver's canonical check all read this one form. Swift writes the
+/// same bytes with `.sortedKeys`.
+fn canonical_json(value: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&Canonical(value)).expect("a JSON value serializes")
+}
+
+struct Canonical<'a>(&'a serde_json::Value);
+
+impl Serialize for Canonical<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+                serializer.collect_map(
+                    entries
+                        .into_iter()
+                        .map(|(key, item)| (key, Canonical(item))),
+                )
+            }
+            serde_json::Value::Array(items) => serializer.collect_seq(items.iter().map(Canonical)),
+            leaf => leaf.serialize(serializer),
+        }
+    }
 }
 
 /// Stable UTF-8 wire encoding consumed by the Swift helper. This sorted-key
 /// JSON form preserves every integer exactly and rejects unknown fields when
 /// decoded back into `ReflexPlan`.
 pub fn wire_bytes(plan: &ReflexPlan) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::to_value(plan).expect("typed plan serializes"))
-        .expect("canonical plan serializes")
+    canonical_json(&serde_json::to_value(plan).expect("typed plan serializes"))
 }
 
 /// The receiver accepts only the canonical integer-only wire. Duplicate
@@ -317,7 +345,7 @@ pub fn wire_bytes(plan: &ReflexPlan) -> Vec<u8> {
 /// tokens cannot be normalized into a different executable plan.
 pub fn decode_wire(bytes: &[u8]) -> Result<ValidatedPlan, ReflexError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ReflexError::Wire)?;
-    if serde_json::to_vec(&value).map_err(|_| ReflexError::Wire)? != bytes {
+    if canonical_json(&value) != bytes {
         return Err(ReflexError::Wire);
     }
     let plan: ReflexPlan = serde_json::from_slice(bytes).map_err(|_| ReflexError::Wire)?;

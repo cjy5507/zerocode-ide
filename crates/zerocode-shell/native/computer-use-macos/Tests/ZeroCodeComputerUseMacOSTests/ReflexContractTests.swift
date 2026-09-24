@@ -17,6 +17,19 @@ final class ReflexContractTests: XCTestCase {
         try Data(contentsOf: fixtureRoot.appendingPathComponent("\(name).json"))
     }
 
+    /// Every file is canonical JSON and a final newline, so the plan's wire is
+    /// the file's own bytes inside the envelope — the same bytes Rust compares
+    /// its output against, whichever map order its build keeps.
+    private func golden(_ name: String) throws -> (expected: String, wire: Data) {
+        let raw = try fixture(name)
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any], name)
+        let expected = try XCTUnwrap(envelope["expected"] as? String, name)
+        let prefix = Data("{\"expected\":\"\(expected)\",\"plan\":".utf8)
+        let suffix = Data("}\n".utf8)
+        XCTAssertTrue(raw.starts(with: prefix) && raw.suffix(suffix.count) == suffix, "\(name) is not written canonical")
+        return (expected, Data(raw.dropFirst(prefix.count).dropLast(suffix.count)))
+    }
+
     private func contractLimits() throws -> ReflexLimits {
         try JSONDecoder().decode(ReflexLimits.self, from: fixture("limits"))
     }
@@ -26,10 +39,7 @@ final class ReflexContractTests: XCTestCase {
         let names = try XCTUnwrap(manifest["semantic"] as? [String])
         let limits = try contractLimits()
         for name in names {
-            let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture(name)) as? [String: Any])
-            let expected = try XCTUnwrap(envelope["expected"] as? String)
-            let planObject = try XCTUnwrap(envelope["plan"])
-            let planData = try JSONSerialization.data(withJSONObject: planObject, options: [.sortedKeys, .withoutEscapingSlashes])
+            let (expected, planData) = try golden(name)
             if expected == "ok" {
                 let validated = try ReflexContract.decodeAndValidate(planData, limits: limits)
                 XCTAssertEqual(validated.plan.version, ReflexContract.version)
@@ -41,7 +51,7 @@ final class ReflexContractTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(names.count, 31)
+        XCTAssertEqual(names.count, 32)
         let wireNames = try XCTUnwrap(manifest["wire_negative"] as? [String])
         for name in wireNames {
             let data = try Data(contentsOf: fixtureRoot.appendingPathComponent("\(name).txt"))
@@ -49,7 +59,7 @@ final class ReflexContractTests: XCTestCase {
                 XCTAssertEqual((error as? ReflexContractError)?.rawValue, "wire", name)
             }
         }
-        XCTAssertEqual(wireNames.count, 9)
+        XCTAssertEqual(wireNames.count, 11)
     }
 
     func testSharedLeaseCasesExercisePermitsAndFrameCursor() throws {

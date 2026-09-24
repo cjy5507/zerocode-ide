@@ -1,12 +1,27 @@
 # Reflex contract cases
 
-`manifest.json` names the plan and wire cases. `lease_cases.json` holds one
+`manifest.json` names the plan and wire cases. Every `.json` file here is
+written in the canonical form below and ends with one newline, so a plan
+case's wire is the file's own bytes inside `{"expected":…,"plan":` and `}`:
+Rust and Swift both feed those bytes to their real decoders and compare
+their re-encoding and hash against them. `lease_cases.json` holds one
 base frame and one base lease; each case replaces some of their top-level
 fields and names the input, the host time and the expected verdict. Rust and
 Swift feed every case to their real `permits` and `observe` methods; the
 tests hold no second copy of the rules. Plan parity and lease parity are
 separate claims: the plan cases say nothing about leases, and the lease cases
 say nothing about plans.
+
+## Canonical wire
+
+The wire is compact UTF-8 JSON with every object's keys in byte order at
+every depth; arrays keep their order and numbers are integers written
+exactly. `plan_hash` is the SHA-256 of the same form with the `plan_hash`
+value set to the empty string (the key stays). The form does not depend on
+how a JSON library keeps its maps: Cargo turns serde_json's `preserve_order`
+on for every crate in a build that includes one asking for it (the shell,
+hookd), shipped app included, so Rust sorts the keys itself. A wire whose keys are out of order at any depth is refused, never
+normalized and run (`wire_unsorted_top_level`, `wire_unsorted_nested`).
 
 ## Action lease
 
