@@ -2632,8 +2632,8 @@ pub fn jev_ledger_dir(cwd: &std::path::Path) -> PathBuf {
 }
 
 /// Whether `seat`'s own evidence has raised its `auto` to acting, read back
-/// from the transitions its ledger recorded
-/// (`zerocode_core::jev::promote::stand_from`).
+/// from the transitions its ledger recorded under the words the seat asks
+/// now (`zerocode_core::jev::promote::standing`, t-6877).
 ///
 /// One reader, because two programs ask it of the same seat: the system
 /// prompt, deciding whether to render the skill index at all, and the seat's
@@ -2652,7 +2652,7 @@ pub fn jev_seat_applies(cwd: &std::path::Path, seat: &zerocode_core::jev::JevUse
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
-    zerocode_core::jev::promote::stand_from(&rows) == zerocode_core::jev::promote::Stand::Applying
+    zerocode_core::jev::promote::standing(seat, &rows) == zerocode_core::jev::promote::Stand::Applying
 }
 
 /// Whether durable traces (`.zo/turns`, `.zo/dream`) live under the global

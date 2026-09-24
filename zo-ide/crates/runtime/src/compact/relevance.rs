@@ -59,8 +59,9 @@ use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 
 /// Bumped whenever an option's meaning, the instructions or the state's
 /// shape changes. A row carries it, so a judgment taken under other words is
-/// never read as evidence about these ones.
-pub const COMPACTION_RUBRIC_VERSION: u32 = 1;
+/// never read as evidence about these ones. The number is the seat's row's
+/// own (t-6877), read from the table and not respelled.
+pub const COMPACTION_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::COMPACTION_RUBRIC_VERSION;
 
 /// The letter a question id opens with, so what comes back is named rather
 /// than numbered. Spelled once: [`questions`] writes ids with it and

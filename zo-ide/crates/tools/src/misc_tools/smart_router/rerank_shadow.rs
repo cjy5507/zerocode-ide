@@ -2978,8 +2978,8 @@ mod tests {
             "the tally counted a label"
         );
         assert_eq!(
-            zerocode_core::jev::promote::asked_toward_judgment(&rows),
-            zerocode_core::jev::promote::asked_toward_judgment(&readings),
+            zerocode_core::jev::promote::asked_toward_judgment(&RECALL, &rows),
+            zerocode_core::jev::promote::asked_toward_judgment(&RECALL, &readings),
             "the cadence counted a label"
         );
         assert!(!rows.iter().filter(|row| row.get("label").is_some()).any(zerocode_core::jev::summary::is_request_or_mark));
@@ -3247,6 +3247,7 @@ mod tests {
             let retriever = session_retriever(cwd);
             assert_eq!(slugs(&retriever.recall("vellichor", 5)), ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"]);
             let rose = zerocode_core::jev::promote::transition_row(
+                &RECALL,
                 9_000,
                 zerocode_core::jev::promote::Verdict::Rise,
                 &zerocode_core::jev::summary::Tally::default(),

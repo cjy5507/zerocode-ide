@@ -32,8 +32,9 @@ use super::shadow_ledger::{append_shadow_row, read_shadow_rows, shadow_ledger_pa
 pub const FILE_PICK_FILE: &str = FILE_PICK.ledger;
 /// The outcome shared with the Jev answer-rate judge.
 pub const FILE_PICK_OUTCOME_ANSWERED: &str = door::ANSWERED_OUTCOME;
-/// The version attached to the one request rubric and state shape.
-pub const FILE_PICK_RUBRIC_VERSION: u32 = 1;
+/// The version attached to the one request rubric and state shape — the
+/// seat's row's own (t-6877), read from the table and not respelled.
+pub const FILE_PICK_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::FILE_PICK_RUBRIC_VERSION;
 const _: () = assert!(matches!(
     FILE_PICK.apply_deadline_ms,
     Some(FILE_PICK_APPLY_DEADLINE_MS)

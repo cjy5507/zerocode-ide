@@ -67,10 +67,14 @@ pub struct SeatReport {
     /// Where it was found, when it exists. A seat that has never been asked
     /// has no file, which is not an error and not a zero answer rate.
     pub found: Option<PathBuf>,
+    /// Today's and the week's rows of the seat's current series — the rows
+    /// asked under the words the seat asks now ([`promote::on_the_newest_version`],
+    /// t-6877), which is what the judge reads; a rubric that moved on starts
+    /// the card again as it starts the judge.
     pub today: Tally,
     pub week: Tally,
     /// What the week's billed input tokens cost, when the price table names
-    /// the judgment's model.
+    /// the judgment's model — every row's, whatever words asked it.
     pub cost_usd: Option<f64>,
     /// The model the seat asks for — the person's pin (`smart.jevModel`) or
     /// the vendor's alias (t-6187). The same for every seat, and on every
@@ -111,7 +115,8 @@ pub struct SeatReport {
     pub baseline: &'static str,
     /// How many disagreeing marks the table asks the seat's record to hold.
     pub negatives_wanted: Option<usize>,
-    /// Where the seat stands, read back from its own transitions.
+    /// Where the seat stands, read back from its own transitions under the
+    /// words it asks now ([`promote::standing`]).
     pub stand: Stand,
     /// Whether the seat acts right now: its mode, and for `auto` its standing.
     pub applies: bool,
@@ -169,12 +174,13 @@ pub fn read_rows(path: &Path) -> Vec<Value> {
     text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect()
 }
 
-/// Whether a seat's ledger says it has been raised to acting: its last
-/// transition a rise, read with only the transition lines parsed
-/// ([`promote::stand_in`]). A ledger that cannot be read never rose.
+/// Whether `seat`'s ledger says it has been raised to acting: its last
+/// transition a rise, decided on the words the seat asks now, read with only
+/// the transition lines parsed ([`promote::standing_in`], t-6877). A ledger
+/// that cannot be read never rose.
 #[must_use]
-pub fn raised_in(ledger: &Path) -> bool {
-    std::fs::read_to_string(ledger).is_ok_and(|text| promote::stand_in(&text) == Stand::Applying)
+pub fn raised_in(seat: &JevUse, ledger: &Path) -> bool {
+    std::fs::read_to_string(ledger).is_ok_and(|text| promote::standing_in(seat, &text) == Stand::Applying)
 }
 
 /// Count every seat in the table, looking for each seat's ledger under the
@@ -267,7 +273,7 @@ pub fn rows_of(seat: &JevUse, roots: &[PathBuf], sessions: Option<&Path>) -> (Op
 /// person's zone, not seven rolling spans: a trend is read against the day
 /// a person remembers doing something.
 #[must_use]
-pub fn days_of(rows: &[Value], now_ms: i64, offset_s: i64) -> Vec<DayTally> {
+pub fn days_of(rows: &[&Value], now_ms: i64, offset_s: i64) -> Vec<DayTally> {
     let today = start_of_day_ms(now_ms, offset_s);
     (0..WINDOW_DAYS)
         .rev()
@@ -276,6 +282,7 @@ pub fn days_of(rows: &[Value], now_ms: i64, offset_s: i64) -> Vec<DayTally> {
             let end_ms = start_ms + MS_PER_DAY;
             let held: Vec<&Value> = rows
                 .iter()
+                .copied()
                 .filter(|row| {
                     let at = summary::AT.read(row).and_then(Value::as_i64).unwrap_or(0);
                     (start_ms..end_ms).contains(&at)
@@ -300,14 +307,19 @@ fn one_with(
     recent: usize,
 ) -> SeatReport {
     let (found, rows) = rows_of(seat, roots, sessions);
-    let today = summary::summarize(&rows, start_of_day_ms(now_ms, offset_s));
+    // The card counts the series the judge reads (t-6877): the rows asked
+    // under the words the seat asks now and the marks that grade them, from
+    // the one reader every number on the card and the judge share. The bill
+    // alone is every row's: a request asked under older words still cost
+    // what it cost.
+    let version = promote::on_the_newest_version(seat, &rows);
+    let today = summary::summarize_rows(version.rows.iter().copied(), start_of_day_ms(now_ms, offset_s));
     let week_since_ms = now_ms - WINDOW_DAYS * MS_PER_DAY;
-    let week = summary::summarize(&rows, week_since_ms);
-    let agreement_week = summary::agreement_since(&rows, week_since_ms);
+    let week = summary::summarize_rows(version.rows.iter().copied(), week_since_ms);
+    let agreement_week = summary::agreement_rows(version.marks.iter().copied(), week_since_ms);
     let asked_model = zerocode_core::jev::model_in(settings.unwrap_or(&Value::Null)).to_string();
-    let cost_usd = cost_of(week.input_tokens, &asked_model);
-    let asked_toward_judgment = promote::asked_toward_judgment(&rows);
-    let version = promote::on_the_newest_version(&rows);
+    let cost_usd = cost_of(summary::summarize(&rows, week_since_ms).input_tokens, &asked_model);
+    let asked_toward_judgment = version.asked();
     // The judge's own reading of the same rows, not a second Evidence built
     // here from the week: routing reads its agreement off the probe beside
     // the judgment, every other rising seat off the `agreed` marks its own
@@ -320,7 +332,7 @@ fn one_with(
     let clears_rise_floor = seat.answer_floor_permille.and_then(|floor| {
         judged.as_ref()?.window.answered_lower_bound().map(|bound| clears(bound, floor))
     });
-    let stand = promote::stand_from(&rows);
+    let stand = promote::standing(seat, &rows);
     SeatReport {
         id: seat.id,
         setting: seat.setting,
@@ -344,7 +356,7 @@ fn one_with(
         applies: seat
             .mode_in(settings.unwrap_or(&Value::Null))
             .applies_with(stand == Stand::Applying),
-        days: days_of(&rows, now_ms, offset_s),
+        days: days_of(&version.rows, now_ms, offset_s),
         recent: recent::recent(&rows, recent),
     }
 }

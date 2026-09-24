@@ -439,6 +439,30 @@ pub struct JevUse {
     /// ([`ConfidenceBands`], t-6342). Recorded, not yet read. `None` for a
     /// seat that never rises.
     pub confidence_bands: Option<ConfidenceBands>,
+    /// The versions of the words this use asks now (t-6877) — the
+    /// `*_RUBRIC_VERSION` its writer stamps on every request row
+    /// ([`summary::RUBRIC_VERSION`]), named here by that constant and never
+    /// by a number of the row's own. One for every seat but the skills
+    /// seat, which asks two questions into one ledger. The judge reads a
+    /// seat's ledger as this rubric's series alone
+    /// ([`promote::on_the_newest_version`]): a request asked under other
+    /// words, the marks that grade it and the rise they earned are another
+    /// question's evidence, and a seat whose words moved on records again
+    /// until its own words have earned their place. A seat whose writer has
+    /// never versioned its words asks [`questions::UNVERSIONED_RUBRIC`],
+    /// which is what a row that names none is read as.
+    pub rubric_versions: &'static [u32],
+    /// The keys a request row of this use carries its own name under — what
+    /// a label row repeats under [`summary::LABEL`] to say which request it
+    /// grades, joined by `:` when there are two (`query:notes`). The judge
+    /// joins a label to its request by it (t-6877): the request's rubric is
+    /// the label's, a label that names no request on the ledger grades
+    /// nothing, and of two labels naming one request the newest counts.
+    /// Empty for a use whose marks sit on the request row itself, whose
+    /// labels name no request (the skills seat's, the step seat's), or
+    /// that writes none: such a label is read as the rubric that was asking
+    /// when it was written, and as a window's by its own time.
+    pub request_name: &'static [&'static str],
 }
 
 /// What a seat forgives whose miss the product was going to cover anyway: one
@@ -854,6 +878,8 @@ pub const ROUTING: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    rubric_versions: &[questions::ROUTING_RUBRIC_VERSION],
+    request_name: &["attempt"],
 };
 
 /// The wall zo's routing waits for a judgment when the seat acts: the batch
@@ -1008,6 +1034,8 @@ pub const RECALL: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    rubric_versions: &[questions::RECALL_RUBRIC_VERSION],
+    request_name: &["query", "notes"],
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -1112,6 +1140,8 @@ pub const BROWSER: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    rubric_versions: &[crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION],
+    request_name: &[],
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -1154,6 +1184,8 @@ pub const DESKTOP: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    rubric_versions: &[crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION],
+    request_name: &[],
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -1193,6 +1225,8 @@ pub const EMULATOR: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    rubric_versions: &[crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION],
+    request_name: &[],
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -1229,6 +1263,8 @@ pub const STALL: JevUse = JevUse {
     baseline: Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word()),
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    rubric_versions: &[crate::stall_cause::STALL_CAUSE_RUBRIC_VERSION],
+    request_name: &["stall"],
 };
 
 /// What the placement seat's answers must bound above before `auto` rises to
@@ -1329,6 +1365,8 @@ pub const PLACEMENT: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    rubric_versions: &[crate::worker_placement::WORKER_PLACEMENT_RUBRIC_VERSION],
+    request_name: &["placement"],
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -1424,6 +1462,8 @@ pub const SUMMON: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    rubric_versions: &[crate::summon_choice::SUMMON_CHOICE_RUBRIC_VERSION],
+    request_name: &[],
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
@@ -1493,6 +1533,8 @@ pub const STEP_EFFORT: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    rubric_versions: &[crate::step_effort::STEP_EFFORT_RUBRIC_VERSION],
+    request_name: &["move"],
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -1696,6 +1738,11 @@ pub const SKILLS: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    rubric_versions: &[
+        questions::SKILL_SEARCH_RUBRIC_VERSION,
+        questions::SKILL_SUGGESTION_RUBRIC_VERSION,
+    ],
+    request_name: &[],
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -1757,6 +1804,8 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    rubric_versions: &[questions::UNVERSIONED_RUBRIC],
+    request_name: &[],
 };
 
 /// Characters of the person's last request one compaction judgment reads
@@ -1934,6 +1983,8 @@ pub const COMPACTION: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    rubric_versions: &[questions::COMPACTION_RUBRIC_VERSION],
+    request_name: &["judged"],
 };
 
 /// Characters of one text an agent's own question carries — the question,
@@ -2034,6 +2085,8 @@ pub const AGENT_TOOL: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: None,
     confidence_bands: None,
+    rubric_versions: &[questions::AGENT_TOOL_RUBRIC_VERSION],
+    request_name: &[],
 };
 
 /// Characters of a page's title one browser-read question carries — the head
@@ -2214,6 +2267,8 @@ pub const BROWSER_READ: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(BROWSER_READ_FOLD_FLOOR_PERMILLE)),
+    rubric_versions: &[crate::browser_read::BROWSER_READ_RUBRIC_VERSION],
+    request_name: &["read"],
 };
 
 /// The closed answer every notify question offers, spelled once: ring now,
@@ -2381,6 +2436,8 @@ pub const NOTIFY: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    rubric_versions: &[crate::notify_call::NOTIFY_CALL_RUBRIC_VERSION],
+    request_name: &["notify"],
 };
 
 /// Characters of the sentence a person is writing that one mention
@@ -2505,6 +2562,8 @@ pub const MENTION_RERANK: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    rubric_versions: &[questions::MENTION_RERANK_RUBRIC_VERSION],
+    request_name: &["query", "notes"],
 };
 
 /// How many of the emulator seat's candidates a forked phone step tries
@@ -2683,6 +2742,8 @@ pub const BRANCHING: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    rubric_versions: &[crate::branching::BRANCHING_RUBRIC_VERSION],
+    request_name: &[],
 };
 
 /// The judgment cache: a memo in front of the wire that answers a screen
@@ -2739,6 +2800,8 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     negatives_wanted: Some(NEGATIVES_WANTED),
     // The screen seats' line: the answer it hands back is pressed under theirs.
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    rubric_versions: &[questions::UNVERSIONED_RUBRIC],
+    request_name: &[],
 };
 
 /// How many of a role's eligible attempts try the model nobody has evidence
@@ -2891,6 +2954,8 @@ pub const CHALLENGER: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    rubric_versions: &[questions::UNVERSIONED_RUBRIC],
+    request_name: &[challenger::ATTEMPT.canonical],
 };
 
 /// Characters of the person's words one patch review reads as the task the
@@ -3073,6 +3138,8 @@ pub const PATCH_REVIEW: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         PATCH_REVIEW_PERMIT_FLOOR_PERMILLE,
     )),
+    rubric_versions: &[questions::PATCH_REVIEW_RUBRIC_VERSION],
+    request_name: &["judged"],
 };
 
 /// One turn's completion claims put beside the tool output that can support
@@ -3134,6 +3201,8 @@ pub const CLAIM: JevUse = JevUse {
         abstain_below_permille: 600,
         act_from_permille: CLAIM_CHOICE_FLOOR_PERMILLE,
     }),
+    rubric_versions: &[questions::CLAIM_RUBRIC_VERSION],
+    request_name: &["judged"],
 };
 
 /// The vault pair seat only suggests relations for a person's weekly review.
@@ -3203,6 +3272,8 @@ pub const VAULT_PAIRS: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         VAULT_PAIR_OPPOSITE_FLOOR_PERMILLE,
     )),
+    rubric_versions: &[questions::VAULT_PAIR_RUBRIC_VERSION],
+    request_name: &[],
 };
 
 /// Re-rank likely files for a code task, with one Noul for each candidate.
@@ -3252,6 +3323,8 @@ pub const FILE_PICK: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         FILE_PICK_MATCH_FLOOR_PERMILLE,
     )),
+    rubric_versions: &[questions::FILE_PICK_RUBRIC_VERSION],
+    request_name: &["judged"],
 };
 
 /// Characters of a shell command one command-guard question carries (t-6348).
@@ -3362,6 +3435,8 @@ pub const COMMAND_GUARD: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         COMMAND_GUARD_FLAG_FLOOR_PERMILLE,
     )),
+    rubric_versions: &[questions::COMMAND_GUARD_RUBRIC_VERSION],
+    request_name: &["judged"],
 };
 
 /// Characters of a tool block's head one tool-text question carries
@@ -3446,6 +3521,8 @@ pub const TOOL_TEXT_GUARD: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE,
     )),
+    rubric_versions: &[questions::TOOL_TEXT_GUARD_RUBRIC_VERSION],
+    request_name: &["judged"],
 };
 
 /// Every place this product asks Jev something.

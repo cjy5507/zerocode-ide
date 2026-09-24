@@ -641,7 +641,7 @@ fn guard_request(at: u64, judged: u64, rubric: u32, model: Option<&str>, outcome
 /// The label `write_text_labels` files for the request named `judged`.
 fn guard_label(at: u64, judged: u64, agreed: bool) -> Value {
     serde_json::json!({
-        "kind": runtime::LABEL_ROW_KIND, "at": at, "label": judged.to_string(), "agreed": agreed, "baselineAgreed": at % 2 == 0,
+        "kind": runtime::LABEL_ROW_KIND, "at": at, "label": judged.to_string(), "agreed": agreed, "baselineAgreed": at.is_multiple_of(2),
     })
 }
 
@@ -772,5 +772,87 @@ fn a_no_model_timeout_stays_in_the_current_rubrics_requests() {
         assert_eq!(TRANSITION.read(&written[1]).and_then(Value::as_str), Some(FELL));
         assert_eq!(written[1]["rubricVersions"], serde_json::json!([2]));
         assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD));
+    });
+}
+
+/// What the guard's judge and the two standing readers cost on a full ledger
+/// of the guard's own shape (t-6877) — a measurement, not a check: the
+/// series is now cut by rubric and its labels joined to their requests, and
+/// the join must not have put the whole-file parse back on the hot path
+/// (t-6346 took the standing read from 35.6 ms to 2.3 ms by parsing only
+/// transition lines). Twenty repetitions each, the median and the worst
+/// printed, through the real entrypoints: `judge_seat_ledger` at a judgment
+/// boundary (the whole judge), `runtime::jev_seat_applies` (every row
+/// parsed, then the standing) and `jev_summary::raised_in` (transition lines
+/// only).
+#[test]
+#[ignore = "a measurement: prints what the judge and the standing reads cost on a full ledger"]
+fn what_a_full_ledger_costs_the_guards_judge_and_standing() {
+    use zerocode_core::jev::promote::window_wanted_for;
+    const REQUESTS: u64 = 16_000;
+    const REPS: usize = 20;
+    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
+        let wanted = u64::try_from(window_wanted_for(&TOOL_TEXT_GUARD).expect("the guard rises")).expect("small");
+        // Requests as the guard files them — the flattened `asked` columns
+        // and all — every other one labelled, the count landing on the
+        // judge's cadence so the whole judge runs; the marks are thin, so
+        // it holds and writes nothing.
+        let total = wanted + (REQUESTS - wanted) / 20 * 20;
+        let mut text = String::new();
+        for n in 0..total {
+            let request = serde_json::json!({
+                "at": 1_700_000_000_000_u64 + n * 1_000, "attempt": format!("turn-{}", n / 7), "judged": 10_000 + n,
+                "rubricVersion": 2, "tool": "read_file", "source": "file", "textChars": 1_024 + n % 900, "fencedBefore": n.is_multiple_of(5),
+                "verdict": "plain", "fenced": false, "noted": false, "outcome": TOOL_GUARD_OUTCOME_ANSWERED,
+                "answers": {INSTRUCTED: 0.04}, "routeUse": "shadow", "applied": false, "elapsedMs": 380 + n % 200, "retries": 0,
+                "requests": 1, "redactedLines": 0, "model": ANSWERING, "inputTokens": 640 + n % 300, "requestBytes": 2_048 + n % 500,
+                "requestDigest": format!("{:064x}", n),
+            });
+            text.push_str(&request.to_string());
+            text.push('\n');
+            if n.is_multiple_of(2) && n + 1 < total.saturating_sub(wanted) {
+                let label = serde_json::json!({
+                    "kind": runtime::LABEL_ROW_KIND, "at": 1_700_000_000_000_u64 + n * 1_000 + 500, "label": (10_000 + n).to_string(),
+                    "verdict": "plain", "applied": false, "agreed": true, "baselineAgreed": n.is_multiple_of(4), "hindsight": IGNORED,
+                    "nextTool": "shell", "confidence": 0.04,
+                });
+                text.push_str(&label.to_string());
+                text.push('\n');
+            }
+        }
+        let ledger = tool_text_guard_path(cwd);
+        std::fs::create_dir_all(ledger.parent().expect("a parent")).expect("dir");
+        std::fs::write(&ledger, &text).expect("the ledger writes");
+        let rows = text.lines().count();
+        let timed = |read: &dyn Fn()| {
+            let mut took: Vec<u128> = (0..REPS)
+                .map(|_| {
+                    let started = Instant::now();
+                    read();
+                    started.elapsed().as_micros()
+                })
+                .collect();
+            took.sort_unstable();
+            (took[took.len() / 2], took[took.len() - 1])
+        };
+        let (judge_p50, judge_max) = timed(&|| {
+            let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99);
+            assert!(verdict.is_some(), "the count lands on the cadence: the whole judge runs");
+        });
+        assert_eq!(
+            std::fs::read_to_string(&ledger).expect("read").lines().count(),
+            rows,
+            "a hold writes nothing"
+        );
+        let (applies_p50, applies_max) = timed(&|| {
+            assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD));
+        });
+        let (lines_p50, lines_max) = timed(&|| {
+            assert!(!super::super::jev_summary::raised_in(&TOOL_TEXT_GUARD, &ledger));
+        });
+        println!(
+            "ledger {} B, {rows} rows ({total} requests) · judge_seat_ledger p50 {judge_p50} µs (max {judge_max}) · jev_seat_applies p50 {applies_p50} µs (max {applies_max}) · raised_in p50 {lines_p50} µs (max {lines_max})",
+            text.len()
+        );
     });
 }

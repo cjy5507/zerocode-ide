@@ -191,11 +191,14 @@ pub fn judge_seat_rows(
     now_ms: i64,
 ) -> Option<zerocode_core::jev::promote::Verdict> {
     use zerocode_core::jev::promote;
-    if !promote::judgment_due(seat, rows) {
+    // The series is read once for both questions (t-6877): whether a
+    // judgment is due, and what it says.
+    let version = promote::on_the_newest_version(seat, rows);
+    if !promote::judgment_due_on(seat, &version, rows) {
         return None;
     }
-    let judged = promote::judge_seat(seat, rows)?;
-    if let Some(row) = promote::transition_row(now_ms, judged.verdict, &judged.window) {
+    let judged = promote::judge_seat_on(seat, &version, rows)?;
+    if let Some(row) = promote::transition_row(seat, now_ms, judged.verdict, &judged.window) {
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }
     Some(judged.verdict)

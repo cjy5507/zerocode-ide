@@ -88,8 +88,10 @@ const _: () = assert!(
 );
 
 /// The rubric's version, pinned by a fingerprint of its words: a word
-/// changed without a bump is a red test rather than a quiet drift.
-pub const MENTION_RUBRIC_VERSION: u32 = 1;
+/// changed without a bump is a red test rather than a quiet drift. The
+/// number lives beside the seat's row (t-6877), which the judge reads the
+/// seat's ledger by; this is that number, not a second one.
+pub const MENTION_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::MENTION_RERANK_RUBRIC_VERSION;
 
 /// The one question, by the id its answer comes back under.
 const QUESTION: &str = "meant";

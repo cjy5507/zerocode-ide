@@ -161,14 +161,15 @@ pub fn record_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
         return;
     }
     let held = read_rows(ledger);
-    if !zerocode_core::jev::promote::judgment_due(seat, &held) {
+    let version = zerocode_core::jev::promote::on_the_newest_version(seat, &held);
+    if !zerocode_core::jev::promote::judgment_due_on(seat, &version, &held) {
         return;
     }
-    let Some(judged) = zerocode_core::jev::promote::judge_seat(seat, &held) else {
+    let Some(judged) = zerocode_core::jev::promote::judge_seat_on(seat, &version, &held) else {
         return;
     };
     if let Some(row) =
-        zerocode_core::jev::promote::transition_row(now_ms, judged.verdict, &judged.window)
+        zerocode_core::jev::promote::transition_row(seat, now_ms, judged.verdict, &judged.window)
     {
         append_rows(ledger, std::slice::from_ref(&row));
     }
@@ -187,8 +188,9 @@ pub fn read_rows(ledger: &Path) -> Vec<Value> {
 }
 
 /// Whether a seat acts right now: a person's `on`, or `auto` raised by the
-/// judge its own ledger recorded (§4). Read where the seat is about to act,
-/// so the answer and the standing come from the same file.
+/// judge its own ledger recorded (§4) under the words the seat asks now
+/// (`zerocode_core::jev::promote::standing`, t-6877). Read where the seat is
+/// about to act, so the answer and the standing come from the same file.
 #[must_use]
 pub fn applies(wire: &Wire, seat: &JevUse) -> bool {
     applies_in(wire, seat, zerocode_core::jev::Run::Fresh)
@@ -202,7 +204,7 @@ pub fn applies_in(wire: &Wire, seat: &JevUse, run: zerocode_core::jev::Run) -> b
     let mode = seat.mode_in_run(&wire.settings_root(), run);
     let raised = ledger_of(wire, seat)
         .map(|ledger| {
-            zerocode_core::jev::promote::stand_from(&read_rows(&ledger))
+            zerocode_core::jev::promote::standing(seat, &read_rows(&ledger))
                 == zerocode_core::jev::promote::Stand::Applying
         })
         .unwrap_or(false);

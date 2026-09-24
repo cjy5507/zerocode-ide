@@ -48,7 +48,6 @@ use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
 use zerocode_core::jev::summary::{self as jev_ledger};
 
-use super::jev_summary;
 use super::shadow_ledger::{append_shadow_row, last_shadow_lines, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 use crate::misc_tools::agent_tools::shared_agent_runtime;
 
@@ -133,7 +132,7 @@ pub fn raised_here(cwd: &Path) -> bool {
 /// pin that would be racing every other test in this binary for it.
 #[must_use]
 pub fn raised_at(ledger: &Path) -> bool {
-    super::jev_summary::raised_in(ledger)
+    super::jev_summary::raised_in(&ROUTING, ledger)
 }
 
 /// The routing seat's word under the working directory's settings (t-6346),
@@ -1184,11 +1183,12 @@ pub fn judge_ledger(
     // times running stops now rather than after nineteen more requests
     // nobody will get an answer to. `promote::judgment_due` holds both, so
     // this seat and the window's seats cannot keep different time.
-    if !promote::judgment_due(&ROUTING, &rows) {
+    let version = promote::on_the_newest_version(&ROUTING, &rows);
+    if !promote::judgment_due_on(&ROUTING, &version, &rows) {
         return None;
     }
-    let judged = judge_rows(&rows, settings)?;
-    if let Some(row) = promote::transition_row(now_ms, judged.verdict, &judged.window) {
+    let judged = judge_rows_on(&version, &rows, settings)?;
+    if let Some(row) = promote::transition_row(&ROUTING, now_ms, judged.verdict, &judged.window) {
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }
     Some(judged.verdict)
@@ -1206,24 +1206,35 @@ pub use zerocode_core::jev::promote::Judged;
 /// 2026-09-20). `None` for a ledger of a seat that never rises.
 #[must_use]
 pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Value>) -> Option<Judged> {
-    let rows = &on_this_rubric(rows)[..];
+    judge_rows_on(&promote::on_the_newest_version(&ROUTING, rows), rows, settings)
+}
+
+/// [`judge_rows`] on a series already read — the cadence and the verdict
+/// read one series ([`judge_ledger`], t-6877).
+fn judge_rows_on(
+    version: &promote::OnVersion<'_>,
+    rows: &[serde_json::Value],
+    settings: Option<&serde_json::Value>,
+) -> Option<Judged> {
     let floor = ROUTING.answer_floor_permille?;
     let agreement_floor = ROUTING.agreement_floor_permille?;
     let deadline_ms = ROUTING.apply_deadline_ms?;
     let window_wanted = promote::window_wanted_for(&ROUTING)?;
-    // The newest answering version's rows, as every seat is judged on
-    // (`promote::on_the_newest_version`); where the seat stands is the whole
-    // ledger's.
-    let version = promote::on_the_newest_version(rows);
-    let held = jev_ledger::last_asked(version.requests, window_wanted);
+    // The rows asked under the words the seat asks now and the newest
+    // answering version's among them, as every seat is judged on
+    // (`promote::on_the_newest_version`, t-6346 → t-6877): a request or a
+    // control row of another rubric version is left out — its answer meant
+    // something else — and a label that grades only such a turn goes with
+    // it (the seat's row names a request by its attempt).
+    let held = jev_ledger::last_asked_of(version.requests.iter().copied(), window_wanted);
     let window = jev_ledger::summarize_rows(held.iter().copied(), i64::MIN);
-    let (compared, control_rows) = with_control_rows(version.marks, &held);
+    let (compared, control_rows) = with_control_rows(&version.marks, &held);
     let agreement = agreement_in(&compared);
     // The label's whole record on this version, as every seat's is read
     // (`promote::judge_seat`, t-6342).
-    let record = agreement_in(&version.marks.iter().collect::<Vec<_>>());
+    let record = agreement_in(&version.marks);
     let verdict = promote::judge(
-        promote::stand_from(rows),
+        promote::standing(&ROUTING, rows),
         &promote::Evidence {
             window: &window,
             floor_permille: floor,
@@ -1234,8 +1245,8 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
                 .agreement_rows_wanted
                 .unwrap_or(zerocode_core::jev::A_WINDOW_OF_COMPARISONS),
             window_forgives: ROUTING.window_forgives.unwrap_or(0),
-            labels: labels_standing(settings, version.requests),
-            fallbacks_in_a_row: jev_summary::failures_in_a_row(version.requests),
+            labels: labels_standing(settings, &version.requests),
+            fallbacks_in_a_row: jev_ledger::failures_in_a_row_of(version.requests.iter().copied()),
             negatives_wanted: ROUTING.negatives_wanted.unwrap_or(0),
             disagreed_on_record: record.disagreed(),
             baseline: ROUTING.baseline,
@@ -1252,37 +1263,6 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
     })
 }
 
-/// The routing ledger's rows asked under the words the seat asks now, and
-/// what grades them (t-6346): a request or a control row of another rubric
-/// version is left out — its answer meant something else — and a label that
-/// grades only such a turn goes with it. A transition stays: where the seat
-/// stands is the whole ledger's ([`promote::stand_from`]).
-fn on_this_rubric(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    let version = |row: &serde_json::Value| row.get(RUBRIC_VERSION).and_then(serde_json::Value::as_u64);
-    let current = |row: &serde_json::Value| version(row).is_none_or(|version| version == u64::from(ROUTING_RUBRIC_VERSION));
-    let attempts: HashSet<&str> = rows
-        .iter()
-        .filter(|row| version(row).is_some() && current(row))
-        .filter_map(|row| row.get(ATTEMPT).and_then(serde_json::Value::as_str))
-        .collect();
-    rows.iter()
-        .filter(|row| {
-            if version(row).is_some() {
-                return current(row);
-            }
-            jev_ledger::LABEL.read(row).is_none()
-                || row
-                    .get(ATTEMPT)
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|attempt| attempts.contains(attempt))
-        })
-        .cloned()
-        .collect()
-}
-
-/// The key a routing row's rubric version is written under.
-const RUBRIC_VERSION: &str = "rubricVersion";
-
 /// The window's rows and, after them, every row joined to them for the
 /// agreement — the control row of a task the window holds, and the turn
 /// label of an attempt it holds ([`RouteLabelRow`]) — with how many control
@@ -1294,7 +1274,7 @@ const RUBRIC_VERSION: &str = "rubricVersion";
 /// it. A window of `applied` rows compares nothing on its own (its probe
 /// cell is `not_run`); these are where its comparisons come from.
 fn with_control_rows<'a>(
-    rows: &'a [serde_json::Value],
+    rows: &[&'a serde_json::Value],
     held: &[&'a serde_json::Value],
 ) -> (Vec<&'a serde_json::Value>, usize) {
     let tasks: HashSet<&str> = held
@@ -1307,7 +1287,7 @@ fn with_control_rows<'a>(
         .collect();
     let mut compared = held.to_vec();
     let mut joined = 0;
-    for row in rows {
+    for row in rows.iter().copied() {
         if jev_ledger::is_control_row(row) {
             if row.get(TASK).and_then(serde_json::Value::as_str).is_some_and(|task| tasks.contains(task)) {
                 compared.push(row);
@@ -1384,13 +1364,13 @@ pub fn agreement_in(rows: &[&serde_json::Value]) -> promote::Agreement {
 /// seat and the screen asks for twenty.
 fn labels_standing(
     settings: Option<&serde_json::Value>,
-    rows: &[serde_json::Value],
+    rows: &[&serde_json::Value],
 ) -> Option<promote::Labels> {
     let path = promote::labels_path_in(settings?)?;
     let text = std::fs::read_to_string(path).ok()?;
     let judged: Vec<DecisionShadowRow> = rows
         .iter()
-        .filter_map(|row| serde_json::from_value(row.clone()).ok())
+        .filter_map(|row| serde_json::from_value((*row).clone()).ok())
         .collect();
     let evaluation = super::decision_report::evaluate_decision_labels(&text, &judged).ok()?;
     Some(promote::Labels {

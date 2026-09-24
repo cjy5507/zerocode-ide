@@ -17,6 +17,21 @@ fn one(
     super::one_with(seat, roots, sessions, settings, now_ms, offset_s, 0)
 }
 
+/// `row` stamped with the rubric `seat` asks now — what its writer stamps on
+/// every request row, and what the card and the judge read a seat's series by
+/// (t-6877).
+fn asked_by(seat: &JevUse, mut row: Value) -> Value {
+    row["rubricVersion"] = json!(seat.rubric_versions[0]);
+    row
+}
+
+/// A rise as the judge writes it for `seat`, at `at`: naming the rubric.
+fn rise_of(seat: &JevUse, at: i64) -> Value {
+    use zerocode_core::jev::promote::ROSE;
+    use zerocode_core::jev::summary::TRANSITION;
+    json!({"at": at, (TRANSITION.canonical): ROSE, "rubricVersions": seat.rubric_versions})
+}
+
 fn write(dir: &std::path::Path, name: &str, rows: &[Value]) {
     fs::create_dir_all(dir).expect("dir");
     let mut text = String::new();
@@ -64,7 +79,7 @@ fn every_seat_in_the_table_gets_a_row_whether_or_not_it_has_a_ledger() {
     write(
         home.path(),
         zerocode_core::jev::ROUTING.ledger,
-        &[json!({"at": 10, "outcome": "answered", "elapsedMs": 40, "requests": 1})],
+        &[asked_by(&zerocode_core::jev::ROUTING, json!({"at": 10, "outcome": "answered", "elapsedMs": 40, "requests": 1}))],
     );
     let seats: Vec<SeatReport> = zerocode_core::jev::JEV_USES
         .iter()
@@ -93,11 +108,18 @@ fn a_screen_seats_rows_are_counted_across_its_session_folders() {
     let roots = [home.path().join("nowhere")];
     let sessions = home.path().join("computer-use").join("sessions");
     let seat = &zerocode_core::jev::BROWSER;
-    write(&sessions.join("20260920-065957-3951"), seat.ledger, &[json!({"at": 10, "outcome": "answered", "elapsedMs": 40, "requests": 1})]);
+    write(
+        &sessions.join("20260920-065957-3951"),
+        seat.ledger,
+        &[asked_by(seat, json!({"at": 10, "outcome": "answered", "elapsedMs": 40, "requests": 1}))],
+    );
     write(
         &sessions.join("20260919-040538-16330"),
         seat.ledger,
-        &[json!({"at": 5, "outcome": "no_look"}), json!({"at": 6, "outcome": "answered", "elapsedMs": 60, "requests": 1})],
+        &[
+            asked_by(seat, json!({"at": 5, "outcome": "no_look"})),
+            asked_by(seat, json!({"at": 6, "outcome": "answered", "elapsedMs": 60, "requests": 1})),
+        ],
     );
     write(&sessions.join("20260918-000000-1"), "unrelated.txt", &[json!({"at": 1})]);
     let report = one(seat, &roots, Some(&sessions), None, 1_000, 0);
@@ -127,7 +149,7 @@ fn a_screen_seat_is_counted_once_when_its_root_ledger_holds_what_a_session_copie
     let sessions = home.path().join("computer-use").join("sessions");
     let seat = &zerocode_core::jev::BROWSER;
     let walk: Vec<Value> = (0..35)
-        .map(|n| json!({"at": 10 + n, "outcome": "answered", "elapsedMs": 40, "requests": 1, "pressed": true, "agreed": true}))
+        .map(|n| asked_by(seat, json!({"at": 10 + n, "outcome": "answered", "elapsedMs": 40, "requests": 1, "pressed": true, "agreed": true})))
         .collect();
     write(&roots[0], seat.ledger, &walk);
     write(&sessions.join("20260921-000000-1"), seat.ledger, &walk);
@@ -153,14 +175,14 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
     let misses = seat.negatives_wanted.expect("a rise line");
     let walk: Vec<Value> = (0..wanted)
         .map(|n| {
-            json!({
+            asked_by(seat, json!({
                 "at": 10 + i64::try_from(n).unwrap_or_default(),
                 "outcome": "answered",
                 "elapsedMs": 300,
                 "requests": 1,
                 "pressed": true,
                 "agreed": n >= misses,
-            })
+            }))
         })
         .collect();
     write(&roots[0], seat.ledger, &walk);
@@ -186,12 +208,12 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
 fn a_seat_that_never_rises_is_never_asked_to_clear_a_line() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf(), home.path().join("other")];
-    let answered = [json!({"at": 10, "outcome": "answered", "elapsedMs": 1})];
     // `.iter()` and not the table itself: `JEV_USES` is a static array of a
     // `Copy` type, so walking it by value hands out copies and these take a
     // `&'static JevUse`.
     #[allow(clippy::explicit_iter_loop)]
     for seat in zerocode_core::jev::JEV_USES.iter() {
+        let answered = [asked_by(seat, json!({"at": 10, "outcome": "answered", "elapsedMs": 1}))];
         write(home.path(), seat.ledger, &answered);
         let row = one(seat, &roots, None, None, 1_000, 0);
         assert_eq!(
@@ -233,19 +255,24 @@ fn a_seat_starts_recording_and_a_rise_row_in_its_own_ledger_makes_it_act() {
     let seat = &zerocode_core::jev::ROUTING;
     let auto = json!({ "smart": { seat.setting: "auto" } });
 
-    write(home.path(), seat.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5})]);
+    let answered = asked_by(seat, json!({"at": 1, "outcome": "answered", "elapsedMs": 5}));
+    write(home.path(), seat.ledger, std::slice::from_ref(&answered));
     let quiet = one(seat, &roots, None, Some(&auto), 1_000, 0);
     assert_eq!(quiet.stand, Stand::Recording);
     assert!(!quiet.applies, "auto starts recording");
 
-    write(
-        home.path(),
-        seat.ledger,
-        &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5}), json!({"at": 2, (TRANSITION.canonical): ROSE})],
-    );
+    write(home.path(), seat.ledger, &[answered.clone(), rise_of(seat, 2)]);
     let raised = one(seat, &roots, None, Some(&auto), 1_000, 0);
     assert_eq!(raised.stand, Stand::Applying);
     assert!(raised.applies, "a rise its own ledger recorded makes auto act");
+
+    // A rise the judge wrote before transitions named a rubric was decided
+    // under the first rubric (t-6877): not this seat's, which asks the
+    // second — it records until its own words have earned their place.
+    write(home.path(), seat.ledger, &[answered, json!({"at": 2, (TRANSITION.canonical): ROSE})]);
+    let older = one(seat, &roots, None, Some(&auto), 1_000, 0);
+    assert_eq!(older.stand, Stand::Recording, "a rise under other words is not this seat's");
+    assert!(!older.applies);
 }
 
 #[test]
@@ -254,7 +281,7 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf()];
     let seat = &zerocode_core::jev::ROUTING;
-    write(home.path(), seat.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5})]);
+    write(home.path(), seat.ledger, &[asked_by(seat, json!({"at": 1, "outcome": "answered", "elapsedMs": 5}))]);
     let row = one(seat, &roots, None, None, 1_000, 0);
     assert!(matches!(row.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))));
 
@@ -263,7 +290,11 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
     let quiet = one(&zerocode_core::jev::RECALL, &roots, None, None, 1_000, 0);
     assert!(matches!(quiet.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 0, .. }))), "{:?}", quiet.verdict());
     // An orchestration seat is judged by the table on its own rows: thin here.
-    write(home.path(), zerocode_core::jev::SUMMON.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5, "agreed": true})]);
+    write(
+        home.path(),
+        zerocode_core::jev::SUMMON.ledger,
+        &[asked_by(&zerocode_core::jev::SUMMON, json!({"at": 1, "outcome": "answered", "elapsedMs": 5, "agreed": true}))],
+    );
     let summon = one(&zerocode_core::jev::SUMMON, &roots, None, None, 1_000, 0);
     assert!(matches!(summon.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))), "{:?}", summon.verdict());
     assert_eq!(summon.judged.as_ref().map(|judged| judged.agreement.compared), Some(1));
@@ -337,18 +368,40 @@ fn the_routing_seat_reads_its_standing_from_the_ledger_it_writes() {
     let work = tempfile::tempdir().expect("tmp");
     let ledger = work.path().join(zerocode_core::jev::ROUTING.ledger);
 
+    let seat = &zerocode_core::jev::ROUTING;
     assert!(
         !super::super::decision_shadow::raised_at(&ledger),
         "a seat with no ledger has never risen"
     );
-    fs::write(&ledger, format!("{}\n", json!({"at": 1, (TRANSITION.canonical): ROSE}))).expect("write");
+    fs::write(&ledger, format!("{}\n", rise_of(seat, 1))).expect("write");
     assert!(super::super::decision_shadow::raised_at(&ledger));
     fs::write(
         &ledger,
-        format!("{}\n{}\n", json!({"at": 1, (TRANSITION.canonical): ROSE}), json!({"at": 2, (TRANSITION.canonical): FELL})),
+        format!("{}\n{}\n", rise_of(seat, 1), json!({"at": 2, (TRANSITION.canonical): FELL, "rubricVersions": seat.rubric_versions})),
     )
     .expect("write");
     assert!(!super::super::decision_shadow::raised_at(&ledger), "a fall takes it back");
+    // The routing seat's own door (t-6877): a rise the judge wrote before
+    // transitions named a rubric is the first rubric's and not this seat's,
+    // and a rise naming other words is not either.
+    fs::write(&ledger, format!("{}\n", json!({"at": 1, (TRANSITION.canonical): ROSE}))).expect("write");
+    assert!(!super::super::decision_shadow::raised_at(&ledger), "a rise under the first rubric is not the second's");
+    fs::write(&ledger, format!("{}\n", json!({"at": 1, (TRANSITION.canonical): ROSE, "rubricVersions": [1]}))).expect("write");
+    assert!(!super::super::decision_shadow::raised_at(&ledger), "a rise naming other words");
+    fs::write(&ledger, format!("{}\n", json!({"at": 1, (TRANSITION.canonical): ROSE, "rubricVersions": "2"}))).expect("write");
+    assert!(!super::super::decision_shadow::raised_at(&ledger), "a rise naming something that is not a version");
+    // And words that went back: a request of newer words after the rise
+    // puts the seat behind its own series, recording.
+    fs::write(
+        &ledger,
+        format!(
+            "{}\n{}\n",
+            rise_of(seat, 1),
+            json!({"at": 2, "outcome": "answered", "elapsedMs": 5, "rubricVersion": seat.rubric_versions[0] + 1})
+        ),
+    )
+    .expect("write");
+    assert!(!super::super::decision_shadow::raised_at(&ledger), "a rollback starts recording");
 }
 
 /// A ledger of `n` requests under a working directory the state root owns.
@@ -364,7 +417,7 @@ fn ledger_with(home: &std::path::Path, rows: &[Value]) -> std::path::PathBuf {
 }
 
 fn answered(at: i64) -> Value {
-    json!({"at": at, "outcome": "answered", "elapsedMs": 400, "requests": 1})
+    asked_by(&zerocode_core::jev::ROUTING, json!({"at": at, "outcome": "answered", "elapsedMs": 400, "requests": 1}))
 }
 
 /// And the first judgment waits for the window the seat's own floor can be
@@ -413,12 +466,12 @@ fn a_verdict_that_changed_nothing_writes_nothing_down() {
 
 #[test]
 fn three_fallbacks_in_a_row_take_an_acting_seat_back_without_waiting_for_a_window() {
-    use zerocode_core::jev::promote::{FELL, FALLBACKS_THAT_END_IT, ROSE, Verdict};
-    use zerocode_core::jev::summary::TRANSITION;
+    use zerocode_core::jev::promote::{FELL, FALLBACKS_THAT_END_IT, Verdict};
     let work = tempfile::tempdir().expect("tmp");
-    let mut rows: Vec<Value> = vec![json!({"at": 1, (TRANSITION.canonical): ROSE})];
+    let seat = &zerocode_core::jev::ROUTING;
+    let mut rows: Vec<Value> = vec![rise_of(seat, 1)];
     rows.extend((0..i64::from(FALLBACKS_THAT_END_IT)).map(|at| {
-        json!({"at": 10 + at, "outcome": "timeout", "elapsedMs": 1_500, "requests": 1})
+        asked_by(seat, json!({"at": 10 + at, "outcome": "timeout", "elapsedMs": 1_500, "requests": 1}))
     }));
     let ledger = ledger_with(work.path(), &rows);
     // Three requests, not twenty: the rule that ends it does not wait.
@@ -440,7 +493,7 @@ fn a_recording_seat_is_not_ended_by_fallbacks_it_never_acted_on() {
     use zerocode_core::jev::promote::FALLBACKS_THAT_END_IT;
     let work = tempfile::tempdir().expect("tmp");
     let rows: Vec<Value> = (0..i64::from(FALLBACKS_THAT_END_IT) + 2)
-        .map(|at| json!({"at": at, "outcome": "timeout", "elapsedMs": 1_500}))
+        .map(|at| asked_by(&zerocode_core::jev::ROUTING, json!({"at": at, "outcome": "timeout", "elapsedMs": 1_500})))
         .collect();
     let ledger = ledger_with(work.path(), &rows);
     assert_eq!(
@@ -659,10 +712,11 @@ fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
 fn an_orchestration_seat_has_no_control_rows_to_borrow() {
     // The window's seats read agreement off their own `agreed` marks; the
     // column is theirs too, so one shape reaches the screen, and it is zero.
+    let seat = &zerocode_core::jev::SUMMON;
     let rows: Vec<Value> = (0..3)
-        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 5, "agreed": true}))
+        .map(|at| asked_by(seat, json!({"at": at, "outcome": "answered", "elapsedMs": 5, "agreed": true})))
         .collect();
-    let judged = zerocode_core::jev::promote::judge_seat(&zerocode_core::jev::SUMMON, &rows).expect("judged");
+    let judged = zerocode_core::jev::promote::judge_seat(seat, &rows).expect("judged");
     assert_eq!((judged.agreement.compared, judged.control_rows), (3, 0));
 }
 
@@ -683,7 +737,7 @@ fn a_seats_days_are_seven_local_days_counted_by_the_weeks_own_counter() {
         json!({"at": today - 7 * MS_PER_DAY, "outcome": "answered", "elapsedMs": 999}),
         json!({"at": today + 3, "label": "k", "agreed": false}),
     ];
-    let days = days_of(&rows, now_ms, offset);
+    let days = days_of(&rows.iter().collect::<Vec<_>>(), now_ms, offset);
     assert_eq!(days.len(), usize::try_from(WINDOW_DAYS).expect("days"));
     assert_eq!(days.last().expect("today").start_ms, today);
     assert_eq!(days[0].start_ms, today - 6 * MS_PER_DAY, "oldest first");
@@ -710,9 +764,9 @@ fn the_recent_list_is_read_from_the_same_rows_and_only_when_asked() {
         home.path(),
         seat.ledger,
         &[
-            json!({"at": 5, "stall": key, "dispatch": "dp-1", "worker": "w-2", "outcome": "answered", "elapsedMs": 40,
-                   "requests": 1, "chosen": "waiting_on_person", "confidence": 0.7}),
-            json!({"at": 6, "stall": "dp-3@6", "outcome": "not_consented", "requests": 0}),
+            asked_by(seat, json!({"at": 5, "stall": key, "dispatch": "dp-1", "worker": "w-2", "outcome": "answered", "elapsedMs": 40,
+                   "requests": 1, "chosen": "waiting_on_person", "confidence": 0.7})),
+            asked_by(seat, json!({"at": 6, "stall": "dp-3@6", "outcome": "not_consented", "requests": 0})),
             json!({"at": 9, "label": key, "dispatch": "dp-1", "worker": "w-2", "followed": "worker_done", "agreed": false}),
         ],
     );
@@ -929,35 +983,42 @@ fn a_turn_label_is_one_comparison_in_the_window_of_the_turn_it_grades() {
     let report = one(seat, &roots, None, None, 1_000, 0);
     assert_eq!(report.judged, Some(judged));
     assert_eq!(report.asked_toward_judgment, 25);
-    // The week counts every mark, held turn or not: three labels, two agreed.
-    assert_eq!(report.agreement_week, Agreement { compared: 3, agreed: 2, ..Agreement::default() });
+    // The week counts every mark of a turn the ledger holds, in the window
+    // or not — and a label naming a turn no row holds grades nothing
+    // (t-6877): two labels, one agreed.
+    assert_eq!(report.agreement_week, Agreement { compared: 2, agreed: 1, ..Agreement::default() });
 }
 
 /// A seat's week of marks is counted beside its judged window (t-5806): the
-/// recall seat's labels are its agreement in both, and the week keeps the
-/// marks the window has let go of.
+/// recall seat's labels — each naming the request it grades by its query
+/// and notes (t-6877) — are its agreement in both; the window keeps the
+/// mark of an old request it still holds, and the week does not.
 #[test]
 fn a_seats_week_of_marks_is_counted_beside_its_judged_window() {
     use zerocode_core::jev::promote::{Agreement, Line, Verdict};
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf()];
     let seat = &zerocode_core::jev::RECALL;
+    let old = -1_000_000_000_000_i64;
     write(
         home.path(),
         seat.ledger,
         &[
-            json!({"at": 1, "outcome": "answered", "elapsed_ms": 5, "applied": false}),
-            json!({"at": 2, "label": "1:2", "query": 1, "notes": 2, "applied": false, "agreed": true, "rank": 0}),
-            json!({"at": 3, "label": "3:4", "query": 3, "notes": 4, "applied": true, "agreed": false}),
-            // Older than the week: not this week's mark.
-            json!({"at": -1_000_000_000_000_i64, "label": "5:6", "query": 5, "notes": 6, "applied": true, "agreed": false}),
+            // Older than the week, still in the window: its mark is the
+            // window's and not the week's.
+            json!({"at": old, "query": 5, "notes": 6, "outcome": "answered", "elapsed_ms": 5, "applied": true}),
+            json!({"at": old + 1, "label": "5:6", "query": 5, "notes": 6, "applied": true, "agreed": false}),
+            json!({"at": 1, "query": 1, "notes": 2, "outcome": "answered", "elapsed_ms": 5, "applied": false}),
+            json!({"at": 2, "query": 3, "notes": 4, "outcome": "answered", "elapsed_ms": 5, "applied": true}),
+            json!({"at": 3, "label": "1:2", "query": 1, "notes": 2, "applied": false, "agreed": true, "rank": 0}),
+            json!({"at": 4, "label": "3:4", "query": 3, "notes": 4, "applied": true, "agreed": false}),
         ],
     );
     let report = one(seat, &roots, None, None, 1_000, 0);
-    assert!(matches!(report.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))), "{:?}", report.verdict());
-    assert_eq!(report.judged.as_ref().map(|judged| judged.agreement), Some(Agreement { compared: 2, agreed: 1, ..Agreement::default() }));
+    assert!(matches!(report.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 3, .. }))), "{:?}", report.verdict());
+    assert_eq!(report.judged.as_ref().map(|judged| judged.agreement), Some(Agreement { compared: 3, agreed: 1, ..Agreement::default() }));
     assert_eq!(report.agreement_week, Agreement { compared: 2, agreed: 1, ..Agreement::default() });
-    assert_eq!((report.week.rows, report.asked_toward_judgment), (1, 1), "a label was counted as a request");
+    assert_eq!((report.week.rows, report.asked_toward_judgment), (2, 3), "a label was counted as a request");
 }
 
 /// What the labels and the judge cost on real ledgers (t-5806) — run
@@ -1079,4 +1140,49 @@ fn the_dashboard_counts_the_same_series_the_judge_reads() {
     assert_eq!((report.model.as_deref(), report.cut.as_deref()), (Some("jev-1.13.0"), None));
     assert_eq!(report.stand, Stand::Recording, "version 1's rise is not version 2's");
     assert!(!report.applies);
+}
+
+/// The routing seat's judge reads the series of the words it asks now and
+/// stands on nothing older (t-6877, at the routing doors the audit named):
+/// a full first-rubric window with its probe beside every judgment and the
+/// rise the judge once wrote for it, then twenty requests under the second
+/// rubric — `judge_ledger` is not due (twenty are not a window), asked
+/// anyway the seat holds on the twenty, and `raised_at` says recording. The
+/// same second-rubric window filled says something of its own again.
+#[test]
+fn the_routing_judge_reads_the_current_rubrics_series_and_stands_on_nothing_older() {
+    use zerocode_core::jev::promote::{window_wanted_for, Line, Verdict, ROSE};
+    use zerocode_core::jev::summary::TRANSITION;
+    let seat = &zerocode_core::jev::ROUTING;
+    let wanted = i64::try_from(window_wanted_for(seat).expect("routing rises")).expect("fits");
+    let under = |at: i64, rubric: u32| {
+        let mut row = compared(at, ["large", "low", "analysis"], Some(["large", "low", "analysis"]));
+        row["rubricVersion"] = json!(rubric);
+        row
+    };
+    let mut rows: Vec<Value> = (0..wanted).map(|at| under(at, seat.rubric_versions[0] - 1)).collect();
+    rows.push(json!({"at": wanted, (TRANSITION.canonical): ROSE}));
+    rows.extend((0..20).map(|n| under(1_000 + n, seat.rubric_versions[0])));
+    let work = tempfile::tempdir().expect("tmp");
+    let ledger = ledger_with(work.path(), &rows);
+    assert_eq!(
+        super::super::decision_shadow::judge_ledger(&ledger, None, 9),
+        None,
+        "twenty of the second rubric are not a window, whatever the first left"
+    );
+    let judged = super::super::decision_shadow::judge_rows(&rows, None).expect("judged");
+    assert!(
+        matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { rows: 20, .. })),
+        "{:?}",
+        judged.verdict
+    );
+    assert_eq!(judged.agreement.compared, 60, "the twenty's own axes, not the first rubric's");
+    assert!(!super::super::decision_shadow::raised_at(&ledger), "the first rubric's rise is not the second's");
+
+    // Filled, the second rubric's window is judged on its own rows: due,
+    // and no longer holding for want of rows.
+    rows.extend((20..wanted).map(|n| under(1_000 + n, seat.rubric_versions[0])));
+    let ledger = ledger_with(work.path(), &rows);
+    let verdict = super::super::decision_shadow::judge_ledger(&ledger, None, 9).expect("due on its own window");
+    assert!(!matches!(verdict, Verdict::Keep | Verdict::Hold(Line::TooFewRows { .. })), "{verdict:?}");
 }

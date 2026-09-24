@@ -2166,3 +2166,65 @@ fn a_seat_that_never_rises_names_no_apply_wall() {
         );
     }
 }
+
+/// Every seat's row names the words it asks now and how its labels name a
+/// request (t-6877): at least one rubric version, each a version (never
+/// zero, never twice), and naming keys that are plain words — the judge
+/// reads a seat's ledger as one rubric's series by these two columns, and
+/// a row that named none would be a seat the judge could not read.
+#[test]
+fn every_seat_names_its_rubric_and_how_its_labels_name_a_request() {
+    use crate::jev::questions::UNVERSIONED_RUBRIC;
+    assert_eq!(
+        UNVERSIONED_RUBRIC, 1,
+        "a row that names no version is the first rubric's"
+    );
+    for row in &JEV_USES {
+        assert!(!row.rubric_versions.is_empty(), "{}: asks no words", row.id);
+        let mut versions = row.rubric_versions.to_vec();
+        versions.sort_unstable();
+        versions.dedup();
+        assert_eq!(
+            versions.len(),
+            row.rubric_versions.len(),
+            "{}: names a version twice",
+            row.id
+        );
+        assert!(
+            versions
+                .iter()
+                .all(|version| *version >= UNVERSIONED_RUBRIC),
+            "{}: zero is not a version",
+            row.id
+        );
+        for key in row.request_name {
+            assert!(
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{}: {key:?} is not a key a request row carries",
+                row.id
+            );
+        }
+    }
+    // The one seat that asks two questions into one ledger, and the rows
+    // that point at the constants their writers stamp.
+    assert_eq!(
+        SKILLS.rubric_versions,
+        &[
+            questions::SKILL_SEARCH_RUBRIC_VERSION,
+            questions::SKILL_SUGGESTION_RUBRIC_VERSION
+        ]
+    );
+    assert_eq!(
+        TOOL_TEXT_GUARD.rubric_versions,
+        &[questions::TOOL_TEXT_GUARD_RUBRIC_VERSION]
+    );
+    assert_eq!(TOOL_TEXT_GUARD.request_name, &["judged"]);
+    assert_eq!(
+        ROUTING.rubric_versions,
+        &[questions::ROUTING_RUBRIC_VERSION]
+    );
+    assert_eq!(RECALL.request_name, &["query", "notes"]);
+    for row in JEV_USES.iter().filter(|row| row.rubric_versions.len() > 1) {
+        assert_eq!(row.id, SKILLS.id, "only the skills seat asks two questions");
+    }
+}

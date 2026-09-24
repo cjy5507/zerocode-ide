@@ -8,15 +8,57 @@ fn wanted() -> usize {
     crate::jev::summary::rows_that_can_clear(950)
 }
 
+/// A request `seat` was asked at `at`, answered: stamped with the rubric
+/// the seat asks now and named as its labels name a request
+/// ([`JevUse::request_name`] — `at` under each key), so a label of `at`
+/// grades it (t-6877).
+fn asked_by(seat: &JevUse, at: usize) -> Value {
+    use serde_json::json;
+    let mut row = json!({"at": at, "outcome": "answered", "elapsedMs": 1, "rubricVersion": seat.rubric_versions[0]});
+    for key in seat.request_name {
+        row[*key] = json!(at);
+    }
+    row
+}
+
+/// The name a label of `seat` gives request `n`: `n` under each of the
+/// seat's naming keys, joined as the reader joins them — or `n` itself for
+/// a seat whose labels name no request.
+fn named(seat: &JevUse, n: usize) -> Value {
+    use serde_json::json;
+    if seat.request_name.is_empty() {
+        json!(n)
+    } else {
+        json!(
+            seat.request_name
+                .iter()
+                .map(|_| n.to_string())
+                .collect::<Vec<_>>()
+                .join(":")
+        )
+    }
+}
+
+/// How many requests a ledger of `seat` holds before its marks: enough for
+/// a window, and enough for every mark the seat's line needs to name one.
+fn asked_count(seat: &JevUse) -> usize {
+    window_wanted_for(seat)
+        .expect("a promoting seat")
+        .max(marks_that_can_clear(seat).unwrap_or(0))
+}
+
+/// A rise as the judge writes it for `seat`: naming the rubric it asks.
+fn rose(seat: &JevUse) -> Value {
+    serde_json::json!({(TRANSITION.canonical): ROSE, "rubricVersions": seat.rubric_versions})
+}
+
 #[test]
 fn a_no_reader_seat_keeps_its_standing_when_its_first_positive_label_arrives() {
     for seat in [&crate::jev::RECALL, &crate::jev::PLACEMENT] {
         let wanted = window_wanted_for(seat).expect("a promoting seat");
-        let mut rows: Vec<Value> = (0..wanted)
-            .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 1}))
-            .collect();
-        rows.push(json!({"transition": ROSE}));
-        rows.push(json!({"at": wanted, "label": "request", "agreed": true}));
+        let mut rows: Vec<Value> = (0..wanted).map(|at| asked_by(seat, at)).collect();
+        rows.push(rose(seat));
+        rows.push(json!({"at": wanted, "label": named(seat, 0), "agreed": true}));
         assert_eq!(
             judge_seat(seat, &rows).expect("judged").verdict,
             Verdict::Keep,
@@ -36,12 +78,12 @@ fn hindsight_waits_for_the_sample_floor_then_uses_the_same_wilson_line() {
             (floor, true, false),
             (floor, false, true),
         ] {
-            let mut rows: Vec<Value> = (0..wanted)
-                .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 1}))
-                .collect();
-            rows.push(json!({"transition": ROSE}));
+            let mut rows: Vec<Value> = (0..wanted).map(|at| asked_by(seat, at)).collect();
+            rows.push(rose(seat));
             rows.extend(
-                (0..compared).map(|at| json!({"at": wanted + at, "label": at, "agreed": agreed})),
+                (0..compared).map(
+                    |at| json!({"at": wanted + at, "label": named(seat, at), "agreed": agreed}),
+                ),
             );
             let verdict = judge_seat(seat, &rows).expect("judged").verdict;
             assert_eq!(
@@ -63,11 +105,9 @@ fn hindsight_waits_for_the_sample_floor_then_uses_the_same_wilson_line() {
 #[test]
 fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
     for seat in crate::jev::JEV_USES.iter().filter(|row| row.promotes) {
-        let wanted = window_wanted_for(seat).expect("a promoting seat");
         let floor = seat.agreement_rows_wanted.expect("a label sample floor");
-        let rows: Vec<Value> = (0..wanted)
-            .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 1}))
-            .collect();
+        let asked = asked_count(seat);
+        let rows: Vec<Value> = (0..asked).map(|at| asked_by(seat, at)).collect();
         assert_eq!(
             judge_seat(seat, &rows).expect("judged").verdict,
             Verdict::Hold(Line::TooFewCompared {
@@ -78,7 +118,7 @@ fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
             seat.id
         );
         let mut marked = rows.clone();
-        marked.extend(marks_that_rise(seat, wanted));
+        marked.extend(marks_that_rise(seat, asked));
         assert_eq!(
             judge_seat(seat, &marked).expect("judged").verdict,
             Verdict::Rise,
@@ -90,11 +130,11 @@ fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
 
 /// Thirty marks that agree nine times in ten, the three that disagree the
 /// oldest, from `at` on.
-fn thirty_marks(at: usize) -> Vec<Value> {
+fn thirty_marks(seat: &JevUse, at: usize) -> Vec<Value> {
     const MARKS: usize = 30;
     const MISSES: usize = 3;
     (0..MARKS)
-        .map(|n| json!({"at": at + n, "label": n, "agreed": n >= MISSES}))
+        .map(|n| json!({"at": at + n, "label": named(seat, n), "agreed": n >= MISSES}))
         .collect()
 }
 
@@ -104,14 +144,14 @@ fn thirty_marks(at: usize) -> Vec<Value> {
 /// all, the shape of every row before versions were recorded.
 fn marks_across_a_version_change(
     seat: &JevUse,
-    marks: impl FnOnce(usize) -> Vec<Value>,
+    marks: impl FnOnce(&JevUse, usize) -> Vec<Value>,
     on_b: Option<usize>,
 ) -> Vec<Value> {
-    let wanted = window_wanted_for(seat).expect("a promoting seat");
+    let asked = asked_count(seat);
     let mut rows = window_then(seat, marks);
     if let Some(on_b) = on_b {
-        let count = rows.len() - wanted;
-        for (n, mark) in rows[wanted..].iter_mut().enumerate() {
+        let count = rows.len() - asked;
+        for (n, mark) in rows[asked..].iter_mut().enumerate() {
             mark[crate::jev::summary::MODEL.canonical] =
                 json!(if n + on_b >= count { "B" } else { "A" });
         }
@@ -159,8 +199,8 @@ fn a_seat_is_judged_on_the_marks_of_the_version_that_answers_now() {
         let on_b = marks_that_rise(seat, 0).len();
         let risen = marks_across_a_version_change(
             seat,
-            |at| {
-                let mut marks = thirty_marks(at);
+            |seat, at| {
+                let mut marks = thirty_marks(seat, at);
                 marks.extend(marks_that_rise(seat, at + marks.len()));
                 marks
             },
@@ -193,6 +233,9 @@ fn a_seat_is_judged_on_the_marks_of_the_version_that_answers_now() {
 /// window's requests with it while the marks written after it stay.
 #[test]
 fn the_rows_of_the_newest_version_start_after_the_last_row_another_answered() {
+    // A seat whose writer never versioned its words and whose labels name no
+    // request: every row here is its series, as every ledger was read before.
+    let seat = &crate::jev::JUDGMENT_CACHE;
     let answered = |at: i64, model: Option<&str>| {
         let mut row = json!({"at": at, "outcome": "answered", "elapsedMs": 1});
         if let Some(model) = model {
@@ -210,16 +253,15 @@ fn the_rows_of_the_newest_version_start_after_the_last_row_another_answered() {
         answered(7, None),
         json!({"at": 8, "transition": ROSE}),
     ];
-    let version = on_the_newest_version(&rows);
+    let version = on_the_newest_version(seat, &rows);
     assert_eq!((version.model, version.cut), (Some("B"), Some("A")));
-    assert_eq!(
-        version.requests,
-        &rows[3..],
-        "after the newest request A answered"
+    assert!(
+        same_rows(&version.requests, &rows[3..7]),
+        "after the newest request A answered, and never the transition"
     );
-    assert_eq!(version.marks, &rows[3..]);
+    assert!(same_rows(&version.marks, &rows[3..7]));
     assert_eq!(
-        asked_toward_judgment(&rows),
+        asked_toward_judgment(seat, &rows),
         3,
         "the timeout, B and the unnamed answer"
     );
@@ -228,11 +270,10 @@ fn the_rows_of_the_newest_version_start_after_the_last_row_another_answered() {
         answered(1, None),
         json!({"at": 2, "label": "x", "agreed": false}),
     ];
-    let version = on_the_newest_version(&unnamed);
+    let version = on_the_newest_version(seat, &unnamed);
     assert_eq!((version.model, version.cut), (None, None));
-    assert_eq!(
-        version.requests,
-        &unnamed[..],
+    assert!(
+        same_rows(&version.requests, &unnamed[..]),
         "a ledger with no versions is read whole"
     );
 
@@ -245,14 +286,18 @@ fn the_rows_of_the_newest_version_start_after_the_last_row_another_answered() {
         json!({"at": 3, "label": "a", "agreed": false, "model": "A"}),
         json!({"at": 4, "label": "b", "agreed": true}),
     ];
-    let version = on_the_newest_version(&late);
+    let version = on_the_newest_version(seat, &late);
     assert_eq!((version.model, version.cut), (Some("B"), Some("A")));
-    assert_eq!(version.requests, &late[1..]);
-    assert_eq!(
-        version.marks,
-        &late[3..],
+    assert!(same_rows(&version.requests, &late[1..]));
+    assert!(
+        same_rows(&version.marks, &late[3..]),
         "the late label of A's answer is A's"
     );
+}
+
+/// Whether `held` is exactly `rows`, row for row.
+fn same_rows(held: &[&Value], rows: &[Value]) -> bool {
+    held.len() == rows.len() && held.iter().zip(rows).all(|(held, row)| *held == row)
 }
 
 /// A row that is neither a request nor a mark names no version, whatever it
@@ -278,14 +323,25 @@ fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
         rows.push(json!({"kind": "label", "at": at + 2, "agreed": n >= crate::jev::NEGATIVES_WANTED, "baselineAgreed": n % 2 == 0}));
         rows.push(json!({"kind": "step", "at": at + 3, model: chat[(n + 1) % chat.len()]}));
     }
-    let version = on_the_newest_version(&rows);
+    let version = on_the_newest_version(seat, &rows);
     assert_eq!(
         (version.model, version.cut),
         (Some("jev-1.13.0"), None),
         "a step's chat model is not the version that answered"
     );
-    assert_eq!(version.requests, &rows[..]);
-    assert_eq!(version.marks, &rows[..], "no step cuts the labels away");
+    let evidence: Vec<Value> = rows
+        .iter()
+        .filter(|row| row["kind"] != "step")
+        .cloned()
+        .collect();
+    assert!(
+        same_rows(&version.requests, &evidence),
+        "the step rows are nobody's evidence"
+    );
+    assert!(
+        same_rows(&version.marks, &evidence),
+        "no step cuts the labels away"
+    );
     let judged = judge_seat(seat, &rows).expect("judged");
     assert_eq!(
         (judged.agreement.compared, judged.cut.as_deref()),
@@ -300,9 +356,12 @@ fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
         json!({"kind": "step", "at": 2, model: "claude-opus-5"}),
         json!({"kind": "label", "at": 3, "agreed": false}),
     ];
-    let version = on_the_newest_version(&unanswered);
+    let version = on_the_newest_version(seat, &unanswered);
     assert_eq!((version.model, version.cut), (None, None));
-    assert_eq!(version.marks, &unanswered[..]);
+    assert!(same_rows(
+        &version.marks,
+        &[unanswered[0].clone(), unanswered[2].clone()]
+    ));
 }
 
 /// A seat already acting is judged on the new version's rows and keeps
@@ -313,16 +372,21 @@ fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
 fn a_change_of_version_restarts_the_window_and_leaves_the_standing() {
     let seat = &crate::jev::SUMMON;
     let wanted = window_wanted_for(seat).expect("summon rises");
-    let row = |at: usize, model: &str| json!({"at": at, "outcome": "answered", "elapsedMs": 1, "agreed": true, "model": model});
+    let row = |at: usize, model: &str| {
+        let mut row = asked_by(seat, at);
+        row["agreed"] = json!(true);
+        row["model"] = json!(model);
+        row
+    };
     let mut rows: Vec<Value> = (0..wanted).map(|at| row(at, "A")).collect();
-    rows.push(json!({"at": wanted, (TRANSITION.canonical): ROSE}));
+    rows.push(rose(seat));
     rows.extend((0..3).map(|n| row(wanted + 1 + n, "B")));
     let judged = judge_seat(seat, &rows).expect("judged");
     assert_eq!(judged.verdict, Verdict::Keep, "{judged:?}");
     assert_eq!(judged.window.rows, 3);
-    assert_eq!(asked_toward_judgment(&rows), 3);
+    assert_eq!(asked_toward_judgment(seat, &rows), 3);
     assert_eq!(
-        rows_to_next_judgment(seat, asked_toward_judgment(&rows)),
+        rows_to_next_judgment(seat, asked_toward_judgment(seat, &rows)),
         Some(wanted - 3)
     );
     assert!(
@@ -334,14 +398,22 @@ fn a_change_of_version_restarts_the_window_and_leaves_the_standing() {
 #[test]
 fn one_forgiven_timeout_does_not_forgive_a_second_one() {
     for seat in [&crate::jev::RECALL, &crate::jev::PLACEMENT] {
-        let wanted = window_wanted_for(seat).expect("a promoting seat");
         for misses in [1, 2] {
             // A window with marks that clear every agreement line, so the
             // one line left to clear is the answer line.
-            let mut rows: Vec<Value> = (0..wanted)
-                .map(|at| json!({"at": at, "outcome": if at < misses {"timeout"} else {"answered"}, "elapsedMs": 1}))
+            // The misses are the newest requests, inside the window however
+            // many requests the marks needed to name.
+            let asked = asked_count(seat);
+            let mut rows: Vec<Value> = (0..asked)
+                .map(|at| {
+                    let mut row = asked_by(seat, at);
+                    if at >= asked - misses {
+                        row["outcome"] = json!("timeout");
+                    }
+                    row
+                })
                 .collect();
-            rows.extend(marks_that_rise(seat, wanted));
+            rows.extend(marks_that_rise(seat, asked));
             let verdict = judge_seat(seat, &rows).expect("judged").verdict;
             assert_eq!(
                 verdict == Verdict::Rise,
@@ -821,16 +893,22 @@ fn a_ledgers_text_stands_where_its_rows_do() {
 
 #[test]
 fn only_a_change_is_written_down() {
+    let seat = &crate::jev::PLACEMENT;
     let held = window(200, 200, Some(600));
-    assert_eq!(transition_row(9, Verdict::Keep, &held), None);
+    assert_eq!(transition_row(seat, 9, Verdict::Keep, &held), None);
     assert_eq!(
-        transition_row(9, Verdict::Hold(Line::Schema { rows: 1 }), &held),
+        transition_row(seat, 9, Verdict::Hold(Line::Schema { rows: 1 }), &held),
         None
     );
 
-    let rose = transition_row(9, Verdict::Rise, &held).expect("a rise is written");
+    let rose = transition_row(seat, 9, Verdict::Rise, &held).expect("a rise is written");
     assert_eq!(rose[TRANSITION.canonical], ROSE);
     assert_eq!(rose["rows"], 200);
+    assert_eq!(
+        rose[RUBRIC_VERSIONS.canonical],
+        serde_json::json!(seat.rubric_versions),
+        "a transition names the rubric it was decided on"
+    );
     assert_eq!(
         rose[ON_LINE],
         serde_json::Value::Null,
@@ -838,6 +916,7 @@ fn only_a_change_is_written_down() {
     );
 
     let fell = transition_row(
+        seat,
         9,
         Verdict::Fall(Line::Latency {
             p95_ms: 4_847,
@@ -853,7 +932,7 @@ fn only_a_change_is_written_down() {
 #[test]
 fn a_transition_row_carries_the_numbers_and_none_of_the_request() {
     let held = window(40, 38, Some(700));
-    let row = transition_row(9, Verdict::Rise, &held).expect("row");
+    let row = transition_row(&crate::jev::PLACEMENT, 9, Verdict::Rise, &held).expect("row");
     // Sorted before it is compared: whether a JSON map keeps insertion order
     // is a feature the WORKSPACE turns on and not a promise this crate makes,
     // so the same row comes back one way here and another in the gate
@@ -871,6 +950,7 @@ fn a_transition_row_carries_the_numbers_and_none_of_the_request() {
         "at",
         "p95Ms",
         "rows",
+        RUBRIC_VERSIONS.canonical,
         TRANSITION.canonical,
     ];
     wanted.sort_unstable();
@@ -1012,7 +1092,7 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
             seat.window_forgives.expect("summon forgives a bad minute")
         )
     );
-    let row = |at: i64, agreed: bool| json!({"at": at, "outcome": "answered", "elapsedMs": 600, "requests": 1, "agreed": agreed});
+    let row = |at: i64, agreed: bool| json!({"at": at, "outcome": "answered", "elapsedMs": 600, "requests": 1, "agreed": agreed, "rubricVersion": seat.rubric_versions[0]});
     // Thin: held short of rows, and not yet due.
     let thin: Vec<serde_json::Value> = (0..3).map(|at| row(at, true)).collect();
     let judged = judge_seat(seat, &thin).expect("a promoting seat is judged");
@@ -1063,7 +1143,7 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
     ));
     // A label row's mark counts too, and only from the window's first row on.
     let mut labelled: Vec<serde_json::Value> = (0..wanted as i64)
-        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 600, "requests": 1}))
+        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 600, "requests": 1, "rubricVersion": seat.rubric_versions[0]}))
         .collect();
     labelled.extend((0..wanted as i64).map(|at| {
         json!({"at": at, "label": format!("k{at}"), "agreed": true, "baselineAgreed": at % 2 == 0})
@@ -1101,18 +1181,18 @@ fn marks_that_rise(seat: &JevUse, at: usize) -> Vec<Value> {
     let marks = marks_that_can_clear(seat).expect("a width the line can be cleared on");
     (0..marks)
         .map(|n| {
-            json!({"at": at + n, "label": n, "agreed": n >= misses, "baselineAgreed": n % 2 == 0})
+            json!({"at": at + n, "label": named(seat, n), "agreed": n >= misses, "baselineAgreed": n % 2 == 0})
         })
         .collect()
 }
 
-/// A window of answered rows, then `marks`.
-fn window_then(seat: &JevUse, marks: impl FnOnce(usize) -> Vec<Value>) -> Vec<Value> {
-    let wanted = window_wanted_for(seat).expect("a promoting seat");
-    let mut rows: Vec<Value> = (0..wanted)
-        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 1}))
-        .collect();
-    rows.extend(marks(wanted));
+/// A window of answered rows — enough of them for every mark to name one
+/// ([`asked_count`]) — then `marks`, handed the seat and the row the marks
+/// start at.
+fn window_then(seat: &JevUse, marks: impl FnOnce(&JevUse, usize) -> Vec<Value>) -> Vec<Value> {
+    let asked = asked_count(seat);
+    let mut rows: Vec<Value> = (0..asked).map(|at| asked_by(seat, at)).collect();
+    rows.extend(marks(seat, asked));
     rows
 }
 
@@ -1125,7 +1205,7 @@ fn window_then(seat: &JevUse, marks: impl FnOnce(usize) -> Vec<Value>) -> Vec<Va
 #[test]
 fn a_seat_whose_labels_never_say_no_cannot_rise() {
     for seat in crate::jev::JEV_USES.iter().filter(|row| row.promotes) {
-        let all_yes = window_then(seat, |at| {
+        let all_yes = window_then(seat, |seat, at| {
             marks_that_rise(seat, at)
                 .into_iter()
                 .map(|mut mark| {
@@ -1143,7 +1223,7 @@ fn a_seat_whose_labels_never_say_no_cannot_rise() {
             "{}",
             seat.id
         );
-        let said_no = window_then(seat, |at| marks_that_rise(seat, at));
+        let said_no = window_then(seat, marks_that_rise);
         assert_eq!(
             judge_seat(seat, &said_no).expect("judged").verdict,
             Verdict::Rise,
@@ -1163,7 +1243,7 @@ fn a_seat_whose_labels_never_say_no_cannot_rise() {
 fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     let seat = &crate::jev::PLACEMENT;
     assert!(seat.baseline.binds());
-    let beaten = window_then(seat, |at| {
+    let beaten = window_then(seat, |seat, at| {
         marks_that_rise(seat, at)
             .into_iter()
             .map(|mut mark| {
@@ -1189,7 +1269,7 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
         Verdict::Fall(Line::Baseline { .. })
     ));
     // No baseline marks: nothing to beat yet.
-    let unmeasured = window_then(seat, |at| {
+    let unmeasured = window_then(seat, |seat, at| {
         marks_that_rise(seat, at)
             .into_iter()
             .map(|mut mark| {
@@ -1206,7 +1286,7 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     ));
     // Beaten comfortably: it rises.
     assert_eq!(
-        judge_seat(seat, &window_then(seat, |at| marks_that_rise(seat, at)))
+        judge_seat(seat, &window_then(seat, marks_that_rise))
             .expect("judged")
             .verdict,
         Verdict::Rise
@@ -1214,7 +1294,7 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     // A seat with no baseline is held to its floor alone.
     let own = &crate::jev::BROWSER_READ;
     assert!(!own.baseline.binds());
-    let unmarked = window_then(own, |at| {
+    let unmarked = window_then(own, |own, at| {
         marks_that_rise(own, at)
             .into_iter()
             .map(|mut mark| {
@@ -1238,9 +1318,9 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
 #[test]
 fn a_seat_whose_rows_all_compare_nothing_has_no_label() {
     let seat = &crate::jev::ZO_STEP_EFFORT;
-    let rows = window_then(seat, |at| {
+    let rows = window_then(seat, |seat, at| {
         (0..5)
-            .map(|n| json!({"at": at + n, "label": n, "notCompared": "not_carried"}))
+            .map(|n| json!({"at": at + n, "label": named(seat, n), "notCompared": "not_carried"}))
             .collect()
     });
     assert_eq!(
@@ -1287,7 +1367,7 @@ fn guard_label(at: usize, judged: u64, agreed: bool) -> Value {
         "at": at,
         "label": judged.to_string(),
         "agreed": agreed,
-        "baselineAgreed": at % 2 == 0,
+        "baselineAgreed": at.is_multiple_of(2),
     })
 }
 
@@ -1571,6 +1651,9 @@ fn a_no_model_timeout_stays_in_the_current_rubrics_requests() {
     let wanted = window_wanted_for(seat).expect("the guard rises");
     let mut acting = guard_window_that_rises(seat, 2, 1_000, 10_000);
     acting.push(rise_on(15_000, &[2]));
+    // One more answered request, so the count sits between two judgments
+    // and only the fallback rule can make one due.
+    acting.push(guard_request(16_000, 1_999, 2, Some(ANSWERING), "answered"));
     let timeouts = |rubric: u32| -> Vec<Value> {
         (0..FALLBACKS_THAT_END_IT as usize)
             .map(|n| guard_request(20_000 + n, 5_000 + n as u64, rubric, None, "timeout"))
@@ -1645,4 +1728,71 @@ fn an_orphan_a_duplicate_and_a_contradicting_label_are_not_compared() {
         (2, 1),
         "request 100 once, by its newest label; 102 once; 999 and the contradicting 101 never: {judged:?}"
     );
+}
+
+/// The standing read off a ledger's text is the one read off its parsed
+/// rows, rubric and all (t-6877): a rise naming the seat's words stands, a
+/// rise naming none is the first rubric's, a rise naming other words or
+/// something that is not a version stands for nothing, a request of newer
+/// words after the rise puts the seat behind its series, and the request
+/// lines are read for their rubric wherever the key falls in the line.
+#[test]
+fn a_ledgers_text_stands_where_its_series_does() {
+    use serde_json::json;
+    let text = |rows: &[Value]| {
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>()
+    };
+    let first = &crate::jev::PLACEMENT;
+    let second = guard();
+    let both = |rows: &[Value]| {
+        for seat in [first, second] {
+            assert_eq!(
+                standing_in(seat, &text(rows)),
+                standing(seat, rows),
+                "{}: the text and the rows disagree on {rows:?}",
+                seat.id
+            );
+        }
+    };
+    let unversioned = [
+        json!({"at": 1, "outcome": "answered", "rubricVersion": 1}),
+        unversioned_rise(2),
+    ];
+    both(&unversioned);
+    assert_eq!(standing_in(first, &text(&unversioned)), Stand::Applying);
+    assert_eq!(standing_in(second, &text(&unversioned)), Stand::Recording);
+
+    let named = [
+        json!({"at": 1, "outcome": "answered", "rubricVersion": 2}),
+        rise_on(2, &[2]),
+    ];
+    both(&named);
+    assert_eq!(standing_in(second, &text(&named)), Stand::Applying);
+    assert_eq!(standing_in(first, &text(&named)), Stand::Recording);
+
+    let malformed = [json!({"at": 2, (TRANSITION.canonical): ROSE, "rubricVersions": "2"})];
+    both(&malformed);
+    assert_eq!(standing_in(second, &text(&malformed)), Stand::Recording);
+
+    // The words went back: a request of newer words after the rise.
+    let rolled_back = [
+        rise_on(1, &[1]),
+        json!({"at": 2, "outcome": "answered", "rubricFingerprint": "abc", "rubricVersion": 2}),
+    ];
+    both(&rolled_back);
+    assert_eq!(standing_in(first, &text(&rolled_back)), Stand::Recording);
+    // And a request of the seat's own or older words after it changes
+    // nothing — nor does a label that only mentions the key in a value.
+    let stood = [
+        rise_on(1, &[1]),
+        json!({"at": 2, "outcome": "answered", "rubricVersion": 1}),
+        json!({"at": 3, "label": "x", "agreed": true, "note": "\"rubricVersion\": 9"}),
+    ];
+    both(&stood);
+    assert_eq!(standing_in(first, &text(&stood)), Stand::Applying);
+    // A torn last line is passed over, as ever.
+    let torn = format!("{}{{\"at\": 9, \"transition\": \"fa", text(&named));
+    assert_eq!(standing_in(second, &torn), Stand::Applying);
 }
