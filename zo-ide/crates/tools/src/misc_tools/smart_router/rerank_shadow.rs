@@ -30,7 +30,9 @@
 //! says `applied: false` either way — so the ledger can be read back for how
 //! often the switch actually changed anything.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -42,9 +44,10 @@ use api::{
 };
 use zerocode_core::jev::door::Refused;
 use zerocode_core::jev::RECALL;
+use runtime::memory::recall::{RecallDemand, RecallDemandSource, MAX_RECALLED_ENTRIES};
 use runtime::memory::rerank::{
     apply_order, compare, rerank_candidates, rerank_questions, rerank_state, validate_rerank,
-    RerankComparison, RerankReading, RERANK_RUBRIC_VERSION,
+    RerankComparison, RerankReading, MAX_RERANK_CANDIDATES, RERANK_RUBRIC_VERSION,
 };
 use core_types::{ContentBlock, ConversationMessage, MessageRole};
 use runtime::{MemoryHit, RecallSeat};
@@ -293,20 +296,24 @@ struct MemoKey {
 
 impl MemoKey {
     fn for_reading(query: &str, hits: &[MemoryHit], model: u64) -> Self {
-        let mut notes = String::new();
-        for hit in hits {
-            notes.push_str(&hit.entry.slug);
-            notes.push('\u{1f}');
-            notes.push_str(&hit.entry.summary);
-            notes.push('\u{1e}');
-        }
-        Self {
-            query: task_fingerprint(query, ""),
-            notes: task_fingerprint("", &notes),
-            rubric: RERANK_RUBRIC_VERSION,
-            model,
-        }
+        let (query, notes) = reading_fingerprints(query, hits);
+        Self { query, notes, rubric: RERANK_RUBRIC_VERSION, model }
     }
+}
+
+/// The two fingerprints a reading's row is named by, and its label with it
+/// (`RerankLabelRow::label`): the request text, and the notes in recall's
+/// order — names and summaries both. `hits` is the notes the question is
+/// built for, [`MAX_RERANK_CANDIDATES`] at most.
+fn reading_fingerprints(query: &str, hits: &[MemoryHit]) -> (u64, u64) {
+    let mut notes = String::new();
+    for hit in hits {
+        notes.push_str(&hit.entry.slug);
+        notes.push('\u{1f}');
+        notes.push_str(&hit.entry.summary);
+        notes.push('\u{1e}');
+    }
+    (task_fingerprint(query, ""), task_fingerprint("", &notes))
 }
 
 #[derive(Debug, Clone)]
@@ -373,17 +380,62 @@ pub(super) fn settle(cwd: &Path, attempt: &str, query: &str, hits: Vec<MemoryHit
     let Some(mode) = asking_mode(cwd, query, &hits) else {
         return hits;
     };
-    // `auto` acts on the standing its own ledger recorded (§4, t-5806): the
-    // judge wrote a rise there when the window cleared every line on the
-    // seat's own labels, and reading it back here is what makes `auto` a
-    // word that decides rather than a second spelling of `shadow`. Read only
-    // under `auto`: a person's `on` needs no ledger, and `shadow` reads none.
-    let raised = mode == zerocode_core::jev::JevMode::Auto && runtime::jev_seat_applies(cwd, &RECALL);
-    if !mode.applies_with(raised) {
-        fire(cwd, query, &hits, RERANK_SHADOW_DEADLINE, None, label);
-        return hits;
+    // Named before the road forks, over the notes the question is built for,
+    // so the label a turn with no judgment writes is still named for the row
+    // this reading leaves (`reading_fingerprints`).
+    let key = reading_fingerprints(query, &hits[..hits.len().min(MAX_RERANK_CANDIDATES)]);
+    let read = if seat_acts(cwd, mode) {
+        apply(cwd, query, hits, &label)
+    } else {
+        fire(cwd, query, &hits, RERANK_SHADOW_DEADLINE, None, Arc::clone(&label));
+        hits
+    };
+    // What the turn is about to read, whichever road handed it over — the
+    // one showing per turn the label counts each note as (t-6264).
+    note_shown(&label, key, &read);
+    read
+}
+
+/// Whether the seat acts on this project's recalls under `mode` (§4): a
+/// person's `on`, or an `auto` standing on what its own ledger recorded
+/// (t-5806) — the judge wrote a rise there when the window cleared every
+/// line on the seat's own labels, and reading it back here is what makes
+/// `auto` a word that decides rather than a second spelling of `shadow`.
+/// Read only under `auto`: a person's `on` needs no ledger, and `shadow`
+/// reads none.
+///
+/// One reading, because two roads ask it of one seat: the recall the seat
+/// settles, and the demand the retriever asks for before that recall
+/// (`demand_for`). Two spellings would be a seat that ranks on its rows
+/// while recording, or records while ranking.
+fn seat_acts(cwd: &Path, mode: zerocode_core::jev::JevMode) -> bool {
+    let raised = mode == zerocode_core::jev::JevMode::Auto && raised_now(cwd);
+    mode.applies_with(raised)
+}
+
+/// `runtime::jev_seat_applies` for this seat, asked once per state of its
+/// ledger: the retriever asks it for the demand and the seat asks it again
+/// for the road a moment later, on the same recall, and nothing is written
+/// between the two. The whole-ledger read it costs (4.5 ms on this
+/// machine's 1,005-row ledger, t-5806) is paid once per recall under `auto`,
+/// as it was before the demand asked too. A ledger whose length moved — a
+/// row appended, a judge's transition, a cut to its newer half — is read
+/// again.
+fn raised_now(cwd: &Path) -> bool {
+    static STAND: OnceLock<Mutex<HashMap<PathBuf, (u64, bool)>>> = OnceLock::new();
+    let ledger = rerank_shadow_path(cwd);
+    let len = fs::metadata(&ledger).map_or(0, |meta| meta.len());
+    let memo = STAND.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&(read_at, raised)) = memo.lock().ok().as_ref().and_then(|held| held.get(&ledger)) {
+        if read_at == len {
+            return raised;
+        }
     }
-    apply(cwd, query, hits, &label)
+    let raised = runtime::jev_seat_applies(cwd, &RECALL);
+    if let Ok(mut held) = memo.lock() {
+        held.insert(ledger, (len, raised));
+    }
+    raised
 }
 
 /// Judge the seat on what it has just written — a reading or a label — and
@@ -506,13 +558,44 @@ async fn run(shot: Shot, answer: Option<RowSender>) {
 
 /* ---- the label: what the turn then read ----------------------------------- */
 
-/// The last reading settled for one attempt — what its turn-end label grades.
+/// What one attempt's recalls have put in front of its turn so far, and the
+/// last reading settled on any of them — what its turn-end label grades.
 ///
 /// In memory and not on disk, for the reason the skill seat gives
 /// (`skill_search::last_answer`): the mark is whether THIS turn went on to
 /// read what THIS reading put first, and an order read back off a ledger row
 /// could be a reading another session settled an hour ago. Slots belong to
 /// (project, attempt), and late results keep only their detached slot.
+#[derive(Default)]
+struct Reading {
+    /// The reading the label is named for when no judgment settled: the last
+    /// recall's fingerprints, which its row is named by too.
+    key: Option<(u64, u64)>,
+    /// Each note a section this turn read has named, once, in the order first
+    /// shown. A turn recalls once per request and reads the same section
+    /// each time, so this grows across the turn and one turn is one showing
+    /// of each note.
+    shown: Vec<ShownPath>,
+    /// Unix milliseconds of the first showing.
+    shown_at: Option<u64>,
+    /// The vault those pages belong to, at first showing
+    /// (`vault_fingerprint`).
+    vault: Option<u64>,
+    settled: Option<Settled>,
+}
+
+/// One note a turn was shown, as the slot remembers it: the path recall
+/// handed it under, which a read is matched against, and the place it held
+/// in the section at its first showing.
+#[derive(Debug, Clone)]
+struct ShownPath {
+    slug: String,
+    path: String,
+    rank: usize,
+}
+
+/// The last reading settled for one attempt: the judgment's order, which the
+/// seat's mark grades.
 struct Settled {
     query: u64,
     notes: u64,
@@ -524,7 +607,7 @@ struct Settled {
     recall_first: Option<(String, String)>,
 }
 
-type ReadingSlot = Arc<Mutex<Option<Settled>>>;
+type ReadingSlot = Arc<Mutex<Reading>>;
 type ReadingBook = HashMap<(PathBuf, String), ReadingSlot>;
 
 fn last_settled() -> &'static Mutex<ReadingBook> {
@@ -534,12 +617,53 @@ fn last_settled() -> &'static Mutex<ReadingBook> {
 
 /// The attempt owns one slot. Replacing or ending it detaches older async
 /// results: they can finish their row but cannot re-enter the label book.
+/// What the turn's earlier requests showed stays with the turn, because the
+/// label counts one showing per turn, not per request.
 fn reading_slot(cwd: &Path, attempt: &str) -> ReadingSlot {
-    let slot = Arc::new(Mutex::new(None));
-    if let Ok(mut held) = last_settled().lock() {
-        held.insert((cwd.to_path_buf(), attempt.to_string()), Arc::clone(&slot));
+    let mut reading = Reading::default();
+    let Ok(mut held) = last_settled().lock() else {
+        return Arc::new(Mutex::new(reading));
+    };
+    let key = (cwd.to_path_buf(), attempt.to_string());
+    if let Some(earlier) = held.get(&key).and_then(|slot| slot.lock().ok()) {
+        reading.key = earlier.key;
+        reading.shown.clone_from(&earlier.shown);
+        reading.shown_at = earlier.shown_at;
+        reading.vault = earlier.vault;
     }
+    let slot = Arc::new(Mutex::new(reading));
+    held.insert(key, Arc::clone(&slot));
     slot
+}
+
+/// Remember what the turn is about to read: the section names the first
+/// [`MAX_RECALLED_ENTRIES`] of what the seat handed back and no more
+/// (`turn_support::recall_and_reminder_sections`), so a note past them, or
+/// one the apply road left out, was shown to nobody. Each note once per
+/// turn, at the place it first held.
+fn note_shown(slot: &ReadingSlot, key: (u64, u64), read: &[MemoryHit]) {
+    let Ok(mut reading) = slot.lock() else {
+        return;
+    };
+    reading.key = Some(key);
+    for (rank, hit) in read.iter().take(MAX_RECALLED_ENTRIES).enumerate() {
+        if !reading.shown.iter().any(|shown| shown.slug == hit.entry.slug) {
+            reading.shown.push(ShownPath { slug: hit.entry.slug.clone(), path: hit.entry.path.clone(), rank });
+        }
+    }
+    if reading.shown_at.is_none() && !reading.shown.is_empty() {
+        reading.shown_at = Some(unix_millis());
+        reading.vault = vault_fingerprint();
+    }
+}
+
+/// The vault the environment names, as the fingerprint the label carries
+/// and the fold filters on — read the way the retriever's corpus is read
+/// (`runtime::memory::recall::load_memory_retriever`, `SecondBrain::from_env`),
+/// so the two agree on which vault a page belongs to. `None` when no vault
+/// is configured, which no demand ranks anything of.
+fn vault_fingerprint() -> Option<u64> {
+    runtime::SecondBrain::from_env().map(|vault| task_fingerprint("", &vault.root().to_string_lossy()))
 }
 
 /// Remember the order a reading settled on, when it settled on one: a row
@@ -562,8 +686,8 @@ fn note_settled(slot: &ReadingSlot, row: &RerankShadowRow, hits: &[MemoryHit]) {
         return;
     }
     let recall_first = hits.first().map(|hit| (hit.entry.slug.clone(), hit.entry.path.clone()));
-    if let Ok(mut settled) = slot.lock() {
-        *settled = Some(Settled { query: row.query, notes: row.notes, applied: row.applied, proposed, recall_first });
+    if let Ok(mut reading) = slot.lock() {
+        reading.settled = Some(Settled { query: row.query, notes: row.notes, applied: row.applied, proposed, recall_first });
     }
 }
 
@@ -579,6 +703,17 @@ fn note_settled(slot: &ReadingSlot, row: &RerankShadowRow, hits: &[MemoryHit]) {
 /// the judgment's order of the first note the turn touched, in the order the
 /// turn touched them; absent when it touched none. Shaped like the skill
 /// seat's label (`skill_search::SkillLabelRow`).
+///
+/// Since t-6264 the same row also names every note the turn was SHOWN, once
+/// each, and what became of it (`shown`) — one row per turn still, because
+/// the judge counts one comparison per row that carries a mark
+/// (`zerocode_core::jev::summary::agreement_rows`), and a row per note would
+/// count a turn shown five notes as five turns. A turn whose reading settled
+/// no judgment — the door refused it, the reply failed its checks, the
+/// answer came after the turn ended — writes the row with its notes and no
+/// mark: it compared nothing, but it showed something, and the demand recall
+/// ranks on (`runtime::memory::recall::RecallDemand`) is read off these
+/// notes alone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RerankLabelRow {
     pub at: u64,
@@ -601,6 +736,43 @@ pub struct RerankLabelRow {
     /// written beside `agreed` (t-6342).
     #[serde(default, rename = "baselineAgreed", skip_serializing_if = "Option::is_none")]
     pub baseline_agreed: Option<bool>,
+    /// Unix milliseconds of the turn's first showing — before which a replay
+    /// may count nothing about these notes as known (t-6264).
+    #[serde(default, rename = "shownAt", skip_serializing_if = "Option::is_none")]
+    pub shown_at: Option<u64>,
+    /// The vault the shown pages belong to, as a fingerprint of its root, so
+    /// a demand read off this ledger folds no other vault's page of the same
+    /// name. Absent when no vault was configured: the notes were the memory
+    /// store's own, which no demand ranks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<u64>,
+    /// Every note the turn was shown, once each, in the order first shown.
+    /// Empty on a row from before t-6264, which says nothing about its
+    /// notes — not that none was opened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shown: Vec<ShownNote>,
+}
+
+/// One note a recall put in front of a turn, and what the turn then did
+/// with it (t-6264) — the per-note half of [`RerankLabelRow`].
+///
+/// `read` and `cited` are two observations, kept apart: a successful read
+/// that named the note's own path, and a citation of the note in the
+/// assistant's own words (`[[slug]]`, or its path, as
+/// `decision_core::dreamer::cited_targets` reads them). A failed read, a
+/// call that got no result, a citation the person or a tool result carried,
+/// and a path that merely ends the same way are none of them. Neither is a
+/// verdict on the note: a turn may go on without opening a page that
+/// answered it, and a row that says neither happened says only that. What
+/// the demand reads off them is the one thing they can answer — whether
+/// anyone, across many showings, ever opened the page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShownNote {
+    pub slug: String,
+    /// The note's place in the order the turn read, at its first showing.
+    pub rank: usize,
+    pub read: bool,
+    pub cited: bool,
 }
 
 /// Write the recall seat's mark for the turn that just ended, judged on
@@ -619,10 +791,15 @@ pub fn note_recall_read(cwd: &Path, attempt: &str, turn: Option<&[ConversationMe
     let Some(turn) = turn else {
         return false;
     };
-    let Some(settled) = slot.lock().ok().and_then(|mut held| held.take()) else {
+    let Some(reading) = slot.lock().ok().map(|mut held| std::mem::take(&mut *held)) else {
         return false;
     };
-    let row = label_row(&settled, turn);
+    // A seat that asked nothing showed nothing: the turn read recall's order
+    // with no seat beside it, and there is no row to write about that.
+    if reading.shown.is_empty() && reading.settled.is_none() {
+        return false;
+    }
+    let row = label_row(&reading, turn);
     let ledger = rerank_shadow_path(cwd);
     let written = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok();
     // A label may be the mark that clears the seat's agreement line: judge
@@ -655,66 +832,108 @@ pub fn mark(touched: &[usize]) -> Result<bool, &'static str> {
     }
 }
 
-/// The label row itself: the mark, or why there is none, and the rank of the
-/// first note touched.
-fn label_row(settled: &Settled, turn: &[ConversationMessage]) -> RerankLabelRow {
-    let touched: Vec<usize> = touched_in_order(&settled.proposed, turn);
-    let graded = mark(&touched);
-    // Today's rule on the same turn: whether recall's own first note was
-    // touched — marked only beside a mark of the seat's, so the two are read
-    // over the same turns.
-    let baseline_agreed = graded.is_ok().then(|| {
-        settled
-            .recall_first
-            .as_ref()
-            .is_some_and(|first| !touched_in_order(std::slice::from_ref(first), turn).is_empty())
-    });
-    RerankLabelRow {
+/// The label row itself: every note shown and what became of it, and — for
+/// a reading whose judgment settled — the mark, or why there is none, and
+/// the rank of the first note touched.
+fn label_row(reading: &Reading, turn: &[ConversationMessage]) -> RerankLabelRow {
+    let named: Vec<(String, String)> = reading.shown.iter().map(|shown| (shown.slug.clone(), shown.path.clone())).collect();
+    let shown = reading
+        .shown
+        .iter()
+        .zip(observe(&named, turn))
+        .map(|(shown, seen)| ShownNote { slug: shown.slug.clone(), rank: shown.rank, read: seen.read, cited: seen.cited })
+        .collect();
+    let (query, notes) = reading
+        .settled
+        .as_ref()
+        .map_or(reading.key.unwrap_or_default(), |settled| (settled.query, settled.notes));
+    let mut row = RerankLabelRow {
         at: unix_millis(),
-        label: format!("{}:{}", settled.query, settled.notes),
-        query: settled.query,
-        notes: settled.notes,
-        applied: settled.applied,
-        agreed: graded.ok(),
-        rank: touched.first().copied(),
-        not_compared: graded.err().map(str::to_string),
-        baseline_agreed,
+        label: format!("{query}:{notes}"),
+        query,
+        notes,
+        applied: false,
+        agreed: None,
+        rank: None,
+        not_compared: None,
+        baseline_agreed: None,
+        shown_at: reading.shown_at,
+        vault: reading.vault,
+        shown,
+    };
+    if let Some(settled) = &reading.settled {
+        let touched: Vec<usize> = touched_in_order(&settled.proposed, turn);
+        let graded = mark(&touched);
+        row.applied = settled.applied;
+        row.agreed = graded.ok();
+        row.rank = touched.first().copied();
+        row.not_compared = graded.err().map(str::to_string);
+        // Today's rule on the same turn: whether recall's own first note was
+        // touched — marked only beside a mark of the seat's, so the two are
+        // read over the same turns.
+        row.baseline_agreed = graded.is_ok().then(|| {
+            settled
+                .recall_first
+                .as_ref()
+                .is_some_and(|first| !touched_in_order(std::slice::from_ref(first), turn).is_empty())
+        });
     }
+    row
 }
 
-/// The ranks of the proposed notes a turn touched, in the order it touched
-/// them, each once.
-fn touched_in_order(proposed: &[(String, String)], turn: &[ConversationMessage]) -> Vec<usize> {
-    let mut touched = Vec::new();
+/// What a turn did with one note it was handed: the two observations, and
+/// the order in which the note was first touched by either.
+#[derive(Debug, Clone, Copy, Default)]
+struct Seen {
+    read: bool,
+    cited: bool,
+    touched_at: Option<usize>,
+}
+
+/// The ranks of the notes a turn touched, in the order it touched them, each
+/// once.
+fn touched_in_order(notes: &[(String, String)], turn: &[ConversationMessage]) -> Vec<usize> {
+    let mut touched: Vec<(usize, usize)> = observe(notes, turn)
+        .iter()
+        .enumerate()
+        .filter_map(|(rank, seen)| seen.touched_at.map(|at| (at, rank)))
+        .collect();
+    touched.sort_unstable();
+    touched.into_iter().map(|(_, rank)| rank).collect()
+}
+
+/// What the turn did with each of `notes`, one [`Seen`] per note in the
+/// notes' own order. A note was read when a successful read named its exact
+/// path, and cited when the assistant's own words named its slug or path
+/// (`cites`); the one scanner, so the mark and the per-note observations
+/// cannot disagree about a turn.
+fn observe(notes: &[(String, String)], turn: &[ConversationMessage]) -> Vec<Seen> {
+    let mut seen = vec![Seen::default(); notes.len()];
+    let mut touches = 0usize;
     let mut pending = HashMap::new();
     for message in turn {
         for block in &message.blocks {
-            let mut hit = |rank: usize| {
-                if !touched.contains(&rank) {
-                    touched.push(rank);
-                }
-            };
             match block {
                 ContentBlock::ToolUse { id, name, input } if message.role == MessageRole::Assistant => {
                     let Some(read) = read_path(name, input) else {
                         continue;
                     };
-                    if let Some(rank) = proposed.iter().position(|(_, path)| !path.is_empty() && *path == read) {
+                    if let Some(rank) = notes.iter().position(|(_, path)| !path.is_empty() && *path == read) {
                         pending.insert(id.as_str(), rank);
                     }
                 }
                 ContentBlock::ToolResult { tool_use_id, is_error, .. } if message.role == MessageRole::Tool => {
                     if let Some(rank) = pending.remove(tool_use_id.as_str()) {
                         if !is_error {
-                            hit(rank);
+                            touch(&mut seen, &mut touches, rank, true);
                         }
                     }
                 }
                 ContentBlock::Text { text } if message.role == MessageRole::Assistant => {
                     for target in decision_core::dreamer::cited_targets(text) {
-                        for (rank, (slug, path)) in proposed.iter().enumerate() {
+                        for (rank, (slug, path)) in notes.iter().enumerate() {
                             if cites(&target, slug, path) {
-                                hit(rank);
+                                touch(&mut seen, &mut touches, rank, false);
                             }
                         }
                     }
@@ -723,13 +942,190 @@ fn touched_in_order(proposed: &[(String, String)], turn: &[ConversationMessage])
             }
         }
     }
-    touched
+    seen
+}
+
+fn touch(seen: &mut [Seen], touches: &mut usize, rank: usize, read: bool) {
+    let note = &mut seen[rank];
+    if read {
+        note.read = true;
+    } else {
+        note.cited = true;
+    }
+    if note.touched_at.is_none() {
+        note.touched_at = Some(*touches);
+        *touches += 1;
+    }
 }
 
 /// Whether a cited target names a note: its slug, or its path whole or by a
 /// tail that begins at a path component.
 fn cites(target: &str, slug: &str, path: &str) -> bool {
     target == slug || target == path || path.ends_with(&format!("/{target}"))
+}
+
+/* ---- the demand: what the rows say readers did, read back by recall ------ */
+
+impl RecallDemandSource for RerankShadow {
+    fn demand(&self) -> Option<Arc<RecallDemand>> {
+        demand_for(&self.cwd)
+    }
+}
+
+/// The demand recall ranks this project's next recall on — what this seat's
+/// own rows say readers did with the pages recall kept showing them — or
+/// `None` on a road that records only: `off`, `shadow`, and an `auto` its
+/// evidence has not raised (`seat_acts`). Under those the retriever ranks
+/// as it always did, byte for byte, which is what a record-only mode
+/// promises; the rows still accrue, so the day the seat rises it rises with
+/// its readers' answers in hand.
+///
+/// Read per recall, as the seat reads its mode per recall: a label the last
+/// turn wrote is folded into this one's demand, and a switch a person flips
+/// takes effect on the next recall. The fold is kept up to the byte
+/// ([`FoldedLedger`]), so a recall pays for the rows written since the last
+/// one and not for the ledger; and the fold is asked before the settings,
+/// because a demand that sinks no page ranks exactly as none does — until a
+/// page has been left unopened five times, a recall pays a `stat` here and
+/// reads no settings at all.
+///
+/// An ablation (`telemetry::attest_ablated`) is not asked here: it holds the
+/// JUDGMENT out, on the road that asks one, and records the holding-out per
+/// recall as it goes; a bench that wants the demand held out too holds the
+/// seat at `shadow`, which is the one word that does both.
+fn demand_for(cwd: &Path) -> Option<Arc<RecallDemand>> {
+    let demand = {
+        let mut book = demand_book().lock().ok()?;
+        let ledger = rerank_shadow_path(cwd);
+        book.entry(ledger.clone()).or_default().catch_up(&ledger, vault_fingerprint())
+    };
+    if !demand.sinks_anything() {
+        return None;
+    }
+    let mode = rerank_shadow_mode_from(&runtime::ConfigLoader::default_for(cwd))?;
+    seat_acts(cwd, mode).then_some(demand)
+}
+
+/// This process's fold of one ledger's label rows into recall's demand,
+/// kept up to the byte it has folded.
+#[derive(Debug, Default)]
+struct FoldedLedger {
+    /// The end of the last whole line folded: the next fold starts here.
+    folded_to: u64,
+    /// The ledger's first bytes when the fold began ([`FOLD_HEAD_BYTES`]):
+    /// a ledger cut to its newer half, or replaced, begins with another row,
+    /// even when it has since grown past [`Self::folded_to`].
+    head: Vec<u8>,
+    /// The vault the fold was made for; another vault starts the fold over.
+    vault: Option<u64>,
+    /// `slug → (times shown, times opened)`, across every row folded.
+    tally: BTreeMap<String, (u32, u32)>,
+    demand: Arc<RecallDemand>,
+}
+
+/// How many of a ledger's first bytes say which ledger a fold was made of.
+/// Every row opens with its `at`, thirteen digits of milliseconds inside the
+/// first twenty bytes, so two ledgers whose first sixty-four agree began
+/// with the same row.
+const FOLD_HEAD_BYTES: usize = 64;
+
+fn demand_book() -> &'static Mutex<HashMap<PathBuf, FoldedLedger>> {
+    static BOOK: OnceLock<Mutex<HashMap<PathBuf, FoldedLedger>>> = OnceLock::new();
+    BOOK.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+impl FoldedLedger {
+    /// Fold the rows written since the last fold, and answer the demand.
+    ///
+    /// A ledger shorter than what was folded has been cut to its newer half
+    /// (`shadow_ledger::append_shadow_row`) or replaced, and is folded again
+    /// from its start; so is one asked for another vault. Only whole lines
+    /// are folded — a row being appended as this reads is left for the next
+    /// fold, which starts where this one stopped.
+    fn catch_up(&mut self, ledger: &Path, vault: Option<u64>) -> Arc<RecallDemand> {
+        let len = fs::metadata(ledger).map_or(0, |meta| meta.len());
+        if self.vault == vault && len == self.folded_to {
+            return Arc::clone(&self.demand);
+        }
+        if self.vault != vault || len < self.folded_to || !self.begins(ledger) {
+            *self = Self { vault, ..Self::default() };
+        }
+        let Some(tail) = read_from(ledger, self.folded_to) else {
+            return Arc::clone(&self.demand);
+        };
+        if self.folded_to == 0 {
+            self.head = tail.as_bytes()[..tail.len().min(FOLD_HEAD_BYTES)].to_vec();
+        }
+        let whole = tail.rfind('\n').map_or(0, |at| at + 1);
+        for line in tail[..whole].lines() {
+            let Ok(row) = serde_json::from_str::<RerankLabelRow>(line) else {
+                continue;
+            };
+            fold_shown(&mut self.tally, &row, vault);
+        }
+        self.folded_to += u64::try_from(whole).unwrap_or(u64::MAX);
+        self.demand = Arc::new(RecallDemand::from_rows(
+            self.tally.iter().map(|(slug, (recalled, opened))| (slug.clone(), *recalled, *opened)),
+        ));
+        Arc::clone(&self.demand)
+    }
+}
+
+impl FoldedLedger {
+    /// Whether the ledger still begins as it did when this fold began.
+    fn begins(&self, ledger: &Path) -> bool {
+        if self.head.is_empty() {
+            return true;
+        }
+        let mut head = vec![0; self.head.len()];
+        fs::File::open(ledger).and_then(|mut file| file.read_exact(&mut head)).is_ok() && head == self.head
+    }
+}
+
+/// The ledger's bytes from `from` to its end, as text; `None` for a ledger
+/// that cannot be read, which is a fold that stays where it was.
+fn read_from(ledger: &Path, from: u64) -> Option<String> {
+    let mut file = fs::File::open(ledger).ok()?;
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    Some(String::from_utf8_lossy(&tail).into_owned())
+}
+
+/// Fold one label row's showings into `tally`: each note the row names once,
+/// shown once and opened once when either observation says so. A row
+/// written under another vault — or under none, when the notes were the
+/// memory store's alone — is not this vault's evidence (`vault`); a row from
+/// before t-6264 names no notes and adds nothing — it does not say they went
+/// unopened.
+fn fold_shown(tally: &mut BTreeMap<String, (u32, u32)>, row: &RerankLabelRow, vault: Option<u64>) {
+    if row.vault != vault {
+        return;
+    }
+    let mut named: Vec<&str> = Vec::with_capacity(row.shown.len());
+    for note in &row.shown {
+        if note.slug.is_empty() || named.contains(&note.slug.as_str()) {
+            continue;
+        }
+        named.push(&note.slug);
+        let counted = tally.entry(note.slug.clone()).or_default();
+        counted.0 = counted.0.saturating_add(1);
+        counted.1 = counted.1.saturating_add(u32::from(note.read || note.cited));
+    }
+}
+
+/// The demand `rows` — this seat's label rows — hold for `vault`, folded as
+/// [`FoldedLedger`] folds them: one showing per row a note appears on, one
+/// opening when the row says it was read or cited. What a replay or a
+/// counter reads; the seat itself folds incrementally.
+#[cfg(test)]
+#[must_use]
+pub fn recall_demand_from<'a>(rows: impl IntoIterator<Item = &'a RerankLabelRow>, vault: Option<u64>) -> RecallDemand {
+    let mut tally = BTreeMap::new();
+    for row in rows {
+        fold_shown(&mut tally, row, vault);
+    }
+    RecallDemand::from_rows(tally.into_iter().map(|(slug, (recalled, opened))| (slug, recalled, opened)))
 }
 
 /// The row when this task is the one to write it, `None` when a caller waiting
@@ -2280,6 +2676,21 @@ mod tests {
         }
         let agreement = zerocode_core::jev::summary::agreement_since(&rows, 0);
         assert_eq!((agreement.compared, agreement.not_compared), (0, 0), "the judge counted a showing as a comparison");
+        // And every other counter reads the reading's row alone: the window,
+        // the cadence, and the version a row names.
+        let readings: Vec<serde_json::Value> = rows.iter().filter(|row| row.get("label").is_none()).cloned().collect();
+        assert_eq!(readings.len(), 1, "{rows:?}");
+        assert_eq!(
+            zerocode_core::jev::summary::summarize(&rows, 0),
+            zerocode_core::jev::summary::summarize(&readings, 0),
+            "the tally counted a label"
+        );
+        assert_eq!(
+            zerocode_core::jev::promote::asked_toward_judgment(&rows),
+            zerocode_core::jev::promote::asked_toward_judgment(&readings),
+            "the cadence counted a label"
+        );
+        assert!(!rows.iter().filter(|row| row.get("label").is_some()).any(zerocode_core::jev::summary::is_request_or_mark));
     }
 
     /// Five label rows say readers were shown the hub and none opened it:
@@ -2293,22 +2704,547 @@ mod tests {
             let vault = vault_with_a_hub(cwd);
             let _vault = VaultEnv::point_at(&vault);
             let ledger = rerank_shadow_path(cwd);
-            for at in 0..runtime::memory::recall::UNADDRESSED_AFTER_RECALLS {
-                let row = serde_json::json!({
-                    "at": 1_000 + u64::from(at), "label": format!("{at}:{at}"), "query": at, "notes": at, "applied": false,
-                    "shownAt": 900 + u64::from(at),
-                    "vault": super::super::probe_exec::task_fingerprint("", &vault.to_string_lossy()),
-                    "shown": [
-                        {"slug": "wiki/seed", "rank": 0, "read": true, "cited": false},
-                        {"slug": "wiki/z-hub", "rank": 1, "read": false, "cited": false},
-                        {"slug": "wiki/a-quiet", "rank": 2, "read": false, "cited": false},
-                    ],
-                });
-                append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            for at in 0..u64::from(runtime::memory::recall::UNADDRESSED_AFTER_RECALLS) {
+                append_shadow_row(&ledger, &hub_unopened(at, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
             }
-            let retriever = runtime::load_memory_retriever(cwd, None).expect("a vault to recall from");
+            let retriever = session_retriever(cwd);
             slugs(&retriever.recall("vellichor", 5))
         });
         assert_eq!(order, ["wiki/seed", "wiki/a-quiet"], "five readers left the hub unopened and the graph still brought it in");
+    }
+
+    /// A label row saying the turn read the seed and left the hub unopened —
+    /// the row this seat writes, as another turn of this project wrote it.
+    fn hub_unopened(at: u64, vault: &Path) -> RerankLabelRow {
+        let note = |slug: &str, rank: usize, read: bool| ShownNote { slug: slug.to_string(), rank, read, cited: false };
+        RerankLabelRow {
+            at: 1_000 + at,
+            label: format!("{at}:{at}"),
+            query: at,
+            notes: at,
+            applied: false,
+            agreed: None,
+            rank: None,
+            not_compared: None,
+            baseline_agreed: None,
+            shown_at: Some(900 + at),
+            vault: Some(super::super::probe_exec::task_fingerprint("", &vault.to_string_lossy())),
+            shown: vec![note("wiki/seed", 0, true), note("wiki/z-hub", 1, false)],
+        }
+    }
+
+    /// The retriever a session at `cwd` recalls with: the production loader,
+    /// with this seat seated as its demand — what `runtime_builder` builds.
+    fn session_retriever(cwd: &Path) -> Arc<dyn runtime::MemoryRetriever + Send + Sync> {
+        runtime::load_memory_retriever(cwd, None, Some(Arc::new(RerankShadow::at(cwd)))).expect("a vault to recall from")
+    }
+
+    /// A turn recalls once per request and reads the same section each time:
+    /// its label counts each note once, at the place it first held, and a
+    /// note a later request's section adds is counted from that section.
+    #[test]
+    fn a_turns_requests_show_one_section_and_each_note_is_counted_once() {
+        let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());
+        let rows = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let first = settle(cwd, "which note answers this (shown, twice)", three().to_vec());
+            assert_eq!(slugs(&first), ["wiki/a", "wiki/b", "wiki/c"]);
+            let mut later = three().to_vec();
+            later.remove(0);
+            later.push(hit("wiki/d", "arrived on the second request"));
+            let second = settle(cwd, "which note answers this (shown, twice)", later);
+            assert_eq!(slugs(&second), ["wiki/b", "wiki/c", "wiki/d"]);
+            assert!(note_recall_read(cwd, &turn(vec![read_of(&second[2].entry.path)])));
+            labels(cwd)
+        });
+        assert_eq!(rows.len(), 1, "one turn, one row: {rows:?}");
+        let named: Vec<(&str, usize, bool)> =
+            rows[0].shown.iter().map(|note| (note.slug.as_str(), note.rank, note.read)).collect();
+        assert_eq!(named, [("wiki/a", 0, false), ("wiki/b", 1, false), ("wiki/c", 2, false), ("wiki/d", 2, true)]);
+    }
+
+    /// The section names the first `MAX_RECALLED_ENTRIES` notes and no more,
+    /// and the apply road's bottom level is out of it: a note shown to nobody
+    /// is on no label.
+    #[test]
+    fn a_note_the_section_did_not_name_was_shown_to_nobody() {
+        let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());
+        let many: Vec<MemoryHit> = (0..7).map(|n| hit(&format!("wiki/n{n}"), "one of many")).collect();
+        let shown = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (shown, seven)", many.clone());
+            assert_eq!(read.len(), 7, "the seat hands back what it was given");
+            assert!(note_recall_read(cwd, &turn(vec![])));
+            labels(cwd).pop().expect("a label row").shown
+        });
+        assert_eq!(
+            shown.iter().map(|note| note.slug.as_str()).collect::<Vec<_>>(),
+            ["wiki/n0", "wiki/n1", "wiki/n2", "wiki/n3", "wiki/n4"],
+            "the section's {MAX_RECALLED_ENTRIES} and no more"
+        );
+
+        let mock = Mock::serving(200, reply_for(&[1, 3, 0]));
+        let shown = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (shown, dropped)", three().to_vec());
+            assert_eq!(slugs(&read), ["wiki/b", "wiki/a"], "the bottom level is out of the turn");
+            assert!(note_recall_read(cwd, &turn(vec![])));
+            labels(cwd).pop().expect("a label row").shown
+        });
+        assert_eq!(
+            shown.iter().map(|note| (note.slug.as_str(), note.rank)).collect::<Vec<_>>(),
+            [("wiki/b", 0), ("wiki/a", 1)],
+            "a dropped note was shown to nobody"
+        );
+    }
+
+    /// A row from before t-6264 names no notes, and a demand folded from it
+    /// says nothing about them: an absent column is not "nobody opened it".
+    #[test]
+    fn an_older_label_names_no_notes_and_folds_to_nothing() {
+        let before: RerankLabelRow = serde_json::from_value(serde_json::json!({
+            "at": 1, "label": "1:1", "query": 1, "notes": 1, "applied": false, "agreed": false, "rank": 1,
+        }))
+        .expect("a row from before");
+        assert!(before.shown.is_empty() && before.shown_at.is_none() && before.vault.is_none());
+        assert!(recall_demand_from([&before], None).is_empty());
+    }
+
+    /// The fold: a page is shown once per row it appears on — twice on one
+    /// row is once — and opened once when either observation says so; a row
+    /// written for another vault is not this vault's evidence, and a slugless
+    /// note is nobody's.
+    #[test]
+    fn the_fold_counts_a_showing_per_turn_and_an_opening_once() {
+        let note = |slug: &str, read: bool, cited: bool| ShownNote { slug: slug.to_string(), rank: 0, read, cited };
+        let row = |vault: Option<u64>, shown: Vec<ShownNote>| RerankLabelRow {
+            at: 1,
+            label: "1:1".to_string(),
+            query: 1,
+            notes: 1,
+            applied: false,
+            agreed: None,
+            rank: None,
+            not_compared: None,
+            baseline_agreed: None,
+            shown_at: Some(1),
+            vault,
+            shown,
+        };
+        let rows = [
+            row(Some(7), vec![note("wiki/x", true, true), note("wiki/x", false, false), note("wiki/y", false, false), note("", true, false)]),
+            row(Some(7), vec![note("wiki/x", false, true)]),
+            row(Some(7), vec![note("wiki/y", false, false)]),
+            row(Some(8), vec![note("wiki/x", false, false), note("wiki/z", false, false)]),
+            row(None, vec![note("gotcha-store", false, false)]),
+        ];
+        let demand = recall_demand_from(&rows, Some(7));
+        assert_eq!(demand.shown("wiki/x"), Some((2, 2)), "shown twice, opened both times");
+        assert_eq!(demand.shown("wiki/y"), Some((2, 0)));
+        assert_eq!(demand.shown("wiki/z"), None, "another vault's page");
+        assert_eq!(demand.shown(""), None, "a slugless note is nobody's");
+        assert_eq!(demand.shown("gotcha-store"), None, "a row written under no vault is not this vault's");
+        assert_eq!(demand.len(), 2);
+        assert_eq!(recall_demand_from(&rows, None).shown("gotcha-store"), Some((1, 0)));
+    }
+
+    /// The record-only roads rank on nothing: under `off` and `shadow` the
+    /// same five rows leave recall's order and its rendered section byte for
+    /// byte as a retriever with no seat produces them — the hub still comes
+    /// in. That is what a record-only mode promises, proved at the seam a
+    /// session recalls through.
+    #[test]
+    fn under_a_record_only_mode_the_rows_change_nothing_the_turn_reads() {
+        for mode in [zerocode_core::jev::JevMode::Off, zerocode_core::jev::JevMode::Shadow] {
+            let mock = Mock::silent();
+            machine(mode.key(), &mock.base_url, |cwd| {
+                let vault = vault_with_a_hub(cwd);
+                let _vault = VaultEnv::point_at(&vault);
+                let ledger = rerank_shadow_path(cwd);
+                for at in 0..u64::from(runtime::memory::recall::UNADDRESSED_AFTER_RECALLS) {
+                    append_shadow_row(&ledger, &hub_unopened(at, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
+                }
+                let unseated = runtime::load_memory_retriever(cwd, None, None).expect("a vault");
+                let seated = session_retriever(cwd);
+                for query in ["vellichor", "hiraeth", "komorebi sonder"] {
+                    let (was, now) = (unseated.recall(query, 5), seated.recall(query, 5));
+                    assert_eq!(was, now, "{}: {query}", mode.key());
+                    assert_eq!(
+                        runtime::render_recalled_memory_section(&was),
+                        runtime::render_recalled_memory_section(&now),
+                        "{}: {query}",
+                        mode.key()
+                    );
+                }
+                assert_eq!(
+                    slugs(&seated.recall("vellichor", 5)),
+                    ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"],
+                    "{}: the hub still comes in",
+                    mode.key()
+                );
+            });
+        }
+    }
+
+    /// The demand is asked per recall: a label the last turn wrote sinks the
+    /// hub on this recall; one reader opening it brings it back on the next;
+    /// and a ledger cut to its newer half is folded again from its start.
+    #[test]
+    fn a_label_the_last_turn_wrote_is_read_by_the_next_recall() {
+        let mock = Mock::silent();
+        machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let vault = vault_with_a_hub(cwd);
+            let _vault = VaultEnv::point_at(&vault);
+            let ledger = rerank_shadow_path(cwd);
+            let retriever = session_retriever(cwd);
+            let order = || slugs(&retriever.recall("vellichor", 5));
+            let (hub_in, hub_out) = (["wiki/seed", "wiki/z-hub", "wiki/a-quiet"].as_slice(), ["wiki/seed", "wiki/a-quiet"].as_slice());
+            assert_eq!(order(), hub_in, "no reader has answered yet");
+            let wanted = u64::from(runtime::memory::recall::UNADDRESSED_AFTER_RECALLS);
+            for at in 0..wanted - 1 {
+                append_shadow_row(&ledger, &hub_unopened(at, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            }
+            assert_eq!(order(), hub_in, "inside its survival window");
+            append_shadow_row(&ledger, &hub_unopened(wanted, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            assert_eq!(order(), hub_out, "the fifth unopened showing, folded by this recall");
+            let mut opened = hub_unopened(wanted + 1, &vault);
+            opened.shown[1].cited = true;
+            append_shadow_row(&ledger, &opened, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            assert_eq!(order(), hub_in, "one reader citing it is an answer");
+            // Cut to its newer half — one unopened showing left.
+            let cut = serde_json::to_string(&hub_unopened(50, &vault)).expect("a row");
+            std::fs::write(&ledger, format!("{cut}\n")).expect("a cut ledger");
+            assert_eq!(order(), hub_in, "folded again from the start of the cut ledger");
+            for at in 1..wanted {
+                append_shadow_row(&ledger, &hub_unopened(50 + at, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            }
+            assert_eq!(order(), hub_out, "five unopened showings since the cut");
+            // Replaced by a ledger that has already grown past the old fold:
+            // its first row is another, and nothing of the old fold stands.
+            let folded = std::fs::metadata(&ledger).expect("a ledger").len();
+            let mut replaced = String::new();
+            let mut at = 100;
+            while u64::try_from(replaced.len()).unwrap_or(u64::MAX) <= folded {
+                let mut opened = hub_unopened(at, &vault);
+                opened.shown[1].read = true;
+                replaced.push_str(&serde_json::to_string(&opened).expect("a row"));
+                replaced.push('\n');
+                at += 1;
+            }
+            std::fs::write(&ledger, replaced).expect("a replaced ledger");
+            assert_eq!(order(), hub_in, "a replaced ledger is folded from its own start");
+        });
+    }
+
+    /// `auto` ranks on its rows only once its own evidence raised it: before
+    /// the rise the same rows are recorded and nothing more; after it they
+    /// rank, as `on` would.
+    #[test]
+    fn auto_ranks_on_its_rows_only_once_its_evidence_raised_it() {
+        let mock = Mock::silent();
+        machine(zerocode_core::jev::JevMode::Auto.key(), &mock.base_url, |cwd| {
+            let vault = vault_with_a_hub(cwd);
+            let _vault = VaultEnv::point_at(&vault);
+            let ledger = rerank_shadow_path(cwd);
+            for at in 0..u64::from(runtime::memory::recall::UNADDRESSED_AFTER_RECALLS) {
+                append_shadow_row(&ledger, &hub_unopened(at, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            }
+            assert!(demand_for(cwd).is_none(), "an unraised auto records only");
+            let retriever = session_retriever(cwd);
+            assert_eq!(slugs(&retriever.recall("vellichor", 5)), ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"]);
+            let rose = zerocode_core::jev::promote::transition_row(
+                9_000,
+                zerocode_core::jev::promote::Verdict::Rise,
+                &zerocode_core::jev::summary::Tally::default(),
+            )
+            .expect("a rise");
+            append_shadow_row(&ledger, &rose, SHADOW_LEDGER_MAX_BYTES).expect("the judge's row");
+            assert!(
+                demand_for(cwd).is_some_and(|demand| demand.unaddressed("wiki/z-hub")),
+                "a raised auto ranks on its rows"
+            );
+            assert_eq!(slugs(&retriever.recall("vellichor", 5)), ["wiki/seed", "wiki/a-quiet"]);
+        });
+    }
+
+    /// What the demand costs a recall on this machine, printed: the first
+    /// fold of a ledger the size of this machine's
+    /// (`ZO_RERANK_REPLAY_LEDGER`, copied; else 1,300 synthetic rows), a
+    /// recall whose ledger did not change, the fold of one appended row, the
+    /// settings read the road costs every recall, and the retriever's recall
+    /// seated against unseated.
+    ///
+    /// ```text
+    /// ZO_RERANK_REPLAY_LEDGER=~/.zo/projects/<slug>/state/smart-router/rerank-shadow.jsonl \
+    ///   cargo test -p tools --release --lib -- measure_what_the_demand_costs_a_recall --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "measures this machine; run deliberately with --nocapture"]
+    fn measure_what_the_demand_costs_a_recall() {
+        use std::time::Instant;
+        fn median(mut samples: Vec<Duration>) -> Duration {
+            samples.sort();
+            samples[samples.len() / 2]
+        }
+        fn timed<T>(times: usize, mut body: impl FnMut() -> T) -> Duration {
+            median((0..times).map(|_| {
+                let began = Instant::now();
+                let _ = body();
+                began.elapsed()
+            }).collect())
+        }
+        let mock = Mock::silent();
+        machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let vault = vault_with_a_hub(cwd);
+            let _vault = VaultEnv::point_at(&vault);
+            let ledger = rerank_shadow_path(cwd);
+            std::fs::create_dir_all(ledger.parent().expect("a ledger dir")).expect("a ledger dir");
+            let source = match std::env::var_os("ZO_RERANK_REPLAY_LEDGER") {
+                Some(real) => {
+                    std::fs::copy(&real, &ledger).expect("a copy of the real ledger");
+                    "this machine's ledger".to_string()
+                }
+                None => {
+                    for at in 0..900u64 {
+                        let row = serde_json::json!({
+                            "at": 1_000 + at, "query": at, "notes": at, "rubric_version": RERANK_RUBRIC_VERSION,
+                            "outcome": RERANK_OUTCOME_ANSWERED, "candidates": 3, "elapsed_ms": 300, "retries": 0,
+                            "requests": 1, "redactedLines": 0, "applied": false,
+                            "judged": {"recalled": ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"], "proposed": ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"], "moved": 0, "top_changed": false, "held_by_graph": [], "readings": [[1.0, 0.9], [0.3, 0.9], [0.3, 0.9]]},
+                        });
+                        append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).expect("a reading");
+                    }
+                    for at in 0..400u64 {
+                        // Turns that read the seed and were shown nothing else.
+                        let mut row = hub_unopened(at, &vault);
+                        row.shown.truncate(1);
+                        append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+                    }
+                    "1,300 synthetic rows".to_string()
+                }
+            };
+            let bytes = std::fs::metadata(&ledger).map(|meta| meta.len()).unwrap_or(0);
+            let rows = std::fs::read_to_string(&ledger).map(|text| text.lines().count()).unwrap_or(0);
+            // As the ledger stands: nothing it says sinks a page yet.
+            let first = timed(1, || demand_for(cwd));
+            let quiet = timed(200, || demand_for(cwd));
+            // Then five turns that left the hub unopened: the demand now ranks,
+            // and the road is read to say whether it may.
+            for at in 0..u64::from(runtime::memory::recall::UNADDRESSED_AFTER_RECALLS) {
+                append_shadow_row(&ledger, &hub_unopened(10_000 + at, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            }
+            let demand = demand_for(cwd).expect("on ranks on a hub left unopened");
+            let unchanged = timed(200, || demand_for(cwd));
+            let appended = timed(50, || {
+                append_shadow_row(&ledger, &hub_unopened(9_000, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
+                demand_for(cwd)
+            });
+            let mode = timed(200, || rerank_shadow_mode_from(&runtime::ConfigLoader::default_for(cwd)));
+            // Under `auto` the road reads the seat's standing: the whole
+            // ledger once per state of it, shared by the demand and the road.
+            let stand_whole = timed(20, || runtime::jev_seat_applies(cwd, &RECALL));
+            let _ = raised_now(cwd);
+            let stand_memo = timed(200, || raised_now(cwd));
+            let unseated = runtime::load_memory_retriever(cwd, None, None).expect("a vault");
+            let seated = session_retriever(cwd);
+            let recall_unseated = timed(300, || unseated.recall("vellichor", 5));
+            let recall_seated = timed(300, || seated.recall("vellichor", 5));
+            println!("\n  ledger: {source} — {rows} rows, {bytes} bytes; demand names {} pages", demand.len());
+            println!("  first fold (whole ledger)        {first:?}");
+            println!("  demand_for, nothing sunk         {quiet:?}  (a stat; no settings read)");
+            println!("  demand_for, a page sunk          {unchanged:?}  (a stat and the settings)");
+            println!("  demand_for after one row         {appended:?}  (one row folded, and the settings)");
+            println!("  settings read (the mode)         {mode:?}");
+            println!("  stand, whole ledger read         {stand_whole:?}  (once per recall under auto, before and after)");
+            println!("  stand, second ask same recall    {stand_memo:?}  (the road after the demand: a stat)");
+            println!("  recall, unseated                 {recall_unseated:?}");
+            println!("  recall, seated (on, a page sunk) {recall_seated:?}");
+        });
+    }
+
+    /// What the readers answered about the pages recall kept showing them,
+    /// replayed in time order over the rows this seat has already written
+    /// (`ZO_RERANK_REPLAY_LEDGER`), counted the way the product counts.
+    ///
+    /// The product folds a showing only from the label the turn's end wrote
+    /// (`fold_shown`): a showing whose turn wrote no label was observed by
+    /// nobody and counts neither way. So here a reading row is a showing of
+    /// the first `MAX_RECALLED_ENTRIES` notes the turn read (`judged.recalled`,
+    /// or `proposed` when applied), and it is folded when — and only as far
+    /// as — its label says what became of it:
+    ///
+    /// * a row since t-6264 names every note shown (`shown`): complete;
+    /// * an older row whose turn touched no note it was handed (`rank`
+    ///   absent beside a mark, or `notCompared: no_note_touched`): complete,
+    ///   every shown note unopened;
+    /// * an older row that names the first note touched (`rank`), and whether
+    ///   the judgment's first (`agreed`) and recall's first (`baselineAgreed`)
+    ///   were: partial — those notes opened, every other note UNKNOWN and not
+    ///   folded, because the row cannot say it went unopened.
+    ///
+    /// Each showing is judged on the demand folded from the labels BEFORE
+    /// it, and folded after, so no later opening reaches an earlier rank.
+    /// Reports what the product's rule (`RecallDemand::unaddressed`) would
+    /// have sunk, whether a reader opened a page it sank, and the recall
+    /// slot's agreement — the first slot opened — as recorded (before) and
+    /// with sunk pages moved behind the rest (after), with the unknowns
+    /// counted apart. The judgment's own mark (`agreed`) is not replayed: the
+    /// demand changes what recall hands the judgment, and a row carries no
+    /// query or summary to ask it again with. Beside the product's survival
+    /// window, the same fold at others, as the constant comparison.
+    ///
+    /// ```text
+    /// ZO_RERANK_REPLAY_LEDGER=/path/to/a/copy/of/rerank-shadow.jsonl \
+    ///   cargo test -p tools --lib -- what_the_readers_answered --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "replays this machine's real ledger; run deliberately"]
+    fn what_the_readers_answered_about_the_pages_recall_kept_showing() {
+        use serde_json::Value;
+        use std::collections::BTreeSet;
+        let ledger = std::env::var_os("ZO_RERANK_REPLAY_LEDGER")
+            .map(PathBuf::from)
+            .expect("point ZO_RERANK_REPLAY_LEDGER at a rerank-shadow.jsonl");
+        let text = std::fs::read_to_string(&ledger).expect("a ledger");
+        let mut rows: Vec<Value> = text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+        rows.sort_by_key(|row| row["at"].as_i64().unwrap_or(0));
+        println!("\n  ledger: {} (fingerprint {:016x}, {} bytes, {} rows)", ledger.display(), task_fingerprint("", &text), text.len(), rows.len());
+        for window in [1, 3, runtime::memory::recall::UNADDRESSED_AFTER_RECALLS, 10] {
+            replay_at(&rows, window);
+        }
+    }
+
+    /// One pass of the replay at survival window `window` — the product's
+    /// rule with its one number moved, so the comparison is the same fold.
+    #[expect(clippy::too_many_lines, reason = "one replay, read top to bottom")]
+    fn replay_at(rows: &[serde_json::Value], window: u32) {
+        use serde_json::Value;
+        use std::collections::{BTreeMap, BTreeSet};
+        struct Showing {
+            shown: Vec<String>,
+            recalled_first: Option<String>,
+            proposed: Vec<String>,
+        }
+        let unaddressed = |tally: &BTreeMap<String, (u32, u32)>, slug: &str| {
+            tally.get(slug).is_some_and(|&(recalled, opened)| recalled >= window && opened == 0)
+        };
+        let list = |judged: &Value, name: &str| -> Vec<String> {
+            judged[name].as_array().map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect()).unwrap_or_default()
+        };
+        let mut tally: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        let mut pending: HashMap<(u64, u64), Showing> = HashMap::new();
+        let mut last_key: Option<(u64, u64)> = None;
+        let (mut showings, mut labeled, mut complete, mut partial, mut unmarked, mut orphan) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut changed, mut sunk_slots, mut slots, mut harmed, mut outside) = (0usize, 0usize, 0usize, 0usize, 0usize);
+        let mut moved = 0usize;
+        let mut before = [0usize; 3];
+        let mut after = [0usize; 3];
+        for row in rows {
+            let key = (row["query"].as_u64().unwrap_or(0), row["notes"].as_u64().unwrap_or(0));
+            if let Some(judged) = row.get("judged").filter(|_| row.get("outcome").is_some()) {
+                if last_key == Some(key) {
+                    continue;
+                }
+                last_key = Some(key);
+                let applied = row["applied"].as_bool().unwrap_or(false);
+                let (recalled, proposed) = (list(judged, "recalled"), list(judged, "proposed"));
+                let shown = if applied { &proposed } else { &recalled }.iter().take(MAX_RECALLED_ENTRIES).cloned().collect();
+                showings += 1;
+                pending.insert(key, Showing { shown, recalled_first: recalled.first().cloned(), proposed });
+                continue;
+            }
+            if row.get("label").is_none() {
+                continue;
+            }
+            // What the label says of each shown note: `Some(opened)` when it
+            // says, `None` when it cannot.
+            let (shown, known): (Vec<String>, Vec<Option<bool>>) = if let Some(notes) = row.get("shown").and_then(Value::as_array).filter(|notes| !notes.is_empty()) {
+                pending.remove(&key);
+                complete += 1;
+                notes
+                    .iter()
+                    .filter_map(|note| {
+                        let opened = note["read"].as_bool().unwrap_or(false) || note["cited"].as_bool().unwrap_or(false);
+                        note["slug"].as_str().map(|slug| (slug.to_string(), Some(opened)))
+                    })
+                    .unzip()
+            } else {
+                let Some(showing) = pending.remove(&key) else {
+                    orphan += 1;
+                    continue;
+                };
+                let rank = row["rank"].as_u64().and_then(|rank| usize::try_from(rank).ok());
+                let marked = row["agreed"].as_bool().is_some();
+                let untouched = row["notCompared"].as_str() == Some(NO_NOTE_TOUCHED) || (marked && rank.is_none());
+                if untouched {
+                    complete += 1;
+                    let known = vec![Some(false); showing.shown.len()];
+                    (showing.shown, known)
+                } else if let Some(rank) = rank {
+                    partial += 1;
+                    let mut touched: BTreeSet<&String> = showing.proposed.get(rank).into_iter().collect();
+                    let mut said: BTreeMap<&String, bool> = BTreeMap::new();
+                    if let (Some(first), Some(agreed)) = (showing.proposed.first(), row["agreed"].as_bool()) {
+                        said.insert(first, agreed);
+                    }
+                    if let (Some(first), Some(agreed)) = (showing.recalled_first.as_ref(), row["baselineAgreed"].as_bool()) {
+                        said.insert(first, agreed);
+                    }
+                    touched.extend(said.iter().filter(|(_, opened)| **opened).map(|(slug, _)| *slug));
+                    outside += touched.iter().filter(|slug| !showing.shown.contains(slug)).count();
+                    let known = showing
+                        .shown
+                        .iter()
+                        .map(|slug| if touched.contains(slug) { Some(true) } else { said.get(slug).copied() })
+                        .collect();
+                    (showing.shown, known)
+                } else {
+                    unmarked += 1;
+                    continue;
+                }
+            };
+            labeled += 1;
+            slots += shown.len();
+            // Judged on what was known before this turn.
+            let sunk: Vec<bool> = shown.iter().map(|slug| unaddressed(&tally, slug)).collect();
+            let sunk_here = sunk.iter().filter(|sunk| **sunk).count();
+            sunk_slots += sunk_here;
+            changed += usize::from(sunk_here > 0);
+            harmed += shown.iter().zip(&known).zip(&sunk).filter(|((_, known), sunk)| **sunk && **known == Some(true)).count();
+            let before_first = (!shown.is_empty()).then_some(0);
+            let after_first = sunk.iter().position(|sunk| !sunk).or(before_first);
+            moved += usize::from(after_first != before_first);
+            let tick = |counts: &mut [usize; 3], at: Option<usize>| {
+                let slot = match at.and_then(|at| known[at]) {
+                    Some(true) => 0,
+                    Some(false) => 1,
+                    None => 2,
+                };
+                counts[slot] += 1;
+            };
+            tick(&mut before, before_first);
+            tick(&mut after, after_first);
+            // Then folded — each note once, and only as far as the label says.
+            let mut named: BTreeSet<&String> = BTreeSet::new();
+            for (slug, known) in shown.iter().zip(&known) {
+                if let (true, Some(opened)) = (named.insert(slug), known) {
+                    let counted = tally.entry(slug.clone()).or_default();
+                    counted.0 += 1;
+                    counted.1 += u32::from(*opened);
+                }
+            }
+        }
+        let share = |part: usize, whole: usize| {
+            #[expect(clippy::cast_precision_loss, reason = "a share of a few hundred showings")]
+            let share = if whole == 0 { 0.0 } else { 100.0 * part as f64 / whole as f64 };
+            share
+        };
+        let product = window == runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
+        let end = tally.keys().filter(|slug| unaddressed(&tally, slug)).count();
+        println!("\n  survival window {window}{}", if product { "  <- the product's" } else { "" });
+        println!("    showings {showings}; labeled {labeled} (complete {complete}, partial {partial}); unlabeled {}; labels with no mark {unmarked}; labels joining no showing {orphan}", showings.saturating_sub(labeled + unmarked));
+        println!("    labeled showings the demand changed      {changed}/{labeled} = {:5.1}%   slots sunk {sunk_slots}/{slots}", share(changed, labeled));
+        println!("    opened notes the demand had sunk         {harmed}   (readers answering the prior back)");
+        println!("    opened notes outside the shown slots     {outside}   (folded nowhere)");
+        println!("    pages unaddressed at the end             {end} of {} observed", tally.len());
+        println!("    first slot moved                         {moved}/{labeled}");
+        println!("    first slot opened — before: yes {} no {} unknown {}   after: yes {} no {} unknown {}", before[0], before[1], before[2], after[0], after[1], after[2]);
     }
 }
