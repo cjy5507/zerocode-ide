@@ -19995,9 +19995,11 @@ fn worker_transcript_probe_reads_a_local_file() {
             scan,
         ) = said.expect("measured");
         eprintln!(
-            "probe turns={turns} n={runs} json_bytes={json} json_tokens~{json_tokens} text_bytes={text} text_tokens~{text_tokens} kept={kept} found={found} dropped={dropped} truncated={truncated} tool_calls={tools} without_result={open} errors={errors} file_bytes={} scanned_bytes={} cut_above={} p50_ms={:.2} min_ms={:.2} max_ms={:.2} read_p50_ms={:.2}",
+            "probe turns={turns} n={runs} json_bytes={json} json_tokens~{json_tokens} text_bytes={text} text_tokens~{text_tokens} kept={kept} found={found} dropped={dropped} truncated={truncated} tool_calls={tools} without_result={open} errors={errors} file_bytes={} read_bytes={} covered={}..{} cut_above={} p50_ms={:.2} min_ms={:.2} max_ms={:.2} read_p50_ms={:.2}",
             scan.file_bytes,
-            scan.scanned_bytes,
+            scan.read_bytes,
+            scan.covered_from,
+            scan.covered_to,
             scan.cut_above,
             wall[wall.len() / 2],
             wall[0],
@@ -20062,7 +20064,11 @@ fn a_worker_transcript_walks_the_conversation_views_reader_for_every_provider() 
             "{agent}: the walk read what the view reads"
         );
         assert!(!scan.cut_above && !scan.skipped, "{agent}: {scan:?}");
-        assert_eq!(scan.file_bytes, scan.scanned_bytes);
+        assert_eq!(
+            (scan.covered_from, scan.covered_to, scan.read_bytes),
+            (0, scan.file_bytes, scan.file_bytes),
+            "{agent}: one read of the whole file"
+        );
         let shaped = shape("w", agent, &walked, scan, &ask(Window::LastTurns(20)));
         // The same three steps out of all three shapes: the prompt, the call
         // with its result joined by id, and the words after it.
@@ -20108,7 +20114,13 @@ fn a_worker_transcript_walks_the_conversation_views_reader_for_every_provider() 
         crate::cmd::terminal::transcript_turns_back(&long, &ask(Window::LastTurns(20)))
             .expect("the walk");
     assert!(scan.cut_above, "twenty turns are inside the last chunk");
-    assert_eq!(scan.scanned_bytes, crate::shell_runtime::SUBAGENT_LOG_CHUNK);
+    assert_eq!(
+        scan.read_bytes,
+        crate::shell_runtime::SUBAGENT_LOG_CHUNK + 1,
+        "one chunk and the byte before it"
+    );
+    assert_eq!(scan.covered_to, size);
+    assert!(scan.covered_from > size - crate::shell_runtime::SUBAGENT_LOG_CHUNK);
     assert!(tail.len() > 20 && tail.len() < lines);
     let (whole, scan) = crate::cmd::terminal::transcript_turns_back(&long, &ask(Window::Since(0)))
         .expect("the walk");
@@ -20116,7 +20128,12 @@ fn a_worker_transcript_walks_the_conversation_views_reader_for_every_provider() 
         !scan.cut_above,
         "a moment before every stamp walks to the file's start"
     );
-    assert_eq!(scan.scanned_bytes, size);
+    assert_eq!((scan.covered_from, scan.covered_to), (0, size));
+    assert_eq!(
+        scan.read_bytes,
+        crate::shell_runtime::SUBAGENT_LOG_CHUNK + 1 + size,
+        "the last chunk, then the whole file once"
+    );
     assert_eq!(
         whole.len(),
         lines,
@@ -20140,13 +20157,429 @@ fn a_worker_transcript_walks_the_conversation_views_reader_for_every_provider() 
             .expect("the walk");
     assert!(scan.cut_above);
     assert_eq!(
-        scan.scanned_bytes,
-        SCAN_CHUNKS * crate::shell_runtime::SUBAGENT_LOG_CHUNK
+        scan.read_bytes,
+        (SCAN_CHUNKS + 1) * crate::shell_runtime::SUBAGENT_LOG_CHUNK + 2,
+        "the budget: a chunk and the wider read, each with the byte before it"
     );
+    assert_eq!(scan.covered_to, size);
+    assert!(scan.covered_from > size - SCAN_CHUNKS * crate::shell_runtime::SUBAGENT_LOG_CHUNK);
     assert!(bounded.len() < lines && !bounded.is_empty());
     assert_eq!(
         bounded.last().map(|turn| turn.text[..12].to_string()),
         Some(format!("prompt {:05}", lines - 1))
+    );
+}
+
+/// A transcript file as `worker-transcript`'s reads see it (t-6742): every
+/// byte read from it counted, and — once — something done to the file on
+/// disk at the first seek below `at.0`, which is where the wider second read
+/// begins: an append, a replacement, a cut in place.
+struct WatchedTranscript {
+    file: std::fs::File,
+    read: std::rc::Rc<std::cell::Cell<u64>>,
+    at: Option<(u64, Box<dyn FnOnce()>)>,
+}
+
+impl std::io::Read for WatchedTranscript {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let got = std::io::Read::read(&mut self.file, buffer)?;
+        self.read.set(self.read.get() + got as u64);
+        Ok(got)
+    }
+}
+
+impl std::io::Seek for WatchedTranscript {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        if let std::io::SeekFrom::Start(at) = to
+            && self.at.as_ref().is_some_and(|(below, _)| at < *below)
+            && let Some((_, then)) = self.at.take()
+        {
+            then();
+        }
+        std::io::Seek::seek(&mut self.file, to)
+    }
+}
+
+type WatchedAnswer = (
+    Result<
+        (
+            Vec<zerocode_core::transcript::TranscriptTurn>,
+            zerocode_core::worker_transcript::Scan,
+        ),
+        String,
+    >,
+    u64,
+    usize,
+);
+
+/// `worker-transcript`'s read of `path`, every open of it watched: the
+/// answer, the bytes read over every open, and how many opens it took.
+/// `at(n)` names what happens to the file during the `n`th open's reads.
+fn read_transcript_watched(
+    path: &std::path::Path,
+    ask: &zerocode_core::worker_transcript::TranscriptAsk,
+    mut at: impl FnMut(usize) -> Option<(u64, Box<dyn FnOnce()>)>,
+) -> WatchedAnswer {
+    let read = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut opens = 0;
+    let answer = crate::cmd::terminal::transcript_turns_through(
+        || {
+            let file = std::fs::File::open(path)?;
+            let size = file.metadata()?.len();
+            let then = at(opens);
+            opens += 1;
+            Ok((
+                WatchedTranscript {
+                    file,
+                    read: read.clone(),
+                    at: then,
+                },
+                size,
+            ))
+        },
+        ask,
+    );
+    (answer, read.get(), opens)
+}
+
+/// A Claude Code line `len` bytes long holding one tool result — a
+/// screenshot's worth of text, in bytes the test can place — and how many
+/// bytes of words the result holds.
+fn a_result_line(len: usize, ended: bool) -> (String, usize) {
+    let head = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-long","content":""#;
+    let tail = r#""}]}}"#;
+    let words = len - head.len() - tail.len() - usize::from(ended);
+    let line = format!(
+        "{head}{}{tail}{}",
+        "w".repeat(words),
+        if ended { "\n" } else { "" }
+    );
+    assert_eq!(line.len(), len);
+    (line, words)
+}
+
+/// `worker-transcript` reads within its budget whatever its lines hold
+/// (t-6742 R2): the last chunk, then the wider read, each with the one byte
+/// before it — a line longer than the wider read is said, not read whole,
+/// where the conversation view still reads its long line whole (its road
+/// for a screenshot). Counted on the file itself, not taken from the
+/// answer: a line past one chunk, just inside and just past the wider read,
+/// past both and short of the view's cap, one with no end yet, and two
+/// calls that share nothing.
+#[test]
+fn a_long_transcript_line_cannot_spend_outside_the_commands_read_budget() {
+    use zerocode_core::worker_transcript::{SCAN_CHUNKS, TranscriptAsk, Window};
+    let chunk = crate::shell_runtime::SUBAGENT_LOG_CHUNK;
+    let widest = SCAN_CHUNKS * chunk;
+    let budget = chunk + 1 + widest + 1;
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let ask = TranscriptAsk {
+        window: Window::LastTurns(5),
+        json: true,
+    };
+    let prompts = |count: usize| {
+        (0..count)
+            .map(|at| {
+                format!(
+                    "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"prompt {at:07}\"}}}}\n"
+                )
+            })
+            .collect::<String>()
+    };
+    let written = |name: &str, body: &str| {
+        let path = temp.path().join(name);
+        std::fs::write(&path, body).expect("written");
+        path
+    };
+    let result_of = |turns: &[zerocode_core::transcript::TranscriptTurn]| {
+        turns
+            .iter()
+            .filter(|turn| turn.role == "tool_result")
+            .map(|turn| turn.text.len())
+            .collect::<Vec<_>>()
+    };
+
+    // Past one chunk, inside the wider read: read whole by the wider read,
+    // inside the budget.
+    let (line, words) = a_result_line(chunk as usize + 40_000, true);
+    let path = written("mid.jsonl", &(prompts(20_000) + &line));
+    let size = std::fs::metadata(&path).expect("size").len();
+    assert!(size > widest, "the wider read opens inside the file");
+    let (answer, read, opens) = read_transcript_watched(&path, &ask, |_| None);
+    let (turns, scan) = answer.expect("answered");
+    assert_eq!(opens, 1);
+    assert_eq!(read, budget, "a chunk, then the wider read");
+    assert_eq!(
+        scan.read_bytes, read,
+        "the answer says what the file was read for"
+    );
+    assert_eq!(result_of(&turns), vec![words], "the long line, whole");
+    assert!(!scan.skipped && scan.cut_above);
+    assert_eq!(scan.covered_to, size);
+
+    // Just inside the wider read, and just past it.
+    for (name, over, whole) in [("inside.jsonl", false, true), ("past.jsonl", true, false)] {
+        let len = if over {
+            widest as usize + 1_024
+        } else {
+            widest as usize - 1_024
+        };
+        let (line, _) = a_result_line(len, true);
+        let path = written(name, &(prompts(20_000) + &line));
+        let size = std::fs::metadata(&path).expect("size").len();
+        let (answer, read, _) = read_transcript_watched(&path, &ask, |_| None);
+        let (turns, scan) = answer.expect("answered");
+        assert_eq!(read, budget, "{name}: {read} bytes read");
+        assert_eq!(result_of(&turns).len(), usize::from(whole), "{name}");
+        assert_eq!(scan.skipped, !whole, "{name}: {scan:?}");
+        assert_eq!(scan.covered_to, size, "{name}");
+        if !whole {
+            assert!(
+                turns.is_empty(),
+                "{name}: nothing above the long line is inside the read"
+            );
+            assert!(
+                scan.covered_from == scan.covered_to && scan.cut_above,
+                "{name}"
+            );
+        }
+    }
+
+    // Past both reads and short of the view's cap: the budget holds, and the
+    // conversation view on the same file still reads the line whole.
+    let len = 2 * widest as usize;
+    let path = written(
+        "screenshot.jsonl",
+        &(prompts(100) + &a_result_line(len, true).0),
+    );
+    let (answer, read, _) = read_transcript_watched(&path, &ask, |_| None);
+    let (turns, scan) = answer.expect("answered");
+    assert_eq!(read, budget);
+    assert!(turns.is_empty() && scan.skipped, "{scan:?}");
+    let view = crate::cmd::terminal::transcript_log_at(&path, None).expect("the view's read");
+    assert_eq!(
+        view.turns.len(),
+        1,
+        "the page no longer reads its screenshot line whole"
+    );
+
+    // A line with no end yet, longer than both reads: inside the budget, not
+    // a skip — it is not yet a fact — and the scan says it is still coming.
+    let path = written(
+        "unfinished.jsonl",
+        &(prompts(100) + &a_result_line(len, false).0),
+    );
+    let size = std::fs::metadata(&path).expect("size").len();
+    let (answer, read, _) = read_transcript_watched(&path, &ask, |_| None);
+    let (turns, scan) = answer.expect("answered");
+    assert_eq!(read, budget);
+    assert!(turns.is_empty() && !scan.skipped, "{scan:?}");
+    assert!(scan.covered_to < size && scan.cut_above, "{scan:?}");
+
+    // Two calls share nothing: each reads its own budget, and answers the
+    // same.
+    let path = written(
+        "twice.jsonl",
+        &(prompts(20_000) + &a_result_line(len, true).0),
+    );
+    let first = read_transcript_watched(&path, &ask, |_| None);
+    let second = read_transcript_watched(&path, &ask, |_| None);
+    assert_eq!((first.1, second.1), (budget, budget));
+    assert_eq!(first.0, second.0);
+}
+
+/// One `worker-transcript` call reads ONE file to ONE end (t-6742 R3): the
+/// file is opened once, its size taken from that open file, and every read
+/// stops there. Bytes appended after the open are not answered; a file
+/// renamed over the path between the two reads — another worker's, the same
+/// length, shorter, longer — is never read; a file cut in place under the
+/// read is read again, whole, as it now stands; one cut under every read is
+/// said, never half answered; and a file rewritten in place between the reads
+/// is answered out of one read alone.
+#[test]
+fn a_transcript_read_keeps_one_source_and_one_end_across_its_windows() {
+    use zerocode_core::worker_transcript::{TranscriptAsk, Window};
+    let chunk = crate::shell_runtime::SUBAGENT_LOG_CHUNK;
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    // A moment before every stamp: the last chunk never holds it, so every
+    // call below makes both reads.
+    let ask = TranscriptAsk {
+        window: Window::Since(0),
+        json: true,
+    };
+    let lines = |said: &str, count: usize| {
+        (0..count)
+            .map(|at| {
+                format!(
+                    "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{said} {at:07}\"}}}}\n"
+                )
+            })
+            .collect::<String>()
+    };
+    let spoken = |turns: &[zerocode_core::transcript::TranscriptTurn], said: &str| {
+        turns
+            .iter()
+            .filter(|turn| turn.text.starts_with(said))
+            .count()
+    };
+    let path = temp.path().join("w.jsonl");
+    let count = 10_000;
+    let original = lines("mine", count);
+    let reset = || std::fs::write(&path, &original).expect("written");
+    reset();
+    let size = original.len() as u64;
+    assert!(
+        size > 2 * chunk,
+        "two reads, and room to cut the file in half"
+    );
+    // The first seek below this is the wider read's.
+    let second_read = size - chunk - 1;
+
+    // Appended after the open: the answer is the file as it was opened.
+    let mut opened = Some({
+        let file = std::fs::File::open(&path).expect("open");
+        let size = file.metadata().expect("stat").len();
+        (file, size)
+    });
+    {
+        use std::io::Write;
+        let mut appending = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        appending
+            .write_all(lines("late", 50).as_bytes())
+            .expect("appended");
+    }
+    let (turns, scan) = crate::cmd::terminal::transcript_turns_through(
+        || {
+            opened
+                .take()
+                .ok_or_else(|| std::io::Error::other("opened twice"))
+        },
+        &ask,
+    )
+    .expect("answered");
+    assert_eq!(
+        spoken(&turns, "late"),
+        0,
+        "bytes after the open were answered"
+    );
+    assert_eq!(spoken(&turns, "mine"), count);
+    assert_eq!((scan.file_bytes, scan.covered_to), (size, size));
+    reset();
+
+    // Another file renamed over the path between the two reads — another
+    // worker's conversation, the same length, shorter, longer.
+    for (name, other) in [
+        ("same length", lines("them", count)),
+        ("shorter", lines("them", 100)),
+        ("longer", lines("them", 2 * count)),
+    ] {
+        let (answer, _, opens) = read_transcript_watched(&path, &ask, |open| {
+            let path = path.clone();
+            let other = other.clone();
+            (open == 0).then(|| {
+                (
+                    second_read,
+                    Box::new(move || {
+                        let aside = path.with_extension("next");
+                        std::fs::write(&aside, other).expect("the other file");
+                        std::fs::rename(&aside, &path).expect("renamed over");
+                    }) as Box<dyn FnOnce()>,
+                )
+            })
+        });
+        let (turns, scan) = answer.expect("answered");
+        assert_eq!(opens, 1, "{name}");
+        assert_eq!(
+            spoken(&turns, "them"),
+            0,
+            "{name}: the replacement was read"
+        );
+        assert_eq!(spoken(&turns, "mine"), count, "{name}");
+        assert_eq!(scan.file_bytes, size, "{name}");
+        reset();
+    }
+
+    // Cut in place under the wider read: read again from a fresh open, as
+    // the file now stands — never the half the first open left.
+    let half = size / 2;
+    let (answer, _, opens) = read_transcript_watched(&path, &ask, |open| {
+        let path = path.clone();
+        (open == 0).then(|| {
+            (
+                second_read,
+                Box::new(move || {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .expect("open to cut")
+                        .set_len(half)
+                        .expect("cut");
+                }) as Box<dyn FnOnce()>,
+            )
+        })
+    });
+    let (turns, scan) = answer.expect("answered after a fresh open");
+    assert_eq!(opens, 2, "the cut file was not opened again");
+    assert_eq!(scan.file_bytes, half);
+    assert_eq!(
+        spoken(&turns, "mine"),
+        original[..half as usize].matches('\n').count()
+    );
+    reset();
+
+    // Cut under every open: said, and nothing answered.
+    let refused = read_transcript_watched(&path, &ask, |_| {
+        let path = path.clone();
+        Some((
+            u64::MAX,
+            Box::new(move || {
+                let now = std::fs::metadata(&path).expect("stat").len();
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .expect("open to cut")
+                    .set_len(now / 2)
+                    .expect("cut");
+            }) as Box<dyn FnOnce()>,
+        ))
+    });
+    let (answer, _, opens) = refused;
+    let why = answer.expect_err("a file cut under every read was answered");
+    assert!(why.contains("cut in place"), "{why}");
+    assert_eq!(opens, 2);
+    reset();
+
+    // Rewritten in place, the same length, between the reads: the answer is
+    // one read's — never the first read's lines beside the second's.
+    let rewritten = original.replace("mine", "ours");
+    assert_eq!(rewritten.len(), original.len());
+    let (answer, _, opens) = read_transcript_watched(&path, &ask, |open| {
+        let path = path.clone();
+        let rewritten = rewritten.clone();
+        (open == 0).then(|| {
+            (
+                second_read,
+                Box::new(move || {
+                    use std::io::{Seek, Write};
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .expect("open to rewrite");
+                    file.seek(std::io::SeekFrom::Start(0)).expect("seek");
+                    file.write_all(rewritten.as_bytes()).expect("rewritten");
+                }) as Box<dyn FnOnce()>,
+            )
+        })
+    });
+    let (turns, _) = answer.expect("answered");
+    assert_eq!(opens, 1);
+    assert_eq!(
+        (spoken(&turns, "mine"), spoken(&turns, "ours")),
+        (0, count),
+        "two reads' lines were answered together"
     );
 }
 

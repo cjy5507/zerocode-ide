@@ -21,14 +21,19 @@
 //! - every text is masked ([`crate::credential::mask_values`]) BEFORE it
 //!   is cut to its cap, so a cut can never split a credential in half and
 //!   leave the half the mask would have caught; and the cut says how long
-//!   the text was;
+//!   the text was. The reader hands the texts over whole for that
+//!   ([`crate::transcript::Detail::Whole`]): the conversation view's own
+//!   16 KiB cut, made before any mask, never stands in front of this one.
+//!   A tool's name and call id are masked by the same table — a call and
+//!   its result are joined on the ids as written first, so two ids the mask
+//!   folds into the same `[redacted]` are never joined for looking alike;
 //! - the whole answer has a cap of its own, and past it the OLDEST turns go
 //!   first and the answer says how many went — the newest turns are the ones
 //!   a coordinator asked for. JSON and text are two renderings of one value,
 //!   so they never differ in what they hold or in what was cut.
 
 use crate::credential;
-use crate::transcript::TranscriptTurn;
+use crate::transcript::{TranscriptTool, TranscriptTurn};
 
 /// How many turns come back when nobody says otherwise: the last few steps
 /// of a worker's work, each with what it ran and how that ended. Five, so
@@ -56,7 +61,10 @@ pub const ANSWER_BYTES: usize = 64 * 1024;
 
 /// How far back one call may read, in the reader's chunks (256 KiB each):
 /// one chunk first, and when the window asked for is not inside it, one
-/// read of this many — a megabyte, the bound on what one call reads.
+/// read of this many. The two reads — a chunk, then this many, each with
+/// the one byte before it that says whether it opens mid-line — are all
+/// one call reads, whatever its lines hold: a line longer than the wider
+/// read is not read whole, it is said ([`Scan::skipped`]).
 pub const SCAN_CHUNKS: u64 = 4;
 
 /// The word that opens every refusal of this verb whose cause is that there
@@ -140,17 +148,27 @@ impl TranscriptAsk {
 /// What the window read to answer — said with the answer, so a reader knows
 /// whether "no more turns" means the conversation began here or the read
 /// did.
+///
+/// Every field is what the reads DID, not what they were asked to do: the
+/// bytes they took, and the stretch of whole lines the answer came out of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scan {
-    /// The transcript's size when it was read.
+    /// The transcript's size when the call opened it. Every read of the call
+    /// stops there, so a file appended to meanwhile is answered as it stood
+    /// then, and every number below is of that one file.
     pub file_bytes: u64,
-    /// How much of its end the window read.
-    pub scanned_bytes: u64,
-    /// Whether the file goes on above what was read — the read is a tail.
+    /// The bytes the call read, all its reads together.
+    pub read_bytes: u64,
+    /// Where the whole lines the answer was read out of begin in the file…
+    pub covered_from: u64,
+    /// …and where they end. Short of `file_bytes`, the file's last line had
+    /// no end yet: it is still being written, and is not in the answer.
+    pub covered_to: u64,
+    /// Whether the file goes on above what was covered — the read is a tail.
     pub cut_above: bool,
-    /// Whether the reader skipped a line it could not take whole (one past
-    /// its long-line cap), so a turn may be missing where it stood.
+    /// Whether the newest whole line the reads reached was longer than they
+    /// could take, and was not read: a turn is missing where it stood.
     pub skipped: bool,
 }
 
@@ -158,7 +176,10 @@ pub struct Scan {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Digest {
     pub text: String,
-    /// How many characters the source text had, before masking and the cut.
+    /// How many characters the text had as the reader read it out of the
+    /// transcript — whole, before masking and before any cut (the reader
+    /// cuts nothing on this road, [`crate::transcript::Detail::Whole`]). An
+    /// image's base64 the reader sets aside is not text and not counted.
     pub chars: usize,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
@@ -240,8 +261,9 @@ pub struct ToolCall {
     pub at_ms: Option<i64>,
 }
 
-/// One logical turn: a person's prompt, or the assistant's contribution up
-/// to the next prompt.
+/// One logical turn — one STEP (the module's first rule): a person's
+/// prompt, or what the assistant said together with the calls it made
+/// after saying it and their results.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
@@ -352,12 +374,39 @@ fn spans(records: &[TranscriptTurn]) -> Vec<Span> {
     spans
 }
 
+impl ToolCall {
+    /// A call as the answer carries it: its name and id masked by the table
+    /// every other text is masked by, never copied as written.
+    fn of(
+        tool: &TranscriptTool,
+        input: Digest,
+        result: Option<Digest>,
+        at_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            call_id: credential::mask_values(&tool.call_id),
+            name: credential::mask_values(&tool.name),
+            input,
+            is_error: result.is_some() && tool.is_error,
+            result,
+            at_ms,
+        }
+    }
+}
+
 /// Build one turn out of its records. A result is joined to the call with
 /// its id inside the turn; one whose call is not there (the read began
 /// between the two) stands as a call of its own with the result's name.
+///
+/// The join reads the ids AS WRITTEN, kept beside the calls and never in
+/// them: a call carries its id out masked ([`ToolCall::of`]), and two ids
+/// the mask folds into the same `[redacted]` must not join a result to a
+/// call that merely looks alike once masked.
 fn turn_of(records: &[TranscriptTurn], span: &Span) -> Turn {
     let mut texts: Vec<&str> = Vec::new();
     let mut tools: Vec<ToolCall> = Vec::new();
+    // The id each of `tools` was written with, at the same index.
+    let mut written: Vec<&str> = Vec::new();
     let mut thinking = 0;
     for record in &records[span.start..span.end] {
         match record.role.as_str() {
@@ -371,14 +420,13 @@ fn turn_of(records: &[TranscriptTurn], span: &Span) -> Turn {
                 let Some(tool) = record.tool.as_ref() else {
                     continue;
                 };
-                tools.push(ToolCall {
-                    call_id: tool.call_id.clone(),
-                    name: tool.name.clone(),
-                    input: Digest::of(&tool.input, TOOL_CHARS),
-                    result: None,
-                    is_error: false,
-                    at_ms: record.at_ms,
-                });
+                tools.push(ToolCall::of(
+                    tool,
+                    Digest::of(&tool.input, TOOL_CHARS),
+                    None,
+                    record.at_ms,
+                ));
+                written.push(&tool.call_id);
             }
             "tool_result" => {
                 let Some(tool) = record.tool.as_ref() else {
@@ -386,21 +434,23 @@ fn turn_of(records: &[TranscriptTurn], span: &Span) -> Turn {
                 };
                 let result = Digest::of(&record.text, TOOL_CHARS);
                 match tools
-                    .iter_mut()
-                    .find(|call| call.result.is_none() && call.call_id == tool.call_id)
+                    .iter()
+                    .zip(&written)
+                    .position(|(call, id)| call.result.is_none() && *id == tool.call_id)
                 {
-                    Some(call) => {
-                        call.result = Some(result);
-                        call.is_error = tool.is_error;
+                    Some(at) => {
+                        tools[at].result = Some(result);
+                        tools[at].is_error = tool.is_error;
                     }
-                    None => tools.push(ToolCall {
-                        call_id: tool.call_id.clone(),
-                        name: tool.name.clone(),
-                        input: Digest::empty(),
-                        result: Some(result),
-                        is_error: tool.is_error,
-                        at_ms: record.at_ms,
-                    }),
+                    None => {
+                        tools.push(ToolCall::of(
+                            tool,
+                            Digest::empty(),
+                            Some(result),
+                            record.at_ms,
+                        ));
+                        written.push(&tool.call_id);
+                    }
                 }
             }
             _ => {}
@@ -568,7 +618,7 @@ impl WorkerTranscript {
             WindowSaid::SinceMs(moment) => format!("since {}", crate::civil::iso_utc_of(moment)),
         };
         out.push_str(&format!(
-            "worker {} · {} · {} turns of {} found (window {}; {} earlier{}) · file {} B, scanned {} B{}{}{}",
+            "worker {} · {} · {} turns of {} found (window {}; {} earlier{}) · file {} B, read {} B, lines {}–{} B{}{}{}{}",
             self.worker,
             self.agent,
             self.turns.len(),
@@ -581,7 +631,9 @@ impl WorkerTranscript {
                 String::new()
             },
             self.scan.file_bytes,
-            self.scan.scanned_bytes,
+            self.scan.read_bytes,
+            self.scan.covered_from,
+            self.scan.covered_to,
             if self.scan.cut_above {
                 ", more above"
             } else {
@@ -589,6 +641,11 @@ impl WorkerTranscript {
             },
             if self.scan.skipped {
                 ", a line skipped"
+            } else {
+                ""
+            },
+            if self.scan.covered_to < self.scan.file_bytes {
+                ", the last line still being written"
             } else {
                 ""
             },
@@ -643,12 +700,14 @@ impl WorkerTranscript {
 mod tests {
     use super::*;
     use crate::credential::MASK;
-    use crate::transcript::{TranscriptTool, turns_in};
+    use crate::transcript::{Detail, turns_in, turns_in_with};
 
     fn scan() -> Scan {
         Scan {
             file_bytes: 1_000,
-            scanned_bytes: 1_000,
+            read_bytes: 1_000,
+            covered_from: 0,
+            covered_to: 1_000,
             cut_above: false,
             skipped: false,
         }
@@ -749,8 +808,10 @@ mod tests {
         assert_eq!(turns[2].at_ms, None, "no stamp is unknown, never now");
     }
 
+    /// The digest half of the brief's `a_transcript_result_is_cut_at_the_digest_cap_and_masked`
+    /// (which runs end to end, through the verb, in the shell's tests).
     #[test]
-    fn a_transcript_result_is_cut_at_the_digest_cap_and_masked() {
+    fn a_digest_is_masked_before_its_cut_and_says_how_long_its_text_was() {
         let filler = "x".repeat(TOOL_CHARS - 10);
         let records = turns_in(
             &[
@@ -790,6 +851,60 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&answer.render(true)).unwrap();
         assert_eq!(json["turns"][1]["tools"][0]["result"]["truncated"], true);
         assert_eq!(json["truncated"], true);
+    }
+
+    /// A call's name and id are texts too (t-6742 R1): masked by the same
+    /// table in both renderings. The join does not go through the mask —
+    /// two ids that both fold into `[redacted]` keep their own results,
+    /// whatever order the results come back in.
+    #[test]
+    fn a_calls_name_and_id_are_masked_and_joined_on_the_ids_as_written() {
+        let first = format!("ghp_{}", "a1".repeat(18));
+        let second = format!("ghp_{}", "b2".repeat(18));
+        let named = format!("deploy_sk-{}", "c3".repeat(12));
+        let records = turns_in_with(
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"go"}}"#.to_string(),
+                format!(
+                    r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"{first}","name":"{named}","input":{{"command":"one"}}}},{{"type":"tool_use","id":"{second}","name":"Bash","input":{{"command":"two"}}}}]}}}}"#
+                ),
+                format!(
+                    r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{second}","content":"result of two"}},{{"type":"tool_result","tool_use_id":"{first}","content":"result of one","is_error":true}}]}}}}"#
+                ),
+            ]
+            .join("\n"),
+            Detail::Whole,
+        );
+        let answer = shape("w-1", "claude", &records, scan(), &ask(20));
+        let calls = &answer.turns[1].tools;
+        assert_eq!(calls.len(), 2, "{calls:#?}");
+        assert_eq!(calls[0].call_id, MASK);
+        assert_eq!(calls[1].call_id, MASK, "both ids fold into the mask");
+        assert_eq!(calls[0].name, MASK);
+        assert_eq!(
+            calls[1].name, "Bash",
+            "a name that is not a credential stays"
+        );
+        assert_eq!(
+            calls[0].result.as_ref().map(|r| r.text.as_str()),
+            Some("result of one"),
+            "a result joined on the masked id"
+        );
+        assert!(calls[0].is_error);
+        assert_eq!(
+            calls[1].result.as_ref().map(|r| r.text.as_str()),
+            Some("result of two")
+        );
+        assert!(!calls[1].is_error);
+        for json in [true, false] {
+            let out = answer.render(json);
+            for secret in [first.as_str(), second.as_str(), named.as_str(), "a1a1a1"] {
+                assert!(!out.contains(secret), "{secret} escaped: {out}");
+            }
+        }
+        // And nothing held for the join outlives the turn: a call's Debug is
+        // what its answer shows.
+        assert!(!format!("{calls:?}").contains(&first));
     }
 
     /// Masking only the lines a cut reaches keeps exactly what masking the
@@ -1029,7 +1144,9 @@ mod tests {
             &records,
             Scan {
                 file_bytes: 5_000_000,
-                scanned_bytes: 1_048_576,
+                read_bytes: 1_310_722,
+                covered_from: 3_951_424,
+                covered_to: 4_999_000,
                 cut_above: true,
                 skipped: true,
             },
@@ -1039,13 +1156,19 @@ mod tests {
         assert_eq!(json["worker"], "w-7");
         assert_eq!(json["agent"], "claude");
         assert_eq!(json["scan"]["fileBytes"], 5_000_000);
+        assert_eq!(json["scan"]["readBytes"], 1_310_722);
+        assert_eq!(json["scan"]["coveredFrom"], 3_951_424);
+        assert_eq!(json["scan"]["coveredTo"], 4_999_000);
         assert_eq!(json["scan"]["cutAbove"], true);
         assert_eq!(json["scan"]["skipped"], true);
         assert_eq!(json["window"], serde_json::json!({"turns": 20}));
         assert!(json.get("path").is_none() && !json.to_string().contains("/Users/"));
         let text = answer.render(false);
         assert!(
-            text.contains("more above") && text.contains("a line skipped"),
+            text.contains("file 5000000 B, read 1310722 B, lines 3951424–4999000 B")
+                && text.contains("more above")
+                && text.contains("a line skipped")
+                && text.contains("the last line still being written"),
             "{text}"
         );
         assert!(
