@@ -1325,14 +1325,17 @@ fn the_classifier_words_are_the_ones_zo_routes_on() {
     );
 }
 
-/// Only the probing word asks the routing seat anything.
+/// Every word but `off` asks the routing seat; only the probing word calls
+/// the chat probe (t-4727, t-6346).
 ///
 /// This is the fact the card has to say out loud, so it is held to zo's
-/// source: the decision shadow is fired from `probe_and_shadow` alone, and the
-/// probe is called only under `Probed`. If zo ever fires the shadow from
-/// somewhere else, the card's notice becomes a lie and this goes red first.
+/// source: the decision shadow is fired from `probe_and_shadow` alone, the
+/// spawn road reads a task whenever automatic routing runs and the seat asks
+/// (`spawn_is_read`), and the probe inside that road waits on `Probed`. If zo
+/// ever gates the judgment on the probe again, the card's notice becomes a lie
+/// and this goes red first.
 #[test]
-fn the_routing_seat_is_only_asked_under_the_probing_word() {
+fn the_routing_seat_is_asked_under_every_word_but_off() {
     let probe_exec =
         include_str!("../../../../zo-ide/crates/tools/src/misc_tools/smart_router/probe_exec.rs");
     let apply =
@@ -1352,15 +1355,32 @@ fn the_routing_seat_is_only_asked_under_the_probing_word() {
         1,
         "the shadow's active road has more than one entrance"
     );
+    let reads = &product(apply)[product(apply)
+        .find("fn spawn_is_read(")
+        .expect("the spawn road's one gate")..];
+    let reads = &reads[..reads.find("\n}\n").expect("the gate closes")];
+    assert!(
+        reads.contains("RouteAutoClassifierMode::Off") && reads.contains("asks_here()"),
+        "the spawn road reads a task for the seat under a word other than `off`:\n{reads}"
+    );
     for entry in ["route_probe_assessment(", "route_probe_assessments("] {
         for at in product(apply).match_indices(entry).map(|(at, _)| at) {
             let before = &product(apply)[..at];
             let gate = before
-                .rfind("RouteAutoClassifierMode::Probed")
-                .expect("a probe call with no Probed gate above it");
+                .rfind("spawn_is_read(")
+                .expect("a spawn read with no gate above it");
             assert!(
                 before.len() - gate < 800,
-                "a `{entry}` call is not under a Probed gate"
+                "a `{entry}` call is not under the spawn road's gate"
+            );
+            let admitted = &product(apply)[at..];
+            let admitted = &admitted[..admitted
+                .find(')')
+                .map_or(admitted.len(), |close| close + 200)
+                .min(admitted.len())];
+            assert!(
+                admitted.contains("Admitted::spawn(probes)"),
+                "a spawn read lets the probe run without the probing word"
             );
         }
     }
@@ -1372,6 +1392,14 @@ fn the_routing_seat_is_only_asked_under_the_probing_word() {
             == 1,
         "more than one word claims to probe"
     );
+    for mode in ClassifierMode::ALL {
+        assert_eq!(
+            mode.reaches(),
+            mode.runs(),
+            "`{}`: the seat is asked exactly where routing runs",
+            mode.key()
+        );
+    }
     assert!(ROUTING.modes.iter().copied().any(JevMode::applies));
 }
 

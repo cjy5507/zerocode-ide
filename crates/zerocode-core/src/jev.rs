@@ -3345,16 +3345,16 @@ pub fn jev_use(id: &str) -> Option<&'static JevUse> {
 /// ---- the gate in front of the routing seat --------------------------------
 ///
 /// The key under [`SMART_SETTINGS_KEY`] that decides how a spawn's difficulty
-/// is classified — and, as a consequence nobody reading the routing row would
-/// guess, whether the routing seat is asked anything at all.
+/// is classified — and whether the routing seat is asked anything at all.
 ///
-/// The chain, read in zo's own source: the decision shadow is fired only by
-/// `probe_and_shadow` (`smart_router/probe_exec.rs`), which is reached only
-/// through `route_probe_assessment(s)`, which `smart_router/apply.rs` calls
-/// only when this setting reads as [`ClassifierMode::Probed`]. So under the
-/// other three words `smart.decisionShadow` may say `on` and there is nothing
-/// the seat can ask — the switch a person CAN see promises a judgment the one
-/// they cannot see has already refused.
+/// Until t-6346 only the probing word reached the seat: the decision shadow
+/// was fired only from inside the chat probe's road, which the spawn road took
+/// only under [`ClassifierMode::Probed`] and the turn road only past the
+/// probe's own band gate — so `smart.decisionShadow` could say `on` while
+/// nothing was ever asked (0 of 25 rows applied, t-4727). Now the seat is
+/// asked under every word but `off` ([`ClassifierMode::reaches`]); the probe
+/// still waits on the probing word, and where the seat acts it is called only
+/// for an answer that abstains.
 ///
 /// It lives here rather than beside zo's own `RouteAutoClassifierMode` for the
 /// reason this module exists: two programs now read it — zo to route, and the
@@ -3375,7 +3375,7 @@ pub enum ClassifierMode {
     Assisted,
     /// The keyword tables, plus one bounded Fast-tier probe (~200 output
     /// tokens) whose verdict is fused on top of them — refining, never
-    /// replacing. The only word under which the routing seat is asked.
+    /// replacing. The only word under which the chat probe is called.
     Probed,
 }
 
@@ -3407,11 +3407,18 @@ impl ClassifierMode {
         matches!(self, Self::Assisted)
     }
 
-    /// Whether a probe is called — which is also whether the routing seat is
-    /// ever asked.
+    /// Whether the chat probe is called.
     #[must_use]
     pub const fn probes(self) -> bool {
         matches!(self, Self::Probed)
+    }
+
+    /// Whether the routing seat can be asked under this word: wherever
+    /// automatic routing runs (t-6346) — `off` routes nothing, so nothing is
+    /// judged for it.
+    #[must_use]
+    pub const fn reaches(self) -> bool {
+        self.runs()
     }
 
     /// The mode `value` names: one of the four words, trimmed, in any case.

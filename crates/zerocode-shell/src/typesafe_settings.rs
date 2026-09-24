@@ -119,6 +119,8 @@ pub struct ClassifierChoice {
     pub runs: bool,
     pub markers: bool,
     pub probes: bool,
+    /// Whether the routing seat can be asked under this word (t-6346).
+    pub reaches: bool,
 }
 
 impl ClassifierChoice {
@@ -128,13 +130,15 @@ impl ClassifierChoice {
             runs: mode.runs(),
             markers: mode.markers(),
             probes: mode.probes(),
+            reaches: mode.reaches(),
         }
     }
 }
 
 /// The gate in front of the routing seat, as the pane paints it: the settings
-/// key it writes, where it stands, whether where it stands reaches a probe at
-/// all, and the words it offers.
+/// key it writes, where it stands, whether where it stands calls the chat
+/// probe and whether it reaches the seat at all (every word but `off`,
+/// t-6346), and the words it offers.
 ///
 /// It is not a Jev use and has no row in that table — it is zo's own routing
 /// setting. It is answered here because it is the one fact the routing row
@@ -146,6 +150,8 @@ pub struct ClassifierRow {
     pub setting: &'static str,
     pub mode: &'static str,
     pub probes: bool,
+    /// Whether the seat this gate stands in front of can be asked at all.
+    pub reaches: bool,
     /// The seat this gate stands in front of, by that use's own name — so the
     /// card reads which row to warn on rather than carrying a second copy of
     /// the coupling.
@@ -269,6 +275,7 @@ pub fn read_settings(
             setting: CLASSIFIER_SETTING,
             mode: classifier.key(),
             probes: classifier.probes(),
+            reaches: classifier.reaches(),
             gates: ROUTING.id,
             modes: ClassifierMode::ALL.map(ClassifierChoice::of).to_vec(),
         },
@@ -1557,11 +1564,12 @@ mod tests {
             .iter()
             .map(|mode| {
                 format!(
-                    "Object.freeze({{ mode: \"{}\", runs: {}, markers: {}, probes: {} }}),",
+                    "Object.freeze({{ mode: \"{}\", runs: {}, markers: {}, probes: {}, reaches: {} }}),",
                     mode.key(),
                     mode.runs(),
                     mode.markers(),
-                    mode.probes()
+                    mode.probes(),
+                    mode.reaches()
                 )
             })
             .collect();
@@ -1593,6 +1601,7 @@ mod tests {
         assert_eq!(untouched.setting, CLASSIFIER_SETTING);
         assert_eq!(untouched.mode, ClassifierMode::Probed.key());
         assert!(untouched.probes);
+        assert!(untouched.reaches);
         assert_eq!(
             untouched.gates, ROUTING.id,
             "the gate names the seat it gates"
@@ -1616,6 +1625,16 @@ mod tests {
         let quiet = read();
         assert_eq!(quiet.mode, ClassifierMode::Deterministic.key());
         assert!(!quiet.probes, "the provider-free word reaches no probe");
+        assert!(
+            quiet.reaches,
+            "the provider-free word still reaches the routing seat (t-6346)"
+        );
+        set_classifier(&path, ClassifierMode::Off.key()).expect("set");
+        assert!(
+            !read().reaches,
+            "with automatic routing off nothing reaches the seat"
+        );
+        set_classifier(&path, ClassifierMode::Deterministic.key()).expect("set");
         let root = crate::api_routers::read_zo_settings_root(&path).expect("root");
         assert_eq!(
             root.get("providers")

@@ -97,15 +97,15 @@ const jevModelPin = (given) => {
   return word && !/[\s\p{Cc}]/u.test(word) ? word : null;
 };
 /* The routing classifier's four words (`zerocode_core::jev::ClassifierMode`)
-   and what each one does. Only the probing word calls a probe, and the routing
-   seat is asked nothing under the other three — `typesafe_settings.rs` holds
-   this fixture to the table and to zo's own source. */
+   and what each one does. Only the probing word calls a probe; the routing
+   seat is asked under every word but `off` (t-6346) — `typesafe_settings.rs`
+   holds this fixture to the table and to zo's own source. */
 const CLASSIFIER_SETTING = "autoClassifier";
 const CLASSIFIER_MODES = Object.freeze([
-  Object.freeze({ mode: "off", runs: false, markers: false, probes: false }),
-  Object.freeze({ mode: "deterministic", runs: true, markers: false, probes: false }),
-  Object.freeze({ mode: "assisted", runs: true, markers: true, probes: false }),
-  Object.freeze({ mode: "probed", runs: true, markers: false, probes: true }),
+  Object.freeze({ mode: "off", runs: false, markers: false, probes: false, reaches: false }),
+  Object.freeze({ mode: "deterministic", runs: true, markers: false, probes: false, reaches: true }),
+  Object.freeze({ mode: "assisted", runs: true, markers: true, probes: false, reaches: true }),
+  Object.freeze({ mode: "probed", runs: true, markers: false, probes: true, reaches: true }),
 ]);
 /* An absent key is the probing word; anything nobody reads is the
    provider-free one (`ClassifierMode::of`). */
@@ -2714,6 +2714,7 @@ class StatefulBackend {
         setting: CLASSIFIER_SETTING,
         mode: classifierMode(this.zoSettings.smart?.[CLASSIFIER_SETTING]).mode,
         probes: classifierMode(this.zoSettings.smart?.[CLASSIFIER_SETTING]).probes,
+        reaches: classifierMode(this.zoSettings.smart?.[CLASSIFIER_SETTING]).reaches,
         gates: JEV_SEATS[0].id,
         modes: clone(CLASSIFIER_MODES),
       },
@@ -4495,16 +4496,15 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
     "an untouched settings file did not read as the probing word",
   );
 
-  // A feature that asks while nothing calls a probe says so, beside the
-  // classifier that changes it — and which feature that is, is the
-  // backend's answer.
+  // A word that calls no probe still reaches the routing seat (t-6346): the
+  // change says only that no Fast-tier model is asked, and no warning stands.
   const quiet = CLASSIFIER_MODES.find((choice) => choice.runs && !choice.probes).mode;
   const chosenAt = backend.calls.length;
   await pageA.selectOption("#route-classifier-select", quiet);
   assertEqual((await backend.waitForCall("A", "set_route_classifier", chosenAt)).args.mode, quiet);
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 어디에도 묻지 않습니다."),
+    await said("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 빠른 등급 모델에게 묻지 않습니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.autoClassifier, quiet, "the choice was not written to zo's settings");
@@ -4515,14 +4515,30 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   );
 
   // Turn Jev on: the gated feature now stands at its recommendation and asks,
-  // so the card offers a judgment nothing can make, and says so.
+  // and a word that calls no probe still reaches it — nothing to warn about.
   const onAt = backend.calls.length;
   await pageA.locator("#jev-enabled").click();
   await backend.waitForCall("A", "set_jev_enabled", onAt);
+  await renderSettled(pageA);
+  assert(
+    await unreachable.isHidden(),
+    "the card warned that a word which reaches the feature cannot reach it",
+  );
+
+  // Automatic routing off is the one word nothing reaches the feature under:
+  // the change says so, and the card says why the feature asks nothing.
+  const off = CLASSIFIER_MODES.find((choice) => !choice.reaches).mode;
+  const offAt = backend.calls.length;
+  await pageA.selectOption("#route-classifier-select", off);
+  await backend.waitForCall("A", "set_route_classifier", offAt);
   await pageA.waitForFunction(() => !document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
+    await statusSaid(pageA, "typesafe-status"),
+    await said("settings.classifier.nowOff", "자동 라우팅을 껐습니다 — 「모델 선택 판단」도 판단을 요청하지 않습니다."),
+  );
+  assertEqual(
     (await unreachable.textContent()).trim(),
-    await said("settings.typesafe.routingUnreachable", "지금 분류 방식이 모델에게 묻지 않아 「모델 선택 판단」은 판단을 요청하지 않습니다. 모델에게도 묻는 방식으로 바꾸면 요청합니다."),
+    await said("settings.typesafe.routingUnreachable", "자동 라우팅이 꺼져 있어 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다."),
     "the classifier does not say why the feature it gates cannot be reached",
   );
 
@@ -4534,7 +4550,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await pageA.waitForFunction(() => document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
     await statusSaid(pageA, "typesafe-status"),
-    await said("settings.classifier.nowProbes", "이제 모델에게도 묻습니다 — 「모델 선택 판단」도 이제 판단을 요청할 수 있습니다."),
+    await said("settings.classifier.nowProbes", "이제 빠른 등급 모델에게도 묻습니다."),
   );
 
   // A refused change keeps the card as it stood.
