@@ -554,6 +554,17 @@ fn request_has_current_turn_skill_note(runtime: &mut ConversationRuntime<StopApi
     })
 }
 
+fn assert_no_transient_skill_note(runtime: &ConversationRuntime<StopApiClient, StaticToolExecutor>) {
+    assert!(
+        runtime
+            .transient_reminders
+            .iter()
+            .all(|reminder| !reminder.starts_with(crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX)),
+        "a previous turn's skill note remains in the current reminder set: {:?}",
+        runtime.transient_reminders
+    );
+}
+
 #[test]
 fn a_skill_note_from_the_last_turn_is_gone_when_this_turn_has_none() {
     let mut runtime = recall_hint_runtime(Session::new());
@@ -576,6 +587,13 @@ fn a_skill_note_from_the_last_turn_is_gone_when_this_turn_has_none() {
     runtime.session.push_user_text("Next request").expect("second turn message");
     runtime.clear_turn_start_transient_reminders();
     runtime.inject_skill_suggestion("Create another document");
+    assert_no_transient_skill_note(&runtime);
+    assert!(runtime.session.messages.iter().any(|message| {
+        message.role == MessageRole::System && message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text }
+                if text.contains(crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX))
+        })
+    }), "the earlier System note remains in the append-only transcript");
     assert!(!request_has_current_turn_skill_note(&mut runtime));
 }
 
@@ -595,6 +613,7 @@ fn an_unseated_turn_clears_a_note_the_seat_left() {
     runtime.session.push_user_text("Next request").expect("second turn message");
     runtime.clear_turn_start_transient_reminders();
     runtime.inject_skill_suggestion("Another turn");
+    assert_no_transient_skill_note(&runtime);
     assert!(!request_has_current_turn_skill_note(&mut runtime));
 }
 
@@ -6576,6 +6595,7 @@ fn a_turn_the_hook_refuses_carries_no_stale_skill_note() {
 
     runtime.run_turn("blocked input", None).expect_err("hook denies the next turn");
     runtime.session.push_user_text("Following request").expect("following turn message");
+    assert_no_transient_skill_note(&runtime);
     assert!(!request_has_current_turn_skill_note(&mut runtime));
 }
 
