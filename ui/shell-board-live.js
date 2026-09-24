@@ -854,7 +854,11 @@ function ledgerReviewStage(place, row) {
  * 거두어지고 워커의 주장만 남음) 그 단계의 사건은 지금의 판이 드는 근거가 아니다. */
 function agentGraphLiveStageHolds(stage, place, row) {
   const held = AGENT_GRAPH_LIVE_STAGES.find((one) => one.stage === stage);
-  if (!held) return false;
+  return held ? agentGraphLiveFlagHolds(held, place, row) : false;
+}
+
+/* 표의 한 줄이 가리키는 원장 칸이 참인가 — 위와 아래(서명)가 같은 이 한 손으로 묻는다. */
+function agentGraphLiveFlagHolds(held, place, row) {
   return held.flag === "reported"
     ? place?.reported === true || row?.reported === true
     : row?.review?.[held.flag] === true;
@@ -875,7 +879,7 @@ function agentGraphLiveResultsSaid(columns, places, ledger) {
       if (agentGraphLiveSubject(place) === null) continue;
       const row = ledger?.get(card.pane) ?? null;
       const holding = AGENT_GRAPH_LIVE_STAGES
-        .filter((one) => agentGraphLiveStageHolds(one.stage, place, row))
+        .filter((one) => agentGraphLiveFlagHolds(one, place, row))
         .map((one) => one.stage);
       if (holding.length > 0) said.push(`${card.pane}\u001f${holding.join(",")}`);
     }
