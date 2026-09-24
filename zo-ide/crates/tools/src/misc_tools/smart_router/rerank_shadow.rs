@@ -2964,6 +2964,217 @@ mod tests {
         });
     }
 
+    /* ---- what reached the model, what the turn did, which ledger (t-6264 r2) */
+
+    /// Notes a recall handed to a request that never left — the context
+    /// budget refused it and the runtime took the reminder back — were shown
+    /// to nobody: five such turns leave no unopened showing, and the graph
+    /// still brings the hub in on the seed's words (astra R1a).
+    #[test]
+    fn an_undispatched_recall_adds_no_unopened_showing() {
+        let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());
+        let order = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let vault = vault_with_a_hub(cwd);
+            let _vault = VaultEnv::point_at(&vault);
+            for _ in 0..runtime::memory::recall::UNADDRESSED_AFTER_RECALLS {
+                let _read = settle(cwd, "vellichor", vec![hit("wiki/seed", "vellichor"), hit("wiki/z-hub", "hiraeth")]);
+                // The request never left: the turn ended on the budget error
+                // with nothing of its own left in the transcript.
+                let _ = note_recall_read(cwd, &[]);
+            }
+            slugs(&session_retriever(cwd).recall("vellichor", 5))
+        });
+        assert_eq!(
+            order,
+            ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"],
+            "notes that never reached the model were counted as left unopened"
+        );
+    }
+
+    /// A turn that read a note did read it, whatever the transcript holds
+    /// when its labels are written: a compaction — mid-turn, or the one after
+    /// the turn's last answer — summarises the read away, and the label must
+    /// not call the note unopened (astra R1b).
+    #[test]
+    fn a_compacted_read_is_not_relabelled_unopened() {
+        let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());
+        let label = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (compacted)", three().to_vec());
+            // What the turn did: it read the first note, then answered.
+            let _did = turn(vec![read_of(&read[0].entry.path), said("done")]);
+            // What the transcript held when the labels were written: the
+            // compaction's summary and the answer it kept.
+            let kept = vec![
+                ConversationMessage::user_text("<summary of the work so far>"),
+                ConversationMessage::assistant(vec![said("done")]),
+            ];
+            assert!(note_recall_read(cwd, &kept));
+            labels(cwd).pop().expect("a label row")
+        });
+        assert!(label.shown[0].read, "a read the compaction took was relabelled unopened: {label:?}");
+    }
+
+    /// The assistant's own citation is a link in its own words: a line it
+    /// quotes from someone else (`> … [[wiki/a]]`) and a fenced block it
+    /// shows are not its citation of those pages (astra R1c).
+    #[test]
+    fn a_quoted_wikilink_is_not_the_assistants_own_citation() {
+        let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());
+        let label = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let _read = settle(cwd, "which note answers this (quoted)", three().to_vec());
+            let reply = "The page puts it this way:\n> the old rule lives in [[wiki/a]]\n\n```text\n[[wiki/b]] is how a link is written\n```\n\nso I follow [[wiki/c]].";
+            assert!(note_recall_read(cwd, &turn(vec![said(reply)])));
+            labels(cwd).pop().expect("a label row")
+        });
+        let cited: Vec<(&str, bool)> = label.shown.iter().map(|note| (note.slug.as_str(), note.cited)).collect();
+        assert_eq!(
+            cited,
+            [("wiki/a", false), ("wiki/b", false), ("wiki/c", true)],
+            "a quoted or fenced link was read as the assistant's own citation"
+        );
+    }
+
+    /// A ledger replaced by another of the very same length — a restore, a
+    /// copy, a cut grown back to the length it had — is another ledger: the
+    /// demand a warm reader folded and the standing it read are not the new
+    /// ledger's, and each is read again, agreeing with a reader that never
+    /// saw the old one (astra R2).
+    #[test]
+    fn a_same_length_ledger_replacement_invalidates_demand_and_standing() {
+        let mock = Mock::silent();
+        machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let vault = vault_with_a_hub(cwd);
+            let _vault = VaultEnv::point_at(&vault);
+            let ledger = rerank_shadow_path(cwd);
+            std::fs::create_dir_all(ledger.parent().expect("a ledger dir")).expect("a ledger dir");
+            // Turns that left the page each names unopened, one row each from
+            // `from` on — every row the same length whatever the page.
+            let written = |pages: &[&str], from: u64| -> String {
+                pages
+                    .iter()
+                    .zip(from..)
+                    .map(|(page, at)| {
+                        let mut row = hub_unopened(at, &vault);
+                        row.shown[1].slug = (*page).to_string();
+                        serde_json::to_string(&row).expect("a row") + "\n"
+                    })
+                    .collect()
+            };
+            let asked = |demand: Option<&RecallDemand>| {
+                demand.map_or((false, false), |demand| (demand.unaddressed("wiki/z-hub"), demand.unaddressed("wiki/y-hub")))
+            };
+            let warm = || asked(demand_for(cwd).as_deref());
+            let cold = || asked(Some(&recall_demand_from(&labels(cwd), vault_fingerprint())));
+            let retriever = session_retriever(cwd);
+            let order = || slugs(&retriever.recall("vellichor", 5));
+            let (hub_in, hub_out) = (["wiki/seed", "wiki/z-hub", "wiki/a-quiet"], ["wiki/seed", "wiki/a-quiet"]);
+            let hub = written(&["wiki/z-hub"; 5], 1_000);
+            std::fs::write(&ledger, &hub).expect("a ledger");
+            assert_eq!(order(), hub_out, "five unopened showings sink the hub");
+            // The same length and the same first bytes, another page unopened.
+            let other = written(&["wiki/y-hub"; 5], 1_000);
+            assert_eq!(other.len(), hub.len());
+            std::fs::write(&ledger, &other).expect("a replaced ledger");
+            assert_eq!(warm(), cold(), "a warm fold kept the replaced ledger's demand");
+            assert_eq!(order(), hub_in, "the replacing ledger never left the hub unopened");
+            // Cut to its newer rows, and grown back to the very length it had.
+            std::fs::write(&ledger, &hub).expect("the hub's ledger again");
+            assert_eq!(order(), hub_out);
+            let regrown = written(&["wiki/z-hub"; 4], 1_001) + &written(&["wiki/y-hub"], 1_005);
+            assert_eq!(regrown.len(), hub.len());
+            std::fs::write(&ledger, &regrown).expect("a cut ledger grown back");
+            assert_eq!(warm(), cold(), "a warm fold kept a row the cut removed");
+            assert_eq!(order(), hub_in, "four unopened showings since the cut");
+        });
+        // The standing an `auto` seat reads, both ways, against the common
+        // reader: `rise` and `fall` are one length.
+        let mock = Mock::silent();
+        machine(zerocode_core::jev::JevMode::Auto.key(), &mock.base_url, |cwd| {
+            use zerocode_core::jev::promote::{FELL, ROSE};
+            let ledger = rerank_shadow_path(cwd);
+            std::fs::create_dir_all(ledger.parent().expect("a ledger dir")).expect("a ledger dir");
+            let stood = |word: &str| format!("{{\"at\":9000,\"transition\":\"{word}\"}}\n");
+            for (from, to) in [(ROSE, FELL), (FELL, ROSE)] {
+                std::fs::write(&ledger, stood(from)).expect("a ledger");
+                assert_eq!(raised_now(cwd), runtime::jev_seat_applies(cwd, &RECALL), "{from}");
+                std::fs::write(&ledger, stood(to)).expect("a replaced ledger");
+                assert_eq!(
+                    raised_now(cwd),
+                    runtime::jev_seat_applies(cwd, &RECALL),
+                    "{from} → {to}: the standing read off the replaced ledger"
+                );
+            }
+        });
+    }
+
+    /// A label that names its own showing (`shown`, `shownAt`), for the
+    /// replay's fixtures: one page, shown at `shown_at`, its label written
+    /// at `at`.
+    fn named_showing(at: u64, shown_at: u64, opened: bool) -> serde_json::Value {
+        serde_json::json!({
+            "at": at, "label": "7:7", "query": 7, "notes": 7, "applied": false, "shownAt": shown_at,
+            "shown": [{"slug": "wiki/x", "rank": 0, "read": opened, "cited": false}],
+        })
+    }
+
+    /// A showing is ranked on what was known when it was shown. Turn A
+    /// showed page x when four readers had left it unopened; turn B's label
+    /// made it five before A's own label arrived — so A's showing is not
+    /// one the demand would have changed, and B's was not either (astra R3).
+    #[test]
+    fn a_late_label_cannot_change_an_earlier_showings_demand() {
+        let window = runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
+        let mut rows: Vec<serde_json::Value> = (0..u64::from(window) - 1).map(|n| named_showing(100 + n, 50 + n, false)).collect();
+        // B: shown at 1,500, labeled at 2,000 — the fifth unopened showing.
+        rows.push(named_showing(2_000, 1_500, false));
+        // A: shown at 1,000, before B was; labeled at 3,000, after B was.
+        rows.push(named_showing(3_000, 1_000, false));
+        let replayed = replay_at(&rows, window);
+        assert_eq!(replayed.exact.exposures, rows.len(), "{replayed:?}");
+        assert_eq!(
+            replayed.exact.changed, 0,
+            "a label written after a showing changed what that showing was ranked on: {replayed:?}"
+        );
+        // The one that follows both is ranked on all five.
+        rows.push(named_showing(4_000, 3_500, false));
+        assert_eq!(replay_at(&rows, window).exact.changed, 1);
+    }
+
+    /// Two turns that asked one question over the same notes — two windows
+    /// on one project — are two showings. An older label names its reading
+    /// only by those two fingerprints, so when two labels answer one run of
+    /// requests the replay cannot say which is whose, and counts both apart
+    /// rather than joining one and dropping the other; a label that names
+    /// its own showing is its own, however alike the readings (astra R3).
+    #[test]
+    fn two_turns_with_the_same_reading_are_not_one_exposure() {
+        let window = runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
+        let reading = |at: u64| {
+            serde_json::json!({
+                "at": at, "query": 7, "notes": 7, "rubric_version": RERANK_RUBRIC_VERSION,
+                "outcome": RERANK_OUTCOME_ANSWERED, "candidates": 2, "applied": false,
+                "judged": {"recalled": ["wiki/x", "wiki/y"], "proposed": ["wiki/x", "wiki/y"], "moved": 0,
+                           "top_changed": false, "held_by_graph": [], "readings": [[1.0, 0.9], [0.5, 0.9]]},
+            })
+        };
+        let older_label = |at: u64, agreed: bool| {
+            serde_json::json!({"at": at, "label": "7:7", "query": 7, "notes": 7, "applied": false,
+                               "agreed": agreed, "rank": 0, "baselineAgreed": agreed})
+        };
+        let rows = [reading(1_000), reading(1_100), older_label(2_000, true), older_label(2_100, false)];
+        let replayed = replay_at(&rows, window);
+        assert_eq!(
+            (replayed.legacy.exposures, replayed.ambiguous, replayed.orphan),
+            (0, 2, 0),
+            "two turns' labels were joined as one showing: {replayed:?}"
+        );
+        // One turn's requests, one label: the run is one showing.
+        let replayed = replay_at(&[reading(1_000), reading(1_100), older_label(2_000, true)], window);
+        assert_eq!((replayed.legacy.exposures, replayed.repeated, replayed.ambiguous), (1, 1, 0), "{replayed:?}");
+        let rows = [reading(1_000), reading(1_100), named_showing(2_000, 1_000, true), named_showing(2_100, 1_100, false)];
+        assert_eq!(replay_at(&rows, window).exact.exposures, 2);
+    }
+
     /// What the demand costs a recall on this machine, printed: the first
     /// fold of a ledger the size of this machine's
     /// (`ZO_RERANK_REPLAY_LEDGER`, copied; else 1,300 synthetic rows), a
@@ -3103,14 +3314,99 @@ mod tests {
         rows.sort_by_key(|row| row["at"].as_i64().unwrap_or(0));
         println!("\n  ledger: {} (fingerprint {:016x}, {} bytes, {} rows)", ledger.display(), task_fingerprint("", &text), text.len(), rows.len());
         for window in [1, 3, runtime::memory::recall::UNADDRESSED_AFTER_RECALLS, 10] {
-            replay_at(&rows, window);
+            replay_at(&rows, window).print();
+        }
+    }
+
+    /// What one population of showings came to, ranked the product's way.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    struct Population {
+        /// Labeled showings.
+        exposures: usize,
+        /// Showings whose label says what became of every note shown.
+        complete: usize,
+        /// Showings whose label says it of some notes only.
+        partial: usize,
+        /// Showings the demand would have changed: a slot it sank.
+        changed: usize,
+        sunk_slots: usize,
+        slots: usize,
+        /// Opened notes the demand had sunk: readers answering the prior back.
+        harmed: usize,
+        /// Opened notes outside the shown slots, folded nowhere.
+        outside: usize,
+        /// Showings whose first slot the demand moved.
+        moved: usize,
+        /// First slot opened — yes, no, unknown — as recorded, and with the
+        /// sunk pages behind the rest.
+        before: [usize; 3],
+        after: [usize; 3],
+    }
+
+    /// What one pass of the replay counted.
+    #[derive(Debug, Default, Clone, PartialEq, Eq)]
+    struct Replayed {
+        window: u32,
+        /// Labels that name their own showing (`shown`, `shownAt`).
+        exact: Population,
+        /// Older labels, joined to a reading by its two fingerprints.
+        legacy: Population,
+        /// Runs of one reading's requests.
+        bundles: usize,
+        /// Requests folded into a run after its first.
+        repeated: usize,
+        /// Runs no label claimed.
+        unlabeled: usize,
+        /// Older labels that cannot be told apart from another's.
+        ambiguous: usize,
+        /// Older labels naming no reading.
+        orphan: usize,
+        /// Older labels with no mark to read.
+        unmarked: usize,
+        /// Pages unaddressed at the end, of those observed.
+        unaddressed: usize,
+        observed: usize,
+    }
+
+    impl Replayed {
+        fn print(&self) {
+            let share = |part: usize, whole: usize| {
+                #[expect(clippy::cast_precision_loss, reason = "a share of a few hundred showings")]
+                let share = if whole == 0 { 0.0 } else { 100.0 * part as f64 / whole as f64 };
+                share
+            };
+            let product = self.window == runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
+            println!("\n  survival window {}{}", self.window, if product { "  <- the product's" } else { "" });
+            println!(
+                "    reading runs {} ({} repeated requests folded in); unlabeled runs {}; older labels ambiguous {}, joining no reading {}, with no mark {}",
+                self.bundles, self.repeated, self.unlabeled, self.ambiguous, self.orphan, self.unmarked
+            );
+            for (name, counted) in [("named showings (exact time)", &self.exact), ("older labels (joined)", &self.legacy)] {
+                println!("    {name}: {} (complete {}, partial {})", counted.exposures, counted.complete, counted.partial);
+                println!(
+                    "      showings the demand changed        {}/{} = {:5.1}%   slots sunk {}/{}",
+                    counted.changed,
+                    counted.exposures,
+                    share(counted.changed, counted.exposures),
+                    counted.sunk_slots,
+                    counted.slots
+                );
+                println!("      opened notes the demand had sunk   {}   (readers answering the prior back)", counted.harmed);
+                println!("      opened notes outside the shown     {}   (folded nowhere)", counted.outside);
+                println!("      first slot moved                   {}/{}", counted.moved, counted.exposures);
+                println!(
+                    "      first slot opened — before: yes {} no {} unknown {}   after: yes {} no {} unknown {}",
+                    counted.before[0], counted.before[1], counted.before[2], counted.after[0], counted.after[1], counted.after[2]
+                );
+            }
+            println!("    pages unaddressed at the end         {} of {} observed", self.unaddressed, self.observed);
         }
     }
 
     /// One pass of the replay at survival window `window` — the product's
     /// rule with its one number moved, so the comparison is the same fold.
     #[expect(clippy::too_many_lines, reason = "one replay, read top to bottom")]
-    fn replay_at(rows: &[serde_json::Value], window: u32) {
+    fn replay_at(rows: &[serde_json::Value], window: u32) -> Replayed {
         use serde_json::Value;
         use std::collections::{BTreeMap, BTreeSet};
         struct Showing {
@@ -3124,25 +3420,22 @@ mod tests {
         let list = |judged: &Value, name: &str| -> Vec<String> {
             judged[name].as_array().map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect()).unwrap_or_default()
         };
+        let mut replayed = Replayed { window, ..Replayed::default() };
         let mut tally: BTreeMap<String, (u32, u32)> = BTreeMap::new();
         let mut pending: HashMap<(u64, u64), Showing> = HashMap::new();
         let mut last_key: Option<(u64, u64)> = None;
-        let (mut showings, mut labeled, mut complete, mut partial, mut unmarked, mut orphan) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
-        let (mut changed, mut sunk_slots, mut slots, mut harmed, mut outside) = (0usize, 0usize, 0usize, 0usize, 0usize);
-        let mut moved = 0usize;
-        let mut before = [0usize; 3];
-        let mut after = [0usize; 3];
         for row in rows {
             let key = (row["query"].as_u64().unwrap_or(0), row["notes"].as_u64().unwrap_or(0));
             if let Some(judged) = row.get("judged").filter(|_| row.get("outcome").is_some()) {
                 if last_key == Some(key) {
+                    replayed.repeated += 1;
                     continue;
                 }
                 last_key = Some(key);
                 let applied = row["applied"].as_bool().unwrap_or(false);
                 let (recalled, proposed) = (list(judged, "recalled"), list(judged, "proposed"));
                 let shown = if applied { &proposed } else { &recalled }.iter().take(MAX_RECALLED_ENTRIES).cloned().collect();
-                showings += 1;
+                replayed.bundles += 1;
                 pending.insert(key, Showing { shown, recalled_first: recalled.first().cloned(), proposed });
                 continue;
             }
@@ -3151,30 +3444,29 @@ mod tests {
             }
             // What the label says of each shown note: `Some(opened)` when it
             // says, `None` when it cannot.
-            let (shown, known): (Vec<String>, Vec<Option<bool>>) = if let Some(notes) = row.get("shown").and_then(Value::as_array).filter(|notes| !notes.is_empty()) {
+            let named = row.get("shown").and_then(Value::as_array).filter(|notes| !notes.is_empty());
+            let (shown, known, whole): (Vec<String>, Vec<Option<bool>>, bool) = if let Some(notes) = named {
                 pending.remove(&key);
-                complete += 1;
-                notes
+                let (shown, known) = notes
                     .iter()
                     .filter_map(|note| {
                         let opened = note["read"].as_bool().unwrap_or(false) || note["cited"].as_bool().unwrap_or(false);
                         note["slug"].as_str().map(|slug| (slug.to_string(), Some(opened)))
                     })
-                    .unzip()
+                    .unzip();
+                (shown, known, true)
             } else {
                 let Some(showing) = pending.remove(&key) else {
-                    orphan += 1;
+                    replayed.orphan += 1;
                     continue;
                 };
                 let rank = row["rank"].as_u64().and_then(|rank| usize::try_from(rank).ok());
                 let marked = row["agreed"].as_bool().is_some();
                 let untouched = row["notCompared"].as_str() == Some(NO_NOTE_TOUCHED) || (marked && rank.is_none());
                 if untouched {
-                    complete += 1;
                     let known = vec![Some(false); showing.shown.len()];
-                    (showing.shown, known)
+                    (showing.shown, known, true)
                 } else if let Some(rank) = rank {
-                    partial += 1;
                     let mut touched: BTreeSet<&String> = showing.proposed.get(rank).into_iter().collect();
                     let mut said: BTreeMap<&String, bool> = BTreeMap::new();
                     if let (Some(first), Some(agreed)) = (showing.proposed.first(), row["agreed"].as_bool()) {
@@ -3184,29 +3476,36 @@ mod tests {
                         said.insert(first, agreed);
                     }
                     touched.extend(said.iter().filter(|(_, opened)| **opened).map(|(slug, _)| *slug));
-                    outside += touched.iter().filter(|slug| !showing.shown.contains(slug)).count();
+                    let outside = touched.iter().filter(|slug| !showing.shown.contains(slug)).count();
+                    replayed.legacy.outside += outside;
                     let known = showing
                         .shown
                         .iter()
                         .map(|slug| if touched.contains(slug) { Some(true) } else { said.get(slug).copied() })
                         .collect();
-                    (showing.shown, known)
+                    (showing.shown, known, false)
                 } else {
-                    unmarked += 1;
+                    replayed.unmarked += 1;
                     continue;
                 }
             };
-            labeled += 1;
-            slots += shown.len();
+            let counted = if named.is_some() { &mut replayed.exact } else { &mut replayed.legacy };
+            counted.exposures += 1;
+            if whole {
+                counted.complete += 1;
+            } else {
+                counted.partial += 1;
+            }
+            counted.slots += shown.len();
             // Judged on what was known before this turn.
             let sunk: Vec<bool> = shown.iter().map(|slug| unaddressed(&tally, slug)).collect();
             let sunk_here = sunk.iter().filter(|sunk| **sunk).count();
-            sunk_slots += sunk_here;
-            changed += usize::from(sunk_here > 0);
-            harmed += shown.iter().zip(&known).zip(&sunk).filter(|((_, known), sunk)| **sunk && **known == Some(true)).count();
+            counted.sunk_slots += sunk_here;
+            counted.changed += usize::from(sunk_here > 0);
+            counted.harmed += shown.iter().zip(&known).zip(&sunk).filter(|((_, known), sunk)| **sunk && **known == Some(true)).count();
             let before_first = (!shown.is_empty()).then_some(0);
             let after_first = sunk.iter().position(|sunk| !sunk).or(before_first);
-            moved += usize::from(after_first != before_first);
+            counted.moved += usize::from(after_first != before_first);
             let tick = |counts: &mut [usize; 3], at: Option<usize>| {
                 let slot = match at.and_then(|at| known[at]) {
                     Some(true) => 0,
@@ -3215,32 +3514,22 @@ mod tests {
                 };
                 counts[slot] += 1;
             };
-            tick(&mut before, before_first);
-            tick(&mut after, after_first);
+            tick(&mut counted.before, before_first);
+            tick(&mut counted.after, after_first);
             // Then folded — each note once, and only as far as the label says.
-            let mut named: BTreeSet<&String> = BTreeSet::new();
+            let mut named_once: BTreeSet<&String> = BTreeSet::new();
             for (slug, known) in shown.iter().zip(&known) {
-                if let (true, Some(opened)) = (named.insert(slug), known) {
+                if let (true, Some(opened)) = (named_once.insert(slug), known) {
                     let counted = tally.entry(slug.clone()).or_default();
                     counted.0 += 1;
                     counted.1 += u32::from(*opened);
                 }
             }
         }
-        let share = |part: usize, whole: usize| {
-            #[expect(clippy::cast_precision_loss, reason = "a share of a few hundred showings")]
-            let share = if whole == 0 { 0.0 } else { 100.0 * part as f64 / whole as f64 };
-            share
-        };
-        let product = window == runtime::memory::recall::UNADDRESSED_AFTER_RECALLS;
-        let end = tally.keys().filter(|slug| unaddressed(&tally, slug)).count();
-        println!("\n  survival window {window}{}", if product { "  <- the product's" } else { "" });
-        println!("    showings {showings}; labeled {labeled} (complete {complete}, partial {partial}); unlabeled {}; labels with no mark {unmarked}; labels joining no showing {orphan}", showings.saturating_sub(labeled + unmarked));
-        println!("    labeled showings the demand changed      {changed}/{labeled} = {:5.1}%   slots sunk {sunk_slots}/{slots}", share(changed, labeled));
-        println!("    opened notes the demand had sunk         {harmed}   (readers answering the prior back)");
-        println!("    opened notes outside the shown slots     {outside}   (folded nowhere)");
-        println!("    pages unaddressed at the end             {end} of {} observed", tally.len());
-        println!("    first slot moved                         {moved}/{labeled}");
-        println!("    first slot opened — before: yes {} no {} unknown {}   after: yes {} no {} unknown {}", before[0], before[1], before[2], after[0], after[1], after[2]);
+        let labeled = replayed.exact.exposures + replayed.legacy.exposures;
+        replayed.unlabeled = replayed.bundles.saturating_sub(labeled + replayed.unmarked);
+        replayed.unaddressed = tally.keys().filter(|slug| unaddressed(&tally, slug)).count();
+        replayed.observed = tally.len();
+        replayed
     }
 }
