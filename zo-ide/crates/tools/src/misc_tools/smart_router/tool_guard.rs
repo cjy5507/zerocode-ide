@@ -402,7 +402,7 @@ pub(super) async fn ask(
         .map(|id| {
             zerocode_core::jev::noul::read(&answers, id)
                 .map(|yes| (id.clone(), yes))
-                .map_err(|refusal| refusal.token())
+                .map_err(zerocode_core::jev::noul::NoulRefusal::token)
         })
         .collect();
     match read {
@@ -567,6 +567,7 @@ pub struct CommandGuardRow {
 /// One command's hindsight, shaped like the other hindsight seats' labels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)] // each bool is a column the ledger keeps — the act, the two marks, the run's own failure — not a state machine
 pub struct CommandGuardLabelRow {
     pub kind: String,
     pub at: u64,
@@ -635,29 +636,32 @@ pub fn todays_rule(command: &str, cwd: &Path) -> (bool, bool) {
     (irreversible, reaches_outside_workspace(command, cwd))
 }
 
-/// A path's state as a label compares it: whether it is a folder, its length
-/// and when it last changed. `None` for a path that is not there.
+/// A path's state as a label compares it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Stamp {
-    dir: bool,
-    len: u64,
-    modified: Option<SystemTime>,
+enum Stamp {
+    /// Nothing is there.
+    Absent,
+    /// Something is: whether it is a folder, its length and when it last
+    /// changed.
+    Present {
+        dir: bool,
+        len: u64,
+        modified: Option<SystemTime>,
+    },
 }
 
 /// The stamp of `path`, or `None` for a place not worth watching — a device,
 /// a socket, a pipe: `/dev/null` changes under every redirect and nothing of
-/// the person's lives there. `Some(None)` is a path that is not there.
-fn stamp(path: &Path) -> Option<Option<Stamp>> {
+/// the person's lives there.
+fn stamp(path: &Path) -> Option<Stamp> {
     match std::fs::symlink_metadata(path) {
-        Err(_) => Some(None),
+        Err(_) => Some(Stamp::Absent),
         Ok(meta) => {
             let kind = meta.file_type();
-            (kind.is_file() || kind.is_dir() || kind.is_symlink()).then(|| {
-                Some(Stamp {
-                    dir: kind.is_dir(),
-                    len: meta.len(),
-                    modified: meta.modified().ok(),
-                })
+            (kind.is_file() || kind.is_dir() || kind.is_symlink()).then(|| Stamp::Present {
+                dir: kind.is_dir(),
+                len: meta.len(),
+                modified: meta.modified().ok(),
             })
         }
     }
@@ -764,6 +768,7 @@ pub fn restores(later: &str, named: &[PathBuf], cwd: &Path) -> bool {
 
 /// One command in the book: what its label needs, as it arrives.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // each bool is an independent fact about one command, not a state machine
 struct CommandWaiting {
     judged: u64,
     tool_use_id: String,
@@ -771,7 +776,7 @@ struct CommandWaiting {
     /// Every place the command named, as paths — what a restore is matched on.
     named: Vec<PathBuf>,
     /// The places outside the project, each with its stamp before the run.
-    outside: Vec<(PathBuf, Option<Stamp>)>,
+    outside: Vec<(PathBuf, Stamp)>,
     /// Today's rule flagged it.
     rule_flagged: bool,
     verdict: Option<Verdict>,
@@ -824,7 +829,7 @@ fn guard_command(project: &Path, ask: CommandAsk) {
         .iter()
         .filter_map(|place| resolve_place(place, &ask.cwd))
         .collect();
-    let outside: Vec<(PathBuf, Option<Stamp>)> = outside_places(&ask.command, &ask.cwd, project)
+    let outside: Vec<(PathBuf, Stamp)> = outside_places(&ask.command, &ask.cwd, project)
         .into_iter()
         .filter_map(|path| stamp(&path).map(|before| (path, before)))
         .collect();

@@ -502,3 +502,48 @@ fn a_text_label_grades_the_verdict_and_the_windows_fence_on_what_the_next_step_d
         assert_eq!((late.hindsight.as_str(), late.agreed, late.baseline_agreed), (IGNORED, true, false));
     });
 }
+
+/// What a shell command's path pays for the guard, measured: the call the
+/// runtime makes right before the command runs, timed under `off` and under
+/// `shadow` on a wire that answers at once — the setting read, the stamps,
+/// the book and the hand-off; the question itself leaves on a worker. The
+/// arms alternate in ABBA blocks so a machine's load falls on both alike.
+/// Prints microseconds and the load; asserts nothing a loaded machine could
+/// fail.
+#[test]
+#[ignore = "a timing; see the t-6348 report"]
+fn the_command_path_pays_microseconds_for_a_recording_guard() {
+    const RUNS: usize = 100;
+    let load = || {
+        std::process::Command::new("sysctl")
+            .args(["-n", "vm.loadavg"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    eprintln!("load before: {}", load());
+    let mock = Mock::serving(200, cannot_be_undone());
+    let mut arms: BTreeMap<&str, Vec<u128>> = BTreeMap::new();
+    for mode in [JevMode::Off, JevMode::Shadow, JevMode::Shadow, JevMode::Off] {
+        machine(&COMMAND_GUARD, mode.key(), &mock.base_url, |cwd| {
+            forget_waiting(cwd);
+            let judge = ToolGuardJudge::at(cwd);
+            let spent = arms.entry(mode.key()).or_default();
+            for at in 0..RUNS {
+                let ask = command_ask(Path::new(WORK), &format!("shell-{at}"), "rm -rf build ~/scratch /etc/zo.log");
+                let started = Instant::now();
+                judge.command(ask);
+                spent.push(started.elapsed().as_micros());
+            }
+            // Let the recording rows land inside this machine's config home.
+            let _ = rows_of(&command_guard_path(cwd), if mode.asks() { RUNS } else { 0 });
+            forget_waiting(cwd);
+        });
+    }
+    for (mode, spent) in &mut arms {
+        spent.sort_unstable();
+        let n = spent.len();
+        eprintln!("{mode}: p50 {} us, p95 {} us, max {} us over {n} commands", spent[n / 2], spent[n * 95 / 100], spent[n - 1]);
+    }
+    eprintln!("load after: {}", load());
+}

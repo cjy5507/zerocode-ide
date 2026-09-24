@@ -291,9 +291,10 @@ fn the_guards_on_the_synthetic_cases() {
         .map(|kind| seed[*kind].as_array().map_or(0, Vec::len))
         .collect();
     assert!(sizes.iter().all(|size| *size >= 60), "each set holds at least sixty cases: {sizes:?}");
-    let chosen: Vec<String> = std::env::var(SETS_ENV)
-        .map(|sets| sets.split(',').map(|set| set.trim().to_string()).collect())
-        .unwrap_or_else(|_| ["irreversible", "safe", "injected", "plain"].map(str::to_string).to_vec());
+    let chosen: Vec<String> = std::env::var(SETS_ENV).map_or_else(
+        |_| ["irreversible", "safe", "injected", "plain"].map(str::to_string).to_vec(),
+        |sets| sets.split(',').map(|set| set.trim().to_string()).collect(),
+    );
     let built: Vec<Case> = cases(&seed, &repo, scratch.path())
         .into_iter()
         .filter(|case| chosen.iter().any(|set| set == case.set))
