@@ -73,7 +73,8 @@ const AGENT_GRAPH_LIVE = Object.freeze({
  * 맥박은 내지 않는다. 놓친 맥박은 아무것도 거짓말하지 않지만, 지어낸 맥박은
  * 없던 사건을 만든다.
  *
- * `count`는 같은 두 주체(`ends`) 사이의 **실제 증가**만 세기 위한 기준선이다. */
+ * `count`는 같은 두 주체(`ends`) 사이의 **실제 증가**만 세기 위한 기준선이고,
+ * 새 사건과 함께만 움직인다(`agentGraphLiveTally`). */
 const liveLanes = new Map();
 
 /* 잊은 것의 바닥. 상한에 밀려난 관계는 이름표를 남기지 않는다 — 밀려난 이름을
@@ -99,8 +100,9 @@ let liveSelectedEventKey = null;
 /* 맥박이 꺼질 때를 기다리는 시계 하나. */
 let livePulseTimer = null;
 /* 다음 판을 **조용히 삼킨다**: 첫 snapshot·손잡이를 켠 순간·범위 이동·부서진
- * 판의 복구·숨김에서 돌아온 첫 판. 놓친 backlog가 방금 생긴 활동처럼 터지지
- * 않는다. */
+ * 판의 복구, 그리고 마지막으로 보이던 지도를 떠났다(숨은 문서·숨은 자리·작업
+ * 목록·닫힌 판) 돌아온 첫 판. 놓친 backlog가 방금 생긴 활동처럼 터지지 않는다.
+ * 이 빚은 **보이는** 판만 치른다(`agentGraphLiveShown`). */
 let liveBaselineDue = true;
 /* 범위가 움직일 때 올라가는 빗장. 이보다 낮은 세대에서 떠난 비동기 갱신은
  * 지금의 지도·선택·근거를 덮지 못한다(`boardCommit`). revision 주장이 아니다. */
@@ -140,6 +142,19 @@ function agentGraphLiveOn() {
  * 가지 방법일 뿐이다. */
 function agentGraphLiveAnimating() {
   return agentGraphLive && !document.hidden;
+}
+
+/* 지도가 지금 **보이는가** — 손잡이가 켜졌고, 문서가 앞에 있고, 보드가 작업 목록이
+ * 아니며, 관계 그림으로 서서 숨지 않은 판이 하나라도 있다. 장부가 사건을 적을 수
+ * 있는 것은 이 동안뿐이다: 아무도 보지 않는 동안 읽은 것은 사건이 아니라 backlog
+ * 이고, 다시 보인 첫 판이 그것을 조용히 기준선으로 삼는다.
+ *
+ * 보드의 모드를 판의 옷(`is-task-board`)과 **함께** 묻는 것은, 모드가 바뀐 뒤 그
+ * 옷이 바뀌기 전에 장부가 먼저 읽는 판이 있기 때문이다 — 작업 공간에서 작업 목록을
+ * 여는 손은 모드를 적고 나서 그린다. */
+function agentGraphLiveShown() {
+  return agentGraphLive && !document.hidden && agentBoardMode !== "tasks"
+    && agentGraphLiveViews().length > 0;
 }
 
 /* ---- 사건의 신원 ------------------------------------------------------------ */
@@ -200,6 +215,31 @@ function agentGraphLiveLane(lane, stamp, key, ends = "") {
   return "new";
 }
 
+/* 수의 기준선을 움직이는 한 손 — 장부의 판정(`agentGraphLiveLane`)과 함께 정한다.
+ * 기준선은 **새 사건과 함께만** 움직인다:
+ *
+ *   `new`   — 이 판의 수가 새 기준선이다. 증가는 기준선이 같은 두 주체 사이의 것일
+ *             때만 센다. 수가 **줄었으면**(보존 기간이 옛 통을 거두었거나 주소가 다른
+ *             카드로 옮겨 갔다) 증가를 추정하지 않고 모른다고 한다.
+ *   `seen`  — 이미 본 사건이거나 옛것이다. 다시 온 판의 수는 그 사건 때의 수이지
+ *             지금의 수가 아니므로 기준선에 손대지 않는다. 같은 시각의 옛 ID도 여기로
+ *             온다 — 옛 stamp만 막으면 그 길이 열리고, 낮아진 수가 다음 새 사건의
+ *             증가를 부풀린다.
+ *   `adopt` — 새 것인지 옛것인지 가릴 수 없는 판이다. 그 수를 기준선으로 삼으면
+ *             다음 증가가 추정이 되므로, 기준선을 모름으로 둔다.
+ *
+ * 돌려주는 것은 이 판의 증가(모르면 `null`)다. */
+function agentGraphLiveTally(held, verdict, baseline, count, ends) {
+  if (verdict === "seen") return null;
+  held.ends = ends;
+  if (verdict === "adopt") {
+    held.count = null;
+    return null;
+  }
+  held.count = count;
+  return baseline !== null && count >= baseline ? count - baseline : null;
+}
+
 function agentGraphLiveKeepLane(lane, value) {
   liveLanes.set(lane, value);
   while (liveLanes.size > AGENT_GRAPH_LIVE.laneKeep) {
@@ -254,6 +294,12 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), { ledger = null
     liveBaselineDue = true;
     return;
   }
+  /* 지도가 보이지 않는 동안 읽은 판(숨은 자리·작업 목록·숨은 문서)은 backlog다.
+   * 장부는 그 판도 지금 상태로 접어 두지만 사건으로 적지 않고, 빚도 **치르지
+   * 않는다** — 다시 보인 첫 판이 치른다. 숨은 동안의 판이 빚을 먼저 치르면, 그 뒤
+   * 숨은 사이에 쌓인 것이 돌아온 판에서 새 사건이 된다. */
+  const shown = agentGraphLiveShown();
+  if (!shown) liveBaselineDue = true;
   const overlays = answer?.overlays ?? {};
   const rows = ledger ?? new Map();
   /* 이 판의 카드, 자리마다. 대기 판정은 원장의 행과 **이 판의** 카드를 함께
@@ -297,17 +343,10 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), { ledger = null
     const verdict = agentGraphLiveLane(lane, stamp, key, ends);
     /* 이 관계에서 **몇 통이 늘었는가**. 기준선이 없으면(처음 보는 관계, 끝의
      * 주체가 바뀐 판, 다시 맞춘 관계, 다시 켠 판) 증가가 아니라 baseline이다 —
-     * 재연결을 활동으로 읽지 않는다.
-     *
-     * 그리고 기준선은 **watermark와 함께만** 움직인다. 옛 stamp의 판이 늦게 와서
-     * 「본 것」으로 걸러져도 그 판의 수를 기준선으로 삼으면, 수는 과거로 돌아가고
-     * 다음 새 사건이 그 사이의 통을 모두 「이번 판에 늘었다」고 말한다. */
-    const count = Number(edge.count) || 0;
-    const held = liveLanes.get(lane);
-    if (stamp >= held.stamp) {
-      held.count = count;
-      held.ends = ends;
-    }
+     * 재연결을 활동으로 읽지 않는다. 기준선이 언제 움직이는가는 장부의 판정과
+     * 한 손에서 정한다(`agentGraphLiveTally`). */
+    const added = agentGraphLiveTally(liveLanes.get(lane), verdict, baseline,
+      Number(edge.count) || 0, ends);
     if (verdict !== "new") continue;
     const event = {
       key,
@@ -317,7 +356,7 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), { ledger = null
       from: agentGraphAgentKey(edge.from),
       to: agentGraphAgentKey(edge.to),
       edgeKey,
-      added: baseline !== null ? Math.max(0, count - baseline) : null,
+      added,
       seats: [[edge.from, seatOf(edge.from)], [edge.to, seatOf(edge.to)]],
       /* 근거는 원장의 것이다. 여기 드는 것은 그 원장으로 가는 식별자뿐 —
        * 본문도 과업 산문도 담지 않는다. */
@@ -439,8 +478,9 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), { ledger = null
 
   if (liveBaselineDue) {
     /* 처음 한 판은 통째로 삼킨다. 위에서 관계마다의 watermark는 이미 지금
-     * 상태로 서 있고 `fresh`는 비어 있다 — 그림은 조용히 지금의 모습으로 선다. */
-    liveBaselineDue = false;
+     * 상태로 서 있고 `fresh`는 비어 있다 — 그림은 조용히 지금의 모습으로 선다.
+     * 빚을 치르는 것은 **보이는** 판뿐이다. */
+    if (shown) liveBaselineDue = false;
     return;
   }
   agentGraphLiveStartPulses(fresh, now);
@@ -513,12 +553,13 @@ function agentGraphLiveArmExpiry(now) {
   livePulseTimer = window.setTimeout(() => {
     livePulseTimer = null;
     /* 그 사이 지도를 보일 판이 모두 사라졌으면(닫힘·숨김·작업 목록) 남은 맥박도
-     * 함께 거둔다 — 아무도 보지 못할 맥박을 위해 시계를 다시 걸지 않는다. */
-    const views = agentGraphLiveViews();
-    if (views.length === 0) {
-      agentGraphLiveStop();
+     * 함께 거두고 돌아온 첫 판의 빚을 남긴다 — 떠나는 문과 같은 한 손이다.
+     * 아무도 보지 못할 맥박을 위해 시계를 다시 걸지 않는다. */
+    if (!agentGraphLiveShown()) {
+      agentGraphLiveSettle();
       return;
     }
+    const views = agentGraphLiveViews();
     const at = Date.now();
     for (const [key, pulse] of [...livePulses]) {
       if (pulse.untilMs <= at) livePulses.delete(key);
@@ -542,13 +583,21 @@ function agentGraphLiveStop() {
   for (const view of document.querySelectorAll(".agent-board")) dressAgentGraphLive(view);
 }
 
-/* 지도를 보일 판이 하나도 남지 않았으면 시계와 맥박을 **지금** 거둔다. 판을
- * 닫든, 작업 목록으로 돌리든, 판을 품은 자리가 숨든 — 보드가 이미 판의 크기를
- * 재는 관찰자(`watchAgentGraphSize`)와 그리기(`paintAgentGraph`)가 그 문을
- * 지나며 이 손을 부른다. 맥박이 없으면 아무것도 묻지 않는다. */
+/* 지도를 보일 판이 하나도 남지 않았으면 — 판을 닫든, 작업 목록으로 돌리든, 판을
+ * 품은 자리가 숨든 — 두 가지를 **지금** 한다. 시계와 맥박을 거두고, 돌아온 첫 판이
+ * 조용한 기준선이 되도록 빚을 남긴다. 떠난 사이 원장에 적힌 것은 이 지도가 본 적
+ * 없는 backlog이고, 그것이 돌아온 판에서 방금 일어난 일처럼 뛰면 오래전 일이 지금
+ * 막 일어난 것이 된다. 빚을 남기는 것은 맥박이 있든 없든이다 — 조용한 판을 떠나도
+ * 돌아오는 판은 같다. 그 빚은 다시 **보이는** 판이 치른다(`agentGraphLiveObserve`).
+ *
+ * 보드가 이미 판의 크기를 재는 관찰자(`watchAgentGraphSize`)와 그리기
+ * (`paintAgentGraph`)가 그 문을 지나며 이 손을 부른다. 묻는 것은 문서의 판 몇 장과
+ * 그 조상의 `hidden`뿐이라 배치를 읽지 않고, 지도가 꺼진 판에서는 아무것도 묻지
+ * 않는다 — 그 판의 빚은 이미 남아 있다. */
 function agentGraphLiveSettle() {
-  if (livePulseTimer === null && livePulses.size === 0) return;
-  if (agentGraphLiveViews().length === 0) agentGraphLiveStop();
+  if (!agentGraphLive || agentGraphLiveShown()) return;
+  liveBaselineDue = true;
+  if (livePulseTimer !== null || livePulses.size > 0) agentGraphLiveStop();
 }
 
 /* 지금 이 장부가 들고 있는 모든 것의 수 — 들어갔다 나오기를 되풀이해도, 관계와
@@ -762,15 +811,19 @@ function dressAgentGraphWait(chip, wait) {
  * 단계로 되읽을 때가 같은 표를 읽는다. 낱말은 t-6815의 seam
  * (`ledgerReviewWord`)이 쓰는 그 키들이다 — 코디네이터가 적은 사실 셋, 워커가
  * 적은 **주장** 셋(원장이 사실과 떼어 둔 것), 그리고 보고. 주장은 제 낱말로만
- * 서고 사실의 단계가 되지 않는다. */
+ * 서고 사실의 단계가 되지 않는다.
+ *
+ * `flag`는 그 seam이 그 낱말을 고를 때 읽는 원장 행의 칸이다(`reported`는 행의
+ * 보고, 나머지는 `review`의 칸). 지난 결과 사건을 누를 때 그 사건이 적은 사실이
+ * 지금도 **같은 사실로** 서 있는지 이 칸으로 묻는다(`agentGraphLiveStageHolds`). */
 const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
-  { stage: "deployed", key: "board.deployed", word: "배포됨" },
-  { stage: "merged", key: "board.merged", word: "병합됨" },
-  { stage: "verified", key: "board.verified", word: "검증됨" },
-  { stage: "claimed-deployed", key: "board.claimedDeployed", word: "배포됐다 함" },
-  { stage: "claimed-merged", key: "board.claimedMerged", word: "병합됐다 함" },
-  { stage: "claimed-verified", key: "board.claimedVerified", word: "검증됐다 함" },
-  { stage: "reported", key: "board.awaitingReview", word: "검증 대기" },
+  { stage: "deployed", flag: "deployed", key: "board.deployed", word: "배포됨" },
+  { stage: "merged", flag: "merged", key: "board.merged", word: "병합됨" },
+  { stage: "verified", flag: "verified", key: "board.verified", word: "검증됨" },
+  { stage: "claimed-deployed", flag: "claimed_deployed", key: "board.claimedDeployed", word: "배포됐다 함" },
+  { stage: "claimed-merged", flag: "claimed_merged", key: "board.claimedMerged", word: "병합됐다 함" },
+  { stage: "claimed-verified", flag: "claimed_verified", key: "board.claimedVerified", word: "검증됐다 함" },
+  { stage: "reported", flag: "reported", key: "board.awaitingReview", word: "검증 대기" },
 ]);
 
 /* 「어디까지 왔는가」를 **원장이 적은 만큼만**. 판정은 t-6815의 한 손
@@ -784,6 +837,17 @@ function ledgerReviewStage(place, row) {
   });
   return AGENT_GRAPH_LIVE_STAGES.find((one) => t(one.key, one.word) === said)?.stage
     ?? "dispatched";
+}
+
+/* 한 결과 단계가 적은 사실이 이 행에 **지금도** 서 있는가. 단계가 앞으로 가도 옛
+ * 사실은 남을 수 있다(검증된 뒤 병합됨 — 검증은 그대로다). 사실이 철회되면(검증이
+ * 거두어지고 워커의 주장만 남음) 그 단계의 사건은 지금의 판이 드는 근거가 아니다. */
+function agentGraphLiveStageHolds(stage, place, row) {
+  const held = AGENT_GRAPH_LIVE_STAGES.find((one) => one.stage === stage);
+  if (!held) return false;
+  return held.flag === "reported"
+    ? place?.reported === true || row?.reported === true
+    : row?.review?.[held.flag] === true;
 }
 
 /* ---- 간선 -------------------------------------------------------------------- */
@@ -914,12 +978,15 @@ function agentGraphLiveWhenWord(event, now) {
  *                 (관계 선택, 노드 선택)으로 가면 같은 식별자가 선다.
  *   `"past"`    — 끝점은 그대로이지만 그곳의 근거는 이제 다른 것이다: 같은 두
  *                 자리 사이에 더 새 메시지가 왔거나, 같은 판에 다른 시도가
- *                 앉았거나, 의존의 상태가 그 뒤로 바뀌었다.
+ *                 앉았거나, 의존의 상태가 그 뒤로 바뀌었다. **같은 시도**에서도
+ *                 그렇다 — 기다림의 사유나 그 사유가 적힌 때가 바뀌었거나, 결과가
+ *                 적은 사실이 철회되었다.
  *   `"outside"` — 이 사건의 끝점이 지금 스냅샷에 없다.
  *
  * 둘째와 셋째에서 지금의 관계나 판으로 가면, 그곳이 보여 주는 것은 이 사건의
  * 근거가 아니라 그 뒤의 것이다 — 누른 줄과 열린 근거가 서로 다른 사건을
- * 말하게 된다. */
+ * 말하게 된다. 판정은 사건 종류마다 그 사건의 키가 된 근거를 그대로 견준다:
+ * 자리 셋만 같다고 지금이 아니다. */
 function agentGraphLiveEventReach(view, event) {
   const model = agentGraphFullModel(view);
   if (!model) return "outside";
@@ -944,8 +1011,18 @@ function agentGraphLiveEventReach(view, event) {
   }
   const entry = model.agents.find((one) => one.key === event.to);
   if (!entry) return "outside";
-  const [, seat] = event.seats?.[0] ?? [];
-  return agentGraphLiveSeat(entry.place) === seat ? "current" : "past";
+  const [pane, seat] = event.seats?.[0] ?? [];
+  if (agentGraphLiveSeat(entry.place) !== seat) return "past";
+  /* 같은 자리, 같은 시도. 원장 행은 이 판이 카드와 함께 물은 그 한 벌에서 온다. */
+  const row = model.source.ledger?.get(pane) ?? null;
+  if (event.kind === "wait") {
+    const wait = agentGraphLiveWaitOf(row, entry.card);
+    return wait?.cause === source.cause && wait.since === source.since ? "current" : "past";
+  }
+  if (event.kind === "result") {
+    return agentGraphLiveStageHolds(source.stage, entry.place, row) ? "current" : "past";
+  }
+  return "current";
 }
 
 /* 사건 한 줄을 누른다. 근거가 지금도 같은 자리에 있으면 이 표면이 이미 가진
@@ -997,6 +1074,11 @@ function agentGraphLiveEventDetail(event, reach) {
       [t("board.graph.dispatchId", "배차 ID"), source.dispatchId],
       [t("board.graph.retryOf", "이전 시도"), source.retryOf],
       [t("board.graph.attemptStarted", "시도 시작"), agentGraphTimeWord(source.dispatchStarted)]);
+    /* 결과 사건은 그때 원장이 적은 사실을 제 낱말로 든다 — 같은 시도에서 그 사실이
+     * 철회되었으면, 지금의 판이 아니라 이 줄이 그것을 말한다. */
+    if (event.kind === "result") {
+      fields.push([t("board.live.result", "결과"), agentGraphLiveStageWord(source.stage)]);
+    }
   }
   fields.push(
     [t("board.live.occurredAt", "발생 시각"), event.at > 0
@@ -1136,6 +1218,8 @@ function agentGraphLiveListen(target, type, handler) {
 }
 
 agentGraphLiveListen(document, "visibilitychange", () => {
+  /* 숨는 문서도 돌아오는 문서도 빚을 남긴다 — 숨은 동안 읽은 판은 사건이 아니고,
+   * 돌아온 첫 판은 조용한 기준선이다. */
+  liveBaselineDue = true;
   if (document.hidden) agentGraphLiveStop();
-  else liveBaselineDue = true;
 });

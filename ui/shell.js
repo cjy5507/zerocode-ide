@@ -1327,7 +1327,7 @@ function cardsFromLedger(rows, drawn) {
  * 실린다 — 한 노드가 두 시각을 말한다. 그래서 행은 **카드와 함께** 돌아가고,
  * 그 판을 그리는 손이 그 한 벌을 모델까지 들고 간다. 행의 자리는 카드가 앉은
  * 자리 그대로다(`boardLedgerPane`). */
-async function boardCardsAndLedger() {
+async function boardCardsAndLedger(ask = null, surface = "graph") {
   let panes = [];
   let listed = [];
   try {
@@ -1336,7 +1336,10 @@ async function boardCardsAndLedger() {
     // agent.
     [panes, listed] = await Promise.all([invoke("pane_agents"), readLedgerAgents()]);
   } catch (error) {
-    showError(String(error));
+    /* 모으다 넘어진 것도 표를 든 답이면 쓰기 문과 같은 판정을 지난다 (t-7288):
+     * 옛 범위에서 떠난 요청의 모으기가 넘어지면 그 오류는 지금 판의 오류가
+     * 아니다. 표 없이 묻는 손(`boardCards`)에게는 예전처럼 곧바로 말한다. */
+    if (ask === null || boardFresh(ask, surface)) showError(String(error));
   }
   const drawn = cardsFromPanes(panes);
   const byPane = new Map(drawn.map((card) => [card.pane, card]));
@@ -1375,12 +1378,23 @@ function boardAsk() {
   return { seq: boardAsked, generation: agentGraphLiveGeneration() };
 }
 
+/* 이 답이 아직 그 표면의 **지금**인가 — 더 늦게 떠난 답이 이미 그 표면에
+ * 들어가지 않았고, 그림이라면 그 사이 범위가 움직이지 않았다. 쓰기 전의 답과
+ * 넘어진 답이 같은 이 판정을 지난다 (t-7288): 늦게 온 성공만 버리고 늦게 온 실패는
+ * 그대로 쓰면, 옛 범위에서 떠난 요청의 오류가 지금 판을 멈춰 세운다.
+ *
+ * 이 판정은 차례를 **가져가지 않는다**. 그림을 쓰지 않은 실패는 그림의 차례가
+ * 아니다 — 지금의 실패 뒤로는 멈춤 깃발(`boardBroken`)이 모든 답을 막는다. */
+function boardFresh(ask, surface) {
+  return ask.seq > boardCommitted[surface]
+    && (surface !== "graph" || ask.generation === agentGraphLiveGeneration());
+}
+
 /* 이 답이 그 표면에 쓸 수 있는가. 쓸 수 있으면 그 자리에서 표면의 차례를
  * 가져간다 — 묻는 일과 차지하는 일이 한 손이라야 둘 사이에 다른 답이 끼지
  * 못한다. */
 function boardCommit(ask, surface) {
-  if (ask.seq <= boardCommitted[surface]) return false;
-  if (surface === "graph" && ask.generation !== agentGraphLiveGeneration()) return false;
+  if (!boardFresh(ask, surface)) return false;
   boardCommitted[surface] = ask.seq;
   return true;
 }
@@ -1582,7 +1596,7 @@ window.addEventListener("keydown", (event) => {
 async function refreshBoardBadge() {
   const ask = boardAsk();
   try {
-    const cards = await boardCards();
+    const { cards } = await boardCardsAndLedger(ask, "badge");
     const answer = await invoke("board_snapshot", {
       cards,
       query: agentGraphSnapshotQuery(),
@@ -7408,7 +7422,7 @@ async function paintAgentGraphView(
   try {
     wireBoardHead(view);
     if (agentBoardMode === "tasks") primeCoordinatorDesk();
-    const bundle = snapshot ?? await boardCardsAndLedger();
+    const bundle = snapshot ?? await boardCardsAndLedger(ask, "graph");
     const { cards } = bundle;
     /* 이 판의 카드를 지은 그 원장 행. 모델이 `source`에 들고 가므로, 다시 짓는
      * 판(선택·접기·오버레이)도 같은 한 벌을 읽는다. */
@@ -7437,6 +7451,11 @@ async function paintAgentGraphView(
       cards,
       query: agentGraphSnapshotQuery(),
     });
+    /* 그 사이 다른 답의 실패가 판을 멈춰 세웠으면 이 답은 — 더 늦게 떠났어도 —
+     * 쓰지 않는다 (t-7288). 멈춘 판을 여는 것은 다시 시도뿐이다(`retryBoardPaint`):
+     * 이미 떠나 있던 답의 성공이 복구 카드를 덮으면, 판은 멈춤 깃발을 든 채 그림을
+     * 보이다가 다음 박자에 다시 멈춤으로 돌아간다. */
+    if (boardBroken) return null;
     /* commit 문 (t-7288). 아래의 모든 쓰기 — 배지, 초안과 펼친 타임라인의 정리,
      * 오버레이, 서명, 실시간 장부, 모델과 선택 — 는 이 줄을 지난 답만 한다. 이
      * 답보다 늦게 떠난 답이 이미 그림에 들어갔거나 그 사이 범위가 움직였으면, 이
@@ -7516,9 +7535,15 @@ async function paintAgentGraphView(
     void syncPreviewedTerms();
     return { cards, answer };
   } catch (error) {
-    /* 문을 지나기 전에 넘어진 답이 이미 옛것이면, 그 실패도 옛것이다 (t-7288):
-     * 더 늦게 떠난 답이 벌써 그린 판을 「그리다 멈춤」으로 덮지 않는다. */
-    if (!committed && ask.seq <= boardCommitted.graph) return null;
+    /* 넘어진 답도 쓰기 전과 **같은 판정**을 지난다 (t-7288). 문을 지나기 전에 넘어진
+     * 답이 이미 옛것이면 — 더 늦게 떠난 답이 그림에 들어갔거나, 그 사이 범위가
+     * 움직였거나 — 그 실패는 지금 판의 실패가 아니다: 판을 멈춰 세우지도, 복구
+     * 카드를 세우지도, 오류를 말하지도 않는다. 버린 답의 몫은 성공과 같다
+     * (`boardPaintAgain`). 판이 이미 멈춰 있으면 더 쓸 것이 없다. */
+    if (!committed && (boardBroken || !boardFresh(ask, "graph"))) {
+      if (!boardBroken) boardPaintAgain(force, ask);
+      return null;
+    }
     console.error("agent graph paint failed", error);
     boardBroken = true;
     paintBoardBroken(view);
@@ -10278,11 +10303,12 @@ async function refreshAgentGraphSurfaces({ badge, graph }) {
     return;
   }
   agentGraphRefreshing = true;
+  /* 표는 **묻기 전에** 받는다 (t-7288): 답이 오는 사이 범위가 움직이거나 더
+   * 늦게 떠난 답이 먼저 들어가면, 이 답은 그 표면에 쓰지 않는다 — 넘어진 답도
+   * 같은 표로 판정한다. */
+  const ask = boardAsk();
   try {
-    /* 표는 **묻기 전에** 받는다 (t-7288): 답이 오는 사이 범위가 움직이거나 더
-     * 늦게 떠난 답이 먼저 들어가면, 이 답은 그 표면에 쓰지 않는다. */
-    const ask = boardAsk();
-    const { cards, ledger } = await boardCardsAndLedger();
+    const { cards, ledger } = await boardCardsAndLedger(ask, graph ? "graph" : "badge");
     const answer = await invoke("board_snapshot", {
       cards,
       query: agentGraphSnapshotQuery(),
@@ -10290,7 +10316,12 @@ async function refreshAgentGraphSurfaces({ badge, graph }) {
     if (badge && boardCommit(ask, "badge")) applyBoardBadge(answer);
     if (graph) await paintAgentGraphView(boardTab(), { snapshot: { cards, ledger, answer, ask } });
   } catch (error) {
-    if (graph) showError(String(error));
+    /* 옛 범위에서 떠난 요청의 실패는 지금 판 위에 오류를 띄우지 않고, 버린 성공과
+     * 같이 지금의 답을 다시 묻는다 (t-7288). 지금의 실패는 예전처럼 말한다. */
+    if (graph) {
+      if (boardFresh(ask, "graph")) showError(String(error));
+      else boardPaintAgain(false, ask);
+    }
   } finally {
     agentGraphRefreshing = false;
     const due = [];
