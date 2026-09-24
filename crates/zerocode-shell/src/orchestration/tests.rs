@@ -18973,3 +18973,9 @@ fn a_late_turn_end_is_never_the_next_occupants_sound() {
     crate::agent_teams::forget_term(LEADER);
     drop(window);
 }
+
+/// t-7812: the window restart restore roads, driven through the production
+/// doors of a private window (`tests/restore.rs`).
+mod restore;
+/// t-7812: the host seams those roads added (`tests/restore_seams.rs`).
+mod restore_seams;

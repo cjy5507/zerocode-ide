@@ -3514,24 +3514,15 @@ fn main() -> ExitCode {
                 write_last_statuses_now(handle);
             }
             tauri::RunEvent::Exit => {
-                #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-                chromium_browser::shutdown();
                 // Again, idempotently: a restart from the main thread skips
                 // `ExitRequested` (tauri's own note on `restart`), and the
                 // log of every restart today shows exactly that. With no
                 // road named before it this is `terminate:` — ⌘Q, the Dock,
-                // a logout — which the app hears only here (t-6428).
-                let road = exit_runtime::begin(exit_runtime::ExitRoad::Terminate);
-                orchestration::window_exiting(now_epoch_ms(), road, &|| {
-                    cmd::appearance::take_census(handle)
-                });
-                if let Err(error) = crash::clean_exit(handle.state::<AppState>().local_data_root())
-                {
-                    note_window_event(
-                        handle.state::<AppState>().local_data_root(),
-                        &format!("crash clean-exit: {error}"),
-                    );
-                }
+                // a logout — which the app hears only here (t-6428). Its
+                // order is `exit_runtime::terminate`'s (t-7812 D1): the
+                // goodbye and everything the next window restores from come
+                // before the embedded browser's shutdown, which can stall.
+                exit_runtime::terminate(&ExitSteps(handle));
                 note_window_event(
                     handle.state::<AppState>().local_data_root(),
                     "event loop exited",
@@ -3596,6 +3587,52 @@ fn main() -> ExitCode {
         }
     });
     ExitCode::SUCCESS
+}
+
+/// The window's own steps on its way out through `terminate:` (t-7812 D1).
+/// Each is a function the window already had; the order they run in is
+/// `exit_runtime::terminate`'s, and nowhere else.
+struct ExitSteps<'a>(&'a AppHandle);
+
+impl exit_runtime::Terminating for ExitSteps<'_> {
+    fn goodbye(&self, road: exit_runtime::ExitRoad) {
+        orchestration::window_exiting(now_epoch_ms(), road, &|| {
+            cmd::appearance::take_census(self.0)
+        });
+    }
+
+    fn keep_screens(&self) {
+        capture_scrollback_at_exit(self.0);
+    }
+
+    fn keep_statuses(&self) {
+        write_last_statuses_now(self.0);
+    }
+
+    fn end_panes(&self) {
+        // Out of the pool, one by one: the last hold on each lets go and
+        // the lane ends its child (`PtyLane`'s own drop). Their seats are
+        // asleep by now, so the ledger settles nothing as they go.
+        let state = self.0.state::<AppState>();
+        for term in state.terminals().terms() {
+            drop(state.terminals().remove(&term));
+        }
+    }
+
+    fn shut_browser(&self) {
+        #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+        chromium_browser::shutdown();
+    }
+
+    fn mark_clean_exit(&self) {
+        let state = self.0.state::<AppState>();
+        if let Err(error) = crash::clean_exit(state.local_data_root()) {
+            note_window_event(
+                state.local_data_root(),
+                &format!("crash clean-exit: {error}"),
+            );
+        }
+    }
 }
 
 #[cfg(test)]

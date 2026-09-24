@@ -26013,6 +26013,146 @@ ok(
   JSON.stringify(refusedAloud),
 );
 
+/* ---- 창 재시작 뒤 한 탭에 한 판 (t-7812) ----
+ *
+ * A. 문이 여는 대화 하나만. 2026-09-25 01:04 재시작 뒤 사이드바의 「지난 소식」
+ * 행을 누르면 문(`reopenConversationIn`)은 그 체크아웃을 먼저 열었고, 여는 것이
+ * 첫 터미널까지 세웠다: 원장 워커가 끝난 체크아웃에서 `openLedgerSeatedAgent`가
+ * 그 워커의 에이전트를 빈 채로 띄우고, 문의 대화가 그 옆에 한 판 더 섰다. 여섯
+ * 체크아웃 모두 빈 판이 143~249 ms 먼저였다(창 로그 term 5/6·7/8·9/10·11/12·
+ * 13/14·16/17). 잠든 워커가 있던 t-6877만 빈 판이 없었다. 스텁이 그날 원장의
+ * 답을 흉내 낸다: 이 체크아웃의 마지막 워커는 claude였고, 지금은 끝났다. */
+const doorOpensOneConversation = await page.evaluate(async () => {
+  const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+  const held = activeWorktreePath;
+  const WHERE = "/w/t7812-door";
+  const session = { key: "session_id", id: "6c508e8c-16bf-4dfa-9aee-3c9e8cbcd93e" };
+  const base = JSON.parse(JSON.stringify(projects));
+  let current = held;
+  const launched = [];
+  const resumed = [];
+  const nextTerm = () => (window.__NEXT_TERM__ = (window.__NEXT_TERM__ ?? 0) + 1);
+  window.__ANSWER__.set_active_worktree = (args) => {
+    current = args.path;
+    return null;
+  };
+  let listed = true;
+  window.__ANSWER__.project_catalog = () => [
+    ...base.map((project) => ({
+      ...project,
+      worktrees: project.worktrees.map((one) => ({ ...one, active: one.path === current })),
+    })),
+    ...(listed
+      ? [{
+        name: "t7812-door",
+        path: WHERE,
+        worktrees: [{
+          path: WHERE, branch: "wt/t-6263", is_main: true, active: current === WHERE,
+          is_folder: false, ownership: "zerocode-managed", external_hidden: false,
+        }],
+      }]
+      : []),
+  ];
+  window.__ANSWER__.save_pane_layouts = () => null;
+  window.__ANSWER__.pane_layouts = () => [];
+  window.__ANSWER__.worktree_last_agent = (args) =>
+    args?.worktree === WHERE ? { agent: "claude", sleeping: false, term: null } : null;
+  window.__ANSWER__.launch_agent_tab = (args) => {
+    launched.push(args.agent);
+    return nextTerm();
+  };
+  window.__ANSWER__.resume_session = (args) => {
+    resumed.push(args.session.id);
+    return { term: nextTerm(), standing: false };
+  };
+  for (const note of document.querySelectorAll(".toast")) note.remove();
+  await reopenConversationIn(WHERE, { agent: "claude", session });
+  await settle(200);
+  const mine = tabs.filter((one) => one.kind === "term" && one.worktree === WHERE);
+  const seen = {
+    launched: launched.join(","),
+    resumed: resumed.join(","),
+    tabs: mine.length,
+    terms: mine.reduce((count, one) => count + paneLeaves(one.layout).length, 0),
+    said: [...document.querySelectorAll(".toast")].map((one) => one.textContent).join(" "),
+  };
+  for (const one of tabs.filter((tab) => tab.worktree === WHERE)) {
+    for (const term of paneLeaves(one.layout)) paneSessions.delete(term);
+    dropTab(one.id);
+  }
+  activeTabByWorktree.delete(WHERE);
+  restoredWorkspaces.delete(WHERE);
+  await activateWorktree(held);
+  listed = false;
+  await refreshWorktrees();
+  for (const name of [
+    "set_active_worktree", "project_catalog", "save_pane_layouts", "pane_layouts",
+    "worktree_last_agent", "launch_agent_tab", "resume_session",
+  ]) delete window.__ANSWER__[name];
+  return seen;
+});
+ok(
+  "a door reopening a conversation in a finished worker's checkout opens that conversation and no empty agent beside it",
+  doorOpensOneConversation.launched === "" &&
+    doorOpensOneConversation.resumed === "6c508e8c-16bf-4dfa-9aee-3c9e8cbcd93e" &&
+    doorOpensOneConversation.tabs === 1 &&
+    doorOpensOneConversation.terms === 1 &&
+    doorOpensOneConversation.said === "",
+  JSON.stringify(doorOpensOneConversation),
+);
+
+/* C. 판이 대화를 말한 그 순간 파일이 안다. 지금까지 파일은 턴 경계에서만 다시
+ * 쓰였고, 세션을 말한 뒤 쉬기만 한 판 — 계정 전환이 --resume으로 다시 세운
+ * 판(2026-09-25 01:01:28 term 63, `done`, 세션 6c508e8c)이 그 모양이다 — 은
+ * `running: claude`만 든 기록으로 남았다. 다음 재시작은 그 기록으로 대화 대신
+ * 빈 claude를 띄운다. */
+const namedIsKept = await page.evaluate(async () => {
+  const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+  const saves = [];
+  window.__ANSWER__.save_pane_layouts = (args) => {
+    saves.push(JSON.parse(JSON.stringify(args)));
+    return null;
+  };
+  const term = (window.__NEXT_TERM__ = (window.__NEXT_TERM__ ?? 0) + 1);
+  paneAgents.set(term, "claude");
+  const tab = mountTermTab(term, { worktree: activeWorktreePath, agent: "Claude" }, { placement: "tab" });
+  await settle(60);
+  const session = {
+    key: "session_id",
+    id: "6c508e8c-16bf-4dfa-9aee-3c9e8cbcd93e",
+    transcript_path: "/p/6c508e8c-16bf-4dfa-9aee-3c9e8cbcd93e.jsonl",
+  };
+  const before = saves.length;
+  for (const handler of window.__LISTENERS__["hook:agent"] ?? []) {
+    handler({
+      payload: {
+        term, agent: "claude", state: "done", session, resumable: true, session_boundary: true,
+      },
+    });
+  }
+  await settle(80);
+  const record = (saved) =>
+    (saved?.layouts ?? []).find((one) => Object.values(one.terms ?? {}).includes(term));
+  const last = [...saves].reverse().find((saved) => record(saved));
+  const seen = {
+    savedAfter: saves.length - before,
+    wake: record(last)?.agents?.[0]?.id ?? null,
+    running: record(last)?.running?.[0] ?? null,
+  };
+  paneSessions.delete(term);
+  paneAgents.delete(term);
+  dropTab(tab.id);
+  delete window.__ANSWER__.save_pane_layouts;
+  return seen;
+});
+ok(
+  "a pane that names its conversation is written into the layout at once, not at its next mid-turn edge",
+  namedIsKept.savedAfter >= 1 &&
+    namedIsKept.wake === "6c508e8c-16bf-4dfa-9aee-3c9e8cbcd93e" &&
+    namedIsKept.running === "claude",
+  JSON.stringify(namedIsKept),
+);
+
 /* ---- CI checks ---- */
 
 /* Failures first, and the fold hides the rows while keeping the counts. Sorted
@@ -52018,11 +52158,16 @@ ok(
  * the person to type "go on" (live report 2026-08-24: "껏다가 키면 … 내가
  * 입력을 해야 다시 시작함"). The repair is a round trip through the layout
  * file, and this walks the whole loop: the hook's `working` boundary persists
- * the pane's row wearing `interrupted`, the `done` boundary persists it bare,
- * and the wake hands the record's word — not this window's guess — to
- * `resume_session`, where the backend turns it into a continue nudge. The
- * edge itself is part of the contract: a repeated `working` writes nothing,
- * so a busy turn costs one write per turn edge, not one per tool call. */
+ * the pane's row wearing `interrupted`, the `done` boundary persists it bare.
+ * The edge itself is part of the contract: a repeated `working` writes
+ * nothing, so a busy turn costs one write per turn edge, not one per tool
+ * call.
+ *
+ * The wake no longer hands that mark on (t-7812 E, the coordinator's policy
+ * of 2026-09-25): whether a resumed pane is told to go on is the backend's to
+ * say, from the goodbye's own reading of a WORKER's turn. A person's tab comes
+ * back as it stood, whatever its record's mark — the window restarting is not
+ * the person asking for more. */
 const midTurn = await page.evaluate(async () => {
   const seen = {};
   const tell = (name, payload) => {
@@ -52092,15 +52237,18 @@ const midTurn = await page.evaluate(async () => {
         tabLayoutRecord(tab).agents?.[0]?.interrupted === true;
     }
     tabs.splice(tabs.indexOf(tab), 1);
-    // And the far shore: a stored row wearing the mark wakes carrying it,
-    // one without wakes without.
+    // And the far shore: a stored row wearing the mark wakes as its
+    // conversation and nothing more — the wake carries no mid-turn word of
+    // the tab's, marked or calm (t-7812 E).
     const woke = await spawnStoredLeaf(
       { agent: "claude", key: "session_id", id: "s-mid-turn", interrupted: true },
       null,
     );
-    seen.wakeCarries = woke?.woke === true && resumes[0]?.interrupted === true;
+    seen.wakeCarriesNoMark =
+      woke?.woke === true && resumes[0]?.session?.id === "s-mid-turn" &&
+      !("interrupted" in (resumes[0] ?? {}));
     const calm = await spawnStoredLeaf({ agent: "claude", key: "session_id", id: "s-calm" }, null);
-    seen.calmWakes = calm?.woke === true && resumes[1]?.interrupted === false;
+    seen.calmWakes = calm?.woke === true && !("interrupted" in (resumes[1] ?? {}));
   } finally {
     // Borrowed ledgers go back: the strip, the pane maps, the answer table.
     const at = tabs.indexOf(tab);
@@ -52119,7 +52267,7 @@ const midTurn = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a pane cut mid-turn is marked at the working edge, cleared at done, and wakes into its own continuation",
+  "a pane cut mid-turn is marked at the working edge, cleared at done, and wakes as its conversation with no mark of the tab's",
   midTurn.boundaryWrote &&
     midTurn.midTurnMarked &&
     midTurn.repeatQuiet &&
@@ -52129,7 +52277,7 @@ ok(
     midTurn.predicate?.["needs-attention"] === false &&
     midTurn.predicate?.done === false &&
     midTurn.predicate?.idle === false &&
-    midTurn.wakeCarries &&
+    midTurn.wakeCarriesNoMark &&
     midTurn.calmWakes,
   JSON.stringify(midTurn),
 );

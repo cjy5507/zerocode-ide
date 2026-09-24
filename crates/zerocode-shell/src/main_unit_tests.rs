@@ -12745,9 +12745,11 @@ fn a_wake_with_nothing_written_starts_what_the_launch_button_starts() {
     let judged = waking
         .find("zerocode_core::conversation_never_written(")
         .expect("the wake no longer asks whether anything was written");
-    // The mark is the rollout's verdict or the commands the restart cut
-    // (t-6428); a pane nothing was ever written in has neither.
-    let nudged = waking.find("marked.then(|| {").expect("the nudge");
+    // The nudge is the goodbye's word about a sleeper (t-7812 E); a pane
+    // nothing was ever written in is nobody's sleeper and has none.
+    let nudged = waking
+        .find("restart_nudge_runtime::worker_nudge(")
+        .expect("the nudge");
     let chosen = waking.find("fresh_command(&agent").expect("the fresh road");
     assert!(
         judged < nudged && nudged < chosen,
@@ -12788,7 +12790,7 @@ fn a_resume_is_judged_before_anything_of_the_wake_happens() {
         .find("return Ok(ConversationWake::standing(holder))")
         .expect("a held conversation is no longer answered with the pane that holds it");
     for effect in [
-        "restart_nudge_runtime::wake_interrupted(",
+        "restart_nudge_runtime::worker_nudge(",
         "resume_command(",
         "account_env_for(",
         "agent_trust_presets::mark_workspace_trusted(",
@@ -12823,54 +12825,123 @@ fn a_resume_is_judged_before_anything_of_the_wake_happens() {
     }
 }
 
-/// t-2874: a Codex wake's mark is the rollout's word, asked on the resume
-/// road that already names the file — before the nudge is built from the mark
-/// and before the receipt is armed, so one verdict feeds both. The rollout's
-/// edges are read by ONE reader, in core; this crate calls it exactly there.
+/// t-7812 E: a wake is told to go on by the goodbye's word about a WORKER
+/// and nothing else — the turn the goodbye read as under way, or the
+/// commands it cut under the pane (t-6428 ⑤). The door's `interrupted` mark
+/// no longer reaches the resume road at all, so a person's own tab comes
+/// back as it stood (2026-09-25: the coordinator's policy, m-7917), and a
+/// crash, which leaves no goodbye, is told nothing rather than guessed at.
+/// Both roads ask the one policy: this one and the ledger's reseat.
 #[test]
-fn a_codex_wake_asks_its_rollout_before_it_builds_the_nudge() {
+fn a_wake_is_told_to_go_on_only_by_the_goodbyes_word_about_a_worker() {
     let board = include_str!("cmd/board.rs");
     let resuming = block_after(board, "pub(crate) fn resume_session(");
-    let asked = resuming
-        .find("restart_nudge_runtime::wake_interrupted(")
-        .expect("the wake no longer asks the rollout for its mark");
-    // The mark is the rollout's verdict, or the commands the restart cut
-    // under a pane whose turn had ended (t-6428): either nudges.
-    let built = resuming
-        .find("marked.then(|| {")
-        .expect("the nudge is no longer built from the mark");
+    let (signature, _) = resuming
+        .split_once(") -> Result<ConversationWake, String> {")
+        .expect("the resume command's signature");
     assert!(
-        resuming.contains("let marked = interrupted || !cut.is_empty();"),
-        "the mark is no longer the verdict and the cut commands:\n{resuming}"
+        !signature.contains("interrupted"),
+        "the door's mid-turn mark is a wire field of the resume road again:\n{signature}"
     );
-    assert!(
-        resuming[built..]
-            .starts_with("marked.then(|| {\n        restart_nudge_runtime::resume_nudge("),
-        "the nudge's words come from resume_nudge, the one builder (t-3058):\n{resuming}"
-    );
+    let sleeper = resuming
+        .find("crate::orchestration::sleeper_awaiting(")
+        .expect("the wake no longer asks which sleeper this conversation is");
+    let nudge = resuming
+        .find("let nudge = reseating.as_deref().and_then(|worker| {\n        restart_nudge_runtime::worker_nudge(")
+        .expect("the nudge is no longer the one policy, asked for a sleeper only");
     let armed = resuming
         .find("restart_nudge_runtime::register_wake(")
         .expect("the receipt is no longer armed on the resume road");
     assert!(
-        asked < built && built < armed,
-        "the rollout's verdict must precede both the nudge and the receipt:\n{resuming}"
+        sleeper < nudge && nudge < armed,
+        "the sleeper must be known before the nudge, and the nudge before the receipt:\n{resuming}"
     );
     assert!(
-        resuming.contains("session.transcript_path.as_deref()"),
-        "the wake asks a file other than the one the record names:\n{resuming}"
+        resuming.contains("let marked = nudge.is_some();"),
+        "the receipt is armed on something other than the words:\n{resuming}"
+    );
+    let orchestration = include_str!("orchestration.rs");
+    let reseating = block_after(orchestration, "pub(crate) fn reseat_sleeping(");
+    assert!(
+        reseating.contains("let nudge = reseat_nudge(&worker, checkout.as_deref());")
+            && !reseating.contains("resume_nudge("),
+        "the ledger's reseat words its continuation apart from the one policy:\n{reseating}"
     );
     let nudging = include_str!("restart_nudge_runtime.rs");
-    let (shipped, _) = nudging.split_once("#[cfg(test)]").unwrap_or((nudging, ""));
-    assert_eq!(
-        shipped
-            .matches("zerocode_core::transcript::codex_turn_open(")
-            .count(),
-        1,
-        "the rollout's edges are read in one place, through core's one reader"
+    let policy = block_after(nudging, "pub(super) fn worker_nudge(");
+    assert!(
+        policy.contains("restart_census::take_cut(root, worker)")
+            && policy.contains("if !cut.any() {\n        return None;"),
+        "the policy reads something other than the goodbye's note:\n{policy}"
+    );
+}
+
+/// t-7812 D1: `terminate:` — ⌘Q, the Dock, a logout — says its goodbye and
+/// keeps what the next window restores from before the embedded browser's
+/// shutdown, the one step measured to stall. On 2026-09-25 01:02 a ⌘Q sat
+/// twenty seconds in that shutdown (`main_scope=event_exit`), the panes ended
+/// inside it, and the ledger — its goodbye queued behind the browser — wrote
+/// three workers down as dead. The Exit arm hands the order to
+/// `exit_runtime::terminate`, the one place it is kept.
+#[test]
+fn terminate_says_goodbye_before_the_browser_can_stall() {
+    let main = include_str!("main.rs");
+    let (_, after) = main
+        .split_once("tauri::RunEvent::Exit => {")
+        .expect("the Exit arm");
+    let (arm, _) = after
+        .split_once("tauri::RunEvent::Reopen")
+        .expect("the arm after Exit");
+    assert!(
+        arm.contains("exit_runtime::terminate(&ExitSteps(handle));"),
+        "the Exit arm keeps an order of its own:\n{arm}"
     );
     assert!(
-        !board.contains("codex_turn_open("),
-        "the resume road grew its own rollout reader"
+        !arm.contains("chromium_browser::shutdown()") && !arm.contains("window_exiting("),
+        "the Exit arm shuts the browser or says goodbye outside the one order:\n{arm}"
+    );
+    let steps = block_after(main, "impl exit_runtime::Terminating for ExitSteps<'_> {");
+    for (step, does) in [
+        ("fn goodbye(", "orchestration::window_exiting("),
+        ("fn keep_screens(", "capture_scrollback_at_exit("),
+        ("fn keep_statuses(", "write_last_statuses_now("),
+        ("fn shut_browser(", "chromium_browser::shutdown()"),
+        ("fn mark_clean_exit(", "crash::clean_exit("),
+    ] {
+        let (_, body) = steps
+            .split_once(step)
+            .unwrap_or_else(|| panic!("{step} left the exit steps"));
+        let body = body.split("\n    fn ").next().unwrap_or(body);
+        assert!(
+            body.contains(does),
+            "{step} no longer does `{does}`:\n{body}"
+        );
+    }
+    // The restart button's road has no exit event after it at all, so it
+    // keeps the same list through the same steps before `app.restart()`.
+    let appearance = include_str!("cmd/appearance.rs");
+    let relaunching = block_after(appearance, "pub(crate) fn relaunch_window(");
+    let kept = relaunching
+        .find("crate::exit_runtime::relaunch(road, &crate::ExitSteps(&app));")
+        .unwrap_or_else(|| panic!("the restart button keeps its own order:\n{relaunching}"));
+    assert!(
+        kept < relaunching.find("app.restart()").expect("the restart"),
+        "the restart button restarts before it keeps the list:\n{relaunching}"
+    );
+    let exiting = include_str!("exit_runtime.rs");
+    let order = block_after(exiting, "fn leave_in_order(");
+    let at = |step: &str| {
+        order
+            .find(step)
+            .unwrap_or_else(|| panic!("{step} left the order:\n{order}"))
+    };
+    assert!(
+        at("steps.goodbye(road)") < at("steps.keep_screens()")
+            && at("steps.keep_screens()") < at("steps.keep_statuses()")
+            && at("steps.keep_statuses()") < at("steps.end_panes()")
+            && at("steps.end_panes()") < at("steps.shut_browser()")
+            && at("steps.shut_browser()") < at("steps.mark_clean_exit()"),
+        "the browser can stall ahead of what the next window restores from:\n{order}"
     );
 }
 

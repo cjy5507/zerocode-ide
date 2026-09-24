@@ -239,6 +239,12 @@ pub(crate) enum CodexQueueError {
     CapabilityIndeterminate { stall: ProbeStall, attempts: u32 },
     #[error("the worker launch already names another Codex remote")]
     ExistingRemote,
+    /// A resumed thread keeps the PTY road (t-7812). Codex refuses a remote
+    /// resume that carries a permission override — "Permission overrides
+    /// are not supported when resuming a remote task." — and exits, which
+    /// is how the ledger's reseat of w-7738 died 1.7 s in on 2026-09-25.
+    #[error("a resumed Codex thread keeps the PTY road: Codex refuses a remote resume")]
+    ResumedThread,
     #[error("a private short Codex runtime directory could not be created")]
     RuntimeDirectory,
     #[error("the Codex app-server sidecar could not be started")]
@@ -641,6 +647,9 @@ fn prepare_with(
         if has_remote(args) {
             return Err(CodexQueueError::ExistingRemote);
         }
+        if resumes_a_thread(args) {
+            return Err(CodexQueueError::ResumedThread);
+        }
         let vendor = past_the_shims(program, env);
         match capability(&vendor, env, budget) {
             CodexQueueCapability::Supported => {}
@@ -741,6 +750,23 @@ pub(crate) fn shutdown_all() {
 fn has_remote(args: &[String]) -> bool {
     args.iter()
         .any(|arg| arg == "--remote" || arg.starts_with("--remote="))
+}
+
+/// Whether this launch line re-enters an existing thread (`codex … resume
+/// <id>`, the core's own spelling of it).
+fn resumes_a_thread(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == zerocode_core::provider_session::CODEX_RESUME_SUBCOMMAND)
+}
+
+impl CodexQueueError {
+    /// Whether this refusal leaves a worker with less than it was meant to
+    /// have — worth the window's warning — or is the route working as
+    /// designed: a resumed thread takes the PTY road on purpose (t-7812), and
+    /// warning about it would cry wolf at every restart.
+    pub(crate) fn degrades(self) -> bool {
+        !matches!(self, Self::ResumedThread)
+    }
 }
 
 fn prepend_remote(args: &mut Vec<String>, endpoint: &str) {
@@ -2482,6 +2508,82 @@ mod tests {
         assert!(
             !runtime_dir.exists(),
             "the sidecar runtime directory survived"
+        );
+    }
+
+    /// t-7812 B: a resumed thread keeps the PTY road. The ledger's reseat of
+    /// a Codex worker on 2026-09-25 (w-7738, 01:03:26) put the app-server
+    /// remote in front of `resume` beside the launch's permission override,
+    /// and Codex answered "Error: Permission overrides are not supported when
+    /// resuming a remote task." and exited 1.7 s in — the worker's death, and
+    /// the empty Codex the next door opened in its place. A resume argv is
+    /// left exactly as it was, and no sidecar is started for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_resumed_codex_thread_keeps_its_argv_and_starts_no_sidecar() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let runnable = |candidate: &Path| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|held| held.is_file() && held.permissions().mode() & 0o111 != 0)
+        };
+        let program = std::env::var_os("ZEROCODE_CODEX_BIN")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("PATH").and_then(|path| {
+                    std::env::split_paths(&path)
+                        .map(|directory| directory.join("codex"))
+                        .find(|candidate| runnable(candidate))
+                })
+            });
+        let Some(program) = program else {
+            eprintln!("skipped the resumed-thread contract: codex is not installed on PATH");
+            return;
+        };
+        let home = tempfile::Builder::new()
+            .prefix("zcx-resume-")
+            .tempdir_in("/tmp")
+            .expect("an isolated Codex home");
+        let command = "zcx-codex-resuming";
+        let reachable = home.path().join("bin");
+        std::fs::create_dir(&reachable).expect("the launch bin directory");
+        std::os::unix::fs::symlink(&program, reachable.join(command))
+            .expect("the launch-only name for the installed CLI");
+        let env = vec![
+            (
+                "CODEX_HOME".to_string(),
+                home.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "PATH".to_string(),
+                format!(
+                    "{}:{}",
+                    reachable.to_string_lossy(),
+                    std::env::var("PATH").expect("a launch PATH")
+                ),
+            ),
+        ];
+        // The reseat's own line: the launch plan's override, the thread.
+        let mut args = vec![
+            "--dangerously-bypass-approvals-and-sandbox".to_string(),
+            "resume".to_string(),
+            "01a0d420-5b6c-7621-9f74-c792f7dc2d36".to_string(),
+        ];
+        let before = args.clone();
+        let pending = prepare_with(
+            Path::new(command),
+            &mut args,
+            Path::new("/tmp"),
+            &env,
+            LOADED_MACHINE,
+        );
+        assert_eq!(
+            args, before,
+            "a resume line was rewritten onto the remote route Codex refuses"
+        );
+        assert!(
+            pending.is_err(),
+            "a sidecar was started for a resumed thread"
         );
     }
 }

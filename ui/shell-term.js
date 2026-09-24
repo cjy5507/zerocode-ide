@@ -6964,8 +6964,8 @@ function storedLeafGrid(root, ordinal, tab) {
  * A pane this door opened is written down straight away, the way the backend
  * records its own copy: the agent's first event may be minutes off, and a
  * persist before it would drop the tab as an agent tab with no way back. */
-async function wakeConversation(agent, session, grid, interrupted = false, restore = null) {
-  const woke = await invoke("resume_session", { agent, session, ...grid, interrupted, restore });
+async function wakeConversation(agent, session, grid, restore = null) {
+  const woke = await invoke("resume_session", { agent, session, ...grid, restore });
   if (!woke.standing) paneSessions.set(woke.term, { agent, session, resumable: true });
   return woke;
 }
@@ -6998,10 +6998,11 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null) {
       ...(wake.transcript_path && { transcript_path: wake.transcript_path }),
     };
     try {
-      // The record's word, not this window's guess: the LAST persist saw the
-      // pane mid-turn, so the resume carries the continue nudge and the cut
-      // turn restarts without anybody typing "go on".
-      const woke = await wakeConversation(wake.agent, session, { rows, cols }, !!wake.interrupted, restore);
+      // The conversation and nothing about its last turn (t-7812 E). Whether
+      // a wake is told to go on is the backend's to say, from the goodbye's
+      // own reading of a WORKER's turn; a person's conversation comes back as
+      // it stood, whatever its record's mid-turn mark says.
+      const woke = await wakeConversation(wake.agent, session, { rows, cols }, restore);
       if (!woke.standing) return { term: woke.term, woke: true, agent: wake.agent };
       // One conversation, one process. Two records naming the same session used
       // to resume it twice on every restart: the second `zo --resume` met the

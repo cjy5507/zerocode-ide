@@ -527,6 +527,13 @@ pub enum RuntimeRequest {
     /// A sleeper the grace ran out on: its attempt ends and its death is
     /// announced with the dispatch id a replacement needs (t-3058).
     SleeperExpired { worker: String, now_ms: i64 },
+    /// A sleeper that cannot come back, ended and announced with the reason
+    /// the moment that is known rather than at the grace (t-7812).
+    SleeperUnrecoverable {
+        worker: String,
+        reason: String,
+        now_ms: i64,
+    },
     /// The provider conversation observed in a terminal. The actor resolves
     /// the terminal to its seat while the pane table is locked, so a respawn
     /// cannot redirect the write between lookup and mutation.
@@ -885,6 +892,16 @@ impl std::fmt::Debug for RuntimeRequest {
             Self::SleeperExpired { worker, now_ms } => formatter
                 .debug_struct("RuntimeRequest::SleeperExpired")
                 .field("worker", worker)
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::SleeperUnrecoverable {
+                worker,
+                reason,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::SleeperUnrecoverable")
+                .field("worker", worker)
+                .field("reason_bytes", &reason.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::WorkerSessionReported {
@@ -2108,6 +2125,24 @@ impl RuntimeActor {
         }
     }
 
+    /// A sleeper that cannot come back ends now, announced with `reason`
+    /// (t-7812).
+    pub fn sleeper_unrecoverable(
+        &self,
+        worker: impl Into<String>,
+        reason: impl Into<String>,
+        now_ms: i64,
+    ) -> Result<u64, RuntimeError> {
+        match self.request(RuntimeRequest::SleeperUnrecoverable {
+            worker: worker.into(),
+            reason: reason.into(),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { revision, .. } => Ok(revision),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// The provider conversation observed in a pane, written durably when
     /// that pane belongs to a ledger worker.
     pub fn worker_session_reported(
@@ -2987,6 +3022,11 @@ impl RuntimeState {
             RuntimeRequest::SleeperExpired { worker, now_ms } => {
                 self.sleeper_expired(&worker, now_ms)
             }
+            RuntimeRequest::SleeperUnrecoverable {
+                worker,
+                reason,
+                now_ms,
+            } => self.sleeper_unrecoverable(&worker, &reason, now_ms),
             RuntimeRequest::WorkerSessionReported {
                 term,
                 session,
@@ -3517,6 +3557,30 @@ impl RuntimeState {
         }
         self.ledger
             .sleeper_expired(worker, now_ms)
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// The same ending as [`Self::sleeper_expired`], for a sleeper known not
+    /// to be coming back, with the reason why (t-7812).
+    fn sleeper_unrecoverable(
+        &mut self,
+        worker: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if worker.is_empty() || worker.len() > MAX_NAME || reason.is_empty() || now_ms < 0 {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        self.ledger
+            .sleeper_unrecoverable(worker, reason, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Settled {

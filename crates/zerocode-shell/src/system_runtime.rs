@@ -573,26 +573,27 @@ pub(super) fn stage_layouts_file(config_root: &Path) -> PathBuf {
 pub(super) fn capture_scrollback_at_exit(app: &AppHandle) {
     let state = app.state::<AppState>();
     let file = pane_layouts_file(state.config_root());
-    let mut layouts = pane_layout::read(&file);
     let terminals = state.terminals();
-    for tabs in layouts.values_mut() {
-        for layout in tabs.iter_mut() {
-            for (ordinal, term) in std::mem::take(&mut layout.terms) {
-                let Some(held) = terminals.handle(term) else {
-                    continue;
-                };
-                let pty = lock_pty(&held);
-                let written = zerocode_pty::serialize_tail(
-                    pty.terminal().grid(),
-                    zerocode_pty::SCROLLBACK_BUFFER_BYTE_LIMIT,
-                );
-                if !written.is_empty() {
-                    layout.buffers.insert(ordinal, written);
+    // Through the file's one writer (t-7812 D) — the exit's own snapshot, so
+    // it is the one write a leaving window still makes.
+    let _ = pane_layout::rewrite(&file, |layouts| {
+        for tabs in layouts.values_mut() {
+            for layout in tabs.iter_mut() {
+                for (ordinal, term) in std::mem::take(&mut layout.terms) {
+                    let Some(held) = terminals.handle(term) else {
+                        continue;
+                    };
+                    let pty = lock_pty(&held);
+                    let written = zerocode_pty::serialize_tail(
+                        pty.terminal().grid(),
+                        zerocode_pty::SCROLLBACK_BUFFER_BYTE_LIMIT,
+                    );
+                    if !written.is_empty() {
+                        layout.buffers.insert(ordinal, written);
+                    }
                 }
             }
         }
-    }
-    if let Ok(text) = serde_json::to_string(&layouts) {
-        let _ = std::fs::write(&file, text);
-    }
+        true
+    });
 }

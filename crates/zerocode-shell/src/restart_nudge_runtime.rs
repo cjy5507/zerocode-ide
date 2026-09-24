@@ -135,6 +135,35 @@ pub(super) fn resume_nudge(
     parts.join(" ")
 }
 
+/// The words a restored worker's wake carries, or none (t-7812 E) — one
+/// answer for both roads that bring a worker back: the ledger's reseat and
+/// the window's resumed pane.
+///
+/// Only what the goodbye read as cut ([`restart_census::take_cut`]): a turn
+/// under way, or commands running under the pane (t-6428 ⑤). A worker at
+/// rest with nothing cut is idle, and an idle worker is not told to go on —
+/// its last turn ended, and a continue would put the next one in its mouth.
+/// A wake with no goodbye to read — a crash's — hears nothing: a line typed
+/// on a guess is the blind re-send a continuation must never be. A person's
+/// own tab never asks here at all; the window restarting is not the person
+/// asking for more.
+///
+/// Taken once: the goodbye's note is spent by the first wake that reads it,
+/// so the words cannot be said twice.
+pub(super) fn worker_nudge(root: &Path, worker: &str, checkout: Option<&Path>) -> Option<String> {
+    let cut = crate::orchestration::restart_census::take_cut(root, worker);
+    if !cut.any() {
+        return None;
+    }
+    let state = checkout.and_then(|checkout| {
+        worktree_state(
+            checkout,
+            u64::try_from(now_epoch_ms() / 1_000).unwrap_or_default(),
+        )
+    });
+    Some(resume_nudge(cut.turn, true, state.as_ref(), &cut.commands))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingNudge {
     pub(super) agent: String,
@@ -298,38 +327,6 @@ fn deliver_composer(state: &AppState, term: TermId, agent: &str, text: &str, mou
         Some(agent),
         readiness,
     );
-}
-
-/// The mark a restored pane wakes with: whether its conversation was cut
-/// MID-TURN, so the wake continues it instead of opening an empty composer.
-///
-/// `stored` is the hook's word at the last persist (`WakeAgent::interrupted`,
-/// written at the renderer's mid-turn edge). For a Codex pane it is the wrong
-/// witness — Codex's hook says `idle` across a long tool call, so a worker cut
-/// mid-`CommandExecution` woke unmarked and the nudge road returned before
-/// typing (t-2874; rollout 01a07004, 2026-09-05). The rollout the record names
-/// is the witness that outlives the process, and at wake time it is final, so
-/// its word replaces the stored one BOTH ways: a turn it left open is
-/// continued whatever the hook last said, and a turn it closed is not reopened
-/// by a stale `working` mark. A record naming no file, or a file that is gone,
-/// keeps the stored word. Every other agent keeps the hook-state rule as it is.
-///
-/// Read here rather than at persist time on purpose: Codex's `Stop` hook lands
-/// 5 ms–3 s before `task_complete` reaches the file, and a pane at `idle` never
-/// crosses the mid-turn edge again, so a persist-time reading is stale in both
-/// directions (measured, docs/design/restart-nudge-delivery.md §4).
-pub(super) fn wake_interrupted(agent: &str, stored: bool, transcript_path: Option<&str>) -> bool {
-    // The witness is the row's: only an agent whose wake mark is its own
-    // rollout file is read there; everyone else keeps the stored hook word.
-    let reads_rollout = zerocode_core::agent_capabilities(agent).is_some_and(|caps| {
-        caps.resume.wake_mark == zerocode_core::capabilities::WakeMark::Rollout
-    });
-    if !reads_rollout {
-        return stored;
-    }
-    transcript_path
-        .and_then(|path| zerocode_core::transcript::codex_turn_open(std::path::Path::new(path)))
-        .unwrap_or(stored)
 }
 
 /// Register one restored pane and arm its one-shot receipt deadline.
@@ -845,56 +842,5 @@ mod tests {
             "the paste closed but no Enter followed it: {:?}",
             run.stdin
         );
-    }
-
-    /// Codex rollout lines in the shapes the real files carry
-    /// (`codex-runtime-home/home/sessions/**/rollout-*.jsonl`).
-    const ROLLOUT_STARTED: &str = r#"{"timestamp":"2026-09-05T05:27:08.553Z","type":"event_msg","payload":{"type":"task_started","turn_id":"01a07008"}}"#;
-    const ROLLOUT_ITEM: &str = r#"{"timestamp":"2026-09-05T05:31:37.338Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"01a07008","item":{"type":"CommandExecution","status":"completed"}}}"#;
-    const ROLLOUT_COMPLETE: &str = r#"{"timestamp":"2026-09-05T05:31:44.900Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"01a07008"}}"#;
-
-    /// The t-2874 root. The window persists a Codex pane's mark from the
-    /// hook's word, and the hook said `idle` while the pane's rollout was
-    /// mid-`CommandExecution` (rollout 01a07004, 2026-09-05) — so the wake
-    /// came back unmarked and `register_wake` returned before typing. The
-    /// rollout the record already names is the one witness that outlives the
-    /// process: a Codex wake asks it, and its word replaces the hook's both
-    /// ways. Claude's hook-state rule is untouched.
-    #[test]
-    fn a_codex_wake_takes_its_mark_from_the_rollout_the_record_names() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let open = dir.path().join("open.jsonl");
-        fs::write(&open, format!("{ROLLOUT_STARTED}\n{ROLLOUT_ITEM}\n")).expect("write");
-        let closed = dir.path().join("closed.jsonl");
-        fs::write(
-            &closed,
-            format!("{ROLLOUT_STARTED}\n{ROLLOUT_ITEM}\n{ROLLOUT_COMPLETE}\n"),
-        )
-        .expect("write");
-        let open = open.to_string_lossy().into_owned();
-        let closed = closed.to_string_lossy().into_owned();
-        let missing = dir
-            .path()
-            .join("missing.jsonl")
-            .to_string_lossy()
-            .into_owned();
-
-        // The evidence: no mark from the hook, a turn still open in the file.
-        assert!(
-            wake_interrupted("codex", false, Some(&open)),
-            "a Codex pane cut mid-turn woke unmarked — the nudge road returns before typing"
-        );
-        // The inverse: a turn the file closed is not reopened, not even by a
-        // mark the hook's `working` edge left behind.
-        assert!(!wake_interrupted("codex", false, Some(&closed)));
-        assert!(!wake_interrupted("codex", true, Some(&closed)));
-        // No file to ask: the record's own word stands, both ways.
-        assert!(wake_interrupted("codex", true, None));
-        assert!(!wake_interrupted("codex", false, None));
-        assert!(!wake_interrupted("codex", false, Some(&missing)));
-        assert!(wake_interrupted("codex", true, Some(&missing)));
-        // Claude's rule is the hook's word, whatever a file beside it says.
-        assert!(!wake_interrupted("claude", false, Some(&open)));
-        assert!(wake_interrupted("claude", true, Some(&closed)));
     }
 }

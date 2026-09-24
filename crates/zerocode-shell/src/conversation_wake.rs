@@ -156,17 +156,22 @@ pub(crate) fn claim_for_wake(
         return Ok(None);
     };
     WAKES
-        .claim(wanted, term, |wanted| {
-            let naming = {
-                let sessions = state.pane_sessions();
-                let agents = state.agent_terms();
-                panes_naming(wanted, &sessions, &agents)
-            };
-            naming
-                .into_iter()
-                .find(|held| !crate::agent_tools_runtime::shell_in_front_of(state, *held))
-        })
+        .claim(wanted, term, |wanted| holding_pane(state, wanted))
         .map(Some)
+}
+
+/// The live pane holding `wanted`, if one does: a pane that reported it and
+/// whose agent still holds the terminal. The one reading both roads ask —
+/// a resume door here, and the ledger's reseat through its host (t-7812).
+pub(crate) fn holding_pane(state: &AppState, wanted: &ConversationKey) -> Option<TermId> {
+    let naming = {
+        let sessions = state.pane_sessions();
+        let agents = state.agent_terms();
+        panes_naming(wanted, &sessions, &agents)
+    };
+    naming
+        .into_iter()
+        .find(|held| !crate::agent_tools_runtime::shell_in_front_of(state, *held))
 }
 
 #[cfg(test)]

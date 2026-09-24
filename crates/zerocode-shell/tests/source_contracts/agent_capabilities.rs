@@ -81,8 +81,8 @@ fn write_doors() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
         ("start_automation", None, "fn start_automation("),
         ("remember_reused_run", None, "fn remember_reused_run("),
         ("reused_run_delivery", None, "fn reused_run_delivery("),
-        // The restart nudge: the wake witness and both nudge roads.
-        ("wake_interrupted", None, "fn wake_interrupted("),
+        // The restart nudge: both nudge roads. Whether a wake is nudged at
+        // all is the goodbye's word about a worker (t-7812 E), not a row's.
         ("register_wake", None, "fn register_wake("),
         ("deliver_composer", None, "fn deliver_composer("),
         // Quick commands, where a prompt is saved to be launched later.
@@ -219,13 +219,6 @@ fn every_write_door_reads_its_decision_off_the_table() {
             "the worker split stopped asking the table for `{needed}`:\n{splitting}"
         );
     }
-
-    // The wake witness is the row's.
-    let witnessing = block_after(backend, "fn wake_interrupted(");
-    assert!(
-        witnessing.contains("WakeMark::Rollout"),
-        "the wake witness is chosen by name again:\n{witnessing}"
-    );
 
     // Quick commands ask whether the agent takes a prompt at start.
     for (door, opens) in [

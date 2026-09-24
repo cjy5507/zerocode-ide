@@ -9639,10 +9639,16 @@ function makeSurvivorRow(one) {
  * 그 되살림이 **끝난 뒤**다. 한 대화에 한 판이라는 판정은 백엔드가 하고
  * (`resumeSession` → `wakeConversation`), 이 문은 그 답이 가리키는 판으로 간다.
  * 2026-09-16의 두 번째 `zo --resume`은 활성화 직후에 물은 결과였다: 그때 대화는
- * 아직 깨어나는 중이었고, 이 창의 사본 판정은 그것을 보지 못했다. */
+ * 아직 깨어나는 중이었고, 이 창의 사본 판정은 그것을 보지 못했다.
+ *
+ * 그리고 이 문은 그 워크트리의 첫 터미널을 스스로 세운다 — 되살릴 대화가
+ * 그것이다. 활성화가 첫 터미널까지 세우면(`openLedgerSeatedAgent`), 원장
+ * 워커가 끝난 체크아웃에서는 그 워커의 에이전트가 빈 채로 먼저 뜨고 이 문의
+ * 대화가 그 옆에 한 판 더 선다. 2026-09-25 01:04 재시작 뒤 여섯 체크아웃이
+ * 모두 그랬다(빈 판이 143~249 ms 먼저, t-7812). */
 async function reopenConversationIn(path, known) {
   if (path && path !== activeWorktreePath) {
-    if (!(await activateWorktree(path))) return;
+    if (!(await activateWorktree(path, { firstTerminal: false }))) return;
   }
   await storedWakesSettled(path);
   await resumeSession(known);
@@ -10294,6 +10300,9 @@ listen("hook:agent", (event) => {
     }
     // The state stood still, but the model or the mode may have moved.
     paintComposerChipsFor(term);
+    // And the conversation may just have been named (t-7812): see the
+    // write at the end of this handler.
+    if (named && owner?.worktree) persistPaneLayouts(owner.worktree);
     return;
   }
   const wasMidTurn = isMidTurn(hookStates.get(term));
@@ -10331,7 +10340,15 @@ listen("hook:agent", (event) => {
   // Only the mid-turn boundary matters and only crossings reach here (the
   // repeat-state return above), so this costs one write per turn edge, not
   // one per tool call.
-  if (wasMidTurn !== isMidTurn(state) && owner?.worktree) {
+  //
+  // And it must know the CONVERSATION the moment the pane names it (t-7812).
+  // A pane that named its session and then rested — an account switch's
+  // `--resume` pane (2026-09-25 01:01:28, term 63, `done`) is that shape —
+  // was stored as `running: claude` alone, a program with no conversation,
+  // and the next restart would start that program empty where the
+  // conversation had been. One write per naming, after the state above, so
+  // the record carries both at once.
+  if ((named || wasMidTurn !== isMidTurn(state)) && owner?.worktree) {
     persistPaneLayouts(owner.worktree);
   }
   // An agent that LEFT took its tool children with it — every page still

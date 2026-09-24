@@ -19292,13 +19292,13 @@ mod tests {
             walking.contains("prepared_worker_reseat")
                 && walking.contains("WorkerHostPlacement::Existing")
                 && walking.contains("actor.worker_reseated(")
-                && walking.contains("host.paste(term, &prepared.prompt)")
+                && walking.contains("deliver_continuation(host, term, &prepared.prompt)")
                 && walking.contains("host.announce_reseated_worker("),
             "the sleeping worker bypasses the split fence or announces before rebind:\n{walking}"
         );
         assert!(
             walking.find("actor.worker_reseated(")
-                < walking.find("host.paste(term, &prepared.prompt)"),
+                < walking.find("deliver_continuation(host, term, &prepared.prompt)"),
             "the restored worker sees its task before its durable seat moves:\n{walking}"
         );
         let spawning = block_after(shipped_backend(), "let readiness = worker_host");
@@ -27480,7 +27480,7 @@ mod tests {
         );
         let leaf = block_after(window, "async function spawnStoredLeaf(");
         assert!(
-            leaf.contains("!!wake.interrupted, restore)")
+            leaf.contains("{ rows, cols }, restore)")
                 && leaf.contains(r#"rows, cols, restore })"#)
                 && leaf
                     .contains(r#"invoke("open_term_tab", { rows, cols, plain: true, restore })"#),

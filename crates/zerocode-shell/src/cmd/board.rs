@@ -945,8 +945,10 @@ pub(crate) fn resume_command(
     let caps = spec.capabilities();
     let base_args = caps.resume.launch_args_without_selectors(&plan.args);
     // Stored worker model/effort words ride after launch defaults and before
-    // the selector (and its optional positional nudge). The Tauri caller sends
-    // an empty slice; a worker plan supplies only its durable tuning receipt.
+    // the selector (and its optional positional nudge). Both roads hand in
+    // the same durable tuning receipt for a worker — the ledger's reseat, and
+    // the Tauri caller for a sleeper's conversation (t-7812) — and nothing
+    // for a person's own.
     argv.splice(1..1, base_args.into_iter().chain(tuning.iter().cloned()));
     Ok(ResumeCommand { kind, argv, plan })
 }
@@ -976,12 +978,12 @@ pub(crate) fn transcript_absent(path: &str) -> bool {
     std::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Six wire arguments, and they stay six: a `#[tauri::command]`'s payload
-/// parameters ARE its wire shape (`launch_agent_tab` says the same), so
-/// folding `interrupted` and `restore` into a struct would rename what every
-/// door sends — a payload change to quiet a lint about a payload. `AppHandle`
-/// and `State` are injected by Tauri and are not wire fields.
-#[allow(clippy::too_many_arguments)]
+/// Five wire arguments: a `#[tauri::command]`'s payload parameters ARE its
+/// wire shape (`launch_agent_tab` says the same), so folding `restore` into a
+/// struct would rename what every door sends. `AppHandle` and `State` are
+/// injected by Tauri and are not wire fields. A door still sending the old
+/// `interrupted` mark sends a field nothing reads: whether a wake is told to
+/// go on is the goodbye's word about a worker (t-7812 E), never a tab's.
 #[tauri::command(async)]
 pub(crate) fn resume_session(
     app: AppHandle,
@@ -990,7 +992,6 @@ pub(crate) fn resume_session(
     session: zerocode_core::ProviderSession,
     rows: u16,
     cols: u16,
-    interrupted: Option<bool>,
     // A restored leaf's closed-window screen, put back before the resumed
     // agent's first byte is parsed (`replay_stored_screen`). A sidebar row or
     // any other door that re-enters a conversation outside a restore sends
@@ -1009,15 +1010,6 @@ pub(crate) fn resume_session(
         Ok(claim) => claim,
         Err(holder) => return Ok(ConversationWake::standing(holder)),
     };
-    // The record's mark is the hook's word at the last persist. For a Codex
-    // pane the rollout the record names knows better whether the turn was
-    // cut (t-2874), so the wake asks it here, once, before the nudge is built
-    // and before the receipt is armed — one verdict for both.
-    let interrupted = restart_nudge_runtime::wake_interrupted(
-        &agent,
-        interrupted.unwrap_or(false),
-        session.transcript_path.as_deref(),
-    );
     let launch_override = stored_launch_override(state.settings(), &agent)?;
     // The words the wake carries are decided here, before the argv is built
     // (t-3058): whether a sleeper in the ledger is this very conversation
@@ -1035,31 +1027,24 @@ pub(crate) fn resume_session(
         && zerocode_core::AgentKind::from_slug(&agent).is_some_and(|kind| {
             zerocode_core::conversation_never_written(kind, &session, transcript_absent)
         });
-    // Nothing was said, so nothing was cut.
-    let interrupted = interrupted && !fresh;
-    // What the restart cut under this worker's pane, read at the goodbye
-    // (t-6428 ⑤): a wake whose turn had ended is still nudged when commands
-    // it left running were cut, and the nudge names them — the same road,
-    // the same receipt.
-    let cut = reseating
-        .as_deref()
-        .map(|worker| {
-            crate::orchestration::restart_census::take_cut(state.local_data_root(), worker)
-        })
-        .unwrap_or_default();
-    let marked = interrupted || !cut.is_empty();
-    let nudge = marked.then(|| {
-        restart_nudge_runtime::resume_nudge(
-            interrupted,
-            reseating.is_some(),
-            restart_nudge_runtime::worktree_state(
-                &root,
-                u64::try_from(now_epoch_ms() / 1_000).unwrap_or_default(),
-            )
-            .as_ref(),
-            &cut,
-        )
+    // Whether this wake is told to go on (t-7812 E): only a sleeper's, by the
+    // one policy the ledger's reseat keeps too — the turn the goodbye read as
+    // under way, or the commands it cut under the pane (t-6428 ⑤). A
+    // person's conversation comes back as it stood, whatever its tab's mark
+    // said; and a wake with no goodbye to read (a crash) is told nothing
+    // rather than guessed at.
+    let nudge = reseating.as_deref().and_then(|worker| {
+        restart_nudge_runtime::worker_nudge(state.local_data_root(), worker, Some(root.as_path()))
     });
+    let marked = nudge.is_some();
+    // And a sleeper's conversation comes back as the launch the ledger would
+    // have cut (t-7812 B): its model, its effort, its peer name. The pane the
+    // 2026-09-25 restart reopened without them was a default-model CLI that
+    // nobody had summoned.
+    let tuning = match reseating.as_deref() {
+        Some(worker) => crate::orchestration::sleeper_launch_tuning(worker)?,
+        None => Vec::new(),
+    };
     let ResumeCommand {
         kind,
         mut argv,
@@ -1071,7 +1056,7 @@ pub(crate) fn resume_session(
             &agent,
             &session,
             nudge.as_deref(),
-            &[],
+            &tuning,
             launch_override.as_ref(),
         )?
     };

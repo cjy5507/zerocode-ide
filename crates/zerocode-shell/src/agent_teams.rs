@@ -869,6 +869,23 @@ pub trait Host {
         None
     }
 
+    /// The live pane already holding this conversation, if one does
+    /// (t-7812) — the judgment every resume door asks
+    /// (`conversation_wake::claim_for_wake`), put to the ledger's reseat
+    /// before it cuts a pane. Test and tmux-only hosts hold none.
+    fn conversation_standing(
+        &self,
+        _agent: &str,
+        _session: &zerocode_core::ProviderSession,
+    ) -> Option<u32> {
+        None
+    }
+
+    /// Write the conversation a reseated pane IS into this window's pane
+    /// table (t-7812), so a door asking before the agent's first report is
+    /// told it stands there. Hosts without such a table keep nothing.
+    fn carry_session(&self, _term: u32, _session: &zerocode_core::ProviderSession) {}
+
     /// The agent's OWN words about a quota wall in this pane — one of the
     /// two witnesses a `quota_walled` notice needs (`quota_wall.rs`).
     ///
