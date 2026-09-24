@@ -305,6 +305,46 @@ fn a_spawn_is_judged_under_the_deterministic_classifier() {
     assert_eq!(rows[0]["routeUse"], "applied");
 }
 
+/// The memo is keyed by the facts beside the words (run-6774 V1): a spawn
+/// retried after a failed attempt carries `retry_of_failed_attempt`, and the
+/// complexity question reads it — so the same description and prompt under
+/// that fact is another state, and the first attempt's remembered answer is
+/// not recalled for it. The same words under the same facts are.
+#[test]
+fn a_retry_of_a_failed_attempt_is_judged_again_not_recalled() {
+    let judgment = answering(answer(2, 0.9));
+    let chat = probe();
+    let machine = Machine::new(json!({ "decisionShadow": "on" }), &judgment, &chat);
+    let inventory = super::ModelInventory::new(PARENT, Vec::new());
+    let prompt = unique_for("implement", "write the parser and its tests");
+    let mut judged = |retry_of_failed_attempt: bool| {
+        super::probe_exec::route_probe_assessment(
+            &inventory,
+            PARENT,
+            "implement",
+            &prompt,
+            runtime::RoutingFacts { retry_of_failed_attempt },
+            "turn-9@1",
+            super::probe_exec::Admitted { probe: true, read: true },
+        )
+    };
+
+    judged(false);
+    assert_eq!(judgment.requests().len(), 1, "the first attempt was judged");
+    judged(false);
+    assert_eq!(judgment.requests().len(), 1, "the same words under the same facts are recalled, not asked");
+    judged(true);
+    assert_eq!(
+        judgment.requests().len(),
+        2,
+        "a retry of a failed attempt is another state: the question reads the fact, so it is asked again"
+    );
+    let rows = machine.rows_after(3);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[1]["cached"], true, "the second first-attempt row came from the memo");
+    assert_ne!(rows[2]["cached"], true, "the retry's row did not");
+}
+
 /// The route-use words a routing row carries are the table's own, so the
 /// judge and every sweep of the ledger count them under one spelling.
 #[test]

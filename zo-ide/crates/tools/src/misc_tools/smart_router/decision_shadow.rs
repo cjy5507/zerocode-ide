@@ -510,12 +510,16 @@ pub(super) fn judged_axes(verdict: &DecisionVerdict) -> BTreeMap<String, JudgedA
 /// A task's judgment as this process remembers it. The key carries the rubric
 /// version and the requested model — the door's, pinned or not
 /// ([`jev_gate::model_key`]) — so a judgment made under other words or by
-/// another model is never recalled for this one.
+/// another model is never recalled for this one; and the facts the state
+/// carries beside the words (`RoutingFacts`), because the question reads
+/// them: a retry of a failed attempt with the same words is a different
+/// state, and the first attempt's answer is not its answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MemoKey {
     task: u64,
     rubric: u32,
     model: u64,
+    facts: RoutingFacts,
 }
 
 #[derive(Debug, Clone)]
@@ -1422,7 +1426,12 @@ async fn judge(
     deadline: Duration,
     active: bool,
 ) -> Judgment {
-    let key = MemoKey { task: shot.task, rubric: ROUTING_RUBRIC_VERSION, model: door.model_key() };
+    let key = MemoKey {
+        task: shot.task,
+        rubric: ROUTING_RUBRIC_VERSION,
+        model: door.model_key(),
+        facts: shot.facts,
+    };
     let recalled = memo().lock().ok().and_then(|memo| memo.get(&key).cloned());
     if let Some(remembered) = recalled {
         telemetry::attest_fired(telemetry::HarnessFeature::DecisionShadow);

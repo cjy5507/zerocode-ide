@@ -282,7 +282,7 @@ pub fn routing_questions() -> &'static BTreeMap<String, SystemOneQuestion> {
 
 /// What code knows about a task beside its words — the facts the state
 /// carries and a question reads by path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RoutingFacts {
     /// An earlier attempt at this same task already failed (a spawn's
     /// `prior_failures`). A person's turn is never marked: nothing says which
