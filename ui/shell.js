@@ -1231,7 +1231,7 @@ function boardLedgerIdentity(row) {
 
 /* Where a ledger row lands on the board: the seat's pane card when this
  * window drew one, else a card of its own under the worker's id. One rule for
- * both the card and the row that travels beside it (`boardCards`). */
+ * both the card and the row that travels beside it (`boardCardsAndLedger`). */
 function boardLedgerPane(row, drawn) {
   return row.term != null && drawn.has(`term:${row.term}`)
     ? `term:${row.term}`
@@ -1327,7 +1327,7 @@ function cardsFromLedger(rows, drawn) {
  * 실린다 — 한 노드가 두 시각을 말한다. 그래서 행은 **카드와 함께** 돌아가고,
  * 그 판을 그리는 손이 그 한 벌을 모델까지 들고 간다. 행의 자리는 카드가 앉은
  * 자리 그대로다(`boardLedgerPane`). */
-async function boardCards() {
+async function boardCardsAndLedger() {
   let panes = [];
   let listed = [];
   try {
@@ -1346,6 +1346,12 @@ async function boardCards() {
     if (row?.worker) ledger.set(boardLedgerPane(row, byPane), row);
   }
   return { cards, ledger };
+}
+
+/* The cards alone, from the same gathering — for a reader that does not draw
+ * the live map's waits (the badge). */
+async function boardCards() {
+  return (await boardCardsAndLedger()).cards;
 }
 
 /* 판 하나가 떠날 때 받는 표 (t-7288).
@@ -1576,7 +1582,7 @@ window.addEventListener("keydown", (event) => {
 async function refreshBoardBadge() {
   const ask = boardAsk();
   try {
-    const { cards } = await boardCards();
+    const cards = await boardCards();
     const answer = await invoke("board_snapshot", {
       cards,
       query: agentGraphSnapshotQuery(),
@@ -2881,7 +2887,7 @@ function agentGraphModel(columns, places, reviews,
   search = boardQuery,
   overlays = {},
   /* `ledger` is the ledger rows the same paint asked beside its cards (pane →
-   * row, `boardCards`). The model keeps it in `source` so every rebuild from
+   * row, `boardCardsAndLedger`). The model keeps it in `source` so every rebuild from
    * this snapshot reads the same bundle, never a later paint's rows. */
   { scoped = false, ledger = null } = {},
 ) {
@@ -7402,7 +7408,7 @@ async function paintAgentGraphView(
   try {
     wireBoardHead(view);
     if (agentBoardMode === "tasks") primeCoordinatorDesk();
-    const bundle = snapshot ?? await boardCards();
+    const bundle = snapshot ?? await boardCardsAndLedger();
     const { cards } = bundle;
     /* 이 판의 카드를 지은 그 원장 행. 모델이 `source`에 들고 가므로, 다시 짓는
      * 판(선택·접기·오버레이)도 같은 한 벌을 읽는다. */
@@ -10276,7 +10282,7 @@ async function refreshAgentGraphSurfaces({ badge, graph }) {
     /* 표는 **묻기 전에** 받는다 (t-7288): 답이 오는 사이 범위가 움직이거나 더
      * 늦게 떠난 답이 먼저 들어가면, 이 답은 그 표면에 쓰지 않는다. */
     const ask = boardAsk();
-    const { cards, ledger } = await boardCards();
+    const { cards, ledger } = await boardCardsAndLedger();
     const answer = await invoke("board_snapshot", {
       cards,
       query: agentGraphSnapshotQuery(),
