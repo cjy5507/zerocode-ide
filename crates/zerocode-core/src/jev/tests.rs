@@ -2304,3 +2304,84 @@ fn every_seat_names_its_rubric_and_how_its_labels_name_a_request() {
         "a progress mark names the judgment it grades by the turn and the step it was asked at"
     );
 }
+
+/// What a request's name picks out is the table's to say, seat by seat
+/// (t-6877 round 3, astra R1b): the routing seat's attempt names a turn of
+/// several judgments; the recall, mention and both skills seats name the
+/// words asked, which the same words asked again carry again — so their
+/// labels name the time of the asking they grade; every other seat's name
+/// is an id its writer made for one request. A label grades a part of its
+/// request only where the request has several — the compaction seat's
+/// dropped blocks — and a part's keys are keys a label row carries.
+#[test]
+fn every_seat_says_what_its_request_name_picks_out() {
+    for row in &JEV_USES {
+        let expected = match row.id {
+            id if id == ROUTING.id => Naming::Turn,
+            id if [RECALL.id, MENTION_RERANK.id, SKILLS.id, SKILL_SUGGESTION.id].contains(&id) => {
+                Naming::Words
+            }
+            _ => Naming::Request,
+        };
+        assert_eq!(row.names, expected, "{}", row.id);
+        if row.names != Naming::Request {
+            assert!(
+                !row.request_name.is_empty(),
+                "{}: a name that picks out words or a turn is carried under some key",
+                row.id
+            );
+        }
+        for key in row.label_part {
+            assert!(
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{}: {key:?} is not a key a label row carries",
+                row.id
+            );
+        }
+        let parts: &[&str] = if row.id == COMPACTION.id {
+            &["block"]
+        } else {
+            &[]
+        };
+        assert_eq!(row.label_part, parts, "{}", row.id);
+    }
+}
+
+/// A seat split off another follows a word written for the other, and only
+/// a seat that was (t-6877 round 3, m-8181): the skill suggestion follows
+/// the search's setting — another row's, never its own — reads every word
+/// the search offers as the search reads it, and the search follows
+/// nothing, so a word is followed one step and never round a circle.
+#[test]
+fn a_seat_follows_only_the_seat_it_was_split_from() {
+    for row in &JEV_USES {
+        let Some(followed) = row.follows else {
+            continue;
+        };
+        assert_eq!(
+            (row.id, followed),
+            (SKILL_SUGGESTION.id, SKILLS.setting),
+            "only the skill suggestion was split from another seat"
+        );
+        let from = JEV_USES
+            .iter()
+            .find(|other| other.setting == followed)
+            .expect("the followed setting is a row's");
+        assert_ne!(from.id, row.id, "a seat does not follow itself");
+        assert_eq!(
+            from.follows, None,
+            "{}: a followed seat follows nothing",
+            from.id
+        );
+        for mode in from.modes {
+            assert!(
+                row.modes.contains(mode),
+                "{}: {} is a word {} offers and this seat would read as off",
+                row.id,
+                mode.key(),
+                from.id
+            );
+        }
+    }
+    assert_eq!(SKILL_SUGGESTION.follows, Some(SKILLS.setting));
+}

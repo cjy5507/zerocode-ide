@@ -991,8 +991,9 @@ fn a_turn_label_is_one_comparison_in_the_window_of_the_turn_it_grades() {
 
 /// A seat's week of marks is counted beside its judged window (t-5806): the
 /// recall seat's labels — each naming the request it grades by its query
-/// and notes (t-6877) — are its agreement in both; the window keeps the
-/// mark of an old request it still holds, and the week does not.
+/// and notes and the time it was asked, as the seat's writer names it
+/// (t-6877) — are its agreement in both; the window keeps the mark of an
+/// old request it still holds, and the week does not.
 #[test]
 fn a_seats_week_of_marks_is_counted_beside_its_judged_window() {
     use zerocode_core::jev::promote::{Agreement, Line, Verdict};
@@ -1007,11 +1008,11 @@ fn a_seats_week_of_marks_is_counted_beside_its_judged_window() {
             // Older than the week, still in the window: its mark is the
             // window's and not the week's.
             json!({"at": old, "query": 5, "notes": 6, "outcome": "answered", "elapsed_ms": 5, "applied": true}),
-            json!({"at": old + 1, "label": "5:6", "query": 5, "notes": 6, "applied": true, "agreed": false}),
+            json!({"at": old + 1, "label": "5:6", "requestAt": old, "query": 5, "notes": 6, "applied": true, "agreed": false}),
             json!({"at": 1, "query": 1, "notes": 2, "outcome": "answered", "elapsed_ms": 5, "applied": false}),
             json!({"at": 2, "query": 3, "notes": 4, "outcome": "answered", "elapsed_ms": 5, "applied": true}),
-            json!({"at": 3, "label": "1:2", "query": 1, "notes": 2, "applied": false, "agreed": true, "rank": 0}),
-            json!({"at": 4, "label": "3:4", "query": 3, "notes": 4, "applied": true, "agreed": false}),
+            json!({"at": 3, "label": "1:2", "requestAt": 1, "query": 1, "notes": 2, "applied": false, "agreed": true, "rank": 0}),
+            json!({"at": 4, "label": "3:4", "requestAt": 2, "query": 3, "notes": 4, "applied": true, "agreed": false}),
         ],
     );
     let report = one(seat, &roots, None, None, 1_000, 0);

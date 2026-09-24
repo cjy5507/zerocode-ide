@@ -545,8 +545,11 @@ fn auto_rises_on_its_own_labels_and_the_next_page_takes_the_judgments_order() {
         let misses = MENTION_RERANK.negatives_wanted.expect("the seat rises");
         let marks = marks_that_can_clear(&MENTION_RERANK).expect("the seat rises");
         for at in 0..marks {
+            // Named by the page's words and the time it was asked, as the
+            // seat's label writer names it (t-6877).
             let label = serde_json::json!({
                 "kind": LABEL_ROW_KIND, "at": now + 5_000 + at as u64, "surface": "mention", "label": format!("{at}:{at}"),
+                "requestAt": now + 1_000 + at as u64,
                 "query": at, "notes": at, "applied": false, "agreed": at >= misses, "baselineAgreed": at % 2 == 0, "rank": 0,
             });
             append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");

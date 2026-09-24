@@ -63,7 +63,8 @@
 //! ([`crate::jev::summary::RUBRIC_VERSION`]; one that names none is the
 //! first rubric's), the marks that grade those requests — a label joined to
 //! one request by the name the seat's row says a request carries
-//! ([`JevUse::request_name`]) and the time it was asked
+//! ([`JevUse::request_name`]), picking a request out as that row says the
+//! name does ([`JevUse::names`]), and the time it was asked
 //! ([`crate::jev::summary::REQUEST_AT`]), the request being the authority
 //! on which rubric the label belongs to and on which version answered it;
 //! a label that could mean two requests grades neither — and, inside that
@@ -84,7 +85,7 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 use crate::jev::questions::UNVERSIONED_RUBRIC;
-use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, JevUse};
+use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, JevUse, Naming};
 
 use crate::jev::summary::{
     AGREED, AT, BASELINE_AGREED, JUDGED_EVERY_ROWS, LABEL, MODEL, NOT_COMPARED, REQUEST_AT,
@@ -132,26 +133,28 @@ pub struct Judged {
 /// is nobody's), and the marks that grade them. A label names its request
 /// by the name the seat's row says a request carries
 /// ([`JevUse::request_name`]) and, when it carries it, by the time that
-/// request was asked ([`crate::jev::summary::REQUEST_AT`]): the request
-/// above it carrying that name at that time is the one it grades. A label
-/// carrying no time joins a name only while every request above it carrying
-/// the name is one occurrence as far as the label can tell — the same
-/// rubric, the same answering version, the same side of the series' start
-/// (the routing seat's label names a turn, which is several rows) — because
-/// the recall and mention seats name a request by the fingerprints of what
-/// was asked, and the same words asked again carry the same name: a label
-/// of the older asking joined by "the nearest" would grade the newer. A
-/// label that names no request — none above it, requests it could mean that
-/// differ in what it would inherit, a time no request above it was asked
-/// at, its own request trimmed away — grades nothing; a label spelling a rubric its
-/// request does not carry grades nothing; a label of a seat whose labels
-/// name no request grades nothing; and of two labels naming one request the
-/// newest counts. The request is the authority on everything the label
-/// inherits: which rubric it belongs to, and which version answered it — a
-/// label spelling a rubric or a version its request contradicts grades
-/// nothing, and a label's own version is read only where its request names
-/// none (every request written before versions were recorded). A mark on a
-/// request row is that row's. Which marks are the WINDOW's is a matter of time and not of naming
+/// request was asked ([`crate::jev::summary::REQUEST_AT`]), and the name
+/// picks out what the seat's row says it does ([`JevUse::names`], t-6877
+/// round 3): an id picks out the one request above the label carrying it;
+/// the fingerprints of the words asked pick out no asking on their own —
+/// the same words asked again carry them again — so a label of the recall,
+/// mention or skills seats grades only the asking made at the time it
+/// names, and a label naming no time grades nothing; and the routing seat's
+/// attempt names a turn, whose several rows stand as one while they agree
+/// on the rubric, the answering version and the side of the series' start.
+/// Wherever the name and the time could mean two requests, the label grades
+/// neither — the reader guesses none, and never the newest of two. A label
+/// that names no request — none above it, a time no request above it was
+/// asked at, its own request trimmed away — grades nothing; a label of a
+/// seat whose labels name no request grades nothing; and of two labels
+/// naming one request, and one part of it where the seat's labels grade
+/// parts ([`JevUse::label_part`]), the newest counts. The request is the
+/// authority on everything the label inherits: which rubric it belongs to,
+/// and which version answered it — a label spelling a rubric or a version
+/// its request contradicts grades nothing, and a label's own version is
+/// read only where its request names none (every request written before
+/// versions were recorded). A mark on a request row is that row's. Which
+/// marks are the WINDOW's is a matter of time and not of naming
 /// ([`judge_seat`]): every mark of the series written since the window's
 /// first request, because a seat's marks lag its requests and a window
 /// narrower than the marks a line needs (placement's 25 rows against 40
@@ -281,11 +284,11 @@ fn is_mark(row: &Value) -> bool {
 
 /// Whether `row` is a request of words newer than `seat` asks — the fence
 /// a seat's series starts behind, and the one thing a standing read off a
-/// ledger's text has to read a request line for. One reader for the rows
-/// and the text ([`series_from`], [`standing_in`]): a request or a control
-/// row, stamped with a version — an integer, and newer — because a label
-/// spelling a newer version fences nothing, and neither does a request
-/// spelling something that is not a version.
+/// ledger's text has to read a request line for. One reader for the series
+/// and for both standing reads ([`series_from`], [`stands_on`]): a request
+/// or a control row, stamped with a version — an integer, and newer —
+/// because a label spelling a newer version fences nothing, and neither
+/// does a request spelling something that is not a version.
 fn fences(seat: &JevUse, row: &Value) -> bool {
     is_asked(row)
         && matches!(Rubric::of(row), Rubric::Named(version) if version > seat.rubric_version)
@@ -371,19 +374,28 @@ fn series_from(seat: &JevUse, rows: &[Value]) -> usize {
         .map_or(0, |at| at + 1)
 }
 
-/// The request the label at `at` grades, by ledger index: of the requests
+/// The request the label at `at` grades, by ledger index — of the requests
 /// above it carrying the name it repeats (`named`, by
 /// [`JevUse::request_name`]), the ones asked at the time the label names
-/// ([`REQUEST_AT`]), or all of them for a label naming no time. One request
-/// is the one it grades. Several are one occurrence only when the label
-/// could not have inherited anything different from any of them — the
-/// routing seat's label names a turn, and a turn is several request rows
-/// asked under one rubric and answered by one version — so they must agree
-/// on the rubric, on the version that answered, and on which side of the
-/// series' start (`from`) they stand; the newest then stands for them. Any
-/// disagreement is a label that could mean two different requests, and it
-/// means neither: the reader guesses none. `None` too for a label no
-/// request above answers to.
+/// ([`REQUEST_AT`]), or every one of them for a label naming no time — as
+/// the seat's row says its name picks a request out ([`JevUse::names`],
+/// t-6877 round 3):
+///
+/// - [`Naming::Request`]: the one such request. Two carrying an id made
+///   for one request are two requests nothing tells apart, and the label
+///   grades neither.
+/// - [`Naming::Words`]: the one asking made at the time the label names. A
+///   label naming no time grades nothing — the same words asked again carry
+///   the same name, and the asking it meant may have been trimmed away with
+///   another left in its place — and a time two askings share names
+///   neither.
+/// - [`Naming::Turn`]: the newest, standing for the turn's rows while they
+///   could hand the label nothing different — the same rubric, the same
+///   answering version, the same side of the series' start (`from`). Rows
+///   that disagree could be two turns, and the label grades neither.
+///
+/// `None` too for a label no request above answers to. The reader guesses
+/// no request, and never the newest of two.
 fn request_of(
     seat: &JevUse,
     named: &HashMap<Name<'_>, Vec<usize>>,
@@ -397,21 +409,27 @@ fn request_of(
     let when = match REQUEST_AT.read(label) {
         // A time that is not a time names no request.
         Some(when) => Some(when.as_i64()?),
+        None if seat.names == Naming::Words => return None,
         None => None,
     };
     let mut found = above.iter().copied().filter(|index| {
         when.is_none_or(|when| AT.read(&rows[*index]).and_then(Value::as_i64) == Some(when))
     });
     let newest = found.next_back()?;
-    let inherits = |index: usize| {
-        (
-            Rubric::of(&rows[index]).version(),
-            named_version(&rows[index]),
-            index >= from,
-        )
-    };
-    let one = inherits(newest);
-    found.all(|index| inherits(index) == one).then_some(newest)
+    match seat.names {
+        Naming::Request | Naming::Words => found.next().is_none().then_some(newest),
+        Naming::Turn => {
+            let inherits = |index: usize| {
+                (
+                    Rubric::of(&rows[index]).version(),
+                    named_version(&rows[index]),
+                    index >= from,
+                )
+            };
+            let one = inherits(newest);
+            found.all(|index| inherits(index) == one).then_some(newest)
+        }
+    }
 }
 
 /// `rows` read as `seat`'s current series from its newest answering
@@ -435,9 +453,11 @@ pub fn on_the_newest_version<'rows>(seat: &JevUse, rows: &'rows [Value]) -> OnVe
         }
     }
     // What each row is to the series, by ledger index: asked under the
-    // seat's rubric, or grading such a request.
+    // seat's rubric, or grading such a request. The newest label of each
+    // request — of each part of it, where the seat's labels grade parts
+    // ([`JevUse::label_part`]).
     let mut kind: Vec<Option<InSeries>> = vec![None; rows.len()];
-    let mut newest_label: HashMap<usize, usize> = HashMap::new();
+    let mut newest_label: HashMap<(usize, Option<Name<'rows>>), usize> = HashMap::new();
     for (at, row) in rows.iter().enumerate() {
         if TRANSITION.read(row).is_some() {
             continue;
@@ -475,7 +495,7 @@ pub fn on_the_newest_version<'rows>(seat: &JevUse, rows: &'rows [Value]) -> OnVe
         }
         if request >= from && version == seat.rubric_version {
             kind[at] = Some(InSeries::Grades(request));
-            newest_label.insert(request, at);
+            newest_label.insert((request, Name::of(seat.label_part, row)), at);
         }
     }
     // The series, and beside each row the version that answered it: a
@@ -487,8 +507,9 @@ pub fn on_the_newest_version<'rows>(seat: &JevUse, rows: &'rows [Value]) -> OnVe
             None => continue,
             Some(InSeries::Asked) => named_version(row),
             Some(InSeries::Grades(request)) => {
-                // Of two labels naming one request, the newest.
-                if newest_label.get(&request) != Some(&at) {
+                // Of two labels naming one request and one part of it, the
+                // newest.
+                if newest_label.get(&(request, Name::of(seat.label_part, row))) != Some(&at) {
                     continue;
                 }
                 // The request's version; the label's own only where the
@@ -1198,85 +1219,125 @@ pub fn labels_path_in(root: &Value) -> Option<&str> {
 /// ([`on_the_newest_version`]) and revives nothing. A transition that names
 /// something that is not a version stands for nothing.
 ///
-/// [`stand_from`] is the word of the newest transition whatever rubric
-/// wrote it — what this reads, before it asks the rubric.
+/// Read newest row first, one row at a time (`stands_on`) — the step
+/// [`standing_in`] walks a ledger's text with, so the two cannot read a row
+/// apart. [`stand_from`] is the word of the newest transition whatever
+/// rubric wrote it — what this reads, before it asks the rubric.
 #[must_use]
 pub fn standing(seat: &JevUse, rows: &[Value]) -> Stand {
-    let from = series_from(seat, rows);
-    rows[from..]
-        .iter()
+    rows.iter()
         .rev()
-        .find_map(|row| stand_of(row).map(|stand| (row, stand)))
-        .filter(|(row, _)| decided_on_these_words(seat, row))
-        .map_or(Stand::Recording, |(_, stand)| stand)
+        .find_map(|row| stands_on(seat, row))
+        .unwrap_or(Stand::Recording)
+}
+
+/// What one row, read newest first, says of where `seat` stands — the one
+/// step both standing readers take ([`standing`], [`standing_in`], t-6877
+/// round 3). A request of words newer than the seat's ([`fences`]) puts it
+/// behind its series, and so recording, whatever else the row carries; a
+/// transition stands it where the transition says while it was decided on
+/// the words the seat asks now, and at recording otherwise; any other row
+/// says nothing, and the reader goes on to the row before it.
+fn stands_on(seat: &JevUse, row: &Value) -> Option<Stand> {
+    if fences(seat, row) {
+        return Some(Stand::Recording);
+    }
+    let stand = stand_of(row)?;
+    Some(if decided_on_these_words(seat, row) {
+        stand
+    } else {
+        Stand::Recording
+    })
 }
 
 /// [`standing`] read off a ledger's text, newest line first, parsing only
-/// the lines that can say something: the lines that carry a transition's
-/// key, and the lines that could be a request of newer words than the
-/// seat's (`fences` — the one reader the rows are read with, so the text
-/// and the rows cannot disagree on what a fence is). An `auto` seat reads
+/// the lines that may say something (`may_speak`: a line holding an escape,
+/// the transition's key, or a rubric that is not a plain integer no newer
+/// than the seat's) and reading each of those with the step the rows are
+/// read with (`stands_on`), so the text and the rows cannot disagree on
+/// what a line says (t-6877 round 3, astra R2). An `auto` seat reads
 /// its standing on every turn it is asked about, and a full ledger is
 /// thousands of request rows around a transition or two: parsing every row
 /// cost 35.6 ms at the 8 MiB cap (4,720 routing rows of the second
 /// version, 2026-09-24, t-6346). A request line whose rubric is spelled as
 /// a plain integer no newer than the seat's — every request line of a
-/// seat's own rubric — is never parsed (`may_fence`), which is what keeps
-/// the read at the cost of the transition lines alone on a ledger the seat
-/// wrote itself; a line spelling anything else there is parsed and read as
-/// the rows are.
+/// seat's own rubric — is never parsed, which is what keeps the read at the
+/// cost of the transition lines alone on a ledger the seat wrote itself.
 #[must_use]
 pub fn standing_in(seat: &JevUse, text: &str) -> Stand {
-    let transition_keys: Vec<String> = TRANSITION
-        .spellings()
-        .map(|name| format!("\"{name}\""))
-        .collect();
-    let rubric_keys: Vec<String> = RUBRIC_VERSION
-        .spellings()
-        .map(|name| format!("\"{name}\""))
-        .collect();
-    for line in text.lines().rev() {
-        if transition_keys
-            .iter()
-            .any(|key| line.contains(key.as_str()))
-        {
-            let Some(row) = serde_json::from_str::<Value>(line).ok() else {
-                continue;
-            };
-            let Some(stand) = stand_of(&row) else {
-                continue;
-            };
-            return if decided_on_these_words(seat, &row) {
-                stand
-            } else {
-                Stand::Recording
-            };
-        }
-        // A request of words newer than the seat's own, between now and any
-        // older transition: the seat's words went back, and it records.
-        if may_fence(seat, line, &rubric_keys)
-            && serde_json::from_str::<Value>(line)
-                .ok()
-                .is_some_and(|row| fences(seat, &row))
-        {
-            return Stand::Recording;
+    let keys = QuotedKeys::new();
+    text.lines()
+        .rev()
+        .filter(|line| may_speak(seat, line, &keys))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|row| stands_on(seat, &row))
+        .unwrap_or(Stand::Recording)
+}
+
+/// The keys a ledger line is searched for, each spelling in its quotes as a
+/// line spells a key: the transition's ([`TRANSITION`]) and the rubric's
+/// ([`RUBRIC_VERSION`]).
+struct QuotedKeys {
+    transition: Vec<String>,
+    rubric: Vec<String>,
+}
+
+impl QuotedKeys {
+    fn new() -> Self {
+        let quoted = |key: crate::jev::summary::LedgerKey| -> Vec<String> {
+            key.spellings().map(|name| format!("\"{name}\"")).collect()
+        };
+        Self {
+            transition: quoted(TRANSITION),
+            rubric: quoted(RUBRIC_VERSION),
         }
     }
-    Stand::Recording
+}
+
+/// Whether a ledger line may say where `seat` stands ([`stands_on`]), read
+/// off the text alone (t-6877 round 3, astra R2). `false` only for a line
+/// that provably cannot: it holds no escape ([`holds_an_escape`]), spells no
+/// transition's key ([`spells_a_key`]) and is no request of newer words as
+/// it is spelled ([`may_fence_as_spelled`]). Everything else is parsed and
+/// read as the rows are read; the text decides nothing itself. The escape
+/// is looked for once, before the spellings only an escape could hide.
+fn may_speak(seat: &JevUse, line: &str, keys: &QuotedKeys) -> bool {
+    holds_an_escape(line)
+        || spells_a_key(line, &keys.transition)
+        || may_fence_as_spelled(seat, line, &keys.rubric)
+}
+
+/// Whether a ledger line holds a JSON escape. Where it holds none, every
+/// key in it is spelled as the parser reads it, and a search of its text
+/// for a key's spelling finds the key or proves it absent; where it holds
+/// one, `"\u0074ransition"` is `transition` and `"rubric\u0056ersion"` the
+/// rubric, and only the parser can say.
+fn holds_an_escape(line: &str) -> bool {
+    line.contains('\\')
+}
+
+/// Whether a ledger line spells one of `keys` (a key's spellings in their
+/// quotes) anywhere — as a key of the row, of an object inside it, or as a
+/// word in a value; the step the line is read with asks the row itself.
+/// Read on a line that holds no escape ([`holds_an_escape`]), where a key's
+/// spelling is the key.
+fn spells_a_key(line: &str, keys: &[String]) -> bool {
+    keys.iter().any(|key| line.contains(key.as_str()))
 }
 
 /// Whether a ledger line could be a request of words newer than `seat`'s
-/// ([`fences`]), read off the text alone — `keys` are the spellings of
-/// [`RUBRIC_VERSION`], each in its quotes. `false` only for a line that
-/// cannot be one: every spelling of the key it carries is followed by a
-/// colon and a plain integer no newer than the seat's rubric, the value
-/// ending there. Everything else — a newer integer, a fraction, a word, a
-/// null, a key with no colon after it, a line torn before the value ends —
-/// is `true`, and the line is parsed and read as the rows are read; the
-/// text decides nothing itself. One search for what every spelling opens
-/// with, then the spellings at that spot: a line is searched once, not once
-/// per spelling.
-fn may_fence(seat: &JevUse, line: &str, keys: &[String]) -> bool {
+/// ([`fences`]), read off its spelling — `keys` are the spellings of
+/// [`RUBRIC_VERSION`], each in its quotes — on a line that holds no escape
+/// ([`holds_an_escape`]; an escape could spell the key as
+/// `"rubric\u0056ersion"`). `false` only for a line that cannot be one:
+/// every spelling of the key it carries is followed by a colon and a plain
+/// integer no newer than the seat's rubric, the value ending there.
+/// Everything else — a newer integer, a fraction, a word, a null, a key
+/// with no colon after it, a line torn before the value ends — is `true`,
+/// and the line is parsed and read as the rows are read. One search for
+/// what every spelling opens with, then the spellings at that spot: a line
+/// is searched once, not once per spelling.
+fn may_fence_as_spelled(seat: &JevUse, line: &str, keys: &[String]) -> bool {
     line.match_indices(RUBRIC_KEY_OPENS).any(|(at, _)| {
         let opens = &line[at..];
         let Some(key) = keys.iter().find(|key| opens.starts_with(key.as_str())) else {
@@ -1301,7 +1362,7 @@ fn may_fence(seat: &JevUse, line: &str, keys: &[String]) -> bool {
 }
 
 /// What every spelling of [`RUBRIC_VERSION`] opens with, as a ledger line
-/// spells it — the one thing [`may_fence`] searches a line for.
+/// spells it — the one thing [`may_fence_as_spelled`] searches a line for.
 const RUBRIC_KEY_OPENS: &str = "\"rubric";
 
 /// Whether a transition row was decided on exactly the words `seat` asks
@@ -1349,17 +1410,15 @@ pub fn stand_from(rows: &[Value]) -> Stand {
 }
 
 /// [`stand_from`] read off a ledger's text, parsing only the lines that
-/// carry a transition's key, newest first (t-6346). A seat's standing is
-/// [`standing_in`], which asks the rubric too.
+/// may carry a transition — its key, or an escape that could spell it —
+/// newest first (t-6346). A seat's standing is [`standing_in`], which asks the rubric
+/// too.
 #[must_use]
 pub fn stand_in(text: &str) -> Stand {
-    let keys: Vec<String> = TRANSITION
-        .spellings()
-        .map(|name| format!("\"{name}\""))
-        .collect();
+    let keys = QuotedKeys::new();
     text.lines()
         .rev()
-        .filter(|line| keys.iter().any(|key| line.contains(key.as_str())))
+        .filter(|line| holds_an_escape(line) || spells_a_key(line, &keys.transition))
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find_map(|row| stand_of(&row))
         .unwrap_or(Stand::Recording)

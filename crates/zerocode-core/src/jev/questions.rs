@@ -27,8 +27,8 @@ pub const CHALLENGER_RUBRIC_VERSION: u32 = 1;
 pub const RECALL_RUBRIC_VERSION: u32 = 1;
 /// The skills seat's explicit search — `skill_search`, the tool an agent
 /// calls — whose words are zo's `runtime::skill_rank` and are pinned there.
-/// The seat's other question, the turn boundary's suggestion, is
-/// [`SKILL_SUGGESTION_RUBRIC_VERSION`]; both are asked into one ledger.
+/// The turn boundary's suggestion asks [`SKILL_SUGGESTION_RUBRIC_VERSION`],
+/// a seat and a ledger of its own (t-6877).
 pub const SKILL_SEARCH_RUBRIC_VERSION: u32 = 1;
 /// The compaction seat's rubric, whose words are zo's
 /// `runtime::compact::relevance::rubric_words` and are pinned there.
@@ -50,8 +50,9 @@ pub const CLAIM_RUBRIC_VERSION: u32 = 1;
 /// `tools::misc_tools::smart_router::file_pick`, pinned there.
 pub const FILE_PICK_RUBRIC_VERSION: u32 = 1;
 
-/// Skill suggestion's two requests share these words and thresholds in the
-/// SKILLS row. A changed question starts a new comparison series.
+/// Skill suggestion's two requests share these words and thresholds in its
+/// own row (`SKILL_SUGGESTION`, t-6877). A changed question starts a new
+/// comparison series.
 pub const SKILL_SUGGESTION_RUBRIC_VERSION: u32 = 2;
 pub const SKILL_WIDE_STATE_SHAPE: &str =
     "wide state: task; choice criteria: skill name and description";
@@ -584,10 +585,10 @@ pub const SCREEN_INSTRUCTED_NO: &str = concat!(
 /// block over bare or the window had wrapped it (t-6982); version 3 grades
 /// the rule on the host's own word and marks nothing where the host cannot
 /// say (t-7058, `tool_guard::todays_text_rule` in the tools crate). The
-/// version rides every request row so a reader can tell the series apart;
-/// the shared promotion reader (`promote::named_version`) still windows by
-/// model alone, and reading requests, labels and standing per rubric version
-/// is t-6877's contract.
+/// version rides every request row, and the shared promotion reader reads
+/// one version's series — its requests, the labels that grade them and the
+/// rise they earn (`promote::on_the_newest_version`, `promote::standing`,
+/// t-6877).
 pub const TOOL_TEXT_GUARD_RUBRIC_VERSION: u32 = 3;
 /// The keys the tool text guard's state carries, in the order the use table
 /// declares them: the kind of tool the block came from, and its head.

@@ -97,9 +97,11 @@ pub struct SwitchRow {
     pub setting: &'static str,
     pub mode: &'static str,
     pub modes: Vec<ModeChoice>,
-    /// Whether the settings file holds a word of this feature's own
-    /// (`smart.<setting>`): a person's hand-written choice, which the switch
-    /// does not govern until the next press on (§6.1).
+    /// Whether a word a person wrote governs this feature
+    /// ([`JevUse::word_in`]): its own (`smart.<setting>`), or — for a feature
+    /// split off another, while it has none of its own — the one written for
+    /// that other (t-6877, [`JevUse::follows`]). A hand-written choice, which
+    /// the switch does not govern until the next press on (§6.1).
     pub written: bool,
     /// How many compared marks the judge wants before the seat's accuracy
     /// may speak ([`JevUse::agreement_rows_wanted`]) — the sample the
@@ -1316,8 +1318,14 @@ mod tests {
             .iter()
             .map(|row| {
                 let modes: Vec<&str> = row.modes.iter().map(|mode| mode.key()).collect();
+                // The setting a feature split off another reads while it has
+                // no word of its own (t-6877), named only where there is one.
+                let follows = row
+                    .follows
+                    .map(|setting| format!(", follows: \"{setting}\""))
+                    .unwrap_or_default();
                 format!(
-                    "Object.freeze({{ id: \"{}\", setting: \"{}\", modes: \"{}\", recommended: \"{}\" }}),",
+                    "Object.freeze({{ id: \"{}\", setting: \"{}\", modes: \"{}\", recommended: \"{}\"{follows} }}),",
                     row.id,
                     row.setting,
                     modes.join(" "),

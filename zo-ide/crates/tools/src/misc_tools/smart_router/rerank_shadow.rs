@@ -2846,8 +2846,11 @@ mod tests {
             let misses = RECALL.negatives_wanted.expect("recall rises");
             let marks = marks_that_can_clear(&RECALL).expect("recall rises");
             for at in 0..marks {
+                // Named by the words and the time the reading was made, as
+                // the seat's label writer names it (t-6877).
                 let label = serde_json::json!({
-                    "at": after_the_window + i64::try_from(at).unwrap_or_default(), "label": format!("{at}:{at}"), "query": at, "notes": at,
+                    "at": after_the_window + i64::try_from(at).unwrap_or_default(), "label": format!("{at}:{at}"),
+                    "requestAt": 1_000 + at, "query": at, "notes": at,
                     "applied": false, "agreed": at >= misses, "baselineAgreed": at % 2 == 0, "rank": 0,
                 });
                 append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");

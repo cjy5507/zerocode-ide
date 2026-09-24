@@ -53,13 +53,14 @@ const TYPESAFE_DECISION_MODES = Object.freeze([
    seat offers all four, a seat nothing labels offers no `auto` — and the mode
    it stands at while Jev is switched on and nobody wrote a word for it
    (`JevUse::recommended`) — `off` for the two seats stopped on their own
-   evidence (t-6342). `typesafe_settings.rs` holds this list against the
-   table. */
+   evidence (t-6342) — and, for a seat split off another, the setting whose
+   word it reads while it has none of its own (`JevUse::follows`, t-6877).
+   `typesafe_settings.rs` holds this list against the table. */
 const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "skills", setting: "skillSearch", modes: "off shadow on auto", recommended: "auto" }),
-  Object.freeze({ id: "skill_suggestion", setting: "skillSuggestion", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "skill_suggestion", setting: "skillSuggestion", modes: "off shadow on auto", recommended: "auto", follows: "skillSearch" }),
   Object.freeze({ id: "browser", setting: "browserAction", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "desktop", setting: "desktopAction", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "emulator", setting: "emulatorAction", modes: "off shadow on auto", recommended: "auto" }),
@@ -2729,8 +2730,13 @@ class StatefulBackend {
     /* `door::switched_on`: the switch written, and true. */
     const switchedOn = door?.enabled === true;
     /* Every seat reads its own row's words and anything else is off; a seat
-       nobody wrote a word for stands at its recommendation while the switch is
-       on and is off otherwise: `JevUse::mode_in`. */
+       split off another reads the word written for that other while it has
+       none of its own (`JevUse::word_in`); a seat nobody wrote a word for
+       stands at its recommendation while the switch is on and is off
+       otherwise: `JevUse::mode_in`. */
+    const wordOf = (seat) => smart[seat.setting] !== undefined || seat.follows === undefined
+      ? smart[seat.setting]
+      : smart[seat.follows];
     const mode = (seat, given) => {
       const offered = seat.modes.split(" ");
       if (given === undefined) return switchedOn ? seat.recommended : offered[0];
@@ -2740,9 +2746,9 @@ class StatefulBackend {
     const switches = JEV_SEATS.map((seat) => ({
       id: seat.id,
       setting: seat.setting,
-      mode: mode(seat, smart[seat.setting]),
+      mode: mode(seat, wordOf(seat)),
       modes: clone(jevSeatModes(seat)),
-      written: smart[seat.setting] !== undefined,
+      written: wordOf(seat) !== undefined,
     }));
     /* `JevSwitch::of`: the door lets a request through (unset is on, anything
        but `true` is off), some seat asks, and some folder is consented. */

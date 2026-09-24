@@ -39,16 +39,26 @@ fn named(seat: &JevUse, n: usize) -> Value {
     }
 }
 
+/// A label row of `seat` grading request `n`, written at `at`, as the
+/// seat's writers write one now: the request's name ([`named`]) and the
+/// time it was asked — [`asked_by`] asks request `n` at `n` — which is all
+/// that picks out one asking of words asked again (t-6877 round 3,
+/// [`crate::jev::Naming::Words`]).
+fn label_of(seat: &JevUse, at: usize, n: usize) -> Value {
+    json!({"at": at, "label": named(seat, n), (REQUEST_AT.canonical): n})
+}
+
 /// A mark of `seat` grading request `n`, written at `at`, as the seat's
 /// writer writes one (t-6877): a label row naming the request, for a seat
-/// whose labels name one ([`JevUse::request_name`]); for a seat whose marks
-/// sit on the request row itself — the screen seats', the summons', the
-/// judgment cache's, the branching fork's — a request row carrying it.
+/// whose labels name one ([`JevUse::request_name`], [`label_of`]); for a
+/// seat whose marks sit on the request row itself — the screen seats', the
+/// summons', the judgment cache's, the branching fork's — a request row
+/// carrying it.
 fn mark(seat: &JevUse, at: usize, n: usize, fields: Value) -> Value {
     let mut row = if seat.request_name.is_empty() {
         asked_by(seat, at)
     } else {
-        json!({"at": at, "label": named(seat, n)})
+        label_of(seat, at, n)
     };
     for (key, value) in fields.as_object().expect("the mark's fields") {
         row[key.as_str()] = value.clone();
@@ -75,7 +85,7 @@ fn a_no_reader_seat_keeps_its_standing_when_its_first_positive_label_arrives() {
         let wanted = window_wanted_for(seat).expect("a promoting seat");
         let mut rows: Vec<Value> = (0..wanted).map(|at| asked_by(seat, at)).collect();
         rows.push(rose(seat));
-        rows.push(json!({"at": wanted, "label": named(seat, 0), "agreed": true}));
+        rows.push(mark(seat, wanted, 0, json!({"agreed": true})));
         assert_eq!(
             judge_seat(seat, &rows).expect("judged").verdict,
             Verdict::Keep,
@@ -98,9 +108,7 @@ fn hindsight_waits_for_the_sample_floor_then_uses_the_same_wilson_line() {
             let mut rows: Vec<Value> = (0..wanted).map(|at| asked_by(seat, at)).collect();
             rows.push(rose(seat));
             rows.extend(
-                (0..compared).map(
-                    |at| json!({"at": wanted + at, "label": named(seat, at), "agreed": agreed}),
-                ),
+                (0..compared).map(|at| mark(seat, wanted + at, at, json!({"agreed": agreed}))),
             );
             let verdict = judge_seat(seat, &rows).expect("judged").verdict;
             assert_eq!(
@@ -1377,7 +1385,7 @@ fn a_seat_whose_rows_all_compare_nothing_has_no_label() {
     let seat = &crate::jev::ZO_STEP_EFFORT;
     let rows = window_then(seat, |seat, at| {
         (0..5)
-            .map(|n| json!({"at": at + n, "label": named(seat, n), "notCompared": "not_carried"}))
+            .map(|n| mark(seat, at + n, n, json!({"notCompared": "not_carried"})))
             .collect()
     });
     assert_eq!(

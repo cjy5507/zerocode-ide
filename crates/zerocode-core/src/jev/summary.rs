@@ -145,9 +145,11 @@ pub const LABEL: LedgerKey = LedgerKey {
 /// is asked once: the recall and mention seats name a request by the
 /// fingerprints of what was asked, and the same words asked again carry
 /// the same name. With the time beside the name a label grades one
-/// occurrence of a request and no other; a label that carries none joins
-/// a name only while exactly one request on the ledger carries it
-/// ([`crate::jev::promote::on_the_newest_version`]).
+/// occurrence of a request and no other; a label that carries none grades a
+/// request only where the seat's name picks one out without it — an id, or
+/// a turn — and never for a seat that names a request by the words asked
+/// ([`crate::jev::JevUse::names`], t-6877 round 3,
+/// [`crate::jev::promote::on_the_newest_version`]).
 pub const REQUEST_AT: LedgerKey = LedgerKey {
     canonical: "requestAt",
     also: &[],

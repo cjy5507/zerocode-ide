@@ -488,9 +488,10 @@ fn label_row(loaded: &str, named: &[String], request: SkillRequestName) -> Skill
     }
 }
 
-/// The turn boundary's two-stage suggestion uses this same SKILLS door and
-/// ledger. It is seated independently of the explicit `skill_search` tool so a
-/// turn reaches the judgment even when the agent never searches.
+/// The turn boundary's two-stage suggestion: a seat of its own with a ledger
+/// of its own ([`SKILL_SUGGESTION`], t-6877), cut at the search's door. It is
+/// seated independently of the explicit `skill_search` tool so a turn reaches
+/// the judgment even when the agent never searches.
 #[derive(Debug)]
 pub struct SkillSuggestionJudge {
     cwd: PathBuf,
