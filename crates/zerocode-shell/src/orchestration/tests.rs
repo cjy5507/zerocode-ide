@@ -919,7 +919,14 @@ fn all_ledger_image_readers_use_the_revision_cache() {
     for reader in [
         "seat_assignment(",
         "bound_run(",
-        "reseat_sleeping(",
+        // The restore road's reading lives in the in-line walk since the
+        // account switch holds the restore line across it (t-7538); the
+        // switch's own readers take the same door.
+        "reseat_sleeping_in_line(",
+        "walled_claude_workers(",
+        "switch_move_ready(",
+        "worker_seat_now(",
+        "worker_model_now(",
         "last_agent_in_checkout(",
         "settled_checkouts(",
         "runtime_report(",
