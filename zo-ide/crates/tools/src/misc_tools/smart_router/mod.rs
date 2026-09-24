@@ -33,6 +33,7 @@ mod routing_replay;
 mod skill_search;
 mod shape;
 mod shape_words;
+mod tool_guard;
 mod step_effort;
 mod turn;
 mod turn_reads;
@@ -84,6 +85,11 @@ pub use file_pick::{
     file_pick_path, note_file_pick_turn, FilePickJudge, FilePickLabelRow, FilePickRow,
     FILE_PICK_FILE, FILE_PICK_OUTCOME_ANSWERED,
 };
+pub use tool_guard::{
+    command_guard_path, note_tool_guard_turn, tool_text_guard_path, CommandGuardLabelRow, CommandGuardRow,
+    ToolGuardJudge, ToolTextGuardLabelRow, ToolTextGuardRow, COMMAND_GUARD_FILE, TOOL_GUARD_OUTCOME_ANSWERED,
+    TOOL_TEXT_GUARD_FILE,
+};
 pub use mention_rerank::{
     mention_rerank_path, MentionAnswer, MentionAsk, MentionCandidate, MentionJudged, MentionLabelRow,
     MentionRerank, MentionRerankRow, MentionSurface, MENTION_OUTCOME_ANSWERED, MENTION_RERANK_DEADLINE,
@@ -108,10 +114,11 @@ pub use plan_shadow::{
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
     agent_tool_mode_from, decision_shadow_mode_from, jev_compaction_mode_from,
-    jev_claim_mode_from, jev_file_pick_mode_from,
+    jev_claim_mode_from, jev_command_guard_mode_from, jev_file_pick_mode_from, jev_tool_text_guard_mode_from,
     jev_mention_rerank_mode_from, jev_patch_review_mode_from, rerank_shadow_mode_from,
     skill_search_mode_from, DecisionShadowMode, AGENT_TOOL_SETTING, DECISION_SHADOW_SETTING,
-    JEV_COMPACTION_SETTING, JEV_FILE_PICK_SETTING, JEV_MENTION_RERANK_SETTING, JEV_PATCH_REVIEW_SETTING,
+    JEV_COMMAND_GUARD_SETTING, JEV_COMPACTION_SETTING, JEV_FILE_PICK_SETTING, JEV_MENTION_RERANK_SETTING,
+    JEV_PATCH_REVIEW_SETTING, JEV_TOOL_TEXT_GUARD_SETTING,
     RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
     conversation_anchor_ttl_for, conversation_anchor_ttl_from_root, CACHE_ANCHOR_TTL_ENV,
     smart_deep_tier_models, smart_deep_tier_models_for, smart_exec_swap, smart_setting_defaults,

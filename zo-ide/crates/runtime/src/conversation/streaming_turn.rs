@@ -2377,6 +2377,9 @@ where
                                     true,
                                 )
                             } else {
+                            // The command guard hears a shell command right
+                            // before it runs (t-6348); it never holds it.
+                            self.guard_command(&p.tool_use_id, &p.tool_name, &p.effective_input);
                             self.record_tool_started(iterations, &p.tool_name);
                             let tool_start = std::time::Instant::now();
                             // Set by the dispatch arm below. A cancelled tool
@@ -2921,6 +2924,9 @@ where
         // The patch review seat reads the tool's own envelope, so it is kept
         // before any hook merges text into it (t-6203).
         let reviewed = (!is_error && self.reviews_edits_of(&p.tool_name)).then(|| output.clone());
+        // So does the text guard, for a block a file read, a web tool, the
+        // window's browser or an MCP tool handed back (t-6348).
+        let text_asked = self.text_guard_ask(&p.tool_use_id, &p.tool_name, &output, is_error);
         if options.notify_slow {
             crate::notifications::notify_if_slow(
                 &p.tool_name,
@@ -3014,6 +3020,10 @@ where
             let note = self.reviewed_edit_note(&p.tool_use_id, &p.tool_name, &pristine).await;
             output = super::reviewed_edit::with_review_note(output, note);
         }
+        // The tool guards' fence and lines, model-facing only (t-6348).
+        output = self
+            .guarded_result(&p.tool_use_id, &p.tool_name, text_asked, output, is_error)
+            .await;
 
         // Drain images the tool staged. The real live dispatcher shares the
         // image sink through cloned contexts, so this remains correct whether

@@ -52,6 +52,13 @@ pub use smart_router::{
     FILE_PICK_OUTCOME_ANSWERED,
 };
 pub use smart_router::{
+    command_guard_path, jev_command_guard_mode_from, jev_tool_text_guard_mode_from,
+    note_tool_guard_turn, tool_text_guard_path, CommandGuardLabelRow, CommandGuardRow,
+    ToolGuardJudge, ToolTextGuardLabelRow, ToolTextGuardRow, COMMAND_GUARD_FILE,
+    JEV_COMMAND_GUARD_SETTING, JEV_TOOL_TEXT_GUARD_SETTING, TOOL_GUARD_OUTCOME_ANSWERED,
+    TOOL_TEXT_GUARD_FILE,
+};
+pub use smart_router::{
     compaction_relevance_path, jev_compaction_mode_from, note_compaction_reread, CompactionJudge,
     CompactionLabelRow, CompactionRow, COMPACTION_JUDGMENT_DEADLINE, COMPACTION_OUTCOME_ANSWERED,
     COMPACTION_RELEVANCE_FILE, JEV_COMPACTION_SETTING,

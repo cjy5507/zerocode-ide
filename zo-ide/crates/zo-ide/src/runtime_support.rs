@@ -387,6 +387,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         recall_seat,
         compaction_seat,
         patch_review_seat,
+        tool_guard_seat,
         file_pick_seat,
         skill_suggestion_seat,
         mcp_state,
@@ -493,6 +494,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     runtime.set_recall_seat(recall_seat);
     runtime.set_compaction_seat(compaction_seat);
     runtime.set_patch_review_seat(patch_review_seat);
+    runtime.set_tool_guard_seat(tool_guard_seat);
     runtime.set_file_pick_seat(file_pick_seat);
     runtime.set_skill_suggestion_seat(skill_suggestion_seat);
     // Wire up parallel tool execution: concurrency-safe tools (Read,

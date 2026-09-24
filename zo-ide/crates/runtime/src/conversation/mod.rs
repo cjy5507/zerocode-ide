@@ -21,6 +21,7 @@ mod helpers;
 mod reminders;
 mod repetition;
 mod reviewed_edit;
+mod guarded_tool;
 mod step_effort;
 mod streaming;
 mod streaming_turn;
@@ -708,6 +709,10 @@ pub struct ConversationRuntime<C, T> {
     skill_suggestion_turn_start: Option<usize>,
     /// The start-of-turn reading awaiting its actual edited-file label.
     file_pick_pending_turn: Option<FilePickPendingTurn>,
+    /// Seated beside the tools and handed each shell command before it runs
+    /// and each text a tool hands back before the model reads it. See
+    /// [`crate::ToolGuardSeat`].
+    tool_guard_seat: Option<Arc<dyn crate::ToolGuardSeat>>,
     max_iterations: usize,
     /// Optional wall-clock deadline for the turn. Two callers set it: spawned
     /// sub-agents bound a straggler that overran its caller's wait window, and
@@ -1705,6 +1710,7 @@ where
             skill_suggestion_seat: None,
             skill_suggestion_turn_start: None,
             file_pick_pending_turn: None,
+            tool_guard_seat: None,
             max_iterations: default_max_iterations(),
             deadline: None,
             deadline_extension: None,
@@ -2899,6 +2905,9 @@ where
                                 Vec::new(),
                             )
                         } else {
+                            // The command guard hears a shell command right
+                            // before it runs (t-6348); it never holds it.
+                            self.guard_command(&p.tool_use_id, &p.tool_name, p.effective_input.as_ref());
                             self.record_tool_started(iterations, &p.tool_name);
                         let tool_start = std::time::Instant::now();
                         let (mut output, mut is_error) =
@@ -2922,6 +2931,9 @@ where
                         // review seat reads the tool's own envelope (t-6203).
                         let reviewed = (!is_error && self.reviews_edits_of(&p.tool_name))
                             .then(|| output.clone());
+                        // So does the text guard (t-6348).
+                        let text_asked =
+                            self.text_guard_ask(&p.tool_use_id, &p.tool_name, &output, is_error);
                         output = merge_hook_feedback(p.pre_hook_result.messages(), output, false);
 
                         let post_hook_result = if is_error {
@@ -2981,6 +2993,14 @@ where
                             );
                             output = reviewed_edit::with_review_note(output, note);
                         }
+                        // The tool guards' fence and lines (t-6348).
+                        output = self.guarded_result_blocking(
+                            &p.tool_use_id,
+                            &p.tool_name,
+                            text_asked,
+                            output,
+                            is_error,
+                        );
 
                         // Drain any images the tool staged (single-threaded: image
                         // tools run on this serial path). Drained unconditionally so
