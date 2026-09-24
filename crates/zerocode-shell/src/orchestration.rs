@@ -4328,10 +4328,15 @@ fn seated_open_attempts(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<SeatedAtt
 /// the 75 s after it, and nothing after its 17th second). The dialog on
 /// screen and a pty silent past every dialog a person answered here are the
 /// two witnesses ([`zerocode_core::orchestration::classifier_decline_witness`]);
-/// a pane the sweep can read is the sweep's, and a told dialog — one notice
-/// per attempt, its key the attempt's — is not told again, nor read again
-/// for it; a record the reading finds, told already, is not told again
-/// either (t-7153, R4).
+/// a pane the sweep can read is the sweep's. A notice is one RECORD's
+/// (t-7153, R4): a told dialog — one notice per attempt, its key the
+/// attempt's — is not told again, and a record the reading finds, told
+/// already, is not told again either; but the pane is read again every
+/// beat it stands behind the stale hook, because the record the CLI writes
+/// once a key answers the dialog — or another request declined — is news
+/// of its own, told and planned on its own key. Before this a told dialog
+/// closed the reading, and a record behind a hook that stayed `working`
+/// was never seen by either sweep.
 fn note_paused_declines(host: &dyn Host, now_ms: i64) {
     let (Some(seated), Some(held)) = (with_ledger_seats(seated_open_attempts), runtime()) else {
         return;
@@ -4339,11 +4344,6 @@ fn note_paused_declines(host: &dyn Host, now_ms: i64) {
     let mut declined = Vec::new();
     for one in seated {
         if one.taken_over
-            || one
-                .declines_told
-                .contains(&zerocode_core::orchestration::decline_dialog_key(
-                    &one.dispatch,
-                ))
             || !crate::quota_wall::has_rule(
                 &one.agent,
                 crate::quota_wall::StallCause::ClassifierDecline,

@@ -3284,53 +3284,154 @@ fn a_printed_decline(category: Option<&str>, key: &str) -> crate::quota_wall::De
 
 /// A dialog's diagnostic notice closes nothing (t-7153, R4): once the same
 /// attempt's pane stands at a RECORD — the CLI printed the error, its
-/// transcript's last record is the decline in a routed category, the hook
-/// at rest — that record is news of its own, told on the handover rung
-/// under the declared order and walked exactly once; before this one
-/// notice, whatever witnessed it, closed the attempt to every reading
-/// after it, and the record was never told nor planned.
+/// transcript's last record is the decline in a routed category — that
+/// record is news of its own, told on the handover rung under the declared
+/// order and walked exactly once, while the hook STILL says `working` and
+/// the pty is still silent: the pane never becomes the quiet sweep's.
+/// Before this one notice, whatever witnessed it, closed the paused
+/// sweep's reading of the attempt, and a record behind a hook that stayed
+/// `working` was never told nor planned by either sweep.
+/// The hook's two roads both lead there: a hook that comes to rest hands
+/// the pane to the quiet sweep, and one that stays `working` leaves it to
+/// the paused sweep, which reads it again.
 #[test]
 fn a_dialogs_diagnostic_notice_does_not_hide_the_record_that_follows_it() {
-    const LEADER_TERM: u32 = 86_100;
     const MINUTE: i64 = 60_000;
-    let stood = Walled::stand_paused(
-        LEADER_TERM,
-        "/tmp",
-        "--on-classifier-decline claude:claude-opus-4-8",
-    );
+    for (leader_term, hook_rests) in [(86_100, false), (86_150, true)] {
+        let stood = Walled::stand_paused(
+            leader_term,
+            "/tmp",
+            "--on-classifier-decline claude:claude-opus-4-8",
+        );
+        let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
+        stood.host.pty_silent_for(11 * MINUTE);
+        tick(&stood.host, &[], stood.began + 20_000);
+        assert_eq!(told(stood.began + 20_001)["count"], 1);
+        assert!(stood.receipts(stood.began + 20_001).is_empty());
+
+        // The record, on the same open attempt.
+        stood.host.declined(
+            leader_term + 1,
+            a_printed_decline(Some("cyber"), "decline-record-1"),
+        );
+        *stood.host.busy.lock().unwrap() = !hook_rests;
+        tick(&stood.host, &[], stood.began + 30_000);
+        let news = told(stood.began + 30_001);
+        assert_eq!(
+            news["count"], 2,
+            "hook at rest {hook_rests}: the record after the dialog's notice was not told: {news}"
+        );
+        let receipts = stood.receipts(stood.began + 30_001);
+        assert_eq!(receipts.len(), 1, "hook at rest {hook_rests}: {receipts:?}");
+        assert_eq!(receipts[0]["status"], "done", "{}", receipts[0]);
+        assert_eq!(receipts[0]["reason"], "classifier-decline");
+        assert_eq!(
+            receipts[0]["recordKey"], "decline-record-1",
+            "{}",
+            receipts[0]
+        );
+        assert_eq!(stood.worker_state(&stood.worker), "Released");
+
+        // Once: the next beat tells nothing more and walks nothing more.
+        tick(&stood.host, &[], stood.began + 40_000);
+        assert_eq!(told(stood.began + 40_001)["count"], 2);
+        assert_eq!(stood.receipts(stood.began + 40_001).len(), 1);
+    }
+}
+
+/// Behind a hook that never stops saying `working`, every record is news
+/// of its own (t-7153, R4): the dialog's diagnostic notice, then a record
+/// once a key answered it, then another request's record — each told once
+/// on its own key, none twice, with no order declared and the pane's pty
+/// silent throughout; and under an order declared after all three, the
+/// walk lands on the record the pane stands at now, exactly once. The
+/// hook stays `working` for the whole road: nothing here is the quiet
+/// sweep's.
+#[test]
+fn records_behind_a_hook_that_stays_working_are_told_and_planned_each_on_its_own_key() {
+    const LEADER_TERM: u32 = 86_300;
+    const MINUTE: i64 = 60_000;
+    let stood = Walled::stand_paused(LEADER_TERM, "/tmp", "");
     let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
+    let keys = |news: &serde_json::Value| -> Vec<String> {
+        news["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                serde_json::from_str::<serde_json::Value>(message["body"].as_str().expect("a body"))
+                    .expect("json")["record"]["key"]
+                    .as_str()
+                    .expect("a key")
+                    .to_string()
+            })
+            .collect()
+    };
     stood.host.pty_silent_for(11 * MINUTE);
     tick(&stood.host, &[], stood.began + 20_000);
     assert_eq!(told(stood.began + 20_001)["count"], 1);
-    assert!(stood.receipts(stood.began + 20_001).is_empty());
 
-    // The record, on the same open attempt.
     stood.host.declined(
         LEADER_TERM + 1,
         a_printed_decline(Some("cyber"), "decline-record-1"),
     );
-    *stood.host.busy.lock().unwrap() = false;
+    assert!(*stood.host.busy.lock().unwrap());
     tick(&stood.host, &[], stood.began + 30_000);
     let news = told(stood.began + 30_001);
     assert_eq!(
         news["count"], 2,
-        "the record after the dialog's notice was not told: {news}"
+        "the record behind the working hook was not told: {news}"
     );
-    let receipts = stood.receipts(stood.began + 30_001);
-    assert_eq!(receipts.len(), 1, "{receipts:?}");
-    assert_eq!(receipts[0]["status"], "done", "{}", receipts[0]);
-    assert_eq!(receipts[0]["reason"], "classifier-decline");
+    tick(&stood.host, &[], stood.began + 31_000);
     assert_eq!(
-        receipts[0]["recordKey"], "decline-record-1",
-        "{}",
-        receipts[0]
+        told(stood.began + 31_001)["count"],
+        2,
+        "the same record was told twice"
     );
-    assert_eq!(stood.worker_state(&stood.worker), "Released");
 
-    // Once: the next beat tells nothing more and walks nothing more.
+    stood.host.declined(
+        LEADER_TERM + 1,
+        a_printed_decline(Some("cyber"), "decline-record-2"),
+    );
     tick(&stood.host, &[], stood.began + 40_000);
-    assert_eq!(told(stood.began + 40_001)["count"], 2);
-    assert_eq!(stood.receipts(stood.began + 40_001).len(), 1);
+    let news = told(stood.began + 40_001);
+    assert_eq!(news["count"], 3, "{news}");
+    assert_eq!(
+        keys(&news),
+        [
+            zerocode_core::orchestration::decline_dialog_key(&stood.dispatch),
+            "decline-record-1".to_string(),
+            "decline-record-2".to_string()
+        ]
+    );
+    assert!(
+        stood.receipts(stood.began + 40_001).is_empty(),
+        "no order declared"
+    );
+
+    stood.json(
+        "handover-policy --on-classifier-decline claude:claude-opus-4-8",
+        stood.began + 41_000,
+    );
+    tick(&stood.host, &[], stood.began + 50_000);
+    let receipts = stood.receipts(stood.began + 50_001);
+    let done: Vec<&serde_json::Value> = receipts
+        .iter()
+        .filter(|receipt| receipt["status"] == "done")
+        .collect();
+    assert_eq!(done.len(), 1, "{receipts:?}");
+    assert_eq!(done[0]["recordKey"], "decline-record-2", "{}", done[0]);
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    tick(&stood.host, &[], stood.began + 60_000);
+    assert_eq!(
+        stood
+            .receipts(stood.began + 60_001)
+            .iter()
+            .filter(|receipt| receipt["status"] == "done")
+            .count(),
+        1,
+        "walked twice"
+    );
 }
 
 /// A later decline of the same attempt is told on its own record and
