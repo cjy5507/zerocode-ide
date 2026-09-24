@@ -486,6 +486,16 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), { ledger = null
   agentGraphLiveStartPulses(fresh, now);
 }
 
+/* 돌아온 지도가 빚을 지고 있으면 이 판을 기준선으로 접는다 — 그림이 그대로라
+ * 그리기를 건너뛰는 판에서도. 숨었다 돌아온 첫 판이 떠나기 전과 같은 판이면 그리는
+ * 손은 서명을 보고 건너뛰고, 그러면 빚이 다음에 **달라진** 판으로 넘어가 돌아온
+ * 뒤에 실제로 일어난 첫 사건을 삼킨다. 빚이 없거나 지도가 보이지 않으면 아무것도
+ * 하지 않는다 — 조용한 판에서 이 손의 값은 0이다. 같은 판을 한 번 더 접는 것은
+ * 아무것도 새로 세지 않는다(장부의 신원 중복 제거). */
+function agentGraphLiveRepay(answer, places, now, bundle) {
+  if (liveBaselineDue && agentGraphLiveShown()) agentGraphLiveObserve(answer, places, now, bundle);
+}
+
 /* ---- 맥박 -------------------------------------------------------------------- */
 
 /* 맥박을 접을 때 쓰는 최근의 차례. 발생 시각을 아는 사건은 그 시각으로, 모르는
@@ -848,6 +858,29 @@ function agentGraphLiveStageHolds(stage, place, row) {
   return held.flag === "reported"
     ? place?.reported === true || row?.reported === true
     : row?.review?.[held.flag] === true;
+}
+
+/* 판의 서명에 드는 결과의 사실들 — 카드마다, 지금 서 있는 단계의 칸들. 지도가
+ * 원장 행에서 읽는 것은 대기 사유만이 아니다: 결과 사건과 지난 사건의 근거 판정은
+ * 행의 `review`를 읽는데, 카드는 그 칸을 싣지 않는다(`reported`만 싣는다). 서명이
+ * 이것을 세지 않으면 검토만 바뀐 판은 그리기를 건너뛰어, 지도는 그 결과를 보지
+ * 못하고 모델의 원장 한 벌도 옛 행에 머문다. 지도가 꺼진 판(보드의 기본값)은
+ * 아무것도 더하지 않는다. */
+function agentGraphLiveResultsSaid(columns, places, ledger) {
+  if (!agentGraphLive) return null;
+  const said = [];
+  for (const column of columns) {
+    for (const card of column.cards) {
+      const place = places.get(card.pane);
+      if (agentGraphLiveSubject(place) === null) continue;
+      const row = ledger?.get(card.pane) ?? null;
+      const holding = AGENT_GRAPH_LIVE_STAGES
+        .filter((one) => agentGraphLiveStageHolds(one.stage, place, row))
+        .map((one) => one.stage);
+      if (holding.length > 0) said.push(`${card.pane}\u001f${holding.join(",")}`);
+    }
+  }
+  return said.join("\u001e");
 }
 
 /* ---- 간선 -------------------------------------------------------------------- */

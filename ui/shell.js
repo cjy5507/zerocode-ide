@@ -7392,6 +7392,9 @@ function agentGraphSaid(columns, reviews, places, now, ledger = null) {
      * 박자가 와도 판이 그대로라 그 칸만 옛 낱말에 굳는다. 지도가 꺼진 판에는
      * 아무것도 더하지 않는다. */
     waits: agentGraphLiveWaitSaid(columns, places, ledger, now),
+    /* 그리고 지도가 원장 행에서 읽는 결과의 사실들 (t-7288). 카드는 `review`를
+     * 싣지 않으므로, 여기 없으면 검토만 바뀐 판을 서명이 모른다. */
+    results: agentGraphLiveResultsSaid(columns, places, ledger),
     following: agentGraphFollowing,
     draft: selectedDraft
       ? {
@@ -7495,6 +7498,10 @@ async function paintAgentGraphView(
     const now = Date.now();
     agentGraphSnapshotOverlays = answer.overlays ?? {};
     const said = agentGraphSaid(answer.columns, reviews, places, now, ledger);
+    /* 돌아온 지도의 빚은 그림이 그대로인 판도 치른다 (t-7288): 아래 줄이 같은 판을
+     * 건너뛰면 빚이 다음에 달라진 판으로 넘어가, 돌아온 뒤의 첫 실제 사건을 삼킨다.
+     * 빚이 없으면 이 줄은 아무것도 하지 않는다. */
+    agentGraphLiveRepay(answer, places, now, { ledger });
     if (!force && view.dataset.said === said) return { cards, answer };
     view.dataset.said = said;
     /* 서명이 움직인 판만 장부에 접힌다. 똑같은 snapshot은 위에서 이미 돌아갔고,
