@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use runtime::tool_guard::{text_ask, TextSource};
+use runtime::tool_guard::{text_ask, HostFraming, TextSource};
 use zerocode_core::jev::{fingerprint_of, JevMode, COMMAND_GUARD, TOOL_TEXT_GUARD};
 
 use super::super::jev_mock::{machine, Mock};
@@ -333,7 +333,10 @@ fn a_recording_text_guard_asks_beside_the_read_and_an_acting_one_fences_it() {
         let row: ToolTextGuardRow =
             serde_json::from_value(rows_of(&tool_text_guard_path(cwd), 1)[0].clone()).expect("a text row");
         assert_eq!((row.verdict.as_str(), row.source.as_str(), row.tool.as_str()), ("flagged", "file", "read_file"));
-        assert_eq!((row.asked.route_use.as_str(), row.fenced, row.noted, row.fenced_before), ("shadow", false, false, false));
+        assert_eq!(
+            (row.asked.route_use.as_str(), row.fenced, row.noted, row.framing.as_str()),
+            ("shadow", false, false, HostFraming::Unfenced.word())
+        );
         assert_eq!(row.text_chars, ORDER.chars().count());
         let body: Value = serde_json::from_str(&mock.requests()[0]).expect("a body");
         assert_eq!(body["state"]["source"], TextSource::File.word());
@@ -491,7 +494,7 @@ fn a_text_label_grades_the_verdict_and_the_windows_fence_on_what_the_next_step_d
                         judged: 7,
                         owner: "turn-1".to_string(),
                         tool_use_id: "read-1".to_string(),
-                        fenced_before: false,
+                        framing: HostFraming::Unfenced,
                         verdict: Some(Verdict::Flagged),
                         confidence: Some(0.76),
                         applied: false,
@@ -501,7 +504,7 @@ fn a_text_label_grades_the_verdict_and_the_windows_fence_on_what_the_next_step_d
                         judged: 8,
                         owner: "turn-1".to_string(),
                         tool_use_id: "read-2".to_string(),
-                        fenced_before: true,
+                        framing: HostFraming::Fenced,
                         verdict: None,
                         confidence: None,
                         applied: false,
@@ -526,14 +529,16 @@ fn a_text_label_grades_the_verdict_and_the_windows_fence_on_what_the_next_step_d
             serde_json::from_value(rows_of(&tool_text_guard_path(cwd), 1)[0].clone()).expect("a label");
         assert_eq!(
             (label.hindsight.as_str(), label.agreed, label.baseline_agreed, label.next_tool.as_deref()),
-            (FOLLOWED, true, false, Some(SHELL_TOOL))
+            (FOLLOWED, true, Some(false), Some(SHELL_TOOL))
         );
+        assert_eq!(label.framing, HostFraming::Unfenced.word());
         assert_eq!(label.confidence, Some(0.76));
         // The second's verdict arrives after its turn: its label is written then.
         settle_text(cwd, 8, Verdict::Plain, Some(0.9), false);
         let late: ToolTextGuardLabelRow =
             serde_json::from_value(rows_of(&tool_text_guard_path(cwd), 2)[1].clone()).expect("a label");
-        assert_eq!((late.hindsight.as_str(), late.agreed, late.baseline_agreed), (IGNORED, true, false));
+        assert_eq!((late.hindsight.as_str(), late.agreed, late.baseline_agreed), (IGNORED, true, Some(false)));
+        assert_eq!(late.framing, HostFraming::Fenced.word());
     });
 }
 
@@ -551,7 +556,7 @@ fn another_runtime_in_the_same_cwd_keeps_its_hindsight() {
         judged: 3,
         owner: "runtime-b".into(),
         tool_use_id: "read-1".into(),
-        fenced_before: false,
+        framing: HostFraming::Unfenced,
         verdict: Some(Verdict::Flagged),
         confidence: None,
         applied: false,

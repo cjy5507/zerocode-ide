@@ -478,3 +478,83 @@ fn the_command_guard_files_the_folder_the_bash_tool_runs_in() {
         );
     }
 }
+
+/// The host's word itself: the manifest of today's rule on each word, the
+/// rows that carry it, and the fence that stands only on it.
+mod host_word {
+    use runtime::tool_guard::guarded_output;
+
+    use super::*;
+
+    /// Today's rule, per word of the host's, against either hindsight: what
+    /// the rule says of the block and the mark the label files — the table
+    /// the t-7058 report prints beside version 2's constant-plain mark.
+    const MANIFEST: [(HostFraming, Option<bool>, bool, Option<bool>); 6] = [
+        (HostFraming::Fenced, Some(true), true, Some(true)),
+        (HostFraming::Fenced, Some(true), false, Some(false)),
+        (HostFraming::Unfenced, Some(false), true, Some(false)),
+        (HostFraming::Unfenced, Some(false), false, Some(true)),
+        (HostFraming::Unknown, None, true, None),
+        (HostFraming::Unknown, None, false, None),
+    ];
+
+    /// The manifest, filed: every row through the label writer, with the
+    /// host's word beside its mark — so a row a reader cannot grade says why.
+    #[test]
+    fn the_label_writer_files_the_manifest() {
+        machine(&TOOL_TEXT_GUARD, JevMode::Shadow.key(), "http://127.0.0.1:9", |cwd| {
+            forget_waiting(cwd);
+            let done: Vec<TextWaiting> = MANIFEST
+                .iter()
+                .zip(1_u64..)
+                .map(|((framing, rule, followed, _), judged)| {
+                    assert_eq!(todays_text_rule(*framing), *rule, "{framing:?}");
+                    TextWaiting {
+                        judged,
+                        owner: "turn-1".into(),
+                        tool_use_id: format!("read-{judged}"),
+                        framing: *framing,
+                        verdict: Some(Verdict::Flagged),
+                        confidence: None,
+                        applied: false,
+                        decided: Some((*followed, followed.then(|| SHELL_TOOL.to_string()))),
+                    }
+                })
+                .collect();
+            assert_eq!(write_text_labels(cwd, done), MANIFEST.len());
+            let labels: Vec<ToolTextGuardLabelRow> = read_shadow_rows(&tool_text_guard_path(cwd));
+            assert_eq!(labels.len(), MANIFEST.len());
+            for ((framing, _, followed, mark), label) in MANIFEST.iter().zip(&labels) {
+                assert_eq!(label.baseline_agreed, *mark, "{framing:?} followed={followed}");
+                assert_eq!(label.framing, framing.word());
+            }
+        });
+    }
+
+    /// The fence is skipped on a host's attested word alone, set at the host's
+    /// seam: bytes never make one, whatever they carry, and a block the host
+    /// attested keeps its bytes as they were and gains the line only.
+    #[test]
+    fn a_hosts_attested_fence_is_the_only_road_to_note_only() {
+        let answers = BTreeMap::from([(INSTRUCTED.to_string(), 0.99)]);
+        let bare = text_ask("turn", "read-1", "read_file", ORDER).expect("a file is read");
+        assert_eq!(bare.framing, HostFraming::Unfenced);
+        let guard = text_guard_for(&bare, &answers);
+        assert_eq!(guard.fence.as_deref(), Some("read_file"));
+        assert!(guard.note.is_some());
+
+        let browser = zerocode_core::untrusted::fence("browser-3", ORDER, usize::MAX);
+        let unknown = text_ask("turn", "shell-7", SHELL_TOOL, &browser).expect("a browser candidate");
+        assert_eq!(unknown.framing, HostFraming::Unknown);
+        assert_eq!(text_guard_for(&unknown, &answers).fence.as_deref(), Some(SHELL_TOOL), "unknown is not fenced");
+
+        let mut attested = bare;
+        attested.framing = HostFraming::Fenced;
+        let guard = text_guard_for(&attested, &answers);
+        assert_eq!(guard.fence, None, "a host's word, and only that, stands in for the fence");
+        let note = guard.note.clone().expect("the line");
+        let output = guarded_output(ORDER.to_string(), ORDER, &guard);
+        assert_eq!(output, format!("{ORDER}\n\n{note}"), "the bytes as they were, then the line");
+        assert_eq!(output.matches(zerocode_core::untrusted::PHRASE).count(), 0);
+    }
+}

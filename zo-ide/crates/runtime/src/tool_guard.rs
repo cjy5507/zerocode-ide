@@ -73,6 +73,49 @@ impl TextSource {
     }
 }
 
+/// What the host that hands a block to the model can say of the fence around
+/// it — the host's own word, never the block's bytes (t-6982). One fact, two
+/// readers asking two questions of it (t-7058): the acting guard skips its
+/// own fence only on [`Self::Fenced`], and today's rule is graded on the fact
+/// where there is one (`tool_guard::todays_text_rule` in the tools crate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostFraming {
+    /// A host attested, out of band, that the block reached the model inside
+    /// its fence. Nothing in this runtime says so today: a shell answer that
+    /// looks like the window's is bytes, and bytes attest to nothing.
+    Fenced,
+    /// This runtime handed the bytes over bare: its own file, web and MCP
+    /// tools put nothing around their answers before the guard.
+    Unfenced,
+    /// The bytes may carry another host's fence — the window's browser CLI's —
+    /// which this runtime cannot verify. Nothing is known, and nothing is
+    /// guessed: no fence is skipped on it, and no rule is graded on it.
+    Unknown,
+}
+
+impl HostFraming {
+    /// The word a row carries.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Fenced => "fenced",
+            Self::Unfenced => "unfenced",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// What this runtime can say at its own seam of a block of `source`: it
+    /// fenced none of its own tools' answers, and it cannot read another
+    /// host's fence off a shell answer's bytes.
+    #[must_use]
+    pub const fn at_this_runtimes_seam(source: TextSource) -> Self {
+        match source {
+            TextSource::File | TextSource::Web | TextSource::Mcp => Self::Unfenced,
+            TextSource::Browser => Self::Unknown,
+        }
+    }
+}
+
 /// The tools whose answers the text guard reads by name, each with the kind
 /// it names. MCP tools are read by their prefix and the window's answers by
 /// their fence ([`text_source_of`]).
@@ -147,9 +190,9 @@ pub struct TextAsk {
     pub head: String,
     /// Characters of all the model reads of it.
     pub chars: usize,
-    /// Whether a trusted host explicitly attested that this result is fenced.
-    /// Tool output bytes never set this field.
-    pub fenced: bool,
+    /// What the host says of the fence around it ([`HostFraming`]) — set by
+    /// the host's own seam, never by the output's bytes.
+    pub framing: HostFraming,
 }
 
 /// What an acting text guard hands back for one block: the label a fence
@@ -256,10 +299,11 @@ pub fn text_ask(attempt: &str, tool_use_id: &str, tool_name: &str, output: &str)
         source,
         head: cut(&read, Cap::Chars(TOOL_TEXT_GUARD_TEXT_CHAR_CAP)),
         chars: read.chars().count(),
-        // The runtime has no out-of-band host-framing receipt for these tool
-        // results. Even a browser CLI's inner marker arrives as shell bytes;
-        // an acting guard places one verified outer fence around those bytes.
-        fenced: false,
+        // The runtime's own word, off the kind of tool and never off the
+        // bytes: its own tools' answers arrive bare; a browser CLI's inner
+        // marker arrives as shell bytes, which say nothing a host can be held
+        // to. An acting guard places one verified outer fence either way.
+        framing: HostFraming::at_this_runtimes_seam(source),
     })
 }
 

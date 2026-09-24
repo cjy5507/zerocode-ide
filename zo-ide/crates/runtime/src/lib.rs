@@ -107,7 +107,7 @@ pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use compact::relevance as compaction_relevance;
 pub use patch_review::{PatchAsk, PatchReview, PatchReviewSeat, PATCH_REVIEW_RUBRIC_VERSION};
 pub use file_pick::{FilePickAsk, FilePickHint, FilePickSeat, FILE_PICK_NOTE_PREFIX};
-pub use tool_guard::{CommandAsk, CommandRan, TextAsk, TextGuard, TextSource, ToolGuardSeat};
+pub use tool_guard::{CommandAsk, CommandRan, HostFraming, TextAsk, TextGuard, TextSource, ToolGuardSeat};
 pub use compact::relevance::{
     BlockHead, CompactionAsk, CompactionJudgment, CompactionSeat, COMPACTION_RUBRIC_VERSION,
 };
