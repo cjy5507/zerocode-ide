@@ -3980,6 +3980,105 @@ await test("CLI 로그인 카드는 행이 말하는 길만 걷고, 못 읽는 �
   return "six shapes, three roads, thirty rows painted";
 });
 
+await test("만료된 Grok 로그인 행은 「한 번 실행」 단추를 세우고, 누르면 CLI를 판에 띄워 갱신을 맡긴다", async () => {
+  // 게이지가 「로그인 만료 — CLI가 다음 실행에서 갱신한다」고 말할 때(Grok의
+  // `delegated-refresh-required`, usage_grok.rs), 계정 화면의 그 행은 로그인을
+  // 다시 시키지 않고 그 CLI를 한 번 띄운다 — 창은 로그인도 갱신도 스스로 하지
+  // 않는다(설계 그대로). 여기 행은 셸로 여는 모양이라 판의 길이 픽스처의 문
+  // 둘(`open_term_tab`·`term_text`)로 보인다; 에이전트 판으로 여는 같은 손은
+  // window 스위트가 본다(t-7170).
+  const row = {
+    agent: "grok",
+    name: "Grok",
+    program: "grok",
+    homepage_url: "https://example.com",
+    installed: true,
+    signed_in: true,
+    account: "person@example.com",
+    known: true,
+    proof: "file",
+    opens: "shell",
+    home: "~/.grok",
+    road: "verb",
+    pane_command: "GROK_HOME=/Users/dev/.grok grok",
+    logout_road: "verb",
+  };
+  backend.cliLogins = { rows: [row] };
+  await pageA.evaluate(() => {
+    usageProvider("grok").write({
+      provider: "grok",
+      session: null,
+      weekly: null,
+      fable_weekly: null,
+      updated_at: Date.now(),
+      error: "Grok 로그인이 만료되었습니다 — 이 컴퓨터에서 grok을 한 번 실행하세요",
+      status: "error",
+      failure_kind: "delegated-refresh-required",
+      account: null,
+    }, false);
+    setSettingsOpen(false);
+  });
+  const openedAt = backend.calls.length;
+  await openSettings(pageA, "provider-accounts");
+  await backend.waitForCall("A", "cli_login_list", openedAt);
+  await renderSettled(pageA);
+  const rows = pageA.locator("#cli-login-list .account-row");
+  assertEqual(await rows.count(), 1, "the card did not paint the one row");
+  const words = await pageA.evaluate(() => ({
+    runOnce: t("usage.runOnce", "{{program}} 한 번 실행", { program: "grok" }),
+    expired: t(
+      "settings.cliLogins.expired",
+      "로그인 만료 — {{program}}을(를) 한 번 실행하면 CLI가 세션을 갱신합니다",
+      { program: "grok" },
+    ),
+    relogin: t("settings.accounts.relogin", "다시 로그인"),
+    logout: t("settings.accounts.logout", "로그아웃"),
+  }));
+  assertEqual(
+    await rows.nth(0).locator(".agent-row-cmd").textContent(),
+    words.expired,
+    "the expired row did not say what to run",
+  );
+  assertEqual(
+    await rows.nth(0).locator("button").allTextContents(),
+    [words.runOnce, words.relogin, words.logout],
+    "the expired row's verbs",
+  );
+
+  // The press: the bare program in a shell of this window, the backend
+  // watching the credential file, and the gauge re-read past its floor once
+  // the CLI has renewed — never the login verb.
+  const pressing = backend.calls.length;
+  await rows.nth(0).locator("button").first().click();
+  await backend.waitForCall("A", "open_term_tab", pressing);
+  const typed = await backend.waitForCall("A", "term_text", pressing);
+  assertEqual(
+    typed.args.text,
+    "GROK_HOME=/Users/dev/.grok grok\r",
+    "the window typed something other than the bare program",
+  );
+  const waited = await backend.waitForCall("A", "cli_login_wait", pressing);
+  assertEqual(waited.args.signedIn, true, "the watch was not for the renewed login");
+  // The re-read is the FORCED ask: an unforced one may ride the same window
+  // (the bar's own asking), and would be the previous reading held.
+  let reread = await backend.waitForCall("A", "grok_usage", pressing);
+  while (reread.args?.force !== true) {
+    reread = await backend.waitForCall("A", "grok_usage", reread.at + 1);
+  }
+  await renderSettled(pageA);
+  assertEqual(
+    backend.calls.slice(pressing).filter((call) => call.command === "cli_login_start").length,
+    0,
+    "the window ran the login verb instead of the program",
+  );
+  backend.cliLogins = { rows: [] };
+  await pageA.evaluate(() => {
+    usageProvider("grok").write(null, false);
+    setSettingsOpen(false);
+  });
+  return "expired → run once → bare program typed → watched → re-read";
+});
+
 await test("라우터 추가→연결 시험→모델 셋 켬→settings.json providers 한 항목", async () => {
   await openSettings(pageA, "api-routers");
 
