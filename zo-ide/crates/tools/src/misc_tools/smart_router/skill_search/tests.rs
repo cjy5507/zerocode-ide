@@ -610,3 +610,51 @@ fn a_legacy_mixed_ledger_reads_as_the_searchs_series_after_the_last_suggestion_r
     let judged = judge_seat(&SKILLS, &rows).expect("judged");
     assert!(matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { rows: 3, .. })), "{judged:?}");
 }
+
+/// The suggestion keeps the word its person wrote for the search until they
+/// write one of its own (t-6877 round 3, the coordinator's migration
+/// contract m-8181), at the seat's own door — the turn-boundary judge a
+/// session holds: a file that turned the search off by hand asks no
+/// suggestion after the update (no turn seated, no request, no row); the
+/// same file with the suggestion's own `auto` asks it; and a file with
+/// neither word asks it as the search's recommendation did before the
+/// split.
+#[test]
+fn the_suggestion_asks_nothing_where_its_person_turned_the_search_off() {
+    use super::super::jev_mock::{machine_words, Mock};
+    // Whether the turn was seated, how many requests left, and how many
+    // rows the suggestion's ledger holds once its judgment has landed.
+    let ask = |words: &[(&str, &str)]| -> (bool, usize, usize) {
+        let mock = Mock::serving(200, "{}".to_string());
+        machine_words(words, &mock.base_url, |cwd| {
+            let skill = cwd.join(".zo").join("skills").join("docx");
+            std::fs::create_dir_all(&skill).expect("a skill folder");
+            std::fs::write(
+                skill.join("SKILL.md"),
+                "---\nname: docx\ndescription: Create and edit Word documents.\n---\n# docx\n",
+            )
+            .expect("a skill");
+            let judge = SkillSuggestionJudge::at(cwd);
+            let note = api::sync_bridge::run_blocking(judge.suggest("draft the quarterly report as a Word file".to_string()));
+            assert_eq!(note, None, "a recording seat hands the turn nothing");
+            let seated = turn_pending().lock().expect("pending lock").contains_key(cwd);
+            let ledger = skill_suggestion_path(cwd);
+            let started = Instant::now();
+            while seated && !ledger.exists() && started.elapsed() < Duration::from_secs(15) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let rows = super::super::jev_summary::read_rows(&ledger).len();
+            finish_turn_suggestion(cwd, &[]);
+            (seated, mock.requests().len(), rows)
+        })
+    };
+    assert_eq!(
+        ask(&[(SKILLS.setting, JevMode::Off.key())]),
+        (false, 0, 0),
+        "a search its person turned off asks no suggestion after the update"
+    );
+    let own = ask(&[(SKILLS.setting, JevMode::Off.key()), (SKILL_SUGGESTION.setting, JevMode::Auto.key())]);
+    assert!(own.0 && own.1 >= 1 && own.2 >= 1, "the suggestion's own auto asks: {own:?}");
+    let neither = ask(&[]);
+    assert!(neither.0 && neither.1 >= 1 && neither.2 >= 1, "neither word: asked as before the split: {neither:?}");
+}

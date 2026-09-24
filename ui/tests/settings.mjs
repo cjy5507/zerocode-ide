@@ -5042,6 +5042,38 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   return `one switch · ${selects.total} select under 고급 · 0 visible`;
 });
 
+await test("분리 전에 손으로 끈 스킬 검색은 업데이트 뒤에도 스킬 제안을 끈 채로 둔다 — 제안은 제 낱말이 생길 때까지 검색의 낱말을 따른다", async () => {
+  await openSettings(pageA, "api-routers");
+  backend.keychain.set(TYPESAFE_SERVICE, "apikey_fixture");
+  const toggle = pageA.locator("#jev-enabled");
+  const suggestion = JEV_SEATS.find((seat) => seat.id === "skill_suggestion");
+  const search = JEV_SEATS.find((seat) => seat.id === "skills");
+  // A file written before the skill suggestion was a seat of its own: Jev on
+  // in every folder and every feature turned off by hand, the skill search
+  // among them, and no word for the suggestion, which read the search's
+  // until the split (t-6877, the coordinator's migration contract m-8181).
+  const byHand = Object.fromEntries(
+    JEV_SEATS.filter((seat) => seat !== suggestion).map((seat) => [seat.setting, "off"]),
+  );
+  try {
+    backend.zoSettings.smart = { ...byHand, [JEV_SETTINGS_KEY]: { enabled: true, workspaces: [JEV_EVERY_WORKSPACE] } };
+    await pageA.evaluate(() => refreshApiRouters());
+    await renderSettled(pageA);
+    assert(!(await toggle.isChecked()), "the update turned the suggestion on though its person had turned the search off");
+    // A word of the suggestion's own is its own: it asks, and the switch
+    // says Jev is in use, while the search's own word stands.
+    backend.zoSettings.smart = { ...backend.zoSettings.smart, [suggestion.setting]: "auto" };
+    await pageA.evaluate(() => refreshApiRouters());
+    await pageA.waitForFunction(() => document.getElementById("jev-enabled")?.checked === true, null, { timeout: UI_TIMEOUT });
+    assertEqual(backend.zoSettings.smart[search.setting], "off", "the search's own word moved");
+  } finally {
+    delete backend.zoSettings.smart;
+    backend.keychain.delete(TYPESAFE_SERVICE);
+  }
+  await pageA.evaluate(() => refreshApiRouters());
+  return `${suggestion.id} follows ${search.setting} until it has a word of its own`;
+});
+
 await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한다 — 분류기가 라우팅 자리 앞에 선다", async () => {
   await openSettings(pageA, "api-routers");
   backend.keychain.set(TYPESAFE_SERVICE, "apikey_fixture");

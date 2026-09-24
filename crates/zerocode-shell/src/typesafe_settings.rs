@@ -737,6 +737,70 @@ mod tests {
         }
     }
 
+    /// A file written before the skill suggestion was a seat of its own
+    /// reads as it did before the update (t-6877 round 3, the coordinator's
+    /// migration contract m-8181): its person turned every feature off by
+    /// hand, the skill search among them, and the suggestion — which read the
+    /// search's word until the split — stands off too, governed by that word
+    /// and not by the switch, so the card says nothing is sent; a word
+    /// written for the suggestion itself is its own, and the search's `off`
+    /// stands beside it.
+    #[test]
+    fn a_file_from_before_the_split_keeps_the_suggestion_at_the_searchs_word() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let suggestion = &zerocode_core::jev::SKILL_SUGGESTION;
+        let search = &zerocode_core::jev::SKILLS;
+        let mut smart = serde_json::Map::new();
+        for row in JEV_USES.iter().filter(|row| row.id != suggestion.id) {
+            smart.insert(row.setting.to_string(), Value::from(JevMode::Off.key()));
+        }
+        smart.insert(
+            door::JEV_SETTINGS_KEY.to_string(),
+            serde_json::json!({
+                door::ENABLED_SETTING: true,
+                door::WORKSPACES_SETTING: [door::EVERY_WORKSPACE],
+            }),
+        );
+        let keys = HeldKeys::default();
+        let read = |smart: &serde_json::Map<String, Value>| {
+            std::fs::write(
+                &path,
+                serde_json::json!({ SMART_SETTINGS_KEY: smart }).to_string(),
+            )
+            .expect("write");
+            read_settings(&path, &keys, true).expect("settings")
+        };
+        let row = |state: &TypeSafeSettings, id: &str| {
+            state
+                .switches
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| (row.mode, row.written))
+                .expect("a row")
+        };
+
+        let before = read(&smart);
+        assert_eq!(
+            row(&before, suggestion.id),
+            (JevMode::Off.key(), true),
+            "the suggestion stands at the search's word, which the switch does not govern"
+        );
+        assert!(
+            !before.jev.on,
+            "nothing asks, so the switch says nothing is sent"
+        );
+
+        smart.insert(
+            suggestion.setting.to_string(),
+            Value::from(JevMode::Auto.key()),
+        );
+        let split = read(&smart);
+        assert_eq!(row(&split, suggestion.id), (JevMode::Auto.key(), true));
+        assert_eq!(row(&split, search.id), (JevMode::Off.key(), true));
+        assert!(split.jev.on, "the suggestion asks on its own word");
+    }
+
     /// zo prints one JSON object whether or not anything answered; anything
     /// else on stdout is no answer at all.
     #[test]

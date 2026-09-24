@@ -1196,33 +1196,80 @@ fn the_routing_judge_reads_the_current_rubrics_series_and_stands_on_nothing_olde
 /// line that is not such a request — a request spelling a fraction, a label
 /// spelling a newer version, a line torn before its value ends — does not,
 /// at `raised_at`, the one standing reader `acts_here` and
-/// `active_assessments` take.
+/// `active_assessments` take. And (round 3, astra R2) a value spelling
+/// `transition`, a transition's key inside an object of the row, or a key
+/// spelled with an escape is read as the parser reads it: the request still
+/// fences, an escaped fall still falls, and a row both asked and a
+/// transition fences first.
 #[test]
 fn the_routing_door_reads_a_fence_as_the_rows_do() {
     let work = tempfile::tempdir().expect("tmp");
     let ledger = work.path().join(zerocode_core::jev::ROUTING.ledger);
     let seat = &zerocode_core::jev::ROUTING;
     let newer = seat.rubric_version + 1;
-    let lines: [(String, bool); 6] = [
+    let current = seat.rubric_version;
+    let lines: [(String, bool); 12] = [
         (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer}}}"#), false),
         (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion" :{newer}}}"#), false),
         (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer}.5}}"#), true),
         (format!(r#"{{"at":2,"label":"orphan","attempt":"a@1","rubricVersion":{newer},"agreed":true}}"#), true),
         (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer}"#), true),
-        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{}}}"#, seat.rubric_version), true),
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{current}}}"#), true),
+        // t-6877 round 3 (astra R2): what a value spells, a key an object
+        // inside the row carries, and a key spelled with an escape.
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer},"note":"transition"}}"#), false),
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer},"meta":{{"transition":"rise"}}}}"#), false),
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubric\u0056ersion":{newer}}}"#), false),
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubric\u0056ersion":{current}}}"#), true),
+        (format!(r#"{{"at":2,"\u0074ransition":"fall","rubricVersions":[{current}]}}"#), false),
+        (
+            format!(r#"{{"at":2,"transition":"rise","rubricVersions":[{current}],"outcome":"control","rubricVersion":{newer}}}"#),
+            false,
+        ),
     ];
+    // Every line the door or the rows read apart from where the seat
+    // stands, named at once — not the first alone.
+    let mut apart = Vec::new();
     for (line, raised) in lines {
         fs::write(&ledger, format!("{}\n{line}\n", rise_of(seat, 1))).expect("write");
-        assert_eq!(
-            super::super::decision_shadow::raised_at(&ledger),
-            raised,
-            "the text after the rise: {line}"
-        );
-        let rows = read_rows(&ledger);
-        assert_eq!(
-            promote::standing(seat, &rows) == promote::Stand::Applying,
-            raised,
-            "the rows disagree with the text on {line}"
-        );
+        let door = super::super::decision_shadow::raised_at(&ledger);
+        let rows = promote::standing(seat, &read_rows(&ledger)) == promote::Stand::Applying;
+        if (door, rows) != (raised, raised) {
+            apart.push(format!("{line} — raised_at {door}, rows {rows}, not {raised}"));
+        }
     }
+    assert!(apart.is_empty(), "the routing door and the rows read these lines apart:\n{}", apart.join("\n"));
+}
+
+/// A recall label naming no time does not overwrite the one naming its
+/// asking, at the card and the judge the recall seat is read by (t-6877
+/// round 3, astra R1b — their four rows): the same words asked twice under
+/// one rubric and answered by one version are two askings; the label naming
+/// the second asking's time is its one comparison, and the label written
+/// after it naming no time grades neither asking.
+#[test]
+fn a_recall_label_naming_no_time_does_not_overwrite_the_one_naming_its_asking() {
+    use zerocode_core::jev::promote::Agreement;
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::RECALL;
+    let asking = |at: i64| {
+        asked_by(seat, json!({"at": at, "outcome": "answered", "requests": 1, "elapsedMs": 1, "query": 7, "notes": 9, "model": "M"}))
+    };
+    write(
+        home.path(),
+        seat.ledger,
+        &[
+            asking(10),
+            asking(20),
+            json!({"at": 21, "label": "7:9", "requestAt": 20, "agreed": false, "baselineAgreed": true}),
+            json!({"at": 22, "label": "7:9", "agreed": true, "baselineAgreed": false}),
+        ],
+    );
+    let report = one(seat, &roots, None, None, 1_000, 0);
+    assert_eq!(
+        report.judged.as_ref().map(|judged| judged.agreement),
+        Some(Agreement { compared: 1, agreed: 0, baseline_compared: 1, baseline_agreed: 1, not_compared: 0 }),
+        "the label naming 20 stands, and the one naming no time grades neither asking"
+    );
 }

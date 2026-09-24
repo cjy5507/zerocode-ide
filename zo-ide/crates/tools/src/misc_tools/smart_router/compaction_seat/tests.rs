@@ -347,7 +347,7 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
         assert_eq!(label.label, row.judged.to_string());
         assert!(label.applied);
     }
-    // The judge reads them as this seat's agreement: one compared, one agreed.
+    // Counted as marks: two compared, one agreed.
     let read = super::super::jev_summary::read_rows(&ledger);
     let agreement = zerocode_core::jev::summary::agreement_since(&read, i64::MIN);
     assert_eq!((agreement.compared, agreement.agreed), (2, 1));
@@ -355,6 +355,15 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
         read.iter().all(|row| zerocode_core::jev::summary::asked_something(row).is_none()),
         "a label is not a request"
     );
+    // And the judge, reading the request beside them, counts each dropped
+    // block's mark: two labels of one compaction grade two blocks, not one
+    // request twice — the regret written first is not overwritten by the
+    // later agreement (t-6877 round 3).
+    let mut judged_rows = vec![serde_json::to_value(&row).expect("the row")];
+    judged_rows.extend(read.iter().cloned());
+    let series = zerocode_core::jev::promote::on_the_newest_version(&zerocode_core::jev::COMPACTION, &judged_rows);
+    let marked = zerocode_core::jev::summary::agreement_rows(series.marks.iter().copied(), i64::MIN);
+    assert_eq!((marked.compared, marked.agreed), (2, 1), "{series:?}");
 }
 
 /// The same call made again — not a read, a re-run — is regret too.

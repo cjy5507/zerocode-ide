@@ -343,6 +343,87 @@ fn a_use_with_no_word_of_its_own_follows_the_switch() {
     }
 }
 
+/// The skill suggestion keeps the word its person wrote for the skill
+/// search until they write one of its own (t-6877 round 3, the
+/// coordinator's migration contract m-8181): it read `smart.skillSearch`
+/// until it was a seat of its own, so a file that says `off` there asks no
+/// suggestion after the update, and `shadow`, `on` and `auto` stand as
+/// written — a slip reads as `off` for both, as it did; with neither word
+/// written it stands where it stood before the split, the search's reading,
+/// whatever the switch says; and a word written for the suggestion is its
+/// own, whatever the search's says. The search never reads the
+/// suggestion's word.
+#[test]
+fn the_skill_suggestion_keeps_the_word_written_for_the_skill_search() {
+    let document = |switch: Option<bool>, search: Option<&str>, suggestion: Option<&str>| {
+        let mut smart = serde_json::Map::new();
+        if let Some(on) = switch {
+            smart.insert(
+                door::JEV_SETTINGS_KEY.to_string(),
+                json!({ door::ENABLED_SETTING: on }),
+            );
+        }
+        if let Some(word) = search {
+            smart.insert(SKILLS.setting.to_string(), json!(word));
+        }
+        if let Some(word) = suggestion {
+            smart.insert(SKILL_SUGGESTION.setting.to_string(), json!(word));
+        }
+        json!({ SMART_SETTINGS_KEY: smart })
+    };
+    // The contract's three cases, under the switch.
+    assert_eq!(
+        SKILL_SUGGESTION.mode_in(&document(Some(true), Some("off"), None)),
+        JevMode::Off,
+        "a search turned off by hand keeps the suggestion off after the update"
+    );
+    assert_eq!(
+        SKILL_SUGGESTION.mode_in(&document(Some(true), Some("off"), Some("auto"))),
+        JevMode::Auto,
+        "a word of the suggestion's own is its own"
+    );
+    assert_eq!(
+        SKILL_SUGGESTION.mode_in(&document(Some(true), None, None)),
+        SKILLS.mode_in(&document(Some(true), None, None)),
+        "with neither word written, where it stood before the split"
+    );
+    for switch in [Some(true), Some(false), None] {
+        let neither = document(switch, None, None);
+        assert_eq!(
+            SKILL_SUGGESTION.mode_in(&neither),
+            SKILLS.mode_in(&neither),
+            "{switch:?}: neither word written reads as the search did"
+        );
+        for search in ["off", "shadow", "on", "auto", "shadwo"] {
+            let before = document(switch, Some(search), None);
+            assert_eq!(
+                SKILL_SUGGESTION.mode_in(&before),
+                SKILLS.mode_in(&before),
+                "{switch:?} {search}: the search's word stands for the suggestion"
+            );
+            for own in ["off", "shadow", "on", "auto"] {
+                let split = document(switch, Some(search), Some(own));
+                assert_eq!(
+                    SKILL_SUGGESTION.mode_in(&split),
+                    SKILL_SUGGESTION.mode_of(Some(&json!(own))),
+                    "{switch:?} {search} {own}: the suggestion's own word"
+                );
+                assert_eq!(
+                    SKILLS.mode_in(&split),
+                    SKILLS.mode_in(&before),
+                    "{switch:?} {search} {own}: the search reads its own word alone"
+                );
+            }
+        }
+        let only_the_suggestion = document(switch, None, Some("off"));
+        assert_eq!(
+            SKILLS.mode_in(&only_the_suggestion),
+            SKILLS.mode_in(&neither),
+            "{switch:?}: the search never follows the suggestion"
+        );
+    }
+}
+
 /// Recall has an apply stage (t-4676): `on` reorders what a turn reads. Its
 /// `auto` records until the judge raises it on the seat's own labels
 /// (t-5806), on the skill seat's lines read from there.

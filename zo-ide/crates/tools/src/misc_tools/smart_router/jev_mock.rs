@@ -180,19 +180,28 @@ pub(super) fn machine_live<T>(seat: &JevUse, mode: &str, body: impl FnOnce(&Path
 }
 
 fn machine_at<T>(seat: &JevUse, mode: &str, wire: Option<&str>, body: impl FnOnce(&Path) -> T) -> T {
+    machine_with(&[(seat.setting, mode)], wire, body)
+}
+
+/// [`machine`] with the seat words its settings file holds given whole —
+/// none, one or several, as `(setting, word)` — for a test of how two
+/// seats' words read together (t-6877: the skill suggestion keeps the
+/// search's word until it has one of its own).
+pub(super) fn machine_words<T>(words: &[(&str, &str)], base_url: &str, body: impl FnOnce(&Path) -> T) -> T {
+    machine_with(words, Some(base_url), body)
+}
+
+fn machine_with<T>(words: &[(&str, &str)], wire: Option<&str>, body: impl FnOnce(&Path) -> T) -> T {
     let home = tempfile::tempdir().expect("a config home");
     let work = tempfile::tempdir().expect("a workspace");
     // As the filesystem spells it, which is how the door spells a cwd.
     let cwd = std::fs::canonicalize(work.path()).expect("the workspace resolved");
+    let mut smart: serde_json::Map<String, serde_json::Value> =
+        words.iter().map(|(setting, word)| ((*setting).to_string(), serde_json::Value::from(*word))).collect();
+    smart.insert("jev".to_string(), serde_json::json!({"enabled": true, "workspaces": [cwd.to_string_lossy()]}));
     std::fs::write(
         home.path().join("settings.json"),
-        serde_json::json!({
-            zerocode_core::jev::SMART_SETTINGS_KEY: {
-                seat.setting: mode,
-                "jev": {"enabled": true, "workspaces": [cwd.to_string_lossy()]},
-            }
-        })
-        .to_string(),
+        serde_json::json!({ zerocode_core::jev::SMART_SETTINGS_KEY: smart }).to_string(),
     )
     .expect("a settings file");
     let mut env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", &home.path().to_string_lossy())

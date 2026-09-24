@@ -922,6 +922,18 @@ fn a_ledgers_text_stands_where_its_rows_do() {
         Stand::Recording,
         "a word in a value is not a transition"
     );
+    // A transition's key spelled with an escape is the key the parser
+    // reads (t-6877 round 3).
+    let escaped = format!(
+        "{}{}\n",
+        text(&rows),
+        r#"{"at":4,"\u0074ransition":"fall"}"#
+    );
+    assert_eq!(
+        stand_in(&escaped),
+        Stand::Recording,
+        "an escaped fall is a fall"
+    );
 }
 
 #[test]
@@ -2107,6 +2119,185 @@ fn a_label_grades_one_asking_of_a_name_and_guesses_none() {
     );
 }
 
+/// A label naming no time guesses no asking of words asked again (t-6877
+/// round 3, astra R1b): the recall seat names a request by the fingerprints
+/// of what was asked, so the same words asked twice under the same rubric
+/// and answered by the same version are two askings, not one. A label
+/// naming its asking's time grades that asking and no other, and of two
+/// labels of one asking the newest counts; a label naming no time — every
+/// label written before round 2 — grades neither asking, so it never
+/// overwrites the exact label's mark, nor grades the one asking left above
+/// it when its own was trimmed away; and a time two askings of the words
+/// share names neither. Read at the judge every seat is read by.
+#[test]
+fn a_label_naming_no_time_grades_no_asking_of_words_asked_again() {
+    use serde_json::json;
+    let seat = &crate::jev::RECALL;
+    let rubric = seat.rubric_version;
+    let asked = |at: u64| {
+        json!({"at": at, "outcome": "answered", "requests": 1, "elapsedMs": 1,
+               "query": 7, "notes": 9, "rubricVersion": rubric, "model": "M"})
+    };
+    let label = |at: u64, agreed: bool, when: Option<u64>| {
+        let mut row =
+            json!({"at": at, "label": "7:9", "agreed": agreed, "baselineAgreed": !agreed});
+        if let Some(when) = when {
+            row[REQUEST_AT.canonical] = json!(when);
+        }
+        row
+    };
+    let marks = |rows: &[Value]| {
+        let judged = judge_seat(seat, rows).expect("recall rises");
+        let agreement = judged.agreement;
+        (
+            agreement.compared,
+            agreement.agreed,
+            agreement.baseline_compared,
+            agreement.baseline_agreed,
+        )
+    };
+    assert_eq!(
+        marks(&[
+            asked(10),
+            asked(20),
+            label(21, false, Some(20)),
+            label(22, true, None)
+        ]),
+        (1, 0, 1, 1),
+        "the label naming 20 stands; the one naming no time grades neither asking"
+    );
+    assert_eq!(
+        marks(&[
+            asked(10),
+            asked(20),
+            label(21, true, Some(10)),
+            label(22, false, Some(20))
+        ]),
+        (2, 1, 2, 1),
+        "each asking by its own time"
+    );
+    assert_eq!(
+        marks(&[
+            asked(10),
+            asked(20),
+            label(21, true, Some(20)),
+            label(22, false, Some(20))
+        ]),
+        (1, 0, 1, 1),
+        "two labels of one asking: the newest"
+    );
+    let mut answered_by_another = label(21, true, Some(20));
+    answered_by_another[crate::jev::summary::MODEL.canonical] = json!("N");
+    assert_eq!(
+        marks(&[asked(10), asked(20), answered_by_another]),
+        (0, 0, 0, 0),
+        "a label spelling a version its asking was not answered by grades nothing"
+    );
+    assert_eq!(
+        marks(&[asked(20), label(22, true, None)]),
+        (0, 0, 0, 0),
+        "its own asking trimmed away, one of the same words left: no time, no asking"
+    );
+    assert_eq!(
+        marks(&[asked(20), label(22, true, Some(10))]),
+        (0, 0, 0, 0),
+        "a time no asking above it was made at names none"
+    );
+    assert_eq!(
+        marks(&[asked(20), asked(20), label(22, true, Some(20))]),
+        (0, 0, 0, 0),
+        "a time two askings of the words share names neither"
+    );
+}
+
+/// Two requests carrying a name the writer made for one request are two
+/// requests nothing tells apart (t-6877 round 3, astra R1b) — a guard's
+/// `judged` minted again by a replay, or by a turn key a compaction made
+/// again: a label naming it grades neither, however alike the two were
+/// asked and answered; a name carried once grades as ever.
+#[test]
+fn a_label_of_a_name_two_requests_carry_grades_neither() {
+    let seat = guard();
+    let rows = vec![
+        guard_request(10, 5, 2, Some(ANSWERING), "answered"),
+        guard_request(20, 5, 2, Some(ANSWERING), "answered"),
+        guard_label(21, 5, true),
+        guard_request(30, 6, 2, Some(ANSWERING), "answered"),
+        guard_label(31, 6, false),
+    ];
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(
+        (judged.agreement.compared, judged.agreement.agreed),
+        (1, 0),
+        "`6` once; `5`, carried by two requests, never: {judged:?}"
+    );
+}
+
+/// A turn is the one name several requests carry by design (t-6877 round
+/// 3, astra R1b): the routing seat's label names a turn's attempt, and
+/// every judgment the turn asked — its own, the agents it spawned — carries
+/// it. The label grades the turn while its rows could hand it nothing
+/// different — one rubric, one answering version, one side of the series'
+/// start — and nothing when they could.
+#[test]
+fn a_turns_label_grades_the_turn_its_several_requests_are() {
+    use serde_json::json;
+    let seat = &crate::jev::ROUTING;
+    let asked = |at: u64, model: &str| {
+        json!({"at": at, "outcome": "answered", "requests": 1, "elapsedMs": 1, "attempt": "s@1",
+               "rubricVersion": seat.rubric_version, "model": model})
+    };
+    let label = json!({"at": 30, "label": "s@1", "attempt": "s@1", "agreed": true});
+    let graded = |rows: &[Value]| {
+        on_the_newest_version(seat, rows)
+            .marks
+            .iter()
+            .any(|row| LABEL.read(row).is_some())
+    };
+    assert!(
+        graded(&[
+            asked(10, "M"),
+            asked(11, "M"),
+            asked(12, "M"),
+            label.clone()
+        ]),
+        "one turn of three judgments, one comparison"
+    );
+    assert!(
+        !graded(&[asked(10, "M"), asked(11, "N"), label]),
+        "a turn two versions answered hands its label two versions: it grades neither"
+    );
+}
+
+/// A label grades one part of its request where the seat's request has
+/// several (t-6877 round 3): the compaction seat writes a label for each
+/// block the compaction dropped — the turn a block is read again it regrets
+/// that block, the rest agree once the window has passed — and each is one
+/// comparison; two labels of one block are one, the newest. Read as one
+/// request's duplicates, the regret written first would be overwritten by a
+/// later block's agreement.
+#[test]
+fn each_dropped_block_is_one_comparison_of_its_compaction() {
+    use serde_json::json;
+    let seat = &crate::jev::COMPACTION;
+    let asked = json!({"at": 10, "judged": 77, "outcome": "answered", "requests": 1, "elapsedMs": 1,
+                       "rubricVersion": seat.rubric_version, "model": "M"});
+    let block = |at: u64, block: u64, agreed: bool| json!({"kind": "label", "at": at, "label": "77", "block": block, "agreed": agreed, "applied": false});
+    let rows = [
+        asked,
+        block(20, 1, false),
+        block(30, 2, true),
+        block(30, 3, false),
+        block(31, 3, true),
+    ];
+    let judged = judge_seat(seat, &rows).expect("compaction rises");
+    assert_eq!(
+        (judged.agreement.compared, judged.agreement.agreed),
+        (3, 2),
+        "block 1's regret, block 2, and block 3 by its newest label: {judged:?}"
+    );
+}
+
 /// The text reader and the row reader agree on what fences a series
 /// (t-6877 round 2, astra R2): a request of newer words fences the seat
 /// behind it, and nothing else does — not a label spelling a newer version,
@@ -2203,6 +2394,94 @@ fn the_text_reader_and_the_row_reader_agree_on_what_fences_a_series() {
             );
         }
     }
+}
+
+/// The text reader reads every line the rows reader would read (t-6877
+/// round 3, astra R2): a request of newer words fences the seat though a
+/// value of it says `transition` or an object inside it carries a
+/// transition's key; a key spelled with an escape is the key the parser
+/// reads — `"rubric\u0056ersion"` is the rubric, `"\u0074ransition"` a
+/// transition; and a row that is both asked and a transition is read as the
+/// rows read it, fence first. Each ledger read off the rows and off the
+/// text, on a seat asking version 1 and one asking version 2.
+#[test]
+fn the_text_reader_reads_every_line_the_rows_reader_would() {
+    let first = &crate::jev::PLACEMENT;
+    let second = guard();
+    // (the ledger after the seat's own rise at its own words, as `S`, and
+    // where the seat stands on it)
+    let ledgers: [(&str, Stand); 10] = [
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":3,"note":"transition"}"#,
+            Stand::Recording,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":3,"meta":{"transition":"rise"}}"#,
+            Stand::Recording,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":3,"note":"a \"transition\" in a value"}"#,
+            Stand::Recording,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubric\u0056ersion":3}"#,
+            Stand::Recording,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubric\u0056ersion":1}"#,
+            Stand::Applying,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":1,"note":"transition"}"#,
+            Stand::Applying,
+        ),
+        (
+            r#"{"at":2,"\u0074ransition":"fall","rubricVersions":[S]}"#,
+            Stand::Recording,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":3}
+{"at":3,"\u0074ransition":"rise","rubricVersions":[S]}"#,
+            Stand::Applying,
+        ),
+        (
+            r#"{"at":2,"transition":"rise","rubricVersions":[S],"outcome":"control","rubricVersion":3}"#,
+            Stand::Recording,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":3,"note":"transi"#,
+            Stand::Applying,
+        ),
+    ];
+    // Every ledger a reader reads apart from where the seat stands, named
+    // at once — not the first alone.
+    let mut apart = Vec::new();
+    for (after, stands) in ledgers {
+        for seat in [first, second] {
+            let own = seat.rubric_version.to_string();
+            let text = format!(
+                "{}\n{}\n",
+                rise_on(1, &[seat.rubric_version]),
+                after.replace('S', &own)
+            );
+            let rows: Vec<Value> = text
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            let (off_rows, off_text) = (standing(seat, &rows), standing_in(seat, &text));
+            if (off_rows, off_text) != (stands, stands) {
+                apart.push(format!(
+                    "{}: {after} — rows {off_rows:?}, text {off_text:?}, not {stands:?}",
+                    seat.id
+                ));
+            }
+        }
+    }
+    assert!(
+        apart.is_empty(),
+        "the readers read these ledgers apart:\n{}",
+        apart.join("\n")
+    );
 }
 
 /// A label that names no request grades nothing (t-6877 round 2, astra
