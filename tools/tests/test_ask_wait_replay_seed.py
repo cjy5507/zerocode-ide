@@ -302,6 +302,55 @@ class EndingsByAttempt(unittest.TestCase):
         )
 
 
+class DeclineNews(unittest.TestCase):
+    """A classifier decline and a model switch are the ledger's own news
+    (t-7153): neither is a question's answer, and neither ends the attempt
+    it is filed under — a declined worker ends by the stop its coordinator
+    or the handover walk writes into the task."""
+
+    def setUp(self):
+        self.raw = tempfile.TemporaryDirectory()
+        self.db = Path(self.raw.name) / "authority.sqlite"
+        db = sqlite3.connect(self.db)
+        db.executescript(SCHEMA)
+        rows = Rows(db)
+        rows.worker("w-9", "dp-9")
+        rows.dispatch("dp-9", "t-9", "w-9", 100)
+        news = ("classifier_declined", "model_deviated")
+        # Declined and switched, then stopped by the handover walk.
+        rows.worker("w-1", None)
+        rows.dispatch("dp-1", "t-1", "w-1", 100, 3000)
+        rows.task("t-1", json.dumps({"outcome": "stopped"}))
+        # Declined and switched, then ended with no reason the ledger kept.
+        rows.worker("w-2", None)
+        rows.dispatch("dp-2", "t-2", "w-2", 100, 3000)
+        rows.task("t-2", "")
+        for question, receiver in (("m-1", "w-1"), ("m-2", "w-2")):
+            rows.message(question, "worker:w-9", f"worker:{receiver}", "question", "which?", dispatch="dp-9", created=1000)
+            for at, kind in enumerate(news):
+                rows.message(f"{question}-{kind}", "ledger", "run:run-1", kind,
+                             json.dumps({"workerId": receiver, "dispatchId": f"dp-{receiver[-1]}"}),
+                             task=f"t-{receiver[-1]}", dispatch=f"dp-{receiver[-1]}", created=1500 + at)
+                # The same kinds threaded on the question under the receiver's name.
+                rows.message(f"{question}-{kind}-thread", f"worker:{receiver}", "worker:w-9", kind, "{}",
+                             thread=question, created=2000 + at)
+        rows.message("m-99", "ledger", "run:run-1", "status", "{}", created=10_000)
+        db.commit()
+        db.close()
+
+    def tearDown(self):
+        self.raw.cleanup()
+
+    def test_a_decline_and_a_switch_are_news_and_never_an_answer_or_an_ending(self):
+        rows = {row["question"]: row for row in seed.gather(self.db)["rows"]}
+        for question in ("m-1", "m-2"):
+            row = rows[seed.hashed(question)]
+            self.assertEqual(row["outcome"], "censored", f"{question}: the ledger's news was taken as the answer")
+            self.assertTrue(row["misread_answer"], f"{question}: the older reading would have taken it")
+        endings = {question: rows[seed.hashed(question)]["receiver_ended"]["ending"] for question in ("m-1", "m-2")}
+        self.assertEqual(endings, {"m-1": "stopped", "m-2": "unexplained"}, "a decline or a switch was read as an ending")
+
+
 class Notices(unittest.TestCase):
     """The rule's own lines are read — for every receiver, while the asker
     waits, and without the advice sentence."""

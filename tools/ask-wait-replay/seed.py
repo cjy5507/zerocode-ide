@@ -78,8 +78,22 @@ DEFAULT_DB = (
 LEDGER_ITSELF = "ledger"
 
 # `MessageKind::is_the_ledgers_own` there: kinds only the ledger writes. A
-# row of one of these can never be a question's answer.
-LEDGERS_OWN_KINDS = ("went_quiet", "deadlocked", "worker_died", "quota_walled", "handover", "resumed")
+# row of one of these can never be a question's answer. Of them only
+# `worker_died` ends an attempt here: a `classifier_declined` row is news and
+# never a settlement — a declined worker is ended by the outcome its
+# coordinator or the handover walk writes into the task (`ENDING_OUTCOMES`) —
+# and a `model_deviated` row tells a switch the worker's CLI made, not an
+# ending.
+LEDGERS_OWN_KINDS = (
+    "went_quiet",
+    "deadlocked",
+    "worker_died",
+    "quota_walled",
+    "handover",
+    "resumed",
+    "classifier_declined",
+    "model_deviated",
+)
 
 # `STALL_JUDGED_REASON` there.
 STALL_JUDGED_REASON = "judged"
