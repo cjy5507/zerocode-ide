@@ -484,6 +484,18 @@ pub enum RuntimeRequest {
     /// A person's hand landed real keys in a terminal — the fifth host
     /// fact. From that moment the pane is theirs, durably.
     PaneTakenOver { term: u32, now_ms: i64 },
+    /// A hook report said a seat's composer holds a question for the
+    /// person since `since_ms` (t-6740): every asker waiting on that seat
+    /// is told, once per wait.
+    PaneAttention {
+        term: u32,
+        since_ms: i64,
+        now_ms: i64,
+    },
+    /// A blocking `ask` reached its deadline: the answer it goes home with
+    /// carries the last thing the ledger observed about the receiver. A
+    /// read; nothing moves.
+    AskTimedOut { waiting: Box<Waiting>, now_ms: i64 },
     /// The window is on its way out and every pane goes with it (t-3058):
     /// seated workers sleep now, before their panes' own deaths can settle
     /// them.
@@ -816,6 +828,22 @@ impl std::fmt::Debug for RuntimeRequest {
             Self::PaneTakenOver { term, now_ms } => formatter
                 .debug_struct("RuntimeRequest::PaneTakenOver")
                 .field("term", term)
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::PaneAttention {
+                term,
+                since_ms,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::PaneAttention")
+                .field("term", term)
+                .field("since_ms", since_ms)
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::AskTimedOut { waiting, now_ms } => formatter
+                .debug_struct("RuntimeRequest::AskTimedOut")
+                .field("run_bytes", &waiting.run.len())
+                .field("thread", &waiting.thread.is_some())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::WindowExiting { now_ms } => formatter
@@ -1972,6 +2000,41 @@ impl RuntimeActor {
         }
     }
 
+    /// A hook report said a seat's composer is waiting on the person since
+    /// `since_ms`. Answers whether any asker was told, and the revision
+    /// that answer speaks for.
+    pub fn pane_attention(
+        &self,
+        term: u32,
+        since_ms: i64,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::PaneAttention {
+            term,
+            since_ms,
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// A blocking `ask` reached its deadline; `Some` is the answer it goes
+    /// home with, `None` when the wait was not a question's.
+    pub fn ask_timed_out(
+        &self,
+        waiting: Waiting,
+        now_ms: i64,
+    ) -> Result<(Option<Box<Decided>>, u64), RuntimeError> {
+        match self.request(RuntimeRequest::AskTimedOut {
+            waiting: Box::new(waiting),
+            now_ms,
+        })? {
+            RuntimeReply::Looked { found, revision } => Ok((found, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// The window is exiting: every seated worker sleeps now (t-3058).
     /// Answers what slept, and the revision that answer speaks for.
     pub fn window_exiting(
@@ -2880,6 +2943,12 @@ impl RuntimeState {
             } => self.observed(&to, &body, receipt.as_deref(), now_ms),
             RuntimeRequest::RetentionSweep { now_ms } => self.retention_swept(now_ms),
             RuntimeRequest::PaneTakenOver { term, now_ms } => self.pane_taken(term, now_ms),
+            RuntimeRequest::PaneAttention {
+                term,
+                since_ms,
+                now_ms,
+            } => self.pane_attention(term, since_ms, now_ms),
+            RuntimeRequest::AskTimedOut { waiting, now_ms } => self.ask_timed_out(&waiting, now_ms),
             RuntimeRequest::WindowExiting { now_ms } => self.window_exiting(now_ms),
             RuntimeRequest::WorkerPaneResumed {
                 term,
@@ -3052,6 +3121,7 @@ impl RuntimeState {
                 let state = settled
                     .ok_or(RuntimeError::AuthorityRejected)?
                     .map_err(|_| RuntimeError::AuthorityRejected)?;
+                self.ledger.receivers_reconciled(settled_at_ms);
                 let revision = self.write_through(settled_at_ms)?;
                 Ok(RuntimeReply::Release { state, revision })
             }
@@ -3106,7 +3176,9 @@ impl RuntimeState {
                     .ok_or(RuntimeError::AuthorityRejected)?;
                 let state = worker.state;
                 let state = if state == WorkerState::ReleasePending {
-                    self.ledger.release_unknown(&seat.worker)
+                    let state = self.ledger.release_unknown(&seat.worker);
+                    self.ledger.receivers_reconciled(now_ms);
+                    state
                 } else {
                     state
                 };
@@ -3198,10 +3270,19 @@ impl RuntimeState {
                 // Any sound retires the readiness window — an interrupted
                 // turn is still an agent that was THERE for it.
                 let spoke = ledger.worker_spoke((team, pane));
-                moved = ledger
+                let quiet = ledger
                     .worker_fell_silent((team, pane), turn_started_ms, interrupted, now_ms)
-                    .is_some()
-                    || spoke;
+                    .is_some();
+                // And whoever is waiting on this seat is told (t-6740) —
+                // under the same transition, so the notice and the silence
+                // reach the disk together or not at all.
+                let told = ledger.receivers_told_turn_ended(
+                    (team, pane),
+                    turn_started_ms,
+                    interrupted,
+                    now_ms,
+                ) > 0;
+                moved = quiet || spoke || told;
             }
         });
         if !moved {
@@ -3230,7 +3311,9 @@ impl RuntimeState {
         let mut moved = false;
         self.panes.with_seat_of_term(term, &mut |seat| {
             if let Some((team, pane)) = seat {
-                moved = ledger.worker_taken_over((team, pane));
+                let taken = ledger.worker_taken_over((team, pane));
+                let told = ledger.receivers_told_taken_over((team, pane), now_ms) > 0;
+                moved = taken || told;
             }
         });
         if !moved {
@@ -3243,6 +3326,59 @@ impl RuntimeState {
         Ok(RuntimeReply::Settled {
             moved: true,
             revision,
+        })
+    }
+
+    /// A seat's composer holds a question for the person: tell whoever is
+    /// waiting on that seat, once per wait.
+    fn pane_attention(
+        &mut self,
+        term: u32,
+        since_ms: i64,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0 || since_ms < 0 {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let ledger = &mut self.ledger;
+        let mut moved = false;
+        self.panes.with_seat_of_term(term, &mut |seat| {
+            if let Some((team, pane)) = seat {
+                moved = ledger.receivers_told_awaiting_input((team, pane), since_ms, now_ms) > 0;
+            }
+        });
+        if !moved {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// A blocking `ask` reached its deadline: a read of the last word about
+    /// its receiver, and nothing written.
+    fn ask_timed_out(
+        &mut self,
+        waiting: &Waiting,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0 {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        Ok(RuntimeReply::Looked {
+            found: zerocode_core::orchestration::ask_timed_out(&self.ledger, waiting).map(Box::new),
+            revision: self.revision,
         })
     }
 
@@ -3771,7 +3907,8 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
-        let told = self.ledger.workers_stalled(stalled, now_ms);
+        let told = self.ledger.workers_stalled(stalled, now_ms)
+            + self.ledger.receivers_told_stalled(stalled, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,
@@ -3936,7 +4073,8 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
-        let told = self.ledger.stall_causes_judged(judged, now_ms);
+        let told = self.ledger.stall_causes_judged(judged, now_ms)
+            + self.ledger.receivers_told_judged(judged, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,
@@ -4658,6 +4796,8 @@ impl RuntimeState {
             Some(screen) => self.ledger.finish_release(worker, Some(screen)),
             None => self.ledger.release_unknown(worker),
         };
+        // A release ends a reader: whoever asked it something is told (t-6740).
+        self.ledger.receivers_reconciled(now_ms);
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Release { state, revision })
     }
@@ -6698,6 +6838,95 @@ mod tests {
             "an interrupted turn is the person typing, not the worker quiet"
         );
         actor.shutdown().expect("join quiet actor");
+    }
+
+    /// A seat somebody has a question open to (t-6740): an interrupted
+    /// turn writes no silence and still moves the ledger, because the asker
+    /// is told; a wait on the person is told once per wait; and the
+    /// deadline answer reads the last word back without moving anything.
+    #[test]
+    fn a_receivers_state_moves_the_ledger_for_its_asker_and_the_deadline_reads_it() {
+        let fixture = Fixture::new();
+        let mut legacy = Ledger::new();
+        let run = legacy.create_run("asking", 5);
+        let seated = legacy
+            .start_worker(&run, "codex", ("team-1", "%2"), None, 6)
+            .expect("a seated worker");
+        let run_address = legacy.run(&run).expect("the run").address();
+        let question = legacy
+            .post(
+                &run,
+                zerocode_core::orchestration::Draft {
+                    from: run_address.clone(),
+                    to: zerocode_core::orchestration::worker_address(&seated.worker),
+                    kind: zerocode_core::orchestration::MessageKind::Question,
+                    body: "which branch?".into(),
+                    subject: Default::default(),
+                    priority: zerocode_core::orchestration::Priority::Normal,
+                    payload: Default::default(),
+                    thread: None,
+                    task: None,
+                    dispatch: None,
+                },
+                7,
+            )
+            .expect("the coordinator's question");
+        let actor = start_with(
+            &fixture,
+            cutover(Some(legacy.export()), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        assert_eq!(
+            actor
+                .pane_turn_ended(7, 15, true, 20)
+                .expect("an interrupted turn"),
+            (true, 1),
+            "the asker was not told the receiver's turn was interrupted"
+        );
+        assert_eq!(
+            actor
+                .pane_attention(7, 30, 31)
+                .expect("a wait on the person"),
+            (true, 2)
+        );
+        assert_eq!(
+            actor
+                .pane_attention(7, 30, 32)
+                .expect("the same wait again"),
+            (false, 2),
+            "one wait was told twice"
+        );
+        let waiting = Waiting {
+            run: run.clone(),
+            address: run_address,
+            kinds: Vec::new(),
+            peek: false,
+            deadline_ms: None,
+            acked: false,
+            format: false,
+            thread: Some(question),
+            seat: "team-1/%1".to_string(),
+        };
+        let (timed, revision) = actor
+            .ask_timed_out(waiting.clone(), 40)
+            .expect("a deadline answer");
+        assert_eq!(revision, 2, "a deadline read moved the ledger");
+        let timed: serde_json::Value =
+            serde_json::from_str(&timed.expect("a question's wait has an answer").reply.stdout)
+                .expect("JSON");
+        assert_eq!(timed["timedOut"], true, "{timed}");
+        assert_eq!(timed["receiver"]["reason"], "awaiting_input", "{timed}");
+        assert_eq!(timed["receiver"]["factMs"], 30);
+        let inbox_wait = Waiting {
+            thread: None,
+            ..waiting
+        };
+        let (none, _) = actor
+            .ask_timed_out(inbox_wait, 41)
+            .expect("an inbox wait's deadline");
+        assert!(none.is_none(), "an inbox wait spoke of a receiver");
+        actor.shutdown().expect("join receiver actor");
     }
 
     #[test]

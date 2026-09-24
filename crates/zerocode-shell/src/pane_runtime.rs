@@ -1272,6 +1272,7 @@ pub(super) fn note_pane_state(
             report.term,
             (report.state == zerocode_core::hook::HookState::NeedsAttention)
                 .then_some(state_started_at),
+            now,
         );
         (report.state == zerocode_core::hook::HookState::Done).then_some((
             state_started_at,

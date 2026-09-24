@@ -10927,12 +10927,12 @@ fn a_worker_observation_carries_the_windows_wait_verdict() {
     );
     // Evaluated and quiet: an explicit null, which must not print the
     // same as never-looked.
-    super::pane_attention_noted(WORKER, None);
+    super::pane_attention_noted(WORKER, None, 4_000);
     let seen = show();
     assert!(seen.get("agentWait").is_some());
     assert!(seen["agentWait"].is_null());
     // Waiting on the person: the evidence and its clock.
-    super::pane_attention_noted(WORKER, Some(4_242));
+    super::pane_attention_noted(WORKER, Some(4_242), 4_300);
     let seen = show();
     assert_eq!(seen["agentWait"]["source"], "hook");
     assert_eq!(seen["agentWait"]["since"], 4_242);
@@ -11094,7 +11094,7 @@ fn a_zo_workers_wait_names_the_event_channel_as_its_source() {
     let started: serde_json::Value = serde_json::from_str(&started.stdout).expect("a worker");
     let worker = started["workerId"].as_str().expect("a worker id");
 
-    super::pane_attention_noted(WORKER, Some(4_243));
+    super::pane_attention_noted(WORKER, Some(4_243), 4_300);
     let shown = run(
         &host,
         Vec::new(),

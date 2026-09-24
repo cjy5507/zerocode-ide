@@ -3053,11 +3053,34 @@ fn pane_attention() -> &'static Mutex<std::collections::HashMap<u32, Option<i64>
 }
 
 /// A hook report said whether this terminal is waiting on the person.
-pub(crate) fn pane_attention_noted(term: u32, waiting_since: Option<i64>) {
-    pane_attention()
-        .lock()
-        .unwrap_or_else(|held| held.into_inner())
-        .insert(term, waiting_since);
+///
+/// Answers whether this report BEGAN a wait — the value changed to
+/// `Some(since)` — which is the one moment the ledger is told (t-6740):
+/// a waiting stretch produces dozens of tool events that all say the same
+/// `since`, and whoever asked this seat a question is owed the fact once.
+pub(crate) fn pane_attention_noted(term: u32, waiting_since: Option<i64>, now_ms: i64) -> bool {
+    let began = {
+        let mut held = pane_attention()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let before = held.insert(term, waiting_since);
+        waiting_since.is_some() && before.flatten() != waiting_since
+    };
+    if !began {
+        return false;
+    }
+    // A hook event, not a verb: as in [`pane_turn_ended`], a degraded
+    // window has nobody to refuse and simply does not tell.
+    if unavailable().is_some() {
+        return true;
+    }
+    if let Some(held) = runtime()
+        && let Some(since_ms) = waiting_since
+        && let Ok((moved, _)) = held.actor.pane_attention(term, since_ms, now_ms)
+    {
+        rang(moved);
+    }
+    true
 }
 
 /// The terminal is gone; its number's next life starts unevaluated.
@@ -6974,6 +6997,21 @@ fn carried(
                         match actor.serve_receipt(Box::new(decided.clone()), now_ms) {
                             Ok((moved, _)) => rang(moved),
                             Err(why) => return refused_by_runtime(why),
+                        }
+                        /* A question's deadline goes home with the last
+                         * word about its receiver (t-6740) — read now, at
+                         * the deadline, rather than the line the first
+                         * look wrote before anything had been observed.
+                         * The receipt above stays the first answer: a
+                         * replay of the same ask reads its way back the
+                         * same way, and the timed-out word is this
+                         * caller's, now. A wait that is not a question's
+                         * answers as it always did. */
+                        if waiting.thread.is_some()
+                            && let Ok((Some(timed), _)) =
+                                actor.ask_timed_out(waiting.clone(), now_ms)
+                        {
+                            return answer(timed.reply);
                         }
                         return answer(decided.reply);
                     }

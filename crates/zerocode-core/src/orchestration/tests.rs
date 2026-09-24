@@ -22443,3 +22443,664 @@ fn a_legacy_result_with_no_author_reads_as_a_claim_and_a_coordinators_row_surviv
     assert_eq!(new.merge_head.as_deref(), Some("3a0a289bb5f3"));
     assert_eq!(new.author, ReviewAuthor::Coordinator);
 }
+
+/* ---- t-6740: the asker learns how its receiver stands ------------------ */
+
+/// The JSON one notice carried, read off a `check` row.
+fn notice_body(row: &serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(row["body"].as_str().expect("a notice body")).expect("a notice is JSON")
+}
+
+/// A question asked from one pane of another, and the wait it planned.
+fn asked_of(bench: &mut Bench, asker_pane: &str, to: &str) -> (String, Waiting) {
+    let planned = bench.at(asker_pane, &format!("ask --to {to} --body which-branch?"));
+    assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+    let said: serde_json::Value =
+        serde_json::from_str(&planned.reply.stdout).expect("an ask answers JSON");
+    let question = said["questionId"].as_str().expect("an id").to_string();
+    let waiting = planned.waiting.clone().expect("a blocking ask waits");
+    (question, waiting)
+}
+
+/// The receiver's turn ends without a word in the thread, and the asker is
+/// told one line in the ledger's voice — a line that is never the answer.
+///
+/// The measured hole (t-6740 baseline, 189 questions over 29 days): a
+/// question to a worker recorded NO turn fact about that worker while the
+/// asker waited, because `worker_fell_silent` writes only for a worker
+/// carrying an open dispatch, and 42 of 45 worker receivers carried none.
+#[test]
+fn an_ask_learns_the_receivers_turn_ended_without_an_answer() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name receivers")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let (receiver, receiver_pane) = bench.seat("worker-start --agent claude");
+    let (_asker, asker_pane) = bench.seat("worker-start --agent codex");
+    let (question, waiting) = asked_of(&mut bench, &asker_pane, &format!("worker:{receiver}"));
+    let seat = ("team-1", receiver_pane.as_str());
+
+    // The receiver's turn ends; it said nothing in the thread.
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, 4_000, false, 4_010),
+        1,
+        "the asker was not told the receiver's turn ended"
+    );
+
+    // One line, threaded on the question, in the ledger's voice. Read with
+    // `--peek` throughout, so the rows accumulate where a lease would
+    // replay the first batch until it was acknowledged.
+    let mail = bench.json_at(&asker_pane, "check --peek");
+    assert_eq!(mail["count"], 1, "{mail}");
+    let notice = &mail["messages"][0];
+    assert_eq!(notice["type"], "status");
+    assert_eq!(notice["from"], LEDGER_ITSELF);
+    assert_eq!(notice["source"], "ledger");
+    assert_eq!(notice["trust"], "observation");
+    assert_eq!(notice["thread"], question.as_str());
+    let body = notice_body(notice);
+    assert_eq!(body["reason"], ReceiverNews::TurnEnded.word());
+    assert_eq!(body["final"], false);
+    assert_eq!(body["questionId"], question.as_str());
+    assert_eq!(body["receiver"], format!("worker:{receiver}"));
+    assert_eq!(body["receiverSeat"]["workerId"], receiver.as_str());
+    assert_eq!(body["factMs"], 4_000);
+    assert_eq!(body["observedAtMs"], 4_010);
+
+    // A notice is not an answer — not to the resume, not to the woken look,
+    // not to the run's own reading of the thread.
+    let resumed = bench.at(&asker_pane, &format!("ask --resume {question}"));
+    assert!(
+        resumed.waiting.is_some(),
+        "a notice put the asker's wait down"
+    );
+    let said: serde_json::Value = serde_json::from_str(&resumed.reply.stdout).expect("JSON");
+    assert_eq!(said["answered"], false, "{said}");
+    assert!(look_again(&mut bench.ledger, &waiting).is_none());
+    let run = bench.ledger.run(&run_id).expect("the run");
+    let asked = run.message(&question).expect("the question");
+    assert!(
+        run.answer_to(asked).is_none(),
+        "the ledger's own line was read as the answer"
+    );
+    assert!(
+        !run.question_is_closed(asked),
+        "a receiver's turn ending closed the question"
+    );
+
+    // The same turn twice, and another turn inside the reminder cadence,
+    // add nothing; past the cadence a fresh turn end is fresh news.
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, 4_000, false, 4_020),
+        0
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, 5_000, false, 5_010),
+        0
+    );
+    let later = 4_010 + QUIET_REMINDER_MS;
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, later, false, later + 5),
+        1
+    );
+    // A turn the person cut short is its own word.
+    let cut = later + QUIET_REMINDER_MS;
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, cut, true, cut + 5),
+        1
+    );
+    let mail = bench.json_at(&asker_pane, "check --peek");
+    assert_eq!(mail["count"], 3, "{mail}");
+    assert_eq!(
+        notice_body(&mail["messages"][2])["reason"],
+        ReceiverNews::Interrupted.word()
+    );
+
+    // The receiver answers: that is the answer, once, and the asker wakes.
+    bench.json_at(
+        &receiver_pane,
+        &format!("reply --to-message {question} --body main"),
+    );
+    let woken = look_again(&mut bench.ledger, &waiting).expect("the answer wakes the asker");
+    let woken: serde_json::Value = serde_json::from_str(&woken.reply.stdout).expect("JSON");
+    assert_eq!(woken["answered"], true, "{woken}");
+    assert_eq!(woken["answer"]["from"], format!("worker:{receiver}"));
+    assert_eq!(woken["answer"]["body"], "main");
+    // And a late turn end is nobody's news any more.
+    let late = cut + QUIET_REMINDER_MS;
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, late, false, late + 5),
+        0
+    );
+}
+
+/// A receiver its coordinator stopped or abandoned can never answer — no
+/// road signs a released worker's address again — so the asker is told
+/// once, finally, in words that say what NOT to do: ask again, or summon a
+/// replacement. The blocked ask wakes on it, a resume answers it at once,
+/// and nothing about the question or the roster moves.
+#[test]
+fn a_cancelled_receiver_tells_the_asker_not_to_resend_or_replace() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name cancelled")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let task = bench.json("task-create --spec look")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (receiver, _) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let (_asker, asker_pane) = bench.seat("worker-start --agent codex");
+    let (question, waiting) = asked_of(&mut bench, &asker_pane, &format!("worker:{receiver}"));
+    let questions_before = bench
+        .ledger
+        .run(&run_id)
+        .expect("the run")
+        .messages()
+        .iter()
+        .filter(|held| held.kind == MessageKind::Question)
+        .count();
+
+    // The coordinator stops the receiver.
+    let stopped = bench.run(&format!(
+        "worker-stop --worker {receiver} --reason elsewhere"
+    ));
+    assert_eq!(stopped.reply.exit_code, 0, "{}", stopped.reply.stderr);
+
+    // Told once, finally, with the advice.
+    let mail = bench.json_at(&asker_pane, "check --peek");
+    assert_eq!(mail["count"], 1, "{mail}");
+    let body = notice_body(&mail["messages"][0]);
+    assert_eq!(body["reason"], ReceiverNews::Cancelled.word());
+    assert_eq!(body["final"], true);
+    assert_eq!(body["advice"], RECEIVER_CANCELLED_ADVICE);
+    assert!(
+        RECEIVER_CANCELLED_ADVICE.contains("do not ask it again")
+            && RECEIVER_CANCELLED_ADVICE.contains("replacement"),
+        "{RECEIVER_CANCELLED_ADVICE}"
+    );
+
+    // The blocked asker wakes with the fact — not an answer, not a closing.
+    let woken = look_again(&mut bench.ledger, &waiting).expect("a gone receiver wakes the asker");
+    assert!(woken.waiting.is_none());
+    let woken: serde_json::Value = serde_json::from_str(&woken.reply.stdout).expect("JSON");
+    assert_eq!(woken["answered"], false, "{woken}");
+    assert!(woken["closed"].is_null(), "{woken}");
+    assert_eq!(woken["receiver"]["reason"], ReceiverNews::Cancelled.word());
+    assert_eq!(woken["receiver"]["final"], true);
+    assert_eq!(woken["receiver"]["advice"], RECEIVER_CANCELLED_ADVICE);
+    assert_eq!(woken["resumeWith"], question.as_str());
+
+    // A resume answers at once with the same fact and sleeps on nothing.
+    let resumed = bench.at(&asker_pane, &format!("ask --resume {question}"));
+    assert!(
+        resumed.waiting.is_none(),
+        "a resume slept on a receiver that is gone"
+    );
+    let resumed: serde_json::Value = serde_json::from_str(&resumed.reply.stdout).expect("JSON");
+    assert_eq!(resumed["answered"], false);
+    assert_eq!(
+        resumed["receiver"]["reason"],
+        ReceiverNews::Cancelled.word()
+    );
+
+    // Nothing was re-asked, nobody was summoned, and the question stands
+    // open and unanswered rather than closed by anybody's hand.
+    let run = bench.ledger.run(&run_id).expect("the run");
+    assert_eq!(run.workers.len(), 2, "somebody was summoned");
+    let questions_after = run
+        .messages()
+        .iter()
+        .filter(|held| held.kind == MessageKind::Question)
+        .count();
+    assert_eq!(
+        questions_after, questions_before,
+        "the notice re-asked the question"
+    );
+    let asked = run.message(&question).expect("the question");
+    assert!(run.answer_to(asked).is_none());
+    assert!(!run.question_is_closed(asked));
+    // Saying it twice is saying it once: the reconcile finds nothing to add.
+    assert_eq!(bench.ledger.receivers_reconciled(90_000), 0);
+    let mail = bench.json_at(&asker_pane, "check --peek");
+    assert_eq!(mail["count"], 1, "{mail}");
+
+    // The other ending: a receiver whose terminal died is `exited`, final,
+    // and without the cancelled advice — a replacement is its coordinator's
+    // call, and the coordinator gets `worker_died` for that.
+    let (dying, dying_pane) = bench.seat("worker-start --agent claude");
+    let (dead_question, _) = asked_of(&mut bench, &asker_pane, &format!("worker:{dying}"));
+    bench.ledger.terminal_gone("team-1", &dying_pane, 50_000);
+    let mail = bench.json_at(&asker_pane, "check --peek");
+    assert_eq!(mail["count"], 2, "{mail}");
+    assert_eq!(mail["messages"][1]["thread"], dead_question.as_str());
+    let body = notice_body(&mail["messages"][1]);
+    assert_eq!(body["reason"], ReceiverNews::Exited.word());
+    assert_eq!(body["final"], true);
+    assert!(body["advice"].is_null(), "{body}");
+}
+
+/// The deadline answer carries the LAST thing the ledger observed about the
+/// receiver, stamped with when it was seen — and nothing when nothing was.
+/// The answer outranks every reason: once it lands, the look answers and
+/// the deadline never comes.
+#[test]
+fn a_timed_out_ask_carries_the_last_receiver_reason() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name deadline");
+    let (receiver, receiver_pane) = bench.seat("worker-start --agent claude");
+    let (_asker, asker_pane) = bench.seat("worker-start --agent codex");
+    let (question, waiting) = asked_of(&mut bench, &asker_pane, &format!("worker:{receiver}"));
+    let seat = ("team-1", receiver_pane.as_str());
+
+    // Nothing observed: the deadline says so rather than inventing a reason.
+    let timed =
+        ask_timed_out(&bench.ledger, &waiting).expect("a thread wait has a deadline answer");
+    assert!(timed.waiting.is_none());
+    let timed: serde_json::Value = serde_json::from_str(&timed.reply.stdout).expect("JSON");
+    assert_eq!(timed["answered"], false, "{timed}");
+    assert_eq!(timed["timedOut"], true);
+    assert_eq!(timed["resumeWith"], question.as_str());
+    assert!(timed["receiver"].is_null(), "{timed}");
+
+    // A turn end, then a stall: the last observation rides the answer.
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, 4_000, false, 4_010),
+        1
+    );
+    let quiet_at = 4_010 + QUIET_REMINDER_MS;
+    assert_eq!(
+        bench
+            .ledger
+            .workers_stalled(&[(receiver.clone(), 4_000)], quiet_at),
+        0,
+        "a worker carrying no dispatch is no stall news to its coordinator"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_stalled(&[(receiver.clone(), 4_000)], quiet_at),
+        1,
+        "…and is stall news to its asker all the same"
+    );
+    let timed = ask_timed_out(&bench.ledger, &waiting).expect("a deadline answer");
+    let timed: serde_json::Value = serde_json::from_str(&timed.reply.stdout).expect("JSON");
+    assert_eq!(
+        timed["receiver"]["reason"],
+        ReceiverNews::Stalled.word(),
+        "{timed}"
+    );
+    assert_eq!(timed["receiver"]["factMs"], 4_000);
+    assert_eq!(timed["receiver"]["observedAtMs"], quiet_at);
+    assert_eq!(timed["receiver"]["final"], false);
+
+    // An inbox wait is not a question: it has no receiver to speak of.
+    let inbox_wait = Waiting {
+        thread: None,
+        ..waiting.clone()
+    };
+    assert!(ask_timed_out(&bench.ledger, &inbox_wait).is_none());
+
+    // The answer lands: the look answers, and a resume reads the answer
+    // rather than a stale reason.
+    bench.json_at(
+        &receiver_pane,
+        &format!("reply --to-message {question} --body main"),
+    );
+    let woken = look_again(&mut bench.ledger, &waiting).expect("the answer wakes the asker");
+    let woken: serde_json::Value = serde_json::from_str(&woken.reply.stdout).expect("JSON");
+    assert_eq!(woken["answered"], true, "{woken}");
+    let resumed = bench.json_at(&asker_pane, &format!("ask --resume {question}"));
+    assert_eq!(resumed["answered"], true);
+    assert!(resumed["receiver"].is_null(), "{resumed}");
+}
+
+/// The ledger's own line in a question's thread is never its answer,
+/// whatever address the question wore — the reading side checks the
+/// author's voice and the kind, not only the address.
+#[test]
+fn a_ledger_line_in_a_questions_thread_is_never_its_answer() {
+    let question = Message {
+        id: "m-1".into(),
+        from: "worker:w-1".into(),
+        to: LEDGER_ITSELF.into(),
+        kind: MessageKind::Question,
+        body: "why?".into(),
+        subject: Text::default(),
+        priority: Priority::Normal,
+        payload: Text::default(),
+        thread: None,
+        task: None,
+        dispatch: None,
+        author_seat: None,
+        created_ms: 1,
+    };
+    let mut line = question.clone();
+    line.id = "m-2".into();
+    line.from = LEDGER_ITSELF.into();
+    line.kind = MessageKind::Status;
+    line.thread = Some("m-1".into());
+    assert!(
+        !line.answers(&question),
+        "the ledger's voice answered a question"
+    );
+    let mut quiet = line.clone();
+    quiet.kind = MessageKind::WentQuiet;
+    assert!(!quiet.answers(&question));
+
+    let mut real = question.clone();
+    real.id = "m-3".into();
+    real.from = "worker:w-2".into();
+    real.thread = Some("m-1".into());
+    let mut asked_of_two = question.clone();
+    asked_of_two.to = "worker:w-2".into();
+    assert!(real.answers(&asked_of_two));
+    let mut ledgers_kind = real.clone();
+    ledgers_kind.kind = MessageKind::Deadlocked;
+    assert!(
+        !ledgers_kind.answers(&asked_of_two),
+        "a ledger-only kind answered"
+    );
+}
+
+/// A question to the run is a question to its coordinator's SEAT, at the
+/// generation that held it — a former seat's turn end is nobody's news, the
+/// new seat's is news of its own.
+#[test]
+fn a_question_to_the_run_hears_its_coordinators_seat_and_not_a_former_one() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name seat")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let (_asker, asker_pane) = bench.seat("worker-start --agent codex");
+    let (question, _) = asked_of(&mut bench, &asker_pane, &format!("run:{run_id}"));
+
+    assert_eq!(
+        bench.ledger.receivers_told_turn_ended(
+            ("team-1", agent_teams::LEADER_PANE),
+            4_000,
+            false,
+            4_010
+        ),
+        1
+    );
+    let mail = bench.json_at(&asker_pane, "check --peek");
+    assert_eq!(mail["count"], 1, "{mail}");
+    let body = notice_body(&mail["messages"][0]);
+    assert_eq!(body["questionId"], question.as_str());
+    assert_eq!(body["receiver"], format!("run:{run_id}"));
+    assert_eq!(body["receiverSeat"]["seat"], "team-1/%1");
+    assert_eq!(body["receiverSeat"]["generation"], 1);
+
+    // A second leader takes the run over: generation 2.
+    let mut other = Team::new("team-2", "second", 70);
+    std::mem::swap(&mut bench.team, &mut other);
+    let taken = bench.json(&format!(
+        "run-takeover --run {run_id} --from team-1/%1 --reason gone"
+    ));
+    assert_eq!(taken["generation"], 2, "{taken}");
+    std::mem::swap(&mut bench.team, &mut other);
+
+    let later = 4_010 + QUIET_REMINDER_MS;
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(("team-1", "%1"), later, false, later + 5),
+        0,
+        "a former coordinator's turn end was pinned on the run's receiver"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(("team-2", "%1"), later, false, later + 5),
+        1
+    );
+    let mail = bench.json_at(&asker_pane, "check --peek");
+    assert_eq!(mail["count"], 2, "{mail}");
+    let body = notice_body(&mail["messages"][1]);
+    assert_eq!(body["receiverSeat"]["seat"], "team-2/%1");
+    assert_eq!(body["receiverSeat"]["generation"], 2);
+}
+
+/// A receiver's late state never revives a question that was answered or
+/// closed, and an asker with no reader left is told nothing.
+#[test]
+fn a_receivers_late_state_never_revives_an_answered_or_closed_question() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name late");
+    let (receiver, receiver_pane) = bench.seat("worker-start --agent claude");
+    let seat = ("team-1", receiver_pane.as_str());
+
+    // (a) Answered first: silence afterwards.
+    let (_a, a_pane) = bench.seat("worker-start --agent codex");
+    let (answered, _) = asked_of(&mut bench, &a_pane, &format!("worker:{receiver}"));
+    bench.json_at(
+        &receiver_pane,
+        &format!("reply --to-message {answered} --body main"),
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, 4_000, false, 4_010),
+        0
+    );
+
+    // (b) The asker's own dispatch ended: the question is closed, nobody waits.
+    let task = bench.json("task-create --spec ask")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (_b, b_pane) = bench.seat(&format!("worker-start --agent codex --task {task}"));
+    let (_closed, _) = asked_of(&mut bench, &b_pane, &format!("worker:{receiver}"));
+    bench.json_at(&b_pane, "send --type worker_done --body {\"ok\":true}");
+    let later = 4_010 + QUIET_REMINDER_MS;
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, later, false, later + 5),
+        0
+    );
+
+    // (c) The asker was released: no reader, nothing filed, nothing refused.
+    let (c, c_pane) = bench.seat("worker-start --agent codex");
+    let (_orphan, _) = asked_of(&mut bench, &c_pane, &format!("worker:{receiver}"));
+    bench.json(&format!("worker-stop --worker {c} --reason done"));
+    let latest = later + QUIET_REMINDER_MS;
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, latest, false, latest + 5),
+        0
+    );
+}
+
+/// Every open question to a receiver is told apart, one line per waiter;
+/// the same fact seen every beat is one line; and the lines a question may
+/// carry that are not final are bounded — past the bound only a final word
+/// still lands.
+#[test]
+fn every_open_question_to_a_receiver_is_told_apart_and_within_bounds() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name bounds");
+    let (receiver, receiver_pane) = bench.seat("worker-start --agent claude");
+    let (_a, a_pane) = bench.seat("worker-start --agent codex");
+    let (_c, c_pane) = bench.seat("worker-start --agent codex");
+    let (q_a, _) = asked_of(&mut bench, &a_pane, &format!("worker:{receiver}"));
+    let (q_c, _) = asked_of(&mut bench, &c_pane, &format!("worker:{receiver}"));
+    let seat = ("team-1", receiver_pane.as_str());
+
+    // The stall sweep sees the same silence every second for an hour: one
+    // line per waiter, however many beats.
+    let since = 10_000;
+    let told: usize = (0..3_600)
+        .map(|beat| {
+            bench
+                .ledger
+                .receivers_told_stalled(&[(receiver.clone(), since)], since + beat * 1_000)
+        })
+        .sum();
+    assert_eq!(told, 2, "two waiters, one silence");
+    for (pane, question) in [(&a_pane, &q_a), (&c_pane, &q_c)] {
+        let mail = bench.json_at(pane, "check --peek");
+        assert_eq!(mail["count"], 1, "{mail}");
+        assert_eq!(
+            mail["messages"][0]["thread"],
+            question.as_str(),
+            "a waiter read another's line"
+        );
+    }
+
+    // Distinct turn ends, one per reminder cadence, fill the bound and stop.
+    let mut clock = since + 3_600_000;
+    let mut lines = 1;
+    for _ in 0..(RECEIVER_NOTICE_CAP + 2) {
+        clock += QUIET_REMINDER_MS;
+        lines += bench
+            .ledger
+            .receivers_told_turn_ended(seat, clock, false, clock + 1)
+            / 2;
+    }
+    assert_eq!(lines, RECEIVER_NOTICE_CAP, "the bound did not hold");
+    let mail = bench.json_at(&a_pane, "check --peek");
+    assert_eq!(mail["count"], RECEIVER_NOTICE_CAP, "{mail}");
+
+    // A final word still lands past the bound.
+    bench.json(&format!("worker-stop --worker {receiver} --reason done"));
+    let mail = bench.json_at(&a_pane, "check --peek");
+    assert_eq!(mail["count"], RECEIVER_NOTICE_CAP + 1, "{mail}");
+    assert_eq!(
+        notice_body(&mail["messages"][RECEIVER_NOTICE_CAP])["final"],
+        true
+    );
+}
+
+/// A receiver whose composer holds a question for the PERSON is news once
+/// per wait, and the stall seat's judged cause rides the same line under
+/// its own word — no second seat, no model call for the measured facts.
+#[test]
+fn a_receiver_waiting_on_the_person_is_news_once_per_wait() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name attention");
+    let (receiver, receiver_pane) = bench.seat("worker-start --agent claude");
+    let (_asker, asker_pane) = bench.seat("worker-start --agent codex");
+    asked_of(&mut bench, &asker_pane, &format!("worker:{receiver}"));
+    let seat = ("team-1", receiver_pane.as_str());
+
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_awaiting_input(seat, 4_000, 4_001),
+        1
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_awaiting_input(seat, 4_000, 4_050),
+        0
+    );
+    let mail = bench.json_at(&asker_pane, "check --peek");
+    assert_eq!(mail["count"], 1, "{mail}");
+    let body = notice_body(&mail["messages"][0]);
+    assert_eq!(body["reason"], ReceiverNews::AwaitingInput.word());
+    assert_eq!(body["factMs"], 4_000);
+
+    let judged = StallJudged {
+        worker: receiver.clone(),
+        stalled_since_ms: 4_000,
+        cause: crate::stall_cause::Cause::WaitingOnOwnCliQuestion
+            .word()
+            .to_string(),
+        confidence: 0.9,
+    };
+    let later = 4_050 + QUIET_REMINDER_MS;
+    assert_eq!(bench.ledger.receivers_told_judged(&[judged], later), 1);
+    let mail = bench.json_at(&asker_pane, "check --peek");
+    assert_eq!(mail["count"], 2, "{mail}");
+    let body = notice_body(&mail["messages"][1]);
+    assert_eq!(
+        body["reason"],
+        crate::stall_cause::Cause::WaitingOnOwnCliQuestion.word()
+    );
+    assert_eq!(body["final"], false);
+}
+
+/// A receiver that reports its task done without answering is news — not
+/// final, because a reclaimable worker still reads its mail and answers.
+#[test]
+fn a_receiver_that_reports_done_without_answering_is_news_and_can_still_answer() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name finished");
+    let task = bench.json("task-create --spec work")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (receiver, receiver_pane) =
+        bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let (_asker, asker_pane) = bench.seat("worker-start --agent codex");
+    let (question, waiting) = asked_of(&mut bench, &asker_pane, &format!("worker:{receiver}"));
+
+    bench.json_at(
+        &receiver_pane,
+        "send --type worker_done --body {\"ok\":true}",
+    );
+    let mail = bench.json_at(&asker_pane, "check");
+    assert_eq!(mail["count"], 1, "{mail}");
+    let body = notice_body(&mail["messages"][0]);
+    assert_eq!(body["reason"], ReceiverNews::Finished.word());
+    assert_eq!(body["final"], false);
+    assert!(
+        look_again(&mut bench.ledger, &waiting).is_none(),
+        "a finished receiver woke the asker"
+    );
+
+    bench.json_at(
+        &receiver_pane,
+        &format!("reply --to-message {question} --body main"),
+    );
+    let woken = look_again(&mut bench.ledger, &waiting).expect("the answer wakes the asker");
+    let woken: serde_json::Value = serde_json::from_str(&woken.reply.stdout).expect("JSON");
+    assert_eq!(woken["answered"], true, "{woken}");
+}
+
+/// The notices are rows like any other: a rebuilt ledger still knows the
+/// last reason, and still refuses to read it as the answer.
+#[test]
+fn receiver_notices_survive_the_projection() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name durable");
+    let (receiver, receiver_pane) = bench.seat("worker-start --agent claude");
+    let (_asker, asker_pane) = bench.seat("worker-start --agent codex");
+    let (_question, waiting) = asked_of(&mut bench, &asker_pane, &format!("worker:{receiver}"));
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(("team-1", &receiver_pane), 4_000, false, 4_010),
+        1
+    );
+    let rebuilt = Ledger::rebuild(bench.ledger.export()).expect("the ledger reloads");
+    let timed = ask_timed_out(&rebuilt, &waiting).expect("a deadline answer");
+    let timed: serde_json::Value = serde_json::from_str(&timed.reply.stdout).expect("JSON");
+    assert_eq!(
+        timed["receiver"]["reason"],
+        ReceiverNews::TurnEnded.word(),
+        "{timed}"
+    );
+    assert_eq!(timed["answered"], false);
+}
