@@ -2406,8 +2406,16 @@ pub enum HandoverCause {
     },
     /// A `classifier_declined` row (t-6747): the category the provider
     /// declined the request under — always a routed one
-    /// ([`decline_is_routed`]); an unrouted decline plans no handover.
-    ClassifierDecline { category: String },
+    /// ([`decline_is_routed`]); an unrouted decline plans no handover — and
+    /// the key of the conversation's own record that witnessed it (t-7153):
+    /// the handover ends the worker only while THAT record, in THAT
+    /// category, is still what its pane stands at
+    /// ([`HandoverCause::is_witnessed_by`]). A decline the screen alone
+    /// witnessed has no such record and plans no handover.
+    ClassifierDecline {
+        category: String,
+        record_key: String,
+    },
 }
 
 impl HandoverCause {
@@ -2440,9 +2448,13 @@ impl HandoverCause {
                 "usedPercent": used_percent,
                 "resetsAtMs": resets_at_ms,
             }),
-            Self::ClassifierDecline { category } => serde_json::json!({
+            Self::ClassifierDecline {
+                category,
+                record_key,
+            } => serde_json::json!({
                 "reason": self.reason(),
                 "category": category,
+                "recordKey": record_key,
             }),
         }
     }
@@ -2450,7 +2462,35 @@ impl HandoverCause {
     fn bytes_held(&self) -> usize {
         match self {
             Self::QuotaWall { provider, .. } => provider.len(),
-            Self::ClassifierDecline { category } => category.len(),
+            Self::ClassifierDecline {
+                category,
+                record_key,
+            } => category.len() + record_key.len(),
+        }
+    }
+
+    /// Whether `witness`, read off the pane NOW, is the decline this
+    /// handover was planned for (t-7153, P1-4): the conversation's own
+    /// record — never the screen alone — with the same key, naming the same
+    /// category, and that category still routed. Asked at every boundary of
+    /// the walk and last inside the actor's fence, where the stop commits:
+    /// a decline whose category reads as none, another request's record, or
+    /// a category the provider routes nowhere is not this plan's, and the
+    /// beat plans again from what it reads next. A wall's cause is never
+    /// witnessed by a decline.
+    #[must_use]
+    pub fn is_witnessed_by(&self, witness: &ClassifierDeclineWitness) -> bool {
+        match self {
+            Self::ClassifierDecline {
+                category,
+                record_key,
+            } => {
+                witness.record.may_stop()
+                    && witness.record.key == *record_key
+                    && witness.record.category.as_deref() == Some(category.as_str())
+                    && decline_is_routed(Some(category))
+            }
+            Self::QuotaWall { .. } => false,
         }
     }
 }
@@ -2709,7 +2749,7 @@ pub fn handover_paragraph(
         // The declined request itself is not repeated here, and its words
         // are not in the recap (`speaks_in_a_recap`): the replacement
         // continues the task, in a conversation of its own.
-        HandoverCause::ClassifierDecline { category } => format!(
+        HandoverCause::ClassifierDecline { category, .. } => format!(
             "stopped when its provider's safety classifier declined a request (`{category}`) \
              and its own CLI could not continue on a fallback model"
         ),
@@ -3007,8 +3047,10 @@ fn handover_candidate<'a>(
 }
 
 /// What a news row says a handover would follow — `None` for a row no
-/// handover follows: another kind, or a decline in a category the provider
-/// routes nowhere ([`decline_is_routed`]), whose answer stands.
+/// handover follows: another kind; a decline in a category the provider
+/// routes nowhere ([`decline_is_routed`]), whose answer stands; or a decline
+/// the screen alone witnessed ([`decline_source_may_stop`]), which is
+/// diagnostic news and no authority to end a worker (t-7153).
 fn handover_cause(news: &Message) -> Option<HandoverCause> {
     let said: serde_json::Value = serde_json::from_str(news.body.as_str()).ok()?;
     match news.kind {
@@ -3020,8 +3062,14 @@ fn handover_cause(news: &Message) -> Option<HandoverCause> {
         }),
         MessageKind::ClassifierDeclined => {
             let category = said["category"].as_str()?;
+            let record = &said["record"];
+            let record_key = record["key"].as_str().filter(|key| !key.is_empty())?;
+            if !decline_source_may_stop(record["source"].as_str()?) {
+                return None;
+            }
             decline_is_routed(Some(category)).then(|| HandoverCause::ClassifierDecline {
                 category: category.to_string(),
+                record_key: record_key.to_string(),
             })
         }
         _ => None,
@@ -9541,14 +9589,31 @@ impl Ledger {
                     .handover
                     .as_ref()
                     .and_then(|policy| policy.on_classifier_decline.as_ref());
-                let (rung, next) = match (routed, declared) {
-                    (true, Some(_)) => (
+                // A decline the screen alone witnessed is told and walked
+                // nowhere, whatever the run declared (t-7153, P1-3): the
+                // record is the witness that ends a worker, and a screen
+                // can be quoted.
+                let stops = witness.record.may_stop();
+                let (rung, next) = match (stops, routed, declared) {
+                    (false, _, _) => (
+                        ClassifierDeclineRung::Notify,
+                        "nothing was settled, and nothing will be by itself: this decline was \
+                         read off the pane's SCREEN only — Claude Code's pause dialog, which \
+                         writes no record until a key answers it — and a screen is not a \
+                         witness that ends a worker. Read the pane (`worker-read`); if it \
+                         stands at the dialog, hand the task over yourself (`worker-stop \
+                         --worker <id> --reason classifier-decline`, then `worker-start \
+                         --agent <alt> --task <same> --retry-of <dispatchId> \
+                         --inherit-checkout`, on the rung you choose), or answer the dialog \
+                         by hand",
+                    ),
+                    (true, true, Some(_)) => (
                         ClassifierDeclineRung::Handover,
                         "nothing was settled: the run's `handover-policy \
                          --on-classifier-decline` hands this task to a fresh worker in the \
                          same checkout, and the beat leaves a `handover` receipt",
                     ),
-                    (true, None) => (
+                    (true, true, None) => (
                         ClassifierDeclineRung::Notify,
                         "nothing was settled: the attempt is open and the task is carried. \
                          Its CLI could not continue the declined turn on a fallback model. \
@@ -9558,7 +9623,7 @@ impl Ledger {
                          --on-classifier-decline <agent[:model[:effort]]>` and the beat walks \
                          that road",
                     ),
-                    (false, _) => (
+                    (true, false, _) => (
                         ClassifierDeclineRung::Notify,
                         "nothing was settled: the provider routes this category nowhere, so \
                          its answer stands — no worker is handed the declined request. Read \
@@ -9576,6 +9641,7 @@ impl Ledger {
                     "checkout": worker.checkout,
                     "category": category,
                     "routed": routed,
+                    "screenOnly": !stops,
                     "screen": witness.screen,
                     "record": {
                         "source": witness.record.source,
@@ -13244,10 +13310,31 @@ pub struct ClassifierDeclineMarker {
     pub source: String,
     /// The CLI's own sentence about the decline.
     pub line: Text,
-    /// The provider's category word, when the record names one.
+    /// The provider's category word, when the record names one — the
+    /// record's OWN word, bound to its request; never another request's.
     pub category: Option<String>,
-    /// The record's own identity, so one decline is told once.
+    /// The record's own identity, so one decline is told once, and so a
+    /// handover planned on it ends the worker only while it stands
+    /// ([`HandoverCause::is_witnessed_by`]).
     pub key: String,
+}
+
+impl ClassifierDeclineMarker {
+    /// Whether this marker may end a worker ([`decline_source_may_stop`]).
+    #[must_use]
+    pub fn may_stop(&self) -> bool {
+        decline_source_may_stop(&self.source)
+    }
+}
+
+/// Whether a decline read from `source` is a witness that may END a worker
+/// (t-7153, P1-3): the conversation's own record is; the screen alone
+/// ([`DECLINE_DIALOG_SOURCE`]) is not — a pause dialog writes no record, and
+/// a screen's words can be quoted by a tool result or a brief, so what the
+/// screen alone says is told as diagnostic news and settles nothing.
+#[must_use]
+pub fn decline_source_may_stop(source: &str) -> bool {
+    source != DECLINE_DIALOG_SOURCE
 }
 
 /// What a quiet worker's screen shows of a decline: the CLI's own sentence,
@@ -13334,7 +13421,10 @@ pub struct ClassifierDeclineWitness {
 /// last request that was declined, and what for. A pause dialog writes no
 /// record until somebody answers it, so for a dialog the second witness is
 /// time: the dialog on screen, and the pane quiet longer than any dialog a
-/// person answered here ([`DECLINE_DIALOG_UNANSWERED_MS`]).
+/// person answered here ([`DECLINE_DIALOG_UNANSWERED_MS`]) — a witness that
+/// is told, and that ends no worker ([`decline_source_may_stop`]): its key
+/// is the attempt's, one dialog notice per attempt, since two readings of
+/// one dialog are one fact however the pty's clock moved between them.
 #[must_use]
 pub fn classifier_decline_witness(
     worker: &str,
@@ -13354,7 +13444,7 @@ pub fn classifier_decline_witness(
                 source: DECLINE_DIALOG_SOURCE.to_string(),
                 line: screen.line.clone(),
                 category: screen.category.clone(),
-                key: format!("{DECLINE_DIALOG_SOURCE}:{dispatch}@{quiet_since_ms}"),
+                key: format!("{DECLINE_DIALOG_SOURCE}:{dispatch}"),
             }
         }
         None => return None,

@@ -581,6 +581,13 @@ fn the_orchestration_guide_teaches_the_classifier_decline_order() {
         "nobody is handed the declined",
         "never paste a picture of the",
         "`smart.classifierFallback`",
+        // t-7153: a pinned worker's CLI never switches by itself, a screen
+        // alone is diagnostic news, the walk ends the worker only on the
+        // decline it was planned for, and silence is not a yes.
+        "summoned with `--model` is pinned",
+        "`screenOnly: true`",
+        "only on the decline it was planned",
+        "is NOT a yes",
     ] {
         assert!(
             skill.contains(needed),

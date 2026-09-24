@@ -5385,11 +5385,14 @@ pub(crate) struct HandoverWall {
 }
 
 /// The two witnesses a walk re-reads before each step, for its cause: the
-/// wall's (§2.2) or the decline's (t-6747).
+/// wall's (§2.2), whose numbers the receipt carries as read today, or the
+/// decline's (t-6747) — which IS the plan's cause, re-proven the same at
+/// every reading (`HandoverCause::is_witnessed_by`, t-7153), so nothing of
+/// it travels here.
 #[derive(Clone, Debug)]
 pub(crate) enum HandoverWitness {
     Quota(zerocode_core::orchestration::QuotaWallWitness),
-    Decline(zerocode_core::orchestration::ClassifierDeclineWitness),
+    Decline,
 }
 
 fn current_handover_wall(
@@ -5442,14 +5445,20 @@ fn current_handover_wall(
         }
         zerocode_core::orchestration::HandoverCause::ClassifierDecline { .. } => {
             let reading = host.classifier_decline_reading(term, &plan.agent)?;
-            HandoverWitness::Decline(zerocode_core::orchestration::classifier_decline_witness(
+            let witness = zerocode_core::orchestration::classifier_decline_witness(
                 &plan.worker,
                 &plan.dispatch,
                 reading.screen,
                 reading.record,
                 since_ms,
                 now_ms,
-            )?)
+            )?;
+            // The decline the plan was made on, and no other (t-7153): the
+            // same record, the same routed category, never the screen alone.
+            if !plan.cause.is_witnessed_by(&witness) {
+                return None;
+            }
+            HandoverWitness::Decline
         }
     };
     // Activity and respawn may race the marker/cache reads. Ask quiet again
@@ -5531,15 +5540,21 @@ fn settle_handover_terminal(
                     &plan.agent,
                     &mut |reading, since_ms| {
                         let at_ms = crate::now_epoch_ms();
-                        if zerocode_core::orchestration::classifier_decline_witness(
-                            &plan.worker,
-                            &plan.dispatch,
-                            reading.screen,
-                            reading.record,
-                            since_ms,
-                            at_ms,
-                        )
-                        .is_some()
+                        // The last boundary re-proves the SAME decline the
+                        // plan was made on (t-7153): a witness that changed
+                        // — its category gone or another, another request's
+                        // record, the screen alone — commits nothing, and the
+                        // beat plans again from what it reads next.
+                        if let Some(witness) =
+                            zerocode_core::orchestration::classifier_decline_witness(
+                                &plan.worker,
+                                &plan.dispatch,
+                                reading.screen,
+                                reading.record,
+                                since_ms,
+                                at_ms,
+                            )
+                            && plan.cause.is_witnessed_by(&witness)
                         {
                             commit(at_ms);
                         }
@@ -5765,16 +5780,10 @@ pub(crate) fn walk_handover(
                 resets_at_ms: witness.headroom.resets_at_ms,
             };
         }
-        // A decline read again in a category the provider routes nowhere is
-        // no handover's (t-6747); one the reading cannot name keeps the
-        // category its notice said.
-        HandoverWitness::Decline(witness) => {
-            if witness.record.category.as_deref().is_some_and(|category| {
-                !zerocode_core::orchestration::decline_is_routed(Some(category))
-            }) {
-                return Walked::Nothing;
-            }
-        }
+        // A decline's witness is the plan's own or the wall above answered
+        // nothing (`HandoverCause::is_witnessed_by`, t-7153): the same
+        // record in the same routed category, so the cause stands as read.
+        HandoverWitness::Decline => {}
     }
     let plan = &current;
     // The reservation: refused, nothing moved and the next beat plans again.

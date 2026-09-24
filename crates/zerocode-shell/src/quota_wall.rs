@@ -278,8 +278,24 @@ const DECLINE_SENTENCE: &str = "safeguards flagged this message";
 /// The choice Claude Code's pause dialog offers beside its fallback —
 /// "Edit prompt and retry", alone or "… with <Model>" (2.1.281's labels, and
 /// the screen a coordinator read off w-5770 on 2026-09-21). A screen that
-/// shows it is a dialog waiting for a key, not a printed error.
+/// shows it IN THE DIALOG'S OWN LAYOUT ([`dialog_stands_in`]) is a dialog
+/// waiting for a key, not a printed error; the words alone are anything a
+/// tool result or a brief quoted.
 const DECLINE_DIALOG_CHOICE: &str = "Edit prompt and retry";
+
+/// The pause dialog's header (2.1.281), the first line of its box.
+const DECLINE_DIALOG_HEADER: &str = "Session paused";
+
+/// The glyph Claude Code's menus put before the highlighted choice
+/// (`❯  1.  Switch to Opus 4.8` on w-5770's screen and on the hermetic
+/// probe's pty, t-6747 `d-dialog`).
+const DECLINE_DIALOG_CURSOR: char = '❯';
+
+/// How many lines above the retry choice the dialog's header stands, at
+/// most: measured 5 on the probe's 118-column pty (the sentence wrapped over
+/// three lines, then the detail line, then the first choice) and 3 on
+/// w-5770's screen; a narrower pane wraps the sentence further.
+const DECLINE_DIALOG_LINES: usize = 8;
 
 /// The system record a decline with no fallback writes beside its error,
 /// naming the category (`apiRefusalCategory`), and the one a decline the
@@ -424,7 +440,8 @@ pub(crate) fn decline_reading_in(
 }
 
 /// The decline sentence as the pane's screen shows it, whether it stands in
-/// the pause dialog, and the category the dialog's detail line names.
+/// the pause dialog, and the category the dialog's detail line names — the
+/// dialog's own, read within its box; a screen that is no dialog names none.
 fn decline_screen(rule: &StallMarkerRule, screen: &str) -> Option<DeclineScreen> {
     let lines: Vec<&str> = screen.lines().map(str::trim).collect();
     let line = lines.iter().rev().find(|line| {
@@ -432,13 +449,52 @@ fn decline_screen(rule: &StallMarkerRule, screen: &str) -> Option<DeclineScreen>
             .iter()
             .any(|group| group.iter().all(|phrase| line.contains(phrase)))
     })?;
+    let dialog = dialog_stands_in(&lines);
     Some(DeclineScreen {
         line: clipped(line),
-        dialog: lines
-            .iter()
-            .any(|line| line.contains(DECLINE_DIALOG_CHOICE)),
-        category: lines.iter().find_map(|line| details_category(line)),
+        dialog: dialog.is_some(),
+        category: dialog.and_then(|(header, choice)| {
+            lines[header..choice]
+                .iter()
+                .find_map(|line| details_category(line))
+        }),
     })
+}
+
+/// Where Claude Code's pause dialog stands on the screen, when it does
+/// (t-7153, P1-3): the line range from its header to its retry choice.
+///
+/// The dialog is a LAYOUT, not a phrase — its header, then the sentence and
+/// the detail line, then a numbered choice under the menu cursor, then the
+/// retry choice, numbered, within [`DECLINE_DIALOG_LINES`] of the header
+/// (both real dialogs read here: w-5770's screen, the probe's pty). A tool
+/// result or a brief that quotes the words shows them indented under the
+/// tool's own mark, with no menu cursor on a numbered line, under the turn's
+/// own spinner. A quote that reproduced the whole layout, cursor and all,
+/// would still read as a dialog: which is why a dialog is diagnostic news
+/// and ends no worker (`decline_source_may_stop`).
+fn dialog_stands_in(lines: &[&str]) -> Option<(usize, usize)> {
+    let numbered = |line: &str| {
+        let mut rest = line.trim_start_matches(DECLINE_DIALOG_CURSOR).trim_start();
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits == 0 {
+            return false;
+        }
+        rest = &rest[digits..];
+        rest.starts_with('.')
+    };
+    let choice = lines
+        .iter()
+        .rposition(|line| numbered(line) && line.contains(DECLINE_DIALOG_CHOICE))?;
+    let box_top = choice.saturating_sub(DECLINE_DIALOG_LINES);
+    let header = lines[box_top..choice]
+        .iter()
+        .rposition(|line| line.contains(DECLINE_DIALOG_HEADER))
+        .map(|at| box_top + at)?;
+    lines[header..=choice]
+        .iter()
+        .any(|line| line.starts_with(DECLINE_DIALOG_CURSOR) && numbered(line))
+        .then_some((header, choice))
 }
 
 /// The category in Claude Code's own detail line — "Details: `[cyber]`"
@@ -458,25 +514,50 @@ fn details_category(line: &str) -> Option<String> {
 
 /// The conversation's last record, when it is a decline its CLI stopped at:
 /// the error record the table's row names, as the last word, and the
-/// category off the system record the CLI wrote beside it.
+/// category off the system record the CLI wrote beside it — THIS error's
+/// own record, never an earlier request's (t-7153, P1-4).
 fn decline_record(rule: &StallMarkerRule, lines: &[String]) -> Option<ClassifierDeclineMarker> {
     let found = read_transcript(rule, lines)?;
     let key = found.key?;
-    let category = lines.iter().rev().find_map(|line| {
-        if !line.contains(CLAUDE_NO_FALLBACK_RECORD) {
-            return None;
-        }
-        let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-        (value["type"] == "system" && value["subtype"] == CLAUDE_NO_FALLBACK_RECORD)
-            .then(|| value["apiRefusalCategory"].as_str().map(str::to_string))
-            .flatten()
-    });
     Some(ClassifierDeclineMarker {
         source: found.source.to_string(),
         line: found.line,
-        category,
+        category: declines_own_category(lines, found.request.as_deref(), found.parent.as_deref()),
         key,
     })
+}
+
+/// The category the CLI wrote beside THIS decline: the
+/// `model_refusal_no_fallback` system record of the same request
+/// (`requestId`), or the one the error record names as its parent
+/// (`parentUuid`) — 2.1.281 writes both, the system record first and the
+/// error record with the system record's uuid as its parent. The first such
+/// record decides, category or none: a decline whose own record names no
+/// category HAS none, and an earlier request's word is never borrowed for
+/// it (before this, a `null` category read the tail on and took the
+/// previous decline's `cyber`). No record of its own, no category.
+fn declines_own_category(
+    lines: &[String],
+    request: Option<&str>,
+    parent: Option<&str>,
+) -> Option<String> {
+    lines
+        .iter()
+        .rev()
+        .find_map(|line| {
+            if !line.contains(CLAUDE_NO_FALLBACK_RECORD) {
+                return None;
+            }
+            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            if value["type"] != "system" || value["subtype"] != CLAUDE_NO_FALLBACK_RECORD {
+                return None;
+            }
+            let same_request = request.is_some() && value["requestId"].as_str() == request;
+            let its_parent = parent.is_some() && value["uuid"].as_str() == parent;
+            (same_request || its_parent)
+                .then(|| value["apiRefusalCategory"].as_str().map(str::to_string))
+        })
+        .flatten()
 }
 
 /// Whether the table reads switches of model in `agent`'s records — a
@@ -654,6 +735,12 @@ struct Found {
     key: Option<String>,
     at_ms: Option<i64>,
     resets_at_ms: Option<i64>,
+    /// The request the record answers (`requestId`) and the record it
+    /// follows (`parentUuid`), in a Claude transcript — what binds a
+    /// decline's category record to its error record (t-7153). A rollout
+    /// carries neither.
+    request: Option<String>,
+    parent: Option<String>,
 }
 
 /// When a record was written, off its own `timestamp` field — the same field
@@ -734,6 +821,8 @@ fn codex_rollout_marker(lines: &[String], errors: &[CodexError]) -> Option<Found
             // The reset is in the sentence ("try again at Sep 7th, 2026
             // 11:27 AM"), in words nobody here has measured a parser for.
             resets_at_ms: None,
+            request: None,
+            parent: None,
         });
     }
     None
@@ -823,6 +912,14 @@ fn claude_transcript_marker(
                 .and_then(|limits| limits.get("resetsAt"))
                 .and_then(serde_json::Value::as_i64)
                 .map(|seconds| seconds.saturating_mul(1000)),
+            request: value
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            parent: value
+                .get("parentUuid")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         });
     }
     None
@@ -898,7 +995,7 @@ pub(crate) fn wip_message(
             );
             format!("wip(handover): {worker} stopped at {provider} wall, resets {resets}")
         }
-        zerocode_core::orchestration::HandoverCause::ClassifierDecline { category } => {
+        zerocode_core::orchestration::HandoverCause::ClassifierDecline { category, .. } => {
             format!("wip(handover): {worker} stopped at a {category} classifier decline")
         }
     }
@@ -979,6 +1076,7 @@ pub(crate) mod tests {
                 "w-5",
                 &zerocode_core::orchestration::HandoverCause::ClassifierDecline {
                     category: "cyber".to_string(),
+                    record_key: "declined".to_string(),
                 },
                 0,
             ),
@@ -1863,5 +1961,130 @@ pub(crate) mod tests {
         assert_eq!(switches.len(), 1);
     }
 
+    /* ---- t-7153: the decline's identity and its screen ----------------- */
+
+    /// An earlier decline of the same conversation, answered by a person
+    /// (ids scrubbed): its own category record, its own error, both on
+    /// request `req_1`.
+    const CLAUDE_OLD_NO_FALLBACK: &str = r#"{"parentUuid":"p0","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"req_1","apiRefusalCategory":"cyber","refusedUserMessageUuid":"q0","isMeta":false,"uuid":"sys-1","timestamp":"2026-09-24T04:00:00.000Z","version":"2.1.281"}"#;
+    const CLAUDE_OLD_DECLINE_ERROR: &str = r#"{"parentUuid":"sys-1","isSidechain":false,"type":"assistant","uuid":"declined-1","timestamp":"2026-09-24T04:00:00.010Z","message":{"id":"e1","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}]},"requestId":"req_1","error":"invalid_request","isApiErrorMessage":true}"#;
+    /// The newest decline, on request `req_2`: its own category record names
+    /// NO category, and its error record names that record as its parent.
+    const CLAUDE_NEW_NO_FALLBACK_UNNAMED: &str = r#"{"parentUuid":"part-2","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"req_2","apiRefusalCategory":null,"refusedUserMessageUuid":"q2","isMeta":false,"uuid":"sys-2","timestamp":"2026-09-24T04:29:48.712Z","version":"2.1.281"}"#;
+    const CLAUDE_NEW_DECLINE_ERROR: &str = r#"{"parentUuid":"sys-2","isSidechain":false,"type":"assistant","uuid":"declined-2","timestamp":"2026-09-24T04:29:48.711Z","message":{"id":"e2","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}]},"requestId":"req_2","error":"invalid_request","isApiErrorMessage":true}"#;
+    /// An error record whose request and parent match no category record in
+    /// the tail (the CLI wrote the category record of another request).
+    const CLAUDE_STRAY_DECLINE_ERROR: &str = r#"{"parentUuid":"elsewhere","isSidechain":false,"type":"assistant","uuid":"declined-3","timestamp":"2026-09-24T05:29:48.711Z","message":{"id":"e3","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}]},"requestId":"req_3","error":"invalid_request","isApiErrorMessage":true}"#;
+
+    /// The category rides with its own request (t-7153, P1-4): a decline
+    /// whose category record names none is a decline with NO category, and
+    /// an earlier request's `cyber` is never borrowed for it; a record that
+    /// matches neither the error's request nor its parent names nothing.
+    #[test]
+    fn a_declines_category_is_read_off_its_own_request_and_never_an_earlier_one() {
+        let borrowed = lines(&[
+            CLAUDE_OLD_NO_FALLBACK,
+            CLAUDE_OLD_DECLINE_ERROR,
+            CLAUDE_PERSON_TYPED,
+            CLAUDE_NEW_NO_FALLBACK_UNNAMED,
+            CLAUDE_NEW_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+        ]);
+        let record = decline_reading_in("claude", None, Some(&borrowed))
+            .record
+            .expect("the newest decline is the last word");
+        assert_eq!(record.key, "declined-2");
+        assert_eq!(
+            record.category, None,
+            "an earlier request's category was borrowed for the newest decline"
+        );
+
+        let stray = lines(&[
+            CLAUDE_OLD_NO_FALLBACK,
+            CLAUDE_STRAY_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+        ]);
+        let record = decline_reading_in("claude", None, Some(&stray))
+            .record
+            .expect("the stray decline is the last word");
+        assert_eq!(record.key, "declined-3");
+        assert_eq!(
+            record.category, None,
+            "a category record of another request was taken for this decline"
+        );
+
+        // The real order, both ids agreeing: the category is this decline's.
+        let own = lines(&[
+            CLAUDE_OLD_NO_FALLBACK,
+            CLAUDE_OLD_DECLINE_ERROR,
+            CLAUDE_PERSON_TYPED,
+            CLAUDE_DECLINED_PARTIAL,
+            CLAUDE_NO_FALLBACK,
+            CLAUDE_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+        ]);
+        let record = decline_reading_in("claude", None, Some(&own))
+            .record
+            .expect("the decline");
+        assert_eq!(record.key, "declined");
+        assert_eq!(record.category.as_deref(), Some("cyber"));
+    }
+
+    /// A tool result that quotes the dialog's words, under a turn that is
+    /// still working — the screen a worker reading about declines shows.
+    const CLAUDE_QUOTED_DIALOG_SCREEN: &str = "\
+⏺ Read(notes/declines.md)
+  ⎿  Read 5 lines
+     Session paused
+     Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards…
+     Details: `[cyber]`
+     1. Switch to Opus 4.8
+     2. Edit prompt and retry
+
+✻ Thinking… (esc to interrupt)
+";
+    /// The dialog as the hermetic probe's pty carried it on 2.1.281
+    /// (t-6747 `d-dialog`, 2026-09-24): the header, the sentence wrapped over
+    /// three lines, the detail line, the cursor on the first choice.
+    const CLAUDE_PROBE_DIALOG_SCREEN: &str = "\
+    Session paused
+    Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more
+  capabilities faster, but can sometimes flag legitimate coding and cybersecurity tasks. You can learn more:
+  https://support.claude.com/en/articles/15363606
+  Details: `[cyber]`
+   ❯  1.  Switch to Opus 4.8
+   2.  Edit prompt and retry with Fable 5.1
+
+  ✻ Waiting for API response · will retry in 2m 40s · check your network
+";
+
+    /// Quoted words are not a dialog (t-7153, P1-3): the pause dialog is the
+    /// CLI's own layout — its header, then the sentence, then the cursor on
+    /// a numbered choice beside the retry choice — and a tool result that
+    /// quotes every one of its lines stands under the turn's own spinner,
+    /// with no cursor on a choice. Both real dialogs read here are dialogs.
+    #[test]
+    fn a_screen_that_quotes_the_dialogs_words_is_no_dialog() {
+        let quoted = decline_reading_in("claude", Some(CLAUDE_QUOTED_DIALOG_SCREEN), None)
+            .screen
+            .expect("the quoted sentence is still on the screen");
+        assert!(!quoted.dialog, "a quoted dialog was read as the CLI's own");
+        assert_eq!(
+            quoted.category, None,
+            "a quoted category was read as the dialog's"
+        );
+
+        for real in [CLAUDE_DIALOG_SCREEN, CLAUDE_PROBE_DIALOG_SCREEN] {
+            let dialog = decline_reading_in("claude", Some(real), None)
+                .screen
+                .expect("the dialog's sentence");
+            assert!(dialog.dialog, "a real dialog was not read as one:\n{real}");
+            assert_eq!(dialog.category.as_deref(), Some("cyber"));
+        }
+        // The printed error is no dialog either, as before.
+        let printed = decline_reading_in("claude", Some(CLAUDE_PRINTED_DECLINE_SCREEN), None)
+            .screen
+            .expect("the printed sentence");
+        assert!(!printed.dialog);
     }
 }

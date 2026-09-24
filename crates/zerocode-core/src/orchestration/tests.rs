@@ -13413,15 +13413,76 @@ fn a_classifier_decline_is_judged_by_two_witnesses() {
         .expect("a dialog nobody answered");
     assert_eq!(unanswered.record.source, DECLINE_DIALOG_SOURCE);
     assert_eq!(unanswered.record.category.as_deref(), Some("cyber"));
+    // One dialog is one fact, however the pty's clock moved between two
+    // readings of it; and a screen alone ends no worker (t-7153).
     assert_eq!(
         unanswered.record.key,
-        format!(
-            "{DECLINE_DIALOG_SOURCE}:dp-1@{}",
-            NOW - DECLINE_DIALOG_UNANSWERED_MS
-        )
+        format!("{DECLINE_DIALOG_SOURCE}:dp-1")
     );
+    assert!(!unanswered.record.may_stop());
+    assert!(a_decline_record(Some("cyber"), "u-1").may_stop());
     // A printed error with no record is no dialog, however long it stands.
     assert!(judged(Some(a_decline_screen(false, None)), None, 0).is_none());
+}
+
+/// A handover's cause knows the decline it was planned for (t-7153, P1-4):
+/// the same record, in the same routed category, witnesses it; a record
+/// with no category, another record, an unrouted category, a screen-only
+/// reading, or a wall's cause do not.
+#[test]
+fn a_handover_cause_is_witnessed_only_by_the_decline_it_was_planned_for() {
+    const NOW: i64 = 90_000_000;
+    let witness = |category: Option<&str>, key: &str| {
+        classifier_decline_witness(
+            "w-1",
+            "dp-1",
+            Some(a_decline_screen(false, None)),
+            Some(a_decline_record(category, key)),
+            NOW - 60_000,
+            NOW,
+        )
+        .expect("two witnesses")
+    };
+    let cause = HandoverCause::ClassifierDecline {
+        category: "cyber".to_string(),
+        record_key: "u-1".to_string(),
+    };
+    assert!(cause.is_witnessed_by(&witness(Some("cyber"), "u-1")));
+    assert!(
+        !cause.is_witnessed_by(&witness(None, "u-1")),
+        "a category that reads as none was taken for the plan's"
+    );
+    assert!(
+        !cause.is_witnessed_by(&witness(Some("cyber"), "u-2")),
+        "another request's record was taken for the plan's"
+    );
+    assert!(
+        !cause.is_witnessed_by(&witness(Some("reasoning_extraction"), "u-1")),
+        "a category the provider routes nowhere was taken for the plan's"
+    );
+    let dialog = classifier_decline_witness(
+        "w-1",
+        "dp-1",
+        Some(a_decline_screen(true, Some("cyber"))),
+        None,
+        NOW - DECLINE_DIALOG_UNANSWERED_MS,
+        NOW,
+    )
+    .expect("the dialog and its silence");
+    let planned_on_a_screen = HandoverCause::ClassifierDecline {
+        category: "cyber".to_string(),
+        record_key: dialog.record.key.clone(),
+    };
+    assert!(
+        !planned_on_a_screen.is_witnessed_by(&dialog),
+        "a screen-only reading witnessed a stop"
+    );
+    let wall = HandoverCause::QuotaWall {
+        provider: "claude".to_string(),
+        used_percent: 99,
+        resets_at_ms: None,
+    };
+    assert!(!wall.is_witnessed_by(&witness(Some("cyber"), "u-1")));
 }
 
 /// A declined worker's notice is written once per attempt, names the rung
@@ -13488,8 +13549,10 @@ fn a_declined_worker_is_told_once_and_a_routed_decline_plans_the_declared_handov
     assert_eq!(
         plan.cause,
         HandoverCause::ClassifierDecline {
-            category: "cyber".to_string()
-        }
+            category: "cyber".to_string(),
+            record_key: "u-1".to_string(),
+        },
+        "the plan carries the record that witnessed it (t-7153)"
     );
     assert_eq!(
         plan.to,
@@ -13544,6 +13607,68 @@ fn a_declined_worker_is_told_once_and_a_routed_decline_plans_the_declared_handov
         })
         .is_none(),
         "an unrouted decline was planned"
+    );
+}
+
+/// A decline witnessed by the screen alone — the pause dialog, which writes
+/// no record until a key answers it — is diagnostic news and nothing more
+/// (t-7153, P1-3): told once, on the `notify` rung whatever the run
+/// declared, marked `screenOnly`, naming the hand road; and it plans no
+/// handover, because a screen is not a witness that ends a worker.
+#[test]
+fn a_screen_only_decline_is_diagnostic_news_and_plans_no_handover() {
+    const NOW: i64 = 6_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name dialogs");
+    bench.json("handover-policy --on-classifier-decline claude:claude-opus-4-8");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!(
+        "worker-start --agent claude --model fable --effort max --task {task}"
+    ));
+    assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/paused"));
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&worker)
+        .and_then(|held| held.dispatch.clone())
+        .expect("the attempt");
+    let paused = classifier_decline_witness(
+        &worker,
+        &dispatch,
+        Some(a_decline_screen(true, Some("cyber"))),
+        None,
+        NOW - DECLINE_DIALOG_UNANSWERED_MS,
+        NOW,
+    )
+    .expect("the dialog and its silence");
+    assert_eq!(paused.record.source, DECLINE_DIALOG_SOURCE);
+    assert_eq!(
+        bench
+            .ledger
+            .workers_classifier_declined(std::slice::from_ref(&paused), NOW),
+        1
+    );
+    let news = bench.json("check --peek --types classifier_declined");
+    assert_eq!(news["count"], 1, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["category"], "cyber");
+    assert_eq!(body["routed"], true);
+    assert_eq!(body["screenOnly"], true, "{body}");
+    assert_eq!(
+        body["rung"], "notify",
+        "a screen-only decline stood on the handover rung: {body}"
+    );
+    assert!(
+        body["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("worker-read")),
+        "{body}"
+    );
+    assert!(
+        next_handover(&bench.ledger.runs()[0], NOW).is_none(),
+        "a screen-only decline planned a handover"
     );
 }
 

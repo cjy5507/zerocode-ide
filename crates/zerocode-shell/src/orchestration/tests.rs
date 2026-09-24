@@ -2251,6 +2251,14 @@ struct AtTheWall {
     /// How long the pty has been silent while the hook still says `working`
     /// — a pause dialog's pane (t-6747); `None` is a pty that just wrote.
     pty_quiet_ms: Mutex<Option<i64>>,
+    /// A pane's visible text, when a test hands the real screen reader a
+    /// screen instead of a reading (t-7153): the decline reading is then
+    /// `quota_wall::decline_reading_in`'s, off these words.
+    screens: Mutex<std::collections::HashMap<u32, String>>,
+    /// What the retirement fence reads, when it is to read something OTHER
+    /// than the beat did (t-7153): the change between a plan and its last
+    /// boundary, made deterministic.
+    fence_reading: Mutex<Option<crate::quota_wall::DeclineReading>>,
 }
 
 impl AtTheWall {
@@ -2283,6 +2291,46 @@ impl AtTheWall {
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .insert(term, reading);
+    }
+
+    /// The pane's screen shows exactly these words (t-7153): the decline
+    /// reading is the real reader's, off them, with no transcript.
+    fn shows(&self, term: u32, screen: &str) {
+        self.screens
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(term, screen.to_string());
+    }
+
+    /// What the retirement fence reads instead of the beat's reading
+    /// (t-7153); `None` puts the fence back on the beat's reading.
+    fn read_at_the_fence(&self, reading: Option<crate::quota_wall::DeclineReading>) {
+        *self
+            .fence_reading
+            .lock()
+            .unwrap_or_else(|held| held.into_inner()) = reading;
+    }
+
+    /// The beat's reading of `term`: the real reader over a screen a test
+    /// handed it, else the reading a test handed it.
+    fn decline_reading_of(&self, term: u32) -> Option<crate::quota_wall::DeclineReading> {
+        if let Some(screen) = self
+            .screens
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+        {
+            return Some(crate::quota_wall::decline_reading_in(
+                "claude",
+                Some(screen),
+                None,
+            ));
+        }
+        self.declines
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+            .cloned()
     }
 
     /// The pane's own words moved past its wall.
@@ -2372,11 +2420,7 @@ impl Host for AtTheWall {
         term: u32,
         _agent: &str,
     ) -> Option<crate::quota_wall::DeclineReading> {
-        self.declines
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .get(&term)
-            .cloned()
+        self.decline_reading_of(term)
     }
     fn with_classifier_decline_observation(
         &self,
@@ -2387,7 +2431,6 @@ impl Host for AtTheWall {
     ) {
         let busy = self.busy.lock().unwrap();
         let pty_quiet = self.pty_quiet_ms.lock().unwrap();
-        let declines = self.declines.lock().unwrap();
         // Quiet as the window's fence reads it: a hook at rest, or a pty
         // silent past the dialog's term whatever the hook says.
         let quiet_ms = if *busy {
@@ -2397,8 +2440,16 @@ impl Host for AtTheWall {
         } else {
             Some(zerocode_core::orchestration::QUIET_GRACE_MS)
         };
-        if let (Some(quiet_ms), Some(reading)) = (quiet_ms, declines.get(&term)) {
-            commit(reading.clone(), crate::now_epoch_ms() - quiet_ms);
+        // The fence reads what the beat read — unless a test moved the
+        // world between the plan and this boundary (t-7153).
+        let reading = self
+            .fence_reading
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
+            .or_else(|| self.decline_reading_of(term));
+        if let (Some(quiet_ms), Some(reading)) = (quiet_ms, reading) {
+            commit(reading, crate::now_epoch_ms() - quiet_ms);
         }
     }
     fn capture(&self, _term: u32) -> Option<String> {
@@ -2598,6 +2649,8 @@ impl Walled {
             asked: Mutex::new(Vec::new()),
             declines: Mutex::new(std::collections::HashMap::new()),
             pty_quiet_ms: Mutex::new(None),
+            screens: Mutex::new(std::collections::HashMap::new()),
+            fence_reading: Mutex::new(None),
         };
         let leader = zerocode_core::agent_teams::LEADER_PANE;
         let verb = |line: &str, at: i64| {
@@ -2856,6 +2909,21 @@ impl Walled {
         stood
     }
 
+    /// A claude worker whose pane shows exactly `screen` under a hook that
+    /// still says `working` (t-7153): what the pane is at is the real screen
+    /// reader's to say, with no transcript record behind it.
+    fn stand_showing(leader_term: u32, checkout: &'static str, policy: &str, screen: &str) -> Self {
+        let stood = Self::stand_declined_with(
+            leader_term,
+            checkout,
+            policy,
+            crate::quota_wall::DeclineReading::default(),
+        );
+        stood.host.shows(leader_term + 1, screen);
+        *stood.host.busy.lock().unwrap() = true;
+        stood
+    }
+
     fn stand_declined_with(
         leader_term: u32,
         checkout: &'static str,
@@ -2876,6 +2944,8 @@ impl Walled {
             asked: Mutex::new(Vec::new()),
             declines: Mutex::new(std::collections::HashMap::new()),
             pty_quiet_ms: Mutex::new(None),
+            screens: Mutex::new(std::collections::HashMap::new()),
+            fence_reading: Mutex::new(None),
         };
         let verb = |line: &str, at: i64| {
             let said = run(
@@ -2984,11 +3054,13 @@ fn a_declined_worker_is_resummoned_on_the_declared_rung_with_its_checkout() {
 /// Claude Code ends no turn while its dialog waits, and says so only through
 /// a `Notification` hook this window does not install, so the stall sweep
 /// never reads the pane. Once its pty has been silent past every dialog a
-/// person answered here, the dialog on screen and that silence are the two
-/// witnesses — told once, and walked under the run's declared order. A
-/// shorter silence is nothing: a person may be about to answer.
+/// person answered here, the dialog on screen and that silence are told —
+/// once, as DIAGNOSTIC news (t-7153, P1-3): a screen is not a witness that
+/// ends a worker, so even under the run's declared order nothing is walked;
+/// the notice says so and names the hand road. A shorter silence is
+/// nothing: a person may be about to answer.
 #[test]
-fn a_pause_dialog_behind_a_working_hook_is_told_once_it_outlasts_every_answered_one() {
+fn a_pause_dialog_behind_a_working_hook_is_diagnostic_news_once_and_ends_no_worker() {
     const LEADER_TERM: u32 = 85_500;
     const MINUTE: i64 = 60_000;
     let stood = Walled::stand_paused(
@@ -3015,17 +3087,163 @@ fn a_pause_dialog_behind_a_working_hook_is_told_once_it_outlasts_every_answered_
         "{body}"
     );
     assert_eq!(body["category"], "cyber", "{body}");
-    assert_eq!(body["rung"], "handover", "{body}");
-    let receipts = stood.receipts(stood.began + 20_001);
-    assert_eq!(receipts.len(), 1, "{receipts:?}");
-    assert_eq!(receipts[0]["status"], "done", "{}", receipts[0]);
-    assert_eq!(receipts[0]["reason"], "classifier-decline");
-    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    assert_eq!(body["screenOnly"], true, "{body}");
+    assert_eq!(
+        body["rung"], "notify",
+        "a screen-only decline armed a stop: {body}"
+    );
+    assert!(
+        body["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("worker-read")),
+        "{body}"
+    );
+    assert!(
+        stood.receipts(stood.began + 20_001).is_empty(),
+        "a screen-only decline was walked to a handover"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    assert!(stood.host.closed.lock().unwrap().is_empty());
 
-    // Told once: the next beat has nothing to tell or walk.
+    // Told once: the next beat has nothing to tell, and still nothing to walk.
     tick(&stood.host, &[], stood.began + 30_000);
     assert_eq!(told(stood.began + 30_001)["count"], 1);
-    assert_eq!(stood.receipts(stood.began + 30_001).len(), 1);
+    assert!(stood.receipts(stood.began + 30_001).is_empty());
+}
+
+/// The dialog's words, quoted — a tool result a worker read, under the
+/// turn's own spinner — are no dialog (t-7153, P1-3): the real screen
+/// reader finds no CLI dialog in them, so a pane showing them under a
+/// `working` hook, silent past the dialog's term, is told about nothing and
+/// nothing is walked. The same pane showing the CLI's own dialog is
+/// diagnostic news, and still walks nowhere.
+#[test]
+fn a_screen_quoting_the_dialogs_words_is_nothing_and_the_cli_dialog_is_diagnostic_news() {
+    const MINUTE: i64 = 60_000;
+    const QUOTED: &str = "\
+⏺ Read(notes/declines.md)
+  ⎿  Read 5 lines
+     Session paused
+     Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards…
+     Details: `[cyber]`
+     1. Switch to Opus 4.8
+     2. Edit prompt and retry
+
+✻ Thinking… (esc to interrupt)
+";
+    const DIALOG: &str = "\
+ Session paused
+ Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster.
+   Details: `[cyber]`
+ ❯ 1. Switch to Opus 4.8
+   2. Edit prompt and retry
+";
+    for (leader_term, screen, told_count) in [(85_600, QUOTED, 0), (85_700, DIALOG, 1)] {
+        let stood = Walled::stand_showing(
+            leader_term,
+            "/tmp",
+            "--on-classifier-decline claude:claude-opus-4-8",
+            screen,
+        );
+        stood.host.pty_silent_for(11 * MINUTE);
+        tick(&stood.host, &[], stood.began + 20_000);
+        let news = stood.json(
+            "check --peek --types classifier_declined",
+            stood.began + 20_001,
+        );
+        assert_eq!(news["count"], told_count, "{screen}\n{news}");
+        if told_count == 1 {
+            let body: serde_json::Value =
+                serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body"))
+                    .expect("json");
+            assert_eq!(body["rung"], "notify", "{body}");
+            assert_eq!(body["screenOnly"], true, "{body}");
+        }
+        assert!(
+            stood.receipts(stood.began + 20_001).is_empty(),
+            "{screen}\nwas walked to a handover"
+        );
+        assert_eq!(stood.worker_state(&stood.worker), "Active");
+    }
+}
+
+/// A handover ends a worker only on the decline it was planned for (t-7153,
+/// P1-4): the plan carries the record that witnessed it, and the last
+/// boundary — inside the actor's fence, where the stop is committed —
+/// re-reads the pane and commits only when the SAME record, in the SAME
+/// routed category, still stands. A category that reads as none, another
+/// request's record, or a category the provider routes nowhere at that
+/// boundary settles nothing: the attempt stays open, the pane stays, the
+/// receipt says the witness changed, and no replacement is summoned. When
+/// the boundary reads the same decline again, the walk lands.
+#[test]
+fn a_decline_that_reads_differently_at_the_last_boundary_ends_no_worker() {
+    let printed = |category: Option<&str>, key: &str| crate::quota_wall::DeclineReading {
+        screen: Some(zerocode_core::orchestration::DeclineScreen {
+            line: zerocode_core::orchestration::Text::from(
+                "API Error: Fable 5.1's safeguards flagged this message.",
+            ),
+            dialog: false,
+            category: None,
+        }),
+        record: Some(zerocode_core::orchestration::ClassifierDeclineMarker {
+            source: "transcript".to_string(),
+            line: zerocode_core::orchestration::Text::from(
+                "API Error: Fable 5.1's safeguards flagged this message.",
+            ),
+            category: category.map(str::to_string),
+            key: key.to_string(),
+        }),
+        fallbacks: Vec::new(),
+    };
+    let changed = [
+        (85_800, printed(None, "decline-record-1")),
+        (85_900, printed(Some("cyber"), "decline-record-2")),
+        (
+            86_000,
+            printed(Some("reasoning_extraction"), "decline-record-1"),
+        ),
+    ];
+    for (leader_term, at_the_fence) in changed {
+        let stood = Walled::stand_declined(
+            leader_term,
+            "/tmp",
+            "cyber",
+            "--on-classifier-decline claude:claude-opus-4-8",
+        );
+        stood.host.read_at_the_fence(Some(at_the_fence.clone()));
+        tick(&stood.host, &[], stood.began + 10_000);
+        let receipts = stood.receipts(stood.began + 10_001);
+        assert!(
+            receipts.iter().all(|receipt| receipt["status"] != "done"),
+            "{at_the_fence:?}\nwas settled: {receipts:?}"
+        );
+        assert_eq!(
+            stood.worker_state(&stood.worker),
+            "Active",
+            "{at_the_fence:?}\nended the worker"
+        );
+        assert!(stood.host.closed.lock().unwrap().is_empty());
+        let rows = the_rows();
+        assert_eq!(
+            rows.dispatches
+                .iter()
+                .filter(|one| one.task == stood.task)
+                .count(),
+            1,
+            "a replacement attempt was opened: {:?}",
+            rows.dispatches
+        );
+        // The same decline again at the boundary: the walk lands.
+        stood.host.read_at_the_fence(None);
+        tick(&stood.host, &[], stood.began + 20_000);
+        let receipts = stood.receipts(stood.began + 20_001);
+        assert!(
+            receipts.iter().any(|receipt| receipt["status"] == "done"),
+            "{receipts:?}"
+        );
+        assert_eq!(stood.worker_state(&stood.worker), "Released");
+    }
 }
 
 /// A category the provider routes nowhere is news and walks nowhere, even
@@ -3384,6 +3602,8 @@ fn the_beat_writes_quota_walled_news_only_with_both_witnesses_and_settles_nothin
         asked: Mutex::new(Vec::new()),
         declines: Mutex::new(std::collections::HashMap::new()),
         pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     };
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let verb = |line: &str, at: i64| {
@@ -14727,6 +14947,8 @@ fn coordinator_handover_native_order_walks_once_and_persists_in_the_store() {
         asked: Mutex::new(Vec::new()),
         declines: Mutex::new(std::collections::HashMap::new()),
         pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let answer = run(
         &host,
@@ -14829,6 +15051,8 @@ fn coordinator_handover_cli_cannot_declare_a_human_order() {
         asked: Mutex::new(Vec::new()),
         declines: Mutex::new(std::collections::HashMap::new()),
         pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let answer = run(
         &host,
@@ -14858,6 +15082,8 @@ fn coordinator_manual_native_picker_and_claim_are_durable_and_retryable() {
         asked: Mutex::new(Vec::new()),
         declines: Mutex::new(std::collections::HashMap::new()),
         pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let made = run(
         &host,
@@ -14941,6 +15167,8 @@ fn coordinator_manual_native_claim_is_available_when_the_source_pane_is_gone() {
         asked: Mutex::new(Vec::new()),
         declines: Mutex::new(std::collections::HashMap::new()),
         pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let made = run(
         &host,
@@ -14992,6 +15220,8 @@ fn coordinator_handover_can_disable_after_source_capability_disappears() {
         asked: Mutex::new(Vec::new()),
         declines: Mutex::new(std::collections::HashMap::new()),
         pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let made = run(
         &host,
