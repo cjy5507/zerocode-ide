@@ -128,6 +128,13 @@ public enum StopReason {
     public static let sessionBudget = "budget:session"
 }
 
+/// Why the hand took a hold back by itself, in the words a status reads.
+public enum HoldRevocation {
+    /// The platform refused a release the hold posted: nothing more is
+    /// pressed until a person resumes.
+    public static let releaseUnconfirmed = "release_unconfirmed"
+}
+
 /// The operator's ledger: stopped or not, how many actions, and the pace.
 /// Pure — time comes in as a number, so a test can run a minute in an instant.
 public struct OperatorLedger: Equatable, Sendable {
@@ -405,6 +412,13 @@ public final class OperatorHand: @unchecked Sendable {
         public let unconfirmedReleases: UInt64
     }
 
+    /// One press still down and the hold that pressed it: a release belongs
+    /// to that hold, never to whoever holds the hand later.
+    private struct Press {
+        let event: HandEvent
+        let hold: UInt64
+    }
+
     private let lock = NSLock()
     private let poster: any HandPoster
     private let clock: any HandClock
@@ -415,8 +429,9 @@ public final class OperatorHand: @unchecked Sendable {
     private var holder: Token?
     private var revokedReason: String?
     private var stoppedReason: String?
-    /// The presses still down, oldest first.
-    private var held: [HandEvent] = []
+    /// The presses still down, oldest first — only ever the current hold's:
+    /// a hold is let go of whole before the hand changes hands.
+    private var held: [Press] = []
     private var pointer: SmoothPointerPath.Point?
     private var posted: UInt64 = 0
     private var unconfirmedReleases: UInt64 = 0
@@ -457,25 +472,49 @@ public final class OperatorHand: @unchecked Sendable {
         return release
     }
 
-    /// Post one event for the holder `token`. A release of something the hand
-    /// pressed always goes; one of something it did not press is dropped — a
-    /// person's own button is not the hand's to let go of.
+    /// Post one event for the holder `token`. A release of something this hold
+    /// pressed always goes — past a stop, a revoke, the hold's own end; one of
+    /// something it did not press is dropped: a person's own button, or the
+    /// same button the next hold pressed, is not this hold's to let go of.
     public func post(_ event: HandEvent, by token: Token) throws {
-        lock.lock()
-        defer { lock.unlock() }
         if let input = event.letsGo {
-            guard let at = held.lastIndex(where: { $0.holds == input }) else { return }
-            try poster.post(event, tag: tag)
-            held.remove(at: at)
-            posted += 1
-            if event.points { pointer = SmoothPointerPath.Point(x: event.x, y: event.y) }
+            try release(input, with: event, by: token)
             return
         }
+        lock.lock()
+        defer { lock.unlock() }
         if let refusal = refusalLocked(token) { throw refusal }
         try poster.post(event, tag: tag)
         posted += 1
         if event.points { pointer = SmoothPointerPath.Point(x: event.x, y: event.y) }
-        if event.holds != nil { held.append(event) }
+        if event.holds != nil { held.append(Press(event: event, hold: token.id)) }
+    }
+
+    /// A hold's own release of `input`. One the platform refuses is settled at
+    /// once, as a stop settles one (`releaseHeldLocked`): counted until a
+    /// person resumes, the hold taken back and what else it pressed let go of
+    /// — the hand never goes on as if the input were up, nor as if it were
+    /// still its own to press around.
+    private func release(_ input: HeldInput, with event: HandEvent, by token: Token) throws {
+        lock.lock()
+        guard let at = held.lastIndex(where: { $0.hold == token.id && $0.event.holds == input }) else {
+            lock.unlock()
+            return
+        }
+        held.remove(at: at)
+        do {
+            try poster.post(event, tag: tag)
+        } catch {
+            unconfirmedReleases += 1
+            if holder == token, revokedReason == nil { revokedReason = HoldRevocation.releaseUnconfirmed }
+            _ = releaseHeldLocked()
+            lock.unlock()
+            sleeper.wake()
+            throw error
+        }
+        posted += 1
+        if event.points { pointer = SmoothPointerPath.Point(x: event.x, y: event.y) }
+        lock.unlock()
     }
 
     /// Why `token` may not press now, or nil when it may.
@@ -569,7 +608,7 @@ public final class OperatorHand: @unchecked Sendable {
             holder: holder?.owner,
             revoked: revokedReason,
             stopped: stoppedReason,
-            held: held.compactMap(\.holds),
+            held: held.compactMap(\.event.holds),
             posted: posted,
             unconfirmedReleases: unconfirmedReleases
         )
@@ -587,9 +626,9 @@ public final class OperatorHand: @unchecked Sendable {
         var released: [HeldInput] = []
         var unconfirmed: [HeldInput] = []
         let at = poster.pointerLocation() ?? pointer
-        while let press = held.popLast() {
+        while let press = held.popLast()?.event {
             guard let input = press.holds else { continue }
-            let flags = held.reduce(UInt64(0)) { $0 | $1.modifierFlag }
+            let flags = held.reduce(UInt64(0)) { $0 | $1.event.modifierFlag }
             guard let release = press.release(at: at ?? SmoothPointerPath.Point(x: press.x, y: press.y), flags: flags) else { continue }
             do {
                 try poster.post(release, tag: tag)

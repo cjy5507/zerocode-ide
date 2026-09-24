@@ -129,15 +129,22 @@ public struct EyeGeometry: Equatable, Sendable {
 }
 
 /// One eye's captures (realtime v1 §5.1) as its platform adapter reports
-/// them: every complete or idle frame is the next capture, with the point
-/// transform of the display the eye opened on; a frame that is neither only
-/// counts toward the next capture's gap. Pure — the adapter reads the stream
-/// and the display, the book keeps the facts.
+/// them: every frame the stream delivers is the next capture. A complete or
+/// idle frame is ready — its point transform read off the display as it
+/// stands at that capture — while the display is still what the eye opened
+/// on. A frame that is neither, a display that moved, rescaled or turned, or
+/// an eye no longer open makes the newest capture an interrupted one: a
+/// reader sees a newer capture it must refuse, and that takes back what it
+/// saw before (`ReflexSightings.revoke`). An eye whose display changed stays
+/// so; the next eye is another stream. Pure — the adapter reads the stream
+/// and the display, the book decides.
 public struct ReflexCaptureBook: Sendable {
     public let opened: EyeGeometry
     public let generation: UInt64
     public private(set) var captureSeq: UInt64 = 0
     public private(set) var newest: ReflexCapture?
+    /// Why this eye's captures stopped describing its display, once they did.
+    public private(set) var lost: String?
     private var gap: UInt64 = 0
 
     public init(opened: EyeGeometry, generation: UInt64) {
@@ -146,7 +153,7 @@ public struct ReflexCaptureBook: Sendable {
     }
 
     /// A complete frame, or an idle one of the pixels already held, delivered
-    /// with the display standing at `now`.
+    /// with the display standing at `now` (nil: the display is gone).
     @discardableResult
     public mutating func delivered(
         extent: ReflexPixelExtent,
@@ -157,44 +164,67 @@ public struct ReflexCaptureBook: Sendable {
         deliveredNs: UInt64,
         now: EyeGeometry?
     ) -> ReflexCapture {
+        if lost == nil, now != opened { lost = Self.changed }
+        let ready = lost == nil
+        let geometry = now ?? opened
         captureSeq += 1
+        if !ready { gap += 1 }
         let capture = ReflexCapture(
-            displayId: opened.displayId,
+            displayId: geometry.displayId,
             region: ReflexRoi(x: 0, y: 0, width: Int64(extent.width), height: Int64(extent.height), space: .pixel),
             pixelExtent: extent,
-            pointTransform: Self.transform(opened, pixelWidth: extent.width),
-            orientation: opened.orientation,
+            pointTransform: Self.transform(geometry, pixelWidth: extent.width),
+            orientation: geometry.orientation,
             colorSpace: colorSpace,
-            status: .ready,
+            status: ready ? .ready : .interrupted,
             dirty: dirty,
             captureGap: gap,
             deliveredHostNs: deliveredNs,
             captureSeq: captureSeq,
             repaintSeq: repaintSeq,
             streamEpoch: generation,
-            // An eye never outlives its display's geometry: a display that
-            // changed closes the eye (`ScreenEye.running`), and the next is another.
+            // One geometry an eye: a display that changed never reads ready again here.
             geometryEpoch: generation,
             clockDomain: ReflexContract.hostUptimeClockDomain,
             capturedHostNs: capturedNs
         )
-        gap = 0
+        if ready { gap = 0 }
         newest = capture
         return capture
     }
 
-    /// A frame that was neither complete nor idle: counted toward the next
-    /// capture's gap.
+    /// A frame that was neither complete nor idle (blank, suspended, the
+    /// stream starting or stopping): the newest capture no longer shows the
+    /// display. Nil before the first capture — nothing to take back.
     @discardableResult
     public mutating func interrupted(capturedNs: UInt64?, deliveredNs: UInt64?) -> ReflexCapture? {
+        guard let last = newest else { return nil }
+        captureSeq += 1
         gap += 1
-        return nil
+        let capture = ReflexCapture(
+            displayId: last.displayId, region: last.region, pixelExtent: last.pixelExtent,
+            pointTransform: last.pointTransform, orientation: last.orientation, colorSpace: last.colorSpace,
+            status: .interrupted, dirty: false, captureGap: gap, deliveredHostNs: deliveredNs,
+            captureSeq: captureSeq, repaintSeq: last.repaintSeq, streamEpoch: last.streamEpoch,
+            geometryEpoch: last.geometryEpoch, clockDomain: last.clockDomain, capturedHostNs: capturedNs
+        )
+        newest = capture
+        return capture
     }
 
-    /// The newest capture for a run's reader.
+    /// The newest capture for a run's reader, with the display standing at
+    /// `now` and whether this eye is still the one open on it: a changed
+    /// display or a closed eye interrupts it once, and it stays so.
     public mutating func read(open: Bool, now: EyeGeometry?) -> ReflexCapture? {
-        newest
+        if lost == nil, !open || now != opened {
+            lost = open ? Self.changed : Self.closed
+            interrupted(capturedNs: nil, deliveredNs: nil)
+        }
+        return newest
     }
+
+    private static let changed = "the display changed since the eye opened"
+    private static let closed = "the eye closed"
 
     /// A capture's pixels on the desktop: the display's origin, and its
     /// points over the buffer's pixels as a reduced fraction.
@@ -242,21 +272,44 @@ public protocol ReflexFrameSource: AnyObject, Sendable {
 
 /// The newest evaluated frame and the admissible sightings on it, shared by
 /// the evaluating thread (which writes) and the hand's thread (which reads
-/// before every event).
+/// before every event). A newer capture the run refuses takes what was seen
+/// back: it is no longer evidence for any event, and a leaf decided on it
+/// posts nothing more — not even once a later capture is seen again.
 public final class ReflexSightings: @unchecked Sendable {
     public struct Seen: Sendable {
         public let frame: ReflexFrameFacts
         public let byDetector: [String: ReflexObservation]
+        /// How many times evidence was taken back before this frame was
+        /// published: a leaf acts only on frames of the evidence it was
+        /// decided on.
+        public fileprivate(set) var evidence: UInt64 = 0
+
+        public init(frame: ReflexFrameFacts, byDetector: [String: ReflexObservation]) {
+            self.frame = frame
+            self.byDetector = byDetector
+        }
     }
 
     private let lock = NSLock()
     private var newestSeen: Seen?
+    private var revocations: UInt64 = 0
 
     public init() {}
 
     public func publish(_ seen: Seen) {
         lock.lock()
-        newestSeen = seen
+        var stamped = seen
+        stamped.evidence = revocations
+        newestSeen = stamped
+        lock.unlock()
+    }
+
+    /// A newer capture was refused, or the frames stopped: nothing seen
+    /// before it is evidence any more.
+    public func revoke() {
+        lock.lock()
+        revocations += 1
+        newestSeen = nil
         lock.unlock()
     }
 
@@ -443,8 +496,16 @@ public struct ReflexReceipt: Equatable, Sendable {
         case unaimed
         /// The lease did not hold on the newest frame (age, epoch, proof, end).
         case lease
-        /// The target moved off the pointer, or another took its place, before the press.
+        /// A newer capture was refused (not ready, its time unknown or earlier
+        /// than the last, the display changed) or the frames stopped: what the
+        /// lease was decided on is no longer evidence.
+        case evidence
+        /// A newer capture no longer shows the target (gone, unknown, another
+        /// track in its place), or it left the pointer before the press.
         case moved
+        /// The point is not the run's to act on: ZeroCode's own window, or a
+        /// window of another app than the one the run was started for.
+        case scope
         /// The operator stopped, or the run's hold was taken back.
         case stopped
         /// The platform could not make or post an event.
@@ -536,9 +597,11 @@ public final class ReflexReceipts: @unchecked Sendable {
 /// Runs one leaf action on the hand (realtime v1 §5.4): one admission for the
 /// leaf; a lease from the frame it was decided on; before every event the
 /// lease read against the newest evaluated frame — never the capture the
-/// lease came from — and the hold read by the hand itself; a press only after
-/// a newer capture still shows the same target under the pointer. It lives on
-/// the run's hand thread.
+/// lease came from — and the hold read by the hand itself. Every newer capture
+/// must still show the same target, and nothing goes once the evidence the
+/// leaf was decided on is taken back. Where it goes is asked of the run's
+/// boundary before its first event, and where it presses before the press.
+/// It lives on the run's hand thread.
 struct ReflexLeafRunner {
     let runId: String
     let hand: OperatorHand
@@ -599,15 +662,16 @@ struct ReflexLeafRunner {
     private func perform(_ leaf: ReflexLeaf, _ draft: inout Draft) throws {
         try admitOnce()
         draft.admittedHostNs = hand.nowNs()
-        guard let seen = sightings.latest(),
-              let sighting = seen.byDetector[leaf.detector],
-              let target = sighting.target, let value = sighting.value, value != 0
+        guard let seen = sightings.latest(), case let (sighting, target)? = seen.sighting(of: leaf.detector)
         else { throw Halt.outcome(.no_target) }
+        let evidence = seen.evidence
         let source = seen.frame
         let issuedNs = hand.nowNs()
         guard let aimed = target.aim(atHostNs: issuedNs, capturedHostNs: sighting.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns)
         else { throw Halt.outcome(.unaimed) }
         let end = source.point(ofPixelX: Double(aimed.x), y: Double(aimed.y))
+        // Where the leaf goes is the run's to act on before anything moves.
+        try within(leaf.kind == .click ? .left_click : .pointer_move, at: end)
         let start = hand.pointerNow() ?? end
         let path = PointerSchedule.glide(from: start, to: end, style: style, tickNs: limits.pointer_tick_ns, startNs: issuedNs)
         let presses: UInt64 = leaf.kind == .click ? 2 : 0
@@ -623,13 +687,14 @@ struct ReflexLeafRunner {
         var posted = -1
         while posted + 1 < path.count {
             try hand.sleep(untilNs: path[posted + 1].dueNs, by: token)
-            let (frame, now) = try newer(than: lease, draft: &draft)
-            if let fresh = frame.byDetector[leaf.detector], fresh.frame.capture_seq == frame.frame.capture_seq,
-               let moved = fresh.target, moved.track_id == target.track_id, fresh.value.map({ $0 != 0 }) == true {
-                lease = lease.renewed(by: frame.frame, target: moved, limits: limits)
-                if let again = moved.aim(atHostNs: now, capturedHostNs: fresh.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns) {
-                    aim = frame.frame.point(ofPixelX: Double(again.x), y: Double(again.y))
-                }
+            let (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+            // Every newer capture must still show the target: one that does
+            // not ends the glide, whatever proof the capture before it left.
+            guard case let (fresh, moved)? = frame.sighting(of: leaf.detector, track: target.track_id)
+            else { throw Halt.outcome(.moved) }
+            lease = lease.renewed(by: frame.frame, target: moved, limits: limits)
+            if let again = moved.aim(atHostNs: now, capturedHostNs: fresh.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns) {
+                aim = frame.frame.point(ofPixelX: Double(again.x), y: Double(again.y))
             }
             guard lease.permits(frame.frame, now_host_ns: now, input: .pointer_move, limits: limits) else { throw Halt.outcome(.lease) }
             guard let index = PointerSchedule.due(path, after: posted, nowNs: now) else { continue }
@@ -647,16 +712,17 @@ struct ReflexLeafRunner {
         guard leaf.kind == .click else { return }
 
         // The press: a capture newer than the one the lease came from still
-        // shows the same target, and the pointer is inside where it is now.
-        let (frame, now) = try newer(than: lease, draft: &draft)
-        guard let fresh = frame.byDetector[leaf.detector], fresh.frame.capture_seq == frame.frame.capture_seq,
-              let moved = fresh.target, moved.track_id == target.track_id, fresh.value.map({ $0 != 0 }) == true,
+        // shows the same target, the pointer is inside where it is now, and
+        // the point is the run's to press.
+        let (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+        guard case let (fresh, moved)? = frame.sighting(of: leaf.detector, track: target.track_id),
               moved.aim(atHostNs: now, capturedHostNs: fresh.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns) != nil,
               let pointer = hand.pointerNow(), let pixel = frame.frame.pixel(ofPoint: pointer),
               moved.roi.contains(x: pixel.x, y: pixel.y)
         else { throw Halt.outcome(.moved) }
         lease = lease.renewed(by: frame.frame, target: moved, limits: limits)
         guard lease.permits(frame.frame, now_host_ns: now, input: .left_click, limits: limits) else { throw Halt.outcome(.lease) }
+        try within(.left_click, at: pointer)
         try hand.post(HandEvent(.buttonDown(.left, clickState: 1), x: pointer.x, y: pointer.y), by: token)
         draft.downHostNs = hand.nowNs()
         if draft.firstEventHostNs == nil {
@@ -671,6 +737,12 @@ struct ReflexLeafRunner {
         try hand.post(HandEvent(.buttonUp(.left, clickState: 1), x: pointer.x, y: pointer.y), by: token)
         draft.upHostNs = hand.nowNs()
         draft.events += 1
+    }
+
+    /// The boundary's word on `input` at `point`: a refusal ends the leaf
+    /// before the event.
+    private func within(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) throws {
+        if boundary.refusal(input, at: point) != nil { throw Halt.outcome(.scope) }
     }
 
     /// Admit the leaf once: a paced table's wait is slept on the hand, where
@@ -691,13 +763,15 @@ struct ReflexLeafRunner {
 
     /// The newest evaluated frame once it is a capture newer than the lease's
     /// source, and now: the wait for that capture is the leaf's own record. A
-    /// lease or proof that ends first ends the leaf.
-    private func newer(than lease: ReflexActionLease, draft: inout Draft) throws -> (ReflexSightings.Seen, UInt64) {
+    /// lease or proof that ends first ends the leaf, and so does evidence
+    /// taken back since the leaf was decided — a later capture seen again
+    /// does not bring it back.
+    private func newer(than lease: ReflexActionLease, evidence: UInt64, draft: inout Draft) throws -> (ReflexSightings.Seen, UInt64) {
         let waitStarted = hand.nowNs()
         while true {
             let now = hand.nowNs()
-            if let seen = sightings.latest(), seen.frame.stream_epoch == lease.stream_epoch,
-               seen.frame.capture_seq > lease.source_capture_seq {
+            guard let seen = sightings.latest(), seen.evidence == evidence else { throw Halt.outcome(.evidence) }
+            if seen.frame.stream_epoch == lease.stream_epoch, seen.frame.capture_seq > lease.source_capture_seq {
                 if draft.firstEventHostNs == nil { draft.captureWaitNs &+= now &- waitStarted }
                 return (seen, now)
             }
@@ -705,6 +779,18 @@ struct ReflexLeafRunner {
             guard now < deadline else { throw Halt.outcome(.lease) }
             try hand.nap(untilNs: deadline, by: token)
         }
+    }
+}
+
+extension ReflexSightings.Seen {
+    /// What `detector` sees on this frame when its target is known and there
+    /// — of `track` when one is named — else nil.
+    func sighting(of detector: String, track: UInt64? = nil) -> (ReflexObservation, ReflexTarget)? {
+        guard let sighting = byDetector[detector], sighting.frame.capture_seq == frame.capture_seq,
+              let target = sighting.target, sighting.value.map({ $0 != 0 }) == true,
+              track.map({ $0 == target.track_id }) ?? true
+        else { return nil }
+        return (sighting, target)
     }
 }
 
@@ -791,7 +877,8 @@ public protocol ReflexInputMonitor: AnyObject, Sendable {
 /// What one reflex run may act on — the baton its start hands the run: the
 /// plan's own scope and the app that scope's target resolved to when the run
 /// began. The window names the target in the plan it hashed; the helper
-/// resolves it once, never to ZeroCode itself (`ReflexInputBoundary`).
+/// resolves it once, never to ZeroCode itself, and every press is held to it
+/// (`ReflexInputBoundary`).
 public struct ReflexActingScope: Equatable, Sendable {
     public let surface: ReflexSurface
     public let target: String
@@ -804,15 +891,20 @@ public struct ReflexActingScope: Equatable, Sendable {
     }
 }
 
-/// Whether a point is a reflex run's to act on: the helper's answer is the
-/// verbs' own policy (never ZeroCode's own window) held to the run's
-/// `ReflexActingScope`; nothing here widens what a verb may do.
+/// The last word before a reflex run's input goes (realtime v1 §5.4): whether
+/// `point` is the run's to act on — asked on the hand's thread before a leaf's
+/// first event and before its press, and a refusal ends the leaf with nothing
+/// posted. The helper's answer is the verbs' own policy (never ZeroCode's own
+/// window) held to the run's `ReflexActingScope`; nothing here widens what a
+/// verb may do.
 public protocol ReflexInputBoundary: Sendable {
     /// Why `input` may not go at `point`, or nil when it may.
     func refusal(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) -> String?
 }
 
-/// Why a run paused or ended on its own, in the words its status reports.
+/// Why a run paused or ended on its own, in the words its status reports. A
+/// hold the hand took back by itself says the hand's own reason
+/// (`HoldRevocation`).
 public enum ReflexRunReason {
     /// Someone else's input was heard.
     public static let externalInput = "external_input"
@@ -826,7 +918,8 @@ public enum ReflexRunReason {
 /// thread takes the newest frame, reads the kernel's sightings and picks a
 /// rule; a hand thread runs its leaves. The run holds the hand from start to
 /// end — no request posts in between — and pauses, letting go of what it
-/// held, when anyone else's input is heard or the monitor stops hearing.
+/// held, when anyone else's input is heard, the monitor stops hearing or the
+/// hand takes its hold back.
 public final class ReflexSession: @unchecked Sendable {
     public enum State: Equatable, Sendable {
         case starting
@@ -860,6 +953,9 @@ public final class ReflexSession: @unchecked Sendable {
         public let planEpoch: UInt64
         public let framesEvaluated: UInt64
         public let framesUnread: UInt64
+        /// Newer captures the run refused (not ready, time unknown or earlier,
+        /// out of order) or the frames stopping: each took the evidence back.
+        public let framesRefused: UInt64
         public let inadmissible: UInt64
         public let fires: UInt64
         public let leaves: UInt64
@@ -892,6 +988,7 @@ public final class ReflexSession: @unchecked Sendable {
     private var startFailure: (any Error)?
     private var framesEvaluated: UInt64 = 0
     private var framesUnread: UInt64 = 0
+    private var framesRefused: UInt64 = 0
     private var inadmissible: UInt64 = 0
     private var fires: UInt64 = 0
     private var leaves: UInt64 = 0
@@ -922,24 +1019,35 @@ public final class ReflexSession: @unchecked Sendable {
     }
 
     /// Take the hand, prove the monitor hears, open the kernel's session and
-    /// start both threads. Any failure lets go of the hand and says why.
+    /// start both threads. Any failure lets go of the hand and says why; a
+    /// stop that comes while it starts ends it — the start publishes nothing
+    /// and gives the hand back (`ReflexRunError.stoppedWhileStarting`).
     public func start() throws {
         try ReflexTable.check(settings.limits)
         let style = try PointerStyle(settings.plan.plan.pointer, limits: settings.limits)
         let token = try hand.acquire(.reflex(settings.runId))
         lock.lock()
+        if case .stopped = state {
+            lock.unlock()
+            hand.relinquish(token)
+            throw ReflexRunError.stoppedWhileStarting
+        }
         self.token = token
         lock.unlock()
         do {
             try proveMonitor(token)
             try startThreads(token: token, style: style)
         } catch {
+            let stoppedMeanwhile = ending
             finish(.stopped(ReflexRunReason.startFailed))
-            throw error
+            throw stoppedMeanwhile ? ReflexRunError.stoppedWhileStarting : error
         }
         lock.lock()
-        if state == .starting { state = .running }
+        let running = state == .starting
+        if running { state = .running }
         lock.unlock()
+        // A stop that came meanwhile has let go already (`finish`).
+        if !running, ending { throw ReflexRunError.stoppedWhileStarting }
     }
 
     /// The monitor must hear the hand's own tagged echo — a move to where
@@ -950,12 +1058,14 @@ public final class ReflexSession: @unchecked Sendable {
             heard: { [weak self] origin in self?.heard(origin) },
             interrupted: { [weak self] reason in self?.interrupted(reason) }
         )
+        if ending { throw ReflexRunError.stoppedWhileStarting }
         guard let here = hand.pointerNow() else {
             throw ReflexRunError.monitorDeaf("the pointer's place is unknown, so no echo can be sent")
         }
         try hand.post(HandEvent(.pointerMove, x: here.x, y: here.y), by: token)
-        let deadline = DispatchTime(uptimeNanoseconds: hand.nowNs() &+ settings.limits.max_lease_ns)
+        let deadline = DispatchTime.now() + .nanoseconds(Int(clamping: settings.limits.max_lease_ns))
         while true {
+            if ending { throw ReflexRunError.stoppedWhileStarting }
             lock.lock()
             let health = watch.health
             lock.unlock()
@@ -995,10 +1105,19 @@ public final class ReflexSession: @unchecked Sendable {
         let failure = startFailure
         lock.unlock()
         if let failure { throw failure }
-        source.onCapture { [weak self] in
-            self?.evaluate.signal()
-            self?.hand.wake()
+        // Wired only while the run stands: a stop that ends it under the same
+        // lock either comes first — nothing is wired — or clears what was.
+        lock.lock()
+        let stopped: Bool
+        if case .stopped = state { stopped = true } else { stopped = false }
+        if !stopped {
+            source.onCapture { [weak self] in
+                self?.evaluate.signal()
+                self?.hand.wake()
+            }
         }
+        lock.unlock()
+        if stopped { throw ReflexRunError.stoppedWhileStarting }
         Thread.detachNewThread { [self] in
             runLeaves(token: token, style: style)
         }
@@ -1006,7 +1125,7 @@ public final class ReflexSession: @unchecked Sendable {
     }
 
     /// End the run: the hand's hold is taken back and returned, and what it
-    /// held is let go of here, on the calling thread.
+    /// held is let go of here, on the calling thread, before anything else.
     public func stop(reason: String) {
         finish(.stopped(reason))
     }
@@ -1024,6 +1143,9 @@ public final class ReflexSession: @unchecked Sendable {
         if let token { hand.revoke(token, reason: reason) }
     }
 
+    /// The release first, on this thread; the capture and the monitor are
+    /// torn down after it, so a teardown that hangs never holds a release
+    /// (realtime v1 §5.8).
     private func finish(_ ending: State) {
         lock.lock()
         if case .stopped = state {
@@ -1033,8 +1155,6 @@ public final class ReflexSession: @unchecked Sendable {
         state = ending
         let token = self.token
         lock.unlock()
-        source.onCapture(nil)
-        monitor.stop()
         if let token {
             if case let .stopped(reason) = ending { hand.revoke(token, reason: reason) }
             hand.relinquish(token)
@@ -1042,6 +1162,8 @@ public final class ReflexSession: @unchecked Sendable {
         evaluate.signal()
         mail.signal()
         echo.signal()
+        source.onCapture(nil)
+        monitor.stop()
     }
 
     private func heard(_ origin: InputOrigin) {
@@ -1077,17 +1199,37 @@ public final class ReflexSession: @unchecked Sendable {
 
     // MARK: the evaluating thread
 
+    /// The newest frame, read once: the same capture taken again is no news;
+    /// a newer one the run refuses — not ready, its capture time unknown or
+    /// before the last one's, out of order — or the frames stopping take back
+    /// what was seen before it (`ReflexSightings.revoke`), and wake the hand
+    /// to see it. Unread between captures, the run still looks again once a
+    /// frame's age has passed, so a source that went quiet is noticed.
     private func evaluateFrames(_ perception: any ReflexPerceptionSession, token: OperatorHand.Token) {
         var cursor = ReflexFrameCursor()
         var book = ReflexRuleBook(settings.plan)
         let detectors = Dictionary(settings.plan.plan.detectors.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let clock: @Sendable () -> UInt64 = { [hand] in hand.nowNs() }
+        let look = DispatchTimeInterval.nanoseconds(Int(clamping: settings.limits.max_frame_age_ns))
+        var lastRead: (stream: UInt64, capture: UInt64)?
+        var lastAcceptedNs: UInt64?
         while true {
-            _ = evaluate.wait(timeout: DispatchTime(uptimeNanoseconds: hand.nowNs() &+ settings.limits.max_frame_age_ns))
+            _ = evaluate.wait(timeout: .now() + look)
             if ending { return }
-            guard let loan = source.newest() else { continue }
+            guard let loan = source.newest() else {
+                if sightings.latest() != nil { refuseFrame() }
+                continue
+            }
             let facts = loan.capture.facts(runId: settings.runId, ownerEpoch: token.id, planEpoch: settings.planEpoch)
-            guard cursor.observe(facts) else { continue }
+            if let lastRead, lastRead == (facts.stream_epoch, facts.capture_seq) { continue }
+            lastRead = (facts.stream_epoch, facts.capture_seq)
+            guard facts.captured_host_ns.map({ at in lastAcceptedNs.map { at >= $0 } ?? true }) == true,
+                  cursor.observe(facts)
+            else {
+                refuseFrame()
+                continue
+            }
+            lastAcceptedNs = facts.captured_host_ns
             var budget = ReflexPerceptionBudget(
                 samples: settings.perception.max_tick_samples,
                 deadlineHostNs: hand.nowNs() &+ settings.perception.max_tick_ns,
@@ -1133,6 +1275,16 @@ public final class ReflexSession: @unchecked Sendable {
         }
     }
 
+    /// A newer capture refused, or the frames stopped: nothing seen before is
+    /// evidence any more, and the hand hears it now.
+    private func refuseFrame() {
+        sightings.revoke()
+        lock.lock()
+        framesRefused += 1
+        lock.unlock()
+        hand.wake()
+    }
+
     // MARK: the hand thread
 
     private func runLeaves(token: OperatorHand.Token, style: PointerStyle) {
@@ -1161,6 +1313,22 @@ public final class ReflexSession: @unchecked Sendable {
             leaves += UInt64(ran)
             handBusy = false
             lock.unlock()
+            pauseIfTheHandTookTheHoldBack(token)
+        }
+    }
+
+    /// The hand took the run's hold back by itself — a release the platform
+    /// refused (`HoldRevocation`) — or the operator stopped: the run stops
+    /// acting and says the hand's reason, so no rule fires on a hold that
+    /// presses nothing.
+    private func pauseIfTheHandTookTheHoldBack(_ token: OperatorHand.Token) {
+        switch hand.refusal(for: token) {
+        case let .revoked(reason)?, let .stopped(reason)?:
+            pause(reason: reason)
+        case .releaseUnconfirmed?:
+            pause(reason: HoldRevocation.releaseUnconfirmed)
+        case nil, .notHolder?, .busy?:
+            return
         }
     }
 
@@ -1203,6 +1371,7 @@ public final class ReflexSession: @unchecked Sendable {
             planEpoch: settings.planEpoch,
             framesEvaluated: framesEvaluated,
             framesUnread: framesUnread,
+            framesRefused: framesRefused,
             inadmissible: inadmissible,
             fires: fires,
             leaves: leaves,
@@ -1221,4 +1390,6 @@ public final class ReflexSession: @unchecked Sendable {
 public enum ReflexRunError: Error, Equatable, Sendable {
     /// The input monitor cannot be trusted to hear a person's input.
     case monitorDeaf(String)
+    /// It was stopped before it stood: it gave the hand back and runs nothing.
+    case stoppedWhileStarting
 }

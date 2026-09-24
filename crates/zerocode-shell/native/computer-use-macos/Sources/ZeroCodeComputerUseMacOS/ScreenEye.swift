@@ -18,7 +18,8 @@ import ZeroCodeComputerUseMacOSCore
 /// asks for its own rate — the stream's rate changes in place, never a restart,
 /// so the repaint numbers, the encoded look and every other reader's cursor
 /// carry on — keeps the stream open past the idle time, and is woken on every
-/// capture with the newest frame's facts (`ReflexCaptureBook`).
+/// capture with the newest frame's facts (`ReflexCaptureBook`), a frame that
+/// was not a capture of the display included.
 final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, EyeFeed, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var eyes: [CGDirectDisplayID: ScreenEye] = [:]
@@ -202,9 +203,10 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, EyeFeed, @unc
         lock.lock()
         let eye = eyes[display.id]
         lock.unlock()
-        // A display that changed its size or scale since the eye opened is
-        // seen at the wrong size and its repaints land in the wrong points.
-        if let eye, eye.display.bounds != display.bounds || eye.display.scale != display.scale {
+        // A display that changed its place, size, scale or turn since the eye
+        // opened is seen at the wrong size and its repaints land in the wrong
+        // points — the same word a run's reader reads before every frame.
+        if let eye, !eye.describes(DesktopScreen.geometry(of: display.id)) {
             stop(ifCurrent: eye)
             throw ProviderError.coded("not_watching", "the display changed since the eye opened")
         }
@@ -229,6 +231,11 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, EyeFeed, @unc
         return eyes[eye.display.id] === eye
     }
 
+    /// Whether the display, standing at `now`, is still the one this eye
+    /// opened on: the same place, size, scale and turn.
+    private func describes(_ now: EyeGeometry?) -> Bool {
+        now == book.opened
+    }
 
     // MARK: the stream
 
@@ -301,9 +308,13 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, EyeFeed, @unc
         self.stream = nil
         newest = nil
         encoded = nil
+        // A run reading this eye hears it close, and its next read is a
+        // capture it refuses (`ReflexCaptureBook.read`).
+        let woken = Array(wakes.values)
         wakes.removeAll()
         readers.closed()
         stateLock.unlock()
+        for wake in woken { wake() }
         if let stream {
             let handle = EyeStreamHandle(stream: stream)
             _ = try? BlockingAsync.run(timeout: Self.streamTimeoutSeconds, what: "closing the eye") {
@@ -366,7 +377,9 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, EyeFeed, @unc
         }
     }
 
-    /// The newest frame and its capture facts, for a run's evaluating thread.
+    /// The newest frame and its capture facts, for a run's evaluating thread,
+    /// read with the display as it stands now and whether this eye is still
+    /// the one open on it (`ReflexCaptureBook.read`).
     func readerCapture() -> (pixels: CVPixelBuffer?, capture: ReflexCapture)? {
         let now = DesktopScreen.geometry(of: display.id)
         let open = Self.isOpen(self)
@@ -393,6 +406,8 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, EyeFeed, @unc
             // Nothing changed: a new capture of the pixels already held.
             idle(capturedNs: capturedNs, deliveredNs: deliveredNs)
         default:
+            // Blank, suspended, starting, stopping: the newest capture no
+            // longer shows the display, and a run reading it is told now.
             stateLock.lock()
             let woken = book.interrupted(capturedNs: capturedNs, deliveredNs: deliveredNs) == nil ? [] : Array(wakes.values)
             stateLock.unlock()
@@ -498,7 +513,9 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, EyeFeed, @unc
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         stateLock.lock()
         failure = "the eye's stream stopped: \(error.localizedDescription)"
+        let woken = Array(wakes.values)
         stateLock.unlock()
+        for wake in woken { wake() }
     }
 
     // MARK: answers
@@ -598,7 +615,11 @@ protocol EyeFeed: AnyObject, Sendable {
 }
 
 /// A run's hold on one display's eye: the frame source its evaluating thread
-/// reads. Ending it gives the run's rate back; nothing restarts.
+/// reads. Every read asks the eye whether its capture still describes the
+/// display — the eye still the one open on it, at the place, size, scale and
+/// turn it opened with — so a display that changed hands the run a capture it
+/// refuses, never the old point transform. Ending it gives the run's rate
+/// back; nothing restarts.
 final class ReflexEyeReader: ReflexRunSource, @unchecked Sendable {
     private let eye: any EyeFeed
     private let reader: String
@@ -613,8 +634,9 @@ final class ReflexEyeReader: ReflexRunSource, @unchecked Sendable {
     func newest() -> ReflexFrameLoan? {
         guard let (pixels, capture) = eye.readerCapture() else { return nil }
         return ReflexFrameLoan(capture: capture) { body in
-            // Only the buffer the facts describe is lent: BGRA, the extent they name.
-            guard let pixels,
+            // Only a ready capture's buffer is lent, and only the one its
+            // facts describe: BGRA, the extent they name.
+            guard capture.status == .ready, let pixels,
                   CVPixelBufferGetPixelFormatType(pixels) == kCVPixelFormatType_32BGRA,
                   CVPixelBufferGetWidth(pixels) == Int(capture.pixelExtent.width),
                   CVPixelBufferGetHeight(pixels) == Int(capture.pixelExtent.height),

@@ -190,13 +190,22 @@ enum ReflexRuntimeHost {
         )
     }
 
-    private struct Run {
-        let session: ReflexSession
-        let source: any ReflexRunSource
+    /// One run from the moment its start is admitted — starting, its source
+    /// and session once made — until it is published running, or stopped. A
+    /// stop and the start's publishing ask the same slot under one lock: a
+    /// stop during a start ends that start, and the start publishes nothing.
+    private final class Slot {
+        let runId: String
+        var source: (any ReflexRunSource)?
+        var session: ReflexSession?
+
+        init(runId: String) {
+            self.runId = runId
+        }
     }
 
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var run: Run?
+    nonisolated(unsafe) private static var slot: Slot?
     nonisolated(unsafe) private static var planEpochs: UInt64 = 0
     /// The kernel that reads a plan's detectors (R5's `Perception/`). A helper
     /// built without one refuses every run rather than acting on nothing.
@@ -246,61 +255,97 @@ enum ReflexRuntimeHost {
         lock.lock()
         let kernel = Self.kernel
         let parts = Self.parts
-        let busy = run?.session.status.runId
-        if busy == nil { planEpochs += 1 }
-        let epoch = planEpochs
+        let held = slot?.runId
         lock.unlock()
         guard let kernel else {
             throw ProviderError.coded("unsupported_capability", "this helper has no perception kernel for a reflex plan yet")
         }
-        if let busy {
-            throw ProviderError.coded("hand_busy", "reflex run \(busy) holds the hand; stop it first (reflexStop)")
-        }
+        if let held { throw busy(held) }
         let boundary = parts.boundary(try actingScope(plan.plan.scope))
-        let source = try parts.reader(runId, eye, display, Int(clamping: limits.frames_per_second))
-        let session = ReflexSession(
-            settings: ReflexSession.Settings(runId: runId, plan: plan, limits: limits, perception: perception, planEpoch: epoch),
-            hand: hand,
-            source: source,
-            kernel: kernel,
-            monitor: parts.monitor(hand.tag),
-            admit: admit,
-            fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000,
-            boundary: boundary
-        )
+        lock.lock()
+        if let held = slot?.runId {
+            lock.unlock()
+            throw busy(held)
+        }
+        let mine = Slot(runId: runId)
+        slot = mine
+        planEpochs += 1
+        let epoch = planEpochs
+        lock.unlock()
+        // The eye's reader once made — given back below whether or not the
+        // slot still held the start when it came.
+        var reader: (any ReflexRunSource)?
         do {
+            let source = try parts.reader(runId, eye, display, Int(clamping: limits.frames_per_second))
+            reader = source
+            try keep(mine) { $0.source = source }
+            let session = ReflexSession(
+                settings: ReflexSession.Settings(runId: runId, plan: plan, limits: limits, perception: perception, planEpoch: epoch),
+                hand: hand,
+                source: source,
+                kernel: kernel,
+                monitor: parts.monitor(hand.tag),
+                admit: admit,
+                fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000,
+                boundary: boundary
+            )
+            // From here a stop reaches the session itself: it lets go on its own thread.
+            try keep(mine) { $0.session = session }
             try session.start()
+            // Published only while no stop has taken the slot — the same
+            // judgement the stop makes; one that comes later stops a run.
+            try keep(mine) { _ in }
+            return render(session.status, receipts: [])
         } catch {
-            source.end()
+            lock.lock()
+            if slot === mine { slot = nil }
+            let session = mine.session
+            lock.unlock()
+            session?.stop(reason: ReflexRunReason.startFailed)
+            reader?.end()
             throw providerError(error)
         }
+    }
+
+    /// Change `mine` while it is still the run's slot; a stop that took it
+    /// back ends the start instead.
+    private static func keep(_ mine: Slot, _ change: (Slot) -> Void) throws {
         lock.lock()
-        run = Run(session: session, source: source)
-        lock.unlock()
-        return render(session.status, receipts: [])
+        defer { lock.unlock() }
+        guard slot === mine else { throw ReflexRunError.stoppedWhileStarting }
+        change(mine)
+    }
+
+    private static func busy(_ run: String) -> ProviderError {
+        .coded("hand_busy", "reflex run \(run) holds the hand; stop it first (reflexStop)")
     }
 
     /// Where the run stands, and the receipts it kept since the last read.
     static func status() -> [String: Any] {
         lock.lock()
-        let current = run
+        let current = slot
+        let session = current?.session
         lock.unlock()
         guard let current else { return ["state": "none"] }
-        return render(current.session.status, receipts: current.session.receipts.drain(limit: unlimited))
+        guard let session else { return ["runId": current.runId, "state": "starting", "reason": NSNull()] }
+        return render(session.status, receipts: session.receipts.drain(limit: unlimited))
     }
 
-    /// End the run: what the hand held is let go of on this thread, then the
-    /// eye gets its rate back.
+    /// End the run — a starting one included: what the hand held is let go of
+    /// on this thread first, then the eye gets its rate back.
     static func stop(reason: String) -> [String: Any] {
         lock.lock()
-        let current = run
-        run = nil
+        let current = slot
+        slot = nil
+        let session = current?.session
+        let source = current?.source
         lock.unlock()
         guard let current else { return ["state": "none"] }
-        current.session.stop(reason: reason)
-        let status = render(current.session.status, receipts: current.session.receipts.drain(limit: unlimited))
+        session?.stop(reason: reason)
+        let status = session.map { render($0.status, receipts: $0.receipts.drain(limit: unlimited)) }
+            ?? ["runId": current.runId, "state": "stopped", "reason": reason]
         // Giving the rate back waits on ScreenCaptureKit; the release is done.
-        DispatchQueue.global(qos: .utility).async { current.source.end() }
+        if let source { DispatchQueue.global(qos: .utility).async { source.end() } }
         return status
     }
 
@@ -322,6 +367,8 @@ enum ReflexRuntimeHost {
             return OperatorHandHost.providerError(refusal, acquiring: true)
         case let ReflexRunError.monitorDeaf(reason):
             return ProviderError.coded("monitor_unavailable", "a reflex run acts only while it can hear a person's input: \(reason)")
+        case ReflexRunError.stoppedWhileStarting:
+            return ProviderError.coded("stopped", "the reflex run was stopped while it started; it holds nothing")
         case let error as ReflexContractError:
             return ProviderError.coded("unsupported_capability", "the plan cannot run here: \(error.rawValue)")
         default:
@@ -357,6 +404,7 @@ enum ReflexRuntimeHost {
             "planEpoch": status.planEpoch,
             "framesEvaluated": status.framesEvaluated,
             "framesUnread": status.framesUnread,
+            "framesRefused": status.framesRefused,
             "inadmissible": status.inadmissible,
             "fires": status.fires,
             "leaves": status.leaves,
