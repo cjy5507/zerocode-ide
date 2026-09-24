@@ -115,7 +115,7 @@ fn the_desk_answers_and_acknowledges_through_the_ledgers_own_verbs_and_invents_n
     let owed = block_after(&desk, "pub(crate) fn desk_mail(");
     for rule in [
         ".answer_to(message)",
-        ".question_is_closed(message)",
+        ".question_is_answerable(message)",
         ".pending_messages(&address, &DESK_MAIL_KINDS)",
         ".open_delivery(&address)",
     ] {

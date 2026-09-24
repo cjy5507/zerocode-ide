@@ -91,7 +91,7 @@ fn delivery_of(id: &str, pending: &HashSet<&str>, open: &HashSet<&str>) -> &'sta
 
 /// What the coordinator of `run` owes, oldest first. A question is owed until
 /// it is answered or can no longer be (`Run::answer_to`,
-/// `Run::question_is_closed` — the reply verb's own rules); a notice until it
+/// `Run::question_is_answerable` — the reply verb's own rules); a notice until it
 /// is acknowledged.
 pub(crate) fn desk_mail(run: &Run) -> Vec<DeskMail> {
     let address = run.address();
@@ -113,7 +113,7 @@ pub(crate) fn desk_mail(run: &Run) -> Vec<DeskMail> {
                 MessageKind::Question => {
                     message.thread.is_none()
                         && run.answer_to(message).is_none()
-                        && !run.question_is_closed(message)
+                        && run.question_is_answerable(message).is_ok()
                 }
                 _ => delivery != "acked",
             };
@@ -523,7 +523,188 @@ pub(crate) fn machine_load(ledger_volume: &Path) -> MachineLoad {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zerocode_core::orchestration::TaskStatus;
+    use zerocode_core::orchestration::{AckedRow, Draft, Priority, TaskStatus};
+
+    #[test]
+    fn a_question_the_ledger_would_refuse_to_answer_is_not_owed_on_the_desk() {
+        let mut ledger = Ledger::new();
+        let run_id = ledger.create_run("mail", 1);
+        let worker = ledger
+            .start_worker(&run_id, "codex", ("team", "%2"), None, 2)
+            .expect("worker")
+            .worker;
+        let question = ledger
+            .post(
+                &run_id,
+                Draft {
+                    from: format!("worker:{worker}"),
+                    to: format!("run:{run_id}"),
+                    kind: MessageKind::Question,
+                    body: "still there?".into(),
+                    subject: "".into(),
+                    priority: Priority::Normal,
+                    payload: "".into(),
+                    thread: None,
+                    task: None,
+                    dispatch: None,
+                },
+                3,
+            )
+            .expect("question");
+        assert_eq!(desk_mail(ledger.run(&run_id).expect("run")).len(), 1);
+        ledger.begin_release(&worker).expect("release begins");
+        assert_eq!(ledger.finish_release(&worker, None).as_str(), "released");
+        let run = ledger.run(&run_id).expect("run");
+        assert_eq!(run.messages().len(), 1, "the question stays in the ledger");
+        assert_eq!(run.messages()[0].id, question);
+        assert!(
+            desk_mail(run).is_empty(),
+            "unanswerable question is still owed"
+        );
+    }
+
+    #[test]
+    fn old_questions_disappear_after_rebuild_without_rewriting_mail() {
+        let mut ledger = Ledger::new();
+        let run_id = ledger.create_run("old mail", 1);
+        let mut workers = Vec::new();
+        for (index, pane) in ["%2", "%3", "%4"].into_iter().enumerate() {
+            let worker = ledger
+                .start_worker(&run_id, "codex", ("team", pane), None, index as i64 + 2)
+                .expect("worker")
+                .worker;
+            ledger
+                .post(
+                    &run_id,
+                    Draft {
+                        from: format!("worker:{worker}"),
+                        to: format!("run:{run_id}"),
+                        kind: MessageKind::Question,
+                        body: "still needed?".into(),
+                        subject: "".into(),
+                        priority: Priority::Normal,
+                        payload: "".into(),
+                        thread: None,
+                        task: None,
+                        dispatch: None,
+                    },
+                    10 + index as i64,
+                )
+                .expect("question");
+            workers.push(worker);
+        }
+        let pane_question = ledger
+            .post(
+                &run_id,
+                Draft {
+                    from: "pane:team/%5".into(),
+                    to: format!("run:{run_id}"),
+                    kind: MessageKind::Question,
+                    body: "pane question?".into(),
+                    subject: "".into(),
+                    priority: Priority::Normal,
+                    payload: "".into(),
+                    thread: None,
+                    task: None,
+                    dispatch: None,
+                },
+                20,
+            )
+            .expect("pane question");
+        assert_eq!(desk_mail(ledger.run(&run_id).expect("run")).len(), 4);
+        for worker in &workers {
+            ledger.begin_release(worker).expect("release begins");
+            ledger.finish_release(worker, None);
+        }
+        ledger
+            .post(
+                &run_id,
+                Draft {
+                    from: format!("run:{run_id}"),
+                    to: "pane:team/%5".into(),
+                    kind: MessageKind::Question,
+                    body: "answered".into(),
+                    subject: "".into(),
+                    priority: Priority::Normal,
+                    payload: "".into(),
+                    thread: Some(pane_question),
+                    task: None,
+                    dispatch: None,
+                },
+                21,
+            )
+            .expect("pane answer");
+        let run = ledger.run(&run_id).expect("run");
+        assert_eq!(run.messages().len(), 5, "old questions were rewritten");
+        assert!(desk_mail(run).is_empty());
+        let rebuilt = Ledger::rebuild(ledger.export()).expect("same ledger rebuilt");
+        assert!(desk_mail(rebuilt.run(&run_id).expect("run")).is_empty());
+    }
+
+    #[test]
+    fn an_acknowledged_unanswered_question_stays_owed_but_an_unacked_notice_stays_separate() {
+        let mut ledger = Ledger::new();
+        let run_id = ledger.create_run("acknowledged question", 1);
+        let question = ledger
+            .post(
+                &run_id,
+                Draft {
+                    from: "pane:team/%2".into(),
+                    to: format!("run:{run_id}"),
+                    kind: MessageKind::Question,
+                    body: "still unanswered?".into(),
+                    subject: "".into(),
+                    priority: Priority::Normal,
+                    payload: "".into(),
+                    thread: None,
+                    task: None,
+                    dispatch: None,
+                },
+                2,
+            )
+            .expect("question");
+        let notice = ledger
+            .post(
+                &run_id,
+                Draft {
+                    from: "pane:team/%2".into(),
+                    to: format!("run:{run_id}"),
+                    kind: MessageKind::WorkerDied,
+                    body: r#"{"workerId":"w-example"}"#.into(),
+                    subject: "".into(),
+                    priority: Priority::Normal,
+                    payload: "".into(),
+                    thread: None,
+                    task: None,
+                    dispatch: None,
+                },
+                3,
+            )
+            .expect("notice");
+        let mut projected = ledger.export();
+        let inbox = projected
+            .inboxes
+            .iter_mut()
+            .find(|row| row.run == run_id && row.address == format!("run:{run_id}"))
+            .expect("run inbox");
+        inbox.pending.retain(|id| id != &question);
+        projected.acked.push(AckedRow {
+            run: run_id.clone(),
+            address: format!("run:{run_id}"),
+            delivery: "d-acknowledged".into(),
+            messages: Some(vec![question.clone()]),
+            seq: 0,
+            current: true,
+        });
+        let rebuilt = Ledger::rebuild(projected).expect("acked ledger");
+        let run = rebuilt.run(&run_id).expect("run");
+        let mail = desk_mail(run);
+        assert_eq!(mail.len(), 2);
+        assert_eq!(mail[0].id, question);
+        assert_eq!(mail[0].delivery, "acked");
+        assert_eq!(mail[1].id, notice);
+        assert_eq!(mail[1].delivery, "pending");
+    }
 
     /// A run in play with one task in every stage, and a finished run nobody
     /// is at: the desk carries the first and not the second, counts every
