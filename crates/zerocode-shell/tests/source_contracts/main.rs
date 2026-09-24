@@ -10455,7 +10455,14 @@ mod tests {
         );
 
         // And the floor that makes all of this free is still a floor.
-        let holding = block_after(shipped, "fn usage_scan_holds(");
+        // The provider gate steps through the one door every read passes,
+        // an account's own read included (t-7538).
+        let gate = block_after(shipped, "fn usage_scan_holds(");
+        assert!(
+            gate.contains("usage_scan_holds_for(held, &key, force, now_ms)"),
+            "the provider gate stopped going through the one door:\n{gate}"
+        );
+        let holding = block_after(shipped, "fn usage_scan_holds_for(");
         assert!(
             holding.contains("if force {") && holding.contains("usage::MIN_REFETCH"),
             "the refetch floor no longer holds unforced asks, so the window's \
@@ -18965,13 +18972,20 @@ mod tests {
     fn the_usage_login_is_the_reading_doors_store_and_only_ever_a_look() {
         let accounts = include_str!("../../src/accounts.rs");
         let shipped = &accounts[..accounts.find("mod tests {").unwrap_or(accounts.len())];
-        let looking = block_after(shipped, "pub(crate) fn usage_login(");
-        // The one reader, of the store the environment names.
+        let reading = block_after(shipped, "pub(crate) fn usage_login(");
+        // The store the environment names, through the one walk an inactive
+        // account's own read shares (t-7538).
         assert!(
-            looking.contains("zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR")
-                && looking.contains("keychain_says(&store)"),
-            "the usage login grew a keychain reader of its own, or reads a \
-             store the CLI does not:\n{looking}"
+            reading.contains("zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR")
+                && reading.contains("usage_login_in("),
+            "the usage login reads a store the CLI does not, or walks a road \
+             of its own:\n{reading}"
+        );
+        let looking = block_after(shipped, "fn usage_login_in(");
+        // The one reader, of the store it is handed.
+        assert!(
+            looking.contains("keychain_says(store)"),
+            "the usage login grew a keychain reader of its own:\n{looking}"
         );
         // In the order the one table states.
         assert!(
@@ -19123,24 +19137,33 @@ mod tests {
         }
     }
 
-    /// `launch_agent_tab`'s `resume` is the session ID — a String on the wire
-    /// — while the record the window keeps per pane (`paneSessions`) is the
-    /// whole `ProviderSession`, because `resume_session` takes the record. The
-    /// account handoff put the record into the String slot, and every
-    /// handed-off pane died with "invalid args `resume` for command
-    /// `launch_agent_tab`: invalid type: map, expected a string" (measured
-    /// 2026-08-27, on each reinstall that re-applied the chosen account).
+    /// An account switch moves no pane from the window (t-7538), and
+    /// `launch_agent_tab`'s `resume` stays the session ID — a String on the
+    /// wire — while the record the window keeps per pane (`paneSessions`) is
+    /// the whole `ProviderSession`. The handoff this replaces put the record
+    /// into the String slot once (every handed-off pane died with "invalid
+    /// args `resume`…", 2026-08-27), and then, fixed, killed every worker it
+    /// handed off in the ledger (2026-09-24).
     #[test]
-    fn the_account_handoff_resumes_by_session_id() {
-        let handoff = block_after(window_source(), "async function handoffClaudePane(");
-        assert!(
-            handoff.contains("resume: held.session.id"),
-            "the handoff no longer hands launch_agent_tab the session ID:\n{handoff}"
-        );
-        assert!(
-            !handoff.contains("resume: held.session }"),
-            "the handoff puts the whole ProviderSession record into a String slot again:\n{handoff}"
-        );
+    fn the_account_switch_hands_no_pane_off_in_the_window() {
+        // The window's handoff queued every Claude pane on a switch,
+        // relaunched it with `--resume` at its next rest and closed the old
+        // shell — and every close reached the ledger as a death (2026-09-24,
+        // five workers; t-7538). A walled worker moves in the backend now,
+        // as the same worker, resuming the session its ledger row carries
+        // (`reseat_one_in_line`); the window moves no pane at all.
+        let window = window_source();
+        for gone in [
+            "function handoffClaudePane(",
+            "accountHandoffQueue",
+            "drainAccountHandoffs",
+            "handoffRunningClaudePanes",
+        ] {
+            assert!(
+                !window.contains(gone),
+                "the window hands panes off on an account switch again: `{gone}`"
+            );
+        }
         let launching = block_after(shipped_backend(), "fn launch_agent_tab(");
         assert!(
             launching.contains("resume: Option<String>,"),
@@ -24182,13 +24205,15 @@ mod tests {
     fn every_account_switch_door_announces_itself_to_the_running_panes() {
         let usage = include_str!("../../src/cmd/usage.rs");
         for (door, announcement) in [
+            // Both Claude doors walk the one switch road (t-7538), whose
+            // door tells the running panes — checked after this loop.
             (
                 "pub(crate) async fn select_claude_account(",
-                "announce_account_switch(&state, zerocode_core::account::Provider::Anthropic)",
+                "person_switched(app, Some(id))",
             ),
             (
-                "pub(crate) fn use_system_claude_login(",
-                "announce_account_switch(&state, zerocode_core::account::Provider::Anthropic)",
+                "pub(crate) async fn use_system_claude_login(",
+                "person_switched(app, None)",
             ),
             (
                 "pub(crate) fn select_codex_account(",
@@ -24205,6 +24230,14 @@ mod tests {
                 "{door} changes the account without telling the running panes:\n{body}"
             );
         }
+        let switch = include_str!("../../src/account_switch.rs");
+        let door = block_after(switch, "fn selected(&self, to: Option<&str>, at_ms: i64) {");
+        assert!(
+            door.contains(
+                "announce_account_switch(self.state, zerocode_core::account::Provider::Anthropic)"
+            ),
+            "the switch road changes the Claude account without telling the running panes:\n{door}"
+        );
 
         // And the fan-out is the one the pane's own wire names.
         let backend = shipped_backend();
@@ -31427,7 +31460,14 @@ mod tests {
         );
         let reading = block_after(shell, "fn usage_headroom(");
         assert!(reading.contains("with_usage_headroom(usage, agent, model,"));
-        let probe = block_after(shell, "fn with_usage_headroom<R>(");
+        // Since t-7538 the reading takes the account a pane runs as; the
+        // provider's reading is that one with no account.
+        let delegating = block_after(shell, "fn with_usage_headroom<R>(");
+        assert!(
+            delegating.contains("with_usage_headroom_of_account(usage, agent, model, None, read)"),
+            "the window's probe no longer reads through the one reading:\n{delegating}"
+        );
+        let probe = block_after(shell, "fn with_usage_headroom_of_account<R>(");
         assert!(
             probe.contains("cached_usage(local_data_root, gauge)"),
             "the window's probe no longer reads the usage cells:\n{probe}"
