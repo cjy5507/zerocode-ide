@@ -4215,6 +4215,22 @@ impl ReceiverSeat {
         }
     }
 
+    /// The same seat as it stood when a question was put to it at
+    /// `asked_ms` — a worker with the attempt it carried THEN. A chair is
+    /// not derived again: [`receivers_at`] names a chair only if it held the
+    /// seat since before the fact, so for a fact older than the question —
+    /// the one case [`notice_owed`] reads this for — it held it when the
+    /// question was asked too.
+    fn as_asked(&self, run: &Run, asked_ms: i64) -> Self {
+        match self {
+            Self::Worker { id, .. } => Self::Worker {
+                id: id.clone(),
+                dispatch: carried_at(run, id, asked_ms),
+            },
+            Self::Coordinator { .. } => self.clone(),
+        }
+    }
+
     fn json(&self) -> serde_json::Value {
         match self {
             Self::Worker { id, dispatch } => {
@@ -4242,19 +4258,37 @@ fn carried_at(run: &Run, worker_id: &str, at_ms: i64) -> Option<String> {
         .map(|one| one.id.clone())
 }
 
+/// The worker a fact that began at `fact_ms` in `team/pane` is about, in
+/// this run: the one sitting there now, if it already held the seat when
+/// the fact began. A worker summoned after that moment is not the fact's —
+/// the next occupant never inherits the last one's late turn end, late
+/// wait on the person or late sound — and a seat whose occupant has gone
+/// is nobody's.
+///
+/// The one boundary every reading of a pane's fact shares, so a fact is
+/// never two workers' at once: whom it tells ([`receivers_at`]), whose
+/// silence it records ([`Ledger::worker_fell_silent`], which also asks
+/// [`carried_at`] for the attempt) and whose readiness window it retires
+/// ([`Ledger::worker_spoke`]).
+///
+/// The worker's summons time stands for when it took the seat: the ledger
+/// keeps no seating time of its own, and a worker seated again after a
+/// restart ([`Ledger::worker_reseated`], [`Ledger::worker_pane_resumed`])
+/// keeps its summons stamp — a fresh pane the ledger cut, or the pane of
+/// the very conversation it resumed.
+fn occupant_at<'run>(run: &'run Run, team: &str, pane: &str, fact_ms: i64) -> Option<&'run Worker> {
+    run.worker_in_pane(team, pane)
+        .filter(|worker| worker.started_ms <= fact_ms)
+}
+
 /// Whom a fact that began at `fact_ms` in `team/pane` is about, in this
-/// run: the worker occupying the pane, and the run's coordinator when that
-/// pane is its chair — each only if it already held the seat when the fact
-/// began. A worker summoned after that moment, or a chair taken after it,
-/// is not that fact's receiver: the next occupant never inherits the last
-/// one's late turn end or late wait on the person. A pane that is neither
-/// is nobody's receiver.
+/// run: the worker occupying the pane ([`occupant_at`]), and the run's
+/// coordinator when that pane is its chair — each only if it already held
+/// the seat when the fact began. A chair taken after that moment is not the
+/// fact's receiver either. A pane that is neither is nobody's receiver.
 fn receivers_at(run: &Run, team: &str, pane: &str, fact_ms: i64) -> Vec<(String, ReceiverSeat)> {
     let mut held = Vec::new();
-    if let Some(worker) = run
-        .worker_in_pane(team, pane)
-        .filter(|worker| worker.started_ms <= fact_ms)
-    {
+    if let Some(worker) = occupant_at(run, team, pane, fact_ms) {
         held.push((
             worker_address(&worker.id),
             ReceiverSeat::of_worker(run, worker, fact_ms),
@@ -4356,21 +4390,33 @@ fn receiver_standing(run: &Run, question: &Message) -> Option<serde_json::Value>
 
 /// Whether a question whose thread already carries `told` is owed a line
 /// saying `news` about `seat` — a fact that began at `fact_ms`, seen at
-/// `now_ms`. The whole rule, here and nowhere else:
+/// `now_ms` — when the question was put at `asked_ms` to the receiver as
+/// it stood then, `asked_seat` ([`ReceiverSeat::as_asked`]). The whole
+/// rule, here and nowhere else:
 ///
 /// 1. A final line ends the telling: nothing is written after it.
 /// 2. A final word is written once, past the bound too — it is the line
 ///    that ends the waiting.
-/// 3. The same fact — the same seat, word and `factMs` — anywhere in the
+/// 3. A question hears how its receiver has stood SINCE it was asked
+///    (t-6740 r3). A fact that began before the question is its news only
+///    while the receiver still stands as it did when asked — the same
+///    seat, and for a worker the same attempt: a state that began inside
+///    the attempt the question was put to is still how the receiver stands.
+///    A fact of an attempt that was over before the question was put — its
+///    turn end reported late, after the same worker took its next attempt —
+///    is how that attempt ended, not how the receiver stands, and is not
+///    the question's news. A fact that began after the question was asked,
+///    in whichever attempt, always is.
+/// 4. The same fact — the same seat, word and `factMs` — anywhere in the
 ///    record is the same line, however late it comes again and whatever
 ///    was told in between. The stall sweep hands over the same silence
 ///    every beat and the stall seat's judged cause lands between two beats;
 ///    a turn's end can be reported twice with another word between. A line
 ///    of another word does not make the second sighting of a fact news.
-/// 4. The same word about the same seat inside [`QUIET_REMINDER_MS`] of the
+/// 5. The same word about the same seat inside [`QUIET_REMINDER_MS`] of the
 ///    last line is the same line: a fresh fact of the word just said waits
 ///    out the cadence.
-/// 5. At most [`RECEIVER_NOTICE_CAP`] lines that are not final.
+/// 6. At most [`RECEIVER_NOTICE_CAP`] lines that are not final.
 ///
 /// What that makes the thread mean: its lines stand in the order the ledger
 /// OBSERVED them and each fact stands once, so the last line is the last
@@ -4386,12 +4432,16 @@ fn notice_owed(
     news: &ReceiverNews,
     fact_ms: i64,
     now_ms: i64,
+    (asked_ms, asked_seat): (i64, &serde_json::Value),
 ) -> bool {
     if told.iter().any(|(_, body)| body["final"] == true) {
         return false;
     }
     if news.is_final() {
         return true;
+    }
+    if fact_ms < asked_ms && asked_seat != seat {
+        return false;
     }
     let same_word =
         |body: &serde_json::Value| body["reason"] == news.word() && body["receiverSeat"] == *seat;
@@ -4437,7 +4487,15 @@ impl Ledger {
                 .filter(|question| {
                     let told: Vec<(&Message, serde_json::Value)> =
                         receiver_notices(run, question).collect();
-                    notice_owed(&told, &seat_json, news, fact_ms, now_ms)
+                    let asked = seat.as_asked(run, question.created_ms).json();
+                    notice_owed(
+                        &told,
+                        &seat_json,
+                        news,
+                        fact_ms,
+                        now_ms,
+                        (question.created_ms, &asked),
+                    )
                 })
                 .map(|question| {
                     let body = serde_json::json!({
@@ -9869,6 +9927,15 @@ impl Ledger {
     ///   worker is not waiting.
     /// - **the same turn twice** — one turn's end can arrive as several events,
     ///   and the ledger should record it once. See [`Worker::quiet_at`].
+    /// - **another attempt's turn** — the turn is the silence of the worker
+    ///   and the attempt it ENDED in, never of whoever sits in the pane when
+    ///   the report lands (t-6740 r3). A report can arrive after the pane's
+    ///   next worker was seated, or after the same worker took its next
+    ///   attempt; that turn is not the next one's silence, and it moves
+    ///   neither its episode nor its watermark. The same boundary as the
+    ///   asker's line about the same turn
+    ///   ([`Self::receivers_told_turn_ended`]), so one turn is one
+    ///   attempt's.
     ///
     /// Notification belongs to [`Self::workers_stalled`], whose input is the
     /// window's conjunction of hook rest, PTY quiet, a live terminal and the
@@ -9894,19 +9961,25 @@ impl Ledger {
             return None;
         }
         let (team, pane) = seat;
-        let run_id = self
-            .runs
-            .iter()
-            .find(|run| run.worker_in_pane(team, pane).is_some())
-            .map(|run| run.id.clone())?;
+        let (run_id, worker_id) = self.runs.iter().find_map(|run| {
+            occupant_at(run, team, pane, turn_ended_ms)
+                .map(|worker| (run.id.clone(), worker.id.clone()))
+        })?;
         let (told, task_id, dispatch_id) = {
             let run = self.run(&run_id)?;
-            let worker = run.worker_in_pane(team, pane)?;
+            let worker = run.worker(&worker_id)?;
             if worker.quiet_at == Some(turn_ended_ms) {
                 return None;
             }
             let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-            if !dispatch.is_open() || awaiting_reply(run, &worker.id) {
+            // The attempt the worker carries NOW must be the one the turn
+            // ended in: a turn from an attempt already over is not this
+            // one's silence.
+            if !dispatch.is_open()
+                || carried_at(run, &worker.id, turn_ended_ms).as_deref()
+                    != Some(dispatch.id.as_str())
+                || awaiting_reply(run, &worker.id)
+            {
                 return None;
             }
             let episode = quiet_episode(run, &worker.id, &dispatch.id);
@@ -9931,23 +10004,21 @@ impl Ledger {
             (told, dispatch.task.clone(), dispatch.id.clone())
         };
         let run = self.run_mut(&run_id)?;
-        /* The worker there NOW — and only a worker that is still there.
+        /* The worker there NOW — and only a worker that is still there, and
+         * was already there when the turn ended (`occupant_at` above).
          *
          * A turn ending in a REUSED pane is the current agent's silence, not
          * the released one's: this walked the rows in the order they were
-         * written and wrote the news against whoever sat there first.
+         * written and wrote the news against whoever sat there first. And
+         * the turn a released one ended before the current agent was seated
+         * is not the current agent's either (t-6740 r3).
          *
          * And a seat whose every row is released has nobody to go quiet:
          * silence is something a worker DOES, and a released worker is not
          * there to do it. That is now the rule everywhere — see
          * `Run::worker_in_pane`, which has no fallback either.
          */
-        let worker = {
-            let at = run.workers.iter().position(|one| {
-                one.team == team && one.pane == pane && one.state.may_occupy_pane()
-            })?;
-            &mut run.workers[at]
-        };
+        let worker = run.workers.iter_mut().find(|one| one.id == worker_id)?;
         worker.quiet_at = Some(turn_ended_ms);
         self.record_quiet_observation(&run_id, told, task_id, dispatch_id, now_ms, false)
     }
@@ -10846,22 +10917,36 @@ impl Ledger {
     /// whether anything moved, so a caller can skip the write-through when
     /// nothing did — this rides every turn's end, most of them long past
     /// their window's retirement.
-    pub fn worker_spoke(&mut self, seat: (&str, &str)) -> bool {
+    ///
+    /// `heard_ms` is when the sound's state began — the pane's own clock
+    /// ([`crate::hook::state_clock`]), for a turn's end the moment it ended.
+    /// A sound is the occupant's only if the occupant already sat there
+    /// then (t-6740 r3): a report that reaches the ledger after the pane's
+    /// next worker was seated is the last one's sound, and the next one has
+    /// not been heard from — its window stays open and its channel mark
+    /// stands. The same boundary the turn's silence and its askers' lines
+    /// read ([`Self::worker_fell_silent`],
+    /// [`Self::receivers_told_turn_ended`]).
+    pub fn worker_spoke(&mut self, seat: (&str, &str), heard_ms: i64) -> bool {
         let (team, pane) = seat;
-        for run in &mut self.runs {
-            for worker in &mut run.workers {
-                if worker.team == team
-                    && worker.pane == pane
-                    && worker.state.may_occupy_pane()
-                    && (worker.ready_by_ms.is_some() || worker.hook_unreachable_since_ms.is_some())
-                {
-                    worker.ready_by_ms = None;
-                    worker.hook_unreachable_since_ms = None;
-                    return true;
-                }
-            }
+        let Some((run_at, worker_id)) = self.runs.iter().enumerate().find_map(|(at, run)| {
+            occupant_at(run, team, pane, heard_ms).map(|worker| (at, worker.id.clone()))
+        }) else {
+            return false;
+        };
+        let Some(worker) = self.runs[run_at]
+            .workers
+            .iter_mut()
+            .find(|one| one.id == worker_id)
+        else {
+            return false;
+        };
+        if worker.ready_by_ms.is_none() && worker.hook_unreachable_since_ms.is_none() {
+            return false;
         }
-        false
+        worker.ready_by_ms = None;
+        worker.hook_unreachable_since_ms = None;
+        true
     }
 
     /// The installed hook script could not deliver a payload for this pane.

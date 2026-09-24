@@ -8746,7 +8746,7 @@ fn a_worker_that_ends_a_turn_without_reporting_is_recorded_but_only_a_stall_is_n
     assert!(
         bench
             .ledger
-            .worker_fell_silent(seat, 100, true, 5_000)
+            .worker_fell_silent(seat, 1_100, true, 5_000)
             .is_none(),
         "an interrupted turn was reported as a worker going quiet"
     );
@@ -8754,14 +8754,14 @@ fn a_worker_that_ends_a_turn_without_reporting_is_recorded_but_only_a_stall_is_n
     // 2. The turn ended on its own, with nothing said. One stored row.
     let told = bench
         .ledger
-        .worker_fell_silent(seat, 200, false, 5_001)
+        .worker_fell_silent(seat, 1_200, false, 5_001)
         .expect("a quiet turn said nothing at all");
     // 3. And the same turn again says nothing more — one turn's end can
     //    arrive as several events.
     assert!(
         bench
             .ledger
-            .worker_fell_silent(seat, 200, false, 5_002)
+            .worker_fell_silent(seat, 1_200, false, 5_002)
             .is_none(),
         "the same turn was reported twice"
     );
@@ -8810,7 +8810,7 @@ fn a_worker_that_ends_a_turn_without_reporting_is_recorded_but_only_a_stall_is_n
     assert!(
         bench
             .ledger
-            .worker_fell_silent(seat, 300, false, 5_003)
+            .worker_fell_silent(seat, 1_300, false, 5_003)
             .is_none(),
         "a worker waiting for a reply was reported as having gone quiet"
     );
@@ -8822,7 +8822,7 @@ fn a_worker_that_ends_a_turn_without_reporting_is_recorded_but_only_a_stall_is_n
     assert!(
         bench
             .ledger
-            .worker_fell_silent(seat, 400, false, 5_004)
+            .worker_fell_silent(seat, 1_400, false, 5_004)
             .is_some(),
         "an answered worker's next quiet turn was swallowed"
     );
@@ -8831,7 +8831,7 @@ fn a_worker_that_ends_a_turn_without_reporting_is_recorded_but_only_a_stall_is_n
     assert!(
         bench
             .ledger
-            .worker_fell_silent(("team-1", "%404"), 500, false, 5_005)
+            .worker_fell_silent(("team-1", "%404"), 1_500, false, 5_005)
             .is_none()
     );
 }
@@ -9058,7 +9058,7 @@ fn a_worker_report_closes_one_quiet_episode_and_the_next_silence_starts_another(
         assert!(
             bench
                 .ledger
-                .worker_fell_silent(seat, 100 + turn, false, 1_000 + turn)
+                .worker_fell_silent(seat, 1_100 + turn, false, 1_000 + turn)
                 .is_some()
         );
     }
@@ -9072,7 +9072,7 @@ fn a_worker_report_closes_one_quiet_episode_and_the_next_silence_starts_another(
     assert!(
         bench
             .ledger
-            .worker_fell_silent(seat, 200, false, 2_000)
+            .worker_fell_silent(seat, 1_200, false, 2_000)
             .is_some()
     );
     assert_eq!(bench.ledger.workers_stalled(&[(worker, 200)], 180_200), 1);
@@ -9088,7 +9088,7 @@ fn a_worker_report_closes_one_quiet_episode_and_the_next_silence_starts_another(
     )
     .expect("quiet JSON");
     assert_eq!(body["quietTurns"], 1);
-    assert_eq!(body["episodeStartedMs"], 200);
+    assert_eq!(body["episodeStartedMs"], 1_200);
 }
 
 /// Death is the ledger's own observation, so it can close a quiet episode
@@ -9108,7 +9108,7 @@ fn worker_death_carries_the_final_quiet_rollup_without_an_extra_quiet_notice() {
         assert!(
             bench
                 .ledger
-                .worker_fell_silent(seat, 100 + turn, false, 1_000 + turn)
+                .worker_fell_silent(seat, 1_100 + turn, false, 1_000 + turn)
                 .is_some()
         );
     }
@@ -9323,7 +9323,7 @@ fn a_reused_pane_starts_its_own_quiet_episode_instead_of_joining_the_last_ones()
         assert!(
             bench
                 .ledger
-                .worker_fell_silent(seat, 100 + turn, false, 1_000 + turn)
+                .worker_fell_silent(seat, 1_100 + turn, false, 1_000 + turn)
                 .is_some()
         );
     }
@@ -9410,7 +9410,7 @@ fn a_second_dispatch_to_the_same_worker_counts_its_silence_from_one() {
         assert!(
             bench
                 .ledger
-                .worker_fell_silent(seat, 100 + turn, false, 1_000 + turn)
+                .worker_fell_silent(seat, 1_100 + turn, false, 1_000 + turn)
                 .is_some()
         );
     }
@@ -9535,7 +9535,7 @@ fn waiting_and_interrupted_turns_never_reach_a_quiet_episodes_count() {
         assert!(
             bench
                 .ledger
-                .worker_fell_silent(seat, 100 + turn, true, 1_000 + turn)
+                .worker_fell_silent(seat, 1_100 + turn, true, 1_000 + turn)
                 .is_none()
         );
     }
@@ -9546,7 +9546,7 @@ fn waiting_and_interrupted_turns_never_reach_a_quiet_episodes_count() {
         assert!(
             bench
                 .ledger
-                .worker_fell_silent(seat, 200 + turn, false, 2_000 + turn)
+                .worker_fell_silent(seat, 1_200 + turn, false, 2_000 + turn)
                 .is_none()
         );
     }
@@ -9557,7 +9557,7 @@ fn waiting_and_interrupted_turns_never_reach_a_quiet_episodes_count() {
     assert!(
         bench
             .ledger
-            .worker_fell_silent(seat, 300, false, 3_000)
+            .worker_fell_silent(seat, 1_300, false, 3_000)
             .is_some()
     );
     assert_eq!(bench.ledger.workers_stalled(&[(worker, 300)], 180_300), 1);
@@ -9571,7 +9571,7 @@ fn waiting_and_interrupted_turns_never_reach_a_quiet_episodes_count() {
         "a stopped or waiting turn was counted as silence"
     );
     assert_eq!(
-        body["episodeStartedMs"], 300,
+        body["episodeStartedMs"], 1_300,
         "the episode was dated from a turn it does not contain"
     );
     assert_eq!(
@@ -9665,7 +9665,7 @@ fn a_delivered_quiet_notice_is_never_rewritten_by_the_turns_that_follow_it() {
         assert!(
             bench
                 .ledger
-                .worker_fell_silent(seat, 100 + turn, false, 1_000 + turn)
+                .worker_fell_silent(seat, 1_100 + turn, false, 1_000 + turn)
                 .is_some()
         );
     }
@@ -9732,7 +9732,7 @@ fn a_delivered_quiet_notice_is_never_rewritten_by_the_turns_that_follow_it() {
         body["suppressedTurns"], 21,
         "the reminder did not say how much it had been holding"
     );
-    assert_eq!(body["episodeStartedMs"], 100);
+    assert_eq!(body["episodeStartedMs"], 1_100);
 }
 
 /// Turn turnover is activity, not silence. The window submits only the
@@ -9850,7 +9850,7 @@ fn a_borrowed_workers_silence_still_does_not_reach_its_home_coordinator() {
         assert!(
             bench
                 .ledger
-                .worker_fell_silent(("team-1", &pane), 100 + turn, false, 1_000 + turn)
+                .worker_fell_silent(("team-1", &pane), 1_100 + turn, false, 1_000 + turn)
                 .is_some()
         );
     }
@@ -9895,14 +9895,14 @@ fn one_turns_end_is_one_fact_even_when_a_report_lands_between_its_events() {
     assert!(
         bench
             .ledger
-            .worker_fell_silent(seat, 200, false, 1_000)
+            .worker_fell_silent(seat, 1_200, false, 1_000)
             .is_some()
     );
     bench.json_at(&pane, "send --type status --body 아직-작업중");
     assert!(
         bench
             .ledger
-            .worker_fell_silent(seat, 200, false, 1_001)
+            .worker_fell_silent(seat, 1_200, false, 1_001)
             .is_none(),
         "one turn's end was recorded twice because a report stood between its events"
     );
@@ -9910,7 +9910,7 @@ fn one_turns_end_is_one_fact_even_when_a_report_lands_between_its_events() {
         .messages
         .iter()
         .filter(|message| message.kind == MessageKind::WentQuiet)
-        .filter(|message| message.body.contains("\"turnEndedMs\":200"))
+        .filter(|message| message.body.contains("\"turnEndedMs\":1200"))
         .count();
     assert_eq!(turns, 1, "the same turn is in the ledger twice");
 }
@@ -12300,7 +12300,7 @@ fn what_followed_a_silence_is_the_first_answer_the_ledger_holds_within_the_windo
     assert!(
         bench
             .ledger
-            .worker_fell_silent(("team-1", &pane), 1, false, bench.clock)
+            .worker_fell_silent(("team-1", &pane), bench.clock, false, bench.clock)
             .is_some(),
         "the ledger's own news was written"
     );
@@ -16272,8 +16272,16 @@ fn a_silent_summons_is_reported_once_and_a_sound_retires_the_window() {
         run.workers.last().expect("the worker").pane.clone()
     };
     assert_ne!(quiet_pane, heard_pane, "two summonses share a pane");
-    assert!(bench.ledger.worker_spoke(("team-1", &heard_pane)));
-    assert!(!bench.ledger.worker_spoke(("team-1", &heard_pane)));
+    assert!(
+        bench
+            .ledger
+            .worker_spoke(("team-1", &heard_pane), bench.clock)
+    );
+    assert!(
+        !bench
+            .ledger
+            .worker_spoke(("team-1", &heard_pane), bench.clock)
+    );
     assert_eq!(
         bench
             .ledger
@@ -16329,7 +16337,7 @@ fn a_hook_delivery_failure_stands_until_a_real_report_arrives() {
         Some(10),
         "the repeated marker replaced the first failure time"
     );
-    assert!(bench.ledger.worker_spoke(("team-1", "%2")));
+    assert!(bench.ledger.worker_spoke(("team-1", "%2"), 30));
     assert_eq!(
         bench
             .ledger
@@ -23300,9 +23308,16 @@ fn the_deadline_answers_what_the_last_look_would_have() {
 }
 
 /// A report can reach the ledger after the attempt it was about has ended
-/// (astra R3): the receiver's late turn end is its asker's news, labelled
-/// with the attempt it was carrying when the turn ENDED — never with the
-/// one it carries when the report lands, which began after it.
+/// (astra R3): the receiver's late turn end is labelled with the attempt it
+/// was carrying when the turn ENDED — never with the one it carries when
+/// the report lands, which began after it.
+///
+/// And it is news only to a question asked before that attempt was over
+/// (t-6740 r3, the coordinator's rule): a question hears how its receiver
+/// has stood since it was asked. Q1, asked inside the first attempt, hears
+/// the first attempt's late turn end, and then the second's; Q2, asked
+/// inside the second, never hears how the first ended — that attempt was
+/// over before Q2 was put — and hears the second's own turn end.
 #[test]
 fn a_late_turn_end_is_labelled_with_the_attempt_it_ended_in() {
     let mut bench = Bench::new();
@@ -23329,6 +23344,7 @@ fn a_late_turn_end_is_labelled_with_the_attempt_it_ended_in() {
             .and_then(|held| held.dispatch.clone())
     };
     let first_attempt = attempt(&bench).expect("the first attempt");
+    let (q1, _) = asked_of(&mut bench, &asker_pane, &format!("worker:{receiver}"));
 
     // Inside the first attempt the receiver's turn ends; its report is late.
     bench.clock += 1;
@@ -23337,7 +23353,32 @@ fn a_late_turn_end_is_labelled_with_the_attempt_it_ended_in() {
     bench.json(&format!("dispatch --task {second} --to {pane}"));
     let second_attempt = attempt(&bench).expect("the second attempt");
     assert_ne!(first_attempt, second_attempt);
-    asked_of(&mut bench, &asker_pane, &format!("worker:{receiver}"));
+    let (q2, _) = asked_of(&mut bench, &asker_pane, &format!("worker:{receiver}"));
+    // The turn-end lines in one question's thread: (factMs, attempt).
+    let turn_ends = |bench: &Bench, question: &str| -> Vec<(i64, String)> {
+        bench
+            .ledger
+            .run(&run_id)
+            .expect("the run")
+            .messages()
+            .iter()
+            .filter(|held| held.from == LEDGER_ITSELF && held.thread.as_deref() == Some(question))
+            .map(|held| {
+                serde_json::from_str::<serde_json::Value>(held.body.as_str())
+                    .expect("a notice is JSON")
+            })
+            .filter(|body| body["reason"] == ReceiverNews::TurnEnded.word())
+            .map(|body| {
+                (
+                    body["factMs"].as_i64().expect("a fact time"),
+                    body["receiverSeat"]["dispatchId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            })
+            .collect()
+    };
 
     bench.clock += 10;
     assert_eq!(
@@ -23345,17 +23386,33 @@ fn a_late_turn_end_is_labelled_with_the_attempt_it_ended_in() {
             .ledger
             .receivers_told_turn_ended(seat, ended, false, bench.clock),
         1,
-        "the receiver's own late turn end is still its asker's news"
+        "the first attempt's late turn end is Q1's news, and Q1's alone"
     );
-    let mail = bench.json_at(&asker_pane, "check --peek");
-    assert_eq!(mail["count"], 1, "{mail}");
-    let body = notice_body(&mail["messages"][0]);
-    assert_eq!(body["factMs"], ended);
     assert_eq!(
-        body["receiverSeat"]["dispatchId"],
-        first_attempt.as_str(),
-        "a late turn end was pinned on the attempt that began after it: {body}"
+        turn_ends(&bench, &q1),
+        vec![(ended, first_attempt.clone())],
+        "a late turn end was pinned on the attempt that began after it"
     );
+    assert!(
+        turn_ends(&bench, &q2).is_empty(),
+        "a question asked after the first attempt was over heard how it ended: {:?}",
+        turn_ends(&bench, &q2)
+    );
+
+    // The second attempt's own turn end is news to both.
+    bench.clock += 1;
+    let own = bench.clock;
+    assert_eq!(
+        bench
+            .ledger
+            .receivers_told_turn_ended(seat, own, false, own),
+        2
+    );
+    assert_eq!(
+        turn_ends(&bench, &q1),
+        vec![(ended, first_attempt), (own, second_attempt.clone())]
+    );
+    assert_eq!(turn_ends(&bench, &q2), vec![(own, second_attempt)]);
 }
 
 /// The next worker seated in a pane never hears the last one's late news
@@ -23423,4 +23480,193 @@ fn a_panes_next_occupant_never_hears_the_last_ones_late_news() {
         .expect("the next occupant's line");
     assert_eq!(last["receiverSeat"]["workerId"], next.as_str(), "{last}");
     assert_eq!(last["factMs"], own);
+}
+
+/// One turn end is one attempt's silence (astra R3, t-6740 r3). A turn
+/// that ended inside the worker's first attempt and reached the ledger
+/// after the second began is not the second's silence: no `went_quiet` row
+/// names the second attempt and its quiet watermark stays where the fresh
+/// attempt put it — the attempt the asker's line is labelled with too
+/// (`a_late_turn_end_is_labelled_with_the_attempt_it_ended_in`). The second
+/// attempt's own turn end is its silence as ever.
+#[test]
+fn a_late_turn_end_never_goes_quiet_on_the_next_attempt() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name late-quiet")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let first = bench.json("task-create --spec first")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let second = bench.json("task-create --spec second")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {first}"));
+    let seat = ("team-1", pane.as_str());
+    bench.clock += 1;
+    let ended = bench.clock;
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+    bench.json(&format!("dispatch --task {second} --to {pane}"));
+    let second_attempt = bench
+        .ledger
+        .run(&run_id)
+        .and_then(|run| run.worker(&worker))
+        .and_then(|held| held.dispatch.clone())
+        .expect("the second attempt");
+    let quiet = |bench: &Bench| {
+        let run = bench.ledger.run(&run_id).expect("the run");
+        (
+            run.messages()
+                .iter()
+                .filter(|held| {
+                    held.kind == MessageKind::WentQuiet
+                        && held.dispatch.as_deref() == Some(second_attempt.as_str())
+                })
+                .count(),
+            run.worker(&worker).and_then(|held| held.quiet_at),
+        )
+    };
+
+    bench.clock += 10;
+    let late = bench
+        .ledger
+        .worker_fell_silent(seat, ended, false, bench.clock);
+    assert_eq!(
+        (late.is_some(), quiet(&bench)),
+        (false, (0, None)),
+        "the first attempt's late turn end went quiet on the second"
+    );
+
+    bench.clock += 1;
+    let own = bench.clock;
+    assert!(
+        bench
+            .ledger
+            .worker_fell_silent(seat, own, false, own + 1)
+            .is_some(),
+        "the second attempt's own turn end was not its silence"
+    );
+    assert_eq!(quiet(&bench), (1, Some(own)));
+}
+
+/// And a pane's next occupant never goes quiet on the last one's turn
+/// (astra R3): the turn ended before it was summoned, so it is not the
+/// next worker's silence, whatever pane it reports from — while the next
+/// worker's own turn end is.
+#[test]
+fn a_panes_next_occupant_never_goes_quiet_on_the_last_ones_turn() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name next-quiet")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let first = bench.json("task-create --spec first")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let second = bench.json("task-create --spec second")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (last, pane) = bench.seat(&format!("worker-start --agent claude --task {first}"));
+    let seat = ("team-1", pane.as_str());
+    bench.clock += 1;
+    let rested = bench.clock;
+    bench.json(&format!("worker-stop --worker {last} --reason moved"));
+    bench.clock += 1;
+    let next = bench
+        .ledger
+        .start_worker(&run_id, "claude", seat, Some(&second), bench.clock)
+        .expect("the pane seated again");
+    let next_attempt = next.dispatch.clone().expect("the next worker's attempt");
+    let quiet = |bench: &Bench| {
+        let run = bench.ledger.run(&run_id).expect("the run");
+        (
+            run.messages()
+                .iter()
+                .filter(|held| {
+                    held.kind == MessageKind::WentQuiet
+                        && held.dispatch.as_deref() == Some(next_attempt.as_str())
+                })
+                .count(),
+            run.worker(&next.worker).and_then(|held| held.quiet_at),
+        )
+    };
+
+    bench.clock += 10;
+    let late = bench
+        .ledger
+        .worker_fell_silent(seat, rested, false, bench.clock);
+    assert_eq!(
+        (late.is_some(), quiet(&bench)),
+        (false, (0, None)),
+        "the last occupant's late turn end went quiet on the next one"
+    );
+
+    bench.clock += 1;
+    let own = bench.clock;
+    assert!(
+        bench
+            .ledger
+            .worker_fell_silent(seat, own, false, own + 1)
+            .is_some(),
+        "the next occupant's own turn end was not its silence"
+    );
+    assert_eq!(quiet(&bench), (1, Some(own)));
+}
+
+/// A sound is the occupant's only if it already sat in the pane when the
+/// sound's state began (astra R3, t-6740 r3): the last occupant's late
+/// sound never retires the next one's readiness window nor clears its
+/// channel mark — the next one has not been heard from — and the next
+/// one's own sound does.
+#[test]
+fn a_late_sound_never_retires_the_next_occupants_readiness() {
+    let mut bench = Bench::new();
+    let run = bench.ledger.create_run("late sound", 1);
+    let seat = ("team-1", "%2");
+    let last = bench
+        .ledger
+        .start_worker(&run, "claude", seat, None, 2)
+        .expect("the last occupant")
+        .worker;
+    bench
+        .ledger
+        .end_attempt(&last, Ending::Stopped, "moved", 4)
+        .expect("the last occupant stopped");
+    let next = bench
+        .ledger
+        .start_worker(&run, "claude", seat, None, 5)
+        .expect("the pane seated again")
+        .worker;
+    // As a summons' row reads before the window heard from it: a window
+    // open, and here the channel marked by a failed delivery too.
+    let window = 5 + i64::from(READY_TIMEOUT_DEFAULT_MS);
+    if let Some(held) = bench.ledger.runs[0]
+        .workers
+        .iter_mut()
+        .find(|held| held.id == next)
+    {
+        held.ready_by_ms = Some(window);
+    }
+    assert!(bench.ledger.worker_hook_delivery_failed(seat, 6));
+    let heard = |bench: &Bench| {
+        let held = bench.ledger.runs()[0]
+            .worker(&next)
+            .expect("the next occupant");
+        (held.ready_by_ms, held.hook_unreachable_since_ms)
+    };
+    assert_eq!(heard(&bench), (Some(window), Some(6)));
+
+    assert!(
+        !bench.ledger.worker_spoke(seat, 3),
+        "the last occupant's late sound moved the next one"
+    );
+    assert_eq!(heard(&bench), (Some(window), Some(6)));
+
+    assert!(bench.ledger.worker_spoke(seat, 7));
+    assert_eq!(heard(&bench), (None, None));
 }

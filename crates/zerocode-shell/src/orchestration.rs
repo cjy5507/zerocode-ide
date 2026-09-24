@@ -3031,12 +3031,28 @@ fn note_pointer_stale(run: &str, address: &str, newest: &str) {
 /// A new turn began in this pane: it is not idle, and whatever pointer state
 /// it carried is stale.
 /// Terminals the window has HEARD since the last beat — a turn beginning or
-/// ending, either is a sound. Only the window sees beginnings, so only the
-/// window can carry them; the readiness sweep drains this on the beat and
-/// hands it to the actor, whose seat table knows whose worker each is.
-fn spoken_terms() -> &'static Mutex<std::collections::HashSet<u32>> {
-    static SPOKEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
-    SPOKEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+/// ending, either is a sound — each with when the latest sound's state
+/// began, on the pane's own clock ([`zerocode_core::hook::state_clock`]).
+/// Only the window sees beginnings, so only the window can carry them; the
+/// readiness sweep drains this on the beat and hands it to the actor, whose
+/// seat table knows whose worker each is and whose ledger reads each sound
+/// as the seat stood when it began — a late sound from a pane's last
+/// occupant is never its next one's (t-6740 r3).
+fn spoken_terms() -> &'static Mutex<std::collections::HashMap<u32, i64>> {
+    static SPOKEN: OnceLock<Mutex<std::collections::HashMap<u32, i64>>> = OnceLock::new();
+    SPOKEN.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Write a sound down for the beat's sweep. A later sound in the same beat
+/// stands for the terminal: it is the one the pane's present occupant is
+/// likelier to have made, and one sound is all the window ever asks for.
+fn heard(term: u32, began_ms: i64) {
+    spoken_terms()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .entry(term)
+        .and_modify(|held| *held = (*held).max(began_ms))
+        .or_insert(began_ms);
 }
 
 /// What the hooks last said about each terminal's need for a PERSON —
@@ -3564,11 +3580,10 @@ pub(crate) fn forget_taken_term(term: u32) {
         .remove(&term);
 }
 
-pub(crate) fn pane_turn_began(term: u32) {
-    spoken_terms()
-        .lock()
-        .unwrap_or_else(|held| held.into_inner())
-        .insert(term);
+/// `began_ms` is when the pane's present state began — the pane's own clock
+/// ([`zerocode_core::hook::state_clock`]), unmoved while the state repeats.
+pub(crate) fn pane_turn_began(term: u32, began_ms: i64) {
+    heard(term, began_ms);
     /* Written down as RUNNING rather than struck out. Both readings refuse to
      * type here, so the old erasure looked equivalent — but it threw away the
      * one fact that separates a pane which will be measured at rest in a
@@ -3601,11 +3616,9 @@ pub(crate) fn pane_turn_began(term: u32) {
 pub(crate) fn pane_turn_ended(term: u32, turn_ended_ms: i64, interrupted: bool, now_ms: i64) {
     // A sound is a sound: the actor road below also retires the readiness
     // window, but it does not run in a degraded window — the beat's sweep
-    // still must not report a pane the window plainly heard.
-    spoken_terms()
-        .lock()
-        .unwrap_or_else(|held| held.into_inner())
-        .insert(term);
+    // still must not report a pane the window plainly heard. Heard at the
+    // moment the turn ended, the moment the actor road reads it at too.
+    heard(term, turn_ended_ms);
     // Nobody to refuse on this road — it is a hook event, not a verb — so it
     // simply does not run in a degraded window. See [`unavailable`]; the
     // window already said why, once, at boot. A silence the store refuses is
@@ -4985,7 +4998,7 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // The readiness sweep, on the beat that already exists: the sounds heard
     // since the last one retire their windows, and whoever stayed silent past
     // their own is reported to their coordinator — once, as news (§7.2).
-    let spoken: Vec<u32> = spoken_terms()
+    let spoken: Vec<(u32, i64)> = spoken_terms()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .drain()

@@ -1074,10 +1074,11 @@ pub(super) fn note_pane_state(
             let _ = waiting.send(());
         }
     }
-    // Answers the turn that just ENDED, for the supervision road below — the
-    // two facts it needs are merged here and nowhere else, and recomputing them
-    // after the borrow closes would be the same merge written twice.
-    let ended = {
+    // Answers the state's own clock, and the turn that just ENDED, for the
+    // supervision road below — the facts it needs are merged here and nowhere
+    // else, and recomputing them after the borrow closes would be the same
+    // merge written twice.
+    let (began_ms, ended) = {
         let state = app.state::<AppState>();
         let mut states = state.pane_states();
         let prior = states.get(&report.term);
@@ -1275,11 +1276,14 @@ pub(super) fn note_pane_state(
                 .then_some(state_started_at),
             now,
         );
-        (report.state == zerocode_core::hook::HookState::Done).then_some((
+        (
             state_started_at,
-            interrupted,
-            now,
-        ))
+            (report.state == zerocode_core::hook::HookState::Done).then_some((
+                state_started_at,
+                interrupted,
+                now,
+            )),
+        )
     };
     // A supervised worker that ends a turn saying nothing leaves its task
     // dispatched forever, because the only automatic completion is a
@@ -1293,8 +1297,9 @@ pub(super) fn note_pane_state(
         // Anything but a finished turn means the pane is NOT at rest: an
         // agent working, or one stopped at a question of its own — and the
         // mail pointer must not type into either. `NeedsAttention` above all:
-        // that composer is holding a question for the PERSON.
-        None => orchestration::pane_turn_began(report.term),
+        // that composer is holding a question for the PERSON. Heard at the
+        // moment that state began, as a finished turn is heard at its end.
+        None => orchestration::pane_turn_began(report.term, began_ms),
     }
     let _ = app.emit("hook:agent", report.clone());
     if report.state == zerocode_core::hook::HookState::Done
