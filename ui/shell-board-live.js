@@ -676,8 +676,8 @@ function agentGraphLiveWaitOf(row, card, now = Date.now()) {
 function agentGraphLiveWaitFor(card, place, ledger, now = Date.now()) {
   if (!agentGraphLive) return null;
   if (agentGraphLiveSubject(place) === null) {
-    return agentGraphLiveWaitWords({ cause: "unverified", key: "board.live.unverified",
-      word: "확인되지 않음", state: "idle", since: 0, until: null }, now);
+    return agentGraphLiveWaitWords({ cause: "unverified", state: "idle", since: 0, until: null,
+      key: "board.live.unverified", word: "확인되지 않음" }, now);
   }
   const wait = agentGraphLiveWaitOf(ledger?.get(card.pane) ?? null, card, now);
   return wait ? agentGraphLiveWaitWords(wait, now) : null;
@@ -827,15 +827,17 @@ function agentGraphLiveRecentEvents() {
  *   reply    — `MessageRow.thread`가 오지 않아 답장은 기록된 연결이 아니다
  *   summoner — `WorkerRow.started_by`가 오지 않아 판 없는 워커의 소환자를 모른다
  *   outside  — 카드로 매핑되지 않아 버려진 끝점의 **수**가 snapshot에 없다 */
+/* 낱말은 제 키와 **한 줄에** 선다 — 창의 한글 라벨 계약
+ * (`no_label_reaches_the_window_hardcoded`)은 `key: "`가 선 줄의 한글만 번역되는
+ * 데이터 행으로 읽는다. 키와 낱말을 두 줄로 나누면 낱말만 남은 줄이 창에 박힌
+ * 라벨로 읽힌다. */
 const AGENT_GRAPH_LIVE_UNKNOWN = Object.freeze([
-  { id: "delivery", key: "board.live.deliveryUnknown",
-    word: "대기·전달·확인·답장을 나눌 기록은 이 스냅샷에 없습니다. 미확인 수 외의 배달 상태는 원장에서 확인합니다." },
-  { id: "reply", key: "board.live.replyUnknown",
-    word: "답장 연결은 이 스냅샷에 없습니다." },
-  { id: "summoner", key: "board.live.summonerUnknown",
-    word: "판을 들고 있지 않은 워커의 소환자는 이 스냅샷에 없습니다." },
-  { id: "outside", key: "board.live.outsideUnknown",
-    word: "이 보기 밖 끝점의 수는 스냅샷에 없습니다." },
+  { id: "delivery",
+    key: "board.live.deliveryUnknown", word: "대기·전달·확인·답장을 나눌 기록은 이 스냅샷에 없습니다. 미확인 수 외의 배달 상태는 원장에서 확인합니다." },
+  { id: "reply", key: "board.live.replyUnknown", word: "답장 연결은 이 스냅샷에 없습니다." },
+  { id: "summoner",
+    key: "board.live.summonerUnknown", word: "판을 들고 있지 않은 워커의 소환자는 이 스냅샷에 없습니다." },
+  { id: "outside", key: "board.live.outsideUnknown", word: "이 보기 밖 끝점의 수는 스냅샷에 없습니다." },
 ]);
 
 function agentGraphLiveUnknownWord(id) {
