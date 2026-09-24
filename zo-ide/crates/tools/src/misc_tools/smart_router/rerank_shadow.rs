@@ -865,8 +865,8 @@ pub struct RerankLabelRow {
 /// that named the note's own path, and a citation of the note in the
 /// assistant's own words (`[[slug]]`, or its path — `own_citations`). A
 /// failed read, a call that got no result, a citation the person or a tool
-/// result carried, one the assistant quoted or fenced, and a path that
-/// merely ends the same way are none of them. Neither is a
+/// result carried, one the assistant quoted or showed as code, and a path
+/// that merely ends the same way are none of them. Neither is a
 /// verdict on the note: a turn may go on without opening a page that
 /// answered it, and a row that says neither happened says only that. What
 /// the demand reads off them is the one thing they can answer — whether
@@ -1055,17 +1055,29 @@ impl TurnSeen {
 }
 
 /// The targets the assistant's own words cite in `text`
-/// (`decision_core::dreamer::cited_targets`), outside what it quotes and what
-/// it fences: a line opening with `>` carries someone else's words, and a
-/// fenced block shows code or output — a link or a path in either is not the
-/// assistant naming the page (t-6264). A fence is the vault's own rule
-/// (`runtime::second_brain::corpus::lines_outside_fences`), so a page and an
-/// answer agree on what one is.
+/// (`decision_core::dreamer::cited_targets`), outside what it quotes and
+/// what it shows as code (t-6264). The answer is read as `CommonMark`, by the
+/// parser the window's renderer draws it with (`pulldown_cmark`), so a block
+/// quote carries someone else's words to its end and not to its last `>`:
+/// a line that carries the quoted paragraph on without one — a lazy
+/// continuation — is quoted too, and so is a quote inside the quote and a
+/// fence the quote holds; a code block, fenced or indented, shows code or
+/// output. A link or a path in either is not the assistant naming the page.
+/// Each such block's source is set aside before any target is read, so
+/// nothing quoted is ever joined to the assistant's own words.
 fn own_citations(text: &str) -> Vec<String> {
-    let own: Vec<&str> = runtime::second_brain::corpus::lines_outside_fences(text)
-        .filter(|line| !line.trim_start().starts_with('>'))
-        .collect();
-    decision_core::dreamer::cited_targets(&own.join("\n"))
+    use pulldown_cmark::{Event, Parser, Tag};
+    let mut own = String::with_capacity(text.len());
+    let mut from = 0;
+    for (event, block) in Parser::new(text).into_offset_iter() {
+        if block.start >= from && matches!(event, Event::Start(Tag::BlockQuote(_) | Tag::CodeBlock(_))) {
+            own.push_str(text.get(from..block.start).unwrap_or_default());
+            own.push('\n');
+            from = block.end;
+        }
+    }
+    own.push_str(text.get(from..).unwrap_or_default());
+    decision_core::dreamer::cited_targets(&own)
 }
 
 /// The ranks of the notes a turn touched, in the order it touched them, each
@@ -1139,11 +1151,13 @@ impl RecallDemandSource for RerankShadow {
 /// Read per recall, as the seat reads its mode per recall: a label the last
 /// turn wrote is folded into this one's demand, and a switch a person flips
 /// takes effect on the next recall. The fold is kept up to the byte
-/// ([`FoldedLedger`]), so a recall pays for the rows written since the last
-/// one and not for the ledger; and the fold is asked before the settings,
-/// because a demand that sinks no page ranks exactly as none does — until a
-/// page has been left unopened five times, a recall pays one look at the
-/// ledger here ([`LedgerLook`]) and reads no settings at all.
+/// ([`FoldedLedger`]), so a recall parses the rows written since the last
+/// one and not the ledger — though one whose ledger changed reads the rest
+/// again, to hold it to what was folded; and the fold is asked before the
+/// settings, because a demand that sinks no page ranks exactly as none
+/// does — until a page has been left unopened five times, a recall whose
+/// ledger did not change pays one look at it here ([`LedgerLook`]) and
+/// reads no settings at all.
 ///
 /// An ablation (`telemetry::attest_ablated`) is not asked here: it holds the
 /// JUDGMENT out, on the road that asks one, and records the holding-out per
@@ -1163,7 +1177,8 @@ fn demand_for(cwd: &Path) -> Option<Arc<RecallDemand>> {
 }
 
 /// This process's fold of one ledger's label rows into recall's demand,
-/// kept up to the byte it has folded.
+/// kept up to the byte it has folded, with a fingerprint of every window of
+/// the bytes it folded.
 #[derive(Debug, Default)]
 struct FoldedLedger {
     /// What the last look at the ledger saw: a look that sees the same has
@@ -1171,16 +1186,23 @@ struct FoldedLedger {
     seen: Option<LedgerLook>,
     /// The end of the last whole line folded: the next fold starts here.
     folded_to: u64,
-    /// The row's worth of bytes that ends at [`Self::folded_to`], as folded:
-    /// a ledger that still holds them there, under the first bytes it had,
-    /// has only grown past them.
-    folded_end: Vec<u8>,
+    /// A fingerprint of each [`FOLD_WINDOW_BYTES`] of the bytes folded,
+    /// counted from the ledger's start — the last of them, of what lies past
+    /// the last whole window.
+    windows: Vec<u64>,
     /// The vault the fold was made for; another vault starts the fold over.
     vault: Option<u64>,
     /// `slug → (times shown, times opened)`, across every row folded.
     tally: BTreeMap<String, (u32, u32)>,
     demand: Arc<RecallDemand>,
 }
+
+/// How many of a ledger's bytes one of its fold's fingerprints covers
+/// ([`FoldedLedger::windows`]): the unit the fold reads what it folded
+/// again in, sixty-four of them at the ledger's cap
+/// ([`SHADOW_LEDGER_MAX_BYTES`]) — one read each, and a rewrite is found at
+/// the first window it touched.
+const FOLD_WINDOW_BYTES: u64 = SHADOW_LEDGER_MAX_BYTES / 64;
 
 fn demand_book() -> &'static Mutex<HashMap<PathBuf, FoldedLedger>> {
     static BOOK: OnceLock<Mutex<HashMap<PathBuf, FoldedLedger>>> = OnceLock::new();
@@ -1192,15 +1214,16 @@ impl FoldedLedger {
     ///
     /// Everything is read through one handle, so a ledger replaced between
     /// two reads is never read as half of each. A ledger this look sees as
-    /// it was last seen has nothing new. One that only grew — longer, made
-    /// at the same moment, beginning with the bytes it began with, and still
-    /// holding the last folded row where it was — is folded from where the
-    /// fold stopped; any other — cut to its newer half
-    /// (`shadow_ledger::append_shadow_row`), replaced, rewritten, even at the
-    /// very length it had — and one asked for another vault, is folded again
-    /// from its start. Only whole lines are folded: a row being appended as
-    /// this reads is left for the next fold, which starts where this one
-    /// stopped.
+    /// it was last seen ([`LedgerLook`]) has nothing new. Any other is held
+    /// to what the fold read of it (t-6264): the same file by its birth, no
+    /// shorter, and every window the fold read still the bytes it read —
+    /// then what lies past the fold is folded on from there. One that is
+    /// not — cut to its newer half (`shadow_ledger::append_shadow_row`),
+    /// replaced, rewritten in place under the same name and birth, at the
+    /// length it had or then grown past it — and one asked for another
+    /// vault is folded again from its start. Only whole lines are folded: a
+    /// row being appended as this reads is left for the next fold, which
+    /// starts where this one stopped.
     fn catch_up(&mut self, ledger: &Path, vault: Option<u64>) -> Arc<RecallDemand> {
         let looked = fs::File::open(ledger).ok().and_then(|mut file| LedgerLook::take(&mut file).map(|look| (file, look)));
         let Some((mut file, now)) = looked else {
@@ -1211,13 +1234,14 @@ impl FoldedLedger {
         if self.vault == vault && self.seen.as_ref() == Some(&now) {
             return Arc::clone(&self.demand);
         }
-        let grown = self.vault == vault
-            && now.len > self.folded_to
-            && self.seen.as_ref().is_some_and(|seen| seen.created == now.created && now.first.starts_with(&seen.first))
-            && row_ending_at(&mut file, self.folded_to).is_some_and(|end| end == self.folded_end);
-        if !grown {
+        let same_file = self.vault == vault
+            && now.len >= self.folded_to
+            && self.seen.as_ref().is_some_and(|seen| seen.created == now.created);
+        let held = if same_file { self.still_held(&mut file) } else { None };
+        let rest = held.unwrap_or_else(|| {
             *self = Self { vault, ..Self::default() };
-        }
+            Vec::new()
+        });
         // What lies past the fold, up to what this look saw: a row appended
         // since is the next look's.
         let Some(tail) = bytes_at(&mut file, self.folded_to, now.len - self.folded_to) else {
@@ -1230,14 +1254,60 @@ impl FoldedLedger {
             };
             fold_shown(&mut self.tally, &row, vault);
         }
+        self.count(&rest, &tail[..whole]);
         self.folded_to += u64::try_from(whole).unwrap_or(u64::MAX);
-        self.folded_end = row_ending_at(&mut file, self.folded_to).unwrap_or_default();
         self.seen = Some(now);
         self.demand = Arc::new(RecallDemand::from_rows(
             self.tally.iter().map(|(slug, (recalled, opened))| (slug.clone(), *recalled, *opened)),
         ));
         Arc::clone(&self.demand)
     }
+
+    /// Whether every window the fold read is, in `file`, the bytes it read
+    /// — each one read again and its fingerprint compared, the first that
+    /// differs ending the look — and if so the bytes past the last whole
+    /// window, which the next rows fill on.
+    fn still_held(&self, file: &mut fs::File) -> Option<Vec<u8>> {
+        let mut rest = Vec::new();
+        for (start, counted) in (0..).step_by(usize::try_from(FOLD_WINDOW_BYTES).ok()?).zip(&self.windows) {
+            let bytes = bytes_at(file, start, FOLD_WINDOW_BYTES.min(self.folded_to - start))?;
+            if window_fingerprint(&[&bytes]) != *counted {
+                return None;
+            }
+            rest = bytes;
+        }
+        if self.folded_to.is_multiple_of(FOLD_WINDOW_BYTES) {
+            rest.clear();
+        }
+        Some(rest)
+    }
+
+    /// Fingerprint the windows `folded` fills and starts, `rest` being the
+    /// bytes already in the window it goes on from.
+    fn count(&mut self, rest: &[u8], folded: &[u8]) {
+        let window = usize::try_from(FOLD_WINDOW_BYTES).unwrap_or(usize::MAX);
+        self.windows.truncate(usize::try_from(self.folded_to / FOLD_WINDOW_BYTES).unwrap_or(usize::MAX));
+        let (filling, mut after) = folded.split_at(window.saturating_sub(rest.len()).min(folded.len()));
+        if !rest.is_empty() || !filling.is_empty() {
+            self.windows.push(window_fingerprint(&[rest, filling]));
+        }
+        while !after.is_empty() {
+            let (next, more) = after.split_at(window.min(after.len()));
+            self.windows.push(window_fingerprint(&[next]));
+            after = more;
+        }
+    }
+}
+
+/// A fingerprint of one window of a ledger's bytes, given in `parts` — the
+/// same as of the parts run together.
+fn window_fingerprint(parts: &[&[u8]]) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::hash::DefaultHasher::new();
+    for part in parts {
+        hasher.write(part);
+    }
+    hasher.finish()
 }
 
 /// What one look at a ledger sees, through one open handle: its length, when
@@ -1246,9 +1316,13 @@ impl FoldedLedger {
 /// agree on all of it are taken to be one state of one file, and a length
 /// alone is never: a ledger replaced by another of the very same length —
 /// the same first bytes, even — differs in when it was written or in its
-/// last row (t-6264). What would pass is a rewrite in place, inside one tick
-/// of the file clock, that kept both ends byte for byte; nothing zo runs
-/// writes a ledger that way.
+/// last row (t-6264). Any look that differs has the fold read what it
+/// folded again ([`FoldedLedger::catch_up`]) and the standing read afresh
+/// (`raised_now`). What a look cannot tell from the state it saw is a
+/// rewrite in place of the very length that kept both end rows byte for
+/// byte and left the file's clock where it stood — written inside one of
+/// its ticks, or with the clock put back; nothing zo runs writes a ledger
+/// that way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LedgerLook {
     len: u64,
@@ -1287,7 +1361,7 @@ fn row_ending_at(file: &mut fs::File, end: u64) -> Option<Vec<u8>> {
 /// `width` of `file`'s bytes from `from`, or fewer where the file ends first.
 fn bytes_at(file: &mut fs::File, from: u64, width: u64) -> Option<Vec<u8>> {
     file.seek(SeekFrom::Start(from)).ok()?;
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(usize::try_from(width).ok()?);
     file.by_ref().take(width).read_to_end(&mut bytes).ok()?;
     Some(bytes)
 }
@@ -3287,7 +3361,7 @@ mod tests {
 
     /// A quote runs past the lines that open with `>`: a line that carries
     /// the quoted paragraph on without one — a lazy continuation, in
-    /// CommonMark and in the renderer that draws the answer — is still the
+    /// `CommonMark` and in the renderer that draws the answer — is still the
     /// quoted words, and so is one that carries on a quote inside a quote,
     /// and a fence the quote holds. The quote ends with its paragraph: after
     /// a blank line the words are the assistant's own again (astra R1c, r3).
@@ -3320,7 +3394,7 @@ mod tests {
         );
     }
 
-    /// The assistant's own words, block by block, as CommonMark reads an
+    /// The assistant's own words, block by block, as `CommonMark` reads an
     /// answer: a quote's lazy line quotes a path as much as a link, and an
     /// indented block is code; a line that opens a list item or a heading
     /// is no lazy line — it ends the quoted paragraph — and neither is one
@@ -3698,9 +3772,11 @@ mod tests {
     /// fold of a ledger the size of this machine's
     /// (`ZO_RERANK_REPLAY_LEDGER`, copied; else 1,300 synthetic rows), a
     /// recall whose ledger did not change — one look at it, beside the bare
-    /// `stat` a length-only cache paid — the fold of one appended row, the
-    /// settings read the road costs every recall, and the retriever's recall
-    /// seated against unseated.
+    /// `stat` a length-only cache paid — the fold of one appended row, with
+    /// the settings and without, and the check of every window the fold
+    /// read that a changed look pays (t-6264 r3), the settings read the road
+    /// costs every recall, and the retriever's recall seated against
+    /// unseated.
     ///
     /// ```text
     /// ZO_RERANK_REPLAY_LEDGER=~/.zo/projects/<slug>/state/smart-router/rerank-shadow.jsonl \
@@ -3764,6 +3840,19 @@ mod tests {
                 append_shadow_row(&ledger, &hub_unopened(9_000, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
                 demand_for(cwd)
             });
+            // The fold alone on a changed look, before any settings: one row
+            // appended — every window the fold read, read again and checked,
+            // and the row parsed — and the check by itself.
+            let fold_one_row = timed(50, || {
+                append_shadow_row(&ledger, &hub_unopened(9_000, &vault), SHADOW_LEDGER_MAX_BYTES).expect("a label");
+                folded(cwd)
+            });
+            let (windows, check) = {
+                let book = demand_book().lock().expect("the fold's book");
+                let fold = book.get(&ledger).expect("the ledger, folded");
+                let mut file = std::fs::File::open(&ledger).expect("the ledger");
+                (fold.windows.len(), timed(50, || fold.still_held(&mut file)))
+            };
             let mode = timed(200, || rerank_shadow_mode_from(&runtime::ConfigLoader::default_for(cwd)));
             // Under `auto` the road reads the seat's standing: the whole
             // ledger once per state of it, shared by the demand and the road.
@@ -3783,6 +3872,8 @@ mod tests {
             println!("  a bare stat, for comparison      {stat:?}  (what a length-only cache paid)");
             println!("  demand_for, a page sunk          {unchanged:?}  (one look and the settings)");
             println!("  demand_for after one row         {appended:?}  (one row folded, and the settings)");
+            println!("  fold after one row, no settings  {fold_one_row:?}  (every window read again and checked, one row parsed)");
+            println!("  the windows checked, alone       {check:?}  ({windows} windows of up to {FOLD_WINDOW_BYTES} bytes)");
             println!("  settings read (the mode)         {mode:?}");
             println!("  stand, whole ledger read         {stand_whole:?}  (once per recall under auto, before and after)");
             println!("  stand, second ask same recall    {stand_memo:?}  (the road after the demand: one look)");
@@ -3952,6 +4043,18 @@ mod tests {
         }
     }
 
+    /// On what footing a replayed showing is ranked.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Footing {
+        /// A label that names its own showing, timed by its turn's first.
+        Named,
+        /// An older label on a run of one request: that request was it.
+        Confirmed,
+        /// An older label on a run of several requests, taken for one
+        /// turn's: an assumption, ranked apart.
+        Conditional,
+    }
+
     /// One pass of the replay at survival window `window` — the product's
     /// rule with its one number moved, so the comparison is the same fold.
     ///
@@ -3960,30 +4063,47 @@ mod tests {
     /// written — so no reader's later answer reaches an earlier rank, however
     /// the turns overlapped (at one instant, the showing goes first). A label
     /// that names its own showing (`shown`, `shownAt`) is its own exposure,
-    /// timed exactly. An older label names its reading only by the two
-    /// fingerprints, so it is joined to the run of requests of that reading
-    /// written before it — one turn asks once per request, over one section,
-    /// and its run is one showing, timed by its first request row (the row
-    /// of the record-only road lands after the showing, by the judgment's
-    /// latency: the time is an upper bound). A run two labels claim may be
-    /// two turns' requests and cannot be told apart: both labels are
-    /// ambiguous and rank nothing, though what each says is folded — it
-    /// happened, only its showing's time is unknown.
+    /// timed by its turn's first showing. An older label names its reading
+    /// only by the two fingerprints, so it is joined to the run of requests
+    /// of that reading written before it — and the run says only that its
+    /// turn asked among them: a turn that was cancelled or failed asked too
+    /// and wrote no label, so a run of several requests may be one turn's or
+    /// several's, and which of them was the label's showing cannot be told
+    /// (t-6264 r3). A run of one request is that showing, confirmed, timed by
+    /// its row — which on the record-only road lands after the showing, by
+    /// the judgment's latency, so the time is an upper bound and `unsure`
+    /// counts the showings another label came inside it. A run of several is
+    /// ranked only on the assumption that it was one turn's, at its first
+    /// request, and apart (`conditional`); a run two labels claim is not
+    /// ranked at all, and both labels are ambiguous. What an older label
+    /// says is folded when every request of its run agrees on what its marks
+    /// point at — the notes shown, the judgment's order, recall's first — so
+    /// it reads the same whichever request was its showing; a run judged in
+    /// different orders leaves the pages its marks name unknown
+    /// (`undetermined`), and nothing it says is folded.
     #[expect(clippy::too_many_lines, reason = "one replay, read top to bottom")]
     fn replay_at(rows: &[serde_json::Value], window: u32) -> Replayed {
         use serde_json::Value;
         use std::collections::{BTreeMap, BTreeSet};
+        /// What one request of a run showed, and the judgment it carried:
+        /// what an older label's marks point into.
+        #[derive(PartialEq)]
+        struct Asked {
+            shown: Vec<String>,
+            recalled_first: Option<String>,
+            proposed: Vec<String>,
+        }
         /// One run of a reading's requests: the rows naming one reading, no
         /// label of it between them.
         struct Run {
             at: u64,
-            /// How long before its row the showing may have been: the
+            /// How long before its first row the showing may have been: the
             /// judgment's latency on the record-only road; none on the apply
             /// road, which writes the row before the turn reads.
             latency: u64,
-            shown: Vec<String>,
-            recalled_first: Option<String>,
-            proposed: Vec<String>,
+            /// What its requests asked, each distinct reading once.
+            asked: Vec<Asked>,
+            requests: usize,
             claims: usize,
         }
         /// What a label says of the notes it speaks of: `Some(opened)`
@@ -3993,12 +4113,36 @@ mod tests {
             known: Vec<Option<bool>>,
             whole: bool,
             outside: usize,
-            /// When it was shown, for a showing that ranks; and whether its
-            /// label names it (exact) or was joined to a run (legacy).
-            ranked: Option<(u64, bool)>,
+            /// When it was shown, for a showing that ranks, and on what
+            /// footing.
+            ranked: Option<(u64, Footing)>,
             /// For a joined older label: how long before `ranked` the showing
             /// may really have been.
             latency: u64,
+        }
+        /// What an older label's marks say of one request's reading: each
+        /// shown note opened, not, or unknown; whether that is every note;
+        /// and how many opened notes lie outside those shown.
+        fn marks_read(asked: &Asked, row: &Value, rank: Option<usize>, untouched: bool) -> (Vec<Option<bool>>, bool, usize) {
+            if untouched {
+                return (vec![Some(false); asked.shown.len()], true, 0);
+            }
+            let mut touched: BTreeSet<&String> = rank.and_then(|rank| asked.proposed.get(rank)).into_iter().collect();
+            let mut said: BTreeMap<&String, bool> = BTreeMap::new();
+            if let (Some(first), Some(agreed)) = (asked.proposed.first(), row["agreed"].as_bool()) {
+                said.insert(first, agreed);
+            }
+            if let (Some(first), Some(agreed)) = (asked.recalled_first.as_ref(), row["baselineAgreed"].as_bool()) {
+                said.insert(first, agreed);
+            }
+            touched.extend(said.iter().filter(|(_, opened)| **opened).map(|(slug, _)| *slug));
+            let outside = touched.iter().filter(|slug| !asked.shown.contains(slug)).count();
+            let known = asked
+                .shown
+                .iter()
+                .map(|slug| if touched.contains(slug) { Some(true) } else { said.get(slug).copied() })
+                .collect();
+            (known, false, outside)
         }
         let unaddressed = |tally: &BTreeMap<String, (u32, u32)>, slug: &str| {
             tally.get(slug).is_some_and(|&(recalled, opened)| recalled >= window && opened == 0)
@@ -4018,17 +4162,23 @@ mod tests {
         for row in order {
             let key = (row["query"].as_u64().unwrap_or(0), row["notes"].as_u64().unwrap_or(0));
             if let Some(judged) = row.get("judged").filter(|_| row.get("outcome").is_some()) {
-                if open.contains_key(&key) {
-                    replayed.repeated += 1;
-                    continue;
-                }
                 let applied = row["applied"].as_bool().unwrap_or(false);
                 let (recalled, proposed) = (list(judged, "recalled"), list(judged, "proposed"));
                 let shown = if applied { &proposed } else { &recalled }.iter().take(MAX_RECALLED_ENTRIES).cloned().collect();
+                let asked = Asked { shown, recalled_first: recalled.first().cloned(), proposed };
+                if let Some(&run) = open.get(&key) {
+                    replayed.repeated += 1;
+                    let run = &mut runs[run];
+                    run.requests += 1;
+                    if !run.asked.contains(&asked) {
+                        run.asked.push(asked);
+                    }
+                    continue;
+                }
                 open.insert(key, runs.len());
                 latest.insert(key, runs.len());
                 let latency = if applied { 0 } else { row["elapsed_ms"].as_u64().unwrap_or(0) };
-                runs.push(Run { at: at(row), latency, shown, recalled_first: recalled.first().cloned(), proposed, claims: 0 });
+                runs.push(Run { at: at(row), latency, asked: vec![asked], requests: 1, claims: 0 });
                 continue;
             }
             if row.get("label").is_none() {
@@ -4056,7 +4206,7 @@ mod tests {
                         note["slug"].as_str().map(|slug| (slug.to_string(), known))
                     })
                     .unzip();
-                let ranked = row["shownAt"].as_u64().map(|shown_at| (shown_at, true));
+                let ranked = row["shownAt"].as_u64().map(|shown_at| (shown_at, Footing::Named));
                 replayed.ambiguous += usize::from(ranked.is_none());
                 outcomes.push((at(row), Outcome { shown, known, whole: !unfinished, outside: 0, ranked, latency: 0 }));
                 continue;
@@ -4068,38 +4218,36 @@ mod tests {
             let rank = row["rank"].as_u64().and_then(|rank| usize::try_from(rank).ok());
             let marked = row["agreed"].as_bool().is_some();
             let untouched = row["notCompared"].as_str() == Some(NO_NOTE_TOUCHED) || (marked && rank.is_none());
-            let (known, whole, outside) = if untouched {
-                (vec![Some(false); run.shown.len()], true, 0)
-            } else if let Some(rank) = rank {
-                let mut touched: BTreeSet<&String> = run.proposed.get(rank).into_iter().collect();
-                let mut said: BTreeMap<&String, bool> = BTreeMap::new();
-                if let (Some(first), Some(agreed)) = (run.proposed.first(), row["agreed"].as_bool()) {
-                    said.insert(first, agreed);
-                }
-                if let (Some(first), Some(agreed)) = (run.recalled_first.as_ref(), row["baselineAgreed"].as_bool()) {
-                    said.insert(first, agreed);
-                }
-                touched.extend(said.iter().filter(|(_, opened)| **opened).map(|(slug, _)| *slug));
-                let outside = touched.iter().filter(|slug| !run.shown.contains(slug)).count();
-                let known = run
-                    .shown
-                    .iter()
-                    .map(|slug| if touched.contains(slug) { Some(true) } else { said.get(slug).copied() })
-                    .collect();
-                (known, false, outside)
-            } else {
+            if !untouched && rank.is_none() {
                 replayed.unmarked += 1;
                 continue;
+            }
+            // What the marks say under each reading the run asked: one
+            // answer, or none that can be told.
+            let readings: Vec<_> = run.asked.iter().map(|asked| (&asked.shown, marks_read(asked, row, rank, untouched))).collect();
+            if readings.windows(2).any(|pair| pair[0] != pair[1]) {
+                replayed.undetermined += 1;
+                continue;
+            }
+            let Some((shown, (known, whole, outside))) = readings.into_iter().next() else {
+                continue;
             };
-            let ranked = (run.claims == 1).then_some((run.at, false));
+            let ranked = match (run.claims, run.requests) {
+                (1, 1) => Some((run.at, Footing::Confirmed)),
+                (1, _) => Some((run.at, Footing::Conditional)),
+                _ => None,
+            };
             replayed.ambiguous += usize::from(ranked.is_none());
-            outcomes.push((at(row), Outcome { shown: run.shown.clone(), known, whole, outside, ranked, latency: run.latency }));
+            outcomes.push((at(row), Outcome { shown: shown.clone(), known, whole, outside, ranked, latency: run.latency }));
         }
         replayed.unsure = outcomes
             .iter()
             .enumerate()
             .filter(|(_, (_, outcome))| outcome.latency > 0)
-            .filter_map(|(index, (_, outcome))| outcome.ranked.map(|(shown_at, _)| (index, shown_at, outcome.latency)))
+            .filter_map(|(index, (_, outcome))| match outcome.ranked {
+                Some((shown_at, Footing::Confirmed)) => Some((index, shown_at, outcome.latency)),
+                _ => None,
+            })
             .filter(|&(index, shown_at, latency)| {
                 outcomes
                     .iter()
@@ -4132,7 +4280,14 @@ mod tests {
                 }
                 continue;
             }
-            let counted = if ranked.is_some_and(|(_, exact)| exact) { &mut replayed.named } else { &mut replayed.confirmed };
+            let Some((_, footing)) = ranked else {
+                continue;
+            };
+            let counted = match footing {
+                Footing::Named => &mut replayed.named,
+                Footing::Confirmed => &mut replayed.confirmed,
+                Footing::Conditional => &mut replayed.conditional,
+            };
             counted.exposures += 1;
             if *whole {
                 counted.complete += 1;
