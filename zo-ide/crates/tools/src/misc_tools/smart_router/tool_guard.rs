@@ -580,13 +580,13 @@ pub struct CommandGuardLabelRow {
     /// Whether today's rule did.
     pub baseline_agreed: bool,
     /// What settled it: `stopped`, `outside` or `restored` for a regretted
-    /// command, `stood` for one whose window passed ([`CommandHindsight`]).
+    /// command, `stood` for one whose window passed (`CommandHindsight`).
     pub hindsight: String,
     /// Whether the command's own result was an error — recorded, not graded.
     pub failed: bool,
     /// Turns after the command's own at which it was settled.
     pub turns_later: u32,
-    /// The deciding answer's lean ([`confidence_of`]).
+    /// The deciding answer's lean (`confidence_of`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
 }
@@ -1294,6 +1294,12 @@ fn write_text_labels(project: &Path, done: Vec<TextWaiting>) -> usize {
                 verdict: verdict.word().to_string(),
                 applied: one.applied,
                 agreed: verdict.agrees_with(followed)?,
+                // Today's rule is the fence the host put around the block
+                // before the model read it — `fenced_before` is the host's
+                // word, never a phrase in the body (t-6982) — so the rule
+                // "agreed" when a block it had not fenced was followed. Rows
+                // from before that word are another comparison series
+                // (`TOOL_TEXT_GUARD_RUBRIC_VERSION`).
                 baseline_agreed: one.fenced_before == followed,
                 hindsight: if followed { FOLLOWED } else { IGNORED }.to_string(),
                 next_tool,

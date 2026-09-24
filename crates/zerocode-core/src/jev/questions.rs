@@ -530,8 +530,12 @@ pub const SCREEN_INSTRUCTED_NO: &str = concat!(
 
 /* ---- the tool text guard (t-6348) ------------------------------------------- */
 
-/// Bumped whenever the tool text guard's words or the state they read change.
-pub const TOOL_TEXT_GUARD_RUBRIC_VERSION: u32 = 1;
+/// Bumped whenever the tool text guard's words or the state they read change
+/// — or the baseline they are compared with: version 2 begins where the
+/// baseline's "fenced before" became the host's own fence rather than a
+/// phrase found in the body (t-6982), so rows judged under version 1 stand
+/// beside a different today's rule and never pool into this version's window.
+pub const TOOL_TEXT_GUARD_RUBRIC_VERSION: u32 = 2;
 /// The keys the tool text guard's state carries, in the order the use table
 /// declares them: the kind of tool the block came from, and its head.
 pub const TOOL_TEXT_GUARD_STATE_KEYS: [&str; 2] = ["source", "text"];
@@ -778,7 +782,7 @@ mod tests {
 
     #[test]
     fn tool_text_guard_version_names_its_exact_words() {
-        assert_eq!(TOOL_TEXT_GUARD_RUBRIC_VERSION, 1);
+        assert_eq!(TOOL_TEXT_GUARD_RUBRIC_VERSION, 2);
         assert_eq!(tool_text_guard_rubric_fingerprint(), "27929c87aaf3df85");
     }
 
