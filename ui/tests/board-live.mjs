@@ -1153,6 +1153,56 @@ async function testLiveMap(browser, origin, ok) {
       && retracted.landed.detail === "",
       JSON.stringify(retracted));
 
+    /* **검토만** 바뀐 판. 코디네이터가 w-verify 의 배포를 적었다가 거둔다 — 카드의
+     * 어느 칸도 움직이지 않고(카드는 `reported`만 싣는다) 그 사실은 원장 행의
+     * `review`에만 있다. 제품의 박자(강제 없음)로 지도가 그 결과를 보고, 거둔 뒤에는
+     * 모델의 원장 한 벌도 그 행을 따라가 옛 배포 사건이 지금이 아니라고 말해야 한다.
+     * 위의 사례들은 강제로 그려 이 길을 지나지 않는다. 서명이 분 경계에서 흔들리지
+     * 않도록 시계를 멈춘다. */
+    const reviewOnly = await page.evaluate(async () => {
+      const at = window.__LEDGER__.findIndex((one) => one.worker === "w-verify");
+      const held = window.__LEDGER__[at];
+      const beat = async () => {
+        scheduleAgentPaint(["board"]);
+        await window.__BOARD_SETTLED__();
+      };
+      const write = async (review) => {
+        window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? { ...held, review } : row);
+        await beat();
+      };
+      const base = { verified: true, merged: true, deployed: false, written: true,
+        claimed_verified: false, claimed_merged: false, claimed_deployed: false,
+        author: "coordinator", attempt: "dp-verify", source: "0123abc" };
+      const trueNow = Date.now;
+      const pinned = trueNow.call(Date);
+      Date.now = () => pinned;
+      try {
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        await write({ ...base, deployed: true });
+        const listed = agentGraphLiveRecentEvents().find((event) => event.kind === "result"
+          && event.evidence?.dispatchId === "dp-verify" && event.evidence.stage === "deployed") ?? null;
+        await write(base);
+        const ledger = agentGraphFullModel(document.querySelector("#board-view"))
+          ?.source.ledger?.get("term:303")?.review?.deployed ?? null;
+        const pressed = listed ? window.__PRESS_EVENT__((event) => event.key === listed.key) : null;
+        return { listed: listed?.key ?? null, ledger, pressed,
+          words: { ...window.__LIVE_WORDS__(), deployed: t("board.deployed", "배포됨") } };
+      } finally {
+        Date.now = trueNow;
+        window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? held : row);
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+      }
+    });
+    ok("a_review_only_change_reaches_the_map_on_the_products_beat",
+      reviewOnly.listed !== null && reviewOnly.ledger === false, JSON.stringify(reviewOnly));
+    ok("a_withdrawn_review_fact_opens_its_own_evidence_on_the_products_beat",
+      reviewOnly.pressed?.found === true && reviewOnly.pressed.selectedKey === "agent:term:301"
+      && reviewOnly.pressed.detail.includes(reviewOnly.words.deployed)
+      && reviewOnly.pressed.detail.includes(reviewOnly.words.notLatest),
+      JSON.stringify(reviewOnly));
+
     /* ---- ④ 보는 일은 아무것도 소비하지 않는다 --------------------------- */
 
     const doors = await page.evaluate(async () => {
@@ -1828,6 +1878,73 @@ async function testLiveLedgerBounds(browser, origin, ok) {
       ok(`after_the_quiet_return_the_next_real_event_pulses_once (${door})`,
         seen.next.head?.endsWith(seen.after) === true && seen.next.pulses === 1
         && seen.next.timers === 1 && seen.next.beats === 1,
+        JSON.stringify(seen));
+    }
+
+    /* 돌아온 첫 판이 떠나기 전과 **같은 판**일 때. 제품의 박자(`scheduleAgentPaint`,
+     * 강제 없음)는 서명이 같은 판을 그리지 않고 건너뛴다 — 그 판도 빚을 치러야
+     * 한다. 치르지 않으면 빚이 다음에 **달라진** 판으로 넘어가, 돌아온 뒤에 실제로
+     * 일어난 첫 사건을 기준선으로 삼킨다. 서명이 분 경계에서 흔들리지 않도록 시계를
+     * 멈추고(맥박은 이 창의 긴 수명 안에서 센다), 모든 판을 제품의 박자로 받는다. */
+    const unchanged = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const now = window.__LIVE_NOW__;
+      let stamp = now + 800_000;
+      const frames = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const record = (name) => {
+        stamp += 1_000;
+        const id = `${name}-${stamp}`;
+        window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+          { from: "term:303", to: "term:302", count: 1, unread: 0, at: stamp, verb: "mail",
+            last_message: { id, run: "run-1", from: "worker:w-verify", to: "worker:w-impl",
+              kind: "status", created_ms: stamp } },
+        ] });
+        return id;
+      };
+      const beat = async () => {
+        scheduleAgentPaint(["board"]);
+        await window.__BOARD_SETTLED__();
+        await frames();
+      };
+      const read = () => ({ head: agentGraphLiveRecentEvents()[0]?.key ?? null,
+        pulses: agentGraphLiveHandles().pulses });
+      const doors = {
+        hidden: {
+          leave: async () => { view.parentElement.hidden = true; await frames(); },
+          back: async () => { view.parentElement.hidden = false; await frames(); } },
+        closed: {
+          leave: async () => { dropTab("board"); await frames(); },
+          back: async () => { openBoard(); await window.__BOARD_SETTLED__(); await frames(); } },
+      };
+      const trueNow = Date.now;
+      const pinned = trueNow.call(Date);
+      Date.now = () => pinned;
+      const out = {};
+      try {
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        for (const [name, door] of Object.entries(doors)) {
+          record("m-steady");
+          await beat();
+          const before = read();
+          await door.leave();
+          await door.back();
+          await beat();
+          const first = read();
+          const after = record("m-after-return");
+          await beat();
+          out[name] = { before, first, after, next: read() };
+        }
+      } finally {
+        Date.now = trueNow;
+      }
+      return out;
+    });
+    for (const [door, seen] of Object.entries(unchanged)) {
+      ok(`an_unchanged_first_snapshot_after_the_return_pays_the_baseline (${door})`,
+        seen.before.head?.includes("m-steady") === true
+        && seen.first.head === seen.before.head && seen.first.pulses === 0
+        && seen.next.head?.endsWith(seen.after) === true && seen.next.pulses === 1,
         JSON.stringify(seen));
     }
 
