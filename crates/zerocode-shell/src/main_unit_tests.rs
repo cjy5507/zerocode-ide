@@ -12925,7 +12925,9 @@ fn terminate_says_goodbye_before_the_browser_can_stall() {
         .find("crate::exit_runtime::relaunch(road, &crate::ExitSteps(&app));")
         .unwrap_or_else(|| panic!("the restart button keeps its own order:\n{relaunching}"));
     assert!(
-        kept < relaunching.find("app.restart()").expect("the restart"),
+        kept < relaunching
+            .find("\n    app.restart();")
+            .expect("the restart"),
         "the restart button restarts before it keeps the list:\n{relaunching}"
     );
     let exiting = include_str!("exit_runtime.rs");
