@@ -253,6 +253,18 @@ export async function testBoardLive(browser, origin, ok) {
       && pulsed[0] === "overlay:mail:agent:term:311>agent:term:301",
       JSON.stringify(pulsed));
 
+    /* 그리고 그 맥박이 **실제로 돈다**. 속성만 보면 CSS 쪽에서 규칙 하나가
+     * 이 맥박을 먹어도 초록이다 — 메일 선의 무한 흐름을 세우는 규칙이 바로 그
+     * 자리에 서 있고, 한 단만 더 구체적이면 animation:none 이 이긴다. */
+    ok("the_pulse_actually_runs_and_is_not_eaten_by_the_flow_stop_rule",
+      await page.evaluate(() => {
+        const beaten = document.querySelector("#board-view [data-live-beat]");
+        if (!beaten) return false;
+        const dress = getComputedStyle(beaten);
+        return ["zc-live-edge-a", "zc-live-edge-b"].includes(dress.animationName)
+          && dress.animationIterationCount === "1";
+      }));
+
     const again = await page.evaluate(async () => {
       const before = agentGraphLiveRecentEvents().length;
       await paintBoardView(undefined, { force: true });
