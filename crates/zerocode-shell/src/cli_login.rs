@@ -51,8 +51,10 @@
 //! session is a different login). `amp` is not a row either: the survey
 //! could not confirm where it keeps its session.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -1333,11 +1335,27 @@ pub(crate) struct Witness<'a> {
     login: LoginIn<'a>,
 }
 
-/// The login inside `file` as the runner reads it — `None` when the file is
-/// missing, unreadable, or holds no login.
+/// The login inside `file` as the runner reads it: `Ok(None)` when the file
+/// is absent or holds no login, `Err` when it could not be READ — a
+/// permission the reader lacks, an I/O fault, bytes that are not text. The
+/// two are kept apart because a baseline is taken from this (t-7170 R2c):
+/// "no login" is a snapshot a first login can change, and "could not look"
+/// is no snapshot at all — one taken as "no login" would read the same old
+/// credential, once readable again, as an arrival.
+fn login_read(file: &Path, login: &LoginIn<'_>) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Ok(login(&text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("자격 증명 파일을 읽지 못했습니다: {error}")),
+    }
+}
+
+/// [`login_read`] for a watch's LOOK at an arrival, where a read that failed
+/// is nothing seen yet — the next poll looks again — rather than a verdict.
+/// (`Witness::taken`'s snapshot for the Codex card reads through it too, as
+/// it always has; the roads of this table snapshot with [`login_read`].)
 fn login_in(file: &Path, login: &LoginIn<'_>) -> Option<String> {
-    let text = std::fs::read_to_string(file).ok()?;
-    login(&text)
+    login_read(file, login).ok().flatten()
 }
 
 /// The login slice as it stood at a moment the caller names — taken BEFORE
@@ -1346,11 +1364,29 @@ fn login_in(file: &Path, login: &LoginIn<'_>) -> Option<String> {
 /// begins (t-7170 R2). Owned, so the command layer can hold it between two
 /// calls; the text a witness compares never leaves this process, and the
 /// baseline is dropped once a watch has taken it.
-#[derive(Debug)]
 pub(crate) struct Baseline {
+    /// The row it was taken for, and the file it was taken of: the two
+    /// things a wait has to be the same about before it may compare
+    /// (t-7170 R2b) — a number is a name for this binding, not the binding.
+    agent: &'static str,
+    file: PathBuf,
     before: Option<String>,
     /// When it was taken, so a baseline nobody came back for can be let go.
     taken_ms: i64,
+}
+
+/// Written by hand so the login text a baseline holds never reaches a log
+/// line or a failing test's message: whether there was one is all a reader
+/// needs.
+impl std::fmt::Debug for Baseline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Baseline")
+            .field("agent", &self.agent)
+            .field("file", &self.file)
+            .field("held_a_login", &self.before.is_some())
+            .field("taken_ms", &self.taken_ms)
+            .finish()
+    }
 }
 
 impl Baseline {
@@ -1361,23 +1397,198 @@ impl Baseline {
         let ceiling = i64::try_from(LOGIN_TIMEOUT.as_millis()).unwrap_or(i64::MAX);
         now_ms.saturating_sub(self.taken_ms) <= ceiling
     }
+
+    /// Whether this is the baseline of `row`'s credential at `file` — the
+    /// question the watch asks before it compares anything.
+    fn names(&self, row: &CliLogin, file: &Path) -> bool {
+        self.agent == row.agent && self.file == file
+    }
 }
 
-/// Take a row's baseline now. `None` for a row proven by no file — a status
-/// command, or nothing — which has no snapshot to carry: the watch on such a
-/// row asks its own question.
-pub(crate) fn baseline(row: &CliLogin, now_ms: i64) -> Result<Option<Baseline>, String> {
-    let home = row.home()?;
-    Ok(baseline_in(row, &home, now_ms))
-}
-
-fn baseline_in(row: &CliLogin, home: &Path, now_ms: i64) -> Option<Baseline> {
-    let file = row.witness_in(home)?;
+/// A row's baseline as its file stands now. `None` for a row proven by no
+/// file — a status command, or nothing — which has no snapshot to carry:
+/// the watch on such a row asks its own question. `Err` when the file could
+/// not be read (t-7170 R2c): no snapshot stands, so nothing is held and the
+/// window runs nothing.
+fn baseline_in(row: &CliLogin, home: &Path, now_ms: i64) -> Result<Option<Baseline>, String> {
+    let Some(file) = row.witness_in(home) else {
+        return Ok(None);
+    };
     let login: LoginIn<'_> = Box::new(|text| row.login_in_text(text, now_ms));
-    Some(Baseline {
-        before: login_in(&file, &login),
+    let before = login_read(&file, &login)?;
+    Ok(Some(Baseline {
+        agent: row.agent,
+        file,
+        before,
         taken_ms: now_ms,
-    })
+    }))
+}
+
+/// What a wait says when the number it carries names no baseline it may
+/// compare against. Each is the wait's END: nothing is snapshotted in its
+/// place, because a snapshot taken after the run is the timeout R2 closed.
+const REFUSED_MISSING: &str = "이 실행을 지켜볼 기준이 없습니다 — 다시 실행하세요";
+const REFUSED_EXPIRED: &str = "이 실행을 지켜볼 기준이 만료되었습니다 — 다시 실행하세요";
+const REFUSED_MOVED: &str = "자격 증명 파일의 위치가 바뀌었습니다 — 다시 실행하세요";
+
+/// The baselines taken for waits that have not begun, under the numbers
+/// the window carries — the store between `cli_login_witness` and
+/// `cli_login_wait`, kept beside the snapshot so that what a number stands
+/// for is decided in one place. The number IS the attempt: a row has one
+/// current attempt, a new one ends the last, and a baseline is taken out
+/// once (t-7170 R2b). The login text a baseline holds never leaves this
+/// process.
+#[derive(Debug, Default)]
+pub(crate) struct Baselines {
+    next: u64,
+    held: HashMap<u64, Baseline>,
+}
+
+impl Baselines {
+    /// Hold a baseline and answer its number. The row's earlier attempt, if
+    /// one stands, is over — a wait still to come for it is refused as
+    /// missing rather than compared against — and baselines nobody came
+    /// back for within a road's ceiling are let go with it.
+    fn hold(&mut self, taken: Baseline, now_ms: i64) -> u64 {
+        self.held
+            .retain(|_, one| one.current_at(now_ms) && one.agent != taken.agent);
+        self.next += 1;
+        self.held.insert(self.next, taken);
+        self.next
+    }
+
+    /// Let a baseline go without waiting on it — the run it was taken for
+    /// would not start, so no wait is coming. A number nobody holds is
+    /// nothing to do.
+    fn let_go(&mut self, id: u64) {
+        self.held.remove(&id);
+    }
+
+    /// Take a baseline out for its wait — once. Refused when the number
+    /// names no baseline (let go, ended by a newer attempt, taken already,
+    /// or from before a restart), when it was taken for another row, or
+    /// when its road's ceiling has passed. Another row's number is not
+    /// spent by the refusal: its own row's wait may still come for it.
+    fn take(&mut self, id: u64, row: &CliLogin, now_ms: i64) -> Result<Baseline, String> {
+        let Some(held) = self.held.get(&id) else {
+            return Err(REFUSED_MISSING.into());
+        };
+        if held.agent != row.agent {
+            return Err(format!("이 기준은 {}의 것이 아닙니다", row.agent));
+        }
+        let current = held.current_at(now_ms);
+        match self.held.remove(&id) {
+            Some(taken) if current => Ok(taken),
+            _ => Err(REFUSED_EXPIRED.into()),
+        }
+    }
+}
+
+/// The store as the doors hold it. A panic mid-hold leaves at worst a
+/// baseline nobody will take, which the ceiling lets go — no reason to
+/// refuse every later attempt.
+fn held(store: &Mutex<Baselines>) -> MutexGuard<'_, Baselines> {
+    store.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The `cli_login_witness` door: the row's baseline as its file stands now,
+/// held under a new number — the row's one current attempt — BEFORE the
+/// window runs the CLI (t-7170 R2). `None` for a row proven by no file;
+/// `Err` when the file could not be read (R2c), and then nothing is held
+/// and the window runs nothing.
+pub(crate) fn hold_witness(
+    store: &Mutex<Baselines>,
+    row: &CliLogin,
+    now_ms: i64,
+) -> Result<Option<u64>, String> {
+    hold_witness_in(store, row, &row.home()?, now_ms)
+}
+
+/// [`hold_witness`] against a named home — the door's own body, so a test
+/// drives what the command runs.
+fn hold_witness_in(
+    store: &Mutex<Baselines>,
+    row: &CliLogin,
+    home: &Path,
+    now_ms: i64,
+) -> Result<Option<u64>, String> {
+    // The file is read before the store is locked: a slow disk holds up
+    // this row's attempt, not every other row's.
+    let Some(taken) = baseline_in(row, home, now_ms)? else {
+        return Ok(None);
+    };
+    Ok(Some(held(store).hold(taken, now_ms)))
+}
+
+/// The `cli_login_witness_drop` door: the run the number was taken for would
+/// not start, so no wait is coming for it.
+pub(crate) fn witness_drop(store: &Mutex<Baselines>, id: u64) {
+    held(store).let_go(id);
+}
+
+/// The `cli_login_wait` door: watch this machine's proof until it holds a
+/// login (`signed_in`) or stops holding one — the pane roads, after the
+/// window has opened the CLI in a pane. A `witness` number names ONE
+/// baseline: this row's, of the file this row resolves to now, its current
+/// attempt, within the road's ceiling, taken out once — and a number the
+/// store refuses is where this wait ends, with nothing snapshotted in its
+/// place (t-7170 R2b). No number at all is the road that snapshots as it
+/// begins.
+pub(crate) fn wait(
+    store: &Mutex<Baselines>,
+    row: &CliLogin,
+    program: Option<&str>,
+    signed_in: bool,
+    witness: Option<u64>,
+    now_ms: i64,
+) -> Result<(), String> {
+    wait_in(
+        store,
+        row,
+        program,
+        &row.home()?,
+        signed_in,
+        witness,
+        now_ms,
+        LOGIN_TIMEOUT,
+        STATUS_POLL,
+    )
+}
+
+/// [`wait`] against a named home and the wait's own bounds — the door's own
+/// body, so a test drives what the command runs.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the store and the number the door is handed, then the watch's own \
+              eight; a struct for one call site would hide them"
+)]
+fn wait_in(
+    store: &Mutex<Baselines>,
+    row: &CliLogin,
+    program: Option<&str>,
+    home: &Path,
+    signed_in: bool,
+    witness: Option<u64>,
+    now_ms: i64,
+    timeout: Duration,
+    status_poll: Duration,
+) -> Result<(), String> {
+    // Taken out under the lock and the lock let go before the watch: a wait
+    // is minutes long, and no other row's attempt waits behind it.
+    let taken = match witness {
+        Some(id) => Some(held(store).take(id, row, now_ms)?),
+        None => None,
+    };
+    watch_in(
+        row,
+        program,
+        home,
+        signed_in,
+        now_ms,
+        timeout,
+        status_poll,
+        taken,
+    )
 }
 
 impl<'a> Witness<'a> {
@@ -1395,6 +1606,15 @@ impl<'a> Witness<'a> {
     fn sliced(file: &'a Path, login: LoginIn<'a>) -> Self {
         let before = login_in(file, &login);
         Self::from_before(file, login, before)
+    }
+
+    /// [`Self::sliced`] for this file's own roads, where a snapshot that
+    /// could not be READ is no snapshot (t-7170 R2c): taken as "no login",
+    /// the same old credential, readable again, would be an arrival. The
+    /// road ends at the error instead, before anything runs.
+    fn read(file: &'a Path, login: LoginIn<'a>) -> Result<Self, String> {
+        let before = login_read(file, &login)?;
+        Ok(Self::from_before(file, login, before))
     }
 
     /// The same witness against a snapshot taken EARLIER — a [`Baseline`]
@@ -1421,9 +1641,11 @@ impl<'a> Witness<'a> {
         }
     }
 
-    /// Is the file gone, or no longer a login?
+    /// Is the file gone, or no longer a login? A look that could not read
+    /// it is neither — the next poll looks again — or a read that failed
+    /// would be a logout that never happened.
     fn departed(&self) -> bool {
-        self.now().is_none()
+        matches!(login_read(self.file, &self.login), Ok(None))
     }
 }
 
@@ -1644,7 +1866,10 @@ fn login_headless_in(
     };
     match row.witness_in(home) {
         Some(file) => {
-            let taken = Witness::sliced(&file, Box::new(|text| row.login_in_text(text, now_ms)));
+            // Read before the verb runs, and a file that could not be read
+            // runs nothing (R2c): the old credential, readable again, would
+            // otherwise end a login the person is still in the middle of.
+            let taken = Witness::read(&file, Box::new(|text| row.login_in_text(text, now_ms)))?;
             run_login_with(row, program, args, home, Some(taken))?;
         }
         // A keychain row has no file to watch: the process leaving IS the
@@ -1708,31 +1933,11 @@ fn logout_headless_in(
 }
 
 /// Watch this machine's proof until it holds a login (`signed_in`) or stops
-/// holding one — the pane roads, after the window has opened the CLI in one
-/// of its panes and typed the row's verb or command. With a [`Baseline`],
-/// the file is judged against that earlier snapshot rather than against
-/// its shape now: the window took it before the run, and a renewal that
-/// has already landed is an arrival, not the starting point.
-pub(crate) fn watch(
-    row: &CliLogin,
-    program: Option<&str>,
-    signed_in: bool,
-    now_ms: i64,
-    taken: Option<Baseline>,
-) -> Result<(), String> {
-    let home = row.home()?;
-    watch_in(
-        row,
-        program,
-        &home,
-        signed_in,
-        now_ms,
-        LOGIN_TIMEOUT,
-        STATUS_POLL,
-        taken,
-    )
-}
-
+/// holding one. With a [`Baseline`], the file is judged against that earlier
+/// snapshot rather than against its shape now: the window took it before
+/// the run, and a renewal that has already landed is an arrival, not the
+/// starting point. Without one, the snapshot is taken here, as the watch
+/// begins — and a file this cannot read is no snapshot (R2c).
 #[expect(
     clippy::too_many_arguments,
     reason = "the row, the machine's program, the home, the direction, the clock, \
@@ -1756,8 +1961,16 @@ fn watch_in(
                 .ok_or_else(|| "이 행에는 기다릴 자격 증명 파일이 없습니다".to_string())?;
             let login: LoginIn<'_> = Box::new(|text| row.login_in_text(text, now_ms));
             let witness = match taken {
+                // A baseline of another row's file, or of this row's file in
+                // a home that has since moved, compares nothing: a different
+                // file's login read against it would be an arrival (t-7170
+                // R2b). The refusal is immediate — not a wait on the wrong
+                // file until the ceiling.
+                Some(baseline) if !baseline.names(row, &file) => {
+                    return Err(REFUSED_MOVED.into());
+                }
                 Some(baseline) => Witness::from_before(&file, login, baseline.before),
-                None => Witness::sliced(&file, login),
+                None => Witness::read(&file, login)?,
             };
             wait_for_witness_within(&witness, signed_in, timeout)
         }
@@ -3138,7 +3351,9 @@ mod tests {
         std::fs::write(&witness, text).expect("held login");
         // The window takes the baseline, runs the CLI, and only then asks
         // for the watch — and the CLI renews in between.
-        let taken = baseline_in(grok, &home, NOW_MS).expect("a row proven by a file");
+        let taken = baseline_in(grok, &home, NOW_MS)
+            .expect("read")
+            .expect("a row proven by a file");
         std::fs::write(&witness, text.replace("fixture-token", "renewed-token"))
             .expect("renewed before the watch");
         let began = Instant::now();
@@ -3164,7 +3379,9 @@ mod tests {
         );
         // A renewal that lands AFTER the watch began is the ordinary arrival,
         // against the same baseline.
-        let taken = baseline_in(grok, &home, NOW_MS).expect("a row proven by a file");
+        let taken = baseline_in(grok, &home, NOW_MS)
+            .expect("read")
+            .expect("a row proven by a file");
         let later_witness = witness.clone();
         let later = text.replace("fixture-token", "later-token");
         let writer = std::thread::spawn(move || {
@@ -3178,7 +3395,9 @@ mod tests {
         writer.join().expect("writer");
         // No change against the baseline runs the wait out — a baseline is not
         // an arrival, and the unchanged file is not one either.
-        let taken = baseline_in(grok, &home, NOW_MS).expect("a row proven by a file");
+        let taken = baseline_in(grok, &home, NOW_MS)
+            .expect("read")
+            .expect("a row proven by a file");
         assert_eq!(
             watch_in(
                 grok,
@@ -3210,7 +3429,9 @@ mod tests {
         );
         // A baseline is let go once the road it was taken for has run out.
         let ceiling = i64::try_from(LOGIN_TIMEOUT.as_millis()).expect("fits");
-        let fresh = baseline_in(grok, &home, NOW_MS).expect("a row proven by a file");
+        let fresh = baseline_in(grok, &home, NOW_MS)
+            .expect("read")
+            .expect("a row proven by a file");
         assert!(fresh.current_at(NOW_MS + ceiling));
         assert!(!fresh.current_at(NOW_MS + ceiling + 1));
         // And a row proven by no file has none to take.
@@ -3218,7 +3439,692 @@ mod tests {
             .iter()
             .find(|row| matches!(row.proof, Proof::Unreadable))
             .expect("a row this window cannot read");
-        assert!(baseline_in(unreadable, &home, NOW_MS).is_none());
+        assert!(
+            baseline_in(unreadable, &home, NOW_MS)
+                .expect("nothing to read")
+                .is_none()
+        );
+    }
+
+    /* ---- t-7170 R2b/R2c: the doors' own bodies ------------------------- */
+    //
+    // Every test below walks the witness and wait doors' own bodies
+    // (`hold_witness_in`, `wait_in`, `witness_drop`) — the functions the two
+    // commands call with this machine's home and the process-wide store —
+    // against a sandboxed home and a store of the test's own.
+
+    /// A store of the test's own: the doors' is process-wide.
+    fn fresh_store() -> Mutex<Baselines> {
+        Mutex::new(Baselines::default())
+    }
+
+    /// A press of 「한 번 실행」 as the witness door sees it: the number it
+    /// answers for this row's file in `home`.
+    fn witnessed(store: &Mutex<Baselines>, row: &CliLogin, home: &Path, now_ms: i64) -> u64 {
+        hold_witness_in(store, row, home, now_ms)
+            .expect("the file was read")
+            .expect("a row proven by a file")
+    }
+
+    /// The wait door's body for an arrival, with a ceiling of the test's
+    /// choosing: a refusal answers at once, a wait that ran out says so.
+    fn waited(
+        store: &Mutex<Baselines>,
+        row: &CliLogin,
+        home: &Path,
+        witness: Option<u64>,
+        now_ms: i64,
+        ceiling: Duration,
+    ) -> Result<(), String> {
+        wait_in(store, row, None, home, true, witness, now_ms, ceiling, POLL)
+    }
+
+    /// The same login, renewed — what a CLI that refreshes on start writes.
+    fn renew(file: &Path, text: &str, token: &str) {
+        std::fs::write(file, text.replace("fixture-token", token)).expect("renewed");
+    }
+
+    /// The positive this whole store exists for (astra R2b): a valid number
+    /// sees a renewal that landed before its wait began, at the first look,
+    /// and one that lands after, within a poll.
+    #[test]
+    fn a_valid_number_sees_a_renewal_before_or_after_its_wait_began() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&file, text).expect("held login");
+        let store = fresh_store();
+
+        let fast = witnessed(&store, grok, &home, NOW_MS);
+        renew(&file, text, "fast-token");
+        let began = Instant::now();
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(fast),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Ok(()),
+            "a renewal that landed before the wait was not seen"
+        );
+        assert!(began.elapsed() < WITNESS_POLL, "seen only after a poll");
+
+        let slow = witnessed(&store, grok, &home, NOW_MS);
+        let later = file.clone();
+        let renewed = text.replace("fixture-token", "slow-token");
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            std::fs::write(&later, renewed).expect("renewed after the wait began");
+        });
+        assert_eq!(
+            waited(&store, grok, &home, Some(slow), NOW_MS, WAIT),
+            Ok(()),
+            "a renewal that landed after the wait began was not seen"
+        );
+        writer.join().expect("writer");
+    }
+
+    /// A number the store does not hold — let go because the run would not
+    /// start, never taken, or from a window before this one — ends the wait
+    /// at once (astra R2b (b)). It is never the old road's fresh snapshot:
+    /// taken now, after a renewal that already landed, that snapshot would
+    /// wait the whole ceiling for a change that has happened.
+    #[test]
+    fn a_number_the_store_does_not_hold_ends_the_wait_and_snapshots_nothing() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&file, text).expect("held login");
+        let store = fresh_store();
+
+        let dropped = witnessed(&store, grok, &home, NOW_MS);
+        witness_drop(&store, dropped);
+        renew(&file, text, "renewed-token");
+        for (case, number) in [("let go", dropped), ("never held", dropped + 41)] {
+            let began = Instant::now();
+            assert_eq!(
+                waited(
+                    &store,
+                    grok,
+                    &home,
+                    Some(number),
+                    NOW_MS,
+                    Duration::from_millis(600)
+                ),
+                Err(REFUSED_MISSING.to_string()),
+                "a number that was {case} did not end the wait"
+            );
+            assert!(
+                began.elapsed() < WITNESS_POLL,
+                "a number that was {case} waited {:?} instead of refusing",
+                began.elapsed()
+            );
+        }
+        // A window restarted since: its store is new, and an old number is
+        // one it never held.
+        let after_restart = fresh_store();
+        assert_eq!(
+            waited(
+                &after_restart,
+                grok,
+                &home,
+                Some(dropped),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Err(REFUSED_MISSING.to_string()),
+            "a number from before a restart did not end the wait"
+        );
+    }
+
+    /// A number is taken out ONCE (astra R2b): the second wait that carries
+    /// it — a retry, a duplicate call — is refused, not a new snapshot.
+    #[test]
+    fn a_number_is_taken_out_once() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&file, text).expect("held login");
+        let store = fresh_store();
+
+        let once = witnessed(&store, grok, &home, NOW_MS);
+        renew(&file, text, "renewed-token");
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(once),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Ok(())
+        );
+        let began = Instant::now();
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(once),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Err(REFUSED_MISSING.to_string()),
+            "a number was taken out twice"
+        );
+        assert!(
+            began.elapsed() < WITNESS_POLL,
+            "the second wait waited instead of refusing"
+        );
+    }
+
+    /// A number whose road has run past its ceiling is refused — and gone,
+    /// so a late second try does not find it either (astra R2b: expiry is
+    /// checked where the number is consumed, not only when another is held).
+    #[test]
+    fn a_number_past_its_ceiling_is_refused_and_gone() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&file, text).expect("held login");
+        let store = fresh_store();
+        let ceiling = i64::try_from(LOGIN_TIMEOUT.as_millis()).expect("fits");
+
+        let stale = witnessed(&store, grok, &home, NOW_MS);
+        renew(&file, text, "renewed-token");
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(stale),
+                NOW_MS + ceiling + 1,
+                Duration::from_millis(600)
+            ),
+            Err(REFUSED_EXPIRED.to_string()),
+            "a baseline past its road's ceiling was compared against"
+        );
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(stale),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Err(REFUSED_MISSING.to_string()),
+            "an expired baseline stayed held"
+        );
+        // The ceiling itself is still the road's.
+        let edge = witnessed(&store, grok, &home, NOW_MS);
+        renew(&file, text, "edge-token");
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(edge),
+                NOW_MS + ceiling,
+                Duration::from_millis(600)
+            ),
+            Ok(()),
+            "a baseline at its road's ceiling was refused"
+        );
+    }
+
+    /// One row's number carried into another row's wait is refused, at once
+    /// (astra R2b (a)) — never compared, which would read the other row's
+    /// different credential as an arrival — and the refusal does not spend
+    /// it: its own row's wait still takes it.
+    #[test]
+    fn a_number_taken_for_one_row_is_refused_by_another_rows_wait() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let kimi = row("kimi").expect("kimi row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (kimi_home, kimi_file) = sandboxed_places(kimi, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        let (_, kimi_text) = fake("kimi").witness.expect("a kimi witness");
+        std::fs::write(&file, text).expect("held login");
+        std::fs::write(&kimi_file, kimi_text).expect("held kimi login");
+        let store = fresh_store();
+
+        let grok_attempt = witnessed(&store, grok, &home, NOW_MS);
+        let began = Instant::now();
+        assert_eq!(
+            waited(
+                &store,
+                kimi,
+                &kimi_home,
+                Some(grok_attempt),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Err(format!("이 기준은 {}의 것이 아닙니다", kimi.agent)),
+            "one row's baseline was handed to another row's wait"
+        );
+        assert!(
+            began.elapsed() < WITNESS_POLL,
+            "the wrong row's wait waited instead of refusing"
+        );
+        renew(&file, text, "renewed-token");
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(grok_attempt),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Ok(()),
+            "refusing the wrong row spent the number its own row carries"
+        );
+    }
+
+    /// A baseline of this row's file under one home, handed to a wait whose
+    /// home now resolves elsewhere, compares nothing (astra R2b (c)): the
+    /// other file's different credential would be an arrival. Refused at
+    /// once, not waited on until the ceiling.
+    #[test]
+    fn a_baseline_of_another_home_is_refused_not_compared() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&file, text).expect("held login");
+        let store = fresh_store();
+
+        let taken_here = witnessed(&store, grok, &home, NOW_MS);
+        let moved_home = sandboxed_home(grok, &root.path().join("moved"));
+        let moved_file = grok.witness_in(&moved_home).expect("a file");
+        renew(&moved_file, text, "other-home-token");
+        let began = Instant::now();
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &moved_home,
+                Some(taken_here),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Err(REFUSED_MOVED.to_string()),
+            "a baseline was compared against a file it was not taken of"
+        );
+        assert!(
+            began.elapsed() < WITNESS_POLL,
+            "the moved home's wait waited instead of refusing"
+        );
+    }
+
+    /// A row has one current attempt (astra R2b): a newer witness ends the
+    /// last, so the earlier attempt's wait — arriving late — is refused
+    /// rather than completing on the newer run's renewal. Another row's
+    /// attempt is not touched by it.
+    #[test]
+    fn a_new_attempt_ends_the_rows_last_one_and_no_other_rows() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let kimi = row("kimi").expect("kimi row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (kimi_home, kimi_file) = sandboxed_places(kimi, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        let (_, kimi_text) = fake("kimi").witness.expect("a kimi witness");
+        std::fs::write(&file, text).expect("held login");
+        std::fs::write(&kimi_file, kimi_text).expect("held kimi login");
+        let store = fresh_store();
+
+        let first = witnessed(&store, grok, &home, NOW_MS);
+        let kimi_attempt = witnessed(&store, kimi, &kimi_home, NOW_MS);
+        let second = witnessed(&store, grok, &home, NOW_MS);
+        assert_ne!(first, second, "two attempts answered the same number");
+        renew(&file, text, "renewed-token");
+        let began = Instant::now();
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(first),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Err(REFUSED_MISSING.to_string()),
+            "an attempt a newer one replaced still completed"
+        );
+        assert!(
+            began.elapsed() < WITNESS_POLL,
+            "the replaced attempt waited instead of refusing"
+        );
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(second),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Ok(()),
+            "the current attempt did not see the renewal"
+        );
+        renew(&kimi_file, kimi_text, "kimi-renewed-token");
+        assert_eq!(
+            waited(
+                &store,
+                kimi,
+                &kimi_home,
+                Some(kimi_attempt),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Ok(()),
+            "another row's attempt was ended by this row's"
+        );
+    }
+
+    /// Make `file` unreadable to this process around `run`, then readable
+    /// again. `None` when this reader is not bound by a file's permission
+    /// (a reader running as root opens a 0000 file anyway), where the
+    /// refusal cannot be asked at all.
+    #[cfg(unix)]
+    fn while_unreadable<T>(file: &Path, run: impl FnOnce() -> T) -> Option<T> {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let bound = std::fs::File::open(file).is_err();
+        let ran = bound.then(run);
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).expect("chmod back");
+        if ran.is_none() {
+            eprintln!("skipped: this reader is not bound by the file's permission");
+        }
+        ran
+    }
+
+    /// A baseline is a READ of the file (astra R2c). A file that is absent
+    /// is a snapshot of "no login", and a first login is an arrival against
+    /// it; one that holds a login is renewed by a changed login. A file that
+    /// could not be read is no snapshot at all: taken as "no login", the
+    /// same old credential, readable again, would be an arrival — so the
+    /// witness door refuses, holds nothing, and the window runs nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_credential_is_no_baseline_and_an_absent_one_is() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        let store = fresh_store();
+
+        // Absent → a baseline of "no login"; a first credential arrives.
+        let absent = witnessed(&store, grok, &home, NOW_MS);
+        std::fs::write(&file, text).expect("first login");
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(absent),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Ok(()),
+            "a first login against an absent file was not an arrival"
+        );
+
+        // Held → a renewal arrives (the ordinary positive).
+        let held_login = witnessed(&store, grok, &home, NOW_MS);
+        renew(&file, text, "renewed-token");
+        assert_eq!(
+            waited(
+                &store,
+                grok,
+                &home,
+                Some(held_login),
+                NOW_MS,
+                Duration::from_millis(600)
+            ),
+            Ok(())
+        );
+
+        // Unreadable: the file stands, holding a login, and the reader may
+        // not open it.
+        let Some(refused) =
+            while_unreadable(&file, || hold_witness_in(&store, grok, &home, NOW_MS))
+        else {
+            return;
+        };
+        // Readable again and unchanged — the failure this closes: whatever
+        // the witness door answered, a wait on it must not take the same old
+        // credential for an arrival.
+        let outcome = match &refused {
+            Ok(Some(number)) => waited(
+                &store,
+                grok,
+                &home,
+                Some(*number),
+                NOW_MS,
+                Duration::from_millis(600),
+            ),
+            Ok(None) => Err("a row proven by a file answered no witness".to_string()),
+            Err(said) => Err(said.clone()),
+        };
+        assert_ne!(
+            outcome,
+            Ok(()),
+            "the same old credential, readable again, was read as an arrival"
+        );
+        assert!(
+            matches!(&refused, Err(said) if said.starts_with("자격 증명 파일을 읽지 못했습니다")),
+            "a credential the reader could not open was taken as a baseline: {refused:?}"
+        );
+        assert!(
+            held(&store).held.is_empty(),
+            "a refused witness left a baseline held"
+        );
+    }
+
+    /// Whether `outcome` is the refusal a snapshot this could not read ends
+    /// a road with.
+    #[cfg(unix)]
+    fn unreadable_said(outcome: &Result<(), String>) -> bool {
+        matches!(outcome, Err(said) if said.starts_with("자격 증명 파일을 읽지 못했습니다"))
+    }
+
+    /// Close `file` to this reader, or `false` when the reader is not bound
+    /// by a file's permission (root), where the refusal cannot be asked.
+    #[cfg(unix)]
+    fn close_to_this_reader(file: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        if std::fs::File::open(file).is_ok() {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod back");
+            eprintln!("skipped: this reader is not bound by the file's permission");
+            return false;
+        }
+        true
+    }
+
+    /// `file` readable again after `after`, on a thread of its own.
+    #[cfg(unix)]
+    fn reopen_after(file: &Path, after: Duration) -> std::thread::JoinHandle<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let file = file.to_path_buf();
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod back");
+        })
+    }
+
+    /// An arrival with no number takes its snapshot as a READ (R2c): begun
+    /// on a file this cannot read, it ends at once rather than standing on
+    /// "no login" — against which the same old credential, readable again
+    /// a moment later, would complete it.
+    #[cfg(unix)]
+    #[test]
+    fn an_arrival_with_no_number_begun_on_an_unreadable_file_is_refused() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&file, text).expect("held login");
+        let store = fresh_store();
+        if !close_to_this_reader(&file) {
+            return;
+        }
+        let reopen = reopen_after(&file, Duration::from_millis(300));
+        let arrival = waited(
+            &store,
+            grok,
+            &home,
+            None,
+            NOW_MS,
+            Duration::from_millis(1_000),
+        );
+        reopen.join().expect("reopen");
+        assert_ne!(
+            arrival,
+            Ok(()),
+            "an arrival begun on an unreadable file completed on the same old credential"
+        );
+        // Refused at the read — or, on a machine too loaded to begin the
+        // wait before the file turned readable, a wait that saw no change.
+        assert!(
+            unreadable_said(&arrival) || arrival == Err("로그인이 완료되지 않았습니다".to_string()),
+            "an arrival begun on an unreadable file ended some other way: {arrival:?}"
+        );
+    }
+
+    /// A logout begun on a file this cannot read is refused (R2c's rule on
+    /// the way out): "could not look" is not "no login", and taken for it
+    /// the logout would be done before anything was removed.
+    #[cfg(unix)]
+    #[test]
+    fn a_logout_begun_on_an_unreadable_file_is_refused_not_done() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&file, text).expect("held login");
+        let store = fresh_store();
+        let Some(begun) = while_unreadable(&file, || {
+            wait_in(
+                &store,
+                grok,
+                None,
+                &home,
+                false,
+                None,
+                NOW_MS,
+                Duration::from_millis(600),
+                POLL,
+            )
+        }) else {
+            return;
+        };
+        assert_ne!(
+            begun,
+            Ok(()),
+            "a logout begun on an unreadable file was read as done"
+        );
+        assert!(
+            unreadable_said(&begun),
+            "a logout begun on an unreadable file ended some other way: {begun:?}"
+        );
+    }
+
+    /// A logout's LOOK that cannot read the file is not the login gone: the
+    /// login stands throughout, so the wait runs out rather than calling a
+    /// logout that never happened.
+    #[cfg(unix)]
+    #[test]
+    fn a_logout_whose_file_turns_unreadable_is_not_done() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&file, text).expect("held login");
+        let store = fresh_store();
+        if !close_to_this_reader(&file) {
+            return;
+        }
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+            .expect("open for the first look");
+        let close = {
+            let file = file.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000))
+                    .expect("chmod");
+            })
+        };
+        let later = wait_in(
+            &store,
+            grok,
+            None,
+            &home,
+            false,
+            None,
+            NOW_MS,
+            Duration::from_millis(1_000),
+            POLL,
+        );
+        close.join().expect("close");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod back");
+        assert_ne!(
+            later,
+            Ok(()),
+            "a look that could not read the file was taken as the login gone"
+        );
+        // The login stood throughout, so the wait ran out — or, on a machine
+        // too loaded to begin it before the file closed, was refused at its
+        // first read.
+        assert!(
+            later == Err("로그아웃이 완료되지 않았습니다".to_string()) || unreadable_said(&later),
+            "a logout whose file closed mid-wait ended some other way: {later:?}"
+        );
+    }
+
+    /// The headless verb's snapshot is a READ too (R2c): on a file this
+    /// cannot read, the verb is not run at all — a login taken as "none
+    /// before" would end the person's real login the moment the old
+    /// credential is readable again.
+    #[cfg(unix)]
+    #[test]
+    fn a_headless_login_that_cannot_read_its_witness_runs_nothing() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, file) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&file, text).expect("held login");
+        let cli = fake_cli_for(fake("grok"), root.path(), &home);
+        let Some(outcome) =
+            while_unreadable(&file, || login_headless_in(grok, &cli, &home, NOW_MS))
+        else {
+            return;
+        };
+        assert_eq!(
+            calls(&home),
+            Vec::<String>::new(),
+            "the login verb ran on a snapshot that could not be read"
+        );
+        assert!(
+            matches!(&outcome, Err(said) if said.starts_with("자격 증명 파일을 읽지 못했습니다")),
+            "an unreadable witness did not end the road: {outcome:?}"
+        );
     }
 
     /// Logging out is the CLI's verb, judged by the proof.

@@ -729,6 +729,10 @@ class StatefulBackend {
     this.pages = new Map();
     this.nextTerm = 100;
     this.nextWitness = 40;
+    // A wait or a logout that answers with a table read EARLIER than the one
+    // the rows hold now — a completion that arrives late (t-7170 R2b).
+    // Consumed once.
+    this.staleWaitAnswer = null;
     this.terminalSessions = [];
     this.routerPresets = [...ROUTER_PRESETS_CATALOG];
     this.zoSettings = { providers: [] };
@@ -2270,7 +2274,20 @@ class StatefulBackend {
       case "verify_claude_accounts": return [];
       case "verify_codex_accounts": return [];
       case "codex_account_list": return { accounts: [], can_add: true };
-      case "cli_login_list": return clone(this.cliLogins ?? { rows: [] });
+      case "cli_login_list": {
+        // What the read found as it began: a read held in flight answers the
+        // table as it stood then, however the table moved while it was out —
+        // and only that one read is held, so a later read answers first
+        // (t-7170 R2b).
+        const answer = clone(this.cliLogins ?? { rows: [] });
+        const held = this.holds.get(command);
+        if (held && !held.taken) {
+          held.taken = true;
+          held.arrive();
+          await held.promise;
+        }
+        return answer;
+      }
       // The three doors that MOVE a login answer with the table re-read, the
       // way the backend does: the row the test asked about flips and the
       // rest stand.
@@ -2288,6 +2305,11 @@ class StatefulBackend {
         }
         const held = this.cliLogins.rows.find((row) => row.agent === args.agent);
         if (held) held.signed_in = args.signedIn ?? true;
+        if (this.staleWaitAnswer !== null) {
+          const stale = this.staleWaitAnswer;
+          this.staleWaitAnswer = null;
+          return stale;
+        }
         return clone(this.cliLogins);
       }
       // The witness taken BEFORE a CLI runs (t-7170 R2): the backend keeps the
@@ -2306,6 +2328,11 @@ class StatefulBackend {
       case "cli_login_logout": {
         const held = this.cliLogins.rows.find((row) => row.agent === args.agent);
         if (held) held.signed_in = false;
+        if (this.staleWaitAnswer !== null) {
+          const stale = this.staleWaitAnswer;
+          this.staleWaitAnswer = null;
+          return stale;
+        }
         return clone(this.cliLogins);
       }
       case "relogin_codex_login": return { accounts: [], can_add: true };
@@ -4082,6 +4109,11 @@ await test("만료된 Grok 로그인 행은 「한 번 실행」 단추를 세�
     "GROK_HOME=/Users/dev/.grok grok\r",
     "the window typed something other than the bare program",
   );
+  assertEqual(
+    typed.args.term,
+    backend.nextTerm,
+    "the line went to a shell the run did not just open",
+  );
   const waited = await backend.waitForCall("A", "cli_login_wait", pressing);
   assertEqual(waited.args.signedIn, true, "the watch was not for the renewed login");
   // The re-read is the FORCED ask: an unforced one may ride the same window
@@ -4109,10 +4141,13 @@ await test("만료된 Grok 로그인 행은 「한 번 실행」 단추를 세�
  * The test above opens the CLI through a plain shell (opens: "shell"); the
  * real Grok row opens it through the launch door (opens: "agent"), and that
  * road REUSED a pane the agent already held — a press that focused a running
- * program and waited for a renewal nobody triggered (astra m-7239 R1). And
- * the witness was taken when the wait began, after the run: a CLI that
- * renewed on start, faster than the window's second call, left a watch
- * waiting for a change that had already happened (R2). */
+ * program and waited for a renewal nobody triggered (astra m-7239 R1) — and
+ * then typed the bare line at a pane whose program had LEFT, on the pane
+ * table's `idle`, a word about the past that proves nothing about the line
+ * or the foreground at the instant of the write (R1b). And the witness was
+ * taken when the wait began, after the run: a CLI that renewed on start,
+ * faster than the window's second call, left a watch waiting for a change
+ * that had already happened (R2). */
 const expiredGrokRow = () => ({
   agent: "grok",
   name: "Grok",
@@ -4211,54 +4246,60 @@ async function forcedGrokReread(from) {
   return reread;
 }
 
-await test("a_run_once_on_an_existing_pane_still_runs_the_program: 에이전트 판이 이미 있어도 「한 번 실행」은 실행한다 — 프로그램이 남은 판이면 새 판, 떠난 판이면 그 판에 맨 프로그램 줄", async () => {
+await test("a_run_once_never_types_at_a_pane_it_did_not_open: 「한 번 실행」은 언제나 그 실행을 위해 창이 여는 새 판에서 — 프로그램이 남은 판에도, 떠난 판(셸 프롬프트)에도 아무것도 치지 않는다", async () => {
   const row = expiredGrokRow();
-  // A pane the window launched for this agent, and that nothing has reported
-  // gone from: the program is still in it.
-  const running = await pageA.evaluate(async (agent) => {
+  // A pane the window holds for this agent: the person's.
+  const held = await pageA.evaluate(async (agent) => {
     const term = await openTermTab({ placement: "tab" });
     paneAgents.set(term, agent);
     return term;
   }, row.agent);
   const rows = await openExpiredGrokCard(row);
+  // Every door that puts bytes into a pane this window already holds.
+  const intoAPane = (from) => backend.calls
+    .slice(from)
+    .filter((call) => ["term_text", "term_key", "term_paste", "send_prompt"].includes(call.command))
+    .map((call) => `${call.command}@${call.args.term}`);
 
-  // 1. The program is still in the pane: the press starts a NEW run through
-  //    the launch door — bare — and types nothing at the pane it holds.
-  const pressing = await pressRunOnce(rows);
-  const launched = await backend.waitForCall("A", "launch_agent_tab", pressing);
-  assertEqual(launched.args.agent, row.agent, "the launch door was asked for another agent");
-  assertEqual(launched.args.prompt, "", "a run is bare — the door was handed words");
-  await backend.waitForCall("A", "cli_login_wait", pressing);
-  await forcedGrokReread(pressing);
-  await renderSettled(pageA);
-  assertEqual(
-    backend.calls.slice(pressing).filter((call) => call.command === "term_text").length,
-    0,
-    "the window typed at a pane whose program is still in it",
-  );
+  // 1. The program is still in the pane — no word from it yet, a turn under
+  //    way, a turn done at its composer: the run is a NEW pane through the
+  //    launch door, bare, and nothing is typed anywhere.
+  for (const word of [null, "working", "done"]) {
+    await pageA.evaluate(([term, said]) => {
+      if (said === null) hookStates.delete(term);
+      else hookStates.set(term, said);
+    }, [held, word]);
+    await openSettings(pageA, "provider-accounts");
+    const pressing = await pressRunOnce(rows);
+    await backend.waitForCall("A", "cli_login_wait", pressing);
+    await forcedGrokReread(pressing);
+    await renderSettled(pageA);
+    assertEqual(intoAPane(pressing), [], `the run typed at a pane (${word ?? "no word yet"})`);
+    const launched = backend.calls
+      .slice(pressing)
+      .find((call) => call.command === "launch_agent_tab");
+    assert(launched, `no new pane opened for the run (${word ?? "no word yet"})`);
+    assertEqual(launched.args.agent, row.agent, "the launch door was asked for another agent");
+    assertEqual(launched.args.prompt, "", "a run is bare — the door was handed words");
+  }
 
-  // 2. The program has LEFT the pane — the shell at its prompt, which the
-  //    backend reports as `idle` when the foreground group is the shell's own
-  //    again (`agent_exit`): the bare line goes to THAT pane, and no second
-  //    pane opens for it.
-  await pageA.evaluate((term) => hookStates.set(term, "idle"), running);
+  // 2. The program has LEFT the pane: `idle`, a shell at its prompt as the
+  //    pane table last saw it. That is a word about the past (astra R1b) — a
+  //    person may have typed half a command there since, or started another
+  //    program in front of it — so the run is still a NEW pane, and the left
+  //    pane is typed at by nobody.
+  await pageA.evaluate((term) => hookStates.set(term, "idle"), held);
   await openSettings(pageA, "provider-accounts");
-  const typingAt = await pressRunOnce(rows);
-  const typed = await backend.waitForCall("A", "term_text", typingAt);
-  assertEqual(typed.args.term, running, "the line went to another pane");
-  assertEqual(
-    typed.args.text,
-    `${row.run_command}\r`,
-    "the window typed something other than the table's bare line",
-  );
-  await backend.waitForCall("A", "cli_login_wait", typingAt);
-  await forcedGrokReread(typingAt);
+  const leaving = await pressRunOnce(rows);
+  await backend.waitForCall("A", "cli_login_wait", leaving);
+  await forcedGrokReread(leaving);
   await renderSettled(pageA);
-  assertEqual(
-    backend.calls.slice(typingAt).filter((call) => call.command === "launch_agent_tab").length,
-    0,
-    "a pane the program had left was not reused",
-  );
+  assertEqual(intoAPane(leaving), [], "the run typed at a pane the program had left");
+  const fresh = backend.calls
+    .slice(leaving)
+    .find((call) => call.command === "launch_agent_tab");
+  assert(fresh, "no new pane opened for the run beside a pane the program had left");
+  assertEqual(fresh.args.prompt, "", "a run is bare — the door was handed words");
 
   // 3. A second press while the first walk is still out runs nothing: the
   //    row is busy, and two runs racing for one credential file is the
@@ -4276,7 +4317,8 @@ await test("a_run_once_on_an_existing_pane_still_runs_the_program: 에이전트 
   await renderSettled(pageA);
   const runsAfter = () => backend.calls
     .slice(holding)
-    .filter((call) => call.command === "term_text" || call.command === "launch_agent_tab").length;
+    .filter((call) => ["term_text", "launch_agent_tab", "send_prompt"].includes(call.command))
+    .length;
   assertEqual(runsAfter(), 1, "a second press ran the program again");
   // Closing the panel and coming back finds the same walk out: the row is
   // still busy, and nothing runs twice for the re-entry either.
@@ -4295,7 +4337,97 @@ await test("a_run_once_on_an_existing_pane_still_runs_the_program: 에이전트 
   await forcedGrokReread(holding);
   await renderSettled(pageA);
   await leaveExpiredGrokCard();
-  return "held pane → new run; left pane → line at it; busy → one run; re-entry → still one";
+  return "program in the pane (3 words) → new pane, nothing typed; program left → new pane, nothing typed; busy → one run; re-entry → still one";
+});
+
+await test("a_finished_wait_paints_no_row_of_its_own: 기다림의 답은 행을 쓰지 않는다 — 걷기가 끝나면 표를 다시 읽고, 늦게 온 옛 답이 새 행을 덮지 않는다", async () => {
+  const row = expiredGrokRow();
+  const rows = await openExpiredGrokCard(row);
+  // The wait is held; while it is out, the table moves on (a home switched,
+  // a row renamed — whatever the backend re-reads next), and the wait then
+  // answers with the table as it stood when the wait BEGAN.
+  const reached = backend.holdNext("cli_login_wait");
+  backend.staleWaitAnswer = { rows: [{ ...row, name: "Grok (stale)", signed_in: true }] };
+  const pressing = await pressRunOnce(rows);
+  await reached;
+  backend.cliLogins = { rows: [{ ...row, name: "Grok (fresh)", signed_in: true }] };
+  backend.release("cli_login_wait");
+  const waited = await backend.waitForCall("A", "cli_login_wait", pressing);
+  await forcedGrokReread(pressing);
+  await renderSettled(pageA);
+  assertEqual(
+    await rows.nth(0).locator(".agent-row-name").textContent(),
+    "Grok (fresh)",
+    "the row painted the wait's own answer instead of the table re-read after it",
+  );
+  const listed = await backend.waitForCall("A", "cli_login_list", waited.at + 1);
+  assert(listed.at > waited.at, "the table was not re-read after the wait came back");
+  await leaveExpiredGrokCard();
+  return "wait answers stale → table re-read → row paints the fresh table";
+});
+
+await test("a_finished_logout_paints_no_row_of_its_own: 로그아웃의 답도 행을 쓰지 않는다 — 길이 끝나면 표를 다시 읽는다", async () => {
+  const row = expiredGrokRow();
+  const rows = await openExpiredGrokCard(row);
+  // The verb signs the row out; its answer is the table as an earlier read
+  // saw it, and the table the backend holds now says signed out.
+  backend.staleWaitAnswer = { rows: [{ ...row, name: "Grok (stale)", signed_in: true }] };
+  const logout = await pageA.evaluate(() => t("settings.accounts.logout", "로그아웃"));
+  const pressing = backend.calls.length;
+  await rows.nth(0).locator("button", { hasText: logout }).click();
+  await pageA.locator("#ask-yes").click();
+  await backend.waitForCall("A", "cli_login_logout", pressing);
+  await forcedGrokReread(pressing);
+  await renderSettled(pageA);
+  assertEqual(
+    await rows.nth(0).locator(".agent-row-name").textContent(),
+    "Grok",
+    "the row painted the logout's own answer instead of the table re-read after it",
+  );
+  assertEqual(
+    await rows.nth(0).locator("button", { hasText: logout }).count(),
+    0,
+    "a signed-out row still offers a logout",
+  );
+  await leaveExpiredGrokCard();
+  return "logout answers stale → table re-read → row paints signed out";
+});
+
+await test("a_late_read_never_paints_over_a_newer_one: 표 읽기는 가장 나중에 부른 것만 그린다 — 먼저 나가 늦게 온 옛 표가 뒤에 읽은 새 표를 덮지 않는다", async () => {
+  const row = expiredGrokRow();
+  const rows = await openExpiredGrokCard(row);
+  const shown = () => rows.nth(0).locator(".agent-row-name").textContent();
+  // A read of the table goes out — the read the pane's arrival makes — and
+  // is held in flight, answering the table as it stood when it began.
+  backend.cliLogins = { rows: [{ ...row, name: "Grok (stale)" }] };
+  const reached = backend.holdNext("cli_login_list");
+  await pageA.evaluate(() => {
+    window.__cliLoginFirstRead = refreshCliLogins();
+  });
+  await reached;
+  // The table moves on, and a walk's end reads it again; that read answers
+  // first.
+  backend.cliLogins = { rows: [{ ...row, name: "Grok (fresh)" }] };
+  const pressing = await pressRunOnce(rows);
+  const waited = await backend.waitForCall("A", "cli_login_wait", pressing);
+  await backend.waitForCall("A", "cli_login_list", waited.at + 1);
+  await forcedGrokReread(pressing);
+  await renderSettled(pageA);
+  assertEqual(await shown(), "Grok (fresh)", "the walk's own re-read did not paint");
+  // And now the read asked earlier lands.
+  backend.release("cli_login_list");
+  await pageA.evaluate(() => window.__cliLoginFirstRead);
+  await renderSettled(pageA);
+  assertEqual(
+    await shown(),
+    "Grok (fresh)",
+    "a read asked earlier and answered later painted over the newer table",
+  );
+  await pageA.evaluate(() => {
+    delete window.__cliLoginFirstRead;
+  });
+  await leaveExpiredGrokCard();
+  return "held read (stale) → walk's re-read (fresh) paints → stale lands → nothing painted";
 });
 
 await test("a_refresh_that_lands_before_the_watch_is_still_seen: 자격 증명 파일의 baseline은 실행 전에 찍고, 기다림이 그 표를 든다", async () => {
