@@ -255,7 +255,7 @@ impl HarnessFeature {
                 "requires a recall that returned notes, smart.rerankShadow = \"shadow\", and TYPESAFE_API_KEY"
             }
             Self::SkillSearch => {
-                "requires a skill_search call, an installed skill, smart.skillSearch on, and TYPESAFE_API_KEY"
+                "requires a public user turn or skill_search call, an installed skill, smart.skillSearch on or shadow, and TYPESAFE_API_KEY"
             }
             Self::AgentTool => {
                 "requires a `Jev` tool call or a `zo jev ask|choose|score`, smart.agentTool on or shadow, and TYPESAFE_API_KEY"

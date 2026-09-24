@@ -821,7 +821,7 @@ where
         let result = self
             .run_turn_streaming_with_images_inner(user_input, images, render_tx, prompter, false)
             .await;
-        self.finish_file_pick_turn();
+        self.finish_turn_seats();
         self.settle_team_inbox_turn_for_result(&result);
         result
     }

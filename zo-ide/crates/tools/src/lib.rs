@@ -135,7 +135,7 @@ pub use misc_tools::{
 pub use misc_tools::{
     note_loaded_skill, note_search_answer, skill_search, skill_search_mode_from,
     skill_search_path,
-    Chosen, Searched, SkillLabelRow, SkillSearchRow,
+    Chosen, Searched, SkillLabelRow, SkillSearchRow, SkillSuggestionJudge,
     SKILL_OUTCOME_ANSWERED, SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE, SKILL_SEARCH_SETTING,
     judge_step_effort_ledger, record_step_event, step_effort_path, step_effort_raised,
     step_effort_word, step_effort_word_in, StepEffortWord, StepJudgmentRow, StepSeat,

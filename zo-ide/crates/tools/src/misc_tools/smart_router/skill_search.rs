@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use api::{
     SystemOneCall, SystemOneClient, SystemOneConfig, SystemOneFailure, SystemOneRequest,
@@ -34,9 +34,11 @@ use api::{
 };
 use runtime::skill_rank::{
     lexical_rank, rank, skill_candidates, skill_questions, skill_shards, skill_state,
-    validate_skills, SkillCandidate, SkillReading, SKILL_RUBRIC_VERSION,
+    validate_skills, narrow_questions, narrow_state, read_narrow, read_wide,
+    suggestion_note, wide_questions, wide_state, SkillCandidate, SkillDetail,
+    SkillReading, SkillSuggestionSeat, SKILL_RUBRIC_VERSION,
 };
-use runtime::SkillIndexEntry;
+use runtime::{ContentBlock, ConversationMessage, MessageRole, SkillIndexEntry};
 use serde::{Deserialize, Serialize};
 use zerocode_core::jev::door::Refused;
 use zerocode_core::jev::{JevMode, ROUTE_USE_APPLIED, ROUTE_USE_FALLBACK, SKILLS};
@@ -70,6 +72,7 @@ const _: () = assert!(
 );
 
 const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
+const FAIL_SKILL_SEND: &str = "skill_request_not_sent";
 
 /// The word a caller's answer carries when there was nothing to ask about —
 /// no skill installed, or no task described. No row is written for it: a
@@ -99,6 +102,10 @@ pub struct SkillSearchRow {
     pub catalog: u64,
     #[serde(rename = "rubricVersion")]
     pub rubric_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "rubricFingerprint")]
+    pub rubric_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "gateScore")]
+    pub gate_score: Option<f64>,
     /// [`SKILL_OUTCOME_ANSWERED`], a failure's ledger token, or the door's
     /// refusal token.
     pub outcome: String,
@@ -185,6 +192,14 @@ pub struct SkillLabelRow {
     /// Where it sat in the search's ranking, when it was in it at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "baselineAgreed")]
+    pub baseline_agreed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "baselineLoaded")]
+    pub baseline_loaded: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "unusedLoad")]
+    pub unused_load: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "baselineUnusedLoad")]
+    pub baseline_unused_load: Option<bool>,
 }
 
 fn unix_millis() -> u64 {
@@ -200,6 +215,8 @@ impl SkillSearchRow {
             task: key.task,
             catalog: key.catalog,
             rubric_version: key.rubric,
+            rubric_fingerprint: None,
+            gate_score: None,
             outcome,
             candidates,
             shards,
@@ -380,10 +397,19 @@ pub fn note_search_answer(cwd: &Path, named: &[String]) {
 /// process: a load nobody asked a question before is not a judgment anyone
 /// agreed or disagreed with.
 pub fn note_loaded_skill(cwd: &Path, loaded: &str) {
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    if let Ok(mut pending) = turn_pending().lock() {
+        if let Some(turn) = pending.get_mut(&canonical) {
+            if turn.loaded.is_none() {
+                turn.loaded = Some(loaded.to_string());
+            }
+            return;
+        }
+    }
     let Some(named) = last_answer()
         .lock()
         .ok()
-        .and_then(|answered| answered.get(cwd).cloned())
+        .and_then(|mut answered| answered.remove(cwd))
     else {
         return;
     };
@@ -398,9 +424,377 @@ fn label_row(loaded: &str, named: &[String]) -> SkillLabelRow {
     SkillLabelRow {
         at: unix_millis(),
         loaded: loaded.to_string(),
-        agreed: rank.is_some(),
+        agreed: rank.is_some() || (loaded.is_empty() && named.is_empty()),
         rank,
+        baseline_agreed: None,
+        baseline_loaded: None,
+        unused_load: None,
+        baseline_unused_load: None,
     }
+}
+
+/// The turn boundary's two-stage suggestion uses this same SKILLS door and
+/// ledger. It is seated independently of the explicit `skill_search` tool so a
+/// turn reaches the judgment even when the agent never searches.
+#[derive(Debug)]
+pub struct SkillSuggestionJudge {
+    cwd: PathBuf,
+}
+
+impl SkillSuggestionJudge {
+    #[must_use]
+    pub fn at(cwd: &Path) -> Self {
+        Self { cwd: cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf()) }
+    }
+}
+
+impl SkillSuggestionSeat for SkillSuggestionJudge {
+    fn suggest(&self, request: String) -> futures_util::future::BoxFuture<'_, Option<String>> {
+        Box::pin(suggest_at(self.cwd.clone(), request))
+    }
+
+    fn finish(&self, turn: &[ConversationMessage]) {
+        finish_turn_suggestion(&self.cwd, turn);
+    }
+}
+
+/// The next observed Skill load is the first-load label for this turn. A turn
+/// with no load is closed by the runtime's turn-end hook. The entry is seated
+/// before the judgment is asked, so a load early in the turn is its label
+/// whether or not the judgment has landed yet; `judged` says whether it did,
+/// and a turn that ends without one is not labelled — there is nothing to
+/// compare the load with.
+#[derive(Debug)]
+struct PendingSuggestion {
+    suggested: Option<String>,
+    loaded: Option<String>,
+    acting: bool,
+    judged: bool,
+}
+
+fn turn_pending() -> &'static Mutex<HashMap<PathBuf, PendingSuggestion>> {
+    static PENDING: OnceLock<Mutex<HashMap<PathBuf, PendingSuggestion>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn finish_turn_suggestion(cwd: &Path, turn: &[ConversationMessage]) {
+    if let Ok(mut answered) = last_answer().lock() {
+        answered.remove(cwd);
+    }
+    let pending = turn_pending().lock().ok().and_then(|mut rows| rows.remove(cwd));
+    if let Some(row) = pending.and_then(|pending| judged_label(pending, turn)) {
+        let _ = append_shadow_row(&skill_search_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+    }
+}
+
+/// The turn's label, when its judgment landed while the turn was open; a
+/// turn whose entry was never marked judged has nothing to compare its load
+/// with, and gets no row.
+fn judged_label(pending: PendingSuggestion, turn: &[ConversationMessage]) -> Option<SkillLabelRow> {
+    pending.judged.then(|| label_turn(pending, turn))
+}
+
+fn label_turn(pending: PendingSuggestion, turn: &[ConversationMessage]) -> SkillLabelRow {
+    let loaded = pending.loaded.as_deref().unwrap_or_default();
+    let mut row = label_row(loaded, &pending.suggested.into_iter().collect::<Vec<_>>());
+    row.unused_load = (!loaded.is_empty()).then(|| skill_used_after_load(turn, loaded))
+        .flatten().map(|used| !used);
+    if !pending.acting {
+        row.baseline_loaded = pending.loaded;
+        row.baseline_unused_load = row.unused_load;
+    }
+    row
+}
+
+/// A deliberately narrow proxy: after a successful first skill load, the
+/// agent used another tool or quoted a substantial line from that skill's
+/// returned body. Silence is an unused-load observation, not a gold label.
+const SKILL_QUOTE_MIN_CHARS: usize = 24;
+const SKILL_QUOTE_MAX_CHARS: usize = 160;
+const SKILL_QUOTE_LINE_CAP: usize = 64;
+
+fn skill_used_after_load(turn: &[ConversationMessage], loaded: &str) -> Option<bool> {
+    let mut load_id: Option<&str> = None;
+    let mut quotes = Vec::new();
+    for message in turn {
+        for block in &message.blocks {
+            match block {
+                ContentBlock::ToolUse { id, name, input } if load_id.is_none()
+                    && skill_call_loaded(name, input, loaded) =>
+                {
+                    load_id = Some(id);
+                }
+                ContentBlock::ToolUse { name, .. } if load_id.is_some()
+                    && !matches!(name.as_str(), "Skill" | "skill_load" | "skill_search") =>
+                {
+                    return Some(true);
+                }
+                ContentBlock::ToolResult { tool_use_id, output, .. }
+                    if load_id == Some(tool_use_id.as_str()) =>
+                {
+                    quotes = skill_quote_lines(output);
+                }
+                ContentBlock::Text { text } if load_id.is_some()
+                    && message.role == MessageRole::Assistant
+                    && quotes.iter().any(|quote| text.contains(quote)) =>
+                {
+                    return Some(true);
+                }
+                _ => {}
+            }
+        }
+    }
+    load_id.map(|_| false)
+}
+
+fn skill_call_loaded(name: &str, input: &str, loaded: &str) -> bool {
+    if name == "skill_search" {
+        return true;
+    }
+    if !matches!(name, "Skill" | "skill_load") {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(input).ok().is_some_and(|value| {
+        value.get("skill").or_else(|| value.get("name"))
+            .and_then(serde_json::Value::as_str) == Some(loaded)
+    })
+}
+
+fn skill_quote_lines(output: &str) -> Vec<String> {
+    fn prompts<'a>(value: &'a serde_json::Value, found: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if let Some(prompt) = fields.get("prompt").and_then(serde_json::Value::as_str) {
+                    found.push(prompt);
+                } else {
+                    for field in fields.values() {
+                        prompts(field, found);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    prompts(item, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(output).ok();
+    let mut bodies = Vec::new();
+    if let Some(value) = &parsed {
+        prompts(value, &mut bodies);
+    }
+    bodies.into_iter().flat_map(str::lines)
+        .map(str::trim)
+        .filter(|line| (SKILL_QUOTE_MIN_CHARS..=SKILL_QUOTE_MAX_CHARS).contains(&line.chars().count()))
+        .take(SKILL_QUOTE_LINE_CAP)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The seat's line is shown only when it acts, so only then does the turn
+/// wait for it: a recording turn hands the judgment to the runtime's worker
+/// threads and goes on, the way the patch-review seat's `detach` does. The
+/// mode is read before the skills are discovered, so a seat that is off costs
+/// a turn no directory walk.
+async fn suggest_at(cwd: PathBuf, task: String) -> Option<String> {
+    if let Ok(mut answered) = last_answer().lock() {
+        answered.remove(&cwd);
+    }
+    // A judgment that landed after its own turn had ended left no label
+    // behind, and it must not label this turn either.
+    if let Ok(mut pending) = turn_pending().lock() {
+        pending.remove(&cwd);
+    }
+    if task.trim().is_empty() {
+        return None;
+    }
+    let mode = asking_mode(&cwd)?;
+    let acting = mode.applies_with(runtime::jev_seat_applies(&cwd, &SKILLS));
+    let skills = runtime::discover_skills(&cwd);
+    let candidates = skill_candidates(&skills);
+    if candidates.is_empty() {
+        return acting.then(|| suggestion_note(None));
+    }
+    if candidates.len() > zerocode_core::jev::SKILL_SUGGESTION_CATALOG_CAP {
+        return None;
+    }
+    if let Ok(mut pending) = turn_pending().lock() {
+        pending.insert(
+            cwd.clone(),
+            PendingSuggestion { suggested: None, loaded: None, acting, judged: false },
+        );
+    }
+    let judged = judge_suggestion(cwd, task, skills, candidates, mode, acting);
+    if acting {
+        judged.await
+    } else {
+        super::patch_review::detach(async move {
+            drop(judged.await);
+        });
+        None
+    }
+}
+
+/// Ask the two stages, write the row, and mark the turn's pending entry
+/// judged — when the turn is still open; a turn that has already ended took
+/// its entry with it, and a judgment that lands after it labels nothing.
+async fn judge_suggestion(
+    cwd: PathBuf,
+    task: String,
+    skills: Vec<SkillIndexEntry>,
+    candidates: Vec<SkillCandidate>,
+    mode: JevMode,
+    acting: bool,
+) -> Option<String> {
+    let opened = cwd.clone();
+    let door = tokio::task::spawn_blocking(move || JevDoor::open(&opened)).await.ok()?;
+    let mut key = MemoKey::for_search(&task, &candidates, door.model_key());
+    key.rubric = zerocode_core::jev::questions::SKILL_SUGGESTION_RUBRIC_VERSION;
+    let mut row = SkillSearchRow::new(key, candidates.len(), 1, String::new());
+    row.rubric_fingerprint = Some(
+        zerocode_core::jev::questions::skill_suggestion_rubric_fingerprint(),
+    );
+    let Some(client) = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client) else {
+        row.outcome = Refused::NoKey.token().into();
+        telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, Refused::NoKey.token());
+        let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+        return None;
+    };
+    let started = Instant::now();
+    let wide = ask_wide(&door, &client, &task, &candidates, acting, &mut row).await;
+    let Some(wide) = wide else {
+        let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+        return None;
+    };
+    row.gate_score = Some(wide.gate);
+    let winner = if wide.shortlist.is_empty() {
+        None
+    } else {
+        match ask_narrow(&door, &client, &task, &skills, &candidates, &wide.shortlist,
+            acting, started, &mut row).await {
+            Ok(winner) => winner,
+            Err(reason) => {
+                row.outcome = SystemOneFailure::Schema.ledger_token();
+                row.rejected = Some(reason);
+                let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+                return None;
+            }
+        }
+    };
+    row.outcome = SKILL_OUTCOME_ANSWERED.into();
+    telemetry::attest_fired(telemetry::HarnessFeature::SkillSearch);
+    row.chosen = winner.iter().map(Chosen::from).collect();
+    row.route_use = if acting { ROUTE_USE_APPLIED.into() } else { mode.key().into() };
+    let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+    // The absence of a skill is a prediction too. It stays until this turn
+    // ends so a no-load turn contributes a negative label.
+    if let Ok(mut pending) = turn_pending().lock() {
+        if let Some(turn) = pending.get_mut(&cwd) {
+            turn.suggested = winner.as_ref().map(|choice| choice.name.clone());
+            turn.judged = true;
+        }
+    }
+    acting.then(|| suggestion_note(winner.as_ref().map(|choice| choice.name.as_str())))
+}
+
+async fn ask_wide(
+    door: &JevDoor,
+    client: &SystemOneClient,
+    task: &str,
+    candidates: &[SkillCandidate],
+    acting: bool,
+    row: &mut SkillSearchRow,
+) -> Option<runtime::skill_rank::WideReading> {
+    let state = wide_state(task, candidates);
+    let questions = wide_questions(candidates);
+    let (call, withheld) = match send_stage(
+        door, client, &state, &questions, acting, SKILL_SEARCH_DEADLINE,
+    ).await {
+        Ok(value) => value,
+        Err(reason) => {
+            row.outcome = reason;
+            return None;
+        }
+    };
+    row.requests = Some(call.requests);
+    row.retries = call.retries;
+    row.elapsed_ms = jev_gate::millis(call.elapsed);
+    row.redacted_lines = Some(withheld);
+    let response = match call.outcome {
+        Ok(response) => response,
+        Err(failure) => {
+            row.outcome = failure.ledger_token();
+            return None;
+        }
+    };
+    row.model = Some(response.model.clone());
+    row.input_tokens = Some(response.usage.input_tokens);
+    match read_wide(&response, candidates) {
+        Ok(wide) => {
+            row.shards_answered = 1;
+            Some(wide)
+        }
+        Err(reason) => {
+            row.outcome = SystemOneFailure::Schema.ledger_token();
+            row.rejected = Some(reason.into());
+            None
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ask_narrow(
+    door: &JevDoor,
+    client: &SystemOneClient,
+    task: &str,
+    skills: &[SkillIndexEntry],
+    candidates: &[SkillCandidate],
+    shortlist: &[usize],
+    acting: bool,
+    started: Instant,
+    row: &mut SkillSearchRow,
+) -> Result<Option<SkillReading>, String> {
+    let details = shortlist.iter().map(|&position| SkillDetail {
+        position,
+        excerpt: skills.get(position).and_then(|skill| std::fs::read_to_string(&skill.path).ok())
+            .unwrap_or_default(),
+    }).collect::<Vec<_>>();
+    let state = narrow_state(task, candidates, &details);
+    let questions = narrow_questions(candidates, &details);
+    row.shards = 2;
+    let remaining = SKILL_SEARCH_DEADLINE.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err("deadline".into());
+    }
+    let (call, withheld) = send_stage(door, client, &state, &questions, acting, remaining).await?;
+    row.requests = Some(row.requests.unwrap_or(0).saturating_add(call.requests));
+    row.retries = row.retries.saturating_add(call.retries);
+    row.elapsed_ms = row.elapsed_ms.saturating_add(jev_gate::millis(call.elapsed));
+    row.redacted_lines = Some(row.redacted_lines.unwrap_or(0).saturating_add(withheld));
+    let response = call.outcome.map_err(SystemOneFailure::ledger_token)?;
+    row.input_tokens = Some(row.input_tokens.unwrap_or(0).saturating_add(response.usage.input_tokens));
+    let winner = read_narrow(&response, candidates, &details).map_err(str::to_string)?;
+    row.shards_answered = 2;
+    Ok(winner)
+}
+
+async fn send_stage(
+    door: &JevDoor,
+    client: &SystemOneClient,
+    state: &serde_json::Value,
+    questions: &std::collections::BTreeMap<String, api::SystemOneQuestion>,
+    acting: bool,
+    deadline: Duration,
+) -> Result<(SystemOneCall, u32), String> {
+    let request = SystemOneRequest { state, model: SYSTEMONE_MODEL, questions };
+    let body = jev_gate::body_of(&request)
+        .ok_or_else(|| SystemOneFailure::InvalidRequest.ledger_token())?;
+    let cleared = door.pass(&SKILLS, true, body).map_err(|refusal| refusal.token().to_string())?;
+    let withheld = u32::try_from(cleared.withheld_lines()).unwrap_or(u32::MAX);
+    let hedge = door.hedge_now(&SKILLS, deadline, acting);
+    Ok((jev_gate::send(client, cleared, deadline, hedge).await, withheld))
 }
 
 /// The mode this search is to be judged under, or `None` when it is not to be
@@ -497,32 +891,17 @@ async fn ask_one(
     };
     let state = skill_state(task, shard);
     let questions = skill_questions(shard);
-    let request = SystemOneRequest {
-        state: &state,
-        model: SYSTEMONE_MODEL,
-        questions: &questions,
+    let Some(client) = client else {
+        telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, Refused::NoKey.token());
+        return refused(Refused::NoKey.token().to_string());
     };
-    let Some(body) = jev_gate::body_of(&request) else {
-        let failure = SystemOneFailure::InvalidRequest;
-        telemetry::attest_failed(telemetry::HarnessFeature::SkillSearch, failure.token());
-        return refused(failure.ledger_token());
-    };
-    let (cleared, client) = match (door.pass(&SKILLS, client.is_some(), body), client) {
-        (Ok(cleared), Some(client)) => (cleared, client),
-        // The door refuses a keyless request before anything else it asks.
-        (passed, _) => {
-            let refusal = passed.err().unwrap_or(Refused::NoKey);
-            telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, refusal.token());
-            return refused(refusal.token().to_string());
+    let (call, withheld) = match send_stage(door, client, &state, &questions, acting, SKILL_SEARCH_DEADLINE).await {
+        Ok(sent) => sent,
+        Err(reason) => {
+            telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, FAIL_SKILL_SEND);
+            return refused(reason);
         }
     };
-    let withheld = u32::try_from(cleared.withheld_lines()).unwrap_or(u32::MAX);
-    // A hedge buys an answer inside a wall, and this seat is waited inside one
-    // only when it acts: a recording search is written down beside what the
-    // word match handed back, so a second copy of it would be the person's
-    // money for nothing.
-    let hedge = door.hedge_now(&SKILLS, SKILL_SEARCH_DEADLINE, acting);
-    let call = jev_gate::send(client, cleared, SKILL_SEARCH_DEADLINE, hedge).await;
     let readings = match &call.outcome {
         Ok(response) => validate_skills(shard, response).map_err(|refusal| Refusal {
             outcome: SystemOneFailure::Schema.ledger_token(),

@@ -183,6 +183,89 @@ fn the_agreed_mark_says_whether_the_turn_loaded_what_the_search_named() {
     // skills — it is the column every rising seat writes.
     let value = serde_json::to_value(&agreed).expect("a label row");
     assert_eq!(summary::AGREED.read(&value), Some(&json!(true)));
+    assert!(label_row("", &[]).agreed, "no suggestion followed by no load is a negative match");
+    assert!(!label_row("", &[String::from("docx")]).agreed,
+        "a suggestion ignored by the turn must be able to say no");
+}
+
+#[test]
+fn a_loaded_skill_with_no_following_tool_or_body_quote_is_an_unused_proxy() {
+    let load = ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+        id: "load-1".into(),
+        name: "Skill".into(),
+        input: json!({"skill":"docx"}).to_string(),
+    }]);
+    let body = ConversationMessage::tool_result(
+        "load-1",
+        "Skill",
+        json!({"prompt":"Check the document layout before delivery.\nUse the template heading styles."}).to_string(),
+        false,
+    );
+    let idle = [load.clone(), body.clone(), ConversationMessage::assistant(vec![
+        ContentBlock::Text { text: "Done.".into() },
+    ])];
+    assert_eq!(skill_used_after_load(&idle, "docx"), Some(false));
+    let quoted = [load.clone(), body, ConversationMessage::assistant(vec![
+        ContentBlock::Text { text: "Check the document layout before delivery.".into() },
+    ])];
+    assert_eq!(skill_used_after_load(&quoted, "docx"), Some(true));
+    let worked = [load, ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+        id: "read-1".into(), name: "read_file".into(), input: "{}".into(),
+    }])];
+    assert_eq!(skill_used_after_load(&worked, "docx"), Some(true));
+    let only_more_loading = [
+        idle[0].clone(),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "load-2".into(),
+            name: "Skill".into(),
+            input: json!({"skill":"pdf"}).to_string(),
+        }]),
+    ];
+    assert_eq!(skill_used_after_load(&only_more_loading, "docx"), Some(false));
+    assert_eq!(skill_used_after_load(&[], "docx"), None);
+
+    let label = label_turn(PendingSuggestion {
+        suggested: Some("docx".into()),
+        loaded: Some("docx".into()),
+        acting: false,
+        judged: true,
+    }, &idle);
+    assert!(label.agreed);
+    assert_eq!(label.baseline_loaded.as_deref(), Some("docx"));
+    assert_eq!(label.unused_load, Some(true));
+    assert_eq!(label.baseline_unused_load, Some(true));
+}
+
+/// A recording turn does not wait for its judgment, so the judgment can land
+/// after the turn has ended — or not at all. A turn whose entry was never
+/// marked judged has nothing to compare its load with and gets no label; a
+/// load seen before the judgment landed is still the turn's first load.
+#[test]
+fn a_turn_whose_judgment_never_landed_writes_no_label() {
+    let root = tempfile::tempdir().expect("a temp root");
+    let cwd = root.path().canonicalize().expect("a canonical root");
+    turn_pending().lock().expect("pending lock").insert(
+        cwd.clone(),
+        PendingSuggestion { suggested: None, loaded: None, acting: false, judged: false },
+    );
+    note_loaded_skill(&cwd, "docx");
+    let unjudged = turn_pending()
+        .lock()
+        .expect("pending lock")
+        .remove(&cwd)
+        .expect("the seated turn");
+    assert_eq!(unjudged.loaded.as_deref(), Some("docx"), "the early load is kept");
+    assert!(judged_label(unjudged, &[]).is_none(), "no judgment, no label");
+
+    let judged = PendingSuggestion {
+        suggested: Some("docx".into()),
+        loaded: Some("docx".into()),
+        acting: false,
+        judged: true,
+    };
+    let row = judged_label(judged, &[]).expect("the judged turn's label");
+    assert!(row.agreed);
+    assert_eq!(row.baseline_loaded.as_deref(), Some("docx"));
 }
 
 /// The `agreed` mark shares a file with the rows it is about, so it has to be
@@ -247,7 +330,8 @@ fn nothing_to_ask_is_answered_without_a_row() {
 /// What one search costs on the wire, for the catalog on the machine it is
 /// run on — the number the design's measurement table carries.
 ///
-/// Ignored by default: it reads `~/.zo/skills` (or `ZO_SKILL_MEASURE_ROOT`),
+/// Ignored by default: it discovers the catalog for the current directory (or
+/// `ZO_SKILL_MEASURE_CWD`),
 /// so what it prints is a fact about a machine rather than a promise about
 /// the code. Nothing leaves — the request bodies are built and measured, not
 /// sent.
@@ -256,37 +340,12 @@ fn nothing_to_ask_is_answered_without_a_row() {
 #[test]
 #[ignore = "a measurement of this machine's catalog, not a contract"]
 fn skill_search_request_cost() {
-    let root = std::env::var("ZO_SKILL_MEASURE_ROOT").map_or_else(
-        |_| runtime::default_config_home().join("skills"),
+    let cwd = std::env::var("ZO_SKILL_MEASURE_CWD").map_or_else(
+        |_| std::env::current_dir().expect("cwd"),
         PathBuf::from,
     );
-    let skills: Vec<SkillIndexEntry> = std::fs::read_dir(&root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let file = entry.path().join("SKILL.md");
-            let text = std::fs::read_to_string(&file).ok()?;
-            // The frontmatter block: everything between the opening `---` and
-            // the next one.
-            let front: String = text
-                .lines()
-                .skip(1)
-                .take_while(|line| line.trim() != "---")
-                .collect::<Vec<_>>()
-                .join("\n");
-            let field = |name: &str| {
-                front
-                    .lines()
-                    .find_map(|line| line.strip_prefix(&format!("{name}:")))
-                    .map(str::trim)
-                    .map(str::to_string)
-            };
-            let name = field("name")?;
-            Some(SkillIndexEntry::new(name, field("description"), file))
-        })
-        .collect();
-    assert!(!skills.is_empty(), "no skills under {}", root.display());
+    let skills = runtime::discover_skills(&cwd);
+    assert!(!skills.is_empty(), "no skills discovered");
 
     let held = runtime::skill_rank::skill_candidates(&skills);
     let shards = runtime::skill_rank::skill_shards(&held);
@@ -316,5 +375,42 @@ fn skill_search_request_cost() {
         shards.len(),
         total / 4,
         started.elapsed()
+    );
+    let wide_state = runtime::skill_rank::wide_state(task, &held);
+    let wide_questions = runtime::skill_rank::wide_questions(&held);
+    let wide = jev_gate::body_of(&SystemOneRequest {
+        state: &wide_state,
+        model: SYSTEMONE_MODEL,
+        questions: &wide_questions,
+    }).expect("wide request");
+    let duplicate_state = runtime::skill_rank::skill_state(task, &held);
+    let duplicate_wide = jev_gate::body_of(&SystemOneRequest {
+        state: &duplicate_state,
+        model: SYSTEMONE_MODEL,
+        questions: &wide_questions,
+    }).expect("duplicate catalog request");
+    println!(
+        "wide state once: {} B versus catalog duplicated: {} B",
+        wide.to_string().len(), duplicate_wide.to_string().len()
+    );
+    let details: Vec<runtime::skill_rank::SkillDetail> = skills.iter().take(
+        zerocode_core::jev::SKILL_SUGGESTION_SHORTLIST
+    ).enumerate().map(|(position, skill)| runtime::skill_rank::SkillDetail {
+        position,
+        excerpt: std::fs::read_to_string(&skill.path).unwrap_or_default(),
+    }).collect();
+    let narrow_state = runtime::skill_rank::narrow_state(task, &held, &details);
+    let narrow_questions = runtime::skill_rank::narrow_questions(&held, &details);
+    let narrow = jev_gate::body_of(&SystemOneRequest {
+        state: &narrow_state,
+        model: SYSTEMONE_MODEL,
+        questions: &narrow_questions,
+    }).expect("narrow request");
+    let bytes = wide.to_string().len() + narrow.to_string().len();
+    println!(
+        "suggestion: {} skills, wide {} B, narrow {} B, both {} B (~{} tokens; 300 turns/day ~${:.5}/day at $0.042/M)",
+        held.len(), wide.to_string().len(), narrow.to_string().len(), bytes, bytes / 4,
+        f64::from(u32::try_from(bytes).expect("a bounded catalog request")) / 4.0
+            * 300.0 * 0.042 / 1_000_000.0
     );
 }

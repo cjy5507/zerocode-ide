@@ -1,4 +1,4 @@
-//! Ranking the installed skills against the work at hand — the pure half.
+//! Ranking and suggesting installed skills — the pure half.
 //!
 //! zo has always shown the model every installed skill on every request: a
 //! `# Available skills` section of one line per skill, under a 900-token
@@ -7,11 +7,9 @@
 //! for it on every turn AND cannot reach the skills it folded away by
 //! reading, only by already knowing their names.
 //!
-//! This module asks one thing instead: for each installed skill, how much
-//! does it cover the task the turn describes? One score question per skill
-//! over a shared state, the way recall's rerank asks about its notes
-//! (`crate::memory::rerank`), and for the same reason — independent
-//! judgments over one state cannot see each other's answers.
+//! The explicit search tool retains its original per-skill Score rubric.
+//! The turn-start suggestion asks a wide Choice with three gate Nouls, then
+//! checks three candidates with a second Choice and three fits Nouls.
 //!
 //! Nothing here calls anything. It builds the state and the questions, cuts
 //! them into requests no larger than one request should carry, checks a reply
@@ -30,22 +28,222 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use api::{SystemOneQuestion, SystemOneResponse};
+use api::{SystemOneQuestion, SystemOneQuestionKind, SystemOneResponse};
 use core_types::text::levenshtein_distance;
+use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use zerocode_core::jev::door::cut;
+use zerocode_core::jev::noul;
+use zerocode_core::jev::questions::{
+    SKILL_ACTS_ON_SYSTEM, SKILL_FITS, SKILL_FOLLOWS_PROCEDURE, SKILL_NARROW_QUESTION,
+    SKILL_NO, SKILL_NO_MATCH, SKILL_NO_MATCH_CRITERION, SKILL_PROSE_SUFFICES,
+    SKILL_WIDE_QUESTION, SKILL_YES,
+};
 use zerocode_core::jev::{
-    shard, Cap, SKILL_DESCRIPTION_CHAR_CAP, SKILL_LEVELS, SKILL_RELEVANCE_FLOOR_PERMILLE,
-    SKILL_SHARD_TARGET, SKILL_TASK_CHAR_CAP,
+    shard, Cap, SKILL_DESCRIPTION_CHAR_CAP, SKILL_EXCERPT_CHAR_CAP,
+    SKILL_FITS_FLOOR_PERMILLE, SKILL_GATE_FLOOR_PERMILLE, SKILL_LEVELS,
+    SKILL_RELEVANCE_FLOOR_PERMILLE, SKILL_SHARD_TARGET, SKILL_SUGGESTION_SHORTLIST,
+    SKILL_TASK_CHAR_CAP,
 };
 
 use crate::jev_score::{read_score, Scale, ScoreRule};
+use crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX;
 use crate::prompt::SkillIndexEntry;
 
 /// Bumped whenever a level description, the instructions or the state's shape
 /// changes. A row carries it, so a reading taken under other words is never
 /// read as evidence about these ones.
 pub const SKILL_RUBRIC_VERSION: u32 = 1;
+
+const WHICH: &str = "which";
+const ACTS_ON_SYSTEM: &str = "acts_on_system";
+const FOLLOWS_PROCEDURE: &str = "follows_procedure";
+const PROSE_SUFFICES: &str = "prose_suffices";
+const FITS_PREFIX: &str = "fits_";
+
+/// The wide request carries the entire installed catalog in one Choice. The
+/// no-match criterion remains available even when all descriptions sound near.
+#[must_use]
+pub fn wide_state(task: &str, _candidates: &[SkillCandidate]) -> Value {
+    json!({"task": cut(task, Cap::Chars(SKILL_TASK_CHAR_CAP))})
+}
+
+#[must_use]
+pub fn wide_questions(candidates: &[SkillCandidate]) -> BTreeMap<String, SystemOneQuestion> {
+    let criteria: Vec<(String, Option<String>)> = candidates
+        .iter()
+        .map(|candidate| (
+            candidate.question_id.clone(),
+            Some(format!("{}: {}", candidate.name, candidate.description)),
+        ))
+        .collect();
+    let borrowed = criteria.iter().map(|(id, description)| (id.as_str(), description.as_deref()))
+        .chain(std::iter::once((SKILL_NO_MATCH, Some(SKILL_NO_MATCH_CRITERION))));
+    BTreeMap::from([
+        (WHICH.into(), SystemOneQuestion::choice(SKILL_WIDE_QUESTION, borrowed)),
+        (ACTS_ON_SYSTEM.into(), SystemOneQuestion::noul(SKILL_ACTS_ON_SYSTEM, SKILL_YES, SKILL_NO)),
+        (FOLLOWS_PROCEDURE.into(), SystemOneQuestion::noul(SKILL_FOLLOWS_PROCEDURE, SKILL_YES, SKILL_NO)),
+        (PROSE_SUFFICES.into(), SystemOneQuestion::noul(SKILL_PROSE_SUFFICES, SKILL_YES, SKILL_NO)),
+    ])
+}
+
+pub struct WideReading {
+    pub gate: f64,
+    pub shortlist: Vec<usize>,
+}
+
+fn checked_choice(
+    response: &SystemOneResponse,
+    allowed: &BTreeSet<String>,
+) -> Result<api::SystemOneChoiceAnswer, &'static str> {
+    let answer = response
+        .choice_answer(WHICH)
+        .ok_or("missing_choice")?
+        .map_err(|_| "invalid_choice")?;
+    if answer.kind != SystemOneQuestionKind::Choice
+        || !allowed.contains(&answer.choice)
+        || !answer.confidence.is_finite()
+        || !(0.0..=1.0).contains(&answer.confidence)
+        || answer.probabilities.keys().collect::<BTreeSet<_>>()
+            != allowed.iter().collect::<BTreeSet<_>>()
+        || answer.probabilities.values().any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
+        || (answer.probabilities.values().sum::<f64>() - 1.0).abs() > 0.02
+    {
+        return Err("invalid_choice");
+    }
+    Ok(answer)
+}
+
+/// Validate every answer before letting a low gate prevent the second request.
+pub fn read_wide(
+    response: &SystemOneResponse,
+    candidates: &[SkillCandidate],
+) -> Result<WideReading, &'static str> {
+    let allowed = candidates
+        .iter()
+        .map(|candidate| candidate.question_id.clone())
+        .chain(std::iter::once(SKILL_NO_MATCH.into()))
+        .collect();
+    let choice = checked_choice(response, &allowed)?;
+    let answers = serde_json::to_value(&response.answers).map_err(|_| "invalid_noul")?;
+    let acts = noul::read(&answers, ACTS_ON_SYSTEM).map_err(|_| "invalid_noul")?;
+    let procedure = noul::read(&answers, FOLLOWS_PROCEDURE).map_err(|_| "invalid_noul")?;
+    let prose = noul::read(&answers, PROSE_SUFFICES).map_err(|_| "invalid_noul")?;
+    let gate = (acts + procedure + (1.0 - prose)) / 3.0;
+    let mut ranked: Vec<(usize, f64)> = candidates
+        .iter()
+        .map(|candidate| (candidate.position, choice.probabilities[&candidate.question_id]))
+        .collect();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    let shortlist = if gate < f64::from(SKILL_GATE_FLOOR_PERMILLE) / 1_000.0
+        || choice.choice == SKILL_NO_MATCH
+    {
+        Vec::new()
+    } else {
+        ranked.into_iter().take(SKILL_SUGGESTION_SHORTLIST).map(|(position, _)| position).collect()
+    };
+    Ok(WideReading { gate, shortlist })
+}
+
+/// Shortlisted instruction text is read locally by the caller and first
+/// appears in the wire body after the SKILLS door has checked consent.
+pub struct SkillDetail {
+    pub position: usize,
+    pub excerpt: String,
+}
+
+#[must_use]
+pub fn narrow_state(task: &str, candidates: &[SkillCandidate], details: &[SkillDetail]) -> Value {
+    json!({
+        "task": cut(task, Cap::Chars(SKILL_TASK_CHAR_CAP)),
+        "candidates": details.iter().filter_map(|detail| candidates.get(detail.position).map(|candidate| json!({
+            "id": candidate.question_id,
+            "name": candidate.name,
+            "description": candidate.description,
+            "excerpt": cut(&detail.excerpt, Cap::Chars(SKILL_EXCERPT_CHAR_CAP)),
+        }))).collect::<Vec<_>>(),
+    })
+}
+
+#[must_use]
+pub fn narrow_questions(
+    candidates: &[SkillCandidate],
+    details: &[SkillDetail],
+) -> BTreeMap<String, SystemOneQuestion> {
+    let mut questions = BTreeMap::new();
+    let mut criteria: Vec<(String, Option<String>)> = Vec::new();
+    for detail in details {
+        if let Some(candidate) = candidates.get(detail.position) {
+            criteria.push((candidate.question_id.clone(), Some(format!(
+                "{} — {}", candidate.description, cut(&detail.excerpt, Cap::Chars(SKILL_EXCERPT_CHAR_CAP))
+            ))));
+            questions.insert(
+                format!("{FITS_PREFIX}{}", candidate.question_id),
+                SystemOneQuestion::noul(
+                    &format!("{SKILL_FITS} Skill {}: {}.", candidate.name, candidate.description),
+                    SKILL_YES,
+                    SKILL_NO,
+                ),
+            );
+        }
+    }
+    let borrowed = criteria.iter().map(|(id, description)| (id.as_str(), description.as_deref()))
+        .chain(std::iter::once((SKILL_NO_MATCH, Some(SKILL_NO_MATCH_CRITERION))));
+    questions.insert(WHICH.into(), SystemOneQuestion::choice(SKILL_NARROW_QUESTION, borrowed));
+    questions
+}
+
+pub fn read_narrow(
+    response: &SystemOneResponse,
+    candidates: &[SkillCandidate],
+    details: &[SkillDetail],
+) -> Result<Option<SkillReading>, &'static str> {
+    let allowed = details.iter().filter_map(|detail| candidates.get(detail.position))
+        .map(|candidate| candidate.question_id.clone())
+        .chain(std::iter::once(SKILL_NO_MATCH.into())).collect();
+    let choice = checked_choice(response, &allowed)?;
+    let answers = serde_json::to_value(&response.answers).map_err(|_| "invalid_noul")?;
+    let best_fit = details.iter().filter_map(|detail| candidates.get(detail.position))
+        .map(|candidate| noul::read(&answers, &format!("{FITS_PREFIX}{}", candidate.question_id)))
+        .collect::<Result<Vec<_>, _>>().map_err(|_| "invalid_noul")?
+        .into_iter().fold(0.0, f64::max);
+    if best_fit < f64::from(SKILL_FITS_FLOOR_PERMILLE) / 1_000.0
+        || choice.choice == SKILL_NO_MATCH {
+        return Ok(None);
+    }
+    let candidate = candidates.iter().find(|candidate| candidate.question_id == choice.choice)
+        .ok_or("invalid_choice")?;
+    Ok(Some(SkillReading {
+        position: candidate.position,
+        name: candidate.name.clone(),
+        score: choice.probabilities[&choice.choice] * SKILL_SCALE.top(),
+        normalised: choice.probabilities[&choice.choice],
+        confidence: choice.confidence,
+    }))
+}
+
+#[must_use]
+pub fn suggestion_note(name: Option<&str>) -> String {
+    match name {
+        Some(name) => {
+            let safe = name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            format!(
+                "{SKILL_RECOMMENDATION_REMINDER_PREFIX} <system-reminder>Relevant to this request: {safe}. Load it if it actually fits.</system-reminder>"
+            )
+        }
+        None => format!(
+            "{SKILL_RECOMMENDATION_REMINDER_PREFIX} <system-reminder>No installed skill appears relevant to this request.</system-reminder>"
+        ),
+    }
+}
+
+/// The runtime's turn boundary calls this seat on every public turn. The
+/// implementation lives with the Jev door in tools; this interface keeps
+/// runtime independent of that crate.
+pub trait SkillSuggestionSeat: Send + Sync {
+    fn suggest(&self, request: String) -> BoxFuture<'_, Option<String>>;
+    fn finish(&self, turn: &[crate::session::ConversationMessage]);
+}
 
 /// The scale every skill question is asked on — the use table's own levels.
 pub const SKILL_SCALE: Scale<'static> = Scale::new(&SKILL_LEVELS);

@@ -26,6 +26,7 @@ pub(crate) struct RuntimePluginState {
     pub(crate) patch_review_seat: Option<Arc<dyn runtime::PatchReviewSeat>>,
     /// Seated at the public turn boundary to rank files for code requests.
     pub(crate) file_pick_seat: Option<Arc<dyn runtime::FilePickSeat>>,
+    pub(crate) skill_suggestion_seat: Option<Arc<dyn runtime::skill_rank::SkillSuggestionSeat>>,
     pub(crate) mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     pub(crate) lsp_state: Option<Arc<Mutex<RuntimeLspState>>>,
 }
