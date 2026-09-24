@@ -11434,7 +11434,7 @@ pub const WORKTREE_BUDGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// The disk's verdict on one more `--worktree` summons, without its sentence.
 ///
-/// One rule with two readers: [`disk_room_for_a_worktree`] refuses and warns
+/// One rule with two readers: `disk_room_for_a_worktree` (private, below) refuses and warns
 /// by it before the ledger moves, and the window's task board draws it on its
 /// machine strip (t-6588) — so the strip can never call "room" a disk the
 /// next summons would be refused on.
