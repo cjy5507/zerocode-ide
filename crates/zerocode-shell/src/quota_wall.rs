@@ -486,41 +486,72 @@ pub(crate) fn reads_fallbacks(agent: &str) -> bool {
         .is_some_and(|rule| matches!(rule.transcript, TranscriptRule::ClaudeJsonl { .. }))
 }
 
-/// The switches of model recorded in the transcript at `path` since
-/// `offset`, which moves past every whole line read — so a switch early in a
-/// long turn is read however far the file has grown since, where a tail
-/// would have scrolled past it (a worker transcript here ran p50 3.8 MB and
-/// up to 11.8 MB over fourteen days, against a 256 KiB tail). A line still
-/// being written waits for the next read; a file that shrank was rewritten
-/// and is read again from its start. An unchanged file costs one `stat`.
-pub(crate) fn fallbacks_since(path: &Path, offset: &mut u64) -> Vec<ModelDeviation> {
+/// One reading of a worker transcript's switch scan (t-7153, P2): the
+/// switches found past the cursor it was given, and where the cursor would
+/// stand once the ledger HOLDS them. Nothing here moves a cursor: the caller
+/// commits `next` after the rows are durable and not before
+/// (`orchestration::note_model_deviations`), so a row the actor refused —
+/// recovering, its store full — is read again next beat, and written once.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeviationScan {
+    pub(crate) switches: Vec<ModelDeviation>,
+    pub(crate) next: u64,
+}
+
+/// The switches of model recorded in the transcript at `path` past
+/// `offset` — whole lines only, and at most
+/// [`zerocode_core::transcript::MAX_TAIL_BYTES`] of them a reading, so an
+/// 11.8 MB transcript is read in beats rather than on one (before this the
+/// first reading took the whole file into memory at once). A switch early
+/// in a long turn is still read however far the file has grown since, where
+/// a tail would have scrolled past it (a worker transcript here ran p50
+/// 3.8 MB and up to 11.8 MB over fourteen days, against a 256 KiB tail). A
+/// line still being written waits for the next reading; a line longer than
+/// the window is a tool result — a switch record is about 700 bytes
+/// ([`tests::CLAUDE_FALLBACK`]) — and is stepped over; a file that shrank
+/// was rewritten and is read again from its start. An unchanged file costs
+/// one `stat`.
+pub(crate) fn scan_fallbacks(path: &Path, offset: u64) -> DeviationScan {
     use std::io::{Read, Seek, SeekFrom};
+    let standing = |next: u64| DeviationScan {
+        switches: Vec::new(),
+        next,
+    };
     let Ok(mut file) = std::fs::File::open(path) else {
-        return Vec::new();
+        return standing(offset);
     };
     let Ok(size) = file.metadata().map(|meta| meta.len()) else {
-        return Vec::new();
+        return standing(offset);
     };
-    if size < *offset {
-        *offset = 0;
+    let offset = if size < offset { 0 } else { offset };
+    if size == offset || file.seek(SeekFrom::Start(offset)).is_err() {
+        return standing(offset);
     }
-    if size == *offset || file.seek(SeekFrom::Start(*offset)).is_err() {
-        return Vec::new();
-    }
+    let window = zerocode_core::transcript::MAX_TAIL_BYTES.min(size - offset);
     let mut fresh = Vec::new();
-    if file.take(size - *offset).read_to_end(&mut fresh).is_err() {
-        return Vec::new();
+    if file.take(window).read_to_end(&mut fresh).is_err() {
+        return standing(offset);
     }
     let Some(end) = fresh.iter().rposition(|byte| *byte == b'\n') else {
-        return Vec::new();
+        // No whole line in the window: a full window is a line longer than
+        // it, stepped over; anything shorter is a line still being written.
+        let longer_than_the_window =
+            fresh.len() as u64 == window && window == zerocode_core::transcript::MAX_TAIL_BYTES;
+        return standing(if longer_than_the_window {
+            offset + window
+        } else {
+            offset
+        });
     };
-    *offset += end as u64 + 1;
     let lines: Vec<String> = String::from_utf8_lossy(&fresh[..end])
         .lines()
         .filter(|line| line.contains(CLAUDE_FALLBACK_RECORD))
         .map(str::to_string)
         .collect();
-    fallbacks_in(&lines)
+    DeviationScan {
+        switches: fallbacks_in(&lines),
+        next: offset + end as u64 + 1,
+    }
 }
 
 /// Every switch of model a Claude transcript tail records — a decline its
@@ -1717,34 +1748,120 @@ pub(crate) mod tests {
         assert_eq!(record.category.as_deref(), Some("cyber"));
     }
 
-    /// The switch scan reads on from where it stopped: whole lines only, an
-    /// unchanged file nothing, a rewritten file from its start.
+    /// The switch scan reads on from the cursor it is given and moves
+    /// nothing itself (t-7153, P2): whole lines only, an unchanged file
+    /// nothing, a rewritten file from its start — and the same cursor read
+    /// twice answers the same switches twice, which is what lets a row the
+    /// ledger refused be read again.
     #[test]
-    fn the_switch_scan_reads_on_from_where_it_stopped() {
+    fn the_switch_scan_reads_on_from_the_cursor_it_is_given_and_moves_nothing() {
         use std::io::Write;
         let dir = tempfile::tempdir().expect("a dir");
         let path = dir.path().join("session.jsonl");
         let mut file = std::fs::File::create(&path).expect("a transcript");
         writeln!(file, "{CLAUDE_PLAIN_RECORD}").expect("write");
         writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
-        let mut offset = 0;
-        let first = fallbacks_since(&path, &mut offset);
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].key, "switch-1");
-        assert!(fallbacks_since(&path, &mut offset).is_empty(), "read twice");
-        // A line still being written waits for its newline.
+        let first = scan_fallbacks(&path, 0);
+        assert_eq!(first.switches.len(), 1);
+        assert_eq!(first.switches[0].key, "switch-1");
+        assert_eq!(
+            first.next,
+            std::fs::metadata(&path).expect("size").len(),
+            "the cursor stands after the last whole line"
+        );
+        assert_eq!(
+            scan_fallbacks(&path, 0),
+            first,
+            "the same cursor reads the same"
+        );
+        let again = scan_fallbacks(&path, first.next);
+        assert!(again.switches.is_empty(), "read past the cursor twice");
+        assert_eq!(again.next, first.next);
+        // A line still being written waits for its newline, cursor unmoved.
         let second = CLAUDE_FALLBACK.replace("switch-1", "switch-2");
         let (head, rest) = second.split_at(40);
         write!(file, "{head}").expect("write");
         file.flush().expect("flush");
-        assert!(fallbacks_since(&path, &mut offset).is_empty());
+        let waiting = scan_fallbacks(&path, first.next);
+        assert!(waiting.switches.is_empty());
+        assert_eq!(waiting.next, first.next);
         writeln!(file, "{rest}").expect("write");
         file.flush().expect("flush");
-        let later = fallbacks_since(&path, &mut offset);
-        assert_eq!(later.len(), 1);
-        assert_eq!(later[0].key, "switch-2");
+        let later = scan_fallbacks(&path, first.next);
+        assert_eq!(later.switches.len(), 1);
+        assert_eq!(later.switches[0].key, "switch-2");
         // Rewritten shorter: read again from the start.
         std::fs::write(&path, format!("{CLAUDE_FALLBACK}\n")).expect("rewrite");
-        assert_eq!(fallbacks_since(&path, &mut offset).len(), 1);
+        let rewritten = scan_fallbacks(&path, later.next);
+        assert_eq!(rewritten.switches.len(), 1);
+        assert_eq!(
+            rewritten.next,
+            u64::try_from(CLAUDE_FALLBACK.len() + 1).expect("small")
+        );
+    }
+
+    /// A reading is bounded (t-7153, P2): at most the tail window's bytes a
+    /// beat, so a long transcript is read in beats; a line longer than the
+    /// window — a tool result, never a switch record — is stepped over, and
+    /// the record after it is read on the next beat.
+    #[test]
+    fn the_switch_scan_reads_at_most_one_window_a_beat_and_steps_over_a_longer_line() {
+        use std::io::Write;
+        use zerocode_core::transcript::MAX_TAIL_BYTES;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let mut file = std::fs::File::create(&path).expect("a transcript");
+        let long = usize::try_from(MAX_TAIL_BYTES).expect("small") + 4_096;
+        writeln!(
+            file,
+            r#"{{"type":"user","uuid":"big","message":{{"role":"user","content":"{}"}}}}"#,
+            "x".repeat(long)
+        )
+        .expect("write");
+        writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
+        let size = std::fs::metadata(&path).expect("size").len();
+
+        let first = scan_fallbacks(&path, 0);
+        assert!(first.switches.is_empty());
+        assert_eq!(first.next, MAX_TAIL_BYTES, "one window, stepped over");
+        let second = scan_fallbacks(&path, first.next);
+        assert_eq!(second.switches.len(), 1, "the record after the long line");
+        assert_eq!(second.switches[0].key, "switch-1");
+        assert_eq!(second.next, size);
+
+        // Many short lines: one window a beat, whole lines only, until caught up.
+        let mut file = std::fs::File::create(&path).expect("a transcript");
+        let rows = usize::try_from(MAX_TAIL_BYTES / 64).expect("small") + 8;
+        for row in 0..rows {
+            writeln!(
+                file,
+                "{}",
+                CLAUDE_PLAIN_RECORD.replace("\"uuid\":\"v\"", &format!("\"uuid\":\"v{row}\""))
+            )
+            .expect("write");
+        }
+        writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
+        let size = std::fs::metadata(&path).expect("size").len();
+        let mut cursor = 0;
+        let mut beats = 0;
+        let mut switches = Vec::new();
+        while cursor < size {
+            let scan = scan_fallbacks(&path, cursor);
+            assert!(scan.next > cursor, "a beat that read nothing whole");
+            assert!(
+                scan.next - cursor <= MAX_TAIL_BYTES,
+                "a beat read past its window"
+            );
+            switches.extend(scan.switches);
+            cursor = scan.next;
+            beats += 1;
+        }
+        assert!(
+            beats > 1,
+            "a transcript longer than the window was read in one beat"
+        );
+        assert_eq!(switches.len(), 1);
+    }
+
     }
 }

@@ -4380,9 +4380,11 @@ fn note_paused_declines(host: &dyn Host, now_ms: i64) {
     rang(moved);
 }
 
-/// Where each worker transcript's switch scan stands: the bytes already
-/// read. In memory on purpose — the ledger keys each row by its record, so a
-/// restart that reads a file again from the start writes nothing twice.
+/// Where each worker transcript's switch scan stands: the bytes the LEDGER
+/// holds the switches of (t-7153) — moved only after the rows are durable,
+/// never on the read. In memory on purpose — the ledger keys each row by its
+/// record, so a restart that reads a file again from the start writes
+/// nothing twice.
 fn deviation_scans() -> &'static Mutex<std::collections::HashMap<String, u64>> {
     static READ: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
     READ.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -4393,14 +4395,17 @@ fn deviation_scans() -> &'static Mutex<std::collections::HashMap<String, u64>> {
 /// a binding choice; leaving it, however well, is the coordinator's to read —
 /// the two models, the category, how long the CLI keeps the switch, why.
 ///
-/// Read off each worker's own transcript from where the last beat stopped
-/// ([`crate::quota_wall::fallbacks_since`]), outside every lock but the scan
-/// table's own, for every live worker whose CLI records such switches.
+/// Read off each worker's own transcript from where the ledger's holdings
+/// end ([`crate::quota_wall::scan_fallbacks`]), one window a beat, outside
+/// every lock — the scan table is taken to read a cursor and again to keep
+/// one, never across the file or the actor — for every live worker whose CLI
+/// records such switches; the cursor moves as [`record_scanned_switches`]
+/// says.
 fn note_model_deviations(host: &dyn Host, now_ms: i64) {
     let (Some(seated), Some(held)) = (with_ledger_seats(seated_open_attempts), runtime()) else {
         return;
     };
-    let mut switches = Vec::new();
+    let mut moved = false;
     for SeatedAttempt { worker, term, .. } in seated
         .into_iter()
         .filter(|one| crate::quota_wall::reads_fallbacks(&one.agent))
@@ -4411,26 +4416,62 @@ fn note_model_deviations(host: &dyn Host, now_ms: i64) {
         else {
             continue;
         };
-        let mut scans = deviation_scans()
+        let held_at = deviation_scans()
             .lock()
-            .unwrap_or_else(|held| held.into_inner());
-        let offset = scans.entry(path.clone()).or_insert(0);
-        switches.extend(
-            crate::quota_wall::fallbacks_since(Path::new(&path), offset)
-                .into_iter()
-                .map(|mut switch| {
-                    switch.worker = worker.clone();
-                    switch
-                }),
-        );
-    }
-    let mut moved = false;
-    for chunk in switches.chunks(zerocode_core::orchestration::MAX_LIST) {
-        if let Ok((told, _)) = held.actor.model_deviations(chunk.to_vec(), now_ms) {
-            moved |= told;
-        }
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&path)
+            .copied()
+            .unwrap_or(0);
+        let scan = crate::quota_wall::scan_fallbacks(Path::new(&path), held_at);
+        let (keep, moved_here) = record_scanned_switches(&worker, scan, held_at, &mut |switches| {
+            held.actor
+                .model_deviations(switches, now_ms)
+                .map(|(told, _)| told)
+        });
+        moved |= moved_here;
+        deviation_scans()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(path, keep);
     }
     rang(moved);
+}
+
+/// Where a switch scan's cursor may stand after `record` was asked to hold
+/// its switches (t-7153, P2): at `scan.next` when every chunk was answered —
+/// or when there was nothing to hold — and back at `held_at`, where it was,
+/// when any chunk was refused (the actor recovering, its store full): the
+/// next beat reads the same lines again, and the ledger writes each switch
+/// once (`workers_model_deviated` keys a row by its record's uuid). Before
+/// this the cursor moved on the read, and a refused row was gone until a
+/// restart. Answers the cursor to keep, and whether a row moved.
+fn record_scanned_switches(
+    worker: &str,
+    scan: crate::quota_wall::DeviationScan,
+    held_at: u64,
+    record: &mut dyn FnMut(
+        Vec<zerocode_core::orchestration::ModelDeviation>,
+    ) -> Result<bool, RuntimeError>,
+) -> (u64, bool) {
+    let crate::quota_wall::DeviationScan { switches, next } = scan;
+    if switches.is_empty() {
+        return (next, false);
+    }
+    let named: Vec<zerocode_core::orchestration::ModelDeviation> = switches
+        .into_iter()
+        .map(|mut switch| {
+            switch.worker = worker.to_string();
+            switch
+        })
+        .collect();
+    let mut moved = false;
+    for chunk in named.chunks(zerocode_core::orchestration::MAX_LIST) {
+        match record(chunk.to_vec()) {
+            Ok(told) => moved |= told,
+            Err(_) => return (held_at, moved),
+        }
+    }
+    (next, moved)
 }
 
 /* ---- the transient-error continuation (t-4537) ------------------------ */

@@ -1241,6 +1241,96 @@ fn a_decline_and_a_switch_of_model_are_owed_on_the_desk() {
     assert!(mail.iter().all(|one| one.delivery == "pending"));
 }
 
+/// The switch scan's cursor moves only past switches the ledger holds
+/// (t-7153, P2): a chunk the actor refuses keeps the cursor where it was, so
+/// the next beat reads the same lines again and the ledger — which keys a
+/// row by its record — writes each once; nothing to hold moves the cursor
+/// at once; a refusal after some chunks landed keeps the cursor too, and
+/// the landed rows dedupe on the second reading.
+#[test]
+fn the_switch_scans_cursor_moves_only_past_what_the_ledger_holds() {
+    use zerocode_core::orchestration::{MAX_LIST, ModelDeviation};
+    let switch = |key: &str| ModelDeviation {
+        worker: String::new(),
+        key: key.to_string(),
+        from: "claude-fable-5-1".to_string(),
+        to: "claude-opus-4-8".to_string(),
+        category: Some("cyber".to_string()),
+        scope: Some("session".to_string()),
+        at_ms: None,
+    };
+    let scan = |keys: &[&str], next: u64| crate::quota_wall::DeviationScan {
+        switches: keys.iter().map(|key| switch(key)).collect(),
+        next,
+    };
+
+    // Nothing to hold: the cursor moves, and nobody is asked.
+    let mut asked = 0;
+    assert_eq!(
+        super::record_scanned_switches("w-1", scan(&[], 40), 10, &mut |_| {
+            asked += 1;
+            Ok(true)
+        }),
+        (40, false)
+    );
+    assert_eq!(asked, 0);
+
+    // The ledger's own dedupe stands in for the ledger: a key it holds
+    // answers false. Refused once, the cursor stays; asked again with the
+    // same lines, the switch lands and the cursor moves.
+    let mut held: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut refuse_next = true;
+    let mut record = |switches: Vec<ModelDeviation>| -> Result<bool, super::RuntimeError> {
+        if refuse_next {
+            refuse_next = false;
+            return Err(super::RuntimeError::RecoveryRequired);
+        }
+        let mut told = false;
+        for one in switches {
+            assert_eq!(one.worker, "w-1", "named for its worker");
+            told |= held.insert(one.key);
+        }
+        Ok(told)
+    };
+    assert_eq!(
+        super::record_scanned_switches("w-1", scan(&["s-1"], 700), 0, &mut record),
+        (0, false),
+        "a refused row moved the cursor"
+    );
+    assert_eq!(
+        super::record_scanned_switches("w-1", scan(&["s-1"], 700), 0, &mut record),
+        (700, true)
+    );
+    assert_eq!(held.len(), 1);
+
+    // Two chunks, the second refused: the cursor stays; asked again, the
+    // first chunk dedupes and the second lands — each switch once.
+    let many: Vec<String> = (0..=MAX_LIST).map(|index| format!("m-{index}")).collect();
+    let keys: Vec<&str> = many.iter().map(String::as_str).collect();
+    let mut chunks = 0;
+    let mut record = |switches: Vec<ModelDeviation>| -> Result<bool, super::RuntimeError> {
+        chunks += 1;
+        if chunks == 2 {
+            return Err(super::RuntimeError::Closed);
+        }
+        let mut told = false;
+        for one in switches {
+            told |= held.insert(one.key);
+        }
+        Ok(told)
+    };
+    assert_eq!(
+        super::record_scanned_switches("w-1", scan(&keys, 9_000), 700, &mut record),
+        (700, true),
+        "a partly refused reading moved the cursor"
+    );
+    assert_eq!(
+        super::record_scanned_switches("w-1", scan(&keys, 9_000), 700, &mut record),
+        (9_000, true)
+    );
+    assert_eq!(held.len(), 1 + MAX_LIST + 1, "each switch once");
+}
+
 /// A worker's row carries what the task board's roster reads its health from
 /// (t-6588): the question it is waiting on (`Run::awaiting_reply`), the newest
 /// quota wall its attempt met as the ledger reads it back (`newest_wall`), and
