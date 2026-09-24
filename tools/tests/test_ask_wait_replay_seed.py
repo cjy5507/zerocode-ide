@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Contract for `tools/ask-wait-replay/seed.py` — it copies what the ledger
 held about a question's receiver while the asker waited, reads the ledger's
-own definition of an answer, moves nothing, and lets no body out.
+own definition of an answer, reads one ledger at a time, calls an ending by
+the ledger's record of it and never by guess, reads the rule's own notices,
+moves nothing, and lets no body out.
 
 Run: python3 tools/tests/test_ask_wait_replay_seed.py   (stdlib only)
 """
@@ -31,46 +33,83 @@ CREATE TABLE ledger_dispatches (ledger_id TEXT, ordinal INTEGER, run TEXT, id TE
   worker TEXT, started_ms INTEGER, ended_ms INTEGER, succeeded INTEGER, retry_of TEXT, remote TEXT);
 CREATE TABLE ledger_workers (ledger_id TEXT, ordinal INTEGER, run TEXT, id TEXT, team TEXT, agent TEXT,
   pane TEXT, state TEXT, started_ms INTEGER, dispatch TEXT, taken_over INTEGER DEFAULT 0);
+CREATE TABLE ledger_tasks (ledger_id TEXT, ordinal INTEGER, run TEXT, id TEXT, spec TEXT DEFAULT '',
+  title TEXT DEFAULT '', parent TEXT, status TEXT, result TEXT DEFAULT '', failures INTEGER DEFAULT 0,
+  created_ms INTEGER DEFAULT 0);
 """
 
 SECRET_BODY = "the token is sk-live-do-not-copy"
+ADVICE = "the seat this question was asked of was ended by its coordinator"
+
+
+class Rows:
+    """One ledger's rows, written as the store keys them."""
+
+    def __init__(self, db: sqlite3.Connection, ledger: str = "L"):
+        self.db = db
+        self.ledger = ledger
+        self.ordinal = 0
+
+    def next(self) -> int:
+        self.ordinal += 1
+        return self.ordinal
+
+    def message(self, mid, sender, recipient, kind, body, thread=None, task=None, dispatch=None, created=0):
+        self.db.execute(
+            "INSERT INTO ledger_messages (ledger_id, ordinal, run, id, sender, recipient, kind, body, thread, "
+            "task, dispatch, created_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (self.ledger, self.next(), "run-1", mid, sender, recipient, kind, body, thread, task, dispatch, created),
+        )
+
+    def worker(self, wid, dispatch, started=100):
+        self.db.execute(
+            "INSERT INTO ledger_workers VALUES (?,?,?,?,?,?,?,?,?,?,0)",
+            (self.ledger, self.next(), "run-1", wid, "team-1", "claude", "%2", "active", started, dispatch),
+        )
+
+    def dispatch(self, did, task, worker, started, ended=None):
+        self.db.execute(
+            "INSERT INTO ledger_dispatches VALUES (?,?,?,?,?,?,?,?,NULL,NULL,NULL)",
+            (self.ledger, self.next(), "run-1", did, task, worker, started, ended),
+        )
+
+    def task(self, tid, result=""):
+        self.db.execute(
+            "INSERT INTO ledger_tasks (ledger_id, ordinal, run, id, status, result) VALUES (?,?,?,?,?,?)",
+            (self.ledger, self.next(), "run-1", tid, "ready", result),
+        )
 
 
 def a_ledger(path: Path) -> None:
     db = sqlite3.connect(path)
     db.executescript(SCHEMA)
-    rows = []
-
-    def message(ordinal, mid, sender, recipient, kind, body, thread=None, task=None, dispatch=None, created=0):
-        rows.append(("L", ordinal, "run-1", mid, sender, recipient, kind, body, thread, task, dispatch, created))
-
+    rows = Rows(db)
     # A worker receiver carrying an open attempt.
-    db.execute("INSERT INTO ledger_workers VALUES ('L',0,'run-1','w-1','team-1','claude','%2','active',100,'dp-1',0)")
-    db.execute("INSERT INTO ledger_workers VALUES ('L',1,'run-1','w-2','team-1','codex','%3','active',100,'dp-2',0)")
-    db.execute("INSERT INTO ledger_dispatches VALUES ('L',0,'run-1','dp-1','t-1','w-1',100,5000,NULL,NULL,NULL)")
-    db.execute("INSERT INTO ledger_dispatches VALUES ('L',1,'run-1','dp-2','t-2','w-2',100,NULL,NULL,NULL,NULL)")
+    rows.worker("w-1", "dp-1")
+    rows.worker("w-2", "dp-2")
+    rows.dispatch("dp-1", "t-1", "w-1", 100, 5000)
+    rows.dispatch("dp-2", "t-2", "w-2", 100)
     # A turn end BEFORE the question: never a fact about this wait.
-    message(0, "m-0", "ledger", "run:run-1", "went_quiet",
-            json.dumps({"workerId": "w-1", "dispatchId": "dp-1", "turnEndedMs": 900}), created=950)
+    rows.message("m-0", "ledger", "run:run-1", "went_quiet",
+                 json.dumps({"workerId": "w-1", "dispatchId": "dp-1", "turnEndedMs": 900}), created=950)
     # The question, from w-2 to w-1.
-    message(1, "m-1", "worker:w-2", "worker:w-1", "question", SECRET_BODY, dispatch="dp-2", created=1000)
+    rows.message("m-1", "worker:w-2", "worker:w-1", "question", SECRET_BODY, dispatch="dp-2", created=1000)
     # A turn end the ledger learned during the wait.
-    message(2, "m-2", "ledger", "run:run-1", "went_quiet",
-            json.dumps({"workerId": "w-1", "dispatchId": "dp-1", "turnEndedMs": 2000}), created=2010)
+    rows.message("m-2", "ledger", "run:run-1", "went_quiet",
+                 json.dumps({"workerId": "w-1", "dispatchId": "dp-1", "turnEndedMs": 2000}), created=2010)
     # The ledger's own line in the thread, wearing the receiver's name: never the answer.
-    message(3, "m-3", "worker:w-1", "worker:w-2", "went_quiet", "{}", thread="m-1", created=2500)
+    rows.message("m-3", "worker:w-1", "worker:w-2", "went_quiet", "{}", thread="m-1", created=2500)
     # A stranger's word in the thread: not the answer either.
-    message(4, "m-4", "worker:w-9", "worker:w-2", "status", "me too", thread="m-1", created=2600)
+    rows.message("m-4", "worker:w-9", "worker:w-2", "status", "me too", thread="m-1", created=2600)
     # The answer.
-    message(5, "m-5", "worker:w-1", "worker:w-2", "question", SECRET_BODY + " answered", thread="m-1", created=4000)
+    rows.message("m-5", "worker:w-1", "worker:w-2", "question", SECRET_BODY + " answered", thread="m-1", created=4000)
     # A turn end after the answer: not this wait's.
-    message(6, "m-6", "ledger", "run:run-1", "went_quiet",
-            json.dumps({"workerId": "w-1", "dispatchId": "dp-1", "turnEndedMs": 4500}), created=4510)
+    rows.message("m-6", "ledger", "run:run-1", "went_quiet",
+                 json.dumps({"workerId": "w-1", "dispatchId": "dp-1", "turnEndedMs": 4500}), created=4510)
     # A second question, to the run: unobservable, and never answered — the asker's dispatch is open, so censored.
-    message(7, "m-7", "worker:w-2", "run:run-1", "question", "how?", dispatch="dp-2", created=6000)
+    rows.message("m-7", "worker:w-2", "run:run-1", "question", "how?", dispatch="dp-2", created=6000)
     # A third, to w-1 after its attempt ended (5000): no open attempt.
-    message(8, "m-8", "worker:w-2", "worker:w-1", "question", "again?", dispatch="dp-2", created=7000)
-    db.executemany("INSERT INTO ledger_messages (ledger_id, ordinal, run, id, sender, recipient, kind, body, thread, task, dispatch, created_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    rows.message("m-8", "worker:w-2", "worker:w-1", "question", "again?", dispatch="dp-2", created=7000)
     db.commit()
     db.close()
 
@@ -92,7 +131,7 @@ class Gathering(unittest.TestCase):
         first = rows[seed.hashed("m-1")]
         self.assertEqual(first["outcome"], "answered")
         self.assertEqual(first["wait_ms"], 3000, "the answer is m-5 at 4000, not the ledger's line at 2500")
-        self.assertTrue(first["misread_answer"], "today's reading would have taken the ledger's line at 2500")
+        self.assertTrue(first["misread_answer"], "the older reading would have taken the ledger's line at 2500")
 
     def test_only_facts_learned_during_the_wait_are_carried(self):
         rows = self.rows()
@@ -125,6 +164,139 @@ class Gathering(unittest.TestCase):
             seed.open_read_only(self.db).execute("DELETE FROM ledger_messages")
 
 
+class Scope(unittest.TestCase):
+    """Two ledgers in one store mint the same ids; a replay reads one."""
+
+    def setUp(self):
+        self.raw = tempfile.TemporaryDirectory()
+        self.db = Path(self.raw.name) / "authority.sqlite"
+        db = sqlite3.connect(self.db)
+        db.executescript(SCHEMA)
+        for ledger, answered_at in (("L", 4000), ("M", 9000)):
+            rows = Rows(db, ledger)
+            rows.worker("w-1", None)
+            rows.worker("w-2", None)
+            rows.message("m-1", "worker:w-2", "worker:w-1", "question", "which?", created=1000)
+            rows.message("m-2", "worker:w-1", "worker:w-2", "question", "main", thread="m-1", created=answered_at)
+        db.commit()
+        db.close()
+
+    def tearDown(self):
+        self.raw.cleanup()
+
+    def test_a_store_of_two_ledgers_is_read_one_at_a_time(self):
+        with self.assertRaises(seed.LedgerScopeError):
+            seed.gather(self.db)
+        for ledger, waited in (("L", 3000), ("M", 8000)):
+            rows = seed.gather(self.db, ledger)["rows"]
+            self.assertEqual(len(rows), 1, f"{ledger} read another ledger's question")
+            self.assertEqual(rows[0]["wait_ms"], waited, f"{ledger} took another ledger's answer")
+        with self.assertRaises(seed.LedgerScopeError):
+            seed.gather(self.db, "N")
+
+
+class Endings(unittest.TestCase):
+    """An attempt that ended while its asker waited is called by the
+    ledger's record of the ending — never guessed to be a stop."""
+
+    def setUp(self):
+        self.raw = tempfile.TemporaryDirectory()
+        self.db = Path(self.raw.name) / "authority.sqlite"
+        db = sqlite3.connect(self.db)
+        db.executescript(SCHEMA)
+        rows = Rows(db)
+        rows.worker("w-9", "dp-9")
+        rows.dispatch("dp-9", "t-9", "w-9", 100)
+        # Stopped, and the stop is the task's latest record.
+        rows.worker("w-1", None)
+        rows.dispatch("dp-1", "t-1", "w-1", 100, 3000)
+        rows.task("t-1", json.dumps({"outcome": "stopped", "reason": "the prose nobody copies"}))
+        # Ended with no reason the ledger kept.
+        rows.worker("w-3", None)
+        rows.dispatch("dp-3", "t-3", "w-3", 100, 3000)
+        rows.task("t-3", "")
+        # Ended, then the task was carried again and THAT attempt was abandoned:
+        # the record speaks for the later attempt, not this one.
+        rows.worker("w-4", None)
+        rows.dispatch("dp-4", "t-4", "w-4", 100, 3000)
+        rows.worker("w-5", None)
+        rows.dispatch("dp-5", "t-4", "w-5", 3500, 3600)
+        rows.task("t-4", json.dumps({"outcome": "abandoned"}))
+        for question, receiver in (("m-1", "w-1"), ("m-3", "w-3"), ("m-4", "w-4")):
+            rows.message(question, "worker:w-9", f"worker:{receiver}", "question", "which?", dispatch="dp-9", created=1000)
+        rows.message("m-99", "ledger", "run:run-1", "status", "{}", created=10_000)
+        db.commit()
+        db.close()
+
+    def tearDown(self):
+        self.raw.cleanup()
+
+    def test_an_ending_is_the_ledgers_record_and_never_a_guess(self):
+        rows = {row["question"]: row for row in seed.gather(self.db)["rows"]}
+        endings = {question: rows[seed.hashed(question)]["receiver_ended"]["ending"] for question in ("m-1", "m-3", "m-4")}
+        self.assertEqual(
+            endings,
+            {"m-1": "stopped", "m-3": "unexplained", "m-4": "unexplained"},
+            "an ending with no record of its own was called a stop",
+        )
+        self.assertNotIn("the prose nobody copies", json.dumps(rows))
+
+
+class Notices(unittest.TestCase):
+    """The rule's own lines are read — for every receiver, while the asker
+    waits, and without the advice sentence."""
+
+    def setUp(self):
+        self.raw = tempfile.TemporaryDirectory()
+        self.db = Path(self.raw.name) / "authority.sqlite"
+        db = sqlite3.connect(self.db)
+        db.executescript(SCHEMA)
+        rows = Rows(db)
+        rows.worker("w-2", "dp-2")
+        rows.dispatch("dp-2", "t-2", "w-2", 100)
+        # A question to the run, and the coordinator's seat seen resting.
+        rows.message("m-1", "worker:w-2", "run:run-1", "question", "which?", dispatch="dp-2", created=1000)
+        rows.message("m-2", "ledger", "worker:w-2", "status", json.dumps({
+            "questionId": "m-1", "receiver": "run:run-1", "reason": "turn_ended", "final": False,
+            "advice": None, "factMs": 1500, "observedAtMs": 1510,
+        }), thread="m-1", created=1510)
+        # A question to a worker that is stopped: the final word, with its advice.
+        rows.worker("w-1", None)
+        rows.message("m-3", "worker:w-2", "worker:w-1", "question", "why?", dispatch="dp-2", created=2000)
+        rows.message("m-4", "ledger", "worker:w-2", "status", json.dumps({
+            "questionId": "m-3", "receiver": "worker:w-1", "reason": "cancelled", "final": True,
+            "advice": ADVICE, "factMs": 2500, "observedAtMs": 2500,
+        }), thread="m-3", created=2500)
+        # The answer to m-1, and a line after it: not a line of that wait.
+        rows.message("m-5", "run:run-1", "worker:w-2", "question", "main", thread="m-1", created=3000)
+        rows.message("m-6", "ledger", "worker:w-2", "status", json.dumps({
+            "questionId": "m-1", "receiver": "run:run-1", "reason": "turn_ended", "final": False,
+            "factMs": 3100, "observedAtMs": 3110,
+        }), thread="m-1", created=3110)
+        db.commit()
+        db.close()
+
+    def tearDown(self):
+        self.raw.cleanup()
+
+    def test_the_rules_lines_are_read_while_the_asker_waits(self):
+        seeded = seed.gather(self.db)
+        rows = {row["question"]: row for row in seeded["rows"]}
+        to_the_run = rows[seed.hashed("m-1")]
+        self.assertEqual(to_the_run["receiver_facts"], "unobservable", "the baseline stays the baseline")
+        self.assertEqual(
+            to_the_run["notices"],
+            [{"reason": "turn_ended", "final": False, "fact_ms": 1500, "learned_ms": 1510}],
+        )
+        to_the_worker = rows[seed.hashed("m-3")]
+        self.assertEqual(
+            to_the_worker["notices"],
+            [{"reason": "cancelled", "final": True, "fact_ms": 2500, "learned_ms": 2500}],
+        )
+        self.assertNotIn(ADVICE, json.dumps(seeded))
+        self.assertTrue(any("with a final word while waiting: 1" in line for line in seed.summarize(seeded)))
+
+
 class Constants(unittest.TestCase):
     def test_the_ledgers_own_kinds_and_words_match_the_rust_source(self):
         self.assertIn(f'pub const LEDGER_ITSELF: &str = "{seed.LEDGER_ITSELF}";', CORE)
@@ -138,6 +310,11 @@ class Constants(unittest.TestCase):
             self.assertIsNotNone(found, variant)
             words.append(found.group(1))
         self.assertEqual(tuple(words), seed.LEDGERS_OWN_KINDS)
+
+    def test_the_ending_outcomes_match_the_rust_source(self):
+        ending = re.search(r"impl Ending \{.*?const fn as_str\(self\) -> &'static str \{\s*match self \{(.*?)\}", CORE, re.S)
+        self.assertIsNotNone(ending)
+        self.assertEqual(tuple(re.findall(r"=> \"([a-z_]+)\"", ending.group(1))), seed.ENDING_OUTCOMES)
 
 
 if __name__ == "__main__":

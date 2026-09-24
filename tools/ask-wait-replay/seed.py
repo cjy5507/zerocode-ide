@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Gather every question the orchestration ledger holds and what its asker
 could have known about the receiver while waiting — the baseline for the
-receiver-notice rule (t-6740, Traycer T4).
+receiver-notice rule (t-6740, Traycer T4) — and, on a ledger written after
+the rule, the notices the asker was actually sent.
 
 This script **only reads the ledger and copies facts**. It decides nothing:
 which receiver facts become a notice, and what that notice says, is the
-`RECEIVER_NOTICE` table in `crates/zerocode-core/src/orchestration.rs`, and
-the ledger's own reading of "answered" is `Message::answers` there. A second
+`ReceiverNews` table in `crates/zerocode-core/src/orchestration.rs`, and the
+ledger's own reading of "answered" is `Message::answers` there. A second
 copy of either in Python would be a second rule.
 
 What a seed row is: one root question (`kind = question`, no thread) with
@@ -19,20 +20,34 @@ time, keyed by when it wrote them, never a later fact moved earlier:
     asker's own dispatch ended first (`closed`), or the ledger's last write
     came with the question still open (`censored` — right-censored, and
     counted apart from the other two on purpose);
-  * for a receiver that is a worker: whether it had an open attempt when
-    asked; the turn ends, stall notices, judged causes and quota walls the
-    ledger recorded about it while the asker waited (each with the fact's
-    own time and the time the ledger learned it); and whether its attempt
-    ended before the wait did — and how (`done`, `died`, `stopped`, which
-    is the ledger's word for an attempt closed by a stop or an abandon);
-  * for a receiver that is a run (its coordinator) or a bare pane: nothing
-    — the ledger records no turn facts about a coordinator's pane, and the
-    row says so (`receiver_facts: unobservable`) rather than guessing.
+  * the BASELINE — what the ledger's own observations said about a worker
+    receiver (`receiver_facts`): whether it had an open attempt when asked;
+    the turn ends, stall notices, judged causes and quota walls the ledger
+    recorded about it while the asker waited (each with the fact's own time
+    and the time the ledger learned it); and whether its attempt ended
+    before the wait did — and how, read off the ledger's record of that
+    ending (`done`, `died`, `stopped`, `abandoned`), or `unexplained` where
+    the ledger kept no reason this replay can read. A run (its coordinator)
+    or a bare pane has no baseline facts: the ledger wrote no turn facts
+    about a coordinator's pane before the rule, and the row says so
+    (`receiver_facts: unobservable`) rather than guessing;
+  * the NOTICES — the rule's own lines (`notices`): each `status` line from
+    `ledger` threaded on the question while the asker waited, with its
+    reason word, whether it was final, the fact's time and the time the
+    ledger wrote it. A ledger written before the rule holds none, for any
+    receiver; after it, run and pane receivers have them too.
 
-Ids are hashed and bodies are never copied. Only counts and durations leave.
+One ledger at a time: the authority store keys every row by `ledger_id`,
+and ids are minted per ledger, so two ledgers in one store can both hold an
+`m-1`. The one ledger the store holds is read; a store holding several is
+refused until one is named.
+
+Ids are hashed and bodies are never copied. Only words, counts and
+durations leave.
 
     tools/ask-wait-replay/seed.py --out seed.json            # the window's ledger, read-only
     tools/ask-wait-replay/seed.py --db PATH --out seed.json
+    tools/ask-wait-replay/seed.py --db PATH --ledger-id ID --out seed.json
 """
 
 from __future__ import annotations
@@ -40,7 +55,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sqlite3
 import statistics
 import sys
@@ -67,9 +81,20 @@ LEDGERS_OWN_KINDS = ("went_quiet", "deadlocked", "worker_died", "quota_walled", 
 # `STALL_JUDGED_REASON` there.
 STALL_JUDGED_REASON = "judged"
 
+# `Ending::as_str` there: the outcome an attempt's coordinator ended it with,
+# as `end_attempt` writes it into the task's result.
+ENDING_OUTCOMES = ("stopped", "abandoned")
+
 # The address heads the ledger routes (`WORKER_ADDRESS_PREFIX`, `RUN_ADDRESS_PREFIX`,
 # `PANE_ADDRESS_PREFIX`, `REMOTE_ADDRESS_PREFIX`).
 ADDRESS_HEADS = ("worker", "run", "pane", "remote", "home")
+
+# The tables a ledger's rows live in, every one keyed by `ledger_id`.
+LEDGER_TABLES = ("ledger_messages", "ledger_dispatches", "ledger_workers", "ledger_tasks")
+
+
+class LedgerScopeError(Exception):
+    """The store does not name the one ledger this replay should read."""
 
 
 def address_head(address: str) -> str:
@@ -92,9 +117,9 @@ def open_read_only(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def body_json(text: str) -> dict:
+def body_json(text: str | None) -> dict:
     try:
-        held = json.loads(text)
+        held = json.loads(text or "")
     except (json.JSONDecodeError, TypeError):
         return {}
     return held if isinstance(held, dict) else {}
@@ -108,20 +133,76 @@ def percentile(values: list[int], share: float) -> int | None:
     return ordered[at]
 
 
-class Ledger:
-    """The tables a question's wait is read from, loaded once."""
+def tables_of(connection: sqlite3.Connection) -> set[str]:
+    return {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
-    def __init__(self, connection: sqlite3.Connection):
+
+def ledger_ids(connection: sqlite3.Connection) -> list[str]:
+    """Every ledger the store holds rows for."""
+    present = tables_of(connection)
+    held: set[str] = set()
+    for table in LEDGER_TABLES:
+        if table in present:
+            held.update(row[0] for row in connection.execute(f"SELECT DISTINCT ledger_id FROM {table}"))
+    return sorted(held)
+
+
+def scoped_ledger(connection: sqlite3.Connection, asked: str | None) -> str:
+    """The one ledger this replay reads: the one named, or the only one the
+    store holds. Several and none named is refused, because rows from two
+    ledgers under one id map would pin one ledger's answer on the other's
+    question."""
+    held = ledger_ids(connection)
+    if asked is None:
+        if len(held) != 1:
+            raise LedgerScopeError(
+                f"the store holds {len(held)} ledgers ({', '.join(held) or 'none'}) — name one with --ledger-id"
+            )
+        return held[0]
+    if asked not in held:
+        raise LedgerScopeError(f"the store holds no ledger {asked!r} ({', '.join(held) or 'none'})")
+    return asked
+
+
+class Ledger:
+    """The tables a question's wait is read from, loaded once — for ONE
+    ledger, every read scoped by its `ledger_id`."""
+
+    def __init__(self, connection: sqlite3.Connection, ledger_id: str):
+        scope = (ledger_id,)
         self.messages = [dict(row) for row in connection.execute(
             "SELECT run, id, sender, recipient, kind, body, thread, task, dispatch, created_ms "
-            "FROM ledger_messages ORDER BY ordinal"
+            "FROM ledger_messages WHERE ledger_id = ? ORDER BY ordinal",
+            scope,
         )]
         self.dispatches = [dict(row) for row in connection.execute(
-            "SELECT run, id, task, worker, started_ms, ended_ms, succeeded FROM ledger_dispatches"
+            "SELECT run, id, task, worker, started_ms, ended_ms, succeeded FROM ledger_dispatches "
+            "WHERE ledger_id = ? ORDER BY ordinal",
+            scope,
         )]
         self.workers = {row["id"]: dict(row) for row in connection.execute(
-            "SELECT run, id, agent, state, started_ms, dispatch, taken_over FROM ledger_workers"
+            "SELECT run, id, agent, state, started_ms, dispatch, taken_over FROM ledger_workers "
+            "WHERE ledger_id = ?",
+            scope,
         )}
+        # What each task's record says now. One field per task, written over
+        # by every attempt that ends it — so it speaks for an attempt only
+        # while that attempt is the task's latest (`latest_attempt`).
+        self.task_results: dict[tuple[str, str], str] = {}
+        if "ledger_tasks" in tables_of(connection):
+            self.task_results = {
+                (row["run"], row["id"]): row["result"]
+                for row in connection.execute(
+                    "SELECT run, id, result FROM ledger_tasks WHERE ledger_id = ?", scope
+                )
+            }
+        latest: dict[tuple[str, str], tuple[int, str]] = {}
+        for row in self.dispatches:
+            key = (row["run"], row["task"])
+            held = latest.get(key)
+            if held is None or row["started_ms"] >= held[0]:
+                latest[key] = (row["started_ms"], row["id"])
+        self.latest_attempt = {key: held[1] for key, held in latest.items()}
         self.observed_until_ms = max((row["created_ms"] for row in self.messages), default=0)
         self.observed_from_ms = min((row["created_ms"] for row in self.messages), default=0)
         self.by_thread: dict[str, list[dict]] = {}
@@ -148,9 +229,9 @@ class Ledger:
 
     def answer_of(self, question: dict) -> tuple[dict | None, dict | None]:
         """The first thread row from the asked seat that is not the ledger's
-        voice — and, beside it, the first from that seat under today's looser
-        reading (any kind, any author), so a row the two disagree on is
-        counted rather than silently taken."""
+        voice — and, beside it, the first from that seat under the older,
+        looser reading (any kind, any author), so a row the two disagree on
+        is counted rather than silently taken."""
         thread = self.by_thread.get(question["id"], [])
         loose = next((row for row in thread if row["sender"] == question["recipient"]), None)
         strict = next(
@@ -165,6 +246,18 @@ class Ledger:
         )
         return strict, loose
 
+    def notices_on(self, question: dict) -> list[tuple[dict, dict]]:
+        """The rule's lines: the ledger's own `status` rows threaded on the
+        question, each with the facts it carried."""
+        held = []
+        for row in self.by_thread.get(question["id"], []):
+            if row["sender"] != LEDGER_ITSELF or row["kind"] != "status":
+                continue
+            body = body_json(row["body"])
+            if isinstance(body.get("reason"), str):
+                held.append((row, body))
+        return held
+
     def receiver_attempt(self, worker_id: str, at_ms: int) -> dict | None:
         """The receiver's dispatch that was open when the question was asked."""
         for row in self.dispatches:
@@ -173,6 +266,26 @@ class Ledger:
             if row["ended_ms"] is None or row["ended_ms"] > at_ms:
                 return row
         return None
+
+    def ending_of(self, worker_id: str, attempt: dict, asked_ms: int, end_ms: int) -> str:
+        """How the receiver's attempt ended, by the ledger's own record of it
+        and nothing else: `died` (a `worker_died` row), `done` (its
+        `worker_done`), the outcome the ledger wrote into the task for THIS
+        attempt (`stopped`, `abandoned` — read only while the attempt is the
+        task's latest, since the next one writes over it), or `unexplained`
+        where the ledger kept no reason this replay can read. Never a guess:
+        an attempt with no recorded reason is not counted as a stop."""
+        facts = self.facts_by_worker.get(worker_id, [])
+        if any(held["kind"] == "worker_died" and asked_ms < held["created_ms"] <= end_ms for held, _ in facts):
+            return "died"
+        if any(asked_ms < done_ms <= attempt["ended_ms"] for done_ms in self.done_by_worker.get(worker_id, [])):
+            return "done"
+        task = (attempt["run"], attempt["task"])
+        if self.latest_attempt.get(task) == attempt["id"]:
+            outcome = body_json(self.task_results.get(task)).get("outcome")
+            if outcome in ENDING_OUTCOMES:
+                return outcome
+        return "unexplained"
 
 
 def question_row(ledger: Ledger, question: dict, earlier: dict[tuple[str, str, str], list[dict]]) -> dict:
@@ -197,8 +310,8 @@ def question_row(ledger: Ledger, question: dict, earlier: dict[tuple[str, str, s
         "asked_ms": asked_ms,
         "outcome": outcome,
         "wait_ms": max(0, end_ms - asked_ms),
-        # A row today's reading would take as the answer that the stricter
-        # one refuses — the ledger's own voice in the thread.
+        # A row the older, looser reading would take as the answer that the
+        # stricter one refuses — the ledger's own voice in the thread.
         "misread_answer": loose is not None and (strict is None or loose["id"] != strict["id"]),
     }
     body_key = (question["sender"], question["recipient"], hashlib.sha256(question["body"].encode()).hexdigest())
@@ -207,6 +320,18 @@ def question_row(ledger: Ledger, question: dict, earlier: dict[tuple[str, str, s
         (hashed(prior["id"]) for prior in repeats if prior["open_until_ms"] > asked_ms), None
     )
     earlier.setdefault(body_key, []).append({"id": question["id"], "open_until_ms": end_ms})
+    # The rule's lines the asker was sent while it waited — words, flags and
+    # clocks only; the advice sentence and every id stay behind.
+    row["notices"] = [
+        {
+            "reason": body["reason"],
+            "final": body.get("final") is True,
+            "fact_ms": body.get("factMs") if isinstance(body.get("factMs"), int) else None,
+            "learned_ms": held["created_ms"],
+        }
+        for held, body in ledger.notices_on(question)
+        if asked_ms < held["created_ms"] <= end_ms
+    ]
 
     if row["receiver"] != "worker":
         row["receiver_facts"] = "unobservable"
@@ -246,25 +371,25 @@ def question_row(ledger: Ledger, question: dict, earlier: dict[tuple[str, str, s
     row["wait_after_first_turn_end_ms"] = None if first_turn is None or first_turn >= end_ms else end_ms - first_turn
     ended_ms = attempt["ended_ms"]
     if ended_ms is not None and asked_ms < ended_ms < end_ms:
-        if any(held["kind"] == "worker_died" and asked_ms < held["created_ms"] <= end_ms for held, _ in facts):
-            ending = "died"
-        elif any(asked_ms < done_ms <= ended_ms for done_ms in ledger.done_by_worker.get(worker_id, [])):
-            ending = "done"
-        else:
-            ending = "stopped"
-        row["receiver_ended"] = {"ending": ending, "fact_ms": ended_ms, "wait_after_ms": end_ms - ended_ms}
+        row["receiver_ended"] = {
+            "ending": ledger.ending_of(worker_id, attempt, asked_ms, end_ms),
+            "fact_ms": ended_ms,
+            "wait_after_ms": end_ms - ended_ms,
+        }
     else:
         row["receiver_ended"] = None
     return row
 
 
-def gather(db: Path) -> dict:
+def gather(db: Path, ledger_id: str | None = None) -> dict:
     with open_read_only(db) as connection:
-        ledger = Ledger(connection)
+        scoped = scoped_ledger(connection, ledger_id)
+        ledger = Ledger(connection, scoped)
     earlier: dict[tuple[str, str, str], list[dict]] = {}
     rows = [question_row(ledger, question, earlier) for question in ledger.root_questions()]
     return {
         "db": hashed(str(db)),
+        "ledger": hashed(scoped),
         "observed_from_ms": ledger.observed_from_ms,
         "observed_until_ms": ledger.observed_until_ms,
         "runs": len({row["run"] for row in ledger.messages}),
@@ -282,7 +407,7 @@ def summarize(seed: dict) -> list[str]:
         pairs[(row["asker"], row["receiver"])] = pairs.get((row["asker"], row["receiver"]), 0) + 1
     lines.append("asker→receiver: " + ", ".join(f"{a}→{r} {n}" for (a, r), n in sorted(pairs.items(), key=lambda kv: -kv[1])))
     lines.append(f"repeats (same words re-asked while open): {sum(1 for row in rows if row['repeat_of'])}")
-    lines.append(f"misread answers under today's reading: {sum(1 for row in rows if row['misread_answer'])}")
+    lines.append(f"misread answers under the older reading: {sum(1 for row in rows if row['misread_answer'])}")
     lines.append("")
     lines.append("| outcome | n | total wait | mean | p50 | p95 |")
     lines.append("|---|---|---|---|---|---|")
@@ -299,6 +424,7 @@ def summarize(seed: dict) -> list[str]:
     lines.append(f"unanswered wait (closed + censored): n {len(unanswered)}, total {sum(unanswered) / 1000:.0f} s"
                  + (f", mean {statistics.mean(unanswered) / 1000:.0f} s" if unanswered else ""))
     lines.append("")
+    lines.append("baseline — what the ledger's own observations held about the receiver:")
     workers = [row for row in rows if row["receiver"] == "worker"]
     facts = {}
     for row in workers:
@@ -327,23 +453,45 @@ def summarize(seed: dict) -> list[str]:
                  + (" (" + ", ".join(sorted({one['cause'] for row in stalled for one in row['judged']})) + ")" if any(row["judged"] for row in stalled) else ""))
     ended = [row for row in observed if row["receiver_ended"]]
     lines.append(f"  receiver's attempt ended before the wait did: {len(ended)}")
-    for ending in ("done", "died", "stopped"):
+    for ending in ("done", "died", *ENDING_OUTCOMES, "unexplained"):
         part = [row["receiver_ended"]["wait_after_ms"] for row in ended if row["receiver_ended"]["ending"] == ending]
         if part:
             lines.append(f"    {ending}: n {len(part)}, wait after the ending total {sum(part) / 1000:.0f} s, "
                          f"mean {statistics.mean(part) / 1000:.0f} s, max {max(part) / 1000:.0f} s")
+    lines.append("")
+    notified = [row for row in rows if row["notices"]]
+    lines.append(f"notices — the rule's lines the asker was sent while waiting: {len(notified)} of {len(rows)} questions")
+    lags: dict[str, list[int]] = {}
+    for row in notified:
+        for one in row["notices"]:
+            if one["fact_ms"] is not None:
+                lags.setdefault(one["reason"], []).append(one["learned_ms"] - one["fact_ms"])
+    for reason, held in sorted(lags.items()):
+        lines.append(f"  {reason}: n {len(held)}, fact → row p50 {percentile(held, 0.5)} ms, p95 {percentile(held, 0.95)} ms")
+    by_receiver: dict[str, int] = {}
+    for row in notified:
+        by_receiver[row["receiver"]] = by_receiver.get(row["receiver"], 0) + 1
+    if by_receiver:
+        lines.append("  by receiver: " + ", ".join(f"{k} {v}" for k, v in sorted(by_receiver.items())))
+    finals = [row for row in notified if any(one["final"] for one in row["notices"])]
+    lines.append(f"  with a final word while waiting: {len(finals)}")
     return lines
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="the authority store (opened read-only)")
+    parser.add_argument("--ledger-id", help="which ledger in the store (default: the only one it holds)")
     parser.add_argument("--out", type=Path, help="where to write the seed JSON")
     args = parser.parse_args()
     if not args.db.is_file():
         print(f"no ledger at {args.db}", file=sys.stderr)
         return 2
-    seed = gather(args.db)
+    try:
+        seed = gather(args.db, args.ledger_id)
+    except LedgerScopeError as why:
+        print(why, file=sys.stderr)
+        return 2
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(seed, indent=1) + "\n")
