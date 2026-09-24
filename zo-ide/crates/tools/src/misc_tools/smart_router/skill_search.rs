@@ -459,12 +459,17 @@ impl SkillSuggestionSeat for SkillSuggestionJudge {
 }
 
 /// The next observed Skill load is the first-load label for this turn. A turn
-/// with no load is closed by the runtime's turn-end hook.
+/// with no load is closed by the runtime's turn-end hook. The entry is seated
+/// before the judgment is asked, so a load early in the turn is its label
+/// whether or not the judgment has landed yet; `judged` says whether it did,
+/// and a turn that ends without one is not labelled — there is nothing to
+/// compare the load with.
 #[derive(Debug)]
 struct PendingSuggestion {
     suggested: Option<String>,
     loaded: Option<String>,
     acting: bool,
+    judged: bool,
 }
 
 fn turn_pending() -> &'static Mutex<HashMap<PathBuf, PendingSuggestion>> {
@@ -477,10 +482,16 @@ fn finish_turn_suggestion(cwd: &Path, turn: &[ConversationMessage]) {
         answered.remove(cwd);
     }
     let pending = turn_pending().lock().ok().and_then(|mut rows| rows.remove(cwd));
-    if let Some(pending) = pending {
-        let row = label_turn(pending, turn);
+    if let Some(row) = pending.and_then(|pending| judged_label(pending, turn)) {
         let _ = append_shadow_row(&skill_search_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
     }
+}
+
+/// The turn's label, when its judgment landed while the turn was open; a
+/// turn whose entry was never marked judged has nothing to compare its load
+/// with, and gets no row.
+fn judged_label(pending: PendingSuggestion, turn: &[ConversationMessage]) -> Option<SkillLabelRow> {
+    pending.judged.then(|| label_turn(pending, turn))
 }
 
 fn label_turn(pending: PendingSuggestion, turn: &[ConversationMessage]) -> SkillLabelRow {
@@ -582,23 +593,61 @@ fn skill_quote_lines(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// The seat's line is shown only when it acts, so only then does the turn
+/// wait for it: a recording turn hands the judgment to the runtime's worker
+/// threads and goes on, the way the patch-review seat's `detach` does. The
+/// mode is read before the skills are discovered, so a seat that is off costs
+/// a turn no directory walk.
 async fn suggest_at(cwd: PathBuf, task: String) -> Option<String> {
     if let Ok(mut answered) = last_answer().lock() {
         answered.remove(&cwd);
     }
-    let skills = runtime::discover_skills(&cwd);
-    let candidates = skill_candidates(&skills);
+    // A judgment that landed after its own turn had ended left no label
+    // behind, and it must not label this turn either.
+    if let Ok(mut pending) = turn_pending().lock() {
+        pending.remove(&cwd);
+    }
     if task.trim().is_empty() {
         return None;
     }
     let mode = asking_mode(&cwd)?;
     let acting = mode.applies_with(runtime::jev_seat_applies(&cwd, &SKILLS));
+    let skills = runtime::discover_skills(&cwd);
+    let candidates = skill_candidates(&skills);
     if candidates.is_empty() {
         return acting.then(|| suggestion_note(None));
     }
     if candidates.len() > zerocode_core::jev::SKILL_SUGGESTION_CATALOG_CAP {
         return None;
     }
+    if let Ok(mut pending) = turn_pending().lock() {
+        pending.insert(
+            cwd.clone(),
+            PendingSuggestion { suggested: None, loaded: None, acting, judged: false },
+        );
+    }
+    let judged = judge_suggestion(cwd, task, skills, candidates, mode, acting);
+    if acting {
+        judged.await
+    } else {
+        super::patch_review::detach(async move {
+            drop(judged.await);
+        });
+        None
+    }
+}
+
+/// Ask the two stages, write the row, and mark the turn's pending entry
+/// judged — when the turn is still open; a turn that has already ended took
+/// its entry with it, and a judgment that lands after it labels nothing.
+async fn judge_suggestion(
+    cwd: PathBuf,
+    task: String,
+    skills: Vec<SkillIndexEntry>,
+    candidates: Vec<SkillCandidate>,
+    mode: JevMode,
+    acting: bool,
+) -> Option<String> {
     let opened = cwd.clone();
     let door = tokio::task::spawn_blocking(move || JevDoor::open(&opened)).await.ok()?;
     let mut key = MemoKey::for_search(&task, &candidates, door.model_key());
@@ -639,14 +688,13 @@ async fn suggest_at(cwd: PathBuf, task: String) -> Option<String> {
     row.chosen = winner.iter().map(Chosen::from).collect();
     row.route_use = if acting { ROUTE_USE_APPLIED.into() } else { mode.key().into() };
     let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
-    // The absence of a skill is a prediction too. Keep it until this turn
+    // The absence of a skill is a prediction too. It stays until this turn
     // ends so a no-load turn contributes a negative label.
     if let Ok(mut pending) = turn_pending().lock() {
-        pending.insert(cwd, PendingSuggestion {
-            suggested: winner.as_ref().map(|choice| choice.name.clone()),
-            loaded: None,
-            acting,
-        });
+        if let Some(turn) = pending.get_mut(&cwd) {
+            turn.suggested = winner.as_ref().map(|choice| choice.name.clone());
+            turn.judged = true;
+        }
     }
     acting.then(|| suggestion_note(winner.as_ref().map(|choice| choice.name.as_str())))
 }

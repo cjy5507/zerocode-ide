@@ -47,6 +47,7 @@ use zerocode_core::jev::{
 };
 
 use crate::jev_score::{read_score, Scale, ScoreRule};
+use crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX;
 use crate::prompt::SkillIndexEntry;
 
 /// Bumped whenever a level description, the instructions or the state's shape
@@ -227,10 +228,12 @@ pub fn suggestion_note(name: Option<&str>) -> String {
         Some(name) => {
             let safe = name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
             format!(
-                "[zo:skill-routing] <system-reminder>Relevant to this request: {safe}. Load it if it actually fits.</system-reminder>"
+                "{SKILL_RECOMMENDATION_REMINDER_PREFIX} <system-reminder>Relevant to this request: {safe}. Load it if it actually fits.</system-reminder>"
             )
         }
-        None => "[zo:skill-routing] <system-reminder>No installed skill appears relevant to this request.</system-reminder>".into(),
+        None => format!(
+            "{SKILL_RECOMMENDATION_REMINDER_PREFIX} <system-reminder>No installed skill appears relevant to this request.</system-reminder>"
+        ),
     }
 }
 

@@ -526,7 +526,7 @@ fn a_skill_hint_rides_after_the_cache_breakpoint() {
     runtime.set_skill_suggestion_seat(Some(Arc::new(FixedSkillSuggestionSeat {
         asked: Arc::clone(&asked),
         finished: Arc::clone(&finished),
-        note: Some("[zo:skill-routing] <system-reminder>Relevant to this request: docx.</system-reminder>".into()),
+        note: Some(crate::skill_rank::suggestion_note(Some("docx"))),
     })));
     runtime.inject_skill_suggestion("Create a Word document");
     let after = runtime.build_request(None).expect("request after hint");
@@ -534,7 +534,7 @@ fn a_skill_hint_rides_after_the_cache_breakpoint() {
     assert_eq!(&after.messages[..before.messages.len()], before.messages.as_slice());
     assert!(after.messages.iter().any(|message| {
         message.role == MessageRole::System && message.blocks.iter().any(|block| {
-            matches!(block, ContentBlock::Text { text } if text.starts_with("[zo:skill-routing]"))
+            matches!(block, ContentBlock::Text { text } if text.starts_with(crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX))
         })
     }));
     assert_eq!(asked.lock().expect("asked lock").as_slice(), ["Create a Word document"]);

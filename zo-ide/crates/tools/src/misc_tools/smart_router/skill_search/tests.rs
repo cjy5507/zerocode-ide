@@ -228,11 +228,44 @@ fn a_loaded_skill_with_no_following_tool_or_body_quote_is_an_unused_proxy() {
         suggested: Some("docx".into()),
         loaded: Some("docx".into()),
         acting: false,
+        judged: true,
     }, &idle);
     assert!(label.agreed);
     assert_eq!(label.baseline_loaded.as_deref(), Some("docx"));
     assert_eq!(label.unused_load, Some(true));
     assert_eq!(label.baseline_unused_load, Some(true));
+}
+
+/// A recording turn does not wait for its judgment, so the judgment can land
+/// after the turn has ended — or not at all. A turn whose entry was never
+/// marked judged has nothing to compare its load with and gets no label; a
+/// load seen before the judgment landed is still the turn's first load.
+#[test]
+fn a_turn_whose_judgment_never_landed_writes_no_label() {
+    let root = tempfile::tempdir().expect("a temp root");
+    let cwd = root.path().canonicalize().expect("a canonical root");
+    turn_pending().lock().expect("pending lock").insert(
+        cwd.clone(),
+        PendingSuggestion { suggested: None, loaded: None, acting: false, judged: false },
+    );
+    note_loaded_skill(&cwd, "docx");
+    let unjudged = turn_pending()
+        .lock()
+        .expect("pending lock")
+        .remove(&cwd)
+        .expect("the seated turn");
+    assert_eq!(unjudged.loaded.as_deref(), Some("docx"), "the early load is kept");
+    assert!(judged_label(unjudged, &[]).is_none(), "no judgment, no label");
+
+    let judged = PendingSuggestion {
+        suggested: Some("docx".into()),
+        loaded: Some("docx".into()),
+        acting: false,
+        judged: true,
+    };
+    let row = judged_label(judged, &[]).expect("the judged turn's label");
+    assert!(row.agreed);
+    assert_eq!(row.baseline_loaded.as_deref(), Some("docx"));
 }
 
 /// The `agreed` mark shares a file with the rows it is about, so it has to be
