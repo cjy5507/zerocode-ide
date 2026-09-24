@@ -21,6 +21,7 @@ pub mod click_plan;
 pub mod coerce;
 pub mod eye;
 pub mod frame;
+pub mod game_state;
 pub mod identity;
 pub mod keys;
 pub mod marks;

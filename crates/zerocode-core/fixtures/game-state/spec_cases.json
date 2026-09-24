@@ -1,0 +1,1343 @@
+{
+ "cases": [
+  {
+   "cost": 336,
+   "expected": "ok",
+   "name": "valid_cells_first",
+   "patch": {}
+  },
+  {
+   "cost": 144,
+   "expected": "ok",
+   "name": "valid_cells_without_ground",
+   "patch": {
+    "ground": null
+   }
+  },
+  {
+   "cost": 16,
+   "expected": "ok",
+   "name": "valid_single_cell",
+   "patch": {
+    "ground": null,
+    "layout": {
+     "columns": 1,
+     "inset_permille": 100,
+     "kind": "cells",
+     "lattice": 4,
+     "min_share_permille": 900,
+     "readout": {
+      "index": 1,
+      "op": "cell"
+     },
+     "rows": 1,
+     "tile_height_permille": 1000,
+     "tile_width_permille": 1000
+    }
+   }
+  },
+  {
+   "cost": 336,
+   "expected": "ok",
+   "name": "valid_count_readout",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 4,
+      "op": "count"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "cost": 336,
+   "expected": "ok",
+   "name": "valid_last_cell_readout",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "index": 16,
+      "op": "cell"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "cost": 240,
+   "expected": "ok",
+   "name": "valid_gaps_on_one_axis",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 1000
+    }
+   }
+  },
+  {
+   "cost": 336,
+   "expected": "ok",
+   "name": "valid_apart_by_one",
+   "patch": {
+    "classes": [
+     {
+      "b": 0,
+      "g": 0,
+      "r": 255,
+      "tolerance": 24
+     },
+     {
+      "b": 0,
+      "g": 0,
+      "r": 206,
+      "tolerance": 24
+     }
+    ]
+   }
+  },
+  {
+   "cost": 11088,
+   "expected": "ok",
+   "name": "valid_blobs",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 3,
+     "step": 4
+    }
+   }
+  },
+  {
+   "cost": 177408,
+   "expected": "ok",
+   "name": "valid_blobs_every_pixel",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 3,
+     "step": 1
+    }
+   }
+  },
+  {
+   "expected": "overlap",
+   "name": "overlap_touching",
+   "patch": {
+    "classes": [
+     {
+      "b": 0,
+      "g": 0,
+      "r": 255,
+      "tolerance": 24
+     },
+     {
+      "b": 0,
+      "g": 0,
+      "r": 207,
+      "tolerance": 24
+     }
+    ]
+   }
+  },
+  {
+   "expected": "overlap",
+   "name": "overlap_ground",
+   "patch": {
+    "ground": {
+     "b": 0,
+     "g": 0,
+     "r": 230,
+     "tolerance": 24
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "no_classes",
+   "patch": {
+    "classes": []
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "too_many_classes",
+   "patch": {
+    "classes": [
+     {
+      "b": 0,
+      "g": 0,
+      "r": 128,
+      "tolerance": 8
+     },
+     {
+      "b": 0,
+      "g": 128,
+      "r": 0,
+      "tolerance": 8
+     },
+     {
+      "b": 128,
+      "g": 0,
+      "r": 0,
+      "tolerance": 8
+     },
+     {
+      "b": 0,
+      "g": 128,
+      "r": 128,
+      "tolerance": 8
+     },
+     {
+      "b": 128,
+      "g": 0,
+      "r": 128,
+      "tolerance": 8
+     },
+     {
+      "b": 128,
+      "g": 128,
+      "r": 0,
+      "tolerance": 8
+     },
+     {
+      "b": 0,
+      "g": 0,
+      "r": 255,
+      "tolerance": 8
+     },
+     {
+      "b": 0,
+      "g": 255,
+      "r": 0,
+      "tolerance": 8
+     },
+     {
+      "b": 255,
+      "g": 0,
+      "r": 0,
+      "tolerance": 8
+     }
+    ]
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "tolerance_over_limit",
+   "patch": {
+    "classes": [
+     {
+      "b": 0,
+      "g": 0,
+      "r": 255,
+      "tolerance": 65
+     },
+     {
+      "b": 0,
+      "g": 255,
+      "r": 0,
+      "tolerance": 24
+     },
+     {
+      "b": 255,
+      "g": 0,
+      "r": 0,
+      "tolerance": 24
+     },
+     {
+      "b": 0,
+      "g": 255,
+      "r": 255,
+      "tolerance": 24
+     }
+    ]
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "ground_tolerance_over_limit",
+   "patch": {
+    "ground": {
+     "b": 0,
+     "g": 0,
+     "r": 0,
+     "tolerance": 65
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "confirm_zero",
+   "patch": {
+    "confirm": 0
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "confirm_over_limit",
+   "patch": {
+    "confirm": 9
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "rows_zero",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 0,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "too_many_cells",
+   "patch": {
+    "layout": {
+     "columns": 17,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 16,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "tile_width_zero",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 0
+    }
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "tile_height_over",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 1001,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "inset_half",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 500,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "lattice_zero",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 0,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "lattice_over_limit",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 9,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "lattice_under_cell_samples",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 1,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "threshold",
+   "name": "min_share_half",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 500,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "threshold",
+   "name": "min_share_over",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 1001,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "reference",
+   "name": "readout_cell_zero",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "index": 0,
+      "op": "cell"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "reference",
+   "name": "readout_cell_past_end",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "index": 17,
+      "op": "cell"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "reference",
+   "name": "readout_first_class_zero",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 0,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "reference",
+   "name": "readout_count_class_past",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 5,
+      "op": "count"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "cells_smaller_than_lattice",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 499,
+     "kind": "cells",
+     "lattice": 8,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "gaps_round_away",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 995
+    }
+   }
+  },
+  {
+   "expected": "unsupported",
+   "name": "ground_without_gaps",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "tile_height_permille": 1000,
+     "tile_width_permille": 1000
+    }
+   }
+  },
+  {
+   "expected": "reference",
+   "name": "blobs_class_zero",
+   "patch": {
+    "layout": {
+     "class": 0,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 3,
+     "step": 4
+    }
+   }
+  },
+  {
+   "expected": "reference",
+   "name": "blobs_class_past",
+   "patch": {
+    "layout": {
+     "class": 5,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 3,
+     "step": 4
+    }
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "blobs_step_zero",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 3,
+     "step": 0
+    }
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "blobs_step_over_roi",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 3,
+     "step": 353
+    }
+   }
+  },
+  {
+   "expected": "threshold",
+   "name": "blobs_min_samples_zero",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 0,
+     "step": 4
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "blobs_gate_zero",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 0,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 3,
+     "step": 4
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "blobs_gate_over",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 257,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 3,
+     "step": 4
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "blobs_max_blobs_zero",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 0,
+     "min_samples": 3,
+     "step": 4
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "blobs_max_blobs_over",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 17,
+     "min_samples": 3,
+     "step": 4
+    }
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "blobs_cost_over",
+   "patch": {
+    "layout": {
+     "class": 1,
+     "gate": 24,
+     "kind": "blobs",
+     "max_blobs": 4,
+     "min_samples": 3,
+     "step": 1
+    }
+   },
+   "roi": {
+    "height": 900,
+    "space": "pixel",
+    "width": 400,
+    "x": 0,
+    "y": 0
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "reference_zero",
+   "patch": {
+    "reference_width": 0
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "roi_outside_reference",
+   "patch": {},
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 352,
+    "x": 100,
+    "y": 189
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "roi_point_space",
+   "patch": {},
+   "roi": {
+    "height": 504,
+    "space": "point",
+    "width": 352,
+    "x": 24,
+    "y": 189
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "roi_negative",
+   "patch": {},
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 352,
+    "x": -1,
+    "y": 189
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "roi_zero_width",
+   "patch": {},
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 0,
+    "x": 24,
+    "y": 189
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_display_p3",
+   "patch": {
+    "space": "display_p3"
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_unknown_key",
+   "patch": {
+    "hue": 1
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_class_unknown_key",
+   "patch": {
+    "classes": [
+     {
+      "b": 0,
+      "g": 0,
+      "name": "red",
+      "r": 255,
+      "tolerance": 24
+     },
+     {
+      "b": 0,
+      "g": 255,
+      "r": 0,
+      "tolerance": 24
+     },
+     {
+      "b": 255,
+      "g": 0,
+      "r": 0,
+      "tolerance": 24
+     },
+     {
+      "b": 0,
+      "g": 255,
+      "r": 255,
+      "tolerance": 24
+     }
+    ]
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_channel_over_byte",
+   "patch": {
+    "classes": [
+     {
+      "b": 0,
+      "g": 0,
+      "r": 256,
+      "tolerance": 24
+     },
+     {
+      "b": 0,
+      "g": 255,
+      "r": 0,
+      "tolerance": 24
+     },
+     {
+      "b": 255,
+      "g": 0,
+      "r": 0,
+      "tolerance": 24
+     },
+     {
+      "b": 0,
+      "g": 255,
+      "r": 255,
+      "tolerance": 24
+     }
+    ]
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_channel_negative",
+   "patch": {
+    "classes": [
+     {
+      "b": 0,
+      "g": 0,
+      "r": -1,
+      "tolerance": 24
+     },
+     {
+      "b": 0,
+      "g": 255,
+      "r": 0,
+      "tolerance": 24
+     },
+     {
+      "b": 255,
+      "g": 0,
+      "r": 0,
+      "tolerance": 24
+     },
+     {
+      "b": 0,
+      "g": 255,
+      "r": 255,
+      "tolerance": 24
+     }
+    ]
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_cells_with_blob_field",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "first"
+     },
+     "rows": 4,
+     "step": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_unknown_layout",
+   "patch": {
+    "layout": {
+     "kind": "ring",
+     "rows": 1
+    }
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_unknown_readout",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "op": "last"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_readout_extra_key",
+   "patch": {
+    "layout": {
+     "columns": 4,
+     "inset_permille": 250,
+     "kind": "cells",
+     "lattice": 3,
+     "min_share_permille": 800,
+     "readout": {
+      "class": 1,
+      "index": 1,
+      "op": "cell"
+     },
+     "rows": 4,
+     "tile_height_permille": 714,
+     "tile_width_permille": 864
+    }
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_missing_confirm",
+   "patch": {
+    "confirm": null
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_fractional_confirm",
+   "patch": {
+    "confirm": 1.5
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_ground_null_class",
+   "patch": {
+    "ground": {
+     "b": 0,
+     "g": 0,
+     "r": 0
+    }
+   }
+  }
+ ],
+ "frame_roi": [
+  {
+   "expected": {
+    "roi": {
+     "height": 504,
+     "space": "pixel",
+     "width": 352,
+     "x": 24,
+     "y": 189
+    },
+    "scale": {
+     "denominator": 1,
+     "numerator": 1
+    }
+   },
+   "frame": {
+    "height": 900,
+    "width": 400
+   },
+   "name": "same_extent",
+   "reference": {
+    "height": 900,
+    "width": 400
+   },
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 352,
+    "x": 24,
+    "y": 189
+   }
+  },
+  {
+   "expected": {
+    "roi": {
+     "height": 1008,
+     "space": "pixel",
+     "width": 704,
+     "x": 48,
+     "y": 378
+    },
+    "scale": {
+     "denominator": 1,
+     "numerator": 2
+    }
+   },
+   "frame": {
+    "height": 1800,
+    "width": 800
+   },
+   "name": "uniform_double",
+   "reference": {
+    "height": 900,
+    "width": 400
+   },
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 352,
+    "x": 24,
+    "y": 189
+   }
+  },
+  {
+   "expected": {
+    "roi": {
+     "height": 169,
+     "space": "pixel",
+     "width": 254,
+     "x": 84,
+     "y": 42
+    },
+    "scale": {
+     "denominator": 189,
+     "numerator": 160
+    }
+   },
+   "frame": {
+    "height": 831,
+    "width": 1280
+   },
+   "name": "ladder_rounding",
+   "reference": {
+    "height": 982,
+    "width": 1512
+   },
+   "roi": {
+    "height": 200,
+    "space": "pixel",
+    "width": 300,
+    "x": 100,
+    "y": 50
+   }
+  },
+  {
+   "expected": null,
+   "frame": {
+    "height": 800,
+    "width": 400
+   },
+   "name": "aspect_changed",
+   "reference": {
+    "height": 900,
+    "width": 400
+   },
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 352,
+    "x": 24,
+    "y": 189
+   }
+  },
+  {
+   "expected": null,
+   "frame": {
+    "height": 400,
+    "width": 900
+   },
+   "name": "turned_extent",
+   "reference": {
+    "height": 900,
+    "width": 400
+   },
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 352,
+    "x": 24,
+    "y": 189
+   }
+  },
+  {
+   "expected": null,
+   "frame": {
+    "height": 900,
+    "width": 400
+   },
+   "name": "outside_reference",
+   "reference": {
+    "height": 900,
+    "width": 400
+   },
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 352,
+    "x": 100,
+    "y": 189
+   }
+  },
+  {
+   "expected": {
+    "roi": {
+     "height": 5,
+     "space": "pixel",
+     "width": 3,
+     "x": 0,
+     "y": 1
+    },
+    "scale": {
+     "denominator": 100,
+     "numerator": 1
+    }
+   },
+   "frame": {
+    "height": 9,
+    "width": 4
+   },
+   "name": "tiny_frame",
+   "reference": {
+    "height": 900,
+    "width": 400
+   },
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 352,
+    "x": 24,
+    "y": 189
+   }
+  },
+  {
+   "expected": null,
+   "frame": {
+    "height": 9,
+    "width": 4
+   },
+   "name": "collapsed_roi",
+   "reference": {
+    "height": 900,
+    "width": 400
+   },
+   "roi": {
+    "height": 1,
+    "space": "pixel",
+    "width": 1,
+    "x": 10,
+    "y": 10
+   }
+  },
+  {
+   "expected": null,
+   "frame": {
+    "height": 0,
+    "width": 0
+   },
+   "name": "empty_frame",
+   "reference": {
+    "height": 900,
+    "width": 400
+   },
+   "roi": {
+    "height": 504,
+    "space": "pixel",
+    "width": 352,
+    "x": 24,
+    "y": 189
+   }
+  }
+ ],
+ "roi": {
+  "height": 504,
+  "space": "pixel",
+  "width": 352,
+  "x": 24,
+  "y": 189
+ },
+ "spec": {
+  "classes": [
+   {
+    "b": 0,
+    "g": 0,
+    "r": 255,
+    "tolerance": 24
+   },
+   {
+    "b": 0,
+    "g": 255,
+    "r": 0,
+    "tolerance": 24
+   },
+   {
+    "b": 255,
+    "g": 0,
+    "r": 0,
+    "tolerance": 24
+   },
+   {
+    "b": 0,
+    "g": 255,
+    "r": 255,
+    "tolerance": 24
+   }
+  ],
+  "confirm": 1,
+  "ground": {
+   "b": 0,
+   "g": 0,
+   "r": 0,
+   "tolerance": 24
+  },
+  "layout": {
+   "columns": 4,
+   "inset_permille": 250,
+   "kind": "cells",
+   "lattice": 3,
+   "min_share_permille": 800,
+   "readout": {
+    "class": 1,
+    "op": "first"
+   },
+   "rows": 4,
+   "tile_height_permille": 714,
+   "tile_width_permille": 864
+  },
+  "reference_height": 900,
+  "reference_width": 400,
+  "space": "srgb"
+ }
+}
