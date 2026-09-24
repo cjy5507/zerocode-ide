@@ -1171,4 +1171,154 @@ pub(crate) mod tests {
         assert!(pane_wall_for("claude", &dir.path().join("gone.jsonl")).is_none());
         assert!(pane_wall_for("zo", &transcript).is_none());
     }
+
+    /// The coordinator's typed pointers replayed through the reader the hold
+    /// uses (t-6560): how many the window typed, how many met a wall and a
+    /// refused request, and how many the hold would have let through.
+    ///
+    /// The replay walks a Claude transcript in order and keeps the last
+    /// answer the pane gave; a typed pointer the hold keeps back takes the
+    /// answer it caused out of the replay with it, so the next pointer is
+    /// judged against the pane as the hold would have left it. It adds
+    /// nothing the record does not hold: an auto-continuation a typed line
+    /// cancelled stays cancelled here, and a hold still standing when a burst
+    /// ends is counted as the one line owed at its lift.
+    ///
+    /// ```sh
+    /// ZEROCODE_POINTER_WALL_REPLAY=<transcript.jsonl> cargo test -p zerocode-shell \
+    ///   --bin zerocode-shell quota_wall::tests::the_typed_pointers_a_wall_hold_would_have_kept_back \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement over a transcript on this machine, not a rule"]
+    fn the_typed_pointers_a_wall_hold_would_have_kept_back() {
+        use std::io::BufRead;
+        let Some(path) = std::env::var_os("ZEROCODE_POINTER_WALL_REPLAY") else {
+            println!("MEASURE skipped: set ZEROCODE_POINTER_WALL_REPLAY to a transcript");
+            return;
+        };
+        /// Pointers closer than this are one burst.
+        const BURST_GAP_MS: i64 = 10_000;
+        #[derive(Default)]
+        struct Burst {
+            first_ms: i64,
+            last_ms: i64,
+            typed: usize,
+            refused: usize,
+            kept_typed: usize,
+            kept_refused: usize,
+            held_at_end: bool,
+        }
+        let pointer = |text: &str| -> bool {
+            let bare = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("<pasted_content"))
+                .filter(|line| !line.trim_start().starts_with("</pasted_content"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (1..=64).any(|count| {
+                bare.trim() == zerocode_core::orchestration::pointer_text(count).trim()
+            })
+        };
+        let file = std::fs::File::open(&path).expect("the transcript");
+        let mut bursts: Vec<Burst> = Vec::new();
+        let mut last_answer: Option<String> = None;
+        let mut swallow_next_answer = false;
+        let mut last_kept_pointer = false;
+        let mut last_pointer_ms = i64::MIN;
+        let mut held_now = false;
+        for line in std::io::BufReader::new(file).lines() {
+            let Ok(line) = line else { continue };
+            let is_user = line.contains("\"type\":\"user\"");
+            let is_answer = line.contains("\"type\":\"assistant\"");
+            if !is_user && !is_answer {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let written = written_at(&value).unwrap_or_default();
+            if is_user {
+                let typed = value.get("promptSource").and_then(|v| v.as_str()) == Some("typed");
+                let text = value
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                if !typed || !pointer(text) {
+                    continue;
+                }
+                if written.saturating_sub(last_pointer_ms) > BURST_GAP_MS {
+                    if let Some(open) = bursts.last_mut() {
+                        open.held_at_end = held_now;
+                    }
+                    bursts.push(Burst {
+                        first_ms: written,
+                        ..Burst::default()
+                    });
+                }
+                last_pointer_ms = written;
+                let burst = bursts.last_mut().expect("a burst");
+                burst.last_ms = written;
+                burst.typed += 1;
+                let wall = last_answer
+                    .as_ref()
+                    .and_then(|answer| pane_wall_in("claude", std::slice::from_ref(answer)));
+                held_now = wall.is_some_and(|wall| wall.stands(written));
+                last_kept_pointer = !held_now;
+                if last_kept_pointer {
+                    burst.kept_typed += 1;
+                }
+                swallow_next_answer = held_now;
+                continue;
+            }
+            // An answer: the one a pointer caused, or anybody else's turn.
+            let refused = value.get("isApiErrorMessage").and_then(|v| v.as_bool()) == Some(true)
+                && value.get("requestId").is_some();
+            if let Some(burst) = bursts.last_mut()
+                && written.saturating_sub(burst.last_ms) <= BURST_GAP_MS
+                && refused
+            {
+                burst.refused += 1;
+                if last_kept_pointer && !swallow_next_answer {
+                    burst.kept_refused += 1;
+                }
+            }
+            if std::mem::take(&mut swallow_next_answer) {
+                continue;
+            }
+            last_kept_pointer = false;
+            last_answer = Some(line);
+        }
+        if let Some(open) = bursts.last_mut() {
+            open.held_at_end = held_now;
+        }
+        let mut totals = (0, 0, 0, 0, 0);
+        println!("MEASURE burst start(UTC) end typed refused | kept refused owed-at-lift");
+        for burst in bursts.iter().filter(|burst| burst.typed >= 3) {
+            let owed = usize::from(burst.held_at_end);
+            println!(
+                "MEASURE {} {} {} {} | {} {} {}",
+                zerocode_core::civil::iso_utc_of(burst.first_ms),
+                zerocode_core::civil::iso_utc_of(burst.last_ms),
+                burst.typed,
+                burst.refused,
+                burst.kept_typed,
+                burst.kept_refused,
+                owed
+            );
+            totals.0 += burst.typed;
+            totals.1 += burst.refused;
+            totals.2 += burst.kept_typed;
+            totals.3 += burst.kept_refused;
+            totals.4 += owed;
+        }
+        println!(
+            "MEASURE bursts>=3 typed={} refused={} | kept={} kept_refused={} owed_at_lift={}",
+            totals.0, totals.1, totals.2, totals.3, totals.4
+        );
+        let all: usize = bursts.iter().map(|burst| burst.typed).sum();
+        let kept: usize = bursts.iter().map(|burst| burst.kept_typed).sum();
+        println!("MEASURE every typed pointer={all} kept by the hold's rule={kept}");
+    }
 }
