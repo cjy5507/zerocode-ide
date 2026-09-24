@@ -3269,6 +3269,16 @@ pub fn summarize_cache_ledger() -> CacheLedgerSummary {
     summary
 }
 
+/// Every prompt-cache root this machine's config homes hold
+/// (`<home>/cache/prompt-cache`), the primary first — for a reader that sums
+/// the day's request ledgers across sessions (the challenger arm's share of
+/// the day's spend, `tools::smart_router::challenger`). The one spelling of
+/// the folder, so a reader never looks where nothing writes.
+#[must_use]
+pub fn prompt_cache_roots() -> Vec<PathBuf> {
+    cache_roots()
+}
+
 fn cache_roots() -> Vec<PathBuf> {
     let homes = core_types::paths::zo_global_config_roots();
     let homes = if homes.is_empty() {

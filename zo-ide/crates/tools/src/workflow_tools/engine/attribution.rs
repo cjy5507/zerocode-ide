@@ -320,6 +320,10 @@ fn write_verdict_record(
         .with_verdict_basis(basis)
         .with_signal_weight(Some(kind.weight()));
     let _ = runtime::record_route_outcome(cwd, &record);
+    // A verdict about an attempt is the receipt the challenger arm's
+    // comparison of that attempt has been waiting for (t-6263): its label is
+    // written here, where the verdict lands, and never off a completion.
+    let _labelled = crate::misc_tools::note_challenger_verdicts(cwd);
 }
 
 /// The objective verdict a command gate settles for a single-item phase: a

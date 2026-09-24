@@ -418,6 +418,21 @@ pub fn jev_file_pick_mode_from(loader: &runtime::ConfigLoader) -> Option<Decisio
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::FILE_PICK.mode_in(&root))
 }
 
+/// `smart.jevChallenger`: whether one eligible spawn in five asks a model
+/// nobody has evidence for the same design the routed model is about to
+/// carry out, and puts the two to a blind comparison (t-6263). Its own
+/// switch, because it spends something else — a bounded request of the
+/// person's own provider credentials on a model the router did not pick,
+/// carrying the head of the task — and consent to one seat is not consent to
+/// another. Read from the same merged root as every other Jev seat; `None`
+/// when the settings cannot be read.
+pub const JEV_CHALLENGER_SETTING: &str = zerocode_core::jev::CHALLENGER.setting;
+
+#[must_use]
+pub fn jev_challenger_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::CHALLENGER.mode_in(&root))
+}
+
 /// `smart.jevCommandGuard`: whether a shell command is put to the command
 /// guard before it runs (t-6348), from the same merged root as the other Jev
 /// seats — `None` when the settings cannot be read.

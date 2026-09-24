@@ -2777,6 +2777,35 @@ pub const CHALLENGER_DESIGN_CAP: usize = 2;
 /// this product already sends through the door.
 pub const CHALLENGER_DESIGN_BYTE_CAP: usize = STALL_TRANSCRIPT_BYTE_CAP;
 
+/// The most tokens a challenger may write for its design — the request's
+/// `max_tokens`, and so the one hard bound the day's reservation stands on.
+///
+/// Derived from the byte cap the judge reads at, not written as its own
+/// number: a token of ASCII is at most four bytes, so this many tokens is
+/// the fewest that can fill the cap, and any more would be words the judge
+/// never sees and the share still pays for. A design in a denser script
+/// fills the cap with fewer tokens and stops sooner; nothing here pays for
+/// a byte the door would cut.
+pub const CHALLENGER_DESIGN_MAX_TOKENS: usize = CHALLENGER_DESIGN_BYTE_CAP / ASCII_BYTES_PER_TOKEN;
+
+/// The most bytes one token of ASCII text can be, for a bound read from a
+/// byte cap.
+const ASCII_BYTES_PER_TOKEN: usize = 4;
+
+/// The wall past which a challenger's design request is dropped, in
+/// milliseconds — and the attempt, which acts on the incumbent's design
+/// anyway, has waited on nothing.
+///
+/// Ninety seconds: the incumbent's own first turn — the plan the design is
+/// compared with — is what the comparison waits for regardless, and this
+/// machine's implementation spawns take longer than that to their first
+/// message more often than not (p50 of 56 minutes to a turn's end); a wall
+/// shorter than a paragraph's worth of reasoning tokens at a provider's slow
+/// hour would drop designs for lateness the comparison never felt. Past it
+/// the row says `timeout`, the reservation settles at what was reserved, and
+/// the incumbent is not compared with a design that never came.
+pub const CHALLENGER_DESIGN_WALL_MS: u64 = 90_000;
+
 /// What the challenger seat's answers must bound above before `auto` scores
 /// a comparison that moves a role's model: nine in ten, the recall seat's
 /// line, because a judgment that does not come back costs nothing here —

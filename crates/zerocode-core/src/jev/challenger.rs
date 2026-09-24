@@ -5,7 +5,7 @@
 //! Every number here is the seat row's or the user's decision relayed with
 //! it: one attempt in [`crate::jev::CHALLENGER_ONE_IN`], a day's challenger
 //! spend under [`crate::jev::CHALLENGER_DAY_SPEND_PERMILLE`] of the day's
-//! own, and four kinds of route that never draw at all.
+//! own, and five kinds of route that never draw at all.
 //!
 //! It is IO-free and clock-free on purpose: the draw and the blind have to
 //! answer the same way for the same attempt however often they are asked, or
@@ -35,6 +35,8 @@ use crate::jev::{
     CHALLENGER_ONE_IN,
 };
 
+pub mod spend;
+
 /// What an attempt is, as far as the draw is concerned.
 ///
 /// A struct rather than five arguments, because every field is a `bool` or a
@@ -53,6 +55,13 @@ pub struct Attempt<'a> {
     /// Whether the work sits behind a guard — payment, the operator, the
     /// release lane. A guarded flow is not a place to ask a new question.
     pub guarded: bool,
+    /// Whether a person named the model — a settings pin or an explicit
+    /// `model:` — rather than the router choosing it. The arm measures the
+    /// router's choice against a newcomer; a model somebody chose by hand is
+    /// not that choice, and a comparison against it would say nothing about
+    /// the route (`routeSource` `pin` and `explicit`, the same two words the
+    /// learner already sets aside as availability rather than quality).
+    pub pinned: bool,
 }
 
 /// Why an attempt did not draw a challenger. Closed, because a ledger row
@@ -71,6 +80,21 @@ pub enum Held {
     /// The day's challenger spend, with what is reserved and what this
     /// attempt would cost, has reached its share.
     DayBudget,
+    /// A person named the model ([`Attempt::pinned`]).
+    Pinned,
+    /// Nothing to challenge with: no connected model the router could route
+    /// this role to is short of evidence, or the only one is the incumbent
+    /// itself.
+    NoChallenger,
+    /// The one model that could challenge has no row in the price table, and
+    /// a model nobody has priced is not free — it is unknown, and the share
+    /// cannot be charged an unknown.
+    Unpriced,
+    /// Drawn, but one of the two designs never came: the incumbent wrote no
+    /// plan before its first tool call, or the challenger's design failed to
+    /// arrive. Nothing to compare, and never a win for the side that did
+    /// answer.
+    NoDesign,
 }
 
 impl Held {
@@ -83,6 +107,10 @@ impl Held {
             Self::Guarded => "guarded",
             Self::NotDrawn => "not_drawn",
             Self::DayBudget => "day_budget",
+            Self::Pinned => "pinned",
+            Self::NoChallenger => "no_challenger",
+            Self::Unpriced => "unpriced",
+            Self::NoDesign => "no_design",
         }
     }
 }
@@ -170,21 +198,26 @@ pub fn within_day_budget(day: &DaySpend, expected_micros: u64) -> bool {
     would_be * 1_000 <= u128::from(day.day_micros) * u128::from(CHALLENGER_DAY_SPEND_PERMILLE)
 }
 
-/// The whole decision, in the order §2 asks it: what the attempt is, then
-/// the draw, then what the day has left for what this attempt would cost.
+/// What the attempt is, then the draw — every line that needs nothing but
+/// the attempt itself, in the order §2 asks it.
 ///
-/// The cheap refusals come first so a held-back role never costs a digest,
-/// and the budget last so a day's spend is only read for an attempt that
-/// would otherwise challenge.
+/// The cheap refusals come first so a held-back role never costs a digest.
+/// Split from [`challenges`] because the caller learns what a challenge
+/// would cost only after it has chosen a challenger, and choosing one reads
+/// the inventory and the outcome ledger: those are read for an attempt that
+/// has cleared everything cheaper, and for no other.
 ///
 /// # Errors
 /// The first line the attempt does not clear.
-pub fn challenges(attempt: &Attempt<'_>, day: &DaySpend, expected_micros: u64) -> Result<(), Held> {
+pub fn eligible(attempt: &Attempt<'_>) -> Result<(), Held> {
     if attempt.retry_or_handover {
         return Err(Held::Retry);
     }
     if attempt.guarded {
         return Err(Held::Guarded);
+    }
+    if attempt.pinned {
+        return Err(Held::Pinned);
     }
     if !role_may_be_challenged(attempt.role) {
         return Err(Held::Role);
@@ -192,10 +225,53 @@ pub fn challenges(attempt: &Attempt<'_>, day: &DaySpend, expected_micros: u64) -
     if !draws(attempt.key) {
         return Err(Held::NotDrawn);
     }
+    Ok(())
+}
+
+/// The whole decision: [`eligible`], then what the day has left for what
+/// this attempt would cost — the budget last, so a day's spend is only read
+/// for an attempt that would otherwise challenge.
+///
+/// # Errors
+/// The first line the attempt does not clear.
+pub fn challenges(attempt: &Attempt<'_>, day: &DaySpend, expected_micros: u64) -> Result<(), Held> {
+    eligible(attempt)?;
     if !within_day_budget(day, expected_micros) {
         return Err(Held::DayBudget);
     }
     Ok(())
+}
+
+/// What a request of `input_tokens` in and `output_tokens` out costs at a
+/// model's list rates, in micro-dollars — the unit every [`DaySpend`] field
+/// is in.
+///
+/// A rate is dollars per million tokens, so tokens times rate IS
+/// micro-dollars; the only arithmetic here is the rounding, and it rounds
+/// up: a share is a ceiling, and a reservation that rounded down would let
+/// a day of fractions past it. The caller hands in the rates because the
+/// price table lives in the program that owns it (`model-prices`), and a
+/// model that table does not name never reaches here — unknown is not zero.
+#[must_use]
+pub fn expected_micros(
+    input_tokens: u64,
+    output_tokens: u64,
+    input_usd_per_million: f64,
+    output_usd_per_million: f64,
+) -> u64 {
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let micros = (input_tokens as f64)
+        .mul_add(
+            input_usd_per_million,
+            output_tokens as f64 * output_usd_per_million,
+        )
+        .max(0.0)
+        .ceil() as u64;
+    micros
 }
 
 /// Whose a design is — the one fact the judge is not shown.
@@ -570,6 +646,28 @@ pub const HELD: LedgerKey = LedgerKey {
     canonical: "held",
     also: &[],
 };
+/// What the challenger's design actually cost, in the share's own unit —
+/// the settled figure the day file carries for the same attempt
+/// ([`spend::Op::Settle`]), written on the row too so the comparison it
+/// belongs to can be priced from the ledger alone.
+pub const COST_MICROS: LedgerKey = LedgerKey {
+    canonical: "costMicros",
+    also: &[],
+};
+/// The fingerprint of the incumbent's design as the judge saw it
+/// ([`crate::jev::fingerprint_of`]) — what binds a row to the plan it
+/// compared and no other: a resent comparison, a later revision or another
+/// attempt's plan has another print. The words themselves never reach the
+/// ledger.
+pub const INCUMBENT_DESIGN: LedgerKey = LedgerKey {
+    canonical: "incumbentDesign",
+    also: &[],
+};
+/// The fingerprint of the challenger's design, likewise.
+pub const CHALLENGER_DESIGN: LedgerKey = LedgerKey {
+    canonical: "challengerDesign",
+    also: &[],
+};
 
 /// Every key this module writes beyond the wire's own
 /// ([`crate::jev::summary::LEDGER_KEYS`]), so a contract can walk them.
@@ -584,6 +682,9 @@ pub const CHALLENGER_KEYS: &[LedgerKey] = &[
     VERIFIED,
     WON,
     HELD,
+    COST_MICROS,
+    INCUMBENT_DESIGN,
+    CHALLENGER_DESIGN,
 ];
 
 /// One comparison as its request row records it, beyond what the wire
@@ -595,6 +696,12 @@ pub struct Comparison<'a> {
     pub incumbent_model: &'a str,
     pub challenger_model: &'a str,
     pub expected_micros: u64,
+    /// What the design actually cost ([`COST_MICROS`]).
+    pub cost_micros: u64,
+    /// Fingerprints of the two designs as shown ([`INCUMBENT_DESIGN`],
+    /// [`CHALLENGER_DESIGN`]).
+    pub incumbent_design: &'a str,
+    pub challenger_design: &'a str,
     pub blind: Blind,
     /// What the judge said, `None` on a row whose answer did not arrive or
     /// did not pass its checks — the wire's `outcome` says which.
@@ -621,6 +728,18 @@ impl Comparison<'_> {
             (
                 EXPECTED_MICROS.canonical.to_string(),
                 Value::from(self.expected_micros),
+            ),
+            (
+                COST_MICROS.canonical.to_string(),
+                Value::from(self.cost_micros),
+            ),
+            (
+                INCUMBENT_DESIGN.canonical.to_string(),
+                Value::from(self.incumbent_design),
+            ),
+            (
+                CHALLENGER_DESIGN.canonical.to_string(),
+                Value::from(self.challenger_design),
             ),
             (BLIND.canonical.to_string(), Value::from(self.blind.token())),
         ]);

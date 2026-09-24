@@ -144,7 +144,8 @@ impl ModelDescriptor {
         self.class.as_deref() == Some(class)
     }
 
-    pub(crate) fn release_rank_value(&self) -> u32 { self.release_rank }
+    #[must_use]
+    pub fn release_rank_value(&self) -> u32 { self.release_rank }
 
     #[must_use]
     pub fn effort_ceiling_value(&self) -> EffortCeiling { self.effort_ceiling }

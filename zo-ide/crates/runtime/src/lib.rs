@@ -274,7 +274,7 @@ pub use model_router::{
     ModelPrice, PlanCacheState, PlanCandidate, PlanChoice, PlanContext, PlanEstimate, PlanEvidence,
     PlanPriors, ScoredPlan, SwitchTrigger, VerifyMode,
     DecisionOutcomeStat, EffortCeiling, FreshnessPolicy, LaneRouteMetadata,
-    LearnedSpecialtyEntry, LearnedSpecialtyHint, VerdictBasis, VerdictSubject, VerifyMetrics,
+    learned_rate, LearnedSpecialtyEntry, LearnedSpecialtyHint, VerdictBasis, VerdictSubject, VerifyMetrics,
     ACCURACY_MIN_DECISIVE, CONFIDENT_DECISIVE_SAMPLES,
     ModelCapability, ModelDescriptor, ModelInventory, ModelStatus, ModelTier, RoleOverride,
     RoleSelector, RouteAudit, RouteAutoClassifierMode, RouteConfidence, RouteContextNeed,

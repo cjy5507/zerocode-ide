@@ -426,6 +426,16 @@ pub(crate) fn route_source_label(source: RouteDecisionSource) -> &'static str {
     }
 }
 
+/// Whether a persisted `routeSource` word says a PERSON chose the model —
+/// a settings pin or an explicit `model:` — rather than the router
+/// ([`route_source_label`]'s `pin` and `explicit`). The one predicate for
+/// the two words, asked by the spawn (a person's pin is honored verbatim)
+/// and by the challenger arm (a person's pick is not the route it measures),
+/// so neither spells the pair for itself.
+pub(crate) fn route_source_is_a_persons(source: &str) -> bool {
+    matches!(source, "pin" | "explicit")
+}
+
 /// Smuggle key carrying the route reason inside a fan-out member's JSON object;
 /// the spawn loop strips it into `AgentInput::route_reason`. SECURITY: the
 /// `__zo_` prefix does NOT make it uncraftable — untrusted agent JSON can

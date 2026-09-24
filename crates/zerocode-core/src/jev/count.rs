@@ -58,14 +58,17 @@ pub fn count_one(path: &Path) -> io::Result<u64> {
     file.write_all(ONE_REQUEST)?;
     let place = file.stream_position()?;
     if first_of_the_day {
-        forget_other_days(path);
+        forget_other_days(path, DAY_FILE_PREFIX, DAY_FILE_SUFFIX);
     }
     Ok(place)
 }
 
-/// Remove every day file beside `today` but `today` — best effort: a file
-/// another program is still counting in comes back with its next request.
-fn forget_other_days(today: &Path) {
+/// Remove every day file beside `today` named `prefix…suffix` but `today`
+/// itself — best effort: a file another program is still writing in comes
+/// back with its next line. Shared by every per-day file in the door's
+/// folder (this count, the challenger arm's spend book), so the rule for
+/// what a past day leaves behind is written once.
+pub fn forget_other_days(today: &Path, prefix: &str, suffix: &str) {
     let (Some(dir), Some(name)) = (today.parent(), today.file_name()) else {
         return;
     };
@@ -75,10 +78,7 @@ fn forget_other_days(today: &Path) {
     for entry in entries.flatten() {
         let other = entry.file_name();
         let other = other.to_string_lossy();
-        if other != name.to_string_lossy()
-            && other.starts_with(DAY_FILE_PREFIX)
-            && other.ends_with(DAY_FILE_SUFFIX)
-        {
+        if other != name.to_string_lossy() && other.starts_with(prefix) && other.ends_with(suffix) {
             let _ = fs::remove_file(entry.path());
         }
     }

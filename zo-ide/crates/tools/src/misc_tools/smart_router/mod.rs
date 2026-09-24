@@ -1,6 +1,7 @@
 mod agent_tool;
 mod apply;
 mod canonical;
+mod challenger;
 mod compaction_seat;
 mod decision_report;
 mod decision_shadow;
@@ -54,7 +55,22 @@ pub(crate) use apply::{
     ROUTE_FALLBACK_MODELS_SMUGGLE_KEY, ROUTE_JUDGED_AGENT_SMUGGLE_KEY,
     ROUTE_MODEL_SMUGGLE_KEY, ROUTE_REASON_SMUGGLE_KEY,
 };
+pub(crate) use apply::route_source_is_a_persons;
 pub(crate) use canonical::canonicalize_route_model_id;
+pub(crate) use challenger::{
+    first_design_text as first_challenger_design_text, Arm as ChallengerArm,
+    AttemptFacts as ChallengerAttemptFacts, Drawn as ChallengerDrawn,
+};
+pub use challenger::{
+    challenger_path, note_challenger_verdicts, ChallengerRow, CHALLENGER_FILE, CHALLENGER_ROUTE_SOURCE,
+    CHALLENGER_RUBRIC_VERSION,
+};
+#[cfg(test)]
+pub(crate) use challenger::tests::{
+    a_key_that_draws as challenger_key_that_draws, jev_answer as challenger_jev_answer,
+    rows_after as challenger_rows_after, Rig as ChallengerRig, Scripted as ChallengerScripted,
+    INCUMBENT as CHALLENGER_TEST_INCUMBENT,
+};
 pub use decision_report::{
     basis_points, evaluate_decision_labels, summarize_decision_shadow, AxisAgreement,
     AxisEvaluation, DecisionShadowSummary, LabelEvaluation, BASIS_POINTS,
@@ -115,12 +131,12 @@ pub use plan_shadow::{
 };
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
-    agent_tool_mode_from, decision_shadow_mode_from, jev_compaction_mode_from,
+    agent_tool_mode_from, decision_shadow_mode_from, jev_challenger_mode_from, jev_compaction_mode_from,
     jev_claim_mode_from, jev_command_guard_mode_from, jev_file_pick_mode_from, jev_tool_text_guard_mode_from,
     jev_mention_rerank_mode_from, jev_patch_review_mode_from, rerank_shadow_mode_from,
     skill_search_mode_from, DecisionShadowMode, AGENT_TOOL_SETTING, DECISION_SHADOW_SETTING,
-    JEV_COMMAND_GUARD_SETTING, JEV_COMPACTION_SETTING, JEV_FILE_PICK_SETTING, JEV_MENTION_RERANK_SETTING,
-    JEV_PATCH_REVIEW_SETTING, JEV_TOOL_TEXT_GUARD_SETTING,
+    JEV_CHALLENGER_SETTING, JEV_COMMAND_GUARD_SETTING, JEV_COMPACTION_SETTING, JEV_FILE_PICK_SETTING,
+    JEV_MENTION_RERANK_SETTING, JEV_PATCH_REVIEW_SETTING, JEV_TOOL_TEXT_GUARD_SETTING,
     RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
     conversation_anchor_ttl_for, conversation_anchor_ttl_from_root, CACHE_ANCHOR_TTL_ENV,
     smart_deep_tier_models, smart_deep_tier_models_for, smart_exec_swap, smart_setting_defaults,

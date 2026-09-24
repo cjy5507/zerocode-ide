@@ -56,7 +56,7 @@ pub use decision::{
     AxisMetrics, AxisReading, AxisSample, DecisionAnswer, DecisionRejection, DecisionVerdict, ROUTE_TRUST_FLOOR,
     CALIBRATION_BINS, PROBABILITY_SUM_TOLERANCE,
 };
-pub use learned::{LearnedSpecialtyEntry, LearnedSpecialtyHint};
+pub use learned::{learned_rate, LearnedSpecialtyEntry, LearnedSpecialtyHint};
 pub use outcome::{
     is_terminal_outcome_status, read_route_outcome_summary, read_route_outcomes,
     record_route_outcome, resolve_verdict_basis, route_outcome_log_path,

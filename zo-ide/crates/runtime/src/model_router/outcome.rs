@@ -205,18 +205,29 @@ pub enum RouteTaxCall {
     Probe,
     /// The fan-out decomposition call that decides the lanes.
     Decompose,
+    /// The challenger arm's design request (`zerocode_core::jev::CHALLENGER`):
+    /// one bounded call to a model nobody has evidence for, asking for the
+    /// design the incumbent is about to carry out. Filed as tax and not as a
+    /// route because the attempt acted on the incumbent's design either way
+    /// — the challenger did no work this row could judge — and because a row
+    /// the learner read as a run of that model would teach the router from a
+    /// paragraph; `Classify` is bookkeeping, and the learning mask already
+    /// skips it. What the design was worth is the challenger seat's own
+    /// ledger's to say, by the comparison and the receipt.
+    Challenger,
 }
 
 impl RouteTaxCall {
-    /// Both calls, the one place the set is enumerated.
-    pub const ALL: [RouteTaxCall; 2] = [Self::Probe, Self::Decompose];
+    /// Every call, the one place the set is enumerated.
+    pub const ALL: [RouteTaxCall; 3] = [Self::Probe, Self::Decompose, Self::Challenger];
 
     /// Canonical label persisted in a tax row's `target` field.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Probe => "probe",
             Self::Decompose => "decompose",
+            Self::Challenger => "challenger",
         }
     }
 
@@ -2418,7 +2429,7 @@ pub(crate) mod tests {
 
     #[test]
     fn route_tax_calls_round_trip_through_one_table() {
-        assert_eq!(RouteTaxCall::ALL.len(), 2);
+        assert_eq!(RouteTaxCall::ALL.len(), 3);
         for call in RouteTaxCall::ALL {
             assert_eq!(RouteTaxCall::from_label(call.as_str()), Some(call));
         }

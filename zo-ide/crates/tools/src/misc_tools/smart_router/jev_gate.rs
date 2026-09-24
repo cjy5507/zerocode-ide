@@ -149,6 +149,26 @@ impl JevDoor {
         )
     }
 
+    /// Ask the door whether a request of `row`'s WOULD be let through —
+    /// the key, the switch, the workspace's consent and the day's budget —
+    /// without sending or counting anything. For a seat that spends
+    /// something of its own before it reaches the door (the challenger's
+    /// design request, on the person's provider credentials): a door that
+    /// would refuse the comparison makes the design a paragraph nobody
+    /// reads, so it is asked first, and the refusal is the row's word.
+    ///
+    /// # Errors
+    /// The door's refusal, as [`Self::pass`] would answer it now.
+    pub fn would_admit(&self, row: &JevUse, key: bool) -> Result<(), Refused> {
+        let asking = door::Asking {
+            key,
+            settings: &self.settings,
+            workspace: self.workspace.as_deref(),
+            sent_today: count::sent(&self.requests),
+        };
+        door::may_send(row, &asking, Value::Object(Map::new())).map(drop)
+    }
+
     /// Ask the door about a key check; cleared, it is counted in the day.
     ///
     /// # Errors

@@ -559,6 +559,54 @@ fn notify_agent_completion_with_route_outcome(job: &AgentJob, mut completion: Ag
     super::auto_verify::maybe_continue_verify_loop(job, &completion, spawn_agent_job);
 }
 
+/// The challenger arm's draw for this spawn, at its start — `None` for a
+/// spawn the arm does not measure or that it held; a held one's word is in
+/// the arm's own ledger. What it costs the spawn is the mode word and the
+/// cheap holds: the rest runs on the arm's own thread.
+fn open_challenger(job: &AgentJob) -> Option<super::super::smart_router::ChallengerDrawn> {
+    let facts = challenger_facts(job)?;
+    let cwd = std::env::current_dir().ok()?;
+    super::super::smart_router::ChallengerArm::live(&cwd).open(facts)
+}
+
+/// What the arm is told of this spawn — `None` for one that is not an
+/// attempt the arm measures: the routing tax's own classification calls,
+/// and a bound verifier (its work is a verdict on someone else's attempt).
+fn challenger_facts(job: &AgentJob) -> Option<super::super::smart_router::ChallengerAttemptFacts> {
+    if job.route_tax.is_some() || job.judged_agent.is_some() {
+        return None;
+    }
+    Some(super::super::smart_router::ChallengerAttemptFacts {
+        key: runtime::spawn_attempt_key(&job.manifest.agent_id, job.manifest.run_generation)?,
+        role: job.manifest.route_role.clone(),
+        risk: job.manifest.route_risk.clone(),
+        route_source: job.manifest.route_source.clone(),
+        incumbent_model: selected_route_model(&job.manifest),
+        task: job.prompt.clone(),
+        effort: job.route_effort,
+        // A resume, a later generation of the same agent, or a repair round
+        // the verify loop asked for: a second opinion is not what a retry
+        // needs.
+        retry_or_handover: job.resume
+            || job.manifest.run_generation != super::AGENT_INITIAL_RUN_GENERATION
+            || job.verify_loop.is_some(),
+    })
+}
+
+/// The first turn of a drawn attempt has ended: its first plan is the
+/// incumbent's design ([`super::super::smart_router::first_challenger_design_text`]),
+/// frozen here once and handed to the arm, which finishes on its own
+/// thread. A later turn — a continuation — is never read as a first plan:
+/// the draw is taken on the first call and the slot is empty after it.
+fn challenger_after_first_turn(
+    challenger: &mut Option<super::super::smart_router::ChallengerDrawn>,
+    turn: Option<&[runtime::ConversationMessage]>,
+) {
+    if let Some(drawn) = challenger.take() {
+        drawn.designs_ready(turn.and_then(super::super::smart_router::first_challenger_design_text));
+    }
+}
+
 /// Pure pass/fail projection of `semantic_verdict`'s label. `None` for
 /// anything ambiguous (the `"retry"` label — status completed but no usable
 /// structured verdict recovered, e.g. missing/malformed `StructuredOutput` —
@@ -1450,6 +1498,11 @@ fn run_agent_job(
     // (and its sink) with markers still on disk. A no-op for agents that never
     // instrumented (the ledger is empty).
     let probe_guard = ProbeRevertGuard::new(runtime.tool_executor().probe_sink_handle());
+    // The challenger arm's draw (t-6263): every hold, the door's word, a
+    // challenger, a price and the day's share — and, cleared, a design
+    // request already on its way while this attempt runs. Nothing below
+    // waits on it; the attempt acts on its own design either way.
+    let mut challenger = open_challenger(job);
     let mut next_prompt = job.prompt.clone();
     let schema_requested = job.schema.is_some();
     let allow_text_progress = subagent_allows_text_progress(
@@ -1460,6 +1513,12 @@ fn run_agent_job(
     let summary_result = loop {
         let result = runtime.run_turn(next_prompt, None);
         runtime.tool_executor().revert_probes();
+        // The incumbent's design is its first turn's first plan — frozen once,
+        // here, off the messages this attempt's own runtime just wrote.
+        challenger_after_first_turn(
+            &mut challenger,
+            result.as_ref().ok().map(|summary| summary.assistant_messages.as_slice()),
+        );
         match result {
             Ok(summary) => {
                 continuation.observe(&summary, job.schema.as_ref());
@@ -4152,4 +4211,81 @@ mod tests {
         );
     }
 
+
+    /// 실제 호출자 한 곳의 끝에서 끝까지(t-6263): 스폰의 사실→뽑힘→예약→설계 둘(현직의 첫 계획은 제품의 첫 턴 이음새로)→문→눈가림 비교→
+    /// 검증자의 verdict(제품의 기록기)→라벨. 가짜는 도전자의 공급자 선과 Jev 선 둘뿐이다.
+    #[test]
+    fn a_drawn_spawn_is_compared_blind_and_its_verifiers_verdict_labels_it() {
+        use crate::misc_tools::smart_router as sr;
+        use zerocode_core::jev::challenger::{Receipt, Side};
+        use zerocode_core::jev::summary::{AGREED, LABEL, OUTCOME};
+        use zerocode_core::jev::JevMode;
+
+        let key = sr::challenger_key_that_draws(Side::Challenger);
+        let agent_id = key.trim_end_matches("#1").to_string();
+        let cwd = std::env::current_dir().expect("cwd");
+        let rig = sr::ChallengerRig::at(
+            cwd,
+            None,
+            JevMode::Shadow,
+            &sr::challenger_jev_answer("first"),
+            sr::ChallengerScripted::answering("CHALLENGER: split the parser and test each half"),
+        );
+        rig.spent_today(
+            u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis())
+                .unwrap_or(u64::MAX),
+        );
+        let mut manifest = verdict_test_manifest(&agent_id, "general-purpose");
+        manifest.run_generation = 1;
+        manifest.resolved_model = Some(sr::CHALLENGER_TEST_INCUMBENT.to_string());
+        manifest.route_role = Some("coding".to_string());
+        manifest.route_risk = Some("low".to_string());
+        manifest.route_source = Some("auto".to_string());
+        let mut job = reviewer_job(None, None, "make the parser stricter");
+        job.manifest = manifest.clone();
+
+        // The spawn's own facts, as the product reads them.
+        let facts = super::challenger_facts(&job).expect("an attempt the arm measures");
+        assert_eq!(facts.key, key);
+        assert_eq!(facts.incumbent_model, sr::CHALLENGER_TEST_INCUMBENT);
+        assert!(!facts.retry_or_handover);
+        let mut resumed = reviewer_job(None, None, "t");
+        resumed.manifest = manifest.clone();
+        resumed.resume = true;
+        assert!(super::challenger_facts(&resumed).expect("facts").retry_or_handover, "a resume is a retry");
+        let mut later = reviewer_job(None, None, "t");
+        later.manifest = manifest.clone();
+        later.manifest.run_generation = 2;
+        assert!(super::challenger_facts(&later).expect("facts").retry_or_handover, "a later generation is a retry");
+        let mut taxed = reviewer_job(None, None, "t");
+        taxed.route_tax = Some(runtime::RouteTaxCall::Probe);
+        assert!(super::challenger_facts(&taxed).is_none(), "the routing tax is not an attempt");
+        assert!(super::challenger_facts(&reviewer_job(Some(&agent_id), None, "t")).is_none(), "a bound verifier is not an attempt");
+
+        // The attempt draws; its first turn plans before it acts.
+        let mut slot = Some(rig.arm().open(facts).expect("drawn"));
+        let turn = vec![
+            ConversationMessage::assistant(vec![ContentBlock::Text { text: "INCUMBENT: reject unknown fields at the root".to_string() }]),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse { id: "t1".to_string(), name: "bash".to_string(), input: "{}".to_string() }]),
+        ];
+        super::challenger_after_first_turn(&mut slot, Some(&turn));
+        assert!(slot.is_none(), "the draw is taken on the first turn");
+        super::challenger_after_first_turn(&mut slot, Some(&turn));
+        let rows = sr::challenger_rows_after(&rig, 1);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(OUTCOME.read(&rows[0]).and_then(serde_json::Value::as_str), Some("answered"));
+        assert_eq!(rows[0]["preferred"], serde_json::json!("challenger"), "first was the challenger's, by the blind");
+        assert_eq!(rig.designer.calls(), 1);
+        assert_eq!(rig.judged(), 1);
+
+        // The verifier bound to this attempt fails its work: the product's verdict recorder labels the comparison.
+        let verifier = reviewer_job(Some(&agent_id), None, "review the current diff");
+        super::record_bound_verdict(&verifier, &manifest, Some("finding"), Some(false));
+        let rows = sr::challenger_rows_after(&rig, 2);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(LABEL.read(&rows[1]).and_then(serde_json::Value::as_str), Some(key.as_str()));
+        assert_eq!(rows[1]["verified"], serde_json::json!(Receipt::Failed.token()));
+        assert_eq!(rows[1]["won"], serde_json::json!(true));
+        assert_eq!(AGREED.read(&rows[1]).and_then(serde_json::Value::as_bool), Some(true));
+    }
 }

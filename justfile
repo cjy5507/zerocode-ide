@@ -78,6 +78,7 @@ tools-test:
     python3 tools/tests/test_command_guard_replay_seed.py
     python3 tools/tests/test_ask_wait_replay_seed.py
     python3 tools/tests/test_question_discovery.py
+    python3 tools/tests/test_challenger_replay_seed.py
     python3 tools/tests/test_claude_code_panel_rules.py
     python3 tools/tests/test_codegraph_bench.py
 
