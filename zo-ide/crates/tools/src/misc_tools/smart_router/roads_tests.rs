@@ -317,7 +317,7 @@ fn a_retry_of_a_failed_attempt_is_judged_again_not_recalled() {
     let machine = Machine::new(json!({ "decisionShadow": "on" }), &judgment, &chat);
     let inventory = runtime::ModelInventory::new(PARENT, Vec::new());
     let prompt = unique_for("implement", "write the parser and its tests");
-    let mut judged = |retry_of_failed_attempt: bool| {
+    let judged = |retry_of_failed_attempt: bool| {
         super::probe_exec::route_probe_assessment(
             &inventory,
             PARENT,
