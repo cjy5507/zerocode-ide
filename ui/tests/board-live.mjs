@@ -183,12 +183,15 @@ export async function testBoardLive(browser, origin, ok) {
       await paintBoardView(undefined, { force: true });
       await window.__BOARD_SETTLED__();
     });
+    /* 지도를 끈 판은 이 변경 **이전의 판**이다: 실시간 선도, 맥박도, 기다림의
+     * 칸도 DOM 에 없다. 빈 칸을 늘 세워 두고 CSS 로 접는 것이 아니라 아예
+     * 짓지 않는다 — 보드의 기본값에 카드마다 요소 셋을 얹지 않기 위해서다. */
     ok("the graph without the live map is the graph it was", await page.evaluate(() => {
       const view = document.querySelector("#board-view");
       return !view.classList.contains("is-live-map")
         && view.querySelectorAll(".agent-graph-edge.is-live-relation").length === 0
         && view.querySelectorAll("[data-live-beat]").length === 0
-        && [...view.querySelectorAll(".agent-graph-wait")].every((chip) => chip.textContent === "");
+        && view.querySelectorAll(".agent-graph-wait").length === 0;
     }));
 
     /* 켜는 판은 **조용히** 선다: 이미 쌓여 있던 관계가 한꺼번에 맥박이 되지
@@ -231,6 +234,25 @@ export async function testBoardLive(browser, origin, ok) {
       await window.__BOARD_SETTLED__();
       return withMap.rows === without && withMap.rows !== ""
         && !withMap.live && withMap.beats === 0 && withMap.waits === 0 && withMap.events === 0;
+    }));
+
+    /* 그리고 손잡이 하나가 그 셋을 실제로 붙였다 뗀다 — 카드가 다시 지어지지
+     * 않으면 켠 판에도 칸이 서지 않고, 끈 판에서도 칸이 남는다. */
+    ok("the_wait_cell_is_built_by_the_toggle_and_not_before", await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const cells = () => view.querySelectorAll(".agent-graph-wait").length;
+      const cards = () => view.querySelectorAll(".agent-graph-node.is-agent").length;
+      const on = { cells: cells(), cards: cards() };
+      setAgentGraphLive(view, false);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      const off = { cells: cells(), cards: cards() };
+      setAgentGraphLive(view, true);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      const back = cells();
+      return on.cells === on.cards && on.cards > 0 && off.cells === 0
+        && off.cards === on.cards && back === on.cells;
     }));
 
     /* ---- ② 맥박은 실제 사건 하나에 한 번 ------------------------------- */

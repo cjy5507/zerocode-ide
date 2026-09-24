@@ -4142,6 +4142,12 @@ function updateAgentGraphNode(node, entity, view) {
     entity.merge ? JSON.stringify(entity.merge) : "",
     entity.type === "workspace" ? agentGraphOverlayMode : "",
     String(entity.previousAttempt ?? false),
+    /* 기다림의 칸을 카드가 **드는가** (t-7288). 손잡이는 사람이 누를 때만
+     * 움직이므로 이것은 안정된 조건이고, 그 한 번의 누름이 카드를 다시 짓는
+     * 것은 옳다 — 지도를 끈 판(보드의 기본값)의 카드는 이 칸을 아예 들지
+     * 않는다. 어느 카드가 기다리는지는 **볼 수 있는 상태**이므로, 그쪽은
+     * 늘 서 있는 빈 칸이 맡고 CSS가 접는다. */
+    String(agentGraphLiveOn()),
   ].join("\u001f");
   const signature = `${stableSignature}\u001d${volatileSignature}`;
   const geometrySignature = [
@@ -4270,9 +4276,12 @@ function updateAgentGraphNode(node, entity, view) {
       phase.className = `agent-card-phase is-${facts.phase || "none"}`;
       phase.textContent = facts.phaseWord;
       phase.dataset.tip = facts.phaseTip;
-      const wait = agentGraphWaitNode();
-      dressAgentGraphWait(wait, entity.wait);
-      status.append(agentGraphStateMark(entity.state), stateWord, phase, wait);
+      status.append(agentGraphStateMark(entity.state), stateWord, phase);
+      if (agentGraphLiveOn()) {
+        const wait = agentGraphWaitNode();
+        dressAgentGraphWait(wait, entity.wait);
+        status.append(wait);
+      }
       parts.push(status);
       const doing = agentCardDoingNode({ graph: true });
       dressAgentCardDoing(doing, facts);
