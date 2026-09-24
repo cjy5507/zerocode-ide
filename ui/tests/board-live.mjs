@@ -661,6 +661,62 @@ async function testLiveMap(browser, origin, ok) {
         && view !== null;
     }));
 
+    /* 착지한 권위 seam(t-6815)이 실제로 싣는 사실로 — 워커가 스스로 적은
+     * 「검증됐다」는 **주장**이고, 코디네이터가 그 시도의 출처를 보고 적은
+     * 「검증됨」은 **사실**이다. 두 사건은 실제 그리기 문을 지나 각자 제 낱말로
+     * 서고, 주장은 사실의 낱말도, 배정도 되지 않는다. 그리고 그 seam이 내는 모든
+     * 낱말이 지도의 단계 하나로 되읽힌다 — seam이 낱말을 늘리면 여기서 빨개진다. */
+    const authority = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const held = window.__LEDGER__;
+      window.__LEDGER__ = held.map((row) => {
+        if (row.worker === "w-impl") {
+          return { ...row, reported: true, review: { verified: false, merged: false, deployed: false,
+            written: false, claimed_verified: true, claimed_merged: false, claimed_deployed: false,
+            author: "worker" } };
+        }
+        if (row.worker === "w-verify") {
+          return { ...row, reported: true, review: { verified: true, merged: true, deployed: false,
+            written: true, claimed_verified: false, claimed_merged: false, claimed_deployed: false,
+            author: "coordinator", attempt: "dp-verify", source: "0123abc" } };
+        }
+        return row;
+      });
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      selectAgentGraphEntity(view, "agent:term:301");
+      const said = (dispatch) => {
+        const event = agentGraphLiveRecentEvents().find((one) => one.evidence?.dispatchId === dispatch
+          && (one.kind === "result" || one.kind === "assignment"));
+        const row = event && [...view.querySelectorAll(".agent-live-event-main")]
+          .find((one) => one.dataset.liveEvent === event.key);
+        return event ? { kind: event.kind, stage: event.evidence.stage, at: event.at,
+          facts: row?.querySelector(".agent-live-event-facts")?.textContent ?? null } : null;
+      };
+      const claim = said("dp-impl");
+      const fact = said("dp-verify");
+      /* seam이 답할 수 있는 모든 낱말이 단계 하나로 되읽히는가. */
+      const reviews = [{ deployed: true }, { merged: true }, { verified: true },
+        { claimed_deployed: true }, { claimed_merged: true }, { claimed_verified: true }, {}];
+      const unread = reviews.filter((review) =>
+        ledgerReviewStage({ reported: true }, { reported: true, review }) === "dispatched");
+      window.__LEDGER__ = held;
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      return { claim, fact, unread,
+        words: { claimed: t("board.claimedVerified", "검증됐다 함"), verified: t("board.verified", "검증됨"),
+          merged: t("board.merged", "병합됨") } };
+    });
+    ok("a_workers_claim_and_a_coordinators_fact_stand_as_different_results",
+      authority.claim?.kind === "result" && authority.claim.stage === "claimed-verified"
+      && authority.claim.at === 0 && authority.claim.facts?.includes(authority.words.claimed) === true
+      && !authority.claim.facts.includes(authority.words.verified)
+      && authority.fact?.kind === "result" && authority.fact.stage === "merged"
+      && authority.fact.facts?.includes(authority.words.merged) === true,
+      JSON.stringify(authority));
+    ok("every_word_the_review_seam_answers_reads_back_as_a_stage",
+      authority.unread.length === 0, JSON.stringify(authority.unread));
+
     ok("a_recorded_dispatch_and_message_point_to_their_exact_evidence",
       await page.evaluate(() => {
         const view = document.querySelector("#board-view");

@@ -760,11 +760,16 @@ function dressAgentGraphWait(chip, wait) {
 
 /* 단계의 이름과 그 낱말, 한 표. 사건 줄이 단계를 말할 때와 원장의 판정을
  * 단계로 되읽을 때가 같은 표를 읽는다. 낱말은 t-6815의 seam
- * (`ledgerReviewWord`)이 쓰는 그 키들이다. */
+ * (`ledgerReviewWord`)이 쓰는 그 키들이다 — 코디네이터가 적은 사실 셋, 워커가
+ * 적은 **주장** 셋(원장이 사실과 떼어 둔 것), 그리고 보고. 주장은 제 낱말로만
+ * 서고 사실의 단계가 되지 않는다. */
 const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
   { stage: "deployed", key: "board.deployed", word: "배포됨" },
   { stage: "merged", key: "board.merged", word: "병합됨" },
   { stage: "verified", key: "board.verified", word: "검증됨" },
+  { stage: "claimed-deployed", key: "board.claimedDeployed", word: "배포됐다 함" },
+  { stage: "claimed-merged", key: "board.claimedMerged", word: "병합됐다 함" },
+  { stage: "claimed-verified", key: "board.claimedVerified", word: "검증됐다 함" },
   { stage: "reported", key: "board.awaitingReview", word: "검증 대기" },
 ]);
 
