@@ -2462,6 +2462,24 @@ pub(crate) mod tests {
             "a replacement that kept the first line and the tail was read as unchanged"
         );
         assert_ne!(rotated.next.file, cursor.file, "another file");
+
+        // Longer than before, the first line and every byte before the
+        // cursor kept: another file too, read from its start at once.
+        let (cursor, _) = read_to_the_end(&path, rotated.next, platform_evidence);
+        replace(&format!(
+            "{}{CLAUDE_PLAIN_RECORD}\n",
+            three_windows_with(&CLAUDE_FALLBACK.replace("switch-1", "switch-7"))
+        ));
+        let longer = scan_fallbacks(&path, &cursor, windows_of(&cursor) - 1);
+        assert_eq!(
+            longer
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-7"],
+            "a longer replacement that kept the first line and the tail was read as appended to"
+        );
     }
 
     /// A file rewritten IN PLACE under its own name — the same inode, the
@@ -2646,6 +2664,51 @@ pub(crate) mod tests {
             keys(&longer),
             ["switch-5"],
             "a longer replacement, its first line kept, was read as appended to"
+        );
+    }
+
+    /// What a reading of an unchanged long transcript costs (t-7153, R3):
+    /// a file as long as the longest a worker wrote here in fourteen days
+    /// (11.8 MB), read to its end, then read again unchanged — the stat,
+    /// the opening, the anchor and the one window the reading's turn names.
+    /// Prints the median of the readings; run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, printed; not a check"]
+    fn measure_a_reading_of_an_unchanged_long_transcript() {
+        const LONGEST_BYTES: usize = 11_800_000;
+        const READINGS: u64 = 2_000;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let plain = format!("{CLAUDE_PLAIN_RECORD}\n");
+        std::fs::write(&path, plain.repeat(LONGEST_BYTES / plain.len())).expect("a transcript");
+        let (cursor, found) = {
+            let size = std::fs::metadata(&path).expect("size").len();
+            let mut cursor = ScanCursor::default();
+            let mut turn = 0;
+            while cursor.offset < size {
+                cursor = scan_fallbacks(&path, &cursor, turn).next;
+                turn += 1;
+            }
+            (cursor, turn)
+        };
+        let mut took: Vec<std::time::Duration> = (0..READINGS)
+            .map(|turn| {
+                let started = std::time::Instant::now();
+                let scan = scan_fallbacks(&path, &cursor, found + turn);
+                let took = started.elapsed();
+                assert_eq!(scan.next.offset, cursor.offset, "an unchanged file moved");
+                took
+            })
+            .collect();
+        took.sort();
+        println!(
+            "an unchanged {} byte transcript, {} windows: median {:?}, p90 {:?} a reading over {READINGS}",
+            cursor.offset,
+            cursor
+                .offset
+                .div_ceil(zerocode_core::transcript::MAX_TAIL_BYTES),
+            took[took.len() / 2],
+            took[took.len() * 9 / 10],
         );
     }
 
