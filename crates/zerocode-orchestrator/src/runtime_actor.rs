@@ -6289,16 +6289,6 @@ mod tests {
         );
     }
 
-    /// A write that dies half-way leaves the ledger that was there, whole.
-    ///
-    /// `ledger_store::write` moves the head, clears every row and re-inserts
-    /// them, on the caller's connection. Without a transaction around it each
-    /// statement commits alone, so a fault after the head and the clearing
-    /// leaves a head counting prose whose rows are gone — a store every read
-    /// from then on refuses as corrupt, across restarts. The fault here lands
-    /// on the first row insert, where the real one did; the ledger the disk
-    /// holds afterwards must be the one from before, and the runtime must be
-    /// able to take the disk's word and answer again once the fault is gone.
     /// Every verb that reaches the plan is counted by UTC day with its
     /// refusals (t-6742) — the reads too, which file no receipt and move no
     /// revision — and the count rides the next durable write. Receipts name
@@ -6327,35 +6317,48 @@ mod tests {
             .expect("a write");
         assert!(after_write > opened);
 
+        // Read back off the store, as JSON: a store that keeps no tallies and
+        // no verbs compiles this and fails it on the assertion (t-6742 R4).
         let connection = fixture.store.connection().expect("store connection");
         let held = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
             .expect("the store reads")
             .expect("and the ledger is there");
-        let rows: Vec<(&str, i64, u64, u64)> = held
-            .projection
-            .verb_tallies
-            .iter()
-            .map(|row| (row.verb.as_str(), row.day_start_ms, row.calls, row.refused))
-            .collect();
+        let stored = serde_json::to_value(&held.projection).expect("a projection");
+        let rows: Vec<serde_json::Value> = stored
+            .get("verb_tallies")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             rows,
             vec![
-                ("run-create", day, 1, 0),
-                ("worker-read", day, 1, 1),
-                ("task-create", day, 1, 0),
+                serde_json::json!({"verb": "run-create", "day_start_ms": day, "calls": 1, "refused": 0}),
+                serde_json::json!({"verb": "worker-read", "day_start_ms": day, "calls": 1, "refused": 1}),
+                serde_json::json!({"verb": "task-create", "day_start_ms": day, "calls": 1, "refused": 0}),
             ]
         );
         assert_eq!(
-            held.projection
-                .served
+            stored["served"]
+                .as_array()
+                .expect("receipts")
                 .iter()
-                .map(|row| row.verb.as_deref())
+                .map(|row| row.get("verb").and_then(serde_json::Value::as_str))
                 .collect::<Vec<_>>(),
             vec![Some("run-create"), Some("task-create")],
             "a read filed no receipt, and each receipt names its verb"
         );
     }
 
+    /// A write that dies half-way leaves the ledger that was there, whole.
+    ///
+    /// `ledger_store::write` moves the head, clears every row and re-inserts
+    /// them, on the caller's connection. Without a transaction around it each
+    /// statement commits alone, so a fault after the head and the clearing
+    /// leaves a head counting prose whose rows are gone — a store every read
+    /// from then on refuses as corrupt, across restarts. The fault here lands
+    /// on the first row insert, where the real one did; the ledger the disk
+    /// holds afterwards must be the one from before, and the runtime must be
+    /// able to take the disk's word and answer again once the fault is gone.
     #[test]
     fn a_write_that_dies_half_way_leaves_the_previous_ledger_whole() {
         let fixture = Fixture::new();

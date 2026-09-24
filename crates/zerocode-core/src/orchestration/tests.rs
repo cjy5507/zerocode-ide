@@ -23686,17 +23686,25 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
 /// from the answer's shape; the word survives the strict projection, a
 /// rebuild, and the sweep that hollows a receipt into a tombstone, and a
 /// replay after the rebuild is still the first answer.
+///
+/// Read off the projection as the store would write it — its JSON — so a
+/// ledger with no such word compiles this and fails it on the assertion
+/// (t-6742 R4).
 #[test]
 fn served_rows_name_their_verb() {
     let mut bench = Bench::new();
     let opened = bench.json("run-create --name verbs --retry-request r-open");
     bench.json("task-create --spec build --retry-request r-task");
     let verbs = |ledger: &Ledger| -> Vec<Option<String>> {
-        ledger
-            .export()
-            .served
+        serde_json::to_value(ledger.export()).expect("a projection")["served"]
+            .as_array()
+            .expect("its receipts")
             .iter()
-            .map(|row| row.verb.clone())
+            .map(|row| {
+                row.get("verb")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
             .collect()
     };
     assert_eq!(
@@ -23706,8 +23714,8 @@ fn served_rows_name_their_verb() {
             Some("task-create".to_string())
         ]
     );
-    for row in &bench.ledger.export().served {
-        let verb = row.verb.as_deref().expect("named");
+    for verb in verbs(&bench.ledger) {
+        let verb = verb.expect("named");
         assert!(
             VERBS.iter().any(|(name, _, _)| *name == verb),
             "{verb} is not a verb of the table"
@@ -23828,6 +23836,15 @@ fn a_session_at(path: Option<&str>) -> ProviderSession {
     }
 }
 
+/// The word every `worker-transcript` refusal for a transcript it cannot
+/// name opens with (`crate::worker_transcript::UNAVAILABLE`), spelled as a
+/// caller branching on it sees it. These tests read the verb through the
+/// plan's own seam — words in, a reply and the effect's `Debug` out — and
+/// name nothing the verb added, so a ledger without the verb compiles them
+/// and fails them on their assertions, `unknown verb`, rather than on the
+/// build (t-6742 R4).
+const TRANSCRIPT_UNAVAILABLE: &str = "transcript unavailable";
+
 /// `worker-transcript` is a read answered from the worker ROW's own
 /// reported transcript: the plan names that file and the NUL placeholder
 /// the window fills, files no receipt, moves nothing — and keeps naming
@@ -23846,19 +23863,12 @@ fn a_worker_transcript_answers_structured_turns_not_screen_bytes() {
 
     let read = bench.run(&format!("worker-transcript --worker {worker}"));
     assert_eq!(read.reply.exit_code, 0, "{}", read.reply.stderr);
-    assert_eq!(
-        read.effect,
-        Effect::WorkerTranscript {
-            worker: worker.clone(),
-            agent: "claude".to_string(),
-            path: "/transcripts/w.jsonl".to_string(),
-            ask: crate::worker_transcript::TranscriptAsk {
-                window: crate::worker_transcript::Window::LastTurns(
-                    crate::worker_transcript::TURNS_DEFAULT
-                ),
-                json: false,
-            },
-        }
+    let effect = format!("{:?}", read.effect);
+    assert!(
+        effect.starts_with(&format!(
+            "WorkerTranscript {{ worker: \"{worker}\", agent: \"claude\", path: \"/transcripts/w.jsonl\", ask: TranscriptAsk {{ window: LastTurns("
+        )) && effect.ends_with("), json: false } }"),
+        "the row's own file, its agent, the default window, text: {effect}"
     );
     assert_eq!(
         read.reply.stdout, "\u{0}",
@@ -23868,22 +23878,20 @@ fn a_worker_transcript_answers_structured_turns_not_screen_bytes() {
     assert_eq!(bench.ledger.export(), before, "a read moved the ledger");
 
     let json = bench.run(&format!(
-        "worker-transcript --worker {worker} --turns 5 --json"
+        "worker-transcript --worker {worker} --turns 7 --json"
     ));
-    let Effect::WorkerTranscript { ask, .. } = json.effect else {
-        panic!("{:?}", json.reply);
-    };
-    assert_eq!(ask.window, crate::worker_transcript::Window::LastTurns(5));
-    assert!(ask.json);
+    let effect = format!("{:?}", json.effect);
+    assert!(
+        effect.ends_with("ask: TranscriptAsk { window: LastTurns(7), json: true } }"),
+        "{effect}"
+    );
     let since = bench.run(&format!(
         "worker-transcript --worker {worker} --since 1790251200000"
     ));
-    let Effect::WorkerTranscript { ask, .. } = since.effect else {
-        panic!("{:?}", since.reply);
-    };
-    assert_eq!(
-        ask.window,
-        crate::worker_transcript::Window::Since(1_790_251_200_000)
+    let effect = format!("{:?}", since.effect);
+    assert!(
+        effect.ends_with("ask: TranscriptAsk { window: Since(1790251200000), json: false } }"),
+        "{effect}"
     );
 
     for (line, why) in [
@@ -23928,10 +23936,12 @@ fn a_worker_transcript_answers_structured_turns_not_screen_bytes() {
     assert_eq!(screen.reply.stdout, "the archived screen\n");
     let after = bench.run(&format!("worker-transcript --worker {worker}"));
     assert_eq!(after.reply.exit_code, 0, "{}", after.reply.stderr);
+    let effect = format!("{:?}", after.effect);
     assert!(
-        matches!(&after.effect, Effect::WorkerTranscript { path, .. } if path == "/transcripts/w.jsonl"),
-        "{:?}",
-        after.effect
+        effect.starts_with("WorkerTranscript {")
+            && effect.contains("path: \"/transcripts/w.jsonl\"")
+            && !effect.contains("archived screen"),
+        "{effect}"
     );
     assert!(!after.reply.stdout.contains("archived screen"));
 }
@@ -23943,7 +23953,7 @@ fn a_worker_transcript_answers_structured_turns_not_screen_bytes() {
 /// with a session of its own, and each row names its own.
 #[test]
 fn a_worker_with_no_transcript_is_unavailable_never_its_screen() {
-    use crate::worker_transcript::UNAVAILABLE;
+    const UNAVAILABLE: &str = TRANSCRIPT_UNAVAILABLE;
     let mut bench = Bench {
         launcher: Catalog(&["claude", "codex", "amp"]),
         ..Bench::new()
@@ -23986,9 +23996,11 @@ fn a_worker_with_no_transcript_is_unavailable_never_its_screen() {
         a_session_at(Some("/rollouts/new.jsonl"))
     ));
     let new = bench.run(&format!("worker-transcript --worker {reused}"));
+    let effect = format!("{:?}", new.effect);
     assert!(
-        matches!(&new.effect, Effect::WorkerTranscript { path, agent, .. } if path == "/rollouts/new.jsonl" && agent == "codex"),
-        "{:?}",
+        effect.starts_with("WorkerTranscript {")
+            && effect.contains("agent: \"codex\", path: \"/rollouts/new.jsonl\""),
+        "{effect} {:?}",
         new.reply
     );
     let old = bench.run(&format!("worker-transcript --worker {unreported}"));
