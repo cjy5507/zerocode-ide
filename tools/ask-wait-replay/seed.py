@@ -25,9 +25,12 @@ time, keyed by when it wrote them, never a later fact moved earlier:
     the turn ends, stall notices, judged causes and quota walls the ledger
     recorded about it while the asker waited (each with the fact's own time
     and the time the ledger learned it); and whether its attempt ended
-    before the wait did — and how, read off the ledger's record of that
-    ending (`done`, `died`, `stopped`, `abandoned`), or `unexplained` where
-    the ledger kept no reason this replay can read. A run (its coordinator)
+    before the wait did — and how, read off the ledger's record of THAT
+    attempt's ending (`done`, `died`: the row filed under the attempt's own
+    dispatch key; `stopped`, `abandoned`: the task's record while the
+    attempt is the task's latest), or `unexplained` where the ledger kept
+    no reason this replay can read. A row naming another attempt of the
+    same worker, or no attempt at all, is never this attempt's ending. A run (its coordinator)
     or a bare pane has no baseline facts: the ledger wrote no turn facts
     about a coordinator's pane before the rule, and the row says so
     (`receiver_facts: unobservable`) rather than guessing;
@@ -213,16 +216,24 @@ class Ledger:
         # The ledger's observations about each worker, in the order written.
         self.facts_by_worker: dict[str, list[tuple[dict, dict]]] = {}
         for row in self.messages:
-            if row["sender"] != LEDGER_ITSELF or row["kind"] not in ("went_quiet", "worker_died", "quota_walled"):
+            if row["sender"] != LEDGER_ITSELF or row["kind"] not in ("went_quiet", "quota_walled"):
                 continue
             body = body_json(row["body"])
             worker = body.get("workerId")
             if isinstance(worker, str):
                 self.facts_by_worker.setdefault(worker, []).append((row, body))
-        self.done_by_worker: dict[str, list[int]] = {}
+        # The rows that END an attempt, under that attempt's own key — the
+        # ledger's `worker_died` and the worker's `worker_done`, each filed
+        # with the dispatch it ended (`announce_a_death` and `send` in
+        # `crates/zerocode-core/src/orchestration.rs`). A row without the key
+        # is filed under no attempt: nothing but the key says whose it was.
+        self.endings_by_attempt: dict[str, list[tuple[str, int]]] = {}
         for row in self.messages:
-            if row["kind"] == "worker_done" and row["sender"].startswith("worker:"):
-                self.done_by_worker.setdefault(row["sender"][len("worker:"):], []).append(row["created_ms"])
+            ends = (row["kind"] == "worker_died" and row["sender"] == LEDGER_ITSELF) or (
+                row["kind"] == "worker_done" and row["sender"].startswith("worker:")
+            )
+            if ends and row["dispatch"]:
+                self.endings_by_attempt.setdefault(row["dispatch"], []).append((row["kind"], row["created_ms"]))
 
     def root_questions(self) -> list[dict]:
         return [row for row in self.messages if row["kind"] == "question" and not row["thread"]]
@@ -267,18 +278,22 @@ class Ledger:
                 return row
         return None
 
-    def ending_of(self, worker_id: str, attempt: dict, asked_ms: int, end_ms: int) -> str:
-        """How the receiver's attempt ended, by the ledger's own record of it
-        and nothing else: `died` (a `worker_died` row), `done` (its
-        `worker_done`), the outcome the ledger wrote into the task for THIS
-        attempt (`stopped`, `abandoned` — read only while the attempt is the
-        task's latest, since the next one writes over it), or `unexplained`
-        where the ledger kept no reason this replay can read. Never a guess:
-        an attempt with no recorded reason is not counted as a stop."""
-        facts = self.facts_by_worker.get(worker_id, [])
-        if any(held["kind"] == "worker_died" and asked_ms < held["created_ms"] <= end_ms for held, _ in facts):
+    def ending_of(self, attempt: dict) -> str:
+        """How the receiver's attempt ended, by the ledger's own record of
+        THAT attempt and nothing else: `died` (a `worker_died` row filed under
+        its dispatch), `done` (its `worker_done`, under the same key) — each
+        written by the time the attempt ended — the outcome the ledger wrote
+        into the task for this attempt (`stopped`, `abandoned` — read only
+        while the attempt is the task's latest, since the next one writes over
+        it), or `unexplained` where the ledger kept no reason this replay can
+        read. Never a guess: an attempt with no recorded reason is not counted
+        as a stop, and a death or a report of the same worker's NEXT attempt —
+        or one that names no attempt — is not this attempt's ending, however
+        close in time."""
+        ended = [kind for kind, at_ms in self.endings_by_attempt.get(attempt["id"], []) if at_ms <= attempt["ended_ms"]]
+        if "worker_died" in ended:
             return "died"
-        if any(asked_ms < done_ms <= attempt["ended_ms"] for done_ms in self.done_by_worker.get(worker_id, [])):
+        if "worker_done" in ended:
             return "done"
         task = (attempt["run"], attempt["task"])
         if self.latest_attempt.get(task) == attempt["id"]:
@@ -372,7 +387,7 @@ def question_row(ledger: Ledger, question: dict, earlier: dict[tuple[str, str, s
     ended_ms = attempt["ended_ms"]
     if ended_ms is not None and asked_ms < ended_ms < end_ms:
         row["receiver_ended"] = {
-            "ending": ledger.ending_of(worker_id, attempt, asked_ms, end_ms),
+            "ending": ledger.ending_of(attempt),
             "fact_ms": ended_ms,
             "wait_after_ms": end_ms - ended_ms,
         }

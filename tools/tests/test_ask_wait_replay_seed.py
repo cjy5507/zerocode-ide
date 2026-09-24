@@ -242,6 +242,66 @@ class Endings(unittest.TestCase):
         self.assertNotIn("the prose nobody copies", json.dumps(rows))
 
 
+class EndingsByAttempt(unittest.TestCase):
+    """An ending is read off the rows that carry the attempt's own key
+    (astra, t-6740 r3): a death or a report of ANOTHER attempt of the same
+    worker is not this attempt's ending, however close in time, and a row
+    that names no attempt at all is nobody's."""
+
+    def setUp(self):
+        self.raw = tempfile.TemporaryDirectory()
+        self.db = Path(self.raw.name) / "authority.sqlite"
+        db = sqlite3.connect(self.db)
+        db.executescript(SCHEMA)
+        rows = Rows(db)
+        # The asker carries an attempt that stays open: every question is censored.
+        rows.worker("w-9", "dp-9")
+        rows.dispatch("dp-9", "t-9", "w-9", 100)
+        # D1 reports done at 3000; the same worker's D2 begins at 3500 and dies
+        # at 5000 while the question put during D1 still waits.
+        rows.worker("w-1", None)
+        rows.dispatch("dp-11", "t-11", "w-1", 100, 3000)
+        rows.message("m-10", "worker:w-1", "run:run-1", "worker_done", '{"ok":true}',
+                     task="t-11", dispatch="dp-11", created=3000)
+        rows.dispatch("dp-12", "t-12", "w-1", 3500, 5000)
+        rows.message("m-11", "ledger", "run:run-1", "worker_died",
+                     json.dumps({"workerId": "w-1", "dispatchId": "dp-12"}),
+                     task="t-12", dispatch="dp-12", created=5000)
+        # D1's own death.
+        rows.worker("w-2", None)
+        rows.dispatch("dp-2", "t-2", "w-2", 100, 3000)
+        rows.message("m-20", "ledger", "run:run-1", "worker_died",
+                     json.dumps({"workerId": "w-2", "dispatchId": "dp-2"}),
+                     task="t-2", dispatch="dp-2", created=3000)
+        # A death that names no attempt, and a report that names none.
+        rows.worker("w-3", None)
+        rows.dispatch("dp-3", "t-3", "w-3", 100, 3000)
+        rows.message("m-30", "ledger", "run:run-1", "worker_died", json.dumps({"workerId": "w-3"}), created=3000)
+        rows.worker("w-4", None)
+        rows.dispatch("dp-4", "t-4", "w-4", 100, 3000)
+        rows.message("m-40", "worker:w-4", "run:run-1", "worker_done", '{"ok":true}', created=3000)
+        for question, receiver in (("m-1", "w-1"), ("m-2", "w-2"), ("m-3", "w-3"), ("m-4", "w-4")):
+            rows.message(question, "worker:w-9", f"worker:{receiver}", "question", "which?", dispatch="dp-9", created=1000)
+        rows.message("m-99", "ledger", "run:run-1", "status", "{}", created=10_000)
+        db.commit()
+        db.close()
+
+    def tearDown(self):
+        self.raw.cleanup()
+
+    def test_an_ending_is_read_off_its_own_attempts_rows(self):
+        rows = {row["question"]: row for row in seed.gather(self.db)["rows"]}
+        endings = {
+            question: rows[seed.hashed(question)]["receiver_ended"]["ending"]
+            for question in ("m-1", "m-2", "m-3", "m-4")
+        }
+        self.assertEqual(
+            endings,
+            {"m-1": "done", "m-2": "died", "m-3": "unexplained", "m-4": "unexplained"},
+            "an ending was read off another attempt's row, or off a row naming none",
+        )
+
+
 class Notices(unittest.TestCase):
     """The rule's own lines are read — for every receiver, while the asker
     waits, and without the advice sentence."""
