@@ -72,6 +72,12 @@ pub trait ValueWriter {
     ///
     /// The token a walk's row names the refusal by.
     fn write(&mut self, look: &FieldLook<'_>, left: Duration) -> Result<Written, String>;
+
+    /// Open the road's connection ahead of the first write, off the
+    /// caller's thread — while the judgment that may ask for a value is
+    /// still in flight. Nothing is sent but a bare request of the endpoint's
+    /// origin, no login with it. A writer with no road to warm does nothing.
+    fn warm(&self) {}
 }
 
 /// Values written before, by identity — what a retry or a replay types again
@@ -235,6 +241,21 @@ impl LiveWriter {
 impl ValueWriter for LiveWriter {
     fn row(&self) -> Option<&'static ValueRow> {
         zerocode_core::type_value::chosen()
+    }
+
+    /// A first write in a process paid for the client and the handshake:
+    /// 895 ms against 657 and 672 for the two behind it on the same road
+    /// (2026-09-26, `the_value_seat_timed_on_its_real_road`). A warm-up
+    /// that outlives the seat's own wall was no help, so that wall bounds it.
+    fn warm(&self) {
+        let (Some(client), Ok(url)) = (client(), url::Url::parse(&self.url)) else {
+            return;
+        };
+        let origin = url.origin().ascii_serialization();
+        let wall = Duration::from_millis(zerocode_core::type_value::seat().deadline_ms);
+        tauri::async_runtime::spawn(async move {
+            let _ = client.get(&origin).timeout(wall).send().await;
+        });
     }
 
     fn write(&mut self, look: &FieldLook<'_>, left: Duration) -> Result<Written, String> {

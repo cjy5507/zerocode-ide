@@ -422,6 +422,8 @@ pub struct GoalWorld<'a, Road> {
     writer: Option<Box<dyn ValueWriter>>,
     /// Values written before, for a retry or a replay to type again.
     values: Arc<Mutex<Values>>,
+    /// Whether the writer's road was opened ahead of this walk's first entry.
+    warmed: bool,
 }
 
 impl<'a, Road> GoalWorld<'a, Road> {
@@ -450,6 +452,7 @@ impl<'a, Road> GoalWorld<'a, Road> {
             seen: None,
             writer: None,
             values: window_values(),
+            warmed: false,
         }
     }
 
@@ -542,6 +545,17 @@ where
         }
         self.look = look;
         self.seen = Some(screen.clone());
+        // The first look that read a field opens the value seat's road, so a
+        // first entry is written over a connection the judgment's own wait
+        // has already paid for.
+        if !self.warmed
+            && self.types()
+            && !screen.snapshot.fields.is_empty()
+            && let Some(writer) = &self.writer
+        {
+            writer.warm();
+            self.warmed = true;
+        }
         Some(screen)
     }
 

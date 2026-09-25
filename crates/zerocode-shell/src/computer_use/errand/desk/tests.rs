@@ -984,3 +984,119 @@ fn generated_value_reaches_stdin_and_is_never_in_argv_or_logs() {
     };
     assert!(!format!("{written:?}").contains("London"));
 }
+
+/// The value seat's road is opened once a walk's look has read a field — on
+/// that first look, while the judgment is still to be asked — and only then:
+/// a look of numbers alone, a world that cannot type and a second look warm
+/// nothing.
+#[test]
+fn the_first_look_that_reads_a_field_opens_the_value_road_once() {
+    struct Warmed(Rc<Cell<usize>>);
+    impl super::super::value::ValueWriter for Warmed {
+        fn row(&self) -> Option<&'static zerocode_core::type_value::ValueRow> {
+            zerocode_core::type_value::chosen()
+        }
+        fn write(
+            &mut self,
+            _: &zerocode_core::type_value::FieldLook<'_>,
+            _: std::time::Duration,
+        ) -> Result<Written, String> {
+            Err("unused".to_string())
+        }
+        fn warm(&self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let warm_after = |page: String, aim: Aim, looks: usize| {
+        let road = Kept::on(page);
+        let mut send = road.road();
+        let warms = Rc::new(Cell::new(0));
+        let mut world = GoalWorld::new(&mut send, aim, Seen::default(), None, 60_000, 0)
+            .writing(Box::new(Warmed(Rc::clone(&warms))))
+            .remembering(memory());
+        for _ in 0..looks {
+            let _ = world.look();
+        }
+        warms.get()
+    };
+    let pane = || Aim::Pane {
+        label: "browser-9".into(),
+    };
+    assert_eq!(
+        warm_after(a_page_with_a_field("doc-1", "", "#destination"), pane(), 3),
+        1
+    );
+    assert_eq!(
+        warm_after(pane_answer(), pane(), 2),
+        0,
+        "no field, no warm-up"
+    );
+    assert_eq!(
+        warm_after(
+            a_page_with_a_field("doc-1", "", "#destination"),
+            Aim::App { name: "x".into() },
+            1
+        ),
+        0,
+        "a world that cannot type"
+    );
+}
+
+/// A field takes one entry in a walk: once a value went into it, the next
+/// question offers no entry into that field again — the entry changed the
+/// words the field is read by, so the screen reads as moved and would offer
+/// it afresh, and a second guess at it is a loop, not a step — while its
+/// press and every other control stay on offer.
+#[test]
+fn a_field_takes_one_entry_a_walk() {
+    // The page as a real one answers: after the entry the field is read by
+    // what it now holds.
+    let typed = std::cell::Cell::new(false);
+    let mut send = |_: RecipeTool, argv: &[String], _: &[String]| match argv[0].as_str() {
+        "marks" if typed.get() => ok(&a_page_with_a_field("doc-1", "London", "#destination")
+            .replace("\"label\":\"City\"", "\"label\":\"London\"")),
+        "marks" => ok(&a_page_with_a_field("doc-1", "", "#destination")),
+        "type" => {
+            typed.set(true);
+            ok("{}")
+        }
+        _ => ok("{}"),
+    };
+    let (pen, writes, _) = Pen::writing("London");
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .writing(Box::new(pen))
+    .remembering(memory());
+    let mut judge = FakeJudge::saying(vec![entry(1), pick(2)]);
+    let walked = run(Mode::On, true, &goal(2), &mut judge, &mut world);
+    drop(world);
+    assert_eq!((walked.typed, walked.pressed, writes.get()), (1, 2, 1));
+    let [first, second] = judge.questions.as_slice() else {
+        panic!("two questions: {:?}", judge.questions);
+    };
+    assert!(
+        first.get("type_target").is_some(),
+        "the first look may type"
+    );
+    assert!(first["action"]["criteria"].get("type_text").is_some());
+    assert!(
+        second["action"]["criteria"]["mark:1"]
+            .as_str()
+            .is_some_and(|line| line.contains("London")),
+        "the screen moved: the field is read by what it holds, and its press is on offer"
+    );
+    assert!(second.get("type_target").is_none(), "the field was entered");
+    assert!(second["action"]["criteria"].get("type_text").is_none());
+    assert!(second["action"]["criteria"].get("mark:2").is_some());
+}

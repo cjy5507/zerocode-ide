@@ -1,0 +1,24 @@
+<!doctype html><meta charset="utf-8"><title>Walk judgment probe</title>
+<style>body{font:18px system-ui;margin:24px}button,input{font:inherit;padding:8px;margin:6px}section{margin-top:12px}ul{list-style:none;padding:0;display:flex;gap:12px;flex-wrap:wrap}li{border:1px solid #ccc;padding:8px;width:220px}img{display:block;width:120px;height:80px;background:#eee}</style>
+<h1>Travel search</h1>
+<form onsubmit="return false"><label>Destination <input id="destination" placeholder="City" autocomplete="off"></label>
+<button type="button" id="search">Search</button> <button type="button" id="advance">Advance</button></form>
+<output id="status">Ready</output>
+<section><h2>Results</h2><ul id="results" role="list" aria-label="Search results">
+<li role="listitem"><img alt="iPhone 16 Pro, black" width="120" height="80"><span>iPhone 16 Pro 256GB — in stock</span></li>
+<li role="listitem"><img alt="iPhone 16 case" width="120" height="80"><span>iPhone 16 silicone case</span></li>
+<li role="listitem"><img alt="USB-C cable" width="120" height="80"><span>USB-C to USB-C cable 1 m</span></li></ul></section>
+<section><h2>You may also like</h2><ul id="carousel" role="list" aria-label="Recommended">
+<li role="listitem"><img alt="Galbitang, 600 g" width="120" height="80"><span>Galbitang 600 g</span></li>
+<li role="listitem"><img alt="Boiled eggs, 30" width="120" height="80"><span>Boiled eggs, 30 pack</span></li></ul></section>
+<script>
+window.probe = { count: 0, searched: null, destination: "" };
+const status = document.querySelector('#status');
+const field = document.querySelector('#destination');
+field.addEventListener('input', () => { probe.destination = field.value; });
+document.querySelector('#advance').onclick = () => { probe.count++; status.textContent = 'Advanced ' + probe.count; };
+document.querySelector('#search').onclick = () => {
+  probe.searched = field.value;
+  status.textContent = field.value ? 'Searched: ' + field.value : 'Destination needed';
+};
+</script>

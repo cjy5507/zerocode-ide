@@ -398,17 +398,39 @@ impl Snapshot {
 }
 
 impl Screen {
-    /// What the question may offer beyond a press on this screen: the
-    /// look's fields when the walk `types`, and its observed candidates.
+    /// What the question may offer beyond a press on this screen: `fields`
+    /// when the walk `types` ([`Self::fields_left`]), and the candidates the
+    /// look observed.
     #[must_use]
-    pub fn beside(&self, types: bool) -> Beside<'_> {
+    pub fn beside<'a>(&'a self, types: bool, fields: &'a [Value]) -> Beside<'a> {
         Beside {
             types,
-            fields: &self.snapshot.fields,
+            fields,
             containers: &self.snapshot.containers,
             images: &self.snapshot.images,
             rows: &self.snapshot.rows,
         }
+    }
+
+    /// The look's fields, less those this walk already entered a value into
+    /// — named by the look's own selector for them, since the entry itself
+    /// changes the words a field is read by. A field takes one entry in a
+    /// walk: the next question is about what comes after it.
+    #[must_use]
+    pub fn fields_left(&self, entered: &[String]) -> Vec<Value> {
+        self.snapshot
+            .fields
+            .iter()
+            .filter(|field| {
+                field
+                    .get("mark")
+                    .and_then(Value::as_u64)
+                    .and_then(|mark| usize::try_from(mark).ok())
+                    .and_then(|mark| selector_of(self, mark))
+                    .is_none_or(|selector| !entered.contains(&selector))
+            })
+            .cloned()
+            .collect()
     }
 
     /// Whether two looks show the same screen — the same words, in the same
@@ -1090,6 +1112,9 @@ fn walk(
     // (t-5497 — a calculator walk pressed `7` three times because every
     // new display looked like a fresh screen with `7` on offer).
     let mut pressed_so_far: Vec<String> = Vec::new();
+    // The fields this walk entered a value into, by the look's own selector
+    // for each: none is offered for a second entry (t-6720).
+    let mut entered: Vec<String> = Vec::new();
     let mut before: Option<Screen> = None;
     let mut still = 0usize;
     // The judgment begun on the last look, if the walk asked ahead
@@ -1164,7 +1189,7 @@ fn walk(
                 pressed: &pressed_so_far,
                 shows: &screen.shows,
             },
-            &screen.beside(world.types()),
+            &screen.beside(world.types(), &screen.fields_left(&entered)),
         ) else {
             walked.agreed = Some(false);
             walked
@@ -1450,18 +1475,21 @@ fn walk(
                 .as_ref()
                 .expect("the screen this walk just looked at");
             let legend = legend_of(seen, chosen);
-            let entered = crate::run_evidence::observing(
+            let went_in = crate::run_evidence::observing(
                 json!({
                     "look_ms": look_ms,
                     "judgment": { "asked": true, "ms": judgment_ms, "confidence": choice.confidence },
                 }),
                 || world.type_into(chosen, at.goal),
             );
-            match entered {
+            match went_in {
                 Typed::Typed { source, chars } => {
                     note(&mut said, TYPED, typed_note(&source, chars));
                     tried.push(chosen);
                     pressed_so_far.push(typed_line(&legend));
+                    if let Some(selector) = selector_of(seen, chosen) {
+                        entered.push(selector);
+                    }
                     walked.pressed += 1;
                     walked.typed += 1;
                     note(&mut said, "pressed", json!(true));
@@ -1549,7 +1577,7 @@ fn walk(
                         pressed: &pressed_ahead,
                         shows: &seen.shows,
                     },
-                    &seen.beside(world.types()),
+                    &seen.beside(world.types(), &seen.fields_left(&entered)),
                 )
                 .and_then(|question| judge.begin(&question));
             }
@@ -1604,7 +1632,7 @@ fn walk(
                             pressed: &pressed_so_far,
                             shows: &screen.shows,
                         },
-                        &screen.beside(world.types()),
+                        &screen.beside(world.types(), &screen.fields_left(&entered)),
                     )
                     .and_then(|question| judge.begin(&question));
                 }
@@ -1759,6 +1787,16 @@ fn legend_of(seen: &Screen, mark: usize) -> String {
         .unwrap_or_else(|| format!("mark:{mark}"))
 }
 
+/// The look's own selector for the control `mark` names on `seen`.
+fn selector_of(seen: &Screen, mark: usize) -> Option<String> {
+    seen.items
+        .iter()
+        .find(|item| item.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())
+        .and_then(|item| item.get(SELECTOR_KEY))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// Whether the control `mark` names on `seen` carries the screen elsewhere.
 fn presses_a_link(seen: &Screen, mark: usize) -> bool {
     seen.items
@@ -1840,6 +1878,8 @@ pub mod desk;
 #[cfg(test)]
 pub(crate) mod guard_fixtures;
 pub mod live;
+#[cfg(test)]
+mod probe;
 pub mod team;
 pub mod value;
 pub mod walk;

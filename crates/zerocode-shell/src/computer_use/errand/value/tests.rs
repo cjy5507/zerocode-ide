@@ -177,3 +177,30 @@ fn the_memory_keeps_the_longest_walks_values_oldest_out_first() {
         zerocode_core::computer_use::WALK_STEPS_MAX
     );
 }
+
+/// The value seat timed on its real road, one process, three writes: the
+/// first pays for the client and the connection, the rest ride its socket.
+/// A measurement, printed; the login is the one zo keeps in its own store,
+/// read here and never printed.
+#[test]
+#[ignore = "spends a real subscription login on the value seat's real road; a measurement"]
+fn the_value_seat_timed_on_its_real_road() {
+    let store = std::env::var("ZEROCODE_VALUE_PROBE_LOGIN_FILE").expect("zo's credential store");
+    let text = std::fs::read_to_string(store).expect("the store");
+    let parsed: Value = serde_json::from_str(&text).expect("a document");
+    let login = parsed
+        .pointer("/oauth/accessToken")
+        .and_then(Value::as_str)
+        .expect("a login")
+        .to_string();
+    let mut writer = LiveWriter::at(ANTHROPIC_WIRE.url, &login);
+    for pass in 1..=3 {
+        let began = Instant::now();
+        let written = writer.write(&look(), Duration::from_secs(10));
+        println!(
+            "pass {pass}: {:?} in {} ms",
+            written.as_ref().map(|written| written.value.as_str()),
+            began.elapsed().as_millis()
+        );
+    }
+}
