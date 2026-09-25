@@ -55183,7 +55183,7 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
   const { page } = await openWindowTestPage(browser, origin);
   try {
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    const seen = await page.evaluate(async () => {
+    const seen = await page.evaluate(async ({ idleWindowMs }) => {
       const tell = (name, payload) => {
         for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
       };
@@ -55196,14 +55196,21 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
       await window.__PAINTED__();
       seen.shownForAgent = !toggle.hidden;
-      window.__ANSWER__.pane_log = () => ({
+      // The pane's transcript, answered the way the backend reads it: the turns
+      // after the page's cursor (the tail on the first read) and the cursor past
+      // them. A read that finds nothing new brings nothing, so the page's quick
+      // follow ends there as it does on a real file — an answer that repeated
+      // the three turns on every read was news every 160 ms, and the follow
+      // never stopped (t-9741).
+      const transcript = [
+        { role: "user", text: "Wallet 결제 레시피 만들어줘" },
+        { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login" },
+        { role: "assistant", text: "저장했습니다." },
+      ];
+      window.__ANSWER__.pane_log = (args) => ({
         found: true,
-        next: 3,
-        turns: [
-          { role: "user", text: "Wallet 결제 레시피 만들어줘" },
-          { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login" },
-          { role: "assistant", text: "저장했습니다." },
-        ],
+        next: transcript.length,
+        turns: transcript.slice(args.after ?? 0),
       });
       const view = termViews.get(term);
       const slot = document.querySelector(`.pane-slot[data-term="${term}"]`);
@@ -55251,11 +55258,27 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       // turn is out and is gone when it ends ("대화창이 계속 움직이는건" —
       // a page born "running" never stopped).
       seen.busyWhileWorking = chat.querySelector(".helper-status")?.hidden === false;
+      // The end of the turn repaints the page once although the read it makes
+      // brings nothing — the last words came with an earlier read — and a
+      // resting page's beats repaint nothing: the page follows the hooks it
+      // shows (`paneChatKey`), not only the lines its file adds (t-9741).
+      let painted = 0;
+      const paintPage = window.paintPaneChat;
+      window.paintPaneChat = (at) => {
+        if (at === term) painted += 1;
+        return paintPage(at);
+      };
       tell("hook:agent", { term, state: "done", agent: "claude", session: "s-view", resumable: false });
       await window.__PAINTED__();
       await settle();
       seen.quietWhenDone = chat.querySelector(".helper-status")?.hidden === true &&
         chat.querySelector(".worker-state")?.textContent === t("worker.idle", "대기 중");
+      seen.donePaints = painted;
+      painted = 0;
+      // The beats the harness's idle window holds, each the clock's own read.
+      for (let beat = 0; beat < Math.ceil(idleWindowMs / HELPER_POLL_MS); beat += 1) await pollHelperPages();
+      seen.idleBeatPaints = painted;
+      window.paintPaneChat = paintPage;
       tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
       await window.__PAINTED__();
       await settle();
@@ -55403,13 +55426,14 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       for (const at of [...termViews.keys()]) dropTermView(at);
       seen.forgotten = paneChats.size === 0;
       return seen;
-    });
+    }, { idleWindowMs: IDLE_TICK_WINDOW_MS });
     ok(
       "the active agent pane's toggle swaps its screen for its conversation in the same slot — turns from the pane's own transcript, a composer, the screen hidden, a described question standing as the extension's card (tool, diff, allow · deny · instead, on the agent's accent, quiet under the poll, gone when the agent moves on), an undescribed one bringing the screen back, and no toggle on a plain shell",
       seen.hiddenBeforeAgent && seen.shownForAgent && seen.screenHidden && seen.chatShown && seen.chatArrived &&
         seen.turns === 3 && seen.composer && seen.chatPressed === "true" && seen.name !== "" &&
         seen.hookPolled && seen.activityPolled && seen.otherPaneQuiet &&
         seen.busyWhileWorking && seen.quietWhenDone && seen.busyAgain &&
+        seen.donePaints === 1 && seen.idleBeatPaints === 0 &&
         seen.cardShown && seen.cardTool === seen.wantCardTool && seen.cardDiff === 2 && seen.cardBeforeComposer &&
         seen.cardActs === "is-allow,is-deny,is-instead" && seen.cardInDock &&
         seen.cardQuietPaint === 0 && seen.approved === seen.wantApproved && seen.cardQuietAfter && seen.cardGone &&
