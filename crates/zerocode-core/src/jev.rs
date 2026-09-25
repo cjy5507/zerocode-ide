@@ -1425,13 +1425,18 @@ pub const PLACEMENT_ANSWER_FLOOR_PERMILLE: u16 = 800;
 /// (`crate::worker_placement`, `cmd::worker_room`); nothing calls it, and
 /// nothing should until those rows exist.
 ///
-/// The `agreed` rule (t-5806, t-6342): the answer agreed when the room the
-/// worker's pane ended [`PLACEMENT_LABEL_WINDOW_MS`] in is the room the seat
-/// named, and disagreed when it is another — the room the person moved it to
-/// (closed a tiled pane to the background, dragged its tab out beside
-/// something else, brought a parked worker back to a tab), or, for a pane
-/// nobody moved, the room it stood in: the answer's own when the seat seated
-/// it, today's tab when the seat only recorded (`worker_placement::stood_in`).
+/// The `agreed` rule (t-5806, t-6342, t-9427): the answer agreed when the
+/// room the worker's pane ended [`PLACEMENT_LABEL_WINDOW_MS`] in is the room
+/// the seat named, and disagreed when the person moved it to another (closed
+/// a tiled pane to the background, dragged its tab out beside something
+/// else, brought a parked worker back to a tab). A pane nobody moved stood
+/// in the answer's room when the seat seated it and in today's tab when the
+/// seat only recorded (`worker_placement::stood_in`), and it grades only the
+/// answer that named that room: a recorded answer naming another room was
+/// never tried, and its row carries `worker_placement::NOT_CARRIED` under
+/// [`summary::NOT_COMPARED`] and no mark — the tab its pane was left in says
+/// the tab would do, not that the answer's room would not have (all 22 seen
+/// recorded splits of 2026-09-26 had been marked wrong that way).
 /// A move that keeps the room (a tab dragged to another group) is still
 /// written down, as a move the answer survived. A pane nobody moved is graded
 /// only if it stood on the stage, with the window in front, for

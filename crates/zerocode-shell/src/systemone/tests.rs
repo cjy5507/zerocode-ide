@@ -393,10 +393,12 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
     let ledger = home.path().join(PLACEMENT.ledger);
     let wanted = window_wanted_for(&PLACEMENT).expect("placement rises");
     // A request as the window's writer files it: named by the worker it
-    // placed, the name its later label repeats (t-6877).
+    // placed, the name its later label repeats, and stamped with the words
+    // the seat asks (t-6877).
     let answered = |at: i64| {
         json!({"at": at, "placement": format!("placement-{at}"), "outcome": "answered",
-               "elapsedMs": 300, "requests": 1, "applied": true})
+               "elapsedMs": 300, "requests": 1, "applied": true,
+               "rubricVersion": PLACEMENT.rubric_version})
     };
     let misses = PLACEMENT.negatives_wanted.expect("placement rises");
     let marks = marks_that_can_clear(&PLACEMENT).expect("a width the budget can be cleared on");
@@ -455,7 +457,8 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
     record_rows(
         &PLACEMENT,
         &ledger,
-        &[json!({"at": 1, "outcome": "timeout", "requests": 1})],
+        &[json!({"at": 1, "outcome": "timeout", "requests": 1,
+                 "rubricVersion": PLACEMENT.rubric_version})],
         1,
     );
     assert_eq!(stand_from(&read_rows(&ledger)), Stand::Applying);
@@ -463,7 +466,8 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
         record_rows(
             &PLACEMENT,
             &ledger,
-            &[json!({"at": at, "outcome": "timeout", "requests": 1})],
+            &[json!({"at": at, "outcome": "timeout", "requests": 1,
+                     "rubricVersion": PLACEMENT.rubric_version})],
             at,
         );
     }

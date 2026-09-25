@@ -19,7 +19,9 @@ fn look(may_split: bool, in_front: InFront, same_workspace: bool) -> PlacementLo
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(WORKER_PLACEMENT_RUBRIC_VERSION, 1);
+    // Version 2 is version 1's words under a label that grades an answer only
+    // on a pane that tried its room (t-9427), so the fingerprint stands.
+    assert_eq!(WORKER_PLACEMENT_RUBRIC_VERSION, 2);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
         "da5b36e59acebce8"
@@ -144,42 +146,101 @@ fn every_offered_room_carries_its_own_words() {
 fn a_pane_nobody_was_present_for_leaves_no_placement_mark() {
     for chosen in every_room() {
         assert_eq!(
-            mark(chosen, stood_in(chosen, true), false),
+            mark(chosen, stood_in(chosen, true), false, false),
             Err(UNSEEN),
+            "{}",
+            chosen.key()
+        );
+        assert_eq!(
+            baseline_mark(chosen, stood_in(chosen, true), false, false),
+            None,
             "{}",
             chosen.key()
         );
     }
     // Seen and left alone: the room it stood in is the person's answer.
     assert_eq!(
-        mark(Placement::Tab, stood_in(Placement::Tab, true), true),
+        mark(Placement::Tab, stood_in(Placement::Tab, true), false, true),
         Ok(true)
     );
-    // A move is always seen: the person's room is the label.
+    // A move is always seen, and the person's room grades every answer.
     assert_eq!(
-        mark(Placement::Split, Placement::Background, true),
+        mark(Placement::Split, Placement::Background, true, true),
         Ok(false)
     );
-    assert_eq!(mark(Placement::Split, Placement::Split, true), Ok(true));
+    assert_eq!(
+        mark(Placement::Split, Placement::Split, true, true),
+        Ok(true)
+    );
 }
 
 /// A recording seat's answer never seated anything: the window put the
 /// worker in today's room, its own tab, and that is where a pane nobody moved
-/// stood. Eleven of the thirty marks were recorded `split` answers whose pane
-/// sat in a tab for five minutes and were written down as a split the person
-/// had left alone.
+/// stood. Version 1 of the label wrote the answer's room there (eleven of the
+/// thirty marks of 2026-09-23 were recorded splits written down as splits a
+/// person had left alone), then graded the answer against the tab — all 22
+/// seen recorded splits of 2026-09-26 marked wrong for a room nobody tried.
+/// A pane nobody moved grades only the answer that named the room it stood
+/// in (t-9427).
 #[test]
-fn a_recorded_answer_is_graded_against_the_room_the_pane_stood_in() {
+fn a_pane_nobody_moved_grades_only_the_answer_whose_room_it_stood_in() {
     assert_eq!(Placement::TODAYS, Placement::Tab);
     assert_eq!(stood_in(Placement::Split, false), Placement::Tab);
     assert_eq!(stood_in(Placement::Background, false), Placement::Tab);
     assert_eq!(stood_in(Placement::Split, true), Placement::Split);
+    for chosen in [Placement::Split, Placement::Background] {
+        assert_eq!(
+            mark(chosen, stood_in(chosen, false), false, true),
+            Err(NOT_CARRIED),
+            "a recorded {} its pane never tried",
+            chosen.key()
+        );
+        assert_eq!(
+            baseline_mark(chosen, stood_in(chosen, false), false, true),
+            None,
+            "and the tab is not graded on a pane the answer is not"
+        );
+        // Seated by the seat and left alone, the room was tried.
+        assert_eq!(mark(chosen, stood_in(chosen, true), false, true), Ok(true));
+    }
     assert_eq!(
-        mark(Placement::Split, stood_in(Placement::Split, false), true),
-        Ok(false)
-    );
-    assert_eq!(
-        mark(Placement::Tab, stood_in(Placement::Tab, false), true),
+        mark(Placement::Tab, stood_in(Placement::Tab, false), false, true),
         Ok(true)
     );
+    assert_eq!(NOT_CARRIED, crate::step_effort::NOT_CARRIED);
+}
+
+/// Today's room is graded on the panes the answer is — the two readers held
+/// to the same marks — and against the room the pane ended in: a move grades
+/// both on the room the person chose.
+#[test]
+fn the_baseline_is_graded_on_the_answers_panes_against_where_the_pane_ended() {
+    let recorded_tab = stood_in(Placement::Tab, false);
+    assert_eq!(
+        baseline_mark(Placement::Tab, recorded_tab, false, true),
+        Some(true)
+    );
+    assert_eq!(
+        baseline_mark(Placement::Split, Placement::Background, true, true),
+        Some(false)
+    );
+    assert_eq!(
+        baseline_mark(Placement::Split, Placement::Tab, true, true),
+        Some(true),
+        "a split the person moved back to a tab"
+    );
+    for (chosen, ended_in, moved) in [
+        (Placement::Tab, recorded_tab, false),
+        (Placement::Split, Placement::Background, true),
+        (Placement::Split, stood_in(Placement::Split, false), false),
+        (Placement::Split, stood_in(Placement::Split, true), false),
+    ] {
+        assert_eq!(
+            baseline_mark(chosen, ended_in, moved, true).is_some(),
+            mark(chosen, ended_in, moved, true).is_ok(),
+            "{} in {}",
+            chosen.key(),
+            ended_in.key()
+        );
+    }
 }

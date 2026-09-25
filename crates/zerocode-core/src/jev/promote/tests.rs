@@ -1405,7 +1405,7 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     assert!(bound_permille >= seat.agreement_floor_permille.expect("a budget"));
     // An acting seat the baseline matches falls.
     let mut acting = beaten.clone();
-    acting.insert(0, json!({"transition": ROSE}));
+    acting.insert(0, rose(seat));
     assert!(matches!(
         judge_seat(seat, &acting).expect("judged").verdict,
         Verdict::Fall(Line::Baseline { .. })
@@ -1726,11 +1726,11 @@ fn an_unversioned_row_reads_as_version_one() {
         .chain(std::iter::once(unversioned_rise(3)))
         .chain((4..7).map(answered))
         .collect();
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     assert_eq!(
-        crate::worker_placement::WORKER_PLACEMENT_RUBRIC_VERSION,
+        crate::jev::questions::RECALL_RUBRIC_VERSION,
         1,
-        "placement asks version 1: its rows may name none"
+        "recall asks version 1: its rows may name none"
     );
     let judged = judge_seat(first, &rows).expect("judged");
     assert_eq!(
@@ -1798,7 +1798,7 @@ fn a_rubric_change_returns_a_risen_seat_to_recording() {
     );
 
     // Rolled back: a seat asking version 1 does not stand on version 2's rise.
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     let answered = |at: usize| serde_json::json!({"at": at, "outcome": "answered", "elapsedMs": 1, "requests": 1});
     let rolled_back: Vec<Value> = (0..3)
         .map(answered)
@@ -1944,7 +1944,7 @@ fn a_ledgers_text_stands_where_its_series_does() {
             .map(|row| format!("{row}\n"))
             .collect::<String>()
     };
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     let second = guard();
     let both = |rows: &[Value]| {
         for seat in [first, second] {
@@ -2394,7 +2394,7 @@ fn each_dropped_block_is_one_comparison_of_its_compaction() {
 #[test]
 fn the_text_reader_and_the_row_reader_agree_on_what_fences_a_series() {
     use serde_json::json;
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     let second = guard();
     // (a line as a writer or a hand spelled it, whether it fences a seat
     // asking version 1, whether it fences one asking version 2)
@@ -2491,7 +2491,7 @@ fn the_text_reader_and_the_row_reader_agree_on_what_fences_a_series() {
 /// text, on a seat asking version 1 and one asking version 2.
 #[test]
 fn the_text_reader_reads_every_line_the_rows_reader_would() {
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     let second = guard();
     // (the ledger after the seat's own rise at its own words, as `S`, and
     // where the seat stands on it)

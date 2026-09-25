@@ -341,15 +341,19 @@ fn label_row(
         "afterMs": now_ms.saturating_sub(placed.at_ms),
     });
     // The mark the judge counts (§4): the seat named the room the pane ended
-    // the window in — for a pane somebody could have moved. A tab dragged to
-    // another group kept its room, and the label says so, with `moved`
-    // beside it for a reader who wants the finer question; a pane nobody was
-    // in front of carries its word and no mark.
-    match worker_placement::mark(placed.chosen, ended_in, seen) {
+    // the window in — for a pane somebody could have moved, and that tried
+    // the answer's room (t-9427). A tab dragged to another group kept its
+    // room, and the label says so, with `moved` beside it for a reader who
+    // wants the finer question; a pane nobody was in front of, or one nobody
+    // moved that stood in a room the answer did not name, carries its word
+    // and no mark.
+    match worker_placement::mark(placed.chosen, ended_in, moved, seen) {
         Ok(agreed) => {
             label[AGREED.canonical] = json!(agreed);
             // Today's room on the same pane: the seat's baseline (t-6342).
-            if let Some(baseline) = worker_placement::baseline_mark(ended_in, seen) {
+            if let Some(baseline) =
+                worker_placement::baseline_mark(placed.chosen, ended_in, moved, seen)
+            {
                 label[BASELINE_AGREED.canonical] = json!(baseline);
             }
         }
@@ -674,7 +678,7 @@ mod tests {
         assert_eq!(row["dispatch"], json!("dp-4782"));
         assert_eq!(row["task"], json!("t-4781"));
         assert_eq!(row["mode"], json!("shadow"));
-        assert_eq!(row["rubricVersion"], json!(1));
+        assert_eq!(row["rubricVersion"], json!(WORKER_PLACEMENT_RUBRIC_VERSION));
         assert_eq!(row["outcome"], json!("answered"));
         assert_eq!(row["chosen"], json!("split"));
         assert_eq!(row["confidence"], json!(0.58));
