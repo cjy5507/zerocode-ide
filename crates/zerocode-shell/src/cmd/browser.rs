@@ -78,6 +78,27 @@ pub(crate) struct BrowserInputReport {
     /// is not charged to a read of the page before it. Never printed.
     #[serde(skip)]
     pub(crate) page_url: Option<String>,
+    /// The page's own clock when the press was made (`performance.now()`),
+    /// from which a settle counts the document's stillness (t-6721).
+    #[serde(skip)]
+    pub(crate) pressed_at: Option<f64>,
+    /// How the page settled after a press by number (t-6721) — said in the
+    /// press's sentence ([`input_said`]); a press by selector does not wait.
+    #[serde(skip)]
+    pub(crate) settle: Option<SettleReport>,
+}
+
+/// How a press's settle ended (t-6721): the core's verdict
+/// ([`zerocode_core::agent_browser::settle_verdict`]) and why, how long it
+/// took on the wall, in how many polls, and whether the page said it was
+/// hidden — reported, never judged.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SettleReport {
+    pub(crate) state: zerocode_core::agent_browser::Settle,
+    pub(crate) why: zerocode_core::agent_browser::SettleWhy,
+    pub(crate) ms: u64,
+    pub(crate) polls: u32,
+    pub(crate) hidden: Option<bool>,
 }
 
 /// The sentence the door answers a click or a typing with: what it did, then
@@ -94,6 +115,8 @@ const INPUT_DPR_KEY: &str = "dpr";
 const INPUT_BLOCK_PATH_KEY: &str = "blockPath";
 /// The key they answer the page's address under, cleared page-side.
 const INPUT_PAGE_URL_KEY: &str = "pageUrl";
+/// The key the click script answers the page's clock at the press under.
+const INPUT_PRESSED_AT_KEY: &str = "pressedAt";
 
 /// The selectors a page is cut into blocks at, as the page scripts take
 /// them: the read seat's own list (`zerocode_core::jev::BROWSER_READ_BLOCK_ROOTS`),
@@ -467,6 +490,9 @@ pub(crate) fn input_report(
         .get(INPUT_PAGE_URL_KEY)
         .and_then(serde_json::Value::as_str)
         .map(|url| scrub_url_credentials(&terminal_safe(url, BROWSER_URL_CAP)));
+    let pressed_at = value
+        .get(INPUT_PRESSED_AT_KEY)
+        .and_then(serde_json::Value::as_f64);
     Ok(BrowserInputReport {
         method: method.to_string(),
         trusted_events,
@@ -475,6 +501,8 @@ pub(crate) fn input_report(
         dpr,
         block_path,
         page_url,
+        pressed_at,
+        settle: None,
     })
 }
 
@@ -2522,7 +2550,8 @@ return zcEncode({ ok: true, value: { method: "dom-activation",
 // than trusting or copying a page's own judgment.
 
 use zerocode_core::agent_browser::{
-    BROWSER_MARKABLE, BrowserFace, BrowserMark, BrowserRemeasure, mark_still_holds, number_marks,
+    BROWSER_MARKABLE, BROWSER_SETTLE_MS, BrowserFace, BrowserLookPin, BrowserMark,
+    BrowserRemeasure, BrowserRemeasureContext, Settle, SettleWhy, look_still_holds, number_marks,
 };
 use zerocode_core::computer_use_protocol::cache;
 
@@ -2630,12 +2659,26 @@ return zcEncode({ ok: true, value: face });
 "#;
 
 /// One pane's last `marks` answer, kept under its label so `click --mark N`
-/// and `screenshot --marks` read the very numbers the agent saw, and the
-/// viewport those rects were measured in so the picture can place them.
+/// and `screenshot --marks` read the very numbers the agent saw, the
+/// viewport those rects were measured in so the picture can place them, and
+/// what the look pinned each number to beyond its face — the document it was
+/// read in and, for a field, the digest of what it held (t-6721).
 struct BrowserMarkTable {
     marks: Vec<BrowserMark>,
     viewport_width: f64,
+    epoch: String,
+    values: std::collections::BTreeMap<usize, String>,
     made: std::time::Instant,
+}
+
+impl BrowserMarkTable {
+    /// What the look knew about mark `n` beyond its face.
+    fn pin_of(&self, n: usize) -> BrowserLookPin {
+        BrowserLookPin {
+            document_epoch: self.epoch.clone(),
+            value_digest: self.values.get(&n).cloned(),
+        }
+    }
 }
 
 fn browser_marks_store()
@@ -2646,24 +2689,25 @@ fn browser_marks_store()
     MARKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-fn remember_marks(label: &str, marks: Vec<BrowserMark>, viewport_width: f64) {
+fn remember_marks(label: &str, look: &BrowserLook) {
     browser_marks_store()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(
             label.to_string(),
             BrowserMarkTable {
-                marks,
-                viewport_width,
+                marks: look.marks.clone(),
+                viewport_width: look.viewport_width,
+                epoch: look.epoch.clone(),
+                values: look.values.clone(),
                 made: std::time::Instant::now(),
             },
         );
 }
 
-/// The pane's last marks and the viewport they were measured in — refused
-/// when there are none, or when they are older than the cache's max age (the
-/// agent looks again with `marks`).
-fn recall_marks(label: &str) -> Result<(Vec<BrowserMark>, f64), String> {
+/// The pane's last marks table — refused when there is none, or when it is
+/// older than the cache's max age (the agent looks again with `marks`).
+fn recall_table<T>(label: &str, read: impl FnOnce(&BrowserMarkTable) -> T) -> Result<T, String> {
     let held = browser_marks_store()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2676,28 +2720,37 @@ fn recall_marks(label: &str) -> Result<(Vec<BrowserMark>, f64), String> {
             cache::MAX_AGE.as_secs()
         ));
     }
-    Ok((table.marks.clone(), table.viewport_width))
+    Ok(read(table))
 }
 
-/// Walk the page for the controls a person could hit, number the hittable
-/// ones in document order (the core's pure step), and remember them under the
-/// pane's label.
-pub(crate) async fn automate_marks(
-    app: &AppHandle,
-    state: &AppState,
-    label: &str,
-) -> Result<Vec<BrowserMark>, String> {
-    let pane = browser_pane_of(app, state, label)?;
-    let request = serde_json::json!({
-        "selectors": BROWSER_MARKABLE,
-        "answerCap": BROWSER_CALLBACK_CAP,
-    });
-    let script = automation_script(
-        &request,
-        &format!("{BROWSER_MARK_HELPERS}\n{BROWSER_MARKS_BODY}"),
-    );
-    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-    let value = page_value(reply)?;
+/// The pane's last marks and the viewport they were measured in.
+fn recall_marks(label: &str) -> Result<(Vec<BrowserMark>, f64), String> {
+    recall_table(label, |table| (table.marks.clone(), table.viewport_width))
+}
+
+/// One marks answer, read: the numbers the core gave the hittable faces, the
+/// viewport they were measured in, and what the page read beside them in the
+/// same pass — its document, the numbered fields, and the containers, images
+/// and rows ([`zerocode_core::screen_action::snapshot`]) — with the window's
+/// clock at the answer.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BrowserLook {
+    pub(crate) marks: Vec<BrowserMark>,
+    pub(crate) viewport_width: f64,
+    pub(crate) epoch: String,
+    pub(crate) at_ms: i64,
+    pub(crate) fields: Vec<serde_json::Value>,
+    /// The containers, images and rows, under the keys the question reads
+    /// them by ([`Observe::key`]).
+    pub(crate) observed: Vec<(&'static str, serde_json::Value)>,
+    /// Each field's value digest, by the number it presses by — the pin's,
+    /// never printed.
+    pub(crate) values: std::collections::BTreeMap<usize, String>,
+}
+
+/// Read the page's marks answer into a look: the faces numbered by the core
+/// (`number_marks`).
+pub(crate) fn look_of(value: &serde_json::Value, at_ms: i64) -> Result<BrowserLook, String> {
     let faces: Vec<BrowserFace> = serde_json::from_value(
         value
             .get("faces")
@@ -2710,8 +2763,39 @@ pub(crate) async fn automate_marks(
         .pointer("/viewport/width")
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0);
-    remember_marks(label, marks.clone(), viewport_width);
-    Ok(marks)
+    // t-6721 red: the old answer — numbers alone, nothing read beside them.
+    Ok(BrowserLook {
+        marks,
+        viewport_width,
+        epoch: String::new(),
+        at_ms,
+        fields: Vec::new(),
+        observed: Vec::new(),
+        values: std::collections::BTreeMap::new(),
+    })
+}
+
+/// Walk the page for the controls a person could hit, number the hittable
+/// ones in document order (the core's pure step), and remember them under the
+/// pane's label.
+pub(crate) async fn automate_marks(
+    app: &AppHandle,
+    state: &AppState,
+    label: &str,
+) -> Result<BrowserLook, String> {
+    let pane = browser_pane_of(app, state, label)?;
+    let request = serde_json::json!({
+        "selectors": BROWSER_MARKABLE,
+        "answerCap": BROWSER_CALLBACK_CAP,
+    });
+    let script = automation_script(
+        &request,
+        &format!("{BROWSER_MARK_HELPERS}\n{BROWSER_MARKS_BODY}"),
+    );
+    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+    let look = look_of(&page_value(reply)?, epoch_ms_now())?;
+    remember_marks(label, &look);
+    Ok(look)
 }
 
 /// A marks answer's items, in CSS pixels plus the centre a legend reads.
@@ -2738,10 +2822,10 @@ pub(crate) fn marks_items(marks: &[BrowserMark]) -> Vec<serde_json::Value> {
 
 /// The marks a person reads: one legend line per number (the desktop look's
 /// own `legend_line`), the empty word when nothing qualified.
-pub(crate) fn marks_lines(marks: &[BrowserMark]) -> String {
+pub(crate) fn marks_lines(look: &BrowserLook) -> String {
     use zerocode_core::computer_use_protocol::marks::legend_line;
     let mut lines = String::new();
-    for item in marks_items(marks) {
+    for item in marks_items(&look.marks) {
         if let Some(line) = legend_line(&item) {
             lines.push_str(&line);
             lines.push('\n');
@@ -2763,11 +2847,32 @@ pub(crate) fn marks_lines(marks: &[BrowserMark]) -> String {
 /// nothing at all, so every browser walk ended at its first look and the seat
 /// that judges one has no rows to show for it (2026-09-19). `diagnose --json`
 /// already answers this way for the same reason.
-pub(crate) fn marks_json(marks: &[BrowserMark]) -> serde_json::Value {
+pub(crate) fn marks_json(look: &BrowserLook) -> serde_json::Value {
     use zerocode_core::computer_use_protocol::marks::ITEMS_KEY;
-    let mut answer = serde_json::json!({ ITEMS_KEY: marks_items(marks), "count": marks.len() });
+    let mut answer =
+        serde_json::json!({ ITEMS_KEY: marks_items(&look.marks), "count": look.marks.len() });
     answer[zerocode_core::untrusted::JSON_FLAG] = serde_json::Value::Bool(true);
     answer
+}
+
+/// Settle a page after a press made at `since` on its own clock, in the
+/// document `epoch` (t-6721): poll the page's facts with `poll` — handed the
+/// wall time the poll may take — until the core's verdict says, or the wall
+/// ([`BROWSER_SETTLE_MS`]) runs out.
+pub(crate) async fn settle_with<P, F>(epoch: &str, since: f64, poll: P) -> SettleReport
+where
+    P: FnMut(Duration) -> F,
+    F: std::future::Future<Output = Result<serde_json::Value, String>>,
+{
+    // t-6721 red: the old road — the press answers and nothing is waited on.
+    let _ = (epoch, since, poll);
+    SettleReport {
+        state: Settle::Ready,
+        why: SettleWhy::Quiet,
+        ms: 0,
+        polls: 0,
+        hidden: None,
+    }
 }
 
 /// `click <label> --mark N`: press the control numbered N on the pane's last
@@ -2782,7 +2887,7 @@ pub(crate) async fn automate_click_mark(
     label: &str,
     mark_n: usize,
 ) -> Result<BrowserInputReport, String> {
-    let (marks, _) = recall_marks(label)?;
+    let (marks, pin) = recall_table(label, |table| (table.marks.clone(), table.pin_of(mark_n)))?;
     let mark = mark_n
         .checked_sub(1)
         .and_then(|at| marks.get(at))
@@ -2794,11 +2899,22 @@ pub(crate) async fn automate_click_mark(
         &format!("{BROWSER_MARK_HELPERS}\n{BROWSER_REMEASURE_BODY}"),
     );
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-    let now: BrowserRemeasure = serde_json::from_value(page_value(reply)?)
+    let value = page_value(reply)?;
+    let now: BrowserRemeasure = serde_json::from_value(value.clone())
         .map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
-    mark_still_holds(&mark, &now).map_err(|error| error.message)?;
+    let context: BrowserRemeasureContext = serde_json::from_value(value)
+        .map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
+    look_still_holds(&mark, &pin, &now, &context).map_err(|error| error.message)?;
     automate_click(app, state, label, &mark.selector).await
 }
+
+/// The settle's page script (t-6721): what the page says of itself on one
+/// poll.
+pub(crate) const BROWSER_SETTLE_BODY: &str = "";
+
+/// The page-side helpers a look, a re-measure, a settle and a press by number
+/// share (t-6721).
+pub(crate) const BROWSER_OBSERVE_HELPERS: &str = "";
 
 /// Lay a pane's last marks onto its screenshot: each mark's control outlined
 /// and numbered by the one badge renderer the desktop look uses
@@ -3205,5 +3321,295 @@ pub(crate) fn note_webview_error(state: State<'_, AppState>, text: String) {
     {
         use std::io::Write;
         let _ = writeln!(held, "{} {line}", epoch_ms_now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The browser door's look, settle and pin (t-6721): what the Rust half
+    //! does with what the page said. The page halves run for real in
+    //! Chromium (`ui/tests/browser-door.mjs`).
+
+    use super::*;
+    use serde_json::json;
+    use zerocode_core::agent_browser::{AT_MS_KEY, BROWSER_SETTLE_QUIET_MS, Settle, SettleWhy};
+    use zerocode_core::screen_action::{Observe, snapshot};
+
+    const EPOCH: &str = "1790000000000.25";
+    const OTHER_EPOCH: &str = "1790000009999.5";
+
+    /// One settle poll's answer as the page script gives it.
+    fn facts(epoch: &str, now: f64, last: f64, busy: bool, hidden: bool) -> serde_json::Value {
+        json!({ "ok": true, "value": {
+            "documentEpoch": epoch, "now": now, "last": last,
+            "busy": busy, "hidden": hidden, "watched": true,
+        } })
+    }
+
+    /// The page's clock: 1000 ms at the press, walking with the test's
+    /// (paused) clock.
+    fn page_now(began: tokio::time::Instant) -> f64 {
+        1_000.0 + began.elapsed().as_secs_f64() * 1_000.0
+    }
+
+    /// A settle is bounded by the wall, not by a frame: a hidden page that
+    /// never paints and never stands still, and a page that never answers at
+    /// all, are both `not_ready` exactly when the quarter second runs out; a
+    /// hidden page that stood still is `ready` once the quiet window is
+    /// whole; another document or a gone pane is `invalidated` at once.
+    #[tokio::test(start_paused = true)]
+    async fn hidden_surface_short_settle_has_a_wall_deadline() {
+        let wall = Duration::from_millis(BROWSER_SETTLE_MS);
+
+        let began = tokio::time::Instant::now();
+        let moving = settle_with(EPOCH, 1_000.0, move |_left| {
+            let now = page_now(began);
+            async move { Ok(facts(EPOCH, now, now - 1.0, false, true)) }
+        })
+        .await;
+        assert_eq!(
+            (moving.state, moving.why),
+            (Settle::NotReady, SettleWhy::Moving)
+        );
+        assert_eq!(began.elapsed(), wall, "a moving page is answered at the wall");
+        assert!(moving.polls >= 2, "{moving:?}");
+
+        // Each poll is handed only the wall that is left: a page that never
+        // answers holds the settle no longer than the settle's own wall, never
+        // the callback's five seconds.
+        let began = tokio::time::Instant::now();
+        let unanswered = settle_with(EPOCH, 1_000.0, |left| async move {
+            tokio::time::sleep(left).await;
+            Err(PAGE_TIMED_OUT.to_string())
+        })
+        .await;
+        assert_eq!(
+            (unanswered.state, unanswered.why),
+            (Settle::NotReady, SettleWhy::Unanswered)
+        );
+        assert_eq!(began.elapsed(), wall);
+
+        let began = tokio::time::Instant::now();
+        let still = settle_with(EPOCH, 1_000.0, move |_left| {
+            let now = page_now(began);
+            async move { Ok(facts(EPOCH, now, 1_000.0, false, true)) }
+        })
+        .await;
+        assert_eq!((still.state, still.why), (Settle::Ready, SettleWhy::Quiet));
+        assert_eq!(
+            began.elapsed(),
+            Duration::from_millis(BROWSER_SETTLE_QUIET_MS),
+            "ready the moment the quiet window is whole"
+        );
+        assert_eq!(still.hidden, Some(true), "a hidden page, and still ready");
+
+        let began = tokio::time::Instant::now();
+        let replaced = settle_with(EPOCH, 1_000.0, |_left| async {
+            Ok(facts(OTHER_EPOCH, 1_000.0, 1_000.0, false, true))
+        })
+        .await;
+        assert_eq!(
+            (replaced.state, replaced.why),
+            (Settle::Invalidated, SettleWhy::Replaced)
+        );
+        let gone = settle_with(EPOCH, 1_000.0, |_left| async {
+            Err(PAGE_SEND_FAILED.to_string())
+        })
+        .await;
+        assert_eq!((gone.state, gone.why), (Settle::Invalidated, SettleWhy::Gone));
+        assert_eq!(began.elapsed(), Duration::ZERO, "neither is waited on");
+    }
+
+    /// Seen is not settled and settled is not done: a visible page painting
+    /// every frame whose document keeps changing is `not_ready`, the press's
+    /// sentence says so in its own words, and the settle reads the document —
+    /// it asks for no animation frame and takes no picture.
+    #[tokio::test(start_paused = true)]
+    async fn visibility_is_not_confused_with_task_completion() {
+        let began = tokio::time::Instant::now();
+        let seen = settle_with(EPOCH, 1_000.0, move |_left| {
+            let now = page_now(began);
+            async move { Ok(facts(EPOCH, now, now - 2.0, false, false)) }
+        })
+        .await;
+        assert_eq!((seen.state, seen.why), (Settle::NotReady, SettleWhy::Moving));
+        assert_eq!(seen.hidden, Some(false));
+
+        let mut report = input_report(
+            json!({ "method": "dom-activation", "rect": [1.0, 2.0, 3.0, 4.0], "dpr": 2.0 }),
+            &["dom-activation"],
+        )
+        .expect("a press report");
+        report.settle = Some(seen);
+        let said = input_said(CLICK_SAID, &report);
+        assert!(said.contains("settle=not_ready"), "{said}");
+        assert!(!said.contains("settle=ready"), "{said}");
+        assert_eq!(
+            pressed_rect(&said),
+            Some(([1.0, 2.0, 3.0, 4.0], 2.0)),
+            "the walk still reads the rect from the sentence: {said}"
+        );
+
+        assert!(
+            BROWSER_SETTLE_BODY.contains("zcSettleFacts")
+                && BROWSER_OBSERVE_HELPERS.contains("const zcSettleFacts"),
+            "the settle reads the page's own facts"
+        );
+        for script in [BROWSER_SETTLE_BODY, BROWSER_OBSERVE_HELPERS] {
+            assert!(!script.contains("requestAnimationFrame"), "{script}");
+        }
+        let source = include_str!("browser.rs");
+        let road = source
+            .split("pub(crate) async fn settle_with<")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the settle's road");
+        assert!(!road.contains("snapshot_png"), "{road}");
+    }
+
+    /// One pass of the page, one look: the numbers are the core's, every
+    /// field the look numbered rides with its number and only those, the
+    /// document and the candidates come from the same pass, the window's
+    /// clock is stamped — and the walk's own reader finds all of it.
+    #[test]
+    fn one_snapshot_contains_controls_values_and_context_from_one_epoch() {
+        let face = |selector: &str, tag: &str, role: &str, hit: bool| {
+            json!({ "tag": tag, "role": role, "label": selector, "selector": selector,
+                "x": 10.0, "y": 10.0, "width": 200.0, "height": 30.0, "hit": hit })
+        };
+        let mut destination = face("#destination", "input", "textbox", true);
+        destination["field"] = json!({ "kind": "text", "secret": false, "label": "Destination",
+            "placeholder": "City", "near": "Travel search", "value": "Lon" });
+        destination["valueDigest"] = json!("3:abc");
+        let mut covered = face("#covered", "input", "textbox", false);
+        covered["field"] = json!({ "kind": "text", "secret": false, "label": "Covered",
+            "placeholder": "", "near": "", "value": "x" });
+        covered["valueDigest"] = json!("1:def");
+        let mut password = face("#pw", "input", "textbox", true);
+        password["field"] = json!({ "kind": "password", "secret": true, "label": "Password",
+            "placeholder": "", "near": "Sign in", "value": "" });
+        password["valueDigest"] = json!("secret");
+        let page = json!({
+            "faces": [destination, covered, password, face("#search", "button", "button", true)],
+            "viewport": { "width": 900.0, "height": 600.0, "dpr": 2.0 },
+            "snapshot": {
+                (snapshot::EPOCH_KEY): EPOCH,
+                (Observe::Container.key()): [{ "label": "Search results", "role": "list",
+                    "count": 3, "selector": "#results" }],
+                (Observe::Image.key()): [{ "alt": "iPhone 16 Pro, black", "width": 120,
+                    "height": 80, "selector": "#results > li:nth-of-type(1) > img" }],
+                (Observe::Row.key()): [{ "text": "iPhone 16 Pro 256GB — in stock",
+                    "selector": "#results > li:nth-of-type(1)" }],
+            },
+        });
+        let look = look_of(&page, 1_790_000_000_123).expect("a look");
+        assert_eq!(
+            look.marks
+                .iter()
+                .map(|mark| (mark.mark, mark.selector.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "#destination"), (2, "#pw"), (3, "#search")],
+            "the covered field has no number"
+        );
+        let answer = marks_json(&look);
+        assert_eq!(answer["count"], 3);
+        assert_eq!(answer[snapshot::EPOCH_KEY], EPOCH);
+        assert_eq!(answer[AT_MS_KEY], 1_790_000_000_123_i64);
+        let fields = answer[snapshot::FIELDS_KEY].as_array().expect("fields");
+        assert_eq!(fields.len(), 2, "{fields:?}");
+        assert_eq!(fields[0][snapshot::FIELD_MARK_KEY], 1);
+        assert_eq!(fields[0][snapshot::FIELD_VALUE_KEY], "Lon");
+        assert_eq!(fields[1][snapshot::FIELD_MARK_KEY], 2);
+        assert_eq!(fields[1][snapshot::FIELD_SECRET_KEY], true);
+        assert_eq!(fields[1][snapshot::FIELD_VALUE_KEY], "");
+        let read = crate::computer_use::errand::Snapshot::of(&answer);
+        assert_eq!(read.epoch, EPOCH);
+        assert_eq!(read.fields.len(), 2);
+        for head in Observe::ALL {
+            assert_eq!(read.of_head(head).len(), 1, "{head:?}");
+        }
+        assert_eq!(look.values.get(&1).map(String::as_str), Some("3:abc"));
+        assert_eq!(look.values.get(&2).map(String::as_str), Some("secret"));
+        assert_eq!(look.values.get(&3), None, "a button pins no value");
+        // A page that could not read itself in one state says so by name.
+        assert_ne!(
+            page_failure(&json!({ "code": "document_moving" })),
+            page_failure(&json!({ "code": "nothing_we_know" }))
+        );
+    }
+
+    /// A number pinned to a field's value and to its document is refused by
+    /// the press itself when either moved since the pin was checked — named
+    /// apart from a control another covered.
+    #[test]
+    fn value_change_or_occlusion_invalidates_selected_target() {
+        let generic = page_failure(&json!({ "code": "nothing_we_know" }));
+        let mut said = std::collections::BTreeSet::new();
+        for code in ["document_replaced", "value_changed", "element_obscured"] {
+            let refusal = page_failure(&json!({ "code": code }));
+            assert_ne!(refusal, generic, "{code} is named");
+            assert!(said.insert(refusal), "{code} says its own words");
+        }
+        let press = include_str!("browser.rs")
+            .split("pub(crate) async fn automate_click_mark(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the press by number");
+        assert!(
+            press.contains("document_epoch") && press.contains("value_digest"),
+            "the press carries the look's document and value to the page:\n{press}"
+        );
+    }
+
+    /// A look and a settle read the page and nothing else — no focus, no
+    /// scroll, no selection, no event, no write — and the window shows,
+    /// raises or focuses no pane for them.
+    #[test]
+    fn background_observation_does_not_focus_another_pane() {
+        assert!(
+            BROWSER_SETTLE_BODY.contains("zcSettleFacts")
+                && BROWSER_MARKS_BODY.contains("zcObserved"),
+            "the look and the settle are the observation this holds to"
+        );
+        for (name, script) in [
+            ("observe helpers", BROWSER_OBSERVE_HELPERS),
+            ("mark helpers", BROWSER_MARK_HELPERS),
+            ("marks", BROWSER_MARKS_BODY),
+            ("remeasure", BROWSER_REMEASURE_BODY),
+            ("settle", BROWSER_SETTLE_BODY),
+        ] {
+            for act in [
+                "focus(",
+                "blur(",
+                "scrollIntoView",
+                "scrollTo",
+                "scrollBy",
+                ".select(",
+                "setSelectionRange",
+                "dispatchEvent",
+                "execCommand",
+                ".click(",
+                "setAttribute",
+                ".style",
+                "requestAnimationFrame",
+            ] {
+                assert!(!script.contains(act), "the {name} script does `{act}`");
+            }
+        }
+        let source = include_str!("browser.rs");
+        for road in [
+            "pub(crate) async fn automate_marks(",
+            "pub(crate) async fn settle_with<",
+            "async fn settle_after_press(",
+        ] {
+            let block = source
+                .split(road)
+                .nth(1)
+                .and_then(|rest| rest.split("\n}\n").next())
+                .unwrap_or_else(|| panic!("{road} is missing"));
+            for window in ["set_focus", ".show(", "focus_main", "set_hidden"] {
+                assert!(!block.contains(window), "{road} touches the pane: `{window}`");
+            }
+        }
     }
 }

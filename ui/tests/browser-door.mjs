@@ -279,6 +279,322 @@ await test("a press names the block it landed in by the same chain the cutter wr
   return `${accept.blockPath}; ${world.blockPath}; ${related.blockPath}`;
 });
 
+/* ---- One look, a press's settle, the look's pin (t-6721) ----
+ *
+ * The marks page script now reads, in the SAME synchronous pass as the
+ * numbers, what the page holds beside them: its document, the numbered
+ * fields, and the containers, images and rows a goal may be about — under
+ * the keys the walk's question reads (`screen_action::snapshot`). A press by
+ * number re-proves the document and the field's value at the moment it
+ * presses, and then the page settles on its document's own stillness —
+ * never on a painted frame, which a hidden tab never paints. Observation
+ * moves no focus, no selection and no scroll. Every constant below is read
+ * from the Rust the pane runs, never restated. */
+const CORE = await readFile(resolve(UI, "../crates/zerocode-core/src/agent_browser.rs"), "utf8");
+const SCREEN = await readFile(resolve(UI, "../crates/zerocode-core/src/screen_action.rs"), "utf8");
+const VALUE_QUESTION = JSON.parse(await readFile(resolve(UI, "../crates/zerocode-core/fixtures/type-value/question.json"), "utf8"));
+/* A Rust `&str` constant's text, raw or plain — null when the source has
+ * none, so a missing script fails its own tests, not the whole file. */
+const rustText = (source, name) => {
+  const raw = source.match(new RegExp(`const ${name}: &str = r(#+)"([\\s\\S]*?)"\\1;`));
+  if (raw) return raw[2];
+  const plain = source.match(new RegExp(`const ${name}: &str = "((?:[^"\\\\]|\\\\.)*)";`));
+  return plain ? JSON.parse(`"${plain[1]}"`) : null;
+};
+const rustList = (source, name) => {
+  const held = source.match(new RegExp(`const ${name}: (?:&\\[&str\\]|\\[&str; \\d+\\]) = &?\\[([\\s\\S]*?)\\];`));
+  return held ? [...held[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((hit) => JSON.parse(`"${hit[1]}"`)) : null;
+};
+const rustNumber = (source, name) => {
+  const held = source.match(new RegExp(`const ${name}: \\w+ = ([\\d_.]+);`));
+  return held ? Number(held[1].replace(/_/g, "")) : null;
+};
+const snapshotKey = (name) => rustText(SCREEN, name);
+const observeKey = (head) => SCREEN.match(new RegExp(`pub const fn key\\(self\\)[\\s\\S]*?Self::${head} => "(\\w+)"`))[1];
+const MARK_HELPERS = rustText(DOOR, "BROWSER_MARK_HELPERS");
+const MARKS_BODY = rustText(DOOR, "BROWSER_MARKS_BODY");
+const REMEASURE_BODY = rustText(DOOR, "BROWSER_REMEASURE_BODY");
+const OBSERVE_HELPERS = rustText(DOOR, "BROWSER_OBSERVE_HELPERS");
+const SETTLE_BODY = rustText(DOOR, "BROWSER_SETTLE_BODY");
+const SETTLE_QUIET_MS = rustNumber(CORE, "BROWSER_SETTLE_QUIET_MS");
+const SETTLE_MS = rustNumber(CORE, "BROWSER_SETTLE_MS");
+const CANDIDATE_CAP = rustNumber(JEV, "SCREEN_CANDIDATE_CAP");
+const KEYS = {
+  epoch: snapshotKey("EPOCH_KEY"), kind: snapshotKey("FIELD_KIND_KEY"), secret: snapshotKey("FIELD_SECRET_KEY"),
+  label: snapshotKey("LABEL_KEY"), placeholder: snapshotKey("FIELD_PLACEHOLDER_KEY"), near: snapshotKey("FIELD_NEAR_KEY"),
+  value: snapshotKey("FIELD_VALUE_KEY"), role: snapshotKey("ROLE_KEY"), count: snapshotKey("COUNT_KEY"),
+  alt: snapshotKey("ALT_KEY"), width: snapshotKey("WIDTH_KEY"), height: snapshotKey("HEIGHT_KEY"),
+  text: snapshotKey("TEXT_KEY"), selector: snapshotKey("SELECTOR_KEY"),
+  containers: observeKey("Container"), images: observeKey("Image"), rows: observeKey("Row"),
+};
+/* The request `automate_marks` hands the page (cmd/browser.rs
+ * `marks_request`), from the same tables. */
+const MARKS_REQUEST = {
+  selectors: rustList(CORE, "BROWSER_MARKABLE"),
+  answerCap: rustNumber(DOOR, "BROWSER_CALLBACK_CAP"),
+  keys: KEYS,
+  observed: {
+    containers: rustList(CORE, "BROWSER_OBSERVED_CONTAINERS"), rows: rustList(CORE, "BROWSER_OBSERVED_ROWS"),
+    images: rustList(CORE, "BROWSER_OBSERVED_IMAGES"), chrome: rustList(CORE, "BROWSER_OBSERVED_CHROME"),
+    cap: CANDIDATE_CAP, imageMinPx: rustNumber(CORE, "BROWSER_OBSERVED_IMAGE_MIN_PX"),
+  },
+  field: { regions: rustList(CORE, "BROWSER_FIELD_REGIONS"), headings: rustList(CORE, "BROWSER_FIELD_HEADINGS") },
+  wordCap: Math.floor(rustNumber(SCREEN, "SHOWS_CHAR_CAP") / CANDIDATE_CAP),
+  valueCap: VALUE_QUESTION.valueCharCap,
+};
+const SETTLE_REQUEST = { watch: "__browserObservation", busy: (rustList(CORE, "BROWSER_SETTLE_BUSY") || []).join(",") };
+const need = (name, value) => assert(value !== null && value !== undefined && value !== "", `${name} is not in the Rust the pane runs`);
+const lookScript = () => { need("BROWSER_MARKS_BODY", MARKS_BODY); need("BROWSER_OBSERVE_HELPERS", OBSERVE_HELPERS);
+  return script(MARKS_REQUEST, `${OBSERVE_HELPERS}\n${MARK_HELPERS}\n${MARKS_BODY}`); };
+const remeasureScript = (selector) => { need("BROWSER_OBSERVE_HELPERS", OBSERVE_HELPERS);
+  return script({ selector }, `${OBSERVE_HELPERS}\n${MARK_HELPERS}\n${REMEASURE_BODY}`); };
+const settleScript = () => { need("BROWSER_SETTLE_BODY", SETTLE_BODY); need("BROWSER_OBSERVE_HELPERS", OBSERVE_HELPERS);
+  return script(SETTLE_REQUEST, `${OBSERVE_HELPERS}\n${SETTLE_BODY}`); };
+const pressScript = (selector, expect) => script({ selector, blockRoots: BLOCK_ROOTS.join(","), expect },
+  `${OBSERVE_HELPERS || ""}\n${CLICK_BODY}`);
+const evalJson = async (target, source) => JSON.parse(await target.evaluate(source));
+/* A tab nobody is looking at, as far as the page can tell: hidden, and no
+ * animation frame ever comes — every call is counted. */
+const HIDDEN_INIT = () => {
+  Object.defineProperty(document, "hidden", { get: () => true });
+  Object.defineProperty(document, "visibilityState", { get: () => "hidden" });
+  window.__frames = 0;
+  window.requestAnimationFrame = () => { window.__frames += 1; return 0; };
+};
+const SNAPSHOT_FIXTURE = `<!doctype html><title>snapshot fixture</title>
+<style>body{font:13px system-ui;margin:8px} li{height:24px} img{display:inline-block;width:120px;height:20px} .icon{width:16px;height:16px} input,select,textarea,button{font:inherit;margin:2px}</style>
+<header><nav aria-label="site"><ul><li><a href="#home" id="home">Home</a></li><li><a href="#deals">Deals</a></li></ul></nav><img id="logo" alt="Shop logo"></header>
+<main><h1>Travel search</h1>
+<form onsubmit="return false">
+<label>Origin <input id="origin" placeholder="From" value="Zurich"></label>
+<label>Destination <input id="destination" placeholder="City" value="Lon"></label>
+<label for="when">When</label><input id="when" type="date">
+<input id="pw" type="password" aria-label="Password" value="hunter2">
+<label>Size <select id="size"><option>S</option><option selected>M</option></select></label>
+<span id="note-label">Note for the host</span><textarea id="note" aria-labelledby="note-label"></textarea>
+<label><input id="agree" type="checkbox" checked> I agree</label>
+<button type="button" id="search">Search</button><input type="submit" id="go" value="Go">
+</form>
+<section><h2>Results</h2><ul id="results" role="list" aria-label="Search results">
+<li role="listitem"><img alt="iPhone 16 Pro, black"><span>iPhone 16 Pro 256GB — in stock</span> <button id="add">Add</button></li>
+<li role="listitem"><img alt="iPhone 16 case"><span>iPhone 16 silicone case</span></li>
+<li role="listitem"><img class="icon" alt=""><span>USB-C to USB-C cable 1 m</span></li>
+</ul></section>
+<div style="height:2000px"></div><img id="below" alt="Far below"></main>`;
+
+await test("one_snapshot_contains_controls_values_and_context_from_one_epoch", async () => {
+  const look = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await look.setContent(SNAPSHOT_FIXTURE);
+    const quiet = await look.evaluate(() => {
+      window.__records = 0;
+      new MutationObserver((records) => { window.__records += records.length; })
+        .observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+      return String(performance.timeOrigin);
+    });
+    const answer = await evalJson(look, lookScript());
+    assert(answer.ok, "the look was refused", answer);
+    const { faces, snapshot } = answer.value;
+    assert(snapshot && snapshot[KEYS.epoch] === quiet, "the look names its document by its epoch", snapshot);
+    const byId = (id) => faces.find((face) => face.selector === "#" + id);
+    const field = (id) => byId(id)?.field;
+    assert(field("destination")?.[KEYS.kind] === "text" && field("destination")[KEYS.value] === "Lon"
+      && field("destination")[KEYS.label] === "Destination" && field("destination")[KEYS.placeholder] === "City"
+      && field("destination")[KEYS.near] === "Travel search" && field("destination")[KEYS.secret] === false,
+      "a text field's words and value", field("destination"));
+    assert(field("when")?.[KEYS.kind] === "date" && field("when")[KEYS.label] === "When", "a label by `for`", field("when"));
+    assert(field("pw")?.[KEYS.secret] === true && field("pw")[KEYS.value] === "" && byId("pw").valueDigest === "secret",
+      "a password's value and fingerprint never leave the page", byId("pw"));
+    assert(field("size")?.[KEYS.kind] === "select" && field("size")[KEYS.label] === "Size" && field("size")[KEYS.value] === "M",
+      "a select's label leaves its options out", field("size"));
+    assert(field("note")?.[KEYS.label] === "Note for the host", "a label by aria-labelledby", field("note"));
+    assert(field("agree")?.[KEYS.kind] === "checkbox" && field("agree")[KEYS.label] === "I agree", "a checkbox", field("agree"));
+    assert(!field("search") && !field("go") && !field("home"), "a button, a submit and a link are no fields", [byId("search"), byId("go")]);
+    const containers = snapshot[KEYS.containers], images = snapshot[KEYS.images], rows = snapshot[KEYS.rows];
+    assert(containers.length === 1 && containers[0][KEYS.selector] === "#results" && containers[0][KEYS.role] === "list"
+      && containers[0][KEYS.label] === "Search results" && containers[0][KEYS.count] === 3,
+      "the results list, and not the site's navigation", containers);
+    assert(images.map((one) => one[KEYS.alt]).join("|") === "iPhone 16 Pro, black|iPhone 16 case"
+      && images.every((one) => one[KEYS.width] >= 32 && one[KEYS.selector]),
+      "the item pictures on screen — no logo in the banner, no icon, nothing below the fold", images);
+    assert(rows.length === 3 && rows[0][KEYS.text].startsWith("iPhone 16 Pro 256GB") && rows.every((row) => row[KEYS.selector]),
+      "the result rows, not the navigation's", rows);
+    assert(rows.length <= CANDIDATE_CAP && images.length <= CANDIDATE_CAP && containers.length <= CANDIDATE_CAP, "the table's cap");
+    assert(await look.evaluate(() => window.__records) === 0, "the look wrote nothing to the page");
+
+    // Page code the look itself runs (a value getter) changes the document
+    // under it: an earlier control's words and an earlier field's value. The
+    // answer is one state — the one after — never the half before.
+    await look.evaluate(() => {
+      const destination = document.getElementById("destination");
+      const own = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      let fired = false;
+      Object.defineProperty(destination, "value", { configurable: true, set(v) { own.set.call(this, v); },
+        get() {
+          if (!fired) {
+            fired = true;
+            document.getElementById("home").textContent = "Start";
+            own.set.call(document.getElementById("origin"), "Geneva");
+            const row = document.createElement("li");
+            row.setAttribute("role", "listitem");
+            row.textContent = "New arrival";
+            document.getElementById("results").append(row);
+          }
+          return own.get.call(this);
+        } });
+    });
+    const moved = await evalJson(look, lookScript());
+    assert(moved.ok, "a document that moved once is read again, not refused", moved);
+    const again = (id) => moved.value.faces.find((face) => face.selector === "#" + id);
+    assert(again("home").label === "Start", "the control read before the change is read after it", again("home"));
+    assert(again("origin").field[KEYS.value] === "Geneva", "the field read before the change is read after it", again("origin"));
+    assert(moved.value.snapshot[KEYS.rows].some((row) => row[KEYS.text] === "New arrival"), "the row the change added is there");
+
+    // A document that moves on every read cannot be read in one state: the
+    // look says so and hands over nothing of it.
+    await look.evaluate(() => {
+      const destination = document.getElementById("destination");
+      const own = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      Object.defineProperty(destination, "value", { configurable: true, set(v) { own.set.call(this, v); },
+        get() { document.getElementById("home").textContent += "!"; return own.get.call(this); } });
+    });
+    const moving = await evalJson(look, lookScript());
+    assert(!moving.ok && moving.code === "document_moving" && moving.value === undefined, "a moving document is refused whole", moving);
+    return `${faces.length} faces, ${images.length} images, ${rows.length} rows`;
+  } finally { await look.close(); }
+});
+
+await test("hidden_surface_short_settle_has_a_wall_deadline", async () => {
+  const hidden = await browser.newPage();
+  try {
+    await hidden.addInitScript(HIDDEN_INIT);
+    await hidden.setContent(`<button id="go">Go</button><p id="status">Ready</p><script>
+      document.getElementById("go").addEventListener("click", () => { document.getElementById("status").textContent = "Went"; });
+    </script>`);
+    const epoch = await hidden.evaluate(() => String(performance.timeOrigin));
+    const pressed = await evalJson(hidden, pressScript("#go", { epoch, value: null }));
+    assert(pressed.ok && typeof pressed.value.pressedAt === "number", "the press answers the page's clock", pressed);
+    const first = await evalJson(hidden, settleScript());
+    assert(first.ok && first.value.hidden === true && first.value.watched === true, "a hidden page answers its facts", first);
+    assert(first.value.documentEpoch === epoch && first.value.last >= pressed.value.pressedAt,
+      "the watch the press set saw the press's own change", { pressed: pressed.value, first: first.value });
+    await new Promise((done) => setTimeout(done, SETTLE_QUIET_MS + 20));
+    const later = await evalJson(hidden, settleScript());
+    assert(later.value.now - Math.max(later.value.last, pressed.value.pressedAt) >= SETTLE_QUIET_MS,
+      "a hidden document that stood still says so, well inside the wall", later.value);
+    assert(await hidden.evaluate(() => window.__frames) === 0, "no animation frame was asked for");
+
+    // A hidden page that never stands still: over the whole wall, never a
+    // quiet window — the page says what it is doing and keeps saying it.
+    await hidden.evaluate(() => { let n = 0; window.__ticker = setInterval(() => { document.getElementById("status").textContent = "tick " + (n += 1); }, 10); });
+    const began = Date.now();
+    let quietest = 0;
+    while (Date.now() - began < SETTLE_MS) {
+      const facts = (await evalJson(hidden, settleScript())).value;
+      quietest = Math.max(quietest, facts.now - facts.last);
+    }
+    assert(quietest < SETTLE_QUIET_MS, "a document changing every 10 ms never looked still", quietest);
+    await hidden.evaluate(() => clearInterval(window.__ticker));
+
+    // Another document in the pane is another epoch.
+    await hidden.goto("data:text/html,<p>elsewhere</p>");
+    const replaced = await evalJson(hidden, settleScript());
+    assert(replaced.value.documentEpoch !== epoch, "a replaced document names another epoch", replaced.value);
+    return `still after ${Math.round(later.value.now - pressed.value.pressedAt)} ms; moving at most ${Math.round(quietest)} ms still`;
+  } finally { await hidden.close(); }
+});
+
+await test("visibility_is_not_confused_with_task_completion", async () => {
+  const seen = await browser.newPage();
+  try {
+    // A painted page, frame after frame, whose document keeps changing on
+    // every frame: visible and drawing, and not still.
+    await seen.setContent(`<p id="clock">0</p><script>
+      let n = 0; const tick = () => { document.getElementById("clock").textContent = String(n += 1); requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    </script>`);
+    const facts = [];
+    const began = Date.now();
+    while (Date.now() - began < SETTLE_MS) facts.push((await evalJson(seen, settleScript())).value);
+    assert(facts.every((one) => one.hidden === false), "the page was visible throughout");
+    assert(facts.every((one) => one.now - one.last < SETTLE_QUIET_MS), "a painted page still changing is not still", facts.slice(-3));
+    assert(await seen.evaluate(() => Number(document.getElementById("clock").textContent)) > 3, "frames were painted all along");
+    return `${facts.length} polls, never still`;
+  } finally { await seen.close(); }
+});
+
+await test("value_change_or_occlusion_invalidates_selected_target", async () => {
+  const pinned = await browser.newPage();
+  try {
+    await pinned.setContent(`<style>#cover{position:fixed;left:0;top:0;width:400px;height:200px;background:#fff}</style>
+      <input id="city" aria-label="City" value="Lon"><input id="pw" type="password" aria-label="Password" value="a">
+      <label><input id="agree" type="checkbox"> ok</label><select id="size"><option>S</option><option>M</option></select>
+      <button id="go">Go</button><p id="log"></p><script>
+      window.__presses = 0;
+      document.getElementById("go").addEventListener("click", () => { window.__presses += 1; });
+      document.getElementById("city").addEventListener("click", () => { window.__presses += 1; });
+    </script>`);
+    const measure = async (selector) => (await evalJson(pinned, remeasureScript(selector))).value;
+    const city = await measure("#city");
+    assert(city.found && city.documentEpoch && city.valueDigest, "the re-measure names the document and the value", city);
+    await pinned.fill("#city", "London");
+    assert((await measure("#city")).valueDigest !== city.valueDigest, "a changed value is another digest");
+    assert((await measure("#city")).label === "City", "while the words the old pin reads stayed");
+    const agree = await measure("#agree");
+    await pinned.check("#agree");
+    assert((await measure("#agree")).valueDigest !== agree.valueDigest, "a checked box is another digest");
+    const size = await measure("#size");
+    await pinned.selectOption("#size", "M");
+    assert((await measure("#size")).valueDigest !== size.valueDigest, "another option is another digest");
+    const pw = await measure("#pw");
+    await pinned.fill("#pw", "hunter2");
+    assert(pw.valueDigest === "secret" && (await measure("#pw")).valueDigest === "secret", "a secret has no fingerprint");
+    assert((await measure("#go")).valueDigest === null, "a button pins no value");
+
+    const now = await measure("#city");
+    const press = async (expect, selector = "#city") => evalJson(pinned, pressScript(selector, expect));
+    const stale = await press({ epoch: "1.5", value: now.valueDigest });
+    assert(!stale.ok && stale.code === "document_replaced", "another document refuses the press", stale);
+    const typed = await press({ epoch: now.documentEpoch, value: city.valueDigest });
+    assert(!typed.ok && typed.code === "value_changed", "a changed value refuses the press", typed);
+    assert(await pinned.evaluate(() => window.__presses) === 0, "neither refusal pressed anything");
+    await pinned.evaluate(() => { const cover = document.createElement("div"); cover.id = "cover"; document.body.append(cover); });
+    const covered = await press({ epoch: now.documentEpoch, value: null }, "#go");
+    assert(!covered.ok && covered.code === "element_obscured", "a covered control is not pressed", covered);
+    await pinned.evaluate(() => document.getElementById("cover").remove());
+    const held = await press({ epoch: now.documentEpoch, value: now.valueDigest });
+    assert(held.ok && await pinned.evaluate(() => window.__presses) === 1, "the look that still holds presses once", held);
+    return "document, value, checked, option, cover: refused; holding: pressed";
+  } finally { await pinned.close(); }
+});
+
+await test("background_observation_does_not_focus_another_pane", async () => {
+  const context = await browser.newContext({ viewport: { width: 900, height: 600 } });
+  try {
+    const person = await context.newPage();
+    await person.setContent(`<input id="typing" value="half a sentence"><div style="height:3000px"></div>`);
+    const background = await context.newPage();
+    await background.addInitScript(HIDDEN_INIT);
+    await background.setContent(SNAPSHOT_FIXTURE);
+    await person.bringToFront();
+    await person.focus("#typing");
+    await person.evaluate(() => { document.getElementById("typing").setSelectionRange(2, 6); window.scrollTo(0, 120); });
+    const where = (target) => target.evaluate(() => ({ active: document.activeElement?.id || document.activeElement?.tagName,
+      start: document.activeElement?.selectionStart ?? null, end: document.activeElement?.selectionEnd ?? null,
+      y: Math.round(window.scrollY), selection: String(getSelection()) }));
+    const personBefore = await where(person), backgroundBefore = await where(background);
+    for (const target of [background, person]) {
+      assert((await evalJson(target, lookScript())).ok, "the look ran");
+      assert((await evalJson(target, remeasureScript("#typing, #destination"))).ok, "the re-measure ran");
+      assert((await evalJson(target, settleScript())).ok, "the settle ran");
+    }
+    const personAfter = await where(person), backgroundAfter = await where(background);
+    assert(JSON.stringify(personAfter) === JSON.stringify(personBefore), "the person's focus, selection and scroll stayed", { personBefore, personAfter });
+    assert(JSON.stringify(backgroundAfter) === JSON.stringify(backgroundBefore), "the observed tab's did too", { backgroundBefore, backgroundAfter });
+    return JSON.stringify(personAfter);
+  } finally { await context.close(); }
+});
+
 await browser.close();
 
 let failed = 0;

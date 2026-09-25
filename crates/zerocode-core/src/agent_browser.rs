@@ -466,12 +466,9 @@ impl BrowserMark {
 /// deterministic — the same faces always give the same numbers.
 #[must_use]
 pub fn number_marks(faces: &[BrowserFace]) -> Vec<BrowserMark> {
-    faces
-        .iter()
-        .filter(|face| face.hit)
-        .enumerate()
-        .map(|(at, face)| BrowserMark {
-            mark: at + 1,
+    numbered_faces(faces)
+        .map(|(_, mark, face)| BrowserMark {
+            mark,
             tag: face.tag.clone(),
             role: face.role.clone(),
             label: face.label.clone(),
@@ -482,6 +479,21 @@ pub fn number_marks(faces: &[BrowserFace]) -> Vec<BrowserMark> {
             height: face.height,
         })
         .collect()
+}
+
+/// The one numbering [`number_marks`] gives: each hittable face's place
+/// among the faces the page walked, the number it presses by, and the face —
+/// for a caller that carries what the page said beside a face (a field's
+/// words, its value's digest) over to the number it went to.
+pub fn numbered_faces(
+    faces: &[BrowserFace],
+) -> impl Iterator<Item = (usize, usize, &BrowserFace)> + '_ {
+    faces
+        .iter()
+        .enumerate()
+        .filter(|(_, face)| face.hit)
+        .enumerate()
+        .map(|(at, (place, face))| (place, at + 1, face))
 }
 
 /// The control re-measured at a mark's selector, as the click's page script
@@ -527,6 +539,241 @@ pub fn mark_still_holds(mark: &BrowserMark, now: &BrowserRemeasure) -> Result<()
     } else {
         Err(pin_broken(mark.mark))
     }
+}
+
+// ---- One look's snapshot, a press's settle and the look's pin (t-6721) ----
+//
+// A walk reads a page once a step (`marks --json`) and presses by number
+// (`click --mark N`). What the page holds beside its numbers — its document,
+// the fields a value may go into, the containers, images and rows the goal
+// may be about — is read in the same synchronous pass as the numbers, under
+// the keys the walk's question reads them by
+// ([`crate::screen_action::snapshot`]), so no answer mixes two states of the
+// page. A press by number then waits a bounded moment for the page to settle
+// on what it did — by the page's own document standing still, never by a
+// painted frame, which a hidden tab never paints — and the number is pinned to
+// the document it was read in and to what a field held.
+
+/// The key a look carries the window's clock under: when the page's answer
+/// was heard, in milliseconds since the Unix epoch — the one key of the
+/// snapshot the walk's question does not read, for a reader that ages a look.
+pub const AT_MS_KEY: &str = "atMs";
+
+/// The containers a look reports beside its numbers, as CSS selectors: the
+/// lists, tables and grids a page shows results in, said in the ARIA roles
+/// and the elements that carry them implicitly. One table, like
+/// [`BROWSER_MARKABLE`]: the page script walks exactly this list.
+pub const BROWSER_OBSERVED_CONTAINERS: &[&str] = &[
+    "[role=list]",
+    "[role=listbox]",
+    "[role=grid]",
+    "[role=table]",
+    "[role=feed]",
+    "ul",
+    "ol",
+    "table",
+];
+
+/// The rows a look reports — and counts inside a container: one entry of a
+/// list, an option, a table or grid row, an article in a feed.
+pub const BROWSER_OBSERVED_ROWS: &[&str] = &[
+    "[role=listitem]",
+    "[role=option]",
+    "[role=row]",
+    "[role=article]",
+    "li",
+    "tr",
+];
+
+/// The pictures a look reports.
+pub const BROWSER_OBSERVED_IMAGES: &[&str] = &["img", "[role=img]"];
+
+/// The page's own chrome — its navigation, its banner and footer, its menus
+/// and tab strips. What sits inside one is the page's furniture, not a result
+/// a goal is about, so no container, image or row is reported from inside it;
+/// its controls are still numbered and pressed like any other.
+pub const BROWSER_OBSERVED_CHROME: &[&str] = &[
+    "nav",
+    "header",
+    "footer",
+    "[role=navigation]",
+    "[role=banner]",
+    "[role=contentinfo]",
+    "[role=menu]",
+    "[role=menubar]",
+    "[role=tablist]",
+];
+
+/// The smallest side, in CSS pixels, of a picture a look reports: an icon, a
+/// spacer or a tracking pixel is not the picture of an item.
+pub const BROWSER_OBSERVED_IMAGE_MIN_PX: f64 = 32.0;
+
+/// Where a field's nearby words are looked for — the region around it, then
+/// the heading of that region: the words a value seat reads beside a label.
+pub const BROWSER_FIELD_REGIONS: &[&str] = &[
+    "fieldset",
+    "form",
+    "dialog",
+    "section",
+    "main",
+    "[role=form]",
+    "[role=search]",
+    "[role=dialog]",
+];
+pub const BROWSER_FIELD_HEADINGS: &[&str] = &["legend", "h1", "h2", "h3", "h4", "[role=heading]"];
+
+/// The most a press by number waits for its page to settle before it
+/// answers: a quarter second on the wall, hidden tab or not. The door's
+/// explicit `wait` keeps its own ceiling ([`BROWSER_WAIT_MAX_MS`]); a settle
+/// never shortens it.
+pub const BROWSER_SETTLE_MS: u64 = 250;
+
+/// How long a page's document must stand still to be settled: fifty
+/// milliseconds, the short settle `jev-ultrafast` gives an ordinary action
+/// (two frames or fifty milliseconds) — said here in the document's own
+/// mutations, because a hidden tab paints no frame (its two
+/// `requestAnimationFrame`s did not come in seven seconds, 6/6, t-6701).
+pub const BROWSER_SETTLE_QUIET_MS: u64 = 50;
+
+/// What says a page is still at work though its document stands still: an
+/// element it marked busy, while one is on screen.
+pub const BROWSER_SETTLE_BUSY: &[&str] = &["[aria-busy=\"true\"]"];
+
+/// How a settle ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settle {
+    /// The document the press was made in stood still for the quiet window
+    /// and says it is not busy. Not a goal reached: only that a look now
+    /// reads what the press left.
+    Ready,
+    /// The wall ran out first. Never a success — a caller looks at a page
+    /// still moving, and knows it.
+    NotReady,
+    /// The document the press was made in is gone, or its pane is: the
+    /// look's numbers mean nothing there.
+    Invalidated,
+}
+
+impl Settle {
+    /// The word the press's answer says it with.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NotReady => "not_ready",
+            Self::Invalidated => "invalidated",
+        }
+    }
+}
+
+/// Why a settle ended as it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettleWhy {
+    /// The document stood still for the quiet window.
+    Quiet,
+    /// It was still changing when the wall ran out.
+    Moving,
+    /// It stood still but said it was busy (loading, or marked busy).
+    Busy,
+    /// The page did not answer inside the wall.
+    Unanswered,
+    /// No watch could be kept on the page's document.
+    Unwatched,
+    /// Another document stands in the pane.
+    Replaced,
+    /// The pane is gone.
+    Gone,
+}
+
+impl SettleWhy {
+    /// The word the press's answer says it with.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Quiet => "quiet",
+            Self::Moving => "moving",
+            Self::Busy => "busy",
+            Self::Unanswered => "unanswered",
+            Self::Unwatched => "unwatched",
+            Self::Replaced => "replaced",
+            Self::Gone => "gone",
+        }
+    }
+}
+
+/// What a page says of itself on one settle poll, on its own clock
+/// (`performance.now()`): its document, the time, when its document last
+/// changed (or when the watch began, whichever is later), and whether it is
+/// busy. `hidden` is reported and never judged.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettleFacts {
+    #[serde(default)]
+    pub document_epoch: String,
+    #[serde(default)]
+    pub now: f64,
+    #[serde(default)]
+    pub last: f64,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default)]
+    pub hidden: bool,
+    /// Whether the page keeps the watch between polls. A page whose document
+    /// refused it cannot say how long it has stood still.
+    #[serde(default)]
+    pub watched: bool,
+}
+
+/// The settle's verdict on one poll of the document a press was made in
+/// (`epoch`), counting stillness from `since` on the page's clock (the
+/// press): `Some` once the answer is known, `None` while it is still to come.
+#[must_use]
+pub fn settle_verdict(facts: &SettleFacts, epoch: &str, since: f64) -> Option<(Settle, SettleWhy)> {
+    // t-6721 red: the old road — a press answers at once, nothing waited on.
+    let _ = (facts, epoch, since);
+    Some((Settle::Ready, SettleWhy::Quiet))
+}
+
+/// How long to wait before the next poll, in milliseconds: the time left
+/// until the quiet window could be whole, or the whole window while busy.
+#[must_use]
+pub fn settle_wait_ms(facts: &SettleFacts, since: f64) -> u64 {
+    let _ = (facts, since);
+    0
+}
+
+/// What a look knew about one mark beyond its face: the document it was
+/// read in and, for a field, the digest of what the field held (a secret's
+/// is a constant, never its fingerprint).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BrowserLookPin {
+    pub document_epoch: String,
+    pub value_digest: Option<String>,
+}
+
+/// What the re-measure says of the page and the control now, beside its face
+/// ([`BrowserRemeasure`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserRemeasureContext {
+    #[serde(default)]
+    pub document_epoch: String,
+    #[serde(default)]
+    pub value_digest: Option<String>,
+}
+
+/// Whether a mark still names what the look read, just before the press:
+/// the control's own pin ([`mark_still_holds`]), then the document it was
+/// read in, then — for a field — what the field held.
+pub fn look_still_holds(
+    mark: &BrowserMark,
+    drawn: &BrowserLookPin,
+    now: &BrowserRemeasure,
+    context: &BrowserRemeasureContext,
+) -> Result<(), ProviderError> {
+    // t-6721 red: the old pin alone.
+    let _ = (drawn, context);
+    mark_still_holds(mark, now)
 }
 
 /// The viewport presets, by id — the window's `BROWSER_VIEWPORT_PRESETS`
@@ -1454,6 +1701,190 @@ mod tests {
             );
             assert!(refusal.message.contains('3'), "names the mark: {refusal:?}");
         }
+    }
+
+    /// A number is pinned to the look it came from, not only to the control's
+    /// face: the document it was read in and, for a field, what the field
+    /// held. Another document with the same layout, or a field whose value
+    /// changed under the walk while its words stayed, is refused; a control
+    /// that is no field pins no value; and the face's own pin still stands in
+    /// front of both.
+    #[test]
+    fn value_change_or_occlusion_invalidates_selected_target() {
+        let mark = BrowserMark {
+            mark: 2,
+            tag: "input".into(),
+            role: "textbox".into(),
+            label: Some("Destination".into()),
+            selector: "#destination".into(),
+            x: 10.0,
+            y: 20.0,
+            width: 200.0,
+            height: 30.0,
+        };
+        let face = BrowserRemeasure {
+            found: true,
+            tag: "input".into(),
+            role: "textbox".into(),
+            label: Some("Destination".into()),
+            x: 10.0,
+            y: 20.0,
+            width: 200.0,
+            height: 30.0,
+        };
+        let drawn = BrowserLookPin {
+            document_epoch: "1790000000000.25".into(),
+            value_digest: Some("3:9a1f".into()),
+        };
+        let same = BrowserRemeasureContext {
+            document_epoch: drawn.document_epoch.clone(),
+            value_digest: drawn.value_digest.clone(),
+        };
+        assert_eq!(look_still_holds(&mark, &drawn, &face, &same), Ok(()));
+
+        let replaced = BrowserRemeasureContext {
+            document_epoch: "1790000009999.5".into(),
+            ..same.clone()
+        };
+        let typed = BrowserRemeasureContext {
+            value_digest: Some("7:44c0".into()),
+            ..same.clone()
+        };
+        for now in [&replaced, &typed] {
+            let refusal = look_still_holds(&mark, &drawn, &face, now)
+                .expect_err("the look no longer holds");
+            assert_eq!(
+                refusal.code,
+                crate::computer_use_protocol::error_code::ELEMENT_NOT_FOUND
+            );
+            assert!(refusal.message.contains('2'), "names the mark: {refusal:?}");
+        }
+        assert_ne!(
+            look_still_holds(&mark, &drawn, &face, &replaced),
+            look_still_holds(&mark, &drawn, &face, &typed),
+            "a replaced document and a changed value say different things"
+        );
+
+        let button = BrowserLookPin {
+            value_digest: None,
+            ..drawn.clone()
+        };
+        assert_eq!(look_still_holds(&mark, &button, &face, &typed), Ok(()));
+
+        let moved = BrowserRemeasure {
+            y: 300.0,
+            ..face.clone()
+        };
+        assert!(look_still_holds(&mark, &drawn, &moved, &same).is_err());
+    }
+
+    /// The settle's verdict is the document's word, bounded by the wall the
+    /// shell keeps: another document is `invalidated` at once; a document
+    /// still changing, or still but busy, is not yet settled and says how
+    /// long to wait; stillness counts from the press, never from before it;
+    /// a page that keeps no watch cannot be called still.
+    #[test]
+    fn hidden_surface_short_settle_has_a_wall_deadline() {
+        let epoch = "1790000000000.25";
+        let facts = |now: f64, last: f64, busy: bool| SettleFacts {
+            document_epoch: epoch.into(),
+            now,
+            last,
+            busy,
+            hidden: true,
+            watched: true,
+        };
+        let quiet = BROWSER_SETTLE_QUIET_MS;
+
+        let moving = facts(1_040.0, 1_035.0, false);
+        assert_eq!(settle_verdict(&moving, epoch, 1_000.0), None);
+        assert_eq!(settle_wait_ms(&moving, 1_000.0), quiet - 5);
+
+        let busy = facts(1_200.0, 1_000.0, true);
+        assert_eq!(settle_verdict(&busy, epoch, 1_000.0), None);
+        assert_eq!(settle_wait_ms(&busy, 1_000.0), quiet);
+
+        let since_the_press = facts(1_010.0, 200.0, false);
+        assert_eq!(settle_verdict(&since_the_press, epoch, 1_000.0), None);
+        assert_eq!(settle_wait_ms(&since_the_press, 1_000.0), quiet - 10);
+
+        #[allow(clippy::cast_precision_loss)]
+        let whole = facts(1_000.0 + quiet as f64, 1_000.0, false);
+        assert_eq!(
+            settle_verdict(&whole, epoch, 1_000.0),
+            Some((Settle::Ready, SettleWhy::Quiet))
+        );
+
+        let replaced = SettleFacts {
+            document_epoch: "1790000009999.5".into(),
+            ..facts(1_000.0, 1_000.0, true)
+        };
+        assert_eq!(
+            settle_verdict(&replaced, epoch, 1_000.0),
+            Some((Settle::Invalidated, SettleWhy::Replaced))
+        );
+
+        let unwatched = SettleFacts {
+            watched: false,
+            ..facts(1_500.0, 1_000.0, false)
+        };
+        assert_eq!(
+            settle_verdict(&unwatched, epoch, 1_000.0),
+            Some((Settle::NotReady, SettleWhy::Unwatched))
+        );
+
+        const {
+            assert!(BROWSER_SETTLE_QUIET_MS * 2 < BROWSER_SETTLE_MS);
+            assert!(BROWSER_SETTLE_MS < BROWSER_CALLBACK_DEADLINE_MS);
+            assert!(BROWSER_SETTLE_MS < BROWSER_WAIT_MAX_MS);
+        }
+    }
+
+    /// Visible is not settled and settled is not done: the verdict never
+    /// reads whether the page was hidden — a painted page still changing is
+    /// not ready, a hidden one that stood still is — and its three words say
+    /// what the page did, never that a goal was reached.
+    #[test]
+    fn visibility_is_not_confused_with_task_completion() {
+        let epoch = "e";
+        let seen_moving = SettleFacts {
+            document_epoch: epoch.into(),
+            now: 1_200.0,
+            last: 1_198.0,
+            busy: false,
+            hidden: false,
+            watched: true,
+        };
+        let hidden_still = SettleFacts {
+            now: 1_120.0,
+            last: 1_000.0,
+            hidden: true,
+            ..seen_moving.clone()
+        };
+        assert_eq!(settle_verdict(&seen_moving, epoch, 1_000.0), None);
+        assert_eq!(
+            settle_verdict(&hidden_still, epoch, 1_000.0),
+            Some((Settle::Ready, SettleWhy::Quiet))
+        );
+        for facts in [&seen_moving, &hidden_still] {
+            let flipped = SettleFacts {
+                hidden: !facts.hidden,
+                ..facts.clone()
+            };
+            assert_eq!(
+                settle_verdict(facts, epoch, 1_000.0),
+                settle_verdict(&flipped, epoch, 1_000.0),
+                "visibility is reported, never judged"
+            );
+        }
+        assert_eq!(
+            [
+                Settle::Ready.word(),
+                Settle::NotReady.word(),
+                Settle::Invalidated.word()
+            ],
+            ["ready", "not_ready", "invalidated"]
+        );
     }
 
     #[test]
