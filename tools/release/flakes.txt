@@ -6,14 +6,6 @@
 # History: memory zerocode-repo-tooling-traps 80/93, t-2863 (the sidecar
 # contract), the old ~/.local/share/zerocode/release/release-judge.sh.
 root:codex_queue::tests::installed_codex_starts_and_cleans_an_explicit_worker_sidecar
-# 2026-09-14 (coordinator gate for t-3993 on a loaded machine, load 11-19): the sidecar probe read `Unknown` where
-# `Confirmed` was expected in one of three full `--bins` runs, green solo x3 — the same codex-sidecar timing family as
-# the line above; the two fake-Codex nudge tests below flaked in the other two runs, also green solo x3.
-# 2026-09-24 t-6671 audit at e41bb0c7: full shell-test repeats this and the hook-pointer flake below;
-# both 3 s limits and their implementations are unchanged since v1.1.20. Solo x3: queue 0.26-0.46 s,
-# hook-pointer 2.62-2.84 s at load 80-96; every run passed. The new desk projection plus JSON costs
-# p50 0.026 ms / p95 0.094 ms for 60 tasks, 5 workers and 20 letters in a release build.
-root:codex_queue::tests::bound_queue_process_receives_the_fixed_pointer_and_minimal_environment
 zo:preferences::tests::persisted_fast_models_are_normalized_to_the_bare_family
 zo:a_pane_shrunk_without_sigwinch_loses_no_rows
 zo:opening_a_pane_uses_its_private_events_channel
@@ -70,11 +62,6 @@ zo:lsp_client::tests::sync_and_collect_diagnostics_returns_did_change_diagnostic
 # port the test frees and rebinds was taken by a neighbour between the two binds (`EADDRINUSE` from bind_seat(port)),
 # not by our own lingering connection — SO_REUSEADDR covers only the latter. Green solo ×3 in 0.00 s.
 root:google_login::tests::the_callback_seat_can_be_retaken_while_the_last_one_lingers
-# 2026-09-22 (coordinator gate for t-5966, `just shell-test` at load 60-74 beside four worker builds): the test expects
-# its hand-driven `collect_stale` to answer Fresh (the hook already took the pointer), but under load the run outlived
-# HOOK_COLLECTION_GRACE, so the parked pointer read as stale instead (tests.rs:9857). Orchestration untouched by the
-# branch; green solo ×3 in 0.37–0.86 s. A wall-clock grace measured against a loaded test run, like the families above.
-root:orchestration::tests::a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_composer
 # 2026-09-23 coordinator gate for t-6203 (zo-test, 49 binaries side by side, load 4-13):
 # Same gate: the growing PTY could not be spawned ("the pty slave has no name") while the other binaries ran beside it —
 # pty allocation under load; green solo x3.

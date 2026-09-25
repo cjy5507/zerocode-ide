@@ -89,9 +89,9 @@ fn an_empty_check_answers(bench: &mut Criterion) {
 
 /// The beat's own read: `pointer_wanted` over a mailbox holding ten thousand
 /// messages, a fifth of them question/reply threads. This runs once a second
-/// for every seated holder, so its shape (two linear walks, never a walk per
-/// question) is load-bearing — the unit tests pin the shape, this pins the
-/// price.
+/// for every seated holder, so its shape (the queue counted, never a walk per
+/// question — a question is no door since t-8938, so its threads cost no walk
+/// at all) is load-bearing — the unit tests pin the shape, this pins the price.
 fn the_pointer_walks_a_full_mailbox(bench: &mut Criterion) {
     let (mut ledger, _, run_id, _) = a_bound_run("mailbox");
     let address = format!("run:{run_id}");

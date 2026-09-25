@@ -172,6 +172,7 @@ mod ssh_prompt;
 mod ssh_send_guard;
 mod ssh_store;
 mod stage_layout;
+mod standing_clock;
 mod state_migration;
 mod stats_events_store;
 mod supply_chain;

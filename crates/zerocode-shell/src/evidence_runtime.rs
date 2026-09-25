@@ -643,7 +643,16 @@ mod tests {
     /// framed once, by its last step; another surface keeps its own frame;
     /// a look is its own frame and a refusal is a line; and a reader asking
     /// to be told is told only once every step before it is written.
-    #[tokio::test(flavor = "multi_thread")]
+    ///
+    /// On tokio's paused clock (t-8938). The settle is time the writer
+    /// COUNTS, and on the wall clock it was measured together with six
+    /// lines and three pictures written to disk through the blocking pool —
+    /// 651 ms against a 400 ms bound in a loaded gate, the settle itself
+    /// never the slow part. Paused, the clock moves only by the timers the
+    /// writer waits on, so the elapsed time IS the settles it slept: one
+    /// for the burst when it is counted from the step, four when it is
+    /// added per framed step.
+    #[tokio::test(start_paused = true)]
     async fn the_writer_keeps_order_frames_a_burst_once_and_answers_a_reader_after_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (writer, messages) = unbounded_channel();
@@ -685,10 +694,10 @@ mod tests {
             "the burst's last desktop step, the phone and the look are framed"
         );
         assert!(!steps[5].ok, "a refusal is a line");
+        let slept = started.elapsed();
         assert!(
-            started.elapsed() < settle * 2,
-            "the settle is counted from the step, not added per framed step: {:?}",
-            started.elapsed()
+            slept >= settle && slept < settle * 2,
+            "the settle is counted from the step, not added per framed step: {slept:?}"
         );
         drop(writer);
         written.await.unwrap();

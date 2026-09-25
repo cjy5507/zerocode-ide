@@ -2470,6 +2470,34 @@ fn note_pointer_wall_lifted(
     );
 }
 
+/// Mail is waiting for a pane held mid-turn inside its own question
+/// ([`Standing::Asking`], t-8938). Said when the hold begins — for this mail,
+/// at this pane — so a reader looking for why nothing was parked finds the
+/// wait that held it.
+fn note_pointer_asking(run: &str, address: &str, term: u32) {
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: mail waiting for {address} in {run} is held at terminal \
+             {term}: it is waiting in its own turn on a question it asked — nothing \
+             is parked or typed until that wait or that turn ends"
+        ),
+    );
+}
+
+/// A pane's hold on its own question ended: the pointer is offered again.
+fn note_pointer_asking_ended(run: &str, address: &str, term: u32) {
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: terminal {term} is no longer held in its own question; \
+             the pointer for {address} in {run} is offered again"
+        ),
+    );
+}
+
 fn note_pointer_silent(run: &str, address: &str, term: u32, why: &str) {
     let Some(root) = BLACKBOX.get() else { return };
     crate::note_window_event(
@@ -3510,6 +3538,29 @@ fn pane_turns() -> &'static Mutex<std::collections::HashMap<u32, PaneTurn>> {
     TURNS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+/// How many waits of one kind each `(run, address)` has out right now.
+type AddressCounts = Mutex<std::collections::HashMap<(String, String), usize>>;
+
+/// One more wait counted under `key`.
+fn count_in(counts: &AddressCounts, key: &(String, String)) {
+    *counts
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .entry(key.clone())
+        .or_insert(0) += 1;
+}
+
+/// One wait fewer under `key`, and the key gone with its last one.
+fn count_out(counts: &AddressCounts, key: &(String, String)) {
+    let mut held = counts.lock().unwrap_or_else(|held| held.into_inner());
+    if let Some(count) = held.get_mut(key) {
+        *count -= 1;
+        if *count == 0 {
+            held.remove(key);
+        }
+    }
+}
+
 /// How many `check --wait` sleepers each address currently has.
 ///
 /// A sleeper IS the better pointer: the bell answers it the instant mail
@@ -3517,10 +3568,44 @@ fn pane_turns() -> &'static Mutex<std::collections::HashMap<u32, PaneTurn>> {
 /// blocked inside a wait would land the advice in a composer nobody is
 /// reading — so an address with a sleeper is skipped, and the registry is
 /// kept by the sleep loop itself.
-fn address_waiters() -> &'static Mutex<std::collections::HashMap<(String, String), usize>> {
-    static WAITERS: OnceLock<Mutex<std::collections::HashMap<(String, String), usize>>> =
-        OnceLock::new();
+fn address_waiters() -> &'static AddressCounts {
+    static WAITERS: OnceLock<AddressCounts> = OnceLock::new();
     WAITERS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// How many `ask` waits each address has out in this window right now — a
+/// question its holder asked, slept on by the loop in [`carried`] (t-8938).
+///
+/// The pointer's witness that a pane is held inside its own question
+/// ([`Standing::Asking`]). First-hand, because this window runs the wait,
+/// and it ends exactly when the wait does — with the answer, at the
+/// deadline, on an unwind. The question row the ledger keeps is no such
+/// witness: it outlives every wait on it, and a question asked twice is
+/// answered once.
+fn question_waiters() -> &'static AddressCounts {
+    static ASKING: OnceLock<AddressCounts> = OnceLock::new();
+    ASKING.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// One `ask` wait's presence in [`question_waiters`], given back on every
+/// exit road including an unwind. Not a [`WaiterCard`]: an ask leases
+/// nothing, so it is no sleeper the one-sleeper rule counts.
+struct AskingCard {
+    key: (String, String),
+}
+
+impl AskingCard {
+    fn hold(run: &str, address: &str) -> Self {
+        let key = (run.to_string(), address.to_string());
+        count_in(question_waiters(), &key);
+        Self { key }
+    }
+}
+
+impl Drop for AskingCard {
+    fn drop(&mut self) {
+        count_out(question_waiters(), &self.key);
+    }
 }
 
 /// Which SEATS sleep on which address — the one-sleeper rule's own key.
@@ -3550,11 +3635,7 @@ struct WaiterCard {
 impl WaiterCard {
     fn hold(run: &str, address: &str, seat: &str) -> Self {
         let key = (run.to_string(), address.to_string());
-        *address_waiters()
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .entry(key.clone())
-            .or_insert(0) += 1;
+        count_in(address_waiters(), &key);
         let seat = (run.to_string(), address.to_string(), seat.to_string());
         seat_waiters()
             .lock()
@@ -3579,16 +3660,7 @@ impl WaiterCard {
 
 impl Drop for WaiterCard {
     fn drop(&mut self) {
-        let mut held = address_waiters()
-            .lock()
-            .unwrap_or_else(|held| held.into_inner());
-        if let Some(count) = held.get_mut(&self.key) {
-            *count -= 1;
-            if *count == 0 {
-                held.remove(&self.key);
-            }
-        }
-        drop(held);
+        count_out(address_waiters(), &self.key);
         seat_waiters()
             .lock()
             .unwrap_or_else(|held| held.into_inner())
@@ -3664,6 +3736,23 @@ enum Standing {
         until_ms: i64,
         cause: crate::quota_wall::StallCause,
     },
+    /// The pane is mid-turn inside its own `ask` — a wait this window runs
+    /// for it, on a question it asked ([`question_waiters`]) — and the window
+    /// has said so once (t-8938). Nothing is parked for its hook: the wait
+    /// ends on its own, with the answer or at its deadline, and advice about
+    /// other mail landing on that tool call's result would read as part of
+    /// the answer.
+    ///
+    /// Judged on the pane as it stands and never on the question row: a
+    /// question outlives every wait on it — an `ask` at its deadline leaves
+    /// it standing, and a question asked twice is answered once — and a
+    /// holder silenced by the row went two hours without a word about three
+    /// messages. So the hold lasts exactly as long as the wait AND the turn:
+    /// a pane at rest is not held in anything, whatever runs in its
+    /// background. Kept across the turn's own reports (the wait is the
+    /// window's fact, not the hook's), struck with the pane, and looked at
+    /// again when either ends.
+    Asking,
 }
 
 fn pointed() -> &'static Mutex<std::collections::HashMap<(String, String), Pointed>> {
@@ -4554,10 +4643,12 @@ pub(crate) fn pane_turn_began(term: u32, began_ms: i64) {
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .insert(term, PaneTurn::Running);
+    // A hold on the pane's own question stands: the wait is this window's
+    // fact, and a report from inside the same turn does not end it.
     pointed()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
-        .retain(|_, held| held.term != Some(term));
+        .retain(|_, held| held.term != Some(term) || held.standing == Standing::Asking);
 }
 
 /// A pane's turn ended. Tell the ledger, in case that pane is a worker's.
@@ -6094,6 +6185,12 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         .keys()
         .cloned()
         .collect();
+    let asking: std::collections::HashSet<(String, String)> = question_waiters()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .keys()
+        .cloned()
+        .collect();
     /// Advice one pass decided to type: the pane, and the line.
     struct Pointing {
         run: String,
@@ -6285,28 +6382,74 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * is over. A parked pointer can only make the composer road
                  * unnecessary; it can never make it unavailable. */
                 if matches!(heard, Some(PaneTurn::Running)) {
-                    if crate::orchestration_pointer_mailbox::agent_has_hook_route(
-                        host.agent_of(term).as_deref(),
-                    ) && let Some(newest) = run.newest_pending(&address)
-                        && let Some(count) = run.pointer_wanted(&address, Some(&seat))
-                        && let Some(notice) = zerocode_hookd::session_notify::PointerNotice::new(
-                            run.id.clone(),
-                            address.clone(),
-                            newest.to_string(),
-                            count,
-                        )
-                        && crate::orchestration_pointer_mailbox::park(
-                            term,
-                            &run.id,
-                            &address,
-                            newest,
-                            host.launch_token_of(term),
-                            notice,
-                        )
+                    /* Unless the turn is held inside the pane's own question
+                     * (t-8938): the wait this window runs for it is out, and
+                     * a pointer handed over at that tool call's end would
+                     * ride in on the answer. Held, said once per watermark,
+                     * and offered again the beat the wait is over. */
+                    let held_asking = asking.contains(&key);
+                    if !held_asking
+                        && marks.get(&key).is_some_and(|stood| {
+                            stood.term == Some(term) && stood.standing == Standing::Asking
+                        })
                     {
-                        note_pointer_parked(&run.id, &address, term);
+                        marks.remove(&key);
+                        note_pointer_asking_ended(&run.id, &address, term);
+                    }
+                    let hooked = crate::orchestration_pointer_mailbox::agent_has_hook_route(
+                        host.agent_of(term).as_deref(),
+                    );
+                    if (held_asking || hooked)
+                        && let Some(newest) = run.newest_pending(&address)
+                        && let Some(count) = run.pointer_wanted(&address, Some(&seat))
+                    {
+                        if held_asking {
+                            let told = marks.get(&key).is_some_and(|stood| {
+                                stood.newest == newest
+                                    && stood.term == Some(term)
+                                    && stood.standing == Standing::Asking
+                            });
+                            if !told {
+                                note_pointer_asking(&run.id, &address, term);
+                                marks.insert(
+                                    key,
+                                    Pointed {
+                                        newest: newest.to_string(),
+                                        term: Some(term),
+                                        standing: Standing::Asking,
+                                    },
+                                );
+                            }
+                        } else if let Some(notice) =
+                            zerocode_hookd::session_notify::PointerNotice::new(
+                                run.id.clone(),
+                                address.clone(),
+                                newest.to_string(),
+                                count,
+                            )
+                            && crate::orchestration_pointer_mailbox::park(
+                                term,
+                                &run.id,
+                                &address,
+                                newest,
+                                host.launch_token_of(term),
+                                notice,
+                            )
+                        {
+                            note_pointer_parked(&run.id, &address, term);
+                        }
                     }
                     continue;
+                }
+                /* Not mid-turn, so not held inside its own question either,
+                 * whatever wait of its runs on in the background (t-8938):
+                 * the hold ends with the turn, said once, whichever mail it
+                 * was said about. */
+                if marks.get(&key).is_some_and(|stood| {
+                    stood.term == Some(term) && stood.standing == Standing::Asking
+                }) {
+                    marks.remove(&key);
+                    note_pointer_asking_ended(&run.id, &address, term);
                 }
                 // At rest, and still the agent's only while it holds the
                 // terminal: a hand-started agent quit after its last turn
@@ -6460,13 +6603,16 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                      * `Withheld` is the same beat over again too: what the
                      * guard refused clears on its own, and the guard is the
                      * door that will know. A wall whose window ran out lands
-                     * here as well, to be looked at again. */
+                     * here as well, to be looked at again. (A hold on the
+                     * pane's own question never does: it was lifted on the
+                     * way in, the moment the turn was over.) */
                     Some(
                         Standing::Unreachable
                         | Standing::Withheld
                         | Standing::Unattended
                         | Standing::Seatless
-                        | Standing::Walled { .. },
+                        | Standing::Walled { .. }
+                        | Standing::Asking,
                     )
                     | None => {
                         /* The wall's door (t-6560), asked where this pass
@@ -6483,7 +6629,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         };
                         let fresh = matches!(
                             standing,
-                            None | Some(Standing::Unattended | Standing::Walled { .. })
+                            None | Some(
+                                Standing::Unattended | Standing::Walled { .. } | Standing::Asking
+                            )
                         );
                         if fresh
                             && let Some(wall) = host
@@ -7930,25 +8078,32 @@ fn carried(
                     });
                 }
                 let mut seen = mail_seen();
-                // Past the first empty look: this caller is now certainly
-                // going to sleep. The one test that has to land a message
-                // INTO a sleeping wait counts this rather than guessing with
-                // a clock — a sleep long enough "under load" is not a proof,
-                // and a message that arrives before the wait begins is
-                // answered by the first look, which is the old deadlock
-                // passing by luck.
-                #[cfg(test)]
-                tests::a_wait_has_begun();
                 // The pointer pass skips an address somebody already sleeps
                 // on — the bell will answer them with the mail itself. Held
                 // as a card so an unwind gives the seat back. A thread wait
-                // holds no card: it is not the sleeper the pointer defers to,
-                // and it must not make the next `check --wait` a "second"
-                // sleeper on an inbox nobody is actually draining.
+                // holds no waiter card: it is not the sleeper the pointer
+                // defers to, and it must not make the next `check --wait` a
+                // "second" sleeper on an inbox nobody is actually draining.
                 let _waiting_here = waiting
                     .thread
                     .is_none()
                     .then(|| WaiterCard::hold(&waiting.run, &waiting.address, &waiting.seat));
+                // What a thread wait IS to the pointer: the asker held inside
+                // its own question, for exactly as long as this loop runs
+                // (`Standing::Asking`, t-8938).
+                let _asking_here = waiting
+                    .thread
+                    .is_some()
+                    .then(|| AskingCard::hold(&waiting.run, &waiting.address));
+                // Past the first empty look, and every card held: this caller
+                // is now certainly going to sleep. The tests that have to land
+                // a message INTO a sleeping wait — or read the pointer beside
+                // one — count this rather than guessing with a clock: a sleep
+                // long enough "under load" is not a proof, and a message that
+                // arrives before the wait begins is answered by the first
+                // look, which is the old deadlock passing by luck.
+                #[cfg(test)]
+                tests::a_wait_has_begun();
                 // The caller's own budget when it brought one — already
                 // clamped by the ledger to a range the bridge and the shim
                 // outwait — and the window's short default when it did not.
