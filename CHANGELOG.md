@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.1.25] — 2026-09-25
+
+_since v1.1.24 (85 commits)_
+
+### feat
+- feat(orchestration): an asker is told how its receiver stands — one ledger status line threaded on the question per change of the receiver's seat (turn_ended, interrupted, awaiting_input, stalled, the stall seat's judged cause, quota_walled, taken_over, finished, seat_vacated, and the two final words cancelled and exited, the first carrying "do not ask it again, and do not summon a replacement"); a final word wakes the blocked ask, every other rides the deadline answer with the time it was seen; Message::answers no longer reads the ledger's voice or a ledger-only kind as an answer, so nothing it writes into a thread is ever taken as one; one line per question × receiver generation × fact, a five-minute cadence and eight non-final lines at most (t-6740)
+- feat(jev): the recall seat's label names every note the turn was shown and what became of it, and recall ranks on those answers when the seat acts (t-6264)
+- feat(orchestration): a receipt names its verb and every verb call is tallied by day — `worker-read` files no receipt, so `served` alone could never count it (t-6742)
+- feat(orchestration): `worker-transcript` answers a worker's conversation as structured steps, out of the transcript its own ledger row reported — never its screen (t-6742)
+- feat(board): the live coordination map over the existing relations graph (t-7288)
+- feat(computer-use): the realtime layer's Mac reflex runtime — one hand that releases only what it pressed and settles a refused release, a stop that frees what is held before any teardown and reaches a run still starting, a newer bad frame taking back the evidence the last good one gave, a press judged again once the run's boundary has answered, and the desktop's own self-window and target guards on every reflex press; staged off — `live_reflex` stays false until the perception kernel is wired (t-6765)
+- feat(computer-use): the realtime layer's perception kernel — colour boards and blobs read in the helper, a demonstration learned only under approval against 42 held-out scenes, one table of limits measured to the 5 ms tick, and a reading that ran past its deadline answers `unknown(budget)` and is no confirmation's evidence; not wired yet (t-6768)
+- feat(tools): a research runner that looks for the questions Jev should be asked — replay inputs and final judgments bound, an uncertain bill stopping every purchase and the judgment (t-6349)
+
+### fix
+- fix(orchestration): a receiver notice is told once per fact whatever came between, an ask's deadline is one look whose answer is also its receipt, a late event is never pinned on a seat's next occupant or attempt, and a wait the store refused is told on the next sighting (t-6740 r2)
+- fix(orchestration): a late fact belongs to one attempt across every effect of its transition, and a question hears its receiver as it has stood since it was asked — the actor's turn end labelled the asker's line with the attempt the turn ended in, but retired readiness and recorded the silence against whoever held the pane when the report landed: a turn that ended inside D1 and arrived after the same worker took D2 went quiet on D2 (its episode and watermark), and one from a pane's last occupant retired the next occupant's readiness window and channel mark and went quiet on its attempt; now `occupant_at` (the worker already in the seat when the fact began) is the one boundary all three readings share, `worker_fell_silent` also asks `carried_at` that the turn ended in the attempt the worker carries now, and `worker_spoke` takes the sound's own clock on both roads the window hears a sound by — the turn's end and the beat's readiness sweep, whose spoken set now carries each sound's state clock; and by the coordinator's rule (m-8284) a fact that began before a question is its news only while the receiver still stands in the attempt the question was put to, so a question asked after D1 was over never hears how D1 ended, while one asked inside D1 hears it and D2's news both (t-6740 r3, astra m-8246 R3)
+- fix(jev): the recall label counts what reached the model and what the turn did, a ledger is known by more than its length, and the replay ranks a showing on its own time (t-6264)
+- fix(jev): a quote ends where CommonMark ends it, a changed ledger is held to every window the fold read, and one label on a run of requests is no confirmed showing (t-6264)
+- fix(jev): a label closes its run but not every turn of it, so what a run's requests outnumber its labels by is owed on to the reading's next run, and a label there is no confirmed showing and folds only what every request it may answer agrees on (t-6264)
+- fix(orchestration): `worker-transcript` masks a call's name and id, masks every text before any cut, and reads one open file to one end inside its two-read budget (t-6742 R1-R3)
+- fix(orchestration): a `worker-transcript` retry reads on what the call's budget has left — every open reads through one meter, a cut read's bytes stay spent, and the answer's readBytes is the meter's (t-6742 R2)
+- fix(restart): a window restart brings each conversation back once, by one road — the ledger's worker as itself, a person's tab as it stood (t-7812)
+- fix(restart): a person's orphan is still never reseated — only a taken-over sleeper is the ledger's to bring back (t-7812)
+- fix(restart): a sleeper's conversation is seated before its pane runs, and its continuation is said once — after it may have reached the pane (t-7812 r2)
+- fix(board): what the live map cannot know, it says it cannot know (t-7288)
+- fix(board): the pulse asks the document where the boards are, not the tab bookkeeping (t-7288)
+- fix(board): a waiting row that does not say what it waits for answers nothing (t-7288)
+- fix(board): the live map reads t-6815's claim words as their own result stage — a worker's "says verified" never becomes the fact's stage or an assignment (t-7288)
+- fix(board): the live map's return, failure, count and same-attempt edges (t-7288)
+- fix(board): the live map's own beat pays the return debt and sees review-only facts (t-7936)
+- fix(board): the live map's event row eases its hover and paints its quiet text from a declared ink — `--ink-quiet` was never declared anywhere, so the facts, the time and the cannot-know chip fell to `inherit`/transparent, and `.agent-live-event-main:hover` snapped where every other state eases; the row now reads `--ink-mist` (the board's own quiet text) and carries `background-color var(--motion-fast) var(--ease-standard)` like the board's other rows — both caught by the shell source contracts (`every_token_the_window_paints_from_is_declared`, `a_state_change_is_eased_not_snapped`) that the branch's window suite does not run: red in the coordinator gate on fae53db7, green here (t-7936 integration)
+
+### perf
+- perf(board): the default board stops carrying three elements per card for a map it is not showing (t-7288)
+- perf(board): the dress pass stops walking a board that has no beats to write or clear (t-7288)
+
+### docs
+- docs(skill): the ask paragraph says what the receiver's lines in your inbox mean — none is an answer, cancelled and exited are final and wake the ask, and cancelled means not to ask again nor summon a replacement (t-6740)
+- docs(orchestration): the skill calls `worker-transcript` a separate read of what the screen does not show, not a cheaper screen (t-6742 R4)
+
+### test
+- test(jev): a label a closed run of requests may still owe, and its readings on both sides — red first for the recall replay's crossing runs (t-6264)
+- test(orchestration): one `worker-transcript` call has one read budget over every open — a retry after a cut reads on what the first open left, and the answer's readBytes counts what the cut read took (t-6742 R2)
+- test(restart): the restart button's contract finds the `app.restart();` statement, not the comment that names it (t-7812)
+- test(orchestration): the walled-pane letter test says when its worker's turn began — t-6740 gave `pane_turn_began` the turn's own clock (`began_ms`, da655fb2) after this test was written on 53f6e034, so the branch rebased onto 22e3084c did not compile (E0061 at the one call); it now passes `clock()` as every other caller does (t-6349 integration on 22e3084c)
+
 ## [1.1.24] — 2026-09-25
 
 _since v1.1.23 (42 commits)_
