@@ -15,11 +15,16 @@ use serde::{Deserialize, Serialize};
 
 use super::reflex::{CoordinateSpace, PixelExtent, Roi, Scale};
 
+pub mod ax;
+pub mod learn;
+
 /// The one table of perception limits. Fields are declared in byte order, so
 /// the struct's own serialization is the canonical wire the helper checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PerceptionLimits {
+    /// Anchors one spec may name.
+    pub max_anchors: u64,
     /// Blobs one blob detector may follow; more is `ambiguous`.
     pub max_blobs: u64,
     /// Cells in one board: a 16 × 16 grid.
@@ -34,9 +39,12 @@ pub struct PerceptionLimits {
     pub max_gate: u64,
     /// Samples along one axis of a cell.
     pub max_lattice: u64,
-    /// Host nanoseconds one tick's observations may take together.
+    /// Host nanoseconds one tick's observations may take together: the
+    /// perception share of a 16.6 ms frame.
     pub max_tick_ns: u64,
-    /// Samples one tick's observations may read together.
+    /// Samples one tick's observations may read together: as many as the
+    /// game-state probe read within `max_tick_ns` at p95 on a loaded machine
+    /// (`tools/game-state-probe`). Twice as many did not fit.
     pub max_tick_samples: u64,
     /// Chebyshev distance a class may accept on each channel.
     pub max_tolerance: u64,
@@ -45,6 +53,7 @@ pub struct PerceptionLimits {
 }
 
 pub const LIMITS: PerceptionLimits = PerceptionLimits {
+    max_anchors: 8,
     max_blobs: 16,
     max_cells: 256,
     max_classes: 8,
@@ -53,7 +62,7 @@ pub const LIMITS: PerceptionLimits = PerceptionLimits {
     max_gate: 256,
     max_lattice: 8,
     max_tick_ns: 5_000_000,
-    max_tick_samples: 1_048_576,
+    max_tick_samples: 262_144,
     max_tolerance: 64,
     min_cell_samples: 4,
 };
@@ -142,6 +151,18 @@ pub enum Layout {
     },
 }
 
+/// A point, in reference pixels, that must show a colour for the frame to be
+/// the scene the plan was written for — a HUD, a frame edge, a corner mark.
+/// `class` 0 names the ground. A board that looks the same turned half round
+/// is told apart only by an anchor it does not share with its turned self.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Anchor {
+    pub x: u32,
+    pub y: u32,
+    pub class: u64,
+}
+
 /// A colour detector's configuration, carried by the plan and covered by
 /// its hash. The ROI it reads is the detector's, written against the
 /// reference extent.
@@ -153,13 +174,49 @@ pub struct ColorSpec {
     /// The background between cells, or behind blobs. With it a cell is known
     /// only while the gaps around it are ground, and a blob count of 0 is
     /// known only while every sample is ground or the class.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "written"
+    )]
     pub ground: Option<ColorClass>,
     pub reference_width: u32,
     pub reference_height: u32,
     pub layout: Layout,
     /// Fresh captures of one scene that must agree before a value is known.
     pub confirm: u64,
+    /// Points that must all show their colour before anything is read; when
+    /// one misses, the frame is not this scene.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "written_list"
+    )]
+    pub anchors: Vec<Anchor>,
+}
+
+/// An optional field is either left out or written in full: the wire never
+/// carries `null`, so a reader that took one would read more than the
+/// helper does.
+fn written<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// A list left empty is left out, for the same reason.
+fn written_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let items = Vec::<T>::deserialize(deserializer)?;
+    if items.is_empty() {
+        return Err(serde::de::Error::custom("an empty list is never written"));
+    }
+    Ok(items)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +280,32 @@ impl Axis {
     }
 }
 
+/// The palette rules every spec and every adopted candidate meets: 1 to
+/// `max_classes` classes, no tolerance over `max_tolerance`, and no two of
+/// them, ground included, able to hold the same sample.
+pub fn check_palette(
+    classes: &[ColorClass],
+    ground: Option<&ColorClass>,
+    limits: &PerceptionLimits,
+) -> Result<(), SpecError> {
+    if classes.is_empty() || classes.len() as u64 > limits.max_classes {
+        return Err(SpecError::Budget);
+    }
+    let palette: Vec<&ColorClass> = classes.iter().chain(ground).collect();
+    if palette
+        .iter()
+        .any(|class| u64::from(class.tolerance) > limits.max_tolerance)
+    {
+        return Err(SpecError::Budget);
+    }
+    for (at, class) in palette.iter().enumerate() {
+        if palette[at + 1..].iter().any(|other| !class.apart(other)) {
+            return Err(SpecError::Overlap);
+        }
+    }
+    Ok(())
+}
+
 /// Checks a colour detector's spec against its ROI and answers how many
 /// samples one observation reads.
 pub fn validate_color(
@@ -243,25 +326,28 @@ pub fn validate_color(
     {
         return Err(SpecError::Geometry);
     }
-    if spec.classes.is_empty() || spec.classes.len() as u64 > limits.max_classes {
-        return Err(SpecError::Budget);
-    }
-    let palette: Vec<&ColorClass> = spec.classes.iter().chain(spec.ground.iter()).collect();
-    if palette
-        .iter()
-        .any(|class| u64::from(class.tolerance) > limits.max_tolerance)
-    {
-        return Err(SpecError::Budget);
-    }
-    for (at, class) in palette.iter().enumerate() {
-        if palette[at + 1..].iter().any(|other| !class.apart(other)) {
-            return Err(SpecError::Overlap);
-        }
-    }
+    check_palette(&spec.classes, spec.ground.as_ref(), limits)?;
     if spec.confirm == 0 || spec.confirm > limits.max_confirm {
         return Err(SpecError::Budget);
     }
     let classes = spec.classes.len() as u64;
+    if spec.anchors.len() as u64 > limits.max_anchors {
+        return Err(SpecError::Budget);
+    }
+    if spec
+        .anchors
+        .iter()
+        .any(|anchor| anchor.x >= spec.reference_width || anchor.y >= spec.reference_height)
+    {
+        return Err(SpecError::Geometry);
+    }
+    if spec
+        .anchors
+        .iter()
+        .any(|anchor| anchor.class > classes || (anchor.class == 0 && spec.ground.is_none()))
+    {
+        return Err(SpecError::Reference);
+    }
     let cost = match spec.layout {
         Layout::Cells {
             rows,
@@ -365,6 +451,9 @@ pub fn validate_color(
             width.div_ceil(step) * height.div_ceil(step)
         }
     };
+    let cost = cost
+        .checked_add(spec.anchors.len() as u64)
+        .ok_or(SpecError::Budget)?;
     if cost > limits.max_detector_samples {
         return Err(SpecError::Budget);
     }
