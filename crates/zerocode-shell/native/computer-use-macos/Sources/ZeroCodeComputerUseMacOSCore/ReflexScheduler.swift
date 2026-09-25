@@ -1126,6 +1126,16 @@ public final class ReflexSession: @unchecked Sendable {
         public let ageNs: UInt64
     }
 
+    /// Where the newest evaluated frame came from — the eye's stream and
+    /// geometry, the run's hold on the hand and its plan: a reading of the run
+    /// is about this scene, and a newer capture of it is the same scene.
+    public struct Scene: Equatable, Sendable {
+        public let stream: UInt64
+        public let geometry: UInt64
+        public let owner: UInt64
+        public let plan: UInt64
+    }
+
     public struct Status: Equatable, Sendable {
         public let state: State
         public let runId: String
@@ -1151,6 +1161,7 @@ public final class ReflexSession: @unchecked Sendable {
         public let outcomes: [String: UInt64]
         /// The newest evaluated frame's admissible sightings, in plan order.
         public let sightings: [Sighting]
+        public let scene: Scene?
         public let lastCapture: UInt64?
         public let lastCaptureAgeNs: UInt64?
         public let monitor: InputMonitorHealth
@@ -1673,6 +1684,8 @@ public final class ReflexSession: @unchecked Sendable {
             receiptsAcknowledged: numbers.acknowledged,
             outcomes: outcomes,
             sightings: seen,
+            scene: latest.map { Scene(stream: $0.frame.stream_epoch, geometry: $0.frame.geometry_epoch,
+                                      owner: $0.frame.owner_epoch, plan: $0.frame.plan_epoch) },
             lastCapture: latest?.frame.capture_seq,
             lastCaptureAgeNs: latest?.frame.captured_host_ns.map { now >= $0 ? now - $0 : 0 },
             monitor: watch.health,

@@ -577,6 +577,9 @@ enum ReflexRuntimeHost {
                     "ageNs": sighting.ageNs,
                 ] as [String: Any]
             },
+            "scene": status.scene.map { scene in
+                ["stream": scene.stream, "geometry": scene.geometry, "owner": scene.owner, "plan": scene.plan] as [String: Any]
+            } ?? NSNull(),
             "lastCapture": nullable(status.lastCapture),
             "lastCaptureAgeNs": nullable(status.lastCaptureAgeNs),
             "monitor": monitor,

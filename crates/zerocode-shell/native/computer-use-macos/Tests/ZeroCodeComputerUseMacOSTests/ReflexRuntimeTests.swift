@@ -2867,6 +2867,28 @@ final class ReflexRunRoadTests: XCTestCase {
         XCTAssertEqual(gated.scene.sessions, 1, "one kernel session for one run, however often it was asked")
     }
 
+    /// A start answers while the run holds the hand: the start has returned, and
+    /// the helper's one hand is still the run's — a request cannot take it, an
+    /// acting verb is refused before it posts — until the run is stopped.
+    func test_one_hand_remains_owned_after_start_returns() throws {
+        let rig = HostRig()
+        defer { rig.restore() }
+        let answer = try HostStart(runId: "holding", plan: try HostRig.clickWire(), hand: rig.host.hand).start()
+        XCTAssertEqual(answer["state"] as? String, "running", "the start has returned")
+        XCTAssertEqual(rig.host.hand.snapshot.holder, .reflex("holding"), "the run holds the hand after it")
+        XCTAssertThrowsError(try rig.host.hand.acquire(.request)) { error in
+            XCTAssertEqual(error as? OperatorHand.Refusal, .busy(.reflex("holding")))
+        }
+        // The frames it reads are the run's, and its status names their scene.
+        rig.show(.ball(track: 5, box: LiveRig.box))
+        let scene = try XCTUnwrap(ReflexRuntimeHost.status(run: "holding")["scene"] as? [String: UInt64])
+        XCTAssertEqual(scene["stream"], 1)
+        XCTAssertEqual(scene["plan"], answer["planEpoch"] as? UInt64)
+        XCTAssertNotNil(scene["owner"])
+        _ = ReflexRuntimeHost.stop(run: "holding", reason: StopReason.request)
+        XCTAssertNil(rig.host.hand.snapshot.holder, "the stop gives it back")
+    }
+
     // MARK: 경계3 — receipts leave only when the window acknowledges them
 
     /// The collector reads a run's receipts after the last number it holds, as often as
