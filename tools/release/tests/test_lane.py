@@ -188,6 +188,31 @@ class Lane:
     def phase(self, name):
         return [p for p in self.status()["phases"] if p["name"] == name][0]
 
+    def report(self, *suites):
+        """A browser harness's report as the window runner prints it — each
+        suite's `SUITE  <name>` over its `PASS|FAIL  <check>  — <detail>`
+        lines (a suite of None has no line: a harness without suites) — for
+        the dry gate to print inside its `<harness>-browser-test` recipe
+        (RELEASE_STUB_GATE_ROOT_REPORT)."""
+        lines = []
+        for suite, checks in suites:
+            if suite is not None:
+                lines.append(f"SUITE  {suite}")
+            for verdict, check, detail in checks:
+                lines.append(f"{verdict}  {check}" + (f"  — {detail}" if detail else ""))
+        lines += ["", "0/0 passed"]
+        path = self.tmp / "report.txt"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def unlisted(self):
+        p = self.home / "unlisted.txt"
+        return p.read_text().splitlines() if p.exists() else []
+
+    def status_line(self):
+        r = subprocess.run(["bash", str(RELEASE / "status.sh")], env=self.env(), capture_output=True, text=True)
+        return r.stdout.strip()
+
 
 class LaneCase(unittest.TestCase):
     def setUp(self):
@@ -315,6 +340,9 @@ class Syntax(LaneCase):
         self.assertEqual(table["UPDATER_ARCH"], "aarch64")
         self.assertEqual(table["ZO_BUILD_TARGETS"].split(), ZO_BUILD_TARGETS)
         self.assertIn("python3", table["TOOLS"].split(), "latest.json is rendered by python3")
+        # t-9741: a UI check's suite is chosen by the runner's own variable; unlisted results live beside installed.json.
+        self.assertEqual(table["UI_SUITE_CHOOSER"], "WINDOW_SUITES")
+        self.assertEqual(Path(table["UNLISTED"]).parent, Path(table["INSTALLED"]).parent)
 
     def test_the_release_repo_is_the_feed_the_app_polls(self):
         # Every gate runs in a clone of the checkout, whose `origin` is a path
@@ -387,7 +415,8 @@ class Syntax(LaneCase):
         names = [l for l in lines if l and not l.startswith("#")]
         self.assertTrue(names, "flakes.txt names nothing")
         for n in names:
-            self.assertRegex(n, r"^(root|zo):[A-Za-z0-9_:]+$", n)
+            # A cargo test path under its gate, or a browser check by the start of its name.
+            self.assertRegex(n, r"^((root|zo):[A-Za-z0-9_:]+|ui:\S.*)$", n)
         self.assertIn(f"root:{FLAKE_ROOT}", names)
 
 
@@ -846,6 +875,160 @@ class Flakes(LaneCase):
         self.assertEqual(len([l for l in self.lane.stub_lines() if " solo " in l]), 2)
         self.assertNotIn("push", " ".join(self.lane.stub_lines()))
         self.assertFalse(self.lane.scratch(SHA_A).exists())
+
+
+
+PCV = "pane-conversation-view"
+TOGGLE = ("the active agent pane's toggle swaps its screen for its conversation in the same slot — "
+          "turns from the pane's own transcript")
+PCV_UNIT = f"ui:window/{PCV}"
+
+
+class UiFlakes(LaneCase):
+    """t-9741: a browser harness's FAIL line is judged by name, like a cargo
+    test's — its suite re-run alone x3 through the window runner's chooser
+    (the harness whole when it has no suites), a listed check (`ui:<the start
+    of its name>`) outside the unlisted cap, and an unlisted one named with its
+    result in the lane log and in unlisted.txt beside installed.json. Before,
+    any FAIL line re-ran the whole harness: eight minutes a run, 1769 checks
+    for another flake to land in."""
+
+    def gate_with(self, *suites, harness="window", **stubs):
+        self.lane.enqueue(SHA_A)
+        return self.lane.run(GATE_ROOT_RC=1, GATE_ROOT_HARNESS=harness,
+                             GATE_ROOT_REPORT=self.lane.report(*suites), **stubs)
+
+    def solos(self):
+        return [line.split(" ", 1)[1] for line in self.lane.stub_lines() if " solo " in line]
+
+    def parse(self, text):
+        log = self.lane.tmp / "gate.log"
+        log.write_text(text)
+        parse = 'eval "$(sed -n \'/^failed_tests()/,/^}/p\' "$0")"; failed_tests "$1"'
+        return subprocess.run(["bash", "-c", parse, str(LANE), str(log)],
+                              capture_output=True, text=True, check=True).stdout.splitlines()
+
+    def test_a_listed_ui_check_is_judged_by_its_suite_alone(self):
+        self.lane.flakes.write_text(f"root:{FLAKE_ROOT}\nui:the active agent pane's toggle swaps\n")
+        r = self.gate_with((PCV, [("PASS", "a check beside it", "{}"), ("FAIL", TOGGLE, '{"otherPaneQuiet":false}')]))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lane.status()["outcome"], "green")
+        self.assertEqual(self.solos(), [f"solo root {PCV_UNIT} run={i}" for i in (1, 2, 3)])
+        self.assertNotIn("unlisted red", r.stdout)
+        self.assertEqual(self.lane.unlisted(), [])
+
+    def test_an_unlisted_ui_check_is_judged_by_its_suite_and_its_result_is_kept(self):
+        # An empty `ui:` line lists nothing — it is the start of no name.
+        self.lane.flakes.write_text(f"root:{FLAKE_ROOT}\nui:\n")
+        r = self.gate_with((PCV, [("FAIL", TOGGLE, '{"otherPaneQuiet":false}')]))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lane.status()["outcome"], "green")
+        self.assertEqual(self.solos(), [f"solo root {PCV_UNIT} run={i}" for i in (1, 2, 3)])
+        named = f"root:{PCV_UNIT}:{TOGGLE}"
+        self.assertIn(f"unlisted red {named} — judged solo\n", r.stdout)
+        self.assertIn(f"unlisted red {named} — judged solo 3/3 green\n", r.stdout)
+        kept = self.lane.unlisted()
+        self.assertEqual(len(kept), 1, kept)
+        self.assertIn(f" {SHA_A[:8]} {named} — judged solo 3/3 green (out/gate-root-{SHA_A[:8]}.log)", kept[0])
+        self.assertIn("unlisted=1(unlisted.txt)", self.lane.status_line())
+
+    def test_an_unlisted_ui_check_that_fails_solo_is_red_and_its_result_is_kept(self):
+        r = self.gate_with((PCV, [("FAIL", TOGGLE, "why")]), SOLO_RCS="0 1")
+        self.assertNotEqual(r.returncode, 0)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "red")
+        self.assertIn(f"solo root {PCV_UNIT} run 2 rc=1", st["reason"])
+        kept = self.lane.unlisted()
+        self.assertEqual(len(kept), 1, kept)
+        self.assertIn(f"root:{PCV_UNIT}:{TOGGLE} — judged solo 1/3 red", kept[0])
+        self.assertNotIn("push", " ".join(self.lane.stub_lines()))
+
+    def test_the_checks_of_one_suite_rerun_that_suite_once_a_round(self):
+        r = self.gate_with((PCV, [("FAIL", TOGGLE, "a"), ("FAIL", "the card stands in the dock", "b")]),
+                           ("conversation-scroll", [("FAIL", "the reader owns the scroll", "c")]))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.solos(),
+                         [f"solo root ui:window/conversation-scroll run={i}" for i in (1, 2, 3)] +
+                         [f"solo root {PCV_UNIT} run={i}" for i in (1, 2, 3)])
+        self.assertEqual(len(self.lane.unlisted()), 3, "each unlisted check keeps its own line")
+
+    def test_ui_checks_count_by_name_against_the_unlisted_cap(self):
+        r = self.gate_with((PCV, [("FAIL", f"a red check {i}", "") for i in range(5)]))
+        self.assertNotEqual(r.returncode, 0)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "red")
+        self.assertIn(f"root:{PCV_UNIT}:a red check 4", st["reason"])
+        self.assertEqual(self.solos(), [])
+
+    def test_listed_ui_checks_stay_outside_the_unlisted_cap(self):
+        self.lane.flakes.write_text("ui:a listed check\n")
+        r = self.gate_with((PCV, [("FAIL", f"a listed check {i}", "") for i in range(5)]))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.solos(), [f"solo root {PCV_UNIT} run={i}" for i in (1, 2, 3)])
+
+    def test_a_check_of_a_harness_without_suites_reruns_that_harness_whole(self):
+        r = self.gate_with((None, [("FAIL", "a settings check", "d")]), harness="settings")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.solos(), [f"solo root harness:settings run={i}" for i in (1, 2, 3)])
+        self.assertIn("root:ui:settings:a settings check — judged solo 3/3 green", self.lane.unlisted()[0])
+
+    def test_a_harness_that_named_no_failed_check_is_still_judged_whole(self):
+        r = self.gate_with((PCV, [("PASS", "a check", "")]))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.solos(), [f"solo root harness:window run={i}" for i in (1, 2, 3)])
+
+    def test_a_check_is_named_by_harness_suite_and_name_and_only_where_its_recipe_failed(self):
+        text = "\n".join([
+            "==> verify recipe settings-browser-test",
+            "FAIL  a line of a recipe that passed  — why",
+            "<== verify recipe settings-browser-test rc=0 1s",
+            "==> verify recipe window-browser-test",
+            "SUITE  one",
+            "PASS  a green check",
+            "SUITE  two",
+            'FAIL  a red check: with a colon  — {"a":"b  — c"}',
+            "FAIL  a bare red check",
+            "",
+            "1/3 passed",
+            "error: recipe `window-browser-test` failed on line 1 with exit code 1",
+            "<== verify recipe window-browser-test rc=1 1s",
+        ]) + "\n"
+        self.assertEqual(self.parse(text), ["ui:window/two:a bare red check", "ui:window/two:a red check: with a colon"])
+
+    def test_the_lane_reads_the_report_the_window_runner_writes(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        script = (
+            "import { createRunner } from %s;\n"
+            "const runner = createRunner({ env: {}, argv: [] });\n"
+            "runner.suite('one', async ({ ok }) => ok('a green check', true, 'x'));\n"
+            "runner.suite('two', async ({ ok }) => ok('a red check: with a colon', false, 'a  — b'));\n"
+            "await runner.run({});\n"
+            "process.exit(runner.report() ? 1 : 0);\n"
+        ) % json.dumps((REPO / "ui" / "tests" / "window-runner.mjs").as_uri())
+        run = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        text = ("==> verify recipe window-browser-test\n" + run.stdout +
+                "error: recipe `window-browser-test` failed on line 1 with exit code 1\n")
+        self.assertEqual(self.parse(text), ["ui:window/two:a red check: with a colon"])
+
+    def test_a_suite_is_rerun_alone_through_the_runners_own_chooser(self):
+        bin_dir = self.lane.tmp / "bin-just"
+        bin_dir.mkdir()
+        said = self.lane.tmp / "just.txt"
+        (bin_dir / "just").write_text(f'#!/bin/sh\nprintf "%s|%s\\n" "${{WINDOW_SUITES-unset}}" "$*" >> "{said}"\n')
+        (bin_dir / "just").chmod(0o755)
+        solo = 'eval "$(bash "$0" --table)"; eval "$(sed -n \'/^ui_solo()/,/^}/p\' "$0")"; ui_solo "$1"'
+        env = {**self.lane.env(), "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+        for unit in ("window/pane-conversation-view", "window/a.b"):
+            subprocess.run(["bash", "-c", solo, str(LANE), unit], env=env, check=True)
+        self.assertEqual(said.read_text().splitlines(), [
+            "^pane-conversation-view$|window-browser-test",
+            "^a\\.b$|window-browser-test",
+        ])
+        runner = (REPO / "ui" / "tests" / "window-runner.mjs").read_text()
+        self.assertIn("env.WINDOW_SUITES", runner, "the chooser the lane names is the one the runner reads")
 
 
 class Queue(LaneCase):
