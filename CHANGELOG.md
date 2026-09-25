@@ -1,5 +1,61 @@
 # Changelog
 
+## [1.1.26] — 2026-09-26
+
+_since v1.1.25 (72 commits)_
+
+### feat
+- feat(reflex): the macOS desktop claims live reflex, and the window says whether a run is supported here apart from whether it is enabled — the capability table's macOS row alone turns `live_reflex` on (no surface claims an instant pointer), `capabilities` and `reflex-status` answer `liveReflex {supported, enabled}`, and the manual says a run is the macOS desktop's with the setting on (t-9205 ON)
+- feat(reflex): the window starts, reads and stops a live reflex run by its id — `reflex-start` passes a door and a helper that reads run policy 1 with its kernel and answers `{runId, state}` at once, `reflex-status` and `reflex-stop` carry `--run` to the helper's compare, one watch per run writes the receipts before it acknowledges them, and the reflex decision is asked in shadow about the run's typed state, every sent request counted and no answer applied (t-9205 R3)
+- feat(jev): the reflex decision is a record-only row of its own — `reflex_decide` (jevReflexDecide) offers off and shadow, stands at shadow under the one switch, never promotes, and asks one closed choice of `continue`, `pause` or `replan` about a live reflex run's typed state alone, its detector list cut at the plan's detector bound and each name at the 64-byte id bound, one lease on the wire (t-9205 S1a)
+- feat(reflex): the helper installs R5's kernel at launch and runs a plan under its policy — evaluator and hand at user-interactive QoS, the window's perception table unchanged, each run its own kernel session, one deadline on an alarm of its own that lets go first, spent quotas renewed without an admission, status/stop/receipts compared against the run they name under one lock, receipts kept until acknowledged and a full queue ending the run, the closing session's stop before exit (t-9205 K)
+- feat(reflex): the contract names a run's policy and reads one capability table — `max_run_ns` 120 s and a public 64-byte identifier bound in the one limits table, run policy v1 (`{renew, run_ns, version}`, canonical, version read first) decoded alike by Rust and Swift from shared cases, and `capability.json` the one table both sides read, whose `live_reflex` and `instant_pointer` columns stay false and whose `instant_pointer` alone now gates `--instant` (t-9205 C0)
+- feat(jev): wire the challenger arm into zo's spawn path — the draw off the spawn's thread, the day's share read, checked and reserved under one lock, the incumbent's first plan as its design, a blind comparison through the one door, the verifier's verdict as the receipt, and a role's model moving only when the seat stands and the standing passes (t-6263)
+
+### fix
+- fix(step-effort): the step effort label keeps its own two-hour wait, apart from the stall label's four, and the wait is pinned to rubric 1 (t-9087 r2, astra R-EFFORT-1)
+- fix(t-7538 r6): a put that ended is not a put whose record landed — the record says a put is under way before the home changes hands, and a home whose put never recorded its end is nobody's
+- fix(t-7538 r5): a hold nobody could read is not a hold that is not there, a selected read files its answer only under the row whose login it asked with, and a move seen complete is written down before its receipt and kept until a write lands
+- fix(t-7538 r4): an account switch rides t-7812's restore roads — its words through the goodbye's one note, its closed program held on the ledger's row against every road, and its yes, receipts and readings bound to the logins they were given for
+- fix(t-7538): a Claude account switch moves a pane only on the wall it stands at now, keeps every receipt until the ledger takes it, and never relaunches on a guess
+- fix(t-7538): clippy — the inactive account's reader is account_login and the Option view of it is the tests' own; aliases are compared with contains
+- fix(t-7538): a Claude account switch keeps every working pane and moves only a walled one, as the same worker, on the model and effort it really ran
+- fix(zo): a restore regrets a command only for what it changed — the path itself, a folder holding it, or a path under a folder it made or removed; a folder whose listing alone moved regrets nothing under it (t-9087 r2, astra R-GUARD-1)
+- fix(jev): the dashboard says where it counts — the checkout by name, the projects with zo records when it has none, every project summed on one switch, and the features this computer keeps in one place marked (t-9091)
+- fix(orchestration): a window that has said its goodbye leaves its sleepers to the next window — neither the grace nor a reseat (t-9091)
+- fix(zo): a restore regrets the command that changed what it put back, not every command that named a folder holding it; the command guard's rubric moves 1 -> 2 (t-9087)
+- fix(summon): a summons whose model was pinned carries no mark, and the rubric moves 4 -> 5 (t-9087)
+- fix(stall): the stall label waits four hours for what followed a silence, and the rubric moves 3 -> 4 (t-9087)
+- fix(jev): a judgment window's marks reach back to hold the sample floor — a seat whose marks are sparser than its requests is judged on its marks (t-9087)
+- fix: the standing reader's doc names private helpers as code, and the skills answer book has a name (t-6877 round 2)
+- fix(jev): keep challenger labels bound across failed reads and start in shadow (t-6263 r6)
+- fix(jev): a verifier's watch stamps every directory a file of its tree could be created in — the root of a tree that holds nothing, and every one git tracks nothing in that the ignores do not leave out — and a strike a reader owed is held and written again until the ledger shows it back, so neither a file come and gone nor a strike that failed or wrote nothing gives a contradicted label back (t-6263 r5)
+- fix(jev): a verifier's watch stamps every file its tree is written from — HEAD's as well as the index's, bound to the HEAD it saw and to every path the tree holds — a label stands off the record only on the evidence it keeps and never against a verdict still on it, a contradiction a reader sees is struck beside the label so a record that forgets gives nothing back, and every row that asked names the rubric it asked by (t-6263 r4)
+- fix(jev): a verdict names the source its verifier read from its start to the end of its turns, carries it whenever the comparison lands, and a label that names no source — or one the record contradicts — is no label to any reader (t-6263 r3)
+- fix(jev): the challenger arm's words leave only as the door clears them when they leave, its day book and a dead holder's lock lose no share, the router learns from its samples only while the seat stands behind them, a receipt is the verdict on the source the attempt handed in, every label is followed by its sample once, and the whole road is proven through the spawn itself (t-6263 r2)
+
+### docs
+- docs(jev): the every-project sum's round size carries both measurements of one zo run (t-9091)
+- docs(orchestration): the grace's refusal is named, not linked, from a public doc (t-9091)
+
+### release
+- release: the stuck-shell test joins the flake list — it measures a 5 s wall clock on the machine and read past it once in three loaded full runs, green solo ×3 (t-8938 review)
+
+### jev
+- jev: the challenger's row asks the rubric its arm stamps on every row, so a changed question opens the arm's window anew and the words before judge nothing of it (t-6877 round 5)
+- jev: a repeated name guesses no asking, the text reader takes the rows reader's step, and a split seat keeps its person's word (t-6877 round 3)
+- jev: a label grades one request and inherits its rubric and version; a seat is one question (t-6877 round 2)
+- jev: a seat is judged on one rubric's series and stands only on the words it asks now (t-6877)
+
+### orchestration
+- orchestration: an unanswered question no longer silences its asker's mail pointer — a named ask retried while its first wait is out joins that question, a pane is held only while it waits mid-turn on its own question, and the three load-flaky tests wait on a clock they stand still instead of the machine's (t-8938)
+
+### tools
+- tools(ask-wait-replay): `account_switched` is the ledger's own kind too, and neither an answer nor an ending — t-7538 adds it to `MessageKind::is_the_ledgers_own` on a main whose replay (t-6740) keeps a copy of that list, so the tools gate's source contract failed on the rebased branch (12 tests, 1 failure, the missing word); an account switch keeps the worker id, dispatch and conversation, so `ending_of` is unchanged (t-7538 integration on 22e3084c)
+
+### ui
+- ui: skill search and skill suggestion each say what they send, in every language (t-6877 round 2)
+
 ## [1.1.25] — 2026-09-25
 
 _since v1.1.24 (85 commits)_
