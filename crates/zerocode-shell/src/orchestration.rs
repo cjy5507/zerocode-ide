@@ -825,35 +825,48 @@ pub(crate) fn forget_switch_mark(worker: &str) {
 
 /* ---- a closed pane whose program was not seen to leave (t-7538, R3) ----- */
 
+/// The ledger the holds are read from (t-7538, astra R3-1): `Ok(None)` is a
+/// window with no durable ledger at all — nothing on its disk can hold a
+/// conversation — and `Err` is one that has a ledger it cannot read now: a
+/// boot that stood down beside it, or a runtime whose image or projection
+/// did not answer. The two are never the same answer: a hold nobody could
+/// read is not a hold that is not there.
+fn holds_ledger() -> Result<Option<(LiveRuntime, Arc<Ledger>)>, String> {
+    let Some(held) = runtime() else {
+        return ledger_left_unread().map_or(Ok(None), Err);
+    };
+    let image = held
+        .actor
+        .view()
+        .map_err(|why| format!("the ledger did not answer ({why})"))?;
+    let ledger = cached_ledger(&held, &image)
+        .map_err(|why| format!("the ledger's rows could not be read ({why})"))?;
+    Ok(Some((held, ledger)))
+}
+
 /// Whether a road may open `worker`'s conversation again: yes when its row
 /// holds no program a switch's close has not seen leave, or when `seen` says
 /// that program is gone now — which the ledger is told, and the hold goes.
-/// A program still there, or a ledger that will not write the lift,
-/// answers no, and the next look asks again. Every road that brings a
-/// sleeper back asks here first — the ledger's reseat with its host, a door
-/// with its window — and the ledger itself refuses the seat and the grace
-/// while the hold stands.
+/// A program still there, a ledger that cannot be read, or one that will
+/// not write the lift, answers no, and the next look asks again. Every road
+/// that brings a sleeper back asks here first — the ledger's reseat with its
+/// host, a door with its window — and the ledger itself refuses the seat and
+/// the grace while the hold stands.
 pub(crate) fn exit_hold_lifted(
     worker: &str,
     seen: &dyn Fn(&crate::agent_teams::ExitWitness) -> bool,
 ) -> bool {
-    let Some(held) = runtime() else {
-        return true;
+    let (held, ledger) = match holds_ledger() {
+        Ok(Some(read)) => read,
+        Ok(None) => return true,
+        Err(_) => return false,
     };
-    let witness = {
-        let Ok(image) = held.actor.view() else {
-            return false;
-        };
-        let Ok(ledger) = cached_ledger(&held, &image) else {
-            return false;
-        };
-        ledger
-            .runs()
-            .iter()
-            .find_map(|run| run.worker(worker))
-            .and_then(|row| row.exit_unconfirmed.clone())
-    };
-    let Some(witness) = witness else {
+    let Some(witness) = ledger
+        .runs()
+        .iter()
+        .find_map(|run| run.worker(worker))
+        .and_then(|row| row.exit_unconfirmed.clone())
+    else {
         return true;
     };
     if !seen(&witness) {
@@ -884,34 +897,37 @@ pub(crate) fn exit_hold_lifted(
 /// program is not seen gone yet, if any — asked by a door before it opens
 /// that conversation, whether or not it would seat the worker (t-7538,
 /// astra R3): a second process on one transcript is the same fault from
-/// every door. Answers `None` once `seen` lifts every such hold.
+/// every door. Answers `Ok(None)` once `seen` lifts every such hold, and
+/// for a window with no durable ledger at all.
+///
+/// A ledger this window cannot read answers `Err` with why (astra R3-1):
+/// the door opens nothing — no launch built, no process, no words — and a
+/// look once the ledger reads again asks the same question.
 pub(crate) fn held_by_an_unseen_exit(
     agent: &str,
     session_id: &str,
     seen: &dyn Fn(&crate::agent_teams::ExitWitness) -> bool,
-) -> Option<String> {
-    let held = runtime()?;
-    let holding: Vec<String> = {
-        let image = held.actor.view().ok()?;
-        let ledger = cached_ledger(&held, &image).ok()?;
-        ledger
-            .runs()
-            .iter()
-            .flat_map(|run| run.workers.iter())
-            .filter(|worker| {
-                worker.exit_unconfirmed.is_some()
-                    && worker.agent == agent
-                    && worker
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| session.id == session_id)
-            })
-            .map(|worker| worker.id.clone())
-            .collect()
+) -> Result<Option<String>, String> {
+    let Some((_, ledger)) = holds_ledger()? else {
+        return Ok(None);
     };
-    holding
+    let holding: Vec<String> = ledger
+        .runs()
+        .iter()
+        .flat_map(|run| run.workers.iter())
+        .filter(|worker| {
+            worker.exit_unconfirmed.is_some()
+                && worker.agent == agent
+                && worker
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.id == session_id)
+        })
+        .map(|worker| worker.id.clone())
+        .collect();
+    Ok(holding
         .into_iter()
-        .find(|worker| !exit_hold_lifted(worker, seen))
+        .find(|worker| !exit_hold_lifted(worker, seen)))
 }
 
 /// One Claude worker standing at its quota wall — as the ledger holds it
@@ -2908,6 +2924,25 @@ pub(crate) fn free_bytes_at(path: &Path) -> Option<u64> {
 
 const LEDGER_FILE: &str = "orchestration.json";
 
+/// The durable authority's directory under the orchestration data root, and
+/// its store's file in it — one spelling for the boot that opens the store
+/// and for the look that asks whether one is on disk (t-7538, astra R3-1).
+const AUTHORITY_DIR: &str = "authority";
+const AUTHORITY_STORE_FILE: &str = "authority.sqlite";
+
+/// Whether a durable ledger is on disk under `root` — the legacy file or
+/// the authority store — or may be: a look that cannot tell is not an
+/// absence (t-7538, astra R3-1). A window whose boot stood down beside one
+/// cannot read the holds it keeps; a root with neither holds nothing.
+fn ledger_on_disk(root: &Path) -> bool {
+    [
+        root.join(LEDGER_FILE),
+        root.join(AUTHORITY_DIR).join(AUTHORITY_STORE_FILE),
+    ]
+    .iter()
+    .any(|path| !crate::cmd::board::definitely_absent(path))
+}
+
 /// How long a second spawn waits in line while the journal walks one pane,
 /// and the step it waits in. Cutting a pane is a few host calls — the line
 /// moves in milliseconds — so the ceiling is for a walk that has died with
@@ -2987,28 +3022,51 @@ fn read_ledger(path: &Path) -> Loaded {
     Loaded::Read(Box::new(read), named)
 }
 
+/// What a boot that could not stand the authority up left behind: the
+/// sentence every road answers with, and — when a durable ledger stays on
+/// disk that this window could not read — the same sentence as the reason a
+/// door cannot say what that ledger holds (t-7538, astra R3-1).
+#[derive(Debug, Clone)]
+struct StoodDown {
+    said: String,
+    unread: Option<String>,
+}
+
 /// Why orchestration is unavailable in this window, or `None` if it is not.
 ///
 /// Set once at boot by [`open`] and never cleared, because nothing this window
 /// can do repairs the file — the person has to fix or move it and start again,
 /// and a window that quietly recovered halfway through would be a window with
 /// half a ledger.
-static UNAVAILABLE: Mutex<Option<String>> = Mutex::new(None);
+static UNAVAILABLE: Mutex<Option<StoodDown>> = Mutex::new(None);
 
-/// What every road asks before it plans anything.
+/// The boot's word, if it stood down.
 ///
 /// Per-THREAD in tests, because a process-global switch would put every other
 /// test sharing this binary into a degraded window, and one of them would
-/// duly fail.
-fn unavailable() -> Option<String> {
+/// duly fail. A boot a test runs for real records its word there too
+/// ([`stand_down`]).
+fn stood_down() -> Option<StoodDown> {
     #[cfg(test)]
-    if let Some(pretend) = tests::pretend_unavailable() {
-        return Some(pretend);
+    if let Some(here) = tests::stood_down_here() {
+        return Some(here);
     }
     UNAVAILABLE
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .clone()
+}
+
+/// What every road asks before it plans anything.
+fn unavailable() -> Option<String> {
+    stood_down().map(|stood| stood.said)
+}
+
+/// Why this window cannot read a durable ledger that is on its disk — the
+/// boot stood down beside it — or `None`: a window whose ledger stands, or
+/// one with no ledger to read at all (t-7538, astra R3-1).
+fn ledger_left_unread() -> Option<String> {
+    stood_down().and_then(|stood| stood.unread)
 }
 
 /// The whole of what a caller is told, and it says all three things.
@@ -3057,10 +3115,22 @@ fn authority_is_unavailable(why: &str) -> String {
     )
 }
 
-/// Refuse to orchestrate in this window, with the sentence that says why.
-fn stand_down(local_data_root: &Path, said: String) {
-    *UNAVAILABLE.lock().unwrap_or_else(|held| held.into_inner()) = Some(said.clone());
+/// Refuse to orchestrate in this window, with the sentence that says why —
+/// and whether a durable ledger stays on disk under `root` that this window
+/// could not read, which a door asks before it opens a conversation that
+/// ledger may hold (t-7538, astra R3-1).
+fn stand_down(local_data_root: &Path, root: &Path, said: String) {
     crate::note_window_event(local_data_root, &format!("orchestration: {said}"));
+    let stood = StoodDown {
+        unread: ledger_on_disk(root).then(|| said.clone()),
+        said,
+    };
+    #[cfg(test)]
+    tests::stand_down_here(stood);
+    #[cfg(not(test))]
+    {
+        *UNAVAILABLE.lock().unwrap_or_else(|held| held.into_inner()) = Some(stood);
+    }
 }
 
 /// The environment variable that moves this window's orchestration files.
@@ -3128,7 +3198,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
         Loaded::Fresh => None,
         Loaded::Read(read, named) => Some(Box::new((read.export(), named))),
         Loaded::Unreadable(why) => {
-            stand_down(local_data_root, ledger_is_unavailable(&why));
+            stand_down(local_data_root, &root, ledger_is_unavailable(&why));
             // And nothing else — nothing is written over a file this window
             // refuses to trust.
             return Restarted::default();
@@ -3137,6 +3207,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
     let Some(epoch_seed) = crate::hooks::random_token() else {
         stand_down(
             local_data_root,
+            &root,
             authority_is_unavailable("this window could not mint a host epoch"),
         );
         return Restarted::default();
@@ -3150,10 +3221,11 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
     /* The store demands a private parent (its preflight refuses anything
      * else), and the app's data root is not one — so the authority gets a
      * directory of its own, made private before the store ever opens it. */
-    let vault = root.join("authority");
+    let vault = root.join(AUTHORITY_DIR);
     if let Err(why) = std::fs::create_dir_all(&vault) {
         stand_down(
             local_data_root,
+            &root,
             authority_is_unavailable(&format!("its directory could not be made ({why})")),
         );
         return Restarted::default();
@@ -3164,6 +3236,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
         if let Err(why) = std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o700)) {
             stand_down(
                 local_data_root,
+                &root,
                 authority_is_unavailable(&format!(
                     "its directory could not be made private ({why})"
                 )),
@@ -3171,7 +3244,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
             return Restarted::default();
         }
     }
-    let authority = vault.join("authority.sqlite");
+    let authority = vault.join(AUTHORITY_STORE_FILE);
     let store = match WorkflowStore::open(&authority) {
         Ok(store) => {
             let _ = AUTHORITY_STORE.set(authority);
@@ -3180,6 +3253,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
         Err(why) => {
             stand_down(
                 local_data_root,
+                &root,
                 authority_is_unavailable(&format!("its SQLite store could not be opened ({why})")),
             );
             return Restarted::default();
@@ -3206,6 +3280,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
         Err(why) => {
             stand_down(
                 local_data_root,
+                &root,
                 authority_is_unavailable(&format!("its runtime could not start ({why})")),
             );
             return Restarted::default();
@@ -3228,6 +3303,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
         Err(why) => {
             stand_down(
                 local_data_root,
+                &root,
                 authority_is_unavailable(&format!("its runtime could not be read ({why})")),
             );
             return Restarted::default();
@@ -3250,6 +3326,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
         }) {
             stand_down(
                 local_data_root,
+                &root,
                 authority_is_unavailable(&format!(
                     "an effect from the last window could not be reconciled ({why})"
                 )),
@@ -3262,6 +3339,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
         Err(why) => {
             stand_down(
                 local_data_root,
+                &root,
                 authority_is_unavailable(&format!(
                     "the last window's terminals could not be settled ({why})"
                 )),

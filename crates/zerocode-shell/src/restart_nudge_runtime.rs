@@ -476,6 +476,17 @@ pub(super) fn held_line(term: TermId, agent: &str, worker: &str) -> String {
     )
 }
 
+/// The line a door leaves when it cannot read whether a conversation is
+/// held (t-7538, astra R3-1): the ledger is on disk and does not answer, so
+/// nothing is opened on a guess.
+pub(super) fn unread_hold_line(term: TermId, agent: &str, why: &str) -> String {
+    format!(
+        "term {term} did not resume {agent}: the ledger could not be read to see whether a \
+         program a switch closed still holds this conversation ({why}); it opens once the \
+         ledger reads again"
+    )
+}
+
 /// What a wake's receipt watch needs from the window it waits in (t-7812):
 /// the table its row sits in, a composer to place the one fallback at, and
 /// the log. The product's is the window's own state; a test's is a fake

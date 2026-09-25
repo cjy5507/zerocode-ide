@@ -706,12 +706,17 @@ fn read_book(dir: &Path) -> Result<JournalBook, String> {
         .map_err(|why| why.to_string())
 }
 
-/// The book to add to or settle: a file this window cannot read is not
-/// written over — it is set aside under its own name, for a person to
-/// look at, and the log says where (astra R4). A file that cannot even be
-/// set aside refuses the switch.
+/// The book to add to or settle: the one this window could not write, when
+/// it holds one (astra R4-1) — it is newer than the file — and otherwise
+/// the file. A file this window cannot read is not written over — it is
+/// set aside under its own name, for a person to look at, and the log says
+/// where (astra R4). A file that cannot even be set aside refuses the
+/// switch.
 fn open_book(doors: &dyn SwitchDoors) -> Result<JournalBook, String> {
     let dir = doors.journal_dir();
+    if let Some(held) = unwritten_book(&dir) {
+        return Ok(held);
+    }
     match read_book(&dir) {
         Ok(book) => Ok(book),
         Err(why) => {
@@ -732,7 +737,69 @@ fn open_book(doors: &dyn SwitchDoors) -> Result<JournalBook, String> {
     }
 }
 
+/// The book this window last meant to write and could not, by journal
+/// directory (t-7538, astra R4-1): read in place of the file, and written
+/// again on every look, until a write lands. A move seen complete is not
+/// given up because one replace failed. A window that ends first takes it
+/// along — the reason a completion is also written down before its receipt
+/// is asked for ([`settle`]), not only after.
+fn unwritten_books() -> &'static Mutex<HashMap<PathBuf, JournalBook>> {
+    static HELD: std::sync::OnceLock<Mutex<HashMap<PathBuf, JournalBook>>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn unwritten_book(dir: &Path) -> Option<JournalBook> {
+    unwritten_books()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(dir)
+        .cloned()
+}
+
+/// `book`, left for the next look to write — or nothing left, once a write
+/// landed.
+fn leave_unwritten(dir: &Path, book: Option<&JournalBook>) {
+    let mut held = unwritten_books()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match book {
+        Some(book) => {
+            held.insert(dir.to_path_buf(), book.clone());
+        }
+        None => {
+            held.remove(dir);
+        }
+    }
+}
+
+/// A new process of the window: nothing it could not write survives it.
+#[cfg(test)]
+pub(crate) fn a_new_process(dir: &Path) {
+    leave_unwritten(dir, None);
+}
+
+/// Write the book down. One that is not written stays this window's book
+/// to read and write again (astra R4-1): what it records happened.
 fn write_book(dir: &Path, book: &JournalBook) -> Result<(), String> {
+    let written = replace_book(dir, book);
+    leave_unwritten(dir, written.as_ref().err().map(|_| book));
+    written
+}
+
+/// Write the book with a new switch in it, before that switch's first
+/// effect. A refusal refuses the switch — it never began — so nothing of
+/// this book is kept to write later; what an earlier look left unwritten
+/// stays as it was.
+fn write_before_the_first_effect(dir: &Path, book: &JournalBook) -> Result<(), String> {
+    let written = replace_book(dir, book);
+    if written.is_ok() {
+        leave_unwritten(dir, None);
+    }
+    written
+}
+
+fn replace_book(dir: &Path, book: &JournalBook) -> Result<(), String> {
     if book.switches.is_empty() {
         return match std::fs::remove_file(journal_file(dir)) {
             Err(why) if why.kind() != std::io::ErrorKind::NotFound => {
@@ -801,24 +868,74 @@ struct Settled {
     refused: Option<String>,
 }
 
-/// Settle what `journal` owes, against the ledger as it stands (astra R4).
-///
-/// Two kinds of pane are owed, and they are told apart. A move still
-/// PENDING — rested, not yet seen in a new pane — is read against the
-/// ledger: live again in ANOTHER pane, on the same attempt and in the same
-/// conversation, it is complete, and where it continues is written down
-/// once, there and then; still asleep, it stays owed (the ledger holds its
-/// conversation while its old program may run); never rested by this
-/// switch, ended, or on another attempt or conversation, it was not this
-/// switch's move, and goes, said in the log. A move already seen COMPLETE is
-/// not read against the worker again: its receipt is sent as it was written
-/// down, whatever the worker has done since — ended, or moved on to another
-/// pane — because none of that says this switch did not move it. The
-/// default's receipt is owed once the selection landed, and counts what has
-/// moved and what is still asleep. A receipt the ledger refused stays in the
-/// journal: nothing is taken out but what the ledger accepted.
-fn settle(
-    host: &dyn Host,
+/// Look at `journal`'s moves still pending, against the ledger as it
+/// stands (astra R4). A move rested by this switch and live again in
+/// ANOTHER pane, on the same attempt and in the same conversation, is
+/// complete: where it continues is written on it once, there and then, and
+/// the answer is `true` — the caller writes the book down before any
+/// receipt is asked for (astra R4-1), so a completion never rides on the
+/// receipt's fate or on the write after it. Still asleep, it stays pending
+/// (the ledger holds its conversation while its old program may run).
+/// Never rested by this switch, ended, or on another attempt or
+/// conversation, it was not this switch's move, and goes, said in the log.
+/// A move already seen complete is not read against the worker again —
+/// what the worker does next, ending or moving on to another pane, is not
+/// what this switch did.
+fn observe_moves(host: &dyn Host, doors: &dyn SwitchDoors, journal: &mut Journal) -> bool {
+    let key = journal.key.clone();
+    let mut completed = 0;
+    journal.panes.retain_mut(|pane| {
+        if pane.to_pane.is_some() {
+            return true;
+        }
+        let now = crate::orchestration::worker_now(&pane.worker);
+        let same = pane.rested
+            && now.as_ref().is_some_and(|now| {
+                now.dispatch.as_deref() == Some(pane.dispatch.as_str())
+                    && now.session.as_deref() == Some(pane.session.as_str())
+            });
+        match now {
+            Some(now) if same && now.state == WorkerState::Sleeping => true,
+            Some(now) if same && now.state.is_live() && now.pane != pane.from_pane => {
+                completed += 1;
+                pane.to_account = now.term.and_then(|term| host.pane_account(term));
+                pane.to_pane = Some(now.pane);
+                true
+            }
+            _ => {
+                doors.log(&format!(
+                    "account-switch: journal {key} lets worker {} go — this switch never rested \
+                     it, or it ended, or it carries another attempt or conversation now: not \
+                     this switch's move",
+                    pane.worker
+                ));
+                false
+            }
+        }
+    });
+    journal.moved += completed;
+    completed > 0
+}
+
+/// Write down the moves a look saw complete, before any receipt is asked
+/// for (astra R4-1). A journal that refuses keeps them in this window's
+/// book, written again on the next look ([`write_book`]).
+fn write_down_moves(doors: &dyn SwitchDoors, book: &JournalBook) {
+    if let Err(why) = write_book(&doors.journal_dir(), book) {
+        doors.log(&format!(
+            "account-switch: the moves seen complete stay in this window until the journal \
+             takes them — {why}"
+        ));
+    }
+}
+
+/// Send what `journal` owes (astra R4). A completed move's receipt is sent
+/// as it was written down, whatever the worker has done since; a pending
+/// one owes nothing yet. The default's receipt is owed once the selection
+/// landed, and counts what has moved and what is still asleep. A receipt
+/// the ledger refused stays in the journal: nothing is taken out but what
+/// the ledger accepted.
+fn send_receipts(
     doors: &dyn SwitchDoors,
     journal: &mut Journal,
     active: Option<&str>,
@@ -826,40 +943,16 @@ fn settle(
 ) -> Settled {
     let mut settled = Settled::default();
     let mut kept = Vec::new();
-    for mut pane in std::mem::take(&mut journal.panes) {
-        if pane.to_pane.is_none() {
-            let now = crate::orchestration::worker_now(&pane.worker);
-            let same = pane.rested
-                && now.as_ref().is_some_and(|now| {
-                    now.dispatch.as_deref() == Some(pane.dispatch.as_str())
-                        && now.session.as_deref() == Some(pane.session.as_str())
-                });
-            match now {
-                Some(now) if same && now.state == WorkerState::Sleeping => {
-                    kept.push(pane);
-                    continue;
-                }
-                Some(now) if same && now.state.is_live() && now.pane != pane.from_pane => {
-                    journal.moved += 1;
-                    pane.to_account = now.term.and_then(|term| host.pane_account(term));
-                    pane.to_pane = Some(now.pane);
-                }
-                _ => {
-                    doors.log(&format!(
-                        "account-switch: journal {} lets worker {} go — this switch never \
-                         rested it, or it ended, or it carries another attempt or conversation \
-                         now: not this switch's move",
-                        journal.key, pane.worker
-                    ));
-                    continue;
-                }
-            }
-        }
+    for pane in std::mem::take(&mut journal.panes) {
+        let Some(to_pane) = pane.to_pane.clone() else {
+            kept.push(pane);
+            continue;
+        };
         let mut receipt = journal.receipt(
             AccountMove::Pane {
                 worker: pane.worker.clone(),
                 from_pane: pane.from_pane.clone(),
-                to_pane: pane.to_pane.clone().unwrap_or_default(),
+                to_pane,
             },
             journal.pane_key(&pane.worker),
             1,
@@ -904,13 +997,33 @@ fn settle(
     settled
 }
 
+/// Settle `journal`, one switch of `book`: the moves it sees complete for
+/// the first time are written down in the book first (astra R4-1), then
+/// what it owes is sent. The caller writes the book after.
+fn settle(
+    host: &dyn Host,
+    doors: &dyn SwitchDoors,
+    book: &mut JournalBook,
+    journal: &mut Journal,
+    active: Option<&str>,
+    now_ms: i64,
+) -> Settled {
+    if observe_moves(host, doors, journal) {
+        keep_in(book, journal);
+        write_down_moves(doors, book);
+    }
+    send_receipts(doors, journal, active, now_ms)
+}
+
 /// Finish what the journal left owed — every switch in it, against the
-/// ledger as it stands — and write the book back only if that changed it:
-/// a look over a journal with nothing to settle writes nothing. Answers
+/// ledger as it stands — and write the book back only if that changed it,
+/// or if it is a book an earlier look could not write (astra R4-1): a look
+/// over a written journal with nothing to settle writes nothing. Answers
 /// the receipts written. The caller holds [`SWITCH_LINE`] (or is a test
 /// that owns the journal).
 pub(crate) fn reconcile(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64) -> usize {
     let dir = doors.journal_dir();
+    let owed_a_write = unwritten_book(&dir).is_some();
     let mut book = match open_book(doors) {
         Ok(book) => book,
         Err(why) => {
@@ -919,6 +1032,9 @@ pub(crate) fn reconcile(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64) -
         }
     };
     if book.switches.is_empty() {
+        if owed_a_write && let Err(why) = write_book(&dir, &book) {
+            doors.log(&format!("account-switch: {why}"));
+        }
         return 0;
     }
     let before = book.clone();
@@ -926,9 +1042,16 @@ pub(crate) fn reconcile(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64) -
         .situation(now_ms)
         .ok()
         .and_then(|situation| situation.active);
+    let mut completed = false;
+    for journal in &mut book.switches {
+        completed |= observe_moves(host, doors, journal);
+    }
+    if completed {
+        write_down_moves(doors, &book);
+    }
     let mut written = 0;
     for journal in &mut book.switches {
-        let settled = settle(host, doors, journal, active.as_deref(), now_ms);
+        let settled = send_receipts(doors, journal, active.as_deref(), now_ms);
         written += settled.written;
         if let Some(why) = settled.refused {
             doors.log(&format!(
@@ -938,7 +1061,7 @@ pub(crate) fn reconcile(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64) -
         }
     }
     book.switches.retain(Journal::owes);
-    if book != before
+    if (book != before || owed_a_write)
         && let Err(why) = write_book(&dir, &book)
     {
         doors.log(&format!("account-switch: {why}"));
@@ -1096,7 +1219,7 @@ pub(crate) fn apply_with(
     // switch still owes — never over it.
     let mut book = open_book(doors)?;
     keep_in(&mut book, &journal);
-    write_book(&dir, &book)?;
+    write_before_the_first_effect(&dir, &book)?;
     // ① The default, through the same verified select the picker uses, so
     // the next launch runs as `to` or nothing moved. A refusal is
     // remembered against `to`, and the next plan leaves it out for one
@@ -1168,10 +1291,19 @@ pub(crate) fn apply_with(
         ));
         panes.push(moved);
     }
-    // ③ The receipts, through the one settling a later look uses: a moved
-    // pane's, then the default's with the count of what moved and what is
-    // still asleep. What the ledger refuses stays owed in the journal.
-    let settled = settle(host, doors, &mut journal, to.as_deref(), doors.now_ms());
+    // ③ The receipts, through the one settling a later look uses: a move
+    // seen complete is written down first (astra R4-1), then a moved pane's
+    // receipt, then the default's with the count of what moved and what is
+    // still asleep. What the ledger refuses stays owed in the journal, and a
+    // journal that refuses a write stays this window's to write again.
+    let settled = settle(
+        host,
+        doors,
+        &mut book,
+        &mut journal,
+        to.as_deref(),
+        doors.now_ms(),
+    );
     keep_in(&mut book, &journal);
     let mut receipt_error = settled.refused;
     if let Err(why) = write_book(&dir, &book) {
@@ -1444,7 +1576,7 @@ pub(crate) fn switch_by_person(
     };
     let mut book = open_book(doors)?;
     keep_in(&mut book, &journal);
-    write_book(&dir, &book)?;
+    write_before_the_first_effect(&dir, &book)?;
     if let Err(why) = doors.select(to) {
         book.switches.retain(|held| held.key != journal.key);
         if let Err(unwritten) = write_book(&dir, &book) {
@@ -1455,7 +1587,7 @@ pub(crate) fn switch_by_person(
     doors.selected(to, now_ms);
     journal.landed = true;
     let default_ms = began.elapsed().as_millis();
-    let settled = settle(host, doors, &mut journal, to, doors.now_ms());
+    let settled = settle(host, doors, &mut book, &mut journal, to, doors.now_ms());
     keep_in(&mut book, &journal);
     let mut receipt_error = settled.refused;
     if let Err(why) = write_book(&dir, &book) {

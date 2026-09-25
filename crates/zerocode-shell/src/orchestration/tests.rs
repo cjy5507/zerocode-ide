@@ -1856,8 +1856,9 @@ fn aliased_terms_keep_the_existing_last_worker_winner() {
 }
 
 thread_local! {
-    /// The sentence a degraded window answers with, for the tests that
-    /// need one.
+    /// The word a degraded window answers with, for the tests that need
+    /// one — and where a boot a test runs for real records its own
+    /// ([`super::stand_down`]).
     ///
     /// Per-thread because the real flag is process-global — a window has
     /// one boot — and a test that set it would put every other test in
@@ -1866,13 +1867,18 @@ thread_local! {
     /// hand-rolled save it reached into: a disk that refuses is injected
     /// at the STORE now (a trigger in a private window's own database),
     /// which is the same seam the actor's own battery uses.
-    static UNAVAILABLE_HERE: std::cell::RefCell<Option<String>> =
+    static UNAVAILABLE_HERE: std::cell::RefCell<Option<super::StoodDown>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// What a degraded window would say on THIS thread, if it is one.
-pub(super) fn pretend_unavailable() -> Option<String> {
+pub(super) fn stood_down_here() -> Option<super::StoodDown> {
     UNAVAILABLE_HERE.with(|held| held.borrow().clone())
+}
+
+/// A boot this test ran stood down: its word, on this thread.
+pub(super) fn stand_down_here(stood: super::StoodDown) {
+    UNAVAILABLE_HERE.with(|held| *held.borrow_mut() = Some(stood));
 }
 
 /// Make this window degraded, and give it back on the way out.
@@ -1880,11 +1886,37 @@ struct Degraded;
 
 impl Degraded {
     fn begin() -> Self {
-        UNAVAILABLE_HERE.with(|held| {
-            *held.borrow_mut() = Some(super::ledger_is_unavailable(
-                "its 12 bytes are not a ledger this window can read (test)",
-            ));
+        // The sentence a boot says of a ledger file on its disk it cannot
+        // read — so the same file is a durable ledger left unread.
+        let said = super::ledger_is_unavailable(
+            "its 12 bytes are not a ledger this window can read (test)",
+        );
+        stand_down_here(super::StoodDown {
+            unread: Some(said.clone()),
+            said,
         });
+        Self
+    }
+}
+
+impl Degraded {
+    /// A boot of a window over `root`, run for real — the product's own
+    /// `open` — that stood down (t-7538, astra R3-1): its word stays on
+    /// this thread until the guard goes.
+    fn booted_over(root: &Path) -> Self {
+        assert!(
+            std::env::var_os(super::ORCHESTRATION_DATA_ROOT_ENV).is_none(),
+            "the boot would read another root than the one it was given"
+        );
+        assert_eq!(
+            super::open_with_headroom(
+                root,
+                clock(),
+                super::HeadroomSource::Fixed(TEST_HEADROOM_BYTES),
+            ),
+            Restarted::default()
+        );
+        assert!(stood_down_here().is_some(), "the boot stood the ledger up");
         Self
     }
 }
@@ -19486,6 +19518,9 @@ struct Switching {
     /// Run once inside the next wall observation at the rest's fence,
     /// before its commit — the world moving at the moment of use.
     during_observation: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Run once as the next pane closes — after the rest was written down,
+    /// before the pane the move opens exists (astra R4-1).
+    at_the_close: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Switching {
@@ -19506,6 +19541,7 @@ impl Switching {
             pasted: Mutex::new(Vec::new()),
             standing_asked: Mutex::new(0),
             during_observation: Mutex::new(None),
+            at_the_close: Mutex::new(None),
         }
     }
 
@@ -19663,6 +19699,10 @@ impl Host for Switching {
     }
     fn close_gone(&self, term: u32) -> crate::agent_teams::PaneExit {
         self.close(term);
+        let closing = self.at_the_close.lock().unwrap().take();
+        if let Some(closing) = closing {
+            closing();
+        }
         if *self.lingering.lock().unwrap() {
             crate::agent_teams::PaneExit::Lingering(crate::agent_teams::ExitWitness {
                 group: term,
@@ -20171,6 +20211,39 @@ impl WalledClaude {
                 .join(crate::app_paths::artifact_file::CLAUDE_ACCOUNT_SWITCH),
         )
         .unwrap_or_default()
+    }
+
+    /// The disk and the switch's journal both start refusing at the
+    /// switch's first receipt (astra R4-1): what the journal took before it
+    /// stays on disk as it was, and the replace that writes the book after
+    /// the receipts meets a journal that takes nothing, until
+    /// [`Self::journal_takes_writes`].
+    fn disk_and_journal_refuse_from_the_first_receipt(&self) {
+        let fault = self
+            .store
+            .fault_connection_for_tests()
+            .expect("a fault connection");
+        let journal = self.world.journal.path().to_path_buf();
+        *self.world.before_receipt.lock().unwrap() = Some(Box::new(move || {
+            fault
+                .execute_batch(REFUSE_LEDGER_WRITES)
+                .expect("a disk that refuses");
+            journal_refuses_writes_in(&journal);
+        }));
+    }
+
+    /// The journal takes nothing from the old pane's close on (astra R4-1):
+    /// the rest is on disk, and whatever the move adds lives only in this
+    /// window's memory until [`Self::journal_takes_writes`].
+    fn journal_refuses_from_the_close(&self) {
+        let journal = self.world.journal.path().to_path_buf();
+        *self.host.at_the_close.lock().unwrap() =
+            Some(Box::new(move || journal_refuses_writes_in(&journal)));
+    }
+
+    /// The journal takes writes again, holding what it held when it stopped.
+    fn journal_takes_writes(&self) {
+        journal_takes_writes_in(self.world.journal.path());
     }
 
     fn receipts(&self, at: i64) -> Vec<serde_json::Value> {
@@ -21437,11 +21510,13 @@ fn pasted_into(host: &Switching, term: u32) -> Vec<String> {
 }
 
 /// A new process of the window, as far as a switch's memory goes: the
-/// goodbye's book is read off the disk again and no switch mark is left —
-/// only what was written down survives it.
-fn a_new_process_forgets(worker: &str) {
+/// goodbye's book is read off the disk again, no switch mark is left, and
+/// no journal the window could not write (astra R4-1) — only what was
+/// written down survives it.
+fn a_new_process_forgets(stood: &WalledClaude) {
     restart_census::a_new_process(super::BLACKBOX.get().expect("the window's data root"));
-    super::forget_switch_mark(worker);
+    super::forget_switch_mark(&stood.worker);
+    crate::account_switch::a_new_process(stood.world.journal.path());
 }
 
 /// The account-switch receipts the ledger holds, read off its rows — the
@@ -21534,7 +21609,7 @@ fn a_worker_the_switch_rested_hears_the_switchs_words_once_after_a_restart_and_a
     *stood.host.lingering.lock().unwrap() = false;
     stood.host.busy.lock().unwrap().clear();
     the_window_goes_once(&[stood.leader, plain_term]);
-    a_new_process_forgets(&stood.worker);
+    a_new_process_forgets(&stood);
     let back = stood.leader + 40;
     stood.host.seating_onto(stood.leader + 30);
     assert_eq!(
@@ -21578,7 +21653,7 @@ fn a_worker_the_switch_rested_hears_the_switchs_words_once_after_a_restart_and_a
     // Once: after the next restart neither of them is told anything, by
     // the doors their restored tabs open.
     the_window_goes_once(&[back, moved, rested]);
-    a_new_process_forgets(&stood.worker);
+    a_new_process_forgets(&stood);
     let door = restore_door::Door::new(Path::new(stood.host.checkout));
     let (tab, plain_tab) = (stood.leader + 80, stood.leader + 81);
     door.wake(tab, "claude", SWITCH_SESSION)
@@ -21691,6 +21766,21 @@ fn a_program_nobody_saw_leave_holds_every_road_even_a_door_and_a_boot_without_it
     );
     assert_eq!(door.noted("has not been seen to leave").len(), 1);
     assert_eq!(stood.row(&stood.worker).state, WorkerState::Sleeping);
+    // astra R3-1: a ledger this window cannot read is not a ledger that
+    // holds nothing. The runtime's own image does not answer — its store
+    // refuses the connection — and then a boot of this window stands down
+    // beside the durable store and leaves no runtime at all: neither
+    // door builds a launch, starts a process or says a word, and the row
+    // and its hold stay as they were. The ledger reads again with the
+    // program still there: held, at both doors.
+    held_doors_open_nothing_while_the_ledger_cannot_be_read(
+        &stood,
+        &[(&other, persons_tab), (&door, own_tab)],
+    );
+    assert_eq!(door.noted("has not been seen to leave").len(), 2);
+    let row = stood.row(&stood.worker);
+    assert_eq!(row.state, WorkerState::Sleeping);
+    assert!(row.exit_unconfirmed.is_some(), "{row:?}");
     // The grace, past its time: ends nothing.
     {
         let _old = BootedHere::at(clock() - RESEAT_GRACE_MS - 1);
@@ -21708,7 +21798,7 @@ fn a_program_nobody_saw_leave_holds_every_road_even_a_door_and_a_boot_without_it
     )
     .expect("an unreadable journal");
     the_window_goes_once(&[stood.leader]);
-    a_new_process_forgets(&stood.worker);
+    a_new_process_forgets(&stood);
     let back = stood.leader + 40;
     stood.host.seating_onto(stood.leader + 30);
     assert_eq!(
@@ -21747,6 +21837,110 @@ fn a_program_nobody_saw_leave_holds_every_road_even_a_door_and_a_boot_without_it
     for term in [own_tab, persons_tab, back] {
         crate::agent_teams::forget_term(term);
     }
+}
+
+/// astra R3-1: every door in `doors` — `(door, the tab it opens)` — asked
+/// for the switch's conversation while this window cannot read its ledger:
+/// first the runtime's image does not answer (a directory stands where its
+/// store's journal goes, so the store refuses the connection every request
+/// opens — a refusal the actor lives through, unlike an authority moved
+/// under it, which ends it), then a boot of this window over the same data
+/// root stands down beside the durable store and leaves no runtime at all.
+/// Nothing is built, started or typed, and each door says why once per
+/// look. Then the ledger reads again with the program still there: each
+/// door is held.
+fn held_doors_open_nothing_while_the_ledger_cannot_be_read(
+    stood: &WalledClaude,
+    doors: &[(&restore_door::Door, u32)],
+) {
+    let prepared = |door: &restore_door::Door| {
+        door.did
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|did| matches!(did, restore_door::Did::Prepared(_)))
+            .count()
+    };
+    let asked = |scene: &str, said: &str| {
+        for (door, tab) in doors {
+            let refused = door.wake(*tab, "claude", SWITCH_SESSION).expect_err(scene);
+            assert!(refused.contains(said), "{scene}: {refused}");
+            assert!(
+                door.started().is_empty(),
+                "{scene}: a door started a process: {:?}",
+                door.started()
+            );
+            assert_eq!(prepared(door), 0, "{scene}: a door built a launch");
+        }
+    };
+    let root = stood._window._root.path().to_path_buf();
+    let mut journal = root
+        .join(super::AUTHORITY_DIR)
+        .join(super::AUTHORITY_STORE_FILE)
+        .into_os_string();
+    journal.push("-wal");
+    let journal = PathBuf::from(journal);
+    let unread = "원장을 읽지 못해";
+    std::fs::create_dir(&journal).expect("a directory where the store's journal goes");
+    asked("the runtime's image does not answer", unread);
+    std::fs::remove_dir(&journal).expect("the store's journal can be made again");
+    std::fs::write(root.join(super::LEDGER_FILE), b"{ not a ledger")
+        .expect("a ledger file the boot cannot read");
+    let standing = super::runtime_cell()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .take();
+    {
+        let _stood_down = Degraded::booted_over(&root);
+        asked("a boot that stood down beside the store", unread);
+    }
+    *super::runtime_cell()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner()) = standing;
+    std::fs::remove_file(root.join(super::LEDGER_FILE)).expect("the file goes");
+    for (door, _) in doors {
+        assert_eq!(door.noted("could not be read").len(), 2);
+    }
+    asked(
+        "the ledger reads, the program is still there",
+        "떠나지 않아",
+    );
+}
+
+/// astra R3-1: a person's tab in another checkout — the door no seat
+/// guards, since it would never seat the worker — opens nothing while the
+/// ledger that holds the conversation cannot be read, nothing while it
+/// reads and the program is still there, and the conversation once that
+/// program is seen gone: one process, at the same door. The worker stays
+/// asleep with its attempt open; only its hold is lifted.
+#[test]
+fn a_persons_door_elsewhere_opens_a_held_conversation_only_once_the_hold_is_read_gone() {
+    let stood = WalledClaude::stand(92_000, 0);
+    let at = stood.began + 20_000;
+    *stood.host.lingering.lock().unwrap() = true;
+    let plan = stood.plan(at);
+    stood.host.seating_onto(stood.leader + 2);
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("applied");
+    assert!(!applied.panes[0].ok, "{applied:?}");
+    assert!(stood.row(&stood.worker).exit_unconfirmed.is_some());
+    let elsewhere = tempfile::tempdir().expect("another checkout");
+    let door = restore_door::Door::new(elsewhere.path());
+    *door.lingering.lock().unwrap() = true;
+    let tab = stood.leader + 71;
+    held_doors_open_nothing_while_the_ledger_cannot_be_read(&stood, &[(&door, tab)]);
+    *door.lingering.lock().unwrap() = false;
+    door.wake(tab, "claude", SWITCH_SESSION)
+        .expect("the door opens it once its program is gone");
+    let started = door.started();
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert!(started[0].1.contains(SWITCH_SESSION), "{started:?}");
+    let row = stood.row(&stood.worker);
+    assert_eq!(row.state, WorkerState::Sleeping);
+    assert_eq!(row.dispatch.as_deref(), Some(stood.dispatch.as_str()));
+    assert!(row.exit_unconfirmed.is_none(), "{row:?}");
+    crate::agent_teams::forget_term(tab);
 }
 
 /// astra R2 (r4): a yes is a yes to the logins it was shown, under the
@@ -21829,6 +22023,46 @@ fn a_login_that_changed_under_a_yes_moves_no_pane() {
     }
 }
 
+/// Where a journal's file waits, byte for byte, while its directory
+/// refuses writes (astra R4-1).
+fn journal_aside(dir: &Path) -> PathBuf {
+    dir.join("the-journal-as-it-stood")
+}
+
+/// A directory stands where the journal's file was, so every replace of it
+/// fails, and the file waits aside. A read-only directory would not do: the
+/// durable writer makes a parent private again before it writes.
+fn journal_refuses_writes_in(dir: &Path) {
+    let file = dir.join(crate::app_paths::artifact_file::CLAUDE_ACCOUNT_SWITCH);
+    std::fs::rename(&file, journal_aside(dir)).expect("the journal's file steps aside");
+    std::fs::create_dir(&file).expect("a directory where the file was");
+    std::fs::write(file.join("in-the-way"), b"").expect("a directory that is not empty");
+}
+
+fn journal_takes_writes_in(dir: &Path) {
+    let file = dir.join(crate::app_paths::artifact_file::CLAUDE_ACCOUNT_SWITCH);
+    std::fs::remove_dir_all(&file).expect("the directory goes");
+    std::fs::rename(journal_aside(dir), &file).expect("the journal's file comes back");
+}
+
+/// How the switch's journal fares from some moment of a move on
+/// (astra R4-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalFares {
+    /// Every write lands.
+    Takes,
+    /// The replace that writes the book after the receipts meets a journal
+    /// that takes nothing; what it held before stays as it was.
+    RefusesItsLastWrite,
+    /// Nothing is written from the old pane's close on: the rest's book
+    /// stays on disk, and the move lives only in this window's memory.
+    RefusesFromTheClose,
+    /// As [`Self::RefusesFromTheClose`] — then the journal takes writes
+    /// again, one look runs while the ledger still refuses the receipts, and
+    /// the window ends: what it held must be on disk by then.
+    RefusesFromTheCloseAndTheWindowEnds,
+}
+
 /// astra R4 (r4): a move this switch saw complete keeps its receipt as it
 /// saw it until the ledger takes it. The disk refuses the receipts, so the
 /// journal holds the pane's completed move — A's pane to B's. Then, before
@@ -21839,9 +22073,28 @@ fn a_login_that_changed_under_a_yes_moves_no_pane() {
 /// names the pane and the account the switch moved it to, not where the
 /// worker went after. A second Claude worker keeps working beside it, so
 /// the run is one the default's receipt concerns in both.
+///
+/// astra R4-1: the same, when the journal also refuses the replace that
+/// writes the book after the receipts — the move seen complete is not
+/// lost with it, across a restart too — and when it refuses everything
+/// from the old pane's close on, so the move lives only in this window's
+/// memory until a write lands: the next look writes it down even when it
+/// has nothing else to change, and a window that ends after that look
+/// leaves the move on disk.
 #[test]
 fn a_moved_panes_receipt_is_the_move_it_saw_whatever_the_worker_does_next() {
-    for (leader, moves_on) in [(90_000, false), (90_100, true)] {
+    use JournalFares::{
+        RefusesFromTheClose, RefusesFromTheCloseAndTheWindowEnds, RefusesItsLastWrite, Takes,
+    };
+    for (leader, moves_on, journal) in [
+        (90_000, false, Takes),
+        (90_100, true, Takes),
+        (92_200, false, RefusesItsLastWrite),
+        (92_300, true, RefusesItsLastWrite),
+        (92_400, false, RefusesFromTheClose),
+        (92_500, false, RefusesFromTheCloseAndTheWindowEnds),
+    ] {
+        let scene = format!("moves_on={moves_on} journal={journal:?}");
         let stood = WalledClaude::stand(leader, 1);
         let (_, beside) = stood.working[0].clone();
         stood.in_its_own_conversation(beside, "5a1e0000-0000-4000-8000-000000007540");
@@ -21849,24 +22102,44 @@ fn a_moved_panes_receipt_is_the_move_it_saw_whatever_the_worker_does_next() {
         let from_pane = stood.row(&stood.worker).pane;
         let plan = stood.plan(at);
         stood.host.seating_onto(stood.leader + 2);
-        stood.disk_refuses_from_the_first_receipt();
+        match journal {
+            Takes => stood.disk_refuses_from_the_first_receipt(),
+            RefusesItsLastWrite => stood.disk_and_journal_refuse_from_the_first_receipt(),
+            RefusesFromTheClose | RefusesFromTheCloseAndTheWindowEnds => {
+                stood.journal_refuses_from_the_close();
+                stood.disk_refuses_from_the_first_receipt();
+            }
+        }
         let applied =
             crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
                 .expect("every effect landed");
-        assert!(applied.panes[0].ok, "{applied:?}");
-        assert_eq!(applied.receipts, 0, "{applied:?}");
+        assert!(applied.panes[0].ok, "{scene}: {applied:?}");
+        assert_eq!(applied.receipts, 0, "{scene}: {applied:?}");
         let moved = stood.row(&stood.worker);
-        let book: crate::account_switch::JournalBook =
-            serde_json::from_str(&stood.journal_text()).expect("a book");
-        let owed = &book.switches[0].panes[0];
-        assert_eq!(owed.to_pane.as_deref(), Some(moved.pane.as_str()));
-        assert_eq!(owed.to_account.as_deref(), Some("b-fixture"));
+        if journal == Takes {
+            let book: crate::account_switch::JournalBook =
+                serde_json::from_str(&stood.journal_text()).expect("a book");
+            let owed = &book.switches[0].panes[0];
+            assert_eq!(owed.to_pane.as_deref(), Some(moved.pane.as_str()));
+            assert_eq!(owed.to_account.as_deref(), Some("b-fixture"));
+        } else {
+            assert!(applied.receipt_error.is_some(), "{scene}: {applied:?}");
+            stood.journal_takes_writes();
+            if journal == RefusesFromTheCloseAndTheWindowEnds {
+                assert_eq!(
+                    crate::account_switch::reconcile(&stood.host, &stood.world, at),
+                    0,
+                    "{scene}"
+                );
+                crate::account_switch::a_new_process(stood.world.journal.path());
+            }
+        }
         stood.disk_takes_writes();
         if moves_on {
             *stood.host.selected.lock().unwrap() = Some("a-fixture".to_string());
             let moved_term = term_now(&stood.worker);
             the_window_goes_once(&[stood.leader, moved_term, beside]);
-            a_new_process_forgets(&stood.worker);
+            a_new_process_forgets(&stood);
             let back = stood.leader + 40;
             stood.host.seating_onto(stood.leader + 30);
             assert_eq!(
@@ -21906,24 +22179,29 @@ fn a_moved_panes_receipt_is_the_move_it_saw_whatever_the_worker_does_next() {
         assert_eq!(
             crate::account_switch::reconcile(&stood.host, &stood.world, at + 1),
             2,
-            "moves_on={moves_on}"
+            "{scene}"
         );
         assert_eq!(
             crate::account_switch::reconcile(&stood.host, &stood.world, at + 2),
-            0
+            0,
+            "{scene}"
         );
         let receipts = switch_receipts();
         let panes: Vec<&serde_json::Value> = receipts
             .iter()
             .filter(|body| body["moved"] == "pane")
             .collect();
-        assert_eq!(panes.len(), 1, "{receipts:?}");
-        assert_eq!(panes[0]["workerId"], stood.worker);
-        assert_eq!(panes[0]["fromPane"], from_pane);
-        assert_eq!(panes[0]["toPane"], moved.pane, "moves_on={moves_on}");
-        assert_eq!(panes[0]["fromAccount"], "a-fixture");
-        assert_eq!(panes[0]["toAccount"], "b-fixture", "moves_on={moves_on}");
-        assert!(stood.journal_text().is_empty(), "{}", stood.journal_text());
+        assert_eq!(panes.len(), 1, "{scene}: {receipts:?}");
+        assert_eq!(panes[0]["workerId"], stood.worker, "{scene}");
+        assert_eq!(panes[0]["fromPane"], from_pane, "{scene}");
+        assert_eq!(panes[0]["toPane"], moved.pane, "{scene}");
+        assert_eq!(panes[0]["fromAccount"], "a-fixture", "{scene}");
+        assert_eq!(panes[0]["toAccount"], "b-fixture", "{scene}");
+        assert!(
+            stood.journal_text().is_empty(),
+            "{scene}: {}",
+            stood.journal_text()
+        );
     }
 }
 
@@ -22144,5 +22422,322 @@ fn a_selected_read_that_lands_after_a_relogin_is_nobodys_number() {
     assert!(
         walled_as_two.is_none(),
         "a pane of login two was judged by login one's number: {walled_as_two:?}"
+    );
+}
+
+/// `ids` as [`a_claude_store`] makes them, each signed in: its store holds a
+/// login of its own — a fixture token that names the account — beside the
+/// identity its row names (t-7538 r5).
+fn signed_in_claude_store(
+    root: &Path,
+    ids: &[&str],
+    selected: &str,
+) -> Vec<zerocode_core::ClaudeAccount> {
+    let accounts = a_claude_store(root, ids, selected);
+    for account in &accounts {
+        let login = serde_json::json!({
+            "claudeAiOauth": {"accessToken": format!("fixture-{}", account.id)},
+            "oauthAccount": {
+                "emailAddress": account.email,
+                "accountUuid": account.account_uuid,
+                "organizationUuid": account.organization_uuid,
+            },
+        });
+        std::fs::write(
+            Path::new(&account.config_dir).join(crate::accounts::CREDENTIALS_FILE),
+            login.to_string(),
+        )
+        .expect("a login in the account's store");
+    }
+    accounts
+}
+
+/// The store selects `id` now, as the selection road writes it.
+fn select_in_store(root: &Path, id: &str) {
+    let mut store = crate::accounts::read_store(root);
+    store.selection.active = Some(id.to_string());
+    std::fs::write(
+        root.join(crate::accounts::ACCOUNT_STORE_FILE),
+        serde_json::to_string(&store).expect("json"),
+    )
+    .expect("the store");
+}
+
+/// One change a test makes from inside the selected read's doors.
+type ReadMove = Box<dyn FnOnce() + Send>;
+
+/// The selected account's doors with no keychain and no server (astra
+/// R6-1). A login is found where the read's environment points: the
+/// account store it names, standing in for that store's own keychain item —
+/// or, when `file` says, the runtime home's credentials file, the half of
+/// the walk that reads the one home. The endpoint answers each account's
+/// fixture token with that account's number. A test may move the world once
+/// inside the preparation — after the look, before the login — and once
+/// inside the ask — after the login, before the answer.
+struct SelectedWorld {
+    used: Vec<(String, f32)>,
+    file: bool,
+    at_prepare: Mutex<Option<ReadMove>>,
+    at_ask: Mutex<Option<ReadMove>>,
+}
+
+impl SelectedWorld {
+    fn answering(used: &[(&zerocode_core::ClaudeAccount, f32)], file: bool) -> Self {
+        Self {
+            used: used
+                .iter()
+                .map(|(account, used)| (format!("fixture-{}", account.id), *used))
+                .collect(),
+            file,
+            at_prepare: Mutex::new(None),
+            at_ask: Mutex::new(None),
+        }
+    }
+}
+
+impl crate::usage_runtime::SelectedDoors for SelectedWorld {
+    fn prepare(
+        &self,
+        _config_root: &Path,
+        _account: &zerocode_core::ClaudeAccount,
+    ) -> Result<(), String> {
+        let moving = self.at_prepare.lock().unwrap().take();
+        if let Some(moving) = moving {
+            moving();
+        }
+        Ok(())
+    }
+
+    fn login(&self, env: &[(String, String)]) -> Option<(String, crate::accounts::LoginFrom)> {
+        let named = |var: &str| {
+            env.iter()
+                .rev()
+                .find(|(key, _)| key == var)
+                .map(|(_, dir)| PathBuf::from(dir))
+        };
+        let (dir, from) = if self.file {
+            (
+                named(zerocode_core::account::CONFIG_DIR_VAR)?,
+                crate::accounts::LoginFrom::File,
+            )
+        } else {
+            (
+                named(zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR)?,
+                crate::accounts::LoginFrom::Keychain,
+            )
+        };
+        std::fs::read_to_string(dir.join(crate::accounts::CREDENTIALS_FILE))
+            .ok()
+            .map(|login| (login, from))
+    }
+
+    fn ask(
+        &self,
+        login: Option<&str>,
+        _now_ms: i64,
+    ) -> Result<crate::usage_oauth::OauthUsage, crate::usage_http::Failure> {
+        let moving = self.at_ask.lock().unwrap().take();
+        if let Some(moving) = moving {
+            moving();
+        }
+        let login = login.ok_or_else(crate::usage_http::Failure::no_credentials)?;
+        let used = self
+            .used
+            .iter()
+            .find(|(token, _)| login.contains(token.as_str()))
+            .map(|(_, used)| *used)
+            .expect("a login this test made");
+        Ok(an_oauth_reading(used))
+    }
+}
+
+/// The session figure an account's row in the switch table holds, if any.
+fn session_in_table(config: &Path, data: &Path, id: &str) -> Option<u8> {
+    table_row(config, data, id)
+        .windows
+        .iter()
+        .find(|window| window.kind == "session")
+        .map(|window| window.used_percent)
+}
+
+/// astra R6-1: the selected account's read takes the row it files its
+/// answer under and the environment it asks with in ONE look, out of one
+/// read of the store. A (100%) and B (10%) each read as themselves, filed
+/// under themselves. Then, with A selected, the selection moves to B after
+/// the read took its look and before it read its login: the read asks with
+/// the look's login — A's — and A's own number lands under A; B's number
+/// never does. And a login read before the selection moved keeps its late
+/// answer under the row it was read for.
+#[test]
+fn a_selected_read_files_its_answer_under_the_row_whose_login_it_asked_with() {
+    let config = tempfile::tempdir().expect("a config root");
+    let data = tempfile::tempdir().expect("a data root");
+    let accounts = signed_in_claude_store(
+        config.path(),
+        &["t7538r5-look-a", "t7538r5-look-b"],
+        "t7538r5-look-a",
+    );
+    let (a, b) = (accounts[0].clone(), accounts[1].clone());
+    let doors = SelectedWorld::answering(&[(&a, 100.0), (&b, 10.0)], false);
+    let read = || {
+        crate::usage_runtime::read_selected_claude_usage(config.path(), data.path(), &doors).usage
+    };
+    let session = |usage: &crate::usage::ProviderUsage| {
+        usage.session.as_ref().map(|window| window.used_percent)
+    };
+    // Nothing moves: each account reads as itself.
+    let as_a = read();
+    assert_eq!(
+        (as_a.account.as_deref(), session(&as_a)),
+        (Some(a.id.as_str()), Some(100))
+    );
+    select_in_store(config.path(), &b.id);
+    let as_b = read();
+    assert_eq!(
+        (as_b.account.as_deref(), session(&as_b)),
+        (Some(b.id.as_str()), Some(10))
+    );
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100)
+    );
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &b.id),
+        Some(10)
+    );
+    // The selection moves under the read, between its look and its login.
+    select_in_store(config.path(), &a.id);
+    let root = config.path().to_path_buf();
+    let to_b = b.id.clone();
+    *doors.at_prepare.lock().unwrap() = Some(Box::new(move || select_in_store(&root, &to_b)));
+    let raced = read();
+    assert_eq!(
+        (raced.account.as_deref(), session(&raced)),
+        (Some(a.id.as_str()), Some(100)),
+        "a read filed under A asked with B's login: {raced:?}"
+    );
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100),
+        "B's number landed under A"
+    );
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &b.id),
+        Some(10)
+    );
+    // A login read before the selection moved: its late answer is still A's.
+    select_in_store(config.path(), &a.id);
+    let root = config.path().to_path_buf();
+    let to_b = b.id.clone();
+    *doors.at_ask.lock().unwrap() = Some(Box::new(move || select_in_store(&root, &to_b)));
+    let late = read();
+    assert_eq!(
+        (late.account.as_deref(), session(&late)),
+        (Some(a.id.as_str()), Some(100))
+    );
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100)
+    );
+}
+
+/// astra R6-1, the runtime home's half: a login read out of the one home is
+/// the selected row's only while the home's record names the row and no
+/// login was put into the home since the read took its look. With A's
+/// login in the home, a read of A through the home is A's. When the switch
+/// to B puts B's login into the home between the look and the read — or has
+/// put it there already while the store still selects A, or is in the
+/// middle of putting it there, B's login in the home and the record still
+/// naming A — the read cannot say whose login it used: nothing lands under
+/// A, and the bar says the number is nobody's.
+#[test]
+fn a_selected_read_through_the_runtime_home_is_the_rows_only_while_the_home_holds_its_login() {
+    let config = tempfile::tempdir().expect("a config root");
+    let data = tempfile::tempdir().expect("a data root");
+    let accounts = signed_in_claude_store(
+        config.path(),
+        &["t7538r5-home-a", "t7538r5-home-b"],
+        "t7538r5-home-a",
+    );
+    let (a, b) = (accounts[0].clone(), accounts[1].clone());
+    let doors = SelectedWorld::answering(&[(&a, 100.0), (&b, 10.0)], true);
+    let read = || {
+        crate::usage_runtime::read_selected_claude_usage(config.path(), data.path(), &doors).usage
+    };
+    crate::accounts::materialize(config.path(), &a).expect("A's login in the one home");
+    let as_a = read();
+    assert_eq!(as_a.status, "ok", "{as_a:?}");
+    assert_eq!(as_a.account.as_deref(), Some(a.id.as_str()));
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100)
+    );
+    // The switch puts B's login into the home between the look and the read.
+    let (root, to_b) = (config.path().to_path_buf(), b.clone());
+    *doors.at_prepare.lock().unwrap() = Some(Box::new(move || {
+        crate::accounts::materialize(&root, &to_b).expect("B's login in the one home");
+    }));
+    let raced = read();
+    assert_eq!(raced.account.as_deref(), Some(a.id.as_str()));
+    assert_eq!(raced.status, "error", "{raced:?}");
+    assert!(raced.session.is_none(), "{raced:?}");
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100),
+        "B's login's number landed under A"
+    );
+    // B's login stands in the home; the store still selects A — the switch
+    // is between its put and its selection.
+    let waiting = read();
+    assert_eq!(waiting.status, "error", "{waiting:?}");
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100)
+    );
+    // A put under way: B's login is in the home, the record still names A.
+    crate::accounts::materialize(config.path(), &a).expect("A's login back in the one home");
+    let (in_the_middle, middle) = std::sync::mpsc::channel::<()>();
+    let (go_on, gone_on) = std::sync::mpsc::channel::<()>();
+    let putting = std::sync::Arc::new(Mutex::new(None));
+    let (root, to_b, slot) = (
+        config.path().to_path_buf(),
+        b.clone(),
+        std::sync::Arc::clone(&putting),
+    );
+    *doors.at_prepare.lock().unwrap() = Some(Box::new(move || {
+        let home = crate::accounts::runtime_home(&root);
+        let put = std::thread::spawn(move || {
+            crate::accounts::before_the_record_of(
+                &home,
+                Box::new(move || {
+                    in_the_middle.send(()).expect("the read waits for the put");
+                    gone_on.recv().expect("the read is done");
+                }),
+            );
+            crate::accounts::materialize(&root, &to_b).expect("B's login in the one home");
+        });
+        middle.recv().expect("the put reached its record");
+        *slot.lock().unwrap() = Some(put);
+    }));
+    let beside = read();
+    go_on.send(()).expect("the put goes on");
+    putting
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the put")
+        .join()
+        .expect("the put ends");
+    assert_eq!(beside.status, "error", "{beside:?}");
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100),
+        "the number of a login put into the home under the read landed under A"
+    );
+    assert!(
+        table_row(config.path(), data.path(), &b.id)
+            .windows
+            .is_empty(),
+        "a read of A landed under B"
     );
 }

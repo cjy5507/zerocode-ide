@@ -44,7 +44,7 @@ use zerocode_core::account::{AccountSelection, ClaudeAccount, ClaudeIdentity, du
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 pub(crate) const ACCOUNT_STORE_FILE: &str = "claude-accounts.json";
 pub(crate) const MANAGED_ACCOUNTS_DIR: &str = "claude-accounts";
-const CREDENTIALS_FILE: &str = ".credentials.json";
+pub(crate) const CREDENTIALS_FILE: &str = ".credentials.json";
 const CLAUDE_SETTINGS_FILE: &str = ".claude.json";
 const CLAUDE_CONFIG_FILE: &str = ".config.json";
 const RUNTIME_AUTH_VERSION: u8 = 1;
@@ -166,6 +166,15 @@ struct RuntimeAuth {
     /// but it is not free, and after it there is nothing left to find.
     #[serde(default)]
     gathered: bool,
+}
+
+impl RuntimeAuth {
+    /// Whether this record speaks for `home` at all: written by this
+    /// version of the bookkeeping, about this home.
+    fn describes(&self, home: &Path) -> bool {
+        self.version == RUNTIME_AUTH_VERSION
+            && self.home.as_deref() == Some(home.to_string_lossy().as_ref())
+    }
 }
 
 fn runtime_file(config_root: &Path) -> PathBuf {
@@ -546,11 +555,18 @@ fn login_at(dir: &Path) -> (Option<String>, KeychainSays) {
 /// Prepare the selected secure store before a background CLI can read it.
 pub fn prepare_selected_store(config_root: &Path) -> Result<(), String> {
     let store = read_store(config_root);
-    if let Some(account) = zerocode_core::active_account(&store.accounts, &store.selection) {
-        require_unchanged_identity(config_root, account)?;
-        seed_scoped_keychain(Path::new(&account.config_dir))?;
+    match zerocode_core::active_account(&store.accounts, &store.selection) {
+        Some(account) => prepare_store(config_root, account),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// The same preparation for a row the caller already holds — the row of
+/// one look at the selection, so the store prepared is the store the read
+/// then asks (t-7538, astra R6-1).
+pub(crate) fn prepare_store(config_root: &Path, account: &ClaudeAccount) -> Result<(), String> {
+    require_unchanged_identity(config_root, account)?;
+    seed_scoped_keychain(Path::new(&account.config_dir))
 }
 
 /// Upgrade a file-era store before a CLI can fall back to the global login.
@@ -1220,12 +1236,11 @@ fn materialize_into(
     // half that said so. Asking twice would be a second chance for a dialog on
     // a road that is walked on every launch.
     let (on_disk, says) = login_at(home);
-    let named_home = home.to_string_lossy().into_owned();
     let mut state = read_runtime(config_root);
-    if state.version != RUNTIME_AUTH_VERSION || state.home.as_deref() != Some(named_home.as_str()) {
+    if !state.describes(home) {
         state = RuntimeAuth {
             version: RUNTIME_AUTH_VERSION,
-            home: Some(named_home),
+            home: Some(home.to_string_lossy().into_owned()),
             ..RuntimeAuth::default()
         };
     }
@@ -1251,6 +1266,9 @@ fn materialize_into(
     ) {
         return Ok(());
     }
+    // From here a login may be put into the home: a read that used the
+    // home's login meanwhile cannot say whose it was (astra R6-1).
+    let _putting = HomePut::begin(home);
 
     // Only a real switch needs the account store. In particular, do not open a
     // per-account keychain item on every launch merely to prove again what the
@@ -1344,10 +1362,46 @@ fn materialize_into(
         state.gathered = true;
     }
 
+    #[cfg(test)]
+    before_the_record(home);
     state.account = Some(account.id.clone());
     state.written = Some(credentials);
     write_runtime(config_root, &state);
     Ok(())
+}
+
+/// A test's hand inside one put into a home, once the login is in the home
+/// and before the record says whose it is (t-7538, astra R6-1): the one
+/// moment a read beside the put finds a login the record does not name.
+#[cfg(test)]
+type RecordHand = (PathBuf, Box<dyn FnOnce() + Send>);
+
+#[cfg(test)]
+static BEFORE_THE_RECORD: std::sync::Mutex<Option<RecordHand>> = std::sync::Mutex::new(None);
+
+/// Hold the next put into `home` at that moment, for `hand`.
+#[cfg(test)]
+pub(crate) fn before_the_record_of(home: &Path, hand: Box<dyn FnOnce() + Send>) {
+    *BEFORE_THE_RECORD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((home.to_path_buf(), hand));
+}
+
+#[cfg(test)]
+fn before_the_record(home: &Path) {
+    let hand = {
+        let mut held = BEFORE_THE_RECORD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.as_ref().is_some_and(|(at, _)| at == home) {
+            held.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, hand)) = hand {
+        hand();
+    }
 }
 
 /// The OAuth identity block this account keeps, out of wherever it keeps it.
@@ -2258,6 +2312,145 @@ fn runtime_env_for(
 /// (`fetchManagedUsagePanelSupplement`, out/main/index.js:209490-209516).
 pub fn reading_env_for(config_root: &Path, agent: &str) -> Vec<(String, String)> {
     runtime_env_for(config_root, agent).0
+}
+
+/// Every put of a login into a runtime home, by home: how many began, and
+/// how many ended (t-7538, astra R6-1). The one home holds whichever login
+/// was put there last, so a read that used the home's login asks whether a
+/// put overlapped it before it says whose that login was.
+fn home_puts() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, u64)>> {
+    type Puts = std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, u64)>>;
+    static HELD: std::sync::OnceLock<Puts> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// One put into a home, under way until it drops.
+struct HomePut(PathBuf);
+
+impl HomePut {
+    fn begin(home: &Path) -> Self {
+        home_puts()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(home.to_path_buf())
+            .or_default()
+            .0 += 1;
+        Self(home.to_path_buf())
+    }
+}
+
+impl Drop for HomePut {
+    fn drop(&mut self) {
+        home_puts()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(self.0.clone())
+            .or_default()
+            .1 += 1;
+    }
+}
+
+/// The puts into a home as a look found them: how many had begun, and
+/// whether one was under way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HomeMark {
+    begun: u64,
+    quiet: bool,
+}
+
+fn home_mark(home: &Path) -> HomeMark {
+    let (begun, ended) = home_puts()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(home)
+        .copied()
+        .unwrap_or_default();
+    HomeMark {
+        begun,
+        quiet: begun == ended,
+    }
+}
+
+/// The selected Claude login as ONE look (t-7538, astra R6-1): the row the
+/// store selects and the environment a read of it runs in, both out of the
+/// same read of the store, beside a mark of the runtime home's puts.
+///
+/// A read that took its row at one moment and its environment at another
+/// asked with whatever login was selected by then and filed the answer
+/// under the row it took first: a selection landing in between gave account
+/// A account B's number. Taken together, the environment names the row's
+/// own store, so a login found in the keychain item scoped to it is the
+/// row's by construction. A login found in the runtime home is not — the
+/// one home holds whichever login was put there last — so it is the row's
+/// only while the home's record names the row and no put overlapped the
+/// read ([`SelectedLook::home_is_its`]). A login that cannot be shown to be
+/// the row's is nobody's.
+#[derive(Debug, Clone)]
+pub(crate) struct SelectedLook {
+    /// The row the store selects — `None` for the system default and for a
+    /// store with no row to select.
+    pub(crate) row: Option<ClaudeAccount>,
+    /// The environment a read of that row runs in: the reading door's,
+    /// which installs nothing and is empty for the system default.
+    pub(crate) env: Vec<(String, String)>,
+    home: HomeMark,
+}
+
+/// Take the one look (see [`SelectedLook`]).
+pub(crate) fn look_at_selected(config_root: &Path) -> SelectedLook {
+    let home = home_mark(&runtime_home(config_root));
+    let (env, row) = runtime_env_for(config_root, "claude");
+    SelectedLook { row, env, home }
+}
+
+impl SelectedLook {
+    /// The row a reading through this look may be filed under: the selected
+    /// row, while it is signed in.
+    pub(crate) fn whose(&self) -> Option<&ClaudeAccount> {
+        self.row
+            .as_ref()
+            .filter(|row| signed_in(Path::new(&row.config_dir)))
+    }
+
+    /// Whether a login this look's environment led to, found where `from`
+    /// says, is the row's own. The keychain half reads the item scoped to
+    /// the store the environment names; the file half reads the runtime
+    /// home ([`usage_login`]).
+    pub(crate) fn login_is_its(&self, config_root: &Path, from: LoginFrom) -> bool {
+        match from {
+            LoginFrom::Keychain => self.names_its_store(),
+            LoginFrom::File => self.home_is_its(config_root),
+        }
+    }
+
+    /// Whether the environment names the row's own secure store.
+    fn names_its_store(&self) -> bool {
+        let Some(row) = &self.row else {
+            return false;
+        };
+        self.env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR)
+            .is_some_and(|(_, dir)| Path::new(dir) == Path::new(&row.config_dir))
+    }
+
+    /// Whether the runtime home held the row's login from this look until
+    /// now: nothing was put into it since, and its record names the row.
+    /// Asked after the home was read — by the credential read, or by the
+    /// CLI the terminal road ran there.
+    pub(crate) fn home_is_its(&self, config_root: &Path) -> bool {
+        let Some(row) = &self.row else {
+            return false;
+        };
+        let home = runtime_home(config_root);
+        let now = home_mark(&home);
+        let record = read_runtime(config_root);
+        self.home.quiet
+            && now.begun == self.home.begun
+            && record.describes(&home)
+            && record.account.as_deref() == Some(row.id.as_str())
+    }
 }
 
 /// Where a usage read found the login it asks the OAuth endpoint with.

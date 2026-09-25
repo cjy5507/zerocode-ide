@@ -975,6 +975,13 @@ pub(crate) fn fresh_command(
 /// Only a definite absence: a directory this process cannot read is not a
 /// missing file.
 pub(crate) fn transcript_absent(path: &str) -> bool {
+    definitely_absent(Path::new(path))
+}
+
+/// The same look at any path: `true` only when the file system says there
+/// is nothing there. The one statement of it — a transcript's absence and a
+/// durable ledger's (t-7538, astra R3-1) are the same question.
+pub(crate) fn definitely_absent(path: &Path) -> bool {
     std::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
@@ -1119,17 +1126,26 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     // not as the worker's witness, and not as a person's tab either — a
     // second process on one transcript is the same fault from every door.
     // The window's look lifts the hold once the program is gone, and this
-    // wake goes on as any other.
-    if let Some(worker) =
-        crate::orchestration::held_by_an_unseen_exit(agent, &session.id, &|seen| {
-            window.exit_seen(seen)
-        })
-    {
-        window.note(&restart_nudge_runtime::held_line(term, agent, &worker));
-        return Err(format!(
-            "워커 {worker}의 옛 판 프로그램이 아직 떠나지 않아 그 대화를 열지 않았습니다 — \
-             떠난 뒤 다시 열 수 있습니다"
-        ));
+    // wake goes on as any other. A ledger this window cannot read is not a
+    // ledger that holds nothing (astra R3-1): nothing opens until it reads.
+    match crate::orchestration::held_by_an_unseen_exit(agent, &session.id, &|seen| {
+        window.exit_seen(seen)
+    }) {
+        Ok(None) => {}
+        Ok(Some(worker)) => {
+            window.note(&restart_nudge_runtime::held_line(term, agent, &worker));
+            return Err(format!(
+                "워커 {worker}의 옛 판 프로그램이 아직 떠나지 않아 그 대화를 열지 않았습니다 — \
+                 떠난 뒤 다시 열 수 있습니다"
+            ));
+        }
+        Err(why) => {
+            window.note(&restart_nudge_runtime::unread_hold_line(term, agent, &why));
+            return Err(format!(
+                "원장을 읽지 못해 이 대화를 붙든 옛 프로그램이 없는지 확인할 수 없어 열지 \
+                 않았습니다 — 원장을 다시 읽을 수 있게 되면 다시 열 수 있습니다 ({why})"
+            ));
+        }
     }
     let launch_override = window.launch_override(agent)?;
     // The words the wake carries are decided here, before the argv is built

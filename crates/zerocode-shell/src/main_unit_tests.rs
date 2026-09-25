@@ -21194,7 +21194,7 @@ mod dock_launched_usage_probes {
         };
         let root = Path::new(&root);
         let read = match provider.as_str() {
-            "claude" => scan_claude_usage_now(root),
+            "claude" => scan_claude_usage_now(root, &LiveSelected).scanned,
             "codex" => scan_codex_usage_now(root),
             other => panic!("no usage scan for {other}"),
         };

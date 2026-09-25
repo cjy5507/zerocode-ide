@@ -234,20 +234,11 @@ pub(crate) fn claude_usage(state: State<'_, AppState>, force: bool) -> UsageRepo
         // the new account's name, which reads as a switch that did nothing.
         |snapshot| snapshot.account == whose,
         force,
-        move || {
-            // The row the read runs as, taken as it begins: what the switch
-            // and the wall read is this account's reading only while the row
-            // still names this login when the answer lands (astra R6).
-            let began_as = active_claude_account(&config_root);
-            let scanned = scan_claude_usage_now(&config_root);
-            land_claude_usage_as(
-                &config_root,
-                &readings_root,
-                began_as.as_ref(),
-                &scanned.usage,
-            );
-            scanned
-        },
+        // The row the read runs as and the login it asks with, taken in one
+        // look: what the switch and the wall read is this account's reading
+        // only when the login the read used is the row's, and while the row
+        // still names that login when the answer lands (astra R6, R6-1).
+        move || read_selected_claude_usage(&config_root, &readings_root, &LiveSelected),
     )
 }
 

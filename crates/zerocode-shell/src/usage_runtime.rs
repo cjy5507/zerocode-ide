@@ -420,15 +420,17 @@ pub(super) fn reading_of_login<'a>(
 /// through the one door every account's reading lands by
 /// ([`land_claude_account_usage`]), so it is stamped with the login it was
 /// read as and dropped if that login changed while it was out (astra R6).
-/// `began_as` is the selected row when the read began; a read that ran as
-/// no managed account, or as another one, lands nowhere here.
+/// `read_as` is the row the read's login was shown to be
+/// ([`SelectedScan::as_account`], astra R6-1); a read that ran as no managed
+/// account, as another one, or with a login nobody could place lands
+/// nowhere here.
 pub(super) fn land_claude_usage_as(
     config_root: &Path,
     local_data_root: &Path,
-    began_as: Option<&zerocode_core::ClaudeAccount>,
+    read_as: Option<&zerocode_core::ClaudeAccount>,
     fresh: &usage::ProviderUsage,
 ) -> bool {
-    match began_as {
+    match read_as {
         Some(account) if fresh.account.as_deref() == Some(account.id.as_str()) => {
             land_claude_account_usage(config_root, local_data_root, account, fresh.clone())
         }
@@ -629,10 +631,94 @@ pub(super) fn probe_path_env() -> Option<(String, String)> {
     Some(("PATH".to_string(), path))
 }
 
-/// Run the hidden terminal and read the `/usage` screen. Blocking — always
-/// called from its own thread.
-pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
-    let whose = active_claude_account_id(config_root);
+/// The selected account's outside doors (t-7538, astra R6-1): its store's
+/// preparation, the login a read's environment leads to, and the endpoint
+/// — handed in so the suite stands fakes where the keychain and the server
+/// are, and can meet a read between its look and its login.
+pub(super) trait SelectedDoors {
+    fn prepare(
+        &self,
+        config_root: &Path,
+        account: &zerocode_core::ClaudeAccount,
+    ) -> Result<(), String>;
+    fn login(&self, env: &[(String, String)]) -> Option<(String, accounts::LoginFrom)>;
+    fn ask(
+        &self,
+        login: Option<&str>,
+        now_ms: i64,
+    ) -> Result<usage_oauth::OauthUsage, usage_http::Failure>;
+}
+
+/// The window's own doors: the store's preparation, the one login walk,
+/// and the endpoint the CLI itself reads.
+pub(super) struct LiveSelected;
+
+impl SelectedDoors for LiveSelected {
+    fn prepare(
+        &self,
+        config_root: &Path,
+        account: &zerocode_core::ClaudeAccount,
+    ) -> Result<(), String> {
+        accounts::prepare_store(config_root, account)
+    }
+
+    fn login(&self, env: &[(String, String)]) -> Option<(String, accounts::LoginFrom)> {
+        accounts::usage_login(env)
+    }
+
+    fn ask(
+        &self,
+        login: Option<&str>,
+        now_ms: i64,
+    ) -> Result<usage_oauth::OauthUsage, usage_http::Failure> {
+        usage_oauth::claude(login, now_ms)
+    }
+}
+
+/// What the selected account's read brought back, and the row it is the
+/// reading of: `None` when it ran as no managed account, or when the login
+/// it used could not be shown to be the row's (astra R6-1).
+pub(super) struct SelectedScan {
+    pub(super) scanned: Scanned,
+    pub(super) as_account: Option<zerocode_core::ClaudeAccount>,
+}
+
+/// The status bar's read of the selected account, and its landing as that
+/// account's own reading — only as the row the read provably ran as
+/// (t-7538, astra R6-1). The one road `claude_usage` runs off its thread.
+pub(super) fn read_selected_claude_usage(
+    config_root: &Path,
+    readings_root: &Path,
+    doors: &dyn SelectedDoors,
+) -> Scanned {
+    let read = scan_claude_usage_now(config_root, doors);
+    land_claude_usage_as(
+        config_root,
+        readings_root,
+        read.as_account.as_ref(),
+        &read.scanned.usage,
+    );
+    read.scanned
+}
+
+/// Why a read of the selected account is nobody's number: the login it
+/// used was not shown to be the row's — the selection or the runtime home
+/// moved under it (astra R6-1).
+const UNPROVEN_LOGIN: &str =
+    "읽는 사이 계정이 바뀌어 이 수치가 선택된 계정의 것인지 확인하지 못했습니다 — 다시 읽습니다";
+
+/// Read the selected account's plan usage — the OAuth road, then the
+/// hidden terminal. Blocking — always called from its own thread.
+///
+/// As ONE look at the selection (astra R6-1): the row whose reading this
+/// is and the environment the read runs in come out of the same read of
+/// the store ([`accounts::look_at_selected`]), and the answer is the row's
+/// only while the login the read used is shown to be the row's; otherwise
+/// it is nobody's number, and says so.
+pub(super) fn scan_claude_usage_now(config_root: &Path, doors: &dyn SelectedDoors) -> SelectedScan {
+    let look = accounts::look_at_selected(config_root);
+    let row = look.whose().cloned();
+    let whose = row.as_ref().map(|row| row.id.clone());
     let failed = |status: &str, error: String| usage::ProviderUsage {
         provider: "claude".to_string(),
         session: None,
@@ -649,6 +735,31 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
         reset_credits: None,
         account: whose.clone(),
     };
+    // How the read ends: filed under the row when what it read is the row's
+    // own (`owned`), and otherwise nobody's.
+    let ended = |usage: usage::ProviderUsage, road: UsageRoad, owned: bool| match &row {
+        Some(row) if owned => SelectedScan {
+            scanned: Scanned { usage, road },
+            as_account: Some(row.clone()),
+        },
+        Some(_) => SelectedScan {
+            scanned: Scanned {
+                usage: claude_reading_failed(
+                    "error",
+                    UNPROVEN_LOGIN.to_string(),
+                    None,
+                    None,
+                    whose.clone(),
+                ),
+                road,
+            },
+            as_account: None,
+        },
+        None => SelectedScan {
+            scanned: Scanned { usage, road },
+            as_account: None,
+        },
+    };
     // The OAuth road FIRST — one round trip against the endpoint the CLI
     // itself reads, exactly Orca's order (claude-fetcher.ts:46; the hidden
     // terminal below is its fallback, not its peer). This is what ends the
@@ -656,16 +767,20 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     // login the SELECTED account's CLI is using, out of the same reading
     // environment the terminal road below is handed — and out of the store
     // that CLI refreshes, not the copy this window wrote at the last switch,
-    // which had expired and answered 401 on every read (t-6583).
-    if let Err(error) = accounts::prepare_selected_store(config_root) {
-        return Scanned {
-            usage: failed("error", error),
-            road: UsageRoad::Local,
-        };
+    // which had expired and answered 401 on every read (t-6583). A store
+    // that cannot be prepared is a fact about the row's own store.
+    if let Some(selected) = &look.row
+        && let Err(error) = doors.prepare(config_root, selected)
+    {
+        return ended(failed("error", error), UsageRoad::Local, true);
     }
-    let login = accounts::usage_login(&accounts::reading_env_for(config_root, "claude"));
+    let login = doors.login(&look.env);
     let from = login.as_ref().map(|(_, from)| *from);
-    let asked = usage_oauth::claude(
+    // Whose login this is, asked as soon as it is read — before the
+    // endpoint answers, however long that takes. No login found through
+    // the row's own environment is the row's own answer.
+    let owned = from.is_none_or(|from| look.login_is_its(config_root, from));
+    let asked = doors.ask(
         login.as_ref().map(|(document, _)| document.as_str()),
         epoch_ms_now(),
     );
@@ -675,8 +790,8 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     if let Err(failure) = &asked
         && failure.skip_cli_fallback
     {
-        return Scanned {
-            usage: usage::ProviderUsage {
+        return ended(
+            usage::ProviderUsage {
                 provider: "claude".to_string(),
                 session: None,
                 weekly: None,
@@ -690,20 +805,22 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
                 retry_at_ms: failure.retry_at_ms,
                 plan_type: None,
                 reset_credits: None,
-                account: whose,
+                account: whose.clone(),
             },
-            road: UsageRoad::Oauth { login: from },
-        };
+            UsageRoad::Oauth { login: from },
+            owned,
+        );
     }
     let oauth = match asked {
         // The same reading the per-account road keeps, under the same
         // range rule (astra R6): the selected account's number is chosen by
         // and walled by exactly like any other account's.
         Ok(read) => {
-            return Scanned {
-                usage: claude_oauth_reading(read, whose),
-                road: UsageRoad::Oauth { login: from },
-            };
+            return ended(
+                claude_oauth_reading(read, whose.clone()),
+                UsageRoad::Oauth { login: from },
+                owned,
+            );
         }
         Err(failure) => failure.recovery.kind,
     };
@@ -723,7 +840,7 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     // pty under `envPatch: { CLAUDE_CONFIG_DIR }` with `stripAuthEnv`,
     // out/main/index.js:209490-209516).
     let mut env = vec![("TERM".to_string(), "xterm-256color".to_string())];
-    env.extend(accounts::reading_env_for(config_root, "claude"));
+    env.extend(look.env.iter().cloned());
     env.extend(probe_path_env());
     let mut pty = match PtyLane::spawn(
         "claude",
@@ -735,13 +852,15 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     ) {
         Ok(pty) => pty,
         Err(error) => {
-            return Scanned {
-                usage: failed(
+            // Nothing ran: a fact about this machine, not about a login.
+            return ended(
+                failed(
                     "unavailable",
                     format!("claude를 시작하지 못했습니다: {error}"),
                 ),
                 road,
-            };
+                true,
+            );
         }
     };
     let started = Instant::now();
@@ -787,6 +906,9 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
         }
     };
     let _ = pty.kill();
+    // The CLI ran in the runtime home: its screen is the row's only while
+    // the home held the row's login the whole time it ran.
+    let owned = look.home_is_its(config_root);
     let parsed = usage::parse_usage_screen(&screen);
     let session = usage_window_from(parsed.session, usage::SESSION_WINDOW_MINUTES);
     let weekly = usage_window_from(parsed.weekly, usage::WEEKLY_WINDOW_MINUTES);
@@ -813,23 +935,21 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
             // carries 「다시 로그인」 (`account_relogin`, ui/shell.js). Naming
             // the discarding road here sent people down the one that slice was
             // written to close.
-            return Scanned {
-                usage: failed(
+            return ended(
+                failed(
                     usage::SIGNED_OUT_STATUS,
                     "이 계정은 로그인되어 있지 않습니다 — 설정에서 다시 로그인하세요".to_string(),
                 ),
                 road,
-            };
+                owned,
+            );
         } else {
             "/usage 화면이 렌더되지 않았습니다".to_string()
         };
-        return Scanned {
-            usage: failed("error", error),
-            road,
-        };
+        return ended(failed("error", error), road, owned);
     }
-    Scanned {
-        usage: usage::ProviderUsage {
+    ended(
+        usage::ProviderUsage {
             provider: "claude".to_string(),
             session,
             weekly,
@@ -843,10 +963,11 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
             retry_at_ms: None,
             plan_type: None,
             reset_credits: None,
-            account: whose,
+            account: whose.clone(),
         },
         road,
-    }
+        owned,
+    )
 }
 
 /// Read Codex's `/status` the way Orca does — a hidden terminal, the command

@@ -18908,8 +18908,15 @@ mod tests {
     fn usage_asks_the_api_before_it_types_at_a_terminal() {
         let backend = shipped_backend();
         let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
+        // The Claude scan asks through its doors (t-7538, astra R6-1), and the
+        // window's own door is the endpoint.
+        assert!(
+            block_after(shipped, "impl SelectedDoors for LiveSelected {")
+                .contains("usage_oauth::claude(login, now_ms)"),
+            "the selected account's live door no longer asks the OAuth endpoint"
+        );
         for (road, oauth) in [
-            ("fn scan_claude_usage_now(", "usage_oauth::claude("),
+            ("fn scan_claude_usage_now(", "doors.ask("),
             ("fn scan_codex_usage_now(", "usage_oauth::codex("),
         ] {
             let scanning = block_after(shipped, road);
@@ -19059,15 +19066,52 @@ mod tests {
             "the usage login names the person's own keychain item:\n{looking}"
         );
         // Asked with the READING door's environment, which is empty for the
-        // system default — so that selection reads no login at all.
+        // system default — so that selection reads no login at all. Taken in
+        // ONE look with the row the answer is filed under (t-7538, astra
+        // R6-1): the row and the environment out of one read of the store,
+        // the login through the live door's one walk.
         let backend = shipped_backend();
         let scanning = block_after(backend, "fn scan_claude_usage_now(");
         assert!(
-            scanning.contains(
-                "accounts::usage_login(&accounts::reading_env_for(config_root, \"claude\"))"
-            ),
+            scanning.contains("let look = accounts::look_at_selected(config_root);")
+                && scanning.contains("doors.login(&look.env)")
+                && !scanning.contains("reading_env_for("),
             "the usage read looks for its login somewhere other than the \
-             reading door:\n{scanning}"
+             reading door, or at another moment than the row it files the \
+             answer under:\n{scanning}"
+        );
+        assert!(
+            block_after(backend, "impl SelectedDoors for LiveSelected {")
+                .contains("accounts::usage_login(env)"),
+            "the selected account's live door walks a login road of its own"
+        );
+        let looking = block_after(shipped, "pub(crate) fn look_at_selected(");
+        assert!(
+            looking.contains("runtime_env_for(config_root, \"claude\")"),
+            "the one look takes its environment somewhere other than the \
+             reading door:\n{looking}"
+        );
+        // And the answer is the row's only as far as the login is shown to
+        // be: the OAuth road asks right after the login is read, the
+        // terminal road after the CLI it ran in the runtime home is done,
+        // and a put into that home is counted from the first write on.
+        assert!(
+            scanning.contains("look.login_is_its(config_root, from)")
+                && scanning.contains("let owned = look.home_is_its(config_root);"),
+            "the selected read files an answer under its row without showing \
+             the login it used is the row's:\n{scanning}"
+        );
+        let putting = block_after(shipped, "fn materialize_into(");
+        let fast = putting
+            .find("if already_materialized(")
+            .expect("the unchanged-runtime fast path");
+        let counted = putting
+            .find("HomePut::begin(home)")
+            .expect("a put into the runtime home is not counted");
+        assert!(
+            fast < counted,
+            "a launch of the already-selected account counts as a put, so a \
+             read beside it can never be shown to be its row's:\n{putting}"
         );
         let deciding = block_after(shipped, "fn runtime_env_for(");
         assert!(
@@ -24110,7 +24154,8 @@ mod tests {
         // while they touched nothing — the drumbeat behind "키체인이 계속 떠".
         let scanning = block_after(backend, "fn scan_claude_usage_now(");
         assert!(
-            scanning.contains("env.extend(accounts::reading_env_for(config_root, \"claude\"))"),
+            scanning.contains("let look = accounts::look_at_selected(config_root);")
+                && scanning.contains("env.extend(look.env.iter().cloned());"),
             "the plan scan reads the machine's login again, so the picker has \
              no visible effect:\n{scanning}"
         );
