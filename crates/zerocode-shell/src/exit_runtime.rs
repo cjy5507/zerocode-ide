@@ -278,6 +278,68 @@ fn first(held: &mut Option<ExitRoad>, road: ExitRoad) -> ExitRoad {
     *held.get_or_insert(road)
 }
 
+/// Whether this window is on its way out — a road has been named (t-7812 D).
+///
+/// From that moment the pane layouts on disk are the list the next window
+/// restores: what the panes do on their way out — a shell ending, a tab
+/// pruned around it — describes the window dying, not the one coming back.
+pub(crate) fn leaving() -> bool {
+    exiting().road.is_some()
+}
+
+/// What `terminate:` must get done before the process is gone, one step
+/// each, so the order is a thing a test can hold (t-7812 D1).
+pub(crate) trait Terminating {
+    /// The ledger's goodbye: seated workers sleep with their dispatches
+    /// open, so a pane that exits after this settles nothing.
+    fn goodbye(&self, road: ExitRoad);
+    /// Every remembered leaf's screen, into the layouts file.
+    fn keep_screens(&self);
+    /// The last statuses, flushed past their debounce.
+    fn keep_statuses(&self);
+    /// Every pane ended, here, rather than whenever the process happens to.
+    fn end_panes(&self);
+    /// The embedded browser's own shutdown.
+    fn shut_browser(&self);
+    /// The crash watchdog's word that this exit was a clean one.
+    fn mark_clean_exit(&self);
+}
+
+/// `terminate:` — ⌘Q, the Dock's Quit, a logout — in the order that keeps
+/// the next window's list (t-7812 D1).
+///
+/// The goodbye first; then the screens and statuses the next window reopens
+/// from; then the panes; and only then the embedded browser, the one step
+/// measured to stall. On 2026-09-25 01:02 a ⌘Q spent twenty seconds inside
+/// the browser's shutdown (the crash record's `main_scope=event_exit`), the
+/// panes ended in that time, and the ledger — whose goodbye stood behind the
+/// browser — wrote three of them down as dead workers. The clean-exit mark
+/// is last: a quit that never got that far was not a clean one.
+pub(crate) fn terminate(steps: &dyn Terminating) {
+    leave_in_order(begin(ExitRoad::Terminate), steps);
+}
+
+/// A restart button's way out (`relaunch_window`), which tauri follows with
+/// no exit event at all — tauri's restart replaces the process — so what the
+/// next window restores from is written here or nowhere (t-7812 D): the
+/// goodbye, then the screens and the statuses. The panes and the browser end
+/// with the process it replaces.
+pub(crate) fn relaunch(road: ExitRoad, steps: &dyn Terminating) {
+    steps.goodbye(road);
+    steps.keep_screens();
+    steps.keep_statuses();
+}
+
+/// [`terminate`]'s order, for the road already named.
+fn leave_in_order(road: ExitRoad, steps: &dyn Terminating) {
+    steps.goodbye(road);
+    steps.keep_screens();
+    steps.keep_statuses();
+    steps.end_panes();
+    steps.shut_browser();
+    steps.mark_clean_exit();
+}
+
 /// What the person chose on the way out, for the goodbye's line.
 pub(crate) fn choice() -> Choice {
     exiting().choice
@@ -589,5 +651,82 @@ mod tests {
         ] {
             assert_eq!(road.to_string(), word);
         }
+    }
+
+    /// Each step a road out takes, written down as it is taken, and the
+    /// road its goodbye named.
+    #[derive(Default)]
+    struct Steps {
+        taken: std::cell::RefCell<Vec<&'static str>>,
+        road: std::cell::Cell<Option<ExitRoad>>,
+    }
+
+    impl Terminating for Steps {
+        fn goodbye(&self, road: ExitRoad) {
+            self.road.set(Some(road));
+            self.taken.borrow_mut().push("goodbye");
+        }
+        fn keep_screens(&self) {
+            self.taken.borrow_mut().push("screens");
+        }
+        fn keep_statuses(&self) {
+            self.taken.borrow_mut().push("statuses");
+        }
+        fn end_panes(&self) {
+            self.taken.borrow_mut().push("panes");
+        }
+        fn shut_browser(&self) {
+            // The stall: whatever ends in here ends after everything above.
+            self.taken.borrow_mut().push("browser");
+        }
+        fn mark_clean_exit(&self) {
+            self.taken.borrow_mut().push("clean");
+        }
+    }
+
+    /// t-7812 D1: the goodbye, the screens, the statuses and the panes all
+    /// come before the embedded browser's shutdown — the step that stalled
+    /// twenty seconds while the panes died and the ledger, its goodbye
+    /// still queued behind it, heard three workers as dead.
+    #[test]
+    fn terminate_says_goodbye_and_keeps_the_list_before_the_browser_can_stall() {
+        let steps = Steps::default();
+        leave_in_order(ExitRoad::Terminate, &steps);
+        assert_eq!(steps.road.get(), Some(ExitRoad::Terminate));
+        assert_eq!(
+            *steps.taken.borrow(),
+            [
+                "goodbye", "screens", "statuses", "panes", "browser", "clean"
+            ]
+        );
+    }
+
+    /// The restart button's road: the goodbye and what the next window
+    /// restores from, before tauri's restart replaces the process — which
+    /// no exit event follows.
+    #[test]
+    fn a_restart_button_says_goodbye_and_keeps_the_list_before_it_restarts() {
+        let steps = Steps::default();
+        let road = ExitRoad::Restart(Some(RestartDoor::UpdateToast));
+        relaunch(road, &steps);
+        assert_eq!(steps.road.get(), Some(road));
+        assert_eq!(*steps.taken.borrow(), ["goodbye", "screens", "statuses"]);
+    }
+
+    /// The layouts file stops being the window's to rewrite the moment a
+    /// road is named, and not before: a question asked and cancelled is not
+    /// leaving.
+    #[test]
+    fn a_window_is_leaving_once_a_road_is_named_and_not_while_it_only_asks() {
+        let mut state = Exiting::default();
+        assert!(state.road.is_none(), "a fresh window is already leaving");
+        state.question = Some((Asking::Close, 0));
+        state.question = None;
+        assert!(state.road.is_none(), "an answered question is leaving");
+        assert_eq!(
+            first(&mut state.road, ExitRoad::Terminate),
+            ExitRoad::Terminate
+        );
+        assert!(state.road.is_some());
     }
 }

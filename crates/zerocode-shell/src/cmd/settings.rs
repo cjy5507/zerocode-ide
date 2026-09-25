@@ -1049,10 +1049,12 @@ pub(crate) fn save_pane_layouts(
     let sessions = state.pane_sessions().clone();
     let agents = state.agent_terms().clone();
     carry_zo_pane_sessions(&mut layouts, &sessions, &agents);
-    let mut held = pane_layout::read(&file);
-    pane_layout::store(&mut held, worktree, layouts);
-    let text = serde_json::to_string(&held).map_err(|error| error.to_string())?;
-    std::fs::write(&file, text).map_err(|error| error.to_string())
+    // The one writer, and not once the window is leaving (t-7812 D): the
+    // file is then the next window's list, and a save of the window dying
+    // would take its tabs off it.
+    pane_layout::save_window_set(&file, worktree, layouts, &crate::exit_runtime::leaving)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// One worktree's stored stage — the document tabs, their groups, the split

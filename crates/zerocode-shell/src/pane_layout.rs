@@ -122,16 +122,14 @@ pub struct WakeAgent {
     /// One agent resumes BY its transcript path rather than by the id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
-    /// Whether the window went down while this conversation was MID-TURN —
-    /// its state was `working` at the last persist. A wake carrying this
-    /// mark is resumed with a continue nudge, so the cut turn restarts by
-    /// itself; a pane that was waiting on the person keeps waiting on them.
+    /// Whether this conversation was MID-TURN at the last persist — its
+    /// state was `working` — as the hook said it then.
     ///
-    /// The hook's word, as of the last persist. For a Codex pane the wake
-    /// asks the rollout `transcript_path` names instead
-    /// (`restart_nudge_runtime::wake_interrupted`, t-2874): Codex's hook
-    /// says `idle` across a long tool call, so this mark alone let a pane cut
-    /// mid-`CommandExecution` wake into an empty composer.
+    /// Kept in the record, and no longer what decides a continue (t-7812 E).
+    /// A person's own tab is reopened as it stood, never told to go on; a
+    /// worker's wake is told by the goodbye's own reading of its turn and the
+    /// commands under its pane (`restart_nudge_runtime::worker_nudge`), which
+    /// a crash leaves unsaid rather than guessed from this mark.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
 }
@@ -315,6 +313,57 @@ pub fn read(file: &Path) -> Layouts {
         return Layouts::new();
     };
     serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// The one writer of the layouts file (t-7812 D).
+///
+/// The file holds every worktree's set, and each save reads it whole,
+/// changes one part and writes it whole. Two saves at once — the restore of
+/// one workspace persisting while another's tab closes — each read the same
+/// file and the second write erased the first one's change; and a write cut
+/// short left half a file for the next boot. So every change goes through
+/// here: one lock for the process, the change asked of the file as it is
+/// under that lock, and the result put in place by one durable replace.
+/// `change` answers whether it changed anything; nothing is written when
+/// it did not.
+pub(crate) fn rewrite(
+    file: &Path,
+    change: impl FnOnce(&mut Layouts) -> bool,
+) -> std::io::Result<()> {
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _writing = WRITING.lock().unwrap_or_else(|held| held.into_inner());
+    let mut held = read(file);
+    if !change(&mut held) {
+        return Ok(());
+    }
+    let text = serde_json::to_vec(&held).map_err(std::io::Error::other)?;
+    crate::durable_file::replace_bytes(file, &text).map(|_| ())
+}
+
+/// The window's own save of one worktree's set, through [`rewrite`] — or
+/// nothing, once the window is leaving (t-7812 D).
+///
+/// From the first exit signal the file is the list the next window restores.
+/// What the window saves after it describes the window dying: a shell that
+/// ended on the way out, and the tab the window pruned around it. Asked
+/// under the writer's own lock, so a save cannot land between the exit's own
+/// snapshot and the process ending. Answers whether the set was written.
+pub(crate) fn save_window_set(
+    file: &Path,
+    worktree: String,
+    tabs: Vec<TabLayout>,
+    leaving: &dyn Fn() -> bool,
+) -> std::io::Result<bool> {
+    let mut saved = false;
+    rewrite(file, |held| {
+        if leaving() {
+            return false;
+        }
+        store(held, worktree, tabs);
+        saved = true;
+        true
+    })?;
+    Ok(saved)
 }
 
 /// Put one worktree's tabs into `layouts`, normalised, pruning as it goes.
@@ -724,5 +773,92 @@ mod tests {
             serde_json::from_str::<TabLayout>(&json).expect("parses"),
             held
         );
+    }
+
+    /// Checkouts that exist, for [`store`]'s pruning to keep.
+    fn checkouts(root: &Path, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|at| {
+                let tree = root.join(format!("wt-{at}"));
+                std::fs::create_dir(&tree).expect("a checkout");
+                tree.to_string_lossy().into_owned()
+            })
+            .collect()
+    }
+
+    /// t-7812 D: one writer for the whole file. Sixteen worktrees saving at
+    /// once, twenty-five times each, keep every worktree they wrote — a save
+    /// that read the file before another's write and wrote after it used to
+    /// erase that one's set.
+    #[test]
+    fn saves_from_many_threads_keep_every_worktree_they_wrote() {
+        let root = tempfile::tempdir().expect("a config root");
+        let file = root.path().join("pane-layouts.json");
+        let trees = checkouts(root.path(), 16);
+        std::thread::scope(|scope| {
+            for tree in &trees {
+                let file = &file;
+                scope.spawn(move || {
+                    for _ in 0..25 {
+                        let saved = save_window_set(
+                            file,
+                            tree.clone(),
+                            vec![bare(PaneNode::Leaf)],
+                            &|| false,
+                        )
+                        .expect("a save");
+                        assert!(saved, "a window that is not leaving was refused");
+                    }
+                });
+            }
+        });
+        let held = read(&file);
+        assert_eq!(
+            held.len(),
+            trees.len(),
+            "a save erased another worktree's set"
+        );
+        for tree in &trees {
+            assert_eq!(held[tree].len(), 1, "{tree} lost its tab");
+        }
+    }
+
+    /// t-7812 D: once the window is leaving, what it saves describes the
+    /// window dying — a shell ended on the way out, the tab pruned around it
+    /// — and the file stays the list the next window restores. The exit's
+    /// own snapshot still writes.
+    #[test]
+    fn a_leaving_window_s_save_leaves_the_restore_list_as_it_stood() {
+        let root = tempfile::tempdir().expect("a config root");
+        let file = root.path().join("pane-layouts.json");
+        let tree = checkouts(root.path(), 1).remove(0);
+        assert!(
+            save_window_set(
+                &file,
+                tree.clone(),
+                vec![bare(PaneNode::Leaf), bare(split(None))],
+                &|| false,
+            )
+            .expect("a save")
+        );
+        let before = std::fs::read(&file).expect("the list");
+        // The last tab's shell ended on the way out; the window saves the
+        // set without it.
+        assert!(!save_window_set(&file, tree.clone(), Vec::new(), &|| true).expect("a refusal"));
+        assert_eq!(
+            std::fs::read(&file).expect("the list"),
+            before,
+            "a leaving window rewrote the next window's restore list"
+        );
+        assert_eq!(read(&file)[&tree].len(), 2);
+        // The exit's snapshot is the one write left, through the same door.
+        rewrite(&file, |held| {
+            held.get_mut(&tree).expect("the set")[0]
+                .buffers
+                .insert(0, "last screen".to_string());
+            true
+        })
+        .expect("the snapshot");
+        assert_eq!(read(&file)[&tree][0].buffers[&0], "last screen");
     }
 }

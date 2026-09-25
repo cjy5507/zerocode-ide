@@ -301,6 +301,12 @@ pub fn claude_args_without_selectors(args: &[String]) -> Vec<String> {
     crate::capabilities::args_without_selectors(crate::capabilities::CLAUDE_RESUME_SELECTORS, args)
 }
 
+/// The word Codex re-enters a thread by — `codex resume <id>` — named once,
+/// for [`resume_argv`] and for the window road that must know a launch line
+/// is a resume before it rewrites one (t-7812: a remote app-server route put
+/// in front of it is refused by Codex).
+pub const CODEX_RESUME_SUBCOMMAND: &str = "resume";
+
 /// The command line that resumes this session, or `None` when it cannot be
 /// built.
 ///
@@ -320,7 +326,7 @@ pub fn resume_argv(agent: AgentKind, session: &ProviderSession) -> Option<Vec<St
     let id = session.id.clone();
     let argv = match agent {
         AgentKind::Claude => vec!["claude", "--resume"],
-        AgentKind::Codex => vec!["codex", "resume"],
+        AgentKind::Codex => vec!["codex", CODEX_RESUME_SUBCOMMAND],
         AgentKind::Droid => vec!["droid", "--resume"],
         AgentKind::Grok => vec!["grok", "--resume"],
         AgentKind::Devin => vec!["devin", "--resume"],

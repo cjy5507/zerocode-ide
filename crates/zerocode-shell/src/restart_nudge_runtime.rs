@@ -135,21 +135,116 @@ pub(super) fn resume_nudge(
     parts.join(" ")
 }
 
+/// The words a restored worker's wake carries, or none (t-7812 E) — one
+/// answer for both roads that bring a worker back: the ledger's reseat and
+/// the window's resumed pane.
+///
+/// Only what the goodbye read as cut ([`restart_census::peek_cut`]): a turn
+/// under way, or commands running under the pane (t-6428 ⑤). A worker at
+/// rest with nothing cut is idle, and an idle worker is not told to go on —
+/// its last turn ended, and a continue would put the next one in its mouth.
+/// A worker that was waiting on a question for the person is not either: the
+/// question was the person's to answer. A wake with no goodbye to read — a
+/// crash's — hears nothing: a line typed on a guess is the blind re-send a
+/// continuation must never be. A person's own tab never asks here at all;
+/// the window restarting is not the person asking for more.
+///
+/// Read, not spent (t-7812 R2): the goodbye's word about a worker is spent
+/// by the wake that hands these words to a pane holding it ([`nudge_spent`]),
+/// so a wake that starts nothing — its seat refused, its spawn refused —
+/// leaves them for the road that tries next.
+///
+/// [`restart_census::peek_cut`]: crate::orchestration::restart_census::peek_cut
+pub(super) fn worker_nudge(root: &Path, worker: &str, checkout: Option<&Path>) -> Option<String> {
+    let cut = crate::orchestration::restart_census::peek_cut(root, worker);
+    if !cut.any() {
+        return None;
+    }
+    let state = checkout.and_then(|checkout| {
+        worktree_state(
+            checkout,
+            u64::try_from(now_epoch_ms() / 1_000).unwrap_or_default(),
+        )
+    });
+    Some(resume_nudge(cut.turn, true, state.as_ref(), &cut.commands))
+}
+
+/// `worker`'s words were handed to a pane that holds it (t-7812 R2): they
+/// reached it, or may have — and words that may have landed are never said
+/// a second time. The goodbye's word about that worker is spent.
+pub(super) fn nudge_spent(root: &Path, worker: &str) {
+    crate::orchestration::restart_census::spend_cut(root, worker);
+}
+
+/// The goodbye's word a wake's words came from: the data root its note lives
+/// in and the worker it was about, so the words are spent exactly when they
+/// may have reached the pane (t-7812 R2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Owed {
+    pub(super) root: PathBuf,
+    pub(super) worker: String,
+}
+
+/// What a wake's delivery answered about its words (t-7812 R2). The one
+/// thing that decides whether they may be typed again: only words that never
+/// left, at a composer that was not ready, are still the wake's to place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Said {
+    /// The words reached the child — its argv, or a paste its composer took,
+    /// Enter or not. Never typed again, whatever the hooks say after.
+    Reached,
+    /// Nothing was sent: the composer never said it was ready. The line is
+    /// still the wake's, and the one fallback may place the words there.
+    NotReady,
+    /// Nothing was sent, and the line was not the wake's to write on: a
+    /// person's draft or hand, a parked question, another launch. Nothing is
+    /// typed there again.
+    Withheld,
+}
+
+impl Said {
+    pub(super) const fn of(outcome: DeliveryOutcome) -> Self {
+        match outcome {
+            DeliveryOutcome::Delivered | DeliveryOutcome::Unsubmitted(_) => Self::Reached,
+            DeliveryOutcome::TimedOut => Self::NotReady,
+            DeliveryOutcome::Refused(_) => Self::Withheld,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingNudge {
     pub(super) agent: String,
     pub(super) session_id: String,
     pub(super) road: zerocode_core::NudgeRoad,
     /// The exact words this wake carries, so the composer fallback types
-    /// what the argv road said and not a second, shorter nudge.
+    /// what the first delivery meant to say and not a second, shorter nudge.
     pub(super) text: String,
     pub(super) started: Instant,
-    /// When the one composer fallback was delivered, if it has been. The row
-    /// is KEPT past that delivery so the replacement's own `working` hook can
-    /// still close it — a fallback that lands is a `working` receipt, and a
-    /// row removed at fallback time made that receipt land on nothing and the
-    /// forensic line stand at `receipt=none` for a nudge the pane had taken.
-    pub(super) fallback_at: Option<Instant>,
+    /// When the first receipt window closed, if it has. The row is KEPT past
+    /// it — and past the one fallback, when that went — so the pane's own
+    /// `working` hook can still close it: a row removed at the first beat
+    /// made that receipt land on nothing and the forensic line stand at
+    /// `receipt=none` for a nudge the pane had taken.
+    pub(super) first_window_closed: Option<Instant>,
+    /// What the delivery answered, once it has (t-7812 R2). An argv's words
+    /// are [`Said::Reached`] from the start: they rode the launch.
+    pub(super) said: Option<Said>,
+    /// The launch these words were for — the pane's fingerprint when the wake
+    /// armed — so a fallback never types at a program relaunched since.
+    pub(super) launch: Option<u64>,
+    /// The goodbye's word to spend once the words may have reached the pane;
+    /// `None` once spent, or for words that owe nobody.
+    pub(super) owed: Option<Owed>,
+}
+
+impl PendingNudge {
+    /// The goodbye's word, spent: the words reached the pane, or may have.
+    fn spend(&mut self) {
+        if let Some(owed) = self.owed.take() {
+            nudge_spent(&owed.root, &owed.worker);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,12 +252,13 @@ pub(super) enum Resolution {
     /// A `working` hook closed the wake — the nudge was taken. Carries the
     /// time from the resume to the hook, whichever delivery earned it.
     Working(PendingNudge, Duration),
-    /// The first receipt window passed in silence: deliver the one composer
-    /// fallback now. The row stays, waiting for this delivery's own receipt.
+    /// The first receipt window closed with the words never sent, at a
+    /// composer that was not ready: deliver the one fallback now. The row
+    /// stays, waiting for this delivery's own answer and receipt.
     FallbackDeliver(PendingNudge),
-    /// A full window after the fallback and still no `working`: give up on
-    /// this wake and file it `receipt=none`. The one fallback already went,
-    /// so this resolution delivers nothing.
+    /// A full window after the first closed and still no `working`: give up
+    /// on this wake and file it `receipt=none`. Nothing is delivered — the
+    /// hook's silence is not a sign the words were lost (t-7812 R2).
     GaveUp(PendingNudge),
 }
 
@@ -176,42 +272,96 @@ impl PendingNudges {
         self.rows.insert(term, pending);
     }
 
+    /// Whether a wake is still waiting on `term`.
+    pub(super) fn holds(&self, term: TermId) -> bool {
+        self.rows.contains_key(&term)
+    }
+
     pub(super) fn working(&mut self, term: TermId, now: Instant) -> Option<Resolution> {
-        let pending = self.rows.remove(&term)?;
+        let mut pending = self.rows.remove(&term)?;
+        // The pane took input: whatever its delivery has said so far, the
+        // words are not the wake's to say again.
+        pending.spend();
         Some(Resolution::Working(
             pending.clone(),
             now.saturating_duration_since(pending.started),
         ))
     }
 
-    /// One receipt window's verdict, read on the timer thread's beat.
-    ///
-    /// The first firing arms the single composer fallback and keeps the row;
-    /// the second, a window after that fallback, gives up. A `working` hook
-    /// arriving on either side of the fallback removes the row first, so this
-    /// answers `None` and no line is filed twice.
-    pub(super) fn timeout(&mut self, term: TermId, now: Instant) -> Option<Resolution> {
-        let deadline = Duration::from_millis(RESUME_NUDGE_RECEIPT_MS);
-        let pending = self.rows.get_mut(&term)?;
-        match pending.fallback_at {
-            None => {
-                if now.saturating_duration_since(pending.started) < deadline {
-                    return None;
-                }
-                pending.fallback_at = Some(now);
-                Some(Resolution::FallbackDeliver(pending.clone()))
-            }
-            Some(fallback_at) => {
-                if now.saturating_duration_since(fallback_at) < deadline {
-                    return None;
-                }
-                self.rows.remove(&term).map(Resolution::GaveUp)
+    /// What the delivery answered about the words (t-7812 R2). Words that
+    /// reached the pane spend the goodbye's word the moment that is known.
+    pub(super) fn heard(&mut self, term: TermId, outcome: DeliveryOutcome) {
+        if let Some(pending) = self.rows.get_mut(&term) {
+            let said = Said::of(outcome);
+            pending.said = Some(said);
+            if said == Said::Reached {
+                pending.spend();
             }
         }
     }
 
+    /// One receipt window's verdict, read on the timer's beat; `window` is
+    /// the product's [`RESUME_NUDGE_RECEIPT_MS`] everywhere but a test's
+    /// short clock.
+    ///
+    /// The first window's close arms the one composer fallback — only for
+    /// words that never left a composer that was not ready — and keeps the
+    /// row either way; the close of the window after it gives up. A hook's
+    /// silence alone never types anything (t-7812 R2): words that reached
+    /// the pane, or may have, whose `working` report was late or never came,
+    /// are not said twice. A `working` hook on either side of a beat removes
+    /// the row first, so this answers `None` and no line is filed twice.
+    pub(super) fn timeout(
+        &mut self,
+        term: TermId,
+        now: Instant,
+        window: Duration,
+    ) -> Option<Resolution> {
+        let deadline = window;
+        let pending = self.rows.get_mut(&term)?;
+        match pending.first_window_closed {
+            None => {
+                if now.saturating_duration_since(pending.started) < deadline {
+                    return None;
+                }
+                pending.first_window_closed = Some(now);
+                (pending.said == Some(Said::NotReady))
+                    .then(|| Resolution::FallbackDeliver(pending.clone()))
+            }
+            Some(closed) => {
+                if now.saturating_duration_since(closed) < deadline {
+                    return None;
+                }
+                let mut pending = self.rows.remove(&term)?;
+                pending.give_up();
+                Some(Resolution::GaveUp(pending))
+            }
+        }
+    }
+
+    /// The one fallback was placed at the composer: until its own answer
+    /// comes, nobody can say the words did not land (t-7812 R2).
+    pub(super) fn placed_again(&mut self, term: TermId) {
+        if let Some(pending) = self.rows.get_mut(&term) {
+            pending.said = None;
+        }
+    }
+
     fn remove(&mut self, term: TermId) -> Option<PendingNudge> {
-        self.rows.remove(&term)
+        let mut pending = self.rows.remove(&term)?;
+        pending.give_up();
+        Some(pending)
+    }
+}
+
+impl PendingNudge {
+    /// The wake ends unanswered. Words nobody could say were sent — a
+    /// delivery that never answered — may have landed, so the goodbye's word
+    /// is spent; words known never to have left keep it (t-7812 R2).
+    fn give_up(&mut self) {
+        if !matches!(self.said, Some(Said::NotReady | Said::Withheld)) {
+            self.spend();
+        }
     }
 }
 
@@ -249,160 +399,254 @@ pub(super) fn fresh_line(term: TermId, agent: &str, session_id: &str) -> String 
     format!("term {term} started {agent} fresh: {session} was never written")
 }
 
-fn note_resolution(state: &AppState, term: TermId, resolution: Resolution) {
+/// One worker wake's words, as the wake hands them over (t-7812 R2).
+pub(super) struct Words<'a> {
+    pub(super) agent: &'a str,
+    pub(super) session_id: &'a str,
+    /// The road the agent's row says a resume nudge takes.
+    pub(super) road: zerocode_core::NudgeRoad,
+    pub(super) text: String,
+    /// The launch the pane holds as the words are placed.
+    pub(super) launch: Option<u64>,
+    pub(super) owed: Owed,
+}
+
+/// Place a worker wake's words — the one delivery a wake makes on its own —
+/// and build the row its receipt waits in (t-7812 R2).
+///
+/// Words on the argv road rode the launch itself (`resume_argv_continuing`
+/// put them there, and the pane started only after its seat was durable):
+/// they reached the pane, and the goodbye's word is spent now. Words for a
+/// composer are typed at it while it mounts; `typed` answers that delivery's
+/// own answer, which decides the rest in [`watch`]. A composer that could
+/// not be asked at all — its terminal already gone — took nothing.
+pub(super) fn place_words(
+    typed: impl FnOnce(&str) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>>,
+    words: Words<'_>,
+) -> (
+    PendingNudge,
+    Option<std::sync::mpsc::Receiver<DeliveryOutcome>>,
+) {
+    let (said, delivery) = match words.road {
+        zerocode_core::NudgeRoad::Argv => (Some(Said::Reached), None),
+        zerocode_core::NudgeRoad::Composer => match typed(&words.text) {
+            Some(delivery) => (None, Some(delivery)),
+            None => (Some(Said::Withheld), None),
+        },
+    };
+    let mut pending = PendingNudge {
+        agent: words.agent.to_string(),
+        session_id: words.session_id.to_string(),
+        road: words.road,
+        text: words.text,
+        started: Instant::now(),
+        first_window_closed: None,
+        said,
+        launch: words.launch,
+        owed: Some(words.owed),
+    };
+    if said == Some(Said::Reached) {
+        pending.spend();
+    }
+    (pending, delivery)
+}
+
+/// The line for a sleeper's wake that started nothing because the ledger
+/// would not seat it (t-7812 R1): the pane would have been a conversation
+/// the ledger does not know, which is the fault the witness exists to close.
+pub(super) fn unseated_line(term: TermId, agent: &str, worker: &str, why: &str) -> String {
+    format!(
+        "term {term} did not resume {agent}: sleeping worker {worker} could not be seated ({why})"
+    )
+}
+
+/// What a wake's receipt watch needs from the window it waits in (t-7812):
+/// the table its row sits in, a composer to place the one fallback at, and
+/// the log. The product's is the window's own state; a test's is a fake
+/// window, which runs the very same watch on a short clock.
+pub(crate) trait WakeReceipts {
+    /// The table of wakes waiting on a receipt.
+    fn rows(&self) -> std::sync::MutexGuard<'_, PendingNudges>;
+    /// The launch the pane at `term` holds now.
+    fn launch(&self, term: TermId) -> Option<u64>;
+    /// Place the one fallback at a composer at rest, beside whatever a person
+    /// left on its line. Answers the delivery's own answer, when it can.
+    fn type_again(
+        &self,
+        term: TermId,
+        agent: &str,
+        text: &str,
+    ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>>;
+    /// One line in the window's log.
+    fn note(&self, line: &str);
+}
+
+fn note_resolution(
+    window: &dyn WakeReceipts,
+    term: TermId,
+    resolution: Resolution,
+) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
     match resolution {
-        Resolution::Working(pending, elapsed) => note_window_event(
-            state.local_data_root(),
-            &log_line(
+        Resolution::Working(pending, elapsed) => {
+            window.note(&log_line(
                 term,
                 &pending.agent,
                 &pending.session_id,
                 Some(pending.road),
                 Some(elapsed),
-            ),
-        ),
-        // Deliver the one fallback and file nothing yet: its own `working`
-        // hook is what the forensic line waits for. A row removed here — the
-        // road this replaced — made a landed fallback's receipt land on
-        // nothing and left the line reading `receipt=none` for a nudge the
-        // pane had taken.
-        Resolution::FallbackDeliver(pending) => {
-            deliver_composer(state, term, &pending.agent, &pending.text, false);
+            ));
+            None
         }
-        // A full window after that fallback and still no receipt: the line is
-        // filed `receipt=none`, and nothing is delivered a third time.
-        Resolution::GaveUp(pending) => note_window_event(
-            state.local_data_root(),
-            &log_line(
+        // Deliver the one fallback and file nothing yet: its own answer and
+        // its own `working` hook are what the row waits for. Never at another
+        // launch: a pane relaunched since the wake holds a program these
+        // words were not for (t-7812 R2).
+        Resolution::FallbackDeliver(pending) => {
+            if window.launch(term) != pending.launch {
+                return None;
+            }
+            window.type_again(term, &pending.agent, &pending.text)
+        }
+        // A full window after the first and still no receipt: the line is
+        // filed `receipt=none`, and nothing is delivered again.
+        Resolution::GaveUp(pending) => {
+            window.note(&log_line(
                 term,
                 &pending.agent,
                 &pending.session_id,
                 Some(pending.road),
                 None,
-            ),
-        ),
+            ));
+            None
+        }
     }
 }
 
-fn deliver_composer(state: &AppState, term: TermId, agent: &str, text: &str, mounting: bool) {
-    let readiness = if mounting {
-        crate::cmd::terminal::PromptReadiness::Mounting
-    } else {
-        crate::cmd::terminal::PromptReadiness::Resting
-    };
-    let _ = crate::cmd::terminal::type_prompt_at_term(
+/// Watch one marked wake through its two receipt windows (t-3058, t-7812
+/// R2), each `window` long — the product's is [`RESUME_NUDGE_RECEIPT_MS`].
+///
+/// `delivery` is the first delivery's own answer, for words typed at a
+/// composer; words that rode the argv come registered as already said. The
+/// first window hears that answer and then closes: words that never left a
+/// composer that was not ready get the one fallback, typed beside whatever a
+/// person has left on the line, and every other wake just waits out the
+/// second window for its `working` hook. Nothing here types because a hook
+/// was silent.
+pub(super) fn watch(
+    receipts: &dyn WakeReceipts,
+    term: TermId,
+    delivery: Option<std::sync::mpsc::Receiver<DeliveryOutcome>>,
+    window: Duration,
+) {
+    let mut delivery = delivery;
+    for _ in 0..2 {
+        let beat = Instant::now() + window;
+        if let Some(answer) = delivery.take()
+            && let Ok(outcome) = answer.recv_timeout(window)
+        {
+            receipts.rows().heard(term, outcome);
+        }
+        std::thread::sleep(beat.saturating_duration_since(Instant::now()));
+        let resolution = receipts.rows().timeout(term, Instant::now(), window);
+        match resolution {
+            Some(resolution) => {
+                delivery = note_resolution(receipts, term, resolution);
+                if delivery.is_some() {
+                    receipts.rows().placed_again(term);
+                }
+            }
+            None if !receipts.rows().holds(term) => break,
+            None => {}
+        }
+    }
+}
+
+/// The window's own receipts: its pending table, its typed-prompt door and
+/// its log.
+struct WindowReceipts(AppHandle);
+
+impl WakeReceipts for WindowReceipts {
+    fn rows(&self) -> std::sync::MutexGuard<'_, PendingNudges> {
+        self.0.state::<AppState>().inner().pending_nudges()
+    }
+
+    fn launch(&self, term: TermId) -> Option<u64> {
+        crate::cmd::terminal::launch_of(&self.0.state::<AppState>(), term)
+    }
+
+    fn type_again(
+        &self,
+        term: TermId,
+        agent: &str,
+        text: &str,
+    ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
+        crate::cmd::terminal::type_prompt_at_term(
+            &self.0.state::<AppState>(),
+            term,
+            text.to_string(),
+            true,
+            Some(agent),
+            crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+        )
+        .ok()
+    }
+
+    fn note(&self, line: &str) {
+        note_window_event(self.0.state::<AppState>().local_data_root(), line);
+    }
+}
+
+/// Type a wake's words at a composer that is still mounting — the first
+/// delivery of a composer-road nudge. Answers the delivery's own answer.
+pub(super) fn deliver_composer(
+    state: &AppState,
+    term: TermId,
+    agent: &str,
+    text: &str,
+) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
+    crate::cmd::terminal::type_prompt_at_term(
         state,
         term,
         text.to_string(),
         true,
         Some(agent),
-        readiness,
-    );
+        crate::cmd::terminal::PromptReadiness::Mounting,
+    )
+    .ok()
 }
 
-/// The mark a restored pane wakes with: whether its conversation was cut
-/// MID-TURN, so the wake continues it instead of opening an empty composer.
-///
-/// `stored` is the hook's word at the last persist (`WakeAgent::interrupted`,
-/// written at the renderer's mid-turn edge). For a Codex pane it is the wrong
-/// witness — Codex's hook says `idle` across a long tool call, so a worker cut
-/// mid-`CommandExecution` woke unmarked and the nudge road returned before
-/// typing (t-2874; rollout 01a07004, 2026-09-05). The rollout the record names
-/// is the witness that outlives the process, and at wake time it is final, so
-/// its word replaces the stored one BOTH ways: a turn it left open is
-/// continued whatever the hook last said, and a turn it closed is not reopened
-/// by a stale `working` mark. A record naming no file, or a file that is gone,
-/// keeps the stored word. Every other agent keeps the hook-state rule as it is.
-///
-/// Read here rather than at persist time on purpose: Codex's `Stop` hook lands
-/// 5 ms–3 s before `task_complete` reaches the file, and a pane at `idle` never
-/// crosses the mid-turn edge again, so a persist-time reading is stale in both
-/// directions (measured, docs/design/restart-nudge-delivery.md §4).
-pub(super) fn wake_interrupted(agent: &str, stored: bool, transcript_path: Option<&str>) -> bool {
-    // The witness is the row's: only an agent whose wake mark is its own
-    // rollout file is read there; everyone else keeps the stored hook word.
-    let reads_rollout = zerocode_core::agent_capabilities(agent).is_some_and(|caps| {
-        caps.resume.wake_mark == zerocode_core::capabilities::WakeMark::Rollout
-    });
-    if !reads_rollout {
-        return stored;
-    }
-    transcript_path
-        .and_then(|path| zerocode_core::transcript::codex_turn_open(std::path::Path::new(path)))
-        .unwrap_or(stored)
-}
-
-/// Register one restored pane and arm its one-shot receipt deadline.
-/// Unmarked wakes are logged immediately; marked wakes resolve on the first
-/// working hook or the one timeout thread below.
-///
-/// `nudge` is the exact text the wake carries ([`resume_nudge`]) — the argv
-/// road already said it; the composer road types it here.
-pub(super) fn register_wake(
+/// Arm the product's receipt watch for one marked wake: its row, and the
+/// timer thread that walks [`watch`] on the product's window.
+pub(super) fn arm_in_window(
     app: &AppHandle,
     term: TermId,
-    agent: &str,
-    session_id: &str,
-    interrupted: bool,
-    nudge: &str,
+    pending: PendingNudge,
+    delivery: Option<std::sync::mpsc::Receiver<DeliveryOutcome>>,
 ) {
-    if !interrupted {
-        note_window_event(
-            app.state::<AppState>().local_data_root(),
-            &log_line(term, agent, session_id, None, None),
-        );
-        return;
-    }
-    let Some(spec) = agent_spec(agent) else {
-        note_window_event(
-            app.state::<AppState>().local_data_root(),
-            &log_line(term, agent, session_id, None, None),
-        );
-        return;
-    };
-    let pending = PendingNudge {
-        agent: agent.to_string(),
-        session_id: session_id.to_string(),
-        road: spec.resume_nudge,
-        text: nudge.to_string(),
-        started: Instant::now(),
-        fallback_at: None,
-    };
     app.state::<AppState>()
         .pending_nudges()
         .register(term, pending);
-    if spec.resume_nudge == zerocode_core::NudgeRoad::Composer {
-        deliver_composer(&app.state::<AppState>(), term, agent, nudge, true);
-    }
     let app = app.clone();
     std::thread::spawn(move || {
-        // Two beats of one window. The first arms the single composer
-        // fallback; the second gives up when even that never earned a
-        // receipt. A `working` hook on either side removes the row, so a
-        // beat that finds it gone files nothing and the line stands as the
-        // hook already wrote it.
-        for _ in 0..2 {
-            std::thread::sleep(Duration::from_millis(RESUME_NUDGE_RECEIPT_MS));
-            let resolution = app
-                .state::<AppState>()
-                .pending_nudges()
-                .timeout(term, Instant::now());
-            match resolution {
-                Some(resolution) => note_resolution(&app.state::<AppState>(), term, resolution),
-                None => break,
-            }
-        }
+        watch(
+            &WindowReceipts(app),
+            term,
+            delivery,
+            Duration::from_millis(RESUME_NUDGE_RECEIPT_MS),
+        );
     });
 }
 
 /// The first working hook is the receipt for a marked wake.
 pub(super) fn received_working(app: &AppHandle, term: TermId) {
-    let resolution = app
-        .state::<AppState>()
-        .pending_nudges()
-        .working(term, Instant::now());
+    received(&WindowReceipts(app.clone()), term);
+}
+
+/// A `working` hook reached `term`: its wake, if one waits, is closed.
+pub(super) fn received(receipts: &dyn WakeReceipts, term: TermId) {
+    let resolution = receipts.rows().working(term, Instant::now());
     if let Some(resolution) = resolution {
-        note_resolution(&app.state::<AppState>(), term, resolution);
+        note_resolution(receipts, term, resolution);
     }
 }
 
@@ -450,7 +694,23 @@ mod tests {
             road,
             text: RESTART_NUDGE.to_string(),
             started,
-            fallback_at: None,
+            first_window_closed: None,
+            said: None,
+            launch: None,
+            owed: None,
+        }
+    }
+
+    /// A row whose delivery already answered `said`.
+    fn answered(
+        agent: &str,
+        road: zerocode_core::NudgeRoad,
+        started: Instant,
+        said: Said,
+    ) -> PendingNudge {
+        PendingNudge {
+            said: Some(said),
+            ..pending(agent, road, started)
         }
     }
 
@@ -590,9 +850,15 @@ mod tests {
             TEST_TERM_WITH_RECEIPT,
             pending("codex", zerocode_core::NudgeRoad::Composer, started),
         );
+        // A composer whose words never left: it was never ready.
         rows.register(
             TEST_TERM_WITHOUT_RECEIPT,
-            pending("claude", zerocode_core::NudgeRoad::Argv, started),
+            answered(
+                "codex",
+                zerocode_core::NudgeRoad::Composer,
+                started,
+                Said::NotReady,
+            ),
         );
 
         assert!(matches!(
@@ -600,33 +866,287 @@ mod tests {
             Some(Resolution::Working(_, elapsed)) if elapsed == Duration::from_secs(3)
         ));
         assert!(
-            rows.timeout(TEST_TERM_WITH_RECEIPT, started + deadline)
+            rows.timeout(TEST_TERM_WITH_RECEIPT, started + deadline, deadline)
                 .is_none()
         );
         assert!(
             rows.timeout(
                 TEST_TERM_WITHOUT_RECEIPT,
-                started + deadline - Duration::from_millis(1)
+                started + deadline - Duration::from_millis(1),
+                deadline
             )
             .is_none()
         );
-        // The first window's silence arms the one fallback, and the row is
+        // The first window's close arms the one fallback, and the row is
         // KEPT so the fallback's own receipt can still close it.
         assert!(matches!(
-            rows.timeout(TEST_TERM_WITHOUT_RECEIPT, started + deadline),
+            rows.timeout(TEST_TERM_WITHOUT_RECEIPT, started + deadline, deadline),
             Some(Resolution::FallbackDeliver(_))
         ));
         // A second window of silence after that fallback gives up, once.
         assert!(matches!(
-            rows.timeout(TEST_TERM_WITHOUT_RECEIPT, started + deadline + deadline),
+            rows.timeout(
+                TEST_TERM_WITHOUT_RECEIPT,
+                started + deadline + deadline,
+                deadline
+            ),
             Some(Resolution::GaveUp(_))
         ));
         assert!(
             rows.timeout(
                 TEST_TERM_WITHOUT_RECEIPT,
-                started + deadline + deadline + deadline
+                started + deadline + deadline + deadline,
+                deadline
             )
             .is_none()
+        );
+    }
+
+    /// t-7812 R2: a hook's silence is not a lost delivery. Words that
+    /// reached the pane — on its argv, or taken by its composer, Enter or
+    /// not — whose `working` report came late or never came are not typed
+    /// a second time: the first window closes on nothing and the second
+    /// files `receipt=none`. Nor are words the line refused (a person's
+    /// draft, a relaunch), nor words whose delivery never answered: nobody
+    /// can say they were not sent. Only words that never left a composer
+    /// that was not ready get the one fallback.
+    #[test]
+    fn a_silent_hook_never_types_the_words_again() {
+        let started = Instant::now();
+        let deadline = Duration::from_millis(RESUME_NUDGE_RECEIPT_MS);
+        let argv = zerocode_core::NudgeRoad::Argv;
+        let composer = zerocode_core::NudgeRoad::Composer;
+        let rows_for = |row: PendingNudge| {
+            let mut rows = PendingNudges::default();
+            rows.register(TEST_TERM_WITHOUT_RECEIPT, row);
+            rows
+        };
+        for (shape, row) in [
+            (
+                "argv, said at launch",
+                answered("claude", argv, started, Said::Reached),
+            ),
+            (
+                "composer, delivered",
+                answered("codex", composer, started, Said::Reached),
+            ),
+            (
+                "composer, refused by the line",
+                answered("codex", composer, started, Said::Withheld),
+            ),
+            (
+                "composer, never answered",
+                pending("codex", composer, started),
+            ),
+        ] {
+            let mut rows = rows_for(row);
+            assert!(
+                rows.timeout(TEST_TERM_WITHOUT_RECEIPT, started + deadline, deadline)
+                    .is_none(),
+                "{shape}: the first window typed the words again"
+            );
+            assert!(
+                matches!(
+                    rows.timeout(
+                        TEST_TERM_WITHOUT_RECEIPT,
+                        started + deadline + deadline,
+                        deadline
+                    ),
+                    Some(Resolution::GaveUp(_))
+                ),
+                "{shape}: the wake never gave up"
+            );
+        }
+        // What the delivery answers is what the row believes.
+        assert_eq!(Said::of(DeliveryOutcome::Delivered), Said::Reached);
+        assert_eq!(
+            Said::of(DeliveryOutcome::Unsubmitted(
+                zerocode_pty::ready::Refusal::HandReached
+            )),
+            Said::Reached,
+            "a paste that went in without its Enter still reached the pane"
+        );
+        assert_eq!(Said::of(DeliveryOutcome::TimedOut), Said::NotReady);
+        assert_eq!(
+            Said::of(DeliveryOutcome::Refused(
+                zerocode_pty::ready::Refusal::HoldsADraft
+            )),
+            Said::Withheld
+        );
+        let mut rows = rows_for(pending("codex", composer, started));
+        rows.heard(TEST_TERM_WITHOUT_RECEIPT, DeliveryOutcome::Delivered);
+        assert!(
+            rows.timeout(TEST_TERM_WITHOUT_RECEIPT, started + deadline, deadline)
+                .is_none(),
+            "a delivered composer was typed at again"
+        );
+    }
+
+    /// t-7812 R2: the goodbye's word is spent exactly when the words may
+    /// have reached the pane — a delivery that answered it took them, a
+    /// `working` hook, or a wake that ended with the delivery unanswered —
+    /// and kept when they are known never to have left, for the road that
+    /// tries next.
+    #[test]
+    fn the_goodbyes_word_is_spent_only_when_the_words_may_have_landed() {
+        use crate::orchestration::restart_census::{self, RestartCensus, Turn, WorkerCut};
+        let started = Instant::now();
+        let deadline = Duration::from_millis(RESUME_NUDGE_RECEIPT_MS);
+        let composer = zerocode_core::NudgeRoad::Composer;
+        let root = tempfile::tempdir().expect("a data root");
+        let owed_by = |worker: &str| Owed {
+            root: root.path().to_path_buf(),
+            worker: worker.to_string(),
+        };
+        let cut = |worker: &str| WorkerCut {
+            worker: worker.to_string(),
+            agent: "codex".to_string(),
+            term: 1,
+            turn: Turn::Running,
+            commands: Some(Vec::new()),
+        };
+        restart_census::leave_cut(
+            root.path(),
+            &RestartCensus {
+                workers: [
+                    "w-heard",
+                    "w-hook",
+                    "w-silent",
+                    "w-unready",
+                    "w-refused",
+                    "w-unplaced",
+                ]
+                .into_iter()
+                .map(cut)
+                .collect(),
+                took_ms: 0,
+            },
+            &|_| false,
+        )
+        .expect("the goodbye");
+        let owed = |worker: &str| restart_census::peek_cut(root.path(), worker).any();
+        let row = |worker: &str| PendingNudge {
+            owed: Some(owed_by(worker)),
+            ..pending("codex", composer, started)
+        };
+        let mut rows = PendingNudges::default();
+        for (term, worker) in [
+            (1, "w-heard"),
+            (2, "w-hook"),
+            (3, "w-silent"),
+            (4, "w-unready"),
+            (5, "w-refused"),
+        ] {
+            rows.register(term, row(worker));
+        }
+        rows.heard(1, DeliveryOutcome::Delivered);
+        assert!(!owed("w-heard"), "a delivered continuation is still owed");
+        rows.working(2, started + Duration::from_secs(1));
+        assert!(!owed("w-hook"), "a pane that took input is still owed");
+        rows.heard(4, DeliveryOutcome::TimedOut);
+        rows.heard(
+            5,
+            DeliveryOutcome::Refused(zerocode_pty::ready::Refusal::LaunchChanged),
+        );
+        rows.register(6, row("w-unplaced"));
+        rows.heard(6, DeliveryOutcome::TimedOut);
+        for term in [3, 4, 5, 6] {
+            let first = rows.timeout(term, started + deadline, deadline);
+            assert_eq!(
+                matches!(first, Some(Resolution::FallbackDeliver(_))),
+                term == 4 || term == 6,
+                "term {term}: {first:?}"
+            );
+            // The fallback reached the composer for w-unready; w-unplaced's
+            // pane was relaunched and it never went.
+            if term == 4 {
+                rows.placed_again(term);
+            }
+            let _ = rows.timeout(term, started + deadline + deadline, deadline);
+        }
+        assert!(
+            !owed("w-silent"),
+            "a delivery nobody heard back from may have landed, and was kept to be said again"
+        );
+        assert!(
+            owed("w-refused"),
+            "words the line refused were spent though they never left"
+        );
+        // The one fallback went out for the composer that was never ready,
+        // and its own answer never came: that too may have landed.
+        assert!(
+            !owed("w-unready"),
+            "a fallback nobody heard back from was kept to be said again"
+        );
+        assert!(
+            owed("w-unplaced"),
+            "words whose fallback never went were spent though they never left"
+        );
+    }
+
+    /// t-7812 R2, the other road: words on the argv reach the pane with its
+    /// launch, and nothing types them — the row is born said, and the
+    /// goodbye's word is spent as it is placed. Words for a composer that
+    /// could not be asked at all were never sent.
+    #[test]
+    fn words_on_the_argv_are_said_by_the_launch_and_never_typed() {
+        use crate::orchestration::restart_census::{self, RestartCensus, Turn, WorkerCut};
+        let root = tempfile::tempdir().expect("a data root");
+        restart_census::leave_cut(
+            root.path(),
+            &RestartCensus {
+                workers: ["w-argv", "w-gone"]
+                    .into_iter()
+                    .map(|worker| WorkerCut {
+                        worker: worker.to_string(),
+                        agent: "claude".to_string(),
+                        term: 1,
+                        turn: Turn::Running,
+                        commands: Some(Vec::new()),
+                    })
+                    .collect(),
+                took_ms: 0,
+            },
+            &|_| false,
+        )
+        .expect("the goodbye");
+        let words = |road, worker: &str| Words {
+            agent: "claude",
+            session_id: "01234567-session",
+            road,
+            text: RESTART_NUDGE.to_string(),
+            launch: Some(7),
+            owed: Owed {
+                root: root.path().to_path_buf(),
+                worker: worker.to_string(),
+            },
+        };
+        let typed = std::cell::Cell::new(0);
+        let (row, delivery) = place_words(
+            |_| {
+                typed.set(typed.get() + 1);
+                None
+            },
+            words(zerocode_core::NudgeRoad::Argv, "w-argv"),
+        );
+        assert_eq!(typed.get(), 0, "argv words were typed at the composer too");
+        assert!(delivery.is_none());
+        assert_eq!(row.said, Some(Said::Reached));
+        assert!(row.owed.is_none());
+        assert!(!restart_census::peek_cut(root.path(), "w-argv").any());
+        let (row, delivery) = place_words(
+            |_| {
+                typed.set(typed.get() + 1);
+                None
+            },
+            words(zerocode_core::NudgeRoad::Composer, "w-gone"),
+        );
+        assert_eq!(typed.get(), 1);
+        assert!(delivery.is_none());
+        assert_eq!(row.said, Some(Said::Withheld));
+        assert!(
+            restart_census::peek_cut(root.path(), "w-gone").any(),
+            "words never sent were spent"
         );
     }
 
@@ -642,10 +1162,15 @@ mod tests {
         let mut rows = PendingNudges::default();
         rows.register(
             TEST_TERM_WITHOUT_RECEIPT,
-            pending("codex", zerocode_core::NudgeRoad::Composer, started),
+            answered(
+                "codex",
+                zerocode_core::NudgeRoad::Composer,
+                started,
+                Said::NotReady,
+            ),
         );
         assert!(matches!(
-            rows.timeout(TEST_TERM_WITHOUT_RECEIPT, started + deadline),
+            rows.timeout(TEST_TERM_WITHOUT_RECEIPT, started + deadline, deadline),
             Some(Resolution::FallbackDeliver(_))
         ));
         // The replacement submits and Codex reports working a second later.
@@ -659,7 +1184,7 @@ mod tests {
         ));
         // Nothing is left for the second beat to give up on.
         assert!(
-            rows.timeout(TEST_TERM_WITHOUT_RECEIPT, receipt_at + deadline)
+            rows.timeout(TEST_TERM_WITHOUT_RECEIPT, receipt_at + deadline, deadline)
                 .is_none()
         );
     }
@@ -845,56 +1370,5 @@ mod tests {
             "the paste closed but no Enter followed it: {:?}",
             run.stdin
         );
-    }
-
-    /// Codex rollout lines in the shapes the real files carry
-    /// (`codex-runtime-home/home/sessions/**/rollout-*.jsonl`).
-    const ROLLOUT_STARTED: &str = r#"{"timestamp":"2026-09-05T05:27:08.553Z","type":"event_msg","payload":{"type":"task_started","turn_id":"01a07008"}}"#;
-    const ROLLOUT_ITEM: &str = r#"{"timestamp":"2026-09-05T05:31:37.338Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"01a07008","item":{"type":"CommandExecution","status":"completed"}}}"#;
-    const ROLLOUT_COMPLETE: &str = r#"{"timestamp":"2026-09-05T05:31:44.900Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"01a07008"}}"#;
-
-    /// The t-2874 root. The window persists a Codex pane's mark from the
-    /// hook's word, and the hook said `idle` while the pane's rollout was
-    /// mid-`CommandExecution` (rollout 01a07004, 2026-09-05) — so the wake
-    /// came back unmarked and `register_wake` returned before typing. The
-    /// rollout the record already names is the one witness that outlives the
-    /// process: a Codex wake asks it, and its word replaces the hook's both
-    /// ways. Claude's hook-state rule is untouched.
-    #[test]
-    fn a_codex_wake_takes_its_mark_from_the_rollout_the_record_names() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let open = dir.path().join("open.jsonl");
-        fs::write(&open, format!("{ROLLOUT_STARTED}\n{ROLLOUT_ITEM}\n")).expect("write");
-        let closed = dir.path().join("closed.jsonl");
-        fs::write(
-            &closed,
-            format!("{ROLLOUT_STARTED}\n{ROLLOUT_ITEM}\n{ROLLOUT_COMPLETE}\n"),
-        )
-        .expect("write");
-        let open = open.to_string_lossy().into_owned();
-        let closed = closed.to_string_lossy().into_owned();
-        let missing = dir
-            .path()
-            .join("missing.jsonl")
-            .to_string_lossy()
-            .into_owned();
-
-        // The evidence: no mark from the hook, a turn still open in the file.
-        assert!(
-            wake_interrupted("codex", false, Some(&open)),
-            "a Codex pane cut mid-turn woke unmarked — the nudge road returns before typing"
-        );
-        // The inverse: a turn the file closed is not reopened, not even by a
-        // mark the hook's `working` edge left behind.
-        assert!(!wake_interrupted("codex", false, Some(&closed)));
-        assert!(!wake_interrupted("codex", true, Some(&closed)));
-        // No file to ask: the record's own word stands, both ways.
-        assert!(wake_interrupted("codex", true, None));
-        assert!(!wake_interrupted("codex", false, None));
-        assert!(!wake_interrupted("codex", false, Some(&missing)));
-        assert!(wake_interrupted("codex", true, Some(&missing)));
-        // Claude's rule is the hook's word, whatever a file beside it says.
-        assert!(!wake_interrupted("claude", false, Some(&open)));
-        assert!(wake_interrupted("claude", true, Some(&closed)));
     }
 }

@@ -524,9 +524,20 @@ pub enum RuntimeRequest {
         session_id: String,
         now_ms: i64,
     },
+    /// The pane the window seated a sleeper in never started (t-7812): the
+    /// sleeper goes back to sleep. A host fact, like the one above, and the
+    /// actor proves the seat is not open before it believes it.
+    ResumedPaneNeverStarted { worker: String, now_ms: i64 },
     /// A sleeper the grace ran out on: its attempt ends and its death is
     /// announced with the dispatch id a replacement needs (t-3058).
     SleeperExpired { worker: String, now_ms: i64 },
+    /// A sleeper that cannot come back, ended and announced with the reason
+    /// the moment that is known rather than at the grace (t-7812).
+    SleeperUnrecoverable {
+        worker: String,
+        reason: String,
+        now_ms: i64,
+    },
     /// The provider conversation observed in a terminal. The actor resolves
     /// the terminal to its seat while the pane table is locked, so a respawn
     /// cannot redirect the write between lookup and mutation.
@@ -882,9 +893,24 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("session_id_bytes", &session_id.len())
                 .field("now_ms", now_ms)
                 .finish(),
+            Self::ResumedPaneNeverStarted { worker, now_ms } => formatter
+                .debug_struct("RuntimeRequest::ResumedPaneNeverStarted")
+                .field("worker", worker)
+                .field("now_ms", now_ms)
+                .finish(),
             Self::SleeperExpired { worker, now_ms } => formatter
                 .debug_struct("RuntimeRequest::SleeperExpired")
                 .field("worker", worker)
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::SleeperUnrecoverable {
+                worker,
+                reason,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::SleeperUnrecoverable")
+                .field("worker", worker)
+                .field("reason_bytes", &reason.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::WorkerSessionReported {
@@ -2093,6 +2119,23 @@ impl RuntimeActor {
         }
     }
 
+    /// The pane the window seated a sleeper in never started (t-7812): the
+    /// sleeper goes back to sleep, durably. Answers whether it moved, and
+    /// the revision that speaks for it; a seat still open is refused.
+    pub fn resumed_pane_never_started(
+        &self,
+        worker: impl Into<String>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::ResumedPaneNeverStarted {
+            worker: worker.into(),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// A sleeper nothing resumed within the grace ends, announced (t-3058).
     pub fn sleeper_expired(
         &self,
@@ -2101,6 +2144,24 @@ impl RuntimeActor {
     ) -> Result<u64, RuntimeError> {
         match self.request(RuntimeRequest::SleeperExpired {
             worker: worker.into(),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { revision, .. } => Ok(revision),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// A sleeper that cannot come back ends now, announced with `reason`
+    /// (t-7812).
+    pub fn sleeper_unrecoverable(
+        &self,
+        worker: impl Into<String>,
+        reason: impl Into<String>,
+        now_ms: i64,
+    ) -> Result<u64, RuntimeError> {
+        match self.request(RuntimeRequest::SleeperUnrecoverable {
+            worker: worker.into(),
+            reason: reason.into(),
             now_ms,
         })? {
             RuntimeReply::Settled { revision, .. } => Ok(revision),
@@ -2984,9 +3045,17 @@ impl RuntimeState {
                 session_id,
                 now_ms,
             } => self.worker_pane_resumed(term, &checkout, &agent, &session_id, now_ms),
+            RuntimeRequest::ResumedPaneNeverStarted { worker, now_ms } => {
+                self.resumed_pane_never_started(&worker, now_ms)
+            }
             RuntimeRequest::SleeperExpired { worker, now_ms } => {
                 self.sleeper_expired(&worker, now_ms)
             }
+            RuntimeRequest::SleeperUnrecoverable {
+                worker,
+                reason,
+                now_ms,
+            } => self.sleeper_unrecoverable(&worker, &reason, now_ms),
             RuntimeRequest::WorkerSessionReported {
                 term,
                 session,
@@ -3505,6 +3574,54 @@ impl RuntimeState {
         })
     }
 
+    /// The witness road's undo (t-7812): the seat a sleeper was written into
+    /// before its pane started, taken back when the pane never did. The same
+    /// proof `seat_never_opened` asks for, from the same table: a seat the
+    /// pane table still maps to a terminal is a pane that exists, and
+    /// putting its worker to sleep would take a live conversation's seat.
+    fn resumed_pane_never_started(
+        &mut self,
+        worker: &str,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if worker.is_empty() || worker.len() > MAX_NAME || now_ms < 0 {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let seat = self.ledger.runs().iter().find_map(|run| {
+            run.worker(worker)
+                .map(|one| (one.team.clone(), one.pane.clone()))
+        });
+        let Some((team, pane)) = seat else {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        };
+        let mut seat_open = false;
+        self.panes.with_team(&team, &mut |held| {
+            if let Some(held) = held {
+                seat_open = held.term_of(&pane).is_some();
+            }
+        });
+        if seat_open {
+            return Err(RuntimeError::SeatStillOpen);
+        }
+        if !self.ledger.resumed_pane_never_started(worker) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
     /// A sleeper past its grace ends through the ledger's own road and is
     /// announced there (t-3058); the refusal for anything but a sleeper is
     /// the ledger's.
@@ -3517,6 +3634,30 @@ impl RuntimeState {
         }
         self.ledger
             .sleeper_expired(worker, now_ms)
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// The same ending as [`Self::sleeper_expired`], for a sleeper known not
+    /// to be coming back, with the reason why (t-7812).
+    fn sleeper_unrecoverable(
+        &mut self,
+        worker: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if worker.is_empty() || worker.len() > MAX_NAME || reason.is_empty() || now_ms < 0 {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        self.ledger
+            .sleeper_unrecoverable(worker, reason, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Settled {

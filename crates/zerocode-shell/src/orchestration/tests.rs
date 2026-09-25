@@ -393,6 +393,7 @@ impl PrivateWindow {
             .unwrap_or_else(|held| held.into_inner())
             .take();
         super::install_runtime(actor, overrides, usage);
+        forget_the_goodbyes_note();
         (
             Self {
                 _root: root,
@@ -401,6 +402,21 @@ impl PrivateWindow {
             },
             store,
         )
+    }
+}
+
+/// A private window is a window of its own (t-7812): a goodbye's note left
+/// in this process's shared data root by another scenario names another
+/// ledger's workers, whose ids this one mints again from `w-1`. Forgotten as
+/// the window opens and again as it closes, so no scenario's owed words
+/// reach another's wake.
+fn forget_the_goodbyes_note() {
+    if let Some(root) = super::BLACKBOX.get() {
+        let _ = super::restart_census::leave_cut(
+            root,
+            &super::restart_census::RestartCensus::default(),
+            &|_| false,
+        );
     }
 }
 
@@ -416,6 +432,7 @@ impl PrivateWindow {
 
 impl Drop for PrivateWindow {
     fn drop(&mut self) {
+        forget_the_goodbyes_note();
         *super::runtime_cell()
             .lock()
             .unwrap_or_else(|held| held.into_inner()) = self.previous.take();
@@ -13612,17 +13629,17 @@ fn a_resumed_pane_is_seated_as_the_sleeper_it_is_and_reports_done_from_there() {
     // No seat yet: nothing is written.
     assert_eq!(
         super::pane_resumed(RESUMED, "/tmp", "codex", "session-witness", clock()),
-        None
+        Ok(None)
     );
     let resumed_team = format!("team-t3058-resumed-{RESUMED}");
     seat_a_team(&resumed_team, RESUMED);
     assert_eq!(
-        super::pane_resumed(RESUMED, "/tmp/", "codex", "session-witness", clock()).as_deref(),
-        Some(worker.as_str())
+        super::pane_resumed(RESUMED, "/tmp/", "codex", "session-witness", clock()),
+        Ok(Some(worker.clone()))
     );
     assert_eq!(
         super::pane_resumed(RESUMED, "/tmp", "codex", "session-witness", clock()),
-        None,
+        Ok(None),
         "the same witness seated the worker twice"
     );
     let rows = the_rows();
@@ -14148,15 +14165,15 @@ fn a_restored_worker_reports_done_through_the_live_verb_after_durable_reseat() {
             clock(),
         )
         .expect("store the resumable session");
-    assert_eq!(
-        held.actor
-            .window_restarted(clock())
-            .expect("sleep the worker")
-            .0
-            .sleeping,
-        1
-    );
-    crate::agent_teams::forget_term(OLD_WORKER);
+    // The window goes with this worker's turn under way, so its reseat
+    // carries a continuation (t-7812 E) — the words this worker answers with
+    // its report. A worker the goodbye found at rest is typed nothing.
+    super::pane_turn_began(OLD_WORKER, clock());
+    restore::the_window_goes(&restore::census_without_commands, &[OLD_WORKER]);
+    assert_eq!(restore::row(&worker).state, WorkerState::Sleeping);
+    held.actor
+        .window_restarted(clock())
+        .expect("the next boot's sweep");
     crate::agent_teams::forget_term(OLD_LEADER);
 
     let new_team = format!("team-live-report-new-{NEW_LEADER}");
@@ -18973,3 +18990,12 @@ fn a_late_turn_end_is_never_the_next_occupants_sound() {
     crate::agent_teams::forget_term(LEADER);
     drop(window);
 }
+
+/// t-7812: the window restart restore roads, driven through the production
+/// doors of a private window (`tests/restore.rs`).
+mod restore;
+/// t-7812 r2: the window's own resume road through a fake launcher, beside
+/// the ledger's reseat (`tests/restore_door.rs`).
+mod restore_door;
+/// t-7812: the host seams those roads added (`tests/restore_seams.rs`).
+mod restore_seams;

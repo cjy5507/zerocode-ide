@@ -1097,7 +1097,7 @@ impl agent_teams::Host for TeamWindow {
                         state.local_data_root(),
                         &format!("Codex native pointer route unavailable; using PTY: {error}"),
                     );
-                    (None, Some(error))
+                    (None, error.degrades().then_some(error))
                 }
             }
         } else {
@@ -1288,6 +1288,23 @@ impl agent_teams::Host for TeamWindow {
             .pane_sessions()
             .get(&term)
             .cloned()
+    }
+
+    fn conversation_standing(
+        &self,
+        agent: &str,
+        session: &zerocode_core::ProviderSession,
+    ) -> Option<TermId> {
+        let wanted = zerocode_core::conversation_key(agent, session)?;
+        crate::conversation_wake::holding_pane(&self.app.state::<AppState>(), &wanted)
+    }
+
+    fn carry_session(&self, term: TermId, session: &zerocode_core::ProviderSession) {
+        self.app
+            .state::<AppState>()
+            .pane_sessions()
+            .entry(term)
+            .or_insert_with(|| session.clone());
     }
 
     fn announce_reseated_worker(

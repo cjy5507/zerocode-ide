@@ -23670,3 +23670,8 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
     assert!(bench.ledger.worker_spoke(seat, 7));
     assert_eq!(heard(&bench), (None, None));
 }
+
+/// t-7812: the window restart restore transitions (`tests/restore.rs`).
+mod restore;
+/// t-7812: the transitions those roads added (`tests/restore_seams.rs`).
+mod restore_seams;

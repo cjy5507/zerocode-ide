@@ -65,6 +65,8 @@ fn write_doors() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
         ("resume_command", None, "fn resume_command("),
         ("fresh_command", None, "fn fresh_command("),
         ("resume_session", None, "fn resume_session("),
+        ("wake_conversation", None, "fn wake_conversation<"),
+        ("ResumeDoor", None, "impl WakeWindow for ResumeDoor<'_> {"),
         ("vault_resume_base", None, "fn vault_resume_base("),
         // The readiness readers every delivery goes through.
         ("ready_signal_for", None, "fn ready_signal_for("),
@@ -81,10 +83,12 @@ fn write_doors() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
         ("start_automation", None, "fn start_automation("),
         ("remember_reused_run", None, "fn remember_reused_run("),
         ("reused_run_delivery", None, "fn reused_run_delivery("),
-        // The restart nudge: the wake witness and both nudge roads.
-        ("wake_interrupted", None, "fn wake_interrupted("),
-        ("register_wake", None, "fn register_wake("),
+        // The restart nudge: both nudge roads, and the one fallback. Whether
+        // a wake is nudged at all is the goodbye's word about a worker (t-7812
+        // E), not a row's; which road its words take is the row's.
+        ("place_words", None, "fn place_words("),
         ("deliver_composer", None, "fn deliver_composer("),
+        ("note_resolution", None, "fn note_resolution("),
         // Quick commands, where a prompt is saved to be launched later.
         ("validate_quick_command", None, "fn validate_quick_command("),
         ("second_brain_setup", None, "fn second_brain_setup("),
@@ -179,7 +183,7 @@ fn every_write_door_reads_its_decision_off_the_table() {
             && resuming.contains("caps.resume.launch_args_without_selectors(&plan.args)"),
         "the resume builder splices selectors by name again:\n{resuming}"
     );
-    let waking = block_after(backend, "fn resume_session(");
+    let waking = block_after(backend, "impl WakeWindow for ResumeDoor<'_> {");
     assert!(
         waking.contains("caps.trust_menu()")
             && waking.contains("caps.spawn == SpawnRoad::SocketPane"),
@@ -219,13 +223,6 @@ fn every_write_door_reads_its_decision_off_the_table() {
             "the worker split stopped asking the table for `{needed}`:\n{splitting}"
         );
     }
-
-    // The wake witness is the row's.
-    let witnessing = block_after(backend, "fn wake_interrupted(");
-    assert!(
-        witnessing.contains("WakeMark::Rollout"),
-        "the wake witness is chosen by name again:\n{witnessing}"
-    );
 
     // Quick commands ask whether the agent takes a prompt at start.
     for (door, opens) in [

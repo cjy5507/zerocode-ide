@@ -3888,17 +3888,46 @@ pub const NOT_RESUMED: &str =
     "the window restarted and nothing resumed this worker's conversation within the grace";
 
 /// The final word an ending is to the askers of the worker it ended: a
-/// terminal that died or a sleeper nobody resumed EXITED, and everything
+/// terminal that died or a sleeper the restart lost EXITED, and everything
 /// else — a stop, an abandon — is its coordinator CANCELLING it. Read off
 /// the ending's own sentence, which is the one fact both roads already
 /// carry, so a third spelling of "why" never has to be kept in step.
 fn ending_news(reason: &str) -> ReceiverNews {
-    if reason == TERMINAL_EXITED || reason == NOT_RESUMED {
+    if reason == TERMINAL_EXITED || RESTART_LOSSES.contains(&reason) {
         ReceiverNews::Exited
     } else {
         ReceiverNews::Cancelled
     }
 }
+
+/// Why a sleeper whose conversation was never recorded is written down as
+/// it is (t-7812): there is no provider session to resume, and a fresh
+/// launch in its place would be an empty conversation where the work was.
+pub const NO_SESSION_RECORDED: &str = "the window restarted and this worker's conversation was \
+     never recorded, so there was nothing to resume";
+
+/// Why a sleeper whose recorded conversation file is not on disk is written
+/// down as it is (t-7812): its agent would be resumed into a conversation it
+/// cannot find, and the pane would die a second later or come up empty.
+pub const CONVERSATION_FILE_GONE: &str = "the window restarted and this worker's conversation \
+     file is not on disk, so there was nothing to resume";
+
+/// Why a sleeper whose conversation this window has no way to resume is
+/// written down as it is (t-7812): a fresh launch in its place would be a new
+/// conversation where the work was, told nothing of it.
+pub const RESUME_UNSUPPORTED: &str = "the window restarted and this worker's conversation is \
+     one this window cannot resume";
+
+/// Every ending a window restart gives a sleeper it could not bring back
+/// (t-3058, t-7812) — in one table, because an asker waiting on that worker
+/// hears each of them the same way ([`ending_news`]): the restart lost it,
+/// nobody cancelled it.
+const RESTART_LOSSES: [&str; 4] = [
+    NOT_RESUMED,
+    NO_SESSION_RECORDED,
+    CONVERSATION_FILE_GONE,
+    RESUME_UNSUPPORTED,
+];
 
 /// Whether a `worker_done` says the work succeeded.
 ///
@@ -11168,6 +11197,16 @@ impl Ledger {
     /// replaces terminal routing metadata, not the dispatch carrying the work.
     /// The new seat is bound to the same run in the same write, so the first
     /// bare verb the restored agent sends lands back in its own run.
+    ///
+    /// A person's hand on the pane does not stop a SLEEPER (t-7812). The
+    /// window never writes a ledger-seated tab into its own layout, so the
+    /// person's window had no record to bring a taken-over worker back from,
+    /// and the grace ended every one of them (2026-09-25 01:13: w-7570 and
+    /// w-7631, both `takenOver`). The mark stays on the row — the hand is
+    /// still the person's — and one conversation is still one process, which
+    /// the reseat road asks the window before it cuts the pane. A taken-over
+    /// ORPHAN is still refused: its pane may be running with the person in
+    /// it, and a second pane would be a second process on their conversation.
     pub fn worker_reseated(
         &mut self,
         worker_id: &str,
@@ -11190,7 +11229,7 @@ impl Ledger {
                 worker.state.as_str()
             ));
         }
-        if worker.taken_over {
+        if worker.taken_over && worker.state == WorkerState::Orphaned {
             return Err(format!(
                 "worker {worker_id}'s pane was taken over by the person — a person's \
                  conversation is not the ledger's to reopen in another pane"
@@ -11295,6 +11334,20 @@ impl Ledger {
         })
     }
 
+    /// The launch words the sleeper `worker_id` comes back with (t-7812):
+    /// `kept_worker_tuning`'s, asked by the window's resume road so the pane
+    /// it opens for a sleeper's conversation is the launch the ledger's own
+    /// reseat would have cut. A read; nothing moves.
+    pub fn sleeper_resume_tuning(&self, worker_id: &str) -> Result<Vec<String>, String> {
+        self.runs
+            .iter()
+            .find_map(|run| {
+                run.worker(worker_id)
+                    .map(|worker| kept_worker_tuning(&run.id, worker))
+            })
+            .unwrap_or_else(|| Err(format!("unknown worker: {worker_id}")))
+    }
+
     /// The window resumed a conversation into a checkout, and a sleeper is
     /// that conversation: seat it there, as the same worker (t-3058).
     ///
@@ -11311,8 +11364,9 @@ impl Ledger {
     /// A taken-over sleeper comes back this way too, and STAYS taken over:
     /// the window that reopened the person's conversation is the person's,
     /// and the ledger records the seat it was shown without claiming the
-    /// pane. This is the one road that seats a person's worker again, which
-    /// is why `worker_reseated` may keep refusing it.
+    /// pane. It is no longer the only road for one (t-7812): the ledger's own
+    /// reseat brings a taken-over sleeper back as well, because the window
+    /// never keeps a ledger-seated tab in its layout to reopen.
     ///
     /// Answers the worker seated, or `None` for a pane that is nobody's
     /// sleeper — the ordinary case for every conversation a person reopens.
@@ -11365,6 +11419,41 @@ impl Ledger {
         Some(worker_id)
     }
 
+    /// The pane a witness seated a sleeper in never started (t-7812): the
+    /// sleeper goes back to sleep as the goodbye left it — dispatch open,
+    /// task dispatched, attempt unspent — so the next road that asks, the
+    /// ledger's reseat or another door, brings it back.
+    ///
+    /// The window seats a sleeper's conversation before its process starts
+    /// ([`Self::worker_pane_resumed`]), so nothing in that pane can type or
+    /// report before the seat is durable; a spawn the host then refused
+    /// leaves a seat nobody sits in, and a worker written down as seated in
+    /// it would be ended by the reconciler for a pane that never was. Only
+    /// that seat goes: the row must still be active in it. Whether the seat
+    /// is open is the caller's question to answer first — the pane table is
+    /// not the ledger's to read.
+    ///
+    /// Answers whether the sleeper went back.
+    pub fn resumed_pane_never_started(&mut self, worker_id: &str) -> bool {
+        let Ok((run_at, worker_at)) = self.locate(worker_id) else {
+            return false;
+        };
+        let run_id = self.runs[run_at].id.clone();
+        let worker = &mut self.runs[run_at].workers[worker_at];
+        if worker.state != WorkerState::Active {
+            return false;
+        }
+        worker.state = WorkerState::Sleeping;
+        let seat = format!("{}/{}", worker.team, worker.pane);
+        // The seat's address named this run only for the pane that never
+        // started; a later occupant's binding is not this road's to drop.
+        if self.bound_run(&seat) == Some(run_id.as_str()) {
+            self.bound.retain(|(caller, _)| caller != &seat);
+            self.binding_revisions.retain(|(caller, _)| caller != &seat);
+        }
+        true
+    }
+
     /// A sleeper the grace ran out on: nothing resumed its conversation, so
     /// the restart lost it after all (t-3058).
     ///
@@ -11380,6 +11469,32 @@ impl Ledger {
     /// Refused for anything but a sleeper: a live worker is not overdue, and
     /// a released one has already been here.
     pub fn sleeper_expired(&mut self, worker_id: &str, now_ms: i64) -> Result<(), String> {
+        self.sleeper_given_up(worker_id, NOT_RESUMED, now_ms)
+    }
+
+    /// A sleeper that cannot come back, said the moment that is known rather
+    /// than when the grace runs out (t-7812): the same ending and the same one
+    /// announcement as [`Self::sleeper_expired`], carrying `reason` instead.
+    ///
+    /// The road is a sleeper whose conversation was never recorded
+    /// ([`NO_SESSION_RECORDED`]). Starting its agent anyway opened an empty
+    /// conversation where the work had been and said nothing to the run; the
+    /// run hears it once instead, with the dispatch id a `--retry-of` needs.
+    pub fn sleeper_unrecoverable(
+        &mut self,
+        worker_id: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        self.sleeper_given_up(worker_id, reason, now_ms)
+    }
+
+    fn sleeper_given_up(
+        &mut self,
+        worker_id: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<(), String> {
         let (run_at, worker_at) = self.locate(worker_id)?;
         let worker = &self.runs[run_at].workers[worker_at];
         if worker.state != WorkerState::Sleeping {
@@ -11401,14 +11516,14 @@ impl Ledger {
                 )
             })
         });
-        self.finish_sleeping_reseat(worker_id, NOT_RESUMED, now_ms)?;
+        self.finish_sleeping_reseat(worker_id, reason, now_ms)?;
         if let Some((run_id, dispatch_id, task_id, quiet)) = carried {
             self.announce_a_death(
                 &run_id,
                 worker_id,
                 &dispatch_id,
                 &task_id,
-                NOT_RESUMED,
+                reason,
                 quiet,
                 now_ms,
             );
@@ -11476,21 +11591,7 @@ impl Ledger {
             .checkout
             .clone()
             .ok_or_else(|| format!("{kept} worker {worker_id} has no checkout"))?;
-        let mut tuning = launch_tuning(
-            &worker.agent,
-            worker.model.as_deref(),
-            worker.effort.as_deref(),
-        )?;
-        if let Some(peer) = provider_peer(&worker.agent, run_id, worker_id) {
-            peer.append_launch_tuning(&mut tuning);
-        }
-        // A restored worker carries a dispatch, so it is told what its first
-        // launch was (t-6747) — the pinned column for a pinned one (t-7153).
-        continue_past_classifier_declines(
-            &worker.agent,
-            summons_pins_a_model(worker.model.as_deref()),
-            &mut tuning,
-        );
+        let tuning = kept_worker_tuning(run_id, worker)?;
         /* Resume the conversation without starting the interrupted work yet.
          *
          * The host has to spawn the process before `worker_reseated` can prove
@@ -15136,6 +15237,36 @@ fn continue_past_classifier_declines(agent: &str, pinned: bool, words: &mut Vec<
         let said = if pinned { row.pinned } else { row.unpinned };
         words.extend(said.iter().map(|word| (*word).to_string()));
     }
+}
+
+/// The launch words a kept worker — a sleeper, an orphan — comes back with:
+/// the model and effort its row holds and the peer name its run gave it
+/// (t-7812).
+///
+/// One answer for both roads that bring such a worker back — the ledger's
+/// own reseat and the window's resumed pane — so a pane the window reopened
+/// is the launch the ledger would have cut. The launch that came back
+/// without them on 2026-09-25 was a default-model CLI nobody had summoned.
+/// The row's values win: an effort changed inside the pane reaches no hook,
+/// so the row's effort stands, and a value the row never held is not filled
+/// in — an agent summoned without tuning comes back without it.
+fn kept_worker_tuning(run_id: &str, worker: &Worker) -> Result<Vec<String>, String> {
+    let mut tuning = launch_tuning(
+        &worker.agent,
+        worker.model.as_deref(),
+        worker.effort.as_deref(),
+    )?;
+    if let Some(peer) = provider_peer(&worker.agent, run_id, &worker.id) {
+        peer.append_launch_tuning(&mut tuning);
+    }
+    // A restored worker carries a dispatch, so it is told what its first
+    // launch was (t-6747) — the pinned column for a pinned one (t-7153).
+    continue_past_classifier_declines(
+        &worker.agent,
+        summons_pins_a_model(worker.model.as_deref()),
+        &mut tuning,
+    );
+    Ok(tuning)
 }
 
 /// Assemble a reserved worker's command or put the reservation back exactly.

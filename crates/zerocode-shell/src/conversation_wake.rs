@@ -139,34 +139,39 @@ pub(crate) fn panes_naming(
 }
 
 /// Claim the conversation `session` names for the wake opening `term`, or
-/// answer the pane already holding it.
+/// answer the pane already holding it: a wake in flight, or the live pane
+/// `holder` names — the window's [`holding_pane`], or a test window's own
+/// table (t-7812).
 ///
 /// `Ok(None)` for a record that names no conversation this window can key —
 /// an agent it does not drive, an id that is not one; the resume command
 /// refuses that record in its own words. A pane whose agent a person quit
 /// back to its shell holds nothing: reopening that conversation is exactly
 /// what its tab's menu is for.
-pub(crate) fn claim_for_wake(
-    state: &AppState,
+pub(crate) fn claim_among(
     agent: &str,
     session: &ProviderSession,
     term: TermId,
+    holder: impl FnOnce(&ConversationKey) -> Option<TermId>,
 ) -> Result<Option<WakeClaim<'static>>, TermId> {
     let Some(wanted) = zerocode_core::conversation_key(agent, session) else {
         return Ok(None);
     };
-    WAKES
-        .claim(wanted, term, |wanted| {
-            let naming = {
-                let sessions = state.pane_sessions();
-                let agents = state.agent_terms();
-                panes_naming(wanted, &sessions, &agents)
-            };
-            naming
-                .into_iter()
-                .find(|held| !crate::agent_tools_runtime::shell_in_front_of(state, *held))
-        })
-        .map(Some)
+    WAKES.claim(wanted, term, holder).map(Some)
+}
+
+/// The live pane holding `wanted`, if one does: a pane that reported it and
+/// whose agent still holds the terminal. The one reading both roads ask —
+/// a resume door here, and the ledger's reseat through its host (t-7812).
+pub(crate) fn holding_pane(state: &AppState, wanted: &ConversationKey) -> Option<TermId> {
+    let naming = {
+        let sessions = state.pane_sessions();
+        let agents = state.agent_terms();
+        panes_naming(wanted, &sessions, &agents)
+    };
+    naming
+        .into_iter()
+        .find(|held| !crate::agent_tools_runtime::shell_in_front_of(state, *held))
 }
 
 #[cfg(test)]

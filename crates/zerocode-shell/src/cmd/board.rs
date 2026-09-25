@@ -945,8 +945,10 @@ pub(crate) fn resume_command(
     let caps = spec.capabilities();
     let base_args = caps.resume.launch_args_without_selectors(&plan.args);
     // Stored worker model/effort words ride after launch defaults and before
-    // the selector (and its optional positional nudge). The Tauri caller sends
-    // an empty slice; a worker plan supplies only its durable tuning receipt.
+    // the selector (and its optional positional nudge). Both roads hand in
+    // the same durable tuning receipt for a worker — the ledger's reseat, and
+    // the Tauri caller for a sleeper's conversation (t-7812) — and nothing
+    // for a person's own.
     argv.splice(1..1, base_args.into_iter().chain(tuning.iter().cloned()));
     Ok(ResumeCommand { kind, argv, plan })
 }
@@ -976,12 +978,16 @@ pub(crate) fn transcript_absent(path: &str) -> bool {
     std::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Six wire arguments, and they stay six: a `#[tauri::command]`'s payload
-/// parameters ARE its wire shape (`launch_agent_tab` says the same), so
-/// folding `interrupted` and `restore` into a struct would rename what every
-/// door sends — a payload change to quiet a lint about a payload. `AppHandle`
-/// and `State` are injected by Tauri and are not wire fields.
-#[allow(clippy::too_many_arguments)]
+/// Five wire arguments: a `#[tauri::command]`'s payload parameters ARE its
+/// wire shape (`launch_agent_tab` says the same), so folding `restore` into a
+/// struct would rename what every door sends. `AppHandle` and `State` are
+/// injected by Tauri and are not wire fields. A door still sending the old
+/// `interrupted` mark sends a field nothing reads: whether a wake is told to
+/// go on is the goodbye's word about a worker (t-7812 E), never a tab's.
+///
+/// The road itself is [`wake_conversation`], over this window's own app and
+/// state ([`ResumeDoor`]): every decision of the wake is made there, and
+/// every effect that needs a real terminal here.
 #[tauri::command(async)]
 pub(crate) fn resume_session(
     app: AppHandle,
@@ -990,12 +996,107 @@ pub(crate) fn resume_session(
     session: zerocode_core::ProviderSession,
     rows: u16,
     cols: u16,
-    interrupted: Option<bool>,
     // A restored leaf's closed-window screen, put back before the resumed
     // agent's first byte is parsed (`replay_stored_screen`). A sidebar row or
     // any other door that re-enters a conversation outside a restore sends
     // none.
     restore: Option<super::settings::StoredScreen>,
+) -> Result<ConversationWake, String> {
+    let door = ResumeDoor {
+        app: &app,
+        state: state.inner(),
+        restore,
+    };
+    let term = state.take_term_id();
+    wake_conversation(&door, term, &agent, session, rows, cols)
+}
+
+/// The window a conversation's wake opens its pane in (t-7812): what the
+/// wake asks of it, and the effects only a window can carry out. The
+/// product's is [`ResumeDoor`], the Tauri command's own app and state; a
+/// test's is a fake launcher that writes down what it started and typed, so
+/// every decision [`wake_conversation`] makes — the claim, the sleeper, the
+/// seat before anything runs, the words after — is the product's own.
+pub(crate) trait WakeWindow {
+    /// One pane's launch, built and seated, not yet started.
+    type Launch;
+    /// What a started pane is joined to once it is recorded: zo's private
+    /// channel, and nothing for any other pane.
+    type Channel;
+    /// The checkout the pane opens in — the window's active root.
+    fn root(&self) -> PathBuf;
+    /// Where the goodbye's note lives: the window's local data root.
+    fn data_root(&self) -> PathBuf;
+    /// The live pane already holding `wanted`, if one does.
+    fn standing(&self, wanted: &zerocode_core::ConversationKey) -> Option<TermId>;
+    /// The person's stored launch override for `agent`.
+    fn launch_override(&self, agent: &str)
+    -> Result<Option<zerocode_core::LaunchOverride>, String>;
+    /// Build `command`'s launch in `term` for the conversation `session_id`:
+    /// its environment, its trust mark and its team — the seat a sleeper's
+    /// witness is written into. Nothing starts.
+    fn prepare(
+        &self,
+        term: TermId,
+        command: ResumeCommand,
+        session_id: &str,
+    ) -> Result<Self::Launch, String>;
+    /// Take back a prepared launch's seat: it will never start.
+    fn abandon(&self, term: TermId);
+    /// Start the prepared launch. Answers the conversation the running
+    /// process says it opened, when it says so at start, and its channel.
+    fn start(
+        &self,
+        term: TermId,
+        launch: Self::Launch,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(Option<String>, Self::Channel), String>;
+    /// This pane IS `session`: recorded now, not at the agent's first report.
+    fn record(&self, term: TermId, session: zerocode_core::ProviderSession);
+    /// Join the channel `start` answered.
+    fn attach(&self, term: TermId, channel: Self::Channel);
+    /// The launch the pane at `term` holds.
+    fn launch_of(&self, term: TermId) -> Option<u64>;
+    /// Type a wake's words at the pane's composer while it mounts. Answers
+    /// the delivery's own answer, when there is one to wait for.
+    fn type_words(
+        &self,
+        term: TermId,
+        agent: &str,
+        words: &str,
+    ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>>;
+    /// Watch a marked wake's receipt.
+    fn arm(
+        &self,
+        term: TermId,
+        pending: restart_nudge_runtime::PendingNudge,
+        delivery: Option<std::sync::mpsc::Receiver<DeliveryOutcome>>,
+    );
+    /// One line in the window's log.
+    fn note(&self, line: &str);
+    /// Wake the pump: a pane just changed.
+    fn stir(&self);
+}
+
+/// Wake one conversation into `term` — the resume road every door takes
+/// (t-3058, t-4398, t-7812), over the window the pane opens in.
+///
+/// A sleeper's conversation is seated before anything of its pane runs: the
+/// ledger's witness (`pane_resumed`) is asked once the launch is built and
+/// its seat exists, and a seat the ledger does not write starts nothing — no
+/// CLI, no words, no `opened`, and a line that says why (t-7812 R1). The
+/// pane that came back on 2026-09-25 with no seat was a conversation whose
+/// `worker_done` the ledger could not hear; a pane started first and bound
+/// after could also type before the seat existed. A spawn that then fails
+/// puts the sleeper back to sleep for the next road to bring back.
+pub(crate) fn wake_conversation<W: WakeWindow>(
+    window: &W,
+    term: TermId,
+    agent: &str,
+    session: zerocode_core::ProviderSession,
+    rows: u16,
+    cols: u16,
 ) -> Result<ConversationWake, String> {
     // One conversation, one process (`conversation_wake`). Asked before
     // anything of this wake happens — the rollout read, the nudge's git
@@ -1004,250 +1105,467 @@ pub(crate) fn resume_session(
     // them and starts no second process on its transcript. The claim lives
     // until this function returns: past the spawn that failed, and past the
     // pane `pane_sessions` answers for from then on.
-    let term = state.take_term_id();
-    let _claim = match conversation_wake::claim_for_wake(&state, &agent, &session, term) {
-        Ok(claim) => claim,
-        Err(holder) => return Ok(ConversationWake::standing(holder)),
-    };
-    // The record's mark is the hook's word at the last persist. For a Codex
-    // pane the rollout the record names knows better whether the turn was
-    // cut (t-2874), so the wake asks it here, once, before the nudge is built
-    // and before the receipt is armed — one verdict for both.
-    let interrupted = restart_nudge_runtime::wake_interrupted(
-        &agent,
-        interrupted.unwrap_or(false),
-        session.transcript_path.as_deref(),
-    );
-    let launch_override = stored_launch_override(state.settings(), &agent)?;
+    let _claim =
+        match conversation_wake::claim_among(agent, &session, term, |held| window.standing(held)) {
+            Ok(claim) => claim,
+            Err(holder) => return Ok(ConversationWake::standing(holder)),
+        };
+    let launch_override = window.launch_override(agent)?;
     // The words the wake carries are decided here, before the argv is built
     // (t-3058): whether a sleeper in the ledger is this very conversation
     // — the seat sentence rides only then — and where the checkout stands
-    // by git's word. The seat itself moves below, once the pane exists.
-    let root = state.active_root();
+    // by git's word. The seat itself is written below, before the pane runs.
+    let root = window.root();
     let root_words = root.to_string_lossy().into_owned();
-    let reseating = crate::orchestration::sleeper_awaiting(&root_words, &agent, &session.id);
+    let reseating = crate::orchestration::sleeper_awaiting(&root_words, agent, &session.id);
+    // A sleeper's conversation that cannot come back — its file is not on
+    // disk, its agent has no resume for it — is not started as something it
+    // is not: the ledger hears the loss once, and nothing starts (t-7812).
+    // The door's record names the conversation; where it does not know the
+    // file, the ledger's record of the same conversation does.
+    if let Some(worker) = reseating.as_deref()
+        && let Some(why) = crate::orchestration::sleeper_unresumable(
+            agent,
+            Some(&zerocode_core::ProviderSession {
+                transcript_path: session.transcript_path.clone().or_else(|| {
+                    crate::orchestration::sleeper_record(worker)
+                        .and_then(|recorded| recorded.transcript_path)
+                }),
+                ..session.clone()
+            }),
+        )
+    {
+        crate::orchestration::sleeper_cannot_come_back(worker, why);
+        return Err(format!(
+            "잠든 워커 {worker}의 대화는 돌아올 수 없습니다 — {why}"
+        ));
+    }
     // A conversation that was never written down has nothing to re-enter
     // (`conversation_never_written`): the pane gets what the launch button
     // starts, and none of the resume's nudge, record, seat or receipt. A
     // ledger sleeper waiting on this id keeps the resume road; its seat is
     // the ledger's to settle.
     let fresh = reseating.is_none()
-        && zerocode_core::AgentKind::from_slug(&agent).is_some_and(|kind| {
+        && zerocode_core::AgentKind::from_slug(agent).is_some_and(|kind| {
             zerocode_core::conversation_never_written(kind, &session, transcript_absent)
         });
-    // Nothing was said, so nothing was cut.
-    let interrupted = interrupted && !fresh;
-    // What the restart cut under this worker's pane, read at the goodbye
-    // (t-6428 ⑤): a wake whose turn had ended is still nudged when commands
-    // it left running were cut, and the nudge names them — the same road,
-    // the same receipt.
-    let cut = reseating
-        .as_deref()
-        .map(|worker| {
-            crate::orchestration::restart_census::take_cut(state.local_data_root(), worker)
-        })
-        .unwrap_or_default();
-    let marked = interrupted || !cut.is_empty();
-    let nudge = marked.then(|| {
-        restart_nudge_runtime::resume_nudge(
-            interrupted,
-            reseating.is_some(),
-            restart_nudge_runtime::worktree_state(
-                &root,
-                u64::try_from(now_epoch_ms() / 1_000).unwrap_or_default(),
-            )
-            .as_ref(),
-            &cut,
-        )
+    // Whether this wake is told to go on (t-7812 E): only a sleeper's, by the
+    // one policy the ledger's reseat keeps too — the turn the goodbye read as
+    // under way, or the commands it cut under the pane (t-6428 ⑤). A
+    // person's conversation comes back as it stood, whatever its tab's mark
+    // said; and a wake with no goodbye to read (a crash) is told nothing
+    // rather than guessed at. Read here and spent only once the words reach
+    // the pane (t-7812 R2): a wake that starts nothing leaves them owed.
+    let data_root = window.data_root();
+    let nudge = reseating.as_deref().and_then(|worker| {
+        restart_nudge_runtime::worker_nudge(&data_root, worker, Some(root.as_path()))
     });
-    let ResumeCommand {
-        kind,
-        mut argv,
-        plan,
-    } = if fresh {
-        fresh_command(&agent, launch_override.as_ref())?
+    // And a sleeper's conversation comes back as the launch the ledger would
+    // have cut (t-7812 B): its model, its effort, its peer name. The pane the
+    // 2026-09-25 restart reopened without them was a default-model CLI that
+    // nobody had summoned.
+    let tuning = match reseating.as_deref() {
+        Some(worker) => crate::orchestration::sleeper_launch_tuning(worker)?,
+        None => Vec::new(),
+    };
+    let command = if fresh {
+        fresh_command(agent, launch_override.as_ref())?
     } else {
         resume_command(
-            &agent,
+            agent,
             &session,
             nudge.as_deref(),
-            &[],
+            &tuning,
             launch_override.as_ref(),
         )?
     };
-    // The row's answers for the two decisions below that used to be spelled
-    // by name: which trust menu to pre-answer, and how the pane is opened.
-    let caps = agent_spec(kind.slug())
-        .ok_or_else(|| format!("{agent}은(는) 이 창이 모르는 에이전트입니다"))?
-        .capabilities();
-    // A resumed claude is the same claude the launch button starts — Orca
-    // builds its team plan for every direct claude command it spawns
-    // (`buildClaudeAgentTeamsLaunchPlan` gates on `isDirectClaudeCommand`
-    // alone). A window restart resumes its leaders, and a leader that split
-    // panes yesterday and backgrounds its teammates the morning after reads
-    // as broken ("소넷은 왜 안보이는거지"), not as off.
-    let teams_mode = load_settings_for_boot(state.settings())
-        .document
-        .agent_teams_mode;
-    let mode_args = zerocode_core::agent_teams::teammate_mode_args(&argv, teams_mode);
-    if !mode_args.is_empty() {
-        argv.splice(1..1, mode_args);
-    }
-    let (program, args) = argv
-        .split_first()
-        .map(|(program, args)| (program.clone(), args.to_vec()))
-        .ok_or("실행할 명령이 없습니다")?;
-    let launch_token = new_launch_token(term);
-    // A resumed agent reports exactly like a launched one: same pane key, same
-    // nonce. Without them the conversation would come back on screen and go
-    // silent, which reads as a resume that did not work. The plan's own env
-    // rides too, and FIRST, for the launch road's reason: the account is the
-    // more specific answer and must be able to override it.
-    let mut env = plan.env.clone();
-    env.extend(hooks::pty_env(
-        &hooks::pane_key_of(term),
-        Some(&launch_token),
-        &root,
-        pty_path_in(&env),
-    ));
-    env.extend(account_env_for(state.config_root(), &agent)?);
-    let (agent_env, _auth_launch_lock) =
-        hooks::agent_launch_env_with_lock(state.local_data_root(), &agent);
-    env.extend(agent_env);
-    let team_env = agent_teams::open_team(
-        state.local_data_root(),
-        term,
-        teams_mode,
-        &pty_path_of(&env),
-        &program,
-    );
-    env.extend(team_env.iter().cloned());
-    // The same pre-mark the launch road makes, for the same menu: a resumed
-    // agent in a workspace it has never trusted asks the same question, and
-    // the resume's own paste would answer it (P0-8).
-    if let Some(preset) = caps.trust_menu()
-        && let Err(error) = agent_trust_presets::mark_workspace_trusted(preset, &root, &env)
-    {
-        eprintln!(
-            "zerocode-shell: the {} trust preset was not written: {error}",
-            kind.slug()
+    let kind = command.kind;
+    let launch = window.prepare(term, command, &session.id)?;
+    // The witness (t-3058): this pane, this checkout, this agent, this
+    // session — written before the pane's process exists (t-7812 R1), so
+    // nothing in it can type or report before its seat is durable. A seat
+    // the ledger will not write is not a person's tab either: the pane is
+    // not started at all.
+    if let Some(worker) = reseating.as_deref() {
+        let seated = crate::orchestration::pane_resumed(
+            term,
+            &root_words,
+            kind.slug(),
+            &session.id,
+            now_epoch_ms(),
         );
+        let why = match &seated {
+            Ok(Some(held)) if held == worker => None,
+            Ok(Some(held)) => Some(format!("the witness seated {held}, not {worker}")),
+            Ok(None) => Some("the ledger seated nobody in this pane".to_string()),
+            Err(why) => Some(why.clone()),
+        };
+        if let Some(why) = why {
+            drop(launch);
+            window.abandon(term);
+            if let Ok(Some(held)) = &seated {
+                crate::orchestration::resumed_pane_never_started(held);
+            }
+            window.note(&restart_nudge_runtime::unseated_line(
+                term,
+                kind.slug(),
+                worker,
+                &why,
+            ));
+            return Err(format!(
+                "잠든 워커 {worker}의 대화라 원장 자리가 먼저 서야 하는데 서지 않아 열지 \
+                 않았습니다 — {why}"
+            ));
+        }
     }
-    // Zo resumes through the same pane-owned channel as a fresh IDE pane.
-    // Replaying `zo --resume ID` in a generic PTY restores the conversation
-    // but omits --events-bind and never republishes the private address, which
-    // is exactly the channel-less restart this road exists to prevent.
-    let spawned = if caps.spawn == SpawnRoad::SocketPane {
-        let addr_file = std::env::temp_dir().join(format!(
-            "zerocode-events-term-{term}-{}.addr",
-            LaneId::random()
-        ));
-        state
-            .supervisor()
-            .ok_or_else(|| "`zo`가 PATH에 없습니다".to_string())
-            .and_then(|supervisor| {
-                crate::cmd::project::open_zo_pane_process(
-                    supervisor,
-                    &root,
-                    Some(&session.id),
-                    &addr_file,
-                    &env,
-                    &args,
-                    rows,
-                    cols,
-                )
-            })
-            .map(|opened| {
-                let crate::cmd::project::OpenedZoPane {
-                    pty,
-                    addr,
-                    session_id,
-                    token,
-                    observation,
-                } = opened;
-                (pty, Some((addr, token, session_id, observation)))
-            })
-    } else {
-        PtyLane::spawn(&program, &args, Some(&root), &env, rows, cols)
-            .map(|pty| (pty.into(), None))
-            .map_err(|error| error.to_string())
+    let (reported, channel) = match window.start(term, launch, rows, cols) {
+        Ok(started) => started,
+        Err(error) => {
+            // Nothing started: the sleeper goes back to sleep, its words
+            // still owed, for the next road to bring it back (t-7812 R2).
+            if let Some(worker) = reseating.as_deref() {
+                crate::orchestration::resumed_pane_never_started(worker);
+            }
+            return Err(error);
+        }
     };
-    let (mut pty, zo_channel) = spawned.map_err(|error| {
-        agent_teams::forget_term(term);
-        note_window_event(
-            state.local_data_root(),
-            &format!("term {term} refused {program}: {error}"),
-        );
-        error
-    })?;
-    if let Some(screen) = &restore {
-        super::settings::replay_stored_screen(state.config_root(), screen, pty.terminal_mut());
-    }
-    state.hold_terminal(term, pty);
-    if !team_env.is_empty() {
-        state.team_envs().insert(term, env.clone());
-    }
-    state.agent_terms().insert(term, kind.slug());
-    state.launch_tokens().insert(term, launch_token);
     if fresh {
         // Not that conversation: the fresh agent's own SessionStart names
         // the one this pane now holds.
-        note_window_event(
-            state.local_data_root(),
-            &restart_nudge_runtime::fresh_line(term, kind.slug(), &session.id),
-        );
-        state.cadence().wake();
+        window.note(&restart_nudge_runtime::fresh_line(
+            term,
+            kind.slug(),
+            &session.id,
+        ));
+        window.stir();
         return Ok(ConversationWake::opened(term));
     }
-    // The session is recorded straight away rather than waited for: this pane IS
-    // that conversation by construction, and the agent's first event may be
-    // minutes away.
-    let session = if let Some((_, _, session_id, _)) = &zo_channel {
-        // The running process is the authority. Normally this equals the
-        // durable id offered above; keeping `session.info`'s answer also makes
-        // aliases/fallbacks honest instead of filing the channel under an id
-        // it did not open.
-        zerocode_core::ProviderSession {
+    // The session is recorded straight away rather than waited for: this
+    // pane IS that conversation by construction, and the agent's first
+    // event may be minutes away. The running process is the authority when
+    // it answers at start — zo's `session.info` — which keeps aliases and
+    // fallbacks honest instead of filing a channel under an id it did not
+    // open.
+    let session = match reported {
+        Some(id) => zerocode_core::ProviderSession {
             key: zerocode_core::SessionKey::SessionId,
-            id: session_id.clone(),
+            id,
             transcript_path: session.transcript_path,
-        }
-    } else {
-        session
+        },
+        None => session,
     };
     let resumed_session_id = session.id.clone();
-    state.pane_sessions().insert(term, session);
-    // The witness (t-3058): this pane, this checkout, this agent, this
-    // session. A sleeper that is this conversation is seated here as the
-    // same worker, before the nudge that tells it so is armed.
-    let _seated = crate::orchestration::pane_resumed(
-        term,
-        &root_words,
-        kind.slug(),
-        &resumed_session_id,
-        now_epoch_ms(),
-    );
-    restart_nudge_runtime::register_wake(
-        &app,
-        term,
-        kind.slug(),
-        &resumed_session_id,
-        marked,
-        nudge.as_deref().unwrap_or_default(),
-    );
-    if let Some((addr, token, session_id, observation)) = zo_channel {
-        crate::cmd::project::attach_zo_pane_channel(
-            &app,
-            state.inner(),
-            ZoChannelOwner::Term(term),
-            addr,
-            token,
-            session_id,
-            Some(observation),
-        );
+    window.record(term, session);
+    match (reseating, nudge) {
+        (Some(worker), Some(words)) => {
+            let road = agent_spec(kind.slug())
+                .map_or(zerocode_core::NudgeRoad::Composer, |spec| spec.resume_nudge);
+            let (pending, delivery) = restart_nudge_runtime::place_words(
+                |said| window.type_words(term, kind.slug(), said),
+                restart_nudge_runtime::Words {
+                    agent: kind.slug(),
+                    session_id: &resumed_session_id,
+                    road,
+                    text: words,
+                    launch: window.launch_of(term),
+                    owed: restart_nudge_runtime::Owed {
+                        root: data_root,
+                        worker,
+                    },
+                },
+            );
+            window.arm(term, pending, delivery);
+        }
+        _ => window.note(&restart_nudge_runtime::log_line(
+            term,
+            kind.slug(),
+            &resumed_session_id,
+            None,
+            None,
+        )),
     }
-    state.cadence().wake();
+    window.attach(term, channel);
+    window.stir();
     Ok(ConversationWake::opened(term))
+}
+
+/// The product's wake window: this window's app and state, and the screen a
+/// restored leaf had when the window closed.
+pub(crate) struct ResumeDoor<'a> {
+    app: &'a AppHandle,
+    state: &'a AppState,
+    restore: Option<super::settings::StoredScreen>,
+}
+
+/// One resume's launch, built and seated and not yet started: the program,
+/// its arguments and environment, the team it opened, and the Codex mirror
+/// lease that must live across the spawn.
+pub(crate) struct ResumeLaunch {
+    kind: zerocode_core::AgentKind,
+    caps: zerocode_core::capabilities::AgentCapabilities,
+    program: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    team_env: Vec<(String, String)>,
+    launch_token: String,
+    root: PathBuf,
+    session_id: String,
+    _auth_launch_lock: Option<zerocode_hookd::codex_runtime_auth::LaunchLock>,
+}
+
+/// A started zo pane's private channel, published once the pane is recorded.
+pub(crate) type ZoChannel = Option<(
+    String,
+    Option<String>,
+    String,
+    crate::zo_integration_runtime::LaunchObservation,
+)>;
+
+impl WakeWindow for ResumeDoor<'_> {
+    type Launch = ResumeLaunch;
+    type Channel = ZoChannel;
+
+    fn root(&self) -> PathBuf {
+        self.state.active_root()
+    }
+
+    fn data_root(&self) -> PathBuf {
+        self.state.local_data_root().to_path_buf()
+    }
+
+    fn standing(&self, wanted: &zerocode_core::ConversationKey) -> Option<TermId> {
+        conversation_wake::holding_pane(self.state, wanted)
+    }
+
+    fn launch_override(
+        &self,
+        agent: &str,
+    ) -> Result<Option<zerocode_core::LaunchOverride>, String> {
+        stored_launch_override(self.state.settings(), agent)
+    }
+
+    fn prepare(
+        &self,
+        term: TermId,
+        command: ResumeCommand,
+        session_id: &str,
+    ) -> Result<ResumeLaunch, String> {
+        let state = self.state;
+        let ResumeCommand {
+            kind,
+            mut argv,
+            plan,
+        } = command;
+        let agent = kind.slug();
+        let root = state.active_root();
+        // The row's answers for the two decisions below that used to be
+        // spelled by name: which trust menu to pre-answer, and how the pane
+        // is opened.
+        let caps = agent_spec(agent)
+            .ok_or_else(|| format!("{agent}은(는) 이 창이 모르는 에이전트입니다"))?
+            .capabilities();
+        // A resumed claude is the same claude the launch button starts — Orca
+        // builds its team plan for every direct claude command it spawns
+        // (`buildClaudeAgentTeamsLaunchPlan` gates on `isDirectClaudeCommand`
+        // alone). A window restart resumes its leaders, and a leader that
+        // split panes yesterday and backgrounds its teammates the morning
+        // after reads as broken ("소넷은 왜 안보이는거지"), not as off.
+        let teams_mode = load_settings_for_boot(state.settings())
+            .document
+            .agent_teams_mode;
+        let mode_args = zerocode_core::agent_teams::teammate_mode_args(&argv, teams_mode);
+        if !mode_args.is_empty() {
+            argv.splice(1..1, mode_args);
+        }
+        let (program, args) = argv
+            .split_first()
+            .map(|(program, args)| (program.clone(), args.to_vec()))
+            .ok_or("실행할 명령이 없습니다")?;
+        let launch_token = new_launch_token(term);
+        // A resumed agent reports exactly like a launched one: same pane key,
+        // same nonce. Without them the conversation would come back on screen
+        // and go silent, which reads as a resume that did not work. The
+        // plan's own env rides too, and FIRST, for the launch road's reason:
+        // the account is the more specific answer and must be able to
+        // override it.
+        let mut env = plan.env.clone();
+        env.extend(hooks::pty_env(
+            &hooks::pane_key_of(term),
+            Some(&launch_token),
+            &root,
+            pty_path_in(&env),
+        ));
+        env.extend(account_env_for(state.config_root(), agent)?);
+        let (agent_env, _auth_launch_lock) =
+            hooks::agent_launch_env_with_lock(state.local_data_root(), agent);
+        env.extend(agent_env);
+        let team_env = agent_teams::open_team(
+            state.local_data_root(),
+            term,
+            teams_mode,
+            &pty_path_of(&env),
+            &program,
+        );
+        env.extend(team_env.iter().cloned());
+        // The same pre-mark the launch road makes, for the same menu: a
+        // resumed agent in a workspace it has never trusted asks the same
+        // question, and the resume's own paste would answer it (P0-8).
+        if let Some(preset) = caps.trust_menu()
+            && let Err(error) = agent_trust_presets::mark_workspace_trusted(preset, &root, &env)
+        {
+            eprintln!(
+                "zerocode-shell: the {} trust preset was not written: {error}",
+                kind.slug()
+            );
+        }
+        Ok(ResumeLaunch {
+            kind,
+            caps,
+            program,
+            args,
+            env,
+            team_env,
+            launch_token,
+            root,
+            session_id: session_id.to_string(),
+            _auth_launch_lock,
+        })
+    }
+
+    fn abandon(&self, term: TermId) {
+        agent_teams::forget_term(term);
+    }
+
+    fn start(
+        &self,
+        term: TermId,
+        launch: ResumeLaunch,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(Option<String>, ZoChannel), String> {
+        let state = self.state;
+        let ResumeLaunch {
+            kind,
+            caps,
+            program,
+            args,
+            env,
+            team_env,
+            launch_token,
+            root,
+            session_id,
+            _auth_launch_lock,
+        } = launch;
+        // Zo resumes through the same pane-owned channel as a fresh IDE pane.
+        // Replaying `zo --resume ID` in a generic PTY restores the
+        // conversation but omits --events-bind and never republishes the
+        // private address, which is exactly the channel-less restart this
+        // road exists to prevent.
+        let spawned = if caps.spawn == SpawnRoad::SocketPane {
+            let addr_file = std::env::temp_dir().join(format!(
+                "zerocode-events-term-{term}-{}.addr",
+                LaneId::random()
+            ));
+            state
+                .supervisor()
+                .ok_or_else(|| "`zo`가 PATH에 없습니다".to_string())
+                .and_then(|supervisor| {
+                    crate::cmd::project::open_zo_pane_process(
+                        supervisor,
+                        &root,
+                        Some(&session_id),
+                        &addr_file,
+                        &env,
+                        &args,
+                        rows,
+                        cols,
+                    )
+                })
+                .map(|opened| {
+                    let crate::cmd::project::OpenedZoPane {
+                        pty,
+                        addr,
+                        session_id,
+                        token,
+                        observation,
+                    } = opened;
+                    (pty, Some((addr, token, session_id, observation)))
+                })
+        } else {
+            PtyLane::spawn(&program, &args, Some(&root), &env, rows, cols)
+                .map(|pty| (pty.into(), None))
+                .map_err(|error| error.to_string())
+        };
+        let (mut pty, zo_channel) = spawned.map_err(|error| {
+            agent_teams::forget_term(term);
+            note_window_event(
+                state.local_data_root(),
+                &format!("term {term} refused {program}: {error}"),
+            );
+            error
+        })?;
+        if let Some(screen) = &self.restore {
+            super::settings::replay_stored_screen(state.config_root(), screen, pty.terminal_mut());
+        }
+        state.hold_terminal(term, pty);
+        if !team_env.is_empty() {
+            state.team_envs().insert(term, env.clone());
+        }
+        state.agent_terms().insert(term, kind.slug());
+        state.launch_tokens().insert(term, launch_token);
+        let reported = zo_channel
+            .as_ref()
+            .map(|(_, _, session_id, _)| session_id.clone());
+        Ok((reported, zo_channel))
+    }
+
+    fn record(&self, term: TermId, session: zerocode_core::ProviderSession) {
+        self.state.pane_sessions().insert(term, session);
+    }
+
+    fn attach(&self, term: TermId, channel: ZoChannel) {
+        if let Some((addr, token, session_id, observation)) = channel {
+            crate::cmd::project::attach_zo_pane_channel(
+                self.app,
+                self.state,
+                ZoChannelOwner::Term(term),
+                addr,
+                token,
+                session_id,
+                Some(observation),
+            );
+        }
+    }
+
+    fn launch_of(&self, term: TermId) -> Option<u64> {
+        crate::cmd::terminal::launch_of(self.state, term)
+    }
+
+    fn type_words(
+        &self,
+        term: TermId,
+        agent: &str,
+        words: &str,
+    ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
+        restart_nudge_runtime::deliver_composer(self.state, term, agent, words)
+    }
+
+    fn arm(
+        &self,
+        term: TermId,
+        pending: restart_nudge_runtime::PendingNudge,
+        delivery: Option<std::sync::mpsc::Receiver<DeliveryOutcome>>,
+    ) {
+        restart_nudge_runtime::arm_in_window(self.app, term, pending, delivery);
+    }
+
+    fn note(&self, line: &str) {
+        note_window_event(self.state.local_data_root(), line);
+    }
+
+    fn stir(&self) {
+        self.state.cadence().wake();
+    }
 }
 
 /// One agent's real mark, as a `data:` URL the window can draw.

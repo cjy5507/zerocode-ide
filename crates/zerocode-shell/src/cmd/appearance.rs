@@ -985,8 +985,10 @@ pub(crate) fn relaunch_window(app: AppHandle, door: Option<String>) {
             .and_then(crate::exit_runtime::RestartDoor::named),
     ));
     // The ledger's goodbye first (t-3058): every seated worker sleeps with
-    // its dispatch open, so the panes this restart takes settle nothing.
-    crate::orchestration::window_exiting(crate::now_epoch_ms(), road, &|| take_census(&app));
+    // its dispatch open, so the panes this restart takes settle nothing. Then
+    // the screens and statuses the next window restores from (t-7812 D) —
+    // the restart below is followed by no exit event that would.
+    crate::exit_runtime::relaunch(road, &crate::ExitSteps(&app));
     if let Some(staged) = app
         .try_state::<cmd::update::UpdateState>()
         .and_then(|held| held.staged())

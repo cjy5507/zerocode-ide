@@ -39,8 +39,9 @@ use zerocode_core::agent::{Injected, agent_spec, prompt_injection};
 use zerocode_core::agent_teams::{Effect, capture_reply};
 use zerocode_core::launch::{LaunchOverride, join_command_line, launch_plan};
 use zerocode_core::orchestration::{
-    Decided, Launcher, Ledger, LedgerProjectionV1, RESEAT_GRACE_MS, RebuildError, Restarted, VERBS,
-    WAIT_SECONDS, Worker, WorkerState,
+    CONVERSATION_FILE_GONE, Decided, Launcher, Ledger, LedgerProjectionV1, NO_SESSION_RECORDED,
+    RESEAT_GRACE_MS, RESUME_UNSUPPORTED, RebuildError, Restarted, VERBS, WAIT_SECONDS, Worker,
+    WorkerState,
 };
 use zerocode_orchestrator::effect_journal::{
     BeginEffect, EffectPermit, EffectRequest, EffectSettlement, HostEffectFailure, HostEffectKind,
@@ -443,22 +444,21 @@ pub(crate) fn reseat_sleeping(
         .map(|agent| agent.id.to_string())
         .collect();
     let mut restored = 0;
-    for (_, worker, agent, checkout, taken_over) in sleeping {
+    for (_, worker, agent, checkout, _taken_over) in sleeping {
         /* Three roads end here without a pane being cut, each with its own
          * sentence for the task's record. An orphan whose pane the window
          * proved gone and whose row never learned a checkout has nowhere to
          * be seated — that is the row a leader's exit used to abandon on the
-         * spot, and it is retired now, after the proof, not before. A
-         * person's pane is never reopened by the ledger (the core writes
-         * that one down as abandoned rather than stopped). */
-        /* A person's pane is not cut again by the ledger — and not ended
-         * here either (t-3058). The window restores the person's own tabs,
-         * and that restored tab seats the worker as its witness
-         * (`pane_resumed`); a tab that never comes back is the grace's to
-         * end (`expire_sleepers`), with the dispatch id a replacement needs. */
-        if taken_over {
+         * spot, and it is retired now, after the proof, not before. */
+        /* A person's hand on a sleeper's pane no longer keeps the ledger
+         * out (t-7812): the window never kept this tab to reopen. What still
+         * does is the conversation already coming back in another pane, no
+         * conversation at all, or an orphan the person may still be typing
+         * in — `reseat_admission` asks all three, and holds the conversation
+         * for this reseat until its pane answers for it. */
+        let Some(_hold) = reseat_admission(host, &worker) else {
             continue;
-        }
+        };
         let permanent = match &checkout {
             None => Some(
                 "its pane is gone and no checkout was ever reported for it — nowhere to \
@@ -483,27 +483,10 @@ pub(crate) fn reseat_sleeping(
             }
             continue;
         }
-        // The same words a resumed pane's witness road carries (t-3058):
-        // the seat sentence, where the checkout stands by git's word, and
-        // the commands the restart cut under its pane (t-6428 ⑤).
-        let cut = BLACKBOX
-            .get()
-            .map(|root| restart_census::take_cut(root, &worker))
-            .unwrap_or_default();
-        let nudge = crate::restart_nudge_runtime::resume_nudge(
-            true,
-            true,
-            checkout
-                .as_deref()
-                .and_then(|checkout| {
-                    crate::restart_nudge_runtime::worktree_state(
-                        Path::new(checkout),
-                        u64::try_from(crate::now_epoch_ms() / 1_000).unwrap_or_default(),
-                    )
-                })
-                .as_ref(),
-            &cut,
-        );
+        // The same words a resumed pane's witness road carries (t-3058), by
+        // the same policy (t-7812 E): nothing unless the goodbye cut its turn
+        // or the commands under its pane (t-6428 ⑤).
+        let nudge = reseat_nudge(&worker, checkout.as_deref());
         let decided = match held.actor.prepare_worker_reseat(
             &run_id,
             &worker,
@@ -522,6 +505,202 @@ pub(crate) fn reseat_sleeping(
         }
     }
     restored
+}
+
+/// The pane a reseat claims its conversation for before any pane exists
+/// (t-7812): no terminal carries id 0, so a door told the conversation is
+/// held here finds no tab to go to and opens nothing — the reseat's own tab
+/// arrives with `term:worker`.
+const RESEAT_CLAIM_TERM: u32 = 0;
+
+/// The hold one sleeper's reseat keeps on its conversation, from before its
+/// pane is cut until the pane answers for it (t-7812). Dropped at the end of
+/// the reseat, whatever became of it.
+pub(crate) struct ReseatHold {
+    _claim: Option<crate::conversation_wake::WakeClaim<'static>>,
+}
+
+/// Whether this sleeper is the ledger's to reseat now, and the hold it is
+/// reseated under (t-7812) — asked once per sleeper, before its pane is cut.
+///
+/// One conversation is one process, and a restart has two roads that can
+/// bring it back: this reseat, and a door or restored tab resuming the same
+/// conversation (`resume_session`), whose pane then seats the worker as its
+/// witness. Both take the same claim ([`crate::conversation_wake::WAKES`]),
+/// and the one that finds it taken — or finds a live pane already holding
+/// the conversation — starts nothing: `None` here, `standing` there. Before
+/// this, the reseat never asked, and a door that resumed a sleeper while its
+/// reseat was cutting a pane put two processes on one transcript.
+///
+/// A sleeper whose conversation cannot come back is not reseated at all
+/// ([`sleeper_unresumable`]): its agent started fresh is an empty
+/// conversation where the work was, and one resumed into a file that is not
+/// there dies a second later — what the run's coordinator must hear about is
+/// the loss, once, now, with the dispatch id a `--retry-of` needs, rather
+/// than find either. An orphan keeps the road it had: its process may still
+/// be running, and the ledger has not lost it the way a restart loses a pane.
+/// A taken-over orphan is not reseated at all, as before.
+pub(crate) fn reseat_admission(host: &dyn Host, worker: &str) -> Option<ReseatHold> {
+    let held = runtime()?;
+    let image = held.actor.view().ok()?;
+    let ledger = cached_ledger(&held, &image).ok()?;
+    let row = ledger.runs().iter().find_map(|run| run.worker(worker))?;
+    let (agent, session, sleeping, persons) = (
+        row.agent.clone(),
+        row.session.clone(),
+        row.state == WorkerState::Sleeping,
+        row.taken_over,
+    );
+    drop(ledger);
+    // A person's orphan stays where it stands: its pane may still be running
+    // with the person in it (`worker_reseated` refuses it for that reason),
+    // and a tab that never comes back is the grace's to end.
+    if persons && !sleeping {
+        return None;
+    }
+    if sleeping && let Some(why) = sleeper_unresumable(&agent, session.as_ref()) {
+        sleeper_cannot_come_back(worker, why);
+        return None;
+    }
+    let Some(session) = session else {
+        return Some(ReseatHold { _claim: None });
+    };
+    let Some(wanted) = zerocode_core::conversation_key(&agent, &session) else {
+        return Some(ReseatHold { _claim: None });
+    };
+    match crate::conversation_wake::WAKES.claim(wanted, RESEAT_CLAIM_TERM, |_| {
+        host.conversation_standing(&agent, &session)
+    }) {
+        Ok(claim) => Some(ReseatHold {
+            _claim: Some(claim),
+        }),
+        Err(holder) => {
+            if let Some(root) = BLACKBOX.get() {
+                crate::note_window_event(
+                    root,
+                    &format!(
+                        "orchestration: sleeping worker {worker}'s conversation is already \
+                         coming back in terminal {holder}; that pane seats it, not a second one"
+                    ),
+                );
+            }
+            None
+        }
+    }
+}
+
+/// Why a sleeper's recorded conversation cannot come back, when it cannot
+/// (t-7812) — asked by both roads that bring a sleeper back, the ledger's
+/// reseat and the door whose pane would be its witness, before either cuts a
+/// pane: none was recorded ([`NO_SESSION_RECORDED`]), its agent has no
+/// resume for it ([`RESUME_UNSUPPORTED`]), or its file is not on disk
+/// ([`CONVERSATION_FILE_GONE`]). Each is a CLI that would not be the
+/// conversation — an empty one, or one that dies at the missing file.
+pub(crate) fn sleeper_unresumable(
+    agent: &str,
+    session: Option<&zerocode_core::ProviderSession>,
+) -> Option<&'static str> {
+    let Some(session) = session else {
+        return Some(NO_SESSION_RECORDED);
+    };
+    let Some(kind) = zerocode_core::AgentKind::from_slug(agent)
+        .filter(|kind| zerocode_core::resume_argv(*kind, session).is_some())
+    else {
+        return Some(RESUME_UNSUPPORTED);
+    };
+    zerocode_core::conversation_never_written(kind, session, crate::cmd::board::transcript_absent)
+        .then_some(CONVERSATION_FILE_GONE)
+}
+
+/// A sleeper known not to be coming back ends now and its run hears why,
+/// once (t-7812): the ledger's `sleeper_unrecoverable`, and the window's line
+/// beside it. Nothing is started in its place.
+pub(crate) fn sleeper_cannot_come_back(worker: &str, why: &str) {
+    let Some(held) = runtime() else {
+        return;
+    };
+    if held
+        .actor
+        .sleeper_unrecoverable(worker, why, crate::now_epoch_ms())
+        .is_ok()
+    {
+        if let Some(root) = BLACKBOX.get() {
+            crate::note_window_event(
+                root,
+                &format!(
+                    "orchestration: sleeping worker {worker} cannot come back ({why}); nothing \
+                     was started in its place and its attempt ended"
+                ),
+            );
+        }
+        rang(true);
+    }
+}
+
+/// The words a reseated worker is told once its seat is durable (t-7812 E):
+/// [`crate::restart_nudge_runtime::worker_nudge`], or nothing — an empty
+/// continuation is delivered as no input at all ([`deliver_continuation`]).
+/// Read, not spent: the goodbye's note is spent only by the wake that hands
+/// these words to a seated pane, so a reseat that never gets that far leaves
+/// them for the road that does (t-7812 R2).
+pub(crate) fn reseat_nudge(worker: &str, checkout: Option<&str>) -> String {
+    BLACKBOX
+        .get()
+        .and_then(|root| {
+            crate::restart_nudge_runtime::worker_nudge(root, worker, checkout.map(Path::new))
+        })
+        .unwrap_or_default()
+}
+
+/// Deliver a restored worker's continuation, or nothing when it has none
+/// (t-7812 E): an idle worker is not typed at, not even an empty line.
+///
+/// The goodbye's note these words came from is spent here, whatever the
+/// paste answered (t-7812 R2): handed to a seated pane, the words may have
+/// landed, and words that may have landed are never said a second time.
+pub(crate) fn deliver_continuation(host: &dyn Host, term: u32, words: &str, worker: &str) -> bool {
+    let delivered = words.trim().is_empty() || host.paste(term, words);
+    if let Some(root) = BLACKBOX.get() {
+        crate::restart_nudge_runtime::nudge_spent(root, worker);
+    }
+    delivered
+}
+
+/// Write the conversation a reseated pane IS into the window's own pane
+/// table, the moment its seat is durable (t-7812): a resume door that asks
+/// before the agent's first report is then told the conversation stands in
+/// this pane, rather than finding it free and starting a second process on
+/// its transcript. The row's session is the resume argv's, by construction.
+pub(crate) fn seed_reseated_session(host: &dyn Host, worker: &str, term: u32) {
+    let Some(held) = runtime() else { return };
+    let Ok(image) = held.actor.view() else { return };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return;
+    };
+    let session = ledger
+        .runs()
+        .iter()
+        .find_map(|run| run.worker(worker))
+        .and_then(|row| row.session.clone());
+    drop(ledger);
+    if let Some(session) = session {
+        host.carry_session(term, &session);
+    }
+}
+
+/// The launch words the sleeper `worker` comes back with when the window's
+/// own resume road reopens its conversation (t-7812 B): the model, effort and
+/// peer name its row holds, the same words the ledger's reseat would have cut
+/// the pane with ([`zerocode_core::orchestration::Ledger::sleeper_resume_tuning`]).
+pub(crate) fn sleeper_launch_tuning(worker: &str) -> Result<Vec<String>, String> {
+    let held = runtime().ok_or_else(|| "the orchestration ledger is not open".to_string())?;
+    let image = held
+        .actor
+        .view()
+        .map_err(|_| "the orchestration ledger could not be read".to_string())?;
+    let ledger = cached_ledger(&held, &image)
+        .map_err(|_| "the orchestration ledger could not be read".to_string())?;
+    ledger.sleeper_resume_tuning(worker)
 }
 
 /// Renderer-safe view of current orchestration state. Message bodies, task
@@ -3291,8 +3470,14 @@ pub(crate) fn window_exiting(
         && let Some(root) = BLACKBOX.get()
     {
         // What each worker's wake will be told was cut (t-6428 ⑤) — left
-        // before the lines, and replaced whole: an older note is stale.
-        if let Err(error) = restart_census::leave_cut(root, &taken) {
+        // before the lines. An older note is stale for every worker this
+        // goodbye read; what it said of a worker still asleep — one no road
+        // brought back in this window — is still the last word about that
+        // worker's cut turn, and goes on to the next (t-7812 R2).
+        let asleep = sleeping_workers();
+        if let Err(error) =
+            restart_census::leave_cut(root, &taken, &|worker| asleep.contains(worker))
+        {
             crate::note_window_event(
                 root,
                 &format!("exit: the cut commands were not left for the wakes: {error}"),
@@ -3331,6 +3516,42 @@ pub(crate) fn window_exiting(
     }
 }
 
+/// Every worker the ledger holds asleep right now — what a goodbye may still
+/// owe a continuation to (t-7812 R2). Empty when the ledger cannot be read:
+/// nothing is carried on a guess.
+fn sleeping_workers() -> std::collections::HashSet<String> {
+    let Some(held) = runtime() else {
+        return std::collections::HashSet::new();
+    };
+    let Ok(image) = held.actor.view() else {
+        return std::collections::HashSet::new();
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return std::collections::HashSet::new();
+    };
+    ledger
+        .runs()
+        .iter()
+        .flat_map(|run| run.workers.iter())
+        .filter(|worker| worker.state == WorkerState::Sleeping)
+        .map(|worker| worker.id.clone())
+        .collect()
+}
+
+/// The conversation the ledger recorded for `worker` — what its reseat would
+/// resume — read for a door that is about to resume the same conversation
+/// from a record that may know less of it (t-7812).
+pub(crate) fn sleeper_record(worker: &str) -> Option<zerocode_core::ProviderSession> {
+    let held = runtime()?;
+    let image = held.actor.view().ok()?;
+    let ledger = cached_ledger(&held, &image).ok()?;
+    ledger
+        .runs()
+        .iter()
+        .find_map(|run| run.worker(worker))
+        .and_then(|row| row.session.clone())
+}
+
 /// The sleeper a conversation the window is about to resume would be, if
 /// it is one — asked before the pane exists, so the resume nudge can say
 /// so in words (t-3058). A read; [`pane_resumed`] is the write.
@@ -3346,33 +3567,37 @@ pub(crate) fn sleeper_awaiting(checkout: &str, agent: &str, session_id: &str) ->
         .map(|worker| worker.id.clone())
 }
 
-/// The window resumed a conversation into `term` (t-3058): this checkout,
-/// this agent, this provider session. If a sleeper is that conversation,
-/// the ledger seats it there as the same worker — dispatch and task kept,
-/// no handover — and the window says so in its log. The witness is the
-/// window's own fact about the pane it just opened; nothing is inferred.
+/// The window is resuming a conversation into `term` (t-3058): this
+/// checkout, this agent, this provider session. If a sleeper is that
+/// conversation, the ledger seats it there as the same worker — dispatch and
+/// task kept, no handover — and the window says so in its log. The witness
+/// is the window's own fact about the pane it is opening; nothing is
+/// inferred. Asked before the pane's process starts (t-7812): the seat is
+/// durable before anything in the pane can type or report.
 ///
-/// Answers the worker seated, or `None` for the ordinary conversation a
-/// person reopened.
+/// Answers the worker seated, `Ok(None)` for a pane that seats nobody — the
+/// ordinary conversation a person reopened — and `Err` when the ledger could
+/// not be asked or would not write: a wake that expected a worker must not
+/// take that for a person's tab (t-7812 R1).
 pub(crate) fn pane_resumed(
     term: u32,
     checkout: &str,
     agent: &str,
     session_id: &str,
     now_ms: i64,
-) -> Option<String> {
-    if unavailable().is_some() {
-        return None;
+) -> Result<Option<String>, String> {
+    if let Some(why) = unavailable() {
+        return Err(why);
     }
-    let held = runtime()?;
+    let held = runtime().ok_or_else(|| "the orchestration ledger is not open".to_string())?;
     let seated = match held
         .actor
         .worker_pane_resumed(term, checkout, agent, session_id, now_ms)
     {
         Ok((seated, _)) => seated,
-        Err(_) => {
+        Err(why) => {
             note_ledger_unwritten("a resumed pane's seat");
-            return None;
+            return Err(format!("the ledger did not write the seat ({why:?})"));
         }
     };
     if let Some(worker) = &seated {
@@ -3387,7 +3612,31 @@ pub(crate) fn pane_resumed(
         }
         rang(true);
     }
-    seated
+    Ok(seated)
+}
+
+/// The pane `pane_resumed` seated `worker` in never started (t-7812): the
+/// sleeper goes back to sleep, so the ledger's reseat or another door can
+/// still bring it back. Called only after the pane's seat is gone from the
+/// team table — the actor refuses a seat that is still open. Answers whether
+/// the sleeper went back.
+pub(crate) fn resumed_pane_never_started(worker: &str) -> bool {
+    let Some(held) = runtime() else {
+        return false;
+    };
+    match held
+        .actor
+        .resumed_pane_never_started(worker, crate::now_epoch_ms())
+    {
+        Ok((moved, _)) => {
+            rang(moved);
+            moved
+        }
+        Err(_) => {
+            note_ledger_unwritten("a resumed pane that never started");
+            false
+        }
+    }
 }
 
 /// When this window booted, on the ledger's clock — the moment from which
@@ -7555,12 +7804,13 @@ fn carried(
                         {
                             rang(moved);
                         }
+                        seed_reseated_session(host, &prepared.worker, term);
                         /* The replacement was started at an idle composer.
                          * Only now, after the row and run binding are durable,
                          * may it see the interrupted work. A tiny task can run
                          * `worker_done` synchronously from this callback; that
                          * is the adversarial ordering this fence exists for. */
-                        if !host.paste(term, &prepared.prompt) {
+                        if !deliver_continuation(host, term, &prepared.prompt, &prepared.worker) {
                             host.close(term);
                             return refused(
                                 "the restored worker became unreachable before its continuation was delivered",

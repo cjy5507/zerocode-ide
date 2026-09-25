@@ -46,8 +46,13 @@ pub(crate) struct Seated {
 /// What the window last measured of one worker's turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Turn {
-    /// Under way, or a question of its own parked in it.
+    /// Under way.
     Running,
+    /// Stopped at a question for the person — the pane's last report was
+    /// `NeedsAttention`. Busy to a restart like a turn under way; but the
+    /// turn is the person's to answer, not the restart's to cut, so its wake
+    /// is never told to go on (t-7812 E).
+    Asking,
     /// Ended, however it ended: the agent is not in a turn.
     Rest,
     /// Nothing heard from the pane since this window began — an agent whose
@@ -56,8 +61,11 @@ pub(crate) enum Turn {
 }
 
 impl Turn {
-    fn of(heard: Option<PaneTurn>) -> Self {
+    /// The pane's turn as last heard, and whether its last report was a
+    /// question for the person — which the turn map files as running.
+    fn of(heard: Option<PaneTurn>, asking: bool) -> Self {
         match heard {
+            Some(PaneTurn::Running) if asking => Self::Asking,
             Some(PaneTurn::Running) => Self::Running,
             Some(PaneTurn::Ended { .. }) => Self::Rest,
             None => Self::Unheard,
@@ -67,6 +75,7 @@ impl Turn {
     fn word(self) -> &'static str {
         match self {
             Self::Running => "running",
+            Self::Asking => "asking",
             Self::Rest => "rest",
             Self::Unheard => "unheard",
         }
@@ -140,7 +149,7 @@ impl RestartCensus {
         };
         for one in &self.workers {
             match (one.turn, &one.commands) {
-                (Turn::Running, _) => said.turning += 1,
+                (Turn::Running | Turn::Asking, _) => said.turning += 1,
                 (Turn::Unheard, _) | (Turn::Rest, None) => said.unknown += 1,
                 (Turn::Rest, Some(commands)) => said.background += commands.len(),
             }
@@ -175,6 +184,18 @@ pub(crate) fn take(
             .filter_map(|one| held.get(&one.term).map(|turn| (one.term, *turn)))
             .collect()
     };
+    // The panes whose last report was a question for the person: the same
+    // map `agentWait` reads, `Some(since)` while it waits.
+    let asking: std::collections::HashSet<u32> = {
+        let held = super::pane_attention()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        seated
+            .iter()
+            .filter(|one| matches!(held.get(&one.term), Some(Some(_))))
+            .map(|one| one.term)
+            .collect()
+    };
     let sample = table().ok();
     let workers = seated
         .into_iter()
@@ -189,7 +210,7 @@ pub(crate) fn take(
                         .collect()
                 });
             WorkerCut {
-                turn: Turn::of(turns.get(&one.term).copied()),
+                turn: Turn::of(turns.get(&one.term).copied(), asking.contains(&one.term)),
                 commands,
                 worker: one.worker,
                 agent: one.agent,
@@ -337,35 +358,113 @@ fn file_name(program: &str) -> &str {
     program.rsplit(['/', '\\']).next().unwrap_or(program)
 }
 
-/// Where the goodbye leaves each worker's cut commands for its wake
-/// (t-6428 ⑤): beside the window's log, in the local data root.
+/// Where the goodbye leaves what it cut for each worker's wake (t-6428 ⑤):
+/// beside the window's log, in the local data root.
 const CUT_FILE: &str = "restart-cut.json";
+
+/// What the goodbye cut for one worker, as its wake reads it: whether its
+/// turn was under way (t-7812 E) and the commands running under its pane
+/// (t-6428 ⑤). The default is a worker the goodbye cut nothing of — at
+/// rest, nothing under it — and also a wake that has no goodbye to read at
+/// all, a crash's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Cut {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) turn: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) commands: Vec<String>,
+}
+
+impl Cut {
+    /// Whether the goodbye cut anything of this worker at all.
+    pub(crate) fn any(&self) -> bool {
+        self.turn || !self.commands.is_empty()
+    }
+}
+
+/// One worker's entry in the note, in either of its spellings: the whole
+/// [`Cut`], or the list of commands a window before t-7812 wrote — which a
+/// window crossing that upgrade reads the day it is installed.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum CutEntry {
+    Cut(Cut),
+    Commands(Vec<String>),
+}
+
+impl From<CutEntry> for Cut {
+    fn from(entry: CutEntry) -> Self {
+        match entry {
+            CutEntry::Cut(cut) => cut,
+            CutEntry::Commands(commands) => Cut {
+                turn: false,
+                commands,
+            },
+        }
+    }
+}
 
 /// What the goodbye left for the wakes, loaded once per data root per
 /// process: the old window writes it on its way out, and the new one reads
 /// it at its first wake.
-type CutBook = HashMap<PathBuf, HashMap<String, Vec<String>>>;
+type CutBook = HashMap<PathBuf, HashMap<String, Cut>>;
 
 fn cut_book() -> &'static Mutex<CutBook> {
     static BOOK: OnceLock<Mutex<CutBook>> = OnceLock::new();
     BOOK.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Leave each worker's cut commands for its wake (t-6428 ⑤): the workers
-/// that had commands running under their panes as the window went. A
-/// goodbye that cut nothing leaves no file — not even an older one.
-pub(crate) fn leave_cut(root: &Path, census: &RestartCensus) -> std::io::Result<()> {
-    let cut: BTreeMap<&str, &Vec<String>> = census
+/// Leave what the goodbye cut for each worker's wake: the workers whose turn
+/// was under way (t-7812 E) and the ones with commands running under their
+/// panes (t-6428 ⑤), as the window went. A goodbye that cut nothing leaves
+/// no file.
+///
+/// An earlier goodbye's word is stale for every worker this one read. For a
+/// worker it did not read that is still `asleep` — no road brought it back
+/// in this window, or the road that tried started nothing — what the earlier
+/// goodbye cut and no wake has said yet is still the last word about that
+/// worker, and goes on to the next window (t-7812 R2). Anyone else's is
+/// dropped: a worker that came back was told, or may have been.
+pub(crate) fn leave_cut(
+    root: &Path,
+    census: &RestartCensus,
+    asleep: &dyn Fn(&str) -> bool,
+) -> std::io::Result<()> {
+    let mut cut: BTreeMap<String, Cut> = census
         .workers
         .iter()
-        .filter_map(|one| {
-            one.commands
-                .as_ref()
-                .filter(|commands| !commands.is_empty())
-                .map(|commands| (one.worker.as_str(), commands))
+        .map(|one| {
+            (
+                one.worker.clone(),
+                Cut {
+                    turn: one.turn == Turn::Running,
+                    commands: one.commands.clone().unwrap_or_default(),
+                },
+            )
         })
+        .filter(|(_, cut)| cut.any())
         .collect();
     let path = root.join(CUT_FILE);
+    // What this process's book still holds for this root, and a note on disk
+    // no wake has read — the newer of the two, when both are there.
+    let mut unsaid = cut_book()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(root)
+        .unwrap_or_default();
+    if path.exists() {
+        unsaid.extend(load_cut(root));
+    }
+    let read: std::collections::HashSet<&str> = census
+        .workers
+        .iter()
+        .map(|one| one.worker.as_str())
+        .collect();
+    for (worker, owed) in unsaid {
+        if owed.any() && !read.contains(worker.as_str()) && asleep(&worker) {
+            cut.entry(worker).or_insert(owed);
+        }
+    }
     if cut.is_empty() {
         return match crate::durable_file::remove_file(&path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
@@ -376,27 +475,71 @@ pub(crate) fn leave_cut(root: &Path, census: &RestartCensus) -> std::io::Result<
     crate::durable_file::replace_bytes(&path, &bytes).map(|_| ())
 }
 
-/// The commands the goodbye cut under this worker's pane, said once
-/// (t-6428 ⑤). The first wake after a boot takes the file the goodbye left
-/// and removes it; each worker's entry goes to its own wake and no other.
-pub(crate) fn take_cut(root: &Path, worker: &str) -> Vec<String> {
+/// This process's book for `root`, with a note on disk read into it first:
+/// a note on disk is a goodbye this book has not read yet — the last
+/// window's at the first wake, and any later one's after it — so it is read
+/// now, whole, in place of what the book held, and gone from the disk as it
+/// is.
+fn book_for<'a>(book: &'a mut CutBook, root: &Path) -> &'a mut HashMap<String, Cut> {
+    let held = book.entry(root.to_path_buf()).or_default();
+    if root.join(CUT_FILE).exists() {
+        *held = load_cut(root);
+    }
+    held
+}
+
+/// What the goodbye cut of this worker (t-6428 ⑤, t-7812 E), read for its
+/// wake and NOT spent (t-7812 R2): each worker's entry goes to its own wake
+/// and no other, and stays until [`spend_cut`] says the words reached a
+/// pane. A wake that started nothing — its seat refused, its spawn refused —
+/// leaves the entry for the road that tries next, and the continuation is
+/// not lost for having been read.
+///
+/// The first read after a boot takes the file the goodbye left into this
+/// process's book and removes it from the disk: a window that crashes after
+/// it has told nothing to the next one, which is the blind re-send a
+/// continuation must never be.
+pub(crate) fn peek_cut(root: &Path, worker: &str) -> Cut {
     let mut book = cut_book().lock().unwrap_or_else(|held| held.into_inner());
-    book.entry(root.to_path_buf())
-        .or_insert_with(|| load_cut(root))
-        .remove(worker)
+    book_for(&mut book, root)
+        .get(worker)
+        .cloned()
         .unwrap_or_default()
+}
+
+/// This worker's words were handed to a pane that holds it — they reached
+/// it, or may have — so the goodbye's entry for it is spent: said once, and
+/// never again (t-7812 R2). Read off the disk first, like [`peek_cut`]: a
+/// spending that came before any read must not leave the entry to be read
+/// after it.
+pub(crate) fn spend_cut(root: &Path, worker: &str) {
+    let mut book = cut_book().lock().unwrap_or_else(|held| held.into_inner());
+    book_for(&mut book, root).remove(worker);
+}
+
+/// A new process of the window, as far as the goodbye's note goes: what this
+/// one's book read is forgotten, and only the disk speaks (t-7812).
+#[cfg(test)]
+pub(crate) fn a_new_process(root: &Path) {
+    cut_book()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(root);
 }
 
 /// The note as the goodbye left it, taken off the disk: nothing, or a note
 /// nobody can read, is nothing cut.
-fn load_cut(root: &Path) -> HashMap<String, Vec<String>> {
+fn load_cut(root: &Path) -> HashMap<String, Cut> {
     let path = root.join(CUT_FILE);
-    let loaded = crate::durable_file::read_plain_file(&path)
+    let loaded: HashMap<String, CutEntry> = crate::durable_file::read_plain_file(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     let _ = crate::durable_file::remove_file(&path);
     loaded
+        .into_iter()
+        .map(|(worker, entry)| (worker, entry.into()))
+        .collect()
 }
 
 /// The goodbye's lines (t-6428 ①): one for the road, the census's numbers
@@ -505,6 +648,11 @@ mod tests {
         assert!(idle.gap && !idle.busy);
     }
 
+    /// Nobody asleep: what an older goodbye owed is nobody's.
+    fn nobody_asleep(_: &str) -> bool {
+        false
+    }
+
     #[test]
     fn the_goodbye_leaves_each_workers_cut_commands_for_its_own_wake_once() {
         let root = tempfile::tempdir().expect("a data root");
@@ -521,28 +669,277 @@ mod tests {
             ],
             took_ms: 0,
         };
-        leave_cut(root.path(), &census).expect("the goodbye leaves its note");
+        leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye leaves its note");
         assert!(file.exists(), "nothing was left for the wakes");
         assert_eq!(
-            take_cut(root.path(), "w-1"),
+            peek_cut(root.path(), "w-1").commands,
             vec!["cargo test -p zerocode-shell", "just gate"]
         );
-        assert!(!file.exists(), "the first wake takes the note");
-        assert!(take_cut(root.path(), "w-1").is_empty(), "said once");
-        assert!(take_cut(root.path(), "w-2").is_empty());
-        assert!(take_cut(root.path(), "w-3").is_empty());
-        // A goodbye that cut nothing leaves nothing, not even an older note.
+        assert!(!file.exists(), "the first wake takes the note off the disk");
+        spend_cut(root.path(), "w-1");
+        assert!(!peek_cut(root.path(), "w-1").any(), "said once");
+        assert!(!peek_cut(root.path(), "w-2").any());
+        assert!(!peek_cut(root.path(), "w-3").any());
+        // A goodbye that cut nothing leaves nothing — an older note included,
+        // when nobody it named is still asleep.
         let later = tempfile::tempdir().expect("another data root");
-        leave_cut(later.path(), &census).expect("a note");
+        leave_cut(later.path(), &census, &nobody_asleep).expect("a note");
         leave_cut(
             later.path(),
             &RestartCensus {
                 workers: vec![named("w-4", Some(&[]))],
                 took_ms: 0,
             },
+            &nobody_asleep,
         )
         .expect("no note");
         assert!(!later.path().join(CUT_FILE).exists());
+    }
+
+    /// t-7812 E: the goodbye also writes down whose TURN it cut — the one
+    /// fact a wake needs to tell a worker cut mid-turn from one at rest, and
+    /// the only witness the wakes read for it. A worker at rest with nothing
+    /// under it leaves no entry; a note written before this field existed
+    /// (a list of commands) still reads, as commands and no turn.
+    #[test]
+    fn the_goodbye_leaves_whose_turn_it_cut_and_reads_the_older_note_too() {
+        let root = tempfile::tempdir().expect("a data root");
+        let named = |id: &str, turn: Turn, commands: Option<&[&str]>| WorkerCut {
+            worker: id.to_string(),
+            ..worker(turn, commands)
+        };
+        let census = RestartCensus {
+            workers: vec![
+                named("w-mid", Turn::Running, Some(&[])),
+                named("w-gate", Turn::Rest, Some(&["just gate"])),
+                named("w-idle", Turn::Rest, Some(&[])),
+                named("w-unheard", Turn::Unheard, None),
+            ],
+            took_ms: 0,
+        };
+        leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye leaves its note");
+        assert_eq!(
+            peek_cut(root.path(), "w-mid"),
+            Cut {
+                turn: true,
+                commands: Vec::new()
+            }
+        );
+        assert_eq!(
+            peek_cut(root.path(), "w-gate"),
+            Cut {
+                turn: false,
+                commands: vec!["just gate".to_string()]
+            }
+        );
+        assert!(
+            !peek_cut(root.path(), "w-idle").any(),
+            "an idle worker was cut"
+        );
+        assert!(
+            !peek_cut(root.path(), "w-unheard").any(),
+            "a guess was left"
+        );
+
+        let older = tempfile::tempdir().expect("another data root");
+        std::fs::write(
+            older.path().join(CUT_FILE),
+            br#"{"w-old":["cargo test -p zerocode-core"]}"#,
+        )
+        .expect("an older window's note");
+        assert_eq!(
+            peek_cut(older.path(), "w-old"),
+            Cut {
+                turn: false,
+                commands: vec!["cargo test -p zerocode-core".to_string()]
+            }
+        );
+    }
+
+    /// t-7812 E, the coordinator's negative: a worker stopped at a question
+    /// for the person when the window went is busy to the restart — its turn
+    /// counts, as it always did — but the goodbye does not write its turn
+    /// down as cut. The question was the person's to answer; a continuation
+    /// typed at the wake would answer it for them.
+    #[test]
+    fn a_question_for_the_person_is_busy_but_never_a_cut_turn() {
+        let root = tempfile::tempdir().expect("a data root");
+        let asking = RestartCensus {
+            workers: vec![WorkerCut {
+                worker: "w-asks".to_string(),
+                ..worker(Turn::Asking, Some(&[]))
+            }],
+            took_ms: 0,
+        };
+        let busy = asking.busy();
+        assert!(busy.busy && busy.turning == 1, "{busy:?}");
+        leave_cut(root.path(), &asking, &nobody_asleep).expect("the goodbye");
+        assert!(
+            !peek_cut(root.path(), "w-asks").any(),
+            "a question for the person was written down as a cut turn"
+        );
+        assert!(!root.path().join(CUT_FILE).exists(), "nothing was cut");
+        // A gate still running under it is cut all the same (t-6428 ⑤).
+        let gate = RestartCensus {
+            workers: vec![WorkerCut {
+                worker: "w-asks".to_string(),
+                ..worker(Turn::Asking, Some(&["just gate"]))
+            }],
+            took_ms: 0,
+        };
+        leave_cut(root.path(), &gate, &nobody_asleep).expect("the goodbye");
+        assert_eq!(
+            peek_cut(root.path(), "w-asks"),
+            Cut {
+                turn: false,
+                commands: vec!["just gate".to_string()]
+            }
+        );
+        assert_eq!(Turn::of(Some(PaneTurn::Running), true), Turn::Asking);
+        assert_eq!(Turn::of(Some(PaneTurn::Running), false), Turn::Running);
+        assert_eq!(
+            Turn::of(Some(PaneTurn::Ended { interrupted: false }), true),
+            Turn::Rest,
+            "a turn that ended is at rest whatever came before it"
+        );
+    }
+
+    /// t-7812 R2: reading a worker's entry is not saying it. A wake that
+    /// started nothing leaves it for the next road; only the wake that
+    /// handed the words to a pane spends it, and then nobody reads it again.
+    /// One worker's spending touches nobody else's entry.
+    #[test]
+    fn a_read_note_is_spent_only_when_its_words_reach_a_pane() {
+        let root = tempfile::tempdir().expect("a data root");
+        let census = RestartCensus {
+            workers: vec![
+                WorkerCut {
+                    worker: "w-a".to_string(),
+                    ..worker(Turn::Running, Some(&[]))
+                },
+                WorkerCut {
+                    worker: "w-b".to_string(),
+                    ..worker(Turn::Running, Some(&[]))
+                },
+            ],
+            took_ms: 0,
+        };
+        leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye");
+        assert!(peek_cut(root.path(), "w-a").turn, "the first read");
+        assert!(
+            peek_cut(root.path(), "w-a").turn,
+            "a read that started nothing spent the words"
+        );
+        spend_cut(root.path(), "w-a");
+        assert!(!peek_cut(root.path(), "w-a").any(), "said twice");
+        assert!(
+            peek_cut(root.path(), "w-b").turn,
+            "another worker's words went"
+        );
+        // Spending what was never there is nothing.
+        spend_cut(root.path(), "w-nobody");
+        spend_cut(tempfile::tempdir().expect("a root").path(), "w-b");
+        assert!(peek_cut(root.path(), "w-b").turn);
+    }
+
+    /// t-7812 R2, across a window: what an earlier goodbye cut and no wake
+    /// has said — read and left, or never read at all — goes on with the
+    /// next goodbye for a worker still asleep, and only for one. The newer
+    /// goodbye's own reading of a worker wins; a worker that came back, or
+    /// ended, is owed nothing.
+    #[test]
+    fn a_goodbye_carries_what_an_older_one_still_owes_a_sleeper() {
+        let asleep = |worker: &str| worker.starts_with("w-asleep");
+        let named = |id: &str, turn: Turn, commands: Option<&[&str]>| WorkerCut {
+            worker: id.to_string(),
+            ..worker(turn, commands)
+        };
+        // Read and left: the wake that read it started nothing.
+        let root = tempfile::tempdir().expect("a data root");
+        leave_cut(
+            root.path(),
+            &RestartCensus {
+                workers: vec![
+                    named("w-asleep-1", Turn::Running, Some(&[])),
+                    named("w-back", Turn::Running, Some(&[])),
+                ],
+                took_ms: 0,
+            },
+            &asleep,
+        )
+        .expect("the first goodbye");
+        assert!(peek_cut(root.path(), "w-asleep-1").turn);
+        assert!(peek_cut(root.path(), "w-back").turn);
+        spend_cut(root.path(), "w-back");
+        leave_cut(
+            root.path(),
+            &RestartCensus {
+                workers: vec![named("w-live", Turn::Rest, Some(&["just gate"]))],
+                took_ms: 0,
+            },
+            &asleep,
+        )
+        .expect("the second goodbye");
+        assert_eq!(
+            peek_cut(root.path(), "w-asleep-1"),
+            Cut {
+                turn: true,
+                commands: Vec::new()
+            },
+            "a sleeper's cut turn was lost between two windows"
+        );
+        assert!(!peek_cut(root.path(), "w-back").any(), "said again");
+        assert_eq!(
+            peek_cut(root.path(), "w-live").commands,
+            vec!["just gate".to_string()]
+        );
+
+        // Never read: the note on disk is carried the same way.
+        let unread = tempfile::tempdir().expect("another data root");
+        leave_cut(
+            unread.path(),
+            &RestartCensus {
+                workers: vec![
+                    named("w-asleep-2", Turn::Rest, Some(&["cargo test"])),
+                    named("w-back-2", Turn::Running, Some(&[])),
+                    named("w-ended", Turn::Running, Some(&[])),
+                ],
+                took_ms: 0,
+            },
+            &asleep,
+        )
+        .expect("a goodbye nobody's wake read");
+        // W-back-2 came back without a word and is live again, at rest over a
+        // gate; the next goodbye reads it as it stands now.
+        leave_cut(
+            unread.path(),
+            &RestartCensus {
+                workers: vec![named("w-back-2", Turn::Rest, Some(&["just gate"]))],
+                took_ms: 0,
+            },
+            &asleep,
+        )
+        .expect("the next goodbye");
+        assert_eq!(
+            peek_cut(unread.path(), "w-asleep-2"),
+            Cut {
+                turn: false,
+                commands: vec!["cargo test".to_string()]
+            },
+            "an unread note was lost for a worker still asleep"
+        );
+        assert_eq!(
+            peek_cut(unread.path(), "w-back-2"),
+            Cut {
+                turn: false,
+                commands: vec!["just gate".to_string()]
+            },
+            "the newer goodbye's own reading of a worker is the one that stands"
+        );
+        assert!(
+            !peek_cut(unread.path(), "w-ended").any(),
+            "a worker that is not asleep was owed a continuation"
+        );
     }
 
     #[test]
