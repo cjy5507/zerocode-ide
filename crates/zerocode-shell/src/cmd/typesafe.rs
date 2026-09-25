@@ -1,5 +1,6 @@
 //! TypeSafe (Jev) settings IPC — the key and the one switch.
 use crate::api_routers::{self, Keychain, RouterRefusal};
+use crate::jev_scope;
 use crate::typesafe_settings::{self, DayBudget, SeatNumbers, TypeSafeCheck, TypeSafeSettings};
 use tauri::State;
 
@@ -107,11 +108,17 @@ pub(crate) async fn check_typesafe_key() -> Result<TypeSafeCheck, String> {
 /// `recent` asks for each seat's last that many requests as well — the
 /// dashboard's list under the table; the card leaves it out and the answer
 /// carries none.
+///
+/// `scope` is which numbers (t-9091): the checkout the person is looking at
+/// — the default — or every project with zo records, summed
+/// ([`jev_scope::read`]). Either way the answer names what it counted, and
+/// where else records are when the checkout has none.
 #[tauri::command]
 pub(crate) async fn jev_summary(
     state: State<'_, AppState>,
     recent: Option<usize>,
-) -> Result<Vec<SeatNumbers>, String> {
+    scope: Option<jev_scope::Scope>,
+) -> Result<jev_scope::JevReading, String> {
     // The screen seats append beside each walk's evidence under this
     // window's Computer Use sessions, not under a root zo knows; handed over
     // on the exec boundary so one counter counts every seat.
@@ -121,34 +128,55 @@ pub(crate) async fn jev_summary(
     // The project whose ledgers are counted: zo's routing and recall seats
     // append under the project's own state directory, so the card asks about
     // the checkout the person is looking at, not the window's cwd.
-    let project = state.active_root();
+    let workspace = state.active_root();
+    // zo's home, where every project's records are: the settings file's
+    // folder, the same one `jev_day` counts the day in.
+    let zo_home = settings_path()
+        .map_err(|refusal| refusal.message)?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| "zo's settings file has no folder".to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
         let bin = crate::zo_companion::zo_path_under(&home);
         if !bin.exists() {
             return Err(format!("zo not installed at {}", bin.display()));
         }
-        let mut command = crate::proc::quiet_command(&bin);
-        command
-            .args(typesafe_settings::ZO_JEV_SUMMARY_ARGS)
-            .arg(typesafe_settings::ZO_JEV_SUMMARY_CWD_FLAG)
-            .arg(&project)
-            .arg(typesafe_settings::ZO_JEV_SUMMARY_SESSIONS_FLAG)
-            .arg(&sessions);
-        if let Some(count) = recent.filter(|count| *count > 0) {
+        let ask = |project: &std::path::Path| -> Result<Vec<SeatNumbers>, String> {
+            let mut command = crate::proc::quiet_command(&bin);
             command
-                .arg(typesafe_settings::ZO_JEV_SUMMARY_RECENT_FLAG)
-                .arg(count.to_string());
-        }
-        let output = command.output().map_err(|error| error.to_string())?;
-        typesafe_settings::read_summary(&output.stdout).ok_or_else(|| {
-            format!(
-                "zo {} exited {}: {}",
-                typesafe_settings::ZO_JEV_SUMMARY_ARGS.join(" "),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-        })
+                .args(typesafe_settings::ZO_JEV_SUMMARY_ARGS)
+                .arg(typesafe_settings::ZO_JEV_SUMMARY_CWD_FLAG)
+                .arg(project)
+                .arg(typesafe_settings::ZO_JEV_SUMMARY_SESSIONS_FLAG)
+                .arg(&sessions);
+            if let Some(count) = recent.filter(|count| *count > 0) {
+                command
+                    .arg(typesafe_settings::ZO_JEV_SUMMARY_RECENT_FLAG)
+                    .arg(count.to_string());
+            }
+            let output = command.output().map_err(|error| error.to_string())?;
+            typesafe_settings::read_summary(&output.stdout).ok_or_else(|| {
+                format!(
+                    "zo {} exited {}: {}",
+                    typesafe_settings::ZO_JEV_SUMMARY_ARGS.join(" "),
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )
+            })
+        };
+        let places = jev_scope::Places {
+            zo_home,
+            sessions: sessions.clone(),
+            temporary: jev_scope::temporary_roots(),
+        };
+        jev_scope::read(
+            &ask,
+            &places,
+            &workspace,
+            scope.unwrap_or_default(),
+            crate::now_epoch_ms(),
+        )
     })
     .await
     .map_err(|error| error.to_string())?

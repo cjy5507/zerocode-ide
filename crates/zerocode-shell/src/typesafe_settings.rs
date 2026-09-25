@@ -2096,6 +2096,21 @@ pub struct SeatNumbers {
     /// them ([`ZO_JEV_SUMMARY_RECENT_FLAG`]); empty otherwise.
     #[serde(default)]
     pub recent: Vec<SeatDecision>,
+    /// The file zo read the seat's rows from — kept to say where they are
+    /// kept ([`crate::jev_scope::with_reach`]), never sent on: a path of the
+    /// person's disk is not the dashboard's to draw.
+    #[serde(default, skip_serializing)]
+    pub found: Option<String>,
+    /// Where the seat's rows are kept — its project's own, or this machine's
+    /// and so the same in every scope (t-9091); absent for a seat with no
+    /// rows on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<crate::jev_scope::Reach>,
+    /// Across every project summed: how many were counted, in how many the
+    /// seat acts, and whether its numbers are a sum (t-9091); absent in a
+    /// reading of one checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub across: Option<crate::jev_scope::SeatAcross>,
 }
 
 /// One local day of a seat's ledger, counted the way the week is.

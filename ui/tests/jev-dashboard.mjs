@@ -62,14 +62,11 @@ export function jevDashboardFixture(real = null) {
   /* What `jev_summary` answers for `seats` (t-9091): the reading names the
    * scope it counted — this checkout, with records of its own — and each
    * feature where its rows are kept, read off the file zo found them in (the
-   * machine's one place, `~/.zo/jev`, or the project's own state). A dashboard
-   * that names no scope was the window before the answer said one, and is
-   * answered the seats alone, as it was. */
+   * machine's one place, `~/.zo/jev`, or the project's own state). */
   function jevReading(args, seats) {
-    if (!args?.scope) return seats;
     const reachOf = (found) => (!found ? null : /\/\.zo\/jev\//.test(found) ? "machine" : "project");
     return {
-      scope: { scope: args.scope, workspace: "/Users/p/project", workspaceName: "project", recorded: true, projects: [], windowDays: 7 },
+      scope: { scope: args?.scope ?? "workspace", workspace: "/Users/p/project", workspaceName: "project", recorded: true, projects: [], windowDays: 7 },
       seats: seats.map((seat) => ({ ...seat, reach: reachOf(seat.found) })),
     };
   }
@@ -1148,8 +1145,6 @@ export async function testJevDashboardScope(browser, origin, ok) {
         answeredShare: null, answeredLowerBound: null, p50Ms: null, p95Ms: null, failures: [], refusals: [] });
       window.__ANSWER__.jev_summary = (args) => {
         const answered = base(args);
-        // The window before the answer named a scope asked for none.
-        if (!args?.scope) return answered;
         const scope = { ...answered.scope, workspace, workspaceName: "t-1", recorded: false, projects };
         const seats = answered.seats.map((seat) => {
           if (args.scope === "projects") {

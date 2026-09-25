@@ -39011,6 +39011,15 @@ h4.knowledge-inspector-head::after {
   flex-wrap: wrap;
 }
 
+/* The header's side (t-9091): the actions, and under them what the numbers
+   count — in the height the heading's lines already take. */
+.jev-head-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
 .jev-status, .jev-error {
   margin: 0;
 }
@@ -39042,6 +39051,15 @@ h4.knowledge-inspector-head::after {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* The line under a feature's name: its id, and — for a feature whose
+   records this computer keeps in one place (t-9091) — a word saying so. */
+.jev-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-1);
 }
 
 /* The feature's id under its name, small (t-6277 D7): the word its settings
@@ -39162,6 +39180,66 @@ h4.knowledge-inspector-head::after {
 
 .jev-error {
   color: var(--signal-halt);
+}
+
+/* What the numbers count (t-9091): the checkout by name — or how many
+   projects — and the one switch between the two, under the header's
+   actions; the note over the strip names the projects with records when
+   the checkout has none of its own. */
+.jev-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.jev-scope-line, .jev-scope-note {
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-scope-name {
+  color: var(--ink-chalk);
+  font-weight: var(--jev-weight-strong);
+}
+
+.jev-scope-switch {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
+.jev-scope-choice {
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--jev-meta-size);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.jev-scope-choice:hover {
+  color: var(--ink-chalk);
+  background: var(--row-hover);
+}
+
+.jev-scope-choice[aria-pressed="true"] {
+  color: var(--ink-chalk);
+  background: var(--surface-well);
+}
+
+/* A feature whose records this computer keeps in one place (t-9091): a
+   quiet word beside its id, what it means as the tip. */
+.jev-reach {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  font-weight: var(--jev-weight-plain);
 }
 
 /* The strip over the table (t-6243 D1): the week's sums, how many features
