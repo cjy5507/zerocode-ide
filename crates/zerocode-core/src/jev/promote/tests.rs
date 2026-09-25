@@ -2566,7 +2566,44 @@ fn asked_then_marked(
     marked: usize,
     fields: impl Fn(usize) -> Value,
 ) -> Vec<Value> {
-    let mut rows: Vec<Value> = (at..at + asked).map(|n| asked_by(seat, n)).collect();
+    asked_then_marked_as(seat, seat.rubric_version, None, at, asked, marked, fields)
+}
+
+/// [`asked_then_marked`] asked under `rubric` and answered by `model`, when
+/// one is named — a label inherits both from its request. For a seat whose
+/// marks sit on the request row ([`mark`]), the first `marked` requests
+/// carry them.
+fn asked_then_marked_as(
+    seat: &JevUse,
+    rubric: u32,
+    model: Option<&str>,
+    at: usize,
+    asked: usize,
+    marked: usize,
+    fields: impl Fn(usize) -> Value,
+) -> Vec<Value> {
+    let ask = |n: usize| {
+        let mut row = asked_by(seat, n);
+        row[RUBRIC_VERSION.canonical] = json!(rubric);
+        if let Some(model) = model {
+            row[MODEL.canonical] = json!(model);
+        }
+        row
+    };
+    if seat.request_name.is_empty() {
+        return (0..asked)
+            .map(|k| {
+                let mut row = ask(at + k);
+                if k < marked {
+                    for (key, value) in fields(k).as_object().expect("the mark's fields") {
+                        row[key.as_str()] = value.clone();
+                    }
+                }
+                row
+            })
+            .collect();
+    }
+    let mut rows: Vec<Value> = (at..at + asked).map(ask).collect();
     rows.extend((0..marked).map(|k| mark(seat, at + asked + k, at + k, fields(k))));
     rows
 }
@@ -2589,14 +2626,22 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
         let inside = 3;
         // Rings asked before the window, each marked before it began — the
         // three that say no the oldest...
-        let mut rows = asked_then_marked(seat, 0, older, older, |k| {
-            json!({"agreed": k >= misses, "baselineAgreed": k % 2 == 0})
-        });
+        let mut rows = asked_then_marked(
+            seat,
+            0,
+            older,
+            older,
+            |k| json!({"agreed": k >= misses, "baselineAgreed": k % 2 == 0}),
+        );
         // ...then the window, and the few marks its own rings earned.
         let start = rows.len();
-        rows.extend(asked_then_marked(seat, start, wanted, inside, |_| {
-            json!({"agreed": true, "baselineAgreed": false})
-        }));
+        rows.extend(asked_then_marked(
+            seat,
+            start,
+            wanted,
+            inside,
+            |_| json!({"agreed": true, "baselineAgreed": false}),
+        ));
         let judged = judge_seat(seat, &rows).expect("judged");
         assert_eq!(
             judged.agreement.compared, floor,
@@ -2608,13 +2653,21 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
 
         // A window that holds the floor on its own reads only its own marks:
         // the older ones that said no are left where they are.
-        let mut full = asked_then_marked(seat, 0, older, older, |_| {
-            json!({"agreed": false, "baselineAgreed": false})
-        });
+        let mut full = asked_then_marked(
+            seat,
+            0,
+            older,
+            older,
+            |_| json!({"agreed": false, "baselineAgreed": false}),
+        );
         let start = full.len();
-        full.extend(asked_then_marked(seat, start, wanted, floor, |_| {
-            json!({"agreed": true, "baselineAgreed": false})
-        }));
+        full.extend(asked_then_marked(
+            seat,
+            start,
+            wanted,
+            floor,
+            |_| json!({"agreed": true, "baselineAgreed": false}),
+        ));
         let judged = judge_seat(seat, &full).expect("judged");
         assert_eq!(
             (judged.agreement.compared, judged.agreement.agreed),
@@ -2625,13 +2678,21 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
 
         // A record holding fewer marks than the floor is read whole, and
         // says how few.
-        let mut thin = asked_then_marked(seat, 0, older, floor - inside - 1, |k| {
-            json!({"agreed": k >= misses})
-        });
+        let mut thin = asked_then_marked(
+            seat,
+            0,
+            older,
+            floor - inside - 1,
+            |k| json!({"agreed": k >= misses}),
+        );
         let start = thin.len();
-        thin.extend(asked_then_marked(seat, start, wanted, inside, |_| {
-            json!({"agreed": true})
-        }));
+        thin.extend(asked_then_marked(
+            seat,
+            start,
+            wanted,
+            inside,
+            |_| json!({"agreed": true}),
+        ));
         assert_eq!(
             judge_seat(seat, &thin).expect("judged").verdict,
             Verdict::Hold(Line::TooFewCompared {
@@ -2639,6 +2700,164 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
                 wanted: floor
             }),
             "{}",
+            seat.id
+        );
+    }
+}
+
+/// The words r1 of t-9087 moved are judged on their own series however far
+/// a window's marks reach back (t-9087 r2, over t-6877): the command guard's
+/// version 2, the stall seat's 4 and the summons' 5 each ask the words
+/// before them graded by another label, and the label's version rides the
+/// request. A window of the new words holding fewer marks than the sample
+/// floor reaches back through its own series and stops there — short of the
+/// older words' thick record and the rise it earned, of a late label of an
+/// older request, of the requests another version answered, and of the
+/// words a rollback left behind — and inside its series it still reaches
+/// its floor.
+#[test]
+fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
+    const OLDER_VERSION: &str = "jev-1.12.0";
+    for seat in [
+        &crate::jev::COMMAND_GUARD,
+        &crate::jev::STALL,
+        &crate::jev::SUMMON,
+    ] {
+        let today = seat.rubric_version;
+        let before = today - 1;
+        let wanted = window_wanted_for(seat).expect("a promoting seat");
+        let floor = seat.agreement_rows_wanted.expect("a label sample floor");
+        let misses = seat.negatives_wanted.expect("a promoting seat");
+        let thick = marks_that_can_clear(seat)
+            .expect("a width the line can be cleared on")
+            .max(wanted);
+        let inside = 3;
+        let rising = |k: usize| json!({"agreed": k >= misses, "baselineAgreed": k % 2 == 0});
+        let yes = |_: usize| json!({"agreed": true, "baselineAgreed": false});
+        let no = |_: usize| json!({"agreed": false, "baselineAgreed": true});
+
+        // The older words' thick record and its rise, then a few requests of
+        // today's: today's marks alone, a window not yet full, recording.
+        let mut rows = asked_then_marked_as(seat, before, None, 0, thick, thick, rising);
+        rows.push(rise_on(rows.len(), &[before]));
+        let start = rows.len();
+        rows.extend(asked_then_marked_as(
+            seat,
+            today,
+            None,
+            start,
+            inside + 2,
+            inside,
+            yes,
+        ));
+        let judged = judge_seat(seat, &rows).expect("judged");
+        assert_eq!(
+            judged.agreement.compared, inside,
+            "{}: today's marks alone",
+            seat.id
+        );
+        assert!(
+            matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { .. })),
+            "{}: {judged:?}",
+            seat.id
+        );
+        assert_eq!(standing(seat, &rows), Stand::Recording, "{}", seat.id);
+
+        // Today's words marked before their window, then the window and its
+        // few marks: the reach back reads today's newest marks to the floor.
+        let mut rows = asked_then_marked_as(seat, before, None, 0, thick, 0, no);
+        let start = rows.len();
+        rows.extend(asked_then_marked_as(
+            seat,
+            today,
+            None,
+            start,
+            thick - inside,
+            thick - inside,
+            rising,
+        ));
+        let start = rows.len();
+        rows.extend(asked_then_marked_as(
+            seat, today, None, start, wanted, inside, yes,
+        ));
+        let clean = judge_seat(seat, &rows).expect("judged");
+        assert_eq!(
+            (clean.agreement.compared, clean.agreement.agreed),
+            (floor, floor),
+            "{}: a sparse window of today's words reads its floor in today's series",
+            seat.id
+        );
+        // The older words' requests graded after the window began — a late
+        // label of each, or, for a seat whose marks sit on its requests, an
+        // older binary's marked requests beside the newer — change nothing:
+        // not the marks, and not how far back they reach.
+        let late = rows.len();
+        if seat.request_name.is_empty() {
+            rows.extend(asked_then_marked_as(
+                seat, before, None, late, floor, floor, no,
+            ));
+        } else {
+            rows.extend((0..floor).map(|k| mark(seat, late + k, k, no(k))));
+        }
+        assert_eq!(
+            judge_seat(seat, &rows).expect("judged"),
+            clean,
+            "{}: the older words' late marks",
+            seat.id
+        );
+
+        // Today's words answered by an older version, then by the version
+        // answering now: the reach back stops where the version changed.
+        let mut rows =
+            asked_then_marked_as(seat, today, Some(OLDER_VERSION), 0, thick, thick, rising);
+        let start = rows.len();
+        rows.extend(asked_then_marked_as(
+            seat,
+            today,
+            Some(ANSWERING),
+            start,
+            wanted,
+            inside,
+            yes,
+        ));
+        let judged = judge_seat(seat, &rows).expect("judged");
+        assert_eq!(
+            judged.agreement.compared, inside,
+            "{}: the version answering now",
+            seat.id
+        );
+        assert_eq!(judged.cut.as_deref(), Some(OLDER_VERSION), "{}", seat.id);
+        assert!(
+            matches!(
+                judged.verdict,
+                Verdict::Hold(Line::TooFewCompared { compared, wanted: asked_for }) if compared == inside && asked_for == floor
+            ),
+            "{}: {judged:?}",
+            seat.id
+        );
+
+        // Words that went back: today's thick record, one request of newer
+        // words, then today's window again — the series starts after the
+        // newer words, and the reach back stops there.
+        let mut rows = asked_then_marked_as(seat, today, None, 0, thick, thick, rising);
+        let fence = rows.len();
+        rows.extend(asked_then_marked_as(
+            seat,
+            today + 1,
+            None,
+            fence,
+            1,
+            0,
+            yes,
+        ));
+        let start = rows.len();
+        rows.extend(asked_then_marked_as(
+            seat, today, None, start, wanted, inside, yes,
+        ));
+        let judged = judge_seat(seat, &rows).expect("judged");
+        assert_eq!(
+            judged.agreement.compared, inside,
+            "{}: the rollback's own series",
             seat.id
         );
     }

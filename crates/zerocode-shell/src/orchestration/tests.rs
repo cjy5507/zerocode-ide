@@ -6239,6 +6239,13 @@ fn an_unmarked_stall_is_asked_about_once_and_recorded_beside_the_silence() {
     assert_eq!(row["agent"], "claude");
     assert_eq!(row["mode"], JevMode::Shadow.key());
     assert_eq!(row["outcome"], "answered");
+    // The request carries the words the seat's row asks, so its label joins
+    // the series of those words and no older one (t-6877; t-9087 moved them
+    // to version 4).
+    assert_eq!(
+        row[zerocode_core::jev::summary::RUBRIC_VERSION.canonical],
+        zerocode_core::jev::STALL.rubric_version
+    );
     assert_eq!(row["cause"], "finished_without_report");
     assert_eq!(
         row[zerocode_core::jev::summary::MODEL.canonical],
