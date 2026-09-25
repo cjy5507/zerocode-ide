@@ -115,6 +115,19 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
     ["merged", 18], ["gate", 2], ["blocked", 2], ["failed", 1],
   ];
   const total = stages.reduce((sum, [, count]) => sum + count, 0);
+  /* What a finished task cost, as `task_cost` hands it over (t-9470): one in
+   * four ran on an agent with no usage ledger, one in five is still open to
+   * the clock. Moving tasks carry none. */
+  const cost = (n) => ({
+    attempts: 1 + (n % 3),
+    wallMs: n % 5 === 0 ? null : (192 + n) * minute,
+    generation: {
+      sessionsKnown: 1 + (n % 2), sessionsLinked: 1 + (n % 2),
+      inputTokens: 1_000 * n, outputTokens: 20_000, cacheReadTokens: 1_200_000, cacheWriteTokens: 40_000,
+      usd: n % 4 === 0 ? null : 1.5 + n / 10, usdReason: n % 4 === 0 ? "unsupported_agent" : null,
+    },
+    jev: { requests: n % 6, stampedSeats: 4, unstampedSeats: 23, inputTokens: null },
+  });
   const deskTasks = [];
   let at = 0;
   for (const [stage, count] of stages) {
@@ -126,6 +139,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
         gate: stage === "gate" ? { id: `gate-${700 + at}`, question: `w-${at} 체크아웃을 수확할까요, 다시 보낼까요?` } : null,
         blocked_by: stage === "blocked" ? [`t-${100 + at - 1}`] : [],
         created_ms: now - (tasks - at) * 3 * minute,
+        cost: stage === "reported" || stage === "merged" ? cost(at) : null,
       });
     }
   }
@@ -618,6 +632,56 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a stage longer than the rows the ledger sent says how many more the ledger holds",
       long && window44.rows.length === 20 && window44.more === "24개 더 — 원장에 있음" &&
       window44.head === "과업 흐름 · 84", JSON.stringify(window44));
+
+    /* ---- 과업이 든 비용 (t-9470): 끝난 행마다 한 줄, 모르는 것은 「—」와 그 까닭 ---- */
+    const readCosts = () => page.evaluate(() =>
+      [...document.querySelectorAll('#board-view [data-desk-block="pipeline"] .board-desk-task')].map((row) => {
+        const line = row.querySelector(".board-desk-task-cost");
+        return { id: row.querySelector(".board-desk-task-id").textContent,
+          cost: line && !line.hidden ? line.textContent : "", tip: line?.dataset.tip ?? "" };
+      }));
+    await page.click('#board-view [data-desk-block="pipeline"] [data-stage="reported"]');
+    await settleDesk();
+    const costs = await readCosts();
+    const shape = /^시도 \d · \d+시간 \d+분\(대기 포함\) · 생성 [\d.]+[kMB] 토큰 · \$\d+\.\d{2} · Jev 요청 \d$/;
+    ok("a finished task's row says what it cost: attempts, the wall clock with its waits, the generation tokens at the API rate, the Jev requests",
+      costs.length === 6 && costs.some((row) => shape.test(row.cost)) &&
+      costs.every((row) => row.tip.includes("마지막 세션 기준 합") && row.tip.includes("API 환산가(구독 사용자는 청구액 아님)") &&
+        row.tip.includes("스탬프 좌석 4개") && row.tip.includes("토큰 미기록")), JSON.stringify(costs));
+    ok("what is not known is said as — with its reason, never as a guess",
+      costs.some((row) => row.cost.includes("$— 사용량 원장 없는 에이전트")) && costs.some((row) => row.cost.includes("벽시계 —")) &&
+      !costs.some((row) => row.cost.includes("NaN") || row.cost.includes("undefined")), JSON.stringify(costs));
+    const costMoved = await page.evaluate(async () => {
+      const surface = document.querySelector("#board-view .task-board-surface");
+      const records = [];
+      const watch = new MutationObserver((batch) => records.push(...batch));
+      watch.observe(surface, { subtree: true, childList: true, attributes: true, characterData: true });
+      const target = window.__DESK__.tasks.find((one) => one.stage === "reported");
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        tasks: window.__DESK__.tasks.map((one) => one === target
+          ? { ...one, cost: { ...one.cost, jev: { ...one.cost.jev, requests: one.cost.jev.requests + 5 } } } : one) };
+      refreshDeskLedger();
+      for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      records.push(...watch.takeRecords());
+      watch.disconnect();
+      const where = (record) => (record.target.nodeType === 1 ? record.target : record.target.parentElement);
+      return { id: target.id, records: records.map((record) =>
+        `${record.type}:${where(record)?.className}:${where(record)?.closest(".board-desk-task")?.dataset.task ?? ""}`) };
+    });
+    ok("a cost that moved rewrites that one line and nothing else",
+      costMoved.records.length > 0 &&
+        costMoved.records.every((one) => one.includes("board-desk-task-cost") && one.endsWith(`run-desk/${costMoved.id}`)),
+      JSON.stringify(costMoved));
+    await page.click('#board-view [data-desk-block="pipeline"] [data-stage="ready"]');
+    await settleDesk();
+    const movingCosts = await readCosts();
+    ok("a task still moving carries no cost line",
+      movingCosts.length > 0 && movingCosts.every((row) => row.cost === ""), JSON.stringify(movingCosts));
+    await page.click('#board-view [data-desk-block="pipeline"] [data-stage="ready"]');
+    await settleDesk();
 
     /* ---- 릴리즈 레인: 레인의 `status.json` 그대로 ---------------------- */
     const release = await page.evaluate(() => {

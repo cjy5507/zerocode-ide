@@ -150,6 +150,12 @@ pub struct Session {
     /// Every model this session used, not just the last one it announced.
     #[serde(default)]
     pub model_breakdown: Vec<ModelBreakdown>,
+    /// What the vendor said the session's turns cost, summed — the per-day
+    /// rows' figure ([`DailyAggregate::estimated_cost_usd`]) kept per
+    /// conversation, so one conversation can be priced the way its vendor
+    /// priced it (a task's cost, t-9470). `None` where no turn reported one.
+    #[serde(default)]
+    pub estimated_cost_usd: Option<f64>,
 }
 
 /// One day of one model in one project.
@@ -212,6 +218,7 @@ pub fn aggregate(entries: Vec<Entry>, worktrees: &[WorktreeRef], offset_minutes:
                 total_tokens: 0,
                 location_breakdown: Vec::new(),
                 model_breakdown: Vec::new(),
+                estimated_cost_usd: None,
             });
         if entry.timestamp < session.first_timestamp {
             session.first_timestamp = entry.timestamp.clone();
@@ -229,6 +236,8 @@ pub fn aggregate(entries: Vec<Entry>, worktrees: &[WorktreeRef], offset_minutes:
         session.output_tokens += entry.output_tokens;
         session.reasoning_output_tokens += entry.reasoning_output_tokens;
         session.total_tokens += entry.total_tokens;
+        session.estimated_cost_usd =
+            plus_cost(session.estimated_cost_usd, entry.estimated_cost_usd);
 
         match session
             .location_breakdown
@@ -342,6 +351,7 @@ pub fn merge(into: &mut Ledger, from: Ledger) {
         held.output_tokens += session.output_tokens;
         held.reasoning_output_tokens += session.reasoning_output_tokens;
         held.total_tokens += session.total_tokens;
+        held.estimated_cost_usd = plus_cost(held.estimated_cost_usd, session.estimated_cost_usd);
         for model in session.model_breakdown {
             match held
                 .model_breakdown
@@ -871,6 +881,38 @@ mod tests {
         // A table that would have priced these rows must not be consulted.
         let table_priced = report(&ledger, Scope::All, Range::All, now, KST, table());
         assert_eq!(table_priced.summary.estimated_cost_usd, Some(0.2));
+    }
+
+    /// A conversation keeps what its turns reported, summed across the files
+    /// a merge joins — one conversation priced the way its vendor priced it
+    /// (t-9470) — and one no turn priced says nothing rather than free.
+    #[test]
+    fn a_session_keeps_the_dollars_its_turns_reported() {
+        let mut paid = entry("paid", "2026-08-19T01:00:00Z", "/w/repo", 100);
+        paid.estimated_cost_usd = Some(0.25);
+        let mut unpriced = entry("paid", "2026-08-19T01:30:00Z", "/w/repo", 100);
+        unpriced.estimated_cost_usd = None;
+        let mut ledger = aggregate(vec![paid, unpriced], &[managed()], KST);
+        let mut later = entry("paid", "2026-08-19T02:00:00Z", "/w/repo", 100);
+        later.estimated_cost_usd = Some(0.5);
+        merge(&mut ledger, aggregate(vec![later], &[managed()], KST));
+        merge(
+            &mut ledger,
+            aggregate(
+                vec![entry("free", "2026-08-19T01:00:00Z", "/w/repo", 100)],
+                &[managed()],
+                KST,
+            ),
+        );
+        let cost = |id: &str| {
+            ledger
+                .sessions
+                .iter()
+                .find(|session| session.session_id == id)
+                .map(|session| session.estimated_cost_usd)
+        };
+        assert_eq!(cost("paid"), Some(Some(0.75)));
+        assert_eq!(cost("free"), Some(None));
     }
 
     /// Nobody reporting a price is not the same as a price of zero.

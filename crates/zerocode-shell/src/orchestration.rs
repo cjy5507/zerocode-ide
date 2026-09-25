@@ -26,6 +26,7 @@
 //! [`RuntimeActor`]: zerocode_orchestrator::runtime_actor::RuntimeActor
 
 pub(crate) mod coordinator_handover;
+pub(crate) mod cost_book;
 pub(crate) mod desk;
 pub(crate) mod restart_census;
 mod stall_cause;
@@ -1773,6 +1774,10 @@ pub(crate) struct LedgerAgent {
     pub(crate) quiet_at: Option<i64>,
     /// The reconciler's proof that its pane is gone (`Worker::pane_missing_since_ms`).
     pub(crate) pane_missing_since_ms: Option<i64>,
+    /// What its task cost, once the task is finished (t-9470) — laid on by
+    /// the board's beat from the window's cost book ([`cost_book::CostBook::dress`]);
+    /// `None` for a task still moving, and on every row read another way.
+    pub(crate) cost: Option<zerocode_core::orchestration::task_cost::TaskCost>,
 }
 
 /// Volatile relations layered over the board's two permanent graph edges.
@@ -2065,14 +2070,24 @@ pub(crate) fn refresh_board_ledger() {
     let Some(held) = runtime() else {
         return;
     };
-    let Some(next) = with_ledger_seats(|ledger, seats| BoardLedgerSnapshot {
-        agents: Arc::new(ledger_agents_for_seats(ledger, seats)),
-        states: Arc::new(ledger_states_for_seats(ledger, seats)),
-        overlays: Arc::new(graph_overlay_snapshot_for_seats(ledger, seats)),
-        held_checkouts: zerocode_core::orchestration::held_checkouts(ledger).len(),
-        desk: Arc::new(desk::desk_snapshot(ledger, |seat| {
-            seat_is_held(seats, seat)
-        })),
+    let Some(next) = with_ledger_seats(|ledger, seats| {
+        // A finished task's cost is worked out once and remembered; the
+        // beat only asks (t-9470, [`cost_book`]).
+        let mut costs = cost_book::book();
+        costs.begin();
+        let next = BoardLedgerSnapshot {
+            agents: Arc::new(costs.dress(ledger, ledger_agents_for_seats(ledger, seats))),
+            states: Arc::new(ledger_states_for_seats(ledger, seats)),
+            overlays: Arc::new(graph_overlay_snapshot_for_seats(ledger, seats)),
+            held_checkouts: zerocode_core::orchestration::held_checkouts(ledger).len(),
+            desk: Arc::new(desk::desk_snapshot(
+                ledger,
+                |seat| seat_is_held(seats, seat),
+                |run, task| costs.cost(run, task),
+            )),
+        };
+        costs.end();
+        next
     }) else {
         return;
     };
@@ -2205,6 +2220,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                     .and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id)),
                 quiet_at: worker.quiet_at,
                 pane_missing_since_ms: worker.pane_missing_since_ms,
+                cost: None,
             });
         }
     }

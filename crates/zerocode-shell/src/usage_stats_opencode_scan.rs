@@ -343,6 +343,11 @@ pub fn held() -> Option<OpenCodeScan> {
     OPENCODE.held()
 }
 
+/// The held OpenCode read, where it lies ([`ScanCell::with_held`]).
+pub fn with_held<R>(read: impl FnOnce(&OpenCodeScan) -> R) -> Option<R> {
+    OPENCODE.with_held(read)
+}
+
 /// Whether a read is running right now.
 #[must_use]
 pub fn scanning() -> bool {

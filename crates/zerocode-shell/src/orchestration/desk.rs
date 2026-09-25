@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
+use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
     Delivery, Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom, worktree_room,
 };
@@ -322,6 +323,9 @@ pub(crate) struct DeskTask {
     /// Its dependencies that failed (`Run::blocked_by`).
     pub(crate) blocked_by: Vec<String>,
     pub(crate) created_ms: i64,
+    /// What the task cost, for a finished one ([`finished`], t-9470) —
+    /// `None` while it is still moving.
+    pub(crate) cost: Option<TaskCost>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -355,6 +359,10 @@ pub(crate) const STAGES: [&str; 8] = [
 /// the ledger hands work out in. The rest are endings, listed newest first.
 const OPEN_STAGES: [&str; 5] = ["pending", "ready", "dispatched", "gate", "blocked"];
 
+/// The stages a finished task stands in — reported, merged — the ones whose
+/// rows carry the task's cost (t-9470).
+const FINISHED_STAGES: [&str; 2] = ["reported", "merged"];
+
 /// The most rows one stage carries across the wire. Its count carries the
 /// rest: a run of two hundred finished tasks is two hundred numbers nobody
 /// reads one by one, and the newest two dozen are what a coordinator checks.
@@ -382,6 +390,11 @@ fn stage_of(run: &Run, task: &Task) -> &'static str {
     }
 }
 
+/// Whether a task is finished: reported, or merged ([`FINISHED_STAGES`]).
+pub(crate) fn finished(run: &Run, task: &Task) -> bool {
+    FINISHED_STAGES.contains(&stage_of(run, task))
+}
+
 /// Whether a run is in play: somebody is coordinating it, or somebody is
 /// still working for it. A finished run with nobody at it is history.
 fn in_play(run: &Run) -> bool {
@@ -393,11 +406,16 @@ fn in_play(run: &Run) -> bool {
 }
 
 /// The desk's reading of `ledger`. `holds_seat` answers whether this window
-/// holds a coordinator seat named `team/pane`.
-pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) -> DeskSnapshot {
+/// holds a coordinator seat named `team/pane`; `cost` what a finished task
+/// cost, asked only of the rows the desk carries.
+pub(crate) fn desk_snapshot(
+    ledger: &Ledger,
+    holds_seat: impl Fn(&str) -> bool,
+    mut cost: impl FnMut(&Run, &Task) -> TaskCost,
+) -> DeskSnapshot {
     let now_ms = crate::now_epoch_ms();
     let mut runs = Vec::new();
-    let mut staged: Vec<(&'static str, DeskTask)> = Vec::new();
+    let mut staged: Vec<(&Run, &Task, DeskTask)> = Vec::new();
     let mut mail = Vec::new();
     let mut news = Vec::new();
     let mut folded = 0;
@@ -416,7 +434,8 @@ pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) 
         for task in &run.tasks {
             let stage = stage_of(run, task);
             staged.push((
-                stage,
+                run,
+                task,
                 DeskTask {
                     run: run.id.clone(),
                     id: task.id.clone(),
@@ -428,6 +447,7 @@ pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) 
                     }),
                     blocked_by: run.blocked_by(task),
                     created_ms: task.created_ms,
+                    cost: None,
                 },
             ));
         }
@@ -435,22 +455,27 @@ pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) 
     let mut stages = Vec::with_capacity(STAGES.len());
     let mut tasks = Vec::new();
     for stage in STAGES {
-        let mut rows: Vec<DeskTask> = staged
+        let mut rows: Vec<&(&Run, &Task, DeskTask)> = staged
             .iter()
-            .filter(|(held, _)| *held == stage)
-            .map(|(_, task)| task.clone())
+            .filter(|(_, _, row)| row.stage == stage)
             .collect();
         stages.push(StageCount {
             stage,
             count: rows.len(),
         });
         if OPEN_STAGES.contains(&stage) {
-            rows.sort_by_key(|task| task.created_ms);
+            rows.sort_by_key(|(_, _, row)| row.created_ms);
         } else {
-            rows.sort_by_key(|task| std::cmp::Reverse(task.created_ms));
+            rows.sort_by_key(|(_, _, row)| std::cmp::Reverse(row.created_ms));
         }
         rows.truncate(STAGE_ROWS);
-        tasks.extend(rows);
+        // A finished task's cost, asked of the rows the desk sends and no
+        // other — a stage of two hundred is two dozen rows and a count.
+        let finished = FINISHED_STAGES.contains(&stage);
+        tasks.extend(rows.into_iter().map(|(run, task, row)| DeskTask {
+            cost: finished.then(|| cost(run, task)),
+            ..row.clone()
+        }));
     }
     mail.sort_by_key(|letter| letter.created_ms);
     news.sort_by_key(|line| line.created_ms);
@@ -666,6 +691,36 @@ pub(crate) fn machine_load(ledger_volume: &Path) -> MachineLoad {
     }
 }
 
+/// The person's ledger store as it stands, read into a projection: its
+/// snapshot is taken into a scratch file, and only that copy grows the
+/// columns this build reads that an older window's store may not have yet —
+/// the same additive step the window's own open takes. The store itself is
+/// only ever read. For the measurements over the ledger that already
+/// happened (the desk's, t-9456; the costs', t-9470).
+#[cfg(test)]
+pub(crate) fn projection_at_rest(store: &str) -> zerocode_core::orchestration::LedgerProjectionV1 {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let copy = scratch.path().join("authority.sqlite");
+    rusqlite::Connection::open_with_flags(
+        store,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("the store opens read-only")
+    .execute("VACUUM INTO ?1", [copy.display().to_string()])
+    .expect("a snapshot of the store");
+    let connection = rusqlite::Connection::open(&copy).expect("the snapshot opens");
+    zerocode_orchestrator::ledger_store::ensure_ledger_columns(&connection)
+        .expect("the snapshot grows this build's columns");
+    zerocode_orchestrator::ledger_store::read(
+        &connection,
+        "main-ledger",
+        zerocode_core::orchestration::PROJECTION_SCHEMA,
+    )
+    .expect("the store reads")
+    .expect("the store holds the main ledger")
+    .projection
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,10 +733,16 @@ mod tests {
     /// beat below tells the coordinator once more.
     const REMINDED_MS: i64 = 300_000;
 
+    /// A cost nobody asked about — for the tests that read the rest.
+    fn no_cost(_: &Run, _: &Task) -> TaskCost {
+        TaskCost::default()
+    }
+
     /// The desk as the window serializes it. The red tests below read the
     /// JSON the screen reads, so they speak to any shape of the snapshot.
     fn desk_json(ledger: &Ledger) -> serde_json::Value {
-        serde_json::to_value(desk_snapshot(ledger, |_| false)).expect("the desk serializes")
+        serde_json::to_value(desk_snapshot(ledger, |_| false, no_cost))
+            .expect("the desk serializes")
     }
 
     /// Every letter the desk draws, in either of its lists.
@@ -1013,6 +1074,75 @@ mod tests {
         );
     }
 
+    /// A finished task's row carries its cost and a moving one's none, and
+    /// the cost is asked only of the rows the desk sends — a stage of thirty
+    /// finished tasks is worked out twenty-four times, not thirty.
+    #[test]
+    fn a_finished_row_carries_its_cost_and_only_the_rows_the_desk_sends_are_costed() {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("costed", 1);
+        ledger
+            .start_worker(&run, "claude", ("team-costed", "%2"), None, 2)
+            .expect("somebody is at it");
+        let finished_count = STAGE_ROWS as i64 + 6;
+        for at in 0..finished_count + 3 {
+            let id = ledger
+                .create_task(&run, "x".into(), format!("t{at}"), vec![], None, 100 + at)
+                .expect("a task");
+            if at < finished_count {
+                ledger
+                    .update_task(
+                        &run,
+                        &id,
+                        Some(TaskStatus::Completed),
+                        None,
+                        ResultAuthor::Ledger,
+                    )
+                    .expect("done");
+            }
+        }
+        let mut asked = Vec::new();
+        let desk = desk_snapshot(
+            &ledger,
+            |_| false,
+            |_, task| {
+                asked.push(task.id.clone());
+                TaskCost {
+                    attempts: 7,
+                    ..TaskCost::default()
+                }
+            },
+        );
+        assert_eq!(
+            asked.len(),
+            STAGE_ROWS,
+            "the cost was asked of rows the desk does not send"
+        );
+        for row in &desk.tasks {
+            let attempts = row.cost.as_ref().map(|one| one.attempts);
+            if FINISHED_STAGES.contains(&row.stage) {
+                assert_eq!(attempts, Some(7), "{row:?}");
+            } else {
+                assert_eq!(attempts, None, "{row:?}");
+            }
+        }
+        let said = serde_json::to_value(&desk).expect("the desk serializes");
+        let costed = said["tasks"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|one| one["stage"] == "reported"))
+            .expect("a reported row");
+        assert_eq!(costed["cost"]["attempts"], 7, "{costed}");
+        assert!(
+            costed["cost"]["generation"]["sessionsKnown"].is_u64(),
+            "{costed}"
+        );
+        let moving = said["tasks"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|one| one["stage"] == "ready"))
+            .expect("a ready row");
+        assert!(moving["cost"].is_null(), "{moving}");
+    }
+
     #[test]
     fn a_question_the_ledger_would_refuse_to_answer_is_not_owed_on_the_desk() {
         let mut ledger = Ledger::new();
@@ -1294,7 +1424,7 @@ mod tests {
             .create_task(&finished, "old".into(), "old".into(), vec![], None, 3)
             .expect("an old task");
 
-        let desk = desk_snapshot(&ledger, |_| false);
+        let desk = desk_snapshot(&ledger, |_| false, no_cost);
         assert_eq!(desk.runs.len(), 1, "{:?}", desk.runs);
         assert!(!desk.runs[0].seat, "a seat this window does not hold");
         let stage = |id: &str| {
@@ -1381,7 +1511,7 @@ mod tests {
                 )
                 .expect("done");
         }
-        let desk = desk_snapshot(&ledger, |_| true);
+        let desk = desk_snapshot(&ledger, |_| true, no_cost);
         let ready: Vec<&DeskTask> = desk
             .tasks
             .iter()
@@ -1442,30 +1572,7 @@ mod tests {
             .ok()
             .and_then(|said| said.parse().ok())
             .unwrap_or(i64::MAX);
-        /* The person's store is only ever read: its snapshot is taken into
-         * a scratch file, and only that copy grows the columns this build
-         * reads that an older window's store may not have yet — the same
-         * additive step the window's own open takes. */
-        let scratch = tempfile::tempdir().expect("a scratch directory");
-        let copy = scratch.path().join("authority.sqlite");
-        rusqlite::Connection::open_with_flags(
-            &store,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .expect("the store opens read-only")
-        .execute("VACUUM INTO ?1", [copy.display().to_string()])
-        .expect("a snapshot of the store");
-        let connection = rusqlite::Connection::open(&copy).expect("the snapshot opens");
-        zerocode_orchestrator::ledger_store::ensure_ledger_columns(&connection)
-            .expect("the snapshot grows this build's columns");
-        let mut projected = zerocode_orchestrator::ledger_store::read(
-            &connection,
-            "main-ledger",
-            zerocode_core::orchestration::PROJECTION_SCHEMA,
-        )
-        .expect("the store reads")
-        .expect("the store holds the main ledger")
-        .projection;
+        let mut projected = projection_at_rest(&store);
         let number = |id: &str| {
             id.rsplit_once('-')
                 .and_then(|(_, number)| number.parse::<u64>().ok())
@@ -1519,7 +1626,7 @@ mod tests {
         let mut took: Vec<u128> = (0..200)
             .map(|_| {
                 let from = std::time::Instant::now();
-                std::hint::black_box(desk_snapshot(&ledger, |_| false));
+                std::hint::black_box(desk_snapshot(&ledger, |_| false, no_cost));
                 from.elapsed().as_micros()
             })
             .collect();

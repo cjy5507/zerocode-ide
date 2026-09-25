@@ -36,6 +36,7 @@
 //! that opened a file could not be tested at all.
 
 pub mod coordinator_handover;
+pub mod task_cost;
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;

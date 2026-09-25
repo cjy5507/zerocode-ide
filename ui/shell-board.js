@@ -805,6 +805,54 @@ function paintDeskWorkers(block, now, view) {
   return true;
 }
 
+/* ---- 과업이 든 비용 (t-9470) --------------------------------------------------
+ *
+ * 끝난 과업 하나가 든 것 한 줄: 시도 수(재작업), 첫 시작부터 마지막 끝까지의 벽시계(대기
+ * 포함), 생성 모델 토큰과 API 환산가, 그 과업 id가 찍힌 Jev 요청. 숫자는 백엔드의 것이고
+ * (`task_cost`), 서식은 이미 있는 손들이다(`formatTokens`·`formatCost`·`usageDuration`).
+ * 모르는 것은 「—」와 그 까닭으로 적고 추정으로 채우지 않는다. 데스크의 끝난 행과 작업
+ * 보기의 과업 카드가 같은 한 줄을 쓴다. */
+
+/* 달러가 숫자가 아닌 까닭, 백엔드의 낱말(`UsdReason`)마다. */
+const TASK_COST_REASONS = Object.freeze({
+  unsupported_agent: { key: "board.desk.cost.reasonUnsupported", word: "사용량 원장 없는 에이전트" },
+  unscanned: { key: "board.desk.cost.reasonUnscanned", word: "끝난 뒤 읽은 사용량 스캔 없음 — 통계에서 읽으면 채워짐" },
+  unlinked: { key: "board.desk.cost.reasonUnlinked", word: "잇지 못한 세션" },
+  mixed_models: { key: "board.desk.cost.reasonMixed", word: "세션 중 모델이 바뀜" },
+  unpriced_model: { key: "board.desk.cost.reasonUnpriced", word: "가격표에 없는 모델" },
+});
+
+/* 비용 한 줄과 그 팁 — 백엔드가 끝난 과업에 실어 보낸 비용 하나에서. */
+function taskCostWords(cost) {
+  const generation = cost.generation ?? {};
+  const jev = cost.jev ?? {};
+  const wall = Number.isFinite(cost.wallMs) ? usageDuration(Math.max(1, cost.wallMs)) : null;
+  const tokens = (Number(generation.inputTokens) || 0) + (Number(generation.outputTokens) || 0) +
+    (Number(generation.cacheReadTokens) || 0) + (Number(generation.cacheWriteTokens) || 0);
+  const reason = TASK_COST_REASONS[generation.usdReason];
+  const text = [
+    t("board.desk.cost.attempts", "시도 {{count}}", { count: Number(cost.attempts) || 0 }),
+    wall ? t("board.desk.cost.wall", "{{time}}(대기 포함)", { time: wall }) : t("board.desk.cost.wallOpen", "벽시계 —"),
+    Number(generation.sessionsLinked) > 0
+      ? t("board.desk.cost.tokens", "생성 {{tokens}} 토큰", { tokens: formatTokens(tokens) })
+      : t("board.desk.cost.tokensNone", "생성 —"),
+    Number.isFinite(generation.usd) ? formatCost(generation.usd)
+      : t("board.desk.cost.usdUnknown", "$— {{reason}}", { reason: reason ? t(reason.key, reason.word) : "" }).trim(),
+    t("board.desk.cost.jev", "Jev 요청 {{count}}", { count: Number(jev.requests) || 0 }),
+  ].join(" · ");
+  const seats = { stamped: Number(jev.stampedSeats) || 0, unstamped: Number(jev.unstampedSeats) || 0 };
+  const tip = [
+    t("board.desk.cost.tipSessions", "생성은 워커마다 마지막 세션 기준 합 · 이은 세션 {{linked}}/{{known}}",
+      { linked: Number(generation.sessionsLinked) || 0, known: Number(generation.sessionsKnown) || 0 }),
+    t("board.desk.cost.tipUsd", "API 환산가(구독 사용자는 청구액 아님)"),
+    Number.isFinite(jev.inputTokens)
+      ? t("board.desk.cost.tipJevTokens", "Jev 요청은 스탬프 좌석 {{stamped}}개만 셈 — 나머지 {{unstamped}}좌석과 zo 원장은 과업 id가 없음 · 입력 {{tokens}} 토큰",
+        { ...seats, tokens: formatTokens(jev.inputTokens) })
+      : t("board.desk.cost.tipJev", "Jev 요청은 스탬프 좌석 {{stamped}}개만 셈 — 나머지 {{unstamped}}좌석과 zo 원장은 과업 id가 없음 · 토큰 미기록", seats),
+  ].join(" · ");
+  return { text, tip };
+}
+
 /* ---- 과업 흐름 --------------------------------------------------------------
  *
  * `task-list`의 자리: 판 위의 런이 적어 둔 과업을 단계 하나씩으로 센다 —
@@ -855,17 +903,23 @@ function deskStageChip(host, stage, counts, view) {
 function deskTaskRow(held, task, runs) {
   const row = held ?? deskElement("li", "board-desk-task");
   if (!held) row.append(deskElement("code", "board-desk-task-id"), deskElement("span", "board-desk-task-title"),
-    deskElement("span", "board-desk-task-note"));
+    deskElement("span", "board-desk-task-note"), deskElement("span", "board-desk-task-cost"));
+  const [, title, noteLine, costLine] = row.children;
   writeAttribute(row, "data-task", `${task.run}/${task.id}`);
   writeTextContent(row.firstElementChild, task.id);
-  writeTextContent(row.children[1], runs > 1 ? `${task.title} · ${task.run}` : task.title);
+  writeTextContent(title, runs > 1 ? `${task.title} · ${task.run}` : task.title);
   const note = task.gate
     ? t("board.desk.taskGate", "{{gate}} · {{question}}", { gate: task.gate.id, question: task.gate.question })
     : task.blocked_by?.length
       ? t("board.desk.taskBlockedBy", "실패한 선행: {{tasks}}", { tasks: task.blocked_by.join(", ") })
       : "";
-  writeTextContent(row.lastElementChild, note);
-  writeHidden(row.lastElementChild, note === "");
+  writeTextContent(noteLine, note);
+  writeHidden(noteLine, note === "");
+  // A finished row carries what its task cost (t-9470); a moving one carries none.
+  const cost = task.cost && typeof task.cost === "object" ? taskCostWords(task.cost) : null;
+  writeTextContent(costLine, cost?.text ?? "");
+  writeAttribute(costLine, "data-tip", cost?.tip ?? "");
+  writeHidden(costLine, cost === null);
   return row;
 }
 
