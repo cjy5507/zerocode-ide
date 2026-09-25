@@ -537,8 +537,8 @@ async function testOrbitRemembered(browser, origin, ok) {
  * 행성계의 그리는 JS(박자 함수를 감싼 벽시계), 그리고 rAF가 실제로 돌아오는 간격 —
  * 같은 판에서 행성계를 숨긴 **정지 대조군**의 간격과 나란히. JS가 싸도 간격이
  * 벌어지면 그 몫은 스타일·레이아웃·합성이다. */
-export async function measureBoardOrbit(page, { seconds = 3 } = {}) {
-  await openOrbit(page);
+export async function measureBoardOrbit(page, { seconds = 3, fixture = {} } = {}) {
+  await openOrbit(page, fixture);
   const product = await page.evaluate(() => typeof agentOrbitHandles === "function");
   const probe = (on) => page.evaluate(async ({ on, seconds }) => {
     const view = document.querySelector("#board-view");
@@ -607,7 +607,7 @@ export async function measureBoardOrbit(page, { seconds = 3 } = {}) {
   return {
     product: product ? "this tree" : "baseline (no orbit)",
     viewport: await page.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })),
-    fixture: { workspaces: 4, agents: 12, links: 40, particles: 20 },
+    fixture: { workspaces: 4, agents: 12, links: 40, fresh: 20, ...fixture },
     cards: { elements: cards.elements, gapP50: round(median(cards.gaps)), gapP95: round(quantile(cards.gaps, 0.95)) },
     orbit: orbit ? {
       elements: orbit.elements,
@@ -625,14 +625,23 @@ export async function measureBoardOrbit(page, { seconds = 3 } = {}) {
 }
 
 const ORBIT_FRAME_BUDGET_MS = 8;
+/* 요소 예산은 브리핑의 판(워크스페이스 4·에이전트 12)의 것이다. 더 큰 판에서는 몸
+ * 하나가 얹는 요소 수(버튼 + 이름 = 2)를 잰다 — 판이 커지면 늘어나는 것이 옳은 수다. */
+const ORBIT_DOM_BUDGET = 50;
+const ORBIT_ELEMENTS_PER_BODY = 2;
+const orbitBriefFixture = (fixture) =>
+  fixture.workspaces === 4 && fixture.agents === 12 && fixture.links === 40 && fixture.fresh === 20;
 
 function orbitVerdict(measured) {
   if (!measured.orbit) return { holds: false, why: "no orbit in this product" };
+  const bodies = measured.orbit.handles?.bodies ?? 0;
   const checks = {
     frameP95: frameBudgetHolds(measured.orbit.frameP95, ORBIT_FRAME_BUDGET_MS),
     hiddenRafs: measured.hiddenRafs === 0,
     reducedStill: measured.reduced?.frames === 0 && measured.reduced?.rafs === 0,
-    domDelta: measured.domDelta <= 50,
+    domDelta: orbitBriefFixture(measured.fixture)
+      ? measured.domDelta <= ORBIT_DOM_BUDGET
+      : measured.domDelta <= ORBIT_ELEMENTS_PER_BODY * bodies,
   };
   return { holds: Object.values(checks).every(Boolean), checks };
 }
@@ -641,12 +650,15 @@ function orbitTable(measured, engine) {
   const orbit = measured.orbit ?? {};
   return [
     `| engine | ${engine} | ${measured.viewport.width}×${measured.viewport.height} @${measured.viewport.dpr}x | ${measured.load} |`,
+    `| fixture | ${JSON.stringify(measured.fixture)} | | |`,
     "|---|---|---|---|",
     `| frame JS p50 / p95 / max (ms) | ${orbit.frameP50} / ${orbit.frameP95} / ${orbit.frameMax} | budget ≤ ${ORBIT_FRAME_BUDGET_MS} | ${orbit.frames} frames |`,
     `| frames drawn / s | ${orbit.fps} | rAF gap p50/p95 orbit ${orbit.gapP50}/${orbit.gapP95} ms | still control ${measured.cards.gapP50}/${measured.cards.gapP95} ms |`,
     `| orbit rAF while the board is hidden (1 s) | ${measured.hiddenRafs} | must be 0 | |`,
     `| reduced motion frames / rAF (1 s) | ${measured.reduced?.frames} / ${measured.reduced?.rafs} | must be 0 / 0 | |`,
-    `| elements card view → orbit view | ${measured.cards.elements} → ${orbit.elements} | delta ${measured.domDelta} (≤ 50) | |`,
+    `| elements card view → orbit view | ${measured.cards.elements} → ${orbit.elements} | delta ${measured.domDelta}`
+      + ` (${orbitBriefFixture(measured.fixture) ? `≤ ${ORBIT_DOM_BUDGET}` : `≤ ${ORBIT_ELEMENTS_PER_BODY} × ${orbit.handles?.bodies} bodies`})`
+      + ` | ${orbit.handles?.bodies} bodies |`,
   ].join("\n");
 }
 
@@ -676,14 +688,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       await cdp.send("Emulation.setDeviceMetricsOverride",
         { width: 1440, height: 960, deviceScaleFactor: dpr, mobile: false });
     }
-    measured = await measureBoardOrbit(page, { seconds: Number(option("--seconds", 3)) });
+    /* 픽스처의 크기 — 기본은 브리핑의 판(4·12·40·20). 더 큰 판의 값을 같은 표로. */
+    const fixture = Object.fromEntries(["workspaces", "agents", "links", "fresh"]
+      .filter((name) => option(`--${name}`, null) !== null)
+      .map((name) => [name, Number(option(`--${name}`, 0))]));
+    measured = await measureBoardOrbit(page, { seconds: Number(option("--seconds", 3)), fixture });
     await page.close();
   } finally {
     await browser.close();
     files.close();
   }
   const verdict = orbitVerdict(measured);
-  report(`orbit weight on ${engine}: frame p95 ≤ ${ORBIT_FRAME_BUDGET_MS} ms, hidden rAF 0, reduced motion still, DOM +50`,
+  report(`orbit weight on ${engine}: frame p95 ≤ ${ORBIT_FRAME_BUDGET_MS} ms, hidden rAF 0, reduced motion still, DOM budget`,
     verdict.holds, JSON.stringify(verdict.checks ?? verdict.why));
   const out = option("--json", null);
   if (out) writeFileSync(out, `${JSON.stringify({ engine, measured, verdict }, null, 2)}\n`);

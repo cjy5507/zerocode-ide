@@ -104,8 +104,10 @@ const ORBIT = Object.freeze({
    * 위·아래. 아래보다 작은 판은 끌어서 본다. */
   system: Object.freeze({ pad: 24, labelRoom: 108, fitMax: 1.25, fitMin: 0.3 }),
   /* 라벨의 자리를 다시 쓰는 문턱(px)과 반올림의 눈금. 배율이 `lod` 밑이면 이름은
-   * 확인 필요·실패·고른 것·손이 오른 것만 선다 — 누를 자리는 그대로 남는다. */
-  label: Object.freeze({ epsilon: 0.2, round: 10, lod: 0.5 }),
+   * 확인 필요·실패·고른 것·손이 오른 것만 선다 — 누를 자리는 그대로 남는다. 도는 몸이
+   * `crowd`개를 넘는 판에서는 대기·완료의 이름도 손이 올라야 선다(60개 판 실측:
+   * 이름이 계마다 겹쳐 확인 필요의 칩을 가렸다). */
+  label: Object.freeze({ epsilon: 0.2, round: 10, lod: 0.5, crowd: 24 }),
   /* 캔버스가 읽는 잉크 — `--agent-orbit-<이름>`. 워크스페이스의 빛깔은 관계 그림이
    * 매긴 레인(`laneClass`)이고, 레인이 없는 워크스페이스는 첫 레인을 입는다. */
   starInk: "lane-1",
@@ -535,6 +537,7 @@ function agentOrbitApply(state, model, now, shown) {
   state.bodies = bodies;
   state.orbiters = [...bodies.values()];
   state.links = links;
+  state.stage.classList.toggle("is-crowded", bodies.size > ORBIT.label.crowd);
   agentOrbitLabels(state);
   agentOrbitLayout(state, { snap: false });
   for (const body of [...stars.values(), ...bodies.values()]) body.isNew = false;
