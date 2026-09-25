@@ -3138,7 +3138,7 @@ pub const CHALLENGER: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
-    rubric_version: questions::UNVERSIONED_RUBRIC,
+    rubric_version: questions::CHALLENGER_RUBRIC_VERSION,
     request_name: &[challenger::ATTEMPT.canonical],
     names: Naming::Request,
     label_part: &[],

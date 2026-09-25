@@ -349,6 +349,8 @@ mod tests {
         };
         use zerocode_core::jev::{JevUse, CHALLENGER, DEFAULT_MODEL};
 
+        use super::super::challenger::CHALLENGER_RUBRIC_VERSION;
+
         // The arm on the day its words move to the next version.
         let today = JevUse { rubric_version: CHALLENGER.rubric_version + 1, ..CHALLENGER };
         let wanted = window_wanted_for(&CHALLENGER).expect("the challenger rises");
@@ -359,19 +361,17 @@ mod tests {
         // Every mark names a comparison of its own, and the series ends on a
         // judgment's boundary.
         let asked = wanted + marks.saturating_sub(wanted).div_ceil(thin) * thin;
-        // An answered comparison of `attempt`; the words before carry no
-        // stamp, as the arm files its rows today.
-        let comparison = |at: usize, attempt: String, rubric: Option<u32>| {
-            let mut row = json!({
+        // An answered comparison of `attempt`, stamped with the words it
+        // was asked in as the arm stamps every row it files: the words
+        // before under its question's number today.
+        let comparison = |at: usize, attempt: String, rubric: u32| {
+            json!({
                 AT.canonical: at, OUTCOME.canonical: ANSWERED_OUTCOME, ELAPSED_MS.canonical: 400, REQUESTS.canonical: 1,
-                MODEL.canonical: DEFAULT_MODEL, ATTEMPT.canonical: attempt,
-            });
-            if let Some(rubric) = rubric {
-                row[RUBRIC_VERSION.canonical] = json!(rubric);
-            }
-            row
+                MODEL.canonical: DEFAULT_MODEL, ATTEMPT.canonical: attempt, RUBRIC_VERSION.canonical: rubric,
+            })
         };
-        let mut before: Vec<Value> = (0..asked).map(|n| comparison(n, format!("before-{n}"), None)).collect();
+        let mut before: Vec<Value> =
+            (0..asked).map(|n| comparison(n, format!("before-{n}"), CHALLENGER_RUBRIC_VERSION)).collect();
         // Each receipt's label: the challenger's word vindicated where the
         // incumbent's was not, but on the three it must hold inside.
         before.extend((0..marks).map(|n| {
@@ -404,7 +404,7 @@ mod tests {
 
         // Today, the same series and a thin window of the new words.
         let mut rows = before;
-        rows.extend((0..thin).map(|n| comparison(10_000 + n, format!("today-{n}"), Some(today.rubric_version))));
+        rows.extend((0..thin).map(|n| comparison(10_000 + n, format!("today-{n}"), today.rubric_version)));
         let under_todays = ledger_of("todays-words.jsonl", &rows);
         let rows: Vec<Value> = read_shadow_rows(&under_todays);
         assert_eq!(

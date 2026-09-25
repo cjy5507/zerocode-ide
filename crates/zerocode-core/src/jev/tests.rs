@@ -2297,6 +2297,11 @@ fn every_seat_names_its_rubric_and_how_its_labels_name_a_request() {
     );
     assert_eq!(TOOL_TEXT_GUARD.request_name, &["judged"]);
     assert_eq!(ROUTING.rubric_version, questions::ROUTING_RUBRIC_VERSION);
+    assert_eq!(
+        CHALLENGER.rubric_version,
+        questions::CHALLENGER_RUBRIC_VERSION,
+        "the number the arm stamps on every row that asked"
+    );
     assert_eq!(RECALL.request_name, &["query", "notes"]);
     assert_eq!(
         ZO_STEP_EFFORT.request_name,
