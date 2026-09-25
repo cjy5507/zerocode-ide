@@ -17867,6 +17867,10 @@ const board = await page.evaluate(async (columns) => {
   // The default task view has its own scenarios above. These contracts exercise
   // the retained relations view, including its camera and ontology controls.
   agentBoardMode = "graph";
+  // The relations tab opens on the orbit (t-9444); these contracts measure its
+  // card picture, so they choose it through the tab's own toggle, before the
+  // first paint — the orbit has its own suite (`board-orbit`).
+  setAgentOrbitChoice(document.getElementById("board-view"), "cards");
   // The live card now lives in the activity tab; relations is the new default.
   agentGraphInspectorTab = "activity";
   window.__COLUMNS__ = columns;
