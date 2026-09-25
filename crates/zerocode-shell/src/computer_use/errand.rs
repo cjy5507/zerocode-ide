@@ -54,11 +54,12 @@ use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
 use zerocode_core::guarded::{ControlKind, kind_of};
 use zerocode_core::jev::promote::SEAT_RECORDING;
-use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS};
+use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS, MODEL};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{
-    ActionAsk, ActionChoice, ActionLook, Chosen, Guard, SCREEN_ACTION_RUBRIC_VERSION, Stopped,
-    Where, ask,
+    ActionAsk, ActionChoice, ActionLook, ActionRead, Beside, Chosen, Guard, Observe,
+    SCREEN_ACTION_RUBRIC_VERSION, Stopped, TYPE_TEXT, Where, ask_with, option_of, snapshot,
+    typed_line,
 };
 
 pub use branch::{Branching, Compared, Saved};
@@ -119,8 +120,10 @@ pub type Mode = JevMode;
 /// What a judgment answered.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Judged {
-    /// A validated choice over the set that was offered.
-    Chose(ActionChoice),
+    /// A validated answer to every head that was asked: the action over the
+    /// set it offered, the field when the action is to type, and what the
+    /// observation heads chose.
+    Chose(ActionRead),
     /// Nothing usable, named by the ledger's own failure token
     /// (`no_key`, `timeout`, `schema`, `unauthorized`, `http_503`, …).
     Refused(String),
@@ -336,9 +339,100 @@ pub struct Screen {
     /// question cuts it ([`zerocode_core::screen_action::shows_cut`]). Empty
     /// for a surface that reads none.
     pub shows: Vec<String>,
+    /// What the look read beside its numbered controls, when its surface
+    /// reads more than numbers (a page's snapshot, t-6721 U4). Empty for a
+    /// look of numbers alone — and such a look walks exactly as before.
+    pub snapshot: Snapshot,
+}
+
+/// What a page's look read beside its numbered controls, in the same pass
+/// ([`zerocode_core::screen_action::snapshot`]): the document it read them
+/// in, its form fields, and the containers, images and rows it found.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Snapshot {
+    /// The document's epoch, as the look spelled it; empty when it named
+    /// none.
+    pub epoch: String,
+    pub fields: Vec<Value>,
+    pub containers: Vec<Value>,
+    pub images: Vec<Value>,
+    pub rows: Vec<Value>,
+}
+
+impl Snapshot {
+    /// What a marks answer carries beside its `items`, read by the keys the
+    /// question names. A key the answer does not carry is empty.
+    #[must_use]
+    pub fn of(said: &Value) -> Self {
+        let list = |key: &str| {
+            said.get(key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
+        // An epoch is whatever the page counts documents with — a word or a
+        // number — and nothing at all is no epoch.
+        let epoch = match said.get(snapshot::EPOCH_KEY) {
+            Some(Value::String(word)) => word.trim().to_string(),
+            Some(Value::Number(number)) => number.to_string(),
+            _ => String::new(),
+        };
+        Self {
+            epoch,
+            fields: list(snapshot::FIELDS_KEY),
+            containers: list(Observe::Container.key()),
+            images: list(Observe::Image.key()),
+            rows: list(Observe::Row.key()),
+        }
+    }
+
+    /// The candidates the look read for `head`.
+    #[must_use]
+    pub fn of_head(&self, head: Observe) -> &[Value] {
+        match head {
+            Observe::Container => &self.containers,
+            Observe::Image => &self.images,
+            Observe::Row => &self.rows,
+        }
+    }
 }
 
 impl Screen {
+    /// What the question may offer beyond a press on this screen: `fields`
+    /// when the walk `types` ([`Self::fields_left`]), and the candidates the
+    /// look observed.
+    #[must_use]
+    pub fn beside<'a>(&'a self, types: bool, fields: &'a [Value]) -> Beside<'a> {
+        Beside {
+            types,
+            fields,
+            containers: &self.snapshot.containers,
+            images: &self.snapshot.images,
+            rows: &self.snapshot.rows,
+        }
+    }
+
+    /// The look's fields, less those this walk already entered a value into
+    /// — named by the look's own selector for them, since the entry itself
+    /// changes the words a field is read by. A field takes one entry in a
+    /// walk: the next question is about what comes after it.
+    #[must_use]
+    pub fn fields_left(&self, entered: &[String]) -> Vec<Value> {
+        self.snapshot
+            .fields
+            .iter()
+            .filter(|field| {
+                field
+                    .get("mark")
+                    .and_then(Value::as_u64)
+                    .and_then(|mark| usize::try_from(mark).ok())
+                    .and_then(|mark| selector_of(self, mark))
+                    .is_none_or(|selector| !entered.contains(&selector))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Whether two looks show the same screen — the same words, in the same
     /// order, at the same address.
     ///
@@ -434,6 +528,61 @@ pub trait World {
     fn forget(&mut self, saved: &Saved) {
         let _ = saved;
     }
+    /// Whether this world can enter a written value into a field its last
+    /// look read (t-6720) — a page's, when the walk was handed a writer.
+    /// `false`, the question never offers [`TYPE_TEXT`].
+    fn types(&self) -> bool {
+        false
+    }
+    /// Enter into the field `mark` names on the last look the value `goal`
+    /// needs there: the value written (or remembered) for exactly this
+    /// field, pressed by its pinned number first and typed down the door's
+    /// value road. What was typed never comes back — only where it came from.
+    fn type_into(&mut self, mark: usize, goal: &str) -> Typed {
+        let _ = (mark, goal);
+        Typed::Refused(NO_TYPING.to_string())
+    }
+}
+
+/// Why a world typed nothing: it cannot type at all; its last look read no
+/// such field (no control, no selector of its own, no field facts); the
+/// field's pinned press was refused; the door refused the typing.
+pub const NO_TYPING: &str = "no_typing";
+pub const NO_FIELD: &str = "no_field";
+pub const PRESS_REFUSED: &str = "press_refused";
+pub const TYPE_REFUSED: &str = "type_refused";
+
+/// Where a typed value came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueSource {
+    /// Written now, by `model`, in `ms`.
+    Written { model: String, ms: u64 },
+    /// Typed again from what an identical input was written before — no
+    /// model asked. Kept apart from a written one in every row, so a reused
+    /// value is never counted as a sample of a model's speed or accuracy.
+    Reused,
+}
+
+impl ValueSource {
+    /// The word a row says it by.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Written { .. } => "written",
+            Self::Reused => "reused",
+        }
+    }
+}
+
+/// What entering a value into a field came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Typed {
+    /// The value went in: where it came from, and how many characters it
+    /// was — never what it was.
+    Typed { source: ValueSource, chars: usize },
+    /// Nothing went in, and the word for why: no field there, a pin that
+    /// broke, a wire that never answered, a value the seat's rules refused.
+    Refused(String),
 }
 
 /// Why a walk is asking the screen anything.
@@ -709,6 +858,19 @@ pub const RESCUE: &str = "rescue";
 pub const RESCUED_BY: &str = "rescuedBy";
 pub const RESCUED_BY_TEAM: &str = "team";
 
+/// The keys a row says what the heads beside the action said under
+/// (t-6720): the operation when it was not a press ([`TYPE_TEXT`]), what an
+/// entry came to, what the field's head answered, and what the observation
+/// heads chose.
+pub const OPERATION: &str = "operation";
+pub const TYPED: &str = "typed";
+pub const TYPE_TARGET_KEY: &str = "typeTarget";
+pub const OBSERVED: &str = "observed";
+
+/// The key a look names a control's or a candidate's own identity under —
+/// the only name a walk ever acts on, and never one it composed.
+const SELECTOR_KEY: &str = snapshot::SELECTOR_KEY;
+
 /// The key a row says how the pressed screen settled under, when the world's
 /// press waits for it to stop changing (a phone's, t-6385) — the emulator
 /// door's own word, so a click's answer and the walk's row cannot come to
@@ -768,6 +930,9 @@ pub struct Walked {
     /// Steps the second reader was asked about and could not press for —
     /// the walk stepped back to the person as it does today.
     pub rescue_failed: usize,
+    /// Presses that entered a value into a field (t-6720) — counted among
+    /// [`Self::pressed`] too, since a hand went out for each.
+    pub typed: usize,
 }
 
 /// One row, with the words every ledger of this family uses.
@@ -947,6 +1112,9 @@ fn walk(
     // (t-5497 — a calculator walk pressed `7` three times because every
     // new display looked like a fresh screen with `7` on offer).
     let mut pressed_so_far: Vec<String> = Vec::new();
+    // The fields this walk entered a value into, by the look's own selector
+    // for each: none is offered for a second entry (t-6720).
+    let mut entered: Vec<String> = Vec::new();
     let mut before: Option<Screen> = None;
     let mut still = 0usize;
     // The judgment begun on the last look, if the walk asked ahead
@@ -1008,15 +1176,21 @@ fn walk(
             }
             None => {}
         }
-        let Some(asked) = ask(&ActionLook {
-            goal: at.goal,
-            errand: at.asked(),
-            at: screen.at.asked(),
-            tried: &tried,
-            items: &screen.items,
-            pressed: &pressed_so_far,
-            shows: &screen.shows,
-        }) else {
+        // One request asks every head the look can answer: the action, the
+        // field when the world can type into one it read, and the containers,
+        // images and rows it read (t-6720).
+        let Some(asked) = ask_with(
+            &ActionLook {
+                goal: at.goal,
+                errand: at.asked(),
+                at: screen.at.asked(),
+                tried: &tried,
+                items: &screen.items,
+                pressed: &pressed_so_far,
+                shows: &screen.shows,
+            },
+            &screen.beside(world.types(), &screen.fields_left(&entered)),
+        ) else {
             walked.agreed = Some(false);
             walked
                 .rows
@@ -1053,8 +1227,12 @@ fn walk(
         };
         let judgment_ms = u64::try_from(judging.elapsed().as_millis()).unwrap_or(u64::MAX);
         let spent = judge.spent();
-        let choice = match judged {
-            Judged::Chose(choice) => choice,
+        let ActionRead {
+            choice,
+            typed,
+            observed,
+        } = match judged {
+            Judged::Chose(read) => read,
             Judged::Refused(token) => {
                 // A next step nobody judged shows nothing about the fork.
                 branch::settle(&mut walked, fork.take(), NextStep::Unknown);
@@ -1095,12 +1273,34 @@ fn walk(
             ),
             overlap.as_ref(),
         );
+        // What the heads asked beside the action said (t-6720): the field's
+        // head when it was asked, and every observation head — the look's
+        // own number of the candidate chosen and that candidate's own
+        // identity, never one composed here.
+        if let Some(typed) = &typed {
+            note(
+                &mut said,
+                TYPE_TARGET_KEY,
+                json!({
+                    "chosen": typed.chosen,
+                    "confidence": typed.confidence,
+                    "probabilities": typed.probabilities,
+                }),
+            );
+        }
+        if !observed.is_empty() {
+            let seen = before
+                .as_ref()
+                .expect("the screen this walk just looked at");
+            note(&mut said, OBSERVED, observed_note(seen, &observed));
+        }
         // The screen moved past the last forked step: what the judgment says
         // of the new screen is that step's mark (t-6044) — a control to press
-        // is the walk going on, `done` is the goal, `give_up` is a dead end.
+        // or a field to type into is the walk going on, `done` is the goal,
+        // `give_up` is a dead end.
         if fork.is_some() {
             let next = match choice.chosen {
-                Chosen::Mark(_) => NextStep::MovedOn,
+                Chosen::Mark(_) | Chosen::Type(_) => NextStep::MovedOn,
                 Chosen::Done => NextStep::Reached,
                 Chosen::GiveUp => NextStep::GaveUp,
             };
@@ -1118,8 +1318,12 @@ fn walk(
                 note(&mut said, key, json!(permille));
             }
         }
-        let chosen = match choice.chosen {
-            Chosen::Mark(mark) => mark,
+        // The hand goes out to one number either way: a control to press, or
+        // a field to type into (t-6720). Everything up to the hand — the
+        // row's words, the stand, the guards and the floor — is one road.
+        let (chosen, typing) = match choice.chosen {
+            Chosen::Mark(mark) => (mark, false),
+            Chosen::Type(field) => (field, true),
             Chosen::GiveUp | Chosen::Done => {
                 let ended = match choice.chosen {
                     Chosen::Done => zerocode_core::screen_action::DONE,
@@ -1145,7 +1349,10 @@ fn walk(
                 return walked;
             }
         };
-        note(&mut said, "chosen", json!(format!("mark:{chosen}")));
+        note(&mut said, "chosen", json!(option_of(chosen)));
+        if typing {
+            note(&mut said, OPERATION, json!(TYPE_TEXT));
+        }
         // The control the judgment named, by kind, on every row that names
         // one — recording or acting — and whether the one press rule lets it
         // go (t-6187).
@@ -1191,7 +1398,9 @@ fn walk(
         // The second rung ([`Options::rescue`]): a judgment under the seat's
         // press floor is put to the second reader as the same closed choice,
         // and its number is pressed under the same rule — or the walk steps
-        // back to the person as it does today.
+        // back to the person as it does today. An entry under the floor
+        // steps back at once: the second reader answers one option and
+        // names no field, so it rescues presses alone.
         let mut chosen = chosen;
         // The second reader's own answer, when it pressed: the ranking a
         // forked step reads its candidates off, in place of the seat's.
@@ -1200,7 +1409,7 @@ fn walk(
             let seen = before
                 .as_ref()
                 .expect("the screen this walk just looked at");
-            let rescued = match rescue.as_deref_mut().filter(|_| options.rescue) {
+            let rescued = match rescue.as_deref_mut().filter(|_| options.rescue && !typing) {
                 Some(team) => {
                     let asking = std::time::Instant::now();
                     let answered =
@@ -1208,7 +1417,7 @@ fn walk(
                     let team_ms = u64::try_from(asking.elapsed().as_millis()).unwrap_or(u64::MAX);
                     let (word, mark) = second_rung(press_policy, seen, &answered);
                     if let (Some(_), Judged::Chose(second)) = (mark, &answered) {
-                        rescued_by = Some(second.clone());
+                        rescued_by = Some(second.choice.clone());
                     }
                     note(
                         &mut said,
@@ -1216,15 +1425,11 @@ fn walk(
                         json!({
                             "outcome": word,
                             "chosen": match &answered {
-                                Judged::Chose(second) => match second.chosen {
-                                    Chosen::Mark(mark) => format!("mark:{mark}"),
-                                    Chosen::GiveUp => zerocode_core::screen_action::GIVE_UP.to_string(),
-                                    Chosen::Done => zerocode_core::screen_action::DONE.to_string(),
-                                },
+                                Judged::Chose(second) => chosen_word(second.choice.chosen),
                                 Judged::Refused(token) => token.clone(),
                             },
                             "confidence": match &answered {
-                                Judged::Chose(second) => json!(second.confidence),
+                                Judged::Chose(second) => json!(second.choice.confidence),
                                 Judged::Refused(_) => Value::Null,
                             },
                             ELAPSED_MS.canonical: team_ms,
@@ -1239,7 +1444,7 @@ fn walk(
                     walked.rescued += 1;
                     chosen = mark;
                     note(&mut said, RESCUED_BY, json!(RESCUED_BY_TEAM));
-                    note(&mut said, "chosen", json!(format!("mark:{mark}")));
+                    note(&mut said, "chosen", json!(option_of(mark)));
                     note(
                         &mut said,
                         CONTROL_KIND,
@@ -1247,7 +1452,7 @@ fn walk(
                     );
                 }
                 None => {
-                    if options.rescue && rescue.is_some() {
+                    if options.rescue && rescue.is_some() && !typing {
                         walked.rescue_failed += 1;
                     }
                     note(&mut said, BARRED, json!(Barred::LowConfidence.as_str()));
@@ -1260,129 +1465,181 @@ fn walk(
         }
         let chosen = chosen;
 
-        // The forked step (t-6044): on a phone whose judgment ranked two or
-        // more controls, the branching seat may try the top candidates on a
-        // saved device and make the comparison's pick canonical. Off, it is
-        // the press below exactly; every other way out presses the number
-        // chosen above — the first candidate — as today. A step the second
-        // reader pressed for is forked on the second reader's own ranking:
-        // its answer is the choice the walk goes out with (t-6132 S3).
-        let forked = branch::step(
-            &branch::Step {
-                branching,
-                at,
-                attempt,
-                screen: before.as_ref(),
-                choice: rescued_by.as_ref().unwrap_or(&choice),
-                chosen,
-                look_ms,
-            },
-            judge,
-            world,
-        );
-        if forked.mark != chosen {
-            // The screen seat's row keeps its own answer; the number the hand
-            // went out with is the fork's, and the row says so.
-            note(&mut said, "forked", json!(format!("mark:{}", forked.mark)));
-        }
-        let chosen = forked.mark;
-        if let Some(row) = forked.row {
-            fork = Some(branch::Pending {
-                row: walked.forks.len(),
-                same_pick: forked.same_pick,
-            });
-            walked.forks.push(row);
-        }
-
-        let seen = before
-            .as_ref()
-            .expect("the screen this walk just looked at");
-        let legend = legend_of(seen, chosen);
-        // Ask ahead ([`Options::overlap`]), before the press: the next
-        // question as the last look would put it — this screen, the chosen
-        // number spent, its legend among `pressed` — begun now, so the
-        // judgment runs while the press lands and the next look is taken.
-        // Only a goal walk comes back to a look; not after a link, whose
-        // screen is another page; not when one more stand on this screen
-        // would end the walk before it asked; not on the last step, which
-        // asks nothing more.
-        // A forked step asks ahead only once its canonical number stands: the
-        // fork's own presses and looks are the fork's and not the walk's, so
-        // nothing was begun over them, and the question begun here names the
-        // number the hand goes out with.
-        if options.overlap
-            && world.asks_ahead_of_the_press()
-            && matches!(at.why, Why::Goal { .. })
-            && attempt < at.steps()
-            && still + 1 < SAME_SCREEN_LIMIT
-            && !presses_a_link(seen, chosen)
-        {
-            let mut tried_ahead = tried.clone();
-            tried_ahead.push(chosen);
-            let mut pressed_ahead = pressed_so_far.clone();
-            pressed_ahead.push(legend.clone());
-            ahead = ask(&ActionLook {
-                goal: at.goal,
-                errand: at.asked(),
-                at: seen.at.asked(),
-                tried: &tried_ahead,
-                items: &seen.items,
-                pressed: &pressed_ahead,
-                shows: &seen.shows,
-            })
-            .and_then(|question| judge.begin(&question));
-        }
-        let pressed = match forked.pressed {
-            Some(pressed) => pressed,
-            None => crate::run_evidence::observing(
+        if typing {
+            // The entry (t-6720): the world writes — or remembers — the value
+            // this field needs, presses the field by its pinned number and
+            // types down the door's value road. No fork and nothing asked
+            // ahead: an entry changes the very field it named, so the next
+            // look is always another question.
+            let seen = before
+                .as_ref()
+                .expect("the screen this walk just looked at");
+            let legend = legend_of(seen, chosen);
+            let went_in = crate::run_evidence::observing(
                 json!({
                     "look_ms": look_ms,
                     "judgment": { "asked": true, "ms": judgment_ms, "confidence": choice.confidence },
                 }),
-                || world.press(chosen),
-            ),
-        };
-        if !pressed {
-            note(&mut said, "routeUse", json!(USE_FALLBACK));
-            note(&mut said, "pressed", json!(false));
-            walked.rows.push(row(mode, at, attempt, said));
-            return walked;
-        }
-        tried.push(chosen);
-        pressed_so_far.push(legend);
-        walked.pressed += 1;
-        note(&mut said, "pressed", json!(true));
-        note(&mut said, "routeUse", json!(USE_APPLIED));
-        let settled = world.settled();
-        if let Some(settled) = &settled {
-            note(&mut said, SETTLE, settled.note.clone());
-        }
-        // Ask ahead on the screen the press settled on (t-6385): the next
-        // question as the loop's own head will put it — a screen that moved
-        // starts its numbers afresh, one that did not keeps what it spent —
-        // begun now, so the judgment is answered while the full look is
-        // taken. The look's question decides: the same bytes use the answer,
-        // any other drops it (an element only the full look finds, a screen
-        // still moving).
-        if options.overlap
-            && ahead.is_none()
-            && matches!(at.why, Why::Goal { .. })
-            && attempt < at.steps()
-            && let Some(screen) = settled.and_then(|settled| settled.screen)
-        {
-            let moved = !seen.same_as(&screen);
-            if moved || still + 1 < SAME_SCREEN_LIMIT {
-                let tried_next = if moved { Vec::new() } else { tried.clone() };
-                ahead = ask(&ActionLook {
-                    goal: at.goal,
-                    errand: at.asked(),
-                    at: screen.at.asked(),
-                    tried: &tried_next,
-                    items: &screen.items,
-                    pressed: &pressed_so_far,
-                    shows: &screen.shows,
-                })
+                || world.type_into(chosen, at.goal),
+            );
+            match went_in {
+                Typed::Typed { source, chars } => {
+                    note(&mut said, TYPED, typed_note(&source, chars));
+                    tried.push(chosen);
+                    pressed_so_far.push(typed_line(&legend));
+                    if let Some(selector) = selector_of(seen, chosen) {
+                        entered.push(selector);
+                    }
+                    walked.pressed += 1;
+                    walked.typed += 1;
+                    note(&mut said, "pressed", json!(true));
+                    note(&mut said, "routeUse", json!(USE_APPLIED));
+                }
+                Typed::Refused(token) => {
+                    // The walk's own answer says why no value went in
+                    // ([`no_press_reason`]): no login, a wire that never
+                    // answered, a value the seat refused, a pin that broke.
+                    note(&mut said, REASON, json!(token));
+                    note(&mut said, TYPED, json!({ "outcome": token }));
+                    note(&mut said, "routeUse", json!(USE_FALLBACK));
+                    note(&mut said, "pressed", json!(false));
+                    walked.rows.push(row(mode, at, attempt, said));
+                    return walked;
+                }
+            }
+        } else {
+            // The forked step (t-6044): on a phone whose judgment ranked two or
+            // more controls, the branching seat may try the top candidates on a
+            // saved device and make the comparison's pick canonical. Off, it is
+            // the press below exactly; every other way out presses the number
+            // chosen above — the first candidate — as today. A step the second
+            // reader pressed for is forked on the second reader's own ranking:
+            // its answer is the choice the walk goes out with (t-6132 S3).
+            let forked = branch::step(
+                &branch::Step {
+                    branching,
+                    at,
+                    attempt,
+                    screen: before.as_ref(),
+                    choice: rescued_by.as_ref().unwrap_or(&choice),
+                    chosen,
+                    look_ms,
+                },
+                judge,
+                world,
+            );
+            if forked.mark != chosen {
+                // The screen seat's row keeps its own answer; the number the hand
+                // went out with is the fork's, and the row says so.
+                note(&mut said, "forked", json!(format!("mark:{}", forked.mark)));
+            }
+            let chosen = forked.mark;
+            if let Some(row) = forked.row {
+                fork = Some(branch::Pending {
+                    row: walked.forks.len(),
+                    same_pick: forked.same_pick,
+                });
+                walked.forks.push(row);
+            }
+
+            let seen = before
+                .as_ref()
+                .expect("the screen this walk just looked at");
+            let legend = legend_of(seen, chosen);
+            // Ask ahead ([`Options::overlap`]), before the press: the next
+            // question as the last look would put it — this screen, the chosen
+            // number spent, its legend among `pressed` — begun now, so the
+            // judgment runs while the press lands and the next look is taken.
+            // Only a goal walk comes back to a look; not after a link, whose
+            // screen is another page; not when one more stand on this screen
+            // would end the walk before it asked; not on the last step, which
+            // asks nothing more.
+            // A forked step asks ahead only once its canonical number stands: the
+            // fork's own presses and looks are the fork's and not the walk's, so
+            // nothing was begun over them, and the question begun here names the
+            // number the hand goes out with.
+            if options.overlap
+                && world.asks_ahead_of_the_press()
+                && matches!(at.why, Why::Goal { .. })
+                && attempt < at.steps()
+                && still + 1 < SAME_SCREEN_LIMIT
+                && !presses_a_link(seen, chosen)
+            {
+                let mut tried_ahead = tried.clone();
+                tried_ahead.push(chosen);
+                let mut pressed_ahead = pressed_so_far.clone();
+                pressed_ahead.push(legend.clone());
+                // Every head the look's own question will ask, so the answer in
+                // flight can be the one request the next step makes.
+                ahead = ask_with(
+                    &ActionLook {
+                        goal: at.goal,
+                        errand: at.asked(),
+                        at: seen.at.asked(),
+                        tried: &tried_ahead,
+                        items: &seen.items,
+                        pressed: &pressed_ahead,
+                        shows: &seen.shows,
+                    },
+                    &seen.beside(world.types(), &seen.fields_left(&entered)),
+                )
                 .and_then(|question| judge.begin(&question));
+            }
+            let pressed = match forked.pressed {
+                Some(pressed) => pressed,
+                None => crate::run_evidence::observing(
+                    json!({
+                        "look_ms": look_ms,
+                        "judgment": { "asked": true, "ms": judgment_ms, "confidence": choice.confidence },
+                    }),
+                    || world.press(chosen),
+                ),
+            };
+            if !pressed {
+                note(&mut said, "routeUse", json!(USE_FALLBACK));
+                note(&mut said, "pressed", json!(false));
+                walked.rows.push(row(mode, at, attempt, said));
+                return walked;
+            }
+            tried.push(chosen);
+            pressed_so_far.push(legend);
+            walked.pressed += 1;
+            note(&mut said, "pressed", json!(true));
+            note(&mut said, "routeUse", json!(USE_APPLIED));
+            let settled = world.settled();
+            if let Some(settled) = &settled {
+                note(&mut said, SETTLE, settled.note.clone());
+            }
+            // Ask ahead on the screen the press settled on (t-6385): the next
+            // question as the loop's own head will put it — a screen that moved
+            // starts its numbers afresh, one that did not keeps what it spent —
+            // begun now, so the judgment is answered while the full look is
+            // taken. The look's question decides: the same bytes use the answer,
+            // any other drops it (an element only the full look finds, a screen
+            // still moving).
+            if options.overlap
+                && ahead.is_none()
+                && matches!(at.why, Why::Goal { .. })
+                && attempt < at.steps()
+                && let Some(screen) = settled.and_then(|settled| settled.screen)
+            {
+                let moved = !seen.same_as(&screen);
+                if moved || still + 1 < SAME_SCREEN_LIMIT {
+                    let tried_next = if moved { Vec::new() } else { tried.clone() };
+                    ahead = ask_with(
+                        &ActionLook {
+                            goal: at.goal,
+                            errand: at.asked(),
+                            at: screen.at.asked(),
+                            tried: &tried_next,
+                            items: &screen.items,
+                            pressed: &pressed_so_far,
+                            shows: &screen.shows,
+                        },
+                        &screen.beside(world.types(), &screen.fields_left(&entered)),
+                    )
+                    .and_then(|question| judge.begin(&question));
+                }
             }
         }
 
@@ -1446,16 +1703,67 @@ fn walk(
 fn second_rung(policy: &JevUse, seen: &Screen, answered: &Judged) -> (String, Option<usize>) {
     match answered {
         Judged::Refused(token) => (token.clone(), None),
-        Judged::Chose(second) => match second.chosen {
+        Judged::Chose(second) => match second.choice.chosen {
             Chosen::GiveUp => (zerocode_core::screen_action::GIVE_UP.to_string(), None),
             Chosen::Done => (zerocode_core::screen_action::DONE.to_string(), None),
-            Chosen::Mark(mark) if !press_rule(policy, seen, mark, second.confidence).0 => {
+            // A second reader names one option and never a field
+            // ([`ActionAsk::choice_of`]); an entry is not a press it rescues.
+            Chosen::Type(_) => (TYPE_TEXT.to_string(), None),
+            Chosen::Mark(mark) if !press_rule(policy, seen, mark, second.choice.confidence).0 => {
                 (Barred::LowConfidence.as_str().to_string(), None)
             }
             Chosen::Mark(mark) if presses_a_link(seen, mark) => ("link".to_string(), None),
             Chosen::Mark(mark) => ("pressed".to_string(), Some(mark)),
         },
     }
+}
+
+/// The word a row names what an answer chose by: the number's option, or
+/// the end it chose.
+fn chosen_word(chosen: Chosen) -> String {
+    match chosen {
+        Chosen::Mark(mark) | Chosen::Type(mark) => option_of(mark),
+        Chosen::GiveUp => zerocode_core::screen_action::GIVE_UP.to_string(),
+        Chosen::Done => zerocode_core::screen_action::DONE.to_string(),
+    }
+}
+
+/// What a row says of an entry that went in (t-6720): where its value came
+/// from and how many characters it was — never the value. A written value
+/// names its model and how long it took; a reused one names neither, so no
+/// counter reads it as a sample of the model.
+fn typed_note(source: &ValueSource, chars: usize) -> Value {
+    let mut note = json!({ "source": source.word(), "chars": chars });
+    if let (ValueSource::Written { model, ms }, Some(fields)) = (source, note.as_object_mut()) {
+        fields.insert(MODEL.canonical.to_string(), json!(model));
+        fields.insert("valueMs".to_string(), json!(ms));
+    }
+    note
+}
+
+/// What a row says the observation heads chose (t-6720): per head, the
+/// look's own number of the candidate (`null` for none), the head's
+/// confidence, and the candidate's own identity as the look carried it.
+fn observed_note(seen: &Screen, observed: &[zerocode_core::screen_action::Observed]) -> Value {
+    let mut note = serde_json::Map::new();
+    for one in observed {
+        let candidate = one
+            .chosen
+            .and_then(|number| seen.snapshot.of_head(one.head).get(number.checked_sub(1)?));
+        let identity = candidate
+            .and_then(|candidate| candidate.get(SELECTOR_KEY))
+            .cloned()
+            .unwrap_or(Value::Null);
+        note.insert(
+            one.head.head().to_string(),
+            json!({
+                "chosen": one.chosen,
+                "confidence": one.confidence,
+                (SELECTOR_KEY): identity,
+            }),
+        );
+    }
+    Value::Object(note)
 }
 
 /// The one press rule every press of a walk passes — the seat's own answer,
@@ -1481,6 +1789,16 @@ fn legend_of(seen: &Screen, mark: usize) -> String {
         .find(|item| item.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())
         .and_then(zerocode_core::computer_use_protocol::marks::legend_line)
         .unwrap_or_else(|| format!("mark:{mark}"))
+}
+
+/// The look's own selector for the control `mark` names on `seen`.
+fn selector_of(seen: &Screen, mark: usize) -> Option<String> {
+    seen.items
+        .iter()
+        .find(|item| item.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())
+        .and_then(|item| item.get(SELECTOR_KEY))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Whether the control `mark` names on `seen` carries the screen elsewhere.
@@ -1564,7 +1882,10 @@ pub mod desk;
 #[cfg(test)]
 pub(crate) mod guard_fixtures;
 pub mod live;
+#[cfg(test)]
+mod probe;
 pub mod team;
+pub mod value;
 pub mod walk;
 
 #[cfg(test)]

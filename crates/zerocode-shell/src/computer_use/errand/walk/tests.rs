@@ -238,3 +238,149 @@ fn a_call_whose_clock_is_gone_has_nothing_left() {
         "spent past the deadline is zero, never a wrap"
     );
 }
+
+/// A walk asks its second reader (t-6132 S3) only when its caller turned the
+/// rung on, and only for a press: a normal walk — the rescue switch off —
+/// never starts one, whatever its seat said; turned on, it asks one only for
+/// a press under the seat's floor, hands it no more than the call has left,
+/// and presses its answer only at that same floor. An entry under the floor
+/// is never a second reader's to rescue (t-6720): the reader answers one
+/// option and names no field. Where the reader must NOT start, it is the real
+/// one over a zo that is a script — started or not, its own record says —
+/// and the row carries no word from it either.
+#[test]
+fn a_normal_walk_does_not_start_the_second_reader() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use zerocode_core::computer_recipe::RecipeStop;
+    use zerocode_core::screen_action::ActionAsk;
+
+    use super::super::team::tests::{fake_zo, judge_over};
+    use super::super::tests::{FakeJudge, entry, pick, stopped};
+    use super::super::{ActionJudge, Branching, Judged, Mode, Options, RESCUE, Walked, run_with};
+
+    /// A second reader that says what the test says and keeps the wall it
+    /// was handed each time it was asked.
+    struct Reader {
+        says: Judged,
+        walls: Rc<RefCell<Vec<Duration>>>,
+    }
+    impl ActionJudge for Reader {
+        fn choose(&mut self, ask: &ActionAsk) -> Judged {
+            self.choose_within(ask, Duration::MAX)
+        }
+        fn choose_within(&mut self, _: &ActionAsk, left: Duration) -> Judged {
+            self.walls.borrow_mut().push(left);
+            self.says.clone()
+        }
+    }
+
+    let unsure = |mut judged: Judged| {
+        if let Judged::Chose(read) = &mut judged {
+            read.choice.confidence = 0.29;
+        }
+        judged
+    };
+    let at = |mut judged: Judged, confidence: f64| {
+        if let Judged::Chose(read) = &mut judged {
+            read.choice.confidence = confidence;
+        }
+        judged
+    };
+    // One stopped walk on the walk road, with `second` as its reader:
+    // every argv the road was handed, and the walk.
+    let walk_once = |rescue: bool, seat: Judged, second: &mut dyn ActionJudge, clock_ms: u64| {
+        let road = Road::new();
+        let mut drive = road.drive();
+        let mut walk = |_: &mut _, _: u64, _: usize| None;
+        let mut world = WalkWorld::new(
+            &mut drive,
+            &mut walk,
+            "app",
+            ("app.local".to_string(), "/cart".to_string()),
+            clock_ms,
+            0,
+        );
+        let mut judge = FakeJudge::saying(vec![seat]);
+        let walked: Walked = run_with(
+            Mode::On,
+            true,
+            Branching::OFF,
+            &stopped(RecipeStop::StepFailed),
+            &mut judge,
+            &mut world,
+            Options {
+                overlap: false,
+                rescue,
+            },
+            Some(second),
+        );
+        drop(world);
+        (road.sent(), walked)
+    };
+    let clicks = |sent: &[Vec<String>], mark: &str| {
+        sent.iter()
+            .filter(|argv| argv[0] == "click" && argv.last().map(String::as_str) == Some(mark))
+            .count()
+    };
+
+    // Where the reader must not start, the real one: its record stays empty.
+    let root = tempfile::tempdir().expect("a root");
+    let (program, _) = fake_zo(root.path(), "", "0");
+    for (name, rescue, seat) in [
+        ("a normal walk", false, unsure(pick(1))),
+        ("a sure press", true, pick(1)),
+        ("an entry under the floor", true, unsure(entry(1))),
+    ] {
+        let record = tempfile::tempdir().expect("a record");
+        let mut team = judge_over(
+            program.clone(),
+            record.path(),
+            r#"{"choice":"mark:2","confidence":0.95}"#,
+            None,
+        );
+        let (sent, walked) = walk_once(rescue, seat, &mut team, 60_000);
+        assert!(
+            !record.path().join("argv").exists(),
+            "{name} started the second reader"
+        );
+        assert!(
+            walked.rows[0].get(RESCUE).is_none(),
+            "{name} asked the second reader"
+        );
+        assert_eq!((walked.rescued, walked.rescue_failed), (0, 0), "{name}");
+        if name == "a sure press" {
+            assert_eq!(clicks(&sent, "1"), 1, "the seat's own press");
+        } else {
+            assert_eq!(clicks(&sent, "1") + clicks(&sent, "2"), 0, "{name} pressed");
+            assert_eq!(walked.rows[0]["barred"], json!("low_confidence"), "{name}");
+        }
+    }
+
+    // Turned on, an unsure press asks the reader once, with no more than the
+    // call has left; its answer under the same floor presses nothing, and one
+    // at the floor presses the reader's own number.
+    let walls = Rc::new(RefCell::new(Vec::new()));
+    let mut under = Reader {
+        says: at(pick(2), 0.4),
+        walls: Rc::clone(&walls),
+    };
+    let (sent, walked) = walk_once(true, unsure(pick(1)), &mut under, 3_000);
+    assert_eq!(walls.borrow().len(), 1, "asked once");
+    assert!(
+        walls.borrow()[0] <= Duration::from_millis(3_000),
+        "the reader was handed more than the call had: {:?}",
+        walls.borrow()[0]
+    );
+    assert_eq!(clicks(&sent, "1") + clicks(&sent, "2"), 0);
+    assert_eq!(walked.rows[0][RESCUE]["outcome"], json!("low_confidence"));
+    assert_eq!(walked.rescue_failed, 1);
+    let mut sure = Reader {
+        says: at(pick(2), 0.95),
+        walls: Rc::new(RefCell::new(Vec::new())),
+    };
+    let (sent, walked) = walk_once(true, unsure(pick(1)), &mut sure, 60_000);
+    assert_eq!((clicks(&sent, "2"), walked.rescued), (1, 1));
+}

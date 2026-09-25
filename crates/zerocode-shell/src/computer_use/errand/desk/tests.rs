@@ -601,3 +601,592 @@ fn what_is_left_of_the_calls_clock_counts_what_was_spent_before_the_walk() {
     );
     assert_eq!(spent.left_ms(), 0, "a clock past its deadline has nothing");
 }
+
+// ---- Entering a written value into a field the look read (t-6720) ----
+
+use std::sync::Arc;
+
+use zerocode_core::agent_browser::TYPE_VALUE_FLAG;
+use zerocode_core::screen_action::{ActionChoice, Chosen, Guard};
+
+use super::super::tests::{FakeJudge, Pen, entry, goal, memory, pick};
+use super::super::value::Written;
+use super::super::{Judged, Mode, TYPED, Typed, ValueSource, run};
+
+/// The one field a page's look read — a city box — and a button beside it,
+/// with what the page read beside its numbers in the same pass (U4's
+/// snapshot): the document, and the field's own words and value.
+fn a_page_with_a_field(epoch: &str, now: &str, selector: &str) -> String {
+    json!({
+        "items": [
+            { "mark": 1, "role": "textbox", "tag": "input", "label": "City",
+              "selector": selector, "centerX": 120.0, "centerY": 40.0 },
+            { "mark": 2, "role": "button", "tag": "button", "label": "Advance",
+              "selector": "#advance", "centerX": 300.0, "centerY": 40.0 },
+        ],
+        "count": 2,
+        (zerocode_core::screen_action::snapshot::EPOCH_KEY): epoch,
+        (zerocode_core::screen_action::snapshot::FIELDS_KEY): [{
+            "mark": 1, "kind": "text", "secret": false,
+            "label": "Destination", "placeholder": "City",
+            "near": "Travel search", "value": now,
+        }],
+    })
+    .to_string()
+}
+
+/// One call a road was handed: the tool, the argv it ran, the argv it logged.
+type Call = (RecipeTool, Vec<String>, Vec<String>);
+
+/// A road that keeps what it was handed to run AND what it was handed to
+/// log, and answers from what the test's page says now.
+struct Kept {
+    calls: RefCell<Vec<Call>>,
+    page: RefCell<String>,
+}
+
+impl Kept {
+    fn on(page: String) -> Self {
+        Self {
+            calls: RefCell::new(Vec::new()),
+            page: RefCell::new(page),
+        }
+    }
+    fn road(&self) -> impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer + '_ {
+        move |tool, argv, logged| {
+            self.calls
+                .borrow_mut()
+                .push((tool, argv.to_vec(), logged.to_vec()));
+            match argv.first().map(String::as_str) {
+                Some("marks") => ok(&self.page.borrow()),
+                Some("click" | "type") => ok("{}"),
+                Some("find") => ok(r#"{"count":0}"#),
+                _ => refused(),
+            }
+        }
+    }
+    fn verbs(&self) -> Vec<String> {
+        self.calls
+            .borrow()
+            .iter()
+            .map(|(_, argv, _)| argv[0].clone())
+            .collect()
+    }
+}
+
+/// The value seat is asked only when the walk's judgment chose to TYPE
+/// and the walk goes on to type: a press, `give_up` and `done` write
+/// nothing — there is no scroll operation to ask about — and neither does
+/// a seat that only records, a guard that stops the step, or an entry under
+/// the press floor. An entry writes once.
+#[test]
+fn only_type_text_calls_the_value_generator() {
+    let walk = |answer: Judged, acting: bool| -> (usize, Vec<String>) {
+        let road = Kept::on(a_page_with_a_field("doc-1", "", "#destination"));
+        let mut send = road.road();
+        let (pen, writes, _) = Pen::writing("London");
+        let mut world = GoalWorld::new(
+            &mut send,
+            Aim::Pane {
+                label: "browser-9".into(),
+            },
+            Seen::default(),
+            None,
+            60_000,
+            0,
+        )
+        .writing(Box::new(pen))
+        .remembering(memory());
+        let mut judge = FakeJudge::saying(vec![answer]);
+        let _ = run(Mode::On, acting, &goal(1), &mut judge, &mut world);
+        drop(world);
+        (writes.get(), road.verbs())
+    };
+    let ended = |chosen: Chosen| {
+        Judged::Chose(
+            ActionChoice {
+                chosen,
+                probabilities: std::collections::BTreeMap::new(),
+                confidence: 0.9,
+                guard: None,
+            }
+            .into(),
+        )
+    };
+    for (name, answer) in [
+        ("click", pick(2)),
+        ("give_up", ended(Chosen::GiveUp)),
+        ("done", ended(Chosen::Done)),
+    ] {
+        let (writes, verbs) = walk(answer, true);
+        assert_eq!(writes, 0, "{name} wrote a value");
+        assert!(!verbs.iter().any(|verb| verb == "type"), "{name} typed");
+    }
+    let (writes, verbs) = walk(entry(1), true);
+    assert_eq!(writes, 1, "an entry writes once");
+    assert_eq!(verbs, ["marks", "click", "type"]);
+
+    // A seat that only records, an entry under the floor and an entry on a
+    // screen whose guard stops it write nothing and type nothing.
+    let (writes, verbs) = walk(entry(1), false);
+    assert_eq!((writes, verbs.len()), (0, 1), "a recording seat");
+    let mut unsure = entry(1);
+    if let Judged::Chose(read) = &mut unsure {
+        read.choice.confidence = 0.29;
+    }
+    let (writes, verbs) = walk(unsure, true);
+    assert_eq!((writes, verbs.len()), (0, 1), "under the floor");
+    let mut walled = entry(1);
+    if let Judged::Chose(read) = &mut walled {
+        read.choice.guard = Some(Guard {
+            instructed: 0.0,
+            walled: 0.95,
+        });
+    }
+    let (writes, verbs) = walk(walled, true);
+    assert_eq!((writes, verbs.len()), (0, 1), "a wall");
+}
+
+/// What makes a second write the same write: the same goal, the same words
+/// around the same field holding the same value, in the same document. A
+/// retry and a replay of that write type the value from memory with no
+/// model asked; a changed document, value, field or goal asks afresh, and a
+/// look that named no document never reuses anything.
+#[test]
+fn identical_value_input_reuses_but_changed_document_or_value_does_not() {
+    let road = Kept::on(a_page_with_a_field("doc-1", "", "#destination"));
+    let mut send = road.road();
+    let (pen, writes, _) = Pen::writing("London");
+    let values = memory();
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .writing(Box::new(pen))
+    .remembering(Arc::clone(&values));
+    let goal = "Set the destination to London";
+    let enter = |world: &mut GoalWorld<'_, _>, page: String, goal: &str| {
+        *road.page.borrow_mut() = page;
+        world.look().expect("a look");
+        world.type_into(1, goal)
+    };
+
+    let first = enter(
+        &mut world,
+        a_page_with_a_field("doc-1", "", "#destination"),
+        goal,
+    );
+    assert!(
+        matches!(
+            &first,
+            Typed::Typed {
+                source: ValueSource::Written { .. },
+                chars: 6
+            }
+        ),
+        "{first:?}"
+    );
+    assert_eq!(writes.get(), 1);
+    // The same input again — a retry: typed from memory, no write.
+    let retried = enter(
+        &mut world,
+        a_page_with_a_field("doc-1", "", "#destination"),
+        goal,
+    );
+    assert_eq!(
+        retried,
+        Typed::Typed {
+            source: ValueSource::Reused,
+            chars: 6
+        }
+    );
+    assert_eq!(writes.get(), 1, "a retry of the same input writes nothing");
+
+    // Anything that changed asks afresh.
+    let changed = [
+        (
+            "another document",
+            a_page_with_a_field("doc-2", "", "#destination"),
+            goal,
+        ),
+        (
+            "another value in the field",
+            a_page_with_a_field("doc-2", "Lon", "#destination"),
+            goal,
+        ),
+        (
+            "another field",
+            a_page_with_a_field("doc-2", "Lon", "#origin"),
+            goal,
+        ),
+        (
+            "another goal",
+            a_page_with_a_field("doc-2", "Lon", "#origin"),
+            "Set the destination to Paris",
+        ),
+    ];
+    for (at, (why, page, goal)) in changed.into_iter().enumerate() {
+        let typed = enter(&mut world, page, goal);
+        assert!(
+            matches!(
+                typed,
+                Typed::Typed {
+                    source: ValueSource::Written { .. },
+                    ..
+                }
+            ),
+            "{why}: {typed:?}"
+        );
+        assert_eq!(writes.get(), 2 + at, "{why} is a new write");
+    }
+    // A look that named no document is never vouched for.
+    for _ in 0..2 {
+        let before = writes.get();
+        let typed = enter(
+            &mut world,
+            a_page_with_a_field("", "", "#destination"),
+            goal,
+        );
+        assert!(matches!(
+            typed,
+            Typed::Typed {
+                source: ValueSource::Written { .. },
+                ..
+            }
+        ));
+        assert_eq!(writes.get(), before + 1, "no document, no reuse");
+    }
+    drop(world);
+
+    // A replay — another walk, the same window's memory, the same input —
+    // types the first write's value without asking.
+    let (pen, rewrites, _) = Pen::writing("never asked");
+    let replay_road = Kept::on(a_page_with_a_field("doc-1", "", "#destination"));
+    let mut replay_send = replay_road.road();
+    let mut replay = GoalWorld::new(
+        &mut replay_send,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .writing(Box::new(pen))
+    .remembering(values);
+    replay.look().expect("a look");
+    assert_eq!(
+        replay.type_into(1, goal),
+        Typed::Typed {
+            source: ValueSource::Reused,
+            chars: 6
+        }
+    );
+    assert_eq!(
+        rewrites.get(),
+        0,
+        "a replay of the same input writes nothing"
+    );
+    let typed_argv = replay_road
+        .calls
+        .borrow()
+        .iter()
+        .find(|(_, argv, _)| argv[0] == "type")
+        .map(|(_, argv, _)| argv.clone())
+        .expect("typed");
+    assert_eq!(typed_argv[4], "London", "the value the first write wrote");
+}
+
+/// A written value reaches the page down the door's value road — `type
+/// <pane> <selector> --value`, the shape the stdin road sends — into the
+/// field the look itself named, pressed first by its pinned number. It is
+/// never in what the log keeps (`[6 chars]` in its place), never on a
+/// walk's row, never in what a writer's debug line prints, and the model is
+/// asked about the words around the box, never the box's value.
+#[test]
+fn generated_value_reaches_stdin_and_is_never_in_argv_or_logs() {
+    let road = Kept::on(a_page_with_a_field("doc-1", "Zur", "#destination"));
+    let mut send = road.road();
+    let (pen, writes, asked) = Pen::writing("London");
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::default(),
+        Some("Arrived".into()),
+        60_000,
+        0,
+    )
+    .writing(Box::new(pen))
+    .remembering(memory());
+    let mut judge = FakeJudge::saying(vec![entry(1)]);
+    let walked = run(Mode::On, true, &goal(1), &mut judge, &mut world);
+    drop(world);
+
+    assert_eq!(writes.get(), 1);
+    assert_eq!(walked.typed, 1);
+    let calls = road.calls.borrow();
+    let verbs: Vec<&str> = calls.iter().map(|(_, argv, _)| argv[0].as_str()).collect();
+    assert_eq!(verbs, ["marks", "click", "type", "find"]);
+    // The field is pressed by its pinned number, then typed by the look's
+    // own selector for it — nothing composed.
+    assert_eq!(calls[1].1, ["click", "browser-9", "--mark", "1"]);
+    assert_eq!(
+        calls[2].1,
+        [
+            "type",
+            "browser-9",
+            "#destination",
+            TYPE_VALUE_FLAG,
+            "London"
+        ],
+        "the value rides the door's value slot, the stdin road's shape"
+    );
+    assert_eq!(
+        calls[2].2,
+        [
+            "type",
+            "browser-9",
+            "#destination",
+            TYPE_VALUE_FLAG,
+            "[6 chars]"
+        ],
+        "the log keeps the flag and hides the value"
+    );
+    for (_, _, logged) in calls.iter() {
+        assert!(
+            !logged.iter().any(|word| word.contains("London")),
+            "a logged line holds the value: {logged:?}"
+        );
+    }
+    let rows = serde_json::to_string(&walked.rows).expect("rows");
+    assert!(!rows.contains("London"), "a row holds the value: {rows}");
+    assert!(
+        !rows.contains("Zur"),
+        "a row holds the field's value: {rows}"
+    );
+    assert_eq!(walked.rows[0][TYPED]["source"], json!("written"));
+    assert_eq!(walked.rows[0][TYPED]["chars"], json!(6));
+    // The model was asked about the words around the box — never what the
+    // box held.
+    let question = asked.borrow().join("\n");
+    assert!(question.contains("Destination") && question.contains("Travel search"));
+    assert!(!question.contains("Zur"), "{question}");
+    let written = Written {
+        value: "London".into(),
+        model: "m".into(),
+        ms: 1,
+    };
+    assert!(!format!("{written:?}").contains("London"));
+}
+
+/// The value seat's road is opened once a walk's look has read a field — on
+/// that first look, while the judgment is still to be asked — and only then:
+/// a look of numbers alone, a world that cannot type and a second look warm
+/// nothing.
+#[test]
+fn the_first_look_that_reads_a_field_opens_the_value_road_once() {
+    struct Warmed(Rc<Cell<usize>>);
+    impl super::super::value::ValueWriter for Warmed {
+        fn row(&self) -> Option<&'static zerocode_core::type_value::ValueRow> {
+            zerocode_core::type_value::chosen()
+        }
+        fn ready(&self) -> bool {
+            true
+        }
+        fn write(
+            &mut self,
+            _: &zerocode_core::type_value::FieldLook<'_>,
+            _: std::time::Duration,
+        ) -> Result<Written, String> {
+            Err("unused".to_string())
+        }
+        fn warm(&self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let warm_after = |page: String, aim: Aim, looks: usize| {
+        let road = Kept::on(page);
+        let mut send = road.road();
+        let warms = Rc::new(Cell::new(0));
+        let mut world = GoalWorld::new(&mut send, aim, Seen::default(), None, 60_000, 0)
+            .writing(Box::new(Warmed(Rc::clone(&warms))))
+            .remembering(memory());
+        for _ in 0..looks {
+            let _ = world.look();
+        }
+        warms.get()
+    };
+    let pane = || Aim::Pane {
+        label: "browser-9".into(),
+    };
+    assert_eq!(
+        warm_after(a_page_with_a_field("doc-1", "", "#destination"), pane(), 3),
+        1
+    );
+    assert_eq!(
+        warm_after(pane_answer(), pane(), 2),
+        0,
+        "no field, no warm-up"
+    );
+    assert_eq!(
+        warm_after(
+            a_page_with_a_field("doc-1", "", "#destination"),
+            Aim::App { name: "x".into() },
+            1
+        ),
+        0,
+        "a world that cannot type"
+    );
+}
+
+/// A field takes one entry in a walk: once a value went into it, the next
+/// question offers no entry into that field again — the entry changed the
+/// words the field is read by, so the screen reads as moved and would offer
+/// it afresh, and a second guess at it is a loop, not a step — while its
+/// press and every other control stay on offer.
+#[test]
+fn a_field_takes_one_entry_a_walk() {
+    // The page as a real one answers: after the entry the field is read by
+    // what it now holds.
+    let typed = std::cell::Cell::new(false);
+    let mut send = |_: RecipeTool, argv: &[String], _: &[String]| match argv[0].as_str() {
+        "marks" if typed.get() => ok(&a_page_with_a_field("doc-1", "London", "#destination")
+            .replace("\"label\":\"City\"", "\"label\":\"London\"")),
+        "marks" => ok(&a_page_with_a_field("doc-1", "", "#destination")),
+        "type" => {
+            typed.set(true);
+            ok("{}")
+        }
+        _ => ok("{}"),
+    };
+    let (pen, writes, _) = Pen::writing("London");
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .writing(Box::new(pen))
+    .remembering(memory());
+    let mut judge = FakeJudge::saying(vec![entry(1), pick(2)]);
+    let walked = run(Mode::On, true, &goal(2), &mut judge, &mut world);
+    drop(world);
+    assert_eq!((walked.typed, walked.pressed, writes.get()), (1, 2, 1));
+    let [first, second] = judge.questions.as_slice() else {
+        panic!("two questions: {:?}", judge.questions);
+    };
+    assert!(
+        first.get("type_target").is_some(),
+        "the first look may type"
+    );
+    assert!(first["action"]["criteria"].get("type_text").is_some());
+    assert!(
+        second["action"]["criteria"]["mark:1"]
+            .as_str()
+            .is_some_and(|line| line.contains("London")),
+        "the screen moved: the field is read by what it holds, and its press is on offer"
+    );
+    assert!(second.get("type_target").is_none(), "the field was entered");
+    assert!(second["action"]["criteria"].get("type_text").is_none());
+    assert!(second["action"]["criteria"].get("mark:2").is_some());
+}
+
+/// A subscription login is on no request the value seat makes (t-6720, the
+/// coordinator's decision m-9526): on a machine whose key store holds only a
+/// subscription login, a look that read a field offers no entry — Type
+/// candidates 0 — and the value seat asks nothing, even of a judgment that
+/// answers with an entry regardless; with a key a person set, the same look
+/// offers the entry and the value goes in down the value road, asked with
+/// that key alone.
+#[test]
+fn a_subscription_login_never_rides_a_value_request() {
+    use super::super::value::tests::{KEY, store, wrote};
+    use super::super::value::{LiveWriter, NO_KEY};
+    use crate::systemone::tests::Endpoint;
+
+    let walk = |with_key: bool| {
+        let endpoint = Endpoint::serving("HTTP/1.1 200 OK", wrote("London"), 0);
+        let road = Kept::on(a_page_with_a_field("doc-1", "", "#destination"));
+        let mut send = road.road();
+        let writer = LiveWriter::at(&format!("{}/v1/messages", endpoint.base()), store(with_key));
+        let mut world = GoalWorld::new(
+            &mut send,
+            Aim::Pane {
+                label: "browser-9".into(),
+            },
+            Seen::default(),
+            None,
+            60_000,
+            0,
+        )
+        .writing(Box::new(writer))
+        .remembering(memory());
+        // A judgment that answers with an entry whether or not one was offered.
+        let mut judge = FakeJudge::saying(vec![entry(1)]);
+        let walked = run(Mode::On, true, &goal(1), &mut judge, &mut world);
+        drop(world);
+        (judge.questions, endpoint.asked(), road.verbs(), walked)
+    };
+
+    let (questions, heard, verbs, walked) = walk(false);
+    assert!(
+        questions[0].get("type_target").is_none(),
+        "an entry was offered"
+    );
+    assert!(
+        questions[0]["action"]["criteria"]
+            .get("type_text")
+            .is_none(),
+        "Type candidates 0"
+    );
+    assert!(heard.is_empty(), "the value seat asked: {heard:?}");
+    assert!(!verbs.iter().any(|verb| verb == "type"));
+    assert_eq!(walked.typed, 0);
+    assert_eq!(walked.rows[0]["reason"], json!(NO_KEY));
+
+    let (questions, heard, verbs, walked) = walk(true);
+    assert!(
+        questions[0].get("type_target").is_some(),
+        "the entry is offered"
+    );
+    // One value, one request; the road's warm-up before it carries no key;
+    // no request carries the subscription login.
+    let (posts, warm_ups): (Vec<&String>, Vec<&String>) = heard
+        .iter()
+        .partition(|request| request.starts_with("POST"));
+    assert_eq!(posts.len(), 1, "one value, one request: {heard:?}");
+    assert!(
+        posts[0]
+            .to_ascii_lowercase()
+            .contains(&format!("x-api-key: {KEY}")),
+        "{}",
+        posts[0]
+    );
+    for request in &warm_ups {
+        assert!(
+            !request.to_ascii_lowercase().contains("x-api-key"),
+            "{request}"
+        );
+    }
+    for request in &heard {
+        assert!(!request.contains("a-subscription-login"), "{request}");
+    }
+    assert!(verbs.iter().any(|verb| verb == "type"));
+    assert_eq!(walked.typed, 1);
+}

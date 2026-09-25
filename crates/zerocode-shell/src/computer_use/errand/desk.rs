@@ -9,9 +9,16 @@
 //!
 //! What a goal walk may NOT do is as load-bearing as what it may:
 //!
-//! - It presses. It does not type, navigate, run a script or set a value —
-//!   the answer space is a number and nothing else, so there is no road from
-//!   a judgment to a value, a selector or an address.
+//! - It presses, and — on a page, when its look read a field it may type
+//!   into (t-6720) — it types. It does not navigate, run a script or set a
+//!   value of its own choosing: the answer space is a number and nothing
+//!   else, so there is no road from a judgment to a value, a selector or an
+//!   address. A typed value is the value seat's
+//!   ([`super::value::ValueWriter`]), entered into the field the look itself
+//!   numbered: pressed first by its pinned number, then typed through the
+//!   look's own selector for it down the door's value road
+//!   (`type <pane> <selector> --value`, the shape the stdin road sends), with
+//!   the log keeping `[n chars]` in its place.
 //! - It stays where it was aimed. A desktop walk names one app and looks only
 //!   at that app's tree; a pane walk names one pane. A press that carries the
 //!   screen somewhere else shows up as a screen that changed, which the walk
@@ -21,17 +28,25 @@
 //!   walk started; no screen's text is compiled in here, and the judgment's
 //!   own `done` is recorded as the weaker end that it is.
 
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use zerocode_core::agent_browser::TYPE_VALUE_FLAG;
 use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
 use zerocode_core::computer_use::{
     EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS,
 };
 use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, LOOK_ID_KEY};
+use zerocode_core::screen_action::snapshot;
+use zerocode_core::type_value::{FieldLook, ValueInput};
 use zerocode_hookd::TeamAnswer;
 
-use super::{Saved, Screen, Seen, Settled, Surface, World};
+use super::value::{ValueWriter, Values, held, window_values};
+use super::{
+    NO_FIELD, NO_TYPING, PRESS_REFUSED, Saved, Screen, Seen, Settled, Snapshot, Surface,
+    TYPE_REFUSED, Typed, ValueSource, World,
+};
 
 /// The flag every road here asks its answer as JSON with — the word both
 /// CLIs already take, spelled once.
@@ -261,6 +276,7 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                     },
                     items: said.get(ITEMS_KEY)?.as_array()?.clone(),
                     shows: Vec::new(),
+                    snapshot: Snapshot::default(),
                 },
                 look.to_string(),
             ))
@@ -273,6 +289,11 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                 at: Seen::default(),
                 items: said.get(ITEMS_KEY)?.as_array()?.clone(),
                 shows: Vec::new(),
+                // What the page read beside its numbers in the same pass
+                // (t-6721 U4) — the fields a walk may type into and the
+                // candidates the observation heads ask about. A marks answer
+                // that carries none walks as it always did.
+                snapshot: Snapshot::of(said),
             },
             String::new(),
         )),
@@ -294,6 +315,7 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                     },
                     items: marks.get(ITEMS_KEY)?.as_array()?.clone(),
                     shows: Vec::new(),
+                    snapshot: Snapshot::default(),
                 },
                 marks
                     .get(LOOK_ID_KEY)
@@ -302,6 +324,59 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                     .to_string(),
             ))
         }
+    }
+}
+
+/// A field one look read, as an entry into it needs it: the control's own
+/// selector, the words around it, what it holds, and the document it was
+/// read in — every piece the look's own, none composed here.
+struct Entry {
+    selector: String,
+    label: String,
+    placeholder: String,
+    near: String,
+    now: String,
+    epoch: String,
+    /// The field's identity in its document: its selector, tag and role as
+    /// the look wrote them — what tells one field from another for a value
+    /// written before.
+    target: String,
+}
+
+impl Entry {
+    /// The field `mark` names on `seen`, when the look read it as one: a
+    /// numbered control with a selector of its own and the page's facts
+    /// about it.
+    fn read(seen: &Screen, mark: usize) -> Option<Self> {
+        let numbered =
+            |value: &Value| value.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok();
+        let item = seen.items.iter().find(|item| numbered(item))?;
+        let field = seen.snapshot.fields.iter().find(|field| numbered(field))?;
+        let said = |value: &Value, key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let selector = said(item, snapshot::SELECTOR_KEY);
+        if selector.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            target: json!([
+                selector,
+                said(item, snapshot::TAG_KEY),
+                said(item, snapshot::ROLE_KEY)
+            ])
+            .to_string(),
+            selector,
+            label: said(field, snapshot::LABEL_KEY),
+            placeholder: said(field, snapshot::FIELD_PLACEHOLDER_KEY),
+            near: said(field, snapshot::FIELD_NEAR_KEY),
+            now: said(field, snapshot::FIELD_VALUE_KEY),
+            epoch: seen.snapshot.epoch.clone(),
+        })
     }
 }
 
@@ -338,6 +413,17 @@ pub struct GoalWorld<'a, Road> {
     /// for the step that looks next: the screen is still, so one tree read
     /// serves both (t-6385).
     kept: Option<(Screen, String)>,
+    /// The screen the last look handed the walk — the fields an entry types
+    /// into are that look's, by its own numbers and its own selectors.
+    seen: Option<Screen>,
+    /// Who writes a value a field needs (t-6720): the value seat's writer,
+    /// handed in by the caller that holds the login. `None`, the world
+    /// types nothing and no question offers an entry.
+    writer: Option<Box<dyn ValueWriter>>,
+    /// Values written before, for a retry or a replay to type again.
+    values: Arc<Mutex<Values>>,
+    /// Whether the writer's road was opened ahead of this walk's first entry.
+    warmed: bool,
 }
 
 impl<'a, Road> GoalWorld<'a, Road> {
@@ -363,7 +449,29 @@ impl<'a, Road> GoalWorld<'a, Road> {
             previewing: false,
             counted: None,
             kept: None,
+            seen: None,
+            writer: None,
+            values: window_values(),
+            warmed: false,
         }
+    }
+
+    /// The same world, able to type into a page's fields the value `writer`
+    /// writes (t-6720). Only a pane types; a desktop or a phone keeps the
+    /// writer and never offers an entry.
+    #[must_use]
+    pub fn writing(mut self, writer: Box<dyn ValueWriter>) -> Self {
+        self.writer = Some(writer);
+        self
+    }
+
+    /// The same world, remembering written values in `values` rather than
+    /// the window's — how a test holds a memory of its own.
+    #[cfg(test)]
+    #[must_use]
+    pub fn remembering(mut self, values: Arc<Mutex<Values>>) -> Self {
+        self.values = values;
+        self
     }
 
     /// The same world, asking each press for a preview of the screen it
@@ -387,6 +495,7 @@ impl<'a, Road> GoalWorld<'a, Road> {
             },
             items: preview.get(ITEMS_KEY)?.as_array()?.clone(),
             shows: Vec::new(),
+            snapshot: Snapshot::default(),
         })
     }
 
@@ -416,6 +525,7 @@ where
     fn look(&mut self) -> Option<Screen> {
         if let Some((screen, look)) = self.kept.take() {
             self.look = look;
+            self.seen = Some(screen.clone());
             return Some(screen);
         }
         let argv = self.aim.look_argv();
@@ -435,6 +545,17 @@ where
                 .unwrap_or_default();
         }
         self.look = look;
+        self.seen = Some(screen.clone());
+        // The first look that read a field opens the value seat's road, so a
+        // first entry is written over a connection the judgment's own wait
+        // has already paid for.
+        if !self.warmed
+            && self.types()
+            && let Some(writer) = &self.writer
+        {
+            writer.warm();
+            self.warmed = true;
+        }
         Some(screen)
     }
 
@@ -476,6 +597,98 @@ where
 
     fn settled(&mut self) -> Option<Settled> {
         self.settled.clone()
+    }
+
+    /// A page whose last look read a field, with a writer a person set up —
+    /// in that order, so a page with no field never touches the key store.
+    fn types(&self) -> bool {
+        matches!(self.aim, Aim::Pane { .. })
+            && self
+                .seen
+                .as_ref()
+                .is_some_and(|seen| !seen.snapshot.fields.is_empty())
+            && self.writer.as_ref().is_some_and(|writer| writer.ready())
+    }
+
+    fn type_into(&mut self, mark: usize, goal: &str) -> Typed {
+        let Aim::Pane { label } = &self.aim else {
+            return Typed::Refused(NO_TYPING.to_string());
+        };
+        let pane = label.clone();
+        let Some(entry) = self.seen.as_ref().and_then(|seen| Entry::read(seen, mark)) else {
+            return Typed::Refused(NO_FIELD.to_string());
+        };
+        // The wall a value is written within: the seat's own, never more than
+        // the call has left.
+        let left = Duration::from_millis(self.left_ms()).min(Duration::from_millis(
+            zerocode_core::type_value::seat().deadline_ms,
+        ));
+        let Some(writer) = self.writer.as_mut() else {
+            return Typed::Refused(NO_TYPING.to_string());
+        };
+        let look = FieldLook {
+            goal,
+            label: &entry.label,
+            placeholder: &entry.placeholder,
+            near: &entry.near,
+        };
+        let identity = writer.row().and_then(|row| {
+            zerocode_core::type_value::identity(
+                &ValueInput {
+                    look,
+                    now: &entry.now,
+                    epoch: &entry.epoch,
+                    target: &entry.target,
+                },
+                row,
+            )
+        });
+        let remembered = identity
+            .as_deref()
+            .and_then(|identity| held(&self.values).recall(identity));
+        let (value, source) = if let Some(value) = remembered {
+            (value, ValueSource::Reused)
+        } else {
+            match writer.write(&look, left) {
+                Ok(written) => {
+                    if let Some(identity) = identity {
+                        held(&self.values).keep(identity, written.value.clone());
+                    }
+                    (
+                        written.value,
+                        ValueSource::Written {
+                            model: written.model,
+                            ms: written.ms,
+                        },
+                    )
+                }
+                Err(token) => return Typed::Refused(token),
+            }
+        };
+        // The field is pressed by its pinned number first — the pin and the
+        // look's age stand in front of an entry as they stand in front of a
+        // press — and typed at once, by the look's own selector for it.
+        if !self.press(mark) {
+            return Typed::Refused(PRESS_REFUSED.to_string());
+        }
+        let argv = vec![
+            "type".to_string(),
+            pane,
+            entry.selector,
+            TYPE_VALUE_FLAG.to_string(),
+            value,
+        ];
+        let logged = crate::run_evidence::redacted(RecipeTool::Browser.as_str(), &argv);
+        let holds = recipe_line_holds_ms(RecipeTool::Browser, &argv);
+        let left = self.left_ms();
+        if left == 0 || left < holds {
+            return Typed::Refused(TYPE_REFUSED.to_string());
+        }
+        let chars = argv[4].chars().count();
+        if (self.road)(RecipeTool::Browser, &argv, &logged).exit_code != 0 {
+            return Typed::Refused(TYPE_REFUSED.to_string());
+        }
+        Typed::Typed { source, chars }
     }
 
     fn asks_ahead_of_the_press(&self) -> bool {

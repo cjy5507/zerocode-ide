@@ -138,7 +138,7 @@ impl TeamJudge {
             "{PROMPT_HEAD}\n\nstate:\n{}\n\nquestion:\n{}\n\noptions: {}\n\n{ANSWER_CONTRACT}\n",
             ask.state,
             ask.questions,
-            ask.options().join(", ")
+            ask.press_options().join(", ")
         )
     }
 
@@ -157,7 +157,7 @@ impl TeamJudge {
             return Judged::Refused(SCHEMA.to_string());
         };
         match ask.choice_of(choice, confidence) {
-            Ok(choice) => Judged::Chose(choice),
+            Ok(choice) => Judged::Chose(choice.into()),
             Err(why) => Judged::Refused(why.token().to_string()),
         }
     }
@@ -312,4 +312,4 @@ impl ActionJudge for TeamJudge {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

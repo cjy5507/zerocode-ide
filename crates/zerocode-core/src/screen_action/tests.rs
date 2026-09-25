@@ -272,10 +272,359 @@ fn every_broken_rule_discards_the_answer_whole() {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 5);
+    assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 6);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "54b6e19666bbd5e0"
+        "31af4b5fa6fb9b34"
+    );
+}
+
+/// A text field as a page's look numbers it.
+fn textbox(mark: usize, label: &str) -> Value {
+    json!({
+        "mark": mark,
+        "role": "textbox",
+        "tag": "input",
+        "label": label,
+        "selector": format!("#field-{mark}"),
+        "centerX": 200.0,
+        "centerY": 40.0 * mark as f64,
+    })
+}
+
+/// A field the same look read beside its controls ([`snapshot::FIELDS_KEY`]).
+fn field(mark: usize, kind: &str, secret: bool) -> Value {
+    json!({
+        (snapshot::FIELD_MARK_KEY): mark,
+        (snapshot::FIELD_KIND_KEY): kind,
+        (snapshot::FIELD_SECRET_KEY): secret,
+        (snapshot::LABEL_KEY): "",
+        (snapshot::FIELD_VALUE_KEY): "",
+    })
+}
+
+/// Every head of an answer answered — the action as `action`, the field as
+/// `type_target`, each observation head as named — with the rest of each
+/// head's options sharing what is left, and the guards clean.
+fn answered_heads(asked: &ActionAsk, chosen: &[(&str, &str)]) -> Value {
+    let mut answers = answered(asked, GIVE_UP, 0.9);
+    for (head, choice) in chosen {
+        let options: Vec<String> = asked.questions[*head]["criteria"]
+            .as_object()
+            .expect("the head was asked")
+            .keys()
+            .cloned()
+            .collect();
+        let mut probabilities = Map::new();
+        let share = 0.2 / (options.len().max(2) - 1) as f64;
+        for option in &options {
+            probabilities.insert(option.clone(), json!(share));
+        }
+        probabilities.insert((*choice).to_string(), json!(0.8));
+        if !options.iter().any(|option| option == choice) {
+            // An answer naming something the head never offered: keep the
+            // keys the head offered so only the choice itself is wrong.
+            probabilities.remove(*choice);
+            probabilities.insert(options[0].clone(), json!(0.8));
+        }
+        let total: f64 = probabilities.values().filter_map(Value::as_f64).sum();
+        let first = options[0].clone();
+        let lead = probabilities[&first].as_f64().unwrap_or(0.0) + (1.0 - total);
+        probabilities.insert(first, json!(lead));
+        answers[*head] = json!({
+            "type": "choice",
+            "choice": choice,
+            "probabilities": Value::Object(probabilities),
+            "confidence": if *head == "action" { 0.9 } else { 0.6 },
+        });
+    }
+    answers
+}
+
+/// Only a field the look read, of a kind a keyboard types and not a secret,
+/// is somewhere a walk may type (t-6720): the operation is offered beside
+/// the presses, the field is asked in its own head, and an answer naming a
+/// button, a secret, a field the look never read, a selector or a command is
+/// refused whole. A walk that cannot type, and a stopped walk, ask exactly
+/// what they asked before.
+#[test]
+fn type_text_is_a_closed_observed_operation_with_a_compatible_target() {
+    let items = [
+        item(1, "button", "Search"),
+        textbox(2, "Destination"),
+        textbox(3, "Password"),
+        textbox(4, "Notes"),
+        json!({ "mark": 5, "role": "combobox", "tag": "select", "label": "Cabin",
+                "selector": "#cabin", "centerX": 10.0, "centerY": 10.0 }),
+        textbox(6, "PIN"),
+        textbox(7, "Code"),
+    ];
+    // Mark 4 is a textbox the look never read as a field; 6 is a text field
+    // the page calls secret (a current password in a text box); 7 is one
+    // whose entry says nothing of secrecy at all.
+    let mut unsaid = field(7, "text", false);
+    unsaid
+        .as_object_mut()
+        .expect("a field")
+        .remove(snapshot::FIELD_SECRET_KEY);
+    let fields = [
+        field(2, "text", false),
+        field(3, "password", true),
+        field(5, "select", false),
+        field(6, "text", true),
+        unsaid,
+    ];
+    let typing = Beside {
+        types: true,
+        fields: &fields,
+        ..Beside::default()
+    };
+    let asked = ask_with(&a_goal(&items, &[]), &typing).expect("a screen with controls asks");
+
+    assert_eq!(
+        asked.options(),
+        [
+            "mark:1", "mark:2", "mark:3", "mark:4", "mark:5", "mark:6", "mark:7", TYPE_TEXT,
+            GIVE_UP, DONE
+        ]
+    );
+    assert_eq!(asked.typing(), [2], "only the read, plain text field");
+    let targets: Vec<&String> = asked.questions["type_target"]["criteria"]
+        .as_object()
+        .expect("the field is asked in a head of its own")
+        .keys()
+        .collect();
+    assert_eq!(targets, ["mark:2"]);
+    assert_eq!(asked.questions["type_target"]["type"], json!("choice"));
+    assert!(
+        asked.questions["action"]["criteria"][TYPE_TEXT].is_string(),
+        "the operation says what it means"
+    );
+
+    let typed = asked
+        .read_all(&answered_heads(
+            &asked,
+            &[("action", TYPE_TEXT), ("type_target", "mark:2")],
+        ))
+        .expect("a whole answer");
+    assert_eq!(typed.choice.chosen, Chosen::Type(2));
+    assert!(
+        (typed.choice.confidence - 0.6).abs() < 1e-9,
+        "the lesser of the two heads' confidences"
+    );
+    assert_eq!(
+        typed.typed.as_ref().map(|head| head.chosen.as_str()),
+        Some("mark:2")
+    );
+
+    for wrong in [
+        "mark:1",
+        "mark:3",
+        "mark:4",
+        "mark:5",
+        "mark:6",
+        "mark:7",
+        "#field-2",
+        "document.querySelector('#field-2').value = 'x'",
+    ] {
+        assert_eq!(
+            asked.read_all(&answered_heads(
+                &asked,
+                &[("action", TYPE_TEXT), ("type_target", wrong)]
+            )),
+            Err(ActionRefusal::Choice(ChoiceRefusal::UnknownOption)),
+            "{wrong} is not a field this look read"
+        );
+    }
+
+    // A second reader answers one option and names no field: it may not type.
+    assert_eq!(
+        asked.choice_of(TYPE_TEXT, 0.9),
+        Err(ActionRefusal::Choice(ChoiceRefusal::UnknownOption))
+    );
+    assert!(
+        !asked
+            .press_options()
+            .iter()
+            .any(|option| option == TYPE_TEXT)
+    );
+
+    // A world with no road for a value, a stopped walk, a spent field and a
+    // look with no fields all ask exactly what a press-only look asks.
+    let plain = ask(&a_goal(&items, &[])).expect("asks");
+    assert!(plain.questions.get("type_target").is_none());
+    for (look, beside) in [
+        (
+            a_goal(&items, &[]),
+            Beside {
+                types: false,
+                fields: &fields,
+                ..Beside::default()
+            },
+        ),
+        (a_goal(&items, &[]), Beside::default()),
+    ] {
+        assert_eq!(ask_with(&look, &beside), Some(plain.clone()));
+    }
+    let stopped = ask_with(&a_look(&items, &[]), &typing).expect("asks");
+    assert_eq!(Some(stopped), ask(&a_look(&items, &[])));
+    let spent = ask_with(&a_goal(&items, &[2]), &typing).expect("asks");
+    assert!(spent.typing().is_empty() && !spent.options().iter().any(|o| o == TYPE_TEXT));
+}
+
+/// The observation heads (t-4692) ask which of the containers, images and
+/// rows the look read the goal is about, by the look's own numbers, in the
+/// same request as the action. A candidate the look could not describe is
+/// not offered, no head carries a selector the page wrote, and an answer
+/// naming another head's candidate, a number the look did not hold or a
+/// selector is refused whole.
+#[test]
+fn observation_heads_select_only_the_observed_container_image_and_row() {
+    let items = [item(1, "button", "More")];
+    let containers = [
+        json!({ "label": "Search results", "role": "list", "count": 36, "selector": "#product-list" }),
+        json!({ "label": "Recommended", "role": "list", "count": 8, "selector": "#carousel" }),
+    ];
+    let images = [
+        json!({ "alt": "iPhone 16 Pro", "width": 230, "height": 230, "selector": "#p1 img" }),
+        json!({ "selector": "#p2 img" }),
+        json!({ "alt": "갈비탕", "width": 230, "height": 230, "selector": "#ad img" }),
+    ];
+    let rows = [
+        json!({ "text": "iPhone 16 Pro 256GB", "selector": "#p1" }),
+        json!({ "text": "구운란 30구", "selector": "#ad" }),
+    ];
+    let beside = Beside {
+        containers: &containers,
+        images: &images,
+        rows: &rows,
+        ..Beside::default()
+    };
+    let asked = ask_with(&a_goal(&items, &[]), &beside).expect("asks");
+
+    // Whatever order the map keeps its keys in, each head offers exactly
+    // these.
+    let offered = |head: &str| -> BTreeSet<String> {
+        asked.questions[head]["criteria"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{head} is asked"))
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let set = |options: &[&str]| -> BTreeSet<String> {
+        options.iter().map(|option| (*option).to_string()).collect()
+    };
+    assert_eq!(
+        offered("container"),
+        set(&["container:1", "container:2", NONE])
+    );
+    assert_eq!(
+        offered("image"),
+        set(&["image:1", "image:3", NONE]),
+        "image 2 says nothing"
+    );
+    assert_eq!(offered("row"), set(&["row:1", "row:2", NONE]));
+    // The same lines stand in the state, under the head's own key, so the
+    // judgment reads the page's candidates as it reads its controls.
+    for head in Observe::ALL {
+        let lines: BTreeSet<String> = asked.state[head.key()]
+            .as_array()
+            .unwrap_or_else(|| panic!("{} stands in the state", head.key()))
+            .iter()
+            .filter_map(|line| line.as_str().map(str::to_string))
+            .collect();
+        let options: BTreeSet<String> = asked.questions[head.head()]["criteria"]
+            .as_object()
+            .expect("criteria")
+            .iter()
+            .filter(|(option, _)| option.as_str() != NONE)
+            .filter_map(|(_, line)| line.as_str().map(str::to_string))
+            .collect();
+        assert_eq!(lines, options, "{}", head.head());
+    }
+    let sent = format!("{}{}", asked.state, asked.questions);
+    for selector in [
+        "#product-list",
+        "#carousel",
+        "#p1 img",
+        "#ad img",
+        "\"#p1\"",
+    ] {
+        assert!(
+            !sent.contains(selector),
+            "{selector} is the look's, not the model's"
+        );
+    }
+    for head in Observe::ALL {
+        assert!(
+            asked.questions[head.head()]["criteria"][NONE].is_string(),
+            "{} says what none means",
+            head.head()
+        );
+    }
+
+    let read = asked
+        .read_all(&answered_heads(
+            &asked,
+            &[
+                ("action", "mark:1"),
+                ("container", "container:1"),
+                ("image", "image:3"),
+                ("row", NONE),
+            ],
+        ))
+        .expect("a whole answer");
+    assert_eq!(read.choice.chosen, Chosen::Mark(1));
+    let chose: Vec<(Observe, Option<usize>)> = read
+        .observed
+        .iter()
+        .map(|observed| (observed.head, observed.chosen))
+        .collect();
+    assert_eq!(
+        chose,
+        [
+            (Observe::Container, Some(1)),
+            (Observe::Image, Some(3)),
+            (Observe::Row, None)
+        ]
+    );
+
+    // Every other head answered well, and one answered wrongly.
+    for (head, wrong) in [
+        ("container", "image:1"),
+        ("image", "container:1"),
+        ("image", "image:2"),
+        ("row", "row:9"),
+        ("container", "#product-list"),
+    ] {
+        let mut chosen = vec![
+            ("action", "mark:1"),
+            ("container", "container:1"),
+            ("image", "image:3"),
+            ("row", NONE),
+        ];
+        for answer in &mut chosen {
+            if answer.0 == head {
+                answer.1 = wrong;
+            }
+        }
+        assert_eq!(
+            asked.read_all(&answered_heads(&asked, &chosen)),
+            Err(ActionRefusal::Choice(ChoiceRefusal::UnknownOption)),
+            "{head} answered {wrong}"
+        );
+    }
+
+    // A stopped walk asks no observation head, and a look that read nothing
+    // beside its controls asks what it always asked.
+    let stopped = ask_with(&a_look(&items, &[]), &beside).expect("asks");
+    for head in Observe::ALL {
+        assert!(stopped.questions.get(head.head()).is_none());
+    }
+    assert_eq!(
+        ask_with(&a_goal(&items, &[]), &Beside::default()),
+        ask(&a_goal(&items, &[]))
     );
 }
 

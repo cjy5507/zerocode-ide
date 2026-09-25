@@ -10,7 +10,7 @@ use serde_json::json;
 use zerocode_core::computer_recipe::RecipeStop;
 use zerocode_core::jev::choice::ChoiceRefusal;
 use zerocode_core::jev::door::{REQUESTS_KEY, Refused};
-use zerocode_core::screen_action::{ActionLook, Chosen, Errand as Asked, Where, ask};
+use zerocode_core::screen_action::{ActionLook, ActionRead, Chosen, Errand as Asked, Where, ask};
 
 use super::*;
 use crate::api_routers::HeldKeys;
@@ -108,7 +108,8 @@ fn body_choosing(choice: &str) -> String {
 fn a_body_is_read_only_through_the_question_that_was_asked() {
     let asked = asked();
 
-    let Judged::Chose(choice) = read_body(&asked, &body_choosing("mark:1")) else {
+    let Judged::Chose(ActionRead { choice, .. }) = read_body(&asked, &body_choosing("mark:1"))
+    else {
         panic!("a well formed body is a choice");
     };
     assert_eq!(choice.chosen, Chosen::Mark(1));
@@ -178,7 +179,7 @@ fn a_real_socket_answering_the_contract_is_a_choice() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:2"), 0);
     let (_home, mut judge) = consented_judge(&endpoint.base());
 
-    let Judged::Chose(choice) = judge.choose(&asked()) else {
+    let Judged::Chose(ActionRead { choice, .. }) = judge.choose(&asked()) else {
         panic!("the contract's own answer is a choice");
     };
     assert_eq!(choice.chosen, Chosen::Mark(2));
@@ -347,7 +348,7 @@ fn a_credential_on_the_screen_never_reaches_the_wire() {
         "sign in\npassword: hunter2-SENTINEL",
         "token=sk-live-SENTINEL",
     );
-    let Judged::Chose(choice) = judge.choose(&question) else {
+    let Judged::Chose(ActionRead { choice, .. }) = judge.choose(&question) else {
         panic!("the contract's own answer is a choice");
     };
     assert_eq!(choice.chosen, Chosen::Mark(1));
@@ -685,7 +686,7 @@ fn a_cache_that_is_off_leaves_the_wire_every_byte_it_had() {
     let asked = asked();
 
     for _ in 0..2 {
-        let Judged::Chose(choice) = judge.choose(&asked) else {
+        let Judged::Chose(ActionRead { choice, .. }) = judge.choose(&asked) else {
             panic!("the wire answers");
         };
         assert_eq!(choice.chosen, Chosen::Mark(1));
@@ -762,7 +763,7 @@ fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
     // Raised, the memo answers: nothing leaves, nothing is counted.
     raise_the_cache(&home);
     let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door);
-    let Judged::Chose(choice) = judge.choose(&asked) else {
+    let Judged::Chose(ActionRead { choice, .. }) = judge.choose(&asked) else {
         panic!("the memo answers");
     };
     assert_eq!(choice.chosen, Chosen::Mark(1));
@@ -819,7 +820,7 @@ fn a_repeated_run_answers_from_the_memo_under_an_auto_nobody_raised() {
 
     // Repeated, the cache still not raised: the memo answers, nothing leaves.
     let mut replay = LiveJudge::at(&endpoint.base(), "test-key", door).in_run(Run::Repeated);
-    let Judged::Chose(choice) = replay.choose(&asked) else {
+    let Judged::Chose(ActionRead { choice, .. }) = replay.choose(&asked) else {
         panic!("the memo answers a repeat");
     };
     assert_eq!(choice.chosen, Chosen::Mark(1));
@@ -905,7 +906,7 @@ fn a_remembered_answer_that_no_longer_reads_is_asked_afresh() {
     .expect("a stale memory");
 
     let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door);
-    let Judged::Chose(choice) = judge.choose(&asked) else {
+    let Judged::Chose(ActionRead { choice, .. }) = judge.choose(&asked) else {
         panic!("the wire answers after the memo failed to read");
     };
     assert_eq!(choice.chosen, Chosen::Mark(1));
@@ -1057,7 +1058,7 @@ fn what_the_memo_would_have_agreed_with_against_the_real_endpoint() {
         let ms = began.elapsed().as_millis();
         waits.push(ms);
         match judged {
-            Judged::Chose(choice) => {
+            Judged::Chose(ActionRead { choice, .. }) => {
                 println!(
                     "pass {pass}: {:?} confidence {} in {ms} ms",
                     choice.chosen, choice.confidence
@@ -1533,4 +1534,149 @@ fn what_the_screen_guards_cost_and_catch_against_the_real_endpoint() {
     if let Ok(out) = std::env::var("ZEROCODE_JEV_BENCH_OUT") {
         std::fs::write(out, format!("{said}\n")).expect("the result file");
     }
+}
+
+/// One request asks every head the look can answer (t-6720) — the action,
+/// the field an entry would type into, the container, image and row the
+/// page read, and the two guards — and one round trip answers them all.
+/// Only the head the chosen action needs is spent: a press of 2 presses 2,
+/// and the field's answer beside it types nothing and writes nothing; the
+/// observation heads' answers are kept on the row, by the look's own
+/// numbers and the page's own identities.
+#[test]
+fn operation_and_all_targets_share_exactly_one_wire_request() {
+    use std::cell::RefCell;
+
+    use zerocode_core::computer_recipe::RecipeTool;
+    use zerocode_core::screen_action::snapshot;
+    use zerocode_hookd::TeamAnswer;
+
+    use crate::computer_use::errand::desk::{Aim, GoalWorld};
+    use crate::computer_use::errand::tests::{Pen, goal, memory};
+    use crate::computer_use::errand::{OBSERVED, Seen, TYPE_TARGET_KEY};
+
+    let page = json!({
+        "items": [
+            { "mark": 1, "role": "textbox", "tag": "input", "label": "City",
+              "selector": "#destination", "centerX": 120.0, "centerY": 40.0 },
+            { "mark": 2, "role": "button", "tag": "button", "label": "Search",
+              "selector": "#search", "centerX": 300.0, "centerY": 40.0 },
+        ],
+        (snapshot::EPOCH_KEY): "doc-1",
+        (snapshot::FIELDS_KEY): [{ "mark": 1, "kind": "text", "secret": false,
+            "label": "Destination", "placeholder": "City", "near": "", "value": "London" }],
+        "containers": [{ "label": "Results", "role": "list", "count": 3, "selector": "#results" }],
+        "images": [{ "alt": "London Eye", "width": 200, "height": 120, "selector": "#hero" }],
+        "rows": [{ "text": "London — 3 flights", "selector": "#row-1" }],
+    })
+    .to_string();
+    // One head's answer: `choice` at nine in ten, the rest of the head's
+    // options sharing what is left (a head of one option takes it all).
+    let head = |choice: &str, options: &[&str]| {
+        let lead = if options.len() == 1 { 1.0 } else { 0.9 };
+        let rest = (1.0 - lead) / options.len().saturating_sub(1).max(1) as f64;
+        let probabilities: serde_json::Map<String, serde_json::Value> = options
+            .iter()
+            .map(|option| {
+                let share = if *option == choice { lead } else { rest };
+                ((*option).to_string(), json!(share))
+            })
+            .collect();
+        json!({ "type": "choice", "choice": choice, "probabilities": probabilities, "confidence": 0.9 })
+    };
+    let body = json!({
+        "model": ANSWERING_VERSION,
+        "answers": {
+            "action": head("mark:2", &["mark:1", "mark:2", "type_text", "give_up", "done"]),
+            "type_target": head("mark:1", &["mark:1"]),
+            "container": head("container:1", &["container:1", "none"]),
+            "image": head("none", &["image:1", "none"]),
+            "row": head("row:1", &["row:1", "none"]),
+            "instructed": { "type": "noul", "noul": 0.02 },
+            "walled": { "type": "noul", "noul": 0.03 },
+        },
+    })
+    .to_string();
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body, 0);
+    let (_home, mut judge) = consented_judge(&endpoint.base());
+
+    let calls: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+    let mut road = |_: RecipeTool, argv: &[String], _: &[String]| {
+        calls.borrow_mut().push(argv.to_vec());
+        TeamAnswer {
+            exit_code: 0,
+            stdout: if argv[0] == "marks" {
+                page.clone()
+            } else {
+                "{}".to_string()
+            },
+            stderr: String::new(),
+        }
+    };
+    let (pen, writes, _) = Pen::writing("London");
+    let mut world = GoalWorld::new(
+        &mut road,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::Page {
+            host: "app.local".into(),
+            path: "/".into(),
+        },
+        None,
+        60_000,
+        0,
+    )
+    .writing(Box::new(pen))
+    .remembering(memory());
+    let walked = run(Mode::On, true, &goal(1), &mut judge, &mut world);
+    drop(world);
+
+    let asked = endpoint.asked();
+    assert_eq!(asked.len(), 1, "one round trip for every head");
+    let sent: serde_json::Value =
+        serde_json::from_str(asked[0].split("\r\n\r\n").nth(1).expect("a body"))
+            .expect("a json body");
+    let mut heads: Vec<&str> = sent["questions"]
+        .as_object()
+        .expect("questions")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    heads.sort_unstable();
+    assert_eq!(
+        heads,
+        [
+            "action",
+            "container",
+            "image",
+            "instructed",
+            "row",
+            "type_target",
+            "walled"
+        ]
+    );
+    for identity in ["#results", "#hero", "#row-1", "#destination"] {
+        assert!(
+            !asked[0].contains(identity),
+            "{identity} is the page's, not the question's"
+        );
+    }
+
+    let calls = calls.into_inner();
+    assert_eq!(calls.len(), 2, "a look and one press: {calls:?}");
+    assert_eq!(calls[1], ["click", "browser-9", "--mark", "2"]);
+    assert_eq!(
+        writes.get(),
+        0,
+        "the field's answer beside a press writes nothing"
+    );
+    assert_eq!(walked.typed, 0);
+    let row = &walked.rows[0];
+    assert_eq!(row["chosen"], json!("mark:2"));
+    assert_eq!(row[TYPE_TARGET_KEY]["chosen"], json!("mark:1"));
+    assert_eq!(row[OBSERVED]["container"]["chosen"], json!(1));
+    assert_eq!(row[OBSERVED]["container"]["selector"], json!("#results"));
+    assert_eq!(row[OBSERVED]["image"]["chosen"], json!(null));
+    assert_eq!(row[OBSERVED]["row"]["selector"], json!("#row-1"));
 }
