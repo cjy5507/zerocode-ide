@@ -348,10 +348,13 @@ final class Provider {
                 plan: Data(try requiredString(params, "plan").utf8),
                 limits: Data(try requiredString(params, "limits").utf8),
                 perception: Data(try requiredString(params, "perception").utf8),
+                runPolicy: Data(try requiredString(params, "runPolicy").utf8),
+                capability: Data(try requiredString(params, "capability").utf8),
                 eye: eye,
                 display: try requiredInteger(params, "display"),
                 hand: OperatorHandHost.hand,
                 admit: { OperatorGuardHost.admission() },
+                standing: { OperatorGuardHost.standing() },
                 actingScope: { try actingScope($0) }
             )
         case "resume":
@@ -3733,6 +3736,21 @@ private enum KeyMap {
     ]
 }
 
+/// What the helper stands up before it answers anyone (realtime v1 §6): the
+/// operator's stop and count, then the perception kernel its reflex runs read
+/// with — installed here, once, so a helper that answers can run a plan.
+enum HelperLaunch {
+    static func install(operatorGuard: () -> Void = OperatorGuardHost.install) {
+        operatorGuard()
+        ReflexRuntimeHost.install(kernel: PerceptionKernel())
+    }
+}
+
+extension StopReason {
+    /// The window's session closed (`OperatorGuardHost.sessionClosed`).
+    static let sessionClosed = "session_closed"
+}
+
 private final class AgentRuntime: NSObject, NSApplicationDelegate {
     private static let unclaimedSessionDeadline: TimeInterval = 30
 
@@ -3747,7 +3765,7 @@ private final class AgentRuntime: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        OperatorGuardHost.install()
+        HelperLaunch.install()
         do {
             let timeout = DispatchWorkItem {
                 fputs("computer-use agent received no authenticated session before its deadline\n", stderr)
@@ -3761,8 +3779,10 @@ private final class AgentRuntime: NSObject, NSApplicationDelegate {
                     timeout.cancel()
                 },
                 onSessionClosed: {
-                    DispatchQueue.main.async {
-                        NSApp.terminate(nil)
+                    OperatorGuardHost.sessionClosed {
+                        DispatchQueue.main.async {
+                            NSApp.terminate(nil)
+                        }
                     }
                 }
             )
@@ -5056,8 +5076,14 @@ func handleRequest(
     // (realtime v1 §5.8): a stop lets go of what the hand holds on this
     // connection's thread, and a status — the operator's or a reflex run's —
     // is read beside whatever holds the provider lock.
-    if let answer = unlockedRoad(request.method) {
-        return ["id": request.id, "ok": true, "result": answer]
+    do {
+        if let answer = try unlockedRoad(request.method, params: request.params ?? [:]) {
+            return ["id": request.id, "ok": true, "result": answer]
+        }
+    } catch let error as ProviderError {
+        return ["id": request.id, "ok": false, "error": ["code": error.code, "message": error.message]]
+    } catch {
+        return ["id": request.id, "ok": false, "error": ["code": "invalid_argument", "message": String(describing: error)]]
     }
 
     do {
@@ -5073,7 +5099,9 @@ func handleRequest(
 }
 
 /// The requests answered outside the provider lock, or nil for every other.
-func unlockedRoad(_ method: String) -> [String: Any]? {
+/// A reflex run's road names the run it means (`run`), and the host compares
+/// and answers it under its own lock (`ReflexRuntimeHost`).
+func unlockedRoad(_ method: String, params: [String: JSONValue]) throws -> [String: Any]? {
     switch method {
     case "stop":
         OperatorGuardHost.stop(reason: StopReason.request)
@@ -5081,23 +5109,32 @@ func unlockedRoad(_ method: String) -> [String: Any]? {
     case "status":
         return OperatorGuardHost.status()
     case "reflexStatus":
-        return ReflexRuntimeHost.status()
+        return ReflexRuntimeHost.status(run: try reflexRunId(params, "run"))
     case "reflexStop":
-        return ReflexRuntimeHost.stop(reason: StopReason.request)
+        return ReflexRuntimeHost.stop(run: try reflexRunId(params, "run"), reason: StopReason.request)
+    case "reflexReceipts":
+        return ReflexRuntimeHost.receipts(run: try reflexRunId(params, "run"), after: try receiptNumber(params, "after"))
+    case "reflexAck":
+        return ReflexRuntimeHost.acknowledge(run: try reflexRunId(params, "run"), through: try receiptNumber(params, "through"))
     default:
         return nil
     }
 }
 
-/// A reflex run's id: the plan's identifier alphabet, never empty.
-private func reflexRunId(_ params: [String: JSONValue]) throws -> String {
-    let runId = try requiredString(params, "runId")
-    guard !runId.isEmpty, runId.utf8.count <= 64,
-          runId.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 })
-    else {
-        throw ProviderError.coded("invalid_argument", "runId must be 1 to 64 of A-Z a-z 0-9 - _")
+/// A reflex run's id: the plan's identifier alphabet and bound, never empty.
+private func reflexRunId(_ params: [String: JSONValue], _ key: String = "runId") throws -> String {
+    let runId = try requiredString(params, key)
+    guard ReflexContract.identifier(runId) else {
+        throw ProviderError.coded("invalid_argument", "\(key) must be 1 to \(ReflexContract.maxIdentifierBytes) of A-Z a-z 0-9 - _")
     }
     return runId
+}
+
+/// A receipt's number, as the window's collector names it: a whole number from 0.
+private func receiptNumber(_ params: [String: JSONValue], _ key: String) throws -> UInt64 {
+    let number = try requiredInteger(params, key)
+    guard number >= 0 else { throw ProviderError.coded("invalid_argument", "\(key) is a receipt number from 0") }
+    return UInt64(number)
 }
 
 private func readLine(from fd: Int32) -> String? {
@@ -6051,6 +6088,25 @@ enum OperatorGuardHost {
         lock.lock()
         defer { lock.unlock() }
         return ledger.admit(now: Date().timeIntervalSince1970)
+    }
+
+    /// What the ledger would answer an action now, counting nothing: asked of a
+    /// copy, so the session count, a stop and the pace stand as they are. A
+    /// reflex run reads it before a spent quota comes back — a renewal is not
+    /// an admission.
+    static func standing() -> GuardAdmission {
+        lock.lock()
+        var copy = ledger
+        lock.unlock()
+        return copy.admit(now: Date().timeIntervalSince1970)
+    }
+
+    /// The window's session closed: nothing it asked for outlives it. The
+    /// stop's own road lets go of what the hand holds and ends a reflex run,
+    /// then the helper exits.
+    static func sessionClosed(then exit: () -> Void) {
+        stop(reason: StopReason.sessionClosed)
+        exit()
     }
 
     /// Count one action — waiting for the pace to come round when a burst is
