@@ -47,7 +47,7 @@ import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
-import { testJevDashboard, testJevDashboardEvidence, testJevDashboardScope } from "./jev-dashboard.mjs";
+import { testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardScope } from "./jev-dashboard.mjs";
 
 import { testCrashReport } from "./crash-report.mjs";
 import { testTerminalSelection } from "./terminal-selection.mjs";
@@ -212,6 +212,7 @@ suite("emulator-loans", ({ browser, origin, ok }) => testEmulatorLoans(browser, 
 suite("coordinator-panel", ({ browser, origin, ok }) => testCoordinatorPanel(browser, origin, ok));
 suite("jev-dashboard", async ({ browser, origin, ok }) => {
   await testJevDashboard(browser, origin, ok);
+  await testJevDashboardPictures(browser, origin, ok);
   await testJevDashboardScope(browser, origin, ok);
   await testJevDashboardEvidence(browser, origin, ok);
 });
