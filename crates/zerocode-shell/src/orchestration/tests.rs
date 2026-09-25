@@ -22741,3 +22741,88 @@ fn a_selected_read_through_the_runtime_home_is_the_rows_only_while_the_home_hold
         "a read of A landed under B"
     );
 }
+
+/// astra R6-2: a put that ended is not a put whose record landed. A's login
+/// stands in the home and reads as A's. The switch to B puts B's login into
+/// the home, and the disk refuses the record's last replace — the record
+/// stays readable, naming A. The put is over; the store still selects A,
+/// the switch between its put and its selection. A read that starts now
+/// finds B's login in the home and nothing under way: it cannot say whose
+/// login that is, so nothing lands under A and nothing under B. Once a put
+/// of B is recorded, B's read is B's; once A's is again, A's is A's.
+#[test]
+fn a_put_whose_record_the_disk_refused_leaves_the_homes_login_nobodys_until_a_put_is_recorded() {
+    let config = tempfile::tempdir().expect("a config root");
+    let data = tempfile::tempdir().expect("a data root");
+    let accounts = signed_in_claude_store(
+        config.path(),
+        &["t7538r6-put-a", "t7538r6-put-b"],
+        "t7538r6-put-a",
+    );
+    let (a, b) = (accounts[0].clone(), accounts[1].clone());
+    let doors = SelectedWorld::answering(&[(&a, 100.0), (&b, 10.0)], true);
+    let read = || {
+        crate::usage_runtime::read_selected_claude_usage(config.path(), data.path(), &doors).usage
+    };
+    let session = |usage: &crate::usage::ProviderUsage| {
+        usage.session.as_ref().map(|window| window.used_percent)
+    };
+    crate::accounts::materialize(config.path(), &a).expect("A's login in the one home");
+    let as_a = read();
+    assert_eq!(as_a.status, "ok", "{as_a:?}");
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100)
+    );
+    // B's login goes into the home; the record's last replace is refused.
+    let root = config.path().to_path_buf();
+    crate::accounts::before_the_record_of(
+        &crate::accounts::runtime_home(config.path()),
+        Box::new(move || crate::accounts::refuse_the_next_record_of(&root)),
+    );
+    let put = crate::accounts::materialize(config.path(), &b);
+    let after = read();
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100),
+        "B's login's number landed under A after a put whose record was refused: {after:?}"
+    );
+    assert_eq!(after.status, "error", "{after:?}");
+    assert!(after.session.is_none(), "{after:?}");
+    assert!(
+        table_row(config.path(), data.path(), &b.id)
+            .windows
+            .is_empty(),
+        "a read of A landed under B"
+    );
+    assert!(
+        put.is_err(),
+        "a put whose record was refused answered as a put that happened"
+    );
+    // The put again, recorded: B's login is B's.
+    crate::accounts::materialize(config.path(), &b).expect("B's put, recorded");
+    select_in_store(config.path(), &b.id);
+    let as_b = read();
+    assert_eq!(as_b.status, "ok", "{as_b:?}");
+    assert_eq!(
+        (as_b.account.as_deref(), session(&as_b)),
+        (Some(b.id.as_str()), Some(10))
+    );
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &b.id),
+        Some(10)
+    );
+    // And A's put, recorded: A's login is A's again.
+    select_in_store(config.path(), &a.id);
+    crate::accounts::materialize(config.path(), &a).expect("A's put, recorded");
+    let back = read();
+    assert_eq!(back.status, "ok", "{back:?}");
+    assert_eq!(
+        (back.account.as_deref(), session(&back)),
+        (Some(a.id.as_str()), Some(100))
+    );
+    assert_eq!(
+        session_in_table(config.path(), data.path(), &a.id),
+        Some(100)
+    );
+}
