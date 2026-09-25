@@ -46,19 +46,31 @@ const STATE_KEYS: [&str; 4] = ["agent", "quietSeconds", "screen", "transcript"];
 /// The version of the words in this module. Bump it when any of them changes:
 /// a judgment read under one wording is not evidence about another. The test
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`].
-pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 3;
+///
+/// Or when the label they are graded by changes: version 4 asks version 3's
+/// words and waits [`STALL_LABEL_WINDOW_MS`]'s four hours for what followed,
+/// where version 3's labels were cut at two (t-9087). The version rides every
+/// request row, so a reader can tell the series apart; reading them apart is
+/// t-6877's contract.
+pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 4;
 
 /// How long after a silence was asked about its label waits for what
 /// followed ([`followed`]).
 ///
-/// Two hours, measured on this machine's orchestration ledger (2026-09-17):
-/// its twenty stall episodes (155 `went_quiet` stall notices, grouped by
-/// episode, the first notice of each) were followed by a coordinator's mail,
-/// a report or a stop within one hour for 16, within two for 18 and within
-/// three for 19 — p50 12 min, p75 39 min, p90 91 min. Past the window the
-/// label is `none`: whatever came later answered something other than that
-/// silence.
-pub const STALL_LABEL_WINDOW_MS: i64 = 2 * 60 * 60 * 1_000;
+/// Four hours, measured on this machine's orchestration ledger over the 104
+/// silences the stall seat answered in the week to 2026-09-25 (t-9087): every
+/// one was followed by a coordinator's mail, a report, a stop or the pane's
+/// death within 3.95 hours — p50 46 min, p75 1.7 h, p90 2.7 h, p95 3.3 h. The
+/// two hours drawn from twenty episodes on 2026-09-17 (p90 91 min) closed on
+/// 19 of the 104 first, and a window that closes before the answer arrives
+/// writes `none` for it: eight `finished_without_report` answers the
+/// coordinator's mail or a stop then proved right were marked wrong, and
+/// eleven `long_running_tool` ones were marked right only because the cut
+/// came before each worker's own report. Re-marked with the same table on the
+/// same 104 silences, two hours agreed 81 of 95 (lower bound 767‰) and four
+/// hours 85 of 91 (863‰). Past the window the label is `none`: whatever came
+/// later answered something other than that silence.
+pub const STALL_LABEL_WINDOW_MS: i64 = 4 * 60 * 60 * 1_000;
 
 /// Why a quiet worker stopped — the question's closed answer space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

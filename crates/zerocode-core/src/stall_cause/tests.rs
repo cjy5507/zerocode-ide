@@ -132,7 +132,9 @@ fn an_answer_is_read_only_through_the_causes_offered() {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 3);
+    // Version 4 is version 3's words under a four-hour label (t-9087), so the
+    // fingerprint stands.
+    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 4);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
         "27c6daa20ba4e267"

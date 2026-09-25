@@ -64,10 +64,11 @@ pub const REPEATS_THAT_RAISE: u32 = 3;
 /// it stuck.
 pub const FAILURES_THAT_RAISE: u32 = 2;
 
-/// How long after a move its label waits for the next turn to end. A
-/// worker's turn on this machine's ledger ends within two hours for nineteen
-/// stall episodes in twenty (`crate::stall_cause::STALL_LABEL_WINDOW_MS`, the
-/// same measurement); past the window the label is `none`.
+/// How long after a move its label waits for the next turn to end: the stall
+/// label's wait for what follows a silence
+/// (`crate::stall_cause::STALL_LABEL_WINDOW_MS`, the same measurement —
+/// every silence of the week to 2026-09-25 was followed within four hours);
+/// past the window the label is `none`.
 pub const STEP_EFFORT_LABEL_WINDOW_MS: i64 = crate::stall_cause::STALL_LABEL_WINDOW_MS;
 
 /// The tool names, as each vendor's transcript spells them, that can change
