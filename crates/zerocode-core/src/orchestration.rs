@@ -3360,6 +3360,25 @@ impl Run {
         awaiting_reply(self, worker_id)
     }
 
+    /// Whether this message still waits on its answer — the one reading
+    /// [`Self::awaiting_reply`] asks of a worker's questions, and the task
+    /// board's 「답할 우편」 asks of a coordinator's mail (t-9456). A notice,
+    /// a report or a reply never does, whatever its kind says.
+    pub fn awaits_answer(&self, message: &Message) -> bool {
+        awaits_answer(self, message)
+    }
+
+    /// Whether a `went_quiet` notice still tells of a silence that is going
+    /// on (t-9456): the ledger's own notice, about an attempt still open and
+    /// still carried by a live worker, written inside the report-free
+    /// interval the quiet episode is rolled up from — after the worker's own
+    /// last word — and not the summary that closed one. Every notice this
+    /// answers `true` for is the attempt's one current silence told again;
+    /// one it answers `false` for is a silence that is over.
+    pub fn quiet_notice_stands(&self, notice: &Message) -> bool {
+        quiet_notice_stands(self, notice)
+    }
+
     /// The answer a question got, if one landed — the word in its thread from
     /// the seat it was asked of, the one the `reply` verb refuses a second
     /// of. The window's task board lists a question to its coordinator until
@@ -4023,9 +4042,16 @@ fn awaiting_reply(run: &Run, worker_id: &str) -> bool {
     let asked = worker_address(worker_id);
     run.messages
         .iter()
-        .filter(|one| one.kind == MessageKind::Question && one.thread.is_none())
         .filter(|one| one.from == asked)
-        .any(|question| !run.messages.iter().any(|one| one.answers(question)))
+        .any(|question| awaits_answer(run, question))
+}
+
+/// A thread's ROOT of the question kind with no [`Message::answers`] in its
+/// thread — both words as [`awaiting_reply`] explains them.
+fn awaits_answer(run: &Run, message: &Message) -> bool {
+    message.kind == MessageKind::Question
+        && message.thread.is_none()
+        && !run.messages.iter().any(|one| one.answers(message))
 }
 
 /// How long a quiet pane must remain still before the window calls it stalled.
@@ -4079,12 +4105,7 @@ struct QuietEpisode {
 /// was delivered; treating absence as `true` preserves that history across an
 /// upgrade.
 fn quiet_episode(run: &Run, worker_id: &str, dispatch_id: &str) -> Option<QuietEpisode> {
-    let reporter = worker_address(worker_id);
-    let after_report = run
-        .messages
-        .iter()
-        .rposition(|message| message.from == reporter)
-        .map_or(0, |at| at + 1);
+    let after_report = report_free_from(run, worker_id);
     let mut episode: Option<QuietEpisode> = None;
 
     for message in &run.messages[after_report..] {
@@ -4135,6 +4156,46 @@ fn quiet_rollup(episode: QuietEpisode) -> serde_json::Value {
         "quietTurns": episode.turns,
         "suppressedTurns": episode.turns.saturating_sub(episode.notified_through),
     })
+}
+
+/// Where a worker's current report-free interval begins in its run's mail:
+/// just past the worker's own last word, or at the first row while it has
+/// said nothing. [`quiet_episode`] rolls up the facts after it, and
+/// [`quiet_notice_stands`] asks whether a notice lies after it.
+fn report_free_from(run: &Run, worker_id: &str) -> usize {
+    let reporter = worker_address(worker_id);
+    run.messages
+        .iter()
+        .rposition(|message| message.from == reporter)
+        .map_or(0, |at| at + 1)
+}
+
+/// The key of the rollup a worker's own word closes an episode with
+/// ([`quiet_closure`]) — a notice about a silence that is already over.
+const EPISODE_CLOSED_BY: &str = "episodeClosedBy";
+
+/// See [`Run::quiet_notice_stands`].
+fn quiet_notice_stands(run: &Run, notice: &Message) -> bool {
+    if notice.kind != MessageKind::WentQuiet || notice.from != LEDGER_ITSELF {
+        return false;
+    }
+    let Some(dispatch) = notice.dispatch.as_deref().and_then(|id| run.dispatch(id)) else {
+        return false;
+    };
+    let carried = run.worker(&dispatch.worker).is_some_and(|worker| {
+        worker.state.is_live() && worker.dispatch.as_deref() == Some(dispatch.id.as_str())
+    });
+    if !dispatch.is_open() || !carried {
+        return false;
+    }
+    let closing = serde_json::from_str::<serde_json::Value>(&notice.body)
+        .is_ok_and(|body| body.get(EPISODE_CLOSED_BY).is_some());
+    !closing
+        && run
+            .messages
+            .iter()
+            .position(|held| held.id == notice.id)
+            .is_some_and(|at| at >= report_free_from(run, &dispatch.worker))
 }
 
 /* ---- what an asker is told about its receiver (t-6740) ----------------- */
@@ -4793,7 +4854,7 @@ fn quiet_closure(run: &Run, message: &Message) -> Option<QuietClosure> {
     body["pane"] = worker.pane.clone().into();
     body["taskId"] = dispatch.task.clone().into();
     body["dispatchId"] = dispatch.id.clone().into();
-    body["episodeClosedBy"] = message.kind.as_str().into();
+    body[EPISODE_CLOSED_BY] = message.kind.as_str().into();
     body["notification"] = true.into();
     Some(QuietClosure {
         body,
