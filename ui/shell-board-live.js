@@ -153,8 +153,16 @@ function agentGraphLiveAnimating() {
  * 옷이 바뀌기 전에 장부가 먼저 읽는 판이 있기 때문이다 — 작업 공간에서 작업 목록을
  * 여는 손은 모드를 적고 나서 그린다. */
 function agentGraphLiveShown() {
-  return agentGraphLive && !document.hidden && agentBoardMode !== "tasks"
-    && agentGraphLiveViews().length > 0;
+  return agentGraphLive && agentGraphPictureOn() && agentGraphLiveViews().length > 0;
+}
+
+/* 관계 그림이 설 수 있는 때인가 — 문서가 앞에 있고 보드가 작업 목록이 아니다. 판
+ * 한 장이 그림으로 서 있는지는 아래 `agentGraphViewStands`가 답한다. 둘로 나눈
+ * 것은 행성계(shell-board-orbit.js)가 프레임마다 **제가 그린 판만** 같은 규칙으로
+ * 묻기 때문이다 — 문서 전체의 판을 매 프레임 훑지 않고, 「보이는가」의 판정을
+ * 두 벌 두지도 않는다 (t-9444). */
+function agentGraphPictureOn() {
+  return !document.hidden && agentBoardMode !== "tasks";
 }
 
 /* ---- 사건의 신원 ------------------------------------------------------------ */
@@ -645,8 +653,13 @@ function agentGraphLiveTuning() {
  * 못해 맥박이 아예 서지 않는다 — 판은 저쪽 문서에 멀쩡히 서 있는데. 문서에
  * 묻는 쪽은 본창·팝아웃·복제된 판을 모두 같은 규칙으로 답한다. */
 function agentGraphLiveViews() {
-  return [...document.querySelectorAll(".agent-board")]
-    .filter((view) => !view.classList.contains("is-task-board") && view.closest("[hidden]") === null);
+  return [...document.querySelectorAll(".agent-board")].filter(agentGraphViewStands);
+}
+
+/* 판 한 장이 관계 그림으로 서서 숨지 않았는가 — 제 자신이나 품은 자리가 `hidden`이면
+ * 아무에게도 보이지 않는다. */
+function agentGraphViewStands(view) {
+  return !view.classList.contains("is-task-board") && view.closest("[hidden]") === null;
 }
 
 /* 맥박 하나를 노드·간선에 적는 유일한 손. 쓰는 것은 `data-live-beat` 하나뿐이라
