@@ -1309,6 +1309,9 @@ pub struct RuntimeImage {
     projection: Arc<LedgerProjectionV1>,
     recoveries: Vec<RuntimeRecovery>,
     repairs: Vec<String>,
+    /// Whether the window has said its goodbye (t-9091) — not a row, so not
+    /// in the projection: the ledger remembers it in-process.
+    said_goodbye: bool,
 }
 
 impl std::fmt::Debug for RuntimeImage {
@@ -1326,6 +1329,7 @@ impl std::fmt::Debug for RuntimeImage {
             .field("recovery_count", &self.recoveries.len())
             .field("repair_count", &self.repairs.len())
             .field("recoveries", &self.recoveries)
+            .field("said_goodbye", &self.said_goodbye)
             .finish()
     }
 }
@@ -1352,6 +1356,13 @@ impl RuntimeImage {
     #[must_use]
     pub fn repairs(&self) -> &[String] {
         &self.repairs
+    }
+
+    /// Whether the window has said its goodbye (t-9091): its sleepers are
+    /// the next window's to seat, and the grace is that window's to spend.
+    #[must_use]
+    pub const fn said_goodbye(&self) -> bool {
+        self.said_goodbye
     }
 }
 
@@ -2868,6 +2879,7 @@ impl RuntimeState {
                 .map(RuntimeRecovery::from_permit)
                 .collect(),
             repairs: self.repairs.clone(),
+            said_goodbye: self.ledger.said_goodbye(),
         }
     }
 

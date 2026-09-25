@@ -365,6 +365,12 @@ pub(crate) fn reseat_sleeping(
         Ok(image) => image,
         Err(_) => return 0,
     };
+    // A window on its way out cuts no pane (t-9091): its sleepers are the
+    // next window's, whose coordinator will ask. The ledger refuses the
+    // reseat itself; this is the road not walking up to that refusal.
+    if image.said_goodbye() {
+        return 0;
+    }
     let ledger = match cached_ledger(&held, &image) {
         Ok(ledger) => ledger,
         Err(_) => return 0,
@@ -3700,7 +3706,9 @@ fn seat_what_the_grace_would_kill(host: &dyn Host, held: &RuntimeSeat) {
 /// the grace is the time THIS window had to bring the pane back, and a
 /// window that stayed closed overnight has had none of it. A sleeper the
 /// beat finds under a window younger than the grace is left exactly as it
-/// is.
+/// is — and so is every sleeper once this window has said its goodbye
+/// (t-9091): the beat keeps running for as long as the way out takes, and
+/// the sleepers that goodbye made belong to the next window's boot.
 ///
 /// The grace ends with one more attempt, not with the killing.
 /// [`reseat_sleeping`] is what a returned coordinator tab calls, and until
@@ -3727,6 +3735,12 @@ fn expire_sleepers(host: &dyn Host, now_ms: i64) {
     let Ok(image) = held.actor.view() else {
         return;
     };
+    // The grace is the NEXT window's once this one has said its goodbye
+    // (t-9091): read off the same image as the sleepers, so a sleeper this
+    // window's own goodbye made is never in the list below.
+    if image.said_goodbye() {
+        return;
+    }
     let Ok(ledger) = cached_ledger(&held, &image) else {
         return;
     };
