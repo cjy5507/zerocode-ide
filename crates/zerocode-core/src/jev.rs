@@ -3730,8 +3730,79 @@ pub const TOOL_TEXT_GUARD: JevUse = JevUse {
     follows: None,
 };
 
+/// The wall one reflex decision waits for its answer, in milliseconds: one
+/// lease's length (`reflex::LIMITS.max_lease_ns`). A wall on the wire only —
+/// whether an answer still fits the run's scene when it lands is the runner's
+/// to judge, against the state it asked about.
+pub const REFLEX_DECIDE_DEADLINE_MS: u64 =
+    crate::computer_use_protocol::reflex::LIMITS.max_lease_ns / 1_000_000;
+
+/// The reflex decision (t-9205): while a live reflex run acts on the desktop,
+/// what should it do next — keep acting, pause, or have its plan rewritten —
+/// asked of the run's typed state alone: each detector's newest sighting (its
+/// value or why it is unknown, the track it follows, how old its frame is)
+/// and how the run's actions ended so far. No pixel, no screen's words and no
+/// app's name is sent; detector names are the plan's own ids.
+///
+/// Record-only: `shadow` is the most it offers, it never promotes and nothing
+/// it answers reaches the hand — its rows are the teacher's labels a local
+/// stand-in is later fitted on. Its consent is its own word: another seat's —
+/// the desktop's included — never switches it on.
+pub const REFLEX_DECIDE: JevUse = JevUse {
+    id: "reflex_decide",
+    setting: "jevReflexDecide",
+    modes: &[JevMode::Off, JevMode::Shadow],
+    recommended: JevMode::Shadow,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/sightings",
+            cap: Cap::Items(crate::computer_use_protocol::reflex::LIMITS.max_detectors as usize),
+        },
+        // A detector's name is the plan's id: the plan's bound, cut the way
+        // any text the product did not write is.
+        Sent {
+            at: "/state/sightings/*/detector",
+            cap: Cap::Bytes(crate::computer_use_protocol::reflex::MAX_IDENTIFIER_BYTES),
+        },
+        // Why a reading is unknown: a word of the contract's closed set,
+        // declared so a reader of this table sees every key the state carries.
+        Sent {
+            at: "/state/sightings/*/unknown",
+            cap: Cap::Uncut,
+        },
+        // How the actions ended: the receipts' closed outcome words, each
+        // with a count.
+        Sent {
+            at: "/state/outcomes",
+            cap: Cap::Uncut,
+        },
+    ],
+    ledger: "reflex-decide.jsonl",
+    promotes: false,
+    answer_floor_permille: None,
+    press_floor_permille: None,
+    agreement_floor_permille: None,
+    // A seat that never rises names no apply deadline; the request's own wire
+    // deadline is `REFLEX_DECIDE_DEADLINE_MS`.
+    apply_deadline_ms: None,
+    window_forgives: None,
+    agreement_rows_wanted: None,
+    agreement_kind: AgreementKind::Comparison,
+    baseline: Baseline::None,
+    negatives_wanted: None,
+    confidence_bands: None,
+    rubric_version: questions::REFLEX_DECIDE_RUBRIC_VERSION,
+    // Its marks — the teacher's answer — sit on the request row itself: no
+    // label row names one of its requests.
+    request_name: &[],
+    names: Naming::Request,
+    label_part: &[],
+    follows: None,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 26] = [
+pub static JEV_USES: [JevUse; 27] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -3758,6 +3829,7 @@ pub static JEV_USES: [JevUse; 26] = [
     FILE_PICK,
     COMMAND_GUARD,
     TOOL_TEXT_GUARD,
+    REFLEX_DECIDE,
 ];
 
 impl JevUse {
