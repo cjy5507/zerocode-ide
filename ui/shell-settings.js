@@ -3163,6 +3163,7 @@ function paintComputerUse() {
     const hint = el(`computer-use-${id}-hint`);
     hint.hidden = noSetupDoor || status === "granted" || status === "unsupported";
     say(hint, () => computerPermissionGuidance(id, computerUsePermissions?.helper_app_path));
+    paintComputerUseTccRows(id);
     for (const action of ["open", "reset", "check"]) {
       const button = document.querySelector(`[data-permission-${action}="${id}"]`);
       button.disabled = computerUseLoading || (action !== "check" && (status === "unsupported" || unavailable !== null || noSetupDoor));
@@ -3207,21 +3208,65 @@ function paintComputerUse() {
   }
 }
 
-async function computerUseOpenInstallTerminal() {
-  const command = computerUseSkillCommand();
-  if (command === "") return;
-  try { await openSkillTerminal(command); } catch (error) { showError(error); }
+/* The TCC rows under one permission (t-6058): both bundles' rows, the one the
+ * permission is judged on first, each saying the grant the backend read and
+ * offering only the buttons the row itself carries (`row.actions` — the core
+ * table's, so only a stale row is ever reset from here). */
+function paintComputerUseTccRows(id) {
+  const list = el(`computer-use-${id}-tcc`);
+  const rows = (computerUsePermissions?.tcc_rows ?? []).filter((row) => row.id === id);
+  list.hidden = rows.length === 0;
+  list.replaceChildren(...rows.map(computerUseTccRowNode));
 }
 
-el("computer-use-refresh").addEventListener("click", () => void refreshComputerUse());
-async function computerUseRequestPermission(id, reset) {
+function computerUseTccRowNode(row) {
+  const item = document.createElement("li");
+  item.className = "computer-use-tcc-row";
+  item.dataset.grant = row.grant;
+  item.dataset.bundle = row.bundle_id;
+  item.dataset.judged = String(Boolean(row.judged));
+  const name = document.createElement("span");
+  name.className = "computer-use-tcc-name";
+  name.textContent = row.name;
+  item.append(name);
+  if (row.judged) {
+    const judged = document.createElement("span");
+    judged.className = "computer-use-tcc-judged";
+    say(judged, () => t("computerUse.tccJudged", "판정 행"));
+    item.append(judged);
+  }
+  const words = document.createElement("span");
+  words.className = "computer-use-tcc-grant";
+  say(words, () => computerTccGrantWords(row));
+  item.append(words);
+  for (const action of row.actions ?? []) {
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.type = "button";
+    button.dataset.tccAction = action;
+    button.disabled = computerUseLoading;
+    const word = COMPUTER_TCC_WORDS.action[action];
+    say(button, () => (word ? t(word.key, word.word) : action));
+    button.addEventListener("click", () => void computerUseCall(
+      () => invoke("computer_use_tcc_row_action", { id: row.id, bundleId: row.bundle_id, action }),
+      (report) => report,
+    ));
+    item.append(button);
+  }
+  return item;
+}
+
+/* One Computer Use call from this card: the card says it is busy, the newest
+ * call's answer is the one kept, and a refusal lands in the card's own error
+ * line. `take` folds the answer into the report the card paints. */
+async function computerUseCall(ask, take) {
   const operation = ++computerUseOperation;
   computerUseLoading = true;
   el("computer-use-permission-error").hidden = true;
   paintComputerUse();
   try {
-    const report = await invoke("open_computer_use_permission", { id, reset });
-    if (operation === computerUseOperation) computerUsePermissions = { ...computerUsePermissions, ...report };
+    const report = await ask();
+    if (operation === computerUseOperation) computerUsePermissions = take(report);
   } catch (error) {
     if (operation !== computerUseOperation) return;
     const note = el("computer-use-permission-error");
@@ -3234,29 +3279,29 @@ async function computerUseRequestPermission(id, reset) {
     }
   }
 }
+
+async function computerUseOpenInstallTerminal() {
+  const command = computerUseSkillCommand();
+  if (command === "") return;
+  try { await openSkillTerminal(command); } catch (error) { showError(error); }
+}
+
+el("computer-use-refresh").addEventListener("click", () => void refreshComputerUse());
+function computerUseRequestPermission(id, reset) {
+  return computerUseCall(
+    () => invoke("open_computer_use_permission", { id, reset }),
+    (report) => ({ ...computerUsePermissions, ...report }),
+  );
+}
 for (const id of COMPUTER_PERMISSION_IDS) {
   document.querySelector(`[data-permission-open="${id}"]`).addEventListener("click", () => void computerUseRequestPermission(id, false));
   document.querySelector(`[data-permission-reset="${id}"]`).addEventListener("click", () => void computerUseRequestPermission(id, true));
   document.querySelector(`[data-permission-check="${id}"]`).addEventListener("click", () => void refreshComputerUse());
 }
-el("computer-use-reset").addEventListener("click", async () => {
-  const operation = ++computerUseOperation;
-  computerUseLoading = true;
-  paintComputerUse();
-  try {
-    const report = await invoke("reset_computer_use_permissions");
-    if (operation === computerUseOperation) computerUsePermissions = report;
-  } catch (error) {
-    const note = el("computer-use-permission-error");
-    note.textContent = String(error);
-    note.hidden = false;
-  } finally {
-    if (operation === computerUseOperation) {
-      computerUseLoading = false;
-      paintComputerUse();
-    }
-  }
-});
+el("computer-use-reset").addEventListener("click", () => void computerUseCall(
+  () => invoke("reset_computer_use_permissions"),
+  (report) => report,
+));
 async function computerUseInstall() {
   if (computerUseInstalling || computerUseSkillLoading || !computerUseSkill) return;
   computerUseInstalling = true;

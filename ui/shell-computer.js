@@ -171,6 +171,41 @@ const COMPUTER_PERMISSION_IDS = ["accessibility", "screenshots"];
 const COMPUTER_PERMISSION_RECHECK_MIN_MS = 3000;
 const COMPUTER_PERMISSION_HELPER_ROW = "ZeroCode Computer Use";
 const COMPUTER_PERMISSION_HELPER_NAME = "ZeroCode Computer Use.app";
+/* What a TCC row reads as (t-6058), in the catalog's words. The backend reads
+ * the row and says its grant, why it could not be read, and which buttons it
+ * offers — all three from the one table in zerocode-core
+ * (`COMPUTER_PERMISSION_GRANTS`). This object only gives each of those words
+ * its sentence, one entry per word (a source contract holds the two
+ * together); nothing here decides a grant or a button. */
+const COMPUTER_TCC_WORDS = Object.freeze({
+  grant: Object.freeze({
+    granted: { key: "computerUse.tccGranted", word: "현재 서명에 묶인 허용" },
+    stale: { key: "computerUse.tccStale", word: "옛 빌드에 묶인 허용 — 시스템 설정에서 제거 후 다시 추가" },
+    denied: { key: "computerUse.tccDenied", word: "허용 안 됨 — 행 없음 또는 거부" },
+    unreadable: { key: "computerUse.tccUnreadable", word: "읽을 수 없음 — {{why}}" },
+  }),
+  unreadable: Object.freeze({
+    "no-full-disk-access": { key: "computerUse.tccNoFullDiskAccess", word: "전체 디스크 접근 없음" },
+    database: { key: "computerUse.tccDatabase", word: "TCC 데이터베이스를 열지 못함" },
+    requirement: { key: "computerUse.tccRequirement", word: "기록된 서명 요구사항을 읽지 못함" },
+    signature: { key: "computerUse.tccSignature", word: "번들의 현재 서명을 읽지 못함" },
+  }),
+  action: Object.freeze({
+    reset: { key: "computerUse.tccReset", word: "초기화" },
+    "open-settings": { key: "computerUse.tccOpenSettings", word: "시스템 설정 열기" },
+  }),
+});
+
+/* A TCC row's sentence: its grant's words, and for a row that could not be
+ * read, why. A word the table does not know is said as the backend wrote it. */
+function computerTccGrantWords(row) {
+  const grant = COMPUTER_TCC_WORDS.grant[row.grant];
+  if (!grant) return String(row.grant ?? "");
+  const why = COMPUTER_TCC_WORDS.unreadable[row.unreadable];
+  return t(grant.key, grant.word, {
+    why: why ? t(why.key, why.word) : String(row.unreadable ?? ""),
+  });
+}
 
 function computerPermissionGuidance(id, report) {
   const row = report?.judged_rows?.find((row) => row.id === id);
