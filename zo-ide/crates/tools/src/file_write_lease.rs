@@ -97,35 +97,11 @@ fn lease_dir(cwd: &Path) -> PathBuf {
     runtime::zo_project_state_dir(cwd).join(LEASE_SUBDIR)
 }
 
-/// Whether `pid` is a live process. Unix signal-0 reports `EPERM` for a live
-/// process owned by another user, which must remain a conflict rather than being
-/// mistaken for a dead holder. Other probe failures stay conservative (alive).
-#[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
-        return true;
-    };
-    process_alive_from_probe(nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid),
-        None,
-    ))
-}
-
-#[cfg(unix)]
-fn process_alive_from_probe(result: Result<(), nix::errno::Errno>) -> bool {
-    !matches!(result, Err(nix::errno::Errno::ESRCH))
-}
-
-#[cfg(not(unix))]
-fn process_alive(_pid: u32) -> bool {
-    true
-}
-
 /// Whether an existing lease may be taken over by `owner` now: the caller
 /// already owns it, it has expired, or its holder process is gone. A live lease
 /// held by a different owner is *not* reclaimable.
 fn is_reclaimable(existing: &WriteLease, owner: &str, now: u64) -> bool {
-    existing.owner == owner || now >= existing.expiry_ms || !process_alive(existing.pid)
+    existing.owner == owner || now >= existing.expiry_ms || !runtime::process_alive(existing.pid)
 }
 
 /// Build the lease record for `owner` taking `abs_path` at `now`.
@@ -612,8 +588,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn eperm_liveness_probe_is_treated_as_alive() {
-        assert!(super::process_alive_from_probe(Err(nix::errno::Errno::EPERM)));
-        assert!(!super::process_alive_from_probe(Err(nix::errno::Errno::ESRCH)));
+        assert!(runtime::process_alive_from_probe(Err(nix::errno::Errno::EPERM)));
+        assert!(!runtime::process_alive_from_probe(Err(nix::errno::Errno::ESRCH)));
     }
 
     #[test]

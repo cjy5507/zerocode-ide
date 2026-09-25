@@ -205,18 +205,29 @@ pub enum RouteTaxCall {
     Probe,
     /// The fan-out decomposition call that decides the lanes.
     Decompose,
+    /// The challenger arm's design request (`zerocode_core::jev::CHALLENGER`):
+    /// one bounded call to a model nobody has evidence for, asking for the
+    /// design the incumbent is about to carry out. Filed as tax and not as a
+    /// route because the attempt acted on the incumbent's design either way
+    /// — the challenger did no work this row could judge — and because a row
+    /// the learner read as a run of that model would teach the router from a
+    /// paragraph; `Classify` is bookkeeping, and the learning mask already
+    /// skips it. What the design was worth is the challenger seat's own
+    /// ledger's to say, by the comparison and the receipt.
+    Challenger,
 }
 
 impl RouteTaxCall {
-    /// Both calls, the one place the set is enumerated.
-    pub const ALL: [RouteTaxCall; 2] = [Self::Probe, Self::Decompose];
+    /// Every call, the one place the set is enumerated.
+    pub const ALL: [RouteTaxCall; 3] = [Self::Probe, Self::Decompose, Self::Challenger];
 
     /// Canonical label persisted in a tax row's `target` field.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Probe => "probe",
             Self::Decompose => "decompose",
+            Self::Challenger => "challenger",
         }
     }
 
@@ -465,7 +476,28 @@ pub struct RouteOutcomeRecord {
     /// recorder did not know the shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
+    /// The source state this record is about, as a git tree of the whole
+    /// working state (`crate::git_snapshot::compute_worktree_tree`): on an
+    /// attempt's own run row, the state it handed in; on a verdict row, the
+    /// state the verifier saw when it settled. Written only where a reader
+    /// binds the two — the challenger arm's receipt holds a verdict to be
+    /// about the very work its comparison stood for (t-6263) — and absent
+    /// everywhere else, where nothing asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Whether the seat that wrote this row as its sample stands behind it
+    /// right now ([`Self::is_seat_sample`]). Read-time only: never written,
+    /// never read back, and `false` until the seat's own reader says
+    /// otherwise — so a sample nobody admitted teaches nothing
+    /// (`learning_sample_mask`), whichever reader forgot to ask.
+    #[serde(skip)]
+    pub admitted: bool,
 }
+
+/// The `routeSource` a seat's verified sample carries: the challenger arm's
+/// word, the same one its design request is filed under as tax
+/// ([`RouteTaxCall::Challenger`]).
+pub const SEAT_SAMPLE_SOURCE: &str = RouteTaxCall::Challenger.as_str();
 
 /// A key as stored: trimmed, and absent when nothing is left.
 fn non_empty_key(value: &str) -> Option<String> {
@@ -512,7 +544,28 @@ impl RouteOutcomeRecord {
             run_id: None,
             parent_attempt: None,
             shape: None,
+            source: None,
+            admitted: false,
         }
+    }
+
+    /// Stamp the source state this record is about (see [`Self::source`]).
+    /// A blank one names nothing.
+    #[must_use]
+    pub fn with_source(mut self, source: Option<String>) -> Self {
+        self.source = source.and_then(|source| non_empty_key(&source));
+        self
+    }
+
+    /// Whether this row is a seat's sample — evidence a Jev seat wrote about
+    /// a model it put beside the router's choice ([`SEAT_SAMPLE_SOURCE`]),
+    /// which teaches only while that seat stands behind it
+    /// ([`Self::admitted`]). A tax row under the same word is bookkeeping,
+    /// not a sample.
+    #[must_use]
+    pub fn is_seat_sample(&self) -> bool {
+        self.route_source.as_deref() == Some(SEAT_SAMPLE_SOURCE)
+            && !self.decision_kind().is_bookkeeping()
     }
 
     /// Stamp the spawn attempt this record is evidence about: the agent id
@@ -981,7 +1034,9 @@ impl DecisionOutcomeStat {
 #[must_use]
 pub fn summarize_decisions_by_kind(records: &[RouteOutcomeRecord]) -> Vec<DecisionOutcomeStat> {
     let mut by_kind: BTreeMap<String, DecisionOutcomeStat> = BTreeMap::new();
-    for record in records {
+    // A seat's sample is evidence a seat wrote about a model, not a decision
+    // the orchestration took: it is in no count here, admitted or not.
+    for record in records.iter().filter(|record| !record.is_seat_sample()) {
         // An explicit label (even a foreign one) keeps its raw string; an
         // absent one takes the inferred kind (legacy verdict -> verify).
         let label = record
@@ -1495,12 +1550,22 @@ pub(super) fn decisive_outcome(status: &str, provider_error_class: Option<&str>)
 /// - an unattributed record (every line before `run_id`, a main-turn
 ///   verdict) is its own sample, exactly as before.
 ///
+/// - a seat's sample ([`RouteOutcomeRecord::is_seat_sample`]) teaches only
+///   while its seat stands behind it ([`RouteOutcomeRecord::admitted`]): the
+///   row stays in the ledger whatever the seat does later, and the reader
+///   asks the seat's standing at the moment it reads — a seat switched off
+///   or fallen has no say, and one raised again has its same rows back
+///   under their own decay (t-6263).
+///
 /// The accuracy report reads the raw decisions instead — it counts what the
 /// orchestration DID, this counts what each attempt proved.
 pub(super) fn learning_sample_mask(records: &[RouteOutcomeRecord]) -> Vec<bool> {
+    let teaches = |record: &RouteOutcomeRecord| {
+        !record.decision_kind().is_bookkeeping() && (!record.is_seat_sample() || record.admitted)
+    };
     let mut speaker: HashMap<&str, usize> = HashMap::new();
     for (index, record) in records.iter().enumerate() {
-        if record.decision_kind().is_bookkeeping() {
+        if !teaches(record) {
             continue;
         }
         let Some(attempt) = record.run_id.as_deref() else {
@@ -1521,7 +1586,7 @@ pub(super) fn learning_sample_mask(records: &[RouteOutcomeRecord]) -> Vec<bool> 
         .iter()
         .enumerate()
         .map(|(index, record)| {
-            !record.decision_kind().is_bookkeeping()
+            teaches(record)
                 && record
                     .run_id
                     .as_deref()
@@ -2418,7 +2483,7 @@ pub(crate) mod tests {
 
     #[test]
     fn route_tax_calls_round_trip_through_one_table() {
-        assert_eq!(RouteTaxCall::ALL.len(), 2);
+        assert_eq!(RouteTaxCall::ALL.len(), 3);
         for call in RouteTaxCall::ALL {
             assert_eq!(RouteTaxCall::from_label(call.as_str()), Some(call));
         }
@@ -3122,4 +3187,49 @@ pub(crate) mod tests {
         assert_eq!(rows[1].selected_model, "planned-model", "historical receipts are immutable");
     }
 
+    /// 자리 표본은 그 자리가 읽는 순간 인정할 때만 가르친다(t-6263): 인정 없는 표본은 어떤 학습기에도 없고, 인정하면
+    /// 제 감쇠 그대로 한 표본이다. 인정은 읽을 때의 것이라 파일에는 적히지도 읽히지도 않고, 오케스트레이션의 결정 수에는
+    /// 인정 여부와 상관없이 들지 않는다. 같은 낱말의 세금 행은 표본이 아니다.
+    #[test]
+    fn a_seat_sample_teaches_only_while_its_seat_admits_it_and_is_never_a_decision() {
+        let now = 2_000_000_000;
+        let sample = |n: usize| {
+            let mut record = RouteOutcomeRecord::new("subagent", SEAT_SAMPLE_SOURCE, "model-new", "completed")
+                .with_decision(DecisionKind::Model)
+                .with_role(Some("coding".to_string()))
+                .with_route_source(Some(SEAT_SAMPLE_SOURCE.to_string()))
+                .with_signal("verdict")
+                .with_signal_weight(Some(1.0))
+                .with_attempt_key(format!("agent-{n}#1~{SEAT_SAMPLE_SOURCE}"));
+            record.recorded_at = now;
+            record
+        };
+        let peer = RouteOutcomeRecord::new("subagent", "general-purpose", "model-old", "completed")
+            .with_role(Some("coding".to_string()))
+            .with_attempt_key("peer#1");
+        let mut rows: Vec<RouteOutcomeRecord> = (0..4).map(sample).collect();
+        rows.push(peer);
+        assert!(rows[0].is_seat_sample());
+        let learned = |rows: &[RouteOutcomeRecord]| -> Vec<String> {
+            learning_samples(rows).map(|record| record.selected_model.clone()).collect()
+        };
+        assert_eq!(learned(&rows), ["model-old"], "a sample no reader admitted teaches nothing");
+        for row in &mut rows[..4] {
+            row.admitted = true;
+        }
+        assert_eq!(learned(&rows).len(), 5, "admitted, each is one sample beside the peer");
+        let decisions: usize = summarize_decisions_by_kind(&rows).iter().map(|stat| stat.total).sum();
+        assert_eq!(decisions, 1, "a seat's sample is no decision the orchestration took, admitted or not");
+
+        let line = serde_json::to_string(&rows[0]).expect("json");
+        assert!(!line.contains("admitted"), "admission is the reader's, never the file's: {line}");
+        let back: RouteOutcomeRecord = serde_json::from_str(&line).expect("parse");
+        assert!(!back.admitted, "and a row read back is unadmitted until a reader says so");
+
+        let tax = RouteOutcomeRecord::route_tax(RouteTaxCall::Challenger, "model-new", "completed")
+            .with_route_source(Some(SEAT_SAMPLE_SOURCE.to_string()));
+        assert!(!tax.is_seat_sample(), "the arm's tax is bookkeeping, not a sample");
+        let sourced = RouteOutcomeRecord::new("subagent", "x", "m", "completed").with_source(Some("  ".to_string()));
+        assert_eq!(sourced.source, None, "a blank source names nothing");
+    }
 }

@@ -88,9 +88,22 @@ pub fn append_shadow_row<T: Serialize>(path: &Path, row: &T, max_bytes: u64) -> 
 /// reader to the rest.
 #[must_use]
 pub fn read_shadow_rows<T: DeserializeOwned>(path: &Path) -> Vec<T> {
-    fs::read_to_string(path)
-        .map(|text| text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect())
-        .unwrap_or_default()
+    try_read_shadow_rows(path).unwrap_or_default()
+}
+
+/// [`read_shadow_rows`] for a reader that must tell a ledger it could not
+/// read from one that holds nothing: a missing ledger is still no rows, and
+/// a line that does not parse is still skipped, but a ledger that is there
+/// and could not be read to its end is the error it met.
+///
+/// # Errors
+/// The ledger exists and could not be read whole.
+pub fn try_read_shadow_rows<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
 }
 
 /// How much of a ledger's end is read for its last row. A row is fingerprints,
@@ -163,12 +176,25 @@ pub fn judge_seat_ledger(
     ledger: &Path,
     now_ms: i64,
 ) -> Option<zerocode_core::jev::promote::Verdict> {
-    use zerocode_core::jev::promote;
     let rows: Vec<serde_json::Value> = read_shadow_rows(ledger);
-    if !promote::judgment_due(seat, &rows) {
+    judge_seat_rows(seat, ledger, &rows, now_ms)
+}
+
+/// [`judge_seat_ledger`] on `ledger`'s rows as the seat's own readers read
+/// them — the challenger arm's leave out every label the record does not
+/// bind (t-6263) — writing the rise or fall to `ledger` itself.
+#[must_use]
+pub fn judge_seat_rows(
+    seat: &zerocode_core::jev::JevUse,
+    ledger: &Path,
+    rows: &[serde_json::Value],
+    now_ms: i64,
+) -> Option<zerocode_core::jev::promote::Verdict> {
+    use zerocode_core::jev::promote;
+    if !promote::judgment_due(seat, rows) {
         return None;
     }
-    let judged = promote::judge_seat(seat, &rows)?;
+    let judged = promote::judge_seat(seat, rows)?;
     if let Some(row) = promote::transition_row(now_ms, judged.verdict, &judged.window) {
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }

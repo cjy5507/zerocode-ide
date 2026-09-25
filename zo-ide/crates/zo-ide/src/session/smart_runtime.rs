@@ -560,7 +560,9 @@ fn file_plan_shadow(
         min_p_verified: f64::from(shadow.settings.min_pass_percent) / 100.0,
         switch_margin: f64::from(shadow.settings.switch_margin_percent) / 100.0,
     };
-    let records = runtime::read_route_outcomes(&shadow.cwd).unwrap_or_default();
+    // As every learner reads them: the challenger arm's samples only while
+    // its seat stands behind them now.
+    let records = tools::read_learning_outcomes(&shadow.cwd).unwrap_or_default();
     let price = tools::model_price_for;
     let recorded_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

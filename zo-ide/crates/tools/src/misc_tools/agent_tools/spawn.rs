@@ -362,12 +362,30 @@ pub(super) fn pane_worker_registration(job: &AgentJob) -> impl Drop + use<> {
 
 /// Publish a pane child's completion through the one channel every spawn
 /// publishes through — route outcome recorded, background pump woken, and the
-/// blocking `Agent` call's wait satisfied.
-pub(super) fn publish_pane_completion(job: &AgentJob, completion: AgentCompletion) {
-    notify_agent_completion_with_route_outcome(job, completion);
+/// blocking `Agent` call's wait satisfied. `seen_source` is what a watched
+/// verifier read over the turn ([`watch_judged_source`]).
+pub(super) fn publish_pane_completion(job: &AgentJob, completion: AgentCompletion, seen_source: Option<String>) {
+    notify_agent_completion_with_route_outcome(job, completion, seen_source);
 }
 
 pub(super) fn spawn_agent_job(job: AgentJob) -> Result<(), ToolError> {
+    spawn_agent_job_with(job, run_agent_job)
+}
+
+/// [`spawn_agent_job`] with the run itself handed in: the product runs
+/// [`run_agent_job`], and the spawn path's end-to-end test runs the same
+/// body on a scripted model — so the thread, the completion, the route
+/// outcome and the verification it triggers are the product's own.
+fn spawn_agent_job_with<R>(job: AgentJob, run: R) -> Result<(), ToolError>
+where
+    R: FnOnce(
+            &AgentJob,
+            &std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+            &std::sync::Arc<std::sync::atomic::AtomicU64>,
+        ) -> Result<AgentJobOutcome, runtime::RuntimeError>
+        + Send
+        + 'static,
+{
     let thread_name = format!("zo-agent-{}", job.manifest.agent_id);
     // This executor's mark on the manifest: a thread of this process. The
     // pane executor writes `pane` at the same moment (`stamp_agent_pane`).
@@ -394,7 +412,7 @@ pub(super) fn spawn_agent_job(job: AgentJob) -> Result<(), ToolError> {
                 std::sync::Arc::default();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 super::manifest::with_agent_run_generation(job.manifest.run_generation, || {
-                    run_agent_job(&job, &token_history, &output_tokens_total)
+                    run(&job, &token_history, &output_tokens_total)
                 })
             }));
             // Read after the turn fully returns (or unwinds) — every `fetch_add`
@@ -422,6 +440,7 @@ pub(super) fn spawn_agent_job(job: AgentJob) -> Result<(), ToolError> {
             };
             match result {
                 Ok(Ok(outcome)) => {
+                    let seen_source = outcome.seen_source;
                     let structured = completion_structured_with_provider_error_class(
                         outcome.structured,
                         outcome.provider_error_class,
@@ -438,6 +457,7 @@ pub(super) fn spawn_agent_job(job: AgentJob) -> Result<(), ToolError> {
                             structured,
                             outcome.error,
                         ),
+                        seen_source,
                     );
                 }
                 Ok(Err(error)) => {
@@ -463,6 +483,7 @@ pub(super) fn spawn_agent_job(job: AgentJob) -> Result<(), ToolError> {
                             provider_error_class.map(provider_error_class_metadata),
                             Some(error),
                         ),
+                        None,
                     );
                 }
                 Err(_) => {
@@ -476,6 +497,7 @@ pub(super) fn spawn_agent_job(job: AgentJob) -> Result<(), ToolError> {
                     notify_agent_completion_with_route_outcome(
                         &job,
                         terminal("failed", None, None, Some(panic_msg)),
+                        None,
                     );
                 }
             }
@@ -535,7 +557,11 @@ fn reconcile_completion_with_manifest(manifest: &AgentOutput, completion: &mut A
     completion.run = run_from_manifest(&stored, completion.run.output_tokens);
 }
 
-fn notify_agent_completion_with_route_outcome(job: &AgentJob, mut completion: AgentCompletion) {
+fn notify_agent_completion_with_route_outcome(
+    job: &AgentJob,
+    mut completion: AgentCompletion,
+    seen_source: Option<String>,
+) {
     if !manifest_generation_is_current(&job.manifest) {
         return;
     }
@@ -549,7 +575,7 @@ fn notify_agent_completion_with_route_outcome(job: &AgentJob, mut completion: Ag
         Some(std::path::PathBuf::from(&job.manifest.manifest_file)),
     );
     record_agent_route_outcome(job, &completion);
-    record_agent_verdict_outcome(job, &completion);
+    record_agent_verdict_outcome(job, &completion, seen_source);
     // P2 live: an unattended implementation spawn is verified by default, and
     // a verifier's failing verdict re-spawns the implementer with the finding
     // up to the difficulty ceiling, all under the implementer's own execution
@@ -557,6 +583,57 @@ fn notify_agent_completion_with_route_outcome(job: &AgentJob, mut completion: Ag
     // "not verified" receipt. Attended turns keep the ask-once rule.
     super::auto_verify::maybe_auto_verify(job, &completion, spawn_agent_job);
     super::auto_verify::maybe_continue_verify_loop(job, &completion, spawn_agent_job);
+}
+
+/// The challenger arm's draw for this spawn, at its start — `None` for a
+/// spawn the arm does not measure or that it held; a held one's word is in
+/// the arm's own ledger. What it costs the spawn is the mode word and the
+/// cheap holds: the rest runs on the arm's own thread.
+fn open_challenger(
+    job: &AgentJob,
+    arm_for: &dyn Fn(&std::path::Path) -> super::super::smart_router::ChallengerArm,
+) -> Option<super::super::smart_router::ChallengerDrawn> {
+    let facts = challenger_facts(job)?;
+    let cwd = std::env::current_dir().ok()?;
+    arm_for(&cwd).open(facts)
+}
+
+/// What the arm is told of this spawn — `None` for one that is not an
+/// attempt the arm measures: the routing tax's own classification calls,
+/// and a bound verifier (its work is a verdict on someone else's attempt).
+fn challenger_facts(job: &AgentJob) -> Option<super::super::smart_router::ChallengerAttemptFacts> {
+    if job.route_tax.is_some() || job.judged_agent.is_some() {
+        return None;
+    }
+    Some(super::super::smart_router::ChallengerAttemptFacts {
+        key: runtime::spawn_attempt_key(&job.manifest.agent_id, job.manifest.run_generation)?,
+        role: job.manifest.route_role.clone(),
+        risk: job.manifest.route_risk.clone(),
+        route_source: job.manifest.route_source.clone(),
+        incumbent_model: selected_route_model(&job.manifest),
+        task: job.prompt.clone(),
+        effort: job.route_effort,
+        // A resume, a later generation of the same agent, or a repair round
+        // the verify loop asked for: a second opinion is not what a retry
+        // needs.
+        retry_or_handover: job.resume
+            || job.manifest.run_generation != super::AGENT_INITIAL_RUN_GENERATION
+            || job.verify_loop.is_some(),
+    })
+}
+
+/// The first turn of a drawn attempt has ended: its first plan is the
+/// incumbent's design ([`super::super::smart_router::first_challenger_design_text`]),
+/// frozen here once and handed to the arm, which finishes on its own
+/// thread. A later turn — a continuation — is never read as a first plan:
+/// the draw is taken on the first call and the slot is empty after it.
+fn challenger_after_first_turn(
+    challenger: &mut Option<super::super::smart_router::ChallengerDrawn>,
+    turn: Option<&[runtime::ConversationMessage]>,
+) {
+    if let Some(drawn) = challenger.take() {
+        drawn.designs_ready(turn.and_then(super::super::smart_router::first_challenger_design_text));
+    }
 }
 
 /// Pure pass/fail projection of `semantic_verdict`'s label. `None` for
@@ -580,8 +657,9 @@ pub(super) fn verdict_passed(label: &str) -> Option<bool> {
 /// rather than a second parser — one classifier, multiple callers. Never
 /// guesses a pass or a failure out of anything ambiguous: provenance over
 /// volume. A bound verifier that settled nothing only marks the attempt it
-/// judged as unverified (`record_bound_verdict`).
-fn record_agent_verdict_outcome(job: &AgentJob, completion: &AgentCompletion) {
+/// judged as unverified (`record_bound_verdict`). `seen_source` is what a
+/// watched verifier read ([`AgentJobOutcome::seen_source`]).
+fn record_agent_verdict_outcome(job: &AgentJob, completion: &AgentCompletion, seen_source: Option<String>) {
     // Only a finished verifier says anything — a live placeholder never does.
     if !runtime::is_terminal_outcome_status(&completion.status) {
         return;
@@ -597,7 +675,7 @@ fn record_agent_verdict_outcome(job: &AgentJob, completion: &AgentCompletion) {
     // bound (see `AgentInput::judged_agent`'s doc for how the binding is
     // established and its exact absence conditions).
     if let Some(judged) = job.judged_agent.as_ref() {
-        record_bound_verdict(job, judged, verdict, passed);
+        record_bound_verdict(job, judged, verdict, passed, seen_source);
         return;
     }
     let Some(passed) = passed else {
@@ -658,12 +736,16 @@ fn record_agent_verdict_outcome(job: &AgentJob, completion: &AgentCompletion) {
 /// own failure, recorded on its own attempt exactly as the workflow repair
 /// loop records it. Whatever is said about the worker is written from
 /// `judged`, the attempt frozen at binding — never the store's copy, which a
-/// resume may have moved to another generation and model by now.
+/// resume may have moved to another generation and model by now. A settled
+/// verdict names `seen`, the source its verifier read throughout, when it
+/// was watched ([`watch_judged_source`]) — never the tree as it stands when
+/// the verdict is written, which is not what the verifier saw.
 fn record_bound_verdict(
     job: &AgentJob,
     judged: &AgentOutput,
     verdict: Option<&str>,
     passed: Option<bool>,
+    seen: Option<String>,
 ) {
     use crate::workflow_tools::engine::attribution;
     if let Some(passed) = passed {
@@ -672,6 +754,7 @@ fn record_bound_verdict(
             passed,
             attribution::VerdictKind::PassFail,
             runtime::VerdictBasis::Model,
+            seen,
         );
         return;
     }
@@ -745,12 +828,45 @@ fn record_agent_route_outcome(job: &AgentJob, completion: &AgentCompletion) {
     } else {
         let record = route_outcome_record(&manifest, completion, job.route_effort, &job.manifest)
             .with_shape(spawn_plan_shape(job));
-        match served_attempt(job) {
+        let record = match served_attempt(job) {
             Some(parent) => record.with_parent_attempt(parent),
             None => record,
-        }
+        };
+        // An attempt the challenger arm drew names the source it handed in:
+        // what a verdict about it must have seen to be its receipt (t-6263).
+        let handed_in = challenger_facts(job)
+            .filter(|facts| super::super::smart_router::challenger_hands_in_a_source(&cwd, facts))
+            .and_then(|_| source_under(job));
+        record.with_source(handed_in)
     };
     let _ = runtime::record_route_outcome(&cwd, &record);
+}
+
+/// The source state of the tree `job`'s tools work in — its own worktree,
+/// or the process's folder when it runs in the parent's
+/// (`smart_router::challenger_source_of`).
+fn source_under(job: &AgentJob) -> Option<String> {
+    let work_dir = job.cwd.clone().or_else(|| std::env::current_dir().ok())?;
+    super::super::smart_router::challenger_source_of(&work_dir)
+}
+
+/// A bound verifier's watch over the source its tools read
+/// (`smart_router::ChallengerSourceWatch`), opened before its first turn —
+/// for a verifier of an attempt the challenger arm drew, whose run named the
+/// source it handed in (`smart_router::challenger_judges_a_source`), so its
+/// verdict says which work it judged whenever the comparison lands (t-6263).
+/// Every other spawn pays one field read. Both executors open it before the
+/// verifier can read anything — the thread before its first turn, the pane
+/// before it is cut or its next turn is sent — and close it the moment the
+/// turn's result is in.
+pub(super) fn watch_judged_source(job: &AgentJob) -> Option<super::super::smart_router::ChallengerSourceWatch> {
+    let judged = job.judged_agent.as_ref()?;
+    let attempt = runtime::spawn_attempt_key(&judged.agent_id, judged.run_generation)?;
+    let cwd = std::env::current_dir().ok()?;
+    if !super::super::smart_router::challenger_judges_a_source(&cwd, &attempt) {
+        return None;
+    }
+    super::super::smart_router::ChallengerSourceWatch::open(&job.cwd.clone().unwrap_or(cwd))
 }
 
 /// The tax row for a classification spawn: what the call cost, and which
@@ -950,6 +1066,12 @@ struct AgentJobOutcome {
     /// Provider classification survives a failed continuation so route health
     /// does not misclassify quota/transport failures as model-quality failures.
     provider_error_class: Option<api::ProviderErrorClass>,
+    /// The source a bound verifier read from before its first turn to the
+    /// end of its last, when the challenger arm watched it
+    /// ([`watch_judged_source`]): what its verdict names as the work it
+    /// judged (t-6263). `None` for every other spawn, and for a verifier
+    /// whose tree was written under it.
+    seen_source: Option<String>,
 }
 
 fn agent_budget_can_auto_continue(kind: runtime::BudgetExhausted) -> bool {
@@ -1387,24 +1509,39 @@ fn agent_budget_wrap_up_prompt(schema_requested: bool) -> String {
     )
 }
 
-// Cohesive terminal-settling core: build runtime → run turn → settle one of
-// three outcomes (error, budget-exhausted-with-work, completed). The budget arm
-// mirrors the completed arm's persist + `SubagentStop`, so keeping them in one
-// scope reads more clearly than a helper that would need the generic runtime
-// type threaded through it.
-#[allow(clippy::too_many_lines)]
 fn run_agent_job(
     job: &AgentJob,
     token_history: &std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
     output_tokens_total: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Result<AgentJobOutcome, runtime::RuntimeError> {
+    let runtime = build_agent_runtime(job, token_history.clone(), output_tokens_total.clone())
+        .map_err(runtime::RuntimeError::new)?;
+    run_agent_job_on(job, runtime, token_history, &super::super::smart_router::ChallengerArm::live)
+}
+
+/// A spawned agent's run on `runtime`: the turns, the challenger arm's draw
+/// and its first-plan seam, the continuation budget, and the terminal
+/// manifest. `arm_for` stands the challenger arm for the process's folder —
+/// the product's reads this machine ([`run_agent_job`]); the end-to-end test
+/// hands in its own, and a scripted model in `runtime`.
+// Cohesive terminal-settling core: run turn → settle one of three outcomes
+// (error, budget-exhausted-with-work, completed). The budget arm mirrors the
+// completed arm's persist + `SubagentStop`, so keeping them in one scope reads
+// more clearly than a helper that would need the generic runtime type
+// threaded through it.
+#[allow(clippy::too_many_lines)]
+fn run_agent_job_on<C: runtime::ApiClient>(
+    job: &AgentJob,
+    runtime: runtime::ConversationRuntime<C, super::SubagentToolExecutor>,
+    token_history: &std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+    arm_for: &dyn Fn(&std::path::Path) -> super::super::smart_router::ChallengerArm,
 ) -> Result<AgentJobOutcome, runtime::RuntimeError> {
     let attendance = runtime::declared_attendance();
     let caps = SpawnedAgentCaps::for_spawn(
         attendance,
         job.manifest.subagent_type.as_deref().unwrap_or_default(),
     );
-    let mut runtime = build_agent_runtime(job, token_history.clone(), output_tokens_total.clone())
-        .map_err(runtime::RuntimeError::new)?
+    let mut runtime = runtime
         .with_max_iterations(caps.iterations)
         .with_max_tool_calls(caps.tool_calls)
         .with_hook_abort_signal(job.cancel_signal.clone());
@@ -1450,6 +1587,15 @@ fn run_agent_job(
     // (and its sink) with markers still on disk. A no-op for agents that never
     // instrumented (the ledger is empty).
     let probe_guard = ProbeRevertGuard::new(runtime.tool_executor().probe_sink_handle());
+    // The challenger arm's draw (t-6263): every hold, the door's word, a
+    // challenger, a price and the day's share — and, cleared, a design
+    // request already on its way while this attempt runs. Nothing below
+    // waits on it; the attempt acts on its own design either way.
+    let mut challenger = open_challenger(job, arm_for);
+    // A bound verifier's watch over the source it reads, from before its
+    // first turn to the end of its last (t-6263): what its verdict can say it
+    // judged. Nothing for any other spawn.
+    let source_watch = watch_judged_source(job);
     let mut next_prompt = job.prompt.clone();
     let schema_requested = job.schema.is_some();
     let allow_text_progress = subagent_allows_text_progress(
@@ -1460,6 +1606,12 @@ fn run_agent_job(
     let summary_result = loop {
         let result = runtime.run_turn(next_prompt, None);
         runtime.tool_executor().revert_probes();
+        // The incumbent's design is its first turn's first plan — frozen once,
+        // here, off the messages this attempt's own runtime just wrote.
+        challenger_after_first_turn(
+            &mut challenger,
+            result.as_ref().ok().map(|summary| summary.assistant_messages.as_slice()),
+        );
         match result {
             Ok(summary) => {
                 continuation.observe(&summary, job.schema.as_ref());
@@ -1503,6 +1655,7 @@ fn run_agent_job(
             Err(error) => break Err(error),
         }
     };
+    let seen_source = source_watch.and_then(super::super::smart_router::ChallengerSourceWatch::seen);
     // Free any write leases this agent acquired (track 4-2) so the paths it
     // edited are immediately available to the next sequential agent instead of
     // waiting out the lease TTL. No-op unless the guard was opt-in enabled.
@@ -1565,6 +1718,7 @@ fn run_agent_job(
                     status,
                     error: Some(message),
                     provider_error_class,
+                    seen_source,
                 });
             }
             runtime.fire_lifecycle_hook(
@@ -1625,6 +1779,7 @@ fn run_agent_job(
             status: "failed",
             error: Some(budget_error),
             provider_error_class: None,
+            seen_source,
         });
     }
     // Capture the `StructuredOutput` tool call's input only when a schema was
@@ -1675,6 +1830,7 @@ fn run_agent_job(
         status: "completed",
         error: None,
         provider_error_class: None,
+        seen_source,
     })
 }
 
@@ -3710,7 +3866,7 @@ mod tests {
 
         let job = reviewer_job(Some("worker-1"), None, "judge sibling worker-1's change");
         let completion = passing_completion(Some(serde_json::json!({"verdict": "pass", "coverage": "tests"})));
-        record_agent_verdict_outcome(&job, &completion);
+        record_agent_verdict_outcome(&job, &completion, None);
 
         let outcomes = VerdictTestEnv::read_outcomes();
         assert_eq!(outcomes.len(), 1, "exactly one verdict for the judged worker");
@@ -3735,8 +3891,8 @@ mod tests {
             judged.model = None;
         }
         let completion = passing_completion(Some(serde_json::json!({"verdict": "pass", "coverage": "tests"})));
-        record_agent_verdict_outcome(&job, &completion);
-        record_agent_verdict_outcome(&job, &passing_completion(None));
+        record_agent_verdict_outcome(&job, &completion, None);
+        record_agent_verdict_outcome(&job, &passing_completion(None), None);
 
         assert!(
             VerdictTestEnv::read_outcomes().is_empty(),
@@ -3770,11 +3926,11 @@ mod tests {
         resumed.route_source = Some("pin".to_string());
         env.write_worker_manifest(&resumed);
 
-        record_agent_verdict_outcome(&job, &failing("off by one", "parser.rs:12"));
-        record_agent_verdict_outcome(&job, &passing_completion(None));
+        record_agent_verdict_outcome(&job, &failing("off by one", "parser.rs:12"), None);
+        record_agent_verdict_outcome(&job, &passing_completion(None), None);
         let mut crashed = passing_completion(None);
         crashed.status = "failed".to_string();
-        record_agent_verdict_outcome(&job, &crashed);
+        record_agent_verdict_outcome(&job, &crashed, None);
 
         let outcomes = VerdictTestEnv::read_outcomes();
         let about_worker: Vec<_> = outcomes
@@ -3818,7 +3974,7 @@ mod tests {
 
         let mut verifier = reviewer_job(None, None, "verify");
         verifier.judged_agent = plan.judged_agent;
-        record_agent_verdict_outcome(&verifier, &failing("missing test", "empty input panics"));
+        record_agent_verdict_outcome(&verifier, &failing("missing test", "empty input panics"), None);
 
         let outcomes = VerdictTestEnv::read_outcomes();
         assert_eq!(outcomes.len(), 1, "{outcomes:?}");
@@ -3838,7 +3994,7 @@ mod tests {
             "Inspect the current diff and relevant tests.",
         );
         let completion = passing_completion(Some(serde_json::json!({"verdict": "pass", "coverage": "tests"})));
-        record_agent_verdict_outcome(&job, &completion);
+        record_agent_verdict_outcome(&job, &completion, None);
 
         let outcomes = VerdictTestEnv::read_outcomes();
         assert_eq!(outcomes.len(), 1);
@@ -3860,7 +4016,7 @@ mod tests {
             "Please look over the project and tell me what you think.",
         );
         let completion = passing_completion(Some(serde_json::json!({"verdict": "pass", "coverage": "tests"})));
-        record_agent_verdict_outcome(&job, &completion);
+        record_agent_verdict_outcome(&job, &completion, None);
 
         assert!(
             VerdictTestEnv::read_outcomes().is_empty(),
@@ -3874,7 +4030,7 @@ mod tests {
 
         let job = reviewer_job(None, None, "Inspect the current diff and relevant tests.");
         let completion = passing_completion(Some(serde_json::json!({"verdict": "pass", "coverage": "tests"})));
-        record_agent_verdict_outcome(&job, &completion);
+        record_agent_verdict_outcome(&job, &completion, None);
 
         assert!(
             VerdictTestEnv::read_outcomes().is_empty(),
@@ -3895,14 +4051,14 @@ mod tests {
         env.write_worker_manifest(&verdict_test_manifest("reviewer-agent", "code-reviewer"));
 
         let bound_job = reviewer_job(Some("worker-2"), None, "judge sibling worker-2's change");
-        record_agent_verdict_outcome(&bound_job, &passing_completion(None));
+        record_agent_verdict_outcome(&bound_job, &passing_completion(None), None);
 
         let ad_hoc_job = reviewer_job(
             None,
             Some("claude-opus-4-8"),
             "Inspect the current diff and relevant tests.",
         );
-        record_agent_verdict_outcome(&ad_hoc_job, &passing_completion(None));
+        record_agent_verdict_outcome(&ad_hoc_job, &passing_completion(None), None);
 
         let outcomes = VerdictTestEnv::read_outcomes();
         assert_eq!(outcomes.len(), 2, "{outcomes:?}");
@@ -3936,7 +4092,7 @@ mod tests {
         let job = reviewer_job(Some("worker-4"), None, "judge sibling worker-4's change");
         let mut crashed = passing_completion(None);
         crashed.status = "failed".to_string();
-        record_agent_verdict_outcome(&job, &crashed);
+        record_agent_verdict_outcome(&job, &crashed, None);
 
         let outcomes = VerdictTestEnv::read_outcomes();
         assert_eq!(outcomes.len(), 1, "{outcomes:?}");
@@ -3960,8 +4116,8 @@ mod tests {
             .expect("the worker's run outcome");
 
         let job = reviewer_job(Some("worker-5"), None, "judge sibling worker-5's change");
-        record_agent_verdict_outcome(&job, &failing("off by one", "parser.rs:12"));
-        record_agent_verdict_outcome(&job, &passing_completion(None));
+        record_agent_verdict_outcome(&job, &failing("off by one", "parser.rs:12"), None);
+        record_agent_verdict_outcome(&job, &passing_completion(None), None);
 
         let outcomes = VerdictTestEnv::read_outcomes();
         let about_worker: Vec<_> = outcomes
@@ -3984,7 +4140,7 @@ mod tests {
         let job = reviewer_job(Some("worker-3"), None, "judge sibling worker-3's change");
         let mut completion = passing_completion(Some(serde_json::json!({"verdict": "pass", "coverage": "tests"})));
         completion.status = "still_running".to_string();
-        record_agent_verdict_outcome(&job, &completion);
+        record_agent_verdict_outcome(&job, &completion, None);
 
         assert!(
             VerdictTestEnv::read_outcomes().is_empty(),
@@ -4152,4 +4308,569 @@ mod tests {
         );
     }
 
+
+
+    /// The attempt's model, scripted: every turn it writes one plan and
+    /// stops — no tool is ever called, nothing leaves the machine.
+    struct PlansAndStops(&'static str);
+
+    impl runtime::ApiClient for PlansAndStops {
+        fn stream(&mut self, _request: runtime::ApiRequest) -> Result<Vec<runtime::AssistantEvent>, runtime::RuntimeError> {
+            Ok(vec![runtime::AssistantEvent::TextDelta(self.0.to_string()), runtime::AssistantEvent::MessageStop])
+        }
+    }
+
+    /// A bound verifier's model, scripted: its first call submits a failing
+    /// verdict through `StructuredOutput`, the next writes a line and stops —
+    /// and before the call an edit names, that edit lands on the file (its
+    /// words, or — `None` — the file gone): someone else's work arriving
+    /// while the verifier reads, once the verifier's watch has written the
+    /// tree it started on (`tree`: the repository and how many trees its
+    /// watches will have written by then).
+    struct FailsTheWork {
+        calls: usize,
+        edits: Vec<(usize, std::path::PathBuf, Option<&'static str>)>,
+        tree: (std::path::PathBuf, usize),
+    }
+
+    impl runtime::ApiClient for FailsTheWork {
+        fn stream(&mut self, _request: runtime::ApiRequest) -> Result<Vec<runtime::AssistantEvent>, runtime::RuntimeError> {
+            let call = self.calls;
+            self.calls += 1;
+            for (at, path, words) in &self.edits {
+                if *at == call {
+                    crate::misc_tools::smart_router::challenger_wait_for_trees_written(&self.tree.0, self.tree.1);
+                    match words {
+                        Some(words) => std::fs::write(path, words).expect("an edit lands"),
+                        None => std::fs::remove_file(path).expect("a removal lands"),
+                    }
+                }
+            }
+            let verdict = serde_json::json!({"verdict": "fail", "title": "accepts unknown fields", "evidence": "parser.rs:1"});
+            Ok(if call == 0 {
+                vec![
+                    runtime::AssistantEvent::ToolUse {
+                        id: "verdict-1".to_string(),
+                        name: "StructuredOutput".to_string(),
+                        input: verdict.to_string(),
+                    },
+                    runtime::AssistantEvent::MessageStop,
+                ]
+            } else {
+                vec![runtime::AssistantEvent::TextDelta("verified".to_string()), runtime::AssistantEvent::MessageStop]
+            })
+        }
+    }
+
+    /// The words the attempts of these tests hand in, and someone else's
+    /// edit of the same file.
+    const HANDED_IN_WORDS: &str = "fn parse() {}\n";
+    const ANOTHER_EDIT: &str = "fn parse() { todo!() }\n";
+
+    /// A repository of the test's own holding the attempt's one source file,
+    /// and the agent store beside it.
+    struct Workspace {
+        repo: std::path::PathBuf,
+        store: std::path::PathBuf,
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+    }
+
+    impl Workspace {
+        fn new() -> Self {
+            let ws = Self::nothing();
+            std::fs::write(ws.parser(), HANDED_IN_WORDS).expect("a source file");
+            ws
+        }
+
+        /// A repository holding no file at all.
+        fn nothing() -> Self {
+            let repo_dir = tempfile::tempdir().expect("a repository");
+            let repo = std::fs::canonicalize(repo_dir.path()).expect("resolved");
+            let git = std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().expect("git");
+            assert!(git.success(), "a repository");
+            let store_dir = tempfile::tempdir().expect("an agent store");
+            let store = std::fs::canonicalize(store_dir.path()).expect("resolved");
+            Self {
+                repo,
+                store,
+                _dirs: (repo_dir, store_dir),
+            }
+        }
+
+        /// The same with a HEAD that holds nothing, and no file on disk: the
+        /// tree the attempt hands in is the empty one.
+        fn empty() -> Self {
+            let ws = Self::nothing();
+            ws.git(&["commit", "-q", "--allow-empty", "-m", "nothing yet"]);
+            ws
+        }
+
+        /// The same, its source file committed: tracked, as most work is.
+        fn committed() -> Self {
+            let ws = Self::new();
+            ws.git(&["add", "parser.rs"]);
+            ws.git(&["commit", "-q", "-m", "the parser"]);
+            ws
+        }
+
+        /// The same, its source file one HEAD holds that the index has let go
+        /// of (`git rm --cached`) and the ignores leave out: on disk, in no
+        /// index, and still in the tree the attempt hands in — which is
+        /// HEAD's, filled from the working files.
+        fn let_go() -> Self {
+            let ws = Self::new();
+            std::fs::write(ws.repo.join(".gitignore"), "*.rs\n").expect("an ignore file");
+            ws.git(&["add", ".gitignore"]);
+            ws.git(&["add", "-f", "parser.rs"]);
+            ws.git(&["commit", "-q", "-m", "the parser, past the ignores"]);
+            ws.git(&["rm", "-q", "--cached", "parser.rs"]);
+            ws
+        }
+
+        fn git(&self, args: &[&str]) {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=test", "-c", "user.email=test@example.invalid"])
+                .args(args)
+                .current_dir(&self.repo)
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?}");
+        }
+
+        fn parser(&self) -> std::path::PathBuf {
+            self.repo.join("parser.rs")
+        }
+
+        /// `manifest`, filed in this store beside the output file its run
+        /// appends to — as a spawn files it.
+        fn file(&self, mut manifest: AgentOutput) -> AgentOutput {
+            manifest.manifest_file = self.store.join(format!("{}.json", manifest.agent_id)).to_string_lossy().into_owned();
+            manifest.output_file = self.store.join(format!("{}.md", manifest.agent_id)).to_string_lossy().into_owned();
+            std::fs::write(&manifest.manifest_file, serde_json::to_string(&manifest).expect("json")).expect("a manifest");
+            std::fs::write(&manifest.output_file, "").expect("an output file");
+            manifest
+        }
+    }
+
+    /// The route-outcome rows about `attempt` that `keep` picks, waited for
+    /// until there are `count` — the spawn path writes on its own threads.
+    fn rows_about(
+        cwd: &std::path::Path,
+        attempt: &str,
+        count: usize,
+        keep: fn(&runtime::RouteOutcomeRecord) -> bool,
+    ) -> Vec<runtime::RouteOutcomeRecord> {
+        let started = std::time::Instant::now();
+        loop {
+            let rows: Vec<runtime::RouteOutcomeRecord> = runtime::read_route_outcomes(cwd)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|record| record.run_id.as_deref() == Some(attempt) && keep(record))
+                .collect();
+            if rows.len() >= count {
+                return rows;
+            }
+            assert!(started.elapsed() < Duration::from_secs(60), "never {count} rows about {attempt}: {rows:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn is_run(record: &runtime::RouteOutcomeRecord) -> bool {
+        record.signal.is_none() && record.decision_kind() == runtime::DecisionKind::Model
+    }
+
+    fn is_verdict(record: &runtime::RouteOutcomeRecord) -> bool {
+        record.signal.as_deref() == Some("verdict")
+    }
+
+    /// A spawn key that draws and whose blind shows the challenger first —
+    /// the `nth` such key, so one test can draw more than one attempt.
+    fn a_drawing_key(nth: usize) -> String {
+        use zerocode_core::jev::challenger::{draws, Blind, Side};
+        (0..10_000)
+            .map(|n| format!("agent-{n}#1"))
+            .filter(|key| draws(key) && Blind::over(key).first() == Side::Challenger)
+            .nth(nth)
+            .expect("enough keys draw with this order")
+    }
+
+    /// A machine of the test's own, in the process's folder (the recorders
+    /// read it): the seat on, a day that bought a share, and a standing
+    /// window the challenger has won.
+    fn an_acting_rig(designer: std::sync::Arc<crate::misc_tools::smart_router::ChallengerScripted>) -> crate::misc_tools::smart_router::ChallengerRig {
+        use crate::misc_tools::smart_router as sr;
+        let rig = sr::ChallengerRig::at(
+            std::env::current_dir().expect("cwd"),
+            None,
+            zerocode_core::jev::JevMode::On,
+            &sr::challenger_jev_answer("first"),
+            designer,
+        );
+        rig.spent_today(
+            u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis())
+                .unwrap_or(u64::MAX),
+        );
+        rig.seed_a_standing_window(true);
+        rig
+    }
+
+    /// One attempt of `key` spawned down the product's own road in `ws` —
+    /// only its model is a script — once its run row, and the source it
+    /// handed in, are on record.
+    fn spawn_an_attempt(
+        rig: &crate::misc_tools::smart_router::ChallengerRig,
+        ws: &Workspace,
+        key: &str,
+    ) -> (AgentOutput, runtime::RouteOutcomeRecord) {
+        use crate::misc_tools::smart_router as sr;
+        let mut manifest = verdict_test_manifest(key.trim_end_matches("#1"), "general-purpose");
+        manifest.run_generation = 1;
+        manifest.resolved_model = Some(sr::CHALLENGER_TEST_INCUMBENT.to_string());
+        manifest.model = Some(sr::CHALLENGER_TEST_INCUMBENT.to_string());
+        manifest.route_role = Some("coding".to_string());
+        manifest.route_risk = Some("low".to_string());
+        manifest.route_source = Some("auto".to_string());
+        let manifest = ws.file(manifest);
+        let mut job = reviewer_job(None, None, "make the parser stricter");
+        job.manifest = manifest.clone();
+        job.cwd = Some(ws.repo.clone());
+        let arm = rig.arm();
+        super::spawn_agent_job_with(job, move |job, history, _| {
+            let runtime = super::super::agent_runtime::build_agent_runtime_on(job, |_, _, _| {
+                Ok(PlansAndStops("INCUMBENT: reject unknown fields at the root"))
+            })
+            .map_err(runtime::RuntimeError::new)?;
+            let arm_for = move |_: &std::path::Path| arm.clone();
+            super::run_agent_job_on(job, runtime, history, &arm_for)
+        })
+        .expect("spawned");
+        let run = rows_about(&rig.cwd, key, 1, is_run).remove(0);
+        (manifest, run)
+    }
+
+    /// A verifier `id` bound to `judged`, spawned down the product's own road
+    /// in `ws`: its model fails the work, each of `edits` landing on the file
+    /// before the model call it names — once the verifier's watch has
+    /// written the tree it started on — and `after` landing once its turns
+    /// are over, before its completion is recorded. Answers the verdict it
+    /// wrote about `judged`'s attempt.
+    fn spawn_a_verifier(
+        cwd: &std::path::Path,
+        ws: &Workspace,
+        judged: &AgentOutput,
+        id: &str,
+        edits: &[(usize, Option<&'static str>)],
+        after: Option<&'static str>,
+    ) -> runtime::RouteOutcomeRecord {
+        let attempt = runtime::spawn_attempt_key(&judged.agent_id, judged.run_generation).expect("an attempt");
+        let before = rows_about(cwd, &attempt, 0, is_verdict).len();
+        let mut verifier = reviewer_job(None, None, "review the current diff");
+        verifier.manifest = ws.file(verdict_test_manifest(id, "code-reviewer"));
+        verifier.judged_agent = Some(judged.clone());
+        verifier.cwd = Some(ws.repo.clone());
+        verifier.schema = Some(crate::workflow_tools::verdict_schema());
+        let parser = ws.parser();
+        let edits: Vec<_> = edits.iter().map(|(at, words)| (*at, parser.clone(), *words)).collect();
+        let tree = (ws.repo.clone(), crate::misc_tools::smart_router::challenger_trees_written(&ws.repo) + 1);
+        super::spawn_agent_job_with(verifier, move |job, history, _| {
+            let runtime =
+                super::super::agent_runtime::build_agent_runtime_on(job, |_, _, _| Ok(FailsTheWork { calls: 0, edits, tree }))
+                    .map_err(runtime::RuntimeError::new)?;
+            let outcome =
+                super::run_agent_job_on(job, runtime, history, &crate::misc_tools::smart_router::ChallengerArm::live);
+            if let Some(words) = after {
+                std::fs::write(&parser, words).expect("an edit after the verifier's turns");
+            }
+            outcome
+        })
+        .expect("spawned");
+        rows_about(cwd, &attempt, before + 1, is_verdict).pop().expect("its verdict")
+    }
+
+    /// The label row of `attempt` in `rig`'s ledger, waited for.
+    fn label_of(rig: &crate::misc_tools::smart_router::ChallengerRig, attempt: &str) -> serde_json::Value {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(label) = labels_of(rig, attempt).pop() {
+                return label;
+            }
+            assert!(started.elapsed() < Duration::from_secs(60), "{attempt} was never labelled: {:?}", rig.rows());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn labels_of(rig: &crate::misc_tools::smart_router::ChallengerRig, attempt: &str) -> Vec<serde_json::Value> {
+        use zerocode_core::jev::summary::LABEL;
+        rig.rows()
+            .into_iter()
+            .filter(|row| LABEL.read(row).and_then(serde_json::Value::as_str) == Some(attempt))
+            .collect()
+    }
+
+    /// The row the arm wrote comparing `attempt`, waited for.
+    fn comparison_of(rig: &crate::misc_tools::smart_router::ChallengerRig, attempt: &str) -> serde_json::Value {
+        use zerocode_core::jev::challenger::ATTEMPT;
+        use zerocode_core::jev::summary::OUTCOME;
+        let started = std::time::Instant::now();
+        loop {
+            let found = rig.rows().into_iter().find(|row| {
+                ATTEMPT.read(row).and_then(serde_json::Value::as_str) == Some(attempt) && OUTCOME.read(row).is_some()
+            });
+            if let Some(row) = found {
+                return row;
+            }
+            assert!(started.elapsed() < Duration::from_secs(60), "{attempt} was never compared: {:?}", rig.rows());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// How many samples the arm wrote of `attempt`.
+    fn samples_of(cwd: &std::path::Path, attempt: &str) -> usize {
+        let key = format!("{attempt}~{}", crate::misc_tools::smart_router::CHALLENGER_ROUTE_SOURCE);
+        runtime::read_route_outcomes(cwd)
+            .unwrap_or_default()
+            .iter()
+            .filter(|record| record.run_id.as_deref() == Some(key.as_str()))
+            .count()
+    }
+
+    /// 실제 호출자 한 곳의 끝에서 끝까지(t-6263 E1): 제품의 스폰 길(`spawn_agent_job_with` → `run_agent_job_on`, 모델만 대본)이
+    /// 그 스폰의 사실로 뽑고·예약하고·설계를 사고·첫 턴의 첫 계획을 현직 설계로 잡아 눈가림 비교하고, 완료 행에 넘긴 source를
+    /// 적는다; 같은 길로 스폰한 검증자가 그 source를 읽고 낸 verdict(제품의 기록기)가 라벨이 되고, 행동하는 자리에서 표본이 되며,
+    /// 라우팅 소비자는 자리가 서 있는 동안만 그 표본에서 배운다. 가짜는 두 모델의 대본·도전자의 대본·Jev 선뿐이다.
+    #[test]
+    #[allow(clippy::too_many_lines)] // one attempt's whole road, start to what the router learns
+    fn a_spawned_attempt_is_drawn_compared_verified_and_learned_through_its_own_road() {
+        use crate::misc_tools::smart_router as sr;
+        use zerocode_core::jev::challenger::{Receipt, VERIFIED, VERIFIED_SOURCE};
+        use zerocode_core::jev::summary::{AGREED, OUTCOME};
+        use zerocode_core::jev::JevMode;
+
+        let key = a_drawing_key(0);
+        let rig = an_acting_rig(sr::ChallengerScripted::answering("CHALLENGER: split the parser and test each half"));
+        let cwd = rig.cwd.clone();
+        let ws = Workspace::new();
+        let (manifest, handed_in) = spawn_an_attempt(&rig, &ws, &key);
+        let source = sr::challenger_source_of(&ws.repo).expect("the repository's working tree");
+        assert_eq!(handed_in.source.as_deref(), Some(source.as_str()), "the drawn attempt's run names the source it handed in");
+
+        let compared = comparison_of(&rig, &key);
+        assert_eq!(OUTCOME.read(&compared).and_then(serde_json::Value::as_str), Some("answered"));
+        assert_eq!(compared["preferred"], serde_json::json!("challenger"), "first was the challenger's, by the blind");
+        assert_eq!(rig.designer.calls(), 1, "one design request");
+        assert_eq!(rig.judged(), 1, "one comparison");
+
+        // The verifier bound to this attempt, spawned down the same road in
+        // the same repository, fails its work: the product's verdict recorder
+        // labels the comparison.
+        let verdict = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-1", &[], None);
+        assert_eq!(verdict.source.as_deref(), Some(source.as_str()), "the verdict names the source its verifier read");
+        let label = label_of(&rig, &key);
+        assert_eq!(VERIFIED.read(&label).and_then(serde_json::Value::as_str), Some(Receipt::Failed.token()));
+        assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), Some(source.as_str()), "on the source it judged");
+        assert_eq!(label["won"], serde_json::json!(true));
+        assert_eq!(AGREED.read(&label).and_then(serde_json::Value::as_bool), Some(true));
+        // Behind the ledger's lock: the call that wrote the label has written its sample.
+        let _ = sr::note_challenger_verdicts(&cwd);
+        assert_eq!(
+            samples_of(&cwd, &key),
+            1,
+            "a seat a person turned on, whose challenger's standing passes, turns the agreeing label into a sample"
+        );
+
+        // What the router's outcome learning reads, as it stands at each moment.
+        let learned = || {
+            let records = sr::read_learning_outcomes(&cwd).expect("records");
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            runtime::LearnedSpecialtyHint::compute(&records, now, crate::misc_tools::canonicalize_route_model_id)
+                .entry_for(runtime::RouteRole::Coding, sr::CHALLENGER_TEST_NEWCOMER)
+                .map(|entry| entry.model_adjustment)
+        };
+        let acting = learned().expect("the router learns from the arm's verified samples while the seat acts");
+        rig.write_settings(Some(JevMode::Off), sr::ChallengerDoorWords::OPEN);
+        assert_eq!(learned(), None, "switched off, the samples teach nothing");
+        rig.write_settings(Some(JevMode::On), sr::ChallengerDoorWords::OPEN);
+        assert_eq!(learned(), Some(acting), "switched back on, the same rows teach again");
+    }
+
+    /// 검증자가 본 source는 검증이 시작될 때 잡고 검증이 끝날 때까지 지킨다(t-6263 R4a): 검증하는 동안 다른 작업이 파일을
+    /// 바꿨다가 넘긴 그대로 되돌려 놓아도, 그 검증은 넘긴 source를 봤다고 말하지 못한다 — 영수증도 라벨도 없다. 검증의 턴이
+    /// 끝난 뒤 트리가 바뀌어도 검증이 본 것은 바뀌지 않는다 — 그 verdict의 source는 검증이 시작될 때의 트리이고, 그것이 라벨이
+    /// 된다. 둘 다 제품의 스폰 길(검증자의 실행 그 자체)을 지난다.
+    #[test]
+    fn a_verifier_names_the_source_it_read_from_its_start_and_never_one_it_did_not_see() {
+        use crate::misc_tools::smart_router as sr;
+        use zerocode_core::jev::challenger::{Receipt, VERIFIED, VERIFIED_SOURCE};
+
+        let key = a_drawing_key(1);
+        let rig = an_acting_rig(sr::ChallengerScripted::answering("CHALLENGER: split the parser and test each half"));
+        let cwd = rig.cwd.clone();
+        let ws = Workspace::new();
+        let (manifest, run) = spawn_an_attempt(&rig, &ws, &key);
+        let handed_in = run.source.clone().expect("the drawn attempt names the source it handed in");
+        comparison_of(&rig, &key);
+
+        // Someone else's edit lands while the verifier reads, and is taken
+        // back to the very bytes handed in before the verifier is done.
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-mid-edit", &[(0, Some(ANOTHER_EDIT)), (1, Some(HANDED_IN_WORDS))], None);
+        assert_eq!(
+            sr::challenger_source_of(&ws.repo).as_deref(),
+            Some(handed_in.as_str()),
+            "the tree is back to what was handed in"
+        );
+        assert_eq!(saw_another.source, None, "a verifier that read the file mid-edit cannot say it saw what was handed in");
+        let _ = sr::note_challenger_verdicts(&cwd);
+        assert!(labels_of(&rig, &key).is_empty(), "no receipt, no label: {:?}", rig.rows());
+
+        // A verifier that read the handed-in tree from its start to its end;
+        // the tree moves on once its turns are over.
+        let saw_it = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-then-an-edit", &[], Some(ANOTHER_EDIT));
+        assert_ne!(
+            sr::challenger_source_of(&ws.repo).as_deref(),
+            Some(handed_in.as_str()),
+            "the tree moved on after the verifier's turns"
+        );
+        assert_eq!(
+            saw_it.source.as_deref(),
+            Some(handed_in.as_str()),
+            "the verdict names the tree its verifier started on and read throughout"
+        );
+        let label = label_of(&rig, &key);
+        assert_eq!(VERIFIED.read(&label).and_then(serde_json::Value::as_str), Some(Receipt::Failed.token()));
+        assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), Some(handed_in.as_str()));
+        assert_eq!(labels_of(&rig, &key).len(), 1, "one label");
+    }
+
+    /// 검증자가 본 source의 감시는 그 source의 트리가 쓰이는 파일 전부를 본다(t-6263 R4a-1): HEAD가 들고 있지만 index가
+    /// 놓아주고(`git rm --cached`) 무시 규칙이 빼는 파일도 넘긴 트리에 들어 있으므로, 검증하는 동안 그 파일이 바뀌었다가 넘긴
+    /// 바이트로 돌아오면 그 검증은 넘긴 source를 봤다고 말하지 못한다 — 영수증도 라벨도 없다. 같은 상태에서 아무것도 바뀌지
+    /// 않은 검증은 넘긴 source를 봤다고 말하고 라벨이 된다. 제품의 스폰 길(검증자의 실행 그 자체)을 지난다.
+    #[test]
+    fn a_verifier_is_watched_over_a_file_its_tree_holds_that_the_index_let_go_of() {
+        use crate::misc_tools::smart_router as sr;
+        use zerocode_core::jev::challenger::VERIFIED_SOURCE;
+
+        let key = a_drawing_key(4);
+        let rig = an_acting_rig(sr::ChallengerScripted::answering("CHALLENGER: split the parser and test each half"));
+        let cwd = rig.cwd.clone();
+        let ws = Workspace::let_go();
+        let (manifest, run) = spawn_an_attempt(&rig, &ws, &key);
+        let handed_in = run.source.clone().expect("the drawn attempt names the source it handed in");
+        comparison_of(&rig, &key);
+
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-let-go-mid-edit", &[(0, Some(ANOTHER_EDIT)), (1, Some(HANDED_IN_WORDS))], None);
+        assert_eq!(
+            sr::challenger_source_of(&ws.repo).as_deref(),
+            Some(handed_in.as_str()),
+            "the tree is back to what was handed in"
+        );
+        assert_eq!(saw_another.source, None, "a verifier that read the file mid-edit cannot say it saw what was handed in");
+        let _ = sr::note_challenger_verdicts(&cwd);
+        assert!(labels_of(&rig, &key).is_empty(), "no receipt, no label: {:?}", rig.rows());
+
+        let saw_it = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-let-go-untouched", &[], None);
+        assert_eq!(saw_it.source.as_deref(), Some(handed_in.as_str()), "nothing moved: the verifier saw what was handed in");
+        let label = label_of(&rig, &key);
+        assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), Some(handed_in.as_str()));
+    }
+
+    /// 감시할 파일이 하나도 없는 source도 감시한다(t-6263 R4a-2): HEAD가 아무것도 들지 않은 저장소에서 넘긴 source는 빈
+    /// 트리다 — 검증자의 감시가 그 트리를 쓴 뒤 검증하는 동안 파일이 생겼다가(검증자가 읽는다) 지워져 트리가 다시 비어도, 그
+    /// 검증은 넘긴 source를 봤다고 말하지 못한다 — 영수증도 라벨도 표본도 없다. 같은 저장소에서 아무것도 바뀌지 않은 검증은
+    /// 빈 트리를 봤다고 말하고 라벨이 된다. 제품의 스폰 길(검증자의 실행 그 자체)을 지난다.
+    #[test]
+    fn a_verifier_over_an_empty_tree_sees_a_file_come_and_go() {
+        use crate::misc_tools::smart_router as sr;
+        use zerocode_core::jev::challenger::VERIFIED_SOURCE;
+
+        let key = a_drawing_key(6);
+        let rig = an_acting_rig(sr::ChallengerScripted::answering("CHALLENGER: split the parser and test each half"));
+        let cwd = rig.cwd.clone();
+        let ws = Workspace::empty();
+        let (manifest, run) = spawn_an_attempt(&rig, &ws, &key);
+        let handed_in = run.source.clone().expect("the drawn attempt names the source it handed in");
+        comparison_of(&rig, &key);
+
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-empty-come-and-go", &[(0, Some(ANOTHER_EDIT)), (1, None)], None);
+        assert_eq!(sr::challenger_source_of(&ws.repo).as_deref(), Some(handed_in.as_str()), "the tree is empty again");
+        assert_eq!(saw_another.source, None, "a verifier that read a file come and gone cannot say it saw the empty tree");
+        let _ = sr::note_challenger_verdicts(&cwd);
+        assert!(labels_of(&rig, &key).is_empty(), "no receipt, no label: {:?}", rig.rows());
+        assert_eq!(samples_of(&cwd, &key), 0, "and no sample");
+
+        let saw_it = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-empty-untouched", &[], None);
+        assert_eq!(saw_it.source.as_deref(), Some(handed_in.as_str()), "nothing moved: the verifier saw the empty tree");
+        let label = label_of(&rig, &key);
+        assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), Some(handed_in.as_str()));
+    }
+
+    /// 커밋된(추적되는) 파일도 같다(t-6263 R4a-1): 검증하는 동안 바뀌었다가 돌아오면 source 없음이다.
+    #[test]
+    fn a_verifier_over_a_committed_file_written_and_put_back_names_no_source() {
+        use crate::misc_tools::smart_router as sr;
+
+        let key = a_drawing_key(5);
+        let rig = an_acting_rig(sr::ChallengerScripted::answering("CHALLENGER: split the parser and test each half"));
+        let cwd = rig.cwd.clone();
+        let ws = Workspace::committed();
+        let (manifest, run) = spawn_an_attempt(&rig, &ws, &key);
+        let handed_in = run.source.clone().expect("the drawn attempt names the source it handed in");
+        comparison_of(&rig, &key);
+
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-committed-mid-edit", &[(0, Some(ANOTHER_EDIT)), (1, Some(HANDED_IN_WORDS))], None);
+        assert_eq!(sr::challenger_source_of(&ws.repo).as_deref(), Some(handed_in.as_str()), "the tree is back");
+        assert_eq!(saw_another.source, None, "a verifier that read the file mid-edit cannot say it saw what was handed in");
+        let _ = sr::note_challenger_verdicts(&cwd);
+        assert!(labels_of(&rig, &key).is_empty(), "no receipt, no label: {:?}", rig.rows());
+    }
+
+    /// 비교와 verdict는 어느 순서로 와도 라벨 하나·표본 하나다(t-6263 R4b): 도전자의 설계를 선에 붙잡아 둔 채 시도가 끝나고
+    /// 검증자가 먼저 verdict를 남겨도, 그 verdict는 검증자가 읽은 source를 이미 들고 있어 늦게 온 비교가 그것을 영수증으로
+    /// 읽는다; 비교가 먼저인 순서도 같다. 몇 번을 다시 불러도 라벨·표본은 늘지 않는다. 두 시도 모두 표본이 생기기 전에 뽑히고
+    /// (표본이 선 도전자는 더 이상 증거 없는 모델이 아니다), 둘 다 제품의 스폰 길을 지난다.
+    #[test]
+    fn a_verdict_and_its_comparison_label_the_attempt_once_in_either_order() {
+        use crate::misc_tools::smart_router as sr;
+        use zerocode_core::jev::challenger::VERIFIED_SOURCE;
+
+        let (designer, let_go) = sr::ChallengerScripted::answering_when_let_go("CHALLENGER: split the parser and test each half");
+        let rig = an_acting_rig(designer);
+        let cwd = rig.cwd.clone();
+
+        // Both drawn first: the one whose verdict comes first has its
+        // challenger's design held on the wire.
+        let verdict_first = a_drawing_key(2);
+        let held = Workspace::new();
+        let (held_manifest, held_run) = spawn_an_attempt(&rig, &held, &verdict_first);
+        rig.designer.wait_until_asked();
+        let comparison_first = a_drawing_key(3);
+        let compared = Workspace::new();
+        let (compared_manifest, compared_run) = spawn_an_attempt(&rig, &compared, &comparison_first);
+        comparison_of(&rig, &comparison_first);
+
+        // The comparison first: its verdict labels it.
+        let verdict = spawn_a_verifier(&cwd, &compared, &compared_manifest, "verifier-second", &[], None);
+        assert_eq!(verdict.source, compared_run.source);
+        let label = label_of(&rig, &comparison_first);
+        assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), compared_run.source.as_deref());
+
+        // The verdict first: it carries the source its verifier read, and
+        // waits for the comparison.
+        let verdict = spawn_a_verifier(&cwd, &held, &held_manifest, "verifier-first", &[], None);
+        assert!(held_run.source.is_some(), "the drawn attempt names the source it handed in");
+        assert_eq!(verdict.source, held_run.source, "the verdict carries the source its verifier read, compared or not");
+        assert_eq!(sr::note_challenger_verdicts(&cwd), 0, "nothing compared yet: nothing to label");
+        assert!(labels_of(&rig, &verdict_first).is_empty());
+        let_go.send(()).expect("the design goes");
+        let label = label_of(&rig, &verdict_first);
+        assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), held_run.source.as_deref());
+
+        for _ in 0..3 {
+            assert_eq!(sr::note_challenger_verdicts(&cwd), 0, "and again: nothing more");
+        }
+        for attempt in [&verdict_first, &comparison_first] {
+            assert_eq!(labels_of(&rig, attempt).len(), 1, "{attempt}: one label");
+            assert_eq!(samples_of(&cwd, attempt), 1, "{attempt}: one sample");
+        }
+    }
 }

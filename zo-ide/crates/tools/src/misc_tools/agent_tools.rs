@@ -1161,7 +1161,10 @@ where
     let (smart_policy, person_deep_models) = super::smart_router::live_agent_model_policy();
     let same_model = |left: &str, right: &str| super::canonicalize_route_model_id(left) == super::canonicalize_route_model_id(right);
     let person_selected = |model: &str| person_deep_models.iter().any(|pin| same_model(pin, model));
-    let route_is_person_pin = matches!(input.route_source.as_deref(), Some("pin" | "explicit"));
+    let route_is_person_pin = input
+        .route_source
+        .as_deref()
+        .is_some_and(super::smart_router::route_source_is_a_persons);
     // A trusted Smart-route model (host, config-driven, already gated to the
     // connected inventory) is honored verbatim unless ZO_AGENT_MODEL is set:
     // that env var is the user's explicit all-agents override and still wins.

@@ -56,7 +56,7 @@ pub use decision::{
     AxisMetrics, AxisReading, AxisSample, DecisionAnswer, DecisionRejection, DecisionVerdict, ROUTE_TRUST_FLOOR,
     CALIBRATION_BINS, PROBABILITY_SUM_TOLERANCE,
 };
-pub use learned::{LearnedSpecialtyEntry, LearnedSpecialtyHint};
+pub use learned::{learned_rate, LearnedSpecialtyEntry, LearnedSpecialtyHint};
 pub use outcome::{
     is_terminal_outcome_status, read_route_outcome_summary, read_route_outcomes,
     record_route_outcome, resolve_verdict_basis, route_outcome_log_path,
@@ -65,7 +65,7 @@ pub use outcome::{
     weighted_feedback_hint_for_route_key, DecisionKind, DecisionOutcomeStat, PlanShape,
     RouteOutcomeBucket, RouteOutcomeRecord, RouteOutcomeSummary, VerdictBasis, VerdictSubject,
     VerifyMetrics, RouteTaxCall, CONFIDENT_DECISIVE_SAMPLES, ROUTE_TAX_ROUTE_KEY,
-    OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STOPPED,
+    OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STOPPED, SEAT_SAMPLE_SOURCE,
 };
 pub use policy::{
     deep_tier_model_matches, default_deep_tier_models, default_difficulty_tier, dynamic_deep_tier_models,

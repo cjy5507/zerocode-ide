@@ -5,7 +5,7 @@
 //! Every number here is the seat row's or the user's decision relayed with
 //! it: one attempt in [`crate::jev::CHALLENGER_ONE_IN`], a day's challenger
 //! spend under [`crate::jev::CHALLENGER_DAY_SPEND_PERMILLE`] of the day's
-//! own, and four kinds of route that never draw at all.
+//! own, and five kinds of route that never draw at all.
 //!
 //! It is IO-free and clock-free on purpose: the draw and the blind have to
 //! answer the same way for the same attempt however often they are asked, or
@@ -32,8 +32,10 @@ use crate::jev::summary::{
 };
 use crate::jev::{
     A_WINDOW_OF_COMPARISONS, CHALLENGER_DAY_SPEND_PERMILLE, CHALLENGER_DESIGN_CAP,
-    CHALLENGER_ONE_IN,
+    CHALLENGER_ONE_IN, fingerprint_of,
 };
+
+pub mod spend;
 
 /// What an attempt is, as far as the draw is concerned.
 ///
@@ -53,6 +55,13 @@ pub struct Attempt<'a> {
     /// Whether the work sits behind a guard — payment, the operator, the
     /// release lane. A guarded flow is not a place to ask a new question.
     pub guarded: bool,
+    /// Whether a person named the model — a settings pin or an explicit
+    /// `model:` — rather than the router choosing it. The arm measures the
+    /// router's choice against a newcomer; a model somebody chose by hand is
+    /// not that choice, and a comparison against it would say nothing about
+    /// the route (`routeSource` `pin` and `explicit`, the same two words the
+    /// learner already sets aside as availability rather than quality).
+    pub pinned: bool,
 }
 
 /// Why an attempt did not draw a challenger. Closed, because a ledger row
@@ -71,6 +80,21 @@ pub enum Held {
     /// The day's challenger spend, with what is reserved and what this
     /// attempt would cost, has reached its share.
     DayBudget,
+    /// A person named the model ([`Attempt::pinned`]).
+    Pinned,
+    /// Nothing to challenge with: no connected model the router could route
+    /// this role to is short of evidence, or the only one is the incumbent
+    /// itself.
+    NoChallenger,
+    /// The one model that could challenge has no row in the price table, and
+    /// a model nobody has priced is not free — it is unknown, and the share
+    /// cannot be charged an unknown.
+    Unpriced,
+    /// Drawn, but one of the two designs never came: the incumbent wrote no
+    /// plan before its first tool call, or the challenger's design failed to
+    /// arrive. Nothing to compare, and never a win for the side that did
+    /// answer.
+    NoDesign,
 }
 
 impl Held {
@@ -83,6 +107,10 @@ impl Held {
             Self::Guarded => "guarded",
             Self::NotDrawn => "not_drawn",
             Self::DayBudget => "day_budget",
+            Self::Pinned => "pinned",
+            Self::NoChallenger => "no_challenger",
+            Self::Unpriced => "unpriced",
+            Self::NoDesign => "no_design",
         }
     }
 }
@@ -170,21 +198,26 @@ pub fn within_day_budget(day: &DaySpend, expected_micros: u64) -> bool {
     would_be * 1_000 <= u128::from(day.day_micros) * u128::from(CHALLENGER_DAY_SPEND_PERMILLE)
 }
 
-/// The whole decision, in the order §2 asks it: what the attempt is, then
-/// the draw, then what the day has left for what this attempt would cost.
+/// What the attempt is, then the draw — every line that needs nothing but
+/// the attempt itself, in the order §2 asks it.
 ///
-/// The cheap refusals come first so a held-back role never costs a digest,
-/// and the budget last so a day's spend is only read for an attempt that
-/// would otherwise challenge.
+/// The cheap refusals come first so a held-back role never costs a digest.
+/// Split from [`challenges`] because the caller learns what a challenge
+/// would cost only after it has chosen a challenger, and choosing one reads
+/// the inventory and the outcome ledger: those are read for an attempt that
+/// has cleared everything cheaper, and for no other.
 ///
 /// # Errors
 /// The first line the attempt does not clear.
-pub fn challenges(attempt: &Attempt<'_>, day: &DaySpend, expected_micros: u64) -> Result<(), Held> {
+pub fn eligible(attempt: &Attempt<'_>) -> Result<(), Held> {
     if attempt.retry_or_handover {
         return Err(Held::Retry);
     }
     if attempt.guarded {
         return Err(Held::Guarded);
+    }
+    if attempt.pinned {
+        return Err(Held::Pinned);
     }
     if !role_may_be_challenged(attempt.role) {
         return Err(Held::Role);
@@ -192,10 +225,53 @@ pub fn challenges(attempt: &Attempt<'_>, day: &DaySpend, expected_micros: u64) -
     if !draws(attempt.key) {
         return Err(Held::NotDrawn);
     }
+    Ok(())
+}
+
+/// The whole decision: [`eligible`], then what the day has left for what
+/// this attempt would cost — the budget last, so a day's spend is only read
+/// for an attempt that would otherwise challenge.
+///
+/// # Errors
+/// The first line the attempt does not clear.
+pub fn challenges(attempt: &Attempt<'_>, day: &DaySpend, expected_micros: u64) -> Result<(), Held> {
+    eligible(attempt)?;
     if !within_day_budget(day, expected_micros) {
         return Err(Held::DayBudget);
     }
     Ok(())
+}
+
+/// What a request of `input_tokens` in and `output_tokens` out costs at a
+/// model's list rates, in micro-dollars — the unit every [`DaySpend`] field
+/// is in.
+///
+/// A rate is dollars per million tokens, so tokens times rate IS
+/// micro-dollars; the only arithmetic here is the rounding, and it rounds
+/// up: a share is a ceiling, and a reservation that rounded down would let
+/// a day of fractions past it. The caller hands in the rates because the
+/// price table lives in the program that owns it (`model-prices`), and a
+/// model that table does not name never reaches here — unknown is not zero.
+#[must_use]
+pub fn expected_micros(
+    input_tokens: u64,
+    output_tokens: u64,
+    input_usd_per_million: f64,
+    output_usd_per_million: f64,
+) -> u64 {
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let micros = (input_tokens as f64)
+        .mul_add(
+            input_usd_per_million,
+            output_tokens as f64 * output_usd_per_million,
+        )
+        .max(0.0)
+        .ceil() as u64;
+    micros
 }
 
 /// Whose a design is — the one fact the judge is not shown.
@@ -558,6 +634,40 @@ pub const VERIFIED: LedgerKey = LedgerKey {
     canonical: "verified",
     also: &[],
 };
+/// The source the receipt judged, on the label row that carried it: the
+/// state the attempt handed in, which the verifier's verdict named as the
+/// state it saw — one identity, or there is no receipt. What was verified is
+/// kept beside what it said, so a reader never has to take a verdict's word
+/// for which work it was about.
+pub const VERIFIED_SOURCE: LedgerKey = LedgerKey {
+    canonical: "verifiedSource",
+    also: &[],
+};
+/// When the receipt's verdict was recorded, on the label row that carried
+/// it — the verdict row's own clock, in seconds ([`Receipted::verdict_at`]):
+/// what a label keeps of the binding it was written on. The route-outcome
+/// ledger keeps a bucket's newest rows only; a label whose attempt's run it
+/// no longer holds stands on this alone, and only while no verdict it still
+/// holds says otherwise. A label that names none was written before labels
+/// kept it, and stands only while the record itself can bind it (t-6263).
+pub const VERIFIED_AT: LedgerKey = LedgerKey {
+    canonical: "verifiedAt",
+    also: &[],
+};
+/// The attempt of a label the record contradicted, on the row that strikes
+/// it ([`strike_row`]): the contradiction written down, so a record that
+/// later forgets the rows that said it gives the label nothing back.
+pub const STRUCK: LedgerKey = LedgerKey {
+    canonical: "struck",
+    also: &[],
+};
+/// Which of the attempt's label rows a strike takes back
+/// ([`label_print`]) — the one the record contradicted, and never a label
+/// written beside it later.
+pub const STRUCK_PRINT: LedgerKey = LedgerKey {
+    canonical: "struckPrint",
+    also: &[],
+};
 /// Whether the challenger won ([`Quality::won`]). On the request row by the
 /// comparison alone; a label row for the same attempt writes it again by
 /// the receipt, and the later word is the one that counts.
@@ -568,6 +678,28 @@ pub const WON: LedgerKey = LedgerKey {
 /// Why an attempt was held ([`Held::token`]), on a row that asked nothing.
 pub const HELD: LedgerKey = LedgerKey {
     canonical: "held",
+    also: &[],
+};
+/// What the challenger's design actually cost, in the share's own unit —
+/// the settled figure the day file carries for the same attempt
+/// ([`spend::Op::Settle`]), written on the row too so the comparison it
+/// belongs to can be priced from the ledger alone.
+pub const COST_MICROS: LedgerKey = LedgerKey {
+    canonical: "costMicros",
+    also: &[],
+};
+/// The fingerprint of the incumbent's design as the judge saw it
+/// ([`crate::jev::fingerprint_of`]) — what binds a row to the plan it
+/// compared and no other: a resent comparison, a later revision or another
+/// attempt's plan has another print. The words themselves never reach the
+/// ledger.
+pub const INCUMBENT_DESIGN: LedgerKey = LedgerKey {
+    canonical: "incumbentDesign",
+    also: &[],
+};
+/// The fingerprint of the challenger's design, likewise.
+pub const CHALLENGER_DESIGN: LedgerKey = LedgerKey {
+    canonical: "challengerDesign",
     also: &[],
 };
 
@@ -582,8 +714,15 @@ pub const CHALLENGER_KEYS: &[LedgerKey] = &[
     BLIND,
     PREFERRED,
     VERIFIED,
+    VERIFIED_SOURCE,
+    VERIFIED_AT,
+    STRUCK,
+    STRUCK_PRINT,
     WON,
     HELD,
+    COST_MICROS,
+    INCUMBENT_DESIGN,
+    CHALLENGER_DESIGN,
 ];
 
 /// One comparison as its request row records it, beyond what the wire
@@ -595,6 +734,12 @@ pub struct Comparison<'a> {
     pub incumbent_model: &'a str,
     pub challenger_model: &'a str,
     pub expected_micros: u64,
+    /// What the design actually cost ([`COST_MICROS`]).
+    pub cost_micros: u64,
+    /// Fingerprints of the two designs as shown ([`INCUMBENT_DESIGN`],
+    /// [`CHALLENGER_DESIGN`]).
+    pub incumbent_design: &'a str,
+    pub challenger_design: &'a str,
     pub blind: Blind,
     /// What the judge said, `None` on a row whose answer did not arrive or
     /// did not pass its checks — the wire's `outcome` says which.
@@ -622,6 +767,18 @@ impl Comparison<'_> {
                 EXPECTED_MICROS.canonical.to_string(),
                 Value::from(self.expected_micros),
             ),
+            (
+                COST_MICROS.canonical.to_string(),
+                Value::from(self.cost_micros),
+            ),
+            (
+                INCUMBENT_DESIGN.canonical.to_string(),
+                Value::from(self.incumbent_design),
+            ),
+            (
+                CHALLENGER_DESIGN.canonical.to_string(),
+                Value::from(self.challenger_design),
+            ),
             (BLIND.canonical.to_string(), Value::from(self.blind.token())),
         ]);
         if let Some(preferred) = self.preferred {
@@ -638,18 +795,41 @@ impl Comparison<'_> {
     }
 }
 
+/// A receipt as the record held it when a label was written on it: what the
+/// verdict said, the source it judged — the very source the attempt handed
+/// in — and when the verdict was recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receipted {
+    pub receipt: Receipt,
+    /// The source the verdict judged ([`VERIFIED_SOURCE`]).
+    pub source: String,
+    /// The verdict row's own clock, in seconds ([`VERIFIED_AT`]).
+    pub verdict_at: u64,
+}
+
 /// The row a receipt writes for the attempt it grades, once the
 /// verification loop has spoken: named after the request row's attempt
-/// ([`crate::jev::summary::LABEL`]), carrying the receipt, the challenger's
-/// word by it, and — where the receipt can say — whether the judge named
-/// what it vindicated ([`crate::jev::summary::AGREED`]).
+/// ([`crate::jev::summary::LABEL`]), carrying the receipt, the source it
+/// judged ([`VERIFIED_SOURCE`]) and when its verdict was recorded
+/// ([`VERIFIED_AT`]), the challenger's word by it, and — where the receipt
+/// can say — whether the judge named what it vindicated
+/// ([`crate::jev::summary::AGREED`]).
 #[must_use]
-pub fn label_row(attempt: &str, receipt: Receipt, preferred: Preferred, at_ms: i64) -> Value {
+pub fn label_row(attempt: &str, receipted: &Receipted, preferred: Preferred, at_ms: i64) -> Value {
+    let receipt = receipted.receipt;
     let graded = quality(Some(receipt), preferred);
     let mut row = Map::from_iter([
         (AT.canonical.to_string(), Value::from(at_ms)),
         (LABEL.canonical.to_string(), Value::from(attempt)),
         (VERIFIED.canonical.to_string(), Value::from(receipt.token())),
+        (
+            VERIFIED_SOURCE.canonical.to_string(),
+            Value::from(receipted.source.as_str()),
+        ),
+        (
+            VERIFIED_AT.canonical.to_string(),
+            Value::from(receipted.verdict_at),
+        ),
         (WON.canonical.to_string(), Value::from(graded.won)),
     ]);
     if let Some(agreed) = graded.agreed {
@@ -664,6 +844,57 @@ pub fn label_row(attempt: &str, receipt: Receipt, preferred: Preferred, at_ms: i
         }
     }
     Value::Object(row)
+}
+
+/// The source a label row names as the one its receipt judged
+/// ([`VERIFIED_SOURCE`]) — `None` for a label that names none, written
+/// before labels carried one or left blank: a label no reader can hold to
+/// the work it was about, which every reader reads as no label at all
+/// (t-6263). Kept as written; a label on the source may join it later.
+#[must_use]
+pub fn label_source(row: &Value) -> Option<&str> {
+    VERIFIED_SOURCE
+        .read(row)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+}
+
+/// When a label row's receipt was recorded ([`VERIFIED_AT`]) — `None` for a
+/// label that keeps no evidence of the binding it was written on.
+#[must_use]
+pub fn label_verdict_at(row: &Value) -> Option<u64> {
+    VERIFIED_AT.read(row).and_then(Value::as_u64)
+}
+
+/// A label row's print: the fingerprint of the row as it stands in the
+/// ledger ([`crate::jev::fingerprint_of`]) — what a strike names it by, so
+/// a later label of the same attempt, whatever it says, is another row.
+#[must_use]
+pub fn label_print(row: &Value) -> String {
+    fingerprint_of(&row.to_string())
+}
+
+/// The row that strikes `label` — a label the record contradicted: its
+/// attempt ([`STRUCK`]) and its print ([`STRUCK_PRINT`]), and nothing a
+/// request, a mark or a label is read by. `None` for a row that is no label.
+/// Appended beside it; the label itself stays as it was written.
+#[must_use]
+pub fn strike_row(label: &Value, at_ms: i64) -> Option<Value> {
+    let attempt = LABEL.read(label).and_then(Value::as_str)?;
+    Some(json!({
+        AT.canonical: at_ms,
+        STRUCK.canonical: attempt,
+        STRUCK_PRINT.canonical: label_print(label),
+    }))
+}
+
+/// The prints of every label `rows` strike ([`strike_row`]).
+#[must_use]
+pub fn struck_prints(rows: &[Value]) -> BTreeSet<&str> {
+    rows.iter()
+        .filter_map(|row| STRUCK_PRINT.read(row).and_then(Value::as_str))
+        .collect()
 }
 
 /// The row an attempt the arm held writes: no `outcome`, so it is no
@@ -713,7 +944,8 @@ impl Standing {
 /// The challenger `challenger_model`'s standing for `role`, read from a
 /// ledger: one word per attempt, the latest — a request row's comparison
 /// until a label row's receipt outranks it — over the pair's own rows and
-/// the labels that name them.
+/// the labels that name them. A label that names no source
+/// ([`label_source`]) outranks nothing: the comparison's own word stands.
 #[must_use]
 pub fn standing(rows: &[Value], role: &str, challenger_model: &str) -> Standing {
     let of_pair = |row: &Value| {
@@ -730,6 +962,7 @@ pub fn standing(rows: &[Value], role: &str, challenger_model: &str) -> Standing 
                 word_of.insert(attempt, won);
             }
         } else if let Some(attempt) = LABEL.read(row).and_then(Value::as_str)
+            && label_source(row).is_some()
             && word_of.contains_key(attempt)
         {
             word_of.insert(attempt, won);

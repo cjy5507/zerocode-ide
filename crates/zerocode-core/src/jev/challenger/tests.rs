@@ -1,10 +1,14 @@
 use serde_json::{Value, json};
 
+use super::spend::{self, Book, Op};
 use super::{
-    ATTEMPT, Attempt, BLIND, Blind, CHALLENGED_ROLES, CHALLENGER_KEYS, CHALLENGER_MODEL,
-    Comparison, DaySpend, Designs, EXPECTED_MICROS, HELD, Held, INCUMBENT_MODEL, OPTIONS,
-    PREFERRED, Preferred, ROLE, Receipt, Side, Standing, VERIFIED, WON, ask, challenges, draws,
-    held_row, label_row, quality, role_may_be_challenged, standing, within_day_budget,
+    ATTEMPT, Attempt, BLIND, Blind, CHALLENGED_ROLES, CHALLENGER_DESIGN, CHALLENGER_KEYS,
+    CHALLENGER_MODEL, COST_MICROS, Comparison, DaySpend, Designs, EXPECTED_MICROS, HELD, Held,
+    INCUMBENT_DESIGN, INCUMBENT_MODEL, OPTIONS, PREFERRED, Preferred, ROLE, Receipt, Receipted,
+    STRUCK, STRUCK_PRINT, Side, Standing, VERIFIED, VERIFIED_AT, VERIFIED_SOURCE, WON, ask,
+    challenges, draws, eligible as eligible_line, expected_micros, held_row, label_print,
+    label_row, label_verdict_at, quality, role_may_be_challenged, standing, strike_row,
+    struck_prints, within_day_budget,
 };
 use crate::jev::choice::ChoiceRefusal;
 use crate::jev::promote::{Verdict, judge_seat};
@@ -14,12 +18,22 @@ use crate::jev::{
     CHALLENGER_ONE_IN,
 };
 
+/// A receipt on `source`, its verdict recorded at second 3.
+fn on(receipt: Receipt, source: &str) -> Receipted {
+    Receipted {
+        receipt,
+        source: source.to_string(),
+        verdict_at: 3,
+    }
+}
+
 fn eligible(key: &str) -> Attempt<'_> {
     Attempt {
         key,
         role: "coding",
         retry_or_handover: false,
         guarded: false,
+        pinned: false,
     }
 }
 
@@ -175,6 +189,20 @@ fn the_lines_are_asked_in_order_and_each_names_itself() {
     };
     assert_eq!(challenges(&guarded, &day, 0), Err(Held::Guarded));
 
+    // 사람이 모델을 고른 시도는 라우터의 선택이 아니다 — 가드 뒤, 역할 앞.
+    let pinned = Attempt {
+        pinned: true,
+        ..eligible("dp-pinned")
+    };
+    assert_eq!(challenges(&pinned, &day, 0), Err(Held::Pinned));
+    assert_eq!(eligible_line(&pinned), Err(Held::Pinned));
+    let pinned_guarded = Attempt {
+        guarded: true,
+        pinned: true,
+        ..eligible("dp-pinned-guarded")
+    };
+    assert_eq!(eligible_line(&pinned_guarded), Err(Held::Guarded));
+
     let verifier = Attempt {
         role: "verifier",
         ..eligible("dp-verifier")
@@ -230,6 +258,10 @@ fn every_holding_and_every_side_writes_a_word_of_its_own() {
         Held::Guarded.token(),
         Held::NotDrawn.token(),
         Held::DayBudget.token(),
+        Held::Pinned.token(),
+        Held::NoChallenger.token(),
+        Held::Unpriced.token(),
+        Held::NoDesign.token(),
     ];
     let mut seen: Vec<&str> = holdings.to_vec();
     seen.sort_unstable();
@@ -390,6 +422,9 @@ fn comparison<'a>(attempt: &'a str, preferred: Option<Preferred>) -> Comparison<
         incumbent_model: "claude-fable-5-1",
         challenger_model: "claude-opus-5-2",
         expected_micros: 12_500,
+        cost_micros: 9_870,
+        incumbent_design: "0123456789abcdef",
+        challenger_design: "fedcba9876543210",
         blind: Blind::over(attempt),
         preferred,
     }
@@ -405,6 +440,9 @@ fn a_request_row_spells_its_columns_from_the_table_and_none_of_the_wires() {
         INCUMBENT_MODEL,
         CHALLENGER_MODEL,
         EXPECTED_MICROS,
+        COST_MICROS,
+        INCUMBENT_DESIGN,
+        CHALLENGER_DESIGN,
         BLIND,
         PREFERRED,
         WON,
@@ -416,6 +454,11 @@ fn a_request_row_spells_its_columns_from_the_table_and_none_of_the_wires() {
         );
     }
     assert_eq!(answered[WON.canonical], Value::Bool(true));
+    assert_eq!(answered[COST_MICROS.canonical], json!(9_870));
+    assert_eq!(
+        answered[INCUMBENT_DESIGN.canonical],
+        json!("0123456789abcdef")
+    );
     assert_eq!(
         answered[PREFERRED.canonical],
         Value::from(Preferred::Challenger.token())
@@ -452,7 +495,12 @@ fn a_request_row_spells_its_columns_from_the_table_and_none_of_the_wires() {
 /// 라벨 행은 요청 행을 시도 이름으로 가리키고, 영수증이 말할 수 있을 때만 합의 표식을 단다.
 #[test]
 fn a_label_row_names_its_attempt_and_marks_agreement_only_where_the_receipt_can_say() {
-    let vindicated = label_row("dp-1", Receipt::Failed, Preferred::Challenger, 7);
+    let vindicated = label_row(
+        "dp-1",
+        &on(Receipt::Failed, "tree-1"),
+        Preferred::Challenger,
+        7,
+    );
     assert_eq!(
         LABEL.read(&vindicated).and_then(Value::as_str),
         Some("dp-1")
@@ -462,6 +510,17 @@ fn a_label_row_names_its_attempt_and_marks_agreement_only_where_the_receipt_can_
         VERIFIED.read(&vindicated).and_then(Value::as_str),
         Some(Receipt::Failed.token())
     );
+    assert_eq!(
+        VERIFIED_SOURCE.read(&vindicated).and_then(Value::as_str),
+        Some("tree-1"),
+        "what was verified stands beside what it said"
+    );
+    assert_eq!(
+        VERIFIED_AT.read(&vindicated).and_then(Value::as_u64),
+        Some(3),
+        "and when its verdict was recorded"
+    );
+    assert_eq!(label_verdict_at(&vindicated), Some(3));
     assert_eq!(WON.read(&vindicated).and_then(Value::as_bool), Some(true));
     assert_eq!(
         AGREED.read(&vindicated).and_then(Value::as_bool),
@@ -472,9 +531,74 @@ fn a_label_row_names_its_attempt_and_marks_agreement_only_where_the_receipt_can_
         "a label row is not a request"
     );
 
-    let undecidable = label_row("dp-2", Receipt::Passed, Preferred::Challenger, 8);
+    let undecidable = label_row(
+        "dp-2",
+        &on(Receipt::Passed, "tree-2"),
+        Preferred::Challenger,
+        8,
+    );
     assert_eq!(WON.read(&undecidable).and_then(Value::as_bool), Some(false));
     assert!(AGREED.read(&undecidable).is_none());
+}
+
+/// 기록이 반박한 라벨을 긋는 행은 그 라벨 행 하나만 가리키고 요청·표식·라벨 어느 것으로도 읽히지 않는다(t-6263 R4c-1):
+/// 같은 시도에 나중에 쓰인 라벨은 다른 행이라 그어지지 않는다.
+#[test]
+fn a_strike_names_one_label_row_and_reads_as_nothing_else() {
+    let label = label_row(
+        "dp-1",
+        &on(Receipt::Failed, "tree-1"),
+        Preferred::Challenger,
+        7,
+    );
+    let strike = strike_row(&label, 9).expect("a label is struck");
+    assert_eq!(STRUCK.read(&strike).and_then(Value::as_str), Some("dp-1"));
+    assert_eq!(
+        STRUCK_PRINT.read(&strike).and_then(Value::as_str),
+        Some(label_print(&label).as_str())
+    );
+    assert!(
+        asked_something(&strike).is_none(),
+        "a strike is not a request"
+    );
+    assert!(
+        LABEL.read(&strike).is_none()
+            && AGREED.read(&strike).is_none()
+            && WON.read(&strike).is_none()
+    );
+    let later = label_row(
+        "dp-1",
+        &on(Receipt::Failed, "tree-1"),
+        Preferred::Challenger,
+        8,
+    );
+    assert_ne!(
+        label_print(&later),
+        label_print(&label),
+        "a later label of the same attempt is another row"
+    );
+    let reread: Value = serde_json::from_str(&label.to_string()).expect("json");
+    assert_eq!(
+        label_print(&reread),
+        label_print(&label),
+        "and a row read back is the row that was written"
+    );
+    let rows = vec![label.clone(), strike];
+    assert_eq!(
+        struck_prints(&rows).into_iter().collect::<Vec<_>>(),
+        [label_print(&label).as_str()]
+    );
+    assert!(
+        strike_row(&json!({"at": 1}), 2).is_none(),
+        "only a label is struck"
+    );
+    assert_eq!(
+        standing(&rows, "coding", "claude-opus-5-2"),
+        Standing {
+            compared: 0,
+            won: 0
+        }
+    );
 }
 
 /// 붙들린 행은 요청이 아니다 — 창에도 몫에도 들지 않고 이유만 적는다.
@@ -519,9 +643,19 @@ fn a_standing_reads_one_latest_word_per_attempt_of_its_own_pair() {
         request_row("dp-4", 4, None),
         Value::Object(other_row),
         // dp-2의 영수증: 현직이 통과했으니 도전자의 승리는 취소된다.
-        label_row("dp-2", Receipt::Passed, Preferred::Challenger, 5),
+        label_row(
+            "dp-2",
+            &on(Receipt::Passed, "tree-2"),
+            Preferred::Challenger,
+            5,
+        ),
         // 모르는 시도의 라벨은 세지 않는다.
-        label_row("dp-nobody", Receipt::Failed, Preferred::Challenger, 6),
+        label_row(
+            "dp-nobody",
+            &on(Receipt::Failed, "tree-x"),
+            Preferred::Challenger,
+            6,
+        ),
     ];
     let record = standing(&rows, "coding", "claude-opus-5-2");
     assert_eq!(
@@ -540,6 +674,45 @@ fn a_standing_reads_one_latest_word_per_attempt_of_its_own_pair() {
     );
     assert_eq!(standing(&rows, "coding", "gpt-6-luna"), Standing::default());
     assert_eq!(Standing::default().lower_bound(), None);
+}
+
+/// source를 적지 않은 라벨(옛 형식, 또는 빈 source)은 판정할 수 없는 라벨이라 전적의 말을 바꾸지 않는다(t-6263 R4c): 그
+/// 시도의 말은 비교 자신의 것이고, source를 적은 라벨만 비교를 덮는다.
+#[test]
+fn a_label_that_names_no_source_leaves_the_comparisons_word_standing() {
+    let unsourced = |attempt: &str, at: i64| {
+        let mut row = label_row(
+            attempt,
+            &on(Receipt::Passed, "tree"),
+            Preferred::Challenger,
+            at,
+        );
+        row.as_object_mut()
+            .expect("a row")
+            .remove(VERIFIED_SOURCE.canonical);
+        row
+    };
+    let rows = vec![
+        request_row("dp-1", 1, Some(Preferred::Challenger)),
+        request_row("dp-2", 2, Some(Preferred::Challenger)),
+        request_row("dp-3", 3, Some(Preferred::Challenger)),
+        unsourced("dp-1", 4),
+        label_row("dp-2", &on(Receipt::Passed, ""), Preferred::Challenger, 5),
+        label_row(
+            "dp-3",
+            &on(Receipt::Passed, "tree-3"),
+            Preferred::Challenger,
+            6,
+        ),
+    ];
+    assert_eq!(
+        standing(&rows, "coding", "claude-opus-5-2"),
+        Standing {
+            compared: 3,
+            won: 2
+        },
+        "dp-1 and dp-2 keep their comparisons' words; dp-3's label, bound to its source, outranks its own"
+    );
 }
 
 /// 역할의 모델이 움직이는 선: 한 창만큼의 비교 위에서 Wilson 하한이 현직의 비율을 넘을 때만.
@@ -602,7 +775,7 @@ fn the_seat_judge_reads_the_rows_this_module_writes_and_raises_the_seat_on_recei
         };
         rows.push(label_row(
             &format!("dp-{n}"),
-            Receipt::Failed,
+            &on(Receipt::Failed, "tree"),
             preferred,
             i64::try_from(requests + n).expect("small"),
         ));
@@ -629,4 +802,385 @@ fn the_seat_judge_reads_the_rows_this_module_writes_and_raises_the_seat_on_recei
             won: requests - misses
         }
     );
+}
+
+/// 예상 비용은 토큰 × 백만 토큰당 달러가 곧 마이크로달러이고, 올림이다 — 몫은 천장이라 내림은 하루치 소수점을 통과시킨다.
+#[test]
+fn an_expected_cost_is_tokens_times_the_rate_rounded_up() {
+    // 1,000 in at $5/M + 1,024 out at $25/M = 5,000 + 25,600 micro-dollars.
+    assert_eq!(expected_micros(1_000, 1_024, 5.0, 25.0), 30_600);
+    // 세 토큰에 $0.4/M = 1.2 micro → 2.
+    assert_eq!(expected_micros(3, 0, 0.4, 0.0), 2);
+    assert_eq!(expected_micros(0, 0, 5.0, 25.0), 0);
+    assert_eq!(
+        expected_micros(1, 0, 0.0, 0.0),
+        0,
+        "a zero rate is a zero rate — unknown never reaches here"
+    );
+    // 달러가 아니라 마이크로달러: $1 = 1,000,000.
+    assert_eq!(expected_micros(1_000_000, 0, 1.0, 0.0), 1_000_000);
+}
+
+/// 하루 파일의 접기: 시도마다 첫 예약이 서고, 정산은 예약을 끝내며 한 번만 세고, 해제는 아무것도 세지 않는다.
+#[test]
+fn a_days_book_is_one_word_per_attempt_and_a_settlement_ends_a_reservation() {
+    let mut text = String::new();
+    text.push_str(&spend::line("dp-a", Op::Reserve, 1_000));
+    text.push_str(&spend::line("dp-a", Op::Reserve, 9_999)); // a retry of the writer — not a second charge
+    text.push_str(&spend::line("dp-b", Op::Reserve, 2_000));
+    text.push_str(&spend::line("dp-b", Op::Settle, 1_500));
+    text.push_str(&spend::line("dp-b", Op::Settle, 7_777)); // seen twice, counts once
+    text.push_str(&spend::line("dp-c", Op::Reserve, 3_000));
+    text.push_str(&spend::line("dp-c", Op::Release, 0));
+    text.push_str(&spend::line("dp-d", Op::Settle, 400)); // the reservation line was lost: the design still left
+    text.push_str("{\"attempt\":\"dp-torn\",\"op\":\"rese"); // a crash's leftover at the tail
+    let book = spend::fold(&text);
+    assert_eq!(
+        book,
+        Book {
+            reserved_micros: 1_000,
+            spent_micros: 1_900,
+            reserved: 1,
+            settled: 2,
+        }
+    );
+
+    // 해제 뒤 정산: 뒤늦게 온 비용은 실제 지출이다.
+    let late = format!(
+        "{}{}",
+        spend::line("dp-e", Op::Release, 0),
+        spend::line("dp-e", Op::Settle, 50)
+    );
+    assert_eq!(spend::fold(&late).spent_micros, 50);
+    // 정산 뒤 해제: 이미 낸 돈은 되돌아오지 않는다.
+    let undone = format!(
+        "{}{}",
+        spend::line("dp-f", Op::Settle, 60),
+        spend::line("dp-f", Op::Release, 0)
+    );
+    assert_eq!(spend::fold(&undone).spent_micros, 60);
+    assert_eq!(spend::fold("").reserved_micros, 0);
+    // 빈 줄·다른 모양의 줄은 건너뛴다.
+    assert_eq!(spend::fold("\n{\"x\":1}\n").spent_micros, 0);
+}
+
+/// 하루 몫의 분모에 도전 지출은 한 번 든다 — 호출자가 더한 나머지와 책의 정산을 여기서 합친다.
+#[test]
+fn the_days_whole_counts_the_arms_own_spend_exactly_once() {
+    let book = Book {
+        reserved_micros: 300,
+        spent_micros: 700,
+        reserved: 1,
+        settled: 2,
+    };
+    let day = spend::day_spend(&book, 9_000);
+    assert_eq!(day.challenger_micros, 700);
+    assert_eq!(day.reserved_micros, 300);
+    assert_eq!(day.day_micros, 9_700);
+    // 실효 상한: 나머지 9,000의 10분의 1이 아니라 전체 9,700의 10분의 1 = 970 — 이미 1,000이 잡혀 있으니 한 푼도 더 못 쓴다.
+    assert!(!within_day_budget(&day, 1));
+    let quieter = spend::day_spend(&Book::default(), 9_000);
+    assert!(within_day_budget(&quieter, 900));
+    assert!(!within_day_budget(&quieter, 901));
+}
+
+/// 하루 파일의 줄과 이름은 한 곳의 철자다.
+#[test]
+fn a_spend_line_and_a_spend_path_are_spelled_from_this_module() {
+    let line = spend::line("dp-1", Op::Reserve, 42);
+    assert!(line.ends_with('\n'));
+    let event: Value = serde_json::from_str(line.trim_end()).expect("one json line");
+    assert_eq!(event[spend::ATTEMPT_KEY], json!("dp-1"));
+    assert_eq!(event[spend::OP_KEY], json!(Op::Reserve.token()));
+    assert_eq!(event[spend::MICROS_KEY], json!(42));
+    let release: Value =
+        serde_json::from_str(spend::line("dp-1", Op::Release, 42).trim_end()).expect("json");
+    assert!(
+        release.get(spend::MICROS_KEY).is_none(),
+        "a release carries no amount"
+    );
+    let path = spend::spend_path(std::path::Path::new("/home/x/.zo"), "2026-09-24");
+    assert_eq!(
+        path,
+        std::path::PathBuf::from("/home/x/.zo")
+            .join(crate::jev::count::REQUESTS_DIR)
+            .join("challenger-spend-2026-09-24.jsonl")
+    );
+}
+
+/// 한 시도는 하루에 한 번만 잡힌다: 이미 적힌 시도는 이름으로 알아본다; 첫 예약은 지난날 파일을 치운다.
+#[test]
+fn an_attempt_is_named_once_a_day_and_the_first_reservation_forgets_past_days() {
+    let text = spend::line("dp-a", Op::Reserve, 1);
+    assert!(spend::names(&text, "dp-a"));
+    assert!(!spend::names(&text, "dp-b"));
+    assert!(!spend::names("{torn", "dp-a"));
+
+    let home = tempfile::tempdir().expect("a home");
+    let book = |day: &str| spend::spend_path(home.path(), day);
+    let write = |day: &str, text: String| std::fs::write(book(day), text).expect("a book");
+    std::fs::create_dir_all(book("x").parent().expect("a folder")).expect("folder");
+    let settled = spend::line("dp-old", Op::Reserve, 9) + &spend::line("dp-old", Op::Settle, 7);
+    write("2026-09-23", settled);
+    write("2026-09-24", spend::line("dp-new", Op::Reserve, 1));
+    write("2026-09-25", spend::line("dp-next", Op::Reserve, 1));
+    let count = crate::jev::count::requests_path(home.path(), "2026-09-23");
+    std::fs::write(&count, "...").expect("the door's own count");
+    spend::forget_settled_days(&book("2026-09-24"));
+    assert!(
+        !book("2026-09-23").exists(),
+        "yesterday's settled book is forgotten"
+    );
+    assert!(book("2026-09-24").exists(), "today's is kept");
+    assert!(
+        book("2026-09-25").exists(),
+        "a later day's book is never an earlier day's to forget"
+    );
+    assert!(
+        count.exists(),
+        "the door's count is not the book's to forget"
+    );
+
+    // A reservation charged before midnight and still out keeps yesterday's
+    // book for its settlement; two days back, a live reservation is a draw
+    // that died, and its day is over.
+    write("2026-09-24", spend::line("dp-late", Op::Reserve, 5));
+    write("2026-09-23", spend::line("dp-dead", Op::Reserve, 5));
+    spend::forget_settled_days(&book("2026-09-25"));
+    assert!(
+        book("2026-09-24").exists(),
+        "yesterday is kept while it can still be settled into"
+    );
+    assert!(
+        !book("2026-09-23").exists(),
+        "two days back is forgotten, live or not"
+    );
+    write(
+        "2026-09-24",
+        spend::line("dp-late", Op::Reserve, 5) + &spend::line("dp-late", Op::Settle, 4),
+    );
+    spend::forget_settled_days(&book("2026-09-25"));
+    assert!(!book("2026-09-24").exists(), "settled, it goes");
+}
+
+/// 날짜 경계의 늦은 쓰기: 자정 전에 날을 정한 프로그램이 자정 뒤에 옛날 파일에 처음 쓰더라도, 이미 시작된 새날의 파일은
+/// 지우지 않는다 — 문의 셈과 도전 장부가 같은 규칙 하나로.
+#[test]
+fn a_late_write_into_an_ended_day_never_forgets_the_day_that_began() {
+    let home = tempfile::tempdir().expect("a home");
+    let today = crate::jev::count::requests_path(home.path(), "2026-09-25");
+    let ended = crate::jev::count::requests_path(home.path(), "2026-09-24");
+    assert_eq!(
+        crate::jev::count::count_one(&today).expect("today's first"),
+        1
+    );
+    assert_eq!(crate::jev::count::count_one(&ended).expect("a late one"), 1);
+    assert_eq!(
+        crate::jev::count::sent(&today),
+        1,
+        "the day that began keeps its count"
+    );
+    assert_eq!(
+        crate::jev::count::count_one(&today).expect("today's second"),
+        2
+    );
+
+    let book = |day: &str| spend::spend_path(home.path(), day);
+    std::fs::write(book("2026-09-25"), spend::line("dp-new", Op::Reserve, 3)).expect("today");
+    std::fs::write(book("2026-09-24"), spend::line("dp-late", Op::Reserve, 5)).expect("late");
+    spend::forget_settled_days(&book("2026-09-24"));
+    assert_eq!(
+        spend::fold(&std::fs::read_to_string(book("2026-09-25")).expect("today's book"))
+            .reserved_micros,
+        3,
+        "a late first reservation of an ended day leaves the new day's book as it was"
+    );
+
+    assert_eq!(
+        crate::jev::count::day_before("2026-03-01").as_deref(),
+        Some("2026-02-28")
+    );
+    assert_eq!(
+        crate::jev::count::day_before("2028-03-01").as_deref(),
+        Some("2028-02-29")
+    );
+    assert_eq!(
+        crate::jev::count::day_before("2026-01-01").as_deref(),
+        Some("2025-12-31")
+    );
+    assert_eq!(crate::jev::count::day_before("not a day"), None);
+    let odd = home
+        .path()
+        .join(crate::jev::count::REQUESTS_DIR)
+        .join("challenger-spend-latest.jsonl");
+    std::fs::write(&odd, "").expect("a name that is not a day");
+    spend::forget_settled_days(&book("2026-09-26"));
+    assert!(
+        odd.exists(),
+        "a name this cannot place is not its to forget"
+    );
+}
+
+/* ---- the replay: a ledger re-read through the product's own functions ---- */
+
+/// What one pair's rows add up to.
+#[derive(Debug, Default, PartialEq)]
+struct PairReplay {
+    standing: Standing,
+    expected_micros: u64,
+    cost_micros: u64,
+}
+
+/// A ledger's rows, re-read the way the arm reads them: the draw and the
+/// blind re-derived from each attempt's key and held against what the row
+/// says, one word per attempt for each (role, challenger) pair
+/// ([`standing`]), what the share was charged and what the designs cost,
+/// and why the held attempts were held.
+#[derive(Debug, Default, PartialEq)]
+struct Replayed {
+    requests: usize,
+    pairs: std::collections::BTreeMap<(String, String), PairReplay>,
+    held: std::collections::BTreeMap<String, usize>,
+    undrawn: Vec<String>,
+    blind_mismatches: Vec<String>,
+}
+
+fn replay(rows: &[Value]) -> Replayed {
+    let mut replayed = Replayed::default();
+    let text = |row: &Value, key: &crate::jev::summary::LedgerKey| {
+        key.read(row).and_then(Value::as_str).map(str::to_string)
+    };
+    for row in rows {
+        let Some(attempt) = text(row, &ATTEMPT) else {
+            continue;
+        };
+        if !draws(&attempt) {
+            replayed.undrawn.push(attempt.clone());
+        }
+        if let Some(word) = text(row, &HELD) {
+            *replayed.held.entry(word).or_default() += 1;
+            continue;
+        }
+        if asked_something(row).is_none() {
+            continue;
+        }
+        replayed.requests += 1;
+        if let Some(blind) = text(row, &BLIND)
+            && blind != Blind::over(&attempt).token()
+        {
+            replayed.blind_mismatches.push(attempt.clone());
+        }
+        let (Some(role), Some(challenger)) = (text(row, &ROLE), text(row, &CHALLENGER_MODEL))
+        else {
+            continue;
+        };
+        let pair = replayed.pairs.entry((role, challenger)).or_default();
+        pair.expected_micros += EXPECTED_MICROS
+            .read(row)
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        pair.cost_micros += COST_MICROS.read(row).and_then(Value::as_u64).unwrap_or(0);
+    }
+    for ((role, challenger), pair) in &mut replayed.pairs {
+        pair.standing = standing(rows, role, challenger);
+    }
+    replayed
+}
+
+/// 재생은 키에서 추첨·눈가림을 다시 뽑아 행과 대조하고, 쌍마다 시도당 마지막 말 하나로 세며, 비용을 더하고, 붙든 이유를 센다.
+#[test]
+fn a_replay_rederives_the_draw_and_the_blind_and_reads_one_word_per_attempt() {
+    let drawn: Vec<String> = thousand_names()
+        .into_iter()
+        .filter(|key| draws(key))
+        .take(3)
+        .collect();
+    let mut rows: Vec<Value> = drawn
+        .iter()
+        .enumerate()
+        .map(|(at, key)| {
+            let mut row = request_row(
+                key,
+                i64::try_from(at).expect("small"),
+                Some(Preferred::Challenger),
+            );
+            row[COST_MICROS.canonical] = json!(9_870);
+            row
+        })
+        .collect();
+    // A receipt that outranks the first comparison.
+    rows.push(label_row(
+        &drawn[0],
+        &on(Receipt::Passed, "tree"),
+        Preferred::Incumbent,
+        10,
+    ));
+    // A held attempt, and a row whose blind was written wrong.
+    rows.push(held_row(&eligible(&drawn[1]), Held::NoDesign, 11));
+    let mut tampered = request_row(&drawn[2], 12, Some(Preferred::Incumbent));
+    tampered[BLIND.canonical] = json!(if Blind::over(&drawn[2]).first() == Side::Challenger {
+        "incumbent_first"
+    } else {
+        "challenger_first"
+    });
+    rows.push(tampered);
+    let undrawn = thousand_names()
+        .into_iter()
+        .find(|key| !draws(key))
+        .expect("an undrawn name");
+    rows.push(request_row(&undrawn, 13, Some(Preferred::Neither)));
+
+    let replayed = replay(&rows);
+    assert_eq!(replayed.requests, 5);
+    assert_eq!(replayed.undrawn, vec![undrawn]);
+    assert_eq!(replayed.blind_mismatches, vec![drawn[2].clone()]);
+    assert_eq!(replayed.held.get(Held::NoDesign.token()), Some(&1));
+    let pair = &replayed.pairs[&("coding".to_string(), "claude-opus-5-2".to_string())];
+    // drawn[0]: the label's word (lost); drawn[1]: won; drawn[2]: its later row's word (lost); undrawn: lost.
+    assert_eq!(
+        pair.standing,
+        Standing {
+            compared: 4,
+            won: 1
+        }
+    );
+    assert_eq!(pair.cost_micros, 3 * 9_870 + 2 * 9_870);
+    assert_eq!(pair.expected_micros, 5 * 12_500);
+}
+
+/// 이 기계의 도전 원장을 씨앗(`tools/challenger-replay/seed.py`)으로 받아 제품의 함수로 다시 읽는다 — 네트워크도 쓰기도 없다.
+#[test]
+#[ignore = "reads a seed of this machine's ledgers; run by hand"]
+fn the_challenger_rows_this_machine_wrote_replayed() {
+    let path = std::env::var_os("ZEROCODE_CHALLENGER_REPLAY_SEED").expect("a seed path");
+    let seed: Value =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("a seed")).expect("json");
+    let mut table = Vec::new();
+    for ledger in seed["ledgers"].as_array().expect("ledgers") {
+        let rows: Vec<Value> = ledger["rows"].as_array().cloned().unwrap_or_default();
+        let replayed = replay(&rows);
+        for ((role, challenger), pair) in &replayed.pairs {
+            table.push(json!({
+                "role": role,
+                "challenger": challenger,
+                "compared": pair.standing.compared,
+                "won": pair.standing.won,
+                "wonLowerBound": pair.standing.lower_bound(),
+                "expectedMicros": pair.expected_micros,
+                "costMicros": pair.cost_micros,
+            }));
+        }
+        println!(
+            "{}",
+            json!({
+                "ledger": ledger["path"],
+                "rows": rows.len(),
+                "requests": replayed.requests,
+                "held": replayed.held,
+                "undrawn": replayed.undrawn.len(),
+                "blindMismatches": replayed.blind_mismatches.len(),
+            })
+        );
+    }
+    println!("{}", json!({ "until": seed["until"], "pairs": table }));
 }

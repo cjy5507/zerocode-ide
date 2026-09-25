@@ -405,18 +405,44 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn git_output(git_root: &Path, args: &[&str]) -> Result<Vec<u8>, io::Error> {
-    let output = Command::new("git")
+    git_start(git_root, args)?.output()
+}
+
+/// A `git` process started and not yet waited for ([`git_start`]).
+struct GitRunning {
+    child: std::process::Child,
+    args: String,
+}
+
+/// [`git_output`]'s process, started now and read later
+/// ([`GitRunning::output`]), so a caller can do other git work while it runs.
+fn git_start(git_root: &Path, args: &[&str]) -> Result<GitRunning, io::Error> {
+    let child = Command::new("git")
         .args(args)
         .current_dir(git_root)
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        )));
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    Ok(GitRunning {
+        child,
+        args: args.join(" "),
+    })
+}
+
+impl GitRunning {
+    /// Wait for it, and answer what it wrote — an error when it failed.
+    fn output(self) -> Result<Vec<u8>, io::Error> {
+        let output = self.child.wait_with_output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "git {} failed: {}",
+                self.args,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(output.stdout)
     }
-    Ok(output.stdout)
 }
 
 /// The blocking half of [`SnapshotStack::capture`]: hash the current worktree
@@ -429,18 +455,42 @@ pub fn compute_worktree_tree(git_root: &Path) -> Result<String, io::Error> {
 }
 
 fn write_worktree_tree(git_root: &Path) -> Result<String, io::Error> {
-    let index = TempIndex::new()?;
-    let has_head = Command::new("git")
+    write_worktree_index(git_root).map(|written| written.tree)
+}
+
+/// A worktree written into an index of its own: the tree
+/// ([`compute_worktree_tree`]), the tree HEAD named that the index was
+/// seeded from (`None` before the first commit), and the index itself,
+/// until this is dropped.
+struct WrittenTree {
+    tree: String,
+    seed: Option<String>,
+    index: TempIndex,
+}
+
+/// The tree HEAD names — `None` in a repository with no commit yet, whose
+/// worktree tree is written from the empty one.
+fn head_tree(git_root: &Path) -> Result<Option<String>, io::Error> {
+    let output = Command::new("git")
         .args(["rev-parse", "--verify", "HEAD^{tree}"])
         .current_dir(git_root)
-        .output()?
-        .status
-        .success();
+        .output()?;
+    let tree = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((output.status.success() && !tree.is_empty()).then_some(tree))
+}
 
-    let read_tree_args = if has_head {
-        vec!["read-tree", "HEAD"]
-    } else {
-        vec!["read-tree", "--empty"]
+/// The one way a worktree tree is written: an index of its own seeded from
+/// HEAD's tree, every working file added over it past the ignores
+/// (`git add -A`), and the tree written from that index. HEAD's files are
+/// in it whether the real index still lists them or the ignores leave them
+/// out; a file of HEAD's gone from disk is not.
+fn write_worktree_index(git_root: &Path) -> Result<WrittenTree, io::Error> {
+    let index = TempIndex::new()?;
+    let seed = head_tree(git_root)?;
+
+    let read_tree_args = match &seed {
+        Some(tree) => vec!["read-tree", tree.as_str()],
+        None => vec!["read-tree", "--empty"],
     };
     let output = index.git(git_root).args(read_tree_args).output()?;
     if !output.status.success() {
@@ -468,7 +518,361 @@ fn write_worktree_tree(git_root: &Path) -> Result<String, io::Error> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let tree = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(WrittenTree { tree, seed, index })
+}
+
+/// A worktree tree ([`compute_worktree_tree`]) with what it was written
+/// from: the tree HEAD named that its index was seeded from, and every path
+/// it holds — what a [`WorktreeStamp`] must have watched to vouch for it
+/// ([`WorktreeStamp::vouches_for`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSource {
+    /// The tree, as [`compute_worktree_tree`] answers it.
+    pub tree: String,
+    seed: Option<String>,
+    /// Every path the tree holds, as git spells it — `None` when one of them
+    /// is a gitlink: a submodule's commit, which no file's times follow.
+    paths: Option<std::collections::BTreeSet<Vec<u8>>>,
+}
+
+/// The mode git writes a gitlink's index entry with.
+const GITLINK_MODE: &[u8] = b"160000";
+
+/// [`compute_worktree_tree`], written the same one way, and what it was
+/// written from ([`WorktreeSource`]): the paths read off the very index the
+/// tree was written from, so they are the tree's own.
+///
+/// # Errors
+/// `git` could not write the tree, or list what its index holds.
+pub fn compute_worktree_source(git_root: &Path) -> Result<WorktreeSource, io::Error> {
+    let written = write_worktree_index(git_root)?;
+    let output = written.index.git(git_root).args(["ls-files", "-z", "-s"]).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    let mut gitlink = false;
+    // `<mode> <object> <stage>\t<path>`, one per NUL.
+    for entry in output.stdout.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
+        let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
+            return Err(io::Error::other("git ls-files wrote an entry with no path"));
+        };
+        gitlink |= entry.starts_with(GITLINK_MODE);
+        paths.insert(entry[tab + 1..].to_vec());
+    }
+    Ok(WorktreeSource {
+        tree: written.tree,
+        seed: written.seed,
+        paths: (!gitlink).then_some(paths),
+    })
+}
+
+/// Every change the files of a worktree tree ([`compute_worktree_tree`])
+/// could take, stamped: one digest over the tree HEAD names and every file a
+/// worktree tree can be written from — HEAD's own, the index's, and the new
+/// ones past the ignores, the same population the tree is written from
+/// (`write_worktree_index`) and never only the real index's — each with
+/// what its `lstat` says (device, inode, mode, size, and the modification
+/// and status-change times), and over every directory a file of such a tree
+/// could be created in: the root, every one that holds such a file, and
+/// every one the ignores do not leave out that holds none — an empty one,
+/// one of ignored files only, one inside a directory that is new itself
+/// (`watched_bare_dirs`). The same stamp twice says no file a tree is
+/// written from was written, replaced, created or removed in between — even
+/// one written and then put back to its old bytes, which a second tree hash
+/// cannot see: a write moves the status-change time, and nothing but the
+/// clock sets it — nor a file created and removed again, wherever the tree
+/// could have held it: the directory it was created in is stamped. An entry
+/// created or removed beside a source file, ignored or not, moves its
+/// directory's times too: the stamp errs toward "changed", never toward
+/// "the same" (t-6263).
+///
+/// Unix only: elsewhere a file keeps no status-change time, and
+/// [`worktree_stamp`] refuses ([`io::ErrorKind::Unsupported`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeStamp {
+    digest: [u8; 32],
+    /// Whether every entry's status-change time was already out of the
+    /// clock's tick when the stamp was taken ([`Self::vouches_until`]).
+    settled: bool,
+    /// The tree HEAD named when the stamp was taken.
+    seed: Option<String>,
+    /// Every file the stamp folded in, as git spells it.
+    names: std::collections::BTreeSet<Vec<u8>>,
+}
+
+impl WorktreeStamp {
+    /// Whether this stamp, taken first, vouches that nothing in the tree
+    /// changed until `later` was taken: the same digest, and no entry whose
+    /// status-change time sat in a tick a later write could still share
+    /// unseen — a filesystem keeping whole seconds, an entry changed in the
+    /// second the stamp was taken.
+    #[must_use]
+    pub fn vouches_until(&self, later: &Self) -> bool {
+        self.settled && self.digest == later.digest
+    }
+
+    /// Whether this stamp, taken first, and `later` vouch that `source` — a
+    /// tree written between the two ([`compute_worktree_source`]) — is what
+    /// the worktree held from the one to the other: nothing stamped changed
+    /// ([`Self::vouches_until`]), the tree was seeded from the HEAD this
+    /// stamp saw, and every path it holds is a file this stamp watched — no
+    /// gitlink among them. A tree holding anything the stamp did not watch
+    /// is one the stamp cannot vouch for, whatever the digests say.
+    #[must_use]
+    pub fn vouches_for(&self, source: &WorktreeSource, later: &Self) -> bool {
+        self.vouches_until(later)
+            && source.seed == self.seed
+            && source
+                .paths
+                .as_ref()
+                .is_some_and(|paths| paths.is_subset(&self.names))
+    }
+}
+
+/// The stamp of the worktree at `git_root` as it stands ([`WorktreeStamp`]):
+/// HEAD's tree named, its files and the index's listed (`git ls-tree`,
+/// `git ls-files`), the directories that hold none of them found
+/// (`watched_bare_dirs`), and one `lstat` per file and per directory.
+///
+/// # Errors
+/// `git` could not list the tree's files or its directories, a directory to
+/// be watched could not be read, or this platform keeps no status-change
+/// time.
+#[cfg(unix)]
+pub fn worktree_stamp(git_root: &Path) -> Result<WorktreeStamp, io::Error> {
+    use sha2::{Digest as _, Sha256};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let taken_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| io::Error::other(format!("system clock before unix epoch: {error}")))?
+        .as_secs();
+    // The index's list and git's list of the directories it tracks nothing
+    // in run while HEAD's tree is named and listed; both are waited for
+    // whatever HEAD's side answers.
+    let listing = git_start(
+        git_root,
+        &["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+    )?;
+    let bare = git_start(
+        git_root,
+        &["ls-files", "-z", "--others", "--exclude-standard", "--directory"],
+    );
+    let from_head = head_tree(git_root).and_then(|seed| {
+        let held = match &seed {
+            Some(tree) => git_output(git_root, &["ls-tree", "-r", "-z", "--name-only", tree])?,
+            None => Vec::new(),
+        };
+        Ok((seed, held))
+    });
+    let listed = listing.output();
+    let bare = bare.and_then(GitRunning::output);
+    let (seed, held) = from_head?;
+    let listed = listed?;
+    let bare = watched_bare_dirs(git_root, &bare?)?;
+    let names: std::collections::BTreeSet<Vec<u8>> = listed
+        .split(|byte| *byte == 0)
+        .chain(held.split(|byte| *byte == 0))
+        .filter(|name| !name.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect();
+    let mut hasher = Sha256::new();
+    hasher.update(seed.as_deref().unwrap_or_default().as_bytes());
+    hasher.update([0]);
+    let mut settled = true;
+    let mut dirs = std::collections::BTreeSet::new();
+    for name in &names {
+        let relative = Path::new(std::ffi::OsStr::from_bytes(name));
+        hasher.update(name);
+        hasher.update([0]);
+        settled &= stamp_entry(&mut hasher, &git_root.join(relative), taken_secs);
+        let mut parent = relative.parent();
+        while let Some(dir) = parent {
+            if !dirs.insert(dir.to_path_buf()) {
+                break;
+            }
+            parent = dir.parent();
+        }
+    }
+    // The root — where a file of a tree that holds none would be created —
+    // and the directories that hold none of its files.
+    dirs.insert(PathBuf::new());
+    dirs.extend(bare);
+    for dir in &dirs {
+        hasher.update(dir.as_os_str().as_bytes());
+        hasher.update([0]);
+        settled &= stamp_entry(&mut hasher, &git_root.join(dir), taken_secs);
+    }
+    Ok(WorktreeStamp {
+        digest: hasher.finalize().into(),
+        settled,
+        seed,
+        names,
+    })
+}
+
+/// See the Unix twin: nothing here keeps a status-change time, so no stamp
+/// can vouch for a tree.
+///
+/// # Errors
+/// Always [`io::ErrorKind::Unsupported`].
+#[cfg(not(unix))]
+pub fn worktree_stamp(_git_root: &Path) -> Result<WorktreeStamp, io::Error> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no status-change time on this platform",
+    ))
+}
+
+/// The directories under `git_root` that hold no file a worktree tree is
+/// written from and that a new one could still be created in, read off
+/// `listed` — git's list of what it tracks nothing in
+/// (`ls-files --others --exclude-standard --directory`): every directory it
+/// names there (an empty one, one of ignored files only, a new one), and
+/// every directory inside those the ignores do not leave out
+/// (`not_ignored`), a level at a time. A new file in any of them moves only
+/// that directory's times, which no stamped file's directory shows. One
+/// that holds a repository of its own is watched and not entered: a tree
+/// holds such a one as a gitlink, which no stamp vouches for
+/// ([`WorktreeStamp::vouches_for`]).
+///
+/// # Errors
+/// A directory to be watched could not be read, or `git` could not say
+/// what the ignores leave out.
+#[cfg(unix)]
+fn watched_bare_dirs(git_root: &Path, listed: &[u8]) -> Result<Vec<PathBuf>, io::Error> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let mut level: Vec<PathBuf> = listed
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| entry.strip_suffix(b"/"))
+        .map(|dir| PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
+        .collect();
+    let mut watched = Vec::new();
+    while !level.is_empty() {
+        let mut inside = Vec::new();
+        for dir in &level {
+            let entries = match std::fs::read_dir(git_root.join(dir)) {
+                Ok(entries) => entries.collect::<Result<Vec<_>, _>>()?,
+                // Gone since git listed it: its parent's times say so.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if entries.iter().any(|entry| entry.file_name() == ".git") {
+                continue;
+            }
+            for entry in entries {
+                if entry.file_type()?.is_dir() {
+                    inside.push(dir.join(entry.file_name()));
+                }
+            }
+        }
+        watched.append(&mut level);
+        level = not_ignored(git_root, inside)?;
+    }
+    Ok(watched)
+}
+
+/// `dirs` less every one the ignores leave out (`git check-ignore`), a
+/// directory whose files `git add -A` never adds.
+///
+/// # Errors
+/// `git` could not say.
+#[cfg(unix)]
+fn not_ignored(git_root: &Path, dirs: Vec<PathBuf>) -> Result<Vec<PathBuf>, io::Error> {
+    use std::io::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if dirs.is_empty() {
+        return Ok(dirs);
+    }
+    let mut asked = Vec::new();
+    for dir in &dirs {
+        asked.extend_from_slice(dir.as_os_str().as_bytes());
+        asked.push(0);
+    }
+    let mut child = Command::new("git")
+        .args(["check-ignore", "-z", "--stdin"])
+        .current_dir(git_root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("git check-ignore took no input"))?;
+    // Written beside the read, so neither pipe fills while the other waits.
+    let output = std::thread::scope(|scope| {
+        let writing = scope.spawn(move || stdin.write_all(&asked));
+        let output = child.wait_with_output();
+        writing
+            .join()
+            .map_err(|_| io::Error::other("git check-ignore's input was not written"))??;
+        output
+    })?;
+    // 0: some are ignored; 1: none is.
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        return Err(io::Error::other(format!(
+            "git check-ignore failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let ignored: std::collections::BTreeSet<&[u8]> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    Ok(dirs
+        .into_iter()
+        .filter(|dir| !ignored.contains(dir.as_os_str().as_bytes()))
+        .collect())
+}
+
+/// Fold one entry's `lstat` into `hasher`; answers whether its
+/// status-change time is out of the clock's open tick
+/// ([`in_an_open_tick`]). A missing entry is stamped as missing; one whose
+/// times cannot be read is never settled.
+#[cfg(unix)]
+fn stamp_entry(hasher: &mut sha2::Sha256, path: &Path, taken_secs: u64) -> bool {
+    use sha2::Digest as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            for word in [meta.dev(), meta.ino(), u64::from(meta.mode()), meta.size()] {
+                hasher.update(word.to_le_bytes());
+            }
+            for word in [meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec()] {
+                hasher.update(word.to_le_bytes());
+            }
+            !in_an_open_tick(meta.ctime(), meta.ctime_nsec(), taken_secs)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            hasher.update(b"missing");
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The widest tick a filesystem's clock keeps (FAT's two seconds).
+#[cfg(unix)]
+const COARSEST_TICK_SECS: i64 = 2;
+
+/// Whether a status-change time could still be shared by a later write the
+/// stamp would not see: one with no fraction of a second — the mark of a
+/// clock that keeps whole seconds — inside the coarsest tick of the moment
+/// the stamp was taken. A clock that keeps fractions is never in doubt.
+#[cfg(unix)]
+fn in_an_open_tick(ctime: i64, ctime_nsec: i64, taken_secs: u64) -> bool {
+    ctime_nsec == 0
+        && ctime.saturating_add(COARSEST_TICK_SECS) >= i64::try_from(taken_secs).unwrap_or(i64::MAX)
 }
 
 fn restore_tree(git_root: &Path, current_tree: &str, target_tree: &str) -> Result<(), io::Error> {
@@ -761,6 +1165,212 @@ fn set_executable(_path: &Path, _executable: bool) -> Result<(), io::Error> {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// A repository of the test's own: an ignored build folder already
+    /// there, and one source file.
+    #[cfg(unix)]
+    fn stamped_repository() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        assert!(Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap().success());
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("lib.rs"), "fn a() {}\n").unwrap();
+        (dir, root)
+    }
+
+    /// A worktree's stamp moves with every change its source files can take
+    /// — a write, even one put back to its old bytes (which leaves the tree
+    /// hash as it was), a file come and gone, a removal — and stands still
+    /// over reads and over what the ignores leave out (t-6263).
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_stamp_sees_a_write_even_one_put_back_to_its_old_bytes() {
+        let (_dir, root) = stamped_repository();
+        let lib = root.join("src").join("lib.rs");
+        let first = worktree_stamp(&root).unwrap();
+        let _ = fs::read(&lib).unwrap();
+        fs::write(root.join("target").join("out.o"), "built").unwrap();
+        assert!(first.vouches_until(&worktree_stamp(&root).unwrap()), "a read and an ignored file change nothing");
+
+        let tree = compute_worktree_tree(&root).unwrap();
+        let before = worktree_stamp(&root).unwrap();
+        fs::write(&lib, "fn b() {}\n").unwrap();
+        fs::write(&lib, "fn a() {}\n").unwrap();
+        assert_eq!(compute_worktree_tree(&root).unwrap(), tree, "the tree hash cannot see the round trip");
+        assert!(!before.vouches_until(&worktree_stamp(&root).unwrap()), "the stamp can");
+
+        let before = worktree_stamp(&root).unwrap();
+        fs::write(root.join("src").join("new.rs"), "fn c() {}\n").unwrap();
+        fs::remove_file(root.join("src").join("new.rs")).unwrap();
+        assert!(!before.vouches_until(&worktree_stamp(&root).unwrap()), "a file come and gone moves its folder");
+
+        let before = worktree_stamp(&root).unwrap();
+        fs::remove_file(&lib).unwrap();
+        assert!(!before.vouches_until(&worktree_stamp(&root).unwrap()), "a removal");
+    }
+
+    /// `git` in `root`, as a test's own author, succeeding.
+    #[cfg(unix)]
+    fn git_in(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.invalid"])
+            .args(args)
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A repository whose HEAD holds a file its ignores leave out (added by
+    /// force), which the index has since let go of (`git rm --cached`): on
+    /// disk, ignored, in no index — and still in every worktree tree, which
+    /// is written from HEAD's.
+    #[cfg(unix)]
+    fn a_file_the_index_let_go_of() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        git_in(&root, &["init", "-q"]);
+        fs::write(root.join(".gitignore"), "src/*.rs\n").unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        let input = root.join("src").join("input.rs");
+        fs::write(&input, "A\n").unwrap();
+        git_in(&root, &["add", ".gitignore"]);
+        git_in(&root, &["add", "-f", "src/input.rs"]);
+        git_in(&root, &["commit", "-q", "-m", "a file the ignores leave out"]);
+        git_in(&root, &["rm", "-q", "--cached", "src/input.rs"]);
+        (dir, root, input)
+    }
+
+    /// The stamp watches every file the worktree tree is written from — the
+    /// tree is HEAD's, filled from the working files — and not only the
+    /// ones the index still lists (t-6263 R4a-1): a file HEAD holds that the
+    /// index let go of and the ignores leave out is in the tree, and a write
+    /// to it put back to its old bytes moves the stamp as any other does.
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_stamp_watches_a_file_the_tree_holds_that_the_index_let_go_of() {
+        let (_dir, root, input) = a_file_the_index_let_go_of();
+        let tree = compute_worktree_tree(&root).unwrap();
+        let held = git_output(&root, &["ls-tree", "-r", "--name-only", &tree]).unwrap();
+        assert!(
+            String::from_utf8_lossy(&held).lines().any(|path| path == "src/input.rs"),
+            "the tree holds the file"
+        );
+        let before = worktree_stamp(&root).unwrap();
+        assert!(before.vouches_until(&worktree_stamp(&root).unwrap()), "untouched");
+        fs::write(&input, "B\n").unwrap();
+        let _ = fs::read(&input).unwrap();
+        fs::write(&input, "A\n").unwrap();
+        assert_eq!(compute_worktree_tree(&root).unwrap(), tree, "the tree is back to its bytes");
+        assert!(!before.vouches_until(&worktree_stamp(&root).unwrap()), "the stamp saw the write");
+    }
+
+    /// A stamp vouches for a tree only over what it watched (t-6263 R4a-1):
+    /// the tree written the one way every worktree tree is, from the HEAD the
+    /// stamp saw, every path of it among the stamp's files, and none a
+    /// gitlink — a submodule's commit, which no file's times follow.
+    #[cfg(unix)]
+    #[test]
+    fn a_stamp_vouches_for_a_tree_only_over_the_files_it_watched_and_the_head_it_saw() {
+        let (_dir, root, input) = a_file_the_index_let_go_of();
+        let first = worktree_stamp(&root).unwrap();
+        let source = compute_worktree_source(&root).unwrap();
+        assert_eq!(source.tree, compute_worktree_tree(&root).unwrap(), "one tree, written one way");
+        assert!(first.vouches_for(&source, &worktree_stamp(&root).unwrap()), "untouched: the tree it held");
+        fs::write(&input, "B\n").unwrap();
+        fs::write(&input, "A\n").unwrap();
+        let back = compute_worktree_source(&root).unwrap();
+        assert_eq!(back.tree, source.tree, "the tree is back to its bytes");
+        assert!(!first.vouches_for(&back, &worktree_stamp(&root).unwrap()), "a write put back");
+
+        let before = worktree_stamp(&root).unwrap();
+        git_in(&root, &["commit", "-q", "-m", "let the file go"]);
+        let moved = compute_worktree_source(&root).unwrap();
+        assert_ne!(moved.tree, source.tree, "HEAD no longer holds the ignored file");
+        assert!(!before.vouches_for(&moved, &worktree_stamp(&root).unwrap()), "a tree of another HEAD");
+        let now = worktree_stamp(&root).unwrap();
+        assert!(!now.vouches_for(&source, &worktree_stamp(&root).unwrap()), "a tree written from a HEAD the stamp never saw");
+
+        let (_outer_dir, outer) = stamped_repository();
+        let sub = outer.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        git_in(&sub, &["init", "-q"]);
+        fs::write(sub.join("mod.rs"), "fn m() {}\n").unwrap();
+        git_in(&sub, &["add", "mod.rs"]);
+        git_in(&sub, &["commit", "-q", "-m", "a module"]);
+        git_in(&outer, &["-c", "advice.addEmbeddedRepo=false", "add", "sub"]);
+        git_in(&outer, &["commit", "-q", "-m", "a submodule's commit"]);
+        let stamp = worktree_stamp(&outer).unwrap();
+        let held = compute_worktree_source(&outer).unwrap();
+        assert!(!stamp.vouches_for(&held, &worktree_stamp(&outer).unwrap()), "a gitlink's commit is no file's times");
+    }
+
+    /// The stamp watches every folder a file of the tree could be created in,
+    /// and not only the folders of the files it lists (t-6263 R4a-2): the
+    /// root of a tree that holds nothing, and every folder git tracks nothing
+    /// in that the ignores do not leave out — an empty one, one of ignored
+    /// files only, one inside a folder that is new itself. A file come and
+    /// gone in any of them, read in between, leaves the tree as it was and
+    /// moves the stamp; one come and gone in a folder the ignores leave out
+    /// moves nothing, as the tree does not.
+    #[cfg(unix)]
+    #[test]
+    fn a_stamp_watches_every_folder_a_file_of_the_tree_could_be_created_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        git_in(&root, &["init", "-q"]);
+        git_in(&root, &["commit", "-q", "--allow-empty", "-m", "nothing yet"]);
+        let come_and_gone = |folder: &Path| {
+            let path = folder.join("during-verification.rs");
+            fs::write(&path, "B\n").unwrap();
+            let _ = fs::read(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+        };
+
+        let first = worktree_stamp(&root).unwrap();
+        let source = compute_worktree_source(&root).unwrap();
+        assert!(first.vouches_for(&source, &worktree_stamp(&root).unwrap()), "untouched: the empty tree it held");
+        come_and_gone(&root);
+        assert_eq!(compute_worktree_source(&root).unwrap(), source, "the tree is empty again");
+        assert!(!first.vouches_for(&source, &worktree_stamp(&root).unwrap()), "a file come and gone at the root");
+
+        fs::write(root.join(".gitignore"), "*.log\nbuild/\n").unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("lib.rs"), "fn a() {}\n").unwrap();
+        git_in(&root, &["add", "."]);
+        git_in(&root, &["commit", "-q", "-m", "a source file"]);
+        for folder in ["empty", "logs", "fresh/inner", "fresh/build", "build"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        fs::write(root.join("logs").join("a.log"), "ignored").unwrap();
+        fs::write(root.join("fresh").join("f.rs"), "fn f() {}\n").unwrap();
+        for folder in ["", "empty", "logs", "fresh", "fresh/inner"] {
+            let before = worktree_stamp(&root).unwrap();
+            let source = compute_worktree_source(&root).unwrap();
+            come_and_gone(&root.join(folder));
+            assert_eq!(compute_worktree_source(&root).unwrap(), source, "{folder:?}: the tree is as it was");
+            assert!(!before.vouches_for(&source, &worktree_stamp(&root).unwrap()), "{folder:?}: a file come and gone");
+        }
+        let before = worktree_stamp(&root).unwrap();
+        let source = compute_worktree_source(&root).unwrap();
+        for folder in ["build", "fresh/build"] {
+            come_and_gone(&root.join(folder));
+        }
+        assert!(before.vouches_for(&source, &worktree_stamp(&root).unwrap()), "what the ignores leave out moves nothing");
+    }
+
+    /// A whole-second status-change time inside the coarsest tick of the
+    /// stamp's own moment is in doubt; a fraction, or an older second, is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_whole_second_change_in_the_stamps_own_tick_is_in_doubt() {
+        assert!(in_an_open_tick(100, 0, 101));
+        assert!(in_an_open_tick(100, 0, 102));
+        assert!(!in_an_open_tick(100, 1, 101), "a clock that keeps fractions is never in doubt");
+        assert!(!in_an_open_tick(97, 0, 101), "long past its tick");
+    }
 
     /// A directory with no `.git` on itself or any ancestor is answered
     /// without a `git` process (t-2902): the ancestry precheck says "not a

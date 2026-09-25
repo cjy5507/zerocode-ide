@@ -193,10 +193,12 @@ pub use core_types::{
     UsageTracker,
 };
 pub use file_ops::{
-    edit_file, glob_search, grep_search, read_file, replace_file_atomic, write_file, EditFileOutput,
-    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, ReadFileOutput, SettingsFileLock,
-    StructuredPatchHunk, TextFilePayload, WriteFileOutput,
+    edit_file, glob_search, grep_search, process_alive, read_file, replace_file_atomic, write_file,
+    EditFileOutput, GlobSearchOutput, GrepSearchInput, GrepSearchOutput, ReadFileOutput,
+    SettingsFileLock, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
+#[cfg(unix)]
+pub use file_ops::process_alive_from_probe;
 pub use file_read_registry::{FileFreshness, FileReadRegistry};
 pub use verified_state::{
     VerifiedStateEvent, VerifiedStateLedger, VERIFIED_STATE_REMINDER_PREFIX,
@@ -256,6 +258,7 @@ pub use model_router::{
     AxisMetrics, AxisReading, AxisSample, DecisionAnswer, DecisionRejection, DecisionVerdict, ROUTE_TRUST_FLOOR,
     CALIBRATION_BINS, PROBABILITY_SUM_TOLERANCE,
     read_route_outcome_summary, read_route_outcomes, read_route_outcomes_across_projects,
+    SEAT_SAMPLE_SOURCE,
     recommend_auto_assignments,
     recommend_auto_assignments_with_feedback, recommend_auto_assignments_with_learned_specialty,
     recommend_auto_assignments_with_options,
@@ -274,7 +277,7 @@ pub use model_router::{
     ModelPrice, PlanCacheState, PlanCandidate, PlanChoice, PlanContext, PlanEstimate, PlanEvidence,
     PlanPriors, ScoredPlan, SwitchTrigger, VerifyMode,
     DecisionOutcomeStat, EffortCeiling, FreshnessPolicy, LaneRouteMetadata,
-    LearnedSpecialtyEntry, LearnedSpecialtyHint, VerdictBasis, VerdictSubject, VerifyMetrics,
+    learned_rate, LearnedSpecialtyEntry, LearnedSpecialtyHint, VerdictBasis, VerdictSubject, VerifyMetrics,
     ACCURACY_MIN_DECISIVE, CONFIDENT_DECISIVE_SAMPLES,
     ModelCapability, ModelDescriptor, ModelInventory, ModelStatus, ModelTier, RoleOverride,
     RoleSelector, RouteAudit, RouteAutoClassifierMode, RouteConfidence, RouteContextNeed,

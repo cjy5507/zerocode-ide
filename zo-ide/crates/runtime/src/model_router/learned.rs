@@ -186,34 +186,7 @@ impl LearnedSpecialtyHint {
         now: u64,
         canonicalize_model: impl Fn(&str) -> String,
     ) -> Self {
-        // Pass 1: weighted (win, loss) sums per (role, canonical model),
-        // pooled across every route_key that shares a role — learned
-        // specialty is a ROLE-level signal (same-role peers), not scoped to
-        // one subagent target the way the plain feedback hint is.
-        // One sample per attributed attempt, never a fold — the same
-        // learning samples every other learner reads (`learning_samples`).
-        let mut per_role_model: BTreeMap<(RouteRole, String), (f64, f64)> = BTreeMap::new();
-        for record in learning_samples(records) {
-            if is_pin_availability_noise(&record) {
-                continue;
-            }
-            let Some(role) = effective_role_for_record(&record) else {
-                continue;
-            };
-            let Some(win) =
-                decisive_outcome(record.status.as_str(), record.provider_error_class.as_deref())
-            else {
-                continue;
-            };
-            let weight = record_weight(&record, now);
-            let model = canonicalize_model(&record.selected_model);
-            let entry = per_role_model.entry((role, model)).or_insert((0.0, 0.0));
-            if win {
-                entry.0 += weight;
-            } else {
-                entry.1 += weight;
-            }
-        }
+        let per_role_model = weighted_tallies(records, now, canonicalize_model);
 
         // Pass 2: group by role so each model's peers are its SAME-role
         // siblings only.
@@ -257,6 +230,72 @@ impl LearnedSpecialtyHint {
         }
         Self { entries }
     }
+}
+
+/// Pass 1 of the learned signal: weighted (win, loss) sums per (role,
+/// canonical model), pooled across every `route_key` that shares a role —
+/// learned specialty is a ROLE-level signal (same-role peers), not scoped to
+/// one subagent target the way the plain feedback hint is. One sample per
+/// attributed attempt, never a fold — the same learning samples every other
+/// learner reads (`learning_samples`).
+///
+/// Shared by [`LearnedSpecialtyHint::compute`] and [`learned_rate`], so the
+/// rate the challenger arm holds a newcomer to is the incumbent's record as
+/// the router itself weighs it — the same decay, the same verdict weight,
+/// the same pin exclusion — and never a second reading of the same rows.
+fn weighted_tallies(
+    records: &[RouteOutcomeRecord],
+    now: u64,
+    canonicalize_model: impl Fn(&str) -> String,
+) -> BTreeMap<(RouteRole, String), (f64, f64)> {
+    let mut per_role_model: BTreeMap<(RouteRole, String), (f64, f64)> = BTreeMap::new();
+    for record in learning_samples(records) {
+        if is_pin_availability_noise(&record) {
+            continue;
+        }
+        let Some(role) = effective_role_for_record(&record) else {
+            continue;
+        };
+        let Some(win) =
+            decisive_outcome(record.status.as_str(), record.provider_error_class.as_deref())
+        else {
+            continue;
+        };
+        let weight = record_weight(&record, now);
+        let model = canonicalize_model(&record.selected_model);
+        let entry = per_role_model.entry((role, model)).or_insert((0.0, 0.0));
+        if win {
+            entry.0 += weight;
+        } else {
+            entry.1 += weight;
+        }
+    }
+    per_role_model
+}
+
+/// The weighted win rate of `model_id` for `role` — the incumbent's own
+/// record, as the learner weighs it — or `None` while the pair has fewer
+/// weighted decisive samples than the learner itself requires before it
+/// says anything (`MIN_WEIGHTED_DECISIVE_SAMPLES`).
+///
+/// This is the line a challenger's standing must clear before its evidence
+/// may move the role's model (`zerocode_core::jev::challenger::Standing::passes`):
+/// read here, from the same tallies and the same floor as the specialty
+/// hint, because a bar spelled by another reader would be another bar. A
+/// pair under the floor has no rate, and a challenger is held to nothing it
+/// cannot be measured against.
+#[must_use]
+pub fn learned_rate(
+    records: &[RouteOutcomeRecord],
+    now: u64,
+    role: RouteRole,
+    model_id: &str,
+    canonicalize_model: impl Fn(&str) -> String,
+) -> Option<f64> {
+    let model = canonicalize_model(model_id);
+    let (won, lost) = weighted_tallies(records, now, canonicalize_model).remove(&(role, model))?;
+    let own_weighted = won + lost;
+    (own_weighted >= MIN_WEIGHTED_DECISIVE_SAMPLES).then(|| won / own_weighted)
 }
 
 /// `records` with `routeSource == "pin"` measure AVAILABILITY (a config

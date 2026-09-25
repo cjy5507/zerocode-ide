@@ -115,16 +115,24 @@ pub(crate) fn bind_attempt(
 /// ([`bind_attempt`], or the spawn path's own copy), so the attempt it names
 /// and the model and route it credits are the judged run's, whatever the
 /// store says by now. `None` (nothing was bound) records nothing.
+///
+/// `source` is the source state the verifier saw when it settled
+/// (`RouteOutcomeRecord::source`), where the recorder knows it — a bound
+/// verifier's own working tree — and `None` where it does not: a verdict
+/// that cannot say which work it judged is never a receipt for a
+/// comparison of the attempt's (t-6263), and counts for the router as
+/// before.
 pub(crate) fn record_verdict_outcome_for_attempt(
     attempt: Option<&AgentOutput>,
     passed: bool,
     kind: VerdictKind,
     basis: runtime::VerdictBasis,
+    source: Option<String>,
 ) {
     let (Some(attempt), Ok(cwd)) = (attempt, std::env::current_dir()) else {
         return;
     };
-    record_attempt_verdict_at(&cwd, attempt, passed, kind, basis);
+    record_attempt_verdict_at(&cwd, attempt, passed, kind, basis, source);
 }
 
 /// Record that a verification BOUND to an attempt ended without a settled
@@ -288,11 +296,12 @@ fn record_attempt_verdict_at(
     passed: bool,
     kind: VerdictKind,
     basis: runtime::VerdictBasis,
+    source: Option<String>,
 ) {
     let Some(record) = base_record_for_attempt(attempt, verdict_status(passed)) else {
         return;
     };
-    write_verdict_record(cwd, record, kind, basis);
+    write_verdict_record(cwd, record.with_source(source), kind, basis);
 }
 
 /// Terminal-only by construction: a verdict is always a settled pass/fail
@@ -320,6 +329,10 @@ fn write_verdict_record(
         .with_verdict_basis(basis)
         .with_signal_weight(Some(kind.weight()));
     let _ = runtime::record_route_outcome(cwd, &record);
+    // A verdict about an attempt is the receipt the challenger arm's
+    // comparison of that attempt has been waiting for (t-6263): its label is
+    // written here, where the verdict lands, and never off a completion.
+    let _labelled = crate::misc_tools::note_challenger_verdicts(cwd);
 }
 
 /// The objective verdict a command gate settles for a single-item phase: a
@@ -660,8 +673,8 @@ mod tests {
             "routeSource": "pin", "runGeneration": 2, "tokenHistory": [999],
         }));
 
-        super::record_attempt_verdict_at(&cwd, &judged, true, VerdictKind::PassFail, runtime::VerdictBasis::Model);
-        super::record_attempt_verdict_at(&cwd, &judged, false, VerdictKind::PassFail, runtime::VerdictBasis::Model);
+        super::record_attempt_verdict_at(&cwd, &judged, true, VerdictKind::PassFail, runtime::VerdictBasis::Model, None);
+        super::record_attempt_verdict_at(&cwd, &judged, false, VerdictKind::PassFail, runtime::VerdictBasis::Model, None);
         super::record_verification_unavailable_at(&cwd, &judged);
 
         let outcomes = read_outcomes(&cwd);
