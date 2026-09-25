@@ -150,10 +150,91 @@ class TheTable(unittest.TestCase):
         del older["judged"]["agreement"]["notComparedBy"]
         self.assertIn("| 4 |", replay.render([replay.seat_row(older, "before")]))
 
+    def test_the_act_line_rides_before_and_after(self) -> None:
+        # t-9468: the answers at the line the seat's bands fix, and at the
+        # line its labels draw — or why they draw none.
+        at = lambda line, share, wrong, baseline, left: {  # noqa: E731
+            "fromPermille": line, "applyShare": share, "errorPermille": wrong,
+            "baselineErrorPermille": baseline, "underErrorPermille": left,
+        }
+        drew = seat("notify", True, "rise", None, 50, 47)
+        drew["calibration"] = {
+            "fixed": at(850, 0.41, 60, 1000, 480), "actFromPermille": 300, "reason": None,
+            "drawn": at(300, 0.5, 60, 1000, 500), "tableLine": 300,
+        }
+        drew["verdict"]["actLine"] = 300
+        none = seat("stall", True, "hold", "too_few_rows", 0, 0)
+        none["calibration"] = {"fixed": at(850, 0.9, 70, 400, 0), "actFromPermille": None, "reason": "whole"}
+        rows = [replay.seat_row(drew, "after"), replay.seat_row(none, "after")]
+        self.assertEqual((rows[0]["judgedAt"], rows[0]["tableLine"]), (300, 300))
+        text = replay.render_lines(rows)
+        self.assertIn("| notify | after | 850‰ | 41% | 60‰ | 1000‰ | 480‰ | 300‰ | 50% | 60‰ | 1000‰ | 500‰ | 300‰ |", text)
+        self.assertIn("| stall | after | 850‰ | 90% | 70‰ | 400‰ | 0‰ | none (whole) | — | — | — | — | — |", text)
+        older = replay.seat_row(seat("notify", True, "hold", None, 0, 0), "before")
+        self.assertEqual((older["fixedLine"], older["actLine"], older["reason"]), (None, None, None), "a binary older than the line")
+
     def test_a_binary_is_named_by_its_label(self) -> None:
         self.assertEqual(replay.binaries(["before=/a/zo"]), [("before", Path("/a/zo"))])
         with self.assertRaises(SystemExit):
             replay.binaries(["/a/zo"])
+
+
+class TheTableKept(unittest.TestCase):
+    """t-9468: the rows a binary drew are kept beside the ledger each was
+    read off, through a file renamed into place, and never outside the home
+    the command was pointed at — a snapshot's folder is opened for the write
+    and closed again."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.TemporaryDirectory()
+        self.home = Path(self.dir.name) / ".zo"
+        self.window = self.home / "jev"
+        self.window.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        for dirpath, dirnames, filenames in os.walk(self.dir.name):
+            for name in dirnames + filenames:
+                os.chmod(os.path.join(dirpath, name), 0o700)
+        self.dir.cleanup()
+
+    def answer(self, found: Path) -> dict:
+        row = {"seat": "notify", "rubricVersion": 1, "computedAtMs": 5, "actFromPermille": 300}
+        return {
+            "thresholdsFile": "thresholds.json",
+            "seats": [
+                {"id": "notify", "found": str(found), "calibration": {"row": row}},
+                {"id": "recall", "found": str(found), "calibration": {"row": None}},
+                {"id": "stall", "found": None, "calibration": {"row": dict(row, seat="stall")}},
+            ],
+        }
+
+    def test_rows_are_kept_beside_their_ledger_and_only_under_the_home(self) -> None:
+        kept = replay.threshold_rows(self.answer(self.window / "notify-call.jsonl"), self.home)
+        self.assertEqual(list(kept), [self.window])
+        self.assertEqual([row["seat"] for row in kept[self.window]], ["notify"], "only a seat whose stage reads a line")
+        with self.assertRaises(SystemExit):
+            replay.threshold_rows(self.answer(Path(self.dir.name) / "elsewhere" / "notify-call.jsonl"), self.home)
+
+    def test_a_read_only_folder_is_opened_for_the_rename_and_closed_again(self) -> None:
+        (self.window / "thresholds.json").write_text("[]\n")
+        replay.read_only(self.home)
+        rows = [{"seat": "notify", "actFromPermille": 300}]
+        path = replay.write_table(self.window, "thresholds.json", rows)
+        self.assertEqual(json.loads(path.read_text()), rows)
+        self.assertEqual([p.name for p in self.window.iterdir()], ["thresholds.json"], "no temporary file left behind")
+        with self.assertRaises(PermissionError):
+            (self.window / "new.jsonl").write_text("written\n")
+        with self.assertRaises(PermissionError):
+            path.write_text("[]\n")
+
+    def test_the_snapshot_takes_the_table_the_binary_names(self) -> None:
+        source = Path(self.dir.name) / "person" / ".zo"
+        (source / "jev").mkdir(parents=True)
+        (source / "jev" / "notify-call.jsonl").write_text('{"at": 1}\n')
+        (source / "jev" / "thresholds.json").write_text('[{"seat": "notify"}]\n')
+        out = Path(self.dir.name) / "copy"
+        copies = replay.snapshot(source, [], ["notify-call.jsonl", "thresholds.json"], out)
+        self.assertEqual(sorted(path.name for path in copies), ["notify-call.jsonl", "thresholds.json"])
 
 
 if __name__ == "__main__":

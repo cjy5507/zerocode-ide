@@ -10,6 +10,7 @@ only by what the change changed.
     replay.py snapshot --zo <zo> --project <dir> [--project <dir> ...] --out <dir>
     replay.py table --snapshot <dir> --project <dir> --zo before=<zo> --zo after=<zo>
                     [--seat <id> ...] [--json <file>]
+    replay.py thresholds --zo <zo> --home <zo home> --project <dir> [--write]
 
 `snapshot` copies, read-only, the seat ledgers the use table names — the
 names are read from the binary (`zo jev summary --json` against an empty home
@@ -17,7 +18,14 @@ lists every seat's `ledger`), never spelled here — from `<zo home>/jev/` and
 from each project's `projects/<slug>/state/smart-router/`, with the settings
 file's `smart` block and nothing else of it. The person's files are read and
 never written. `table` runs each binary with `ZO_CONFIG_HOME`, `ZO_HOME` and
-`HOME` pointed away from the person's home and prints one markdown table.
+`HOME` pointed away from the person's home and prints one markdown table,
+and beside it the act-line table (t-9468): each seat's answers at the line its
+bands fix and at the line its labels draw.
+
+`thresholds` asks one binary what each seat's labels draw and keeps it where
+the product reads it — the thresholds file beside each seat's ledger, named by
+the binary — only on `--write`, through a file renamed into place, and never
+outside the home it was pointed at: run on a snapshot it writes the snapshot.
 
 The judged numbers (window, marks, verdict) are counts of rows and do not move
 with the clock; the week's are read from the moment the command runs.
@@ -100,10 +108,15 @@ def summary(zo: Path, zo_home: Path, project: Path) -> dict:
 
 
 def ledger_names(zo: Path, project: Path) -> list[str]:
-    """Every seat's ledger file, as the binary's own table names it."""
+    """Every seat's ledger file, as the binary's own table names it, and the
+    file the seats' act lines are kept in beside them (t-9468) when the
+    binary names one."""
     with tempfile.TemporaryDirectory(prefix="jev-seat-replay-empty-") as empty:
-        seats = summary(zo, Path(empty), project)["seats"]
-    return sorted({seat["ledger"] for seat in seats})
+        answer = summary(zo, Path(empty), project)
+    names = {seat["ledger"] for seat in answer["seats"]}
+    if answer.get("thresholdsFile"):
+        names.add(answer["thresholdsFile"])
+    return sorted(names)
 
 
 def read_only(path: Path) -> None:
@@ -165,6 +178,36 @@ def seat_row(seat: dict, binary: str) -> dict:
         "baselineCompared": agreement.get("baselineCompared"),
         "weekAnswered": (seat.get("week") or {}).get("answered"),
         "toNext": seat.get("rowsToNextJudgment"),
+        # The act line (t-9468): the answers at the line the seat's bands fix
+        # and at the line its labels draw — or why they draw none — and the
+        # line the product read, from the table beside the ledger.
+        **line_numbers("fixed", calibration(seat).get("fixed")),
+        "actLine": calibration(seat).get("actFromPermille"),
+        "reason": calibration(seat).get("reason"),
+        **line_numbers("drawn", calibration(seat).get("drawn")),
+        "tableLine": calibration(seat).get("tableLine"),
+        "judgedAt": verdict.get("actLine"),
+    }
+
+
+def calibration(seat: dict) -> dict:
+    """What a binary's summary said of a seat's act line; nothing from a
+    binary older than it."""
+    return seat.get("calibration") or {}
+
+
+def line_numbers(side: str, at: dict | None) -> dict:
+    """The answers at one line, as the binary counted them: the line, the
+    share of answered requests it acts on, and how often the marks of what
+    it acts on, the baseline on the same marks, and the marks of what it
+    leaves alone said wrong, per thousand."""
+    at = at or {}
+    return {
+        f"{side}Line": at.get("fromPermille"),
+        f"{side}Share": at.get("applyShare"),
+        f"{side}Error": at.get("errorPermille"),
+        f"{side}BaselineError": at.get("baselineErrorPermille"),
+        f"{side}UnderError": at.get("underErrorPermille"),
     }
 
 
@@ -224,6 +267,88 @@ def render(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def share(value) -> str:
+    return "—" if value is None else f"{value * 100:.0f}%"
+
+
+def per_thousand(value) -> str:
+    return "—" if value is None else f"{value}‰"
+
+
+def render_lines(rows: list[dict]) -> str:
+    """The act-line table: before — the line the seat's bands fix — and
+    after — the line its labels draw, or why none — each with the share it
+    acts on, how often what it acts on is wrong, the baseline on the same
+    marks, and what it leaves alone."""
+    head = (
+        "| seat | binary | fixed line | acts on | wrong | baseline wrong | left wrong "
+        "| drawn line | acts on | wrong | baseline wrong | left wrong | table line |"
+    )
+    lines = [head, "|" + "|".join(["---"] * (head.count("|") - 1)) + "|"]
+    for row in rows:
+        drawn = per_thousand(row["actLine"]) if row["actLine"] is not None else f"none ({cell(row['reason'])})"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    row["seat"],
+                    row["binary"],
+                    per_thousand(row["fixedLine"]),
+                    share(row["fixedShare"]),
+                    per_thousand(row["fixedError"]),
+                    per_thousand(row["fixedBaselineError"]),
+                    per_thousand(row["fixedUnderError"]),
+                    drawn,
+                    share(row["drawnShare"]),
+                    per_thousand(row["drawnError"]),
+                    per_thousand(row["drawnBaselineError"]),
+                    per_thousand(row["drawnUnderError"]),
+                    per_thousand(row["tableLine"]),
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines)
+
+
+def threshold_rows(answer: dict, home: Path) -> dict[Path, list[dict]]:
+    """The rows one binary's summary drew for the seats whose stage reads an
+    act line, grouped by the folder each seat's ledger was found in — every
+    folder under `home`, or the command refuses: a row is kept beside the
+    ledger it was read off, and nowhere else."""
+    folders: dict[Path, list[dict]] = {}
+    for seat in answer["seats"]:
+        row = calibration(seat).get("row")
+        if not row or not seat.get("found"):
+            continue
+        folder = Path(seat["found"]).parent
+        if not folder.resolve().is_relative_to(home.resolve()):
+            raise SystemExit(f"{seat['id']}: its ledger is at {folder}, outside {home}")
+        folders.setdefault(folder, []).append(row)
+    return folders
+
+
+def write_table(folder: Path, name: str, rows: list[dict]) -> Path:
+    """Keep `rows` as `folder/name`: written beside it and renamed over it,
+    so a reader sees the old table or the new one and never half of either.
+    A folder a snapshot left read-only is opened for the rename and closed
+    again, and the file keeps the folder's word."""
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    closed = not mode & stat.S_IWUSR
+    if closed:
+        folder.chmod(mode | stat.S_IWUSR)
+    try:
+        handle, temporary = tempfile.mkstemp(dir=folder, prefix=f".{name}.", suffix=".tmp")
+        with os.fdopen(handle, "w") as out:
+            out.write(json.dumps(rows, indent=1) + "\n")
+        os.chmod(temporary, 0o444 if closed else 0o644)
+        os.replace(temporary, folder / name)
+    finally:
+        if closed:
+            folder.chmod(mode)
+    return folder / name
+
+
 def binaries(pairs: list[str]) -> list[tuple[str, Path]]:
     named = []
     for pair in pairs:
@@ -248,16 +373,36 @@ def main(argv: list[str]) -> int:
     table.add_argument("--zo", action="append", required=True, help="label=path, one per binary")
     table.add_argument("--seat", action="append", default=[])
     table.add_argument("--json", type=Path)
+    keep = verbs.add_parser("thresholds", help="what each seat's labels draw, kept beside its ledger on --write")
+    keep.add_argument("--zo", type=Path, required=True)
+    keep.add_argument("--home", type=Path, required=True, help="the zo home to read — and, on --write, to keep the table in")
+    keep.add_argument("--project", type=Path, required=True)
+    keep.add_argument("--write", action="store_true", help="keep the rows; without it, only say what would be kept")
     args = parser.parse_args(argv)
     if args.verb == "snapshot":
         names = ledger_names(args.zo, args.project[0] if args.project else Path.cwd())
         copies = snapshot(args.zo_home, args.project, names, args.out)
         print(f"{len(copies)} ledgers copied read-only under {args.out / '.zo'}")
         return 0
+    if args.verb == "thresholds":
+        answer = summary(args.zo, args.home, args.project)
+        name = answer.get("thresholdsFile")
+        if not name:
+            raise SystemExit(f"{args.zo}: this binary names no thresholds file")
+        for folder, kept in threshold_rows(answer, args.home).items():
+            said = ", ".join(f"{row['seat']} {row.get('actFromPermille') or 'none (' + str(row.get('reason')) + ')'}" for row in kept)
+            if args.write:
+                print(f"kept {write_table(folder, name, kept)}: {said}")
+            else:
+                print(f"would keep {folder / name}: {said}")
+        return 0
     home = args.snapshot / ".zo"
     summaries = [(label, summary(zo, home, args.project)) for label, zo in binaries(args.zo)]
     rows = rows_of(summaries, args.seat)
     print(render(rows))
+    if any(row["fixedLine"] is not None or row["reason"] is not None or row["actLine"] is not None for row in rows):
+        print()
+        print(render_lines(rows))
     if args.json:
         args.json.write_text(json.dumps(rows, indent=1) + "\n")
     return 0
