@@ -81,6 +81,9 @@ public final class PerceptionSession: ReflexPerceptionSession {
 
     /// The plan's detectors on `frame`, in plan order. A frame whose capture time is unknown has no
     /// reference an observation could name (the runtime's cursor never hands one over): it gets none.
+    /// Confirmations and tracks are the session's to settle: a detector that answers `budget`, late
+    /// or unread, has already let go of them, so a runtime that drops that answer has nothing of
+    /// this session's to take back.
     public func observe(frame: ReflexFrameFacts, pixels: ReflexPixels,
                         budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
         guard let reference = ReflexFrameRef(frame) else {
@@ -118,9 +121,25 @@ public final class PerceptionSession: ReflexPerceptionSession {
         return nil
     }
 
+    /// One detector's answer on a frame every detector can read: its reading, if the tick's deadline
+    /// had not passed when the reading ended. A reading that ends past it is late: it answers
+    /// `budget` with no value, target or cells and forgets what the detector held, as an unread one
+    /// does, and no detector after it reads. The samples it read stay on its receipt; the tick paid
+    /// them.
+    private func look(_ detector: inout Detector, _ frame: ReflexFrameFacts, _ reference: ReflexFrameRef,
+                      _ plane: PerceptionPlane, _ budget: inout ReflexPerceptionBudget,
+                      _ exhausted: inout Bool) -> ReflexObservation {
+        let seen = read(&detector, frame, reference, plane, &budget, &exhausted)
+        // `spend(0)` is the budget's own deadline test with nothing left to pay.
+        if exhausted || budget.spend(0) { return seen }
+        exhausted = true
+        detector.forget()
+        return observation(detector, frame, reference, unknown: .budget, samples: seen.samples)
+    }
+
     /// One detector's reading of a frame every detector can read. It works on the detector in place:
     /// a copy would copy its scratch every frame.
-    private func look(_ detector: inout Detector, _ frame: ReflexFrameFacts, _ reference: ReflexFrameRef,
+    private func read(_ detector: inout Detector, _ frame: ReflexFrameFacts, _ reference: ReflexFrameRef,
                       _ plane: PerceptionPlane, _ budget: inout ReflexPerceptionBudget,
                       _ exhausted: inout Bool) -> ReflexObservation {
         func observation(_ detector: Detector, unknown: ReflexUnknown? = nil, value: Int64? = nil,

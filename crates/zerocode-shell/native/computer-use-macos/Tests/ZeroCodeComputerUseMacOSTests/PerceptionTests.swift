@@ -339,6 +339,61 @@ final class PerceptionTests: XCTestCase {
         XCTAssertThrowsError(try session([greedy]))
     }
 
+    /// A tick with time left when a detector began reading and none when it finished: what that
+    /// detector read is not an answer, and no detector after it reads.
+    func testDeadlinePassedWhileReadingReturnsUnknown() throws {
+        let limits = try contractLimits()
+        let reader = try session([boardSpec(), boardSpec()])
+        let cells = board([Self.red, Self.red, Self.red, Self.red])
+        XCTAssertEqual(look(reader, cells, capture: 1).map(\.value), [1, 1])
+
+        var tick = lateTick(limits)
+        let frame = frameFacts(capture: 2, width: 64, height: 64)
+        let late = cells.withPixels { reader.observe(frame: frame, pixels: $0, budget: &tick) }
+        XCTAssertEqual(late.map(\.unknown), [.budget, .budget])
+        for observation in late {
+            XCTAssertNil(observation.value)
+            XCTAssertNil(observation.target)
+            XCTAssertNil(observation.cells)
+        }
+        // What the late reading cost is not hidden: its samples stand on its receipt, and the tick
+        // paid them.
+        XCTAssertEqual(late.map(\.samples), [84, 0])
+        XCTAssertEqual(tick.samples, limits.max_tick_samples - 84)
+    }
+
+    /// A frame read past its tick's deadline is no evidence: it counts toward no confirmation, and
+    /// no target is followed through it.
+    func testFrameReadPastTheDeadlineIsNotEvidence() throws {
+        let limits = try contractLimits()
+        let careful = try session([boardSpec(confirm: 2)])
+        let cells = board([Self.blue, Self.red, Self.green, Self.red])
+        XCTAssertEqual(look(careful, cells, capture: 1, budget: lateTick(limits))[0].unknown, .budget)
+        // Two fresh captures in time must agree; the late one is not the first of them.
+        let after = look(careful, cells, capture: 2)[0]
+        XCTAssertEqual(after.unknown, .unconfirmed)
+        XCTAssertNil(after.value)
+        XCTAssertNil(after.target)
+        let confirmed = look(careful, cells, capture: 3)[0]
+        XCTAssertEqual(confirmed.value, 2)
+        XCTAssertNotNil(confirmed.target)
+
+        // A ball seen, read late one step on, then seen one more step on: the late sighting links
+        // nothing, so what follows is a new target with no motion measured across the late frame.
+        let follower = try session([blobSpec()])
+        func ball(at x: Int) -> Canvas {
+            var canvas = Canvas(width: 96, height: 64, ground: Self.black)
+            canvas.fill(x, 10, 6, 6, Self.red)
+            return canvas
+        }
+        let seen = try XCTUnwrap(look(follower, ball(at: 10), capture: 1)[0].target?.track_id)
+        XCTAssertEqual(look(follower, ball(at: 16), capture: 2, budget: lateTick(limits))[0].unknown, .budget)
+        let next = look(follower, ball(at: 22), capture: 3)[0]
+        XCTAssertEqual(next.value, 1)
+        XCTAssertNotEqual(next.target?.track_id, seen)
+        XCTAssertEqual(next.target?.velocity_x, 0)
+    }
+
     func testReadoutsConfirmationsAnchorsAndScale() throws {
         let cells = board([Self.blue, Self.red, Self.green, Self.red])
         let count = try session([boardSpec(readout: .count(class: 1))])
@@ -639,4 +694,27 @@ private func budget(samples: UInt64, deadlineHostNs: UInt64, now: @escaping @Sen
 
 private func unlimited() -> ReflexPerceptionBudget {
     budget(samples: .max, deadlineHostNs: .max, now: { 0 })
+}
+
+/// A tick of the table's length on a clock that reads its start once — the check a detector passes
+/// before it reads — and its deadline ever after: the tick runs out while that detector reads.
+private func lateTick(_ limits: PerceptionLimits) -> ReflexPerceptionBudget {
+    let clock = LateClock(late: limits.max_tick_ns)
+    return budget(samples: limits.max_tick_samples, deadlineHostNs: limits.max_tick_ns, now: { clock.now() })
+}
+
+private final class LateClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private let late: UInt64
+    private var read = false
+
+    init(late: UInt64) { self.late = late }
+
+    func now() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = read ? late : 0
+        read = true
+        return now
+    }
 }
