@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createRunner, legacyOnlyName } from "./window-runner.mjs";
+import { createRunner, legacyOnlyName, REPORT } from "./window-runner.mjs";
 
 /* The window harness's runner, on its own (t-4017). What it promises the lane
  * and the coordinator's watch is a text contract — `^PASS `/`^FAIL ` lines,
@@ -43,7 +43,7 @@ test("a suite that throws is one FAIL line, and the suites after it still run an
   assert.equal(said.at(-1), "3/4 passed");
 });
 
-test("the report is the lane's text contract: PASS/FAIL lines, a blank, N/M passed", async () => {
+test("the report is the lane's text contract: each suite's name over its PASS/FAIL lines, a blank, N/M passed", async () => {
   const { said, log } = lines();
   const runner = createRunner({ log, env: {}, argv: [] });
   runner.suite("one", async ({ ok }) => {
@@ -51,14 +51,50 @@ test("the report is the lane's text contract: PASS/FAIL lines, a blank, N/M pass
     ok("a check without detail", true);
     ok("a red check", false, "why");
   });
+  runner.suite("two", async ({ ok }) => {
+    ok("a check of the second suite", true);
+  });
   await runner.run({});
   assert.equal(runner.report(), 1);
   assert.deepEqual(said, [
+    "SUITE  one",
     'PASS  a check with detail  — {"seen":1}',
     "PASS  a check without detail",
     "FAIL  a red check  — why",
+    "SUITE  two",
+    "PASS  a check of the second suite",
     "",
-    "2/3 passed",
+    "3/4 passed",
+  ]);
+  // Spelled in one table: the lane's parser and this report read the same words.
+  assert.deepEqual(REPORT, { pass: "PASS", fail: "FAIL", suite: "SUITE", gap: "  ", detail: "  — " });
+  assert.ok(Object.isFrozen(REPORT));
+});
+
+test("a check keeps the suite that made it — one that lands after its suite has ended stands under its own name again, and one made outside every suite comes first, under none", async () => {
+  const { said, log } = lines();
+  const runner = createRunner({ log, env: {}, argv: [] });
+  let late = null;
+  runner.suite("early", async ({ ok }) => {
+    ok("early speaks", true);
+    late = ok;
+  });
+  runner.suite("next", async ({ ok }) => {
+    ok("next speaks", true);
+    // The first suite's own hands, still held, speak while this one runs.
+    late("early speaks late", false, "late");
+  });
+  await runner.run({});
+  runner.ok("said outside every suite", false, "loose");
+  runner.report();
+  assert.deepEqual(said.slice(0, -2), [
+    "FAIL  said outside every suite  — loose",
+    "SUITE  early",
+    "PASS  early speaks",
+    "SUITE  next",
+    "PASS  next speaks",
+    "SUITE  early",
+    "FAIL  early speaks late  — late",
   ]);
 });
 
