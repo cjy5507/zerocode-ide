@@ -18880,6 +18880,67 @@ fn a_recording_step_effort_seat_writes_its_rows_and_types_nothing() {
     assert!(stood.sent_at_worker().is_empty());
 }
 
+/// A move's label waits two hours for the next turn to end, as every
+/// label of the seat's version 1 did (t-9087, astra R-EFFORT-1): the stall
+/// label's move to four hours measured what follows a silence, not how long
+/// a worker's next turn takes after an effort move, and a wait moved under
+/// an unchanged rubric would grade version 1 rows two ways. A move whose
+/// next turn ends three hours on is closed at two as `none`, with no mark,
+/// and the turn that ends later grades nothing.
+#[test]
+fn a_move_whose_next_turn_ends_after_two_hours_is_closed_at_two_as_none() {
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    const HOUR_MS: i64 = 60 * 60 * 1_000;
+    let stood = StoppedWorker::stand_with(
+        97_850,
+        "--agent claude --model claude-fable-5-1 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let endpoint =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let home = stood.asks_jev_for(&STEP_EFFORT, &endpoint, JevMode::Shadow, "/wt");
+    let began = stood.began + 10_000;
+    let stuck = a_stuck_turn("fix the build", "medium");
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    for beat in [2_000, 3_000, 4_000, 5_000] {
+        tick(&stood.host, &[], began + beat);
+    }
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let asked = &rows[0];
+
+    // Two hours and a second on, no turn has ended: the label closes.
+    tick(&stood.host, &[], began + 5_000 + 2 * HOUR_MS + 1_000);
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 2, "the move is closed at two hours: {rows:?}");
+    let label = &rows[1];
+    assert_eq!(label["label"], asked["move"]);
+    assert_eq!(label["followed"], "none");
+    assert!(label.get("agreed").is_none(), "{label}");
+    assert_eq!(
+        label[zerocode_core::jev::summary::NOT_COMPARED.canonical],
+        zerocode_core::step_effort::Followed::Nothing.word()
+    );
+
+    // The next turn ends three hours on: the move it follows is closed, and
+    // nothing grades it again.
+    let mut next = stuck.clone();
+    next.extend(a_progressed_turn("now the tests", "medium"));
+    a_turn_runs_then_ends(
+        &stood,
+        &next,
+        began + 3 * HOUR_MS,
+        began + 3 * HOUR_MS + 1_000,
+    );
+    tick(&stood.host, &[], began + 3 * HOUR_MS + 2_000);
+    let labels = StoppedWorker::rows_of(&home, &STEP_EFFORT)
+        .into_iter()
+        .filter(|row| row["label"] == asked["move"])
+        .count();
+    assert_eq!(labels, 1, "one label for the move");
+}
+
 /// A composer with a turn under way gets nothing, and a move whose next
 /// turn started before the composer rested is written down as such; a pane
 /// a person took over is never read at all.
