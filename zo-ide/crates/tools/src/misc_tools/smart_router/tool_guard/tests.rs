@@ -157,6 +157,69 @@ fn a_later_git_restore_of_a_named_path_is_a_regret() {
     assert!(!restores("rm -rf build", &named, cwd));
 }
 
+/// A later restore puts back what a command changed, not every folder it
+/// named (t-9087). This machine's ledger (2026-09-25) holds 51 `restored`
+/// labels written in two seconds by two `git checkout <one file>` calls, 49
+/// of them for commands that never spelled the file — a `cd` into the
+/// checkout, a `tr /`, an `ls` of a folder above it — which is 49 of the
+/// seat's 59 disagreements. A command that changed the file is regretted by
+/// its restore; one that only named folders holding it keeps waiting.
+#[test]
+fn a_restore_regrets_the_command_that_changed_what_it_put_back_and_no_other() {
+    let mock = Mock::serving(200, reply(&[(COMMAND_GUARD_IRREVERSIBLE, 0.1), (COMMAND_GUARD_OUTSIDE, 0.1)]));
+    machine(&COMMAND_GUARD, JevMode::Shadow.key(), &mock.base_url, |cwd| {
+        forget_waiting(cwd);
+        std::fs::create_dir_all(cwd.join("src")).expect("a source folder");
+        std::fs::write(cwd.join("src/a.rs"), "fn a() {}\n").expect("a source file");
+        let judge = ToolGuardJudge::at(cwd);
+        let ran = |id: &str| CommandRan {
+            owner: "turn-1".to_string(),
+            tool_use_id: id.to_string(),
+            failed: false,
+            cancelled: false,
+        };
+        // Names the folder it runs in, the root and the folder holding the
+        // file, and changes none of them.
+        let looked = "cd . && ls / src | tr / _";
+        judge.command(command_ask(cwd, "shell-1", looked));
+        assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran("shell-1"))), None);
+        // Changes the file: the runtime runs it between the two calls.
+        let edited = "sed -i '' s/a/b/ src/a.rs";
+        judge.command(command_ask(cwd, "shell-2", edited));
+        std::fs::write(cwd.join("src/a.rs"), "fn b() { 1 }\n").expect("the command's edit");
+        assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran("shell-2"))), None);
+        // Both answered: each verdict is in the book before the turn ends.
+        assert_eq!(rows_of(&command_guard_path(cwd), 2).len(), 2);
+
+        let shell = |id: &str, command: &str| call(id, SHELL_TOOL, &serde_json::json!({"command": command}));
+        let turn = vec![
+            user("fix a"),
+            shell("shell-1", looked),
+            shell("shell-2", edited),
+            shell("shell-3", "git checkout -- src/a.rs"),
+            said("put it back"),
+        ];
+        assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&turn)), 1, "the edit alone was put back");
+        let labels: Vec<CommandGuardLabelRow> = read_shadow_rows::<Value>(&command_guard_path(cwd))
+            .into_iter()
+            .filter_map(|row| serde_json::from_value(row).ok())
+            .collect();
+        let edit = task_fingerprint("turn-1", "shell-2").to_string();
+        assert_eq!(
+            labels.iter().map(|label| (label.label.as_str(), label.hindsight.as_str())).collect::<Vec<_>>(),
+            vec![(edit.as_str(), "restored")]
+        );
+        let waiting = command_book().lock().expect("book");
+        assert_eq!(
+            waiting[cwd].iter().map(|one| one.tool_use_id.as_str()).collect::<Vec<_>>(),
+            vec!["shell-1"],
+            "the look waits on its own window"
+        );
+        drop(waiting);
+        forget_waiting(cwd);
+    });
+}
+
 /// A text was followed when the agent's next step ran a command it spelled —
 /// one the person's words did not — and ignored when the next step did
 /// anything else: read on, answered, or ran what the person asked for.
