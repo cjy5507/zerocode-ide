@@ -10,6 +10,10 @@
 //! one collector per run reads after the last number it has on disk, writes,
 //! syncs, and only then acknowledges. The reflex decision only records
 //! (`zerocode_core::jev::REFLEX_DECIDE`): nothing it answers reaches the hand.
+//!
+//! Whether a run could start here and whether the person lets it are two
+//! words, never one: `capabilities` and `reflex-status` answer both
+//! (`liveReflex {supported, enabled}`, [`standing`]).
 
 use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
@@ -25,7 +29,7 @@ use zerocode_core::computer_use::{ComputerCommand, ComputerMethod, REFLEX_COLLEC
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::game_state;
 use zerocode_core::computer_use_protocol::reflex::{
-    self, RUN_POLICY_VERSION, RunPolicy, Surface, VERSION, ValidatedPlan,
+    self, RUN_POLICY_VERSION, ReflexCapability, RunPolicy, Surface, VERSION, ValidatedPlan,
 };
 use zerocode_core::jev::reflex_decide::{self, Decider, Offer, Pending, Wired};
 use zerocode_core::jev::{JevMode, REFLEX_DECIDE, REFLEX_DECIDE_DEADLINE_MS};
@@ -51,12 +55,35 @@ impl DoorFacts {
     /// on, the person's setting and the operator's stop.
     pub(crate) fn now(enabled: bool) -> Self {
         Self {
-            supported: cfg!(target_os = "macos")
-                && reflex::capability(Surface::MacosDesktop).live_reflex,
+            supported: platform_runs_reflex(
+                cfg!(target_os = "macos"),
+                reflex::capability(Surface::MacosDesktop),
+            ),
             enabled,
             stopped: super::guard::stopped_reason(),
         }
     }
+}
+
+/// Whether a platform runs live reflex at all: a macOS desktop whose row in
+/// the capability table claims it. No other platform does, whatever a row
+/// says — none has the live frames a run reads.
+pub(crate) const fn platform_runs_reflex(macos: bool, desktop: ReflexCapability) -> bool {
+    macos && desktop.live_reflex
+}
+
+/// The key `capabilities` and `reflex-status` carry [`standing`] under.
+pub(crate) const LIVE_REFLEX: &str = "liveReflex";
+
+/// Live reflex as `capabilities` and `reflex-status` answer it, in two words
+/// never folded into one: `supported` — this platform's row in the table,
+/// the helper's kernel, and the plan contract and run policy it reads
+/// ([`helper_reads_it`]) — and `enabled`, the person's setting.
+pub(crate) fn standing(facts: &DoorFacts, handshake: &Value) -> Value {
+    json!({
+        "supported": facts.supported && helper_reads_it(handshake),
+        "enabled": facts.enabled,
+    })
 }
 
 /// A start the door let through: the validated plan, the run's policy, the
@@ -205,16 +232,39 @@ pub(crate) fn start(
 
 /// Where one run stands, from the helper — read, never taking a receipt —
 /// beside what its watch kept on disk.
-pub(crate) fn status(params: &Value, call: Call<'_>) -> Result<Value, ComputerUseError> {
+pub(crate) fn status(
+    params: &Value,
+    facts: &DoorFacts,
+    call: Call<'_>,
+) -> Result<Value, ComputerUseError> {
     let run = params
         .get("run")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let handshake = call("handshake", json!({}))?;
     let mut answer = call("reflexStatus", json!({ "run": run }))?;
-    if let (Some(fields), Some(report)) = (answer.as_object_mut(), watch_report(run)) {
-        fields.insert("collector".into(), report);
+    if let Some(fields) = answer.as_object_mut() {
+        if let Some(report) = watch_report(run) {
+            fields.insert("collector".into(), report);
+        }
+        fields.insert(LIVE_REFLEX.into(), standing(facts, &handshake));
     }
     Ok(answer)
+}
+
+/// The helper's handshake as `capabilities` answers it, with [`standing`]
+/// beside what the helper says it reads.
+pub(crate) fn capabilities(
+    params: &Value,
+    facts: &DoorFacts,
+    call: Call<'_>,
+) -> Result<Value, ComputerUseError> {
+    let mut handshake = call("handshake", params.clone())?;
+    let standing = standing(facts, &handshake);
+    if let Some(fields) = handshake.as_object_mut() {
+        fields.insert(LIVE_REFLEX.into(), standing);
+    }
+    Ok(handshake)
 }
 
 /// End one run, and no other: the helper compares the run it names.
@@ -226,8 +276,9 @@ pub(crate) fn stop(params: &Value, call: Call<'_>) -> Result<Value, ComputerUseE
     call("reflexStop", json!({ "run": run }))
 }
 
-/// The three verbs as the window answers them: `enabled` reads the person's
-/// setting, and only a start asks for it.
+/// The three verbs and `capabilities` as the window answers them: `enabled`
+/// reads the person's setting, asked by a start, a status and the
+/// capabilities, and by nothing else.
 pub(crate) fn answer(
     command: &ComputerCommand,
     enabled: impl FnOnce() -> bool,
@@ -258,8 +309,13 @@ pub(crate) fn answer(
                 "evidence": evidence,
             }))
         }
-        ComputerMethod::ReflexStatus => status(&command.params, &mut call),
+        ComputerMethod::ReflexStatus => {
+            status(&command.params, &DoorFacts::now(enabled()), &mut call)
+        }
         ComputerMethod::ReflexStop => stop(&command.params, &mut call),
+        ComputerMethod::Capabilities => {
+            capabilities(&command.params, &DoorFacts::now(enabled()), &mut call)
+        }
         _ => Err(ComputerUseError::invalid_argument("not a reflex verb")),
     }
 }

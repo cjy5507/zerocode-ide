@@ -193,14 +193,14 @@ enum ReflexFixtures {
                                    options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
-    /// The capability table's own bytes, or — for a run on this build before the
-    /// table claims it — the same table claiming live reflex on the desktop.
+    /// The capability table's own bytes with the desktop's live reflex set to
+    /// `liveReflex` — either way, never read off the file's row, which is the
+    /// window's to turn on and off.
     static func capabilityWire(liveReflex: Bool) throws -> Data {
         let raw = Data(try Data(contentsOf: root.appendingPathComponent("reflex-contract/capability.json")).dropLast())
-        guard liveReflex else { return raw }
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
         var surfaces = try XCTUnwrap(object["surfaces"] as? [String: Any])
-        surfaces["macos_desktop"] = ["instant_pointer": false, "live_reflex": true]
+        surfaces["macos_desktop"] = ["instant_pointer": false, "live_reflex": liveReflex]
         object["surfaces"] = surfaces
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
     }
@@ -719,6 +719,9 @@ final class ReflexRuntimeTests: XCTestCase {
         let policy = String(decoding: try ReflexFixtures.policyWire(), as: UTF8.self)
         let claimed = String(decoding: try ReflexFixtures.capabilityWire(liveReflex: true), as: UTF8.self)
         let table = String(decoding: try ReflexFixtures.capabilityWire(liveReflex: false), as: UTF8.self)
+        // The window's own table, as it sends it: the file's canonical bytes.
+        let golden = String(decoding: Data(try Data(contentsOf: fixtures.appendingPathComponent("reflex-contract/capability.json")).dropLast()), as: UTF8.self)
+        var said = ""
         func start(_ change: (inout [String: JSONValue]) -> Void) -> String? {
             var params: [String: JSONValue] = [
                 "runId": .string("wiring"), "plan": .string(wire), "limits": .string(limits),
@@ -730,15 +733,21 @@ final class ReflexRuntimeTests: XCTestCase {
                 _ = try Provider().handle(method: "reflexStart", params: params)
                 return nil
             } catch let error as ProviderError {
+                said = error.message
                 return error.code
             } catch {
                 return "\(error)"
             }
         }
         XCTAssertNil(ReflexRuntimeHost.kernel, "the test process never launched the helper")
+        XCTAssertEqual(start { $0["capability"] = .string(golden) }, "unsupported_capability")
+        XCTAssertTrue(said.contains("no perception kernel"),
+                      "the window's own table claims the desktop; what this helper lacks is its kernel: \(said)")
         XCTAssertEqual(start { _ in }, "unsupported_capability", "a helper with no kernel installed: refused before the eye or the hand")
+        XCTAssertTrue(said.contains("no perception kernel"), said)
         XCTAssertEqual(start { $0["capability"] = .string(table) }, "unsupported_capability",
-                       "the window's own table, which claims no live reflex yet: refused before the eye or the hand")
+                       "a table that claims no live reflex on the desktop: refused before the eye or the hand")
+        XCTAssertTrue(said.contains("claims no live reflex"), "refused for the table, before a kernel is looked for: \(said)")
         XCTAssertEqual(start { $0["capability"] = nil }, "invalid_argument", "no capability table, no run")
         XCTAssertEqual(start { $0["capability"] = .string(" " + claimed) }, "invalid_argument", "only the table's canonical bytes")
         XCTAssertEqual(start { $0["runPolicy"] = nil }, "invalid_argument", "no run policy, no run")

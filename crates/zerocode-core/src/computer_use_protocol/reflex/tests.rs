@@ -325,20 +325,25 @@ fn a_new_frame_keeps_a_lease_but_an_epoch_change_revokes_it() {
     assert!(!lease.permits(&frame, 100, LeaseInput::LeftClick));
 }
 
+/// Live reflex is claimed where a live frame provider feeds a run — the
+/// macOS desktop's eye — and nowhere else: the Windows desktop and the iOS
+/// device have none a run reads, so their rows claim nothing; and no surface
+/// claims an instant pointer (`instant_stays_refused_until_a_helper_reads_it`).
 #[test]
 fn windows_reflex_is_unsupported_without_a_live_frame_provider() {
-    for surface in [
-        Surface::MacosDesktop,
-        Surface::IosDevice,
-        Surface::WindowsDesktop,
+    for (surface, live_reflex) in [
+        (Surface::MacosDesktop, true),
+        (Surface::IosDevice, false),
+        (Surface::WindowsDesktop, false),
     ] {
         assert_eq!(
             capability(surface),
             ReflexCapability {
                 schema_version: VERSION,
-                live_reflex: false,
+                live_reflex,
                 instant_pointer: false,
-            }
+            },
+            "{surface:?}"
         );
     }
 }

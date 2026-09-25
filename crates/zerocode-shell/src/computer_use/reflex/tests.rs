@@ -71,15 +71,21 @@ fn start_words() -> Value {
     json!({ "flow": "/flows/reflex.md", "display": 0, "seconds": 60 })
 }
 
+/// The handshake of a helper with its kernel installed that reads this plan
+/// contract and run policy 1.
+fn reading_handshake() -> Value {
+    json!({ "supports": { "desktop": { "reflex": {
+        "planVersion": VERSION, "runPolicy": RUN_POLICY_VERSION, "kernel": true
+    } } } })
+}
+
 /// A helper that answers the handshake as a helper that reads this contract,
 /// a start as running, and anything else from `rest`.
 fn helper(calls: &mut Calls) -> impl FnMut(&str, Value) -> Result<Value, ComputerUseError> + '_ {
     move |method: &str, params: Value| {
         calls.push((method.to_string(), params.clone()));
         Ok(match method {
-            "handshake" => json!({ "supports": { "desktop": { "reflex": {
-                "planVersion": VERSION, "runPolicy": RUN_POLICY_VERSION, "kernel": true
-            } } } }),
+            "handshake" => reading_handshake(),
             "reflexStart" => json!({ "runId": params["runId"], "state": "running", "fires": 0 }),
             "reflexStatus" => {
                 json!({ "runId": params["run"], "state": "running", "receiptsPending": 2 })
@@ -206,6 +212,121 @@ fn a_helper_without_the_run_policy_is_never_sent_a_start() {
     }
 }
 
+/// Live reflex is advertised only where it can run. On a platform other than
+/// macOS nothing claims it — whatever the table's row or the helper says —
+/// so `capabilities` and `reflex-status` say `supported: false` and a start
+/// is refused at the door with no helper asked. On a Mac, `supported` needs
+/// the table's row and a helper with its kernel that reads this contract and
+/// run policy 1; and `enabled` is the setting's word, apart from it.
+#[test]
+fn unsupported_platform_never_advertises_live_reflex() {
+    let claims = |live_reflex| ReflexCapability {
+        schema_version: VERSION,
+        live_reflex,
+        instant_pointer: false,
+    };
+    for claimed in [claims(true), claims(false)] {
+        assert!(
+            !platform_runs_reflex(false, claimed),
+            "another platform claims nothing"
+        );
+        assert_eq!(platform_runs_reflex(true, claimed), claimed.live_reflex);
+    }
+    // This build's table claims the macOS desktop: a Mac supports it, every
+    // other platform this test runs on does not.
+    assert_eq!(DoorFacts::now(true).supported, cfg!(target_os = "macos"));
+
+    let elsewhere = DoorFacts {
+        supported: platform_runs_reflex(false, claims(true)),
+        ..open()
+    };
+    let not_here = json!({ "supported": false, "enabled": true });
+    let mut calls = Calls::new();
+    let answer = capabilities(&json!({}), &elsewhere, &mut helper(&mut calls)).expect("answered");
+    assert_eq!(
+        answer[LIVE_REFLEX], not_here,
+        "even beside a helper that reads it all"
+    );
+    let answer = status(
+        &json!({ "run": "rx-a" }),
+        &elsewhere,
+        &mut helper(&mut calls),
+    )
+    .expect("answered");
+    assert_eq!(answer[LIVE_REFLEX], not_here);
+    calls.clear();
+    let refused = start(
+        &start_words(),
+        |_| Ok(flow("dry", false, Some(&plan("macos_desktop")))),
+        &elsewhere,
+        &mut helper(&mut calls),
+    )
+    .expect_err("refused at the door");
+    assert_eq!(refused.code, error_code::UNSUPPORTED_CAPABILITY);
+    assert!(calls.is_empty(), "the helper was asked {calls:?}");
+
+    // A Mac whose helper has no kernel, or reads another contract or run
+    // policy, or says nothing of reflex, supports no run either.
+    let reflex = |fields: Value| json!({ "supports": { "desktop": { "reflex": fields } } });
+    for handshake in [
+        reflex(json!({ "planVersion": VERSION, "runPolicy": RUN_POLICY_VERSION, "kernel": false })),
+        reflex(
+            json!({ "planVersion": VERSION + 1, "runPolicy": RUN_POLICY_VERSION, "kernel": true }),
+        ),
+        reflex(
+            json!({ "planVersion": VERSION, "runPolicy": RUN_POLICY_VERSION + 1, "kernel": true }),
+        ),
+        json!({ "supports": { "desktop": {} } }),
+    ] {
+        assert_eq!(
+            standing(&open(), &handshake),
+            json!({ "supported": false, "enabled": true }),
+            "{handshake}"
+        );
+    }
+    assert_eq!(
+        standing(&open(), &reading_handshake()),
+        json!({ "supported": true, "enabled": true })
+    );
+}
+
+/// The person's setting off refuses a start at the door — before the helper
+/// is asked anything, its handshake included — and names the setting that
+/// turns it on; `capabilities` says the run is supported here and not
+/// enabled, two words; and the manual says whose runs these are.
+#[test]
+fn a_disabled_setting_refuses_before_the_helper() {
+    let off = DoorFacts {
+        enabled: false,
+        ..open()
+    };
+    let mut calls = Calls::new();
+    let refused = start(
+        &start_words(),
+        |_| Ok(flow("dry", false, Some(&plan("macos_desktop")))),
+        &off,
+        &mut helper(&mut calls),
+    )
+    .expect_err("refused at the door");
+    assert_eq!(refused.code, error_code::UNSUPPORTED_CAPABILITY);
+    assert!(
+        refused.message.contains(COMPUTER_LIVE_REFLEX),
+        "{}",
+        refused.message
+    );
+    assert!(calls.is_empty(), "the helper was asked {calls:?}");
+    let answer = capabilities(&json!({}), &off, &mut helper(&mut calls)).expect("answered");
+    assert_eq!(
+        answer[LIVE_REFLEX],
+        json!({ "supported": true, "enabled": false })
+    );
+    assert!(
+        zerocode_core::computer_use::usage()
+            .contains("macOS only, and only with the live reflex setting on"),
+        "the manual names the platform and the setting"
+    );
+}
+
 /// A start answers at once — the run's id and its state from the helper,
 /// which holds the hand for the run — and asks nothing to end or wait: the
 /// window never stops what it just started, and its watch reads the run
@@ -299,11 +420,23 @@ fn reflex_stop_carries_its_run_to_the_helper() {
 fn public_status_never_takes_collector_receipts() {
     let mut calls = Calls::new();
     for _ in 0..3 {
-        let answer = status(&json!({ "run": "rx-a" }), &mut helper(&mut calls)).expect("answered");
+        let answer =
+            status(&json!({ "run": "rx-a" }), &open(), &mut helper(&mut calls)).expect("answered");
         assert!(answer.get("receipts").is_none());
     }
-    assert!(calls.iter().all(|(method, params)| method == "reflexStatus" && params == &json!({ "run": "rx-a" })));
-    assert_eq!(calls.len(), 3);
+    // It asks the helper what it reads (for `liveReflex`) and the run's
+    // status — never its receipts, never an acknowledgement.
+    assert!(calls.iter().all(
+        |(method, params)| (method == "handshake" && params == &json!({}))
+            || (method == "reflexStatus" && params == &json!({ "run": "rx-a" }))
+    ));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(method, _)| method == "reflexStatus")
+            .count(),
+        3
+    );
 }
 
 /// A helper's run as the collector sees it: receipts numbered 1…`issued`,

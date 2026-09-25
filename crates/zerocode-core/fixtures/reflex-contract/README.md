@@ -50,6 +50,12 @@ instant pointer. The table names the plan `contract` and the `run_policy`
 version it was written against; a table of another version claims nothing on
 either side, so a helper built for another contract is unsupported.
 
+The macOS desktop alone claims `live_reflex` — the one surface with the live
+frames a run reads — and no surface claims `instant_pointer`. A claim is not
+a run: the window still asks the helper whether its kernel is installed and
+which contract and run policy it reads (`supported`), and the person's
+`computer_live_reflex` setting, off until they turn it on (`enabled`).
+
 ## Run policy (t-9205)
 
 A start carries a run policy beside the plan — `{"renew":…,"run_ns":…,
