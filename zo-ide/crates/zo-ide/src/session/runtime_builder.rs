@@ -24,9 +24,14 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
     let plugin_manager = crate::build_plugin_manager(cwd, loader, runtime_config);
     let plugin_registry: PluginRegistry = plugin_manager.plugin_registry()?;
     crate::runtime_support::log_boot_stage("plugin-state/plugins", stage);
+    // Seated before the retriever, which asks it on every recall what
+    // readers did with the pages it recalled before (t-6264) — the seat
+    // reads its own rows and the road the person chose, so a record-only
+    // mode ranks exactly as before.
+    let recall_seat = Arc::new(tools::RerankShadow::at(cwd));
     let memory_retriever = runtime_config
         .auto_memory_enabled()
-        .then(|| load_runtime_memory_retriever(cwd, active_model))
+        .then(|| load_runtime_memory_retriever(cwd, active_model, Arc::clone(&recall_seat)))
         .flatten();
     let plugin_hook_config =
         runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);
@@ -91,7 +96,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         memory_retriever,
         // Seated whenever there is a retriever to sit beside; what it may do
         // per recall — record, or settle the order — is `smart.rerankShadow`.
-        recall_seat: Some(Arc::new(tools::RerankShadow::at(cwd))),
+        recall_seat: Some(recall_seat),
         // Seated always; what it may do per compaction — record, or drop —
         // is `smart.jevCompaction`, read at the boundary.
         compaction_seat: Some(Arc::new(tools::CompactionJudge::at(cwd))),
@@ -114,8 +119,9 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
 fn load_runtime_memory_retriever(
     cwd: &Path,
     active_model: Option<&str>,
+    demand: Arc<tools::RerankShadow>,
 ) -> Option<std::sync::Arc<dyn runtime::MemoryRetriever + Send + Sync>> {
-    runtime::load_memory_retriever(cwd, active_model)
+    runtime::load_memory_retriever(cwd, active_model, Some(demand))
         .or_else(|| load_legacy_project_memory_retriever(cwd, active_model))
 }
 

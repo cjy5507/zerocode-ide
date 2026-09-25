@@ -13624,6 +13624,240 @@ fn streaming_overflow_guard_rollback_releases_recall_dedup_marks() {
     );
 }
 
+/// A recall seat that settles nothing and remembers what the runtime told it
+/// (t-6264): how many recalls it saw, and at each boundary the messages the
+/// turn had appended, whether the request that carried the last recall was
+/// answered, and whether the turn ended.
+#[derive(Default)]
+struct HeardSeat {
+    settled: AtomicUsize,
+    heard: Mutex<Vec<(Vec<ConversationMessage>, bool, bool)>>,
+}
+
+impl crate::RecallSeat for HeardSeat {
+    fn settle(&self, _attempt: &str, _query: &str, hits: Vec<crate::MemoryHit>) -> Vec<crate::MemoryHit> {
+        self.settled.fetch_add(1, Ordering::SeqCst);
+        hits
+    }
+
+    fn observe(&self, _attempt: &str, progress: crate::TurnProgress<'_>) {
+        self.heard
+            .lock()
+            .expect("heard lock")
+            .push((progress.appended.to_vec(), progress.answered, progress.ended));
+    }
+}
+
+impl HeardSeat {
+    fn heard(&self) -> Vec<(Vec<ConversationMessage>, bool, bool)> {
+        self.heard.lock().expect("heard lock").clone()
+    }
+
+    fn answered_and_ended(&self) -> Vec<(bool, bool)> {
+        self.heard().into_iter().map(|(_, answered, ended)| (answered, ended)).collect()
+    }
+}
+
+fn recalling_parsers() -> Arc<dyn crate::MemoryRetriever + Send + Sync> {
+    Arc::new(LexicalMemoryRetriever::from_index_markdown(
+        "# Zo memory\n\n- [parsers](parsers.md) — recall me about parser bugs\n",
+    ))
+}
+
+/// The recall seat hears what the turn did while the turn goes: each
+/// request's answer and the tools it ran at the next request's boundary, and
+/// the rest when the turn ends — before the compaction at either. Here the
+/// turn reads three files and answers past the compaction threshold, the
+/// compaction after the answer summarises the first read out of the
+/// transcript, and the seat has already heard it succeed (t-6264).
+#[test]
+#[allow(clippy::too_many_lines)]
+fn the_recall_seat_hears_the_turn_before_the_compaction_after_it() {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use crate::message_stream::types::{BlockId, RenderBlock};
+
+    /// Reads a.rs, b.rs and c.rs a request at a time, then answers with a
+    /// context past the threshold; a compaction's summary request is
+    /// answered as a summary.
+    struct ThreeReadsThenFull;
+    impl AsyncApiClient for ThreeReadsThenFull {
+        fn stream_async<'a>(
+            &'a self,
+            request: ApiRequest,
+            _render_tx: tokio::sync::mpsc::Sender<RenderBlock>,
+            _text_block_id: BlockId,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>>
+        {
+            let summarising = request.messages.last().is_some_and(|message| {
+                matches!(message.blocks.first(), Some(ContentBlock::Text { text }) if text.starts_with(COMPACTION_SYSTEM_PROMPT))
+            });
+            let results = request.messages.iter().filter(|message| message.role == MessageRole::Tool).count();
+            Box::pin(async move {
+                if summarising {
+                    return Ok(vec![
+                        AssistantEvent::TextDelta("<summary>three files were read</summary>".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                Ok(match ["a.rs", "b.rs", "c.rs"].get(results) {
+                    Some(path) => vec![
+                        AssistantEvent::ToolUse {
+                            id: format!("tool-{results}"),
+                            name: "read_file".to_string(),
+                            input: format!(r#"{{"path":"{path}"}}"#),
+                        },
+                        AssistantEvent::MessageStop,
+                    ],
+                    None => vec![
+                        AssistantEvent::TextDelta("done".to_string()),
+                        AssistantEvent::Usage(TokenUsage {
+                            input_tokens: 1_000,
+                            output_tokens: 4,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 119_000,
+                            output_tokens_details: None,
+                        }),
+                        AssistantEvent::MessageStop,
+                    ],
+                })
+            })
+        }
+    }
+
+    let seat = Arc::new(HeardSeat::default());
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        StopApiClient,
+        StaticToolExecutor::new().register("read_file", |input| Ok(format!("read:{input}"))),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_async_api_client(Arc::new(ThreeReadsThenFull))
+    .with_auto_compaction_input_tokens_threshold(100_000);
+    let dispatch: ConcurrentDispatchFn = Arc::new(|_name, input| Ok(format!("read:{input}")));
+    runtime.set_concurrent_dispatch(dispatch);
+    runtime.set_memory_retriever(Some(recalling_parsers()));
+    runtime.set_recall_seat(Some(seat.clone()));
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let summary = tokio_runtime.block_on(async {
+        let (render_tx, _render_rx) = tokio::sync::mpsc::channel(256);
+        let prompter: Arc<dyn crate::permission::PermissionPrompter> = Arc::new(AllowAsyncPrompterForOverflow);
+        runtime
+            .run_turn_streaming_with_images("parser bugs: read the three files", Vec::new(), render_tx, prompter)
+            .await
+            .expect("the turn ends")
+    });
+
+    assert!(summary.auto_compaction.is_some(), "the turn compacted after its answer");
+    let holds_result = |messages: &[ConversationMessage], id: &str| {
+        messages.iter().any(|message| {
+            message.blocks.iter().any(|block| {
+                matches!(block, ContentBlock::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == id)
+            })
+        })
+    };
+    assert!(
+        !holds_result(&runtime.session().messages, "tool-0"),
+        "the compaction left the first read in the transcript, so this proves nothing"
+    );
+    let heard = seat.heard();
+    for id in ["tool-0", "tool-1", "tool-2"] {
+        assert!(
+            heard.iter().any(|(appended, _, _)| holds_result(appended, id)),
+            "the seat never heard {id} succeed: {heard:?}"
+        );
+    }
+    assert_eq!(
+        seat.answered_and_ended(),
+        [(false, false), (true, false), (true, false), (true, false), (true, true)],
+        "the turn's start, three answered reads, and the answered end — told once each"
+    );
+    assert_eq!(seat.settled.load(Ordering::SeqCst), 4, "one recall per request");
+}
+
+/// A request the context budget refuses never left: the seat hears no answer
+/// to the recall it settled, and the failed turn never says it ended — what
+/// that recall put in front of the turn reached nobody (t-6264).
+#[test]
+fn the_recall_seat_hears_no_answer_for_a_request_that_never_left() {
+    struct CompactingApi;
+
+    impl ApiClient for CompactingApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![
+                AssistantEvent::TextDelta("<summary>compacted</summary>".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    const MARKER: &str = "parser bugs never-left";
+    let seat = Arc::new(HeardSeat::default());
+    let mut runtime = ConversationRuntime::new(
+        overflow_guard_long_session(MARKER),
+        CompactingApi,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.set_context_window(10_000);
+    runtime.set_memory_retriever(Some(recalling_parsers()));
+    runtime.set_recall_seat(Some(seat.clone()));
+
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let error = tokio_runtime.block_on(async {
+        let (render_tx, _render_rx) = tokio::sync::mpsc::channel(64);
+        let prompter: Arc<dyn crate::permission::PermissionPrompter> = Arc::new(AllowAsyncPrompterForOverflow);
+        runtime
+            .run_turn_streaming_with_images(MARKER, Vec::new(), render_tx, prompter)
+            .await
+            .expect_err("an over-budget request must not be dispatched")
+    });
+    assert!(error.to_string().contains("remains over the context budget after compaction"), "unexpected error: {error}");
+    assert_eq!(seat.settled.load(Ordering::SeqCst), 1, "the recall was settled for the request");
+    assert_eq!(
+        seat.answered_and_ended(),
+        [(false, false)],
+        "only the turn's start was told: no answer, and no end"
+    );
+}
+
+/// A gateway that refused the request carrying the recall is asked again
+/// without it, and answers: that answer is not an answer to the recall, and
+/// the seat never hears one — though it does hear the turn end (t-6264).
+#[test]
+fn a_refused_recall_is_not_answered_by_the_retry_without_it() {
+    let _env_lock = crate::test_env_lock();
+    ::api::refresh_custom_providers_from_json(
+        r#"[{"name":"gate","base_url":"http://127.0.0.1:9/v1","models":["m"],"requires_auth":false}]"#,
+    )
+    .expect("gateway row");
+    let carried = Arc::new(Mutex::new(Vec::new()));
+    let seat = Arc::new(HeardSeat::default());
+    let mut runtime = recall_refusing_runtime("gate/m", carried.clone());
+    runtime.set_recall_seat(Some(seat.clone()));
+
+    let outcome = run_recall_refusing_turn(&mut runtime, "parser bugs please");
+    ::api::refresh_custom_providers_from_json("[]").expect("clear rows");
+
+    outcome.expect("the refused turn is answered without the recalled memory");
+    assert_eq!(*carried.lock().expect("carried lock"), [true, false]);
+    assert_eq!(seat.settled.load(Ordering::SeqCst), 1, "the retry recalled nothing");
+    let told = seat.answered_and_ended();
+    assert!(told.iter().all(|(answered, _)| !answered), "the retry's answer was told as the recall's: {told:?}");
+    assert_eq!(told.last(), Some(&(false, true)), "the turn ended on its own terms: {told:?}");
+}
+
 /// A recording client for the gateway-refusal tests: refuses any request that
 /// carries zo's recalled memory with the gateway's content-filter answer and
 /// answers every other one, remembering which requests carried recall. With

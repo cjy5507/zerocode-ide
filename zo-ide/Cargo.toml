@@ -54,6 +54,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 gix = { version = "=0.84.0", default-features = false, features = ["status", "sha1", "parallel"] }
 notify = "=8.2.0"
 
+# Markdown — CommonMark, as the renderer draws an answer and the recall seat
+# reads one (what it quotes, what it shows as code).
+pulldown-cmark = "0.13"
+
 # Test harness
 tempfile = "3"
 

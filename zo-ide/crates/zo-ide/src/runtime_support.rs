@@ -82,7 +82,7 @@ fn profile_boot_components(
     );
 
     let retriever_started = std::time::Instant::now();
-    let retriever_loaded = runtime::load_memory_retriever(cwd, Some(model)).is_some();
+    let retriever_loaded = runtime::load_memory_retriever(cwd, Some(model), None).is_some();
     eprintln!(
         "[BOOT-COMPONENT] retriever-load={}us loaded={retriever_loaded}",
         retriever_started.elapsed().as_micros()

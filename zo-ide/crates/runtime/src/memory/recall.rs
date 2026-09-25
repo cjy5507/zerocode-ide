@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::SystemTime;
 
 use core_types::text::truncate_on_char_boundary;
@@ -68,8 +68,32 @@ pub struct LexicalMemoryRetriever {
     /// What readers did with the pages recall put in front of them — the
     /// demand side of the hub prior. Empty by default, which ranks exactly
     /// as before.
-    demand: RecallDemand,
+    demand: Arc<RecallDemand>,
+    /// Where to ask for that demand afresh on every recall, when a host
+    /// seated one ([`Self::with_demand_source`]); a seated source outranks
+    /// [`Self::demand`], and a source that answers `None` ranks as if no
+    /// reader had ever answered.
+    demand_source: Option<Arc<dyn RecallDemandSource>>,
     active_model: Option<MemoryModelTag>,
+}
+
+/// Where a retriever asks, on every recall, what readers have done with the
+/// pages it recalled before — and whether that answer is to be ranked on at
+/// all.
+///
+/// The recall seat implements it over its own ledger, the rows
+/// `rerank_shadow::note_recall_read` writes (t-6264), because the seat is the
+/// one thing that knows both the rows and the road the person chose: under
+/// `on`, or an `auto` its own evidence has raised, the demand ranks; under
+/// `off` and `shadow` the seat records what readers do and the retriever
+/// ranks exactly as it always did — the same bytes, which is what a
+/// record-only mode promises. Asked per recall rather than once at build, so
+/// a label the last turn wrote is read by this one, and a switch a person
+/// flips takes effect on the next recall rather than the next process.
+pub trait RecallDemandSource: Send + Sync + std::fmt::Debug {
+    /// The demand to rank this recall on, or `None` to rank as if no reader
+    /// had ever answered.
+    fn demand(&self) -> Option<Arc<RecallDemand>>;
 }
 
 /// How often recall has shown each page and how often a reader then opened
@@ -106,28 +130,63 @@ pub const UNADDRESSED_AFTER_RECALLS: u32 = 5;
 pub const UNADDRESSED_DEMOTION: i64 = GRAPH_HUB_PRIOR_MAX + 1;
 
 impl RecallDemand {
-    /// Build from `(slug, recalled, opened)` rows.
+    /// Build from `(slug, recalled, opened)` rows, adding up every row that
+    /// names one slug: the seat writes one row per turn a page was shown,
+    /// and a demand that kept only the last of them would call a page shown
+    /// fifty times and opened once "shown once" (t-6264).
     #[must_use]
     pub fn from_rows<I>(rows: I) -> Self
     where
         I: IntoIterator<Item = (String, u32, u32)>,
     {
-        Self {
-            shown: rows
-                .into_iter()
-                .map(|(slug, recalled, opened)| (slug, (recalled, opened)))
-                .collect(),
+        let mut shown: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        for (slug, recalled, opened) in rows {
+            let counted = shown.entry(slug).or_default();
+            counted.0 = counted.0.saturating_add(recalled);
+            counted.1 = counted.1.saturating_add(opened);
         }
+        Self { shown }
+    }
+
+    /// How many pages this demand has an answer about.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.shown.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.shown.is_empty()
+    }
+
+    /// `(times recalled, times opened)` for `slug`, when readers were ever
+    /// shown it.
+    #[must_use]
+    pub fn shown(&self, slug: &str) -> Option<(u32, u32)> {
+        self.shown.get(slug).copied()
     }
 
     /// Whether readers have been shown `slug` at least
     /// [`UNADDRESSED_AFTER_RECALLS`] times and none of them opened it.
     #[must_use]
     pub fn unaddressed(&self, slug: &str) -> bool {
-        self.shown
-            .get(slug)
-            .is_some_and(|&(recalled, opened)| recalled >= UNADDRESSED_AFTER_RECALLS && opened == 0)
+        self.shown.get(slug).is_some_and(|&counted| answered_by_nobody(counted))
     }
+
+    /// Whether any page is [`Self::unaddressed`] — whether this demand ranks
+    /// differently from none at all. A demand that sinks nothing is the
+    /// empty demand as far as ranking goes, so a caller holding one need ask
+    /// nothing more before handing it over.
+    #[must_use]
+    pub fn sinks_anything(&self) -> bool {
+        self.shown.values().any(|&counted| answered_by_nobody(counted))
+    }
+}
+
+/// The one rule both questions of [`RecallDemand`] ask: shown at least
+/// [`UNADDRESSED_AFTER_RECALLS`] times, opened never.
+fn answered_by_nobody((recalled, opened): (u32, u32)) -> bool {
+    recalled >= UNADDRESSED_AFTER_RECALLS && opened == 0
 }
 
 /// One reading of the merged memory stores, plus the fingerprint of the
@@ -332,7 +391,8 @@ impl LexicalMemoryRetriever {
             corpus_incoming: BTreeMap::new(),
             corpus_by_slug: BTreeMap::new(),
             corpus_in_degree: BTreeMap::new(),
-            demand: RecallDemand::default(),
+            demand: Arc::new(RecallDemand::default()),
+            demand_source: None,
             active_model: None,
         }
     }
@@ -343,14 +403,34 @@ impl LexicalMemoryRetriever {
     }
 
     /// Tell the retriever what readers did with the pages it recalled before,
-    /// so a hub nobody opens stops being lifted by its in-links. Nothing is
-    /// wired to read this from the recall seat's ledger yet: the seat labels
-    /// only whether its first note was opened, and a demand read off that
-    /// would call every other page unaddressed.
+    /// so a hub nobody opens stops being lifted by its in-links — a demand
+    /// fixed for the retriever's life. A session's retriever is handed a
+    /// [`RecallDemandSource`] instead ([`Self::with_demand_source`]), which
+    /// reads the recall seat's rows afresh on every recall.
     #[must_use]
     pub fn with_demand(mut self, demand: RecallDemand) -> Self {
-        self.demand = demand;
+        self.demand = Arc::new(demand);
         self
+    }
+
+    /// Seat the source every recall asks for its demand: the recall seat,
+    /// reading its own rows and the road the person chose (t-6264). What it
+    /// answers outranks [`Self::with_demand`]; `None` from it ranks as if no
+    /// reader had ever answered.
+    #[must_use]
+    pub fn with_demand_source(mut self, source: Arc<dyn RecallDemandSource>) -> Self {
+        self.demand_source = Some(source);
+        self
+    }
+
+    /// The demand this recall ranks on: what the seated source says now, or
+    /// the fixed one — and nothing at all from a source that is recording
+    /// rather than acting.
+    fn demand_now(&self) -> Arc<RecallDemand> {
+        match &self.demand_source {
+            Some(source) => source.demand().unwrap_or_default(),
+            None => Arc::clone(&self.demand),
+        }
     }
 
     /// Tell the retriever which model is driving this session, so recall can
@@ -376,7 +456,8 @@ impl LexicalMemoryRetriever {
             corpus_incoming: BTreeMap::new(),
             corpus_by_slug: BTreeMap::new(),
             corpus_in_degree: BTreeMap::new(),
-            demand: RecallDemand::default(),
+            demand: Arc::new(RecallDemand::default()),
+            demand_source: None,
             active_model: None,
         }
     }
@@ -490,7 +571,7 @@ impl LexicalMemoryRetriever {
     /// plus whatever lexical score the neighbour earned on its own. Taken over
     /// seeds it is a max, not a sum: a page several seeds point at is one
     /// answer arrived at three ways, not three answers.
-    fn expand_graph_neighbors<'a>(&'a self, candidates: &mut Vec<Candidate<'a>>) {
+    fn expand_graph_neighbors<'a>(&'a self, demand: &RecallDemand, candidates: &mut Vec<Candidate<'a>>) {
         if self.corpus.is_empty() {
             return;
         }
@@ -522,7 +603,7 @@ impl LexicalMemoryRetriever {
                 // Readers have answered about this page; the graph does not
                 // bring it back in on another page's words. Its own words
                 // still can, below.
-                if self.demand.unaddressed(neighbor) {
+                if demand.unaddressed(neighbor) {
                     continue;
                 }
                 let Some(decay) = relation_decay(kind) else {
@@ -571,7 +652,7 @@ impl LexicalMemoryRetriever {
             };
             candidates.push(Candidate {
                 lexical: value,
-                boost: self.corpus_prior(&slug),
+                boost: self.corpus_prior(demand, &slug),
                 page: Some(page),
                 hit: MemoryHit {
                     entry: page.entry().clone(),
@@ -647,11 +728,11 @@ impl LexicalMemoryRetriever {
 
     /// The boost a vault page carries before any query is asked: what the rest
     /// of the vault has said about it, independent of this query.
-    fn corpus_prior(&self, slug: &str) -> i64 {
+    fn corpus_prior(&self, demand: &RecallDemand, slug: &str) -> i64 {
         // The vault's attention lifts a page only until readers have answered:
         // in-links are one author's sentence each, an unopened showing is a
         // reader's, and five readers outweigh any number of links.
-        let mut prior = if self.demand.unaddressed(slug) {
+        let mut prior = if demand.unaddressed(slug) {
             -UNADDRESSED_DEMOTION
         } else {
             self.hub_prior(slug)
@@ -1042,6 +1123,10 @@ impl LexicalMemoryRetriever {
         if query_tokens.is_empty() || (lone_cjk && !self.names(&index).named(&first_cjk)) {
             return None;
         }
+        // Asked once per recall, before the ranking reads it in two places:
+        // a source answering differently between the prior and the graph
+        // would rank one recall on two demands.
+        let demand = self.demand_now();
         let mut candidates = index
             .entries
             .iter()
@@ -1057,7 +1142,7 @@ impl LexicalMemoryRetriever {
                     .filter_map(|token| indexed.token_weights.get(token))
                     .sum::<usize>();
                 let boost = match page {
-                    Some(_) => self.corpus_prior(&indexed.entry.slug),
+                    Some(_) => self.corpus_prior(&demand, &indexed.entry.slug),
                     None => i64::try_from(ranking_boost(indexed, self.active_model.as_ref()))
                         .unwrap_or(i64::MAX),
                 };
@@ -1079,7 +1164,7 @@ impl LexicalMemoryRetriever {
         // Rank first, expand second: the seeds are defined by the ranking, so
         // the ranking has to exist before the graph reads it.
         sort_candidates(&mut candidates);
-        self.expand_graph_neighbors(&mut candidates);
+        self.expand_graph_neighbors(&demand, &mut candidates);
         sort_candidates(&mut candidates);
         candidates.truncate(k);
         let superseders = self.superseders_among(&candidates);
@@ -1923,16 +2008,26 @@ impl Names {
 /// dense RRF hybrid when the `memory-embed` feature is on and the embedding
 /// model loads. Returns `None` when there is no memory index. The boxed trait
 /// object lets the runtime hold either backend behind one type (DIP).
+///
+/// `demand` is the source the lexical half asks on every recall for what
+/// readers did with the pages it recalled before ([`RecallDemandSource`]);
+/// `None` ranks as before, which is what a probe or a host with no recall
+/// seat asks for.
 #[must_use]
 pub fn load_memory_retriever(
     cwd: &Path,
     active_model: Option<&str>,
+    demand: Option<Arc<dyn RecallDemandSource>>,
 ) -> Option<std::sync::Arc<dyn MemoryRetriever + Send + Sync>> {
     let (roots, stamp, entries) = read_watched_stores(cwd);
     let corpus = second_brain_corpus();
     if entries.is_empty() && corpus.pages.is_empty() {
         return None;
     }
+    let seated = move |lexical: LexicalMemoryRetriever| match demand {
+        Some(source) => lexical.with_demand_source(source),
+        None => lexical,
+    };
     #[cfg(feature = "memory-embed")]
     {
         if let Some(memory_dir) = nearest_memory_root(cwd) {
@@ -1945,20 +2040,22 @@ pub fn load_memory_retriever(
                 // keep off the turn. A memory written this session is therefore
                 // recalled by its words immediately and by its meaning next
                 // process — better than not at all, and it costs no turn time.
-                let lexical = LexicalMemoryRetriever::watching(roots, stamp, entries)
-                    .with_corpus(corpus)
-                    .with_active_model(active_model);
+                let lexical = seated(
+                    LexicalMemoryRetriever::watching(roots, stamp, entries)
+                        .with_corpus(corpus)
+                        .with_active_model(active_model),
+                );
                 return Some(std::sync::Arc::new(hybrid::HybridMemoryRetriever::new(
                     lexical, dense,
                 )));
             }
         }
     }
-    Some(std::sync::Arc::new(
+    Some(std::sync::Arc::new(seated(
         LexicalMemoryRetriever::watching(roots, stamp, entries)
             .with_corpus(corpus)
             .with_active_model(active_model),
-    ))
+    )))
 }
 
 /// Global per-project memory directory that owns the embedding cache.
@@ -2097,7 +2194,7 @@ mod tests {
     use super::{
         load_lexical_memory_retriever, parse_memory_index, recall_section_reserve_tokens,
         render_recalled_memory_section, LexicalMemoryRetriever, RecallDemand,
-        GRAPH_NEIGHBORS_PER_KIND, GRAPH_RELATION_DECAY, MAX_RECALLED_ENTRIES,
+        RecallDemandSource, GRAPH_NEIGHBORS_PER_KIND, GRAPH_RELATION_DECAY, MAX_RECALLED_ENTRIES,
         UNADDRESSED_AFTER_RECALLS,
     };
     use crate::memory::MemoryModelTag;
@@ -2645,6 +2742,86 @@ mod tests {
             ranked("vellichor", 50, 1),
             ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"],
             "one reader opening it is an answer, and its place stays"
+        );
+    }
+
+    /// The seat's rows name a page once per turn it was shown, and a demand
+    /// built from them has to ADD those rows up: a reader that kept only the
+    /// last row about a page would call a page shown fifty times and opened
+    /// once "shown once and opened once", and never sink anything.
+    #[test]
+    fn a_page_named_by_several_rows_is_the_sum_of_them() {
+        let demand = RecallDemand::from_rows(
+            std::iter::repeat_n(("wiki/z-hub".to_string(), 1, 0), usize::try_from(UNADDRESSED_AFTER_RECALLS).unwrap()),
+        );
+        assert!(demand.unaddressed("wiki/z-hub"), "five rows of one showing each are five showings");
+        let demand = RecallDemand::from_rows([
+            ("wiki/z-hub".to_string(), UNADDRESSED_AFTER_RECALLS, 0),
+            ("wiki/z-hub".to_string(), 1, 1),
+        ]);
+        assert!(!demand.unaddressed("wiki/z-hub"), "one opening in a later row is an answer");
+    }
+
+    /// The retriever asks its source on every recall, and a source that
+    /// answers `None` — the seat recording — leaves ranking exactly as a
+    /// retriever with no source ranks: the same hits, byte for byte.
+    #[test]
+    fn a_seated_source_is_asked_on_every_recall_and_none_ranks_as_before() {
+        use crate::second_brain::corpus::RelationKind;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Debug, Default)]
+        struct Switch(Mutex<Option<Arc<RecallDemand>>>);
+        impl RecallDemandSource for Switch {
+            fn demand(&self) -> Option<Arc<RecallDemand>> {
+                self.0.lock().expect("a switch").clone()
+            }
+        }
+
+        let _lock = crate::test_env_lock();
+        let pages: [FixturePage<'_>; 6] = [
+            (
+                "wiki/seed",
+                "vellichor",
+                &[
+                    (RelationKind::Related, "wiki/a-quiet"),
+                    (RelationKind::Related, "wiki/z-hub"),
+                ],
+            ),
+            ("wiki/a-quiet", "sonder", &[]),
+            ("wiki/z-hub", "hiraeth", &[]),
+            ("wiki/cite-1", "komorebi", &[(RelationKind::Related, "wiki/z-hub")]),
+            ("wiki/cite-2", "meraki", &[(RelationKind::Related, "wiki/z-hub")]),
+            ("wiki/cite-3", "saudade", &[(RelationKind::Related, "wiki/z-hub")]),
+        ];
+        let source = Arc::new(Switch::default());
+        let seated = LexicalMemoryRetriever::from_index_markdown(INDEX)
+            .with_corpus(corpus_scan(&pages))
+            .with_demand_source(source.clone());
+        let unseated =
+            LexicalMemoryRetriever::from_index_markdown(INDEX).with_corpus(corpus_scan(&pages));
+        let slugs = |hits: Vec<MemoryHit>| hits.into_iter().map(|hit| hit.entry.slug).collect::<Vec<_>>();
+
+        assert_eq!(
+            seated.recall("vellichor", 5),
+            unseated.recall("vellichor", 5),
+            "a source saying nothing ranks as no source"
+        );
+        *source.0.lock().expect("a switch") = Some(Arc::new(RecallDemand::from_rows([(
+            "wiki/z-hub".to_string(),
+            UNADDRESSED_AFTER_RECALLS,
+            0,
+        )])));
+        assert_eq!(
+            slugs(seated.recall("vellichor", 5)),
+            ["wiki/seed", "wiki/a-quiet"],
+            "asked afresh on this recall"
+        );
+        *source.0.lock().expect("a switch") = None;
+        assert_eq!(
+            seated.recall("vellichor", 5),
+            unseated.recall("vellichor", 5),
+            "and again on the next"
         );
     }
 

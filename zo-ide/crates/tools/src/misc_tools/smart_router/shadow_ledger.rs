@@ -106,7 +106,7 @@ const LAST_ROW_WINDOW_BYTES: u64 = 64 * 1024;
 /// their readings — to 2,186 B (p90 1,775). 2.5 KiB holds the longest of
 /// either with room, so a window of this times the rows asked for holds them
 /// all and the reader never has to guess whether it saw the last of them.
-const TAIL_ROW_BYTES: u64 = 2_560;
+pub(super) const TAIL_ROW_BYTES: u64 = 2_560;
 
 /// A ledger's last row, read from its end rather than the whole file: `None`
 /// for a missing or empty ledger.

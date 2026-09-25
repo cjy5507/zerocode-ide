@@ -2,7 +2,7 @@
 //! read — and, in the one mode a person switches on, to settle the order it
 //! reads it in.
 
-use core_types::MemoryHit;
+use core_types::{ConversationMessage, MemoryHit};
 
 /// Sees every recall a turn performs — the query, and the hits in the order
 /// recall settled — after recall has decided and before anything renders, and
@@ -26,4 +26,34 @@ pub trait RecallSeat: Send + Sync {
     /// `attempt` belongs to the turn; asynchronous evidence must keep this
     /// identity rather than borrowing another turn in the same project.
     fn settle(&self, attempt: &str, query: &str, hits: Vec<MemoryHit>) -> Vec<MemoryHit>;
+
+    /// What the turn did since the seat last heard of it ([`TurnProgress`]),
+    /// told by the runtime at each request's boundary and once more when the
+    /// turn ends. A seat that grades nothing ignores it.
+    fn observe(&self, _attempt: &str, _progress: TurnProgress<'_>) {}
+}
+
+/// What a turn did after a recall, as the runtime hands it to the seat while
+/// the turn goes (t-6264).
+///
+/// The seat learns it from the runtime and not from the transcript at the
+/// turn's end, because by then the transcript may no longer hold it: a
+/// compaction — mid-turn, or the one after the turn's last answer — replaces
+/// what the turn read with a summary, and a request that failed takes its
+/// messages back. So each boundary hands over what the turn appended since the
+/// last one, before any compaction can take it.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnProgress<'a> {
+    /// What the turn appended since the seat last heard.
+    pub appended: &'a [ConversationMessage],
+    /// Whether the request that carried the seat's last recall was answered:
+    /// the model was sent what the recall put in front of it and replied. A
+    /// request the context budget refused, one a gateway turned away, one
+    /// whose stream failed, and one whose reply was taken back showed the
+    /// model nothing.
+    pub answered: bool,
+    /// Whether the turn is over and ended on its own terms — the model's
+    /// answer, or a budget that closed it — so that what the seat has heard is
+    /// the whole of it. A turn that failed or was cancelled never says so.
+    pub ended: bool,
 }

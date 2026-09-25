@@ -35,5 +35,6 @@ pub use dreamer::{
 };
 pub use recall::{
     load_lexical_memory_retriever, load_memory_retriever, parse_memory_index,
-    render_recalled_memory_section, IndexedCorpusPage, LexicalMemoryRetriever,
+    render_recalled_memory_section, IndexedCorpusPage, LexicalMemoryRetriever, RecallDemand,
+    RecallDemandSource,
 };

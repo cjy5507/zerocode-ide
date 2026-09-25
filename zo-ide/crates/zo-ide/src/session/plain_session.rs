@@ -915,17 +915,19 @@ impl PlainSession {
 
     /// Write the routing and recall seats' `agreed` marks for the turn that
     /// just ended: the route stood unless `unseated` says which door moved
-    /// the wire, and the recall's first note was read or cited in the
-    /// messages from `turn_from` on. A session compaction may have shrunk the
-    /// transcript under that index; the turn is then read from its own user
-    /// message, the last one the session holds.
+    /// the wire, and the recall's first note was read or cited — as the
+    /// runtime told the recall seat while the turn went (t-6264), not as the
+    /// transcript holds it now. The other seats read the messages from
+    /// `turn_from` on. A session compaction may have shrunk the transcript
+    /// under that index; the turn is then read from its own user message,
+    /// the last one the session holds.
     fn label_jev_seats(&self, unseated: Option<runtime::SwitchTrigger>, turn_from: usize, cancelled: bool) {
         let Some(inner) = self.runtime.try_runtime() else {
             return;
         };
         let attempt = inner.attempt().to_string();
         if cancelled {
-            let _ = tools::note_recall_read(&self.cwd, &attempt, None);
+            let _ = tools::note_recall_read(&self.cwd, &attempt, true);
             let _ = tools::note_compaction_reread(&self.cwd, None);
             let _ = tools::note_patch_review_turn(&self.cwd, None);
             // A turn the person stopped stops the commands it ran (t-6348).
@@ -944,7 +946,7 @@ impl PlainSession {
         // Whether a row was written is the ledger's business, not the turn's.
         // The routing seat's label reads what the turn did (t-6346).
         let _ = tools::note_route_followed(&self.cwd, &attempt, unseated, Some(&messages[from..]));
-        let _ = tools::note_recall_read(&self.cwd, &attempt, Some(&messages[from..]));
+        let _ = tools::note_recall_read(&self.cwd, &attempt, false);
         // And the compaction seat's: whether a block a compaction dropped was
         // read again inside its window (t-6039).
         let _ = tools::note_compaction_reread(&self.cwd, Some(&messages[from..]));

@@ -64,7 +64,7 @@ pub use decision_shadow::{
 };
 pub use probe_exec::task_fingerprint;
 pub use rerank_shadow::{
-    note_recall_read, rerank_shadow_path, Judged, RerankLabelRow, RerankShadow, RerankShadowRow,
+    note_recall_read, rerank_shadow_path, Judged, RerankLabelRow, RerankShadow, RerankShadowRow, ShownNote,
     RERANK_OUTCOME_ANSWERED, RERANK_OUTCOME_UNORDERABLE, RERANK_SHADOW_FILE,
 };
 pub use compaction_seat::{
