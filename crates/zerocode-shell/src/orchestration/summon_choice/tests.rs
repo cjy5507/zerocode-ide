@@ -125,7 +125,8 @@ fn heard_body(request: &str) -> Value {
 /// One summons, asked and written down: what left the machine is the shape
 /// and not the agent already chosen, and the row carries both answers beside
 /// each other with the one number this ledger exists for — whether they
-/// agreed.
+/// agreed. A summons that named no model of its own: a pinned one grades
+/// nothing (`a_summons_whose_model_was_pinned_grades_nothing`).
 #[test]
 fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
     let work = tempfile::tempdir().expect("a checkout");
@@ -139,7 +140,10 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
             &work.path().display().to_string(),
         )),
     );
-    let shadow = shadow();
+    let shadow = SummonShadow {
+        model_was_pinned: false,
+        ..shadow()
+    };
     let ask =
         summon_choice::ask(&shadow.look(), &shadow.options).expect("two agents are a question");
     let row = settle(&wire, seat(&shadow), &ask, &shadow, Some(work.path()));
@@ -189,7 +193,7 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
         "the Jev version that judged the summons, beside the worker's model"
     );
     assert_eq!(row["effort"], json!("max"));
-    assert_eq!(row["modelWasPinned"], json!(true));
+    assert_eq!(row["modelWasPinned"], json!(false));
     assert_eq!(row["agreed"], json!(false), "two agents, two answers");
     assert_eq!(row["confidence"], json!(0.64));
     assert_eq!(option_ids(&row), ["claude", "kimi"]);

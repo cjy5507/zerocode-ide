@@ -158,7 +158,12 @@ const STATE_KEYS: [&str; 8] = [
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`],
 /// so changing a word without bumping the version is a red test rather than a
 /// quiet drift.
-pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 4;
+///
+/// Or when the label they are graded by changes: version 5 asks version 4's
+/// words and marks no summons whose model was pinned ([`PINNED`], t-9087).
+/// The version rides every row, so a reader can tell the series apart;
+/// reading them apart is t-6877's contract.
+pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 5;
 
 /// The fewest options that make a choice. One agent is not a question, and a
 /// question asked where there was nothing to decide is a row that says the

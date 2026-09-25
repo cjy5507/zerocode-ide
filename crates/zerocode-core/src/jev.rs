@@ -1500,6 +1500,11 @@ pub const PLACEMENT: JevUse = JevUse {
 /// - A summons whose own agent was never offered is not a comparison either;
 ///   the row says [`crate::summon_choice::NOT_OFFERED`] under
 ///   [`crate::summon_choice::NOT_COMPARED_KEY`] instead of a mark.
+/// - Nor is a summons whose model was pinned ([`crate::summon_choice::PINNED`],
+///   t-9087): the pin is the person's word and an apply stage leaves it
+///   alone. All 121 marked summonses of the fourth words on this machine
+///   (2026-09-25) were pinned and landed on the pin's own CLI, so the
+///   baseline stood at 1,000‰ over the marks — a line no bound can clear.
 ///
 /// What the rule does NOT count as disagreement: a person taking the pane
 /// over (`taken_over`), the worker being stopped, or the work failing. Those
