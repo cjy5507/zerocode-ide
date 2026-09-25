@@ -30,24 +30,27 @@ import { installBoardWaits } from "./board-waits.mjs";
 import { coordinatorDeskFixture } from "./coordinator-desk.mjs";
 import { loadNote, machineIsLoud } from "./machine-load.mjs";
 
-const median = (values) => {
+export const median = (values) => {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 };
 
-const quantile = (values, q) => {
+export const quantile = (values, q) => {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
 };
 
-/* The page's hands for one measurement: the painters wrapped where they are
+/* 이 셋은 t-7288의 실시간 지도 실측도 같은 손으로 재려고 밖에서 부를 수 있다
+ * — 두 표면이 서로 다른 자로 잰 수는 나란히 놓을 수 없다.
+ *
+ * The page's hands for one measurement: the painters wrapped where they are
  * looked up (a nested desk paint inside the board's paint is counted once, by
  * the outer call), a watch on the board, and a settle that waits for the
  * board's own readiness and — where the window has one — the desk's. */
-async function installPerfHands(page) {
+export async function installPerfHands(page) {
   await installBoardWaits(page);
   await page.evaluate(() => {
     window.__PERF_PAINT__ = 0;

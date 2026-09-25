@@ -56,6 +56,7 @@
     <script defer src="./shell-sftp.js"></script>
     <script defer src="./shell-conversation-view.js"></script>
     <script defer src="./shell-board.js"></script>
+    <script defer src="./shell-board-live.js"></script>
     <script defer src="./shell.js"></script>
   </head>
   <body>
@@ -1596,6 +1597,14 @@
                  선다. 인스펙터 여닫이는 서랍 티어에서만 보인다 — 넓은 판의 곁판은
                  늘 서 있으므로 열 것이 없다. -->
             <div class="agent-graph-head-tools">
+            <!-- 실시간 조율 지도의 손잡이 (t-7288). 세 번째 모드가 아니라 이
+                 그림 위의 켜고 끄기다: 보드의 기본값은 작업 목록 그대로이고,
+                 끈 판은 지금까지의 관계 그림 그대로다. -->
+            <button class="icon-btn agent-graph-live" type="button" aria-pressed="false"
+                    data-i18n-aria="board.live.title" aria-label="실시간 조율"
+                    data-i18n-title="board.live.title" data-tip="실시간 조율">
+              <svg class="icon" aria-hidden="true"><use href="#i-waypoints"></use></svg>
+            </button>
             <button class="icon-btn agent-graph-follow" type="button" aria-pressed="false"
                     data-i18n-aria="board.graph.follow" aria-label="작업 따라가기"
                     data-i18n-title="board.graph.follow" data-tip="작업 따라가기">
