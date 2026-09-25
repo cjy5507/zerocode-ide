@@ -196,6 +196,8 @@ fn an_asker_hears_a_sleeper_the_restart_lost_as_exited_not_cancelled() {
         assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/lost"));
         let (question, _) = asked_of(&mut bench, "%1", &format!("worker:{worker}"));
         assert_eq!(bench.ledger.window_exiting(2_000).sleeping, 1);
+        // Given up on by the next window, whose grace it is (t-9091).
+        bench.ledger.window_restarted(2_500);
         let given_up = if reason == NOT_RESUMED {
             bench.ledger.sleeper_expired(&worker, 3_000)
         } else {

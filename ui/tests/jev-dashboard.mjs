@@ -59,6 +59,17 @@ function axeBuilder() {
  * With `real` — this machine's own count, from `realSummary` — the summary
  * answer is that count and every switch stands where that count says. */
 export function jevDashboardFixture(real = null) {
+  /* What `jev_summary` answers for `seats` (t-9091): the reading names the
+   * scope it counted — this checkout, with records of its own — and each
+   * feature where its rows are kept, read off the file zo found them in (the
+   * machine's one place, `~/.zo/jev`, or the project's own state). */
+  function jevReading(args, seats) {
+    const reachOf = (found) => (!found ? null : /\/\.zo\/jev\//.test(found) ? "machine" : "project");
+    return {
+      scope: { scope: args?.scope ?? "workspace", workspace: "/Users/p/project", workspaceName: "project", recorded: true, projects: [], windowDays: 7 },
+      seats: seats.map((seat) => ({ ...seat, reach: reachOf(seat.found) })),
+    };
+  }
   const seats = [...document.getElementById("jev-features").content.querySelectorAll("[data-jev-feature]")]
     .map((feature) => feature.dataset.jevFeature);
   const modes = [
@@ -206,7 +217,7 @@ export function jevDashboardFixture(real = null) {
   window.__ANSWER__.jev_day = () => ({ sent: 247, most: 500 });
   window.__ANSWER__.jev_summary = (args) => {
     window.__JEV__.asks.push(args ?? {});
-    return seats.map((id) => numbers(id, args));
+    return jevReading(args, seats.map((id) => numbers(id, args)));
   };
   // The switch's door, as the core presses it: on is every folder and every
   // seat at its recommendation, off is nothing in use.
@@ -219,7 +230,7 @@ export function jevDashboardFixture(real = null) {
     for (const seat of real.seats) if (seat.id in modeOf) modeOf[seat.id] = seat.mode;
     window.__ANSWER__.jev_summary = (args) => {
       window.__JEV__.asks.push(args ?? {});
-      return real.seats;
+      return jevReading(args, real.seats);
     };
   }
   /* Text that a person cannot read is a fault: cut by the surface that
@@ -1104,6 +1115,118 @@ export async function testJevDashboard(browser, origin, ok) {
         under: under.slice(0, 6), unknown: unknown.slice(0, 6) }));
 
     ok("the dashboard raised no renderer fault", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
+/* t-9091: the dashboard says where it counts. On 2026-09-25 it was opened
+ * while a worker's checkout was the one being looked at, and every zo
+ * feature read zero — zo counts the project it is asked about, and that
+ * checkout had no zo records of its own — while another project had
+ * thirteen features' records that day; nothing on the page said which
+ * project it had counted. The reading now names its scope: the checkout by
+ * name, and — when it has no zo records — the projects that do, with a
+ * switch to every project summed, where a feature says in how many projects
+ * it acts. A feature whose records this computer keeps in one place is
+ * marked, and reads the same numbers in both scopes. */
+export async function testJevDashboardScope(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.evaluate(jevDashboardFixture);
+    const seen = await page.evaluate(async () => {
+      const base = window.__ANSWER__.jev_summary;
+      const workspace = "/Users/p/zerocode/workspaces/zerocode/t-1";
+      const projects = [
+        { path: "/Users/p/atlas", name: "atlas", newestMs: Date.now() - 3_600_000 },
+        { path: "/Users/p/notes", name: "notes", newestMs: Date.now() - 86_400_000 },
+      ];
+      const nothing = (counted) => ({ ...counted, rows: 0, answered: 0, refused: 0, applied: 0, called: 0, requests: 0,
+        answeredShare: null, answeredLowerBound: null, p50Ms: null, p95Ms: null, failures: [], refusals: [] });
+      window.__ANSWER__.jev_summary = (args) => {
+        const answered = base(args);
+        const scope = { ...answered.scope, workspace, workspaceName: "t-1", recorded: false, projects };
+        const seats = answered.seats.map((seat) => {
+          if (args.scope === "projects") {
+            return { ...seat, across: { projects: projects.length, applying: seat.applies ? 1 : 0, summed: seat.reach === "project" } };
+          }
+          // This checkout has no zo records of its own: a project's rows are not here.
+          return seat.reach !== "project" ? seat : {
+            ...seat, reach: null, today: nothing(seat.today), week: nothing(seat.week), costUsd: null,
+            verdict: null, judged: null, rowsToNextJudgment: null, clearsRiseFloor: null, days: [], recent: [],
+          };
+        });
+        return { scope, seats };
+      };
+      const view = () => document.querySelector("#jev-view");
+      const until = (drawn) => new Promise((done, fail) => {
+        const end = performance.now() + 3_000;
+        const look = () => {
+          if (drawn()) done();
+          else if (performance.now() > end) fail(new Error("the dashboard never drew it"));
+          else requestAnimationFrame(look);
+        };
+        look();
+      });
+      const fact = (id, name) => view().querySelector(`[data-jev-dash-row="${id}"] [data-jev-fact="${name}"]`)?.textContent ?? null;
+      const reachOf = (id) => view().querySelector(`[data-jev-dash-row="${id}"] [data-jev-reach]`)?.dataset.jevReach ?? null;
+      const read = () => {
+        const line = view().querySelector("[data-jev-scope-line]");
+        const note = view().querySelector("[data-jev-scope-note]");
+        return {
+          line: line?.textContent.trim() ?? null,
+          lineTip: line?.dataset.tip ?? null,
+          note: note && !note.hidden ? note.textContent.trim() : null,
+          choices: [...view().querySelectorAll("[data-jev-scope-choice]")]
+            .map((one) => `${one.dataset.jevScopeChoice}:${one.getAttribute("aria-pressed")}`),
+          summon: { week: fact("summon", "week"), reach: reachOf("summon") },
+          routing: {
+            week: fact("routing", "week"), reach: reachOf("routing"),
+            across: view().querySelector('[data-jev-dash-row="routing"] [data-jev-across]')?.textContent.trim() ?? null,
+          },
+          ask: window.__JEV__.asks.at(-1) ?? null,
+        };
+      };
+      el("nav-jev").click();
+      await until(() => fact("summon", "week") === "50");
+      const here = read();
+      const asked = window.__JEV__.asks.length;
+      const pressed = Boolean(view().querySelector('[data-jev-scope-choice="projects"]'));
+      view().querySelector('[data-jev-scope-choice="projects"]')?.click();
+      // Whether the other scope was asked for and drawn is itself a finding:
+      // a dashboard with no switch never asks, and each claim below says so.
+      const drawnAgain = await until(() => window.__JEV__.asks.length > asked && fact("routing", "week") === "35")
+        .then(() => true, () => false);
+      const everywhere = { ...read(), pressed, drawnAgain };
+      let kept = null;
+      try {
+        kept = localStorage.getItem(JEV_SCOPE_KEY);
+      } catch {
+        kept = null;
+      }
+      return { here, everywhere, kept, workspace };
+    }).catch((error) => ({ error: String(error) }));
+    const { here, everywhere } = seen;
+    ok("the dashboard names the checkout it counts, with its whole path as the tip",
+      !seen.error && here.line?.includes("t-1") && here.lineTip?.includes(seen.workspace) && here.ask?.scope === "workspace",
+      JSON.stringify(seen.error ?? { line: here.line, tip: here.lineTip, ask: here.ask }));
+    ok("a checkout with no zo records says so and names the projects that have them",
+      !seen.error && here.note !== null && here.note.includes("atlas") && here.note.includes("notes") && here.note.includes("2"),
+      JSON.stringify(seen.error ?? here.note));
+    ok("the scope is one choice of two, this checkout first and chosen",
+      !seen.error && here.choices.join(",") === "workspace:true,projects:false",
+      JSON.stringify(seen.error ?? here.choices));
+    ok("every project, asked, is summed: the table says in how many projects a feature acts",
+      !seen.error && everywhere.ask?.scope === "projects" && everywhere.line?.includes("2") && everywhere.note === null
+        && everywhere.choices.join(",") === "workspace:false,projects:true"
+        && everywhere.routing.week === "35" && Boolean(everywhere.routing.across?.includes("2") && everywhere.routing.across?.includes("1")),
+      JSON.stringify(seen.error ?? everywhere));
+    ok("a feature this computer keeps in one place is marked, reads the same in both scopes, and is the only one marked",
+      !seen.error && here.summon.reach === "machine" && everywhere.summon.reach === "machine"
+        && here.summon.week === "50" && everywhere.summon.week === "50" && everywhere.routing.reach === null,
+      JSON.stringify(seen.error ?? { here: here.summon, everywhere: everywhere.summon, routing: everywhere.routing.reach }));
+    ok("the scope chosen is kept for the next open", !seen.error && seen.kept === "projects", JSON.stringify(seen.error ?? seen.kept));
+    ok("the scope's dashboard raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
   }

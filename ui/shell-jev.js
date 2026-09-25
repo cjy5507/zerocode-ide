@@ -59,6 +59,7 @@ let jevNumbersRecent = false;
  * one zo, and what it was asked for. */
 let jevNumbersAsking = null;
 let jevNumbersAskingRecent = false;
+let jevNumbersAskingScope = null;
 /* When the last answer landed and what it cost, for the dashboard's own
  * freshness line — the cost is the exec boundary's, measured here rather
  * than promised. */
@@ -97,6 +98,41 @@ function jevRememberUnusedOpen(open) {
 
 let jevUnusedOpen = jevReadUnusedOpen();
 
+/* Which numbers the dashboard counts (t-9091): this checkout — zo is asked
+ * about the one the person is looking at, and that stays the default — or
+ * every project with zo records, summed (`jev_scope::read`). The words are
+ * the switch's; `scope` is the answer's own word for each. The person's last
+ * choice is kept in this browser like the fold's, and a store that cannot be
+ * read is this checkout. */
+const JEV_SCOPES = Object.freeze([
+  { scope: "workspace", key: "jev.scope.workspace", word: "이 작업 공간" },
+  { scope: "projects", key: "jev.scope.projects", word: "모든 프로젝트" },
+]);
+const JEV_SCOPE_KEY = "zerocode.jev-scope.v1";
+
+function jevReadScope() {
+  try {
+    const kept = localStorage.getItem(JEV_SCOPE_KEY);
+    return JEV_SCOPES.some((one) => one.scope === kept) ? kept : JEV_SCOPES[0].scope;
+  } catch {
+    return JEV_SCOPES[0].scope;
+  }
+}
+
+function jevRememberScope(scope) {
+  try {
+    localStorage.setItem(JEV_SCOPE_KEY, scope);
+  } catch {
+    // Unsaved, the next start counts this checkout again.
+  }
+}
+
+let jevScopeChoice = jevReadScope();
+/* What the numbers in hand counted (`jev_scope::JevScope`): the checkout by
+ * name, whether it has zo records of its own, and the projects that do.
+ * `null` until zo has answered. */
+let jevScope = null;
+
 function jevViewsShowing() {
   return tabs.some((tab) => tab.kind === "jev" && stillShowing(tab));
 }
@@ -110,17 +146,18 @@ function jevViewsShowing() {
  * feeds the dashboard when both are open. */
 async function loadJevNumbers({ recent = jevViewsShowing() } = {}) {
   if (jevNumbersAsking) {
-    if (jevNumbersAskingRecent || !recent) return jevNumbersAsking;
+    if ((jevNumbersAskingRecent || !recent) && jevNumbersAskingScope === jevScopeChoice) return jevNumbersAsking;
     await jevNumbersAsking;
     return loadJevNumbers({ recent });
   }
   jevNumbersAskingRecent = recent;
+  jevNumbersAskingScope = jevScopeChoice;
   jevNumbersAsking = (async () => {
     const began = performance.now();
     let held = null;
     try {
       [held, jevDay] = await Promise.all([
-        invoke("jev_summary", recent ? { recent: JEV_RECENT_ROWS } : {}),
+        invoke("jev_summary", { ...(recent ? { recent: JEV_RECENT_ROWS } : {}), scope: jevNumbersAskingScope }),
         // The dashboard's strip reads the day's count beside the ledgers: a
         // file's length, so it rides every refresh; the card draws none.
         recent ? invoke("jev_day").catch(() => null) : jevDay,
@@ -140,7 +177,10 @@ async function loadJevNumbers({ recent = jevViewsShowing() } = {}) {
       paintJevViews();
       return;
     }
-    jevNumbers = held;
+    // The reading names what it counted (t-9091): the seats, and the scope
+    // the dashboard says it counted them over.
+    jevNumbers = held.seats;
+    jevScope = held.scope;
     jevNumbersRecent = recent;
     if (typesafeState) paintTypeSafe(typesafeState);
     else paintJevViews();
@@ -449,7 +489,23 @@ function buildJevView() {
   refresh.type = "button";
   const settings = jevText("jev.openSettings", "설정에서 자세히", "button", "btn jev-settings-open");
   settings.type = "button";
-  root.append(jevNode("header", "jev-head", heading, jevNode("div", "jev-actions", freshness, refresh, settings)));
+  // What the numbers count (t-9091), beside the refresh that asks for
+  // them: the checkout by name — or every project — and the one switch
+  // between the two, in the room the heading's lines already take.
+  const scopeName = jevNode("strong", "jev-scope-name");
+  const scopeLine = jevNode("p", "jev-scope-line", jevText("jev.scope.label", "범위"), document.createTextNode(" "), scopeName);
+  scopeLine.dataset.jevScopeLine = "";
+  const choices = jevNode("div", "jev-scope-switch", ...JEV_SCOPES.map((one) => {
+    const choice = jevText(one.key, one.word, "button", "jev-scope-choice");
+    choice.type = "button";
+    choice.dataset.jevScopeChoice = one.scope;
+    return choice;
+  }));
+  choices.setAttribute("role", "group");
+  choices.dataset.i18nAria = "jev.scope.choose";
+  choices.setAttribute("aria-label", t("jev.scope.choose", "집계 범위"));
+  root.append(jevNode("header", "jev-head", heading, jevNode("div", "jev-head-side",
+    jevNode("div", "jev-actions", freshness, refresh, settings), jevNode("div", "jev-scope", scopeLine, choices))));
   // The settings card's switch, worn over the table (§6.1).
   const mirror = jevSwitchMirror();
   if (mirror) root.append(mirror);
@@ -461,6 +517,14 @@ function buildJevView() {
   error.setAttribute("role", "alert");
   error.hidden = true;
   root.append(status, error);
+
+  // When the checkout has no zo records of its own, the projects that do
+  // (t-9091), over the strip whose sums would otherwise read as nothing.
+  const scopeNote = jevNode("p", "jev-scope-note");
+  scopeNote.dataset.jevScopeNote = "";
+  scopeNote.setAttribute("role", "status");
+  scopeNote.hidden = true;
+  root.append(scopeNote);
 
   // The strip over the table: the sums, how many features stand where, and
   // the day's requests against the limit (t-6243 D1).
@@ -552,6 +616,10 @@ function wireJevView(host) {
   host.querySelector("[data-jev-everywhere]")?.addEventListener("click", () => {
     void setJevEnabled(true);
   });
+  host.querySelector(".jev-scope-switch").addEventListener("click", (event) => {
+    const choice = event.target.closest("[data-jev-scope-choice]");
+    if (choice) void setJevScope(choice.dataset.jevScopeChoice);
+  });
   host.querySelector("[data-jev-rows]").addEventListener("click", (event) => {
     const chip = event.target.closest("[data-jev-fix]");
     if (chip) {
@@ -573,6 +641,45 @@ function wireJevView(host) {
   new ResizeObserver(() => {
     host.style.setProperty("--jev-drawer-height", `${host.clientHeight}px`);
   }).observe(host);
+}
+
+/* Count another scope (t-9091): kept for the next open, drawn as chosen at
+ * once, and asked for — the numbers in hand stand until the answer lands. */
+function setJevScope(scope) {
+  if (scope === jevScopeChoice || !JEV_SCOPES.some((one) => one.scope === scope)) return undefined;
+  jevScopeChoice = scope;
+  jevRememberScope(scope);
+  paintJevViews();
+  return loadJevNumbers({ recent: jevViewsShowing() });
+}
+
+/* The line over the strip: what the numbers in hand counted — the checkout
+ * by name, its whole path as the tip, or how many projects and which — the
+ * switch as chosen, and the note under it when the checkout has no zo
+ * records of its own: which projects do, in the last days zo counts. */
+function paintJevScope(view) {
+  for (const choice of view.querySelectorAll("[data-jev-scope-choice]")) {
+    choice.setAttribute("aria-pressed", String(choice.dataset.jevScopeChoice === jevScopeChoice));
+  }
+  const line = view.querySelector("[data-jev-scope-line]");
+  const note = view.querySelector("[data-jev-scope-note]");
+  line.hidden = jevScope === null;
+  note.hidden = true;
+  if (jevScope === null) return;
+  const projects = jevScope.projects ?? [];
+  const summed = jevScope.scope === "projects" && projects.length > 0;
+  line.querySelector(".jev-scope-name").textContent = summed
+    ? t("jev.scope.counted", "프로젝트 {{count}}곳", { count: jevCount(projects.length) })
+    : jevScope.workspaceName;
+  line.dataset.tip = summed ? projects.map((one) => one.path).join("\n") : jevScope.workspace;
+  if (summed || jevScope.recorded) return;
+  const days = jevCount(jevScope.windowDays);
+  note.textContent = projects.length > 0
+    ? t("jev.scope.elsewhere", "이 작업 공간에는 zo 판단 기록이 없습니다 — 최근 {{days}}일 기록이 있는 프로젝트 {{count}}곳: {{names}}", {
+      days, count: jevCount(projects.length), names: projects.map((one) => one.name).join(", "),
+    })
+    : t("jev.scope.nowhere", "이 작업 공간에는 zo 판단 기록이 없습니다 — 최근 {{days}}일 기록이 있는 프로젝트도 없습니다", { days });
+  note.hidden = false;
 }
 
 /* What the dashboard says under its head: the last press of the switch. */
@@ -831,15 +938,27 @@ function jevStatusCell(held, choice, standing, head) {
   const chip = jevNode("span", "jev-chip");
   chip.dataset.status = status;
   chip.textContent = t(said.key, said.word);
-  const owed = jevSamplesOwed(held, standing);
+  // Summed over projects, a feature has no one judgment to wait on or cite:
+  // each project judges its own rows (t-9091), and the line says in how
+  // many of them it acts instead.
+  const across = held.across ?? null;
+  const owed = across?.summed ? null : jevSamplesOwed(held, standing);
   const lead = jevNode("div", "jev-status-lead", chip);
   if (owed) lead.append(owed);
-  const reason = jevStatusReason(held, status, choice, owed !== null);
+  const reason = across?.summed ? "" : jevStatusReason(held, status, choice, owed !== null);
   if (reason) {
     const line = jevNode("p", "jev-status-reason", document.createTextNode(reason));
     // A feature measured under its bar says so in the tone of a miss.
     line.classList.toggle("is-under", status === "recording" && jevUnderBar(held));
     lead.append(line);
+  }
+  if (across) {
+    const acts = jevNode("p", "jev-status-reason jev-across");
+    acts.dataset.jevAcross = "";
+    acts.textContent = t("jev.scope.across", "{{projects}}곳 중 {{applying}}곳 적용 중", {
+      projects: jevCount(across.projects), applying: jevCount(across.applying),
+    });
+    lead.append(acts);
   }
   const cell = jevNode("div", "jev-status", lead);
   const other = held.model && held.model !== head
@@ -997,6 +1116,7 @@ function paintJevView(view) {
   }
   jevArrange(body, drawn);
   paintJevSwitches(view);
+  paintJevScope(view);
   paintJevCaption(view, numbers);
   paintJevSummary(view, order, heldOf);
   paintJevFreshness(view);
@@ -1151,11 +1271,22 @@ function paintJevRow(row, id, held, standing, head) {
     open = document.createElement("button");
     open.type = "button";
     open.className = "jev-row-open";
-    seat.replaceChildren(open, jevNode("span", "jev-row-id"));
+    seat.replaceChildren(open, jevNode("span", "jev-row-meta", jevNode("span", "jev-row-id")));
   }
   open.textContent = jevSeatName(id);
   open.dataset.tip = jevHintLead(id);
   seat.querySelector(".jev-row-id").textContent = id;
+  // A feature whose records this computer keeps in one place reads the same
+  // numbers whichever scope is counted, and says so (t-9091).
+  let reach = seat.querySelector("[data-jev-reach]");
+  if (held?.reach === "machine" && !reach) {
+    reach = jevHint("jev.scope.machineTip", "이 기능의 기록은 이 컴퓨터 한곳에 쌓여, 범위를 바꿔도 숫자가 같습니다.",
+      jevText("jev.scope.machine", "프로젝트와 무관", "span", "jev-reach"));
+    reach.dataset.jevReach = "machine";
+    seat.querySelector(".jev-row-meta").append(reach);
+  } else if (held?.reach !== "machine") {
+    reach?.remove();
+  }
   const choice = standing ? jevSeatChoice(typesafeState, id) : null;
   const applying = held ? held.applies : Boolean(choice?.applies);
   row.classList.toggle("is-applying", Boolean(applying));

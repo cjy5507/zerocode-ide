@@ -3903,16 +3903,19 @@ fn a_sleeper_nobody_resumed_dies_with_its_dispatch_id() {
             .and_then(|held| held.dispatch.clone())
             .expect("the dispatch");
         assert_eq!(bench.ledger.window_exiting(2_000).sleeping, 1);
+        // The grace is the next window's (t-9091): measured from its boot,
+        // spent by its beat.
+        bench.ledger.window_restarted(3_000);
 
         bench
             .ledger
-            .sleeper_expired(&worker, 2_000 + RESEAT_GRACE_MS)
+            .sleeper_expired(&worker, 3_000 + RESEAT_GRACE_MS)
             .expect("the overdue sleeper ends");
         // Only once: the second call finds no sleeper.
         assert!(
             bench
                 .ledger
-                .sleeper_expired(&worker, 2_001 + RESEAT_GRACE_MS)
+                .sleeper_expired(&worker, 3_001 + RESEAT_GRACE_MS)
                 .is_err()
         );
 

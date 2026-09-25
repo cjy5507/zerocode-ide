@@ -13766,6 +13766,12 @@ fn a_sleeper_nobody_resumed_dies_on_the_beat_after_the_grace() {
     );
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
+    // The grace is the next window's (t-9091): its boot, then its beats.
+    super::runtime()
+        .expect("the private runtime")
+        .actor
+        .window_restarted(clock())
+        .expect("the next boot's sweep");
 
     {
         let _young = BootedHere::at(clock());
@@ -19539,6 +19545,9 @@ mod restore;
 /// t-7812 r2: the window's own resume road through a fake launcher, beside
 /// the ledger's reseat (`tests/restore_door.rs`).
 mod restore_door;
+/// t-9091: a closing window's beat leaves its sleepers to the next window
+/// (`tests/restore_goodbye.rs`).
+mod restore_goodbye;
 /// t-7812: the host seams those roads added (`tests/restore_seams.rs`).
 mod restore_seams;
 

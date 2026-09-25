@@ -3965,6 +3965,23 @@ const RESTART_LOSSES: [&str; 4] = [
     RESUME_UNSUPPORTED,
 ];
 
+/// Why a ledger whose window has said its goodbye neither ends a sleeper at
+/// the grace nor cuts one a pane (t-9091).
+///
+/// The goodbye puts the seated workers to sleep for the NEXT window, and the
+/// window saying it keeps beating for as long as its way out takes. On
+/// 2026-09-25 that beat measured the grace from its own boot — 10.4 and 72.2
+/// minutes back — and ended all five workers its goodbye had just put to
+/// sleep, 0.36 to 1.19 s after it (`sleeping worker … was not resumed within
+/// the grace`, then `event loop exited`); the next windows had nobody left
+/// to bring back.
+fn said_goodbye_refusal(worker_id: &str) -> String {
+    format!(
+        "worker {worker_id} sleeps for the next window: this one has said its goodbye, \
+         and the grace and the reseat are that window's"
+    )
+}
+
 /// Whether a `worker_done` says the work succeeded.
 ///
 /// Read as JSON rather than looked for as a byte sequence. The version that
@@ -4963,6 +4980,16 @@ pub struct Ledger {
     binding_revisions: Vec<(String, u64)>,
     #[serde(skip)]
     next_binding_revision: u64,
+    /// Whether the window holding this ledger has said its goodbye
+    /// ([`Self::window_exiting`]) — and so is on its way out (t-9091).
+    ///
+    /// In-process, like the binding revisions: a goodbye never crosses a
+    /// restart, and the ledger the next window reads back has not said one.
+    /// From here on every sleeper is the next window's to bring back, and so
+    /// is the grace that could end one ([`Self::sleeper_expired`],
+    /// [`Self::prepare_worker_reseat`]).
+    #[serde(skip)]
+    said_goodbye: bool,
     /// How long a finished run keeps its detail rows. One of
     /// [`RETENTION_CHOICES`], and [`RETENTION_DEFAULT_DAYS`] in every ledger
     /// written before this existed — which is what those ledgers effectively
@@ -4995,6 +5022,7 @@ impl Default for Ledger {
             next_id: 0,
             binding_revisions: Vec::new(),
             next_binding_revision: 0,
+            said_goodbye: false,
             retention_days: RETENTION_DEFAULT_DAYS,
             swept_at_ms: 0,
             verb_tallies: Vec::new(),
@@ -9721,8 +9749,13 @@ impl Ledger {
     /// sweep, which is still the one authority on "the window is gone"; and
     /// the seats, the pending releases and the standing orders stay as they
     /// are, because the window that vacates them is the next one.
+    ///
+    /// And the goodbye is remembered in-process ([`Self::said_goodbye`],
+    /// t-9091): the sleepers it made are the next window's to seat and to
+    /// time, so this ledger refuses both from here on.
     pub fn window_exiting(&mut self, now_ms: i64) -> Restarted {
         let _ = now_ms;
+        self.said_goodbye = true;
         let (sleeping, _) = self.kept_and_lost_by_the_window();
         let asleep = sleeping.len();
         for worker in sleeping {
@@ -9735,6 +9768,14 @@ impl Ledger {
             sleeping: asleep,
             moved: asleep > 0,
         }
+    }
+
+    /// Whether this ledger's window has said its goodbye (t-9091): read by
+    /// the runtime's image, so a beat on the way out knows it has no sleeper
+    /// to seat or to end.
+    #[must_use]
+    pub const fn said_goodbye(&self) -> bool {
+        self.said_goodbye
     }
 
     /// Every live worker's terminal died with the window that held it.
@@ -9759,6 +9800,10 @@ impl Ledger {
     /// the exit signal never reached — a crash's — and it keeps for them the
     /// same bargain it always made.
     pub fn window_restarted(&mut self, now_ms: i64) -> Restarted {
+        // A boot: this is the next window's ledger, and it has said no
+        // goodbye — the sleepers are its own to seat, and the grace its own
+        // to spend (t-9091).
+        self.said_goodbye = false;
         // Every leader pane died with the window, so every coordinator seat
         // is empty — and says so, rather than naming a pane the next window
         // will never have (t-2512).
@@ -11609,8 +11654,13 @@ impl Ledger {
     /// was what made the first restart of the day unrecoverable by any verb.
     ///
     /// Refused for anything but a sleeper: a live worker is not overdue, and
-    /// a released one has already been here.
+    /// a released one has already been here. Refused, too, by a ledger that
+    /// has said its window's goodbye (`said_goodbye_refusal`): the grace is
+    /// the time the NEXT window has to bring its sleepers back.
     pub fn sleeper_expired(&mut self, worker_id: &str, now_ms: i64) -> Result<(), String> {
+        if self.said_goodbye {
+            return Err(said_goodbye_refusal(worker_id));
+        }
         self.sleeper_given_up(worker_id, NOT_RESUMED, now_ms)
     }
 
@@ -11695,6 +11745,10 @@ impl Ledger {
         launcher: &dyn Launcher,
         resume_nudge: &str,
     ) -> Result<Decided, String> {
+        // A pane cut now would start in a window on its way out (t-9091).
+        if self.said_goodbye {
+            return Err(said_goodbye_refusal(worker_id));
+        }
         let run = self.run(run_id).ok_or_else(|| unknown_run(run_id))?;
         if run.seat_is_coordinator(&format!("{}/{}", team.id, coordinator_pane)) != Some(true) {
             return Err(format!(
@@ -21891,6 +21945,7 @@ impl Ledger {
             next_id: projected.next_id,
             binding_revisions: Vec::new(),
             next_binding_revision: 0,
+            said_goodbye: false,
             retention_days: projected.retention_days,
             swept_at_ms: projected.swept_at_ms,
             verb_tallies: projected.verb_tallies,
