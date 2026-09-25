@@ -12892,7 +12892,10 @@ fn a_wake_is_told_to_go_on_only_by_the_goodbyes_word_about_a_worker() {
         "words are placed for something other than a sleeper's goodbye:\n{resuming}"
     );
     let orchestration = include_str!("orchestration.rs");
-    let reseating = block_after(orchestration, "pub(crate) fn reseat_sleeping(");
+    // The walk lives in the restore line since an account switch holds that
+    // line across its rest and its reseat (t-7538); `reseat_sleeping` takes
+    // the line and walks.
+    let reseating = block_after(orchestration, "fn reseat_sleeping_in_line(");
     assert!(
         reseating.contains("let nudge = reseat_nudge(&worker, checkout.as_deref());")
             && !reseating.contains("resume_nudge("),

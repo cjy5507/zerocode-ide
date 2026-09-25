@@ -218,6 +218,7 @@ pub(crate) fn claude_usage(state: State<'_, AppState>, force: bool) -> UsageRepo
     let whose = active_claude_account_id(state.config_root());
     let config_root = state.config_root().to_path_buf();
     let local_data_root = state.local_data_root().to_path_buf();
+    let readings_root = local_data_root.clone();
     usage_report(
         UsageGauge {
             provider: "claude",
@@ -233,7 +234,20 @@ pub(crate) fn claude_usage(state: State<'_, AppState>, force: bool) -> UsageRepo
         // the new account's name, which reads as a switch that did nothing.
         |snapshot| snapshot.account == whose,
         force,
-        move || scan_claude_usage_now(&config_root),
+        move || {
+            // The row the read runs as, taken as it begins: what the switch
+            // and the wall read is this account's reading only while the row
+            // still names this login when the answer lands (astra R6).
+            let began_as = active_claude_account(&config_root);
+            let scanned = scan_claude_usage_now(&config_root);
+            land_claude_usage_as(
+                &config_root,
+                &readings_root,
+                began_as.as_ref(),
+                &scanned.usage,
+            );
+            scanned
+        },
     )
 }
 
@@ -295,22 +309,15 @@ pub(crate) fn claude_account_usage(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    let main = claude_usage_cache(state.local_data_root())
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
     let accounts = store
         .accounts
         .iter()
         .map(|account| {
             let active = plan.active.as_deref() == Some(account.id.as_str());
-            // Only a reading of the login the row names now (astra R6).
-            let usage = match &main {
-                Some(main) if active && main.account.as_deref() == Some(account.id.as_str()) => {
-                    Some(main.clone())
-                }
-                _ => reading_of(&map, account).cloned(),
-            };
+            // Only a reading of the login the row names now — the selected
+            // account's own gauge lands in the same map under the same rule
+            // — so a row shows the number the table chooses by (astra R6).
+            let usage = reading_of(&map, account).cloned();
             AccountUsageRow {
                 id: account.id.clone(),
                 organization_type: account.organization_type.clone(),

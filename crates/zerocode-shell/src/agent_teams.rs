@@ -733,17 +733,20 @@ pub enum PaneExit {
     Lingering(ExitWitness),
 }
 
-/// What a later look asks about a program that outlived its pane's close:
-/// its process group, and its leader's start identity when the process
-/// table could read it — so a pid the system has since handed to another
-/// program is never taken for the one that did not leave. Ids only; kept
-/// in the switch journal so a window that restarts asks the same question.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExitWitness {
-    pub group: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started: Option<String>,
+/// What a later look asks about a program that outlived its pane's close —
+/// the ledger's own type, since the ledger holds it on the worker's row
+/// until a look sees the program gone (t-7538, astra R3).
+pub use zerocode_core::orchestration::ExitWitness;
+
+/// Which managed login a pane was launched as (t-7538): the account row's id
+/// and the login that row named at that launch ([`crate::usage_runtime`]'s
+/// `claude_login_key`). A pane keeps the credentials it started with, so its
+/// wall is judged by a reading of THIS login — an id that has since come to
+/// name another login is another account's number (astra R6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneLogin {
+    pub account: String,
+    pub login: String,
 }
 
 /// What [`run`] needs from the window, kept behind a trait so the whole
@@ -899,6 +902,15 @@ pub trait Host {
         PaneExit::Gone
     }
 
+    /// The program running in a pane, read while it stands — what a switch
+    /// holds on the worker's row before it closes the pane (t-7538, astra
+    /// R3), and what [`Self::exit_seen`] is later asked about. `None` for a
+    /// pane with no program the host can name; hosts without processes of
+    /// their own have none.
+    fn exit_witness(&self, _term: u32) -> Option<ExitWitness> {
+        None
+    }
+
     /// Whether the program a lingering close left behind has left since
     /// (t-7538, astra R3) — asked by every restore of that worker before it
     /// opens the conversation again. Hosts without processes of their own
@@ -1016,11 +1028,16 @@ pub trait Host {
     /// while nobody looks at the window. Test and tmux-only hosts read
     /// nothing.
     fn ask_usage(&self, _gauge: &str) {}
-    /// The managed account this pane was launched as, when the window
-    /// recorded one (t-7538) — the wall witness judges the pane against
-    /// THAT account's gauge. `None` is "unknown", never "the selected one".
-    fn pane_account(&self, _term: u32) -> Option<String> {
+    /// The managed login this pane was launched as, when the window recorded
+    /// one (t-7538) — the wall witness judges the pane against THAT login's
+    /// reading. `None` is "unknown", never "the selected one".
+    fn pane_login(&self, _term: u32) -> Option<PaneLogin> {
         None
+    }
+
+    /// The account id of [`Self::pane_login`].
+    fn pane_account(&self, term: u32) -> Option<String> {
+        self.pane_login(term).map(|held| held.account)
     }
 
     /// Publish a restored worker only after its durable seat has moved. Fake

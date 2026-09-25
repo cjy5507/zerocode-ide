@@ -980,12 +980,12 @@ struct ShellRuntime {
     /// launched", and the send path still waits for the agent to actually
     /// listen before typing at it.
     agent_terms: Mutex<HashMap<TermId, &'static str>>,
-    /// Which managed Claude account each launched pane runs as (t-7538) —
-    /// read off the launch environment's secure store at spawn, beside
-    /// `agent_terms`. A pane with no row is unknown, never the selected one:
-    /// its wall is judged by the provider gauge as before, and the switch
-    /// road moves only panes it can attribute.
-    pane_accounts: Mutex<HashMap<TermId, String>>,
+    /// Which managed Claude login each launched pane runs as (t-7538) — the
+    /// account row read off the launch environment's secure store at spawn,
+    /// and the login it named then. A pane with no row is unknown, never the
+    /// selected one: its wall is judged by the provider gauge as before, and
+    /// the switch road moves only panes it can attribute.
+    pane_accounts: Mutex<HashMap<TermId, agent_teams::PaneLogin>>,
     /// The nonce each launched agent was handed, by the shell it runs in.
     ///
     /// A hook event carries the token its agent was started with. Relaunching a
@@ -1467,7 +1467,7 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn pane_accounts(&self) -> MutexGuard<'_, HashMap<TermId, String>> {
+    fn pane_accounts(&self) -> MutexGuard<'_, HashMap<TermId, agent_teams::PaneLogin>> {
         self.pane_accounts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1778,7 +1778,7 @@ trait ShellStateExt {
     fn isolated_worker_terms(&self) -> MutexGuard<'_, HashMap<TermId, IsolatedWorkerCheckout>>;
     fn prompt_queue(&self) -> MutexGuard<'_, HashMap<TermId, VecDeque<QueuedPrompt>>>;
     fn agent_terms(&self) -> MutexGuard<'_, HashMap<TermId, &'static str>>;
-    fn pane_accounts(&self) -> MutexGuard<'_, HashMap<TermId, String>>;
+    fn pane_accounts(&self) -> MutexGuard<'_, HashMap<TermId, agent_teams::PaneLogin>>;
     fn launch_tokens(&self) -> MutexGuard<'_, HashMap<TermId, String>>;
     fn untitled_markdowns(&self) -> MutexGuard<'_, std::collections::HashSet<String>>;
     fn browser_panes(&self) -> MutexGuard<'_, std::collections::HashSet<String>>;
@@ -1958,7 +1958,7 @@ impl ShellStateExt for AppState {
         self.shell_runtime().agent_terms()
     }
 
-    fn pane_accounts(&self) -> MutexGuard<'_, HashMap<TermId, String>> {
+    fn pane_accounts(&self) -> MutexGuard<'_, HashMap<TermId, agent_teams::PaneLogin>> {
         self.shell_runtime().pane_accounts()
     }
 
@@ -3282,10 +3282,6 @@ fn main() -> ExitCode {
             // a pane that is not there.
             crumbs::record("boot", format_args!("ledger"));
             let swept = orchestration::open(&local_data_root, now_epoch_ms());
-            // A pane an account switch closed whose program outlived the wait
-            // holds its worker's restore again, before any restore road runs
-            // (t-7538).
-            account_switch::hold_lingering_exits(&local_data_root);
             if swept.ended > 0 {
                 note_window_event(
                     &local_data_root,

@@ -1231,6 +1231,29 @@ pub struct Worker {
     /// over the run's ([`QuotaWallOrder::standing`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quota_wait: bool,
+    /// The program of this worker's last pane, while nobody has seen it
+    /// leave (t-7538, astra R3): written in the same transition that rests
+    /// the worker for an account switch, BEFORE its pane is closed, and let
+    /// go only by [`Ledger::worker_exit_seen`] once a look sees that program
+    /// gone. While it stands no road opens the conversation again — the
+    /// ledger's reseat, a door's witness, the grace — because a second
+    /// process on the same transcript beside one that may still write is
+    /// the thing the switch must never make. Durable so a window that
+    /// restarts, or a journal that could not be written, holds it the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_unconfirmed: Option<ExitWitness>,
+}
+
+/// What a later look asks about a program that may have outlived its pane's
+/// close (t-7538): its process group, and its leader's start identity when
+/// the process table could read it — so a pid the system has since handed to
+/// another program is never taken for the one that did not leave. Ids only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitWitness {
+    pub group: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<String>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -1258,6 +1281,7 @@ impl std::fmt::Debug for Worker {
             .field("adopted_by", &self.adopted_by)
             .field("on_quota_wall", &self.on_quota_wall)
             .field("quota_wait", &self.quota_wait)
+            .field("exit_unconfirmed", &self.exit_unconfirmed)
             .finish()
     }
 }
@@ -7681,6 +7705,7 @@ impl Ledger {
             adopted_by: None,
             on_quota_wall: tuning.on_quota_wall,
             quota_wait: tuning.quota_wait,
+            exit_unconfirmed: None,
         });
         if let (Some(task_id), Some(dispatch)) = (task, dispatch_id.as_ref()) {
             run.dispatches.push(Dispatch {
@@ -11494,6 +11519,9 @@ impl Ledger {
     ) -> Option<String> {
         let worker_id = self
             .sleeper_awaiting(checkout, agent, session_id)
+            // A sleeper whose last program was not seen to leave is not
+            // seated in a second pane beside it (t-7538, astra R3).
+            .filter(|worker| worker.exit_unconfirmed.is_none())
             .map(|worker| worker.id.clone())?;
         if self
             .runs
@@ -11618,6 +11646,11 @@ impl Ledger {
                 worker.state.as_str()
             ));
         }
+        // Not one nothing seated: one whose last program may still be at its
+        // attempt (t-7538, astra R3). It waits for that program.
+        if worker.exit_unconfirmed.is_some() {
+            return Err(exit_unconfirmed_refusal(worker_id));
+        }
         // Read before the ending erases it, for `terminal_gone`'s reason.
         let carried = worker.dispatch.as_deref().and_then(|dispatch_id| {
             let held = self.runs[run_at].dispatch(dispatch_id)?;
@@ -11677,6 +11710,9 @@ impl Ledger {
                  sleeper or an orphan — can be restored",
                 worker.state.as_str()
             ));
+        }
+        if worker.exit_unconfirmed.is_some() {
+            return Err(exit_unconfirmed_refusal(worker_id));
         }
         let kept = worker.state.as_str();
         let dispatch_id = worker
@@ -12471,7 +12507,30 @@ impl Ledger {
         worker.effort = Some(rest.effort.trim().to_string());
         worker.state = WorkerState::Sleeping;
         worker.quiet_at = None;
+        // Held before the pane is closed, in the same write (astra R3): a
+        // window that dies between this and the close, or whose journal
+        // cannot be written, boots with the hold on the row.
+        worker.exit_unconfirmed.clone_from(&rest.exit);
         Ok(dispatch_id)
+    }
+
+    /// A look saw the program a switch's close left behind gone (t-7538,
+    /// astra R3): the hold on `worker_id`'s conversation goes, and the roads
+    /// that bring a sleeper back may open it again — once, as the same
+    /// worker on the same attempt. Only the witness the row holds lifts it:
+    /// a look at another program is not a look at this one.
+    ///
+    /// Answers whether a hold was lifted.
+    pub fn worker_exit_seen(&mut self, worker_id: &str, witness: &ExitWitness) -> bool {
+        let Ok((run_at, worker_at)) = self.locate(worker_id) else {
+            return false;
+        };
+        let worker = &mut self.runs[run_at].workers[worker_at];
+        if worker.exit_unconfirmed.as_ref() != Some(witness) {
+            return false;
+        }
+        worker.exit_unconfirmed = None;
+        true
     }
 
     /// Whether [`Self::worker_rested_for_account_switch`] would rest this
@@ -13887,6 +13946,15 @@ pub enum AccountMove {
     },
 }
 
+/// The one sentence every road that would open a held worker's conversation
+/// again answers with (t-7538, astra R3).
+fn exit_unconfirmed_refusal(worker_id: &str) -> String {
+    format!(
+        "worker {worker_id}'s last pane's program was not seen to leave — its conversation is \
+         not opened again, and its attempt not ended, while that program may still write"
+    )
+}
+
 /// What an account switch was approved to move (t-7538), carried to the
 /// ledger's rest of ONE walled worker so the rest is of exactly that: the
 /// worker, the attempt it carried and the coordinator generation its run
@@ -13903,6 +13971,10 @@ pub struct SwitchRest {
     pub session: String,
     pub model: String,
     pub effort: String,
+    /// The program in the pane about to close, read before the rest: held
+    /// on the row by the same transition ([`Worker::exit_unconfirmed`]) until
+    /// a look sees it leave. `None` for a pane the window saw no program in.
+    pub exit: Option<ExitWitness>,
 }
 
 /// One account move, as the window reports it for the receipt row.
@@ -21364,6 +21436,10 @@ pub struct WorkerRow {
     /// And its own `wait`, same posture (t-6427).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quota_wait: bool,
+    /// The program a switch's close has not seen leave, same posture
+    /// (t-7538, astra R3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_unconfirmed: Option<ExitWitness>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -21697,6 +21773,7 @@ impl Ledger {
                     adopted_by: worker.adopted_by,
                     on_quota_wall: worker.on_quota_wall.clone(),
                     quota_wait: worker.quota_wait,
+                    exit_unconfirmed: worker.exit_unconfirmed.clone(),
                 });
             }
             for attachment in &run.attachments {
@@ -21937,6 +22014,7 @@ impl Ledger {
                     adopted_by: row.adopted_by,
                     on_quota_wall: row.on_quota_wall,
                     quota_wait: row.quota_wait,
+                    exit_unconfirmed: row.exit_unconfirmed,
                 });
         }
         for row in projected.messages {

@@ -86,6 +86,9 @@ pub(super) struct Door {
     /// Where this door's events are written in order, beside the other
     /// roads' (t-7812 F).
     pub(super) timeline: Mutex<Option<std::sync::Arc<super::restore::Timeline>>>,
+    /// A program an account switch's close left behind is still there, as
+    /// this window's look sees it (t-7538).
+    pub(super) lingering: Mutex<bool>,
 }
 
 impl Door {
@@ -103,6 +106,7 @@ impl Door {
             armed: Mutex::new(Vec::new()),
             during_prepare: Mutex::new(None),
             timeline: Mutex::new(None),
+            lingering: Mutex::new(false),
         }
     }
 
@@ -385,6 +389,10 @@ impl WakeWindow for Door {
     }
 
     fn stir(&self) {}
+
+    fn exit_seen(&self, _witness: &crate::agent_teams::ExitWitness) -> bool {
+        !*self.lingering.lock().unwrap()
+    }
 }
 
 impl WakeReceipts for Door {

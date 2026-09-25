@@ -2411,7 +2411,13 @@ fn usage_login_in(store: Option<&Path>, file_home: Option<&Path>) -> Option<(Str
 /// environment that names no managed store — the machine's own login, or a
 /// pane this window did not launch — which is "unknown", never "the
 /// active one".
-pub(crate) fn account_of_env(config_root: &Path, env: &[(String, String)]) -> Option<String> {
+///
+/// The whole row, so a launch also writes down WHICH login that row named
+/// when the pane started (astra R6).
+pub(crate) fn account_row_of_env(
+    config_root: &Path,
+    env: &[(String, String)],
+) -> Option<zerocode_core::ClaudeAccount> {
     let store = env
         .iter()
         .rev()
@@ -2421,7 +2427,6 @@ pub(crate) fn account_of_env(config_root: &Path, env: &[(String, String)]) -> Op
         .accounts
         .into_iter()
         .find(|account| Path::new(&account.config_dir) == store)
-        .map(|account| account.id)
 }
 
 /// Which home a LOOK at the Claude login reads (t-3996), and whose it is.
@@ -3437,26 +3442,22 @@ JSON
         let mut store = read_store(root.path());
         store.selection.active = Some(a.id.clone());
         write_store(root.path(), &store).unwrap();
+        let account_of_env =
+            |env: &[(String, String)]| account_row_of_env(root.path(), env).map(|row| row.id);
         let env = reading_env_for(root.path(), "claude");
-        assert_eq!(
-            account_of_env(root.path(), &env).as_deref(),
-            Some("a-fixture")
-        );
+        assert_eq!(account_of_env(&env).as_deref(), Some("a-fixture"));
         let env_b = zerocode_core::launch_env(
             None,
             runtime_home(root.path()).to_str(),
             Some(b.config_dir.as_str()),
         );
-        assert_eq!(
-            account_of_env(root.path(), &env_b).as_deref(),
-            Some("b-fixture")
-        );
-        assert_eq!(account_of_env(root.path(), &[]), None);
+        assert_eq!(account_of_env(&env_b).as_deref(), Some("b-fixture"));
+        assert_eq!(account_of_env(&[]), None);
         let elsewhere = vec![(
             zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR.to_string(),
             "/nowhere/fixture".to_string(),
         )];
-        assert_eq!(account_of_env(root.path(), &elsewhere), None);
+        assert_eq!(account_of_env(&elsewhere), None);
     }
 
     /// Every refusal about an account names it by id. The email used to be

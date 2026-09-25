@@ -6075,6 +6075,7 @@ fn an_agents_words_never_reach_a_debug_rendering() {
             adopted_by: None,
             on_quota_wall: None,
             quota_wait: false,
+            exit_unconfirmed: None,
         }
     );
     assert!(
@@ -24105,6 +24106,7 @@ fn approval(bench: &Bench, worker: &str, session: &str) -> SwitchRest {
         session: session.to_string(),
         model: "claude-opus-5-5".to_string(),
         effort: "xhigh".to_string(),
+        exit: None,
     }
 }
 
@@ -24370,6 +24372,101 @@ fn a_rest_is_the_approved_attempt_under_the_approved_coordinator_with_the_panes_
     assert_eq!(rested.state, WorkerState::Sleeping);
     assert_eq!(rested.model.as_deref(), Some("claude-opus-5-5"));
     assert_eq!(rested.effort.as_deref(), Some("xhigh"));
+}
+
+/// t-7538 r4 (astra R3): the program in the pane a switch is about to close
+/// is written on the worker's row by the rest itself, and while it stands
+/// the ledger refuses every road that would open the conversation again —
+/// its own reseat, a door's witness, the grace. A look at ANOTHER program
+/// lifts nothing; a look at this one, gone, lifts it once, and the same
+/// worker comes back on the same attempt.
+#[test]
+fn a_switchs_close_holds_the_conversation_until_its_own_program_is_seen_gone() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    let (worker, _pane, _task, dispatch) = a_walled_claude_worker(&mut bench, NOW);
+    let program = ExitWitness {
+        group: 4_242,
+        started: Some("Thu Sep 25 04:10:00 2026".to_string()),
+    };
+    let rest = SwitchRest {
+        exit: Some(program.clone()),
+        ..approval(&bench, &worker, SWITCHING_SESSION)
+    };
+    assert_eq!(
+        bench
+            .ledger
+            .worker_rested_for_account_switch(&rest, NOW + 1)
+            .as_deref(),
+        Ok(dispatch.as_str())
+    );
+    let row = |bench: &Bench| {
+        bench.ledger.runs()[0]
+            .worker(&worker)
+            .expect("the worker")
+            .clone()
+    };
+    assert_eq!(row(&bench).state, WorkerState::Sleeping);
+    assert_eq!(row(&bench).exit_unconfirmed.as_ref(), Some(&program));
+    let run = bench.ledger.runs()[0].id.clone();
+    // The ledger's own reseat.
+    let Bench {
+        ledger,
+        team,
+        launcher,
+        ..
+    } = &mut bench;
+    let refused = ledger
+        .prepare_worker_reseat(
+            &run,
+            &worker,
+            team,
+            agent_teams::LEADER_PANE,
+            launcher,
+            "go on",
+        )
+        .unwrap_err();
+    assert!(refused.contains("not seen to leave"), "{refused}");
+    // A door's witness seats nobody.
+    let door = ("team-door", agent_teams::LEADER_PANE);
+    assert_eq!(
+        bench.ledger.worker_pane_resumed(
+            door,
+            "/wt/switching",
+            "claude",
+            SWITCHING_SESSION,
+            NOW + 2
+        ),
+        None
+    );
+    assert_eq!(row(&bench).state, WorkerState::Sleeping);
+    // The grace ends nothing.
+    let refused = bench.ledger.sleeper_expired(&worker, NOW + 3).unwrap_err();
+    assert!(refused.contains("not seen to leave"), "{refused}");
+    assert_eq!(row(&bench).state, WorkerState::Sleeping);
+    // A look at another program lifts nothing.
+    assert!(!bench.ledger.worker_exit_seen(
+        &worker,
+        &ExitWitness {
+            group: 4_242,
+            started: Some("a program that took the pid later".to_string()),
+        }
+    ));
+    assert!(row(&bench).exit_unconfirmed.is_some());
+    // This program, gone: lifted once, and the same worker comes back on
+    // the same attempt.
+    assert!(bench.ledger.worker_exit_seen(&worker, &program));
+    assert!(!bench.ledger.worker_exit_seen(&worker, &program));
+    assert_eq!(
+        bench
+            .ledger
+            .worker_pane_resumed(door, "/wt/switching", "claude", SWITCHING_SESSION, NOW + 4)
+            .as_deref(),
+        Some(worker.as_str())
+    );
+    let back = row(&bench);
+    assert_eq!(back.state, WorkerState::Active);
+    assert_eq!(back.dispatch.as_deref(), Some(dispatch.as_str()));
 }
 
 /// Every switch leaves ONE receipt in the ledger's own voice, keyed so a

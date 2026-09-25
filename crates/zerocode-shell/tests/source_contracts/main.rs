@@ -17327,13 +17327,12 @@ mod tests {
     /// The roads are DERIVED rather than listed: a spawn that is held is a
     /// pane somebody can be left staring at, so a new one is caught by
     /// existing here at all rather than by somebody remembering to add it.
-    #[test]
-    fn every_road_that_holds_a_shell_writes_down_that_it_started_one() {
+    /// Every function of the shipped backend, method or free, from its `fn`
+    /// line to the next one — so a road inside an `impl` is measured the
+    /// same as one at the top level.
+    fn shipped_functions() -> Vec<&'static str> {
         let backend = shipped_backend();
         let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
-
-        // Where each function begins, method or free, so a road inside an
-        // `impl` is measured the same as one at the top level.
         let mut opens: Vec<usize> = shipped
             .match_indices('\n')
             .filter_map(|(at, _)| {
@@ -17348,11 +17347,17 @@ mod tests {
             })
             .collect();
         opens.push(shipped.len());
+        opens
+            .windows(2)
+            .map(|pair| &shipped[pair[0]..pair[1]])
+            .collect()
+    }
 
+    #[test]
+    fn every_road_that_holds_a_shell_writes_down_that_it_started_one() {
         let mut silent = Vec::new();
         let mut roads = 0;
-        for pair in opens.windows(2) {
-            let body = &shipped[pair[0]..pair[1]];
+        for body in shipped_functions() {
             // A spawn nobody keeps is a command being run, not a pane — the
             // usage scrapers read a CLI through a pty and drop it, and a line
             // per scrape would bury the record this file exists to be.
@@ -17376,6 +17381,46 @@ mod tests {
             "these roads open a shell and keep it as a pane without writing \
              the spawn line, so a pane of theirs standing empty cannot be \
              told from one that never started: {silent:#?}"
+        );
+    }
+
+    /// Every road that LAUNCHES an agent in a pane writes down the login it
+    /// runs as (t-7538 r4, brief ③): the launcher, a schedule, a summons and
+    /// the ledger's reseat through the team split, a door's resume — whoever
+    /// it seats, a person's tab or a sleeper's witness — and a vault resume.
+    /// The switch judges a pane's wall by that login's own reading and moves
+    /// only a pane it can attribute, so a road that forgot it would leave
+    /// that pane's worker walled for good. Derived like the spawn line's
+    /// roads: a function that keeps a shell, hands it a launch token and
+    /// names the agent it launched is a road, and the next one is caught by
+    /// existing. A plain terminal tab whose configured command happens to be
+    /// an agent mints no launch token — nothing the ledger seats runs there.
+    #[test]
+    fn every_road_that_launches_an_agent_writes_down_the_login_it_runs_as() {
+        let mut unattributed = Vec::new();
+        let mut roads = 0;
+        for body in shipped_functions() {
+            if !body.contains("hold_terminal(")
+                || !body.contains("launch_tokens().insert(")
+                || !body.contains("agent_terms().insert(")
+            {
+                continue;
+            }
+            roads += 1;
+            if !body.contains("note_pane_account(") {
+                unattributed.push(body.lines().next().unwrap_or("").trim().to_string());
+            }
+        }
+        assert!(
+            roads >= 5,
+            "only {roads} agent-pane roads were found, so this gate is reading \
+             the file wrong and would pass on anything"
+        );
+        assert!(
+            unattributed.is_empty(),
+            "these roads launch an agent without writing down the login it runs \
+             as, so its wall is judged by nobody's number and the switch never \
+             moves it: {unattributed:#?}"
         );
     }
 

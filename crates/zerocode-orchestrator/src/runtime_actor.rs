@@ -538,6 +538,14 @@ pub enum RuntimeRequest {
         reason: String,
         now_ms: i64,
     },
+    /// A look saw the program a switch's close left behind gone (t-7538):
+    /// the hold on the worker's conversation goes. A host fact about the
+    /// witness the row holds, and only that witness lifts it.
+    WorkerExitSeen {
+        worker: String,
+        witness: zerocode_core::orchestration::ExitWitness,
+        now_ms: i64,
+    },
     /// The provider conversation observed in a terminal. The actor resolves
     /// the terminal to its seat while the pane table is locked, so a respawn
     /// cannot redirect the write between lookup and mutation.
@@ -935,6 +943,16 @@ impl std::fmt::Debug for RuntimeRequest {
                 .debug_struct("RuntimeRequest::SleeperUnrecoverable")
                 .field("worker", worker)
                 .field("reason_bytes", &reason.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::WorkerExitSeen {
+                worker,
+                witness,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::WorkerExitSeen")
+                .field("worker", worker)
+                .field("group", &witness.group)
                 .field("now_ms", now_ms)
                 .finish(),
             Self::WorkerSessionReported {
@@ -2212,6 +2230,25 @@ impl RuntimeActor {
         }
     }
 
+    /// The program a switch's close left behind is gone: the hold on
+    /// `worker`'s conversation goes (t-7538). Answers whether a hold was
+    /// lifted — `false` when the row holds no hold, or another witness.
+    pub fn worker_exit_seen(
+        &self,
+        worker: impl Into<String>,
+        witness: zerocode_core::orchestration::ExitWitness,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::WorkerExitSeen {
+            worker: worker.into(),
+            witness,
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// The provider conversation observed in a pane, written durably when
     /// that pane belongs to a ledger worker.
     pub fn worker_session_reported(
@@ -3145,6 +3182,11 @@ impl RuntimeState {
                 reason,
                 now_ms,
             } => self.sleeper_unrecoverable(&worker, &reason, now_ms),
+            RuntimeRequest::WorkerExitSeen {
+                worker,
+                witness,
+                now_ms,
+            } => self.worker_exit_seen(&worker, &witness, now_ms),
             RuntimeRequest::WorkerSessionReported {
                 term,
                 session,
@@ -3759,6 +3801,41 @@ impl RuntimeState {
         self.ledger
             .sleeper_unrecoverable(worker, reason, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// The hold a switch's close left on a worker, lifted once a look saw
+    /// its program gone (t-7538, astra R3). Nothing to lift is an answer,
+    /// not an error: two looks may see the same exit.
+    fn worker_exit_seen(
+        &mut self,
+        worker: &str,
+        witness: &zerocode_core::orchestration::ExitWitness,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if worker.is_empty()
+            || worker.len() > MAX_NAME
+            || witness
+                .started
+                .as_ref()
+                .is_some_and(|started| started.len() > MAX_NAME)
+            || now_ms < 0
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.worker_exit_seen(worker, witness) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Settled {
             moved: true,

@@ -364,21 +364,28 @@ const CUT_FILE: &str = "restart-cut.json";
 
 /// What the goodbye cut for one worker, as its wake reads it: whether its
 /// turn was under way (t-7812 E) and the commands running under its pane
-/// (t-6428 ⑤). The default is a worker the goodbye cut nothing of — at
-/// rest, nothing under it — and also a wake that has no goodbye to read at
-/// all, a crash's.
+/// (t-6428 ⑤) — or the words an account switch left for the worker it
+/// rested, said in their place (t-7538). The default is a worker the
+/// goodbye cut nothing of — at rest, nothing under it — and also a wake that
+/// has no goodbye to read at all, a crash's.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Cut {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) turn: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) commands: Vec<String>,
+    /// An account switch's own words for the worker it rested (t-7538): its
+    /// pane was cut to move the conversation to another login, and an agent
+    /// told "the window restarted" would look for a restart that never
+    /// happened. Owed, read and spent like any other word in this note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) switched: Option<String>,
 }
 
 impl Cut {
-    /// Whether the goodbye cut anything of this worker at all.
+    /// Whether this note owes the worker's wake anything at all.
     pub(crate) fn any(&self) -> bool {
-        self.turn || !self.commands.is_empty()
+        self.turn || !self.commands.is_empty() || self.switched.is_some()
     }
 }
 
@@ -399,6 +406,7 @@ impl From<CutEntry> for Cut {
             CutEntry::Commands(commands) => Cut {
                 turn: false,
                 commands,
+                switched: None,
             },
         }
     }
@@ -439,6 +447,7 @@ pub(crate) fn leave_cut(
                 Cut {
                     turn: one.turn == Turn::Running,
                     commands: one.commands.clone().unwrap_or_default(),
+                    switched: None,
                 },
             )
         })
@@ -505,6 +514,22 @@ pub(crate) fn peek_cut(root: &Path, worker: &str) -> Cut {
         .get(worker)
         .cloned()
         .unwrap_or_default()
+}
+
+/// An account switch rested `worker` (t-7538): its next wake is told
+/// `words` in place of whatever a goodbye cut of it — the switch is the last
+/// thing that happened to it. Written into this process's book, read off the
+/// disk first like [`peek_cut`], and so read, spent and carried to the next
+/// window by the same rules as a goodbye's own word.
+pub(crate) fn leave_switch_words(root: &Path, worker: &str, words: String) {
+    let mut book = cut_book().lock().unwrap_or_else(|held| held.into_inner());
+    book_for(&mut book, root).insert(
+        worker.to_string(),
+        Cut {
+            switched: Some(words),
+            ..Cut::default()
+        },
+    );
 }
 
 /// This worker's words were handed to a pane that holds it — they reached
@@ -722,14 +747,16 @@ mod tests {
             peek_cut(root.path(), "w-mid"),
             Cut {
                 turn: true,
-                commands: Vec::new()
+                commands: Vec::new(),
+                switched: None,
             }
         );
         assert_eq!(
             peek_cut(root.path(), "w-gate"),
             Cut {
                 turn: false,
-                commands: vec!["just gate".to_string()]
+                commands: vec!["just gate".to_string()],
+                switched: None,
             }
         );
         assert!(
@@ -751,7 +778,8 @@ mod tests {
             peek_cut(older.path(), "w-old"),
             Cut {
                 turn: false,
-                commands: vec!["cargo test -p zerocode-core".to_string()]
+                commands: vec!["cargo test -p zerocode-core".to_string()],
+                switched: None,
             }
         );
     }
@@ -792,7 +820,8 @@ mod tests {
             peek_cut(root.path(), "w-asks"),
             Cut {
                 turn: false,
-                commands: vec!["just gate".to_string()]
+                commands: vec!["just gate".to_string()],
+                switched: None,
             }
         );
         assert_eq!(Turn::of(Some(PaneTurn::Running), true), Turn::Asking);
@@ -884,7 +913,8 @@ mod tests {
             peek_cut(root.path(), "w-asleep-1"),
             Cut {
                 turn: true,
-                commands: Vec::new()
+                commands: Vec::new(),
+                switched: None,
             },
             "a sleeper's cut turn was lost between two windows"
         );
@@ -924,7 +954,8 @@ mod tests {
             peek_cut(unread.path(), "w-asleep-2"),
             Cut {
                 turn: false,
-                commands: vec!["cargo test".to_string()]
+                commands: vec!["cargo test".to_string()],
+                switched: None,
             },
             "an unread note was lost for a worker still asleep"
         );
@@ -932,7 +963,8 @@ mod tests {
             peek_cut(unread.path(), "w-back-2"),
             Cut {
                 turn: false,
-                commands: vec!["just gate".to_string()]
+                commands: vec!["just gate".to_string()],
+                switched: None,
             },
             "the newer goodbye's own reading of a worker is the one that stands"
         );

@@ -752,9 +752,9 @@ impl agent_teams::Host for TeamWindow {
         held.map(str::to_string)
     }
 
-    /// Which managed account this pane was launched as — the record every
-    /// Claude launch road writes beside `agent_terms` (t-7538).
-    fn pane_account(&self, term: TermId) -> Option<String> {
+    /// Which managed login this pane was launched as — the record every
+    /// Claude launch road writes when its pane is held (t-7538).
+    fn pane_login(&self, term: TermId) -> Option<agent_teams::PaneLogin> {
         self.app
             .state::<AppState>()
             .pane_accounts()
@@ -1688,34 +1688,38 @@ impl agent_teams::Host for TeamWindow {
         self.app.emit("term:focus-pane", term).is_ok()
     }
 
-    /// The pane's process group read before the close and watched after it,
-    /// on the clock the hand-over already keeps for a pane's CLI leaving
-    /// (`HAND_OVER_EXIT_WAIT`, polled every `HAND_OVER_EXIT_POLL`). The
-    /// leader's start identity is read while it still stands, so a later
-    /// look at a group that outlived the wait can tell it from a program
-    /// that took its pid afterwards.
-    fn close_gone(&self, term: TermId) -> agent_teams::PaneExit {
+    /// The pane's process group and its leader's start identity, read while
+    /// the leader still stands, so a later look at a group that outlived a
+    /// close can tell it from a program that took its pid afterwards.
+    fn exit_witness(&self, term: TermId) -> Option<agent_teams::ExitWitness> {
         let root = self
             .app
             .state::<AppState>()
             .terminals()
             .handle(term)
-            .and_then(|held| lock_pty(&held).pid());
-        let started =
-            root.and_then(|root| crate::resource_usage::process_start_identity(root).ok());
+            .and_then(|held| lock_pty(&held).pid())?;
+        Some(agent_teams::ExitWitness {
+            group: root,
+            started: crate::resource_usage::process_start_identity(root).ok(),
+        })
+    }
+
+    /// The pane's program read before the close ([`Self::exit_witness`]) and
+    /// watched after it, on the clock the hand-over already keeps for a
+    /// pane's CLI leaving (`HAND_OVER_EXIT_WAIT`, polled every
+    /// `HAND_OVER_EXIT_POLL`).
+    fn close_gone(&self, term: TermId) -> agent_teams::PaneExit {
+        let witness = self.exit_witness(term);
         self.close(term);
-        match root {
-            Some(root)
+        match witness {
+            Some(witness)
                 if !crate::cmd::wait_process_group_gone(
-                    root,
+                    witness.group,
                     crate::cmd::HAND_OVER_EXIT_WAIT,
                     crate::cmd::HAND_OVER_EXIT_POLL,
                 ) =>
             {
-                agent_teams::PaneExit::Lingering(agent_teams::ExitWitness {
-                    group: root,
-                    started,
-                })
+                agent_teams::PaneExit::Lingering(witness)
             }
             _ => agent_teams::PaneExit::Gone,
         }

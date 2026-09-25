@@ -1077,6 +1077,10 @@ pub(crate) trait WakeWindow {
     fn note(&self, line: &str);
     /// Wake the pump: a pane just changed.
     fn stir(&self);
+    /// Whether the program a switch's close left behind has left since
+    /// (t-7538) — the window's own look at a process group the ledger holds
+    /// a conversation for.
+    fn exit_seen(&self, witness: &crate::agent_teams::ExitWitness) -> bool;
 }
 
 /// Wake one conversation into `term` — the resume road every door takes
@@ -1110,6 +1114,23 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
             Ok(claim) => claim,
             Err(holder) => return Ok(ConversationWake::standing(holder)),
         };
+    // A conversation whose last program an account switch closed and nobody
+    // has seen leave is not opened again by any door (t-7538, astra R3):
+    // not as the worker's witness, and not as a person's tab either — a
+    // second process on one transcript is the same fault from every door.
+    // The window's look lifts the hold once the program is gone, and this
+    // wake goes on as any other.
+    if let Some(worker) =
+        crate::orchestration::held_by_an_unseen_exit(agent, &session.id, &|seen| {
+            window.exit_seen(seen)
+        })
+    {
+        window.note(&restart_nudge_runtime::held_line(term, agent, &worker));
+        return Err(format!(
+            "워커 {worker}의 옛 판 프로그램이 아직 떠나지 않아 그 대화를 열지 않았습니다 — \
+             떠난 뒤 다시 열 수 있습니다"
+        ));
+    }
     let launch_override = window.launch_override(agent)?;
     // The words the wake carries are decided here, before the argv is built
     // (t-3058): whether a sleeper in the ledger is this very conversation
@@ -1566,6 +1587,10 @@ impl WakeWindow for ResumeDoor<'_> {
 
     fn stir(&self) {
         self.state.cadence().wake();
+    }
+
+    fn exit_seen(&self, witness: &crate::agent_teams::ExitWitness) -> bool {
+        crate::cmd::program_left(witness)
     }
 }
 

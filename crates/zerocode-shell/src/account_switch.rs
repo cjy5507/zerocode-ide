@@ -19,8 +19,11 @@
 //! the ledger rests it, the pane closes and its process group is gone,
 //! `reseat_one_in_line` opens the new pane with `--resume` — all in the
 //! restore line, so neither another restore nor the grace can walk the
-//! worker between its rest and its new pane. A group that outlives the
-//! close holds every later restore of that worker until it is gone (R3).
+//! worker between its rest and its new pane. The program in the pane is
+//! written on the worker's row by the rest itself, before the close, and
+//! every road that would open the conversation again waits until a look
+//! sees that program gone (R3) — the ledger holds it, so neither a window
+//! that restarts nor a journal that could not be written lets it go.
 //!
 //! Every effect is written down before it happens and stays written down
 //! until the ledger has accepted its receipt ([`JournalBook`], R4): a
@@ -36,7 +39,7 @@
 //! from the summons (R5).
 
 use super::*;
-use crate::agent_teams::{ExitWitness, Host, PaneExit};
+use crate::agent_teams::{Host, PaneExit, PaneLogin};
 use zerocode_core::LaunchOverride;
 use zerocode_core::account_autoswitch::{
     AccountGauge, AutoSwitchMode, CLAUDE_ACCOUNT_AUTOSWITCH, Decision, Fitness, Question,
@@ -384,6 +387,11 @@ pub(crate) struct SwitchPlan {
     /// seat, generation and verdict, and which login every account id names
     /// (astra R6). `apply` re-plans and compares.
     pub(crate) token: String,
+    /// Which login every account id named when this plan was read — what a
+    /// yes to it approved, compared again at every pane's last door and at
+    /// its rest (astra R2). Never shown, never written.
+    #[serde(skip)]
+    pub(crate) logins: Vec<(String, String)>,
     pub(crate) now_ms: i64,
 }
 
@@ -529,7 +537,73 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         cooldown_until_ms,
         failed_recently,
         token,
+        logins,
         now_ms,
+    }
+}
+
+/// The login `id` names in `logins`, when it names one.
+fn login_of(logins: &[(String, String)], id: &str) -> Option<String> {
+    logins
+        .iter()
+        .find(|(named, _)| named == id)
+        .map(|(_, login)| login.clone())
+}
+
+/// What a yes was given to beyond the plan's own token, for ONE pane (astra
+/// R2): the road that asked, and the login the pane's account and its
+/// landing named when the plan was read. The default's selection moves the
+/// plan's token by itself, so the token cannot be compared again after it —
+/// these facts can, and every one of them must still stand when the pane is
+/// touched.
+struct Approval<'a> {
+    by: &'a str,
+    from: &'a str,
+    from_login: Option<String>,
+    landing: &'a str,
+    to_login: Option<String>,
+}
+
+impl<'a> Approval<'a> {
+    fn of(plan: &SwitchPlan, row: &'a WalledRow, by: &'a str, landing: &'a str) -> Option<Self> {
+        let from = row.account.as_deref()?;
+        Some(Self {
+            by,
+            from,
+            from_login: login_of(&plan.logins, from),
+            landing,
+            to_login: login_of(&plan.logins, landing),
+        })
+    }
+
+    /// Whether this approval still holds under `mode`, with every account
+    /// id naming `logins`.
+    fn stands(&self, mode: AutoSwitchMode, logins: &[(String, String)]) -> Result<(), String> {
+        match (self.by, mode) {
+            (_, AutoSwitchMode::Off) => {
+                return Err(
+                    "the switch was turned off before this pane moved — not moved".to_string(),
+                );
+            }
+            ("auto", AutoSwitchMode::Ask) => {
+                return Err(
+                    "the switch asks first now — this pane waits for a person's yes".to_string(),
+                );
+            }
+            _ => {}
+        }
+        for (id, approved) in [
+            (self.from, &self.from_login),
+            (self.landing, &self.to_login),
+        ] {
+            if login_of(logins, id) != *approved {
+                return Err(format!(
+                    "the login account {id} names changed since the yes — not moved; a new plan \
+                     needs a new yes"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -598,15 +672,14 @@ pub(crate) struct JournalPane {
     #[serde(default)]
     pub(crate) rested: bool,
     /// Where it continues, once it does — kept while its receipt is owed.
+    /// Written ONCE, the first time a look sees the move complete, and
+    /// never read again off the worker after that (astra R4): what the
+    /// worker does next — ends, or moves on to another pane — is not what
+    /// this switch did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) to_pane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) to_account: Option<String>,
-    /// The old pane's program outlived its close (astra R3): no restore
-    /// opens this worker's conversation until a look sees it gone, and a
-    /// window that restarts holds the same witness again from here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) lingering: Option<ExitWitness>,
 }
 
 fn journal_file(dir: &Path) -> PathBuf {
@@ -730,15 +803,20 @@ struct Settled {
 
 /// Settle what `journal` owes, against the ledger as it stands (astra R4).
 ///
-/// Every pane it rested that is live again in ANOTHER pane — the same
-/// attempt, the same conversation — gets its receipt; a pane still asleep
-/// stays owed (its program's lingering witness held for every restore, or
-/// let go once a look sees it gone); a pane the switch never rested, or
-/// that ended, or carries another attempt or another conversation, was not
-/// this switch's move, and goes, said in the log. The default's receipt is owed
-/// once the selection landed, and counts what has moved and what is still
-/// asleep. A receipt the ledger refused stays in the journal: nothing is
-/// taken out but what the ledger accepted.
+/// Two kinds of pane are owed, and they are told apart. A move still
+/// PENDING — rested, not yet seen in a new pane — is read against the
+/// ledger: live again in ANOTHER pane, on the same attempt and in the same
+/// conversation, it is complete, and where it continues is written down
+/// once, there and then; still asleep, it stays owed (the ledger holds its
+/// conversation while its old program may run); never rested by this
+/// switch, ended, or on another attempt or conversation, it was not this
+/// switch's move, and goes, said in the log. A move already seen COMPLETE is
+/// not read against the worker again: its receipt is sent as it was written
+/// down, whatever the worker has done since — ended, or moved on to another
+/// pane — because none of that says this switch did not move it. The
+/// default's receipt is owed once the selection landed, and counts what has
+/// moved and what is still asleep. A receipt the ledger refused stays in the
+/// journal: nothing is taken out but what the ledger accepted.
 fn settle(
     host: &dyn Host,
     doors: &dyn SwitchDoors,
@@ -749,59 +827,52 @@ fn settle(
     let mut settled = Settled::default();
     let mut kept = Vec::new();
     for mut pane in std::mem::take(&mut journal.panes) {
-        let now = crate::orchestration::worker_now(&pane.worker);
-        let same = pane.rested
-            && now.as_ref().is_some_and(|now| {
-                now.dispatch.as_deref() == Some(pane.dispatch.as_str())
-                    && now.session.as_deref() == Some(pane.session.as_str())
-            });
-        match now {
-            Some(now) if same && now.state == WorkerState::Sleeping => {
-                if let Some(witness) = pane.lingering.clone() {
-                    if host.exit_seen(&witness) {
-                        pane.lingering = None;
-                        crate::orchestration::forget_lingering_exit(&pane.worker);
-                    } else {
-                        crate::orchestration::hold_lingering_exit(&pane.worker, witness);
-                    }
+        if pane.to_pane.is_none() {
+            let now = crate::orchestration::worker_now(&pane.worker);
+            let same = pane.rested
+                && now.as_ref().is_some_and(|now| {
+                    now.dispatch.as_deref() == Some(pane.dispatch.as_str())
+                        && now.session.as_deref() == Some(pane.session.as_str())
+                });
+            match now {
+                Some(now) if same && now.state == WorkerState::Sleeping => {
+                    kept.push(pane);
+                    continue;
                 }
+                Some(now) if same && now.state.is_live() && now.pane != pane.from_pane => {
+                    journal.moved += 1;
+                    pane.to_account = now.term.and_then(|term| host.pane_account(term));
+                    pane.to_pane = Some(now.pane);
+                }
+                _ => {
+                    doors.log(&format!(
+                        "account-switch: journal {} lets worker {} go — this switch never \
+                         rested it, or it ended, or it carries another attempt or conversation \
+                         now: not this switch's move",
+                        journal.key, pane.worker
+                    ));
+                    continue;
+                }
+            }
+        }
+        let mut receipt = journal.receipt(
+            AccountMove::Pane {
+                worker: pane.worker.clone(),
+                from_pane: pane.from_pane.clone(),
+                to_pane: pane.to_pane.clone().unwrap_or_default(),
+            },
+            journal.pane_key(&pane.worker),
+            1,
+            0,
+        );
+        receipt.from_account = Some(pane.from_account.clone());
+        receipt.to_account.clone_from(&pane.to_account);
+        match doors.record(receipt, now_ms) {
+            Ok(written) => settled.written += usize::from(written),
+            Err(why) => {
+                settled.refused = Some(why);
                 kept.push(pane);
             }
-            Some(now) if same && now.state.is_live() && now.pane != pane.from_pane => {
-                if pane.to_pane.is_none() {
-                    journal.moved += 1;
-                }
-                pane.to_account = now
-                    .term
-                    .and_then(|term| host.pane_account(term))
-                    .or(pane.to_account);
-                pane.to_pane = Some(now.pane.clone());
-                let mut receipt = journal.receipt(
-                    AccountMove::Pane {
-                        worker: pane.worker.clone(),
-                        from_pane: pane.from_pane.clone(),
-                        to_pane: now.pane,
-                    },
-                    journal.pane_key(&pane.worker),
-                    1,
-                    0,
-                );
-                receipt.from_account = Some(pane.from_account.clone());
-                receipt.to_account.clone_from(&pane.to_account);
-                match doors.record(receipt, now_ms) {
-                    Ok(written) => settled.written += usize::from(written),
-                    Err(why) => {
-                        settled.refused = Some(why);
-                        kept.push(pane);
-                    }
-                }
-            }
-            _ => doors.log(&format!(
-                "account-switch: journal {} lets worker {} go — this switch never rested it, or \
-                 it ended, or it carries another attempt or conversation now: not this \
-                 switch's move",
-                journal.key, pane.worker
-            )),
         }
     }
     let pending = u32::try_from(kept.iter().filter(|pane| pane.to_pane.is_none()).count())
@@ -878,21 +949,6 @@ pub(crate) fn reconcile(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64) -
         ));
     }
     written
-}
-
-/// At boot: every close a switch saw outlive its wait is held again from
-/// the journal (astra R3) — a window that restarted must not open a
-/// conversation whose old program may still run. Read only; the next
-/// settling lets go of the ones a look sees gone.
-pub(crate) fn hold_lingering_exits(journal_dir: &Path) {
-    let Ok(book) = read_book(journal_dir) else {
-        return;
-    };
-    for pane in book.switches.iter().flat_map(|held| &held.panes) {
-        if let Some(witness) = &pane.lingering {
-            crate::orchestration::hold_lingering_exit(&pane.worker, witness.clone());
-        }
-    }
 }
 
 /* ---- applying ---- */
@@ -1030,7 +1086,6 @@ pub(crate) fn apply_with(
                     rested: false,
                     to_pane: None,
                     to_account: None,
-                    lingering: None,
                 })
             })
             .collect(),
@@ -1077,22 +1132,21 @@ pub(crate) fn apply_with(
     let key = journal.key.clone();
     let mut panes = Vec::new();
     for row in plan.moves() {
+        let approval = Approval::of(&plan, row, by, &landing);
         let moved = move_pane(
             host,
             doors,
             row,
-            by,
-            &landing,
+            approval.as_ref(),
             &key,
             now_ms,
-            &mut |lingering| {
+            &mut || {
                 if let Some(entry) = journal
                     .panes
                     .iter_mut()
                     .find(|entry| entry.worker == row.worker)
                 {
                     entry.rested = true;
-                    entry.lingering = lingering.cloned();
                 }
                 keep_in(&mut book, &journal);
                 write_book(&dir, &book)
@@ -1152,29 +1206,21 @@ pub(crate) fn apply_with(
 
 /// The policy as it stands NOW, asked at the last door before a pane is
 /// touched (astra R2). The selection and the checks before it take time,
-/// and the setting, the candidate or the pane's own verdict may have moved
-/// under them: the plan read again must still send this worker — the same
-/// seat, attempt and coordinator generation — to the same landing, under a
-/// mode that allows this road.
+/// and the setting, the candidate, the logins or the pane's own verdict may
+/// have moved under them: the approval must still stand — the mode allows
+/// this road, and the pane's account and the landing name the logins they
+/// named when the yes was given — and the plan read again must still send
+/// this worker — the same seat, attempt and coordinator generation — to the
+/// same landing.
 fn still_moves(
     host: &dyn Host,
     doors: &dyn SwitchDoors,
     row: &WalledRow,
-    by: &str,
-    landing: &str,
+    approval: &Approval<'_>,
 ) -> Result<(), String> {
     let now = plan_with(host, doors.situation(doors.now_ms())?);
-    match (by, now.mode) {
-        (_, AutoSwitchMode::Off) => {
-            return Err("the switch was turned off before this pane moved — not moved".to_string());
-        }
-        ("auto", AutoSwitchMode::Ask) => {
-            return Err(
-                "the switch asks first now — this pane waits for a person's yes".to_string(),
-            );
-        }
-        _ => {}
-    }
+    approval.stands(now.mode, &now.logins)?;
+    let landing = approval.landing;
     let still = now.moves().any(|held| {
         held.worker == row.worker
             && held.term == row.term
@@ -1196,32 +1242,32 @@ enum Walked {
     /// The old pane's program is gone, and the restore road seated this
     /// many (0 or 1).
     Seated(usize),
-    /// The old pane's program outlived the wait; its witness is held and
-    /// written down.
+    /// The old pane's program outlived the wait; the ledger's row holds it
+    /// since the rest.
     Lingered,
 }
 
-/// Move ONE walled pane to `landing` — the same worker id, dispatch,
-/// checkout and conversation (t-7538, condition 6). Everything that can
-/// be known beforehand is checked before anything is touched: the seat and
-/// the attempt the plan saw, the pane's own model, effort and permission
-/// mode (R5), the ledger's word, and the policy as it stands now (R2).
-/// Then, in the restore line, the ledger rests the worker at the fence —
-/// only while the window still sees the wall — with the pane's tuning on
-/// its row, `note` writes that down, the pane closes, and the restore road
-/// seats that one worker again once the old program is gone; a program
-/// that outlives the wait is held against every restore (R3) and written
-/// down too. A pane that fails a check is left exactly as it was.
-#[allow(clippy::too_many_arguments)]
+/// Move ONE walled pane to its approval's landing — the same worker id,
+/// dispatch, checkout and conversation (t-7538, condition 6). Everything
+/// that can be known beforehand is checked before anything is touched: the
+/// seat and the attempt the plan saw, the login the pane was launched as,
+/// the pane's own model, effort and permission mode (R5), the ledger's word,
+/// and the approval and the policy as they stand now (R2). Then, in the
+/// restore line, the ledger rests the worker at the fence — only while the
+/// window still sees the wall and the approval still stands — with the
+/// pane's tuning and the program running in it on its row (R3), `note`
+/// writes that down, the pane closes, and the restore road seats that one
+/// worker again once the old program is gone. A program that outlives the
+/// wait stays held on the row, against every restore, until a look sees it
+/// gone. A pane that fails a check is left exactly as it was.
 fn move_pane(
     host: &dyn Host,
     doors: &dyn SwitchDoors,
     row: &WalledRow,
-    by: &str,
-    landing: &str,
+    approval: Option<&Approval<'_>>,
     key: &str,
     now_ms: i64,
-    note: &mut dyn FnMut(Option<&ExitWitness>) -> Result<(), String>,
+    note: &mut dyn FnMut() -> Result<(), String>,
 ) -> MovedPane {
     let began = Instant::now();
     let mut moved = MovedPane {
@@ -1233,7 +1279,8 @@ fn move_pane(
         why: None,
         ms: 0,
     };
-    let checked = (|| -> Result<(u32, SwitchRest, String), String> {
+    let checked = (|| -> Result<(u32, SwitchRest, PaneLogin, &Approval<'_>), String> {
+        let approval = approval.ok_or("the window did not record the account the pane runs as")?;
         let now = crate::orchestration::worker_now(&row.worker)
             .ok_or("the ledger no longer knows the worker")?;
         let Some(term) = now.term else {
@@ -1242,10 +1289,10 @@ fn move_pane(
         if term != row.term || !now.state.is_live() {
             return Err("the worker moved seats since the plan".to_string());
         }
-        let account = row
-            .account
-            .clone()
-            .ok_or("the window did not record the account the pane runs as")?;
+        let pane = host
+            .pane_login(term)
+            .filter(|held| held.account == approval.from)
+            .ok_or("the window did not record the login the pane runs as")?;
         let leader = crate::orchestration::leader_term_of_team(&now.team)
             .ok_or("the worker's team has no leader pane to restore under")?;
         let tuning = pane_tuning(host, term).ok_or(
@@ -1260,12 +1307,13 @@ fn move_pane(
             session: tuning.session.id.clone(),
             model: relaunch_model(now.model.as_deref(), &model),
             effort,
+            exit: host.exit_witness(term),
         };
         crate::orchestration::switch_move_ready(&rest, now_ms)?;
-        still_moves(host, doors, row, by, landing)?;
-        Ok((leader, rest, account))
+        still_moves(host, doors, row, approval)?;
+        Ok((leader, rest, pane, approval))
     })();
-    let (leader, rest, account) = match checked {
+    let (leader, rest, pane, approval) = match checked {
         Ok(checked) => checked,
         Err(why) => {
             moved.why = Some(why);
@@ -1273,30 +1321,32 @@ fn move_pane(
             return moved;
         }
     };
+    let landing = approval.landing;
     let overrides = doors.overrides();
     let actor = host.actor_for(leader);
     let walked = crate::orchestration::in_restore_line(|line| -> Result<Walked, String> {
         crate::orchestration::rest_worker_for_switch(
             host,
             &rest,
-            &account,
+            &pane,
+            // The approval as it stands at the moment of the rest, asked at
+            // the fence beside the wall (astra R2).
+            &|| {
+                let now = doors.situation(doors.now_ms())?;
+                approval.stands(now.mode, &now.logins)
+            },
             &|| doors.now_ms(),
             now_ms,
         )?;
         // Rested: written down before the pane closes. A journal that
         // cannot be written is said in the log and the move goes on — a
         // sleeping worker beside its own live pane is the one state this
-        // road must never leave behind.
-        if let Err(why) = note(None) {
+        // road must never leave behind, and the program in the pane is held
+        // on the ledger's row, not here.
+        if let Err(why) = note() {
             doors.log(&format!("account-switch: {why}"));
         }
-        crate::orchestration::leave_switch_mark(
-            &row.worker,
-            crate::orchestration::SwitchMark {
-                nudge: switch_nudge(landing),
-                occasion: key.to_string(),
-            },
-        );
+        crate::orchestration::switch_rested(&row.worker, switch_nudge(landing), key);
         // The old pane goes only now: the ledger has the worker asleep, so
         // its exit settles nothing — and the new one opens only once the old
         // program is gone, so the conversation never has two writers.
@@ -1309,16 +1359,10 @@ fn move_pane(
                 actor.as_deref(),
                 &row.worker,
             ))),
-            PaneExit::Lingering(witness) => {
-                // Held before the line opens again: no restore — this
-                // window's, a restart's or the grace's — opens the
-                // conversation beside a program that did not leave.
-                crate::orchestration::hold_lingering_exit(&row.worker, witness.clone());
-                if let Err(why) = note(Some(&witness)) {
-                    doors.log(&format!("account-switch: {why}"));
-                }
-                Ok(Walked::Lingered)
-            }
+            // Held since the rest, on the ledger's row: no restore — this
+            // window's, a restart's, a door's or the grace's — opens the
+            // conversation beside a program that did not leave.
+            PaneExit::Lingering(_) => Ok(Walked::Lingered),
         }
     });
     let landed = crate::orchestration::worker_now(&row.worker);

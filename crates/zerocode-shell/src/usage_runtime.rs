@@ -171,21 +171,8 @@ pub(super) fn scan_claude_account_usage_with(
     let failed = |status: &str,
                   error: String,
                   kind: Option<zerocode_core::usage_limit::FailureKind>,
-                  retry_at_ms: Option<i64>| usage::ProviderUsage {
-        provider: "claude".to_string(),
-        session: None,
-        weekly: None,
-        fable_weekly: None,
-        monthly: None,
-        buckets: None,
-        updated_at: epoch_ms_now(),
-        error: Some(error),
-        status: status.to_string(),
-        failure_kind: kind,
-        retry_at_ms,
-        plan_type: None,
-        reset_credits: None,
-        account: whose.clone(),
+                  retry_at_ms: Option<i64>| {
+        claude_reading_failed(status, error, kind, retry_at_ms, whose.clone())
     };
     let (login, from) = match read_login(account) {
         accounts::AccountLogin::Found(login, from) => (login, from),
@@ -215,45 +202,8 @@ pub(super) fn scan_claude_account_usage_with(
     };
     let road = UsageRoad::Oauth { login: Some(from) };
     match ask(login.as_str(), epoch_ms_now()) {
-        // A figure outside 0–100 is no reading at all (astra R6). The
-        // status bar clamps what it shows (`oauth_usage_window`), and a
-        // clamped figure is not a number an account may be chosen by: the
-        // read is `invalid`, its windows are left out, and the switch table
-        // calls the account unknown.
-        Ok(read)
-            if [&read.session, &read.weekly, &read.fable_weekly]
-                .into_iter()
-                .flatten()
-                .any(|window| !(0.0..=100.0).contains(&window.used_percent)) =>
-        {
-            Scanned {
-                usage: failed(
-                    ACCOUNT_READING_INVALID,
-                    "사용량 수치가 0–100 밖으로 왔습니다 — 이 읽기로는 계정을 고르지 않습니다"
-                        .to_string(),
-                    None,
-                    None,
-                ),
-                road,
-            }
-        }
         Ok(read) => Scanned {
-            usage: usage::ProviderUsage {
-                provider: "claude".to_string(),
-                session: read.session.map(oauth_usage_window),
-                weekly: read.weekly.map(oauth_usage_window),
-                fable_weekly: read.fable_weekly.map(oauth_usage_window),
-                monthly: None,
-                buckets: None,
-                updated_at: epoch_ms_now(),
-                error: None,
-                status: "ok".to_string(),
-                failure_kind: None,
-                retry_at_ms: None,
-                plan_type: None,
-                reset_credits: None,
-                account: whose,
-            },
+            usage: claude_oauth_reading(read, whose),
             road,
         },
         Err(failure) => Scanned {
@@ -430,21 +380,17 @@ pub(super) fn refresh_inactive_claude_accounts(
 }
 
 /// Every managed account's latest reading as the switch table wants it —
-/// the selected account's from its own gauge when that gauge names it and
-/// is the newer, every other account's from the account map, and only a
-/// reading of the login the row names now (astra R6). An account with no
-/// such reading is a row with no windows, which the table calls unknown.
-/// Read over the store the caller already holds.
+/// out of the account map only, and only a reading of the login the row
+/// names now (astra R6). The selected account's own gauge lands there too,
+/// under the same login rule ([`land_claude_usage_as`]); the status bar's
+/// snapshot names an id, not a login, and is never a number this table
+/// chooses by. An account with no such reading is a row with no windows,
+/// which the table calls unknown. Read over the store the caller already
+/// holds.
 pub(super) fn claude_account_gauges_of(
     store: &accounts::AccountStore,
     local_data_root: &Path,
 ) -> Vec<zerocode_core::account_autoswitch::AccountGauge> {
-    let active = zerocode_core::active_account(&store.accounts, &store.selection)
-        .map(|account| account.id.clone());
-    let main = claude_usage_cache(local_data_root)
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
     let map = claude_account_usage_cache(local_data_root)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -452,21 +398,42 @@ pub(super) fn claude_account_gauges_of(
     store
         .accounts
         .iter()
-        .map(|account| {
-            let own = reading_of(&map, account);
-            let snapshot = match &main {
-                Some(main)
-                    if active.as_deref() == Some(account.id.as_str())
-                        && main.account.as_deref() == Some(account.id.as_str())
-                        && own.is_none_or(|own| own.updated_at <= main.updated_at) =>
-                {
-                    Some(main)
-                }
-                _ => own,
-            };
-            account_gauge_of(account, snapshot)
-        })
+        .map(|account| account_gauge_of(account, reading_of(&map, account)))
         .collect()
+}
+
+/// The reading of exactly `pane`'s login — the one number a pane launched as
+/// that login may be judged against (t-7538, astra R6). An id that has since
+/// come to name another login has another login's reading, and that is not
+/// this pane's.
+pub(super) fn reading_of_login<'a>(
+    readings: &'a HashMap<String, AccountReading>,
+    pane: &crate::agent_teams::PaneLogin,
+) -> Option<&'a usage::ProviderUsage> {
+    readings
+        .get(&pane.account)
+        .filter(|held| held.login == pane.login)
+        .map(|held| &held.usage)
+}
+
+/// The selected account's own gauge, landed as that account's reading too —
+/// through the one door every account's reading lands by
+/// ([`land_claude_account_usage`]), so it is stamped with the login it was
+/// read as and dropped if that login changed while it was out (astra R6).
+/// `began_as` is the selected row when the read began; a read that ran as
+/// no managed account, or as another one, lands nowhere here.
+pub(super) fn land_claude_usage_as(
+    config_root: &Path,
+    local_data_root: &Path,
+    began_as: Option<&zerocode_core::ClaudeAccount>,
+    fresh: &usage::ProviderUsage,
+) -> bool {
+    match began_as {
+        Some(account) if fresh.account.as_deref() == Some(account.id.as_str()) => {
+            land_claude_account_usage(config_root, local_data_root, account, fresh.clone())
+        }
+        _ => false,
+    }
 }
 
 /// One snapshot as the switch table's row — windows and status only.
@@ -552,6 +519,75 @@ pub(super) fn usage_window_from(
         resets_at,
         reset_description: words,
     })
+}
+
+/// One Claude OAuth answer as the reading every road keeps — the selected
+/// account's gauge and every other account's own read alike (astra R6).
+///
+/// A figure outside 0–100 is no reading at all: the status bar clamps what it
+/// shows ([`oauth_usage_window`]), and a clamped figure is not a number an
+/// account may be chosen, or a pane moved, by. Such a read is `invalid`, its
+/// windows are left out, and the switch table and the wall witness both call
+/// the account unknown.
+pub(super) fn claude_oauth_reading(
+    read: usage_oauth::OauthUsage,
+    whose: Option<String>,
+) -> usage::ProviderUsage {
+    if [&read.session, &read.weekly, &read.fable_weekly]
+        .into_iter()
+        .flatten()
+        .any(|window| !(0.0..=100.0).contains(&window.used_percent))
+    {
+        return claude_reading_failed(
+            ACCOUNT_READING_INVALID,
+            "사용량 수치가 0–100 밖으로 왔습니다 — 이 읽기로는 계정을 고르지 않습니다".to_string(),
+            None,
+            None,
+            whose,
+        );
+    }
+    usage::ProviderUsage {
+        provider: "claude".to_string(),
+        session: read.session.map(oauth_usage_window),
+        weekly: read.weekly.map(oauth_usage_window),
+        fable_weekly: read.fable_weekly.map(oauth_usage_window),
+        monthly: None,
+        buckets: None,
+        updated_at: epoch_ms_now(),
+        error: None,
+        status: "ok".to_string(),
+        failure_kind: None,
+        retry_at_ms: None,
+        plan_type: None,
+        reset_credits: None,
+        account: whose,
+    }
+}
+
+/// A Claude read that produced no figures, and why.
+pub(super) fn claude_reading_failed(
+    status: &str,
+    error: String,
+    kind: Option<zerocode_core::usage_limit::FailureKind>,
+    retry_at_ms: Option<i64>,
+    whose: Option<String>,
+) -> usage::ProviderUsage {
+    usage::ProviderUsage {
+        provider: "claude".to_string(),
+        session: None,
+        weekly: None,
+        fable_weekly: None,
+        monthly: None,
+        buckets: None,
+        updated_at: epoch_ms_now(),
+        error: Some(error),
+        status: status.to_string(),
+        failure_kind: kind,
+        retry_at_ms,
+        plan_type: None,
+        reset_credits: None,
+        account: whose,
+    }
 }
 
 /// An OAuth window in the panel's own dress. No reset words: the API hands a
@@ -660,24 +696,12 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
         };
     }
     let oauth = match asked {
+        // The same reading the per-account road keeps, under the same
+        // range rule (astra R6): the selected account's number is chosen by
+        // and walled by exactly like any other account's.
         Ok(read) => {
             return Scanned {
-                usage: usage::ProviderUsage {
-                    provider: "claude".to_string(),
-                    session: read.session.map(oauth_usage_window),
-                    weekly: read.weekly.map(oauth_usage_window),
-                    fable_weekly: read.fable_weekly.map(oauth_usage_window),
-                    monthly: None,
-                    buckets: None,
-                    updated_at: epoch_ms_now(),
-                    error: None,
-                    status: "ok".to_string(),
-                    failure_kind: None,
-                    retry_at_ms: None,
-                    plan_type: None,
-                    reset_credits: None,
-                    account: whose,
-                },
+                usage: claude_oauth_reading(read, whose),
                 road: UsageRoad::Oauth { login: from },
             };
         }
@@ -1059,20 +1083,33 @@ pub(super) fn active_codex_account_id(config_root: &Path) -> Option<String> {
 /// identity comes from the selection and its readable account store rather
 /// than trying to reverse-map that shared runtime path.
 pub(super) fn active_claude_account_id(config_root: &Path) -> Option<String> {
+    active_claude_account(config_root).map(|account| account.id)
+}
+
+/// The row [`active_claude_account_id`] names — the whole row, so a read can
+/// say later which login it ran as.
+pub(super) fn active_claude_account(config_root: &Path) -> Option<zerocode_core::ClaudeAccount> {
     let store = accounts::read_store(config_root);
     zerocode_core::active_account(&store.accounts, &store.selection)
         .filter(|account| accounts::signed_in(Path::new(&account.config_dir)))
-        .map(|account| account.id.clone())
+        .cloned()
 }
 
-/// Write down which managed Claude account a pane was launched as, read
-/// off the environment the launch really got (t-7538). Every Claude launch
-/// road calls this beside its `agent_terms` write; a launch that names no
-/// managed store leaves no row, which is "unknown", not "the selected one".
+/// Write down which managed Claude login a pane was launched as, read off
+/// the environment the launch really got (t-7538): the account row and the
+/// login it named at that moment. Every agent launch road calls this beside
+/// its `agent_terms` write; a launch that names no managed store leaves no
+/// row, which is "unknown", not "the selected one".
 pub(super) fn note_pane_account(state: &AppState, term: TermId, env: &[(String, String)]) {
-    match accounts::account_of_env(state.config_root(), env) {
-        Some(id) => {
-            state.pane_accounts().insert(term, id);
+    match accounts::account_row_of_env(state.config_root(), env) {
+        Some(account) => {
+            state.pane_accounts().insert(
+                term,
+                crate::agent_teams::PaneLogin {
+                    login: claude_login_key(&account),
+                    account: account.id,
+                },
+            );
         }
         None => {
             state.pane_accounts().remove(&term);
