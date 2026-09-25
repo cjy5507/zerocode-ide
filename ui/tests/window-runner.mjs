@@ -36,9 +36,10 @@
  * run and reached only by choosing it — for focused iteration whose checks
  * the full run covers elsewhere. */
 
-/* The report's words, spelled here and nowhere else: the lane reads them back
- * (`tools/release/lane.sh`, whose own test reads this runner's report through
- * the lane's parser). */
+/* The report's words, in one table: the report spells its lines with it, and
+ * the release lane's parser (`tools/release/lane.sh` failed_tests) is held to
+ * what it writes by tools/release/tests/test_lane.py, which runs this runner
+ * and reads its report through that parser. */
 export const REPORT = Object.freeze({ pass: "PASS", fail: "FAIL", suite: "SUITE", gap: "  ", detail: "  — " });
 
 /* `editor-recovery` → `EDITOR_RECOVERY_ONLY`: the switch each focused block

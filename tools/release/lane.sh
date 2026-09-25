@@ -29,6 +29,8 @@ POLL_SECS=15                # status.sh --wait poll period
 THROTTLE_SECS=60            # launchd ThrottleInterval between lane launches
 ZO_PROFILE=release          # cargo profile for the zo release build (fast-release is the candidate)
 SOLO_RUNS=3                 # a known flake must pass this many solo runs
+UI_SUITE_CHOOSER=WINDOW_SUITES   # the window runner's own chooser (ui/tests/window-runner.mjs): a failed browser check's
+                            # suite is re-run alone through it — the whole harness took eight minutes a run (t-9741)
 MAX_SOLO_JUDGED=4           # up to this many UNLISTED red names (root+zo together) are judged solo — a
                             # real regression fails solo too, and every run of the first day died on a
                             # NEW timing wait; more unlisted names at once is a real red. Names listed in
@@ -111,12 +113,13 @@ WORK=$RELEASE_HOME/work
 STATUS=$RELEASE_HOME/status.json
 INSTALLED=$RELEASE_HOME/installed.json
 INSTALLED_PREV=$RELEASE_HOME/installed.prev.json
+UNLISTED=$RELEASE_HOME/unlisted.txt   # every unlisted red the lane judged solo, with its result: the evidence a flakes.txt line is written from
 
 if [ "${1:-}" = "--table" ]; then
   for k in DISK_FLOOR_GB TARGET_CAP_GB RECLAIM_BELOW_GB POLL_SECS THROTTLE_SECS ZO_PROFILE SOLO_RUNS CALM_LOAD CALM_WAIT_SECS \
            CALM_POLL_SECS PHASES TARGET_LANES TOOLS \
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
-           RELEASE_ZO_BIN RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV \
+           RELEASE_ZO_BIN RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED UI_SUITE_CHOOSER \
            RELEASE_GITHUB_REPO RELEASE_PUBLISH RELEASE_CHANNEL RELEASE_LEGACY_MANIFEST UPDATER_KEY \
            UPDATER_PLATFORM UPDATER_ARCH UPDATER_FEED ZO_BUILD_TARGETS COMPUTER_USE_HELPER APP_SIBLING_BINS; do
     eval "printf \"%s='%s'\\n\" \"$k\" \"\$$k\""
@@ -340,7 +343,8 @@ run_gate() {
     sleep "$(stub "GATE_$(upper "$lane")_SLEEP" 0)"
     rc=$(stub "GATE_$(upper "$lane")_RC" 0)
     { echo "stub gate $lane"; if [ "$rc" != 0 ]; then echo "==> verify recipe test"; echo "failures:"; local f; for f in $(stub "GATE_$(upper "$lane")_FAILS"); do echo "    $f"; done; echo "test result: FAILED."; fi
-      local h; h=$(stub "GATE_$(upper "$lane")_HARNESS" ""); [ -z "$h" ] || { echo "==> verify recipe $h-browser-test"; echo "error: recipe \`$h-browser-test\` failed on line 41 with exit code 1"; }
+      local h r; h=$(stub "GATE_$(upper "$lane")_HARNESS" ""); r=$(stub "GATE_$(upper "$lane")_REPORT" "")
+      [ -z "$h" ] || { echo "==> verify recipe $h-browser-test"; [ -z "$r" ] || cat "$r"; echo "error: recipe \`$h-browser-test\` failed on line 41 with exit code 1"; }
       local u; u=$(stub "GATE_$(upper "$lane")_UNNAMED" ""); [ -z "$u" ] || { echo "==> verify recipe $u"; echo "error: recipe \`$u\` failed on line 43 with exit code 101"; }
     } > "$log"
   else
@@ -353,29 +357,99 @@ run_gate() {
   stub_log "gate $lane done rc=$rc"
   return "$rc"
 }
-failed_tests() { # LOG -> sorted unique failure names, each read against its own recipe (the
-                 # `==> verify recipe` marks): the test paths of a cargo `failures:` block;
-                 # `harness:<name>` for a failed `<name>-browser-test`; and `recipe:<name>` for any
-                 # other recipe that failed without naming a test — its tests never spoke, so no
-                 # solo run can judge it (1.3.37: shell-test died compiling beside a named harness red)
+failed_tests() { # LOG -> sorted unique failure names, one a line, each read against its own recipe
+                 # (the `==> verify recipe` marks): the test paths of a cargo `failures:` block; for a
+                 # failed `<harness>-browser-test`, each check its report failed (`FAIL  <check>  — …`)
+                 # as `ui:<harness>/<suite>:<check>` — the suite the `SUITE  <suite>` line over it named,
+                 # `ui:<harness>:<check>` in a harness without suites (t-9741) — or `harness:<harness>`
+                 # when it named none (it died before its report); and `recipe:<name>` for any other
+                 # recipe that failed without naming a test — its tests never spoke, so no solo run can
+                 # judge it (1.3.37: shell-test died compiling beside a named harness red)
   awk '
-    /^==> verify recipe / { named = 0; next }
+    /^==> verify recipe / {
+      named = 0; harness = ""; suite = ""; checks = ""
+      if ($4 ~ /^[a-z]+-browser-test$/) { harness = $4; sub(/-browser-test$/, "", harness) }
+      next
+    }
     /^failures:$/ { inblock = 1; next }
     inblock && /^test result/ { inblock = 0; next }
     inblock && /^    [A-Za-z0-9_:]+$/ { sub(/^    /, ""); print; named = 1; next }
+    harness != "" && /^SUITE  / { suite = substr($0, 8); next }
+    harness != "" && /^FAIL  / {
+      check = substr($0, 7); cut = index(check, "  — "); if (cut) check = substr(check, 1, cut - 1)
+      gsub(/\t/, " ", check)
+      checks = checks "ui:" harness (suite == "" ? "" : "/" suite) ":" check "\n"
+      next
+    }
     /recipe `[^`]+` (failed|was terminated)/ {
       match($0, /recipe `[^`]+`/); r = substr($0, RSTART + 8, RLENGTH - 9)
-      if (r ~ /^[a-z]+-browser-test$/) { sub(/-browser-test$/, "", r); print "harness:" r }
+      if (r ~ /^[a-z]+-browser-test$/) {
+        if (checks != "") printf "%s", checks
+        else { sub(/-browser-test$/, "", r); print "harness:" r }
+        checks = ""
+      }
       else if (!named) print "recipe:" r
     }
   ' "$1" 2>/dev/null | sort -u
 }
-known_flake() { # LANE NAME — listed under that prefix in flakes.txt (substring, as before)
-  local k; [ -f "$RELEASE_FLAKES_FILE" ] || return 1
+known_flake() { # LANE NAME — listed in flakes.txt: a test path under its lane's prefix (substring, as
+                # before), a browser check under `ui:` by the start of its name (t-9741)
+  local k check; [ -f "$RELEASE_FLAKES_FILE" ] || return 1
+  case $2 in
+    ui:*)
+      check=${2#ui:}; check=${check#*:}
+      while IFS= read -r k; do
+        [ -n "$k" ] || continue   # an empty `ui:` is the start of every name, so it lists none
+        case $check in "$k"*) return 0;; esac
+      done <<< "$(sed -n 's/^ui://p' "$RELEASE_FLAKES_FILE")"
+      return 1 ;;
+  esac
   for k in $(sed -n "s/^$1:\([A-Za-z0-9_:]*\).*/\1/p" "$RELEASE_FLAKES_FILE"); do
     case "$2" in *"$k"*) return 0;; esac
   done
   return 1
+}
+solo_unit() { # NAME -> what a solo run re-runs for it: a cargo test by its path; a browser check by its
+              # suite (`ui:<harness>/<suite>`), or its harness whole when it has none (`harness:<harness>`)
+  local unit
+  case $1 in
+    ui:*) unit=${1#ui:}; unit=${unit%%:*}
+          case $unit in */*) printf 'ui:%s' "$unit" ;; *) printf 'harness:%s' "$unit" ;; esac ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+solo_plan() { # LANE LOG -> "<lane>\t<listed|unlisted|recipe>\t<unit>\t<name>", one line per failure name
+  local lane=$1 f kind
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case $f in
+      recipe:*) kind=recipe ;;
+      *) if known_flake "$lane" "$f"; then kind=listed; else kind=unlisted; fi ;;
+    esac
+    printf '%s\t%s\t%s\t%s\n' "$lane" "$kind" "$(solo_unit "$f")" "$f"
+  done <<< "$(failed_tests "$2")"
+}
+plan_names() { # PLAN LANE -> 0 when the plan holds a failure name under that lane
+  case $'\n'"$1" in *$'\n'"$2"$'\t'*) return 0 ;; esac
+  return 1
+}
+# say_unlisted PLAN LANE UNIT PASSED VERDICT — each unlisted name that unit's solo runs judged: in the
+# lane log, and kept in $UNLISTED with the day, the sha and its gate log, where the person writing a
+# flakes.txt line finds the evidence for it (t-9741).
+say_unlisted() {
+  local lane kind unit f
+  while IFS=$'\t' read -r lane kind unit f; do
+    [ "$kind" = unlisted ] && [ "$lane" = "$2" ] && [ "$unit" = "$3" ] || continue
+    log "unlisted red $lane:$f — judged solo $4/$SOLO_RUNS $5"
+    printf '%s %s %s:%s — judged solo %s/%s %s (out/gate-%s-%s.log)\n' \
+      "$(now_iso)" "$SHA8" "$lane" "$f" "$4" "$SOLO_RUNS" "$5" "$lane" "$SHA8" >> "$UNLISTED"
+  done <<< "$1"
+}
+# ui_solo HARNESS/SUITE — that suite of the harness alone, chosen the way the window runner chooses
+# (`$UI_SUITE_CHOOSER`, anchored so no other suite's name contains it), by the recipe the gate ran.
+ui_solo() {
+  local harness=${1%%/*} suite=${1#*/}
+  env "$UI_SUITE_CHOOSER=^$(printf '%s' "$suite" | sed 's/[][\\.*^$+?(){}|]/\\&/g')\$" just "$harness-browser-test"
 }
 run_solo() { # LANE NAME RUN -> prints rc
   local lane=$1 name=$2 n=$3 rc log="$OUT/solo-$1-$SHA8-$3.log" target
@@ -390,9 +464,11 @@ run_solo() { # LANE NAME RUN -> prints rc
     echo "$last"; return 0
   fi
   case "$lane:$name" in
-    # A node harness is judged whole — its cases have no solo runner of their own —
-    # by the very recipe the gate ran, so a new harness needs no line here.
+    # A node harness is judged by the very recipe the gate ran, so a new harness
+    # needs no line here: whole when its checks have no suite to stand in (or it
+    # named none), and one suite alone when the check that failed named its suite.
     root:harness:*) ( cd "$SCRATCH" && just "${name#harness:}-browser-test" ) > "$log" 2>&1; rc=$? ;;
+    root:ui:*) ( cd "$SCRATCH" && ui_solo "${name#ui:}" ) > "$log" 2>&1; rc=$? ;;
     root:*) ( cd "$SCRATCH" && CARGO_TARGET_DIR=$target cargo test --workspace "$name" ) > "$log" 2>&1; rc=$? ;;
     zo:*)   ( cd "$SCRATCH/zo-ide" && ZO_DISABLE_KEYCHAIN=1 CARGO_TARGET_DIR=$target cargo test --workspace "$name" ) > "$log" 2>&1; rc=$? ;;
   esac
@@ -789,7 +865,7 @@ read_result() { # FILE -> sets RES_RC RES_SECS
   RES_RC=${RES_RC:-1}; RES_SECS=${RES_SECS:-0}
 }
 judge_sha() {
-  local missing= t full root_rc zo_rc root_fail zo_fail real f i rc reds=
+  local missing= t full root_rc zo_rc plan lane kind unit real f i rc reds=
   for t in $TOOLS; do have_tool "$t" || missing="$missing $t"; done
   if [ -n "$missing" ]; then refuse "tools:$missing"; return 3; fi
   measure_disk
@@ -842,28 +918,34 @@ judge_sha() {
 
   bow_out_if_superseded flakes || return 1
   phase_begin flakes
-  root_fail=$(failed_tests "$OUT/gate-root-$SHA8.log"); zo_fail=$(failed_tests "$OUT/gate-zo-$SHA8.log")
+  # One line per failure name — its lane, whether flakes.txt lists it, what a solo run re-runs for
+  # it, the name — read line by line, so a browser check's name with spaces in it stays one name.
+  plan=$(solo_plan root "$OUT/gate-root-$SHA8.log"; solo_plan zo "$OUT/gate-zo-$SHA8.log")
   real=; names=0   # unlisted names only — a listed cluster is what flakes.txt is for
-  for f in $root_fail; do known_flake root "$f" || names=$(( names + 1 )); done
-  for f in $zo_fail; do known_flake zo "$f" || names=$(( names + 1 )); done
+  while IFS=$'\t' read -r lane kind unit f; do
+    [ "$kind" != unlisted ] || names=$(( names + 1 ))
+    # A recipe that failed without naming a test is real whatever else failed by name.
+    [ "$kind" != recipe ] || real="$real $lane:$f"
+  done <<< "$plan"
   # A red with no failure names is a build/harness failure, not a test: real.
-  if [ "$root_rc" != 0 ] && [ -z "$root_fail" ]; then real="$real root:?"; fi
-  # A recipe that failed without naming a test is real whatever else failed by name.
-  for f in $root_fail; do case $f in recipe:*) real="$real root:$f";; esac; done
-  for f in $zo_fail; do case $f in recipe:*) real="$real zo:$f";; esac; done
-  if [ "$zo_rc" != 0 ] && [ -z "$zo_fail" ]; then real="$real zo:?"; fi
+  [ "$root_rc" = 0 ] || plan_names "$plan" root || real=" root:?$real"
+  [ "$zo_rc" = 0 ] || plan_names "$plan" zo || real="$real zo:?"
   # Too many unlisted names at once is a regression, not a flake storm.
   if [ "$names" -gt "$MAX_SOLO_JUDGED" ]; then
-    for f in $root_fail; do real="$real root:$f"; done; for f in $zo_fail; do real="$real zo:$f"; done
+    while IFS=$'\t' read -r lane kind unit f; do
+      [ -z "$lane" ] || [ "$kind" = recipe ] || real="$real $lane:$f"
+    done <<< "$plan"
   fi
   if [ -n "$real" ]; then
     step_done flakes 1
     red "gate red for real: root rc=$root_rc zo rc=$zo_rc [$(printf '%s' "$real" | sed 's/^ //')]"; return 1
   fi
   # Every remaining name is judged solo, listed or not; an unlisted one is
-  # named so the person can add it to flakes.txt once it has passed solo.
-  for f in $root_fail; do known_flake root "$f" || log "unlisted red root:$f — judged solo"; done
-  for f in $zo_fail; do known_flake zo "$f" || log "unlisted red zo:$f — judged solo"; done
+  # named so the person can add it to flakes.txt once it has passed solo —
+  # and named again with its judgment, which $UNLISTED keeps (t-9741).
+  while IFS=$'\t' read -r lane kind unit f; do
+    [ "$kind" != unlisted ] || log "unlisted red $lane:$f — judged solo"
+  done <<< "$plan"
   if [ "$root_rc" != 0 ] || [ "$zo_rc" != 0 ]; then
     # The solo run is the judgment — flake or real — so it gets the calm
     # machine a gate gets. It follows the zo gate immediately, and a 2px anchor
@@ -872,14 +954,20 @@ judge_sha() {
     # load 7.75, failed again in the solo right behind it, and were green every
     # time they were asked on an idle machine.
     heavy wait_for_calm flakes-solo
-    for f in $root_fail; do for i in $(seq 1 "$SOLO_RUNS"); do
-      rc=$(run_solo root "$f" "$i"); log "solo root $f $i/$SOLO_RUNS rc=$rc"
-      [ "$rc" = 0 ] || { step_done flakes 1; red "solo root $f run $i rc=$rc"; return 1; }
-    done; done
-    for f in $zo_fail; do for i in $(seq 1 "$SOLO_RUNS"); do
-      rc=$(run_solo zo "$f" "$i"); log "solo zo $f $i/$SOLO_RUNS rc=$rc"
-      [ "$rc" = 0 ] || { step_done flakes 1; red "solo zo $f run $i rc=$rc"; return 1; }
-    done; done
+    # One solo road per unit, however many of its names failed: a suite of a
+    # browser harness is re-run once a round for every check of it that was red.
+    # The list comes in on fd 3, so nothing a solo run starts can read it.
+    while IFS=$'\t' read -r lane unit <&3; do
+      [ -n "$lane" ] || continue
+      for i in $(seq 1 "$SOLO_RUNS"); do
+        rc=$(run_solo "$lane" "$unit" "$i"); log "solo $lane $unit $i/$SOLO_RUNS rc=$rc"
+        if [ "$rc" != 0 ]; then
+          say_unlisted "$plan" "$lane" "$unit" $(( i - 1 )) red
+          step_done flakes 1; red "solo $lane $unit run $i rc=$rc"; return 1
+        fi
+      done
+      say_unlisted "$plan" "$lane" "$unit" "$SOLO_RUNS" green
+    done 3<<< "$(printf '%s\n' "$plan" | awk -F'\t' 'NF && $2 != "recipe" && !seen[$1 FS $3]++ { print $1 FS $3 }')"
   fi
   # A red gate's target served its solo judgments; now it too is done with.
   [ "$root_rc" = 0 ] || release_gate_target root-gate

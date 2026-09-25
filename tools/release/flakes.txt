@@ -1,8 +1,14 @@
 # Known load flakes the release lane judges solo ×3 instead of calling red.
 # One test per line, `root:` for the root gate (just verify at the repo root),
 # `zo:` for the zo gate (zo-ide/just verify). A red naming anything NOT listed
-# here is red for real (design §3.5). Matching is by substring of the failing
-# test path in cargo's `failures:` block, so a bare name covers every module.
+# here counts against MAX_SOLO_JUDGED (lane.sh), and past it is red for real
+# (design §3.5). Matching is by substring of the failing test path in cargo's
+# `failures:` block, so a bare name covers every module.
+# `ui:` lists a browser harness's check by the start of its name — the text of
+# its report line after `FAIL  ` (t-9741). The lane re-runs that check's suite
+# alone ×3 (`WINDOW_SUITES`), the harness whole when it has no suites. A check
+# it judged while NOT listed is kept with its result in unlisted.txt beside
+# installed.json — list one from there, with that evidence, or not at all.
 # History: memory zerocode-repo-tooling-traps 80/93, t-2863 (the sidecar
 # contract), the old ~/.local/share/zerocode/release/release-judge.sh.
 root:codex_queue::tests::installed_codex_starts_and_cleans_an_explicit_worker_sidecar
