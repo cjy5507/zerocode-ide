@@ -303,4 +303,8 @@ windows = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# A paused clock for the tests that assert time the code counted, not time the
+# machine took (t-8938) — the same feature zerocode-ssh's tests already bring
+# into every workspace test build.
+tokio = { workspace = true, features = ["test-util"] }
 zerocode-shell-state = { workspace = true, features = ["test-memory"] }

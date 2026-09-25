@@ -3589,7 +3589,7 @@ impl Run {
     ///
     /// The idleness is the window's fact and arrives from outside; this is
     /// the ledger's half of the question, pure so it can be tested without a
-    /// pane. `None` is the usual answer, and each reason is a door:
+    /// pane. `None` is the usual answer, and its reason is a door:
     ///
     /// - **Nothing waiting unhanded.** Advice about no mail is noise, and an
     ///   open delivery is mail the holder has already been handed: while
@@ -3597,9 +3597,18 @@ impl Run {
     ///   is in it, and a pointer on top of it would be nagging mid-recovery
     ///   (Orca's own guard). The count is therefore what is queued and
     ///   unhanded — never the open batch, which needs no announcing.
-    /// - **An unanswered question of its own.** A holder that asked and has
-    ///   no reply yet is waiting on purpose, and typing at it would answer
-    ///   its question with our advice (the work order's third condition).
+    ///
+    /// What is NOT a door is a question of the holder's own that has no answer
+    /// yet. It was one, read as "an asker is waiting on purpose" — and the
+    /// ledger cannot see a wait. An `ask` that reached its deadline lets its
+    /// sleeper go and leaves the question standing, and a question asked twice
+    /// is answered once; either kept this door shut over every later message,
+    /// for good. A Codex reviewer's second copy of one question went
+    /// unanswered and three messages to it sat unannounced for two hours, and
+    /// a coordinator's question to another run's pane silenced its own address
+    /// from the moment it was asked (t-8938). An asker held inside its own
+    /// wait is mid-turn, and the window, which runs that wait, holds the
+    /// pointer for exactly as long as the wait lasts.
     ///
     /// What an open delivery must NOT silence is the mail queued BEHIND it.
     /// The lease arm of this door used to answer `None` on the lease alone,
@@ -3626,32 +3635,6 @@ impl Run {
             .find(|(held, _)| held == address)
             .map(|(_, inbox)| inbox)?;
         if inbox.pending.is_empty() {
-            return None;
-        }
-        /* One walk for the answered threads, one for the questions — never a
-         * walk per question. This runs on every beat for every address, and
-         * a run's mail grows without a bound, so the quadratic shape would
-         * be paid exactly where it hurts: forever, on the clock that types
-         * at people's panes.
-         *
-         * The set holds the two facts [`Message::answers`] asks for, which is
-         * that rule said in the shape a single walk can use: a message is an
-         * answer when it is in the question's thread AND comes from the seat
-         * the question was asked of. Matched on the thread alone, a
-         * bystander's `send --thread-id` retired a wait nobody had answered.
-         */
-        let answered: std::collections::HashSet<(&str, &str)> = self
-            .messages
-            .iter()
-            .filter_map(|reply| Some((reply.thread.as_deref()?, reply.from.as_str())))
-            .collect();
-        let asked_and_unanswered = self.messages.iter().any(|question| {
-            question.kind == MessageKind::Question
-                && question.thread.is_none()
-                && question.from == address
-                && !answered.contains(&(question.id.as_str(), question.to.as_str()))
-        });
-        if asked_and_unanswered {
             return None;
         }
         /* Mail this SEAT wrote is not news to it, and it is the same rule
@@ -4927,6 +4910,11 @@ pub struct Ledger {
     binding_revisions: Vec<(String, u64)>,
     #[serde(skip)]
     next_binding_revision: u64,
+    /// Named `ask`s whose wait has not settled yet ([`Asking`]). In-process
+    /// for the reason above: the wait lives in this window and never crosses
+    /// a restart.
+    #[serde(skip)]
+    asking: Vec<Asking>,
     /// How long a finished run keeps its detail rows. One of
     /// [`RETENTION_CHOICES`], and [`RETENTION_DEFAULT_DAYS`] in every ledger
     /// written before this existed — which is what those ledgers effectively
@@ -4959,11 +4947,35 @@ impl Default for Ledger {
             next_id: 0,
             binding_revisions: Vec::new(),
             next_binding_revision: 0,
+            asking: Vec::new(),
             retention_days: RETENTION_DEFAULT_DAYS,
             swept_at_ms: 0,
             verb_tallies: Vec::new(),
         }
     }
+}
+
+/// A named `ask` whose wait is still out: the question it posted, under the
+/// name and the fingerprint it was asked with (t-8938).
+///
+/// An `ask`'s receipt is the answer its wait goes home with, so it is filed
+/// when the wait settles — and until then a retry under the same name found
+/// no receipt and posted a second question. That is how one reviewer's
+/// question stood twice: the coordinator answered the first copy, the second
+/// was never answered, and the retry's wait timed out on a thread nobody
+/// was writing in. A retry while the first wait is out JOINS it instead —
+/// the same question, waited on again — and one that asks something else
+/// under the name is refused, as a mismatched replay is.
+///
+/// Forgotten when the name's receipt is filed ([`Ledger::remember`]), which
+/// is the moment the replay road takes over.
+#[derive(Debug)]
+struct Asking {
+    caller: String,
+    request: String,
+    fingerprint: String,
+    run: String,
+    question: String,
 }
 
 /// How often one verb was asked on one UTC day, and how often it was
@@ -5808,6 +5820,11 @@ fn fingerprint_of(caller: &str, verb: &str, words: &Words) -> String {
 
 /// The flag that names a retry, spelled once.
 const RETRY_REQUEST: &str = "--retry-request";
+
+/// What a retry under a name already in use has to be — said once for both
+/// roads that refuse one: a name already answered, and a name whose `ask` is
+/// still waiting ([`Asking`]).
+const A_RETRY_REPEATS_ITS_REQUEST: &str = "a retry has to repeat the request it retries";
 
 /// Whether this command line is one the road will refuse for want of a name.
 ///
@@ -7059,6 +7076,46 @@ impl Ledger {
             .find(|held| held.request == request && held.belongs_to(caller))
     }
 
+    /// The question a named `ask` still waiting under this name posted —
+    /// `None` when no wait is out under it, and a refusal when the name is
+    /// out asking something else ([`Asking`]).
+    fn joining(&self, key: &ReceiptKey, run_id: &str) -> Result<Option<String>, String> {
+        let Some(held) = self
+            .asking
+            .iter()
+            .find(|held| held.caller == key.caller && held.request == key.request)
+        else {
+            return Ok(None);
+        };
+        if held.fingerprint != key.durable.fingerprint() {
+            return Err(format!(
+                "{RETRY_REQUEST} {} is still waiting on a different question — \
+                 {A_RETRY_REPEATS_ITS_REQUEST}",
+                key.request
+            ));
+        }
+        /* A question in another run, or one retention has taken since, is no
+         * wait to join: the name asks afresh. */
+        Ok((held.run == run_id
+            && self
+                .run(run_id)
+                .is_some_and(|run| run.message(&held.question).is_some()))
+        .then(|| held.question.clone()))
+    }
+
+    /// Write down that a named `ask` posted `question` and goes to wait on it.
+    fn now_asking(&mut self, key: &ReceiptKey, run_id: &str, question: &str) {
+        self.asking
+            .retain(|held| held.caller != key.caller || held.request != key.request);
+        self.asking.push(Asking {
+            caller: key.caller.clone(),
+            request: key.request.clone(),
+            fingerprint: key.durable.fingerprint().to_string(),
+            run: run_id.to_string(),
+            question: question.to_string(),
+        });
+    }
+
     /// File the receipt for a verb whose effect actually happened.
     ///
     /// The one place that knows the rule, so the window and the bench cannot
@@ -7101,6 +7158,10 @@ impl Ledger {
     }
 
     fn remember(&mut self, key: &ReceiptKey, answer: ServedAnswer, now_ms: i64) {
+        // A named `ask` whose wait settles hands its name to the replay road
+        // — whichever of its joined waits settled first.
+        self.asking
+            .retain(|held| held.caller != key.caller || held.request != key.request);
         if self.already_served(&key.caller, &key.request).is_some() {
             return;
         }
@@ -17660,7 +17721,7 @@ fn plan_inner(
             if !agrees {
                 return Err(format!(
                     "--retry-request {request} was already answered for a different \
-                     caller, verb or payload — a retry has to repeat the request it retries"
+                     caller, verb or payload — {A_RETRY_REPEATS_ITS_REQUEST}"
                 ));
             }
             /* And the binding is NOT touched.
@@ -19369,20 +19430,41 @@ fn plan_inner(
                         Some(named) => named.to_string(),
                         None => format!("run:{run_id}"),
                     };
-                    let carried = carried_by(ledger, &run_id, (&team.id, pane));
-                    let draft = Draft {
-                        from: me.clone(),
-                        to,
-                        kind: MessageKind::Question,
-                        body: body.into(),
-                        subject: Text::default(),
-                        priority: Priority::Normal,
-                        payload: Text::default(),
-                        thread: None,
-                        task: carried.0.clone(),
-                        dispatch: carried.1.clone(),
+                    /* A retry of a named ask whose wait is still out IS that
+                     * ask (t-8938): it joins the question the first call
+                     * posted rather than posting a second one nobody will
+                     * answer. Its receipt is filed only when a wait settles,
+                     * so the replay road above cannot see it yet. */
+                    let named = words
+                        .value(RETRY_REQUEST)
+                        .map(|request| ReceiptKey::of(request, actor, verb, &words));
+                    let joined = match named.as_ref() {
+                        Some(key) => ledger.joining(key, &run_id)?,
+                        None => None,
                     };
-                    ledger.post_as(&run_id, draft, Some(&seat), now_ms)?
+                    match joined {
+                        Some(question) => question,
+                        None => {
+                            let carried = carried_by(ledger, &run_id, (&team.id, pane));
+                            let draft = Draft {
+                                from: me.clone(),
+                                to,
+                                kind: MessageKind::Question,
+                                body: body.into(),
+                                subject: Text::default(),
+                                priority: Priority::Normal,
+                                payload: Text::default(),
+                                thread: None,
+                                task: carried.0.clone(),
+                                dispatch: carried.1.clone(),
+                            };
+                            let posted = ledger.post_as(&run_id, draft, Some(&seat), now_ms)?;
+                            if let Some(key) = named.as_ref() {
+                                ledger.now_asking(key, &run_id, &posted);
+                            }
+                            posted
+                        }
+                    }
                 }
             };
             // The answer may already be in the log — the whole point of
@@ -21441,6 +21523,7 @@ impl Ledger {
             next_id: projected.next_id,
             binding_revisions: Vec::new(),
             next_binding_revision: 0,
+            asking: Vec::new(),
             retention_days: projected.retention_days,
             swept_at_ms: projected.swept_at_ms,
             verb_tallies: projected.verb_tallies,

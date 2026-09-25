@@ -963,11 +963,13 @@ fn run_bounded_command(
         Ok(child) => child,
         Err(error) => return spawn_result(error.kind()),
     };
-    let deadline = Instant::now() + timeout;
+    // On the clock a test can stand still (`standing_clock`): the bound is
+    // the window's, and a test of what the command did is not a test of it.
+    let deadline = crate::standing_clock::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return command_result(status),
-            Ok(None) if Instant::now() < deadline => {
+            Ok(None) if crate::standing_clock::now() < deadline => {
                 std::thread::sleep(PROCESS_POLL_INTERVAL);
             }
             Ok(None) => {
@@ -1981,6 +1983,17 @@ mod tests {
         );
     }
 
+    /// What the queue process is handed — the endpoint, the thread, the
+    /// fixed pointer and two environment names — and that its clean exit is
+    /// `Confirmed`.
+    ///
+    /// Not how fast it exits. The fake is a shell script, and inside the
+    /// full parallel suite a fork of `/bin/sh` plus `env` plus `printf` has
+    /// outlived `QUEUE_TIMEOUT` (three seconds) on every loaded gate of
+    /// 2026-09-25 — killed at the bound, `TimedOut`, read as `Unknown` —
+    /// while it takes a fraction of a second alone (t-8938). So the clock
+    /// the bounded wait reads stands still here, and the wait ends when the
+    /// process does.
     #[cfg(unix)]
     #[test]
     fn bound_queue_process_receives_the_fixed_pointer_and_minimal_environment() {
@@ -2015,6 +2028,7 @@ mod tests {
         };
         let notice = test_notice();
 
+        let _stood = crate::standing_clock::stand_still();
         assert_eq!(notifier.notify(&notice), NotificationOutcome::Confirmed);
         let args = std::fs::read(root.path().join("queue.args")).expect("captured queue argv");
         let args: Vec<&str> = args

@@ -9184,6 +9184,16 @@ impl Host for Releasing {
 /// settlement has to take. Answers the run, the worker, and the pane the
 /// plan minted for it.
 fn a_worker_carrying_work(team: &str, leader_term: u32, term: u32) -> (String, String, String) {
+    an_agent_carrying_work("claude", team, leader_term, term)
+}
+
+/// The same, for a named agent's worker.
+fn an_agent_carrying_work(
+    agent: &str,
+    team: &str,
+    leader_term: u32,
+    term: u32,
+) -> (String, String, String) {
     seat_a_team(team, leader_term);
     let host = Splitting::onto(term);
     let seat = zerocode_core::agent_teams::LEADER_PANE;
@@ -9217,7 +9227,7 @@ fn a_worker_carrying_work(team: &str, leader_term: u32, term: u32) -> (String, S
         team,
         seat,
         TEST_CAPABILITY,
-        &words(&format!("worker-start --agent claude --task {task}")),
+        &words(&format!("worker-start --agent {agent} --task {task}")),
         clock(),
     );
     assert_eq!(started.exit_code, 0, "{}", started.stderr);
@@ -12436,12 +12446,20 @@ fn a_pane_the_window_never_heard_is_told_apart_from_one_at_work() {
 /// · a pointer nobody collects is taken back, and the composer road speaks
 ///   exactly as it always did — a native road that quietly does not work
 ///   on some machine must never become mail nobody is told about.
+///
+/// The shelf's clock stands still here (t-8938). Its grace is counted from
+/// the park, and this test looks at the shelf five beats and two log reads
+/// later: inside a loaded parallel suite that took longer than the three
+/// seconds, the look itself called the pointer abandoned and threw it away,
+/// and the hook had nothing to collect. What is asserted is what the shelf
+/// HOLDS; the grace keeps its own test, aged by hand.
 #[test]
 fn a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_composer() {
     const LEADER: u32 = 11_070;
     const WORKER: u32 = 11_071;
     let _window = the_window();
     let _turn = one_beat_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
     let team = format!("team-parked-{LEADER}");
     let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
 
@@ -13274,6 +13292,687 @@ fn confirmed_native_pointer_suppresses_pty_and_unknown_falls_back_without_retry(
     pane_turn_began(LEADER, clock());
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
+}
+
+/// How a pointer reaches a pane in the scenarios below: the pane's native
+/// queue route, or its composer when it holds none.
+#[derive(Clone, Copy, Debug)]
+enum Road {
+    Native,
+    Composer,
+}
+
+/// A native route that keeps what it was handed and says each time it was.
+struct Knocked {
+    carried: Mutex<Vec<String>>,
+    said: Mutex<std::sync::mpsc::Sender<()>>,
+}
+
+impl Knocked {
+    fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>) {
+        let (said, heard) = std::sync::mpsc::channel();
+        let knocked = Arc::new(Self {
+            carried: Mutex::new(Vec::new()),
+            said: Mutex::new(said),
+        });
+        (knocked, heard)
+    }
+
+    fn carried(&self) -> Vec<String> {
+        self.carried
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
+    }
+}
+
+impl zerocode_hookd::session_notify::SessionNotifier for Knocked {
+    fn notify(
+        &self,
+        notice: &zerocode_hookd::session_notify::PointerNotice,
+    ) -> zerocode_hookd::session_notify::NotificationOutcome {
+        self.carried
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push(notice.text().to_string());
+        let _ = self
+            .said
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .send(());
+        zerocode_hookd::session_notify::NotificationOutcome::Confirmed
+    }
+}
+
+/// Panes holding the agent a scenario names, and every keystroke typed at
+/// them — the composer road lands here, one line and its Enter.
+struct Holding {
+    agent: zerocode_core::AgentKind,
+    typed: Mutex<Vec<(u32, String)>>,
+}
+
+impl Holding {
+    fn new(agent: zerocode_core::AgentKind) -> Self {
+        Self {
+            agent,
+            typed: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn typed_at(&self, term: u32) -> Vec<String> {
+        self.typed
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .iter()
+            .filter(|(at, _)| *at == term)
+            .map(|(_, text)| text.clone())
+            .collect()
+    }
+}
+
+impl Host for Holding {
+    fn split(
+        &self,
+        _team: &str,
+        _leader_term: u32,
+        _from_term: u32,
+        _pane: &str,
+        _direction: zerocode_core::agent_teams::Direction,
+        _command: &str,
+        _token: &str,
+    ) -> Option<u32> {
+        None
+    }
+    fn send(&self, term: u32, text: &str) -> bool {
+        self.typed
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push((term, text.to_string()));
+        true
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        None
+    }
+    fn focus(&self, _term: u32) -> bool {
+        false
+    }
+    fn close(&self, _term: u32) {}
+    fn actor_for(&self, term: u32) -> Option<String> {
+        Some(test_actor(term))
+    }
+    fn agent_of(&self, _term: u32) -> Option<String> {
+        Some(self.agent.slug().to_string())
+    }
+}
+
+/// How long a native route's one knock may take to be heard. A hang
+/// guard, not a bound any passing run comes near: the knock is an in-process
+/// call on the hub's own worker thread.
+const A_KNOCK_IS_HEARD: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One verb from a pane, JSON back — panicking with the refusal.
+fn said_at(host: &dyn Host, team: &str, pane: &str, held: &str, line: &str) -> serde_json::Value {
+    let answer = run(host, Vec::new(), team, pane, held, &words(line), clock());
+    assert_eq!(answer.exit_code, 0, "`{line}`: {}", answer.stderr);
+    serde_json::from_str(&answer.stdout)
+        .unwrap_or_else(|_| panic!("`{line}` did not answer JSON: {}", answer.stdout))
+}
+
+/// A pane reads everything waiting for it and acknowledges it, as `check`
+/// then `check --ack` — the delivery the pointer only ever advises.
+fn reads_its_mail(host: &dyn Host, team: &str, pane: &str, held: &str) -> usize {
+    let batch = said_at(host, team, pane, held, "check");
+    let count = batch["count"].as_u64().expect("a count") as usize;
+    if let Some(delivery) = batch["deliveryId"].as_str() {
+        said_at(host, team, pane, held, &format!("check --ack {delivery}"));
+    }
+    count
+}
+
+/// The beats that follow a pane coming to rest with `pending` messages it
+/// has not read, and what reached it: exactly one pointer by `road`, none
+/// through the other, and none again after it reads (t-8938).
+fn one_pointer_reaches_the_resting_pane(
+    road: Road,
+    host: &Holding,
+    term: u32,
+    pending: usize,
+    reads: impl FnOnce() -> usize,
+) {
+    let (knocked, heard) = Knocked::new();
+    let lease = matches!(road, Road::Native)
+        .then(|| crate::orchestration_notify::register_route(term, knocked.clone()));
+    super::tick(host, &[], clock());
+    if matches!(road, Road::Native) {
+        heard.recv_timeout(A_KNOCK_IS_HEARD).unwrap_or_else(|_| {
+            panic!(
+                "no road carried a pointer to the resting pane (typed: {:?})",
+                host.typed_at(term)
+            )
+        });
+    }
+    for _ in 0..3 {
+        super::tick(host, &[], clock());
+    }
+    let advice = zerocode_core::orchestration::pointer_text(pending);
+    let (native, composer) = match road {
+        Road::Native => (vec![advice], Vec::new()),
+        Road::Composer => (Vec::new(), vec![advice, "\r".to_string()]),
+    };
+    assert_eq!(
+        (knocked.carried(), host.typed_at(term)),
+        (native.clone(), composer.clone()),
+        "the resting pane was not pointed at its mail exactly once by the {road:?} road"
+    );
+    assert_eq!(
+        reads(),
+        pending,
+        "the pointer named mail the pane was not handed"
+    );
+    for _ in 0..3 {
+        super::tick(host, &[], clock());
+    }
+    assert_eq!(
+        (knocked.carried(), host.typed_at(term)),
+        (native, composer),
+        "read mail was pointed at again"
+    );
+    drop(lease);
+}
+
+/// How many messages wait unhanded at an address — what its `check` hands
+/// over next, and so what a pointer names.
+fn waiting_for(run_id: &str, address: &str) -> usize {
+    the_rows()
+        .inboxes
+        .iter()
+        .find(|row| row.run == run_id && row.address == address)
+        .map_or(0, |row| row.pending.len())
+}
+
+/// The questions a holder asked that open a thread of their own.
+fn questions_from(run_id: &str, address: &str) -> usize {
+    the_rows()
+        .messages
+        .iter()
+        .filter(|row| {
+            row.run == run_id
+                && row.from == address
+                && row.kind == zerocode_core::orchestration::MessageKind::Question
+                && row.thread.is_none()
+        })
+        .count()
+}
+
+/// How long the reviewer's two asks below may wait. Not a bound the test
+/// asserts — the answer ends both waits on the new road — it is how long the
+/// old road's second copy of the question waited for an answer nobody gave,
+/// and so how long a red run of this test takes.
+const ASKED_TWICE_PATIENCE_MS: u32 = 5_000;
+
+/// B's order on 2026-09-25, through the window (t-8938). A Codex reviewer
+/// asked the coordinator a question, and asked again under the same retry
+/// name while the first wait was still out; the coordinator answered the
+/// first copy; the reviewer read the answer and ended its turn, and three
+/// messages came for it. The second copy was never answered, the ledger
+/// read "asked and unanswered" as "waiting on purpose", and no road carried
+/// a pointer to the resting pane for two hours. Now the retry joins the
+/// question it repeats and a question is no door: the three messages earn
+/// one pointer, and none once they are read.
+fn a_resting_pane_that_asked_twice_is_pointed_at_its_mail_once(road: Road, leader_term: u32) {
+    let worker_term = leader_term + 1;
+    let _window = the_window();
+    let _beat = one_beat_at_a_time();
+    let _waits = one_wait_at_a_time();
+    let team = format!("team-asked-twice-{leader_term}");
+    let (run_id, worker, pane) = an_agent_carrying_work("codex", &team, leader_term, worker_term);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let host = Holding::new(zerocode_core::AgentKind::Codex);
+
+    super::pane_turn_began(worker_term, clock());
+    let asked = format!(
+        "ask --body which-queue-next? --timeout-ms {ASKED_TWICE_PATIENCE_MS} \
+         --retry-request asked-twice-{worker_term}"
+    );
+    let asking = || {
+        let (team, pane, held, line) = (team.clone(), pane.clone(), held.clone(), asked.clone());
+        std::thread::spawn(move || {
+            run(
+                &Nowhere,
+                Vec::new(),
+                &team,
+                &pane,
+                &held,
+                &words(&line),
+                clock(),
+            )
+        })
+    };
+    let before = WAITS_BEGUN.load(std::sync::atomic::Ordering::SeqCst);
+    let first = asking();
+    until_a_wait_has_begun(before);
+    let before = WAITS_BEGUN.load(std::sync::atomic::Ordering::SeqCst);
+    let again = asking();
+    until_a_wait_has_begun(before);
+
+    let questions = said_at(
+        &host,
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        "check --types question",
+    );
+    let asked_first = questions["messages"][0]["messageId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no question reached the coordinator: {questions}"))
+        .to_string();
+    if let Some(delivery) = questions["deliveryId"].as_str() {
+        said_at(
+            &host,
+            &team,
+            leader,
+            TEST_CAPABILITY,
+            &format!("check --ack {delivery}"),
+        );
+    }
+    said_at(
+        &host,
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &format!("reply --to-message {asked_first} --body hold-the-seat"),
+    );
+    let first = first.join().expect("the first ask");
+    let again = again.join().expect("the retry");
+    assert_eq!(first.exit_code, 0, "{}", first.stderr);
+    assert_eq!(again.exit_code, 0, "{}", again.stderr);
+
+    reads_its_mail(&host, &team, &pane, &held);
+    for body in ["t-7936-first", "t-6877-next", "main-landed"] {
+        said_at(
+            &host,
+            &team,
+            leader,
+            TEST_CAPABILITY,
+            &format!("send --to worker:{worker} --type status --body {body}"),
+        );
+    }
+    super::pane_turn_ended(worker_term, clock(), false, clock());
+    one_pointer_reaches_the_resting_pane(road, &host, worker_term, 3, || {
+        reads_its_mail(&host, &team, &pane, &held)
+    });
+
+    let (first, again): (serde_json::Value, serde_json::Value) = (
+        serde_json::from_str(&first.stdout).expect("the first ask answers JSON"),
+        serde_json::from_str(&again.stdout).expect("the retry answers JSON"),
+    );
+    assert_eq!(
+        again["questionId"], first["questionId"],
+        "the retry posted a second question instead of joining the first"
+    );
+    assert_eq!(
+        questions_from(&run_id, &format!("worker:{worker}")),
+        1,
+        "one named ask left two questions in the ledger"
+    );
+
+    super::pane_turn_began(worker_term, clock());
+    crate::agent_teams::forget_term(leader_term);
+    crate::agent_teams::forget_term(worker_term);
+}
+
+#[test]
+fn a_resting_codex_pane_that_asked_twice_is_pointed_at_its_mail_once_by_its_queue() {
+    a_resting_pane_that_asked_twice_is_pointed_at_its_mail_once(Road::Native, 12_390);
+}
+
+#[test]
+fn a_resting_codex_pane_that_asked_twice_is_pointed_at_its_mail_once_in_its_composer() {
+    a_resting_pane_that_asked_twice_is_pointed_at_its_mail_once(Road::Composer, 12_392);
+}
+
+/// A question nobody answered is no door (t-8938). The ledger cannot see a
+/// wait: an `ask` goes home at its deadline and leaves its question
+/// standing, and the rule that read that row as "waiting on purpose" kept
+/// every later message from the pointer. Here the ask times out, the turn
+/// ends, and the mail after it is pointed at once — by either road.
+fn a_question_left_standing_silences_no_mail(road: Road, leader_term: u32) {
+    let worker_term = leader_term + 1;
+    let _window = the_window();
+    let _beat = one_beat_at_a_time();
+    let _waits = one_wait_at_a_time();
+    let team = format!("team-left-standing-{leader_term}");
+    let (run_id, worker, pane) = an_agent_carrying_work("codex", &team, leader_term, worker_term);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let host = Holding::new(zerocode_core::AgentKind::Codex);
+
+    super::pane_turn_began(worker_term, clock());
+    let gave_up = said_at(
+        &host,
+        &team,
+        &pane,
+        &held,
+        &format!(
+            "ask --body which-way? --timeout-ms {}",
+            zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+        ),
+    );
+    assert_eq!(gave_up["answered"], false, "{gave_up}");
+    assert_eq!(questions_from(&run_id, &format!("worker:{worker}")), 1);
+    super::pane_turn_ended(worker_term, clock(), false, clock());
+    said_at(
+        &host,
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &format!("send --to worker:{worker} --type status --body next-in-the-queue"),
+    );
+    one_pointer_reaches_the_resting_pane(road, &host, worker_term, 1, || {
+        reads_its_mail(&host, &team, &pane, &held)
+    });
+
+    super::pane_turn_began(worker_term, clock());
+    crate::agent_teams::forget_term(leader_term);
+    crate::agent_teams::forget_term(worker_term);
+}
+
+#[test]
+fn a_question_left_standing_silences_no_mail_to_the_queue() {
+    a_question_left_standing_silences_no_mail(Road::Native, 12_394);
+}
+
+#[test]
+fn a_question_left_standing_silences_no_mail_to_the_composer() {
+    a_question_left_standing_silences_no_mail(Road::Composer, 12_396);
+}
+
+/// The coordinator's own seat (t-8938): a question it put to another pane
+/// that was never answered — the shape of a coordinator asking the next
+/// run's pane at 01:36 and hearing nothing — silenced its own address for
+/// the rest of the day. Its mail is pointed at like anybody's: the report,
+/// and the ledger's word beside it about the receiver of its question.
+#[test]
+fn a_coordinators_unanswered_question_leaves_its_own_mail_pointed_at() {
+    const LEADER: u32 = 12_398;
+    const WORKER: u32 = 12_399;
+    let _window = the_window();
+    let _beat = one_beat_at_a_time();
+    let _waits = one_wait_at_a_time();
+    let team = format!("team-seat-asked-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let host = Holding::new(zerocode_core::AgentKind::Claude);
+
+    let gave_up = said_at(
+        &host,
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &format!(
+            "ask --to worker:{worker} --body is-that-yours? --timeout-ms {}",
+            zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+        ),
+    );
+    assert_eq!(gave_up["answered"], false, "{gave_up}");
+    assert_eq!(questions_from(&run_id, &format!("run:{run_id}")), 1);
+    super::pane_turn_ended(LEADER, clock(), false, clock());
+    said_at(
+        &host,
+        &team,
+        &pane,
+        &held,
+        "send --type worker_done --body {\"ok\":true}",
+    );
+    let waiting = waiting_for(&run_id, &format!("run:{run_id}"));
+    assert!(
+        waiting >= 1,
+        "the worker's report never reached its coordinator"
+    );
+    one_pointer_reaches_the_resting_pane(Road::Composer, &host, LEADER, waiting, || {
+        reads_its_mail(&host, &team, leader, TEST_CAPABILITY)
+    });
+
+    super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
+/// A pane held mid-turn inside its own `ask` is not parked at (t-8938): the
+/// window runs that wait, and advice about other mail handed over at the
+/// ask's end would ride in on the answer. Held and said once while the wait
+/// is out — judged on the pane, not the question row — and parked for the
+/// pane's own hook the beat the wait is over, with the hold's end said once.
+#[test]
+fn a_pane_waiting_in_its_own_question_is_held_and_then_parked() {
+    const LEADER: u32 = 12_380;
+    const WORKER: u32 = 12_381;
+    let _window = the_window();
+    let _beat = one_beat_at_a_time();
+    let _waits = one_wait_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
+    let team = format!("team-held-asking-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let host = Holding::new(zerocode_core::AgentKind::Claude);
+    let address = format!("worker:{worker}");
+    let blackbox = super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    let said = |needle: String| {
+        std::fs::read_to_string(&blackbox)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(&needle))
+            .count()
+    };
+    let holding = || {
+        said(format!(
+            "{address} in {run_id} is held at terminal {WORKER}"
+        ))
+    };
+    let let_go = || {
+        said(format!(
+            "terminal {WORKER} is no longer held in its own question"
+        ))
+    };
+    let parked = || {
+        said(format!(
+            "{address} in {run_id} is parked for terminal {WORKER}"
+        ))
+    };
+    let shelved = || {
+        crate::orchestration_pointer_mailbox::collect_stale(
+            WORKER,
+            &run_id,
+            &address,
+            &the_rows()
+                .messages
+                .iter()
+                .rev()
+                .find(|row| row.run == run_id && row.to == address)
+                .map(|row| row.id.clone())
+                .unwrap_or_default(),
+            crate::orchestration_pointer_mailbox::HOOK_COLLECTION_GRACE,
+        )
+    };
+
+    super::pane_turn_began(WORKER, clock());
+    let before = WAITS_BEGUN.load(std::sync::atomic::Ordering::SeqCst);
+    let asking = {
+        let (team, pane, held) = (team.clone(), pane.clone(), held.clone());
+        std::thread::spawn(move || {
+            run(
+                &Nowhere,
+                Vec::new(),
+                &team,
+                &pane,
+                &held,
+                &words(&format!(
+                    "ask --body which-way? --timeout-ms {ASKED_TWICE_PATIENCE_MS}"
+                )),
+                clock(),
+            )
+        })
+    };
+    until_a_wait_has_begun(before);
+    said_at(
+        &host,
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &format!("send --to {address} --type status --body not-the-answer"),
+    );
+    for _ in 0..3 {
+        super::tick(&host, &[], clock());
+    }
+    assert_eq!(
+        shelved(),
+        crate::orchestration_pointer_mailbox::Parked::Empty,
+        "a pane waiting in its own question was parked at"
+    );
+    assert_eq!(
+        holding(),
+        1,
+        "the hold was said once per beat, or not at all"
+    );
+    assert!(
+        host.typed_at(WORKER).is_empty(),
+        "a turn in progress was typed at"
+    );
+
+    let questions = said_at(
+        &host,
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        "check --types question",
+    );
+    let asked = questions["messages"][0]["messageId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no question reached the coordinator: {questions}"))
+        .to_string();
+    if let Some(delivery) = questions["deliveryId"].as_str() {
+        said_at(
+            &host,
+            &team,
+            leader,
+            TEST_CAPABILITY,
+            &format!("check --ack {delivery}"),
+        );
+    }
+    said_at(
+        &host,
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &format!("reply --to-message {asked} --body left"),
+    );
+    let answered = asking.join().expect("the asker");
+    assert_eq!(answered.exit_code, 0, "{}", answered.stderr);
+
+    for _ in 0..3 {
+        super::tick(&host, &[], clock());
+    }
+    assert_eq!(
+        shelved(),
+        crate::orchestration_pointer_mailbox::Parked::Fresh,
+        "the pane's own hook was left nothing once its wait was over"
+    );
+    assert_eq!((holding(), let_go(), parked()), (1, 1, 1));
+    assert!(
+        host.typed_at(WORKER).is_empty(),
+        "a turn in progress was typed at"
+    );
+
+    super::pane_turn_began(WORKER, clock());
+    crate::orchestration_pointer_mailbox::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
+/// How many rounds the measurement below takes.
+const MEASURED_ROUNDS: u32 = 20;
+
+/// The window's side of B's road, measured (t-8938) — run by hand:
+/// `cargo test -p zerocode-shell --bins -- --ignored --exact
+/// orchestration::tests::the_pointer_to_a_resting_codex_pane_is_measured
+/// --nocapture`. Each round is B's shape on the new road: a Codex worker
+/// with a question nobody answered, its turn over, one message landing, one
+/// beat. Timed end to end: the message landed → the pane's queue route was
+/// handed the pointer → the pane's `check` came back with the message.
+/// What lies outside it is said beside it: the beat's own phase
+/// (`AUTO_BEAT_EVERY`, up to a second in the window) and the agent's turn,
+/// which only the field can time.
+#[test]
+#[ignore = "measurement, run by hand"]
+fn the_pointer_to_a_resting_codex_pane_is_measured() {
+    let _window = the_window();
+    let _beat = one_beat_at_a_time();
+    let _waits = one_wait_at_a_time();
+    let host = Holding::new(zerocode_core::AgentKind::Codex);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let mut handed = Vec::new();
+    let mut read = Vec::new();
+    for round in 0..MEASURED_ROUNDS {
+        let leader_term = 12_400 + 2 * round;
+        let worker_term = leader_term + 1;
+        let team = format!("team-measured-{leader_term}");
+        let (_run_id, worker, pane) =
+            an_agent_carrying_work("codex", &team, leader_term, worker_term);
+        let held = crate::agent_teams::current_pane_capability(&team, &pane)
+            .expect("the split minted the worker a capability");
+        said_at(
+            &host,
+            &team,
+            &pane,
+            &held,
+            "send --type question --body which-way?",
+        );
+        super::pane_turn_ended(worker_term, clock(), false, clock());
+        let (knocked, heard) = Knocked::new();
+        let lease = crate::orchestration_notify::register_route(worker_term, knocked);
+        said_at(
+            &host,
+            &team,
+            leader,
+            TEST_CAPABILITY,
+            &format!("send --to worker:{worker} --type status --body next-in-the-queue"),
+        );
+        let landed = std::time::Instant::now();
+        super::tick(&host, &[], clock());
+        heard
+            .recv_timeout(A_KNOCK_IS_HEARD)
+            .expect("the pointer reached the pane's route");
+        let knocked_at = std::time::Instant::now();
+        assert_eq!(reads_its_mail(&host, &team, &pane, &held), 1);
+        let read_at = std::time::Instant::now();
+        handed.push(knocked_at - landed);
+        read.push(read_at - knocked_at);
+        drop(lease);
+        super::pane_turn_began(worker_term, clock());
+        crate::agent_teams::forget_term(leader_term);
+        crate::agent_teams::forget_term(worker_term);
+    }
+    let spread = |mut held: Vec<std::time::Duration>| {
+        held.sort();
+        let at = |share: usize| held[(held.len() - 1) * share / 100];
+        format!("p50 {:?} p95 {:?} max {:?}", at(50), at(95), at(100))
+    };
+    eprintln!(
+        "t-8938 over {MEASURED_ROUNDS} rounds — message landed → pointer on the queue route: {}; \
+         pointer → the pane's check read the message: {}",
+        spread(handed),
+        spread(read)
+    );
 }
 
 /// A host that, like the window's own, answers where the pane it

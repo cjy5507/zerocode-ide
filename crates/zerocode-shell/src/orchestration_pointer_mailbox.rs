@@ -160,7 +160,7 @@ impl PointerMailbox for Shelf {
             self.continued
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(term, Instant::now());
+                .insert(term, crate::standing_clock::now());
         }
         /* OFFERED, which is the strongest word this side of the wire is
          * entitled to.
@@ -183,7 +183,7 @@ impl PointerMailbox for Shelf {
         self.offered
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(term, (standing, Instant::now()));
+            .insert(term, (standing, crate::standing_clock::now()));
         Some(notice)
     }
 
@@ -242,6 +242,14 @@ fn launch_matches(parked_for: Option<&str>, knocking: &str) -> bool {
     }
 }
 
+/// How long ago a shelf stamp was. Every stamp here and every age is read on
+/// the one clock a test can stand still ([`crate::standing_clock`]): the
+/// grace and the offer's minute are the window's bounds, and a test of what
+/// the shelf holds is not a test of how fast a loaded suite reached it.
+fn age(at: Instant) -> Duration {
+    crate::standing_clock::now().saturating_duration_since(at)
+}
+
 pub(crate) fn park(
     term: u32,
     run: &str,
@@ -272,7 +280,7 @@ pub(crate) fn park(
              * road that types once that minute is up. */
             if let Some((standing, at)) = offered.get(&term)
                 && standing.notice.id() == notice.id()
-                && at.elapsed() < RENOTIFY_AFTER
+                && age(*at) < RENOTIFY_AFTER
             {
                 return false;
             }
@@ -289,7 +297,7 @@ pub(crate) fn park(
                     address: address.to_string(),
                     newest: newest.to_string(),
                     launch,
-                    since: Instant::now(),
+                    since: crate::standing_clock::now(),
                 },
             );
             true
@@ -310,7 +318,7 @@ pub(crate) fn turn_was_continued(term: u32, within: Duration) -> bool {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     match held.get(&term) {
-        Some(at) if at.elapsed() < within => {
+        Some(at) if age(*at) < within => {
             held.remove(&term);
             true
         }
@@ -358,7 +366,7 @@ pub(crate) fn collect_stale(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match held.get(&term) {
             Some(standing) if !names_this_mail(standing) => {}
-            Some(standing) if standing.since.elapsed() < grace => return Parked::Fresh,
+            Some(standing) if age(standing.since) < grace => return Parked::Fresh,
             Some(_) => {
                 held.remove(&term);
                 return Parked::Abandoned;
@@ -378,7 +386,7 @@ pub(crate) fn collect_stale(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     match offered.get(&term) {
         Some((standing, _)) if !names_this_mail(standing) => Parked::Empty,
-        Some((_, at)) if at.elapsed() < RENOTIFY_AFTER => Parked::Fresh,
+        Some((_, at)) if age(*at) < RENOTIFY_AFTER => Parked::Fresh,
         Some(_) => {
             offered.remove(&term);
             Parked::Abandoned

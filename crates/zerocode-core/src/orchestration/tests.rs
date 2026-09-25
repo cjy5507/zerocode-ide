@@ -1897,9 +1897,9 @@ fn worker_worktree_titles_keep_the_id_across_free_form_task_titles() {
 }
 
 /// The ledger's half of the mail pointer: when advice is owed, and every
-/// reason it is not.
+/// reason it is not — and a question of the holder's own is not one of them.
 #[test]
-fn a_pointer_is_owed_exactly_when_mail_waits_unleased_and_unasked() {
+fn a_pointer_is_owed_exactly_when_mail_waits_unleased() {
     let mut bench = Bench::new();
     bench.json("run-create --name pointed");
     let run_id = bench.json("run-current")["runId"]
@@ -2006,8 +2006,11 @@ fn a_pointer_is_owed_exactly_when_mail_waits_unleased_and_unasked() {
         None
     );
 
-    // A question of the coordinator's own, unanswered: it is waiting on
-    // purpose, and typing at it would answer with our advice.
+    // A question of the coordinator's own, unanswered, is no door (t-8938):
+    // the ledger cannot see whether anybody still waits on it — an `ask` at
+    // its deadline lets its sleeper go and leaves the question standing —
+    // and a door that shut on it shut over every message after it. An
+    // asker held inside its wait is the window's to hold, off the pane.
     bench.json_at(&worker_pane, "send --type status --body still-here");
     assert_eq!(
         bench
@@ -2024,9 +2027,10 @@ fn a_pointer_is_owed_exactly_when_mail_waits_unleased_and_unasked() {
             .run(&run_id)
             .expect("the run")
             .pointer_wanted(&coordinator, None),
-        None
+        Some(1),
+        "an unanswered question of the holder's own silenced its mail"
     );
-    // The worker answers; the advice is owed again — now for two.
+    // The worker answers; the advice is owed for both.
     let thread = asked["questionId"]
         .as_str()
         .expect("a message id")
