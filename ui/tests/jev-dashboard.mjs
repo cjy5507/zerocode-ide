@@ -1356,7 +1356,7 @@ export async function testJevDashboardPictures(browser, origin, ok) {
       JSON.stringify(rows.summon.latency) === JSON.stringify({ p50: [null, 210, 220, 230, null, 250, 260], p95: [null, 420, 440, 460, null, 500, 520] })
         && JSON.stringify(rows.routing.latency?.p50) === JSON.stringify([200, 210, 220, 230, 240, 250, 260])
         && rows.browser.latency === null && rows.notify.latency === null
-        && rows.summon.latencyLabel.includes("230 ms") && rows.summon.latencyLabel.includes("460"),
+        && rows.summon.latencyLabel.includes("230 · 460 ms"),
       JSON.stringify({ summon: rows.summon.latency, routing: rows.routing.latency, label: rows.summon.latencyLabel }));
 
     // Every picture is named for a screen reader, with its numbers; a chart

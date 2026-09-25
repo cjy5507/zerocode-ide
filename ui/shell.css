@@ -39984,7 +39984,8 @@ button.jev-token:hover {
 /* The strip of days: a faint cell for every day, filled by what the day did,
    and the dot of where the feature stands now in its state's tone. */
 .jev-strip-track {
-  fill: var(--jev-chart-grid);
+  fill: none;
+  stroke: var(--jev-chart-grid);
 }
 
 .jev-strip-day[data-state="recorded"] { fill: var(--jev-chart-quiet); }
@@ -40296,11 +40297,22 @@ button.jev-token:hover {
 
    Under 58em the head stacks over its side and the strip's figures stand in
    even columns. */
+/* Where a row's latency picture stands the table says so to the script
+   that draws it (`jevLatencyShown`), which then draws it; where it does not,
+   it is neither drawn nor shown. */
+.jev-table {
+  --jev-latency-shown: 0;
+}
+
 .jev-table .jev-latency-picture {
   display: none;
 }
 
 @container jev (width >= 100em) {
+  .jev-table {
+    --jev-latency-shown: 1;
+  }
+
   .jev-table .jev-latency-picture {
     display: block;
   }
@@ -40317,7 +40329,7 @@ button.jev-token:hover {
 
   .jev-table tbody tr[data-jev-dash-row] {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(calc(var(--jev-stat-min) * 1.25), 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(var(--jev-stat-min), 1fr));
     gap: var(--space-2) var(--space-3);
     padding: var(--space-3);
     border-bottom: var(--jev-line) solid var(--edge-rule);
@@ -40331,7 +40343,6 @@ button.jev-token:hover {
   }
 
   .jev-table tbody tr[data-jev-dash-row] td::before {
-    content: attr(data-label);
     display: block;
     color: var(--ink-mist);
     font-size: var(--jev-stat-label-size);
@@ -40339,18 +40350,28 @@ button.jev-token:hover {
     white-space: normal;
   }
 
+  /* Each column's name, as the table says it (`jevNameColumns`). */
+  .jev-table td[data-jev-cell="rows"]::before { content: var(--jev-label-rows, none); }
+  .jev-table td[data-jev-cell="answered"]::before { content: var(--jev-label-answered, none); }
+  .jev-table td[data-jev-cell="latency"]::before { content: var(--jev-label-latency, none); }
+  .jev-table td[data-jev-cell="acted"]::before { content: var(--jev-label-acted, none); }
+  .jev-table td[data-jev-cell="cost"]::before { content: var(--jev-label-cost, none); }
+  .jev-table td[data-jev-cell="status"]::before { content: var(--jev-label-status, none); }
+  .jev-table td[data-jev-cell="trend"]::before { content: var(--jev-label-trend, none); }
+
   .jev-table td[data-jev-cell="seat"],
   .jev-table td[data-jev-cell="status"],
   .jev-table td[data-jev-cell="trend"] {
     grid-column: 1 / -1;
   }
 
-  .jev-table tbody tr[data-jev-dash-row] td[data-jev-cell="seat"]::before {
-    content: none;
-  }
 
   .jev-table [data-jev-cell="status"] {
     min-width: 0;
+  }
+
+  .jev-table {
+    --jev-latency-shown: 1;
   }
 
   .jev-table .jev-latency-picture {

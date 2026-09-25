@@ -100,6 +100,9 @@ const jevViewsWired = new WeakSet();
  * rebuilt every row on every beat. Keyed by the node drawn, so a node that
  * leaves the page takes its entry with it. */
 const jevDrawnFrom = new WeakMap();
+/* Whether each view's width shows its rows' latency pictures, as its size
+ * watcher last read it (`jevLatencyShown`); none until it has read. */
+const jevLatencyAt = new WeakMap();
 /* The words one feature's numbers say, once per answer: zo's answer is new
  * objects each time it is asked, and the same objects between the paints of
  * one answer. */
@@ -291,17 +294,26 @@ function jevSwitchMirror() {
   return holder;
 }
 
+const jevFeatureWords = new Map();
+
 /* A feature's words as the settings markup keeps them (`#jev-features`): its
  * name, one line of what it does and the paragraph of what it sends, each by
  * the catalog key it is written under — the markup is the one place the
  * Korean is written. `null` for a part the markup does not hold. */
 function jevFeature(id) {
-  const holder = el("jev-features")?.content.querySelector(`[data-jev-feature="${id}"]`) ?? null;
-  const part = (name) => {
-    const node = holder?.querySelector(`[data-jev-${name}]`);
-    return node ? { key: node.dataset.i18n, source: node.textContent.replace(/\s+/g, " ").trim() } : null;
-  };
-  return { name: part("name"), summary: part("summary"), hint: part("hint") };
+  let words = jevFeatureWords.get(id);
+  if (words === undefined) {
+    const holder = el("jev-features")?.content.querySelector(`[data-jev-feature="${id}"]`) ?? null;
+    const part = (name) => {
+      const node = holder?.querySelector(`[data-jev-${name}]`);
+      return node ? { key: node.dataset.i18n, source: node.textContent.replace(/\s+/g, " ").trim() } : null;
+    };
+    words = { name: part("name"), summary: part("summary"), hint: part("hint") };
+    // The markup's words are the page's own and never change, so each
+    // feature's are read once (t-9633 §3: every row read them twice a paint).
+    if (holder) jevFeatureWords.set(id, words);
+  }
+  return words;
 }
 
 /* The line a judgment turned on, by the core's token
@@ -383,6 +395,9 @@ const JEV_COLUMNS = Object.freeze([
   { cell: "status", key: "jev.col.why", word: "상태와 다음 단계" },
   { cell: "trend", key: "jev.col.trend", word: "지난 7일 (정확도 · 단순 방식)", tipKey: "jev.col.trendTip", tip: "선은 날마다 판단이 맞은 비율(실선)과 가장 단순한 방식의 비율(점선)이고, 띠는 그 비율의 신뢰 하한까지입니다. 아래 칸은 날마다 한 일입니다: 진한 칸은 비교함, 옅은 칸은 비교가 너무 적음, 회색 칸은 요청만 있음, 주황 칸은 단순 방식이 같거나 나았던 날이고, 끝의 점은 지금 상태입니다." },
 ]);
+
+/* Where each column stands in a row. */
+const JEV_COLUMN_AT = new Map(JEV_COLUMNS.map((column, at) => [column.cell, at]));
 
 /* The lines a feature's week draws in its accuracy picture (t-6243 D4,
  * t-9633 (b)), each read off one day (`jevDaysOf`): the share of the
@@ -697,7 +712,23 @@ function wireJevView(host) {
   // window's size: one measure per resize, none per paint.
   new ResizeObserver(() => {
     host.style.setProperty("--jev-drawer-height", `${host.clientHeight}px`);
+    // A width that shows the rows' latency pictures where they were not (or
+    // hides them) is a paint: they are drawn only where they stand. Read
+    // here, after the page is laid out, and never in a paint, where reading
+    // a style would lay out a page half drawn.
+    const shown = jevLatencyShown(host);
+    if (shown === (jevLatencyAt.get(host) ?? false)) return;
+    jevLatencyAt.set(host, shown);
+    paintJevView(host);
   }).observe(host);
+}
+
+/* Whether a row's latency picture stands at the width this view has — the
+ * stylesheet's to say (`--jev-latency-shown`, t-9633) — so that one it hides
+ * is not drawn. */
+function jevLatencyShown(view) {
+  const table = view.querySelector(".jev-table");
+  return Boolean(table) && getComputedStyle(table).getPropertyValue("--jev-latency-shown").trim() === "1";
 }
 
 /* Count another scope (t-9091): kept for the next open, drawn as chosen at
@@ -788,14 +819,20 @@ listen("ledger:changed", () => {
   }, JEV_EVENT_SETTLE_MS);
 });
 
-/* The words a feature's numbers say, for `jevMoved`: everything a row draws
- * from, and not the recent list — the drawer's alone, and new with every
- * request. */
+/* The words a feature's numbers say, for `jevMoved`: its days as the
+ * pictures read them (`jevDaysOf`, kept for the paint that draws them) —
+ * the fields a picture reads and none of the rest of a day, a tenth of its
+ * size — and apart from them the rest a row draws from. Neither holds the
+ * recent list: the drawer's alone, and new with every request. */
 function jevWordsOf(held) {
-  if (!held) return "";
+  if (!held) return { days: "", rest: "", read: [] };
   let words = jevHeldWords.get(held);
   if (words === undefined) {
-    words = JSON.stringify(held, (key, value) => (key === "recent" ? undefined : value));
+    // Copies without the list rather than a replacer: a replacer is called
+    // for every key, and costs the check its fast road.
+    const { recent, days, ...rest } = held;
+    const read = jevDaysOf(held);
+    words = { days: JSON.stringify(read.map(Object.values)), rest: JSON.stringify(rest), read };
     jevHeldWords.set(held, words);
   }
   return words;
@@ -817,7 +854,7 @@ function jevSay(node, text) {
 }
 
 function jevLanguage() {
-  return document.documentElement.lang ?? "";
+  return jevRoot.lang ?? "";
 }
 
 function paintJevViews() {
@@ -871,30 +908,61 @@ const JEV_COST_DIGITS = 3;
 /* The number and day formats of the language in force, made once per
  * language: a formatter is not free to build, and a paint formats every
  * cell. */
+const jevRoot = document.documentElement;
 let jevNumbersLang = null;
 let jevCountFormat = null;
 let jevCostFormat = null;
 let jevDayFormat = null;
+/* And what they said: a picture names each of its days, and a table of
+ * features names the same seven over and over — each is formatted once per
+ * language (t-9633 §3: formatting a day was a fifth of a full repaint). */
+let jevDayNames = new Map();
+let jevStateWords = new Map();
+let jevColumnWords = null;
+let jevCounted = new Map();
+/* How many grouped counts are kept before they are all let go: a month of
+ * twenty-seven features' days and their numbers several times over. */
+const JEV_COUNTS_KEPT = 4096;
 
 function jevFormats() {
-  const lang = document.documentElement.lang || undefined;
+  const lang = jevRoot.lang || undefined;
   if (jevCountFormat === null || lang !== jevNumbersLang) {
     jevNumbersLang = lang;
     jevCountFormat = new Intl.NumberFormat(lang);
     jevCostFormat = new Intl.NumberFormat(lang, { maximumSignificantDigits: JEV_COST_DIGITS });
     jevDayFormat = new Intl.DateTimeFormat(lang, { month: "short", day: "numeric" });
+    jevDayNames = new Map();
+    jevStateWords = new Map();
+    jevColumnWords = null;
+    jevCounted = new Map();
   }
   return { count: jevCountFormat, cost: jevCostFormat, day: jevDayFormat };
 }
 
 /* A day as the language in force names it: "9월 21일", "Sep 21". */
 function jevDayName(ms) {
-  return jevFormats().day.format(new Date(ms));
+  const day = jevFormats().day;
+  let name = jevDayNames.get(ms);
+  if (name === undefined) {
+    name = day.format(new Date(ms));
+    jevDayNames.set(ms, name);
+  }
+  return name;
 }
 
 /* A count as the language in force groups its digits (1,321). */
 function jevCount(value) {
-  return value === null || value === undefined ? "—" : jevFormats().count.format(value);
+  if (value === null || value === undefined) return "—";
+  const count = jevFormats().count;
+  // The same counts come back paint after paint — a day's tokens, a
+  // latency — and each is grouped once per language.
+  let said = jevCounted.get(value);
+  if (said === undefined) {
+    if (jevCounted.size >= JEV_COUNTS_KEPT) jevCounted.clear();
+    said = count.format(value);
+    jevCounted.set(value, said);
+  }
+  return said;
 }
 
 function jevMs(ms) {
@@ -947,7 +1015,9 @@ function jevMark(className, d, line = null, values = null) {
   return path;
 }
 
-const jevFixed = (value) => Number(value.toFixed(2));
+/* A coordinate to the hundredth of a unit: finer than a screen shows, and
+ * short to write into a path. */
+const jevFixed = (value) => Math.round(value * 100) / 100;
 
 /* Where a day stands across `width`: the middle of its share of the width,
  * so a point, a cell and a column of the same day line up in every picture
@@ -1120,11 +1190,19 @@ function jevTimelinePicture(days, status, label, box = JEV_CHART.trend) {
   const cell = (at) => `M${jevFixed(at * slot + box.gap / 2)} 0h${jevFixed(slot - box.gap)}v${box.strip}h${-jevFixed(slot - box.gap)}Z`;
   const states = days.map(jevDayState);
   svg.dataset.states = states.join(",");
-  svg.append(jevMark("jev-strip-track", days.map((day, at) => cell(at)).join("")));
+  // Every day's faint cell as one stroke across the days, dashed a cell and
+  // a gap at a time: a month costs what a week does.
+  const track = jevMark("jev-strip-track", `M${jevFixed(box.gap / 2)} ${jevFixed(box.strip / 2)}H${jevFixed(width)}`);
+  track.setAttribute("stroke-width", String(box.strip));
+  track.setAttribute("stroke-dasharray", `${jevFixed(slot - box.gap)} ${jevFixed(box.gap)}`);
+  svg.append(track);
+  const cells = new Map();
+  states.forEach((state, at) => {
+    if (state !== "idle") cells.set(state, (cells.get(state) ?? "") + cell(at));
+  });
   for (const { state } of JEV_DAY_STATES) {
-    const d = states.map((one, at) => (one === state && state !== "idle" ? cell(at) : "")).join("");
-    if (!d) continue;
-    const mark = jevMark("jev-strip-day", d);
+    if (!cells.has(state)) continue;
+    const mark = jevMark("jev-strip-day", cells.get(state));
     mark.dataset.state = state;
     svg.append(mark);
   }
@@ -1237,17 +1315,45 @@ function jevTrendCell(days, status) {
   return cell;
 }
 
-/* A day's state in words (`JEV_DAY_STATES`). */
+/* The table's column names (`JEV_COLUMNS`), once per language. */
+function jevColumnNames() {
+  jevFormats();
+  jevColumnWords ??= JEV_COLUMNS.map((column) => t(column.key, column.word));
+  return jevColumnWords;
+}
+
+/* Each column's name, said once on the table for every cell of it to wear
+ * where the rows stand as cards with no head over them (t-9633) — a string
+ * the stylesheet reads (`--jev-label-<cell>`), written again only when the
+ * language moved, and never cell by cell. */
+const jevNamedIn = new WeakMap();
+
+function jevNameColumns(view) {
+  const table = view.querySelector(".jev-table");
+  const names = jevColumnNames();
+  if (jevNamedIn.get(table) === names) return;
+  jevNamedIn.set(table, names);
+  JEV_COLUMNS.forEach((column, at) => table.style.setProperty(`--jev-label-${column.cell}`, JSON.stringify(names[at])));
+}
+
+/* A day's state in words (`JEV_DAY_STATES`), once per language. */
 function jevDayWords(state) {
-  const said = JEV_DAY_STATES.find((one) => one.state === state);
-  return said ? t(said.key, said.word) : state;
+  jevFormats();
+  let words = jevStateWords.get(state);
+  if (words === undefined) {
+    const said = JEV_DAY_STATES.find((one) => one.state === state);
+    words = said ? t(said.key, said.word) : state;
+    jevStateWords.set(state, words);
+  }
+  return words;
 }
 
 /* How long a feature's answers take (t-9633 (d)): the week's typical wait and
- * its slow one beside it, and the picture of its days once three answered. A
- * sum of projects carries no percentile — each project measures its own — and
- * says so rather than a dash. */
-function jevLatencyCell(held, days) {
+ * its slow one beside it, and — where the width shows it (`drawn`) — the
+ * picture of its days once three answered. A sum of projects carries no
+ * percentile — each project measures its own — and says so rather than a
+ * dash. */
+function jevLatencyCell(held, days, drawn) {
   const cell = jevNode("div", "jev-latency");
   const words = jevNode("div", "jev-latency-words");
   const week = held.week;
@@ -1262,11 +1368,12 @@ function jevLatencyCell(held, days) {
       words.append(jevFact("p95", t("jev.latency.slow", "느릴 때 {{p95}}", { p95: jevMs(week.p95Ms) }), "jev-fact-mist"));
     }
   }
-  if (days.filter((day) => day.p50 !== null).length >= JEV_CHART.trendDays) {
-    cell.append(jevLatencyPicture(days, t("jev.chart.latency", "날마다 응답 시간 — {{days}}", {
-      days: jevDaysSaid(days, (day) => (day.p50 === null ? null : day.p95 === null
-        ? `${jevMs(day.p50)} ms`
-        : t("jev.chart.latencyDay", "{{p50}} ms (느릴 때 {{p95}})", { p50: jevMs(day.p50), p95: jevMs(day.p95) }))),
+  if (drawn && days.filter((day) => day.p50 !== null).length >= JEV_CHART.trendDays) {
+    // Each day says its two numbers, typical then slow; the words for the
+    // two are said once, at the head of the name.
+    cell.append(jevLatencyPicture(days, t("jev.chart.latency", "날마다 응답 시간 (보통 · 느릴 때) — {{days}}", {
+      days: jevDaysSaid(days, (day) => (day.p50 === null ? null
+        : `${jevMs(day.p50)}${day.p95 === null ? "" : ` · ${jevMs(day.p95)}`} ms`)),
     })));
   }
   cell.append(words);
@@ -1733,11 +1840,13 @@ function paintJevView(view) {
   const unused = order.filter((id) => heldOf.get(id)?.week.rows === 0);
   const inUse = jevActivityOrder(order.filter((id) => !unused.includes(id)), heldOf);
   const body = view.querySelector("[data-jev-rows]");
+  jevNameColumns(view);
   const head = jevHeadModel(numbers);
+  const latency = jevLatencyAt.get(view) ?? false;
   const drawn = [];
   for (const id of [...inUse, ...(jevUnusedOpen ? unused : [])]) {
     const row = jevDashRow(body, id);
-    paintJevRow(row, id, heldOf.get(id) ?? null, switches.find((one) => one.id === id) ?? null, head);
+    paintJevRow(row, id, heldOf.get(id) ?? null, switches.find((one) => one.id === id) ?? null, head, latency);
     drawn.push(row);
   }
   const fold = unused.length > 0 ? jevFoldRow(body, unused.length) : null;
@@ -1818,7 +1927,7 @@ function paintJevDrawer(view, id, held) {
   const part = (name) => drawer.querySelector(`[data-jev-drawer-part="${name}"]`);
 
   // Its week, large, with the table of its days (t-9633).
-  const days = jevDaysOf(held);
+  const days = jevWordsOf(held).read;
   const asked = days.some((day) => day.rows > 0 || day.compared > 0);
   part("days").hidden = !asked;
   if (asked) paintJevDays(part("days"), days);
@@ -1917,13 +2026,13 @@ function jevDashRow(body, id) {
 /* One feature's row, drawn from what is in hand — and only when that moved
  * since it was last drawn (`jevMoved`): its numbers, its switch, the version
  * over the table and the language, each of which a cell reads. */
-function paintJevRow(row, id, held, standing, head) {
+function paintJevRow(row, id, held, standing, head, latency) {
   const choice = standing ? jevSeatChoice(typesafeState, id) : null;
-  if (!jevMoved(row, jevWordsOf(held), JSON.stringify(standing), JSON.stringify(choice), head ?? "", jevLanguage())) return;
-  const cell = (name) => row.querySelector(`[data-jev-cell="${name}"]`);
-  // Each cell names its column, for the narrow window where the rows stand
-  // as cards with no head over them (t-9633).
-  for (const column of JEV_COLUMNS) cell(column.cell).dataset.label = t(column.key, column.word);
+  const words = jevWordsOf(held);
+  const language = jevLanguage();
+  if (!jevMoved(row, words.rest, words.days, JSON.stringify(standing), JSON.stringify(choice), head ?? "", language)) return;
+  // A row's cells stand in `JEV_COLUMNS`' order (`jevDashRow`).
+  const cell = (name) => row.cells[JEV_COLUMN_AT.get(name)];
   // The name opens the feature's drawer — a button, so the row opens from
   // the keyboard as well as from a click anywhere on it (t-6277 D6) — with
   // the feature's id under it, small, and as its tip what the feature judges
@@ -1957,6 +2066,8 @@ function paintJevRow(row, id, held, standing, head) {
     for (const column of JEV_COLUMNS) {
       if (column.cell === "seat") continue;
       cell(column.cell).textContent = "—";
+      // A dash stands where a picture was: the next numbers draw it anew.
+      jevDrawnFrom.delete(cell(column.cell));
     }
     return;
   }
@@ -1995,15 +2106,20 @@ function paintJevRow(row, id, held, standing, head) {
     }
     share.append(jevFact("share", jevPercent(held.week.answeredShare), "jev-share"), document.createTextNode(" "), bound);
   }
-  // The days each picture of the row reads, read once.
-  const days = jevDaysOf(held);
-  cell("latency").replaceChildren(jevLatencyCell(held, days));
+  // The row's pictures draw its days, and are drawn again only when those,
+  // or what a cell says beside them, moved — a count that moved alone draws
+  // its own cell.
+  const status = jevSeatStatus(held, choice);
+  const summed = String(Boolean(held.across?.summed));
+  if (jevMoved(cell("latency"), words.days, String(held.week.p50Ms), String(held.week.p95Ms), summed, String(latency), language)) {
+    cell("latency").replaceChildren(jevLatencyCell(held, words.read, latency));
+  }
   const acted = cell("acted");
   acted.replaceChildren(
     jevFact("applied", held.week.rows === 0 ? "—" : jevCount(held.week.applied ?? 0)), document.createTextNode(" · "),
     jevFact("agreement", jevAgreementWords(held, standing)));
   cell("cost").textContent = jevCost(held.costUsd);
-  cell("trend").replaceChildren(jevTrendCell(days, jevSeatStatus(held, choice)));
+  if (jevMoved(cell("trend"), words.days, status, language)) cell("trend").replaceChildren(jevTrendCell(words.read, status));
   cell("status").replaceChildren(jevStatusCell(held, choice, standing, head));
 }
 
