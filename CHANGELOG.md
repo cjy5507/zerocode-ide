@@ -4,6 +4,12 @@
 
 _since v1.1.26 (35 commits)_
 
+### release
+- release: the lane judges a browser harness's FAIL line by name as it judges a cargo test — that one suite re-run alone three times, a listed `ui:` check outside the cap, an unlisted one named with its result beside `installed.json`; the window harness holds every frame late under `WINDOW_FRAME_LAG_MS` so a load flake reads red on a quiet machine (t-9741)
+
+### jev
+- feat(jev): a seat's act line is drawn from its own graded answers — the judge tests whether confidence separates being right, stores a per-seat threshold beside the ledgers when it does, and `JevUse::acts_on` is the one place the apply guards read it; the summary says each seat's applied share, its error on that share and the baseline, and why rows compared to nothing (`notComparedBy`). No seat on this machine earns a line yet, so today's behaviour is unchanged (t-9468, t-9556)
+
 ### dashboard
 - feat(jev): the Jev dashboard draws each seat's days, accuracy trend with its lower bound and baseline, the rows owed before the next judgment, latency and daily tokens with an estimated cost, in the shell's own tokens for dark and light (t-9633)
 
@@ -14,6 +20,7 @@ _since v1.1.26 (35 commits)_
 - feat(walk): a walk step chooses its operation and every target it needs in one Jev request — the action head carries the operation, the click target, the type target and the observation heads; a `Type` operation is a closed observed operation (only a field the snapshot lists, never an id or a command) whose value comes from a generator the person configured in the product's key store, through the existing stdin pipe; the person's subscription login is not a road for it; a repeated value is reused (t-6720)
 - feat(browser): the browser's observation is one state, read once — `marks --json` gathers the numbered controls with the document epoch, the input fields, containers, images and rows in one synchronous read (a moved page is read again, then said as `document_moving`); `click --mark` pins the document and the value, re-checks at the press and settles within 250 ms as ready, not ready or invalidated; the walk verb is proven through `run_goal` itself (t-6721)
 - feat(jev): the recall seat judges latency on answered calls against its own deadline, a placement the pane never tried is `not_carried` (rubric 2), a notify ring nobody was there for says `away`, and `tools/jev-seat-replay` prints every seat's judgment before and after a change from a read-only ledger copy (t-9427)
+- feat(walk): a page press answers before it settles — `click --mark N --settle-later` answers at once with the look the press left and the pane's next `marks` finishes the settle; a page walk asks ahead by default on a page the press changed, and a page that still looks as it did is asked in turn once it settled. On the harness a press step p50 376 → 293 ms and a three-press walk 1,189 → 922 ms; a page that answers late asks no more than before (t-9712)
 
 ### feat
 - feat(board): 「답할 우편」 is the questions that wait on an answer — the ledger's notices stand under it as 「소식」, one line per quiet episode while the silence goes on, folded into a count after a day, and the desk's three numbers are the backend's (t-9456)
@@ -28,6 +35,7 @@ _since v1.1.26 (35 commits)_
 - fix(jev): a notify ring nobody was there for names why it compares nothing — `notify_call::agreed` says `away` where it used to say nothing (t-9427)
 - fix(jev): a pane nobody moved grades only the answer whose room it stood in — a recorded placement the pane never tried is `not_carried`, not wrong (placement rubric 1 → 2, t-9427)
 - fix(jev): the latency line reads the answers' own times, so an acting seat no longer falls on the one timeout its answer line forgives — and recall's wall is its own number, measured (t-9427)
+- fix(window): a pane's conversation page stops its spinner at the turn's end even when an earlier read already carried the turn's last words — the page is repainted once when the pane's state changes and never on a resting beat (t-9741)
 
 ### orchestration
 - orchestration: one reading of a wait and one of a silence going on — `Run::awaits_answer` is the step `awaiting_reply` takes, and `Run::quiet_notice_stands` says whether a `went_quiet` notice still tells of the attempt's current silence (t-9456)
