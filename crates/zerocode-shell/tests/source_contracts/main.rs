@@ -2,6 +2,7 @@ mod agent_capabilities;
 mod bundle_resources;
 mod cli_login;
 mod computer_use_mirrors;
+mod computer_use_tcc;
 mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
