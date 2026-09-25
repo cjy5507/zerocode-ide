@@ -342,7 +342,10 @@ const MARKS_REQUEST = {
   wordCap: Math.floor(rustNumber(SCREEN, "SHOWS_CHAR_CAP") / CANDIDATE_CAP),
   valueCap: VALUE_QUESTION.valueCharCap,
 };
-const SETTLE_REQUEST = { watch: "__browserObservation", busy: (rustList(CORE, "BROWSER_SETTLE_BUSY") || []).join(",") };
+/* The settle's watch is kept under the guest's own slot name
+ * (`settle_watch`, cmd/browser.rs), read from the one file both sides read. */
+const WATCH = (await readFile(resolve(UI, "browser-guest-key.txt"), "utf8")).trim();
+const SETTLE_REQUEST = { watch: WATCH, busy: (rustList(CORE, "BROWSER_SETTLE_BUSY") || []).join(",") };
 /* The page says a field holds a secret under the door's own word — the
  * encoder hides every key that names a secret — and the door answers it
  * under the question's key (`look_of`, cmd/browser.rs). */
@@ -483,6 +486,23 @@ await test("one_snapshot_contains_controls_values_and_context_from_one_epoch", a
     assert(again("origin").field[KEYS.value] === "Geneva", "the field read before the change is read after it", again("origin"));
     assert(moved.value.snapshot[KEYS.rows].some((row) => row[KEYS.text] === "New arrival"), "the row the change added is there");
 
+    // A value changed by the read's own page code, with no change to the
+    // document a watch could see: the second read of every field's value
+    // catches it, and the answer is the state after.
+    await look.evaluate(() => {
+      const destination = document.getElementById("destination");
+      const own = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      let fired = false;
+      Object.defineProperty(destination, "value", { configurable: true, set(v) { own.set.call(this, v); },
+        get() {
+          if (!fired) { fired = true; own.set.call(document.getElementById("origin"), "Bern"); }
+          return own.get.call(this);
+        } });
+    });
+    const quietly = await evalJson(look, lookScript());
+    const origin = quietly.value.faces.find((face) => face.selector === "#origin");
+    assert(quietly.ok && origin.field[KEYS.value] === "Bern", "a value changed under the read is read after it", origin);
+
     // A document that moves on every read cannot be read in one state: the
     // look says so and hands over nothing of it.
     await look.evaluate(() => {
@@ -504,13 +524,18 @@ await test("hidden_surface_short_settle_has_a_wall_deadline", async () => {
       document.getElementById("go").addEventListener("click", () => { document.getElementById("status").textContent = "Went"; });
     </script>`);
     const epoch = await hidden.evaluate(() => String(performance.timeOrigin));
-    const pressed = await evalJson(hidden, pressScript("#go", { epoch, value: null }));
+    const pressed = await evalJson(hidden, pressScript("#go", { epoch, value: null, watch: WATCH }));
     assert(pressed.ok && typeof pressed.value.pressedAt === "number", "the press answers the page's clock", pressed);
+    await new Promise((done) => setTimeout(done, SETTLE_QUIET_MS + 20));
     const first = await evalJson(hidden, settleScript());
     assert(first.ok && first.value.hidden === true && first.value.watched === true, "a hidden page answers its facts", first);
     assert(first.value.documentEpoch === epoch && first.value.last >= pressed.value.pressedAt,
       "the watch the press set saw the press's own change", { pressed: pressed.value, first: first.value });
-    await new Promise((done) => setTimeout(done, SETTLE_QUIET_MS + 20));
+    // The watch stood before the press's first event, so the very first
+    // poll, a quiet window later, already finds the document still — a watch
+    // set by that poll would start its count there.
+    assert(first.value.now - Math.max(first.value.last, pressed.value.pressedAt) >= SETTLE_QUIET_MS,
+      "the first poll knew how long the document had stood still", first.value);
     const later = await evalJson(hidden, settleScript());
     assert(later.value.now - Math.max(later.value.last, pressed.value.pressedAt) >= SETTLE_QUIET_MS,
       "a hidden document that stood still says so, well inside the wall", later.value);
@@ -590,16 +615,16 @@ await test("value_change_or_occlusion_invalidates_selected_target", async () => 
 
     const now = await measure("#city");
     const press = async (expect, selector = "#city") => evalJson(pinned, pressScript(selector, expect));
-    const stale = await press({ epoch: "1.5", value: now.valueDigest });
+    const stale = await press({ epoch: "1.5", value: now.valueDigest, watch: WATCH });
     assert(!stale.ok && stale.code === "document_replaced", "another document refuses the press", stale);
-    const typed = await press({ epoch: now.documentEpoch, value: city.valueDigest });
+    const typed = await press({ epoch: now.documentEpoch, value: city.valueDigest, watch: WATCH });
     assert(!typed.ok && typed.code === "value_changed", "a changed value refuses the press", typed);
     assert(await pinned.evaluate(() => window.__presses) === 0, "neither refusal pressed anything");
     await pinned.evaluate(() => { const cover = document.createElement("div"); cover.id = "cover"; document.body.append(cover); });
-    const covered = await press({ epoch: now.documentEpoch, value: null }, "#go");
+    const covered = await press({ epoch: now.documentEpoch, value: null, watch: WATCH }, "#go");
     assert(!covered.ok && covered.code === "element_obscured", "a covered control is not pressed", covered);
     await pinned.evaluate(() => document.getElementById("cover").remove());
-    const held = await press({ epoch: now.documentEpoch, value: now.valueDigest });
+    const held = await press({ epoch: now.documentEpoch, value: now.valueDigest, watch: WATCH });
     assert(held.ok && await pinned.evaluate(() => window.__presses) === 1, "the look that still holds presses once", held);
     return "document, value, checked, option, cover: refused; holding: pressed";
   } finally { await pinned.close(); }
