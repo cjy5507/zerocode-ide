@@ -457,9 +457,9 @@ def main() -> int:
                 # Turn about: A B C, then C B A.
                 order = arms if walk % 2 == 0 else list(reversed(arms))
                 for label in order:
-                    build, overlap = ARMS[label]
-                    walk_once(bins / build, label, scenario, pane, url, out, homes[label],
-                              os.environ.get("ANTHROPIC_API_KEY") if build == "after" else None,
+                    built, overlap = ARMS[label]
+                    walk_once(bins / built, label, scenario, pane, url, out, homes[label],
+                              os.environ.get("ANTHROPIC_API_KEY") if built == "after" else None,
                               overlap)
     finally:
         if opened:
