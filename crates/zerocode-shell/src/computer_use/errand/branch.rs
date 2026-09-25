@@ -49,6 +49,10 @@ pub struct Branching {
     /// (`crate::systemone::applies`). Read by the caller, off the same wire
     /// the questions go down.
     pub acting: bool,
+    /// The act line the seat's graded answers drew (t-9468,
+    /// `crate::systemone::act_line`): the pick is pressed from it in place
+    /// of the press floor. `None` presses from the floor, as ever.
+    pub act_line: Option<u16>,
 }
 
 impl Branching {
@@ -56,6 +60,7 @@ impl Branching {
     pub const OFF: Self = Self {
         mode: Mode::Off,
         acting: false,
+        act_line: None,
     };
 }
 
@@ -205,6 +210,7 @@ fn compared(
     screen: &Screen,
     today: usize,
     acting: bool,
+    line: Option<u16>,
     said: &mut Value,
 ) -> usize {
     let judging = Instant::now();
@@ -232,7 +238,8 @@ fn compared(
             }
             // The walk's one press rule, read for the pick (t-6187): a
             // control a press cannot take back asks nine in ten here too.
-            let (permitted, kind) = press_rule(&BRANCHING, screen, choice.mark, choice.confidence);
+            let (permitted, kind) =
+                press_rule(&BRANCHING, line, screen, choice.mark, choice.confidence);
             said[CONTROL_KIND] = json!(kind.word());
             if !permitted {
                 said[BARRED] = json!(Barred::LowConfidence.as_str());
@@ -299,7 +306,15 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
             // The pick is today's whatever the answer; what the mark reads is
             // whether the comparison named it. A refusal named nothing and
             // shares today's fate.
-            let _ = compared(judge, &asked, screen, today, false, &mut said);
+            let _ = compared(
+                judge,
+                &asked,
+                screen,
+                today,
+                false,
+                step.branching.act_line,
+                &mut said,
+            );
             same_pick = said
                 .get("chosen")
                 .and_then(Value::as_str)
@@ -421,7 +436,15 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
             before: &before,
             candidates: &tried,
         }) {
-            pick = compared(judge, &asked, screen, today, true, &mut said);
+            pick = compared(
+                judge,
+                &asked,
+                screen,
+                today,
+                true,
+                step.branching.act_line,
+                &mut said,
+            );
         }
     }
     world.forget(&saved);

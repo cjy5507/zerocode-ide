@@ -14,18 +14,20 @@
 //! for a program, and an exit code that says the answer (an `ask` exits 0 for
 //! yes and 1 for no) so a worker's script can branch on it without parsing.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use tools::jev_summary::{self, SeatReport};
+use tools::jev_summary::{self, SeatCalibration, SeatReport};
+use zerocode_core::jev::threshold::{self, AtLine};
 use tools::{JevAnswer, JevCaller, JevQuestion, JevShape, JevVerdict};
 
 use crate::autonomy::limits::HEADLESS_LOOP_EXIT_DONE;
 
 pub const USAGE: &str = "\
-zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--recent <n>] [--json]
+zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--recent <n>] [--act-lines] [--json]
 zo jev ask <question> [--context <text>] [--cwd <dir>] [--json]
 zo jev choose <question> (--option <text>... | --stdin) [--context <text>] [--cwd <dir>] [--json]
 zo jev score <question> --level <text>... (--item <text>... | --stdin) [--cwd <dir>] [--json]
@@ -46,6 +48,10 @@ zo jev score <question> --level <text>... (--item <text>... | --stdin) [--cwd <d
   what it answered, whether that was acted on, and what the seat's own
   writer later said of it — read from the same rows in the same pass.
   Every seat also carries its last seven local days, one count per day.
+  Every seat that can rise says where one answer may act alone: the line
+  its graded answers draw, or why none, and the line the product reads
+  now; --act-lines adds every line of the grid the answers were read at
+  and the row `tools/jev-seat-replay thresholds` keeps beside the ledger.
 
   ask / choose / score: put your own question to Jev, TypeSafe's typed
   judge, through the door every seat passes (smart.agentTool in the ZeroCode
@@ -85,6 +91,9 @@ struct SummaryRequest {
     sessions: Option<PathBuf>,
     /// How many of each seat's last requests to list; none by default.
     recent: usize,
+    /// Whether each seat's calibration carries its whole grid and the row
+    /// the replay keeps (t-9468) — the replay's ask; a screen draws neither.
+    act_lines: bool,
     json: bool,
 }
 
@@ -129,11 +138,12 @@ fn parse(args: &[String]) -> Result<Request, Refused> {
 
 fn parse_summary(args: &[String]) -> Result<SummaryRequest, Refused> {
     let refuse = |message: String| Refused { message, exit: SUMMARY_REFUSED_EXIT };
-    let mut request = SummaryRequest { cwd: None, sessions: None, recent: 0, json: false };
+    let mut request = SummaryRequest { cwd: None, sessions: None, recent: 0, act_lines: false, json: false };
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--json" => request.json = true,
+            "--act-lines" => request.act_lines = true,
             "--cwd" => {
                 let dir = rest.next().ok_or_else(|| refuse("--cwd needs a directory".to_string()))?;
                 request.cwd = Some(PathBuf::from(dir));
@@ -252,7 +262,7 @@ fn run_summary(request: &SummaryRequest, cwd: &Path, now_ms: i64, offset_s: i64)
     );
     Report {
         text: if request.json {
-            render_json(&seats).to_string()
+            render_json(&seats, request.act_lines).to_string()
         } else {
             render_text(&seats)
         },
@@ -382,7 +392,9 @@ fn tally_json(tally: &jev_summary::SeatTally) -> Value {
     })
 }
 
-fn agreement_json(agreement: &jev_summary::SeatAgreement) -> Value {
+/// One agreement, beside why its rows that compared nothing say so, word by
+/// word (t-9556) — every agreement the answer carries says both.
+fn agreement_json(agreement: &jev_summary::SeatAgreement, withheld: &BTreeMap<String, usize>) -> Value {
     json!({
         "compared": agreement.compared,
         "agreed": agreement.agreed,
@@ -393,6 +405,7 @@ fn agreement_json(agreement: &jev_summary::SeatAgreement) -> Value {
         "baselineAgreed": agreement.baseline_agreed,
         "baselineShare": agreement.baseline_share(),
         "notCompared": agreement.not_compared,
+        "notComparedBy": withheld,
     })
 }
 
@@ -411,10 +424,36 @@ fn decision_json(decision: &jev_summary::SeatDecision) -> Value {
     })
 }
 
-fn render_json(seats: &[SeatReport]) -> Value {
+/// What a seat's graded answers say of its act line (t-9468): the line they
+/// draw or why none, the answers at the seat's fixed line and at the drawn
+/// one, and the line the product reads now — and, when `act_lines` asks,
+/// every line of the grid and the row the replay would keep for it.
+fn calibration_json(id: &str, calibration: &SeatCalibration, act_lines: bool) -> Value {
+    let calibrated = &calibration.calibrated;
+    let mut said = json!({
+        "readsActLine": zerocode_core::jev::jev_use(id).is_some_and(|seat| seat.reads_act_line),
+        "marksWanted": calibrated.marks_wanted,
+        "actFromPermille": calibrated.line.ok(),
+        "reason": calibrated.line.err().map(threshold::NoLine::token),
+        "fixed": calibration.fixed.as_ref().map(AtLine::json),
+        "drawn": calibration.drawn.as_ref().map(AtLine::json),
+        "tableLine": calibration.table_line,
+        "atTableLine": calibration.at_table_line.as_ref().map(AtLine::json),
+    });
+    if act_lines {
+        said["grid"] = calibrated.grid.iter().map(AtLine::json).collect::<Vec<Value>>().into();
+        said["row"] = calibration.row.clone().unwrap_or(Value::Null);
+    }
+    said
+}
+
+fn render_json(seats: &[SeatReport], act_lines: bool) -> Value {
     json!({
         "windowDays": jev_summary::WINDOW_DAYS,
         "judgedEveryRows": jev_summary::JUDGED_EVERY_ROWS,
+        // The file a seat's act line is kept in beside its ledger — named
+        // here so the replay copies and writes it by the binary's own word.
+        "thresholdsFile": threshold::THRESHOLDS_FILE,
         "seats": seats
             .iter()
             .map(|seat| json!({
@@ -439,7 +478,7 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 // it — the numbers a seat is promoted on, which are not the
                 // week's.
                 "judged": seat.judged.as_ref().map(|judged| {
-                    let mut agreement = agreement_json(&judged.agreement);
+                    let mut agreement = agreement_json(&judged.agreement, &judged.not_compared_by);
                     // Control rows joined to the window for the comparison —
                     // the probe run once more beside a judgment an active
                     // turn acted on. They are in no other number here.
@@ -458,7 +497,7 @@ fn render_json(seats: &[SeatReport]) -> Value {
                     .map(|day| json!({
                         "startMs": day.start_ms,
                         "tally": tally_json(&day.tally),
-                        "agreement": agreement_json(&day.agreement),
+                        "agreement": agreement_json(&day.agreement, &day.not_compared_by),
                     }))
                     .collect::<Vec<Value>>(),
                 // The last requests, newest first, when `--recent` asked.
@@ -466,7 +505,7 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 // Every `agreed` mark of the week, counted whether or not the
                 // seat rises — the recall seat's only agreement number, and
                 // the routing seat's turn labels beside its probe axes.
-                "agreementWeek": agreement_json(&seat.agreement_week),
+                "agreementWeek": agreement_json(&seat.agreement_week, &seat.not_compared_week),
                 // The reader the seat is held against and how many times its
                 // label must have said no (t-6342), from the table.
                 "baseline": seat.baseline,
@@ -479,10 +518,52 @@ fn render_json(seats: &[SeatReport]) -> Value {
                     // The version the rows were cut away from, beside the
                     // line the seat holds on: a thin sample says why.
                     "cutModel": judged.cut,
+                    // The act line the marks were read at (t-9468).
+                    "actLine": judged.act_line,
                 })),
+                // What the seat's labels say of its act line, and the line
+                // the product reads now (t-9468).
+                "calibration": seat
+                    .calibration
+                    .as_ref()
+                    .map(|calibration| calibration_json(seat.id, calibration, act_lines)),
+                // At that line: the share of the seat's answered requests it
+                // acts on, how often the marks of what it acts on say it was
+                // wrong, and how often the baseline was on the same marks —
+                // absent while the table holds no line for the seat.
+                "applyShare": at_table_line(seat).and_then(AtLine::apply_share),
+                "appliedErrorPermille": at_table_line(seat).and_then(AtLine::error_permille),
+                "baselineErrorPermille": at_table_line(seat).and_then(AtLine::baseline_error_permille),
             }))
             .collect::<Vec<Value>>(),
     })
+}
+
+/// The answers at the line the product reads for `seat` now, when the table
+/// holds one.
+fn at_table_line(seat: &SeatReport) -> Option<&AtLine> {
+    seat.calibration.as_ref()?.at_table_line.as_ref()
+}
+
+/// What the text says of a seat's act line, after the notes before it: the
+/// one it acts from, the one its labels draw that the table does not hold
+/// yet, or why there is none.
+fn act_line_note(notes: &mut String, calibration: &SeatCalibration) {
+    let permille = |value: Option<u16>| value.map_or_else(|| "—".to_string(), |value| format!("{value}‰"));
+    let said = if let (Some(line), Some(at)) = (calibration.table_line, calibration.at_table_line.as_ref()) {
+        format!(
+            "acts from {line}‰ on {} (wrong {}, baseline wrong {})",
+            at.apply_share().map_or_else(|| "—".to_string(), |share| format!("{:.0}%", share * 100.0)),
+            permille(at.error_permille()),
+            permille(at.baseline_error_permille())
+        )
+    } else {
+        match calibration.calibrated.line {
+            Ok(line) => format!("labels draw {line}‰, not yet in the table"),
+            Err(why) => format!("no act line ({})", why.token()),
+        }
+    };
+    let _ = write!(notes, "{}{said}", if notes.is_empty() { "" } else { " · " });
 }
 
 fn render_text(seats: &[SeatReport]) -> String {
@@ -568,6 +649,9 @@ fn render_text(seats: &[SeatReport]) -> String {
         }
         if let Some(owed) = seat.rows_to_next_judgment() {
             let _ = write!(notes, " · {owed} rows to judgment");
+        }
+        if let Some(calibration) = seat.calibration.as_ref() {
+            act_line_note(&mut notes, calibration);
         }
         let _ = writeln!(
             out,

@@ -416,6 +416,40 @@ fn an_agreement_over_rows_already_picked_out_reads_the_same_marks() {
     assert_eq!(agreement_since(&rows, 0), agreement_rows(rows.iter(), 0));
 }
 
+/// Why the rows compared nothing is counted word by word over the rows the
+/// agreement counts as `not_compared` (t-9556): a row that carries a mark is
+/// a mark whatever else it spells, a row before the cut is not counted, and
+/// a value that is not a word is keyed by its own JSON — so the words always
+/// add up to the count, and no reader spells a word of its own.
+#[test]
+fn the_rows_that_compared_nothing_are_told_apart_by_the_word_they_wrote() {
+    use crate::worker_placement::{NOT_CARRIED, UNSEEN};
+    let rows = [
+        json!({"at": 1, "label": "a", "notCompared": UNSEEN}),
+        json!({"at": 5, "label": "b", "notCompared": UNSEEN}),
+        json!({"at": 6, "label": "c", "notCompared": NOT_CARRIED}),
+        json!({"at": 7, "label": "d", "agreed": false, "notCompared": NOT_CARRIED}),
+        json!({"at": 8, "label": "e", "notCompared": 3}),
+        json!({"at": 9, "label": "f"}),
+    ];
+    let words = not_compared_words(rows.iter(), 5);
+    assert_eq!(
+        words,
+        BTreeMap::from([
+            (UNSEEN.to_string(), 1),
+            (NOT_CARRIED.to_string(), 1),
+            ("3".to_string(), 1)
+        ])
+    );
+    assert_eq!(
+        words.values().sum::<usize>(),
+        agreement_rows(rows.iter(), 5).not_compared,
+        "the words add up to the count"
+    );
+    assert_eq!(not_compared_words(rows.iter(), i64::MIN)[UNSEEN], 2);
+    assert!(not_compared_words([].iter(), i64::MIN).is_empty());
+}
+
 /// What a screen seat's guards stopped and what it handed to the person are
 /// counted once, here, off the rows' own words (t-6187's `barred` and
 /// `controlKind`, the dashboard's drawer, t-6277 D6): a press the screen's own

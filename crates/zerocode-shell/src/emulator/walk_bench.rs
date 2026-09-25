@@ -284,6 +284,7 @@ fn a_phone_walk_timed_on_a_simulator_of_our_own() {
                 errand::Options {
                     overlap,
                     rescue: false,
+                    act_line: None,
                 },
                 None,
             )

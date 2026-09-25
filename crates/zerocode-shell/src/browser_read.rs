@@ -292,7 +292,12 @@ pub(crate) fn settle(
     }
 
     let verdict = Verdict::of(readings);
-    let droppable = verdict.droppable(&BROWSER_READ);
+    // From the act line the seat's labels drew, where they drew one
+    // (t-9468): the fold's floor otherwise.
+    let droppable = verdict.droppable_at(
+        &BROWSER_READ,
+        crate::systemone::act_line(wire, &BROWSER_READ),
+    );
     let chrome: Vec<String> = verdict
         .chrome
         .keys()

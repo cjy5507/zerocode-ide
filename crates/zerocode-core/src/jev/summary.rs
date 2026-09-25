@@ -599,12 +599,26 @@ pub fn last_asked(rows: &[Value], n: usize) -> Vec<&Value> {
 /// ([`crate::jev::promote::OnVersion::requests`]), held by reference.
 #[must_use]
 pub fn last_asked_of<'a>(rows: impl IntoIterator<Item = &'a Value>, n: usize) -> Vec<&'a Value> {
-    let asked: Vec<&Value> = rows
+    last_asked_with(rows.into_iter().map(|row| (row, ())), n)
         .into_iter()
-        .filter(|row| asked_something(row).is_some())
+        .map(|(row, ())| row)
+        .collect()
+}
+
+/// [`last_asked_of`] over rows that carry something beside them — the
+/// judged window with each request's confidence (t-9468) — picked by the
+/// one rule, so the window and what rides beside it cannot fall apart.
+#[must_use]
+pub fn last_asked_with<'a, T>(
+    rows: impl IntoIterator<Item = (&'a Value, T)>,
+    n: usize,
+) -> Vec<(&'a Value, T)> {
+    let mut asked: Vec<(&Value, T)> = rows
+        .into_iter()
+        .filter(|(row, _)| asked_something(row).is_some())
         .collect();
     let from = asked.len().saturating_sub(n);
-    asked[from..].to_vec()
+    asked.split_off(from)
 }
 
 /// How many requests at the end of the ledger did not answer, stopping at the
@@ -652,7 +666,9 @@ pub fn agreement_since(rows: &[Value], since_ms: i64) -> crate::jev::promote::Ag
 /// ([`AGREED`]) were written since, to the time of the `wanted`th newest, or
 /// to the first row when the rows hold fewer. A time is a cut, so marks
 /// sharing the time the cut falls on all count: a window reached back holds
-/// at least `wanted` marks, not always exactly that many.
+/// at least `wanted` marks, not always exactly that many. The judge asks for
+/// as many as its agreement line can be cleared on
+/// ([`crate::jev::promote::marks_that_can_clear`], t-9468).
 ///
 /// `rows` are one seat's series ([`crate::jev::promote::OnVersion::marks`]):
 /// the reach back is as far as the marks of the words the seat asks now and
@@ -665,8 +681,8 @@ pub fn agreement_since(rows: &[Value], since_ms: i64) -> crate::jev::promote::Ag
 /// — 110 of the 444 rings this machine's ledger held on 2026-09-25 — so its
 /// 53-ring window held 15 marks, and the judge said `too_few_compared` with
 /// 110 in hand; the placement seat's 25 requests held 9 of its 87. The
-/// sample floor asks for marks in hand, and a window that already holds it
-/// reads its own marks alone.
+/// judge asks for marks in hand, and a window that already holds them reads
+/// its own marks alone.
 #[must_use]
 pub fn marks_from<'a>(
     rows: impl IntoIterator<Item = &'a Value>,
@@ -697,22 +713,65 @@ pub fn agreement_rows<'a>(
 ) -> crate::jev::promote::Agreement {
     let mut agreement = crate::jev::promote::Agreement::default();
     for row in rows {
-        if AT.read(row).and_then(Value::as_i64).unwrap_or(0) < since_ms {
+        if !at_or_after(row, since_ms) {
             continue;
         }
-        let agreed = AGREED.read(row).and_then(Value::as_bool);
-        if let Some(agreed) = agreed {
+        if let Some(agreed) = AGREED.read(row).and_then(Value::as_bool) {
             agreement.compared += 1;
             agreement.agreed += usize::from(agreed);
-        } else if NOT_COMPARED.read(row).is_some() {
-            agreement.not_compared += 1;
         }
+        agreement.not_compared += usize::from(withheld(row).is_some());
         if let Some(baseline) = BASELINE_AGREED.read(row).and_then(Value::as_bool) {
             agreement.baseline_compared += 1;
             agreement.baseline_agreed += usize::from(baseline);
         }
     }
     agreement
+}
+
+/// Why the rows at or after `since_ms` that grade a request carry no mark,
+/// word by word (t-9556): each word a row wrote under [`NOT_COMPARED`] — a
+/// ring nobody was there to turn to, a move nobody carried, a summons
+/// whose model was pinned — with how many rows wrote it. They are the rows
+/// [`agreement_rows`] counts as `not_compared`, told apart: a count alone
+/// cannot say that a seat is waiting on a person to move a pane rather than
+/// on more answers (t-9427, review (d)①). The words are the writers' own;
+/// a value that is not a word is keyed by its JSON, so the counts always
+/// add up to `not_compared`.
+#[must_use]
+pub fn not_compared_words<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    since_ms: i64,
+) -> BTreeMap<String, usize> {
+    let mut words: BTreeMap<String, usize> = BTreeMap::new();
+    for word in rows
+        .into_iter()
+        .filter(|row| at_or_after(row, since_ms))
+        .filter_map(withheld)
+    {
+        let word = word
+            .as_str()
+            .map_or_else(|| word.to_string(), str::to_string);
+        *words.entry(word).or_default() += 1;
+    }
+    words
+}
+
+/// What a row that grades a request says in place of a mark
+/// ([`NOT_COMPARED`]) — `None` for a row that carries one ([`AGREED`]),
+/// whatever else it spells, or says nothing. One reader for the count and
+/// the words, so they cannot disagree on which rows compared nothing.
+fn withheld(row: &Value) -> Option<&Value> {
+    if AGREED.read(row).and_then(Value::as_bool).is_some() {
+        return None;
+    }
+    NOT_COMPARED.read(row)
+}
+
+/// Whether a row was written at or after `since_ms` — read the way every
+/// counter here reads a row's time: a row with none is at the epoch.
+fn at_or_after(row: &Value, since_ms: i64) -> bool {
+    AT.read(row).and_then(Value::as_i64).unwrap_or(0) >= since_ms
 }
 
 /// How many of a seat's graded answers fell in one stretch of confidence,

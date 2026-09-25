@@ -314,6 +314,7 @@ fn a_normal_walk_does_not_start_the_second_reader() {
             Options {
                 overlap: false,
                 rescue,
+                act_line: None,
             },
             Some(second),
         );

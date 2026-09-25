@@ -577,6 +577,7 @@ fn clean() -> Evidence<'static> {
         negatives_wanted: crate::jev::NEGATIVES_WANTED,
         disagreed_on_record: crate::jev::NEGATIVES_WANTED,
         baseline: Baseline::None,
+        apply_share: None,
     }
 }
 
@@ -2691,8 +2692,11 @@ fn asked_then_marked_as(
 /// on 2026-09-25 — so the 53 rings its answer floor is read on held 15 marks,
 /// and the seat sat at `too_few_compared` with 110 in hand; the placement
 /// seat's 25 held 9 of 87. The window's marks reach back from its first
-/// request to hold the sample floor, and no further: a window that already
-/// holds the floor reads its own marks alone.
+/// request to the width its agreement line can be cleared on with the
+/// negatives it asks inside ([`marks_that_can_clear`], t-9468 — not the
+/// sample floor, which is the judgment's cadence and no width a line can be
+/// cleared on), and no further: a window that already holds that width
+/// reads its own marks alone.
 #[test]
 fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
     for seat in [&crate::jev::NOTIFY, &crate::jev::PLACEMENT] {
@@ -2700,6 +2704,7 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
         let floor = seat.agreement_rows_wanted.expect("a label sample floor");
         let misses = seat.negatives_wanted.expect("a promoting seat");
         let older = marks_that_can_clear(seat).expect("a width the line can be cleared on");
+        let reach = older;
         let inside = 3;
         // Rings asked before the window, each marked before it began — the
         // three that say no the oldest...
@@ -2721,15 +2726,15 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
         ));
         let judged = judge_seat(seat, &rows).expect("judged");
         assert_eq!(
-            judged.agreement.compared, floor,
-            "{}: the window reaches back to the newest {floor} marks, and no further",
+            judged.agreement.compared, reach,
+            "{}: the window reaches back to the newest {reach} marks, and no further",
             seat.id
         );
-        assert_eq!(judged.agreement.agreed, floor, "{}", seat.id);
+        assert_eq!(judged.agreement.agreed, reach, "{}", seat.id);
         assert_eq!(judged.verdict, Verdict::Rise, "{}: {judged:?}", seat.id);
 
-        // A window that holds the floor on its own reads only its own marks:
-        // the older ones that said no are left where they are.
+        // A window that holds that width on its own reads only its own
+        // marks: the older ones that said no are left where they are.
         let mut full = asked_then_marked(
             seat,
             0,
@@ -2741,14 +2746,14 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
         full.extend(asked_then_marked(
             seat,
             start,
-            wanted,
-            floor,
+            wanted.max(reach),
+            reach,
             |_| json!({"agreed": true, "baselineAgreed": false}),
         ));
         let judged = judge_seat(seat, &full).expect("judged");
         assert_eq!(
             (judged.agreement.compared, judged.agreement.agreed),
-            (floor, floor),
+            (reach, reach),
             "{}",
             seat.id
         );
@@ -2786,12 +2791,12 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
 /// a window's marks reach back (t-9087 r2, over t-6877): the command guard's
 /// version 2, the stall seat's 4 and the summons' 5 each ask the words
 /// before them graded by another label, and the label's version rides the
-/// request. A window of the new words holding fewer marks than the sample
-/// floor reaches back through its own series and stops there — short of the
-/// older words' thick record and the rise it earned, of a late label of an
-/// older request, of the requests another version answered, and of the
-/// words a rollback left behind — and inside its series it still reaches
-/// its floor.
+/// request. A window of the new words holding fewer marks than its line can
+/// be cleared on reaches back through its own series and stops there —
+/// short of the older words' thick record and the rise it earned, of a late
+/// label of an older request, of the requests another version answered, and
+/// of the words a rollback left behind — and inside its series it still
+/// reaches that width ([`marks_that_can_clear`], t-9468).
 #[test]
 fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
     const OLDER_VERSION: &str = "jev-1.12.0";
@@ -2805,9 +2810,8 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
         let wanted = window_wanted_for(seat).expect("a promoting seat");
         let floor = seat.agreement_rows_wanted.expect("a label sample floor");
         let misses = seat.negatives_wanted.expect("a promoting seat");
-        let thick = marks_that_can_clear(seat)
-            .expect("a width the line can be cleared on")
-            .max(wanted);
+        let reach = marks_that_can_clear(seat).expect("a width the line can be cleared on");
+        let thick = reach.max(wanted);
         let inside = 3;
         let rising =
             |k: usize| json!({"agreed": k >= misses, "baselineAgreed": k.is_multiple_of(2)});
@@ -2842,7 +2846,8 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
         assert_eq!(standing(seat, &rows), Stand::Recording, "{}", seat.id);
 
         // Today's words marked before their window, then the window and its
-        // few marks: the reach back reads today's newest marks to the floor.
+        // few marks: the reach back reads today's newest marks to the width
+        // the line can be cleared on.
         let mut rows = asked_then_marked_as(seat, before, None, 0, thick, 0, no);
         let start = rows.len();
         rows.extend(asked_then_marked_as(
@@ -2861,8 +2866,8 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
         let clean = judge_seat(seat, &rows).expect("judged");
         assert_eq!(
             (clean.agreement.compared, clean.agreement.agreed),
-            (floor, floor),
-            "{}: a sparse window of today's words reads its floor in today's series",
+            (reach, reach),
+            "{}: a sparse window of today's words reads its width in today's series",
             seat.id
         );
         // The older words' requests graded after the window began — a late
@@ -2939,4 +2944,142 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
             seat.id
         );
     }
+}
+
+/// A ledger of `seat` whose requests carry the confidence they were
+/// answered with, each graded by a label: `(confidence, agreed)` per
+/// request, in order, every baseline mark wrong — the cheapest reader is
+/// beaten wherever a line's marks are right at all.
+fn confident_ledger(seat: &JevUse, answers: &[(f64, bool)]) -> Vec<Value> {
+    use serde_json::json;
+    let mut rows: Vec<Value> = answers
+        .iter()
+        .enumerate()
+        .map(|(n, (confidence, _))| {
+            let mut row = asked_by(seat, n);
+            row["confidence"] = json!(confidence);
+            row
+        })
+        .collect();
+    let at = rows.len();
+    rows.extend(answers.iter().enumerate().map(|(n, (_, agreed))| {
+        mark(
+            seat,
+            at + n,
+            n,
+            json!({"agreed": agreed, "baselineAgreed": false}),
+        )
+    }));
+    rows
+}
+
+/// A seat acting from an act line is judged on the answers the line lets
+/// act (t-9468): the notify seat's confident half — forty-seven of fifty
+/// right from 0.9 — rises from 0.7 where its whole record, dragged under
+/// the floor by the half it would leave to today's rule, holds; the line
+/// is named on the verdict it gave.
+#[test]
+fn a_seat_acting_from_a_line_is_judged_on_the_answers_the_line_lets_act() {
+    let seat = &crate::jev::NOTIFY;
+    let answers: Vec<(f64, bool)> = (0..100)
+        .map(|n| {
+            if n % 2 == 0 {
+                (0.9, n % 34 != 0)
+            } else {
+                (0.2, n % 4 == 1)
+            }
+        })
+        .collect();
+    let rows = confident_ledger(seat, &answers);
+    let whole = judge_seat(seat, &rows).expect("judged");
+    assert!(
+        matches!(whole.verdict, Verdict::Hold(Line::Agreement { .. })),
+        "{whole:?}"
+    );
+    assert_eq!(whole.act_line, None);
+    assert_eq!(judge_seat_in(seat, &rows, None), Some(whole));
+
+    let lined = judge_seat_in(seat, &rows, Some(700)).expect("judged");
+    assert_eq!(
+        (lined.agreement.compared, lined.agreement.agreed),
+        (50, 47),
+        "the answers from 0.7 alone"
+    );
+    assert_eq!(lined.verdict, Verdict::Rise, "{lined:?}");
+    assert_eq!(lined.act_line, Some(700));
+}
+
+/// A seat acting from a line that acts on too little of its window does
+/// not rise on it — and one already acting keeps its place: a line acting
+/// on little still acts well on what it acts on, and the floor is one to
+/// rise on (t-9468).
+#[test]
+fn a_line_acting_on_too_little_of_the_window_holds_a_seat_and_keeps_an_acting_one() {
+    let seat = &crate::jev::NOTIFY;
+    let window = window_wanted_for(seat).expect("a promoting seat");
+    // Sixty confident answers first, then a window of timid ones with four
+    // confident among them.
+    let mut answers: Vec<(f64, bool)> = (0..60).map(|n| (0.9, n >= 3)).collect();
+    answers.extend((0..window).map(|n| if n < 4 { (0.9, true) } else { (0.2, false) }));
+    let rows = confident_ledger(seat, &answers);
+    let share = u16::try_from(4 * 1_000 / window).expect("a per-thousand");
+    assert_eq!(
+        judge_seat_in(seat, &rows, Some(700)).map(|judged| judged.verdict),
+        Some(Verdict::Hold(Line::ApplyShare {
+            share_permille: share,
+            floor_permille: crate::jev::threshold::CALIBRATION.apply_share_floor_permille
+        }))
+    );
+    let mut acting = rows.clone();
+    acting.push(rise_on(acting.len(), &[seat.rubric_version]));
+    assert_eq!(
+        judge_seat_in(seat, &acting, Some(700)).map(|judged| judged.verdict),
+        Some(Verdict::Keep)
+    );
+    assert_eq!(
+        Line::ApplyShare {
+            share_permille: 0,
+            floor_permille: 0
+        }
+        .token(),
+        "apply_share"
+    );
+}
+
+/// A request whose row says no confidence is read by the copy its newest
+/// label carries (t-9468): the guards write the deciding answer's lean on
+/// the label and none on the request, and a line read off their marks acts
+/// on requests — so the marks, the answered requests and the window all
+/// read it, and a request no label copied it to stands at no line.
+#[test]
+fn a_request_that_says_no_confidence_is_read_by_its_labels_copy() {
+    use crate::jev::threshold::Graded;
+    use serde_json::json;
+    let seat = &crate::jev::COMMAND_GUARD;
+    let rows = vec![
+        asked_by(seat, 0),
+        asked_by(seat, 1),
+        mark(seat, 2, 0, json!({"agreed": true, "confidence": 0.8})),
+    ];
+    let version = on_the_newest_version(seat, &rows);
+    assert_eq!(version.answered(), vec![Some(0.8), None]);
+    assert_eq!(
+        version.graded(),
+        vec![Graded {
+            confidence: Some(0.8),
+            agreed: true,
+            baseline: None
+        }]
+    );
+    let window: Vec<Option<f64>> = version
+        .window(10)
+        .into_iter()
+        .map(|(_, confidence)| confidence)
+        .collect();
+    assert_eq!(window, vec![Some(0.8), None]);
+    assert_eq!(
+        version.window(1).len(),
+        1,
+        "the window is the last requests, as ever"
+    );
 }

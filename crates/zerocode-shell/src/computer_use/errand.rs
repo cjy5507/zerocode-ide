@@ -175,6 +175,12 @@ pub struct Options {
     /// back to the person as it does today. Off, the walk never asks: the
     /// second reader costs a frontier turn.
     pub rescue: bool,
+    /// The act line the screen seat's graded answers drew, kept beside its
+    /// ledger (t-9468, `crate::systemone::act_line`): a plain press asks it
+    /// in place of the seat's press floor, and a press that cannot be taken
+    /// back still asks nine in ten. `None` — the default, and every seat
+    /// whose labels drew no line — presses from the floor as ever.
+    pub act_line: Option<u16>,
 }
 
 /// What a judgment begun ahead of the walk came to ([`Pending::wait`]): the
@@ -1400,6 +1406,7 @@ fn walk(
         // go (t-6187).
         let (permitted, kind) = press_rule(
             press_policy,
+            options.act_line,
             before
                 .as_ref()
                 .expect("the screen this walk just looked at"),
@@ -1457,7 +1464,7 @@ fn walk(
                     let answered =
                         team.choose_within(&asked, Duration::from_millis(world.left_ms()));
                     let team_ms = u64::try_from(asking.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    let (word, mark) = second_rung(press_policy, seen, &answered);
+                    let (word, mark) = second_rung(press_policy, options.act_line, seen, &answered);
                     if let (Some(_), Judged::Chose(second)) = (mark, &answered) {
                         rescued_by = Some(second.choice.clone());
                     }
@@ -1768,7 +1775,12 @@ fn walk(
 /// screen elsewhere — a rescue that navigates away is the person's call;
 /// `give_up`/`done` when it declined to press; the wire's own token when it
 /// answered nothing.
-fn second_rung(policy: &JevUse, seen: &Screen, answered: &Judged) -> (String, Option<usize>) {
+fn second_rung(
+    policy: &JevUse,
+    line: Option<u16>,
+    seen: &Screen,
+    answered: &Judged,
+) -> (String, Option<usize>) {
     match answered {
         Judged::Refused(token) => (token.clone(), None),
         Judged::Chose(second) => match second.choice.chosen {
@@ -1777,7 +1789,9 @@ fn second_rung(policy: &JevUse, seen: &Screen, answered: &Judged) -> (String, Op
             // A second reader names one option and never a field
             // ([`ActionAsk::choice_of`]); an entry is not a press it rescues.
             Chosen::Type(_) => (TYPE_TEXT.to_string(), None),
-            Chosen::Mark(mark) if !press_rule(policy, seen, mark, second.choice.confidence).0 => {
+            Chosen::Mark(mark)
+                if !press_rule(policy, line, seen, mark, second.choice.confidence).0 =>
+            {
                 (Barred::LowConfidence.as_str().to_string(), None)
             }
             Chosen::Mark(mark) if presses_a_link(seen, mark) => ("link".to_string(), None),
@@ -1836,11 +1850,18 @@ fn observed_note(seen: &Screen, observed: &[zerocode_core::screen_action::Observ
 
 /// The one press rule every press of a walk passes — the seat's own answer,
 /// a second reader's, a fork's pick (t-6187): the seat's floor for a plain
-/// control, nine in ten for one a press cannot take back
-/// ([`JevUse::permits_press`]). The control's kind comes back for the row.
-fn press_rule(policy: &JevUse, seen: &Screen, mark: usize, confidence: f64) -> (bool, ControlKind) {
+/// control — or the act line its labels drew (`line`, t-9468) — and nine in
+/// ten for one a press cannot take back ([`JevUse::permits_press_at`]). The
+/// control's kind comes back for the row.
+fn press_rule(
+    policy: &JevUse,
+    line: Option<u16>,
+    seen: &Screen,
+    mark: usize,
+    confidence: f64,
+) -> (bool, ControlKind) {
     let kind = control_kind(seen, mark);
-    (policy.permits_press(confidence, kind), kind)
+    (policy.permits_press_at(confidence, kind, line), kind)
 }
 
 /// The kind of the control `mark` names on `seen`, read off the legend line

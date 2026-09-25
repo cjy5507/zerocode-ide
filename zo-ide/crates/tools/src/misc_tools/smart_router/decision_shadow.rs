@@ -376,6 +376,11 @@ pub struct DecisionShadowRow {
     /// acting would have done (t-6346).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub band: Option<String>,
+    /// The confidence that band was read on — the complexity answer's own
+    /// (`RoutingReading::band_confidence`): the number the seat's act line
+    /// is drawn on and read against (t-9468). Absent on rows written before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
     /// Every answer of the judgment as it came — the Scores' positions and
     /// spreads, the Choices' spreads, each fact's probability — for the
     /// reader that will weigh them (t-6324 P7). Absent on a row asked under
@@ -463,6 +468,7 @@ impl DecisionShadowRow {
             probe,
             jev: None,
             band: None,
+            confidence: None,
             reading: None,
             rule: None,
             hangul_permille: None,
@@ -764,10 +770,13 @@ pub(super) fn active_assessments(
     let attempt = Some(attempt.trim()).filter(|attempt| !attempt.is_empty());
     let door = JevDoor::open(&cwd);
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
+    // The act line the seat's labels drew, kept beside its ledger (t-9468):
+    // an answer acts alone from it, where one was drawn.
+    let line = zerocode_core::jev::threshold::line_beside(&ROUTING, &ledger);
     let judgments = api::sync_bridge::run_blocking(futures_util::future::join_all(
         shots
             .into_iter()
-            .map(|shot| judge(&door, client.as_ref(), shot, attempt, deadline, true)),
+            .map(|shot| judge(&door, client.as_ref(), shot, attempt, deadline, true, line)),
     ));
     let mut by_task = HashMap::with_capacity(judgments.len());
     // The sample is drawn from what was judged, not from what was asked: a
@@ -829,14 +838,21 @@ async fn run_shadow_batch(batch: ShadowBatch) {
     let ShadowBatch { settings, cwd, ledger, config, attempt, deadline, shots } = batch;
     let judged = super::settings::merged_settings_root_from(&settings);
     // The door opens only for a mode that asks: a switched-off shadow reads its
-    // one setting and nothing else.
+    // one setting and nothing else. The act line the band on a recording row
+    // is read from — what acting would have done, from the line acting would
+    // read (t-9468) — is the file beside the ledger, read off the runtime's
+    // threads with the rest.
+    let beside = ledger.clone();
     let read = tokio::task::spawn_blocking(move || {
-        decision_shadow_mode_from(&settings).map(|mode| (mode, mode.asks().then(|| JevDoor::open(&cwd))))
+        decision_shadow_mode_from(&settings).map(|mode| {
+            let line = mode.asks().then(|| zerocode_core::jev::threshold::line_beside(&ROUTING, &beside)).flatten();
+            (mode, mode.asks().then(|| JevDoor::open(&cwd)), line)
+        })
     })
     .await
     .ok()
     .flatten();
-    let Some((mode, door)) = read else {
+    let Some((mode, door, line)) = read else {
         for _ in &shots {
             telemetry::attest_failed(telemetry::HarnessFeature::DecisionShadow, FAIL_SETTINGS_UNAVAILABLE);
         }
@@ -856,7 +872,7 @@ async fn run_shadow_batch(batch: ShadowBatch) {
     let judgments: Vec<Judgment> = futures_util::future::join_all(
         shots
             .into_iter()
-            .map(|shot| judge(&door, client.as_ref(), shot, attempt.as_deref(), deadline, false)),
+            .map(|shot| judge(&door, client.as_ref(), shot, attempt.as_deref(), deadline, false, line)),
     )
     .await;
     let rows: Vec<DecisionShadowRow> = judgments.into_iter().map(|judgment| judgment.row).collect();
@@ -1187,7 +1203,8 @@ pub fn judge_ledger(
     if !promote::judgment_due_on(&ROUTING, &version, &rows) {
         return None;
     }
-    let judged = judge_rows_on(&version, &rows, settings)?;
+    let line = zerocode_core::jev::threshold::line_beside(&ROUTING, ledger);
+    let judged = judge_rows_on(&version, &rows, settings, line)?;
     if let Some(row) = promote::transition_row(&ROUTING, now_ms, judged.verdict, &judged.window) {
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }
@@ -1198,15 +1215,29 @@ pub fn judge_ledger(
 /// window's seats and this one carry the same shape to the screen.
 pub use zerocode_core::jev::promote::Judged;
 
+/// [`judge_rows_at`] with no act line — the seat read on every mark, as it
+/// is judged until its labels draw a line.
+#[cfg(test)]
+#[must_use]
+pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Value>) -> Option<Judged> {
+    judge_rows_at(rows, settings, None)
+}
+
 /// Judge the routing seat on a ledger's rows — the one reading of the
 /// evidence, which the judge that writes transitions and the summary that
 /// shows a person the same numbers both take, so the screen cannot say "hold"
 /// on one window while the ledger rose on another (it did: the summary
 /// judged the week with no labels, the judge the last twenty with them,
-/// 2026-09-20). `None` for a ledger of a seat that never rises.
+/// 2026-09-20) — acting from `line`, the act line its labels drew, as the
+/// product reads it (`promote::judge_seat_at`, t-9468). `None` for a ledger
+/// of a seat that never rises.
 #[must_use]
-pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Value>) -> Option<Judged> {
-    judge_rows_on(&promote::on_the_newest_version(&ROUTING, rows), rows, settings)
+pub fn judge_rows_at(
+    rows: &[serde_json::Value],
+    settings: Option<&serde_json::Value>,
+    line: Option<u16>,
+) -> Option<Judged> {
+    judge_rows_on(&promote::on_the_newest_version(&ROUTING, rows), rows, settings, line)
 }
 
 /// [`judge_rows`] on a series already read — the cadence and the verdict
@@ -1215,6 +1246,7 @@ fn judge_rows_on(
     version: &promote::OnVersion<'_>,
     rows: &[serde_json::Value],
     settings: Option<&serde_json::Value>,
+    line: Option<u16>,
 ) -> Option<Judged> {
     let floor = ROUTING.answer_floor_permille?;
     let agreement_floor = ROUTING.agreement_floor_permille?;
@@ -1226,13 +1258,18 @@ fn judge_rows_on(
     // control row of another rubric version is left out — its answer meant
     // something else — and a label that grades only such a turn goes with
     // it (the seat's row names a request by its attempt).
-    let held = jev_ledger::last_asked_of(version.requests.iter().copied(), window_wanted);
+    let held_with = version.window(window_wanted);
+    let held: Vec<&serde_json::Value> = held_with.iter().map(|(row, _)| *row).collect();
     let window = jev_ledger::summarize_rows(held.iter().copied(), i64::MIN);
-    let (compared, control_rows) = with_control_rows(&version.marks, &held);
+    // The marks of the answers the seat's act line lets act, where its
+    // labels drew one (`promote::judge_seat_at`, t-9468); every mark
+    // otherwise.
+    let marks = version.marks_from_line(line);
+    let (compared, control_rows) = with_control_rows(&marks, &held);
     let agreement = agreement_in(&compared);
     // The label's whole record on this version, as every seat's is read
     // (`promote::judge_seat`, t-6342).
-    let record = agreement_in(&version.marks);
+    let record = agreement_in(&marks);
     let verdict = promote::judge(
         promote::standing(&ROUTING, rows),
         &promote::Evidence {
@@ -1250,6 +1287,7 @@ fn judge_rows_on(
             negatives_wanted: ROUTING.negatives_wanted.unwrap_or(0),
             disagreed_on_record: record.disagreed(),
             baseline: ROUTING.baseline,
+            apply_share: promote::apply_share_of(held_with.iter().copied(), line),
         },
     );
     Some(Judged {
@@ -1257,9 +1295,11 @@ fn judge_rows_on(
         window,
         window_wanted,
         agreement,
+        not_compared_by: jev_ledger::not_compared_words(compared.iter().copied(), i64::MIN),
         control_rows,
         model: version.model.map(str::to_string),
         cut: version.cut.map(str::to_string),
+        act_line: line,
     })
 }
 
@@ -1405,6 +1445,7 @@ async fn judge(
     attempt: Option<&str>,
     deadline: Duration,
     active: bool,
+    line: Option<u16>,
 ) -> Judgment {
     let key = MemoKey {
         task: shot.task,
@@ -1415,9 +1456,9 @@ async fn judge(
     let recalled = memo().lock().ok().and_then(|memo| memo.get(&key).cloned());
     if let Some(remembered) = recalled {
         telemetry::attest_fired(telemetry::HarnessFeature::DecisionShadow);
-        let (route_use, assessment) = routed(&remembered.reading, active);
+        let (route_use, assessment) = routed(&remembered.reading, active, line);
         let mut row =
-            answered_row(&shot, attempt, route_use, remembered.model, remembered.jev, remembered.reading);
+            answered_row(&shot, attempt, route_use, remembered.model, remembered.jev, remembered.reading, line);
         row.cached = true;
         return Judgment { task: shot.task, row, assessment };
     }
@@ -1474,8 +1515,8 @@ async fn judge(
                     )],
                 );
             }
-            let (route_use, assessment) = routed(&reading, active);
-            let mut row = answered_row(&shot, attempt, route_use, response.model.clone(), jev, reading);
+            let (route_use, assessment) = routed(&reading, active, line);
+            let mut row = answered_row(&shot, attempt, route_use, response.model.clone(), jev, reading, line);
             row.input_tokens = Some(response.usage.input_tokens);
             (row, assessment)
         }
@@ -1512,13 +1553,15 @@ fn answered_row(
     model: String,
     jev: BTreeMap<String, JudgedAxis>,
     reading: RoutingReading,
+    line: Option<u16>,
 ) -> DecisionShadowRow {
     let mut row =
         DecisionShadowRow::new(shot.task, shot.probe.clone(), attempt, OUTCOME_ANSWERED.to_string(), route_use)
             .about(shot);
     row.model = Some(model);
     row.jev = Some(jev);
-    row.band = Some(reading.band().word().to_string());
+    row.band = Some(reading.band_at(line).word().to_string());
+    row.confidence = Some(reading.band_confidence());
     row.reading = Some(reading);
     row
 }
@@ -1526,12 +1569,13 @@ fn answered_row(
 /// How an answered judgment takes part in routing on its road: on the
 /// acting road it routes by its band — the assessment when it acts or
 /// confirms, none when it abstains (the caller asks the chat probe in its
-/// place); on the recording road it routes nothing.
-fn routed(reading: &RoutingReading, active: bool) -> (DecisionRouteUse, Option<ProbeAssessment>) {
+/// place); on the recording road it routes nothing. The band is read from
+/// the seat's act line where its labels drew one (`line`, t-9468).
+fn routed(reading: &RoutingReading, active: bool, line: Option<u16>) -> (DecisionRouteUse, Option<ProbeAssessment>) {
     if !active {
         return (DecisionRouteUse::RecordOnly, None);
     }
-    match reading.assessment() {
+    match reading.assessment_at(line) {
         Some(assessment) => (DecisionRouteUse::Applied, Some(assessment)),
         None => (DecisionRouteUse::Abstained, None),
     }

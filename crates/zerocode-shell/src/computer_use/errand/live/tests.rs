@@ -1146,6 +1146,7 @@ fn a_judgment_begun_ahead_runs_down_the_wire_and_its_account_comes_back() {
         crate::computer_use::errand::Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );

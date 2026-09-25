@@ -1935,6 +1935,52 @@ mod tests {
         assert!(seat.days.is_empty() && seat.recent.is_empty());
         assert_eq!(seat.clears_rise_floor, None);
         assert!(seat.week.refusals.is_empty() && seat.week.failures.is_empty());
+        assert_eq!((seat.calibration.as_ref(), seat.apply_share), (None, None));
+    }
+
+    /// A seat's act line reaches the dashboard as the screen reads it
+    /// (t-9468): the line drawn or why none, the table's line, the answers
+    /// at the fixed and drawn lines, and at the table's line the three
+    /// numbers — while zo's grid and the row the replay keeps stay in zo's
+    /// answer.
+    #[test]
+    fn a_summary_carries_the_act_line_the_screen_draws_and_not_the_grid() {
+        let stdout = br#"{"seats":[{"id":"notify","stand":"recording","applies":false,
+          "today":{"rows":1,"answered":1},"week":{"rows":1,"answered":1},
+          "calibration":{"readsActLine":true,"marksWanted":40,"actFromPermille":300,"reason":null,
+            "grid":[{"fromPermille":0,"marks":100}],"row":{"seat":"notify","grid":[]},
+            "fixed":{"fromPermille":850,"marks":50,"applyShare":0.5,"errorPermille":60,
+                     "baselineErrorPermille":1000,"underErrorPermille":500},
+            "drawn":{"fromPermille":300,"marks":50,"applyShare":0.5,"errorPermille":60,
+                     "baselineErrorPermille":1000,"underErrorPermille":500},
+            "tableLine":300,"atTableLine":{"fromPermille":300}},
+          "applyShare":0.5,"appliedErrorPermille":60,"baselineErrorPermille":1000}]}"#;
+        let notify = &read_summary(stdout).expect("a summary")[0];
+        let calibration = notify.calibration.as_ref().expect("the act line");
+        assert_eq!(
+            (
+                calibration.act_from_permille,
+                calibration.table_line,
+                calibration.reason.as_deref()
+            ),
+            (Some(300), Some(300), None)
+        );
+        assert_eq!(calibration.fixed.map(|at| at.from_permille), Some(850));
+        assert_eq!(
+            (
+                notify.apply_share,
+                notify.applied_error_permille,
+                notify.baseline_error_permille
+            ),
+            (Some(0.5), Some(60), Some(1_000))
+        );
+        let drawn = serde_json::to_value(notify).expect("serializes");
+        assert_eq!(drawn["calibration"]["drawn"]["underErrorPermille"], 500);
+        assert!(
+            drawn["calibration"].get("grid").is_none() && drawn["calibration"].get("row").is_none(),
+            "the grid and the row stay in zo's answer: {}",
+            drawn["calibration"]
+        );
     }
 
     /// The command line the window execs is the one zo's CLI documents.
@@ -2096,6 +2142,21 @@ pub struct SeatNumbers {
     /// them ([`ZO_JEV_SUMMARY_RECENT_FLAG`]); empty otherwise.
     #[serde(default)]
     pub recent: Vec<SeatDecision>,
+    /// What the seat's graded answers say of its act line, beside the line
+    /// the product reads for it now (t-9468) — absent from a zo older than
+    /// the act line, and for a seat that never rises.
+    #[serde(default)]
+    pub calibration: Option<SeatCalibration>,
+    /// At the line the product reads for the seat now: the share of its
+    /// answered requests it acts on, how often the marks of what it acts on
+    /// say it was wrong, and how often its baseline was on the same marks,
+    /// per thousand (t-9468) — absent while no line is read for it.
+    #[serde(default)]
+    pub apply_share: Option<f64>,
+    #[serde(default)]
+    pub applied_error_permille: Option<u16>,
+    #[serde(default)]
+    pub baseline_error_permille: Option<u16>,
     /// The file zo read the seat's rows from — kept to say where they are
     /// kept ([`crate::jev_scope::with_reach`]), never sent on: a path of the
     /// person's disk is not the dashboard's to draw.
@@ -2111,6 +2172,53 @@ pub struct SeatNumbers {
     /// reading of one checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub across: Option<crate::jev_scope::SeatAcross>,
+}
+
+/// What a seat's graded answers say of its act line (t-9468), as the
+/// dashboard reads it: the line they draw or why none, the line the product
+/// reads now, and the answers at the bands' fixed line and at the drawn one.
+/// zo's grid and the row the replay keeps stay in zo's answer — the screen
+/// draws none of them.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatCalibration {
+    #[serde(default)]
+    pub reads_act_line: bool,
+    /// The line the graded answers draw, per thousand — or why none
+    /// (`reason`: `whole`, `one_colour`, `non_monotone`, `no_lift`,
+    /// `no_confidence`, or the judge's own line word).
+    #[serde(default)]
+    pub act_from_permille: Option<u16>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// The line the product reads for the seat now — the table's row.
+    #[serde(default)]
+    pub table_line: Option<u16>,
+    /// The answers at the line the seat's bands fix, and at the drawn one.
+    #[serde(default)]
+    pub fixed: Option<SeatLine>,
+    #[serde(default)]
+    pub drawn: Option<SeatLine>,
+}
+
+/// A seat's graded answers at one line: the line, how many marks it holds,
+/// the share of answered requests it acts on, and how often the marks of
+/// what it acts on, the baseline on those marks and the marks of what it
+/// leaves alone say wrong, per thousand.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatLine {
+    pub from_permille: u16,
+    #[serde(default)]
+    pub marks: usize,
+    #[serde(default)]
+    pub apply_share: Option<f64>,
+    #[serde(default)]
+    pub error_permille: Option<u16>,
+    #[serde(default)]
+    pub baseline_error_permille: Option<u16>,
+    #[serde(default)]
+    pub under_error_permille: Option<u16>,
 }
 
 /// One local day of a seat's ledger, counted the way the week is.
@@ -2193,6 +2301,10 @@ pub struct SeatAgreement {
     /// Label rows that compared nothing and said why.
     #[serde(default)]
     pub not_compared: usize,
+    /// Why, word by word — the writers' own words with their counts
+    /// (t-9556); empty from a zo older than the words.
+    #[serde(default)]
+    pub not_compared_by: std::collections::BTreeMap<String, usize>,
 }
 
 /// What the judge said of a seat's recent window.

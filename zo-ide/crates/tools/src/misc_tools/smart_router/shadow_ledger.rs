@@ -197,7 +197,10 @@ pub fn judge_seat_rows(
     if !promote::judgment_due_on(seat, &version, rows) {
         return None;
     }
-    let judged = promote::judge_seat_on(seat, &version, rows)?;
+    // The act line the seat's labels drew, kept beside this ledger (t-9468):
+    // a seat acting from one is judged on the answers it lets act.
+    let line = zerocode_core::jev::threshold::line_beside(seat, ledger);
+    let judged = promote::judge_seat_at(seat, &version, rows, line)?;
     if let Some(row) = promote::transition_row(seat, now_ms, judged.verdict, &judged.window) {
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }

@@ -435,6 +435,10 @@ pub const SEAT: &[(&str, Carry)] = &[
     ("model", Carry::Agreed),
     ("days", Carry::Days),
     ("recent", Carry::Newest),
+    ("calibration", Carry::Own),
+    ("applyShare", Carry::Own),
+    ("appliedErrorPermille", Carry::Own),
+    ("baselineErrorPermille", Carry::Own),
     ("reach", Carry::Across),
     ("across", Carry::Across),
 ];
@@ -469,6 +473,7 @@ pub const AGREEMENT: &[(&str, Carry)] = &[
     ("baselineAgreed", Carry::Add),
     (BASELINE_SHARE, Carry::Recounted),
     ("notCompared", Carry::Add),
+    ("notComparedBy", Carry::Add),
 ];
 
 /// One calendar day of a seat's trend.
@@ -927,7 +932,8 @@ mod tests {
                 json!({
                     "verdict": { "verdict": "hold", "line": "too_few_rows" }, "rowsToNextJudgment": 50,
                     "costUsd": 0.002, "riseFloorPermille": 950, "model": "jev-1.13.0",
-                    "agreementWeek": { "compared": 3, "agreed": 3, "baselineCompared": 2, "baselineAgreed": 1 },
+                    "agreementWeek": { "compared": 3, "agreed": 3, "baselineCompared": 2, "baselineAgreed": 1,
+                                       "notCompared": 1, "notComparedBy": { "unanswered": 1 } },
                     "days": [day(1_000, 20), day(2_000, 3)],
                     "recent": [{ "at": 30, "outcome": "answered" }, { "at": 10, "outcome": "answered" }],
                 }),
@@ -948,7 +954,8 @@ mod tests {
             true,
             json!({
                 "verdict": { "verdict": "hold", "line": "answered" }, "costUsd": 0.001, "riseFloorPermille": 950, "model": "jev-1.12.0",
-                "agreementWeek": { "compared": 1, "agreed": 0 },
+                "agreementWeek": { "compared": 1, "agreed": 0, "notCompared": 2,
+                                   "notComparedBy": { "unanswered": 1, "away": 1 } },
                 "days": [day(2_000, 5), day(3_000, 1)],
                 "recent": [{ "at": 20, "outcome": "timeout" }],
             }),
@@ -1027,10 +1034,17 @@ mod tests {
             agreed: 3,
             baseline_compared: 2,
             baseline_agreed: 1,
-            not_compared: 0,
+            not_compared: 3,
         };
         assert_eq!(week.lower_bound, marks.lower_bound());
         assert_eq!(week.baseline_share, marks.baseline_share());
+        // Why the rows compared nothing, added word by word (t-9556).
+        let sent = serde_json::to_value(routing).expect("the seat, sent");
+        assert_eq!(sent["agreementWeek"]["notCompared"], 3);
+        assert_eq!(
+            sent["agreementWeek"]["notComparedBy"],
+            json!({ "unanswered": 2, "away": 1 })
+        );
         let days: Vec<(i64, usize)> = routing
             .days
             .iter()
@@ -1113,7 +1127,7 @@ mod tests {
             "p50Ms": 1, "p95Ms": 1, "redactedLines": 0, "called": 1, "requests": 1, "inputTokens": 1, "applied": 0,
             "failures": [], "refusals": [], "guards": {}, "controls": {} });
         let marks = json!({ "compared": 1, "agreed": 1, "lowerBound": 0.2, "controlRows": 0, "baselineCompared": 1,
-            "baselineAgreed": 1, "baselineShare": 1.0, "notCompared": 0 });
+            "baselineAgreed": 1, "baselineShare": 1.0, "notCompared": 0, "notComparedBy": {} });
         let full: SeatNumbers = serde_json::from_value(json!({
             "id": "routing", "stand": "recording", "applies": false,
             "verdict": { "verdict": "hold" }, "rowsToNextJudgment": 1, "riseFloorPermille": 950, "clearsRiseFloor": false,

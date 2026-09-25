@@ -276,8 +276,14 @@ pub(super) fn acting_cause(
     if !crate::systemone::applies(&wire, &STALL) {
         return None;
     }
+    // Only an answer its act line lets act — the line its labels drew
+    // (t-9468), every answer while they drew none.
+    let line = crate::systemone::act_line(&wire, &STALL);
     let held = book.lock().unwrap_or_else(|held| held.into_inner());
-    held.answered.get(dispatch).map(|(cause, _)| *cause)
+    held.answered
+        .get(dispatch)
+        .filter(|(_, confidence)| STALL.acts_on(*confidence, line))
+        .map(|(cause, _)| *cause)
 }
 
 /// The cause the seat last named for `dispatch`'s silence, whatever the seat's
@@ -309,11 +315,13 @@ pub(super) fn acting_judgments(
     if !crate::systemone::applies(&wire, &STALL) {
         return Vec::new();
     }
+    let line = crate::systemone::act_line(&wire, &STALL);
     let held = book.lock().unwrap_or_else(|held| held.into_inner());
     quiet
         .filter_map(|(worker, dispatch, since_ms)| {
             let (cause, confidence) = held.answered.get(&dispatch)?;
-            if *cause == stall_cause::Cause::TransientApiError {
+            if *cause == stall_cause::Cause::TransientApiError || !STALL.acts_on(*confidence, line)
+            {
                 return None;
             }
             Some(zerocode_core::orchestration::StallJudged {

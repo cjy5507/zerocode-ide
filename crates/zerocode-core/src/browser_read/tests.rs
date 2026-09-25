@@ -149,6 +149,15 @@ fn only_a_chrome_answer_over_the_seats_own_line_is_dropped() {
     );
     // 0.6 sits under BROWSER_READ_FOLD_FLOOR_PERMILLE (700): the aside stays.
     assert_eq!(verdict.droppable(&BROWSER_READ), vec![0, 1, 5]);
+    // From an act line the seat's labels drew (t-9468) in place of the
+    // floor: none at all, the floor's own; 0.85, the two surest; 0.5, the
+    // aside too.
+    assert_eq!(verdict.droppable_at(&BROWSER_READ, None), vec![0, 1, 5]);
+    assert_eq!(verdict.droppable_at(&BROWSER_READ, Some(850)), vec![0, 5]);
+    assert_eq!(
+        verdict.droppable_at(&BROWSER_READ, Some(500)),
+        vec![0, 1, 3, 5]
+    );
     let folded = fold(
         &blocks,
         &verdict.droppable(&BROWSER_READ),

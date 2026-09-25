@@ -165,7 +165,11 @@ pub fn record_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
     if !zerocode_core::jev::promote::judgment_due_on(seat, &version, &held) {
         return;
     }
-    let Some(judged) = zerocode_core::jev::promote::judge_seat_on(seat, &version, &held) else {
+    // A seat acting from the act line its labels drew is judged on the
+    // answers that line lets act (t-9468).
+    let line = zerocode_core::jev::threshold::line_beside(seat, ledger);
+    let Some(judged) = zerocode_core::jev::promote::judge_seat_at(seat, &version, &held, line)
+    else {
         return;
     };
     if let Some(row) =
@@ -173,6 +177,17 @@ pub fn record_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
     {
         append_rows(ledger, std::slice::from_ref(&row));
     }
+}
+
+/// The act line `seat`'s graded answers drew, as the product reads it: the
+/// row of the table beside the seat's ledger (t-9468,
+/// [`zerocode_core::jev::threshold::line_beside`]). `None` — the seat acts
+/// from its own line, as it always has — for a seat with no such row, a
+/// stage that reads no line, or no zo home to look in. Read where the seat
+/// is about to act, off the wire the question went down, like [`applies`].
+#[must_use]
+pub fn act_line(wire: &Wire, seat: &JevUse) -> Option<u16> {
+    zerocode_core::jev::threshold::line_beside(seat, &ledger_of(wire, seat)?)
 }
 
 /// Every row of one use's ledger, newest last — the same reader zo's counter

@@ -14,6 +14,7 @@ fn the_usage_names_every_verb_and_flag() {
         "--cwd",
         "--json",
         "--recent",
+        "--act-lines",
         "--context",
         "--option",
         "--level",
@@ -48,6 +49,7 @@ fn the_flags_are_read_in_either_order() {
         cwd: Some(std::path::PathBuf::from("/tmp/x")),
         sessions: None,
         recent: 0,
+        act_lines: false,
         json: true,
     });
     let one = parse(&words(&["summary", "--json", "--cwd", "/tmp/x"]));
@@ -56,12 +58,27 @@ fn the_flags_are_read_in_either_order() {
     assert_eq!(two.as_ref(), Ok(&want));
 }
 
+/// The replay asks for every line of each seat's grid and the row it keeps
+/// (t-9468); nobody else does.
+#[test]
+fn the_act_lines_are_read_off_their_flag() {
+    let Ok(Request::Summary(asked)) = parse(&words(&["summary", "--json", "--act-lines"])) else {
+        panic!("a summary");
+    };
+    assert!(asked.act_lines && asked.json);
+    let Ok(Request::Summary(plain)) = parse(&words(&["summary", "--json"])) else {
+        panic!("a summary");
+    };
+    assert!(!plain.act_lines);
+}
+
 #[test]
 fn the_sessions_folder_is_read_off_its_flag() {
     let want = Request::Summary(SummaryRequest {
         cwd: None,
         sessions: Some(std::path::PathBuf::from("/tmp/cu")),
         recent: 0,
+        act_lines: false,
         json: false,
     });
     assert_eq!(parse(&words(&["summary", "--computer-use", "/tmp/cu"])).as_ref(), Ok(&want));
@@ -73,7 +90,7 @@ fn the_sessions_folder_is_read_off_its_flag() {
 
 #[test]
 fn the_recent_count_is_read_off_its_flag_and_refused_when_it_is_not_a_count() {
-    let want = Request::Summary(SummaryRequest { cwd: None, sessions: None, recent: 12, json: true });
+    let want = Request::Summary(SummaryRequest { cwd: None, sessions: None, recent: 12, act_lines: false, json: true });
     assert_eq!(parse(&words(&["summary", "--recent", "12", "--json"])).as_ref(), Ok(&want));
     assert_eq!(parse(&words(&["summary", "--recent"])).unwrap_err().message, "--recent needs a count");
     assert!(
@@ -222,7 +239,7 @@ fn the_json_carries_the_days_the_refusals_the_applied_count_and_the_recent_list(
     )
     .expect("write");
     let seats = tools::jev_summary::report_with_recent(&roots, None, None, 1_000, 0, 3);
-    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
     let placement = value["seats"]
         .as_array()
         .expect("seats")
@@ -247,10 +264,129 @@ fn the_json_carries_the_days_the_refusals_the_applied_count_and_the_recent_list(
     assert_eq!(recent[1]["asked"], serde_json::json!({"task": "t-1", "worker": "w-1"}));
     assert_eq!(recent[1]["confidence"], 0.6);
     let unasked = tools::jev_summary::report(&roots, None, None, 1_000, 0);
-    let without: serde_json::Value = serde_json::from_str(&render_json(&unasked).to_string()).expect("json");
+    let without: serde_json::Value = serde_json::from_str(&render_json(&unasked, false).to_string()).expect("json");
     let placement = without["seats"].as_array().expect("seats").iter().find(|row| row["id"] == seat.id).expect("placement");
     assert_eq!(placement["recent"], serde_json::json!([]), "nothing listed unless asked");
     assert_eq!(placement["days"].as_array().map(Vec::len), Some(7), "the days always ride");
+}
+
+/// Every agreement the JSON carries says why its rows compare nothing, word
+/// by word (t-9556): the words the label rows wrote, each with its count, so
+/// a screen says "not carried 2 · unseen 1" and not only "3". A row that
+/// carries a mark is a mark, whatever else it spells.
+#[test]
+fn the_json_says_why_the_rows_compare_nothing_word_by_word() {
+    use zerocode_core::worker_placement::{NOT_CARRIED, UNSEEN};
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::PLACEMENT;
+    let asked = |at: i64, worker: &str| {
+        serde_json::json!({"at": at, "placement": worker, "outcome": "answered", "elapsedMs": 40, "requests": 1,
+                           "chosen": "split", "confidence": 0.7, "rubricVersion": seat.rubric_version})
+    };
+    let rows = [
+        asked(100, "w-1"),
+        asked(110, "w-2"),
+        asked(120, "w-3"),
+        asked(130, "w-4"),
+        serde_json::json!({"at": 200, "label": "w-1", "notCompared": UNSEEN}),
+        serde_json::json!({"at": 210, "label": "w-2", "notCompared": NOT_CARRIED}),
+        serde_json::json!({"at": 220, "label": "w-3", "notCompared": NOT_CARRIED}),
+        serde_json::json!({"at": 230, "label": "w-4", "agreed": true, "notCompared": UNSEEN}),
+    ];
+    std::fs::write(
+        home.path().join(seat.ledger),
+        rows.iter().map(|row| row.to_string() + "\n").collect::<String>(),
+    )
+    .expect("write");
+    let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
+    let placement = value["seats"]
+        .as_array()
+        .expect("seats")
+        .iter()
+        .find(|row| row["id"] == seat.id)
+        .expect("placement");
+    let words = serde_json::json!({ NOT_CARRIED: 2, UNSEEN: 1 });
+    assert_eq!(placement["agreementWeek"]["notCompared"], 3);
+    assert_eq!(placement["agreementWeek"]["notComparedBy"], words, "the week");
+    assert_eq!(placement["judged"]["agreement"]["notComparedBy"], words, "the judged window");
+    assert_eq!(placement["days"][6]["agreement"]["notComparedBy"], words, "today");
+    assert_eq!(
+        placement["days"][0]["agreement"]["notComparedBy"],
+        serde_json::json!({}),
+        "a day nothing was withheld on says so"
+    );
+}
+
+/// A seat's act line, end to end (t-9468): the summary says the line the
+/// seat's graded answers draw and the row the replay would keep for it; the
+/// row, kept beside the ledger, is the line the product then reads — the
+/// seat is judged on the answers that line lets act, rises where its whole
+/// record holds, and the JSON says what it acts on and how often that is
+/// wrong beside the baseline.
+#[test]
+fn the_act_line_the_labels_draw_is_the_line_the_seat_reads_once_the_table_keeps_it() {
+    use zerocode_core::jev::threshold::THRESHOLDS_FILE;
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::NOTIFY;
+    // Fifty confident rings, three of them wrong; fifty timid ones, half
+    // wrong; the baseline wrong on every one.
+    let mut rows: Vec<serde_json::Value> = (0..100)
+        .map(|n| {
+            serde_json::json!({"at": 1_000 + n, "notify": format!("r-{n}"), "outcome": "answered", "elapsedMs": 40,
+                               "requests": 1, "confidence": if n % 2 == 0 { 0.9 } else { 0.2 },
+                               "rubricVersion": seat.rubric_version})
+        })
+        .collect();
+    rows.extend((0..100).map(|n| {
+        let agreed = if n % 2 == 0 { n % 34 != 0 } else { n % 4 == 1 };
+        serde_json::json!({"at": 2_000 + n, "label": format!("r-{n}"), "agreed": agreed, "baselineAgreed": false})
+    }));
+    let ledger = home.path().join(seat.ledger);
+    std::fs::write(&ledger, rows.iter().map(|row| row.to_string() + "\n").collect::<String>()).expect("write");
+    let notify = |value: &serde_json::Value| -> serde_json::Value {
+        value["seats"].as_array().expect("seats").iter().find(|row| row["id"] == seat.id).expect("notify").clone()
+    };
+    let read = || {
+        let seats = tools::jev_summary::report(&roots, None, None, 10_000, 0);
+        let value: serde_json::Value = serde_json::from_str(&render_json(&seats, true).to_string()).expect("json");
+        let plain: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
+        assert!(
+            notify(&plain)["calibration"].get("grid").is_none() && notify(&plain)["calibration"].get("row").is_none(),
+            "the grid and the row ride only when --act-lines asks"
+        );
+        (value.clone(), notify(&value))
+    };
+
+    let (value, before) = read();
+    assert_eq!(value["thresholdsFile"], THRESHOLDS_FILE);
+    let calibration = &before["calibration"];
+    assert_eq!(calibration["readsActLine"], true);
+    assert_eq!(calibration["actFromPermille"], 300, "the lowest line the confident rings pass on");
+    assert_eq!(calibration["reason"], serde_json::Value::Null);
+    assert_eq!(calibration["grid"].as_array().map(Vec::len), Some(9));
+    assert_eq!(calibration["fixed"]["fromPermille"], 850, "the bands' own act line");
+    assert_eq!(calibration["drawn"]["marks"], 50);
+    assert_eq!(calibration["tableLine"], serde_json::Value::Null);
+    assert_eq!(before["applyShare"], serde_json::Value::Null, "no line is read yet");
+    assert_eq!(before["verdict"]["verdict"], "hold");
+    assert_eq!(before["verdict"]["line"], "agreement", "the whole record, timid rings and all");
+    assert_eq!(before["verdict"]["actLine"], serde_json::Value::Null);
+
+    // The replay keeps the row beside the ledger; the product reads it.
+    let row = calibration["row"].clone();
+    assert_eq!(row["actFromPermille"], 300);
+    std::fs::write(home.path().join(THRESHOLDS_FILE), serde_json::json!([row]).to_string()).expect("the table");
+    let (_, after) = read();
+    assert_eq!(after["calibration"]["tableLine"], 300);
+    assert_eq!(after["applyShare"], 0.5);
+    assert_eq!(after["appliedErrorPermille"], 60, "three of the fifty it acts on");
+    assert_eq!(after["baselineErrorPermille"], 1_000);
+    assert_eq!(after["verdict"]["verdict"], "rise", "{}", after["verdict"]);
+    assert_eq!(after["verdict"]["actLine"], 300);
+    assert_eq!(after["judged"]["agreement"]["compared"], 50);
 }
 
 /// Every seat's line says which id it asks with and which version answered
@@ -279,7 +415,7 @@ fn the_json_names_the_asked_model_the_answering_version_and_the_cut() {
     .expect("write");
     let placement_of = |settings: Option<&serde_json::Value>| {
         let seats = tools::jev_summary::report(&roots, None, settings, 1_000, 0);
-        let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+        let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
         let placement = value["seats"]
             .as_array()
             .expect("seats")
@@ -304,7 +440,7 @@ fn the_json_names_the_asked_model_the_answering_version_and_the_cut() {
     assert_eq!(placement["askedModel"], zerocode_core::jev::DEFAULT_MODEL, "unpinned, the alias");
     let summon = {
         let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
-        render_json(&seats)["seats"]
+        render_json(&seats, false)["seats"]
             .as_array()
             .expect("seats")
             .iter()
@@ -320,7 +456,7 @@ fn every_seat_the_table_names_reaches_the_json_with_its_own_numbers() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf()];
     let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
-    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
     let seats = value["seats"].as_array().expect("seats");
     assert_eq!(seats.len(), zerocode_core::jev::JEV_USES.len());
     for (row, seat) in seats.iter().zip(zerocode_core::jev::JEV_USES) {
@@ -390,7 +526,7 @@ fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
     // A clock just past the rows, so the day holds them.
     let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
 
-    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
     let routing = value["seats"]
         .as_array()
         .expect("seats")
@@ -420,6 +556,7 @@ fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
             "baselineAgreed": 0,
             "baselineShare": null,
             "notCompared": 0,
+            "notComparedBy": {},
         })
     );
 

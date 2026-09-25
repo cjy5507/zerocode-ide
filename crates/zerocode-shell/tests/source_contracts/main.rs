@@ -1,3 +1,4 @@
+mod act_lines;
 mod agent_capabilities;
 mod bundle_resources;
 mod cli_login;

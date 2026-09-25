@@ -1730,6 +1730,7 @@ fn a_judgment_begun_on_the_last_look_answers_the_next_look_that_asks_the_same_qu
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1763,6 +1764,7 @@ fn a_judgment_begun_ahead_is_dropped_when_the_next_look_asks_another_question() 
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1793,6 +1795,7 @@ fn nothing_is_begun_ahead_where_the_next_screen_is_another_page_or_the_walk_ends
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1814,6 +1817,7 @@ fn nothing_is_begun_ahead_where_the_next_screen_is_another_page_or_the_walk_ends
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1833,6 +1837,7 @@ fn nothing_is_begun_ahead_where_the_next_screen_is_another_page_or_the_walk_ends
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1852,6 +1857,7 @@ fn nothing_is_begun_ahead_where_the_next_screen_is_another_page_or_the_walk_ends
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1887,6 +1893,7 @@ fn a_phone_walk_asks_its_next_question_on_the_screen_its_press_settled_on() {
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1926,6 +1933,7 @@ fn a_preview_the_full_look_disagrees_with_is_dropped_and_the_look_asked_again() 
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1953,6 +1961,7 @@ fn a_world_that_asks_after_its_press_never_asks_before_it() {
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1985,6 +1994,7 @@ fn a_judgment_asked_on_the_settled_screen_hides_behind_the_look() {
             Options {
                 overlap,
                 rescue: false,
+                act_line: None,
             },
             None,
         );
@@ -2065,6 +2075,7 @@ fn a_page_press_that_settles_later_is_judged_on_the_page_it_left_behind_its_sett
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -2116,6 +2127,7 @@ fn a_settle_that_did_not_end_ready_cancels_the_judgment_begun_on_the_page_and_as
             Options {
                 overlap: true,
                 rescue: false,
+                act_line: None,
             },
             None,
         );
@@ -2159,6 +2171,7 @@ fn a_page_that_settled_on_another_question_drops_the_judgment_begun_on_it() {
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -2192,6 +2205,7 @@ fn a_page_that_changes_after_its_press_answered_begins_nothing_on_the_page_it_wa
             &mut judge,
             &mut world,
             Options {
+                act_line: None,
                 overlap: true,
                 rescue: false,
             },
@@ -2258,6 +2272,7 @@ fn a_phone_screen_its_press_left_where_it_was_is_still_asked_on() {
         &mut judge,
         &mut world,
         Options {
+            act_line: None,
             overlap: true,
             rescue: false,
         },
@@ -2294,6 +2309,7 @@ fn every_press_that_settles_later_is_settled_but_only_a_walk_that_asks_ahead_beg
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -2349,6 +2365,7 @@ fn a_settle_waited_for_behind_the_next_judgment_is_hidden_from_the_walk() {
             Options {
                 overlap: true,
                 rescue: false,
+                act_line: None,
             },
             None,
         );
@@ -2415,6 +2432,7 @@ fn a_judgment_hidden_behind_the_press_shortens_the_walk_by_what_it_hid() {
             Options {
                 overlap,
                 rescue: false,
+                act_line: None,
             },
             None,
         );
@@ -2548,6 +2566,7 @@ fn a_judgment_under_the_floor_is_pressed_for_by_the_second_reader_when_it_is_sur
         Options {
             overlap: false,
             rescue: true,
+            act_line: None,
         },
         Some(&mut team),
     );
@@ -2623,6 +2642,7 @@ fn a_second_reader_that_cannot_press_leaves_the_walk_where_today_leaves_it() {
             Options {
                 overlap: false,
                 rescue: true,
+                act_line: None,
             },
             Some(&mut team),
         );
@@ -2664,6 +2684,7 @@ fn a_recovery_under_the_floor_is_pressed_for_and_the_document_walked_again() {
         Options {
             overlap: false,
             rescue: true,
+            act_line: None,
         },
         Some(&mut team),
     );
@@ -2690,6 +2711,7 @@ fn a_sure_judgment_never_asks_the_second_reader() {
         Options {
             overlap: false,
             rescue: true,
+            act_line: None,
         },
         Some(&mut team),
     );
@@ -2751,6 +2773,7 @@ fn the_second_rung_presses_for_the_steps_the_seat_left_and_costs_its_own_turn() 
         Options {
             overlap: false,
             rescue: true,
+            act_line: None,
         },
         Some(&mut team),
     );
@@ -2778,6 +2801,7 @@ fn the_second_rung_presses_for_the_steps_the_seat_left_and_costs_its_own_turn() 
         Options {
             overlap: false,
             rescue: true,
+            act_line: None,
         },
         Some(&mut team),
     );
@@ -3099,6 +3123,7 @@ fn asking_ahead_with_every_head_is_still_one_request_a_step() {
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
