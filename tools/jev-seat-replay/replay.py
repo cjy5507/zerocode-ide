@@ -84,9 +84,10 @@ def project_dir(zo_home: Path, project: Path) -> Path:
     return found[0]
 
 
-def summary(zo: Path, zo_home: Path, project: Path) -> dict:
+def summary(zo: Path, zo_home: Path, project: Path, *more: str) -> dict:
     """`zo jev summary --json --cwd <project>`, run by `zo` with every home it
-    could read or write pointed at `zo_home` and a scratch `HOME`."""
+    could read or write pointed at `zo_home` and a scratch `HOME` — with
+    `more` of the verb's own flags (`--act-lines`, t-9468) when asked."""
     with tempfile.TemporaryDirectory(prefix="jev-seat-replay-home-") as home:
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -96,7 +97,7 @@ def summary(zo: Path, zo_home: Path, project: Path) -> dict:
             "ZO_DISABLE_KEYCHAIN": "1",
         }
         done = subprocess.run(
-            [str(zo), "jev", "summary", "--json", "--cwd", str(project)],
+            [str(zo), "jev", "summary", "--json", "--cwd", str(project), *more],
             env=env,
             capture_output=True,
             text=True,
@@ -385,7 +386,8 @@ def main(argv: list[str]) -> int:
         print(f"{len(copies)} ledgers copied read-only under {args.out / '.zo'}")
         return 0
     if args.verb == "thresholds":
-        answer = summary(args.zo, args.home, args.project)
+        # Every line of the grid and the row to keep ride only when asked.
+        answer = summary(args.zo, args.home, args.project, "--act-lines")
         name = answer.get("thresholdsFile")
         if not name:
             raise SystemExit(f"{args.zo}: this binary names no thresholds file")

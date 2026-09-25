@@ -14,6 +14,7 @@ fn the_usage_names_every_verb_and_flag() {
         "--cwd",
         "--json",
         "--recent",
+        "--act-lines",
         "--context",
         "--option",
         "--level",
@@ -48,6 +49,7 @@ fn the_flags_are_read_in_either_order() {
         cwd: Some(std::path::PathBuf::from("/tmp/x")),
         sessions: None,
         recent: 0,
+        act_lines: false,
         json: true,
     });
     let one = parse(&words(&["summary", "--json", "--cwd", "/tmp/x"]));
@@ -56,12 +58,27 @@ fn the_flags_are_read_in_either_order() {
     assert_eq!(two.as_ref(), Ok(&want));
 }
 
+/// The replay asks for every line of each seat's grid and the row it keeps
+/// (t-9468); nobody else does.
+#[test]
+fn the_act_lines_are_read_off_their_flag() {
+    let Ok(Request::Summary(asked)) = parse(&words(&["summary", "--json", "--act-lines"])) else {
+        panic!("a summary");
+    };
+    assert!(asked.act_lines && asked.json);
+    let Ok(Request::Summary(plain)) = parse(&words(&["summary", "--json"])) else {
+        panic!("a summary");
+    };
+    assert!(!plain.act_lines);
+}
+
 #[test]
 fn the_sessions_folder_is_read_off_its_flag() {
     let want = Request::Summary(SummaryRequest {
         cwd: None,
         sessions: Some(std::path::PathBuf::from("/tmp/cu")),
         recent: 0,
+        act_lines: false,
         json: false,
     });
     assert_eq!(parse(&words(&["summary", "--computer-use", "/tmp/cu"])).as_ref(), Ok(&want));
@@ -73,7 +90,7 @@ fn the_sessions_folder_is_read_off_its_flag() {
 
 #[test]
 fn the_recent_count_is_read_off_its_flag_and_refused_when_it_is_not_a_count() {
-    let want = Request::Summary(SummaryRequest { cwd: None, sessions: None, recent: 12, json: true });
+    let want = Request::Summary(SummaryRequest { cwd: None, sessions: None, recent: 12, act_lines: false, json: true });
     assert_eq!(parse(&words(&["summary", "--recent", "12", "--json"])).as_ref(), Ok(&want));
     assert_eq!(parse(&words(&["summary", "--recent"])).unwrap_err().message, "--recent needs a count");
     assert!(
@@ -222,7 +239,7 @@ fn the_json_carries_the_days_the_refusals_the_applied_count_and_the_recent_list(
     )
     .expect("write");
     let seats = tools::jev_summary::report_with_recent(&roots, None, None, 1_000, 0, 3);
-    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
     let placement = value["seats"]
         .as_array()
         .expect("seats")
@@ -247,7 +264,7 @@ fn the_json_carries_the_days_the_refusals_the_applied_count_and_the_recent_list(
     assert_eq!(recent[1]["asked"], serde_json::json!({"task": "t-1", "worker": "w-1"}));
     assert_eq!(recent[1]["confidence"], 0.6);
     let unasked = tools::jev_summary::report(&roots, None, None, 1_000, 0);
-    let without: serde_json::Value = serde_json::from_str(&render_json(&unasked).to_string()).expect("json");
+    let without: serde_json::Value = serde_json::from_str(&render_json(&unasked, false).to_string()).expect("json");
     let placement = without["seats"].as_array().expect("seats").iter().find(|row| row["id"] == seat.id).expect("placement");
     assert_eq!(placement["recent"], serde_json::json!([]), "nothing listed unless asked");
     assert_eq!(placement["days"].as_array().map(Vec::len), Some(7), "the days always ride");
@@ -283,7 +300,7 @@ fn the_json_says_why_the_rows_compare_nothing_word_by_word() {
     )
     .expect("write");
     let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
-    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
     let placement = value["seats"]
         .as_array()
         .expect("seats")
@@ -334,7 +351,12 @@ fn the_act_line_the_labels_draw_is_the_line_the_seat_reads_once_the_table_keeps_
     };
     let read = || {
         let seats = tools::jev_summary::report(&roots, None, None, 10_000, 0);
-        let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+        let value: serde_json::Value = serde_json::from_str(&render_json(&seats, true).to_string()).expect("json");
+        let plain: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
+        assert!(
+            notify(&plain)["calibration"].get("grid").is_none() && notify(&plain)["calibration"].get("row").is_none(),
+            "the grid and the row ride only when --act-lines asks"
+        );
         (value.clone(), notify(&value))
     };
 
@@ -393,7 +415,7 @@ fn the_json_names_the_asked_model_the_answering_version_and_the_cut() {
     .expect("write");
     let placement_of = |settings: Option<&serde_json::Value>| {
         let seats = tools::jev_summary::report(&roots, None, settings, 1_000, 0);
-        let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+        let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
         let placement = value["seats"]
             .as_array()
             .expect("seats")
@@ -418,7 +440,7 @@ fn the_json_names_the_asked_model_the_answering_version_and_the_cut() {
     assert_eq!(placement["askedModel"], zerocode_core::jev::DEFAULT_MODEL, "unpinned, the alias");
     let summon = {
         let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
-        render_json(&seats)["seats"]
+        render_json(&seats, false)["seats"]
             .as_array()
             .expect("seats")
             .iter()
@@ -434,7 +456,7 @@ fn every_seat_the_table_names_reaches_the_json_with_its_own_numbers() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf()];
     let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
-    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
     let seats = value["seats"].as_array().expect("seats");
     assert_eq!(seats.len(), zerocode_core::jev::JEV_USES.len());
     for (row, seat) in seats.iter().zip(zerocode_core::jev::JEV_USES) {
@@ -504,7 +526,7 @@ fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
     // A clock just past the rows, so the day holds them.
     let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
 
-    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
     let routing = value["seats"]
         .as_array()
         .expect("seats")

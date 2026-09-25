@@ -599,12 +599,26 @@ pub fn last_asked(rows: &[Value], n: usize) -> Vec<&Value> {
 /// ([`crate::jev::promote::OnVersion::requests`]), held by reference.
 #[must_use]
 pub fn last_asked_of<'a>(rows: impl IntoIterator<Item = &'a Value>, n: usize) -> Vec<&'a Value> {
-    let asked: Vec<&Value> = rows
+    last_asked_with(rows.into_iter().map(|row| (row, ())), n)
         .into_iter()
-        .filter(|row| asked_something(row).is_some())
+        .map(|(row, ())| row)
+        .collect()
+}
+
+/// [`last_asked_of`] over rows that carry something beside them — the
+/// judged window with each request's confidence (t-9468) — picked by the
+/// one rule, so the window and what rides beside it cannot fall apart.
+#[must_use]
+pub fn last_asked_with<'a, T>(
+    rows: impl IntoIterator<Item = (&'a Value, T)>,
+    n: usize,
+) -> Vec<(&'a Value, T)> {
+    let mut asked: Vec<(&Value, T)> = rows
+        .into_iter()
+        .filter(|(row, _)| asked_something(row).is_some())
         .collect();
     let from = asked.len().saturating_sub(n);
-    asked[from..].to_vec()
+    asked.split_off(from)
 }
 
 /// How many requests at the end of the ledger did not answer, stopping at the

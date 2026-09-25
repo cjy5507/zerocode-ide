@@ -101,8 +101,8 @@ use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, JevUse, Naming};
 use crate::jev::summary::{
     AGREED, ANSWERED, AT, BASELINE_AGREED, JUDGED_EVERY_ROWS, LABEL, MODEL, NOT_COMPARED,
     REQUEST_AT, RUBRIC_VERSION, RUBRIC_VERSIONS, TRANSITION, Tally, WILSON_Z_95, asked_something,
-    failures_in_a_row_of, is_control_row, is_request_or_mark, last_asked_of,
-    rows_that_can_clear_forgiving, wilson_lower,
+    failures_in_a_row_of, is_control_row, is_request_or_mark, rows_that_can_clear_forgiving,
+    wilson_lower,
 };
 use crate::jev::threshold::{CALIBRATION, Graded, answer_confidence};
 
@@ -229,6 +229,9 @@ pub struct OnVersion<'rows> {
     /// label's own copy where the request carries none (the guards' labels
     /// carry the deciding answer's lean). `None` where neither says one.
     pub mark_confidences: Vec<Option<f64>>,
+    /// Beside each of [`Self::requests`], the confidence the same way: a
+    /// request's own, or the copy its newest label carries.
+    pub request_confidences: Vec<Option<f64>>,
 }
 
 impl<'rows> OnVersion<'rows> {
@@ -242,9 +245,10 @@ impl<'rows> OnVersion<'rows> {
     }
 
     /// The series' graded answers (t-9468): every mark
-    /// ([`crate::jev::summary::AGREED`]) whose answer says the confidence it
-    /// was given with, beside the baseline's mark on the same fact — what a
-    /// seat's act line is read off ([`crate::jev::threshold::calibrate`]).
+    /// ([`crate::jev::summary::AGREED`]) with the confidence its answer was
+    /// given with, where the rows say one, beside the baseline's mark on the
+    /// same fact — what a seat's act line is read off
+    /// ([`crate::jev::threshold::calibrate`]).
     #[must_use]
     pub fn graded(&self) -> Vec<Graded> {
         self.marks
@@ -252,7 +256,7 @@ impl<'rows> OnVersion<'rows> {
             .zip(&self.mark_confidences)
             .filter_map(|(row, confidence)| {
                 Some(Graded {
-                    confidence: (*confidence)?,
+                    confidence: *confidence,
                     agreed: AGREED.read(row).and_then(Value::as_bool)?,
                     baseline: BASELINE_AGREED.read(row).and_then(Value::as_bool),
                 })
@@ -261,10 +265,28 @@ impl<'rows> OnVersion<'rows> {
     }
 
     /// The confidence each answered request of the series was given with —
-    /// `None` for one whose row says none, which no act line acts on.
+    /// `None` for one whose rows say none, which no act line acts on.
     #[must_use]
     pub fn answered(&self) -> Vec<Option<f64>> {
-        answered_confidences(self.requests.iter().copied())
+        answered_confidences(
+            self.requests
+                .iter()
+                .copied()
+                .zip(self.request_confidences.iter().copied()),
+        )
+    }
+
+    /// The judged window — the last `n` requests of the series — each with
+    /// the confidence its answer was given with.
+    #[must_use]
+    pub fn window(&self, n: usize) -> Vec<(&'rows Value, Option<f64>)> {
+        crate::jev::summary::last_asked_with(
+            self.requests
+                .iter()
+                .copied()
+                .zip(self.request_confidences.iter().copied()),
+            n,
+        )
     }
 
     /// The marks a seat acting from `line` is judged on (t-9468): with no
@@ -286,10 +308,12 @@ impl<'rows> OnVersion<'rows> {
 }
 
 /// The confidence each answered request among `rows` was given with.
-fn answered_confidences<'a>(rows: impl IntoIterator<Item = &'a Value>) -> Vec<Option<f64>> {
+fn answered_confidences<'a>(
+    rows: impl IntoIterator<Item = (&'a Value, Option<f64>)>,
+) -> Vec<Option<f64>> {
     rows.into_iter()
-        .filter(|row| asked_something(row) == Some(ANSWERED))
-        .map(answer_confidence)
+        .filter(|(row, _)| asked_something(row) == Some(ANSWERED))
+        .map(|(_, confidence)| confidence)
         .collect()
 }
 
@@ -577,6 +601,17 @@ pub fn on_the_newest_version<'rows>(seat: &JevUse, rows: &'rows [Value]) -> OnVe
             newest_label.insert((request, Name::of(seat.label_part, row)), at);
         }
     }
+    // The copy of the answer's confidence each request's newest label
+    // carries — what a request that says none is read by (the guards').
+    let mut labelled: HashMap<usize, f64> = HashMap::new();
+    for (at, row) in rows.iter().enumerate() {
+        if let Some(InSeries::Grades(request)) = kind[at]
+            && newest_label.get(&(request, Name::of(seat.label_part, row))) == Some(&at)
+            && let Some(confidence) = answer_confidence(row)
+        {
+            labelled.insert(request, confidence);
+        }
+    }
     // The series, and beside each row the version that answered it and
     // the confidence the answer was given with: a request's own, a label's
     // its request's.
@@ -586,7 +621,10 @@ pub fn on_the_newest_version<'rows>(seat: &JevUse, rows: &'rows [Value]) -> OnVe
     for (at, row) in rows.iter().enumerate() {
         let (version, confidence) = match kind[at] {
             None => continue,
-            Some(InSeries::Asked) => (named_version(row), answer_confidence(row)),
+            Some(InSeries::Asked) => (
+                named_version(row),
+                answer_confidence(row).or_else(|| labelled.get(&at).copied()),
+            ),
             Some(InSeries::Grades(request)) => {
                 // Of two labels naming one request and one part of it, the
                 // newest.
@@ -637,6 +675,7 @@ pub fn on_the_newest_version<'rows>(seat: &JevUse, rows: &'rows [Value]) -> OnVe
         requests: series[requests_from..].to_vec(),
         marks,
         mark_confidences,
+        request_confidences: given_with[requests_from..].to_vec(),
         rows: series,
     }
 }
@@ -720,7 +759,8 @@ pub fn judge_seat_at(
     let sample_floor = seat
         .agreement_rows_wanted
         .unwrap_or(A_WINDOW_OF_COMPARISONS);
-    let held = last_asked_of(version.requests.iter().copied(), window_wanted);
+    let held_with = version.window(window_wanted);
+    let held: Vec<&Value> = held_with.iter().map(|(row, _)| *row).collect();
     let since_ms = held
         .first()
         .and_then(|row| AT.read(row).and_then(Value::as_i64))
@@ -758,7 +798,7 @@ pub fn judge_seat_at(
             negatives_wanted: seat.negatives_wanted.unwrap_or(0),
             disagreed_on_record: record.disagreed(),
             baseline: seat.baseline,
-            apply_share: apply_share_of(held.iter().copied(), line),
+            apply_share: apply_share_of(held_with.iter().copied(), line),
         },
     );
     Some(Judged {
@@ -775,12 +815,14 @@ pub fn judge_seat_at(
 }
 
 /// The share of a window's answered requests a seat acting from `line`
-/// acts on, beside the floor it must reach ([`CALIBRATION`]) — `None` for
-/// a seat with no line, which is not held to one (t-9468). A request that
-/// says no confidence is one the line does not act on.
+/// acts on — the window as [`OnVersion::window`] hands it, each request
+/// beside its answer's confidence — with the floor it must reach
+/// ([`CALIBRATION`]); `None` for a seat with no line, which is not held to
+/// one (t-9468). A request that says no confidence is one the line does not
+/// act on.
 #[must_use]
 pub fn apply_share_of<'a>(
-    window: impl IntoIterator<Item = &'a Value>,
+    window: impl IntoIterator<Item = (&'a Value, Option<f64>)>,
     line: Option<u16>,
 ) -> Option<ApplyShare> {
     let line = line?;

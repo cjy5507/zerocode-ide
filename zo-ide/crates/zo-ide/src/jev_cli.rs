@@ -27,7 +27,7 @@ use tools::{JevAnswer, JevCaller, JevQuestion, JevShape, JevVerdict};
 use crate::autonomy::limits::HEADLESS_LOOP_EXIT_DONE;
 
 pub const USAGE: &str = "\
-zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--recent <n>] [--json]
+zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--recent <n>] [--act-lines] [--json]
 zo jev ask <question> [--context <text>] [--cwd <dir>] [--json]
 zo jev choose <question> (--option <text>... | --stdin) [--context <text>] [--cwd <dir>] [--json]
 zo jev score <question> --level <text>... (--item <text>... | --stdin) [--cwd <dir>] [--json]
@@ -48,6 +48,10 @@ zo jev score <question> --level <text>... (--item <text>... | --stdin) [--cwd <d
   what it answered, whether that was acted on, and what the seat's own
   writer later said of it — read from the same rows in the same pass.
   Every seat also carries its last seven local days, one count per day.
+  Every seat that can rise says where one answer may act alone: the line
+  its graded answers draw, or why none, and the line the product reads
+  now; --act-lines adds every line of the grid the answers were read at
+  and the row `tools/jev-seat-replay thresholds` keeps beside the ledger.
 
   ask / choose / score: put your own question to Jev, TypeSafe's typed
   judge, through the door every seat passes (smart.agentTool in the ZeroCode
@@ -87,6 +91,9 @@ struct SummaryRequest {
     sessions: Option<PathBuf>,
     /// How many of each seat's last requests to list; none by default.
     recent: usize,
+    /// Whether each seat's calibration carries its whole grid and the row
+    /// the replay keeps (t-9468) — the replay's ask; a screen draws neither.
+    act_lines: bool,
     json: bool,
 }
 
@@ -131,11 +138,12 @@ fn parse(args: &[String]) -> Result<Request, Refused> {
 
 fn parse_summary(args: &[String]) -> Result<SummaryRequest, Refused> {
     let refuse = |message: String| Refused { message, exit: SUMMARY_REFUSED_EXIT };
-    let mut request = SummaryRequest { cwd: None, sessions: None, recent: 0, json: false };
+    let mut request = SummaryRequest { cwd: None, sessions: None, recent: 0, act_lines: false, json: false };
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--json" => request.json = true,
+            "--act-lines" => request.act_lines = true,
             "--cwd" => {
                 let dir = rest.next().ok_or_else(|| refuse("--cwd needs a directory".to_string()))?;
                 request.cwd = Some(PathBuf::from(dir));
@@ -254,7 +262,7 @@ fn run_summary(request: &SummaryRequest, cwd: &Path, now_ms: i64, offset_s: i64)
     );
     Report {
         text: if request.json {
-            render_json(&seats).to_string()
+            render_json(&seats, request.act_lines).to_string()
         } else {
             render_text(&seats)
         },
@@ -416,27 +424,30 @@ fn decision_json(decision: &jev_summary::SeatDecision) -> Value {
     })
 }
 
-/// What a seat's graded answers say of its act line (t-9468): the grid, the
-/// line they draw or why none, the answers at the seat's fixed line and at
-/// the drawn one, and the line the product reads now with the row the replay
-/// would write for it.
-fn calibration_json(id: &str, calibration: &SeatCalibration) -> Value {
+/// What a seat's graded answers say of its act line (t-9468): the line they
+/// draw or why none, the answers at the seat's fixed line and at the drawn
+/// one, and the line the product reads now — and, when `act_lines` asks,
+/// every line of the grid and the row the replay would keep for it.
+fn calibration_json(id: &str, calibration: &SeatCalibration, act_lines: bool) -> Value {
     let calibrated = &calibration.calibrated;
-    json!({
+    let mut said = json!({
         "readsActLine": zerocode_core::jev::jev_use(id).is_some_and(|seat| seat.reads_act_line),
         "marksWanted": calibrated.marks_wanted,
         "actFromPermille": calibrated.line.ok(),
         "reason": calibrated.line.err().map(threshold::NoLine::token),
-        "grid": calibrated.grid.iter().map(AtLine::json).collect::<Vec<Value>>(),
         "fixed": calibration.fixed.as_ref().map(AtLine::json),
         "drawn": calibration.drawn.as_ref().map(AtLine::json),
         "tableLine": calibration.table_line,
         "atTableLine": calibration.at_table_line.as_ref().map(AtLine::json),
-        "row": calibration.row,
-    })
+    });
+    if act_lines {
+        said["grid"] = calibrated.grid.iter().map(AtLine::json).collect::<Vec<Value>>().into();
+        said["row"] = calibration.row.clone().unwrap_or(Value::Null);
+    }
+    said
 }
 
-fn render_json(seats: &[SeatReport]) -> Value {
+fn render_json(seats: &[SeatReport], act_lines: bool) -> Value {
     json!({
         "windowDays": jev_summary::WINDOW_DAYS,
         "judgedEveryRows": jev_summary::JUDGED_EVERY_ROWS,
@@ -512,7 +523,10 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 })),
                 // What the seat's labels say of its act line, and the line
                 // the product reads now (t-9468).
-                "calibration": seat.calibration.as_ref().map(|calibration| calibration_json(seat.id, calibration)),
+                "calibration": seat
+                    .calibration
+                    .as_ref()
+                    .map(|calibration| calibration_json(seat.id, calibration, act_lines)),
                 // At that line: the share of the seat's answered requests it
                 // acts on, how often the marks of what it acts on say it was
                 // wrong, and how often the baseline was on the same marks —

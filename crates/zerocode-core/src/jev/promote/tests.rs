@@ -3045,3 +3045,41 @@ fn a_line_acting_on_too_little_of_the_window_holds_a_seat_and_keeps_an_acting_on
         "apply_share"
     );
 }
+
+/// A request whose row says no confidence is read by the copy its newest
+/// label carries (t-9468): the guards write the deciding answer's lean on
+/// the label and none on the request, and a line read off their marks acts
+/// on requests — so the marks, the answered requests and the window all
+/// read it, and a request no label copied it to stands at no line.
+#[test]
+fn a_request_that_says_no_confidence_is_read_by_its_labels_copy() {
+    use crate::jev::threshold::Graded;
+    use serde_json::json;
+    let seat = &crate::jev::COMMAND_GUARD;
+    let rows = vec![
+        asked_by(seat, 0),
+        asked_by(seat, 1),
+        mark(seat, 2, 0, json!({"agreed": true, "confidence": 0.8})),
+    ];
+    let version = on_the_newest_version(seat, &rows);
+    assert_eq!(version.answered(), vec![Some(0.8), None]);
+    assert_eq!(
+        version.graded(),
+        vec![Graded {
+            confidence: Some(0.8),
+            agreed: true,
+            baseline: None
+        }]
+    );
+    let window: Vec<Option<f64>> = version
+        .window(10)
+        .into_iter()
+        .map(|(_, confidence)| confidence)
+        .collect();
+    assert_eq!(window, vec![Some(0.8), None]);
+    assert_eq!(
+        version.window(1).len(),
+        1,
+        "the window is the last requests, as ever"
+    );
+}

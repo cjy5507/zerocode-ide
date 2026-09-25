@@ -83,12 +83,12 @@ pub fn answer_confidence(row: &Value) -> Option<f64> {
         .filter(|confidence| (0.0..=1.0).contains(confidence))
 }
 
-/// One graded answer: the confidence it was given with, whether the mark
-/// that graded it agreed, and whether the seat's baseline was right on the
-/// same fact, where the writer marked it.
+/// One graded answer: the confidence it was given with, where its rows say
+/// one, whether the mark that graded it agreed, and whether the seat's
+/// baseline was right on the same fact, where the writer marked it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Graded {
-    pub confidence: f64,
+    pub confidence: Option<f64>,
     pub agreed: bool,
     pub baseline: Option<bool>,
 }
@@ -116,7 +116,8 @@ pub struct AtLine {
 }
 
 impl AtLine {
-    /// `graded` and `answered` counted at `from_permille`.
+    /// `graded` and `answered` counted at `from_permille`. A graded answer
+    /// that says no confidence stands at no line, above or under.
     #[must_use]
     pub fn of(graded: &[Graded], answered: &[Option<f64>], from_permille: u16) -> Self {
         let mut at = Self {
@@ -125,7 +126,10 @@ impl AtLine {
             ..Self::default()
         };
         for one in graded {
-            if crate::jev::reaches(one.confidence, from_permille) {
+            let Some(confidence) = one.confidence else {
+                continue;
+            };
+            if crate::jev::reaches(confidence, from_permille) {
                 at.marks += 1;
                 at.agreed += usize::from(one.agreed);
                 if let Some(baseline) = one.baseline {
@@ -237,8 +241,9 @@ fn error_of(marks: usize, agreed: usize) -> Option<u16> {
 /// Why a seat has no act line of its own ([`calibrate`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NoLine {
-    /// None of its graded answers carries the confidence it was given with
-    /// — there is nothing to read a line off.
+    /// Its graded answers carry no confidence they were given with — there
+    /// is nothing to read a line off. A seat with no graded answer at all has
+    /// too few marks ([`Line::TooFewCompared`]).
     NoConfidence,
     /// Every answer, taken whole, already passes what the judge asks of it:
     /// no line is wanted, and the seat stands or falls whole.
@@ -392,7 +397,11 @@ pub fn calibrate(seat: &JevUse, graded: &[Graded], answered: &[Option<f64>]) -> 
         .iter()
         .map(|from| AtLine::of(graded, answered, *from))
         .collect();
-    let line = choose(&grid, &asks);
+    let line = if grid.first().is_some_and(|whole| whole.marks == 0) && !graded.is_empty() {
+        Err(NoLine::NoConfidence)
+    } else {
+        choose(&grid, &asks)
+    };
     Some(Calibrated {
         grid,
         marks_wanted: asks.marks,
@@ -408,7 +417,10 @@ fn choose(grid: &[AtLine], asks: &Asks) -> Result<u16, NoLine> {
         return Err(NoLine::NoConfidence);
     };
     if whole.marks == 0 {
-        return Err(NoLine::NoConfidence);
+        return Err(NoLine::Line(Line::TooFewCompared {
+            compared: 0,
+            wanted: asks.marks,
+        }));
     }
     if asks.broken(whole).is_none() {
         return Err(NoLine::Whole);

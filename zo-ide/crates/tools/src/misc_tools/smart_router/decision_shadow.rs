@@ -1258,7 +1258,8 @@ fn judge_rows_on(
     // control row of another rubric version is left out — its answer meant
     // something else — and a label that grades only such a turn goes with
     // it (the seat's row names a request by its attempt).
-    let held = jev_ledger::last_asked_of(version.requests.iter().copied(), window_wanted);
+    let held_with = version.window(window_wanted);
+    let held: Vec<&serde_json::Value> = held_with.iter().map(|(row, _)| *row).collect();
     let window = jev_ledger::summarize_rows(held.iter().copied(), i64::MIN);
     // The marks of the answers the seat's act line lets act, where its
     // labels drew one (`promote::judge_seat_at`, t-9468); every mark
@@ -1286,7 +1287,7 @@ fn judge_rows_on(
             negatives_wanted: ROUTING.negatives_wanted.unwrap_or(0),
             disagreed_on_record: record.disagreed(),
             baseline: ROUTING.baseline,
-            apply_share: promote::apply_share_of(held.iter().copied(), line),
+            apply_share: promote::apply_share_of(held_with.iter().copied(), line),
         },
     );
     Some(Judged {

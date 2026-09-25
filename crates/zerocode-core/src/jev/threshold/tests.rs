@@ -11,7 +11,7 @@ fn cells(cells: &[(f64, usize, usize, usize)]) -> Vec<Graded> {
     for (confidence, marks, agreed, baseline) in cells {
         for k in 0..*marks {
             graded.push(Graded {
-                confidence: *confidence,
+                confidence: Some(*confidence),
                 agreed: k < *agreed,
                 baseline: Some(k < *baseline),
             });
@@ -23,7 +23,7 @@ fn cells(cells: &[(f64, usize, usize, usize)]) -> Vec<Graded> {
 /// Every graded answer's confidence, as the answered requests' — each
 /// request graded once.
 fn answered_as(graded: &[Graded]) -> Vec<Option<f64>> {
-    graded.iter().map(|one| Some(one.confidence)).collect()
+    graded.iter().map(|one| one.confidence).collect()
 }
 
 fn line_of(seat: &JevUse, graded: &[Graded]) -> Result<u16, NoLine> {
@@ -244,11 +244,26 @@ fn a_line_that_acts_on_too_little_is_no_line() {
     );
 }
 
-/// Nothing graded carries a confidence: nothing to read a line off. A seat
-/// that never rises, or names no bands, is not calibrated at all.
+/// Graded answers that carry no confidence leave nothing to read a line
+/// off; a seat with none graded yet has too few marks. A seat that never
+/// rises, or names no bands, is not calibrated at all.
 #[test]
 fn a_seat_with_no_confident_answers_or_no_lines_is_not_read() {
-    assert_eq!(line_of(&NOTIFY, &[]), Err(NoLine::NoConfidence));
+    let unconfident: Vec<Graded> = cells(&[(0.9, 50, 45, 10)])
+        .into_iter()
+        .map(|one| Graded {
+            confidence: None,
+            ..one
+        })
+        .collect();
+    assert_eq!(line_of(&NOTIFY, &unconfident), Err(NoLine::NoConfidence));
+    assert_eq!(
+        line_of(&NOTIFY, &[]),
+        Err(NoLine::Line(Line::TooFewCompared {
+            compared: 0,
+            wanted: 40
+        }))
+    );
     assert_eq!(calibrate(&crate::jev::AGENT_TOOL, &[], &[]), None);
     assert_eq!(calibrate(&crate::jev::REFLEX_DECIDE, &[], &[]), None);
 }
