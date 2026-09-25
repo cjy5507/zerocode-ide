@@ -21,4 +21,24 @@ after asks with `ANTHROPIC_API_KEY` from the command's environment when a
 person has one — the way their own key reaches it in the window — and offers
 no entry without it; a subscription login is never used.
 
+Arms (`--arms`, default `before,after`): `before`/`after` walk as a plain
+`walk`; `before-ahead`/`after-ahead` walk as `walk --overlap`, asking ahead
+(t-9712). `--scenarios` adds `steps` (`steps.html`, three presses that each
+change the page at once) to `press,repeat,type,observe`.
+
+The running window's door may be older than the build's (a v1.1.25 window
+does not settle a press by number, and knows no `--settle-later`), so the
+probe stands the build's door in front of it: a press by number settles by
+the product's own loop (`settle_with`), each poll one `eval` of the door's
+settle script, stillness counted from the first poll; `--settle-later`
+answers the page the press left and the next `marks` finishes the settle.
+What that stand-in did inside a call is on the call (`inside`), and the
+table says it: settle p50/p95 and how many ended ready, the look a
+settle-later press answered with (preview), the gap from one hand to the
+next, judgments begun ahead that were used, dropped or cancelled, and the
+questions a walk asked in turn and ahead.
+
+    TYPESAFE_API_KEY=… python3 tools/walk-judgment-probe/run.py --before <sha> --out <dir> \
+      --walks 8 --scenarios press,repeat,type,observe,steps --arms before,before-ahead,after-ahead
+
 Validation: `python3 -m unittest discover -s tools/walk-judgment-probe -v`.

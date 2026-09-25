@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Walk steps probe</title>
+<style>body{font:18px system-ui;margin:24px}button{font:inherit;padding:8px;margin:6px}</style>
+<h1>Checkout</h1>
+<p id="step">Step 1 of 4</p>
+<button type="button" id="next">Next: step 2</button>
+<script>
+// Every press re-draws the step and its own button at once, so the page a
+// press leaves is the page it settles on, and each look asks a new question.
+window.probe = { count: 0 };
+let at = 1;
+document.querySelector('#next').onclick = () => {
+  if (at >= 4) return;
+  at += 1;
+  probe.count = at - 1;
+  document.querySelector('#step').textContent = 'Step ' + at + ' of 4';
+  document.querySelector('#next').textContent = at < 4 ? 'Next: step ' + (at + 1) : 'Done';
+};
+</script>

@@ -12,6 +12,16 @@
 //! call. A typed value goes to the CLI on stdin (`type … --value-stdin`), the
 //! road the shim already has, and never on a process's argv.
 //!
+//! The running window's door may predate the one a build expects (t-9712): a
+//! v1.1.25 window's `click --mark` answers without settling, and knows no
+//! `--settle-later`. So the probe stands the door a build expects in front of
+//! the window's: a press by number settles the page before it answers, by the
+//! product's own loop and verdict (`settle_with`) with each poll one `eval` of
+//! the door's own settle script; `--settle-later` presses, answers the page as
+//! the press left it (`marks --json`), and holds the settle for the pane's next
+//! `marks`, which finishes it the same way and says how. Each call's row says
+//! what the stand-in door did inside it (`settleMs`, `previewMs`), apart.
+//!
 //! Lines between `// after-only {` and `// after-only }` need what only the
 //! build after the change has; the driver drops them for the build before.
 
@@ -21,14 +31,23 @@ use std::process::Stdio;
 use std::time::Instant;
 
 use serde_json::{Value, json};
-use zerocode_core::agent_browser::{TYPE_VALUE_FLAG, TYPE_VALUE_STDIN_FLAG};
+use zerocode_core::agent_browser::{BROWSER_SETTLE_BUSY, TYPE_VALUE_FLAG, TYPE_VALUE_STDIN_FLAG};
+use zerocode_core::branching::BranchAsk;
 use zerocode_core::computer_recipe::RecipeTool;
 use zerocode_core::jev::{BROWSER, JUDGMENT_CACHE, JevMode, Run};
+use zerocode_core::screen_action::ActionAsk;
 use zerocode_hookd::TeamAnswer;
+
+use crate::cmd::browser::{
+    BROWSER_OBSERVE_HELPERS, BROWSER_SETTLE_BODY, SettleReport, automation_script, settle_with,
+};
 
 use super::desk::{Aim, GoalWorld};
 use super::live::{Doorway, LiveJudge};
-use super::{Branching, Errand, Options, Seen, Why, run_with};
+use super::{
+    ActionJudge, Branching, Compared, Done, Errand, Judged, Options, Pending, Seen, Spent, Why,
+    run_with,
+};
 
 /// The window's browser CLI — the shim every agent in the window drives.
 const CLI: &str = "zerocode-browser";
@@ -117,12 +136,193 @@ fn stand_in(pane: &str, script: &str, marks: &str) -> Option<(String, f64)> {
     Some((said.to_string(), ms))
 }
 
-/// A road call as the row keeps it.
+/// A road call as the row keeps it, with what the stand-in door did inside it.
 struct Call {
     verb: String,
     start_ms: f64,
     ms: f64,
     exit: i32,
+    inside: Value,
+}
+
+/// The name the door keeps a settle's watch under on a page — the guest's
+/// own slot name, read from the one file the window reads it from.
+const WATCH: &str = include_str!("../../../../../ui/browser-guest-key.txt");
+
+/// The epoch the stand-in settle names the press's document by: the first
+/// document its polls saw — a later one is another document.
+const PRESS_EPOCH: &str = "the-press";
+
+/// Settle `pane` as the door has since t-6721 — the product's own loop and
+/// verdict, each poll one `eval` of the door's own settle script. Stillness
+/// counts from the first poll: the watch the press would have set before its
+/// first event is set by that poll here, one CLI round later.
+fn settle_by_eval(pane: &str) -> SettleReport {
+    let script = automation_script(
+        &json!({ "watch": WATCH.trim(), "busy": BROWSER_SETTLE_BUSY.join(",") }),
+        &format!("{BROWSER_OBSERVE_HELPERS}\n{BROWSER_SETTLE_BODY}"),
+    );
+    let first: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    let poll = |_left: std::time::Duration| {
+        let (answer, _) = drive(&["eval".to_string(), pane.to_string(), script.clone()]);
+        let said = if answer.exit_code == 0 {
+            evaled(&answer.stdout).ok_or_else(|| "unreadable".to_string())
+        } else {
+            Err(answer.stderr)
+        };
+        let said = said.map(|mut said| {
+            let seen = said
+                .pointer("/value/documentEpoch")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let press = first.borrow_mut().get_or_insert_with(|| seen.clone()).clone();
+            if seen == press {
+                said["value"]["documentEpoch"] = json!(PRESS_EPOCH);
+            }
+            said
+        });
+        std::future::ready(said)
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a runtime for the settle")
+        .block_on(settle_with(PRESS_EPOCH, f64::NEG_INFINITY, poll))
+}
+
+/// What a settle came to, as the call's row keeps it.
+fn settled_note(settle: &SettleReport) -> Value {
+    json!({
+        "settleMs": settle.ms,
+        "settle": settle.state.word(),
+        "settleWhy": settle.why.word(),
+        "polls": settle.polls,
+    })
+}
+
+/// The door a build expects, stood in front of the running window's: a
+/// look, with the stand-in snapshot when the scenario needs it; a press by
+/// number that settles before it answers; and — for a build that asks for
+/// it — a press that leaves its settle for the pane's next look.
+struct Door<'a> {
+    pane: &'a str,
+    script: Option<&'a str>,
+    // after-only {
+    /// Whether the last press left its settle for the next look.
+    held: bool,
+    // after-only }
+}
+
+impl Door<'_> {
+    /// One look, with the stand-in snapshot merged in when asked for.
+    fn look(&self, argv: &[String], inside: &mut Value) -> TeamAnswer {
+        let (mut answer, _) = drive(argv);
+        if let (Some(script), 0) = (self.script, answer.exit_code)
+            && let Some((said, took)) = stand_in(self.pane, script, &answer.stdout)
+        {
+            answer.stdout = said;
+            inside["standInMs"] = json!(took);
+        }
+        answer
+    }
+
+    /// One road call through the stand-in door, and what it did inside it.
+    fn drive(&mut self, argv: &[String]) -> (TeamAnswer, Value) {
+        let mut inside = json!({});
+        let verb = argv.first().map(String::as_str);
+        // after-only {
+        if verb == Some("click")
+            && argv.last().map(String::as_str)
+                == Some(zerocode_core::agent_browser::BROWSER_SETTLE_LATER_FLAG)
+        {
+            let (pressed, _) = drive(&argv[..argv.len() - 1]);
+            if pressed.exit_code != 0 {
+                return (pressed, inside);
+            }
+            self.held = true;
+            let began = Instant::now();
+            let look = self.look(
+                &["marks".to_string(), self.pane.to_string(), "--json".to_string()],
+                &mut inside,
+            );
+            inside["previewMs"] = json!(began.elapsed().as_secs_f64() * 1_000.0);
+            let mut said: Value = serde_json::from_str(look.stdout.trim()).unwrap_or(json!({}));
+            said[crate::cmd::browser::CLICK_SAID_KEY] = json!(pressed.stdout.trim());
+            return (
+                TeamAnswer {
+                    exit_code: 0,
+                    stdout: said.to_string(),
+                    stderr: String::new(),
+                },
+                inside,
+            );
+        }
+        if verb == Some("marks") && std::mem::take(&mut self.held) {
+            let settle = settle_by_eval(self.pane);
+            inside = settled_note(&settle);
+            let mut look = self.look(argv, &mut inside);
+            if look.exit_code == 0
+                && let Ok(mut said) = serde_json::from_str::<Value>(look.stdout.trim())
+            {
+                said[zerocode_core::agent_browser::BROWSER_SETTLE_KEY] =
+                    zerocode_core::agent_browser::settle_said(settle.state, settle.why, settle.ms);
+                look.stdout = said.to_string();
+            }
+            return (look, inside);
+        }
+        // after-only }
+        match verb {
+            Some("marks") => {
+                let look = self.look(argv, &mut inside);
+                (look, inside)
+            }
+            Some("click") if argv.get(2).map(String::as_str) == Some("--mark") => {
+                let (pressed, _) = drive(argv);
+                if pressed.exit_code == 0 {
+                    inside = settled_note(&settle_by_eval(self.pane));
+                }
+                (pressed, inside)
+            }
+            _ => (drive(argv).0, inside),
+        }
+    }
+}
+
+/// A judge that counts the questions it was asked, in turn and ahead —
+/// every request a walk spent, whatever became of its answer.
+struct Counting<'a> {
+    judge: &'a mut LiveJudge,
+    asked: usize,
+    begun: usize,
+}
+
+impl ActionJudge for Counting<'_> {
+    fn choose(&mut self, ask: &ActionAsk) -> Judged {
+        self.asked += 1;
+        self.judge.choose(ask)
+    }
+    fn compare(&mut self, ask: &BranchAsk) -> Compared {
+        self.judge.compare(ask)
+    }
+    fn begin(&mut self, ask: &ActionAsk) -> Option<Pending> {
+        let begun = self.judge.begin(ask);
+        self.begun += usize::from(begun.is_some());
+        begun
+    }
+    fn finish(&mut self, done: Done) -> Judged {
+        self.judge.finish(done)
+    }
+    fn choose_within(&mut self, ask: &ActionAsk, left: std::time::Duration) -> Judged {
+        self.asked += 1;
+        self.judge.choose_within(ask, left)
+    }
+    fn spent(&self) -> Option<Spent> {
+        self.judge.spent()
+    }
+    fn cached(&self) -> bool {
+        self.judge.cached()
+    }
 }
 
 // after-only {
@@ -163,6 +363,9 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
     let cache = knob("ZEROCODE_WALK_PROBE_CACHE").unwrap_or_else(|| JevMode::Off.key().to_string());
     let base = knob("ZO_SYSTEMONE_BASE_URL")
         .unwrap_or_else(|| crate::systemone::SYSTEMONE_BASE_URL.to_string());
+    // `walk --overlap`: the walk asks ahead, and a page's world hands back
+    // the screen its press left.
+    let overlap = knob("ZEROCODE_WALK_PROBE_OVERLAP").is_some_and(|flag| flag == "1");
 
     // A zo home of the probe's own: its settings consent one workspace and
     // switch the browser seat on; its ledgers are the only ones written.
@@ -205,25 +408,23 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
 
         let began = Instant::now();
         let calls = std::cell::RefCell::new(Vec::<Call>::new());
-        let stand_ins = std::cell::RefCell::new(Vec::<f64>::new());
+        let mut door = Door {
+            pane: &pane,
+            script: script.as_deref(),
+            // after-only {
+            held: false,
+            // after-only }
+        };
         let mut road = |_: RecipeTool, argv: &[String], _: &[String]| {
             let start_ms = began.elapsed().as_secs_f64() * 1_000.0;
-            let (mut answer, ms) = drive(argv);
+            let (answer, inside) = door.drive(argv);
             calls.borrow_mut().push(Call {
                 verb: argv.first().cloned().unwrap_or_default(),
                 start_ms,
-                ms,
+                ms: began.elapsed().as_secs_f64() * 1_000.0 - start_ms,
                 exit: answer.exit_code,
+                inside,
             });
-            if let (Some(script), Some("marks"), 0) = (
-                script.as_deref(),
-                argv.first().map(String::as_str),
-                answer.exit_code,
-            ) && let Some((said, took)) = stand_in(&pane, script, &answer.stdout)
-            {
-                answer.stdout = said;
-                stand_ins.borrow_mut().push(took);
-            }
             answer
         };
         let at = Errand {
@@ -231,6 +432,11 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
             why: Why::Goal { steps },
             flow: None,
             moves_money: false,
+        };
+        let mut counting = Counting {
+            judge: &mut judge,
+            asked: 0,
+            begun: 0,
         };
         let walked = {
             let world = GoalWorld::new(
@@ -245,7 +451,8 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
                 until.clone(),
                 120_000,
                 0,
-            );
+            )
+            .previewing(overlap);
             // after-only {
             let world = match knob("ZEROCODE_WALK_PROBE_VALUE_KEY") {
                 Some(key) => world.writing(Box::new(value_writer(&key))),
@@ -258,16 +465,17 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
                 true,
                 Branching::OFF,
                 &at,
-                &mut judge,
+                &mut counting,
                 &mut world,
                 Options {
-                    overlap: false,
+                    overlap,
                     rescue: false,
                 },
                 None,
             )
         };
         let walk_ms = began.elapsed().as_secs_f64() * 1_000.0;
+        let (asked, begun) = (counting.asked, counting.begun);
         let now = crate::project_runtime::now_epoch_ms();
         super::write_rows(&BROWSER, judge.wire(), None, &walked.rows, now);
         judge.write_memo_rows(None, now);
@@ -285,9 +493,17 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
             "pressed": walked.pressed,
             "reached": walked.reached,
             "oracle": evaled(&oracle.stdout),
-            "standInMs": stand_ins.into_inner(),
+            "overlap": overlap,
+            "asked": asked,
+            "begun": begun,
+            "overlapped": walked.overlapped,
+            "discarded": walked.discarded,
+            // after-only {
+            "cancelled": walked.cancelled,
+            // after-only }
             "calls": calls.into_inner().iter().map(|call| json!({
                 "verb": call.verb, "startMs": call.start_ms, "ms": call.ms, "exit": call.exit,
+                "inside": call.inside,
             })).collect::<Vec<_>>(),
             "rows": walked.rows,
             "load": crate::orchestration::desk::load_average().map(|reading| reading.one_minute),

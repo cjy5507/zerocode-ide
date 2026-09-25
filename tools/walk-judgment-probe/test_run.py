@@ -37,8 +37,13 @@ class DriverTests(unittest.TestCase):
             [line for line in stripped.splitlines() if line.strip().startswith("// after-only")],
             "a region marker survived",
         )
-        for needed_after in ("LiveWriter", "value_writer", "ZEROCODE_WALK_PROBE_VALUE_KEY"):
+        for needed_after in ("LiveWriter", "value_writer", "ZEROCODE_WALK_PROBE_VALUE_KEY",
+                             "BROWSER_SETTLE_LATER_FLAG", "settle_said", "walked.cancelled",
+                             "held"):
             self.assertNotIn(needed_after, stripped)
+        # Both builds stand the same settling door in front of the window.
+        for both in ("settle_by_eval", "struct Door", "struct Counting", "ZEROCODE_WALK_PROBE_OVERLAP"):
+            self.assertIn(both, stripped)
 
     def test_a_step_runs_from_its_look_to_its_hand_without_the_stand_in(self):
         row = {
@@ -56,11 +61,49 @@ class DriverTests(unittest.TestCase):
         # A look with no hand after it is no step.
         self.assertEqual(run.steps_of({"calls": [call("marks", 0, 30)]}), [])
 
+    def test_a_walk_that_settles_later_is_timed_by_the_same_step_and_by_the_gap_between_hands(self):
+        def inside(verb, start, ms, **what):
+            said = call(verb, start, ms)
+            said["inside"] = what
+            return said
+        # A press that left its settle for later: the look that finishes it
+        # opens the next step; the stand-in snapshot inside any call is taken
+        # out of both the step and the gap, the settle is not.
+        row = {
+            "calls": [
+                inside("marks", 0, 30, standInMs=10.0),
+                inside("click", 250, 60, previewMs=30.0, standInMs=10.0),
+                inside("marks", 310, 120, settleMs=90.0, settle="ready", standInMs=10.0),
+                call("find", 430, 20),
+                inside("click", 520, 60, previewMs=30.0, standInMs=10.0),
+                inside("marks", 580, 120, settleMs=88.0, settle="ready", standInMs=10.0),
+                call("find", 700, 20),
+            ],
+        }
+        steps = run.steps_of(row)
+        self.assertEqual([step["kind"] for step in steps], ["press", "press"])
+        self.assertAlmostEqual(steps[0]["ms"], 310 - 0 - 20)
+        self.assertAlmostEqual(steps[1]["ms"], 580 - 310 - 20)
+        self.assertEqual(run.press_gaps(row), [580 - 310 - 20])
+        # A refused press is no hand.
+        refused = {"calls": [call("click", 0, 10), dict(call("click", 50, 10), exit=1), call("click", 90, 10)]}
+        self.assertEqual(run.press_gaps(refused), [90])
+
+    def test_the_arms_name_a_build_and_whether_it_asks_ahead(self):
+        self.assertEqual(run.ARMS["before"], ("before", False))
+        self.assertEqual(run.ARMS["after"], ("after", False))
+        self.assertEqual(run.ARMS["before-ahead"], ("before", True))
+        self.assertEqual(run.ARMS["after-ahead"], ("after", True))
+        self.assertEqual(run.SCENARIOS["steps"]["page"], "steps.html")
+        self.assertTrue((run.HERE / "steps.html").exists())
+
     def test_success_is_the_pages_own_word(self):
         self.assertTrue(run.succeeded("press", {"oracle": {"count": 1}}))
         self.assertFalse(run.succeeded("press", {"oracle": {"count": 2}}))
         self.assertTrue(run.succeeded("type", {"oracle": {"searched": "London"}}))
         self.assertFalse(run.succeeded("type", {"oracle": {"searched": None}}))
+        self.assertTrue(run.succeeded("steps", {"oracle": {"count": 3}}))
+        self.assertFalse(run.succeeded("steps", {"oracle": {"count": 2}}))
         observed = {"container": {"chosen": 1}, "image": {"chosen": 1}, "row": {"chosen": 1}}
         self.assertTrue(run.succeeded("observe", {"rows": [{"observed": observed}]}))
         self.assertFalse(run.succeeded("observe", {"rows": [{}]}))
@@ -90,6 +133,30 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(summary["type/after"]["values_written"], 1)
         self.assertEqual(summary["type/after"]["large_model_calls"], 0)
         self.assertIn("press/after", run.table_md(summary, "cmd", pathlib.Path("/out")))
+
+    def test_the_table_counts_settles_aheads_and_the_questions_a_walk_asked(self):
+        def inside(verb, start, ms, **what):
+            said = call(verb, start, ms)
+            said["inside"] = what
+            return said
+        row = {"scenario": "steps", "label": "after-ahead", "walk": 1, "walkMs": 900.0, "load": 9.0,
+               "oracle": {"count": 3}, "asked": 1, "begun": 3,
+               "overlapped": 2, "discarded": 0, "cancelled": 1,
+               "calls": [call("marks", 0, 30), inside("click", 250, 40, previewMs=30.0),
+                         inside("marks", 290, 90, settleMs=60.0, settle="ready"), call("find", 380, 20),
+                         inside("click", 500, 40, previewMs=30.0),
+                         inside("marks", 540, 300, settleMs=250.0, settle="not_ready"),
+                         call("find", 840, 20)],
+               "rows": [{"outcome": "answered", "requests": 1, "model": "jev-1.13.0"}]}
+        cell = run.summarize([row])["steps/after-ahead"]
+        self.assertEqual(cell["ok"], 1)
+        self.assertEqual((cell["settled_ready"], cell["settled"]), (1, 2))
+        self.assertEqual(cell["settle_p50"], 60.0)
+        self.assertEqual(cell["preview_p50"], 30.0)
+        self.assertEqual((cell["overlapped"], cell["discarded"], cell["cancelled"]), (2, 0, 1))
+        self.assertEqual(cell["asks_per_walk"], 4)
+        self.assertEqual(cell["gaps"], 1)
+        self.assertIn("2/0/1", run.table_md({"steps/after-ahead": cell}, "cmd", pathlib.Path("/out")))
 
 
 if __name__ == "__main__":
