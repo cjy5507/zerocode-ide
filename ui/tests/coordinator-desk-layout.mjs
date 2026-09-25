@@ -239,7 +239,8 @@ function holesOf(facts) {
         : [h.mail, stackOf([h.workers, h.pipeline, h.release], facts.gap)];
     return tenth(candidate.height - Math.min(...columns));
   };
-  return { chosen: chosen.id, hole: hole(chosen), candidates: candidates.map((one) => `${one.id} ${one.height} (hole ${hole(one)})`) };
+  return { chosen: chosen.id, hole: hole(chosen), floor: Math.min(...candidates.map(hole)),
+    candidates: candidates.map((one) => `${one.id} ${one.height} (hole ${hole(one)})`) };
 }
 
 const settle = (page) => page.evaluate(async () => {
@@ -273,8 +274,8 @@ async function openDesk(browser, origin, fixture, { width = 1280, height = 800 }
     await askReleaseStatus();
     await paintBoardView();
     paintCoordinatorDesk(view);
-    window.__HELD_ANSWERS__ = { machine: window.__MACHINE__, mail: window.__DESK__.mail, stages: window.__DESK__.stages,
-      ledger: window.__LEDGER__, release: window.__RELEASE__ };
+    window.__HELD_ANSWERS__ = { machine: window.__MACHINE__, mail: window.__DESK__.mail, news: window.__DESK__.news,
+      counts: window.__DESK__.counts, stages: window.__DESK__.stages, ledger: window.__LEDGER__, release: window.__RELEASE__ };
   });
   await settle(page);
   return { page, faults };
@@ -290,6 +291,8 @@ async function showOnly(page, off) {
     window.__MACHINE__ = hidden.has("machine") ? null : held.machine;
     window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
       mail: hidden.has("mail") ? [] : held.mail,
+      news: hidden.has("mail") ? [] : held.news,
+      counts: hidden.has("mail") ? { mail: 0, news: 0, folded: 0 } : held.counts,
       stages: hidden.has("pipeline") ? held.stages.map((one) => ({ ...one, count: 0 })) : held.stages };
     window.__LEDGER__ = hidden.has("workers") ? [] : held.ledger;
     window.__RELEASE__ = hidden.has("release") ? null : held.release;
@@ -429,8 +432,12 @@ export async function testCoordinatorDeskLayout(browser, origin, ok) {
       const facts = await readDesk(page);
       const holes = holesOf(facts);
       const wide = wideFaults(facts);
-      ok("the_default_desk_splits_the_flow_and_the_lane (mail 5 rows beside workers 5: the flow under the mail, the lane under the workers, the hole under the shorter column no deeper than one gap)",
-        facts.mailRows === 5 && facts.workerRows === 5 && holes.chosen === "split" && holes.hole <= facts.gap && wide.length === 0,
+      /* The default desk shows five questions now (t-9456: the notices stand
+       * under them as news), and a question's row is its answer button's
+       * height — the two columns differ by that on content alone. What the
+       * placement owes is the floor: no arrangement leaves a shallower hole. */
+      ok("the_default_desk_splits_the_flow_and_the_lane (mail 5 rows beside workers 5: the flow under the mail, the lane under the workers, the hole under the shorter column the floor of every placement's)",
+        facts.mailRows === 5 && facts.workerRows === 5 && holes.chosen === "split" && holes.hole <= holes.floor && wide.length === 0,
         JSON.stringify({ holes, faults: wide, ...summarize(facts) }));
       ok("the_default_desk_splits_the_flow_and_the_lane (on a 1998×1069 board the first task row is on the first screen, as t-6588 promised)",
         facts.firstRow !== null && facts.firstRow.top < facts.surface.bottom && facts.firstRow.top >= facts.desk.bottom,

@@ -30475,12 +30475,37 @@ details.task-board-section > summary {
   cursor: pointer;
 }
 
+/* 소식(t-9456): 답을 기다리지 않는 원장의 알림이라 레일은 조용한 선이고, 끝난
+ * 워커만 멈춤의 잉크를 지킨다. 소식의 머리 줄과 접힌 개수는 조용한 작은 글자다. */
+.board-desk-letters.is-news .board-desk-letter {
+  box-shadow: inset var(--rail-width) 0 0 var(--edge-rule);
+}
+
+.board-desk-letters.is-news .board-desk-letter.is-worker_died {
+  box-shadow: inset var(--rail-width) 0 0 var(--signal-halt);
+}
+
+.board-desk-news-head,
+.board-desk-news-folded {
+  margin: var(--space-3) 0 var(--space-2);
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+  overflow-wrap: anywhere;
+}
+
+.board-desk-news-folded {
+  margin: var(--space-2) 0 0;
+}
+
 .board-desk-letter-body[hidden],
 .board-desk-letter-act[hidden],
 .board-desk-letter-note[hidden],
 .board-desk-unseated[hidden],
 .board-desk-reply[hidden],
 .board-desk-reply-error[hidden],
+.board-desk-letters[hidden],
+.board-desk-news-head[hidden],
+.board-desk-news-folded[hidden],
 .board-desk-letters-more[hidden] {
   display: none;
 }

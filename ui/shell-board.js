@@ -352,9 +352,14 @@ listen("emulator:loans", () => scheduleDeskPaint());
 
 /* ---- 답할 우편 --------------------------------------------------------------
  *
- * `check --peek`의 자리: 판 위의 런의 코디네이터가 빚진 편지(`desk_mail`) — 답을
- * 기다리는 질문, 그리고 워커가 멈췄다는 원장의 소식(한도 벽·끝남·조용해짐·서로
- * 기다림·분류기 거절)과 소환 때 정한 모델을 벗어났다는 기록(t-6747). 오래된 것이 먼저이고, 행마다 받은편지함의 상태(배달 전·받음·확인함)와
+ * `check --peek`의 자리: 판 위의 런의 코디네이터가 빚진 편지(`desk_letters`). 두
+ * 목록이다(t-9456). 「답할 우편」은 답을 기다리는 질문뿐이고 — 원장이 워커를
+ * `went_quiet`에서 빼 주는 바로 그 판정(`Run::awaits_answer`) — 「소식」은 워커가
+ * 멈췄다는 원장의 알림(한도 벽·끝남·조용해짐·서로 기다림·분류기 거절)과 소환 때
+ * 정한 모델을 벗어났다는 기록(t-6747)이다. 조용해짐은 에피소드마다 한 줄이고 끝난
+ * 침묵은 줄이 없으며, 하루 지난 소식은 접혀 개수만 선다 — 그 규칙과 세 숫자는 모두
+ * 백엔드의 것이다(`DESK_NEWS`, `counts`). 이 화면은 편지를 다시 세지도, 고르지도
+ * 않는다. 오래된 것이 먼저이고, 행마다 받은편지함의 상태(배달 전·받음·확인함)와
  * 나이를 적는다.
  *
  * 답하기와 확인은 원장의 뜻 그대로다(2026-09-24 코디네이터 지시). 질문에는 그
@@ -366,12 +371,13 @@ listen("emulator:loans", () => scheduleDeskPaint());
  * 화면은 답도 ack도 지어내지 않는다. */
 
 /* 편지 종류마다 낱말과 다섯 상태의 표식 — 사람이 필요한 것은 기다림, 끝난 워커는
- * 실패의 표식이다. */
+ * 실패, 조용한 판은 유휴의 표식이다. 표식과 낱말뿐이다: 어느 편지가 답을 기다리고
+ * 몇 통인지는 백엔드가 준 목록과 수(`counts`)가 말한다. */
 const DESK_MAIL = Object.freeze({
   question: { state: "needs-attention", key: "board.desk.mailQuestion", word: "질문" },
   quota_walled: { state: "needs-attention", key: "board.desk.mailWalled", word: "한도 벽" },
   worker_died: { state: "failed", key: "board.desk.mailDied", word: "워커 끝남" },
-  went_quiet: { state: "needs-attention", key: "board.desk.mailQuiet", word: "조용해짐" },
+  went_quiet: { state: "idle", key: "board.desk.mailQuiet", word: "조용해짐" },
   deadlocked: { state: "needs-attention", key: "board.desk.mailDeadlocked", word: "서로 기다림" },
   classifier_declined: { state: "needs-attention", key: "board.desk.mailDeclined", word: "분류기 거절" },
   model_deviated: { state: "needs-attention", key: "board.desk.mailDeviated", word: "모델 바뀜" },
@@ -427,8 +433,11 @@ function deskLetterDetail(letter, now) {
     return Number.isFinite(letter.resets_at_ms) ? usageCountdown(letter.resets_at_ms - now) : "";
   }
   if (letter.kind === "went_quiet") {
-    const reason = DESK_QUIET_REASONS[letter.reason];
-    return reason ? t(reason.key, reason.word) : String(letter.reason ?? "");
+    const quiet = DESK_QUIET_REASONS[letter.reason];
+    const reason = quiet ? t(quiet.key, quiet.word) : String(letter.reason ?? "");
+    return letter.notices > 1
+      ? t("board.desk.quietNotices", "{{reason}} · 알림 {{count}}통", { reason, count: letter.notices })
+      : reason;
   }
   if (letter.kind === "worker_died") return t("board.desk.mailDiedCopy", "보고 전에 판이 끝났어요");
   if (letter.kind === "deadlocked") return t("board.desk.mailDeadlockedCopy", "서로의 답을 기다리는 고리에 들었어요");
@@ -571,10 +580,10 @@ async function ackDeskBatch(view, letter) {
 function paintDeskLetter(row, letter, seat, now, view) {
   row.__letter = letter;
   writeAttribute(row, "data-letter", deskLetterKey(letter));
-  const kind = DESK_MAIL[letter.kind] ?? DESK_MAIL.went_quiet;
+  const kind = DESK_MAIL[letter.kind];
   writeClassName(row, `board-desk-letter is-${letter.kind} is-${letter.delivery}`);
-  dressAgentGraphStateMark(row.querySelector(".agent-graph-node-state"), kind.state);
-  writeTextContent(row.querySelector(".board-desk-letter-kind"), t(kind.key, kind.word));
+  dressAgentGraphStateMark(row.querySelector(".agent-graph-node-state"), kind?.state ?? "idle");
+  writeTextContent(row.querySelector(".board-desk-letter-kind"), kind ? t(kind.key, kind.word) : String(letter.kind));
   const who = [letter.worker, letter.task].filter(Boolean).join(" · ");
   writeTextContent(row.querySelector(".board-desk-letter-who"), who);
   writeTextContent(row.querySelector(".board-desk-letter-age"),
@@ -624,49 +633,68 @@ function paintDeskLetter(row, letter, seat, now, view) {
   }
 }
 
+/* 편지 목록 하나를 그린다. */
+function paintDeskLetterList(list, letters, seats, now, view) {
+  const held = new Map([...list.children].map((node) => [node.dataset.letter, node]));
+  reconcileElementOrder(list, letters.map((letter) => {
+    const row = held.get(deskLetterKey(letter)) ?? deskLetterRow(view);
+    paintDeskLetter(row, letter, seats.get(letter.run) ?? false, now, view);
+    return row;
+  }));
+  writeHidden(list, letters.length === 0);
+}
+
+/* 두 목록은 처음 `DESK.mailShown`통을 함께 쓴다 — 답할 것이 먼저, 소식이 그 뒤 — 그
+ * 뒤는 「N통 더 보기」 하나다. 세 숫자(답할 우편·소식·접힘)는 백엔드의 `counts`
+ * 그대로다. */
 function paintDeskMail(block, now, view) {
   const letters = Array.isArray(deskLedger?.mail) ? deskLedger.mail : [];
-  if (letters.length === 0) return false;
-  writeTextContent(block.firstElementChild, t("board.desk.mail", "답할 우편 · {{count}}", { count: letters.length }));
+  const news = Array.isArray(deskLedger?.news) ? deskLedger.news : [];
+  const counts = deskLedger?.counts ?? {};
+  const owed = Number(counts.mail) || 0;
+  const told = Number(counts.news) || 0;
+  const folded = Number(counts.folded) || 0;
+  if (owed + told + folded === 0) return false;
+  writeTextContent(block.firstElementChild, t("board.desk.mail", "답할 우편 · {{count}}", { count: owed }));
   const body = block.lastElementChild;
-  let list = body.querySelector(":scope > .board-desk-letters");
+  let list = body.querySelector(":scope > .board-desk-letters.is-mail");
   if (!list) {
-    list = deskElement("ol", "board-desk-letters");
+    list = deskElement("ol", "board-desk-letters is-mail");
     const more = deskElement("button", "board-desk-letters-more");
     more.type = "button";
     more.onclick = () => {
       deskChoice.mailAll = !deskChoice.mailAll;
       paintCoordinatorDesk(view);
     };
-    body.replaceChildren(list, more);
+    body.replaceChildren(deskElement("p", "board-desk-unseated"), list, deskElement("p", "board-desk-news-head"),
+      deskElement("ol", "board-desk-letters is-news"), more, deskElement("p", "board-desk-news-folded"));
   }
+  const [unseated, , newsHead, newsList, more, foldedLine] = body.children;
   const seats = new Map((deskLedger.runs ?? []).map((run) => [run.run, run.seat === true]));
-  const shown = deskChoice.mailAll ? letters : letters.slice(0, DESK.mailShown);
-  let unseated = body.querySelector(":scope > .board-desk-unseated");
-  if (!unseated) {
-    unseated = deskElement("p", "board-desk-unseated");
-    body.prepend(unseated);
-  }
+  const room = deskChoice.mailAll ? Infinity : DESK.mailShown;
+  const shownMail = letters.slice(0, room);
+  const shownNews = news.slice(0, Math.max(0, room - shownMail.length));
+  paintDeskLetterList(list, shownMail, seats, now, view);
+  paintDeskLetterList(newsList, shownNews, seats, now, view);
+  const shown = [...shownMail, ...shownNews];
   const strangers = !isPopout && shown.some((letter) => !(seats.get(letter.run) ?? false));
   writeTextContent(unseated, strangers
     ? t("board.desk.noSeat", "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요") : "");
   writeHidden(unseated, !strangers);
-  const held = new Map([...list.children].map((node) => [node.dataset.letter, node]));
-  reconcileElementOrder(list, shown.map((letter) => {
-    const row = held.get(deskLetterKey(letter)) ?? deskLetterRow(view);
-    paintDeskLetter(row, letter, seats.get(letter.run) ?? false, now, view);
-    return row;
-  }));
-  const more = body.querySelector(".board-desk-letters-more");
-  const rest = letters.length - DESK.mailShown;
+  writeTextContent(newsHead, t("board.desk.news", "소식 · {{count}}", { count: told }));
+  writeHidden(newsHead, shownNews.length === 0);
+  const rest = owed + told - DESK.mailShown;
   writeHidden(more, rest <= 0);
   writeTextContent(more, deskChoice.mailAll ? t("board.desk.mailFewer", "접기")
     : t("board.desk.mailMore", "{{count}}통 더 보기", { count: Math.max(0, rest) }));
   writeAttribute(more, "aria-expanded", String(deskChoice.mailAll));
-  // Letters that left the ledger's list take their drafts and presses with them.
+  writeTextContent(foldedLine, t("board.desk.newsFolded", "접힌 소식 {{count}}통 · 하루 지났거나 끝난 침묵",
+    { count: folded }));
+  writeHidden(foldedLine, folded === 0);
+  // Letters that left the ledger's lists take their drafts and presses with them.
   const standing = new Set(letters.map((letter) => letter.id));
   for (const id of deskDrafts.keys()) if (!standing.has(id)) deskDrafts.delete(id);
-  const batches = new Set(letters.map((letter) => letter.delivery_id).filter(Boolean));
+  const batches = new Set([...letters, ...news].map((letter) => letter.delivery_id).filter(Boolean));
   for (const id of deskAcks.keys()) if (!batches.has(id)) deskAcks.delete(id);
   return true;
 }

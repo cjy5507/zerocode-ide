@@ -8986,6 +8986,277 @@ fn many_turns_without_a_report_are_one_quiet_episode_in_the_coordinator_inbox() 
     );
 }
 
+/// A message waits on its answer by ONE reading (t-9456): the one a worker is
+/// held out of `went_quiet` by (`Run::awaiting_reply`) is the one the task
+/// board's 「답할 우편」 counts (`Run::awaits_answer`). A question's root waits
+/// until the seat it was asked of answers in its thread; a stranger's word
+/// there, the reply itself, a status and the ledger's notices never do.
+#[test]
+fn a_question_waits_on_its_answer_by_the_one_reading_its_asker_is_held_by() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name one-reading");
+    let task = bench.json("task-create --spec ask")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let asked = bench.json_at(&pane, "send --type question --body 어느-브랜치?")["messageId"]
+        .as_str()
+        .expect("a question")
+        .to_string();
+    let status = bench.json_at(&pane, "send --type status --body 진행-중")["messageId"]
+        .as_str()
+        .expect("a status")
+        .to_string();
+    let reading = |bench: &Bench, id: &str| {
+        let run = &bench.ledger.runs()[0];
+        run.awaits_answer(run.message(id).expect("the message"))
+    };
+    assert!(
+        reading(&bench, &asked),
+        "an unanswered question did not wait"
+    );
+    assert!(!reading(&bench, &status), "a status waited on an answer");
+    assert!(bench.ledger.runs()[0].awaiting_reply(&worker));
+
+    // A bystander's word in the thread is not the answer.
+    let run_id = bench.ledger.runs()[0].id.clone();
+    bench.clock += 1;
+    bench
+        .ledger
+        .post(
+            &run_id,
+            Draft {
+                from: "pane:fixture/%0".to_string(),
+                to: worker_address(&worker),
+                kind: MessageKind::Status,
+                body: "끼어듦".into(),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: Some(asked.clone()),
+                task: None,
+                dispatch: None,
+            },
+            bench.clock,
+        )
+        .expect("a bystander");
+    assert!(
+        reading(&bench, &asked),
+        "a bystander's word answered the question"
+    );
+    assert!(bench.ledger.runs()[0].awaiting_reply(&worker));
+
+    let answer = bench.json(&format!("reply --to-message {asked} --body main"))["messageId"]
+        .as_str()
+        .expect("the answer")
+        .to_string();
+    assert!(
+        !reading(&bench, &asked),
+        "an answered question still waited"
+    );
+    assert!(
+        !reading(&bench, &answer),
+        "the reply waited on an answer of its own"
+    );
+    assert!(!bench.ledger.runs()[0].awaiting_reply(&worker));
+
+    assert_eq!(
+        bench.ledger.workers_stalled(&[(worker, 1_000)], 181_000),
+        1,
+        "the answered worker's stall told nobody"
+    );
+    let notice = bench.ledger.runs()[0]
+        .messages
+        .iter()
+        .rev()
+        .find(|one| one.kind == MessageKind::WentQuiet)
+        .expect("the stall notice")
+        .id
+        .clone();
+    assert!(
+        !reading(&bench, &notice),
+        "the ledger's notice waited on an answer"
+    );
+}
+
+/// A `went_quiet` notice stands only while the silence it tells of goes on
+/// (t-9456): its attempt open, its worker live and carrying it, and no word
+/// from the worker since. The worker's word ends it — and the summary the
+/// ledger files behind that word is a silence already over — as does the
+/// attempt ending; a notice in any other voice never stood.
+#[test]
+fn a_quiet_notice_stands_only_while_its_silence_goes_on() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name standing-silence");
+    let task = bench.json("task-create --spec keep-working")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let seat = ("team-1", pane.as_str());
+    let newest_quiet = |bench: &Bench| {
+        bench.ledger.runs()[0]
+            .messages
+            .iter()
+            .rev()
+            .find(|one| one.kind == MessageKind::WentQuiet)
+            .expect("a quiet row")
+            .id
+            .clone()
+    };
+    let stands = |bench: &Bench, id: &str| {
+        let run = &bench.ledger.runs()[0];
+        run.quiet_notice_stands(run.message(id).expect("the notice"))
+    };
+
+    assert_eq!(
+        bench
+            .ledger
+            .workers_stalled(&[(worker.clone(), 1_000)], 181_000),
+        1
+    );
+    let first = newest_quiet(&bench);
+    assert!(stands(&bench, &first), "the silence going on did not stand");
+    // Turns folded behind the notice, so the worker's word files a summary.
+    for turn in 0..3 {
+        bench
+            .ledger
+            .worker_fell_silent(seat, 190_000 + turn, false, 190_000 + turn)
+            .expect("a quiet turn");
+    }
+    bench.json_at(&pane, "send --type status --body 다시-시작");
+    let summary = newest_quiet(&bench);
+    assert_ne!(summary, first, "the worker's word filed no summary");
+    assert!(
+        !stands(&bench, &first),
+        "the worker spoke and its silence still stood"
+    );
+    assert!(
+        !stands(&bench, &summary),
+        "the summary of a silence already over stood"
+    );
+
+    assert_eq!(
+        bench
+            .ledger
+            .workers_stalled(&[(worker.clone(), 200_000)], 500_000),
+        1
+    );
+    let second = newest_quiet(&bench);
+    assert!(stands(&bench, &second), "the next silence did not stand");
+
+    // A notice in anybody's voice but the ledger's never stood.
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&worker)
+        .and_then(|one| one.dispatch.clone())
+        .expect("the attempt");
+    let run_id = bench.ledger.runs()[0].id.clone();
+    let forged = bench
+        .ledger
+        .post(
+            &run_id,
+            Draft {
+                from: "pane:fixture/%0".to_string(),
+                to: format!("run:{run_id}"),
+                kind: MessageKind::WentQuiet,
+                body: r#"{"reason":"stalled"}"#.into(),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task: Some(task),
+                dispatch: Some(dispatch),
+            },
+            500_001,
+        )
+        .expect("a row in another voice");
+    assert!(!stands(&bench, &forged), "a pane's went_quiet stood");
+
+    bench.json(&format!("worker-stop --worker {worker} --reason spent"));
+    assert!(
+        !stands(&bench, &second),
+        "the attempt ended and its silence still stood"
+    );
+}
+
+/// Once an attempt ends — the worker reports, a coordinator stops or
+/// abandons it, or its pane dies — no road writes one more notice about its
+/// silence (t-9456): ten beats after the end, the stall sweep and the stall
+/// seat's reading write nothing. The desk's pile of 「조용해짐」 about dead
+/// workers was notices written while they lived; this pins that none is
+/// written after.
+#[test]
+fn no_notice_is_written_about_an_attempt_that_has_ended() {
+    for ending in ["worker_done", "worker-stop", "worker-abandon", "pane-died"] {
+        let mut bench = Bench::new();
+        bench.json("run-create --name ended");
+        let task = bench.json("task-create --spec x")["taskId"]
+            .as_str()
+            .expect("a task")
+            .to_string();
+        let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+        assert_eq!(
+            bench
+                .ledger
+                .workers_stalled(&[(worker.clone(), 1_000)], 181_000),
+            1,
+            "{ending}: the live stall told nobody"
+        );
+        match ending {
+            "worker_done" => {
+                bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+            }
+            "worker-stop" | "worker-abandon" => {
+                bench.json(&format!("{ending} --worker {worker} --reason over"));
+            }
+            _ => {
+                bench.clock += 1;
+                assert_eq!(
+                    bench
+                        .ledger
+                        .terminal_gone("team-1", &pane, bench.clock)
+                        .as_deref(),
+                    Some(worker.as_str()),
+                    "{ending}"
+                );
+            }
+        }
+        let notices = |bench: &Bench| {
+            bench.ledger.runs()[0]
+                .messages
+                .iter()
+                .filter(|one| one.kind == MessageKind::WentQuiet)
+                .count()
+        };
+        let written = notices(&bench);
+        for beat in 1..=10_i64 {
+            let now_ms = 181_000 + beat * 300_000;
+            assert_eq!(
+                bench
+                    .ledger
+                    .workers_stalled(&[(worker.clone(), 1_000)], now_ms),
+                0,
+                "{ending}: beat {beat} told of an ended attempt"
+            );
+            assert_eq!(
+                bench.ledger.stall_causes_judged(
+                    &[StallJudged {
+                        worker: worker.clone(),
+                        stalled_since_ms: 1_000 + beat,
+                        cause: "finished_turn".into(),
+                        confidence: 0.9,
+                    }],
+                    now_ms,
+                ),
+                0,
+                "{ending}: beat {beat} judged an ended attempt's silence"
+            );
+        }
+        assert_eq!(notices(&bench), written, "{ending}");
+    }
+}
+
 /// One hundred turns are activity, not one hundred stalls. The first real
 /// stall notifies once and a continuing stall waits five minutes.
 #[test]
