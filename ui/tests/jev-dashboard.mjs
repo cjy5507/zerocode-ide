@@ -45,6 +45,25 @@ const FIRST_SCREEN_ROWS = 7;
 /* The narrow window the dashboard has to stay whole in (t-9633): a laptop
  * split in two, both side panels open. */
 const NARROW = { width: 900, height: 1000 };
+
+/* The narrow window, grown as tall as the dashboard it holds so every part
+ * of it stands on the screen at once — again after each growth, since a
+ * window that grows can lay the page out again. */
+async function standNarrow(page) {
+  await page.setViewportSize(NARROW);
+  await settlePaint(page);
+  for (let round = 0; round < 4; round += 1) {
+    const wanted = await page.evaluate(() => {
+      const view = document.querySelector("#jev-view");
+      view.scrollTop = 0;
+      return view.scrollHeight - view.clientHeight;
+    });
+    if (wanted <= 0) return;
+    const now = page.viewportSize();
+    await page.setViewportSize({ width: now.width, height: Math.min(8000, now.height + wanted + 16) });
+    await settlePaint(page);
+  }
+}
 /* The contrast every text on the dashboard and the card clears, in both
  * treatments, large or not (t-6277 D10): WCAG AA's line for body text. */
 const CONTRAST_FLOOR = 4.5;
@@ -411,7 +430,8 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
           asked: [...view.querySelectorAll("[data-jev-dash-row]")].filter((row) =>
             ((jevNumbers ?? []).find((one) => one.id === row.dataset.jevDashRow)?.days ?? [])
               .some((day) => day.tally.rows > 0)).length,
-          charts: view.querySelectorAll("[data-jev-chart] svg[data-jev-picture], [data-jev-chart] .jev-chart-empty:not([hidden])").length,
+          charts: [...view.querySelectorAll("[data-jev-chart]")].filter((card) =>
+            card.querySelector("svg[data-jev-picture]") !== null || !card.querySelector(".jev-chart-empty").hidden).length,
           theme: document.documentElement.dataset.theme ?? "dark",
           viewport: [window.innerWidth, window.innerHeight],
         };
@@ -426,11 +446,11 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
         JSON.stringify({ ...seen, faults: seen.faults.slice(0, 6), path }));
     }
     // A narrow window (t-9633): the rows stand as cards and the charts one
-    // under the other, every word whole, nothing wider than the page.
-    await page.setViewportSize(NARROW);
+    // under the other, every word whole, nothing wider than the page — the
+    // window as tall as the page, so the picture is the whole of it.
     for (const theme of ["dark", "light"]) {
       await setQualityTheme(page, theme);
-      await settlePaint(page);
+      await standNarrow(page);
       const seen = await page.evaluate(() => {
         const view = document.querySelector("#jev-view");
         view.scrollTop = 0;
@@ -545,7 +565,7 @@ export async function testJevDashboard(browser, origin, ok) {
       const strip = Object.fromEntries([...view().querySelectorAll("[data-jev-stat]")]
         .map((one) => [one.dataset.jevStat, one.querySelector("dd").textContent]));
       const foldRow = view().querySelector("[data-jev-fold]");
-      const bodyRows = [...view().querySelectorAll("tbody tr")];
+      const bodyRows = [...view().querySelectorAll(".jev-table tbody tr")];
       const fold = foldRow ? {
         text: foldRow.textContent, expanded: foldRow.querySelector("button").getAttribute("aria-expanded"),
         at: bodyRows.indexOf(foldRow),
@@ -1389,15 +1409,17 @@ export async function testJevDashboardPictures(browser, origin, ok) {
           ['[data-jev-picture="timeline"] [data-state="recorded"]', "fill", "--jev-chart-quiet"],
           ['[data-jev-picture="latency"] [data-line="p50"]', "stroke", "--jev-chart-accent"],
           ['[data-jev-picture="latency"] [data-line="p95"]', "stroke", "--jev-chart-range"],
-          ['[data-jev-picture="tokens"] [data-values]', "fill", "--jev-chart-accent"],
+          ['[data-jev-picture="tokens"] [data-values]', "stroke", "--jev-chart-accent"],
           ['[data-jev-picture="judgment"] [data-values]', "fill", "--jev-chart-accent"],
           ['[data-jev-picture="judgment"]', "backgroundColor", "--jev-chart-track"],
         ].map(([selector, property, name]) => ({ selector, worn: worn(selector, property), token: token(name) }));
+        const accent = token("--jev-chart-accent");
+        const behind = token("--jev-chart-behind");
         probe.remove();
         const inked = [...view.querySelectorAll("svg[data-jev-picture], svg[data-jev-picture] *")]
           .filter((one) => ["fill", "stroke", "style", "color", "stop-color"].some((name) => one.hasAttribute(name)))
           .map((one) => one.outerHTML.slice(0, 80));
-        return { marks, inked, accent: token("--jev-chart-accent"), behind: token("--jev-chart-behind") };
+        return { marks, inked, accent, behind };
       });
     }
     await setQualityTheme(page, "dark");
@@ -1547,9 +1569,11 @@ export async function testJevDashboardPictures(browser, origin, ok) {
         setLocale(language);
         await window.__PAINTED__();
         const view = document.querySelector("#jev-view");
+        // What stands on the page: a closed drawer is said again when it opens.
+        const shown = (selector) => [...view.querySelectorAll(selector)].filter((one) => !one.closest("[hidden]"));
         const words = [
-          ...[...view.querySelectorAll("[data-jev-charts], .jev-trends, [data-jev-cell=\"latency\"], thead")].map((one) => one.textContent),
-          ...[...view.querySelectorAll("svg[data-jev-picture], [data-jev-charts] [data-tip]")].map((one) => `${one.getAttribute("aria-label") ?? ""} ${one.dataset.tip ?? ""}`),
+          ...shown("[data-jev-charts], .jev-trends, [data-jev-cell=\"latency\"], thead").map((one) => one.textContent),
+          ...shown("svg[data-jev-picture], [data-jev-charts] [data-tip]").map((one) => `${one.getAttribute("aria-label") ?? ""} ${one.dataset.tip ?? ""}`),
         ].join(" ");
         said[language] = { korean: (words.match(/[가-힣]+/g) ?? []).slice(0, 6), pictures: view.querySelectorAll("svg[data-jev-picture]").length };
       }
@@ -1561,9 +1585,9 @@ export async function testJevDashboardPictures(browser, origin, ok) {
       Object.values(spoken).every((one) => one.korean.length === 0 && one.pictures > 10), JSON.stringify(spoken));
 
     // A narrow window: the charts one under the other and every row a card,
-    // with every word whole and nothing wider than the page.
-    await page.setViewportSize(NARROW);
-    await settlePaint(page);
+    // with every word whole and nothing wider than the page — the window as
+    // tall as the page, so what is measured is width and not the fold.
+    await standNarrow(page);
     const narrow = await page.evaluate(() => {
       const view = document.querySelector("#jev-view");
       const wide = [view, ...view.querySelectorAll(".jev-table-wrap, [data-jev-chart], [data-jev-dash-row]")]

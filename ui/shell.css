@@ -39267,6 +39267,7 @@ h4.knowledge-inspector-head::after {
    Geometry from tokens.css (--jev-*); colours from the semantic palette. */
 .jev-view {
   position: relative;
+  container: jev / inline-size;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -39338,7 +39339,7 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-table tbody tr.is-open td {
-  background: color-mix(in srgb, var(--jev-progress-ink) var(--jev-tint-open), transparent);
+  background: color-mix(in srgb, var(--jev-chart-accent) var(--jev-tint-open), transparent);
 }
 
 .jev-row-open {
@@ -39720,8 +39721,10 @@ h4.knowledge-inspector-head::after {
   font-weight: var(--jev-weight-strong);
 }
 
-/* The week as one picture of two lines, each line's latest value under it,
-   marked the way its line is drawn (t-6243 D4). */
+/* A feature's week in its row (t-6243 D4, t-9633 (a)(b)): the accuracy
+   picture over the strip of days — one width, so a day's point stands over
+   its day's cell — and beside them each line's latest value, marked the way
+   its line is drawn. */
 .jev-trends {
   display: flex;
   align-items: center;
@@ -39730,7 +39733,17 @@ h4.knowledge-inspector-head::after {
   font-size: var(--jev-meta-size);
 }
 
-/* Beside the picture, one line per line of it — the row keeps its height. */
+.jev-trend-pictures {
+  display: grid;
+  gap: var(--jev-plot-gap);
+  justify-items: start;
+}
+
+.jev-trend-short {
+  white-space: nowrap;
+}
+
+/* Beside the pictures, one line per line of them — the row keeps its height. */
 .jev-trend-legend {
   display: grid;
 }
@@ -39745,12 +39758,12 @@ h4.knowledge-inspector-head::after {
 .jev-trend-last::before {
   content: "";
   width: var(--space-3);
-  border-top: var(--jev-trend-stroke) solid var(--jev-trend);
+  border-top: var(--jev-trend-stroke) solid var(--jev-chart-accent);
 }
 
-.jev-trend-agreement::before {
+.jev-trend-baseline::before {
   border-top-style: dashed;
-  border-top-color: var(--jev-trend-accuracy);
+  border-top-color: var(--jev-chart-context);
 }
 
 .jev-table [data-jev-cell="status"] {
@@ -39827,28 +39840,10 @@ h4.knowledge-inspector-head::after {
   color: var(--ink-mist);
 }
 
+/* What a feature still owes the judge, in words; the bar is the chart's
+   over the table (t-9633 (c)). */
 .jev-owed {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
   color: var(--ink-mist);
-}
-
-.jev-progress {
-  position: relative;
-  flex: none;
-  width: var(--jev-progress-width);
-  height: var(--jev-progress-height);
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--ink-mist) var(--jev-tint-track), transparent);
-  overflow: hidden;
-}
-
-.jev-progress-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: calc(var(--jev-filled, 0) * 100%);
-  background: var(--jev-progress-ink);
 }
 
 /* A lower bound under the line for acting by itself wears the tone of a
@@ -39910,31 +39905,488 @@ button.jev-token:hover {
   background: color-mix(in srgb, var(--jev-tone-blocked) var(--jev-tint-hover), transparent);
 }
 
-.jev-spark {
-  width: var(--jev-spark-width);
-  height: var(--jev-spark-height);
+/* ---- the pictures' marks (t-9633) ----
+   Every colour a mark wears is a `--jev-chart-*` role, declared for both
+   treatments; a picture carries none of its own. A row's pictures keep their
+   box's proportions (their height follows their width); a chart's and the
+   drawer's fill the width they are given and keep their strokes and dots at
+   their own size. */
+.jev-spark, .jev-strip, .jev-latency-picture {
+  display: block;
+  height: auto;
   overflow: visible;
 }
 
-.jev-spark-line {
+.jev-spark, .jev-strip {
+  width: var(--jev-spark-width);
+}
+
+.jev-latency-picture {
+  flex: none;
+  width: var(--jev-plot-latency-width);
+}
+
+.jev-spark-line, .jev-latency-line {
   fill: none;
-  stroke: var(--jev-trend);
+  stroke: var(--jev-chart-accent);
   stroke-width: var(--jev-trend-stroke);
   stroke-linejoin: round;
   stroke-linecap: round;
 }
 
-.jev-spark-dot {
-  fill: var(--jev-trend);
+.jev-spark-band {
+  fill: var(--jev-chart-wash);
 }
 
-.jev-spark-agreement .jev-spark-line {
-  stroke: var(--jev-trend-accuracy);
+.jev-spark-baseline {
+  fill: none;
+  stroke: var(--jev-chart-context);
+  stroke-width: var(--jev-line);
   stroke-dasharray: var(--jev-trend-dash);
 }
 
-.jev-spark-agreement .jev-spark-dot {
-  fill: var(--jev-trend-accuracy);
+/* A dot is a stroke of no length its round cap draws round; a day graded on
+   fewer marks than the sample floor is a faint one. */
+.jev-spark-dots, .jev-latency-dots {
+  fill: none;
+  stroke: var(--jev-chart-accent);
+  stroke-width: var(--jev-plot-dot);
+  stroke-linecap: round;
+}
+
+.jev-spark-dots.is-thin {
+  stroke: var(--jev-chart-thin);
+}
+
+/* The drawer's week, large: the days' comparisons under the lines and the
+   sample floor across them. */
+.jev-spark-wide {
+  width: 100%;
+  height: var(--jev-plot-wide-height);
+}
+
+.jev-spark-wide path {
+  vector-effect: non-scaling-stroke;
+}
+
+.jev-spark-samples {
+  fill: var(--jev-chart-quiet);
+}
+
+/* The sample floor is a line to clear, not a grid: dashed, as a threshold. */
+.jev-spark-floor {
+  fill: none;
+  stroke: var(--jev-chart-context);
+  stroke-width: var(--jev-line);
+  stroke-dasharray: var(--jev-trend-dash);
+}
+
+/* The strip of days: a faint cell for every day, filled by what the day did,
+   and the dot of where the feature stands now in its state's tone. */
+.jev-strip-track {
+  fill: var(--jev-chart-grid);
+}
+
+.jev-strip-day[data-state="recorded"] { fill: var(--jev-chart-quiet); }
+.jev-strip-day[data-state="thin"] { fill: var(--jev-chart-thin); }
+.jev-strip-day[data-state="measured"] { fill: var(--jev-chart-accent); }
+.jev-strip-day[data-state="behind"] { fill: var(--jev-chart-behind); }
+
+.jev-strip-now {
+  fill: none;
+  stroke: var(--jev-tone);
+  stroke-width: var(--jev-plot-now);
+  stroke-linecap: round;
+}
+
+/* A day's typical answer as a line and its slow one as a whisker above it. */
+.jev-latency-range {
+  fill: none;
+  stroke: var(--jev-chart-range);
+  stroke-width: var(--jev-trend-stroke);
+  stroke-linecap: round;
+}
+
+/* How long a feature's answers take: the picture of its days, then the
+   week's typical wait over its slow one. */
+.jev-latency {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.jev-latency-words {
+  display: grid;
+  white-space: nowrap;
+}
+
+/* ---- the charts over the table (t-9633 (c)(e)) ----
+   Cards side by side while each has its room, one under the other when
+   not; each reads like a figure of the strip — a small title, the figure it
+   is read for, a line under it — over its picture. */
+.jev-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--jev-plot-card-min)), 1fr));
+  gap: var(--space-3);
+}
+
+.jev-chart {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  grid-template-areas: "head" "plot";
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+}
+
+.jev-chart-head {
+  grid-area: head;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+}
+
+.jev-chart-title {
+  flex: 1 0 100%;
+  color: var(--ink-mist);
+  font-size: var(--jev-stat-label-size);
+  font-weight: var(--jev-weight-medium);
+  line-height: var(--leading-tight);
+}
+
+.jev-chart-figure {
+  font-size: var(--jev-stat-size);
+  font-weight: var(--jev-weight-strong);
+  line-height: var(--leading-tight);
+}
+
+.jev-chart-sub {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-chart-body, .jev-chart-empty {
+  grid-area: plot;
+  min-width: 0;
+}
+
+.jev-chart-body {
+  display: grid;
+  align-content: end;
+  gap: var(--space-1);
+}
+
+.jev-chart-empty {
+  align-self: center;
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-chart-picture {
+  display: block;
+  width: 100%;
+  height: var(--jev-plot-height);
+  overflow: visible;
+}
+
+.jev-chart-picture path {
+  vector-effect: non-scaling-stroke;
+}
+
+.jev-chart-rule {
+  fill: none;
+  stroke: var(--jev-chart-grid);
+  stroke-width: var(--jev-line);
+}
+
+/* A column is a stroke from the baseline that keeps its thickness however
+   wide the chart is; it lets a pointer through to its day's slot, which lifts
+   under it and says the day's numbers. */
+.jev-chart-columns {
+  fill: none;
+  stroke: var(--jev-chart-accent);
+  stroke-width: var(--jev-plot-column);
+  stroke-linecap: butt;
+  pointer-events: none;
+}
+
+.jev-chart-picture[data-dense] .jev-chart-columns {
+  stroke-width: var(--jev-plot-column-dense);
+}
+
+.jev-chart-hit {
+  fill: transparent;
+  transition: fill var(--motion-fast) var(--ease-standard);
+}
+
+.jev-chart-hit:hover {
+  fill: var(--jev-chart-track);
+}
+
+.jev-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--ink-mist);
+  font-size: var(--jev-stat-label-size);
+}
+
+/* The features nearest their next judgment. Where the card has the room
+   (32em of its own text), one line a feature — its name, its bar and what
+   remains, the bars in one column so their lengths compare; where it has
+   not, the name and what remains over the bar. */
+.jev-chart {
+  container: jev-chart / inline-size;
+}
+
+.jev-judgment {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.jev-judgment-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  grid-template-areas: "name owed" "bar bar";
+  row-gap: var(--space-1);
+  align-items: baseline;
+}
+
+@container jev-chart (width >= 32em) {
+  .jev-judgment {
+    grid-template-columns: minmax(0, max-content) minmax(var(--jev-plot-bar-min), 1fr) max-content;
+  }
+
+  .jev-judgment-row {
+    grid-template-areas: "name bar owed";
+    align-items: center;
+  }
+}
+
+.jev-judgment-name {
+  grid-area: name;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.jev-judgment-owed {
+  grid-area: owed;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  text-align: right;
+}
+
+.jev-judgment-bar {
+  grid-area: bar;
+  display: block;
+  width: 100%;
+  height: var(--jev-progress-height);
+  background: var(--jev-chart-track);
+  clip-path: inset(0 round var(--radius-pill));
+}
+
+.jev-judgment-fill {
+  fill: var(--jev-chart-accent);
+}
+
+/* The drawer's week: the picture, the key to its marks and the table of its
+   days. */
+.jev-days-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-days-key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.jev-days-key::before {
+  content: "";
+  flex: none;
+  width: var(--space-3);
+  border-top: var(--jev-trend-stroke) solid var(--jev-chart-accent);
+}
+
+.jev-days-key.is-band::before {
+  height: var(--space-2);
+  border-top: 0;
+  background: var(--jev-chart-wash);
+}
+
+.jev-days-key.is-baseline::before {
+  border-top: var(--jev-line) dashed var(--jev-chart-context);
+}
+
+.jev-days-key.is-samples::before {
+  height: var(--space-2);
+  border-top: var(--jev-line) dashed var(--jev-chart-context);
+  background: var(--jev-chart-quiet);
+}
+
+.jev-days-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--jev-meta-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.jev-days-table th, .jev-days-table td {
+  padding: var(--space-1) var(--space-1);
+  border-bottom: var(--jev-line) solid var(--edge-rule);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.jev-days-table th:first-child, .jev-days-table td:first-child {
+  text-align: left;
+}
+
+.jev-days-table thead th {
+  color: var(--ink-mist);
+  font-weight: var(--jev-weight-medium);
+  white-space: normal;
+}
+
+/* The scope just chosen is being counted: what stands counted the other one
+   and steps back until the answer lands. */
+.jev-view[data-jev-stale] :is(.jev-summary, .jev-charts, .jev-table-wrap) {
+  opacity: var(--jev-stale-opacity);
+}
+
+.jev-summary, .jev-charts, .jev-table-wrap {
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+/* ---- the width the dashboard is given (t-9633) ----
+   The view is its own container, so what decides is the width it is given
+   — a split, the side panels open — and not the screen's. The widths below
+   are in the view's own text (`em`, its 13-pixel body): what the table needs
+   is a length of words, which grows with the text, and a query cannot read a
+   token. Three widths:
+
+   From 100em a row has the room for its latency picture beside its words
+   (the table's narrowest with it, measured with the gate's fixture: 1034
+   pixels in Korean, 1149 in English, 1224 in Spanish, and the page's
+   padding); under it the table says its latency in words — 978, 1095 and
+   1168 pixels — and so still fits a 1080p stage with both side panels open
+   (1241 pixels).
+
+   Under 94em the table no longer fits, and every row stands as a card: its
+   name over it, each number under its column's name in as many columns as
+   the card has room for, the state and the week across the whole card. The
+   head row goes, and each cell says its column's name itself, to the eye and
+   to a screen reader alike; the cells keep their roles (`role` on each, as a
+   table that stops displaying as one can lose them).
+
+   Under 58em the head stacks over its side and the strip's figures stand in
+   even columns. */
+.jev-table .jev-latency-picture {
+  display: none;
+}
+
+@container jev (width >= 100em) {
+  .jev-table .jev-latency-picture {
+    display: block;
+  }
+}
+
+@container jev (width < 94em) {
+  .jev-table, .jev-table tbody, .jev-table caption {
+    display: block;
+  }
+
+  .jev-table thead {
+    display: none;
+  }
+
+  .jev-table tbody tr[data-jev-dash-row] {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(calc(var(--jev-stat-min) * 1.25), 1fr));
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-3);
+    border-bottom: var(--jev-line) solid var(--edge-rule);
+  }
+
+  .jev-table tbody tr[data-jev-dash-row] td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .jev-table tbody tr[data-jev-dash-row] td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--ink-mist);
+    font-size: var(--jev-stat-label-size);
+    font-weight: var(--jev-weight-plain);
+    white-space: normal;
+  }
+
+  .jev-table td[data-jev-cell="seat"],
+  .jev-table td[data-jev-cell="status"],
+  .jev-table td[data-jev-cell="trend"] {
+    grid-column: 1 / -1;
+  }
+
+  .jev-table tbody tr[data-jev-dash-row] td[data-jev-cell="seat"]::before {
+    content: none;
+  }
+
+  .jev-table [data-jev-cell="status"] {
+    min-width: 0;
+  }
+
+  .jev-table .jev-latency-picture {
+    display: block;
+  }
+
+  .jev-table .jev-empty-row, .jev-table .jev-fold-row,
+  .jev-table .jev-empty-row td, .jev-table .jev-fold-row td {
+    display: block;
+  }
+}
+
+@container jev (width < 58em) {
+  .jev-head, .jev-head-side {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .jev-scope {
+    justify-content: flex-start;
+  }
+
+  /* The freshness line over the two presses, which then fit beside each
+     other; the strip's figures in even columns. */
+  .jev-freshness {
+    flex: 1 0 100%;
+  }
+
+  .jev-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(calc(var(--jev-stat-min) * 1.25), 1fr));
+  }
+
+  .jev-stat.jev-stat--lead {
+    margin-inline-start: 0;
+  }
 }
 
 .jev-recent-list {

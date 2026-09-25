@@ -2630,10 +2630,26 @@
   --agent-accent-codex: #0e8a6c;
   --agent-accent-zo: #6b5fd6;
   --agent-accent-antigravity: #2f6fdb;
+
+  /* The Jev pictures on paper (t-9633): the dark treatment's roles below,
+     stepped for the white deck — the accent and the miss's tone each clear
+     3:1 on it and stay apart for colour-blind eyes (checked with the
+     dataviz palette check: #0d9488 against #b45309, ΔE 13.6 deutan, 23.6
+     unsimulated), the washes lighter so the lines over them keep theirs. */
+  --jev-chart-accent: #0d9488;
+  --jev-chart-behind: #b45309;
+  --jev-chart-context: var(--ink-mist);
+  --jev-chart-wash: color-mix(in srgb, var(--jev-chart-accent) 16%, transparent);
+  --jev-chart-thin: color-mix(in srgb, var(--jev-chart-accent) 40%, transparent);
+  --jev-chart-range: color-mix(in srgb, var(--jev-chart-accent) 50%, transparent);
+  --jev-chart-quiet: color-mix(in srgb, var(--ink-mist) 32%, transparent);
+  --jev-chart-track: color-mix(in srgb, var(--ink-mist) 18%, transparent);
+  --jev-chart-grid: var(--edge-rule);
 }
 
 /* Jev dashboard geometry; colours inherit the semantic palette in both
-   themes, the trend lines take the first lane's hue. The type is the
+   themes, and the pictures' own roles (--jev-chart-*) are declared here for
+   the dark treatment and again in the light block above. The type is the
    window's own scale (--text-*) wherever a step of it fits; the page's title
    and the strip's figures are the two sizes of its own (t-6277 D10). */
 :root {
@@ -2641,8 +2657,9 @@
   --jev-meta-size: var(--text-xs);
   --jev-body-size: var(--text-sm);
   --jev-line: 1px;
+  /* A row's accuracy picture and its strip of days: one width, each as tall
+     as its own box's proportions make it (t-9633). */
   --jev-spark-width: 72px;
-  --jev-spark-height: 24px;
   --jev-cell-min: 56px;
   /* A state's chip and bar on one line, its sentence on one or two: a row
      stays three lines tall and the table fits a 1080p stage (t-6243 D2). */
@@ -2654,12 +2671,43 @@
   --jev-reason-min: 10em;
   /* A failure's chip is one text line tall (t-6243 D5). */
   --jev-token-line: 16px;
-  --jev-trend: var(--lane-1);
-  /* The week's second line, accuracy: the ink and a dash, so it reads apart
-     from the response rate in both treatments (the light one draws every
-     lane in one colour) and without colour at all (t-6243 D4). */
-  --jev-trend-accuracy: var(--ink-chalk);
+  /* The simplest method's line under a feature's accuracy: the context ink
+     and a dash, so it reads apart from the accuracy in both treatments and
+     without colour at all (t-6243 D4, t-9633). */
   --jev-trend-dash: 3 2;
+  /* The pictures (t-9633): the one accent every feature's own measure is
+     drawn in, the tone of a day the simplest method did as well, the ink of
+     what a measure is held against, and the washes and tracks they lie on.
+     The accent and the miss's tone sit in the dark band for marks and stay
+     apart for colour-blind eyes (the dataviz palette check: #23a083 against
+     #c4852c, ΔE 10.1 protan, 18.9 unsimulated, both 3:1 on the deck); the
+     light block above steps each for paper. */
+  --jev-chart-accent: #23a083;
+  --jev-chart-behind: #c4852c;
+  --jev-chart-context: var(--ink-mist);
+  --jev-chart-wash: color-mix(in srgb, var(--jev-chart-accent) 22%, transparent);
+  --jev-chart-thin: color-mix(in srgb, var(--jev-chart-accent) 45%, transparent);
+  --jev-chart-range: color-mix(in srgb, var(--jev-chart-accent) 55%, transparent);
+  --jev-chart-quiet: color-mix(in srgb, var(--ink-mist) 38%, transparent);
+  --jev-chart-track: color-mix(in srgb, var(--ink-mist) 22%, transparent);
+  --jev-chart-grid: var(--edge-rule);
+  /* How large they draw: the tokens chart's plot, the drawer's week, the
+     narrowest a chart card goes before the charts stand one under the other,
+     a latency picture's width, a day's column (and a month's), the shortest
+     a judgment bar goes, a dot and the mark of where a feature stands now,
+     and the step the page takes back while the scope just chosen is being
+     counted. */
+  --jev-plot-height: 48px;
+  --jev-plot-wide-height: 96px;
+  --jev-plot-card-min: 320px;
+  --jev-plot-latency-width: 48px;
+  --jev-plot-column: 12px;
+  --jev-plot-column-dense: 4px;
+  --jev-plot-bar-min: 64px;
+  --jev-plot-dot: 3px;
+  --jev-plot-now: 4.5px;
+  --jev-plot-gap: 2px;
+  --jev-stale-opacity: 0.55;
   /* The strip over the table (t-6243 D1): the figure large and its label
      small above it (t-6277 D10). */
   --jev-stat-size: 22px;
@@ -2673,10 +2721,8 @@
   --jev-tone-under: var(--signal-wait-ink);
   --jev-tone-blocked: var(--signal-halt-ink);
   --jev-tone-dormant: var(--ink-mist);
-  /* The samples still owed, as a bar filling toward the judge's window. */
-  --jev-progress-width: 72px;
+  /* The bar filling toward a feature's next judgment (t-9633 (c)). */
   --jev-progress-height: 6px;
-  --jev-progress-ink: var(--lane-1);
   /* The drawer a feature's row opens (t-6277 D6): wide enough for a
      judgment's asked facts on one or two lines, narrow enough to leave the
      table's first columns in view beside it. */
@@ -2695,7 +2741,6 @@
   --jev-tint-quiet: 6%;
   --jev-tint-open: 10%;
   --jev-tint-hover: 22%;
-  --jev-tint-track: 24%;
   --jev-trend-stroke: 1.5px;
   /* The settings card's link to the dashboard: its underline's gap, and how
      much it thickens under a pointer. */
