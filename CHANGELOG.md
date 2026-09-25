@@ -4,6 +4,11 @@
 
 _since v1.1.26 (35 commits)_
 
+### walk
+- feat(walk): a walk step chooses its operation and every target it needs in one Jev request — the action head carries the operation, the click target, the type target and the observation heads; a `Type` operation is a closed observed operation (only a field the snapshot lists, never an id or a command) whose value comes from a generator the person configured in the product's key store, through the existing stdin pipe; the person's subscription login is not a road for it; a repeated value is reused (t-6720)
+- feat(browser): the browser's observation is one state, read once — `marks --json` gathers the numbered controls with the document epoch, the input fields, containers, images and rows in one synchronous read (a moved page is read again, then said as `document_moving`); `click --mark` pins the document and the value, re-checks at the press and settles within 250 ms as ready, not ready or invalidated; the walk verb is proven through `run_goal` itself (t-6721)
+- feat(jev): the recall seat judges latency on answered calls against its own deadline, a placement the pane never tried is `not_carried` (rubric 2), a notify ring nobody was there for says `away`, and `tools/jev-seat-replay` prints every seat's judgment before and after a change from a read-only ledger copy (t-9427)
+
 ### feat
 - feat(board): 「답할 우편」 is the questions that wait on an answer — the ledger's notices stand under it as 「소식」, one line per quiet episode while the silence goes on, folded into a count after a day, and the desk's three numbers are the backend's (t-9456)
 - feat(board): a crowded orbit names only the planets that are doing something (t-9444)
