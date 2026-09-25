@@ -545,22 +545,25 @@ fn at_table_line(seat: &SeatReport) -> Option<&AtLine> {
     seat.calibration.as_ref()?.at_table_line.as_ref()
 }
 
-/// What the text says of a seat's act line: the one it acts from, the one
-/// its labels draw that the table does not hold yet, or why there is none.
-fn act_line_note(calibration: &SeatCalibration) -> String {
+/// What the text says of a seat's act line, after the notes before it: the
+/// one it acts from, the one its labels draw that the table does not hold
+/// yet, or why there is none.
+fn act_line_note(notes: &mut String, calibration: &SeatCalibration) {
     let permille = |value: Option<u16>| value.map_or_else(|| "—".to_string(), |value| format!("{value}‰"));
-    if let (Some(line), Some(at)) = (calibration.table_line, calibration.at_table_line.as_ref()) {
-        return format!(
+    let said = if let (Some(line), Some(at)) = (calibration.table_line, calibration.at_table_line.as_ref()) {
+        format!(
             "acts from {line}‰ on {} (wrong {}, baseline wrong {})",
             at.apply_share().map_or_else(|| "—".to_string(), |share| format!("{:.0}%", share * 100.0)),
             permille(at.error_permille()),
             permille(at.baseline_error_permille())
-        );
-    }
-    match calibration.calibrated.line {
-        Ok(line) => format!("labels draw {line}‰, not yet in the table"),
-        Err(why) => format!("no act line ({})", why.token()),
-    }
+        )
+    } else {
+        match calibration.calibrated.line {
+            Ok(line) => format!("labels draw {line}‰, not yet in the table"),
+            Err(why) => format!("no act line ({})", why.token()),
+        }
+    };
+    let _ = write!(notes, "{}{said}", if notes.is_empty() { "" } else { " · " });
 }
 
 fn render_text(seats: &[SeatReport]) -> String {
@@ -648,12 +651,7 @@ fn render_text(seats: &[SeatReport]) -> String {
             let _ = write!(notes, " · {owed} rows to judgment");
         }
         if let Some(calibration) = seat.calibration.as_ref() {
-            let _ = write!(
-                notes,
-                "{}{}",
-                if notes.is_empty() { "" } else { " · " },
-                act_line_note(calibration)
-            );
+            act_line_note(&mut notes, calibration);
         }
         let _ = writeln!(
             out,
