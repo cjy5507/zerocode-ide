@@ -278,7 +278,12 @@ pub(crate) fn choose(
     let body = crate::systemone::request_body(&ask.state, &ask.questions);
     let answer = wire.ask(&SUMMON, None, body, SUMMON_CHOICE_DEADLINE);
     let parsed: Value = serde_json::from_str(&answer.answer.ok()?).ok()?;
+    // Only an answer its act line lets act — the line its labels drew
+    // (t-9468), every answer while they drew none; under it the summons
+    // is refused as a failed one is.
+    let line = crate::systemone::act_line(&wire, &SUMMON);
     ask.read(parsed.get("answers")?)
         .ok()
+        .filter(|pick| SUMMON.acts_on(pick.confidence, line))
         .map(|pick| pick.chosen)
 }

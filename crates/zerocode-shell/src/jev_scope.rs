@@ -435,6 +435,10 @@ pub const SEAT: &[(&str, Carry)] = &[
     ("model", Carry::Agreed),
     ("days", Carry::Days),
     ("recent", Carry::Newest),
+    ("calibration", Carry::Own),
+    ("applyShare", Carry::Own),
+    ("appliedErrorPermille", Carry::Own),
+    ("baselineErrorPermille", Carry::Own),
     ("reach", Carry::Across),
     ("across", Carry::Across),
 ];

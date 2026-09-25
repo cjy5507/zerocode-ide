@@ -302,6 +302,71 @@ fn the_json_says_why_the_rows_compare_nothing_word_by_word() {
     );
 }
 
+/// A seat's act line, end to end (t-9468): the summary says the line the
+/// seat's graded answers draw and the row the replay would keep for it; the
+/// row, kept beside the ledger, is the line the product then reads — the
+/// seat is judged on the answers that line lets act, rises where its whole
+/// record holds, and the JSON says what it acts on and how often that is
+/// wrong beside the baseline.
+#[test]
+fn the_act_line_the_labels_draw_is_the_line_the_seat_reads_once_the_table_keeps_it() {
+    use zerocode_core::jev::threshold::THRESHOLDS_FILE;
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::NOTIFY;
+    // Fifty confident rings, three of them wrong; fifty timid ones, half
+    // wrong; the baseline wrong on every one.
+    let mut rows: Vec<serde_json::Value> = (0..100)
+        .map(|n| {
+            serde_json::json!({"at": 1_000 + n, "notify": format!("r-{n}"), "outcome": "answered", "elapsedMs": 40,
+                               "requests": 1, "confidence": if n % 2 == 0 { 0.9 } else { 0.2 },
+                               "rubricVersion": seat.rubric_version})
+        })
+        .collect();
+    rows.extend((0..100).map(|n| {
+        let agreed = if n % 2 == 0 { n % 34 != 0 } else { n % 4 == 1 };
+        serde_json::json!({"at": 2_000 + n, "label": format!("r-{n}"), "agreed": agreed, "baselineAgreed": false})
+    }));
+    let ledger = home.path().join(seat.ledger);
+    std::fs::write(&ledger, rows.iter().map(|row| row.to_string() + "\n").collect::<String>()).expect("write");
+    let notify = |value: &serde_json::Value| -> serde_json::Value {
+        value["seats"].as_array().expect("seats").iter().find(|row| row["id"] == seat.id).expect("notify").clone()
+    };
+    let read = || {
+        let seats = tools::jev_summary::report(&roots, None, None, 10_000, 0);
+        let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+        (value.clone(), notify(&value))
+    };
+
+    let (value, before) = read();
+    assert_eq!(value["thresholdsFile"], THRESHOLDS_FILE);
+    let calibration = &before["calibration"];
+    assert_eq!(calibration["readsActLine"], true);
+    assert_eq!(calibration["actFromPermille"], 300, "the lowest line the confident rings pass on");
+    assert_eq!(calibration["reason"], serde_json::Value::Null);
+    assert_eq!(calibration["grid"].as_array().map(Vec::len), Some(9));
+    assert_eq!(calibration["fixed"]["fromPermille"], 850, "the bands' own act line");
+    assert_eq!(calibration["drawn"]["marks"], 50);
+    assert_eq!(calibration["tableLine"], serde_json::Value::Null);
+    assert_eq!(before["applyShare"], serde_json::Value::Null, "no line is read yet");
+    assert_eq!(before["verdict"]["verdict"], "hold");
+    assert_eq!(before["verdict"]["line"], "agreement", "the whole record, timid rings and all");
+    assert_eq!(before["verdict"]["actLine"], serde_json::Value::Null);
+
+    // The replay keeps the row beside the ledger; the product reads it.
+    let row = calibration["row"].clone();
+    assert_eq!(row["actFromPermille"], 300);
+    std::fs::write(home.path().join(THRESHOLDS_FILE), serde_json::json!([row]).to_string()).expect("the table");
+    let (_, after) = read();
+    assert_eq!(after["calibration"]["tableLine"], 300);
+    assert_eq!(after["applyShare"], 0.5);
+    assert_eq!(after["appliedErrorPermille"], 60, "three of the fifty it acts on");
+    assert_eq!(after["baselineErrorPermille"], 1_000);
+    assert_eq!(after["verdict"]["verdict"], "rise", "{}", after["verdict"]);
+    assert_eq!(after["verdict"]["actLine"], 300);
+    assert_eq!(after["judged"]["agreement"]["compared"], 50);
+}
+
 /// Every seat's line says which id it asks with and which version answered
 /// (t-6187): the person's pin, or the alias, beside the `model` its newest
 /// request named — and a verdict read on rows a change of version cut

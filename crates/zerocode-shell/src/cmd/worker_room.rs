@@ -505,14 +505,23 @@ fn judged(wire: &Wire, look: &WorkerRoomLook, now_ms: i64) -> WorkerRoomJudged {
     });
     let judged = match read {
         Ok(pick) => {
+            // The seat seats the worker only on an answer its act line lets
+            // act — the line its labels drew (t-9468), every answer while
+            // they drew none — and the row says which it was.
+            let applied = crate::systemone::applies(wire, &PLACEMENT)
+                && PLACEMENT.acts_on(
+                    pick.confidence,
+                    crate::systemone::act_line(wire, &PLACEMENT),
+                );
             row["outcome"] = json!(ANSWERED);
             row["chosen"] = json!(pick.chosen.key());
             row["probabilities"] = json!(pick.probabilities);
             row["confidence"] = json!(pick.confidence);
+            row[zerocode_core::jev::summary::APPLIED.canonical] = json!(applied);
             WorkerRoomJudged {
                 outcome: ANSWERED.to_string(),
                 chosen: Some(pick.chosen.key().to_string()),
-                applied: crate::systemone::applies(wire, &PLACEMENT),
+                applied,
                 offered,
                 placed: false,
                 seen_after_ms: PLACEMENT_SEEN_DWELL_MS,
@@ -693,6 +702,47 @@ mod tests {
             "the version that answered"
         );
         assert!(row["elapsedMs"].is_u64() && row["requestBytes"].as_u64() > Some(0));
+    }
+
+    /// An acting seat seats the worker on an answer its act line lets act
+    /// (t-9468): with no table beside its ledger every answer, as before; with
+    /// a line its labels drew, only an answer that reaches it — one under it
+    /// is written down as not applied and the pane keeps today's room.
+    #[test]
+    fn an_acting_seat_seats_the_worker_only_from_the_line_its_labels_drew() {
+        use zerocode_core::jev::threshold::THRESHOLDS_FILE;
+        let work = tempfile::tempdir().expect("a checkout");
+        let home = tempfile::tempdir().expect("a zo home");
+        let folder = home.path().join(zerocode_core::jev::count::REQUESTS_DIR);
+        let table = |line: u16| {
+            std::fs::create_dir_all(&folder).expect("the ledger folder");
+            std::fs::write(
+                folder.join(THRESHOLDS_FILE),
+                json!([{ "seat": PLACEMENT.id, "rubricVersion": PLACEMENT.rubric_version,
+                         "computedAtMs": 1, "actFromPermille": line }])
+                .to_string(),
+            )
+            .expect("the table");
+        };
+        let settings = settings(&home, JevMode::On, &work.path().display().to_string());
+        let mut look = look();
+        look.checkout = Some(work.path().display().to_string());
+        let ask = || {
+            let endpoint = Endpoint::serving("HTTP/1.1 200 OK", a_room_answer("split"), 0);
+            let wire = Wire::at(&endpoint.base(), "test-key", Some(settings.clone()));
+            let judged = judged(&wire, &look, 1_789_700_000_000);
+            let row = rows(&folder.join(PLACEMENT.ledger)).pop().expect("a row");
+            (judged.applied, row["applied"].clone())
+        };
+        assert_eq!(ask(), (true, json!(true)), "no line: every answer, as ever");
+        table(700);
+        assert_eq!(
+            ask(),
+            (false, json!(false)),
+            "0.58 is under the line its labels drew"
+        );
+        table(500);
+        assert_eq!(ask(), (true, json!(true)), "0.58 reaches a line of 500");
     }
 
     /// A window with no room to cut offers two rooms, not three — and a judgment

@@ -279,11 +279,19 @@ impl Verdict {
     /// enough to act on alone.
     #[must_use]
     pub fn droppable(&self, seat: &JevUse) -> Vec<usize> {
+        self.droppable_at(seat, None)
+    }
+
+    /// [`Self::droppable`] for a seat acting from `line` — the act line its
+    /// graded answers drew, kept beside its ledger (t-9468) — in place of
+    /// its fold floor.
+    #[must_use]
+    pub fn droppable_at(&self, seat: &JevUse, line: Option<u16>) -> Vec<usize> {
         self.chrome
             .iter()
             // A block is no control: the fold reads the seat's own floor.
             .filter(|(_, confidence)| {
-                seat.permits_press(**confidence, crate::guarded::ControlKind::Plain)
+                seat.permits_press_at(**confidence, crate::guarded::ControlKind::Plain, line)
             })
             .map(|(index, _)| *index)
             .collect()

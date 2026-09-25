@@ -40,6 +40,7 @@ pub mod recent;
 pub mod reflex_decide;
 pub mod shard;
 pub mod summary;
+pub mod threshold;
 
 /// The object zo's settings keep every Jev switch under.
 pub const SMART_SETTINGS_KEY: &str = "smart";
@@ -438,9 +439,17 @@ pub struct JevUse {
     /// [`NEGATIVES_WANTED`]). `None` for a seat that never rises.
     pub negatives_wanted: Option<usize>,
     /// Where one answer's confidence puts it — abstain, confirm, act
-    /// ([`ConfidenceBands`], t-6342). Recorded, not yet read. `None` for a
-    /// seat that never rises.
+    /// ([`ConfidenceBands`], t-6342). `None` for a seat that never rises.
     pub confidence_bands: Option<ConfidenceBands>,
+    /// Whether this use's stage reads one answer's act line before it acts
+    /// on it (t-9468): the line the seat's graded answers drew, kept beside
+    /// its ledger ([`threshold::Thresholds::line_of`]), and the seat's own
+    /// lines where none was drawn ([`Self::acts_on`], [`Self::band_at`],
+    /// [`Self::permits_press_at`]). A stage that reads none acts on whatever
+    /// it answered, so a line drawn for it would be a line the judge reads
+    /// and the stage does not: [`threshold::Thresholds::line_of`] hands it
+    /// none, and its judge reads its whole record as before.
+    pub reads_act_line: bool,
     /// The version of the words this use asks now (t-6877) — the
     /// `*_RUBRIC_VERSION` its writer stamps on every request row
     /// ([`summary::RUBRIC_VERSION`]), named here by that constant and never
@@ -649,9 +658,13 @@ pub const NEGATIVES_WANTED: usize = 3;
 /// and the seats' existing floors; `tools/label-audit` draws each seat's
 /// curve from its ledger for the day they are moved.
 ///
-/// Recorded, not yet read: no seat routes on its band today. The model
-/// choice's second version (docs/design/jev-engineering-review-20260923.md
-/// §6-5, the chat probe only for an unsure answer) is its first reader.
+/// Read by the model choice's second version (docs/design/jev-engineering-review-20260923.md
+/// §6-5, the chat probe only for an unsure answer), and moved by the
+/// seat's own labels (t-9468): a seat whose stage reads an act line
+/// ([`JevUse::reads_act_line`]) acts from the line its graded answers drew
+/// ([`threshold::Thresholds::line_of`]) where one was drawn, and from these
+/// lines where none was ([`JevUse::acts_on`], [`JevUse::band_at`],
+/// [`JevUse::permits_press_at`]).
 ///
 /// Read on the answer's `confidence`: a Choice's spread collapsed into one
 /// number and normalized by its option count. A Noul carries none
@@ -740,22 +753,51 @@ impl ConfidenceBands {
     }
 
     /// The band `confidence` falls in — `None` for a reading outside
-    /// `0..=1`. The lines are compared as the press gate compares its floor,
-    /// so a pressing seat's `Act` is exactly [`JevUse::permits_press`].
+    /// `0..=1`. The lines are compared as the press gate compares its floor
+    /// ([`reaches`]), so a pressing seat's `Act` is exactly
+    /// [`JevUse::permits_press`].
     #[must_use]
     pub fn band_of(self, confidence: f64) -> Option<Band> {
         if !(0.0..=1.0).contains(&confidence) {
             return None;
         }
-        let from = |permille: u16| confidence >= f64::from(permille) / 1_000.0;
-        Some(if !from(self.abstain_below_permille) {
+        Some(if !reaches(confidence, self.abstain_below_permille) {
             Band::Abstain
-        } else if !from(self.act_from_permille) {
+        } else if !reaches(confidence, self.act_from_permille) {
             Band::Confirm
         } else {
             Band::Act
         })
     }
+
+    /// These bands acting from `line` — the act line a seat's graded
+    /// answers drew (t-9468) — in place of their own: from the line an
+    /// answer acts, under the lower of the line and the abstain line it
+    /// abstains, and between the two it wants a confirmation. No line moves
+    /// nothing.
+    #[must_use]
+    pub const fn acting_from(self, line: Option<u16>) -> Self {
+        match line {
+            None => self,
+            Some(line) => Self {
+                abstain_below_permille: if line < self.abstain_below_permille {
+                    line
+                } else {
+                    self.abstain_below_permille
+                },
+                act_from_permille: line,
+            },
+        }
+    }
+}
+
+/// Whether an answer given at `confidence` reaches a line drawn per
+/// thousand — the one comparison a band, a press floor and an act line are
+/// all read with, so no two of them can disagree on an answer that sits on
+/// a line. A reading outside `0..=1` reaches none.
+#[must_use]
+pub fn reaches(confidence: f64, line_permille: u16) -> bool {
+    (0.0..=1.0).contains(&confidence) && confidence >= f64::from(line_permille) / 1_000.0
 }
 
 /// A Noul probability of yes, per thousand, as a lean from the middle:
@@ -945,6 +987,7 @@ pub const ROUTING: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: true,
     rubric_version: questions::ROUTING_RUBRIC_VERSION,
     request_name: &["attempt"],
     names: Naming::Turn,
@@ -1122,6 +1165,7 @@ pub const RECALL: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    reads_act_line: false,
     rubric_version: questions::RECALL_RUBRIC_VERSION,
     request_name: &["query", "notes"],
     names: Naming::Words,
@@ -1231,6 +1275,7 @@ pub const BROWSER: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    reads_act_line: true,
     rubric_version: crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION,
     request_name: &[],
     names: Naming::Request,
@@ -1278,6 +1323,7 @@ pub const DESKTOP: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    reads_act_line: true,
     rubric_version: crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION,
     request_name: &[],
     names: Naming::Request,
@@ -1322,6 +1368,7 @@ pub const EMULATOR: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    reads_act_line: true,
     rubric_version: crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION,
     request_name: &[],
     names: Naming::Request,
@@ -1363,6 +1410,7 @@ pub const STALL: JevUse = JevUse {
     baseline: Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word()),
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: true,
     rubric_version: crate::stall_cause::STALL_CAUSE_RUBRIC_VERSION,
     request_name: &["stall"],
     names: Naming::Request,
@@ -1473,6 +1521,7 @@ pub const PLACEMENT: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    reads_act_line: true,
     rubric_version: crate::worker_placement::WORKER_PLACEMENT_RUBRIC_VERSION,
     request_name: &["placement"],
     names: Naming::Request,
@@ -1578,6 +1627,7 @@ pub const SUMMON: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: true,
     rubric_version: crate::summon_choice::SUMMON_CHOICE_RUBRIC_VERSION,
     request_name: &[],
     names: Naming::Request,
@@ -1652,6 +1702,7 @@ pub const STEP_EFFORT: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: false,
     rubric_version: crate::step_effort::STEP_EFFORT_RUBRIC_VERSION,
     request_name: &["move"],
     names: Naming::Request,
@@ -1876,6 +1927,7 @@ pub const SKILLS: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    reads_act_line: false,
     rubric_version: questions::SKILL_SEARCH_RUBRIC_VERSION,
     request_name: SKILL_REQUEST_NAME,
     names: Naming::Words,
@@ -1924,6 +1976,7 @@ pub const SKILL_SUGGESTION: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    reads_act_line: false,
     rubric_version: questions::SKILL_SUGGESTION_RUBRIC_VERSION,
     request_name: SKILL_REQUEST_NAME,
     names: Naming::Words,
@@ -1990,6 +2043,7 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: false,
     rubric_version: questions::UNVERSIONED_RUBRIC,
     // A progress mark names the judgment it grades by the turn's attempt and
     // the step that judgment was asked at (t-6877): the label's own `step`
@@ -2175,6 +2229,7 @@ pub const COMPACTION: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: false,
     rubric_version: questions::COMPACTION_RUBRIC_VERSION,
     request_name: &["judged"],
     names: Naming::Request,
@@ -2280,6 +2335,7 @@ pub const AGENT_TOOL: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: None,
     confidence_bands: None,
+    reads_act_line: false,
     rubric_version: questions::AGENT_TOOL_RUBRIC_VERSION,
     request_name: &[],
     names: Naming::Request,
@@ -2465,6 +2521,7 @@ pub const BROWSER_READ: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(BROWSER_READ_FOLD_FLOOR_PERMILLE)),
+    reads_act_line: true,
     rubric_version: crate::browser_read::BROWSER_READ_RUBRIC_VERSION,
     request_name: &["read"],
     names: Naming::Request,
@@ -2637,6 +2694,7 @@ pub const NOTIFY: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: true,
     rubric_version: crate::notify_call::NOTIFY_CALL_RUBRIC_VERSION,
     request_name: &["notify"],
     names: Naming::Request,
@@ -2766,6 +2824,7 @@ pub const MENTION_RERANK: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    reads_act_line: false,
     rubric_version: questions::MENTION_RERANK_RUBRIC_VERSION,
     request_name: &["query", "notes"],
     names: Naming::Words,
@@ -2949,6 +3008,7 @@ pub const BRANCHING: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    reads_act_line: true,
     rubric_version: crate::branching::BRANCHING_RUBRIC_VERSION,
     request_name: &[],
     names: Naming::Request,
@@ -3010,6 +3070,7 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     negatives_wanted: Some(NEGATIVES_WANTED),
     // The screen seats' line: the answer it hands back is pressed under theirs.
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    reads_act_line: false,
     rubric_version: questions::UNVERSIONED_RUBRIC,
     request_name: &[],
     names: Naming::Request,
@@ -3167,6 +3228,7 @@ pub const CHALLENGER: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: false,
     rubric_version: questions::CHALLENGER_RUBRIC_VERSION,
     request_name: &[challenger::ATTEMPT.canonical],
     names: Naming::Request,
@@ -3354,6 +3416,7 @@ pub const PATCH_REVIEW: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         PATCH_REVIEW_PERMIT_FLOOR_PERMILLE,
     )),
+    reads_act_line: false,
     rubric_version: questions::PATCH_REVIEW_RUBRIC_VERSION,
     request_name: &["judged"],
     names: Naming::Request,
@@ -3420,6 +3483,7 @@ pub const CLAIM: JevUse = JevUse {
         abstain_below_permille: 600,
         act_from_permille: CLAIM_CHOICE_FLOOR_PERMILLE,
     }),
+    reads_act_line: false,
     rubric_version: questions::CLAIM_RUBRIC_VERSION,
     request_name: &["judged"],
     names: Naming::Request,
@@ -3494,6 +3558,7 @@ pub const VAULT_PAIRS: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         VAULT_PAIR_OPPOSITE_FLOOR_PERMILLE,
     )),
+    reads_act_line: false,
     rubric_version: questions::VAULT_PAIR_RUBRIC_VERSION,
     request_name: &[],
     names: Naming::Request,
@@ -3548,6 +3613,7 @@ pub const FILE_PICK: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         FILE_PICK_MATCH_FLOOR_PERMILLE,
     )),
+    reads_act_line: false,
     rubric_version: questions::FILE_PICK_RUBRIC_VERSION,
     request_name: &["judged"],
     names: Naming::Request,
@@ -3664,6 +3730,7 @@ pub const COMMAND_GUARD: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         COMMAND_GUARD_FLAG_FLOOR_PERMILLE,
     )),
+    reads_act_line: false,
     rubric_version: questions::COMMAND_GUARD_RUBRIC_VERSION,
     request_name: &["judged"],
     names: Naming::Request,
@@ -3753,6 +3820,7 @@ pub const TOOL_TEXT_GUARD: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE,
     )),
+    reads_act_line: false,
     rubric_version: questions::TOOL_TEXT_GUARD_RUBRIC_VERSION,
     request_name: &["judged"],
     names: Naming::Request,
@@ -3822,6 +3890,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: None,
     confidence_bands: None,
+    reads_act_line: false,
     rubric_version: questions::REFLEX_DECIDE_RUBRIC_VERSION,
     // Its marks — the teacher's answer — sit on the request row itself: no
     // label row names one of its requests.
@@ -3867,8 +3936,16 @@ impl JevUse {
     /// ([`ConfidenceBands::band_of`]) — `None` for a seat that names no bands.
     #[must_use]
     pub fn band_of(&self, confidence: f64) -> Option<Band> {
+        self.band_at(confidence, None)
+    }
+
+    /// [`Self::band_of`] for a seat acting from `line` — the act line its
+    /// graded answers drew ([`threshold::Thresholds::line_of`], t-9468) —
+    /// in place of its bands' own ([`ConfidenceBands::acting_from`]).
+    #[must_use]
+    pub fn band_at(&self, confidence: f64, line: Option<u16>) -> Option<Band> {
         self.confidence_bands
-            .and_then(|bands| bands.band_of(confidence))
+            .and_then(|bands| bands.acting_from(line).band_of(confidence))
     }
 
     /// Whether a validated screen choice meets this seat's press policy for
@@ -3878,16 +3955,46 @@ impl JevUse {
     /// nothing, of either kind.
     #[must_use]
     pub fn permits_press(&self, confidence: f64, kind: crate::guarded::ControlKind) -> bool {
+        self.permits_press_at(confidence, kind, None)
+    }
+
+    /// [`Self::permits_press`] with the plain floor moved to `line` — the
+    /// act line the seat's graded answers drew (t-9468). A control a press
+    /// cannot take back still asks
+    /// [`SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE`] on top, and a seat with no
+    /// press floor still presses nothing: a line moves a floor, it grants no
+    /// authority to press.
+    #[must_use]
+    pub fn permits_press_at(
+        &self,
+        confidence: f64,
+        kind: crate::guarded::ControlKind,
+        line: Option<u16>,
+    ) -> bool {
         self.press_floor_permille
-            .map(|floor| match kind {
-                crate::guarded::ControlKind::Plain => floor,
-                crate::guarded::ControlKind::Destructive => {
-                    floor.max(SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE)
+            .map(|floor| {
+                let floor = line.unwrap_or(floor);
+                match kind {
+                    crate::guarded::ControlKind::Plain => floor,
+                    crate::guarded::ControlKind::Destructive => {
+                        floor.max(SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE)
+                    }
                 }
             })
-            .is_some_and(|floor| {
-                (0.0..=1.0).contains(&confidence) && confidence >= f64::from(floor) / 1_000.0
-            })
+            .is_some_and(|floor| reaches(confidence, floor))
+    }
+
+    /// Whether one answer of this seat, given at `confidence`, may act alone
+    /// (t-9468): from `line` — the act line its graded answers drew, as the
+    /// product reads it ([`threshold::Thresholds::line_of`]) — when there is
+    /// one; else from its press floor, the line its stage has always read
+    /// ([`Self::permits_press`]); else whatever it answered, as a stage with
+    /// no line has always acted. A seat with no act line of its own acts
+    /// exactly as it did before the table was written.
+    #[must_use]
+    pub fn acts_on(&self, confidence: f64, line: Option<u16>) -> bool {
+        line.or(self.press_floor_permille)
+            .is_none_or(|from| reaches(confidence, from))
     }
 
     /// The mode `value` names for this use: one of this use's own words,

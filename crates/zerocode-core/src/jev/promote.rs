@@ -99,11 +99,12 @@ use crate::jev::questions::UNVERSIONED_RUBRIC;
 use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, JevUse, Naming};
 
 use crate::jev::summary::{
-    AGREED, AT, BASELINE_AGREED, JUDGED_EVERY_ROWS, LABEL, MODEL, NOT_COMPARED, REQUEST_AT,
-    RUBRIC_VERSION, RUBRIC_VERSIONS, TRANSITION, Tally, WILSON_Z_95, asked_something,
+    AGREED, ANSWERED, AT, BASELINE_AGREED, JUDGED_EVERY_ROWS, LABEL, MODEL, NOT_COMPARED,
+    REQUEST_AT, RUBRIC_VERSION, RUBRIC_VERSIONS, TRANSITION, Tally, WILSON_Z_95, asked_something,
     failures_in_a_row_of, is_control_row, is_request_or_mark, last_asked_of,
     rows_that_can_clear_forgiving, wilson_lower,
 };
+use crate::jev::threshold::{CALIBRATION, Graded, answer_confidence};
 
 /// What the judge said of a ledger's rows, and the window it said it on —
 /// the one reading a judge that writes transitions and a screen that shows
@@ -138,6 +139,10 @@ pub struct Judged {
     /// cut them ([`OnVersion::cut`]) — the reason a thinner sample gives
     /// for itself beside the line it holds on.
     pub cut: Option<String>,
+    /// The act line the marks were read at ([`judge_seat_at`], t-9468) —
+    /// `None` for a seat judged on every mark, as every seat was before its
+    /// labels drew one.
+    pub act_line: Option<u16>,
 }
 
 /// A ledger read as one seat's current series (t-6877) from its newest
@@ -218,6 +223,12 @@ pub struct OnVersion<'rows> {
     /// a request the older version answered is that version's comparison
     /// and not this one's, and cuts nothing of this one's either.
     pub marks: Vec<&'rows Value>,
+    /// Beside each of [`Self::marks`], the confidence the answer it grades
+    /// was given with (t-9468): a request's own, a label's its request's —
+    /// the request is the authority on it as on the version — or the
+    /// label's own copy where the request carries none (the guards' labels
+    /// carry the deciding answer's lean). `None` where neither says one.
+    pub mark_confidences: Vec<Option<f64>>,
 }
 
 impl<'rows> OnVersion<'rows> {
@@ -229,6 +240,57 @@ impl<'rows> OnVersion<'rows> {
             .filter(|row| asked_something(row).is_some())
             .count()
     }
+
+    /// The series' graded answers (t-9468): every mark
+    /// ([`crate::jev::summary::AGREED`]) whose answer says the confidence it
+    /// was given with, beside the baseline's mark on the same fact — what a
+    /// seat's act line is read off ([`crate::jev::threshold::calibrate`]).
+    #[must_use]
+    pub fn graded(&self) -> Vec<Graded> {
+        self.marks
+            .iter()
+            .zip(&self.mark_confidences)
+            .filter_map(|(row, confidence)| {
+                Some(Graded {
+                    confidence: (*confidence)?,
+                    agreed: AGREED.read(row).and_then(Value::as_bool)?,
+                    baseline: BASELINE_AGREED.read(row).and_then(Value::as_bool),
+                })
+            })
+            .collect()
+    }
+
+    /// The confidence each answered request of the series was given with —
+    /// `None` for one whose row says none, which no act line acts on.
+    #[must_use]
+    pub fn answered(&self) -> Vec<Option<f64>> {
+        answered_confidences(self.requests.iter().copied())
+    }
+
+    /// The marks a seat acting from `line` is judged on (t-9468): with no
+    /// line every mark, as before; with one, the marks of the answers the
+    /// line lets act — an answer that says no confidence is not one of them.
+    #[must_use]
+    pub fn marks_from_line(&self, line: Option<u16>) -> Vec<&'rows Value> {
+        self.marks
+            .iter()
+            .zip(&self.mark_confidences)
+            .filter(|(_, confidence)| {
+                line.is_none_or(|line| {
+                    confidence.is_some_and(|confidence| crate::jev::reaches(confidence, line))
+                })
+            })
+            .map(|(row, _)| *row)
+            .collect()
+    }
+}
+
+/// The confidence each answered request among `rows` was given with.
+fn answered_confidences<'a>(rows: impl IntoIterator<Item = &'a Value>) -> Vec<Option<f64>> {
+    rows.into_iter()
+        .filter(|row| asked_something(row) == Some(ANSWERED))
+        .map(answer_confidence)
+        .collect()
 }
 
 /// The version `row` names as the one that answered it, if it names one —
@@ -515,28 +577,35 @@ pub fn on_the_newest_version<'rows>(seat: &JevUse, rows: &'rows [Value]) -> OnVe
             newest_label.insert((request, Name::of(seat.label_part, row)), at);
         }
     }
-    // The series, and beside each row the version that answered it: a
-    // request's own, a label's its request's.
+    // The series, and beside each row the version that answered it and
+    // the confidence the answer was given with: a request's own, a label's
+    // its request's.
     let mut series: Vec<&'rows Value> = Vec::new();
     let mut answered_by: Vec<Option<&'rows str>> = Vec::new();
+    let mut given_with: Vec<Option<f64>> = Vec::new();
     for (at, row) in rows.iter().enumerate() {
-        let version = match kind[at] {
+        let (version, confidence) = match kind[at] {
             None => continue,
-            Some(InSeries::Asked) => named_version(row),
+            Some(InSeries::Asked) => (named_version(row), answer_confidence(row)),
             Some(InSeries::Grades(request)) => {
                 // Of two labels naming one request and one part of it, the
                 // newest.
                 if newest_label.get(&(request, Name::of(seat.label_part, row))) != Some(&at) {
                     continue;
                 }
-                // The request's version; the label's own only where the
-                // request names none (every request written before
-                // versions were recorded).
-                named_version(&rows[request]).or_else(|| named_version(row))
+                // The request's version and confidence; the label's own
+                // only where the request names none (every request written
+                // before versions were recorded; a guard's request, whose
+                // label carries the deciding answer's lean).
+                (
+                    named_version(&rows[request]).or_else(|| named_version(row)),
+                    answer_confidence(&rows[request]).or_else(|| answer_confidence(row)),
+                )
             }
         };
         series.push(row);
         answered_by.push(version);
+        given_with.push(confidence);
     }
     let model = series
         .iter()
@@ -555,17 +624,19 @@ pub fn on_the_newest_version<'rows>(seat: &JevUse, rows: &'rows [Value]) -> OnVe
         .iter()
         .rev()
         .find_map(|version| version.filter(|_| another(*version)));
-    let marks: Vec<&'rows Value> = series[requests_from..]
+    let (marks, mark_confidences): (Vec<&'rows Value>, Vec<Option<f64>>) = series[requests_from..]
         .iter()
         .zip(&answered_by[requests_from..])
-        .filter(|(_, version)| !another(**version))
-        .map(|(row, _)| *row)
-        .collect();
+        .zip(&given_with[requests_from..])
+        .filter(|((_, version), _)| !another(**version))
+        .map(|((row, _), confidence)| (*row, *confidence))
+        .unzip();
     OnVersion {
         model,
         cut,
         requests: series[requests_from..].to_vec(),
         marks,
+        mark_confidences,
         rows: series,
     }
 }
@@ -608,7 +679,13 @@ pub fn asked_toward_judgment(seat: &JevUse, rows: &[Value]) -> usize {
 /// alone, however far back they reach.
 #[must_use]
 pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
-    judge_seat_on(seat, &on_the_newest_version(seat, rows), rows)
+    judge_seat_in(seat, rows, None)
+}
+
+/// [`judge_seat`] for a seat acting from `line` ([`judge_seat_at`]).
+#[must_use]
+pub fn judge_seat_in(seat: &JevUse, rows: &[Value], line: Option<u16>) -> Option<Judged> {
+    judge_seat_at(seat, &on_the_newest_version(seat, rows), rows, line)
 }
 
 /// [`judge_seat`] on a series already read ([`on_the_newest_version`]) —
@@ -617,6 +694,25 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
 /// once and not twice on the way to one verdict.
 #[must_use]
 pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> Option<Judged> {
+    judge_seat_at(seat, version, rows, None)
+}
+
+/// [`judge_seat_on`] for a seat that acts from `line` — the act line its
+/// graded answers drew, as the product reads it
+/// ([`crate::jev::threshold::Thresholds::line_of`], t-9468). Its marks are
+/// the marks of the answers the line lets act
+/// ([`OnVersion::marks_from_line`]) — the agreement, the negatives and the
+/// baseline are read on what the seat would do, not on what it would leave
+/// to today's path — and it is held to acting on enough of its window
+/// ([`Line::ApplyShare`]). With no line every mark is read, and nothing
+/// else changes: a seat with no line of its own is judged as it always was.
+#[must_use]
+pub fn judge_seat_at(
+    seat: &JevUse,
+    version: &OnVersion<'_>,
+    rows: &[Value],
+    line: Option<u16>,
+) -> Option<Judged> {
     let floor = seat.answer_floor_permille?;
     let agreement_floor = seat.agreement_floor_permille?;
     let deadline_ms = seat.apply_deadline_ms?;
@@ -630,6 +726,7 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
         .and_then(|row| AT.read(row).and_then(Value::as_i64))
         .unwrap_or(i64::MIN);
     let window = crate::jev::summary::summarize_rows(held.iter().copied(), i64::MIN);
+    let marks = version.marks_from_line(line);
     // The window's marks are the series' marks written since its first
     // request — a late label of an older request of the same words counts,
     // a label of other words is not in the series at all — reached back
@@ -639,14 +736,13 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
     // ([`rows_that_can_clear_forgiving`]), and not the sample floor, which
     // is how many marks the line may speak on, not how many it can pass on.
     let reach = marks_that_can_clear(seat).unwrap_or(sample_floor);
-    let marks_since =
-        crate::jev::summary::marks_from(version.marks.iter().copied(), since_ms, reach);
-    let agreement = crate::jev::summary::agreement_rows(version.marks.iter().copied(), marks_since);
+    let marks_since = crate::jev::summary::marks_from(marks.iter().copied(), since_ms, reach);
+    let agreement = crate::jev::summary::agreement_rows(marks.iter().copied(), marks_since);
     let not_compared_by =
-        crate::jev::summary::not_compared_words(version.marks.iter().copied(), marks_since);
+        crate::jev::summary::not_compared_words(marks.iter().copied(), marks_since);
     // The label's whole record on this version, not the window's: a seat
     // that is right almost every time is not held for being right lately.
-    let record = crate::jev::summary::agreement_rows(version.marks.iter().copied(), i64::MIN);
+    let record = crate::jev::summary::agreement_rows(marks.iter().copied(), i64::MIN);
     let verdict = judge(
         standing(seat, rows),
         &Evidence {
@@ -662,6 +758,7 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
             negatives_wanted: seat.negatives_wanted.unwrap_or(0),
             disagreed_on_record: record.disagreed(),
             baseline: seat.baseline,
+            apply_share: apply_share_of(held.iter().copied(), line),
         },
     );
     Some(Judged {
@@ -673,7 +770,44 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
         control_rows: 0,
         model: version.model.map(str::to_string),
         cut: version.cut.map(str::to_string),
+        act_line: line,
     })
+}
+
+/// The share of a window's answered requests a seat acting from `line`
+/// acts on, beside the floor it must reach ([`CALIBRATION`]) — `None` for
+/// a seat with no line, which is not held to one (t-9468). A request that
+/// says no confidence is one the line does not act on.
+#[must_use]
+pub fn apply_share_of<'a>(
+    window: impl IntoIterator<Item = &'a Value>,
+    line: Option<u16>,
+) -> Option<ApplyShare> {
+    let line = line?;
+    let answered = answered_confidences(window);
+    let acted = answered
+        .iter()
+        .flatten()
+        .filter(|confidence| crate::jev::reaches(**confidence, line))
+        .count();
+    #[allow(clippy::cast_precision_loss)]
+    let share = if answered.is_empty() {
+        0.0
+    } else {
+        acted as f64 / answered.len() as f64
+    };
+    Some(ApplyShare {
+        share_permille: permille(share),
+        floor_permille: CALIBRATION.apply_share_floor_permille,
+    })
+}
+
+/// How much of its window a seat acting from an act line acts on, and the
+/// floor under which `auto` does not rise on the line (t-9468).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplyShare {
+    pub share_permille: u16,
+    pub floor_permille: u16,
 }
 
 /// The window `seat` is judged on: the last requests its answer floor can be
@@ -923,6 +1057,9 @@ pub struct Evidence<'window> {
     pub disagreed_on_record: usize,
     /// The cheapest reader the seat is held against ([`JevUse::baseline`]).
     pub baseline: Baseline,
+    /// How much of the window a seat acting from an act line acts on
+    /// ([`apply_share_of`], t-9468) — `None` for a seat with no line.
+    pub apply_share: Option<ApplyShare>,
 }
 
 /// Why a seat may not act, in the order §4 asks.
@@ -970,6 +1107,12 @@ pub enum Line {
     Baseline {
         bound_permille: u16,
         baseline_permille: u16,
+    },
+    /// A seat acting from an act line acts on too small a share of its
+    /// window's answers (t-9468, [`ApplyShare`]).
+    ApplyShare {
+        share_permille: u16,
+        floor_permille: u16,
     },
 }
 
@@ -1082,20 +1225,30 @@ pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
     }
     // And a floor is not enough: the cheapest reader over the same marks
     // has to be beaten (t-6342).
-    if !evidence.baseline.binds() {
-        return None;
+    if evidence.baseline.binds() {
+        if agreement.baseline_compared < evidence.agreement_rows_wanted {
+            return Some(Line::TooFewBaseline {
+                compared: agreement.baseline_compared,
+                wanted: evidence.agreement_rows_wanted,
+            });
+        }
+        let baseline = agreement.baseline_share().map(permille)?;
+        if bound <= baseline {
+            return Some(Line::Baseline {
+                bound_permille: bound,
+                baseline_permille: baseline,
+            });
+        }
     }
-    if agreement.baseline_compared < evidence.agreement_rows_wanted {
-        return Some(Line::TooFewBaseline {
-            compared: agreement.baseline_compared,
-            wanted: evidence.agreement_rows_wanted,
-        });
-    }
-    let baseline = agreement.baseline_share().map(permille)?;
-    (bound <= baseline).then_some(Line::Baseline {
-        bound_permille: bound,
-        baseline_permille: baseline,
-    })
+    // A seat acting from an act line acts on enough of what it answers, or
+    // it does not rise on the line (t-9468).
+    evidence
+        .apply_share
+        .filter(|apply| apply.share_permille < apply.floor_permille)
+        .map(|apply| Line::ApplyShare {
+            share_permille: apply.share_permille,
+            floor_permille: apply.floor_permille,
+        })
 }
 
 /// Judge a seat on its window (§4).
@@ -1117,14 +1270,17 @@ pub fn judge(stand: Stand, evidence: &Evidence) -> Verdict {
         (Stand::Applying, None) => Verdict::Keep,
         // A seat already acting is not held to the window's width: it earned
         // its place on a full one, and a fresh window is not evidence against
-        // it. Only a line it actually breaks takes it back.
+        // it. Only a line it actually breaks takes it back — and a line
+        // acting on little of the window still acts well on what it acts on:
+        // the apply share is a floor to rise on (t-9468).
         (
             Stand::Applying,
             Some(
                 Line::TooFewRows { .. }
                 | Line::TooFewCompared { .. }
                 | Line::Unlabeled { .. }
-                | Line::TooFewBaseline { .. },
+                | Line::TooFewBaseline { .. }
+                | Line::ApplyShare { .. },
             ),
         ) => Verdict::Keep,
         (Stand::Applying, Some(line)) => Verdict::Fall(line),
@@ -1159,6 +1315,7 @@ impl Line {
             Self::OneSided { .. } => "one_sided",
             Self::TooFewBaseline { .. } => "too_few_baseline",
             Self::Baseline { .. } => "baseline",
+            Self::ApplyShare { .. } => "apply_share",
         }
     }
 }

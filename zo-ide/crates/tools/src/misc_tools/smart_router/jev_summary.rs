@@ -21,6 +21,7 @@ use zerocode_core::jev::count::REQUESTS_DIR;
 use zerocode_core::jev::promote::{self, Stand, Verdict};
 use zerocode_core::jev::recent::{self, Decision};
 use zerocode_core::jev::summary::{self, Tally};
+use zerocode_core::jev::threshold::{self, AtLine, Calibrated};
 use zerocode_core::jev::{JEV_USES, JevMode, JevUse};
 
 /// What a reader of this report needs from the table's own counter, re-said
@@ -133,6 +134,35 @@ pub struct SeatReport {
     /// The last requests, newest first — as many as the caller asked for
     /// ([`report_with_recent`]); none for a caller that wants the numbers.
     pub recent: Vec<Decision>,
+    /// What the seat's graded answers say of its act line, beside the line
+    /// the product reads for it now (t-9468) — `None` for a seat that never
+    /// rises or names no bands.
+    pub calibration: Option<SeatCalibration>,
+}
+
+/// A seat's graded answers read at every line of the grid
+/// ([`threshold::calibrate`]), and the answers at the lines a reader weighs
+/// them against: the seat's own fixed act line, the line the answers draw,
+/// and the line the table beside its ledger holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeatCalibration {
+    /// The grid and the line — or why none.
+    pub calibrated: Calibrated,
+    /// The answers at the act line the seat's bands fix
+    /// ([`zerocode_core::jev::ConfidenceBands::act_from_permille`]) — the
+    /// line before any label moved it.
+    pub fixed: Option<AtLine>,
+    /// The answers at the line the graded answers draw, when they draw one.
+    pub drawn: Option<AtLine>,
+    /// The line the product reads for the seat now — the table's row,
+    /// under the words the seat asks now ([`threshold::Thresholds::line_of`]).
+    pub table_line: Option<u16>,
+    /// The answers at that line: what the seat acts on now, and how often
+    /// the marks of what it acts on say it was wrong.
+    pub at_table_line: Option<AtLine>,
+    /// The row the replay writes for the seat ([`threshold::row`]) — for a
+    /// seat whose stage reads a line; none for one whose stage reads none.
+    pub row: Option<Value>,
 }
 
 impl SeatReport {
@@ -316,6 +346,9 @@ fn one_with(
     recent: usize,
 ) -> SeatReport {
     let (found, rows) = rows_of(seat, roots, sessions);
+    // The act line the product reads for the seat: the table beside the
+    // ledger the rows came from (t-9468).
+    let line = found.as_deref().and_then(|ledger| threshold::line_beside(seat, ledger));
     // The card counts the series the judge reads (t-6877): the rows asked
     // under the words the seat asks now and the marks that grade them, from
     // the one reader every number on the card and the judge share. The bill
@@ -335,9 +368,9 @@ fn one_with(
     // the judgment, every other rising seat off the `agreed` marks its own
     // writer left (the window's orchestration seats).
     let judged = if seat.id == zerocode_core::jev::ROUTING.id {
-        super::decision_shadow::judge_rows(&rows, settings)
+        super::decision_shadow::judge_rows_at(&rows, settings, line)
     } else {
-        promote::judge_seat(seat, &rows)
+        promote::judge_seat_in(seat, &rows, line)
     };
     let clears_rise_floor = seat.answer_floor_permille.and_then(|floor| {
         judged.as_ref()?.window.answered_lower_bound().map(|bound| clears(bound, floor))
@@ -369,7 +402,33 @@ fn one_with(
             .applies_with(stand == Stand::Applying),
         days: days_of(&version.rows, now_ms, offset_s),
         recent: recent::recent(&rows, recent),
+        calibration: calibration_of(seat, &version, line, now_ms),
     }
+}
+
+/// What `seat`'s graded answers say of its act line, read off the series the
+/// judge reads ([`promote::OnVersion::graded`]), beside the line the product
+/// reads now (`line`).
+fn calibration_of(
+    seat: &JevUse,
+    version: &promote::OnVersion<'_>,
+    line: Option<u16>,
+    now_ms: i64,
+) -> Option<SeatCalibration> {
+    let graded = version.graded();
+    let answered = version.answered();
+    let calibrated = threshold::calibrate(seat, &graded, &answered)?;
+    let at = |from: u16| AtLine::of(&graded, &answered, from);
+    Some(SeatCalibration {
+        fixed: seat.confidence_bands.map(|bands| at(bands.act_from_permille)),
+        drawn: calibrated.line.ok().map(at),
+        table_line: line,
+        at_table_line: line.map(at),
+        row: seat
+            .reads_act_line
+            .then(|| threshold::row(seat, &calibrated, now_ms)),
+        calibrated,
+    })
 }
 
 /// Whether a bound in `[0, 1]` reaches a line written per thousand. Compared

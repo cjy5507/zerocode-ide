@@ -479,6 +479,7 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
                 Options {
                     overlap,
                     rescue: false,
+                    act_line: None,
                 },
                 None,
             )

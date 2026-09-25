@@ -20,7 +20,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use tools::jev_summary::{self, SeatReport};
+use tools::jev_summary::{self, SeatCalibration, SeatReport};
+use zerocode_core::jev::threshold::{self, AtLine};
 use tools::{JevAnswer, JevCaller, JevQuestion, JevShape, JevVerdict};
 
 use crate::autonomy::limits::HEADLESS_LOOP_EXIT_DONE;
@@ -415,10 +416,33 @@ fn decision_json(decision: &jev_summary::SeatDecision) -> Value {
     })
 }
 
+/// What a seat's graded answers say of its act line (t-9468): the grid, the
+/// line they draw or why none, the answers at the seat's fixed line and at
+/// the drawn one, and the line the product reads now with the row the replay
+/// would write for it.
+fn calibration_json(id: &str, calibration: &SeatCalibration) -> Value {
+    let calibrated = &calibration.calibrated;
+    json!({
+        "readsActLine": zerocode_core::jev::jev_use(id).is_some_and(|seat| seat.reads_act_line),
+        "marksWanted": calibrated.marks_wanted,
+        "actFromPermille": calibrated.line.ok(),
+        "reason": calibrated.line.err().map(threshold::NoLine::token),
+        "grid": calibrated.grid.iter().map(AtLine::json).collect::<Vec<Value>>(),
+        "fixed": calibration.fixed.as_ref().map(AtLine::json),
+        "drawn": calibration.drawn.as_ref().map(AtLine::json),
+        "tableLine": calibration.table_line,
+        "atTableLine": calibration.at_table_line.as_ref().map(AtLine::json),
+        "row": calibration.row,
+    })
+}
+
 fn render_json(seats: &[SeatReport]) -> Value {
     json!({
         "windowDays": jev_summary::WINDOW_DAYS,
         "judgedEveryRows": jev_summary::JUDGED_EVERY_ROWS,
+        // The file a seat's act line is kept in beside its ledger — named
+        // here so the replay copies and writes it by the binary's own word.
+        "thresholdsFile": threshold::THRESHOLDS_FILE,
         "seats": seats
             .iter()
             .map(|seat| json!({
@@ -483,10 +507,46 @@ fn render_json(seats: &[SeatReport]) -> Value {
                     // The version the rows were cut away from, beside the
                     // line the seat holds on: a thin sample says why.
                     "cutModel": judged.cut,
+                    // The act line the marks were read at (t-9468).
+                    "actLine": judged.act_line,
                 })),
+                // What the seat's labels say of its act line, and the line
+                // the product reads now (t-9468).
+                "calibration": seat.calibration.as_ref().map(|calibration| calibration_json(seat.id, calibration)),
+                // At that line: the share of the seat's answered requests it
+                // acts on, how often the marks of what it acts on say it was
+                // wrong, and how often the baseline was on the same marks —
+                // absent while the table holds no line for the seat.
+                "applyShare": at_table_line(seat).and_then(AtLine::apply_share),
+                "appliedErrorPermille": at_table_line(seat).and_then(AtLine::error_permille),
+                "baselineErrorPermille": at_table_line(seat).and_then(AtLine::baseline_error_permille),
             }))
             .collect::<Vec<Value>>(),
     })
+}
+
+/// The answers at the line the product reads for `seat` now, when the table
+/// holds one.
+fn at_table_line(seat: &SeatReport) -> Option<&AtLine> {
+    seat.calibration.as_ref()?.at_table_line.as_ref()
+}
+
+/// What the text says of a seat's act line: the one it acts from, the one
+/// its labels draw that the table does not hold yet, or why there is none.
+fn act_line_note(calibration: &SeatCalibration) -> String {
+    let permille = |value: Option<u16>| value.map_or_else(|| "—".to_string(), |value| format!("{value}‰"));
+    if let (Some(line), Some(at)) = (calibration.table_line, calibration.at_table_line.as_ref()) {
+        return format!(
+            "acts from {line}‰ on {} (wrong {}, baseline wrong {})",
+            at.apply_share().map_or_else(|| "—".to_string(), |share| format!("{:.0}%", share * 100.0)),
+            permille(at.error_permille()),
+            permille(at.baseline_error_permille())
+        );
+    }
+    match calibration.calibrated.line {
+        Ok(line) => format!("labels draw {line}‰, not yet in the table"),
+        Err(why) => format!("no act line ({})", why.token()),
+    }
 }
 
 fn render_text(seats: &[SeatReport]) -> String {
@@ -572,6 +632,14 @@ fn render_text(seats: &[SeatReport]) -> String {
         }
         if let Some(owed) = seat.rows_to_next_judgment() {
             let _ = write!(notes, " · {owed} rows to judgment");
+        }
+        if let Some(calibration) = seat.calibration.as_ref() {
+            let _ = write!(
+                notes,
+                "{}{}",
+                if notes.is_empty() { "" } else { " · " },
+                act_line_note(calibration)
+            );
         }
         let _ = writeln!(
             out,

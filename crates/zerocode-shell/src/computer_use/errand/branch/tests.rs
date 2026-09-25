@@ -18,14 +18,17 @@ use super::{Branching, Compared};
 const SHADOW: Branching = Branching {
     mode: Mode::Shadow,
     acting: false,
+    act_line: None,
 };
 const RAISED: Branching = Branching {
     mode: Mode::Auto,
     acting: true,
+    act_line: None,
 };
 const UNRAISED: Branching = Branching {
     mode: Mode::Auto,
     acting: false,
+    act_line: None,
 };
 
 /// The screen seat's answer: `chosen` first, then the others by weight.
@@ -110,6 +113,7 @@ fn off_is_todays_walk_byte_for_byte() {
         Branching {
             mode: Mode::Off,
             acting: true,
+            act_line: None,
         },
     ] {
         let mut world = phone();
@@ -1396,6 +1400,7 @@ fn a_forked_step_asks_ahead_with_the_canonical_number() {
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );
@@ -1467,6 +1472,7 @@ fn a_rescued_step_forks_on_the_second_readers_ranking() {
         Options {
             overlap: false,
             rescue: true,
+            act_line: None,
         },
         Some(&mut team),
     );
@@ -1547,6 +1553,7 @@ fn the_next_look_settles_the_fork_and_says_the_memo_answered_ahead() {
         Options {
             overlap: true,
             rescue: false,
+            act_line: None,
         },
         None,
     );

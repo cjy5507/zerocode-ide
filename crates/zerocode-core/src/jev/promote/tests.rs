@@ -577,6 +577,7 @@ fn clean() -> Evidence<'static> {
         negatives_wanted: crate::jev::NEGATIVES_WANTED,
         disagreed_on_record: crate::jev::NEGATIVES_WANTED,
         baseline: Baseline::None,
+        apply_share: None,
     }
 }
 
@@ -2943,4 +2944,104 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
             seat.id
         );
     }
+}
+
+/// A ledger of `seat` whose requests carry the confidence they were
+/// answered with, each graded by a label: `(confidence, agreed)` per
+/// request, in order, every baseline mark wrong — the cheapest reader is
+/// beaten wherever a line's marks are right at all.
+fn confident_ledger(seat: &JevUse, answers: &[(f64, bool)]) -> Vec<Value> {
+    use serde_json::json;
+    let mut rows: Vec<Value> = answers
+        .iter()
+        .enumerate()
+        .map(|(n, (confidence, _))| {
+            let mut row = asked_by(seat, n);
+            row["confidence"] = json!(confidence);
+            row
+        })
+        .collect();
+    let at = rows.len();
+    rows.extend(answers.iter().enumerate().map(|(n, (_, agreed))| {
+        mark(
+            seat,
+            at + n,
+            n,
+            json!({"agreed": agreed, "baselineAgreed": false}),
+        )
+    }));
+    rows
+}
+
+/// A seat acting from an act line is judged on the answers the line lets
+/// act (t-9468): the notify seat's confident half — forty-seven of fifty
+/// right from 0.9 — rises from 0.7 where its whole record, dragged under
+/// the floor by the half it would leave to today's rule, holds; the line
+/// is named on the verdict it gave.
+#[test]
+fn a_seat_acting_from_a_line_is_judged_on_the_answers_the_line_lets_act() {
+    let seat = &crate::jev::NOTIFY;
+    let answers: Vec<(f64, bool)> = (0..100)
+        .map(|n| {
+            if n % 2 == 0 {
+                (0.9, n % 34 != 0)
+            } else {
+                (0.2, n % 4 == 1)
+            }
+        })
+        .collect();
+    let rows = confident_ledger(seat, &answers);
+    let whole = judge_seat(seat, &rows).expect("judged");
+    assert!(
+        matches!(whole.verdict, Verdict::Hold(Line::Agreement { .. })),
+        "{whole:?}"
+    );
+    assert_eq!(whole.act_line, None);
+    assert_eq!(judge_seat_in(seat, &rows, None), Some(whole));
+
+    let lined = judge_seat_in(seat, &rows, Some(700)).expect("judged");
+    assert_eq!(
+        (lined.agreement.compared, lined.agreement.agreed),
+        (50, 47),
+        "the answers from 0.7 alone"
+    );
+    assert_eq!(lined.verdict, Verdict::Rise, "{lined:?}");
+    assert_eq!(lined.act_line, Some(700));
+}
+
+/// A seat acting from a line that acts on too little of its window does
+/// not rise on it — and one already acting keeps its place: a line acting
+/// on little still acts well on what it acts on, and the floor is one to
+/// rise on (t-9468).
+#[test]
+fn a_line_acting_on_too_little_of_the_window_holds_a_seat_and_keeps_an_acting_one() {
+    let seat = &crate::jev::NOTIFY;
+    let window = window_wanted_for(seat).expect("a promoting seat");
+    // Sixty confident answers first, then a window of timid ones with four
+    // confident among them.
+    let mut answers: Vec<(f64, bool)> = (0..60).map(|n| (0.9, n >= 3)).collect();
+    answers.extend((0..window).map(|n| if n < 4 { (0.9, true) } else { (0.2, false) }));
+    let rows = confident_ledger(seat, &answers);
+    let share = u16::try_from(4 * 1_000 / window).expect("a per-thousand");
+    assert_eq!(
+        judge_seat_in(seat, &rows, Some(700)).map(|judged| judged.verdict),
+        Some(Verdict::Hold(Line::ApplyShare {
+            share_permille: share,
+            floor_permille: crate::jev::threshold::CALIBRATION.apply_share_floor_permille
+        }))
+    );
+    let mut acting = rows.clone();
+    acting.push(rise_on(acting.len(), &[seat.rubric_version]));
+    assert_eq!(
+        judge_seat_in(seat, &acting, Some(700)).map(|judged| judged.verdict),
+        Some(Verdict::Keep)
+    );
+    assert_eq!(
+        Line::ApplyShare {
+            share_permille: 0,
+            floor_permille: 0
+        }
+        .token(),
+        "apply_share"
+    );
 }

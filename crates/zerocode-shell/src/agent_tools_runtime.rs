@@ -3210,6 +3210,7 @@ pub(super) fn run_recipe(
                 let options = computer_use::errand::Options {
                     overlap: false,
                     rescue: rescue.is_some(),
+                    act_line: crate::systemone::act_line(judge.wire(), seat),
                 };
                 let recovered = computer_use::errand::run_with(
                     mode,
@@ -3426,6 +3427,7 @@ pub(super) fn run_goal(
     let branching = errand::Branching {
         mode: forks.mode_in(&settings),
         acting: crate::systemone::applies(judge.wire(), forks),
+        act_line: crate::systemone::act_line(judge.wire(), forks),
     };
     let snapshots: Box<dyn desk::Snapshots> = Box::new(AvdSnapshots {
         device: word("device").unwrap_or_default(),
@@ -3433,6 +3435,7 @@ pub(super) fn run_goal(
     let options = errand::Options {
         overlap: zerocode_core::computer_use::walk_overlaps(&command.params),
         rescue: rescue.is_some(),
+        act_line: crate::systemone::act_line(judge.wire(), seat),
     };
     let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
         .with_snapshots(snapshots)

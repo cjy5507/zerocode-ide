@@ -485,7 +485,23 @@ impl RoutingReading {
     /// checks, and abstains.
     #[must_use]
     pub fn band(&self) -> Band {
-        ROUTING.band_of(self.complexity.confidence).unwrap_or(Band::Abstain)
+        self.band_at(None)
+    }
+
+    /// [`Self::band`] for a seat acting from `line` — the act line the
+    /// seat's graded answers drew, kept beside its ledger (t-9468,
+    /// `zerocode_core::jev::threshold::line_beside`).
+    #[must_use]
+    pub fn band_at(&self, line: Option<u16>) -> Band {
+        ROUTING.band_at(self.band_confidence(), line).unwrap_or(Band::Abstain)
+    }
+
+    /// The confidence the band is read on: the complexity answer's own —
+    /// what the row stamps as the answer's confidence, so the seat's act
+    /// line is drawn on the number its band reads (t-9468).
+    #[must_use]
+    pub fn band_confidence(&self) -> f64 {
+        self.complexity.confidence
     }
 
     /// What the apply stage routes on, or `None` when the judgment abstains
@@ -500,7 +516,15 @@ impl RoutingReading {
     /// (`Unknown`), a timid intent is the router's neutral `Other`.
     #[must_use]
     pub fn assessment(&self) -> Option<ProbeAssessment> {
-        let confidence = match self.band() {
+        self.assessment_at(None)
+    }
+
+    /// [`Self::assessment`] for a seat acting from `line` ([`Self::band_at`]):
+    /// the line moves where the judgment acts alone; the abstain line, and
+    /// what risk and intent say past it, stay the seat's own.
+    #[must_use]
+    pub fn assessment_at(&self, line: Option<u16>) -> Option<ProbeAssessment> {
+        let confidence = match self.band_at(line) {
             Band::Act => RouteConfidence::High,
             Band::Confirm => RouteConfidence::Medium,
             Band::Abstain => return None,
@@ -1045,6 +1069,34 @@ mod tests {
             let reading = validate_routing(&response(answers)).expect("valid");
             assert_eq!(reading.band(), band, "{confidence}");
             assert_eq!(reading.assessment().map(|assessment| assessment.confidence), authority, "{confidence}");
+        }
+    }
+
+    /// A seat acting from the line its labels drew (t-9468) acts alone from
+    /// that line and not the pattern's 850‰; the abstain line stays the
+    /// seat's own, and a line under it lowers it with the act line. No line
+    /// is today's bands.
+    #[test]
+    fn a_verdict_acts_alone_from_the_line_its_labels_drew() {
+        for (confidence, line, band, authority) in [
+            (0.9, Some(950), Band::Confirm, Some(RouteConfidence::Medium)),
+            (0.96, Some(950), Band::Act, Some(RouteConfidence::High)),
+            (0.7, Some(700), Band::Act, Some(RouteConfidence::High)),
+            (0.599, Some(700), Band::Abstain, None),
+            (0.55, Some(500), Band::Act, Some(RouteConfidence::High)),
+            (0.45, Some(500), Band::Abstain, None),
+            (0.849, None, Band::Confirm, Some(RouteConfidence::Medium)),
+        ] {
+            let mut answers = routing_answers();
+            answers[ROUTING_COMPLEXITY_ID]["confidence"] = json!(confidence);
+            let reading = validate_routing(&response(answers)).expect("valid");
+            assert_eq!(reading.band_at(line), band, "{confidence} from {line:?}");
+            assert_eq!(
+                reading.assessment_at(line).map(|assessment| assessment.confidence),
+                authority,
+                "{confidence} from {line:?}"
+            );
+            assert!((reading.band_confidence() - confidence).abs() < f64::EPSILON);
         }
     }
 

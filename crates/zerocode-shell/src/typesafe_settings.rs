@@ -2096,6 +2096,22 @@ pub struct SeatNumbers {
     /// them ([`ZO_JEV_SUMMARY_RECENT_FLAG`]); empty otherwise.
     #[serde(default)]
     pub recent: Vec<SeatDecision>,
+    /// What the seat's graded answers say of its act line — the grid, the
+    /// line they draw or why none — beside the line the product reads for it
+    /// now (t-9468). Passed through as zo shaped it; absent from a zo older
+    /// than the act line, and for a seat that never rises.
+    #[serde(default)]
+    pub calibration: Option<Value>,
+    /// At the line the product reads for the seat now: the share of its
+    /// answered requests it acts on, how often the marks of what it acts on
+    /// say it was wrong, and how often its baseline was on the same marks,
+    /// per thousand (t-9468) — absent while no line is read for it.
+    #[serde(default)]
+    pub apply_share: Option<f64>,
+    #[serde(default)]
+    pub applied_error_permille: Option<u16>,
+    #[serde(default)]
+    pub baseline_error_permille: Option<u16>,
     /// The file zo read the seat's rows from — kept to say where they are
     /// kept ([`crate::jev_scope::with_reach`]), never sent on: a path of the
     /// person's disk is not the dashboard's to draw.
