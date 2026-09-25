@@ -1114,35 +1114,47 @@ fn a_field_takes_one_entry_a_walk() {
 /// answers with an entry regardless; with a key a person set, the same look
 /// offers the entry and the value goes in down the value road, asked with
 /// that key alone.
-#[test]
-fn a_subscription_login_never_rides_a_value_request() {
-    use super::super::value::tests::{KEY, store, wrote};
-    use super::super::value::{LiveWriter, NO_KEY};
+/// One walk over a page with a field, as the window walks one: a writer of
+/// its own over `keys`, its value seat on an endpoint of its own, and a
+/// judgment that answers with an entry whether or not one was offered — the
+/// questions it was asked, what the value seat heard, the verbs the page was
+/// sent, and the walk.
+fn walk_a_field(
+    keys: Box<dyn crate::api_routers::RouterKeys>,
+    epoch: &str,
+) -> (Vec<Value>, Vec<String>, Vec<String>, super::super::Walked) {
+    use super::super::value::LiveWriter;
+    use super::super::value::tests::wrote;
     use crate::systemone::tests::Endpoint;
 
-    let walk = |with_key: bool| {
-        let endpoint = Endpoint::serving("HTTP/1.1 200 OK", wrote("London"), 0);
-        let road = Kept::on(a_page_with_a_field("doc-1", "", "#destination"));
-        let mut send = road.road();
-        let writer = LiveWriter::at(&format!("{}/v1/messages", endpoint.base()), store(with_key));
-        let mut world = GoalWorld::new(
-            &mut send,
-            Aim::Pane {
-                label: "browser-9".into(),
-            },
-            Seen::default(),
-            None,
-            60_000,
-            0,
-        )
-        .writing(Box::new(writer))
-        .remembering(memory());
-        // A judgment that answers with an entry whether or not one was offered.
-        let mut judge = FakeJudge::saying(vec![entry(1)]);
-        let walked = run(Mode::On, true, &goal(1), &mut judge, &mut world);
-        drop(world);
-        (judge.questions, endpoint.asked(), road.verbs(), walked)
-    };
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", wrote("London"), 0);
+    let road = Kept::on(a_page_with_a_field(epoch, "", "#destination"));
+    let mut send = road.road();
+    let writer = LiveWriter::at(&format!("{}/v1/messages", endpoint.base()), keys);
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .writing(Box::new(writer))
+    .remembering(memory());
+    let mut judge = FakeJudge::saying(vec![entry(1)]);
+    let walked = run(Mode::On, true, &goal(1), &mut judge, &mut world);
+    drop(world);
+    (judge.questions, endpoint.asked(), road.verbs(), walked)
+}
+
+#[test]
+fn a_subscription_login_never_rides_a_value_request() {
+    use super::super::value::NO_KEY;
+    use super::super::value::tests::{KEY, store};
+
+    let walk = |with_key: bool| walk_a_field(store(with_key), "doc-1");
 
     let (questions, heard, verbs, walked) = walk(false);
     assert!(
@@ -1189,4 +1201,39 @@ fn a_subscription_login_never_rides_a_value_request() {
     }
     assert!(verbs.iter().any(|verb| verb == "type"));
     assert_eq!(walked.typed, 1);
+}
+
+/// The pane's key turns typing on for the walks after it (t-9537), counted:
+/// walks over pages with a field — each with a writer of its own over the one
+/// key store, as the window makes one per walk — type into none of their
+/// fields and say `value_no_key` before a person saves the key in the
+/// Computer Use pane, and into every one after it, with no restart between.
+/// `--nocapture` prints the count.
+#[test]
+fn the_panes_key_turns_typing_on_for_the_walks_after_it() {
+    use super::super::value::NO_KEY;
+    use super::super::value::tests::{KEY, OneStore, chosen_key, store};
+
+    const WALKS: usize = 6;
+    let keys = OneStore::over(store(false));
+    let walks = |first: usize| -> Vec<super::super::Walked> {
+        (first..first + WALKS)
+            .map(|page| walk_a_field(Box::new(keys.clone()), &format!("doc-{page}")).3)
+            .collect()
+    };
+
+    let before = walks(0);
+    for walked in &before {
+        assert_eq!(walked.rows[0]["reason"], json!(NO_KEY), "{walked:?}");
+    }
+    crate::type_value_keys::save(chosen_key(), KEY, &keys).expect("the pane keeps the key");
+    let after = walks(WALKS);
+
+    let typed = |walks: &[super::super::Walked]| walks.iter().map(|walked| walked.typed).sum();
+    let (typed_before, typed_after): (usize, usize) = (typed(&before), typed(&after));
+    println!(
+        "type steps run on pages with a field: {typed_before}/{WALKS} before the pane's key, \
+         {typed_after}/{WALKS} after"
+    );
+    assert_eq!((typed_before, typed_after), (0, WALKS));
 }

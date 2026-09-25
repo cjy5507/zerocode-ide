@@ -3,13 +3,14 @@
 //! test's own map — and every case has an endpoint on a port of its own.
 
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zerocode_core::type_value::{ANTHROPIC_WIRE, FieldLook, ValueRefusal, asked, chosen, render};
 
 use super::*;
-use crate::api_routers::{HeldKeys, RouterKeys};
+use crate::api_routers::{HeldKeys, RouterKeys, RouterRefusal};
 use crate::systemone::tests::Endpoint;
 use crate::systemone::{SCHEMA, TIMEOUT, UNAUTHORIZED};
 
@@ -33,6 +34,36 @@ pub(in crate::computer_use::errand) fn store(with_key: bool) -> Box<dyn RouterKe
         keys.write(&service, KEY).expect("the person's key held");
     }
     Box::new(keys)
+}
+
+/// One key store that the Computer Use pane writes and every walk's writer
+/// reads, as the window's keychain is one (t-9537): a clone is the same store.
+#[derive(Clone)]
+pub(in crate::computer_use::errand) struct OneStore(Rc<dyn RouterKeys>);
+
+impl OneStore {
+    pub(in crate::computer_use::errand) fn over(keys: Box<dyn RouterKeys>) -> Self {
+        Self(Rc::from(keys))
+    }
+}
+
+impl RouterKeys for OneStore {
+    fn read(&self, service: &str) -> Result<Option<String>, RouterRefusal> {
+        self.0.read(service)
+    }
+    fn write(&self, service: &str, secret: &str) -> Result<(), RouterRefusal> {
+        self.0.write(service, secret)
+    }
+    fn delete(&self, service: &str) -> Result<(), RouterRefusal> {
+        self.0.delete(service)
+    }
+}
+
+/// The name of the key the chosen row reads, as the pane names it.
+pub(in crate::computer_use::errand) fn chosen_key() -> &'static str {
+    chosen()
+        .and_then(|row| row.credential_key.as_deref())
+        .expect("the chosen row names its key")
 }
 
 /// The words around one box, as a walk's look reads them.
@@ -132,6 +163,51 @@ fn a_subscription_login_alone_sets_up_no_writer() {
         NO_KEY
     );
     assert!(endpoint.asked().is_empty(), "a request left without a key");
+}
+
+/// The key a person saves in the Computer Use pane (t-9537) is the key the
+/// next walk's writer asks with — the same item, named by the same function —
+/// and no restart stands between them: the writer a walk made before the save
+/// has no key, the one the next walk makes after it types with the key, and
+/// after the pane removes it the one after that has none again.
+#[test]
+fn a_key_saved_in_the_pane_is_the_next_walks_key() {
+    let keys = OneStore::over(store(false));
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", wrote("London"), 0);
+    let at = format!("{}/v1/messages", endpoint.base());
+
+    let mut before = LiveWriter::at(&at, Box::new(keys.clone()));
+    assert!(!before.ready(), "a walk before the save has a key");
+    assert_eq!(
+        before
+            .write(&look(), Duration::from_secs(5))
+            .map(|written| written.ms)
+            .expect_err("no key, no value"),
+        NO_KEY
+    );
+
+    crate::type_value_keys::save(chosen_key(), KEY, &keys).expect("the pane keeps the key");
+    let mut after = LiveWriter::at(&at, Box::new(keys.clone()));
+    assert!(after.ready(), "the next walk's writer reads the saved key");
+    let written = after
+        .write(&look(), Duration::from_secs(5))
+        .expect("a value");
+    assert_eq!(written.value, "London");
+    let heard = endpoint.asked();
+    assert_eq!(heard.len(), 1, "one request for one value: {heard:?}");
+    assert!(
+        heard[0]
+            .to_ascii_lowercase()
+            .contains(&format!("{}: {KEY}", ANTHROPIC_WIRE.key_header)),
+        "the pane's key rides the request:\n{}",
+        heard[0]
+    );
+
+    crate::type_value_keys::remove(chosen_key(), &keys).expect("the pane forgets the key");
+    assert!(
+        !LiveWriter::at(&at, Box::new(keys)).ready(),
+        "a walk after the removal has a key"
+    );
 }
 
 /// An answer that is no value says why in a word of its own — the wire's

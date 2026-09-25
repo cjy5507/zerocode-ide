@@ -249,9 +249,7 @@ pub fn read_settings(
     keys: &dyn RouterKeys,
     keys_kept_here: bool,
 ) -> Result<TypeSafeSettings, RouterRefusal> {
-    let key_saved = keys
-        .read(&typesafe_keychain_service())?
-        .is_some_and(|key| !key.trim().is_empty());
+    let key_saved = key_saved_at(&typesafe_keychain_service(), keys)?;
     let root = crate::api_routers::read_zo_settings_root(path)?;
     let classifier = classifier_in(&root);
     // Read by the core's own readers, as zo and the door read it: a seat
@@ -298,17 +296,59 @@ fn choices(row: &JevUse) -> Vec<ModeChoice> {
     row.modes.iter().copied().map(ModeChoice::of).collect()
 }
 
+/// Whether the keychain item `service` holds a key — read, and the key itself
+/// dropped where it was read, so a pane is only ever told yes or no. The one
+/// reading of a saved key for every card that keeps one: this one's, and the
+/// Computer Use pane's (t-9537).
+///
+/// # Errors
+/// An unreadable keychain.
+pub fn key_saved_at(service: &str, keys: &dyn RouterKeys) -> Result<bool, RouterRefusal> {
+    Ok(keys
+        .read(service)?
+        .is_some_and(|key| !key.trim().is_empty()))
+}
+
+/// Keep `key` in the keychain item `service`, trimmed. An empty key is refused
+/// in `empty`, the card's own sentence, rather than saved as "configured,
+/// empty".
+///
+/// # Errors
+/// An empty key, a machine with no keychain, or a refused keychain write.
+pub fn save_key_at(
+    service: &str,
+    key: &str,
+    empty: &str,
+    keys: &dyn RouterKeys,
+) -> Result<(), RouterRefusal> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(empty.to_string().into());
+    }
+    keys.write(service, key)
+}
+
+/// Forget the key kept in the keychain item `service`. Nothing saved is not
+/// an error.
+///
+/// # Errors
+/// A refused keychain deletion.
+pub fn remove_key_at(service: &str, keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
+    keys.delete(service)
+}
+
 /// Keep `key` in the keychain item zo reads, trimmed. An empty key is refused
 /// rather than saved as "configured, empty".
 ///
 /// # Errors
 /// An empty key, a machine with no keychain, or a refused keychain write.
 pub fn save_key(key: &str, keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("TypeSafe API 키가 비어 있습니다".to_string().into());
-    }
-    keys.write(&typesafe_keychain_service(), key)
+    save_key_at(
+        &typesafe_keychain_service(),
+        key,
+        "TypeSafe API 키가 비어 있습니다",
+        keys,
+    )
 }
 
 /// Forget the saved key. Nothing saved is not an error.
@@ -316,7 +356,7 @@ pub fn save_key(key: &str, keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
 /// # Errors
 /// A refused keychain deletion.
 pub fn remove_key(keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
-    keys.delete(&typesafe_keychain_service())
+    remove_key_at(&typesafe_keychain_service(), keys)
 }
 
 /// Turn Jev on or off (§6.1) in zo's settings file, under the window's

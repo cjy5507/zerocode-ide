@@ -28,6 +28,9 @@ const PANE_OF = {
   "jev-enabled": "api-routers",
   "typesafe-key-input": "api-routers",
   "typesafe-status": "api-routers",
+  // The field of the key a page's typing asks with now (t-9537) — drawn per
+  // key, and this id is the one a walk reads (`paintTypeValueSlot`).
+  "type-value-key-input": "computer-use",
   "show-automations": "appearance",
   "show-tasks": "appearance",
   "worktree-prefix": "git",
@@ -3056,6 +3059,8 @@ async function refreshComputerUse() {
   // session folders, so it is spent when the pane is looked at, beside the
   // permission and skill reads above.
   void refreshFlows();
+  // And the key for typing: one keychain read, whether a key is saved.
+  void refreshTypeValueKeys();
 }
 
 function computerUseCoverageSummary() {
@@ -3323,6 +3328,143 @@ window.addEventListener("focus", () => {
     void refreshComputerUse();
   }
 });
+
+/* ---- the key typing into a page's fields asks with (t-9537) ----
+ *
+ * A browser task that meets an empty field asks a small model what to type,
+ * with an API key a person keeps in this window's keychain — and until this
+ * card there was nowhere to put one, so every such field was left for a
+ * person. One slot per key the backend lists (`type_value_keys`): which key,
+ * which rows read it and whether it is the one read now are the value seat's
+ * table, handed over whole and spelled nowhere here, so a row the table gains
+ * or chooses reaches this card by itself. A saved key goes into the keychain
+ * and never comes back — the answer says whether one is saved — and since a
+ * task reads the key when it starts, a save is typed with from the next task
+ * on, with no restart. */
+let typeValueKeys = null;
+let typeValueBusy = false;
+/* Counts reads and steps, so the newest answer is the one painted: a read
+ * begun before a save must not paint the key unsaved after it. */
+let typeValueGeneration = 0;
+/* The slots on the page, by key name. A repaint updates each where it
+ * stands, so a key half typed into its field survives the refresh a return
+ * to the window brings. */
+const typeValueSlots = new Map();
+
+/* This card's hands for the step every key card runs (`runKeyCardStep`),
+ * about the slot named `name`. */
+function typeValueCard(name) {
+  return {
+    busy: () => typeValueBusy,
+    setBusy: (busy) => {
+      typeValueBusy = busy;
+      if (busy) typeValueGeneration += 1;
+    },
+    repaint: () => {
+      if (typeValueKeys) paintTypeValueKeys(typeValueKeys);
+    },
+    paint: (state) => paintTypeValueKeys(state),
+    say: (text, evidence) => paintSettingsStatus(
+      typeValueSlots.get(name)?.querySelector("[data-type-value-status]") ?? el("type-value-status"),
+      text,
+      evidence,
+    ),
+    standing: (state) => keyStanding(
+      Boolean(state.keys?.find((key) => key.credentialKey === name)?.keySaved),
+    ),
+  };
+}
+
+async function refreshTypeValueKeys() {
+  // A step in flight paints its own answer, read after it wrote.
+  if (typeValueBusy) return;
+  const generation = ++typeValueGeneration;
+  try {
+    const state = await invoke("type_value_keys");
+    if (generation === typeValueGeneration) paintTypeValueKeys(state);
+  } catch (error) {
+    if (generation !== typeValueGeneration) return;
+    paintSettingsStatus(el("type-value-status"), keyStoreRefusal(error), keyStoreRefusalEvidence(error));
+  }
+}
+
+function paintTypeValueKeys(state) {
+  typeValueKeys = state;
+  const kept = Boolean(state.keysKeptHere);
+  const keys = state.keys ?? [];
+  el("type-value-no-keychain-hint").hidden = kept;
+  el("type-value-none").hidden = keys.length > 0;
+  const listed = new Set(keys.map((key) => key.credentialKey));
+  for (const [name, slot] of typeValueSlots) {
+    if (listed.has(name)) continue;
+    slot.remove();
+    typeValueSlots.delete(name);
+  }
+  for (const key of keys) {
+    let slot = typeValueSlots.get(key.credentialKey);
+    if (!slot) {
+      slot = typeValueSlotNode(key.credentialKey);
+      typeValueSlots.set(key.credentialKey, slot);
+      el("type-value-keys").append(slot);
+    }
+    paintTypeValueSlot(slot, key, kept);
+  }
+}
+
+/* One slot, from the markup's template, answering to its key's name. */
+function typeValueSlotNode(name) {
+  const slot = el("type-value-key").content.firstElementChild.cloneNode(true);
+  slot.dataset.typeValueKey = name;
+  slot.querySelector("[data-type-value-name]").textContent = name;
+  applyLocale(slot);
+  const input = slot.querySelector("[data-type-value-input]");
+  input.addEventListener("input", () => paintTypeValueSave(slot));
+  slot.querySelector("[data-type-value-save]").addEventListener("click", () => {
+    void saveTypeValueKey(name, input);
+  });
+  slot.querySelector("[data-type-value-remove]").addEventListener("click", () => {
+    void runKeyCardStep(
+      typeValueCard(name),
+      () => invoke("remove_type_value_key", { credentialKey: name }),
+      () => t("computerUse.typeKeyRemoved", "지웠습니다 — {{name}}. 빈 칸은 입력하지 않고 사람에게 맡깁니다.", { name }),
+    );
+  });
+  return slot;
+}
+
+function paintTypeValueSlot(slot, key, kept) {
+  const input = slot.querySelector("[data-type-value-input]");
+  // Settings lands on the field of the key read now (`PANE_OF`).
+  if (key.chosen) input.id = "type-value-key-input";
+  else input.removeAttribute("id");
+  slot.querySelector("[data-type-value-now]").hidden = !key.chosen;
+  say(slot.querySelector("[data-type-value-rows]"), () => t("computerUse.typeKeyRows", "이 키로 묻는 모델: {{rows}}", {
+    rows: (key.rows ?? []).map((row) => `${row.id} (${row.model})`).join(", "),
+  }));
+  paintSettingsStanding(slot.querySelector("[data-type-value-state]"), keyStanding(key.keySaved));
+  say(slot.querySelector("[data-type-value-said]"), () => (key.keySaved
+    ? t("computerUse.typeKeyTyping", "저장된 키로 빈 칸에 글자를 입력합니다. 새 키를 저장하면 바뀝니다.")
+    : t("computerUse.typeKeyWaiting", "저장된 키가 없어 빈 칸은 입력하지 않고 사람에게 맡깁니다.")));
+  paintKeyField(input, { busy: typeValueBusy, kept });
+  slot.querySelector("[data-type-value-remove]").disabled = typeValueBusy || !key.keySaved;
+  paintTypeValueSave(slot);
+}
+
+function paintTypeValueSave(slot) {
+  slot.querySelector("[data-type-value-save]").disabled = typeValueBusy
+    || !typeValueKeys?.keysKeptHere
+    || !slot.querySelector("[data-type-value-input]").value.trim();
+}
+
+async function saveTypeValueKey(name, input) {
+  const key = input.value.trim();
+  if (!key) return;
+  await runKeyCardStep(typeValueCard(name), async () => {
+    const state = await invoke("save_type_value_key", { credentialKey: name, key });
+    input.value = "";
+    return state;
+  }, () => t("computerUse.typeKeySaved", "키체인에 저장했습니다 — {{name}}. 다음 작업부터 빈 칸에 글자를 입력합니다.", { name }));
+}
 
 /* ---- Flow cards (t-4260, docs/design/flow-engine-operator-and-qa.md §2.7) --
  *
@@ -5757,6 +5899,71 @@ function requestIdIn(said) {
   return said.match(/request[ _-]?id["'\s:=]+([A-Za-z0-9_-]{6,64})/i)?.[1] ?? null;
 }
 
+/* ---- a card that keeps a key ----
+ *
+ * Two cards keep an API key in the keychain and never see it again — the
+ * TypeSafe card and the Computer Use pane's key for typing (t-9537) — and
+ * they keep it the same way: the field is closed where no key could be kept,
+ * the head wears the standings table's word for whether one is saved, a
+ * refusal is said in the reader's language when the backend named why, and
+ * one step at a time goes to the backend and the card repaints from its
+ * answer. Said once, here. */
+
+/* Where a key card stands before anybody asked a server about its key. */
+function keyStanding(saved) {
+  return saved ? "keySaved" : "unchecked";
+}
+
+/* A key field: closed while a step runs or where no key could be kept, and
+ * emptied there, so nothing typed waits in a field that cannot save it. */
+function paintKeyField(input, { busy, kept }) {
+  if (!input) return;
+  input.disabled = busy || !kept;
+  if (!kept) input.value = "";
+}
+
+/* A refused step, in the reader's language when the backend named why — the
+ * router pane's rule (`routerSaveRefusal`). */
+function keyStoreRefusal(error) {
+  const failure = failureOf(error);
+  return failure.kind === "keychain-unavailable"
+    ? t(
+      "settings.typesafe.keychainUnavailable",
+      "이 컴퓨터에는 API 키를 보관할 키체인이 없어 저장하지 않았습니다.",
+    )
+    : failure.message;
+}
+
+/* A refused step says our sentence and keeps the backend's under the fold —
+ * except when the refusal already IS our sentence, which is the one kind a
+ * key card translates. */
+function keyStoreRefusalEvidence(error) {
+  const failure = failureOf(error);
+  return failure.kind === "keychain-unavailable" ? {} : { raw: failure.message };
+}
+
+/* One backend step, then the card the answer describes. `card` is the card's
+ * own hands: whether it is busy and the switch for it, a repaint of what it
+ * holds, a paint of an answer, its status line, and where an answer stands.
+ * A refused step keeps the card as it was and says why. */
+async function runKeyCardStep(card, step, said) {
+  if (card.busy()) return;
+  card.setBusy(true);
+  card.repaint();
+  try {
+    const state = await step();
+    card.setBusy(false);
+    card.paint(state);
+    // The line says where the card now stands as well as what just happened:
+    // one component, and the standing is the same one its head wears.
+    card.say(said(state), { standing: card.standing(state) });
+  } catch (error) {
+    card.setBusy(false);
+    card.repaint();
+    card.say(keyStoreRefusal(error), keyStoreRefusalEvidence(error));
+  }
+}
+
 /* ---- API Routers (OpenRouter, AgentRouter, Custom) ----
  *
  * §1.0 contract:
@@ -6062,17 +6269,13 @@ async function refreshTypeSafe() {
  * asked since the key was saved, and otherwise whether there is a key at all.
  * A saved key is a saved key until somebody asks TypeSafe about it. */
 function typesafeStanding(state) {
-  return typesafeChecked ?? (state.keySaved ? "keySaved" : "unchecked");
+  return typesafeChecked ?? keyStanding(state.keySaved);
 }
 
 function paintTypeSafe(state) {
   typesafeState = state;
   paintSettingsStanding(el("typesafe-key-state"), typesafeStanding(state));
-  const input = el("typesafe-key-input");
-  if (input) {
-    input.disabled = typesafeBusy || !state.keysKeptHere;
-    if (!state.keysKeptHere) input.value = "";
-  }
+  paintKeyField(el("typesafe-key-input"), { busy: typesafeBusy, kept: state.keysKeptHere });
   const noStore = el("typesafe-no-keychain-hint");
   if (noStore) noStore.hidden = state.keysKeptHere;
   for (const id of ["typesafe-check-btn", "typesafe-remove-btn"]) {
@@ -6100,24 +6303,24 @@ function paintTypeSafeStatus(text, evidence = {}) {
   paintSettingsStatus(el("typesafe-status"), text, evidence);
 }
 
+/* This card's hands, for the step every key card runs (`runKeyCardStep`). */
+const TYPESAFE_CARD = {
+  busy: () => typesafeBusy,
+  setBusy: (busy) => {
+    typesafeBusy = busy;
+  },
+  repaint: () => {
+    if (typesafeState) paintTypeSafe(typesafeState);
+  },
+  paint: (state) => paintTypeSafe(state),
+  say: (text, evidence) => paintTypeSafeStatus(text, evidence),
+  standing: (state) => typesafeStanding(state),
+};
+
 /* One backend step, then the page the answer describes. A refused step keeps
  * the page as it was and says why. */
 async function runTypeSafe(step, said) {
-  if (typesafeBusy) return;
-  typesafeBusy = true;
-  if (typesafeState) paintTypeSafe(typesafeState);
-  try {
-    const state = await step();
-    typesafeBusy = false;
-    paintTypeSafe(state);
-    // The line says where the card now stands as well as what just happened:
-    // one component, and the standing is the same one its head wears.
-    paintTypeSafeStatus(said(state), { standing: typesafeStanding(state) });
-  } catch (error) {
-    typesafeBusy = false;
-    if (typesafeState) paintTypeSafe(typesafeState);
-    paintTypeSafeStatus(typesafeRefusal(error), typesafeRefusalEvidence(error));
-  }
+  await runKeyCardStep(TYPESAFE_CARD, step, said);
 }
 
 async function saveTypeSafeKey() {
@@ -6174,24 +6377,13 @@ function typesafeCheckFailure(token) {
   return row?.saidKey ? t(row.saidKey, row.said) : t("settings.typesafe.unanswered", "응답하지 않았습니다.");
 }
 
-/* A refused step, in the reader's language when the backend named why — the
- * router pane's rule (`routerSaveRefusal`). */
+/* This card says a refusal as every key card does (`keyStoreRefusal`). */
 function typesafeRefusal(error) {
-  const failure = failureOf(error);
-  return failure.kind === "keychain-unavailable"
-    ? t(
-      "settings.typesafe.keychainUnavailable",
-      "이 컴퓨터에는 API 키를 보관할 키체인이 없어 저장하지 않았습니다.",
-    )
-    : failure.message;
+  return keyStoreRefusal(error);
 }
 
-/* A refused step says our sentence and keeps the backend's under the fold —
- * except when the refusal already IS our sentence, which is the one kind this
- * pane translates. */
 function typesafeRefusalEvidence(error) {
-  const failure = failureOf(error);
-  return failure.kind === "keychain-unavailable" ? {} : { raw: failure.message };
+  return keyStoreRefusalEvidence(error);
 }
 
 function populateRouterPresets() {
