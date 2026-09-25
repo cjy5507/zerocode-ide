@@ -119,6 +119,8 @@ export async function testAutonomyBoard(browser, origin, ok) {
       paused.mixed === "streaming" && paused.question === "waiting", JSON.stringify(paused));
     await page.screenshot({ path: resolve(shot, "paused.png"), animations: "disabled" });
     await page.click('[data-board-mode="graph"]');
+    // 관계 탭은 행성계로 열린다(t-9444) — 이 검사는 카드 그림의 상태 줄을 읽는다.
+    await page.click('[data-relations-view="cards"]');
     await page.waitForSelector('.agent-graph-node.is-agent.is-paused .agent-graph-node-status');
     ok("the relations graph keeps the paused goal visible with its actual status label", (await page.locator('.agent-graph-node.is-agent.is-paused .agent-graph-node-status').innerText()).startsWith("일시 정지"));
     await page.screenshot({ path: resolve(shot, "paused-graph.png"), animations: "disabled" });

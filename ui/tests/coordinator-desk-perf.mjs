@@ -189,7 +189,7 @@ export async function measureDesk(page, { polls = 40, now } = {}) {
   };
 }
 
-function webkitType() {
+export function webkitType() {
   const require = createRequire(import.meta.url);
   let entry;
   try {

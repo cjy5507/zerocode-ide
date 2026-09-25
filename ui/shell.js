@@ -5412,6 +5412,10 @@ function selectAgentGraphEntity(view, key, { focus = false } = {}) {
 
 function focusAgentGraphSelection(view) {
   if (!agentGraphSelectedKey) return;
+  if (agentOrbitShowing(view)) {
+    agentOrbitFocus(view, agentGraphSelectedKey);
+    return;
+  }
   const node = [...view.querySelectorAll("[data-graph-key]")]
     .find((candidate) => candidate.dataset.graphKey === agentGraphSelectedKey);
   node?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
@@ -5419,7 +5423,7 @@ function focusAgentGraphSelection(view) {
 }
 
 function softlyFollowAgentGraphSelection(view) {
-  if (!agentGraphSelectedKey) return;
+  if (!agentGraphSelectedKey || agentOrbitShowing(view)) return;
   const node = [...view.querySelectorAll("[data-graph-key]")]
     .find((candidate) => candidate.dataset.graphKey === agentGraphSelectedKey);
   node?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
@@ -5675,6 +5679,8 @@ function applyAgentGraphZoom(view, { remeasure = true } = {}) {
   // 같은 낱말을 다시 써 넣지 않는다: 매 판 지나가는 길이고, 같은 글자로 텍스트
   // 노드를 갈아 끼우는 것도 그 자리의 스타일을 다시 계산시키는 쓰기다.
   if (label) writeTextContent(label, `${Math.round(agentGraphZoom * 100)}%`);
+  /* 행성계의 배율은 맞춤 × 이 배율이다 — 움직였을 때만 다시 앉는다 (t-9444). */
+  agentOrbitZoomed(view);
   // A repaint spends this to restore the zoom on a freshly built view; it must
   // not also remeasure, or the topology guard below stops meaning anything and
   // every hook event walks every edge again.
@@ -5770,6 +5776,13 @@ function fitAgentGraph(view, { asked = true, pass = 0 } = {}) {
    * 예약할 때가 아니라 **쓸 때** 유효해야 한다. 둘째 판(`pass === 1`)도 같은
    * 문을 지난다: 그 사이에도 손은 움직인다. */
   if (!asked && agentGraphZoomTaken) return;
+  /* 행성계가 선 판의 맞춤은 행성계의 것이다 (t-9444): 행성계는 늘 판에 맞춰 서므로
+   * 저절로 하는 맞춤은 할 일이 없고, 청한 맞춤은 배율 1과 제자리다. 접힌 카드 판을
+   * 재면 크기 0이라 이 문 밑의 셈은 아무 답도 하지 않는다. */
+  if (agentOrbitShowing(view)) {
+    if (asked) agentOrbitFit(view);
+    return;
+  }
   const scroll = view.querySelector(".agent-graph-scroll");
   const { wide, tall } = agentGraphDrawnSize(view);
   if (wide <= 0 || tall <= 0) return;
@@ -6115,7 +6128,9 @@ function agentGraphListMode(view) {
  * 좁히지 못하고 낱말만 줄이므로, 눌리는 채로 두면 아무 일도 하지 않는 단추가
  * 된다 — 그리고 눈금은 사람이 마지막으로 넓은 판에서 고른 수에 굳어 있다. */
 function syncAgentGraphTier(view) {
-  const list = agentGraphListMode(view);
+  /* 행성계는 목록 티어가 없다 (t-9444): 판에 맞춰 서는 그림이라 좁은 판에서도 배율이
+   * 뜻을 가진다. 카드로 돌아가면 카드 판의 관찰자가 다시 묻는다. */
+  const list = agentGraphListMode(view) && !agentOrbitShowing(view);
   view.classList.toggle("is-graph-list", list);
   for (const button of view.querySelectorAll(
     ".agent-graph-zoom-in, .agent-graph-zoom-out, .agent-graph-fit")) {
@@ -7074,6 +7089,8 @@ function paintAgentGraph(view, model) {
   view.classList.toggle("is-detailed-relations", agentGraphCardDetails);
   writeHidden(view.querySelector(".task-board-surface"), !taskMode);
   writeHidden(view.querySelector(".agent-graph-surface"), taskMode);
+  /* 관계 그림의 두 보기 (t-9444): 고른 것이 행성계면 카드의 판이 접히고 무대가 선다. */
+  dressAgentOrbitMode(view, model, taskMode);
   /* 작업 목록으로 돌아간 판에는 지도가 없다 — 다른 판도 지도를 보이지 않으면
    * 맥박의 시계를 지금 거둔다 (t-7288). */
   agentGraphLiveSettle();
@@ -7260,6 +7277,8 @@ function paintAgentGraph(view, model) {
   wireAgentGraphCanvas(view);
   wireAgentGraphKeys(view);
   applyAgentGraphZoom(view, { remeasure: false });
+  /* 행성계는 이 판이 그린 그 모델을 읽는다 — 서명이 움직인 판에서만 적용한다. */
+  paintAgentOrbit(view, model);
   if (topologyMoved) scheduleAgentGraphFit(view);
   if (topologyMoved || dressMoved) scheduleAgentGraphEdges(view);
   else if (selectionMoved || overlayMoved) paintAgentGraphEdges(view, { styleOnly: true });

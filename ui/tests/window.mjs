@@ -33,6 +33,7 @@ import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testBoardLive } from "./board-live.mjs";
+import { testBoardOrbit } from "./board-orbit.mjs";
 import { testAutonomyBoard } from "./autonomy-board.mjs";
 import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
@@ -194,6 +195,8 @@ suite("agent-relations", async ({ browser, origin, ok }) => {
 });
 // The live coordination map layered over that same graph (t-7288).
 suite("board-live", ({ browser, origin, ok }) => testBoardLive(browser, origin, ok));
+// The orbit view of the same relations picture (t-9444): stars, planets, moons and mail.
+suite("board-orbit", ({ browser, origin, ok }) => testBoardOrbit(browser, origin, ok));
 suite("autonomy-board", ({ browser, origin, ok }) => testAutonomyBoard(browser, origin, ok));
 suite("connected-workbench", ({ browser, origin, ok }) => testConnectedWorkbench(browser, origin, ok));
 suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsive(browser, origin, ok));
@@ -17864,6 +17867,10 @@ const board = await page.evaluate(async (columns) => {
   // The default task view has its own scenarios above. These contracts exercise
   // the retained relations view, including its camera and ontology controls.
   agentBoardMode = "graph";
+  // The relations tab opens on the orbit (t-9444); these contracts measure its
+  // card picture, so they choose it through the tab's own toggle, before the
+  // first paint — the orbit has its own suite (`board-orbit`).
+  setAgentOrbitChoice(document.getElementById("board-view"), "cards");
   // The live card now lives in the activity tab; relations is the new default.
   agentGraphInspectorTab = "activity";
   window.__COLUMNS__ = columns;
