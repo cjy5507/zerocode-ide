@@ -24085,7 +24085,7 @@ mod tests {
         let skipping = block_after(accounts, "fn already_materialized(");
         assert!(
             skipping.contains("state.gathered")
-                && skipping.contains("state.account.as_deref() == Some(account.id.as_str())")
+                && skipping.contains("state.holder() == Some(account.id.as_str())")
                 && skipping.contains("state.written.as_deref() == on_disk")
                 && skipping.contains("on_disk.is_some()")
                 && skipping.contains("!says.contradicts_a_login()")
