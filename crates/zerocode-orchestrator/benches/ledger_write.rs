@@ -96,6 +96,7 @@ fn a_projection() -> LedgerProjectionV1 {
                 adopted_by: None,
                 on_quota_wall: None,
                 quota_wait: false,
+                exit_unconfirmed: None,
                 taken_over: false,
                 checkout: None,
                 quiet_at: Some(at as i64 + 1),

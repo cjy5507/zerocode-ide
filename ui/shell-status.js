@@ -3427,6 +3427,12 @@ async function refreshProviderUsage(provider, force) {
       settingsPane === "provider-accounts") {
     paintCliLogins();
   }
+  // The selected account's number just landed: the other accounts' own
+  // gauges and the switch table read on the same beat (t-7538). Unforced —
+  // the backend's per-account floors decide whether anything goes out.
+  if (provider.id === "claude" && !fetching && typeof refreshClaudeAccountUsage === "function") {
+    void refreshClaudeAccountUsage(false);
+  }
   // While the backend scans, keep asking — its answer changes once, and the
   // backend's own floor makes the asking free. One timer per provider: two
   // scans run against two different CLIs, and a shared timer would let the

@@ -1708,7 +1708,57 @@ const stubBackend = ({ boot, pollers }) => {
     }),
     launch_agent_tab: (args) => {
       window.__LAUNCHED__ = args;
+      window.__LAUNCHES__ = (window.__LAUNCHES__ ?? 0) + 1;
       return (window.__NEXT_TERM__ = (window.__NEXT_TERM__ ?? 0) + 1);
+    },
+    // Counted, for the account switch's contract (t-7538): a switch closes
+    // no pane from the window — the backend moves the one walled worker.
+    close_term: (args) => {
+      window.__CLOSED__ = [...(window.__CLOSED__ ?? []), args?.term];
+      return null;
+    },
+    /* Every managed account's own gauge and the beat's plan (t-7538). A
+       suite hands the whole answer over as `window.__ACCOUNT_USAGE__`; the
+       default is one account, no plan to speak of. Every ask is counted. */
+    claude_account_usage: (args) => {
+      window.__ACCOUNT_USAGE_ASKS__ = [...(window.__ACCOUNT_USAGE_ASKS__ ?? []), Boolean(args?.force)];
+      return window.__ACCOUNT_USAGE__ ?? {
+        accounts: [],
+        plan: {
+          mode: window.__AUTOSWITCH_MODE__ ?? "ask",
+          active: window.__ACCOUNTS__?.active ?? null,
+          decision: { kind: "stay", why: "alone" },
+          landing: window.__ACCOUNTS__?.active ?? null,
+          fitness: [],
+          next: null,
+          walled: [],
+          last_switch_ms: null,
+          cooldown_until_ms: null,
+          failed_recently: [],
+          token: "fixture-token",
+          now_ms: Date.now(),
+        },
+        sent: 0,
+        fetching: false,
+      };
+    },
+    claude_autoswitch_apply: (args) => {
+      window.__SWITCH_APPLIES__ = [...(window.__SWITCH_APPLIES__ ?? []), args];
+      if (window.__SWITCH_REFUSES__) throw new Error(window.__SWITCH_REFUSES__);
+      return window.__SWITCH_APPLIED__ ?? {
+        from: window.__ACCOUNTS__?.active ?? null,
+        to: args?.token ? "b-fixture" : "",
+        switched_default: true,
+        default_ms: 3,
+        panes: [],
+        receipts: 1,
+        total_ms: 4,
+      };
+    },
+    claude_autoswitch_mode: () => window.__AUTOSWITCH_MODE__ ?? "ask",
+    set_claude_autoswitch_mode: (args) => {
+      window.__AUTOSWITCH_MODE__ = args.mode;
+      return { revision: 1, claude_autoswitch_mode: args.mode };
     },
     list_claude_sessions: () => [],
     // 만들기 다이얼로그가 읽는 넷. 판정 규칙은 Rust의 것이고

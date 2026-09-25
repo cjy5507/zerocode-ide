@@ -137,7 +137,8 @@ pub(super) fn resume_nudge(
 
 /// The words a restored worker's wake carries, or none (t-7812 E) — one
 /// answer for both roads that bring a worker back: the ledger's reseat and
-/// the window's resumed pane.
+/// the window's resumed pane. A worker an account switch rested hears the
+/// switch's words instead (t-7538), whichever road brings it back.
 ///
 /// Only what the goodbye read as cut ([`restart_census::peek_cut`]): a turn
 /// under way, or commands running under the pane (t-6428 ⑤). A worker at
@@ -157,6 +158,11 @@ pub(super) fn resume_nudge(
 /// [`restart_census::peek_cut`]: crate::orchestration::restart_census::peek_cut
 pub(super) fn worker_nudge(root: &Path, worker: &str, checkout: Option<&Path>) -> Option<String> {
     let cut = crate::orchestration::restart_census::peek_cut(root, worker);
+    // A worker an account switch rested is told the switch's own words and
+    // not the restart's (t-7538): the same note, spent the same way.
+    if let Some(words) = cut.switched {
+        return Some(words);
+    }
     if !cut.any() {
         return None;
     }
@@ -457,6 +463,27 @@ pub(super) fn place_words(
 pub(super) fn unseated_line(term: TermId, agent: &str, worker: &str, why: &str) -> String {
     format!(
         "term {term} did not resume {agent}: sleeping worker {worker} could not be seated ({why})"
+    )
+}
+
+/// The line for a wake that started nothing because the conversation's last
+/// program, closed by an account switch, is not seen gone yet (t-7538, astra
+/// R3): a second process beside it would be two writers on one transcript.
+pub(super) fn held_line(term: TermId, agent: &str, worker: &str) -> String {
+    format!(
+        "term {term} did not resume {agent}: worker {worker}'s last pane's program has not been \
+         seen to leave, so its conversation is not opened beside it"
+    )
+}
+
+/// The line a door leaves when it cannot read whether a conversation is
+/// held (t-7538, astra R3-1): the ledger is on disk and does not answer, so
+/// nothing is opened on a guess.
+pub(super) fn unread_hold_line(term: TermId, agent: &str, why: &str) -> String {
+    format!(
+        "term {term} did not resume {agent}: the ledger could not be read to see whether a \
+         program a switch closed still holds this conversation ({why}); it opens once the \
+         ledger reads again"
     )
 }
 

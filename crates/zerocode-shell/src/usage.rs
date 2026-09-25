@@ -36,9 +36,10 @@ pub const MIN_REFETCH: Duration = Duration::from_secs(300);
 /// How often the window asks unprompted, and when a snapshot stops being
 /// worth showing without a warning triangle. The window's own timers carry
 /// these numbers (`USAGE_AMBIENT_MS`/`USAGE_STALE_MS` in shell.js); the
-/// constants exist for the gate that keeps the two sides agreeing, which is
-/// why they ship only with the tests.
-#[cfg(test)]
+/// constants exist for the gate that keeps the two sides agreeing. The
+/// ambient cadence also ships: it is the floor an INACTIVE Claude account's
+/// own read keeps (`refresh_inactive_claude_accounts`, t-7538) — the same
+/// beat the bar asks the selected account on, and not a second number.
 pub const AMBIENT_POLL_MINUTES: u32 = 15;
 #[cfg(test)]
 pub const STALE_AFTER_MINUTES: u32 = 30;

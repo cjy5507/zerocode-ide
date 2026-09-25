@@ -82,8 +82,10 @@ LEDGER_ITSELF = "ledger"
 # `worker_died` ends an attempt here: a `classifier_declined` row is news and
 # never a settlement — a declined worker is ended by the outcome its
 # coordinator or the handover walk writes into the task (`ENDING_OUTCOMES`) —
-# and a `model_deviated` row tells a switch the worker's CLI made, not an
-# ending.
+# a `model_deviated` row tells a switch the worker's CLI made, not an
+# ending; and an `account_switched` row is the window's receipt that a walled
+# worker went on under another Claude login with the same worker id, dispatch
+# and conversation (t-7538) — news again, not an ending.
 LEDGERS_OWN_KINDS = (
     "went_quiet",
     "deadlocked",
@@ -93,6 +95,7 @@ LEDGERS_OWN_KINDS = (
     "resumed",
     "classifier_declined",
     "model_deviated",
+    "account_switched",
 )
 
 # `STALL_JUDGED_REASON` there.

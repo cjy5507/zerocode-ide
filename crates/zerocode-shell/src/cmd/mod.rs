@@ -12,8 +12,9 @@ pub(crate) mod console;
 pub(crate) use console::{agent_models, slash_commands};
 pub(crate) mod wire;
 pub(crate) use wire::{
-    wire_answer, wire_image, wire_interrupt, wire_log, wire_models, wire_send, wire_set_mode,
-    wire_set_model, wire_start, wire_stop,
+    HAND_OVER_EXIT_POLL, HAND_OVER_EXIT_WAIT, program_left, wait_process_group_gone, wire_answer,
+    wire_image, wire_interrupt, wire_log, wire_models, wire_send, wire_set_mode, wire_set_model,
+    wire_start, wire_stop,
 };
 pub(crate) mod browser;
 pub(crate) mod fs;
@@ -75,9 +76,10 @@ pub(crate) use fs::{
 };
 
 pub(crate) use usage::{
-    add_claude_account, add_codex_account, antigravity_usage, cancel_google_login, claude_accounts,
-    claude_token_usage, claude_usage, claude_usage_stats, cli_login_list, cli_login_logout,
-    cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop, codex_account_list,
+    add_claude_account, add_codex_account, antigravity_usage, cancel_google_login,
+    claude_account_usage, claude_accounts, claude_autoswitch_apply, claude_token_usage,
+    claude_usage, claude_usage_stats, cli_login_list, cli_login_logout, cli_login_start,
+    cli_login_wait, cli_login_witness, cli_login_witness_drop, codex_account_list,
     codex_token_usage, codex_usage, codex_usage_stats, google_account, google_login_finish,
     google_login_start, google_logout, grok_usage, kimi_usage, logout_codex_login, opencode_usage,
     opencode_usage_stats, relogin_claude_account, relogin_codex_account, relogin_codex_login,
@@ -210,15 +212,15 @@ pub(crate) use worktree::{
 };
 
 pub(crate) use settings::{
-    agent_teams_mode, computer_confirm_answer, computer_guard_status, computer_resume,
-    computer_stop, floating_workspace_seat, list_system_fonts, pane_layouts, patch_editing_prefs,
-    patch_floating_workspace, patch_open_in_applications, patch_workspace_board_items,
-    patch_workspace_board_status, patch_workspace_creation_prefs, read_primary_selection,
-    save_pane_layouts, save_stage_layouts, scm_tree_rows, set_agent_teams_mode,
-    set_artifacts_retention_days, set_computer_confirm, set_confirm_close_pinned,
-    set_conversation_focus_view, set_ctrl_tab_order_mode, set_default_task_source,
-    set_diff_side_by_side, set_hidden_shortcuts, set_hidden_task_sources,
-    set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
+    agent_teams_mode, claude_autoswitch_mode, computer_confirm_answer, computer_guard_status,
+    computer_resume, computer_stop, floating_workspace_seat, list_system_fonts, pane_layouts,
+    patch_editing_prefs, patch_floating_workspace, patch_open_in_applications,
+    patch_workspace_board_items, patch_workspace_board_status, patch_workspace_creation_prefs,
+    read_primary_selection, save_pane_layouts, save_stage_layouts, scm_tree_rows,
+    set_agent_teams_mode, set_artifacts_retention_days, set_claude_autoswitch_mode,
+    set_computer_confirm, set_confirm_close_pinned, set_conversation_focus_view,
+    set_ctrl_tab_order_mode, set_default_task_source, set_diff_side_by_side, set_hidden_shortcuts,
+    set_hidden_task_sources, set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_keep_default_branch_awake, set_keybinding, set_panel_width,
     set_panel_widths, set_shortcut_visibility, set_sidebar_view,

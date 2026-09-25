@@ -538,6 +538,14 @@ pub enum RuntimeRequest {
         reason: String,
         now_ms: i64,
     },
+    /// A look saw the program a switch's close left behind gone (t-7538):
+    /// the hold on the worker's conversation goes. A host fact about the
+    /// witness the row holds, and only that witness lifts it.
+    WorkerExitSeen {
+        worker: String,
+        witness: zerocode_core::orchestration::ExitWitness,
+        now_ms: i64,
+    },
     /// The provider conversation observed in a terminal. The actor resolves
     /// the terminal to its seat while the pane table is locked, so a respawn
     /// cannot redirect the write between lookup and mutation.
@@ -589,6 +597,30 @@ pub enum RuntimeRequest {
     FinishSleepingReseat {
         worker: String,
         reason: String,
+        now_ms: i64,
+    },
+    /// The window is about to close a WALLED worker's pane to seat it again
+    /// on another account (t-7538): the row sleeps with its attempt open,
+    /// so the pane's exit settles nothing and the restore road seats the
+    /// same worker. The ledger checks the approval against the row — the
+    /// attempt, the coordinator generation, the conversation, the standing
+    /// wall — then, holding the pane's incarnation (`seat`, `term`,
+    /// `capability`), meets the window at the fence: the rest is written at
+    /// the moment the window's CURRENT observation still sees the wall, or
+    /// not at all (astra R2). The pane's model and effort ride in the same
+    /// transition (astra R5).
+    WorkerRestedForSwitch {
+        rest: Box<zerocode_core::orchestration::SwitchRest>,
+        seat: (String, String),
+        term: u32,
+        capability: String,
+        fence: EffectFence,
+        now_ms: i64,
+    },
+    /// The window moved a Claude account — the default, or one walled pane —
+    /// and the ledger writes its receipt once per key (t-7538).
+    AccountSwitched {
+        receipt: Box<zerocode_core::orchestration::AccountSwitchReceipt>,
         now_ms: i64,
     },
     /// A pane the plan asked for never opened: the worker row it minted
@@ -913,6 +945,16 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("reason_bytes", &reason.len())
                 .field("now_ms", now_ms)
                 .finish(),
+            Self::WorkerExitSeen {
+                worker,
+                witness,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::WorkerExitSeen")
+                .field("worker", worker)
+                .field("group", &witness.group)
+                .field("now_ms", now_ms)
+                .finish(),
             Self::WorkerSessionReported {
                 term,
                 session,
@@ -985,6 +1027,25 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("worker_bytes", &worker.len())
                 .field("team_bytes", &team.len())
                 .field("pane_bytes", &pane.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::WorkerRestedForSwitch {
+                rest,
+                seat,
+                term,
+                now_ms,
+                ..
+            } => formatter
+                .debug_struct("RuntimeRequest::WorkerRestedForSwitch")
+                .field("worker_bytes", &rest.worker.len())
+                .field("session_bytes", &rest.session.len())
+                .field("seat_bytes", &(seat.0.len() + seat.1.len()))
+                .field("term", term)
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::AccountSwitched { receipt, now_ms } => formatter
+                .debug_struct("RuntimeRequest::AccountSwitched")
+                .field("key_bytes", &receipt.key.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::FinishSleepingReseat {
@@ -2169,6 +2230,25 @@ impl RuntimeActor {
         }
     }
 
+    /// The program a switch's close left behind is gone: the hold on
+    /// `worker`'s conversation goes (t-7538). Answers whether a hold was
+    /// lifted — `false` when the row holds no hold, or another witness.
+    pub fn worker_exit_seen(
+        &self,
+        worker: impl Into<String>,
+        witness: zerocode_core::orchestration::ExitWitness,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::WorkerExitSeen {
+            worker: worker.into(),
+            witness,
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// The provider conversation observed in a pane, written durably when
     /// that pane belongs to a ledger worker.
     pub fn worker_session_reported(
@@ -2300,6 +2380,52 @@ impl RuntimeActor {
             now_ms,
         })? {
             RuntimeReply::Settled { revision, .. } => Ok(revision),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// Put a walled worker to sleep ahead of closing its pane, so the same
+    /// worker can be seated again on another account (t-7538) — at the
+    /// fence, like a terminal's settlement: the actor takes the request,
+    /// checks the approval against the row while it holds the pane's
+    /// incarnation, and only then asks `observe` for the window's current
+    /// evidence. `observe` calls `commit` once, with the time of use, under
+    /// the host's activity and quota locks, and only while both wall
+    /// witnesses stand; it must not re-enter the actor. No `commit` is a
+    /// refusal, and so is every refusal of the ledger's — `AuthorityRejected`,
+    /// with nothing moved.
+    pub fn worker_rested_for_switch_fenced(
+        &self,
+        rest: zerocode_core::orchestration::SwitchRest,
+        seat: (String, String),
+        term: u32,
+        capability: String,
+        now_ms: i64,
+        observe: impl FnOnce(&mut dyn FnMut(i64)),
+    ) -> Result<(WorkerState, u64), RuntimeError> {
+        let pending = self.pending_effect(|fence| RuntimeRequest::WorkerRestedForSwitch {
+            rest: Box::new(rest),
+            seat,
+            term,
+            capability,
+            fence,
+            now_ms,
+        })?;
+        self.observe_terminal(pending, observe)
+    }
+
+    /// The receipt for one account move (t-7538). Answers whether a row was
+    /// written — the same key again writes none — and the revision.
+    pub fn account_switched(
+        &self,
+        receipt: zerocode_core::orchestration::AccountSwitchReceipt,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::AccountSwitched {
+            receipt: Box::new(receipt),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
             _ => Err(RuntimeError::AuthorityRejected),
         }
     }
@@ -3056,6 +3182,11 @@ impl RuntimeState {
                 reason,
                 now_ms,
             } => self.sleeper_unrecoverable(&worker, &reason, now_ms),
+            RuntimeRequest::WorkerExitSeen {
+                worker,
+                witness,
+                now_ms,
+            } => self.worker_exit_seen(&worker, &witness, now_ms),
             RuntimeRequest::WorkerSessionReported {
                 term,
                 session,
@@ -3101,6 +3232,17 @@ impl RuntimeState {
                 reason,
                 now_ms,
             } => self.finish_sleeping_reseat(&worker, &reason, now_ms),
+            RuntimeRequest::WorkerRestedForSwitch {
+                rest,
+                seat,
+                term,
+                capability,
+                fence,
+                now_ms,
+            } => self.worker_rested_for_switch(&rest, &seat, term, &capability, fence, now_ms),
+            RuntimeRequest::AccountSwitched { receipt, now_ms } => {
+                self.account_switched(&receipt, now_ms)
+            }
             RuntimeRequest::SeatNeverOpened { worker, now_ms } => {
                 self.seat_never_opened(&worker, now_ms)
             }
@@ -3666,6 +3808,41 @@ impl RuntimeState {
         })
     }
 
+    /// The hold a switch's close left on a worker, lifted once a look saw
+    /// its program gone (t-7538, astra R3). Nothing to lift is an answer,
+    /// not an error: two looks may see the same exit.
+    fn worker_exit_seen(
+        &mut self,
+        worker: &str,
+        witness: &zerocode_core::orchestration::ExitWitness,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if worker.is_empty()
+            || worker.len() > MAX_NAME
+            || witness
+                .started
+                .as_ref()
+                .is_some_and(|started| started.len() > MAX_NAME)
+            || now_ms < 0
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.worker_exit_seen(worker, witness) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
     /// A provider session observed in a terminal. Seat resolution and the
     /// ledger mutation share the pane-table borrow, closing the respawn gap;
     /// the disk write follows after the host lock is released.
@@ -3866,6 +4043,113 @@ impl RuntimeState {
         self.ledger
             .finish_sleeping_reseat(worker, reason, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn worker_rested_for_switch(
+        &mut self,
+        rest: &zerocode_core::orchestration::SwitchRest,
+        seat: &(String, String),
+        term: u32,
+        capability: &str,
+        fence: EffectFence,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if [
+            rest.worker.as_str(),
+            rest.dispatch.as_str(),
+            rest.session.as_str(),
+            rest.model.as_str(),
+            rest.effort.as_str(),
+            seat.0.as_str(),
+            seat.1.as_str(),
+        ]
+        .iter()
+        .any(|word| word.is_empty() || word.len() > MAX_NAME)
+            || now_ms < 0
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let mut fence = Some(fence);
+        let mut rested = None;
+        let mut rested_at_ms = now_ms;
+        let ledger = &mut self.ledger;
+        self.panes
+            .with_pane_authority(&seat.0, &seat.1, capability, &mut |team| {
+                // The pane this request names is still that pane, the
+                // worker still sits in it, and the ledger would rest it —
+                // all before the host is asked anything.
+                let seated = ledger.runs().iter().any(|run| {
+                    run.worker(&rest.worker)
+                        .is_some_and(|row| row.team == seat.0 && row.pane == seat.1)
+                });
+                if !seated
+                    || team.is_none_or(|team| team.term_of(&seat.1) != Some(term))
+                    || ledger.may_rest_for_account_switch(rest, now_ms).is_err()
+                {
+                    return;
+                }
+                let Some(fence) = fence.take() else {
+                    return;
+                };
+                let Ok(at_ms) = fence.enter() else {
+                    return;
+                };
+                if at_ms < 0 {
+                    return;
+                }
+                rested_at_ms = at_ms;
+                rested = Some(ledger.worker_rested_for_account_switch(rest, at_ms));
+            });
+        rested
+            .ok_or(RuntimeError::AuthorityRejected)?
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        let revision = self.write_through(rested_at_ms)?;
+        Ok(RuntimeReply::Release {
+            state: WorkerState::Sleeping,
+            revision,
+        })
+    }
+
+    fn account_switched(
+        &mut self,
+        receipt: &zerocode_core::orchestration::AccountSwitchReceipt,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || receipt.key.is_empty()
+            || receipt.key.len() > MAX_NAME
+            || receipt
+                .to_account
+                .as_ref()
+                .is_some_and(|to| to.len() > MAX_NAME)
+            || receipt
+                .from_account
+                .as_ref()
+                .is_some_and(|from| from.len() > MAX_NAME)
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let written = self
+            .ledger
+            .account_switched(receipt, now_ms)
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        if written.is_empty() {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Settled {
             moved: true,

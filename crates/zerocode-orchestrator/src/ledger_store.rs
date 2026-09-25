@@ -218,6 +218,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         adopted_by INTEGER,
         on_quota_wall TEXT,
         quota_wait INTEGER NOT NULL DEFAULT 0 CHECK (quota_wait IN (0, 1)),
+        exit_unconfirmed TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -489,6 +490,10 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * on the head, like a run's seat — a small bounded table read and
          * written whole, NULL on a head written before it was counted. */
         ("orchestration_ledger_heads", "verb_tallies", "TEXT"),
+        /* The program a switch's close has not seen leave (t-7538): one
+         * JSON document like the summons' alternative, NULL for every row
+         * written before it — a worker nobody holds. */
+        ("ledger_workers", "exit_unconfirmed", "TEXT"),
     ];
     /* Unversioned digest rows were written by format generation one. Derive
      * the migration default from the format's single named constant so the
@@ -658,6 +663,10 @@ fn bytes_held(projection: &LedgerProjectionV1) -> u64 {
                 + plain(&row.checkout)
                 + session
                 + row.on_quota_wall.as_ref().map_or(0, pinned_bytes)
+                + row
+                    .exit_unconfirmed
+                    .as_ref()
+                    .map_or(0, |held| plain(&held.started))
         })
         .sum();
     let dispatches: u64 = projection
@@ -1695,8 +1704,8 @@ fn write_rows(
                         started_ms, dispatch, model, effort, session, ready_by_ms,
                         hook_unreachable_since_ms, pane_missing_since_ms,
                         taken_over, checkout, quiet_at, archive, started_by, adopted_by,
-                        on_quota_wall, quota_wait
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                        on_quota_wall, quota_wait, exit_unconfirmed
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                     params![
                         ledger_id,
                         ordinal(at)?,
@@ -1730,6 +1739,11 @@ fn write_rows(
                             .transpose()
                             .map_err(|_| EffectJournalError::Corrupt)?,
                         row.quota_wait,
+                        row.exit_unconfirmed
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(|_| EffectJournalError::Corrupt)?,
                     ],
                 )
                 .map_err(|_| EffectJournalError::Database)?;
@@ -2473,7 +2487,7 @@ fn read_repairable_from_head(
         "SELECT run, id, team, agent, pane, state, started_ms, dispatch, model, effort,
                 session, ready_by_ms, hook_unreachable_since_ms,
                 pane_missing_since_ms, taken_over, checkout, quiet_at, archive,
-                started_by, adopted_by, on_quota_wall, quota_wait
+                started_by, adopted_by, on_quota_wall, quota_wait, exit_unconfirmed
            FROM ledger_workers WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2503,6 +2517,7 @@ fn read_repairable_from_head(
                     row.get::<_, Option<i64>>(19)?,
                     row.get::<_, Option<String>>(20)?,
                     row.get::<_, bool>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ),
             ));
             Ok(())
@@ -2534,7 +2549,7 @@ fn read_repairable_from_head(
                 ),
                 state,
             )| {
-                let (started_by, adopted_by, on_quota_wall, quota_wait) = lineage;
+                let (started_by, adopted_by, on_quota_wall, quota_wait, exit_unconfirmed) = lineage;
                 /* A generation is a small positive count; a value SQLite hands
                  * back that a `u32` cannot hold was not written by this store. */
                 let adopted_by = adopted_by
@@ -2546,6 +2561,12 @@ fn read_repairable_from_head(
                 let on_quota_wall = on_quota_wall
                     .as_deref()
                     .map(serde_json::from_str::<Pinned>)
+                    .transpose()
+                    .map_err(|_| EffectJournalError::Corrupt)?;
+                // And a hold that will not parse, for the same reason.
+                let exit_unconfirmed = exit_unconfirmed
+                    .as_deref()
+                    .map(serde_json::from_str)
                     .transpose()
                     .map_err(|_| EffectJournalError::Corrupt)?;
                 Ok(WorkerRow {
@@ -2575,6 +2596,7 @@ fn read_repairable_from_head(
                     adopted_by,
                     on_quota_wall,
                     quota_wait,
+                    exit_unconfirmed,
                 })
             },
         )
@@ -3023,6 +3045,7 @@ mod tests {
                 adopted_by: None,
                 on_quota_wall: None,
                 quota_wait: false,
+                exit_unconfirmed: None,
             }],
             attachments: vec![AttachmentRow {
                 run: "run-2".to_string(),
@@ -3478,6 +3501,11 @@ mod tests {
         });
         // And its own `wait` beside it (t-6427).
         projection.workers[0].quota_wait = true;
+        // And a switch's close nobody saw end (t-7538), the same way.
+        projection.workers[0].exit_unconfirmed = Some(zerocode_core::orchestration::ExitWitness {
+            group: 4_242,
+            started: Some("Thu Sep 25 04:10:00 2026".to_string()),
+        });
         write(&store, "one", 0, 1, &projection, 10).expect("it writes");
 
         let held = read(&store, "one", projection.schema)
@@ -3887,6 +3915,7 @@ mod tests {
                  ALTER TABLE ledger_runs DROP COLUMN handover;
                  ALTER TABLE ledger_workers DROP COLUMN on_quota_wall;
                  ALTER TABLE ledger_workers DROP COLUMN quota_wait;
+                 ALTER TABLE ledger_workers DROP COLUMN exit_unconfirmed;
                  UPDATE orchestration_ledger_heads SET bytes_held = {};",
                 bytes_held(&expected)
             ))

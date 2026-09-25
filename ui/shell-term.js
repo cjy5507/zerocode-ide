@@ -599,7 +599,11 @@ function say(node, produce) {
     spokenNodes.add(ref);
     spokenGone.register(node, ref, node);
   }
-  node.textContent = produce();
+  const text = produce();
+  // The same words already standing stay standing: a repaint that says what
+  // is on screen again is a DOM mutation for nothing (t-7538). An element
+  // holding markup is still flattened to the text, as it always was.
+  if (node.childElementCount > 0 || node.textContent !== text) node.textContent = text;
 }
 
 /* Take an element off the walkable half. Both halves of the handle go: the

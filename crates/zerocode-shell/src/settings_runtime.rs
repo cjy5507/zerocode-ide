@@ -90,6 +90,9 @@ pub(super) mod setting_key {
     pub const WINDOW_MATERIAL: &str = "window_material";
     pub const DEFAULT_AGENT: &str = "default_agent";
     pub const AGENT_TEAMS_MODE: &str = "agent_teams_mode";
+    /// `accounts.claudeAutoSwitch` in the briefing's words: whether the
+    /// window may move the Claude account by itself (t-7538).
+    pub const CLAUDE_AUTOSWITCH_MODE: &str = "claude_autoswitch_mode";
     pub const HIDDEN_SHORTCUTS: &str = "hidden_shortcuts";
     pub const KEYBINDINGS: &str = "keybindings";
     pub const HIDDEN_TASK_SOURCES: &str = "hidden_task_sources";
@@ -2219,6 +2222,11 @@ pub(super) struct SettingsDocument {
     pub(super) default_agent: zerocode_core::DefaultAgentPreference,
     #[serde(default)]
     pub(super) agent_teams_mode: TeamsMode,
+    /// Whether the window may switch the Claude account by itself when the
+    /// selected one nears its limit or a worker stands at its wall (t-7538):
+    /// `off`, `ask` (the default — a line and a button), `auto`.
+    #[serde(default)]
+    pub(super) claude_autoswitch_mode: zerocode_core::account_autoswitch::AutoSwitchMode,
     #[serde(default)]
     pub(super) worktree_prefs: WorktreePrefs,
     #[serde(default)]
@@ -2397,6 +2405,7 @@ impl Default for SettingsDocument {
             window_material: WindowMaterial::default(),
             default_agent: zerocode_core::DefaultAgentPreference::Auto,
             agent_teams_mode: TeamsMode::default(),
+            claude_autoswitch_mode: zerocode_core::account_autoswitch::AutoSwitchMode::default(),
             worktree_prefs: WorktreePrefs::default(),
             notifications: NotificationPrefs::default(),
             computer_awake_mode: awake::ComputerAwakeMode::default(),

@@ -35,6 +35,448 @@ pub(super) fn forget_claude_usage(local_data_root: &Path) {
 pub(super) static CLAUDE_USAGE_SCANNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/* ---- every managed Claude account's own reading (t-7538) ---------------- */
+
+pub(super) fn claude_account_usage_file(local_data_root: &Path) -> PathBuf {
+    local_data_root.join(artifact_file::CLAUDE_ACCOUNT_USAGE)
+}
+
+/// One account's reading, and WHICH login it was read as (astra R6): the
+/// store directory and the identity the account row named when the read
+/// began. An id is a row in the person's list, and a row can come to name
+/// another login — re-logged, re-added elsewhere, or a changed
+/// organisation applied — so a reading is only ever the account's while the
+/// row still names the login it was read as ([`claude_login_key`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct AccountReading {
+    pub(super) login: String,
+    pub(super) usage: usage::ProviderUsage,
+}
+
+/// Which login an account row names: its store directory and its identity
+/// (account and organisation uuids). Compared, never shown or logged.
+pub(super) fn claude_login_key(account: &zerocode_core::ClaudeAccount) -> String {
+    [
+        account.config_dir.as_str(),
+        account.account_uuid.as_deref().unwrap_or_default(),
+        account.organization_uuid.as_deref().unwrap_or_default(),
+    ]
+    .join("\u{1f}")
+}
+
+/// One reading per managed account, by id — the selected account's
+/// included when its own gauge has landed, so the switch table compares
+/// every account by the same kind of number. Loaded once from disk like the
+/// provider gauges; a window that restarts keeps what it knew, and reads it
+/// under the same login rule as a window that never stopped. A file of the
+/// first round's shape — readings with no login — loads as nothing, and the
+/// accounts are read again.
+pub(super) fn claude_account_usage_cache(
+    local_data_root: &Path,
+) -> &'static Mutex<HashMap<String, AccountReading>> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, AccountReading>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(load_account_readings(local_data_root)))
+}
+
+/// The readings file as it stands on disk.
+pub(super) fn load_account_readings(local_data_root: &Path) -> HashMap<String, AccountReading> {
+    std::fs::read_to_string(claude_account_usage_file(local_data_root))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// `account`'s own reading — only while its row still names the login the
+/// reading was taken as (astra R6).
+pub(super) fn reading_of<'a>(
+    readings: &'a HashMap<String, AccountReading>,
+    account: &zerocode_core::ClaudeAccount,
+) -> Option<&'a usage::ProviderUsage> {
+    readings
+        .get(&account.id)
+        .filter(|held| held.login == claude_login_key(account))
+        .map(|held| &held.usage)
+}
+
+/// Which accounts have a read out right now — one per account, so a slow
+/// endpoint cannot be asked twice for the same login while the first answer
+/// is still in the air.
+fn claude_account_scanning() -> &'static Mutex<std::collections::HashSet<String>> {
+    static OUT: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    OUT.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Whether one account's own read is out right now.
+pub(super) fn claude_account_scanning_now(id: &str) -> bool {
+    claude_account_scanning()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(id)
+}
+
+/// Drop one account's reading — the account was removed, or re-logged, so
+/// its number is about a login that is gone.
+pub(super) fn forget_claude_account_usage(local_data_root: &Path, id: &str) {
+    let mut held = claude_account_usage_cache(local_data_root)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.remove(id).is_some() {
+        write_account_usage_file(local_data_root, &held);
+    }
+}
+
+fn write_account_usage_file(local_data_root: &Path, held: &HashMap<String, AccountReading>) {
+    if let Ok(text) = serde_json::to_string_pretty(held) {
+        let _ = durable_file::replace_bytes(
+            &claude_account_usage_file(local_data_root),
+            text.as_bytes(),
+        );
+    }
+}
+
+/// The backoff key one account's reads are counted under — the provider
+/// and the account, so a 429 on account B does not hold account A's poll
+/// and A's healthy streak does not let B be asked past its `Retry-After`.
+fn account_backoff_key(id: &str) -> String {
+    format!("claude:{id}")
+}
+
+/// Read one account's plan usage as THAT account — the OAuth road only.
+///
+/// No hidden terminal behind it, on purpose: the terminal road runs the CLI
+/// in the runtime home, which is the SELECTED account's, so a fallback there
+/// would read A for B (astra A1). An account whose own store holds no login
+/// answers `signed_out`, one whose keychain would not say answers `denied`,
+/// both with no request made; a refused or failed request answers `error`
+/// with the endpoint's own classification, and the number stays unknown —
+/// never 0%, never somebody else's.
+pub(super) fn scan_claude_account_usage_now(account: &zerocode_core::ClaudeAccount) -> Scanned {
+    scan_claude_account_usage_with(account, accounts::account_login, |login, now_ms| {
+        usage_oauth::claude(Some(login), now_ms)
+    })
+}
+
+/// The same read with its two doors handed in — the account's own login and
+/// the endpoint — so the suite can stand a fake keychain and a fake server
+/// where the real ones are (astra A1, C1). Only the login `read_login`
+/// found for THIS account ever reaches `ask`.
+pub(super) fn scan_claude_account_usage_with(
+    account: &zerocode_core::ClaudeAccount,
+    read_login: impl FnOnce(&zerocode_core::ClaudeAccount) -> accounts::AccountLogin,
+    ask: impl FnOnce(&str, i64) -> Result<usage_oauth::OauthUsage, usage_http::Failure>,
+) -> Scanned {
+    let whose = Some(account.id.clone());
+    let failed = |status: &str,
+                  error: String,
+                  kind: Option<zerocode_core::usage_limit::FailureKind>,
+                  retry_at_ms: Option<i64>| {
+        claude_reading_failed(status, error, kind, retry_at_ms, whose.clone())
+    };
+    let (login, from) = match read_login(account) {
+        accounts::AccountLogin::Found(login, from) => (login, from),
+        accounts::AccountLogin::Refused => {
+            return Scanned {
+                usage: failed(
+                    ACCOUNT_LOGIN_REFUSED,
+                    "이 계정의 키체인 항목이 답하지 않았습니다 — 눌러서 다시 읽을 때만 묻습니다"
+                        .to_string(),
+                    None,
+                    None,
+                ),
+                road: UsageRoad::Local,
+            };
+        }
+        accounts::AccountLogin::Missing => {
+            return Scanned {
+                usage: failed(
+                    "signed_out",
+                    "이 계정의 저장소에 로그인이 없습니다".to_string(),
+                    None,
+                    None,
+                ),
+                road: UsageRoad::Local,
+            };
+        }
+    };
+    let road = UsageRoad::Oauth { login: Some(from) };
+    match ask(login.as_str(), epoch_ms_now()) {
+        Ok(read) => Scanned {
+            usage: claude_oauth_reading(read, whose),
+            road,
+        },
+        Err(failure) => Scanned {
+            usage: failed(
+                "error",
+                failure.message.clone(),
+                Some(failure.recovery.kind),
+                failure.retry_at_ms,
+            ),
+            road,
+        },
+    }
+}
+
+/// Land one account's reading — only if the account is still the account
+/// it was when the read began (astra A1): the same id still in the store
+/// with the same directory. A read whose account was removed, re-added
+/// under the same id elsewhere, or re-logged mid-flight is dropped, and a
+/// late answer never overwrites a newer one. Answers whether it landed.
+pub(super) fn land_claude_account_usage(
+    config_root: &Path,
+    local_data_root: &Path,
+    began_as: &zerocode_core::ClaudeAccount,
+    fresh: usage::ProviderUsage,
+) -> bool {
+    let still = accounts::read_store(config_root)
+        .accounts
+        .into_iter()
+        .any(|account| {
+            account.id == began_as.id
+                && account.config_dir == began_as.config_dir
+                && account.account_uuid == began_as.account_uuid
+                && account.organization_uuid == began_as.organization_uuid
+        });
+    if !still {
+        return false;
+    }
+    let now = epoch_ms_now();
+    let login = claude_login_key(began_as);
+    let mut held = claude_account_usage_cache(local_data_root)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A reading of another login under the same id is not an earlier
+    // reading of this one: it goes, whatever its age.
+    let landed = match held
+        .remove(&began_as.id)
+        .filter(|previous| previous.login == login)
+    {
+        Some(previous) if previous.usage.updated_at > fresh.updated_at => previous.usage,
+        Some(previous) => usage_through_failure(previous.usage, fresh, now),
+        None => fresh,
+    };
+    note_usage_attempt(&account_backoff_key(&began_as.id), &landed.status, now);
+    held.insert(
+        began_as.id.clone(),
+        AccountReading {
+            login,
+            usage: landed,
+        },
+    );
+    write_account_usage_file(local_data_root, &held);
+    true
+}
+
+/// The status of an account whose keychain would not answer — held until a
+/// person asks again (t-7538, astra A2).
+pub(super) const ACCOUNT_LOGIN_REFUSED: &str = "denied";
+
+/// The status of a read whose figures were outside 0–100 (astra R6).
+pub(super) const ACCOUNT_READING_INVALID: &str = "invalid";
+
+/// Why an account is being read, which decides how old a reading may be
+/// before it is read again — three floors, none of them new (astra 3):
+/// the ambient poll's own cadence for the beat, the refetch floor when a
+/// switch is about to choose this account, and none for a person's press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AccountPoll {
+    Ambient,
+    Candidate,
+    Person,
+}
+
+impl AccountPoll {
+    fn floor_ms(self) -> i64 {
+        match self {
+            Self::Ambient => i64::from(usage::AMBIENT_POLL_MINUTES) * 60_000,
+            Self::Candidate => usage::MIN_REFETCH.as_millis() as i64,
+            Self::Person => 0,
+        }
+    }
+}
+
+/// Ask every managed account that is NOT the selected one for its own
+/// reading, off the command thread, one read per account at a time, under
+/// the floor `why` names and each account's own backoff. The selected
+/// account is read by its own gauge (`claude_usage`) and not here — one
+/// request per login per floor, however many roads ask.
+///
+/// Answers how many reads went out.
+pub(super) fn refresh_inactive_claude_accounts(
+    config_root: &Path,
+    local_data_root: &Path,
+    why: AccountPoll,
+) -> usize {
+    let store = accounts::read_store(config_root);
+    let active = zerocode_core::active_account(&store.accounts, &store.selection)
+        .map(|account| account.id.clone());
+    let now = epoch_ms_now();
+    let mut sent = 0;
+    for account in store.accounts {
+        if active.as_deref() == Some(account.id.as_str()) {
+            continue;
+        }
+        let held = reading_of(
+            &claude_account_usage_cache(local_data_root)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &account,
+        )
+        .cloned();
+        let young = held
+            .as_ref()
+            .is_some_and(|snapshot| now - snapshot.updated_at < why.floor_ms());
+        // A keychain that refused is asked again by a person's press and by
+        // nothing else: every automated ask would be one more dialog.
+        let refused = why != AccountPoll::Person
+            && held
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.status == ACCOUNT_LOGIN_REFUSED);
+        if young
+            || refused
+            || usage_scan_holds_for(
+                held.as_ref(),
+                &account_backoff_key(&account.id),
+                why == AccountPoll::Person,
+                now,
+            )
+        {
+            continue;
+        }
+        if !claude_account_scanning()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(account.id.clone())
+        {
+            continue;
+        }
+        sent += 1;
+        let config_root = config_root.to_path_buf();
+        let local_data_root = local_data_root.to_path_buf();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = scan_claude_account_usage_now(&account);
+            let line = usage_read_line(
+                "claude-account",
+                result.road,
+                started.elapsed().as_millis(),
+                Some(&result.usage),
+                why == AccountPoll::Person,
+            );
+            let landed =
+                land_claude_account_usage(&config_root, &local_data_root, &account, result.usage);
+            claude_account_scanning()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&account.id);
+            note_window_event(
+                &local_data_root,
+                &format!("{line} account={} landed={landed}", account.id),
+            );
+        });
+    }
+    sent
+}
+
+/// Every managed account's latest reading as the switch table wants it —
+/// out of the account map only, and only a reading of the login the row
+/// names now (astra R6). The selected account's own gauge lands there too,
+/// under the same login rule ([`land_claude_usage_as`]); the status bar's
+/// snapshot names an id, not a login, and is never a number this table
+/// chooses by. An account with no such reading is a row with no windows,
+/// which the table calls unknown. Read over the store the caller already
+/// holds.
+pub(super) fn claude_account_gauges_of(
+    store: &accounts::AccountStore,
+    local_data_root: &Path,
+) -> Vec<zerocode_core::account_autoswitch::AccountGauge> {
+    let map = claude_account_usage_cache(local_data_root)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    store
+        .accounts
+        .iter()
+        .map(|account| account_gauge_of(account, reading_of(&map, account)))
+        .collect()
+}
+
+/// The reading of exactly `pane`'s login — the one number a pane launched as
+/// that login may be judged against (t-7538, astra R6). An id that has since
+/// come to name another login has another login's reading, and that is not
+/// this pane's.
+pub(super) fn reading_of_login<'a>(
+    readings: &'a HashMap<String, AccountReading>,
+    pane: &crate::agent_teams::PaneLogin,
+) -> Option<&'a usage::ProviderUsage> {
+    readings
+        .get(&pane.account)
+        .filter(|held| held.login == pane.login)
+        .map(|held| &held.usage)
+}
+
+/// The selected account's own gauge, landed as that account's reading too —
+/// through the one door every account's reading lands by
+/// ([`land_claude_account_usage`]), so it is stamped with the login it was
+/// read as and dropped if that login changed while it was out (astra R6).
+/// `read_as` is the row the read's login was shown to be
+/// ([`SelectedScan::as_account`], astra R6-1); a read that ran as no managed
+/// account, as another one, or with a login nobody could place lands
+/// nowhere here.
+pub(super) fn land_claude_usage_as(
+    config_root: &Path,
+    local_data_root: &Path,
+    read_as: Option<&zerocode_core::ClaudeAccount>,
+    fresh: &usage::ProviderUsage,
+) -> bool {
+    match read_as {
+        Some(account) if fresh.account.as_deref() == Some(account.id.as_str()) => {
+            land_claude_account_usage(config_root, local_data_root, account, fresh.clone())
+        }
+        _ => false,
+    }
+}
+
+/// One snapshot as the switch table's row — windows and status only.
+pub(super) fn account_gauge_of(
+    account: &zerocode_core::ClaudeAccount,
+    snapshot: Option<&usage::ProviderUsage>,
+) -> zerocode_core::account_autoswitch::AccountGauge {
+    use zerocode_core::account_autoswitch::{AccountGauge, GaugeWindow};
+    let window = |kind: &str, held: Option<&usage::UsageWindow>| {
+        held.map(|held| GaugeWindow {
+            kind: kind.to_string(),
+            used_percent: held.used_percent,
+            resets_at_ms: held.resets_at,
+        })
+    };
+    AccountGauge {
+        id: account.id.clone(),
+        org_type: account.organization_type.clone(),
+        // Which login the row is, for the table's "one login twice" rule —
+        // compared there, never shown. Unknown when either half is.
+        identity: account
+            .account_uuid
+            .as_deref()
+            .zip(account.organization_uuid.as_deref())
+            .map(|(person, organization)| format!("{person}/{organization}")),
+        windows: snapshot
+            .into_iter()
+            .flat_map(|held| {
+                [
+                    window("session", held.session.as_ref()),
+                    window("weekly", held.weekly.as_ref()),
+                    window("fable_weekly", held.fable_weekly.as_ref()),
+                ]
+            })
+            .flatten()
+            .collect(),
+        observed_at_ms: snapshot.map_or(0, |held| held.updated_at),
+        status: snapshot.map_or_else(|| "unknown".to_string(), |held| held.status.clone()),
+    }
+}
+
 pub(super) fn epoch_ms_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -81,6 +523,75 @@ pub(super) fn usage_window_from(
     })
 }
 
+/// One Claude OAuth answer as the reading every road keeps — the selected
+/// account's gauge and every other account's own read alike (astra R6).
+///
+/// A figure outside 0–100 is no reading at all: the status bar clamps what it
+/// shows ([`oauth_usage_window`]), and a clamped figure is not a number an
+/// account may be chosen, or a pane moved, by. Such a read is `invalid`, its
+/// windows are left out, and the switch table and the wall witness both call
+/// the account unknown.
+pub(super) fn claude_oauth_reading(
+    read: usage_oauth::OauthUsage,
+    whose: Option<String>,
+) -> usage::ProviderUsage {
+    if [&read.session, &read.weekly, &read.fable_weekly]
+        .into_iter()
+        .flatten()
+        .any(|window| !(0.0..=100.0).contains(&window.used_percent))
+    {
+        return claude_reading_failed(
+            ACCOUNT_READING_INVALID,
+            "사용량 수치가 0–100 밖으로 왔습니다 — 이 읽기로는 계정을 고르지 않습니다".to_string(),
+            None,
+            None,
+            whose,
+        );
+    }
+    usage::ProviderUsage {
+        provider: "claude".to_string(),
+        session: read.session.map(oauth_usage_window),
+        weekly: read.weekly.map(oauth_usage_window),
+        fable_weekly: read.fable_weekly.map(oauth_usage_window),
+        monthly: None,
+        buckets: None,
+        updated_at: epoch_ms_now(),
+        error: None,
+        status: "ok".to_string(),
+        failure_kind: None,
+        retry_at_ms: None,
+        plan_type: None,
+        reset_credits: None,
+        account: whose,
+    }
+}
+
+/// A Claude read that produced no figures, and why.
+pub(super) fn claude_reading_failed(
+    status: &str,
+    error: String,
+    kind: Option<zerocode_core::usage_limit::FailureKind>,
+    retry_at_ms: Option<i64>,
+    whose: Option<String>,
+) -> usage::ProviderUsage {
+    usage::ProviderUsage {
+        provider: "claude".to_string(),
+        session: None,
+        weekly: None,
+        fable_weekly: None,
+        monthly: None,
+        buckets: None,
+        updated_at: epoch_ms_now(),
+        error: Some(error),
+        status: status.to_string(),
+        failure_kind: kind,
+        retry_at_ms,
+        plan_type: None,
+        reset_credits: None,
+        account: whose,
+    }
+}
+
 /// An OAuth window in the panel's own dress. No reset words: the API hands a
 /// timestamp, and the window's face renders a countdown from it directly.
 pub(super) fn oauth_usage_window(window: usage_oauth::OauthWindow) -> usage::UsageWindow {
@@ -120,10 +631,94 @@ pub(super) fn probe_path_env() -> Option<(String, String)> {
     Some(("PATH".to_string(), path))
 }
 
-/// Run the hidden terminal and read the `/usage` screen. Blocking — always
-/// called from its own thread.
-pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
-    let whose = active_claude_account_id(config_root);
+/// The selected account's outside doors (t-7538, astra R6-1): its store's
+/// preparation, the login a read's environment leads to, and the endpoint
+/// — handed in so the suite stands fakes where the keychain and the server
+/// are, and can meet a read between its look and its login.
+pub(super) trait SelectedDoors {
+    fn prepare(
+        &self,
+        config_root: &Path,
+        account: &zerocode_core::ClaudeAccount,
+    ) -> Result<(), String>;
+    fn login(&self, env: &[(String, String)]) -> Option<(String, accounts::LoginFrom)>;
+    fn ask(
+        &self,
+        login: Option<&str>,
+        now_ms: i64,
+    ) -> Result<usage_oauth::OauthUsage, usage_http::Failure>;
+}
+
+/// The window's own doors: the store's preparation, the one login walk,
+/// and the endpoint the CLI itself reads.
+pub(super) struct LiveSelected;
+
+impl SelectedDoors for LiveSelected {
+    fn prepare(
+        &self,
+        config_root: &Path,
+        account: &zerocode_core::ClaudeAccount,
+    ) -> Result<(), String> {
+        accounts::prepare_store(config_root, account)
+    }
+
+    fn login(&self, env: &[(String, String)]) -> Option<(String, accounts::LoginFrom)> {
+        accounts::usage_login(env)
+    }
+
+    fn ask(
+        &self,
+        login: Option<&str>,
+        now_ms: i64,
+    ) -> Result<usage_oauth::OauthUsage, usage_http::Failure> {
+        usage_oauth::claude(login, now_ms)
+    }
+}
+
+/// What the selected account's read brought back, and the row it is the
+/// reading of: `None` when it ran as no managed account, or when the login
+/// it used could not be shown to be the row's (astra R6-1).
+pub(super) struct SelectedScan {
+    pub(super) scanned: Scanned,
+    pub(super) as_account: Option<zerocode_core::ClaudeAccount>,
+}
+
+/// The status bar's read of the selected account, and its landing as that
+/// account's own reading — only as the row the read provably ran as
+/// (t-7538, astra R6-1). The one road `claude_usage` runs off its thread.
+pub(super) fn read_selected_claude_usage(
+    config_root: &Path,
+    readings_root: &Path,
+    doors: &dyn SelectedDoors,
+) -> Scanned {
+    let read = scan_claude_usage_now(config_root, doors);
+    land_claude_usage_as(
+        config_root,
+        readings_root,
+        read.as_account.as_ref(),
+        &read.scanned.usage,
+    );
+    read.scanned
+}
+
+/// Why a read of the selected account is nobody's number: the login it
+/// used was not shown to be the row's — the selection or the runtime home
+/// moved under it (astra R6-1).
+const UNPROVEN_LOGIN: &str =
+    "읽는 사이 계정이 바뀌어 이 수치가 선택된 계정의 것인지 확인하지 못했습니다 — 다시 읽습니다";
+
+/// Read the selected account's plan usage — the OAuth road, then the
+/// hidden terminal. Blocking — always called from its own thread.
+///
+/// As ONE look at the selection (astra R6-1): the row whose reading this
+/// is and the environment the read runs in come out of the same read of
+/// the store ([`accounts::look_at_selected`]), and the answer is the row's
+/// only while the login the read used is shown to be the row's; otherwise
+/// it is nobody's number, and says so.
+pub(super) fn scan_claude_usage_now(config_root: &Path, doors: &dyn SelectedDoors) -> SelectedScan {
+    let look = accounts::look_at_selected(config_root);
+    let row = look.whose().cloned();
+    let whose = row.as_ref().map(|row| row.id.clone());
     let failed = |status: &str, error: String| usage::ProviderUsage {
         provider: "claude".to_string(),
         session: None,
@@ -140,6 +735,31 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
         reset_credits: None,
         account: whose.clone(),
     };
+    // How the read ends: filed under the row when what it read is the row's
+    // own (`owned`), and otherwise nobody's.
+    let ended = |usage: usage::ProviderUsage, road: UsageRoad, owned: bool| match &row {
+        Some(row) if owned => SelectedScan {
+            scanned: Scanned { usage, road },
+            as_account: Some(row.clone()),
+        },
+        Some(_) => SelectedScan {
+            scanned: Scanned {
+                usage: claude_reading_failed(
+                    "error",
+                    UNPROVEN_LOGIN.to_string(),
+                    None,
+                    None,
+                    whose.clone(),
+                ),
+                road,
+            },
+            as_account: None,
+        },
+        None => SelectedScan {
+            scanned: Scanned { usage, road },
+            as_account: None,
+        },
+    };
     // The OAuth road FIRST — one round trip against the endpoint the CLI
     // itself reads, exactly Orca's order (claude-fetcher.ts:46; the hidden
     // terminal below is its fallback, not its peer). This is what ends the
@@ -147,16 +767,20 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     // login the SELECTED account's CLI is using, out of the same reading
     // environment the terminal road below is handed — and out of the store
     // that CLI refreshes, not the copy this window wrote at the last switch,
-    // which had expired and answered 401 on every read (t-6583).
-    if let Err(error) = accounts::prepare_selected_store(config_root) {
-        return Scanned {
-            usage: failed("error", error),
-            road: UsageRoad::Local,
-        };
+    // which had expired and answered 401 on every read (t-6583). A store
+    // that cannot be prepared is a fact about the row's own store.
+    if let Some(selected) = &look.row
+        && let Err(error) = doors.prepare(config_root, selected)
+    {
+        return ended(failed("error", error), UsageRoad::Local, true);
     }
-    let login = accounts::usage_login(&accounts::reading_env_for(config_root, "claude"));
+    let login = doors.login(&look.env);
     let from = login.as_ref().map(|(_, from)| *from);
-    let asked = usage_oauth::claude(
+    // Whose login this is, asked as soon as it is read — before the
+    // endpoint answers, however long that takes. No login found through
+    // the row's own environment is the row's own answer.
+    let owned = from.is_none_or(|from| look.login_is_its(config_root, from));
+    let asked = doors.ask(
         login.as_ref().map(|(document, _)| document.as_str()),
         epoch_ms_now(),
     );
@@ -166,8 +790,8 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     if let Err(failure) = &asked
         && failure.skip_cli_fallback
     {
-        return Scanned {
-            usage: usage::ProviderUsage {
+        return ended(
+            usage::ProviderUsage {
                 provider: "claude".to_string(),
                 session: None,
                 weekly: None,
@@ -181,32 +805,22 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
                 retry_at_ms: failure.retry_at_ms,
                 plan_type: None,
                 reset_credits: None,
-                account: whose,
+                account: whose.clone(),
             },
-            road: UsageRoad::Oauth { login: from },
-        };
+            UsageRoad::Oauth { login: from },
+            owned,
+        );
     }
     let oauth = match asked {
+        // The same reading the per-account road keeps, under the same
+        // range rule (astra R6): the selected account's number is chosen by
+        // and walled by exactly like any other account's.
         Ok(read) => {
-            return Scanned {
-                usage: usage::ProviderUsage {
-                    provider: "claude".to_string(),
-                    session: read.session.map(oauth_usage_window),
-                    weekly: read.weekly.map(oauth_usage_window),
-                    fable_weekly: read.fable_weekly.map(oauth_usage_window),
-                    monthly: None,
-                    buckets: None,
-                    updated_at: epoch_ms_now(),
-                    error: None,
-                    status: "ok".to_string(),
-                    failure_kind: None,
-                    retry_at_ms: None,
-                    plan_type: None,
-                    reset_credits: None,
-                    account: whose,
-                },
-                road: UsageRoad::Oauth { login: from },
-            };
+            return ended(
+                claude_oauth_reading(read, whose.clone()),
+                UsageRoad::Oauth { login: from },
+                owned,
+            );
         }
         Err(failure) => failure.recovery.kind,
     };
@@ -226,7 +840,7 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     // pty under `envPatch: { CLAUDE_CONFIG_DIR }` with `stripAuthEnv`,
     // out/main/index.js:209490-209516).
     let mut env = vec![("TERM".to_string(), "xterm-256color".to_string())];
-    env.extend(accounts::reading_env_for(config_root, "claude"));
+    env.extend(look.env.iter().cloned());
     env.extend(probe_path_env());
     let mut pty = match PtyLane::spawn(
         "claude",
@@ -238,13 +852,15 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     ) {
         Ok(pty) => pty,
         Err(error) => {
-            return Scanned {
-                usage: failed(
+            // Nothing ran: a fact about this machine, not about a login.
+            return ended(
+                failed(
                     "unavailable",
                     format!("claude를 시작하지 못했습니다: {error}"),
                 ),
                 road,
-            };
+                true,
+            );
         }
     };
     let started = Instant::now();
@@ -290,6 +906,9 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
         }
     };
     let _ = pty.kill();
+    // The CLI ran in the runtime home: its screen is the row's only while
+    // the home held the row's login the whole time it ran.
+    let owned = look.home_is_its(config_root);
     let parsed = usage::parse_usage_screen(&screen);
     let session = usage_window_from(parsed.session, usage::SESSION_WINDOW_MINUTES);
     let weekly = usage_window_from(parsed.weekly, usage::WEEKLY_WINDOW_MINUTES);
@@ -316,23 +935,21 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
             // carries 「다시 로그인」 (`account_relogin`, ui/shell.js). Naming
             // the discarding road here sent people down the one that slice was
             // written to close.
-            return Scanned {
-                usage: failed(
+            return ended(
+                failed(
                     usage::SIGNED_OUT_STATUS,
                     "이 계정은 로그인되어 있지 않습니다 — 설정에서 다시 로그인하세요".to_string(),
                 ),
                 road,
-            };
+                owned,
+            );
         } else {
             "/usage 화면이 렌더되지 않았습니다".to_string()
         };
-        return Scanned {
-            usage: failed("error", error),
-            road,
-        };
+        return ended(failed("error", error), road, owned);
     }
-    Scanned {
-        usage: usage::ProviderUsage {
+    ended(
+        usage::ProviderUsage {
             provider: "claude".to_string(),
             session,
             weekly,
@@ -346,10 +963,11 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
             retry_at_ms: None,
             plan_type: None,
             reset_credits: None,
-            account: whose,
+            account: whose.clone(),
         },
         road,
-    }
+        owned,
+    )
 }
 
 /// Read Codex's `/status` the way Orca does — a hidden terminal, the command
@@ -586,10 +1204,38 @@ pub(super) fn active_codex_account_id(config_root: &Path) -> Option<String> {
 /// identity comes from the selection and its readable account store rather
 /// than trying to reverse-map that shared runtime path.
 pub(super) fn active_claude_account_id(config_root: &Path) -> Option<String> {
+    active_claude_account(config_root).map(|account| account.id)
+}
+
+/// The row [`active_claude_account_id`] names — the whole row, so a read can
+/// say later which login it ran as.
+pub(super) fn active_claude_account(config_root: &Path) -> Option<zerocode_core::ClaudeAccount> {
     let store = accounts::read_store(config_root);
     zerocode_core::active_account(&store.accounts, &store.selection)
         .filter(|account| accounts::signed_in(Path::new(&account.config_dir)))
-        .map(|account| account.id.clone())
+        .cloned()
+}
+
+/// Write down which managed Claude login a pane was launched as, read off
+/// the environment the launch really got (t-7538): the account row and the
+/// login it named at that moment. Every agent launch road calls this beside
+/// its `agent_terms` write; a launch that names no managed store leaves no
+/// row, which is "unknown", not "the selected one".
+pub(super) fn note_pane_account(state: &AppState, term: TermId, env: &[(String, String)]) {
+    match accounts::account_row_of_env(state.config_root(), env) {
+        Some(account) => {
+            state.pane_accounts().insert(
+                term,
+                crate::agent_teams::PaneLogin {
+                    login: claude_login_key(&account),
+                    account: account.id,
+                },
+            );
+        }
+        None => {
+            state.pane_accounts().remove(&term);
+        }
+    }
 }
 
 /// The account environment a launch of `agent` gets.
@@ -885,6 +1531,21 @@ pub(super) fn usage_scan_holds(
     force: bool,
     now_ms: i64,
 ) -> bool {
+    let key = held
+        .map(|snapshot| snapshot.provider.clone())
+        .unwrap_or_default();
+    usage_scan_holds_for(held, &key, force, now_ms)
+}
+
+/// The same gate, with the backoff streak read under `key` — the provider
+/// for a provider gauge, `claude:<account>` for one account's own read
+/// (t-7538), so two logins' failures are two streaks.
+pub(super) fn usage_scan_holds_for(
+    held: Option<&usage::ProviderUsage>,
+    key: &str,
+    force: bool,
+    now_ms: i64,
+) -> bool {
     if force {
         return false;
     }
@@ -903,7 +1564,7 @@ pub(super) fn usage_scan_holds(
     let run = usage_failure_runs()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&snapshot.provider)
+        .get(key)
         .copied()
         .unwrap_or_default();
     if run.streak == 0 {
@@ -1666,6 +2327,11 @@ pub(super) struct AccountsReport {
     /// False when this machine has no `claude` to log in with, so the window
     /// can say that instead of offering a button that cannot work.
     pub(super) can_add: bool,
+    /// A person's pick that happened but whose receipt the ledger refused —
+    /// said beside the list the pick moved, never as a success and never
+    /// dropped (t-7538, astra R4). Only the pick road sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) switch_unrecorded: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1740,6 +2406,7 @@ pub(super) fn accounts_report(config_root: &Path, local_data_root: &Path) -> Acc
             .collect(),
         active,
         can_add: claude_program().is_some(),
+        switch_unrecorded: None,
     }
 }
 

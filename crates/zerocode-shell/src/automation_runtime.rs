@@ -818,6 +818,7 @@ pub(super) fn start_automation(
     if let Some(driving) = driving {
         state.agent_terms().insert(term, driving);
     }
+    note_pane_account(&state, term, &env);
     // Its own delivery, waiting on the agent the same way a person's prompt
     // does. Nothing about being scheduled makes an agent listen any sooner.
     state.deliveries().insert(

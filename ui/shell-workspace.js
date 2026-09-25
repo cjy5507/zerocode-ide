@@ -7065,9 +7065,6 @@ async function activateWorktree(
     refreshWorktrees(),
   ]);
   recordNavVisit(path);
-  // 계정 전환 때 이 워크트리에 있어 갈아타지 못한 claude 판이 있다면, 이제
-  // 활성 루트가 제 것이 되었으니 그 자리에서 갈아탄다.
-  if (accountHandoffQueue.size > 0) void drainAccountHandoffs();
   return true;
 }
 

@@ -389,8 +389,10 @@ fn signal_process_group(process_group: u32, signal: libc::c_int) -> std::io::Res
     }
 }
 
+/// Whether any process of this group is left — also the account switch's
+/// question about a closed pane's CLI (t-7538, `wait_process_group_gone`).
 #[cfg(unix)]
-fn process_group_exists(process_group: u32) -> bool {
+pub(crate) fn process_group_exists(process_group: u32) -> bool {
     match signal_process_group(process_group, 0) {
         Ok(()) => true,
         Err(error) => error.raw_os_error() == Some(libc::EPERM),

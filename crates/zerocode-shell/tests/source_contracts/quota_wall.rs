@@ -44,7 +44,11 @@ fn the_wall_witness_is_asked_beside_the_stall_probe_and_outside_the_team_table()
     );
     for needed in [
         "zerocode_core::orchestration::quota_wall_witness(",
-        "usage_headroom(&held.usage,",
+        // The cache road, for the login the PANE runs as (t-7538): a pane
+        // launched as A keeps A's login after the default moves to B, and is
+        // judged by that login's own reading (astra R6).
+        "usage_headroom_of_account(",
+        "one.pane.as_ref(),",
         "held.actor.quota_walls(",
         "held.actor.quiet_sweep(",
         "walled_already",

@@ -300,6 +300,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "window_material": { "terminal_opacity": 1.0, "blur": false },
   "default_agent": { "kind": "auto" },
   "agent_teams_mode": "panes",
+  "claude_autoswitch_mode": "ask",
   "worktree_prefs": { "branch_prefix": "git-username" },
   "notifications": { "enabled": true, "agent_attention": true, "agent_completion": true },
   "computer_awake_mode": "off",
@@ -707,7 +708,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_notification_preference", "set_browser_home_page", "set_browser_search_engine",
   "patch_browser_link_routing", "patch_browser_user_agents", "set_browser_restore_tabs", "set_browser_default_zoom", "set_browser_open_tabs",
   "set_terminal_opacity",
-  "set_window_blur", "set_agent_teams_mode", "set_default_agent",
+  "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
   "set_diff_side_by_side", "set_conversation_focus_view", "set_confirm_close_pinned",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
@@ -1544,6 +1545,11 @@ class StatefulBackend {
         this.settings.agent_teams_mode = args.mode;
         keys = ["agent_teams_mode"];
         break;
+      case "set_claude_autoswitch_mode":
+        if (!["off", "ask", "auto"].includes(args.mode)) throw new Error(`${args.mode}는 이 창이 아는 자동 전환 낱말이 아닙니다 (off|ask|auto)`);
+        this.settings.claude_autoswitch_mode = args.mode;
+        keys = ["claude_autoswitch_mode"];
+        break;
       case "set_default_agent":
         this.settings.default_agent = clone(args.preference);
         keys = ["default_agent"];
@@ -1941,6 +1947,28 @@ class StatefulBackend {
         return this.grokUsage ? clone(this.grokUsage) : { usage: null, fetching: false };
       case "opencode_usage":
         return { usage: null, fetching: false };
+      // 계정마다 제 게이지와 전환 표의 판정(t-7538) — 계정이 없는 이 픽스처에서는
+      // 「혼자」이고 아무것도 나가지 않는다. 모드는 설정 문서의 것.
+      case "claude_account_usage":
+        return {
+          accounts: [],
+          plan: {
+            mode: this.settings.claude_autoswitch_mode,
+            active: null,
+            decision: { kind: "stay", why: "alone" },
+            landing: null,
+            fitness: [],
+            next: null,
+            walled: [],
+            last_switch_ms: null,
+            cooldown_until_ms: null,
+            failed_recently: [],
+            token: "settings-fixture",
+            now_ms: 0,
+          },
+          sent: 0,
+          fetching: false,
+        };
       // 토큰 원장은 게이지와 다른 물음이라 답의 모양도 다르다 — 아직 스캔이
       // 없는 상태가 이 픽스처의 기본값이다.
       // 머리의 세 figure는 파생이 아니라 센 값이라 자기 문으로 온다.
@@ -2253,6 +2281,7 @@ class StatefulBackend {
       case "terminal_command": return this.settings.terminal_command;
       case "terminal_command_argv": return [this.settings.terminal_command];
       case "agent_teams_mode": return this.settings.agent_teams_mode;
+      case "claude_autoswitch_mode": return this.settings.claude_autoswitch_mode;
       case "project_scripts":
         return {
           root: BOOT_BASE.project_root,
@@ -3019,6 +3048,7 @@ const controlValue = async (page, kind) => page.evaluate((name) => {
     opacity: () => Number(document.getElementById("window-opacity")?.value),
     blur: () => document.getElementById("window-blur")?.checked,
     teams: () => document.getElementById("orch-teams-mode")?.value,
+    claude_autoswitch: () => document.getElementById("account-autoswitch")?.value,
     setup_script_launch_mode: () => document.querySelector(
       "[data-setup-launch-mode][aria-pressed='true']",
     )?.dataset.setupLaunchMode,
@@ -3138,6 +3168,7 @@ const chooseControl = async (page, kind, value) => {
       value,
     );
     case "teams": return page.selectOption("#orch-teams-mode", value);
+    case "claude_autoswitch": return page.selectOption("#account-autoswitch", value);
     case "setup_script_launch_mode": return page.click(
       `[data-setup-launch-mode="${value}"]`,
     );
@@ -6998,6 +7029,7 @@ await test("non-default writes become canonical state before the second window b
     ["opacity", "set_terminal_opacity", 0.7, "appearance"],
     ["blur", "set_window_blur", true, "appearance"],
     ["teams", "set_agent_teams_mode", "off", "orchestration"],
+    ["claude_autoswitch", "set_claude_autoswitch_mode", "auto", "provider-accounts"],
     ["setup_script_launch_mode", "set_setup_script_launch_mode", "split-horizontal", "terminal"],
     ["terminal_shortcut_policy", "set_terminal_shortcut_policy", "terminal-first", "shortcuts"],
     ["workspace_directory", "patch_workspace_creation_prefs", "/tmp/zerocode-workspaces", "general"],
@@ -7488,6 +7520,7 @@ const ROLLBACKS = [
   { kind: "opacity", command: "set_terminal_opacity", pane: "appearance", asked: 0.2, canonical: 0.65 },
   { kind: "blur", command: "set_window_blur", pane: "appearance", asked: false, canonical: true },
   { kind: "teams", command: "set_agent_teams_mode", pane: "orchestration", asked: "panes", canonical: "off" },
+  { kind: "claude_autoswitch", command: "set_claude_autoswitch_mode", pane: "provider-accounts", asked: "off", canonical: "auto" },
   {
     kind: "setup_script_launch_mode", command: "set_setup_script_launch_mode", pane: "terminal",
     asked: "split-vertical", canonical: "split-horizontal",
@@ -7579,6 +7612,7 @@ for (const row of ROLLBACKS) {
           delete_worktree_confirm: () => document.getElementById("ask-before-delete-worktree")?.checked,
           delete_automation_confirm: () => document.getElementById("ask-before-delete-automation")?.checked,
     artifacts_retention: () => Number(document.getElementById("artifacts-retention-days")?.value),
+          claude_autoswitch: () => document.getElementById("account-autoswitch")?.value,
           default_agent: () => ({ auto: pressed("auto"), blank: pressed("blank"), codex: pressed("codex") }),
         }[kind]();
         return JSON.stringify(actual) === JSON.stringify(canonical);

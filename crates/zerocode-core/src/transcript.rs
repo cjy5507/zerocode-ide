@@ -1493,6 +1493,55 @@ pub fn effort_in(chunk: &str) -> Option<String> {
     })
 }
 
+/// The permission mode a Claude Code transcript says its session is in —
+/// its newest word, or `None` where it has not said (t-7538).
+///
+/// Claude Code writes it in two places, both named `permissionMode`: a
+/// `permission-mode` record it re-appends with the session's other
+/// metadata, and every user record (measured 2026-09-25 on this machine's
+/// 2.1.28x transcripts: one session held 84 `permission-mode` records and
+/// 92 user records carrying it). A Shift+Tab inside the pane moves both, so
+/// the newest word is the session's mode now — the one an account switch
+/// has to start the resumed pane in, or not move the pane at all.
+#[must_use]
+pub fn permission_mode_in(chunk: &str) -> Option<String> {
+    chunk
+        .lines()
+        .rev()
+        .filter(|line| line.contains("\"permissionMode\""))
+        .find_map(|line| {
+            let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            let mode = row.get("permissionMode")?.as_str()?.trim();
+            (!mode.is_empty()).then(|| mode.to_string())
+        })
+}
+
+/// The effort a Claude Code SESSION stands at — the `effort` its newest
+/// assistant record carries, and never the turn's own `perTurnEffort`
+/// (t-7538).
+///
+/// [`effort_in`] reads what the newest turn RAN at, which is the step-effort
+/// seat's question; a relaunch asks what the session is SET to. The two part
+/// on a turn a keyword raised for itself (`perTurnEffort: "ultracode"` over
+/// `effort: "xhigh"`, the fixture below): that word is not a level the CLI's
+/// `--effort` takes, and a resumed session started on it would not be the
+/// session the person left.
+#[must_use]
+pub fn session_effort_in(chunk: &str) -> Option<String> {
+    chunk
+        .lines()
+        .rev()
+        .filter(|line| line.contains("\"effort\""))
+        .find_map(|line| {
+            let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            if row.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+                return None;
+            }
+            let effort = row.get("effort")?.as_str()?.trim();
+            (!effort.is_empty()).then(|| effort.to_string())
+        })
+}
+
 /// The turns in a stretch of transcript, in the order they were written.
 ///
 /// Complete lines only — the caller reads by byte and stops at the last
@@ -2360,6 +2409,49 @@ mod tests {
         );
         assert_eq!(effort_in(""), None);
         assert_eq!(effort_in("not json"), None);
+    }
+
+    /// What a relaunch must start the session in (t-7538): the mode the
+    /// newest record names — the metadata record or a user record, both
+    /// spelled `permissionMode` — and the effort the session is SET to,
+    /// which a keyword-raised turn does not move.
+    #[test]
+    fn a_claude_session_says_its_permission_mode_and_its_standing_effort() {
+        let mode_row = |mode: &str| {
+            serde_json::json!({"type": "permission-mode", "permissionMode": mode, "sessionId": "s"})
+                .to_string()
+        };
+        let user_row = |mode: &str| {
+            serde_json::json!({
+                "type": "user", "permissionMode": mode,
+                "message": {"role": "user", "content": "go on"}
+            })
+            .to_string()
+        };
+        let answer = |effort: &str, per_turn: &str| {
+            serde_json::json!({
+                "type": "assistant", "effort": effort, "perTurnEffort": per_turn,
+                "message": {"role": "assistant", "model": "claude-opus-5-5", "content": []}
+            })
+            .to_string()
+        };
+        let chunk = [
+            mode_row("bypassPermissions"),
+            user_row("bypassPermissions"),
+            answer("high", "high"),
+            user_row("plan"),
+            answer("xhigh", "ultracode"),
+        ]
+        .join("\n");
+        assert_eq!(permission_mode_in(&chunk), Some("plan".to_string()));
+        assert_eq!(session_effort_in(&chunk), Some("xhigh".to_string()));
+        // The turn's own word is still what `effort_in` answers — the two
+        // questions stay two.
+        assert_eq!(effort_in(&chunk), Some("ultracode".to_string()));
+        assert_eq!(permission_mode_in(&answer("low", "low")), None);
+        assert_eq!(session_effort_in(&user_row("default")), None);
+        assert_eq!(permission_mode_in(""), None);
+        assert_eq!(session_effort_in("not json \"effort\""), None);
     }
 
     #[test]

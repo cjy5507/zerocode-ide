@@ -155,14 +155,10 @@ fn every_verb_that_moves_a_login_invalidates_the_snapshot() {
             "fn relogin_claude_account(",
             "login_moved(Provider::Anthropic)",
         ),
-        (
-            "fn select_claude_account(",
-            "login_moved(Provider::Anthropic)",
-        ),
-        (
-            "fn use_system_claude_login(",
-            "login_moved(Provider::Anthropic)",
-        ),
+        // The person's pick walks the one switch road (t-7538); its door
+        // invalidates the snapshot, checked below.
+        ("fn select_claude_account(", "person_switched("),
+        ("fn use_system_claude_login(", "person_switched("),
         (
             "fn remove_claude_account(",
             "login_moved(Provider::Anthropic)",
@@ -180,6 +176,17 @@ fn every_verb_that_moves_a_login_invalidates_the_snapshot() {
             "`{verb}` moves a login without `{moved}`:\n{body}"
         );
     }
+    let switch = include_str!("../../src/account_switch.rs");
+    let door = block_after(switch, "fn selected(&self, to: Option<&str>, at_ms: i64) {");
+    assert!(
+        door.contains("login_moved(zerocode_core::account::Provider::Anthropic)"),
+        "the switch road selects a Claude login without invalidating the snapshot:\n{door}"
+    );
+    let road = block_after(usage, "async fn person_switched(");
+    assert!(
+        road.contains("switch_by_person("),
+        "the person's pick no longer walks the switch road:\n{road}"
+    );
     let github = backend_part("cmd/integration_prefs.rs");
     for verb in ["fn github_select_account(", "fn github_disconnect("] {
         let body = block_after(github, verb);

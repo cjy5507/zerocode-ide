@@ -52,6 +52,13 @@ pub(crate) mod artifact_file {
     pub(crate) const STAGE_LAYOUTS: &str = "stage-layouts.json";
     pub(crate) const AUTOMATION_RUNS: &str = "automation-runs.json";
     pub(crate) const CLAUDE_USAGE: &str = "claude-usage.json";
+    /// Every managed Claude account's own reading, keyed by account id —
+    /// beside the selected account's file, never instead of it (t-7538).
+    pub(crate) const CLAUDE_ACCOUNT_USAGE: &str = "claude-account-usage.json";
+    /// The one Claude account switch in flight, if any: written before its
+    /// first effect and removed after its last receipt, so a window that
+    /// dies halfway finishes the receipts on its next look (t-7538).
+    pub(crate) const CLAUDE_ACCOUNT_SWITCH: &str = "claude-account-switch.json";
     pub(crate) const CODEX_USAGE: &str = "codex-usage.json";
     pub(crate) const ANTIGRAVITY_USAGE: &str = "antigravity-usage.json";
     /// Kimi 게이지의 스냅샷 — 프로바이더마다 자기 파일이다(한 파일을 나눠

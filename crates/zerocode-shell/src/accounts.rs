@@ -44,7 +44,7 @@ use zerocode_core::account::{AccountSelection, ClaudeAccount, ClaudeIdentity, du
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 pub(crate) const ACCOUNT_STORE_FILE: &str = "claude-accounts.json";
 pub(crate) const MANAGED_ACCOUNTS_DIR: &str = "claude-accounts";
-const CREDENTIALS_FILE: &str = ".credentials.json";
+pub(crate) const CREDENTIALS_FILE: &str = ".credentials.json";
 const CLAUDE_SETTINGS_FILE: &str = ".claude.json";
 const CLAUDE_CONFIG_FILE: &str = ".config.json";
 const RUNTIME_AUTH_VERSION: u8 = 1;
@@ -146,7 +146,7 @@ const OAUTH_ACCOUNT_FILE: &str = "oauth-account.json";
 /// On disk beside the account list, because it has to survive a restart: the
 /// question it answers — "are these bytes ours, or did the CLI rotate the token
 /// since?" — is meaningless if the answer starts empty every boot.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RuntimeAuth {
     /// Bumped when the evidence required to trust `written` changes.
     #[serde(default)]
@@ -155,7 +155,8 @@ struct RuntimeAuth {
     /// global-home implementation is not evidence about the app-owned home.
     #[serde(default)]
     home: Option<String>,
-    /// The account whose login is in the runtime home right now.
+    /// The account whose login is in the runtime home right now — while no
+    /// put is under way ([`Self::holder`]).
     #[serde(default)]
     account: Option<String>,
     /// The exact bytes this window last wrote there.
@@ -166,6 +167,32 @@ struct RuntimeAuth {
     /// but it is not free, and after it there is nothing left to find.
     #[serde(default)]
     gathered: bool,
+    /// The account a put was bringing into the home, written before the
+    /// home changed hands and cleared by the put's own record (t-7538,
+    /// astra R6-2). Standing, it says a put began and its end was never
+    /// recorded: the home holds this login or the one `account` names, and
+    /// nothing here proves which.
+    #[serde(default)]
+    putting: Option<String>,
+}
+
+impl RuntimeAuth {
+    /// Whether this record speaks for `home` at all: written by this
+    /// version of the bookkeeping, about this home.
+    fn describes(&self, home: &Path) -> bool {
+        self.version == RUNTIME_AUTH_VERSION
+            && self.home.as_deref() == Some(home.to_string_lossy().as_ref())
+    }
+
+    /// The account whose login the home holds, as far as this record can
+    /// say: the one it names — and nobody while a put it announced has not
+    /// recorded its end ([`Self::putting`]).
+    fn holder(&self) -> Option<&str> {
+        match self.putting {
+            Some(_) => None,
+            None => self.account.as_deref(),
+        }
+    }
 }
 
 fn runtime_file(config_root: &Path) -> PathBuf {
@@ -179,24 +206,27 @@ fn read_runtime(config_root: &Path) -> RuntimeAuth {
         .unwrap_or_default()
 }
 
-fn write_runtime(config_root: &Path, state: &RuntimeAuth) {
-    let Ok(text) = serde_json::to_string_pretty(state) else {
-        return;
-    };
+fn write_runtime(config_root: &Path, state: &RuntimeAuth) -> Result<(), String> {
+    #[cfg(test)]
+    if record_refused(config_root) {
+        return Err("the disk refused the record".to_string());
+    }
+    let text = serde_json::to_string_pretty(state).map_err(|error| error.to_string())?;
     // It carries a copy of a credential, so it wears the same clothes as one.
-    let _ = write_private(&runtime_file(config_root), &text);
+    write_private(&runtime_file(config_root), &text)
+        .map_err(|error| format!("계정 런타임 기록을 쓰지 못했습니다: {error}"))
 }
 
 /// Force the next launch to compare an account's newly authenticated store
 /// with the runtime instead of taking the unchanged-runtime fast path.
-fn invalidate_materialized_account(config_root: &Path, id: &str) {
+fn invalidate_materialized_account(config_root: &Path, id: &str) -> Result<(), String> {
     let mut state = read_runtime(config_root);
     if state.account.as_deref() != Some(id) {
-        return;
+        return Ok(());
     }
     state.account = None;
     state.written = None;
-    write_runtime(config_root, &state);
+    write_runtime(config_root, &state)
 }
 
 /// The one Claude Code home every Zerocode account runs in.
@@ -546,11 +576,18 @@ fn login_at(dir: &Path) -> (Option<String>, KeychainSays) {
 /// Prepare the selected secure store before a background CLI can read it.
 pub fn prepare_selected_store(config_root: &Path) -> Result<(), String> {
     let store = read_store(config_root);
-    if let Some(account) = zerocode_core::active_account(&store.accounts, &store.selection) {
-        require_unchanged_identity(config_root, account)?;
-        seed_scoped_keychain(Path::new(&account.config_dir))?;
+    match zerocode_core::active_account(&store.accounts, &store.selection) {
+        Some(account) => prepare_store(config_root, account),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// The same preparation for a row the caller already holds — the row of
+/// one look at the selection, so the store prepared is the store the read
+/// then asks (t-7538, astra R6-1).
+pub(crate) fn prepare_store(config_root: &Path, account: &ClaudeAccount) -> Result<(), String> {
+    require_unchanged_identity(config_root, account)?;
+    seed_scoped_keychain(Path::new(&account.config_dir))
 }
 
 /// Upgrade a file-era store before a CLI can fall back to the global login.
@@ -1139,7 +1176,7 @@ fn already_materialized(
     store_dir: &Path,
 ) -> bool {
     state.gathered
-        && state.account.as_deref() == Some(account.id.as_str())
+        && state.holder() == Some(account.id.as_str())
         && state.written.as_deref() == on_disk
         && on_disk.is_some()
         && state.written.as_deref() == on_file
@@ -1220,12 +1257,11 @@ fn materialize_into(
     // half that said so. Asking twice would be a second chance for a dialog on
     // a road that is walked on every launch.
     let (on_disk, says) = login_at(home);
-    let named_home = home.to_string_lossy().into_owned();
     let mut state = read_runtime(config_root);
-    if state.version != RUNTIME_AUTH_VERSION || state.home.as_deref() != Some(named_home.as_str()) {
+    if !state.describes(home) {
         state = RuntimeAuth {
             version: RUNTIME_AUTH_VERSION,
-            home: Some(named_home),
+            home: Some(home.to_string_lossy().into_owned()),
             ..RuntimeAuth::default()
         };
     }
@@ -1251,6 +1287,9 @@ fn materialize_into(
     ) {
         return Ok(());
     }
+    // From here a login may be put into the home: a read that used the
+    // home's login meanwhile cannot say whose it was (astra R6-1).
+    let _putting = HomePut::begin(home);
 
     // Only a real switch needs the account store. In particular, do not open a
     // per-account keychain item on every launch merely to prove again what the
@@ -1280,7 +1319,7 @@ fn materialize_into(
         && let Some(disk) = on_disk.as_deref()
         && state.written.as_deref() != Some(disk)
         && holds_login(disk)
-        && let Some(dir) = home_owner_dir(config_root, &settings, state.account.as_deref())
+        && let Some(dir) = home_owner_dir(config_root, &settings, state.holder())
     {
         // A seeded store now reads its scoped keychain first too. Keep both
         // halves current, or the next switch resurrects its pre-refresh token.
@@ -1295,26 +1334,40 @@ fn materialize_into(
         }
     }
 
+    // The record says a put is under way BEFORE the home changes hands
+    // (t-7538, astra R6-2). A put that ended without recording its end — the
+    // disk refusing the record's last replace — left this login in the home
+    // under a record still naming the account before, and a read that began
+    // after the put was over filed this login's number under that account.
+    // Announced first, a put whose end is never recorded leaves a home
+    // nobody can be shown to hold, and one the disk will not let us announce
+    // does not begin. When a step below fails with the home as it stood, the
+    // record goes back as it stood; if it cannot, the word stays — the home
+    // is then nobody's until a put is recorded, the safe side.
+    let before = state.clone();
+    state.putting = Some(account.id.clone());
+    write_runtime(config_root, &state)?;
+
     // 2. Nothing to do when it is already there — but the bookkeeping still is,
     //    because the file may have been ours all along and unrecorded.
     let already_on_file = on_file.as_deref() == Some(credentials.as_str());
-    if !already_on_file {
-        write_private(&live, &credentials)?;
+    if !already_on_file && let Err(error) = write_private(&live, &credentials) {
+        // A refused replace leaves the file as it stood.
+        let _ = write_runtime(config_root, &before);
+        return Err(error);
     }
 
     // 3. And the keychain, or the file goes back.
     if let Err(error) = write_keychain(home, &credentials) {
         // The undo restores the FILE, which is the only half this window wrote
         // before the keychain refused.
-        if !already_on_file {
-            match on_file.as_deref() {
-                Some(previous) => {
-                    let _ = write_private(&live, previous);
-                }
-                None => {
-                    let _ = std::fs::remove_file(&live);
-                }
-            }
+        let undone = already_on_file
+            || match on_file.as_deref() {
+                Some(previous) => write_private(&live, previous).is_ok(),
+                None => std::fs::remove_file(&live).is_ok(),
+            };
+        if undone {
+            let _ = write_runtime(config_root, &before);
         }
         return Err(error);
     }
@@ -1344,10 +1397,75 @@ fn materialize_into(
         state.gathered = true;
     }
 
+    #[cfg(test)]
+    before_the_record(home);
     state.account = Some(account.id.clone());
     state.written = Some(credentials);
-    write_runtime(config_root, &state);
-    Ok(())
+    state.putting = None;
+    // The put's end. Refused, the word written before the home changed hands
+    // stands, and the put is not one that happened.
+    write_runtime(config_root, &state)
+}
+
+/// A test's hand inside one put into a home, once the login is in the home
+/// and before the record says whose it is (t-7538, astra R6-1): the one
+/// moment a read beside the put finds a login the record does not name.
+#[cfg(test)]
+type RecordHand = (PathBuf, Box<dyn FnOnce() + Send>);
+
+/// One per home, so tests holding puts into their own homes in parallel
+/// never take each other's hands.
+#[cfg(test)]
+static BEFORE_THE_RECORD: std::sync::Mutex<Vec<RecordHand>> = std::sync::Mutex::new(Vec::new());
+
+/// Hold the next put into `home` at that moment, for `hand`.
+#[cfg(test)]
+pub(crate) fn before_the_record_of(home: &Path, hand: Box<dyn FnOnce() + Send>) {
+    BEFORE_THE_RECORD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((home.to_path_buf(), hand));
+}
+
+#[cfg(test)]
+fn before_the_record(home: &Path) {
+    let hand = {
+        let mut held = BEFORE_THE_RECORD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.iter()
+            .position(|(at, _)| at == home)
+            .map(|at| held.remove(at))
+    };
+    if let Some((_, hand)) = hand {
+        hand();
+    }
+}
+
+/// The config roots whose next write of the record the disk refuses, the
+/// record left readable as it stood (t-7538, astra R6-2).
+#[cfg(test)]
+static REFUSED_RECORDS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Refuse the next write of `config_root`'s record, once.
+#[cfg(test)]
+pub(crate) fn refuse_the_next_record_of(config_root: &Path) {
+    REFUSED_RECORDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(config_root.to_path_buf());
+}
+
+#[cfg(test)]
+fn record_refused(config_root: &Path) -> bool {
+    let mut refused = REFUSED_RECORDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    refused
+        .iter()
+        .position(|at| at == config_root)
+        .map(|at| refused.remove(at))
+        .is_some()
 }
 
 /// The OAuth identity block this account keeps, out of wherever it keeps it.
@@ -1848,7 +1966,7 @@ pub fn relogin_account(
     let selected = current.selection.active.as_deref() == Some(id);
     write_store(config_root, &current)?;
     if selected {
-        invalidate_materialized_account(config_root, id);
+        invalidate_materialized_account(config_root, id)?;
         materialize(config_root, &refreshed)?;
     }
     clear_login(&attempt)?;
@@ -1973,7 +2091,7 @@ pub fn resolve_identity(
         let _ = std::fs::remove_dir_all(&attempt);
     }
     if choice == "apply" && store.selection.active.as_deref() == Some(id) {
-        invalidate_materialized_account(config_root, id);
+        invalidate_materialized_account(config_root, id)?;
         materialize(config_root, &store.accounts[at])?;
     }
     Ok(store)
@@ -2018,7 +2136,10 @@ pub fn use_system_default(config_root: &Path) -> Result<AccountStore, String> {
     if state.account.is_some() {
         state.account = None;
         state.written = None;
-        write_runtime(config_root, &state);
+        // Nobody wrote the home, so a record that could not forget still
+        // names the login standing there; only the forced full write is
+        // lost, and the person's choice already stands.
+        let _ = write_runtime(config_root, &state);
     }
     Ok(store)
 }
@@ -2052,19 +2173,28 @@ pub fn select_account(config_root: &Path, program: &str, id: &str) -> Result<Acc
     })
 }
 
+/// A refusal about one account, said by the account's ID and never by its
+/// email (t-7538, astra C1).
+///
+/// These sentences travel: the settings dialog shows them, the auto-switch
+/// road writes them into its receipt and the window's log, and a worker
+/// may quote one back in its report. An address in them was an address in
+/// every one of those places. The id is the window's own, stable, and the
+/// accounts pane already knows how to draw a label for it.
+pub(crate) fn account_refusal(account: &ClaudeAccount, what: &str) -> String {
+    format!("선택한 Claude 계정({})의 {what}", account.id)
+}
+
 fn require_live_account(
     account: &ClaudeAccount,
     probe: &mut impl FnMut(&Path) -> Option<bool>,
 ) -> Result<(), String> {
     match probe(Path::new(&account.config_dir)) {
         Some(true) => Ok(()),
-        Some(false) => Err(format!(
-            "선택한 Claude 계정 {}의 로그인이 만료되었습니다",
-            account.email
-        )),
-        None => Err(format!(
-            "선택한 Claude 계정 {}의 로그인 상태를 확인하지 못했습니다",
-            account.email
+        Some(false) => Err(account_refusal(account, "로그인이 만료되었습니다")),
+        None => Err(account_refusal(
+            account,
+            "로그인 상태를 확인하지 못했습니다",
         )),
     }
 }
@@ -2076,13 +2206,13 @@ fn require_live_runtime(
 ) -> Result<(), String> {
     match status {
         Some(true) => Ok(()),
-        Some(false) => Err(format!(
-            "선택한 Claude 계정 {}을 앱 런타임에 {action}하지 못했습니다",
-            account.email
+        Some(false) => Err(account_refusal(
+            account,
+            &format!("로그인을 앱 런타임에 {action}하지 못했습니다"),
         )),
-        None => Err(format!(
-            "선택한 Claude 계정 {}의 앱 런타임 상태를 확인하지 못했습니다",
-            account.email
+        None => Err(account_refusal(
+            account,
+            "앱 런타임 상태를 확인하지 못했습니다",
         )),
     }
 }
@@ -2095,7 +2225,7 @@ fn restore_previous_runtime(
     let Some(previous) = previous.filter(|held| held.id != attempted.id) else {
         return Ok(());
     };
-    invalidate_materialized_account(config_root, &previous.id);
+    invalidate_materialized_account(config_root, &previous.id)?;
     materialize(config_root, previous)
 }
 
@@ -2123,16 +2253,25 @@ fn select_account_with_probe(
     // Even selecting the same row is a switch action.  Force this pass because
     // the CLI probe above may have refreshed an expired token while our
     // receipt still matches the old, non-empty runtime document.
-    invalidate_materialized_account(config_root, &account.id);
-    materialize(config_root, &account)?;
+    invalidate_materialized_account(config_root, &account.id)?;
+    let undone =
+        |error: String| match restore_previous_runtime(config_root, previous.as_ref(), &account) {
+            Ok(()) => error,
+            Err(rollback) => format!("{error}; 이전 계정 런타임 복구도 실패했습니다: {rollback}"),
+        };
+    if let Err(error) = materialize(config_root, &account) {
+        // A put that failed after its login went in — its record refused
+        // (astra R6-2) — leaves a home its record names nobody as holding,
+        // and the previous login goes back, as after a failed probe of the
+        // runtime. One that failed with the home as it stood leaves the
+        // record naming the previous login still, and nothing to put back.
+        let stood =
+            read_runtime(config_root).holder() == previous.as_ref().map(|held| held.id.as_str());
+        return Err(if stood { error } else { undone(error) });
+    }
     if let Err(error) = require_live_runtime(&account, probe(&runtime_home(config_root)), "적용")
     {
-        if let Err(rollback) = restore_previous_runtime(config_root, previous.as_ref(), &account) {
-            return Err(format!(
-                "{error}; 이전 계정 런타임 복구도 실패했습니다: {rollback}"
-            ));
-        }
-        return Err(error);
+        return Err(undone(error));
     }
     store = read_store(config_root);
     store.selection.active = Some(id.to_string());
@@ -2251,6 +2390,146 @@ pub fn reading_env_for(config_root: &Path, agent: &str) -> Vec<(String, String)>
     runtime_env_for(config_root, agent).0
 }
 
+/// Every put of a login into a runtime home, by home: how many began, and
+/// how many ended (t-7538, astra R6-1). The one home holds whichever login
+/// was put there last, so a read that used the home's login asks whether a
+/// put overlapped it before it says whose that login was.
+fn home_puts() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, u64)>> {
+    type Puts = std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, u64)>>;
+    static HELD: std::sync::OnceLock<Puts> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// One put into a home, under way until it drops.
+struct HomePut(PathBuf);
+
+impl HomePut {
+    fn begin(home: &Path) -> Self {
+        home_puts()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(home.to_path_buf())
+            .or_default()
+            .0 += 1;
+        Self(home.to_path_buf())
+    }
+}
+
+impl Drop for HomePut {
+    fn drop(&mut self) {
+        home_puts()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(self.0.clone())
+            .or_default()
+            .1 += 1;
+    }
+}
+
+/// The puts into a home as a look found them: how many had begun, and
+/// whether one was under way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HomeMark {
+    begun: u64,
+    quiet: bool,
+}
+
+fn home_mark(home: &Path) -> HomeMark {
+    let (begun, ended) = home_puts()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(home)
+        .copied()
+        .unwrap_or_default();
+    HomeMark {
+        begun,
+        quiet: begun == ended,
+    }
+}
+
+/// The selected Claude login as ONE look (t-7538, astra R6-1): the row the
+/// store selects and the environment a read of it runs in, both out of the
+/// same read of the store, beside a mark of the runtime home's puts.
+///
+/// A read that took its row at one moment and its environment at another
+/// asked with whatever login was selected by then and filed the answer
+/// under the row it took first: a selection landing in between gave account
+/// A account B's number. Taken together, the environment names the row's
+/// own store, so a login found in the keychain item scoped to it is the
+/// row's by construction. A login found in the runtime home is not — the
+/// one home holds whichever login was put there last — so it is the row's
+/// only while the home's record names the row and no put overlapped the
+/// read ([`SelectedLook::home_is_its`]). A login that cannot be shown to be
+/// the row's is nobody's.
+#[derive(Debug, Clone)]
+pub(crate) struct SelectedLook {
+    /// The row the store selects — `None` for the system default and for a
+    /// store with no row to select.
+    pub(crate) row: Option<ClaudeAccount>,
+    /// The environment a read of that row runs in: the reading door's,
+    /// which installs nothing and is empty for the system default.
+    pub(crate) env: Vec<(String, String)>,
+    home: HomeMark,
+}
+
+/// Take the one look (see [`SelectedLook`]).
+pub(crate) fn look_at_selected(config_root: &Path) -> SelectedLook {
+    let home = home_mark(&runtime_home(config_root));
+    let (env, row) = runtime_env_for(config_root, "claude");
+    SelectedLook { row, env, home }
+}
+
+impl SelectedLook {
+    /// The row a reading through this look may be filed under: the selected
+    /// row, while it is signed in.
+    pub(crate) fn whose(&self) -> Option<&ClaudeAccount> {
+        self.row
+            .as_ref()
+            .filter(|row| signed_in(Path::new(&row.config_dir)))
+    }
+
+    /// Whether a login this look's environment led to, found where `from`
+    /// says, is the row's own. The keychain half reads the item scoped to
+    /// the store the environment names; the file half reads the runtime
+    /// home ([`usage_login`]).
+    pub(crate) fn login_is_its(&self, config_root: &Path, from: LoginFrom) -> bool {
+        match from {
+            LoginFrom::Keychain => self.names_its_store(),
+            LoginFrom::File => self.home_is_its(config_root),
+        }
+    }
+
+    /// Whether the environment names the row's own secure store.
+    fn names_its_store(&self) -> bool {
+        let Some(row) = &self.row else {
+            return false;
+        };
+        self.env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR)
+            .is_some_and(|(_, dir)| Path::new(dir) == Path::new(&row.config_dir))
+    }
+
+    /// Whether the runtime home held the row's login from this look until
+    /// now: nothing was put into it since, and its record names the row as
+    /// its holder — no put it announced left its end unrecorded (astra
+    /// R6-2). Asked after the home was read — by the credential read, or by
+    /// the CLI the terminal road ran there.
+    pub(crate) fn home_is_its(&self, config_root: &Path) -> bool {
+        let Some(row) = &self.row else {
+            return false;
+        };
+        let home = runtime_home(config_root);
+        let now = home_mark(&home);
+        let record = read_runtime(config_root);
+        self.home.quiet
+            && now.begun == self.home.begun
+            && record.describes(&home)
+            && record.holder() == Some(row.id.as_str())
+    }
+}
+
 /// Where a usage read found the login it asks the OAuth endpoint with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoginFrom {
@@ -2309,16 +2588,115 @@ pub(crate) fn usage_login(env: &[(String, String)]) -> Option<(String, LoginFrom
             .find(|(key, _)| key == var)
             .map(|(_, value)| PathBuf::from(value))
     };
+    usage_login_in(
+        named(zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR).as_deref(),
+        named(zerocode_core::account::CONFIG_DIR_VAR).as_deref(),
+    )
+}
+
+/// [`account_login`]'s answer in the shape the selected account's reader
+/// gives, for the tests that compare the two readers.
+#[cfg(test)]
+pub(crate) fn usage_login_of_account(account: &ClaudeAccount) -> Option<(String, LoginFrom)> {
+    match account_login(account) {
+        AccountLogin::Found(login, from) => Some((login, from)),
+        AccountLogin::Refused | AccountLogin::Missing => None,
+    }
+}
+
+/// What one inactive account's own store answered (t-7538, astra A2): a
+/// login, a keychain that would not say, or nothing there. The two
+/// failures are two repairs — a locked or refusing keychain is asked again
+/// only when a person asks (a timer that asked would be a password dialog
+/// every poll), a missing login is a sign-in — so they stay two words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AccountLogin {
+    Found(String, LoginFrom),
+    /// The scoped item's keychain refused, was locked, or did not answer
+    /// inside its bound — and the account's own file held nothing either.
+    Refused,
+    /// Neither the scoped item nor the account's file holds a login.
+    Missing,
+}
+
+/// The same walk as [`usage_login`], for ONE account that is not the
+/// selected one (t-7538).
+///
+/// Its own store, and only its own: the keychain item scoped to the
+/// account's directory, then the credentials file IN that directory. Never
+/// the runtime home — the runtime home's file is the copy [`materialize`]
+/// wrote for the SELECTED account, and a read of account B that fell back
+/// to it would ask the endpoint with A's token and file the answer under
+/// B's name (astra A1). A read that finds nothing says whether the keychain
+/// refused or the store is empty, and the caller reports the account as
+/// unreadable rather than as anybody's number.
+///
+/// A look, and only a look, like [`usage_login`]: nothing is seeded or
+/// written for an inactive account — the scan's [`prepare_selected_store`]
+/// seeds the selected store only, and a poll that wrote every account's
+/// keychain item on a timer is the dialog storm this file has already paid
+/// for once.
+pub(crate) fn account_login(account: &ClaudeAccount) -> AccountLogin {
+    let dir = Path::new(&account.config_dir);
+    let said = keychain_says(dir);
+    if let Some(login) = said.login() {
+        return AccountLogin::Found(login.to_string(), LoginFrom::Keychain);
+    }
+    if let Some((login, from)) = usage_login_in(None, Some(dir)) {
+        return AccountLogin::Found(login, from);
+    }
+    match said {
+        // Only a keychain can refuse: elsewhere `NoAnswer` is "there is no
+        // keychain", and the file was the whole story.
+        KeychainSays::NoAnswer | KeychainSays::UnknownUser if cfg!(target_os = "macos") => {
+            AccountLogin::Refused
+        }
+        _ => AccountLogin::Missing,
+    }
+}
+
+/// [`USAGE_LOGIN_ORDER`], walked over the two places a login can be: the
+/// keychain item scoped to `store`, then the credentials file under
+/// `file_home`. The one statement of the walk; both readers above are it.
+fn usage_login_in(store: Option<&Path>, file_home: Option<&Path>) -> Option<(String, LoginFrom)> {
     USAGE_LOGIN_ORDER.into_iter().find_map(|from| {
         let login = match from {
-            LoginFrom::Keychain => named(zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR)
-                .and_then(|store| keychain_says(&store).login().map(str::to_string)),
-            LoginFrom::File => named(zerocode_core::account::CONFIG_DIR_VAR)
+            LoginFrom::Keychain => {
+                store.and_then(|store| keychain_says(store).login().map(str::to_string))
+            }
+            LoginFrom::File => file_home
                 .and_then(|home| std::fs::read_to_string(home.join(CREDENTIALS_FILE)).ok())
                 .filter(|text| holds_login(text)),
         };
         login.map(|text| (text, from))
     })
+}
+
+/// Which managed account a launch environment runs as, read back off the
+/// secure-storage directory it names (t-7538).
+///
+/// The window records this beside every Claude pane it opens, so a wall
+/// witnessed in that pane is judged against THAT account's gauge and not
+/// against whichever account is selected by then (astra A4). `None` for an
+/// environment that names no managed store — the machine's own login, or a
+/// pane this window did not launch — which is "unknown", never "the
+/// active one".
+///
+/// The whole row, so a launch also writes down WHICH login that row named
+/// when the pane started (astra R6).
+pub(crate) fn account_row_of_env(
+    config_root: &Path,
+    env: &[(String, String)],
+) -> Option<zerocode_core::ClaudeAccount> {
+    let store = env
+        .iter()
+        .rev()
+        .find(|(key, _)| key == zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR)
+        .map(|(_, value)| Path::new(value.as_str()))?;
+    read_store(config_root)
+        .accounts
+        .into_iter()
+        .find(|account| Path::new(&account.config_dir) == store)
 }
 
 /// Which home a LOOK at the Claude login reads (t-3996), and whose it is.
@@ -2357,10 +2735,7 @@ pub fn launch_env_for(config_root: &Path, agent: &str) -> Result<Vec<(String, St
     // send the launch back to an external terminal home either.
     let dir = Path::new(&account.config_dir);
     if !signed_in(dir) {
-        return Err(format!(
-            "선택한 Claude 계정 {}의 로그인이 유효하지 않습니다",
-            account.email
-        ));
+        return Err(account_refusal(&account, "로그인이 유효하지 않습니다"));
     }
     // Its login into the one home, before the launch reads that home. On the
     // launch road and not only on the switch, because the directories that need
@@ -2371,9 +2746,9 @@ pub fn launch_env_for(config_root: &Path, agent: &str) -> Result<Vec<(String, St
     materialize(config_root, &account)?;
     let home = runtime_home(config_root);
     if !signed_in(&home) {
-        return Err(format!(
-            "선택한 Claude 계정 {}을 앱 런타임에 준비하지 못했습니다",
-            account.email
+        return Err(account_refusal(
+            &account,
+            "로그인을 앱 런타임에 준비하지 못했습니다",
         ));
     }
     Ok(isolated)
@@ -2458,7 +2833,7 @@ fn require_unattended_login_with_probe(
         ));
     };
     require_live_account(&account, &mut probe)?;
-    invalidate_materialized_account(config_root, &account.id);
+    invalidate_materialized_account(config_root, &account.id)?;
     materialize(config_root, &account)?;
     require_live_runtime(&account, probe(runtime), "준비")
 }
@@ -3259,6 +3634,127 @@ JSON
         account
     }
 
+    /// An inactive account's usage read asks with THAT account's own login —
+    /// its scoped keychain item, then the file in its own directory — and
+    /// never with the selected account's, whose copy sits in the runtime
+    /// home (t-7538, astra A1). The window used to have one reader, keyed by
+    /// the launch environment, which names the runtime home: a read of B
+    /// through it was a read of A wearing B's name.
+    #[test]
+    fn an_inactive_accounts_usage_is_read_with_its_own_login_and_never_the_active_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let a = one_account(
+            root.path(),
+            "a-fixture",
+            "a@example.test",
+            "TOKEN-A-FIXTURE",
+        );
+        let b = one_account(
+            root.path(),
+            "b-fixture",
+            "b@example.test",
+            "TOKEN-B-FIXTURE",
+        );
+        // A is selected and materialized: the runtime home holds A's copy.
+        let mut store = read_store(root.path());
+        store.selection.active = Some(a.id.clone());
+        write_store(root.path(), &store).unwrap();
+        materialize(root.path(), &a).expect("materialized");
+        let active = usage_login(&reading_env_for(root.path(), "claude")).expect("A's login");
+        assert!(
+            active.0.contains("TOKEN-A-FIXTURE"),
+            "the active read is not A's"
+        );
+        // B, read as itself: B's own file (no keychain item yet).
+        let (text, from) = usage_login_of_account(&b).expect("B's login");
+        assert!(
+            text.contains("TOKEN-B-FIXTURE"),
+            "B's read came back as somebody else's"
+        );
+        assert!(!text.contains("TOKEN-A-FIXTURE"));
+        assert_eq!(from, LoginFrom::File);
+        // The CLI refreshed B's token in B's scoped item: the keychain wins,
+        // as it does for the selected account (t-6583).
+        #[cfg(target_os = "macos")]
+        {
+            let refreshed = r#"{"claudeAiOauth":{"accessToken":"TOKEN-B-REFRESHED"}}"#;
+            write_keychain(Path::new(&b.config_dir), refreshed).unwrap();
+            let (text, from) = usage_login_of_account(&b).expect("B's refreshed login");
+            assert!(text.contains("TOKEN-B-REFRESHED"));
+            assert_eq!(from, LoginFrom::Keychain);
+        }
+        // B's directory lost its login: the answer is NOTHING — not A's copy
+        // in the runtime home, which is a byte away in the old reader.
+        std::fs::remove_file(Path::new(&b.config_dir).join(CREDENTIALS_FILE)).unwrap();
+        #[cfg(target_os = "macos")]
+        delete_keychain_service(&keychain_services(Path::new(&b.config_dir)).remove(0)).unwrap();
+        assert_eq!(usage_login_of_account(&b), None);
+        assert!(
+            usage_login(&reading_env_for(root.path(), "claude"))
+                .is_some_and(|(text, _)| text.contains("TOKEN-A-FIXTURE")),
+            "the selected account's read moved"
+        );
+        // And the runtime home never learned B: only the selected account is
+        // materialized there.
+        let home = std::fs::read_to_string(runtime_home(root.path()).join(CREDENTIALS_FILE))
+            .unwrap_or_default();
+        assert!(!home.contains("TOKEN-B"));
+    }
+
+    /// A launch environment names the account it runs as — by the secure
+    /// store it points at — and an environment that names none is unknown,
+    /// never "the active one" (astra A4).
+    #[test]
+    fn a_pane_is_attributed_to_the_account_its_environment_names_or_to_nobody() {
+        let root = tempfile::tempdir().unwrap();
+        let a = one_account(root.path(), "a-fixture", "a@example.test", "TOKEN-A");
+        let b = one_account(root.path(), "b-fixture", "b@example.test", "TOKEN-B");
+        let mut store = read_store(root.path());
+        store.selection.active = Some(a.id.clone());
+        write_store(root.path(), &store).unwrap();
+        let account_of_env =
+            |env: &[(String, String)]| account_row_of_env(root.path(), env).map(|row| row.id);
+        let env = reading_env_for(root.path(), "claude");
+        assert_eq!(account_of_env(&env).as_deref(), Some("a-fixture"));
+        let env_b = zerocode_core::launch_env(
+            None,
+            runtime_home(root.path()).to_str(),
+            Some(b.config_dir.as_str()),
+        );
+        assert_eq!(account_of_env(&env_b).as_deref(), Some("b-fixture"));
+        assert_eq!(account_of_env(&[]), None);
+        let elsewhere = vec![(
+            zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR.to_string(),
+            "/nowhere/fixture".to_string(),
+        )];
+        assert_eq!(account_of_env(&elsewhere), None);
+    }
+
+    /// Every refusal about an account names it by id. The email used to be
+    /// in the sentence, and the sentence reaches the dialog, the receipt,
+    /// the log and a worker's report (astra C1).
+    #[test]
+    fn an_account_refusal_never_carries_the_email() {
+        let root = tempfile::tempdir().unwrap();
+        let a = one_account(root.path(), "a-fixture", "somebody@example.test", "TOKEN-A");
+        for said in [
+            require_live_account(&a, &mut |_| Some(false)).unwrap_err(),
+            require_live_account(&a, &mut |_| None).unwrap_err(),
+            require_live_runtime(&a, Some(false), "적용").unwrap_err(),
+            require_live_runtime(&a, None, "적용").unwrap_err(),
+            account_refusal(&a, "x"),
+        ] {
+            assert!(said.contains("a-fixture"), "{said}");
+            assert!(!said.contains('@'), "an address in a refusal: {said}");
+        }
+        std::fs::remove_dir_all(&a.config_dir).unwrap();
+        let mut store = read_store(root.path());
+        store.selection.active = Some(a.id.clone());
+        write_store(root.path(), &store).unwrap();
+        let said = launch_env_for(root.path(), "claude").unwrap_err();
+        assert!(said.contains("a-fixture") && !said.contains('@'), "{said}");
+    }
+
     fn cli_writes_credentials(dir: &Path, credentials: &str) {
         #[cfg(target_os = "macos")]
         {
@@ -3448,7 +3944,8 @@ JSON
                 gathered: true,
                 ..RuntimeAuth::default()
             },
-        );
+        )
+        .expect("an old record");
 
         materialize_into(config.path(), &account, home.path()).expect("repair old runtime");
         let repaired =
@@ -3710,6 +4207,70 @@ JSON
         );
     }
 
+    /// astra R6-2 at the switch: a switch whose record the disk refused is
+    /// not a switch. The put that changed the home was never recorded, so
+    /// the selection stays, the runtime is never asked to prove a login
+    /// nobody recorded, and the previous login goes back into the home under
+    /// a record that names it — a read of it is its own again.
+    #[test]
+    fn a_switch_whose_record_the_disk_refused_selects_nothing_and_puts_the_previous_login_back() {
+        let config = tempfile::tempdir().expect("no config dir");
+        one_account(config.path(), "a-1", "one@example.com", "login-one");
+        one_account(config.path(), "a-2", "two@example.com", "login-two");
+        select_account_with_probe(config.path(), "a-1", |_| Some(true)).expect("first select");
+        let runtime = runtime_home(config.path());
+        let root = config.path().to_path_buf();
+        before_the_record_of(&runtime, Box::new(move || refuse_the_next_record_of(&root)));
+        let mut runtime_asked = 0usize;
+        select_account_with_probe(config.path(), "a-2", |dir| {
+            runtime_asked += usize::from(dir == runtime);
+            Some(true)
+        })
+        .expect_err("a switch whose record the disk refused was selected");
+
+        assert_eq!(
+            read_store(config.path()).selection.active.as_deref(),
+            Some("a-1")
+        );
+        assert_eq!(
+            runtime_asked, 0,
+            "the runtime was asked about an unrecorded put"
+        );
+        assert!(
+            std::fs::read_to_string(runtime.join(CREDENTIALS_FILE))
+                .expect("the runtime's login")
+                .contains("login-one"),
+            "the refused switch left its login in the home"
+        );
+        assert_eq!(read_runtime(config.path()).account.as_deref(), Some("a-1"));
+        assert!(
+            look_at_selected(config.path()).home_is_its(config.path()),
+            "the previous login, back in the home, is not its own"
+        );
+    }
+
+    /// astra R6-2, the order: the record says a put is under way before
+    /// the home changes hands. A disk that refuses that first word refuses
+    /// the put, and the home and its record stay as they stood.
+    #[test]
+    fn a_put_the_record_could_not_announce_leaves_the_home_and_its_record_as_they_stood() {
+        let config = tempfile::tempdir().expect("no config dir");
+        one_account(config.path(), "a-1", "one@example.com", "login-one");
+        let second = one_account(config.path(), "a-2", "two@example.com", "login-two");
+        select_account_with_probe(config.path(), "a-1", |_| Some(true)).expect("first select");
+        refuse_the_next_record_of(config.path());
+        materialize(config.path(), &second).expect_err("a put its record could not announce");
+
+        assert!(
+            std::fs::read_to_string(runtime_home(config.path()).join(CREDENTIALS_FILE))
+                .expect("the runtime's login")
+                .contains("login-one"),
+            "a put the record never announced changed the home"
+        );
+        assert_eq!(read_runtime(config.path()).account.as_deref(), Some("a-1"));
+        assert!(look_at_selected(config.path()).home_is_its(config.path()));
+    }
+
     #[test]
     fn an_unattended_worker_repairs_runtime_drift_from_the_live_selected_account() {
         let config = tempfile::tempdir().expect("no config dir");
@@ -3926,12 +4487,13 @@ JSON
                 gathered: true,
                 ..RuntimeAuth::default()
             },
-        );
+        )
+        .expect("a record");
 
-        invalidate_materialized_account(config.path(), "a-2");
+        invalidate_materialized_account(config.path(), "a-2").expect("nothing to forget");
         assert_eq!(read_runtime(config.path()).account.as_deref(), Some("a-1"));
 
-        invalidate_materialized_account(config.path(), "a-1");
+        invalidate_materialized_account(config.path(), "a-1").expect("forgotten");
         let state = read_runtime(config.path());
         assert!(state.account.is_none());
         assert!(state.written.is_none());

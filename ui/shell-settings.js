@@ -296,6 +296,10 @@ function applyAgentSettingsSnapshot(snapshot) {
     agentTeamsMode = snapshot.agent_teams_mode ?? "panes";
     el("orch-teams-mode").value = agentTeamsMode;
   }
+  if (hasSetting(snapshot, "claude_autoswitch_mode")) {
+    claudeAutoSwitchMode = snapshot.claude_autoswitch_mode ?? "ask";
+    el("account-autoswitch").value = claudeAutoSwitchMode;
+  }
   // 대화의 Focus view(확장 2.1.221): 이 창의 모든 대화가 입는 한 값이라,
   // 권위 있는 스냅샷이 올 때마다 서 있는 목록들이 그 값을 따라간다.
   if (hasSetting(snapshot, "conversation_focus_view")) {
@@ -3691,21 +3695,68 @@ async function verifyClaudeAccounts() {
 
 function paintClaudeAccounts() {
   const rows = accountReport.accounts ?? [];
-  el("account-count").textContent = String(rows.length);
+  const count = el("account-count");
+  const total = String(rows.length);
+  if (count.textContent !== total) count.textContent = total;
   const host = el("account-list");
-  host.replaceChildren();
-  // The original's 「시스템 기본값」, first and always — a ROW, not the absence of
-  // one (설정 → AI 제공자 계정, above the managed list). It is what makes the
-  // managed accounts 선택 사항: this machine's own Claude login, with this window
-  // staying out of it entirely. Somebody who wants that back should be able to
-  // click it rather than delete every account to achieve it by subtraction.
-  host.appendChild(systemDefaultRow());
   const counts = new Map();
   for (const row of rows) {
     const key = claudeLoginKey(row);
     if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  for (const row of rows) host.appendChild(accountRow(row, (counts.get(claudeLoginKey(row)) ?? 0) > 1));
+  const shown = locale === "system" ? systemLocale : locale;
+  /* Every row this paint wants, each with the shape it is drawn from. A row
+   * whose shape did not move is the row already standing — kept, not rebuilt:
+   * the usage answer repaints this list on every beat, and the same rows made
+   * again were DOM mutations for nothing and rows whose identity was thrown
+   * away (t-7538 E1). Its gauge line is written in place below, so a figure
+   * or a countdown that moved rewrites that one line and nothing else. */
+  const wanted = [
+    // The original's 「시스템 기본값」, first and always — a ROW, not the
+    // absence of one (설정 → AI 제공자 계정, above the managed list). It is
+    // what makes the managed accounts 선택 사항: this machine's own Claude
+    // login, with this window staying out of it entirely. Somebody who wants
+    // that back should be able to click it rather than delete every account
+    // to achieve it by subtraction.
+    {
+      key: "",
+      shape: JSON.stringify([shown, !accountReport.active]),
+      make: () => systemDefaultRow(),
+    },
+    ...rows.map((row) => {
+      const duplicate = (counts.get(claudeLoginKey(row)) ?? 0) > 1;
+      return {
+        key: row.id,
+        shape: JSON.stringify([
+          shown, row, duplicate, row.id === accountReport.active,
+          row.id === switchingAccount, addingAccount,
+        ]),
+        make: () => accountRow(row, duplicate),
+      };
+    }),
+  ];
+  const standing = new Map([...host.children].map((line) => [line.dataset.accountRow, line]));
+  const lines = wanted.map(({ key, shape, make }) => {
+    const held = standing.get(key);
+    if (held && held.dataset.accountShape === shape) return held;
+    const line = make();
+    line.dataset.accountRow = key;
+    line.dataset.accountShape = shape;
+    return line;
+  });
+  const keep = new Set(lines);
+  lines.forEach((line, at) => {
+    const there = host.children[at] ?? null;
+    if (there === line) return;
+    if (there && !keep.has(there)) there.replaceWith(line);
+    else host.insertBefore(line, there);
+  });
+  while (host.children.length > lines.length) host.lastElementChild.remove();
+  for (const row of rows) {
+    const gauge = host.querySelector(`.account-gauge[data-account="${CSS.escape(row.id)}"]`);
+    const words = accountGaugeWords(row.id);
+    if (gauge && gauge.textContent !== words) gauge.textContent = words;
+  }
   paintAccountAdd();
   // Also recorded rather than written: which of the three sentences applies is
   // state, so a language change has to ask again rather than replay one of them.
@@ -3723,7 +3774,8 @@ function paintAccountAdd() {
   // element from being written behind its key matches by VARIABLE NAME across
   // the whole file, so a common local shadows every other one that shares it.
   const accountAdd = el("account-add");
-  accountAdd.disabled = addingAccount || !accountReport.can_add;
+  const closed = addingAccount || !accountReport.can_add;
+  if (accountAdd.disabled !== closed) accountAdd.disabled = closed;
   // Said through `say` rather than written straight in. The words depend on
   // state, so the key in the markup cannot produce them on its own — and a
   // language change redraws a keyed element FROM its key, which would put
@@ -3744,7 +3796,7 @@ function accountNote(rows) {
   if (rows.length === 0) {
     return t("settings.accounts.none", "추가된 계정이 없습니다. 지금까지 쓰던 로그인이 그대로 쓰입니다.");
   }
-  return t("settings.accounts.hint", "고른 계정의 자격 증명으로 claude가 실행됩니다 — 즉시 적용됩니다. 쉬는 Claude 판은 대화를 이어 새 계정으로 갈아타고, 일하는 판은 턴이 끝나면 갈아탑니다.");
+  return t("settings.accounts.hint", "고른 계정의 자격 증명으로 새 claude가 실행됩니다 — 즉시 적용됩니다. 이미 떠 있는 판은 제 로그인으로 계속하고, 한도 벽에 선 판만 같은 대화로 새 계정에서 이어집니다.");
 }
 
 /* One account: who it is, and the two things that can be done to it.
@@ -3788,6 +3840,7 @@ function systemDefaultRow() {
 function claudeLoginMoved() {
   paintClaudeAccounts();
   void refreshClaudeUsage(true);
+  void refreshClaudeAccountUsage(true);
   // The agent rows' 「로그인 필요」 was read off the login that just moved;
   // the backend forgot its snapshot, and this is the repaint that reads
   // the new one.
@@ -3804,6 +3857,15 @@ async function pickSystemClaudeLogin() {
     return;
   }
   claudeLoginMoved();
+  sayUnrecordedPick();
+}
+
+/* 사람의 전환은 일어났는데 원장이 그 영수증을 거절했다면 — 성공처럼 조용히 넘기지 않고
+ * 자동 전환과 같은 말로 알린다(astra R4). 영수증은 일지에 남아 다음 조회가 적는다. */
+function sayUnrecordedPick() {
+  const why = accountReport?.switch_unrecorded;
+  if (!why) return;
+  showError(t("settings.accounts.switchUnrecorded", "전환은 했지만 원장에 적지 못했습니다: {{why}}", { why }));
 }
 
 function claudeLoginKey(row) {
@@ -3856,6 +3918,13 @@ function accountRow(row, duplicate = false) {
   const alarm = paintAccountAlarm(line, accountAlarmed(row));
   if (alarm) top.appendChild(alarm);
   body.appendChild(under);
+  // 이 계정의 제 게이지(t-7538) — 활성 계정만이 아니라 목록의 모든 계정이
+  // 제 로그인으로 읽힌다. 읽은 적 없으면 그렇게 말한다.
+  const gauge = document.createElement("span");
+  gauge.className = "agent-row-cmd account-gauge";
+  gauge.dataset.account = row.id;
+  gauge.textContent = accountGaugeWords(row.id);
+  body.appendChild(gauge);
   pick.appendChild(body);
   pick.addEventListener("click", () => pickClaudeAccount(row.id));
   line.appendChild(pick);
@@ -4107,147 +4176,332 @@ async function pickClaudeAccount(id) {
   }
   switchingAccount = null;
   claudeLoginMoved();
-  // And the panes already running claude follow — the resting ones now, the
-  // busy ones when their turn ends. See the handoff block below.
-  handoffRunningClaudePanes();
+  sayUnrecordedPick();
+  // And nothing else: the panes already running claude keep the login they
+  // were started with (see the block below). A person who wants a pane on
+  // the new account opens a new one.
 }
 
-/* ---- 계정 전환의 산 판 갈아타기 ----
+/* ---- 계정 전환과 산 판 ----
  *
- * 전환의 나머지 반쪽. 새로 여는 터미널은 이미 새 계정이다 — `launch_env_for`
- * 가 launch마다 materialize한다. 이 블록은 이미 떠 있는 claude 판을 맡는다:
- * 쉬는 판(`done`)은 그 자리에서 `--resume`으로 다시 세워 같은 대화를 새
- * 계정으로 잇고(모든 관리 계정은 한 런타임 홈을 쓰므로 대화 기록은 계정을
- * 가리지 않는다 — `gather_conversations`), 일하거나 사람을 기다리는 판은 그
- * 턴을 자르지 않고 큐에 남았다가 `done`에 닿는 숨에 갈아탄다(hook:agent).
- *
- * 시스템 기본값으로의 전환은 여기 오지 않는다: 그 로그인의 홈(~/.claude)에는
- * 이 창의 대화가 없어서 `--resume`이 1초 만에 죽는다 — 지난 세션의 죽은
- * resume 껍데기와 같은 길. 대화를 끊는 갈아타기는 갈아타기가 아니다.
- *
- * 다른 워크트리의 판도 큐에 남는다 — `launch_agent_tab`은 활성 루트에서
- * 스폰하므로, 그 워크트리가 앞에 설 때(`activateWorktree`) 비로소 제 자리
- * 에서 갈아탄다. */
-const accountHandoffQueue = new Set();
+ * 전환의 나머지 반쪽은 이제 백엔드의 것이다(t-7538). 새로 여는 터미널은 이미
+ * 새 계정이다 — `launch_env_for`가 launch마다 materialize한다. 이미 떠 있는
+ * claude 판은 **건드리지 않는다**: 일하는 판도, 쉬는 판도, 제 로그인(계정별
+ * 키체인 항목)으로 계속한다. 옛 길은 전환 순간 모든 claude 판을 큐에 넣고
+ * `done`에 닿는 숨마다 `--resume`으로 다시 세우며 옛 셸을 닫았는데, 그 닫힘이
+ * 원장에 `worker_died`로 닿아 워커 다섯이 「끝남」이 되고 새 자리를 만들어야
+ * 했다(09-24 21:2x, 함정 410). 한도 벽에 선 판만 움직이고, 그것도 원장이
+ * 워커를 먼저 재운 뒤 같은 worker id·dispatch로 다시 앉히는 백엔드의
+ * `claude_autoswitch_apply`가 한다 — 창은 그 결과를 그리기만 한다. */
 
-/* 흘려보낼 수 없는 판 — 산 자식(팀원 판이든 헬퍼든)이 매달린 코디네이터를
- * 다시 세우면 그 밑의 계보가 끊긴다. 그런 판은 큐에 남아 혼자가 된 다음
- * 숨에 갈아탄다. */
-function paneHasLiveKin(term) {
-  if (paneSubagents.has(term)) return true;
-  for (const [kid, parent] of paneParents) {
-    if (parent === term && tabOfTerm(kid) !== null) return true;
+/* 계정별 사용량과 자동 전환 계획(t-7538): `claude_account_usage`의 답을 들고
+ * 계정 목록의 게이지 칸, 아래의 제안 줄, 상태 바의 「다음」 낱말을 그린다.
+ * 판정은 전부 백엔드의 표(`CLAUDE_ACCOUNT_AUTOSWITCH`)가 하고 — 다음 후보도
+ * `plan.next`로 온다 — 여기서는 낱말만 고른다. */
+let accountUsageReport = null;
+let claudeAutoSwitchMode = "ask";
+let applyingAccountSwitch = false;
+/* The token the window last applied: the same plan on the next beat is
+ * not applied again from here — the backend re-plans and would refuse it
+ * too, but a second call for one decision is a second call. */
+let appliedSwitchToken = null;
+const accountUsageAskTimer = { handle: null, outAt: null };
+
+function accountUsageRow(id) {
+  return accountUsageReport?.accounts?.find((row) => row.id === id) ?? null;
+}
+
+function accountFitness(id) {
+  return accountUsageReport?.plan?.fitness?.find((row) => row.id === id) ?? null;
+}
+
+/* 새 표면(상태 바·제안 줄·토스트)이 계정을 부르는 이름 — 요금제 낱말과 계정 id.
+ * 이메일은 사람이 관리하는 계정 목록 줄에만 있다(t-7538: 토큰·이메일은 로그·
+ * UI·원장에 싣지 않는다). */
+function accountBadge(id) {
+  const kind = (
+    accountUsageRow(id)?.organization_type ??
+    accountReport.accounts?.find((row) => row.id === id)?.organization_type
+  )?.replace(/^claude_/, "");
+  const type = CLAUDE_ORGANIZATION_TYPES.get(kind)?.() ?? "";
+  return [type, id].filter(Boolean).join(" ");
+}
+
+/* 한 계정의 게이지 낱말: 창마다 「이름 N% · 리셋까지」, 뒤에 표의 판정(남은 몫·
+ * 한도·읽지 못함·오래됨·거절). 숫자는 백엔드의 것이고 여기서는 낱말만 고른다. */
+function accountGaugeWords(id) {
+  const held = accountUsageRow(id);
+  const fit = accountFitness(id);
+  const usage = held?.usage ?? null;
+  const parts = [];
+  for (const [key, label] of [
+    ["session", t("settings.accounts.gaugeSession", "세션")],
+    ["weekly", t("settings.accounts.gaugeWeekly", "주")],
+    ["fable_weekly", t("settings.accounts.gaugeFable", "Fable")],
+  ]) {
+    const window = usage?.[key];
+    if (!window) continue;
+    const reset = window.resets_at == null ? null : statusUsageDuration(window.resets_at - Date.now());
+    parts.push(reset ? `${label} ${Math.round(window.used_percent)}% (${reset})` : `${label} ${Math.round(window.used_percent)}%`);
   }
-  return false;
-}
-
-function accountHandoffReady(term) {
-  const tab = tabOfTerm(term);
-  if (tab === null || tab.kind !== "term") return false;
-  if (tab.worktree !== activeWorktreePath) return false;
-  if (paneAgents.get(term) !== "claude") return false;
-  if (hookStates.get(term) !== "done") return false;
-  return !paneHasLiveKin(term);
-}
-
-/* 새 술을 같은 자리에 — 잎만 바꿔 끼우면 분할 비율도 이웃도 그대로다.
- * 스폰이 먼저, 갈아끼우기가 다음, 옛 셸 닫기가 마지막: launch가 실패하면
- * 판은 손대지 않은 채 남고, 성공했으면 빈 자리가 한 프레임도 서지 않는다. */
-async function handoffClaudePane(term) {
-  const tab = tabOfTerm(term);
-  const held = paneSessions.get(term);
-  // 대화가 있는데 이어갈 수 없다는 판이면, 다시 세우는 순간이 곧 끊김이다 —
-  // 건드리지 않고 다음 토큰 갱신의 자연 수렴에 맡긴다.
-  if (held?.session && held.resumable === false) return false;
-  const parent = paneParents.get(term);
-  let fresh;
-  try {
-    fresh = await launchAgentTab({
-      agent: "claude",
-      prompt: "",
-      rows: 24,
-      cols: 96,
-      // The ID alone: `resume` is a String on the wire, while the record
-      // paneSessions holds is the whole ProviderSession `resume_session`
-      // takes. The record in the String slot was every handed-off pane
-      // dying with "invalid args `resume` … invalid type: map, expected a
-      // string" on each reinstall that re-applied the chosen account.
-      ...(held?.session ? { resume: held.session.id } : {}),
-      ...(typeof parent === "number" ? { parent } : {}),
-    });
-  } catch (error) {
-    showError(error);
-    return false;
+  if (usage?.status === "denied") parts.push(t("settings.accounts.gaugeDenied", "키체인 거절 — 눌러서 다시"));
+  else if (usage?.status === "signed_out") parts.push(t("settings.accounts.gaugeSignedOut", "로그인 없음"));
+  else if (fit?.unfit === "blocked") parts.push(t("settings.accounts.gaugeBlocked", "한도"));
+  else if (fit?.unfit === "stale") parts.push(t("settings.accounts.gaugeStale", "오래됨"));
+  else if (fit?.unfit || !usage) parts.push(t("settings.accounts.gaugeUnknown", "읽지 못함"));
+  else if (typeof fit?.room_percent === "number") {
+    parts.push(t("settings.accounts.gaugeRoom", "남은 몫 {{room}}%", { room: fit.room_percent }));
   }
-  const swap = (node) => {
-    if (node.type === "leaf") return node.term === term ? { ...node, term: fresh } : node;
-    return { ...node, first: swap(node.first), second: swap(node.second) };
+  if (held?.fetching) parts.push("…");
+  return parts.join(" · ");
+}
+
+/* 계획이 옮길 벽 판. */
+function accountSwitchMoves(plan) {
+  return (plan?.walled ?? []).filter((row) => row.verdict?.kind === "switch");
+}
+
+/* 제안 줄 — `ask`에서 표가 「바꾸자」거나 벽 판을 옮기자고 할 때만 서고, 단추는
+ * 바로 그 계획의 토큰으로만 적용한다. 늦은 「예」는 백엔드가 토큰 비교로
+ * 거절한다. `wait`는 어느 모드에서든 그 분(分)을 말하고 단추를 내놓지 않는다. */
+function paintAccountSwitchNote() {
+  const note = el("account-switch-note");
+  const plan = accountUsageReport?.plan ?? null;
+  const decision = plan?.decision ?? null;
+  const said = el("account-switch-said");
+  const button = el("account-switch-now");
+  // Only what moved is written: the note repaints on every usage answer
+  // (t-7538 E1).
+  const paint = (shown, offered, words = "") => {
+    if (note.hidden !== !shown) note.hidden = !shown;
+    if (!shown) return;
+    if (button.hidden !== !offered) button.hidden = !offered;
+    if (said.textContent !== words) said.textContent = words;
+    if (!offered) return;
+    if (button.disabled !== applyingAccountSwitch) button.disabled = applyingAccountSwitch;
+    // The button applies the plan whose words stand beside it, and no
+    // other (astra R1): its token is the one this paint read.
+    if (button.dataset.token !== plan.token) button.dataset.token = plan.token;
   };
-  tab.layout = swap(tab.layout);
-  if (tab.term === term) tab.term = fresh;
-  if (tab.activePane === term) tab.activePane = fresh;
-  if (tab.expandedPane === term) tab.expandedPane = fresh;
-  // Both of a pane's words follow the shell: the title a person gave it and
-  // the name it was born with.
-  for (const words of [tab.paneTitles, tab.paneNames]) {
-    if (words?.[term] === undefined) continue;
-    words[fresh] = words[term];
-    delete words[term];
+  if (!plan || !decision || plan.mode === "off") {
+    paint(false, false);
+    return;
   }
-  // 옛 이름 밑에 살던 아이가 있었다면 그 끈도 새 이름으로 — 계보는 판의
-  // 것이지 셸 id의 것이 아니다.
-  for (const [kid, was] of paneParents) {
-    if (was === term) paneParents.set(kid, fresh);
+  if (decision.kind === "wait") {
+    paint(true, false, t("settings.accounts.switchWait", "리셋까지 {{minutes}}분 — 기다립니다", {
+      minutes: decision.minutes,
+    }));
+    return;
   }
-  dropTermView(term);
-  invoke("close_term", { term }).catch(() => {});
-  renderPanes(tab);
-  renderTabs();
-  updateStage();
-  paintRunningCount();
-  persistPaneLayouts(tab.worktree);
-  return true;
+  const moves = accountSwitchMoves(plan);
+  if (plan.mode !== "ask" || (decision.kind !== "switch" && moves.length === 0)) {
+    paint(false, false);
+    return;
+  }
+  paint(true, true, accountSwitchProposal(plan));
 }
 
-/* 한 번에 하나씩 — 두 갈아타기가 같은 탭의 레이아웃을 겹쳐 쓰면 한쪽의
- * 잎이 사라진다. 재진입은 표식으로 눌러 두고, 도는 동안 새로 든 큐 항목은
- * 같은 순회가 마저 집는다. */
-let drainingHandoffs = false;
-
-async function drainAccountHandoffs() {
-  if (drainingHandoffs) return;
-  drainingHandoffs = true;
-  let moved = 0;
-  try {
-    for (const term of [...accountHandoffQueue]) {
-      // 판이 사라졌으면 기다릴 것도 없다.
-      if (tabOfTerm(term) === null && !paneAgents.has(term)) {
-        accountHandoffQueue.delete(term);
-        continue;
-      }
-      if (!accountHandoffReady(term)) continue;
-      accountHandoffQueue.delete(term);
-      if (await handoffClaudePane(term)) moved += 1;
-    }
-  } finally {
-    drainingHandoffs = false;
+/* 제안 한 문장 — 설정 화면의 줄과 알림이 같은 말을 한다. */
+function accountSwitchProposal(plan) {
+  const decision = plan.decision;
+  const moves = accountSwitchMoves(plan);
+  const to = decision.kind === "switch" ? decision.to : plan.landing;
+  const parts = [
+    decision.kind === "switch"
+      ? t("settings.accounts.switchAsk", "계정을 {{to}}(으)로 바꿀까요? {{why}}", {
+          to: accountBadge(to),
+          why: switchReasonWords(decision.reason),
+        })
+      : t("settings.accounts.switchAskPanes", "벽에 선 판을 {{to}}(으)로 옮길까요?", { to: accountBadge(to) }),
+  ];
+  if (moves.length > 0) {
+    parts.push(t("settings.accounts.switchPanes", "벽에 선 판 {{count}}개는 같은 대화로 이어집니다", { count: moves.length }));
   }
-  if (moved > 0) {
-    toast(t("settings.accounts.handoff", "Claude 판 {{count}}개가 대화를 이어 새 계정으로 갈아탔습니다", {
-      count: moved,
+  return parts.join(" ");
+}
+
+/* `ask`의 알림 — 상태 바를 보는 사람에게 같은 한 줄과 단추를, 제안(토큰)마다 한 번.
+ * 같은 제안에 다시 뜨지 않고, 단추는 **그 알림을 만든 제안의 토큰**으로만 적용한다
+ * (astra R1): 누를 때의 최신 계획을 읽지 않는다. 제안이 바뀌거나 사라지면 옛 알림은
+ * 걷고, 걷히기 전에 눌린 옛 단추는 새 계획을 고르지 못한다. 설정 화면의 줄과 상태
+ * 바의 「확인 기다림」은 알림이 사라진 뒤에도 남는다. */
+let proposedSwitchToken = null;
+let proposedSwitchNote = null;
+
+function offerAccountSwitch() {
+  const plan = accountUsageReport?.plan ?? null;
+  const decision = plan?.decision ?? null;
+  const proposes =
+    plan?.mode === "ask" &&
+    (decision?.kind === "switch" || accountSwitchMoves(plan).length > 0);
+  if (proposedSwitchNote && (!proposes || plan.token !== proposedSwitchToken)) {
+    proposedSwitchNote.remove();
+    proposedSwitchNote = null;
+  }
+  if (!proposes) {
+    proposedSwitchToken = null;
+    return;
+  }
+  if (applyingAccountSwitch || plan.token === proposedSwitchToken) return;
+  const token = plan.token;
+  proposedSwitchToken = token;
+  proposedSwitchNote = toast(accountSwitchProposal(plan), "", {
+    action: {
+      label: t("settings.accounts.switchNow", "지금 바꾸기"),
+      run: () => void applyAccountSwitch("ask", token),
+    },
+  });
+}
+
+function switchReasonWords(reason) {
+  if (!reason) return "";
+  if (reason === "walled") return t("settings.accounts.reasonWalled", "판이 한도 벽에 섰습니다");
+  return t("settings.accounts.reasonNearLimit", "{{window}} {{used}}% 사용", {
+    window: reason.near_limit?.window ?? "",
+    used: reason.near_limit?.used_percent ?? "",
+  });
+}
+
+/* 상태 바: 활성 조각 옆의 「다음 계정 · 남은 몫 · 자동 전환 낱말」. 표의 판정이
+ * 숫자를 못 내는 때(후보 없음·쉼·읽지 못함·리셋 대기·확인 기다림)는 그 낱말을
+ * 말한다 — 0%나 빈칸으로 감추지 않는다. */
+function paintClaudeNext() {
+  const next = document.getElementById("sb-claude-next");
+  if (!next) return;
+  const plan = accountUsageReport?.plan ?? null;
+  if (!plan || (plan.fitness ?? []).length < 2) {
+    if (!next.hidden) next.hidden = true;
+    return;
+  }
+  const decision = plan.decision ?? {};
+  const moves = accountSwitchMoves(plan);
+  const parts = [];
+  if (decision.kind === "wait") {
+    parts.push(t("usage.nextWait", "리셋 {{minutes}}분", { minutes: decision.minutes }));
+  } else if (decision.kind === "switch") {
+    parts.push(t("usage.nextSwitch", "→ {{account}} {{room}}%", {
+      account: accountBadge(decision.to),
+      room: accountFitness(decision.to)?.room_percent ?? "?",
+    }));
+  } else if (decision.why === "unread") {
+    parts.push(t("usage.nextUnread", "사용량 읽지 못함"));
+  } else if (plan.next) {
+    parts.push(t("usage.nextAccount", "다음 {{account}} {{room}}%", {
+      account: accountBadge(plan.next.id),
+      room: plan.next.room_percent,
+    }));
+  } else {
+    parts.push(t("usage.nextNone", "다음 계정 없음"));
+  }
+  if (decision.why === "cooldown" && plan.cooldown_until_ms) {
+    parts.push(t("usage.nextCooldown", "전환 쉼 {{minutes}}분", {
+      minutes: Math.max(1, Math.ceil((plan.cooldown_until_ms - Date.now()) / 60000)),
     }));
   }
+  if (moves.length > 0) parts.push(t("usage.nextWalled", "벽 판 {{count}}", { count: moves.length }));
+  parts.push({
+    off: t("settings.accounts.autoSwitchOff", "끔"),
+    ask: t("settings.accounts.autoSwitchAsk", "물어보기"),
+    auto: t("settings.accounts.autoSwitchAuto", "자동"),
+  }[plan.mode] ?? plan.mode);
+  if (plan.mode === "ask" && (decision.kind === "switch" || moves.length > 0)) {
+    parts.push(t("usage.nextAsk", "확인 기다림"));
+  }
+  const words = parts.join(" · ");
+  if (next.textContent !== words) next.textContent = words;
+  if (next.hidden) next.hidden = false;
 }
 
-function handoffRunningClaudePanes() {
-  for (const tab of tabs) {
-    if (tab.kind !== "term") continue;
-    for (const term of paneLeaves(tab.layout)) {
-      if (paneAgents.get(term) === "claude") accountHandoffQueue.add(term);
-    }
+async function refreshClaudeAccountUsage(force = false) {
+  let report;
+  try {
+    report = await invoke("claude_account_usage", { force });
+  } catch (error) {
+    showError(error);
+    return;
   }
-  void drainAccountHandoffs();
+  accountUsageReport = report ?? null;
+  claudeAutoSwitchMode = report?.plan?.mode ?? claudeAutoSwitchMode;
+  paintClaudeAccounts();
+  paintAccountSwitchNote();
+  paintClaudeNext();
+  offerAccountSwitch();
+  // 읽기가 나가 있는 동안은 다시 묻는다 — 백엔드의 마루가 물음을 공짜로 만든다.
+  clearTimeout(accountUsageAskTimer.handle);
+  if (report?.fetching) {
+    if (force || accountUsageAskTimer.outAt === null) accountUsageAskTimer.outAt = Date.now();
+    accountUsageAskTimer.handle = setTimeout(
+      () => refreshClaudeAccountUsage(false),
+      usageFollowUpMs(Date.now() - accountUsageAskTimer.outAt),
+    );
+  } else {
+    accountUsageAskTimer.outAt = null;
+  }
+  // `auto`: 표가 바꾸자면(기본 계정이든 벽 판이든) 바로 — 그 계획의 토큰으로. 한 번에 하나.
+  const plan = report?.plan;
+  if (plan?.mode === "auto" && (plan.decision?.kind === "switch" || accountSwitchMoves(plan).length > 0)) {
+    void applyAccountSwitch("auto", plan.token);
+  }
 }
+
+/* 적용은 늘 **어느 제안의** 토큰으로 한다(astra R1) — 알림 단추는 그 알림의 토큰,
+ * 설정 줄의 단추는 그 줄을 그린 계획의 토큰, `auto`는 그 박자의 계획의 토큰. 창이
+ * 이미 다른 계획을 들고 있으면 그 옛 토큰은 보내지도 않고 「제안이 바뀌었다」고
+ * 말한다. 보낸 토큰도 백엔드가 지금 계획과 다시 대조해 다르면 거절한다. */
+async function applyAccountSwitch(by, token) {
+  if (!token || applyingAccountSwitch || token === appliedSwitchToken) return;
+  if (token !== accountUsageReport?.plan?.token) {
+    showError(t("settings.accounts.switchStale", "제안이 바뀌어 그 제안으로는 바꾸지 않았습니다 — 지금 제안을 확인하세요"));
+    return;
+  }
+  applyingAccountSwitch = true;
+  appliedSwitchToken = token;
+  paintAccountSwitchNote();
+  let applied;
+  try {
+    applied = await invoke("claude_autoswitch_apply", { token, by });
+  } catch (error) {
+    showError(error);
+    applyingAccountSwitch = false;
+    await refreshClaudeAccounts();
+    return;
+  } finally {
+    applyingAccountSwitch = false;
+  }
+  try {
+    accountReport = await invoke("claude_accounts");
+  } catch {
+    // The report is re-read below anyway.
+  }
+  claudeLoginMoved();
+  // 원장이 영수증을 거절했으면 성공처럼 말하지 않는다 — 전환은 일어났고, 그 사실을
+  // 오류로 알린다.
+  if (applied?.receipt_error) {
+    showError(t("settings.accounts.switchUnrecorded", "전환은 했지만 원장에 적지 못했습니다: {{why}}", {
+      why: applied.receipt_error,
+    }));
+    return;
+  }
+  const moved = (applied?.panes ?? []).filter((pane) => pane.ok).length;
+  const stuck = (applied?.panes ?? []).length - moved;
+  const words = [
+    applied?.switched_default
+      ? t("settings.accounts.switched", "계정을 {{to}}(으)로 바꿨습니다", { to: accountBadge(applied?.to ?? "") })
+      : t("settings.accounts.switchedPanes", "벽에 선 판을 {{to}}(으)로 옮겼습니다", { to: accountBadge(applied?.to ?? "") }),
+    t("settings.accounts.switchedMoved", "판 {{count}}개 이어짐", { count: moved }),
+  ];
+  if (stuck > 0) words.push(t("settings.accounts.switchedStuck", "{{count}}개는 그대로", { count: stuck }));
+  toast(words.join(" · "));
+}
+
+el("account-switch-now").addEventListener("click", () =>
+  void applyAccountSwitch("ask", el("account-switch-now").dataset.token));
+el("account-autoswitch").addEventListener("change", (event) => {
+  claudeAutoSwitchMode = event.target.value;
+  void commitSetting("claude_autoswitch_mode", "set_claude_autoswitch_mode", {
+    mode: claudeAutoSwitchMode,
+  });
+});
 
 /* Removing an account deletes its credentials with it, so it asks first.
  *

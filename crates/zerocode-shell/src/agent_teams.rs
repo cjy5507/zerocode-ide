@@ -724,6 +724,31 @@ pub fn forget_term(term: u32) {
     }
 }
 
+/// How a closed pane's program left (t-7538).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneExit {
+    /// Its whole process group is gone.
+    Gone,
+    /// Something of it outlived the wait.
+    Lingering(ExitWitness),
+}
+
+/// What a later look asks about a program that outlived its pane's close —
+/// the ledger's own type, since the ledger holds it on the worker's row
+/// until a look sees the program gone (t-7538, astra R3).
+pub use zerocode_core::orchestration::ExitWitness;
+
+/// Which managed login a pane was launched as (t-7538): the account row's id
+/// and the login that row named at that launch ([`crate::usage_runtime`]'s
+/// `claude_login_key`). A pane keeps the credentials it started with, so its
+/// wall is judged by a reading of THIS login — an id that has since come to
+/// name another login is another account's number (astra R6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneLogin {
+    pub account: String,
+    pub login: String,
+}
+
 /// What [`run`] needs from the window, kept behind a trait so the whole
 /// protocol can be driven in a test without a pty or a Tauri handle.
 ///
@@ -862,6 +887,37 @@ pub trait Host {
     fn capture(&self, term: u32) -> Option<String>;
     fn focus(&self, term: u32) -> bool;
     fn close(&self, term: u32);
+    /// Close a pane and answer only once the program that was in it is
+    /// gone — its whole process group (t-7538). The account switch resumes
+    /// the same conversation in a new pane right after, and a CLI still
+    /// flushing the old pane's last lines is a second writer on the same
+    /// transcript. [`PaneExit::Lingering`] is a group that outlived the
+    /// wait, with what a later look asks about it
+    /// ([`Self::exit_seen`]): the caller must not start the conversation
+    /// again, and no restore may either, until a look sees it gone.
+    ///
+    /// Hosts without processes of their own close and answer at once.
+    fn close_gone(&self, term: u32) -> PaneExit {
+        self.close(term);
+        PaneExit::Gone
+    }
+
+    /// The program running in a pane, read while it stands — what a switch
+    /// holds on the worker's row before it closes the pane (t-7538, astra
+    /// R3), and what [`Self::exit_seen`] is later asked about. `None` for a
+    /// pane with no program the host can name; hosts without processes of
+    /// their own have none.
+    fn exit_witness(&self, _term: u32) -> Option<ExitWitness> {
+        None
+    }
+
+    /// Whether the program a lingering close left behind has left since
+    /// (t-7538, astra R3) — asked by every restore of that worker before it
+    /// opens the conversation again. Hosts without processes of their own
+    /// never leave one behind.
+    fn exit_seen(&self, _witness: &ExitWitness) -> bool {
+        true
+    }
 
     /// The provider conversation already observed in a new terminal, when
     /// one raced ahead of the durable worker reseat.
@@ -972,6 +1028,17 @@ pub trait Host {
     /// while nobody looks at the window. Test and tmux-only hosts read
     /// nothing.
     fn ask_usage(&self, _gauge: &str) {}
+    /// The managed login this pane was launched as, when the window recorded
+    /// one (t-7538) — the wall witness judges the pane against THAT login's
+    /// reading. `None` is "unknown", never "the selected one".
+    fn pane_login(&self, _term: u32) -> Option<PaneLogin> {
+        None
+    }
+
+    /// The account id of [`Self::pane_login`].
+    fn pane_account(&self, term: u32) -> Option<String> {
+        self.pane_login(term).map(|held| held.account)
+    }
 
     /// Publish a restored worker only after its durable seat has moved. Fake
     /// hosts need no renderer surface and therefore default to doing nothing.

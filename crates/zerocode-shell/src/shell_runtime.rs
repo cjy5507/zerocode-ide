@@ -2584,6 +2584,7 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
     zo_integration_runtime::prune_owner(state, ZoChannelOwner::Term(term));
     state.zo_worker_deliveries().remove(&term);
     state.agent_terms().remove(&term);
+    state.pane_accounts().remove(&term);
     state.shell_panes().remove(&term);
     // Its token goes with it: an event still in flight for a pane that closed
     // has no tab to paint, and a token left behind would let the NEXT occupant

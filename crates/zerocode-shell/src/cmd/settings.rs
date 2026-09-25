@@ -293,6 +293,39 @@ pub(crate) fn agent_teams_mode(state: State<'_, AppState>) -> Result<TeamsMode, 
     Ok(load_settings(state.settings())?.document.agent_teams_mode)
 }
 
+/// Whether the window may switch the Claude account by itself (t-7538).
+/// Refused for a word the table does not hold, so the file never carries
+/// one the beat cannot read.
+#[tauri::command(async)]
+pub(crate) fn set_claude_autoswitch_mode(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<SettingsSnapshot, String> {
+    let mode = zerocode_core::account_autoswitch::AutoSwitchMode::of(&mode)
+        .ok_or_else(|| format!("{mode}는 이 창이 아는 자동 전환 낱말이 아닙니다 (off|ask|auto)"))?;
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::CLAUDE_AUTOSWITCH_MODE],
+        move |settings| {
+            settings.claude_autoswitch_mode = mode;
+            Ok(())
+        },
+    )
+}
+
+#[tauri::command(async)]
+pub(crate) fn claude_autoswitch_mode(
+    state: State<'_, AppState>,
+) -> Result<zerocode_core::account_autoswitch::AutoSwitchMode, String> {
+    Ok(load_settings(state.settings())?
+        .document
+        .claude_autoswitch_mode)
+}
+
 #[tauri::command(async)]
 pub(crate) fn set_hide_automation_workspaces(
     app: AppHandle,

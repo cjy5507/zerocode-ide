@@ -298,7 +298,11 @@ fn read_claude_usage(body: &serde_json::Value) -> OauthUsage {
 }
 
 /// One Claude window: `utilization` first, `used_percentage` as the older
-/// spelling, clamped the way Orca clamps (`mapClaudeUsageWindow`).
+/// spelling — the figure as the server said it. The status bar clamps what
+/// it SHOWS the way Orca clamps (`mapClaudeUsageWindow`,
+/// `oauth_usage_window`); a figure outside 0–100 is kept outside it here,
+/// so the one road that chooses an account by it can tell it is no reading
+/// (t-7538, astra R6).
 fn claude_window(raw: Option<&serde_json::Value>, window_minutes: u32) -> Option<OauthWindow> {
     let raw = raw?;
     let percent = raw
@@ -310,7 +314,7 @@ fn claude_window(raw: Option<&serde_json::Value>, window_minutes: u32) -> Option
         })?;
     Some(OauthWindow {
         #[allow(clippy::cast_possible_truncation)]
-        used_percent: percent.clamp(0.0, 100.0) as f32,
+        used_percent: percent as f32,
         window_minutes,
         resets_at: raw.get("resets_at").and_then(reset_stamp_ms),
     })
@@ -341,12 +345,10 @@ fn claude_scoped_weekly(body: &serde_json::Value) -> Option<OauthWindow> {
             })
         });
     if let Some(limit) = scoped {
+        // As the server said it, like `claude_window`.
         #[allow(clippy::cast_possible_truncation)]
         return Some(OauthWindow {
-            used_percent: limit
-                .get("percent")
-                .and_then(serde_json::Value::as_f64)?
-                .clamp(0.0, 100.0) as f32,
+            used_percent: limit.get("percent").and_then(serde_json::Value::as_f64)? as f32,
             window_minutes: 10080,
             resets_at: limit.get("resets_at").and_then(reset_stamp_ms),
         });
@@ -522,16 +524,22 @@ mod tests {
             serde_json::json!({ "seven_day_fable": { "utilization": 3.0 } });
         assert!(read_claude_usage(&legacy).fable_weekly.is_some());
 
-        // Overflow clamps; an empty body is three absences, never zeros.
+        // An overflow is kept as said — the display clamps it, and the one
+        // road that chooses an account by it refuses it (t-7538, astra R6);
+        // an empty body is three absences, never zeros.
         let over: serde_json::Value = serde_json::json!({ "five_hour": { "utilization": 130.0 } });
-        assert!(
-            (read_claude_usage(&over)
-                .session
-                .expect("clamped")
-                .used_percent
-                - 100.0)
-                .abs()
-                < 0.01
+        let said = read_claude_usage(&over).session.expect("the overflow");
+        assert!((said.used_percent - 130.0).abs() < 0.01);
+        assert_eq!(
+            crate::usage_runtime::oauth_usage_window(said).used_percent,
+            100
+        );
+        let under: serde_json::Value = serde_json::json!({ "five_hour": { "utilization": -5.0 } });
+        let said = read_claude_usage(&under).session.expect("the underflow");
+        assert!((said.used_percent + 5.0).abs() < 0.01);
+        assert_eq!(
+            crate::usage_runtime::oauth_usage_window(said).used_percent,
+            0
         );
         let empty = read_claude_usage(&serde_json::json!({}));
         assert!(empty.session.is_none() && empty.weekly.is_none() && empty.fable_weekly.is_none());

@@ -988,6 +988,7 @@ pub(crate) async fn resume_vault_session(
     if let Some(kind) = zerocode_core::AgentKind::from_slug(&session.agent) {
         state.agent_terms().insert(term, kind.slug());
     }
+    note_pane_account(&state, term, &env);
     state.launch_tokens().insert(term, launch_token);
     state.cadence().wake();
     Ok(term)
