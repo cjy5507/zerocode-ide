@@ -4,6 +4,9 @@
 
 _since v1.1.26 (35 commits)_
 
+### dashboard
+- feat(jev): the Jev dashboard draws each seat's days, accuracy trend with its lower bound and baseline, the rows owed before the next judgment, latency and daily tokens with an estimated cost, in the shell's own tokens for dark and light (t-9633)
+
 ### permissions
 - feat(permissions): the Computer Use permissions card says what macOS will actually do — each TCC row of the app and its helper reads `granted`, `stale` (a grant recorded under an older build's signature), `denied` or `unreadable`, and a stale row offers reset and System Settings (t-6058)
 
