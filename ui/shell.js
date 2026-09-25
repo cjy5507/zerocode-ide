@@ -11466,10 +11466,22 @@ function paneChatStatus(state) {
   return state === "idle" ? "done" : "idle";
 }
 
+/* What a pane's page shows of its hooks, as one key: the agent, its state and
+ * that state's stamp (the turn clock counts from it), and the permission mode
+ * the status line wears. `paintPaneChat` keeps the key it painted, so a read
+ * that brings no new line still repaints once when a hook moved it — the end
+ * of a turn whose last words an earlier read already carried, which left the
+ * spinner turning after the turn was over — and a resting beat, whose key
+ * stands, repaints nothing (t-9741). */
+function paneChatKey(term) {
+  return [paneAgents.get(term), hookStates.get(term), hookStamps.get(term), panePermissionModes.get(term)].join(" ");
+}
+
 function paintPaneChat(term) {
   const held = paneChats.get(term);
   if (!held?.host || held.host.hidden) return;
   const run = held.run;
+  run.helper.hookKey = paneChatKey(term);
   run.agent = paneAgents.get(term) ?? run.agent;
   run.name = agentName(run.agent);
   const status = paneChatStatus(hookStates.get(term));
@@ -11679,7 +11691,10 @@ async function pollHelperPages() {
   // the composer read it there), and a change repaints with no new turn.
   const wireChanged = held.id === WIRE_LOG_ID && holdWireState(tab.worker, more);
   if (document.hidden || activeHelperPage() !== tab) return;
-  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved) return;
+  // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
+  // that brought no new line repaints once when a hook moved since the paint.
+  const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
+  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved) return;
   if (wireChanged) syncWorkerComposers(tab.worker);
   if (wireChanged) settleComposerQueue(tab.worker);
   // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
