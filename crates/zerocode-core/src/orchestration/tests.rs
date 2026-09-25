@@ -12373,6 +12373,47 @@ fn what_followed_a_silence_is_the_first_answer_the_ledger_holds_within_the_windo
     );
 }
 
+/// What followed a silence can take longer than two hours to arrive (t-9087).
+/// Every one of the 104 silences this machine's ledger answered in the week
+/// to 2026-09-25 was followed within 3.95 hours — p50 46 minutes, p90 2.7
+/// hours, p95 3.3 — and a two-hour window closed on 19 of them first: the
+/// eight a `finished_without_report` answer had called were written down as
+/// needing nobody, and every one of them then drew the coordinator's mail or
+/// ended without a report. A mail two and a half hours after the question is
+/// what followed it.
+#[test]
+fn a_silence_the_coordinator_answers_after_two_hours_is_answered() {
+    use crate::stall_cause::{Followed, followed};
+    const HOUR: i64 = 60 * 60 * 1_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name stall");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&worker)
+        .and_then(|held| held.dispatch.clone())
+        .expect("an open attempt");
+    let asked = bench.clock;
+    bench.clock += 5 * HOUR / 2;
+    bench.json(&format!(
+        "send --to worker:{worker} --type status --body nudge"
+    ));
+    let mailed = bench.clock;
+    assert_eq!(
+        followed(
+            &bench.ledger.runs()[0],
+            &worker,
+            &dispatch,
+            asked,
+            mailed + 1
+        ),
+        Some((Followed::Mail, mailed))
+    );
+}
+
 fn a_transient_marker(key: &str) -> TransientErrorMarker {
     TransientErrorMarker {
         source: "transcript".to_string(),
