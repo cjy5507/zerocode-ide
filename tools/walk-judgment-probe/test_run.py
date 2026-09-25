@@ -95,6 +95,8 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(run.ARMS["before-ahead"], ("before", True))
         self.assertEqual(run.ARMS["after-ahead"], ("after", True))
         self.assertEqual(run.SCENARIOS["steps"]["page"], "steps.html")
+        self.assertIn('id="next"', (run.HERE / "steps.html").read_text(), "the steps page is ready at #next")
+        self.assertEqual(run.SCENARIOS["steps"]["ready"], "#next")
         self.assertTrue((run.HERE / "steps.html").exists())
 
     def test_success_is_the_pages_own_word(self):

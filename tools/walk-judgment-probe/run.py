@@ -100,6 +100,7 @@ SCENARIOS = {
         "steps": 4,
         "stand_in": False,
         "page": "steps.html",
+        "ready": "#next",
     },
 }
 
@@ -389,6 +390,7 @@ def walk_once(binary: pathlib.Path, label: str, scenario: str, pane: str, url: s
         "ZEROCODE_WALK_PROBE_PANE": pane,
         "ZEROCODE_WALK_PROBE_URL": (HERE / spec["page"]).as_uri() if spec.get("page") else url,
         "ZEROCODE_WALK_PROBE_OVERLAP": "1" if overlap else "0",
+        "ZEROCODE_WALK_PROBE_READY": spec.get("ready", "#search"),
         "ZEROCODE_WALK_PROBE_KEY": os.environ["TYPESAFE_API_KEY"],
         "ZEROCODE_WALK_PROBE_OUT": str(out / "rows.jsonl"),
         "ZEROCODE_WALK_PROBE_HOME": str(home),

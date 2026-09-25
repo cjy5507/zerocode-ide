@@ -366,6 +366,8 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
     // `walk --overlap`: the walk asks ahead, and a page's world hands back
     // the screen its press left.
     let overlap = knob("ZEROCODE_WALK_PROBE_OVERLAP").is_some_and(|flag| flag == "1");
+    // What says the page has loaded: a control of its own.
+    let ready = knob("ZEROCODE_WALK_PROBE_READY").unwrap_or_else(|| "#search".to_string());
 
     // A zo home of the probe's own: its settings consent one workspace and
     // switch the browser seat on; its ledgers are the only ones written.
@@ -403,7 +405,7 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
         // The page as it loads, every walk: a fresh document.
         let (went, _) = drive(&["goto".to_string(), pane.clone(), url.clone()]);
         assert_eq!(went.exit_code, 0, "{}", went.stderr);
-        let (waited, _) = drive(&["wait".to_string(), pane.clone(), "#search".to_string()]);
+        let (waited, _) = drive(&["wait".to_string(), pane.clone(), ready.clone()]);
         assert_eq!(waited.exit_code, 0, "{}", waited.stderr);
 
         let began = Instant::now();
