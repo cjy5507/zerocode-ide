@@ -7,12 +7,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use api::SystemOneClient;
-use runtime::patch_review::{ask_for, ask_reading, task_by, TaskReading, Verdict};
+use runtime::patch_review::{ask_for, TaskReading, Verdict};
 use runtime::{ContentBlock, ConversationMessage, MessageRole, PatchAsk};
 use zerocode_core::jev::door::{JevSettings, Refused};
 use zerocode_core::jev::{digest_of, fingerprint_of, JevMode, PATCH_REVIEW, PATCH_REVIEW_REGRET_TURNS};
 
 use super::super::jev_gate::JevDoor;
+use super::super::replay_support::{self, ReplayPoint};
 use super::super::jev_mock::{machine, Mock};
 use super::super::shadow_ledger::read_shadow_rows;
 use super::*;
@@ -482,62 +483,6 @@ const REPLAY_OUT_ENV: &str = "ZEROCODE_PATCH_REVIEW_REPLAY_OUT";
 /// under it.
 const REPLAY_IN_FLIGHT: usize = 4;
 
-/// One patch of a transcript, as the replay asks about it and grades it.
-struct ReplayPoint {
-    ask: PatchAsk,
-    hindsight: Option<runtime::patch_review::Hindsight>,
-    /// The task every reading reads at this patch, in `TaskReading::ALL`'s
-    /// order — read here, never sent, so one replay shows what the others
-    /// would have asked about the same sample.
-    tasks: Vec<String>,
-}
-
-/// What became of the patch `ask` names, read off the turns from the one it
-/// was written in onward — `None` when the transcript ends before its window
-/// does. Only the label reads past the patch; the ask was made from the
-/// messages before it.
-fn hindsight_in(history: &[ConversationMessage], at: usize, ask: &PatchAsk) -> Option<runtime::patch_review::Hindsight> {
-    let turns = runtime::patch_review::persons_turns(history);
-    let mut start = 0;
-    let mut watched = vec![runtime::patch_review::Watched::of(ask)];
-    for turn in turns {
-        let end = start + turn.len();
-        if end > at {
-            let decided = runtime::patch_review::hindsight_of_turn(&mut watched, turn);
-            if let Some((_, hindsight)) = decided.into_iter().next() {
-                return Some(hindsight);
-            }
-        }
-        start = end;
-    }
-    None
-}
-
-/// Every patch in `history` a review would have been asked about: an edit's
-/// result that wrote one, asked from the messages before it with the task
-/// read as `reading` reads it.
-fn replay_points(history: &[ConversationMessage], reading: TaskReading) -> Vec<ReplayPoint> {
-    let mut points = Vec::new();
-    for (at, message) in history.iter().enumerate() {
-        for block in &message.blocks {
-            let ContentBlock::ToolResult { tool_use_id, tool_name, output, is_error, .. } = block else {
-                continue;
-            };
-            if *is_error {
-                continue;
-            }
-            let before = &history[..at];
-            let Some(asked) = ask_reading(before, "replay", tool_use_id, tool_name, output, reading) else {
-                continue;
-            };
-            let hindsight = hindsight_in(history, at, &asked);
-            let tasks = TaskReading::ALL.iter().map(|other| task_by(before, *other)).collect();
-            points.push(ReplayPoint { ask: asked, hindsight, tasks });
-        }
-    }
-    points
-}
-
 /// What each reading read over the replay's sample: on how many patches its
 /// task differed from the seat's own and from `v2b`'s, and how long it ran —
 /// so a table of one reading's answers can be read beside what it was asked.
@@ -636,12 +581,12 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
             skipped += 1;
             continue;
         };
-        let Some(history) = super::super::replay_support::history_as_it_stood(&session) else {
+        let Some(history) = replay_support::history_as_it_stood(&session) else {
             skipped += 1;
             continue;
         };
         read += 1;
-        points.extend(replay_points(&history, reading));
+        points.extend(replay_support::replay_points(&history, reading));
     }
     let in_seed = points.len();
     // A limit takes points spread evenly over the seed, not its head: the

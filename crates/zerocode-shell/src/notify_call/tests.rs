@@ -574,16 +574,6 @@ struct ReplayLabel {
     reacted: bool,
 }
 
-/// The ring kind a seed verb names — the verb table read backwards.
-fn ring_of_verb(verb: &str) -> Option<Ring> {
-    match verb {
-        notify::VERB_ATTENTION => Some(Ring::Attention),
-        notify::VERB_FINISHED | notify::VERB_STOPPED => Some(Ring::Completion),
-        notify::VERB_PUSH => Some(Ring::Push),
-        _ => None,
-    }
-}
-
 /// One ring's outcome in one pass.
 struct Outcome {
     index: usize,
@@ -595,13 +585,13 @@ struct Outcome {
 }
 
 fn ask_one(wire: &Wire, workspace: &Path, row: &ReplayRow) -> Option<(Call, f64, u64)> {
-    let ring = ring_of_verb(&row.verb)?;
+    let ring = notify::from_verb(&row.verb)?;
     let recent: Vec<Recent> = row
         .recent
         .iter()
         .filter_map(|one| {
             Some(Recent {
-                ring: ring_of_verb(&one.verb)?,
+                ring: notify::from_verb(&one.verb)?,
                 interrupted: one.interrupted,
                 ago_ms: one.ago_ms,
                 reacted: one.reacted,
