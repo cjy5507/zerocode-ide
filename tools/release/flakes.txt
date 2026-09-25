@@ -102,3 +102,9 @@ root:artifact_publish::tests::a_store_lock_held_for_a_moment_is_waited_out_and_o
 # funnel's deadline — and passed solo ×3 (load 25). The same mock-Codex live-path timing family as the two
 # `decision_shadow` lines above; the routing and shadow code are unchanged since v1.1.21.
 zo:misc_tools::smart_router::probe_exec::live_path_tests::decision_shadow::routing_is_the_same_with_the_shadow_on_or_off
+
+# 2026-09-25 (t-8938 review: full shell `--bins` three times at load 59–69 beside three worker builds): the stuck-shell
+# test asserts the kill of a shell that never answers within its 5 s wall clock (`SPAWN_TIMEOUT`, measured with
+# `Instant::now` on the machine, not a clock the test stands still) and once in three runs read the wall past it;
+# green solo ×3. The same wall-clock-under-load family as the lines above; `shell_path` is unchanged by the branch.
+root:shell_path::tests::a_real_shell_is_read_and_a_stuck_one_is_killed
