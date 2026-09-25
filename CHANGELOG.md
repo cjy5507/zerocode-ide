@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.1.27] — 2026-09-26
+
+_since v1.1.26 (35 commits)_
+
+### feat
+- feat(board): 「답할 우편」 is the questions that wait on an answer — the ledger's notices stand under it as 「소식」, one line per quiet episode while the silence goes on, folded into a count after a day, and the desk's three numbers are the backend's (t-9456)
+- feat(board): a crowded orbit names only the planets that are doing something (t-9444)
+- feat(board): the relations tab draws a planetary system, and remembers which view a person chose (t-9444)
+
+### fix
+- fix(board): the crowded-orbit rule names each state in its own selector (t-9444)
+- fix(board): a needs-you or failed planet's ring is drawn at its own width (t-9444)
+- fix(board): the view toggle stands in the picture's head, so the card toolbar keeps its one line (t-9444)
+- fix(board): the orbit carries the live map's leaving door, spends tokens instead of pixels, and keeps a label's side (t-9444)
+- fix(jev): a notify ring nobody was there for names why it compares nothing — `notify_call::agreed` says `away` where it used to say nothing (t-9427)
+- fix(jev): a pane nobody moved grades only the answer whose room it stood in — a recorded placement the pane never tried is `not_carried`, not wrong (placement rubric 1 → 2, t-9427)
+- fix(jev): the latency line reads the answers' own times, so an acting seat no longer falls on the one timeout its answer line forgives — and recall's wall is its own number, measured (t-9427)
+
+### orchestration
+- orchestration: one reading of a wait and one of a silence going on — `Run::awaits_answer` is the step `awaiting_reply` takes, and `Run::quiet_notice_stands` says whether a `went_quiet` notice still tells of the attempt's current silence (t-9456)
+
+### tools
+- tools(jev-seat-replay): every seat's judgment before and after a change, from two zo binaries on one read-only copy of the ledgers — the combined table only (t-9427)
+
 ## [1.1.26] — 2026-09-26
 
 _since v1.1.25 (72 commits)_
