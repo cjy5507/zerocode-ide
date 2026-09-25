@@ -652,7 +652,9 @@ pub fn agreement_since(rows: &[Value], since_ms: i64) -> crate::jev::promote::Ag
 /// ([`AGREED`]) were written since, to the time of the `wanted`th newest, or
 /// to the first row when the rows hold fewer. A time is a cut, so marks
 /// sharing the time the cut falls on all count: a window reached back holds
-/// at least `wanted` marks, not always exactly that many.
+/// at least `wanted` marks, not always exactly that many. The judge asks for
+/// as many as its agreement line can be cleared on
+/// ([`crate::jev::promote::marks_that_can_clear`], t-9468).
 ///
 /// `rows` are one seat's series ([`crate::jev::promote::OnVersion::marks`]):
 /// the reach back is as far as the marks of the words the seat asks now and
@@ -665,8 +667,8 @@ pub fn agreement_since(rows: &[Value], since_ms: i64) -> crate::jev::promote::Ag
 /// — 110 of the 444 rings this machine's ledger held on 2026-09-25 — so its
 /// 53-ring window held 15 marks, and the judge said `too_few_compared` with
 /// 110 in hand; the placement seat's 25 requests held 9 of its 87. The
-/// sample floor asks for marks in hand, and a window that already holds it
-/// reads its own marks alone.
+/// judge asks for marks in hand, and a window that already holds them reads
+/// its own marks alone.
 #[must_use]
 pub fn marks_from<'a>(
     rows: impl IntoIterator<Item = &'a Value>,

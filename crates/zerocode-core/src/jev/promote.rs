@@ -44,10 +44,11 @@
 //! that marks one request in four — the notify seat grades a ring only when
 //! the person was there to turn to it — held 15 marks in its 53-ring window
 //! with 110 on its record, and sat at `too_few_compared` for good. The
-//! window's marks reach back to hold the sample floor
-//! ([`crate::jev::summary::marks_from`]) — within the seat's series, the
-//! words it asks now and the version answering now, and never past it; a
-//! window that holds the floor reads its own.
+//! window's marks reach back to the width the seat's agreement line can be
+//! cleared on with the negatives it asks inside ([`marks_that_can_clear`],
+//! t-9468; [`crate::jev::summary::marks_from`]) — within the seat's series,
+//! the words it asks now and the version answering now, and never past it; a
+//! window that holds that width reads its own.
 //!
 //! Evidence is one version's (2026-09-23, t-6187). Every request names the
 //! vendor's alias unless a person pinned a version, and the alias answers
@@ -116,9 +117,10 @@ pub struct Judged {
     /// How many requests that window wants before the floor can be cleared
     /// at all, for a screen that says "17 of 73".
     pub window_wanted: usize,
-    /// How often, over that window's marks — reached back to hold the sample
-    /// floor ([`crate::jev::summary::marks_from`]) — the judgment named what
-    /// the reader it would replace named.
+    /// How often, over that window's marks — reached back to the width the
+    /// agreement line can be cleared on ([`marks_that_can_clear`],
+    /// [`crate::jev::summary::marks_from`]) — the judgment named what the
+    /// reader it would replace named.
     pub agreement: Agreement,
     /// Why that window's rows that compared nothing say so, word by word
     /// ([`crate::jev::summary::not_compared_words`], t-9556): the
@@ -598,8 +600,9 @@ pub fn asked_toward_judgment(seat: &JevUse, rows: &[Value]) -> usize {
 /// a standing under these.
 ///
 /// The window's marks are the series' marks written since its first
-/// request, reached back within the series to hold the sample floor
-/// ([`crate::jev::summary::marks_from`], t-9087): a seat whose marks are
+/// request, reached back within the series to the width the agreement line
+/// can be cleared on ([`marks_that_can_clear`], t-9468;
+/// [`crate::jev::summary::marks_from`], t-9087): a seat whose marks are
 /// sparser than its requests is judged on its marks, not held for them —
 /// and on marks of the words it asks now and the version answering now
 /// alone, however far back they reach.
@@ -630,10 +633,14 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
     // The window's marks are the series' marks written since its first
     // request — a late label of an older request of the same words counts,
     // a label of other words is not in the series at all — reached back
-    // within the series while they hold fewer than the sample floor
-    // (t-9087).
+    // within the series while they hold fewer than the agreement line can
+    // be cleared on with the negatives inside (t-9087, t-9468): the width
+    // the rows' side reads off its own floor for the same reason
+    // ([`rows_that_can_clear_forgiving`]), and not the sample floor, which
+    // is how many marks the line may speak on, not how many it can pass on.
+    let reach = marks_that_can_clear(seat).unwrap_or(sample_floor);
     let marks_since =
-        crate::jev::summary::marks_from(version.marks.iter().copied(), since_ms, sample_floor);
+        crate::jev::summary::marks_from(version.marks.iter().copied(), since_ms, reach);
     let agreement = crate::jev::summary::agreement_rows(version.marks.iter().copied(), marks_since);
     let not_compared_by =
         crate::jev::summary::not_compared_words(version.marks.iter().copied(), marks_since);

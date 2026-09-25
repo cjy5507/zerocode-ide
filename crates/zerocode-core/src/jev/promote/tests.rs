@@ -2691,8 +2691,11 @@ fn asked_then_marked_as(
 /// on 2026-09-25 — so the 53 rings its answer floor is read on held 15 marks,
 /// and the seat sat at `too_few_compared` with 110 in hand; the placement
 /// seat's 25 held 9 of 87. The window's marks reach back from its first
-/// request to hold the sample floor, and no further: a window that already
-/// holds the floor reads its own marks alone.
+/// request to the width its agreement line can be cleared on with the
+/// negatives it asks inside ([`marks_that_can_clear`], t-9468 — not the
+/// sample floor, which is the judgment's cadence and no width a line can be
+/// cleared on), and no further: a window that already holds that width
+/// reads its own marks alone.
 #[test]
 fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
     for seat in [&crate::jev::NOTIFY, &crate::jev::PLACEMENT] {
@@ -2700,6 +2703,7 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
         let floor = seat.agreement_rows_wanted.expect("a label sample floor");
         let misses = seat.negatives_wanted.expect("a promoting seat");
         let older = marks_that_can_clear(seat).expect("a width the line can be cleared on");
+        let reach = older;
         let inside = 3;
         // Rings asked before the window, each marked before it began — the
         // three that say no the oldest...
@@ -2721,15 +2725,15 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
         ));
         let judged = judge_seat(seat, &rows).expect("judged");
         assert_eq!(
-            judged.agreement.compared, floor,
-            "{}: the window reaches back to the newest {floor} marks, and no further",
+            judged.agreement.compared, reach,
+            "{}: the window reaches back to the newest {reach} marks, and no further",
             seat.id
         );
-        assert_eq!(judged.agreement.agreed, floor, "{}", seat.id);
+        assert_eq!(judged.agreement.agreed, reach, "{}", seat.id);
         assert_eq!(judged.verdict, Verdict::Rise, "{}: {judged:?}", seat.id);
 
-        // A window that holds the floor on its own reads only its own marks:
-        // the older ones that said no are left where they are.
+        // A window that holds that width on its own reads only its own
+        // marks: the older ones that said no are left where they are.
         let mut full = asked_then_marked(
             seat,
             0,
@@ -2741,14 +2745,14 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
         full.extend(asked_then_marked(
             seat,
             start,
-            wanted,
-            floor,
+            wanted.max(reach),
+            reach,
             |_| json!({"agreed": true, "baselineAgreed": false}),
         ));
         let judged = judge_seat(seat, &full).expect("judged");
         assert_eq!(
             (judged.agreement.compared, judged.agreement.agreed),
-            (floor, floor),
+            (reach, reach),
             "{}",
             seat.id
         );
@@ -2786,12 +2790,12 @@ fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
 /// a window's marks reach back (t-9087 r2, over t-6877): the command guard's
 /// version 2, the stall seat's 4 and the summons' 5 each ask the words
 /// before them graded by another label, and the label's version rides the
-/// request. A window of the new words holding fewer marks than the sample
-/// floor reaches back through its own series and stops there — short of the
-/// older words' thick record and the rise it earned, of a late label of an
-/// older request, of the requests another version answered, and of the
-/// words a rollback left behind — and inside its series it still reaches
-/// its floor.
+/// request. A window of the new words holding fewer marks than its line can
+/// be cleared on reaches back through its own series and stops there —
+/// short of the older words' thick record and the rise it earned, of a late
+/// label of an older request, of the requests another version answered, and
+/// of the words a rollback left behind — and inside its series it still
+/// reaches that width ([`marks_that_can_clear`], t-9468).
 #[test]
 fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
     const OLDER_VERSION: &str = "jev-1.12.0";
@@ -2805,9 +2809,8 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
         let wanted = window_wanted_for(seat).expect("a promoting seat");
         let floor = seat.agreement_rows_wanted.expect("a label sample floor");
         let misses = seat.negatives_wanted.expect("a promoting seat");
-        let thick = marks_that_can_clear(seat)
-            .expect("a width the line can be cleared on")
-            .max(wanted);
+        let reach = marks_that_can_clear(seat).expect("a width the line can be cleared on");
+        let thick = reach.max(wanted);
         let inside = 3;
         let rising =
             |k: usize| json!({"agreed": k >= misses, "baselineAgreed": k.is_multiple_of(2)});
@@ -2842,7 +2845,8 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
         assert_eq!(standing(seat, &rows), Stand::Recording, "{}", seat.id);
 
         // Today's words marked before their window, then the window and its
-        // few marks: the reach back reads today's newest marks to the floor.
+        // few marks: the reach back reads today's newest marks to the width
+        // the line can be cleared on.
         let mut rows = asked_then_marked_as(seat, before, None, 0, thick, 0, no);
         let start = rows.len();
         rows.extend(asked_then_marked_as(
@@ -2861,8 +2865,8 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
         let clean = judge_seat(seat, &rows).expect("judged");
         assert_eq!(
             (clean.agreement.compared, clean.agreement.agreed),
-            (floor, floor),
-            "{}: a sparse window of today's words reads its floor in today's series",
+            (reach, reach),
+            "{}: a sparse window of today's words reads its width in today's series",
             seat.id
         );
         // The older words' requests graded after the window began — a late
