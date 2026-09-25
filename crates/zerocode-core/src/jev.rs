@@ -2843,9 +2843,9 @@ pub const CHALLENGER_APPLY_DEADLINE_MS: u64 = 2_000;
 /// design the incumbent is about to act on; the attempt acts on the
 /// INCUMBENT's design either way, and the two — anonymized, so the judge
 /// scores the plan rather than the name — are put to Jev as a closed
-/// comparison. The label joins the verification loop's own work verdict to
-/// that comparison. Without a work verdict, the comparison alone cannot say
-/// the challenger won. A finished attempt is never a win by itself
+/// comparison. The label is quality: the verification loop's own verdict
+/// where the attempt has one, and the anonymized comparison where it does
+/// not. A finished attempt is never a win by itself
 /// ([[agent-turn-done-is-not-task-verified]]).
 ///
 /// What it sends is the request and two designs. What it decides is nothing
@@ -2862,8 +2862,7 @@ pub const CHALLENGER: JevUse = JevUse {
     id: "challenger",
     setting: "jevChallenger",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
-    // A new seat observes first; moving a role needs the person's acting mode.
-    recommended: JevMode::Shadow,
+    recommended: JevMode::Auto,
     repeat: None,
     sends: &[
         Sent {

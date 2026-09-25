@@ -179,12 +179,11 @@ fn every_use_is_off_until_a_person_says_otherwise() {
 
 /// What a use stands at when a person turned Jev on and chose nothing seat by
 /// seat (2026-09-23, §6.1): one of the use's own modes — `auto` wherever the
-/// use offers it except a seat whose first rollout observes in shadow, and
-/// the agent's own tool, which has nothing to rise on, answers the agent.
+/// use offers it, and the agent's own tool, which has nothing to rise on,
+/// answers the agent.
 ///
-/// `shadow` for the vault pair review, whose proposals a person reads at the
-/// weekly review and which never rises, and for a new challenger seat until
-/// the person explicitly chooses an acting mode.
+/// `shadow` for the one seat that only ever records — the vault pair review,
+/// whose proposals a person reads at the weekly review and which never rises.
 /// `off` only for a seat stopped on its own evidence until it is redesigned
 /// (docs/design/jev-engineering-review-20260923.md §7, t-6342): the patch
 /// review and the window's worker effort. Anywhere else a switch turned on
@@ -192,7 +191,7 @@ fn every_use_is_off_until_a_person_says_otherwise() {
 #[test]
 fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
     let stopped = [PATCH_REVIEW.id, STEP_EFFORT.id];
-    let recording = [VAULT_PAIRS.id, CHALLENGER.id];
+    let recording = [VAULT_PAIRS.id];
     for row in &JEV_USES {
         assert!(
             row.modes.contains(&row.recommended),
