@@ -161,7 +161,11 @@ pub struct Options {
     /// ([`World::unsettled`]), the next question is begun there, and the
     /// settle — the fifty quiet milliseconds a press by number waits — is
     /// waited for behind it ([`World::settle`]). A page that did not settle
-    /// cancels what was begun, and the walk looks again.
+    /// cancels what was begun, and the walk looks again. A page the press
+    /// left as it was pressed begins nothing — its change may come after the
+    /// press answered (a result a fetch renders), and a question begun on it
+    /// is one the settled page no longer asks — so the look after its settle
+    /// asks in turn, one request a step as ever.
     pub overlap: bool,
     /// The second rung (t-6132 S3): when the seat's judgment is under its
     /// press floor, ask the second reader the walk was handed
@@ -1651,10 +1655,14 @@ fn walk(
             // The screen the next question is asked on: the one a phone's press
             // settled on (t-6385), or — for a page whose press answered before
             // it settled — the page as the press left it (t-9712); never after
-            // a link, whose page is another's.
+            // a link, whose page is another's, and never a page the press left
+            // as it was pressed: its change may still be on the way (a result
+            // a fetch renders), so the look after its settle asks in turn.
             let left = match settled.and_then(|settled| settled.screen) {
                 Some(screen) => Some(screen),
-                None => world.unsettled().filter(|_| !presses_a_link(seen, chosen)),
+                None => world
+                    .unsettled()
+                    .filter(|page| !presses_a_link(seen, chosen) && !seen.same_as(page)),
             };
             // Ask ahead on it: the next question as the loop's own head will
             // put it — a screen that moved starts its numbers afresh, one that
