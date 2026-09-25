@@ -38,6 +38,9 @@ pub(super) struct FakeJudge {
     pub(super) begun: Vec<Vec<usize>>,
     /// The state of each question begun ahead, as the wire would carry it.
     pub(super) begun_state: Vec<Value>,
+    /// Every question's heads as the wire would carry them, asked in turn
+    /// or begun ahead, in the order they were asked (t-6720).
+    pub(super) questions: Vec<Value>,
     /// Whether it answers from the judgment memo ([`ActionJudge::cached`]),
     /// in turn or ahead — a test's stand-in for the cache seat's hit.
     pub(super) cached: bool,
@@ -53,7 +56,7 @@ impl FakeJudge {
     pub(super) fn chose(marks: &[usize]) -> Self {
         Self::saying(marks.iter().map(|mark| pick(*mark)).collect())
     }
-    fn saying(answers: Vec<Judged>) -> Self {
+    pub(super) fn saying(answers: Vec<Judged>) -> Self {
         Self {
             answers,
             asked: Vec::new(),
@@ -62,6 +65,7 @@ impl FakeJudge {
             compared_state: Vec::new(),
             begun: Vec::new(),
             begun_state: Vec::new(),
+            questions: Vec::new(),
             cached: false,
             overlaps: true,
             latency: Duration::ZERO,
@@ -82,19 +86,38 @@ impl FakeJudge {
     }
 }
 
+/// A validated choice to type into the field `field`, as the pure module
+/// would have read one: the action head said [`TYPE_TEXT`] and the field's
+/// head named `field` (t-6720).
+pub(super) fn entry(field: usize) -> Judged {
+    Judged::Chose(
+        ActionChoice {
+            chosen: Chosen::Type(field),
+            probabilities: BTreeMap::new(),
+            confidence: 0.7,
+            guard: None,
+        }
+        .into(),
+    )
+}
+
 /// A validated choice of `mark`, as the pure module would have read one.
 pub(super) fn pick(mark: usize) -> Judged {
-    Judged::Chose(ActionChoice {
-        chosen: Chosen::Mark(mark),
-        probabilities: BTreeMap::new(),
-        confidence: 0.7,
-        guard: None,
-    })
+    Judged::Chose(
+        ActionChoice {
+            chosen: Chosen::Mark(mark),
+            probabilities: BTreeMap::new(),
+            confidence: 0.7,
+            guard: None,
+        }
+        .into(),
+    )
 }
 
 impl ActionJudge for FakeJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged {
         self.asked.push(ask.marks().to_vec());
+        self.questions.push(ask.questions.clone());
         std::thread::sleep(self.latency);
         self.next_answer()
     }
@@ -105,6 +128,7 @@ impl ActionJudge for FakeJudge {
         }
         self.begun.push(ask.marks().to_vec());
         self.begun_state.push(ask.state.clone());
+        self.questions.push(ask.questions.clone());
         let judged = self.next_answer();
         let latency = self.latency;
         let cached = self.cached;
@@ -139,6 +163,65 @@ impl ActionJudge for FakeJudge {
             self.compares.remove(0)
         }
     }
+}
+
+// ---- A value seat of the test's own (t-6720) ----
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use zerocode_core::type_value::{FieldLook, ValueRow};
+
+use super::value::{ValueWriter, Values, Written};
+
+/// A writer that writes what the test says, counts every write and keeps
+/// the words each write was asked about.
+pub(super) struct Pen {
+    value: String,
+    writes: Rc<Cell<usize>>,
+    asked: Rc<RefCell<Vec<String>>>,
+}
+
+impl Pen {
+    pub(super) fn writing(value: &str) -> (Self, Rc<Cell<usize>>, Rc<RefCell<Vec<String>>>) {
+        let writes = Rc::new(Cell::new(0));
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        (
+            Self {
+                value: value.to_string(),
+                writes: Rc::clone(&writes),
+                asked: Rc::clone(&asked),
+            },
+            writes,
+            asked,
+        )
+    }
+}
+
+impl ValueWriter for Pen {
+    fn row(&self) -> Option<&'static ValueRow> {
+        zerocode_core::type_value::chosen()
+    }
+
+    fn write(&mut self, look: &FieldLook<'_>, _left: Duration) -> Result<Written, String> {
+        self.writes.set(self.writes.get() + 1);
+        self.asked
+            .borrow_mut()
+            .push(zerocode_core::type_value::render(look));
+        Ok(Written {
+            value: self.value.clone(),
+            model: self.row().map(|row| row.model.clone()).unwrap_or_default(),
+            ms: 5,
+        })
+    }
+}
+
+/// A memory of the test's own, as large as the window's.
+pub(super) fn memory() -> Arc<Mutex<Values>> {
+    Arc::new(Mutex::new(Values::new(
+        zerocode_core::computer_use::WALK_STEPS_MAX,
+    )))
 }
 
 /// A world that answers what the test says and remembers what was done to it —
@@ -211,6 +294,7 @@ impl FakeWorld {
                     path: "/settings".into(),
                 },
                 items: marks.iter().map(|mark| control(*mark, "저장")).collect(),
+                snapshot: Snapshot::default(),
             }),
             presses: Vec::new(),
             observed: Vec::new(),
@@ -430,7 +514,7 @@ fn mobile_and_other_surfaces_refuse_low_confidence() {
         },
     ] {
         let mut judge = FakeJudge::chose(&[1]);
-        let Judged::Chose(choice) = &mut judge.answers[0] else {
+        let Judged::Chose(ActionRead { choice, .. }) = &mut judge.answers[0] else {
             unreachable!()
         };
         choice.confidence = 0.29;
@@ -699,12 +783,15 @@ fn an_unusable_answer_leaves_the_walk_where_it_stopped() {
 
 #[test]
 fn giving_up_presses_nothing() {
-    let mut judge = FakeJudge::saying(vec![Judged::Chose(ActionChoice {
-        chosen: Chosen::GiveUp,
-        probabilities: BTreeMap::new(),
-        confidence: 0.3,
-        guard: None,
-    })]);
+    let mut judge = FakeJudge::saying(vec![Judged::Chose(
+        ActionChoice {
+            chosen: Chosen::GiveUp,
+            probabilities: BTreeMap::new(),
+            confidence: 0.3,
+            guard: None,
+        }
+        .into(),
+    )]);
     let mut world = FakeWorld::showing(&[1, 2]);
 
     let recovered = run(
@@ -1055,12 +1142,15 @@ fn the_callers_own_condition_ends_a_goal_walk_and_the_judgments_word_is_the_weak
     // and the row says which of the two ends it was.
     let mut judge = FakeJudge::saying(vec![
         pick(1),
-        Judged::Chose(ActionChoice {
-            chosen: Chosen::Done,
-            probabilities: BTreeMap::new(),
-            confidence: 0.9,
-            guard: None,
-        }),
+        Judged::Chose(
+            ActionChoice {
+                chosen: Chosen::Done,
+                probabilities: BTreeMap::new(),
+                confidence: 0.9,
+                guard: None,
+            }
+            .into(),
+        ),
     ]);
     let mut world = FakeWorld::that_moves(&[1, 2]);
 
@@ -1211,6 +1301,7 @@ fn two_looks_are_the_same_screen_when_the_question_would_read_the_same_words() {
         },
         items: vec![control(1, label)],
         shows: Vec::new(),
+        snapshot: Snapshot::default(),
     };
     assert!(page("a.local", "저장").same_as(&page("a.local", "저장")));
     assert!(!page("a.local", "저장").same_as(&page("a.local", "삭제")));
@@ -1235,6 +1326,7 @@ fn two_looks_are_the_same_screen_when_the_question_would_read_the_same_words() {
         },
         items: vec![control(1, "보내기")],
         shows: Vec::new(),
+        snapshot: Snapshot::default(),
     };
     assert!(desk("카카오톡").same_as(&desk("카카오톡")));
     assert!(!desk("카카오톡").same_as(&desk("Finder")));
@@ -1340,12 +1432,15 @@ fn a_walk_nothing_checked_is_left_out_of_the_agreement_rather_than_guessed_at() 
     // walk, it does not testify about the press before it.
     let mut judge = FakeJudge::saying(vec![
         pick(1),
-        Judged::Chose(ActionChoice {
-            chosen: Chosen::Done,
-            probabilities: BTreeMap::new(),
-            confidence: 0.9,
-            guard: None,
-        }),
+        Judged::Chose(
+            ActionChoice {
+                chosen: Chosen::Done,
+                probabilities: BTreeMap::new(),
+                confidence: 0.9,
+                guard: None,
+            }
+            .into(),
+        ),
     ]);
     let mut world = FakeWorld::that_moves(&[1, 2]);
 
@@ -1952,7 +2047,7 @@ fn a_judgment_hidden_behind_the_press_shortens_the_walk_by_what_it_hid() {
 fn unsure(marks: &[usize]) -> FakeJudge {
     let mut judge = FakeJudge::chose(marks);
     for answer in &mut judge.answers {
-        if let Judged::Chose(choice) = answer {
+        if let Judged::Chose(ActionRead { choice, .. }) = answer {
             choice.confidence = 0.29;
         }
     }
@@ -1962,7 +2057,7 @@ fn unsure(marks: &[usize]) -> FakeJudge {
 fn sure(marks: &[usize]) -> FakeJudge {
     let mut judge = FakeJudge::chose(marks);
     for answer in &mut judge.answers {
-        if let Judged::Chose(choice) = answer {
+        if let Judged::Chose(ActionRead { choice, .. }) = answer {
             choice.confidence = 0.9;
         }
     }
@@ -2049,22 +2144,28 @@ fn a_second_reader_that_cannot_press_leaves_the_walk_where_today_leaves_it() {
         ("timeout", FakeJudge::saying(Vec::new()), None),
         (
             "give_up",
-            FakeJudge::saying(vec![Judged::Chose(ActionChoice {
-                chosen: Chosen::GiveUp,
-                probabilities: BTreeMap::new(),
-                confidence: 0.9,
-                guard: None,
-            })]),
+            FakeJudge::saying(vec![Judged::Chose(
+                ActionChoice {
+                    chosen: Chosen::GiveUp,
+                    probabilities: BTreeMap::new(),
+                    confidence: 0.9,
+                    guard: None,
+                }
+                .into(),
+            )]),
             None,
         ),
         (
             "done",
-            FakeJudge::saying(vec![Judged::Chose(ActionChoice {
-                chosen: Chosen::Done,
-                probabilities: BTreeMap::new(),
-                confidence: 0.9,
-                guard: None,
-            })]),
+            FakeJudge::saying(vec![Judged::Chose(
+                ActionChoice {
+                    chosen: Chosen::Done,
+                    probabilities: BTreeMap::new(),
+                    confidence: 0.9,
+                    guard: None,
+                }
+                .into(),
+            )]),
             None,
         ),
         ("link", sure(&[2]), Some("link")),
@@ -2172,7 +2273,7 @@ fn the_second_rung_presses_for_the_steps_the_seat_left_and_costs_its_own_turn() 
     let seat = || {
         let mut judge = FakeJudge::chose(&[1, 1, 1, 1, 1, 1]).slow(JUDGE_MS);
         for (n, answer) in judge.answers.iter_mut().enumerate() {
-            if let Judged::Chose(choice) = answer {
+            if let Judged::Chose(ActionRead { choice, .. }) = answer {
                 choice.confidence = if n % 2 == 0 { 0.9 } else { 0.29 };
             }
         }
@@ -2285,15 +2386,18 @@ fn yes(holds: bool) -> f64 {
 /// A judge that picks the fixture's first control, sure of it, with both
 /// guards saying what the fixture is.
 fn judging(fixture: &Fixture) -> FakeJudge {
-    FakeJudge::saying(vec![Judged::Chose(ActionChoice {
-        chosen: Chosen::Mark(1),
-        probabilities: BTreeMap::new(),
-        confidence: 0.9,
-        guard: Some(Guard {
-            instructed: yes(fixture.injected),
-            walled: yes(fixture.walled),
-        }),
-    })])
+    FakeJudge::saying(vec![Judged::Chose(
+        ActionChoice {
+            chosen: Chosen::Mark(1),
+            probabilities: BTreeMap::new(),
+            confidence: 0.9,
+            guard: Some(Guard {
+                instructed: yes(fixture.injected),
+                walled: yes(fixture.walled),
+            }),
+        }
+        .into(),
+    )])
 }
 
 /// An acting seat presses nothing on a screen whose text tells an assistant
@@ -2403,12 +2507,15 @@ fn a_recording_walk_writes_both_guards_and_refuses_nothing() {
 #[test]
 fn a_destructive_control_at_eight_in_ten_goes_to_the_person_and_a_plain_one_is_pressed() {
     let sure = |confidence: f64| {
-        FakeJudge::saying(vec![Judged::Chose(ActionChoice {
-            chosen: Chosen::Mark(1),
-            probabilities: BTreeMap::new(),
-            confidence,
-            guard: None,
-        })])
+        FakeJudge::saying(vec![Judged::Chose(
+            ActionChoice {
+                chosen: Chosen::Mark(1),
+                probabilities: BTreeMap::new(),
+                confidence,
+                guard: None,
+            }
+            .into(),
+        )])
     };
     let on = |label: &str| {
         let mut world = FakeWorld::showing(&[]);
@@ -2416,6 +2523,7 @@ fn a_destructive_control_at_eight_in_ten_goes_to_the_person_and_a_plain_one_is_p
             at: Seen::default(),
             items: vec![control(1, label), control(2, "닫기")],
             shows: Vec::new(),
+            snapshot: Snapshot::default(),
         });
         world
     };
@@ -2474,12 +2582,15 @@ fn the_destructive_presses_under_nine_in_ten_on_the_fixture_screens_before_and_a
                 steps += 1;
                 let mut world = FakeWorld::showing(&[]);
                 world.screen_is(screen.clone());
-                let mut judge = FakeJudge::saying(vec![Judged::Chose(ActionChoice {
-                    chosen: Chosen::Mark(mark),
-                    probabilities: BTreeMap::new(),
-                    confidence,
-                    guard: None,
-                })]);
+                let mut judge = FakeJudge::saying(vec![Judged::Chose(
+                    ActionChoice {
+                        chosen: Chosen::Mark(mark),
+                        probabilities: BTreeMap::new(),
+                        confidence,
+                        guard: None,
+                    }
+                    .into(),
+                )]);
                 let walked = run(Mode::On, true, &goal_on(fixture), &mut judge, &mut world);
                 let pressed_now = walked.pressed == 1;
                 // Today's rule was the plain floor for every control.
@@ -2520,4 +2631,106 @@ fn the_destructive_presses_under_nine_in_ten_on_the_fixture_screens_before_and_a
         steps - destructive,
         "a plain control's press moved"
     );
+}
+
+/// Asking ahead (t-6132 S2) and asking every head in one request (t-6720)
+/// add up to one round trip a step, never two: the question begun on the
+/// last look carries the very heads the next look's own question asks — the
+/// containers, images and rows the look read — so the next step uses the
+/// answer in flight instead of asking again.
+#[test]
+fn asking_ahead_with_every_head_is_still_one_request_a_step() {
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let mut screen = world.look_now();
+    screen.snapshot = Snapshot {
+        containers: vec![
+            json!({ "label": "Results", "role": "list", "count": 2, "selector": "#results" }),
+        ],
+        images: vec![json!({ "alt": "a picture", "width": 10, "height": 10 })],
+        rows: vec![json!({ "text": "row one" })],
+        ..Snapshot::default()
+    };
+    world.screen_is(screen);
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(world.presses, vec![1, 2]);
+    assert_eq!(
+        judge.asked.len() + judge.begun.len(),
+        2,
+        "two steps, two requests: one asked in turn, one begun ahead and used"
+    );
+    assert_eq!((walked.overlapped, walked.discarded), (1, 0));
+    assert_eq!(judge.questions.len(), 2);
+    for questions in &judge.questions {
+        for head in [
+            "action",
+            "container",
+            "image",
+            "row",
+            "instructed",
+            "walled",
+        ] {
+            assert!(
+                questions.get(head).is_some(),
+                "a question begun or asked without its {head} head: {questions}"
+            );
+        }
+    }
+}
+
+/// The window's own walk types (t-6720): the product door's goal walk —
+/// `run_goal`, the one road `zerocode-computer walk` takes — hands the world
+/// it walks the value seat's writer, built at the loop that knows the
+/// window's config root from that root. Read from the source, as the other
+/// contracts on the walk's wiring are: the loop does not run without a
+/// window, and a walk that is never handed a writer never offers an entry.
+#[test]
+fn the_windows_walk_hands_its_world_the_windows_writer() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agent_tools_runtime.rs"),
+    )
+    .expect("the loop's source");
+    let goal = &source[source
+        .find("pub(super) fn run_goal(")
+        .expect("the goal walk")..];
+    let body = &goal[..goal.find("\n}\n").expect("its end")];
+    assert!(
+        body.contains("writer: computer_use::errand::value::LiveWriter,"),
+        "run_goal is handed the writer"
+    );
+    let world = &body[body
+        .find("desk::GoalWorld::new(")
+        .expect("the world the walk walks")..];
+    let world = &world[..world.find(';').expect("the world's statement")];
+    assert!(
+        world.contains(".writing(Box::new(writer))"),
+        "the world the walk walks is handed the writer: {world}"
+    );
+    let branch = &source[source
+        .find("ComputerMethod::Walk {")
+        .expect("the walk verb's branch")..];
+    let branch = &branch[..branch.find("} else {").expect("its end")];
+    for needle in [
+        "config_root()",
+        "computer_use::errand::value::LiveWriter::window(&root)",
+        "run_goal(",
+        "writer,",
+    ] {
+        assert!(
+            branch.contains(needle),
+            "the walk verb's branch lost `{needle}`:\n{branch}"
+        );
+    }
 }

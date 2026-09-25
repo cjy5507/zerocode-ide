@@ -9,9 +9,16 @@
 //!
 //! What a goal walk may NOT do is as load-bearing as what it may:
 //!
-//! - It presses. It does not type, navigate, run a script or set a value —
-//!   the answer space is a number and nothing else, so there is no road from
-//!   a judgment to a value, a selector or an address.
+//! - It presses, and — on a page, when its look read a field it may type
+//!   into (t-6720) — it types. It does not navigate, run a script or set a
+//!   value of its own choosing: the answer space is a number and nothing
+//!   else, so there is no road from a judgment to a value, a selector or an
+//!   address. A typed value is the value seat's
+//!   ([`super::value::ValueWriter`]), entered into the field the look itself
+//!   numbered: pressed first by its pinned number, then typed through the
+//!   look's own selector for it down the door's value road
+//!   (`type <pane> <selector> --value`, the shape the stdin road sends), with
+//!   the log keeping `[n chars]` in its place.
 //! - It stays where it was aimed. A desktop walk names one app and looks only
 //!   at that app's tree; a pane walk names one pane. A press that carries the
 //!   screen somewhere else shows up as a screen that changed, which the walk
@@ -21,6 +28,7 @@
 //!   walk started; no screen's text is compiled in here, and the judgment's
 //!   own `done` is recorded as the weaker end that it is.
 
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -31,7 +39,8 @@ use zerocode_core::computer_use::{
 use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, LOOK_ID_KEY};
 use zerocode_hookd::TeamAnswer;
 
-use super::{Saved, Screen, Seen, Settled, Surface, World};
+use super::value::{ValueWriter, Values, window_values};
+use super::{NO_TYPING, Saved, Screen, Seen, Settled, Snapshot, Surface, Typed, World};
 
 /// The flag every road here asks its answer as JSON with — the word both
 /// CLIs already take, spelled once.
@@ -261,6 +270,7 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                     },
                     items: said.get(ITEMS_KEY)?.as_array()?.clone(),
                     shows: Vec::new(),
+                    snapshot: Snapshot::default(),
                 },
                 look.to_string(),
             ))
@@ -273,6 +283,11 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                 at: Seen::default(),
                 items: said.get(ITEMS_KEY)?.as_array()?.clone(),
                 shows: Vec::new(),
+                // What the page read beside its numbers in the same pass
+                // (t-6721 U4) — the fields a walk may type into and the
+                // candidates the observation heads ask about. A marks answer
+                // that carries none walks as it always did.
+                snapshot: Snapshot::of(said),
             },
             String::new(),
         )),
@@ -294,6 +309,7 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                     },
                     items: marks.get(ITEMS_KEY)?.as_array()?.clone(),
                     shows: Vec::new(),
+                    snapshot: Snapshot::default(),
                 },
                 marks
                     .get(LOOK_ID_KEY)
@@ -338,6 +354,15 @@ pub struct GoalWorld<'a, Road> {
     /// for the step that looks next: the screen is still, so one tree read
     /// serves both (t-6385).
     kept: Option<(Screen, String)>,
+    /// The screen the last look handed the walk — the fields an entry types
+    /// into are that look's, by its own numbers and its own selectors.
+    seen: Option<Screen>,
+    /// Who writes a value a field needs (t-6720): the value seat's writer,
+    /// handed in by the caller that holds the login. `None`, the world
+    /// types nothing and no question offers an entry.
+    writer: Option<Box<dyn ValueWriter>>,
+    /// Values written before, for a retry or a replay to type again.
+    values: Arc<Mutex<Values>>,
 }
 
 impl<'a, Road> GoalWorld<'a, Road> {
@@ -363,7 +388,27 @@ impl<'a, Road> GoalWorld<'a, Road> {
             previewing: false,
             counted: None,
             kept: None,
+            seen: None,
+            writer: None,
+            values: window_values(),
         }
+    }
+
+    /// The same world, able to type into a page's fields the value `writer`
+    /// writes (t-6720). Only a pane types; a desktop or a phone keeps the
+    /// writer and never offers an entry.
+    #[must_use]
+    pub fn writing(mut self, writer: Box<dyn ValueWriter>) -> Self {
+        self.writer = Some(writer);
+        self
+    }
+
+    /// The same world, remembering written values in `values` rather than
+    /// the window's — how a test holds a memory of its own.
+    #[must_use]
+    pub fn remembering(mut self, values: Arc<Mutex<Values>>) -> Self {
+        self.values = values;
+        self
     }
 
     /// The same world, asking each press for a preview of the screen it
@@ -387,6 +432,7 @@ impl<'a, Road> GoalWorld<'a, Road> {
             },
             items: preview.get(ITEMS_KEY)?.as_array()?.clone(),
             shows: Vec::new(),
+            snapshot: Snapshot::default(),
         })
     }
 
@@ -416,6 +462,7 @@ where
     fn look(&mut self) -> Option<Screen> {
         if let Some((screen, look)) = self.kept.take() {
             self.look = look;
+            self.seen = Some(screen.clone());
             return Some(screen);
         }
         let argv = self.aim.look_argv();
@@ -435,6 +482,7 @@ where
                 .unwrap_or_default();
         }
         self.look = look;
+        self.seen = Some(screen.clone());
         Some(screen)
     }
 
@@ -476,6 +524,15 @@ where
 
     fn settled(&mut self) -> Option<Settled> {
         self.settled.clone()
+    }
+
+    fn types(&self) -> bool {
+        matches!(self.aim, Aim::Pane { .. }) && self.writer.is_some()
+    }
+
+    fn type_into(&mut self, mark: usize, goal: &str) -> Typed {
+        let _ = (mark, goal, &self.seen, &self.values);
+        Typed::Refused(NO_TYPING.to_string())
     }
 
     fn asks_ahead_of_the_press(&self) -> bool {

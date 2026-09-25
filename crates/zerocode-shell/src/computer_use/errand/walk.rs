@@ -26,7 +26,7 @@ use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
 use zerocode_core::computer_use_protocol::marks::ITEMS_KEY;
 use zerocode_hookd::TeamAnswer;
 
-use super::{Screen, Seen, World};
+use super::{Screen, Seen, Snapshot, World};
 
 /// The pane's host and path among the pages a desk sees (`Desk::pages`), or
 /// two empty strings when no page answers to that label. The query is
@@ -104,6 +104,7 @@ where
             },
             items,
             shows: Vec::new(),
+            snapshot: Snapshot::default(),
         })
     }
 

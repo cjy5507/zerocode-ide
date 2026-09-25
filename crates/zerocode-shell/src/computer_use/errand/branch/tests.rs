@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use zerocode_core::branching::{BranchChoice, NextStep};
 use zerocode_core::computer_recipe::RecipeStop;
 use zerocode_core::jev::summary::{AGREED, CACHED};
-use zerocode_core::screen_action::{ActionChoice, Chosen, option_of};
+use zerocode_core::screen_action::{ActionChoice, ActionRead, Chosen, option_of};
 
 use super::super::tests::{FakeJudge, FakeWorld, goal, pick, stopped};
 use super::super::{
@@ -30,7 +30,7 @@ const UNRAISED: Branching = Branching {
 
 /// The screen seat's answer: `chosen` first, then the others by weight.
 fn ranked(chosen: usize, spread: &[(usize, f64)]) -> Judged {
-    let Judged::Chose(mut choice) = pick(chosen) else {
+    let Judged::Chose(ActionRead { mut choice, .. }) = pick(chosen) else {
         unreachable!()
     };
     choice.probabilities = spread
@@ -38,7 +38,7 @@ fn ranked(chosen: usize, spread: &[(usize, f64)]) -> Judged {
         .map(|(mark, weight)| (option_of(*mark), *weight))
         .collect();
     choice.probabilities.insert("give_up".to_string(), 0.0);
-    Judged::Chose(choice)
+    Judged::Chose(choice.into())
 }
 
 /// A comparison that names `mark` at `confidence`.
@@ -556,12 +556,15 @@ fn the_walks_next_step_grades_the_fork() {
 
     // Gave up: the next judgment sees nothing worth pressing where the pick led.
     let (mut world, mut judge) = two_steps(
-        Judged::Chose(ActionChoice {
-            chosen: Chosen::GiveUp,
-            probabilities: BTreeMap::new(),
-            confidence: 0.7,
-            guard: None,
-        }),
+        Judged::Chose(
+            ActionChoice {
+                chosen: Chosen::GiveUp,
+                probabilities: BTreeMap::new(),
+                confidence: 0.7,
+                guard: None,
+            }
+            .into(),
+        ),
         compared(1, 0.8),
     );
     let walked = run_with(
@@ -763,7 +766,9 @@ fn measure_forked_steps_on_a_fake_desk() {
     let forking = grid
         .iter()
         .filter(|leader| {
-            let Judged::Chose(choice) = ranked(2, &[(2, **leader), (1, 1.0 - **leader)]) else {
+            let Judged::Chose(ActionRead { choice, .. }) =
+                ranked(2, &[(2, **leader), (1, 1.0 - **leader)])
+            else {
                 unreachable!()
             };
             zerocode_core::branching::fork_wanted(&choice).len() >= 2
@@ -1434,11 +1439,14 @@ fn a_forked_step_asks_ahead_with_the_canonical_number() {
 fn a_rescued_step_forks_on_the_second_readers_ranking() {
     let seat = || {
         let mut judge = FakeJudge::chose(&[]);
-        let Judged::Chose(mut unsure) = ranked(2, &[(2, 0.6), (1, 0.4)]) else {
+        let Judged::Chose(ActionRead {
+            choice: mut unsure, ..
+        }) = ranked(2, &[(2, 0.6), (1, 0.4)])
+        else {
             unreachable!()
         };
         unsure.confidence = 0.29;
-        judge.answers = vec![Judged::Chose(unsure)];
+        judge.answers = vec![Judged::Chose(unsure.into())];
         judge.compares = vec![compared(2, 0.8)];
         judge
     };

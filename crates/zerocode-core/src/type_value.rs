@@ -342,6 +342,97 @@ pub enum ValueRefusal {
     Untypable,
 }
 
+impl ValueRefusal {
+    /// The word a walk's row names this refusal by: `value_` and the rule,
+    /// so a row tells a value this seat refused from a wire that never
+    /// answered, and carries not one character of the answer.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Empty => "value_empty",
+            Self::NotOneLine => "value_not_one_line",
+            Self::TooLong => "value_too_long",
+            Self::Untypable => "value_untypable",
+        }
+    }
+}
+
+/// Everything one written value depends on (t-6720): what makes a second
+/// write the same write, so a retry or a replay types the value it wrote
+/// before instead of asking again, and anything else asks afresh.
+#[derive(Debug, Clone, Copy)]
+pub struct ValueInput<'a> {
+    /// What the question renders — the goal and the words around the box.
+    pub look: FieldLook<'a>,
+    /// What the field holds right now, as the look read it. Never rendered
+    /// and never sent: it is part of the identity only, because a field that
+    /// changed under the walk is a different question even with the same
+    /// words around it.
+    pub now: &'a str,
+    /// The document the look read the field in — its epoch, as the look
+    /// carried it. Empty when the look carried none, and then nothing is
+    /// reused: a value cannot be vouched for across documents nobody told
+    /// apart.
+    pub epoch: &'a str,
+    /// The field itself in that document, as the look named it — its own
+    /// selector, tag and role, never a name composed here.
+    pub target: &'a str,
+}
+
+/// The identity of one value's input asked of `row`: the seat's name, its
+/// question's version, the row's model and every part of the input, each
+/// behind its length ([`crate::jev::digest_of`], the digest a Jev row's
+/// receipt is) — so a changed word of the question, another model, another
+/// goal, another field, another value in it or another document is another
+/// identity. `None` when the look named no document ([`ValueInput::epoch`]):
+/// such a value is written fresh every time.
+#[must_use]
+pub fn identity(input: &ValueInput<'_>, row: &ValueRow) -> Option<String> {
+    if input.epoch.trim().is_empty() {
+        return None;
+    }
+    let parts = serde_json::json!([
+        input.look.goal,
+        input.look.label,
+        input.look.placeholder,
+        input.look.near,
+        input.now,
+        input.epoch,
+        input.target,
+    ]);
+    Some(crate::jev::digest_of(
+        &seat().seat,
+        asked().rubric_version,
+        &row.model,
+        parts.to_string().as_bytes(),
+    ))
+}
+
+/// What the [`Road::Anthropic`] road speaks: the Messages endpoint, reached
+/// with the subscription login the window already holds. The same four facts
+/// the probe that measured the table sends (`tools/type_value_latency.py`,
+/// `AnthropicRoad`), named once for the product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnthropicWire {
+    /// Where a value is asked for.
+    pub url: &'static str,
+    /// The API version the request is written against.
+    pub version: &'static str,
+    /// The beta a subscription (OAuth) login is admitted under.
+    pub beta: &'static str,
+    /// The system line a subscription login's request opens with — the one
+    /// the vendor admits that login's requests under.
+    pub identity: &'static str,
+}
+
+/// [`AnthropicWire`], as this product sends it.
+pub const ANTHROPIC_WIRE: AnthropicWire = AnthropicWire {
+    url: "https://api.anthropic.com/v1/messages",
+    version: "2023-06-01",
+    beta: "oauth-2025-04-20",
+    identity: "You are Claude Code, Anthropic's official CLI for Claude.",
+};
+
 /// The value an answer names, or why it names none.
 ///
 /// The rules are the seat's, not a model's: one line, inside the cap, typable,

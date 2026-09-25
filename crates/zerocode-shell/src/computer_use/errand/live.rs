@@ -46,8 +46,8 @@ pub fn read_body(ask: &ActionAsk, body: &str) -> Judged {
     let Some(answers) = parsed.get("answers") else {
         return Judged::Refused(SCHEMA.to_string());
     };
-    match ask.read(answers) {
-        Ok(choice) => Judged::Chose(choice),
+    match ask.read_all(answers) {
+        Ok(read) => Judged::Chose(read),
         // An answer that broke one of the closed choice's rules is refused by
         // THAT rule's own word. One word for every refusal puts the cause out
         // of reach of the row that records it, and the cause is the row's
@@ -311,7 +311,7 @@ impl LiveJudge {
         if let (Judged::Chose(fresh), Judged::Chose(remembered)) =
             (&fresh, read_body(ask, &recalled.answer))
         {
-            row[AGREED.canonical] = json!(fresh.chosen == remembered.chosen);
+            row[AGREED.canonical] = json!(fresh.choice.chosen == remembered.choice.chosen);
         }
         self.memo_rows.push(row);
         fresh

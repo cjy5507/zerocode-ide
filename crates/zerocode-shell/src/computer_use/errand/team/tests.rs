@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use serde_json::json;
 use zerocode_core::jev::choice::ChoiceRefusal;
-use zerocode_core::screen_action::{ActionChoice, ActionLook, Chosen, Errand, Where, ask};
+use zerocode_core::screen_action::{
+    ActionChoice, ActionLook, ActionRead, Chosen, Errand, Where, ask,
+};
 
 use super::*;
 
@@ -34,7 +36,11 @@ fn asked() -> ActionAsk {
 /// A zo that is a shell script: it records its arguments and its stdin
 /// beside `record`, and writes `answer` to the file `--last-message` names
 /// after sleeping `sleep_s`.
-fn fake_zo(root: &Path, answer: &str, sleep_s: &str) -> (PathBuf, PathBuf) {
+pub(in crate::computer_use::errand) fn fake_zo(
+    root: &Path,
+    answer: &str,
+    sleep_s: &str,
+) -> (PathBuf, PathBuf) {
     let record = root.join("record");
     std::fs::create_dir_all(&record).expect("a record folder");
     let program = root.join("zo");
@@ -51,7 +57,12 @@ fn fake_zo(root: &Path, answer: &str, sleep_s: &str) -> (PathBuf, PathBuf) {
     (program, record)
 }
 
-fn judge_over(program: PathBuf, record: &Path, answer: &str, model: Option<&str>) -> TeamJudge {
+pub(in crate::computer_use::errand) fn judge_over(
+    program: PathBuf,
+    record: &Path,
+    answer: &str,
+    model: Option<&str>,
+) -> TeamJudge {
     TeamJudge::at(
         program,
         vec![
@@ -75,7 +86,7 @@ fn the_reader_is_started_headless_in_a_session_of_its_own_and_told_the_whole_que
     );
     let asked = asked();
 
-    let Judged::Chose(choice) = judge.choose(&asked) else {
+    let Judged::Chose(ActionRead { choice, .. }) = judge.choose(&asked) else {
         panic!("a well formed answer is a choice");
     };
     assert_eq!(choice.chosen, Chosen::Mark(2));
@@ -158,8 +169,11 @@ fn the_readers_words_are_read_through_the_question_and_anything_else_is_refused(
     );
     assert!(matches!(
         read("```json\n{\"choice\": \"give_up\", \"confidence\": 0.6}\n```"),
-        Judged::Chose(ActionChoice {
-            chosen: Chosen::GiveUp,
+        Judged::Chose(ActionRead {
+            choice: ActionChoice {
+                chosen: Chosen::GiveUp,
+                ..
+            },
             ..
         })
     ));
@@ -275,7 +289,7 @@ fn what_the_second_reader_costs_against_the_real_zo() {
         let last = judge.last().cloned().expect("what it cost");
         waits.push(last.elapsed_ms);
         match &judged {
-            Judged::Chose(choice) => {
+            Judged::Chose(ActionRead { choice, .. }) => {
                 answered += 1;
                 println!(
                     "pass {pass}: {:?} confidence {} in {} ms (prompt {} B, answer {} B, model {:?})",

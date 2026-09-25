@@ -245,7 +245,7 @@ fn whole_count(raw: Option<&serde_json::Value>) -> Option<u32> {
 /// was logged in on this machine — somebody else's login, for a figure on our
 /// status bar. A missing login says "no account selected", which is true and
 /// is what the person can act on.
-fn claude_access_token(document: &str) -> Option<String> {
+pub(crate) fn claude_access_token(document: &str) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_str(document).ok()?;
     let token = parsed.get("claudeAiOauth")?.get("accessToken")?.as_str()?;
     (!token.trim().is_empty()).then(|| token.to_string())

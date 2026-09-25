@@ -45,6 +45,7 @@ impl Fixture {
                 .map(|(at, label)| control(at + 1, label))
                 .collect(),
             shows: self.shows.iter().map(|line| (*line).to_string()).collect(),
+            ..Screen::default()
         }
     }
 }

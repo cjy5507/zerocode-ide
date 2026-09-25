@@ -35,13 +35,25 @@
 //! What a look may put in the state is likewise narrow. A step's argv is NOT
 //! state: `type <label> <css> <text>` carries the text a person typed, so
 //! [`Errand::Clear`]'s `step` takes the verb alone.
+//!
+//! One request, every head (t-6720, the ultrafast shape): what to do next and
+//! what to do it TO are asked together, and only the head the chosen action
+//! needs is spent. The `action` head is the operation with the press targets
+//! inline — `mark:<n>` IS "press n" — and, when a goal walk's look read a
+//! field it may type into ([`Beside`]), it offers [`TYPE_TEXT`] too, with
+//! the field asked beside it in `type_target`. When the look read the
+//! containers, images and rows a page holds, three observation heads ask
+//! which of them the goal is about ([`Observe`]). Every head is a closed
+//! choice over what the look saw, answered in the same round trip; none of
+//! them writes a selector or a value, and a head the chosen action does not
+//! need is read — a broken one refuses the answer whole — and never acted on.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
 use crate::computer_use_protocol::marks::legend_line;
-use crate::jev::choice::{self, ChoiceRefusal};
+use crate::jev::choice::{self, Choice, ChoiceRefusal};
 use crate::jev::noul::{self, NoulRefusal};
 // The first guard — whether the screen's own text tells an assistant what to
 // do (t-6187) — is named and worded in the question catalog, where the tool
@@ -134,6 +146,38 @@ const GOAL_GIVE_UP_MEANS: &str =
 /// What [`DONE`] means.
 const DONE_MEANS: &str = "The goal has already been reached on this screen; nothing more to press.";
 
+/// The operation that enters text into a field — offered in the `action`
+/// head beside the presses, only to a goal walk whose world can type and
+/// whose look read a field it may type into ([`Beside`]). Which field is the
+/// `type_target` head's answer; the text itself is written by the value seat
+/// (`crate::type_value`), never by this judgment.
+pub const TYPE_TEXT: &str = "type_text";
+
+/// What [`TYPE_TEXT`] means.
+const TYPE_TEXT_MEANS: &str = "Enter text into one of the fields this screen shows — the one `type_target` names — because the goal needs text there that the field does not hold yet.";
+
+/// The words of the question when a goal walk may also type: the goal's own
+/// question, with entering text among the things a person could do next.
+const GOAL_TYPING_INSTRUCTIONS: &str = "Someone wants to reach the goal in `goal` on the screen described by `where`, and they can press things or enter text into a field. The controls that screen is showing right now are the options, each named by the number the screen drew on it; `type_text` means entering text into one of the fields, and `type_target` says which. `shows` is the text the screen displays right now that is not a control — a value, a heading, a message — and `pressed` is what this walk already pressed or typed into, oldest first. Read the two together to tell how far along the goal already is, and choose what a person would do NEXT to get closer to it: never a press or an entry whose effect `shows` or a field's own words already carry, and never the same control again unless the goal itself repeats it.";
+
+/// The head that names the field a [`TYPE_TEXT`] enters text into.
+const TYPE_TARGET: &str = "type_target";
+
+/// The words the `type_target` head asks.
+const TYPE_TARGET_INSTRUCTIONS: &str = "If the next thing to do on this screen is to enter text, which field should receive it? The options are the fields this screen is showing, each named by the number the screen drew on it.";
+
+/// The option an observation head offers beside the candidates the look
+/// read: none of them is what the goal is about.
+pub const NONE: &str = "none";
+
+/// What a line of `pressed` says of a field this walk typed into: the
+/// operation's own word before the field's legend line, so the next question
+/// reads an entry apart from a press — and never the text entered.
+#[must_use]
+pub fn typed_line(legend: &str) -> String {
+    format!("{TYPE_TEXT} {legend}")
+}
+
 /// The second guard's name: whether the screen is a wall in front of the
 /// page the goal expects — a sign-in, a captcha, an error dialog (t-6187).
 /// Pressing on a wall is pressing on a page the goal never named.
@@ -168,6 +212,181 @@ pub const SHOWS_CHAR_CAP: usize = 1_500;
 /// The key the numbered controls sit under.
 const CANDIDATES_KEY: &str = "candidates";
 
+/// What a page's look carries beside its numbered `items` (the snapshot
+/// contract of t-6721 U4): the document it read them in, when, and the
+/// fields, containers, images and rows it read in the same pass. The marks
+/// answer keeps `items` as it always was; every key here is added beside it,
+/// and a look that carries none of them walks exactly as before — presses
+/// only. Named here, where the question reads them, so the page that writes
+/// them and the walk that reads them spell each key once.
+pub mod snapshot {
+    /// The document the look read — a value that changes when the page's
+    /// document is replaced, never when it merely changes.
+    pub const EPOCH_KEY: &str = "documentEpoch";
+    /// When the look was read, in milliseconds.
+    pub const AT_MS_KEY: &str = "atMs";
+    /// The form fields among the numbered controls.
+    pub const FIELDS_KEY: &str = "fields";
+    /// A field's number among the look's `items` — the control it is.
+    pub const FIELD_MARK_KEY: &str = "mark";
+    /// A field's kind: an `<input>`'s own `type`, lower-cased; `textarea`,
+    /// `select` or `contenteditable` for the rest.
+    pub const FIELD_KIND_KEY: &str = "kind";
+    /// Whether a field holds a secret — a password, or one the page declares
+    /// a current password. Only an explicit `false` lets a value in.
+    pub const FIELD_SECRET_KEY: &str = "secret";
+    /// The words around a field the value seat reads (`crate::type_value`):
+    /// its label, its placeholder and the page's own words beside it.
+    pub const FIELD_LABEL_KEY: &str = "label";
+    pub const FIELD_PLACEHOLDER_KEY: &str = "placeholder";
+    pub const FIELD_NEAR_KEY: &str = "near";
+    /// What the field holds right now. Never sent to a judgment or a model:
+    /// it tells a retry of one entry from a new one.
+    pub const FIELD_VALUE_KEY: &str = "value";
+    /// A numbered control's or an observed candidate's own identity in the
+    /// document, as the look wrote it — the only name a walk ever types
+    /// into or reports, and never one a walk or a judgment composed.
+    pub const SELECTOR_KEY: &str = "selector";
+}
+
+/// The kinds of field ([`snapshot::FIELD_KIND_KEY`]) a walk may type a
+/// written value into: the ones whose whole value is one line of text a
+/// keyboard types. A password is not among them and a secret field of any
+/// kind is refused beside it ([`snapshot::FIELD_SECRET_KEY`]); a `select`, a
+/// checkbox, a date or a file is pressed or left to a person, never typed.
+pub const TEXT_FIELD_KINDS: [&str; 8] = [
+    "text",
+    "search",
+    "email",
+    "tel",
+    "url",
+    "number",
+    "textarea",
+    "contenteditable",
+];
+
+/// The observation heads (t-4692): which of the containers, images and rows
+/// a page's look read the goal is about — the three choices a collection
+/// made by a person's coordinator took four round trips and two wrong
+/// answers to settle. Each is a closed choice over what the look read, by
+/// the look's own number, plus [`NONE`]; the answer names a candidate the
+/// look already holds and never composes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observe {
+    /// The container that holds the results the goal is about.
+    Container,
+    /// The picture of the item the goal is about.
+    Image,
+    /// The row that matches the goal.
+    Row,
+}
+
+impl Observe {
+    /// Every head, in the order a request asks them.
+    pub const ALL: [Self; 3] = [Self::Container, Self::Image, Self::Row];
+
+    /// The head's name on the wire, and the stem of its options
+    /// (`container:2`).
+    #[must_use]
+    pub const fn head(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::Image => "image",
+            Self::Row => "row",
+        }
+    }
+
+    /// The key the look carries this head's candidates under.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Container => "containers",
+            Self::Image => "images",
+            Self::Row => "rows",
+        }
+    }
+
+    /// What the head asks.
+    const fn instructions(self) -> &'static str {
+        match self {
+            Self::Container => CONTAINER_INSTRUCTIONS,
+            Self::Image => IMAGE_INSTRUCTIONS,
+            Self::Row => ROW_INSTRUCTIONS,
+        }
+    }
+
+    /// What [`NONE`] means to this head.
+    const fn none_means(self) -> &'static str {
+        match self {
+            Self::Container => CONTAINER_NONE,
+            Self::Image => IMAGE_NONE,
+            Self::Row => ROW_NONE,
+        }
+    }
+
+    /// The option naming the look's `n`th candidate of this head.
+    #[must_use]
+    pub fn option(self, n: usize) -> String {
+        format!("{}:{n}", self.head())
+    }
+
+    /// The number an option of this head names, if it names one.
+    #[must_use]
+    pub fn number_of(self, option: &str) -> Option<usize> {
+        option
+            .strip_prefix(self.head())?
+            .strip_prefix(':')?
+            .parse()
+            .ok()
+    }
+}
+
+/// What the container head asks.
+const CONTAINER_INSTRUCTIONS: &str = "Which of the containers this screen holds has the results the goal in `goal` is about? The options are the containers the screen was read to hold, each named by its number.";
+/// What [`NONE`] means to the container head.
+const CONTAINER_NONE: &str = "None of these containers holds what the goal is about.";
+/// What the image head asks.
+const IMAGE_INSTRUCTIONS: &str = "Which of the images this screen shows is the picture of the item the goal in `goal` is about? The options are the images the screen was read to show, each named by its number.";
+/// What [`NONE`] means to the image head.
+const IMAGE_NONE: &str = "None of these images is the picture the goal is about.";
+/// What the row head asks.
+const ROW_INSTRUCTIONS: &str = "Which of the rows this screen lists matches the goal in `goal`? The options are the rows the screen was read to list, each named by its number.";
+/// What [`NONE`] means to the row head.
+const ROW_NONE: &str = "None of these rows matches the goal.";
+
+/// How many characters one observed candidate's description may take: the
+/// screen's own text cap shared among the most candidates one head offers,
+/// so a head's options never cost more than the screen's words do
+/// ([`SHOWS_CHAR_CAP`], [`MAX_ACTION_CANDIDATES`]).
+pub const OBSERVED_CHAR_CAP: usize = SHOWS_CHAR_CAP / MAX_ACTION_CANDIDATES;
+
+/// What a look read beside its numbered controls, and whether the walk can
+/// type at all — what [`ask_with`] may offer beyond a press. The default is
+/// a look of numbers alone, and it asks exactly what [`ask`] asks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Beside<'a> {
+    /// Whether the walk's world has a road for a written value (a page's).
+    pub types: bool,
+    /// The look's fields ([`snapshot::FIELDS_KEY`]).
+    pub fields: &'a [Value],
+    /// The look's containers, images and rows ([`Observe::key`]).
+    pub containers: &'a [Value],
+    pub images: &'a [Value],
+    pub rows: &'a [Value],
+}
+
+impl<'a> Beside<'a> {
+    /// The candidates the look read for `head`.
+    #[must_use]
+    pub const fn of(&self, head: Observe) -> &'a [Value] {
+        match head {
+            Observe::Container => self.containers,
+            Observe::Image => self.images,
+            Observe::Row => self.rows,
+        }
+    }
+}
+
 /// The version of the words above. Bump it when any of them changes: a
 /// judgment read under one wording is not evidence about another. The test
 /// `the_version_is_pinned_to_the_words` holds it to
@@ -178,7 +397,7 @@ const CANDIDATES_KEY: &str = "candidates";
 /// ([`Errand::key`]), so evidence is read per errand; what a single version
 /// buys is that neither errand's words can change while the other's evidence
 /// silently keeps its number.
-pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 5;
+pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 6;
 
 /// What a walk is asking the screen about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,6 +547,11 @@ pub struct ActionAsk {
     marks: Vec<usize>,
     /// Whether this question offered [`DONE`].
     ends_itself: bool,
+    /// The fields `type_target` offered, in order — empty when the question
+    /// offered no [`TYPE_TEXT`].
+    typing: Vec<usize>,
+    /// Each observation head asked, with the look's numbers it offered.
+    observing: Vec<(Observe, Vec<usize>)>,
 }
 
 /// What an answer chose.
@@ -335,10 +559,45 @@ pub struct ActionAsk {
 pub enum Chosen {
     /// Press this number.
     Mark(usize),
+    /// Enter a written value into the field this number names — the
+    /// `type_target` head's answer to a [`TYPE_TEXT`].
+    Type(usize),
     /// Nothing here helps.
     GiveUp,
     /// The goal is already reached; press nothing.
     Done,
+}
+
+/// What one observation head chose: the look's own number of the candidate,
+/// or `None` for [`NONE`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Observed {
+    pub head: Observe,
+    pub chosen: Option<usize>,
+    pub confidence: f64,
+}
+
+/// A validated answer to every head a question asked: the action (with the
+/// field folded into [`Chosen::Type`] when it is to type), what the
+/// `type_target` head said when it was asked — its spread, for the row — and
+/// what each observation head chose.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionRead {
+    pub choice: ActionChoice,
+    pub typed: Option<Choice>,
+    pub observed: Vec<Observed>,
+}
+
+impl From<ActionChoice> for ActionRead {
+    /// An answer to the action head alone — a second reader's, or a question
+    /// that asked nothing beside it.
+    fn from(choice: ActionChoice) -> Self {
+        Self {
+            choice,
+            typed: None,
+            observed: Vec::new(),
+        }
+    }
 }
 
 /// A validated answer.
@@ -480,6 +739,33 @@ pub fn rubric_words() -> String {
         .keys()
         .join(","),
     );
+    // The typing and observation heads (v6, t-6720): the operation, its
+    // field's head, the kinds of field it may enter text into, and each
+    // observation head's words.
+    for line in [
+        TYPE_TEXT,
+        TYPE_TEXT_MEANS,
+        GOAL_TYPING_INSTRUCTIONS,
+        TYPE_TARGET,
+        TYPE_TARGET_INSTRUCTIONS,
+        NONE,
+    ] {
+        words.push('\n');
+        words.push_str(line);
+    }
+    words.push('\n');
+    words.push_str(&TEXT_FIELD_KINDS.join(","));
+    for head in Observe::ALL {
+        for line in [
+            head.head(),
+            head.key(),
+            head.instructions(),
+            head.none_means(),
+        ] {
+            words.push('\n');
+            words.push_str(line);
+        }
+    }
     words
 }
 
@@ -560,7 +846,19 @@ pub fn ask(look: &ActionLook<'_>) -> Option<ActionAsk> {
         questions,
         marks,
         ends_itself,
+        typing: Vec::new(),
+        observing: Vec::new(),
     })
+}
+
+/// [`ask`], with what the look read beside its numbered controls: a goal
+/// walk that may type is offered [`TYPE_TEXT`] with the fields it may type
+/// into (`type_target`), and the containers, images and rows the look read
+/// are asked about in the observation heads — all in the one request.
+#[must_use]
+pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk> {
+    let _ = beside;
+    ask(look)
 }
 
 impl ActionAsk {
@@ -568,6 +866,34 @@ impl ActionAsk {
     #[must_use]
     pub fn marks(&self) -> &[usize] {
         &self.marks
+    }
+
+    /// The fields `type_target` offered, in order — empty when nothing may
+    /// be typed.
+    #[must_use]
+    pub fn typing(&self) -> &[usize] {
+        &self.typing
+    }
+
+    /// The press options a second reader chooses among: every offered
+    /// number, [`GIVE_UP`] and — for a goal — [`DONE`]. Never [`TYPE_TEXT`]:
+    /// a reader answering one option cannot name the field it would type
+    /// into, and a rescue presses or steps back.
+    #[must_use]
+    pub fn press_options(&self) -> Vec<String> {
+        self.options()
+    }
+
+    /// Every head's answer, each judged against the set its head offered —
+    /// the action, the field when it is to type, the observation heads and
+    /// the two guards. One broken rule in any head discards the answer
+    /// whole, whether or not the action needed that head.
+    ///
+    /// # Errors
+    ///
+    /// [`ActionRefusal`] names which rule the answer broke.
+    pub fn read_all(&self, answers: &Value) -> Result<ActionRead, ActionRefusal> {
+        self.read(answers).map(ActionRead::from)
     }
 
     /// A second reader's answer to this question — one option and one

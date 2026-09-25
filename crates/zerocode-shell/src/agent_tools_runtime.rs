@@ -2544,6 +2544,10 @@ pub(super) async fn computer_loop(
                             })
                             .flatten();
                         if command.method == zerocode_core::computer_use::ComputerMethod::Walk {
+                            // The value seat's writer (t-6720): the window's own login, read
+                            // only when a walk types into a field.
+                            let root = app.state::<AppState>().config_root().to_path_buf();
+                            let writer = computer_use::errand::value::LiveWriter::window(&root);
                             run_goal(
                                 &command,
                                 deadline_ms,
@@ -2552,6 +2556,7 @@ pub(super) async fn computer_loop(
                                 roads,
                                 desk,
                                 rescue,
+                                writer,
                             )
                         } else {
                             run_recipe(
@@ -3273,6 +3278,7 @@ pub(super) fn run_recipe(
 /// The seat is the surface's, never the verb's: a walk at a browser pane is
 /// under the browser row of the Jev use table and a walk at an app is under
 /// the desktop row, so neither switch can turn the other's surface on.
+#[allow(clippy::too_many_arguments)] // Its roads, desk, second reader and value writer are each one seam.
 pub(super) fn run_goal(
     command: &zerocode_core::computer_use::ComputerCommand,
     deadline_ms: u64,
@@ -3290,6 +3296,7 @@ pub(super) fn run_goal(
     >,
     mut desk_of: impl computer_use::arena::DeskOf,
     mut rescue: Option<computer_use::errand::team::TeamJudge>,
+    writer: computer_use::errand::value::LiveWriter,
 ) -> zerocode_hookd::TeamAnswer {
     use computer_use::errand::{self, desk};
     use computer_use::recipe_run::Desk as _;
@@ -3416,7 +3423,8 @@ pub(super) fn run_goal(
     };
     let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
         .with_snapshots(snapshots)
-        .previewing(options.overlap);
+        .previewing(options.overlap)
+        .writing(Box::new(writer));
     let walked = errand::run_with(
         mode,
         acting,
