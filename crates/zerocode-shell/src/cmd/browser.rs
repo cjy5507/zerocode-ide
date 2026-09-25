@@ -3156,29 +3156,53 @@ pub(crate) fn marks_request() -> serde_json::Value {
 
 /// Walk the page for the controls a person could hit, number the hittable
 /// ones in document order (the core's pure step), and remember them under the
-/// pane's label.
-///
-/// A settle the pane's last press left for later (`--settle-later`, t-9712)
-/// is finished first, by the one settle road, and the look says how it
-/// ended: the look reads what the press left. A pane gone before it could
-/// be finished answers so, the settle said `unknown`; a look that fails
-/// after it says how the settle ended in its refusal — no settle is dropped
-/// without a word.
+/// pane's label — finishing first a settle the pane's last press left for
+/// later ([`look_after_held_settle`], t-9712).
 pub(crate) async fn automate_marks(
     app: &AppHandle,
     state: &AppState,
     label: &str,
 ) -> Result<BrowserLook, String> {
+    look_after_held_settle(
+        label,
+        browser_pane_of(app, state, label),
+        |pane, held| async move { settle_after_press(&pane, &held.epoch, held.since).await },
+        |pane| async move { read_look(&pane, label).await },
+    )
+    .await
+}
+
+/// A look that first finishes the settle the pane's last press left for
+/// later (`--settle-later`, t-9712): the held settle is taken — once — and
+/// ended by `settle` on the pane, by the one settle road, before `read` reads
+/// the page, and the look says how it ended; with none held it reads at once.
+/// A pane gone before the settle could be finished answers so, the settle
+/// said `unknown`; a read that fails after it says how the settle ended in
+/// its refusal — no settle is dropped without a word. `automate_marks`' own
+/// road, apart from the window.
+pub(crate) async fn look_after_held_settle<P, S, SF, R, RF>(
+    label: &str,
+    pane: Result<P, String>,
+    settle: S,
+    read: R,
+) -> Result<BrowserLook, String>
+where
+    P: Clone,
+    S: FnOnce(P, HeldSettle) -> SF,
+    SF: std::future::Future<Output = SettleReport>,
+    R: FnOnce(P) -> RF,
+    RF: std::future::Future<Output = Result<BrowserLook, String>>,
+{
     let held = take_held_settle(label);
-    let pane = browser_pane_of(app, state, label).map_err(|why| match held {
+    let pane = pane.map_err(|why| match held {
         Some(_) => format!("{why} ({})", settle_unheard_fact()),
         None => why,
     })?;
     let settle = match held {
-        Some(held) => Some(settle_after_press(&pane, &held.epoch, held.since).await),
+        Some(held) => Some(settle(pane.clone(), held).await),
         None => None,
     };
-    let mut look = read_look(&pane, label).await.map_err(|why| match &settle {
+    let mut look = read(pane).await.map_err(|why| match &settle {
         Some(settle) => format!("{why} ({})", settle_facts(settle)),
         None => why,
     })?;

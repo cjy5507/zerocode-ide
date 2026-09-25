@@ -21297,9 +21297,9 @@ mod browser_look_settle_pin {
     use cmd::browser::{
         BROWSER_MARK_HELPERS, BROWSER_MARKS_BODY, BROWSER_OBSERVE_HELPERS, BROWSER_REMEASURE_BODY,
         BROWSER_SETTLE_BODY, BrowserLook, CLICK_SAID, CLICK_SAID_KEY, HeldSettle, PAGE_SEND_FAILED,
-        PAGE_TIMED_OUT, SettleReport, held_refusal, hold_settle, input_report, input_said, look_of,
-        marks_json, marks_lines, page_failure, pressed_rect, settle_held, settle_later_json,
-        settle_with, take_held_settle,
+        PAGE_TIMED_OUT, SettleReport, held_refusal, hold_settle, input_report, input_said,
+        look_after_held_settle, look_of, marks_json, marks_lines, page_failure, pressed_rect,
+        settle_held, settle_later_json, settle_with, take_held_settle,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -21725,6 +21725,84 @@ mod browser_look_settle_pin {
         );
     }
 
+    /// A look takes the settle its pane's last press left for later, once,
+    /// finishes it before it reads the page and says how it ended; with none
+    /// held it reads at once and says nothing of a settle; a pane gone first
+    /// says the settle went unheard, and a read that fails after it says how
+    /// it ended — no settle is dropped without a word (t-9712).
+    #[tokio::test]
+    async fn a_look_finishes_the_held_settle_before_it_reads_and_says_how_it_ended() {
+        let label = "browser-t9712-look";
+        let held = || HeldSettle {
+            epoch: EPOCH.to_string(),
+            since: Some(1_000.0),
+        };
+        let order = std::cell::RefCell::new(Vec::<String>::new());
+        hold_settle(label, held());
+        let look = look_after_held_settle(
+            label,
+            Ok(()),
+            |(), settling| {
+                order
+                    .borrow_mut()
+                    .push(format!("settle {} {:?}", settling.epoch, settling.since));
+                async { a_ready_settle() }
+            },
+            |()| {
+                order.borrow_mut().push("read".to_string());
+                async { Ok(a_one_button_look()) }
+            },
+        )
+        .await
+        .expect("a look");
+        assert_eq!(
+            order.take(),
+            [format!("settle {EPOCH} Some(1000.0)"), "read".to_string()],
+            "the held settle is finished before the page is read"
+        );
+        assert_eq!(look.settle, Some(a_ready_settle()));
+        assert!(!settle_held(label), "taken once");
+
+        let plain = look_after_held_settle(
+            label,
+            Ok(()),
+            |(), _| {
+                order.borrow_mut().push("settle".to_string());
+                async { a_ready_settle() }
+            },
+            |()| async { Ok(a_one_button_look()) },
+        )
+        .await
+        .expect("a look");
+        assert!(order.take().is_empty(), "nothing held, nothing settled");
+        assert_eq!(plain.settle, None);
+
+        hold_settle(label, held());
+        let gone = look_after_held_settle(
+            label,
+            Err::<(), String>("판이 없습니다".to_string()),
+            |(), _| async { a_ready_settle() },
+            |()| async { Ok(a_one_button_look()) },
+        )
+        .await;
+        assert_eq!(gone, Err("판이 없습니다 (settle=unknown)".to_string()));
+        assert!(!settle_held(label), "the unheard settle went with its word");
+
+        hold_settle(label, held());
+        let failed = look_after_held_settle(
+            label,
+            Ok(()),
+            |(), _| async { a_ready_settle() },
+            |()| async { Err("document_moving".to_string()) },
+        )
+        .await;
+        assert_eq!(
+            failed,
+            Err("document_moving (settle=ready, settle-why=quiet, settle-ms=52)".to_string())
+        );
+        assert!(!settle_held(label));
+    }
+
     /// A press by number that does not leave its settle for later answers
     /// v1.1.27's sentence to the byte (t-9712) — and its road still settles
     /// before it answers; the road that leaves the settle holds it instead,
@@ -21756,12 +21834,13 @@ mod browser_look_settle_pin {
             "{later}"
         );
         let look = block("pub(crate) async fn automate_marks(");
-        let taken = look
-            .find("take_held_settle(label)")
-            .expect("the look takes it");
-        let settled = look.find("settle_after_press(").expect("and settles it");
-        let read = look.find("read_look(").expect("and reads");
-        assert!(taken < settled && settled < read, "{look}");
+        assert!(
+            look.contains("look_after_held_settle(")
+                && look.contains("browser_pane_of(app, state, label)")
+                && look.contains("settle_after_press(&pane, &held.epoch, held.since)")
+                && look.contains("read_look(&pane, label)"),
+            "the look finishes a held settle by the one settle road before it reads:\n{look}"
+        );
         let press = block("async fn press_mark(");
         let refused = press
             .find("settle_held(label)")
