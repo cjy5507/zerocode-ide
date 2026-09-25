@@ -61,8 +61,9 @@ final class ReflexContractTests: XCTestCase {
                 }
             }
         }
-        // R1's 32 cases under version 2, and the six version 2 adds.
-        XCTAssertEqual(names.count, 38)
+        // R1's 32 cases under version 2, the six version 2 adds, and the identifier
+        // bound's two sides (t-9205).
+        XCTAssertEqual(names.count, 40)
         let wireNames = try XCTUnwrap(manifest["wire_negative"] as? [String])
         for name in wireNames {
             let data = try Data(contentsOf: fixtureRoot.appendingPathComponent("\(name).txt"))
@@ -170,6 +171,76 @@ final class ReflexContractTests: XCTestCase {
         XCTAssertThrowsError(try ReflexContract.decodeLimits(narrowed))
         let spaced = Data(" ".utf8) + raw
         XCTAssertThrowsError(try ReflexContract.decodeLimits(spaced))
+    }
+
+    /// The capability table is one file both sides read (`reflex::capability_wire` sends it,
+    /// Rust's `swift_and_rust_read_one_capability_table` reads it): the helper decodes the
+    /// file's own bytes, each surface claims its row, and a table written for another
+    /// contract or run-policy version claims nothing.
+    func test_swift_and_rust_read_one_capability_table() throws {
+        let raw = try fixture("capability")
+        XCTAssertEqual(raw.last, UInt8(ascii: "\n"))
+        let wire = Data(raw.dropLast())
+        let table = try ReflexContract.decodeCapabilities(wire)
+        XCTAssertEqual(table.contract, ReflexContract.version)
+        XCTAssertEqual(table.run_policy, ReflexContract.runPolicyVersion)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: wire) as? [String: Any])
+        let surfaces = try XCTUnwrap(object["surfaces"] as? [String: [String: Bool]])
+        for surface in [ReflexSurface.macos_desktop, .ios_device, .windows_desktop] {
+            let row = try XCTUnwrap(surfaces[surface.rawValue], surface.rawValue)
+            let claimed = ReflexContract.capability(surface, table: table)
+            XCTAssertEqual(claimed, ReflexCapability(schema_version: ReflexContract.version,
+                                                     live_reflex: try XCTUnwrap(row["live_reflex"]),
+                                                     instant_pointer: try XCTUnwrap(row["instant_pointer"])), surface.rawValue)
+        }
+        // A table claiming everything, written for another contract or run policy.
+        func generous(contract: UInt32, runPolicy: UInt32) throws -> ReflexCapabilityTable {
+            var changed = object
+            changed["contract"] = contract
+            changed["run_policy"] = runPolicy
+            let all = ["instant_pointer": true, "live_reflex": true]
+            changed["surfaces"] = ["ios_device": all, "macos_desktop": all, "windows_desktop": all]
+            return try ReflexContract.decodeCapabilities(try JSONSerialization.data(withJSONObject: changed, options: [.sortedKeys, .withoutEscapingSlashes]))
+        }
+        XCTAssertTrue(ReflexContract.capability(.windows_desktop, table: try generous(contract: ReflexContract.version, runPolicy: ReflexContract.runPolicyVersion)).live_reflex)
+        for stale in [try generous(contract: ReflexContract.version + 1, runPolicy: ReflexContract.runPolicyVersion),
+                      try generous(contract: ReflexContract.version, runPolicy: ReflexContract.runPolicyVersion + 1)] {
+            for surface in [ReflexSurface.macos_desktop, .ios_device, .windows_desktop] {
+                let claimed = ReflexContract.capability(surface, table: stale)
+                XCTAssertFalse(claimed.live_reflex || claimed.instant_pointer, surface.rawValue)
+            }
+        }
+        // Only the canonical bytes with every field known are read.
+        let text = String(decoding: wire, as: UTF8.self)
+        for bad in [" " + text,
+                    text.replacingOccurrences(of: "{\"contract\"", with: "{\"a_claim\":true,\"contract\""),
+                    text.replacingOccurrences(of: "\"instant_pointer\":false,", with: ""),
+                    text.replacingOccurrences(of: "\"contract\":2,", with: "")] {
+            XCTAssertThrowsError(try ReflexContract.decodeCapabilities(Data(bad.utf8)), bad)
+        }
+    }
+
+    /// A run's policy is decoded as Rust decodes it, from the shared cases.
+    func test_shared_run_policy_cases_run_through_the_real_decoder() throws {
+        let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: self.fixture("run_policy_cases")) as? [String: Any])
+        let cases = try XCTUnwrap(fixture["cases"] as? [[String: Any]])
+        let limits = try contractLimits()
+        var mismatches: [String] = []
+        for row in cases {
+            let name = try XCTUnwrap(row["name"] as? String)
+            let wire = Data(try XCTUnwrap(row["wire"] as? String).utf8)
+            let got: String
+            do {
+                let policy = try ReflexContract.decodeRunPolicy(wire, limits: limits)
+                XCTAssertEqual(policy.version, ReflexContract.runPolicyVersion, name)
+                got = "ok"
+            } catch let error as ReflexContractError {
+                got = error.rawValue
+            }
+            if got != (try XCTUnwrap(row["expected"] as? String)) { mismatches.append("\(name): got \(got)") }
+        }
+        XCTAssertEqual(mismatches, [])
+        XCTAssertEqual(cases.count, 18)
     }
 
     func testAColourDetectorCarriesItsSpecInsideThePlanHash() throws {

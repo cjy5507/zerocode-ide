@@ -122,6 +122,8 @@ public struct ReflexLimits: Codable, Equatable, Sendable {
     public let max_macro_depth: UInt64
     public let max_cooldown_ms: UInt64
     public let max_lease_ns: UInt64
+    /// The longest one run may be asked to last (`ReflexRunPolicy.run_ns`).
+    public let max_run_ns: UInt64
     public let max_scale_part: UInt64
     public let max_pointer_duration_ms: UInt64
     public let instant_duration_ms: UInt64
@@ -139,7 +141,7 @@ public enum ReflexTable {
     /// Every bound a run waits or divides by is positive, and the longest
     /// glide plus a press and its release fit one lease's children.
     public static func check(_ limits: ReflexLimits) throws {
-        guard limits.max_frame_age_ns > 0, limits.max_lease_ns > 0,
+        guard limits.max_frame_age_ns > 0, limits.max_lease_ns > 0, limits.max_run_ns > 0,
               limits.frames_per_second > 0, limits.pointer_tick_ns > 0,
               maxGlideWaypoints(limits) < limits.max_expanded_actions,
               limits.max_expanded_actions - maxGlideWaypoints(limits) >= 2
@@ -170,6 +172,11 @@ public enum ReflexContract {
     /// nanoseconds (`mach_absolute_time`), the clock ScreenCaptureKit reports a frame's
     /// display time in (`reflex::HOST_UPTIME_CLOCK`).
     public static let hostUptimeClockDomain: UInt64 = 1
+    /// 1: a run's own terms beside its plan (`reflex::RUN_POLICY_VERSION`).
+    public static let runPolicyVersion: UInt32 = 1
+    /// The longest id a plan, a rule, a macro, an action or a run may carry
+    /// (`reflex::MAX_IDENTIFIER_BYTES`), pinned for both by the shared plan cases.
+    public static let maxIdentifierBytes = 64
 
     /// The reflex table as the window sends it (`reflex::limits_wire`): only the canonical
     /// form is read, so a field the helper does not know cannot be dropped silently.
@@ -193,9 +200,50 @@ public enum ReflexContract {
         return try validate(plan, limits: limits, perception: perception)
     }
 
-    private static func identifier(_ text: String) -> Bool {
-        guard !text.isEmpty, text.utf8.count <= 64 else { return false }
+    /// Whether `text` is an id this contract carries: 1 to `maxIdentifierBytes` bytes of
+    /// `[A-Za-z0-9_-]` (`reflex::identifier`).
+    public static func identifier(_ text: String) -> Bool {
+        guard !text.isEmpty, text.utf8.count <= maxIdentifierBytes else { return false }
         return text.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }
+    }
+
+    /// The canonical form of a JSON object: compact, keys sorted at every depth.
+    private static func canonical(_ object: Any) -> Data? {
+        try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
+    /// A run's policy as a start carries it (`reflex::decode_run_policy`, pinned for both by
+    /// `run_policy_cases.json`): canonical, of the version this contract names — an absent
+    /// one or another integer is a version refused before any other field is read, a
+    /// version that is not an integer is the wire — with exactly its three fields, and a
+    /// length the window's table allows.
+    public static func decodeRunPolicy(_ data: Data, limits: ReflexLimits) throws -> ReflexRunPolicy {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              canonical(object) == data
+        else { throw ReflexContractError.wire }
+        guard let version = object["version"] else { throw ReflexContractError.version }
+        guard let number = version as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(number as CFNumber)
+        else { throw ReflexContractError.wire }
+        guard number.int64Value == Int64(runPolicyVersion) else { throw ReflexContractError.version }
+        guard let policy = try? JSONDecoder().decode(ReflexRunPolicy.self, from: data),
+              let again = try? JSONEncoder().encode(policy),
+              let reread = try? JSONSerialization.jsonObject(with: again),
+              canonical(reread) == data
+        else { throw ReflexContractError.wire }
+        guard policy.run_ns > 0, policy.run_ns <= limits.max_run_ns else { throw ReflexContractError.budget }
+        return policy
+    }
+
+    /// The capability table as the window sends it (`reflex::decode_capability`): only the
+    /// canonical form with every field known is read.
+    public static func decodeCapabilities(_ data: Data) throws -> ReflexCapabilityTable {
+        guard let table = try? JSONDecoder().decode(ReflexCapabilityTable.self, from: data),
+              let again = try? JSONEncoder().encode(table),
+              let object = try? JSONSerialization.jsonObject(with: again),
+              canonical(object) == data
+        else { throw ReflexContractError.wire }
+        return table
     }
 
     public static func wireBytes(_ plan: ReflexPlan) throws -> Data {
@@ -427,15 +475,67 @@ public struct ReflexActionLease: Codable, Equatable, Sendable {
     }
 }
 
-public struct ReflexCapability: Codable, Equatable {
+/// A run's own terms beside its plan (`reflex::RunPolicy`): how long it may last from the
+/// moment the helper first accepts it, and whether a rule whose `max_fires` are spent gets
+/// exactly those back. The plan and its hash stay what they are.
+public struct ReflexRunPolicy: Codable, Equatable, Sendable {
+    public let version: UInt32
+    public let run_ns: UInt64
+    public let renew: Bool
+
+    public init(version: UInt32, run_ns: UInt64, renew: Bool) {
+        self.version = version
+        self.run_ns = run_ns
+        self.renew = renew
+    }
+}
+
+/// What one surface may claim (`reflex::SurfaceCapability`): a live reflex run, and an
+/// instant pointer on the helper's own verbs — two columns, because running plans does
+/// not teach the verbs an instant pointer.
+public struct ReflexSurfaceCapability: Codable, Equatable, Sendable {
+    public let live_reflex: Bool
+    public let instant_pointer: Bool
+}
+
+public struct ReflexCapabilitySurfaces: Codable, Equatable, Sendable {
+    public let ios_device: ReflexSurfaceCapability
+    public let macos_desktop: ReflexSurfaceCapability
+    public let windows_desktop: ReflexSurfaceCapability
+}
+
+/// The one capability table (`fixtures/reflex-contract/capability.json`, `reflex::CapabilityTable`)
+/// as the window sends it with a start: each surface's claims, for the plan contract and
+/// the run policy it was written against.
+public struct ReflexCapabilityTable: Codable, Equatable, Sendable {
+    public let contract: UInt32
+    public let run_policy: UInt32
+    public let surfaces: ReflexCapabilitySurfaces
+
+    public func surface(_ surface: ReflexSurface) -> ReflexSurfaceCapability {
+        switch surface {
+        case .macos_desktop: return surfaces.macos_desktop
+        case .ios_device: return surfaces.ios_device
+        case .windows_desktop: return surfaces.windows_desktop
+        }
+    }
+}
+
+public struct ReflexCapability: Codable, Equatable, Sendable {
     public let schema_version: UInt32
     public let live_reflex: Bool
+    public let instant_pointer: Bool
 }
 
 public extension ReflexContract {
-    static func capability(_ surface: ReflexSurface) -> ReflexCapability {
-        _ = surface
-        return ReflexCapability(schema_version: version, live_reflex: false)
+    /// What `table` claims for `surface` (`reflex::capability_in`): nothing unless the table
+    /// was written for this contract and this run policy — a helper of another version reads
+    /// a table that claims nothing.
+    static func capability(_ surface: ReflexSurface, table: ReflexCapabilityTable) -> ReflexCapability {
+        let current = table.contract == version && table.run_policy == runPolicyVersion
+        let row = table.surface(surface)
+        return ReflexCapability(schema_version: version, live_reflex: current && row.live_reflex,
+                                instant_pointer: current && row.instant_pointer)
     }
 }
 

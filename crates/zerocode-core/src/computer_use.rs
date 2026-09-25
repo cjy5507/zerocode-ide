@@ -2883,14 +2883,13 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
     let json = flags.contains_key("json");
     reject_unknown(method, &flags)?;
     if flags.contains_key("instant")
-        && !crate::computer_use_protocol::reflex::capability(
-            crate::computer_use_protocol::reflex::Surface::MacosDesktop,
+        && let Some(refusal) = crate::computer_use_protocol::reflex::instant_pointer_refusal(
+            crate::computer_use_protocol::reflex::capability(
+                crate::computer_use_protocol::reflex::Surface::MacosDesktop,
+            ),
         )
-        .live_reflex
     {
-        return Err(
-            "unsupported_capability: instant pointer style needs a live reflex provider".into(),
-        );
+        return Err(refusal.into());
     }
     let mut params = Map::new();
 
