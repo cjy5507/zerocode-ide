@@ -305,9 +305,9 @@ pub struct Tally {
     /// three rows of a missing key held the routing seat at a bound of 0.728
     /// on a week it answered 25 of the 25 requests that left (2026-09-20).
     pub refused: usize,
-    /// Rows whose judgment went over the wire — the latency population. A
-    /// memo hit answered without asking, so it is counted as an answer and
-    /// not as a call.
+    /// Rows whose judgment went over the wire, answered or not. A memo hit
+    /// answered without asking, so it is counted as an answer and not as a
+    /// call.
     pub called: usize,
     /// Rows that asked and did not answer, by outcome token, most frequent
     /// first, then by token so the order is the same twice.
@@ -323,7 +323,20 @@ pub struct Tally {
     pub redacted_lines: u64,
     /// Input tokens the window's calls billed.
     pub input_tokens: u64,
-    /// Nearest-rank percentiles of the calls' elapsed milliseconds.
+    /// Nearest-rank percentiles of the elapsed milliseconds of the calls that
+    /// answered — how long the seat's answers take over the wire, the time
+    /// the latency line holds to the apply stage's wall (§4).
+    ///
+    /// Only an answer has an answer's time (t-9427). A call that did not
+    /// answer is the answered share's miss, and a malformed reply the schema
+    /// line's too; a timeout's row carries the wall its stage gave up at,
+    /// not a reply's time. Read as a latency sample it counted the same miss
+    /// twice — once where the answer floor forgives it
+    /// ([`crate::jev::JevUse::window_forgives`]) and again as the p95, which
+    /// on fewer than twenty calls is the slowest. The recall seat's window
+    /// on 2026-09-23 held 53 requests, 46 of them memo hits: its six answers
+    /// took 239 to 720 ms and its one timeout carried the 1,500 ms wall plus
+    /// two, and the acting seat was judged to fall on latency.
     pub p50_ms: Option<u64>,
     pub p95_ms: Option<u64>,
     /// Presses a screen seat's two guards stopped (t-6187), off the rows'
@@ -837,7 +850,10 @@ pub fn summarize_rows<'a>(rows: impl IntoIterator<Item = &'a Value>, since_ms: i
             .filter(|_| !cached)
         {
             tally.called += 1;
-            elapsed.push(ms);
+            // An answer's time, and no miss's (t-9427, [`Tally::p95_ms`]).
+            if outcome == ANSWERED {
+                elapsed.push(ms);
+            }
         }
     }
     elapsed.sort_unstable();

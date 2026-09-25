@@ -32,8 +32,9 @@ zo jev score <question> --level <text>... (--item <text>... | --stdin) [--cwd <d
 
   summary: count every Jev seat's ledger — today and the last seven days.
   Per seat: its mode (off/shadow/on/auto), rows, how many answered and the
-  95% lower bound on that share, the p50 and p95 of the calls that went over
-  the wire (a memo hit answered without asking, so it is not one), the
+  95% lower bound on that share, the p50 and p95 of the answers that came
+  back over the wire (a memo hit answered without asking, and a call that
+  did not answer has no answer time — it is counted among the failures), the
   refusal and failure tokens with their counts, the lines the door withheld,
   what the billed tokens cost, and — for a seat whose `auto` may rise — the
   share it must clear and how many rows stand before the next judgment.

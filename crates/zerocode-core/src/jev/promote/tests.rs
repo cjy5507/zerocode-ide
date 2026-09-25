@@ -466,6 +466,83 @@ fn one_forgiven_timeout_does_not_forgive_a_second_one() {
     }
 }
 
+/// The recall seat's window as its ledger held it on 2026-09-23 09:06
+/// (t-9427): 53 requests, the memo answering 46 of them, and 7 calls over
+/// the wire — six answers of 239 to 720 ms, and one timeout whose row
+/// carries the wall its apply road gave up at, not an answer's time. The
+/// answer line forgives that one miss; the latency line used to read it
+/// again, and on fewer than twenty calls the nearest-rank p95 is the
+/// slowest, so the acting seat fell on the timeout it had just been
+/// forgiven for.
+fn recalls_window(timeouts: usize) -> Vec<Value> {
+    let seat = &crate::jev::RECALL;
+    let wall = seat.apply_deadline_ms.expect("a rising seat");
+    let answers = [260_u64, 553, 245, 720, 323, 239];
+    let mut rows = vec![rose(seat)];
+    rows.extend((0..53).map(|at| {
+        let mut row = asked_by(seat, at);
+        match at.checked_sub(53 - answers.len() - timeouts) {
+            None => {
+                row["cached"] = json!(true);
+                row["elapsedMs"] = json!(0);
+            }
+            Some(call) if call < answers.len() => row["elapsedMs"] = json!(answers[call]),
+            Some(_) => {
+                row["outcome"] = json!("timeout");
+                row["elapsedMs"] = json!(wall + 2);
+            }
+        }
+        row
+    }));
+    rows
+}
+
+#[test]
+fn an_acting_seat_does_not_fall_on_the_one_timeout_its_answer_line_forgives() {
+    let seat = &crate::jev::RECALL;
+    let judged = judge_seat(seat, &recalls_window(1)).expect("judged");
+    assert_eq!(judged.verdict, Verdict::Keep);
+    assert_eq!(
+        (judged.window.called, judged.window.answered),
+        (7, 52),
+        "the window as the ledger held it"
+    );
+    assert_eq!(
+        judged.window.p95_ms,
+        Some(720),
+        "the answers' p95, not the wall a timeout was cut at"
+    );
+    // A second timeout is one more than the answer line forgives, and the
+    // answer line is the one that says so.
+    assert!(matches!(
+        judge_seat(seat, &recalls_window(2))
+            .expect("judged")
+            .verdict,
+        Verdict::Fall(Line::Answered { .. })
+    ));
+}
+
+/// The latency line still reads the answers: one that arrived after the
+/// wall on the record-only road — 1,843 ms, the recall ledger's own — is an
+/// answer the apply road would have missed, and a seat that has not risen
+/// holds on it.
+#[test]
+fn an_answer_slower_than_the_wall_still_holds_a_seat_on_the_latency_line() {
+    let seat = &crate::jev::RECALL;
+    let wall = seat.apply_deadline_ms.expect("a rising seat");
+    let mut rows = recalls_window(0);
+    rows.remove(0);
+    let last = rows.last_mut().expect("a request");
+    last["elapsedMs"] = json!(1_843);
+    assert_eq!(
+        judge_seat(seat, &rows).expect("judged").verdict,
+        Verdict::Hold(Line::Latency {
+            p95_ms: 1_843,
+            deadline_ms: wall
+        })
+    );
+}
+
 fn window(rows: usize, answered: usize, p95_ms: Option<u64>) -> Tally {
     Tally {
         rows,
@@ -1328,7 +1405,7 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     assert!(bound_permille >= seat.agreement_floor_permille.expect("a budget"));
     // An acting seat the baseline matches falls.
     let mut acting = beaten.clone();
-    acting.insert(0, json!({"transition": ROSE}));
+    acting.insert(0, rose(seat));
     assert!(matches!(
         judge_seat(seat, &acting).expect("judged").verdict,
         Verdict::Fall(Line::Baseline { .. })
@@ -1649,11 +1726,11 @@ fn an_unversioned_row_reads_as_version_one() {
         .chain(std::iter::once(unversioned_rise(3)))
         .chain((4..7).map(answered))
         .collect();
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     assert_eq!(
-        crate::worker_placement::WORKER_PLACEMENT_RUBRIC_VERSION,
+        crate::jev::questions::RECALL_RUBRIC_VERSION,
         1,
-        "placement asks version 1: its rows may name none"
+        "recall asks version 1: its rows may name none"
     );
     let judged = judge_seat(first, &rows).expect("judged");
     assert_eq!(
@@ -1721,7 +1798,7 @@ fn a_rubric_change_returns_a_risen_seat_to_recording() {
     );
 
     // Rolled back: a seat asking version 1 does not stand on version 2's rise.
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     let answered = |at: usize| serde_json::json!({"at": at, "outcome": "answered", "elapsedMs": 1, "requests": 1});
     let rolled_back: Vec<Value> = (0..3)
         .map(answered)
@@ -1867,7 +1944,7 @@ fn a_ledgers_text_stands_where_its_series_does() {
             .map(|row| format!("{row}\n"))
             .collect::<String>()
     };
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     let second = guard();
     let both = |rows: &[Value]| {
         for seat in [first, second] {
@@ -2317,7 +2394,7 @@ fn each_dropped_block_is_one_comparison_of_its_compaction() {
 #[test]
 fn the_text_reader_and_the_row_reader_agree_on_what_fences_a_series() {
     use serde_json::json;
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     let second = guard();
     // (a line as a writer or a hand spelled it, whether it fences a seat
     // asking version 1, whether it fences one asking version 2)
@@ -2414,7 +2491,7 @@ fn the_text_reader_and_the_row_reader_agree_on_what_fences_a_series() {
 /// text, on a seat asking version 1 and one asking version 2.
 #[test]
 fn the_text_reader_reads_every_line_the_rows_reader_would() {
-    let first = &crate::jev::PLACEMENT;
+    let first = &crate::jev::RECALL;
     let second = guard();
     // (the ledger after the seat's own rise at its own words, as `S`, and
     // where the seat stands on it)

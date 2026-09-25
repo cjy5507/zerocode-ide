@@ -1023,6 +1023,24 @@ pub const RECALL_ANSWER_FLOOR_PERMILLE: u16 = SKILL_ANSWER_FLOOR_PERMILLE;
 /// from there for the reason its answer floor is.
 pub const RECALL_AGREEMENT_FLOOR_PERMILLE: u16 = SKILL_AGREEMENT_FLOOR_PERMILLE;
 
+/// The wall the recall seat's apply road holds a turn for the judgment's
+/// order, in milliseconds — what `rerank_shadow::RERANK_APPLY_DEADLINE`
+/// waits and the latency line the judge holds the seat to (§4), one number
+/// so the two cannot disagree (t-9427).
+///
+/// The seat's own, where it used to be routing's borrowed. The wait is the
+/// same kind — recall settles its section on the turn's own path before the
+/// request leaves (`rerank_shadow::settle`), and only the label hears the
+/// turn from outside it — but the answers timed are this seat's, and a
+/// re-measurement of either seat moves one line. Measured on this machine's
+/// recall ledger (2026-09-26, 1,331 requests, 1,141 of them memo hits): the
+/// 119 calls that answered over the wire took 308 ms at the median and
+/// 1,020 ms at p95 (the 27 the apply road waited for, 322 and 720 ms, the
+/// slowest 833), and the week's 43 took 305 and 720 ms. At 1.5 s the wall
+/// holds all but four of the 119 — 1,843 to 2,165 ms, every one on the
+/// record-only road; a 1 s wall would have cut six, and 800 ms eight.
+pub const RECALL_APPLY_DEADLINE_MS: u64 = 1_500;
+
 /// zo's recall rerank: how much each note a recall found helps with the
 /// request (docs/design/typesafe-judgment-expansion-20260917.md).
 ///
@@ -1093,10 +1111,10 @@ pub const RECALL: JevUse = JevUse {
     answer_floor_permille: Some(RECALL_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: None,
     agreement_floor_permille: Some(RECALL_AGREEMENT_FLOOR_PERMILLE),
-    // The routing seat's active wall: the apply road already waits inside
-    // it (`rerank_shadow::RERANK_APPLY_DEADLINE`), so the judge times the
-    // seat against the wall the stage actually holds.
-    apply_deadline_ms: Some(ROUTING_APPLY_DEADLINE_MS),
+    // The wall the apply road waits (`rerank_shadow::RERANK_APPLY_DEADLINE`
+    // reads it), so the judge times the seat against the wall the stage
+    // actually holds.
+    apply_deadline_ms: Some(RECALL_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
@@ -1407,13 +1425,18 @@ pub const PLACEMENT_ANSWER_FLOOR_PERMILLE: u16 = 800;
 /// (`crate::worker_placement`, `cmd::worker_room`); nothing calls it, and
 /// nothing should until those rows exist.
 ///
-/// The `agreed` rule (t-5806, t-6342): the answer agreed when the room the
-/// worker's pane ended [`PLACEMENT_LABEL_WINDOW_MS`] in is the room the seat
-/// named, and disagreed when it is another — the room the person moved it to
-/// (closed a tiled pane to the background, dragged its tab out beside
-/// something else, brought a parked worker back to a tab), or, for a pane
-/// nobody moved, the room it stood in: the answer's own when the seat seated
-/// it, today's tab when the seat only recorded (`worker_placement::stood_in`).
+/// The `agreed` rule (t-5806, t-6342, t-9427): the answer agreed when the
+/// room the worker's pane ended [`PLACEMENT_LABEL_WINDOW_MS`] in is the room
+/// the seat named, and disagreed when the person moved it to another (closed
+/// a tiled pane to the background, dragged its tab out beside something
+/// else, brought a parked worker back to a tab). A pane nobody moved stood
+/// in the answer's room when the seat seated it and in today's tab when the
+/// seat only recorded (`worker_placement::stood_in`), and it grades only the
+/// answer that named that room: a recorded answer naming another room was
+/// never tried, and its row carries `worker_placement::NOT_CARRIED` under
+/// [`summary::NOT_COMPARED`] and no mark — the tab its pane was left in says
+/// the tab would do, not that the answer's room would not have (all 22 seen
+/// recorded splits of 2026-09-26 had been marked wrong that way).
 /// A move that keeps the room (a tab dragged to another group) is still
 /// written down, as a move the answer survived. A pane nobody moved is graded
 /// only if it stood on the stage, with the window in front, for

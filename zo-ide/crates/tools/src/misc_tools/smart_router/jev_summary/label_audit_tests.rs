@@ -302,13 +302,13 @@ fn placement(rows: &[Value], watch: &[(i64, Vec<u64>)], worker_terms: &HashMap<S
             audit.not_compared("sight_unknown");
             continue;
         };
-        match worker_placement::mark(chosen, ended_in, seen) {
+        match worker_placement::mark(chosen, ended_in, moved, seen) {
             Ok(mark) => {
                 audit.after.add(mark);
                 if let Some(confidence) = ask.and_then(|ask| confidence(ask)) {
                     audit.graded.push((confidence, mark));
                 }
-                if let Some(baseline) = worker_placement::baseline_mark(ended_in, seen) {
+                if let Some(baseline) = worker_placement::baseline_mark(chosen, ended_in, moved, seen) {
                     audit.baseline.add(baseline);
                 }
             }
@@ -330,10 +330,10 @@ fn placement(rows: &[Value], watch: &[(i64, Vec<u64>)], worker_terms: &HashMap<S
         } else {
             worker_placement::stood_in(chosen, applied)
         };
-        if let Ok(mark) = worker_placement::mark(chosen, ended_in, true) {
+        if let Ok(mark) = worker_placement::mark(chosen, ended_in, moved, true) {
             room.add(mark);
         }
-        if let Some(baseline) = worker_placement::baseline_mark(ended_in, true) {
+        if let Some(baseline) = worker_placement::baseline_mark(chosen, ended_in, moved, true) {
             room_baseline.add(baseline);
         }
     }
@@ -450,15 +450,18 @@ fn notify(rows: &[Value]) -> Audit {
             audit.not_compared("no_answer");
             continue;
         };
-        let Some(mark) = notify_call::agreed(call, reacted, attendance) else {
-            audit.not_compared("away");
-            continue;
+        let mark = match notify_call::agreed(call, reacted, attendance) {
+            Ok(mark) => mark,
+            Err(why) => {
+                audit.not_compared(why);
+                continue;
+            }
         };
         audit.after.add(mark);
         if let Some(confidence) = label_of(label).and_then(|key| asked.get(key)).and_then(|ask| confidence(ask)) {
             audit.graded.push((confidence, mark));
         }
-        if let Some(baseline) = notify_call::agreed(notify_call::Call::today(), reacted, attendance) {
+        if let Ok(baseline) = notify_call::agreed(notify_call::Call::today(), reacted, attendance) {
             audit.baseline.add(baseline);
         }
     }
@@ -651,7 +654,9 @@ fn table(audits: &[(&'static JevUse, Audit)]) -> String {
 /// A seed of a handful of rows, graded the way the measurement grades the
 /// machine's: the eleven stall marks the old table read wrong read right,
 /// a turn that touched no note compares nothing, a summons a pinned model
-/// leaves one agent for asks nothing, and a step held on its wire is no mark.
+/// leaves one agent for asks nothing, a step held on its wire is no mark,
+/// and a recorded split whose pane sat in its tab untouched was never tried
+/// (t-9427).
 #[test]
 fn the_audit_grades_old_rows_by_the_new_rules_and_counts_what_they_would_ask() {
     let seed = json!({
@@ -664,6 +669,10 @@ fn the_audit_grades_old_rows_by_the_new_rules_and_counts_what_they_would_ask() {
                 "summon-choice.jsonl": [
                     {"at": 1, "agent": "codex", "model": "gpt", "modelWasPinned": true, "options": ["codex", "claude"], "chosen": "claude", "agreed": false, "requests": 1, "outcome": "answered"},
                     {"at": 2, "agent": "claude", "model": "opus", "modelWasPinned": true, "options": ["claude", "zo", "codex"], "chosen": "zo", "confidence": 0.4, "agreed": false, "requests": 1, "outcome": "answered"},
+                ],
+                "worker-placement.jsonl": [
+                    {"at": 1, "placement": "w-1", "chosen": "split", "applied": false, "outcome": "answered", "requests": 1},
+                    {"at": 2, "label": "w-1", "worker": "w-1", "chosen": "split", "applied": false, "followed": "tab", "moved": false, "seen": true, "agreed": false, "baselineAgreed": true},
                 ],
             },
             "projects": {
@@ -698,6 +707,11 @@ fn the_audit_grades_old_rows_by_the_new_rules_and_counts_what_they_would_ask() {
     // model's own CLI would have landed.
     assert_eq!(summon.after, Marks { compared: 1, agreed: 0 });
     assert_eq!(summon.baseline, Marks { compared: 1, agreed: 1 });
+
+    let placement = of(PLACEMENT.id);
+    assert_eq!((placement.before.compared, placement.after.compared), (1, 0));
+    assert_eq!(placement.not_compared.get(worker_placement::NOT_CARRIED), Some(&1));
+    assert_eq!(placement.baseline.compared, 0, "nor is today's tab graded on it");
 
     let recall = of(RECALL.id);
     assert_eq!(recall.after.compared, 0);

@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use zerocode_core::jev::summary::{AGREED, APPLIED, BASELINE_AGREED, LABEL};
+use zerocode_core::jev::summary::{AGREED, APPLIED, BASELINE_AGREED, LABEL, NOT_COMPARED};
 use zerocode_core::jev::{JevMode, NOTIFY, NOTIFY_APPLY_DEADLINE_MS, NOTIFY_RECENT_CAP};
 use zerocode_core::notify::{self, Notice, Ring};
 use zerocode_core::notify_call::{
@@ -239,7 +239,7 @@ impl NotifyBook {
 
 /// The label row for one waiting row: the person's reaction, how long after
 /// the ring, the attendance the ring was judged under, and the mark — when
-/// the rule leaves one.
+/// the rule leaves one, and why not when it leaves none (t-9427).
 fn label_row(one: &Waiting, reacted: bool, now_ms: i64) -> Value {
     let mut label = json!({
         "at": now_ms,
@@ -251,12 +251,15 @@ fn label_row(one: &Waiting, reacted: bool, now_ms: i64) -> Value {
         "reacted": reacted,
         "afterMs": now_ms.saturating_sub(one.asked_ms),
     });
-    if let Some(agreed) = notify_call::agreed(one.call, reacted, one.attendance) {
-        label[AGREED.canonical] = json!(agreed);
-        // Today's rule on the same ring: the seat's baseline (t-6342).
-        if let Some(baseline) = notify_call::agreed(Call::today(), reacted, one.attendance) {
-            label[BASELINE_AGREED.canonical] = json!(baseline);
+    match notify_call::agreed(one.call, reacted, one.attendance) {
+        Ok(agreed) => {
+            label[AGREED.canonical] = json!(agreed);
+            // Today's rule on the same ring: the seat's baseline (t-6342).
+            if let Ok(baseline) = notify_call::agreed(Call::today(), reacted, one.attendance) {
+                label[BASELINE_AGREED.canonical] = json!(baseline);
+            }
         }
+        Err(why) => label[NOT_COMPARED.canonical] = json!(why),
     }
     label
 }

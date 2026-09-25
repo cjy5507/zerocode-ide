@@ -84,10 +84,11 @@ pub const RERANK_OUTCOME_UNORDERABLE: &str = "unorderable";
 /// this either way.
 pub const RERANK_SHADOW_DEADLINE: Duration = PROBE_TIMEOUT;
 
-/// The wall on the apply road, where a turn IS waiting. The routing judgment's
-/// own active wall, because it is the same question asked twice — how long a Jev
-/// answer may hold the thing it is deciding — and one answer to it.
-pub const RERANK_APPLY_DEADLINE: Duration = super::decision_shadow::DECISION_ACTIVE_DEADLINE;
+/// The wall on the apply road, where a turn IS waiting: the recall seat's own
+/// (`zerocode_core::jev::RECALL_APPLY_DEADLINE_MS`), the one the judge times
+/// the seat's answers against, so the stage that waits and the judge that
+/// reads the wait cannot disagree (t-9427).
+pub const RERANK_APPLY_DEADLINE: Duration = Duration::from_millis(zerocode_core::jev::RECALL_APPLY_DEADLINE_MS);
 
 const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 

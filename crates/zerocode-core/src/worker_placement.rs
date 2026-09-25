@@ -54,7 +54,13 @@ const STATE_KEYS: [&str; 5] = ["brief", "startedBy", "inFront", "sameWorkspace",
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`],
 /// so changing a word without bumping the version is a red test rather than a
 /// quiet drift.
-pub const WORKER_PLACEMENT_RUBRIC_VERSION: u32 = 1;
+///
+/// Or when the label they are graded by changes: version 2 asks version 1's
+/// words and grades an answer only on a pane that tried its room ([`mark`],
+/// t-9427), where version 1's quiet label graded a recorded answer against
+/// the tab its pane was put in. The version rides every request row, so the
+/// judge reads the two series apart (t-6877).
+pub const WORKER_PLACEMENT_RUBRIC_VERSION: u32 = 2;
 
 /// Who started this worker. The one fact that most changes the answer and the
 /// one the window always knows for certain.
@@ -322,34 +328,66 @@ pub const fn stood_in(chosen: Placement, applied: bool) -> Placement {
 /// nobody was in front of the pane while its label's window was open.
 pub const UNSEEN: &str = "unseen";
 
-/// The placement seat's mark (t-6342): whether the room the pane ended the
-/// label's window in is the room the answer named — counted only for a pane
-/// somebody could have moved.
+/// The word a placement label carries under the summary's `notCompared` when
+/// the room the answer named was never tried (t-9427): the seat only
+/// recorded, the pane stood in today's room, and nobody moved it. The effort
+/// seats' word for an answer the product never carried out, read from there
+/// so one fact has one spelling.
+pub const NOT_CARRIED: &str = crate::step_effort::NOT_CARRIED;
+
+/// The placement seat's mark (t-6342, t-9427): whether the room the pane
+/// ended the label's window in is the room the answer named — counted only
+/// for a pane somebody could have moved, and only where the pane tried the
+/// answer's room.
 ///
-/// A pane the person moved was seen. One nobody moved says something only if
-/// it stood on the stage, with the window in front, for
-/// [`crate::jev::PLACEMENT_SEEN_DWELL_MS`]: every one of the thirty marks
-/// this machine's ledger held said the pane was left where it was, and so
-/// would any answer's have — a label that cannot tell "nobody looked" from
-/// "looked and kept it" cannot say no.
+/// A pane the person `moved` was seen, and their move chose a room: it
+/// grades every answer, right or wrong. One nobody moved says something only
+/// if it stood on the stage, with the window in front, for
+/// [`crate::jev::PLACEMENT_SEEN_DWELL_MS`] — every one of the thirty marks
+/// this machine's ledger held on 2026-09-23 said the pane was left where it
+/// was, and so would any answer's have: a label that cannot tell "nobody
+/// looked" from "looked and kept it" cannot say no. And then it says only
+/// that the room it stood in would do: it grades the answer that named that
+/// room, and nothing of one that named another. A recording seat's pane
+/// stands in today's tab whatever the answer said ([`stood_in`]), so a
+/// recorded `split` nobody moved was a split nobody tried — version 1
+/// graded all 22 of this machine's seen ones wrong against the tab
+/// (2026-09-26), while the one split the seat seated and a person left in
+/// place was graded right, and no person moved any of the 169 panes.
 ///
 /// # Errors
 ///
-/// [`UNSEEN`] for a pane nobody was in front of.
-pub fn mark(chosen: Placement, ended_in: Placement, seen: bool) -> Result<bool, &'static str> {
-    if seen {
+/// [`UNSEEN`] for a pane nobody was in front of, and [`NOT_CARRIED`] for one
+/// nobody moved that stood in a room the answer did not name.
+pub fn mark(
+    chosen: Placement,
+    ended_in: Placement,
+    moved: bool,
+    seen: bool,
+) -> Result<bool, &'static str> {
+    if !seen {
+        Err(UNSEEN)
+    } else if moved || chosen == ended_in {
         Ok(chosen == ended_in)
     } else {
-        Err(UNSEEN)
+        Err(NOT_CARRIED)
     }
 }
 
 /// What the placement seat's baseline — today's room, the tab — would have
-/// been marked on the same pane (t-6342): the same rule as [`mark`], with
-/// [`Placement::TODAYS`] as the answer.
+/// been marked on the same pane (t-6342): on exactly the panes [`mark`]
+/// grades the answer on, so the two readers are held to the same marks, and
+/// against the room the pane ended in.
 #[must_use]
-pub fn baseline_mark(ended_in: Placement, seen: bool) -> Option<bool> {
-    mark(Placement::TODAYS, ended_in, seen).ok()
+pub fn baseline_mark(
+    chosen: Placement,
+    ended_in: Placement,
+    moved: bool,
+    seen: bool,
+) -> Option<bool> {
+    mark(chosen, ended_in, moved, seen)
+        .ok()
+        .map(|_| ended_in == Placement::TODAYS)
 }
 
 /// Every room, in the order the table spells them — what a reader of

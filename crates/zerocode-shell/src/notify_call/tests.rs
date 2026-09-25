@@ -239,7 +239,10 @@ fn a_hand_inside_the_minute_labels_the_panes_rows_as_reacted() {
 }
 
 /// The clock closes the windows nobody's hand landed in: present says the
-/// call was right iff it did not ring; away leaves no mark.
+/// call was right iff it did not ring; away leaves no mark, and says why —
+/// the person was away (t-9427): 325 of this machine's 460 label rows
+/// (2026-09-26) compared nothing and named no reason, so the judge counted
+/// none of them as rows that compare nothing.
 #[test]
 fn a_closed_window_labels_the_rows_nobody_turned_to() {
     let mut book = NotifyBook::default();
@@ -273,6 +276,12 @@ fn a_closed_window_labels_the_rows_nobody_turned_to() {
     assert!(
         by_term(9).get(AGREED.canonical).is_none(),
         "away says nothing either way"
+    );
+    assert!(by_term(9).get(BASELINE_AGREED.canonical).is_none());
+    assert_eq!(
+        by_term(9)[zerocode_core::jev::summary::NOT_COMPARED.canonical],
+        Attendance::Away.word(),
+        "and says why"
     );
     assert_eq!(book.waiting_len(), 1);
     assert_eq!(book.rings_of(7), vec![(asked, Some(false))]);
@@ -804,12 +813,12 @@ fn the_calls_this_machine_would_have_made() {
                 hit_by_pass[pass].compared += 1;
                 hit_by_pass[pass].agreed += usize::from(call.rings());
             }
-            if let Some(mark) = notify_call::agreed(call, reacted, attendance) {
+            if let Ok(mark) = notify_call::agreed(call, reacted, attendance) {
                 mark_by_pass[pass].compared += 1;
                 mark_by_pass[pass].agreed += usize::from(mark);
             }
             if pass == 0 {
-                if let Some(mark) = notify_call::agreed(Call::today(), reacted, attendance) {
+                if let Ok(mark) = notify_call::agreed(Call::today(), reacted, attendance) {
                     todays_mark.compared += 1;
                     todays_mark.agreed += usize::from(mark);
                 }

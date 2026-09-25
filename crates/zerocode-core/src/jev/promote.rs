@@ -921,7 +921,9 @@ pub enum Line {
         bound_permille: u16,
         floor_permille: u16,
     },
-    /// The calls' p95 is over the apply stage's deadline.
+    /// The answers' p95 is over the apply stage's deadline — the time the
+    /// calls that answered took ([`Tally::p95_ms`]); a call that did not
+    /// answer is the answered line's miss, forgiven there or not (t-9427).
     Latency { p95_ms: u64, deadline_ms: u64 },
     /// Replies arrived malformed in the window.
     Schema { rows: usize },
