@@ -77,16 +77,19 @@ public enum SyntheticMouseClickDelivery {
         return match
     }
 
+    /// `post` and `pause` may throw: the helper posts through its one hand,
+    /// where a stop refuses the next press and ends a pause at once — the
+    /// press already posted is then let go of by the stop itself.
     public static func deliver<Event>(
         clickCount: Int,
         target: Recipient,
         currentObservation: () -> RecipientObservation,
         makeEvent: (Step) throws -> Event,
-        post: (Event) -> Void,
-        pause: (UInt32) -> Void
+        post: (Event) throws -> Void,
+        pause: (UInt32) throws -> Void
     ) throws {
-        post(try makeEvent(.move))
-        pause(interEventPauseMicroseconds)
+        try post(try makeEvent(.move))
+        try pause(interEventPauseMicroseconds)
         let pressCount = min(max(clickCount, 1), maxClickCount)
         for pressIndex in 1...pressCount {
             let beforeDown = currentObservation()
@@ -99,9 +102,9 @@ public enum SyntheticMouseClickDelivery {
             }
             let down = try makeEvent(.buttonDown(pressIndex: pressIndex))
             let up = try makeEvent(.buttonUp(pressIndex: pressIndex))
-            post(down)
-            pause(interEventPauseMicroseconds)
-            post(up)
+            try post(down)
+            try pause(interEventPauseMicroseconds)
+            try post(up)
             let afterUp = currentObservation()
             // A final mouse-up may dismiss the target, but an unavailable probe is unsafe.
             let finalDismissal = pressIndex == pressCount && afterUp == .dismissed
@@ -112,7 +115,7 @@ public enum SyntheticMouseClickDelivery {
                     deliveredPresses: pressIndex
                 )
             }
-            pause(interEventPauseMicroseconds)
+            try pause(interEventPauseMicroseconds)
         }
     }
 }

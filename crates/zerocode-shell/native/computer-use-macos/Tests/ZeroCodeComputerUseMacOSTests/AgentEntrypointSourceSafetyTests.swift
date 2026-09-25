@@ -31,7 +31,9 @@ final class AgentEntrypointSourceSafetyTests: XCTestCase {
                             try? keyEvent(modifier.keyCode, down: false, flags: flags, pid: pid)
             """
         ))
-        XCTAssertTrue(source.contains("event.flags = flags\n        event.postToPid(pid)"))
+        // Moved with the one hand (t-6765): an app-level click and drag still carry the verb's
+        // flags and a process-routed event still goes to its pid — now in CGEventHandPoster.
+        XCTAssertTrue(source.contains("made.flags = flags") && source.contains("case let .process(pid):\n            made.postToPid(pid)") && source.contains("flags: flags.rawValue, route: .desktop, source: .session") && source.contains("flags: flags.rawValue, route: .process(pid), source: .session"))
     }
 
     private func agentEntrypointSource() throws -> String {

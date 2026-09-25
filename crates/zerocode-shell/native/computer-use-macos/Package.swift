@@ -27,9 +27,11 @@ let package = Package(
             dependencies: ["ZeroCodeComputerUseMacOSCore"],
             path: "Sources/ZeroCodeComputerUseMacOS"
         ),
+        // The tests read the helper itself too — its dispatch, its stop road
+        // and its one hand — not only the pure Core it calls.
         .testTarget(
             name: "ZeroCodeComputerUseMacOSTests",
-            dependencies: ["ZeroCodeComputerUseMacOSCore"],
+            dependencies: ["ZeroCodeComputerUseMacOSCore", "ZeroCodeComputerUseMacOS"],
             path: "Tests/ZeroCodeComputerUseMacOSTests"
         )
     ]

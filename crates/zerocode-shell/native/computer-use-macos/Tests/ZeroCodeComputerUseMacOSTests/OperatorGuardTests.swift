@@ -143,4 +143,134 @@ final class OperatorGuardTests: XCTestCase {
         XCTAssertFalse(isStopHotkey(keyCode: 53, control: true, option: false, command: false))
         XCTAssertFalse(isStopHotkey(keyCode: 12, control: true, option: true, command: false))
     }
+
+    // MARK: the one hand
+
+    /// A release of something the hand never pressed is dropped: a person's
+    /// own button is not the hand's to let go of.
+    func testTheHandLetsGoOnlyOfWhatItPressed() throws {
+        let clock = FakeClock()
+        let poster = RecordingPoster()
+        let hand = OperatorHand(poster: poster, clock: clock, sleeper: ScriptedSleeper(clock: clock), tag: 3)
+        let token = try hand.acquire(.request)
+        try hand.post(HandEvent(.buttonUp(.left, clickState: 1), x: 1, y: 1), by: token)
+        try hand.post(HandEvent(.key(code: 7, down: false, modifier: 0)), by: token)
+        XCTAssertEqual(poster.events.count, 0)
+        try hand.post(HandEvent(.buttonDown(.right, clickState: 1), x: 1, y: 1), by: token)
+        XCTAssertEqual(hand.relinquish(token).released, [.button(.right)], "the end of a hold lets go of what it left")
+        XCTAssertEqual(poster.releases.map(\.kind), [.buttonUp(.right, clickState: 1)])
+    }
+
+    /// A release the platform could not post is not called let go: the hand
+    /// says so and presses nothing again until a person resumes.
+    func testAReleaseTheHandCouldNotPostKeepsItsHandsOffUntilResume() throws {
+        final class RefusingReleases: HandPoster, @unchecked Sendable {
+            struct Refused: Error {}
+            func post(_ event: HandEvent, tag: Int64) throws {
+                if event.letsGo != nil { throw Refused() }
+            }
+            func pointerLocation() -> SmoothPointerPath.Point? { nil }
+        }
+        let clock = FakeClock()
+        let hand = OperatorHand(poster: RefusingReleases(), clock: clock, sleeper: ScriptedSleeper(clock: clock), tag: 3)
+        let token = try hand.acquire(.request)
+        try hand.post(HandEvent(.key(code: 9, down: true, modifier: 0)), by: token)
+        let release = hand.stop(reason: StopReason.hotkey)
+        XCTAssertEqual(release.released, [])
+        XCTAssertEqual(release.unconfirmed, [.key(9)])
+        hand.relinquish(token)
+        XCTAssertThrowsError(try hand.acquire(.request)) { error in
+            XCTAssertEqual(error as? OperatorHand.Refusal, .stopped(StopReason.hotkey))
+        }
+        hand.resume()
+        // Taken back without a stop, the same unconfirmed release still keeps
+        // the next hold off.
+        let run = try hand.acquire(.reflex("r"))
+        try hand.post(HandEvent(.key(code: 9, down: true, modifier: 0)), by: run)
+        XCTAssertEqual(hand.revoke(run, reason: "external_input").unconfirmed, [.key(9)])
+        hand.relinquish(run)
+        XCTAssertThrowsError(try hand.acquire(.request)) { error in
+            XCTAssertEqual(error as? OperatorHand.Refusal, .releaseUnconfirmed)
+        }
+        hand.resume()
+        XCTAssertNoThrow(try hand.acquire(.request), "a person's resume")
+    }
+
+    /// A release goes past a stop, a revoke and the end of its hold — but only
+    /// of what that hold pressed. Hold A's thread is held right before its own
+    /// release while the run is stopped (A let go of by the revoke, the hand
+    /// returned) and hold B presses the same button, then the same key: A's
+    /// late release posts nothing and B's press stays down until B lets go.
+    func test_a_late_release_from_an_earlier_hold_does_not_let_go_of_the_next_holds_press() throws {
+        let inputs: [(String, HandEvent, HandEvent)] = [
+            ("button", HandEvent(.buttonDown(.left, clickState: 1), x: 4, y: 4), HandEvent(.buttonUp(.left, clickState: 1), x: 4, y: 4)),
+            ("key", HandEvent(.key(code: 12, down: true, modifier: 0)), HandEvent(.key(code: 12, down: false, modifier: 0))),
+        ]
+        for (name, press, release) in inputs {
+            let clock = FakeClock()
+            let poster = RecordingPoster()
+            let hand = OperatorHand(poster: poster, clock: clock, sleeper: ScriptedSleeper(clock: clock), tag: 0x1a7e)
+            let a = try hand.acquire(.reflex("a"))
+            try hand.post(press, by: a)
+            let atRelease = DispatchSemaphore(value: 0)
+            let go = DispatchSemaphore(value: 0)
+            let done = DispatchSemaphore(value: 0)
+            Thread.detachNewThread {
+                atRelease.signal()
+                _ = go.wait(timeout: .now() + 10)
+                try? hand.post(release, by: a)
+                done.signal()
+            }
+            XCTAssertEqual(atRelease.wait(timeout: .now() + 5), .success, name)
+            // The run stops the way a reflex stop ends it: taken back, then returned.
+            XCTAssertEqual(hand.revoke(a, reason: StopReason.request).released, press.holds.map { [$0] }, name)
+            hand.relinquish(a)
+            let b = try hand.acquire(.request)
+            try hand.post(press, by: b)
+            let posted = poster.events.count
+            go.signal()
+            XCTAssertEqual(done.wait(timeout: .now() + 5), .success, name)
+            XCTAssertEqual(poster.events.count, posted, "\(name): A's late release posted nothing")
+            XCTAssertEqual(hand.snapshot.held, press.holds.map { [$0] }, "\(name): B's press is still down")
+            try hand.post(release, by: b)
+            XCTAssertEqual(hand.snapshot.held, [], "\(name): B lets go of its own")
+            XCTAssertEqual(poster.releases.count, 2, "\(name): A's by the revoke, B's by B")
+            hand.relinquish(b)
+        }
+    }
+
+    /// The platform refuses a hold's ordinary release: the hand does not keep
+    /// calling the input held and go on. It counts the release it could not
+    /// confirm, takes the hold back and lets go of what else it pressed; the
+    /// hold presses nothing more, and nobody takes the hand until a person
+    /// resumes.
+    func test_a_release_the_platform_refuses_is_settled_before_anything_more_is_pressed() throws {
+        let clock = FakeClock()
+        let poster = RecordingPoster()
+        var refusedOnce = false
+        poster.refuse = { event in
+            guard !refusedOnce, case .buttonUp = event.kind else { return false }
+            refusedOnce = true
+            return true
+        }
+        let hand = OperatorHand(poster: poster, clock: clock, sleeper: ScriptedSleeper(clock: clock), tag: 0xbad)
+        let run = try hand.acquire(.reflex("r"))
+        let shift: UInt64 = 0x20000
+        try hand.post(HandEvent(.key(code: 56, down: true, modifier: shift), flags: shift), by: run)
+        try hand.post(HandEvent(.buttonDown(.left, clickState: 1), x: 5, y: 5, flags: shift), by: run)
+        XCTAssertThrowsError(try hand.post(HandEvent(.buttonUp(.left, clickState: 1), x: 5, y: 5, flags: shift), by: run))
+        let settled = hand.snapshot
+        XCTAssertEqual(settled.unconfirmedReleases, 1, "the refused release is counted")
+        XCTAssertEqual(settled.held, [], "settled: the button is not called held, and the modifier was let go of")
+        XCTAssertNotNil(settled.revoked, "the hold is taken back")
+        XCTAssertEqual(poster.releases.map(\.kind), [.key(code: 56, down: false, modifier: shift)])
+        XCTAssertThrowsError(try hand.post(HandEvent(.buttonDown(.left, clickState: 1), x: 5, y: 5), by: run), "the hold presses nothing more")
+        XCTAssertEqual(poster.presses.count, 2, "no press after the refused release")
+        hand.relinquish(run)
+        XCTAssertThrowsError(try hand.acquire(.request)) { error in
+            XCTAssertEqual(error as? OperatorHand.Refusal, .releaseUnconfirmed)
+        }
+        hand.resume()
+        XCTAssertNoThrow(try hand.acquire(.request), "a person's resume")
+    }
 }

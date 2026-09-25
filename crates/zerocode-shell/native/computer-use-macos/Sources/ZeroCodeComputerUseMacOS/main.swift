@@ -270,11 +270,19 @@ final class Provider {
     static let keyedMethods: Set<String> = ["key", "holdKey", "type"]
 
     func handle(method: String, params: [String: JSONValue]) throws -> Any {
-        if Self.actingMethods.contains(method) {
+        guard Self.actingMethods.contains(method) else { return try dispatch(method: method, params: params) }
+        // One hand (realtime v1 §5.4): an acting request holds it from its
+        // count to its last event — never beside a reflex run — and a stop
+        // lets go of whatever it pressed.
+        return try OperatorHandHost.whileHeld {
             try OperatorGuardHost.admit()
             // What repaints from here on may be this act's doing (§7.1 eye).
             ScreenEye.markAct()
+            return try dispatch(method: method, params: params)
         }
+    }
+
+    private func dispatch(method: String, params: [String: JSONValue]) throws -> Any {
         // Confirmation and execution share one fresh dispatch snapshot. It
         // is local to this request: a confirmed retry must observe anew.
         var dispatchSnapshot: Snapshot?
@@ -331,13 +339,23 @@ final class Provider {
             return try ScreenEye.frame(displayIndex: try optionalInteger(params, "display"))
         case "soundRead":
             return try SoundListener.read(after: Int(params["after"]?.number ?? 0))
-        case "stop":
-            OperatorGuardHost.stop(reason: StopReason.request)
-            return OperatorGuardHost.status()
+        case "reflexStart":
+            guard case let .object(table)? = params["eye"], let eye = eyeConfig(table) else {
+                throw ProviderError.coded("invalid_argument", "reflexStart needs the window's eye table")
+            }
+            return try ReflexRuntimeHost.start(
+                runId: try reflexRunId(params),
+                plan: Data(try requiredString(params, "plan").utf8),
+                limits: Data(try requiredString(params, "limits").utf8),
+                perception: Data(try requiredString(params, "perception").utf8),
+                eye: eye,
+                display: try requiredInteger(params, "display"),
+                hand: OperatorHandHost.hand,
+                admit: { OperatorGuardHost.admission() },
+                actingScope: { try actingScope($0) }
+            )
         case "resume":
             OperatorGuardHost.resume(resetBudget: params["resetBudget"]?.bool == true)
-            return OperatorGuardHost.status()
-        case "status":
             return OperatorGuardHost.status()
         case "handshake":
             return providerHandshake()
@@ -789,6 +807,8 @@ final class Provider {
                         "signal": "SIGUSR1",
                         "budget": OperatorGuardHost.renderedBudget(),
                     ],
+                    // What a reflex run here reads; whether one may run is the window's table.
+                    "reflex": ReflexRuntimeHost.handshake(),
                 ],
             ],
         ]
@@ -806,7 +826,7 @@ final class Provider {
             }
             throw ProviderError.coded("app_not_found", "app '\(trimmed)' not found")
         }
-        if blockedBundleIds.contains(trimmed) {
+        if BlockedApps.bundleIds.contains(trimmed) {
             throw ProviderError.coded("app_blocked", "app '\(trimmed)' is blocked for safety")
         }
         if let app = listApps().first(where: { matches($0, query: trimmed) }) {
@@ -817,16 +837,33 @@ final class Provider {
     }
 
     private func refuseOwnTarget(_ params: [String: JSONValue]) throws {
-        if let query = params["app"]?.string, let app = try? resolveApp(query), isTrustedZeroCodeApplication(app.pid) {
-            throw ProviderError.coded("app_blocked", "'\(query)' is ZeroCode itself; the operator does not drive the app it lives in")
+        if let query = params["app"]?.string, let app = try? resolveApp(query) {
+            try refuseOwn(app, named: query)
         }
         if let id = params["windowId"]?.number, let owner = DesktopWindows.ownerPid(windowId: CGWindowID(id)), isTrustedZeroCodeApplication(owner) {
             throw ProviderError.coded("app_blocked", "window \(Int(id)) is ZeroCode's own; the operator does not drive the app it lives in")
         }
     }
 
+    /// ZeroCode's own app is never the operator's target (§1.6).
+    private func refuseOwn(_ app: AppDescriptor, named query: String) throws {
+        if isTrustedZeroCodeApplication(app.pid) {
+            throw ProviderError.coded("app_blocked", "'\(query)' is ZeroCode itself; the operator does not drive the app it lives in")
+        }
+    }
+
+    /// What a reflex plan acts in: its scope's target, resolved the way every
+    /// verb names an app (`resolveApp`, blocked apps refused), and never
+    /// ZeroCode itself — once, when the run starts; every press is held to it
+    /// (`DesktopRunBoundary`).
+    private func actingScope(_ scope: ReflexScope) throws -> ReflexActingScope {
+        let app = try resolveApp(scope.target)
+        try refuseOwn(app, named: scope.target)
+        return ReflexActingScope(surface: scope.surface, target: scope.target, pid: app.pid)
+    }
+
     private func rejectBlockedApp(_ app: AppDescriptor) throws {
-        if let bundle = app.bundleId, blockedBundleIds.contains(bundle) {
+        if let bundle = app.bundleId, BlockedApps.bundleIds.contains(bundle) {
             throw ProviderError.coded("app_blocked", "app '\(bundle)' is blocked for safety")
         }
     }
@@ -1489,16 +1526,22 @@ final class Provider {
     }
 }
 
-private let blockedBundleIds: Set<String> = [
-    "com.1password.1password",
-    "com.1password.safari",
-    "com.bitwarden.desktop",
-    "com.dashlane.dashlanephonefinal",
-    "com.lastpass.LastPass",
-    "com.nordsec.nordpass",
-    "me.proton.pass.electron",
-    "me.proton.pass.catalyst",
-]
+/// The apps the operator never drives. A static rather than a top-level
+/// constant: main.swift's constants are set only as the helper's own start
+/// runs through them, so code that a test reaches (`resolveApp`) must not
+/// read one.
+private enum BlockedApps {
+    static let bundleIds: Set<String> = [
+        "com.1password.1password",
+        "com.1password.safari",
+        "com.bitwarden.desktop",
+        "com.dashlane.dashlanephonefinal",
+        "com.lastpass.LastPass",
+        "com.nordsec.nordpass",
+        "me.proton.pass.electron",
+        "me.proton.pass.catalyst",
+    ]
+}
 
 private func requiredString(_ params: [String: JSONValue], _ key: String) throws -> String {
     guard let value = params[key]?.string, !value.isEmpty else {
@@ -2322,6 +2365,17 @@ extension MouseButtonSelection {
             return .rightMouseUp
         case .middle:
             return .otherMouseUp
+        }
+    }
+
+    var dragEvent: CGEventType {
+        switch self {
+        case .left:
+            return .leftMouseDragged
+        case .right:
+            return .rightMouseDragged
+        case .middle:
+            return .otherMouseDragged
         }
     }
 }
@@ -3321,14 +3375,13 @@ private enum Input {
         modifiers: [KeyModifier],
         targetWindow: Snapshot
     ) throws {
-        guard let source = CGEventSource(stateID: .combinedSessionState) else {
-            throw ProviderError.coded("accessibility_error", "failed to create event source")
-        }
         let flags = modifiers.reduce(into: CGEventFlags()) { result, modifier in
             result.insert(modifier.flag)
         }
         let target = syntheticClickRecipient(pid: targetWindow.app.pid, windowId: targetWindow.windowId)
         do {
+            // The fenced click (STA-3433) on the one hand: every event through
+            // it, and the pause a wait a stop ends at once.
             try SyntheticMouseClickDelivery.deliver(
                 clickCount: count,
                 target: target,
@@ -3336,32 +3389,20 @@ private enum Input {
                     currentSyntheticClickRecipient(snapshot: targetWindow, point: point)
                 },
                 makeEvent: { step in
-                    let type: CGEventType
+                    let clickState = SyntheticMouseClickDelivery.clickState(for: step)
+                    let kind: HandEvent.Kind
                     switch step {
                     case .move:
-                        type = .mouseMoved
+                        kind = .pointerMove
                     case .buttonDown:
-                        type = button.downEvent
+                        kind = .buttonDown(button, clickState: clickState)
                     case .buttonUp:
-                        type = button.upEvent
+                        kind = .buttonUp(button, clickState: clickState)
                     }
-                    guard let event = CGEvent(
-                        mouseEventSource: source,
-                        mouseType: type,
-                        mouseCursorPosition: point,
-                        mouseButton: button.cgButton
-                    ) else {
-                        throw ProviderError.coded("accessibility_error", "failed to create mouse event")
-                    }
-                    event.flags = flags
-                    let clickState = SyntheticMouseClickDelivery.clickState(for: step)
-                    if clickState > 0 {
-                        event.setIntegerValueField(.mouseEventClickState, value: clickState)
-                    }
-                    return event
+                    return HandEvent(kind, x: point.x, y: point.y, flags: flags.rawValue, route: .desktop, source: .session)
                 },
-                post: { $0.post(tap: .cghidEventTap) },
-                pause: { _ = usleep($0) }
+                post: { try OperatorHandHost.post($0) },
+                pause: { try OperatorHandHost.sleep(nanoseconds: UInt64($0) * 1_000) }
             )
         } catch let failure as SyntheticMouseClickDelivery.FenceFailure {
             switch failure {
@@ -3386,54 +3427,39 @@ private enum Input {
         }
         let wheel1: Int32 = direction == "up" ? delta : direction == "down" ? -delta : 0
         let wheel2: Int32 = direction == "left" ? delta : direction == "right" ? -delta : 0
-        guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: wheel1, wheel2: wheel2, wheel3: 0) else {
-            throw ProviderError.coded("accessibility_error", "failed to create scroll event")
-        }
-        event.location = point
-        event.postToPid(pid)
+        try OperatorHandHost.post(HandEvent(.scroll(wheel1: wheel1, wheel2: wheel2), x: point.x, y: point.y, route: .process(pid)))
     }
 
     static func drag(pid: pid_t, from start: CGPoint, to end: CGPoint) throws {
-        guard let source = CGEventSource(stateID: .combinedSessionState) else {
-            throw ProviderError.coded("accessibility_error", "failed to create event source")
-        }
-        try mouse(.mouseMoved, source: source, point: start, button: .left, pid: pid)
-        try mouse(.leftMouseDown, source: source, point: start, button: .left, pid: pid)
+        try mouse(.pointerMove, at: start, pid: pid)
+        try mouse(.buttonDown(.left, clickState: 0), at: start, pid: pid)
         var reached = start
         do {
             for step in 1...10 {
                 let progress = CGFloat(step) / 10
                 let point = CGPoint(x: start.x + (end.x - start.x) * progress, y: start.y + (end.y - start.y) * progress)
-                try mouse(.leftMouseDragged, source: source, point: point, button: .left, pid: pid)
+                try mouse(.buttonDrag(.left, clickState: 0), at: point, pid: pid)
                 reached = point
             }
         } catch {
-            // A stop mid-drag lets go where the pointer is, then reports.
-            try? mouse(.leftMouseUp, source: source, point: reached, button: .left, pid: pid)
+            // A stop mid-drag has already let go (`OperatorHand.stop`); any
+            // other failure lets go where the pointer is, then reports.
+            try? mouse(.buttonUp(.left, clickState: 0), at: reached, pid: pid)
             throw error
         }
-        try mouse(.leftMouseUp, source: source, point: end, button: .left, pid: pid)
+        try mouse(.buttonUp(.left, clickState: 0), at: end, pid: pid)
     }
 
     static func typeText(_ text: String, pid: pid_t) throws {
         for unit in text.utf16 {
-            // A stop lands between two characters, never inside a key press.
-            try OperatorGuardHost.checkNotStopped()
-            var char = unit
-            guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
-            else {
-                throw ProviderError.coded("accessibility_error", "failed to create keyboard event")
-            }
-            down.keyboardSetUnicodeString(stringLength: 1, unicodeString: &char)
-            up.keyboardSetUnicodeString(stringLength: 1, unicodeString: &char)
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
+            // A stop lands between two characters; one inside a press lets
+            // go of it at once.
+            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: true)))
+            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: false)))
         }
     }
 
     static func pressKey(_ key: String, pid: pid_t) throws {
-        try OperatorGuardHost.checkNotStopped()
         let parsed = try KeyMap.parse(key)
         var flags = CGEventFlags()
         var pressedModifiers: [KeyModifier] = []
@@ -3445,7 +3471,7 @@ private enum Input {
         }
         for modifier in parsed.modifiers {
             flags.insert(modifier.flag)
-            try keyEvent(modifier.keyCode, down: true, flags: flags, pid: pid)
+            try keyEvent(modifier.keyCode, down: true, flags: flags, pid: pid, holding: modifier.flag)
             pressedModifiers.append(modifier)
         }
         try keyEvent(parsed.keyCode, down: true, flags: flags, pid: pid)
@@ -3481,28 +3507,15 @@ private enum Input {
         Thread.sleep(forTimeInterval: pasteSettleSeconds)
     }
 
-    private static func mouse(
-        _ type: CGEventType,
-        source: CGEventSource,
-        point: CGPoint,
-        button: CGMouseButton,
-        flags: CGEventFlags = [],
-        pid: pid_t
-    ) throws {
-        if !isMouseRelease(type) { try OperatorGuardHost.checkNotStopped() }
-        guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
-            throw ProviderError.coded("accessibility_error", "failed to create mouse event")
-        }
-        event.flags = flags
-        event.postToPid(pid)
+    /// A mouse event for one process, made with the combined session state
+    /// as the app verbs always made it.
+    private static func mouse(_ kind: HandEvent.Kind, at point: CGPoint, flags: CGEventFlags = [], pid: pid_t) throws {
+        try OperatorHandHost.post(HandEvent(kind, x: point.x, y: point.y, flags: flags.rawValue, route: .process(pid), source: .session))
     }
 
-    private static func keyEvent(_ keyCode: CGKeyCode, down: Bool, flags: CGEventFlags, pid: pid_t) throws {
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down) else {
-            throw ProviderError.coded("accessibility_error", "failed to create key event")
-        }
-        event.flags = flags
-        event.post(tap: .cghidEventTap)
+    /// A key on the desktop; a modifier key names the flag it holds while down.
+    private static func keyEvent(_ keyCode: CGKeyCode, down: Bool, flags: CGEventFlags, pid: pid_t, holding modifier: CGEventFlags = []) throws {
+        try OperatorHandHost.post(HandEvent(.key(code: keyCode, down: down, modifier: modifier.rawValue), flags: flags.rawValue))
     }
 }
 
@@ -5020,7 +5033,7 @@ private func runStdio() {
     exit(13)
 }
 
-private func handleRequest(
+func handleRequest(
     provider: Provider,
     lock: NSLock,
     request: Request,
@@ -5039,6 +5052,13 @@ private func handleRequest(
         }
         return ["id": request.id, "ok": true, "result": ["ok": true]]
     }
+    // The operator's own roads never wait behind an action in flight
+    // (realtime v1 §5.8): a stop lets go of what the hand holds on this
+    // connection's thread, and a status — the operator's or a reflex run's —
+    // is read beside whatever holds the provider lock.
+    if let answer = unlockedRoad(request.method) {
+        return ["id": request.id, "ok": true, "result": answer]
+    }
 
     do {
         lock.lock()
@@ -5050,6 +5070,34 @@ private func handleRequest(
     } catch {
         return ["id": request.id, "ok": false, "error": ["code": "accessibility_error", "message": String(describing: error)]]
     }
+}
+
+/// The requests answered outside the provider lock, or nil for every other.
+func unlockedRoad(_ method: String) -> [String: Any]? {
+    switch method {
+    case "stop":
+        OperatorGuardHost.stop(reason: StopReason.request)
+        return OperatorGuardHost.status()
+    case "status":
+        return OperatorGuardHost.status()
+    case "reflexStatus":
+        return ReflexRuntimeHost.status()
+    case "reflexStop":
+        return ReflexRuntimeHost.stop(reason: StopReason.request)
+    default:
+        return nil
+    }
+}
+
+/// A reflex run's id: the plan's identifier alphabet, never empty.
+private func reflexRunId(_ params: [String: JSONValue]) throws -> String {
+    let runId = try requiredString(params, "runId")
+    guard !runId.isEmpty, runId.utf8.count <= 64,
+          runId.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 })
+    else {
+        throw ProviderError.coded("invalid_argument", "runId must be 1 to 64 of A-Z a-z 0-9 - _")
+    }
+    return runId
 }
 
 private func readLine(from fd: Int32) -> String? {
@@ -5180,6 +5228,31 @@ enum DesktopScreen {
             return Display(id: id, bounds: CGDisplayBounds(id), scale: screen?.backingScaleFactor ?? 1, main: CGDisplayIsMain(id) != 0)
         }
         return found.sorted { lhs, rhs in lhs.main && !rhs.main }
+    }
+
+    /// Where display `id` sits and how fine it is now — its bounds, its mode's
+    /// pixels a point and its turn — from CoreGraphics alone, so the eye's
+    /// stream queue and a run's evaluating thread can ask it; nil once the
+    /// display is gone.
+    static func geometry(of id: CGDirectDisplayID) -> EyeGeometry? {
+        guard CGDisplayIsActive(id) != 0, let mode = CGDisplayCopyDisplayMode(id), mode.width > 0 else { return nil }
+        let bounds = CGDisplayBounds(id)
+        let orientation: ReflexOrientation
+        switch Int(CGDisplayRotation(id).rounded()) {
+        case 90: orientation = .right
+        case 180: orientation = .down
+        case 270: orientation = .left
+        default: orientation = .up
+        }
+        return EyeGeometry(
+            displayId: String(id),
+            originX: bounds.minX,
+            originY: bounds.minY,
+            width: bounds.width,
+            height: bounds.height,
+            scale: Double(mode.pixelWidth) / Double(mode.width),
+            orientation: orientation
+        )
     }
 
     static func render(_ display: Display, index: Int) -> [String: Any] {
@@ -5477,20 +5550,22 @@ extension Input {
         CGEvent(source: nil)?.location ?? .zero
     }
 
+    /// The pause between two stepped waypoints (`mouseMove --steps`, a drag).
+    private static var desktopStepNs: UInt64 { UInt64(desktopDragStepMicros) * 1_000 }
+
     static func desktopMove(to point: CGPoint) throws {
-        try desktopPost(.mouseMoved, at: point, button: .left)
+        try desktopPost(.pointerMove, at: point)
     }
 
     /// A human-paced move: eased intermediate points from where the pointer is,
-    /// posted at the drag cadence, no button held. The path is pure Core.
+    /// each due one drag step after the one before, no button held. The path
+    /// is pure Core; the hand posts the newest point due and a stop ends it.
     static func desktopMove(to point: CGPoint, steps: Int) throws {
         let start = desktopCursorPosition()
-        let path = SmoothPointerPath.points(
-            from: .init(x: start.x, y: start.y), to: .init(x: point.x, y: point.y), steps: steps)
-        for waypoint in path {
-            try desktopPost(.mouseMoved, at: CGPoint(x: waypoint.x, y: waypoint.y), button: .left)
-            usleep(desktopDragStepMicros)
-        }
+        let path = PointerSchedule.steps(
+            from: .init(x: start.x, y: start.y), to: .init(x: point.x, y: point.y),
+            count: steps, eased: true, stepNs: desktopStepNs, startNs: OperatorHandHost.hand.nowNs())
+        try OperatorHandHost.walk(path) { HandEvent(.pointerMove, x: $0.x, y: $0.y) }
     }
 
     /// A click at a desktop point: move there, then press and release `count`
@@ -5499,55 +5574,50 @@ extension Input {
     /// the screenshot that follows is the verification.
     static func desktopClick(at point: CGPoint, button: MouseButtonSelection, count: Int, modifiers: [KeyModifier]) throws {
         let flags = modifiers.reduce(into: CGEventFlags()) { result, modifier in result.insert(modifier.flag) }
-        try desktopPost(.mouseMoved, at: point, button: button.cgButton, flags: flags)
+        try desktopPost(.pointerMove, at: point, flags: flags)
         for state in 1...max(1, count) {
-            try desktopPost(button.downEvent, at: point, button: button.cgButton, flags: flags, clickState: state)
-            try desktopPost(button.upEvent, at: point, button: button.cgButton, flags: flags, clickState: state)
+            try desktopPost(.buttonDown(button, clickState: Int64(state)), at: point, flags: flags)
+            try desktopPost(.buttonUp(button, clickState: Int64(state)), at: point, flags: flags)
         }
     }
 
     static func desktopDrag(from start: CGPoint, to end: CGPoint, steps: Int) throws {
-        let count = max(1, steps)
-        try desktopPost(.mouseMoved, at: start, button: .left)
-        try desktopPost(.leftMouseDown, at: start, button: .left, clickState: 1)
-        var reached = start
+        try desktopPost(.pointerMove, at: start)
+        try desktopPost(.buttonDown(.left, clickState: 1), at: start)
+        let path = PointerSchedule.steps(
+            from: .init(x: start.x, y: start.y), to: .init(x: end.x, y: end.y),
+            count: steps, eased: false, stepNs: desktopStepNs, startNs: OperatorHandHost.hand.nowNs())
         do {
-            for step in 1...count {
-                let share = CGFloat(step) / CGFloat(count)
-                let point = CGPoint(x: start.x + (end.x - start.x) * share, y: start.y + (end.y - start.y) * share)
-                try desktopPost(.leftMouseDragged, at: point, button: .left, clickState: 1)
-                reached = point
-                usleep(desktopDragStepMicros)
-            }
+            try OperatorHandHost.walk(path) { HandEvent(.buttonDrag(.left, clickState: 1), x: $0.x, y: $0.y) }
+            // The pointer rests one step on the drop target before the release.
+            try OperatorHandHost.sleep(nanoseconds: desktopStepNs)
         } catch {
-            // A stop mid-drag lets go where the pointer is, then reports.
-            try? desktopPost(.leftMouseUp, at: reached, button: .left, clickState: 1)
+            // A stop mid-drag has already let go (`OperatorHand.stop`); any
+            // other failure lets go where the pointer is, then reports.
+            try? desktopPost(.buttonUp(.left, clickState: 1), at: desktopCursorPosition())
             throw error
         }
-        try desktopPost(.leftMouseUp, at: end, button: .left, clickState: 1)
+        try desktopPost(.buttonUp(.left, clickState: 1), at: end)
     }
 
     /// Lines of scroll at a desktop point: positive `dy` scrolls the content
     /// up (the wheel toward the person), the sign CGEvent's wheel uses.
     static func desktopScroll(at point: CGPoint, dx: Int32, dy: Int32) throws {
-        try desktopPost(.mouseMoved, at: point, button: .left)
-        guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else {
-            throw ProviderError.coded("accessibility_error", "failed to create scroll event")
-        }
-        event.location = point
-        event.post(tap: .cghidEventTap)
+        try desktopPost(.pointerMove, at: point)
+        try OperatorHandHost.post(HandEvent(.scroll(wheel1: dy, wheel2: dx), x: point.x, y: point.y))
     }
 
+    /// Hold a chord for `milliseconds` on the hand's clock: a stop lets go of
+    /// every key it holds at once, on the stopping thread, and ends the hold.
     static func desktopHoldKey(_ key: String, milliseconds: Int) throws {
-        try OperatorGuardHost.checkNotStopped()
         let parsed = try KeyMap.parse(key)
         var flags = CGEventFlags()
         for modifier in parsed.modifiers {
             flags.insert(modifier.flag)
-            try keyEvent(modifier.keyCode, down: true, flags: flags, pid: 0)
+            try keyEvent(modifier.keyCode, down: true, flags: flags, pid: 0, holding: modifier.flag)
         }
         try keyEvent(parsed.keyCode, down: true, flags: flags, pid: 0)
-        usleep(UInt32(max(0, milliseconds)) * 1_000)
+        try OperatorHandHost.sleep(nanoseconds: UInt64(max(0, milliseconds)) * 1_000_000)
         try keyEvent(parsed.keyCode, down: false, flags: flags, pid: 0)
         for modifier in parsed.modifiers.reversed() {
             flags.remove(modifier.flag)
@@ -5555,28 +5625,85 @@ extension Input {
         }
     }
 
-    private static func desktopPost(
-        _ type: CGEventType,
-        at point: CGPoint,
-        button: CGMouseButton,
-        flags: CGEventFlags = [],
-        clickState: Int = 0
-    ) throws {
-        // A release always goes through: a stop must never leave a button down.
-        if !isMouseRelease(type) { try OperatorGuardHost.checkNotStopped() }
-        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
-            throw ProviderError.coded("accessibility_error", "failed to create mouse event")
-        }
-        event.flags = flags
-        if clickState > 0 {
-            event.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
-        }
-        event.post(tap: .cghidEventTap)
+    /// A mouse event on the desktop, made with no source as the desktop verbs
+    /// always made it. A release always goes: a stop never leaves a button down.
+    private static func desktopPost(_ kind: HandEvent.Kind, at point: CGPoint, flags: CGEventFlags = []) throws {
+        try OperatorHandHost.post(HandEvent(kind, x: point.x, y: point.y, flags: flags.rawValue))
     }
 }
 
-private func isMouseRelease(_ type: CGEventType) -> Bool {
-    type == .leftMouseUp || type == .rightMouseUp || type == .otherMouseUp
+/// The hand's platform half: makes each event as the verbs made it before the
+/// hand — the same source, flags and click state — stamps it with the hand's
+/// tag (`eventSourceUserData`) so the input monitor knows it for the hand's
+/// own, and posts it to the HID tap or to one process.
+struct CGEventHandPoster: HandPoster {
+    func post(_ event: HandEvent, tag: Int64) throws {
+        let made = try make(event)
+        made.setIntegerValueField(.eventSourceUserData, value: tag)
+        switch event.route {
+        case .desktop:
+            made.post(tap: .cghidEventTap)
+        case let .process(pid):
+            made.postToPid(pid)
+        }
+    }
+
+    func pointerLocation() -> SmoothPointerPath.Point? {
+        guard let location = CGEvent(source: nil)?.location else { return nil }
+        return SmoothPointerPath.Point(x: location.x, y: location.y)
+    }
+
+    private func make(_ event: HandEvent) throws -> CGEvent {
+        var source: CGEventSource?
+        if event.source == .session {
+            guard let session = CGEventSource(stateID: .combinedSessionState) else {
+                throw ProviderError.coded("accessibility_error", "failed to create event source")
+            }
+            source = session
+        }
+        let point = CGPoint(x: event.x, y: event.y)
+        let flags = CGEventFlags(rawValue: event.flags)
+        switch event.kind {
+        case .pointerMove:
+            return try mouse(.mouseMoved, source, point, .left, flags, clickState: 0)
+        case let .buttonDown(button, clickState):
+            return try mouse(button.downEvent, source, point, button.cgButton, flags, clickState: clickState)
+        case let .buttonUp(button, clickState):
+            return try mouse(button.upEvent, source, point, button.cgButton, flags, clickState: clickState)
+        case let .buttonDrag(button, clickState):
+            return try mouse(button.dragEvent, source, point, button.cgButton, flags, clickState: clickState)
+        case let .scroll(wheel1, wheel2):
+            guard let made = CGEvent(scrollWheelEvent2Source: source, units: .line, wheelCount: 2, wheel1: wheel1, wheel2: wheel2, wheel3: 0) else {
+                throw ProviderError.coded("accessibility_error", "failed to create scroll event")
+            }
+            made.location = point
+            return made
+        case let .key(code, down, _):
+            guard let made = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else {
+                throw ProviderError.coded("accessibility_error", "failed to create key event")
+            }
+            made.flags = flags
+            return made
+        case let .text(unit, down):
+            guard let made = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else {
+                throw ProviderError.coded("accessibility_error", "failed to create keyboard event")
+            }
+            var char = unit
+            made.keyboardSetUnicodeString(stringLength: 1, unicodeString: &char)
+            return made
+        }
+    }
+
+    private func mouse(_ type: CGEventType, _ source: CGEventSource?, _ point: CGPoint, _ button: CGMouseButton, _ flags: CGEventFlags, clickState: Int64) throws -> CGEvent {
+        guard let made = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
+            throw ProviderError.coded("accessibility_error", "failed to create mouse event")
+        }
+        made.flags = flags
+        if clickState > 0 {
+            made.setIntegerValueField(.mouseEventClickState, value: clickState)
+        }
+        return made
+    }
 }
 
 // MARK: - Apps, windows and the system (docs/design/computer-use-full-operator.md §2.2)
@@ -5861,6 +5988,7 @@ enum OperatorGuardHost {
     nonisolated(unsafe) private static var hotkeyMonitor: Any?
     nonisolated(unsafe) private static var signalSource: DispatchSourceSignal?
     nonisolated(unsafe) private static var installedAt: Date?
+    private static let stopQueue = DispatchQueue(label: "dev.zerocode.computer-use.stop", qos: .userInteractive)
 
     static func install() {
         installedAt = Date()
@@ -5890,25 +6018,39 @@ enum OperatorGuardHost {
                 stop(reason: StopReason.hotkey)
             }
         }
-        // The window's road that does not wait behind an in-flight request.
+        // The window's road that does not wait behind an in-flight request —
+        // nor behind the main thread: it has a queue of its own.
         signal(SIGUSR1, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: stopQueue)
         source.setEventHandler { stop(reason: StopReason.signal) }
         source.resume()
         signalSource = source
     }
 
+    /// The stop, on whatever thread it came in on: the hand lets go of what
+    /// it pressed first, then the count refuses, then a reflex run ends.
     static func stop(reason: String) {
+        let release = OperatorHandHost.hand.stop(reason: reason)
         lock.lock()
         ledger.stop(reason: reason)
         lock.unlock()
-        fputs("computer-use operator stopped: \(reason)\n", stderr)
+        fputs("computer-use operator stopped: \(reason) (let go of \(release.released.count), unconfirmed \(release.unconfirmed.count))\n", stderr)
+        ReflexRuntimeHost.operatorStopped(reason: reason)
     }
 
     static func resume(resetBudget: Bool) {
         lock.lock()
         ledger.resume(resetBudget: resetBudget)
         lock.unlock()
+        OperatorHandHost.hand.resume()
+    }
+
+    /// One action's admission as the ledger answers it, for a reflex run's
+    /// leaf: the run sleeps a pace's wait on the hand, where a stop ends it.
+    static func admission() -> GuardAdmission {
+        lock.lock()
+        defer { lock.unlock() }
+        return ledger.admit(now: Date().timeIntervalSince1970)
     }
 
     /// Count one action — waiting for the pace to come round when a burst is
@@ -5946,16 +6088,6 @@ enum OperatorGuardHost {
         return budget?.rendered ?? NSNull()
     }
 
-    /// The cheap in-flight check between two posted events.
-    static func checkNotStopped() throws {
-        lock.lock()
-        let reason = ledger.stoppedReason
-        lock.unlock()
-        if let reason {
-            throw ProviderError.coded("stopped", "the operator was stopped mid-action (\(reason)); `zerocode-computer resume` lifts it")
-        }
-    }
-
     static func status() -> [String: Any] {
         lock.lock()
         let snapshot = ledger
@@ -5978,6 +6110,109 @@ enum OperatorGuardHost {
             "secureInput": SecureInputState.now().rendered,
             "upSince": installedAt.map { Int($0.timeIntervalSince1970 * 1_000) } ?? NSNull(),
         ]
+    }
+}
+
+/// The one hand as the verbs hold it (realtime v1 §5.4): a request posts only
+/// while it holds the hand — never beside a reflex run — every event goes
+/// through it, stamped with its tag, and a stop lets go of what it pressed.
+enum OperatorHandHost {
+    static let hand = OperatorHand(
+        poster: CGEventHandPoster(),
+        clock: HostUptimeClock(),
+        sleeper: SemaphoreSleeper(),
+        tag: Int64.random(in: 1...Int64.max)
+    )
+    private static let lock = NSLock()
+    /// The hold of the request running now: requests run one at a time under
+    /// the provider lock, so there is at most one.
+    nonisolated(unsafe) private static var request: OperatorHand.Token?
+
+    /// Run one acting request while it holds the hand; whatever it left held
+    /// is let go of when it ends.
+    static func whileHeld<T>(_ body: () throws -> T) throws -> T {
+        let token: OperatorHand.Token
+        do {
+            token = try hand.acquire(.request)
+        } catch let refusal as OperatorHand.Refusal {
+            throw providerError(refusal, acquiring: true)
+        }
+        lock.lock()
+        request = token
+        lock.unlock()
+        defer {
+            lock.lock()
+            request = nil
+            lock.unlock()
+            hand.relinquish(token)
+        }
+        return try body()
+    }
+
+    /// Post one event for the request holding the hand.
+    static func post(_ event: HandEvent) throws {
+        let token = try current()
+        do {
+            try hand.post(event, by: token)
+        } catch let refusal as OperatorHand.Refusal {
+            throw providerError(refusal, acquiring: false)
+        }
+    }
+
+    /// Wait on the hand's clock for the request holding it: a stop ends the
+    /// wait at once with the refusal.
+    static func sleep(nanoseconds: UInt64) throws {
+        let token = try current()
+        do {
+            try hand.sleep(untilNs: hand.nowNs() &+ nanoseconds, by: token)
+        } catch let refusal as OperatorHand.Refusal {
+            throw providerError(refusal, acquiring: false)
+        }
+    }
+
+    /// Post a path's waypoints as they come due — the newest one due each
+    /// time, so a hand woken late skips to where it should be.
+    static func walk(_ path: [PointerWaypoint], _ make: (PointerWaypoint) -> HandEvent) throws {
+        let token = try current()
+        var posted = -1
+        while posted + 1 < path.count {
+            do {
+                try hand.sleep(untilNs: path[posted + 1].dueNs, by: token)
+            } catch let refusal as OperatorHand.Refusal {
+                throw providerError(refusal, acquiring: false)
+            }
+            guard let index = PointerSchedule.due(path, after: posted, nowNs: hand.nowNs()) else { continue }
+            try post(make(path[index]))
+            posted = index
+        }
+    }
+
+    private static func current() throws -> OperatorHand.Token {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let request else {
+            throw ProviderError.coded("stopped", "no request holds the hand")
+        }
+        return request
+    }
+
+    /// The hand's refusal in the words the skill recovers by — before an
+    /// action (`acquiring`) or in the middle of one.
+    static func providerError(_ refusal: OperatorHand.Refusal, acquiring: Bool) -> ProviderError {
+        switch refusal {
+        case let .stopped(reason), let .revoked(reason):
+            return acquiring
+                ? .coded("stopped", "the operator is stopped (\(reason)); `zerocode-computer resume` lifts it")
+                : .coded("stopped", "the operator was stopped mid-action (\(reason)); `zerocode-computer resume` lifts it")
+        case let .busy(.reflex(run)):
+            return .coded("hand_busy", "reflex run \(run) holds the hand; stop it first (reflexStop)")
+        case .busy(.request):
+            return .coded("hand_busy", "another request holds the hand")
+        case .notHolder:
+            return .coded("stopped", "this request no longer holds the hand")
+        case .releaseUnconfirmed:
+            return .coded("stopped", "a release the hand posted could not be confirmed; check the keys and buttons, then `zerocode-computer resume`")
+        }
     }
 }
 
@@ -6014,8 +6249,19 @@ enum DesktopSelf {
     }
 
     static func refuseOwnWindow(at point: CGPoint) throws {
-        guard let pid = ownerPid(at: point), isTrustedZeroCodeApplication(pid) else { return }
+        try refuseOwn(ownerPid(at: point), at: point)
+    }
+
+    /// The policy itself, for whoever already knows whose window is under the
+    /// point (a reflex run's press asks it too, `DesktopRunBoundary`).
+    static func refuseOwn(_ pid: pid_t?, at point: CGPoint, isOwn: (pid_t) -> Bool = DesktopSelf.isOwn) throws {
+        guard let pid, isOwn(pid) else { return }
         throw ProviderError.coded("app_blocked", "(\(Int(point.x)), \(Int(point.y))) lands on ZeroCode's own window; the operator does not drive the app it lives in")
+    }
+
+    /// Whether `pid` is ZeroCode itself.
+    static func isOwn(_ pid: pid_t) -> Bool {
+        isTrustedZeroCodeApplication(pid)
     }
 
     static func refuseOwnFrontmost() throws {
