@@ -698,6 +698,8 @@ function wireAgentOrbitStage(state) {
   });
   let from = { x: 0, y: 0 };
   wireGraphDrag(stage, {
+    /* 스페이스를 쥔 손은 라벨 위에서도 판을 민다 — 카드 그림과 같은 몸짓. */
+    grabbed: () => agentGraphSpaceHeld,
     onGrab: () => {
       from = { ...state.pan };
     },

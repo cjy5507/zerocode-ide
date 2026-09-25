@@ -1643,12 +1643,6 @@
                 <option value="" data-i18n="board.graph.allExecutions">전체 실행</option>
               </select>
             </label>
-            <!-- 관계 그림의 두 보기 (t-9444): 행성계와 카드. 고른 것은 로컬 설정 한 키에
-                 남는다(`setAgentOrbitChoice`, shell-board-orbit.js). -->
-            <div class="board-mode agent-relations-view" role="group" data-i18n-aria="board.orbit.view" aria-label="관계 보기">
-              <button type="button" data-relations-view="orbit" aria-pressed="true" data-i18n="board.orbit.orbit">행성계</button>
-              <button type="button" data-relations-view="cards" aria-pressed="false" data-i18n="board.orbit.cards">카드</button>
-            </div>
             <!-- 오버레이 셋. 넓은 판에서는 세 단추가 나란히 서고, 좁아지면
                  세그먼트 하나가 그 셋을 팝오버로 든다 — 지우는 것이 아니라
                  옮기는 것이므로 세 단추는 어느 폭에서도 DOM에 남는다
@@ -1723,6 +1717,13 @@
                   <p class="agent-graph-scope-copy"></p>
                 </div>
                 <span class="agent-graph-scope-count"></span>
+                <!-- 그림의 두 보기 (t-9444): 행성계와 카드. 그림의 머리에 서는 것은 이것이
+                     그림을 바꾸는 손이기 때문이다 — 툴바의 손들은 무엇을 그릴지를 고른다.
+                     고른 것은 로컬 설정 한 키에 남는다(`setAgentOrbitChoice`). -->
+                <div class="board-mode agent-relations-view" role="group" data-i18n-aria="board.orbit.view" aria-label="관계 보기">
+                  <button type="button" data-relations-view="orbit" aria-pressed="true" data-i18n="board.orbit.orbit">행성계</button>
+                  <button type="button" data-relations-view="cards" aria-pressed="false" data-i18n="board.orbit.cards">카드</button>
+                </div>
               </header>
               <!-- 행성계 (t-9444). 캔버스 한 장이 항성·궤도·링크·입자·행성을 그리고, 그 위의
                    버튼들이 이름과 상태 칩을 들고 누름·손·초점을 받는다. 요약 이름표는

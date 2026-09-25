@@ -17,6 +17,7 @@
  *
  *   node ui/tests/board-orbit.mjs                     기능 시험 + 무게 표(Chromium)
  *   node ui/tests/board-orbit.mjs --perf --engine webkit --json out.json
+ *   node ui/tests/board-orbit.mjs --perf --dpr 2       2배 밀도(Chromium, CDP)
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -667,6 +668,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     if (!perfOnly) await testBoardOrbit(browser, origin, report);
     const { page } = await openWindowTestPage(browser, origin);
     await page.setViewportSize({ width: 1440, height: 960 });
+    /* 설치 앱의 화면은 2배 밀도다. Chromium은 그 밀도를 CDP로 흉내 낸다 — 캔버스가
+     * 네 배의 픽셀을 칠하는 판의 값을 같은 표로 잰다. */
+    const dpr = Number(option("--dpr", 1));
+    if (dpr !== 1 && engine === "chromium") {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Emulation.setDeviceMetricsOverride",
+        { width: 1440, height: 960, deviceScaleFactor: dpr, mobile: false });
+    }
     measured = await measureBoardOrbit(page, { seconds: Number(option("--seconds", 3)) });
     await page.close();
   } finally {
