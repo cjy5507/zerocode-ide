@@ -2732,7 +2732,8 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
             .expect("a width the line can be cleared on")
             .max(wanted);
         let inside = 3;
-        let rising = |k: usize| json!({"agreed": k >= misses, "baselineAgreed": k % 2 == 0});
+        let rising =
+            |k: usize| json!({"agreed": k >= misses, "baselineAgreed": k.is_multiple_of(2)});
         let yes = |_: usize| json!({"agreed": true, "baselineAgreed": false});
         let no = |_: usize| json!({"agreed": false, "baselineAgreed": true});
 
