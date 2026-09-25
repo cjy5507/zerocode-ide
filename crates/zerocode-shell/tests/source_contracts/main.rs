@@ -23862,7 +23862,7 @@ mod tests {
                 "a token the CLI rotated is overwritten instead of kept",
             ),
             (
-                "if !already_on_file {",
+                "if !already_on_file && let Err(error) = write_private(&live, &credentials)",
                 "the same bytes are rewritten, which is the Windows contention",
             ),
             (
@@ -23883,8 +23883,8 @@ mod tests {
             .find("if let Err(error) = write_keychain(")
             .expect("the keychain write left the switch");
         assert!(
-            putting[keychain_at..].contains("let _ = write_private(&live,")
-                && putting[keychain_at..].contains("let _ = std::fs::remove_file(&live);"),
+            putting[keychain_at..].contains("write_private(&live, previous)")
+                && putting[keychain_at..].contains("std::fs::remove_file(&live)"),
             "a refused keychain leaves the file naming the new account:\n{putting}"
         );
 
