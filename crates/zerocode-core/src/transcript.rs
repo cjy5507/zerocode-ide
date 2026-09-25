@@ -1150,16 +1150,40 @@ pub fn is_payload(bytes: &[u8]) -> bool {
 /// need a bound so one large result does not monopolise the conversation.
 const TOOL_DETAIL_CHARS: usize = 16 * 1024;
 
-fn tool_detail(text: &str) -> String {
-    let mut chars = text.chars();
-    let mut kept: String = chars.by_ref().take(TOOL_DETAIL_CHARS).collect();
-    if chars.next().is_some() {
-        kept.push('…');
-    }
-    kept
+/// How much of a tool's input and of its result a read hands over.
+///
+/// The page's tool cell shows a bounded detail ([`Detail::Clipped`]). A
+/// reader that masks credentials and then cuts a digest of its own —
+/// `worker-transcript` ([`crate::worker_transcript`], t-6742) — takes the
+/// text [`Detail::Whole`]: a cut made HERE, before its mask, can fall
+/// between a URL's userinfo and the `@` that marks it, or between a glued
+/// password and the program its line names later, and hand the mask a
+/// prefix it no longer recognises; and the length that reader reports
+/// would be this cut's, not the text's. Whole is bounded by the read that
+/// handed the line over, never by nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    /// At most `TOOL_DETAIL_CHARS` characters, and `…` where more stood.
+    Clipped,
+    /// Every character, for a reader that masks first and cuts after.
+    Whole,
 }
 
-fn transcript_tool(part: &serde_json::Value, result: bool) -> TranscriptTool {
+impl Detail {
+    fn kept(self, text: &str) -> String {
+        if self == Self::Whole {
+            return text.to_string();
+        }
+        let mut chars = text.chars();
+        let mut kept: String = chars.by_ref().take(TOOL_DETAIL_CHARS).collect();
+        if chars.next().is_some() {
+            kept.push('…');
+        }
+        kept
+    }
+}
+
+fn transcript_tool(part: &serde_json::Value, result: bool, detail: Detail) -> TranscriptTool {
     let name = part
         .get(if result { "tool_name" } else { "name" })
         .and_then(serde_json::Value::as_str)
@@ -1194,7 +1218,7 @@ fn transcript_tool(part: &serde_json::Value, result: bool) -> TranscriptTool {
             .unwrap_or_default()
             .to_string(),
         name: name.to_string(),
-        input: tool_detail(&input),
+        input: detail.kept(&input),
         edits: if result {
             Vec::new()
         } else {
@@ -1328,7 +1352,11 @@ fn tool_target(name: &str, input: &serde_json::Map<String, serde_json::Value>) -
         .map(str::to_string)
 }
 
-fn tool_result_turn(part: &serde_json::Value, at_ms: Option<i64>) -> TranscriptTurn {
+fn tool_result_turn(
+    part: &serde_json::Value,
+    at_ms: Option<i64>,
+    detail: Detail,
+) -> TranscriptTurn {
     let output = part.get("content").or_else(|| part.get("output"));
     let text = match output {
         Some(serde_json::Value::String(text)) => text.clone(),
@@ -1344,9 +1372,9 @@ fn tool_result_turn(part: &serde_json::Value, at_ms: Option<i64>) -> TranscriptT
     };
     TranscriptTurn {
         role: "tool_result".into(),
-        text: tool_detail(&text),
+        text: detail.kept(&text),
         at_ms,
-        tool: Some(transcript_tool(part, true)),
+        tool: Some(transcript_tool(part, true, detail)),
         images: images_in(output),
     }
 }
@@ -1471,9 +1499,18 @@ pub fn effort_in(chunk: &str) -> Option<String> {
 /// newline, because a half-written line is not yet a fact. Lines that are not
 /// conversation (summaries and meta records) contribute nothing. Tool results
 /// carry the vendor's call ID separately from prose; they never impersonate a
-/// user message and are expanded only inside their tool cell.
+/// user message and are expanded only inside their tool cell, whose detail
+/// is [`Detail::Clipped`].
 #[must_use]
 pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
+    turns_in_with(chunk, Detail::Clipped)
+}
+
+/// [`turns_in`], with a tool's input and result kept as `detail` says — the
+/// one reader, for a reader that must mask the whole text before it cuts
+/// ([`Detail::Whole`]).
+#[must_use]
+pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
     let mut turns = Vec::new();
     for line in chunk.lines() {
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -1492,14 +1529,14 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
                             role: "tool".into(),
                             text,
                             at_ms,
-                            tool: Some(transcript_tool(payload, false)),
+                            tool: Some(transcript_tool(payload, false, detail)),
                             images: Vec::new(),
                         });
                     }
                     continue;
                 }
                 Some("function_call_output" | "custom_tool_call_output") => {
-                    turns.push(tool_result_turn(payload, at_ms));
+                    turns.push(tool_result_turn(payload, at_ms, detail));
                     continue;
                 }
                 Some("reasoning") => {
@@ -1553,7 +1590,7 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
             .flatten()
         {
             if part.get("type").and_then(serde_json::Value::as_str) == Some("tool_result") {
-                turns.push(tool_result_turn(part, at_ms));
+                turns.push(tool_result_turn(part, at_ms, detail));
                 continue;
             }
             match reasoning_text(part) {
@@ -1615,7 +1652,7 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
                     role: "tool".to_string(),
                     text: said,
                     at_ms,
-                    tool: Some(transcript_tool(part, false)),
+                    tool: Some(transcript_tool(part, false, detail)),
                     images: Vec::new(),
                 });
             }
@@ -2088,6 +2125,24 @@ mod tests {
         let turns = turns_in(&source);
         assert_eq!(turns[0].text.chars().count(), TOOL_DETAIL_CHARS + 1);
         assert!(turns[0].text.ends_with('…'));
+
+        // Whole, for a reader that masks before it cuts (t-6742): the same
+        // record, every character of it, the call's input too.
+        let whole = turns_in_with(&source, Detail::Whole);
+        assert_eq!(whole[0].text.chars().count(), TOOL_DETAIL_CHARS + 10);
+        assert!(!whole[0].text.ends_with('…'));
+        let called = serde_json::json!({"type":"assistant","message":{"content":[{
+            "type":"tool_use","id":"big","name":"Bash","input":{"command":"나".repeat(TOOL_DETAIL_CHARS + 3)}
+        }]}})
+        .to_string();
+        let tool = |detail| {
+            turns_in_with(&called, detail)[0]
+                .tool
+                .as_ref()
+                .map(|tool| tool.input.chars().count())
+        };
+        assert_eq!(tool(Detail::Clipped), Some(TOOL_DETAIL_CHARS + 1));
+        assert_eq!(tool(Detail::Whole), Some(TOOL_DETAIL_CHARS + 3));
     }
 
     #[test]

@@ -18884,6 +18884,7 @@ fn a_ledger_with_one_inbox() -> LedgerProjectionV1 {
         attachments: Vec::new(),
         retention_days: RETENTION_DEFAULT_DAYS,
         swept_at_ms: 0,
+        verb_tallies: Vec::new(),
     }
 }
 
@@ -19399,10 +19400,11 @@ fn a_retry_name_on_a_read_is_refused_with_a_reason_and_moves_nothing() {
         .filter(|(_, _, what)| what.why_a_name_is_pointless().is_some())
         .map(|(name, _, _)| *name)
         .collect();
-    /* Thirteen, not twelve: `worktree-evidence` joined the read verbs. The
-     * number is written down so a verb added to the table without answering
-     * the retry-name question shows up here. */
-    assert_eq!(reads.len(), 13, "{reads:?}");
+    /* Fourteen: `worktree-evidence` joined the read verbs, then
+     * `worker-transcript` (t-6742). The number is written down so a verb
+     * added to the table without answering the retry-name question shows up
+     * here. */
+    assert_eq!(reads.len(), 14, "{reads:?}");
 
     for verb in reads {
         let refused = bench.at("%1", &format!("{verb} --retry-request r-1"));
@@ -20666,6 +20668,7 @@ fn a_large_healthy_ledger_still_loads() {
         attachments: Vec::new(),
         retention_days: RETENTION_DEFAULT_DAYS,
         swept_at_ms: 0,
+        verb_tallies: Vec::new(),
     };
 
     let _ = message_rows_taken();
@@ -20794,6 +20797,7 @@ fn a_ledger_with_many_runs_and_many_receipts_still_loads() {
                     messages: carried.clone(),
                 }),
                 fingerprint: Some(Text::from("f".repeat(64))),
+                verb: Some("check".to_string()),
                 filed_ms: Some(1),
                 expired: false,
             });
@@ -20816,6 +20820,7 @@ fn a_ledger_with_many_runs_and_many_receipts_still_loads() {
         attachments: Vec::new(),
         retention_days: RETENTION_DEFAULT_DAYS,
         swept_at_ms: 0,
+        verb_tallies: Vec::new(),
     };
 
     // Whatever building the fixture cost is not what is being measured.
@@ -21266,6 +21271,7 @@ fn tombstones_stop_at_a_ceiling_and_the_oldest_go_first() {
             request: format!("r-{at}"),
             answer: ServedAnswer::Inline("old".to_string()),
             fingerprint: Some("f".to_string()),
+            verb: Some("run-use".to_string()),
             filed_ms: Some(stamp),
             expired: false,
         });
@@ -23675,3 +23681,362 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
 mod restore;
 /// t-7812: the transitions those roads added (`tests/restore_seams.rs`).
 mod restore_seams;
+
+/* ---- served rows name their verb (t-6742) ---------------------------- */
+
+/// A receipt says which VERB it answered — one word out of [`VERBS`], the
+/// structural fact a frequency table is built from — and nothing else about
+/// the request: not its argv, not its body, not its answer. A row an older
+/// window filed says `None`, which reads as "unknown" and is never inferred
+/// from the answer's shape; the word survives the strict projection, a
+/// rebuild, and the sweep that hollows a receipt into a tombstone, and a
+/// replay after the rebuild is still the first answer.
+///
+/// Read off the projection as the store would write it — its JSON — so a
+/// ledger with no such word compiles this and fails it on the assertion
+/// (t-6742 R4).
+#[test]
+fn served_rows_name_their_verb() {
+    let mut bench = Bench::new();
+    let opened = bench.json("run-create --name verbs --retry-request r-open");
+    bench.json("task-create --spec build --retry-request r-task");
+    let verbs = |ledger: &Ledger| -> Vec<Option<String>> {
+        serde_json::to_value(ledger.export()).expect("a projection")["served"]
+            .as_array()
+            .expect("its receipts")
+            .iter()
+            .map(|row| {
+                row.get("verb")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    };
+    assert_eq!(
+        verbs(&bench.ledger),
+        vec![
+            Some("run-create".to_string()),
+            Some("task-create".to_string())
+        ]
+    );
+    for verb in verbs(&bench.ledger) {
+        let verb = verb.expect("named");
+        assert!(
+            VERBS.iter().any(|(name, _, _)| *name == verb),
+            "{verb} is not a verb of the table"
+        );
+        assert!(
+            !verb.contains("--") && !verb.contains("verbs") && !verb.contains("build"),
+            "a verb row carried more than the verb: {verb}"
+        );
+    }
+
+    let rebuilt = Ledger::rebuild(bench.ledger.export()).expect("rebuilds");
+    assert_eq!(verbs(&rebuilt), verbs(&bench.ledger));
+    let mut bench = Bench {
+        ledger: rebuilt,
+        ..Bench::new()
+    };
+    let replayed = bench.json("run-create --name verbs --retry-request r-open");
+    assert_eq!(
+        replayed["runId"], opened["runId"],
+        "the replay is the first answer"
+    );
+    assert_eq!(
+        bench.ledger.export().served.len(),
+        2,
+        "a replay filed nothing new"
+    );
+
+    // The sweep keeps the verb on the tombstone it leaves.
+    let swept = bench.ledger.sweep_retention(bench.clock + 400 * DAY_MS);
+    assert_eq!(swept.receipts_expired, 2);
+    assert_eq!(
+        verbs(&bench.ledger),
+        vec![
+            Some("run-create".to_string()),
+            Some("task-create".to_string())
+        ]
+    );
+
+    // Older shapes: no verb was written, so none is known.
+    let file = serde_json::json!({
+        "runs": [], "bound": [],
+        "served": [
+            ["r-oldest", "the first answer"],
+            { "caller": "team-1/%2", "request": "r-seat", "answer": "the seat answer" },
+        ],
+        "next_id": 3,
+    })
+    .to_string();
+    let old: Ledger = serde_json::from_str(&file).expect("an old ledger opens");
+    assert_eq!(verbs(&old), vec![None, None]);
+    let carried = Ledger::rebuild(old.export()).expect("and projects");
+    assert_eq!(verbs(&carried), vec![None, None], "unknown stays unknown");
+}
+
+/// The count `served` cannot keep (t-6742): every verb of the table, by
+/// UTC day, calls and refusals — bounded to the newest days, carried by the
+/// projection and a rebuild, absent from a ledger written before it, and
+/// never a receipt.
+#[test]
+fn every_verb_call_is_tallied_by_day_without_a_receipt() {
+    let mut ledger = Ledger::new();
+    let day_one = 1_790_208_000_000_i64; // 2026-09-24T00:00:00Z
+    ledger.note_verb("worker-read", false, day_one + 5);
+    ledger.note_verb("worker-read", false, day_one + 7);
+    ledger.note_verb("worker-read", true, day_one + 9);
+    ledger.note_verb("worker-transcript", false, day_one + DAY_MS + 1);
+    ledger.note_verb("not-a-verb", false, day_one);
+    ledger.note_verb("check", false, -1);
+    let expected = vec![
+        VerbTally {
+            verb: "worker-read".to_string(),
+            day_start_ms: day_one,
+            calls: 3,
+            refused: 1,
+        },
+        VerbTally {
+            verb: "worker-transcript".to_string(),
+            day_start_ms: day_one + DAY_MS,
+            calls: 1,
+            refused: 0,
+        },
+    ];
+    assert_eq!(ledger.verb_tallies(), expected.as_slice());
+    assert!(
+        ledger.export().served.is_empty(),
+        "a tally is not a receipt"
+    );
+    assert_eq!(ledger.export().verb_tallies, expected);
+    let rebuilt = Ledger::rebuild(ledger.export()).expect("rebuilds");
+    assert_eq!(rebuilt.verb_tallies(), expected.as_slice());
+    let file = serde_json::to_string(&ledger).expect("writes");
+    let read: Ledger = serde_json::from_str(&file).expect("reads");
+    assert_eq!(read.verb_tallies(), expected.as_slice());
+
+    let old: Ledger = serde_json::from_str(r#"{"runs":[],"bound":[],"served":[],"next_id":1}"#)
+        .expect("an old ledger opens");
+    assert!(old.verb_tallies().is_empty());
+
+    // Only the newest days stay.
+    ledger.note_verb("check", false, day_one + (VERB_TALLY_DAYS + 2) * DAY_MS);
+    assert_eq!(
+        ledger
+            .verb_tallies()
+            .iter()
+            .map(|row| row.verb.as_str())
+            .collect::<Vec<_>>(),
+        vec!["check"]
+    );
+}
+
+/* ---- worker-transcript (t-6742) --------------------------------------- */
+
+fn a_session_at(path: Option<&str>) -> ProviderSession {
+    ProviderSession {
+        key: SessionKey::SessionId,
+        id: "session-of-the-row".to_string(),
+        transcript_path: path.map(str::to_string),
+    }
+}
+
+/// The word every `worker-transcript` refusal for a transcript it cannot
+/// name opens with (`crate::worker_transcript::UNAVAILABLE`), spelled as a
+/// caller branching on it sees it. These tests read the verb through the
+/// plan's own seam — words in, a reply and the effect's `Debug` out — and
+/// name nothing the verb added, so a ledger without the verb compiles them
+/// and fails them on their assertions, `unknown verb`, rather than on the
+/// build (t-6742 R4).
+const TRANSCRIPT_UNAVAILABLE: &str = "transcript unavailable";
+
+/// `worker-transcript` is a read answered from the worker ROW's own
+/// reported transcript: the plan names that file and the NUL placeholder
+/// the window fills, files no receipt, moves nothing — and keeps naming
+/// the file after the worker is released with a screen archived, because
+/// a screen is not a transcript and the archived road is `worker-read`'s.
+#[test]
+fn a_worker_transcript_answers_structured_turns_not_screen_bytes() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name transcripts");
+    let (worker, pane) = bench.seat("worker-start --agent claude");
+    assert!(bench.ledger.worker_session_reported(
+        ("team-1", &pane),
+        a_session_at(Some("/transcripts/w.jsonl"))
+    ));
+    let before = bench.ledger.export();
+
+    let read = bench.run(&format!("worker-transcript --worker {worker}"));
+    assert_eq!(read.reply.exit_code, 0, "{}", read.reply.stderr);
+    let effect = format!("{:?}", read.effect);
+    assert!(
+        effect.starts_with(&format!(
+            "WorkerTranscript {{ worker: \"{worker}\", agent: \"claude\", path: \"/transcripts/w.jsonl\", ask: TranscriptAsk {{ window: LastTurns("
+        )) && effect.ends_with("), json: false } }"),
+        "the row's own file, its agent, the default window, text: {effect}"
+    );
+    assert_eq!(
+        read.reply.stdout, "\u{0}",
+        "the plan hands the window the capture placeholder, never bytes of its own"
+    );
+    assert!(read.receipt.is_none() && !read.requires_durability);
+    assert_eq!(bench.ledger.export(), before, "a read moved the ledger");
+
+    let json = bench.run(&format!(
+        "worker-transcript --worker {worker} --turns 7 --json"
+    ));
+    let effect = format!("{:?}", json.effect);
+    assert!(
+        effect.ends_with("ask: TranscriptAsk { window: LastTurns(7), json: true } }"),
+        "{effect}"
+    );
+    let since = bench.run(&format!(
+        "worker-transcript --worker {worker} --since 1790251200000"
+    ));
+    let effect = format!("{:?}", since.effect);
+    assert!(
+        effect.ends_with("ask: TranscriptAsk { window: Since(1790251200000), json: false } }"),
+        "{effect}"
+    );
+
+    for (line, why) in [
+        (
+            format!("worker-transcript --worker {worker} --turns 2 --since 3"),
+            "two different windows",
+        ),
+        (
+            format!("worker-transcript --worker {worker} --turns 0"),
+            "asks for nothing",
+        ),
+        (
+            format!("worker-transcript --worker {worker} --retry-request t-1"),
+            "writes nothing down",
+        ),
+        ("worker-transcript".to_string(), "needs --worker"),
+        (
+            "worker-transcript --worker w-404".to_string(),
+            "unknown worker",
+        ),
+    ] {
+        let refused = bench.run(&line);
+        assert_ne!(refused.reply.exit_code, 0, "{line} was answered");
+        assert!(refused.reply.stdout.is_empty(), "bytes escaped a refusal");
+        assert!(
+            refused.reply.stderr.contains(why),
+            "{line}: {}",
+            refused.reply.stderr
+        );
+    }
+
+    // Released with a screen archived: `worker-read` answers the archive,
+    // `worker-transcript` still names the row's file and never the screen.
+    bench
+        .ledger
+        .begin_release(&worker)
+        .expect("the release begins");
+    bench
+        .ledger
+        .finish_release(&worker, Some("the archived screen".to_string()));
+    let screen = bench.run(&format!("worker-read --worker {worker}"));
+    assert_eq!(screen.reply.stdout, "the archived screen\n");
+    let after = bench.run(&format!("worker-transcript --worker {worker}"));
+    assert_eq!(after.reply.exit_code, 0, "{}", after.reply.stderr);
+    let effect = format!("{:?}", after.effect);
+    assert!(
+        effect.starts_with("WorkerTranscript {")
+            && effect.contains("path: \"/transcripts/w.jsonl\"")
+            && !effect.contains("archived screen"),
+        "{effect}"
+    );
+    assert!(!after.reply.stdout.contains("archived screen"));
+}
+
+/// A row with no transcript to read says so — one of three absences, each
+/// opening with the same word — and is never answered from the screen a
+/// release archived, from the pane's current session, or from another
+/// row's file: the pane a released worker sat in may carry a new worker
+/// with a session of its own, and each row names its own.
+#[test]
+fn a_worker_with_no_transcript_is_unavailable_never_its_screen() {
+    const UNAVAILABLE: &str = TRANSCRIPT_UNAVAILABLE;
+    let mut bench = Bench {
+        launcher: Catalog(&["claude", "codex", "amp"]),
+        ..Bench::new()
+    };
+    bench.json("run-create --name absences");
+
+    // Not reported yet.
+    let (unreported, _) = bench.seat("worker-start --agent claude");
+    let refused = bench.run(&format!("worker-transcript --worker {unreported}"));
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(
+        refused.reply.stderr.contains(UNAVAILABLE)
+            && refused.reply.stderr.contains("has not reported"),
+        "{}",
+        refused.reply.stderr
+    );
+    // Released with a screen: still unavailable, and the screen stays out.
+    bench
+        .ledger
+        .begin_release(&unreported)
+        .expect("the release begins");
+    bench
+        .ledger
+        .finish_release(&unreported, Some("a screen nobody asked for".to_string()));
+    let refused = bench.run(&format!("worker-transcript --worker {unreported}"));
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(refused.reply.stdout.is_empty());
+    assert!(
+        refused.reply.stderr.contains(UNAVAILABLE)
+            && !refused.reply.stderr.contains("nobody asked for"),
+        "{}",
+        refused.reply.stderr
+    );
+
+    // A new worker with a file of its own answers its file; the old row is
+    // still unavailable and never borrows the newer one.
+    let (reused, reused_pane) = bench.seat("worker-start --agent codex");
+    assert!(bench.ledger.worker_session_reported(
+        ("team-1", &reused_pane),
+        a_session_at(Some("/rollouts/new.jsonl"))
+    ));
+    let new = bench.run(&format!("worker-transcript --worker {reused}"));
+    let effect = format!("{:?}", new.effect);
+    assert!(
+        effect.starts_with("WorkerTranscript {")
+            && effect.contains("agent: \"codex\", path: \"/rollouts/new.jsonl\""),
+        "{effect} {:?}",
+        new.reply
+    );
+    let old = bench.run(&format!("worker-transcript --worker {unreported}"));
+    assert!(
+        old.reply.stderr.contains(UNAVAILABLE) && !old.reply.stderr.contains("new.jsonl"),
+        "{}",
+        old.reply.stderr
+    );
+
+    // A session reported without a file.
+    let (fileless, pane) = bench.seat("worker-start --agent claude");
+    assert!(
+        bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), a_session_at(None))
+    );
+    let refused = bench.run(&format!("worker-transcript --worker {fileless}"));
+    assert!(
+        refused.reply.stderr.contains(UNAVAILABLE)
+            && refused.reply.stderr.contains("no transcript file"),
+        "{}",
+        refused.reply.stderr
+    );
+
+    // An agent that reports no session at all.
+    let (silent, _) = bench.seat("worker-start --agent amp");
+    let refused = bench.run(&format!("worker-transcript --worker {silent}"));
+    assert!(
+        refused.reply.stderr.contains(UNAVAILABLE)
+            && refused.reply.stderr.contains("reports no session"),
+        "{}",
+        refused.reply.stderr
+    );
+}

@@ -259,34 +259,47 @@ pub(crate) fn pane_log(
 /// A longer one is skipped, as every long line was before.
 const LONG_LINE_CAP: u64 = 32 * 1024 * 1024;
 
+/// One window of a transcript as the one reader read it: the page's answer,
+/// and the stretch of the file it came out of. What the reading cost is
+/// counted where every read passes, not added up here — see [`Metered`].
+struct WindowRead {
+    log: SubagentLog,
+    /// The whole lines the read decoded, as a stretch of the file.
+    lines: std::ops::Range<u64>,
+    /// Whether the window held a line end at all — with no whole line in
+    /// it, the difference between a line still being written and one too
+    /// long for the window.
+    ended: bool,
+}
+
 /// The one line a read found no end inside, read whole with its payloads set
 /// aside. It begins at `from`, or — for a read that opened inside it, the
 /// tail's — after the line end before `from`. `None` when it runs past
-/// [`LONG_LINE_CAP`] (the caller skips it); an answer with nothing new, and
+/// `cap` (the caller skips it); an answer with nothing new, and
 /// the cursor left at the line's start, when it has no end yet — it is still
-/// being written.
-fn long_line_log(
-    file: &mut std::fs::File,
+/// being written. The conversation view's road only: `worker-transcript`
+/// reads within a budget of its own and never takes it (t-6742).
+fn long_line_log<F: std::io::Read + std::io::Seek>(
+    file: &mut F,
     from: u64,
     starts_mid_line: bool,
     size: u64,
     folded: bool,
-) -> Result<Option<SubagentLog>, String> {
-    use std::io::{Read, Seek};
+    cap: u64,
+    detail: zerocode_core::transcript::Detail,
+) -> std::io::Result<Option<WindowRead>> {
     let block = usize::try_from(SUBAGENT_LOG_CHUNK).unwrap_or(1 << 18);
     let mut start = from;
     if starts_mid_line {
         // Back to the line end before `from`, a block at a time.
-        let floor = from.saturating_sub(LONG_LINE_CAP);
+        let floor = from.saturating_sub(cap);
         let mut cursor = from;
         start = floor;
         while cursor > floor {
             let step = (cursor - floor).min(SUBAGENT_LOG_CHUNK);
             let mut back = vec![0u8; usize::try_from(step).unwrap_or_default()];
-            file.seek(std::io::SeekFrom::Start(cursor - step))
-                .map_err(|error| error.to_string())?;
-            file.read_exact(&mut back)
-                .map_err(|error| error.to_string())?;
+            file.seek(std::io::SeekFrom::Start(cursor - step))?;
+            file.read_exact(&mut back)?;
             if let Some(at) = back.iter().rposition(|byte| *byte == b'\n') {
                 start = cursor - step + at as u64 + 1;
                 break;
@@ -297,23 +310,26 @@ fn long_line_log(
             return Ok(None);
         }
     }
-    file.seek(std::io::SeekFrom::Start(start))
-        .map_err(|error| error.to_string())?;
+    file.seek(std::io::SeekFrom::Start(start))?;
     let mut line = Vec::new();
     let mut piece = vec![0u8; block];
     loop {
-        let got = file.read(&mut piece).map_err(|error| error.to_string())?;
+        let got = file.read(&mut piece)?;
         if got == 0 {
             // No end yet: the line is still being written.
-            return Ok(Some(SubagentLog {
-                turns: Vec::new(),
-                model: None,
-                next: start,
-                found: true,
-                skipped: false,
-                more: false,
-                folded: folded || start > 0,
-                usage: None,
+            return Ok(Some(WindowRead {
+                log: SubagentLog {
+                    turns: Vec::new(),
+                    model: None,
+                    next: start,
+                    found: true,
+                    skipped: false,
+                    more: false,
+                    folded: folded || start > 0,
+                    usage: None,
+                },
+                lines: start..start,
+                ended: false,
             }));
         }
         if let Some(at) = piece[..got].iter().position(|byte| *byte == b'\n') {
@@ -321,22 +337,26 @@ fn long_line_log(
             break;
         }
         line.extend_from_slice(&piece[..got]);
-        if line.len() as u64 > LONG_LINE_CAP {
+        if line.len() as u64 > cap {
             return Ok(None);
         }
     }
     let bytes = zerocode_core::transcript::elide_payloads(&line, start);
     let text = String::from_utf8_lossy(&bytes);
     let next = start + line.len() as u64;
-    Ok(Some(SubagentLog {
-        turns: zerocode_core::transcript::turns_in(&text),
-        model: zerocode_core::transcript::model_in(&text),
-        next,
-        found: true,
-        skipped: false,
-        more: next < size,
-        folded: folded || start > 0,
-        usage: zerocode_core::transcript::usage_in(&text),
+    Ok(Some(WindowRead {
+        log: SubagentLog {
+            turns: zerocode_core::transcript::turns_in_with(&text, detail),
+            model: zerocode_core::transcript::model_in(&text),
+            next,
+            found: true,
+            skipped: false,
+            more: next < size,
+            folded: folded || start > 0,
+            usage: zerocode_core::transcript::usage_in(&text),
+        },
+        lines: start..next,
+        ended: true,
     }))
 }
 
@@ -350,66 +370,297 @@ pub(crate) fn transcript_log_at(
     path: impl AsRef<std::path::Path>,
     after: Option<u64>,
 ) -> Result<SubagentLog, String> {
-    let path = path.as_ref();
-    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut file = std::fs::File::open(path.as_ref()).map_err(|error| error.to_string())?;
     let size = file.metadata().map_err(|error| error.to_string())?.len();
+    transcript_log_window(
+        &mut file,
+        size,
+        after,
+        SUBAGENT_LOG_CHUNK,
+        Some(LONG_LINE_CAP),
+        zerocode_core::transcript::Detail::Clipped,
+    )
+    .map(|window| window.log)
+    .map_err(|error| error.to_string())
+}
+
+/// The same read with the window, the long-line road and the detail a
+/// caller names: at most `window` bytes from `after`, or the last `window`
+/// bytes before `size`; complete lines only, decoded by core's reader.
+///
+/// `file` is read here and never opened, and `size` is what its opener
+/// measured when it opened it: every byte this reads lies below `size`, so
+/// a file appended to while it is read is read as it stood. The one
+/// exception is `long_lines` — the page's road for a window with no line end
+/// inside it, which reads that one line whole up to the cap it names; a
+/// caller that names none reads nothing past its window (t-6742: a read
+/// with a budget spends it here or nowhere). A caller reading twice reads
+/// one file to one end both times — renamed away, rotated or replaced under
+/// it, the file it opened is still the one it asked about.
+fn transcript_log_window<F: std::io::Read + std::io::Seek>(
+    file: &mut F,
+    size: u64,
+    after: Option<u64>,
+    window: u64,
+    long_lines: Option<u64>,
+    detail: zerocode_core::transcript::Detail,
+) -> std::io::Result<WindowRead> {
     let (from, folded) = match after {
         // A file that SHRANK was replaced under us; reading on from a stale
         // offset would splice two conversations together.
         Some(after) => (if after > size { 0 } else { after }, false),
-        None => (
-            size.saturating_sub(SUBAGENT_LOG_CHUNK),
-            size > SUBAGENT_LOG_CHUNK,
-        ),
+        None => (size.saturating_sub(window), size > window),
     };
-    let read = (size - from).min(SUBAGENT_LOG_CHUNK);
+    let read = (size - from).min(window);
     let mut buffer = vec![0u8; usize::try_from(read).unwrap_or_default()];
-    use std::io::{Read, Seek};
     let starts_mid_line = if from > 0 {
-        file.seek(std::io::SeekFrom::Start(from - 1))
-            .map_err(|error| error.to_string())?;
+        file.seek(std::io::SeekFrom::Start(from - 1))?;
         let mut preceding = [0u8; 1];
-        file.read_exact(&mut preceding)
-            .map_err(|error| error.to_string())?;
+        file.read_exact(&mut preceding)?;
         preceding[0] != b'\n'
     } else {
         false
     };
-    file.seek(std::io::SeekFrom::Start(from))
-        .map_err(|error| error.to_string())?;
-    file.read_exact(&mut buffer)
-        .map_err(|error| error.to_string())?;
+    file.seek(std::io::SeekFrom::Start(from))?;
+    file.read_exact(&mut buffer)?;
     let chunk = zerocode_core::transcript::complete_transcript_chunk(
         &buffer,
         starts_mid_line,
-        read == SUBAGENT_LOG_CHUNK,
+        read == window,
     );
     // A read with no line end inside it stands inside one long line — nearly
     // always one carrying an image: 135 of the 146 image lines in this
     // machine's last 40 transcripts were past the read, and skipping them
     // dropped the words on them too (t-6323 A8). That line is read whole,
-    // once, its payloads set aside.
+    // once, its payloads set aside — on the page's road.
     if chunk.bytes.is_empty()
-        && read == SUBAGENT_LOG_CHUNK
-        && let Some(log) = long_line_log(&mut file, from, starts_mid_line, size, folded)?
+        && read == window
+        && let Some(cap) = long_lines
+        && let Some(long) = long_line_log(file, from, starts_mid_line, size, folded, cap, detail)?
     {
-        return Ok(log);
+        return Ok(long);
     }
     // The payloads step aside, leaving where they stand in the file.
     let base = from + u64::try_from(chunk.start).unwrap_or_default();
     let bytes = zerocode_core::transcript::elide_payloads(chunk.bytes, base);
     let text = String::from_utf8_lossy(&bytes);
     let next = from + u64::try_from(chunk.consumed).unwrap_or_default();
-    Ok(SubagentLog {
-        turns: zerocode_core::transcript::turns_in(&text),
-        model: zerocode_core::transcript::model_in(&text),
-        next,
-        found: true,
-        skipped: chunk.skipped,
-        more: next < size,
-        folded,
-        usage: zerocode_core::transcript::usage_in(&text),
+    let whole = u64::try_from(chunk.bytes.len()).unwrap_or_default();
+    Ok(WindowRead {
+        log: SubagentLog {
+            turns: zerocode_core::transcript::turns_in_with(&text, detail),
+            model: zerocode_core::transcript::model_in(&text),
+            next,
+            found: true,
+            skipped: chunk.skipped,
+            more: next < size,
+            folded,
+            usage: zerocode_core::transcript::usage_in(&text),
+        },
+        lines: base..base + whole,
+        ended: chunk.start + chunk.bytes.len() > 0,
     })
+}
+
+/// How many times `worker-transcript` opens a transcript that came up
+/// shorter than the size it had when it was opened: once, and once more
+/// from a fresh open — a file cut in place under one read is read again as
+/// it now stands, and one cut under both is said, never half answered.
+const TRANSCRIPT_OPENS: usize = 2;
+
+/// How far back `worker-transcript`'s wider read reaches: the last
+/// [`zerocode_core::worker_transcript::SCAN_CHUNKS`] chunks.
+const TRANSCRIPT_WIDEST: u64 =
+    zerocode_core::worker_transcript::SCAN_CHUNKS.saturating_mul(SUBAGENT_LOG_CHUNK);
+
+/// Everything one `worker-transcript` call may read, over every open it
+/// makes: its two reads, a chunk and then the wider one, each with the byte
+/// before it (t-6742 R2). A retry after a cut reads on what is left of it.
+const TRANSCRIPT_READ_BUDGET: u64 =
+    tail_read_cost(SUBAGENT_LOG_CHUNK, u64::MAX) + tail_read_cost(TRANSCRIPT_WIDEST, u64::MAX);
+
+/// What reading the last `window` bytes of a `size`-byte file takes from it
+/// ([`transcript_log_window`] with no cursor): the window, and — when the
+/// window opens inside the file — the one byte before it that says whether
+/// it opens mid-line.
+const fn tail_read_cost(window: u64, size: u64) -> u64 {
+    if size > window { window + 1 } else { size }
+}
+
+/// The widest window, up to `wanted`, whose tail read of a `size`-byte file
+/// costs no more than `left`: `wanted` itself when it fits, else the one
+/// that, with the byte before it, takes `left` exactly.
+fn tail_window_within(wanted: u64, size: u64, left: u64) -> u64 {
+    if tail_read_cost(wanted, size) <= left {
+        wanted
+    } else {
+        left.saturating_sub(1)
+    }
+}
+
+/// One `worker-transcript` call's file, metered (t-6742 R2). Every open of
+/// the call reads through one of these, and they all count into the call's
+/// one `spent`: a byte a read took is spent whichever open took it, and
+/// whether or not the read it was part of came up short at a cut. None is
+/// read past `budget` — a read that would is refused, not shortened into a
+/// short read a caller would take for a cut.
+struct Metered<'call, F> {
+    file: F,
+    spent: &'call mut u64,
+    budget: u64,
+}
+
+impl<F> Metered<'_, F> {
+    /// What the call may still read.
+    fn left(&self) -> u64 {
+        self.budget.saturating_sub(*self.spent)
+    }
+}
+
+impl<F: std::io::Read> std::io::Read for Metered<'_, F> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let left = usize::try_from(self.left()).unwrap_or(usize::MAX);
+        if left == 0 && !buffer.is_empty() {
+            return Err(std::io::Error::other(
+                "a read past the call's read budget was refused",
+            ));
+        }
+        let taking = buffer.len().min(left);
+        let got = self.file.read(&mut buffer[..taking])?;
+        *self.spent += got as u64;
+        Ok(got)
+    }
+}
+
+impl<F: std::io::Seek> std::io::Seek for Metered<'_, F> {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(to)
+    }
+}
+
+/// A worker's conversation for `worker-transcript` (t-6742), read the way
+/// the conversation view reads a pane's own ([`transcript_log_window`], the
+/// reader behind [`transcript_log_at`]): the file opened ONCE, its size
+/// taken from that open file, and every read of the call made on it and
+/// stopped at that size — a file appended to meanwhile is answered as it
+/// stood, and one renamed, rotated or replaced under the call is still the
+/// one it opened. The last chunk first; when the window asked for is not
+/// inside it (`TranscriptAsk::satisfied_by`), one read of the last
+/// [`zerocode_core::worker_transcript::SCAN_CHUNKS`] chunks.
+///
+/// Those two reads are the budget ([`TRANSCRIPT_READ_BUDGET`]), whatever
+/// the lines hold: the page's long line road is not taken, so a line longer
+/// than the wider read is said (`Scan::skipped`), never read whole. It is
+/// the CALL's budget, not an open's: a file cut in place under a read is
+/// opened again and read on what the first open left of it, never a budget
+/// of its own. The answer's scan says what the reads did — the bytes they
+/// took over every open, and the lines they covered.
+///
+/// Read-only, and nothing is remembered: the file is opened for reading and
+/// no cursor is kept.
+pub(crate) fn transcript_turns_back(
+    path: &Path,
+    ask: &zerocode_core::worker_transcript::TranscriptAsk,
+) -> Result<
+    (
+        Vec<zerocode_core::transcript::TranscriptTurn>,
+        zerocode_core::worker_transcript::Scan,
+    ),
+    String,
+> {
+    transcript_turns_through(
+        || {
+            let file = std::fs::File::open(path)?;
+            let size = file.metadata()?.len();
+            Ok((file, size))
+        },
+        ask,
+    )
+}
+
+/// [`transcript_turns_back`] with the opening handed in: `open` gives the
+/// open file and the size it had when it was opened. Its tests reach the
+/// reads through here, with a file that counts what is read from it and
+/// one that is appended to, replaced or cut in place between the reads.
+pub(crate) fn transcript_turns_through<F: std::io::Read + std::io::Seek>(
+    mut open: impl FnMut() -> std::io::Result<(F, u64)>,
+    ask: &zerocode_core::worker_transcript::TranscriptAsk,
+) -> Result<
+    (
+        Vec<zerocode_core::transcript::TranscriptTurn>,
+        zerocode_core::worker_transcript::Scan,
+    ),
+    String,
+> {
+    let mut spent = 0;
+    for _ in 0..TRANSCRIPT_OPENS {
+        let (file, size) = open().map_err(|error| error.to_string())?;
+        let mut file = Metered {
+            file,
+            spent: &mut spent,
+            budget: TRANSCRIPT_READ_BUDGET,
+        };
+        match transcript_turns_in(&mut file, size, ask) {
+            // Shorter than it was when it was opened: cut in place under the
+            // read. Read again as it now stands, from a fresh open.
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+            read => return read.map_err(|error| error.to_string()),
+        }
+    }
+    Err(format!(
+        "it came up shorter than its size {TRANSCRIPT_OPENS} times while it was read — it is \
+         being cut in place, not appended to"
+    ))
+}
+
+/// The call's reads on one open file of `size` bytes — see
+/// [`transcript_turns_back`]. The first read is the chunk, whole: the least
+/// an answer is read out of, so an open whose call can no longer afford it
+/// says so. The wider read reaches as far back as the call has left, up to
+/// [`TRANSCRIPT_WIDEST`] — all of it on a first open.
+fn transcript_turns_in<F: std::io::Read + std::io::Seek>(
+    file: &mut Metered<'_, F>,
+    size: u64,
+    ask: &zerocode_core::worker_transcript::TranscriptAsk,
+) -> std::io::Result<(
+    Vec<zerocode_core::transcript::TranscriptTurn>,
+    zerocode_core::worker_transcript::Scan,
+)> {
+    let first = SUBAGENT_LOG_CHUNK.min(TRANSCRIPT_WIDEST);
+    if tail_window_within(first, size, file.left()) < first {
+        return Err(std::io::Error::other(
+            "it was cut in place under the read, and what is left of the call's read budget \
+             cannot read it again",
+        ));
+    }
+    let mut window = first;
+    loop {
+        let got = transcript_log_window(
+            file,
+            size,
+            None,
+            window,
+            None,
+            zerocode_core::transcript::Detail::Whole,
+        )?;
+        let scan = zerocode_core::worker_transcript::Scan {
+            file_bytes: size,
+            read_bytes: *file.spent,
+            covered_from: got.lines.start,
+            covered_to: got.lines.end,
+            cut_above: got.lines.start > 0,
+            // No whole line, and yet a line end: the newest line ends inside
+            // the read and began above it — longer than the read, not taken.
+            // A read with no line end at all stands inside a line still being
+            // written, which is not yet a fact to skip.
+            skipped: got.lines.is_empty() && got.ended,
+        };
+        let wider = tail_window_within(TRANSCRIPT_WIDEST, size, file.left());
+        if size <= window || wider <= window || ask.satisfied_by(&got.log.turns) {
+            return Ok((got.log.turns, scan));
+        }
+        window = wider;
+    }
 }
 
 /// A pane that READS a nested run's mirror as a terminal.

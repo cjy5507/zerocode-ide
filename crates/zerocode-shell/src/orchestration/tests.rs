@@ -15677,6 +15677,434 @@ fn a_worker_read_interrupted_by_a_seat_change_files_nothing() {
     }
 }
 
+/// `worker-transcript` answers the worker ROW's own transcript as
+/// structured turns (t-6742): the file its pane reported, read by the
+/// conversation view's reader and shaped by core — the screen is never
+/// captured, the path never printed, a credential in the file never
+/// answered, and the read moves nothing: not the rows, not the file, and
+/// no receipt. A file the window cannot open is said as unavailable.
+#[test]
+fn a_worker_transcript_reads_the_rows_own_file_and_never_the_screen() {
+    const LEADER_TERM: u32 = 90_140;
+    const WORKER_TERM: u32 = 90_141;
+    let _window = the_window();
+    let team = format!("team-transcript-{LEADER_TERM}");
+    let (run_id, worker, _pane) = a_worker_in_a_pane(&team, LEADER_TERM, WORKER_TERM);
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let path = temp.path().join("w.jsonl");
+    std::fs::write(
+        &path,
+        [
+            r#"{"type":"user","timestamp":"2026-09-24T12:00:00.000Z","message":{"role":"user","content":"run the tests with --password hunter2"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-24T12:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Running them."},{"type":"tool_use","id":"call-1","name":"Bash","input":{"command":"cargo test -p x"}}]}}"#,
+            r#"{"type":"user","timestamp":"2026-09-24T12:00:09.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"ok · 12 passed"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-24T12:00:10.000Z","message":{"role":"assistant","content":[{"type":"text","text":"All green."}]}}"#,
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("the transcript");
+    let written = std::fs::metadata(&path).expect("stat");
+    super::pane_session_reported(
+        WORKER_TERM,
+        &zerocode_core::ProviderSession {
+            key: zerocode_core::provider_session::SessionKey::SessionId,
+            id: "session-of-the-row".to_string(),
+            transcript_path: Some(path.to_string_lossy().into_owned()),
+        },
+        clock(),
+    );
+    let host = Reading::quiet("THE SCREEN NOBODY ASKED FOR");
+    let shadow = a_runs_shadow(&run_id);
+    let receipts = the_rows().served.len();
+
+    let answered = run(
+        &host,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "worker-transcript --run {run_id} --worker {worker} --json"
+        )),
+        clock(),
+    );
+    assert_eq!(answered.exit_code, 0, "{}", answered.stderr);
+    let json: serde_json::Value = serde_json::from_str(&answered.stdout).expect("a record");
+    assert_eq!(json["worker"], worker);
+    assert_eq!(json["agent"], "claude");
+    assert_eq!(
+        json["found"], 3,
+        "the prompt, the call's step, the words after"
+    );
+    assert_eq!(json["turns"][0]["role"], "user");
+    assert_eq!(json["turns"][1]["role"], "assistant");
+    assert_eq!(json["turns"][2]["text"]["text"], "All green.");
+    assert_eq!(json["turns"][1]["tools"][0]["name"], "Bash");
+    assert_eq!(json["turns"][1]["tools"][0]["callId"], "call-1");
+    assert_eq!(
+        json["turns"][1]["tools"][0]["result"]["text"],
+        "ok · 12 passed"
+    );
+    assert_eq!(json["turns"][1]["atMs"], 1_790_251_201_000_i64);
+    assert_eq!(json["scan"]["fileBytes"], written.len());
+    assert!(
+        !answered.stdout.contains("hunter2"),
+        "a credential was answered"
+    );
+    assert!(answered.stdout.contains("[redacted]"));
+    assert!(
+        !answered
+            .stdout
+            .contains(temp.path().to_str().expect("utf8")),
+        "the path escaped"
+    );
+    assert!(!answered.stdout.contains("NOBODY ASKED FOR"));
+    assert_eq!(host.captures(), 0, "the screen was captured");
+
+    let text = run(
+        &host,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "worker-transcript --run {run_id} --worker {worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(text.exit_code, 0, "{}", text.stderr);
+    assert!(
+        text.stdout
+            .contains("↳ Bash · cargo test -p x → ok · 12 passed"),
+        "{}",
+        text.stdout
+    );
+    assert!(!text.stdout.contains("hunter2"));
+
+    // A read: the rows did not move, no receipt was filed, the file was
+    // not touched.
+    assert_eq!(a_runs_shadow(&run_id), shadow, "a read moved the run");
+    assert_eq!(the_rows().served.len(), receipts, "a read filed a receipt");
+    let after = std::fs::metadata(&path).expect("stat");
+    assert_eq!(after.len(), written.len());
+    assert_eq!(after.modified().ok(), written.modified().ok());
+
+    // The file gone: unavailable, said without the path, never the screen.
+    std::fs::remove_file(&path).expect("gone");
+    let gone = run(
+        &host,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "worker-transcript --run {run_id} --worker {worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(gone.exit_code, 1, "{gone:?}");
+    assert!(gone.stdout.is_empty());
+    assert!(
+        gone.stderr.contains(TRANSCRIPT_UNAVAILABLE),
+        "{}",
+        gone.stderr
+    );
+    assert!(!gone.stderr.contains(temp.path().to_str().expect("utf8")));
+    assert_eq!(host.captures(), 0);
+}
+
+/// The word a `worker-transcript` refusal for a transcript it cannot read
+/// opens with (`zerocode_core::worker_transcript::UNAVAILABLE`), spelled as a
+/// caller branching on it sees it — so the tests below name no module of the
+/// verb's, compile against a window that has no such verb, and fail there on
+/// their assertions rather than on the build (t-6742 R4).
+const TRANSCRIPT_UNAVAILABLE: &str = "transcript unavailable";
+
+/// `worker-transcript` of a worker whose row reported `transcript` as its
+/// file, asked twice — `--json`, and the text rendering of the same record —
+/// down the verb's own road (t-6742): the plan names the row's file, the
+/// window reads it with the conversation view's reader, core shapes what was
+/// read. The screen is never captured and the file's path never answered.
+/// Each caller names terms of its own.
+fn transcript_answers(
+    leader_term: u32,
+    worker_term: u32,
+    transcript: &str,
+) -> (serde_json::Value, String) {
+    let _window = the_window();
+    let team = format!("team-transcript-{leader_term}");
+    let (run_id, worker, _pane) = a_worker_in_a_pane(&team, leader_term, worker_term);
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let path = temp.path().join("w.jsonl");
+    std::fs::write(&path, transcript).expect("the transcript");
+    super::pane_session_reported(
+        worker_term,
+        &zerocode_core::ProviderSession {
+            key: zerocode_core::provider_session::SessionKey::SessionId,
+            id: format!("session-{worker_term}"),
+            transcript_path: Some(path.to_string_lossy().into_owned()),
+        },
+        clock(),
+    );
+    let host = Reading::quiet("THE SCREEN NOBODY ASKED FOR");
+    let asked = |rendering: &str| {
+        run(
+            &host,
+            Vec::new(),
+            &team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&format!(
+                "worker-transcript --run {run_id} --worker {worker} {rendering}"
+            )),
+            clock(),
+        )
+    };
+    let json = asked("--json");
+    assert_eq!(json.exit_code, 0, "{}", json.stderr);
+    let text = asked("");
+    assert_eq!(text.exit_code, 0, "{}", text.stderr);
+    assert_eq!(host.captures(), 0, "the screen was captured");
+    let folder = temp.path().to_string_lossy().into_owned();
+    for said in [&json.stdout, &text.stdout] {
+        assert!(!said.contains("NOBODY ASKED FOR") && !said.contains(&folder));
+    }
+    (
+        serde_json::from_str(&json.stdout).expect("a record"),
+        text.stdout,
+    )
+}
+
+/// One transcript line, from its JSON.
+fn a_transcript_line(row: &serde_json::Value) -> String {
+    format!("{row}\n")
+}
+
+/// The brief's first red (t-6742), end to end: a transcript's texts come
+/// out of the verb masked in both renderings — the person's prompt, the
+/// assistant's words, a call's input, its result — and a result past the
+/// digest's cap is cut, says it was, and says how long it was.
+#[test]
+fn a_transcript_result_is_cut_at_the_digest_cap_and_masked() {
+    let result = format!(
+        "{} DB_PASSWORD=sekretvalue1234567890 {}",
+        "x".repeat(390),
+        "y".repeat(600)
+    );
+    let transcript = [
+        serde_json::json!({"type":"user","timestamp":"2026-09-24T12:00:00.000Z","message":{"role":"user","content":"deploy with --password hunter2 please"}}),
+        serde_json::json!({"type":"assistant","timestamp":"2026-09-24T12:00:01.000Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"Using Bearer abc.def now"},
+            {"type":"tool_use","id":"c","name":"Bash","input":{"command":"curl -H 'Authorization: Bearer abc.def' https://user:tok3n@host.test/x"}}
+        ]}}),
+        serde_json::json!({"type":"user","timestamp":"2026-09-24T12:00:02.000Z","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"c","content": result}
+        ]}}),
+    ]
+    .iter()
+    .map(a_transcript_line)
+    .collect::<String>();
+    let (json, text) = transcript_answers(90_150, 90_151, &transcript);
+    for said in [json.to_string(), text.clone()] {
+        for secret in ["hunter2", "abc.def", "tok3n", "sekretvalue"] {
+            assert!(!said.contains(secret), "{secret} escaped: {said}");
+        }
+        assert!(
+            said.contains(zerocode_core::credential::MASK),
+            "nothing was masked: {said}"
+        );
+    }
+    let cut = &json["turns"][1]["tools"][0]["result"];
+    let kept = cut["text"].as_str().expect("a result").chars().count();
+    let chars = cut["chars"].as_u64().expect("its length");
+    assert_eq!(cut["truncated"], true, "{cut}");
+    assert_eq!(
+        chars,
+        result.chars().count() as u64,
+        "the length said is the text's own"
+    );
+    assert!((kept as u64) < chars, "{kept} of {chars}");
+    assert_eq!(json["truncated"], true);
+    assert!(text.contains(&format!("…(of {chars} chars)")), "{text}");
+}
+
+/// A call's name and id are texts too (t-6742 R1): masked by the same table
+/// in both renderings, while a result still finds its own call — the join is
+/// on the ids as written, so two ids the mask folds into one `[redacted]`
+/// never trade results.
+#[test]
+fn transcript_metadata_is_masked_in_both_renderings() {
+    let mask = zerocode_core::credential::MASK;
+    let first = format!("ghp_{}", "a1".repeat(18));
+    let second = format!("ghp_{}", "b2".repeat(18));
+    let named = format!("deploy_sk-{}", "c3".repeat(12));
+    let transcript = [
+        serde_json::json!({"type":"user","message":{"role":"user","content":"go"}}),
+        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[
+            {"type":"tool_use","id": first,"name": named,"input":{"command":"one"}},
+            {"type":"tool_use","id": second,"name":"Bash","input":{"command":"two"}}
+        ]}}),
+        serde_json::json!({"type":"user","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id": second,"content":"result of two"},
+            {"type":"tool_result","tool_use_id": first,"content":"result of one"}
+        ]}}),
+    ]
+    .iter()
+    .map(a_transcript_line)
+    .collect::<String>();
+    let (json, text) = transcript_answers(90_152, 90_153, &transcript);
+    for said in [json.to_string(), text.clone()] {
+        for secret in [first.as_str(), second.as_str(), named.as_str()] {
+            assert!(!said.contains(secret), "{secret} escaped: {said}");
+        }
+    }
+    let calls = &json["turns"][1]["tools"];
+    assert_eq!(calls[0]["callId"], mask, "{calls}");
+    assert_eq!(calls[1]["callId"], mask, "{calls}");
+    assert_eq!(calls[0]["name"], mask, "{calls}");
+    assert_eq!(
+        calls[1]["name"], "Bash",
+        "a name that is no credential stays"
+    );
+    assert_eq!(
+        calls[0]["result"]["text"], "result of one",
+        "a result joined on the masked id: {calls}"
+    );
+    assert_eq!(calls[1]["result"]["text"], "result of two", "{calls}");
+    assert!(
+        text.contains(&format!("↳ {mask} · one → result of one"))
+            && text.contains("↳ Bash · two → result of two"),
+        "{text}"
+    );
+}
+
+/// The conversation view's 16 KiB cell never stands in front of a digest
+/// (t-6742 R1): the length a digest says is its text's whole length, not the
+/// view's cut of it, and a header whose value runs past that cut keeps the
+/// lines after it — masked whole first, then cut.
+#[test]
+fn a_digest_keeps_the_shared_readers_prior_cut_visible() {
+    let rows: String = (0..1_000)
+        .map(|at| format!("row {at:04} of the listing\n"))
+        .collect();
+    let header = format!(
+        "Authorization: Bearer {}\nthen: cargo test -p x",
+        "q".repeat(17_000)
+    );
+    let transcript = [
+        serde_json::json!({"type":"user","message":{"role":"user","content":"go"}}),
+        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"call-1","name":"Bash","input":{"command":"ls -R"}},
+            {"type":"tool_use","id":"call-2","name":"Bash","input":{"command": header}}
+        ]}}),
+        serde_json::json!({"type":"user","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"call-1","content": rows},
+            {"type":"tool_result","tool_use_id":"call-2","content":"ok"}
+        ]}}),
+    ]
+    .iter()
+    .map(a_transcript_line)
+    .collect::<String>();
+    assert!(rows.chars().count() > 16 * 1024 && header.chars().count() > 16 * 1024);
+    let (json, text) = transcript_answers(90_154, 90_155, &transcript);
+    let listing = &json["turns"][1]["tools"][0]["result"];
+    assert_eq!(
+        listing["chars"],
+        rows.chars().count(),
+        "the length said is a cut's, not the text's: {listing}"
+    );
+    assert_eq!(listing["truncated"], true);
+    assert!(
+        text.contains(&format!("…(of {} chars)", rows.chars().count())),
+        "{text}"
+    );
+    let input = &json["turns"][1]["tools"][1]["input"];
+    assert_eq!(input["chars"], header.chars().count(), "{input}");
+    assert!(
+        input["text"]
+            .as_str()
+            .is_some_and(|kept| kept.contains("then: cargo test -p x")),
+        "the line after the header was lost: {input}"
+    );
+    assert!(!json.to_string().contains("qqqqqqqq") && !text.contains("qqqqqqqq"));
+}
+
+/// A URL whose `@` stands past the conversation view's cut still loses its
+/// userinfo (t-6742 R1): masked while the `@` is there to mark it, then cut —
+/// in a call's input and in its result, in both renderings.
+#[test]
+fn a_url_cut_before_its_at_sign_still_hides_its_userinfo() {
+    let url = format!("https://demo:{}@host.test/x", "z".repeat(20_000));
+    let transcript = [
+        serde_json::json!({"type":"user","message":{"role":"user","content":"go"}}),
+        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"call-1","name":"Bash","input":{"command": format!("curl {url}")}}
+        ]}}),
+        serde_json::json!({"type":"user","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"call-1","content": format!("fetched {url}")}
+        ]}}),
+    ]
+    .iter()
+    .map(a_transcript_line)
+    .collect::<String>();
+    let (json, text) = transcript_answers(90_156, 90_157, &transcript);
+    for said in [json.to_string(), text] {
+        assert!(
+            !said.contains("demo:") && !said.contains("zzzzzzzz"),
+            "the userinfo escaped: {}",
+            &said[..said.len().min(600)]
+        );
+        assert!(said.contains("https://***@host.test/x"), "{said}");
+    }
+}
+
+/// A line longer than both of the verb's reads is said, not read whole
+/// (t-6742 R2): the answer holds no turn out of it, says a line was skipped,
+/// and says it read exactly its budget — a chunk and the wider read, each
+/// with the byte before it. A line inside the wider read is read whole, for
+/// the same budget.
+#[test]
+fn a_worker_transcript_says_a_line_past_its_read_budget_instead_of_reading_it() {
+    let chunk = crate::shell_runtime::SUBAGENT_LOG_CHUNK;
+    let widest = zerocode_core::worker_transcript::SCAN_CHUNKS * chunk;
+    let budget = chunk + 1 + widest + 1;
+    let prompts: String = (0..20_000)
+        .map(|at| {
+            a_transcript_line(
+                &serde_json::json!({"type":"user","message":{"role":"user","content":format!("prompt {at:05}")}}),
+            )
+        })
+        .collect();
+    let with_a_result = |len: u64| {
+        prompts.clone()
+            + &a_transcript_line(
+                &serde_json::json!({"type":"user","message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"call-1","content": "s".repeat(usize::try_from(len).expect("a length"))}
+                ]}}),
+            )
+    };
+
+    let (json, text) = transcript_answers(90_158, 90_159, &with_a_result(2 * widest));
+    assert_eq!(json["found"], 0, "a line past the budget was answered");
+    assert_eq!(json["scan"]["skipped"], true, "{}", json["scan"]);
+    assert_eq!(json["scan"]["readBytes"], budget, "{}", json["scan"]);
+    assert!(text.contains("a line skipped"), "{text}");
+
+    let (json, _) = transcript_answers(90_160, 90_161, &with_a_result(chunk + 40_000));
+    assert_eq!(json["scan"]["skipped"], false, "{}", json["scan"]);
+    assert_eq!(json["scan"]["readBytes"], budget, "{}", json["scan"]);
+    let last = json["turns"]
+        .as_array()
+        .and_then(|turns| turns.last())
+        .expect("a turn");
+    assert_eq!(
+        last["tools"][0]["result"]["chars"],
+        chunk + 40_000,
+        "the long line, whole"
+    );
+}
+
 /// A `worker-read` that arrives with a retry name is refused, and the
 /// screen is never touched.
 ///

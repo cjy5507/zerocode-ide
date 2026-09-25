@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use zerocode_core::orchestration::{
     AckedRow, AttachmentRow, Auto, BoundRow, CHECK_RENDERER, CheckV1, CoordinatorSeat, Delivery,
     DispatchRow, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1, MessageRow, Pinned,
-    ResultAuthor, RunRow, RunSummary, ServedAnswer, ServedRow, TaskRow, Text, WorkerRow,
+    ResultAuthor, RunRow, RunSummary, ServedAnswer, ServedRow, TaskRow, Text, VerbTally, WorkerRow,
 };
 
 use crate::effect_journal::{EffectJournalError, from_sql_u64, to_sql_u64};
@@ -76,7 +76,8 @@ pub const LEDGER_TABLES_SQL: &str = "
         ),
         table_digest_root BLOB CHECK (
             table_digest_root IS NULL OR length(table_digest_root) = 32
-        )
+        ),
+        verb_tallies TEXT
     );
     CREATE TABLE IF NOT EXISTS ledger_runs (
         ledger_id TEXT NOT NULL,
@@ -298,6 +299,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         check_delivery TEXT,
         filed_ms INTEGER,
         expired INTEGER NOT NULL DEFAULT 0 CHECK (expired IN (0, 1)),
+        verb TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         CHECK ((renderer IS NULL) = (inline IS NOT NULL)),
         CHECK ((renderer IS NULL) = (check_run IS NULL)),
@@ -479,6 +481,14 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
             "expired",
             "INTEGER NOT NULL DEFAULT 0 CHECK (expired IN (0, 1))",
         ),
+        /* The verb a receipt answered (t-6742): one word of the verb table,
+         * NULL for every row written before it was kept — unknown, never
+         * inferred from the answer. */
+        ("ledger_served", "verb", "TEXT"),
+        /* How often each verb was asked, by day (t-6742): one JSON document
+         * on the head, like a run's seat — a small bounded table read and
+         * written whole, NULL on a head written before it was counted. */
+        ("orchestration_ledger_heads", "verb_tallies", "TEXT"),
     ];
     /* Unversioned digest rows were written by format generation one. Derive
      * the migration default from the format's single named constant so the
@@ -559,7 +569,7 @@ pub struct Held {
     pub bytes_match: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredLedgerHead {
     revision: i64,
     next_id: i64,
@@ -567,6 +577,7 @@ struct StoredLedgerHead {
     updated_at_ms: i64,
     retention_days: i64,
     swept_at_ms: i64,
+    verb_tallies: Option<String>,
 }
 
 /// How much prose a ledger is carrying, in bytes.
@@ -580,6 +591,20 @@ struct StoredLedgerHead {
 fn pinned_bytes(pinned: &Pinned) -> u64 {
     let plain = |held: &Option<String>| held.as_ref().map_or(0, |one| one.len() as u64);
     pinned.agent.len() as u64 + plain(&pinned.model) + plain(&pinned.effort)
+}
+
+/// The head's verb tallies as the one JSON document the column holds —
+/// NULL when nothing has been counted, so a head that never counted reads
+/// back exactly as it was written.
+fn verb_tallies_column(
+    projection: &LedgerProjectionV1,
+) -> Result<Option<String>, EffectJournalError> {
+    if projection.verb_tallies.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(&projection.verb_tallies)
+        .map(Some)
+        .map_err(|_| EffectJournalError::Database)
 }
 
 fn bytes_held(projection: &LedgerProjectionV1) -> u64 {
@@ -691,13 +716,31 @@ fn bytes_held(projection: &LedgerProjectionV1) -> u64 {
             maybe(&row.caller)
                 + text(&row.request)
                 + maybe(&row.fingerprint)
+                + plain(&row.verb)
                 + match &row.answer {
                     ServedAnswer::Inline(held) => held.len() as u64,
                     ServedAnswer::Check(_) => 0,
                 }
         })
         .sum();
-    runs + tasks + workers + dispatches + attachments + messages + gates + bound + served + leases
+    /* The tallies' verb names, for the seat's reason: bounded by the verb
+     * table and the days kept, but a string the accounting skips is one a
+     * direct SQLite change could grow unwatched. */
+    let tallies: u64 = projection
+        .verb_tallies
+        .iter()
+        .map(|row| row.verb.len() as u64)
+        .sum();
+    runs + tasks
+        + workers
+        + dispatches
+        + attachments
+        + messages
+        + gates
+        + bound
+        + served
+        + leases
+        + tallies
 }
 
 type TableDigest = [u8; TABLE_DIGEST_BYTES];
@@ -922,6 +965,7 @@ fn served_row_digest(row: &ServedRow) -> TableDigest {
         check_delivery,
         filed_ms,
         expired,
+        verb,
     ) = served_values(row);
     let mut hasher = Sha256::new();
     hash_optional_text(&mut hasher, caller);
@@ -935,6 +979,13 @@ fn served_row_digest(row: &ServedRow) -> TableDigest {
     hash_optional_text(&mut hasher, check_delivery);
     hash_optional_i64(&mut hasher, filed_ms);
     hasher.update([u8::from(expired)]);
+    /* Only a row that HAS a verb hashes it (t-6742): a row written before
+     * the column digests byte-for-byte as it did, so a store full of them
+     * is neither rewritten nor read as a new digest format — the same rule
+     * the seat and the adoption generation followed (t-2512). */
+    if verb.is_some() {
+        hash_optional_text(&mut hasher, verb);
+    }
     hasher.finalize().into()
 }
 
@@ -1212,7 +1263,8 @@ pub fn write(
                     "UPDATE orchestration_ledger_heads
                         SET revision = ?1, next_id = ?2, bytes_held = ?3, updated_at_ms = ?4,
                             retention_days = ?7, swept_at_ms = ?8,
-                            table_digest_format_generation = ?9, table_digest_root = ?10
+                            table_digest_format_generation = ?9, table_digest_root = ?10,
+                            verb_tallies = ?11
                       WHERE ledger_id = ?5 AND revision = ?6",
                     params![
                         to_sql_u64(next_revision)?,
@@ -1225,6 +1277,7 @@ pub fn write(
                         projection.swept_at_ms.max(0),
                         i64::from(TABLE_DIGEST_FORMAT_GENERATION),
                         digest_root.as_slice(),
+                        verb_tallies_column(projection)?,
                     ],
                 )
                 .map_err(|_| EffectJournalError::Database)?;
@@ -1238,8 +1291,9 @@ pub fn write(
                     "INSERT INTO orchestration_ledger_heads (
                         ledger_id, revision, next_id, bytes_held, updated_at_ms,
                         retention_days, swept_at_ms,
-                        table_digest_format_generation, table_digest_root
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        table_digest_format_generation, table_digest_root,
+                        verb_tallies
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         ledger_id,
                         to_sql_u64(next_revision)?,
@@ -1250,6 +1304,7 @@ pub fn write(
                         projection.swept_at_ms.max(0),
                         i64::from(TABLE_DIGEST_FORMAT_GENERATION),
                         digest_root.as_slice(),
+                        verb_tallies_column(projection)?,
                     ],
                 )
                 .map_err(|_| EffectJournalError::Database)?;
@@ -1308,6 +1363,7 @@ type ServedValues<'a> = (
     Option<&'a str>,
     Option<i64>,
     bool,
+    Option<&'a str>,
 );
 
 fn served_values(row: &ServedRow) -> ServedValues<'_> {
@@ -1332,6 +1388,7 @@ fn served_values(row: &ServedRow) -> ServedValues<'_> {
         check_delivery,
         row.filed_ms,
         row.expired,
+        row.verb.as_deref(),
     )
 }
 
@@ -1371,14 +1428,15 @@ fn write_served_rows(
             check_delivery,
             filed_ms,
             expired,
+            verb,
         ) = served_values(row);
         connection
             .execute(
                 "INSERT INTO ledger_served (
                     ledger_id, ordinal, caller, request, fingerprint, renderer,
                     inline, check_run, check_address, check_delivery, filed_ms,
-                    expired
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    expired, verb
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT (ledger_id, ordinal) DO UPDATE SET
                     caller = excluded.caller,
                     request = excluded.request,
@@ -1389,7 +1447,8 @@ fn write_served_rows(
                     check_address = excluded.check_address,
                     check_delivery = excluded.check_delivery,
                     filed_ms = excluded.filed_ms,
-                    expired = excluded.expired",
+                    expired = excluded.expired,
+                    verb = excluded.verb",
                 params![
                     ledger_id,
                     ordinal,
@@ -1403,6 +1462,7 @@ fn write_served_rows(
                     check_delivery,
                     filed_ms,
                     expired,
+                    verb,
                 ],
             )
             .map_err(|_| EffectJournalError::Database)?;
@@ -2053,7 +2113,7 @@ fn stored_ledger_head(
 ) -> rusqlite::Result<StoredLedgerHead> {
     connection.query_row(
         "SELECT revision, next_id, bytes_held, updated_at_ms,
-                retention_days, swept_at_ms
+                retention_days, swept_at_ms, verb_tallies
            FROM orchestration_ledger_heads
           WHERE ledger_id = ?1",
         [ledger_id],
@@ -2065,6 +2125,7 @@ fn stored_ledger_head(
                 updated_at_ms: row.get(3)?,
                 retention_days: row.get(4)?,
                 swept_at_ms: row.get(5)?,
+                verb_tallies: row.get(6)?,
             })
         },
     )
@@ -2093,7 +2154,15 @@ fn read_repairable_from_head(
         updated_at_ms,
         retention_days,
         swept_at_ms,
+        verb_tallies,
     } = head;
+    /* A head written before the tallies were kept holds NULL — nothing
+     * counted, not a corrupt count. A document this window cannot read is
+     * refused, as every other column is. */
+    let verb_tallies: Vec<VerbTally> = match verb_tallies {
+        Some(held) => serde_json::from_str(&held).map_err(|_| EffectJournalError::Corrupt)?,
+        None => Vec::new(),
+    };
 
     let deps = children(
         connection,
@@ -2621,7 +2690,7 @@ fn read_repairable_from_head(
     each(
         connection,
         "SELECT ordinal, caller, request, fingerprint, renderer, inline,
-                check_run, check_address, check_delivery, filed_ms, expired
+                check_run, check_address, check_delivery, filed_ms, expired, verb
            FROM ledger_served WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2637,6 +2706,7 @@ fn read_repairable_from_head(
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, bool>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ));
             Ok(())
         },
@@ -2654,6 +2724,7 @@ fn read_repairable_from_head(
         delivery,
         filed_ms,
         expired,
+        verb,
     ) in served_raw
     {
         let answer = match (renderer.as_deref(), inline, run, address) {
@@ -2673,6 +2744,7 @@ fn read_repairable_from_head(
             request: Text::from(request),
             answer,
             fingerprint: fingerprint.map(Text::from),
+            verb,
             filed_ms,
             expired,
         });
@@ -2729,6 +2801,7 @@ fn read_repairable_from_head(
         attachments,
         retention_days: u32::try_from(retention_days).map_err(|_| EffectJournalError::Corrupt)?,
         swept_at_ms,
+        verb_tallies,
     };
     let bytes_match = from_sql_u64(bytes)? == bytes_held(&projection);
     Ok(Held {
@@ -2818,6 +2891,12 @@ mod tests {
             next_id: 40,
             retention_days: 7,
             swept_at_ms: 6,
+            verb_tallies: vec![VerbTally {
+                verb: "worker-read".to_string(),
+                day_start_ms: 1_758_672_000_000,
+                calls: 3,
+                refused: 1,
+            }],
             runs: vec![
                 RunRow {
                     id: "run-2".to_string(),
@@ -3031,6 +3110,7 @@ mod tests {
                         messages: vec!["m-2".to_string(), "m-1".to_string()],
                     }),
                     fingerprint: Some(Text::from("f".repeat(64))),
+                    verb: None,
                     filed_ms: Some(7),
                     expired: false,
                 },
@@ -3039,6 +3119,7 @@ mod tests {
                     request: Text::from("r-1".to_string()),
                     answer: ServedAnswer::Inline("what it printed\n".to_string()),
                     fingerprint: None,
+                    verb: None,
                     filed_ms: None,
                     expired: false,
                 },
@@ -3051,6 +3132,7 @@ mod tests {
                     request: Text::from("r-0".to_string()),
                     answer: ServedAnswer::Inline(String::new()),
                     fingerprint: Some(Text::from("e".repeat(64))),
+                    verb: None,
                     filed_ms: Some(3),
                     expired: true,
                 },
@@ -4066,6 +4148,7 @@ mod tests {
             request: Text::from("r-new"),
             answer: ServedAnswer::Inline("new answer".to_string()),
             fingerprint: None,
+            verb: None,
             filed_ms: Some(13),
             expired: false,
         });
@@ -4382,6 +4465,83 @@ mod tests {
             matches!(refused, EffectJournalError::Corrupt),
             "{refused:?}"
         );
+    }
+
+    /// The verb on a receipt and the head's verb tallies (t-6742) cross the
+    /// store whole; a store written before either — its head counting bytes
+    /// without them — reads back as "unknown" and "nothing counted" rather
+    /// than corrupt; and a tallies document this window cannot read is
+    /// refused like any other column.
+    #[test]
+    fn served_verbs_and_verb_tallies_cross_the_store_and_older_heads_read_empty() {
+        let store = a_store();
+        let mut projection = a_ledger_where_order_is_load_bearing();
+        projection.served[0].verb = Some("check".to_string());
+        projection.served[2].verb = Some("run-use".to_string());
+        write(&store, "one", 0, 1, &projection, 10).expect("it writes");
+        let held = read(&store, "one", projection.schema)
+            .expect("it reads")
+            .expect("and is there");
+        assert_eq!(held.projection, projection);
+        assert_eq!(
+            held.projection
+                .served
+                .iter()
+                .map(|row| row.verb.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("check"), None, Some("run-use")]
+        );
+        // A row without a verb digests as it always did — the pin below
+        // (`canonical_populated_fixture_pins_table_digest_format_generation`)
+        // is the proof for the whole fixture; this is the row-level half.
+        let mut bare = projection.served[0].clone();
+        bare.verb = None;
+        let canonical = a_ledger_where_order_is_load_bearing();
+        assert_eq!(
+            served_row_digest(&bare),
+            served_row_digest(&canonical.served[0])
+        );
+        assert_ne!(
+            served_row_digest(&projection.served[0]),
+            served_row_digest(&bare)
+        );
+        assert_eq!(held.projection.verb_tallies, projection.verb_tallies);
+
+        // An older store: no verb column values, no tallies, and a head that
+        // never counted their bytes.
+        let uncounted: u64 = projection
+            .served
+            .iter()
+            .map(|row| row.verb.as_ref().map_or(0, |verb| verb.len() as u64))
+            .sum::<u64>()
+            + projection
+                .verb_tallies
+                .iter()
+                .map(|row| row.verb.len() as u64)
+                .sum::<u64>();
+        store
+            .execute_batch(&format!(
+                "UPDATE ledger_served SET verb = NULL;
+                 UPDATE orchestration_ledger_heads
+                    SET verb_tallies = NULL, bytes_held = bytes_held - {uncounted};"
+            ))
+            .expect("an older store's shape");
+        let older = read(&store, "one", projection.schema)
+            .expect("an older store reads")
+            .expect("and is there");
+        assert!(older.projection.served.iter().all(|row| row.verb.is_none()));
+        assert!(older.projection.verb_tallies.is_empty());
+
+        store
+            .execute(
+                "UPDATE orchestration_ledger_heads SET verb_tallies = 'not a document'",
+                [],
+            )
+            .expect("the tamper");
+        assert!(matches!(
+            read(&store, "one", projection.schema).expect_err("must refuse"),
+            EffectJournalError::Corrupt
+        ));
     }
 
     /// A row cannot claim a parent that is not there.

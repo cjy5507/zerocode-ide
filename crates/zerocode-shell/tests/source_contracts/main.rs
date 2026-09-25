@@ -34520,19 +34520,75 @@ mod tests {
                 && pane.contains("transcript_log_at(&path, after)"),
             "the pane's conversation door names a file, or reads it down another road:\n{pane}"
         );
-        let reading = block_after(shipped, "fn transcript_log_at(");
+        // `transcript_log_at` is the page's chunk of the one windowed reader,
+        // clipped for its cells and with its long-line road; and
+        // `worker-transcript` reads down that same reader (t-6742) — never a
+        // walk of its own over the file — with the texts whole for its
+        // masks, and no road past its own budget.
+        let door = block_after(shipped, "fn transcript_log_at(");
+        assert!(
+            door.contains("transcript_log_window(")
+                && door.contains("SUBAGENT_LOG_CHUNK,")
+                && door.contains("Some(LONG_LINE_CAP),")
+                && door.contains("zerocode_core::transcript::Detail::Clipped"),
+            "the page's read no longer goes down the windowed reader:\n{door}"
+        );
+        // The verb opens its file ONCE and takes its size from that open
+        // file; every read of the call is made on it (t-6742 R3).
+        let walk = block_after(shipped, "fn transcript_turns_back(");
+        assert!(
+            walk.matches("File::open(").count() == 1
+                && walk.contains("file.metadata()?.len()")
+                && walk.contains("transcript_turns_through("),
+            "worker-transcript opens its transcript more than once, or measures it apart from the file it reads:\n{walk}"
+        );
+        // Every open of the call reads through one meter, and every meter
+        // counts into the call's one budget — a retry reads on what the
+        // first open left, and the answer's count is the meter's (R2).
+        let through = block_after(shipped, "fn transcript_turns_through<");
+        let metered = through.find("let mut spent = 0;");
+        let opens = through.find("for _ in 0..TRANSCRIPT_OPENS");
+        assert!(
+            metered.is_some_and(|metered| opens.is_some_and(|opens| metered < opens))
+                && through.contains("spent: &mut spent,")
+                && through.contains("budget: TRANSCRIPT_READ_BUDGET,")
+                && through.contains("transcript_turns_in(&mut file, size, ask)"),
+            "worker-transcript gives an open a budget of its own, or reads past the meter:\n{through}"
+        );
+        let reads = block_after(shipped, "fn transcript_turns_in<");
+        assert!(
+            reads.contains("file: &mut Metered<'_, F>,")
+                && reads.contains("read_bytes: *file.spent,")
+                && reads.contains("tail_window_within(TRANSCRIPT_WIDEST, size, file.left())"),
+            "worker-transcript's answer counts apart from the meter, or its wider read ignores what is left:\n{reads}"
+        );
+        assert!(
+            reads.contains("transcript_log_window(")
+                && reads.contains("zerocode_core::transcript::Detail::Whole")
+                && !reads.contains("LONG_LINE_CAP")
+                && !reads.contains("File::open")
+                && !reads.contains("metadata(")
+                && !reads.contains("turns_in("),
+            "worker-transcript reads a transcript down a road of its own, or past its budget:\n{reads}"
+        );
+        let reading = block_after(shipped, "fn transcript_log_window<");
         // Core owns complete byte records and the bounded oversized-line
         // escape. The shell must decode and advance from that same answer.
         // The payloads step aside before the words are read, leaving their
         // place in the file (t-6323 A8), and a line past the read is read
-        // whole instead of dropped.
+        // whole instead of dropped — on the road that names a cap for it.
+        // The reader is handed its file and never opens one.
         assert!(
             reading.contains("zerocode_core::transcript::complete_transcript_chunk(")
                 && reading.contains("zerocode_core::transcript::elide_payloads(chunk.bytes, base)")
                 && reading.contains("String::from_utf8_lossy(&bytes)")
                 && reading.contains("u64::try_from(chunk.consumed)")
-                && reading
-                    .contains("long_line_log(&mut file, from, starts_mid_line, size, folded)"),
+                && reading.contains("&& let Some(cap) = long_lines")
+                && reading.contains(
+                    "long_line_log(file, from, starts_mid_line, size, folded, cap, detail)"
+                )
+                && !reading.contains("File::open")
+                && !reading.contains("metadata("),
             "a half-written line is handed over as though it were a turn, or a payload is read as words:\n{reading}"
         );
         let chunking = block_after(
@@ -34548,8 +34604,7 @@ mod tests {
         // the last chunk — and the answer says what stood above it is folded.
         assert!(
             reading.contains("Some(after) => (if after > size { 0 } else { after }, false),")
-                && reading.contains("size.saturating_sub(SUBAGENT_LOG_CHUNK),")
-                && reading.contains("size > SUBAGENT_LOG_CHUNK,"),
+                && reading.contains("None => (size.saturating_sub(window), size > window),"),
             "a replaced transcript is read from a stale offset, or a cursorless read no longer opens at the tail:\n{reading}"
         );
 
@@ -34562,7 +34617,7 @@ mod tests {
         // What a line MEANS is core's, not this file's: one owner for the
         // shape of a transcript.
         assert!(
-            reading.contains("zerocode_core::transcript::turns_in("),
+            reading.contains("zerocode_core::transcript::turns_in_with(&text, detail)"),
             "the shell grew its own reader of a transcript line:\n{reading}"
         );
     }

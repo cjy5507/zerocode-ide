@@ -360,6 +360,13 @@ The shape of a session is always the same:
    is asked by the seat the LEDGER knows, so another leader's worker — an
    orphan whose leader exited, a worker of the coordinator you took over from
    — reads the same way; "unknown pane" is no longer what that answers.
+   `worker-transcript --worker <id> [--turns <n> | --since <ms>] [--json]`
+   is a separate read of the same worker's CONVERSATION — its newest steps
+   (default 5: what it said, the tools it then ran and what came back, and
+   when), which its screen does not show — out of the transcript its agent
+   reported, masked and cut at fixed caps; it is not a cheaper screen, it
+   never answers from the screen, and a worker whose agent reports no
+   transcript says `transcript unavailable` instead.
 
 When verification needs pixels, use the computer-use skill's
 `zerocode-browser screenshot` or `zerocode-emulator screenshot`; both commands
