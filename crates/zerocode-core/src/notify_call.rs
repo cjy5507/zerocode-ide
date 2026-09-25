@@ -335,12 +335,23 @@ pub const fn window_closed(asked_ms: i64, now_ms: i64) -> bool {
 /// was present at the window says it was not, so the call agreed iff it did
 /// not ring; no hand while they were away says nothing — a person who was
 /// not there could not have turned to it — and leaves no mark.
-#[must_use]
-pub const fn agreed(call: Call, reacted: bool, attendance: Attendance) -> Option<bool> {
+///
+/// # Errors
+///
+/// The attendance's own word ([`Attendance::word`], `away`) for a ring the
+/// person was away from and did not turn to — what its label row names
+/// under the summary's `notCompared`, so a reader counts it among the rows
+/// that compare nothing rather than among none (t-9427: 325 of this
+/// machine's 460 label rows on 2026-09-26).
+pub const fn agreed(
+    call: Call,
+    reacted: bool,
+    attendance: Attendance,
+) -> Result<bool, &'static str> {
     match (reacted, attendance) {
-        (true, _) => Some(call.rings()),
-        (false, Attendance::Present) => Some(!call.rings()),
-        (false, Attendance::Away) => None,
+        (true, _) => Ok(call.rings()),
+        (false, Attendance::Present) => Ok(!call.rings()),
+        (false, Attendance::Away) => Err(Attendance::Away.word()),
     }
 }
 
@@ -542,18 +553,22 @@ mod tests {
     #[test]
     fn the_persons_hand_writes_the_mark_and_an_absent_person_writes_none() {
         for attendance in Attendance::ALL {
-            assert_eq!(agreed(Call::Interrupt, true, attendance), Some(true));
-            assert_eq!(agreed(Call::Batch, true, attendance), Some(false));
-            assert_eq!(agreed(Call::Ignore, true, attendance), Some(false));
+            assert_eq!(agreed(Call::Interrupt, true, attendance), Ok(true));
+            assert_eq!(agreed(Call::Batch, true, attendance), Ok(false));
+            assert_eq!(agreed(Call::Ignore, true, attendance), Ok(false));
         }
         assert_eq!(
             agreed(Call::Interrupt, false, Attendance::Present),
-            Some(false)
+            Ok(false)
         );
-        assert_eq!(agreed(Call::Batch, false, Attendance::Present), Some(true));
-        assert_eq!(agreed(Call::Ignore, false, Attendance::Present), Some(true));
+        assert_eq!(agreed(Call::Batch, false, Attendance::Present), Ok(true));
+        assert_eq!(agreed(Call::Ignore, false, Attendance::Present), Ok(true));
         for call in Call::ALL {
-            assert_eq!(agreed(call, false, Attendance::Away), None);
+            assert_eq!(
+                agreed(call, false, Attendance::Away),
+                Err(Attendance::Away.word()),
+                "no mark, and the reason is the person's absence"
+            );
         }
     }
 }

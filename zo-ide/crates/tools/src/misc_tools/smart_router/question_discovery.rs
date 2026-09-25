@@ -196,7 +196,7 @@ fn notify_rows(seed: &Value) -> Vec<Row> {
         let Some(ring) = row["verb"].as_str().and_then(notify::from_verb) else { continue };
         let Some(attendance) = row["attendance"].as_str().and_then(Attendance::from_word) else { continue };
         let Some(reacted) = row["label"]["reacted"].as_bool() else { continue };
-        if notify_call::agreed(Call::today(), reacted, attendance).is_none() {
+        if notify_call::agreed(Call::today(), reacted, attendance).is_err() {
             continue;
         }
         let recent: Vec<Recent> = row["recent"]

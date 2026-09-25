@@ -813,12 +813,12 @@ fn the_calls_this_machine_would_have_made() {
                 hit_by_pass[pass].compared += 1;
                 hit_by_pass[pass].agreed += usize::from(call.rings());
             }
-            if let Some(mark) = notify_call::agreed(call, reacted, attendance) {
+            if let Ok(mark) = notify_call::agreed(call, reacted, attendance) {
                 mark_by_pass[pass].compared += 1;
                 mark_by_pass[pass].agreed += usize::from(mark);
             }
             if pass == 0 {
-                if let Some(mark) = notify_call::agreed(Call::today(), reacted, attendance) {
+                if let Ok(mark) = notify_call::agreed(Call::today(), reacted, attendance) {
                     todays_mark.compared += 1;
                     todays_mark.agreed += usize::from(mark);
                 }

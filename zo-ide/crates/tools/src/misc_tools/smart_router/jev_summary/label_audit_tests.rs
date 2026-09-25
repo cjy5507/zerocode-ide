@@ -450,15 +450,18 @@ fn notify(rows: &[Value]) -> Audit {
             audit.not_compared("no_answer");
             continue;
         };
-        let Some(mark) = notify_call::agreed(call, reacted, attendance) else {
-            audit.not_compared("away");
-            continue;
+        let mark = match notify_call::agreed(call, reacted, attendance) {
+            Ok(mark) => mark,
+            Err(why) => {
+                audit.not_compared(why);
+                continue;
+            }
         };
         audit.after.add(mark);
         if let Some(confidence) = label_of(label).and_then(|key| asked.get(key)).and_then(|ask| confidence(ask)) {
             audit.graded.push((confidence, mark));
         }
-        if let Some(baseline) = notify_call::agreed(notify_call::Call::today(), reacted, attendance) {
+        if let Ok(baseline) = notify_call::agreed(notify_call::Call::today(), reacted, attendance) {
             audit.baseline.add(baseline);
         }
     }
