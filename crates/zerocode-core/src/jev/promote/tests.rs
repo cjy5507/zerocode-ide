@@ -2552,3 +2552,94 @@ fn the_skills_seat_asks_one_question_and_a_mixed_ledger_reads_as_its_own_series(
     let judged = judge_seat(seat, &rows).expect("judged");
     assert_eq!(judged.window.rows, 3, "{judged:?}");
 }
+
+/* ---- a window's marks reach back to hold the sample floor (t-9087) ---------- */
+
+/// `asked` requests of `seat` asked from `at` on, then marks of the first
+/// `marked` of them written after the last, each carrying what `fields` says
+/// of the `k`th — every mark a label naming its own request and the time it
+/// was asked, as the seat's writer files one ([`mark`], t-6877).
+fn asked_then_marked(
+    seat: &JevUse,
+    at: usize,
+    asked: usize,
+    marked: usize,
+    fields: impl Fn(usize) -> Value,
+) -> Vec<Value> {
+    let mut rows: Vec<Value> = (at..at + asked).map(|n| asked_by(seat, n)).collect();
+    rows.extend((0..marked).map(|k| mark(seat, at + asked + k, at + k, fields(k))));
+    rows
+}
+
+/// A seat whose marks are sparser than its requests is judged on its marks
+/// (t-9087). The notify seat marks a ring only when the person was at the
+/// window or turned to it — 110 of the 444 rings this machine's ledger held
+/// on 2026-09-25 — so the 53 rings its answer floor is read on held 15 marks,
+/// and the seat sat at `too_few_compared` with 110 in hand; the placement
+/// seat's 25 held 9 of 87. The window's marks reach back from its first
+/// request to hold the sample floor, and no further: a window that already
+/// holds the floor reads its own marks alone.
+#[test]
+fn a_seat_whose_marks_are_sparser_than_its_requests_is_judged_on_its_marks() {
+    for seat in [&crate::jev::NOTIFY, &crate::jev::PLACEMENT] {
+        let wanted = window_wanted_for(seat).expect("a promoting seat");
+        let floor = seat.agreement_rows_wanted.expect("a label sample floor");
+        let misses = seat.negatives_wanted.expect("a promoting seat");
+        let older = marks_that_can_clear(seat).expect("a width the line can be cleared on");
+        let inside = 3;
+        // Rings asked before the window, each marked before it began — the
+        // three that say no the oldest...
+        let mut rows = asked_then_marked(seat, 0, older, older, |k| {
+            json!({"agreed": k >= misses, "baselineAgreed": k % 2 == 0})
+        });
+        // ...then the window, and the few marks its own rings earned.
+        let start = rows.len();
+        rows.extend(asked_then_marked(seat, start, wanted, inside, |_| {
+            json!({"agreed": true, "baselineAgreed": false})
+        }));
+        let judged = judge_seat(seat, &rows).expect("judged");
+        assert_eq!(
+            judged.agreement.compared, floor,
+            "{}: the window reaches back to the newest {floor} marks, and no further",
+            seat.id
+        );
+        assert_eq!(judged.agreement.agreed, floor, "{}", seat.id);
+        assert_eq!(judged.verdict, Verdict::Rise, "{}: {judged:?}", seat.id);
+
+        // A window that holds the floor on its own reads only its own marks:
+        // the older ones that said no are left where they are.
+        let mut full = asked_then_marked(seat, 0, older, older, |_| {
+            json!({"agreed": false, "baselineAgreed": false})
+        });
+        let start = full.len();
+        full.extend(asked_then_marked(seat, start, wanted, floor, |_| {
+            json!({"agreed": true, "baselineAgreed": false})
+        }));
+        let judged = judge_seat(seat, &full).expect("judged");
+        assert_eq!(
+            (judged.agreement.compared, judged.agreement.agreed),
+            (floor, floor),
+            "{}",
+            seat.id
+        );
+
+        // A record holding fewer marks than the floor is read whole, and
+        // says how few.
+        let mut thin = asked_then_marked(seat, 0, older, floor - inside - 1, |k| {
+            json!({"agreed": k >= misses})
+        });
+        let start = thin.len();
+        thin.extend(asked_then_marked(seat, start, wanted, inside, |_| {
+            json!({"agreed": true})
+        }));
+        assert_eq!(
+            judge_seat(seat, &thin).expect("judged").verdict,
+            Verdict::Hold(Line::TooFewCompared {
+                compared: floor - 1,
+                wanted: floor
+            }),
+            "{}",
+            seat.id
+        );
+    }
+}
