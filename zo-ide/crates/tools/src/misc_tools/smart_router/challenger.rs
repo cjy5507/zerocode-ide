@@ -96,7 +96,7 @@ use zerocode_core::jev::{
 use super::jev_gate::{self, JevDoor};
 use super::settings::jev_challenger_mode_from;
 use super::shadow_ledger::{
-    append_shadow_row, judge_seat_rows, read_shadow_rows, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES,
+    append_shadow_row, judge_seat_rows, shadow_ledger_path, try_read_shadow_rows, SHADOW_LEDGER_MAX_BYTES,
 };
 
 /// The seat's ledger file — the Jev use table's name for it.
@@ -1023,12 +1023,14 @@ impl Drawn {
         };
         arm.write(&row);
         let cwd = &arm.inner.cwd;
-        // A record that cannot be read is not an empty one: no label is read
-        // off it, and the seat is judged the next time it can be.
+        // A record or a ledger that cannot be read is not an empty one: no
+        // label is read off it, and the seat is judged the next time both can
+        // be.
         if let Ok(records) = runtime::read_route_outcomes(cwd) {
             let now_ms = unix_millis_i64(arm.now_ms());
-            let rows = bound_rows(&arm.ledger(), &OnRecord::of(&records), now_ms);
-            let _ = judge_seat_rows(&CHALLENGER, &arm.ledger(), &rows, now_ms);
+            if let Ok(rows) = bound_rows(&arm.ledger(), &OnRecord::of(&records), now_ms) {
+                let _ = judge_seat_rows(&CHALLENGER, &arm.ledger(), &rows, now_ms);
+            }
         }
         let _ = note_verdicts_in(cwd, (arm.inner.mode)(), &|sample| runtime::record_route_outcome(cwd, sample));
     }
@@ -1555,34 +1557,92 @@ fn strikes_due(rows: &[Value], on_record: &OnRecord<'_>, now_ms: i64) -> Vec<Val
 /// failed, or that answered `Ok` and wrote nothing, as a write the shadow
 /// ledger declines does ([`append_shadow_row`]), never gives a contradicted
 /// label back.
-fn bound_rows(ledger: &Path, on_record: &OnRecord<'_>, now_ms: i64) -> Vec<Value> {
-    let mut rows = read_shadow_rows(ledger);
-    let due = strikes_due(&rows, on_record, now_ms);
-    for strike in unseen_strikes(ledger, &rows, due) {
+///
+/// # Errors
+/// The ledger could not be read ([`Reading::of`]): no rows, and nothing held
+/// is settled on it — a ledger that could not be read is not one that
+/// holds nothing.
+fn bound_rows(ledger: &Path, on_record: &OnRecord<'_>, now_ms: i64) -> io::Result<Vec<Value>> {
+    let reading = Reading::of(ledger)?;
+    let due = strikes_due(&reading.rows, on_record, now_ms);
+    let owed = unseen_strikes(ledger, &reading, due);
+    let mut rows = reading.rows;
+    for strike in owed {
         let _ = append_strike(ledger, &strike);
         rows.push(strike);
     }
     keep_bound_labels(&mut rows, on_record);
-    rows
+    Ok(rows)
+}
+
+/// One whole reading of the challenger's ledger, and where it stands in the
+/// order of this process's readings ([`READINGS`]): begun at one tick and
+/// ended at a later one. A reading begun after another ended holds every
+/// row the other held but the ones the ledger's retention has cut since —
+/// what lets a strike held on one reading be settled only on a reading that
+/// is not older than it ([`unseen_strikes`]).
+struct Reading {
+    rows: Vec<Value>,
+    begun: u64,
+    ended: u64,
+}
+
+/// The ticks this process's readings of a challenger ledger begin and end
+/// at ([`Reading`]) — one order for every reader, whichever thread.
+static READINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Reading {
+    /// Read `ledger` whole, between two ticks of [`READINGS`]; under a
+    /// test, first whatever failure the test's thread queued
+    /// (`tests::failed_reading`), and once read, wherever the test's thread
+    /// asked to be held (`tests::reading_taken`).
+    ///
+    /// # Errors
+    /// The ledger is there and could not be read to its end
+    /// ([`try_read_shadow_rows`]).
+    fn of(ledger: &Path) -> io::Result<Self> {
+        let tick = || READINGS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let begun = tick();
+        #[cfg(test)]
+        if let Some(failed) = tests::failed_reading() {
+            return Err(failed);
+        }
+        let rows = try_read_shadow_rows(ledger)?;
+        #[cfg(test)]
+        tests::reading_taken();
+        Ok(Self { rows, begun, ended: tick() })
+    }
+}
+
+/// A strike a reading owed and the ledger has not yet shown back
+/// ([`UNSEEN_STRIKES`]).
+struct UnseenStrike {
+    strike: Value,
+    /// The tick the newest reading that owed it ended at ([`Reading::ended`]).
+    owed_at: u64,
 }
 
 /// Every strike a reading of this process owed a ledger that the ledger
 /// has not yet shown back, by ledger, each under the print of the label it
 /// takes back ([`bound_rows`]). In this process only: the record's
 /// retention cannot reach it, and a strike that lands leaves it at the next
-/// reading.
+/// reading begun after it was owed.
 static UNSEEN_STRIKES: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, std::collections::BTreeMap<String, Value>>>,
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::collections::BTreeMap<String, UnseenStrike>>>,
 > = std::sync::OnceLock::new();
 
-/// The strikes `ledger` still owes once `rows` — the ledger as it was just
-/// read — and the strikes `due` now are taken into account, in the order
-/// the ledger holds the labels they take back: each held
-/// ([`UNSEEN_STRIKES`]) until `rows` show it, or until `rows` no longer
-/// hold the label it takes back.
-fn unseen_strikes(ledger: &Path, rows: &[Value], due: Vec<Value>) -> Vec<Value> {
-    let shown = arm::struck_prints(rows);
-    let labels: Vec<String> = rows.iter().filter(|row| LABEL.read(row).is_some()).map(arm::label_print).collect();
+/// The strikes `ledger` still owes once `reading` — the ledger as it was
+/// just read — and the strikes `due` on it are taken into account, in the
+/// order the ledger holds the labels they take back: each held
+/// ([`UNSEEN_STRIKES`]) until a reading shows it, or no longer holds the
+/// label it takes back. Only a reading begun after the newest reading that
+/// owed a strike ended may settle it: an older one — taken before the label
+/// was appended, and brought to the book only after — has not seen the
+/// label at all, and its missing it says nothing.
+fn unseen_strikes(ledger: &Path, reading: &Reading, due: Vec<Value>) -> Vec<Value> {
+    let shown = arm::struck_prints(&reading.rows);
+    let labels: Vec<String> =
+        reading.rows.iter().filter(|row| LABEL.read(row).is_some()).map(arm::label_print).collect();
     let mut book = UNSEEN_STRIKES
         .get_or_init(Default::default)
         .lock()
@@ -1590,7 +1650,11 @@ fn unseen_strikes(ledger: &Path, rows: &[Value], due: Vec<Value>) -> Vec<Value> 
     let unseen = book.entry(ledger.to_path_buf()).or_default();
     for strike in due {
         if let Some(print) = arm::STRUCK_PRINT.read(&strike).and_then(Value::as_str) {
-            unseen.entry(print.to_string()).or_insert(strike);
+            let held = unseen.entry(print.to_string()).or_insert(UnseenStrike {
+                strike,
+                owed_at: reading.ended,
+            });
+            held.owed_at = held.owed_at.max(reading.ended);
         }
     }
     let mut owing = std::collections::BTreeSet::new();
@@ -1599,13 +1663,14 @@ fn unseen_strikes(ledger: &Path, rows: &[Value], due: Vec<Value>) -> Vec<Value> 
         if shown.contains(print.as_str()) || owing.contains(&print) {
             continue;
         }
-        if let Some(strike) = unseen.get(&print) {
-            owed.push(strike.clone());
+        if let Some(held) = unseen.get(&print) {
+            owed.push(held.strike.clone());
             owing.insert(print);
         }
     }
-    // What the ledger shows, or no longer holds a label for, leaves the book.
-    unseen.retain(|print, _| owing.contains(print));
+    // What the ledger shows, or no longer holds a label for, leaves the book
+    // — on a reading no older than the strike.
+    unseen.retain(|print, held| owing.contains(print) || held.owed_at > reading.begun);
     if unseen.is_empty() {
         book.remove(ledger);
     }
@@ -1863,8 +1928,9 @@ pub fn note_challenger_verdicts(cwd: &Path) -> usize {
 /// Under the ledger's lock: a verdict landing while a comparison's row is
 /// being written reads the rows once, one attempt is labelled once, and one
 /// sample is written once however many callers race for it. A route-outcome
-/// ledger that cannot be read is not an empty one: nothing is labelled, fed,
-/// struck or judged until it can be read.
+/// ledger that cannot be read is not an empty one, nor is a challenger
+/// ledger that cannot be read ([`bound_rows`]): nothing is labelled, fed,
+/// struck or judged until both can be read.
 pub(crate) fn note_verdicts_in(
     cwd: &Path,
     mode: Option<JevMode>,
@@ -1885,7 +1951,9 @@ pub(crate) fn note_verdicts_in(
     };
     let on_record = OnRecord::of(&records);
     let now = Today::now();
-    let mut rows = bound_rows(&ledger, &on_record, unix_millis_i64(now.now_ms));
+    let Ok(mut rows) = bound_rows(&ledger, &on_record, unix_millis_i64(now.now_ms)) else {
+        return 0;
+    };
     let mut written = 0;
     for label in labels_due(&rows, |attempt| on_record.receipt(attempt), unix_millis_i64(now.now_ms)) {
         if append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).is_ok() {
@@ -1911,7 +1979,8 @@ pub(crate) fn note_verdicts_in(
 /// forgot the rows that said so ([`bound_rows`]) — admits nothing. Switched
 /// off or fallen, none is admitted, and the router learns as if the arm had
 /// never written; raised again, the same rows count under their own decay.
-/// Nothing is removed from the ledger. A record set with no sample in it asks nothing
+/// A ledger that cannot be read stands behind no sample. Nothing is removed
+/// from the ledger. A record set with no sample in it asks nothing
 /// more, not even the mode word (`mode_of`).
 pub(crate) fn admit_samples(
     cwd: &Path,
@@ -1925,15 +1994,15 @@ pub(crate) fn admit_samples(
     let Some((acting, raised)) = acting_now(cwd, mode_of()) else {
         return;
     };
-    let behind: std::collections::BTreeMap<String, String> = {
-        let now_ms = i64::try_from(now_secs.saturating_mul(1_000)).unwrap_or(i64::MAX);
-        let rows = bound_rows(&challenger_path(cwd), &OnRecord::of(records), now_ms);
-        stood_behind(acting, raised, &rows, records, now_secs)
-            .iter()
-            .filter_map(sample_of)
-            .filter_map(|sample| Some((sample.run_id?, sample.status)))
-            .collect()
+    let now_ms = i64::try_from(now_secs.saturating_mul(1_000)).unwrap_or(i64::MAX);
+    let Ok(rows) = bound_rows(&challenger_path(cwd), &OnRecord::of(records), now_ms) else {
+        return;
     };
+    let behind: std::collections::BTreeMap<String, String> = stood_behind(acting, raised, &rows, records, now_secs)
+        .iter()
+        .filter_map(sample_of)
+        .filter_map(|sample| Some((sample.run_id?, sample.status)))
+        .collect();
     for record in records.iter_mut().filter(|record| record.is_seat_sample()) {
         record.admitted = record.run_id.as_deref().and_then(|key| behind.get(key)) == Some(&record.status);
     }

@@ -15,8 +15,18 @@ use crate::jev::promote::{Verdict, judge_seat};
 use crate::jev::summary::{AGREED, AT, LABEL, LEDGER_KEYS, asked_something};
 use crate::jev::{
     A_WINDOW_OF_COMPARISONS, CHALLENGER, CHALLENGER_DAY_SPEND_PERMILLE, CHALLENGER_DESIGN_CAP,
-    CHALLENGER_ONE_IN,
+    CHALLENGER_ONE_IN, JevMode,
 };
+
+/// A newly enabled Jev seat observes before it can move a role. The person
+/// may still explicitly ask this seat for auto after seeing shadow receipts.
+#[test]
+fn a_new_challenger_seat_starts_in_shadow() {
+    let enabled = json!({"smart": {"jev": {"enabled": true}}});
+    assert_eq!(CHALLENGER.mode_in(&enabled), JevMode::Shadow);
+    let explicit_auto = json!({"smart": {"jev": {"enabled": true}, "jevChallenger": "auto"}});
+    assert_eq!(CHALLENGER.mode_in(&explicit_auto), JevMode::Auto);
+}
 
 /// A receipt on `source`, its verdict recorded at second 3.
 fn on(receipt: Receipt, source: &str) -> Receipted {

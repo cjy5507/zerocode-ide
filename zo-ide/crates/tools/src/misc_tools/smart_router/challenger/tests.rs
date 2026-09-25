@@ -1876,10 +1876,13 @@ const CONTRADICTED: [&str; 3] = ["window-0#1", "window-1#1", "window-2#1"];
 /// the evidence it was bound on but the [`CONTRADICTED`] ones' where
 /// `kept_its_evidence` is false, and each followed by its sample — and the
 /// record contradicting the three: a run that handed in another source, a
-/// first receipt that passed the work, a run no verdict followed.
-fn contradicted_window(rig: &Rig, kept_its_evidence: bool) {
+/// first receipt that passed the work, a run no verdict followed. The labels
+/// of `held_back` are not appended but answered, in the window's order, for
+/// the test to append when it will.
+fn contradicted_window(rig: &Rig, kept_its_evidence: bool, held_back: &[&str]) -> Vec<Value> {
     rig.seed_a_standing_window(false);
     let ledger = challenger_path(&rig.cwd);
+    let mut held = Vec::new();
     for n in 0..A_WINDOW_OF_COMPARISONS {
         let attempt = format!("window-{n}#1");
         let label = if kept_its_evidence || !CONTRADICTED.contains(&attempt.as_str()) {
@@ -1887,7 +1890,11 @@ fn contradicted_window(rig: &Rig, kept_its_evidence: bool) {
         } else {
             unproven_label(&attempt, Receipt::Failed, Preferred::Challenger, 1)
         };
-        append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+        if held_back.contains(&attempt.as_str()) {
+            held.push(label);
+        } else {
+            append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+        }
         let sample = sample_of(&Labelled { attempt, ..labelled("") }).expect("an agreeing label");
         runtime::record_route_outcome(&rig.cwd, &sample).expect("the sample it was given");
     }
@@ -1896,6 +1903,7 @@ fn contradicted_window(rig: &Rig, kept_its_evidence: bool) {
     record(handed_in("window-1#1", Some(HANDED_IN)));
     record(verdict("window-1#1", runtime::OUTCOME_COMPLETED, VerdictSubject::Work, VERDICT_AT - 1));
     record(handed_in("window-2#1", Some(HANDED_IN)));
+    held
 }
 
 /// That the router's reader admits no sample of a [`CONTRADICTED`] label,
@@ -1937,6 +1945,60 @@ fn refuse_strikes(times: usize, refusal: Option<std::io::ErrorKind>) {
 /// Whether every refusal this thread queued was spent.
 fn every_refusal_spent() -> bool {
     REFUSED_STRIKES.with(|queued| queued.borrow().is_empty())
+}
+
+thread_local! {
+    /// How this thread's next readings of a challenger ledger fail
+    /// ([`failed_reading`]).
+    static FAILED_READINGS: std::cell::RefCell<std::collections::VecDeque<std::io::ErrorKind>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    /// Where this thread's next reading of a challenger ledger stops once it
+    /// has read ([`reading_taken`]): it says so on the first, and goes on
+    /// when the second says to.
+    static HELD_READING: std::cell::RefCell<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The failure queued for this thread's next reading of a challenger ledger
+/// (`Reading::of`).
+pub(super) fn failed_reading() -> Option<std::io::Error> {
+    FAILED_READINGS.with(|queued| queued.borrow_mut().pop_front()).map(std::io::Error::from)
+}
+
+/// Fail this thread's next `times` readings of a challenger ledger with
+/// `kind`.
+fn fail_readings(times: usize, kind: std::io::ErrorKind) {
+    FAILED_READINGS.with(|queued| queued.borrow_mut().extend(std::iter::repeat_n(kind, times)));
+}
+
+/// Whether every failure this thread queued was spent.
+fn every_failure_spent() -> bool {
+    FAILED_READINGS.with(|queued| queued.borrow().is_empty())
+}
+
+/// A reading of a challenger ledger has read it, and neither ended nor
+/// settled a thing on it (`Reading::of`): if this thread asked to be held
+/// there, say so and wait to be let go.
+pub(super) fn reading_taken() {
+    if let Some((reached, go)) = HELD_READING.with(std::cell::RefCell::take) {
+        reached.send(()).expect("the test waits for the reading");
+        go.recv_timeout(Duration::from_secs(60)).expect("the test lets the reading go");
+    }
+}
+
+/// Hold this thread's next reading of a challenger ledger once it has read
+/// ([`reading_taken`]).
+fn hold_the_next_reading(reached: mpsc::Sender<()>, go: mpsc::Receiver<()>) {
+    HELD_READING.with(|held| *held.borrow_mut() = Some((reached, go)));
+}
+
+/// How many strikes this process holds for `ledger` that it has not seen
+/// back yet (`UNSEEN_STRIKES`).
+fn held_strikes(ledger: &Path) -> usize {
+    UNSEEN_STRIKES
+        .get()
+        .and_then(|book| book.lock().ok().and_then(|book| book.get(ledger).map(std::collections::BTreeMap::len)))
+        .unwrap_or_default()
 }
 
 /// How many trees a [`SourceWatch`] has written, by the root it watched —
@@ -1987,7 +2049,7 @@ const STRIKE_REFUSALS: [Option<std::io::ErrorKind>; 3] =
 fn a_label_the_record_contradicted_stays_unadmitted_once_the_record_forgets_the_run() {
     for kept_its_evidence in [false, true] {
         let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
-        contradicted_window(&rig, kept_its_evidence);
+        contradicted_window(&rig, kept_its_evidence, &[]);
         let now = now_ms() / 1_000;
         let record = |row: RouteOutcomeRecord| runtime::record_route_outcome(&rig.cwd, &row).expect("a row");
         let written = rig.rows();
@@ -2059,7 +2121,7 @@ fn a_label_the_labeller_bound_stands_on_its_evidence_once_the_record_forgets_the
 fn a_contradiction_a_reader_saw_is_held_until_its_strike_lands() {
     for refusal in STRIKE_REFUSALS {
         let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
-        contradicted_window(&rig, true);
+        contradicted_window(&rig, true, &[]);
         let written = rig.rows();
         refuse_strikes(CONTRADICTED.len(), refusal);
         assert_the_contradicted_unadmitted(&rig, &format!("{refusal:?} on record"));
@@ -2075,6 +2137,131 @@ fn a_contradiction_a_reader_saw_is_held_until_its_strike_lands() {
         assert_eq!(&rows[..written.len()], written.as_slice(), "{refusal:?}: every row stands as it was written");
         assert_eq!(struck_on_file(&rig), CONTRADICTED, "{refusal:?}: each held strike written down once, beside its label");
     }
+}
+
+/// How a reading of the challenger's ledger fails in these tests: a ledger
+/// nobody may read, and one that is not text.
+const READING_FAILURES: [std::io::ErrorKind; 2] =
+    [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::InvalidData];
+
+/// 읽지 못한 원장은 빈 원장이 아니다(t-6263 R4c-3 A): 기록이 라벨을 반박하는 동안 독자가 그 반박을 봤고 줄긋기 저장이
+/// 거절돼(세 변형) 반박이 붙잡혀 있을 때, 그다음 원장 읽기가 실패하면(권한 없음·텍스트 아님) 학습기는 어떤 표본도
+/// 인정하지 않고 기록기는 아무것도 적지 않으며, 붙잡힌 반박은 하나도 풀리지 않는다 — 읽기가 돌아오고 실행 행과 verdict가
+/// 보존 한도로 빠진 뒤에도 라벨의 표본은 인정되지 않고 새 표본도 없으며, 줄긋기는 원 행 옆에 한 번 적히고, 원장이 그것을
+/// 되돌려 보여 준 뒤에 장부를 떠난다.
+#[test]
+fn a_held_strike_outlives_a_reading_that_failed() {
+    for failure in READING_FAILURES {
+        for refusal in STRIKE_REFUSALS {
+            let case = format!("{failure:?} after {refusal:?}");
+            let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+            contradicted_window(&rig, true, &[]);
+            let ledger = challenger_path(&rig.cwd);
+            let written = rig.rows();
+            refuse_strikes(CONTRADICTED.len(), refusal);
+            assert_the_contradicted_unadmitted(&rig, &format!("{case} on record"));
+            assert!(every_refusal_spent(), "{case}: the reader tried to write every strike it owed");
+            assert_eq!(held_strikes(&ledger), CONTRADICTED.len(), "{case}: and holds every one");
+
+            fail_readings(1, failure);
+            assert!(admitted(&rig.cwd).is_empty(), "{case}: a ledger that cannot be read stands behind no sample");
+            fail_readings(1, failure);
+            assert_eq!(
+                note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)),
+                0,
+                "{case}: and labels nothing"
+            );
+            assert!(every_failure_spent(), "{case}: both readers met the failure");
+            assert_eq!(rig.rows(), written, "{case}: nothing was written on it");
+
+            age_out(&rig.cwd, &CONTRADICTED);
+            assert_the_contradicted_unadmitted(&rig, &format!("{case} aged out"));
+            assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 0, "{case}: nothing to label");
+            assert_the_contradicted_unadmitted(&rig, &format!("{case} after the writer"));
+            assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS, "{case}: and no sample is written");
+            let rows = rig.rows();
+            assert_eq!(&rows[..written.len()], written.as_slice(), "{case}: every row stands as it was written");
+            assert_eq!(struck_on_file(&rig), CONTRADICTED, "{case}: each held strike written down once, beside its label");
+            assert_eq!(held_strikes(&ledger), 0, "{case}: and let go once the ledger showed it back");
+        }
+    }
+}
+
+/// 붙잡힌 반박보다 오래된 읽기는 그것을 풀지 못한다(t-6263 R4c-3 B): 한 독자(학습기)가 반박될 라벨들이 아직 없는 원장을
+/// 읽고 장부에 닿기 전에 멈춘 사이 라벨들이 적히고, 다른 독자가 기록의 반박을 읽어 줄긋기를 붙잡는데 그 저장이
+/// 거절되면(세 변형) — 먼저 읽은 독자가 다시 가서 제 옛 읽기에 그 라벨이 없다는 이유로 붙잡힌 반박을 풀면 안 된다. 실행
+/// 행과 verdict가 보존 한도로 빠진 뒤에도 표본은 인정되지 않고 새 표본도 없으며, 줄긋기는 원 행 옆에 한 번 적힌다.
+#[test]
+fn a_reading_older_than_a_held_strike_never_lets_it_go() {
+    for refusal in STRIKE_REFUSALS {
+        let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+        let late = contradicted_window(&rig, true, &CONTRADICTED);
+        let ledger = challenger_path(&rig.cwd);
+        let (reached, read) = mpsc::channel();
+        let (let_go, go) = mpsc::channel();
+        let cwd = rig.cwd.clone();
+        let older = std::thread::spawn(move || {
+            hold_the_next_reading(reached, go);
+            admitted(&cwd)
+        });
+        read.recv_timeout(Duration::from_secs(60)).expect("the older reading has read the ledger");
+
+        for label in &late {
+            append_shadow_row(&ledger, label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+        }
+        let written = rig.rows();
+        refuse_strikes(CONTRADICTED.len(), refusal);
+        assert_the_contradicted_unadmitted(&rig, &format!("{refusal:?} on record"));
+        assert!(every_refusal_spent(), "{refusal:?}: the reader tried to write every strike it owed");
+        assert_eq!(rig.rows(), written, "{refusal:?}: and none landed");
+        assert_eq!(held_strikes(&ledger), CONTRADICTED.len(), "{refusal:?}: it holds every one");
+
+        let_go.send(()).expect("the older reading waits");
+        let saw = older.join().expect("the older reading");
+        for attempt in CONTRADICTED {
+            assert!(!saw.contains(&sample_attempt_key(attempt)), "{refusal:?}: the older reading held no label of {attempt}");
+        }
+
+        age_out(&rig.cwd, &CONTRADICTED);
+        assert_the_contradicted_unadmitted(&rig, &format!("{refusal:?} aged out"));
+        assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 0, "{refusal:?}: nothing to label");
+        assert_the_contradicted_unadmitted(&rig, &format!("{refusal:?} after the writer"));
+        assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS, "{refusal:?}: and no sample is written");
+        let rows = rig.rows();
+        assert_eq!(&rows[..written.len()], written.as_slice(), "{refusal:?}: every row stands as it was written");
+        assert_eq!(struck_on_file(&rig), CONTRADICTED, "{refusal:?}: each held strike written down once, beside its label");
+        assert_eq!(held_strikes(&ledger), 0, "{refusal:?}: and let go once the ledger showed it back");
+    }
+}
+
+/// 붙잡힌 줄긋기는 그것을 빚진 가장 새 읽기가 끝난 뒤 시작한 읽기만 정산한다(t-6263 R4c-3): 그보다 먼저 시작한 읽기는
+/// 라벨이 없든 줄긋기를 보여 주든 아무것도 풀지 못하고, 그 뒤 읽기는 줄긋기가 보이거나(원장이 되돌려 보여 줌) 라벨이
+/// 원장에서 잘려 나갔으면(보존 한도) 푼다 — 라벨이 있고 줄긋기가 없으면 다시 쓸 빚으로 돌려준다.
+#[test]
+fn a_held_strike_is_settled_only_on_a_reading_begun_after_it_was_owed() {
+    let ledger = PathBuf::from("a-ledger-this-test-only-names").join(CHALLENGER_FILE);
+    let label = arm::label_row("window-0#1", &receipted(Receipt::Failed), Preferred::Challenger, 1);
+    let strike = arm::strike_row(&label, 2).expect("a strike");
+    let settle = |rows: &[&Value], begun: u64, ended: u64, due: &[&Value]| {
+        let reading = Reading {
+            rows: rows.iter().copied().cloned().collect(),
+            begun,
+            ended,
+        };
+        let owed = unseen_strikes(&ledger, &reading, due.iter().copied().cloned().collect());
+        (owed.len(), held_strikes(&ledger))
+    };
+
+    assert_eq!(settle(&[&label], 9, 10, &[&strike]), (1, 1), "a reading that owes it holds it and writes it");
+    assert_eq!(settle(&[], 8, 11, &[]), (0, 1), "a reading begun before it was owed holds no label, and lets nothing go");
+    assert_eq!(settle(&[&label, &strike], 7, 12, &[]), (0, 1), "nor does one that shows the strike");
+    assert_eq!(settle(&[&label], 13, 14, &[]), (1, 1), "a later reading that holds the label and no strike owes it again");
+    assert_eq!(settle(&[&label], 15, 20, &[&strike]), (1, 1), "and one that finds it due holds it as of its own end");
+    assert_eq!(settle(&[&label, &strike], 16, 21, &[]), (0, 1), "so a reading begun before that end lets nothing go");
+    assert_eq!(settle(&[&label, &strike], 22, 23, &[]), (0, 0), "a reading begun after it that shows the strike lets it go");
+
+    assert_eq!(settle(&[&label], 24, 25, &[&strike]), (1, 1));
+    assert_eq!(settle(&[], 26, 27, &[]), (0, 0), "as does one begun after it that no longer holds the label");
 }
 
 /// 라벨러가 적법하게 묶은 라벨도 같다(t-6263 R4c-2): 영수증(실패)으로 라벨과 표본이 선 뒤 같은 source에 나중 verdict(통과)가
