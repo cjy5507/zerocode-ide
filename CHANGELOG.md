@@ -4,6 +4,9 @@
 
 _since v1.1.26 (35 commits)_
 
+### permissions
+- feat(permissions): the Computer Use permissions card says what macOS will actually do — each TCC row of the app and its helper reads `granted`, `stale` (a grant recorded under an older build's signature), `denied` or `unreadable`, and a stale row offers reset and System Settings (t-6058)
+
 ### walk
 - feat(walk): a walk step chooses its operation and every target it needs in one Jev request — the action head carries the operation, the click target, the type target and the observation heads; a `Type` operation is a closed observed operation (only a field the snapshot lists, never an id or a command) whose value comes from a generator the person configured in the product's key store, through the existing stdin pipe; the person's subscription login is not a road for it; a repeated value is reused (t-6720)
 - feat(browser): the browser's observation is one state, read once — `marks --json` gathers the numbered controls with the document epoch, the input fields, containers, images and rows in one synchronous read (a moved page is read again, then said as `document_moving`); `click --mark` pins the document and the value, re-checks at the press and settles within 250 ms as ready, not ready or invalidated; the walk verb is proven through `run_goal` itself (t-6721)
