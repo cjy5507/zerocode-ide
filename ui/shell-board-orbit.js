@@ -1041,7 +1041,9 @@ function agentOrbitDraw(state, step, stamp, { still = false } = {}) {
     ctx.beginPath();
     ctx.arc(body.x, body.y, radius, 0, ORBIT_TURN);
     ctx.fill();
-    if (body.ringed) agentOrbitRing(ctx, inks[body.ink], body.x, body.y, radius + ORBIT.planet.ringGap, alpha);
+    if (body.ringed) {
+      agentOrbitRing(ctx, inks[body.ink], body.x, body.y, radius + ORBIT.planet.ringGap, alpha, ORBIT.planet.ringWidth);
+    }
     if (body.key === selected) {
       agentOrbitRing(ctx, inks.select, body.x, body.y, radius + ORBIT.planet.ringGap + ORBIT.select.gap, 1);
     } else if (body.key === state.hovered) {
@@ -1092,9 +1094,9 @@ function agentOrbitDraw(state, step, stamp, { still = false } = {}) {
   agentOrbitFrames += 1;
 }
 
-function agentOrbitRing(ctx, ink, x, y, radius, alpha) {
+function agentOrbitRing(ctx, ink, x, y, radius, alpha, width = ORBIT.select.width) {
   ctx.strokeStyle = ink;
-  ctx.lineWidth = ORBIT.select.width;
+  ctx.lineWidth = width;
   ctx.globalAlpha = alpha;
   ctx.beginPath();
   ctx.arc(x, y, radius, 0, ORBIT_TURN);
