@@ -295,7 +295,7 @@ fn the_table_is_read_only_for_the_words_asked_now_and_a_stage_that_reads_a_line(
         None,
         "two rows for one seat's words"
     );
-    assert!(!RECALL.reads_act_line);
+    const { assert!(!RECALL.reads_act_line) };
     assert_eq!(table.line_of(&RECALL), None, "a stage that reads no line");
     assert_eq!(
         table.line_of(&ROUTING),
