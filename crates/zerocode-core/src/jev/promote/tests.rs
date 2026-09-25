@@ -466,6 +466,83 @@ fn one_forgiven_timeout_does_not_forgive_a_second_one() {
     }
 }
 
+/// The recall seat's window as its ledger held it on 2026-09-23 09:06
+/// (t-9427): 53 requests, the memo answering 46 of them, and 7 calls over
+/// the wire — six answers of 239 to 720 ms, and one timeout whose row
+/// carries the wall its apply road gave up at, not an answer's time. The
+/// answer line forgives that one miss; the latency line used to read it
+/// again, and on fewer than twenty calls the nearest-rank p95 is the
+/// slowest, so the acting seat fell on the timeout it had just been
+/// forgiven for.
+fn recalls_window(timeouts: usize) -> Vec<Value> {
+    let seat = &crate::jev::RECALL;
+    let wall = seat.apply_deadline_ms.expect("a rising seat");
+    let answers = [260_u64, 553, 245, 720, 323, 239];
+    let mut rows = vec![rose(seat)];
+    rows.extend((0..53).map(|at| {
+        let mut row = asked_by(seat, at);
+        match at.checked_sub(53 - answers.len() - timeouts) {
+            None => {
+                row["cached"] = json!(true);
+                row["elapsedMs"] = json!(0);
+            }
+            Some(call) if call < answers.len() => row["elapsedMs"] = json!(answers[call]),
+            Some(_) => {
+                row["outcome"] = json!("timeout");
+                row["elapsedMs"] = json!(wall + 2);
+            }
+        }
+        row
+    }));
+    rows
+}
+
+#[test]
+fn an_acting_seat_does_not_fall_on_the_one_timeout_its_answer_line_forgives() {
+    let seat = &crate::jev::RECALL;
+    let judged = judge_seat(seat, &recalls_window(1)).expect("judged");
+    assert_eq!(judged.verdict, Verdict::Keep);
+    assert_eq!(
+        (judged.window.called, judged.window.answered),
+        (7, 52),
+        "the window as the ledger held it"
+    );
+    assert_eq!(
+        judged.window.p95_ms,
+        Some(720),
+        "the answers' p95, not the wall a timeout was cut at"
+    );
+    // A second timeout is one more than the answer line forgives, and the
+    // answer line is the one that says so.
+    assert!(matches!(
+        judge_seat(seat, &recalls_window(2))
+            .expect("judged")
+            .verdict,
+        Verdict::Fall(Line::Answered { .. })
+    ));
+}
+
+/// The latency line still reads the answers: one that arrived after the
+/// wall on the record-only road — 1,843 ms, the recall ledger's own — is an
+/// answer the apply road would have missed, and a seat that has not risen
+/// holds on it.
+#[test]
+fn an_answer_slower_than_the_wall_still_holds_a_seat_on_the_latency_line() {
+    let seat = &crate::jev::RECALL;
+    let wall = seat.apply_deadline_ms.expect("a rising seat");
+    let mut rows = recalls_window(0);
+    rows.remove(0);
+    let last = rows.last_mut().expect("a request");
+    last["elapsedMs"] = json!(1_843);
+    assert_eq!(
+        judge_seat(seat, &rows).expect("judged").verdict,
+        Verdict::Hold(Line::Latency {
+            p95_ms: 1_843,
+            deadline_ms: wall
+        })
+    );
+}
+
 fn window(rows: usize, answered: usize, p95_ms: Option<u64>) -> Tally {
     Tally {
         rows,
