@@ -24,7 +24,11 @@ no entry without it; a subscription login is never used.
 Arms (`--arms`, default `before,after`): `before`/`after` walk as a plain
 `walk`; `before-ahead`/`after-ahead` walk as `walk --overlap`, asking ahead
 (t-9712). `--scenarios` adds `steps` (`steps.html`, three presses that each
-change the page at once) to `press,repeat,type,observe`.
+change the page at once) to `press,repeat,type,observe`, and `later` — the
+same walk on `steps.html?delay=120`, whose step answers 120 ms after the
+press, busy until then, so the page a press leaves is the page it was pressed
+on, as on a page that fetches (t-9712 r2). That answer comes from a worker's
+timer: a hidden pane holds the page's own timers to the next whole second.
 
 The running window's door may be older than the build's (a v1.1.25 window
 does not settle a press by number, and knows no `--settle-later`), so the

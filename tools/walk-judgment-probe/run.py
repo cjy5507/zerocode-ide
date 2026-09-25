@@ -17,7 +17,7 @@ build walks twice in one process: the first walk pays for the process's cold
 connections (the window keeps its warm), so it is reported on its own, and the
 table is the second — the walk a long-lived window takes.
 
-Scenarios (on `page.html` beside this file, `steps` on `steps.html`):
+Scenarios (on `page.html` beside this file, `steps` and `later` on `steps.html`):
 
 - press   — "press Advance once", until the page says so
 - repeat  — the same, asked as a replay with the judgment cache on
@@ -25,6 +25,10 @@ Scenarios (on `page.html` beside this file, `steps` on `steps.html`):
 - observe — which container, image and row the goal is about (one step)
 - steps   — "press Next until Step 4 of 4": three presses, each changing the
             page at once (t-9712)
+- later   — the same walk on `steps.html?delay=120`: each press changes the
+            page 120 ms after it answered, the step busy until then, so the
+            page a press leaves is the page it was pressed on — the shape of a
+            page that fetches (t-9712 r2)
 
 Arms (`--arms`, t-9712): `before` and `after` walk as a plain `walk` does;
 `before-ahead` and `after-ahead` walk as `walk --overlap` does, asking ahead. The
@@ -103,6 +107,9 @@ SCENARIOS = {
         "ready": "#next",
     },
 }
+# The steps walk on the same page answering later: the step comes from a
+# worker's timer, since a hidden pane holds its own to the next second.
+SCENARIOS["later"] = {**SCENARIOS["steps"], "query": "delay=120"}
 
 # The arms a run may walk: which build, and whether the walk asks ahead
 # (`walk --overlap`).
@@ -122,6 +129,12 @@ def strip_after_only(source: str) -> str:
     """The harness as the build before sees it: every `// after-only {` …
     `// after-only }` region dropped, markers and all."""
     return re.sub(r"[ \t]*// after-only \{\n.*?// after-only \}\n", "", source, flags=re.S)
+
+
+def page_url(spec: dict) -> str:
+    """A scenario's own page beside this file, with its query when it has one."""
+    url = (HERE / spec["page"]).as_uri()
+    return f"{url}?{spec['query']}" if spec.get("query") else url
 
 
 def percentile(values: list[float], share: float) -> float | None:
@@ -191,7 +204,7 @@ def succeeded(scenario: str, row: dict) -> bool:
     oracle = row.get("oracle") or {}
     if scenario in ("press", "repeat"):
         return oracle.get("count") == 1
-    if scenario == "steps":
+    if scenario in ("steps", "later"):
         return oracle.get("count") == 3
     if scenario == "type":
         return oracle.get("searched") == "London"
@@ -388,7 +401,7 @@ def walk_once(binary: pathlib.Path, label: str, scenario: str, pane: str, url: s
     env = dict(os.environ)
     env.update({
         "ZEROCODE_WALK_PROBE_PANE": pane,
-        "ZEROCODE_WALK_PROBE_URL": (HERE / spec["page"]).as_uri() if spec.get("page") else url,
+        "ZEROCODE_WALK_PROBE_URL": page_url(spec) if spec.get("page") else url,
         "ZEROCODE_WALK_PROBE_OVERLAP": "1" if overlap else "0",
         "ZEROCODE_WALK_PROBE_READY": spec.get("ready", "#search"),
         "ZEROCODE_WALK_PROBE_KEY": os.environ["TYPESAFE_API_KEY"],

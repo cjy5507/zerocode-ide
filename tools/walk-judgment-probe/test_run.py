@@ -99,6 +99,21 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(run.SCENARIOS["steps"]["ready"], "#next")
         self.assertTrue((run.HERE / "steps.html").exists())
 
+    def test_the_later_walk_is_the_steps_walk_on_the_page_answering_after_its_press(self):
+        later, steps = run.SCENARIOS["later"], run.SCENARIOS["steps"]
+        self.assertEqual({key: value for key, value in later.items() if key != "query"}, steps)
+        self.assertEqual(later["query"], "delay=120")
+        self.assertTrue(run.page_url(later).startswith("file://"))
+        self.assertTrue(run.page_url(later).endswith("/steps.html?delay=120"), "the query is not quoted into the path")
+        self.assertNotIn("?", run.page_url(steps))
+        page = (run.HERE / "steps.html").read_text()
+        # The step answers from a worker's timer, busy until it does; without
+        # the query the press re-draws at once, as before.
+        for needed in ("get('delay')", "new Worker(", "aria-busy", "if (!later) return draw();"):
+            self.assertIn(needed, page)
+        self.assertTrue(run.succeeded("later", {"oracle": {"count": 3}}))
+        self.assertFalse(run.succeeded("later", {"oracle": {"count": 2}}))
+
     def test_success_is_the_pages_own_word(self):
         self.assertTrue(run.succeeded("press", {"oracle": {"count": 1}}))
         self.assertFalse(run.succeeded("press", {"oracle": {"count": 2}}))
