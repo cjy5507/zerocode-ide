@@ -547,6 +547,346 @@ mod tests {
         AckedRow, Draft, Priority, ResultAuthor, TaskStatus, Text, worker_address,
     };
 
+    const HOUR_MS: i64 = 60 * 60 * 1000;
+    /// The ledger's stall reminder cadence (`QUIET_REMINDER_MS`), so each
+    /// beat below tells the coordinator once more.
+    const REMINDED_MS: i64 = 300_000;
+
+    /// The desk as the window serializes it. The red tests below read the
+    /// JSON the screen reads, so they speak to any shape of the snapshot.
+    fn desk_json(ledger: &Ledger) -> serde_json::Value {
+        serde_json::to_value(desk_snapshot(ledger, |_| false)).expect("the desk serializes")
+    }
+
+    /// Every letter the desk draws, in either of its lists.
+    fn drawn(desk: &serde_json::Value) -> Vec<serde_json::Value> {
+        ["mail", "news"]
+            .iter()
+            .flat_map(|field| desk[*field].as_array().cloned().unwrap_or_default())
+            .collect()
+    }
+
+    /// A run with somebody still at it (a second worker, so it stays in
+    /// play), and a worker in `%2` carrying a task: the run and that worker.
+    fn a_worker_carrying_a_task(ledger: &mut Ledger, at: i64) -> (String, String) {
+        let run_id = ledger.create_run("desk-news", at);
+        ledger
+            .start_worker(&run_id, "codex", ("team-news", "%3"), None, at + 1)
+            .expect("somebody is still at the run");
+        let task = ledger
+            .create_task(
+                &run_id,
+                "stall".into(),
+                "stall".into(),
+                vec![],
+                None,
+                at + 2,
+            )
+            .expect("a task");
+        let worker = ledger
+            .start_worker(&run_id, "claude", ("team-news", "%2"), Some(&task), at + 3)
+            .expect("the worker")
+            .worker;
+        (run_id, worker)
+    }
+
+    fn a_notice(run_id: &str, kind: MessageKind, body: &str) -> Draft {
+        Draft {
+            from: zerocode_core::orchestration::LEDGER_ITSELF.to_string(),
+            to: format!("run:{run_id}"),
+            kind,
+            body: Text::from(body),
+            subject: Text::default(),
+            priority: Priority::Normal,
+            payload: Text::default(),
+            thread: None,
+            task: None,
+            dispatch: None,
+        }
+    }
+
+    /// t-9456, the night the desk said 「답할 우편 46」 and no question stood:
+    /// a worker's silence is told again every five minutes while its attempt
+    /// is open, and every one of those notices stood as a letter to answer
+    /// long after the worker had died. Once the attempt ends the silence is
+    /// over — the ledger writes nothing more about it, and the desk draws
+    /// none of it; the death itself is the news, once.
+    #[test]
+    fn a_silence_that_is_over_leaves_the_desk_and_nothing_is_written_after_it() {
+        let start = crate::now_epoch_ms() - 3 * HOUR_MS;
+        let mut ledger = Ledger::new();
+        let (run_id, worker) = a_worker_carrying_a_task(&mut ledger, start);
+        for beat in 0..3 {
+            assert_eq!(
+                ledger.workers_stalled(
+                    &[(worker.clone(), start + 10)],
+                    start + 200_000 + beat * REMINDED_MS
+                ),
+                1,
+                "stall {beat} told nobody"
+            );
+        }
+        assert_eq!(
+            ledger
+                .terminal_gone("team-news", "%2", start + HOUR_MS)
+                .as_deref(),
+            Some(worker.as_str()),
+            "the pane died while it carried the task"
+        );
+        let told = |ledger: &Ledger| {
+            ledger
+                .run(&run_id)
+                .expect("the run")
+                .messages()
+                .iter()
+                .filter(|one| matches!(one.kind, MessageKind::WentQuiet | MessageKind::WorkerDied))
+                .count()
+        };
+        let written = told(&ledger);
+        assert_eq!(written, 4, "three stalls and one death");
+        for beat in 1..=10 {
+            let now_ms = start + HOUR_MS + beat * REMINDED_MS;
+            assert_eq!(
+                ledger.workers_stalled(&[(worker.clone(), start + 10)], now_ms),
+                0
+            );
+            assert_eq!(
+                ledger.stall_causes_judged(
+                    &[zerocode_core::orchestration::StallJudged {
+                        worker: worker.clone(),
+                        stalled_since_ms: start + 10 + beat,
+                        cause: "finished_turn".into(),
+                        confidence: 0.9,
+                    }],
+                    now_ms,
+                ),
+                0
+            );
+        }
+        assert_eq!(
+            told(&ledger),
+            written,
+            "a notice was written about an attempt that had ended"
+        );
+
+        let desk = desk_json(&ledger);
+        let letters = drawn(&desk);
+        assert!(
+            !letters.iter().any(|one| one["kind"] == "went_quiet"),
+            "a silence that is over still stands on the desk: {desk}"
+        );
+        assert_eq!(
+            letters
+                .iter()
+                .filter(|one| one["kind"] == "worker_died")
+                .count(),
+            1,
+            "the death is news, once: {desk}"
+        );
+        assert_eq!(
+            desk["counts"]["mail"], 0,
+            "nothing here waits on an answer: {desk}"
+        );
+        assert_eq!(
+            desk["counts"]["folded"], 3,
+            "the three stalls fold into the count: {desk}"
+        );
+    }
+
+    /// One silence, told ten times, is one line — and the worker's own word
+    /// ends it: the line leaves, and its notices fold into the count.
+    #[test]
+    fn one_silence_told_ten_times_is_one_line_until_the_worker_speaks() {
+        let start = crate::now_epoch_ms() - 3 * HOUR_MS;
+        let mut ledger = Ledger::new();
+        let (run_id, worker) = a_worker_carrying_a_task(&mut ledger, start);
+        for beat in 0..10 {
+            assert_eq!(
+                ledger.workers_stalled(
+                    &[(worker.clone(), start + 10)],
+                    start + 200_000 + beat * REMINDED_MS
+                ),
+                1
+            );
+        }
+        let desk = desk_json(&ledger);
+        let quiet: Vec<serde_json::Value> = drawn(&desk)
+            .into_iter()
+            .filter(|one| one["kind"] == "went_quiet")
+            .collect();
+        assert_eq!(quiet.len(), 1, "one silence, one line: {desk}");
+        assert_eq!(
+            quiet[0]["notices"], 10,
+            "the line says how many notices it stands for: {desk}"
+        );
+        assert_eq!(quiet[0]["worker"], worker.as_str());
+        assert_eq!(desk["counts"]["news"], 1, "{desk}");
+        assert_eq!(
+            desk["counts"]["mail"], 0,
+            "a silence is not a letter to answer: {desk}"
+        );
+
+        ledger
+            .post(
+                &run_id,
+                Draft {
+                    from: worker_address(&worker),
+                    to: format!("run:{run_id}"),
+                    kind: MessageKind::Status,
+                    body: "still at it".into(),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: None,
+                    dispatch: None,
+                },
+                start + 2 * HOUR_MS,
+            )
+            .expect("the worker speaks");
+        let desk = desk_json(&ledger);
+        assert!(
+            !drawn(&desk).iter().any(|one| one["kind"] == "went_quiet"),
+            "the worker spoke and its silence still stands: {desk}"
+        );
+        assert_eq!(desk["counts"]["folded"], 10, "{desk}");
+    }
+
+    /// 「답할 우편」 is the letters that wait on an answer and nothing else: a
+    /// question nobody has answered. The ledger's notices, a status, an
+    /// answered question and a reply that wears the question kind are not.
+    #[test]
+    fn only_a_question_waiting_on_its_answer_is_mail_to_answer() {
+        let start = crate::now_epoch_ms() - HOUR_MS;
+        let mut ledger = Ledger::new();
+        let (run_id, _) = a_worker_carrying_a_task(&mut ledger, start);
+        let address = format!("run:{run_id}");
+        let from_pane = |pane: &str, kind: MessageKind, body: &str, thread: Option<String>| Draft {
+            from: format!("pane:team-news/{pane}"),
+            to: address.clone(),
+            kind,
+            body: Text::from(body),
+            subject: Text::default(),
+            priority: Priority::Normal,
+            payload: Text::default(),
+            thread,
+            task: None,
+            dispatch: None,
+        };
+        let waiting = ledger
+            .post(
+                &run_id,
+                from_pane("%7", MessageKind::Question, "main에 올릴까요?", None),
+                start + 1,
+            )
+            .expect("a question");
+        let answered = ledger
+            .post(
+                &run_id,
+                from_pane("%8", MessageKind::Question, "끝났나요?", None),
+                start + 2,
+            )
+            .expect("another question");
+        ledger
+            .post(
+                &run_id,
+                Draft {
+                    from: address.clone(),
+                    to: "pane:team-news/%8".into(),
+                    kind: MessageKind::Question,
+                    body: "네".into(),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: Some(answered.clone()),
+                    task: None,
+                    dispatch: None,
+                },
+                start + 3,
+            )
+            .expect("its answer");
+        ledger
+            .post(
+                &run_id,
+                from_pane("%8", MessageKind::Question, "고마워요", Some(answered)),
+                start + 4,
+            )
+            .expect("a reply wearing the question kind");
+        ledger
+            .post(
+                &run_id,
+                from_pane("%7", MessageKind::Status, "heads-up", None),
+                start + 5,
+            )
+            .expect("a status");
+        for (at, kind) in [
+            (6, MessageKind::WorkerDied),
+            (7, MessageKind::QuotaWalled),
+            (8, MessageKind::Deadlocked),
+            (9, MessageKind::ClassifierDeclined),
+            (10, MessageKind::ModelDeviated),
+        ] {
+            ledger
+                .post(
+                    &run_id,
+                    a_notice(&run_id, kind, r#"{"workerId":"w-elsewhere"}"#),
+                    start + at,
+                )
+                .expect("a notice");
+        }
+        let desk = desk_json(&ledger);
+        let mail = desk["mail"].as_array().cloned().unwrap_or_default();
+        assert_eq!(
+            mail.iter()
+                .map(|one| one["id"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec![waiting.as_str()],
+            "only the waiting question is owed an answer: {desk}"
+        );
+        assert_eq!(desk["counts"]["mail"], 1, "{desk}");
+        assert_eq!(
+            desk["counts"]["news"], 5,
+            "the notices are news, one line each: {desk}"
+        );
+    }
+
+    /// A notice stands as a line for a day from when the ledger wrote it;
+    /// after that it folds into the count — the inbox still holds it.
+    #[test]
+    fn a_notice_older_than_a_day_folds_into_the_count() {
+        let now = crate::now_epoch_ms();
+        let mut ledger = Ledger::new();
+        let (run_id, _) = a_worker_carrying_a_task(&mut ledger, now - 30 * HOUR_MS);
+        let old = ledger
+            .post(
+                &run_id,
+                a_notice(&run_id, MessageKind::WorkerDied, r#"{"workerId":"w-old"}"#),
+                now - 25 * HOUR_MS,
+            )
+            .expect("a day-old notice");
+        let fresh = ledger
+            .post(
+                &run_id,
+                a_notice(&run_id, MessageKind::WorkerDied, r#"{"workerId":"w-new"}"#),
+                now - HOUR_MS,
+            )
+            .expect("an hour-old notice");
+        let desk = desk_json(&ledger);
+        let ids: Vec<String> = drawn(&desk)
+            .iter()
+            .filter_map(|one| one["id"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(ids, vec![fresh], "{desk}");
+        assert_eq!(desk["counts"]["folded"], 1, "{desk}");
+        let run = ledger.run(&run_id).expect("the run");
+        assert!(
+            run.pending_messages(&run.address(), &[])
+                .iter()
+                .any(|one| one.id == old),
+            "folding took the notice out of the inbox"
+        );
+    }
+
     #[test]
     fn a_question_the_ledger_would_refuse_to_answer_is_not_owed_on_the_desk() {
         let mut ledger = Ledger::new();
@@ -929,6 +1269,130 @@ mod tests {
             reported
                 .windows(2)
                 .all(|pair| pair[0].created_ms >= pair[1].created_ms)
+        );
+    }
+
+    /// The desk over the ledger that already happened (t-9456): the store
+    /// read into a snapshot, the mail written after an instant dropped, the
+    /// batches handed over after it put back in their queues and their
+    /// receipts with them — and then the desk this build draws, as numbers
+    /// only (no body, id or path leaves). Run on the base and on the change,
+    /// it is the before and after the report reads. Every id the ledger mints
+    /// comes off one counter, so a batch numbered past the newest message of
+    /// the instant was handed over after it; take the instant at a message's
+    /// own stamp and that is exact. Workers and attempts are read as they
+    /// stand now, so an instant is exact only where every attempt its notices
+    /// name had already ended or is still open — the report says which
+    /// instant was checked that way.
+    ///
+    /// ```sh
+    /// ZEROCODE_DESK_REPLAY_STORE="$HOME/Library/Application Support/dev.zerocode.app/authority/authority.sqlite" \
+    /// ZEROCODE_DESK_REPLAY_AT=<a message's created_ms> \
+    ///   cargo test -p zerocode-shell --bin zerocode-shell \
+    ///   orchestration::desk::tests::the_desk_over_the_ledger_that_already_happened \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement over the person's own ledger, printed; not a check"]
+    fn the_desk_over_the_ledger_that_already_happened() {
+        let store = std::env::var("ZEROCODE_DESK_REPLAY_STORE")
+            .expect("ZEROCODE_DESK_REPLAY_STORE names the authority store");
+        let at: i64 = std::env::var("ZEROCODE_DESK_REPLAY_AT")
+            .ok()
+            .and_then(|said| said.parse().ok())
+            .unwrap_or(i64::MAX);
+        /* The person's store is only ever read: its snapshot is taken into
+         * a scratch file, and only that copy grows the columns this build
+         * reads that an older window's store may not have yet — the same
+         * additive step the window's own open takes. */
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let copy = scratch.path().join("authority.sqlite");
+        rusqlite::Connection::open_with_flags(
+            &store,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("the store opens read-only")
+        .execute("VACUUM INTO ?1", [copy.display().to_string()])
+        .expect("a snapshot of the store");
+        let connection = rusqlite::Connection::open(&copy).expect("the snapshot opens");
+        zerocode_orchestrator::ledger_store::ensure_ledger_columns(&connection)
+            .expect("the snapshot grows this build's columns");
+        let mut projected = zerocode_orchestrator::ledger_store::read(
+            &connection,
+            "main-ledger",
+            zerocode_core::orchestration::PROJECTION_SCHEMA,
+        )
+        .expect("the store reads")
+        .expect("the store holds the main ledger")
+        .projection;
+        let number = |id: &str| {
+            id.rsplit_once('-')
+                .and_then(|(_, number)| number.parse::<u64>().ok())
+        };
+        projected.messages.retain(|row| row.created_ms <= at);
+        let minted = projected
+            .messages
+            .iter()
+            .filter_map(|row| number(&row.id))
+            .max()
+            .unwrap_or(0);
+        let later = |delivery: &str| number(delivery).is_some_and(|held| held > minted);
+        let written: HashSet<(String, String)> = projected
+            .messages
+            .iter()
+            .map(|row| (row.run.clone(), row.id.clone()))
+            .collect();
+        let mut back: Vec<(String, String, Vec<String>)> = projected
+            .acked
+            .iter()
+            .filter(|row| later(&row.delivery))
+            .map(|row| {
+                (
+                    row.run.clone(),
+                    row.address.clone(),
+                    row.messages.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        projected.acked.retain(|row| !later(&row.delivery));
+        projected
+            .served
+            .retain(|row| row.filed_ms.is_none_or(|filed| filed <= at));
+        for inbox in &mut projected.inboxes {
+            if let Some(open) = inbox.open.take_if(|open| later(&open.id)) {
+                back.push((inbox.run.clone(), inbox.address.clone(), open.messages));
+            }
+            let mut queue: Vec<String> = back
+                .iter()
+                .filter(|(run, address, _)| *run == inbox.run && *address == inbox.address)
+                .flat_map(|(_, _, ids)| ids.iter().cloned())
+                .collect();
+            queue.append(&mut inbox.pending);
+            queue.retain(|id| written.contains(&(inbox.run.clone(), id.clone())));
+            inbox.pending = queue;
+        }
+        let ledger = Ledger::rebuild(projected).expect("the ledger as it stood");
+        let desk = desk_json(&ledger);
+        let letters = drawn(&desk);
+        let of_kind = |kind: &str| letters.iter().filter(|one| one["kind"] == kind).count();
+        let quiet_rows: u64 = letters
+            .iter()
+            .filter(|one| one["kind"] == "went_quiet")
+            .map(|one| one["notices"].as_u64().unwrap_or(1))
+            .sum();
+        println!(
+            "{}",
+            serde_json::json!({
+                "at": at,
+                "mailToAnswer": desk["counts"]["mail"].as_u64().unwrap_or(desk["mail"].as_array().map_or(0, Vec::len) as u64),
+                "news": desk["counts"]["news"],
+                "folded": desk["counts"]["folded"],
+                "drawn": letters.len(),
+                "questions": of_kind("question"),
+                "wentQuietLines": of_kind("went_quiet"),
+                "wentQuietRows": quiet_rows,
+                "workerDied": of_kind("worker_died"),
+            })
         );
     }
 

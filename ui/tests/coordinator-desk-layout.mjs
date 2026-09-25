@@ -273,8 +273,8 @@ async function openDesk(browser, origin, fixture, { width = 1280, height = 800 }
     await askReleaseStatus();
     await paintBoardView();
     paintCoordinatorDesk(view);
-    window.__HELD_ANSWERS__ = { machine: window.__MACHINE__, mail: window.__DESK__.mail, stages: window.__DESK__.stages,
-      ledger: window.__LEDGER__, release: window.__RELEASE__ };
+    window.__HELD_ANSWERS__ = { machine: window.__MACHINE__, mail: window.__DESK__.mail, news: window.__DESK__.news,
+      counts: window.__DESK__.counts, stages: window.__DESK__.stages, ledger: window.__LEDGER__, release: window.__RELEASE__ };
   });
   await settle(page);
   return { page, faults };
@@ -290,6 +290,8 @@ async function showOnly(page, off) {
     window.__MACHINE__ = hidden.has("machine") ? null : held.machine;
     window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
       mail: hidden.has("mail") ? [] : held.mail,
+      news: hidden.has("mail") ? [] : held.news,
+      counts: hidden.has("mail") ? { mail: 0, news: 0, folded: 0 } : held.counts,
       stages: hidden.has("pipeline") ? held.stages.map((one) => ({ ...one, count: 0 })) : held.stages };
     window.__LEDGER__ = hidden.has("workers") ? [] : held.ledger;
     window.__RELEASE__ = hidden.has("release") ? null : held.release;

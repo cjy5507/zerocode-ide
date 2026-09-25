@@ -20,7 +20,7 @@ import { installBoardWaits } from "./board-waits.mjs";
 
 /* The fixture, run inside the page. Self-contained: a page function carries
  * no closure. `now` is passed so a before/after pair draws the same clocks. */
-export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, now = Date.now() } = {}) {
+export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, folded = 0, now = Date.now() } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const checkout = (n) => `/repos/zerocode/workspaces/t-${n}`;
@@ -81,17 +81,21 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, now
   window.__PANES__ = [];
   window.__LEDGER__ = ledger;
 
-  /* The ledger's mail to the coordinator, oldest first: questions stand until
-   * answered, notices until the coordinator acknowledged them. Twenty rows
-   * over five kinds and the three delivery states. */
+  /* The ledger's letters to the coordinator, oldest first, as `desk_letters`
+   * hands them over (t-9456): the questions that wait on an answer are the
+   * mail, the notices owed an acknowledgement the news — a quiet worker's
+   * notices already one line per episode, saying how many it stands for — and
+   * the three numbers are the backend's. Twenty rows over five kinds and the
+   * three delivery states. */
   const kinds = ["question", "went_quiet", "quota_walled", "worker_died", "went_quiet", "question", "deadlocked"];
   const reasons = ["stalled", "quota_lifted", "pane_missing", "never_spoke"];
   const deskMail = [];
+  const deskNews = [];
   for (let n = 1; n <= mail; n += 1) {
     const kind = kinds[(n - 1) % kinds.length];
     const worker = `w-${((n - 1) % Math.max(1, workers)) + 1}`;
     const delivery = n % 3 === 0 ? "delivered" : kind === "question" && n % 5 === 0 ? "acked" : "pending";
-    deskMail.push({
+    (kind === "question" ? deskMail : deskNews).push({
       run, id: `m-${900 + n}`, kind, from: `worker:${worker}`, worker,
       task_id: `t-${((n - 1) % Math.max(1, workers)) + 1}`,
       task: `데스크 과업 ${((n - 1) % Math.max(1, workers)) + 1}`,
@@ -102,6 +106,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, now
       delivery,
       delivery_id: delivery === "delivered" ? "d-990" : null,
       batch: delivery === "delivered" ? Math.floor(mail / 3) : null,
+      notices: kind === "went_quiet" ? 1 + (n % 4) : 1,
     });
   }
   /* The run's tasks by the pipeline's own stage words, sixty by default. */
@@ -129,6 +134,8 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, now
     revision: 1,
     runs: [{ run, name: "데스크 픽스처", seat: true }],
     mail: deskMail,
+    news: deskNews,
+    counts: { mail: deskMail.length, news: deskNews.length, folded },
     tasks: deskTasks,
     stages: counts,
   };
@@ -332,22 +339,37 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       }));
       const more = block?.querySelector(".board-desk-letters-more");
       const unseated = block?.querySelector(".board-desk-unseated");
+      const newsHead = block?.querySelector(".board-desk-news-head");
+      const folded = block?.querySelector(".board-desk-news-folded");
       return { shown: Boolean(block) && !block.hidden, head: block?.querySelector(".board-desk-head")?.textContent,
         letters, more: more && !more.hidden ? more.textContent : "",
         unseated: unseated && !unseated.hidden ? unseated.textContent : "",
+        newsHead: newsHead && !newsHead.hidden ? newsHead.textContent : "",
+        folded: folded && !folded.hidden ? folded.textContent : "",
+        news: [...(block?.querySelectorAll(".board-desk-letters.is-news .board-desk-letter") ?? [])]
+          .map((row) => row.dataset.letter),
         order: [...document.querySelectorAll("#board-view .task-board-desk > .board-desk-block:not([hidden])")].map((node) => node.dataset.deskBlock) };
     });
+    const shut = await readMail();
+    ok("the mail to answer is the questions alone (t-9456) — oldest first, five at a time, the news behind them, with how many more",
+      shut.shown && shut.head === "답할 우편 · 6" && shut.letters.length === 5 && shut.more === "15통 더 보기" &&
+      shut.letters.map((one) => one.key).join() === [901, 906, 908, 913, 915].map((n) => `run-desk/m-${n}`).join() &&
+      shut.letters.every((one) => one.kind === "질문") && shut.newsHead === "" && shut.folded === "" &&
+      shut.order.indexOf("mail") === shut.order.indexOf("machine") + 1, JSON.stringify(shut));
+    await page.click('#board-view [data-desk-block="mail"] .board-desk-letters-more');
+    await settleMail();
     const mail = await readMail();
     const letter = (id) => mail.letters.find((one) => one.key === `run-desk/${id}`);
-    ok("the mail the coordinator owes stands oldest first, five at a time, with how many more",
-      mail.shown && mail.head === "답할 우편 · 20" && mail.letters.length === 5 && mail.more === "15통 더 보기" &&
-      mail.letters.map((one) => one.key).join() === [901, 902, 903, 904, 905].map((n) => `run-desk/m-${n}`).join() &&
-      mail.order.indexOf("mail") === mail.order.indexOf("machine") + 1, JSON.stringify(mail));
+    ok("opened, the news stands under its own head with the backend's number, and one quiet episode is one line",
+      mail.head === "답할 우편 · 6" && mail.newsHead === "소식 · 14" && mail.letters.length === 20 &&
+      mail.news.length === 14 && mail.more === "접기" && !mail.news.some((key) => letter(key.split("/")[1])?.kind === "질문"),
+      JSON.stringify(mail));
     ok("each letter says its kind, whom it concerns, its age and where it stands in the coordinator's inbox",
       letter("m-901")?.kind === "질문" && letter("m-901").who === "w-1 · 데스크 과업 1" &&
       /^\d+(분|시간) 전$/.test(letter("m-901").age) && letter("m-901").body.startsWith("질문 1:") &&
       letter("m-901").delivery === "배달 전" && letter("m-901").deliveryTip === "배달 전 · 코디네이터가 아직 안 읽음" &&
-      letter("m-902")?.kind === "조용해짐" && letter("m-902").body === "판이 보이지 않음" &&
+      letter("m-902")?.kind === "조용해짐" && letter("m-902").body === "판이 보이지 않음 · 알림 3통" &&
+      letter("m-905")?.kind === "조용해짐" && letter("m-905").body === "한도가 풀린 뒤에도 멈춰 있음 · 알림 2통" &&
       letter("m-903")?.kind === "한도 벽" && letter("m-903").body.startsWith("재설정까지") &&
       letter("m-903").delivery === "받음 d-990" && letter("m-903").deliveryTip === "받음 · 묶음 d-990" &&
       letter("m-904")?.kind === "워커 끝남" && letter("m-904").body === "보고 전에 판이 끝났어요",
@@ -355,6 +377,21 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a question is answered where it stands; a notice the coordinator holds acknowledges its whole batch, one it has not read offers nothing",
       letter("m-901").act === "답하기" && letter("m-903").act === "확인 · 이 묶음 6통" &&
       letter("m-902").act === "" && letter("m-904").act === "", JSON.stringify(mail.letters));
+    const counted = await page.evaluate(async () => {
+      const held = window.__DESK__;
+      window.__DESK__ = { ...held, revision: held.revision + 1, counts: { ...held.counts, folded: 41 } };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const line = document.querySelector('#board-view [data-desk-block="mail"] .board-desk-news-folded');
+      const said = line && !line.hidden ? line.textContent : "";
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1, counts: held.counts };
+      refreshDeskLedger();
+      return said;
+    });
+    await settleMail();
+    ok("the notices no line stands for are the backend's count, drawn and never listed",
+      counted === "접힌 소식 41통 · 하루 지났거나 끝난 침묵" && (await readMail()).folded === "", counted);
 
     /* 분류기 거절과 그 때문에 바뀐 모델(t-6747): 둘째 줄은 원장이 적은 사실 그대로 —
      * 분류, 거절 뒤에 무엇이 서 있는지, 어느 모델로 얼마 동안 바뀌었는지. */
@@ -421,19 +458,23 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const held = afterAck.letters.find((one) => one.key === "run-desk/m-903");
     ok("the screen invents no acknowledgement: the batch is asked of the ledger, and the letter stays until the ledger says so",
       acked.length === 1 && acked[0].run === "run-desk" && acked[0].delivery === "d-990" &&
-      held && held.note === "묶음을 확인함 · 원장에 적히면 목록에서 빠져요" && afterAck.head === "답할 우편 · 20",
+      held && held.note === "묶음을 확인함 · 원장에 적히면 목록에서 빠져요" && afterAck.head === "답할 우편 · 6",
       JSON.stringify({ acked, held }));
     const landed = await page.evaluate(async () => {
-      window.__DESK__ = { ...window.__DESK__, mail: window.__DESK__.mail.filter((one) =>
-        one.id !== "m-901" && one.delivery_id !== "d-990") };
+      const kept = (one) => one.id !== "m-901" && one.delivery_id !== "d-990";
+      const mail = window.__DESK__.mail.filter(kept);
+      const news = window.__DESK__.news.filter(kept);
+      window.__DESK__ = { ...window.__DESK__, mail, news,
+        counts: { ...window.__DESK__.counts, mail: mail.length, news: news.length } };
       refreshDeskLedger();
       await new Promise((done) => setTimeout(done, 0));
-      return window.__DESK__.mail.length;
+      return [mail.length, news.length];
     });
     await settleMail();
     const cleared = await readMail();
     ok("once the ledger records the answer and the acknowledgement, those letters leave the desk",
-      cleared.head === `답할 우편 · ${landed}` && !cleared.letters.some((one) => one.key === "run-desk/m-901" || one.key === "run-desk/m-903"),
+      cleared.head === `답할 우편 · ${landed[0]}` && cleared.newsHead === `소식 · ${landed[1]}` &&
+      !cleared.letters.some((one) => one.key === "run-desk/m-901" || one.key === "run-desk/m-903"),
       JSON.stringify(cleared));
     const unseated = await page.evaluate(async () => {
       window.__DESK__ = { ...window.__DESK__, runs: window.__DESK__.runs.map((one) => ({ ...one, seat: false })) };
@@ -450,6 +491,9 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     });
     ok("a run whose coordinator seat this window does not hold offers no answer and says why",
       unseated.act && unseated.said === "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요", JSON.stringify(unseated));
+    await settleMail();
+    // Folded again, as the rest of the suite found it.
+    await page.click('#board-view [data-desk-block="mail"] .board-desk-letters-more');
     await settleMail();
 
     /* ---- 워커: `worker-list`의 자리, 건강이 나쁜 워커가 먼저 ------------------- */
