@@ -55183,7 +55183,7 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
   const { page } = await openWindowTestPage(browser, origin);
   try {
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    const seen = await page.evaluate(async () => {
+    const seen = await page.evaluate(async ({ idleWindowMs }) => {
       const tell = (name, payload) => {
         for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
       };
@@ -55196,14 +55196,21 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
       await window.__PAINTED__();
       seen.shownForAgent = !toggle.hidden;
-      window.__ANSWER__.pane_log = () => ({
+      // The pane's transcript, answered the way the backend reads it: the turns
+      // after the page's cursor (the tail on the first read) and the cursor past
+      // them. A read that finds nothing new brings nothing, so the page's quick
+      // follow ends there as it does on a real file — an answer that repeated
+      // the three turns on every read was news every 160 ms, and the follow
+      // never stopped (t-9741).
+      const transcript = [
+        { role: "user", text: "Wallet 결제 레시피 만들어줘" },
+        { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login" },
+        { role: "assistant", text: "저장했습니다." },
+      ];
+      window.__ANSWER__.pane_log = (args) => ({
         found: true,
-        next: 3,
-        turns: [
-          { role: "user", text: "Wallet 결제 레시피 만들어줘" },
-          { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login" },
-          { role: "assistant", text: "저장했습니다." },
-        ],
+        next: transcript.length,
+        turns: transcript.slice(args.after ?? 0),
       });
       const view = termViews.get(term);
       const slot = document.querySelector(`.pane-slot[data-term="${term}"]`);
@@ -55222,6 +55229,16 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       // The hooks are the transcript's own events: a state or a tool call on
       // this pane makes the page read now, not on its next tick — and only
       // the pane on screen, not another's.
+      //
+      // 「지금」은 사건을 받는 그 자리다. 받이(`hook:agent`·`hook:activity`)가
+      // `pollHelperPages()`를 곧바로 부르고 목의 `invoke`는 그 부름 안에서 이
+      // 통에 닿으므로, 한 사건이 시킨 읽기는 `tell`이 도는 동기 구간의 계수
+      // 차이다(`readsFor`). 창이 시계로 하는 읽기 — 일하는 판의 쫓아 읽기
+      // 160 ms, 보는 페이지의 박자 1 s — 는 그 구간에 끼어들 수 없다. 벽시계로
+      // 기다린 뒤에 세던 때는 그 둘이 기다림 안에 떨어지면 「남의 판이 시킨
+      // 읽기」로 세어졌고, 언제 떨어지는지는 기계의 부하가 정했다(2026-09-21
+      // 세 레인, 2026-09-26 릴리즈 레인 두 번; `WINDOW_FRAME_LAG_MS=60`이면
+      // 매번 — t-9741).
       let polled = 0;
       const answerLog = window.__ANSWER__.pane_log;
       // 이 판의 읽기만 센다. 통이 창 전체를 세면 다른 판의 폴러가 늦게
@@ -55230,47 +55247,48 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         if (args.term === term) polled += 1;
         return answerLog(args);
       };
-      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
+      const readsFor = (name, payload) => {
+        const before = polled;
+        tell(name, payload);
+        return polled - before;
+      };
+      seen.hookPolled = readsFor("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false }) === 1;
       await settle();
-      seen.hookPolled = polled === 1;
       // The page's pulse follows the hook: the status line breathes while the
       // turn is out and is gone when it ends ("대화창이 계속 움직이는건" —
       // a page born "running" never stopped).
       seen.busyWhileWorking = chat.querySelector(".helper-status")?.hidden === false;
+      // The end of the turn repaints the page once although the read it makes
+      // brings nothing — the last words came with an earlier read — and a
+      // resting page's beats repaint nothing: the page follows the hooks it
+      // shows (`paneChatKey`), not only the lines its file adds (t-9741).
+      let painted = 0;
+      const paintPage = window.paintPaneChat;
+      window.paintPaneChat = (at) => {
+        if (at === term) painted += 1;
+        return paintPage(at);
+      };
       tell("hook:agent", { term, state: "done", agent: "claude", session: "s-view", resumable: false });
       await window.__PAINTED__();
       await settle();
       seen.quietWhenDone = chat.querySelector(".helper-status")?.hidden === true &&
         chat.querySelector(".worker-state")?.textContent === t("worker.idle", "대기 중");
+      seen.donePaints = painted;
+      painted = 0;
+      // The beats the harness's idle window holds, each the clock's own read.
+      for (let beat = 0; beat < Math.ceil(idleWindowMs / HELPER_POLL_MS); beat += 1) await pollHelperPages();
+      seen.idleBeatPaints = painted;
+      window.paintPaneChat = paintPage;
       tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
       await window.__PAINTED__();
       await settle();
       seen.busyAgain = chat.querySelector(".helper-status")?.hidden === false;
-      // 쫓아 읽기를 멈춘 뒤에 센다. 일하는 판은 읽은 뒤 160 ms에 또 읽도록
-      // 예약하므로(`quickFollow`), 그 예약이 기다림 안에 들어오면 세는 것이
-      // 「이 사건이 시킨 읽기」가 아니라 「그 사이 몇 번 쫓아 읽었나」가 된다.
-      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-view", resumable: false });
-      await settle();
-      await settle();
-      await settle();
-      const beforeMine = polled;
-      tell("hook:activity", { pane: `term:${term}`, activities: [{ verb: "Read", target: "a.rs", phase: "start" }] });
-      await settle();
-      // 「지금 읽었나」만 묻는다 — 몇 번 읽었는지는 쫓아 읽기가 정하고,
-      // 그 수는 기계의 속도다. 남의 판 쪽은 아래에서 0으로 못 박는다.
-      seen.activityPolled = polled > beforeMine;
-      // 이 판의 읽기가 예약한 쫓아 읽기(160 ms)가 다 지나간 뒤에야 남의 판을
-      // 센다 — 그 예약이 아래 기다림 안에 떨어지면 「남의 판이 시킨 읽기」로
-      // 잘못 세어지고, 그 시각은 기계의 부하가 정한다(2026-09-21 세 레인이
-      // 기계를 같이 쓰는 동안 붉었다 푸르렀다 했다).
-      await settle();
-      await settle();
-      await settle();
-      const beforeOther = polled;
-      tell("hook:activity", { pane: `term:${term + 1}`, activities: [{ verb: "Read", target: "b.rs", phase: "start" }] });
+      seen.activityPolled = readsFor("hook:activity", { pane: `term:${term}`, activities: [{ verb: "Read", target: "a.rs", phase: "start" }] }) === 1;
+      // 그 읽기가 돌아온 뒤에 남의 판 사건을 흘린다. 읽기가 떠 있는 동안 온
+      // 부름은 `again`으로 그 읽기 뒤에 미뤄져 이 구간 밖에서 나가므로, 떠
+      // 있을 때 세면 남의 판에 읽는 창도 0을 받는다.
       await window.__PAINTED__();
-      await settle();
-      seen.otherPaneQuiet = polled === beforeOther;
+      seen.otherPaneQuiet = readsFor("hook:activity", { pane: `term:${term + 1}`, activities: [{ verb: "Read", target: "b.rs", phase: "start" }] }) === 0;
       window.__ANSWER__.pane_log = answerLog;
       // A question the hook DESCRIBED stays in the conversation as the
       // extension's card: the tool, its edit as a diff, allow / deny / say
@@ -55408,13 +55426,14 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       for (const at of [...termViews.keys()]) dropTermView(at);
       seen.forgotten = paneChats.size === 0;
       return seen;
-    });
+    }, { idleWindowMs: IDLE_TICK_WINDOW_MS });
     ok(
       "the active agent pane's toggle swaps its screen for its conversation in the same slot — turns from the pane's own transcript, a composer, the screen hidden, a described question standing as the extension's card (tool, diff, allow · deny · instead, on the agent's accent, quiet under the poll, gone when the agent moves on), an undescribed one bringing the screen back, and no toggle on a plain shell",
       seen.hiddenBeforeAgent && seen.shownForAgent && seen.screenHidden && seen.chatShown && seen.chatArrived &&
         seen.turns === 3 && seen.composer && seen.chatPressed === "true" && seen.name !== "" &&
         seen.hookPolled && seen.activityPolled && seen.otherPaneQuiet &&
         seen.busyWhileWorking && seen.quietWhenDone && seen.busyAgain &&
+        seen.donePaints === 1 && seen.idleBeatPaints === 0 &&
         seen.cardShown && seen.cardTool === seen.wantCardTool && seen.cardDiff === 2 && seen.cardBeforeComposer &&
         seen.cardActs === "is-allow,is-deny,is-instead" && seen.cardInDock &&
         seen.cardQuietPaint === 0 && seen.approved === seen.wantApproved && seen.cardQuietAfter && seen.cardGone &&

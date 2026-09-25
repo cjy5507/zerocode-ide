@@ -2286,6 +2286,47 @@ const installHarnessHands = (surface) => surface.addInitScript((primaryEvent) =>
   };
 }, PRIMARY_EVENT);
 
+/* `WINDOW_FRAME_LAG_MS=<ms>`: every animation frame on the page lands this
+ * much later — a loaded machine's frames, on an idle one (t-9741).
+ *
+ * Under load the renderer's frames are what slip first, so a check that waits
+ * a frame or two and then counts what the page's own timers did meanwhile
+ * counts more of them. That is how a load flake reads in a lane: once in a
+ * while, on a busy night. With the frames held late on purpose the same check
+ * reads it on every run, so a determinism fix can be shown red before and
+ * green after on a quiet machine. A cancelled frame stays cancelled, whether
+ * it was still waiting for the frame or already waiting out the lag. */
+const lagFrames = (surface) => {
+  const lag = Number(process.env.WINDOW_FRAME_LAG_MS ?? 0);
+  if (!(lag > 0)) return null;
+  return surface.addInitScript((late) => {
+    const frame = window.requestAnimationFrame.bind(window);
+    const cancelFrame = window.cancelAnimationFrame.bind(window);
+    const waiting = new Map();
+    let last = 0;
+    window.requestAnimationFrame = (callback) => {
+      last += 1;
+      const id = last;
+      const held = { timer: null };
+      held.frame = frame((stamp) => {
+        held.timer = setTimeout(() => {
+          waiting.delete(id);
+          callback(stamp);
+        }, late);
+      });
+      waiting.set(id, held);
+      return id;
+    };
+    window.cancelAnimationFrame = (id) => {
+      const held = waiting.get(id);
+      if (!held) return;
+      waiting.delete(id);
+      cancelFrame(held.frame);
+      if (held.timer !== null) clearTimeout(held.timer);
+    };
+  }, lag);
+};
+
 /* A fresh document for scenarios that own their timing, adapters or pane
  * layout — and, since t-4017, for every suite that owns its state: the page
  * dies with the suite, so nothing the suite moved (the active workspace, the
@@ -2314,6 +2355,7 @@ export async function openWindowTestPage(browser, origin, { faults = [], before 
   }
   await standBackend(page);
   await installHarnessHands(page);
+  await lagFrames(page);
   if (before) await before(page);
   await page.goto(`${origin}/index.html`);
   try {
