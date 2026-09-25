@@ -3,7 +3,7 @@
 use serde_json::Value;
 use zerocode_core::computer_use::{
     ComputerPermissionId, ComputerPermissionReport, ComputerPermissionReset,
-    ComputerPermissionSetup,
+    ComputerPermissionRowAction, ComputerPermissionSetup,
 };
 use zerocode_core::computer_use_protocol::error_code;
 
@@ -46,6 +46,7 @@ pub(super) fn open_permission(
         platform: std::env::consts::OS.into(),
         helper_app_path: None,
         judged_rows: Vec::new(),
+        tcc_rows: Vec::new(),
         permission_id,
         requested_os: false,
         opened_settings: false,
@@ -60,6 +61,15 @@ pub(super) fn reset_permissions() -> Result<ComputerPermissionReset, ComputerUse
         report: unsupported_permissions(),
         bundle_ids: Vec::new(),
     })
+}
+
+/// No TCC database stands here, so no row either: unsupported, said aloud.
+pub(super) fn tcc_row_action(
+    _id: ComputerPermissionId,
+    _bundle_id: &str,
+    _action: ComputerPermissionRowAction,
+) -> Result<ComputerPermissionReport, ComputerUseError> {
+    Err(refusal())
 }
 
 #[cfg(test)]
@@ -79,5 +89,15 @@ mod tests {
             Some(ComputerPermissionId::Accessibility)
         );
         assert!(reset_permissions().unwrap().bundle_ids.is_empty());
+        assert_eq!(
+            tcc_row_action(
+                ComputerPermissionId::Accessibility,
+                "dev.zerocode.app",
+                ComputerPermissionRowAction::Reset,
+            )
+            .unwrap_err()
+            .code,
+            "unsupported_capability"
+        );
     }
 }

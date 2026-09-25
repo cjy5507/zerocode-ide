@@ -77,7 +77,7 @@ use std::sync::{Mutex, OnceLock};
 use serde_json::Value;
 use zerocode_core::computer_use::{
     ComputerPermissionId, ComputerPermissionReport, ComputerPermissionReset,
-    ComputerPermissionSetup,
+    ComputerPermissionRowAction, ComputerPermissionSetup,
 };
 
 pub use screenshot_export::{export_screenshot, screenshot_png};
@@ -178,4 +178,15 @@ pub fn setup_permission(
 
 pub fn reset_permissions() -> Result<ComputerPermissionReset, ComputerUseError> {
     platform::reset_permissions()
+}
+
+/// A TCC row's button, pressed by the person on the settings page — never by
+/// anything else: `action` on `bundle_id`'s row of `id`'s service, answered
+/// with the report read after it.
+pub fn tcc_row_action(
+    id: ComputerPermissionId,
+    bundle_id: &str,
+    action: ComputerPermissionRowAction,
+) -> Result<ComputerPermissionReport, ComputerUseError> {
+    platform::tcc_row_action(id, bundle_id, action)
 }

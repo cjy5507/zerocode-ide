@@ -67,12 +67,12 @@ pub(crate) use browser::{
 
 pub(crate) use fs::{
     browse_dir, browse_places, browser_snapshot, computer_use_capabilities,
-    computer_use_permission_status, file_version, fs_create, fs_duplicate, fs_move,
-    fs_open_default, fs_redo, fs_rename, fs_reveal, fs_trash, fs_undo, image_diff, list_dir,
-    open_computer_use_permission, open_download, orchestration_runtime_state, path_kinds,
-    paths_exist, read_image_file, read_text_file, render_mermaid, reset_computer_use_permissions,
-    resume_vault_session, reveal_vault_session, set_clipboard_image, show_download, vault_sessions,
-    watch_files, write_text_file,
+    computer_use_permission_status, computer_use_tcc_row_action, file_version, fs_create,
+    fs_duplicate, fs_move, fs_open_default, fs_redo, fs_rename, fs_reveal, fs_trash, fs_undo,
+    image_diff, list_dir, open_computer_use_permission, open_download, orchestration_runtime_state,
+    path_kinds, paths_exist, read_image_file, read_text_file, render_mermaid,
+    reset_computer_use_permissions, resume_vault_session, reveal_vault_session,
+    set_clipboard_image, show_download, vault_sessions, watch_files, write_text_file,
 };
 
 pub(crate) use usage::{

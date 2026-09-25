@@ -443,12 +443,26 @@ fn accessibility_status() -> PermissionStatus {
     }
 }
 
+/// Where a TCC database stands under its root — `/` for the system's, the
+/// home directory for the person's. One spelling for every reader of either.
+#[cfg(target_os = "macos")]
+pub(crate) const TCC_DATABASE: &str = "Library/Application Support/com.apple.TCC/TCC.db";
+
 #[cfg(target_os = "macos")]
 fn full_disk_access_status() -> PermissionStatus {
     let Some(home) = dirs::home_dir() else {
         return PermissionStatus::Unknown;
     };
-    let database = home.join("Library/Application Support/com.apple.TCC/TCC.db");
+    tcc_database_access(&home.join(TCC_DATABASE))
+}
+
+/// Whether this process may open the TCC database at `database` — the one
+/// open attempt Full Disk Access is judged by: the person's database for this
+/// page's row, the system's for Computer Use's rows (t-6058). Only an open
+/// that was refused is `Denied`; a database that is simply not there is
+/// `Unknown`, never a verdict on the grant.
+#[cfg(target_os = "macos")]
+pub(crate) fn tcc_database_access(database: &std::path::Path) -> PermissionStatus {
     match std::fs::File::open(database) {
         Ok(_) => PermissionStatus::Granted,
         Err(error)

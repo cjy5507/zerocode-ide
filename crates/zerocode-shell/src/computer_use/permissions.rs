@@ -36,6 +36,8 @@ pub(super) fn unsupported_permissions() -> ComputerPermissionReport {
         helper_unavailable_reason: None,
         permissions: every_permission(ComputerPermissionStatus::Unsupported),
         judged_rows: Vec::new(),
+        // No TCC database stands here: no rows to read, said by an empty list.
+        tcc_rows: Vec::new(),
     }
 }
 
