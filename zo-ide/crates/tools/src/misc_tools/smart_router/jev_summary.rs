@@ -13,6 +13,7 @@
 //! and a reader that knew which was which would carry a second copy of a fact
 //! the table already holds. Both roots are asked for the file the table names.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -54,6 +55,9 @@ pub struct DayTally {
     /// The comparisons the seat's rows carried that day — the marks its own
     /// writer left, counted the way the judge counts them.
     pub agreement: promote::Agreement,
+    /// Why that day's rows that compared nothing say so, word by word
+    /// ([`summary::not_compared_words`], t-9556).
+    pub not_compared_by: BTreeMap<String, usize>,
 }
 
 /// One seat, counted.
@@ -107,6 +111,10 @@ pub struct SeatReport {
     /// on; this one is the number a seat that never rises (recall) still
     /// earns, and the one a week's trend is read from (t-5806).
     pub agreement_week: promote::Agreement,
+    /// Why the week's rows that compared nothing say so, word by word
+    /// ([`summary::not_compared_words`], t-9556) — `agreement_week`'s
+    /// `not_compared`, told apart.
+    pub not_compared_week: BTreeMap<String, usize>,
     /// The requests the judgment's cadence counts: every one the newest
     /// answering version was asked ([`promote::asked_toward_judgment`]).
     pub asked_toward_judgment: usize,
@@ -292,6 +300,7 @@ pub fn days_of(rows: &[&Value], now_ms: i64, offset_s: i64) -> Vec<DayTally> {
                 start_ms,
                 tally: summary::summarize_rows(held.iter().copied(), i64::MIN),
                 agreement: summary::agreement_rows(held.iter().copied(), i64::MIN),
+                not_compared_by: summary::not_compared_words(held.iter().copied(), i64::MIN),
             }
         })
         .collect()
@@ -317,6 +326,7 @@ fn one_with(
     let week_since_ms = now_ms - WINDOW_DAYS * MS_PER_DAY;
     let week = summary::summarize_rows(version.rows.iter().copied(), week_since_ms);
     let agreement_week = summary::agreement_rows(version.marks.iter().copied(), week_since_ms);
+    let not_compared_week = summary::not_compared_words(version.marks.iter().copied(), week_since_ms);
     let asked_model = zerocode_core::jev::model_in(settings.unwrap_or(&Value::Null)).to_string();
     let cost_usd = cost_of(summary::summarize(&rows, week_since_ms).input_tokens, &asked_model);
     let asked_toward_judgment = version.asked();
@@ -349,6 +359,7 @@ fn one_with(
         clears_rise_floor,
         judged,
         agreement_week,
+        not_compared_week,
         asked_toward_judgment,
         baseline: seat.baseline.kind(),
         negatives_wanted: seat.negatives_wanted,

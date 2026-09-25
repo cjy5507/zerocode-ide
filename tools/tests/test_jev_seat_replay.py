@@ -47,6 +47,7 @@ def seat(id: str, found: bool, verdict: str, line: str | None, compared: int, ag
                 "compared": compared,
                 "agreed": agreed,
                 "notCompared": 4,
+                "notComparedBy": {"unseen": 1, "not_carried": 3},
                 "lowerBound": 0.5,
                 "baselineAgreed": 1,
                 "baselineCompared": 2,
@@ -131,11 +132,23 @@ class TheTable(unittest.TestCase):
         rows = replay.rows_of([("before", before), ("after", after)], [])
         self.assertEqual([(row["seat"], row["binary"]) for row in rows], [("recall", "before"), ("recall", "after")])
         text = replay.render(rows)
-        self.assertIn("| recall | before | recording | fall (latency) | 25/25 | 25 | 300/640 | 0/0 (0.500) | 4 | 1/2 | 9 | 3 |", text)
+        self.assertIn(
+            "| recall | before | recording | fall (latency) | 25/25 | 25 | 300/640 | 0/0 (0.500) | 4 (not_carried 3 · unseen 1) | 1/2 | 9 | 3 |",
+            text,
+        )
         self.assertIn("| recall | after | recording | keep | 25/25 |", text)
         named = replay.rows_of([("before", before)], ["routing"])
         self.assertEqual([row["seat"] for row in named], ["routing"], "a named seat is tabled though nothing was found")
         self.assertTrue(re.match(r"^\| seat \|", text))
+
+    def test_why_the_rows_compare_nothing_rides_word_by_word(self) -> None:
+        # t-9556: the reasons the binary counted, most first, and nothing
+        # where a binary counted none or predates the words.
+        row = replay.seat_row(seat("placement", True, "hold", "agreement", 1, 1), "after")
+        self.assertEqual(row["notComparedBy"], {"unseen": 1, "not_carried": 3})
+        older = seat("placement", True, "hold", "agreement", 1, 1)
+        del older["judged"]["agreement"]["notComparedBy"]
+        self.assertIn("| 4 |", replay.render([replay.seat_row(older, "before")]))
 
     def test_a_binary_is_named_by_its_label(self) -> None:
         self.assertEqual(replay.binaries(["before=/a/zo"]), [("before", Path("/a/zo"))])

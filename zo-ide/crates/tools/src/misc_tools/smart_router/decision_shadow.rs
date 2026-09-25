@@ -1257,6 +1257,7 @@ fn judge_rows_on(
         window,
         window_wanted,
         agreement,
+        not_compared_by: jev_ledger::not_compared_words(compared.iter().copied(), i64::MIN),
         control_rows,
         model: version.model.map(str::to_string),
         cut: version.cut.map(str::to_string),

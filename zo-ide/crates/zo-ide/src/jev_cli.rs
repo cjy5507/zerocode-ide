@@ -14,6 +14,7 @@
 //! for a program, and an exit code that says the answer (an `ask` exits 0 for
 //! yes and 1 for no) so a worker's script can branch on it without parsing.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -382,7 +383,9 @@ fn tally_json(tally: &jev_summary::SeatTally) -> Value {
     })
 }
 
-fn agreement_json(agreement: &jev_summary::SeatAgreement) -> Value {
+/// One agreement, beside why its rows that compared nothing say so, word by
+/// word (t-9556) — every agreement the answer carries says both.
+fn agreement_json(agreement: &jev_summary::SeatAgreement, withheld: &BTreeMap<String, usize>) -> Value {
     json!({
         "compared": agreement.compared,
         "agreed": agreement.agreed,
@@ -393,6 +396,7 @@ fn agreement_json(agreement: &jev_summary::SeatAgreement) -> Value {
         "baselineAgreed": agreement.baseline_agreed,
         "baselineShare": agreement.baseline_share(),
         "notCompared": agreement.not_compared,
+        "notComparedBy": withheld,
     })
 }
 
@@ -439,7 +443,7 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 // it — the numbers a seat is promoted on, which are not the
                 // week's.
                 "judged": seat.judged.as_ref().map(|judged| {
-                    let mut agreement = agreement_json(&judged.agreement);
+                    let mut agreement = agreement_json(&judged.agreement, &judged.not_compared_by);
                     // Control rows joined to the window for the comparison —
                     // the probe run once more beside a judgment an active
                     // turn acted on. They are in no other number here.
@@ -458,7 +462,7 @@ fn render_json(seats: &[SeatReport]) -> Value {
                     .map(|day| json!({
                         "startMs": day.start_ms,
                         "tally": tally_json(&day.tally),
-                        "agreement": agreement_json(&day.agreement),
+                        "agreement": agreement_json(&day.agreement, &day.not_compared_by),
                     }))
                     .collect::<Vec<Value>>(),
                 // The last requests, newest first, when `--recent` asked.
@@ -466,7 +470,7 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 // Every `agreed` mark of the week, counted whether or not the
                 // seat rises — the recall seat's only agreement number, and
                 // the routing seat's turn labels beside its probe axes.
-                "agreementWeek": agreement_json(&seat.agreement_week),
+                "agreementWeek": agreement_json(&seat.agreement_week, &seat.not_compared_week),
                 // The reader the seat is held against and how many times its
                 // label must have said no (t-6342), from the table.
                 "baseline": seat.baseline,

@@ -2193,6 +2193,10 @@ pub struct SeatAgreement {
     /// Label rows that compared nothing and said why.
     #[serde(default)]
     pub not_compared: usize,
+    /// Why, word by word — the writers' own words with their counts
+    /// (t-9556); empty from a zo older than the words.
+    #[serde(default)]
+    pub not_compared_by: std::collections::BTreeMap<String, usize>,
 }
 
 /// What the judge said of a seat's recent window.

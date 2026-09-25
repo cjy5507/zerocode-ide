@@ -158,6 +158,8 @@ def seat_row(seat: dict, binary: str) -> dict:
         "compared": agreement.get("compared"),
         "agreed": agreement.get("agreed"),
         "notCompared": agreement.get("notCompared"),
+        # Why, word by word (t-9556) — absent from a binary older than it.
+        "notComparedBy": agreement.get("notComparedBy"),
         "lowerBound": agreement.get("lowerBound"),
         "baselineAgreed": agreement.get("baselineAgreed"),
         "baselineCompared": agreement.get("baselineCompared"),
@@ -184,6 +186,14 @@ def cell(value) -> str:
     return "—" if value is None else str(value)
 
 
+def withheld(row: dict) -> str:
+    """How many rows compared nothing, and why, most first: `4 (not_carried
+    3 · unseen 1)`; the count alone where the binary said no words."""
+    words = row.get("notComparedBy") or {}
+    said = " · ".join(f"{word} {count}" for word, count in sorted(words.items(), key=lambda one: (-one[1], one[0])))
+    return cell(row["notCompared"]) + (f" ({said})" if said else "")
+
+
 def render(rows: list[dict]) -> str:
     """The rows as one markdown table."""
     head = "| seat | binary | stand | verdict (line) | window | calls | p50/p95 ms | agreed/compared (lower) | not compared | baseline | week answered | to next |"
@@ -203,7 +213,7 @@ def render(rows: list[dict]) -> str:
                     cell(row["called"]),
                     f"{cell(row['p50'])}/{cell(row['p95'])}",
                     f"{cell(row['agreed'])}/{cell(row['compared'])} ({bound})",
-                    cell(row["notCompared"]),
+                    withheld(row),
                     f"{cell(row['baselineAgreed'])}/{cell(row['baselineCompared'])}",
                     cell(row["weekAnswered"]),
                     cell(row["toNext"]),

@@ -253,6 +253,55 @@ fn the_json_carries_the_days_the_refusals_the_applied_count_and_the_recent_list(
     assert_eq!(placement["days"].as_array().map(Vec::len), Some(7), "the days always ride");
 }
 
+/// Every agreement the JSON carries says why its rows compare nothing, word
+/// by word (t-9556): the words the label rows wrote, each with its count, so
+/// a screen says "not carried 2 · unseen 1" and not only "3". A row that
+/// carries a mark is a mark, whatever else it spells.
+#[test]
+fn the_json_says_why_the_rows_compare_nothing_word_by_word() {
+    use zerocode_core::worker_placement::{NOT_CARRIED, UNSEEN};
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::PLACEMENT;
+    let asked = |at: i64, worker: &str| {
+        serde_json::json!({"at": at, "placement": worker, "outcome": "answered", "elapsedMs": 40, "requests": 1,
+                           "chosen": "split", "confidence": 0.7, "rubricVersion": seat.rubric_version})
+    };
+    let rows = [
+        asked(100, "w-1"),
+        asked(110, "w-2"),
+        asked(120, "w-3"),
+        asked(130, "w-4"),
+        serde_json::json!({"at": 200, "label": "w-1", "notCompared": UNSEEN}),
+        serde_json::json!({"at": 210, "label": "w-2", "notCompared": NOT_CARRIED}),
+        serde_json::json!({"at": 220, "label": "w-3", "notCompared": NOT_CARRIED}),
+        serde_json::json!({"at": 230, "label": "w-4", "agreed": true, "notCompared": UNSEEN}),
+    ];
+    std::fs::write(
+        home.path().join(seat.ledger),
+        rows.iter().map(|row| row.to_string() + "\n").collect::<String>(),
+    )
+    .expect("write");
+    let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let placement = value["seats"]
+        .as_array()
+        .expect("seats")
+        .iter()
+        .find(|row| row["id"] == seat.id)
+        .expect("placement");
+    let words = serde_json::json!({ NOT_CARRIED: 2, UNSEEN: 1 });
+    assert_eq!(placement["agreementWeek"]["notCompared"], 3);
+    assert_eq!(placement["agreementWeek"]["notComparedBy"], words, "the week");
+    assert_eq!(placement["judged"]["agreement"]["notComparedBy"], words, "the judged window");
+    assert_eq!(placement["days"][6]["agreement"]["notComparedBy"], words, "today");
+    assert_eq!(
+        placement["days"][0]["agreement"]["notComparedBy"],
+        serde_json::json!({}),
+        "a day nothing was withheld on says so"
+    );
+}
+
 /// Every seat's line says which id it asks with and which version answered
 /// (t-6187): the person's pin, or the alias, beside the `model` its newest
 /// request named — and a verdict read on rows a change of version cut
@@ -420,6 +469,7 @@ fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
             "baselineAgreed": 0,
             "baselineShare": null,
             "notCompared": 0,
+            "notComparedBy": {},
         })
     );
 

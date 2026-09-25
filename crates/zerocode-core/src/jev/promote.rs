@@ -90,7 +90,7 @@
 //! ([`crate::jev::SKILLS`], [`crate::jev::SKILL_SUGGESTION`]), each judged
 //! on its own rows and standing on its own rise.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::{Value, json};
 
@@ -120,6 +120,10 @@ pub struct Judged {
     /// floor ([`crate::jev::summary::marks_from`]) — the judgment named what
     /// the reader it would replace named.
     pub agreement: Agreement,
+    /// Why that window's rows that compared nothing say so, word by word
+    /// ([`crate::jev::summary::not_compared_words`], t-9556): the
+    /// agreement's `not_compared`, told apart.
+    pub not_compared_by: BTreeMap<String, usize>,
     /// Control rows the agreement was read over beside the window's own —
     /// the routing seat's probe run once more for a sampled active turn
     /// ([`crate::jev::summary::CONTROL`]), joined to the window by task.
@@ -631,6 +635,8 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
     let marks_since =
         crate::jev::summary::marks_from(version.marks.iter().copied(), since_ms, sample_floor);
     let agreement = crate::jev::summary::agreement_rows(version.marks.iter().copied(), marks_since);
+    let not_compared_by =
+        crate::jev::summary::not_compared_words(version.marks.iter().copied(), marks_since);
     // The label's whole record on this version, not the window's: a seat
     // that is right almost every time is not held for being right lately.
     let record = crate::jev::summary::agreement_rows(version.marks.iter().copied(), i64::MIN);
@@ -656,6 +662,7 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
         window,
         window_wanted,
         agreement,
+        not_compared_by,
         control_rows: 0,
         model: version.model.map(str::to_string),
         cut: version.cut.map(str::to_string),
