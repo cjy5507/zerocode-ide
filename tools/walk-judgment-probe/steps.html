@@ -2,10 +2,12 @@
 <style>body{font:18px system-ui;margin:24px}button{font:inherit;padding:8px;margin:6px}</style>
 <h1>Checkout</h1>
 <p id="step">Step 1 of 4</p>
-<button type="button" id="next">Next: step 2</button>
+<button type="button" id="next">Next: step 2</button> <button type="button" id="save">Save for later</button>
 <script>
-// Every press re-draws the step and its own button at once, so the page a
-// press leaves is the page it settles on, and each look asks a new question.
+// Every press of Next re-draws the step and its own button at once, so the
+// page a press leaves is the page it settles on, and each look asks a new
+// question. A second control stands beside it, as on a real page: a question
+// begun before a press has something left to offer once Next is spent.
 window.probe = { count: 0 };
 let at = 1;
 document.querySelector('#next').onclick = () => {
