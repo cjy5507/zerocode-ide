@@ -3,6 +3,12 @@
 
 pub const VAULT_PAIR_RUBRIC_VERSION: u32 = 1;
 
+/// The challenger arm's comparison: the words the judge is asked
+/// ([`crate::jev::challenger::ask`]) and the two designs' shape. Every row
+/// that asked names it ([`crate::jev::summary::RUBRIC_VERSION`]), so a changed
+/// question starts a series of its own (t-6263 R5).
+pub const CHALLENGER_RUBRIC_VERSION: u32 = 1;
+
 /// Skill suggestion's two requests share these words and thresholds in the
 /// SKILLS row. A changed question starts a new comparison series.
 pub const SKILL_SUGGESTION_RUBRIC_VERSION: u32 = 2;

@@ -31,15 +31,18 @@
 //! 3. **When a verdict lands** ([`note_challenger_verdicts`]): the
 //!    verification loop's receipt for the attempt — a `verdict` row about
 //!    that attempt's work, naming as the source it saw the very source the
-//!    attempt handed in ([`OnRecord::receipt`]) — writes the label. What a
-//!    verifier saw is taken when it starts and held until its turns end
-//!    ([`SourceWatch`]): a tree written under it, even back to the bytes it
-//!    had, is no source it saw. The verdict carries it whenever the
-//!    comparison lands, so a label follows the later of the two. A finished
-//!    attempt is not a receipt; a verifier that settled nothing, or that
-//!    judged some other source, labels nothing; and a label that names no
-//!    source, or one the record contradicts, is read as no label at all
-//!    ([`binding`]).
+//!    attempt handed in ([`OnRecord::receipt`]) — writes the label, with
+//!    when that verdict was recorded. What a verifier saw is taken when it
+//!    starts and held until its turns end ([`SourceWatch`]): a tree written
+//!    under it, even back to the bytes it had — any file the tree is written
+//!    from, the index's or not — is no source it saw. The verdict carries it
+//!    whenever the comparison lands, so a label follows the later of the
+//!    two. A finished attempt is not a receipt; a verifier that settled
+//!    nothing, or that judged some other source, labels nothing; and a label
+//!    that names no source, one that proves no binding once the record has
+//!    forgotten the run, or one the record contradicts — now, or before it
+//!    forgot the rows that said so, which a strike keeps — is read as no
+//!    label at all ([`binding`], [`bound_rows`]).
 //! 4. **Acting** (`auto` once the seat's own evidence has raised it, or a
 //!    person's `on`): a labelled comparison whose receipt and judge agree
 //!    becomes one verified sample of the challenger in the route-outcome
@@ -78,8 +81,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use zerocode_core::jev::challenger::spend::{self, Book, Op};
 use zerocode_core::jev::challenger::{
-    self as arm, Attempt, Comparison, Designs, Held, Preferred, Receipt, ATTEMPT, CHALLENGER_MODEL,
-    COST_MICROS, INCUMBENT_MODEL, ROLE,
+    self as arm, Attempt, Comparison, Designs, Held, Preferred, Receipt, Receipted, ATTEMPT,
+    CHALLENGER_MODEL, COST_MICROS, INCUMBENT_MODEL, ROLE,
 };
 use zerocode_core::jev::door::Refused;
 use zerocode_core::jev::summary::{AGREED, LABEL, OUTCOME};
@@ -99,10 +102,12 @@ use super::shadow_ledger::{
 pub const CHALLENGER_FILE: &str = CHALLENGER.ledger;
 
 /// The version of the comparison's question — the words the judge is asked
-/// (`zerocode_core::jev::challenger::ask`) and the two designs' shape. A
-/// row's request digest carries it, so a later reading of the question
-/// starts a window of its own.
-pub const CHALLENGER_RUBRIC_VERSION: u32 = 1;
+/// (`zerocode_core::jev::challenger::ask`) and the two designs' shape: the
+/// core question table's own number, never a copy. Every row that asked
+/// names it ([`ChallengerRow::rubric_version`]) and its request digest
+/// carries it, so a later reading of the question starts a window of its
+/// own (t-6263 R5).
+pub const CHALLENGER_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::CHALLENGER_RUBRIC_VERSION;
 
 /// The wall one comparison waits — the use table's own number.
 const COMPARISON_DEADLINE: Duration = Duration::from_millis(CHALLENGER_APPLY_DEADLINE_MS);
@@ -1003,6 +1008,7 @@ impl Drawn {
         let row = ChallengerRow {
             at: arm.now_ms(),
             outcome: wire.outcome,
+            rubric_version: CHALLENGER_RUBRIC_VERSION,
             elapsed_ms: wire.elapsed_ms,
             requests: wire.requests,
             retries: wire.retries,
@@ -1016,9 +1022,13 @@ impl Drawn {
         };
         arm.write(&row);
         let cwd = &arm.inner.cwd;
-        let records = runtime::read_route_outcomes(cwd).unwrap_or_default();
-        let rows = bound_rows(&arm.ledger(), &OnRecord::of(&records));
-        let _ = judge_seat_rows(&CHALLENGER, &arm.ledger(), &rows, unix_millis_i64(arm.now_ms()));
+        // A record that cannot be read is not an empty one: no label is read
+        // off it, and the seat is judged the next time it can be.
+        if let Ok(records) = runtime::read_route_outcomes(cwd) {
+            let now_ms = unix_millis_i64(arm.now_ms());
+            let rows = bound_rows(&arm.ledger(), &OnRecord::of(&records), now_ms);
+            let _ = judge_seat_rows(&CHALLENGER, &arm.ledger(), &rows, now_ms);
+        }
         let _ = note_verdicts_in(cwd, (arm.inner.mode)(), &|sample| runtime::record_route_outcome(cwd, sample));
     }
 }
@@ -1076,6 +1086,10 @@ pub struct ChallengerRow {
     /// The door's word for an answered comparison, a failure's ledger token
     /// or the door's refusal.
     pub outcome: String,
+    /// The version of the question it asked ([`CHALLENGER_RUBRIC_VERSION`]),
+    /// under the one key every seat's row names it by
+    /// (`zerocode_core::jev::summary::RUBRIC_VERSION`).
+    pub rubric_version: u32,
     pub elapsed_ms: u64,
     pub requests: u32,
     pub retries: u32,
@@ -1103,6 +1117,7 @@ fn refused_row(attempt: &Attempt<'_>, incumbent: &str, refused: Refused, now_ms:
     ChallengerRow {
         at: now_ms,
         outcome: refused.token().to_string(),
+        rubric_version: CHALLENGER_RUBRIC_VERSION,
         elapsed_ms: 0,
         requests: 0,
         retries: 0,
@@ -1287,20 +1302,24 @@ pub fn source_of(work_dir: &Path) -> Option<String> {
 
 /// A bound verifier's watch over the source it reads, from the moment before
 /// its first turn to the end of its last: the tree of the work as the
-/// verifier starts ([`source_of`], hashed on a thread of its own while the
-/// verifier works), and the stamp of every file that tree is written from
+/// verifier starts — written the way [`source_of`] writes it, on a thread of
+/// its own while the verifier works, with every path it holds
+/// ([`runtime::git_snapshot::WorktreeSource`]) — and the stamp of every file
+/// a tree of the work can be written from
 /// ([`runtime::git_snapshot::WorktreeStamp`]), taken again when its turns
-/// are over. The same stamp both times says nothing in the tree was written
-/// in between — not even an edit put back to the bytes it replaced — so
-/// whatever the verifier read, it read that tree. Any change, or a stamp
-/// that cannot be taken, and the watch names no source: a verdict that
-/// cannot say it saw the work handed in is no receipt for it
-/// ([`OnRecord::receipt`]). What happens to the tree once its turns are
-/// over is not what it saw, and moves nothing.
+/// are over. The two stamps alike, the tree written from the HEAD the first
+/// one saw and every path it holds among the files it stamped
+/// ([`runtime::git_snapshot::WorktreeStamp::vouches_for`]): nothing in the
+/// tree was written in between — not even an edit put back to the bytes it
+/// replaced — so whatever the verifier read, it read that tree. Any change,
+/// a path the stamp did not watch, or a stamp that cannot be taken, and the
+/// watch names no source: a verdict that cannot say it saw the work handed
+/// in is no receipt for it ([`OnRecord::receipt`]). What happens to the
+/// tree once its turns are over is not what it saw, and moves nothing.
 pub(crate) struct SourceWatch {
     root: PathBuf,
     stamp: runtime::git_snapshot::WorktreeStamp,
-    tree: JoinHandle<Option<String>>,
+    tree: JoinHandle<Option<runtime::git_snapshot::WorktreeSource>>,
 }
 
 impl SourceWatch {
@@ -1314,7 +1333,7 @@ impl SourceWatch {
         let hashing = root.clone();
         let tree = std::thread::Builder::new()
             .name("zo-challenger-source".to_string())
-            .spawn(move || source_of(&hashing))
+            .spawn(move || runtime::git_snapshot::compute_worktree_source(&hashing).ok())
             .ok()?;
         Some(Self { root, stamp, tree })
     }
@@ -1323,9 +1342,9 @@ impl SourceWatch {
     /// in it changed since — `None` otherwise.
     #[must_use]
     pub(crate) fn seen(self) -> Option<String> {
-        let tree = self.tree.join().ok().flatten()?;
+        let source = self.tree.join().ok().flatten()?;
         let now = runtime::git_snapshot::worktree_stamp(&self.root).ok()?;
-        self.stamp.vouches_until(&now).then_some(tree)
+        self.stamp.vouches_for(&source, &now).then_some(source.tree)
     }
 }
 
@@ -1357,25 +1376,35 @@ fn handed_in_among<'r>(rows: &[&'r RouteOutcomeRecord]) -> Option<&'r str> {
 /// verdict judged is half of what it says, and a verdict that cannot say it
 /// judged this work is no receipt for it. Completion is not here: a spawn's
 /// own `completed` row is not a verdict.
-fn receipt_among(rows: &[&RouteOutcomeRecord]) -> Option<(Receipt, String)> {
+fn receipt_among(rows: &[&RouteOutcomeRecord]) -> Option<Receipted> {
     let handed_in = handed_in_among(rows)?;
-    let mut verdicts: Vec<&RouteOutcomeRecord> = rows
-        .iter()
-        .copied()
-        .filter(|record| record.signal.as_deref() == Some(VERDICT_SIGNAL))
-        .filter(|record| record.decision_kind() == DecisionKind::Verify)
-        .filter(|record| record.verdict_subject_kind() == VerdictSubject::Work)
-        .filter(|record| record.source.as_deref() == Some(handed_in))
-        .collect();
+    let mut verdicts: Vec<&RouteOutcomeRecord> =
+        rows.iter().copied().filter(|record| record.source.as_deref() == Some(handed_in)).collect();
     verdicts.sort_by_key(|record| record.recorded_at);
-    verdicts
-        .into_iter()
-        .find_map(|record| match record.status.as_str() {
-            runtime::OUTCOME_COMPLETED => Some(Receipt::Passed),
-            runtime::OUTCOME_FAILED => Some(Receipt::Failed),
-            _ => None,
+    verdicts.into_iter().find_map(|record| {
+        Some(Receipted {
+            receipt: settled_by(record)?,
+            source: handed_in.to_string(),
+            verdict_at: record.recorded_at,
         })
-        .map(|receipt| (receipt, handed_in.to_string()))
+    })
+}
+
+/// What a `verdict` row about an attempt's work settled — a pass or a
+/// failure of the WORK; `None` for any other row, for the verifier's own
+/// fault, and for a verifier that settled nothing.
+fn settled_by(record: &RouteOutcomeRecord) -> Option<Receipt> {
+    if record.signal.as_deref() != Some(VERDICT_SIGNAL)
+        || record.decision_kind() != DecisionKind::Verify
+        || record.verdict_subject_kind() != VerdictSubject::Work
+    {
+        return None;
+    }
+    match record.status.as_str() {
+        runtime::OUTCOME_COMPLETED => Some(Receipt::Passed),
+        runtime::OUTCOME_FAILED => Some(Receipt::Failed),
+        _ => None,
+    }
 }
 
 /// The `signal` word a verdict row carries, as the attribution recorders
@@ -1402,13 +1431,26 @@ impl<'r> OnRecord<'r> {
 
     /// `attempt`'s receipt ([`receipt_among`]).
     #[must_use]
-    pub(crate) fn receipt(&self, attempt: &str) -> Option<(Receipt, String)> {
+    pub(crate) fn receipt(&self, attempt: &str) -> Option<Receipted> {
         self.rows_of.get(attempt).and_then(|rows| receipt_among(rows))
     }
 
     /// Whether `attempt`'s own run row is still on record.
     fn ran(&self, attempt: &str) -> bool {
         self.rows_of.get(attempt).is_some_and(|rows| rows.iter().any(|record| is_run_row(record)))
+    }
+
+    /// Whether a verdict still on record about `attempt`'s work on `source`
+    /// settled it other than `verified` says ([`settled_by`]) — whenever it
+    /// was recorded: with the run gone, the record can no longer say which
+    /// verdict on the source was the first, only that one of them disagrees.
+    fn gainsays(&self, attempt: &str, source: &str, verified: Option<&str>) -> bool {
+        self.rows_of.get(attempt).is_some_and(|rows| {
+            rows.iter()
+                .filter(|record| record.source.as_deref() == Some(source))
+                .filter_map(|record| settled_by(record))
+                .any(|receipt| Some(receipt.token()) != verified)
+        })
     }
 }
 
@@ -1417,18 +1459,25 @@ impl<'r> OnRecord<'r> {
 /// the seat's own judgment (t-6263).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Binding {
-    /// It names the source its receipt judged, and the record says the same
-    /// — or no longer holds the attempt's run: the route-outcome ledger
-    /// keeps a bucket's newest rows only, and a label was held to the record
-    /// when it was written ([`labels_due`]).
+    /// It names the source its receipt judged, and the record says the same;
+    /// or the record no longer holds the attempt's run — the route-outcome
+    /// ledger keeps a bucket's newest rows only — and the label keeps the
+    /// evidence it was bound on ([`arm::VERIFIED_AT`]), which no verdict
+    /// still on record gainsays.
     Bound,
     /// It names no source ([`arm::label_source`]): written before labels
     /// carried one. Not evaluable — kept as written, read as no label, and
     /// joined by a label on its source once a receipt for it is on record.
     Unsourced,
-    /// The record holds the attempt's run and says otherwise: it handed in
-    /// another source, or the first receipt on that source is not the one
-    /// the label carries, or there is none.
+    /// It names a source, but the record no longer holds the attempt's run
+    /// and the label keeps no evidence of the binding it was written on —
+    /// written before labels kept it. A run gone from the record proves
+    /// nothing: not evaluable, and read as no label.
+    Unproven,
+    /// The record says otherwise: it holds the attempt's run, which handed
+    /// in another source, or whose first receipt on that source is not the
+    /// one the label carries, or which has none; or, the run gone, it holds
+    /// a verdict on the label's source that settled it otherwise.
     Contradicted,
 }
 
@@ -1438,31 +1487,68 @@ pub(crate) fn binding(label: &Value, attempt: &str, on_record: &OnRecord<'_>) ->
     let Some(source) = arm::label_source(label) else {
         return Binding::Unsourced;
     };
-    if !on_record.ran(attempt) {
-        return Binding::Bound;
-    }
     let verified = arm::VERIFIED.read(label).and_then(Value::as_str);
-    match on_record.receipt(attempt) {
-        Some((receipt, judged)) if judged == source && verified == Some(receipt.token()) => Binding::Bound,
-        _ => Binding::Contradicted,
+    if on_record.ran(attempt) {
+        return match on_record.receipt(attempt) {
+            Some(receipted) if receipted.source == source && verified == Some(receipted.receipt.token()) => {
+                Binding::Bound
+            }
+            _ => Binding::Contradicted,
+        };
+    }
+    if on_record.gainsays(attempt, source, verified) {
+        Binding::Contradicted
+    } else if arm::label_verdict_at(label).is_some() {
+        Binding::Bound
+    } else {
+        Binding::Unproven
     }
 }
 
-/// `rows` less every label that does not stand ([`binding`]) — the ledger as
-/// its readers read it. Nothing is taken out of the file.
+/// `rows` less every label that does not stand ([`binding`]) or that a
+/// strike took back ([`arm::strike_row`]) — the ledger as its readers read
+/// it. Nothing is taken out of the file.
 pub(crate) fn keep_bound_labels(rows: &mut Vec<Value>, on_record: &OnRecord<'_>) {
+    let struck: std::collections::BTreeSet<String> =
+        arm::struck_prints(rows).into_iter().map(str::to_string).collect();
     rows.retain(|row| {
-        LABEL
-            .read(row)
-            .and_then(Value::as_str)
-            .is_none_or(|attempt| binding(row, attempt, on_record) == Binding::Bound)
+        LABEL.read(row).and_then(Value::as_str).is_none_or(|attempt| {
+            binding(row, attempt, on_record) == Binding::Bound
+                && (struck.is_empty() || !struck.contains(&arm::label_print(row)))
+        })
     });
 }
 
+/// The strikes `rows` owe: one for every label the record contradicts now
+/// ([`Binding::Contradicted`]) that no strike has taken back yet — so a
+/// record that later forgets the rows that contradicted it gives the label
+/// nothing back. Pure; the caller appends them.
+fn strikes_due(rows: &[Value], on_record: &OnRecord<'_>, now_ms: i64) -> Vec<Value> {
+    let mut struck: std::collections::BTreeSet<String> =
+        arm::struck_prints(rows).into_iter().map(str::to_string).collect();
+    rows.iter()
+        .filter(|row| {
+            LABEL
+                .read(row)
+                .and_then(Value::as_str)
+                .is_some_and(|attempt| binding(row, attempt, on_record) == Binding::Contradicted)
+        })
+        .filter(|row| struck.insert(arm::label_print(row)))
+        .filter_map(|row| arm::strike_row(row, now_ms))
+        .collect()
+}
+
 /// The challenger's ledger at `ledger` as its readers read it
-/// ([`keep_bound_labels`]).
-fn bound_rows(ledger: &Path, on_record: &OnRecord<'_>) -> Vec<Value> {
+/// ([`keep_bound_labels`]) — every contradiction the reading finds written
+/// down first ([`strikes_due`]): one `O_APPEND` line each, beside the label,
+/// never over it; a strike two readers both wrote is one strike.
+fn bound_rows(ledger: &Path, on_record: &OnRecord<'_>, now_ms: i64) -> Vec<Value> {
     let mut rows = read_shadow_rows(ledger);
+    for strike in strikes_due(&rows, on_record, now_ms) {
+        if append_shadow_row(ledger, &strike, SHADOW_LEDGER_MAX_BYTES).is_ok() {
+            rows.push(strike);
+        }
+    }
     keep_bound_labels(&mut rows, on_record);
     rows
 }
@@ -1482,13 +1568,14 @@ pub(crate) struct Labelled {
 }
 
 /// The label rows due on `rows`: one per answered comparison whose attempt
-/// has a receipt and no label that names a source yet, carrying the source
-/// the receipt judged. Pure; the caller appends them, and hands in the rows
-/// as its readers read them ([`keep_bound_labels`]).
+/// has a receipt and no label that stands yet, carrying the source the
+/// receipt judged and when its verdict was recorded ([`arm::Receipted`]).
+/// Pure; the caller appends them, and hands in the rows as its readers read
+/// them ([`keep_bound_labels`]).
 #[must_use]
 pub(crate) fn labels_due(
     rows: &[Value],
-    receipt_of: impl Fn(&str) -> Option<(Receipt, String)>,
+    receipt_of: impl Fn(&str) -> Option<Receipted>,
     now_ms: i64,
 ) -> Vec<Value> {
     let mut labelled: std::collections::BTreeSet<&str> = rows
@@ -1511,11 +1598,11 @@ pub(crate) fn labels_due(
         else {
             continue;
         };
-        let Some((receipt, source)) = receipt_of(attempt) else {
+        let Some(receipted) = receipt_of(attempt) else {
             continue;
         };
         labelled.insert(attempt);
-        due.push(arm::label_row(attempt, receipt, preferred, &source, now_ms));
+        due.push(arm::label_row(attempt, &receipted, preferred, now_ms));
     }
     due
 }
@@ -1705,7 +1792,9 @@ pub fn note_challenger_verdicts(cwd: &Path) -> usize {
 /// sample writer handed in — the seam a test hands a refusing writer to.
 /// Under the ledger's lock: a verdict landing while a comparison's row is
 /// being written reads the rows once, one attempt is labelled once, and one
-/// sample is written once however many callers race for it.
+/// sample is written once however many callers race for it. A route-outcome
+/// ledger that cannot be read is not an empty one: nothing is labelled, fed,
+/// struck or judged until it can be read.
 pub(crate) fn note_verdicts_in(
     cwd: &Path,
     mode: Option<JevMode>,
@@ -1721,10 +1810,12 @@ pub(crate) fn note_verdicts_in(
     let Ok(_lock) = runtime::SettingsFileLock::acquire(&ledger) else {
         return 0;
     };
-    let records = runtime::read_route_outcomes(cwd).unwrap_or_default();
+    let Ok(records) = runtime::read_route_outcomes(cwd) else {
+        return 0;
+    };
     let on_record = OnRecord::of(&records);
-    let mut rows = bound_rows(&ledger, &on_record);
     let now = Today::now();
+    let mut rows = bound_rows(&ledger, &on_record, unix_millis_i64(now.now_ms));
     let mut written = 0;
     for label in labels_due(&rows, |attempt| on_record.receipt(attempt), unix_millis_i64(now.now_ms)) {
         if append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).is_ok() {
@@ -1745,11 +1836,12 @@ pub(crate) fn note_verdicts_in(
 /// sample counts while its seat acts NOW and its challenger's standing for
 /// the role passes the incumbent's own learned rate — [`may_move`], the same
 /// line it was written on — and only as the sample its label, standing to
-/// the record now ([`binding`]), makes: a label that names no source, or
-/// that the record contradicts, admits nothing. Switched off or fallen,
-/// none is admitted, and the router learns as if the arm had never written;
-/// raised again, the same rows count under their own decay. Nothing is
-/// removed from the ledger. A record set with no sample in it asks nothing
+/// the record now ([`binding`]), makes: a label that names no source, that
+/// proves no binding, or that the record contradicts — now, or before it
+/// forgot the rows that said so ([`bound_rows`]) — admits nothing. Switched
+/// off or fallen, none is admitted, and the router learns as if the arm had
+/// never written; raised again, the same rows count under their own decay.
+/// Nothing is removed from the ledger. A record set with no sample in it asks nothing
 /// more, not even the mode word (`mode_of`).
 pub(crate) fn admit_samples(
     cwd: &Path,
@@ -1764,7 +1856,8 @@ pub(crate) fn admit_samples(
         return;
     };
     let behind: std::collections::BTreeMap<String, String> = {
-        let rows = bound_rows(&challenger_path(cwd), &OnRecord::of(records));
+        let now_ms = i64::try_from(now_secs.saturating_mul(1_000)).unwrap_or(i64::MAX);
+        let rows = bound_rows(&challenger_path(cwd), &OnRecord::of(records), now_ms);
         stood_behind(acting, raised, &rows, records, now_secs)
             .iter()
             .filter_map(sample_of)

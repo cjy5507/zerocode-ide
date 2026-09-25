@@ -4383,6 +4383,38 @@ mod tests {
             }
         }
 
+        /// The same, its source file committed: tracked, as most work is.
+        fn committed() -> Self {
+            let ws = Self::new();
+            ws.git(&["add", "parser.rs"]);
+            ws.git(&["commit", "-q", "-m", "the parser"]);
+            ws
+        }
+
+        /// The same, its source file one HEAD holds that the index has let go
+        /// of (`git rm --cached`) and the ignores leave out: on disk, in no
+        /// index, and still in the tree the attempt hands in — which is
+        /// HEAD's, filled from the working files.
+        fn let_go() -> Self {
+            let ws = Self::new();
+            std::fs::write(ws.repo.join(".gitignore"), "*.rs\n").expect("an ignore file");
+            ws.git(&["add", ".gitignore"]);
+            ws.git(&["add", "-f", "parser.rs"]);
+            ws.git(&["commit", "-q", "-m", "the parser, past the ignores"]);
+            ws.git(&["rm", "-q", "--cached", "parser.rs"]);
+            ws
+        }
+
+        fn git(&self, args: &[&str]) {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=test", "-c", "user.email=test@example.invalid"])
+                .args(args)
+                .current_dir(&self.repo)
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?}");
+        }
+
         fn parser(&self) -> std::path::PathBuf {
             self.repo.join("parser.rs")
         }
@@ -4682,6 +4714,59 @@ mod tests {
         assert_eq!(VERIFIED.read(&label).and_then(serde_json::Value::as_str), Some(Receipt::Failed.token()));
         assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), Some(handed_in.as_str()));
         assert_eq!(labels_of(&rig, &key).len(), 1, "one label");
+    }
+
+    /// 검증자가 본 source의 감시는 그 source의 트리가 쓰이는 파일 전부를 본다(t-6263 R4a-1): HEAD가 들고 있지만 index가
+    /// 놓아주고(`git rm --cached`) 무시 규칙이 빼는 파일도 넘긴 트리에 들어 있으므로, 검증하는 동안 그 파일이 바뀌었다가 넘긴
+    /// 바이트로 돌아오면 그 검증은 넘긴 source를 봤다고 말하지 못한다 — 영수증도 라벨도 없다. 같은 상태에서 아무것도 바뀌지
+    /// 않은 검증은 넘긴 source를 봤다고 말하고 라벨이 된다. 제품의 스폰 길(검증자의 실행 그 자체)을 지난다.
+    #[test]
+    fn a_verifier_is_watched_over_a_file_its_tree_holds_that_the_index_let_go_of() {
+        use crate::misc_tools::smart_router as sr;
+        use zerocode_core::jev::challenger::VERIFIED_SOURCE;
+
+        let key = a_drawing_key(4);
+        let rig = an_acting_rig(sr::ChallengerScripted::answering("CHALLENGER: split the parser and test each half"));
+        let cwd = rig.cwd.clone();
+        let ws = Workspace::let_go();
+        let (manifest, run) = spawn_an_attempt(&rig, &ws, &key);
+        let handed_in = run.source.clone().expect("the drawn attempt names the source it handed in");
+        comparison_of(&rig, &key);
+
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-let-go-mid-edit", &[(0, ANOTHER_EDIT), (1, HANDED_IN_WORDS)], None);
+        assert_eq!(
+            sr::challenger_source_of(&ws.repo).as_deref(),
+            Some(handed_in.as_str()),
+            "the tree is back to what was handed in"
+        );
+        assert_eq!(saw_another.source, None, "a verifier that read the file mid-edit cannot say it saw what was handed in");
+        let _ = sr::note_challenger_verdicts(&cwd);
+        assert!(labels_of(&rig, &key).is_empty(), "no receipt, no label: {:?}", rig.rows());
+
+        let saw_it = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-let-go-untouched", &[], None);
+        assert_eq!(saw_it.source.as_deref(), Some(handed_in.as_str()), "nothing moved: the verifier saw what was handed in");
+        let label = label_of(&rig, &key);
+        assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), Some(handed_in.as_str()));
+    }
+
+    /// 커밋된(추적되는) 파일도 같다(t-6263 R4a-1): 검증하는 동안 바뀌었다가 돌아오면 source 없음이다.
+    #[test]
+    fn a_verifier_over_a_committed_file_written_and_put_back_names_no_source() {
+        use crate::misc_tools::smart_router as sr;
+
+        let key = a_drawing_key(5);
+        let rig = an_acting_rig(sr::ChallengerScripted::answering("CHALLENGER: split the parser and test each half"));
+        let cwd = rig.cwd.clone();
+        let ws = Workspace::committed();
+        let (manifest, run) = spawn_an_attempt(&rig, &ws, &key);
+        let handed_in = run.source.clone().expect("the drawn attempt names the source it handed in");
+        comparison_of(&rig, &key);
+
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-committed-mid-edit", &[(0, ANOTHER_EDIT), (1, HANDED_IN_WORDS)], None);
+        assert_eq!(sr::challenger_source_of(&ws.repo).as_deref(), Some(handed_in.as_str()), "the tree is back");
+        assert_eq!(saw_another.source, None, "a verifier that read the file mid-edit cannot say it saw what was handed in");
+        let _ = sr::note_challenger_verdicts(&cwd);
+        assert!(labels_of(&rig, &key).is_empty(), "no receipt, no label: {:?}", rig.rows());
     }
 
     /// 비교와 verdict는 어느 순서로 와도 라벨 하나·표본 하나다(t-6263 R4b): 도전자의 설계를 선에 붙잡아 둔 채 시도가 끝나고

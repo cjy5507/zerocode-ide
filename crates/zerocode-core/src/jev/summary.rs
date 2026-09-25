@@ -205,6 +205,12 @@ pub const CONTROL_KIND: LedgerKey = LedgerKey {
     canonical: "controlKind",
     also: &[],
 };
+/// The version of the words a request was asked in: what keeps one rubric's
+/// evidence apart from another's when a seat is judged (t-6263 R5).
+pub const RUBRIC_VERSION: LedgerKey = LedgerKey {
+    canonical: "rubricVersion",
+    also: &["rubric_version"],
+};
 
 /// Every key this module reads, so a contract can walk them.
 pub const LEDGER_KEYS: &[LedgerKey] = &[
@@ -226,6 +232,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     MODEL,
     BARRED,
     CONTROL_KIND,
+    RUBRIC_VERSION,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.

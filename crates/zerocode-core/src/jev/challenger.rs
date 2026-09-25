@@ -32,7 +32,7 @@ use crate::jev::summary::{
 };
 use crate::jev::{
     A_WINDOW_OF_COMPARISONS, CHALLENGER_DAY_SPEND_PERMILLE, CHALLENGER_DESIGN_CAP,
-    CHALLENGER_ONE_IN,
+    CHALLENGER_ONE_IN, fingerprint_of,
 };
 
 pub mod spend;
@@ -643,6 +643,31 @@ pub const VERIFIED_SOURCE: LedgerKey = LedgerKey {
     canonical: "verifiedSource",
     also: &[],
 };
+/// When the receipt's verdict was recorded, on the label row that carried
+/// it — the verdict row's own clock, in seconds ([`Receipted::verdict_at`]):
+/// what a label keeps of the binding it was written on. The route-outcome
+/// ledger keeps a bucket's newest rows only; a label whose attempt's run it
+/// no longer holds stands on this alone, and only while no verdict it still
+/// holds says otherwise. A label that names none was written before labels
+/// kept it, and stands only while the record itself can bind it (t-6263).
+pub const VERIFIED_AT: LedgerKey = LedgerKey {
+    canonical: "verifiedAt",
+    also: &[],
+};
+/// The attempt of a label the record contradicted, on the row that strikes
+/// it ([`strike_row`]): the contradiction written down, so a record that
+/// later forgets the rows that said it gives the label nothing back.
+pub const STRUCK: LedgerKey = LedgerKey {
+    canonical: "struck",
+    also: &[],
+};
+/// Which of the attempt's label rows a strike takes back
+/// ([`label_print`]) — the one the record contradicted, and never a label
+/// written beside it later.
+pub const STRUCK_PRINT: LedgerKey = LedgerKey {
+    canonical: "struckPrint",
+    also: &[],
+};
 /// Whether the challenger won ([`Quality::won`]). On the request row by the
 /// comparison alone; a label row for the same attempt writes it again by
 /// the receipt, and the later word is the one that counts.
@@ -690,6 +715,9 @@ pub const CHALLENGER_KEYS: &[LedgerKey] = &[
     PREFERRED,
     VERIFIED,
     VERIFIED_SOURCE,
+    VERIFIED_AT,
+    STRUCK,
+    STRUCK_PRINT,
     WON,
     HELD,
     COST_MICROS,
@@ -767,26 +795,41 @@ impl Comparison<'_> {
     }
 }
 
+/// A receipt as the record held it when a label was written on it: what the
+/// verdict said, the source it judged — the very source the attempt handed
+/// in — and when the verdict was recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receipted {
+    pub receipt: Receipt,
+    /// The source the verdict judged ([`VERIFIED_SOURCE`]).
+    pub source: String,
+    /// The verdict row's own clock, in seconds ([`VERIFIED_AT`]).
+    pub verdict_at: u64,
+}
+
 /// The row a receipt writes for the attempt it grades, once the
 /// verification loop has spoken: named after the request row's attempt
 /// ([`crate::jev::summary::LABEL`]), carrying the receipt, the source it
-/// judged ([`VERIFIED_SOURCE`]), the challenger's word by it, and — where
-/// the receipt can say — whether the judge named what it vindicated
+/// judged ([`VERIFIED_SOURCE`]) and when its verdict was recorded
+/// ([`VERIFIED_AT`]), the challenger's word by it, and — where the receipt
+/// can say — whether the judge named what it vindicated
 /// ([`crate::jev::summary::AGREED`]).
 #[must_use]
-pub fn label_row(
-    attempt: &str,
-    receipt: Receipt,
-    preferred: Preferred,
-    source: &str,
-    at_ms: i64,
-) -> Value {
+pub fn label_row(attempt: &str, receipted: &Receipted, preferred: Preferred, at_ms: i64) -> Value {
+    let receipt = receipted.receipt;
     let graded = quality(Some(receipt), preferred);
     let mut row = Map::from_iter([
         (AT.canonical.to_string(), Value::from(at_ms)),
         (LABEL.canonical.to_string(), Value::from(attempt)),
         (VERIFIED.canonical.to_string(), Value::from(receipt.token())),
-        (VERIFIED_SOURCE.canonical.to_string(), Value::from(source)),
+        (
+            VERIFIED_SOURCE.canonical.to_string(),
+            Value::from(receipted.source.as_str()),
+        ),
+        (
+            VERIFIED_AT.canonical.to_string(),
+            Value::from(receipted.verdict_at),
+        ),
         (WON.canonical.to_string(), Value::from(graded.won)),
     ]);
     if let Some(agreed) = graded.agreed {
@@ -815,6 +858,43 @@ pub fn label_source(row: &Value) -> Option<&str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|source| !source.is_empty())
+}
+
+/// When a label row's receipt was recorded ([`VERIFIED_AT`]) — `None` for a
+/// label that keeps no evidence of the binding it was written on.
+#[must_use]
+pub fn label_verdict_at(row: &Value) -> Option<u64> {
+    VERIFIED_AT.read(row).and_then(Value::as_u64)
+}
+
+/// A label row's print: the fingerprint of the row as it stands in the
+/// ledger ([`crate::jev::fingerprint_of`]) — what a strike names it by, so
+/// a later label of the same attempt, whatever it says, is another row.
+#[must_use]
+pub fn label_print(row: &Value) -> String {
+    fingerprint_of(&row.to_string())
+}
+
+/// The row that strikes `label` — a label the record contradicted: its
+/// attempt ([`STRUCK`]) and its print ([`STRUCK_PRINT`]), and nothing a
+/// request, a mark or a label is read by. `None` for a row that is no label.
+/// Appended beside it; the label itself stays as it was written.
+#[must_use]
+pub fn strike_row(label: &Value, at_ms: i64) -> Option<Value> {
+    let attempt = LABEL.read(label).and_then(Value::as_str)?;
+    Some(json!({
+        AT.canonical: at_ms,
+        STRUCK.canonical: attempt,
+        STRUCK_PRINT.canonical: label_print(label),
+    }))
+}
+
+/// The prints of every label `rows` strike ([`strike_row`]).
+#[must_use]
+pub fn struck_prints(rows: &[Value]) -> BTreeSet<&str> {
+    rows.iter()
+        .filter_map(|row| STRUCK_PRINT.read(row).and_then(Value::as_str))
+        .collect()
 }
 
 /// The row an attempt the arm held writes: no `outcome`, so it is no

@@ -4,10 +4,11 @@ use super::spend::{self, Book, Op};
 use super::{
     ATTEMPT, Attempt, BLIND, Blind, CHALLENGED_ROLES, CHALLENGER_DESIGN, CHALLENGER_KEYS,
     CHALLENGER_MODEL, COST_MICROS, Comparison, DaySpend, Designs, EXPECTED_MICROS, HELD, Held,
-    INCUMBENT_DESIGN, INCUMBENT_MODEL, OPTIONS, PREFERRED, Preferred, ROLE, Receipt, Side,
-    Standing, VERIFIED, VERIFIED_SOURCE, WON, ask, challenges, draws, eligible as eligible_line,
-    expected_micros, held_row, label_row, quality, role_may_be_challenged, standing,
-    within_day_budget,
+    INCUMBENT_DESIGN, INCUMBENT_MODEL, OPTIONS, PREFERRED, Preferred, ROLE, Receipt, Receipted,
+    STRUCK, STRUCK_PRINT, Side, Standing, VERIFIED, VERIFIED_AT, VERIFIED_SOURCE, WON, ask,
+    challenges, draws, eligible as eligible_line, expected_micros, held_row, label_print,
+    label_row, label_verdict_at, quality, role_may_be_challenged, standing, strike_row,
+    struck_prints, within_day_budget,
 };
 use crate::jev::choice::ChoiceRefusal;
 use crate::jev::promote::{Verdict, judge_seat};
@@ -16,6 +17,15 @@ use crate::jev::{
     A_WINDOW_OF_COMPARISONS, CHALLENGER, CHALLENGER_DAY_SPEND_PERMILLE, CHALLENGER_DESIGN_CAP,
     CHALLENGER_ONE_IN,
 };
+
+/// A receipt on `source`, its verdict recorded at second 3.
+fn on(receipt: Receipt, source: &str) -> Receipted {
+    Receipted {
+        receipt,
+        source: source.to_string(),
+        verdict_at: 3,
+    }
+}
 
 fn eligible(key: &str) -> Attempt<'_> {
     Attempt {
@@ -485,7 +495,12 @@ fn a_request_row_spells_its_columns_from_the_table_and_none_of_the_wires() {
 /// 라벨 행은 요청 행을 시도 이름으로 가리키고, 영수증이 말할 수 있을 때만 합의 표식을 단다.
 #[test]
 fn a_label_row_names_its_attempt_and_marks_agreement_only_where_the_receipt_can_say() {
-    let vindicated = label_row("dp-1", Receipt::Failed, Preferred::Challenger, "tree-1", 7);
+    let vindicated = label_row(
+        "dp-1",
+        &on(Receipt::Failed, "tree-1"),
+        Preferred::Challenger,
+        7,
+    );
     assert_eq!(
         LABEL.read(&vindicated).and_then(Value::as_str),
         Some("dp-1")
@@ -500,6 +515,12 @@ fn a_label_row_names_its_attempt_and_marks_agreement_only_where_the_receipt_can_
         Some("tree-1"),
         "what was verified stands beside what it said"
     );
+    assert_eq!(
+        VERIFIED_AT.read(&vindicated).and_then(Value::as_u64),
+        Some(3),
+        "and when its verdict was recorded"
+    );
+    assert_eq!(label_verdict_at(&vindicated), Some(3));
     assert_eq!(WON.read(&vindicated).and_then(Value::as_bool), Some(true));
     assert_eq!(
         AGREED.read(&vindicated).and_then(Value::as_bool),
@@ -510,9 +531,74 @@ fn a_label_row_names_its_attempt_and_marks_agreement_only_where_the_receipt_can_
         "a label row is not a request"
     );
 
-    let undecidable = label_row("dp-2", Receipt::Passed, Preferred::Challenger, "tree-2", 8);
+    let undecidable = label_row(
+        "dp-2",
+        &on(Receipt::Passed, "tree-2"),
+        Preferred::Challenger,
+        8,
+    );
     assert_eq!(WON.read(&undecidable).and_then(Value::as_bool), Some(false));
     assert!(AGREED.read(&undecidable).is_none());
+}
+
+/// 기록이 반박한 라벨을 긋는 행은 그 라벨 행 하나만 가리키고 요청·표식·라벨 어느 것으로도 읽히지 않는다(t-6263 R4c-1):
+/// 같은 시도에 나중에 쓰인 라벨은 다른 행이라 그어지지 않는다.
+#[test]
+fn a_strike_names_one_label_row_and_reads_as_nothing_else() {
+    let label = label_row(
+        "dp-1",
+        &on(Receipt::Failed, "tree-1"),
+        Preferred::Challenger,
+        7,
+    );
+    let strike = strike_row(&label, 9).expect("a label is struck");
+    assert_eq!(STRUCK.read(&strike).and_then(Value::as_str), Some("dp-1"));
+    assert_eq!(
+        STRUCK_PRINT.read(&strike).and_then(Value::as_str),
+        Some(label_print(&label).as_str())
+    );
+    assert!(
+        asked_something(&strike).is_none(),
+        "a strike is not a request"
+    );
+    assert!(
+        LABEL.read(&strike).is_none()
+            && AGREED.read(&strike).is_none()
+            && WON.read(&strike).is_none()
+    );
+    let later = label_row(
+        "dp-1",
+        &on(Receipt::Failed, "tree-1"),
+        Preferred::Challenger,
+        8,
+    );
+    assert_ne!(
+        label_print(&later),
+        label_print(&label),
+        "a later label of the same attempt is another row"
+    );
+    let reread: Value = serde_json::from_str(&label.to_string()).expect("json");
+    assert_eq!(
+        label_print(&reread),
+        label_print(&label),
+        "and a row read back is the row that was written"
+    );
+    let rows = vec![label.clone(), strike];
+    assert_eq!(
+        struck_prints(&rows).into_iter().collect::<Vec<_>>(),
+        [label_print(&label).as_str()]
+    );
+    assert!(
+        strike_row(&json!({"at": 1}), 2).is_none(),
+        "only a label is struck"
+    );
+    assert_eq!(
+        standing(&rows, "coding", "claude-opus-5-2"),
+        Standing {
+            compared: 0,
+            won: 0
+        }
+    );
 }
 
 /// 붙들린 행은 요청이 아니다 — 창에도 몫에도 들지 않고 이유만 적는다.
@@ -557,13 +643,17 @@ fn a_standing_reads_one_latest_word_per_attempt_of_its_own_pair() {
         request_row("dp-4", 4, None),
         Value::Object(other_row),
         // dp-2의 영수증: 현직이 통과했으니 도전자의 승리는 취소된다.
-        label_row("dp-2", Receipt::Passed, Preferred::Challenger, "tree-2", 5),
+        label_row(
+            "dp-2",
+            &on(Receipt::Passed, "tree-2"),
+            Preferred::Challenger,
+            5,
+        ),
         // 모르는 시도의 라벨은 세지 않는다.
         label_row(
             "dp-nobody",
-            Receipt::Failed,
+            &on(Receipt::Failed, "tree-x"),
             Preferred::Challenger,
-            "tree-x",
             6,
         ),
     ];
@@ -591,7 +681,12 @@ fn a_standing_reads_one_latest_word_per_attempt_of_its_own_pair() {
 #[test]
 fn a_label_that_names_no_source_leaves_the_comparisons_word_standing() {
     let unsourced = |attempt: &str, at: i64| {
-        let mut row = label_row(attempt, Receipt::Passed, Preferred::Challenger, "tree", at);
+        let mut row = label_row(
+            attempt,
+            &on(Receipt::Passed, "tree"),
+            Preferred::Challenger,
+            at,
+        );
         row.as_object_mut()
             .expect("a row")
             .remove(VERIFIED_SOURCE.canonical);
@@ -602,8 +697,13 @@ fn a_label_that_names_no_source_leaves_the_comparisons_word_standing() {
         request_row("dp-2", 2, Some(Preferred::Challenger)),
         request_row("dp-3", 3, Some(Preferred::Challenger)),
         unsourced("dp-1", 4),
-        label_row("dp-2", Receipt::Passed, Preferred::Challenger, "", 5),
-        label_row("dp-3", Receipt::Passed, Preferred::Challenger, "tree-3", 6),
+        label_row("dp-2", &on(Receipt::Passed, ""), Preferred::Challenger, 5),
+        label_row(
+            "dp-3",
+            &on(Receipt::Passed, "tree-3"),
+            Preferred::Challenger,
+            6,
+        ),
     ];
     assert_eq!(
         standing(&rows, "coding", "claude-opus-5-2"),
@@ -675,9 +775,8 @@ fn the_seat_judge_reads_the_rows_this_module_writes_and_raises_the_seat_on_recei
         };
         rows.push(label_row(
             &format!("dp-{n}"),
-            Receipt::Failed,
+            &on(Receipt::Failed, "tree"),
             preferred,
-            "tree",
             i64::try_from(requests + n).expect("small"),
         ));
     }
@@ -1012,9 +1111,8 @@ fn a_replay_rederives_the_draw_and_the_blind_and_reads_one_word_per_attempt() {
     // A receipt that outranks the first comparison.
     rows.push(label_row(
         &drawn[0],
-        Receipt::Passed,
+        &on(Receipt::Passed, "tree"),
         Preferred::Incumbent,
-        "tree",
         10,
     ));
     // A held attempt, and a row whose blind was written wrong.
