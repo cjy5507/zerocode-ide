@@ -565,6 +565,40 @@ await test("hidden_surface_short_settle_has_a_wall_deadline", async () => {
   } finally { await hidden.close(); }
 });
 
+/* A press that leaves its settle for later (t-9712) is answered with a look
+ * taken the moment it was made, and the settle is finished by the pane's
+ * next look: that first look must read what the press left and must not
+ * itself count as a change — it only reads — so the settle it runs ahead of
+ * ends exactly when it would have without it. */
+await test("a_look_between_a_press_and_its_settle_reads_what_the_press_left_and_moves_no_settle", async () => {
+  const hidden = await browser.newPage();
+  try {
+    await hidden.setContent(`${HIDDEN}<main><button id="next">Next: 2</button><p id="step">Step 1 of 4</p></main><script>
+      let at = 1;
+      document.getElementById("next").addEventListener("click", () => {
+        at += 1;
+        document.getElementById("step").textContent = "Step " + at + " of 4";
+        document.getElementById("next").textContent = "Next: " + (at + 1);
+      });
+    </script>`);
+    const epoch = await hidden.evaluate(() => String(performance.timeOrigin));
+    const pressed = await evalJson(hidden, pressScript("#next", { epoch, value: null, watch: WATCH }));
+    assert(pressed.ok, "the press was made", pressed);
+    const first = await evalJson(hidden, lookScript());
+    const lookedAt = await hidden.evaluate(() => performance.now());
+    assert(first.ok, "the look right after the press read the page", first);
+    const labels = first.value.faces.map((face) => face.label);
+    assert(labels.includes("Next: 3"), "the first look reads what the press left", labels);
+    await new Promise((done) => setTimeout(done, SETTLE_QUIET_MS + 20));
+    const facts = (await evalJson(hidden, settleScript())).value;
+    assert(facts.watched && facts.documentEpoch === epoch, "the press's own watch answers", facts);
+    assert(facts.last <= lookedAt, "the look counted as no change", { facts, lookedAt });
+    const still = facts.now - Math.max(facts.last, pressed.value.pressedAt);
+    assert(still >= SETTLE_QUIET_MS, "the settle stood still since the press, the look inside it", { still, facts });
+    return `first look ${Math.round(lookedAt - pressed.value.pressedAt)} ms after the press; still ${Math.round(still)} ms at the poll`;
+  } finally { await hidden.close(); }
+});
+
 await test("visibility_is_not_confused_with_task_completion", async () => {
   const seen = await browser.newPage();
   try {

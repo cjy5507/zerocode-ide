@@ -404,7 +404,8 @@ fn a_settled_press_that_counted_the_words_ends_the_walk_without_a_look() {
 
 /// A press asked for a preview (a walk asking ahead, t-6385) hands back the
 /// screen it settled on, numbered as a look of it would be; a phone's world
-/// never asks ahead of its press, a page's does as before.
+/// never asks ahead of its press, and neither does a page's that asks ahead
+/// (t-9712): it asks on the page its press left. A window's still does.
 #[test]
 fn a_press_asked_for_a_preview_hands_back_the_screen_it_settled_on() {
     let road = Road::new(|verb| match verb {
@@ -462,7 +463,23 @@ fn a_press_asked_for_a_preview_hands_back_the_screen_it_settled_on() {
         0,
     )
     .previewing(true);
-    assert!(page.asks_ahead_of_the_press());
+    assert!(!page.asks_ahead_of_the_press());
+    drop(page);
+
+    let road = Road::new(|_| refused());
+    let mut send = road.road();
+    let window = GoalWorld::new(
+        &mut send,
+        Aim::App {
+            name: "계산기".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .previewing(true);
+    assert!(window.asks_ahead_of_the_press());
 }
 
 /// The count a look answers decides the check as `find`'s did.
@@ -1189,4 +1206,242 @@ fn a_subscription_login_never_rides_a_value_request() {
     }
     assert!(verbs.iter().any(|verb| verb == "type"));
     assert_eq!(walked.typed, 1);
+}
+
+// ---- A page's press that leaves its settle for the next look (t-9712) ----
+
+use zerocode_core::agent_browser::{
+    BROWSER_SETTLE_KEY, BROWSER_SETTLE_LATER_FLAG, Settle, SettleWhy, settle_said, settle_unheard,
+};
+
+/// A road that answers a page's calls in the order the test wrote them down,
+/// and keeps every argv it was handed.
+struct Script {
+    said: RefCell<Vec<Vec<String>>>,
+    answers: RefCell<std::collections::VecDeque<TeamAnswer>>,
+}
+
+impl Script {
+    fn of(answers: Vec<TeamAnswer>) -> Self {
+        Self {
+            said: RefCell::new(Vec::new()),
+            answers: RefCell::new(answers.into()),
+        }
+    }
+    fn road(&self) -> impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer + '_ {
+        move |_, argv, _| {
+            self.said.borrow_mut().push(argv.to_vec());
+            self.answers
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(refused)
+        }
+    }
+    fn said(&self) -> Vec<Vec<String>> {
+        self.said.borrow().clone()
+    }
+}
+
+/// A page whose one button says `next`, as `marks --json` answers it — with
+/// how the pane's last press settled, when this look finished one.
+fn a_step_page(next: &str, settle: Option<Value>) -> String {
+    let mut page = json!({
+        "items": [
+            { "mark": 1, "role": "button", "tag": "button", "label": next,
+              "selector": "#next", "centerX": 120.0, "centerY": 40.0 },
+        ],
+        "count": 1,
+        (zerocode_core::screen_action::snapshot::EPOCH_KEY): "doc-1",
+    });
+    if let Some(settle) = settle {
+        page[BROWSER_SETTLE_KEY] = settle;
+    }
+    page.to_string()
+}
+
+/// A settle-later press's answer: the page as the press left it, with the
+/// press's own sentence beside it.
+fn a_press_that_left(next: &str) -> String {
+    let mut answer: Value = serde_json::from_str(&a_step_page(next, None)).expect("json");
+    answer[crate::cmd::browser::CLICK_SAID_KEY] =
+        json!(format!("{} (method=dom-activation)", crate::cmd::browser::CLICK_SAID));
+    answer.to_string()
+}
+
+fn a_pane_walk<'a, R>(road: &'a mut R, previewing: bool) -> GoalWorld<'a, R>
+where
+    R: FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
+{
+    GoalWorld::new(
+        road,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::Page {
+            host: "app.local".into(),
+            path: "/steps".into(),
+        },
+        Some("Step 4 of 4".into()),
+        60_000,
+        0,
+    )
+    .previewing(previewing)
+}
+
+fn words(line: &[&str]) -> Vec<String> {
+    line.iter().map(|word| (*word).to_string()).collect()
+}
+
+/// A page walk that asks ahead presses with `--settle-later` (t-9712): the
+/// press hands back the page it left — at the walk's own address — once;
+/// the pane's next look finishes the settle and says how, before the reach
+/// check reads the page; and a page that settled is not read a third time:
+/// its look is the next step's.
+#[test]
+fn a_page_press_that_settles_later_hands_back_the_page_it_left_and_its_next_look_settles_it() {
+    let ready = settle_said(Settle::Ready, SettleWhy::Quiet, 52);
+    let script = Script::of(vec![
+        ok(&a_step_page("Next: 2", None)),
+        ok(&a_press_that_left("Next: 3")),
+        ok(&a_step_page("Next: 3", Some(ready.clone()))),
+        ok(r#"{"count":0}"#),
+    ]);
+    let mut road = script.road();
+    let mut world = a_pane_walk(&mut road, true);
+    assert!(
+        !world.asks_ahead_of_the_press(),
+        "a page that settles later asks on the page its press left"
+    );
+    world.look().expect("the first look");
+    assert!(world.press(1));
+    let left = world.unsettled().expect("the page the press left");
+    assert_eq!(
+        left.at,
+        Seen::Page {
+            host: "app.local".into(),
+            path: "/steps".into()
+        }
+    );
+    assert_eq!(left.items[0]["label"], "Next: 3");
+    assert!(world.unsettled().is_none(), "handed back once");
+    let settled = world.settle().expect("the settle the press left");
+    assert_eq!(settled.note, ready);
+    assert!(world.settle().is_none(), "one settle a press");
+    assert_eq!(world.reached(), Some(false));
+    let next = world.look().expect("the settled page");
+    assert_eq!(Some(next), settled.screen);
+    drop(world);
+    assert_eq!(
+        script.said(),
+        [
+            words(&["marks", "browser-9", "--json"]),
+            words(&["click", "browser-9", "--mark", "1", BROWSER_SETTLE_LATER_FLAG]),
+            words(&["marks", "browser-9", "--json"]),
+            words(&["find", "browser-9", "Step 4 of 4"]),
+        ],
+        "the settled page's look is the next step's: no third read of it"
+    );
+}
+
+/// A settle that did not end `ready` keeps nothing: the next look reads the
+/// page again (t-9712) — and a look that failed before it could say how the
+/// settle ended says `unknown`, never a settle that went unheard in silence.
+#[test]
+fn a_page_that_did_not_settle_is_looked_at_again_and_an_unheard_settle_says_unknown() {
+    let not_ready = settle_said(Settle::NotReady, SettleWhy::Moving, 250);
+    for (settling, said) in [
+        (ok(&a_step_page("Next: 2", Some(not_ready.clone()))), not_ready.clone()),
+        (refused(), settle_unheard()),
+    ] {
+        let script = Script::of(vec![
+            ok(&a_step_page("Next: 2", None)),
+            ok(&a_press_that_left("Next: 2")),
+            settling,
+            ok(&a_step_page("Next: 3", None)),
+        ]);
+        let mut road = script.road();
+        let mut world = a_pane_walk(&mut road, true);
+        world.look().expect("the first look");
+        assert!(world.press(1));
+        let settled = world.settle().expect("a settle was left");
+        assert_eq!(settled.note, said);
+        let again = world.look().expect("the page read again");
+        assert_eq!(again.items[0]["label"], "Next: 3", "{said}");
+        drop(world);
+        assert_eq!(script.said().len(), 4, "{said}");
+        assert_eq!(script.said()[3], words(&["marks", "browser-9", "--json"]));
+    }
+}
+
+/// A walk that does not ask ahead presses exactly as v1.1.27 did — `click
+/// <pane> --mark <n>`, a press that settles before it answers — and has no
+/// page to hand back and no settle to wait for; a press the door refused
+/// leaves none either.
+#[test]
+fn a_page_walk_that_does_not_ask_ahead_presses_as_it_always_did() {
+    let script = Script::of(vec![
+        ok(&a_step_page("Next: 2", None)),
+        ok("클릭 이벤트를 보냈습니다 (method=dom-activation, settle=ready)"),
+    ]);
+    let mut road = script.road();
+    let mut world = a_pane_walk(&mut road, false);
+    assert!(world.asks_ahead_of_the_press());
+    world.look().expect("the first look");
+    assert!(world.press(1));
+    assert!(world.unsettled().is_none());
+    assert!(world.settle().is_none());
+    drop(world);
+    assert_eq!(
+        script.said()[1],
+        words(&["click", "browser-9", "--mark", "1"])
+    );
+
+    let script = Script::of(vec![ok(&a_step_page("Next: 2", None)), refused()]);
+    let mut road = script.road();
+    let mut world = a_pane_walk(&mut road, true);
+    world.look().expect("the first look");
+    assert!(!world.press(1));
+    assert!(world.unsettled().is_none());
+    assert!(world.settle().is_none(), "a refused press left no settle");
+}
+
+/// An entry's own press settles before it answers even in a walk that asks
+/// ahead (t-9712): the typing follows it at once, and no settle may be left
+/// for a look that comes after the typing.
+#[test]
+fn an_entrys_own_press_settles_before_the_typing_even_when_the_walk_asks_ahead() {
+    let road = Kept::on(a_page_with_a_field("doc-1", "", "#destination"));
+    let mut send = road.road();
+    let (pen, _, _) = Pen::writing("London");
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .previewing(true)
+    .writing(Box::new(pen))
+    .remembering(memory());
+    world.look().expect("a look with a field");
+    assert!(matches!(
+        world.type_into(1, "Search for London"),
+        Typed::Typed { .. }
+    ));
+    assert!(world.settle().is_none(), "no settle was left for later");
+    drop(world);
+    let calls = road.calls.borrow();
+    let pressed: Vec<&Vec<String>> = calls
+        .iter()
+        .map(|(_, argv, _)| argv)
+        .filter(|argv| argv[0] == "click")
+        .collect();
+    assert_eq!(
+        pressed,
+        [&words(&["click", "browser-9", "--mark", "1"])],
+        "the field is pressed as v1.1.27 pressed it"
+    );
 }

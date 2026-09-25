@@ -498,6 +498,14 @@ pub trait World {
     /// when its press leaves the screen where it was; a phone's press moves
     /// its screen too often for that, and it asks on the screen its press
     /// settled on instead ([`Self::settled`]).
+    /// The screen as the last press left it, before it settled (t-9712).
+    fn unsettled(&mut self) -> Option<Screen> {
+        None
+    }
+    /// Wait for the last press's screen to settle (t-9712).
+    fn settle(&mut self) -> Option<Settled> {
+        None
+    }
     fn asks_ahead_of_the_press(&self) -> bool {
         true
     }
@@ -848,6 +856,7 @@ pub(crate) const BARRED: &str = zerocode_core::jev::summary::BARRED.canonical;
 pub const OVERLAP: &str = "overlap";
 pub const OVERLAP_USED: &str = "used";
 pub const OVERLAP_DISCARDED: &str = "discarded";
+pub const OVERLAP_CANCELLED: &str = "cancelled";
 
 /// The key a row keeps what the second reader said under
 /// ([`Options::rescue`]): its outcome, what it chose, its confidence and
@@ -924,6 +933,9 @@ pub struct Walked {
     /// Judgments begun ahead that the next look made moot — their request
     /// spent, the screen asked afresh.
     pub discarded: usize,
+    /// Judgments begun on the page a press left that its settle cancelled
+    /// (t-9712).
+    pub cancelled: usize,
     /// Steps the seat's judgment left under its press floor that the second
     /// reader pressed for ([`Options::rescue`]).
     pub rescued: usize,

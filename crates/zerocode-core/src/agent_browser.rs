@@ -319,11 +319,17 @@ pub fn parse_marks(argv: &[String]) -> Result<MarksCommand, String> {
 pub enum ClickTarget {
     Css(String),
     Mark(usize),
+    /// `--mark <n> --settle-later` (t-9712): the same press by number,
+    /// answered the moment it is made with the page as the press left it;
+    /// the pane's next `marks` finishes the settle
+    /// ([`BROWSER_SETTLE_LATER_FLAG`]).
+    MarkSettleLater(usize),
 }
 
-/// Read `click <label> <css>` or `click <label> --mark <n>` — the arity is
-/// already checked, so this only tells the two shapes apart and refuses a
-/// number that is not one, or a selector shaped like a flag.
+/// Read `click <label> <css>` or `click <label> --mark <n> [--settle-later]`
+/// — the arity is already checked, so this only tells the shapes apart and
+/// refuses a number that is not one, a word after the number that is not the
+/// settle's, or a selector shaped like a flag.
 pub fn parse_click(argv: &[String]) -> Result<ClickTarget, String> {
     if argv.first().map(String::as_str) != Some("click") {
         return Err(usage());
@@ -639,6 +645,24 @@ pub const BROWSER_SETTLE_QUIET_MS: u64 = 50;
 /// element it marked busy, while one is on screen.
 pub const BROWSER_SETTLE_BUSY: &[&str] = &["[aria-busy=\"true\"]"];
 
+/// `click <label> --mark <n> --settle-later` (t-9712): the press answers the
+/// moment it is made, with the page as the press left it — what a
+/// `marks --json` would answer then — and leaves its settle to the pane's
+/// next `marks`, which finishes it before it reads and says how it ended
+/// under [`BROWSER_SETTLE_KEY`]. A walk that judges ahead begins its next
+/// judgment on that first look and waits for the settle behind it; a press by
+/// number without the flag settles before it answers, as it always has.
+pub const BROWSER_SETTLE_LATER_FLAG: &str = "--settle-later";
+
+/// The key a look says under how the pane's settle-later press settled before
+/// the look was read (t-9712), and the keys of what it says there: how it
+/// ended ([`Settle::word`]), why ([`SettleWhy::word`]) and how long it took on
+/// the wall. A walk's row keeps the same words under the same key.
+pub const BROWSER_SETTLE_KEY: &str = "settle";
+pub const BROWSER_SETTLE_STATE_KEY: &str = "state";
+pub const BROWSER_SETTLE_WHY_KEY: &str = "why";
+pub const BROWSER_SETTLE_MS_KEY: &str = "ms";
+
 /// How a settle ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settle {
@@ -652,6 +676,12 @@ pub enum Settle {
     /// The document the press was made in is gone, or its pane is: the
     /// look's numbers mean nothing there.
     Invalidated,
+    /// No look finished the settle of a press made with
+    /// [`BROWSER_SETTLE_LATER_FLAG`]: its pane closed, or the look meant to
+    /// finish it never answered (t-9712). Never a verdict of
+    /// [`settle_verdict`] — the word for a settle nobody heard end, so none
+    /// is dropped without saying so.
+    Unknown,
 }
 
 impl Settle {
@@ -662,8 +692,40 @@ impl Settle {
             Self::Ready => "ready",
             Self::NotReady => "not_ready",
             Self::Invalidated => "invalidated",
+            Self::Unknown => "unknown",
         }
     }
+}
+
+/// A settle's words as a look carries them under [`BROWSER_SETTLE_KEY`]
+/// (t-9712): how it ended, why and its wall milliseconds — the one writer the
+/// door answers with, beside the one reader a walk decides by
+/// ([`settle_said_ready`]).
+#[must_use]
+pub fn settle_said(state: Settle, why: SettleWhy, ms: u64) -> serde_json::Value {
+    serde_json::json!({
+        BROWSER_SETTLE_STATE_KEY: state.word(),
+        BROWSER_SETTLE_WHY_KEY: why.word(),
+        BROWSER_SETTLE_MS_KEY: ms,
+    })
+}
+
+/// What is said of a settle-later press whose settle no look finished
+/// ([`Settle::Unknown`]).
+#[must_use]
+pub fn settle_unheard() -> serde_json::Value {
+    serde_json::json!({ BROWSER_SETTLE_STATE_KEY: Settle::Unknown.word() })
+}
+
+/// Whether a settle's words say its page settled: [`Settle::Ready`] alone
+/// does. `not_ready`, `invalidated`, `unknown` and words that are not a
+/// settle's all say it did not — what a walk reads before it uses a judgment
+/// begun on the page its press left (t-9712).
+#[must_use]
+pub fn settle_said_ready(said: &serde_json::Value) -> bool {
+    said.get(BROWSER_SETTLE_STATE_KEY)
+        .and_then(serde_json::Value::as_str)
+        == Some(Settle::Ready.word())
 }
 
 /// Why a settle ended as it did.
@@ -1594,6 +1656,7 @@ mod tests {
             &["marks", "b"],
             &["marks", "b", "--json"],
             &["click", "b", "--mark", "3"],
+            &["click", "b", "--mark", "3", BROWSER_SETTLE_LATER_FLAG],
         ] {
             assert_eq!(arity_ok(&argv(ok)), Ok(()), "{ok:?}");
         }
@@ -1608,7 +1671,7 @@ mod tests {
             &["click", "b"],
             &["marks"],
             &["marks", "b", "x", "y"],
-            &["click", "b", "--mark", "3", "x"],
+            &["click", "b", "--mark", "3", BROWSER_SETTLE_LATER_FLAG, "x"],
         ] {
             assert!(arity_ok(&argv(refused)).is_err(), "{refused:?}");
         }
@@ -1644,9 +1707,10 @@ mod tests {
         assert_eq!(marks.hold_ms, BROWSER_CALLBACK_DEADLINE_MS);
         assert!(!marks.check && !marks.acts);
         assert!(VERBS.contains(&"marks"));
-        // `click` still presses, and now takes a third word for `--mark <n>`.
+        // `click` still presses, and takes a third word for `--mark <n>` and
+        // a fourth for `--settle-later` (t-9712).
         let click = browser_verb("click").expect("click is a verb");
-        assert_eq!(click.arity, Arity { min: 2, max: 3 });
+        assert_eq!(click.arity, Arity { min: 2, max: 4 });
         assert!(click.acts);
 
         let argv = |line: &[&str]| line.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
@@ -1678,6 +1742,37 @@ mod tests {
         assert!(parse_click(&argv(&["click", "b", "--mark", "x"])).is_err());
         assert!(parse_click(&argv(&["click", "b", "--mark"])).is_err());
         assert!(parse_click(&argv(&["click", "b", "--other"])).is_err());
+    }
+
+    /// A press by number may leave its settle to the pane's next `marks`
+    /// (t-9712) — said by one flag after the number and nowhere else: not
+    /// on a press by selector, not before the number, not beside another
+    /// word, and never changing what the plain press by number reads as.
+    #[test]
+    fn a_press_by_number_leaves_its_settle_for_later_only_when_it_says_so() {
+        let argv = |line: &[&str]| line.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse_click(&argv(&["click", "b", "--mark", "7", BROWSER_SETTLE_LATER_FLAG])),
+            Ok(ClickTarget::MarkSettleLater(7))
+        );
+        assert_eq!(
+            parse_click(&argv(&["click", "b", "--mark", "7"])),
+            Ok(ClickTarget::Mark(7)),
+            "the plain press by number is read as it always was"
+        );
+        for refused in [
+            &["click", "b", "--mark", "0", BROWSER_SETTLE_LATER_FLAG][..],
+            &["click", "b", "--mark", "7", "--json"],
+            &["click", "b", "--mark", BROWSER_SETTLE_LATER_FLAG, "7"],
+            &["click", "b", "#save", BROWSER_SETTLE_LATER_FLAG],
+            &["click", "b", BROWSER_SETTLE_LATER_FLAG],
+        ] {
+            assert!(parse_click(&argv(refused)).is_err(), "{refused:?}");
+        }
+        assert!(
+            usage().contains(&format!("--mark <n> [{BROWSER_SETTLE_LATER_FLAG}]")),
+            "the manual names the flag where the press by number is taught"
+        );
     }
 
     /// The faces the page gathers become marks 1..N over the hittable ones, in
@@ -1935,10 +2030,43 @@ mod tests {
             [
                 Settle::Ready.word(),
                 Settle::NotReady.word(),
-                Settle::Invalidated.word()
+                Settle::Invalidated.word(),
+                Settle::Unknown.word()
             ],
-            ["ready", "not_ready", "invalidated"]
+            ["ready", "not_ready", "invalidated", "unknown"]
         );
+    }
+
+    /// A settle is said in one shape and read by one rule (t-9712): the
+    /// door writes how it ended, why and its wall milliseconds under the
+    /// table's keys, a settle nobody heard end is `unknown`, and only
+    /// `ready` reads as settled — so a walk never uses a judgment begun on a
+    /// page that had not stopped.
+    #[test]
+    fn a_settle_is_said_in_one_shape_and_only_ready_reads_as_settled() {
+        let said = settle_said(Settle::Ready, SettleWhy::Quiet, 52);
+        assert_eq!(said[BROWSER_SETTLE_STATE_KEY], Settle::Ready.word());
+        assert_eq!(said[BROWSER_SETTLE_WHY_KEY], SettleWhy::Quiet.word());
+        assert_eq!(said[BROWSER_SETTLE_MS_KEY], 52);
+        assert!(settle_said_ready(&said));
+        for (state, why) in [
+            (Settle::NotReady, SettleWhy::Moving),
+            (Settle::NotReady, SettleWhy::Busy),
+            (Settle::Invalidated, SettleWhy::Replaced),
+            (Settle::Invalidated, SettleWhy::Gone),
+        ] {
+            assert!(!settle_said_ready(&settle_said(state, why, 250)), "{state:?}");
+        }
+        assert_eq!(settle_unheard()[BROWSER_SETTLE_STATE_KEY], Settle::Unknown.word());
+        assert!(!settle_said_ready(&settle_unheard()));
+        for stranger in [
+            serde_json::Value::Null,
+            serde_json::json!("ready"),
+            serde_json::json!({ BROWSER_SETTLE_WHY_KEY: SettleWhy::Quiet.word() }),
+            serde_json::json!({ BROWSER_SETTLE_STATE_KEY: "still" }),
+        ] {
+            assert!(!settle_said_ready(&stranger), "{stranger}");
+        }
     }
 
     #[test]

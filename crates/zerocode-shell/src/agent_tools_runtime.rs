@@ -5967,7 +5967,7 @@ pub(super) async fn answer_browser_command(
                 Ok(ClickTarget::Css(css)) => {
                     cmd::browser::automate_click(app, &state, &argv[1], &css).await
                 }
-                Ok(ClickTarget::Mark(mark)) => {
+                Ok(ClickTarget::Mark(mark) | ClickTarget::MarkSettleLater(mark)) => {
                     cmd::browser::automate_click_mark(app, &state, &argv[1], mark).await
                 }
                 Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),

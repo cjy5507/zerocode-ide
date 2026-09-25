@@ -157,6 +157,62 @@ pub(crate) fn input_said(what: &str, report: &BrowserInputReport) -> String {
     format!("{what} ({facts}){limitation}")
 }
 
+/// The key a settle-later press's JSON answer carries its sentence under
+/// (t-9712).
+pub(crate) const CLICK_SAID_KEY: &str = "said";
+
+/// The answer of `click <label> --mark <n> --settle-later` (t-9712) — red
+/// seam: the look alone.
+pub(crate) fn settle_later_json(
+    report: &BrowserInputReport,
+    look: Option<&BrowserLook>,
+) -> serde_json::Value {
+    let _ = report;
+    look.map_or_else(|| serde_json::json!({}), marks_json)
+}
+
+/// A press by number whose settle was left for later (t-9712).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HeldSettle {
+    pub(crate) epoch: String,
+    pub(crate) since: Option<f64>,
+}
+
+fn held_settles() -> &'static std::sync::Mutex<std::collections::HashMap<String, HeldSettle>> {
+    static HELD: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, HeldSettle>>,
+    > = std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn hold_settle(label: &str, held: HeldSettle) {
+    held_settles()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(label.to_string(), held);
+}
+
+pub(crate) fn take_held_settle(label: &str) -> Option<HeldSettle> {
+    held_settles()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(label)
+}
+
+pub(crate) fn settle_held(label: &str) -> bool {
+    held_settles()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(label)
+}
+
+pub(crate) fn held_refusal(label: &str) -> String {
+    format!(
+        "이 판의 마지막 누름이 아직 정착을 기다립니다 — 먼저 `{} marks {label}`",
+        zerocode_core::agent_browser::BROWSER_CLI
+    )
+}
+
 /// The rect and ratio a click's sentence carries, if it carries them.
 #[must_use]
 pub(crate) fn pressed_rect(said: &str) -> Option<([f64; 4], f64)> {
@@ -2962,6 +3018,8 @@ pub(crate) struct BrowserLook {
     /// Each field's value digest, by the number it presses by — the pin's,
     /// never printed.
     pub(crate) values: std::collections::BTreeMap<usize, String>,
+    /// How the pane's settle-later press settled before this look (t-9712).
+    pub(crate) settle: Option<SettleReport>,
 }
 
 /// The key a face carries its field's words under, and its value's digest —
@@ -3042,6 +3100,7 @@ pub(crate) fn look_of(value: &serde_json::Value, at_ms: i64) -> Result<BrowserLo
         fields,
         observed,
         values,
+        settle: None,
     })
 }
 
