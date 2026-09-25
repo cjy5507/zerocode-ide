@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><title>State probe — a page that never stands still</title>
+<style>body{font:18px system-ui;margin:24px}button{font:inherit;padding:8px}</style>
+<h1>Live board</h1><button id="advance">Advance</button><p id="clock">0</p>
+<script>
+// The document changes every 10 ms, on a timer (not a frame), for as long as
+// the page stands — what a live ticker does.
+let ticks = 0;
+setInterval(() => { document.getElementById("clock").textContent = String(ticks += 1); }, 10);
+document.getElementById("advance").addEventListener("click", () => {});
+</script>

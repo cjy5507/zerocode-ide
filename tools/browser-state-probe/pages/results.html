@@ -1,0 +1,26 @@
+<!doctype html><meta charset="utf-8"><title>State probe — a results page</title>
+<style>body{font:15px system-ui;margin:0}header,footer{background:#eee;padding:8px}nav a{margin:0 6px}
+main{padding:12px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;list-style:none;padding:0}
+.card{border:1px solid #ccc;padding:6px}.card img{display:block;width:100%;height:90px;background:#ddd}
+button,input,select{font:inherit;padding:4px;margin:2px}</style>
+<header><nav aria-label="Site"><ul><li><a href="#home">Home</a></li><li><a href="#deals">Deals</a></li><li><a href="#help">Help</a></li></ul></nav></header>
+<main><h1>Search results</h1>
+<form onsubmit="return false" role="search"><label>Search <input id="q" value="phone case"></label>
+<label>Sort <select id="sort"><option>Relevance</option><option>Price</option></select></label>
+<label><input id="stock" type="checkbox" checked> In stock</label><button type="button" id="go">Go</button></form>
+<ul id="grid" class="grid" role="list" aria-label="Products"></ul></main>
+<footer><a href="#terms">Terms</a> <a href="#privacy">Privacy</a></footer>
+<script>
+// `?cards=` product cards (40 by default), each a picture, words and a button.
+const cards = Number(new URLSearchParams(location.search).get("cards") || 40);
+const grid = document.getElementById("grid");
+const pixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+for (let i = 1; i <= cards; i += 1) {
+  const card = document.createElement("li");
+  card.className = "card";
+  card.setAttribute("role", "listitem");
+  card.innerHTML = "<img src=\"" + pixel + "\" alt=\"Phone case model " + i + "\"><div>Phone case model " + i
+    + " — " + (5 + i) + ".99</div><button id=\"add-" + i + "\">Add to cart</button>";
+  grid.append(card);
+}
+</script>

@@ -1,0 +1,31 @@
+<!doctype html><meta charset="utf-8"><title>State probe — a form that answers later</title>
+<style>body{font:18px system-ui;margin:24px}button,input{font:inherit;padding:8px;margin:6px}li{margin:4px 0}</style>
+<h1>Flight search</h1>
+<form onsubmit="return false"><label>From <input id="from" placeholder="City"></label>
+<label>To <input id="to" placeholder="City"></label>
+<button type="button" id="search">Search</button></form>
+<section id="results"><h2>Results</h2><ul id="list" role="list" aria-label="Flights"></ul></section>
+<script>
+// A search that answers after `?delay=` milliseconds (120 by default), the
+// results region marked busy until it does — the shape of a page that fetches.
+window.probe = { searches: 0, rendered: 0 };
+const delay = Number(new URLSearchParams(location.search).get("delay") || 120);
+document.getElementById("search").addEventListener("click", () => {
+  probe.searches += 1;
+  const asked = probe.searches;
+  const results = document.getElementById("results");
+  results.setAttribute("aria-busy", "true");
+  document.getElementById("list").replaceChildren();
+  setTimeout(() => {
+    const list = document.getElementById("list");
+    for (let i = 1; i <= 5; i += 1) {
+      const row = document.createElement("li");
+      row.setAttribute("role", "listitem");
+      row.innerHTML = "<span>Flight " + i + " for search " + asked + "</span> <button id=\"book-" + i + "\">Book</button>";
+      list.append(row);
+    }
+    results.removeAttribute("aria-busy");
+    probe.rendered = asked;
+  }, delay);
+});
+</script>
