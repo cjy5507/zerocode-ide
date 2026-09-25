@@ -142,12 +142,8 @@ pub(crate) fn input_said(what: &str, report: &BrowserInputReport) -> String {
     // A press by number says how its page settled (t-6721) — `not_ready` in
     // its own word, never as a page that settled.
     if let Some(settle) = &report.settle {
-        facts.push_str(&format!(
-            "{INPUT_FACT_SEPARATOR}settle={}{INPUT_FACT_SEPARATOR}settle-why={}{INPUT_FACT_SEPARATOR}settle-ms={}",
-            settle.state.word(),
-            settle.why.word(),
-            settle.ms
-        ));
+        facts.push_str(INPUT_FACT_SEPARATOR);
+        facts.push_str(&settle_facts(settle));
     }
     let limitation = report
         .limitation
@@ -157,9 +153,65 @@ pub(crate) fn input_said(what: &str, report: &BrowserInputReport) -> String {
     format!("{what} ({facts}){limitation}")
 }
 
+/// How a settle ended, as the door's sentences say it — a press's, a look's
+/// that finished a press's settle (t-9712), a refusal's: the facts named by
+/// the settle table's own keys (`settle=`, `settle-why=`, `settle-ms=`).
+pub(crate) fn settle_facts(settle: &SettleReport) -> String {
+    use zerocode_core::agent_browser::{
+        BROWSER_SETTLE_KEY, BROWSER_SETTLE_MS_KEY, BROWSER_SETTLE_WHY_KEY,
+    };
+    format!(
+        "{BROWSER_SETTLE_KEY}={}{INPUT_FACT_SEPARATOR}{BROWSER_SETTLE_KEY}-{BROWSER_SETTLE_WHY_KEY}={}{INPUT_FACT_SEPARATOR}{BROWSER_SETTLE_KEY}-{BROWSER_SETTLE_MS_KEY}={}",
+        settle.state.word(),
+        settle.why.word(),
+        settle.ms
+    )
+}
+
+/// The fact a sentence says a settle-later press's settle went unheard by
+/// ([`Settle::Unknown`], t-9712): its pane closed, or the look meant to
+/// finish it failed first.
+fn settle_unheard_fact() -> String {
+    format!(
+        "{}={}",
+        zerocode_core::agent_browser::BROWSER_SETTLE_KEY,
+        Settle::Unknown.word()
+    )
+}
+
+/// The key a settle-later press's JSON answer carries its sentence under
+/// (t-9712) — the same sentence a plain press answers, so the rect and the
+/// ratio read back from it ([`pressed_rect`]).
+pub(crate) const CLICK_SAID_KEY: &str = "said";
+
+/// The answer of `click <label> --mark <n> --settle-later` (t-9712): the
+/// page as the press left it, read as `marks --json` reads it, with the
+/// press's own sentence beside it — or the sentence alone when that look
+/// could not be read (the press was made; the pane's next `marks` finishes
+/// its settle either way).
+pub(crate) fn settle_later_json(
+    report: &BrowserInputReport,
+    look: Option<&BrowserLook>,
+) -> serde_json::Value {
+    let mut answer = look.map_or_else(|| serde_json::json!({}), marks_json);
+    answer[CLICK_SAID_KEY] = input_said(CLICK_SAID, report).into();
+    answer
+}
+
 /// The rect and ratio a click's sentence carries, if it carries them.
 #[must_use]
 pub(crate) fn pressed_rect(said: &str) -> Option<([f64; 4], f64)> {
+    // A press that left its settle for later answers JSON, its sentence under
+    // one key (t-9712): the rect is read from that sentence, never from the
+    // page's words beside it.
+    if let Ok(serde_json::Value::Object(answer)) =
+        serde_json::from_str::<serde_json::Value>(said.trim())
+    {
+        return answer
+            .get(CLICK_SAID_KEY)
+            .and_then(serde_json::Value::as_str)
+            .and_then(pressed_rect);
+    }
     let (_, rest) = said.split_once('(')?;
     let (facts, _) = rest.split_once(')')?;
     let (mut rect, mut dpr) = (None, None);
@@ -1818,10 +1870,15 @@ pub(crate) fn open_answer(label: &str, opened: bool) -> String {
 
 /// `close`'s answer: gone — or still closing.
 pub(crate) fn close_answer(label: &str, closed: bool) -> String {
+    // A settle-later press no look finished goes with its pane, and says so
+    // (t-9712): no settle is dropped without a word.
+    let unheard = take_held_settle(label)
+        .map(|_| format!(" ({})", settle_unheard_fact()))
+        .unwrap_or_default();
     if closed {
-        format!("닫힘 {label}\n")
+        format!("닫힘 {label}{unheard}\n")
     } else {
-        format!("아직 닫는 중 {label} — `zerocode-browser tabs`가 말해 줍니다\n")
+        format!("아직 닫는 중 {label}{unheard} — `zerocode-browser tabs`가 말해 줍니다\n")
     }
 }
 
@@ -2962,6 +3019,9 @@ pub(crate) struct BrowserLook {
     /// Each field's value digest, by the number it presses by — the pin's,
     /// never printed.
     pub(crate) values: std::collections::BTreeMap<usize, String>,
+    /// How the pane's settle-later press settled before this look read the
+    /// page (t-9712) — `None` when no press was waiting for one.
+    pub(crate) settle: Option<SettleReport>,
 }
 
 /// The key a face carries its field's words under, and its value's digest —
@@ -3042,6 +3102,7 @@ pub(crate) fn look_of(value: &serde_json::Value, at_ms: i64) -> Result<BrowserLo
         fields,
         observed,
         values,
+        settle: None,
     })
 }
 
@@ -3095,18 +3156,68 @@ pub(crate) fn marks_request() -> serde_json::Value {
 
 /// Walk the page for the controls a person could hit, number the hittable
 /// ones in document order (the core's pure step), and remember them under the
-/// pane's label.
+/// pane's label — finishing first a settle the pane's last press left for
+/// later ([`look_after_held_settle`], t-9712).
 pub(crate) async fn automate_marks(
     app: &AppHandle,
     state: &AppState,
     label: &str,
 ) -> Result<BrowserLook, String> {
-    let pane = browser_pane_of(app, state, label)?;
+    look_after_held_settle(
+        label,
+        browser_pane_of(app, state, label),
+        |pane, held| async move { settle_after_press(&pane, &held.epoch, held.since).await },
+        |pane| async move { read_look(&pane, label).await },
+    )
+    .await
+}
+
+/// A look that first finishes the settle the pane's last press left for
+/// later (`--settle-later`, t-9712): the held settle is taken — once — and
+/// ended by `settle` on the pane, by the one settle road, before `read` reads
+/// the page, and the look says how it ended; with none held it reads at once.
+/// A pane gone before the settle could be finished answers so, the settle
+/// said `unknown`; a read that fails after it says how the settle ended in
+/// its refusal — no settle is dropped without a word. `automate_marks`' own
+/// road, apart from the window.
+pub(crate) async fn look_after_held_settle<P, S, SF, R, RF>(
+    label: &str,
+    pane: Result<P, String>,
+    settle: S,
+    read: R,
+) -> Result<BrowserLook, String>
+where
+    P: Clone,
+    S: FnOnce(P, HeldSettle) -> SF,
+    SF: std::future::Future<Output = SettleReport>,
+    R: FnOnce(P) -> RF,
+    RF: std::future::Future<Output = Result<BrowserLook, String>>,
+{
+    let held = take_held_settle(label);
+    let pane = pane.map_err(|why| match held {
+        Some(_) => format!("{why} ({})", settle_unheard_fact()),
+        None => why,
+    })?;
+    let settle = match held {
+        Some(held) => Some(settle(pane.clone(), held).await),
+        None => None,
+    };
+    let mut look = read(pane).await.map_err(|why| match &settle {
+        Some(settle) => format!("{why} ({})", settle_facts(settle)),
+        None => why,
+    })?;
+    look.settle = settle;
+    Ok(look)
+}
+
+/// One look at `pane`, numbered by the core and remembered under `label` —
+/// what `marks` reads, and what a settle-later press answers with.
+async fn read_look(pane: &BrowserPane, label: &str) -> Result<BrowserLook, String> {
     let script = automation_script(
         &marks_request(),
         &format!("{BROWSER_OBSERVE_HELPERS}\n{BROWSER_MARK_HELPERS}\n{BROWSER_MARKS_BODY}"),
     );
-    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+    let reply = page_json(pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     let look = look_of(&page_value(reply)?, epoch_ms_now())?;
     remember_marks(label, &look);
     Ok(look)
@@ -3139,6 +3250,10 @@ pub(crate) fn marks_items(marks: &[BrowserMark]) -> Vec<serde_json::Value> {
 pub(crate) fn marks_lines(look: &BrowserLook) -> String {
     use zerocode_core::computer_use_protocol::marks::legend_line;
     let mut lines = String::new();
+    // A look that finished a press's settle says how, first (t-9712).
+    if let Some(settle) = &look.settle {
+        lines.push_str(&format!("({})\n", settle_facts(settle)));
+    }
     for item in marks_items(&look.marks) {
         if let Some(line) = legend_line(&item) {
             lines.push_str(&line);
@@ -3175,6 +3290,11 @@ pub(crate) fn marks_json(look: &BrowserLook) -> serde_json::Value {
     answer[snapshot::FIELDS_KEY] = look.fields.clone().into();
     for (key, list) in &look.observed {
         answer[*key] = list.clone();
+    }
+    // How the pane's settle-later press settled before this look (t-9712).
+    if let Some(settle) = &look.settle {
+        answer[zerocode_core::agent_browser::BROWSER_SETTLE_KEY] =
+            zerocode_core::agent_browser::settle_said(settle.state, settle.why, settle.ms);
     }
     answer[zerocode_core::untrusted::JSON_FLAG] = serde_json::Value::Bool(true);
     answer
@@ -3290,6 +3410,47 @@ pub(crate) async fn automate_click_mark(
     label: &str,
     mark_n: usize,
 ) -> Result<BrowserInputReport, String> {
+    let (pane, pin, mut report) = press_mark(app, state, label, mark_n).await?;
+    report.settle = Some(settle_after_press(&pane, &pin.document_epoch, report.pressed_at).await);
+    Ok(report)
+}
+
+/// `click <label> --mark N --settle-later` (t-9712): the same press, answered
+/// the moment it is made — its settle held for the pane's next `marks`, which
+/// finishes it before it reads — with the page as the press left it, read
+/// and numbered as a look (`None` when that look could not be read: the press
+/// was made all the same).
+pub(crate) async fn automate_click_mark_later(
+    app: &AppHandle,
+    state: &AppState,
+    label: &str,
+    mark_n: usize,
+) -> Result<(BrowserInputReport, Option<BrowserLook>), String> {
+    let (pane, pin, report) = press_mark(app, state, label, mark_n).await?;
+    hold_settle(
+        label,
+        HeldSettle {
+            epoch: pin.document_epoch,
+            since: report.pressed_at,
+        },
+    );
+    let look = read_look(&pane, label).await.ok();
+    Ok((report, look))
+}
+
+/// The press by number both roads share: the pin proved on the pane's last
+/// marks, then the one press with what the look read. Refused while the
+/// pane's last settle-later press still waits for a look (t-9712): its
+/// numbers are the first look's, and its settle would go unheard.
+async fn press_mark(
+    app: &AppHandle,
+    state: &AppState,
+    label: &str,
+    mark_n: usize,
+) -> Result<(BrowserPane, BrowserLookPin, BrowserInputReport), String> {
+    if settle_held(label) {
+        return Err(held_refusal(label));
+    }
     let (marks, pin) = recall_table(label, |table| (table.marks.clone(), table.pin_of(mark_n)))?;
     let mark = mark_n
         .checked_sub(1)
@@ -3313,9 +3474,56 @@ pub(crate) async fn automate_click_mark(
         "value": pin.value_digest,
         "watch": settle_watch(),
     });
-    let mut report = press(&pane, &mark.selector, Some(expect)).await?;
-    report.settle = Some(settle_after_press(&pane, &pin.document_epoch, report.pressed_at).await);
-    Ok(report)
+    let report = press(&pane, &mark.selector, Some(expect)).await?;
+    Ok((pane, pin, report))
+}
+
+/// A press by number whose settle was left for later (t-9712): the document
+/// it was made in and the page's clock at the press — what the pane's next
+/// `marks` settles against before it reads.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HeldSettle {
+    pub(crate) epoch: String,
+    pub(crate) since: Option<f64>,
+}
+
+fn held_settles() -> &'static std::sync::Mutex<std::collections::HashMap<String, HeldSettle>> {
+    static HELD: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, HeldSettle>>,
+    > = std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Leave `held` for the pane's next `marks` to finish.
+pub(crate) fn hold_settle(label: &str, held: HeldSettle) {
+    held_settles()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(label.to_string(), held);
+}
+
+/// Take the settle the pane's last press left for later, if one waits.
+pub(crate) fn take_held_settle(label: &str) -> Option<HeldSettle> {
+    held_settles()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(label)
+}
+
+/// Whether the pane's last press left its settle for a look still to come.
+pub(crate) fn settle_held(label: &str) -> bool {
+    held_settles()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(label)
+}
+
+/// Why a press by number is refused while a settle waits (t-9712).
+pub(crate) fn held_refusal(label: &str) -> String {
+    format!(
+        "이 판의 마지막 누름이 아직 정착을 기다립니다 — 먼저 `{} marks {label}`",
+        zerocode_core::agent_browser::BROWSER_CLI
+    )
 }
 
 /// The settle's page script (t-6721): what the page says of itself on one

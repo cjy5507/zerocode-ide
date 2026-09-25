@@ -35,6 +35,7 @@ zerocode-browser eval <pane-label> <expr>
 zerocode-browser click <pane-label> <css>
 zerocode-browser marks <pane-label> [--json]            # number the controls a person could hit (picture: screenshot --marks)
 zerocode-browser click <pane-label> --mark <n>          # press mark n from the last marks (refused if it moved or changed)
+zerocode-browser click <pane-label> --mark <n> --settle-later  # answer at once with the page the press left (JSON); the pane's next marks finishes the settle and says it
 zerocode-browser type <pane-label> <css> <text>
 zerocode-browser type <pane-label> <css> --value-stdin   # a password field: the value from stdin, never argv
 zerocode-browser wait <pane-label> <css> [timeout-ms]

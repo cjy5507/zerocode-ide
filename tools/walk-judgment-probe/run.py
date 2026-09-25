@@ -17,12 +17,28 @@ build walks twice in one process: the first walk pays for the process's cold
 connections (the window keeps its warm), so it is reported on its own, and the
 table is the second — the walk a long-lived window takes.
 
-Scenarios (all on `page.html` beside this file):
+Scenarios (on `page.html` beside this file, `steps` and `later` on `steps.html`):
 
 - press   — "press Advance once", until the page says so
 - repeat  — the same, asked as a replay with the judgment cache on
 - type    — "search for London": an entry, then a press
 - observe — which container, image and row the goal is about (one step)
+- steps   — "press Next until Step 4 of 4": three presses, each changing the
+            page at once (t-9712)
+- later   — the same walk on `steps.html?delay=120`: each press changes the
+            page 120 ms after it answered, the step busy until then, so the
+            page a press leaves is the page it was pressed on — the shape of a
+            page that fetches (t-9712 r2)
+
+Arms (`--arms`, t-9712): `before` and `after` walk as a plain `walk` does;
+`before-ahead` and `after-ahead` walk as `walk --overlap` does, asking ahead. The
+running window's door may predate the one a build expects (a v1.1.25 window
+does not settle a press by number), so the harness stands that door in front
+of it (`probe.rs` `Door`): a press by number settles, by the product's own
+loop, each poll one `eval`; a press that leaves its settle for later answers
+the page it left and the next look finishes the settle. What the stand-in did
+inside a call is kept on that call (`inside`: `settleMs`, `previewMs`,
+`standInMs`) and every table says it.
 
 The page's snapshot the browser door does not carry yet (t-6721 U4) is stood
 in for by `snapshot.js`, one more `eval` after each look, in both builds and
@@ -82,6 +98,26 @@ SCENARIOS = {
         "steps": 1,
         "stand_in": True,
     },
+    "steps": {
+        "goal": "Go through the checkout: press Next until the page says Step 4 of 4.",
+        "until": "Step 4 of 4",
+        "steps": 4,
+        "stand_in": False,
+        "page": "steps.html",
+        "ready": "#next",
+    },
+}
+# The steps walk on the same page answering later: the step comes from a
+# worker's timer, since a hidden pane holds its own to the next second.
+SCENARIOS["later"] = {**SCENARIOS["steps"], "query": "delay=120"}
+
+# The arms a run may walk: which build, and whether the walk asks ahead
+# (`walk --overlap`).
+ARMS = {
+    "before": ("before", False),
+    "after": ("after", False),
+    "before-ahead": ("before", True),
+    "after-ahead": ("after", True),
 }
 
 # What the observation heads should choose on page.html: the search results,
@@ -95,6 +131,12 @@ def strip_after_only(source: str) -> str:
     return re.sub(r"[ \t]*// after-only \{\n.*?// after-only \}\n", "", source, flags=re.S)
 
 
+def page_url(spec: dict) -> str:
+    """A scenario's own page beside this file, with its query when it has one."""
+    url = (HERE / spec["page"]).as_uri()
+    return f"{url}?{spec['query']}" if spec.get("query") else url
+
+
 def percentile(values: list[float], share: float) -> float | None:
     """Nearest rank; `None` for no values."""
     if not values:
@@ -103,10 +145,17 @@ def percentile(values: list[float], share: float) -> float | None:
     return ordered[max(0, math.ceil(share * len(ordered)) - 1)]
 
 
+def inside(call: dict, key: str) -> float:
+    """What the harness did inside one call (the stand-in door, the stand-in
+    snapshot), in ms — never the product's own road."""
+    return float((call.get("inside") or {}).get(key) or 0.0)
+
+
 def steps_of(row: dict) -> list[dict]:
     """A walk's hand steps, from its calls: a step opens at a look (`marks`)
-    and ends where its last press or entry ended; the stand-in's time for
-    that look is taken out, so a step is what the product's own road costs."""
+    and ends where its last press or entry ended; the stand-in snapshot's time
+    inside it is taken out, so a step is what the product's own road costs
+    (a settle the door ran inside a call stays in: it is the product's)."""
     calls = row.get("calls") or []
     stand_ins = list(row.get("standInMs") or [])
     steps, current = [], None
@@ -115,11 +164,13 @@ def steps_of(row: dict) -> list[dict]:
         if call["verb"] == "marks":
             if current and current["end"] is not None:
                 steps.append(current)
-            stand_in = stand_ins[looks] if looks < len(stand_ins) else 0.0
+            # A row that kept its stand-in times apart, one per look.
+            stand_in = stand_ins[looks] if looks < len(stand_ins) else inside(call, "standInMs")
             looks += 1
             current = {"start": call["startMs"], "end": None, "kind": "press", "standIn": stand_in}
         elif call["verb"] in ("click", "type") and current is not None:
             current["end"] = call["startMs"] + call["ms"]
+            current["standIn"] += inside(call, "standInMs")
             if call["verb"] == "type":
                 current["kind"] = "type"
         elif call["verb"] == "find" and current is not None and current["end"] is not None:
@@ -133,11 +184,28 @@ def steps_of(row: dict) -> list[dict]:
     ]
 
 
+def press_gaps(row: dict) -> list[float]:
+    """The time from one hand to the next — a press's end to the next press's
+    or entry's end — what a person watching the walk waits between two
+    presses, the settle and the look between them included; the stand-in
+    snapshot's time in between is taken out."""
+    ends, gaps, stand_in = [], [], 0.0
+    for call in row.get("calls") or []:
+        stand_in += inside(call, "standInMs")
+        if call["verb"] in ("click", "type") and call.get("exit", 0) == 0:
+            ends.append((call["startMs"] + call["ms"], stand_in))
+    for (was, before), (now, after) in zip(ends, ends[1:]):
+        gaps.append(now - was - (after - before))
+    return gaps
+
+
 def succeeded(scenario: str, row: dict) -> bool:
     """The page's own word, never the walk's."""
     oracle = row.get("oracle") or {}
     if scenario in ("press", "repeat"):
         return oracle.get("count") == 1
+    if scenario in ("steps", "later"):
+        return oracle.get("count") == 3
     if scenario == "type":
         return oracle.get("searched") == "London"
     if scenario == "observe":
@@ -161,16 +229,32 @@ def summarize(rows: list[dict], first: bool = False) -> dict:
         key = (row["scenario"], row["label"])
         cell = table.setdefault(key, {"walks": [], "press": [], "type": [], "ok": 0, "n": 0,
                                       "requests": 0, "judged": 0, "cached": 0, "written": 0,
-                                      "reused": 0, "large": 0, "standIn": [], "loads": []})
+                                      "reused": 0, "large": 0, "standIn": [], "loads": [],
+                                      "gaps": [], "settles": [], "previews": [], "asks": [],
+                                      "overlapped": 0, "discarded": 0, "cancelled": 0,
+                                      "settledReady": 0, "settledAll": 0})
         cell["n"] += 1
         cell["ok"] += succeeded(row["scenario"], row)
-        cell["walks"].append(row["walkMs"])
+        # A walk's own time, less what the stand-in snapshot took inside it.
+        cell["walks"].append(row["walkMs"] - sum(inside(call, "standInMs") for call in row.get("calls") or []))
         if row.get("load") is not None:
             cell["loads"].append(row["load"])
         for step in steps_of(row):
             cell[step["kind"]].append(step["ms"])
             if step["standInMs"]:
                 cell["standIn"].append(step["standInMs"])
+        cell["gaps"].extend(press_gaps(row))
+        for call in row.get("calls") or []:
+            if (call.get("inside") or {}).get("settle"):
+                cell["settles"].append(inside(call, "settleMs"))
+                cell["settledAll"] += 1
+                cell["settledReady"] += call["inside"]["settle"] == "ready"
+            if inside(call, "previewMs"):
+                cell["previews"].append(inside(call, "previewMs"))
+        if row.get("asked") is not None:
+            cell["asks"].append(int(row.get("asked") or 0) + int(row.get("begun") or 0))
+        for word in ("overlapped", "discarded", "cancelled"):
+            cell[word] += int(row.get(word) or 0)
         for judged in row.get("rows") or []:
             if judged.get("outcome") == "answered" or judged.get("requests") is not None:
                 cell["judged"] += 1
@@ -202,6 +286,18 @@ def summarize(rows: list[dict], first: bool = False) -> dict:
             "stand_in_p50": percentile(cell["standIn"], 0.5),
             "load_min": min(cell["loads"]) if cell["loads"] else None,
             "load_max": max(cell["loads"]) if cell["loads"] else None,
+            "gap_p50": percentile(cell["gaps"], 0.5),
+            "gap_p95": percentile(cell["gaps"], 0.95),
+            "gaps": len(cell["gaps"]),
+            "settle_p50": percentile(cell["settles"], 0.5),
+            "settle_p95": percentile(cell["settles"], 0.95),
+            "settled_ready": cell["settledReady"],
+            "settled": cell["settledAll"],
+            "preview_p50": percentile(cell["previews"], 0.5),
+            "asks_per_walk": (sum(cell["asks"]) / len(cell["asks"])) if cell["asks"] else None,
+            "overlapped": cell["overlapped"],
+            "discarded": cell["discarded"],
+            "cancelled": cell["cancelled"],
         }
     return summary
 
@@ -210,16 +306,27 @@ def table_md(summary: dict, command: str, out: pathlib.Path) -> str:
     def ms(value):
         return "—" if value is None else f"{value:,.0f}"
 
+    def mean(value):
+        return "—" if value is None else f"{value:.2f}"
+
     lines = [
         f"`{command}` → `{out}`",
         "",
-        "| scenario/build | n | ok | walk p50/p95 | press step p50/p95 | type step p50/p95 | Jev requests / judged steps | memo | large model | values written/reused | stand-in p50 | load |",
-        "|---|---:|---:|---|---|---|---|---:|---:|---|---:|---|",
+        "| scenario/arm | n | ok | walk p50/p95 | press step p50/p95 | press gap p50/p95 (n) | type step p50/p95 "
+        "| settle p50/p95 (ready/all) | preview p50 | ahead used/dropped/cancelled | asked+begun per walk "
+        "| Jev requests / judged steps | memo | large model | values written/reused | stand-in p50 | load |",
+        "|---|---:|---:|---|---|---|---|---|---:|---|---:|---|---:|---:|---|---:|---|",
     ]
     for name, cell in summary.items():
         lines.append(
             f"| {name} | {cell['n']} | {cell['ok']}/{cell['n']} | {ms(cell['walk_p50'])} / {ms(cell['walk_p95'])} "
-            f"| {ms(cell['press_p50'])} / {ms(cell['press_p95'])} | {ms(cell['type_p50'])} / {ms(cell['type_p95'])} "
+            f"| {ms(cell['press_p50'])} / {ms(cell['press_p95'])} "
+            f"| {ms(cell.get('gap_p50'))} / {ms(cell.get('gap_p95'))} ({cell.get('gaps', 0)}) "
+            f"| {ms(cell['type_p50'])} / {ms(cell['type_p95'])} "
+            f"| {ms(cell.get('settle_p50'))} / {ms(cell.get('settle_p95'))} ({cell.get('settled_ready', 0)}/{cell.get('settled', 0)}) "
+            f"| {ms(cell.get('preview_p50'))} "
+            f"| {cell.get('overlapped', 0)}/{cell.get('discarded', 0)}/{cell.get('cancelled', 0)} "
+            f"| {mean(cell.get('asks_per_walk'))} "
             f"| {cell['jev_requests']} / {cell['judged_steps']} | {cell['memo_answers']} | {cell['large_model_calls']} "
             f"| {cell['values_written']}/{cell['values_reused']} | {ms(cell['stand_in_p50'])} "
             f"| {cell['load_min']}–{cell['load_max']} |"
@@ -289,12 +396,14 @@ def build(label: str, before: str | None, bins: pathlib.Path) -> pathlib.Path:
 
 
 def walk_once(binary: pathlib.Path, label: str, scenario: str, pane: str, url: str,
-              out: pathlib.Path, home: pathlib.Path, value_key: str | None) -> int:
+              out: pathlib.Path, home: pathlib.Path, value_key: str | None, overlap: bool = False) -> int:
     spec = SCENARIOS[scenario]
     env = dict(os.environ)
     env.update({
         "ZEROCODE_WALK_PROBE_PANE": pane,
-        "ZEROCODE_WALK_PROBE_URL": url,
+        "ZEROCODE_WALK_PROBE_URL": page_url(spec) if spec.get("page") else url,
+        "ZEROCODE_WALK_PROBE_OVERLAP": "1" if overlap else "0",
+        "ZEROCODE_WALK_PROBE_READY": spec.get("ready", "#search"),
         "ZEROCODE_WALK_PROBE_KEY": os.environ["TYPESAFE_API_KEY"],
         "ZEROCODE_WALK_PROBE_OUT": str(out / "rows.jsonl"),
         "ZEROCODE_WALK_PROBE_HOME": str(home),
@@ -331,6 +440,8 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--walks", type=int, default=8, help="walks per scenario per build")
     parser.add_argument("--scenarios", default="press,repeat,type,observe")
+    parser.add_argument("--arms", default="before,after",
+                        help="which of " + ",".join(ARMS) + " to walk, turn about")
     parser.add_argument("--pane", help="a pane of your own; one is opened (and closed) when absent")
     parser.add_argument("--bins", help="reuse the binaries a previous run built here")
     args = parser.parse_args()
@@ -343,7 +454,10 @@ def main() -> int:
     if not args.bins:
         build("before", args.before, bins)
         build("after", None, bins)
-    arms = {"before": bins / "before", "after": bins / "after"}
+    arms = [arm for arm in args.arms.split(",") if arm]
+    unknown = [arm for arm in arms if arm not in ARMS]
+    if unknown:
+        sys.exit(f"unknown arms {unknown}; the arms are {list(ARMS)}")
     url = (HERE / "page.html").as_uri()
     pane, opened = args.pane, False
     if not pane:
@@ -355,16 +469,20 @@ def main() -> int:
         for scenario in args.scenarios.split(","):
             print(f"{scenario}:", flush=True)
             for walk in range(args.walks):
-                order = ["before", "after"] if walk % 2 == 0 else ["after", "before"]
+                # Turn about: A B C, then C B A.
+                order = arms if walk % 2 == 0 else list(reversed(arms))
                 for label in order:
-                    walk_once(arms[label], label, scenario, pane, url, out, homes[label],
-                              os.environ.get("ANTHROPIC_API_KEY") if label == "after" else None)
+                    built, overlap = ARMS[label]
+                    walk_once(bins / built, label, scenario, pane, url, out, homes[label],
+                              os.environ.get("ANTHROPIC_API_KEY") if built == "after" else None,
+                              overlap)
     finally:
         if opened:
             subprocess.run(["zerocode-browser", "close", pane], capture_output=True, text=True)
     rows = [json.loads(line) for line in (out / "rows.jsonl").read_text().splitlines() if line.strip()]
     steady, first = summarize(rows), summarize(rows, first=True)
-    command = f"python3 tools/walk-judgment-probe/run.py --before {args.before} --out {out} --walks {args.walks}"
+    command = (f"python3 tools/walk-judgment-probe/run.py --before {args.before} --out {out} --walks {args.walks}"
+               f" --scenarios {args.scenarios} --arms {args.arms}")
     (out / "summary.json").write_text(json.dumps(
         {"before": args.before, "after": head, "steady": steady, "firstInProcess": first}, indent=1))
     text = table_md(steady, command, out) + "\nFirst walk of each process (cold connections):\n\n" \

@@ -1,0 +1,40 @@
+<!doctype html><meta charset="utf-8"><title>Walk steps probe</title>
+<style>body{font:18px system-ui;margin:24px}button{font:inherit;padding:8px;margin:6px}</style>
+<h1>Checkout</h1>
+<p id="step">Step 1 of 4</p>
+<button type="button" id="next">Next: step 2</button> <button type="button" id="save">Save for later</button>
+<script>
+// Every press of Next re-draws the step and its own button at once, so the
+// page a press leaves is the page it settles on, and each look asks a new
+// question. A second control stands beside it, as on a real page: a question
+// begun before a press has something left to offer once Next is spent.
+//
+// `?delay=<ms>` (t-9712 r2): the step answers that long after the press
+// instead, marked busy until it does — the page a press leaves is the page it
+// was pressed on, the shape of a page that fetches. The answer comes from a
+// worker's timer: a hidden pane holds its own timers to the next whole second
+// (a 100 ms timeout fired at 355 ms, a worker's at 132), as it never holds a
+// fetch's answer.
+window.probe = { count: 0 };
+let at = 1;
+const step = document.querySelector('#step');
+const next = document.querySelector('#next');
+const draw = () => {
+  if (at >= 4) return;
+  at += 1;
+  probe.count = at - 1;
+  step.textContent = 'Step ' + at + ' of 4';
+  next.textContent = at < 4 ? 'Next: step ' + (at + 1) : 'Done';
+};
+const delay = Number(new URLSearchParams(location.search).get('delay') || 0);
+const later = delay > 0 && new Worker(URL.createObjectURL(new Blob(
+  ['onmessage = () => setTimeout(() => postMessage(0), ' + delay + ')'],
+  { type: 'text/javascript' })));
+if (later) later.onmessage = () => { draw(); step.removeAttribute('aria-busy'); };
+next.onclick = () => {
+  if (!later) return draw();
+  if (at >= 4) return;
+  step.setAttribute('aria-busy', 'true');
+  later.postMessage(0);
+};
+</script>

@@ -290,6 +290,26 @@ pub(super) struct FakeWorld {
     /// How long one look holds the walk — what a judgment begun on a settled
     /// screen runs behind.
     pub(super) look_holds: Duration,
+    /// What a press that answers before its page settles says of the settle
+    /// once it is waited for (a page's `--settle-later`, t-9712): `None` is a
+    /// world whose press settles before it answers, or needs no settle.
+    pub(super) settles_later: Option<Value>,
+    /// What the page shows the moment the press is made, when that is not
+    /// what it settles on (a late result, a page still moving).
+    pub(super) unsettled_items: Option<Vec<Value>>,
+    /// Whether the page the press left still shows what it showed before the
+    /// press — a result a fetch renders after the press answered — so each
+    /// press sets `unsettled_items` to the page it was made on.
+    pub(super) unsettled_lags: bool,
+    /// How long waiting for that settle holds the walk — what a judgment
+    /// begun on the page the press left runs behind.
+    pub(super) settle_holds: Duration,
+    /// Whether the last press left its settle for later, and how many such
+    /// settles the walk waited for.
+    settling: bool,
+    pub(super) settles_waited: usize,
+    /// How many looks the walk took.
+    pub(super) looks: usize,
 }
 
 impl FakeWorld {
@@ -327,6 +347,13 @@ impl FakeWorld {
             preview_items: None,
             asks_before_press: true,
             look_holds: Duration::ZERO,
+            settles_later: None,
+            unsettled_items: None,
+            unsettled_lags: false,
+            settle_holds: Duration::ZERO,
+            settling: false,
+            settles_waited: 0,
+            looks: 0,
         }
     }
 
@@ -384,6 +411,7 @@ impl FakeWorld {
 
 impl World for FakeWorld {
     fn look(&mut self) -> Option<Screen> {
+        self.looks += 1;
         self.spend(self.look_ms);
         std::thread::sleep(self.look_holds);
         self.screen.clone()
@@ -391,6 +419,10 @@ impl World for FakeWorld {
     fn press(&mut self, mark: usize) -> bool {
         self.observed.push(crate::run_evidence::observation());
         self.presses.push(mark);
+        self.settling = self.press_takes && self.settles_later.is_some();
+        if self.unsettled_lags {
+            self.unsettled_items = self.screen.as_ref().map(|screen| screen.items.clone());
+        }
         // Time first — the world's own clock, then the door's landing — then
         // whether the screen moved, then where the press led.
         self.spend(self.press_ms);
@@ -463,6 +495,28 @@ impl World for FakeWorld {
                 screen
             });
         Some(Settled { note, screen })
+    }
+    fn unsettled(&mut self) -> Option<Screen> {
+        if !self.settling {
+            return None;
+        }
+        let mut screen = self.screen.clone()?;
+        if let Some(items) = &self.unsettled_items {
+            screen.items.clone_from(items);
+        }
+        Some(screen)
+    }
+    fn settle(&mut self) -> Option<Settled> {
+        if !std::mem::take(&mut self.settling) {
+            return None;
+        }
+        let note = self.settles_later.clone()?;
+        self.settles_waited += 1;
+        std::thread::sleep(self.settle_holds);
+        Some(Settled {
+            note,
+            screen: self.screen.clone(),
+        })
     }
     fn asks_ahead_of_the_press(&self) -> bool {
         self.asks_before_press
@@ -1962,6 +2016,381 @@ fn a_judgment_asked_on_the_settled_screen_hides_behind_the_look() {
     );
 }
 
+// ---- a page's settle, waited for behind the next judgment (t-9712) --------------
+
+/// What a page's settle says once it is waited for: ready, still moving at the
+/// wall, another document, or a settle nobody heard end — the door's words.
+fn settle_ready() -> Value {
+    zerocode_core::agent_browser::settle_said(
+        zerocode_core::agent_browser::Settle::Ready,
+        zerocode_core::agent_browser::SettleWhy::Quiet,
+        52,
+    )
+}
+
+fn settle_failures() -> [Value; 3] {
+    use zerocode_core::agent_browser::{Settle, SettleWhy, settle_said, settle_unheard};
+    [
+        settle_said(Settle::NotReady, SettleWhy::Moving, 250),
+        settle_said(Settle::Invalidated, SettleWhy::Replaced, 3),
+        settle_unheard(),
+    ]
+}
+
+/// A page world whose press answers the moment it is made — its settle left
+/// for later — and asks nothing ahead of a press (t-9712).
+fn a_page_that_settles_later(world: FakeWorld, note: Value) -> FakeWorld {
+    FakeWorld {
+        settles_later: Some(note),
+        asks_before_press: false,
+        ..world
+    }
+}
+
+/// A page's press that answers before it settles (t-9712): the next question
+/// is begun on the page the press left, the settle is waited for behind it,
+/// and when the settled page asks the very same question its answer is used.
+/// Every press's row says how its page settled, in the door's own words.
+#[test]
+fn a_page_press_that_settles_later_is_judged_on_the_page_it_left_behind_its_settle() {
+    let mut judge = FakeJudge::chose(&[1, 1, 1]);
+    let mut world = a_page_that_settles_later(FakeWorld::that_moves(&[1, 2]), settle_ready());
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(world.presses, vec![1, 1, 1]);
+    assert_eq!(judge.asked.len(), 1, "only the first page is asked in turn");
+    assert_eq!(
+        judge.begun.len(),
+        2,
+        "begun on the page each of the first two presses left, not the last"
+    );
+    assert_eq!(judge.finished, 2);
+    assert_eq!(
+        (walked.overlapped, walked.discarded, walked.cancelled),
+        (2, 0, 0)
+    );
+    assert_eq!(
+        world.settles_waited, 3,
+        "every press's settle was waited for"
+    );
+    for row in &walked.rows {
+        assert_eq!(row[SETTLE], settle_ready(), "{row}");
+    }
+    assert!(walked.rows[0].get(OVERLAP).is_none());
+    assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_USED));
+    assert_eq!(walked.rows[2][OVERLAP], json!(OVERLAP_USED));
+    assert_eq!(
+        SETTLE,
+        zerocode_core::agent_browser::BROWSER_SETTLE_KEY,
+        "the row keeps the look's settle under the look's own key"
+    );
+}
+
+/// A settle that did not end `ready` — a page still moving at the wall,
+/// another document, a settle nobody heard end — cancels the judgment begun
+/// on the page the press left: its answer is never used, the next row says
+/// it was cancelled, and the page is asked in turn once it is looked at again.
+#[test]
+fn a_settle_that_did_not_end_ready_cancels_the_judgment_begun_on_the_page_and_asks_again() {
+    for note in settle_failures() {
+        let mut judge = FakeJudge::chose(&[1, 1, 1]);
+        let mut world = a_page_that_settles_later(FakeWorld::that_moves(&[1, 2]), note.clone());
+        let walked = run_with(
+            Mode::On,
+            true,
+            Branching::OFF,
+            &goal(2),
+            &mut judge,
+            &mut world,
+            Options {
+                overlap: true,
+                rescue: false,
+            },
+            None,
+        );
+        assert_eq!(world.presses, vec![1, 1], "{note}");
+        assert_eq!(
+            judge.begun.len(),
+            1,
+            "begun on the page the first press left: {note}"
+        );
+        assert_eq!(
+            judge.finished, 0,
+            "a cancelled judgment is never used: {note}"
+        );
+        assert_eq!(judge.asked.len(), 2, "the next page asked in turn: {note}");
+        assert_eq!(
+            (walked.overlapped, walked.discarded, walked.cancelled),
+            (0, 0, 1),
+            "{note}"
+        );
+        assert_eq!(walked.rows[0][SETTLE], note);
+        assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_CANCELLED), "{note}");
+        assert_eq!(world.looks, 2, "{note}");
+    }
+}
+
+/// A page that settled on something other than what the press left — a late
+/// result — asks another question: the answer begun on the first look of it
+/// is dropped and the settled page asked in turn.
+#[test]
+fn a_page_that_settled_on_another_question_drops_the_judgment_begun_on_it() {
+    let mut judge = FakeJudge::chose(&[1, 1, 1]);
+    let mut world = a_page_that_settles_later(FakeWorld::that_moves(&[1, 2]), settle_ready());
+    world.unsettled_items = Some(vec![control(1, "누른 순간")]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(judge.begun.len(), 1);
+    assert_eq!(judge.asked.len(), 2, "both pages asked in turn");
+    assert_eq!(judge.finished, 0);
+    assert_eq!(
+        (walked.overlapped, walked.discarded, walked.cancelled),
+        (0, 1, 0)
+    );
+    assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_DISCARDED));
+}
+
+/// A page whose press changes it only after the press answered — a result a
+/// fetch renders — still shows, the moment the press is made, the page it was
+/// made on (t-9712 r2): a question begun there is one the settled page no
+/// longer asks, so nothing is begun, and the look after the settle asks in
+/// turn — one request a step, as a walk that does not ask ahead spends. The
+/// same page changed by its press at once is asked on as it was left.
+#[test]
+fn a_page_that_changes_after_its_press_answered_begins_nothing_on_the_page_it_was_pressed_on() {
+    let walk = |lags: bool| {
+        let mut judge = FakeJudge::chose(&[1; 5]);
+        let mut world = a_page_that_settles_later(FakeWorld::that_moves(&[1, 2]), settle_ready());
+        world.unsettled_lags = lags;
+        let walked = run_with(
+            Mode::On,
+            true,
+            Branching::OFF,
+            &goal(3),
+            &mut judge,
+            &mut world,
+            Options {
+                overlap: true,
+                rescue: false,
+            },
+            None,
+        );
+        (walked, judge, world)
+    };
+
+    let (walked, judge, world) = walk(true);
+    assert_eq!(world.presses, vec![1, 1, 1]);
+    // Begun, used, dropped, cancelled: none of them.
+    assert_eq!(
+        (
+            judge.begun.len(),
+            walked.overlapped,
+            walked.discarded,
+            walked.cancelled
+        ),
+        (0, 0, 0, 0),
+        "nothing is begun on the page a press was made on: {:?}",
+        judge.begun
+    );
+    assert_eq!(
+        judge.asked.len(),
+        3,
+        "each settled page asked in turn, once"
+    );
+    assert_eq!(
+        world.settles_waited, 3,
+        "every press's settle was waited for"
+    );
+    for row in &walked.rows {
+        assert_eq!(row[SETTLE], settle_ready(), "{row}");
+        assert!(row.get(OVERLAP).is_none(), "{row}");
+    }
+
+    let (walked, judge, world) = walk(false);
+    assert_eq!(world.presses, vec![1, 1, 1]);
+    assert_eq!(
+        judge.begun.len(),
+        2,
+        "begun on the page each of the first two presses changed"
+    );
+    assert_eq!(judge.asked.len(), 1, "only the first page is asked in turn");
+    assert_eq!(
+        (walked.overlapped, walked.discarded, walked.cancelled),
+        (2, 0, 0)
+    );
+}
+
+/// A phone's press waits for its screen to stop changing (t-6385), so the
+/// screen it hands back is the one it settled on: a screen that did not move
+/// is asked on as before, its pressed number spent, and the answer used —
+/// the page's rule for the page it was pressed on is the page's alone.
+#[test]
+fn a_phone_screen_its_press_left_where_it_was_is_still_asked_on() {
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = a_phone_that_settles(FakeWorld::showing(&[1, 2]));
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(world.presses, vec![1, 2]);
+    assert_eq!(judge.asked, vec![vec![1, 2]], "asked in turn once");
+    assert_eq!(
+        judge.begun,
+        vec![vec![2]],
+        "begun on the settled screen: mark 1 spent"
+    );
+    assert_eq!((walked.overlapped, walked.discarded), (1, 0));
+    assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_USED));
+    assert_eq!(walked.rows[2]["outcome"], json!("stuck"));
+}
+
+/// A press that left its settle for later is settled whether or not the walk
+/// asks ahead, and on a link too — only the asking ahead stops there: a
+/// link's page is another page's, and a walk that does not ask ahead begins
+/// nothing. No press's settle goes unwaited for, or unsaid on its row.
+#[test]
+fn every_press_that_settles_later_is_settled_but_only_a_walk_that_asks_ahead_begins_on_it() {
+    let mut judge = FakeJudge::chose(&[1, 1]);
+    let mut world = a_page_that_settles_later(FakeWorld::that_moves(&[1, 2]), settle_ready());
+    world.screen.as_mut().unwrap().items[0]["role"] = json!("link");
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert!(judge.begun.is_empty(), "a link's page is another's");
+    assert_eq!(world.settles_waited, 2);
+    assert!(walked.rows.iter().all(|row| row[SETTLE] == settle_ready()));
+
+    let mut judge = FakeJudge::chose(&[1, 1]);
+    let mut world = a_page_that_settles_later(FakeWorld::that_moves(&[1, 2]), settle_ready());
+    let walked = run(Mode::On, true, &goal(2), &mut judge, &mut world);
+    assert!(
+        judge.begun.is_empty(),
+        "a walk that does not ask ahead begins nothing"
+    );
+    assert_eq!(world.settles_waited, 2);
+    assert!(walked.rows.iter().all(|row| row[SETTLE] == settle_ready()));
+    assert_eq!(
+        (walked.overlapped, walked.discarded, walked.cancelled),
+        (0, 0, 0)
+    );
+}
+
+/// The measurement leaving the settle for later is for: a page walk whose
+/// judgments take the wire's time and whose every press changes the page,
+/// the settle held inside the press as v1.1.27 holds it (the judgment begun
+/// before the press asks about a page the press then changes) against the
+/// settle waited for behind the judgment begun on the page the press left.
+/// Printed, and held on the count: every judgment after the first was used,
+/// and each ran behind a whole settle.
+#[test]
+fn a_settle_waited_for_behind_the_next_judgment_is_hidden_from_the_walk() {
+    const JUDGE_MS: u64 = 60;
+    const SETTLE_MS: u64 = 40;
+    const STEPS: usize = 6;
+    let walk = |later: bool| {
+        let mut judge = FakeJudge::chose(&[1; STEPS * 2]).slow(JUDGE_MS);
+        let mut world = if later {
+            let mut world =
+                a_page_that_settles_later(FakeWorld::that_moves(&[1, 2]), settle_ready());
+            world.settle_holds = Duration::from_millis(SETTLE_MS);
+            world
+        } else {
+            FakeWorld::that_moves(&[1, 2]).holding(SETTLE_MS)
+        };
+        let began = std::time::Instant::now();
+        let walked = run_with(
+            Mode::On,
+            true,
+            Branching::OFF,
+            &goal(STEPS),
+            &mut judge,
+            &mut world,
+            Options {
+                overlap: true,
+                rescue: false,
+            },
+            None,
+        );
+        (
+            began.elapsed().as_millis(),
+            walked,
+            judge.asked.len() + judge.begun.len(),
+        )
+    };
+    let (before_ms, held, held_asks) = walk(false);
+    let (after_ms, later, later_asks) = walk(true);
+    assert_eq!((held.pressed, later.pressed), (STEPS, STEPS));
+    assert_eq!(
+        (held.overlapped, held.discarded),
+        (0, STEPS - 1),
+        "a judgment begun before a press that changes the page is dropped"
+    );
+    assert_eq!(
+        (later.overlapped, later.discarded, later.cancelled),
+        (STEPS - 1, 0, 0)
+    );
+    assert_eq!(held_asks, 2 * STEPS - 1);
+    assert_eq!(
+        later_asks, STEPS,
+        "asking on the page the press left asks no more"
+    );
+    let hidden: Vec<u64> = later
+        .rows
+        .iter()
+        .filter_map(|row| row["hiddenMs"].as_u64())
+        .collect();
+    assert_eq!(hidden.len(), STEPS - 1);
+    assert!(
+        hidden.iter().all(|ms| *ms >= SETTLE_MS),
+        "every judgment used ran behind a whole settle: {hidden:?}"
+    );
+    println!(
+        "measure: settle behind the judgment steps={STEPS} judge_ms={JUDGE_MS} settle_ms={SETTLE_MS} before_ms={before_ms} after_ms={after_ms} overlapped={} discarded_before={} hidden_ms={hidden:?}",
+        later.overlapped, held.discarded
+    );
+}
+
 /// The measurement asking ahead is for: a walk whose presses hold the door's
 /// own landing and whose judgments take the wire's own time, with and
 /// without the judgment begun ahead — on a screen that stays after every
@@ -3013,10 +3442,26 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
         !sent.iter().any(|argv| argv[0] == "type"),
         "nothing was typed: {sent:?}"
     );
-    assert!(sent.contains(&vec![
-        "click".to_string(),
-        "browser-9".to_string(),
-        "--mark".to_string(),
-        "2".to_string(),
-    ]));
+    // A page's walk judges ahead unasked (t-9712): its press answers before
+    // it settles, and the pane's next look finishes the settle.
+    let pressed = sent
+        .iter()
+        .position(|argv| {
+            argv[..]
+                == [
+                    "click",
+                    "browser-9",
+                    "--mark",
+                    "2",
+                    zerocode_core::agent_browser::BROWSER_SETTLE_LATER_FLAG,
+                ]
+        })
+        .unwrap_or_else(|| {
+            panic!("the search button, its settle left for the next look: {sent:?}")
+        });
+    assert_eq!(
+        sent.get(pressed + 1).map(|argv| argv[0].as_str()),
+        Some("marks"),
+        "the next look finishes the settle: {sent:?}"
+    );
 }
