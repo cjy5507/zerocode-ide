@@ -727,19 +727,54 @@ pub struct SettleFacts {
 /// The settle's verdict on one poll of the document a press was made in
 /// (`epoch`), counting stillness from `since` on the page's clock (the
 /// press): `Some` once the answer is known, `None` while it is still to come.
+///
+/// Another document is `invalidated` whatever else it says; a page that kept
+/// no watch cannot say how long it stood still (`not_ready`, at once); a busy
+/// page is not settled however still; a still one is `ready` once it has
+/// stood still for [`BROWSER_SETTLE_QUIET_MS`] since the later of its last
+/// change and the press. Whether the page was hidden is never read: a painted
+/// page still changing is not settled, a hidden one that stood still is.
 #[must_use]
 pub fn settle_verdict(facts: &SettleFacts, epoch: &str, since: f64) -> Option<(Settle, SettleWhy)> {
-    // t-6721 red: the old road — a press answers at once, nothing waited on.
-    let _ = (facts, epoch, since);
-    Some((Settle::Ready, SettleWhy::Quiet))
+    if facts.document_epoch != epoch {
+        return Some((Settle::Invalidated, SettleWhy::Replaced));
+    }
+    if !facts.watched {
+        return Some((Settle::NotReady, SettleWhy::Unwatched));
+    }
+    if facts.busy {
+        return None;
+    }
+    (still_for(facts, since) >= quiet_ms()).then_some((Settle::Ready, SettleWhy::Quiet))
 }
 
 /// How long to wait before the next poll, in milliseconds: the time left
-/// until the quiet window could be whole, or the whole window while busy.
+/// until the quiet window could be whole, or the whole window while busy —
+/// never less than a millisecond, never more than the window.
 #[must_use]
 pub fn settle_wait_ms(facts: &SettleFacts, since: f64) -> u64 {
-    let _ = (facts, since);
-    0
+    if facts.busy {
+        return BROWSER_SETTLE_QUIET_MS;
+    }
+    let left = (quiet_ms() - still_for(facts, since))
+        .ceil()
+        .clamp(1.0, quiet_ms());
+    // Whole milliseconds inside the window, so the cast keeps them.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let left = left as u64;
+    left
+}
+
+/// How long, on the page's clock, the document has stood still since the
+/// later of its last change and the press.
+fn still_for(facts: &SettleFacts, since: f64) -> f64 {
+    facts.now - facts.last.max(since)
+}
+
+/// The quiet window on the page's clock.
+#[allow(clippy::cast_precision_loss)]
+fn quiet_ms() -> f64 {
+    BROWSER_SETTLE_QUIET_MS as f64
 }
 
 /// What a look knew about one mark beyond its face: the document it was
@@ -771,9 +806,28 @@ pub fn look_still_holds(
     now: &BrowserRemeasure,
     context: &BrowserRemeasureContext,
 ) -> Result<(), ProviderError> {
-    // t-6721 red: the old pin alone.
-    let _ = (drawn, context);
-    mark_still_holds(mark, now)
+    mark_still_holds(mark, now)?;
+    if context.document_epoch != drawn.document_epoch {
+        return Err(ProviderError::new(
+            crate::computer_use_protocol::error_code::ELEMENT_NOT_FOUND,
+            format!(
+                "element {} was read in another document (the page was replaced since that look); look again with `{BROWSER_CLI} marks`",
+                mark.mark
+            ),
+        ));
+    }
+    if let Some(digest) = &drawn.value_digest
+        && context.value_digest.as_ref() != Some(digest)
+    {
+        return Err(ProviderError::new(
+            crate::computer_use_protocol::error_code::ELEMENT_NOT_FOUND,
+            format!(
+                "element {} holds another value than its look read (it changed since that look); look again with `{BROWSER_CLI} marks`",
+                mark.mark
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The viewport presets, by id — the window's `BROWSER_VIEWPORT_PRESETS`
@@ -1751,8 +1805,8 @@ mod tests {
             ..same.clone()
         };
         for now in [&replaced, &typed] {
-            let refusal = look_still_holds(&mark, &drawn, &face, now)
-                .expect_err("the look no longer holds");
+            let refusal =
+                look_still_holds(&mark, &drawn, &face, now).expect_err("the look no longer holds");
             assert_eq!(
                 refusal.code,
                 crate::computer_use_protocol::error_code::ELEMENT_NOT_FOUND

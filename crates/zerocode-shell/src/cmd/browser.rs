@@ -139,6 +139,16 @@ pub(crate) fn input_said(what: &str, report: &BrowserInputReport) -> String {
             "{INPUT_FACT_SEPARATOR}{INPUT_RECT_KEY}={x},{y},{width},{height}{INPUT_FACT_SEPARATOR}{INPUT_DPR_KEY}={dpr}"
         ));
     }
+    // A press by number says how its page settled (t-6721) — `not_ready` in
+    // its own word, never as a page that settled.
+    if let Some(settle) = &report.settle {
+        facts.push_str(&format!(
+            "{INPUT_FACT_SEPARATOR}settle={}{INPUT_FACT_SEPARATOR}settle-why={}{INPUT_FACT_SEPARATOR}settle-ms={}",
+            settle.state.word(),
+            settle.why.word(),
+            settle.ms
+        ));
+    }
     let limitation = report
         .limitation
         .as_deref()
@@ -208,6 +218,8 @@ impl TypeRoad {
 pub(crate) const PAGE_SEND_FAILED: &str = "브라우저 판에 자동화 명령을 보낼 수 없습니다";
 pub(crate) const PAGE_TIMED_OUT: &str = "브라우저 판이 시간 안에 답하지 않았습니다";
 pub(crate) const PAGE_ANSWER_UNREADABLE: &str = "브라우저 판의 답을 읽을 수 없습니다";
+/// The pane took the script and dropped its answer — it closed under it.
+pub(crate) const PAGE_GONE: &str = "브라우저 판이 답하지 않았습니다";
 
 /// The one JS -> Rust round trip used throughout this module.
 ///
@@ -238,7 +250,7 @@ async fn page_json(
     let raw = tokio::time::timeout(deadline, heard)
         .await
         .map_err(|_| PAGE_TIMED_OUT.to_string())?
-        .map_err(|_| "브라우저 판이 답하지 않았습니다".to_string())?;
+        .map_err(|_| PAGE_GONE.to_string())?;
     if raw.len() > BROWSER_CALLBACK_CAP {
         return Err("브라우저 판의 답이 너무 큽니다".to_string());
     }
@@ -420,6 +432,13 @@ pub(crate) fn page_failure(reply: &serde_json::Value) -> String {
         "element_read_only" => "고른 요소는 읽기 전용입니다",
         "element_not_editable" => "고른 요소에는 글을 입력할 수 없습니다",
         "input_cancelled" => "페이지가 입력을 거부했습니다",
+        "document_moving" => {
+            "페이지가 읽는 동안 계속 바뀌어 한 상태로 읽을 수 없습니다 — 다시 `zerocode-browser marks`"
+        }
+        "document_replaced" => {
+            "그 번호를 읽은 문서가 아닙니다 — 페이지가 바뀌었으니 다시 `zerocode-browser marks`"
+        }
+        "value_changed" => "그 칸의 값이 marks 때와 다릅니다 — 다시 `zerocode-browser marks`",
         "text_too_long" => "입력 글이 요소의 최대 길이를 넘습니다",
         "async_value" => "비동기 값은 이 eval 왕복에서 돌려줄 수 없습니다",
         "evaluation_failed" => "페이지 식을 평가하지 못했습니다",
@@ -582,6 +601,12 @@ const zcEncode = (answer, cap = 64000) => {
   }
 };
 const zcFail = (code) => zcEncode({ ok: false, code });
+// A password field is the platform's own fact — the input's type, or the
+// `current-password` a form declares — never a label's word: the one rule
+// the typing holds its keys by and a look calls a field secret by.
+const zcSecretField = (element) => element instanceof HTMLInputElement
+  && (String(element.type).toLowerCase() === "password"
+    || String(element.autocomplete || "").toLowerCase() === "current-password");
 // The element a selector names is the first one a person could SEE, not the
 // first in the document: a page that keeps a hidden twin of its form (a
 // responsive layout, a template) puts the twin first, and a door that took it
@@ -2488,11 +2513,33 @@ pub(crate) async fn automate_click(
 ) -> Result<BrowserInputReport, String> {
     checked_selector(selector)?;
     let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(
-        &serde_json::json!({ "selector": selector, "blockRoots": block_roots() }),
-        CLICK_BODY,
-    );
-    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+    press(&pane, selector, None).await
+}
+
+/// The one press: the click's page script by a selector, answered as the
+/// door's report. A press by number hands it what its look read (`expect`:
+/// the document, the value's digest, the settle's watch), for the page to
+/// prove at the moment of the press.
+async fn press(
+    pane: &BrowserPane,
+    selector: &str,
+    expect: Option<serde_json::Value>,
+) -> Result<BrowserInputReport, String> {
+    checked_selector(selector)?;
+    let mut request = serde_json::json!({ "selector": selector, "blockRoots": block_roots() });
+    let body = match expect {
+        Some(expect) => {
+            request["expect"] = expect;
+            format!("{BROWSER_OBSERVE_HELPERS}\n{CLICK_BODY}")
+        }
+        None => CLICK_BODY.to_string(),
+    };
+    let reply = page_json(
+        pane,
+        automation_script(&request, &body),
+        BROWSER_CALLBACK_DEADLINE,
+    )
+    .await?;
     input_report(page_value(reply)?, &["dom-activation"])
 }
 
@@ -2505,6 +2552,14 @@ pub(crate) const CLICK_BODY: &str = r#"
 const selected = zcSelect(request.selector);
 if (selected.code) return zcFail(selected.code);
 const element = selected.element;
+// A press by number carries what its look read (t-6721): the page proves the
+// document and the field's value at the moment it presses, before anything
+// moves — the gap between the pin's re-measure and this press is closed here.
+const expect = request.expect || null;
+if (expect && zcEpoch() !== expect.epoch) return zcFail("document_replaced");
+if (expect && expect.value !== null && zcValueDigest(element) !== expect.value) {
+  return zcFail("value_changed");
+}
 element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
 if (!zcVisible(element)) return zcFail("element_not_visible");
 if (element.matches && element.matches(":disabled")) return zcFail("element_disabled");
@@ -2513,6 +2568,9 @@ const clientX = rect.left + rect.width / 2;
 const clientY = rect.top + rect.height / 2;
 const hit = document.elementFromPoint(clientX, clientY);
 if (hit && hit !== element && !element.contains(hit)) return zcFail("element_obscured");
+// The settle's watch stands before the first event, so the press's own
+// changes are the first it sees.
+if (expect) zcSettleWatch(expect.watch);
 const common = { bubbles: true, cancelable: true, composed: true, view: window,
   clientX, clientY, button: 0, buttons: 0 };
 if (typeof PointerEvent === "function") {
@@ -2535,7 +2593,8 @@ if (typeof element.click === "function") {
 }
 return zcEncode({ ok: true, value: { method: "dom-activation",
   rect: [rect.left, rect.top, rect.width, rect.height], dpr: window.devicePixelRatio,
-  blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href) } });
+  blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href),
+  pressedAt: performance.now() } });
 "#;
 
 // ---- Marks (set-of-marks) for the browser door (t-4246, plan D) ----
@@ -2550,8 +2609,10 @@ return zcEncode({ ok: true, value: { method: "dom-activation",
 // than trusting or copying a page's own judgment.
 
 use zerocode_core::agent_browser::{
-    BROWSER_MARKABLE, BROWSER_SETTLE_MS, BrowserFace, BrowserLookPin, BrowserMark,
-    BrowserRemeasure, BrowserRemeasureContext, Settle, SettleWhy, look_still_holds, number_marks,
+    AT_MS_KEY, BROWSER_MARKABLE, BROWSER_SETTLE_BUSY, BROWSER_SETTLE_MS, BROWSER_SETTLE_QUIET_MS,
+    BrowserFace, BrowserLookPin, BrowserMark, BrowserRemeasure, BrowserRemeasureContext, Settle,
+    SettleFacts, SettleWhy, look_still_holds, number_marks, numbered_faces, settle_verdict,
+    settle_wait_ms,
 };
 use zerocode_core::computer_use_protocol::cache;
 
@@ -2617,44 +2678,199 @@ const zcMarkFace = (el) => {
   return { tag: zcMarkTag(el), role: zcMarkRole(el), label: zcMarkName(el),
     selector: zcMarkSelector(el), x: r.left, y: r.top, width: r.width, height: r.height };
 };
+// ---- What a look reads beside its numbers (t-6721) ----
+// A text cut at `cap` on a whole character — never half a surrogate pair,
+// which no JSON reader takes back.
+const zcCut = (text, cap) => {
+  if (text.length <= cap) return text;
+  const cut = text.slice(0, cap);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+};
+// Words as a look carries them: whitespace folded, cut at the question's cap.
+const zcWords = (text, cap) => zcCut(String(text || "").replace(/\s+/g, " ").trim(), cap);
+// What a label element says of its control: its own words, never those of
+// another control inside it (a select's options, a textarea's text).
+const zcLabelWords = (label) => {
+  const skip = "select, textarea, button, script, style, template";
+  const walker = document.createTreeWalker(label, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => node.nodeType === 1 && node.matches(skip)
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+  const words = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.nodeType === 3) words.push(node.nodeValue);
+  }
+  return words.join(" ");
+};
+// An element's name in the order a reader takes it: the elements it is
+// labelled by, its own label, the labels that name it, a table's caption,
+// its title.
+const zcNameOf = (el) => {
+  const by = el.getAttribute("aria-labelledby");
+  if (by) {
+    const words = by.split(/\s+/).map((id) => document.getElementById(id)).filter(Boolean)
+      .map((node) => node.textContent).join(" ");
+    if (words.trim()) return words;
+  }
+  const aria = el.getAttribute("aria-label");
+  if (aria && aria.trim()) return aria;
+  for (const label of el.labels || []) {
+    const words = zcLabelWords(label);
+    if (words.trim()) return words;
+  }
+  if (el.caption && el.caption.textContent.trim()) return el.caption.textContent;
+  return el.getAttribute("title") || "";
+};
+// The words beside a field: the heading of the region around it, else the
+// page's own heading.
+const zcNear = (el, field) => {
+  const around = el.closest(field.regions.join(","));
+  const heading = (around && around.querySelector(field.headings.join(",")))
+    || document.querySelector("h1");
+  return heading ? heading.textContent : "";
+};
+// A numbered control read as a field — its kind, whether it holds a secret,
+// its words and what it holds (never a secret's) under the question's keys —
+// with the digest the look's pin keeps; `null` for a control that is no field.
+const zcFieldFacts = (el, request) => {
+  const input = el instanceof HTMLInputElement;
+  const area = el instanceof HTMLTextAreaElement;
+  const select = el instanceof HTMLSelectElement;
+  const editable = !input && !area && !select && el.isContentEditable;
+  if ((!input && !area && !select && !editable) || zcMarkRole(el) === "button") return null;
+  const keys = request.keys;
+  const secret = zcSecretField(el);
+  const held = editable ? String(el.textContent || "") : String(el.value);
+  return {
+    facts: {
+      [keys.kind]: input ? String(el.type || "text").toLowerCase()
+        : area ? "textarea" : select ? "select" : "contenteditable",
+      // Under the door's own word: the encoder hides any key that names a
+      // secret, and the door puts it back under the question's key.
+      masked: secret,
+      [keys.label]: zcWords(zcNameOf(el), request.wordCap),
+      [keys.placeholder]: zcWords(el.getAttribute("placeholder"), request.wordCap),
+      [keys.near]: zcWords(zcNear(el, request.field), request.wordCap),
+      [keys.value]: secret ? "" : zcCut(held, request.valueCap),
+    },
+    digest: zcValueDigest(el),
+  };
+};
+// The containers, pictures and rows on screen a goal may be about — none
+// inside the page's chrome — each by its own words and the selector a caller
+// finds it by, at most the question's cap of each, in document order.
+const zcObserved = (request) => {
+  const keys = request.keys, table = request.observed, cap = request.wordCap;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const chrome = table.chrome.join(",");
+  const rowsOf = table.rows.join(",");
+  const gather = (selectors, read) => {
+    const found = [];
+    for (const el of document.querySelectorAll(selectors.join(","))) {
+      if (found.length >= table.cap) break;
+      const r = el.getBoundingClientRect();
+      if (!(r.width > 0 && r.height > 0)) continue;
+      if (r.bottom <= 0 || r.right <= 0 || r.top >= vh || r.left >= vw) continue;
+      if (el.closest(chrome) || !zcVisible(el)) continue;
+      const one = read(el, r);
+      if (one) found.push(one);
+    }
+    return found;
+  };
+  const implicit = { ul: "list", ol: "list", table: "table" };
+  return {
+    [keys.containers]: gather(table.containers, (el) => {
+      const count = el.querySelectorAll(rowsOf).length;
+      return count ? { [keys.label]: zcWords(zcNameOf(el), cap),
+        [keys.role]: el.getAttribute("role") || implicit[zcMarkTag(el)] || zcMarkTag(el),
+        [keys.count]: count, [keys.selector]: zcMarkSelector(el) } : null;
+    }),
+    [keys.images]: gather(table.images, (el, r) => Math.min(r.width, r.height) < table.imageMinPx ? null
+      : { [keys.alt]: zcWords(el.getAttribute("alt") || zcNameOf(el), cap),
+        [keys.width]: Math.round(r.width), [keys.height]: Math.round(r.height),
+        [keys.selector]: zcMarkSelector(el) }),
+    [keys.rows]: gather(table.rows, (el) => {
+      const text = zcWords(el.innerText, cap);
+      return text ? { [keys.text]: text, [keys.selector]: zcMarkSelector(el) } : null;
+    }),
+  };
+};
 "##;
 
 /// The `marks` walk: every markable control in the viewport, in document
 /// order, with whether a person could hit it — `elementFromPoint` at its
 /// centre is it, a child of it, or an ancestor around it, never a different
 /// control on top (the obscured-element rule of
-/// [[a-mark-presses-only-what-a-person-could-hit]]).
+/// [[a-mark-presses-only-what-a-person-could-hit]]) — and, in the same pass
+/// (t-6721), each hittable field's words and value and the containers,
+/// images and rows on screen, with the document they were all read in.
+///
+/// One synchronous pass is one state of the page unless page code the pass
+/// itself runs (a getter, an overridden method) changes it underneath: a
+/// `MutationObserver`'s pending records and a second read of each field's
+/// value catch that, a second pass reads the state it left, and a page that
+/// moves on every read is refused whole (`document_moving`) rather than
+/// answered in two states.
 pub(crate) const BROWSER_MARKS_BODY: &str = r#"
-const seen = document.querySelectorAll(request.selectors.join(","));
-const vw = window.innerWidth, vh = window.innerHeight;
-const faces = [];
-for (const el of seen) {
-  if (el.matches && el.matches('[contenteditable="false"]')) continue;
-  const r = el.getBoundingClientRect();
-  if (!(r.width > 0 && r.height > 0)) continue;
-  if (r.bottom <= 0 || r.right <= 0 || r.top >= vh || r.left >= vw) continue;
-  const face = zcMarkFace(el);
-  const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-  let hit = false;
-  if (cx >= 0 && cy >= 0 && cx < vw && cy < vh) {
-    const top = document.elementFromPoint(cx, cy);
-    hit = !!top && (top === el || el.contains(top) || top.contains(el));
+const readPass = () => {
+  const seen = document.querySelectorAll(request.selectors.join(","));
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const faces = [];
+  const fields = [];
+  for (const el of seen) {
+    if (el.matches && el.matches('[contenteditable="false"]')) continue;
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) continue;
+    if (r.bottom <= 0 || r.right <= 0 || r.top >= vh || r.left >= vw) continue;
+    const face = zcMarkFace(el);
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    let hit = false;
+    if (cx >= 0 && cy >= 0 && cx < vw && cy < vh) {
+      const top = document.elementFromPoint(cx, cy);
+      hit = !!top && (top === el || el.contains(top) || top.contains(el));
+    }
+    face.hit = hit;
+    const field = hit ? zcFieldFacts(el, request) : null;
+    if (field) {
+      face.field = field.facts;
+      face.valueDigest = field.digest;
+      fields.push([el, field.digest]);
+    }
+    faces.push(face);
   }
-  face.hit = hit;
-  faces.push(face);
+  return { faces, fields, observed: zcObserved(request),
+    viewport: { width: vw, height: vh, dpr: window.devicePixelRatio || 1 } };
+};
+const changes = new MutationObserver(() => {});
+changes.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+let answer = null;
+for (let pass = 0; pass < 2 && answer === null; pass += 1) {
+  changes.takeRecords();
+  const epoch = zcEpoch();
+  const read = readPass();
+  const moved = changes.takeRecords().length > 0 || zcEpoch() !== epoch
+    || read.fields.some(([el, digest]) => zcValueDigest(el) !== digest);
+  if (!moved) {
+    answer = { faces: read.faces, viewport: read.viewport,
+      snapshot: { [request.keys.epoch]: epoch, ...read.observed } };
+  }
 }
-return zcEncode({ ok: true, value: { faces,
-  viewport: { width: vw, height: vh, dpr: window.devicePixelRatio || 1 } } }, request.answerCap);
+changes.disconnect();
+if (answer === null) return zcFail("document_moving");
+return zcEncode({ ok: true, value: answer }, request.answerCap);
 "#;
 
 /// The click-by-mark re-measure: the control at the mark's selector as it
-/// stands now, for the core pin to judge before the press. A selector that
-/// resolves to nothing answers `found: false`.
+/// stands now, for the core pin to judge before the press — its face, the
+/// document it stands in and the digest of what it holds (t-6721). A
+/// selector that resolves to nothing answers `found: false`.
 pub(crate) const BROWSER_REMEASURE_BODY: &str = r#"
 const el = document.querySelector(request.selector);
 if (!el) return zcEncode({ ok: true, value: { found: false } });
 const face = zcMarkFace(el);
 face.found = true;
+face.documentEpoch = zcEpoch();
+face.valueDigest = zcValueDigest(el);
 return zcEncode({ ok: true, value: face });
 "#;
 
@@ -2741,37 +2957,139 @@ pub(crate) struct BrowserLook {
     pub(crate) at_ms: i64,
     pub(crate) fields: Vec<serde_json::Value>,
     /// The containers, images and rows, under the keys the question reads
-    /// them by ([`Observe::key`]).
+    /// them by ([`zerocode_core::screen_action::Observe::key`]).
     pub(crate) observed: Vec<(&'static str, serde_json::Value)>,
     /// Each field's value digest, by the number it presses by — the pin's,
     /// never printed.
     pub(crate) values: std::collections::BTreeMap<usize, String>,
 }
 
+/// The key a face carries its field's words under, and its value's digest —
+/// the page script's own words to the door, never the answer's.
+const FACE_FIELD_KEY: &str = "field";
+const FACE_VALUE_DIGEST_KEY: &str = "valueDigest";
+/// Whether a field holds a secret, as the page says it: not under the
+/// question's own key ([`zerocode_core::screen_action::snapshot::FIELD_SECRET_KEY`]),
+/// which the page's encoder hides with every key that names a secret.
+const FACE_FIELD_MASKED_KEY: &str = "masked";
+/// The key the page answers what it read beside its numbers under.
+const LOOK_SNAPSHOT_KEY: &str = "snapshot";
+
 /// Read the page's marks answer into a look: the faces numbered by the core
-/// (`number_marks`).
+/// (`number_marks`), each hittable field's words carried over to the number
+/// it went to ([`numbered_faces`]) — its value only when the page said in so
+/// many words that it holds no secret — and the document and candidates
+/// the same pass read.
 pub(crate) fn look_of(value: &serde_json::Value, at_ms: i64) -> Result<BrowserLook, String> {
-    let faces: Vec<BrowserFace> = serde_json::from_value(
-        value
-            .get("faces")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-    )
-    .map_err(|_| "브라우저 판의 마크를 읽을 수 없습니다".to_string())?;
+    use zerocode_core::screen_action::{Observe, snapshot};
+    let said_faces = value
+        .get("faces")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let faces: Vec<BrowserFace> = serde_json::from_value(said_faces.clone())
+        .map_err(|_| "브라우저 판의 마크를 읽을 수 없습니다".to_string())?;
     let marks = number_marks(&faces);
+    let mut fields = Vec::new();
+    let mut values = std::collections::BTreeMap::new();
+    for (place, mark, _) in numbered_faces(&faces) {
+        let Some(said) = said_faces.get(place) else {
+            continue;
+        };
+        if let Some(serde_json::Value::Object(words)) = said.get(FACE_FIELD_KEY) {
+            let mut field = serde_json::Map::new();
+            field.insert(snapshot::FIELD_MARK_KEY.to_string(), mark.into());
+            field.extend(words.clone());
+            let plain = field.remove(FACE_FIELD_MASKED_KEY) == Some(serde_json::Value::Bool(false));
+            field.insert(snapshot::FIELD_SECRET_KEY.to_string(), (!plain).into());
+            if !plain {
+                field.insert(snapshot::FIELD_VALUE_KEY.to_string(), "".into());
+            }
+            fields.push(serde_json::Value::Object(field));
+        }
+        if let Some(digest) = said
+            .get(FACE_VALUE_DIGEST_KEY)
+            .and_then(serde_json::Value::as_str)
+        {
+            values.insert(mark, digest.to_string());
+        }
+    }
+    let read = value.get(LOOK_SNAPSHOT_KEY);
+    let epoch = read
+        .and_then(|read| read.get(snapshot::EPOCH_KEY))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let observed = Observe::ALL
+        .iter()
+        .map(|head| {
+            let list = read
+                .and_then(|read| read.get(head.key()))
+                .filter(|list| list.is_array())
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+            (head.key(), list)
+        })
+        .collect();
     let viewport_width = value
         .pointer("/viewport/width")
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0);
-    // t-6721 red: the old answer — numbers alone, nothing read beside them.
     Ok(BrowserLook {
         marks,
         viewport_width,
-        epoch: String::new(),
+        epoch,
         at_ms,
-        fields: Vec::new(),
-        observed: Vec::new(),
-        values: std::collections::BTreeMap::new(),
+        fields,
+        observed,
+        values,
+    })
+}
+
+/// What `automate_marks` hands the page: the controls it numbers, and every
+/// table, key and cap the snapshot reads by — each from its one place: the
+/// door's tables (`agent_browser`), the question's keys and caps
+/// (`screen_action`, `jev::SCREEN_CANDIDATE_CAP`) and the value seat's cap on
+/// a value (`type_value`).
+pub(crate) fn marks_request() -> serde_json::Value {
+    use zerocode_core::agent_browser::{
+        BROWSER_FIELD_HEADINGS, BROWSER_FIELD_REGIONS, BROWSER_OBSERVED_CHROME,
+        BROWSER_OBSERVED_CONTAINERS, BROWSER_OBSERVED_IMAGE_MIN_PX, BROWSER_OBSERVED_IMAGES,
+        BROWSER_OBSERVED_ROWS,
+    };
+    use zerocode_core::screen_action::{OBSERVED_CHAR_CAP, Observe, snapshot};
+    serde_json::json!({
+        "selectors": BROWSER_MARKABLE,
+        "answerCap": BROWSER_CALLBACK_CAP,
+        "keys": {
+            "epoch": snapshot::EPOCH_KEY,
+            "kind": snapshot::FIELD_KIND_KEY,
+            "secret": snapshot::FIELD_SECRET_KEY,
+            "label": snapshot::LABEL_KEY,
+            "placeholder": snapshot::FIELD_PLACEHOLDER_KEY,
+            "near": snapshot::FIELD_NEAR_KEY,
+            "value": snapshot::FIELD_VALUE_KEY,
+            "role": snapshot::ROLE_KEY,
+            "count": snapshot::COUNT_KEY,
+            "alt": snapshot::ALT_KEY,
+            "width": snapshot::WIDTH_KEY,
+            "height": snapshot::HEIGHT_KEY,
+            "text": snapshot::TEXT_KEY,
+            "selector": snapshot::SELECTOR_KEY,
+            "containers": Observe::Container.key(),
+            "images": Observe::Image.key(),
+            "rows": Observe::Row.key(),
+        },
+        "observed": {
+            "containers": BROWSER_OBSERVED_CONTAINERS,
+            "rows": BROWSER_OBSERVED_ROWS,
+            "images": BROWSER_OBSERVED_IMAGES,
+            "chrome": BROWSER_OBSERVED_CHROME,
+            "cap": zerocode_core::jev::SCREEN_CANDIDATE_CAP,
+            "imageMinPx": BROWSER_OBSERVED_IMAGE_MIN_PX,
+        },
+        "field": { "regions": BROWSER_FIELD_REGIONS, "headings": BROWSER_FIELD_HEADINGS },
+        "wordCap": OBSERVED_CHAR_CAP,
+        "valueCap": zerocode_core::type_value::asked().value_char_cap,
     })
 }
 
@@ -2784,13 +3102,9 @@ pub(crate) async fn automate_marks(
     label: &str,
 ) -> Result<BrowserLook, String> {
     let pane = browser_pane_of(app, state, label)?;
-    let request = serde_json::json!({
-        "selectors": BROWSER_MARKABLE,
-        "answerCap": BROWSER_CALLBACK_CAP,
-    });
     let script = automation_script(
-        &request,
-        &format!("{BROWSER_MARK_HELPERS}\n{BROWSER_MARKS_BODY}"),
+        &marks_request(),
+        &format!("{BROWSER_OBSERVE_HELPERS}\n{BROWSER_MARK_HELPERS}\n{BROWSER_MARKS_BODY}"),
     );
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     let look = look_of(&page_value(reply)?, epoch_ms_now())?;
@@ -2847,10 +3161,21 @@ pub(crate) fn marks_lines(look: &BrowserLook) -> String {
 /// nothing at all, so every browser walk ended at its first look and the seat
 /// that judges one has no rows to show for it (2026-09-19). `diagnose --json`
 /// already answers this way for the same reason.
+///
+/// Beside the items, what the same pass of the page read (t-6721): the
+/// document, the numbered fields and the containers, images and rows, under
+/// the keys the walk's question reads them by, and the window's clock.
 pub(crate) fn marks_json(look: &BrowserLook) -> serde_json::Value {
     use zerocode_core::computer_use_protocol::marks::ITEMS_KEY;
+    use zerocode_core::screen_action::snapshot;
     let mut answer =
         serde_json::json!({ ITEMS_KEY: marks_items(&look.marks), "count": look.marks.len() });
+    answer[snapshot::EPOCH_KEY] = look.epoch.clone().into();
+    answer[AT_MS_KEY] = look.at_ms.into();
+    answer[snapshot::FIELDS_KEY] = look.fields.clone().into();
+    for (key, list) in &look.observed {
+        answer[*key] = list.clone();
+    }
     answer[zerocode_core::untrusted::JSON_FLAG] = serde_json::Value::Bool(true);
     answer
 }
@@ -2859,28 +3184,106 @@ pub(crate) fn marks_json(look: &BrowserLook) -> serde_json::Value {
 /// document `epoch` (t-6721): poll the page's facts with `poll` — handed the
 /// wall time the poll may take — until the core's verdict says, or the wall
 /// ([`BROWSER_SETTLE_MS`]) runs out.
-pub(crate) async fn settle_with<P, F>(epoch: &str, since: f64, poll: P) -> SettleReport
+///
+/// Each poll is handed only the wall that is left, so a page that never
+/// answers holds the settle no longer than the settle's own wall; a pane
+/// that is gone is `invalidated` at once; nothing here reads a frame or a
+/// picture, so a hidden tab settles as a shown one does.
+pub(crate) async fn settle_with<P, F>(epoch: &str, since: f64, mut poll: P) -> SettleReport
 where
     P: FnMut(Duration) -> F,
     F: std::future::Future<Output = Result<serde_json::Value, String>>,
 {
-    // t-6721 red: the old road — the press answers and nothing is waited on.
-    let _ = (epoch, since, poll);
-    SettleReport {
-        state: Settle::Ready,
-        why: SettleWhy::Quiet,
-        ms: 0,
-        polls: 0,
-        hidden: None,
+    let wall = Duration::from_millis(BROWSER_SETTLE_MS);
+    let began = tokio::time::Instant::now();
+    let mut polls = 0;
+    let mut hidden = None;
+    let mut why = SettleWhy::Unanswered;
+    let ended = |state, why, polls, hidden| SettleReport {
+        state,
+        why,
+        ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+        polls,
+        hidden,
+    };
+    loop {
+        let left = wall.saturating_sub(began.elapsed());
+        if left.is_zero() {
+            return ended(Settle::NotReady, why, polls, hidden);
+        }
+        polls += 1;
+        let facts = match poll(left).await {
+            Ok(reply) => page_value(reply)
+                .ok()
+                .and_then(|value| serde_json::from_value::<SettleFacts>(value).ok()),
+            Err(error) if error == PAGE_SEND_FAILED || error == PAGE_GONE => {
+                return ended(Settle::Invalidated, SettleWhy::Gone, polls, hidden);
+            }
+            // The poll spent the wall that was left.
+            Err(error) if error == PAGE_TIMED_OUT => {
+                why = SettleWhy::Unanswered;
+                continue;
+            }
+            Err(_) => None,
+        };
+        let Some(facts) = facts else {
+            why = SettleWhy::Unanswered;
+            tokio::time::sleep(
+                Duration::from_millis(BROWSER_SETTLE_QUIET_MS)
+                    .min(wall.saturating_sub(began.elapsed())),
+            )
+            .await;
+            continue;
+        };
+        hidden = Some(facts.hidden);
+        if let Some((state, verdict)) = settle_verdict(&facts, epoch, since) {
+            return ended(state, verdict, polls, hidden);
+        }
+        why = if facts.busy {
+            SettleWhy::Busy
+        } else {
+            SettleWhy::Moving
+        };
+        tokio::time::sleep(
+            Duration::from_millis(settle_wait_ms(&facts, since))
+                .min(wall.saturating_sub(began.elapsed())),
+        )
+        .await;
     }
+}
+
+/// The name the settle's watch is kept under on a document: the guest's own
+/// slot name, so no brand-specific word reaches the page.
+fn settle_watch() -> &'static str {
+    BROWSER_GUEST_KEY.trim()
+}
+
+/// Settle `pane` after a press made at `since` on its clock in document
+/// `epoch` — the page's own facts, polled by the one settle road.
+async fn settle_after_press(pane: &BrowserPane, epoch: &str, since: Option<f64>) -> SettleReport {
+    let script = automation_script(
+        &serde_json::json!({
+            "watch": settle_watch(),
+            "busy": BROWSER_SETTLE_BUSY.join(","),
+        }),
+        &format!("{BROWSER_OBSERVE_HELPERS}\n{BROWSER_SETTLE_BODY}"),
+    );
+    // Without the press's clock, stillness counts from the document's last
+    // change alone.
+    let since = since.unwrap_or(f64::NEG_INFINITY);
+    settle_with(epoch, since, |left| page_json(pane, script.clone(), left)).await
 }
 
 /// `click <label> --mark N`: press the control numbered N on the pane's last
 /// marks, but only after re-measuring it and proving the pin still holds — a
 /// control that moved or changed, or a selector the page can no longer find,
-/// is refused (`mark_still_holds` → the marks' own `pin_broken`). The press
-/// itself walks `automate_click`'s road by the mark's selector, so its own
-/// visibility and on-top guards apply at the moment of the press.
+/// is refused (`mark_still_holds` → the marks' own `pin_broken`), and so is
+/// one read in another document or a field whose value changed since the
+/// look (`look_still_holds`, t-6721). The press itself walks `press`'s road by
+/// the mark's selector, so its own visibility and on-top guards apply at the
+/// moment of the press, and the page proves the document and the value again
+/// right there; then the page settles, for a quarter second at most, on its
+/// document's own stillness, and the press's answer says how.
 pub(crate) async fn automate_click_mark(
     app: &AppHandle,
     state: &AppState,
@@ -2896,25 +3299,104 @@ pub(crate) async fn automate_click_mark(
     let pane = browser_pane_of(app, state, label)?;
     let script = automation_script(
         &serde_json::json!({ "selector": mark.selector }),
-        &format!("{BROWSER_MARK_HELPERS}\n{BROWSER_REMEASURE_BODY}"),
+        &format!("{BROWSER_OBSERVE_HELPERS}\n{BROWSER_MARK_HELPERS}\n{BROWSER_REMEASURE_BODY}"),
     );
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     let value = page_value(reply)?;
     let now: BrowserRemeasure = serde_json::from_value(value.clone())
         .map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
-    let context: BrowserRemeasureContext = serde_json::from_value(value)
-        .map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
+    let context: BrowserRemeasureContext =
+        serde_json::from_value(value).map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
     look_still_holds(&mark, &pin, &now, &context).map_err(|error| error.message)?;
-    automate_click(app, state, label, &mark.selector).await
+    let expect = serde_json::json!({
+        "epoch": pin.document_epoch,
+        "value": pin.value_digest,
+        "watch": settle_watch(),
+    });
+    let mut report = press(&pane, &mark.selector, Some(expect)).await?;
+    report.settle = Some(settle_after_press(&pane, &pin.document_epoch, report.pressed_at).await);
+    Ok(report)
 }
 
 /// The settle's page script (t-6721): what the page says of itself on one
-/// poll.
-pub(crate) const BROWSER_SETTLE_BODY: &str = "";
+/// poll — keeping the watch the press set, or setting one.
+pub(crate) const BROWSER_SETTLE_BODY: &str = r#"
+return zcEncode({ ok: true, value: zcSettleFacts(zcSettleWatch(request.watch), request.busy) });
+"#;
 
 /// The page-side helpers a look, a re-measure, a settle and a press by number
-/// share (t-6721).
-pub(crate) const BROWSER_OBSERVE_HELPERS: &str = "";
+/// share (t-6721): the document's epoch, a field's value digest, and the
+/// settle's watch and facts. They read the page; the watch is an observer
+/// kept on the document itself, never an attribute, a style or an event.
+pub(crate) const BROWSER_OBSERVE_HELPERS: &str = r##"
+// The document a script runs in, by the moment it began: another document is
+// another epoch, a document that only changed is the same one.
+const zcEpoch = () => String(performance.timeOrigin || performance.timing.navigationStart);
+// What a field holds, as a pin compares it: a digest of its value — a box's
+// checked state, a select's choice — never a secret's fingerprint, and none at
+// all for a control that holds no value.
+const zcValueDigest = (el) => {
+  if (!el || el.nodeType !== 1) return null;
+  if (zcSecretField(el)) return "secret";
+  let held;
+  if (el instanceof HTMLInputElement) {
+    const type = String(el.type).toLowerCase();
+    held = type === "checkbox" || type === "radio" ? (el.checked ? "1:" : "0:") + el.value : String(el.value);
+  } else if (el instanceof HTMLSelectElement) {
+    held = el.selectedIndex + ":" + String(el.value);
+  } else if (el instanceof HTMLTextAreaElement) {
+    held = String(el.value);
+  } else if (el.isContentEditable) {
+    held = String(el.textContent || "");
+  } else {
+    return null;
+  }
+  let hash = 0x811c9dc5;
+  for (let at = 0; at < held.length; at += 1) {
+    hash ^= held.charCodeAt(at);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return held.length + ":" + hash.toString(16);
+};
+// The watch a settle reads: when this document last changed, on its own
+// clock, kept on the document itself — another document starts with none, a
+// gone one takes its watch along. A MutationObserver runs as a microtask after
+// the change, which a hidden tab still runs when it paints nothing.
+const zcSettleWatch = (name) => {
+  const key = Symbol.for(name);
+  const held = document[key];
+  if (held && held.observer) {
+    if (held.observer.takeRecords().length) held.last = performance.now();
+    return held;
+  }
+  const watch = { last: performance.now(), observer: null };
+  let observer = null;
+  try {
+    observer = new MutationObserver(() => { watch.last = performance.now(); });
+    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+    Object.defineProperty(document, key, { value: watch });
+    watch.observer = observer;
+  } catch (_) {
+    if (observer) observer.disconnect();
+  }
+  return watch;
+};
+// What one settle poll says of the page: its document, its clock, when it
+// last changed, whether it says it is busy — still loading, or an element on
+// screen marked busy — and whether it is hidden, which is reported and never
+// judged.
+const zcSettleFacts = (watch, busy) => {
+  const loading = document.readyState === "loading";
+  let marked = false;
+  if (!loading && busy) {
+    for (const el of document.querySelectorAll(busy)) {
+      if (zcVisible(el)) { marked = true; break; }
+    }
+  }
+  return { documentEpoch: zcEpoch(), now: performance.now(), last: watch.last,
+    busy: loading || marked, hidden: document.hidden === true, watched: !!watch.observer };
+};
+"##;
 
 /// Lay a pane's last marks onto its screenshot: each mark's control outlined
 /// and numbered by the one badge renderer the desktop look uses
@@ -3037,8 +3519,7 @@ if (input && String(element.type).toLowerCase() === "file") return zcFail("eleme
 if ((input || area) && element.maxLength >= 0 && request.text.length > element.maxLength) {
   return zcFail("text_too_long");
 }
-const secureField = input && (String(element.type).toLowerCase() === "password"
-  || String(element.autocomplete || "").toLowerCase() === "current-password");
+const secureField = zcSecretField(element);
 if (request.road === "keys" && secureField) {
   return zcEncode({ ok: true, value: { method: "held", secureField } });
 }
@@ -3321,295 +3802,5 @@ pub(crate) fn note_webview_error(state: State<'_, AppState>, text: String) {
     {
         use std::io::Write;
         let _ = writeln!(held, "{} {line}", epoch_ms_now());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    //! The browser door's look, settle and pin (t-6721): what the Rust half
-    //! does with what the page said. The page halves run for real in
-    //! Chromium (`ui/tests/browser-door.mjs`).
-
-    use super::*;
-    use serde_json::json;
-    use zerocode_core::agent_browser::{AT_MS_KEY, BROWSER_SETTLE_QUIET_MS, Settle, SettleWhy};
-    use zerocode_core::screen_action::{Observe, snapshot};
-
-    const EPOCH: &str = "1790000000000.25";
-    const OTHER_EPOCH: &str = "1790000009999.5";
-
-    /// One settle poll's answer as the page script gives it.
-    fn facts(epoch: &str, now: f64, last: f64, busy: bool, hidden: bool) -> serde_json::Value {
-        json!({ "ok": true, "value": {
-            "documentEpoch": epoch, "now": now, "last": last,
-            "busy": busy, "hidden": hidden, "watched": true,
-        } })
-    }
-
-    /// The page's clock: 1000 ms at the press, walking with the test's
-    /// (paused) clock.
-    fn page_now(began: tokio::time::Instant) -> f64 {
-        1_000.0 + began.elapsed().as_secs_f64() * 1_000.0
-    }
-
-    /// A settle is bounded by the wall, not by a frame: a hidden page that
-    /// never paints and never stands still, and a page that never answers at
-    /// all, are both `not_ready` exactly when the quarter second runs out; a
-    /// hidden page that stood still is `ready` once the quiet window is
-    /// whole; another document or a gone pane is `invalidated` at once.
-    #[tokio::test(start_paused = true)]
-    async fn hidden_surface_short_settle_has_a_wall_deadline() {
-        let wall = Duration::from_millis(BROWSER_SETTLE_MS);
-
-        let began = tokio::time::Instant::now();
-        let moving = settle_with(EPOCH, 1_000.0, move |_left| {
-            let now = page_now(began);
-            async move { Ok(facts(EPOCH, now, now - 1.0, false, true)) }
-        })
-        .await;
-        assert_eq!(
-            (moving.state, moving.why),
-            (Settle::NotReady, SettleWhy::Moving)
-        );
-        assert_eq!(began.elapsed(), wall, "a moving page is answered at the wall");
-        assert!(moving.polls >= 2, "{moving:?}");
-
-        // Each poll is handed only the wall that is left: a page that never
-        // answers holds the settle no longer than the settle's own wall, never
-        // the callback's five seconds.
-        let began = tokio::time::Instant::now();
-        let unanswered = settle_with(EPOCH, 1_000.0, |left| async move {
-            tokio::time::sleep(left).await;
-            Err(PAGE_TIMED_OUT.to_string())
-        })
-        .await;
-        assert_eq!(
-            (unanswered.state, unanswered.why),
-            (Settle::NotReady, SettleWhy::Unanswered)
-        );
-        assert_eq!(began.elapsed(), wall);
-
-        let began = tokio::time::Instant::now();
-        let still = settle_with(EPOCH, 1_000.0, move |_left| {
-            let now = page_now(began);
-            async move { Ok(facts(EPOCH, now, 1_000.0, false, true)) }
-        })
-        .await;
-        assert_eq!((still.state, still.why), (Settle::Ready, SettleWhy::Quiet));
-        assert_eq!(
-            began.elapsed(),
-            Duration::from_millis(BROWSER_SETTLE_QUIET_MS),
-            "ready the moment the quiet window is whole"
-        );
-        assert_eq!(still.hidden, Some(true), "a hidden page, and still ready");
-
-        let began = tokio::time::Instant::now();
-        let replaced = settle_with(EPOCH, 1_000.0, |_left| async {
-            Ok(facts(OTHER_EPOCH, 1_000.0, 1_000.0, false, true))
-        })
-        .await;
-        assert_eq!(
-            (replaced.state, replaced.why),
-            (Settle::Invalidated, SettleWhy::Replaced)
-        );
-        let gone = settle_with(EPOCH, 1_000.0, |_left| async {
-            Err(PAGE_SEND_FAILED.to_string())
-        })
-        .await;
-        assert_eq!((gone.state, gone.why), (Settle::Invalidated, SettleWhy::Gone));
-        assert_eq!(began.elapsed(), Duration::ZERO, "neither is waited on");
-    }
-
-    /// Seen is not settled and settled is not done: a visible page painting
-    /// every frame whose document keeps changing is `not_ready`, the press's
-    /// sentence says so in its own words, and the settle reads the document —
-    /// it asks for no animation frame and takes no picture.
-    #[tokio::test(start_paused = true)]
-    async fn visibility_is_not_confused_with_task_completion() {
-        let began = tokio::time::Instant::now();
-        let seen = settle_with(EPOCH, 1_000.0, move |_left| {
-            let now = page_now(began);
-            async move { Ok(facts(EPOCH, now, now - 2.0, false, false)) }
-        })
-        .await;
-        assert_eq!((seen.state, seen.why), (Settle::NotReady, SettleWhy::Moving));
-        assert_eq!(seen.hidden, Some(false));
-
-        let mut report = input_report(
-            json!({ "method": "dom-activation", "rect": [1.0, 2.0, 3.0, 4.0], "dpr": 2.0 }),
-            &["dom-activation"],
-        )
-        .expect("a press report");
-        report.settle = Some(seen);
-        let said = input_said(CLICK_SAID, &report);
-        assert!(said.contains("settle=not_ready"), "{said}");
-        assert!(!said.contains("settle=ready"), "{said}");
-        assert_eq!(
-            pressed_rect(&said),
-            Some(([1.0, 2.0, 3.0, 4.0], 2.0)),
-            "the walk still reads the rect from the sentence: {said}"
-        );
-
-        assert!(
-            BROWSER_SETTLE_BODY.contains("zcSettleFacts")
-                && BROWSER_OBSERVE_HELPERS.contains("const zcSettleFacts"),
-            "the settle reads the page's own facts"
-        );
-        for script in [BROWSER_SETTLE_BODY, BROWSER_OBSERVE_HELPERS] {
-            assert!(!script.contains("requestAnimationFrame"), "{script}");
-        }
-        let source = include_str!("browser.rs");
-        let road = source
-            .split("pub(crate) async fn settle_with<")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}\n").next())
-            .expect("the settle's road");
-        assert!(!road.contains("snapshot_png"), "{road}");
-    }
-
-    /// One pass of the page, one look: the numbers are the core's, every
-    /// field the look numbered rides with its number and only those, the
-    /// document and the candidates come from the same pass, the window's
-    /// clock is stamped — and the walk's own reader finds all of it.
-    #[test]
-    fn one_snapshot_contains_controls_values_and_context_from_one_epoch() {
-        let face = |selector: &str, tag: &str, role: &str, hit: bool| {
-            json!({ "tag": tag, "role": role, "label": selector, "selector": selector,
-                "x": 10.0, "y": 10.0, "width": 200.0, "height": 30.0, "hit": hit })
-        };
-        let mut destination = face("#destination", "input", "textbox", true);
-        destination["field"] = json!({ "kind": "text", "secret": false, "label": "Destination",
-            "placeholder": "City", "near": "Travel search", "value": "Lon" });
-        destination["valueDigest"] = json!("3:abc");
-        let mut covered = face("#covered", "input", "textbox", false);
-        covered["field"] = json!({ "kind": "text", "secret": false, "label": "Covered",
-            "placeholder": "", "near": "", "value": "x" });
-        covered["valueDigest"] = json!("1:def");
-        let mut password = face("#pw", "input", "textbox", true);
-        password["field"] = json!({ "kind": "password", "secret": true, "label": "Password",
-            "placeholder": "", "near": "Sign in", "value": "" });
-        password["valueDigest"] = json!("secret");
-        let page = json!({
-            "faces": [destination, covered, password, face("#search", "button", "button", true)],
-            "viewport": { "width": 900.0, "height": 600.0, "dpr": 2.0 },
-            "snapshot": {
-                (snapshot::EPOCH_KEY): EPOCH,
-                (Observe::Container.key()): [{ "label": "Search results", "role": "list",
-                    "count": 3, "selector": "#results" }],
-                (Observe::Image.key()): [{ "alt": "iPhone 16 Pro, black", "width": 120,
-                    "height": 80, "selector": "#results > li:nth-of-type(1) > img" }],
-                (Observe::Row.key()): [{ "text": "iPhone 16 Pro 256GB — in stock",
-                    "selector": "#results > li:nth-of-type(1)" }],
-            },
-        });
-        let look = look_of(&page, 1_790_000_000_123).expect("a look");
-        assert_eq!(
-            look.marks
-                .iter()
-                .map(|mark| (mark.mark, mark.selector.as_str()))
-                .collect::<Vec<_>>(),
-            vec![(1, "#destination"), (2, "#pw"), (3, "#search")],
-            "the covered field has no number"
-        );
-        let answer = marks_json(&look);
-        assert_eq!(answer["count"], 3);
-        assert_eq!(answer[snapshot::EPOCH_KEY], EPOCH);
-        assert_eq!(answer[AT_MS_KEY], 1_790_000_000_123_i64);
-        let fields = answer[snapshot::FIELDS_KEY].as_array().expect("fields");
-        assert_eq!(fields.len(), 2, "{fields:?}");
-        assert_eq!(fields[0][snapshot::FIELD_MARK_KEY], 1);
-        assert_eq!(fields[0][snapshot::FIELD_VALUE_KEY], "Lon");
-        assert_eq!(fields[1][snapshot::FIELD_MARK_KEY], 2);
-        assert_eq!(fields[1][snapshot::FIELD_SECRET_KEY], true);
-        assert_eq!(fields[1][snapshot::FIELD_VALUE_KEY], "");
-        let read = crate::computer_use::errand::Snapshot::of(&answer);
-        assert_eq!(read.epoch, EPOCH);
-        assert_eq!(read.fields.len(), 2);
-        for head in Observe::ALL {
-            assert_eq!(read.of_head(head).len(), 1, "{head:?}");
-        }
-        assert_eq!(look.values.get(&1).map(String::as_str), Some("3:abc"));
-        assert_eq!(look.values.get(&2).map(String::as_str), Some("secret"));
-        assert_eq!(look.values.get(&3), None, "a button pins no value");
-        // A page that could not read itself in one state says so by name.
-        assert_ne!(
-            page_failure(&json!({ "code": "document_moving" })),
-            page_failure(&json!({ "code": "nothing_we_know" }))
-        );
-    }
-
-    /// A number pinned to a field's value and to its document is refused by
-    /// the press itself when either moved since the pin was checked — named
-    /// apart from a control another covered.
-    #[test]
-    fn value_change_or_occlusion_invalidates_selected_target() {
-        let generic = page_failure(&json!({ "code": "nothing_we_know" }));
-        let mut said = std::collections::BTreeSet::new();
-        for code in ["document_replaced", "value_changed", "element_obscured"] {
-            let refusal = page_failure(&json!({ "code": code }));
-            assert_ne!(refusal, generic, "{code} is named");
-            assert!(said.insert(refusal), "{code} says its own words");
-        }
-        let press = include_str!("browser.rs")
-            .split("pub(crate) async fn automate_click_mark(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}\n").next())
-            .expect("the press by number");
-        assert!(
-            press.contains("document_epoch") && press.contains("value_digest"),
-            "the press carries the look's document and value to the page:\n{press}"
-        );
-    }
-
-    /// A look and a settle read the page and nothing else — no focus, no
-    /// scroll, no selection, no event, no write — and the window shows,
-    /// raises or focuses no pane for them.
-    #[test]
-    fn background_observation_does_not_focus_another_pane() {
-        assert!(
-            BROWSER_SETTLE_BODY.contains("zcSettleFacts")
-                && BROWSER_MARKS_BODY.contains("zcObserved"),
-            "the look and the settle are the observation this holds to"
-        );
-        for (name, script) in [
-            ("observe helpers", BROWSER_OBSERVE_HELPERS),
-            ("mark helpers", BROWSER_MARK_HELPERS),
-            ("marks", BROWSER_MARKS_BODY),
-            ("remeasure", BROWSER_REMEASURE_BODY),
-            ("settle", BROWSER_SETTLE_BODY),
-        ] {
-            for act in [
-                "focus(",
-                "blur(",
-                "scrollIntoView",
-                "scrollTo",
-                "scrollBy",
-                ".select(",
-                "setSelectionRange",
-                "dispatchEvent",
-                "execCommand",
-                ".click(",
-                "setAttribute",
-                ".style",
-                "requestAnimationFrame",
-            ] {
-                assert!(!script.contains(act), "the {name} script does `{act}`");
-            }
-        }
-        let source = include_str!("browser.rs");
-        for road in [
-            "pub(crate) async fn automate_marks(",
-            "pub(crate) async fn settle_with<",
-            "async fn settle_after_press(",
-        ] {
-            let block = source
-                .split(road)
-                .nth(1)
-                .and_then(|rest| rest.split("\n}\n").next())
-                .unwrap_or_else(|| panic!("{road} is missing"));
-            for window in ["set_focus", ".show(", "focus_main", "set_hidden"] {
-                assert!(!block.contains(window), "{road} touches the pane: `{window}`");
-            }
-        }
     }
 }

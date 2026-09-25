@@ -5567,12 +5567,15 @@ fn browser_type_refuses_a_password_field_and_value_stdin_uses_the_setter_only() 
     for edge in [
         "request.road",
         "secureField",
-        "=== \"password\"",
-        "current-password",
+        "zcSecretField(element)",
         "\"held\"",
         "\"value-setter\"",
     ] {
         assert!(TYPE_BODY.contains(edge), "the type body lost `{edge}`");
+    }
+    for word in ["=== \"password\"", "\"current-password\""] {
+        let helpers = cmd::browser::BROWSER_AUTOMATION_HELPERS;
+        assert!(helpers.contains(word), "the one secret rule lost `{word}`");
     }
     let setter_road = TYPE_BODY
         .split("value-setter")
@@ -21282,5 +21285,315 @@ mod quiet_since {
             quiet_since_output(None, started, started + QUIET_GRACE_MS),
             Some(started)
         );
+    }
+}
+
+/// The browser door's look, settle and pin (t-6721): what the Rust half of
+/// `cmd/browser.rs` does with what the page said. The page halves run for
+/// real in Chromium (`ui/tests/browser-door.mjs`).
+mod browser_look_settle_pin {
+
+    use super::*;
+    use cmd::browser::{
+        BROWSER_MARK_HELPERS, BROWSER_MARKS_BODY, BROWSER_OBSERVE_HELPERS, BROWSER_REMEASURE_BODY,
+        BROWSER_SETTLE_BODY, CLICK_SAID, PAGE_SEND_FAILED, PAGE_TIMED_OUT, input_report,
+        input_said, look_of, marks_json, page_failure, pressed_rect, settle_with,
+    };
+    use serde_json::json;
+    use std::time::Duration;
+    use zerocode_core::agent_browser::{
+        AT_MS_KEY, BROWSER_SETTLE_MS, BROWSER_SETTLE_QUIET_MS, Settle, SettleWhy,
+    };
+    use zerocode_core::screen_action::{Observe, snapshot};
+
+    const EPOCH: &str = "1790000000000.25";
+    const OTHER_EPOCH: &str = "1790000009999.5";
+
+    /// One settle poll's answer as the page script gives it.
+    fn facts(epoch: &str, now: f64, last: f64, busy: bool, hidden: bool) -> serde_json::Value {
+        json!({ "ok": true, "value": {
+            "documentEpoch": epoch, "now": now, "last": last,
+            "busy": busy, "hidden": hidden, "watched": true,
+        } })
+    }
+
+    /// The page's clock: 1000 ms at the press, walking with the test's
+    /// (paused) clock.
+    fn page_now(began: tokio::time::Instant) -> f64 {
+        1_000.0 + began.elapsed().as_secs_f64() * 1_000.0
+    }
+
+    /// A settle is bounded by the wall, not by a frame: a hidden page that
+    /// never paints and never stands still, and a page that never answers at
+    /// all, are both `not_ready` exactly when the quarter second runs out; a
+    /// hidden page that stood still is `ready` once the quiet window is
+    /// whole; another document or a gone pane is `invalidated` at once.
+    #[tokio::test(start_paused = true)]
+    async fn hidden_surface_short_settle_has_a_wall_deadline() {
+        let wall = Duration::from_millis(BROWSER_SETTLE_MS);
+
+        let began = tokio::time::Instant::now();
+        let moving = settle_with(EPOCH, 1_000.0, move |_left| {
+            let now = page_now(began);
+            async move { Ok(facts(EPOCH, now, now - 1.0, false, true)) }
+        })
+        .await;
+        assert_eq!(
+            (moving.state, moving.why),
+            (Settle::NotReady, SettleWhy::Moving)
+        );
+        assert_eq!(
+            began.elapsed(),
+            wall,
+            "a moving page is answered at the wall"
+        );
+        assert!(moving.polls >= 2, "{moving:?}");
+
+        // Each poll is handed only the wall that is left: a page that never
+        // answers holds the settle no longer than the settle's own wall, never
+        // the callback's five seconds.
+        let began = tokio::time::Instant::now();
+        let unanswered = settle_with(EPOCH, 1_000.0, |left| async move {
+            tokio::time::sleep(left).await;
+            Err(PAGE_TIMED_OUT.to_string())
+        })
+        .await;
+        assert_eq!(
+            (unanswered.state, unanswered.why),
+            (Settle::NotReady, SettleWhy::Unanswered)
+        );
+        assert_eq!(began.elapsed(), wall);
+
+        let began = tokio::time::Instant::now();
+        let still = settle_with(EPOCH, 1_000.0, move |_left| {
+            let now = page_now(began);
+            async move { Ok(facts(EPOCH, now, 1_000.0, false, true)) }
+        })
+        .await;
+        assert_eq!((still.state, still.why), (Settle::Ready, SettleWhy::Quiet));
+        assert_eq!(
+            began.elapsed(),
+            Duration::from_millis(BROWSER_SETTLE_QUIET_MS),
+            "ready the moment the quiet window is whole"
+        );
+        assert_eq!(still.hidden, Some(true), "a hidden page, and still ready");
+
+        let began = tokio::time::Instant::now();
+        let replaced = settle_with(EPOCH, 1_000.0, |_left| async {
+            Ok(facts(OTHER_EPOCH, 1_000.0, 1_000.0, false, true))
+        })
+        .await;
+        assert_eq!(
+            (replaced.state, replaced.why),
+            (Settle::Invalidated, SettleWhy::Replaced)
+        );
+        let gone = settle_with(EPOCH, 1_000.0, |_left| async {
+            Err(PAGE_SEND_FAILED.to_string())
+        })
+        .await;
+        assert_eq!(
+            (gone.state, gone.why),
+            (Settle::Invalidated, SettleWhy::Gone)
+        );
+        assert_eq!(began.elapsed(), Duration::ZERO, "neither is waited on");
+    }
+
+    /// Seen is not settled and settled is not done: a visible page painting
+    /// every frame whose document keeps changing is `not_ready`, the press's
+    /// sentence says so in its own words, and the settle reads the document —
+    /// it asks for no animation frame and takes no picture.
+    #[tokio::test(start_paused = true)]
+    async fn visibility_is_not_confused_with_task_completion() {
+        let began = tokio::time::Instant::now();
+        let seen = settle_with(EPOCH, 1_000.0, move |_left| {
+            let now = page_now(began);
+            async move { Ok(facts(EPOCH, now, now - 2.0, false, false)) }
+        })
+        .await;
+        assert_eq!(
+            (seen.state, seen.why),
+            (Settle::NotReady, SettleWhy::Moving)
+        );
+        assert_eq!(seen.hidden, Some(false));
+
+        let mut report = input_report(
+            json!({ "method": "dom-activation", "rect": [1.0, 2.0, 3.0, 4.0], "dpr": 2.0 }),
+            &["dom-activation"],
+        )
+        .expect("a press report");
+        report.settle = Some(seen);
+        let said = input_said(CLICK_SAID, &report);
+        assert!(said.contains("settle=not_ready"), "{said}");
+        assert!(!said.contains("settle=ready"), "{said}");
+        assert_eq!(
+            pressed_rect(&said),
+            Some(([1.0, 2.0, 3.0, 4.0], 2.0)),
+            "the walk still reads the rect from the sentence: {said}"
+        );
+
+        assert!(
+            BROWSER_SETTLE_BODY.contains("zcSettleFacts")
+                && BROWSER_OBSERVE_HELPERS.contains("const zcSettleFacts"),
+            "the settle reads the page's own facts"
+        );
+        for script in [BROWSER_SETTLE_BODY, BROWSER_OBSERVE_HELPERS] {
+            assert!(!script.contains("requestAnimationFrame"), "{script}");
+        }
+        let source = include_str!("cmd/browser.rs");
+        let road = source
+            .split("pub(crate) async fn settle_with<")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the settle's road");
+        assert!(!road.contains("snapshot_png"), "{road}");
+    }
+
+    /// One pass of the page, one look: the numbers are the core's, every
+    /// field the look numbered rides with its number and only those, the
+    /// document and the candidates come from the same pass, the window's
+    /// clock is stamped — and the walk's own reader finds all of it.
+    #[test]
+    fn one_snapshot_contains_controls_values_and_context_from_one_epoch() {
+        let face = |selector: &str, tag: &str, role: &str, hit: bool| {
+            json!({ "tag": tag, "role": role, "label": selector, "selector": selector,
+                "x": 10.0, "y": 10.0, "width": 200.0, "height": 30.0, "hit": hit })
+        };
+        let mut destination = face("#destination", "input", "textbox", true);
+        destination["field"] = json!({ "kind": "text", "masked": false, "label": "Destination",
+            "placeholder": "City", "near": "Travel search", "value": "Lon" });
+        destination["valueDigest"] = json!("3:abc");
+        let mut covered = face("#covered", "input", "textbox", false);
+        covered["field"] = json!({ "kind": "text", "masked": false, "label": "Covered",
+            "placeholder": "", "near": "", "value": "x" });
+        covered["valueDigest"] = json!("1:def");
+        let mut password = face("#pw", "input", "textbox", true);
+        password["field"] = json!({ "kind": "password", "masked": true, "label": "Password",
+            "placeholder": "", "near": "Sign in", "value": "hunter2" });
+        password["valueDigest"] = json!("secret");
+        let page = json!({
+            "faces": [destination, covered, password, face("#search", "button", "button", true)],
+            "viewport": { "width": 900.0, "height": 600.0, "dpr": 2.0 },
+            "snapshot": {
+                (snapshot::EPOCH_KEY): EPOCH,
+                (Observe::Container.key()): [{ "label": "Search results", "role": "list",
+                    "count": 3, "selector": "#results" }],
+                (Observe::Image.key()): [{ "alt": "iPhone 16 Pro, black", "width": 120,
+                    "height": 80, "selector": "#results > li:nth-of-type(1) > img" }],
+                (Observe::Row.key()): [{ "text": "iPhone 16 Pro 256GB — in stock",
+                    "selector": "#results > li:nth-of-type(1)" }],
+            },
+        });
+        let look = look_of(&page, 1_790_000_000_123).expect("a look");
+        assert_eq!(
+            look.marks
+                .iter()
+                .map(|mark| (mark.mark, mark.selector.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "#destination"), (2, "#pw"), (3, "#search")],
+            "the covered field has no number"
+        );
+        let answer = marks_json(&look);
+        assert_eq!(answer["count"], 3);
+        assert_eq!(answer[snapshot::EPOCH_KEY], EPOCH);
+        assert_eq!(answer[AT_MS_KEY], 1_790_000_000_123_i64);
+        let fields = answer[snapshot::FIELDS_KEY].as_array().expect("fields");
+        assert_eq!(fields.len(), 2, "{fields:?}");
+        assert_eq!(fields[0][snapshot::FIELD_MARK_KEY], 1);
+        assert_eq!(fields[0][snapshot::FIELD_VALUE_KEY], "Lon");
+        assert_eq!(fields[1][snapshot::FIELD_MARK_KEY], 2);
+        assert_eq!(fields[1][snapshot::FIELD_SECRET_KEY], true);
+        assert_eq!(fields[1][snapshot::FIELD_VALUE_KEY], "");
+        let read = crate::computer_use::errand::Snapshot::of(&answer);
+        assert_eq!(read.epoch, EPOCH);
+        assert_eq!(read.fields.len(), 2);
+        for head in Observe::ALL {
+            assert_eq!(read.of_head(head).len(), 1, "{head:?}");
+        }
+        assert_eq!(look.values.get(&1).map(String::as_str), Some("3:abc"));
+        assert_eq!(look.values.get(&2).map(String::as_str), Some("secret"));
+        assert_eq!(look.values.get(&3), None, "a button pins no value");
+        // A page that could not read itself in one state says so by name.
+        assert_ne!(
+            page_failure(&json!({ "code": "document_moving" })),
+            page_failure(&json!({ "code": "nothing_we_know" }))
+        );
+    }
+
+    /// A number pinned to a field's value and to its document is refused by
+    /// the press itself when either moved since the pin was checked — named
+    /// apart from a control another covered.
+    #[test]
+    fn value_change_or_occlusion_invalidates_selected_target() {
+        let generic = page_failure(&json!({ "code": "nothing_we_know" }));
+        let mut said = std::collections::BTreeSet::new();
+        for code in ["document_replaced", "value_changed", "element_obscured"] {
+            let refusal = page_failure(&json!({ "code": code }));
+            assert_ne!(refusal, generic, "{code} is named");
+            assert!(said.insert(refusal), "{code} says its own words");
+        }
+        let press = include_str!("cmd/browser.rs")
+            .split("pub(crate) async fn automate_click_mark(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the press by number");
+        assert!(
+            press.contains("document_epoch") && press.contains("value_digest"),
+            "the press carries the look's document and value to the page:\n{press}"
+        );
+    }
+
+    /// A look and a settle read the page and nothing else — no focus, no
+    /// scroll, no selection, no event, no write — and the window shows,
+    /// raises or focuses no pane for them.
+    #[test]
+    fn background_observation_does_not_focus_another_pane() {
+        assert!(
+            BROWSER_SETTLE_BODY.contains("zcSettleFacts")
+                && BROWSER_MARKS_BODY.contains("zcObserved"),
+            "the look and the settle are the observation this holds to"
+        );
+        for (name, script) in [
+            ("observe helpers", BROWSER_OBSERVE_HELPERS),
+            ("mark helpers", BROWSER_MARK_HELPERS),
+            ("marks", BROWSER_MARKS_BODY),
+            ("remeasure", BROWSER_REMEASURE_BODY),
+            ("settle", BROWSER_SETTLE_BODY),
+        ] {
+            for act in [
+                "focus(",
+                "blur(",
+                "scrollIntoView",
+                "scrollTo",
+                "scrollBy",
+                ".select(",
+                "setSelectionRange",
+                "dispatchEvent",
+                "execCommand",
+                ".click(",
+                "setAttribute",
+                ".style",
+                "requestAnimationFrame",
+            ] {
+                assert!(!script.contains(act), "the {name} script does `{act}`");
+            }
+        }
+        let source = include_str!("cmd/browser.rs");
+        for road in [
+            "pub(crate) async fn automate_marks(",
+            "pub(crate) async fn settle_with<",
+            "async fn settle_after_press(",
+        ] {
+            let block = source
+                .split(road)
+                .nth(1)
+                .and_then(|rest| rest.split("\n}\n").next())
+                .unwrap_or_else(|| panic!("{road} is missing"));
+            for window in ["set_focus", ".show(", "focus_main", "set_hidden"] {
+                assert!(
+                    !block.contains(window),
+                    "{road} touches the pane: `{window}`"
+                );
+            }
+        }
     }
 }
