@@ -625,8 +625,16 @@ pub fn tool_text_guard_rubric_fingerprint() -> String {
 
 /* ---- the command guard (t-6348) --------------------------------------------- */
 
-/// Bumped whenever the command guard's words or the state they read change.
-pub const COMMAND_GUARD_RUBRIC_VERSION: u32 = 1;
+/// Bumped whenever the command guard's words or the state they read change —
+/// or the label they are graded by. Version 1 read a later restore as the
+/// regret of every command that named a folder holding what it put back: on
+/// this machine's ledger (2026-09-25) two single-file checkouts wrote 51
+/// `restored` labels, 49 of them for commands that never spelled the file.
+/// Version 2 asks the same words and grades a restore against the places a
+/// command changed (t-9087, `tool_guard::restores` in the tools crate). The
+/// version rides every request row so a reader can tell the series apart;
+/// reading them apart is t-6877's contract, as the text guard's is.
+pub const COMMAND_GUARD_RUBRIC_VERSION: u32 = 2;
 /// The keys the command guard's state carries, in the order the use table
 /// declares them: the command, the folder it runs in, and the first line of
 /// the person's newest words.
@@ -828,9 +836,11 @@ mod tests {
 
     /// The command guard's two questions, their criteria and the state they
     /// read are one rubric (t-6348): a word changed without a version is red.
+    /// Version 2 is the same words graded by another label (t-9087), so the
+    /// fingerprint stands.
     #[test]
     fn command_guard_version_names_its_exact_words() {
-        assert_eq!(COMMAND_GUARD_RUBRIC_VERSION, 1);
+        assert_eq!(COMMAND_GUARD_RUBRIC_VERSION, 2);
         assert_eq!(command_guard_rubric_fingerprint(), "c4a0f75aaf1e9192");
     }
 

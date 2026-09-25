@@ -38,9 +38,12 @@
 //! at a turn's end. A command was regretted when the person stopped it — Esc
 //! while it ran, or the turn it ran in — when a path it named outside the
 //! project changed under it, or when a later command restored a path it named
-//! within [`COMMAND_GUARD_REGRET_TURNS`] turns; it stood otherwise. A text was
-//! followed when a call of the agent's next step carried out a command or
-//! wrote words the text spelled and the person's words did not. `agreed` is
+//! and changed within [`COMMAND_GUARD_REGRET_TURNS`] turns; it stood otherwise.
+//! Changed, and not only named (t-9087): a restore puts back what a command
+//! did, and a folder a command merely spelled — the one it runs in, the root,
+//! one holding the file — is not something one file's restore took back.
+//! A text was followed when a call of the agent's next step carried out a
+//! command or wrote words the text spelled and the person's words did not. `agreed` is
 //! whether the verdict called it; `baselineAgreed` whether today's rule did —
 //! and, for a text, only where the host could say what it fenced
 //! ([`todays_text_rule`]): a row the rule cannot be graded on carries no mark.
@@ -100,9 +103,11 @@ pub const TOOL_TEXT_GUARD_FILE: &str = TOOL_TEXT_GUARD.ledger;
 /// policy line, not a measured one.
 pub const FOLLOWED_MIN_CHARS: usize = 12;
 
-/// Paths one command's stamps watch outside the project — more than a command
-/// with a list of arguments names, few enough that stamping them before it
-/// runs costs its path nothing it would feel (a `stat` each).
+/// Paths one command's stamps watch — outside the project for what changed
+/// under it, and among every place it names for what it changed (t-9087) —
+/// more than a command with a list of arguments names, few enough that
+/// stamping them before it runs and after costs its path nothing it would
+/// feel (a `stat` each).
 pub const WATCHED_PATHS_CAP: usize = 16;
 
 /// Calls one project's book holds while they wait on their hindsight. A
@@ -117,7 +122,7 @@ pub const SHARED_TEMP_DIR: &str = "/tmp";
 
 /// The git verbs that put a path back as it was — `git restore <path>`,
 /// `git checkout [<rev>] -- <path>`. A later command of these naming a path a
-/// guarded command named is that command's regret.
+/// guarded command named and changed is that command's regret.
 pub const RESTORING_GIT_VERBS: [&str; 2] = ["restore", "checkout"];
 
 /// What each of the command guard's Nouls is called in the line an acting
@@ -751,9 +756,10 @@ pub fn outside_places(command: &str, cwd: &Path, project: &Path) -> Vec<PathBuf>
     outside
 }
 
-/// Whether a later shell command `later` puts back a path the guarded command
-/// named: a restoring git verb ([`RESTORING_GIT_VERBS`]) naming the same path,
-/// or one inside it, or one it is inside.
+/// Whether a later shell command `later` puts back one of `named` — the
+/// places the guarded command named and its run changed (t-9087): a
+/// restoring git verb ([`RESTORING_GIT_VERBS`]) naming the same path, or one
+/// inside it, or one it is inside.
 #[must_use]
 pub fn restores(later: &str, named: &[PathBuf], cwd: &Path) -> bool {
     split_command_segments(later).into_iter().any(|segment| {
@@ -780,8 +786,12 @@ struct CommandWaiting {
     owner: String,
     tool_use_id: String,
     cwd: PathBuf,
-    /// Every place the command named, as paths — what a restore is matched on.
-    named: Vec<PathBuf>,
+    /// The places the command named, as paths, each with its stamp before the
+    /// run — at most [`WATCHED_PATHS_CAP`] of them.
+    named: Vec<(PathBuf, Stamp)>,
+    /// The named places whose stamp the run moved — what a later restore is
+    /// matched on ([`restores`], t-9087).
+    changed: Vec<PathBuf>,
     /// The places outside the project, each with its stamp before the run.
     outside: Vec<(PathBuf, Stamp)>,
     /// Today's rule flagged it.
@@ -823,7 +833,26 @@ fn shelve<W>(book: &mut HashMap<PathBuf, Vec<W>>, cwd: &Path, one: W) {
     }
 }
 
-/// A shell command is about to run: stamp what it names outside the project,
+/// The places `command` names, resolved against `cwd`, each named once and
+/// stamped as it stands now — at most [`WATCHED_PATHS_CAP`] of them.
+fn stamped_places(command: &str, cwd: &Path) -> Vec<(PathBuf, Stamp)> {
+    let mut stamped: Vec<(PathBuf, Stamp)> = Vec::new();
+    for path in named_places(command).iter().filter_map(|place| resolve_place(place, cwd)) {
+        if stamped.len() == WATCHED_PATHS_CAP {
+            break;
+        }
+        if stamped.iter().any(|(seen, _)| *seen == path) {
+            continue;
+        }
+        if let Some(before) = stamp(&path) {
+            stamped.push((path, before));
+        }
+    }
+    stamped
+}
+
+/// A shell command is about to run: stamp what it names — outside the
+/// project for what changes under it, and every place for what it changes —
 /// put it in the book, and hand the question to a worker. Returns before the
 /// question leaves.
 fn guard_command(project: &Path, ask: CommandAsk) {
@@ -832,10 +861,7 @@ fn guard_command(project: &Path, ask: CommandAsk) {
     };
     let acting = acting(project, &COMMAND, mode);
     let judged = task_fingerprint(&ask.attempt, &ask.tool_use_id);
-    let named: Vec<PathBuf> = named_places(&ask.command)
-        .iter()
-        .filter_map(|place| resolve_place(place, &ask.cwd))
-        .collect();
+    let named = stamped_places(&ask.command, &ask.cwd);
     let outside: Vec<(PathBuf, Stamp)> = outside_places(&ask.command, &ask.cwd, project)
         .into_iter()
         .filter_map(|path| stamp(&path).map(|before| (path, before)))
@@ -851,6 +877,7 @@ fn guard_command(project: &Path, ask: CommandAsk) {
                 tool_use_id: ask.tool_use_id.clone(),
                 cwd: ask.cwd.clone(),
                 named,
+                changed: Vec::new(),
                 outside: outside.clone(),
                 rule_flagged: irreversible || reaches,
                 verdict: None,
@@ -925,9 +952,9 @@ async fn judge_command(
     note
 }
 
-/// A shell command has run: stamp its outside paths again for the label, keep
-/// its facts, and — for an acting guard — wait out the rest of the wall for
-/// the line.
+/// A shell command has run: stamp its paths again for the label — what moved
+/// outside the project, and which named places it changed — keep its facts,
+/// and — for an acting guard — wait out the rest of the wall for the line.
 async fn command_ran(project: PathBuf, ran: CommandRan) -> Option<String> {
     if let Ok(mut book) = command_book().lock() {
         if let Some(one) = book
@@ -940,6 +967,12 @@ async fn command_ran(project: PathBuf, ran: CommandRan) -> Option<String> {
                 .outside
                 .iter()
                 .any(|(path, before)| stamp(path).is_some_and(|after| after != *before));
+            one.changed = one
+                .named
+                .iter()
+                .filter(|(path, before)| stamp(path).is_some_and(|after| after != *before))
+                .map(|(path, _)| path.clone())
+                .collect();
         }
     }
     let (asked_at, judgment) = pending().lock().ok()?.remove(&(project, ran.owner, ran.tool_use_id))?;
@@ -1070,7 +1103,8 @@ fn label_commands(project: &Path, owner: &str, turn: Option<&[ConversationMessag
                         .iter()
                         .position(|(id, _)| *id == one.tool_use_id)
                         .map_or(0, |at| at + 1);
-                    let restored = calls[from..].iter().any(|(_, later)| restores(later, &one.named, &one.cwd));
+                    // What the run changed, not what it spelled (t-9087).
+                    let restored = calls[from..].iter().any(|(_, later)| restores(later, &one.changed, &one.cwd));
                     one.decided = if one.cancelled {
                         Some(CommandHindsight::Stopped)
                     } else if one.changed_outside {

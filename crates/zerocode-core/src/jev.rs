@@ -3592,8 +3592,9 @@ pub const COMMAND_GUARD_REGRET_TURNS: u32 = PATCH_REVIEW_REGRET_TURNS;
 /// when its turn ends or its window of turns closes: the command was regretted
 /// when the person stopped it (Esc while it ran, or the turn it ran in),
 /// when a path it named outside the project changed under it, or when a later
-/// command restored a path it named ([`COMMAND_GUARD_REGRET_TURNS`]); it stood
-/// otherwise. A failed command is recorded, not graded. `flagged` agreed when
+/// command restored a path it named and changed
+/// ([`COMMAND_GUARD_REGRET_TURNS`], t-9087); it stood otherwise. A failed
+/// command is recorded, not graded. `flagged` agreed when
 /// the command was regretted, `plain` when it stood. The baseline is today's
 /// rule: zo's destructive and path tables, its shared-tree table, and the
 /// Computer Use words a control that cannot be taken back carries

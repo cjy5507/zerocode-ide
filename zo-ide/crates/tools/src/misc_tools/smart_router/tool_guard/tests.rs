@@ -456,7 +456,9 @@ fn waiting_command(judged: u64, id: &str, cwd: &Path, rule_flagged: bool, verdic
         owner: "turn-1".to_string(),
         tool_use_id: id.to_string(),
         cwd: cwd.to_path_buf(),
-        named: vec![cwd.join("build")],
+        // A command that removed the folder it named.
+        named: vec![(cwd.join("build"), Stamp::Absent)],
+        changed: vec![cwd.join("build")],
         outside: Vec::new(),
         rule_flagged,
         verdict: Some(verdict),
