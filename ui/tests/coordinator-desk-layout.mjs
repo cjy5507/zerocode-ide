@@ -239,7 +239,8 @@ function holesOf(facts) {
         : [h.mail, stackOf([h.workers, h.pipeline, h.release], facts.gap)];
     return tenth(candidate.height - Math.min(...columns));
   };
-  return { chosen: chosen.id, hole: hole(chosen), candidates: candidates.map((one) => `${one.id} ${one.height} (hole ${hole(one)})`) };
+  return { chosen: chosen.id, hole: hole(chosen), floor: Math.min(...candidates.map(hole)),
+    candidates: candidates.map((one) => `${one.id} ${one.height} (hole ${hole(one)})`) };
 }
 
 const settle = (page) => page.evaluate(async () => {
@@ -431,8 +432,12 @@ export async function testCoordinatorDeskLayout(browser, origin, ok) {
       const facts = await readDesk(page);
       const holes = holesOf(facts);
       const wide = wideFaults(facts);
-      ok("the_default_desk_splits_the_flow_and_the_lane (mail 5 rows beside workers 5: the flow under the mail, the lane under the workers, the hole under the shorter column no deeper than one gap)",
-        facts.mailRows === 5 && facts.workerRows === 5 && holes.chosen === "split" && holes.hole <= facts.gap && wide.length === 0,
+      /* The default desk shows five questions now (t-9456: the notices stand
+       * under them as news), and a question's row is its answer button's
+       * height — the two columns differ by that on content alone. What the
+       * placement owes is the floor: no arrangement leaves a shallower hole. */
+      ok("the_default_desk_splits_the_flow_and_the_lane (mail 5 rows beside workers 5: the flow under the mail, the lane under the workers, the hole under the shorter column the floor of every placement's)",
+        facts.mailRows === 5 && facts.workerRows === 5 && holes.chosen === "split" && holes.hole <= holes.floor && wide.length === 0,
         JSON.stringify({ holes, faults: wide, ...summarize(facts) }));
       ok("the_default_desk_splits_the_flow_and_the_lane (on a 1998×1069 board the first task row is on the first screen, as t-6588 promised)",
         facts.firstRow !== null && facts.firstRow.top < facts.surface.bottom && facts.firstRow.top >= facts.desk.bottom,

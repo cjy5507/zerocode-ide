@@ -9,12 +9,12 @@
 //! the ledger already judges — the disk's word is the rule a `--worktree`
 //! summons is refused by ([`zerocode_core::orchestration::worktree_room`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
 use zerocode_core::orchestration::{
-    Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom, worktree_room,
+    Delivery, Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom, worktree_room,
 };
 
 /// The desk's reading of the ledger, published beside the board's other
@@ -29,8 +29,29 @@ pub(crate) struct DeskSnapshot {
     /// Every task of those runs, counted by stage — the rows above are a
     /// window onto these, never the other way round.
     pub(crate) stages: Vec<StageCount>,
-    /// The letters their coordinators owe, oldest first ([`desk_mail`]).
+    /// The letters their coordinators owe an answer, oldest first
+    /// ([`DeskLetters::mail`]) — the 「답할 우편」.
     pub(crate) mail: Vec<DeskMail>,
+    /// The ledger's news their coordinators have not acknowledged, one line
+    /// per notice or per quiet episode, oldest first ([`DeskLetters::news`])
+    /// — the 「소식」.
+    pub(crate) news: Vec<DeskMail>,
+    /// The desk's numbers, counted here once: the screen draws them and never
+    /// counts letters again (t-9456).
+    pub(crate) counts: DeskCounts,
+}
+
+/// The desk's three numbers (t-9456).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct DeskCounts {
+    /// Letters owed an answer — the 「답할 우편」 number.
+    pub(crate) mail: usize,
+    /// Lines of news — the 「소식」 number.
+    pub(crate) news: usize,
+    /// Notices owed an acknowledgement that no line of news stands for:
+    /// older than [`DESK_NEWS`]'s day, or a silence that is over. Counted,
+    /// never drawn one by one; the ledger still holds every row.
+    pub(crate) folded: usize,
 }
 
 /// One letter a run's coordinator owes: an answer, or an acknowledgement.
@@ -74,74 +95,165 @@ pub(crate) struct DeskMail {
     /// How many letters that batch holds: the ledger acknowledges a batch,
     /// never one letter of it.
     pub(crate) batch: Option<usize>,
+    /// How many of the ledger's rows this line stands for: one, or every
+    /// notice of one quiet episode ([`NewsLine::PerEpisode`]) — the line
+    /// wears the newest of them.
+    pub(crate) notices: usize,
 }
 
-/// The letters a coordinator owes something, one table: a question put to it
-/// (owed an answer until one lands, however it was delivered), and the
-/// ledger's news that a worker stopped — at its quota wall, dead, quiet,
-/// waiting in a ring, or at a classifier's decline — or went on under a model
-/// its summons did not bind (owed an acknowledgement until the batch holding
-/// it is acknowledged).
-const DESK_MAIL_KINDS: [MessageKind; 7] = [
-    MessageKind::Question,
-    MessageKind::QuotaWalled,
-    MessageKind::WorkerDied,
-    MessageKind::WentQuiet,
-    MessageKind::Deadlocked,
-    MessageKind::ClassifierDeclined,
-    MessageKind::ModelDeviated,
-];
+/// How the desk's 「소식」 lists the notices a coordinator has not
+/// acknowledged — one table (t-9456): which kinds are news, which of them
+/// fold into ONE line per quiet episode, and how long any notice stands as a
+/// line before it folds into [`DeskCounts::folded`]. Folding hides nothing
+/// from the ledger: the inbox, `check` and `inbox` still hold every row.
+struct NewsTable {
+    /// How long a notice stands as a line, from when the ledger wrote it.
+    ///
+    /// A day, measured (2026-09-26, this machine's ledger): of 570 notices
+    /// the coordinators' inboxes handed over, the age at hand-over was p50
+    /// 0.10 h, p90 11.64 h and p99 17.95 h — a day stands past 99 in 100 of
+    /// them, and the one night that filled the desk with 46 letters was a
+    /// seven-hour gap. What is older is history, and `inbox` reads history.
+    stands_ms: i64,
+    kinds: [(MessageKind, NewsLine); 6],
+}
 
-/// Where one letter stands in the inbox that holds it.
-fn delivery_of(id: &str, pending: &HashSet<&str>, open: &HashSet<&str>) -> &'static str {
-    if pending.contains(id) {
-        "pending"
-    } else if open.contains(id) {
-        "delivered"
-    } else {
-        "acked"
+/// How many lines one kind of notice earns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NewsLine {
+    /// One line per notice: each is news of its own — a wall, a death, a
+    /// ring of waiting, a decline, a switch of model.
+    PerNotice,
+    /// One line per quiet episode, while the silence goes on
+    /// ([`Run::quiet_notice_stands`]): the ledger tells the same silence
+    /// again every five minutes it lasts, so its notices are copies of one
+    /// fact (t-9456 measured 41 of them for ten workers' silences on one
+    /// desk). A silence that is over — the attempt ended, the worker spoke
+    /// — earns no line at all.
+    PerEpisode,
+}
+
+const DESK_NEWS: NewsTable = NewsTable {
+    stands_ms: 24 * 60 * 60 * 1000,
+    kinds: [
+        (MessageKind::QuotaWalled, NewsLine::PerNotice),
+        (MessageKind::WorkerDied, NewsLine::PerNotice),
+        (MessageKind::WentQuiet, NewsLine::PerEpisode),
+        (MessageKind::Deadlocked, NewsLine::PerNotice),
+        (MessageKind::ClassifierDeclined, NewsLine::PerNotice),
+        (MessageKind::ModelDeviated, NewsLine::PerNotice),
+    ],
+};
+
+impl NewsTable {
+    fn line(&self, kind: MessageKind) -> Option<NewsLine> {
+        self.kinds
+            .iter()
+            .find(|(held, _)| *held == kind)
+            .map(|(_, line)| *line)
     }
 }
 
-/// What the coordinator of `run` owes, oldest first. A question is owed until
-/// it is answered or can no longer be (`Run::answer_to`,
-/// `Run::question_is_answerable` — the reply verb's own rules); a notice until it
-/// is acknowledged.
-pub(crate) fn desk_mail(run: &Run) -> Vec<DeskMail> {
-    let address = run.address();
-    let pending: HashSet<&str> = run
-        .pending_messages(&address, &DESK_MAIL_KINDS)
-        .into_iter()
-        .map(|message| message.id.as_str())
-        .collect();
-    let batch = run.open_delivery(&address);
-    let open: HashSet<&str> = batch
-        .map(|held| held.messages.iter().map(String::as_str).collect())
-        .unwrap_or_default();
-    run.messages()
-        .iter()
-        .filter(|message| message.to == address && DESK_MAIL_KINDS.contains(&message.kind))
-        .filter_map(|message| {
-            let delivery = delivery_of(&message.id, &pending, &open);
-            let owed = match message.kind {
-                MessageKind::Question => {
-                    message.thread.is_none()
-                        && run.answer_to(message).is_none()
-                        && run.question_is_answerable(message).is_ok()
-                }
-                _ => delivery != "acked",
-            };
-            owed.then(|| mail_row(run, message, delivery, batch))
-        })
-        .collect()
+/// Where the letters of one address stand in its inbox.
+struct InboxState<'a> {
+    pending: HashSet<&'a str>,
+    open: HashSet<&'a str>,
+    batch: Option<&'a Delivery>,
 }
 
-fn mail_row(
-    run: &Run,
-    message: &Message,
-    delivery: &'static str,
-    batch: Option<&zerocode_core::orchestration::Delivery>,
-) -> DeskMail {
+impl<'a> InboxState<'a> {
+    fn of(run: &'a Run, address: &str) -> Self {
+        let batch = run.open_delivery(address);
+        Self {
+            pending: run
+                .pending_messages(address, &[])
+                .into_iter()
+                .map(|message| message.id.as_str())
+                .collect(),
+            open: batch
+                .map(|held| held.messages.iter().map(String::as_str).collect())
+                .unwrap_or_default(),
+            batch,
+        }
+    }
+
+    /// `pending` (not yet handed over), `delivered` (in the batch the
+    /// coordinator holds, unacknowledged) or `acked`.
+    fn delivery(&self, id: &str) -> &'static str {
+        if self.pending.contains(id) {
+            "pending"
+        } else if self.open.contains(id) {
+            "delivered"
+        } else {
+            "acked"
+        }
+    }
+}
+
+/// What the coordinator of one run owes, read off its inbox once.
+#[derive(Debug, Default)]
+pub(crate) struct DeskLetters {
+    /// Owed an answer, oldest first: a question put to it, however it was
+    /// delivered, until it is answered or can no longer be — the ledger's
+    /// own reading of a wait (`Run::awaits_answer`, the one
+    /// `Run::awaiting_reply` asks) and the reply verb's own rule
+    /// (`Run::question_is_answerable`). The ledger's notices are never owed
+    /// an answer.
+    pub(crate) mail: Vec<DeskMail>,
+    /// Owed an acknowledgement, oldest first: one line per notice or per
+    /// quiet episode, as [`DESK_NEWS`] says.
+    pub(crate) news: Vec<DeskMail>,
+    /// The notices owed an acknowledgement that no line stands for.
+    pub(crate) folded: usize,
+}
+
+/// What the coordinator of `run` owes at `now_ms`.
+pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
+    let address = run.address();
+    let inbox = InboxState::of(run, &address);
+    let mut owed = DeskLetters::default();
+    let mut episodes: HashMap<&str, usize> = HashMap::new();
+    for message in run.messages().iter().filter(|one| one.to == address) {
+        if run.awaits_answer(message) {
+            if run.question_is_answerable(message).is_ok() {
+                owed.mail.push(mail_row(run, message, &inbox));
+            }
+            continue;
+        }
+        let Some(line) = DESK_NEWS.line(message.kind) else {
+            continue;
+        };
+        if inbox.delivery(&message.id) == "acked" {
+            continue;
+        }
+        let stands = now_ms.saturating_sub(message.created_ms) < DESK_NEWS.stands_ms
+            && (line == NewsLine::PerNotice || run.quiet_notice_stands(message));
+        if !stands {
+            owed.folded += 1;
+            continue;
+        }
+        let row = mail_row(run, message, &inbox);
+        match (line, message.dispatch.as_deref()) {
+            (NewsLine::PerEpisode, Some(attempt)) => match episodes.get(attempt) {
+                Some(&at) => {
+                    let notices = owed.news[at].notices + 1;
+                    owed.news[at] = DeskMail { notices, ..row };
+                }
+                None => {
+                    episodes.insert(attempt, owed.news.len());
+                    owed.news.push(row);
+                }
+            },
+            _ => owed.news.push(row),
+        }
+    }
+    owed.news.sort_by_key(|line| line.created_ms);
+    owed
+}
+
+fn mail_row(run: &Run, message: &Message, inbox: &InboxState) -> DeskMail {
+    let delivery = inbox.delivery(&message.id);
+    let batch = inbox.batch;
     let question = message.kind == MessageKind::Question;
     let said: serde_json::Value = if question {
         serde_json::Value::Null
@@ -185,6 +297,7 @@ fn mail_row(
         delivery,
         delivery_id: batch.filter(|_| delivered).map(|held| held.id.clone()),
         batch: batch.filter(|_| delivered).map(|held| held.messages.len()),
+        notices: 1,
     }
 }
 
@@ -282,11 +395,17 @@ fn in_play(run: &Run) -> bool {
 /// The desk's reading of `ledger`. `holds_seat` answers whether this window
 /// holds a coordinator seat named `team/pane`.
 pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) -> DeskSnapshot {
+    let now_ms = crate::now_epoch_ms();
     let mut runs = Vec::new();
     let mut staged: Vec<(&'static str, DeskTask)> = Vec::new();
     let mut mail = Vec::new();
+    let mut news = Vec::new();
+    let mut folded = 0;
     for run in ledger.runs().iter().filter(|run| in_play(run)) {
-        mail.extend(desk_mail(run));
+        let owed = desk_letters(run, now_ms);
+        mail.extend(owed.mail);
+        news.extend(owed.news);
+        folded += owed.folded;
         runs.push(DeskRun {
             run: run.id.clone(),
             name: run.name.clone(),
@@ -334,11 +453,18 @@ pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) 
         tasks.extend(rows);
     }
     mail.sort_by_key(|letter| letter.created_ms);
+    news.sort_by_key(|line| line.created_ms);
     DeskSnapshot {
         runs,
         tasks,
         stages,
+        counts: DeskCounts {
+            mail: mail.len(),
+            news: news.len(),
+            folded,
+        },
         mail,
+        news,
     }
 }
 
@@ -913,14 +1039,19 @@ mod tests {
                 3,
             )
             .expect("question");
-        assert_eq!(desk_mail(ledger.run(&run_id).expect("run")).len(), 1);
+        assert_eq!(
+            desk_letters(ledger.run(&run_id).expect("run"), 4)
+                .mail
+                .len(),
+            1
+        );
         ledger.begin_release(&worker).expect("release begins");
         assert_eq!(ledger.finish_release(&worker, None).as_str(), "released");
         let run = ledger.run(&run_id).expect("run");
         assert_eq!(run.messages().len(), 1, "the question stays in the ledger");
         assert_eq!(run.messages()[0].id, question);
         assert!(
-            desk_mail(run).is_empty(),
+            desk_letters(run, 4).mail.is_empty(),
             "unanswerable question is still owed"
         );
     }
@@ -973,7 +1104,12 @@ mod tests {
                 20,
             )
             .expect("pane question");
-        assert_eq!(desk_mail(ledger.run(&run_id).expect("run")).len(), 4);
+        assert_eq!(
+            desk_letters(ledger.run(&run_id).expect("run"), 20)
+                .mail
+                .len(),
+            4
+        );
         for worker in &workers {
             ledger.begin_release(worker).expect("release begins");
             ledger.finish_release(worker, None);
@@ -998,9 +1134,13 @@ mod tests {
             .expect("pane answer");
         let run = ledger.run(&run_id).expect("run");
         assert_eq!(run.messages().len(), 5, "old questions were rewritten");
-        assert!(desk_mail(run).is_empty());
+        assert!(desk_letters(run, 22).mail.is_empty());
         let rebuilt = Ledger::rebuild(ledger.export()).expect("same ledger rebuilt");
-        assert!(desk_mail(rebuilt.run(&run_id).expect("run")).is_empty());
+        assert!(
+            desk_letters(rebuilt.run(&run_id).expect("run"), 22)
+                .mail
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1060,12 +1200,13 @@ mod tests {
         });
         let rebuilt = Ledger::rebuild(projected).expect("acked ledger");
         let run = rebuilt.run(&run_id).expect("run");
-        let mail = desk_mail(run);
-        assert_eq!(mail.len(), 2);
-        assert_eq!(mail[0].id, question);
-        assert_eq!(mail[0].delivery, "acked");
-        assert_eq!(mail[1].id, notice);
-        assert_eq!(mail[1].delivery, "pending");
+        let owed = desk_letters(run, 4);
+        assert_eq!(owed.mail.len(), 1);
+        assert_eq!(owed.mail[0].id, question);
+        assert_eq!(owed.mail[0].delivery, "acked");
+        assert_eq!(owed.news.len(), 1);
+        assert_eq!(owed.news[0].id, notice);
+        assert_eq!(owed.news[0].delivery, "pending");
     }
 
     /// A run in play with one task in every stage, and a finished run nobody
@@ -1374,6 +1515,15 @@ mod tests {
         let ledger = Ledger::rebuild(projected).expect("the ledger as it stood");
         let desk = desk_json(&ledger);
         let letters = drawn(&desk);
+        // The board's beat builds this snapshot every second: what it costs.
+        let mut took: Vec<u128> = (0..200)
+            .map(|_| {
+                let from = std::time::Instant::now();
+                std::hint::black_box(desk_snapshot(&ledger, |_| false));
+                from.elapsed().as_micros()
+            })
+            .collect();
+        took.sort_unstable();
         let of_kind = |kind: &str| letters.iter().filter(|one| one["kind"] == kind).count();
         let quiet_rows: u64 = letters
             .iter()
@@ -1392,6 +1542,7 @@ mod tests {
                 "wentQuietLines": of_kind("went_quiet"),
                 "wentQuietRows": quiet_rows,
                 "workerDied": of_kind("worker_died"),
+                "snapshotMicros": { "p50": took[took.len() / 2], "p95": took[took.len() * 95 / 100] },
             })
         );
     }

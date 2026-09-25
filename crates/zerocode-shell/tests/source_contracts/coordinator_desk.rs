@@ -112,14 +112,21 @@ fn the_desk_answers_and_acknowledges_through_the_ledgers_own_verbs_and_invents_n
             "the acknowledgement lost `{word}`:\n{acknowledge}"
         );
     }
-    let owed = block_after(&desk, "pub(crate) fn desk_mail(");
+    let owed = block_after(&desk, "pub(crate) fn desk_letters(");
     for rule in [
-        ".answer_to(message)",
+        "InboxState::of(run, &address)",
+        "run.awaits_answer(message)",
         ".question_is_answerable(message)",
-        ".pending_messages(&address, &DESK_MAIL_KINDS)",
-        ".open_delivery(&address)",
+        "run.quiet_notice_stands(message)",
     ] {
         assert!(owed.contains(rule), "what is owed lost `{rule}`:\n{owed}");
+    }
+    let inbox = block_after(&desk, "fn of(run: &'a Run, address: &str) -> Self {");
+    for rule in [".pending_messages(address, &[])", ".open_delivery(address)"] {
+        assert!(
+            inbox.contains(rule),
+            "the inbox's state lost `{rule}`:\n{inbox}"
+        );
     }
     let board = shell_source("cmd/board.rs");
     for door in [
@@ -213,5 +220,100 @@ fn the_roster_reads_the_ledgers_rows_and_the_trees_own_counts() {
     assert!(
         refresh.contains("readLedgerAgents()") && !refresh.contains("invoke(\"ledger_agents\""),
         "the roster reads the ledger's workers a second way:\n{refresh}"
+    );
+}
+
+/// What the desk owes is counted in one place (t-9456): 「답할 우편」 is the
+/// ledger's own reading of a wait — `Run::awaits_answer`, the function
+/// `Run::awaiting_reply` answers with — and 「소식」 is one table, `DESK_NEWS`,
+/// that holds both the day a notice stands and the one kind that folds into a
+/// line per quiet episode. The window draws the backend's three numbers and
+/// its two lists as they come: it counts no letter, filters none, and names
+/// no kind a letter to answer. The desk that said 「답할 우편 46」 over no
+/// question at all was a screen counting every unacknowledged notice.
+#[test]
+fn the_desks_numbers_are_the_backends_and_the_window_counts_no_letter() {
+    let desk = shell_source("orchestration/desk.rs");
+    let table = block_after(&desk, "const DESK_NEWS: NewsTable = NewsTable {");
+    for row in [
+        "stands_ms: 24 * 60 * 60 * 1000,",
+        "(MessageKind::WentQuiet, NewsLine::PerEpisode),",
+        "(MessageKind::WorkerDied, NewsLine::PerNotice),",
+    ] {
+        assert!(table.contains(row), "the news table lost `{row}`:\n{table}");
+    }
+    assert_eq!(
+        desk.matches("24 * 60 * 60 * 1000").count(),
+        1,
+        "a notice's day is spelled outside the table"
+    );
+    let letters = block_after(&desk, "pub(crate) fn desk_letters(");
+    for rule in ["DESK_NEWS.line(message.kind)", "DESK_NEWS.stands_ms"] {
+        assert!(
+            letters.contains(rule),
+            "the letters stopped reading the table (`{rule}`):\n{letters}"
+        );
+    }
+    let snapshot = block_after(&desk, "pub(crate) fn desk_snapshot(");
+    for count in ["mail: mail.len(),", "news: news.len(),", "folded,"] {
+        assert!(
+            snapshot.contains(count),
+            "the desk's numbers lost `{count}`:\n{snapshot}"
+        );
+    }
+    let core = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../zerocode-core/src/orchestration.rs"),
+    )
+    .expect("the core ledger");
+    let waiting = block_after(
+        &core,
+        "fn awaiting_reply(run: &Run, worker_id: &str) -> bool {",
+    );
+    assert!(
+        waiting.contains("awaits_answer(run, question)"),
+        "a worker's wait and the desk's letters read two rules:\n{waiting}"
+    );
+
+    let window = window_source();
+    let mail = block_after(window, "function paintDeskMail(");
+    for number in [
+        "const counts = deskLedger?.counts ?? {};",
+        "Number(counts.mail)",
+        "Number(counts.news)",
+        "Number(counts.folded)",
+        "{ count: owed }",
+        "{ count: told }",
+    ] {
+        assert!(
+            mail.contains(number),
+            "the desk draws a number of its own (`{number}` missing):\n{mail}"
+        );
+    }
+    let list = block_after(window, "function paintDeskLetterList(");
+    for body in [mail, list] {
+        for recount in [
+            "letters.filter(",
+            "news.filter(",
+            ".mail.filter(",
+            ".news.filter(",
+            "letter.kind ===",
+            "count: letters.length",
+            "count: news.length",
+        ] {
+            assert!(
+                !body.contains(recount),
+                "the desk counts or picks letters itself (`{recount}`):\n{body}"
+            );
+        }
+    }
+    let kinds = block_after(window, "const DESK_MAIL = Object.freeze({");
+    assert!(
+        !kinds.contains("went_quiet: { state: \"needs-attention\""),
+        "a quiet worker is drawn as waiting on the person:\n{kinds}"
+    );
+    let letter = block_after(window, "function paintDeskLetter(");
+    assert!(
+        !letter.contains("DESK_MAIL.went_quiet"),
+        "a kind the table does not know is drawn as a silence:\n{letter}"
     );
 }

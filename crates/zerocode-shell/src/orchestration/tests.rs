@@ -1081,11 +1081,13 @@ fn ledger_state_for_a_reused_seat_comes_from_its_current_worker() {
     );
 }
 
-/// The desk's mail follows the coordinator's own inbox (t-6588): a question
-/// and a notice stand `pending` until the coordinator's `check` hands them
-/// over, `delivered` in the batch it holds (named, with its size — the unit
-/// an acknowledgement takes), and after the ack the notice is gone while the
-/// question stays, `acked`, until the coordinator's `reply` answers it.
+/// The desk's letters follow the coordinator's own inbox (t-6588): a
+/// question and a notice stand `pending` until the coordinator's `check`
+/// hands them over, `delivered` in the batch it holds (named, with its size —
+/// the unit an acknowledgement takes), and after the ack the notice is gone
+/// while the question stays, `acked`, until the coordinator's `reply`
+/// answers it. The question is the 「답할 우편」 and the notice the 「소식」
+/// (t-9456).
 #[test]
 fn the_desks_mail_is_the_coordinators_inbox_letter_by_letter() {
     use zerocode_core::agent_teams::Team;
@@ -1144,18 +1146,23 @@ fn the_desks_mail_is_the_coordinators_inbox_letter_by_letter() {
     held.post(
         &run_id,
         letter(
-            MessageKind::WentQuiet,
-            r#"{"workerId":"w-9","reason":"stalled"}"#,
+            MessageKind::QuotaWalled,
+            r#"{"workerId":"w-9","reason":"quota_wall","resetsAtMs":9000}"#,
         ),
         1_200,
     )
     .expect("a notice");
-    let mail = |ledger: &Ledger| super::desk::desk_mail(ledger.run(&run_id).expect("the run"));
+    // Every letter the desk draws, the answers first and the news after.
+    let mail = |ledger: &Ledger| {
+        let owed = super::desk::desk_letters(ledger.run(&run_id).expect("the run"), 1_600);
+        [owed.mail, owed.news].concat()
+    };
 
     let pending = mail(&held);
     assert_eq!(pending.len(), 2, "{pending:?}");
     assert!(pending.iter().all(|one| one.delivery == "pending"));
-    assert_eq!(pending[1].reason.as_deref(), Some("stalled"));
+    assert_eq!(pending[1].reason.as_deref(), Some("quota_wall"));
+    assert_eq!(pending[1].resets_at_ms, Some(9_000));
     assert_eq!(pending[1].worker.as_deref(), Some("w-9"));
 
     let looked: serde_json::Value =
@@ -1209,7 +1216,7 @@ fn the_desks_mail_is_the_coordinators_inbox_letter_by_letter() {
 }
 
 /// A classifier's decline and the switch of model it caused reach the desk
-/// as letters owed an acknowledgement (t-6747), with the facts their second
+/// as news owed an acknowledgement (t-6747), with the facts their second
 /// lines are written from: the category, whether it is routed and on which
 /// rung the notice stands, and the model that answered in the bound one's
 /// place, for how long.
@@ -1250,7 +1257,9 @@ fn a_decline_and_a_switch_of_model_are_owed_on_the_desk() {
     )
     .expect("a switch");
 
-    let mail = super::desk::desk_mail(held.run(&run_id).expect("the run"));
+    let owed = super::desk::desk_letters(held.run(&run_id).expect("the run"), 1_300);
+    assert!(owed.mail.is_empty(), "a notice is not owed an answer");
+    let mail = owed.news;
 
     assert_eq!(mail.len(), 2, "{mail:?}");
     assert_eq!(mail[0].kind, "classifier_declined");
