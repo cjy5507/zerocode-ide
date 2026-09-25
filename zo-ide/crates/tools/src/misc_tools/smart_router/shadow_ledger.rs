@@ -326,4 +326,92 @@ mod tests {
         let rows: Vec<serde_json::Value> = read_shadow_rows(&path);
         assert_eq!(rows, vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})]);
     }
+
+    /// The challenger arm's share of the one judge (t-6263, t-6877): the arm
+    /// hands [`judge_seat_rows`] its ledger's rows as its readers read them,
+    /// and that road reads one rubric's series as every seat's judge does. On
+    /// the day the comparison's words move on, a thick series asked under the
+    /// words before — a full window, answered, and every mark the arm needs
+    /// to rise — does not judge a thin window of today's words: twenty
+    /// requests of them are no window, so nothing is judged and no rise is
+    /// written. The same series judged under the words it was asked in
+    /// rises, so the hold is today's thin window, not a series that could
+    /// never rise.
+    #[test]
+    fn the_challengers_thick_series_of_the_words_before_does_not_judge_a_thin_window_of_todays() {
+        use serde_json::{json, Value};
+        use zerocode_core::jev::challenger::ATTEMPT;
+        use zerocode_core::jev::door::ANSWERED_OUTCOME;
+        use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Verdict};
+        use zerocode_core::jev::summary::{
+            AGREED, AT, BASELINE_AGREED, ELAPSED_MS, JUDGED_EVERY_ROWS, LABEL, MODEL, OUTCOME, REQUESTS,
+            RUBRIC_VERSION, TRANSITION,
+        };
+        use zerocode_core::jev::{JevUse, CHALLENGER, DEFAULT_MODEL};
+
+        // The arm on the day its words move to the next version.
+        let today = JevUse { rubric_version: CHALLENGER.rubric_version + 1, ..CHALLENGER };
+        let wanted = window_wanted_for(&CHALLENGER).expect("the challenger rises");
+        let marks = marks_that_can_clear(&CHALLENGER).expect("a width");
+        let misses = CHALLENGER.negatives_wanted.expect("negatives");
+        let thin = JUDGED_EVERY_ROWS;
+        assert!(thin < wanted, "a judgment's worth of requests is short of a window");
+        // Every mark names a comparison of its own, and the series ends on a
+        // judgment's boundary.
+        let asked = wanted + marks.saturating_sub(wanted).div_ceil(thin) * thin;
+        // An answered comparison of `attempt`; the words before carry no
+        // stamp, as the arm files its rows today.
+        let comparison = |at: usize, attempt: String, rubric: Option<u32>| {
+            let mut row = json!({
+                AT.canonical: at, OUTCOME.canonical: ANSWERED_OUTCOME, ELAPSED_MS.canonical: 400, REQUESTS.canonical: 1,
+                MODEL.canonical: DEFAULT_MODEL, ATTEMPT.canonical: attempt,
+            });
+            if let Some(rubric) = rubric {
+                row[RUBRIC_VERSION.canonical] = json!(rubric);
+            }
+            row
+        };
+        let mut before: Vec<Value> = (0..asked).map(|n| comparison(n, format!("before-{n}"), None)).collect();
+        // Each receipt's label: the challenger's word vindicated where the
+        // incumbent's was not, but on the three it must hold inside.
+        before.extend((0..marks).map(|n| {
+            json!({
+                AT.canonical: asked + n, LABEL.canonical: format!("before-{n}"),
+                AGREED.canonical: n >= misses, BASELINE_AGREED.canonical: n < misses,
+            })
+        }));
+        let dir = tempfile::tempdir().expect("a scratch folder");
+        let ledger_of = |name: &str, rows: &[Value]| {
+            let ledger = dir.path().join(name);
+            for row in rows {
+                append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES).expect("a row");
+            }
+            ledger
+        };
+        let transitions = |ledger: &Path| {
+            read_shadow_rows::<Value>(ledger).into_iter().filter(|row| TRANSITION.read(row).is_some()).count()
+        };
+
+        // Under the words it was asked in, the thick series rises.
+        let under_its_words = ledger_of("its-words.jsonl", &before);
+        let rows: Vec<Value> = read_shadow_rows(&under_its_words);
+        assert_eq!(
+            judge_seat_rows(&CHALLENGER, &under_its_words, &rows, 99_999),
+            Some(Verdict::Rise),
+            "the series rises on its own words"
+        );
+        assert_eq!(transitions(&under_its_words), 1, "the rise is written");
+
+        // Today, the same series and a thin window of the new words.
+        let mut rows = before;
+        rows.extend((0..thin).map(|n| comparison(10_000 + n, format!("today-{n}"), Some(today.rubric_version))));
+        let under_todays = ledger_of("todays-words.jsonl", &rows);
+        let rows: Vec<Value> = read_shadow_rows(&under_todays);
+        assert_eq!(
+            judge_seat_rows(&today, &under_todays, &rows, 99_999),
+            None,
+            "{thin} requests of today's words are not a window of {wanted}: nothing is judged"
+        );
+        assert_eq!(transitions(&under_todays), 0, "no rise is written on the evidence of the words before");
+    }
 }

@@ -3003,6 +3003,75 @@ mod tests {
         assert!(!rows.iter().filter(|row| row.get("label").is_some()).any(zerocode_core::jev::summary::is_request_or_mark));
     }
 
+    /// The label names the asking it grades by that asking's own time
+    /// (`requestAt`, t-6877) — the time the row of the reading it grades was
+    /// made — and never by the turn's first showing (`shownAt`, t-6264),
+    /// which is when the model was shown a section and not when the graded
+    /// reading was asked (astra m-8636). A turn whose first request showed a
+    /// reading of other words, and whose second asked the words it is graded
+    /// on, holds the two times apart; an earlier turn asked those words over
+    /// the same notes too, so two askings carry the label's name. The common
+    /// reader (`promote::on_the_newest_version`) joins the label to the one
+    /// asking at its time, and the judge compares it once. A label named by
+    /// the showing's time would name no asking, and grade nothing.
+    #[test]
+    fn a_label_names_the_asking_it_grades_by_that_askings_time_and_not_the_showings() {
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let words = "which note answers this (asked twice, graded once)";
+        // Every clock this test reads moves on a millisecond between the
+        // steps, so no two of the times it compares can meet by accident.
+        let tick = || std::thread::sleep(Duration::from_millis(2));
+        let (values, labels, readings) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            // The earlier turn: the same words over the same notes — the same
+            // name, another asking. It ends cancelled, and labels nothing.
+            let earlier = "session@earlier-turn";
+            let _read = super::settle(cwd, earlier, words, three().to_vec());
+            assert!(!super::note_recall_read(cwd, earlier, true), "a cancelled turn wrote a label");
+            tick();
+            // This turn's first request shows a reading of other words over
+            // the notes in another order, and is answered.
+            let mut other = three().to_vec();
+            other.reverse();
+            let _first = settle(cwd, "which note answers this (shown first)", other);
+            heard(cwd, TEST_ATTEMPT, told(&[], true, false));
+            tick();
+            // Its second asks the words the turn is graded on, after that
+            // showing, and the turn reads the note the judgment put first.
+            let second = settle(cwd, words, three().to_vec());
+            assert!(note_recall_read(cwd, &turn(vec![read_of(&second[0].entry.path)])));
+            (values(cwd), labels(cwd), rows(cwd))
+        });
+        let [label] = labels.as_slice() else {
+            panic!("one turn, one label: {labels:?}");
+        };
+        let named = values
+            .iter()
+            .find(|row| row.get(zerocode_core::jev::summary::LABEL.canonical).is_some())
+            .expect("the label row");
+        let series = zerocode_core::jev::promote::on_the_newest_version(&RECALL, &values);
+        assert!(series.marks.contains(&named), "the label graded no asking: {named}");
+        let judged = zerocode_core::jev::promote::judge_seat(&RECALL, &values).expect("recall rises");
+        assert_eq!(
+            (judged.agreement.compared, judged.agreement.agreed),
+            (1, 1),
+            "the judge compared the turn's label once: {named}"
+        );
+        // The asking it grades is the one its reading settled on: of the two
+        // askings of these words over these notes, the later — and neither is
+        // the showing.
+        let asked: Vec<u64> =
+            readings.iter().filter(|row| (row.query, row.notes) == (label.query, label.notes)).map(|row| row.at).collect();
+        let [before, graded] = asked.as_slice() else {
+            panic!("the same words over the same notes, asked twice: {readings:?}");
+        };
+        assert!(before < graded, "{asked:?}");
+        assert_eq!(label.request_at, Some(*graded), "the label names its reading's asking: {named}");
+        assert!(
+            label.shown_at.is_some_and(|shown| Some(shown) != label.request_at),
+            "the turn was first shown notes at another time than the graded reading was asked: {named}"
+        );
+    }
+
     /// Five label rows say readers were shown the hub and none opened it:
     /// the retriever a session is built with reads them, and the graph no
     /// longer brings the hub in on the seed's words — the demand seam of
