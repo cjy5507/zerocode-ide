@@ -33,6 +33,7 @@ import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testBoardLive } from "./board-live.mjs";
+import { testBoardOrbit } from "./board-orbit.mjs";
 import { testAutonomyBoard } from "./autonomy-board.mjs";
 import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
@@ -194,6 +195,8 @@ suite("agent-relations", async ({ browser, origin, ok }) => {
 });
 // The live coordination map layered over that same graph (t-7288).
 suite("board-live", ({ browser, origin, ok }) => testBoardLive(browser, origin, ok));
+// The orbit view of the same relations picture (t-9444): stars, planets, moons and mail.
+suite("board-orbit", ({ browser, origin, ok }) => testBoardOrbit(browser, origin, ok));
 suite("autonomy-board", ({ browser, origin, ok }) => testAutonomyBoard(browser, origin, ok));
 suite("connected-workbench", ({ browser, origin, ok }) => testConnectedWorkbench(browser, origin, ok));
 suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsive(browser, origin, ok));
