@@ -832,7 +832,7 @@ function jevWordsOf(held) {
     // for every key, and costs the check its fast road.
     const { recent, days, ...rest } = held;
     const read = jevDaysOf(held);
-    words = { days: JSON.stringify(read.map(Object.values)), rest: JSON.stringify(rest), read };
+    words = { days: JSON.stringify(read.flatMap(Object.values)), rest: JSON.stringify(rest), read };
     jevHeldWords.set(held, words);
   }
   return words;
@@ -1291,9 +1291,17 @@ function jevTrendCell(days, status) {
     }).filter(Boolean).join("; ");
     pictures.append(jevTrendPicture(days, said));
   }
+  // The strip is named by how many days stood in each state — the days one
+  // by one are the drawer's table — and where the feature stands now.
   const standing = JEV_STATUSES.find((one) => one.status === status);
+  const tally = new Map();
+  for (const day of days) {
+    const state = jevDayState(day);
+    tally.set(state, (tally.get(state) ?? 0) + 1);
+  }
   pictures.append(jevTimelinePicture(days, status, t("jev.chart.strip", "날마다 한 일 — {{days}} · 지금 {{standing}}", {
-    days: jevDaysSaid(days, (day) => jevDayWords(jevDayState(day))),
+    days: JEV_DAY_STATES.filter(({ state }) => tally.has(state))
+      .map(({ state }) => t("jev.chart.stripDays", "{{state}} {{count}}일", { state: jevDayWords(state), count: jevCount(tally.get(state)) })).join(", "),
     standing: standing ? t(standing.key, standing.word) : "",
   })));
   cell.append(pictures);
@@ -1303,12 +1311,17 @@ function jevTrendCell(days, status) {
       : t("jev.trendShort", "{{days}}일치만 있음", { days: jevCount(graded) }))));
     return cell;
   }
+  // Each line's latest value beside its key — the line's name is the
+  // column's head, in the same order, and the key's tip; a screen reader
+  // has both in the picture's own name, so the key is not read twice.
   const legend = jevNode("div", "jev-trend-legend");
+  legend.setAttribute("aria-hidden", "true");
   for (const trend of JEV_TRENDS) {
     const last = days.map(trend.read).filter((value) => value !== null).at(-1);
     if (last === undefined) continue;
     const item = jevNode("span", `jev-trend-last jev-trend-${trend.line}`);
-    item.textContent = `${t(trend.key, trend.word)} ${jevPercent(last)}`;
+    item.textContent = jevPercent(last);
+    item.dataset.tip = t(trend.key, trend.word);
     legend.append(item);
   }
   cell.append(legend);
@@ -1579,7 +1592,8 @@ function paintJevTokens(card, days, counting) {
     return;
   }
   const priced = days.some((day) => day.cost !== null);
-  const cost = (day) => (day.cost === null ? "—" : jevCost(day.cost));
+  const costs = new Map(days.map((day) => [day, day.cost === null ? "—" : jevCost(day.cost)]));
+  const cost = (day) => costs.get(day);
   for (const day of days) {
     day.tip = t("jev.chart.tokens.day", "{{day}} · 입력 토큰 {{tokens}} · 추정 비용 {{cost}}", {
       day: jevDayName(day.startMs), tokens: jevCount(day.tokens), cost: cost(day),
@@ -2030,7 +2044,7 @@ function paintJevRow(row, id, held, standing, head, latency) {
   const choice = standing ? jevSeatChoice(typesafeState, id) : null;
   const words = jevWordsOf(held);
   const language = jevLanguage();
-  if (!jevMoved(row, words.rest, words.days, JSON.stringify(standing), JSON.stringify(choice), head ?? "", language)) return;
+  if (!jevMoved(row, words.rest, words.days, JSON.stringify(standing), JSON.stringify(choice), head ?? "", String(latency), language)) return;
   // A row's cells stand in `JEV_COLUMNS`' order (`jevDashRow`).
   const cell = (name) => row.cells[JEV_COLUMN_AT.get(name)];
   // The name opens the feature's drawer — a button, so the row opens from

@@ -39739,10 +39739,6 @@ h4.knowledge-inspector-head::after {
   justify-items: start;
 }
 
-.jev-trend-short {
-  white-space: nowrap;
-}
-
 /* Beside the pictures, one line per line of them — the row keeps its height. */
 .jev-trend-legend {
   display: grid;
@@ -40277,18 +40273,18 @@ button.jev-token:hover {
 /* ---- the width the dashboard is given (t-9633) ----
    The view is its own container, so what decides is the width it is given
    — a split, the side panels open — and not the screen's. The widths below
-   are in the view's own text (`em`, its 13-pixel body): what the table needs
-   is a length of words, which grows with the text, and a query cannot read a
-   token. Three widths:
+   are the width inside the view's padding, in the view's own text (`em`,
+   its 13-pixel body): what the table needs is a length of words, which grows
+   with the text, and a query cannot read a token. Three widths:
 
-   From 100em a row has the room for its latency picture beside its words
-   (the table's narrowest with it, measured with the gate's fixture: 1034
-   pixels in Korean, 1149 in English, 1224 in Spanish, and the page's
-   padding); under it the table says its latency in words — 978, 1095 and
-   1168 pixels — and so still fits a 1080p stage with both side panels open
-   (1241 pixels).
+   From 90em a row has the room for its latency picture beside its words
+   (the table's narrowest with it, measured with the gate's fixture: 1066
+   pixels in English and 1149 in Spanish); under it the table says its
+   latency in words — 930, 1012 and 1093 pixels in Korean, English and
+   Spanish, each narrower than before the pictures — and a 1080p stage with
+   both side panels open (1241 pixels) holds it with its pictures.
 
-   Under 94em the table no longer fits, and every row stands as a card: its
+   Under 85em the table no longer fits, and every row stands as a card: its
    name over it, each number under its column's name in as many columns as
    the card has room for, the state and the week across the whole card. The
    head row goes, and each cell says its column's name itself, to the eye and
@@ -40308,7 +40304,7 @@ button.jev-token:hover {
   display: none;
 }
 
-@container jev (width >= 100em) {
+@container jev (width >= 90em) {
   .jev-table {
     --jev-latency-shown: 1;
   }
@@ -40318,7 +40314,7 @@ button.jev-token:hover {
   }
 }
 
-@container jev (width < 94em) {
+@container jev (width < 85em) {
   .jev-table, .jev-table tbody, .jev-table caption {
     display: block;
   }

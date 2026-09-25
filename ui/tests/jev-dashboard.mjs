@@ -579,7 +579,7 @@ export async function testJevDashboard(browser, origin, ok) {
           pictures: picture.length,
           lines: [...holder.querySelectorAll('svg[data-jev-picture="trend"] [data-line]')].map((line) => `${line.dataset.line}:${line.dataset.points}`),
           text: holder.querySelector(".jev-trend-short")?.textContent.trim() ?? "",
-          legend: holder.querySelector(".jev-trend-legend")?.textContent.trim() ?? "",
+          legend: [...holder.querySelectorAll(".jev-trend-legend .jev-trend-last")].map((one) => `${one.dataset.tip} ${one.textContent}`).join("|"),
         };
       };
       const trends = Object.fromEntries(["summon", "placement", "routing", "recall", "notify", "browser"].map((id) => [id, trendOf(id)]));
@@ -789,7 +789,7 @@ export async function testJevDashboard(browser, origin, ok) {
     const tr = opened.trends;
     ok("the week's accuracy is one picture — the judgment's share, the band down to its lower bound and the simplest method — drawn only from three graded days",
       tr.summon.pictures === 1 && tr.summon.lines.join(",") === "band:5,baseline:2,agreement:5"
-        && tr.summon.legend.includes("정확도 88%") && tr.summon.legend.includes("단순 방식 88%")
+        && tr.summon.legend === "정확도 88%|단순 방식 88%"
         && tr.placement.pictures === 1 && tr.placement.lines.join(",") === "band:3,baseline:3,agreement:3"
         && tr.routing.pictures === 0 && tr.routing.text === "1일치만 있음"
         && tr.recall.pictures === 0 && tr.recall.text === "비교한 판단 없음"
@@ -1583,6 +1583,46 @@ export async function testJevDashboardPictures(browser, origin, ok) {
     });
     ok("the pictures, the charts and their tips speak every language, with no Korean left behind",
       Object.values(spoken).every((one) => one.korean.length === 0 && one.pictures > 10), JSON.stringify(spoken));
+
+    // A 1080p stage with both side panels open holds the whole table — rows,
+    // not cards, with every row's latency picture — in every language: what
+    // the table needs is a length of words, and the widths the stylesheet
+    // switches at were measured on the longest of them (t-9633). The pictures
+    // come with the width alone, before any language moves a row.
+    const latencies = () => page.evaluate(() => ({
+      pictures: document.querySelectorAll('#jev-view [data-jev-dash-row] svg[data-jev-picture="latency"]').length,
+      rows: getComputedStyle(document.querySelector("#jev-view .jev-table thead")).display !== "none",
+    }));
+    await page.setViewportSize({ width: 1800, height: 1080 });
+    await settlePaint(page);
+    const tight = await latencies();
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await settlePaint(page);
+    const widened = await latencies();
+    ok("a table with no room for the latency pictures draws none, and widening it draws them without another answer",
+      tight.rows && tight.pictures === 0 && widened.rows && widened.pictures === 4, JSON.stringify({ tight, widened }));
+    const whole = await page.evaluate(async () => {
+      const said = {};
+      for (const language of ["ko", "en", "ja", "zh", "es"]) {
+        setLocale(language);
+        await window.__PAINTED__();
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        const view = document.querySelector("#jev-view");
+        const wrap = view.querySelector(".jev-table-wrap");
+        said[language] = {
+          fits: wrap.scrollWidth <= wrap.clientWidth + 1,
+          rows: getComputedStyle(view.querySelector(".jev-table thead")).display !== "none",
+          latency: view.querySelectorAll('[data-jev-dash-row] svg[data-jev-picture="latency"]').length,
+          faults: window.__JEV_TEXT_FAULTS__(view.querySelector(".jev-table-wrap")).length,
+        };
+      }
+      setLocale("ko");
+      await window.__PAINTED__();
+      return said;
+    });
+    ok("a 1080p stage with both side panels holds the whole table, latency pictures and all, in every language",
+      Object.values(whole).every((one) => one.fits && one.rows && one.latency === 4 && one.faults === 0),
+      JSON.stringify(whole));
 
     // A narrow window: the charts one under the other and every row a card,
     // with every word whole and nothing wider than the page — the window as
