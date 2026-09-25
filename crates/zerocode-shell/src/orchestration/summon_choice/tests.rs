@@ -305,6 +305,60 @@ fn a_summons_the_options_never_offered_is_no_comparison_at_all() {
     );
 }
 
+/// A summons whose model was pinned is no comparison either (t-9087): the pin
+/// is the person's word, an apply stage leaves such a summons alone, and the
+/// agent the coordinator typed beside it is the pin's own CLI — on this
+/// machine's ledger (2026-09-25) every one of the 121 marked summonses of the
+/// seat's current words was pinned, and the pin's CLI carried all 121, so the
+/// seat's baseline stood at 1,000‰ and no answer could beat it. The row asks
+/// and records what came back, and says why it carries no mark.
+#[test]
+fn a_summons_whose_model_was_pinned_grades_nothing() {
+    let work = tempfile::tempdir().expect("a checkout");
+    let home = tempfile::tempdir().expect("a zo home");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", an_agent_answer("claude", "kimi"), 0);
+    let wire = Wire::at(
+        &endpoint.base(),
+        "test-key",
+        Some(settings_consenting_to(
+            &home,
+            &work.path().display().to_string(),
+        )),
+    );
+    let shadow = shadow();
+    assert!(shadow.model_was_pinned);
+    let ask =
+        summon_choice::ask(&shadow.look(), &shadow.options).expect("two agents are a question");
+    let row = settle(&wire, seat(&shadow), &ask, &shadow, Some(work.path()));
+
+    // Asked and answered as any summons is.
+    assert_eq!(endpoint.asked().len(), 1);
+    assert_eq!(row["outcome"], json!("answered"));
+    assert_eq!(row["chosen"], json!("claude"));
+    assert_eq!(row["modelWasPinned"], json!(true));
+    // No mark, for the seat or its baseline, and a word for why.
+    assert!(
+        row["agreed"].is_null(),
+        "a pinned summons was graded: {row}"
+    );
+    assert!(
+        row[zerocode_core::jev::summary::BASELINE_AGREED.canonical].is_null(),
+        "{row}"
+    );
+    assert_eq!(
+        row[summon_choice::NOT_COMPARED_KEY],
+        json!(summon_choice::PINNED),
+        "{row}"
+    );
+    assert_eq!(
+        zerocode_core::jev::summary::agreement_since(std::slice::from_ref(&row), 0),
+        zerocode_core::jev::promote::Agreement {
+            not_compared: 1,
+            ..zerocode_core::jev::promote::Agreement::default()
+        }
+    );
+}
+
 /// A checkout the person never consented to sends nothing at all, and the row
 /// says which of the door's four questions stopped it — with the two numbers
 /// every row written since the door carries.

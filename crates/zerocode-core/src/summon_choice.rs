@@ -188,6 +188,16 @@ pub const NOT_COMPARED_KEY: &str = crate::jev::summary::NOT_COMPARED.canonical;
 /// not reach the statistics a seat rises on.
 pub const NOT_OFFERED: &str = "not_offered";
 
+/// [`NOT_COMPARED_KEY`]'s word for a summons whose model was pinned (t-9087).
+///
+/// The pin is the person's word and binds the launch: an apply stage leaves
+/// such a summons alone, and the agent typed beside it is the pin's own CLI.
+/// On this machine's ledger (2026-09-25) all 121 marked summonses of the
+/// fourth words were pinned and the pin's CLI carried every one, so the
+/// seat's baseline stood at 1,000‰ over its marks and no answer could clear
+/// it — the marks graded the pin, not the seat.
+pub const PINNED: &str = "pinned";
+
 /// The row's key for the model the summons launched its worker with, beside
 /// `agent` and `effort` — the coordinator's word after the quota gate had
 /// its say.
