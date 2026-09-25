@@ -1053,7 +1053,7 @@ fn typeable(fields: &[Value], mark: usize) -> bool {
                         .any(|allowed| allowed.eq_ignore_ascii_case(kind.trim()))
                 })
     };
-    named.next().is_some_and(|first| plain(first)) && named.all(plain)
+    named.next().is_some_and(&plain) && named.all(plain)
 }
 
 impl ActionAsk {

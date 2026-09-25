@@ -635,10 +635,13 @@ fn a_page_with_a_field(epoch: &str, now: &str, selector: &str) -> String {
     .to_string()
 }
 
+/// One call a road was handed: the tool, the argv it ran, the argv it logged.
+type Call = (RecipeTool, Vec<String>, Vec<String>);
+
 /// A road that keeps what it was handed to run AND what it was handed to
 /// log, and answers from what the test's page says now.
 struct Kept {
-    calls: RefCell<Vec<(RecipeTool, Vec<String>, Vec<String>)>>,
+    calls: RefCell<Vec<Call>>,
     page: RefCell<String>,
 }
 

@@ -175,16 +175,19 @@ use zerocode_core::type_value::{FieldLook, ValueRow};
 
 use super::value::{ValueWriter, Values, Written};
 
+/// The words each of a [`Pen`]'s writes was asked about.
+pub(super) type AskedAbout = Rc<RefCell<Vec<String>>>;
+
 /// A writer that writes what the test says, counts every write and keeps
 /// the words each write was asked about.
 pub(super) struct Pen {
     value: String,
     writes: Rc<Cell<usize>>,
-    asked: Rc<RefCell<Vec<String>>>,
+    asked: AskedAbout,
 }
 
 impl Pen {
-    pub(super) fn writing(value: &str) -> (Self, Rc<Cell<usize>>, Rc<RefCell<Vec<String>>>) {
+    pub(super) fn writing(value: &str) -> (Self, Rc<Cell<usize>>, AskedAbout) {
         let writes = Rc::new(Cell::new(0));
         let asked = Rc::new(RefCell::new(Vec::new()));
         (

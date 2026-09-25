@@ -467,6 +467,7 @@ impl<'a, Road> GoalWorld<'a, Road> {
 
     /// The same world, remembering written values in `values` rather than
     /// the window's — how a test holds a memory of its own.
+    #[cfg(test)]
     #[must_use]
     pub fn remembering(mut self, values: Arc<Mutex<Values>>) -> Self {
         self.values = values;

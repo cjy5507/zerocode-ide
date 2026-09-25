@@ -109,6 +109,7 @@ impl Values {
     }
 
     /// How many values it holds at most.
+    #[cfg(test)]
     #[must_use]
     pub const fn cap(&self) -> usize {
         self.cap

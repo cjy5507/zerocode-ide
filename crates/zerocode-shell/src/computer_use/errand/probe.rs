@@ -17,7 +17,7 @@
 
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -58,7 +58,7 @@ pub(super) fn cli_call(argv: &[String]) -> (Vec<String>, Option<String>) {
 fn drive(argv: &[String]) -> (TeamAnswer, f64) {
     let (words, stdin) = cli_call(argv);
     let began = Instant::now();
-    let mut child = Command::new(CLI)
+    let mut child = crate::proc::quiet_command(CLI)
         .args(&words)
         .stdin(if stdin.is_some() {
             Stdio::piped()
