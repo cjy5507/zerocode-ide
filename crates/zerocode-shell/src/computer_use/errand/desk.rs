@@ -32,7 +32,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use zerocode_core::agent_browser::TYPE_VALUE_FLAG;
+use zerocode_core::agent_browser::{
+    BROWSER_SETTLE_KEY, BROWSER_SETTLE_LATER_FLAG, TYPE_VALUE_FLAG, settle_said_ready,
+    settle_unheard,
+};
 use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
 use zerocode_core::computer_use::{
     EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS,
@@ -401,10 +404,16 @@ pub struct GoalWorld<'a, Road> {
     /// What the last press said of its screen settling, when its door waits
     /// for the screen to stop changing (a phone's, t-6385).
     settled: Option<Settled>,
-    /// Whether a press asks for a preview of the screen it settles on
-    /// (`click --preview`, t-6385) — what a walk that asks ahead begins its
-    /// next judgment on.
+    /// Whether a press hands back the screen a walk that asks ahead begins
+    /// its next judgment on: a phone's, the screen it settled on (`click
+    /// --preview`, t-6385); a page's, the page as the press left it, its
+    /// settle left for the next look (`click --settle-later`, t-9712).
     previewing: bool,
+    /// The page as the last press left it, the moment it was made — a
+    /// settle-later press's own answer (t-9712), taken once.
+    unsettled: Option<Screen>,
+    /// Whether the last press left its settle for the pane's next look.
+    settling: bool,
     /// How many of the caller's words that press counted in the tree it
     /// settled on — the walk alone, so a count proves they are there and a
     /// zero proves nothing.
@@ -447,6 +456,8 @@ impl<'a, Road> GoalWorld<'a, Road> {
             snapshots: None,
             settled: None,
             previewing: false,
+            unsettled: None,
+            settling: false,
             counted: None,
             kept: None,
             seen: None,
@@ -474,9 +485,11 @@ impl<'a, Road> GoalWorld<'a, Road> {
         self
     }
 
-    /// The same world, asking each press for a preview of the screen it
-    /// settles on (t-6385) — for a walk that begins its next judgment there
-    /// ([`super::Options::overlap`]). Only a phone's door answers one.
+    /// The same world, asking each press for the screen a walk that asks
+    /// ahead begins its next judgment on ([`super::Options::overlap`]): a
+    /// phone's press for a preview of the screen it settles on (t-6385), a
+    /// page's to answer before it settles, with the page it left (t-9712).
+    /// The desktop's door answers neither.
     #[must_use]
     pub const fn previewing(mut self, on: bool) -> Self {
         self.previewing = on;
@@ -497,6 +510,65 @@ impl<'a, Road> GoalWorld<'a, Road> {
             shows: Vec::new(),
             snapshot: Snapshot::default(),
         })
+    }
+
+    /// Press `mark` by number down the surface's own door — a page's press
+    /// `later` answering before it settles, with the page it left (t-9712).
+    fn press_by(&mut self, mark: usize, later: bool) -> bool
+    where
+        Road: FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
+    {
+        // By number, never by selector or a point: the surface re-measures the
+        // element it handed that number to and refuses a press whose pin no
+        // longer holds. A phone's press is asked to count the caller's words
+        // in the screen it settles on, so a walk that got there looks no more.
+        let mut argv = self.aim.press_argv(mark, &self.look);
+        if let (Aim::Phone { .. }, Some(until)) = (&self.aim, &self.until) {
+            argv.extend(["--text".to_string(), until.clone()]);
+        }
+        if self.previewing && matches!(self.aim, Aim::Phone { .. }) {
+            argv.push(format!("--{EMULATOR_PREVIEW_FLAG}"));
+        }
+        let later = later && matches!(self.aim, Aim::Pane { .. });
+        if later {
+            argv.push(BROWSER_SETTLE_LATER_FLAG.to_string());
+        }
+        let holds = recipe_line_holds_ms(self.aim.tool(), &argv);
+        let left = self.left_ms();
+        if left == 0 || left < holds {
+            return false;
+        }
+        self.kept = None;
+        self.unsettled = None;
+        let answer = (self.road)(self.aim.tool(), &argv, &argv);
+        let said = answer_value(&answer);
+        self.settled = said.as_ref().and_then(|said| {
+            Some(Settled {
+                note: said
+                    .get(zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY)?
+                    .clone(),
+                screen: said
+                    .get(EMULATOR_PREVIEW_FLAG)
+                    .and_then(|preview| self.preview_screen(preview)),
+            })
+        });
+        self.counted = said
+            .as_ref()
+            .and_then(|said| said.get(crate::emulator::checks::COUNT_KEY)?.as_u64());
+        // A page's press that answered before it settled (t-9712): the page it
+        // left, read as a look of it would be, and a settle the next look
+        // finishes — held from the moment the door took the press.
+        if later {
+            self.unsettled = said
+                .as_ref()
+                .and_then(|said| screen_of(&self.aim, said))
+                .map(|(mut screen, _)| {
+                    screen.at = self.page.clone();
+                    screen
+                });
+            self.settling = answer.exit_code == 0;
+        }
+        answer.exit_code == 0
     }
 
     /// The same world, able to save and load the device it is aimed at — an
@@ -560,43 +632,49 @@ where
     }
 
     fn press(&mut self, mark: usize) -> bool {
-        // By number, never by selector or a point: the surface re-measures the
-        // element it handed that number to and refuses a press whose pin no
-        // longer holds. A phone's press is asked to count the caller's words
-        // in the screen it settles on, so a walk that got there looks no more.
-        let mut argv = self.aim.press_argv(mark, &self.look);
-        if let (Aim::Phone { .. }, Some(until)) = (&self.aim, &self.until) {
-            argv.extend(["--text".to_string(), until.clone()]);
-        }
-        if self.previewing && matches!(self.aim, Aim::Phone { .. }) {
-            argv.push(format!("--{EMULATOR_PREVIEW_FLAG}"));
-        }
-        let holds = recipe_line_holds_ms(self.aim.tool(), &argv);
-        let left = self.left_ms();
-        if left == 0 || left < holds {
-            return false;
-        }
-        self.kept = None;
-        let answer = (self.road)(self.aim.tool(), &argv, &argv);
-        let said = answer_value(&answer);
-        self.settled = said.as_ref().and_then(|said| {
-            Some(Settled {
-                note: said
-                    .get(zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY)?
-                    .clone(),
-                screen: said
-                    .get(EMULATOR_PREVIEW_FLAG)
-                    .and_then(|preview| self.preview_screen(preview)),
-            })
-        });
-        self.counted = said
-            .as_ref()
-            .and_then(|said| said.get(crate::emulator::checks::COUNT_KEY)?.as_u64());
-        answer.exit_code == 0
+        // A walk that asks ahead has a page's press answer before it settles
+        // (t-9712); an entry's own press settles as ever ([`Self::type_into`]).
+        let later = self.previewing && matches!(self.aim, Aim::Pane { .. });
+        self.press_by(mark, later)
     }
 
     fn settled(&mut self) -> Option<Settled> {
         self.settled.clone()
+    }
+
+    fn unsettled(&mut self) -> Option<Screen> {
+        self.unsettled.take()
+    }
+
+    /// The pane's next look finishes the settle its last press left (t-9712):
+    /// the look is taken now, while the walk's judgment runs, and it says how
+    /// the settle ended. A settled page's look is kept for the step that looks
+    /// next — the page is still, so one read serves both; a page that did not
+    /// settle, or a look that failed (a settle nobody heard end), keeps
+    /// nothing, and the next look reads the page again.
+    fn settle(&mut self) -> Option<Settled> {
+        if !std::mem::take(&mut self.settling) {
+            return None;
+        }
+        let argv = self.aim.look_argv();
+        let answer = read_unjudged(self.road, self.aim.tool(), &argv);
+        let said = answer_value(&answer);
+        let note = said
+            .as_ref()
+            .and_then(|said| said.get(BROWSER_SETTLE_KEY))
+            .cloned()
+            .unwrap_or_else(settle_unheard);
+        let looked = said.as_ref().and_then(|said| screen_of(&self.aim, said));
+        let screen = looked.as_ref().map(|(screen, _)| {
+            let mut screen = screen.clone();
+            screen.at = self.page.clone();
+            screen
+        });
+        self.kept = screen
+            .clone()
+            .zip(looked.map(|(_, look)| look))
+            .filter(|_| settle_said_ready(&note));
+        Some(Settled { note, screen })
     }
 
     /// A page whose last look read a field, with a writer a person set up —
@@ -667,8 +745,9 @@ where
         };
         // The field is pressed by its pinned number first — the pin and the
         // look's age stand in front of an entry as they stand in front of a
-        // press — and typed at once, by the look's own selector for it.
-        if !self.press(mark) {
+        // press — and typed at once, by the look's own selector for it: a
+        // press that settles before it answers, since the typing follows it.
+        if !self.press_by(mark, false) {
             return Typed::Refused(PRESS_REFUSED.to_string());
         }
         let argv = vec![
@@ -692,7 +771,15 @@ where
     }
 
     fn asks_ahead_of_the_press(&self) -> bool {
-        !matches!(self.aim, Aim::Phone { .. })
+        // A phone asks on the screen its press settled on (t-6385); a page
+        // that answers before it settles asks on the page its press left
+        // (t-9712) — a question begun before either press is about a screen
+        // the press is about to change.
+        match self.aim {
+            Aim::Phone { .. } => false,
+            Aim::Pane { .. } => !self.previewing,
+            Aim::App { .. } => true,
+        }
     }
 
     fn reached(&mut self) -> Option<bool> {

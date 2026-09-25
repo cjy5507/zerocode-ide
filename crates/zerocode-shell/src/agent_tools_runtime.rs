@@ -5960,15 +5960,28 @@ pub(super) async fn answer_browser_command(
         }
         // `click <label> <css>` presses the first element a selector names;
         // `click <label> --mark <n>` presses the control numbered n on the
-        // pane's last `marks`, pinned so a moved or changed control is refused.
-        ("click", 3) | ("click", 4) => {
+        // pane's last `marks`, pinned so a moved or changed control is refused;
+        // `--settle-later` answers at once with the page the press left, its
+        // settle finished by the pane's next `marks` (t-9712).
+        ("click", 3) | ("click", 4) | ("click", 5) => {
             use zerocode_core::agent_browser::ClickTarget;
             let pressed = match zerocode_core::agent_browser::parse_click(argv) {
                 Ok(ClickTarget::Css(css)) => {
                     cmd::browser::automate_click(app, &state, &argv[1], &css).await
                 }
-                Ok(ClickTarget::Mark(mark) | ClickTarget::MarkSettleLater(mark)) => {
+                Ok(ClickTarget::Mark(mark)) => {
                     cmd::browser::automate_click_mark(app, &state, &argv[1], mark).await
+                }
+                Ok(ClickTarget::MarkSettleLater(mark)) => {
+                    let later = cmd::browser::automate_click_mark_later(app, &state, &argv[1], mark);
+                    return match later.await {
+                        Ok((report, look)) => {
+                            crate::browser_read::label_press(&argv[1], "click", &report);
+                            let answer = cmd::browser::settle_later_json(&report, look.as_ref());
+                            browser_said(format!("{answer}\n"))
+                        }
+                        Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+                    };
                 }
                 Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
             };

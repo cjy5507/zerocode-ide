@@ -178,9 +178,11 @@ pub const BROWSER_VERBS: [BrowserVerb; 18] = [
     // `read <label> [css]` or `read <label> --full` — the same read, whole
     // when the agent says so (`parse_read`).
     verb("read", 1, 2, BROWSER_CALLBACK_DEADLINE_MS),
-    // `click <label> <css>` or `click <label> --mark <n>` — the same press
-    // named by a selector or by a number the pane's last `marks` handed out.
-    act_verb("click", 2, 3, BROWSER_CALLBACK_DEADLINE_MS),
+    // `click <label> <css>` or `click <label> --mark <n> [--settle-later]` —
+    // the same press named by a selector or by a number the pane's last
+    // `marks` handed out; a press by number may leave its settle to the
+    // pane's next `marks` (t-9712).
+    act_verb("click", 2, 4, BROWSER_CALLBACK_DEADLINE_MS),
     act_verb("type", 3, 4, BROWSER_CALLBACK_DEADLINE_MS),
     check_verb("wait", 2, 3, BROWSER_WAIT_MAX_MS),
     // `screenshot <label> [--out <path>] [--json] [--marks]` — `--marks`
@@ -334,17 +336,28 @@ pub fn parse_click(argv: &[String]) -> Result<ClickTarget, String> {
     if argv.first().map(String::as_str) != Some("click") {
         return Err(usage());
     }
-    match (argv.get(2).map(String::as_str), argv.get(3)) {
-        (Some("--mark"), Some(number)) if argv.len() == 4 => number
+    let mark = |number: &String| {
+        number
             .parse::<usize>()
             .ok()
             .filter(|mark| *mark >= 1)
-            .map(ClickTarget::Mark)
-            .ok_or_else(|| "a mark is a positive whole number".to_string()),
-        (Some("--mark"), _) => {
-            Err("click --mark takes one number (zerocode-browser click <label> --mark <n>)".into())
+            .ok_or_else(|| "a mark is a positive whole number".to_string())
+    };
+    match (
+        argv.get(2).map(String::as_str),
+        argv.get(3),
+        argv.get(4).map(String::as_str),
+    ) {
+        (Some("--mark"), Some(number), None) if argv.len() == 4 => {
+            mark(number).map(ClickTarget::Mark)
         }
-        (Some(css), None) if !css.is_empty() && !css.starts_with("--") => {
+        (Some("--mark"), Some(number), Some(BROWSER_SETTLE_LATER_FLAG)) if argv.len() == 5 => {
+            mark(number).map(ClickTarget::MarkSettleLater)
+        }
+        (Some("--mark"), _, _) => Err(format!(
+            "click --mark takes one number, then {BROWSER_SETTLE_LATER_FLAG} or nothing ({BROWSER_CLI} click <label> --mark <n> [{BROWSER_SETTLE_LATER_FLAG}])"
+        )),
+        (Some(css), None, None) if !css.is_empty() && !css.starts_with("--") => {
             Ok(ClickTarget::Css(css.to_string()))
         }
         _ => Err(
@@ -1190,8 +1203,8 @@ pub fn usage() -> String {
         "  zerocode-browser read <label> [css]   보이는 텍스트와 고른 DOM (본문 소음 판정이 켜져 있으면 nav·footer 같은 블록은 한 줄로 접음)",
         "  zerocode-browser read <label> --full  판정 없이 페이지 전체 텍스트",
         "  zerocode-browser click <label> <css>  보이는 첫 요소를 클릭",
-        "  zerocode-browser click <label> --mark <n>",
-        "                                             마지막 marks의 번호 n을 누름 (움직였거나 바뀌었으면 거절)",
+        "  zerocode-browser click <label> --mark <n> [--settle-later]",
+        "                                             마지막 marks의 번호 n을 누름 (움직였거나 바뀌었으면 거절; --settle-later: 누른 즉시 그 자리의 marks --json으로 답하고 정착은 판의 다음 marks가 끝냄)",
         "  zerocode-browser type <label> <css> <text>",
         "                                             요소 내용을 바꾸고 입력 이벤트 (비밀번호 칸은 거절)",
         "  zerocode-browser type <label> <css> --value-stdin",

@@ -155,6 +155,13 @@ pub struct Options {
     /// press waits for its screen to stop changing hands back what it stopped
     /// on ([`World::settled`]), the next question is begun there, and the
     /// full look is taken while it is answered.
+    ///
+    /// A page asks after its press too, and before its settle (t-9712): its
+    /// press answers the moment it is made with the page as the press left it
+    /// ([`World::unsettled`]), the next question is begun there, and the
+    /// settle — the fifty quiet milliseconds a press by number waits — is
+    /// waited for behind it ([`World::settle`]). A page that did not settle
+    /// cancels what was begun, and the walk looks again.
     pub overlap: bool,
     /// The second rung (t-6132 S3): when the seat's judgment is under its
     /// press floor, ask the second reader the walk was handed
@@ -493,19 +500,27 @@ pub trait World {
     fn settled(&mut self) -> Option<Settled> {
         None
     }
-    /// Whether a judgment begun before a press can stand for the question
-    /// the next look asks ([`Options::overlap`]). A page's or a window's can
-    /// when its press leaves the screen where it was; a phone's press moves
-    /// its screen too often for that, and it asks on the screen its press
-    /// settled on instead ([`Self::settled`]).
-    /// The screen as the last press left it, before it settled (t-9712).
+    /// The screen as the last press left it, the moment it was made — for a
+    /// world whose press answers before its screen settles (a page's, pressed
+    /// with `--settle-later`, t-9712): what a walk that asks ahead begins its
+    /// next judgment on while the settle is waited for ([`Self::settle`]).
+    /// `None` for a world whose press waited, or read nothing.
     fn unsettled(&mut self) -> Option<Screen> {
         None
     }
-    /// Wait for the last press's screen to settle (t-9712).
+    /// Wait for the last press's screen to settle, for a world whose press
+    /// answered before it did (t-9712): how it ended, in the door's own
+    /// words, and the screen it settled on. `None` when no settle waits — a
+    /// world whose press waited for its own, or a press that was not taken.
     fn settle(&mut self) -> Option<Settled> {
         None
     }
+    /// Whether a judgment begun before a press can stand for the question
+    /// the next look asks ([`Options::overlap`]). A window's can when its
+    /// press leaves the screen where it was; a phone's press moves its screen
+    /// too often for that, and it asks on the screen its press settled on
+    /// instead ([`Self::settled`]); a page that answers before it settles
+    /// asks on the page its press left ([`Self::unsettled`]).
     fn asks_ahead_of_the_press(&self) -> bool {
         true
     }
@@ -856,6 +871,9 @@ pub(crate) const BARRED: &str = zerocode_core::jev::summary::BARRED.canonical;
 pub const OVERLAP: &str = "overlap";
 pub const OVERLAP_USED: &str = "used";
 pub const OVERLAP_DISCARDED: &str = "discarded";
+/// A judgment begun on the page a press left that the page's settle then
+/// cancelled — it did not end `ready` (t-9712): its request spent, the page
+/// looked at again and asked afresh.
 pub const OVERLAP_CANCELLED: &str = "cancelled";
 
 /// The key a row keeps what the second reader said under
@@ -881,9 +899,9 @@ pub const OBSERVED: &str = "observed";
 const SELECTOR_KEY: &str = snapshot::SELECTOR_KEY;
 
 /// The key a row says how the pressed screen settled under, when the world's
-/// press waits for it to stop changing (a phone's, t-6385) — the emulator
-/// door's own word, so a click's answer and the walk's row cannot come to
-/// spell it two ways.
+/// press waits for it to stop changing (a phone's, t-6385) or leaves it for
+/// the next look (a page's, t-9712) — the doors' own word, so a click's or a
+/// look's answer and the walk's row cannot come to spell it two ways.
 pub const SETTLE: &str = zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY;
 
 /// Why this walk pressed nothing, when one of its rows says why.
@@ -934,7 +952,8 @@ pub struct Walked {
     /// spent, the screen asked afresh.
     pub discarded: usize,
     /// Judgments begun on the page a press left that its settle cancelled
-    /// (t-9712).
+    /// before the next look (t-9712) — their request spent, the page looked
+    /// at again.
     pub cancelled: usize,
     /// Steps the seat's judgment left under its press floor that the second
     /// reader pressed for ([`Options::rescue`]).
@@ -1133,6 +1152,9 @@ fn walk(
     // ([`Options::overlap`]): used when the next look asks the same question,
     // dropped when it does not.
     let mut ahead: Option<Pending> = None;
+    // Whether the last press's settle cancelled the judgment begun on the page
+    // it left (t-9712) — the next row says so.
+    let mut cancelled = false;
     for attempt in 1..=at.steps() {
         if world.left_ms() <= u64::try_from(ACTION_DEADLINE.as_millis()).unwrap_or(u64::MAX) {
             // Out of time with the errand unserved: whatever was pressed on
@@ -1235,6 +1257,10 @@ fn walk(
                     Some(json!({ OVERLAP: OVERLAP_DISCARDED })),
                 )
             }
+            None if std::mem::take(&mut cancelled) => (
+                judge.choose(&asked),
+                Some(json!({ OVERLAP: OVERLAP_CANCELLED })),
+            ),
             None => (judge.choose(&asked), None),
         };
         let judgment_ms = u64::try_from(judging.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1622,18 +1648,28 @@ fn walk(
             if let Some(settled) = &settled {
                 note(&mut said, SETTLE, settled.note.clone());
             }
-            // Ask ahead on the screen the press settled on (t-6385): the next
-            // question as the loop's own head will put it — a screen that moved
-            // starts its numbers afresh, one that did not keeps what it spent —
-            // begun now, so the judgment is answered while the full look is
-            // taken. The look's question decides: the same bytes use the answer,
-            // any other drops it (an element only the full look finds, a screen
-            // still moving).
+            // The screen the next question is asked on: the one a phone's press
+            // settled on (t-6385), or — for a page whose press answered before
+            // it settled — the page as the press left it (t-9712); never after
+            // a link, whose page is another's.
+            let left = match settled.and_then(|settled| settled.screen) {
+                Some(screen) => Some(screen),
+                None => world
+                    .unsettled()
+                    .filter(|_| !presses_a_link(seen, chosen)),
+            };
+            // Ask ahead on it: the next question as the loop's own head will
+            // put it — a screen that moved starts its numbers afresh, one that
+            // did not keeps what it spent — begun now, so the judgment is
+            // answered while the full look (a phone's) or the settle and the
+            // look (a page's) are taken. The look's question decides: the same
+            // bytes use the answer, any other drops it (an element only the
+            // full look finds, a screen still moving).
             if options.overlap
                 && ahead.is_none()
                 && matches!(at.why, Why::Goal { .. })
                 && attempt < at.steps()
-                && let Some(screen) = settled.and_then(|settled| settled.screen)
+                && let Some(screen) = left
             {
                 let moved = !seen.same_as(&screen);
                 if moved || still + 1 < SAME_SCREEN_LIMIT {
@@ -1651,6 +1687,20 @@ fn walk(
                         &screen.beside(world.types(), &screen.fields_left(&entered)),
                     )
                     .and_then(|question| judge.begin(&question));
+                }
+            }
+            // A page whose press answered before it settled is settled now,
+            // behind the judgment just begun (t-9712). The settle's own words go
+            // on the row; a page that did not end `ready` — still moving at the
+            // wall, another document, a pane gone, a settle nobody heard end —
+            // cancels that judgment, and the next look reads the page again.
+            if let Some(late) = world.settle() {
+                let ready = zerocode_core::agent_browser::settle_said_ready(&late.note);
+                note(&mut said, SETTLE, late.note);
+                if !ready && let Some(begun) = ahead.take() {
+                    drop(begun);
+                    walked.cancelled += 1;
+                    cancelled = true;
                 }
             }
         }
