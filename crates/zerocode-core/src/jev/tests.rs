@@ -443,7 +443,7 @@ fn recall_acts_when_a_person_says_on_or_its_labels_raised_it() {
     );
     assert_eq!(
         row.apply_deadline_ms,
-        Some(ROUTING_APPLY_DEADLINE_MS),
+        Some(RECALL_APPLY_DEADLINE_MS),
         "the judge times recall against the wall its apply road waits inside"
     );
 }
