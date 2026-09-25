@@ -150,6 +150,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
     mail: deskMail,
     news: deskNews,
     counts: { mail: deskMail.length, news: deskNews.length, folded },
+    folded_batches: [],
     tasks: deskTasks,
     stages: counts,
   };
@@ -505,6 +506,38 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     });
     ok("a run whose coordinator seat this window does not hold offers no answer and says why",
       unseated.act && unseated.said === "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요", JSON.stringify(unseated));
+    await settleMail();
+
+    /* 접힌 소식의 묶음 확인 (t-9548): 코디네이터가 받아 둔 묶음의 소식이 전부 접혔으면 접힌 수
+     * 옆에서 그 묶음을 통째로 확인한다 — 어느 묶음인지는 백엔드가 고르고, 자리 없는 창은 내밀지
+     * 않는다. */
+    const foldedAck = await page.evaluate(async () => {
+      const held = window.__DESK__;
+      const beat = async (desk) => {
+        window.__DESK__ = { ...desk, revision: window.__DESK__.revision + 1 };
+        refreshDeskLedger();
+        await new Promise((done) => setTimeout(done, 0));
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        const line = document.querySelector('#board-view [data-desk-block="mail"] .board-desk-news-folded');
+        const act = line?.querySelector(".board-desk-news-folded-ack");
+        return { line, act, shown: act && !act.hidden ? act.textContent : "" };
+      };
+      const folded = { ...held, counts: { ...held.counts, folded: 3 },
+        folded_batches: [{ run: "run-desk", delivery_id: "d-777", batch: 3 }] };
+      const offered = await beat(folded);
+      const said = { word: offered.line?.firstElementChild?.textContent ?? "", act: offered.shown };
+      offered.act?.click();
+      await new Promise((done) => setTimeout(done, 0));
+      said.sent = window.__DESK_SENT__.filter((one) => one.verb === "ack" && one.delivery === "d-777").length;
+      window.__DESK_SENT__ = window.__DESK_SENT__.filter((one) => one.delivery !== "d-777");
+      said.unseated = (await beat({ ...folded, runs: held.runs.map((one) => ({ ...one, seat: false })) })).shown;
+      said.none = (await beat({ ...held, counts: { ...held.counts, folded: 3 } })).shown;
+      await beat(held);
+      return said;
+    });
+    ok("folded notices in a batch the coordinator holds offer that whole batch beside the count; none where it holds no seat or no batch (t-9548)",
+      foldedAck.word === "접힌 소식 3통 · 하루 지났거나 끝난 침묵" && foldedAck.act === "확인 · 이 묶음 3통" &&
+      foldedAck.sent === 1 && foldedAck.unseated === "" && foldedAck.none === "", JSON.stringify(foldedAck));
     await settleMail();
     // Folded again, as the rest of the suite found it.
     await page.click('#board-view [data-desk-block="mail"] .board-desk-letters-more');

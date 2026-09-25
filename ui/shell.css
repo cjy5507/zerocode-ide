@@ -30499,6 +30499,12 @@ details.task-board-section > summary {
   margin: var(--space-2) 0 0;
 }
 
+/* The acknowledgement of a batch whose notices all folded stands beside the
+ * folded count (t-9548) — the letter's own door, a word's width away. */
+.board-desk-news-folded-ack {
+  margin-inline-start: var(--space-2);
+}
+
 .board-desk-letter-body[hidden],
 .board-desk-letter-act[hidden],
 .board-desk-letter-note[hidden],

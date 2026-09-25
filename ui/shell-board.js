@@ -666,8 +666,10 @@ function paintDeskMail(block, now, view) {
       deskChoice.mailAll = !deskChoice.mailAll;
       paintCoordinatorDesk(view);
     };
+    const foldedLine = deskElement("p", "board-desk-news-folded");
+    foldedLine.append(deskElement("span", "board-desk-news-folded-word"));
     body.replaceChildren(deskElement("p", "board-desk-unseated"), list, deskElement("p", "board-desk-news-head"),
-      deskElement("ol", "board-desk-letters is-news"), more, deskElement("p", "board-desk-news-folded"));
+      deskElement("ol", "board-desk-letters is-news"), more, foldedLine);
   }
   const [unseated, , newsHead, newsList, more, foldedLine] = body.children;
   const seats = new Map((deskLedger.runs ?? []).map((run) => [run.run, run.seat === true]));
@@ -688,15 +690,47 @@ function paintDeskMail(block, now, view) {
   writeTextContent(more, deskChoice.mailAll ? t("board.desk.mailFewer", "접기")
     : t("board.desk.mailMore", "{{count}}통 더 보기", { count: Math.max(0, rest) }));
   writeAttribute(more, "aria-expanded", String(deskChoice.mailAll));
-  writeTextContent(foldedLine, t("board.desk.newsFolded", "접힌 소식 {{count}}통 · 하루 지났거나 끝난 침묵",
+  writeTextContent(foldedLine.firstElementChild, t("board.desk.newsFolded", "접힌 소식 {{count}}통 · 하루 지났거나 끝난 침묵",
     { count: folded }));
+  const foldedBatches = Array.isArray(deskLedger?.folded_batches) ? deskLedger.folded_batches : [];
+  paintDeskFoldedAcks(foldedLine, foldedBatches, seats, view);
   writeHidden(foldedLine, folded === 0);
   // Letters that left the ledger's lists take their drafts and presses with them.
   const standing = new Set(letters.map((letter) => letter.id));
   for (const id of deskDrafts.keys()) if (!standing.has(id)) deskDrafts.delete(id);
-  const batches = new Set([...letters, ...news].map((letter) => letter.delivery_id).filter(Boolean));
+  const batches = new Set([...letters, ...news, ...foldedBatches].map((letter) => letter.delivery_id).filter(Boolean));
   for (const id of deskAcks.keys()) if (!batches.has(id)) deskAcks.delete(id);
   return true;
+}
+
+/* 접힌 소식 옆의 확인 (t-9548): 코디네이터가 받아 둔 묶음의 소식이 전부 접혀 그 묶음을
+ * 내미는 줄이 없을 때, 접힌 수 옆에서 그 묶음을 통째로 확인한다. 어느 묶음인지는 백엔드가
+ * 고르고(`DESK_NEWS.folded_ack` — 받아 둔 묶음만, 이미 확인한 것은 빚이 아니다), 누를 수
+ * 있는가는 줄의 단추와 같은 규칙(`deskLetterAct`), 누르는 손도 같다(`ackDeskBatch`). */
+function paintDeskFoldedAcks(line, batches, seats, view) {
+  const held = new Map([...line.querySelectorAll(":scope > .board-desk-news-folded-ack")]
+    .map((node) => [node.dataset.batch, node]));
+  const offered = [];
+  for (const batch of batches) {
+    const letter = { run: batch.run, delivery: "delivered", delivery_id: batch.delivery_id, batch: batch.batch };
+    if (deskLetterAct(letter, seats.get(batch.run) ?? false) !== "ack") continue;
+    const key = `${batch.run}/${batch.delivery_id}`;
+    let act = held.get(key);
+    if (!act) {
+      act = deskElement("button", "board-desk-letter-act board-desk-news-folded-ack");
+      act.type = "button";
+      act.dataset.batch = key;
+      act.onclick = () => { if (act.__letter) void ackDeskBatch(view, act.__letter); };
+    }
+    act.__letter = letter;
+    const ack = deskAcks.get(batch.delivery_id);
+    writeDisabled(act, Boolean(ack?.sending));
+    writeHidden(act, Boolean(ack?.sent));
+    writeTextContent(act, ack?.sending ? t("board.desk.acking", "확인하는 중…")
+      : t("board.desk.ack", "확인 · 이 묶음 {{count}}통", { count: batch.batch ?? 0 }));
+    offered.push(act);
+  }
+  reconcileElementOrder(line, [line.firstElementChild, ...offered]);
 }
 
 /* ---- 워커 ------------------------------------------------------------------
