@@ -4,13 +4,15 @@
     "service": "Accessibility",
     "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
     "list_name": "Accessibility",
-    "subject": "helper"
+    "subject": "helper",
+    "database": "system"
   },
   {
     "id": "screenshots",
     "service": "ScreenCapture",
     "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
     "list_name": "Screen & System Audio Recording",
-    "subject": "app"
+    "subject": "app",
+    "database": "system"
   }
 ]

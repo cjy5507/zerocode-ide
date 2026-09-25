@@ -2404,7 +2404,27 @@ class StatefulBackend {
           helper_app_path: "/Applications/ZeroCode Computer Use.app",
           helper_unavailable_reason: null,
           permissions: clone(this.computerUsePermissions),
+          tcc_rows: clone(this.computerUseTccRows ?? []),
         };
+      case "computer_use_tcc_row_action": {
+        // `tccutil reset` takes the row away: it reads denied, with no
+        // buttons, until the app is added again (t-6058).
+        const at = (this.computerUseTccRows ?? []).findIndex((row) =>
+          row.id === args.id && row.bundle_id === args.bundleId);
+        if (at < 0 || !this.computerUseTccRows[at].actions.includes(args.action)) {
+          throw new Error(`the row offers no ${args.action}`);
+        }
+        if (args.action === "reset") {
+          this.computerUseTccRows[at] = { ...this.computerUseTccRows[at], grant: "denied", pin: undefined, actions: [] };
+        }
+        return {
+          platform: this.computerUsePlatform ?? "darwin",
+          helper_app_path: "/Applications/ZeroCode Computer Use.app",
+          helper_unavailable_reason: null,
+          permissions: clone(this.computerUsePermissions),
+          tcc_rows: clone(this.computerUseTccRows),
+        };
+      }
       case "open_computer_use_permission":
         return {
           platform: this.computerUsePlatform ?? "darwin",
@@ -3473,6 +3493,113 @@ await test("Computer Use owns permissions, skill setup, and built-in routing on 
     ...permission,
     status: "not-granted",
   }));
+});
+
+// t-6058: each TCC row under a Computer Use permission — both bundles' rows,
+// the judged one first — says one of four grants in the catalog's words for
+// every language, and only a stale row offers buttons: its reset (which the
+// row then reads back as denied) and its System Settings pane.
+await test("Computer Use's TCC rows say one of four grants in five languages and only a stale row offers a reset", async () => {
+  const helperRow = {
+    bundle_id: "dev.zerocode.app.computer-use",
+    name: "ZeroCode Computer Use",
+    path: "/Applications/ZeroCode.app/Contents/Resources/ZeroCode Computer Use.app",
+  };
+  const appRow = { bundle_id: "dev.zerocode.app", name: "ZeroCode", path: "/Applications/ZeroCode.app" };
+  backend.computerUseTccRows = [
+    { id: "accessibility", ...helperRow, judged: true, grant: "granted", pin: "signature", actions: [] },
+    { id: "accessibility", ...appRow, judged: false, grant: "stale", pin: "cdhash", actions: ["reset", "open-settings"] },
+    { id: "screenshots", ...appRow, judged: true, grant: "unreadable", unreadable: "no-full-disk-access", actions: [] },
+    { id: "screenshots", ...helperRow, judged: false, grant: "denied", actions: [] },
+  ];
+  const previousLocale = backend.settings.locale;
+  try {
+    const from = backend.calls.length;
+    await openSettings(pageA, "computer-use");
+    await pageA.click("#computer-use-refresh");
+    await backend.waitForCall("A", "computer_use_permission_status", from);
+    await pageA.waitForFunction(
+      () => document.querySelectorAll(".computer-use-tcc-row").length === 4,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    const painted = () => pageA.evaluate(() => [...document.querySelectorAll(".computer-use-tcc-row")].map((row) => ({
+      permission: row.closest("[data-permission]")?.dataset.permission,
+      bundle: row.dataset.bundle,
+      grant: row.dataset.grant,
+      judged: row.dataset.judged,
+      marked: row.querySelector(".computer-use-tcc-judged")?.textContent ?? null,
+      words: row.querySelector(".computer-use-tcc-grant")?.textContent,
+      buttons: [...row.querySelectorAll("[data-tcc-action]")].map((button) => [button.dataset.tccAction, button.textContent]),
+    })));
+    // The sentence each row should say in the locale in force, read straight
+    // from the catalogs (Korean is the call site's own words).
+    const expected = (code) => pageA.evaluate((code) => {
+      const say = (entry, vars) => {
+        const text = CATALOG[code]?.[entry.key] || entry.word;
+        return text.replace(/\{\{(\w+)\}\}/g, (whole, name) => (name in (vars ?? {}) ? vars[name] : whole));
+      };
+      const why = say(COMPUTER_TCC_WORDS.unreadable["no-full-disk-access"]);
+      return {
+        granted: say(COMPUTER_TCC_WORDS.grant.granted),
+        stale: say(COMPUTER_TCC_WORDS.grant.stale),
+        unreadable: say(COMPUTER_TCC_WORDS.grant.unreadable, { why }),
+        denied: say(COMPUTER_TCC_WORDS.grant.denied),
+        reset: say(COMPUTER_TCC_WORDS.action.reset),
+        open: say(COMPUTER_TCC_WORDS.action["open-settings"]),
+        judged: say({ key: "computerUse.tccJudged", word: "판정 행" }),
+      };
+    }, code);
+    const korean = await expected("ko");
+    try {
+      for (const code of ["ko", "en", "ja", "zh", "es"]) {
+        await backend.externalPatch({ locale: code }, ["locale"]);
+        await renderSettled(pageA);
+        const words = await expected(code);
+        if (code !== "ko") {
+          for (const [word, text] of Object.entries(words)) {
+            assert(text !== korean[word], `${code} has no translation for the ${word} words`, text);
+          }
+        }
+        assertEqual(await painted(), [
+          { permission: "accessibility", bundle: "dev.zerocode.app.computer-use", grant: "granted", judged: "true", marked: words.judged, words: words.granted, buttons: [] },
+          { permission: "accessibility", bundle: "dev.zerocode.app", grant: "stale", judged: "false", marked: null, words: words.stale, buttons: [["reset", words.reset], ["open-settings", words.open]] },
+          { permission: "screenshots", bundle: "dev.zerocode.app", grant: "unreadable", judged: "true", marked: words.judged, words: words.unreadable, buttons: [] },
+          { permission: "screenshots", bundle: "dev.zerocode.app.computer-use", grant: "denied", judged: "false", marked: null, words: words.denied, buttons: [] },
+        ], `the TCC rows did not say the table's words in ${code}`);
+      }
+    } finally {
+      await backend.externalPatch({ locale: previousLocale }, ["locale"]);
+      await renderSettled(pageA);
+    }
+
+    // The stale row's pane, then its reset: each asks the backend for that row
+    // alone, and the reset's answer is painted back — the row now denied.
+    let askedAt = backend.calls.length;
+    await pageA.click('.computer-use-tcc-row[data-grant="stale"] [data-tcc-action="open-settings"]');
+    const opened = await backend.waitForCall("A", "computer_use_tcc_row_action", askedAt);
+    assertEqual(opened.args, { id: "accessibility", bundleId: "dev.zerocode.app", action: "open-settings" }, "the pane button named another row");
+    await pageA.waitForFunction(
+      () => document.querySelector('.computer-use-tcc-row[data-grant="stale"] [data-tcc-action="reset"]')?.disabled === false,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    askedAt = backend.calls.length;
+    await pageA.click('.computer-use-tcc-row[data-grant="stale"] [data-tcc-action="reset"]');
+    const reset = await backend.waitForCall("A", "computer_use_tcc_row_action", askedAt);
+    assertEqual(reset.args, { id: "accessibility", bundleId: "dev.zerocode.app", action: "reset" }, "the reset named another row");
+    await pageA.waitForFunction(
+      () => document.querySelector('#computer-use-accessibility-tcc [data-bundle="dev.zerocode.app"]')?.dataset.grant === "denied",
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    assertEqual(await pageA.locator("[data-tcc-action]").count(), 0, "a row that is not stale offered a button");
+  } finally {
+    // Pass or fail, the next Computer Use tests open the pane fresh and
+    // expect it to read — a failure here must not become theirs.
+    backend.computerUseTccRows = undefined;
+    await pageA.evaluate(() => setSettingsOpen(false));
+  }
 });
 
 // The Flow card (t-4260): its policy and evidence controls are the core enums

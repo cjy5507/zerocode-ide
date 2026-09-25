@@ -41394,8 +41394,47 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   gap: var(--space-2);
 }
 .computer-use-permission .computer-permission-actions,
+.computer-use-tcc-rows,
 .computer-permission-hint {
   grid-column: 2 / -1;
+}
+/* What the TCC database records for each bundle's row (t-6058): one line per
+   row, the judged one first; only a stale row carries buttons. */
+.computer-use-tcc-rows {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.computer-use-tcc-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+.computer-use-tcc-name {
+  color: var(--ink-label);
+  font-weight: 600;
+}
+.computer-use-tcc-judged {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--edge-rule);
+  border-radius: 999px;
+  color: var(--ink-mist);
+  font-size: var(--text-3xs);
+}
+.computer-use-tcc-grant {
+  overflow-wrap: anywhere;
+}
+.computer-use-tcc-row[data-grant="granted"] .computer-use-tcc-grant {
+  color: var(--signal-ready);
+}
+.computer-use-tcc-row[data-grant="stale"] .computer-use-tcc-grant {
+  color: var(--signal-wait-ink);
 }
 .computer-permission-hint {
   margin: 0;

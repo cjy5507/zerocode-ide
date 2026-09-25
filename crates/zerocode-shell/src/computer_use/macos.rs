@@ -24,14 +24,17 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use zerocode_core::computer_use::{
     COMPUTER_USE_PROTOCOL_VERSION, ComputerPermissionId, ComputerPermissionReport,
-    ComputerPermissionReset, ComputerPermissionRow, ComputerPermissionSetup,
-    ComputerPermissionState, ComputerPermissionStatus,
+    ComputerPermissionReset, ComputerPermissionRow, ComputerPermissionRowAction,
+    ComputerPermissionSetup, ComputerPermissionState, ComputerPermissionStatus,
+    ComputerPermissionTccRow, ComputerPermissionUnreadable,
 };
 use zerocode_core::computer_use_protocol::error_code;
 
 use super::ComputerUseError;
 use super::permissions::missing_permissions;
 use super::session::{ProviderSession, SessionFailure};
+
+mod tcc;
 
 const HELPER_APP_NAME: &str = "ZeroCode Computer Use.app";
 const HELPER_EXECUTABLE: &str = "zerocode-computer-use-macos";
@@ -452,6 +455,9 @@ pub(super) fn permission_status() -> ComputerPermissionReport {
             judged_rows: helper_app_path()
                 .map(|helper| judged_rows(&helper))
                 .unwrap_or_default(),
+            tcc_rows: helper_app_path()
+                .map(|helper| tcc_rows(&helper, None))
+                .unwrap_or_default(),
         },
     }
 }
@@ -525,16 +531,18 @@ fn permission_probe(
             ComputerPermissionStatus::NotGranted
         },
     };
+    let permissions = vec![
+        status_of(ComputerPermissionId::Accessibility),
+        status_of(ComputerPermissionId::Screenshots),
+    ];
     Ok((
         ComputerPermissionReport {
             identity: helper_signing_identity(),
             platform: "darwin".into(),
             helper_app_path: Some(helper.to_string_lossy().into_owned()),
             helper_unavailable_reason: None,
-            permissions: vec![
-                status_of(ComputerPermissionId::Accessibility),
-                status_of(ComputerPermissionId::Screenshots),
-            ],
+            tcc_rows: tcc_rows(&helper, Some(&permissions)),
+            permissions,
             judged_rows: judged_rows(&helper),
         },
         raw.get("requested_os").and_then(Value::as_bool) == Some(true),
@@ -548,6 +556,8 @@ struct PermissionTarget {
     settings_url: String,
     list_name: String,
     subject: PermissionSubject,
+    /// The TCC database this service's rows stand in.
+    database: tcc::TccDatabase,
 }
 
 /// Which process a permission list judges. Accessibility looks at the caller
@@ -560,18 +570,129 @@ enum PermissionSubject {
     App,
 }
 
-/// The System Settings row `target` is judged on.
-fn judged_row(target: &PermissionTarget, helper: &Path) -> ComputerPermissionRow {
-    let (bundle_id, name, path) = match target.subject {
-        PermissionSubject::Helper => (HELPER_BUNDLE_ID, HELPER_NAME, helper.to_path_buf()),
-        PermissionSubject::App => (APP_BUNDLE_ID, APP_NAME, app_bundle_path(helper)),
+impl PermissionSubject {
+    /// This app's two bundles — the only ones whose rows are read or reset.
+    const BOTH: [Self; 2] = [Self::Helper, Self::App];
+
+    const fn bundle_id(self) -> &'static str {
+        match self {
+            Self::Helper => HELPER_BUNDLE_ID,
+            Self::App => APP_BUNDLE_ID,
+        }
+    }
+
+    const fn other(self) -> Self {
+        match self {
+            Self::Helper => Self::App,
+            Self::App => Self::Helper,
+        }
+    }
+}
+
+/// The System Settings row `subject`'s bundle has for permission `id`.
+fn subject_row(
+    id: ComputerPermissionId,
+    subject: PermissionSubject,
+    helper: &Path,
+) -> ComputerPermissionRow {
+    let (name, path) = match subject {
+        PermissionSubject::Helper => (HELPER_NAME, helper.to_path_buf()),
+        PermissionSubject::App => (APP_NAME, app_bundle_path(helper)),
     };
     ComputerPermissionRow {
-        id: target.id,
-        bundle_id: bundle_id.into(),
+        id,
+        bundle_id: subject.bundle_id().into(),
         name: name.into(),
         path: path.to_string_lossy().into_owned(),
     }
+}
+
+/// The System Settings row `target` is judged on.
+fn judged_row(target: &PermissionTarget, helper: &Path) -> ComputerPermissionRow {
+    subject_row(target.id, target.subject, helper)
+}
+
+/// Both bundles' rows for `target` — the judged one first — and whether each
+/// has a bundle signature to be held against. A helper standing alone (a dev
+/// build) has no app bundle around it, so the app's row has none.
+fn tcc_wanted(
+    target: &PermissionTarget,
+    helper: &Path,
+) -> [(bool, ComputerPermissionRow, bool); 2] {
+    let standing_alone = app_bundle_path(helper) == helper;
+    [target.subject, target.subject.other()].map(|subject| {
+        (
+            subject == target.subject,
+            subject_row(target.id, subject, helper),
+            subject == PermissionSubject::Helper || !standing_alone,
+        )
+    })
+}
+
+/// [`tcc_wanted`]'s rows, each with what the TCC database records for it,
+/// held against its bundle as signed now.
+fn tcc_reads(
+    target: &PermissionTarget,
+    helper: &Path,
+) -> Vec<(bool, ComputerPermissionRow, tcc::RowRead)> {
+    let rows = tcc_wanted(target, helper);
+    let wanted = rows
+        .iter()
+        .map(|(_, row, signed)| tcc::Wanted {
+            service: &target.service,
+            bundle_id: &row.bundle_id,
+            bundle: signed.then(|| Path::new(&row.path)),
+        })
+        .collect::<Vec<_>>();
+    let reads = target.database.path().map_or_else(
+        || vec![tcc::RowRead::Unreadable(ComputerPermissionUnreadable::Database); wanted.len()],
+        |database| tcc::read_rows(&database, &wanted),
+    );
+    rows.into_iter()
+        .zip(reads)
+        .map(|((judged, row, _), read)| (judged, row, read))
+        .collect()
+}
+
+/// `target`'s rows as read, each judged: macOS's answer for the permission
+/// (`live`, the helper probe's) speaks for the row it is judged on and for no
+/// other — the helper granted Accessibility says nothing of the app's own
+/// Accessibility row, which is the row 2026-09-22 found stale.
+fn judge_rows(
+    target: &PermissionTarget,
+    reads: Vec<(bool, ComputerPermissionRow, tcc::RowRead)>,
+    live: Option<&[ComputerPermissionState]>,
+) -> Vec<ComputerPermissionTccRow> {
+    let answer = live
+        .and_then(|states| states.iter().find(|state| state.id == target.id))
+        .map(|state| state.status == ComputerPermissionStatus::Granted);
+    reads
+        .into_iter()
+        .map(|(judged, row, read)| {
+            let (grant, unreadable, pin) = tcc::verdict(answer.filter(|_| judged), read);
+            ComputerPermissionTccRow::new(row, judged, grant, unreadable, pin)
+        })
+        .collect()
+}
+
+/// Every permission's two rows, as the settings page and `permissions` show
+/// them. `live` is the helper probe's answer — `None` when the probe did not
+/// answer.
+fn tcc_rows(
+    helper: &Path,
+    live: Option<&[ComputerPermissionState]>,
+) -> Vec<ComputerPermissionTccRow> {
+    permission_targets()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|target| judge_rows(target, tcc_reads(target, helper), live))
+        .collect()
+}
+
+/// Whether a row read as `read` offers `action`: the table's buttons for the
+/// grant the database alone gives it — the door the person's click passes.
+fn row_offers(read: tcc::RowRead, action: ComputerPermissionRowAction) -> bool {
+    tcc::verdict(None, read).0.actions().contains(&action)
 }
 
 /// The app bundle the helper ships inside — the nearest `.app` above it. A
@@ -599,12 +720,15 @@ fn helper_or_name() -> PathBuf {
     helper_app_path().unwrap_or_else(|| PathBuf::from(HELPER_APP_NAME))
 }
 
-fn permission_target(id: ComputerPermissionId) -> Result<PermissionTarget, ComputerUseError> {
-    let targets: Vec<PermissionTarget> = serde_json::from_str(include_str!(
+fn permission_targets() -> Result<Vec<PermissionTarget>, ComputerUseError> {
+    serde_json::from_str(include_str!(
         "../../native/computer-use-macos/permissions.json"
     ))
-    .map_err(|error| ComputerUseError::invalid_argument(error.to_string()))?;
-    targets
+    .map_err(|error| ComputerUseError::invalid_argument(error.to_string()))
+}
+
+fn permission_target(id: ComputerPermissionId) -> Result<PermissionTarget, ComputerUseError> {
+    permission_targets()?
         .into_iter()
         .find(|target| target.id == id)
         .ok_or_else(|| ComputerUseError::invalid_argument("missing permission target"))
@@ -633,8 +757,23 @@ fn permission_probe_args(
     args
 }
 
-fn reset_args<'a>(target: &'a PermissionTarget, row: &'a ComputerPermissionRow) -> [&'a str; 3] {
-    ["reset", &target.service, &row.bundle_id]
+/// `tccutil reset <service> <bundle id>` — always three words, the last one
+/// of this app's own two bundle ids. `tccutil` reads a missing bundle id as
+/// every app's row for the service, so anything else is refused here, before
+/// a process starts (t-6058).
+fn reset_args<'a>(
+    target: &'a PermissionTarget,
+    bundle_id: &'a str,
+) -> Result<[&'a str; 3], ComputerUseError> {
+    if !PermissionSubject::BOTH
+        .iter()
+        .any(|subject| subject.bundle_id() == bundle_id)
+    {
+        return Err(ComputerUseError::invalid_argument(format!(
+            "tccutil reset names only this app's own rows, not {bundle_id:?}"
+        )));
+    }
+    Ok(["reset", &target.service, bundle_id])
 }
 
 /// Launching the helper's own permission window: the small "Enable ZeroCode
@@ -709,6 +848,7 @@ pub(super) fn open_permission(
         platform: report.platform,
         helper_app_path: report.helper_app_path,
         judged_rows: report.judged_rows,
+        tcc_rows: report.tcc_rows,
         permission_id: plan.advise,
         requested_os: false,
         opened_settings: false,
@@ -739,16 +879,8 @@ pub(super) fn open_permission(
         }
         setup.requested_os = requested_os;
         setup.permissions = Some(report.permissions);
-        let opened = crate::proc::quiet_command("/usr/bin/open")
-            .arg(&target.settings_url)
-            .status()
-            .map_err(io_error("open permission settings"))?;
-        if !opened.success() {
-            return Err(ComputerUseError::new(
-                error_code::ACCESSIBILITY_ERROR,
-                "could not open the permission settings page",
-            ));
-        }
+        setup.tcc_rows = report.tcc_rows;
+        open_settings_pane(&target)?;
         setup.opened_settings = true;
         setup.next_step = Some(permission_next_step(
             &target,
@@ -758,13 +890,29 @@ pub(super) fn open_permission(
     Ok(setup)
 }
 
-/// Reset the row `id` is judged on; returns the bundle id that row named.
-pub(super) fn reset_permission(id: ComputerPermissionId) -> Result<String, ComputerUseError> {
+/// The permission's pane in System Settings.
+fn open_settings_pane(target: &PermissionTarget) -> Result<(), ComputerUseError> {
+    let opened = crate::proc::quiet_command("/usr/bin/open")
+        .arg(&target.settings_url)
+        .status()
+        .map_err(io_error("open permission settings"))?;
+    if !opened.success() {
+        return Err(ComputerUseError::new(
+            error_code::ACCESSIBILITY_ERROR,
+            "could not open the permission settings page",
+        ));
+    }
+    Ok(())
+}
+
+/// `tccutil reset` for one of this app's rows — the one road to it.
+fn reset_row(
+    target: &PermissionTarget,
+    row: &ComputerPermissionRow,
+) -> Result<(), ComputerUseError> {
     super::shutdown();
-    let target = permission_target(id)?;
-    let row = judged_row(&target, &helper_or_name());
     let output = crate::proc::quiet_command("/usr/bin/tccutil")
-        .args(reset_args(&target, &row))
+        .args(reset_args(target, &row.bundle_id)?)
         .output()
         .map_err(io_error("reset Computer Use permission"))?;
     if !output.status.success() {
@@ -774,7 +922,47 @@ pub(super) fn reset_permission(id: ComputerPermissionId) -> Result<String, Compu
             format!("could not reset {} for {}: {why}", target.service, row.name),
         ));
     }
+    Ok(())
+}
+
+/// Reset the row `id` is judged on; returns the bundle id that row named.
+pub(super) fn reset_permission(id: ComputerPermissionId) -> Result<String, ComputerUseError> {
+    let target = permission_target(id)?;
+    let row = judged_row(&target, &helper_or_name());
+    reset_row(&target, &row)?;
     Ok(row.bundle_id)
+}
+
+/// A TCC row's button, pressed (t-6058): `action` on `bundle_id`'s row of
+/// `id`'s service — only while that row, as the database records it now,
+/// reads as a grant the table gives that button, so nothing but a stale row
+/// is ever reset from here. Answers the report read after it: the row says
+/// what the button did.
+pub(super) fn tcc_row_action(
+    id: ComputerPermissionId,
+    bundle_id: &str,
+    action: ComputerPermissionRowAction,
+) -> Result<ComputerPermissionReport, ComputerUseError> {
+    let target = permission_target(id)?;
+    let Some((_, row, read)) = tcc_reads(&target, &helper_or_name())
+        .into_iter()
+        .find(|(_, row, _)| row.bundle_id == bundle_id)
+    else {
+        return Err(ComputerUseError::invalid_argument(format!(
+            "{bundle_id:?} names none of this app's rows"
+        )));
+    };
+    if !row_offers(read, action) {
+        return Err(ComputerUseError::invalid_argument(format!(
+            "{}'s {} row offers no {action:?} as it reads now",
+            row.name, target.service
+        )));
+    }
+    match action {
+        ComputerPermissionRowAction::Reset => reset_row(&target, &row)?,
+        ComputerPermissionRowAction::OpenSettings => open_settings_pane(&target)?,
+    }
+    Ok(permission_status())
 }
 
 pub(super) fn reset_permissions() -> Result<ComputerPermissionReset, ComputerUseError> {
@@ -806,7 +994,7 @@ mod tests {
         assert_eq!(row.name, APP_NAME);
         assert_eq!(row.path, "/Applications/ZeroCode.app");
         assert_eq!(
-            reset_args(&screenshots, &row),
+            reset_args(&screenshots, &row.bundle_id).unwrap(),
             ["reset", "ScreenCapture", APP_BUNDLE_ID]
         );
         let step = permission_next_step(&screenshots, &row);
@@ -862,6 +1050,207 @@ mod tests {
         assert!(
             env < start.find(".arg(\"--args\")").expect("--args"),
             "`open` reads --env only before --args"
+        );
+    }
+
+    /// `tccutil reset <service>` without a bundle id resets every app's row
+    /// for the service — the person's grants to every other app. So a reset
+    /// is three words or nothing: a bundle that is not one of this app's own
+    /// two is refused before anything runs (t-6058).
+    #[test]
+    fn a_reset_names_one_of_this_apps_bundles_or_runs_nothing() {
+        let target = permission_target(ComputerPermissionId::Accessibility).unwrap();
+        for bundle in [HELPER_BUNDLE_ID, APP_BUNDLE_ID] {
+            assert_eq!(
+                reset_args(&target, bundle).unwrap(),
+                ["reset", "Accessibility", bundle]
+            );
+        }
+        for stranger in [
+            "",
+            " ",
+            "com.apple.Terminal",
+            "dev.zerocode.app ",
+            "dev.zerocode",
+        ] {
+            assert!(
+                reset_args(&target, stranger).is_err(),
+                "{stranger:?} reached tccutil"
+            );
+        }
+    }
+
+    /// Both bundles' rows are read for each permission, the judged one first;
+    /// a helper standing alone has no app bundle to hold the app's row
+    /// against.
+    #[test]
+    fn both_bundles_rows_are_read_for_every_permission_the_judged_one_first() {
+        let helper =
+            Path::new("/Applications/ZeroCode.app/Contents/Resources/ZeroCode Computer Use.app");
+        let accessibility = permission_target(ComputerPermissionId::Accessibility).unwrap();
+        let screenshots = permission_target(ComputerPermissionId::Screenshots).unwrap();
+        let bundles = |target: &PermissionTarget, helper: &Path| {
+            tcc_wanted(target, helper).map(|(judged, row, signed)| (judged, row.bundle_id, signed))
+        };
+        assert_eq!(
+            bundles(&accessibility, helper),
+            [
+                (true, HELPER_BUNDLE_ID.to_string(), true),
+                (false, APP_BUNDLE_ID.to_string(), true),
+            ]
+        );
+        assert_eq!(
+            bundles(&screenshots, helper),
+            [
+                (true, APP_BUNDLE_ID.to_string(), true),
+                (false, HELPER_BUNDLE_ID.to_string(), true),
+            ]
+        );
+        let dev =
+            Path::new("/repo/native/computer-use-macos/.build/release/ZeroCode Computer Use.app");
+        assert_eq!(
+            bundles(&screenshots, dev),
+            [
+                (true, APP_BUNDLE_ID.to_string(), false),
+                (false, HELPER_BUNDLE_ID.to_string(), true),
+            ]
+        );
+        for target in [&accessibility, &screenshots] {
+            assert_eq!(
+                target.database,
+                tcc::TccDatabase::System,
+                "measured 2026-09-26"
+            );
+        }
+    }
+
+    /// 2026-09-22 as the page reads it: the helper's Accessibility is granted
+    /// — macOS said so — and the app's own Accessibility row is pinned to the
+    /// 09-08 build. macOS's answer speaks for the judged row only, so the
+    /// app's row still reads stale and offers its reset and its pane.
+    #[test]
+    fn macos_answer_speaks_for_the_judged_row_and_the_pinned_row_still_reads_stale() {
+        use zerocode_core::computer_use::{ComputerPermissionGrant, ComputerPermissionPin};
+        let helper =
+            Path::new("/Applications/ZeroCode.app/Contents/Resources/ZeroCode Computer Use.app");
+        let target = permission_target(ComputerPermissionId::Accessibility).unwrap();
+        let [(judged, helper_row, _), (other, app_row, _)] = tcc_wanted(&target, helper);
+        let reads = vec![
+            (
+                judged,
+                helper_row,
+                tcc::RowRead::Allows {
+                    pin: Some(ComputerPermissionPin::Signature),
+                    satisfied: true,
+                },
+            ),
+            (
+                other,
+                app_row,
+                tcc::RowRead::Allows {
+                    pin: Some(ComputerPermissionPin::Cdhash),
+                    satisfied: false,
+                },
+            ),
+        ];
+        let live = [ComputerPermissionState {
+            id: ComputerPermissionId::Accessibility,
+            status: ComputerPermissionStatus::Granted,
+        }];
+        let rows = judge_rows(&target, reads, Some(&live));
+        let read = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.row.bundle_id.as_str(),
+                    row.judged,
+                    row.grant,
+                    row.pin,
+                    row.actions.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            read,
+            [
+                (
+                    HELPER_BUNDLE_ID,
+                    true,
+                    ComputerPermissionGrant::Granted,
+                    Some(ComputerPermissionPin::Signature),
+                    vec![],
+                ),
+                (
+                    APP_BUNDLE_ID,
+                    false,
+                    ComputerPermissionGrant::Stale,
+                    Some(ComputerPermissionPin::Cdhash),
+                    vec![
+                        ComputerPermissionRowAction::Reset,
+                        ComputerPermissionRowAction::OpenSettings,
+                    ],
+                ),
+            ]
+        );
+    }
+
+    /// The row door lets through only what the table gives the row's grant as
+    /// the database records it: a stale row is reset and opened, and nothing
+    /// else is reset — not a working grant, not an absent row, not a row that
+    /// could not be read.
+    #[test]
+    fn only_a_stale_row_is_reset_through_its_door() {
+        use zerocode_core::computer_use::{ComputerPermissionPin, ComputerPermissionUnreadable};
+        let stale = tcc::RowRead::Allows {
+            pin: Some(ComputerPermissionPin::Cdhash),
+            satisfied: false,
+        };
+        assert!(row_offers(stale, ComputerPermissionRowAction::Reset));
+        assert!(row_offers(stale, ComputerPermissionRowAction::OpenSettings));
+        for read in [
+            tcc::RowRead::Allows {
+                pin: Some(ComputerPermissionPin::Signature),
+                satisfied: true,
+            },
+            tcc::RowRead::Refused,
+            tcc::RowRead::Unreadable(ComputerPermissionUnreadable::NoFullDiskAccess),
+        ] {
+            for action in [
+                ComputerPermissionRowAction::Reset,
+                ComputerPermissionRowAction::OpenSettings,
+            ] {
+                assert!(!row_offers(read, action), "{read:?} offered {action:?}");
+            }
+        }
+    }
+
+    /// This machine's rows as the settings page reads them, and what the
+    /// reading costs — the before/after measure of t-6058. Reads the system
+    /// TCC database (this app's rows only) and launches the installed
+    /// helper's status probe, which requests nothing.
+    #[test]
+    #[ignore = "reads this machine's TCC database and launches the installed helper's status probe; run with ZEROCODE_COMPUTER_MACOS_HELPER_APP_PATH naming the installed helper"]
+    fn this_machines_rows_as_the_settings_page_reads_them() {
+        let report = permission_status();
+        eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
+        let helper = helper_app_path().expect("the installed helper");
+        let mut spent = (0..21)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let rows = tcc_rows(&helper, Some(&report.permissions));
+                assert_eq!(rows.len(), 4);
+                started.elapsed()
+            })
+            .collect::<Vec<_>>();
+        spent.sort();
+        eprintln!(
+            "tcc_rows over 21 reads: p50 {:?}, max {:?}",
+            spent[10], spent[20]
+        );
+        assert_eq!(
+            report.tcc_rows.len(),
+            4,
+            "both bundles' rows for both permissions"
         );
     }
 
@@ -931,7 +1320,7 @@ mod tests {
             );
             let row = judged_row(&target, Path::new("/test/helper.app"));
             assert_eq!(
-                reset_args(&target, &row),
+                reset_args(&target, &row.bundle_id).unwrap(),
                 ["reset", service, row.bundle_id.as_str()]
             );
             assert!(permission_next_step(&target, &row).contains(&format!(

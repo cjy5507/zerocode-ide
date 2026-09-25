@@ -38,7 +38,7 @@ use std::time::Duration;
 use serde_json::Value;
 use zerocode_core::computer_use::{
     ComputerPermissionId, ComputerPermissionReport, ComputerPermissionReset,
-    ComputerPermissionSetup, ComputerPermissionStatus,
+    ComputerPermissionRowAction, ComputerPermissionSetup, ComputerPermissionStatus,
 };
 use zerocode_core::computer_use_protocol::error_code;
 
@@ -161,6 +161,8 @@ pub(super) fn permission_status() -> ComputerPermissionReport {
             helper_unavailable_reason: None,
             permissions: every_permission(ComputerPermissionStatus::Granted),
             judged_rows: Vec::new(),
+            // Windows keeps no TCC database: there is no row to read.
+            tcc_rows: Vec::new(),
         },
         Err(error) => ComputerPermissionReport {
             identity: None,
@@ -169,6 +171,7 @@ pub(super) fn permission_status() -> ComputerPermissionReport {
             helper_unavailable_reason: Some(error.message),
             permissions: every_permission(ComputerPermissionStatus::NotGranted),
             judged_rows: Vec::new(),
+            tcc_rows: Vec::new(),
         },
     }
 }
@@ -188,6 +191,7 @@ pub(super) fn open_permission(
         platform: "windows".into(),
         helper_app_path: None,
         judged_rows: Vec::new(),
+        tcc_rows: Vec::new(),
         permission_id,
         requested_os: false,
         opened_settings: false,
@@ -195,6 +199,19 @@ pub(super) fn open_permission(
         permissions: Some(report.permissions),
         next_step,
     })
+}
+
+/// Windows keeps no TCC database, so no row stands here to press a button
+/// on: the door says unsupported rather than pretending to reset.
+pub(super) fn tcc_row_action(
+    _id: ComputerPermissionId,
+    _bundle_id: &str,
+    _action: ComputerPermissionRowAction,
+) -> Result<ComputerPermissionReport, ComputerUseError> {
+    Err(ComputerUseError::new(
+        error_code::UNSUPPORTED_CAPABILITY,
+        "Windows keeps no TCC rows: there is nothing to reset or open",
+    ))
 }
 
 /// Nothing to reset but the session itself; the next call starts a fresh

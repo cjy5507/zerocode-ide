@@ -1033,6 +1033,22 @@ pub(crate) async fn reset_computer_use_permissions()
         .map_err(|error| error.to_string())
 }
 
+/// A TCC row's button on the settings page (t-6058) — the row's own reset or
+/// its System Settings pane, and only what the row's grant offers.
+#[tauri::command]
+pub(crate) async fn computer_use_tcc_row_action(
+    id: zerocode_core::computer_use::ComputerPermissionId,
+    bundle_id: String,
+    action: zerocode_core::computer_use::ComputerPermissionRowAction,
+) -> Result<zerocode_core::computer_use::ComputerPermissionReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        computer_use::tcc_row_action(id, &bundle_id, action)
+    })
+    .await
+    .map_err(|join| join.to_string())?
+    .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub(crate) async fn computer_use_capabilities() -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(|| computer_use::call("handshake", serde_json::json!({})))
