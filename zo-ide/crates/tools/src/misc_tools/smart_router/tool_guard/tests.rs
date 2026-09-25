@@ -220,6 +220,66 @@ fn a_restore_regrets_the_command_that_changed_what_it_put_back_and_no_other() {
     });
 }
 
+/// A folder that changed is not every file in it changed (t-9087, astra
+/// R-GUARD-1): a command that runs in the checkout's root and makes or
+/// removes another file there moves the root's own stamp — its listing
+/// changed — and a later restore of a file it never touched is no regret of
+/// it. Whether the restored path moved is what the stamps can say; that one
+/// of a folder's children did says nothing of which.
+#[test]
+fn a_restore_of_one_file_regrets_no_command_that_only_changed_another_in_its_folder() {
+    let mock = Mock::serving(200, reply(&[(COMMAND_GUARD_IRREVERSIBLE, 0.1), (COMMAND_GUARD_OUTSIDE, 0.1)]));
+    machine(&COMMAND_GUARD, JevMode::Shadow.key(), &mock.base_url, |cwd| {
+        forget_waiting(cwd);
+        std::fs::create_dir_all(cwd.join("src")).expect("a source folder");
+        std::fs::write(cwd.join("src/a.rs"), "fn a() {}\n").expect("a source file");
+        let a_rs = std::fs::read(cwd.join("src/a.rs")).expect("the file's bytes");
+        let judge = ToolGuardJudge::at(cwd);
+        let ran = |id: &str| CommandRan {
+            owner: "turn-1".to_string(),
+            tool_use_id: id.to_string(),
+            failed: false,
+            cancelled: false,
+        };
+        // Makes another file in the root: the runtime runs it between the
+        // two calls, and the root's stamp moves with its listing.
+        let made = "cd . && touch other.tmp";
+        let root_before = stamp(cwd);
+        judge.command(command_ask(cwd, "shell-1", made));
+        std::fs::write(cwd.join("other.tmp"), "").expect("the command's file");
+        assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran("shell-1"))), None);
+        let root_made = stamp(cwd);
+        assert_ne!(root_made, root_before, "the root's own stamp moved");
+        // Removes it again: the root moves once more.
+        let removed = "cd . && rm other.tmp";
+        judge.command(command_ask(cwd, "shell-2", removed));
+        std::fs::remove_file(cwd.join("other.tmp")).expect("the command's removal");
+        assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran("shell-2"))), None);
+        assert_ne!(stamp(cwd), root_made, "the root's own stamp moved again");
+        assert_eq!(std::fs::read(cwd.join("src/a.rs")).expect("the file's bytes"), a_rs, "neither touched it");
+        // Both answered: each verdict is in the book before the turn ends.
+        assert_eq!(rows_of(&command_guard_path(cwd), 2).len(), 2);
+
+        let shell = |id: &str, command: &str| call(id, SHELL_TOOL, &serde_json::json!({"command": command}));
+        let turn = vec![
+            user("tidy up"),
+            shell("shell-1", made),
+            shell("shell-2", removed),
+            shell("shell-3", "git checkout -- src/a.rs"),
+            said("put it back"),
+        ];
+        assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&turn)), 0, "a restore of a file neither changed regrets neither");
+        let waiting = command_book().lock().expect("book");
+        assert_eq!(
+            waiting[cwd].iter().map(|one| one.tool_use_id.as_str()).collect::<Vec<_>>(),
+            vec!["shell-1", "shell-2"],
+            "each waits on its own window"
+        );
+        drop(waiting);
+        forget_waiting(cwd);
+    });
+}
+
 /// A text was followed when the agent's next step ran a command it spelled —
 /// one the person's words did not — and ignored when the next step did
 /// anything else: read on, answered, or ran what the person asked for.
