@@ -3315,10 +3315,23 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
         !sent.iter().any(|argv| argv[0] == "type"),
         "nothing was typed: {sent:?}"
     );
-    assert!(sent.contains(&vec![
-        "click".to_string(),
-        "browser-9".to_string(),
-        "--mark".to_string(),
-        "2".to_string(),
-    ]));
+    // A page's walk judges ahead unasked (t-9712): its press answers before
+    // it settles, and the pane's next look finishes the settle.
+    let pressed = sent
+        .iter()
+        .position(|argv| {
+            argv[..] == [
+                "click",
+                "browser-9",
+                "--mark",
+                "2",
+                zerocode_core::agent_browser::BROWSER_SETTLE_LATER_FLAG,
+            ]
+        })
+        .unwrap_or_else(|| panic!("the search button, its settle left for the next look: {sent:?}"));
+    assert_eq!(
+        sent.get(pressed + 1).map(|argv| argv[0].as_str()),
+        Some("marks"),
+        "the next look finishes the settle: {sent:?}"
+    );
 }
