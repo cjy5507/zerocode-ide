@@ -37,8 +37,10 @@ pub const WINDOW_DAYS: i64 = 7;
 const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
 
 /// How many projects' zo run at once for the every-project sum. One run is
-/// one short process — 0.11 to 0.25 s over this machine's projects
-/// (2026-09-25) — and the sum waits for the slowest of each round.
+/// one short process, and the sum waits for the slowest of each round:
+/// measured over this machine's seven projects with records (2026-09-25),
+/// 0.03 to 0.09 s each at a load near 10 (0.11 to 0.25 s near 20), and the
+/// seven in 0.34 s one at a time against 0.12 s four at a time.
 pub const PROJECT_ASKS_AT_ONCE: usize = 4;
 
 /// Which numbers the dashboard asked for.
