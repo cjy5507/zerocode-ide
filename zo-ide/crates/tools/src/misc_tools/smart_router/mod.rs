@@ -68,7 +68,8 @@ pub use challenger::{
 };
 #[cfg(test)]
 pub(crate) use challenger::tests::{
-    jev_answer as challenger_jev_answer, DoorWords as ChallengerDoorWords, Rig as ChallengerRig,
+    jev_answer as challenger_jev_answer, trees_written as challenger_trees_written,
+    wait_for_trees_written as challenger_wait_for_trees_written, DoorWords as ChallengerDoorWords, Rig as ChallengerRig,
     Scripted as ChallengerScripted, INCUMBENT as CHALLENGER_TEST_INCUMBENT, NEWCOMER as CHALLENGER_TEST_NEWCOMER,
 };
 pub use decision_report::{

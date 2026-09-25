@@ -4322,11 +4322,15 @@ mod tests {
 
     /// A bound verifier's model, scripted: its first call submits a failing
     /// verdict through `StructuredOutput`, the next writes a line and stops —
-    /// and before the call an edit names, that edit lands on the file:
-    /// someone else's work arriving while the verifier reads.
+    /// and before the call an edit names, that edit lands on the file (its
+    /// words, or — `None` — the file gone): someone else's work arriving
+    /// while the verifier reads, once the verifier's watch has written the
+    /// tree it started on (`tree`: the repository and how many trees its
+    /// watches will have written by then).
     struct FailsTheWork {
         calls: usize,
-        edits: Vec<(usize, std::path::PathBuf, &'static str)>,
+        edits: Vec<(usize, std::path::PathBuf, Option<&'static str>)>,
+        tree: (std::path::PathBuf, usize),
     }
 
     impl runtime::ApiClient for FailsTheWork {
@@ -4335,7 +4339,11 @@ mod tests {
             self.calls += 1;
             for (at, path, words) in &self.edits {
                 if *at == call {
-                    std::fs::write(path, words).expect("an edit lands");
+                    crate::misc_tools::smart_router::challenger_wait_for_trees_written(&self.tree.0, self.tree.1);
+                    match words {
+                        Some(words) => std::fs::write(path, words).expect("an edit lands"),
+                        None => std::fs::remove_file(path).expect("a removal lands"),
+                    }
                 }
             }
             let verdict = serde_json::json!({"verdict": "fail", "title": "accepts unknown fields", "evidence": "parser.rs:1"});
@@ -4369,11 +4377,17 @@ mod tests {
 
     impl Workspace {
         fn new() -> Self {
+            let ws = Self::nothing();
+            std::fs::write(ws.parser(), HANDED_IN_WORDS).expect("a source file");
+            ws
+        }
+
+        /// A repository holding no file at all.
+        fn nothing() -> Self {
             let repo_dir = tempfile::tempdir().expect("a repository");
             let repo = std::fs::canonicalize(repo_dir.path()).expect("resolved");
             let git = std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().expect("git");
             assert!(git.success(), "a repository");
-            std::fs::write(repo.join("parser.rs"), HANDED_IN_WORDS).expect("a source file");
             let store_dir = tempfile::tempdir().expect("an agent store");
             let store = std::fs::canonicalize(store_dir.path()).expect("resolved");
             Self {
@@ -4381,6 +4395,14 @@ mod tests {
                 store,
                 _dirs: (repo_dir, store_dir),
             }
+        }
+
+        /// The same with a HEAD that holds nothing, and no file on disk: the
+        /// tree the attempt hands in is the empty one.
+        fn empty() -> Self {
+            let ws = Self::nothing();
+            ws.git(&["commit", "-q", "--allow-empty", "-m", "nothing yet"]);
+            ws
         }
 
         /// The same, its source file committed: tracked, as most work is.
@@ -4528,15 +4550,16 @@ mod tests {
 
     /// A verifier `id` bound to `judged`, spawned down the product's own road
     /// in `ws`: its model fails the work, each of `edits` landing on the file
-    /// before the model call it names, and `after` landing once its turns are
-    /// over, before its completion is recorded. Answers the verdict it wrote
-    /// about `judged`'s attempt.
+    /// before the model call it names — once the verifier's watch has
+    /// written the tree it started on — and `after` landing once its turns
+    /// are over, before its completion is recorded. Answers the verdict it
+    /// wrote about `judged`'s attempt.
     fn spawn_a_verifier(
         cwd: &std::path::Path,
         ws: &Workspace,
         judged: &AgentOutput,
         id: &str,
-        edits: &[(usize, &'static str)],
+        edits: &[(usize, Option<&'static str>)],
         after: Option<&'static str>,
     ) -> runtime::RouteOutcomeRecord {
         let attempt = runtime::spawn_attempt_key(&judged.agent_id, judged.run_generation).expect("an attempt");
@@ -4548,9 +4571,11 @@ mod tests {
         verifier.schema = Some(crate::workflow_tools::verdict_schema());
         let parser = ws.parser();
         let edits: Vec<_> = edits.iter().map(|(at, words)| (*at, parser.clone(), *words)).collect();
+        let tree = (ws.repo.clone(), crate::misc_tools::smart_router::challenger_trees_written(&ws.repo) + 1);
         super::spawn_agent_job_with(verifier, move |job, history, _| {
-            let runtime = super::super::agent_runtime::build_agent_runtime_on(job, |_, _, _| Ok(FailsTheWork { calls: 0, edits }))
-                .map_err(runtime::RuntimeError::new)?;
+            let runtime =
+                super::super::agent_runtime::build_agent_runtime_on(job, |_, _, _| Ok(FailsTheWork { calls: 0, edits, tree }))
+                    .map_err(runtime::RuntimeError::new)?;
             let outcome =
                 super::run_agent_job_on(job, runtime, history, &crate::misc_tools::smart_router::ChallengerArm::live);
             if let Some(words) = after {
@@ -4687,7 +4712,7 @@ mod tests {
 
         // Someone else's edit lands while the verifier reads, and is taken
         // back to the very bytes handed in before the verifier is done.
-        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-mid-edit", &[(0, ANOTHER_EDIT), (1, HANDED_IN_WORDS)], None);
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-mid-edit", &[(0, Some(ANOTHER_EDIT)), (1, Some(HANDED_IN_WORDS))], None);
         assert_eq!(
             sr::challenger_source_of(&ws.repo).as_deref(),
             Some(handed_in.as_str()),
@@ -4733,7 +4758,7 @@ mod tests {
         let handed_in = run.source.clone().expect("the drawn attempt names the source it handed in");
         comparison_of(&rig, &key);
 
-        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-let-go-mid-edit", &[(0, ANOTHER_EDIT), (1, HANDED_IN_WORDS)], None);
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-let-go-mid-edit", &[(0, Some(ANOTHER_EDIT)), (1, Some(HANDED_IN_WORDS))], None);
         assert_eq!(
             sr::challenger_source_of(&ws.repo).as_deref(),
             Some(handed_in.as_str()),
@@ -4745,6 +4770,36 @@ mod tests {
 
         let saw_it = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-let-go-untouched", &[], None);
         assert_eq!(saw_it.source.as_deref(), Some(handed_in.as_str()), "nothing moved: the verifier saw what was handed in");
+        let label = label_of(&rig, &key);
+        assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), Some(handed_in.as_str()));
+    }
+
+    /// 감시할 파일이 하나도 없는 source도 감시한다(t-6263 R4a-2): HEAD가 아무것도 들지 않은 저장소에서 넘긴 source는 빈
+    /// 트리다 — 검증자의 감시가 그 트리를 쓴 뒤 검증하는 동안 파일이 생겼다가(검증자가 읽는다) 지워져 트리가 다시 비어도, 그
+    /// 검증은 넘긴 source를 봤다고 말하지 못한다 — 영수증도 라벨도 표본도 없다. 같은 저장소에서 아무것도 바뀌지 않은 검증은
+    /// 빈 트리를 봤다고 말하고 라벨이 된다. 제품의 스폰 길(검증자의 실행 그 자체)을 지난다.
+    #[test]
+    fn a_verifier_over_an_empty_tree_sees_a_file_come_and_go() {
+        use crate::misc_tools::smart_router as sr;
+        use zerocode_core::jev::challenger::VERIFIED_SOURCE;
+
+        let key = a_drawing_key(6);
+        let rig = an_acting_rig(sr::ChallengerScripted::answering("CHALLENGER: split the parser and test each half"));
+        let cwd = rig.cwd.clone();
+        let ws = Workspace::empty();
+        let (manifest, run) = spawn_an_attempt(&rig, &ws, &key);
+        let handed_in = run.source.clone().expect("the drawn attempt names the source it handed in");
+        comparison_of(&rig, &key);
+
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-empty-come-and-go", &[(0, Some(ANOTHER_EDIT)), (1, None)], None);
+        assert_eq!(sr::challenger_source_of(&ws.repo).as_deref(), Some(handed_in.as_str()), "the tree is empty again");
+        assert_eq!(saw_another.source, None, "a verifier that read a file come and gone cannot say it saw the empty tree");
+        let _ = sr::note_challenger_verdicts(&cwd);
+        assert!(labels_of(&rig, &key).is_empty(), "no receipt, no label: {:?}", rig.rows());
+        assert_eq!(samples_of(&cwd, &key), 0, "and no sample");
+
+        let saw_it = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-empty-untouched", &[], None);
+        assert_eq!(saw_it.source.as_deref(), Some(handed_in.as_str()), "nothing moved: the verifier saw the empty tree");
         let label = label_of(&rig, &key);
         assert_eq!(VERIFIED_SOURCE.read(&label).and_then(serde_json::Value::as_str), Some(handed_in.as_str()));
     }
@@ -4762,7 +4817,7 @@ mod tests {
         let handed_in = run.source.clone().expect("the drawn attempt names the source it handed in");
         comparison_of(&rig, &key);
 
-        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-committed-mid-edit", &[(0, ANOTHER_EDIT), (1, HANDED_IN_WORDS)], None);
+        let saw_another = spawn_a_verifier(&cwd, &ws, &manifest, "verifier-committed-mid-edit", &[(0, Some(ANOTHER_EDIT)), (1, Some(HANDED_IN_WORDS))], None);
         assert_eq!(sr::challenger_source_of(&ws.repo).as_deref(), Some(handed_in.as_str()), "the tree is back");
         assert_eq!(saw_another.source, None, "a verifier that read the file mid-edit cannot say it saw what was handed in");
         let _ = sr::note_challenger_verdicts(&cwd);

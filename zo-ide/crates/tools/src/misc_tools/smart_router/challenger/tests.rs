@@ -1851,16 +1851,131 @@ fn a_label_off_the_record_never_stands_against_a_verdict_still_on_it() {
 /// only, so what the attempts' runs and verdicts said ages out, as it does
 /// on a machine that goes on working.
 fn age_out(cwd: &Path, attempts: &[&str]) {
+    age_out_rows(cwd, |record| record.run_id.as_deref().is_some_and(|run| attempts.contains(&run)));
+}
+
+/// The route-outcome ledger with the incumbent's own runs appended until it
+/// holds no row `gone` picks — the oldest rows of the bucket leave first.
+fn age_out_rows(cwd: &Path, gone: impl Fn(&RouteOutcomeRecord) -> bool) {
     let now = now_ms() / 1_000;
     for n in 0.. {
         let records = runtime::read_route_outcomes(cwd).expect("records");
-        if !records.iter().any(|record| record.run_id.as_deref().is_some_and(|run| attempts.contains(&run))) {
+        if !records.iter().any(&gone) {
             return;
         }
-        assert!(n < 10_000, "the ledger never let go of {attempts:?}");
+        assert!(n < 10_000, "the ledger never let go of the rows");
         runtime::record_route_outcome(cwd, &incumbent_run(n, now)).expect("a later run");
     }
 }
+
+/// The attempts [`contradicted_window`] contradicts.
+const CONTRADICTED: [&str; 3] = ["window-0#1", "window-1#1", "window-2#1"];
+
+/// A standing window laid down in `rig`'s ledgers — every comparison
+/// labelled by a failing receipt the judge agreed with, each label keeping
+/// the evidence it was bound on but the [`CONTRADICTED`] ones' where
+/// `kept_its_evidence` is false, and each followed by its sample — and the
+/// record contradicting the three: a run that handed in another source, a
+/// first receipt that passed the work, a run no verdict followed.
+fn contradicted_window(rig: &Rig, kept_its_evidence: bool) {
+    rig.seed_a_standing_window(false);
+    let ledger = challenger_path(&rig.cwd);
+    for n in 0..A_WINDOW_OF_COMPARISONS {
+        let attempt = format!("window-{n}#1");
+        let label = if kept_its_evidence || !CONTRADICTED.contains(&attempt.as_str()) {
+            arm::label_row(&attempt, &receipted(Receipt::Failed), Preferred::Challenger, 1)
+        } else {
+            unproven_label(&attempt, Receipt::Failed, Preferred::Challenger, 1)
+        };
+        append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+        let sample = sample_of(&Labelled { attempt, ..labelled("") }).expect("an agreeing label");
+        runtime::record_route_outcome(&rig.cwd, &sample).expect("the sample it was given");
+    }
+    let record = |row: RouteOutcomeRecord| runtime::record_route_outcome(&rig.cwd, &row).expect("a row");
+    record(handed_in("window-0#1", Some("tree-another")));
+    record(handed_in("window-1#1", Some(HANDED_IN)));
+    record(verdict("window-1#1", runtime::OUTCOME_COMPLETED, VerdictSubject::Work, VERDICT_AT - 1));
+    record(handed_in("window-2#1", Some(HANDED_IN)));
+}
+
+/// That the router's reader admits no sample of a [`CONTRADICTED`] label,
+/// and every other one of the window's.
+fn assert_the_contradicted_unadmitted(rig: &Rig, when: &str) {
+    let admitted = admitted(&rig.cwd);
+    for attempt in CONTRADICTED {
+        assert!(!admitted.contains(&sample_attempt_key(attempt)), "{when}: {attempt}'s label was contradicted");
+    }
+    assert_eq!(admitted.len(), A_WINDOW_OF_COMPARISONS - CONTRADICTED.len(), "{when}: every other label stands");
+}
+
+/// The attempts the strikes in `rig`'s ledger name, in the order written.
+fn struck_on_file(rig: &Rig) -> Vec<String> {
+    rig.rows().iter().filter_map(|row| word(row, &arm::STRUCK)).collect()
+}
+
+thread_local! {
+    /// How this thread's next strike appends are refused
+    /// ([`refused_strike`]): with an error of this kind, or — `None` — with
+    /// an `Ok` that wrote nothing, as a write the shadow ledger declines
+    /// answers ([`append_shadow_row`]).
+    static REFUSED_STRIKES: std::cell::RefCell<std::collections::VecDeque<Option<std::io::ErrorKind>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// The refusal queued for this thread's next strike append (`append_strike`).
+pub(super) fn refused_strike() -> Option<std::io::Result<()>> {
+    REFUSED_STRIKES
+        .with(|queued| queued.borrow_mut().pop_front())
+        .map(|refusal| refusal.map_or(Ok(()), |kind| Err(kind.into())))
+}
+
+/// Refuse this thread's next `times` strike appends as `refusal` says.
+fn refuse_strikes(times: usize, refusal: Option<std::io::ErrorKind>) {
+    REFUSED_STRIKES.with(|queued| queued.borrow_mut().extend(std::iter::repeat_n(refusal, times)));
+}
+
+/// Whether every refusal this thread queued was spent.
+fn every_refusal_spent() -> bool {
+    REFUSED_STRIKES.with(|queued| queued.borrow().is_empty())
+}
+
+/// How many trees a [`SourceWatch`] has written, by the root it watched —
+/// what a test holds an edit on until the watch's tree is written, since
+/// the tree is written on a thread of its own while the verifier works and
+/// the order of the two is not promised.
+static WATCHED_TREES: (Mutex<std::collections::BTreeMap<PathBuf, usize>>, std::sync::Condvar) =
+    (Mutex::new(std::collections::BTreeMap::new()), std::sync::Condvar::new());
+
+/// A watch over `root` has written its tree.
+pub(super) fn tree_written(root: &Path) {
+    let (written, changed) = &WATCHED_TREES;
+    *written.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(root.to_path_buf()).or_default() += 1;
+    changed.notify_all();
+}
+
+/// How many trees watches over `root` have written.
+pub(crate) fn trees_written(root: &Path) -> usize {
+    WATCHED_TREES.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(root).copied().unwrap_or_default()
+}
+
+/// Wait until watches over `root` have written `count` trees.
+pub(crate) fn wait_for_trees_written(root: &Path, count: usize) {
+    let (written, changed) = &WATCHED_TREES;
+    let started = Instant::now();
+    let mut seen = written.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    while seen.get(root).copied().unwrap_or_default() < count {
+        assert!(started.elapsed() < Duration::from_secs(60), "no watch over {} wrote its tree", root.display());
+        seen = changed
+            .wait_timeout(seen, Duration::from_millis(100))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0;
+    }
+}
+
+/// The three ways a strike can fail to land: two errors, and an `Ok` that
+/// wrote nothing.
+const STRIKE_REFUSALS: [Option<std::io::ErrorKind>; 3] =
+    [Some(std::io::ErrorKind::PermissionDenied), Some(std::io::ErrorKind::WriteZero), None];
 
 /// 기록이 반박한 라벨은 기록이 그 시도를 잊은 뒤에도 서지 않는다(t-6263 R4c-1): 다른 source를 넘긴 실행·먼저 통과한
 /// verdict·영수증 없는 실행이 라벨을 반박한 뒤, 실행 행과 verdict가 보존 한도로 기록에서 빠져도 그 라벨의 표본은 인정되지
@@ -1870,51 +1985,26 @@ fn age_out(cwd: &Path, attempts: &[&str]) {
 /// 표본이 된다: 기록이 옛 라벨을 스스로 묶거나, 그어진 라벨 옆에 새 라벨이 보태진다.
 #[test]
 fn a_label_the_record_contradicted_stays_unadmitted_once_the_record_forgets_the_run() {
-    let contradicted = ["window-0#1", "window-1#1", "window-2#1"];
     for kept_its_evidence in [false, true] {
         let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
-        rig.seed_a_standing_window(false);
-        let ledger = challenger_path(&rig.cwd);
-        for n in 0..A_WINDOW_OF_COMPARISONS {
-            let attempt = format!("window-{n}#1");
-            let label = if kept_its_evidence || !contradicted.contains(&attempt.as_str()) {
-                arm::label_row(&attempt, &receipted(Receipt::Failed), Preferred::Challenger, 1)
-            } else {
-                unproven_label(&attempt, Receipt::Failed, Preferred::Challenger, 1)
-            };
-            append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
-            let sample = sample_of(&Labelled { attempt, ..labelled("") }).expect("an agreeing label");
-            runtime::record_route_outcome(&rig.cwd, &sample).expect("the sample it was given");
-        }
+        contradicted_window(&rig, kept_its_evidence);
         let now = now_ms() / 1_000;
         let record = |row: RouteOutcomeRecord| runtime::record_route_outcome(&rig.cwd, &row).expect("a row");
-        record(handed_in("window-0#1", Some("tree-another")));
-        record(handed_in("window-1#1", Some(HANDED_IN)));
-        record(verdict("window-1#1", runtime::OUTCOME_COMPLETED, VerdictSubject::Work, VERDICT_AT - 1));
-        record(handed_in("window-2#1", Some(HANDED_IN)));
         let written = rig.rows();
-        let look = |when: &str| {
-            let admitted = admitted(&rig.cwd);
-            for attempt in contradicted {
-                assert!(!admitted.contains(&sample_attempt_key(attempt)), "{kept_its_evidence} {when}: {attempt}'s label was contradicted");
-            }
-            assert_eq!(admitted.len(), A_WINDOW_OF_COMPARISONS - contradicted.len(), "{kept_its_evidence} {when}: every other label stands");
-        };
+        let look = |when: &str| assert_the_contradicted_unadmitted(&rig, &format!("{kept_its_evidence} {when}"));
         if kept_its_evidence {
             // A reader sees the contradiction while the record still says it.
             look("on record");
         }
-        age_out(&rig.cwd, &contradicted);
+        age_out(&rig.cwd, &CONTRADICTED);
         look("aged out");
         assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 0, "no receipt: nothing to label");
         look("after the writer");
         assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS, "{kept_its_evidence}: and no sample is written");
         let rows = rig.rows();
         assert_eq!(&rows[..written.len()], written.as_slice(), "{kept_its_evidence}: every row stands as it was written");
-        let struck: Vec<&str> =
-            rows.iter().filter_map(|row| arm::STRUCK.read(row).and_then(Value::as_str)).collect();
-        let owed: &[&str] = if kept_its_evidence { &contradicted } else { &[] };
-        assert_eq!(struck, owed, "each contradiction a reader saw written down once, beside its label");
+        let owed: &[&str] = if kept_its_evidence { &CONTRADICTED } else { &[] };
+        assert_eq!(struck_on_file(&rig), owed, "each contradiction a reader saw written down once, beside its label");
 
         // A lawful receipt on the source handed in, on record again.
         record(handed_in("window-2#1", Some(HANDED_IN)));
@@ -1958,6 +2048,74 @@ fn a_label_the_labeller_bound_stands_on_its_evidence_once_the_record_forgets_the
     assert_eq!(rig.rows().len(), before, "nor struck");
     assert!(rig.sampled("window-0#1"));
     assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS, "and no sample written twice");
+}
+
+/// 독자가 읽은 반박은 줄긋기 저장이 실패해도 사라지지 않는다(t-6263 R4c-2): 기록이 라벨을 반박하는 동안 학습기의 읽기가
+/// 그 반박을 봤는데 줄긋기 append가 거절되면(권한 없음·쓰인 바이트 0, 또는 shadow 원장이 사양하는 쓰기처럼 `Ok`인데
+/// 아무것도 안 쓰임), 그 반박은 원장이 되돌려 보여 줄 때까지 붙잡힌다 — 그 사이 실행 행과 verdict가 보존 한도로 기록에서
+/// 빠져도 라벨의 표본은 인정되지 않고 새 표본도 없으며, 쓰기가 돌아오면 그 줄긋기가 원 행 옆에 한 번 적힌다. 옛 행은
+/// 바이트 그대로다.
+#[test]
+fn a_contradiction_a_reader_saw_is_held_until_its_strike_lands() {
+    for refusal in STRIKE_REFUSALS {
+        let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+        contradicted_window(&rig, true);
+        let written = rig.rows();
+        refuse_strikes(CONTRADICTED.len(), refusal);
+        assert_the_contradicted_unadmitted(&rig, &format!("{refusal:?} on record"));
+        assert!(every_refusal_spent(), "{refusal:?}: the reader tried to write every strike it owed");
+        assert_eq!(rig.rows(), written, "{refusal:?}: and none landed");
+
+        age_out(&rig.cwd, &CONTRADICTED);
+        assert_the_contradicted_unadmitted(&rig, &format!("{refusal:?} aged out"));
+        assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 0, "no receipt: nothing to label");
+        assert_the_contradicted_unadmitted(&rig, &format!("{refusal:?} after the writer"));
+        assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS, "{refusal:?}: and no sample is written");
+        let rows = rig.rows();
+        assert_eq!(&rows[..written.len()], written.as_slice(), "{refusal:?}: every row stands as it was written");
+        assert_eq!(struck_on_file(&rig), CONTRADICTED, "{refusal:?}: each held strike written down once, beside its label");
+    }
+}
+
+/// 라벨러가 적법하게 묶은 라벨도 같다(t-6263 R4c-2): 영수증(실패)으로 라벨과 표본이 선 뒤 같은 source에 나중 verdict(통과)가
+/// 기록되고 실행 행만 먼저 보존 한도로 빠지면 남은 verdict가 라벨을 반박한다 — 그때 줄긋기 저장이 실패하고 나머지 verdict까지
+/// 빠져도 그 표본은 다시 인정되지 않으며, 쓰기가 돌아오면 줄긋기가 한 번 적힌다.
+#[test]
+fn a_lawful_label_a_later_verdict_gainsays_stays_unadmitted_whatever_its_strike_met() {
+    let attempt = "window-0#1";
+    for refusal in STRIKE_REFUSALS {
+        let rig = Rig::new(JevMode::On, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+        rig.seed_a_standing_window(false);
+        let ledger = challenger_path(&rig.cwd);
+        for n in 1..A_WINDOW_OF_COMPARISONS {
+            let label = arm::label_row(&format!("window-{n}#1"), &receipted(Receipt::Failed), Preferred::Challenger, 1);
+            append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+        }
+        let now = now_ms() / 1_000;
+        let record = |row: RouteOutcomeRecord| runtime::record_route_outcome(&rig.cwd, &row).expect("a row");
+        record(handed_in(attempt, Some(HANDED_IN)));
+        record(verdict(attempt, runtime::OUTCOME_FAILED, VerdictSubject::Work, now));
+        assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 1, "{refusal:?}: the labeller binds it");
+        let sample = sample_attempt_key(attempt);
+        assert!(admitted(&rig.cwd).contains(&sample), "{refusal:?}: its sample is admitted");
+
+        // A later verdict on the same source says the work passed; the run
+        // leaves the record first.
+        record(verdict(attempt, runtime::OUTCOME_COMPLETED, VerdictSubject::Work, now + 9));
+        age_out_rows(&rig.cwd, |row| row.run_id.as_deref() == Some(attempt) && is_run_row(row));
+        let written = rig.rows();
+        refuse_strikes(1, refusal);
+        assert!(!admitted(&rig.cwd).contains(&sample), "{refusal:?}: a verdict still on record gainsays its label");
+        assert!(every_refusal_spent(), "{refusal:?}: the reader tried to write its strike");
+        assert_eq!(rig.rows(), written, "{refusal:?}: and it did not land");
+
+        age_out(&rig.cwd, &[attempt]);
+        assert!(!admitted(&rig.cwd).contains(&sample), "{refusal:?}: the record forgot the verdict; the label stays taken back");
+        assert_eq!(note_verdicts_in(&rig.cwd, Some(JevMode::On), &feed_into(&rig.cwd)), 0, "{refusal:?}: nothing to label");
+        assert!(!admitted(&rig.cwd).contains(&sample), "{refusal:?}: after the writer");
+        assert_eq!(struck_on_file(&rig), [attempt], "{refusal:?}: its strike written down once, beside its label");
+        assert_eq!(rig.samples(), A_WINDOW_OF_COMPARISONS, "{refusal:?}: and no sample written twice");
+    }
 }
 
 /// 결과가 있는 도전 행은 모두 물은 말의 버전을 적는다(t-6263 R5): 답한 비교·벽을 넘긴 비교·검사에 걸린 답·문이

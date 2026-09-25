@@ -41,8 +41,9 @@
 //!    nothing, or that judged some other source, labels nothing; and a label
 //!    that names no source, one that proves no binding once the record has
 //!    forgotten the run, or one the record contradicts — now, or before it
-//!    forgot the rows that said so, which a strike keeps — is read as no
-//!    label at all ([`binding`], [`bound_rows`]).
+//!    forgot the rows that said so, which a strike keeps, and which this
+//!    process holds until the ledger shows it back — is read as no label at
+//!    all ([`binding`], [`bound_rows`]).
 //! 4. **Acting** (`auto` once the seat's own evidence has raised it, or a
 //!    person's `on`): a labelled comparison whose receipt and judge agree
 //!    becomes one verified sample of the challenger in the route-outcome
@@ -1333,7 +1334,12 @@ impl SourceWatch {
         let hashing = root.clone();
         let tree = std::thread::Builder::new()
             .name("zo-challenger-source".to_string())
-            .spawn(move || runtime::git_snapshot::compute_worktree_source(&hashing).ok())
+            .spawn(move || {
+                let source = runtime::git_snapshot::compute_worktree_source(&hashing).ok();
+                #[cfg(test)]
+                tests::tree_written(&hashing);
+                source
+            })
             .ok()?;
         Some(Self { root, stamp, tree })
     }
@@ -1541,16 +1547,80 @@ fn strikes_due(rows: &[Value], on_record: &OnRecord<'_>, now_ms: i64) -> Vec<Val
 /// The challenger's ledger at `ledger` as its readers read it
 /// ([`keep_bound_labels`]) — every contradiction the reading finds written
 /// down first ([`strikes_due`]): one `O_APPEND` line each, beside the label,
-/// never over it; a strike two readers both wrote is one strike.
+/// never over it; a strike two readers both wrote is one strike. A strike
+/// is kept only once the ledger shows it back: until a reading finds it
+/// there, it is held apart from the record whose retention would forget
+/// what contradicted the label ([`UNSEEN_STRIKES`]), written again by every
+/// reading, and taken back by every reading meanwhile — an append that
+/// failed, or that answered `Ok` and wrote nothing, as a write the shadow
+/// ledger declines does ([`append_shadow_row`]), never gives a contradicted
+/// label back.
 fn bound_rows(ledger: &Path, on_record: &OnRecord<'_>, now_ms: i64) -> Vec<Value> {
     let mut rows = read_shadow_rows(ledger);
-    for strike in strikes_due(&rows, on_record, now_ms) {
-        if append_shadow_row(ledger, &strike, SHADOW_LEDGER_MAX_BYTES).is_ok() {
-            rows.push(strike);
-        }
+    let due = strikes_due(&rows, on_record, now_ms);
+    for strike in unseen_strikes(ledger, &rows, due) {
+        let _ = append_strike(ledger, &strike);
+        rows.push(strike);
     }
     keep_bound_labels(&mut rows, on_record);
     rows
+}
+
+/// Every strike a reading of this process owed a ledger that the ledger
+/// has not yet shown back, by ledger, each under the print of the label it
+/// takes back ([`bound_rows`]). In this process only: the record's
+/// retention cannot reach it, and a strike that lands leaves it at the next
+/// reading.
+static UNSEEN_STRIKES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::collections::BTreeMap<String, Value>>>,
+> = std::sync::OnceLock::new();
+
+/// The strikes `ledger` still owes once `rows` — the ledger as it was just
+/// read — and the strikes `due` now are taken into account, in the order
+/// the ledger holds the labels they take back: each held
+/// ([`UNSEEN_STRIKES`]) until `rows` show it, or until `rows` no longer
+/// hold the label it takes back.
+fn unseen_strikes(ledger: &Path, rows: &[Value], due: Vec<Value>) -> Vec<Value> {
+    let shown = arm::struck_prints(rows);
+    let labels: Vec<String> = rows.iter().filter(|row| LABEL.read(row).is_some()).map(arm::label_print).collect();
+    let mut book = UNSEEN_STRIKES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let unseen = book.entry(ledger.to_path_buf()).or_default();
+    for strike in due {
+        if let Some(print) = arm::STRUCK_PRINT.read(&strike).and_then(Value::as_str) {
+            unseen.entry(print.to_string()).or_insert(strike);
+        }
+    }
+    let mut owing = std::collections::BTreeSet::new();
+    let mut owed = Vec::new();
+    for print in labels {
+        if shown.contains(print.as_str()) || owing.contains(&print) {
+            continue;
+        }
+        if let Some(strike) = unseen.get(&print) {
+            owed.push(strike.clone());
+            owing.insert(print);
+        }
+    }
+    // What the ledger shows, or no longer holds a label for, leaves the book.
+    unseen.retain(|print, _| owing.contains(print));
+    if unseen.is_empty() {
+        book.remove(ledger);
+    }
+    owed
+}
+
+/// Append `strike` beside the label it takes back — the shadow ledger's one
+/// append; under a test, first whatever refusal the test's thread queued
+/// (`tests::refused_strike`).
+fn append_strike(ledger: &Path, strike: &Value) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(refused) = tests::refused_strike() {
+        return refused;
+    }
+    append_shadow_row(ledger, strike, SHADOW_LEDGER_MAX_BYTES)
 }
 
 /// One labelled comparison, for the sample it may become.
