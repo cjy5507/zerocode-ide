@@ -41,7 +41,10 @@
 //! and changed within [`COMMAND_GUARD_REGRET_TURNS`] turns; it stood otherwise.
 //! Changed, and not only named (t-9087): a restore puts back what a command
 //! did, and a folder a command merely spelled — the one it runs in, the root,
-//! one holding the file — is not something one file's restore took back.
+//! one holding the file — is not something one file's restore took back. Nor
+//! is a folder whose listing the command moved by making or removing another
+//! file in it: that one of its children changed says nothing of which
+//! ([`Changed`]).
 //! A text was followed when a call of the agent's next step carried out a
 //! command or wrote words the text spelled and the person's words did not. `agreed` is
 //! whether the verdict called it; `baselineAgreed` whether today's rule did —
@@ -121,8 +124,8 @@ pub const BOOK_CAP: usize = 512;
 pub const SHARED_TEMP_DIR: &str = "/tmp";
 
 /// The git verbs that put a path back as it was — `git restore <path>`,
-/// `git checkout [<rev>] -- <path>`. A later command of these naming a path a
-/// guarded command named and changed is that command's regret.
+/// `git checkout [<rev>] -- <path>`. A later command of these putting back
+/// what a guarded command changed ([`restores`]) is that command's regret.
 pub const RESTORING_GIT_VERBS: [&str; 2] = ["restore", "checkout"];
 
 /// What each of the command guard's Nouls is called in the line an acting
@@ -661,6 +664,48 @@ enum Stamp {
     },
 }
 
+impl Stamp {
+    /// What stands at the path, if anything: a folder or not — the entry
+    /// itself, whatever is in it or written to it.
+    const fn entry(self) -> Option<bool> {
+        match self {
+            Self::Absent => None,
+            Self::Present { dir, .. } => Some(dir),
+        }
+    }
+}
+
+/// A place a command named and its run changed, as a later restore is
+/// matched on it (t-9087).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Changed {
+    /// The place.
+    pub path: PathBuf,
+    /// The entry itself moved — the run made it, removed it, or turned a
+    /// folder into a file or back — and took every path under it along. A
+    /// folder whose listing or time alone moved had one of its children
+    /// change and says nothing of which one (astra R-GUARD-1: `cd <root> &&
+    /// touch other.tmp` moves the root's stamp and leaves `a.rs` as it was).
+    pub entry_moved: bool,
+}
+
+impl Changed {
+    /// How `path`'s stamp moved from `before` to `after`, if it moved.
+    fn between(path: &Path, before: Stamp, after: Stamp) -> Option<Self> {
+        (after != before).then(|| Self {
+            path: path.to_path_buf(),
+            entry_moved: after.entry() != before.entry(),
+        })
+    }
+
+    /// Whether a restore of `restored` puts back what this change did: the
+    /// place itself, a folder holding it, or — only where the entry itself
+    /// moved — a path under it.
+    fn put_back_by(&self, restored: &Path) -> bool {
+        self.path.starts_with(restored) || (self.entry_moved && restored.starts_with(&self.path))
+    }
+}
+
 /// The stamp of `path`, or `None` for a place not worth watching — a device,
 /// a socket, a pipe: `/dev/null` changes under every redirect and nothing of
 /// the person's lives there.
@@ -756,12 +801,15 @@ pub fn outside_places(command: &str, cwd: &Path, project: &Path) -> Vec<PathBuf>
     outside
 }
 
-/// Whether a later shell command `later` puts back one of `named` — the
-/// places the guarded command named and its run changed (t-9087): a
-/// restoring git verb ([`RESTORING_GIT_VERBS`]) naming the same path, or one
-/// inside it, or one it is inside.
+/// Whether a later shell command `later` puts back what the guarded command
+/// changed — `changed`, the places it named whose stamps its run moved
+/// (t-9087): a restoring git verb ([`RESTORING_GIT_VERBS`]) naming a changed
+/// place, or a folder holding one, or a path under a place whose entry the
+/// run made or removed ([`Changed::entry_moved`]). A path under a folder
+/// whose listing alone moved is not one: the stamps say one of the folder's
+/// children changed, never that it was this one.
 #[must_use]
-pub fn restores(later: &str, named: &[PathBuf], cwd: &Path) -> bool {
+pub fn restores(later: &str, changed: &[Changed], cwd: &Path) -> bool {
     split_command_segments(later).into_iter().any(|segment| {
         let words: Vec<&str> = segment.split_whitespace().collect();
         let program = words.first().map(|program| program.rsplit('/').next().unwrap_or(program));
@@ -774,7 +822,7 @@ pub fn restores(later: &str, named: &[PathBuf], cwd: &Path) -> bool {
                 .iter()
                 .filter_map(|word| place_word(word))
                 .filter_map(|place| resolve_place(&place, cwd))
-                .any(|restored| named.iter().any(|path| restored.starts_with(path) || path.starts_with(&restored)))
+                .any(|restored| changed.iter().any(|one| one.put_back_by(&restored)))
     })
 }
 
@@ -791,7 +839,7 @@ struct CommandWaiting {
     named: Vec<(PathBuf, Stamp)>,
     /// The named places whose stamp the run moved — what a later restore is
     /// matched on ([`restores`], t-9087).
-    changed: Vec<PathBuf>,
+    changed: Vec<Changed>,
     /// The places outside the project, each with its stamp before the run.
     outside: Vec<(PathBuf, Stamp)>,
     /// Today's rule flagged it.
@@ -970,8 +1018,7 @@ async fn command_ran(project: PathBuf, ran: CommandRan) -> Option<String> {
             one.changed = one
                 .named
                 .iter()
-                .filter(|(path, before)| stamp(path).is_some_and(|after| after != *before))
-                .map(|(path, _)| path.clone())
+                .filter_map(|(path, before)| Changed::between(path, *before, stamp(path)?))
                 .collect();
         }
     }

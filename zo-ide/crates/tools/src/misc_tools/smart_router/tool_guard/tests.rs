@@ -142,19 +142,34 @@ fn the_places_a_command_names_outside_its_task_are_the_ones_stamped() {
     assert_eq!(resolve_place("src/*.rs", cwd), None);
 }
 
-/// A later `git restore` or `git checkout -- <path>` of a path the guarded
-/// command named puts it back — the command's regret; a restore elsewhere and
-/// every other command do not.
+/// A later `git restore` or `git checkout -- <path>` putting back what the
+/// guarded command changed is the command's regret: the file it wrote, a
+/// folder holding it, a path under a folder it removed. A restore elsewhere,
+/// a path under a folder whose listing alone it moved (t-9087, astra
+/// R-GUARD-1), and every other command are not.
 #[test]
 fn a_later_git_restore_of_a_named_path_is_a_regret() {
     let cwd = Path::new("/work/zo");
-    let named = [cwd.join("build"), cwd.join("src/flag.rs")];
-    assert!(restores("git checkout -- build/a.rs", &named, cwd));
-    assert!(restores("git restore src/flag.rs", &named, cwd));
-    assert!(restores("cd /work/zo && git checkout .", &named, cwd), "a restore of the whole folder");
-    assert!(!restores("git restore docs/readme.md", &named, cwd));
-    assert!(!restores("git status", &named, cwd));
-    assert!(!restores("rm -rf build", &named, cwd));
+    let changed = [
+        // A folder the command removed, and a file it wrote.
+        Changed { path: cwd.join("build"), entry_moved: true },
+        Changed { path: cwd.join("src/flag.rs"), entry_moved: false },
+    ];
+    assert!(restores("git checkout -- build/a.rs", &changed, cwd));
+    assert!(restores("git restore src/flag.rs", &changed, cwd));
+    assert!(restores("git checkout -- src", &changed, cwd), "a restore of a folder holding it");
+    assert!(restores("cd /work/zo && git checkout .", &changed, cwd), "a restore of the whole folder");
+    assert!(!restores("git restore docs/readme.md", &changed, cwd));
+    assert!(!restores("git restore src/other.rs", &changed, cwd), "another file beside it");
+    assert!(!restores("git status", &changed, cwd));
+    assert!(!restores("rm -rf build", &changed, cwd));
+
+    // A folder whose listing moved — another file made in it — puts back
+    // nothing under it but itself.
+    let listing = [Changed { path: cwd.join("src"), entry_moved: false }];
+    assert!(!restores("git checkout -- src/a.rs", &listing, cwd));
+    assert!(restores("git checkout -- src", &listing, cwd));
+    assert!(restores("git checkout .", &listing, cwd));
 }
 
 /// A later restore puts back what a command changed, not every folder it
@@ -517,8 +532,8 @@ fn waiting_command(judged: u64, id: &str, cwd: &Path, rule_flagged: bool, verdic
         tool_use_id: id.to_string(),
         cwd: cwd.to_path_buf(),
         // A command that removed the folder it named.
-        named: vec![(cwd.join("build"), Stamp::Absent)],
-        changed: vec![cwd.join("build")],
+        named: vec![(cwd.join("build"), Stamp::Present { dir: true, len: 64, modified: None })],
+        changed: vec![Changed { path: cwd.join("build"), entry_moved: true }],
         outside: Vec::new(),
         rule_flagged,
         verdict: Some(verdict),

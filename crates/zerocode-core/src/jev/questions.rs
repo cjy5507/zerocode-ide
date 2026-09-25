@@ -630,8 +630,11 @@ pub fn tool_text_guard_rubric_fingerprint() -> String {
 /// regret of every command that named a folder holding what it put back: on
 /// this machine's ledger (2026-09-25) two single-file checkouts wrote 51
 /// `restored` labels, 49 of them for commands that never spelled the file.
-/// Version 2 asks the same words and grades a restore against the places a
-/// command changed (t-9087, `tool_guard::restores` in the tools crate). The
+/// Version 2 asks the same words and grades a restore against what a
+/// command changed — the place itself, a folder holding it, or a path under
+/// a folder it made or removed, and never every file of a folder whose
+/// listing alone it moved (t-9087, `tool_guard::restores` in the tools
+/// crate). The
 /// version rides every request row so a reader can tell the series apart;
 /// reading them apart is t-6877's contract, as the text guard's is.
 pub const COMMAND_GUARD_RUBRIC_VERSION: u32 = 2;
