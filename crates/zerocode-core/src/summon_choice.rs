@@ -158,7 +158,12 @@ const STATE_KEYS: [&str; 8] = [
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`],
 /// so changing a word without bumping the version is a red test rather than a
 /// quiet drift.
-pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 4;
+///
+/// Or when the label they are graded by changes: version 5 asks version 4's
+/// words and marks no summons whose model was pinned ([`PINNED`], t-9087).
+/// The version rides every row, so a reader can tell the series apart;
+/// reading them apart is t-6877's contract.
+pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 5;
 
 /// The fewest options that make a choice. One agent is not a question, and a
 /// question asked where there was nothing to decide is a row that says the
@@ -187,6 +192,16 @@ pub const NOT_COMPARED_KEY: &str = crate::jev::summary::NOT_COMPARED.canonical;
 /// named the agent did not disagree about it, and evidence about nothing may
 /// not reach the statistics a seat rises on.
 pub const NOT_OFFERED: &str = "not_offered";
+
+/// [`NOT_COMPARED_KEY`]'s word for a summons whose model was pinned (t-9087).
+///
+/// The pin is the person's word and binds the launch: an apply stage leaves
+/// such a summons alone, and the agent typed beside it is the pin's own CLI.
+/// On this machine's ledger (2026-09-25) all 121 marked summonses of the
+/// fourth words were pinned and the pin's CLI carried every one, so the
+/// seat's baseline stood at 1,000‰ over its marks and no answer could clear
+/// it — the marks graded the pin, not the seat.
+pub const PINNED: &str = "pinned";
 
 /// The row's key for the model the summons launched its worker with, beside
 /// `agent` and `effort` — the coordinator's word after the quota gate had

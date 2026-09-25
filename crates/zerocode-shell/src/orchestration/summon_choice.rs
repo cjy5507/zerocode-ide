@@ -227,11 +227,18 @@ fn settle(
             // judgment that could not have named it did not disagree about
             // it, so the row says WHY in a word instead of a mark it has no
             // right to (t-4839).
+            // Nor on one whose model was pinned (t-9087): the pin is the
+            // person's word, an apply stage leaves the summons alone, and a
+            // mark there grades the pin's own CLI rather than the seat.
             if !shadow.auto {
-                if ask.offered(&shadow.pinned.agent) {
+                if !ask.offered(&shadow.pinned.agent) {
+                    row[summon_choice::NOT_COMPARED_KEY] = json!(summon_choice::NOT_OFFERED);
+                } else if shadow.model_was_pinned {
+                    row[summon_choice::NOT_COMPARED_KEY] = json!(summon_choice::PINNED);
+                } else {
                     row["agreed"] = json!(pick.chosen == shadow.pinned.agent);
                     // The seat's baseline on the same summons, today's rule:
-                    // the pinned model's own vendor CLI (t-6342).
+                    // the launched model's own vendor CLI (t-6342).
                     if let Some(native) = shadow
                         .pinned
                         .model
@@ -241,8 +248,6 @@ fn settle(
                         row[zerocode_core::jev::summary::BASELINE_AGREED.canonical] =
                             json!(native == shadow.pinned.agent);
                     }
-                } else {
-                    row[summon_choice::NOT_COMPARED_KEY] = json!(summon_choice::NOT_OFFERED);
                 }
             }
             row["probabilities"] = json!(pick.probabilities);

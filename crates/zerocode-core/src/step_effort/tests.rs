@@ -47,6 +47,18 @@ fn the_version_is_pinned_to_the_words() {
     );
 }
 
+/// The label's wait is part of what version 1 means (t-9087, astra
+/// R-EFFORT-1): every version 1 row was graded two hours after its move,
+/// and the stall label's wait moving to four did not move this one. Moving
+/// it without a new version turns this red.
+#[test]
+fn the_label_window_is_pinned_to_the_version() {
+    assert_eq!(
+        (STEP_EFFORT_RUBRIC_VERSION, STEP_EFFORT_LABEL_WINDOW_MS),
+        (1, 2 * 60 * 60 * 1_000)
+    );
+}
+
 /// The same call three times running is a loop; a different call between
 /// two of them is not. A result the vendor marked as an error is a failure.
 #[test]

@@ -41,7 +41,9 @@ fn look() -> SummonLook<'static> {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 4);
+    // Version 5 is version 4's words under a label that leaves pinned
+    // summonses unmarked (t-9087), so the fingerprint stands.
+    assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 5);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
         "1d5d6af8efffc1de"

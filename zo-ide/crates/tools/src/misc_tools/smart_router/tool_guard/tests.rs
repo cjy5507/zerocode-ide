@@ -142,19 +142,157 @@ fn the_places_a_command_names_outside_its_task_are_the_ones_stamped() {
     assert_eq!(resolve_place("src/*.rs", cwd), None);
 }
 
-/// A later `git restore` or `git checkout -- <path>` of a path the guarded
-/// command named puts it back — the command's regret; a restore elsewhere and
-/// every other command do not.
+/// A later `git restore` or `git checkout -- <path>` putting back what the
+/// guarded command changed is the command's regret: the file it wrote, a
+/// folder holding it, a path under a folder it removed. A restore elsewhere,
+/// a path under a folder whose listing alone it moved (t-9087, astra
+/// R-GUARD-1), and every other command are not.
 #[test]
 fn a_later_git_restore_of_a_named_path_is_a_regret() {
     let cwd = Path::new("/work/zo");
-    let named = [cwd.join("build"), cwd.join("src/flag.rs")];
-    assert!(restores("git checkout -- build/a.rs", &named, cwd));
-    assert!(restores("git restore src/flag.rs", &named, cwd));
-    assert!(restores("cd /work/zo && git checkout .", &named, cwd), "a restore of the whole folder");
-    assert!(!restores("git restore docs/readme.md", &named, cwd));
-    assert!(!restores("git status", &named, cwd));
-    assert!(!restores("rm -rf build", &named, cwd));
+    let changed = [
+        // A folder the command removed, and a file it wrote.
+        Changed { path: cwd.join("build"), entry_moved: true },
+        Changed { path: cwd.join("src/flag.rs"), entry_moved: false },
+    ];
+    assert!(restores("git checkout -- build/a.rs", &changed, cwd));
+    assert!(restores("git restore src/flag.rs", &changed, cwd));
+    assert!(restores("git checkout -- src", &changed, cwd), "a restore of a folder holding it");
+    assert!(restores("cd /work/zo && git checkout .", &changed, cwd), "a restore of the whole folder");
+    assert!(!restores("git restore docs/readme.md", &changed, cwd));
+    assert!(!restores("git restore src/other.rs", &changed, cwd), "another file beside it");
+    assert!(!restores("git status", &changed, cwd));
+    assert!(!restores("rm -rf build", &changed, cwd));
+
+    // A folder whose listing moved — another file made in it — puts back
+    // nothing under it but itself.
+    let listing = [Changed { path: cwd.join("src"), entry_moved: false }];
+    assert!(!restores("git checkout -- src/a.rs", &listing, cwd));
+    assert!(restores("git checkout -- src", &listing, cwd));
+    assert!(restores("git checkout .", &listing, cwd));
+}
+
+/// A later restore puts back what a command changed, not every folder it
+/// named (t-9087). This machine's ledger (2026-09-25) holds 51 `restored`
+/// labels written in two seconds by two `git checkout <one file>` calls, 49
+/// of them for commands that never spelled the file — a `cd` into the
+/// checkout, a `tr /`, an `ls` of a folder above it — which is 49 of the
+/// seat's 59 disagreements. A command that changed the file is regretted by
+/// its restore; one that only named folders holding it keeps waiting.
+#[test]
+fn a_restore_regrets_the_command_that_changed_what_it_put_back_and_no_other() {
+    let mock = Mock::serving(200, reply(&[(COMMAND_GUARD_IRREVERSIBLE, 0.1), (COMMAND_GUARD_OUTSIDE, 0.1)]));
+    machine(&COMMAND_GUARD, JevMode::Shadow.key(), &mock.base_url, |cwd| {
+        forget_waiting(cwd);
+        std::fs::create_dir_all(cwd.join("src")).expect("a source folder");
+        std::fs::write(cwd.join("src/a.rs"), "fn a() {}\n").expect("a source file");
+        let judge = ToolGuardJudge::at(cwd);
+        let ran = |id: &str| CommandRan {
+            owner: "turn-1".to_string(),
+            tool_use_id: id.to_string(),
+            failed: false,
+            cancelled: false,
+        };
+        // Names the folder it runs in, the root and the folder holding the
+        // file, and changes none of them.
+        let looked = "cd . && ls / src | tr / _";
+        judge.command(command_ask(cwd, "shell-1", looked));
+        assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran("shell-1"))), None);
+        // Changes the file: the runtime runs it between the two calls.
+        let edited = "sed -i '' s/a/b/ src/a.rs";
+        judge.command(command_ask(cwd, "shell-2", edited));
+        std::fs::write(cwd.join("src/a.rs"), "fn b() { 1 }\n").expect("the command's edit");
+        assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran("shell-2"))), None);
+        // Both answered: each verdict is in the book before the turn ends.
+        assert_eq!(rows_of(&command_guard_path(cwd), 2).len(), 2);
+
+        let shell = |id: &str, command: &str| call(id, SHELL_TOOL, &serde_json::json!({"command": command}));
+        let turn = vec![
+            user("fix a"),
+            shell("shell-1", looked),
+            shell("shell-2", edited),
+            shell("shell-3", "git checkout -- src/a.rs"),
+            said("put it back"),
+        ];
+        assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&turn)), 1, "the edit alone was put back");
+        let labels: Vec<CommandGuardLabelRow> = read_shadow_rows::<Value>(&command_guard_path(cwd))
+            .into_iter()
+            .filter_map(|row| serde_json::from_value(row).ok())
+            .collect();
+        let edit = task_fingerprint("turn-1", "shell-2").to_string();
+        assert_eq!(
+            labels.iter().map(|label| (label.label.as_str(), label.hindsight.as_str())).collect::<Vec<_>>(),
+            vec![(edit.as_str(), "restored")]
+        );
+        let waiting = command_book().lock().expect("book");
+        assert_eq!(
+            waiting[cwd].iter().map(|one| one.tool_use_id.as_str()).collect::<Vec<_>>(),
+            vec!["shell-1"],
+            "the look waits on its own window"
+        );
+        drop(waiting);
+        forget_waiting(cwd);
+    });
+}
+
+/// A folder that changed is not every file in it changed (t-9087, astra
+/// R-GUARD-1): a command that runs in the checkout's root and makes or
+/// removes another file there moves the root's own stamp — its listing
+/// changed — and a later restore of a file it never touched is no regret of
+/// it. Whether the restored path moved is what the stamps can say; that one
+/// of a folder's children did says nothing of which.
+#[test]
+fn a_restore_of_one_file_regrets_no_command_that_only_changed_another_in_its_folder() {
+    let mock = Mock::serving(200, reply(&[(COMMAND_GUARD_IRREVERSIBLE, 0.1), (COMMAND_GUARD_OUTSIDE, 0.1)]));
+    machine(&COMMAND_GUARD, JevMode::Shadow.key(), &mock.base_url, |cwd| {
+        forget_waiting(cwd);
+        std::fs::create_dir_all(cwd.join("src")).expect("a source folder");
+        std::fs::write(cwd.join("src/a.rs"), "fn a() {}\n").expect("a source file");
+        let a_rs = std::fs::read(cwd.join("src/a.rs")).expect("the file's bytes");
+        let judge = ToolGuardJudge::at(cwd);
+        let ran = |id: &str| CommandRan {
+            owner: "turn-1".to_string(),
+            tool_use_id: id.to_string(),
+            failed: false,
+            cancelled: false,
+        };
+        // Makes another file in the root: the runtime runs it between the
+        // two calls, and the root's stamp moves with its listing.
+        let made = "cd . && touch other.tmp";
+        let root_before = stamp(cwd);
+        judge.command(command_ask(cwd, "shell-1", made));
+        std::fs::write(cwd.join("other.tmp"), "").expect("the command's file");
+        assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran("shell-1"))), None);
+        let root_made = stamp(cwd);
+        assert_ne!(root_made, root_before, "the root's own stamp moved");
+        // Removes it again: the root moves once more.
+        let removed = "cd . && rm other.tmp";
+        judge.command(command_ask(cwd, "shell-2", removed));
+        std::fs::remove_file(cwd.join("other.tmp")).expect("the command's removal");
+        assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran("shell-2"))), None);
+        assert_ne!(stamp(cwd), root_made, "the root's own stamp moved again");
+        assert_eq!(std::fs::read(cwd.join("src/a.rs")).expect("the file's bytes"), a_rs, "neither touched it");
+        // Both answered: each verdict is in the book before the turn ends.
+        assert_eq!(rows_of(&command_guard_path(cwd), 2).len(), 2);
+
+        let shell = |id: &str, command: &str| call(id, SHELL_TOOL, &serde_json::json!({"command": command}));
+        let turn = vec![
+            user("tidy up"),
+            shell("shell-1", made),
+            shell("shell-2", removed),
+            shell("shell-3", "git checkout -- src/a.rs"),
+            said("put it back"),
+        ];
+        assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&turn)), 0, "a restore of a file neither changed regrets neither");
+        let waiting = command_book().lock().expect("book");
+        assert_eq!(
+            waiting[cwd].iter().map(|one| one.tool_use_id.as_str()).collect::<Vec<_>>(),
+            vec!["shell-1", "shell-2"],
+            "each waits on its own window"
+        );
+        drop(waiting);
+        forget_waiting(cwd);
+    });
 }
 
 /// A text was followed when the agent's next step ran a command it spelled —
@@ -393,7 +531,9 @@ fn waiting_command(judged: u64, id: &str, cwd: &Path, rule_flagged: bool, verdic
         owner: "turn-1".to_string(),
         tool_use_id: id.to_string(),
         cwd: cwd.to_path_buf(),
-        named: vec![cwd.join("build")],
+        // A command that removed the folder it named.
+        named: vec![(cwd.join("build"), Stamp::Present { dir: true, len: 64, modified: None })],
+        changed: vec![Changed { path: cwd.join("build"), entry_moved: true }],
         outside: Vec::new(),
         rule_flagged,
         verdict: Some(verdict),

@@ -64,11 +64,21 @@ pub const REPEATS_THAT_RAISE: u32 = 3;
 /// it stuck.
 pub const FAILURES_THAT_RAISE: u32 = 2;
 
-/// How long after a move its label waits for the next turn to end. A
-/// worker's turn on this machine's ledger ends within two hours for nineteen
-/// stall episodes in twenty (`crate::stall_cause::STALL_LABEL_WINDOW_MS`, the
-/// same measurement); past the window the label is `none`.
-pub const STEP_EFFORT_LABEL_WINDOW_MS: i64 = crate::stall_cause::STALL_LABEL_WINDOW_MS;
+/// How long after a move its label waits for the next turn to end; past the
+/// window the label is `none`.
+///
+/// Two hours: the stall label's window as it was measured on 2026-09-17 —
+/// twenty stall episodes on this machine's orchestration ledger were
+/// followed within two hours for eighteen, p90 91 min — which this label
+/// read until the stall label moved to four hours (2026-09-25, t-9087). It
+/// keeps its own two because nothing measured moved it: the four hours were
+/// read off what followed 104 silences, not off how long a worker's next
+/// turn takes after an effort move, and this machine holds no step effort
+/// row to read that from. The wait is part of what a label means — a move
+/// whose next turn ends three hours on is `none` under two hours and graded
+/// under four — so it moves only with [`STEP_EFFORT_RUBRIC_VERSION`] (astra
+/// R-EFFORT-1), and every version 1 row was graded under two.
+pub const STEP_EFFORT_LABEL_WINDOW_MS: i64 = 2 * 60 * 60 * 1_000;
 
 /// The tool names, as each vendor's transcript spells them, that can change
 /// a file or run a command — a turn that called none of them was a reading

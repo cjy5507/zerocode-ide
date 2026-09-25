@@ -39,6 +39,16 @@
 //! (t-5806); a seat whose marks never arrive is one that stays recording,
 //! which is what `auto` promised.
 //!
+//! Marks in hand are the seat's, not only its window's (2026-09-25, t-9087).
+//! The window is a count of requests sized by the answer floor, and a seat
+//! that marks one request in four — the notify seat grades a ring only when
+//! the person was there to turn to it — held 15 marks in its 53-ring window
+//! with 110 on its record, and sat at `too_few_compared` for good. The
+//! window's marks reach back to hold the sample floor
+//! ([`crate::jev::summary::marks_from`]) — within the seat's series, the
+//! words it asks now and the version answering now, and never past it; a
+//! window that holds the floor reads its own.
+//!
 //! Evidence is one version's (2026-09-23, t-6187). Every request names the
 //! vendor's alias unless a person pinned a version, and the alias answers
 //! with whatever version the vendor ships under it — the answer's own
@@ -106,8 +116,9 @@ pub struct Judged {
     /// How many requests that window wants before the floor can be cleared
     /// at all, for a screen that says "17 of 73".
     pub window_wanted: usize,
-    /// How often, over that window, the judgment named what the reader it
-    /// would replace named.
+    /// How often, over that window's marks — reached back to hold the sample
+    /// floor ([`crate::jev::summary::marks_from`]) — the judgment named what
+    /// the reader it would replace named.
     pub agreement: Agreement,
     /// Control rows the agreement was read over beside the window's own —
     /// the routing seat's probe run once more for a sampled active turn
@@ -581,6 +592,13 @@ pub fn asked_toward_judgment(seat: &JevUse, rows: &[Value]) -> usize {
 /// the next one's rows — a seat already acting keeps acting until one of
 /// them breaks a line ([`judge`]) — but one earned under other words is not
 /// a standing under these.
+///
+/// The window's marks are the series' marks written since its first
+/// request, reached back within the series to hold the sample floor
+/// ([`crate::jev::summary::marks_from`], t-9087): a seat whose marks are
+/// sparser than its requests is judged on its marks, not held for them —
+/// and on marks of the words it asks now and the version answering now
+/// alone, however far back they reach.
 #[must_use]
 pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
     judge_seat_on(seat, &on_the_newest_version(seat, rows), rows)
@@ -596,6 +614,9 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
     let agreement_floor = seat.agreement_floor_permille?;
     let deadline_ms = seat.apply_deadline_ms?;
     let window_wanted = window_wanted_for(seat)?;
+    let sample_floor = seat
+        .agreement_rows_wanted
+        .unwrap_or(A_WINDOW_OF_COMPARISONS);
     let held = last_asked_of(version.requests.iter().copied(), window_wanted);
     let since_ms = held
         .first()
@@ -604,8 +625,12 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
     let window = crate::jev::summary::summarize_rows(held.iter().copied(), i64::MIN);
     // The window's marks are the series' marks written since its first
     // request — a late label of an older request of the same words counts,
-    // a label of other words is not in the series at all.
-    let agreement = crate::jev::summary::agreement_rows(version.marks.iter().copied(), since_ms);
+    // a label of other words is not in the series at all — reached back
+    // within the series while they hold fewer than the sample floor
+    // (t-9087).
+    let marks_since =
+        crate::jev::summary::marks_from(version.marks.iter().copied(), since_ms, sample_floor);
+    let agreement = crate::jev::summary::agreement_rows(version.marks.iter().copied(), marks_since);
     // The label's whole record on this version, not the window's: a seat
     // that is right almost every time is not held for being right lately.
     let record = crate::jev::summary::agreement_rows(version.marks.iter().copied(), i64::MIN);
@@ -617,9 +642,7 @@ pub fn judge_seat_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> 
             deadline_ms,
             agreement_floor_permille: agreement_floor,
             agreement,
-            agreement_rows_wanted: seat
-                .agreement_rows_wanted
-                .unwrap_or(A_WINDOW_OF_COMPARISONS),
+            agreement_rows_wanted: sample_floor,
             window_forgives: seat.window_forgives.unwrap_or(0),
             labels: None,
             fallbacks_in_a_row: failures_in_a_row_of(version.requests.iter().copied()),

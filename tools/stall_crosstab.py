@@ -74,8 +74,22 @@ CAUSE_SOURCE = (
     / "stall_cause.rs"
 )
 
+
+
+def label_window_ms(source: str) -> int:
+    """`stall_cause::STALL_LABEL_WINDOW_MS`, read off the source like the axes —
+    a copy of the number here was two hours after the product's became four."""
+    found = re.search(r"pub const STALL_LABEL_WINDOW_MS: i64 = ([0-9_ *]+);", source)
+    if not found:
+        raise SystemExit(f"{CAUSE_SOURCE} no longer spells STALL_LABEL_WINDOW_MS as a product of numbers")
+    window = 1
+    for factor in found.group(1).split("*"):
+        window *= int(factor.strip().replace("_", ""))
+    return window
+
+
 # The two rules this file borrows, as the product spells them.
-LABEL_WINDOW_MS = 2 * 60 * 60 * 1000
+LABEL_WINDOW_MS = label_window_ms(CAUSE_SOURCE.read_text())
 # `MessageKind::is_the_ledgers_own` — a kind the ledger writes about a worker
 # is never the coordinator writing TO it.
 LEDGERS_OWN = frozenset(

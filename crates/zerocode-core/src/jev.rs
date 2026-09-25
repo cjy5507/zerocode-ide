@@ -1500,6 +1500,11 @@ pub const PLACEMENT: JevUse = JevUse {
 /// - A summons whose own agent was never offered is not a comparison either;
 ///   the row says [`crate::summon_choice::NOT_OFFERED`] under
 ///   [`crate::summon_choice::NOT_COMPARED_KEY`] instead of a mark.
+/// - Nor is a summons whose model was pinned ([`crate::summon_choice::PINNED`],
+///   t-9087): the pin is the person's word and an apply stage leaves it
+///   alone. All 121 marked summonses of the fourth words on this machine
+///   (2026-09-25) were pinned and landed on the pin's own CLI, so the
+///   baseline stood at 1,000‰ over the marks — a line no bound can clear.
 ///
 /// What the rule does NOT count as disagreement: a person taking the pane
 /// over (`taken_over`), the worker being stopped, or the work failing. Those
@@ -3587,8 +3592,9 @@ pub const COMMAND_GUARD_REGRET_TURNS: u32 = PATCH_REVIEW_REGRET_TURNS;
 /// when its turn ends or its window of turns closes: the command was regretted
 /// when the person stopped it (Esc while it ran, or the turn it ran in),
 /// when a path it named outside the project changed under it, or when a later
-/// command restored a path it named ([`COMMAND_GUARD_REGRET_TURNS`]); it stood
-/// otherwise. A failed command is recorded, not graded. `flagged` agreed when
+/// command restored a path it named and changed
+/// ([`COMMAND_GUARD_REGRET_TURNS`], t-9087); it stood otherwise. A failed
+/// command is recorded, not graded. `flagged` agreed when
 /// the command was regretted, `plain` when it stood. The baseline is today's
 /// rule: zo's destructive and path tables, its shared-tree table, and the
 /// Computer Use words a control that cannot be taken back carries

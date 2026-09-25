@@ -16460,9 +16460,11 @@ pub struct SummonShadow {
     ///
     /// A model a person pinned in their own turn nails the spawn down, so an
     /// apply stage would leave such a summons alone. The shadow asks anyway
-    /// and records the flag: a row nobody would have acted on is still
-    /// evidence about the judgment, and separating the two is the reader's
-    /// job, not the asker's.
+    /// and records the flag, and the row carries no `agreed` mark for it
+    /// (`summon_choice::PINNED`, t-9087): the judge reads marks and nothing
+    /// else, so a mark on a pinned summons was counted as the seat's evidence
+    /// — 121 of 121 on this machine's ledger (2026-09-25), all agreeing with
+    /// the pin's own CLI.
     pub model_was_pinned: bool,
     /// Whether the seat itself chose the agent (`--agent auto`): the row then
     /// carries no `agreed` mark, because there was no coordinator's word to
