@@ -1048,11 +1048,14 @@ mod tests {
     }
 
     /// A pane the surface reported on the stage is graded when its window
-    /// closes, against the room it stood in (t-6342): a recorded `split` whose
-    /// pane sat in its own tab is a split the person did not ask for — and a
-    /// sight is taken only inside the window, for a worker the book holds.
+    /// closes, and only on the room it tried (t-6342, t-9427): a recorded
+    /// `split` whose pane sat in its own tab untouched was a split nobody
+    /// tried, and a person leaving the tab alone says the tab would do — not
+    /// that the split would not have. Its label names why it compares
+    /// nothing, and neither reader is marked on it. A sight is taken only
+    /// inside the window, for a worker the book holds.
     #[test]
-    fn a_pane_seen_on_the_stage_is_graded_against_the_room_it_stood_in() {
+    fn a_pane_seen_on_the_stage_is_graded_only_on_the_room_it_tried() {
         let work = tempfile::tempdir().expect("a checkout");
         let home = tempfile::tempdir().expect("a zo home");
         let endpoint = Endpoint::serving("HTTP/1.1 200 OK", a_room_answer("split"), 0);
@@ -1102,8 +1105,13 @@ mod tests {
             ),
             (json!("split"), json!("tab"), json!(true))
         );
-        assert_eq!(label[AGREED.canonical], json!(false), "{label}");
-        assert!(label.get(NOT_COMPARED.canonical).is_none(), "{label}");
+        assert!(label.get(AGREED.canonical).is_none(), "{label}");
+        assert!(label.get(BASELINE_AGREED.canonical).is_none(), "{label}");
+        assert_eq!(
+            label[NOT_COMPARED.canonical],
+            json!(worker_placement::NOT_CARRIED),
+            "{label}"
+        );
     }
 
     /// An answer that never came back whole has nothing to grade: the book

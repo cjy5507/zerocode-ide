@@ -322,6 +322,13 @@ pub const fn stood_in(chosen: Placement, applied: bool) -> Placement {
 /// nobody was in front of the pane while its label's window was open.
 pub const UNSEEN: &str = "unseen";
 
+/// The word a placement label carries under the summary's `notCompared` when
+/// the room the answer named was never tried (t-9427): the seat only
+/// recorded, the pane stood in today's room, and nobody moved it. The effort
+/// seats' word for an answer the product never carried out, read from there
+/// so one fact has one spelling.
+pub const NOT_CARRIED: &str = crate::step_effort::NOT_CARRIED;
+
 /// The placement seat's mark (t-6342): whether the room the pane ended the
 /// label's window in is the room the answer named — counted only for a pane
 /// somebody could have moved.
