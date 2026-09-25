@@ -212,8 +212,9 @@ fn the_json_carries_the_days_the_refusals_the_applied_count_and_the_recent_list(
         home.path().join(seat.ledger),
         [
             serde_json::json!({"at": 900, "outcome": "answered", "elapsedMs": 40, "requests": 1, "chosen": "split",
-                               "applied": true, "confidence": 0.6, "task": "t-1", "worker": "w-1"}),
-            serde_json::json!({"at": 950, "outcome": "not_consented", "requests": 0}),
+                               "applied": true, "confidence": 0.6, "task": "t-1", "worker": "w-1",
+                               "rubricVersion": seat.rubric_version}),
+            serde_json::json!({"at": 950, "outcome": "not_consented", "requests": 0, "rubricVersion": seat.rubric_version}),
         ]
         .iter()
         .map(|row| row.to_string() + "\n")
@@ -266,10 +267,10 @@ fn the_json_names_the_asked_model_the_answering_version_and_the_cut() {
         home.path().join(seat.ledger),
         [
             serde_json::json!({"at": 900, "outcome": "answered", "elapsedMs": 40, "requests": 1,
-                               "inputTokens": 1000, "model": "jev-1.12.0"}),
+                               "inputTokens": 1000, "model": "jev-1.12.0", "rubricVersion": seat.rubric_version}),
             serde_json::json!({"at": 950, "outcome": "answered", "elapsedMs": 40, "requests": 1,
-                               "inputTokens": 1000, "model": "jev-1.13.0"}),
-            serde_json::json!({"at": 960, "outcome": "timeout", "requests": 1}),
+                               "inputTokens": 1000, "model": "jev-1.13.0", "rubricVersion": seat.rubric_version}),
+            serde_json::json!({"at": 960, "outcome": "timeout", "requests": 1, "rubricVersion": seat.rubric_version}),
         ]
         .iter()
         .map(|row| row.to_string() + "\n")
