@@ -2742,3 +2742,281 @@ fn the_windows_walk_hands_its_world_the_windows_writer() {
         );
     }
 }
+
+/// The walk verb types through `run_goal` itself (t-6721, the review t-6720
+/// left open): a walk read from the CLI's own words; a page answered by the
+/// browser door's own reader and writer (`look_of` → `marks_json`) with the
+/// field it read; a judge and the value seat each across a real socket; zo's
+/// settings in a folder of the case's own. With a key a person set, the one
+/// request offers the entry and a `type --value` goes down the road; with
+/// none, the request offers no entry and nothing is typed. No keychain, no
+/// screen, no person's settings or ledger. And the switches the walk reads
+/// come from the file its judge asks through — for the window's judge, the
+/// very file `mode_now` reads, through the same reader.
+#[test]
+fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    use zerocode_core::computer_recipe::RecipeTool;
+    use zerocode_core::computer_use_protocol::frame::ShotFrame;
+    use zerocode_core::screen_action::snapshot;
+    use zerocode_hookd::TeamAnswer;
+
+    use super::live::{Doorway, LiveJudge};
+    use super::value::LiveWriter;
+    use super::value::tests::{store, wrote};
+    use crate::agent_tools_runtime::{RecipeRoads, run_goal};
+    use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
+
+    let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // The window's judge reads where `mode_now` reads: the same file (no
+    // file is read here) through the same reader.
+    let window = crate::systemone::Wire::new(&crate::api_routers::HeldKeys::default());
+    assert_eq!(
+        window.config_home().map(Path::to_path_buf),
+        crate::api_routers::zo_settings_path()
+            .and_then(|file| file.parent().map(Path::to_path_buf)),
+        "the window's judge and `mode_now` read one settings file"
+    );
+    let source = |file: &str, from: &str| {
+        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(file))
+            .expect("a source");
+        let at = text
+            .find(from)
+            .unwrap_or_else(|| panic!("{from} in {file}"));
+        let body = &text[at..];
+        body[..body.find("\n}\n").expect("its end")].to_string()
+    };
+    for (file, from) in [
+        ("src/computer_use/errand.rs", "pub fn mode_now("),
+        ("src/systemone.rs", "pub fn settings_root("),
+    ] {
+        assert!(
+            source(file, from).contains("read_zo_settings_root"),
+            "{from} stopped reading through the one reader"
+        );
+    }
+    assert!(
+        source("src/systemone.rs", "pub fn new(keys").contains("zo_settings_path()"),
+        "the window's wire stopped reading zo's own settings file"
+    );
+    let goal = source("src/agent_tools_runtime.rs", "pub(super) fn run_goal(");
+    assert!(
+        goal.contains("let settings = judge.wire().settings_root();")
+            && goal.contains("seat.mode_in(&settings)")
+            && goal.contains("forks.mode_in(&settings)")
+            && !goal.contains("mode_now("),
+        "the walk reads its switches from its judge's settings file"
+    );
+
+    // The page as the browser door answers it — the page's own pass, read
+    // and written by the door.
+    let page = json!({
+        "faces": [
+            { "tag": "input", "role": "textbox", "label": "City", "selector": "#destination",
+              "x": 20.0, "y": 20.0, "width": 200.0, "height": 30.0, "hit": true,
+              "field": { "kind": "text", "masked": false, "label": "Destination",
+                         "placeholder": "City", "near": "Flight search", "value": "" },
+              "valueDigest": "0:811c9dc5" },
+            { "tag": "button", "role": "button", "label": "Search", "selector": "#search",
+              "x": 240.0, "y": 20.0, "width": 80.0, "height": 30.0, "hit": true },
+        ],
+        "viewport": { "width": 900.0, "height": 600.0, "dpr": 2.0 },
+        "snapshot": { (snapshot::EPOCH_KEY): "doc-1" },
+    });
+    let marks = crate::cmd::browser::marks_json(
+        &crate::cmd::browser::look_of(&page, 0).expect("the door reads the page"),
+    )
+    .to_string();
+
+    // The judgment: every head the request asked, over exactly the options
+    // it offered — an entry where one is offered, else the search button.
+    let judging = |request: &str| {
+        let sent: Value = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .and_then(|body| serde_json::from_str(body).ok())
+            .unwrap_or(Value::Null);
+        let mut answers = serde_json::Map::new();
+        for (name, question) in sent["questions"].as_object().into_iter().flatten() {
+            let answer = if question["type"] == json!("noul") {
+                json!({ "type": "noul", "noul": 0.02 })
+            } else {
+                let offered: Vec<&str> = question["criteria"]
+                    .as_object()
+                    .map(|criteria| criteria.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                let choice = ["type_text", "mark:2", "mark:1"]
+                    .into_iter()
+                    .find(|option| offered.contains(option))
+                    .or_else(|| offered.first().copied())
+                    .unwrap_or_default();
+                #[allow(clippy::cast_precision_loss)]
+                let rest = 0.1 / offered.len().saturating_sub(1).max(1) as f64;
+                let lead = if offered.len() == 1 { 1.0 } else { 0.9 };
+                let probabilities: serde_json::Map<String, Value> = offered
+                    .iter()
+                    .map(|option| {
+                        let share = if *option == choice { lead } else { rest };
+                        ((*option).to_string(), json!(share))
+                    })
+                    .collect();
+                json!({ "type": "choice", "choice": choice,
+                        "probabilities": probabilities, "confidence": 0.9 })
+            };
+            answers.insert(name.clone(), answer);
+        }
+        json!({ "model": ANSWERING_VERSION, "answers": answers,
+                "usage": { "input_tokens": 120, "output_tokens": 0 } })
+        .to_string()
+    };
+
+    /// A desk that knows only the pane's page: no pointer, no picture.
+    struct PaneDesk;
+    impl crate::computer_use::recipe_run::Desk for PaneDesk {
+        fn pointer(&mut self) -> Option<(f64, f64)> {
+            None
+        }
+        fn picture(&mut self, _: [f64; 4]) -> Option<(Vec<u8>, ShotFrame)> {
+            None
+        }
+        fn changed(&self, _: &[u8], _: &[u8], _: ShotFrame) -> Option<bool> {
+            None
+        }
+        fn elapsed_ms(&self) -> u64 {
+            0
+        }
+        fn now_epoch_ms(&self) -> i64 {
+            0
+        }
+        fn pause(&mut self, _: Duration) {}
+        fn pages(&mut self) -> Vec<(String, String)> {
+            vec![("browser-9".into(), "https://flights.example/search".into())]
+        }
+    }
+
+    let walk = |with_key: bool| {
+        let home = tempfile::tempdir().expect("a zo home");
+        let work = home.path().join("work");
+        std::fs::create_dir_all(&work).expect("a workspace");
+        let settings = home.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            json!({ "smart": {
+                (zerocode_core::jev::BROWSER.setting): zerocode_core::jev::JevMode::On.key(),
+                "jev": { "workspaces": [work.display().to_string()] },
+            } })
+            .to_string(),
+        )
+        .expect("zo's settings");
+        let jev = Endpoint::answering_each("HTTP/1.1 200 OK", judging, 0);
+        let value = Endpoint::serving("HTTP/1.1 200 OK", wrote("London"), 0);
+        let words: Vec<String> = [
+            "walk",
+            "--pane",
+            "browser-9",
+            "--goal",
+            "Search flights to London",
+            "--steps",
+            "1",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let command = zerocode_core::computer_use::parse_command(&words).expect("a walk");
+        let sent: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+        let answer = run_goal(
+            &command,
+            60_000,
+            None,
+            Some(&work),
+            RecipeRoads::new(
+                |_: RecipeTool, argv: &[String], _: &[String]| {
+                    sent.borrow_mut().push(argv.to_vec());
+                    TeamAnswer {
+                        exit_code: 0,
+                        stdout: match argv[0].as_str() {
+                            "marks" => marks.clone(),
+                            "find" => r#"{"count":0}"#.to_string(),
+                            _ => "{}".to_string(),
+                        },
+                        stderr: String::new(),
+                    }
+                },
+                |_: &[String], _: &[String], _: &TeamAnswer| {},
+                |_| {},
+                |_| {},
+            ),
+            || PaneDesk,
+            None,
+            LiveWriter::at(&format!("{}/v1/messages", value.base()), store(with_key)),
+            Some(LiveJudge::at(
+                &jev.base(),
+                "test-key",
+                Doorway {
+                    settings: Some(settings.clone()),
+                    workspace: Some(work.clone()),
+                    seat: &zerocode_core::jev::BROWSER,
+                },
+            )),
+        );
+        let asked: Vec<Value> = jev
+            .asked()
+            .iter()
+            .filter_map(|request| serde_json::from_str(request.split("\r\n\r\n").nth(1)?).ok())
+            .collect();
+        (asked, value.asked(), sent.into_inner(), answer)
+    };
+
+    let (asked, values, sent, answer) = walk(true);
+    assert_eq!(answer.exit_code, 0, "{}", answer.stdout);
+    assert_eq!(asked.len(), 1, "one judgment: {asked:?}");
+    assert!(
+        asked[0]["questions"].get("type_target").is_some()
+            && asked[0]["questions"]["action"]["criteria"]
+                .get("type_text")
+                .is_some(),
+        "with a key a person set, the one request offers the entry"
+    );
+    assert!(
+        values.iter().any(|request| request.starts_with("POST")),
+        "the value seat was asked: {values:?}"
+    );
+    assert!(
+        sent.contains(&vec![
+            "type".to_string(),
+            "browser-9".to_string(),
+            "#destination".to_string(),
+            zerocode_core::agent_browser::TYPE_VALUE_FLAG.to_string(),
+            "London".to_string(),
+        ]),
+        "the walk typed the written value into the field the look read: {sent:?}"
+    );
+
+    let (asked, values, sent, answer) = walk(false);
+    assert_eq!(answer.exit_code, 0, "{}", answer.stdout);
+    assert_eq!(asked.len(), 1, "one judgment: {asked:?}");
+    assert!(
+        asked[0]["questions"].get("type_target").is_none()
+            && asked[0]["questions"]["action"]["criteria"]
+                .get("type_text")
+                .is_none(),
+        "without a key, no entry is offered"
+    );
+    assert!(values.is_empty(), "the value seat was asked: {values:?}");
+    assert!(
+        !sent.iter().any(|argv| argv[0] == "type"),
+        "nothing was typed: {sent:?}"
+    );
+    assert!(sent.contains(&vec![
+        "click".to_string(),
+        "browser-9".to_string(),
+        "--mark".to_string(),
+        "2".to_string(),
+    ]));
+}

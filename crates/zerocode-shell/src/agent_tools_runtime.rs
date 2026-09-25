@@ -2556,6 +2556,8 @@ pub(super) async fn computer_loop(
                                 desk,
                                 rescue,
                                 writer,
+                                // The window's own judge, built by the walk.
+                                None,
                             )
                         } else {
                             run_recipe(
@@ -3277,7 +3279,7 @@ pub(super) fn run_recipe(
 /// The seat is the surface's, never the verb's: a walk at a browser pane is
 /// under the browser row of the Jev use table and a walk at an app is under
 /// the desktop row, so neither switch can turn the other's surface on.
-#[allow(clippy::too_many_arguments)] // Its roads, desk, second reader and value writer are each one seam.
+#[allow(clippy::too_many_arguments)] // Its roads, desk, second reader, value writer and judge are each one seam.
 pub(super) fn run_goal(
     command: &zerocode_core::computer_use::ComputerCommand,
     deadline_ms: u64,
@@ -3296,6 +3298,7 @@ pub(super) fn run_goal(
     mut desk_of: impl computer_use::arena::DeskOf,
     mut rescue: Option<computer_use::errand::team::TeamJudge>,
     writer: computer_use::errand::value::LiveWriter,
+    judge: Option<computer_use::errand::live::LiveJudge>,
 ) -> zerocode_hookd::TeamAnswer {
     use computer_use::errand::{self, desk};
     use computer_use::recipe_run::Desk as _;
@@ -3373,7 +3376,6 @@ pub(super) fn run_goal(
         }
     };
     let seat = errand::seat_of(aim.surface());
-    let mode = errand::mode_now(seat);
     let at = errand::Errand {
         goal: &goal,
         why: errand::Why::Goal {
@@ -3386,12 +3388,24 @@ pub(super) fn run_goal(
         // it can only press, never type an amount or a recipient.
         moves_money: false,
     };
-    let mut judge = errand::live::LiveJudge::new(
-        &crate::api_routers::Keychain::of_this_machine(),
-        workspace,
-        seat,
-    )
-    .in_run(zerocode_core::computer_use::walk_run(&command.params));
+    // The judge this walk asks: one its caller built — a test's, across a
+    // socket of its own — else the window's, the key the settings pane keeps,
+    // for the folder the walk was asked from and the surface's own seat.
+    let mut judge = judge
+        .unwrap_or_else(|| {
+            errand::live::LiveJudge::new(
+                &crate::api_routers::Keychain::of_this_machine(),
+                workspace,
+                seat,
+            )
+        })
+        .in_run(zerocode_core::computer_use::walk_run(&command.params));
+    // Every switch this walk reads, it reads from the settings file its judge
+    // asks through — for the window's judge the file `errand::mode_now`
+    // reads (`zo_settings_path`), so the seat's mode and whether it acts come
+    // from one reading of one file.
+    let settings = judge.wire().settings_root();
+    let mode = seat.mode_in(&settings);
     if mode == errand::Mode::Off || !judge.armed() {
         // Off is today's product exactly: no look is taken, nothing is sent,
         // and the answer says plainly that nothing walked.
@@ -3410,7 +3424,7 @@ pub(super) fn run_goal(
     // comparison's pick is the one pressed.
     let forks = &zerocode_core::jev::BRANCHING;
     let branching = errand::Branching {
-        mode: errand::mode_now(forks),
+        mode: forks.mode_in(&settings),
         acting: crate::systemone::applies(judge.wire(), forks),
     };
     let snapshots: Box<dyn desk::Snapshots> = Box::new(AvdSnapshots {
