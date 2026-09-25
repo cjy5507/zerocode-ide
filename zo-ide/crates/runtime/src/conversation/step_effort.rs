@@ -437,6 +437,12 @@ pub enum StepEvent {
 pub struct StepLabel {
     pub kind: &'static str,
     pub at: u64,
+    /// The judgment this mark grades, as the judge joins the two
+    /// (`zerocode_core::jev::JevUse::request_name`, t-6877): the turn's
+    /// attempt and the step the judgment was ASKED at — the seat's own row
+    /// carries both — joined by `:`. A mark that named only the step it was
+    /// consulted at named a step the seat was not asked at.
+    pub label: String,
     pub attempt: String,
     /// The step the judgment was consulted at.
     pub step: u32,
@@ -567,6 +573,9 @@ impl BatchSeen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LabelDue {
     step: u32,
+    /// The step the judgment consulted at `step` was asked at — the row it
+    /// grades.
+    asked_at_step: u32,
     /// The request's effort is not the one the table alone would have given
     /// it: the judgment moved it.
     seat_moved_it: bool,
@@ -828,6 +837,9 @@ impl StepEffortState {
             StepLabel {
                 kind: LABEL_ROW_KIND,
                 at: unix_millis(),
+                // Spelled as the seat's judgment row spells its attempt
+                // (trimmed) and its step.
+                label: format!("{}:{}", attempt.trim(), due.asked_at_step),
                 attempt: attempt.to_string(),
                 step: due.step,
                 agreed: graded.ok(),
@@ -841,11 +853,12 @@ impl StepEffortState {
     /// whether it moved the effort away from what the table alone would have
     /// given the request (`shifted` against the table's own), and whether
     /// the request carried it.
-    fn owe_label(&mut self, step: u32, signals: &StepSignals, shifted: EffortStep) {
+    fn owe_label(&mut self, step: u32, asked_at_step: u32, signals: &StepSignals, shifted: EffortStep) {
         let table = decide(step, signals, None);
         let ruled = shift(self.config.floor, self.config.ceiling, self.config.cap(), table.delta);
         self.label_due = Some(LabelDue {
             step,
+            asked_at_step,
             seat_moved_it: shifted != ruled,
             carried: self.config.applies,
         });
@@ -879,8 +892,8 @@ impl StepEffortState {
         let progressed = batch.calls > 0 && !decision.strong && !decision.slipping && !batch.check_red;
         let label = self.label_owed(attempt, progressed);
         let shifted = shift(self.config.floor, self.config.ceiling, self.config.cap(), decision.delta);
-        if decision.judged.is_some() {
-            self.owe_label(step, &signals, shifted);
+        if let Some(judged) = decision.judged {
+            self.owe_label(step, judged.at_step, &signals, shifted);
         }
         self.next = Some(shifted);
         let rung_move = plan_move(&self.config, &decision, self.strong_streak, self.routine_streak, shifted);
@@ -1178,6 +1191,7 @@ mod tests {
         let label = serde_json::to_value(StepEvent::Label(StepLabel {
             kind: LABEL_ROW_KIND,
             at: 2,
+            label: "s@1:1".to_string(),
             attempt: "s@1".to_string(),
             step: 2,
             agreed: Some(true),
@@ -1186,6 +1200,7 @@ mod tests {
         }))
         .expect("label");
         assert_eq!(label["kind"], "label");
+        assert_eq!(label["label"], "s@1:1", "the mark names the judgment it grades");
         assert_eq!(label["agreed"], true);
         assert!(label.get("notCompared").is_none(), "{label}");
     }
@@ -1241,6 +1256,10 @@ mod tests {
         // its grade.
         let moved = graded_after(RouteTaskComplexity::Large, true, None);
         assert_eq!((moved.agreed, moved.not_compared), (Some(true), None));
+        // And the mark names the judgment it grades as the seat's judgment
+        // row names it — the turn and the step the judgment was ASKED at,
+        // not the later step it was consulted at (t-6877).
+        assert_eq!((moved.label.as_str(), moved.step), ("s@1:1", 2));
         // Carried, but the judgment said what the table said: nothing to grade.
         let same = graded_after(RouteTaskComplexity::Small, true, None);
         assert_eq!((same.agreed, same.not_compared), (None, Some(SAME_AS_RULE)));

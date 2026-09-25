@@ -664,6 +664,9 @@ struct ShownPath {
 /// The last reading settled for one attempt: the judgment's order, which the
 /// seat's mark grades.
 struct Settled {
+    /// When the reading's row was made — the label's `requestAt`, so it
+    /// grades this asking of `query` over `notes` and no other (t-6877).
+    at: u64,
     query: u64,
     notes: u64,
     applied: bool,
@@ -785,7 +788,8 @@ fn note_settled(slot: &ReadingSlot, row: &RerankShadowRow, hits: &[MemoryHit]) {
     }
     let recall_first = hits.first().map(|hit| (hit.entry.slug.clone(), hit.entry.path.clone()));
     if let Ok(mut reading) = slot.lock() {
-        reading.settled = Some(Settled { query: row.query, notes: row.notes, applied: row.applied, proposed, recall_first });
+        reading.settled =
+            Some(Settled { at: row.at, query: row.query, notes: row.notes, applied: row.applied, proposed, recall_first });
     }
 }
 
@@ -818,6 +822,16 @@ pub struct RerankLabelRow {
     /// The reading this row grades, spelled `<query>:<notes>` — the two
     /// fingerprints the answered row is named by.
     pub label: String,
+    /// When the reading this row grades was asked — its row's time, which
+    /// the settled reading carries (`zerocode_core::jev::summary::REQUEST_AT`,
+    /// t-6877): the same words asked over the same notes again carry the
+    /// same name, and the judge joins a label to one asking by the time.
+    /// Never the showing's time (`shown_at`), which is when the model was
+    /// shown the notes and not when the reading was asked. Absent on a row
+    /// that grades no settled reading, and on every row from before t-6877:
+    /// such a row grades no asking.
+    #[serde(default, rename = "requestAt", skip_serializing_if = "Option::is_none")]
+    pub request_at: Option<u64>,
     pub query: u64,
     pub notes: u64,
     pub applied: bool,
@@ -954,6 +968,7 @@ fn label_row(reading: &Reading) -> RerankLabelRow {
     let mut row = RerankLabelRow {
         at: unix_millis(),
         label: format!("{query}:{notes}"),
+        request_at: graded.map(|settled| settled.at),
         query,
         notes,
         applied: false,
@@ -2831,8 +2846,11 @@ mod tests {
             let misses = RECALL.negatives_wanted.expect("recall rises");
             let marks = marks_that_can_clear(&RECALL).expect("recall rises");
             for at in 0..marks {
+                // Named by the words and the time the reading was made, as
+                // the seat's label writer names it (t-6877).
                 let label = serde_json::json!({
-                    "at": after_the_window + i64::try_from(at).unwrap_or_default(), "label": format!("{at}:{at}"), "query": at, "notes": at,
+                    "at": after_the_window + i64::try_from(at).unwrap_or_default(), "label": format!("{at}:{at}"),
+                    "requestAt": 1_000 + at, "query": at, "notes": at,
                     "applied": false, "agreed": at >= misses, "baselineAgreed": at % 2 == 0, "rank": 0,
                 });
                 append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
@@ -2978,11 +2996,80 @@ mod tests {
             "the tally counted a label"
         );
         assert_eq!(
-            zerocode_core::jev::promote::asked_toward_judgment(&rows),
-            zerocode_core::jev::promote::asked_toward_judgment(&readings),
+            zerocode_core::jev::promote::asked_toward_judgment(&RECALL, &rows),
+            zerocode_core::jev::promote::asked_toward_judgment(&RECALL, &readings),
             "the cadence counted a label"
         );
         assert!(!rows.iter().filter(|row| row.get("label").is_some()).any(zerocode_core::jev::summary::is_request_or_mark));
+    }
+
+    /// The label names the asking it grades by that asking's own time
+    /// (`requestAt`, t-6877) — the time the row of the reading it grades was
+    /// made — and never by the turn's first showing (`shownAt`, t-6264),
+    /// which is when the model was shown a section and not when the graded
+    /// reading was asked (astra m-8636). A turn whose first request showed a
+    /// reading of other words, and whose second asked the words it is graded
+    /// on, holds the two times apart; an earlier turn asked those words over
+    /// the same notes too, so two askings carry the label's name. The common
+    /// reader (`promote::on_the_newest_version`) joins the label to the one
+    /// asking at its time, and the judge compares it once. A label named by
+    /// the showing's time would name no asking, and grade nothing.
+    #[test]
+    fn a_label_names_the_asking_it_grades_by_that_askings_time_and_not_the_showings() {
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let words = "which note answers this (asked twice, graded once)";
+        // Every clock this test reads moves on a millisecond between the
+        // steps, so no two of the times it compares can meet by accident.
+        let tick = || std::thread::sleep(Duration::from_millis(2));
+        let (values, labels, readings) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            // The earlier turn: the same words over the same notes — the same
+            // name, another asking. It ends cancelled, and labels nothing.
+            let earlier = "session@earlier-turn";
+            let _read = super::settle(cwd, earlier, words, three().to_vec());
+            assert!(!super::note_recall_read(cwd, earlier, true), "a cancelled turn wrote a label");
+            tick();
+            // This turn's first request shows a reading of other words over
+            // the notes in another order, and is answered.
+            let mut other = three().to_vec();
+            other.reverse();
+            let _first = settle(cwd, "which note answers this (shown first)", other);
+            heard(cwd, TEST_ATTEMPT, told(&[], true, false));
+            tick();
+            // Its second asks the words the turn is graded on, after that
+            // showing, and the turn reads the note the judgment put first.
+            let second = settle(cwd, words, three().to_vec());
+            assert!(note_recall_read(cwd, &turn(vec![read_of(&second[0].entry.path)])));
+            (values(cwd), labels(cwd), rows(cwd))
+        });
+        let [label] = labels.as_slice() else {
+            panic!("one turn, one label: {labels:?}");
+        };
+        let named = values
+            .iter()
+            .find(|row| row.get(zerocode_core::jev::summary::LABEL.canonical).is_some())
+            .expect("the label row");
+        let series = zerocode_core::jev::promote::on_the_newest_version(&RECALL, &values);
+        assert!(series.marks.contains(&named), "the label graded no asking: {named}");
+        let judged = zerocode_core::jev::promote::judge_seat(&RECALL, &values).expect("recall rises");
+        assert_eq!(
+            (judged.agreement.compared, judged.agreement.agreed),
+            (1, 1),
+            "the judge compared the turn's label once: {named}"
+        );
+        // The asking it grades is the one its reading settled on: of the two
+        // askings of these words over these notes, the later — and neither is
+        // the showing.
+        let asked: Vec<u64> =
+            readings.iter().filter(|row| (row.query, row.notes) == (label.query, label.notes)).map(|row| row.at).collect();
+        let [before, graded] = asked.as_slice() else {
+            panic!("the same words over the same notes, asked twice: {readings:?}");
+        };
+        assert!(before < graded, "{asked:?}");
+        assert_eq!(label.request_at, Some(*graded), "the label names its reading's asking: {named}");
+        assert!(
+            label.shown_at.is_some_and(|shown| Some(shown) != label.request_at),
+            "the turn was first shown notes at another time than the graded reading was asked: {named}"
+        );
     }
 
     /// Five label rows say readers were shown the hub and none opened it:
@@ -3012,6 +3099,7 @@ mod tests {
         RerankLabelRow {
             at: 1_000 + at,
             label: format!("{at}:{at}"),
+            request_at: None,
             query: at,
             notes: at,
             applied: false,
@@ -3113,6 +3201,7 @@ mod tests {
         let row = |vault: Option<u64>, shown: Vec<ShownNote>| RerankLabelRow {
             at: 1,
             label: "1:1".to_string(),
+            request_at: None,
             query: 1,
             notes: 1,
             applied: false,
@@ -3247,6 +3336,7 @@ mod tests {
             let retriever = session_retriever(cwd);
             assert_eq!(slugs(&retriever.recall("vellichor", 5)), ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"]);
             let rose = zerocode_core::jev::promote::transition_row(
+                &RECALL,
                 9_000,
                 zerocode_core::jev::promote::Verdict::Rise,
                 &zerocode_core::jev::summary::Tally::default(),

@@ -1,5 +1,19 @@
 //! Versioned words for new Jev questions. Callers build their wire types from
 //! these words; the same rubric must not be repeated in a runner.
+//!
+//! Every seat's row names the version of the words it asks now
+//! ([`crate::jev::JevUse::rubric_version`], t-6877) by one of these
+//! constants or by the one that lives beside its words in another module —
+//! never by a number of its own. The versions of the questions zo's runtime
+//! and tools ask are spelled here too, and those crates read them from here:
+//! a number spelled in two crates is a number that forks.
+
+/// The version a row that names none is read as, and the version a seat
+/// asks whose writer has never versioned its words (t-6877): the first.
+/// Every row written before versions were recorded belongs to it, so the
+/// seats already standing on their ledgers keep the evidence they stand on
+/// — and so a seat that moved its words on cannot stand on those rows.
+pub const UNVERSIONED_RUBRIC: u32 = 1;
 
 pub const VAULT_PAIR_RUBRIC_VERSION: u32 = 1;
 
@@ -8,9 +22,37 @@ pub const VAULT_PAIR_RUBRIC_VERSION: u32 = 1;
 /// that asked names it ([`crate::jev::summary::RUBRIC_VERSION`]), so a changed
 /// question starts a series of its own (t-6263 R5).
 pub const CHALLENGER_RUBRIC_VERSION: u32 = 1;
+/// The recall seat's rubric — the levels asked of each note, whose words
+/// are zo's `runtime::memory::rerank::rubric_words` and are pinned there.
+pub const RECALL_RUBRIC_VERSION: u32 = 1;
+/// The skills seat's explicit search — `skill_search`, the tool an agent
+/// calls — whose words are zo's `runtime::skill_rank` and are pinned there.
+/// The turn boundary's suggestion asks [`SKILL_SUGGESTION_RUBRIC_VERSION`],
+/// a seat and a ledger of its own (t-6877).
+pub const SKILL_SEARCH_RUBRIC_VERSION: u32 = 1;
+/// The compaction seat's rubric, whose words are zo's
+/// `runtime::compact::relevance::rubric_words` and are pinned there.
+pub const COMPACTION_RUBRIC_VERSION: u32 = 1;
+/// The agent's own tool, whose words and state shape are zo's
+/// `tools::misc_tools::smart_router::agent_tool` and are pinned there.
+pub const AGENT_TOOL_RUBRIC_VERSION: u32 = 1;
+/// The mention rerank seat's rubric, whose words are zo's
+/// `tools::misc_tools::smart_router::mention_rerank::rubric_words` and are
+/// pinned there.
+pub const MENTION_RERANK_RUBRIC_VERSION: u32 = 1;
+/// The patch review seat's rubric, whose words are zo's
+/// `runtime::patch_review` and are pinned there.
+pub const PATCH_REVIEW_RUBRIC_VERSION: u32 = 1;
+/// The claim seat's rubric, whose words are zo's
+/// `runtime::conversation::claim_check` and are pinned there.
+pub const CLAIM_RUBRIC_VERSION: u32 = 1;
+/// The file pick seat's rubric and state shape, zo's
+/// `tools::misc_tools::smart_router::file_pick`, pinned there.
+pub const FILE_PICK_RUBRIC_VERSION: u32 = 1;
 
-/// Skill suggestion's two requests share these words and thresholds in the
-/// SKILLS row. A changed question starts a new comparison series.
+/// Skill suggestion's two requests share these words and thresholds in its
+/// own row (`SKILL_SUGGESTION`, t-6877). A changed question starts a new
+/// comparison series.
 pub const SKILL_SUGGESTION_RUBRIC_VERSION: u32 = 2;
 pub const SKILL_WIDE_STATE_SHAPE: &str =
     "wide state: task; choice criteria: skill name and description";
@@ -543,10 +585,10 @@ pub const SCREEN_INSTRUCTED_NO: &str = concat!(
 /// block over bare or the window had wrapped it (t-6982); version 3 grades
 /// the rule on the host's own word and marks nothing where the host cannot
 /// say (t-7058, `tool_guard::todays_text_rule` in the tools crate). The
-/// version rides every request row so a reader can tell the series apart;
-/// the shared promotion reader (`promote::named_version`) still windows by
-/// model alone, and reading requests, labels and standing per rubric version
-/// is t-6877's contract.
+/// version rides every request row, and the shared promotion reader reads
+/// one version's series — its requests, the labels that grade them and the
+/// rise they earn (`promote::on_the_newest_version`, `promote::standing`,
+/// t-6877).
 pub const TOOL_TEXT_GUARD_RUBRIC_VERSION: u32 = 3;
 /// The keys the tool text guard's state carries, in the order the use table
 /// declares them: the kind of tool the block came from, and its head.

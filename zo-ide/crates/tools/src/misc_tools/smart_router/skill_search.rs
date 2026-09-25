@@ -42,15 +42,20 @@ use runtime::skill_rank::{
 use runtime::{ContentBlock, ConversationMessage, MessageRole, SkillIndexEntry};
 use serde::{Deserialize, Serialize};
 use zerocode_core::jev::door::Refused;
-use zerocode_core::jev::{JevMode, ROUTE_USE_APPLIED, ROUTE_USE_FALLBACK, SKILLS};
+use zerocode_core::jev::{JevMode, JevUse, ROUTE_USE_APPLIED, ROUTE_USE_FALLBACK, SKILLS, SKILL_SUGGESTION};
 
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::{remember_bounded, task_fingerprint};
-use super::settings::skill_search_mode_from;
+use super::settings::{skill_search_mode_from, skill_suggestion_mode_from};
 use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 
 /// The skill search's ledger file — the Jev use table's name for this seat.
 pub const SKILL_SEARCH_FILE: &str = SKILLS.ledger;
+
+/// The turn-start suggestion's ledger file — its own seat's (t-6877): the
+/// suggestion asks other words than the search, and a seat is judged on one
+/// question's rows.
+pub const SKILL_SUGGESTION_FILE: &str = SKILL_SUGGESTION.ledger;
 
 /// Outcome of a row whose judgment answered and checked out.
 ///
@@ -84,6 +89,12 @@ const NOTHING_TO_ASK: &str = "nothing_to_ask";
 #[must_use]
 pub fn skill_search_path(cwd: &Path) -> PathBuf {
     shadow_ledger_path(cwd, SKILL_SEARCH_FILE)
+}
+
+/// Where the turn-start suggestion's rows go for `cwd`.
+#[must_use]
+pub fn skill_suggestion_path(cwd: &Path) -> PathBuf {
+    shadow_ledger_path(cwd, SKILL_SUGGESTION_FILE)
 }
 
 /// One search's row: what was asked, what came back, and which reader the
@@ -186,6 +197,14 @@ impl From<&SkillReading> for Chosen {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillLabelRow {
     pub at: u64,
+    /// The request this row grades, spelled `<task>:<catalog>` — the two
+    /// fingerprints the request row is named by (`zerocode_core::jev::summary::LABEL`,
+    /// t-6877), and when that request was made (`REQUEST_AT`): the same task
+    /// against the same catalog carries the same name every time it is
+    /// asked, and the judge joins a label to one asking by the time.
+    pub label: String,
+    #[serde(rename = "requestAt")]
+    pub request_at: u64,
     /// The skill the turn actually loaded.
     pub loaded: String,
     /// Whether the search that preceded it had named that skill.
@@ -201,6 +220,27 @@ pub struct SkillLabelRow {
     pub unused_load: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "baselineUnusedLoad")]
     pub baseline_unused_load: Option<bool>,
+}
+
+/// The name a request row carries and its label repeats, and the time it
+/// was made — what a label needs to grade one asking and no other
+/// (`zerocode_core::jev::JevUse::request_name`, t-6877).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillRequestName {
+    pub task: u64,
+    pub catalog: u64,
+    pub at: u64,
+}
+
+impl SkillRequestName {
+    fn of(row: &SkillSearchRow) -> Self {
+        Self { task: row.task, catalog: row.catalog, at: row.at }
+    }
+
+    /// The name as a label spells it: the request's keys joined by `:`.
+    fn label(self) -> String {
+        format!("{}:{}", self.task, self.catalog)
+    }
 }
 
 fn unix_millis() -> u64 {
@@ -294,6 +334,9 @@ pub struct Searched {
     /// about the seat. What promotes this seat is whether the JUDGMENT named
     /// the skill the turn loaded ([`note_search_answer`]).
     pub judged_names: Option<Vec<String>>,
+    /// The request the judgment answered, for the label that grades it —
+    /// `None` when no judgment answered.
+    pub judged_request: Option<SkillRequestName>,
 }
 
 impl Searched {
@@ -319,11 +362,12 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
         route_use: ROUTE_USE_FALLBACK.to_string(),
         outcome: outcome.to_string(),
         judged_names: None,
+        judged_request: None,
     };
     if candidates.is_empty() || task.trim().is_empty() {
         return fallback(NOTHING_TO_ASK);
     }
-    let Some(mode) = asking_mode(cwd) else {
+    let Some(mode) = asking_mode(cwd, &SKILLS) else {
         return fallback(JevMode::Off.key());
     };
     // Read once, here: the standing decides both whether the tool result is
@@ -339,6 +383,7 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
             .map(|reading| reading.name.clone())
             .collect::<Vec<_>>()
     });
+    let judged_request = judged.then(|| SkillRequestName::of(&row));
     // A recording mode asked and wrote the row down; what the turn reads is
     // still the word match's ranking, exactly as it would be with the switch
     // off. That is what makes the two readable side by side.
@@ -348,6 +393,7 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
             route_use: ROUTE_USE_APPLIED.to_string(),
             outcome: row.outcome.clone(),
             judged_names,
+            judged_request,
         }
     } else {
         Searched {
@@ -359,6 +405,7 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
             },
             outcome: row.outcome.clone(),
             judged_names,
+            judged_request,
         }
     };
     row.route_use.clone_from(&searched.route_use);
@@ -373,16 +420,21 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
 /// whether THIS turn went on to load what THIS search named, and a name read
 /// back from a ledger row could be a search somebody else's session made an
 /// hour ago.
-fn last_answer() -> &'static Mutex<HashMap<PathBuf, Vec<String>>> {
-    static ANSWERED: OnceLock<Mutex<HashMap<PathBuf, Vec<String>>>> = OnceLock::new();
+/// Per project: the names the last search's judgment handed back, and the
+/// request it answered.
+type AnswerBook = HashMap<PathBuf, (Vec<String>, SkillRequestName)>;
+
+fn last_answer() -> &'static Mutex<AnswerBook> {
+    static ANSWERED: OnceLock<Mutex<AnswerBook>> = OnceLock::new();
     ANSWERED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Remember what a search handed back, so a load that follows can be read as
-/// agreeing with it or not.
-pub fn note_search_answer(cwd: &Path, named: &[String]) {
+/// Remember what a search handed back, and which request it was, so a load
+/// that follows can be read as agreeing with it or not — and its label can
+/// name the request it grades.
+pub fn note_search_answer(cwd: &Path, named: &[String], request: SkillRequestName) {
     if let Ok(mut answered) = last_answer().lock() {
-        answered.insert(cwd.to_path_buf(), named.to_vec());
+        answered.insert(cwd.to_path_buf(), (named.to_vec(), request));
     }
 }
 
@@ -407,23 +459,25 @@ pub fn note_loaded_skill(cwd: &Path, loaded: &str) {
             return;
         }
     }
-    let Some(named) = last_answer()
+    let Some((named, request)) = last_answer()
         .lock()
         .ok()
         .and_then(|mut answered| answered.remove(cwd))
     else {
         return;
     };
-    let row = label_row(loaded, &named);
+    let row = label_row(loaded, &named, request);
     let _ = append_shadow_row(&skill_search_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
 }
 
-/// The mark itself: whether the skill the turn loaded was one the search
-/// named, and where in the ranking it sat.
-fn label_row(loaded: &str, named: &[String]) -> SkillLabelRow {
+/// The mark itself: whether the skill the turn loaded was one the judgment
+/// `request` named, and where in the ranking it sat.
+fn label_row(loaded: &str, named: &[String], request: SkillRequestName) -> SkillLabelRow {
     let rank = named.iter().position(|name| name == loaded);
     SkillLabelRow {
         at: unix_millis(),
+        label: request.label(),
+        request_at: request.at,
         loaded: loaded.to_string(),
         agreed: rank.is_some() || (loaded.is_empty() && named.is_empty()),
         rank,
@@ -434,9 +488,10 @@ fn label_row(loaded: &str, named: &[String]) -> SkillLabelRow {
     }
 }
 
-/// The turn boundary's two-stage suggestion uses this same SKILLS door and
-/// ledger. It is seated independently of the explicit `skill_search` tool so a
-/// turn reaches the judgment even when the agent never searches.
+/// The turn boundary's two-stage suggestion: a seat of its own with a ledger
+/// of its own ([`SKILL_SUGGESTION`], t-6877), cut at the search's door. It is
+/// seated independently of the explicit `skill_search` tool so a turn reaches
+/// the judgment even when the agent never searches.
 #[derive(Debug)]
 pub struct SkillSuggestionJudge {
     cwd: PathBuf,
@@ -462,16 +517,16 @@ impl SkillSuggestionSeat for SkillSuggestionJudge {
 /// The next observed Skill load is the first-load label for this turn. A turn
 /// with no load is closed by the runtime's turn-end hook. The entry is seated
 /// before the judgment is asked, so a load early in the turn is its label
-/// whether or not the judgment has landed yet; `judged` says whether it did,
-/// and a turn that ends without one is not labelled — there is nothing to
-/// compare the load with.
+/// whether or not the judgment has landed yet; `judged` names the request
+/// once it did, and a turn that ends without one is not labelled — there is
+/// nothing to compare the load with, and no request for a label to name.
 #[derive(Debug)]
 struct PendingSuggestion {
     generation: u64,
     suggested: Option<String>,
     loaded: Option<String>,
     acting: bool,
-    judged: bool,
+    judged: Option<SkillRequestName>,
 }
 
 static NEXT_SUGGESTION_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -490,17 +545,22 @@ fn start_pending_suggestion(cwd: &Path, acting: bool) -> Option<u64> {
         suggested: None,
         loaded: None,
         acting,
-        judged: false,
+        judged: None,
     });
     Some(generation)
 }
 
-fn mark_pending_suggestion_judged(cwd: &Path, generation: u64, suggested: Option<&str>) {
+fn mark_pending_suggestion_judged(
+    cwd: &Path,
+    generation: u64,
+    suggested: Option<&str>,
+    request: SkillRequestName,
+) {
     if let Ok(mut pending) = turn_pending().lock() {
         match pending.get_mut(cwd) {
             Some(turn) if turn.generation == generation => {
                 turn.suggested = suggested.map(str::to_string);
-                turn.judged = true;
+                turn.judged = Some(request);
             }
             _ => {
                 LATE_SUGGESTION_JUDGMENTS.fetch_add(1, Ordering::Relaxed);
@@ -515,7 +575,7 @@ fn finish_turn_suggestion(cwd: &Path, turn: &[ConversationMessage]) {
     }
     let pending = turn_pending().lock().ok().and_then(|mut rows| rows.remove(cwd));
     if let Some(row) = pending.and_then(|pending| judged_label(pending, turn)) {
-        let _ = append_shadow_row(&skill_search_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+        let _ = append_shadow_row(&skill_suggestion_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
     }
 }
 
@@ -523,12 +583,13 @@ fn finish_turn_suggestion(cwd: &Path, turn: &[ConversationMessage]) {
 /// turn whose entry was never marked judged has nothing to compare its load
 /// with, and gets no row.
 fn judged_label(pending: PendingSuggestion, turn: &[ConversationMessage]) -> Option<SkillLabelRow> {
-    pending.judged.then(|| label_turn(pending, turn))
+    let request = pending.judged?;
+    Some(label_turn(pending, request, turn))
 }
 
-fn label_turn(pending: PendingSuggestion, turn: &[ConversationMessage]) -> SkillLabelRow {
+fn label_turn(pending: PendingSuggestion, request: SkillRequestName, turn: &[ConversationMessage]) -> SkillLabelRow {
     let loaded = pending.loaded.as_deref().unwrap_or_default();
-    let mut row = label_row(loaded, &pending.suggested.into_iter().collect::<Vec<_>>());
+    let mut row = label_row(loaded, &pending.suggested.into_iter().collect::<Vec<_>>(), request);
     row.unused_load = (!loaded.is_empty()).then(|| skill_used_after_load(turn, loaded))
         .flatten().map(|used| !used);
     if !pending.acting {
@@ -642,8 +703,8 @@ async fn suggest_at(cwd: PathBuf, task: String) -> Option<String> {
     if task.trim().is_empty() {
         return None;
     }
-    let mode = asking_mode(&cwd)?;
-    let acting = mode.applies_with(runtime::jev_seat_applies(&cwd, &SKILLS));
+    let mode = asking_mode(&cwd, &SKILL_SUGGESTION)?;
+    let acting = mode.applies_with(runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION));
     let skills = runtime::discover_skills(&cwd);
     let candidates = skill_candidates(&skills);
     if candidates.is_empty() {
@@ -687,13 +748,13 @@ async fn judge_suggestion(
     let Some(client) = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client) else {
         row.outcome = Refused::NoKey.token().into();
         telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, Refused::NoKey.token());
-        let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+        let _ = append_shadow_row(&skill_suggestion_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
         return None;
     };
     let started = Instant::now();
     let wide = ask_wide(&door, &client, &task, &candidates, acting, &mut row).await;
     let Some(wide) = wide else {
-        let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+        let _ = append_shadow_row(&skill_suggestion_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
         return None;
     };
     row.gate_score = Some(wide.gate);
@@ -706,7 +767,7 @@ async fn judge_suggestion(
             Err(reason) => {
                 row.outcome = SystemOneFailure::Schema.ledger_token();
                 row.rejected = Some(reason);
-                let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+                let _ = append_shadow_row(&skill_suggestion_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
                 return None;
             }
         }
@@ -715,11 +776,16 @@ async fn judge_suggestion(
     telemetry::attest_fired(telemetry::HarnessFeature::SkillSearch);
     row.chosen = winner.iter().map(Chosen::from).collect();
     row.route_use = if acting { ROUTE_USE_APPLIED.into() } else { mode.key().into() };
-    let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+    let _ = append_shadow_row(&skill_suggestion_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
     // The absence of a skill is a prediction too. It stays until this turn
     // ends so a no-load turn contributes a negative label.
     if let Some(generation) = generation {
-        mark_pending_suggestion_judged(&cwd, generation, winner.as_ref().map(|choice| choice.name.as_str()));
+        mark_pending_suggestion_judged(
+            &cwd,
+            generation,
+            winner.as_ref().map(|choice| choice.name.as_str()),
+            SkillRequestName::of(&row),
+        );
     }
     acting.then(|| suggestion_note(winner.as_ref().map(|choice| choice.name.as_str())))
 }
@@ -735,7 +801,7 @@ async fn ask_wide(
     let state = wide_state(task, candidates);
     let questions = wide_questions(candidates);
     let (call, withheld) = match send_stage(
-        door, client, &state, &questions, acting, SKILL_SEARCH_DEADLINE,
+        &SKILL_SUGGESTION, door, client, &state, &questions, acting, SKILL_SEARCH_DEADLINE,
     ).await {
         Ok(value) => value,
         Err(reason) => {
@@ -793,7 +859,7 @@ async fn ask_narrow(
     if remaining.is_zero() {
         return Err("deadline".into());
     }
-    let (call, withheld) = send_stage(door, client, &state, &questions, acting, remaining).await?;
+    let (call, withheld) = send_stage(&SKILL_SUGGESTION, door, client, &state, &questions, acting, remaining).await?;
     row.requests = Some(row.requests.unwrap_or(0).saturating_add(call.requests));
     row.retries = row.retries.saturating_add(call.retries);
     row.elapsed_ms = row.elapsed_ms.saturating_add(jev_gate::millis(call.elapsed));
@@ -805,7 +871,10 @@ async fn ask_narrow(
     Ok(winner)
 }
 
+/// One request of `seat` through the door — the search's or the
+/// suggestion's, each cut and hedged as its own row says.
 async fn send_stage(
+    seat: &JevUse,
     door: &JevDoor,
     client: &SystemOneClient,
     state: &serde_json::Value,
@@ -816,20 +885,26 @@ async fn send_stage(
     let request = SystemOneRequest { state, model: SYSTEMONE_MODEL, questions };
     let body = jev_gate::body_of(&request)
         .ok_or_else(|| SystemOneFailure::InvalidRequest.ledger_token())?;
-    let cleared = door.pass(&SKILLS, true, body).map_err(|refusal| refusal.token().to_string())?;
+    let cleared = door.pass(seat, true, body).map_err(|refusal| refusal.token().to_string())?;
     let withheld = u32::try_from(cleared.withheld_lines()).unwrap_or(u32::MAX);
-    let hedge = door.hedge_now(&SKILLS, deadline, acting);
+    let hedge = door.hedge_now(seat, deadline, acting);
     Ok((jev_gate::send(client, cleared, deadline, hedge).await, withheld))
 }
 
-/// The mode this search is to be judged under, or `None` when it is not to be
-/// judged at all: an ablation holding it out, an unreadable setting, or a
-/// mode that asks nothing.
-fn asking_mode(cwd: &Path) -> Option<JevMode> {
+/// The mode `seat` — the search or the suggestion — is to be judged under,
+/// or `None` when it is not to be judged at all: an ablation holding it
+/// out, an unreadable setting, or a mode that asks nothing.
+fn asking_mode(cwd: &Path, seat: &JevUse) -> Option<JevMode> {
     if telemetry::attest_ablated(telemetry::HarnessFeature::SkillSearch) {
         return None;
     }
-    let Some(mode) = skill_search_mode_from(&runtime::ConfigLoader::default_for(cwd)) else {
+    let loader = runtime::ConfigLoader::default_for(cwd);
+    let mode = if seat.id == SKILL_SUGGESTION.id {
+        skill_suggestion_mode_from(&loader)
+    } else {
+        skill_search_mode_from(&loader)
+    };
+    let Some(mode) = mode else {
         telemetry::attest_failed(telemetry::HarnessFeature::SkillSearch, FAIL_SETTINGS_UNAVAILABLE);
         return None;
     };
@@ -920,7 +995,7 @@ async fn ask_one(
         telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, Refused::NoKey.token());
         return refused(Refused::NoKey.token().to_string());
     };
-    let (call, withheld) = match send_stage(door, client, &state, &questions, acting, SKILL_SEARCH_DEADLINE).await {
+    let (call, withheld) = match send_stage(&SKILLS, door, client, &state, &questions, acting, SKILL_SEARCH_DEADLINE).await {
         Ok(sent) => sent,
         Err(reason) => {
             telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, FAIL_SKILL_SEND);

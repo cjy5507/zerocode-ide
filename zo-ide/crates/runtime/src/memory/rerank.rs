@@ -104,8 +104,9 @@ use super::recall::{wikilink_target, RECALL_CONTRADICTS_MARK, RECALL_SUPERSEDED_
 
 /// Bumped whenever a level description, the instructions or the state's shape
 /// changes. A comparison row carries it, so a reading taken under other words
-/// is never read as evidence about these ones.
-pub const RERANK_RUBRIC_VERSION: u32 = 1;
+/// is never read as evidence about these ones. The number is the seat's
+/// row's own (t-6877), read from the table and not respelled.
+pub const RERANK_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::RECALL_RUBRIC_VERSION;
 
 /// The ordered levels of the one question asked about each note, lowest first.
 ///

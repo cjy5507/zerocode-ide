@@ -369,6 +369,27 @@ pub fn skill_search_mode_from(loader: &runtime::ConfigLoader) -> Option<Decision
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::SKILLS.mode_in(&root))
 }
 
+/// `smart.skillSuggestion`: whether the turn-start suggestion — the two-stage
+/// question asked at every turn's boundary whether or not the agent
+/// searches — is asked, and whether its answer is handed to the turn. Its
+/// own switch beside [`SKILL_SEARCH_SETTING`] (t-6877): the two ask
+/// different words of the same catalog, and a seat is one question judged
+/// on its own rows.
+pub const SKILL_SUGGESTION_SETTING: &str = zerocode_core::jev::SKILL_SUGGESTION.setting;
+
+/// `smart.skillSuggestion` from the settings `loader` merges, on the same
+/// terms as [`skill_search_mode_from`] — and, while nobody wrote a word for
+/// it, the word written for the search (`zerocode_core::jev::JevUse::follows`,
+/// t-6877 round 3): a person who turned the search off before the two were
+/// split turned the suggestion off with it. `on`, and an `auto` this seat's
+/// own evidence has raised, hand the turn a note naming the skill the
+/// judgment chose; `shadow` and a recording `auto` write the row and hand the
+/// turn nothing.
+#[must_use]
+pub fn skill_suggestion_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::SKILL_SUGGESTION.mode_in(&root))
+}
+
 /// `smart.jevCompaction`: whether the tool results a full compaction is about
 /// to summarize away are put to a judgment first. Its own switch, because it
 /// sends something else off the machine — the heads of a session's tool

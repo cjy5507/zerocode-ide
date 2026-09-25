@@ -130,10 +130,17 @@ def evaluate(seed: list[dict], gold: dict[str, dict], assisted: dict[str, dict])
     return results
 
 
+# The ledgers the turn-start suggestion's labels are in: its own since it
+# became a seat of its own (t-6877; `zerocode_core::jev::SKILL_SUGGESTION`),
+# and the search's, which it shared before.
+SUGGESTION_LEDGERS = ("skill-suggestion.jsonl", "skill-search.jsonl")
+
+
 def observed_labels(root: Path, since_ms: int) -> dict[str, int]:
     rows = (
         row
-        for path in root.glob("*/state/smart-router/skill-search.jsonl")
+        for ledger in SUGGESTION_LEDGERS
+        for path in root.glob(f"*/state/smart-router/{ledger}")
         for row in read_jsonl(path)
         if (row.get("at") or 0) >= since_ms and "agreed" in row
     )

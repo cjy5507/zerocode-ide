@@ -1414,6 +1414,9 @@ fn answered_press(at_ms: i64, agreed: bool) -> Value {
         ELAPSED_MS.canonical: 300,
         "pressed": true,
         AGREED.canonical: agreed,
+        // Stamped as the walk's writer stamps every row (t-6877): the seat
+        // is judged on the series of the words it asks now.
+        (zerocode_core::jev::summary::RUBRIC_VERSION.canonical): SCREEN_ACTION_RUBRIC_VERSION,
     })
 }
 
@@ -1492,7 +1495,13 @@ fn a_screen_seats_auto_rises_on_its_own_rows_and_falls_when_the_wire_does() {
     // Three answers in a row that never came back end it at once, whatever
     // the cadence says: that is the wire, the key or the model.
     let dead: Vec<Value> = (0..3)
-        .map(|n| json!({ AT.canonical: 2_000 + n, "outcome": "timeout" }))
+        .map(|n| {
+            json!({
+                AT.canonical: 2_000 + n,
+                "outcome": "timeout",
+                (zerocode_core::jev::summary::RUBRIC_VERSION.canonical): SCREEN_ACTION_RUBRIC_VERSION,
+            })
+        })
         .collect();
     write_rows(seat, &wire, None, &dead, 95_000);
 

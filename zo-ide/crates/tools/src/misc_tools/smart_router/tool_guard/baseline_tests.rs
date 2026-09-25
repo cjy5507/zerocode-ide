@@ -2,8 +2,9 @@
 //! marks today's rule only where the host can say what it fenced, the live
 //! label and the replay grade that rule alike, a series the rule cannot grade
 //! does not rise on marks it never had, two runtime owners in one folder keep
-//! their own hindsight through the real seam, and the command guard files a
-//! command under the folder the Bash tool runs it in.
+//! their own hindsight through the real seam, the command guard files a
+//! command under the folder the Bash tool runs it in, and a thick series of
+//! the words before today's judges nothing of today's (t-6877).
 //!
 //! Every test outside `host_word` reads only what the product had before
 //! t-7058, so the same bytes run against it; `host_word` reads the host's
@@ -16,22 +17,20 @@ use std::time::Duration;
 use runtime::tool_guard::{command_with_cwd, text_ask};
 use runtime::{ApiRequest, AssistantEvent, ConversationRuntime, PermissionMode, PermissionPolicy, RuntimeError, Session, StaticToolExecutor};
 use zerocode_core::jev::promote::{self, marks_that_can_clear, window_wanted_for, Line};
-use zerocode_core::jev::summary::{agreement_since, JUDGED_EVERY_ROWS, MODEL, TRANSITION};
+use zerocode_core::jev::summary::{agreement_since, JUDGED_EVERY_ROWS, TRANSITION};
 use zerocode_core::jev::{JevMode, JevUse, COMMAND_GUARD, TOOL_TEXT_GUARD};
 
 use super::super::jev_mock::{machine, Mock};
 use super::super::shadow_ledger::read_shadow_rows;
-use super::tests::{addresses_the_agent, call, cannot_be_undone, result, rows_of, said, user, ORDER};
+use super::tests::{
+    addresses_the_agent, call, cannot_be_undone, guard_ledger_with, guard_request, result, rows_of, said, today_and_before,
+    transitions_in, user, ORDER,
+};
 use super::*;
 
 /// The label rows among `rows`.
 fn labels_in(rows: &[Value]) -> Vec<Value> {
     rows.iter().filter(|row| row["kind"] == runtime::LABEL_ROW_KIND).cloned().collect()
-}
-
-/// The transition rows the judge wrote on `ledger`.
-fn transitions_in(ledger: &Path) -> Vec<Value> {
-    read_shadow_rows::<Value>(ledger).into_iter().filter(|row| TRANSITION.read(row).is_some()).collect()
 }
 
 /// The command a followed block spelled, as the next step runs it.
@@ -222,53 +221,48 @@ fn a_series_graded_on_the_hosts_word_rises_on_its_own_marks() {
     });
 }
 
-/// A text guard request row reduced to what the judge reads, answered by
-/// the product's model under `rubric`.
-fn request_row(at: u64, judged: u64, rubric: u32) -> Value {
-    let mut row = serde_json::json!({
-        "at": at, "judged": judged, "rubricVersion": rubric, "outcome": TOOL_GUARD_OUTCOME_ANSWERED, "elapsedMs": 400, "requests": 1,
-    });
-    row[MODEL.canonical] = Value::from(zerocode_core::jev::DEFAULT_MODEL);
-    row
-}
-
-/// TODAY'S FACT, NOT THE RIGHT BEHAVIOUR — t-6877 turns these assertions
-/// over (coordinator m-7831). The shared promotion reader windows the text
-/// guard's ledger by the answering model alone
-/// (`promote::on_the_newest_version`), so a thick series asked under version
-/// 2 — every mark the constant plain of that version — still judges a thin
-/// window of twenty requests asked under version 3, the words the seat asks
-/// now: at the guard's own judge (`judge_seat_ledger`) the mix rises, and the
-/// runtime's standing reader acts on it. t-6877 reads one rubric's series:
-/// twenty requests of version 3 are no window, nothing is judged, no rise is
-/// written. This test records the gap t-7058 does not close; it is not a
-/// contract.
+/// A thick series of the guard's words before today's does not judge a thin
+/// window of today's (t-6877 turned over what t-7058 recorded here as the
+/// day's fact, coordinator m-7831 and m-8338). While the shared promotion
+/// reader windowed the ledger by the answering model alone, a thick series
+/// asked under the version before — every mark the constant plain of that
+/// version — judged a thin window of twenty requests of the words the seat
+/// asks now, answered by the same model, and the mix rose. It reads one
+/// rubric's series now (`promote::on_the_newest_version`): twenty requests
+/// of today's words are no window, so at the guard's own judge
+/// (`judge_seat_ledger`) nothing is judged, no rise is written, and neither
+/// the runtime's standing reader nor the guard's cached `auto` acts — on the
+/// same rows.
 #[test]
-fn t6877_flips_this_today_a_thick_version_two_series_judges_a_thin_version_three_window() {
-    let before = TOOL_TEXT_GUARD_RUBRIC_VERSION - 1;
+fn a_thick_series_of_the_words_before_does_not_judge_a_thin_window_of_todays() {
+    let (today, before) = today_and_before();
     machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
         let wanted = u64::try_from(window_wanted_for(&TOOL_TEXT_GUARD).expect("the guard rises")).expect("small");
         let marks = u64::try_from(marks_that_can_clear(&TOOL_TEXT_GUARD).expect("a width")).expect("small");
         let misses = u64::try_from(TOOL_TEXT_GUARD.negatives_wanted.expect("negatives")).expect("small");
         let thin = u64::try_from(JUDGED_EVERY_ROWS).expect("small");
-        let ledger = tool_text_guard_path(cwd);
-        let mut rows: Vec<Value> = (0..wanted).map(|n| request_row(n, 1 + n, before)).collect();
-        // Version 2's mark: plain on every block, so it agreed exactly where
-        // the block was not followed — where the guard's flag disagreed.
+        // Answered by the product's model under `rubric`.
+        let answered = |at: u64, judged: u64, rubric: u32| {
+            guard_request(at, judged, rubric, Some(zerocode_core::jev::DEFAULT_MODEL), TOOL_GUARD_OUTCOME_ANSWERED)
+        };
+        let mut rows: Vec<Value> = (0..wanted).map(|n| answered(n, 1 + n, before)).collect();
+        // The mark of the words before: plain on every block, so it agreed
+        // exactly where the block was not followed — where the guard's flag
+        // disagreed.
         rows.extend((0..marks).map(|n| {
             serde_json::json!({
                 "kind": runtime::LABEL_ROW_KIND, "at": wanted + n, "label": (1 + n).to_string(),
                 "agreed": n >= misses, "baselineAgreed": n < misses,
             })
         }));
-        rows.extend((0..thin).map(|n| request_row(10_000 + n, 1_000 + n, TOOL_TEXT_GUARD_RUBRIC_VERSION)));
-        for row in &rows {
-            append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES).expect("a row");
-        }
+        rows.extend((0..thin).map(|n| answered(10_000 + n, 1_000 + n, today)));
+        let ledger = guard_ledger_with(cwd, &rows);
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
-        assert_eq!(verdict, Some(promote::Verdict::Rise), "today: version 2's marks judge version 3's thin window");
-        assert_eq!(transitions_in(&ledger).len(), 1, "today: a rise written on version 2's evidence");
-        assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "today: the runtime's reader acts on it");
+        assert_eq!(verdict, None, "{thin} requests of today's words are not a window of {wanted}: nothing is judged");
+        assert!(transitions_in(&ledger).is_empty(), "no rise is written on the evidence of the words before");
+        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "the runtime's reader: recording");
+        refresh_standing(cwd, &TOOL_TEXT_GUARD);
+        assert!(!raised(cwd, &TEXT), "the guard's cached auto: recording");
     });
 }
 

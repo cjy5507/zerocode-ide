@@ -53,12 +53,14 @@ const TYPESAFE_DECISION_MODES = Object.freeze([
    seat offers all four, a seat nothing labels offers no `auto` — and the mode
    it stands at while Jev is switched on and nobody wrote a word for it
    (`JevUse::recommended`) — `off` for the two seats stopped on their own
-   evidence (t-6342). `typesafe_settings.rs` holds this list against the
-   table. */
+   evidence (t-6342) — and, for a seat split off another, the setting whose
+   word it reads while it has none of its own (`JevUse::follows`, t-6877).
+   `typesafe_settings.rs` holds this list against the table. */
 const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "skills", setting: "skillSearch", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "skill_suggestion", setting: "skillSuggestion", modes: "off shadow on auto", recommended: "auto", follows: "skillSearch" }),
   Object.freeze({ id: "browser", setting: "browserAction", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "desktop", setting: "desktopAction", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "emulator", setting: "emulatorAction", modes: "off shadow on auto", recommended: "auto" }),
@@ -2728,8 +2730,13 @@ class StatefulBackend {
     /* `door::switched_on`: the switch written, and true. */
     const switchedOn = door?.enabled === true;
     /* Every seat reads its own row's words and anything else is off; a seat
-       nobody wrote a word for stands at its recommendation while the switch is
-       on and is off otherwise: `JevUse::mode_in`. */
+       split off another reads the word written for that other while it has
+       none of its own (`JevUse::word_in`); a seat nobody wrote a word for
+       stands at its recommendation while the switch is on and is off
+       otherwise: `JevUse::mode_in`. */
+    const wordOf = (seat) => smart[seat.setting] !== undefined || seat.follows === undefined
+      ? smart[seat.setting]
+      : smart[seat.follows];
     const mode = (seat, given) => {
       const offered = seat.modes.split(" ");
       if (given === undefined) return switchedOn ? seat.recommended : offered[0];
@@ -2739,9 +2746,9 @@ class StatefulBackend {
     const switches = JEV_SEATS.map((seat) => ({
       id: seat.id,
       setting: seat.setting,
-      mode: mode(seat, smart[seat.setting]),
+      mode: mode(seat, wordOf(seat)),
       modes: clone(jevSeatModes(seat)),
-      written: smart[seat.setting] !== undefined,
+      written: wordOf(seat) !== undefined,
     }));
     /* `JevSwitch::of`: the door lets a request through (unset is on, anything
        but `true` is off), some seat asks, and some folder is consented. */
@@ -5039,6 +5046,38 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   await pageA.evaluate(() => refreshApiRouters());
   assert(!(await pageA.locator("#typesafe-key-input").isDisabled()), "a machine with a keychain was left without the key field");
   return `one switch · ${selects.total} select under 고급 · 0 visible`;
+});
+
+await test("분리 전에 손으로 끈 스킬 검색은 업데이트 뒤에도 스킬 제안을 끈 채로 둔다 — 제안은 제 낱말이 생길 때까지 검색의 낱말을 따른다", async () => {
+  await openSettings(pageA, "api-routers");
+  backend.keychain.set(TYPESAFE_SERVICE, "apikey_fixture");
+  const toggle = pageA.locator("#jev-enabled");
+  const suggestion = JEV_SEATS.find((seat) => seat.id === "skill_suggestion");
+  const search = JEV_SEATS.find((seat) => seat.id === "skills");
+  // A file written before the skill suggestion was a seat of its own: Jev on
+  // in every folder and every feature turned off by hand, the skill search
+  // among them, and no word for the suggestion, which read the search's
+  // until the split (t-6877, the coordinator's migration contract m-8181).
+  const byHand = Object.fromEntries(
+    JEV_SEATS.filter((seat) => seat !== suggestion).map((seat) => [seat.setting, "off"]),
+  );
+  try {
+    backend.zoSettings.smart = { ...byHand, [JEV_SETTINGS_KEY]: { enabled: true, workspaces: [JEV_EVERY_WORKSPACE] } };
+    await pageA.evaluate(() => refreshApiRouters());
+    await renderSettled(pageA);
+    assert(!(await toggle.isChecked()), "the update turned the suggestion on though its person had turned the search off");
+    // A word of the suggestion's own is its own: it asks, and the switch
+    // says Jev is in use, while the search's own word stands.
+    backend.zoSettings.smart = { ...backend.zoSettings.smart, [suggestion.setting]: "auto" };
+    await pageA.evaluate(() => refreshApiRouters());
+    await pageA.waitForFunction(() => document.getElementById("jev-enabled")?.checked === true, null, { timeout: UI_TIMEOUT });
+    assertEqual(backend.zoSettings.smart[search.setting], "off", "the search's own word moved");
+  } finally {
+    delete backend.zoSettings.smart;
+    backend.keychain.delete(TYPESAFE_SERVICE);
+  }
+  await pageA.evaluate(() => refreshApiRouters());
+  return `${suggestion.id} follows ${search.setting} until it has a word of its own`;
 });
 
 await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한다 — 분류기가 라우팅 자리 앞에 선다", async () => {

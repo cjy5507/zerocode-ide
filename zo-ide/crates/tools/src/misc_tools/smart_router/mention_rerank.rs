@@ -88,8 +88,10 @@ const _: () = assert!(
 );
 
 /// The rubric's version, pinned by a fingerprint of its words: a word
-/// changed without a bump is a red test rather than a quiet drift.
-pub const MENTION_RUBRIC_VERSION: u32 = 1;
+/// changed without a bump is a red test rather than a quiet drift. The
+/// number lives beside the seat's row (t-6877), which the judge reads the
+/// seat's ledger by; this is that number, not a second one.
+pub const MENTION_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::MENTION_RERANK_RUBRIC_VERSION;
 
 /// The one question, by the id its answer comes back under.
 const QUESTION: &str = "meant";
@@ -306,6 +308,11 @@ pub struct MentionLabelRow {
     /// The reading this row grades, spelled `<query>:<notes>` — the two
     /// fingerprints the answered row is named by.
     pub label: String,
+    /// When that judgment's row was made
+    /// (`zerocode_core::jev::summary::REQUEST_AT`, t-6877): the same page
+    /// under the same words carries the same name every time it opens, and
+    /// the judge joins a label to one opening by the time.
+    pub request_at: u64,
     pub query: u64,
     pub notes: u64,
     pub applied: bool,
@@ -368,6 +375,8 @@ fn memo() -> &'static Mutex<HashMap<MemoKey, Remembered>> {
 #[derive(Debug, Clone)]
 struct Settled {
     ticket: u64,
+    /// When the judgment's row was made — the label's `requestAt` (t-6877).
+    at: u64,
     surface: MentionSurface,
     query: u64,
     notes: u64,
@@ -633,6 +642,7 @@ async fn run(shot: Shot) {
         if let Ok(mut held) = settled.lock() {
             *held = Some(Settled {
                 ticket,
+                at: row.at,
                 surface: ask.surface,
                 query: row.query,
                 notes: row.notes,
@@ -807,6 +817,7 @@ fn label_row(settled: &Settled, chosen: Option<usize>, reordered: bool) -> Menti
         at: super::decision_shadow::unix_millis(),
         surface: settled.surface,
         label: format!("{}:{}", settled.query, settled.notes),
+        request_at: settled.at,
         query: settled.query,
         notes: settled.notes,
         applied: reordered,

@@ -343,6 +343,87 @@ fn a_use_with_no_word_of_its_own_follows_the_switch() {
     }
 }
 
+/// The skill suggestion keeps the word its person wrote for the skill
+/// search until they write one of its own (t-6877 round 3, the
+/// coordinator's migration contract m-8181): it read `smart.skillSearch`
+/// until it was a seat of its own, so a file that says `off` there asks no
+/// suggestion after the update, and `shadow`, `on` and `auto` stand as
+/// written — a slip reads as `off` for both, as it did; with neither word
+/// written it stands where it stood before the split, the search's reading,
+/// whatever the switch says; and a word written for the suggestion is its
+/// own, whatever the search's says. The search never reads the
+/// suggestion's word.
+#[test]
+fn the_skill_suggestion_keeps_the_word_written_for_the_skill_search() {
+    let document = |switch: Option<bool>, search: Option<&str>, suggestion: Option<&str>| {
+        let mut smart = serde_json::Map::new();
+        if let Some(on) = switch {
+            smart.insert(
+                door::JEV_SETTINGS_KEY.to_string(),
+                json!({ door::ENABLED_SETTING: on }),
+            );
+        }
+        if let Some(word) = search {
+            smart.insert(SKILLS.setting.to_string(), json!(word));
+        }
+        if let Some(word) = suggestion {
+            smart.insert(SKILL_SUGGESTION.setting.to_string(), json!(word));
+        }
+        json!({ SMART_SETTINGS_KEY: smart })
+    };
+    // The contract's three cases, under the switch.
+    assert_eq!(
+        SKILL_SUGGESTION.mode_in(&document(Some(true), Some("off"), None)),
+        JevMode::Off,
+        "a search turned off by hand keeps the suggestion off after the update"
+    );
+    assert_eq!(
+        SKILL_SUGGESTION.mode_in(&document(Some(true), Some("off"), Some("auto"))),
+        JevMode::Auto,
+        "a word of the suggestion's own is its own"
+    );
+    assert_eq!(
+        SKILL_SUGGESTION.mode_in(&document(Some(true), None, None)),
+        SKILLS.mode_in(&document(Some(true), None, None)),
+        "with neither word written, where it stood before the split"
+    );
+    for switch in [Some(true), Some(false), None] {
+        let neither = document(switch, None, None);
+        assert_eq!(
+            SKILL_SUGGESTION.mode_in(&neither),
+            SKILLS.mode_in(&neither),
+            "{switch:?}: neither word written reads as the search did"
+        );
+        for search in ["off", "shadow", "on", "auto", "shadwo"] {
+            let before = document(switch, Some(search), None);
+            assert_eq!(
+                SKILL_SUGGESTION.mode_in(&before),
+                SKILLS.mode_in(&before),
+                "{switch:?} {search}: the search's word stands for the suggestion"
+            );
+            for own in ["off", "shadow", "on", "auto"] {
+                let split = document(switch, Some(search), Some(own));
+                assert_eq!(
+                    SKILL_SUGGESTION.mode_in(&split),
+                    SKILL_SUGGESTION.mode_of(Some(&json!(own))),
+                    "{switch:?} {search} {own}: the suggestion's own word"
+                );
+                assert_eq!(
+                    SKILLS.mode_in(&split),
+                    SKILLS.mode_in(&before),
+                    "{switch:?} {search} {own}: the search reads its own word alone"
+                );
+            }
+        }
+        let only_the_suggestion = document(switch, None, Some("off"));
+        assert_eq!(
+            SKILLS.mode_in(&only_the_suggestion),
+            SKILLS.mode_in(&neither),
+            "{switch:?}: the search never follows the suggestion"
+        );
+    }
+}
+
 /// Recall has an apply stage (t-4676): `on` reorders what a turn reads. Its
 /// `auto` records until the judge raises it on the seat's own labels
 /// (t-5806), on the skill seat's lines read from there.
@@ -1485,7 +1566,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 25);
+    assert_eq!(JEV_USES.len(), 26);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1787,7 +1868,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 25);
+    assert_eq!(JEV_USES.len(), 26);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 3), Some(&FILE_PICK));
 }
 
@@ -2165,4 +2246,147 @@ fn a_seat_that_never_rises_names_no_apply_wall() {
             row.apply_deadline_ms
         );
     }
+}
+
+/// Every seat's row names the words it asks now and how its labels name a
+/// request (t-6877): one rubric version — a version, never zero — and
+/// naming keys that are plain words. The judge reads a seat's ledger as
+/// one rubric's series by these two columns; a seat is one question, so no
+/// two seats write one ledger, and the skills seat's two questions are two
+/// rows, each pointing at the constant its writer stamps.
+#[test]
+fn every_seat_names_its_rubric_and_how_its_labels_name_a_request() {
+    use crate::jev::questions::UNVERSIONED_RUBRIC;
+    assert_eq!(
+        UNVERSIONED_RUBRIC, 1,
+        "a row that names no version is the first rubric's"
+    );
+    for row in &JEV_USES {
+        assert!(
+            row.rubric_version >= UNVERSIONED_RUBRIC,
+            "{}: zero is not a version",
+            row.id
+        );
+        for key in row.request_name {
+            assert!(
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{}: {key:?} is not a key a request row carries",
+                row.id
+            );
+        }
+    }
+    assert_eq!(
+        SKILLS.rubric_version,
+        questions::SKILL_SEARCH_RUBRIC_VERSION
+    );
+    assert_eq!(
+        SKILL_SUGGESTION.rubric_version,
+        questions::SKILL_SUGGESTION_RUBRIC_VERSION
+    );
+    assert_ne!(
+        SKILLS.rubric_version, SKILL_SUGGESTION.rubric_version,
+        "two questions, two rubrics"
+    );
+    assert_ne!(SKILLS.ledger, SKILL_SUGGESTION.ledger, "and two ledgers");
+    assert_eq!(SKILLS.sends, SKILL_SUGGESTION.sends, "cut at one door");
+    assert_eq!(SKILLS.request_name, &["task", "catalog"]);
+    assert_eq!(SKILL_SUGGESTION.request_name, SKILLS.request_name);
+    assert_eq!(
+        TOOL_TEXT_GUARD.rubric_version,
+        questions::TOOL_TEXT_GUARD_RUBRIC_VERSION
+    );
+    assert_eq!(TOOL_TEXT_GUARD.request_name, &["judged"]);
+    assert_eq!(ROUTING.rubric_version, questions::ROUTING_RUBRIC_VERSION);
+    assert_eq!(
+        CHALLENGER.rubric_version,
+        questions::CHALLENGER_RUBRIC_VERSION,
+        "the number the arm stamps on every row that asked"
+    );
+    assert_eq!(RECALL.request_name, &["query", "notes"]);
+    assert_eq!(
+        ZO_STEP_EFFORT.request_name,
+        &["attempt", "step"],
+        "a progress mark names the judgment it grades by the turn and the step it was asked at"
+    );
+}
+
+/// What a request's name picks out is the table's to say, seat by seat
+/// (t-6877 round 3, astra R1b): the routing seat's attempt names a turn of
+/// several judgments; the recall, mention and both skills seats name the
+/// words asked, which the same words asked again carry again — so their
+/// labels name the time of the asking they grade; every other seat's name
+/// is an id its writer made for one request. A label grades a part of its
+/// request only where the request has several — the compaction seat's
+/// dropped blocks — and a part's keys are keys a label row carries.
+#[test]
+fn every_seat_says_what_its_request_name_picks_out() {
+    for row in &JEV_USES {
+        let expected = match row.id {
+            id if id == ROUTING.id => Naming::Turn,
+            id if [RECALL.id, MENTION_RERANK.id, SKILLS.id, SKILL_SUGGESTION.id].contains(&id) => {
+                Naming::Words
+            }
+            _ => Naming::Request,
+        };
+        assert_eq!(row.names, expected, "{}", row.id);
+        if row.names != Naming::Request {
+            assert!(
+                !row.request_name.is_empty(),
+                "{}: a name that picks out words or a turn is carried under some key",
+                row.id
+            );
+        }
+        for key in row.label_part {
+            assert!(
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{}: {key:?} is not a key a label row carries",
+                row.id
+            );
+        }
+        let parts: &[&str] = if row.id == COMPACTION.id {
+            &["block"]
+        } else {
+            &[]
+        };
+        assert_eq!(row.label_part, parts, "{}", row.id);
+    }
+}
+
+/// A seat split off another follows a word written for the other, and only
+/// a seat that was (t-6877 round 3, m-8181): the skill suggestion follows
+/// the search's setting — another row's, never its own — reads every word
+/// the search offers as the search reads it, and the search follows
+/// nothing, so a word is followed one step and never round a circle.
+#[test]
+fn a_seat_follows_only_the_seat_it_was_split_from() {
+    for row in &JEV_USES {
+        let Some(followed) = row.follows else {
+            continue;
+        };
+        assert_eq!(
+            (row.id, followed),
+            (SKILL_SUGGESTION.id, SKILLS.setting),
+            "only the skill suggestion was split from another seat"
+        );
+        let from = JEV_USES
+            .iter()
+            .find(|other| other.setting == followed)
+            .expect("the followed setting is a row's");
+        assert_ne!(from.id, row.id, "a seat does not follow itself");
+        assert_eq!(
+            from.follows, None,
+            "{}: a followed seat follows nothing",
+            from.id
+        );
+        for mode in from.modes {
+            assert!(
+                row.modes.contains(mode),
+                "{}: {} is a word {} offers and this seat would read as off",
+                row.id,
+                mode.key(),
+                from.id
+            );
+        }
+    }
+    assert_eq!(SKILL_SUGGESTION.follows, Some(SKILLS.setting));
 }

@@ -2337,6 +2337,84 @@ fn every_row_that_asked_names_the_rubric_it_asked_by() {
     assert_eq!(CHALLENGER_RUBRIC_VERSION, zerocode_core::jev::questions::CHALLENGER_RUBRIC_VERSION, "the table's own number");
 }
 
+/// 팔이 찍는 버전이 곧 표의 챌린저 행이 판정받는 창이다(t-6877 r5, t-6263 R5): 팔이 적은 비교와 그 라벨은 모두 표가
+/// 오늘 묻는 버전의 창에 들고, 그 창은 자리를 세운다. 질문을 바꿔 표의 버전을 올린 날에는 그 옛 행이 새 버전의 창에
+/// 하나도 들지 않는다 — 창은 빈 채로 새로 열리고, 새 말로 물은 행만 그 창을 채우며, 판정 박자에 못 미친 얇은 창은
+/// 판정받지 않는다.
+#[test]
+fn the_arms_rows_fill_the_window_its_row_is_judged_on_and_a_new_question_opens_a_new_one() {
+    use zerocode_core::jev::promote::{marks_that_can_clear, on_the_newest_version, window_wanted_for};
+    use zerocode_core::jev::summary::{AT, JUDGED_EVERY_ROWS};
+    use zerocode_core::jev::JevUse;
+
+    // One comparison as the arm files it: the version it names is the writer's own stamp.
+    let rig = Rig::new(JevMode::Auto, &jev_answer("first"), Scripted::answering("CHALLENGER: a plan"));
+    rig.spent_today(now_ms());
+    rig.arm()
+        .open(facts(&a_key_that_draws(Side::Challenger), "t"))
+        .expect("drawn")
+        .finish(Some("INCUMBENT: a plan".to_string()));
+    let filed = rig.rows().pop().expect("the arm filed its comparison");
+    let ledger = challenger_path(&rig.cwd);
+    std::fs::remove_file(&ledger).expect("the ledger starts again from the arm's one row");
+    let as_filed = |at: usize, attempt: &str| {
+        let mut row = filed.clone();
+        row[AT.canonical] = json!(at);
+        row[ATTEMPT.canonical] = json!(attempt);
+        row
+    };
+    let file = |row: &Value| append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES).expect("a row");
+    let rose = |rows: &[Value]| rows.iter().filter(|row| word(row, &TRANSITION).as_deref() == Some(ROSE)).count();
+
+    // A window's worth of them and a receipt's label on every one the judge needs, ending on a
+    // judgment's boundary; the judge got the first few wrong.
+    let wanted = window_wanted_for(&CHALLENGER).expect("the challenger rises");
+    let marks = marks_that_can_clear(&CHALLENGER).expect("a width");
+    let misses = CHALLENGER.negatives_wanted.expect("negatives");
+    let thin = JUDGED_EVERY_ROWS;
+    assert!(thin < wanted, "a judgment's worth of requests is short of a window");
+    let asked = wanted + marks.saturating_sub(wanted).div_ceil(thin) * thin;
+    for n in 0..asked {
+        file(&as_filed(n, &format!("before-{n}#1")));
+    }
+    for n in 0..marks {
+        let preferred = if n < misses { Preferred::Incumbent } else { Preferred::Challenger };
+        let at = i64::try_from(asked + n).expect("small");
+        file(&arm::label_row(&format!("before-{n}#1"), &receipted(Receipt::Failed), preferred, at));
+    }
+
+    // Every row the arm wrote is in the window the table's row reads today …
+    let rows = rig.rows();
+    let today = on_the_newest_version(&CHALLENGER, &rows);
+    assert_eq!(today.asked(), asked, "every comparison the arm filed is asked under the words its row asks");
+    assert_eq!(today.rows.len(), rows.len(), "and every label grading one");
+    // … and the day the question moves on, none of them is in the new one.
+    let tomorrow = JevUse { rubric_version: CHALLENGER.rubric_version + 1, ..CHALLENGER };
+    assert!(on_the_newest_version(&tomorrow, &rows).rows.is_empty(), "no row of the words before in the new window");
+
+    // The window is one the arm's own judge raises the seat on …
+    let _ = note_verdicts_in(&rig.cwd, Some(JevMode::Auto), &feed_into(&rig.cwd));
+    assert_eq!(rose(&rig.rows()), 1, "the arm's rows rise under the words they were asked in");
+
+    // … and the new question's window holds only what it asked: a judgment's worth of requests
+    // filed as the arm files them once its words move on, which is no window yet.
+    for n in 0..thin {
+        let mut row = as_filed(asked + marks + n, &format!("tomorrow-{n}#1"));
+        row[RUBRIC_VERSION.canonical] = json!(tomorrow.rubric_version);
+        file(&row);
+    }
+    let rows = rig.rows();
+    let opened = on_the_newest_version(&tomorrow, &rows);
+    assert_eq!(opened.asked(), thin, "the new window counts the new question's requests alone");
+    assert_eq!(opened.rows.len(), thin, "and nothing of the words before");
+    assert_eq!(
+        judge_seat_rows(&tomorrow, &ledger, &rows, 99_999),
+        None,
+        "{thin} requests are not a window of {wanted}"
+    );
+    assert_eq!(rose(&rig.rows()), 1, "no rise is written on the evidence of the words before");
+}
+
 /// source 없는 라벨의 합의 표식은 자리를 세우지 못한다(t-6263 R4c): 자리 판정기가 세울 원장이라도 라벨이 source를 적지
 /// 않았으면 그 표식은 판정에 들지 않아 자리는 오르지 않는다; 같은 원장의 라벨이 source를 적었으면 오른다.
 #[test]

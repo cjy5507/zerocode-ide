@@ -139,6 +139,21 @@ pub const LABEL: LedgerKey = LedgerKey {
     canonical: "label",
     also: &[],
 };
+/// When the request a label row grades was made — that request row's
+/// [`AT`], copied by the writer that knows which request it graded
+/// (t-6877). A name alone ([`LABEL`]) picks out one request only while it
+/// is asked once: the recall and mention seats name a request by the
+/// fingerprints of what was asked, and the same words asked again carry
+/// the same name. With the time beside the name a label grades one
+/// occurrence of a request and no other; a label that carries none grades a
+/// request only where the seat's name picks one out without it — an id, or
+/// a turn — and never for a seat that names a request by the words asked
+/// ([`crate::jev::JevUse::names`], t-6877 round 3,
+/// [`crate::jev::promote::on_the_newest_version`]).
+pub const REQUEST_AT: LedgerKey = LedgerKey {
+    canonical: "requestAt",
+    also: &[],
+};
 /// Why a row that grades a request carries no [`AGREED`] mark, as a word —
 /// the side of the comparison that had nothing to say (t-6342).
 ///
@@ -205,11 +220,32 @@ pub const CONTROL_KIND: LedgerKey = LedgerKey {
     canonical: "controlKind",
     also: &[],
 };
-/// The version of the words a request was asked in: what keeps one rubric's
-/// evidence apart from another's when a seat is judged (t-6263 R5).
+
+/// The version of the words that asked a request — the seat's rubric as its
+/// row names it ([`crate::jev::JevUse::rubric_version`]), written by the
+/// writer that asked, on every request and control row. Read by the judge
+/// to keep one rubric's evidence apart from another's (t-6877): a request
+/// asked under other words answered another question, and its answer, its
+/// marks and the rise they earned say nothing about the words the seat asks
+/// now. A row that names none is the first rubric's
+/// ([`crate::jev::questions::UNVERSIONED_RUBRIC`]) — every row written
+/// before versions were recorded, and every row of a seat whose writer has
+/// never versioned its words; a row that names something that is not a
+/// version — null, a word, a negative — names no rubric at all and is no
+/// series' evidence. A label row carries none of its own: the request it
+/// names carries it ([`crate::jev::JevUse::request_name`]).
 pub const RUBRIC_VERSION: LedgerKey = LedgerKey {
     canonical: "rubricVersion",
     also: &["rubric_version"],
+};
+/// The rubrics a transition was decided on — every version the seat asked
+/// at the time, as its row said ([`crate::jev::promote::transition_row`],
+/// t-6877). A seat stands on a transition only while it asks exactly those
+/// words: a rise earned under other words is not its rise, and a transition
+/// that names none was decided under the first rubric.
+pub const RUBRIC_VERSIONS: LedgerKey = LedgerKey {
+    canonical: "rubricVersions",
+    also: &[],
 };
 
 /// Every key this module reads, so a contract can walk them.
@@ -227,12 +263,14 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     APPLIED,
     PRESSED,
     LABEL,
+    REQUEST_AT,
     NOT_COMPARED,
     BASELINE_AGREED,
     MODEL,
     BARRED,
     CONTROL_KIND,
     RUBRIC_VERSION,
+    RUBRIC_VERSIONS,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.
@@ -541,8 +579,15 @@ pub fn summarize_last(rows: &[Value], n: usize) -> Tally {
 /// (what each answered, beside what the probe answered).
 #[must_use]
 pub fn last_asked(rows: &[Value], n: usize) -> Vec<&Value> {
+    last_asked_of(rows.iter(), n)
+}
+
+/// [`last_asked`] over rows already picked out — one seat's series
+/// ([`crate::jev::promote::OnVersion::requests`]), held by reference.
+#[must_use]
+pub fn last_asked_of<'a>(rows: impl IntoIterator<Item = &'a Value>, n: usize) -> Vec<&'a Value> {
     let asked: Vec<&Value> = rows
-        .iter()
+        .into_iter()
         .filter(|row| asked_something(row).is_some())
         .collect();
     let from = asked.len().saturating_sub(n);
@@ -560,8 +605,15 @@ pub fn last_asked(rows: &[Value], n: usize) -> Vec<&Value> {
 /// is the person's to lift, and the seat is not what it says anything about.
 #[must_use]
 pub fn failures_in_a_row(rows: &[Value]) -> u32 {
+    failures_in_a_row_of(rows.iter())
+}
+
+/// [`failures_in_a_row`] over rows already picked out — one seat's series,
+/// held by reference.
+#[must_use]
+pub fn failures_in_a_row_of<'a>(rows: impl DoubleEndedIterator<Item = &'a Value>) -> u32 {
     let mut held = 0;
-    for row in rows.iter().rev() {
+    for row in rows.rev() {
         match asked_something(row) {
             None => continue,
             Some(ANSWERED) => break,

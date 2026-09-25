@@ -116,7 +116,7 @@ pub fn step_effort_word(cwd: &Path) -> Option<StepEffortWord> {
 /// the ledger it writes.
 #[must_use]
 pub fn step_effort_raised(cwd: &Path) -> bool {
-    super::jev_summary::raised_in(&step_effort_path(cwd))
+    super::jev_summary::raised_in(&ZO_STEP_EFFORT, &step_effort_path(cwd))
 }
 
 /// Append one of the governor's events — a decision, or a progress mark —
@@ -460,12 +460,15 @@ mod tests {
         }
     }
 
-    fn label_row(step: u32, agreed: bool) -> StepEvent {
+    /// The mark for the judgment asked at `judged`, written one step later
+    /// and naming that judgment as the writer names it (t-6877).
+    fn label_row(judged: u32, agreed: bool) -> StepEvent {
         StepEvent::Label(runtime::StepLabel {
             kind: runtime::LABEL_ROW_KIND,
-            at: u64::from(step) + 1,
+            at: u64::from(judged) + 2,
+            label: format!("s@1:{judged}"),
             attempt: "s@1".to_string(),
-            step,
+            step: judged + 1,
             agreed: Some(agreed),
             not_compared: None,
             baseline_agreed: None,
@@ -504,7 +507,7 @@ mod tests {
         assert_eq!(asked[0]["kind"], JUDGMENT_ROW_KIND);
         let agreement = zerocode_core::jev::summary::agreement_since(&rows, i64::MIN);
         assert_eq!((agreement.compared, agreement.agreed), (1, 1));
-        assert!(!super::super::jev_summary::raised_in(&ledger));
+        assert!(!super::super::jev_summary::raised_in(&ZO_STEP_EFFORT, &ledger));
     }
 
     /// The seat's summary reads its judgments and labels whole, whatever
@@ -528,7 +531,7 @@ mod tests {
             let mut filed_before = serde_json::to_value(StepEvent::Step(Box::new(step_row(step + 1, None)))).expect("row");
             filed_before[zerocode_core::jev::summary::MODEL.canonical] = json!("claude-fable-5-1");
             append_shadow_row(&ledger, &filed_before, SHADOW_LEDGER_MAX_BYTES).expect("an old step");
-            append_shadow_row(&ledger, &label_row(step + 1, true), SHADOW_LEDGER_MAX_BYTES).expect("label");
+            append_shadow_row(&ledger, &label_row(step, true), SHADOW_LEDGER_MAX_BYTES).expect("label");
             let filed_now = StepEvent::Step(Box::new(step_row(step + 2, Some("claude-opus-5"))));
             append_shadow_row(&ledger, &filed_now, SHADOW_LEDGER_MAX_BYTES).expect("a step");
         }

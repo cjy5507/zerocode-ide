@@ -62,8 +62,9 @@ pub const AGENT_TOOL_DEADLINE: Duration = Duration::from_millis(AGENT_TOOL_DEADL
 
 /// Bumped whenever an instruction sentence or the state's shape changes. A
 /// row carries it, so a count taken under other words is never read as one
-/// about these.
-pub const AGENT_TOOL_RUBRIC_VERSION: u32 = 1;
+/// about these. The number is the seat's row's own (t-6877), read from the
+/// table and not respelled.
+pub const AGENT_TOOL_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::AGENT_TOOL_RUBRIC_VERSION;
 
 /// What an `ask` is told to do with the state it is handed.
 const ASK_INSTRUCTIONS: &str = "Read `context`, then answer `question`: is it yes, or no?";

@@ -58,8 +58,10 @@ use crate::todo_progress::{render_todo_lines, todos_written, PLAN_WRITING_TOOLS}
 
 /// Bumped whenever a question's words, the state's shape or the verdict's rule
 /// changes. A row carries it, and its request digest is taken over it, so a
-/// review asked under other words is never read as evidence about these.
-pub const PATCH_REVIEW_RUBRIC_VERSION: u32 = 1;
+/// review asked under other words is never read as evidence about these. The
+/// number is the seat's row's own (t-6877), read from the table and not
+/// respelled.
+pub const PATCH_REVIEW_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::PATCH_REVIEW_RUBRIC_VERSION;
 
 /// What every message zo writes into the conversation in the person's place
 /// opens with (`[zo:turn-end-gate]`, `[zo:goal-plan]`, …): a user message

@@ -14,7 +14,9 @@ use super::verified_state::tool_verified_state_events;
 use super::{ContentBlock, ConversationMessage};
 use crate::verified_state::VerifiedStateEvent;
 
-pub const CLAIM_RUBRIC_VERSION: u32 = 1;
+/// The claim question's version, the seat's row's own (t-6877), read from
+/// the table and not respelled.
+pub const CLAIM_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::CLAIM_RUBRIC_VERSION;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodeVerdict {

@@ -80,17 +80,18 @@ fn replay(seat: &JevUse, source: &[Value], quiet: bool) -> Vec<Value> {
     for row in source {
         let now_ms = summary::AT.read(row).and_then(Value::as_i64).unwrap_or(0) + 1;
         live.push(row.clone());
-        if !promote::judgment_due(seat, &live) {
+        let version = promote::on_the_newest_version(seat, &live);
+        if !promote::judgment_due_on(seat, &version, &live) {
             continue;
         }
-        let Some(judged) = promote::judge_seat(seat, &live) else {
+        let Some(judged) = promote::judge_seat_on(seat, &version, &live) else {
             continue;
         };
         let asked = live
             .iter()
             .filter(|row| summary::asked_something(row).is_some())
             .count();
-        let transition = promote::transition_row(now_ms, judged.verdict, &judged.window);
+        let transition = promote::transition_row(seat, now_ms, judged.verdict, &judged.window);
         if !quiet || transition.is_some() {
             println!(
                 "row {asked:>5}  {:<5} {:<17} answered {}/{} bound {}‰ p95 {} agrees {} of {}",
@@ -112,7 +113,7 @@ fn replay(seat: &JevUse, source: &[Value], quiet: bool) -> Vec<Value> {
             live.push(transition);
         }
     }
-    let stand = promote::stand_from(&live);
+    let stand = promote::standing(seat, &live);
     let rises = count_of(&live, promote::ROSE);
     let falls = count_of(&live, promote::FELL);
     println!(

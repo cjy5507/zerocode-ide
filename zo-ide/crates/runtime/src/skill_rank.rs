@@ -52,8 +52,9 @@ use crate::prompt::SkillIndexEntry;
 
 /// Bumped whenever a level description, the instructions or the state's shape
 /// changes. A row carries it, so a reading taken under other words is never
-/// read as evidence about these ones.
-pub const SKILL_RUBRIC_VERSION: u32 = 1;
+/// read as evidence about these ones. The number is the seat's row's own
+/// (t-6877), read from the table and not respelled.
+pub const SKILL_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::SKILL_SEARCH_RUBRIC_VERSION;
 
 const WHICH: &str = "which";
 const ACTS_ON_SYSTEM: &str = "acts_on_system";
