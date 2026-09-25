@@ -213,8 +213,8 @@ pub const SHOWS_CHAR_CAP: usize = 1_500;
 const CANDIDATES_KEY: &str = "candidates";
 
 /// What a page's look carries beside its numbered `items` (the snapshot
-/// contract of t-6721 U4): the document it read them in, when, and the
-/// fields, containers, images and rows it read in the same pass. The marks
+/// contract of t-6721 U4): the document it read them in, and the fields,
+/// containers, images and rows it read in the same pass. The marks
 /// answer keeps `items` as it always was; every key here is added beside it,
 /// and a look that carries none of them walks exactly as before — presses
 /// only. Named here, where the question reads them, so the page that writes
@@ -223,8 +223,6 @@ pub mod snapshot {
     /// The document the look read — a value that changes when the page's
     /// document is replaced, never when it merely changes.
     pub const EPOCH_KEY: &str = "documentEpoch";
-    /// When the look was read, in milliseconds.
-    pub const AT_MS_KEY: &str = "atMs";
     /// The form fields among the numbered controls.
     pub const FIELDS_KEY: &str = "fields";
     /// A field's number among the look's `items` — the control it is.
@@ -235,11 +233,20 @@ pub mod snapshot {
     /// Whether a field holds a secret — a password, or one the page declares
     /// a current password. Only an explicit `false` lets a value in.
     pub const FIELD_SECRET_KEY: &str = "secret";
-    /// The words around a field the value seat reads (`crate::type_value`):
-    /// its label, its placeholder and the page's own words beside it.
-    pub const FIELD_LABEL_KEY: &str = "label";
+    /// A field's or a container's label — for a field, the first of the
+    /// words around it the value seat reads (`crate::type_value`), beside
+    /// its placeholder and the page's own words next to it.
+    pub const LABEL_KEY: &str = "label";
     pub const FIELD_PLACEHOLDER_KEY: &str = "placeholder";
     pub const FIELD_NEAR_KEY: &str = "near";
+    /// An observed candidate's own words: a container's role and how many
+    /// rows it holds, an image's alt text and its size, a row's text.
+    pub const ROLE_KEY: &str = "role";
+    pub const COUNT_KEY: &str = "count";
+    pub const ALT_KEY: &str = "alt";
+    pub const WIDTH_KEY: &str = "width";
+    pub const HEIGHT_KEY: &str = "height";
+    pub const TEXT_KEY: &str = "text";
     /// What the field holds right now. Never sent to a judgment or a model:
     /// it tells a retry of one entry from a new one.
     pub const FIELD_VALUE_KEY: &str = "value";
@@ -247,6 +254,9 @@ pub mod snapshot {
     /// document, as the look wrote it — the only name a walk ever types
     /// into or reports, and never one a walk or a judgment composed.
     pub const SELECTOR_KEY: &str = "selector";
+    /// A numbered control's element name — with its selector and its role,
+    /// what tells one control in a document from another.
+    pub const TAG_KEY: &str = "tag";
 }
 
 /// The kinds of field ([`snapshot::FIELD_KIND_KEY`]) a walk may type a
@@ -339,7 +349,68 @@ impl Observe {
             .parse()
             .ok()
     }
+
+    /// How the look's `number`th candidate of this head is described to the
+    /// judgment — its own words, never its identity — or `None` for one the
+    /// look gave nothing to describe it by. Cut to [`OBSERVED_CHAR_CAP`].
+    fn line(self, number: usize, candidate: &Value) -> Option<String> {
+        let text = |key: &str| {
+            candidate
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|words| !words.is_empty())
+        };
+        let size = |key: &str| {
+            candidate
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|pixels| pixels.is_finite() && *pixels > 0.0)
+        };
+        let line = match self {
+            Self::Container => {
+                let words: Vec<&str> = [text(snapshot::ROLE_KEY), text(snapshot::LABEL_KEY)]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                if words.is_empty() {
+                    return None;
+                }
+                let held = candidate
+                    .get(snapshot::COUNT_KEY)
+                    .and_then(Value::as_u64)
+                    .map(|count| format!(" ({count} {OBSERVED_COUNT_WORD})"))
+                    .unwrap_or_default();
+                format!("{number} {}{held}", words.join(" "))
+            }
+            Self::Image => {
+                let alt = text(snapshot::ALT_KEY);
+                let dimensions = size(snapshot::WIDTH_KEY)
+                    .zip(size(snapshot::HEIGHT_KEY))
+                    .map(|(width, height)| format!("{width:.0}x{height:.0}"));
+                if alt.is_none() && dimensions.is_none() {
+                    return None;
+                }
+                let words: Vec<String> = [
+                    Some(OBSERVED_IMAGE_WORD.to_string()),
+                    alt.map(str::to_string),
+                    dimensions,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                format!("{number} {}", words.join(" "))
+            }
+            Self::Row => format!("{number} {}", text(snapshot::TEXT_KEY)?),
+        };
+        Some(line.chars().take(OBSERVED_CHAR_CAP).collect())
+    }
 }
+
+/// The words an observed candidate's line is written with beside its own:
+/// what an image is called, and what a container's count counts.
+const OBSERVED_IMAGE_WORD: &str = "image";
+const OBSERVED_COUNT_WORD: &str = "items";
 
 /// What the container head asks.
 const CONTAINER_INSTRUCTIONS: &str = "Which of the containers this screen holds has the results the goal in `goal` is about? The options are the containers the screen was read to hold, each named by its number.";
@@ -755,6 +826,10 @@ pub fn rubric_words() -> String {
     }
     words.push('\n');
     words.push_str(&TEXT_FIELD_KINDS.join(","));
+    for line in [OBSERVED_IMAGE_WORD, OBSERVED_COUNT_WORD] {
+        words.push('\n');
+        words.push_str(line);
+    }
     for head in Observe::ALL {
         for line in [
             head.head(),
@@ -775,6 +850,17 @@ pub fn rubric_words() -> String {
 /// have without a judgment at all.
 #[must_use]
 pub fn ask(look: &ActionLook<'_>) -> Option<ActionAsk> {
+    ask_with(look, &Beside::default())
+}
+
+/// [`ask`], with what the look read beside its numbered controls: a goal
+/// walk that may type is offered [`TYPE_TEXT`] with the fields it may type
+/// into (`type_target`), and the containers, images and rows the look read
+/// are asked about in the observation heads — all in the one request. A look
+/// that read nothing beside its numbers, a walk that cannot type and a
+/// stopped walk ask exactly what [`ask`] always asked, to the byte.
+#[must_use]
+pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk> {
     let tried: BTreeSet<usize> = look.tried.iter().copied().collect();
     let mut marks = Vec::new();
     let mut criteria = Map::new();
@@ -802,6 +888,25 @@ pub fn ask(look: &ActionLook<'_>) -> Option<ActionAsk> {
     if marks.is_empty() {
         return None;
     }
+    // What a goal walk may type into: the offered numbers the look itself
+    // read as plain text fields — never a secret, never a field it did not
+    // read, never one this walk already spent here.
+    let goal = matches!(look.errand, Errand::Goal);
+    let typing: Vec<usize> = if goal && beside.types {
+        marks
+            .iter()
+            .copied()
+            .filter(|mark| typeable(beside.fields, *mark))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !typing.is_empty() {
+        criteria.insert(
+            TYPE_TEXT.to_string(),
+            Value::String(TYPE_TEXT_MEANS.to_string()),
+        );
+    }
     criteria.insert(
         GIVE_UP.to_string(),
         Value::String(look.errand.give_up_means().to_string()),
@@ -810,6 +915,16 @@ pub fn ask(look: &ActionLook<'_>) -> Option<ActionAsk> {
     if ends_itself {
         criteria.insert(DONE.to_string(), Value::String(DONE_MEANS.to_string()));
     }
+    // The field's head offers the very lines the action head describes those
+    // fields by, so the two heads cannot come to name one field two ways.
+    let fields: Map<String, Value> = typing
+        .iter()
+        .filter_map(|mark| {
+            let option = option_of(*mark);
+            let line = criteria.get(&option)?.clone();
+            Some((option, line))
+        })
+        .collect();
 
     let mut state = Map::new();
     state.insert(STATE_KEYS[0].to_string(), json!(look.goal));
@@ -828,7 +943,12 @@ pub fn ask(look: &ActionLook<'_>) -> Option<ActionAsk> {
     state.insert(STATE_KEYS[3].to_string(), json!(look.pressed));
     state.insert(STATE_KEYS[4].to_string(), json!(shows_cut(look.shows)));
     state.insert(CANDIDATES_KEY.to_string(), Value::Array(candidates));
-    let mut questions = choice::asked(QUESTION, look.errand.instructions(), criteria);
+    let instructions = if typing.is_empty() {
+        look.errand.instructions()
+    } else {
+        GOAL_TYPING_INSTRUCTIONS
+    };
+    let mut questions = choice::asked(QUESTION, instructions, criteria);
     // The two guards ride the same request: the state is charged once and an
     // answer's output is free, so asking them costs their own two lines.
     if let Some(asked) = questions.as_object_mut() {
@@ -841,24 +961,87 @@ pub fn ask(look: &ActionLook<'_>) -> Option<ActionAsk> {
             noul::question(WALLED_INSTRUCTIONS, WALLED_YES, WALLED_NO),
         );
     }
+    // So do the heads beside the action (t-6720): what an entry would type
+    // into, and what the page's containers, images and rows are to the goal.
+    if !fields.is_empty() {
+        also_ask(
+            &mut questions,
+            TYPE_TARGET,
+            TYPE_TARGET_INSTRUCTIONS,
+            fields,
+        );
+    }
+    let mut observing = Vec::new();
+    if goal {
+        for head in Observe::ALL {
+            let mut offered = Vec::new();
+            let mut described = Map::new();
+            for (index, candidate) in beside.of(head).iter().enumerate() {
+                if offered.len() == MAX_ACTION_CANDIDATES {
+                    break;
+                }
+                let number = index + 1;
+                let Some(line) = head.line(number, candidate) else {
+                    continue;
+                };
+                described.insert(head.option(number), Value::String(line));
+                offered.push(number);
+            }
+            if offered.is_empty() {
+                continue;
+            }
+            described.insert(
+                NONE.to_string(),
+                Value::String(head.none_means().to_string()),
+            );
+            also_ask(&mut questions, head.head(), head.instructions(), described);
+            observing.push((head, offered));
+        }
+    }
     Some(ActionAsk {
         state: Value::Object(state),
         questions,
         marks,
         ends_itself,
-        typing: Vec::new(),
-        observing: Vec::new(),
+        typing,
+        observing,
     })
 }
 
-/// [`ask`], with what the look read beside its numbered controls: a goal
-/// walk that may type is offered [`TYPE_TEXT`] with the fields it may type
-/// into (`type_target`), and the containers, images and rows the look read
-/// are asked about in the observation heads — all in the one request.
-#[must_use]
-pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk> {
-    let _ = beside;
-    ask(look)
+/// One more closed choice asked in the same request, beside the heads
+/// `questions` already holds.
+fn also_ask(questions: &mut Value, name: &str, instructions: &str, criteria: Map<String, Value>) {
+    if let (Some(asked), Value::Object(head)) = (
+        questions.as_object_mut(),
+        choice::asked(name, instructions, criteria),
+    ) {
+        asked.extend(head);
+    }
+}
+
+/// Whether the look read `mark` as a field a written value may go into:
+/// every entry naming it says a plain text kind ([`TEXT_FIELD_KINDS`]) and
+/// an explicit `false` for a secret, and at least one does. A field the look
+/// did not read is not one — a textbox's role alone vouches for nothing.
+fn typeable(fields: &[Value], mark: usize) -> bool {
+    let mut named = fields.iter().filter(|field| {
+        field.get(snapshot::FIELD_MARK_KEY).and_then(Value::as_u64) == u64::try_from(mark).ok()
+    });
+    let plain = |field: &Value| {
+        field
+            .get(snapshot::FIELD_SECRET_KEY)
+            .and_then(Value::as_bool)
+            == Some(false)
+            && field
+                .get(snapshot::FIELD_KIND_KEY)
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    TEXT_FIELD_KINDS
+                        .iter()
+                        .any(|allowed| allowed.eq_ignore_ascii_case(kind.trim()))
+                })
+    };
+    named.next().is_some_and(|first| plain(first)) && named.all(plain)
 }
 
 impl ActionAsk {
@@ -881,7 +1064,12 @@ impl ActionAsk {
     /// into, and a rescue presses or steps back.
     #[must_use]
     pub fn press_options(&self) -> Vec<String> {
-        self.options()
+        self.marks
+            .iter()
+            .map(|mark| option_of(*mark))
+            .chain(std::iter::once(GIVE_UP.to_string()))
+            .chain(self.ends_itself.then(|| DONE.to_string()))
+            .collect()
     }
 
     /// Every head's answer, each judged against the set its head offered —
@@ -893,7 +1081,60 @@ impl ActionAsk {
     ///
     /// [`ActionRefusal`] names which rule the answer broke.
     pub fn read_all(&self, answers: &Value) -> Result<ActionRead, ActionRefusal> {
-        self.read(answers).map(ActionRead::from)
+        let offered: BTreeSet<String> = self.options().into_iter().collect();
+        let action = choice::read(answers, QUESTION, &offered)?;
+        let typed = if self.typing.is_empty() {
+            None
+        } else {
+            let fields: BTreeSet<String> =
+                self.typing.iter().map(|mark| option_of(*mark)).collect();
+            Some(choice::read(answers, TYPE_TARGET, &fields)?)
+        };
+        let mut observed = Vec::with_capacity(self.observing.len());
+        for (head, numbers) in &self.observing {
+            let offered: BTreeSet<String> = numbers
+                .iter()
+                .map(|number| head.option(*number))
+                .chain(std::iter::once(NONE.to_string()))
+                .collect();
+            let read = choice::read(answers, head.head(), &offered)?;
+            observed.push(Observed {
+                head: *head,
+                chosen: head.number_of(&read.chosen),
+                confidence: read.confidence,
+            });
+        }
+        let guard = Guard {
+            instructed: noul::read(answers, INSTRUCTED)?,
+            walled: noul::read(answers, WALLED)?,
+        };
+        // An entry is as sure as the less sure of its two heads: what to do,
+        // and which field to do it to.
+        let (chosen, confidence) = match action.chosen.as_str() {
+            GIVE_UP => (Chosen::GiveUp, action.confidence),
+            DONE => (Chosen::Done, action.confidence),
+            TYPE_TEXT => {
+                let field = typed.as_ref().ok_or(ChoiceRefusal::NoAnswer)?;
+                (
+                    Chosen::Type(mark_of(&field.chosen).ok_or(ChoiceRefusal::UnknownOption)?),
+                    action.confidence.min(field.confidence),
+                )
+            }
+            named => (
+                Chosen::Mark(mark_of(named).ok_or(ChoiceRefusal::UnknownOption)?),
+                action.confidence,
+            ),
+        };
+        Ok(ActionRead {
+            choice: ActionChoice {
+                chosen,
+                probabilities: action.probabilities,
+                confidence,
+                guard: Some(guard),
+            },
+            typed,
+            observed,
+        })
     }
 
     /// A second reader's answer to this question — one option and one
@@ -910,7 +1151,7 @@ impl ActionAsk {
     /// offer; [`ChoiceRefusal::NotOne`] for a confidence outside `[0, 1]`.
     pub fn choice_of(&self, option: &str, confidence: f64) -> Result<ActionChoice, ActionRefusal> {
         let option = option.trim();
-        if !self.options().iter().any(|offered| offered == option) {
+        if !self.press_options().iter().any(|offered| offered == option) {
             return Err(ChoiceRefusal::UnknownOption.into());
         }
         if !(0.0..=1.0).contains(&confidence) {
@@ -929,12 +1170,15 @@ impl ActionAsk {
         })
     }
 
-    /// Every option name it offered, in the order a reader would see them.
+    /// Every option name its action head offered, in the order a reader
+    /// would see them: the numbers, [`TYPE_TEXT`] when a field may be typed
+    /// into, [`GIVE_UP`] and — for a goal — [`DONE`].
     #[must_use]
     pub fn options(&self) -> Vec<String> {
         self.marks
             .iter()
             .map(|mark| option_of(*mark))
+            .chain((!self.typing.is_empty()).then(|| TYPE_TEXT.to_string()))
             .chain(std::iter::once(GIVE_UP.to_string()))
             .chain(self.ends_itself.then(|| DONE.to_string()))
             .collect()
@@ -949,23 +1193,7 @@ impl ActionAsk {
     ///
     /// [`ActionRefusal`] names which rule the answer broke.
     pub fn read(&self, answers: &Value) -> Result<ActionChoice, ActionRefusal> {
-        let offered: BTreeSet<String> = self.options().into_iter().collect();
-        let choice = crate::jev::choice::read(answers, QUESTION, &offered)?;
-        let chosen = match choice.chosen.as_str() {
-            GIVE_UP => Chosen::GiveUp,
-            DONE => Chosen::Done,
-            named => Chosen::Mark(mark_of(named).ok_or(ChoiceRefusal::UnknownOption)?),
-        };
-        let guard = Guard {
-            instructed: noul::read(answers, INSTRUCTED)?,
-            walled: noul::read(answers, WALLED)?,
-        };
-        Ok(ActionChoice {
-            chosen,
-            probabilities: choice.probabilities,
-            confidence: choice.confidence,
-            guard: Some(guard),
-        })
+        self.read_all(answers).map(|read| read.choice)
     }
 }
 

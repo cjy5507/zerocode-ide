@@ -346,16 +346,13 @@ pub struct Screen {
 }
 
 /// What a page's look read beside its numbered controls, in the same pass
-/// ([`zerocode_core::screen_action::snapshot`]): the document and the moment
-/// it read them in, its form fields, and the containers, images and rows it
-/// found.
+/// ([`zerocode_core::screen_action::snapshot`]): the document it read them
+/// in, its form fields, and the containers, images and rows it found.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Snapshot {
     /// The document's epoch, as the look spelled it; empty when it named
     /// none.
     pub epoch: String,
-    /// When it was read, in the look's own milliseconds.
-    pub at_ms: Option<i64>,
     pub fields: Vec<Value>,
     pub containers: Vec<Value>,
     pub images: Vec<Value>,
@@ -367,8 +364,26 @@ impl Snapshot {
     /// question names. A key the answer does not carry is empty.
     #[must_use]
     pub fn of(said: &Value) -> Self {
-        let _ = said;
-        Self::default()
+        let list = |key: &str| {
+            said.get(key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
+        // An epoch is whatever the page counts documents with — a word or a
+        // number — and nothing at all is no epoch.
+        let epoch = match said.get(snapshot::EPOCH_KEY) {
+            Some(Value::String(word)) => word.trim().to_string(),
+            Some(Value::Number(number)) => number.to_string(),
+            _ => String::new(),
+        };
+        Self {
+            epoch,
+            fields: list(snapshot::FIELDS_KEY),
+            containers: list(Observe::Container.key()),
+            images: list(Observe::Image.key()),
+            rows: list(Observe::Row.key()),
+        }
     }
 
     /// The candidates the look read for `head`.
@@ -507,8 +522,13 @@ pub trait World {
     }
 }
 
-/// Why a world typed nothing because it cannot type at all.
+/// Why a world typed nothing: it cannot type at all; its last look read no
+/// such field (no control, no selector of its own, no field facts); the
+/// field's pinned press was refused; the door refused the typing.
 pub const NO_TYPING: &str = "no_typing";
+pub const NO_FIELD: &str = "no_field";
+pub const PRESS_REFUSED: &str = "press_refused";
+pub const TYPE_REFUSED: &str = "type_refused";
 
 /// Where a typed value came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1278,7 +1298,7 @@ fn walk(
         // row's words, the stand, the guards and the floor — is one road.
         let (chosen, typing) = match choice.chosen {
             Chosen::Mark(mark) => (mark, false),
-            Chosen::Type(field) => (field, false), // RED-STUB: the old press road
+            Chosen::Type(field) => (field, true),
             Chosen::GiveUp | Chosen::Done => {
                 let ended = match choice.chosen {
                     Chosen::Done => zerocode_core::screen_action::DONE,

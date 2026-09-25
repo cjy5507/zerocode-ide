@@ -626,7 +626,6 @@ fn a_page_with_a_field(epoch: &str, now: &str, selector: &str) -> String {
         ],
         "count": 2,
         (zerocode_core::screen_action::snapshot::EPOCH_KEY): epoch,
-        (zerocode_core::screen_action::snapshot::AT_MS_KEY): 1_000,
         (zerocode_core::screen_action::snapshot::FIELDS_KEY): [{
             "mark": 1, "kind": "text", "secret": false,
             "label": "Destination", "placeholder": "City",

@@ -275,7 +275,7 @@ fn the_version_is_pinned_to_the_words() {
     assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 6);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "20e2ddbe60926514"
+        "31af4b5fa6fb9b34"
     );
 }
 
@@ -298,7 +298,7 @@ fn field(mark: usize, kind: &str, secret: bool) -> Value {
         (snapshot::FIELD_MARK_KEY): mark,
         (snapshot::FIELD_KIND_KEY): kind,
         (snapshot::FIELD_SECRET_KEY): secret,
-        (snapshot::FIELD_LABEL_KEY): "",
+        (snapshot::LABEL_KEY): "",
         (snapshot::FIELD_VALUE_KEY): "",
     })
 }
@@ -488,7 +488,9 @@ fn observation_heads_select_only_the_observed_container_image_and_row() {
     };
     let asked = ask_with(&a_goal(&items, &[]), &beside).expect("asks");
 
-    let offered = |head: &str| -> Vec<String> {
+    // Whatever order the map keeps its keys in, each head offers exactly
+    // these.
+    let offered = |head: &str| -> BTreeSet<String> {
         asked.questions[head]["criteria"]
             .as_object()
             .unwrap_or_else(|| panic!("{head} is asked"))
@@ -496,13 +498,19 @@ fn observation_heads_select_only_the_observed_container_image_and_row() {
             .cloned()
             .collect()
     };
-    assert_eq!(offered("container"), ["container:1", "container:2", NONE]);
+    let set = |options: &[&str]| -> BTreeSet<String> {
+        options.iter().map(|option| (*option).to_string()).collect()
+    };
+    assert_eq!(
+        offered("container"),
+        set(&["container:1", "container:2", NONE])
+    );
     assert_eq!(
         offered("image"),
-        ["image:1", "image:3", NONE],
+        set(&["image:1", "image:3", NONE]),
         "image 2 says nothing"
     );
-    assert_eq!(offered("row"), ["row:1", "row:2", NONE]);
+    assert_eq!(offered("row"), set(&["row:1", "row:2", NONE]));
     let sent = format!("{}{}", asked.state, asked.questions);
     for selector in [
         "#product-list",
@@ -550,6 +558,7 @@ fn observation_heads_select_only_the_observed_container_image_and_row() {
         ]
     );
 
+    // Every other head answered well, and one answered wrongly.
     for (head, wrong) in [
         ("container", "image:1"),
         ("image", "container:1"),
@@ -557,11 +566,19 @@ fn observation_heads_select_only_the_observed_container_image_and_row() {
         ("row", "row:9"),
         ("container", "#product-list"),
     ] {
+        let mut chosen = vec![
+            ("action", "mark:1"),
+            ("container", "container:1"),
+            ("image", "image:3"),
+            ("row", NONE),
+        ];
+        for answer in &mut chosen {
+            if answer.0 == head {
+                answer.1 = wrong;
+            }
+        }
         assert_eq!(
-            asked.read_all(&answered_heads(
-                &asked,
-                &[("action", "mark:1"), (head, wrong)]
-            )),
+            asked.read_all(&answered_heads(&asked, &chosen)),
             Err(ActionRefusal::Choice(ChoiceRefusal::UnknownOption)),
             "{head} answered {wrong}"
         );
