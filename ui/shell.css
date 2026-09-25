@@ -28115,8 +28115,9 @@ input[type="search"]::-webkit-search-cancel-button {
  * 배율에서나 그렇다: 부모 곁 몇 픽셀을 도는 몸의 이름은 늘 부모의 이름 위에 선다. */
 .agent-orbit.is-lod .agent-orbit-label:not(:hover, :focus-visible, [aria-pressed="true"],
   .is-needs-attention, .is-failed, .is-star) .agent-orbit-name,
-.agent-orbit.is-crowded .agent-orbit-label:is(.is-idle, .is-paused, .is-done):not(:hover,
-  :focus-visible, [aria-pressed="true"]) .agent-orbit-name,
+.agent-orbit.is-crowded .agent-orbit-label.is-idle:not(:hover, :focus-visible, [aria-pressed="true"]) .agent-orbit-name,
+.agent-orbit.is-crowded .agent-orbit-label.is-paused:not(:hover, :focus-visible, [aria-pressed="true"]) .agent-orbit-name,
+.agent-orbit.is-crowded .agent-orbit-label.is-done:not(:hover, :focus-visible, [aria-pressed="true"]) .agent-orbit-name,
 .agent-orbit-label.is-moon:not(:hover, :focus-visible, [aria-pressed="true"],
   .is-needs-attention, .is-failed) .agent-orbit-name {
   opacity: 0;
