@@ -16,6 +16,9 @@ walks twice in one process and the table reports the second walk; the first
 door does not carry yet (t-6721 U4) is stood in for by `snapshot.js`, timed
 apart and taken out of every step. Rows, `table.md` and `summary.json` land in
 `--out`; keep them outside git. A zo home of the probe's own takes every
-ledger row; the person's own is never written.
+ledger row; the person's own is never written. The value seat in the build
+after asks with `ANTHROPIC_API_KEY` from the command's environment when a
+person has one — the way their own key reaches it in the window — and offers
+no entry without it; a subscription login is never used.
 
 Validation: `python3 -m unittest discover -s tools/walk-judgment-probe -v`.

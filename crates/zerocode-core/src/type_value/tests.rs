@@ -124,6 +124,13 @@ fn every_row_carries_its_road_and_no_key() {
             Road::CodeAssist => assert!(row.host.is_some(), "{} has no host", row.id),
             Road::Anthropic => {
                 assert!(row.base_url.is_none(), "{} pins an endpoint", row.id);
+                // A person's own key, by its name in the window's key store:
+                // this road is never a subscription's (t-6720).
+                assert!(
+                    row.credential_key.is_some(),
+                    "{} names no key store",
+                    row.id
+                );
             }
         }
         assert!(
@@ -218,19 +225,21 @@ fn the_chosen_row_was_read_more_than_once() {
             continue;
         };
         assert!(
-            rival >= worst || !reachable_by_everyone(row),
+            rival >= worst || !first_party(row),
             "{} is steadier than the chosen {} ({rival} ms against {worst} ms) and \
-             reaches as far",
+             is a first party's too",
             row.id,
             chosen.id
         );
     }
 }
 
-/// Whether a row needs nothing of a person that this product does not already
-/// have. A row behind a key they would have to go and get is a row the seat
-/// may prefer but cannot default to.
-fn reachable_by_everyone(row: &ValueRow) -> bool {
+/// Whether a row's road is a model maker's own API — one key or one
+/// sign-in with the maker — rather than a gateway or a private endpoint in
+/// front of someone else's model. Every row now asks for something a person
+/// set up (t-6720); a gateway's row is one the seat may prefer, a first
+/// party's the one it defaults to.
+fn first_party(row: &ValueRow) -> bool {
     matches!(row.road, Road::Anthropic | Road::CodeAssist)
 }
 
@@ -317,4 +326,89 @@ fn every_case_accepts_a_value_this_seat_would_take() {
         }
         assert!(!case.goal.trim().is_empty(), "{} has no goal", case.id);
     }
+}
+
+/// A written value's identity is every part of its input under the chosen
+/// row: the same input is the same identity, a change to any one part is
+/// another, and a look that named no document has none — such a value is
+/// written fresh every time (t-6720).
+#[test]
+fn a_values_identity_is_every_part_of_its_input_and_none_without_a_document() {
+    let row = chosen().expect("a chosen row");
+    let look = FieldLook {
+        goal: "Search for London",
+        label: "Destination",
+        placeholder: "City",
+        near: "Travel search",
+    };
+    let input = ValueInput {
+        look,
+        now: "",
+        epoch: "doc-1",
+        target: r##"["#destination","input","textbox"]"##,
+    };
+    let same = identity(&input, row).expect("a document names an identity");
+    assert_eq!(identity(&input, row).as_deref(), Some(same.as_str()));
+    let changed = [
+        ValueInput {
+            look: FieldLook {
+                goal: "Search for Paris",
+                ..look
+            },
+            ..input
+        },
+        ValueInput {
+            look: FieldLook {
+                label: "Origin",
+                ..look
+            },
+            ..input
+        },
+        ValueInput {
+            look: FieldLook {
+                placeholder: "Airport",
+                ..look
+            },
+            ..input
+        },
+        ValueInput {
+            look: FieldLook {
+                near: "Hotels",
+                ..look
+            },
+            ..input
+        },
+        ValueInput {
+            now: "Zur",
+            ..input
+        },
+        ValueInput {
+            epoch: "doc-2",
+            ..input
+        },
+        ValueInput {
+            target: r##"["#origin","input","textbox"]"##,
+            ..input
+        },
+    ];
+    for other in changed {
+        assert_ne!(
+            identity(&other, row).as_deref(),
+            Some(same.as_str()),
+            "{other:?}"
+        );
+    }
+    assert_eq!(
+        identity(
+            &ValueInput {
+                epoch: " ",
+                ..input
+            },
+            row
+        ),
+        None
+    );
+    // The value a field holds is part of the identity only: the question a
+    // model is asked never carries it.
+    assert!(!render(&look).contains("Zur"));
 }

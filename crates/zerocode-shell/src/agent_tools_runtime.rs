@@ -2544,10 +2544,9 @@ pub(super) async fn computer_loop(
                             })
                             .flatten();
                         if command.method == zerocode_core::computer_use::ComputerMethod::Walk {
-                            // The value seat's writer (t-6720): the window's own login, read
-                            // only when a walk types into a field.
-                            let root = app.state::<AppState>().config_root().to_path_buf();
-                            let writer = computer_use::errand::value::LiveWriter::window(&root);
+                            // The value seat's writer (t-6720): the key a person set for it,
+                            // read only when a walk's look has a field to type into.
+                            let writer = computer_use::errand::value::LiveWriter::window();
                             run_goal(
                                 &command,
                                 deadline_ms,

@@ -126,16 +126,19 @@ struct Call {
 }
 
 // after-only {
-/// The login the value seat is asked with in a measurement: the one zo keeps
-/// in its own store, read here and handed in — never printed, never written.
-fn value_login(path: &str) -> String {
-    let text = std::fs::read_to_string(path).expect("zo's credential store");
-    let parsed: Value = serde_json::from_str(&text).expect("a credential document");
-    parsed
-        .pointer("/oauth/accessToken")
-        .and_then(Value::as_str)
-        .expect("a subscription login")
-        .to_string()
+/// The value seat as a person who set its key has it: the key handed to this
+/// command's environment, held in a store of the probe's own — never a
+/// subscription login, never a keychain, never printed.
+fn value_writer(key: &str) -> super::value::LiveWriter {
+    use crate::api_routers::RouterKeys as _;
+    let keys = crate::api_routers::HeldKeys::default();
+    let row = zerocode_core::type_value::chosen().expect("a chosen row");
+    let service = super::value::key_service(row).expect("its key's name");
+    keys.write(&service, key).expect("the key held");
+    super::value::LiveWriter::at(
+        zerocode_core::type_value::ANTHROPIC_WIRE.url,
+        Box::new(keys),
+    )
 }
 // after-only }
 
@@ -244,11 +247,8 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
                 0,
             );
             // after-only {
-            let world = match knob("ZEROCODE_WALK_PROBE_LOGIN_FILE") {
-                Some(path) => world.writing(Box::new(super::value::LiveWriter::at(
-                    zerocode_core::type_value::ANTHROPIC_WIRE.url,
-                    &value_login(&path),
-                ))),
+            let world = match knob("ZEROCODE_WALK_PROBE_VALUE_KEY") {
+                Some(key) => world.writing(Box::new(value_writer(&key))),
                 None => world,
             };
             // after-only }

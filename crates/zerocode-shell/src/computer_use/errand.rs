@@ -1496,6 +1496,10 @@ fn walk(
                     note(&mut said, "routeUse", json!(USE_APPLIED));
                 }
                 Typed::Refused(token) => {
+                    // The walk's own answer says why no value went in
+                    // ([`no_press_reason`]): no login, a wire that never
+                    // answered, a value the seat refused, a pin that broke.
+                    note(&mut said, REASON, json!(token));
                     note(&mut said, TYPED, json!({ "outcome": token }));
                     note(&mut said, "routeUse", json!(USE_FALLBACK));
                     note(&mut said, "pressed", json!(false));

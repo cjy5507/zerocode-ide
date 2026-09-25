@@ -356,12 +356,23 @@ fn type_text_is_a_closed_observed_operation_with_a_compatible_target() {
         textbox(4, "Notes"),
         json!({ "mark": 5, "role": "combobox", "tag": "select", "label": "Cabin",
                 "selector": "#cabin", "centerX": 10.0, "centerY": 10.0 }),
+        textbox(6, "PIN"),
+        textbox(7, "Code"),
     ];
-    // Mark 4 is a textbox the look never read as a field.
+    // Mark 4 is a textbox the look never read as a field; 6 is a text field
+    // the page calls secret (a current password in a text box); 7 is one
+    // whose entry says nothing of secrecy at all.
+    let mut unsaid = field(7, "text", false);
+    unsaid
+        .as_object_mut()
+        .expect("a field")
+        .remove(snapshot::FIELD_SECRET_KEY);
     let fields = [
         field(2, "text", false),
         field(3, "password", true),
         field(5, "select", false),
+        field(6, "text", true),
+        unsaid,
     ];
     let typing = Beside {
         types: true,
@@ -373,7 +384,8 @@ fn type_text_is_a_closed_observed_operation_with_a_compatible_target() {
     assert_eq!(
         asked.options(),
         [
-            "mark:1", "mark:2", "mark:3", "mark:4", "mark:5", TYPE_TEXT, GIVE_UP, DONE
+            "mark:1", "mark:2", "mark:3", "mark:4", "mark:5", "mark:6", "mark:7", TYPE_TEXT,
+            GIVE_UP, DONE
         ]
     );
     assert_eq!(asked.typing(), [2], "only the read, plain text field");
@@ -410,6 +422,8 @@ fn type_text_is_a_closed_observed_operation_with_a_compatible_target() {
         "mark:3",
         "mark:4",
         "mark:5",
+        "mark:6",
+        "mark:7",
         "#field-2",
         "document.querySelector('#field-2').value = 'x'",
     ] {
@@ -511,6 +525,24 @@ fn observation_heads_select_only_the_observed_container_image_and_row() {
         "image 2 says nothing"
     );
     assert_eq!(offered("row"), set(&["row:1", "row:2", NONE]));
+    // The same lines stand in the state, under the head's own key, so the
+    // judgment reads the page's candidates as it reads its controls.
+    for head in Observe::ALL {
+        let lines: BTreeSet<String> = asked.state[head.key()]
+            .as_array()
+            .unwrap_or_else(|| panic!("{} stands in the state", head.key()))
+            .iter()
+            .filter_map(|line| line.as_str().map(str::to_string))
+            .collect();
+        let options: BTreeSet<String> = asked.questions[head.head()]["criteria"]
+            .as_object()
+            .expect("criteria")
+            .iter()
+            .filter(|(option, _)| option.as_str() != NONE)
+            .filter_map(|(_, line)| line.as_str().map(str::to_string))
+            .collect();
+        assert_eq!(lines, options, "{}", head.head());
+    }
     let sent = format!("{}{}", asked.state, asked.questions);
     for selector in [
         "#product-list",

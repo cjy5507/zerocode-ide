@@ -117,7 +117,10 @@ pub struct Question {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Road {
-    /// The subscription token zo and the window already hold.
+    /// Anthropic's Messages API, asked with the API key a person put in the
+    /// window's key store for this row ([`ValueRow::credential_key`]) — never
+    /// with a subscription login, which is the person's to spend in the
+    /// vendor's own clients alone.
     Anthropic,
     /// Google's Code Assist backend, under the Antigravity identity.
     CodeAssist,
@@ -213,8 +216,10 @@ pub struct ValueRow {
     /// `openai-compat`: the endpoint.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// `openai-compat`: the key's name in the credential store, or the
-    /// keychain item a router row keeps it under. Never a key.
+    /// The key's name in the window's key store (`dev.zerocode.key.<name>`),
+    /// or the keychain item a router row keeps it under. Never a key — and
+    /// the only place this seat's key is found: a row whose key a person has
+    /// not put there is a row this seat does not ask.
     #[serde(default)]
     pub credential_key: Option<String>,
     #[serde(default)]
@@ -408,29 +413,25 @@ pub fn identity(input: &ValueInput<'_>, row: &ValueRow) -> Option<String> {
     ))
 }
 
-/// What the [`Road::Anthropic`] road speaks: the Messages endpoint, reached
-/// with the subscription login the window already holds. The same four facts
-/// the probe that measured the table sends (`tools/type_value_latency.py`,
-/// `AnthropicRoad`), named once for the product.
+/// What the [`Road::Anthropic`] road speaks: the Messages endpoint, the API
+/// version the request is written against, and the header a person's own API
+/// key goes in. Nothing else: no client is spoken for and no subscription is
+/// admitted down this road (t-6720, the coordinator's decision m-9526).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnthropicWire {
     /// Where a value is asked for.
     pub url: &'static str,
     /// The API version the request is written against.
     pub version: &'static str,
-    /// The beta a subscription (OAuth) login is admitted under.
-    pub beta: &'static str,
-    /// The system line a subscription login's request opens with — the one
-    /// the vendor admits that login's requests under.
-    pub identity: &'static str,
+    /// The header the person's key rides.
+    pub key_header: &'static str,
 }
 
 /// [`AnthropicWire`], as this product sends it.
 pub const ANTHROPIC_WIRE: AnthropicWire = AnthropicWire {
     url: "https://api.anthropic.com/v1/messages",
     version: "2023-06-01",
-    beta: "oauth-2025-04-20",
-    identity: "You are Claude Code, Anthropic's official CLI for Claude.",
+    key_header: "x-api-key",
 };
 
 /// The value an answer names, or why it names none.

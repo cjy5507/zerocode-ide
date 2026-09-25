@@ -550,7 +550,6 @@ where
         // has already paid for.
         if !self.warmed
             && self.types()
-            && !screen.snapshot.fields.is_empty()
             && let Some(writer) = &self.writer
         {
             writer.warm();
@@ -599,8 +598,15 @@ where
         self.settled.clone()
     }
 
+    /// A page whose last look read a field, with a writer a person set up —
+    /// in that order, so a page with no field never touches the key store.
     fn types(&self) -> bool {
-        matches!(self.aim, Aim::Pane { .. }) && self.writer.is_some()
+        matches!(self.aim, Aim::Pane { .. })
+            && self
+                .seen
+                .as_ref()
+                .is_some_and(|seen| !seen.snapshot.fields.is_empty())
+            && self.writer.as_ref().is_some_and(|writer| writer.ready())
     }
 
     fn type_into(&mut self, mark: usize, goal: &str) -> Typed {

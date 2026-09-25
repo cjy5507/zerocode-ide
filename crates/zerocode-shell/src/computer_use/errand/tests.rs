@@ -204,6 +204,11 @@ impl ValueWriter for Pen {
         zerocode_core::type_value::chosen()
     }
 
+    /// A writer the test set up.
+    fn ready(&self) -> bool {
+        true
+    }
+
     fn write(&mut self, look: &FieldLook<'_>, _left: Duration) -> Result<Written, String> {
         self.writes.set(self.writes.get() + 1);
         self.asked
@@ -2692,10 +2697,11 @@ fn asking_ahead_with_every_head_is_still_one_request_a_step() {
 
 /// The window's own walk types (t-6720): the product door's goal walk —
 /// `run_goal`, the one road `zerocode-computer walk` takes — hands the world
-/// it walks the value seat's writer, built at the loop that knows the
-/// window's config root from that root. Read from the source, as the other
-/// contracts on the walk's wiring are: the loop does not run without a
-/// window, and a walk that is never handed a writer never offers an entry.
+/// it walks the value seat's writer, the window's own (`LiveWriter::window`,
+/// the key a person set in the window's key store). Read from the source, as
+/// the other contracts on the walk's wiring are: the loop does not run
+/// without a window, and a walk that is never handed a writer never offers
+/// an entry.
 #[test]
 fn the_windows_walk_hands_its_world_the_windows_writer() {
     let source = std::fs::read_to_string(
@@ -2723,8 +2729,7 @@ fn the_windows_walk_hands_its_world_the_windows_writer() {
         .expect("the walk verb's branch")..];
     let branch = &branch[..branch.find("} else {").expect("its end")];
     for needle in [
-        "config_root()",
-        "computer_use::errand::value::LiveWriter::window(&root)",
+        "computer_use::errand::value::LiveWriter::window()",
         "run_goal(",
         "writer,",
     ] {

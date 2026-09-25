@@ -996,6 +996,9 @@ fn the_first_look_that_reads_a_field_opens_the_value_road_once() {
         fn row(&self) -> Option<&'static zerocode_core::type_value::ValueRow> {
             zerocode_core::type_value::chosen()
         }
+        fn ready(&self) -> bool {
+            true
+        }
         fn write(
             &mut self,
             _: &zerocode_core::type_value::FieldLook<'_>,
@@ -1099,4 +1102,88 @@ fn a_field_takes_one_entry_a_walk() {
     assert!(second.get("type_target").is_none(), "the field was entered");
     assert!(second["action"]["criteria"].get("type_text").is_none());
     assert!(second["action"]["criteria"].get("mark:2").is_some());
+}
+
+/// A subscription login is on no request the value seat makes (t-6720, the
+/// coordinator's decision m-9526): on a machine whose key store holds only a
+/// subscription login, a look that read a field offers no entry — Type
+/// candidates 0 — and the value seat asks nothing, even of a judgment that
+/// answers with an entry regardless; with a key a person set, the same look
+/// offers the entry and the value goes in down the value road, asked with
+/// that key alone.
+#[test]
+fn a_subscription_login_never_rides_a_value_request() {
+    use super::super::value::tests::{KEY, store, wrote};
+    use super::super::value::{LiveWriter, NO_KEY};
+    use crate::systemone::tests::Endpoint;
+
+    let walk = |with_key: bool| {
+        let endpoint = Endpoint::serving("HTTP/1.1 200 OK", wrote("London"), 0);
+        let road = Kept::on(a_page_with_a_field("doc-1", "", "#destination"));
+        let mut send = road.road();
+        let writer = LiveWriter::at(&format!("{}/v1/messages", endpoint.base()), store(with_key));
+        let mut world = GoalWorld::new(
+            &mut send,
+            Aim::Pane {
+                label: "browser-9".into(),
+            },
+            Seen::default(),
+            None,
+            60_000,
+            0,
+        )
+        .writing(Box::new(writer))
+        .remembering(memory());
+        // A judgment that answers with an entry whether or not one was offered.
+        let mut judge = FakeJudge::saying(vec![entry(1)]);
+        let walked = run(Mode::On, true, &goal(1), &mut judge, &mut world);
+        drop(world);
+        (judge.questions, endpoint.asked(), road.verbs(), walked)
+    };
+
+    let (questions, heard, verbs, walked) = walk(false);
+    assert!(
+        questions[0].get("type_target").is_none(),
+        "an entry was offered"
+    );
+    assert!(
+        questions[0]["action"]["criteria"]
+            .get("type_text")
+            .is_none(),
+        "Type candidates 0"
+    );
+    assert!(heard.is_empty(), "the value seat asked: {heard:?}");
+    assert!(!verbs.iter().any(|verb| verb == "type"));
+    assert_eq!(walked.typed, 0);
+    assert_eq!(walked.rows[0]["reason"], json!(NO_KEY));
+
+    let (questions, heard, verbs, walked) = walk(true);
+    assert!(
+        questions[0].get("type_target").is_some(),
+        "the entry is offered"
+    );
+    // One value, one request; the road's warm-up before it carries no key;
+    // no request carries the subscription login.
+    let (posts, warm_ups): (Vec<&String>, Vec<&String>) = heard
+        .iter()
+        .partition(|request| request.starts_with("POST"));
+    assert_eq!(posts.len(), 1, "one value, one request: {heard:?}");
+    assert!(
+        posts[0]
+            .to_ascii_lowercase()
+            .contains(&format!("x-api-key: {KEY}")),
+        "{}",
+        posts[0]
+    );
+    for request in &warm_ups {
+        assert!(
+            !request.to_ascii_lowercase().contains("x-api-key"),
+            "{request}"
+        );
+    }
+    for request in &heard {
+        assert!(!request.contains("a-subscription-login"), "{request}");
+    }
+    assert!(verbs.iter().any(|verb| verb == "type"));
+    assert_eq!(walked.typed, 1);
 }

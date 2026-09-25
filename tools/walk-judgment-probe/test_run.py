@@ -25,7 +25,7 @@ class DriverTests(unittest.TestCase):
             "    // after-only }\n"
             "keep two\n"
             "// after-only {\n"
-            "fn value_login() {}\n"
+            "fn value_writer() {}\n"
             "// after-only }\n"
         )
         self.assertEqual(run.strip_after_only(source), "keep one\nkeep two\n")
@@ -37,7 +37,7 @@ class DriverTests(unittest.TestCase):
             [line for line in stripped.splitlines() if line.strip().startswith("// after-only")],
             "a region marker survived",
         )
-        for needed_after in ("LiveWriter", "value_login", "ZEROCODE_WALK_PROBE_LOGIN_FILE"):
+        for needed_after in ("LiveWriter", "value_writer", "ZEROCODE_WALK_PROBE_VALUE_KEY"):
             self.assertNotIn(needed_after, stripped)
 
     def test_a_step_runs_from_its_look_to_its_hand_without_the_stand_in(self):

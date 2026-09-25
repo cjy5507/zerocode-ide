@@ -7,7 +7,8 @@
       "id": "haiku",
       "model": "claude-haiku-4-5-20251001",
       "road": "anthropic",
-      "reach": "every login this product already holds — the subscription token zo and the window ask everything else with, so this row needs nothing of a person",
+      "credentialKey": "ANTHROPIC_API_KEY",
+      "reach": "a person who put an Anthropic API key in the window's key store under this row's credentialKey — never a subscription login, which only the vendor's own clients spend",
       "measured": {
         "at": "2026-09-18",
         "runs": [

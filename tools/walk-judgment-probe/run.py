@@ -28,8 +28,11 @@ The page's snapshot the browser door does not carry yet (t-6721 U4) is stood
 in for by `snapshot.js`, one more `eval` after each look, in both builds and
 only in the scenarios that need it; its time is kept apart. Rows land in
 `<out>/rows.jsonl`; the table is `<out>/table.md` and `<out>/summary.json`.
-The key is read from this command's environment only and written nowhere.
-The value seat's login is zo's own credential store, read by the test.
+The keys are read from this command's environment only and written nowhere:
+`TYPESAFE_API_KEY` for Jev, and — when a person has one — `ANTHROPIC_API_KEY`
+for the value seat in the build after, the way a person's own key reaches it
+in the window. Without it the build after offers no entry, as the window does
+for a person who set no key; no subscription login is ever used.
 """
 
 from __future__ import annotations
@@ -286,7 +289,7 @@ def build(label: str, before: str | None, bins: pathlib.Path) -> pathlib.Path:
 
 
 def walk_once(binary: pathlib.Path, label: str, scenario: str, pane: str, url: str,
-              out: pathlib.Path, home: pathlib.Path, login_file: str | None) -> int:
+              out: pathlib.Path, home: pathlib.Path, value_key: str | None) -> int:
     spec = SCENARIOS[scenario]
     env = dict(os.environ)
     env.update({
@@ -306,12 +309,15 @@ def walk_once(binary: pathlib.Path, label: str, scenario: str, pane: str, url: s
         "ZO_CONFIG_HOME": str(home),
     })
     env.pop("TYPESAFE_API_KEY", None)
+    env.pop("ANTHROPIC_API_KEY", None)
     if spec["stand_in"]:
         env["ZEROCODE_WALK_PROBE_SNAPSHOT_JS"] = str(HERE / "snapshot.js")
     else:
         env.pop("ZEROCODE_WALK_PROBE_SNAPSHOT_JS", None)
-    if login_file:
-        env["ZEROCODE_WALK_PROBE_LOGIN_FILE"] = login_file
+    if value_key:
+        env["ZEROCODE_WALK_PROBE_VALUE_KEY"] = value_key
+    else:
+        env.pop("ZEROCODE_WALK_PROBE_VALUE_KEY", None)
     done = subprocess.run([str(binary), "--exact", TEST_NAME, "--ignored", "--nocapture", "--test-threads=1"],
                           cwd=ROOT, env=env, capture_output=True, text=True)
     said = [line.split("... ")[-1] for line in done.stdout.splitlines() if " walk " in line]
@@ -327,7 +333,6 @@ def main() -> int:
     parser.add_argument("--scenarios", default="press,repeat,type,observe")
     parser.add_argument("--pane", help="a pane of your own; one is opened (and closed) when absent")
     parser.add_argument("--bins", help="reuse the binaries a previous run built here")
-    parser.add_argument("--login-file", default=str(pathlib.Path.home() / ".zo" / "credentials.json"))
     args = parser.parse_args()
     if "TYPESAFE_API_KEY" not in os.environ:
         sys.exit("TYPESAFE_API_KEY is read from this command's environment only")
@@ -353,7 +358,7 @@ def main() -> int:
                 order = ["before", "after"] if walk % 2 == 0 else ["after", "before"]
                 for label in order:
                     walk_once(arms[label], label, scenario, pane, url, out, homes[label],
-                              args.login_file if label == "after" else None)
+                              os.environ.get("ANTHROPIC_API_KEY") if label == "after" else None)
     finally:
         if opened:
             subprocess.run(["zerocode-browser", "close", pane], capture_output=True, text=True)

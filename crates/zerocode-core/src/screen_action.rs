@@ -971,11 +971,19 @@ pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk>
             fields,
         );
     }
+    // An observation head's candidates stand in the state as well as among
+    // its options, as the numbered controls do: a judgment reads the screen
+    // from the state, and asked with the lines among the options alone it
+    // answered `none` for 47 of 48 heads on a page whose right answers stood
+    // plain (2026-09-26, the probe page; with the lines in the state, 18 of
+    // 18). Each line is cleared of anything that may carry a credential by
+    // the door's own rule before it goes anywhere.
     let mut observing = Vec::new();
     if goal {
         for head in Observe::ALL {
             let mut offered = Vec::new();
             let mut described = Map::new();
+            let mut lines = Vec::new();
             for (index, candidate) in beside.of(head).iter().enumerate() {
                 if offered.len() == MAX_ACTION_CANDIDATES {
                     break;
@@ -984,7 +992,10 @@ pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk>
                 let Some(line) = head.line(number, candidate) else {
                     continue;
                 };
-                described.insert(head.option(number), Value::String(line));
+                let (line, _) =
+                    crate::jev::door::clear_text(&line, crate::jev::Cap::Chars(OBSERVED_CHAR_CAP));
+                described.insert(head.option(number), Value::String(line.clone()));
+                lines.push(Value::String(line));
                 offered.push(number);
             }
             if offered.is_empty() {
@@ -994,6 +1005,7 @@ pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk>
                 NONE.to_string(),
                 Value::String(head.none_means().to_string()),
             );
+            state.insert(head.key().to_string(), Value::Array(lines));
             also_ask(&mut questions, head.head(), head.instructions(), described);
             observing.push((head, offered));
         }
