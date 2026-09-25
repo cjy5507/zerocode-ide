@@ -634,6 +634,47 @@ pub fn agreement_since(rows: &[Value], since_ms: i64) -> crate::jev::promote::Ag
     agreement_rows(rows.iter(), since_ms)
 }
 
+/// Where a judgment window's marks are counted from (t-9087): the window's
+/// first request, `since_ms` — reached back, when fewer than `wanted` marks
+/// ([`AGREED`]) were written since, to the time of the `wanted`th newest, or
+/// to the first row when the rows hold fewer. A time is a cut, so marks
+/// sharing the time the cut falls on all count: a window reached back holds
+/// at least `wanted` marks, not always exactly that many.
+///
+/// `rows` are one seat's series ([`crate::jev::promote::OnVersion::marks`]):
+/// the reach back is as far as the marks of the words the seat asks now and
+/// the version answering now go, and a ledger's raw rows would carry it into
+/// other words' marks.
+///
+/// The window is a count of requests, as wide as the seat's answer floor
+/// needs; how many marks those requests earn is the seat's own. The notify
+/// seat marks a ring only when the person was at the window or turned to it
+/// — 110 of the 444 rings this machine's ledger held on 2026-09-25 — so its
+/// 53-ring window held 15 marks, and the judge said `too_few_compared` with
+/// 110 in hand; the placement seat's 25 requests held 9 of its 87. The
+/// sample floor asks for marks in hand, and a window that already holds it
+/// reads its own marks alone.
+#[must_use]
+pub fn marks_from<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    since_ms: i64,
+    wanted: usize,
+) -> i64 {
+    // Read the way [`agreement_rows`] reads a mark's time.
+    let mut marked: Vec<i64> = rows
+        .into_iter()
+        .filter(|row| AGREED.read(row).and_then(Value::as_bool).is_some())
+        .map(|row| AT.read(row).and_then(Value::as_i64).unwrap_or(0))
+        .collect();
+    if marked.iter().filter(|at| **at >= since_ms).count() >= wanted {
+        return since_ms;
+    }
+    marked.sort_unstable_by(|older, newer| newer.cmp(older));
+    marked
+        .get(wanted.saturating_sub(1))
+        .map_or(i64::MIN, |at| (*at).min(since_ms))
+}
+
 /// [`agreement_since`] over rows already picked out — one local day of a
 /// ledger, for the trend a screen draws beside the week.
 #[must_use]
