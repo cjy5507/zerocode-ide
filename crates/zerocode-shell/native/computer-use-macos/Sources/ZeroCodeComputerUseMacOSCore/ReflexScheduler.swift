@@ -501,7 +501,8 @@ public struct ReflexReceipt: Equatable, Sendable {
         /// lease was decided on is no longer evidence.
         case evidence
         /// A newer capture no longer shows the target (gone, unknown, another
-        /// track in its place), or it left the pointer before the press.
+        /// track in its place), or it left the pointer before the press, or
+        /// the pointer left the point the boundary was asked about.
         case moved
         /// The point is not the run's to act on: ZeroCode's own window, or a
         /// window of another app than the one the run was started for.
@@ -600,8 +601,9 @@ public final class ReflexReceipts: @unchecked Sendable {
 /// lease came from — and the hold read by the hand itself. Every newer capture
 /// must still show the same target, and nothing goes once the evidence the
 /// leaf was decided on is taken back. Where it goes is asked of the run's
-/// boundary before its first event, and where it presses before the press.
-/// It lives on the run's hand thread.
+/// boundary before its first event, and where it presses before the press —
+/// read again once the boundary has answered. It lives on the run's hand
+/// thread.
 struct ReflexLeafRunner {
     let runId: String
     let hand: OperatorHand
@@ -712,17 +714,17 @@ struct ReflexLeafRunner {
         guard leaf.kind == .click else { return }
 
         // The press: a capture newer than the one the lease came from still
-        // shows the same target, the pointer is inside where it is now, and
-        // the point is the run's to press.
-        let (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
-        guard case let (fresh, moved)? = frame.sighting(of: leaf.detector, track: target.track_id),
-              moved.aim(atHostNs: now, capturedHostNs: fresh.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns) != nil,
-              let pointer = hand.pointerNow(), let pixel = frame.frame.pixel(ofPoint: pointer),
-              moved.roi.contains(x: pixel.x, y: pixel.y)
-        else { throw Halt.outcome(.moved) }
-        lease = lease.renewed(by: frame.frame, target: moved, limits: limits)
-        guard lease.permits(frame.frame, now_host_ns: now, input: .left_click, limits: limits) else { throw Halt.outcome(.lease) }
+        // shows the same target, the lease holds, the pointer is inside where
+        // the target is now, and the point is the run's to press. The
+        // boundary's answer takes its time (the window server is asked), so
+        // what became known meanwhile — evidence taken back, a newer capture,
+        // the clock past the frame or the lease — is read again before the
+        // press, and the press goes only where the boundary was asked.
+        var (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+        let pointer = try pressPoint(leaf, target, on: frame, at: now, lease: &lease)
         try within(.left_click, at: pointer)
+        (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+        guard try pressPoint(leaf, target, on: frame, at: now, lease: &lease) == pointer else { throw Halt.outcome(.moved) }
         try hand.post(HandEvent(.buttonDown(.left, clickState: 1), x: pointer.x, y: pointer.y), by: token)
         draft.downHostNs = hand.nowNs()
         if draft.firstEventHostNs == nil {
@@ -737,6 +739,23 @@ struct ReflexLeafRunner {
         try hand.post(HandEvent(.buttonUp(.left, clickState: 1), x: pointer.x, y: pointer.y), by: token)
         draft.upHostNs = hand.nowNs()
         draft.events += 1
+    }
+
+    /// Where the press goes on `seen` at `now`, `lease` renewed by it: the
+    /// leaf's target on that capture, the lease holding a click then, and the
+    /// aim and the pointer still inside where the target is. A lease that no
+    /// longer holds ends the leaf as `lease` before the target's place is read.
+    private func pressPoint(
+        _ leaf: ReflexLeaf, _ target: ReflexTarget, on seen: ReflexSightings.Seen, at now: UInt64, lease: inout ReflexActionLease
+    ) throws -> SmoothPointerPath.Point {
+        guard case let (fresh, moved)? = seen.sighting(of: leaf.detector, track: target.track_id) else { throw Halt.outcome(.moved) }
+        lease = lease.renewed(by: seen.frame, target: moved, limits: limits)
+        guard lease.permits(seen.frame, now_host_ns: now, input: .left_click, limits: limits) else { throw Halt.outcome(.lease) }
+        guard moved.aim(atHostNs: now, capturedHostNs: fresh.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns) != nil,
+              let pointer = hand.pointerNow(), let pixel = seen.frame.pixel(ofPoint: pointer),
+              moved.roi.contains(x: pixel.x, y: pixel.y)
+        else { throw Halt.outcome(.moved) }
+        return pointer
     }
 
     /// The boundary's word on `input` at `point`: a refusal ends the leaf

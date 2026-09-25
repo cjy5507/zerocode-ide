@@ -102,6 +102,14 @@ final class RecordingPoster: HandPoster, @unchecked Sendable {
         return location
     }
 
+    /// Someone else moved the pointer, and no monitor has heard it yet (a
+    /// tap hears it a moment later): nothing is recorded as posted.
+    func movePointer(to point: SmoothPointerPath.Point) {
+        lock.lock()
+        location = point
+        lock.unlock()
+    }
+
     var events: [Posted] {
         lock.lock()
         defer { lock.unlock() }
@@ -801,6 +809,32 @@ struct PermitEverywhere: ReflexInputBoundary {
     func refusal(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) -> String? { nil }
 }
 
+/// A boundary that allows everything and keeps where it was asked; the
+/// test's step runs inside an ask, before its answer — as the window server's
+/// answer takes its time.
+final class AskedBoundary: ReflexInputBoundary, @unchecked Sendable {
+    private let lock = NSLock()
+    private var asked: [SmoothPointerPath.Point] = []
+    /// Runs inside the `n`th ask, counted from 1.
+    var during: ((Int) -> Void)?
+
+    func refusal(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) -> String? {
+        lock.lock()
+        asked.append(point)
+        let ask = asked.count
+        let step = during
+        lock.unlock()
+        step?(ask)
+        return nil
+    }
+
+    var points: [SmoothPointerPath.Point] {
+        lock.lock()
+        defer { lock.unlock() }
+        return asked
+    }
+}
+
 // MARK: - A run the test steps (the edges astra's review found)
 
 /// Waits in real time until `condition` holds; false when it never did.
@@ -1478,6 +1512,76 @@ final class ReflexRunBoundaryTests: XCTestCase {
         }
         XCTAssertEqual(late?.outcome.rawValue, "scope", "covered before the press")
         XCTAssertEqual(covered.downs, 0)
+    }
+
+    /// The ask before the press takes its time (the window server answers
+    /// it), and what became known meanwhile is read before the press:
+    /// evidence taken back, the clock past the frame's age and the lease's
+    /// end, a newer capture with the target where the pointer is not, the
+    /// pointer off the point asked — none of them presses. Allowed at once, or on a newer capture that still
+    /// holds the pointer, the press goes where the boundary was asked.
+    func test_what_became_known_while_the_boundary_answered_is_read_before_the_press() throws {
+        let limits = try ReflexFixtures.limits()
+        func run(duringTheAsk step: @escaping (LiveRig) -> Void) throws -> (LiveRig, ReflexReceipt?, AskedBoundary) {
+            let boundary = AskedBoundary()
+            let rig = try LiveRig(plan: try ReflexFixtures.clickPlan(), boundary: boundary)
+            rig.sleeper.onSleep = { _, _ in rig.frame(.ball(track: 5, box: LiveRig.box)) }
+            // The leaf asks where it goes, then where it presses.
+            boundary.during = { ask in if ask == 2 { step(rig) } }
+            try rig.session.start()
+            rig.frame(.ball(track: 5, box: LiveRig.box))
+            let receipt = rig.receipts(1).first
+            rig.session.stop(reason: StopReason.request)
+            return (rig, receipt, boundary)
+        }
+        func pressedWhereAsked(_ rig: LiveRig, _ boundary: AskedBoundary, _ name: String) {
+            XCTAssertEqual(boundary.points.count, 2, "\(name): asked where it goes and where it presses, once each")
+            XCTAssertEqual(rig.poster.presses.map { SmoothPointerPath.Point(x: $0.x, y: $0.y) }, [boundary.points[1]],
+                           "\(name): pressed where the boundary was asked")
+            XCTAssertEqual(rig.downs, 1, name)
+            XCTAssertEqual(rig.ups, 1, "\(name): let go of")
+        }
+
+        let (allowed, done, asked) = try run { _ in }
+        XCTAssertEqual(done?.outcome, .done, "allowed at once")
+        pressedWhereAsked(allowed, asked, "allowed at once")
+
+        // A newer capture refused while the boundary answered: the evidence is taken back first.
+        let taken = Box<(latest: Bool, refused: UInt64)>()
+        let (refused, evidence, _) = try run { rig in
+            let before = rig.session.status.framesRefused
+            rig.frame(.ball(track: 5, box: LiveRig.box), status: .interrupted)
+            taken.value = (rig.session.sightings.latest() != nil, rig.session.status.framesRefused - before)
+        }
+        XCTAssertEqual(taken.value?.latest, false, "the refusal took the evidence back before the boundary answered")
+        XCTAssertEqual(taken.value?.refused, 1)
+        XCTAssertEqual(evidence?.outcome, .evidence)
+        XCTAssertEqual(refused.downs, 0, "no press on evidence taken back")
+        XCTAssertEqual(refused.hand.snapshot.held, [])
+
+        // The clock past the frame's age and the lease's end while the boundary answered.
+        let (late, ended, _) = try run { rig in rig.clock.set(rig.clock.nowNs() + limits.max_frame_age_ns + limits.max_lease_ns + 1) }
+        XCTAssertEqual(ended?.outcome, .lease)
+        XCTAssertEqual(late.downs, 0, "no press on a lease that ended")
+
+        // A newer capture with the target where the pointer is not.
+        let far = ReflexRoi(x: 0, y: 0, width: 4, height: 4, space: .pixel)
+        let (away, left, _) = try run { rig in rig.frame(.ball(track: 5, box: far)) }
+        XCTAssertEqual(left?.outcome, .moved)
+        XCTAssertEqual(away.downs, 0, "no press where the target no longer is")
+
+        // The pointer moved off the point asked, before any monitor heard it.
+        let (drifted, off, _) = try run { rig in
+            guard let asked = rig.hand.pointerNow() else { return }
+            rig.poster.movePointer(to: SmoothPointerPath.Point(x: asked.x + 1, y: asked.y))
+        }
+        XCTAssertEqual(off?.outcome, .moved)
+        XCTAssertEqual(drifted.downs, 0, "no press on a point the boundary was not asked about")
+
+        // A newer capture that still holds the pointer: pressed where the boundary was asked.
+        let (held, still, heldAsked) = try run { rig in rig.frame(.ball(track: 5, box: LiveRig.box)) }
+        XCTAssertEqual(still?.outcome, .done, "a newer capture that still holds the pointer")
+        pressedWhereAsked(held, heldAsked, "a newer capture that still holds the pointer")
     }
 
     /// The helper binds a run to its plan's own target when it starts: a
