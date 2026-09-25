@@ -7692,20 +7692,32 @@ mod tests {
     #[test]
     fn a_walk_may_be_asked_to_judge_ahead_of_its_looks_and_nothing_else_may() {
         let argv = |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
-        let plain =
-            parse_command(&argv(&["walk", "--goal", "pay", "--app", "Calculator"])).expect("a walk");
+        let plain = parse_command(&argv(&["walk", "--goal", "pay", "--app", "Calculator"]))
+            .expect("a walk");
         assert!(!walk_overlaps(&plain.params), "off unless asked");
         assert!(plain.params.get(WALK_OVERLAP_PARAM).is_none());
         let phone = parse_command(&argv(&[
-            "walk", "--goal", "pay", "--platform", "ios", "--device", "phone",
+            "walk",
+            "--goal",
+            "pay",
+            "--platform",
+            "ios",
+            "--device",
+            "phone",
         ]))
         .expect("a phone walk");
-        assert!(!walk_overlaps(&phone.params), "a phone's walk is off unless asked");
+        assert!(
+            !walk_overlaps(&phone.params),
+            "a phone's walk is off unless asked"
+        );
         // A page's walk judges ahead unasked (t-9712): its settle hides
         // behind the judgment begun on the page its press left.
         let page =
             parse_command(&argv(&["walk", "--goal", "pay", "--pane", "b"])).expect("a page walk");
-        assert!(walk_overlaps(&page.params), "a page's walk judges ahead unasked");
+        assert!(
+            walk_overlaps(&page.params),
+            "a page's walk judges ahead unasked"
+        );
         assert!(page.params.get(WALK_OVERLAP_PARAM).is_none());
         assert_eq!(WALK_OVERLAP_UNASKED, ["pane"]);
         let ahead = parse_command(&argv(&[

@@ -21296,10 +21296,10 @@ mod browser_look_settle_pin {
     use super::*;
     use cmd::browser::{
         BROWSER_MARK_HELPERS, BROWSER_MARKS_BODY, BROWSER_OBSERVE_HELPERS, BROWSER_REMEASURE_BODY,
-        BROWSER_SETTLE_BODY, BrowserLook, CLICK_SAID, CLICK_SAID_KEY, HeldSettle,
-        PAGE_SEND_FAILED, PAGE_TIMED_OUT, SettleReport, hold_settle, held_refusal, input_report,
-        input_said, look_of, marks_json, marks_lines, page_failure, pressed_rect,
-        settle_held, settle_later_json, settle_with, take_held_settle,
+        BROWSER_SETTLE_BODY, BrowserLook, CLICK_SAID, CLICK_SAID_KEY, HeldSettle, PAGE_SEND_FAILED,
+        PAGE_TIMED_OUT, SettleReport, held_refusal, hold_settle, input_report, input_said, look_of,
+        marks_json, marks_lines, page_failure, pressed_rect, settle_held, settle_later_json,
+        settle_with, take_held_settle,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -21671,7 +21671,11 @@ mod browser_look_settle_pin {
             Some(([1.0, 2.0, 3.0, 4.0], 2.0))
         );
         let bare = settle_later_json(&report, None);
-        assert_eq!(bare.as_object().map(serde_json::Map::len), Some(1), "{bare}");
+        assert_eq!(
+            bare.as_object().map(serde_json::Map::len),
+            Some(1),
+            "{bare}"
+        );
         assert_eq!(
             pressed_rect(&bare.to_string()),
             Some(([1.0, 2.0, 3.0, 4.0], 2.0))
@@ -21752,12 +21756,16 @@ mod browser_look_settle_pin {
             "{later}"
         );
         let look = block("pub(crate) async fn automate_marks(");
-        let taken = look.find("take_held_settle(label)").expect("the look takes it");
+        let taken = look
+            .find("take_held_settle(label)")
+            .expect("the look takes it");
         let settled = look.find("settle_after_press(").expect("and settles it");
         let read = look.find("read_look(").expect("and reads");
         assert!(taken < settled && settled < read, "{look}");
         let press = block("async fn press_mark(");
-        let refused = press.find("settle_held(label)").expect("a held settle refuses");
+        let refused = press
+            .find("settle_held(label)")
+            .expect("a held settle refuses");
         let pinned = press.find("recall_table(").expect("the pin is read");
         assert!(
             refused < pinned,

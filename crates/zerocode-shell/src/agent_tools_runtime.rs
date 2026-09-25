@@ -5973,7 +5973,8 @@ pub(super) async fn answer_browser_command(
                     cmd::browser::automate_click_mark(app, &state, &argv[1], mark).await
                 }
                 Ok(ClickTarget::MarkSettleLater(mark)) => {
-                    let later = cmd::browser::automate_click_mark_later(app, &state, &argv[1], mark);
+                    let later =
+                        cmd::browser::automate_click_mark_later(app, &state, &argv[1], mark);
                     return match later.await {
                         Ok((report, look)) => {
                             crate::browser_read::label_press(&argv[1], "click", &report);

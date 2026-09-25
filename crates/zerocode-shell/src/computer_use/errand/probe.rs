@@ -176,7 +176,10 @@ fn settle_by_eval(pane: &str) -> SettleReport {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let press = first.borrow_mut().get_or_insert_with(|| seen.clone()).clone();
+            let press = first
+                .borrow_mut()
+                .get_or_insert_with(|| seen.clone())
+                .clone();
             if seen == press {
                 said["value"]["documentEpoch"] = json!(PRESS_EPOCH);
             }
@@ -243,7 +246,11 @@ impl Door<'_> {
             self.held = true;
             let began = Instant::now();
             let look = self.look(
-                &["marks".to_string(), self.pane.to_string(), "--json".to_string()],
+                &[
+                    "marks".to_string(),
+                    self.pane.to_string(),
+                    "--json".to_string(),
+                ],
                 &mut inside,
             );
             inside["previewMs"] = json!(began.elapsed().as_secs_f64() * 1_000.0);

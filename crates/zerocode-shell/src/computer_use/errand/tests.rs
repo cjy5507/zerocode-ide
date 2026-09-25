@@ -2072,7 +2072,10 @@ fn a_page_press_that_settles_later_is_judged_on_the_page_it_left_behind_its_sett
         (walked.overlapped, walked.discarded, walked.cancelled),
         (2, 0, 0)
     );
-    assert_eq!(world.settles_waited, 3, "every press's settle was waited for");
+    assert_eq!(
+        world.settles_waited, 3,
+        "every press's settle was waited for"
+    );
     for row in &walked.rows {
         assert_eq!(row[SETTLE], settle_ready(), "{row}");
     }
@@ -2109,8 +2112,15 @@ fn a_settle_that_did_not_end_ready_cancels_the_judgment_begun_on_the_page_and_as
             None,
         );
         assert_eq!(world.presses, vec![1, 1], "{note}");
-        assert_eq!(judge.begun.len(), 1, "begun on the page the first press left: {note}");
-        assert_eq!(judge.finished, 0, "a cancelled judgment is never used: {note}");
+        assert_eq!(
+            judge.begun.len(),
+            1,
+            "begun on the page the first press left: {note}"
+        );
+        assert_eq!(
+            judge.finished, 0,
+            "a cancelled judgment is never used: {note}"
+        );
         assert_eq!(judge.asked.len(), 2, "the next page asked in turn: {note}");
         assert_eq!(
             (walked.overlapped, walked.discarded, walked.cancelled),
@@ -2183,7 +2193,10 @@ fn every_press_that_settles_later_is_settled_but_only_a_walk_that_asks_ahead_beg
     let mut judge = FakeJudge::chose(&[1, 1]);
     let mut world = a_page_that_settles_later(FakeWorld::that_moves(&[1, 2]), settle_ready());
     let walked = run(Mode::On, true, &goal(2), &mut judge, &mut world);
-    assert!(judge.begun.is_empty(), "a walk that does not ask ahead begins nothing");
+    assert!(
+        judge.begun.is_empty(),
+        "a walk that does not ask ahead begins nothing"
+    );
     assert_eq!(world.settles_waited, 2);
     assert!(walked.rows.iter().all(|row| row[SETTLE] == settle_ready()));
     assert_eq!(
@@ -2247,7 +2260,10 @@ fn a_settle_waited_for_behind_the_next_judgment_is_hidden_from_the_walk() {
         (STEPS - 1, 0, 0)
     );
     assert_eq!(held_asks, 2 * STEPS - 1);
-    assert_eq!(later_asks, STEPS, "asking on the page the press left asks no more");
+    assert_eq!(
+        later_asks, STEPS,
+        "asking on the page the press left asks no more"
+    );
     let hidden: Vec<u64> = later
         .rows
         .iter()
@@ -3320,15 +3336,18 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
     let pressed = sent
         .iter()
         .position(|argv| {
-            argv[..] == [
-                "click",
-                "browser-9",
-                "--mark",
-                "2",
-                zerocode_core::agent_browser::BROWSER_SETTLE_LATER_FLAG,
-            ]
+            argv[..]
+                == [
+                    "click",
+                    "browser-9",
+                    "--mark",
+                    "2",
+                    zerocode_core::agent_browser::BROWSER_SETTLE_LATER_FLAG,
+                ]
         })
-        .unwrap_or_else(|| panic!("the search button, its settle left for the next look: {sent:?}"));
+        .unwrap_or_else(|| {
+            panic!("the search button, its settle left for the next look: {sent:?}")
+        });
     assert_eq!(
         sent.get(pressed + 1).map(|argv| argv[0].as_str()),
         Some("marks"),

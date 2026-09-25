@@ -1263,8 +1263,10 @@ fn a_step_page(next: &str, settle: Option<Value>) -> String {
 /// press's own sentence beside it.
 fn a_press_that_left(next: &str) -> String {
     let mut answer: Value = serde_json::from_str(&a_step_page(next, None)).expect("json");
-    answer[crate::cmd::browser::CLICK_SAID_KEY] =
-        json!(format!("{} (method=dom-activation)", crate::cmd::browser::CLICK_SAID));
+    answer[crate::cmd::browser::CLICK_SAID_KEY] = json!(format!(
+        "{} (method=dom-activation)",
+        crate::cmd::browser::CLICK_SAID
+    ));
     answer.to_string()
 }
 
@@ -1335,7 +1337,13 @@ fn a_page_press_that_settles_later_hands_back_the_page_it_left_and_its_next_look
         script.said(),
         [
             words(&["marks", "browser-9", "--json"]),
-            words(&["click", "browser-9", "--mark", "1", BROWSER_SETTLE_LATER_FLAG]),
+            words(&[
+                "click",
+                "browser-9",
+                "--mark",
+                "1",
+                BROWSER_SETTLE_LATER_FLAG
+            ]),
             words(&["marks", "browser-9", "--json"]),
             words(&["find", "browser-9", "Step 4 of 4"]),
         ],
@@ -1350,7 +1358,10 @@ fn a_page_press_that_settles_later_hands_back_the_page_it_left_and_its_next_look
 fn a_page_that_did_not_settle_is_looked_at_again_and_an_unheard_settle_says_unknown() {
     let not_ready = settle_said(Settle::NotReady, SettleWhy::Moving, 250);
     for (settling, said) in [
-        (ok(&a_step_page("Next: 2", Some(not_ready.clone()))), not_ready.clone()),
+        (
+            ok(&a_step_page("Next: 2", Some(not_ready.clone()))),
+            not_ready.clone(),
+        ),
         (refused(), settle_unheard()),
     ] {
         let script = Script::of(vec![

@@ -1654,9 +1654,7 @@ fn walk(
             // a link, whose page is another's.
             let left = match settled.and_then(|settled| settled.screen) {
                 Some(screen) => Some(screen),
-                None => world
-                    .unsettled()
-                    .filter(|_| !presses_a_link(seen, chosen)),
+                None => world.unsettled().filter(|_| !presses_a_link(seen, chosen)),
             };
             // Ask ahead on it: the next question as the loop's own head will
             // put it — a screen that moved starts its numbers afresh, one that

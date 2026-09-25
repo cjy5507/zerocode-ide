@@ -1765,7 +1765,13 @@ mod tests {
     fn a_press_by_number_leaves_its_settle_for_later_only_when_it_says_so() {
         let argv = |line: &[&str]| line.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
         assert_eq!(
-            parse_click(&argv(&["click", "b", "--mark", "7", BROWSER_SETTLE_LATER_FLAG])),
+            parse_click(&argv(&[
+                "click",
+                "b",
+                "--mark",
+                "7",
+                BROWSER_SETTLE_LATER_FLAG
+            ])),
             Ok(ClickTarget::MarkSettleLater(7))
         );
         assert_eq!(
@@ -2068,9 +2074,15 @@ mod tests {
             (Settle::Invalidated, SettleWhy::Replaced),
             (Settle::Invalidated, SettleWhy::Gone),
         ] {
-            assert!(!settle_said_ready(&settle_said(state, why, 250)), "{state:?}");
+            assert!(
+                !settle_said_ready(&settle_said(state, why, 250)),
+                "{state:?}"
+            );
         }
-        assert_eq!(settle_unheard()[BROWSER_SETTLE_STATE_KEY], Settle::Unknown.word());
+        assert_eq!(
+            settle_unheard()[BROWSER_SETTLE_STATE_KEY],
+            Settle::Unknown.word()
+        );
         assert!(!settle_said_ready(&settle_unheard()));
         for stranger in [
             serde_json::Value::Null,
