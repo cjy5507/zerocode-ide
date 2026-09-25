@@ -11615,7 +11615,7 @@ impl Ledger {
     ///
     /// Refused for anything but a sleeper: a live worker is not overdue, and
     /// a released one has already been here. Refused, too, by a ledger that
-    /// has said its window's goodbye ([`said_goodbye_refusal`]): the grace is
+    /// has said its window's goodbye (`said_goodbye_refusal`): the grace is
     /// the time the NEXT window has to bring its sleepers back.
     pub fn sleeper_expired(&mut self, worker_id: &str, now_ms: i64) -> Result<(), String> {
         if self.said_goodbye {
