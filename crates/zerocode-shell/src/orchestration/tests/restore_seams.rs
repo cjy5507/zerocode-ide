@@ -12,9 +12,9 @@ use std::collections::HashMap;
 
 /// [`Restoring`], with the window's pane table: which conversation a live
 /// pane already holds, and what the reseat wrote into it.
-struct WithTable {
-    inner: Restoring,
-    standing: Mutex<HashMap<String, u32>>,
+pub(super) struct WithTable {
+    pub(super) inner: Restoring,
+    pub(super) standing: Mutex<HashMap<String, u32>>,
     carried: Mutex<Vec<(u32, String)>>,
 }
 
@@ -69,7 +69,7 @@ impl Host for WithTable {
     }
 }
 
-fn with_table(
+pub(super) fn with_table(
     checkout: &std::path::Path,
     first: u32,
     new_leader: u32,
