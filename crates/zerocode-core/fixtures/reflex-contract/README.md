@@ -13,6 +13,8 @@ separate claims: the plan cases say nothing about leases, and the lease cases
 say nothing about plans. `observation_cases.json` does the same for what a
 perception kernel answers (below). `limits.json` is the reflex table exactly
 as `limits_wire` sends it to the helper (plus the newline).
+`capability.json` is the capability table itself and `run_policy_cases.json`
+the run policy's cases (both below).
 
 ## Version 2: a colour detector carries its spec
 
@@ -28,6 +30,49 @@ re-hashed under version 2 with a valid spec on each colour detector, and
 `color_missing`, `color_spec_refused`, `color_patches`, `color_scale` and
 `valid_cells` are the cases version 2 adds. A version-1 plan is refused,
 never read as a colour detector with nothing to read its ROI with.
+
+## Identifiers (t-9205)
+
+Every id a plan carries — a detector, a rule, a macro, an action — and a
+run's own id is 1 to `MAX_IDENTIFIER_BYTES` (64) bytes of `[A-Za-z0-9_-]`.
+`id_at_limit` (a 64-byte rule id, `ok`) and `id_over_limit` (65 bytes, `id`)
+pin the bound on both sides.
+
+## Capability table (t-9205)
+
+`capability.json` is the one table of what each surface may claim — not a
+copy of one: the window compiles the file in (`reflex::capability_wire`),
+sends its bytes with every start, and the helper decodes the same bytes
+(`ReflexContract.decodeCapabilities`). Each surface has two columns:
+`live_reflex` (a reflex run) and `instant_pointer` (`--instant` on the
+helper's own verbs), because running plans does not teach the verbs an
+instant pointer. The table names the plan `contract` and the `run_policy`
+version it was written against; a table of another version claims nothing on
+either side, so a helper built for another contract is unsupported.
+
+The macOS desktop alone claims `live_reflex` — the one surface with the live
+frames a run reads — and no surface claims `instant_pointer`. A claim is not
+a run: the window still asks the helper whether its kernel is installed and
+which contract and run policy it reads (`supported`), and the person's
+`computer_live_reflex` setting, off until they turn it on (`enabled`).
+
+## Run policy (t-9205)
+
+A start carries a run policy beside the plan — `{"renew":…,"run_ns":…,
+"version":1}`, canonical — and the plan and its hash stay what they are.
+`run_ns` is at least one nanosecond and at most the table's `max_run_ns`,
+counted from the moment the helper first accepts the start: one deadline
+that no renewal, pause or answer lengthens. Without `renew` a rule's
+`max_fires` is its total for the run, the plan's own meaning. With it a rule
+whose `max_fires` are spent gets exactly those back — armed or not, its last
+fire, the last frame read, a leaf in flight, the tracks, the epochs, the
+evidence taken back, the leases issued, the operator's session count and a
+release left unconfirmed all stand. The version is read before anything
+else: an absent version or another integer is `version`, a version that is
+not an integer is `wire`; then every field must be known and present
+(`wire`), and the length inside the table (`budget`).
+`run_policy_cases.json` pins this for both decoders; a helper that does not
+say `runPolicy: 1` in its handshake is never sent a start.
 
 ## Canonical wire
 

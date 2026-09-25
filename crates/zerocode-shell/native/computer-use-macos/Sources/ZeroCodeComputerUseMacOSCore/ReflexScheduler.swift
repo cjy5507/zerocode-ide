@@ -331,50 +331,106 @@ public final class ReflexSightings: @unchecked Sendable {
 /// priority fires, a tie going to the smaller id; cooldown and the rule's own
 /// fire count bound it. While the hand is busy nothing fires and nothing is
 /// used up: a rule still armed fires on the next frame that reads true.
+///
+/// A rule whose `max_fires` are spent does not fire, and an edge it reads
+/// meanwhile is used up with nothing fired: whatever comes back, it fires
+/// again only on a new false→true. Under a renewing run policy
+/// (`ReflexRunPolicy.renew`) a spent rule gets exactly its fire count back —
+/// one rule at a time, on a frame read while the hand is free and the run's
+/// standing still allows it (`read`'s `renewal`, asked at most once a frame and
+/// only when a spent rule is read) — and nothing else: whether it is armed, when
+/// it last fired (its cooldown) and the frame read last stand. Without renewal
+/// `max_fires` is the rule's total for the run.
 public struct ReflexRuleBook {
     private struct Arm {
         var armed = true
+        /// Fires since the rule's quota was last given back.
         var fires: UInt64 = 0
         var lastFireNs: UInt64?
+        /// When the quota was spent, until it comes back.
+        var spentAtNs: UInt64?
+    }
+
+    /// What one frame's read came to.
+    public struct Read: Sendable {
+        /// The rule that fires now, already counted as fired.
+        public let fired: ReflexRule?
+        /// Each quota given back on this frame: the rule and how long it had
+        /// been spent.
+        public let renewed: [Renewal]
+    }
+
+    public struct Renewal: Equatable, Sendable {
+        public let rule: String
+        public let spentForNs: UInt64
     }
 
     private let order: [ReflexRule]
+    private let renews: Bool
     private var arms: [String: Arm]
     private var lastFrame: (stream: UInt64, capture: UInt64)?
+    /// Every fire of the run, across renewals.
+    public private(set) var fires: UInt64 = 0
+    /// Every quota given back.
+    public private(set) var renewals: UInt64 = 0
 
-    public init(_ plan: ValidatedReflexPlan) {
+    public init(_ plan: ValidatedReflexPlan, policy: ReflexRunPolicy) {
         order = plan.plan.rules.sorted { lhs, rhs in
             lhs.priority != rhs.priority ? lhs.priority > rhs.priority : lhs.id < rhs.id
         }
+        renews = policy.renew
         arms = Dictionary(uniqueKeysWithValues: plan.plan.rules.map { ($0.id, Arm()) })
     }
 
     /// Read one evaluated frame. `values` holds each detector's known value
-    /// on it; a detector missing from it is unknown. Returns the rule that
-    /// fires now, already counted as fired.
-    public mutating func read(streamEpoch: UInt64, captureSeq: UInt64, values: [String: Int64], nowNs: UInt64, handFree: Bool) -> ReflexRule? {
-        if let last = lastFrame, (streamEpoch, captureSeq) <= (last.stream, last.capture) { return nil }
+    /// on it; a detector missing from it is unknown. `renewal` is asked — at
+    /// most once, only under a renewing policy, only while the hand is free and
+    /// only once a spent rule is read — whether the run may give spent quotas
+    /// back now; it re-checks the run's standing and admits nothing.
+    public mutating func read(
+        streamEpoch: UInt64, captureSeq: UInt64, values: [String: Int64], nowNs: UInt64, handFree: Bool,
+        renewal: () -> Bool = { false }
+    ) -> Read {
+        if let last = lastFrame, (streamEpoch, captureSeq) <= (last.stream, last.capture) { return Read(fired: nil, renewed: []) }
         lastFrame = (streamEpoch, captureSeq)
         var chosen: ReflexRule?
+        var renewed: [Renewal] = []
+        var mayRenew: Bool?
         for rule in order {
             guard var arm = arms[rule.id] else { continue }
+            if arm.fires >= rule.max_fires, renews, handFree {
+                if mayRenew == nil { mayRenew = renewal() }
+                if mayRenew == true {
+                    renewed.append(Renewal(rule: rule.id, spentForNs: arm.spentAtNs.map { nowNs >= $0 ? nowNs - $0 : 0 } ?? 0))
+                    arm.fires = 0
+                    arm.spentAtNs = nil
+                    renewals += 1
+                }
+            }
             switch rule.predicate.evaluate(values[rule.detector]) {
             case .no:
                 arm.armed = true
             case .unknown:
                 break
             case .yes:
+                if arm.fires >= rule.max_fires {
+                    // Spent: the edge is used up, and nothing fires on it later.
+                    arm.armed = false
+                    break
+                }
                 let cooled = arm.lastFireNs.map { nowNs >= $0 && nowNs - $0 >= rule.cooldown_ms &* 1_000_000 } ?? true
-                if chosen == nil, handFree, arm.armed, arm.fires < rule.max_fires, cooled {
+                if chosen == nil, handFree, arm.armed, cooled {
                     chosen = rule
                     arm.armed = false
                     arm.fires += 1
                     arm.lastFireNs = nowNs
+                    if arm.fires >= rule.max_fires { arm.spentAtNs = nowNs }
+                    fires += 1
                 }
             }
             arms[rule.id] = arm
         }
-        return chosen
+        return Read(fired: chosen, renewed: renewed)
     }
 }
 
@@ -421,18 +477,21 @@ public enum ReflexMacros {
 
 extension ReflexActionLease {
     /// A lease for one leaf action, issued from the frame it was decided on:
-    /// no longer than the table's `max_lease_ns`, its target proof no longer
-    /// than that frame's `max_frame_age_ns`. The kernel invents no time.
+    /// no longer than the table's `max_lease_ns` nor past the run's deadline,
+    /// its target proof no longer than that frame's `max_frame_age_ns`. The
+    /// kernel invents no time. A lease issued at or after the deadline ends
+    /// where it starts, and so permits nothing.
     static func issue(
         runId: String,
         leaf: ReflexLeaf,
         target: ReflexTarget,
         frame: ReflexFrameFacts,
         nowNs: UInt64,
+        deadlineNs: UInt64,
         children: UInt64,
         limits: ReflexLimits
     ) -> ReflexActionLease {
-        let validUntil = nowNs &+ limits.max_lease_ns
+        let validUntil = min(nowNs &+ limits.max_lease_ns, deadlineNs)
         return ReflexActionLease(
             run_id: runId,
             action_id: leaf.actionId,
@@ -534,62 +593,83 @@ public struct ReflexReceipt: Equatable, Sendable {
     public let events: UInt64
 }
 
-/// The receipts a run keeps until the window reads them: bounded by the
-/// window's table, and never a wait. The hand offers a receipt and goes on; a
-/// full queue refuses the next action instead of blocking the one in flight
-/// or any release (realtime v1 §5.8).
+/// The receipts a run keeps until the window has them on disk (realtime v1
+/// §5.8): each numbered in the run's own order, handed to one reader as often
+/// as it asks after the last number it holds, and let go only when that
+/// reader acknowledges a number it wrote — so an answer lost on the way, or a
+/// write that failed, reads the same receipts again, never fewer. Bounded by
+/// the window's table and never a wait: the hand offers a receipt and goes on,
+/// and a queue the reader left full ends the run rather than the receipts
+/// (`ReflexSession`), with nothing it holds waiting on this lock.
 public final class ReflexReceipts: @unchecked Sendable {
+    public struct Entry: Equatable, Sendable {
+        /// The receipt's place in its run, from 1.
+        public let seq: UInt64
+        public let receipt: ReflexReceipt
+    }
+
     private let lock = NSLock()
     public let capacity: Int
-    private var queue: [ReflexReceipt] = []
-    private var refusedActions: UInt64 = 0
+    private var queue: [Entry] = []
+    private var issued: UInt64 = 0
+    private var acknowledged: UInt64 = 0
 
     public init(capacity: Int) {
         self.capacity = max(0, capacity)
     }
 
+    /// Whether one more receipt fits beside the ones not yet acknowledged.
     public var hasRoom: Bool {
         lock.lock()
         defer { lock.unlock() }
         return queue.count < capacity
     }
 
-    /// Keep one receipt if there is room; never waits.
+    /// Keep one receipt if there is room, numbered next; never waits.
     @discardableResult
-    public func offer(_ receipt: ReflexReceipt) -> Bool {
+    public func offer(_ receipt: ReflexReceipt) -> UInt64? {
         lock.lock()
         defer { lock.unlock() }
-        guard queue.count < capacity else { return false }
-        queue.append(receipt)
-        return true
+        guard queue.count < capacity else { return nil }
+        issued += 1
+        queue.append(Entry(seq: issued, receipt: receipt))
+        return issued
     }
 
-    /// An action that did not start for want of room.
-    public func noteRefused() {
-        lock.lock()
-        refusedActions += 1
-        lock.unlock()
-    }
-
-    /// The oldest receipts, up to `limit`, handed to the reader.
-    public func drain(limit: Int) -> [ReflexReceipt] {
+    /// The kept receipts numbered after `after`, oldest first, up to `limit`:
+    /// read, not taken — the same ones come back until they are acknowledged.
+    public func read(after: UInt64, limit: Int) -> [Entry] {
         lock.lock()
         defer { lock.unlock() }
-        let taken = Array(queue.prefix(max(0, limit)))
-        queue.removeFirst(taken.count)
-        return taken
+        return Array(queue.lazy.filter { $0.seq > after }.prefix(max(0, limit)))
     }
 
+    /// The reader has every receipt through `through` on disk: they are let go
+    /// of. A number past the last one issued acknowledges only what was issued.
+    /// Answers how many were let go of now.
+    @discardableResult
+    public func acknowledge(through: UInt64) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let upTo = min(through, issued)
+        let before = queue.count
+        queue.removeAll { $0.seq <= upTo }
+        acknowledged = max(acknowledged, upTo)
+        return before - queue.count
+    }
+
+    /// Receipts kept and not yet acknowledged.
     public var pending: Int {
         lock.lock()
         defer { lock.unlock() }
         return queue.count
     }
 
-    public var refused: UInt64 {
+    /// The last number issued, and the last acknowledged.
+    public var numbers: (issued: UInt64, acknowledged: UInt64) {
         lock.lock()
         defer { lock.unlock() }
-        return refusedActions
+        return (issued, acknowledged)
     }
 }
 
@@ -616,6 +696,8 @@ struct ReflexLeafRunner {
     let fenceNs: UInt64
     /// What the run may act on (`ReflexInputBoundary`).
     let boundary: any ReflexInputBoundary
+    /// The run's one deadline: no lease outlives it.
+    let deadlineNs: UInt64
 
     private struct Draft {
         let leaf: ReflexLeaf
@@ -662,6 +744,8 @@ struct ReflexLeafRunner {
     }
 
     private func perform(_ leaf: ReflexLeaf, _ draft: inout Draft) throws {
+        // At the run's deadline no lease could hold: nothing is admitted.
+        guard hand.nowNs() < deadlineNs else { throw Halt.outcome(.lease) }
         try admitOnce()
         draft.admittedHostNs = hand.nowNs()
         guard let seen = sightings.latest(), case let (sighting, target)? = seen.sighting(of: leaf.detector)
@@ -679,7 +763,7 @@ struct ReflexLeafRunner {
         let presses: UInt64 = leaf.kind == .click ? 2 : 0
         var lease = ReflexActionLease.issue(
             runId: runId, leaf: leaf, target: target, frame: source,
-            nowNs: issuedNs, children: UInt64(path.count) + presses, limits: limits
+            nowNs: issuedNs, deadlineNs: deadlineNs, children: UInt64(path.count) + presses, limits: limits
         )
         draft.targetId = lease.target_id
         draft.sourceCapture = source.capture_seq
@@ -923,7 +1007,8 @@ public protocol ReflexInputBoundary: Sendable {
 
 /// Why a run paused or ended on its own, in the words its status reports. A
 /// hold the hand took back by itself says the hand's own reason
-/// (`HoldRevocation`).
+/// (`HoldRevocation`); a run the operator's ledger refused to renew says the
+/// ledger's (`StopReason`).
 public enum ReflexRunReason {
     /// Someone else's input was heard.
     public static let externalInput = "external_input"
@@ -931,6 +1016,63 @@ public enum ReflexRunReason {
     public static let monitorInterrupted = "monitor_interrupted"
     /// The run could not start.
     public static let startFailed = "start_failed"
+    /// The run's one deadline came (`ReflexRunPolicy.run_ns`).
+    public static let deadline = "deadline"
+    /// The receipts nobody acknowledged filled the queue: the run ends rather
+    /// than act with nowhere to keep what it did.
+    public static let overflow = "overflow"
+    /// A renewal found the window's guard table missing from the ledger.
+    public static let noGuardTable = "no_guard_table"
+}
+
+// MARK: - The run's deadline
+
+/// Rings once at a host time on a thread of its own — never the evaluator's,
+/// the hand's, a frame source's or a receipt reader's — so a run's deadline
+/// lets go of what the run holds whatever else has stalled.
+public protocol ReflexAlarm: Sendable {
+    /// Ring `ring` once at `atNs` on the host clock (a time already past rings
+    /// at once); the bell cancels a ring that has not come.
+    func set(atNs: UInt64, ring: @escaping @Sendable () -> Void) -> any ReflexAlarmBell
+}
+
+public protocol ReflexAlarmBell: Sendable {
+    func cancel()
+}
+
+/// The platform's alarm: a strict dispatch timer on a user-interactive queue of
+/// its own, on the host uptime clock the hand keeps (`HostUptimeClock`).
+public struct DispatchAlarm: ReflexAlarm {
+    private static let queue = DispatchQueue(label: "dev.zerocode.computer-use.reflex-deadline", qos: .userInteractive)
+
+    public init() {}
+
+    public func set(atNs: UInt64, ring: @escaping @Sendable () -> Void) -> any ReflexAlarmBell {
+        let timer = DispatchSource.makeTimerSource(flags: .strict, queue: Self.queue)
+        let bell = DispatchBell(timer: timer)
+        timer.schedule(deadline: DispatchTime(uptimeNanoseconds: atNs), leeway: .nanoseconds(0))
+        timer.setEventHandler { [bell] in
+            bell.cancel()
+            ring()
+        }
+        timer.resume()
+        return bell
+    }
+}
+
+private final class DispatchBell: ReflexAlarmBell, @unchecked Sendable {
+    private let lock = NSLock()
+    private var timer: DispatchSourceTimer?
+
+    init(timer: DispatchSourceTimer) { self.timer = timer }
+
+    func cancel() {
+        lock.lock()
+        let timer = self.timer
+        self.timer = nil
+        lock.unlock()
+        timer?.cancel()
+    }
 }
 
 /// A run of one validated plan on the hand (realtime v1 §4): an evaluating
@@ -938,7 +1080,10 @@ public enum ReflexRunReason {
 /// rule; a hand thread runs its leaves. The run holds the hand from start to
 /// end — no request posts in between — and pauses, letting go of what it
 /// held, when anyone else's input is heard, the monitor stops hearing or the
-/// hand takes its hold back.
+/// hand takes its hold back. It ends at its one deadline, set when the helper
+/// first accepted it, on an alarm of its own; when the receipts nobody
+/// acknowledged fill their queue; and when a renewal finds the operator's
+/// ledger no longer admitting — letting go of what it held first each time.
 public final class ReflexSession: @unchecked Sendable {
     public enum State: Equatable, Sendable {
         case starting
@@ -947,22 +1092,48 @@ public final class ReflexSession: @unchecked Sendable {
         case stopped(String)
     }
 
-    /// What a run is started with: the plan the helper validated and the two tables the
-    /// window sent with it, as they came — the run keeps no number of its own.
+    /// What a run is started with: the plan the helper validated, the two tables the
+    /// window sent with it and the run's own policy, as they came — the run keeps no
+    /// number of its own — and its one deadline on the host clock.
     public struct Settings: Sendable {
         public let runId: String
         public let plan: ValidatedReflexPlan
         public let limits: ReflexLimits
         public let perception: PerceptionLimits
         public let planEpoch: UInt64
+        public let policy: ReflexRunPolicy
+        public let deadlineNs: UInt64
 
-        public init(runId: String, plan: ValidatedReflexPlan, limits: ReflexLimits, perception: PerceptionLimits, planEpoch: UInt64) {
+        public init(runId: String, plan: ValidatedReflexPlan, limits: ReflexLimits, perception: PerceptionLimits, planEpoch: UInt64,
+                    policy: ReflexRunPolicy, deadlineNs: UInt64) {
             self.runId = runId
             self.plan = plan
             self.limits = limits
             self.perception = perception
             self.planEpoch = planEpoch
+            self.policy = policy
+            self.deadlineNs = deadlineNs
         }
+    }
+
+    /// One detector's newest admissible word, as a status says it: a value or
+    /// why it is unknown, the track it points at, and how old its frame is.
+    public struct Sighting: Equatable, Sendable {
+        public let detector: String
+        public let value: Int64?
+        public let unknown: ReflexUnknown?
+        public let track: UInt64?
+        public let ageNs: UInt64
+    }
+
+    /// Where the newest evaluated frame came from — the eye's stream and
+    /// geometry, the run's hold on the hand and its plan: a reading of the run
+    /// is about this scene, and a newer capture of it is the same scene.
+    public struct Scene: Equatable, Sendable {
+        public let stream: UInt64
+        public let geometry: UInt64
+        public let owner: UInt64
+        public let plan: UInt64
     }
 
     public struct Status: Equatable, Sendable {
@@ -970,6 +1141,8 @@ public final class ReflexSession: @unchecked Sendable {
         public let runId: String
         public let planHash: String
         public let planEpoch: UInt64
+        public let policy: ReflexRunPolicy
+        public let deadlineNs: UInt64
         public let framesEvaluated: UInt64
         public let framesUnread: UInt64
         /// Newer captures the run refused (not ready, time unknown or earlier,
@@ -977,9 +1150,18 @@ public final class ReflexSession: @unchecked Sendable {
         public let framesRefused: UInt64
         public let inadmissible: UInt64
         public let fires: UInt64
+        public let renewals: UInt64
         public let leaves: UInt64
+        /// Receipts kept and not yet acknowledged, and the last number issued
+        /// and acknowledged (`ReflexReceipts`).
         public let receiptsPending: Int
-        public let actionsRefused: UInt64
+        public let receiptsIssued: UInt64
+        public let receiptsAcknowledged: UInt64
+        /// How many leaves ended each way, by `ReflexReceipt.Outcome`.
+        public let outcomes: [String: UInt64]
+        /// The newest evaluated frame's admissible sightings, in plan order.
+        public let sightings: [Sighting]
+        public let scene: Scene?
         public let lastCapture: UInt64?
         public let lastCaptureAgeNs: UInt64?
         public let monitor: InputMonitorHealth
@@ -994,13 +1176,21 @@ public final class ReflexSession: @unchecked Sendable {
     private let kernel: any ReflexPerceptionKernel
     private let monitor: any ReflexInputMonitor
     private let admit: @Sendable () -> GuardAdmission
+    /// The operator's ledger as it stands, read — never counted — when a
+    /// spent quota would come back.
+    private let standing: @Sendable () -> GuardAdmission
     private let fenceNs: UInt64
     private let boundary: any ReflexInputBoundary
+    private let alarm: any ReflexAlarm
+    /// Told once the run ends, whatever ended it, with its reason — after
+    /// what it held was let go of.
+    private let ended: (@Sendable (String) -> Void)?
     public let receipts: ReflexReceipts
     public let sightings = ReflexSightings()
 
     private var state: State = .starting
     private var token: OperatorHand.Token?
+    private var bell: (any ReflexAlarmBell)?
     private var watch = InputWatch()
     private var pendingFire: ReflexRule?
     private var handBusy = false
@@ -1010,7 +1200,10 @@ public final class ReflexSession: @unchecked Sendable {
     private var framesRefused: UInt64 = 0
     private var inadmissible: UInt64 = 0
     private var fires: UInt64 = 0
+    private var renewals: UInt64 = 0
+    private var renewalGaps: [UInt64] = []
     private var leaves: UInt64 = 0
+    private var outcomes: [String: UInt64] = [:]
     private let evaluate = DispatchSemaphore(value: 0)
     private let mail = DispatchSemaphore(value: 0)
     private let echo = DispatchSemaphore(value: 0)
@@ -1023,8 +1216,11 @@ public final class ReflexSession: @unchecked Sendable {
         kernel: any ReflexPerceptionKernel,
         monitor: any ReflexInputMonitor,
         admit: @escaping @Sendable () -> GuardAdmission,
+        standing: @escaping @Sendable () -> GuardAdmission,
         fenceNs: UInt64,
-        boundary: any ReflexInputBoundary
+        boundary: any ReflexInputBoundary,
+        alarm: any ReflexAlarm,
+        ended: (@Sendable (String) -> Void)? = nil
     ) {
         self.settings = settings
         self.hand = hand
@@ -1032,18 +1228,33 @@ public final class ReflexSession: @unchecked Sendable {
         self.kernel = kernel
         self.monitor = monitor
         self.admit = admit
+        self.standing = standing
         self.fenceNs = fenceNs
         self.boundary = boundary
+        self.alarm = alarm
+        self.ended = ended
         receipts = ReflexReceipts(capacity: Int(clamping: settings.limits.max_expanded_actions))
     }
 
-    /// Take the hand, prove the monitor hears, open the kernel's session and
-    /// start both threads. Any failure lets go of the hand and says why; a
-    /// stop that comes while it starts ends it — the start publishes nothing
-    /// and gives the hand back (`ReflexRunError.stoppedWhileStarting`).
+    /// The run's deadline alarm, then: take the hand, prove the monitor hears,
+    /// open the kernel's session and start both threads. Any failure lets go of
+    /// the hand and says why; a stop that comes while it starts ends it — the
+    /// start publishes nothing and gives the hand back
+    /// (`ReflexRunError.stoppedWhileStarting`). A deadline that comes first is
+    /// such a stop.
     public func start() throws {
         try ReflexTable.check(settings.limits)
         let style = try PointerStyle(settings.plan.plan.pointer, limits: settings.limits)
+        let bell = alarm.set(atNs: settings.deadlineNs) { [weak self] in
+            self?.finish(.stopped(ReflexRunReason.deadline))
+        }
+        lock.lock()
+        self.bell = bell
+        lock.unlock()
+        if ending {
+            bell.cancel()
+            throw ReflexRunError.stoppedWhileStarting
+        }
         let token = try hand.acquire(.reflex(settings.runId))
         lock.lock()
         if case .stopped = state {
@@ -1102,10 +1313,15 @@ public final class ReflexSession: @unchecked Sendable {
         }
     }
 
+    /// The class a run's two threads run at: user-interactive, the one R5's
+    /// ABBA measured a tick's tail under 5 ms at (and the hand's events go out
+    /// on the second).
+    public static let threadQuality: QualityOfService = .userInteractive
+
     private func startThreads(token: OperatorHand.Token, style: PointerStyle) throws {
         let settings = self.settings
         let kernel = self.kernel
-        Thread.detachNewThread { [self] in
+        let evaluator = Thread { [self] in
             let perception: any ReflexPerceptionSession
             do {
                 perception = try kernel.session(for: settings.plan, limits: settings.perception)
@@ -1119,6 +1335,9 @@ public final class ReflexSession: @unchecked Sendable {
             started.signal()
             evaluateFrames(perception, token: token)
         }
+        evaluator.qualityOfService = Self.threadQuality
+        evaluator.name = "reflex evaluator"
+        evaluator.start()
         started.wait()
         lock.lock()
         let failure = startFailure
@@ -1137,9 +1356,12 @@ public final class ReflexSession: @unchecked Sendable {
         }
         lock.unlock()
         if stopped { throw ReflexRunError.stoppedWhileStarting }
-        Thread.detachNewThread { [self] in
+        let leaves = Thread { [self] in
             runLeaves(token: token, style: style)
         }
+        leaves.qualityOfService = Self.threadQuality
+        leaves.name = "reflex hand"
+        leaves.start()
         evaluate.signal()
     }
 
@@ -1162,9 +1384,9 @@ public final class ReflexSession: @unchecked Sendable {
         if let token { hand.revoke(token, reason: reason) }
     }
 
-    /// The release first, on this thread; the capture and the monitor are
-    /// torn down after it, so a teardown that hangs never holds a release
-    /// (realtime v1 §5.8).
+    /// The release first, on this thread; the deadline's alarm, the capture and
+    /// the monitor are torn down after it, so a teardown that hangs never holds
+    /// a release (realtime v1 §5.8). Whoever started the run hears it ended.
     private func finish(_ ending: State) {
         lock.lock()
         if case .stopped = state {
@@ -1173,16 +1395,19 @@ public final class ReflexSession: @unchecked Sendable {
         }
         state = ending
         let token = self.token
+        let bell = self.bell
         lock.unlock()
         if let token {
             if case let .stopped(reason) = ending { hand.revoke(token, reason: reason) }
             hand.relinquish(token)
         }
+        bell?.cancel()
         evaluate.signal()
         mail.signal()
         echo.signal()
         source.onCapture(nil)
         monitor.stop()
+        if case let .stopped(reason) = ending { self.ended?(reason) }
     }
 
     private func heard(_ origin: InputOrigin) {
@@ -1216,6 +1441,11 @@ public final class ReflexSession: @unchecked Sendable {
         return state == .running && watch.permitsActing
     }
 
+    /// Whether the run may act at `now`: running, hearing, and before its deadline.
+    private func acting(at now: UInt64) -> Bool {
+        now < settings.deadlineNs && acting
+    }
+
     // MARK: the evaluating thread
 
     /// The newest frame, read once: the same capture taken again is no news;
@@ -1226,7 +1456,7 @@ public final class ReflexSession: @unchecked Sendable {
     /// frame's age has passed, so a source that went quiet is noticed.
     private func evaluateFrames(_ perception: any ReflexPerceptionSession, token: OperatorHand.Token) {
         var cursor = ReflexFrameCursor()
-        var book = ReflexRuleBook(settings.plan)
+        var book = ReflexRuleBook(settings.plan, policy: settings.policy)
         let detectors = Dictionary(settings.plan.plan.detectors.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let clock: @Sendable () -> UInt64 = { [hand] in hand.nowNs() }
         let look = DispatchTimeInterval.nanoseconds(Int(clamping: settings.limits.max_frame_age_ns))
@@ -1278,20 +1508,47 @@ public final class ReflexSession: @unchecked Sendable {
             sightings.publish(ReflexSightings.Seen(frame: facts, byDetector: byDetector))
             hand.wake()
             let values = byDetector.compactMapValues(\.value)
+            let now = hand.nowNs()
             lock.lock()
             framesEvaluated += 1
             if !read { framesUnread += 1 }
             inadmissible += refused
-            let free = !handBusy && pendingFire == nil && state == .running && watch.permitsActing
+            let free = !handBusy && pendingFire == nil && state == .running && watch.permitsActing && now < settings.deadlineNs
             lock.unlock()
-            if let rule = book.read(streamEpoch: facts.stream_epoch, captureSeq: facts.capture_seq, values: values, nowNs: hand.nowNs(), handFree: free) {
-                lock.lock()
+            let outcome = book.read(streamEpoch: facts.stream_epoch, captureSeq: facts.capture_seq, values: values, nowNs: now,
+                                    handFree: free, renewal: { mayRenew(token) })
+            lock.lock()
+            renewals += UInt64(outcome.renewed.count)
+            renewalGaps.append(contentsOf: outcome.renewed.map(\.spentForNs))
+            if let rule = outcome.fired {
                 pendingFire = rule
                 fires += 1
-                lock.unlock()
-                mail.signal()
             }
+            lock.unlock()
+            if outcome.fired != nil { mail.signal() }
         }
+    }
+
+    /// Whether spent quotas may come back now (`ReflexRuleBook`): the run acts,
+    /// still holds the hand and is before its deadline, and the operator's
+    /// ledger — read, never counted — still admits. A renewal changes nothing
+    /// else: each new leaf is admitted once like any action, and the session
+    /// count, a stop and a release left unconfirmed stand. A ledger that no
+    /// longer admits ends the run: a renewal that fails grants nothing more.
+    private func mayRenew(_ token: OperatorHand.Token) -> Bool {
+        guard acting(at: hand.nowNs()), hand.refusal(for: token) == nil else { return false }
+        switch standing() {
+        case .admitted, .wait:
+            // A stop, a pause or the deadline that came while the ledger was read wins.
+            return acting(at: hand.nowNs())
+        case let .stopped(reason):
+            finish(.stopped(reason))
+        case .sessionBudget:
+            finish(.stopped(StopReason.sessionBudget))
+        case .noBudget:
+            finish(.stopped(ReflexRunReason.noGuardTable))
+        }
+        return false
     }
 
     /// A newer capture refused, or the frames stopped: nothing seen before is
@@ -1309,7 +1566,7 @@ public final class ReflexSession: @unchecked Sendable {
     private func runLeaves(token: OperatorHand.Token, style: PointerStyle) {
         let runner = ReflexLeafRunner(
             runId: settings.runId, hand: hand, token: token, limits: settings.limits, style: style,
-            sightings: sightings, admit: admit, fenceNs: fenceNs, boundary: boundary
+            sightings: sightings, admit: admit, fenceNs: fenceNs, boundary: boundary, deadlineNs: settings.deadlineNs
         )
         var index: UInt64 = 0
         while true {
@@ -1324,9 +1581,16 @@ public final class ReflexSession: @unchecked Sendable {
             let ran = Self.runFire(
                 ReflexMacros.leaves(ruleId: rule.id, macroId: rule.macro_id, in: settings.plan.plan),
                 receipts: receipts,
-                acting: { acting },
+                acting: { acting(at: hand.nowNs()) },
+                overflowed: { finish(.stopped(ReflexRunReason.overflow)) },
                 next: &index,
-                run: runner.run
+                run: { [self] leaf, at in
+                    let receipt = runner.run(leaf, index: at)
+                    lock.lock()
+                    outcomes[receipt.outcome.rawValue, default: 0] += 1
+                    lock.unlock()
+                    return receipt
+                }
             )
             lock.lock()
             leaves += UInt64(ran)
@@ -1352,13 +1616,16 @@ public final class ReflexSession: @unchecked Sendable {
     }
 
     /// One fire's leaves on the hand, in order: a receipt offered after each
-    /// — never a wait on whoever reads them — and no leaf started once the
-    /// receipts have no room, the run stops acting, or a leaf did not finish.
-    /// Answers how many leaves ran.
+    /// — never a wait on whoever reads them — and no leaf started once the run
+    /// stops acting or a leaf did not finish. A queue the reader left full
+    /// ends the run (`overflowed`) before the next leaf starts: nothing acts
+    /// without a place to keep what it did, and freeing a place later does not
+    /// bring the run back. Answers how many leaves ran.
     static func runFire(
         _ fire: [ReflexLeaf],
         receipts: ReflexReceipts,
         acting: () -> Bool,
+        overflowed: () -> Void,
         next index: inout UInt64,
         run: (ReflexLeaf, UInt64) -> ReflexReceipt
     ) -> Int {
@@ -1366,7 +1633,7 @@ public final class ReflexSession: @unchecked Sendable {
         for leaf in fire {
             guard acting() else { break }
             guard receipts.hasRoom else {
-                receipts.noteRefused()
+                overflowed()
                 break
             }
             let receipt = run(leaf, index)
@@ -1378,9 +1645,24 @@ public final class ReflexSession: @unchecked Sendable {
         return ran
     }
 
+    /// How long each spent quota waited to come back, in order.
+    public var renewalGapsNs: [UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return renewalGaps
+    }
+
     public var status: Status {
         let latest = sightings.latest()
         let now = hand.nowNs()
+        let numbers = receipts.numbers
+        let pending = receipts.pending
+        let order = settings.plan.plan.detectors.map(\.id)
+        let age = latest?.frame.captured_host_ns.map { now >= $0 ? now - $0 : 0 } ?? 0
+        let seen: [Sighting] = order.compactMap { id in
+            guard let sighting = latest?.byDetector[id] else { return nil }
+            return Sighting(detector: id, value: sighting.value, unknown: sighting.unknown, track: sighting.target?.track_id, ageNs: age)
+        }
         lock.lock()
         defer { lock.unlock() }
         return Status(
@@ -1388,14 +1670,22 @@ public final class ReflexSession: @unchecked Sendable {
             runId: settings.runId,
             planHash: settings.plan.plan.plan_hash,
             planEpoch: settings.planEpoch,
+            policy: settings.policy,
+            deadlineNs: settings.deadlineNs,
             framesEvaluated: framesEvaluated,
             framesUnread: framesUnread,
             framesRefused: framesRefused,
             inadmissible: inadmissible,
             fires: fires,
+            renewals: renewals,
             leaves: leaves,
-            receiptsPending: receipts.pending,
-            actionsRefused: receipts.refused,
+            receiptsPending: pending,
+            receiptsIssued: numbers.issued,
+            receiptsAcknowledged: numbers.acknowledged,
+            outcomes: outcomes,
+            sightings: seen,
+            scene: latest.map { Scene(stream: $0.frame.stream_epoch, geometry: $0.frame.geometry_epoch,
+                                      owner: $0.frame.owner_epoch, plan: $0.frame.plan_epoch) },
             lastCapture: latest?.frame.capture_seq,
             lastCaptureAgeNs: latest?.frame.captured_host_ns.map { now >= $0 ? now - $0 : 0 },
             monitor: watch.health,

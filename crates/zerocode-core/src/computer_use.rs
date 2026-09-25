@@ -738,6 +738,13 @@ pub const EYE_IDLE_STOP_MS: u64 = 30_000;
 pub const EYE_FIRST_FRAME_MS: u64 = 2_000;
 /// What `watch` waits for: the first repaint, or the screen going still.
 pub const WATCH_UNTIL: &[&str] = &["change", "quiet"];
+/// How often the window reads a live reflex run's receipts, and with them its
+/// status (t-9205). An empirical poll: at 200 actions a minute a second holds
+/// about seven leaves against the helper's queue of
+/// `reflex::LIMITS.max_expanded_actions`. It is not what keeps a receipt:
+/// the helper keeps each one until the window has it on disk and says so, and
+/// a queue the window left full ends the run instead of the receipts.
+pub const REFLEX_COLLECT_MS: u64 = 1_000;
 /// An OCR read of the desktop keeps its last reading where nothing
 /// repainted since (§7.1): what did repaint is read again, snapped out to a
 /// grid of this many points, widened by this margin and by every line it
@@ -1766,6 +1773,16 @@ pub enum ComputerMethod {
     /// on the caller's own `--until` check, on the judgment saying it is
     /// there, on a screen that will not move, or on its step budget.
     Walk,
+    /// A live reflex run (realtime v1, t-9205) — the window's: it reads a
+    /// Flow document's reflex plan, admits it at its door, hands the helper
+    /// the plan with the window's tables and the run's policy, and answers at
+    /// once while the helper's one hand runs the plan until its deadline.
+    ReflexStart,
+    /// Where one reflex run stands (`--run`), and never another's.
+    ReflexStatus,
+    /// End one reflex run (`--run`) and no other; the operator's `stop` ends
+    /// whatever runs.
+    ReflexStop,
 }
 
 /// The provider methods the Windows provider answers today
@@ -1889,6 +1906,9 @@ impl ComputerMethod {
         Self::Watch,
         Self::Batch,
         Self::Walk,
+        Self::ReflexStart,
+        Self::ReflexStatus,
+        Self::ReflexStop,
     ];
 
     /// Where the verb stands on Windows, by the two tables.
@@ -1953,6 +1973,7 @@ impl ComputerMethod {
             Self::ListenStop => Some("listenStop"),
             Self::SoundRead => Some("soundRead"),
             Self::SoundWait | Self::Watch | Self::Batch | Self::Walk => None,
+            Self::ReflexStart | Self::ReflexStatus | Self::ReflexStop => None,
         }
     }
 
@@ -2022,6 +2043,9 @@ impl ComputerMethod {
             Self::Watch => "watch",
             Self::Batch => "batch",
             Self::Walk => "walk",
+            Self::ReflexStart => "reflex-start",
+            Self::ReflexStatus => "reflex-status",
+            Self::ReflexStop => "reflex-stop",
         }
     }
 
@@ -2089,6 +2113,7 @@ impl ComputerMethod {
                 | Self::Batch
                 | Self::RecipeRun
                 | Self::Walk
+                | Self::ReflexStart
         )
     }
 
@@ -2214,6 +2239,9 @@ impl ComputerMethod {
                 | Self::SoundWait
                 | Self::Watch
                 | Self::Batch
+                | Self::ReflexStart
+                | Self::ReflexStatus
+                | Self::ReflexStop
         )
     }
 }
@@ -2787,6 +2815,9 @@ pub fn verb_method(verb: &str) -> Option<ComputerMethod> {
         "sound-wait" => ComputerMethod::SoundWait,
         "watch" => ComputerMethod::Watch,
         "walk" => ComputerMethod::Walk,
+        "reflex-start" => ComputerMethod::ReflexStart,
+        "reflex-status" => ComputerMethod::ReflexStatus,
+        "reflex-stop" => ComputerMethod::ReflexStop,
         "batch" => ComputerMethod::Batch,
         _ => return None,
     })
@@ -2883,14 +2914,13 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
     let json = flags.contains_key("json");
     reject_unknown(method, &flags)?;
     if flags.contains_key("instant")
-        && !crate::computer_use_protocol::reflex::capability(
-            crate::computer_use_protocol::reflex::Surface::MacosDesktop,
+        && let Some(refusal) = crate::computer_use_protocol::reflex::instant_pointer_refusal(
+            crate::computer_use_protocol::reflex::capability(
+                crate::computer_use_protocol::reflex::Surface::MacosDesktop,
+            ),
         )
-        .live_reflex
     {
-        return Err(
-            "unsupported_capability: instant pointer style needs a live reflex provider".into(),
-        );
+        return Err(refusal.into());
     }
     let mut params = Map::new();
 
@@ -2914,6 +2944,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("start", "start"),
         ("end", "end"),
         ("mark", "mark"),
+        ("seconds", "seconds"),
     ] {
         if let Some(value) = optional_non_negative_integer(&flags, flag)? {
             params.insert(key.into(), json!(value));
@@ -2973,6 +3004,8 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("pane", "pane"),
         ("platform", "platform"),
         ("device", "device"),
+        ("flow", "flow"),
+        ("run", "run"),
     ] {
         if let Some(value) = optional_string_allowing_empty(&flags, flag)? {
             params.insert(key.into(), Value::String(value));
@@ -3003,6 +3036,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         (WALK_OVERLAP_FLAG, WALK_OVERLAP_PARAM),
         (WALK_RESCUE_FLAG, WALK_RESCUE_PARAM),
         (WALK_REPLAY_FLAG, WALK_REPLAY_PARAM),
+        ("renew", "renew"),
     ] {
         if flags.contains_key(flag) {
             params.insert(key.into(), Value::Bool(true));
@@ -3375,6 +3409,8 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::Compare => &[
             "json", "baseline", "against", "region", "display", "max-diff",
         ],
+        ComputerMethod::ReflexStart => &["json", "flow", "display", "seconds", "renew"],
+        ComputerMethod::ReflexStatus | ComputerMethod::ReflexStop => &["json", "run"],
     }
 }
 
@@ -3762,6 +3798,39 @@ fn validate(
                 return Err("--until is the text that is on screen when it worked".into());
             }
         }
+        ComputerMethod::ReflexStart => {
+            require(
+                params,
+                "flow",
+                "--flow <a Flow document with its reflex sections>",
+            )?;
+            require(params, "display", "--display N")?;
+            require(params, "seconds", "--seconds N")?;
+            // The seconds become the run policy's nanoseconds here, at the door:
+            // none, too many to count, or past the table's longest run is refused
+            // before anything reaches a helper.
+            let seconds = params.get("seconds").and_then(Value::as_u64).unwrap_or(0);
+            crate::computer_use_protocol::reflex::RunPolicy::for_seconds(seconds, has("renew"))
+                .map_err(|_| {
+                    format!(
+                        "--seconds is a whole number from 1 to {}",
+                        crate::computer_use_protocol::reflex::LIMITS.max_run_ns / 1_000_000_000
+                    )
+                })?;
+        }
+        ComputerMethod::ReflexStatus | ComputerMethod::ReflexStop => {
+            require(params, "run", "--run <run id>")?;
+            if !params
+                .get("run")
+                .and_then(Value::as_str)
+                .is_some_and(crate::computer_use_protocol::reflex::identifier)
+            {
+                return Err(format!(
+                    "--run is 1 to {} of A-Z a-z 0-9 - _, as reflex-start answered it",
+                    crate::computer_use_protocol::reflex::MAX_IDENTIFIER_BYTES
+                ));
+            }
+        }
         ComputerMethod::RecipeSave | ComputerMethod::RecipeShow | ComputerMethod::RecipeRun => {
             for flag in ["start", "end"] {
                 if params.get(flag).and_then(Value::as_u64) == Some(0) {
@@ -4081,6 +4150,15 @@ pub fn usage() -> String {
         "       until --until (a time of day, or N rounds), a stop, a hand on the pointer, or the person's whole turn;",
         "       --arena rehearses the walk against a recorded evidence folder: every step is answered as recorded,",
         "       nothing on a desk moves, and the evidence lands in a folder of its own)",
+        "",
+        "  a live reflex run — a Flow document's reflex plan, run by the helper's one hand until its deadline;",
+        "  macOS only, and only with the live reflex setting on (capabilities and reflex-status say liveReflex",
+        "  {supported, enabled}: whether this Mac and its helper can run one, and whether the setting lets it):",
+        "  zerocode-computer reflex-start --flow <Flow document> --display N --seconds N [--renew] [--json]",
+        "      (answers {runId, state} at once; the run holds the hand, and every verb that acts waits for it to end;",
+        "       --renew gives a rule its max_fires back once they are spent, on a new edge — the deadline never moves)",
+        "  zerocode-computer reflex-status --run <run id> [--json]",
+        "  zerocode-computer reflex-stop --run <run id> [--json]      (the operator's stop ends every run)",
         "",
         "  the ears — the machine's sound, through the screen-recording permission the eyes already hold:",
         "  zerocode-computer listen-start [--app <app>] [--json]      (the whole machine, or one app's sound)",

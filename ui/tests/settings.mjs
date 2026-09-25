@@ -83,6 +83,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "file_pick", setting: "jevFilePick", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "command_guard", setting: "jevCommandGuard", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "tool_text_guard", setting: "jevToolTextGuard", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "reflex_decide", setting: "jevReflexDecide", modes: "off shadow", recommended: "shadow" }),
 ]);
 /* The door's object under `smart` and the one word its folder list may hold
    that is not a folder (`zerocode_core::jev::door::JEV_SETTINGS_KEY`,
@@ -307,6 +308,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "computer_confirm_payment": true,
   "computer_confirm_transfer": true,
   "computer_confirm_delete": true,
+  "computer_live_reflex": false,
   "emulator.keepBooted": true,
   "emulator.prebootLastUsed": true,
   "emulator.idleShutdownMinutes": 30,

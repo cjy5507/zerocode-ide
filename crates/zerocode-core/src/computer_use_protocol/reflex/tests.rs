@@ -88,8 +88,9 @@ fn shared_golden_runs_through_the_real_validator() {
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
-    // R1's 32 cases under v2, and the six v2 adds.
-    assert_eq!(cases.len(), 38);
+    // R1's 32 cases under v2, the six v2 adds, and the identifier bound's
+    // two sides (t-9205).
+    assert_eq!(cases.len(), 40);
     for name in manifest["wire_negative"].as_array().unwrap() {
         let name = name.as_str().unwrap();
         let path = format!(
@@ -324,21 +325,224 @@ fn a_new_frame_keeps_a_lease_but_an_epoch_change_revokes_it() {
     assert!(!lease.permits(&frame, 100, LeaseInput::LeftClick));
 }
 
+/// Live reflex is claimed where a live frame provider feeds a run — the
+/// macOS desktop's eye — and nowhere else: the Windows desktop and the iOS
+/// device have none a run reads, so their rows claim nothing; and no surface
+/// claims an instant pointer (`instant_stays_refused_until_a_helper_reads_it`).
 #[test]
 fn windows_reflex_is_unsupported_without_a_live_frame_provider() {
-    for surface in [
-        Surface::MacosDesktop,
-        Surface::IosDevice,
-        Surface::WindowsDesktop,
+    for (surface, live_reflex) in [
+        (Surface::MacosDesktop, true),
+        (Surface::IosDevice, false),
+        (Surface::WindowsDesktop, false),
     ] {
         assert_eq!(
             capability(surface),
             ReflexCapability {
                 schema_version: VERSION,
-                live_reflex: false
-            }
+                live_reflex,
+                instant_pointer: false,
+            },
+            "{surface:?}"
         );
     }
+}
+
+/// The capability table is one file both sides read: the window compiles
+/// it in and sends its bytes with a start, the helper decodes those bytes
+/// (`ReflexContract.decodeCapabilities`, the Swift half of this test). What
+/// a surface claims is the file's row, and nothing at all under a table
+/// written for another contract or run-policy version.
+#[test]
+fn swift_and_rust_read_one_capability_table() {
+    let file = include_str!("../../../fixtures/reflex-contract/capability.json");
+    assert_eq!(capability_wire(), file.trim_end().as_bytes());
+    assert!(file.ends_with('\n') && !file.trim_end().contains('\n'));
+    let table = decode_capability(capability_wire()).unwrap();
+    assert_eq!(table, capability_table());
+    assert_eq!(
+        canonical_json(&serde_json::to_value(table).unwrap()),
+        capability_wire()
+    );
+    assert_eq!(table.contract, VERSION);
+    assert_eq!(table.run_policy, RUN_POLICY_VERSION);
+    let row = |value: &serde_json::Value, surface: &str| SurfaceCapability {
+        live_reflex: value["surfaces"][surface]["live_reflex"].as_bool().unwrap(),
+        instant_pointer: value["surfaces"][surface]["instant_pointer"]
+            .as_bool()
+            .unwrap(),
+    };
+    let raw: serde_json::Value = serde_json::from_str(file).unwrap();
+    for (surface, name) in [
+        (Surface::MacosDesktop, "macos_desktop"),
+        (Surface::IosDevice, "ios_device"),
+        (Surface::WindowsDesktop, "windows_desktop"),
+    ] {
+        let claimed = row(&raw, name);
+        assert_eq!(table.surface(surface), claimed, "{name}");
+        assert_eq!(
+            capability(surface),
+            ReflexCapability {
+                schema_version: VERSION,
+                live_reflex: claimed.live_reflex,
+                instant_pointer: claimed.instant_pointer,
+            },
+            "{name}"
+        );
+    }
+    // A table that claims everything, written for another contract or run
+    // policy, claims nothing here.
+    let everything = SurfaceCapability {
+        live_reflex: true,
+        instant_pointer: true,
+    };
+    let generous = CapabilityTable {
+        surfaces: CapabilitySurfaces {
+            ios_device: everything,
+            macos_desktop: everything,
+            windows_desktop: everything,
+        },
+        ..table
+    };
+    assert!(capability_in(&generous, Surface::WindowsDesktop).live_reflex);
+    for stale in [
+        CapabilityTable {
+            contract: VERSION + 1,
+            ..generous
+        },
+        CapabilityTable {
+            run_policy: RUN_POLICY_VERSION + 1,
+            ..generous
+        },
+    ] {
+        for surface in [
+            Surface::MacosDesktop,
+            Surface::IosDevice,
+            Surface::WindowsDesktop,
+        ] {
+            let claimed = capability_in(&stale, surface);
+            assert!(!claimed.live_reflex && !claimed.instant_pointer);
+        }
+    }
+    // Only the canonical bytes with every field known are read.
+    let text = std::str::from_utf8(capability_wire()).unwrap();
+    for bad in [
+        format!(" {text}"),
+        text.replacen("{\"contract\"", "{\"a_claim\":true,\"contract\"", 1),
+        text.replacen("\"instant_pointer\":false,", "", 1),
+        text.replacen("\"contract\":2,", "", 1),
+    ] {
+        assert_eq!(
+            decode_capability(bad.as_bytes()).unwrap_err(),
+            ReflexError::Wire,
+            "{bad}"
+        );
+    }
+}
+
+/// `--instant` asks the helper's verbs for an instant pointer, which is the
+/// table's `instant_pointer` column and nothing else: a surface that runs
+/// live reflex plans has not thereby learnt to glide its verbs' pointer
+/// instantly (the helper does not read the flag), so the flag stays refused
+/// until a helper reads it and its row says so.
+#[test]
+fn instant_stays_refused_until_a_helper_reads_it() {
+    let runs_plans = ReflexCapability {
+        schema_version: VERSION,
+        live_reflex: true,
+        instant_pointer: false,
+    };
+    assert!(
+        instant_pointer_refusal(runs_plans)
+            .is_some_and(|why| why.contains("unsupported_capability"))
+    );
+    assert_eq!(
+        instant_pointer_refusal(ReflexCapability {
+            live_reflex: false,
+            instant_pointer: true,
+            ..runs_plans
+        }),
+        None
+    );
+    assert!(!capability(Surface::MacosDesktop).instant_pointer);
+    let words = |parts: &[&str]| {
+        parts
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect::<Vec<_>>()
+    };
+    for command in [
+        words(&["mouse-move", "--x", "1", "--y", "2", "--instant"]),
+        words(&["mouse-click", "--x", "1", "--y", "2", "--instant"]),
+    ] {
+        assert_eq!(
+            crate::computer_use::parse_command(&command).unwrap_err(),
+            instant_pointer_refusal(capability(Surface::MacosDesktop)).unwrap()
+        );
+    }
+    assert!(
+        crate::computer_use::parse_command(&words(&["mouse-move", "--x", "1", "--y", "2"])).is_ok()
+    );
+}
+
+/// A run's policy is decoded the same way on both sides, from the shared
+/// cases: canonical bytes, an integer version this contract names, its three
+/// fields exactly, and a length the table allows.
+#[test]
+fn shared_run_policy_cases_run_through_the_real_decoder() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/reflex-contract/run_policy_cases.json"
+    ))
+    .unwrap();
+    let mut mismatches = Vec::new();
+    for case in fixture["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let wire = case["wire"].as_str().unwrap().as_bytes();
+        let got = match decode_run_policy(wire) {
+            Ok(policy) => {
+                if policy.wire() != wire {
+                    mismatches.push(format!("{name}: re-encoded wire differs"));
+                }
+                "ok".to_string()
+            }
+            Err(err) => format!("{err:?}").to_lowercase(),
+        };
+        if got != case["expected"].as_str().unwrap() {
+            mismatches.push(format!("{name}: got {got}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    assert_eq!(fixture["cases"].as_array().unwrap().len(), 18);
+}
+
+/// The seconds a start asks for become the policy's nanoseconds at the
+/// window's door: none, too many to count, or more than the table's longest
+/// run are refused there, before anything reaches a helper.
+#[test]
+fn a_run_policy_names_its_seconds_within_the_table() {
+    let longest = LIMITS.max_run_ns / 1_000_000_000;
+    assert_eq!(longest, 120);
+    let policy = RunPolicy::for_seconds(longest, true).unwrap();
+    assert_eq!(
+        policy,
+        RunPolicy {
+            version: RUN_POLICY_VERSION,
+            run_ns: LIMITS.max_run_ns,
+            renew: true
+        }
+    );
+    assert_eq!(decode_run_policy(&policy.wire()), Ok(policy));
+    for seconds in [0, longest + 1, u64::MAX / 1_000_000_000 + 1, u64::MAX] {
+        assert_eq!(
+            RunPolicy::for_seconds(seconds, false),
+            Err(ReflexError::Budget),
+            "{seconds}"
+        );
+    }
+    assert_eq!(
+        RunPolicy::for_seconds(60, false).unwrap().run_ns,
+        60_000_000_000
+    );
 }
 
 #[test]

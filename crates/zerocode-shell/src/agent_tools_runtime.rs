@@ -4718,6 +4718,22 @@ pub(super) fn answer_computer_command(
                 format!("nobody took over within {timeout} ms ({reason})"),
             )),
         }
+    } else if matches!(
+        command.method,
+        ComputerMethod::ReflexStart
+            | ComputerMethod::ReflexStatus
+            | ComputerMethod::ReflexStop
+            | ComputerMethod::Capabilities
+    ) {
+        // A live reflex run is the window's to admit and to watch, and
+        // whether one is supported here and enabled is the window's to say
+        // beside the helper's handshake; the person's setting is read only
+        // when a start, a status or the capabilities ask.
+        computer_use::reflex::answer(&command, || {
+            permission_window.is_some_and(|app| {
+                crate::settings_runtime::computer_live_reflex(app.state::<AppState>().settings())
+            })
+        })
     } else if command.method == ComputerMethod::Compare {
         desktop_compare(&command.params)
     } else if matches!(

@@ -110,6 +110,7 @@ pub(super) mod setting_key {
     pub const COMPUTER_CONFIRM_PAYMENT: &str = "computer_confirm_payment";
     pub const COMPUTER_CONFIRM_TRANSFER: &str = "computer_confirm_transfer";
     pub const COMPUTER_CONFIRM_DELETE: &str = "computer_confirm_delete";
+    pub const COMPUTER_LIVE_REFLEX: &str = "computer_live_reflex";
     pub const OPENCODE_COOKIE_CONFIGURED: &str = "opencode_cookie_configured";
     pub const OPENCODE_WORKSPACE: &str = "opencode_workspace";
     pub const CONFIRM_CLOSE_PINNED: &str = "confirm_close_pinned";
@@ -1796,6 +1797,15 @@ impl SettingsDocument {
     }
 }
 
+/// Whether a live reflex run may start (`computer_live_reflex`), read from the
+/// settings now — the reflex door asks it when a start comes, and nothing
+/// else keeps a copy of it.
+pub(crate) fn computer_live_reflex(repository: &settings::SettingsRepository) -> bool {
+    load_settings_resilient(repository)
+        .document
+        .computer_live_reflex
+}
+
 pub(super) const fn enabled_by_default() -> bool {
     true
 }
@@ -2245,6 +2255,11 @@ pub(super) struct SettingsDocument {
     pub(super) computer_confirm_transfer: bool,
     #[serde(default = "enabled_by_default")]
     pub(super) computer_confirm_delete: bool,
+    /// Whether a live reflex run may start on this desktop (realtime v1,
+    /// t-9205). Off for a person who never chose: a run holds the hand and
+    /// presses at its own pace, so it is theirs to turn on.
+    #[serde(default)]
+    pub(super) computer_live_reflex: bool,
     #[serde(default)]
     pub(super) browser: BrowserPrefs,
     /// Whether the emulators this window started stay up when it exits
@@ -2412,6 +2427,7 @@ impl Default for SettingsDocument {
             computer_confirm_payment: true,
             computer_confirm_transfer: true,
             computer_confirm_delete: true,
+            computer_live_reflex: false,
             browser: BrowserPrefs::default(),
             emulator_keep_booted: true,
             emulator_preboot_last_used: true,

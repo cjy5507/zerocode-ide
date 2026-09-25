@@ -19,6 +19,14 @@ pub const HOST_UPTIME_CLOCK: u64 = 1;
 pub const HEADING_REFLEX: &str = "## Reflex";
 pub const HEADING_PERCEPTION: &str = "## Perception";
 pub const HEADING_RULES: &str = "## Rules";
+/// 1: a run's own terms beside its plan — how long it may last and whether a
+/// rule's spent `max_fires` comes back ([`RunPolicy`], t-9205). A start
+/// carries it, and a helper that does not name this version is never sent one.
+pub const RUN_POLICY_VERSION: u32 = 1;
+/// The longest id a plan, a rule, a macro, an action or a run may carry, in
+/// bytes of `[A-Za-z0-9_-]`: the bound every reader of those ids — the plan's
+/// validators, a run's id, a question's state — holds them to.
+pub const MAX_IDENTIFIER_BYTES: usize = 64;
 
 /// The only source of plan limits for the core and its CLI projection. Swift
 /// checks the same values against the shared golden contract before use.
@@ -35,6 +43,10 @@ pub struct ReflexLimits {
     pub max_macro_depth: u64,
     pub max_cooldown_ms: u64,
     pub max_lease_ns: u64,
+    /// The longest one run may be asked to last ([`RunPolicy::run_ns`]):
+    /// twice R4's sixty-second measurement. The deadline is fixed when the
+    /// helper first accepts the start, and nothing lengthens it.
+    pub max_run_ns: u64,
     pub max_scale_part: u64,
     pub max_pointer_duration_ms: u64,
     pub instant_duration_ms: u64,
@@ -61,6 +73,7 @@ pub const LIMITS: ReflexLimits = ReflexLimits {
     max_macro_depth: 8,
     max_cooldown_ms: 60_000,
     max_lease_ns: 1_000_000_000,
+    max_run_ns: 120_000_000_000,
     max_scale_part: 8,
     max_pointer_duration_ms: 1_000,
     instant_duration_ms: 1,
@@ -329,9 +342,12 @@ pub enum ReflexError {
     Perception,
 }
 
-fn identifier(s: &str) -> bool {
+/// Whether `s` is an id this contract carries: 1 to [`MAX_IDENTIFIER_BYTES`]
+/// bytes of `[A-Za-z0-9_-]`.
+#[must_use]
+pub fn identifier(s: &str) -> bool {
     !s.is_empty()
-        && s.len() <= 64
+        && s.len() <= MAX_IDENTIFIER_BYTES
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
@@ -592,18 +608,195 @@ pub fn validate(plan: ReflexPlan) -> Result<ValidatedPlan, ReflexError> {
     Ok(ValidatedPlan(plan))
 }
 
-/// R1 publishes schema support; no platform has a wired live provider yet.
+/// A run's own terms, sent beside its plan with every start (version
+/// [`RUN_POLICY_VERSION`]): the plan and its hash stay what they are.
+///
+/// `run_ns` is how long the run may last from the moment the helper first
+/// accepts the start — one monotonic deadline that no renewal, pause or
+/// answer lengthens. Without `renew` a rule's `max_fires` is its total for
+/// the run, the plan's own meaning. With it a rule whose `max_fires` are
+/// spent gets exactly those back and nothing else: whether it is armed, when
+/// it last fired, the frame read last, a leaf in flight, the kernel's tracks,
+/// the epochs, the evidence taken back, the leases already issued, the
+/// operator's session count and a release left unconfirmed all stand as they
+/// were, and every new leaf is still admitted once like any action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPolicy {
+    pub version: u32,
+    pub run_ns: u64,
+    pub renew: bool,
+}
+
+impl RunPolicy {
+    /// The policy a start asks for: `seconds` of run, renewing or not.
+    ///
+    /// # Errors
+    /// [`ReflexError::Budget`] for no seconds, seconds whose nanoseconds do
+    /// not fit, or more than [`ReflexLimits::max_run_ns`].
+    pub fn for_seconds(seconds: u64, renew: bool) -> Result<Self, ReflexError> {
+        let policy = Self {
+            version: RUN_POLICY_VERSION,
+            run_ns: seconds
+                .checked_mul(1_000_000_000)
+                .ok_or(ReflexError::Budget)?,
+            renew,
+        };
+        policy.check()?;
+        Ok(policy)
+    }
+
+    fn check(&self) -> Result<(), ReflexError> {
+        if self.version != RUN_POLICY_VERSION {
+            return Err(ReflexError::Version);
+        }
+        if self.run_ns == 0 || self.run_ns > LIMITS.max_run_ns {
+            return Err(ReflexError::Budget);
+        }
+        Ok(())
+    }
+
+    /// The policy as a start carries it: canonical JSON, the only form the
+    /// helper reads (`ReflexContract.decodeRunPolicy`).
+    #[must_use]
+    pub fn wire(&self) -> Vec<u8> {
+        canonical_json(&serde_json::to_value(self).expect("an integer policy serializes"))
+    }
+}
+
+/// A run policy as a helper receives it: canonical, of a version this
+/// contract names — an absent one, or another integer, is refused as a
+/// version before any other field is read, and a version that is not an
+/// integer at all as the wire — with exactly its three fields, and a length
+/// the table allows. Pinned for Rust and Swift by `run_policy_cases.json`.
+///
+/// # Errors
+/// [`ReflexError::Wire`], [`ReflexError::Version`] or [`ReflexError::Budget`].
+pub fn decode_run_policy(bytes: &[u8]) -> Result<RunPolicy, ReflexError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ReflexError::Wire)?;
+    if canonical_json(&value) != bytes {
+        return Err(ReflexError::Wire);
+    }
+    match value.get("version") {
+        None => return Err(ReflexError::Version),
+        Some(version) if version.as_u64() == Some(RUN_POLICY_VERSION.into()) => {}
+        Some(version) if version.is_i64() || version.is_u64() => {
+            return Err(ReflexError::Version);
+        }
+        Some(_) => return Err(ReflexError::Wire),
+    }
+    let policy: RunPolicy = serde_json::from_value(value).map_err(|_| ReflexError::Wire)?;
+    policy.check()?;
+    Ok(policy)
+}
+
+/// What one surface may claim: a live reflex run, and an instant pointer on
+/// the helper's own verbs (`--instant`). Two columns, because a helper that
+/// runs plans has not thereby learnt to move its verbs' pointer instantly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceCapability {
+    pub live_reflex: bool,
+    pub instant_pointer: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitySurfaces {
+    pub ios_device: SurfaceCapability,
+    pub macos_desktop: SurfaceCapability,
+    pub windows_desktop: SurfaceCapability,
+}
+
+/// The one capability table (`fixtures/reflex-contract/capability.json`):
+/// each surface's claims, for the plan contract and the run policy it was
+/// written against. The window reads it, sends its bytes to the helper with a
+/// start, and the helper reads the same bytes: a table of another contract or
+/// run-policy version claims nothing on either side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityTable {
+    pub contract: u32,
+    pub run_policy: u32,
+    pub surfaces: CapabilitySurfaces,
+}
+
+impl CapabilityTable {
+    #[must_use]
+    pub const fn surface(&self, surface: Surface) -> SurfaceCapability {
+        match surface {
+            Surface::MacosDesktop => self.surfaces.macos_desktop,
+            Surface::IosDevice => self.surfaces.ios_device,
+            Surface::WindowsDesktop => self.surfaces.windows_desktop,
+        }
+    }
+}
+
+/// The capability table's file, compiled in: the table itself, not a copy.
+const CAPABILITY_FILE: &str = include_str!("../../fixtures/reflex-contract/capability.json");
+
+/// The capability table as the window sends it: the file's canonical bytes.
+#[must_use]
+pub fn capability_wire() -> &'static [u8] {
+    CAPABILITY_FILE.trim_end().as_bytes()
+}
+
+/// A capability table read as the helper reads it: canonical, and every
+/// field known.
+///
+/// # Errors
+/// [`ReflexError::Wire`] for anything else.
+pub fn decode_capability(bytes: &[u8]) -> Result<CapabilityTable, ReflexError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ReflexError::Wire)?;
+    if canonical_json(&value) != bytes {
+        return Err(ReflexError::Wire);
+    }
+    serde_json::from_value(value).map_err(|_| ReflexError::Wire)
+}
+
+/// The table this build carries.
+#[must_use]
+pub fn capability_table() -> CapabilityTable {
+    static TABLE: std::sync::LazyLock<CapabilityTable> = std::sync::LazyLock::new(|| {
+        decode_capability(capability_wire()).expect("the capability table is canonical")
+    });
+    *TABLE
+}
+
+/// What a surface claims, as the one table says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReflexCapability {
     pub schema_version: u32,
     pub live_reflex: bool,
+    pub instant_pointer: bool,
 }
 
 #[must_use]
-pub const fn capability(_surface: Surface) -> ReflexCapability {
+pub fn capability(surface: Surface) -> ReflexCapability {
+    capability_in(&capability_table(), surface)
+}
+
+/// What `table` claims for `surface`: nothing unless it was written for this
+/// contract and this run policy.
+#[must_use]
+pub const fn capability_in(table: &CapabilityTable, surface: Surface) -> ReflexCapability {
+    let current = table.contract == VERSION && table.run_policy == RUN_POLICY_VERSION;
+    let row = table.surface(surface);
     ReflexCapability {
         schema_version: VERSION,
-        live_reflex: false,
+        live_reflex: current && row.live_reflex,
+        instant_pointer: current && row.instant_pointer,
+    }
+}
+
+/// Why `--instant` is refused on the helper's own verbs, or None when it is
+/// not: the table's `instant_pointer` alone decides, never `live_reflex`.
+#[must_use]
+pub const fn instant_pointer_refusal(capability: ReflexCapability) -> Option<&'static str> {
+    if capability.instant_pointer {
+        None
+    } else {
+        Some("unsupported_capability: no helper reads an instant pointer style on its verbs")
     }
 }
 

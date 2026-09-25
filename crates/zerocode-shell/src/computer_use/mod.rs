@@ -46,6 +46,7 @@ pub mod marks;
 pub mod observe;
 pub mod recipe_run;
 pub mod recipes;
+pub mod reflex;
 pub mod report;
 pub(crate) mod screenshot_png;
 pub mod sequence;
