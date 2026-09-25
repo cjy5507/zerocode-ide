@@ -321,8 +321,15 @@ function agentOrbitFocus(view, key) {
   state?.bodies.get(key)?.label?.focus({ preventScroll: true });
 }
 
-/* 무대의 크기가 움직였다 — 숨었다 드러난 판도 여기로 온다(크기 0 → 제 크기). */
+/* 무대의 크기가 움직였다 — 숨었다 드러난 판도 여기로 온다(크기 0 → 제 크기).
+ *
+ * 실시간 지도의 떠나는 문도 이 관찰자가 지난다. 지도는 판이 숨거나 닫히는 것을 카드
+ * 판의 관찰자(`watchAgentGraphSize`)가 크기 0을 들고 오는 것으로 알았는데, 행성계가
+ * 선 판에서 카드 판은 이미 접혀(크기 0) 있어 그 관찰자가 다시 오지 않는다 — 그러면
+ * 닫힌 판에 지도의 시계와 맥박이 남고 돌아온 판이 기준선을 치르지 않는다. 보이는
+ * 판이 행성계일 때 그 소식을 드는 것은 이 관찰자다. */
 function agentOrbitResized(view) {
+  agentGraphLiveSettle();
   const state = agentOrbitStates.get(view);
   if (!state) return;
   const width = state.stage.clientWidth;

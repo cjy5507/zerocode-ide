@@ -27957,9 +27957,14 @@ input[type="search"]::-webkit-search-cancel-button {
   --agent-orbit-nebula: color-mix(in srgb, var(--lane-2) 9%, transparent);
   --agent-orbit-dust: color-mix(in srgb, var(--ink-chalk) 22%, transparent);
   --agent-orbit-halo: var(--surface-well);
-  --agent-orbit-label-height: 20px;
-  --agent-orbit-label-width: 184px;
-  --agent-orbit-label-gap: 4px;
+  /* 라벨의 높이는 누를 자리의 높이다 — 한 칸(`--space-5`)이면 움직이는 과녁도 손에
+   * 잡힌다. 폭은 카드 레인 하나를 넘지 않는다. 먼지 두 겹은 캔버스 모눈의 눈금을
+   * 어긋나게 늘린 것이라 모눈처럼 읽히지 않는다. */
+  --agent-orbit-label-height: var(--space-5);
+  --agent-orbit-label-width: var(--agent-graph-agent-width);
+  --agent-orbit-label-gap: var(--space-1);
+  --agent-orbit-dust-near: calc(var(--agent-graph-grid) * 1.8);
+  --agent-orbit-dust-far: calc(var(--agent-graph-grid) * 3);
   grid-row: 2;
   position: relative;
   min-width: 0;
@@ -27967,8 +27972,12 @@ input[type="search"]::-webkit-search-cancel-button {
   overflow: hidden;
   background:
     radial-gradient(ellipse at 50% 42%, var(--agent-orbit-nebula), transparent 70%),
-    radial-gradient(circle, var(--agent-orbit-dust) 0.6px, transparent 1.2px) 0 0 / 43px 43px,
-    radial-gradient(circle, var(--agent-orbit-dust) 0.5px, transparent 1.1px) 17px 29px / 71px 71px,
+    radial-gradient(circle, var(--agent-orbit-dust) calc(var(--rule-width) * 0.6),
+      transparent calc(var(--rule-width) * 1.2)) 0 0 / var(--agent-orbit-dust-near) var(--agent-orbit-dust-near),
+    radial-gradient(circle, var(--agent-orbit-dust) calc(var(--rule-width) * 0.5),
+      transparent calc(var(--rule-width) * 1.1))
+      calc(var(--agent-orbit-dust-near) * 0.4) calc(var(--agent-orbit-dust-near) * 0.7)
+      / var(--agent-orbit-dust-far) var(--agent-orbit-dust-far),
     var(--surface-well);
   cursor: grab;
   touch-action: none;
@@ -28012,6 +28021,8 @@ input[type="search"]::-webkit-search-cancel-button {
  * 여유를 더한 것 — `agentOrbitLayout`이 적는다), 그 오른쪽에 이름, 그리고 상태
  * 칩(`::after`). 자리는 프레임이 `translate` 하나로 옮긴다. */
 .agent-orbit-label {
+  /* 몸을 덮는 누를 자리의 반지름 — 그리는 손이 적기 전의 자리값. */
+  --orbit-body: var(--space-2);
   position: absolute;
   top: 0;
   left: 0;
@@ -28020,8 +28031,8 @@ input[type="search"]::-webkit-search-cancel-button {
   gap: var(--space-1);
   max-width: var(--agent-orbit-label-width);
   height: var(--agent-orbit-label-height);
-  margin: calc(var(--agent-orbit-label-height) / -2) 0 0 calc(var(--orbit-body, 0px) * -1);
-  padding: 0 var(--space-1) 0 calc(var(--orbit-body, 0px) * 2 + var(--agent-orbit-label-gap));
+  margin: calc(var(--agent-orbit-label-height) / -2) 0 0 calc(var(--orbit-body) * -1);
+  padding: 0 var(--space-1) 0 calc(var(--orbit-body) * 2 + var(--agent-orbit-label-gap));
   border: 0;
   border-radius: var(--radius-pill);
   background: none;
@@ -28045,8 +28056,8 @@ input[type="search"]::-webkit-search-cancel-button {
   overflow: hidden;
   text-overflow: ellipsis;
   text-shadow:
-    0 0 2px var(--agent-orbit-halo),
-    0 0 5px var(--agent-orbit-halo);
+    0 0 calc(var(--rule-width) * 2) var(--agent-orbit-halo),
+    0 0 var(--space-1) var(--agent-orbit-halo);
 }
 
 .agent-orbit-label::after {
@@ -28113,8 +28124,8 @@ input[type="search"]::-webkit-search-cancel-button {
  * 몸을 덮고, 칩은 이름의 바깥쪽에 온다. */
 .agent-orbit-label.is-west {
   flex-direction: row-reverse;
-  margin-left: var(--orbit-body, 0px);
-  padding: 0 calc(var(--orbit-body, 0px) * 2 + var(--agent-orbit-label-gap)) 0 var(--space-1);
+  margin-left: var(--orbit-body);
+  padding: 0 calc(var(--orbit-body) * 2 + var(--agent-orbit-label-gap)) 0 var(--space-1);
   transform: translateX(-100%);
 }
 
@@ -28123,8 +28134,8 @@ input[type="search"]::-webkit-search-cancel-button {
 .agent-orbit-label.is-star {
   flex-direction: column;
   height: auto;
-  margin: calc(var(--orbit-body, 0px) * -1) 0 0;
-  padding: calc(var(--orbit-body, 0px) * 2 + var(--agent-orbit-label-gap)) var(--space-1) 0;
+  margin: calc(var(--orbit-body) * -1) 0 0;
+  padding: calc(var(--orbit-body) * 2 + var(--agent-orbit-label-gap)) var(--space-1) 0;
   transform: translateX(-50%);
   color: var(--ink-chalk);
   font-family: var(--font-display);
