@@ -22,6 +22,7 @@
 
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zerocode_core::branching::{
     BRANCHING_RUBRIC_VERSION, BranchChoice, BranchLook, Candidate, NextStep, Outcome, agreed, ask,
@@ -30,7 +31,7 @@ use zerocode_core::branching::{
 use zerocode_core::computer_use_protocol::marks::legend_line;
 use zerocode_core::guarded::ControlKind;
 use zerocode_core::jev::promote::SEAT_RECORDING;
-use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
+use zerocode_core::jev::summary::{AGREED, AT, BASELINE_AGREED, ELAPSED_MS};
 use zerocode_core::jev::{BRANCHING, BRANCHING_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{ActionChoice, option_of};
 
@@ -102,6 +103,43 @@ const ANSWERED: &str = "answered";
 const USE_SHADOW: &str = Mode::Shadow.key();
 const USE_APPLIED: &str = zerocode_core::jev::ROUTE_USE_APPLIED;
 const USE_FALLBACK: &str = zerocode_core::jev::ROUTE_USE_FALLBACK;
+
+/// A baseline's observation names how it was obtained: an explored
+/// snapshot's movement, or the actual next step. They are never exchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BaselineSource {
+    Explored,
+    Next,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct BaselineObservation {
+    source: BaselineSource,
+    agreed: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BaselineStamp {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    baseline_observation: Option<BaselineObservation>,
+}
+
+fn baseline_observation(row: &Value) -> Option<BaselineObservation> {
+    serde_json::from_value::<BaselineStamp>(row.clone())
+        .ok()?
+        .baseline_observation
+}
+
+fn note_baseline(row: &mut Value, observation: BaselineObservation) {
+    if let Ok(Value::Object(stamp)) = serde_json::to_value(BaselineStamp {
+        baseline_observation: Some(observation),
+    }) && let Some(row) = row.as_object_mut()
+    {
+        row.extend(stamp);
+    }
+}
 
 /// A forked step waiting for the walk's next step to grade it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,6 +418,19 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
         }
         let after = world.look();
         step_ms.push(elapsed_ms(stepping));
+        // The restored fork really tried today's candidate, but it did not
+        // continue its walk. Preserve that movement as an explored observation.
+        if candidate.mark == today
+            && let Some(after) = &after
+        {
+            note_baseline(
+                &mut said,
+                BaselineObservation {
+                    source: BaselineSource::Explored,
+                    agreed: !screen.same_as(after),
+                },
+            );
+        }
         candidate.result = Some(match &after {
             Some(after) => Outcome {
                 moved: !screen.same_as(after),
@@ -478,6 +529,20 @@ pub fn settle(walked: &mut Walked, pending: Option<Pending>, next: NextStep) {
     };
     row[AGREED.canonical] = json!(mark);
     let applied = row["routeUse"] == json!(USE_APPLIED);
+    let today_pressed =
+        row["chosen"] == row["today"] || (!applied && row["outcome"] != json!(RESTORE_FAILED));
+    let baseline = if today_pressed {
+        next.went_on().map(|agreed| BaselineObservation {
+            source: BaselineSource::Next,
+            agreed,
+        })
+    } else {
+        baseline_observation(row)
+    };
+    if let Some(observation) = baseline {
+        note_baseline(row, observation);
+        row[BASELINE_AGREED.canonical] = json!(observation.agreed);
+    }
     row["rescued"] = json!(mark && applied && row["chosen"] != row["today"]);
 }
 

@@ -300,8 +300,9 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
     let ledger_dir = tempfile::tempdir().expect("a ledger");
     let ledger = ledger_dir.path().join(COMPACTION_RELEVANCE_FILE);
     forget_pending(cwd.path());
-    let (row, _) = settle(JevMode::On, true, CompactionRow::new(&ask, 1, COMPACTION_OUTCOME_ANSWERED.to_string()), vec![0, 1]);
-    remember_dropped(cwd.path(), &row, &ask, &[0, 1]);
+    let (mut row, _) = settle(JevMode::On, true, CompactionRow::new(&ask, 1, COMPACTION_OUTCOME_ANSWERED.to_string()), vec![0, 1]);
+    row.shards_answered = row.shards;
+    remember_blocks(cwd.path(), &row, &ask, &[0, 1]);
 
     let turn = |messages: Vec<ConversationMessage>| messages;
     // Turn 1 reads another file: nothing is decided.
@@ -331,7 +332,7 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
     }
     // Turn 5 closes the window: the shell command was never run again.
     assert_eq!(COMPACTION_REGRET_TURNS, 5, "the turns below are the window's");
-    assert_eq!(label_turn(cwd.path(), &ledger, Some(&turn(vec![user_text("done")]))), 1);
+    assert_eq!(label_turn(cwd.path(), &ledger, Some(&turn(vec![user_text("done")]))), 2);
     // And nothing waits any more.
     assert_eq!(label_turn(cwd.path(), &ledger, Some(&turn(vec![
         call("r4", "Bash", r#"{"command":"cargo test"}"#),
@@ -339,7 +340,7 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
     ]))), 0);
 
     let rows: Vec<CompactionLabelRow> = super::super::shadow_ledger::read_shadow_rows(&ledger);
-    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows.len(), 3, "{rows:?}");
     assert_eq!((rows[0].tool.as_str(), rows[0].agreed, rows[0].turns_later), ("Read", false, 2));
     assert_eq!((rows[1].tool.as_str(), rows[1].agreed, rows[1].turns_later), ("Bash", true, 5));
     for label in &rows {
@@ -350,7 +351,7 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
     // Counted as marks: two compared, one agreed.
     let read = super::super::jev_summary::read_rows(&ledger);
     let agreement = zerocode_core::jev::summary::agreement_since(&read, i64::MIN);
-    assert_eq!((agreement.compared, agreement.agreed), (2, 1));
+    assert_eq!((agreement.compared, agreement.agreed), (3, 1));
     assert!(
         read.iter().all(|row| zerocode_core::jev::summary::asked_something(row).is_none()),
         "a label is not a request"
@@ -363,7 +364,7 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
     judged_rows.extend(read.iter().cloned());
     let series = zerocode_core::jev::promote::on_the_newest_version(&zerocode_core::jev::COMPACTION, &judged_rows);
     let marked = zerocode_core::jev::summary::agreement_rows(series.marks.iter().copied(), i64::MIN);
-    assert_eq!((marked.compared, marked.agreed), (2, 1), "{series:?}");
+    assert_eq!((marked.compared, marked.agreed), (3, 1), "{series:?}");
 }
 
 /// The same call made again — not a read, a re-run — is regret too.
@@ -375,8 +376,9 @@ fn the_same_call_made_again_is_regret() {
     let ledger_dir = tempfile::tempdir().expect("a ledger");
     let ledger = ledger_dir.path().join(COMPACTION_RELEVANCE_FILE);
     forget_pending(cwd.path());
-    let (row, _) = settle(JevMode::Shadow, false, CompactionRow::new(&ask, 1, COMPACTION_OUTCOME_ANSWERED.to_string()), vec![1]);
-    remember_dropped(cwd.path(), &row, &ask, &[1]);
+    let (mut row, _) = settle(JevMode::Shadow, false, CompactionRow::new(&ask, 1, COMPACTION_OUTCOME_ANSWERED.to_string()), vec![1]);
+    row.shards_answered = row.shards;
+    remember_blocks(cwd.path(), &row, &ask, &[1]);
     assert_eq!(
         label_turn(cwd.path(), &ledger, Some(&[
             call("r1", "Bash", r#"{"command":"cargo test"}"#),
@@ -669,4 +671,49 @@ fn share(part: usize, whole: usize) -> f64 {
     } else {
         part as f64 * 100.0 / whole as f64
     }
+}
+
+#[test]
+fn compaction_labels_compare_keeping_the_same_block_over_the_same_window() {
+    for (dropped, reread, expected) in [
+        (true, true, (false, Some(true))),
+        (true, false, (true, Some(false))),
+        (false, true, (true, Some(true))),
+        (false, false, (false, Some(false))),
+    ] {
+        let (mut ask, _) = ask_of(&session());
+        ask.blocks.truncate(1);
+        let cwd = tempfile::tempdir().expect("project");
+        let ledger = cwd.path().join(COMPACTION.ledger);
+        let drops: Vec<usize> = if dropped { vec![0] } else { Vec::new() };
+        let (mut row, _) = settle(JevMode::On, true,
+            CompactionRow::new(&ask, 1, COMPACTION_OUTCOME_ANSWERED.into()), drops.clone());
+        row.shards_answered = row.shards;
+        remember_blocks(cwd.path(), &row, &ask, &drops);
+        if reread {
+            label_turn(cwd.path(), &ledger, Some(&[call("r1", "Read", r#"{"path":"/work/src/lib.rs"}"#)]));
+        } else {
+            for _ in 0..COMPACTION_REGRET_TURNS { label_turn(cwd.path(), &ledger, Some(&[])); }
+        }
+        let labels: Vec<CompactionLabelRow> = super::super::shadow_ledger::read_shadow_rows(&ledger);
+        assert_eq!(labels.len(), 1, "every compared block gets its own observation");
+        assert_eq!((labels[0].agreed, labels[0].baseline_agreed), expected);
+    }
+}
+
+#[test]
+fn a_partial_reply_labels_only_the_drops_it_actually_judged() {
+    let (ask, _) = ask_of(&session());
+    let cwd = tempfile::tempdir().expect("project");
+    let ledger = cwd.path().join(COMPACTION.ledger);
+    let mut row = CompactionRow::new(&ask, 2, COMPACTION_OUTCOME_ANSWERED.into());
+    row.shards_answered = 1;
+    remember_blocks(cwd.path(), &row, &ask, &[]);
+    for _ in 0..COMPACTION_REGRET_TURNS { label_turn(cwd.path(), &ledger, Some(&[])); }
+    let labels: Vec<CompactionLabelRow> = super::super::shadow_ledger::read_shadow_rows(&ledger);
+    assert!(labels.is_empty(), "a failed shard's untouched blocks were graded as Jev keeps: {labels:?}");
+    remember_blocks(cwd.path(), &row, &ask, &[0]);
+    for _ in 0..COMPACTION_REGRET_TURNS { label_turn(cwd.path(), &ledger, Some(&[])); }
+    let labels: Vec<CompactionLabelRow> = super::super::shadow_ledger::read_shadow_rows(&ledger);
+    assert_eq!(labels.len(), 1, "a validated drop is still comparable");
 }

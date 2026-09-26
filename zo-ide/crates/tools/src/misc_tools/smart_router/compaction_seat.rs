@@ -29,11 +29,12 @@
 //!
 //! # The label is hindsight
 //!
-//! One label row per dropped block, written by [`note_compaction_reread`] at
-//! a turn's end: `agreed: false` the turn a dropped block's path was read
-//! again or its call made again — the seat's regret — and `agreed: true`
-//! once [`COMPACTION_REGRET_TURNS`] turns have passed without either. The
-//! judge counts those rows as this seat's agreement
+//! One label per judged block, written by [`note_compaction_reread`]: a
+//! reread inside [`COMPACTION_REGRET_TURNS`] agrees with keeping the block,
+//! and no reread over the whole window agrees with dropping it. The prepared
+//! summary's baseline keeps the same block, so `baselineAgreed` is decided
+//! from that same observation. These are hindsight proxies, not independent
+//! relevance gold. The judge counts those rows as this seat's agreement
 //! (`zerocode_core::jev::summary::AGREED`), which is what `auto` rises on.
 
 use std::collections::HashMap;
@@ -190,8 +191,8 @@ fn judged_key(ask: &CompactionAsk) -> u64 {
     task_fingerprint(&ask.goal, &ids.join("\u{1f}"))
 }
 
-/// One dropped block's hindsight, as the ledger keeps it: whether the turns
-/// after the compaction went back for it. Shaped like the recall seat's label
+/// One judged block's hindsight: whether the turns after compaction went
+/// back for it. Shaped like the recall seat's label
 /// (`rerank_shadow::RerankLabelRow`): the row it grades under `label`, the
 /// mark under `agreed`, and `applied` from the row so an applied drop and a
 /// recorded one are compared on the same mark.
@@ -202,14 +203,20 @@ pub struct CompactionLabelRow {
     pub at: u64,
     /// The row this grades — its `judged` fingerprint, spelled as text.
     pub label: String,
-    /// Fingerprint of the dropped block's call (its tool and input).
+    /// Fingerprint of the judged block's call (its tool and input).
     pub block: u64,
     pub tool: String,
     pub applied: bool,
-    /// `false` is regret: the block was read again inside the window.
+    /// Whether keeping/dropping matched the same window's reread observation.
     pub agreed: bool,
     /// Turns after the compaction at which the label was decided.
     pub turns_later: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The prepared summary keeps this block; a reread agrees with that rule.
+    pub baseline_agreed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The exact compaction being graded, including repeated content keys.
+    pub request_at: Option<u64>,
 }
 
 /// The seat a host installs on the runtime: asked on the runtime's own task
@@ -273,8 +280,8 @@ async fn judge_at(cwd: &Path, ask: &CompactionAsk) -> CompactionJudgment {
     let (row, dropped) = judge(&door, client.as_ref(), ask, acting).await;
     let (row, judgment) = settle(mode, acting, row, dropped);
     let ledger = compaction_relevance_path(cwd);
-    if !judgment.dropped.is_empty() {
-        remember_dropped(cwd, &row, ask, &judgment.dropped);
+    if row.outcome == COMPACTION_OUTCOME_ANSWERED {
+        remember_blocks(cwd, &row, ask, &judgment.dropped);
     }
     let _ = tokio::task::spawn_blocking(move || {
         let written = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES);
@@ -479,27 +486,29 @@ pub fn judge_ledger(ledger: &Path, now_ms: i64) -> Option<promote::Verdict> {
 
 /* ---- the label: what the turns after went back for ------------------------- */
 
-/// One dropped block, as the label waits on it: the call that produced it,
+/// One candidate block, as the label waits on it: the call that produced it,
 /// so a later turn making the same call or reading the same path is caught.
 #[derive(Debug, Clone)]
-struct Dropped {
+struct ObservedBlock {
     block: u64,
     tool: String,
     path: Option<String>,
+    proposed_drop: bool,
 }
 
-/// One compaction's drops, waiting on the turns after it.
+/// One compaction's candidates, waiting on the turns after it.
 #[derive(Debug, Clone)]
 struct Pending {
     label: String,
+    request_at: u64,
     applied: bool,
     turns_seen: u32,
-    blocks: Vec<Dropped>,
+    blocks: Vec<ObservedBlock>,
 }
 
 type PendingBook = HashMap<PathBuf, Vec<Pending>>;
 
-/// The drops still waiting on their window, per project. In memory and not
+/// The judged blocks still waiting on their window, per project. In memory and not
 /// on disk, for the reason the other seats' books are: the mark is whether
 /// THIS session's next turns went back for what THIS compaction dropped,
 /// and a compaction read back off a ledger row could be another session's.
@@ -516,15 +525,19 @@ fn call_key(tool: &str, input: &str) -> u64 {
     task_fingerprint(tool, input)
 }
 
-fn remember_dropped(cwd: &Path, row: &CompactionRow, ask: &CompactionAsk, dropped: &[usize]) {
-    let blocks: Vec<Dropped> = ask
+fn remember_blocks(cwd: &Path, row: &CompactionRow, ask: &CompactionAsk, dropped: &[usize]) {
+    let blocks: Vec<ObservedBlock> = ask
         .blocks
         .iter()
-        .filter(|block| dropped.contains(&block.position))
-        .map(|block| Dropped {
+        // A failed shard kept its blocks by fallback, not by judgment. The
+        // drop list identifies validated decisions even on a partial reply;
+        // keeps are comparable only when every shard answered.
+        .filter(|block| row.shards_answered == row.shards || dropped.contains(&block.position))
+        .map(|block| ObservedBlock {
             block: call_key(&block.tool_name, &block.input),
             tool: block.tool_name.clone(),
             path: read_path(&block.tool_name, &block.input),
+            proposed_drop: dropped.contains(&block.position),
         })
         .collect();
     if blocks.is_empty() {
@@ -533,6 +546,7 @@ fn remember_dropped(cwd: &Path, row: &CompactionRow, ask: &CompactionAsk, droppe
     if let Ok(mut book) = pending().lock() {
         book.entry(cwd.to_path_buf()).or_default().push(Pending {
             label: row.judged.to_string(),
+            request_at: row.at,
             applied: row.applied,
             turns_seen: 0,
             blocks,
@@ -573,10 +587,10 @@ fn went_back_for(turn: &[ConversationMessage]) -> (Vec<String>, Vec<u64>) {
 
 /// Write this seat's hindsight for the turn that just ended, judged on
 /// `turn` — the messages the turn appended, already in memory — against
-/// every compaction of `cwd`'s still inside its window. A dropped block the
-/// turn read again (its path, or its call) is labeled `agreed: false` now;
-/// the rest are labeled `agreed: true` once [`COMPACTION_REGRET_TURNS`]
-/// turns have passed. `None` is a cancelled turn, which is not a turn of the
+/// every compaction still inside its window. A reread closes the observation
+/// now: keeping agrees and dropping disagrees. Otherwise the full
+/// [`COMPACTION_REGRET_TURNS`] window closes it: dropping agrees and keeping
+/// disagrees. The baseline keeps the same block over the same window. `None` is a cancelled turn, which is not a turn of the
 /// window and writes nothing. Answers how many label rows were written.
 #[must_use]
 pub fn note_compaction_reread(cwd: &Path, turn: Option<&[ConversationMessage]>) -> usize {
@@ -614,8 +628,10 @@ fn label_turn(cwd: &Path, ledger: &Path, turn: Option<&[ConversationMessage]>) -
                     block: dropped.block,
                     tool: dropped.tool.clone(),
                     applied: compaction.applied,
-                    agreed: !regretted,
+                    agreed: dropped.proposed_drop != regretted,
                     turns_later,
+                    baseline_agreed: Some(regretted),
+                    request_at: Some(compaction.request_at),
                 });
             } else {
                 still.push(dropped);
