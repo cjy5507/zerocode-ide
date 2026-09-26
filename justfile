@@ -65,6 +65,7 @@ tools-test:
     python3 tools/tests/test_jev_token_diet_baseline.py
     python3 tools/tests/test_hedge_replay_seed.py
     python3 tools/tests/test_summon_replay_seed.py
+    python3 tools/tests/test_summon_difficulty_replay_seed.py
     python3 tools/tests/test_compaction_replay_seed.py
     python3 tools/tests/test_agent_tool_replay_seed.py
     python3 tools/tests/test_browser_read_replay_seed.py

@@ -98,6 +98,7 @@ pub mod stall_cause;
 pub mod stats_events;
 pub mod step_effort;
 pub mod summon_choice;
+pub mod summon_difficulty;
 pub mod supply_chain;
 pub mod task;
 pub mod transcript;

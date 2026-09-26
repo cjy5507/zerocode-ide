@@ -3,6 +3,16 @@
 use serde_json::json;
 
 use super::*;
+
+#[test]
+fn summon_difficulty_learns_the_pin_against_always_high() {
+    let seat = jev_use("summon_difficulty").expect("a distinct difficulty seat");
+    assert_eq!(seat.agreement_kind, AgreementKind::Comparison);
+    assert_eq!(seat.baseline, Baseline::AlwaysSame("high"));
+    assert_eq!(seat.request_name, &["dispatch"]);
+    assert_eq!(seat.apply_deadline_ms, Some(2_000));
+    assert!(seat.promotes && seat.modes.contains(&JevMode::On));
+}
 use crate::jev::summary;
 
 #[test]
@@ -642,7 +652,7 @@ fn the_placement_seats_line_sits_where_its_negatives_are() {
         Some(PLACEMENT_ANSWER_FLOOR_PERMILLE)
     );
     const { assert!(PLACEMENT_ANSWER_FLOOR_PERMILLE < ORCHESTRATION_ANSWER_FLOOR_PERMILLE) };
-    for row in [STALL, SUMMON, STEP_EFFORT, REFLEX_DECIDE] {
+    for row in [STALL, SUMMON, SUMMON_DIFFICULTY, STEP_EFFORT, REFLEX_DECIDE] {
         assert_eq!(
             row.answer_floor_permille,
             Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
@@ -1623,7 +1633,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 27);
+    assert_eq!(JEV_USES.len(), 28);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1925,7 +1935,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 27);
+    assert_eq!(JEV_USES.len(), 28);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 4), Some(&FILE_PICK));
 }
 
@@ -2893,6 +2903,9 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
                 .expect("two agents are a question")
                 .questions,
             ]
+        }
+        id if id == SUMMON_DIFFICULTY.id => {
+            vec![crate::summon_difficulty::questions()]
         }
         id if id == STEP_EFFORT.id => {
             use crate::step_effort::{Signals, Standing, StepLook, ask};

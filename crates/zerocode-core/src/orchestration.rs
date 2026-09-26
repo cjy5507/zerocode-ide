@@ -7903,6 +7903,7 @@ impl Ledger {
             // placement half is the same: a reseat repeats a placement the
             // person already has on their screen.
             summon_shadow: None,
+            difficulty_shadow: None,
             placement_shadow: None,
             prior_binding,
             prior_binding_revision,
@@ -13521,6 +13522,16 @@ pub trait Launcher {
         None
     }
 
+    /// An acting difficulty request's receipt, or no request while recording.
+    /// This hook is called only when effort was omitted and a model exists.
+    fn choose_difficulty(
+        &self,
+        _look: &crate::summon_difficulty::Look,
+        _origin: [&str; 3],
+    ) -> Option<serde_json::Value> {
+        None
+    }
+
     /// What this machine actually has, one row per agent the catalog knows.
     ///
     /// The ledger cannot look for itself — it reads no `PATH` and stats no
@@ -13849,7 +13860,7 @@ fn family_gauge(model: &str) -> Option<Option<&'static str>> {
 /// codex was offered thirteen times and named none (2026-09-23).
 #[must_use]
 pub fn runs_model(agent: &str, model: &str) -> bool {
-    let takes_a_model = TUNABLE.iter().any(|(id, _, _)| *id == agent);
+    let takes_a_model = TUNABLE.iter().any(|(id, _, _, _)| *id == agent);
     takes_a_model
         && match family_gauge(model) {
             Some(Some(gauge)) => quota_gauge_for(agent, Some(model)) == Some(gauge),
@@ -16046,21 +16057,51 @@ fn command_for_reserved_worker(
 ///
 /// A test pins every id in this table to the agent catalog so the two
 /// registries cannot drift.
-const TUNABLE: &[(&str, &str, Option<EffortRide>)] = &[
+const TUNABLE: &[(&str, &str, Option<EffortRide>, &str)] = &[
     // This project's own harness leads the table, as it does the catalog.
-    ("zo", "--model", Some(EffortRide::Flag("--effort"))),
-    ("claude", "--model", Some(EffortRide::Flag("--effort"))),
+    (
+        "zo",
+        "--model",
+        Some(EffortRide::Flag("--effort")),
+        crate::summon_difficulty::LADDER[2].2,
+    ),
+    (
+        "claude",
+        "--model",
+        Some(EffortRide::Flag("--effort")),
+        crate::summon_difficulty::LADDER[2].2,
+    ),
     (
         "codex",
         "--model",
         Some(EffortRide::ConfigKv("model_reasoning_effort")),
+        crate::summon_difficulty::LADDER[2].2,
     ),
-    ("antigravity", "--model", Some(EffortRide::Flag("--effort"))),
+    (
+        "antigravity",
+        "--model",
+        Some(EffortRide::Flag("--effort")),
+        crate::summon_difficulty::LADDER[1].2,
+    ),
     // Not installed on the machine this table was measured on, so its model
     // flag stands as inherited and it carries no effort ride: refusing a dial
     // nobody has measured beats guessing at its spelling.
-    ("cursor", "--model", None),
+    ("cursor", "--model", None, ""),
 ];
+
+/// Translate the difficulty ladder through the measured launch table.
+/// Its last column is the highest effort this summons ladder may use.
+#[must_use]
+pub fn difficulty_effort(agent: &str, difficulty: &str) -> Option<&'static str> {
+    let (_, _, ride, ceiling) = TUNABLE.iter().find(|(id, _, _, _)| *id == agent)?;
+    ride.as_ref()?;
+    let effort = crate::summon_difficulty::effort(difficulty)?;
+    Some(if effort == crate::summon_difficulty::LADDER[2].2 {
+        ceiling
+    } else {
+        effort
+    })
+}
 
 /// Turn `--model`/`--effort` into the words the agent's own CLI takes.
 ///
@@ -16075,7 +16116,8 @@ fn launch_tuning(
     if model.is_none() && effort.is_none() {
         return Ok(Vec::new());
     }
-    let Some((_, model_flag, effort_ride)) = TUNABLE.iter().find(|(id, _, _)| *id == agent) else {
+    let Some((_, model_flag, effort_ride, _)) = TUNABLE.iter().find(|(id, _, _, _)| *id == agent)
+    else {
         return Err(format!(
             "{agent} does not support launch-time model selection"
         ));
@@ -16122,7 +16164,7 @@ fn launch_tuning_notice(
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Option<&'static str> {
-    let (_, _, effort_ride) = TUNABLE.iter().find(|(id, _, _)| *id == agent)?;
+    let (_, _, effort_ride, _) = TUNABLE.iter().find(|(id, _, _, _)| *id == agent)?;
     match (model.is_none(), effort.is_none() && effort_ride.is_some()) {
         (true, true) => Some("model and effort were not selected; the agent CLI defaults apply"),
         (true, false) => Some("model was not selected; the agent CLI default applies"),
@@ -16155,7 +16197,7 @@ fn agent_row(
     readiness: Option<&crate::readiness::AgentReadinessSnapshot>,
     now_ms: i64,
 ) -> serde_json::Value {
-    let tuning = TUNABLE.iter().find(|(id, _, _)| *id == spec.id);
+    let tuning = TUNABLE.iter().find(|(id, _, _, _)| *id == spec.id);
     let mut row = serde_json::json!({
         "id": spec.id,
         "name": spec.name,
@@ -16164,7 +16206,7 @@ fn agent_row(
         // name takes neither, which is what `launch_tuning` will tell a
         // `worker-start` that tries.
         "takesModel": tuning.is_some(),
-        "takesEffort": tuning.is_some_and(|(_, _, ride)| ride.is_some()),
+        "takesEffort": tuning.is_some_and(|(_, _, ride, _)| ride.is_some()),
     });
     match seen {
         Some(here) => {
@@ -16750,6 +16792,8 @@ pub struct PreparedWorkerStart {
     /// about that. Whether it is asked at all is the shell's to gate, on the
     /// person's switch; nothing here leaves the process.
     pub placement_shadow: Option<PlacementShadow>,
+    /// Difficulty evidence, recorded after this reservation really opens.
+    pub difficulty_shadow: Option<crate::summon_difficulty::Shadow>,
     prior_binding: Option<String>,
     prior_binding_revision: Option<u64>,
     binding_revision: u64,
@@ -19274,6 +19318,7 @@ fn plan_inner(
             } else {
                 (agent, false)
             };
+            let teacher_effort = effort.clone();
             let requested = Pinned {
                 agent: agent.clone(),
                 model,
@@ -19294,6 +19339,47 @@ fn plan_inner(
                 model,
                 effort,
             } = pinned;
+            let difficulty_look = crate::summon_difficulty::Look {
+                title: task
+                    .as_deref()
+                    .and_then(|id| ledger.run(&run_id)?.task(id))
+                    .map_or_else(String::new, |held| held.title.as_str().to_string()),
+                spec: task
+                    .as_deref()
+                    .and_then(|id| ledger.run(&run_id)?.task(id))
+                    .map_or_else(|| asked.to_string(), |held| held.spec.as_str().to_string()),
+                attempt: written.as_ref().map_or(0, |written| written.attempts),
+                failures: written.as_ref().map_or(0, |written| written.failures),
+                retry_of: words.value("--retry-of").is_some(),
+            };
+            // A pin is a teacher, never a candidate for replacement. Remote
+            // summonses leave the decision to the server window.
+            let difficulty_receipt = if teacher_effort.is_none()
+                && effort.is_none()
+                && model.is_some()
+                && words.value("--on").is_none()
+                && !difficulty_look.spec.is_empty()
+                && difficulty_effort(&agent, crate::summon_difficulty::LADDER[0].0).is_some()
+            {
+                launcher.choose_difficulty(
+                    &difficulty_look,
+                    [
+                        &team.id,
+                        pane,
+                        words.value("--retry-request").unwrap_or_default(),
+                    ],
+                )
+            } else {
+                None
+            };
+            let effort = effort.or_else(|| {
+                difficulty_receipt
+                    .as_ref()
+                    .filter(|row| row["applied"].as_bool() == Some(true))
+                    .and_then(|row| row["chosen"].as_str())
+                    .and_then(|chosen| difficulty_effort(&agent, chosen))
+                    .map(str::to_string)
+            });
             // A worker that carries a task is told how to report it, unless
             // somebody asked for a bare one — an operator starting an agent to
             // work with by hand does not want a protocol in its composer.
@@ -19546,6 +19632,12 @@ fn plan_inner(
             // work, and a judgment asked about nothing is a row that says
             // nothing: it gets no question at all.
             let said = Some(summon_brief(written.as_ref(), asked)).filter(|said| !said.is_empty());
+            prepared_worker_start.difficulty_shadow =
+                said.map(|_| crate::summon_difficulty::Shadow {
+                    look: difficulty_look,
+                    teacher_effort,
+                    receipt: difficulty_receipt,
+                });
             prepared_worker_start.summon_shadow = said.map(|words| {
                 let (brief, brief_chars) = crate::summon_choice::brief_shape(words);
                 SummonShadow {

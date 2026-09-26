@@ -32,6 +32,7 @@ pub(crate) mod restart_census;
 mod stall_cause;
 mod step_effort;
 mod summon_choice;
+mod summon_difficulty;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -2778,6 +2779,14 @@ enum HeadroomSource {
 }
 
 impl Launcher for LiveCatalog {
+    fn choose_difficulty(
+        &self,
+        look: &zerocode_core::summon_difficulty::Look,
+        origin: [&str; 3],
+    ) -> Option<serde_json::Value> {
+        summon_difficulty::choose(look, origin)
+    }
+
     fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {
         let overrides = self
             .overrides
@@ -7937,6 +7946,21 @@ fn run_seated(
         },
         None => command,
     };
+    // The consent origin is the window's own checkout observation, not an
+    // argv path or the application's process cwd. Carry it across the actor
+    // call under this command's identity; its guard drops even on refusal.
+    let _difficulty_origin =
+        (argv.first().map(String::as_str) == Some("worker-start")).then(|| {
+            let term = crate::agent_teams::teams()
+                .get(team_id)
+                .and_then(|team| team.term_of(pane));
+            let checkout = term.and_then(|term| host.worktree_of(term));
+            let request = argv
+                .windows(2)
+                .find(|pair| pair[0] == "--retry-request")
+                .map_or("", |pair| pair[1].as_str());
+            summon_difficulty::origin([team_id, pane, request], checkout)
+        });
     let decided = match actor.plan(command) {
         Ok((decided, _)) => *decided,
         Err(why) => return refused_by_runtime(why),
@@ -8743,6 +8767,7 @@ fn carried(
                      * beat, and nothing below waits on it. */
                     if let Some(prepared) = decided.prepared_worker_start.as_ref() {
                         summon_choice::record(host, prepared, seated.as_deref(), now_ms);
+                        summon_difficulty::record(host, prepared, seated.as_deref(), now_ms);
                     }
                     /* The seat report lands beside the receipt, best-effort:
                      * the pane is open and the answer below stands whatever
