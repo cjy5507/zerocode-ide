@@ -1301,6 +1301,29 @@ pub(crate) fn set_computer_confirm(
     Ok(snapshot)
 }
 
+/// Whether a live reflex run may start (`computer_live_reflex`, t-10221):
+/// the settings page offers it on only when the platform, both permissions
+/// and a check with this helper stand; the reflex door reads it again at
+/// every start, so nothing else keeps a copy of it.
+#[tauri::command(async)]
+pub(crate) fn set_computer_live_reflex(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    on: bool,
+) -> Result<SettingsSnapshot, String> {
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::COMPUTER_LIVE_REFLEX],
+        |settings| {
+            settings.computer_live_reflex = on;
+            Ok(())
+        },
+    )
+}
+
 /// The person's answer to the operator's question (§1.5).
 #[tauri::command]
 pub(crate) fn computer_confirm_answer(id: String, allow: bool) -> bool {

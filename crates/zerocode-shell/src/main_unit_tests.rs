@@ -21288,6 +21288,52 @@ mod quiet_since {
     }
 }
 
+/// The live reflex switch (t-10221): `computer_live_reflex` goes through the
+/// one settings writer and comes back through the snapshot, the settings page
+/// reads live reflex from `capabilities` as the door reads it — the person's
+/// setting and this platform, `DoorFacts::now` — with the kept check beside
+/// it, and every command the card calls is registered.
+#[test]
+fn the_live_reflex_switch_rides_the_settings_document_and_the_doors_own_words() {
+    let window = window_source();
+    assert_canonical_setting_round_trip(
+        shipped_backend(),
+        window,
+        "set_computer_live_reflex",
+        "setting_key::COMPUTER_LIVE_REFLEX",
+        "settings.computer_live_reflex = on",
+        "function setComputerLiveReflex(on) {",
+        "computer_live_reflex",
+        "paintComputerLiveReflex();",
+    );
+    let fs = include_str!("cmd/fs.rs");
+    for command in ["computer_use_capabilities", "computer_live_reflex_check"] {
+        let body = block_after(fs, &format!("fn {command}("));
+        assert!(
+            body.contains("reflex::settings_answer(")
+                && body.contains("DoorFacts::now(")
+                && body.contains("computer_live_reflex(")
+                && body.contains("reflex::CHECK_FILE"),
+            "`{command}` does not answer live reflex as the door reads it:\n{body}"
+        );
+    }
+    let main = include_str!("main.rs");
+    for command in [
+        "set_computer_live_reflex",
+        "computer_use_capabilities",
+        "computer_live_reflex_check",
+    ] {
+        assert!(
+            main.matches(&format!("{command},")).count() >= 2,
+            "`{command}` is not registered with the window"
+        );
+        assert!(
+            window.contains(&format!("\"{command}\"")),
+            "the settings page never calls `{command}`"
+        );
+    }
+}
+
 /// The browser door's look, settle and pin (t-6721): what the Rust half of
 /// `cmd/browser.rs` does with what the page said. The page halves run for
 /// real in Chromium (`ui/tests/browser-door.mjs`).

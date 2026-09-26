@@ -74,7 +74,7 @@ fn start_words() -> Value {
 /// The handshake of a helper with its kernel installed that reads this plan
 /// contract and run policy 1.
 fn reading_handshake() -> Value {
-    json!({ "supports": { "desktop": { "reflex": {
+    json!({ "providerVersion": "1.0.0", "supports": { "desktop": { "reflex": {
         "planVersion": VERSION, "runPolicy": RUN_POLICY_VERSION, "kernel": true
     } } } })
 }
@@ -325,6 +325,212 @@ fn a_disabled_setting_refuses_before_the_helper() {
             .contains("macOS only, and only with the live reflex setting on"),
         "the manual names the platform and the setting"
     );
+}
+
+/// The settings page's check reads what a start's door and handshake read —
+/// nobody stopped, in the window or in the helper; this platform's row; a
+/// helper whose kernel reads this plan contract and run policy — and asks the
+/// helper nothing else: no plan, no frame, no input. Every failing road says
+/// the sentence the door says for it, and the check names the helper it
+/// checked.
+#[test]
+fn the_settings_check_reads_what_a_start_reads_and_runs_nothing() {
+    let at_ms = 1_790_000_000_000;
+    let checked = |facts: &DoorFacts, handshake: Value, helper_status: Value| {
+        let mut asked = Vec::new();
+        let answer = check(
+            facts,
+            &handshake,
+            &mut |method: &str, _params: Value| {
+                asked.push(method.to_string());
+                Ok(helper_status.clone())
+            },
+            at_ms,
+        )
+        .expect("checked");
+        (answer, asked)
+    };
+    let idle = json!({ "stopped": false, "reason": null });
+
+    let (passed, asked) = checked(&open(), reading_handshake(), idle.clone());
+    assert_eq!(
+        passed,
+        json!({
+            "ok": true,
+            "at_ms": at_ms,
+            "helper": helper_identity(&reading_handshake()),
+            "reason": null,
+        })
+    );
+    assert_eq!(
+        helper_identity(&reading_handshake()),
+        json!({ "version": "1.0.0", "planVersion": VERSION })
+    );
+    assert_eq!(
+        asked,
+        ["status"],
+        "the check asked the helper for more than its stop"
+    );
+
+    // The window stopped, or a platform the table does not claim: refused in
+    // the door's words before the helper is asked anything.
+    let stopped = DoorFacts {
+        stopped: Some("hotkey".into()),
+        ..open()
+    };
+    let not_here = DoorFacts {
+        supported: false,
+        ..open()
+    };
+    for (facts, said) in [
+        (stopped, super::super::guard::refusal("hotkey").message),
+        (not_here, NOT_HERE.to_string()),
+    ] {
+        let (failed, asked) = checked(&facts, reading_handshake(), idle.clone());
+        assert_eq!(failed["ok"], json!(false));
+        assert_eq!(failed["reason"], json!(said));
+        assert!(asked.is_empty(), "the helper was asked {asked:?}");
+    }
+
+    // A helper that does not read this contract, in the handshake's words.
+    let (failed, asked) = checked(
+        &open(),
+        json!({ "supports": { "desktop": { "reflex": { "planVersion": VERSION, "kernel": true } } } }),
+        idle,
+    );
+    assert_eq!(failed["reason"], json!(HELPER_DOES_NOT_READ));
+    assert!(asked.is_empty(), "the helper was asked {asked:?}");
+
+    // A helper stopped on its own — the person's chord heard on the desktop.
+    let (failed, _) = checked(
+        &open(),
+        reading_handshake(),
+        json!({ "stopped": true, "reason": "hotkey" }),
+    );
+    assert_eq!(failed["ok"], json!(false));
+    assert_eq!(
+        failed["reason"],
+        json!(super::super::guard::refusal("hotkey").message)
+    );
+}
+
+/// The settings page's answer is `capabilities` with the check beside it: a
+/// check made now is kept beside the settings — never in them — and read back
+/// only while the helper that answers is the one it checked; another helper
+/// version, another plan contract or no kept check reads as none.
+#[test]
+fn a_kept_check_vouches_only_for_the_helper_it_checked() {
+    let home = tempfile::tempdir().expect("a home");
+    let kept = home.path().join(CHECK_FILE);
+    let at_ms = 1_790_000_000_000;
+    let answering = |handshake: Value| {
+        move |method: &str, _params: Value| -> Result<Value, ComputerUseError> {
+            Ok(match method {
+                "handshake" => handshake.clone(),
+                "status" => json!({ "stopped": false, "reason": null }),
+                other => panic!("the page asked the helper for {other}"),
+            })
+        }
+    };
+
+    let fresh = settings_answer(&open(), &mut answering(reading_handshake()), &kept, None)
+        .expect("answered");
+    assert_eq!(
+        fresh[LIVE_REFLEX],
+        json!({ "supported": true, "enabled": true })
+    );
+    assert_eq!(fresh[CHECK], Value::Null, "a check nobody made");
+
+    let made = settings_answer(
+        &open(),
+        &mut answering(reading_handshake()),
+        &kept,
+        Some(at_ms),
+    )
+    .expect("checked");
+    assert_eq!(made[CHECK]["ok"], json!(true));
+    assert_eq!(made[CHECK]["at_ms"], json!(at_ms));
+    assert!(kept.is_file(), "the check was not kept");
+
+    let again = settings_answer(&open(), &mut answering(reading_handshake()), &kept, None)
+        .expect("answered");
+    assert_eq!(
+        again[CHECK], made[CHECK],
+        "the same helper reads its check back"
+    );
+
+    let mut newer = reading_handshake();
+    newer["providerVersion"] = json!("1.0.1");
+    let mut other_plan = reading_handshake();
+    other_plan["supports"]["desktop"]["reflex"]["planVersion"] = json!(VERSION + 1);
+    for handshake in [newer, other_plan] {
+        let answer = settings_answer(&open(), &mut answering(handshake.clone()), &kept, None)
+            .expect("answered");
+        assert_eq!(
+            answer[CHECK],
+            Value::Null,
+            "an old check vouched for {handshake}"
+        );
+    }
+}
+
+/// The switch on the settings page opens the door a start passes: the
+/// person's setting written through the settings document is the `enabled`
+/// a start reads (`DoorFacts::now`), and on this platform the start reaches
+/// the helper's handshake and its start — on a Mac — or is refused at the
+/// door with nothing asked elsewhere.
+#[test]
+fn the_setting_turned_on_opens_the_door_on_this_platform() {
+    let home = tempfile::tempdir().expect("a home");
+    let repository = crate::settings::SettingsRepository::new(home.path());
+    let desktop = plan("macos_desktop");
+    let starting = |facts: &DoorFacts| {
+        let mut calls = Calls::new();
+        let started = start(
+            &start_words(),
+            |_| Ok(flow("dry", false, Some(&desktop))),
+            facts,
+            &mut helper(&mut calls),
+        );
+        (started.map(|_| ()), calls)
+    };
+    // Nobody's stop: another test's stop is the process's, not this one's.
+    let now = |enabled| DoorFacts {
+        stopped: None,
+        ..DoorFacts::now(enabled)
+    };
+
+    let off = now(crate::settings_runtime::computer_live_reflex(&repository));
+    assert!(!off.enabled, "the switch is on before anyone turned it on");
+    let (refused, calls) = starting(&off);
+    assert!(
+        refused
+            .expect_err("refused")
+            .message
+            .contains(COMPUTER_LIVE_REFLEX)
+            || !off.supported
+    );
+    assert!(calls.is_empty(), "the helper was asked {calls:?}");
+
+    crate::settings_runtime::mutate_settings(&repository, |document| {
+        document.computer_live_reflex = true;
+        Ok(())
+    })
+    .expect("the switch turned on");
+    let on = now(crate::settings_runtime::computer_live_reflex(&repository));
+    assert!(on.enabled, "the switch did not reach the door");
+    let (started, calls) = starting(&on);
+    let asked: Vec<&str> = calls.iter().map(|(method, _)| method.as_str()).collect();
+    if cfg!(target_os = "macos") {
+        started.expect("admitted");
+        assert_eq!(asked, ["handshake", "reflexStart"]);
+    } else {
+        assert_eq!(
+            started.expect_err("refused").code,
+            error_code::UNSUPPORTED_CAPABILITY
+        );
+        assert!(asked.is_empty(), "the helper was asked {asked:?}");
+    }
 }
 
 /// A start answers at once — the run's id and its state from the helper,

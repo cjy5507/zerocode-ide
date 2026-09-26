@@ -744,6 +744,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
   "set_diff_side_by_side", "set_conversation_focus_view", "set_confirm_close_pinned",
+  "set_computer_live_reflex",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
   "patch_floating_workspace",
@@ -893,6 +894,11 @@ class StatefulBackend {
       { id: "accessibility", status: "not-granted" },
       { id: "screenshots", status: "not-granted" },
     ];
+    // Live reflex (t-10221): the helper reads the kernel, no check kept, and
+    // a check made now passes unless a refusal is set.
+    this.liveReflexHelperReads = true;
+    this.liveReflexCheck = null;
+    this.liveReflexRefusal = null;
     this.computerUseSkill = {
       installed: false,
       install_command: "npx skills add https://github.com/cjy5507/zerocode-ide --skill computer-use --global",
@@ -1340,6 +1346,10 @@ class StatefulBackend {
       case "set_conversation_focus_view":
         this.settings.conversation_focus_view = args.on === true;
         keys = ["conversation_focus_view"];
+        break;
+      case "set_computer_live_reflex":
+        this.settings.computer_live_reflex = args.on === true;
+        keys = ["computer_live_reflex"];
         break;
       case "set_confirm_close_pinned":
         this.settings.confirm_close_pinned = args.on === true;
@@ -2494,8 +2504,19 @@ class StatefulBackend {
       // Where the operator stands (C4): idle, nothing stopped, no actions yet.
       case "computer_guard_status":
         return { active: false, stopped: null, actions: 0, hotkey: "control+option+escape", helper: "idle" };
+      // Mirrors `reflex::settings_answer`: the handshake with `liveReflex`
+      // as the door reads it (this platform and helper, the person's
+      // setting) and the check kept for this helper, or none.
       case "computer_use_capabilities":
-        return { platform: "darwin", provider: "zerocode-computer-use-macos", protocolVersion: 1 };
+        return this.computerUseCapabilities();
+      case "computer_live_reflex_check":
+        this.liveReflexCheck = {
+          ok: this.liveReflexRefusal === null,
+          at_ms: Date.now(),
+          helper: { version: "1.0.0", planVersion: 1 },
+          reason: this.liveReflexRefusal,
+        };
+        return this.computerUseCapabilities();
       case "list_automations": return clone(this.automations);
       case "list_automation_runs":
         // Newest first, as the backend answers: it stores oldest-first and
@@ -2821,6 +2842,20 @@ class StatefulBackend {
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);
     }
+  }
+
+  computerUseCapabilities() {
+    const platform = this.computerUsePlatform ?? "darwin";
+    return {
+      platform,
+      provider: "zerocode-computer-use-macos",
+      protocolVersion: 1,
+      liveReflex: {
+        supported: platform === "darwin" && this.liveReflexHelperReads,
+        enabled: this.settings.computer_live_reflex === true,
+      },
+      check: clone(this.liveReflexCheck),
+    };
   }
 
   typeValueSlot(name) {
@@ -3827,6 +3862,172 @@ await test("Computer Use on Windows reads ready and offers no permission door to
       status: "not-granted",
     }));
   }
+});
+
+// The live reflex switch (t-10221): the card says three things — whether
+// this platform and helper read the reflex kernel, whether both permissions
+// are granted (the permission report's own judgment), and whether a check
+// made with this helper passed — and the switch turns on only when all three
+// stand. Otherwise it stays off and unpressable, saying why; once on it is
+// never turned off behind the person's back (a revoked permission says "on,
+// cannot run now"), and turning it off always works.
+const LIVE_REFLEX_WORDS = Object.freeze({
+  supported: { key: "computerUse.liveReflexSupported", word: "이 Mac과 헬퍼가 반사 커널을 읽습니다" },
+  helperOld: { key: "computerUse.liveReflexHelperOld", word: "이 헬퍼는 반사 커널을 읽지 않습니다 — Computer Use를 다시 시작하세요" },
+  platform: { key: "computerUse.unsupported", word: "지원되지 않는 플랫폼" },
+  granted: { key: "computerUse.granted", word: "허용됨" },
+  notGranted: { key: "computerUse.notEnabled", word: "허용 안 됨" },
+  checkNone: { key: "computerUse.liveReflexCheckNone", word: "이 헬퍼로 한 점검이 없습니다" },
+  checkPassed: { key: "computerUse.liveReflexCheckPassed", word: "통과 · {{time}}" },
+  checkFailed: { key: "computerUse.liveReflexCheckFailed", word: "통과 못 함 · {{time}} — {{reason}}" },
+  needs: { key: "computerUse.liveReflexNeeds", word: "아직 켤 수 없습니다 — {{why}}" },
+  onBlocked: { key: "computerUse.liveReflexOnBlocked", word: "켜짐 · 지금은 못 돎 — {{why}}" },
+  on: { key: "computerUse.liveReflexOn", word: "켜짐 — 에이전트가 반사 계획을 시작할 때만 헬퍼가 화면을 보고 누릅니다." },
+  whySupport: { key: "computerUse.liveReflexWhySupport", word: "이 플랫폼이나 헬퍼가 반사 층을 지원하지 않습니다" },
+  whyPermissions: { key: "computerUse.liveReflexWhyPermissions", word: "접근성과 스크린샷 권한이 모두 허용되어야 합니다" },
+  whyCheck: { key: "computerUse.liveReflexWhyCheck", word: "이 헬퍼로 한 점검이 통과해야 합니다" },
+});
+
+await test("Computer Use의 실시간 반사 층 스위치는 지원·권한·점검이 모두 설 때만 켜지고, 끄기는 늘 된다", async () => {
+  const words = (one, vars = {}) => pageA.evaluate(
+    ([key, word, values]) => t(key, word, values),
+    [LIVE_REFLEX_WORDS[one].key, LIVE_REFLEX_WORDS[one].word, vars],
+  );
+  const clock = (ms) => pageA.evaluate((at) => knowledgeClock(at, Date.now()), ms);
+  const grant = (status) => {
+    backend.computerUsePermissions = backend.computerUsePermissions.map((permission) => ({ ...permission, status }));
+  };
+  const card = pageA.locator("#computer-live-reflex-card");
+  const toggle = pageA.locator("#computer-live-reflex");
+  const line = (name) => pageA.locator(`#computer-live-reflex-${name}`);
+  const refresh = async () => {
+    const at = backend.calls.length;
+    await pageA.click("#computer-use-refresh");
+    await backend.waitForCall("A", "computer_use_capabilities", at);
+    await renderSettled(pageA);
+  };
+  const says = async (name, expected) => {
+    await pageA.waitForFunction(
+      ([id, text]) => document.getElementById(id)?.textContent === text,
+      [`computer-live-reflex-${name}`, expected],
+      { timeout: UI_TIMEOUT },
+    ).catch(async () => {
+      throw new Error(`#computer-live-reflex-${name} said ${JSON.stringify(await line(name).textContent())}, not ${JSON.stringify(expected)}`);
+    });
+  };
+  const permissionsSaid = async (one) => `${await pageA.evaluate(() => t("computerUse.accessibility", "접근성"))} ${await words(one)} · ${await pageA.evaluate(() => t("computerUse.screenshots", "스크린샷"))} ${await words(one)}`;
+  const pressDoesNothing = async () => {
+    const writes = backend.count("A", "set_computer_live_reflex");
+    // Playwright will not press an `aria-disabled` control on its own; a
+    // person can, so the press is forced and must change nothing.
+    await toggle.click({ force: true });
+    await renderSettled(pageA);
+    assert(!(await toggle.isChecked()), "an unpressable switch turned on");
+    assertEqual(backend.count("A", "set_computer_live_reflex"), writes, "an unpressable switch wrote the setting");
+  };
+  const shots = process.env.LIVE_REFLEX_SHOTS;
+  const shoot = (name) => shots ? card.screenshot({ path: resolve(shots, `live-reflex-${name}.png`), animations: "disabled" }) : null;
+
+  try {
+    // Nothing granted, nothing checked: off, unpressable, and saying why —
+    // the tip is what the switch is described by.
+    await openSettings(pageA, "computer-use");
+    await refresh();
+    assert(await card.isVisible(), "the Computer Use pane has no live reflex card");
+    assert(!(await toggle.isChecked()), "live reflex is on by default");
+    assertEqual(await toggle.getAttribute("role"), "switch");
+    assertEqual(await toggle.getAttribute("aria-describedby"), "computer-live-reflex-why");
+    await says("support", await words("supported"));
+    await says("permissions", await permissionsSaid("notGranted"));
+    await says("check-line", await words("checkNone"));
+    await says("why", await words("needs", { why: await words("whyPermissions") }));
+    assertEqual(await toggle.getAttribute("aria-disabled"), "true", "an ungranted Mac offered the switch");
+    await pressDoesNothing();
+    await shoot("1-needs-permissions");
+
+    // Granted, no check: the next thing it needs is the check.
+    grant("granted");
+    await refresh();
+    await says("permissions", await permissionsSaid("granted"));
+    await says("why", await words("needs", { why: await words("whyCheck") }));
+    assertEqual(await toggle.getAttribute("aria-disabled"), "true", "an unchecked helper offered the switch");
+
+    // A check that fails says why, with its time, and the switch stays shut.
+    backend.liveReflexRefusal = "the operator is stopped (hotkey)";
+    let checkedAt = backend.calls.length;
+    await pageA.click("#computer-live-reflex-check");
+    await backend.waitForCall("A", "computer_live_reflex_check", checkedAt);
+    await says("check-line", await words("checkFailed", { time: await clock(backend.liveReflexCheck.at_ms), reason: backend.liveReflexRefusal }));
+    assertEqual(await toggle.getAttribute("aria-disabled"), "true", "a failed check offered the switch");
+
+    // A check that passes opens it; pressing it writes the setting once.
+    backend.liveReflexRefusal = null;
+    checkedAt = backend.calls.length;
+    await pageA.click("#computer-live-reflex-check");
+    await backend.waitForCall("A", "computer_live_reflex_check", checkedAt);
+    await says("check-line", await words("checkPassed", { time: await clock(backend.liveReflexCheck.at_ms) }));
+    await pageA.waitForFunction(() => document.getElementById("computer-live-reflex")?.getAttribute("aria-disabled") === "false", null, { timeout: UI_TIMEOUT });
+    assertEqual(await line("why").textContent(), "", "a switch that may turn on still said why not");
+    await shoot("2-ready");
+    const onAt = backend.calls.length;
+    await toggle.click();
+    const on = await backend.waitForCall("A", "set_computer_live_reflex", onAt);
+    assertEqual(on.args, { on: true }, "the switch did not write the setting on");
+    assertEqual(backend.settings.computer_live_reflex, true);
+    await says("why", await words("on"));
+    assert(await toggle.isChecked(), "the switch fell back after it was written");
+
+    // Permissions taken away: still on — never turned off behind the
+    // person's back — saying it cannot run now, and still pressable to off.
+    grant("not-granted");
+    const quietAt = backend.calls.length;
+    await refresh();
+    await says("why", await words("onBlocked", { why: await words("whyPermissions") }));
+    assert(await toggle.isChecked(), "a revoked permission turned the switch off");
+    assertEqual(await toggle.getAttribute("aria-disabled"), "false", "a switch that is on could not be turned off");
+    assertEqual(backend.calls.slice(quietAt).filter((call) => call.command === "set_computer_live_reflex").length, 0, "the page wrote the setting on its own");
+    await shoot("3-on-cannot-run");
+    const offAt = backend.calls.length;
+    await toggle.click();
+    assertEqual((await backend.waitForCall("A", "set_computer_live_reflex", offAt)).args, { on: false });
+    assertEqual(backend.settings.computer_live_reflex, false);
+    assertEqual(await toggle.getAttribute("aria-disabled"), "true", "an off switch with a revoked permission was offered");
+
+    // A helper that does not read the kernel, then a platform that runs no
+    // reflex: the support line says which, and the switch stays shut.
+    grant("granted");
+    backend.liveReflexHelperReads = false;
+    await refresh();
+    await says("support", await words("helperOld"));
+    await says("why", await words("needs", { why: await words("whySupport") }));
+    assertEqual(await toggle.getAttribute("aria-disabled"), "true");
+    backend.computerUsePlatform = "windows";
+    backend.liveReflexHelperReads = true;
+    await refresh();
+    await says("support", await words("platform"));
+    await says("why", await words("needs", { why: await words("whySupport") }));
+    assertEqual(await toggle.getAttribute("aria-disabled"), "true", "Windows offered live reflex");
+    await pressDoesNothing();
+
+    // Settings lands the switch in the pane it lives on.
+    const landing = await pageA.evaluate(() => ({
+      pane: PANE_OF["computer-live-reflex"] ?? null,
+      strays: Object.entries(PANE_OF).flatMap(([id, pane]) => {
+        const lives = document.getElementById(id)?.closest(".settings-pane")?.dataset.pane;
+        return lives === undefined || lives === pane ? [] : [{ id, pane, lives }];
+      }),
+    }));
+    assertEqual(landing, { pane: "computer-use", strays: [] }, "settings does not land on the live reflex switch");
+  } finally {
+    backend.computerUsePlatform = "darwin";
+    backend.liveReflexHelperReads = true;
+    backend.liveReflexCheck = null;
+    backend.liveReflexRefusal = null;
+    backend.settings.computer_live_reflex = false;
+    grant("not-granted");
+    await pageA.evaluate(() => setSettingsOpen(false));
+  }
+  return "switch shut ×4 · check fail/pass · on · on-blocked · off";
 });
 
 await test("Setup Script Location owns Orca's three choices and survives a canonical reopen", async () => {

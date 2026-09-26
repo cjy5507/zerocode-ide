@@ -1,5 +1,6 @@
 //! Filesystem, local capability, and download commands.
 
+use crate::computer_use::reflex;
 use crate::*;
 
 #[tauri::command]
@@ -1049,12 +1050,46 @@ pub(crate) async fn computer_use_tcc_row_action(
     .map_err(|error| error.to_string())
 }
 
+/// The helper's handshake with live reflex as the door reads it — this
+/// platform and helper, and the person's setting — and the check kept for
+/// this helper (t-10221).
 #[tauri::command]
-pub(crate) async fn computer_use_capabilities() -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(|| computer_use::call("handshake", serde_json::json!({})))
-        .await
-        .map_err(|join| join.to_string())?
-        .map_err(|error| error.to_string())
+pub(crate) async fn computer_use_capabilities(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let enabled = crate::settings_runtime::computer_live_reflex(state.settings());
+    let kept = state.local_data_root().join(reflex::CHECK_FILE);
+    tauri::async_runtime::spawn_blocking(move || {
+        reflex::settings_answer(
+            &reflex::DoorFacts::now(enabled),
+            &mut computer_use::call,
+            &kept,
+            None,
+        )
+    })
+    .await
+    .map_err(|join| join.to_string())?
+}
+
+/// The settings page's check before the live reflex switch may turn on —
+/// what a start's door and handshake read, no input — kept beside the
+/// settings and answered as `computer_use_capabilities` answers.
+#[tauri::command]
+pub(crate) async fn computer_live_reflex_check(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let enabled = crate::settings_runtime::computer_live_reflex(state.settings());
+    let kept = state.local_data_root().join(reflex::CHECK_FILE);
+    tauri::async_runtime::spawn_blocking(move || {
+        reflex::settings_answer(
+            &reflex::DoorFacts::now(enabled),
+            &mut computer_use::call,
+            &kept,
+            Some(crate::project_runtime::now_epoch_ms()),
+        )
+    })
+    .await
+    .map_err(|join| join.to_string())?
 }
 
 /// One image as it was at the last commit, beside the one on disk.
