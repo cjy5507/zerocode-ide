@@ -69,9 +69,13 @@ def run(args):
     output.mkdir(parents=True, exist_ok=True)
     assert os.environ.get("ZO_CONFIG_HOME"), "use a temporary configuration home"
     jev = Jev()
-    token = VALUE.credentials().get("oauth", {}).get("accessToken")
-    large = VALUE.AnthropicRoad(token) if token and args.large_model else None
-    small = VALUE.AnthropicRoad(token) if token and args.large_model else None
+    table = json.loads((VALUE.FIXTURES / "models.json").read_text())
+    chosen = next(row for row in table["rows"] if row["id"] == table["chosen"])
+    # A person's own key for the chosen row, from the window's key store —
+    # never a login (t-10372).
+    key = VALUE.row_key(chosen) if args.large_model else None
+    large = VALUE.AnthropicRoad(key) if key else None
+    small = VALUE.AnthropicRoad(key) if key else None
     for road in (large, small):
         if road:
             send = road.session.stream
@@ -79,8 +83,7 @@ def run(args):
                 body.pop("temperature", None)
                 return send(path, headers, body, pick)
             road.session.stream = without_temperature
-    table = json.loads((VALUE.FIXTURES / "models.json").read_text())
-    small_model = next(row["model"] for row in table["rows"] if row["id"] == table["chosen"])
+    small_model = chosen["model"]
     goal = "Press the Advance button exactly once. Return only its mark number."
     q = {
         "action": question("choice", goal, {"mark:1": "City input", "mark:2": "Advance button", "give_up": "No suitable button"}),
