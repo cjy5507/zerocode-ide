@@ -359,7 +359,7 @@ fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
     let mut rows: Vec<Value> = Vec::new();
     for n in 0..wanted {
         let at = n * 4;
-        rows.push(json!({"kind": "judgment", "at": at, "attempt": "s@1", "step": n, "outcome": "answered", "elapsedMs": 1, model: "jev-1.13.0"}));
+        rows.push(json!({"kind": "judgment", "at": at, "attempt": "s@1", "step": n, "outcome": "answered", "elapsedMs": 1, model: "jev-1.13.0", "rubricVersion": seat.rubric_version}));
         rows.push(json!({"kind": "step", "at": at + 1, model: chat[n % chat.len()]}));
         rows.push(json!({"kind": "label", "at": at + 2, "label": format!("s@1:{n}"), "agreed": n >= crate::jev::NEGATIVES_WANTED, "baselineAgreed": n % 2 == 0}));
         rows.push(json!({"kind": "step", "at": at + 3, model: chat[(n + 1) % chat.len()]}));
@@ -393,7 +393,7 @@ fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
     // A ledger whose requests all went unanswered names no version at all —
     // not the chat model its steps ran on.
     let unanswered = [
-        json!({"kind": "judgment", "at": 1, "attempt": "s@1", "step": 1, "outcome": "no_key"}),
+        json!({"kind": "judgment", "at": 1, "attempt": "s@1", "step": 1, "outcome": "no_key", "rubricVersion": seat.rubric_version}),
         json!({"kind": "step", "at": 2, model: "claude-opus-5"}),
         json!({"kind": "label", "at": 3, "label": "s@1:1", "agreed": false}),
     ];
@@ -1471,7 +1471,7 @@ fn a_seat_whose_rows_all_compare_nothing_has_no_label() {
         Verdict::Hold(Line::Unlabeled { withheld: 5 })
     );
     let mut acting = rows;
-    acting.insert(0, json!({"transition": ROSE}));
+    acting.insert(0, rose(seat));
     assert_eq!(
         judge_seat(seat, &acting).expect("judged").verdict,
         Verdict::Keep,
@@ -2581,7 +2581,7 @@ fn a_label_that_names_no_request_grades_nothing() {
     let seat = &crate::jev::ZO_STEP_EFFORT;
     let judgment = json!({
         "kind": "judgment", "at": 10, "attempt": "s@1", "step": 3, "outcome": "answered",
-        "elapsedMs": 5, "requests": 1, "model": ANSWERING,
+        "elapsedMs": 5, "requests": 1, "model": ANSWERING, "rubricVersion": seat.rubric_version,
     });
     let unnamed = json!({"kind": "label", "at": 11, "attempt": "s@1", "step": 4, "agreed": true});
     let judged = judge_seat(seat, &[judgment.clone(), unnamed]).expect("judged");

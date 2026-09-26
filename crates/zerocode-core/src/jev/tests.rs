@@ -870,13 +870,28 @@ fn the_skill_seat_discloses_the_bounded_second_pass() {
             "/state/skills/*/name",
             "/state/skills/*/description",
             "/state/candidates",
+            "/state/candidates/*/name",
             "/state/candidates/*/excerpt",
             "/state/candidates/*/description",
             "/questions/which/criteria/*",
-            "/questions/*/instructions",
         ]
     );
     assert!(!sent.iter().any(|at| at.contains("prompt")));
+    // Every skill's words ride the state once (t-10010): an option says a
+    // skill's place and name, which the state carries uncut, and no
+    // question's instructions carry a skill's words at all.
+    let cap_of = |at: &str| {
+        SKILLS
+            .sends
+            .iter()
+            .find(|sent| sent.at == at)
+            .map(|sent| sent.cap)
+    };
+    assert_eq!(cap_of("/questions/which/criteria/*"), Some(Cap::Uncut));
+    assert_eq!(
+        cap_of("/state/candidates/*/name"),
+        cap_of("/state/skills/*/name")
+    );
 }
 
 /// The skill search's own floor is a line under one skill's relevance, and
@@ -971,15 +986,30 @@ fn the_routing_seat_sends_the_task_under_its_cap_and_its_facts_whole() {
 #[test]
 fn the_step_effort_seat_reads_the_turn_like_routing_and_rises_on_its_own_marks() {
     assert_eq!(jev_use("step_effort"), Some(&ZO_STEP_EFFORT));
-    // The same head of the turn under the same cap — as the probe rubric's
-    // plain string, where the routing seat's second version sends it inside
-    // an object beside its facts (t-6346).
+    // The same head of the turn under the same key and cap as the routing
+    // seat's, and the step's counts as fields of their own beside it — the
+    // step and a count line once rode after the words as prose, where the
+    // cut of a long turn took them (t-10010).
     assert_eq!(
         ZO_STEP_EFFORT.sends,
-        &[Sent {
-            at: "/state",
-            cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
-        }]
+        &[
+            Sent {
+                at: "/state/task",
+                cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
+            },
+            Sent {
+                at: "/state/step",
+                cap: Cap::Uncut,
+            },
+            Sent {
+                at: "/state/signals",
+                cap: Cap::Uncut,
+            },
+        ]
+    );
+    assert_eq!(
+        ZO_STEP_EFFORT.sends[0], ROUTING.sends[0],
+        "the turn's words go under the routing seat's own pointer and cap"
     );
     assert!(
         ROUTING
@@ -1171,8 +1201,14 @@ fn the_mention_seat_reranks_a_fuzzy_page_and_rises_on_the_persons_pick() {
             "/state/candidates",
             "/state/candidates/*/name",
             "/state/candidates/*/head",
+            "/questions/*/criteria/*",
         ],
         "names and heads only: no file body, no page body, no transcript"
+    );
+    assert_eq!(
+        MENTION_RERANK.sends[5].cap,
+        Cap::Uncut,
+        "an option names its row by the title the state already carries under its own cap"
     );
     let caps: Vec<Cap> = MENTION_RERANK.sends.iter().map(|sent| sent.cap).collect();
     assert_eq!(caps[0], Cap::Chars(MENTION_INTENT_CHAR_CAP));
@@ -2642,6 +2678,26 @@ fn every_seat_names_its_rubric_and_how_its_labels_name_a_request() {
         &["attempt", "step"],
         "a progress mark names the judgment it grades by the turn and the step it was asked at"
     );
+    // The step seat names a version of its own (t-10010), stamped on every
+    // judgment row it writes, where it named the version a row that names
+    // none is read as — so rows asked in other words could not be told
+    // apart from its own.
+    assert_eq!(
+        ZO_STEP_EFFORT.rubric_version,
+        questions::ZO_STEP_EFFORT_RUBRIC_VERSION
+    );
+    assert_ne!(
+        ZO_STEP_EFFORT.rubric_version, UNVERSIONED_RUBRIC,
+        "the rows the seat wrote before it was versioned are not its words'"
+    );
+    assert_eq!(
+        AGENT_TOOL.rubric_version,
+        questions::AGENT_TOOL_RUBRIC_VERSION
+    );
+    assert_eq!(
+        MENTION_RERANK.rubric_version,
+        questions::MENTION_RERANK_RUBRIC_VERSION
+    );
 }
 
 /// Every option, level and outcome a request's `questions` offer that says
@@ -2933,6 +2989,7 @@ fn every_seat_offers_no_option_without_the_words_that_say_what_it_means() {
                         .collect(),
                 ),
                 id if id == SKILL_SUGGESTION.id => Asked::Spelled(vec![
+                    words::SKILL_OPTION,
                     words::SKILL_NO_MATCH_CRITERION,
                     words::SKILL_YES,
                     words::SKILL_NO,

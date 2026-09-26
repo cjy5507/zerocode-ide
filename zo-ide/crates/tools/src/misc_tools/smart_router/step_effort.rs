@@ -22,7 +22,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use api::{SystemOneConfig, SystemOneFailure, SYSTEMONE_MODEL};
-use runtime::{RouteTaskComplexity, StepAskContext, StepEffortSeat, StepEvent, StepJudgment};
+use runtime::{
+    RouteTaskComplexity, StepAskContext, StepEffortSeat, StepEvent, StepJudgment, STEP_RUBRIC_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zerocode_core::jev::door::{self, Refused};
@@ -135,6 +137,9 @@ pub struct StepJudgmentRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<String>,
     pub step: u32,
+    /// The version of the words the judgment was asked ([`STEP_RUBRIC_VERSION`],
+    /// t-10010): a row that names none was asked the first version's.
+    pub rubric_version: u32,
     /// Why the seat was asked: the governor's own word.
     pub why: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +163,7 @@ impl StepJudgmentRow {
             at: super::decision_shadow::unix_millis(),
             attempt: ask.attempt.clone(),
             step: ask.step,
+            rubric_version: STEP_RUBRIC_VERSION,
             why: ask.why.clone(),
             model: None,
             outcome,
@@ -177,7 +183,8 @@ impl StepJudgmentRow {
 struct OwnedAsk {
     step: u32,
     why: String,
-    state: String,
+    /// The seat's state for the step (`runtime::step_state`).
+    state: Value,
     attempt: Option<String>,
 }
 
@@ -235,7 +242,7 @@ impl StepEffortSeat for StepSeat {
         let owned = OwnedAsk {
             step: ask.step,
             why: ask.why.token().to_string(),
-            state: ask.state.to_string(),
+            state: ask.state.clone(),
             attempt: Some(ask.attempt.trim())
                 .filter(|attempt| !attempt.is_empty())
                 .map(str::to_string),
@@ -290,7 +297,7 @@ async fn judge_step(
     client: Option<&api::SystemOneClient>,
     ask: &OwnedAsk,
 ) -> (StepJudgmentRow, Option<StepJudgment>) {
-    let key: StepKey = (door.model_key(), task_fingerprint("", &ask.state));
+    let key: StepKey = (door.model_key(), task_fingerprint("", &ask.state.to_string()));
     let recalled = memo().lock().ok().and_then(|memo| memo.get(&key).cloned());
     if let Some(remembered) = recalled {
         telemetry::attest_fired(telemetry::HarnessFeature::DecisionShadow);
@@ -304,7 +311,7 @@ async fn judge_step(
         };
         return (row, Some(answer));
     }
-    let request = runtime::decision_request(SYSTEMONE_MODEL, &ask.state);
+    let request = runtime::step_request(SYSTEMONE_MODEL, &ask.state);
     let Some(body) = jev_gate::body_of(&request) else {
         let failure = SystemOneFailure::InvalidRequest;
         telemetry::attest_failed(telemetry::HarnessFeature::DecisionShadow, failure.token());
@@ -479,7 +486,7 @@ mod tests {
         OwnedAsk {
             step,
             why: "cadence".to_string(),
-            state: "words".to_string(),
+            state: runtime::step_state("words", step, &runtime::StepSignals::default()),
             attempt: Some("s@1".to_string()),
         }
     }
@@ -556,11 +563,15 @@ mod tests {
             model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
         };
         let door = JevDoor::at(settings, home.path(), home.path());
+        let counts = runtime::StepSignals {
+            batch: runtime::StepBatch::ReadOnly,
+            repeats: 1,
+            ..runtime::StepSignals::default()
+        };
         let ask = OwnedAsk {
             step: 5,
             why: "cadence".to_string(),
-            state: "rename one variable\n[step 5] batch=read_only repeats=1 errors_in_a_row=0 check_red=false"
-                .to_string(),
+            state: runtime::step_state("rename one variable", 5, &counts),
             attempt: None,
         };
         let (row, answer) = judge_step(&door, None, &ask).await;
@@ -569,6 +580,82 @@ mod tests {
         assert_eq!(row.kind, JUDGMENT_ROW_KIND);
         assert_eq!((row.step, row.requests, row.cached), (5, 0, false));
         assert!(row.jev.is_none());
+    }
+
+    /// A contract-shaped answer to the seat's three questions: a large,
+    /// risky piece of implementation work.
+    fn judged_large() -> String {
+        json!({
+            "model": "jev-test",
+            "answers": {
+                "complexity": { "type": "choice", "choice": "large", "confidence": 0.64,
+                    "probabilities": { "trivial": 0.05, "small": 0.05, "medium": 0.2, "large": 0.7 } },
+                "risk": { "type": "choice", "choice": "high", "confidence": 0.41,
+                    "probabilities": { "low": 0.1, "medium": 0.2, "high": 0.6, "critical": 0.1 } },
+                "intent": { "type": "choice", "choice": "implementation", "confidence": 0.88,
+                    "probabilities": { "design": 0.05, "implementation": 0.9, "analysis": 0.03, "other": 0.02 } },
+            },
+            "usage": { "input_tokens": 300, "output_tokens": 0 },
+        })
+        .to_string()
+    }
+
+    /// A step judgment sends the step's counts as fields beside the turn's
+    /// words, and its row names the version of the words it asked (t-10010).
+    /// The door cuts a long turn's words by their own pointer and the counts
+    /// still go; version 1 wrote them as a line after the words, which the
+    /// cut of a turn past the cap took, and its rows named no version, so a
+    /// row asked in other words was read as one of these.
+    #[test]
+    fn a_step_judgment_sends_its_counts_as_fields_and_names_its_version() {
+        // A workspace consented by name at a door that reads no machine's
+        // settings, as the mention seat's tests stand.
+        const WORKSPACE: &str = "/work/zo";
+        let mock = super::super::jev_mock::Mock::serving(200, judged_large());
+        let home = tempfile::tempdir().expect("tmp");
+        let settings = zerocode_core::jev::door::JevSettings {
+            enabled: true,
+            workspaces: vec![WORKSPACE.to_string()],
+            daily_requests: None,
+            model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
+        };
+        let door = JevDoor::at(settings, Path::new(WORKSPACE), home.path());
+        let client = api::SystemOneClient::new(&mock.base_url, "test-key");
+        let words = "w".repeat(zerocode_core::jev::ROUTING_TASK_CHAR_CAP + 500);
+        let counts = runtime::StepSignals {
+            batch: runtime::StepBatch::ReadOnly,
+            repeats: 2,
+            error_streak: 1,
+            check_red: false,
+            routine_streak: 3,
+            band: RouteTaskComplexity::Medium,
+        };
+        let ask = OwnedAsk {
+            step: 5,
+            why: "conflict".to_string(),
+            state: runtime::step_state(&words, 5, &counts),
+            attempt: Some("s@1".to_string()),
+        };
+        let (row, answer) = api::sync_bridge::run_blocking(judge_step(&door, Some(&client), &ask));
+        assert_eq!(row.outcome, OUTCOME_ANSWERED);
+        assert_eq!(answer.map(|judged| judged.complexity), Some(RouteTaskComplexity::Large));
+        let written = serde_json::to_value(&row).expect("a row");
+        assert_eq!(written["rubricVersion"], json!(runtime::STEP_RUBRIC_VERSION), "{written}");
+        let sent = mock.requests();
+        assert_eq!(sent.len(), 1);
+        let body: Value = serde_json::from_str(&sent[0]).expect("a JSON body");
+        assert_eq!(
+            body["state"]["signals"],
+            json!({ "batch": "read_only", "repeats": 2, "errors_in_a_row": 1, "check_red": false }),
+            "{}",
+            body["state"]
+        );
+        assert_eq!(body["state"]["step"], 5);
+        assert_eq!(
+            body["state"]["task"].as_str().map(|task| task.chars().count()),
+            Some(zerocode_core::jev::ROUTING_TASK_CHAR_CAP),
+            "the door cuts the turn's words by their own pointer, and nothing else"
+        );
     }
 
     #[test]

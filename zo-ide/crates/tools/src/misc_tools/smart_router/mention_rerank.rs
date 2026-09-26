@@ -99,7 +99,17 @@ const QUESTION: &str = "meant";
 /// What the judgment is asked. The names in backticks are the state's own
 /// keys, so the sentence reads the request rather than describing it.
 const INSTRUCTIONS: &str = "The person is writing `intent` and has typed `query` to pick one row of \
-`candidates`. Which candidate do they mean?";
+`candidates`, each shown by its `name` and, where it has one, its `head`. Which candidate do they mean?";
+
+/// What choosing a row means: the person means the row at `{position}` of
+/// `candidates`, which shows `{title}` — what they tell the row apart by
+/// (t-10010: version 1 said the place alone, and a place is a pointer, not
+/// a meaning).
+const OPTION_MEANS: &str = "They mean `candidates[{position}]`: {title}";
+
+/// The keys of the state, and of each row of `candidates`.
+const STATE_KEYS: [&str; 3] = ["intent", "query", "candidates"];
+const CANDIDATE_KEYS: [&str; 2] = ["name", "head"];
 
 /// The word a label row carries as its kind, so a reader sweeping the ledger
 /// can tell a comparison from a reading without parsing both.
@@ -113,12 +123,18 @@ pub fn mention_rerank_path(cwd: &Path) -> PathBuf {
     shadow_ledger_path(cwd, MENTION_RERANK_FILE)
 }
 
-/// Every sentence the judgment is shown, in one string, so a fingerprint of
-/// it pins them ([`MENTION_RUBRIC_VERSION`]).
+/// Every word the judgment is shown, in one string, so a fingerprint of it
+/// pins them ([`MENTION_RUBRIC_VERSION`]): the question, what an option
+/// means, and the keys of the state and of each row.
 #[cfg(test)]
 #[must_use]
 pub fn rubric_words() -> String {
-    [QUESTION, INSTRUCTIONS].join("\n")
+    [
+        [QUESTION, INSTRUCTIONS, OPTION_MEANS].join("\n"),
+        STATE_KEYS.join(","),
+        CANDIDATE_KEYS.join(","),
+    ]
+    .join("\n")
 }
 
 /// The fingerprint of [`rubric_words`] this version was pinned at.
@@ -145,6 +161,16 @@ impl MentionSurface {
         match self {
             Self::Mention => "mention",
             Self::Resume => "resume",
+        }
+    }
+
+    /// The title a row of this page shows — what a person tells it apart by:
+    /// its name on the `@` popup; its first words on the `/resume` list,
+    /// whose name is a session id the row does not show.
+    fn title_of(self, candidate: &MentionCandidate) -> &str {
+        match self {
+            Self::Resume if !candidate.head.is_empty() => &candidate.head,
+            Self::Mention | Self::Resume => &candidate.name,
         }
     }
 }
@@ -666,17 +692,17 @@ fn state_of(ask: &MentionAsk) -> Value {
         .candidates
         .iter()
         .map(|candidate| {
-            let mut row = Map::from_iter([("name".to_string(), Value::from(candidate.name.as_str()))]);
+            let mut row = Map::from_iter([(CANDIDATE_KEYS[0].to_string(), Value::from(candidate.name.as_str()))]);
             if !candidate.head.is_empty() {
-                row.insert("head".to_string(), Value::from(candidate.head.as_str()));
+                row.insert(CANDIDATE_KEYS[1].to_string(), Value::from(candidate.head.as_str()));
             }
             Value::Object(row)
         })
         .collect();
     Value::Object(Map::from_iter([
-        ("intent".to_string(), Value::from(ask.intent.as_str())),
-        ("query".to_string(), Value::from(ask.query.as_str())),
-        ("candidates".to_string(), Value::Array(candidates)),
+        (STATE_KEYS[0].to_string(), Value::from(ask.intent.as_str())),
+        (STATE_KEYS[1].to_string(), Value::from(ask.query.as_str())),
+        (STATE_KEYS[2].to_string(), Value::Array(candidates)),
     ]))
 }
 
@@ -692,7 +718,16 @@ fn option_id(position: usize) -> String {
 /// (`choice::read`), so the rules a closed choice keeps are kept once.
 fn questions_of(ask: &MentionAsk) -> (BTreeMap<String, SystemOneQuestion>, Vec<String>) {
     let offered: Vec<String> = (0..ask.candidates.len()).map(option_id).collect();
-    let means: Vec<String> = (0..ask.candidates.len()).map(|position| format!("`candidates[{position}]`")).collect();
+    let means: Vec<String> = ask
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(position, candidate)| {
+            OPTION_MEANS
+                .replace("{position}", &position.to_string())
+                .replace("{title}", ask.surface.title_of(candidate))
+        })
+        .collect();
     let question = SystemOneQuestion::choice(
         INSTRUCTIONS,
         offered.iter().zip(&means).map(|(id, means)| (id.as_str(), Some(means.as_str()))),

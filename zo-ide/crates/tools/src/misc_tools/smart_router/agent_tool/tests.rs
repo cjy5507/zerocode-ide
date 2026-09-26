@@ -220,7 +220,9 @@ fn on_hands_the_choice_over_by_place() {
 }
 
 /// An `ask` is a choice over the two words of the table, and the answer's
-/// `yes` is whether the affirmative was chosen.
+/// `yes` is whether the affirmative was chosen. Each of the two says what it
+/// means, of the state the question reads (t-10010): version 1 offered them
+/// by name alone.
 #[test]
 fn ask_is_a_choice_over_yes_and_no() {
     let mock = Mock::serving(200, choice_reply("a", &["yes", "no"], "yes"));
@@ -232,7 +234,16 @@ fn ask_is_a_choice_over_yes_and_no() {
     assert_eq!(rows[0].candidates, 2);
     let body: Value = serde_json::from_str(&mock.requests()[0]).expect("a JSON body");
     assert_eq!(body["questions"]["a"]["instructions"], ASK_INSTRUCTIONS);
-    assert_eq!(body["questions"]["a"]["criteria"], json!({ "yes": null, "no": null }));
+    let criteria = body["questions"]["a"]["criteria"].as_object().expect("named options");
+    let mut offered: Vec<&str> = criteria.keys().map(String::as_str).collect();
+    offered.sort_unstable();
+    assert_eq!(offered, ["no", "yes"]);
+    for (option, means) in criteria {
+        let means = means.as_str().unwrap_or_default();
+        for key in ["`question`", "`context`"] {
+            assert!(means.contains(key), "{option} says nothing of {key}: {means:?}");
+        }
+    }
     assert_eq!(body["state"]["context"], "+ fn send_once()");
 }
 
@@ -405,9 +416,15 @@ fn a_row_is_spelled_the_way_every_jev_counter_reads_it_and_the_summary_counts_it
     assert_eq!(seat.judged, None, "nothing judges a seat with no floor");
 }
 
-/// Every sentence this seat asks with, in one string, for the pin.
+/// Every sentence this seat asks with, in one string, for the pin: the three
+/// instructions, what an `ask`'s two answers mean, and the state's keys.
 fn rubric_words() -> String {
-    format!("{ASK_INSTRUCTIONS}\n{CHOOSE_INSTRUCTIONS}\n{}", score_instructions(0))
+    format!(
+        "{ASK_INSTRUCTIONS}\n{CHOOSE_INSTRUCTIONS}\n{}\n{}\n{}",
+        score_instructions(0),
+        ASK_OPTION_MEANS.join("\n"),
+        STATE_KEYS.join(",")
+    )
 }
 
 /// The sentences this seat asks with are pinned to its rubric version: a
@@ -415,8 +432,8 @@ fn rubric_words() -> String {
 /// count the ledger holds.
 #[test]
 fn the_rubric_is_pinned_to_its_version() {
-    assert_eq!(AGENT_TOOL_RUBRIC_VERSION, 1);
-    assert_eq!(zerocode_core::jev::rubric_fingerprint(rubric_words), "ae7f75d8593d1bf6", "{}", rubric_words());
+    assert_eq!(AGENT_TOOL_RUBRIC_VERSION, 2);
+    assert_eq!(zerocode_core::jev::rubric_fingerprint(rubric_words), "27dc981795271706", "{}", rubric_words());
 }
 
 /// The shape words are the CLI's verbs and the schema's enum, and the

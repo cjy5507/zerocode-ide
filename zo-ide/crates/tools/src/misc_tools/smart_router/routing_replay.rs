@@ -27,7 +27,9 @@ use runtime::{ContentBlock, ConversationMessage, MessageRole, RouteTaskComplexit
 use serde_json::{json, Value};
 use zerocode_core::jev::door::JevSettings;
 use zerocode_core::jev::summary::{wilson_lower, WILSON_Z_95};
-use zerocode_core::jev::{Band, ROUTING, ROUTING_APPLY_DEADLINE_MS, ZO_STEP_EFFORT};
+use zerocode_core::jev::{
+    Band, Cap, JevUse, Sent, ROUTING, ROUTING_APPLY_DEADLINE_MS, ROUTING_TASK_CHAR_CAP, ZO_STEP_EFFORT,
+};
 
 use super::jev_gate::{self, JevDoor};
 use super::route_label::{observed_level, same_tier, turn_work};
@@ -50,6 +52,17 @@ const IN_FLIGHT: usize = 6;
 const REPLAY_WALL: Duration = super::probe_exec::PROBE_TIMEOUT;
 /// The workspace the replay's own door consents to.
 const WORKSPACE: &str = "/work/routing-replay";
+
+/// The first version's request as the step seat sent it until that seat
+/// asked words of its own (t-10010): the task as one string, cleared and
+/// cut under the one pointer that seat's row carried then.
+const FIRST_VERSION: JevUse = JevUse {
+    sends: &[Sent {
+        at: "/state",
+        cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
+    }],
+    ..ZO_STEP_EFFORT
+};
 
 /// One task the seat would have been asked about.
 struct Task {
@@ -204,13 +217,13 @@ async fn ask(door: &JevDoor, client: &SystemOneClient, task: &Task, second: bool
     let whole = runtime::rubric_task_whole(&task.description, &task.prompt);
     let state = runtime::routing_state(&whole, runtime::RoutingFacts::default());
     // The first version sends the task as the plain string the step governor
-    // still sends, so it is cleared under that row's pointer.
+    // sent until t-10010, so it is cleared under that row's pointer then.
     let body = if second {
         jev_gate::body_of(&runtime::routing_request(SYSTEMONE_MODEL, &state))
     } else {
         jev_gate::body_of(&runtime::decision_request(SYSTEMONE_MODEL, &whole))
     };
-    let row = if second { &ROUTING } else { &ZO_STEP_EFFORT };
+    let row = if second { &ROUTING } else { &FIRST_VERSION };
     let Some(cleared) = body.and_then(|body| door.pass(row, true, body).ok()) else {
         return Answer { outcome: "refused".to_string(), ..Answer::default() };
     };

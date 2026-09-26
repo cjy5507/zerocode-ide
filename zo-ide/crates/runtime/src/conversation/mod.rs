@@ -66,11 +66,12 @@ pub use deep_gate::{
 use compaction::parse_auto_compaction_threshold;
 pub use error::{RuntimeError, StreamingTurnError, ToolError, ToolTextKind};
 pub use step_effort::{
-    decide as decide_step_effort, shift as shift_step_effort, EffortStep, RungMove, StepAsk,
-    StepAskContext, StepBatch, StepDecision, StepEffortConfig, StepEffortObserver, StepEffortSeat,
-    StepEvent, StepJudgment, StepJudgmentRow, StepLabel, StepMove, StepReason, StepRow,
-    StepSignals, LABEL_ROW_KIND, NO_IN_TURN_ROAD, ROUTINE_STEPS_FOR_LIGHTER, STEP_JUDGMENT_EVERY,
-    STEP_ROW_KIND, STRONG_STEPS_FOR_HEAVIER,
+    decide as decide_step_effort, shift as shift_step_effort, step_questions, step_request,
+    step_state, EffortStep, RungMove, StepAsk, StepAskContext, StepBatch, StepDecision,
+    StepEffortConfig, StepEffortObserver, StepEffortSeat, StepEvent, StepJudgment, StepJudgmentRow,
+    StepLabel, StepMove, StepReason, StepRow, StepSignals, LABEL_ROW_KIND, NO_IN_TURN_ROAD,
+    ROUTINE_STEPS_FOR_LIGHTER, STEP_JUDGMENT_EVERY, STEP_ROW_KIND, STEP_RUBRIC_VERSION,
+    STRONG_STEPS_FOR_HEAVIER,
 };
 pub use reminders::{
     build_design_guidance_reminder, DESIGN_GUIDANCE_REMINDER_PREFIX, PRELUDE_FANNED_OUT_REMINDER,

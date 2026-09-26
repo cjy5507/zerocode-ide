@@ -117,8 +117,25 @@ fn the_setting_reads_the_tables_words_and_a_slip_is_off() {
 /// The words the judgment is shown are pinned: a rewording is a version.
 #[test]
 fn the_rubric_is_pinned_to_its_version() {
-    assert_eq!(MENTION_RUBRIC_VERSION, 1);
-    assert_eq!(rubric_pin(), "3f155c8d1efc284d", "the rubric's words moved: bump MENTION_RUBRIC_VERSION");
+    assert_eq!(MENTION_RUBRIC_VERSION, 2);
+    assert_eq!(rubric_pin(), "5e3cc95d27501896", "the rubric's words moved: bump MENTION_RUBRIC_VERSION");
+}
+
+/// The question names every key it reads (t-10010) — the sentence, the
+/// token, the page, and what each row carries.
+#[test]
+fn the_question_names_every_key_of_its_state() {
+    let state = state_of(&MentionAsk {
+        surface: MentionSurface::Mention,
+        intent: "the composer".to_string(),
+        query: "comp".to_string(),
+        candidates: vec![candidate("src/tui/composer.rs", "the composer")],
+    });
+    let mut keys: Vec<String> = state.as_object().expect("an object").keys().cloned().collect();
+    keys.extend(state["candidates"][0].as_object().expect("a row").keys().cloned());
+    for key in keys {
+        assert!(INSTRUCTIONS.contains(&format!("`{key}`")), "the question never names `{key}`: {INSTRUCTIONS}");
+    }
 }
 
 #[test]
@@ -158,7 +175,9 @@ fn an_answered_page_writes_the_fuzzy_and_proposed_names_and_never_the_words() {
     assert_eq!(body["state"]["candidates"][1]["name"], "src/tui/composer.rs");
     assert_eq!(body["state"]["candidates"][1].get("head"), None, "an empty head is not sent");
     assert_eq!(body["questions"][QUESTION]["type"], "choice");
-    assert_eq!(body["questions"][QUESTION]["criteria"]["c1"], "`candidates[1]`");
+    // An option is the row's place and the title the row shows, never the
+    // place alone (t-10010): a place is a pointer, not a meaning.
+    assert_eq!(body["questions"][QUESTION]["criteria"]["c1"], "They mean `candidates[1]`: src/tui/composer.rs");
     assert!(!sent[0].contains("/Users/"), "no absolute path leaves the machine: {}", sent[0]);
 }
 
@@ -195,6 +214,12 @@ fn a_head_is_cut_at_the_cap_and_the_page_is_one_page() {
     let body: serde_json::Value = serde_json::from_str(&mock.requests()[0]).expect("json");
     assert_eq!(body["state"]["candidates"].as_array().map(Vec::len), Some(MENTION_CANDIDATE_CAP));
     assert_eq!(body["state"]["intent"], "", "a resume search has no sentence but the words typed");
+    // A session's row shows its first words, not its id: that is the title
+    // its option names it by, under the head's own cap (t-10010).
+    assert_eq!(
+        body["questions"][QUESTION]["criteria"]["c0"],
+        format!("They mean `candidates[0]`: {}", ask.candidates[0].head),
+    );
 }
 
 #[test]

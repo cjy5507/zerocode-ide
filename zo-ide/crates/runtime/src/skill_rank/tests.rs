@@ -18,7 +18,7 @@ fn the_search_version_is_pinned_to_its_words() {
     assert_eq!(SKILL_RUBRIC_VERSION, 1);
     assert_eq!(zerocode_core::jev::rubric_fingerprint(search_rubric_words), "c9de8db4a463432e");
     let asked = search_instructions(0);
-    for key in SEARCH_STATE_KEYS {
+    for key in SKILL_STATE_KEYS {
         assert!(asked.contains(&format!("`{key}")), "{key}: {asked}");
     }
     let candidates = skill_candidates(&catalog(2));
@@ -51,14 +51,60 @@ fn a_turn_the_gate_calls_prose_only_suggests_nothing_and_says_so() {
     assert!(suggestion_note(None).contains("No installed skill"));
 }
 
+/// The wide request asks one Choice over the whole catalog, which rides the
+/// state as the explicit search's does — every skill's name and description
+/// under `skills` — while an option says only which skill it loads: its
+/// place and its name (t-10010). Version 2 sent the task alone as the state
+/// and each skill's description as its option's words.
 #[test]
 fn fifty_skills_fit_one_choice_without_shards() {
     let candidates = skill_candidates(&catalog(50));
     let questions = wide_questions(&candidates);
     assert_eq!(questions.len(), 4);
     let criteria = serde_json::to_value(&questions["which"]).expect("choice");
-    assert_eq!(criteria["criteria"].as_object().expect("options").len(), 51);
-    assert!(wide_state("make a file", &candidates).get("skills").is_none());
+    let options = criteria["criteria"].as_object().expect("options");
+    assert_eq!(options.len(), 51);
+    assert_eq!(options["s7"], "Load `skills[7]`, skill-007.");
+    let state = wide_state("make a file", &candidates);
+    assert_eq!(state, skill_state("make a file", &candidates), "the explicit search's own state");
+    assert_eq!(state["skills"].as_array().map(Vec::len), Some(50));
+    assert_eq!(state["skills"][7]["description"], "does thing 7");
+}
+
+/// Every skill's words ride the request once (t-10010): a description or an
+/// excerpt is state, and no option or question carries it again. Version 2
+/// carried a shortlisted skill's description three times — the state, its
+/// option and its fits question — and its excerpt twice.
+#[test]
+fn every_skill_word_rides_a_suggestion_request_once() {
+    let candidates = skill_candidates(&catalog(5));
+    let details: Vec<SkillDetail> = [4, 1]
+        .into_iter()
+        .map(|position| SkillDetail { position, excerpt: format!("EXCERPT-{position} steps") })
+        .collect();
+    let body = |state: &serde_json::Value, questions: &BTreeMap<String, SystemOneQuestion>| {
+        serde_json::to_string(&json!({ "state": state, "questions": questions })).expect("a body")
+    };
+    let wide = body(&wide_state("task", &candidates), &wide_questions(&candidates));
+    let narrow = body(&narrow_state("task", &candidates, &details), &narrow_questions(&candidates, &details));
+    for candidate in &candidates {
+        assert_eq!(wide.matches(&candidate.description).count(), 1, "{}: {wide}", candidate.description);
+    }
+    for detail in &details {
+        let candidate = &candidates[detail.position];
+        assert_eq!(narrow.matches(&candidate.description).count(), 1, "{}: {narrow}", candidate.description);
+        assert_eq!(narrow.matches(&detail.excerpt).count(), 1, "{}: {narrow}", detail.excerpt);
+    }
+    // The shortlist names its skills by their place in `candidates`, in the
+    // order the wide answer ranked them, and asks each one's fit of `task`.
+    let questions = narrow_questions(&candidates, &details);
+    let options = serde_json::to_value(&questions["which"]).expect("choice");
+    assert_eq!(options["criteria"]["s4"], "Load `candidates[0]`, skill-004.");
+    assert_eq!(options["criteria"]["s1"], "Load `candidates[1]`, skill-001.");
+    assert_eq!(questions["fits_s1"].instructions, "Does `candidates[1]` do the specific thing `task` asks for?");
+    let state = narrow_state("task", &candidates, &details);
+    assert_eq!(state["candidates"][1]["name"], "skill-001");
+    assert_eq!(state["candidates"][1]["excerpt"], "EXCERPT-1 steps");
 }
 
 #[test]
@@ -72,9 +118,10 @@ fn a_skill_body_excerpt_is_sent_only_under_its_own_consent_scope() {
         sent.at == "/state/candidates/*/excerpt"
             && sent.cap == Cap::Chars(SKILL_EXCERPT_CHAR_CAP)
     ));
+    // An option carries a skill's place and name, which the state carries
+    // uncut; no question carries its description or its excerpt (t-10010).
     assert!(zerocode_core::jev::SKILLS.sends.iter().any(|sent|
-        sent.at == "/questions/which/criteria/*"
-            && sent.cap == Cap::Chars(zerocode_core::jev::SKILL_DETAIL_CHAR_CAP)
+        sent.at == "/questions/which/criteria/*" && sent.cap == Cap::Uncut
     ));
 }
 

@@ -239,8 +239,9 @@ fn read_answer<T>(
 
 // ---- the routing seat's second version (t-6346) ---------------------------
 //
-// Version 1 asked the probe's rubric as three Choices (above, and still what
-// the step governor asks). The routing seat now asks the core catalog's
+// Version 1 asked the probe's rubric as three Choices (above; the routing
+// replay's first arm still asks it, and the step governor asked it until it
+// had words of its own, t-10010). The routing seat now asks the core catalog's
 // questions (`zerocode_core::jev::questions`) — two Scores, two contrastive
 // Choices and the facts — in one request, and code turns the answers into
 // the router's words and the authority they route with. Nothing here asks a
