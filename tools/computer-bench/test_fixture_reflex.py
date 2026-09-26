@@ -858,6 +858,9 @@ class Tally(unittest.TestCase):
         self.assertEqual(pilot["tokens"], {"input": 4_000, "output": 1_600})
         self.assertIsNotNone(pilot["goal_to_first_press_ms"])
         self.assertIsNone(rows["hand"]["l1_rtt_ms"])
+        # The whole tally reads the same rows: no reflex column is mistaken for one of its own.
+        tally.summarize(list(rows.values()), VALUES)
+        self.assertEqual(pilot["not_carried_out"]["stale"], 1)
         summary = tally.summarize_reflex(list(rows.values()), VALUES)
         entry = next(entry for entry in summary.values() if entry["runs"] == 1 and entry["median_plans"])
         self.assertEqual(entry["median_l1_rtt_p50"], 400.0)

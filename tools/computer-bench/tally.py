@@ -321,7 +321,7 @@ def reflex_row(folder, judged):
         "goal_to_first_press_ms": measured.get("goal_to_first_press_ms"),
         "replan_gap_ms": measured.get("replan_gap_ms") or {},
         "applied": piloted.get("applied"),
-        "invalid": piloted.get("invalid"),
+        "not_carried_out": piloted.get("invalid"),
         "unanswered": piloted.get("unanswered"),
         "ended": piloted.get("ended"),
         "plans": piloted.get("plans"),
