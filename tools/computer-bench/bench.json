@@ -137,6 +137,7 @@
     "value": {
       "pointer_ms": 80,
       "quota": 16,
+      "rules_per_colour": 1,
       "step_pt": 4,
       "min_samples": 6,
       "gate_pt": 24,
@@ -144,7 +145,7 @@
       "confirm": 1,
       "anchors": [0.25, 0.5, 0.75]
     },
-    "why": "The plan the bench writes for the goal: the visible glide (valid_basic's 80 ms), each rule's fire quota under renewal, the blob lattice in reference points (one sample every four, a target at least six samples), the track gate, one blob of a colour, one capture to believe it, and where across the strip the anchors read the phase."
+    "why": "The plan the bench writes for the goal: the visible glide (valid_basic's 80 ms), each rule's fire quota under renewal, the blob lattice in reference points (one sample every four, a target at least six samples), the track gate, one blob of a colour, one capture to believe it, where across the strip the anchors read the phase, and one rule a colour (`run --rules N` writes N, the later ones trying a target again while it stands; the quota shrinks to keep the table's expanded-action budget)."
   },
   "reflex_safety": {
     "value": {

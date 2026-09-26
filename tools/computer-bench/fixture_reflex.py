@@ -165,7 +165,7 @@ def colour_class(entry, tolerance=True):
     return {word: entry[word] for word in words}
 
 
-def plan(geometry, values, bundle, contract_version):
+def plan(geometry, values, bundle, contract_version, rules=None, table_limits=None):
     """The plan the goal asks for, read off the window the window server named
     (`listWindows`) on the display it sits on (`displays`) and the table —
     never off the round: its reference extent is the display in points, its
@@ -203,9 +203,19 @@ def plan(geometry, values, bundle, contract_version):
             "id": colour, "kind": "color", "patches": 1, "roi": roi,
             "scale": {"denominator": 1, "numerator": 1},
         })
-    rules = [{"cooldown_ms": 0, "detector": colour, "id": f"hit_{colour}", "macro_id": f"tap_{colour}",
-              "max_fires": chosen["quota"], "predicate": {"op": "eq", "value": 1}, "priority": 1}
-             for colour in COLOURS]
+    # One rule a colour, or several: a rule that fired is spent until its
+    # colour reads false again, so a rule beside it — armed, lower in priority —
+    # tries the same target again while it stands when the first try ended
+    # without a press. Every rule's quota keeps the plan inside the table's
+    # expanded-action budget (two leaves a fire).
+    many = rules or chosen["rules_per_colour"]
+    leaves = 2
+    budget = (table_limits or limits())["max_expanded_actions"]
+    quota = min(chosen["quota"], budget // (len(COLOURS) * many * leaves))
+    rules = [{"cooldown_ms": 0, "detector": colour, "id": f"hit_{colour}" + (f"_{try_}" if try_ > 1 else ""),
+              "macro_id": f"tap_{colour}", "max_fires": quota, "predicate": {"op": "eq", "value": 1},
+              "priority": many - try_ + 1}
+             for colour in COLOURS for try_ in range(1, many + 1)]
     macros = [{"actions": [{"id": f"move_{colour}", "kind": "move", "target": colour},
                            {"id": f"click_{colour}", "kind": "click", "target": colour}],
                "id": f"tap_{colour}", "repeat": 1}
@@ -712,7 +722,7 @@ class Desk:
         return {"folder": str(run), "frames": fixture.get("frames"), "events": fixture.get("events"),
                 "frame_ms": spread(spans), "shown": sorted({name for frame in frames for name in frame["shown"]})[:12]}
 
-    def run(self, seed, driver, helper_app):
+    def run(self, seed, driver, helper_app, rules=None):
         """One run: announce, re-check, the goal, the driver, the supervision, the verdict."""
         safety = self.values["reflex_safety"]
         why = self.refused({"pointerInside": True}) or self.another_operator()
@@ -723,7 +733,9 @@ class Desk:
         time.sleep(safety["announce_s"])
         run = self.run_folder(seed)
         ready = self.launch(run, seed)
-        record = {"owner": self.session["owner"], "seed": seed, "config": CONFIG, "fixturePid": ready["pid"],
+        many = rules or self.values["reflex_plan"]["rules_per_colour"]
+        record = {"owner": self.session["owner"], "seed": seed, "fixturePid": ready["pid"], "rules": many,
+                  "config": CONFIG if many == self.values["reflex_plan"]["rules_per_colour"] else f"{CONFIG}+rules{many}",
                   "readyNs": ready["readyNs"], "stoppedBy": None}
         driver_process = None
         try:
@@ -795,7 +807,8 @@ class Desk:
             if not planned:
                 if geometry:
                     watch = Supervisor(helper_pid=geometry["helperPid"])
-                    write_atomic(run / "plan.json", plan(geometry, self.values, self.session["bundle"], contract()))
+                    write_atomic(run / "plan.json", plan(geometry, self.values, self.session["bundle"], contract(),
+                                                         rules=record["rules"], table_limits=self.limits))
                     planned = True
                 elif uptime_ns() > prep_until:
                     return stop("preparation overran")
@@ -839,6 +852,7 @@ def main(argv=None):
     parser.add_argument("--seconds", type=float, help="rehearse: how long the round plays with no hand")
     parser.add_argument("--driver", help="run: the window crate's test binary (target/debug/deps/zerocode_shell-…)")
     parser.add_argument("--helper-app", help="run: the helper app (default: the one the window names)")
+    parser.add_argument("--rules", type=int, help="run: rules a colour (default: the table's rules_per_colour)")
     args = parser.parse_args(argv)
     values, table_limits = tally.table(), limits()
     signals = Signals().install()
@@ -858,7 +872,7 @@ def main(argv=None):
                 helper_app = args.helper_app or installed_helper()
                 if not args.driver or not helper_app:
                     parser.error("run needs --driver and a helper app")
-                result = desk.run(args.seed, args.driver, helper_app)
+                result = desk.run(args.seed, args.driver, helper_app, rules=args.rules)
         print(json.dumps(result, indent=2))
         return 0
     except Refused as why:

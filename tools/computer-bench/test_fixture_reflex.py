@@ -516,6 +516,25 @@ class Runner(unittest.TestCase):
         self.assertFalse((self.folder / "run-33").exists(), "refused before the fixture came up")
 
 
+class Retries(unittest.TestCase):
+    def test_several_rules_a_colour_try_a_standing_target_again_inside_the_budget(self):
+        bundle = f"dev.zerocode.bench.reflex.{OWNER}"
+        one = reflex.plan(GEOMETRY, VALUES, bundle, reflex.contract())
+        self.assertEqual(len(one["rules"]), len(reflex.COLOURS), "the table's default is one rule a colour")
+        four = reflex.plan(GEOMETRY, VALUES, bundle, reflex.contract(), rules=4)
+        self.assertEqual(len(four["rules"]), 4 * len(reflex.COLOURS))
+        self.assertEqual(len({rule["id"] for rule in four["rules"]}), len(four["rules"]))
+        for colour in reflex.COLOURS:
+            mine = [rule for rule in four["rules"] if rule["detector"] == colour]
+            self.assertEqual(sorted(rule["priority"] for rule in mine), [1, 2, 3, 4])
+            self.assertTrue(all(rule["macro_id"] == f"tap_{colour}" and rule["predicate"] == {"op": "eq", "value": 1}
+                                for rule in mine))
+        self.assertEqual(four["detectors"], one["detectors"], "the retries change the rules, never what is read")
+        for plan in (one, four, reflex.plan(GEOMETRY, VALUES, bundle, reflex.contract(), rules=16)):
+            self.assertLessEqual(sum(rule["max_fires"] for rule in plan["rules"]) * 2, LIMITS["max_expanded_actions"])
+            self.assertTrue(all(rule["max_fires"] >= 1 for rule in plan["rules"]))
+
+
 class Tally(unittest.TestCase):
     def test_a_reflex_run_is_tallied_from_its_record(self):
         record = clean()
