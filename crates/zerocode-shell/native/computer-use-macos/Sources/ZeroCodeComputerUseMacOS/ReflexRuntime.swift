@@ -133,24 +133,54 @@ protocol ReflexRunSource: ReflexFrameSource {
     func end()
 }
 
+/// When a process started (its BSD info), or nil when none runs under that
+/// pid — a zombie included: a pid names one process only while its start
+/// stands.
+enum ProcessStart {
+    static func of(_ pid: pid_t) -> UInt64? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard pid > 0, proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_status != UInt32(SZOMB) else { return nil }
+        return info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec
+    }
+}
+
 /// What a reflex run's press may land on (`ReflexInputBoundary`): the verbs'
 /// own policy — never ZeroCode's own window (`DesktopSelf.refuseOwn`) — and
 /// only a window of the app the run was started for. Whose window is under a
 /// point is the window server's answer (`DesktopSelf.ownerPid`); a test hands
-/// its own.
+/// its own. A key goes to that app's process alone, and only while it is the
+/// very process the run resolved (`keyRoute`).
 struct DesktopRunBoundary: ReflexInputBoundary {
     let scope: ReflexActingScope
     let owner: @Sendable (CGPoint) -> pid_t?
     let isOwn: @Sendable (pid_t) -> Bool
+    /// When a process started (`ProcessStart.of`).
+    let started: @Sendable (pid_t) -> UInt64?
+    /// When the scope's process started, read as the run began.
+    let scopeStarted: UInt64?
 
     init(
         scope: ReflexActingScope,
         owner: @escaping @Sendable (CGPoint) -> pid_t? = { DesktopSelf.ownerPid(at: $0) },
-        isOwn: @escaping @Sendable (pid_t) -> Bool = { DesktopSelf.isOwn($0) }
+        isOwn: @escaping @Sendable (pid_t) -> Bool = { DesktopSelf.isOwn($0) },
+        started: @escaping @Sendable (pid_t) -> UInt64? = { ProcessStart.of($0) }
     ) {
         self.scope = scope
         self.owner = owner
         self.isOwn = isOwn
+        self.started = started
+        scopeStarted = started(scope.pid)
+    }
+
+    /// The run's app's process, while it is the process the run began with —
+    /// never the desktop's event tap, where a key reaches whatever app a person
+    /// has in front.
+    func keyRoute() -> ReflexKeyRoute {
+        guard let scopeStarted, started(scope.pid) == scopeStarted else {
+            return .refused("\(scope.target), the app this run acts in, no longer runs as pid \(scope.pid); its keys go nowhere else")
+        }
+        return .process(scope.pid)
     }
 
     func refusal(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) -> String? {
@@ -189,6 +219,8 @@ enum ReflexRuntimeHost {
         var boundary: @Sendable (ReflexActingScope) -> any ReflexInputBoundary
         /// Rings the run's deadline on a thread of its own (`DispatchAlarm`).
         var alarm: @Sendable () -> any ReflexAlarm
+        /// Names the codes a plan's keys and modifiers press (`KeyMapKeyboard`).
+        var keyboard: any ReflexKeyboard = KeyMapKeyboard()
 
         static let platform = Parts(
             reader: { try ScreenEye.reader($0, config: $1, displayIndex: $2, framesPerSecond: $3) },
@@ -245,13 +277,15 @@ enum ReflexRuntimeHost {
     }
 
     /// Start a run: the helper validates the plan again under the tables the
-    /// window sent (never numbers of its own), reads the window's capability
-    /// table and the run's policy, resolves what it acts on (`actingScope`: the
-    /// plan's own target, never ZeroCode itself), holds the hand for the run,
-    /// reads the display at the table's rate and proves its monitor hears. The
-    /// run's one deadline counts from the moment this start was first accepted.
-    /// The same start asked again — its answer lost on the way — answers the run
-    /// it started, whatever became of it, and starts nothing.
+    /// window sent (never numbers of its own) — the key table among them —
+    /// reads the window's capability table and the run's policy, names each
+    /// key and modifier's code from its own key table, resolves what it acts on
+    /// (`actingScope`: the plan's own target, never ZeroCode itself), holds the
+    /// hand for the run, reads the display at the table's rate and proves its
+    /// monitor hears. The run's one deadline counts from the moment this start
+    /// was first accepted. The same start asked again — its answer lost on the
+    /// way — answers the run it started, whatever became of it, and starts
+    /// nothing.
     static func start(
         runId: String,
         plan planWire: Data,
@@ -259,6 +293,7 @@ enum ReflexRuntimeHost {
         perception perceptionWire: Data,
         runPolicy policyWire: Data,
         capability capabilityWire: Data,
+        keys keysWire: Data,
         eye: EyeConfig,
         display: Int,
         hand: OperatorHand,
@@ -271,6 +306,7 @@ enum ReflexRuntimeHost {
         let limits: ReflexLimits
         let perception: PerceptionLimits
         let capability: ReflexCapabilityTable
+        let keys: ReflexKeyTable
         let policy: ReflexRunPolicy
         let plan: ValidatedReflexPlan
         do {
@@ -290,12 +326,17 @@ enum ReflexRuntimeHost {
             throw ProviderError.coded("invalid_argument", "the capability table is not the window's canonical table (\(error))")
         }
         do {
+            keys = try ReflexContract.decodeKeys(keysWire)
+        } catch {
+            throw ProviderError.coded("invalid_argument", "the key table is not the window's canonical table (\(error))")
+        }
+        do {
             policy = try ReflexContract.decodeRunPolicy(policyWire, limits: limits)
         } catch let error as ReflexContractError {
             throw ProviderError.coded("invalid_argument", "the run policy was refused: \(error.rawValue)")
         }
         do {
-            plan = try ReflexContract.decodeAndValidate(planWire, limits: limits, perception: perception)
+            plan = try ReflexContract.decodeAndValidate(planWire, limits: limits, perception: perception, keys: keys)
         } catch let error as ReflexContractError {
             throw ProviderError.coded("invalid_argument", "the reflex plan was refused: \(error.rawValue)")
         }
@@ -316,6 +357,13 @@ enum ReflexRuntimeHost {
         lock.unlock()
         guard let kernel else {
             throw ProviderError.coded("unsupported_capability", "this helper has no perception kernel for a reflex plan")
+        }
+        let presses: [String: ReflexPress]
+        do {
+            presses = try ReflexPresses.resolve(plan, keyboard: parts.keyboard)
+        } catch let uncoded as ReflexPresses.Uncoded {
+            throw ProviderError.coded("unsupported_capability",
+                                      "this helper has no key code for \(uncoded.words.joined(separator: "+")) (action \(uncoded.action))")
         }
         if let held { throw busy(held) }
         let boundary = parts.boundary(try actingScope(plan.plan.scope))
@@ -342,7 +390,7 @@ enum ReflexRuntimeHost {
             try keep(mine) { $0.source = source }
             let session = ReflexSession(
                 settings: ReflexSession.Settings(runId: runId, plan: plan, limits: limits, perception: perception, planEpoch: epoch,
-                                                 policy: policy, deadlineNs: deadlineNs),
+                                                 policy: policy, deadlineNs: deadlineNs, presses: presses),
                 hand: hand,
                 source: source,
                 kernel: kernel,
@@ -612,6 +660,11 @@ enum ReflexRuntimeHost {
             "upHostNs": time(receipt.upHostNs),
             "endedHostNs": receipt.endedHostNs,
             "events": receipt.events,
+            "kind": receipt.kind.rawValue,
+            "key": receipt.key.map { $0 as Any } ?? NSNull(),
+            "button": receipt.button.map { $0.rawValue as Any } ?? NSNull(),
+            "modifiers": receipt.modifiers,
+            "reason": receipt.reason.map { $0 as Any } ?? NSNull(),
         ]
     }
 }

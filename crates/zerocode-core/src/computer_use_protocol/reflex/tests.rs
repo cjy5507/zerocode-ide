@@ -880,6 +880,38 @@ fn the_key_table_speaks_the_key_vocabulary() {
     }
 }
 
+/// The key table the window sends is the file's own bytes, read as the helper
+/// reads them; a row refuses its key held with at least its modifiers, and a
+/// table that is not canonical is not read (t-10384).
+#[test]
+fn the_key_table_the_window_sends_is_the_one_table() {
+    let file = include_str!("../../../fixtures/reflex-contract/keys.json");
+    assert_eq!(keys_wire(), file.trim_end().as_bytes());
+    assert_eq!(&decode_keys(keys_wire()).unwrap(), key_table());
+    let held = |words: &[&str]| -> BTreeSet<String> {
+        words.iter().map(|word| (*word).to_string()).collect()
+    };
+    let table = key_table();
+    assert!(table.refuses("q", &held(&["cmd"])));
+    assert!(
+        table.refuses("q", &held(&["cmd", "shift"])),
+        "a wider chord"
+    );
+    assert!(!table.refuses("q", &held(&["shift"])));
+    assert!(!table.refuses("q", &held(&[])));
+    assert!(
+        table.refuses("f11", &held(&[])),
+        "a row that names no modifier"
+    );
+    assert!(table.refuses("f11", &held(&["opt"])));
+    assert!(!table.refuses("1", &held(&["ctrl"])), "a group's key");
+    let spaced = format!(" {}", file.trim_end());
+    assert_eq!(
+        decode_keys(spaced.as_bytes()).unwrap_err(),
+        ReflexError::Wire
+    );
+}
+
 /// A Flow document names a key, a click's button and modifiers and a drag's
 /// ends inside its `macro:` lines — the macro's own JSON — and writes them
 /// back the same way (t-10384).

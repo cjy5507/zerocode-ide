@@ -37,6 +37,11 @@ final class ReflexContractTests: XCTestCase {
         try ReflexContract.decodeLimits(Data(try fixture("limits").dropLast()))
     }
 
+    /// The key table exactly as the window sends it (`reflex::keys_wire`).
+    private func keyTable() throws -> ReflexKeyTable {
+        try ReflexContract.decodeKeys(Data(try fixture("keys").dropLast()))
+    }
+
     /// R5's perception table (`game_state::limits_wire`), which the window sends beside it.
     private func perceptionLimits() throws -> PerceptionLimits {
         let raw = try Data(contentsOf: coreFixtures.appendingPathComponent("game-state/limits.json"))
@@ -48,12 +53,13 @@ final class ReflexContractTests: XCTestCase {
         let names = try XCTUnwrap(manifest["semantic"] as? [String])
         let limits = try contractLimits()
         let perception = try perceptionLimits()
+        let keys = try keyTable()
         for name in names {
             let (expected, planData) = try golden(name)
             if expected == "ok" {
                 let validated: ValidatedReflexPlan
                 do {
-                    validated = try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception)
+                    validated = try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception, keys: keys)
                 } catch {
                     // Every case is judged, so a failure names each case that failed.
                     XCTFail("\(name): \(error)")
@@ -63,7 +69,7 @@ final class ReflexContractTests: XCTestCase {
                 XCTAssertEqual(try ReflexContract.hash(validated.plan), validated.plan.plan_hash, name)
                 XCTAssertEqual(try ReflexContract.wireBytes(validated.plan), planData, name)
             } else {
-                XCTAssertThrowsError(try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception), name) { error in
+                XCTAssertThrowsError(try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception, keys: keys), name) { error in
                     XCTAssertEqual((error as? ReflexContractError)?.rawValue, expected, name)
                 }
             }

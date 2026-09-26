@@ -22,7 +22,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
-    VIRTUAL_KEY, VK_0, VK_A, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
+    VIRTUAL_KEY, VK_0, VK_A, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
+    VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_HOME,
     VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT,
     VK_SPACE, VK_TAB, VK_UP, VkKeyScanW,
 };
@@ -185,6 +186,18 @@ pub(super) fn key_code(name: &str) -> Result<(VIRTUAL_KEY, bool, bool), Provider
         "end" => Some((VK_END, true)),
         "pageup" | "page_up" => Some((VK_PRIOR, true)),
         "pagedown" | "page_down" => Some((VK_NEXT, true)),
+        "f1" => Some((VK_F1, false)),
+        "f2" => Some((VK_F2, false)),
+        "f3" => Some((VK_F3, false)),
+        "f4" => Some((VK_F4, false)),
+        "f5" => Some((VK_F5, false)),
+        "f6" => Some((VK_F6, false)),
+        "f7" => Some((VK_F7, false)),
+        "f8" => Some((VK_F8, false)),
+        "f9" => Some((VK_F9, false)),
+        "f10" => Some((VK_F10, false)),
+        "f11" => Some((VK_F11, false)),
+        "f12" => Some((VK_F12, false)),
         _ => None,
     };
     if let Some((vk, extended)) = named {

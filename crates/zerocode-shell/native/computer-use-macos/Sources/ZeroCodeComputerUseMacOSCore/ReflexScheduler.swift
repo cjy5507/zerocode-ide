@@ -434,7 +434,90 @@ public struct ReflexRuleBook {
     }
 }
 
-/// One leaf action of a fired rule: a move or a click at a detector's target.
+/// The helper's own key table as a run reads it (`KeyMap`, t-10384): the
+/// chord a key held with modifiers makes, and the flags modifiers hold on a
+/// mouse event — nil for a word it has no code for.
+public protocol ReflexKeyboard: Sendable {
+    func chord(key: String, modifiers: [String]) -> KeyChordStroke?
+    func flags(_ modifiers: [String]) -> UInt64?
+}
+
+/// What one action presses beyond putting the pointer somewhere (t-10384),
+/// resolved once when its run starts: a click's or a drag's button and the
+/// flags its modifiers hold on the mouse events, a key's chord in the helper's
+/// own codes, a drag's two ends — and the plan's words for the receipt. A
+/// press nobody resolved names no chord, and no flags for modifiers it holds:
+/// its leaf presses nothing.
+public struct ReflexPress: Equatable, Sendable {
+    public let button: ReflexButton
+    /// The flags its modifiers hold; nil when the words were never resolved.
+    public let flags: UInt64?
+    public let chord: KeyChordStroke?
+    public let from: ReflexDragPoint?
+    public let to: ReflexDragPoint?
+    public let key: String?
+    public let modifiers: [String]
+
+    public init(button: ReflexButton = .left, flags: UInt64? = 0, chord: KeyChordStroke? = nil, from: ReflexDragPoint? = nil,
+                to: ReflexDragPoint? = nil, key: String? = nil, modifiers: [String] = []) {
+        self.button = button
+        self.flags = flags
+        self.chord = chord
+        self.from = from
+        self.to = to
+        self.key = key
+        self.modifiers = modifiers
+    }
+
+    /// `action`'s press with the codes `keyboard` names — nil for a key or
+    /// a modifier it has no code for.
+    public init?(_ action: ReflexAction, keyboard: (any ReflexKeyboard)?) {
+        var chord: KeyChordStroke?
+        if let key = action.key {
+            guard let named = keyboard?.chord(key: key, modifiers: action.modifiers) else { return nil }
+            chord = named
+        }
+        let flags: UInt64?
+        if action.modifiers.isEmpty {
+            flags = 0
+        } else {
+            guard let named = keyboard?.flags(action.modifiers) else { return nil }
+            flags = named
+        }
+        self.init(button: action.button, flags: flags, chord: chord, from: action.from, to: action.to, key: action.key,
+                  modifiers: action.modifiers)
+    }
+
+    /// The plan's words alone, before any code is named.
+    init(unresolved action: ReflexAction) {
+        self.init(button: action.button, flags: action.modifiers.isEmpty ? 0 : nil, from: action.from, to: action.to,
+                  key: action.key, modifiers: action.modifiers)
+    }
+}
+
+public enum ReflexPresses {
+    /// A word the helper's key table has no code for: the run cannot press it.
+    public struct Uncoded: Error, Equatable {
+        public let action: String
+        public let words: [String]
+    }
+
+    /// Every pressing action's press in `plan`, with the codes `keyboard`
+    /// names, keyed by action id — or the first action it cannot code.
+    public static func resolve(_ plan: ValidatedReflexPlan, keyboard: any ReflexKeyboard) throws -> [String: ReflexPress] {
+        var out: [String: ReflexPress] = [:]
+        for action in plan.plan.macros.flatMap(\.actions) where action.kind != .macro && action.kind != .move {
+            guard let press = ReflexPress(action, keyboard: keyboard) else {
+                throw Uncoded(action: action.id, words: action.modifiers + (action.key.map { [$0] } ?? []))
+            }
+            out[action.id] = press
+        }
+        return out
+    }
+}
+
+/// One leaf action of a fired rule: a move, a click, a key or a drag at a
+/// detector's target.
 public struct ReflexLeaf: Equatable, Sendable {
     public let ruleId: String
     public let actionId: String
@@ -442,21 +525,40 @@ public struct ReflexLeaf: Equatable, Sendable {
     public let detector: String
     /// How that detector's target is picked when it follows none, for the receipt.
     public let pick: ReflexPick
+    /// What it presses (t-10384).
+    public let press: ReflexPress
 
-    public init(ruleId: String, actionId: String, kind: ReflexActionKind, detector: String, pick: ReflexPick = .first) {
+    public init(ruleId: String, actionId: String, kind: ReflexActionKind, detector: String, pick: ReflexPick = .first,
+                press: ReflexPress = ReflexPress()) {
         self.ruleId = ruleId
         self.actionId = actionId
         self.kind = kind
         self.detector = detector
         self.pick = pick
+        self.press = press
+    }
+
+    /// The press a click posts: its button's.
+    var clickInput: ReflexLeaseInput { press.button == .right ? .right_click : .left_click }
+
+    /// What its lease lets it post.
+    var inputs: Set<ReflexLeaseInput> {
+        switch kind {
+        case .key: return [.key_press]
+        case .drag: return [.pointer_move, .left_click, .button_drag]
+        case .click: return [.pointer_move, clickInput]
+        case .move, .macro: return [.pointer_move]
+        }
     }
 }
 
 public enum ReflexMacros {
     /// The leaf actions one fire of `macroId` runs, in order: a macro's
-    /// actions `repeat` times, a nested macro expanded where it stands. The
+    /// actions `repeat` times, a nested macro expanded where it stands, each
+    /// with its press from `presses` (the run's, resolved when it started). The
     /// validated plan is acyclic and inside `max_expanded_actions`.
-    public static func leaves(ruleId: String, macroId: String, in plan: ReflexPlan) -> [ReflexLeaf] {
+    public static func leaves(ruleId: String, macroId: String, in plan: ReflexPlan,
+                              presses: [String: ReflexPress] = [:]) -> [ReflexLeaf] {
         let byId = Dictionary(plan.macros.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let picks = Dictionary(plan.detectors.map { ($0.id, $0.pick) }, uniquingKeysWith: { first, _ in first })
         var out: [ReflexLeaf] = []
@@ -466,10 +568,10 @@ public enum ReflexMacros {
                 for action in item.actions {
                     switch action.kind {
                     case .macro: expand(action.target)
-                    case .move, .click:
+                    case .move, .click, .key, .drag:
                         out.append(ReflexLeaf(ruleId: ruleId, actionId: action.id, kind: action.kind, detector: action.target,
-                                              pick: picks[action.target] ?? .first))
-                    case .key: continue
+                                              pick: picks[action.target] ?? .first,
+                                              press: presses[action.id] ?? ReflexPress(unresolved: action)))
                     }
                 }
             }
@@ -504,7 +606,7 @@ extension ReflexActionLease {
             action_id: leaf.actionId,
             target_id: "\(leaf.detector)#\(target.track_id)",
             target_roi: target.roi,
-            allowed_inputs: leaf.kind == .click ? [.pointer_move, .left_click] : [.pointer_move],
+            allowed_inputs: leaf.inputs,
             owner_epoch: frame.owner_epoch,
             stream_epoch: frame.stream_epoch,
             geometry_epoch: frame.geometry_epoch,
@@ -572,7 +674,8 @@ public struct ReflexReceipt: Equatable, Sendable {
         /// the pointer left the point the boundary was asked about.
         case moved
         /// The point is not the run's to act on: ZeroCode's own window, or a
-        /// window of another app than the one the run was started for.
+        /// window of another app than the one the run was started for — or,
+        /// for a key, the app the run was started for no longer runs.
         case scope
         /// The operator stopped, or the run's hold was taken back.
         case stopped
@@ -607,6 +710,15 @@ public struct ReflexReceipt: Equatable, Sendable {
     public let upHostNs: UInt64?
     public let endedHostNs: UInt64
     public let events: UInt64
+    /// What the leaf presses (t-10384): its kind, a key's key, a click's or a
+    /// drag's button, the modifiers it holds.
+    public let kind: ReflexActionKind
+    public let key: String?
+    public let button: ReflexButton?
+    public let modifiers: [String]
+    /// Why it pressed nothing, in the words of whatever refused it — the run's
+    /// boundary for a point or a key — when that has words.
+    public let reason: String?
 }
 
 /// The receipts a run keeps until the window has them on disk (realtime v1
@@ -731,6 +843,7 @@ struct ReflexLeafRunner {
         var downHostNs: UInt64?
         var upHostNs: UInt64?
         var events: UInt64 = 0
+        var reason: String?
 
         func end(_ outcome: ReflexReceipt.Outcome, at endedHostNs: UInt64) -> ReflexReceipt {
             ReflexReceipt(
@@ -741,8 +854,19 @@ struct ReflexLeafRunner {
                 firstEventHostNs: firstEventHostNs, firstEventFrameHostNs: firstEventFrameHostNs,
                 firstEventFrameDeliveredHostNs: firstEventFrameDeliveredHostNs,
                 downHostNs: downHostNs, upHostNs: upHostNs,
-                endedHostNs: endedHostNs, events: events
+                endedHostNs: endedHostNs, events: events,
+                kind: leaf.kind, key: leaf.press.key,
+                button: leaf.kind == .click || leaf.kind == .drag ? leaf.press.button : nil,
+                modifiers: leaf.press.modifiers, reason: reason
             )
+        }
+
+        /// The first event's times, once: when it went and the capture that let it go.
+        mutating func first(_ frame: ReflexFrameFacts, at nowNs: UInt64) {
+            guard firstEventHostNs == nil else { return }
+            firstEventHostNs = nowNs
+            firstEventFrameHostNs = frame.captured_host_ns
+            firstEventFrameDeliveredHostNs = frame.delivered_host_ns
         }
     }
 
@@ -771,6 +895,18 @@ struct ReflexLeafRunner {
         draft.admittedHostNs = hand.nowNs()
         guard let seen = sightings.latest(), case let (sighting, target)? = seen.sighting(of: leaf.detector)
         else { throw Halt.outcome(.no_target) }
+        switch leaf.kind {
+        case .key: try key(leaf, seen, target, &draft)
+        case .drag: try drag(leaf, seen, sighting, target, &draft)
+        case .move, .click, .macro: try pointer(leaf, seen, sighting, target, &draft)
+        }
+    }
+
+    /// A move, or a click with its button and the flags its modifiers hold:
+    /// a glide to the target's aim, then — a click — the press.
+    private func pointer(_ leaf: ReflexLeaf, _ seen: ReflexSightings.Seen, _ sighting: ReflexObservation, _ target: ReflexTarget,
+                         _ draft: inout Draft) throws {
+        guard let flags = leaf.press.flags else { throw Halt.outcome(.failed) }
         let evidence = seen.evidence
         let source = seen.frame
         let issuedNs = hand.nowNs()
@@ -778,7 +914,7 @@ struct ReflexLeafRunner {
         else { throw Halt.outcome(.unaimed) }
         let end = source.point(ofPixelX: Double(aimed.x), y: Double(aimed.y))
         // Where the leaf goes is the run's to act on before anything moves.
-        try within(leaf.kind == .click ? .left_click : .pointer_move, at: end)
+        try within(leaf.kind == .click ? leaf.clickInput : .pointer_move, at: end, &draft)
         let start = hand.pointerNow() ?? end
         let path = PointerSchedule.glide(from: start, to: end, style: style, tickNs: limits.pointer_tick_ns, startNs: issuedNs)
         let presses: UInt64 = leaf.kind == .click ? 2 : 0
@@ -786,13 +922,178 @@ struct ReflexLeafRunner {
             runId: runId, leaf: leaf, target: target, frame: source,
             nowNs: issuedNs, deadlineNs: deadlineNs, children: UInt64(path.count) + presses, limits: limits
         )
+        decided(target, lease, on: source, &draft)
+        try glide(leaf, target, path: path, from: start, input: .pointer_move, evidence: evidence, lease: &lease, draft: &draft,
+                  aim: { moved, at, captured in moved.aim(atHostNs: at, capturedHostNs: captured, maxAgeNs: limits.max_frame_age_ns) },
+                  event: { HandEvent(.pointerMove, x: $0.x, y: $0.y) })
+        guard leaf.kind == .click else { return }
+
+        // The press: a capture newer than the one the lease came from still
+        // shows the same target, the lease holds a click, the pointer is inside
+        // where the target is now, and the point is the run's to press. The
+        // boundary's answer takes its time (the window server is asked), so
+        // what became known meanwhile — evidence taken back, a newer capture,
+        // the clock past the frame or the lease — is read again before the
+        // press, and the press goes only where the boundary was asked.
+        let input = leaf.clickInput
+        var (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+        let pointer = try pressPoint(leaf, target, input, on: frame, at: now, lease: &lease)
+        try within(input, at: pointer, &draft)
+        (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+        guard try pressPoint(leaf, target, input, on: frame, at: now, lease: &lease) == pointer else { throw Halt.outcome(.moved) }
+        let button: MouseButtonSelection = leaf.press.button == .right ? .right : .left
+        try hand.post(HandEvent(.buttonDown(button, clickState: 1), x: pointer.x, y: pointer.y, flags: flags), by: token)
+        draft.downHostNs = hand.nowNs()
+        draft.first(frame.frame, at: draft.downHostNs ?? now)
+        draft.events += 1
+        lease = lease.spent()
+        // The fence the window server needs between a press and its release;
+        // a stop inside it has already let go of the button (`OperatorHand.stop`).
+        try hand.sleep(untilNs: hand.nowNs() &+ fenceNs, by: token)
+        try hand.post(HandEvent(.buttonUp(button, clickState: 1), x: pointer.x, y: pointer.y, flags: flags), by: token)
+        draft.upHostNs = hand.nowNs()
+        draft.events += 1
+    }
+
+    /// A key (t-10384): its chord goes to the process of the app the run was
+    /// started for — never the desktop — while that app runs, once a capture
+    /// newer than the one that decided it still shows its target under a
+    /// lease that permits a key. Whatever stops the chord midway, each of its
+    /// presses is let go of: its releases go, and the hand posts only those of
+    /// what this hold still holds.
+    private func key(_ leaf: ReflexLeaf, _ seen: ReflexSightings.Seen, _ target: ReflexTarget, _ draft: inout Draft) throws {
+        guard let chord = leaf.press.chord else { throw Halt.outcome(.failed) }
+        let evidence = seen.evidence
+        let source = seen.frame
+        // Where it goes is known before anything is issued.
+        _ = try keyRoute(&draft)
+        var lease = ReflexActionLease.issue(
+            runId: runId, leaf: leaf, target: target, frame: source, nowNs: hand.nowNs(), deadlineNs: deadlineNs,
+            children: UInt64(chord.downs(route: .desktop).count + chord.ups(route: .desktop).count), limits: limits
+        )
+        decided(target, lease, on: source, &draft)
+        let (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+        guard case let (_, moved)? = frame.sighting(of: leaf.detector, track: target.track_id) else { throw Halt.outcome(.moved) }
+        lease = lease.renewed(by: frame.frame, target: moved, limits: limits)
+        guard lease.permits(frame.frame, now_host_ns: now, input: .key_press, limits: limits) else { throw Halt.outcome(.lease) }
+        // Asked again just before the press: the app may have gone while the capture was awaited.
+        let route = HandRoute.process(try keyRoute(&draft))
+        let ups = chord.ups(route: route)
+        do {
+            for event in chord.downs(route: route) {
+                try hand.post(event, by: token)
+                draft.first(frame.frame, at: hand.nowNs())
+                draft.events += 1
+                lease = lease.spent()
+            }
+            draft.downHostNs = hand.nowNs()
+            for (index, event) in ups.enumerated() {
+                try hand.post(event, by: token)
+                if index == 0 { draft.upHostNs = hand.nowNs() }
+                draft.events += 1
+            }
+        } catch {
+            for event in ups { try? hand.post(event, by: token) }
+            throw error
+        }
+    }
+
+    /// A drag (t-10384): a glide to `from` on the target's hitbox, the left
+    /// button pressed there, a move to `to` with it held at the table's
+    /// pointer tick, and the release — one leaf, on one lease. Both ends are
+    /// the run's to act on before anything moves, and the press goes only
+    /// where the target now puts `from`. Once pressed, whatever ends the drag
+    /// lets go of the button where the pointer stands.
+    private func drag(_ leaf: ReflexLeaf, _ seen: ReflexSightings.Seen, _ sighting: ReflexObservation, _ target: ReflexTarget,
+                      _ draft: inout Draft) throws {
+        guard let flags = leaf.press.flags, let from = leaf.press.from, let to = leaf.press.to else { throw Halt.outcome(.failed) }
+        let evidence = seen.evidence
+        let source = seen.frame
+        let issuedNs = hand.nowNs()
+        let captured = sighting.frame.captured_host_ns
+        guard let pressAt = target.point(from, atHostNs: issuedNs, capturedHostNs: captured, maxAgeNs: limits.max_frame_age_ns),
+              let letGoAt = target.point(to, atHostNs: issuedNs, capturedHostNs: captured, maxAgeNs: limits.max_frame_age_ns)
+        else { throw Halt.outcome(.unaimed) }
+        let start = source.point(ofPixelX: Double(pressAt.x), y: Double(pressAt.y))
+        let end = source.point(ofPixelX: Double(letGoAt.x), y: Double(letGoAt.y))
+        try within(.left_click, at: start, &draft)
+        try within(.left_click, at: end, &draft)
+        let here = hand.pointerNow() ?? start
+        let toPress = PointerSchedule.glide(from: here, to: start, style: style, tickNs: limits.pointer_tick_ns, startNs: issuedNs)
+        let held = PointerSchedule.glide(from: start, to: end, style: style, tickNs: limits.pointer_tick_ns, startNs: issuedNs)
+        var lease = ReflexActionLease.issue(
+            runId: runId, leaf: leaf, target: target, frame: source,
+            nowNs: issuedNs, deadlineNs: deadlineNs, children: UInt64(toPress.count + held.count) + 2, limits: limits
+        )
+        decided(target, lease, on: source, &draft)
+        let maxAgeNs = limits.max_frame_age_ns
+        let carried = { (point: ReflexDragPoint) in
+            { (moved: ReflexTarget, at: UInt64, captured: UInt64) in
+                moved.point(point, atHostNs: at, capturedHostNs: captured, maxAgeNs: maxAgeNs)
+            }
+        }
+        try glide(leaf, target, path: toPress, from: here, input: .pointer_move, evidence: evidence, lease: &lease, draft: &draft,
+                  aim: carried(from), event: { HandEvent(.pointerMove, x: $0.x, y: $0.y) })
+
+        // The press, read as a click's is: a newer capture still shows the
+        // target, the lease holds a click, the pointer stands where the target
+        // puts `from`, and the point is the run's — read again once the
+        // boundary has answered.
+        var (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+        let pointer = try dragStart(leaf, target, from, on: frame, at: now, lease: &lease)
+        try within(.left_click, at: pointer, &draft)
+        (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+        guard try dragStart(leaf, target, from, on: frame, at: now, lease: &lease) == pointer else { throw Halt.outcome(.moved) }
+        try hand.post(HandEvent(.buttonDown(.left, clickState: 1), x: pointer.x, y: pointer.y, flags: flags), by: token)
+        let pressedNs = hand.nowNs()
+        draft.downHostNs = pressedNs
+        draft.first(frame.frame, at: pressedNs)
+        draft.events += 1
+        lease = lease.spent()
+        do {
+            let path = PointerSchedule.glide(from: pointer, to: end, style: style, tickNs: limits.pointer_tick_ns, startNs: pressedNs)
+            let last = try glide(leaf, target, path: path, from: pointer, input: .button_drag, evidence: evidence, lease: &lease,
+                                 draft: &draft, aim: carried(to),
+                                 event: { HandEvent(.buttonDrag(.left, clickState: 1), x: $0.x, y: $0.y, flags: flags) }) ?? pointer
+            // The pointer rests a tick where it lets go, and the release comes
+            // no sooner than a click's fence after the press.
+            try hand.sleep(untilNs: max(hand.nowNs() &+ limits.pointer_tick_ns, pressedNs &+ fenceNs), by: token)
+            try hand.post(HandEvent(.buttonUp(.left, clickState: 1), x: last.x, y: last.y, flags: flags), by: token)
+            draft.upHostNs = hand.nowNs()
+            draft.events += 1
+        } catch {
+            // A release always goes; the hand posts it only while this hold
+            // still holds the button (a stop has let go of it already).
+            let at = hand.pointerNow() ?? pointer
+            try? hand.post(HandEvent(.buttonUp(.left, clickState: 1), x: at.x, y: at.y, flags: flags), by: token)
+            throw error
+        }
+    }
+
+    /// The leaf's record of what it was decided on.
+    private func decided(_ target: ReflexTarget, _ lease: ReflexActionLease, on source: ReflexFrameFacts, _ draft: inout Draft) {
         draft.targetId = lease.target_id
         draft.trackId = target.track_id
         draft.sourceCapture = source.capture_seq
         draft.decidedHostNs = source.captured_host_ns
         draft.decidedDeliveredHostNs = source.delivered_host_ns
+    }
 
-        var aim = end
+    /// The pointer along `path` from `start`, toward where `aim` puts the
+    /// target on each newer capture — every waypoint read against the newest
+    /// evaluated frame, the lease renewed by the same target on it and
+    /// permitting `input`; a capture that no longer shows the target ends it.
+    /// Answers the last point posted.
+    @discardableResult
+    private func glide(
+        _ leaf: ReflexLeaf, _ target: ReflexTarget, path: [PointerWaypoint], from start: SmoothPointerPath.Point,
+        input: ReflexLeaseInput, evidence: UInt64, lease: inout ReflexActionLease, draft: inout Draft,
+        aim: (_ target: ReflexTarget, _ atHostNs: UInt64, _ capturedHostNs: UInt64) -> (x: Int64, y: Int64)?,
+        event: (SmoothPointerPath.Point) -> HandEvent
+    ) throws -> SmoothPointerPath.Point? {
+        guard let last = path.last else { return nil }
+        var toward = SmoothPointerPath.Point(x: last.x, y: last.y)
+        var reached: SmoothPointerPath.Point?
         var posted = -1
         while posted + 1 < path.count {
             try hand.sleep(untilNs: path[posted + 1].dueNs, by: token)
@@ -802,64 +1103,34 @@ struct ReflexLeafRunner {
             guard case let (fresh, moved)? = frame.sighting(of: leaf.detector, track: target.track_id)
             else { throw Halt.outcome(.moved) }
             lease = lease.renewed(by: frame.frame, target: moved, limits: limits)
-            if let again = moved.aim(atHostNs: now, capturedHostNs: fresh.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns) {
-                aim = frame.frame.point(ofPixelX: Double(again.x), y: Double(again.y))
+            if let again = aim(moved, now, fresh.frame.captured_host_ns) {
+                toward = frame.frame.point(ofPixelX: Double(again.x), y: Double(again.y))
             }
-            guard lease.permits(frame.frame, now_host_ns: now, input: .pointer_move, limits: limits) else { throw Halt.outcome(.lease) }
+            guard lease.permits(frame.frame, now_host_ns: now, input: input, limits: limits) else { throw Halt.outcome(.lease) }
             guard let index = PointerSchedule.due(path, after: posted, nowNs: now) else { continue }
             let share = style.instant || index == path.count - 1 ? 1 : style.share(Double(index + 1) / Double(path.count))
-            let point = SmoothPointerPath.Point(x: start.x + (aim.x - start.x) * share, y: start.y + (aim.y - start.y) * share)
-            try hand.post(HandEvent(.pointerMove, x: point.x, y: point.y), by: token)
-            if draft.firstEventHostNs == nil {
-                draft.firstEventHostNs = hand.nowNs()
-                draft.firstEventFrameHostNs = frame.frame.captured_host_ns
-                draft.firstEventFrameDeliveredHostNs = frame.frame.delivered_host_ns
-            }
+            let point = SmoothPointerPath.Point(x: start.x + (toward.x - start.x) * share, y: start.y + (toward.y - start.y) * share)
+            try hand.post(event(point), by: token)
+            draft.first(frame.frame, at: hand.nowNs())
             draft.events += 1
             lease = lease.spent()
+            reached = point
             posted = index
         }
-        guard leaf.kind == .click else { return }
-
-        // The press: a capture newer than the one the lease came from still
-        // shows the same target, the lease holds, the pointer is inside where
-        // the target is now, and the point is the run's to press. The
-        // boundary's answer takes its time (the window server is asked), so
-        // what became known meanwhile — evidence taken back, a newer capture,
-        // the clock past the frame or the lease — is read again before the
-        // press, and the press goes only where the boundary was asked.
-        var (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
-        let pointer = try pressPoint(leaf, target, on: frame, at: now, lease: &lease)
-        try within(.left_click, at: pointer)
-        (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
-        guard try pressPoint(leaf, target, on: frame, at: now, lease: &lease) == pointer else { throw Halt.outcome(.moved) }
-        try hand.post(HandEvent(.buttonDown(.left, clickState: 1), x: pointer.x, y: pointer.y), by: token)
-        draft.downHostNs = hand.nowNs()
-        if draft.firstEventHostNs == nil {
-            draft.firstEventHostNs = draft.downHostNs
-            draft.firstEventFrameHostNs = frame.frame.captured_host_ns
-            draft.firstEventFrameDeliveredHostNs = frame.frame.delivered_host_ns
-        }
-        draft.events += 1
-        lease = lease.spent()
-        // The fence the window server needs between a press and its release;
-        // a stop inside it has already let go of the button (`OperatorHand.stop`).
-        try hand.sleep(untilNs: hand.nowNs() &+ fenceNs, by: token)
-        try hand.post(HandEvent(.buttonUp(.left, clickState: 1), x: pointer.x, y: pointer.y), by: token)
-        draft.upHostNs = hand.nowNs()
-        draft.events += 1
+        return reached
     }
 
     /// Where the press goes on `seen` at `now`, `lease` renewed by it: the
-    /// leaf's target on that capture, the lease holding a click then, and the
+    /// leaf's target on that capture, the lease holding `input` then, and the
     /// aim and the pointer still inside where the target is. A lease that no
     /// longer holds ends the leaf as `lease` before the target's place is read.
     private func pressPoint(
-        _ leaf: ReflexLeaf, _ target: ReflexTarget, on seen: ReflexSightings.Seen, at now: UInt64, lease: inout ReflexActionLease
+        _ leaf: ReflexLeaf, _ target: ReflexTarget, _ input: ReflexLeaseInput, on seen: ReflexSightings.Seen, at now: UInt64,
+        lease: inout ReflexActionLease
     ) throws -> SmoothPointerPath.Point {
         guard case let (fresh, moved)? = seen.sighting(of: leaf.detector, track: target.track_id) else { throw Halt.outcome(.moved) }
         lease = lease.renewed(by: seen.frame, target: moved, limits: limits)
-        guard lease.permits(seen.frame, now_host_ns: now, input: .left_click, limits: limits) else { throw Halt.outcome(.lease) }
+        guard lease.permits(seen.frame, now_host_ns: now, input: input, limits: limits) else { throw Halt.outcome(.lease) }
         guard moved.aim(atHostNs: now, capturedHostNs: fresh.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns) != nil,
               let pointer = hand.pointerNow(), let pixel = seen.frame.pixel(ofPoint: pointer),
               moved.roi.contains(x: pixel.x, y: pixel.y)
@@ -867,10 +1138,44 @@ struct ReflexLeafRunner {
         return pointer
     }
 
+    /// Where a drag presses on `seen` at `now`, `lease` renewed by it: the
+    /// leaf's target on that capture, the lease holding a click then, and the
+    /// pointer standing where the target puts `from` — within the target's own
+    /// uncertainty about its place.
+    private func dragStart(
+        _ leaf: ReflexLeaf, _ target: ReflexTarget, _ from: ReflexDragPoint, on seen: ReflexSightings.Seen, at now: UInt64,
+        lease: inout ReflexActionLease
+    ) throws -> SmoothPointerPath.Point {
+        guard case let (fresh, moved)? = seen.sighting(of: leaf.detector, track: target.track_id) else { throw Halt.outcome(.moved) }
+        lease = lease.renewed(by: seen.frame, target: moved, limits: limits)
+        guard lease.permits(seen.frame, now_host_ns: now, input: .left_click, limits: limits) else { throw Halt.outcome(.lease) }
+        let reach = Double(moved.uncertainty)
+        guard let at = moved.point(from, atHostNs: now, capturedHostNs: fresh.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns),
+              let pointer = hand.pointerNow(), let pixel = seen.frame.pixel(ofPoint: pointer),
+              abs(pixel.x - Double(at.x)) <= reach, abs(pixel.y - Double(at.y)) <= reach
+        else { throw Halt.outcome(.moved) }
+        return pointer
+    }
+
     /// The boundary's word on `input` at `point`: a refusal ends the leaf
-    /// before the event.
-    private func within(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) throws {
-        if boundary.refusal(input, at: point) != nil { throw Halt.outcome(.scope) }
+    /// before the event, its words on the receipt.
+    private func within(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point, _ draft: inout Draft) throws {
+        if let refusal = boundary.refusal(input, at: point) {
+            draft.reason = refusal
+            throw Halt.outcome(.scope)
+        }
+    }
+
+    /// The process a key goes to, as the boundary names it now; a refusal ends
+    /// the leaf before anything is pressed, its words on the receipt.
+    private func keyRoute(_ draft: inout Draft) throws -> Int32 {
+        switch boundary.keyRoute() {
+        case let .process(pid):
+            return pid
+        case let .refused(reason):
+            draft.reason = reason
+            throw Halt.outcome(.scope)
+        }
     }
 
     /// Admit the leaf once: a paced table's wait is slept on the hand, where
@@ -1028,6 +1333,24 @@ public struct ReflexActingScope: Equatable, Sendable {
 public protocol ReflexInputBoundary: Sendable {
     /// Why `input` may not go at `point`, or nil when it may.
     func refusal(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) -> String?
+    /// Where a key goes now (t-10384): asked before a key leaf's lease is
+    /// issued and again before its first press.
+    func keyRoute() -> ReflexKeyRoute
+}
+
+/// Where a reflex run's key goes (t-10384): to the process of the app the run
+/// was started for, while that app runs — never to the desktop, where it would
+/// reach whatever app a person has in front — or nowhere, and why.
+public enum ReflexKeyRoute: Equatable, Sendable {
+    case process(Int32)
+    case refused(String)
+}
+
+public extension ReflexInputBoundary {
+    /// A boundary that names no process for keys sends them nowhere.
+    func keyRoute() -> ReflexKeyRoute {
+        .refused("this run names no app for its keys, and a key goes nowhere else")
+    }
 }
 
 /// Why a run paused or ended on its own, in the words its status reports. A
@@ -1128,9 +1451,13 @@ public final class ReflexSession: @unchecked Sendable {
         public let planEpoch: UInt64
         public let policy: ReflexRunPolicy
         public let deadlineNs: UInt64
+        /// What each action presses, in the helper's own codes, resolved when
+        /// the start was accepted (`ReflexPresses.resolve`); an action missing
+        /// from it presses nothing it would need a code for.
+        public let presses: [String: ReflexPress]
 
         public init(runId: String, plan: ValidatedReflexPlan, limits: ReflexLimits, perception: PerceptionLimits, planEpoch: UInt64,
-                    policy: ReflexRunPolicy, deadlineNs: UInt64) {
+                    policy: ReflexRunPolicy, deadlineNs: UInt64, presses: [String: ReflexPress] = [:]) {
             self.runId = runId
             self.plan = plan
             self.limits = limits
@@ -1138,6 +1465,7 @@ public final class ReflexSession: @unchecked Sendable {
             self.planEpoch = planEpoch
             self.policy = policy
             self.deadlineNs = deadlineNs
+            self.presses = presses
         }
     }
 
@@ -1616,7 +1944,7 @@ public final class ReflexSession: @unchecked Sendable {
             lock.unlock()
             guard let rule else { continue }
             let ran = Self.runFire(
-                ReflexMacros.leaves(ruleId: rule.id, macroId: rule.macro_id, in: settings.plan.plan),
+                ReflexMacros.leaves(ruleId: rule.id, macroId: rule.macro_id, in: settings.plan.plan, presses: settings.presses),
                 receipts: receipts,
                 acting: { acting(at: hand.nowNs()) },
                 overflowed: { finish(.stopped(ReflexRunReason.overflow)) },
