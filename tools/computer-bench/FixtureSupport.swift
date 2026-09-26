@@ -9,15 +9,18 @@ func uptimeNs() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
 final class Recorder: @unchecked Sendable {
     let folder: URL
     private let queue = DispatchQueue(label: "reflex-fixture.recorder")
-    private var events: [[String: Any]] = []
-    private var frames: [[String: Any]] = []
+    private enum Stream: String, CaseIterable {
+        case events = "events.jsonl", frames = "frames.jsonl", oracle = "oracle.jsonl"
+    }
+    private var streams: [Stream: [[String: Any]]] = [:]
 
     init(folder: URL) {
         self.folder = folder
     }
 
-    func event(_ row: [String: Any]) { events.append(row) }
-    func frame(_ row: [String: Any]) { frames.append(row) }
+    func event(_ row: [String: Any]) { streams[.events, default: []].append(row) }
+    func frame(_ row: [String: Any]) { streams[.frames, default: []].append(row) }
+    func scene(_ row: [String: Any]) { streams[.oracle, default: []].append(row) }
 
     func write(_ name: String, _ object: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return }
@@ -36,9 +39,8 @@ final class Recorder: @unchecked Sendable {
             }
             return text
         }
-        let appended = [("events.jsonl", lines(events)), ("frames.jsonl", lines(frames))]
-        events = []
-        frames = []
+        let appended = Stream.allCases.map { ($0.rawValue, lines(streams[$0] ?? [])) }
+        streams.removeAll(keepingCapacity: true)
         let whole = (try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])) ?? Data()
         let folder = self.folder
         let work: @Sendable () -> Void = {
