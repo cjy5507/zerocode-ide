@@ -707,6 +707,14 @@ class Desk:
             return "another operator acted a moment ago"
         return None
 
+    def another_bench(self):
+        """Why the pointer may be someone else's now, or None: another reflex
+        round standing on this machine — a runner, its driver or its fixture,
+        from any checkout — would put two hands on one pointer, or cover this
+        fixture with its own."""
+        standing = other_benches(os.getpid())
+        return f"another reflex round is standing ({standing[0]})" if standing else None
+
     def rehearse(self, seed, seconds):
         """A round with no hand: the fixture plays and records, nothing is pressed."""
         run = self.run_folder(f"rehearsal-{seed}")
@@ -725,7 +733,7 @@ class Desk:
     def run(self, seed, driver, helper_app, rules=None):
         """One run: announce, re-check, the goal, the driver, the supervision, the verdict."""
         safety = self.values["reflex_safety"]
-        why = self.refused({"pointerInside": True}) or self.another_operator()
+        why = self.refused({"pointerInside": True}) or self.another_operator() or self.another_bench()
         if why:
             raise Refused(why)
         print(f"reflex bench: the pointer will move on the fixture in {safety['announce_s']} s for "
@@ -739,7 +747,7 @@ class Desk:
                   "readyNs": ready["readyNs"], "stoppedBy": None}
         driver_process = None
         try:
-            why = self.refused(ready) or self.another_operator()
+            why = self.refused(ready) or self.another_operator() or self.another_bench()
             if why:
                 record["refused"] = why
                 raise Refused(why)
@@ -835,6 +843,27 @@ class Desk:
         finally:
             if driver_process.stdin:
                 driver_process.stdin.close()
+
+
+def other_benches(own, listing=None):
+    """Every reflex round standing now that is not `own`'s or its children's:
+    a runner (`run` or `rehearse`), a driver test, or a fixture executable —
+    read with `ps -Aww`, since a clipped command line would hide one."""
+    if listing is None:
+        listing = subprocess.run(["ps", "-Aww", "-o", "pid=,ppid=,command="], capture_output=True, text=True).stdout
+    marks = (f"{pathlib.Path(__file__).name} run", f"{pathlib.Path(__file__).name} rehearse", DRIVER_TEST,
+             f"/Contents/MacOS/{EXECUTABLE}")
+    standing = []
+    for line in listing.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        pid, ppid, command = int(parts[0]), int(parts[1]), parts[2]
+        if own in (pid, ppid):
+            continue
+        if any(mark in command for mark in marks):
+            standing.append(command)
+    return standing
 
 
 def installed_helper():

@@ -285,6 +285,39 @@ class Safety(unittest.TestCase):
         stopped["run"]["stoppedBy"] = "person"
         self.assertEqual(reflex.verdict(stopped, VALUES, LIMITS)["verdict"], "aborted")
 
+    def test_another_round_standing_anywhere_keeps_this_one_from_starting(self):
+        own = 500
+        listing = "\n".join([
+            f"{own} 1 python3 fixture_reflex.py run /tmp/bench --seed 1",       # this runner
+            f"501 {own} /tmp/bench/ReflexFixture-a.app/Contents/MacOS/ReflexFixture r.json /tmp/run",  # its fixture
+            "777 1 /usr/bin/python3 /Users/dev/elsewhere/tools/computer-bench/fixture_reflex.py run /tmp/b2 --seed 9",
+            "778 1 /Users/dev/elsewhere/target/debug/deps/zerocode_shell-0f " + reflex.DRIVER_TEST + " --exact --ignored",
+            "779 1 /tmp/b3/ReflexFixture-b.app/Contents/MacOS/ReflexFixture round.json /tmp/b3/run-1",
+            "780 1 python3 fixture_reflex.py rehearse /tmp/b4 --seed 2",
+            "781 1 /bin/zsh -c grep fixture_reflex",
+        ])
+        standing = reflex.other_benches(own, listing)
+        self.assertEqual(len(standing), 4, standing)
+        self.assertFalse(any(line.startswith("python3 fixture_reflex.py run /tmp/bench") for line in standing))
+        self.assertEqual(reflex.other_benches(own, "\n".join(listing.splitlines()[:2])), [], "its own tree is no other round")
+        # The runner refuses before anything shows: no fixture, no folder.
+        folder = pathlib.Path(tempfile.mkdtemp())
+        try:
+            (folder / "session.json").write_text(json.dumps({"owner": OWNER, "app": "-", "executable": "/nowhere",
+                                                            "bundle": f"{reflex.BUNDLE_PREFIX}.{OWNER}"}))
+            desk = reflex.Desk(folder, VALUES, LIMITS)
+            with mock.patch.object(reflex.Bench, "hid_idle_s", return_value=VALUES["reflex_safety"]["idle_s"] + 1), \
+                    mock.patch.object(reflex.Bench, "screen_locked", return_value=False), \
+                    mock.patch.object(reflex.Desk, "another_operator", return_value=None), \
+                    mock.patch.object(reflex, "other_benches", return_value=[standing[0]]):
+                with self.assertRaises(reflex.Refused) as refused:
+                    desk.run(41, "/nowhere/driver", "/nowhere/helper.app")
+            self.assertIn("another reflex round", str(refused.exception))
+            self.assertFalse((folder / "run-41").exists())
+        finally:
+            import shutil
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_a_run_the_helper_refused_is_not_judged_and_says_why(self):
         refused = clean()
         refused["started"] = None
@@ -476,6 +509,7 @@ class Runner(unittest.TestCase):
         with mock.patch.object(reflex.Bench, "hid_idle_s", return_value=VALUES["reflex_safety"]["idle_s"] + 1), \
                 mock.patch.object(reflex.Bench, "screen_locked", return_value=False), \
                 mock.patch.object(reflex.Desk, "another_operator", return_value=None), \
+                mock.patch.object(reflex, "other_benches", return_value=[]), \
                 mock.patch.dict(os.environ, env):
             return desk.run(seed, self.driver, "/nowhere/helper.app"), self.folder / f"run-{seed}"
 
