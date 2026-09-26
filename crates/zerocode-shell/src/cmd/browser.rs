@@ -187,14 +187,21 @@ pub(crate) const CLICK_SAID_KEY: &str = "said";
 /// The answer of `click <label> --mark <n> --settle-later` (t-9712): the
 /// page as the press left it, read as `marks --json` reads it, with the
 /// press's own sentence beside it — or the sentence alone when that look
-/// could not be read (the press was made; the pane's next `marks` finishes
-/// its settle either way).
+/// could not be read (the press was made all the same). A press that settled
+/// before it answered — its legend stood (t-9876) — says how under the look's
+/// own key, as a look that finished a held settle says it, and in its
+/// sentence, as a press without the flag does; one that did not leaves its
+/// settle for the pane's next `marks`.
 pub(crate) fn settle_later_json(
     report: &BrowserInputReport,
     look: Option<&BrowserLook>,
 ) -> serde_json::Value {
     let mut answer = look.map_or_else(|| serde_json::json!({}), marks_json);
     answer[CLICK_SAID_KEY] = input_said(CLICK_SAID, report).into();
+    if let Some(settle) = &report.settle {
+        answer[zerocode_core::agent_browser::BROWSER_SETTLE_KEY] =
+            zerocode_core::agent_browser::settle_said(settle.state, settle.why, settle.ms);
+    }
     answer
 }
 
@@ -3410,32 +3417,101 @@ pub(crate) async fn automate_click_mark(
     label: &str,
     mark_n: usize,
 ) -> Result<BrowserInputReport, String> {
-    let (pane, pin, mut report) = press_mark(app, state, label, mark_n).await?;
+    let PressedMark {
+        pane,
+        pin,
+        mut report,
+        ..
+    } = press_mark(app, state, label, mark_n).await?;
     report.settle = Some(settle_after_press(&pane, &pin.document_epoch, report.pressed_at).await);
     Ok(report)
 }
 
 /// `click <label> --mark N --settle-later` (t-9712): the same press, answered
-/// the moment it is made — its settle held for the pane's next `marks`, which
-/// finishes it before it reads — with the page as the press left it, read
-/// and numbered as a look (`None` when that look could not be read: the press
-/// was made all the same).
+/// the moment it is made when it changed the page's legend — its settle held
+/// for the pane's next `marks`, which finishes it before it reads — with the
+/// page as the press changed it, read and numbered as a look (`None` when
+/// that look could not be read: the press was made all the same). A press
+/// whose page still reads the legend it was made on settles before it
+/// answers, as a press without the flag does, and answers the page read after
+/// its settle, saying how it settled (t-9876): nothing it left could begin a
+/// judgment, and a change still to come — a result a fetch renders — lands
+/// inside the settle, not after an answer that showed the page as it was.
 pub(crate) async fn automate_click_mark_later(
     app: &AppHandle,
     state: &AppState,
     label: &str,
     mark_n: usize,
 ) -> Result<(BrowserInputReport, Option<BrowserLook>), String> {
-    let (pane, pin, report) = press_mark(app, state, label, mark_n).await?;
-    hold_settle(
+    let PressedMark {
+        pane,
+        pin,
+        marks,
+        mut report,
+    } = press_mark(app, state, label, mark_n).await?;
+    let held = HeldSettle {
+        epoch: pin.document_epoch,
+        since: report.pressed_at,
+    };
+    let (settle, look) = look_after_press(
         label,
-        HeldSettle {
-            epoch: pin.document_epoch,
-            since: report.pressed_at,
-        },
-    );
-    let look = read_look(&pane, label).await.ok();
+        pane,
+        &marks,
+        held,
+        |pane, held| async move { settle_after_press(&pane, &held.epoch, held.since).await },
+        |pane| async move { read_look(&pane, label).await },
+    )
+    .await;
+    report.settle = settle;
     Ok((report, look))
+}
+
+/// What a settle-later press answers with, apart from the window (t-9876):
+/// `read` reads the page the moment the press was made, and its legend
+/// decides. Still the legend the press was made on (`pressed_on`, the marks
+/// it was pinned by — taken before any look replaced the pane's table), the
+/// press changed nothing a next judgment could begin on, so it settles here
+/// by the one settle road (`settle`, from the press and within its own wall),
+/// holds nothing, and answers the page `read` reads after, with how it
+/// settled. A legend that moved holds the settle for the pane's next look
+/// (t-9712) and answers the page the press changed. A first read that failed
+/// shows no legend that stood still: the settle is held, as before.
+pub(crate) async fn look_after_press<P, S, SF, R, RF>(
+    label: &str,
+    pane: P,
+    pressed_on: &[BrowserMark],
+    held: HeldSettle,
+    settle: S,
+    read: R,
+) -> (Option<SettleReport>, Option<BrowserLook>)
+where
+    P: Clone,
+    S: FnOnce(P, HeldSettle) -> SF,
+    SF: std::future::Future<Output = SettleReport>,
+    R: Fn(P) -> RF,
+    RF: std::future::Future<Output = Result<BrowserLook, String>>,
+{
+    use zerocode_core::computer_use_protocol::marks::same_legend;
+    let left = read(pane.clone()).await.ok();
+    let stood = left
+        .as_ref()
+        .is_some_and(|left| same_legend(&marks_items(pressed_on), &marks_items(&left.marks)));
+    if !stood {
+        hold_settle(label, held);
+        return (None, left);
+    }
+    let settled = settle(pane.clone(), held).await;
+    (Some(settled), read(pane).await.ok())
+}
+
+/// A press by number, made: the pane it was made on, what the look pinned
+/// the number to, the marks the look numbered — the legend the press was
+/// made on (t-9876) — and the press's own report.
+struct PressedMark {
+    pane: BrowserPane,
+    pin: BrowserLookPin,
+    marks: Vec<BrowserMark>,
+    report: BrowserInputReport,
 }
 
 /// The press by number both roads share: the pin proved on the pane's last
@@ -3447,7 +3523,7 @@ async fn press_mark(
     state: &AppState,
     label: &str,
     mark_n: usize,
-) -> Result<(BrowserPane, BrowserLookPin, BrowserInputReport), String> {
+) -> Result<PressedMark, String> {
     if settle_held(label) {
         return Err(held_refusal(label));
     }
@@ -3475,7 +3551,12 @@ async fn press_mark(
         "watch": settle_watch(),
     });
     let report = press(&pane, &mark.selector, Some(expect)).await?;
-    Ok((pane, pin, report))
+    Ok(PressedMark {
+        pane,
+        pin,
+        marks,
+        report,
+    })
 }
 
 /// A press by number whose settle was left for later (t-9712): the document

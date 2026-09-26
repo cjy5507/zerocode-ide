@@ -1164,6 +1164,48 @@ fn the_answer_speaks_screen_points_and_the_legend_one_line_per_mark() {
     );
 }
 
+/// Two looks read as the same legend when every item says the same line, in
+/// the same order: a centre that moved less than the line rounds is the same
+/// legend; words, a number, a centre, an order or a count that changed is not
+/// (t-9876).
+#[test]
+fn two_looks_are_one_legend_only_when_every_line_reads_the_same() {
+    let item = |mark: u64, label: &str, x: f64| json!({ "mark": mark, "role": "button", "label": label, "centerX": x, "centerY": 40.0 });
+    let looked = [
+        item(1, "Next: step 2", 120.0),
+        item(2, "Save for later", 260.0),
+    ];
+    assert!(same_legend(&looked, &looked.clone()));
+    assert!(same_legend(&[], &[]));
+    let nudged = [
+        item(1, "Next: step 2", 120.3),
+        item(2, "Save for later", 259.8),
+    ];
+    assert!(same_legend(&looked, &nudged), "under the line's rounding");
+    for moved in [
+        vec![
+            item(1, "Next: step 3", 120.0),
+            item(2, "Save for later", 260.0),
+        ],
+        vec![
+            item(1, "Next: step 2", 140.0),
+            item(2, "Save for later", 260.0),
+        ],
+        vec![
+            item(2, "Next: step 2", 120.0),
+            item(1, "Save for later", 260.0),
+        ],
+        vec![
+            item(2, "Save for later", 260.0),
+            item(1, "Next: step 2", 120.0),
+        ],
+        vec![item(1, "Next: step 2", 120.0)],
+    ] {
+        assert!(!same_legend(&looked, &moved), "{moved:?}");
+        assert!(!same_legend(&moved, &looked), "{moved:?}");
+    }
+}
+
 #[test]
 fn element_faces_carry_what_the_walk_saw() {
     let record = |index: usize, frame: Option<Rect>| RenderedRecord {

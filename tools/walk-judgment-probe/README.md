@@ -35,12 +35,17 @@ does not settle a press by number, and knows no `--settle-later`), so the
 probe stands the build's door in front of it: a press by number settles by
 the product's own loop (`settle_with`), each poll one `eval` of the door's
 settle script, stillness counted from the first poll; `--settle-later`
-answers the page the press left and the next `marks` finishes the settle.
-What that stand-in did inside a call is on the call (`inside`), and the
-table says it: settle p50/p95 and how many ended ready, the look a
-settle-later press answered with (preview), the gap from one hand to the
-next, judgments begun ahead that were used, dropped or cancelled, and the
-questions a walk asked in turn and ahead.
+answers the page the press changed and the next `marks` finishes the settle —
+or, in a build that has the door's rule (t-9876), settles before it answers
+when that page still reads the legend the press was made on, compared by the
+core's own `same_legend`, and answers the page read after. What that stand-in
+did inside a call is on the call (`inside`), and the table says it: settle
+p50/p95 and how many ended ready, how many a press finished before it
+answered (settled in the press), the look a settle-later press answered with
+first (preview), the gap from one hand to the next, judgments begun ahead
+that were used, dropped or cancelled, and the questions a walk asked in turn
+and ahead. The `// after-only` lines of `probe.rs` are what the build before
+does not have; everything else stands in front of both builds alike.
 
     TYPESAFE_API_KEY=… python3 tools/walk-judgment-probe/run.py --before <sha> --out <dir> \
       --walks 8 --scenarios press,repeat,type,observe,steps --arms before,before-ahead,after-ahead

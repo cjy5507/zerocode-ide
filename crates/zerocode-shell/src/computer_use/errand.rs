@@ -157,15 +157,18 @@ pub struct Options {
     /// full look is taken while it is answered.
     ///
     /// A page asks after its press too, and before its settle (t-9712): its
-    /// press answers the moment it is made with the page as the press left it
-    /// ([`World::unsettled`]), the next question is begun there, and the
+    /// press answers the moment it is made with the page as the press changed
+    /// it ([`World::unsettled`]), the next question is begun there, and the
     /// settle — the fifty quiet milliseconds a press by number waits — is
     /// waited for behind it ([`World::settle`]). A page that did not settle
     /// cancels what was begun, and the walk looks again. A page the press
     /// left as it was pressed begins nothing — its change may come after the
     /// press answered (a result a fetch renders), and a question begun on it
     /// is one the settled page no longer asks — so the look after its settle
-    /// asks in turn, one request a step as ever.
+    /// asks in turn, one request a step as ever. The browser door settles such
+    /// a press before it answers, as a press without the flag does, and
+    /// answers the settled page with how it settled (t-9876): that page is the
+    /// next step's look, and no settle is left to wait for.
     pub overlap: bool,
     /// The second rung (t-6132 S3): when the seat's judgment is under its
     /// press floor, ask the second reader the walk was handed
@@ -454,20 +457,17 @@ impl Screen {
     /// order, at the same address.
     ///
     /// The comparison is the question's own view of the screen (the legend
-    /// line each control is described by), not the raw items: a caret that
-    /// blinked or a pixel that moved is not a screen that moved, and reading
-    /// the raw items would make every look different and quietly disable the
-    /// rule that ends an unattended walk.
+    /// line each control is described by, [`same_legend`]), not the raw
+    /// items: a caret that blinked or a pixel that moved is not a screen that
+    /// moved, and reading the raw items would make every look different and
+    /// quietly disable the rule that ends an unattended walk. The browser
+    /// door holds a press to the same comparison (t-9876).
+    ///
+    /// [`same_legend`]: zerocode_core::computer_use_protocol::marks::same_legend
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
-        use zerocode_core::computer_use_protocol::marks::legend_line;
         self.at == other.at
-            && self.items.len() == other.items.len()
-            && self
-                .items
-                .iter()
-                .zip(&other.items)
-                .all(|(mine, theirs)| legend_line(mine) == legend_line(theirs))
+            && zerocode_core::computer_use_protocol::marks::same_legend(&self.items, &other.items)
     }
 }
 
@@ -504,17 +504,19 @@ pub trait World {
         None
     }
     /// What the last press's screen did while the press waited for it to stop
-    /// changing (t-6385). `None` for a world whose press does not wait — a
-    /// page's, the desktop's, an Android device's — and then nothing is
-    /// noted.
+    /// changing (t-6385) — a phone's, or a page's press that left the legend
+    /// it was made on and so settled before it answered (t-9876). `None` for a
+    /// world whose press does not wait — the desktop's, an Android device's,
+    /// a page's that changed its legend — and then nothing is noted here.
     fn settled(&mut self) -> Option<Settled> {
         None
     }
     /// The screen as the last press left it, the moment it was made — for a
     /// world whose press answers before its screen settles (a page's, pressed
-    /// with `--settle-later`, t-9712): what a walk that asks ahead begins its
-    /// next judgment on while the settle is waited for ([`Self::settle`]).
-    /// `None` for a world whose press waited, or read nothing.
+    /// with `--settle-later`, t-9712, when the press changed its legend): what
+    /// a walk that asks ahead begins its next judgment on while the settle is
+    /// waited for ([`Self::settle`]). `None` for a world whose press waited,
+    /// or read nothing.
     fn unsettled(&mut self) -> Option<Screen> {
         None
     }
@@ -530,7 +532,7 @@ pub trait World {
     /// press leaves the screen where it was; a phone's press moves its screen
     /// too often for that, and it asks on the screen its press settled on
     /// instead ([`Self::settled`]); a page that answers before it settles
-    /// asks on the page its press left ([`Self::unsettled`]).
+    /// asks on the page its press changed ([`Self::unsettled`]).
     fn asks_ahead_of_the_press(&self) -> bool {
         true
     }
@@ -881,7 +883,7 @@ pub(crate) const BARRED: &str = zerocode_core::jev::summary::BARRED.canonical;
 pub const OVERLAP: &str = "overlap";
 pub const OVERLAP_USED: &str = "used";
 pub const OVERLAP_DISCARDED: &str = "discarded";
-/// A judgment begun on the page a press left that the page's settle then
+/// A judgment begun on the page a press changed that the page's settle then
 /// cancelled — it did not end `ready` (t-9712): its request spent, the page
 /// looked at again and asked afresh.
 pub const OVERLAP_CANCELLED: &str = "cancelled";
@@ -909,9 +911,10 @@ pub const OBSERVED: &str = "observed";
 const SELECTOR_KEY: &str = snapshot::SELECTOR_KEY;
 
 /// The key a row says how the pressed screen settled under, when the world's
-/// press waits for it to stop changing (a phone's, t-6385) or leaves it for
-/// the next look (a page's, t-9712) — the doors' own word, so a click's or a
-/// look's answer and the walk's row cannot come to spell it two ways.
+/// press waits for it to stop changing (a phone's, t-6385; a page's that left
+/// its legend, t-9876) or leaves it for the next look (a page's, t-9712) — the
+/// doors' own word, so a click's or a look's answer and the walk's row cannot
+/// come to spell it two ways.
 pub const SETTLE: &str = zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY;
 
 /// Why this walk pressed nothing, when one of its rows says why.
@@ -961,7 +964,7 @@ pub struct Walked {
     /// Judgments begun ahead that the next look made moot — their request
     /// spent, the screen asked afresh.
     pub discarded: usize,
-    /// Judgments begun on the page a press left that its settle cancelled
+    /// Judgments begun on the page a press changed that its settle cancelled
     /// before the next look (t-9712) — their request spent, the page looked
     /// at again.
     pub cancelled: usize,
@@ -1661,10 +1664,12 @@ fn walk(
             }
             // The screen the next question is asked on: the one a phone's press
             // settled on (t-6385), or — for a page whose press answered before
-            // it settled — the page as the press left it (t-9712); never after
-            // a link, whose page is another's, and never a page the press left
-            // as it was pressed: its change may still be on the way (a result
-            // a fetch renders), so the look after its settle asks in turn.
+            // it settled — the page as the press changed it (t-9712); never
+            // after a link, whose page is another's, and never a page the press
+            // left as it was pressed: its change may still be on the way (a
+            // result a fetch renders), so the look after its settle asks in
+            // turn. The browser door settles such a press before it answers
+            // (t-9876); this holds the walk to the same rule on any other.
             let left = match settled.and_then(|settled| settled.screen) {
                 Some(screen) => Some(screen),
                 None => world

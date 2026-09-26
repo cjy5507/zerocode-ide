@@ -21298,8 +21298,8 @@ mod browser_look_settle_pin {
         BROWSER_MARK_HELPERS, BROWSER_MARKS_BODY, BROWSER_OBSERVE_HELPERS, BROWSER_REMEASURE_BODY,
         BROWSER_SETTLE_BODY, BrowserLook, CLICK_SAID, CLICK_SAID_KEY, HeldSettle, PAGE_SEND_FAILED,
         PAGE_TIMED_OUT, SettleReport, held_refusal, hold_settle, input_report, input_said,
-        look_after_held_settle, look_of, marks_json, marks_lines, page_failure, pressed_rect,
-        settle_held, settle_later_json, settle_with, take_held_settle,
+        look_after_held_settle, look_after_press, look_of, marks_json, marks_lines, page_failure,
+        pressed_rect, settle_held, settle_later_json, settle_with, take_held_settle,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -21803,10 +21803,139 @@ mod browser_look_settle_pin {
         assert!(!settle_held(label));
     }
 
+    /// One button, one document, the button saying `words` at `x`: a page a
+    /// press moved, or one it did not.
+    fn a_button_look(words: &str, x: f64) -> BrowserLook {
+        let page = json!({
+            "faces": [{ "tag": "button", "role": "button", "label": words, "selector": "#next",
+                "x": x, "y": 10.0, "width": 200.0, "height": 30.0, "hit": true }],
+            "viewport": { "width": 900.0, "height": 600.0, "dpr": 2.0 },
+            "snapshot": { (snapshot::EPOCH_KEY): EPOCH },
+        });
+        look_of(&page, 1_790_000_000_123).expect("a look")
+    }
+
+    /// A settle-later press whose page, read the moment it was made, still
+    /// shows the legend it was made on settles before it answers (t-9876) —
+    /// its own settle, by the one settle road, from the press — holds
+    /// nothing, and answers the page read after the settle; a press that
+    /// moved the legend — words or a centre — holds its settle for the pane's
+    /// next look and answers the page it left, read once; a page that could
+    /// not be read shows no legend that stood still, so its press holds too.
+    #[tokio::test]
+    async fn a_press_that_left_its_legend_settles_before_it_answers_and_one_that_moved_it_holds() {
+        let label = "browser-t9876-press";
+        let held = || HeldSettle {
+            epoch: EPOCH.to_string(),
+            since: Some(1_000.0),
+        };
+        let pressed_on = a_one_button_look().marks;
+        let order = std::cell::RefCell::new(Vec::<String>::new());
+        let pages = std::cell::RefCell::new(std::collections::VecDeque::new());
+        let press = || {
+            look_after_press(
+                label,
+                (),
+                &pressed_on,
+                held(),
+                |(), settling| {
+                    order
+                        .borrow_mut()
+                        .push(format!("settle {} {:?}", settling.epoch, settling.since));
+                    async { a_ready_settle() }
+                },
+                |()| {
+                    order.borrow_mut().push("read".to_string());
+                    let page = pages.borrow_mut().pop_front().expect("a page to read");
+                    async move { page }
+                },
+            )
+        };
+
+        // The legend stood: the result a fetch renders comes during the settle.
+        pages.replace([Ok(a_one_button_look()), Ok(a_button_look("Next: 3", 10.0))].into());
+        let (settled, answered) = press().await;
+        assert_eq!(
+            order.take(),
+            [
+                "read".to_string(),
+                format!("settle {EPOCH} Some(1000.0)"),
+                "read".to_string()
+            ],
+            "read, then settled from the press, then read again"
+        );
+        assert_eq!(settled, Some(a_ready_settle()));
+        assert_eq!(
+            answered.map(|look| look.marks),
+            Some(a_button_look("Next: 3", 10.0).marks),
+            "the page read after the settle is the answer"
+        );
+        assert!(!settle_held(label), "nothing held for a later look");
+
+        // The legend stood, and the page read after the settle could not be:
+        // the press still says how it settled, and holds nothing.
+        pages.replace([Ok(a_one_button_look()), Err("document_moving".to_string())].into());
+        assert_eq!(press().await, (Some(a_ready_settle()), None));
+        assert_eq!(order.take().len(), 3);
+        assert!(!settle_held(label));
+
+        // The legend moved — its words, or where it stands.
+        for moved in [a_button_look("Next: 3", 10.0), a_button_look("Next", 90.0)] {
+            pages.replace([Ok(moved.clone())].into());
+            let (settled, answered) = press().await;
+            assert_eq!(
+                order.take(),
+                ["read".to_string()],
+                "read once, settled by no one here"
+            );
+            assert_eq!(settled, None);
+            assert_eq!(answered, Some(moved));
+            assert_eq!(
+                take_held_settle(label),
+                Some(held()),
+                "held for the next look"
+            );
+        }
+
+        // No page to read: no legend stood still.
+        pages.replace([Err("document_moving".to_string())].into());
+        assert_eq!(press().await, (None, None));
+        assert_eq!(order.take(), ["read".to_string()]);
+        assert_eq!(take_held_settle(label), Some(held()));
+    }
+
+    /// A settle-later press that settled before it answered (t-9876) says how
+    /// under the look's own key — the one key a look that finished a held
+    /// settle says it under — and in its sentence, as a press without the flag
+    /// says it; with the page or, when the page could not be read, without.
+    #[test]
+    fn a_press_that_settled_before_it_answered_says_how_under_the_looks_own_key() {
+        use zerocode_core::agent_browser::{BROWSER_SETTLE_KEY, settle_said};
+        let mut report = a_press();
+        report.settle = Some(a_ready_settle());
+        let page = a_one_button_look();
+        let answered = settle_later_json(&report, Some(&page));
+        assert_eq!(answered["items"], marks_json(&page)["items"]);
+        for answer in [answered, settle_later_json(&report, None)] {
+            assert_eq!(
+                answer[BROWSER_SETTLE_KEY],
+                settle_said(Settle::Ready, SettleWhy::Quiet, 52),
+                "{answer}"
+            );
+            assert_eq!(answer[CLICK_SAID_KEY], input_said(CLICK_SAID, &report));
+            assert!(
+                input_said(CLICK_SAID, &report).contains("settle=ready"),
+                "{answer}"
+            );
+        }
+    }
+
     /// A press by number that does not leave its settle for later answers
     /// v1.1.27's sentence to the byte (t-9712) — and its road still settles
-    /// before it answers; the road that leaves the settle holds it instead,
-    /// and the look takes a held settle and finishes it before it reads.
+    /// before it answers; the road that leaves the settle holds it — or,
+    /// when the press left the legend it was made on, settles it by the same
+    /// road (t-9876) — and the look takes a held settle and finishes it
+    /// before it reads.
     #[test]
     fn a_plain_press_by_number_answers_as_it_did_before_a_settle_could_wait() {
         let mut report = a_press();
@@ -21828,10 +21957,24 @@ mod browser_look_settle_pin {
             plain.contains("press_mark(") && plain.contains("settle_after_press("),
             "the plain press settles before it answers:\n{plain}"
         );
+        // The settle-later press settles by the same road and reads by the
+        // same look (t-9876); whether it settles or holds hangs on the one
+        // legend comparison, made once, against the marks the press was made
+        // on — never against the table its own look replaced.
         let later = block("pub(crate) async fn automate_click_mark_later(");
         assert!(
-            later.contains("hold_settle(") && !later.contains("settle_after_press("),
+            later.contains("press_mark(")
+                && later.contains("look_after_press(")
+                && later.contains("settle_after_press(&pane, &held.epoch, held.since)")
+                && later.contains("read_look(&pane, label)"),
             "{later}"
+        );
+        let fork = block("pub(crate) async fn look_after_press<");
+        assert!(
+            fork.contains("hold_settle(")
+                && fork.matches("same_legend(").count() == 1
+                && !fork.contains("recall_"),
+            "{fork}"
         );
         let look = block("pub(crate) async fn automate_marks(");
         assert!(

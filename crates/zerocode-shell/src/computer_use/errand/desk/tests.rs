@@ -405,7 +405,7 @@ fn a_settled_press_that_counted_the_words_ends_the_walk_without_a_look() {
 /// A press asked for a preview (a walk asking ahead, t-6385) hands back the
 /// screen it settled on, numbered as a look of it would be; a phone's world
 /// never asks ahead of its press, and neither does a page's that asks ahead
-/// (t-9712): it asks on the page its press left. A window's still does.
+/// (t-9712): it asks on the page its press changed. A window's still does.
 #[test]
 fn a_press_asked_for_a_preview_hands_back_the_screen_it_settled_on() {
     let road = Road::new(|verb| match verb {
@@ -1282,6 +1282,15 @@ fn a_press_that_left(next: &str) -> String {
     answer.to_string()
 }
 
+/// A settle-later press's answer when the press left the legend it was made
+/// on (t-9876): the page read after its settle, how it settled under the
+/// look's own key, and the press's sentence beside it.
+fn a_press_that_settled(next: &str, settle: &Value) -> String {
+    let mut answer: Value = serde_json::from_str(&a_press_that_left(next)).expect("json");
+    answer[BROWSER_SETTLE_KEY] = settle.clone();
+    answer.to_string()
+}
+
 fn a_pane_walk<'a, R>(road: &'a mut R, previewing: bool) -> GoalWorld<'a, R>
 where
     R: FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
@@ -1307,7 +1316,7 @@ fn words(line: &[&str]) -> Vec<String> {
 }
 
 /// A page walk that asks ahead presses with `--settle-later` (t-9712): the
-/// press hands back the page it left — at the walk's own address — once;
+/// press hands back the page it changed — at the walk's own address — once;
 /// the pane's next look finishes the settle and says how, before the reach
 /// check reads the page; and a page that settled is not read a third time:
 /// its look is the next step's.
@@ -1324,11 +1333,11 @@ fn a_page_press_that_settles_later_hands_back_the_page_it_left_and_its_next_look
     let mut world = a_pane_walk(&mut road, true);
     assert!(
         !world.asks_ahead_of_the_press(),
-        "a page that settles later asks on the page its press left"
+        "a page that settles later asks on the page its press changed"
     );
     world.look().expect("the first look");
     assert!(world.press(1));
-    let left = world.unsettled().expect("the page the press left");
+    let left = world.unsettled().expect("the page the press changed");
     assert_eq!(
         left.at,
         Seen::Page {
@@ -1426,6 +1435,82 @@ fn a_page_walk_that_does_not_ask_ahead_presses_as_it_always_did() {
     assert!(!world.press(1));
     assert!(world.unsettled().is_none());
     assert!(world.settle().is_none(), "a refused press left no settle");
+}
+
+/// A page press that left the legend it was made on settled before it
+/// answered (t-9876), and its answer says how under the look's own key: the
+/// world holds nothing — no page handed back to begin on, no settle left for
+/// a later look — its settle is the press's own, the reach check asks `find`
+/// as a page's always does, and the settled page the press answered is the
+/// next step's look, read no second time. A press that changed the legend
+/// still answers at once and holds its settle, as before.
+#[test]
+fn a_page_press_that_left_its_legend_settled_before_it_answered_and_holds_nothing() {
+    let ready = settle_said(Settle::Ready, SettleWhy::Quiet, 52);
+    let script = Script::of(vec![
+        ok(&a_step_page("Next: 2", None)),
+        ok(&a_press_that_settled("Next: 3", &ready)),
+        ok(r#"{"count":0}"#),
+        ok(&a_press_that_left("Next: 4")),
+        ok(&a_step_page("Next: 4", Some(ready.clone()))),
+    ]);
+    let mut road = script.road();
+    let mut world = a_pane_walk(&mut road, true);
+    world.look().expect("the first look");
+    assert!(world.press(1));
+    let settled = world
+        .settled()
+        .expect("the press said how its page settled");
+    assert_eq!(settled.note, ready);
+    assert_eq!(
+        settled.screen, None,
+        "a page hands back no screen to begin on"
+    );
+    assert!(
+        world.unsettled().is_none(),
+        "the legend stood: nothing to begin on"
+    );
+    assert!(world.settle().is_none(), "nothing held for a later look");
+    assert_eq!(world.reached(), Some(false));
+    let next = world.look().expect("the page the press answered");
+    assert_eq!(next.items[0]["label"], "Next: 3");
+    assert_eq!(
+        next.at,
+        Seen::Page {
+            host: "app.local".into(),
+            path: "/steps".into()
+        }
+    );
+
+    assert!(world.press(1));
+    assert!(world.settled().is_none(), "its settle is still to come");
+    let left = world.unsettled().expect("the page the press changed");
+    assert_eq!(left.items[0]["label"], "Next: 4");
+    assert_eq!(world.settle().expect("the settle it held").note, ready);
+    drop(world);
+    assert_eq!(
+        script.said(),
+        [
+            words(&["marks", "browser-9", "--json"]),
+            words(&[
+                "click",
+                "browser-9",
+                "--mark",
+                "1",
+                BROWSER_SETTLE_LATER_FLAG
+            ]),
+            words(&["find", "browser-9", "Step 4 of 4"]),
+            words(&[
+                "click",
+                "browser-9",
+                "--mark",
+                "1",
+                BROWSER_SETTLE_LATER_FLAG
+            ]),
+            words(&["marks", "browser-9", "--json"]),
+        ],
+        "the page the first press answered is the next step's look: one read a step"
+    );
 }
 
 /// An entry's own press settles before it answers even in a walk that asks

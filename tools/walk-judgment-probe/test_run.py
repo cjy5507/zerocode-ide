@@ -38,11 +38,13 @@ class DriverTests(unittest.TestCase):
             "a region marker survived",
         )
         for needed_after in ("LiveWriter", "value_writer", "ZEROCODE_WALK_PROBE_VALUE_KEY",
-                             "BROWSER_SETTLE_LATER_FLAG", "settle_said", "walked.cancelled",
-                             "held"):
+                             "same_legend(", "self.legend"):
             self.assertNotIn(needed_after, stripped)
-        # Both builds stand the same settling door in front of the window.
-        for both in ("settle_by_eval", "struct Door", "struct Counting", "ZEROCODE_WALK_PROBE_OVERLAP"):
+        # Both builds stand the same settling door in front of the window —
+        # and the settle-later press the build before already has (t-9712),
+        # so a walk that asks ahead is timed on both (t-9876).
+        for both in ("settle_by_eval", "struct Door", "struct Counting", "ZEROCODE_WALK_PROBE_OVERLAP",
+                     "BROWSER_SETTLE_LATER_FLAG", "settle_said", "walked.cancelled", "held"):
             self.assertIn(both, stripped)
 
     def test_a_step_runs_from_its_look_to_its_hand_without_the_stand_in(self):
@@ -88,6 +90,36 @@ class DriverTests(unittest.TestCase):
         # A refused press is no hand.
         refused = {"calls": [call("click", 0, 10), dict(call("click", 50, 10), exit=1), call("click", 90, 10)]}
         self.assertEqual(run.press_gaps(refused), [90])
+
+    def test_a_hand_with_no_look_before_it_was_judged_on_the_page_the_last_press_answered(self):
+        def inside(verb, start, ms, **what):
+            said = call(verb, start, ms)
+            said["inside"] = what
+            return said
+        # A press that left the legend it was made on settles inside the
+        # press and answers the settled page, which the walk keeps as the next
+        # step's look (t-9876): that step opens where the call before its hand
+        # ended, and the stand-in inside the press (both its looks) is taken
+        # out of the step and the gap it lies in.
+        row = {
+            "calls": [
+                inside("marks", 0, 30, standInMs=10.0),
+                inside("click", 250, 150, previewMs=30.0, settleMs=60.0, settle="ready", standInMs=20.0),
+                call("find", 400, 20),
+                inside("click", 620, 120, previewMs=30.0, settleMs=30.0, settle="ready", standInMs=20.0),
+                call("find", 740, 20),
+            ],
+        }
+        steps = run.steps_of(row)
+        self.assertEqual([step["kind"] for step in steps], ["press", "press"])
+        self.assertAlmostEqual(steps[0]["ms"], 400 - 0 - 30)
+        self.assertAlmostEqual(steps[1]["ms"], 740 - 420 - 20)
+        self.assertEqual(run.press_gaps(row), [740 - 400 - 20])
+        # An entry after such a press opens its step the same way.
+        typed = {"calls": [call("marks", 0, 30), call("click", 250, 100), call("find", 350, 20),
+                           call("click", 600, 60), call("type", 660, 40), call("find", 700, 20)]}
+        self.assertEqual([(step["kind"], step["ms"]) for step in run.steps_of(typed)],
+                         [("press", 350), ("type", 700 - 370)])
 
     def test_the_arms_name_a_build_and_whether_it_asks_ahead(self):
         self.assertEqual(run.ARMS["before"], ("before", False))
@@ -173,7 +205,30 @@ class DriverTests(unittest.TestCase):
         self.assertEqual((cell["overlapped"], cell["discarded"], cell["cancelled"]), (2, 0, 1))
         self.assertEqual(cell["asks_per_walk"], 4)
         self.assertEqual(cell["gaps"], 1)
+        self.assertEqual(cell["settled_in_press"], 0, "every settle here was the next look's")
         self.assertIn("2/0/1", run.table_md({"steps/after-ahead": cell}, "cmd", pathlib.Path("/out")))
+
+    def test_the_table_counts_the_settles_a_press_finished_before_it_answered(self):
+        def inside(verb, start, ms, **what):
+            said = call(verb, start, ms)
+            said["inside"] = what
+            return said
+        # A plain press settles inside itself; a settle-later press that left
+        # its legend does too (t-9876); one that moved it leaves its settle
+        # for the next look.
+        row = {"scenario": "later", "label": "after-ahead", "walk": 1, "walkMs": 900.0, "load": 9.0,
+               "oracle": {"count": 3}, "asked": 3, "begun": 0,
+               "calls": [call("marks", 0, 30),
+                         inside("click", 250, 200, previewMs=30.0, settleMs=150.0, settle="ready"),
+                         call("find", 450, 20),
+                         inside("click", 700, 60, previewMs=30.0),
+                         inside("marks", 760, 90, settleMs=60.0, settle="ready"), call("find", 850, 20),
+                         inside("click", 1_100, 100, settleMs=70.0, settle="ready")],
+               "rows": []}
+        cell = run.summarize([row])["later/after-ahead"]
+        self.assertEqual(cell["settled_in_press"], 2)
+        self.assertEqual((cell["settled_ready"], cell["settled"]), (3, 3))
+        self.assertIn("| 2 |", run.table_md({"later/after-ahead": cell}, "cmd", pathlib.Path("/out")))
 
 
 if __name__ == "__main__":

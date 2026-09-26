@@ -556,17 +556,29 @@ impl<'a, Road> GoalWorld<'a, Road> {
             .as_ref()
             .and_then(|said| said.get(crate::emulator::checks::COUNT_KEY)?.as_u64());
         // A page's press that answered before it settled (t-9712): the page it
-        // left, read as a look of it would be, and a settle the next look
-        // finishes — held from the moment the door took the press.
+        // changed, read as a look of it would be, and a settle the next look
+        // finishes — held from the moment the door took the press. One whose
+        // legend stood settled before it answered and says how (t-9876): its
+        // page is settled, the next step's look once it settled `ready` — as a
+        // page a held settle's look finished is — and nothing is held.
         if later {
-            self.unsettled = said
+            let page = said
                 .as_ref()
                 .and_then(|said| screen_of(&self.aim, said))
-                .map(|(mut screen, _)| {
+                .map(|(mut screen, look)| {
                     screen.at = self.page.clone();
-                    screen
+                    (screen, look)
                 });
-            self.settling = answer.exit_code == 0;
+            match &self.settled {
+                Some(settled) => {
+                    self.kept = page.filter(|_| settle_said_ready(&settled.note));
+                    self.settling = false;
+                }
+                None => {
+                    self.unsettled = page.map(|(screen, _)| screen);
+                    self.settling = answer.exit_code == 0;
+                }
+            }
         }
         answer.exit_code == 0
     }
@@ -784,7 +796,9 @@ where
 
     fn reached(&mut self) -> Option<bool> {
         let until = self.until.clone()?;
-        if self.settled.is_some() {
+        // A page's press that settled before it answered (t-9876) counted no
+        // words: a page asks `find`, as ever.
+        if self.settled.is_some() && matches!(self.aim, Aim::Phone { .. }) {
             // The press waited for its screen to stop changing and counted
             // the caller's words in the tree it stopped on: found there, the
             // walk got there and looks no more.

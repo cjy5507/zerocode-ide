@@ -1705,7 +1705,7 @@ pub const WALK_OVERLAP_PARAM: &str = "overlap";
 
 /// The surfaces whose walk judges ahead unasked, by the parameter a walk
 /// names its surface with (t-9712): a page's. Its press answers the moment it
-/// is made, the next judgment is begun on the page the press left, and the
+/// is made, the next judgment is begun on the page the press changed, and the
 /// settle every press by number waits for is waited for behind it — measured on the walk probe (ABBA, n=8 a cell): a press step p50 376 → 293 ms, a three-press walk 1,189 → 922 ms, one more question a walk.
 /// The cost is the judgment begun after the walk's last press, which nothing
 /// asks. A window's and a phone's walk judge ahead only when asked.

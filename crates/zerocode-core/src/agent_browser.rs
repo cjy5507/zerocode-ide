@@ -322,8 +322,9 @@ pub enum ClickTarget {
     Css(String),
     Mark(usize),
     /// `--mark <n> --settle-later` (t-9712): the same press by number,
-    /// answered the moment it is made with the page as the press left it;
-    /// the pane's next `marks` finishes the settle
+    /// answered the moment it is made with the page as the press changed it;
+    /// the pane's next `marks` finishes the settle — or, when the press left
+    /// the legend as it was, settled before it answers (t-9876)
     /// ([`BROWSER_SETTLE_LATER_FLAG`]).
     MarkSettleLater(usize),
 }
@@ -659,12 +660,15 @@ pub const BROWSER_SETTLE_QUIET_MS: u64 = 50;
 pub const BROWSER_SETTLE_BUSY: &[&str] = &["[aria-busy=\"true\"]"];
 
 /// `click <label> --mark <n> --settle-later` (t-9712): the press answers the
-/// moment it is made, with the page as the press left it — what a
+/// moment it is made, with the page as the press changed it — what a
 /// `marks --json` would answer then — and leaves its settle to the pane's
 /// next `marks`, which finishes it before it reads and says how it ended
 /// under [`BROWSER_SETTLE_KEY`]. A walk that judges ahead begins its next
 /// judgment on that first look and waits for the settle behind it; a press by
-/// number without the flag settles before it answers, as it always has.
+/// number without the flag settles before it answers, as it always has, and
+/// so does a press with it whose page still reads the legend it was made on
+/// (t-9876) — nothing a judgment could begin on — answering the settled page
+/// with how it settled under the same key.
 pub const BROWSER_SETTLE_LATER_FLAG: &str = "--settle-later";
 
 /// The key a look says under how the pane's settle-later press settled before
@@ -1204,7 +1208,7 @@ pub fn usage() -> String {
         "  zerocode-browser read <label> --full  판정 없이 페이지 전체 텍스트",
         "  zerocode-browser click <label> <css>  보이는 첫 요소를 클릭",
         "  zerocode-browser click <label> --mark <n> [--settle-later]",
-        "                                             마지막 marks의 번호 n을 누름 (움직였거나 바뀌었으면 거절; --settle-later: 누른 즉시 그 자리의 marks --json으로 답하고 정착은 판의 다음 marks가 끝냄)",
+        "                                             마지막 marks의 번호 n을 누름 (움직였거나 바뀌었으면 거절; --settle-later: 누름이 범례를 바꿨으면 즉시 그 자리의 marks --json으로 답하고 정착은 판의 다음 marks가 끝냄, 범례가 그대로면 정착까지 마치고 답함)",
         "  zerocode-browser type <label> <css> <text>",
         "                                             요소 내용을 바꾸고 입력 이벤트 (비밀번호 칸은 거절)",
         "  zerocode-browser type <label> <css> --value-stdin",
