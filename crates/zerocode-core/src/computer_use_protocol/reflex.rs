@@ -864,6 +864,23 @@ pub struct FrameFacts {
     pub captured_host_ns: Option<u64>,
 }
 
+impl FrameFacts {
+    /// When the frame was in hand on the host clock: its capture time, or its
+    /// delivery when that came first. A display stream stamps a frame with the
+    /// time the display shows it (ScreenCaptureKit's display time), which can
+    /// stand ahead of the moment the frame is delivered and read (t-10127).
+    /// None when the capture time is unknown: the delivery time never stands
+    /// in for it.
+    #[must_use]
+    pub fn observed_host_ns(&self) -> Option<u64> {
+        let captured = self.captured_host_ns?;
+        Some(
+            self.delivered_host_ns
+                .map_or(captured, |delivered| captured.min(delivered)),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseInput {
@@ -895,10 +912,11 @@ pub struct ActionLease {
 impl ActionLease {
     /// The frame must be ready and nonempty, share the lease's nonempty run
     /// and its epochs, and be a newer capture than `source_capture_seq`: the
-    /// capture that issued the lease never satisfies it. An unknown capture
-    /// time is never replaced by the delivery time. Expiry and proof ends are
-    /// exclusive; the frame age and lease length limits in `LIMITS` are
-    /// inclusive. Swift checks the same contract, pinned for both by the
+    /// capture that issued the lease never satisfies it. Its age counts from
+    /// when it was in hand ([`FrameFacts::observed_host_ns`]), and an unknown
+    /// capture time is never replaced by the delivery time. Expiry and proof
+    /// ends are exclusive; the frame age and lease length limits in `LIMITS`
+    /// are inclusive. Swift checks the same contract, pinned for both by the
     /// shared `fixtures/reflex-contract/lease_cases.json`.
     #[must_use]
     pub fn permits(&self, frame: &FrameFacts, now_host_ns: u64, input: LeaseInput) -> bool {
@@ -908,8 +926,8 @@ impl ActionLease {
             && frame.status == FrameStatus::Ready
             && frame.pixel_extent.width > 0
             && frame.pixel_extent.height > 0
-            && frame.captured_host_ns.is_some_and(|captured| {
-                captured <= now_host_ns && now_host_ns - captured <= LIMITS.max_frame_age_ns
+            && frame.observed_host_ns().is_some_and(|observed| {
+                observed <= now_host_ns && now_host_ns - observed <= LIMITS.max_frame_age_ns
             })
             && self.issued_host_ns <= now_host_ns
             && self.valid_until_host_ns > self.issued_host_ns
@@ -1191,9 +1209,11 @@ pub struct Target {
 impl Target {
     /// Where to press at `at_host_ns`: the point carried forward by the
     /// velocity since `captured_host_ns`, while the square of the
-    /// uncertainty around it stays inside the hitbox carried the same way.
-    /// None — do not press — when time runs backwards or past `max_age_ns`,
-    /// a carry overflows, or the square leaves the hitbox.
+    /// uncertainty around it stays inside the hitbox carried the same way. A
+    /// capture stamped after `at_host_ns` — a display time that runs ahead of
+    /// its reading ([`FrameFacts::observed_host_ns`]) — carries nothing.
+    /// None — do not press — when time runs past `max_age_ns`, a carry
+    /// overflows, or the square leaves the hitbox.
     #[must_use]
     pub fn aim(
         &self,
@@ -1201,7 +1221,7 @@ impl Target {
         captured_host_ns: u64,
         max_age_ns: u64,
     ) -> Option<(i64, i64)> {
-        let elapsed = at_host_ns.checked_sub(captured_host_ns)?;
+        let elapsed = at_host_ns.saturating_sub(captured_host_ns);
         if elapsed > max_age_ns {
             return None;
         }

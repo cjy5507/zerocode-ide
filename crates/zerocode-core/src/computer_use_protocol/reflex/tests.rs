@@ -193,6 +193,34 @@ fn shared_lease_cases_exercise_permits_and_frame_cursor() {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// A display stream stamps a frame with the time the display shows it, which
+/// can run ahead of its delivery (t-10127): the frame is in hand at the
+/// earlier of the two, and a delivery never stands in for an unknown capture.
+#[test]
+fn a_frame_is_observed_no_later_than_its_delivery() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/reflex-contract/lease_cases.json"
+    ))
+    .unwrap();
+    let base: FrameFacts = serde_json::from_value(fixture["frame"].clone()).unwrap();
+    let observed = |captured: Option<u64>, delivered: Option<u64>| {
+        FrameFacts {
+            captured_host_ns: captured,
+            delivered_host_ns: delivered,
+            ..base.clone()
+        }
+        .observed_host_ns()
+    };
+    for (captured, delivered, expected, why) in [
+        (Some(103), Some(100), Some(100), "ahead of its delivery"),
+        (Some(90), Some(91), Some(90), "captured, then delivered"),
+        (Some(103), None, Some(103), "no delivery to bound it"),
+        (None, Some(100), None, "the delivery never stands in"),
+    ] {
+        assert_eq!(observed(captured, delivered), expected, "{why}");
+    }
+}
+
 #[test]
 fn unknown_features_cannot_authorize_actions() {
     let unknown = None;
@@ -734,5 +762,5 @@ fn shared_observation_cases_run_through_admissible_and_aim() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
     assert_eq!(fixture["cases"].as_array().unwrap().len(), 34);
-    assert_eq!(fixture["aim_cases"].as_array().unwrap().len(), 9);
+    assert_eq!(fixture["aim_cases"].as_array().unwrap().len(), 10);
 }

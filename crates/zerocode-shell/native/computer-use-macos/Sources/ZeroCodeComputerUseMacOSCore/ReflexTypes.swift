@@ -430,6 +430,16 @@ public struct ReflexFrameFacts: Codable, Equatable, Sendable {
     public let plan_epoch: UInt64
     public let clock_domain: UInt64
     public let captured_host_ns: UInt64?
+
+    /// When the frame was in hand on the host clock (`reflex::FrameFacts::observed_host_ns`):
+    /// its capture time, or its delivery when that came first. ScreenCaptureKit stamps a frame
+    /// with the time the display shows it, which can stand ahead of the moment the frame is
+    /// delivered and read (t-10127). Nil when the capture time is unknown: the delivery time
+    /// never stands in for it.
+    public var observed_host_ns: UInt64? {
+        guard let captured = captured_host_ns else { return nil }
+        return delivered_host_ns.map { min(captured, $0) } ?? captured
+    }
 }
 
 public enum ReflexLeaseInput: String, Codable, Sendable { case pointer_move, left_click }
@@ -455,13 +465,14 @@ public struct ReflexActionLease: Codable, Equatable, Sendable {
     /// The same contract as Rust `ActionLease::permits`, pinned for both by the shared
     /// `fixtures/reflex-contract/lease_cases.json`. The frame must be ready and nonempty,
     /// share the lease's nonempty run and its epochs, and be a newer capture than
-    /// `source_capture_seq`: the capture that issued the lease never satisfies it. An
-    /// unknown capture time is never replaced by the delivery time. Expiry and proof ends
-    /// are exclusive; the frame age and lease length limits are inclusive.
+    /// `source_capture_seq`: the capture that issued the lease never satisfies it. Its age
+    /// counts from when it was in hand (`observed_host_ns`), and an unknown capture time is
+    /// never replaced by the delivery time. Expiry and proof ends are exclusive; the frame
+    /// age and lease length limits are inclusive.
     public func permits(_ frame: ReflexFrameFacts, now_host_ns: UInt64, input: ReflexLeaseInput, limits: ReflexLimits) -> Bool {
         !run_id.isEmpty && run_id == frame.run_id && allowed_inputs.contains(input) &&
             frame.status == .ready && frame.pixel_extent.width > 0 && frame.pixel_extent.height > 0 &&
-            frame.captured_host_ns.map({ $0 <= now_host_ns && now_host_ns - $0 <= limits.max_frame_age_ns }) == true &&
+            frame.observed_host_ns.map({ $0 <= now_host_ns && now_host_ns - $0 <= limits.max_frame_age_ns }) == true &&
             issued_host_ns <= now_host_ns && valid_until_host_ns > issued_host_ns &&
             valid_until_host_ns - issued_host_ns <= limits.max_lease_ns &&
             target_proof_until_host_ns <= valid_until_host_ns &&
@@ -629,11 +640,13 @@ public struct ReflexTarget: Codable, Equatable, Sendable {
 
     /// Where to press at `atHostNs` (`reflex::Target::aim`): the point carried forward by the
     /// velocity since `capturedHostNs`, while the square of the uncertainty around it stays
-    /// inside the hitbox carried the same way. Nil — do not press — when time runs backwards
-    /// or past `maxAgeNs`, a carry overflows, or the square leaves the hitbox.
+    /// inside the hitbox carried the same way. A capture stamped after `atHostNs` — a display
+    /// time that runs ahead of its reading (`ReflexFrameFacts.observed_host_ns`) — carries
+    /// nothing. Nil — do not press — when time runs past `maxAgeNs`, a carry overflows, or the
+    /// square leaves the hitbox.
     public func aim(atHostNs: UInt64, capturedHostNs: UInt64, maxAgeNs: UInt64) -> (x: Int64, y: Int64)? {
-        guard atHostNs >= capturedHostNs, atHostNs - capturedHostNs <= maxAgeNs,
-              let elapsed = Int64(exactly: atHostNs - capturedHostNs) else { return nil }
+        let since = atHostNs >= capturedHostNs ? atHostNs - capturedHostNs : 0
+        guard since <= maxAgeNs, let elapsed = Int64(exactly: since) else { return nil }
         func carry(_ velocity: Int64) -> Int64? {
             let moved = velocity.multipliedReportingOverflow(by: elapsed)
             return moved.overflow ? nil : moved.partialValue / 1_000_000_000
