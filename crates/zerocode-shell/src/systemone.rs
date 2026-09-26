@@ -216,6 +216,19 @@ pub fn applies(wire: &Wire, seat: &JevUse) -> bool {
 /// ([`JevUse::mode_in_run`]).
 #[must_use]
 pub fn applies_in(wire: &Wire, seat: &JevUse, run: zerocode_core::jev::Run) -> bool {
+    standing_in(wire, seat, run).1
+}
+
+/// [`applies_in`], with the mode it was read under: one reading of the
+/// person's settings and one of the seat's ledger, so a row that names the
+/// mode it was judged under and whether its answer was carried out cannot
+/// have read the two from different moments (t-10223).
+#[must_use]
+pub fn standing_in(
+    wire: &Wire,
+    seat: &JevUse,
+    run: zerocode_core::jev::Run,
+) -> (zerocode_core::jev::JevMode, bool) {
     let mode = seat.mode_in_run(&wire.settings_root(), run);
     let raised = ledger_of(wire, seat)
         .map(|ledger| {
@@ -223,7 +236,7 @@ pub fn applies_in(wire: &Wire, seat: &JevUse, run: zerocode_core::jev::Run) -> b
                 == zerocode_core::jev::promote::Stand::Applying
         })
         .unwrap_or(false);
-    mode.applies_with(raised)
+    (mode, mode.applies_with(raised))
 }
 
 /// Append `rows` to one use's ledger.

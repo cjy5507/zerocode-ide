@@ -4288,9 +4288,9 @@
             <p data-jev-hint data-i18n="settings.typesafe.tool_text_guardHint">파일 읽기, 웹 가져오기·검색, ZeroCode가 이미 「신뢰 안 함」 표시로 감싼 브라우저 읽기, MCP 도구 결과마다 앞부분 최대 2,000자와 도구 종류를 보냅니다. 글이 에이전트에게 무엇을 하라고 시키는지 한 가지를 묻습니다(화면 판단과 같은 질문). 「기록만」은 결과를 바꾸지 않고 답만 기록합니다. 다음 단계에서 에이전트가 그 글에 적힌 명령을 그대로 실행했는지를 결과 라벨로 삼고, 근거가 쌓인 뒤에만 「자동」이 그 결과를 「신뢰 안 함」 표시로 감싸고 한 줄을 붙입니다. 읽기를 막지는 않습니다.</p>
           </div>
           <div data-jev-feature="reflex_decide">
-            <span data-jev-name data-i18n="settings.typesafe.reflex_decide">실시간 반사 판단 기록</span>
-            <span data-jev-summary data-i18n="settings.typesafe.reflex_decideSummary">화면을 빠르게 누르는 반사 실행이 도는 동안, 계속할지·잠시 멈출지·계획을 다시 쓸지를 기록만 합니다.</span>
-            <p data-jev-hint data-i18n="settings.typesafe.reflex_decideHint">반사 실행이 도는 동안 감지기마다 최신 판독(값 또는 모르는 이유, 따라가는 표적 번호, 프레임이 찍힌 지 몇 밀리초인지)과 지금까지 동작이 끝난 방식별 개수만 보냅니다. 감지기 이름은 계획에 적힌 식별자(최대 64바이트, 최대 16개)이며, 화면 이미지·화면 글자·앱 이름은 보내지 않습니다. 「기록만」만 있고 답은 입력을 바꾸지 않으며, 나중에 이 기기에서 판단할 작은 모델을 맞출 교사 답으로만 기록합니다. 1초 안에 답이 없으면 그렇게 기록합니다.</p>
+            <span data-jev-name data-i18n="settings.typesafe.reflex_decide">실시간 반사 판단</span>
+            <span data-jev-summary data-i18n="settings.typesafe.reflex_decideSummary">화면을 빠르게 누르는 반사 실행이 도는 동안, 계속할지·멈출지·계획을 다시 쓸지 판단합니다. 자동 실행(reflex-auto)에서는 그 판단대로 실행을 멈추거나 계획을 다시 씁니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.reflex_decideHint">반사 실행이 도는 동안 감지기마다 최신 판독(값 또는 모르는 이유, 따라가는 표적 번호, 프레임이 찍힌 지 몇 밀리초인지)과 지금까지 동작이 끝난 방식별 개수만 보냅니다. 감지기 이름은 계획에 적힌 식별자(최대 64바이트, 최대 16개)이며, 화면 이미지·화면 글자·앱 이름은 보내지 않습니다. 「기록만」은 답을 기록하기만 하고, 「항상 적용」은 자동 실행(reflex-auto)을 답대로 바로 멈추거나 계획을 다시 쓰며, 「자동」은 답마다 그 뒤 3초 동안 손이 실제로 한 일로 매긴 채점이 충분히 쌓인 뒤에야 그렇게 합니다. 직접 쓴 계획(reflex-start)의 실행에서는 기록만 합니다. 1초 안에 오지 않은 답, 2초보다 오래된 판독에 대한 답, 이미 바뀐 계획이나 끝난 실행에 대한 답은 수행하지 않습니다.</p>
           </div>
         </template>
         </section>

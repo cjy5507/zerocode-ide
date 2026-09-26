@@ -901,6 +901,72 @@ pub const WATCH_UNTIL: &[&str] = &["change", "quiet"];
 /// the helper keeps each one until the window has it on disk and says so, and
 /// a queue the window left full ends the run instead of the receipts.
 pub const REFLEX_COLLECT_MS: u64 = 1_000;
+/// The oldest a reading may be when the reflex decision about it is carried
+/// out (t-10223 §2.2): the time since the window read the run's status plus
+/// the age its capture already had then (`lastCaptureAgeNs`). An answer is
+/// read one collect after it was asked at the soonest, so two collects is as
+/// old as a reading gets and still be the scene the hand acts in; past it the
+/// answer is the teacher's word on a scene gone by. Whether the scene itself
+/// moved (`staleForCurrent`) is the row's other word, apart from this one.
+pub const REFLEX_APPLY_MAX_AGE_MS: u64 = 2 * REFLEX_COLLECT_MS;
+/// How many collects running every detector must have read nothing — each
+/// unknown, or no target — before a pause the reflex decision carried out
+/// hands the run to a new plan rather than ending it (§2.2): the plan no
+/// longer finds anything on this screen, which a rewritten plan may.
+pub const REFLEX_REPLAN_AFTER_UNKNOWN_PASSES: u32 = 3;
+/// How many reflex decisions running may go unanswered or come back unusable
+/// — stale, another epoch's, another plan's — while the decision is being
+/// carried out before the run ends `escalated` and the person is told
+/// (§2.2): the judge's own count of fallbacks that end an acting seat's turn,
+/// for the judge's reason — three in a row is the wire, the key or the model.
+/// A door that refused (no key, no consent) or a wire that failed is not
+/// counted: that is the person's settings or the network, said apart.
+pub const REFLEX_ESCALATE_AFTER: u32 = crate::jev::promote::FALLBACKS_THAT_END_IT;
+/// How many times a plan the window refused is asked for again with the
+/// refusal's own sentence attached (§2.3): the contract's words are learned
+/// from its refusals rather than from a second copy of its grammar.
+pub const REFLEX_PLAN_RETRIES: u32 = 2;
+/// The wall one plan request waits for its answer: a quarter of the longest
+/// run the table allows. While a new plan is written the hand stands still,
+/// and a plan that takes longer than a quarter of the run it is for has cost
+/// the run more than it can win back.
+pub const REFLEX_PLAN_DEADLINE_MS: u64 =
+    crate::computer_use_protocol::reflex::LIMITS.max_run_ns / 4 / 1_000_000;
+/// The most a plan's answer may spend, in tokens. A plan at every bound of
+/// the table — sixteen detectors, thirty-two rules and thirty-two macros,
+/// each as valid_basic writes one — is 15,156 bytes of the contract's compact
+/// JSON (29,758 indented; measured 2026-09-26), about five thousand tokens at
+/// three bytes a token: the plan the instructions ask for, compact, fits
+/// with room, and a model that indents it still fits all but the table's
+/// last rows.
+pub const REFLEX_PLAN_MAX_TOKENS: u32 = 8_192;
+/// How long after a decision its label watches the run (§2.2, D3): three
+/// collects, long enough for the phase it was asked in to show whether the
+/// hand kept finding targets.
+pub const REFLEX_LABEL_WINDOW_MS: u64 = 3_000;
+/// How much of each run a re-plan's label compares (§2.2): the old plan's
+/// last ten seconds against the new plan's first ten.
+pub const REFLEX_REPLAN_COMPARE_MS: u64 = 10_000;
+/// How much of a written plan's run its label reads (§2.3): the first thirty
+/// seconds, the plan's share of the targets over them.
+pub const REFLEX_PLAN_LABEL_MS: u64 = 30_000;
+/// The receipt outcome a click the hand landed leaves
+/// (`ReflexReceipt.Outcome.done`), and the ones a target the hand went for
+/// and did not press leaves — it moved, its lease or evidence did not hold,
+/// or its aim did not fit: the words a screen's share is counted in (§2.2).
+pub const REFLEX_PRESSED_OUTCOME: &str = "done";
+pub const REFLEX_MISSED_OUTCOMES: [&str; 4] = ["moved", "lease", "evidence", "unaimed"];
+/// The ledger a written plan leaves its row in, beside the reflex
+/// decision's (§2.3).
+pub const REFLEX_PLAN_LEDGER: &str = "reflex-plan.jsonl";
+/// The words `reflex-auto --l1` takes: the reflex decision off, asked and
+/// only recorded, or carried out as though it had risen — a bench's word
+/// that every row it writes says was forced (§2.5, D5).
+pub const REFLEX_AUTO_L1: [crate::jev::JevMode; 3] = [
+    crate::jev::JevMode::Off,
+    crate::jev::JevMode::Shadow,
+    crate::jev::JevMode::Auto,
+];
 /// An OCR read of the desktop keeps its last reading where nothing
 /// repainted since (§7.1): what did repaint is read again, snapped out to a
 /// grid of this many points, widened by this margin and by every line it
@@ -1983,6 +2049,14 @@ pub enum ComputerMethod {
     /// End one reflex run (`--run`) and no other; the operator's `stop` ends
     /// whatever runs.
     ReflexStop,
+    /// A reflex run whose plan a model writes from a goal (t-10223 §2.4) —
+    /// the window's: a palette read off the app's window, the plan asked of
+    /// the generator the Computer Use pane set up with no picture of the
+    /// screen, the same door and start as `reflex-start`, and the reflex
+    /// decision carried out on the run — a pause stops it, a re-plan writes
+    /// the next plan. Answers once the first plan runs; the run holds the
+    /// hand until its deadline, a stop or the decision ends it.
+    ReflexAuto,
 }
 
 /// The provider methods the Windows provider answers today
@@ -2109,6 +2183,7 @@ impl ComputerMethod {
         Self::ReflexStart,
         Self::ReflexStatus,
         Self::ReflexStop,
+        Self::ReflexAuto,
     ];
 
     /// Where the verb stands on Windows, by the two tables.
@@ -2173,7 +2248,7 @@ impl ComputerMethod {
             Self::ListenStop => Some("listenStop"),
             Self::SoundRead => Some("soundRead"),
             Self::SoundWait | Self::Watch | Self::Batch | Self::Walk => None,
-            Self::ReflexStart | Self::ReflexStatus | Self::ReflexStop => None,
+            Self::ReflexStart | Self::ReflexStatus | Self::ReflexStop | Self::ReflexAuto => None,
         }
     }
 
@@ -2246,6 +2321,7 @@ impl ComputerMethod {
             Self::ReflexStart => "reflex-start",
             Self::ReflexStatus => "reflex-status",
             Self::ReflexStop => "reflex-stop",
+            Self::ReflexAuto => "reflex-auto",
         }
     }
 
@@ -2314,6 +2390,7 @@ impl ComputerMethod {
                 | Self::RecipeRun
                 | Self::Walk
                 | Self::ReflexStart
+                | Self::ReflexAuto
         )
     }
 
@@ -3018,6 +3095,7 @@ pub fn verb_method(verb: &str) -> Option<ComputerMethod> {
         "reflex-start" => ComputerMethod::ReflexStart,
         "reflex-status" => ComputerMethod::ReflexStatus,
         "reflex-stop" => ComputerMethod::ReflexStop,
+        "reflex-auto" => ComputerMethod::ReflexAuto,
         "batch" => ComputerMethod::Batch,
         _ => return None,
     })
@@ -3206,6 +3284,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("device", "device"),
         ("flow", "flow"),
         ("run", "run"),
+        ("l1", "l1"),
     ] {
         if let Some(value) = optional_string_allowing_empty(&flags, flag)? {
             params.insert(key.into(), Value::String(value));
@@ -3326,6 +3405,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
                 | "all-layers"
                 | "verify"
                 | "repeat"
+                | "renew"
                 | WALK_OVERLAP_FLAG
                 | WALK_RESCUE_FLAG
                 | WALK_REPLAY_FLAG
@@ -3611,6 +3691,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ],
         ComputerMethod::ReflexStart => &["json", "flow", "display", "seconds", "renew"],
         ComputerMethod::ReflexStatus | ComputerMethod::ReflexStop => &["json", "run"],
+        ComputerMethod::ReflexAuto => &["json", "goal", "app", "display", "seconds", "renew", "l1"],
     }
 }
 
@@ -3998,12 +4079,38 @@ fn validate(
                 return Err("--until is the text that is on screen when it worked".into());
             }
         }
-        ComputerMethod::ReflexStart => {
-            require(
-                params,
-                "flow",
-                "--flow <a Flow document with its reflex sections>",
-            )?;
+        ComputerMethod::ReflexStart | ComputerMethod::ReflexAuto => {
+            if method == ComputerMethod::ReflexStart {
+                require(
+                    params,
+                    "flow",
+                    "--flow <a Flow document with its reflex sections>",
+                )?;
+            } else {
+                // The goal is the person's sentence the plan is written for,
+                // and the app is the one the run may act in — the plan's
+                // scope, never the model's to choose.
+                require(params, "goal", "--goal <what the run is for>")?;
+                if params
+                    .get("goal")
+                    .and_then(Value::as_str)
+                    .is_some_and(|goal| goal.trim().is_empty())
+                {
+                    return Err("--goal is the sentence the plan is written for".into());
+                }
+                if let Some(word) = params.get("l1").and_then(Value::as_str)
+                    && !REFLEX_AUTO_L1.iter().any(|mode| mode.key() == word)
+                {
+                    return Err(format!(
+                        "--l1 is one of {}",
+                        REFLEX_AUTO_L1
+                            .iter()
+                            .map(|mode| mode.key())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
             require(params, "display", "--display N")?;
             require(params, "seconds", "--seconds N")?;
             // The seconds become the run policy's nanoseconds here, at the door:
@@ -4359,6 +4466,13 @@ pub fn usage() -> String {
         "       --renew gives a rule its max_fires back once they are spent, on a new edge — the deadline never moves)",
         "  zerocode-computer reflex-status --run <run id> [--json]",
         "  zerocode-computer reflex-stop --run <run id> [--json]      (the operator's stop ends every run)",
+        "  zerocode-computer reflex-auto --goal <what the run is for> --app <app> --display N --seconds N [--renew] [--l1 auto|shadow|off] [--json]",
+        "      (the plan is written by the generator the Computer Use pane's key card sets up, from the goal, the",
+        "       display's size, the app window's place and the colours it shows — never a picture of the screen —",
+        "       checked by the same door as reflex-start, and run; the reflex decision is carried out on the run",
+        "       as its setting says: a pause stops it, a re-plan writes the next plan in the same app, and",
+        "       reflex-status on any of its runs says the plans, the decisions and why it ended;",
+        "       --l1 forces the decision for a bench, and every row it writes says so)",
         "",
         "  the ears — the machine's sound, through the screen-recording permission the eyes already hold:",
         "  zerocode-computer listen-start [--app <app>] [--json]      (the whole machine, or one app's sound)",
@@ -4987,6 +5101,157 @@ mod tests {
 
     fn words(input: &[&str]) -> Vec<String> {
         input.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    /// `reflex-auto` names the sentence its plan is written for, the app the
+    /// run may act in — the plan's scope, the person's to name — the display
+    /// and the seconds a run policy takes, and, for a bench, the decision's
+    /// forced word; each is refused at the parse when missing or out of its
+    /// table, before anything reaches a helper or a generator.
+    #[test]
+    fn reflex_auto_names_its_goal_its_app_and_its_run() {
+        let command = parse_command(&words(&[
+            "reflex-auto",
+            "--goal",
+            "press the red dots, never the blue",
+            "--app",
+            "com.example.Fixture",
+            "--display",
+            "1",
+            "--seconds",
+            "60",
+            "--renew",
+            "--l1",
+            "auto",
+            "--json",
+        ]))
+        .expect("a reflex-auto");
+        assert_eq!(command.method, ComputerMethod::ReflexAuto);
+        assert_eq!(
+            command.params,
+            json!({
+                "goal": "press the red dots, never the blue",
+                "app": "com.example.Fixture",
+                "display": 1,
+                "seconds": 60,
+                "renew": true,
+                "l1": "auto",
+            })
+        );
+        assert!(command.json);
+        assert!(
+            ComputerMethod::ReflexAuto.acts(),
+            "a stopped operator refuses it"
+        );
+        assert_eq!(ComputerMethod::ReflexAuto.verb_name(), "reflex-auto");
+        for word in REFLEX_AUTO_L1 {
+            assert!(
+                parse_command(&words(&[
+                    "reflex-auto",
+                    "--goal",
+                    "g",
+                    "--app",
+                    "a",
+                    "--display",
+                    "0",
+                    "--seconds",
+                    "5",
+                    "--l1",
+                    word.key(),
+                ]))
+                .is_ok(),
+                "{}",
+                word.key()
+            );
+        }
+        let max_seconds = crate::computer_use_protocol::reflex::LIMITS.max_run_ns / 1_000_000_000;
+        let too_long = (max_seconds + 1).to_string();
+        for refused in [
+            vec![
+                "reflex-auto",
+                "--app",
+                "a",
+                "--display",
+                "0",
+                "--seconds",
+                "5",
+            ],
+            vec![
+                "reflex-auto",
+                "--goal",
+                "  ",
+                "--app",
+                "a",
+                "--display",
+                "0",
+                "--seconds",
+                "5",
+            ],
+            vec![
+                "reflex-auto",
+                "--goal",
+                "g",
+                "--display",
+                "0",
+                "--seconds",
+                "5",
+            ],
+            vec!["reflex-auto", "--goal", "g", "--app", "a", "--seconds", "5"],
+            vec!["reflex-auto", "--goal", "g", "--app", "a", "--display", "0"],
+            vec![
+                "reflex-auto",
+                "--goal",
+                "g",
+                "--app",
+                "a",
+                "--display",
+                "0",
+                "--seconds",
+                &too_long,
+            ],
+            vec![
+                "reflex-auto",
+                "--goal",
+                "g",
+                "--app",
+                "a",
+                "--display",
+                "0",
+                "--seconds",
+                "5",
+                "--l1",
+                "on",
+            ],
+            vec![
+                "reflex-auto",
+                "--goal",
+                "g",
+                "--app",
+                "a",
+                "--display",
+                "0",
+                "--seconds",
+                "5",
+                "--flow",
+                "/plan.md",
+            ],
+        ] {
+            assert!(parse_command(&words(&refused)).is_err(), "{refused:?}");
+        }
+        assert!(usage().contains("zerocode-computer reflex-auto --goal"));
+        // `--renew` is a switch: it takes no value, for either reflex verb.
+        let start = parse_command(&words(&[
+            "reflex-start",
+            "--flow",
+            "/plan.md",
+            "--display",
+            "0",
+            "--seconds",
+            "5",
+            "--renew",
+        ]))
+        .expect("a renewing start");
+        assert_eq!(start.params["renew"], json!(true));
     }
 
     /// One row per grant, and only a stale row offers a reset (t-6058): a

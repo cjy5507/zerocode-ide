@@ -58,7 +58,7 @@ fn flow(policy: &str, money: bool, plan: Option<&ReflexPlan>) -> String {
 }
 
 /// The door open: a macOS desktop the table claims, the setting on, nobody stopped.
-fn open() -> DoorFacts {
+pub(super) fn open() -> DoorFacts {
     DoorFacts {
         supported: true,
         enabled: true,
@@ -73,7 +73,7 @@ fn start_words() -> Value {
 
 /// The handshake of a helper with its kernel installed that reads this plan
 /// contract and run policy 1.
-fn reading_handshake() -> Value {
+pub(super) fn reading_handshake() -> Value {
     json!({ "providerVersion": "1.0.0", "supports": { "desktop": { "reflex": {
         "planVersion": VERSION, "runPolicy": RUN_POLICY_VERSION, "kernel": true
     } } } })
@@ -840,7 +840,7 @@ fn settings(consented: &[&str], mode: Option<&str>) -> (tempfile::TempDir, PathB
 }
 
 /// The endpoint's body naming `word`.
-fn answer_naming(word: &str) -> String {
+pub(super) fn answer_naming(word: &str) -> String {
     let probabilities: serde_json::Map<String, Value> = REFLEX_DECIDE_OPTIONS
         .iter()
         .map(|(option, _)| {

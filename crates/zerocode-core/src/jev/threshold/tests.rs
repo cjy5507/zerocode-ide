@@ -265,7 +265,9 @@ fn a_seat_with_no_confident_answers_or_no_lines_is_not_read() {
         }))
     );
     assert_eq!(calibrate(&crate::jev::AGENT_TOOL, &[], &[]), None);
-    assert_eq!(calibrate(&crate::jev::REFLEX_DECIDE, &[], &[]), None);
+    for seat in crate::jev::JEV_USES.iter().filter(|seat| !seat.promotes) {
+        assert_eq!(calibrate(seat, &[], &[]), None, "{}", seat.id);
+    }
 }
 
 /// The table beside a ledger is what the product reads, row by row: a row
