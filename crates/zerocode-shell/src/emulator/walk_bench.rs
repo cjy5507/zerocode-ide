@@ -147,9 +147,15 @@ fn stand_in_for_a_pane(udid: &str) {
     super::ios_hid::retain(udid).expect("this build's helper");
 }
 
-/// A failed or empty walk is a recorded failure, never a faster sample.
+/// A failed or empty walk is a recorded failure, never a faster sample — and
+/// so is one only the judgment called done: a sample's goal was read on the
+/// screen by its own condition (`agreed`, the `until` check), never taken on
+/// the judgment's word (`reachedBy: judgment`).
 fn a_speed_sample(looks: Option<usize>, walked: &errand::Walked) -> bool {
-    looks.is_some() && walked.pressed > 0 && walked.reached == Some(true)
+    looks.is_some()
+        && walked.pressed > 0
+        && walked.reached == Some(true)
+        && walked.agreed == Some(true)
 }
 
 #[test]
@@ -157,6 +163,7 @@ fn a_phone_speed_sample_requires_readiness_a_press_and_its_goal() {
     let done = errand::Walked {
         pressed: 2,
         reached: Some(true),
+        agreed: Some(true),
         ..Default::default()
     };
     assert!(a_speed_sample(Some(2), &done));
@@ -182,6 +189,25 @@ fn a_phone_speed_sample_requires_readiness_a_press_and_its_goal() {
             ..done
         }
     ));
+}
+
+#[test]
+fn a_judgment_only_done_is_not_a_success_sample() {
+    // The judgment said `done` and nothing checked the screen (`agreed` stays
+    // None, the row says `reachedBy: judgment`): its word is no success.
+    let judged = errand::Walked {
+        pressed: 2,
+        reached: Some(true),
+        agreed: None,
+        ..Default::default()
+    };
+    assert!(!a_speed_sample(Some(2), &judged));
+    // The goal's own condition, read on the screen, said it was there.
+    let checked = errand::Walked {
+        agreed: Some(true),
+        ..judged
+    };
+    assert!(a_speed_sample(Some(2), &checked));
 }
 
 #[test]
