@@ -89,7 +89,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "api"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "base64 0.22.1",
  "core-types",
@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "ignore",
  "rayon",
@@ -476,7 +476,7 @@ checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
 name = "commands"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "core-types",
  "plugins",
@@ -577,7 +577,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-types"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -729,7 +729,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "decision-core"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "serde",
  "serde_json",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-service"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "api",
  "serde_json",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "model-prices"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "serde",
  "serde_json",
@@ -2508,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "nix 0.29.0",
  "serde",
@@ -3024,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "api",
  "base64 0.22.1",
@@ -3291,7 +3291,7 @@ dependencies = [
 
 [[package]]
 name = "session-corpus"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "core-types",
 ]
@@ -3802,7 +3802,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tools"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "api",
  "base64 0.22.1",
@@ -4881,7 +4881,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-core"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "serde",
  "serde_json",
@@ -4894,7 +4894,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-harness"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "serde",
  "serde_json",
@@ -4990,7 +4990,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zo-ide"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "api",
  "arboard",
@@ -5025,7 +5025,7 @@ dependencies = [
 
 [[package]]
 name = "zo-telemetry"
-version = "1.1.28"
+version = "1.1.29"
 dependencies = [
  "serde",
  "serde_json",
