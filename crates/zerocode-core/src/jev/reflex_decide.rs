@@ -455,14 +455,19 @@ pub enum Why {
     EpochMismatch,
     /// The helper runs another plan than the one the run was started with.
     PlanMismatch,
+    /// A pause about a hand with nothing to stop: its reading found nothing
+    /// to press and the hand pressed nothing over the collect before it
+    /// ([`idle`]). A hand with no target is already still.
+    Idle,
 }
 
 impl Why {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::NotAuto,
         Self::Stale,
         Self::EpochMismatch,
         Self::PlanMismatch,
+        Self::Idle,
     ];
 
     /// The word a row and a status name it by.
@@ -473,6 +478,7 @@ impl Why {
             Self::Stale => "stale",
             Self::EpochMismatch => "epoch_mismatch",
             Self::PlanMismatch => "plan_mismatch",
+            Self::Idle => "idle",
         }
     }
 }
@@ -481,8 +487,10 @@ impl Why {
 /// (§2.2, 1d) — the answer's grounds before the seat's word: about the run
 /// and epoch running now (`asked_run` and the row's [`Stamp`]), the plan the
 /// helper runs, and a reading no older than [`REFLEX_APPLY_MAX_AGE_MS`]
-/// (`age_ms`, [`age_at`]); then a seat that applies. So a row under `shadow`
-/// still says whether the answer would have been fit to carry out.
+/// (`age_ms`, [`age_at`]), and something for it to change (`idle`: a pause
+/// about a hand already still, [`idle`]); then a seat that applies. So a row
+/// under `shadow` still says whether the answer would have been fit to carry
+/// out.
 ///
 /// # Errors
 ///
@@ -492,6 +500,7 @@ pub fn verdict(
     stamp: &Stamp,
     running: Option<Running<'_>>,
     age_ms: Option<u64>,
+    idle: bool,
     applies: bool,
 ) -> Result<(), Why> {
     let running = running
@@ -503,10 +512,24 @@ pub fn verdict(
     if age_ms.is_none_or(|age| age > REFLEX_APPLY_MAX_AGE_MS) {
         return Err(Why::Stale);
     }
+    if idle {
+        return Err(Why::Idle);
+    }
     if !applies {
         return Err(Why::NotAuto);
     }
     Ok(())
+}
+
+/// Whether an answer is a pause with nothing to stop: its reading found
+/// nothing to press ([`finds_nothing`]) and the hand stood `quiet` — no press
+/// over the collect before it, and not yet blind for the collects a new plan
+/// waits on (the autopilot's to say). Such a pause is never carried out: a
+/// hand with no target already waits, and a pause would end a run that has
+/// done nothing wrong.
+#[must_use]
+pub fn idle(chosen: &str, state: &Value, quiet: bool) -> bool {
+    chosen == PAUSE && quiet && finds_nothing(state)
 }
 
 /// Write a verdict onto its decision's row: `applied`, and the word of why

@@ -168,6 +168,27 @@
     },
     "why": "The realtime gate (t-6723 §7): at least 99% of the round's targets hit by the fixture's own account, at least 12 phase changes the reflex answered, over at least 60 s from the goal; the APM floor is human_step_ms's, and no wrong input is allowed at all."
   },
+  "reflex_goal": {
+    "value": {
+      "words": "Press every dot of the colour the strip across the top shows while it shows, and never a dot of the other colour.",
+      "l1": "auto",
+      "generator": "window",
+      "keys": {
+        "prefix": "dev.zerocode.key.",
+        "jev": "TYPESAFE_API_KEY"
+      }
+    },
+    "why": "The autopilot round (t-10223 R9, `run --autopilot`): the one sentence the window's reflex-auto is given in place of a plan, the reflex decision forced to auto on the bench's own ledgers (its rows say forced), and the generator that writes the plans — the window's (the value seat's chosen row, its key read from the keychain into the driver's environment only) or `stub` (`--generator stub`: the runner's own plan, answered down the autopilot's road and counted as stub, never as a model's). Keys go to the driver by the name the key store's item carries after the window's prefix; the Jev key asks the reflex decision's questions and never writes a plan."
+  },
+  "reflex_usd_per_million": {
+    "value": {
+      "claude-haiku-4-5-20251001": {
+        "input": 1.0,
+        "output": 5.0
+      }
+    },
+    "why": "What a generator's plan costs, by the model its ledger row names, in US dollars per million tokens (Anthropic's list price for Claude Haiku 4.5, 2026-09). A row whose model has no price here is counted in tokens and left out of the dollars, never guessed."
+  },
   "allowed_tools": {
     "value": [
       "Computer"

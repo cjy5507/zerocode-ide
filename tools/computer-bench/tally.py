@@ -291,6 +291,9 @@ def reflex_row(folder, judged):
     measured = judged.get("measure") or {}
     verdict = judged.get("verdict") or {}
     reaction = measured.get("appear_to_press_ms") or {}
+    piloted = measured.get("autopilot") or {}
+    asked = measured.get("l1") or {}
+    cost = measured.get("cost") or {}
     return {
         "folder": folder,
         "scenario": judged.get("scenario"),
@@ -314,10 +317,27 @@ def reflex_row(folder, judged):
         "reaction_ms": {name: reaction.get(name) for name in ("n", "p50", "p95", "p99")},
         "roads": measured.get("roads") or {},
         "floors": judged.get("floors") or {},
+        # The autopilot's own columns (t-10223 R9): None for a person's plan.
+        "goal_to_first_press_ms": measured.get("goal_to_first_press_ms"),
+        "replan_gap_ms": measured.get("replan_gap_ms") or {},
+        "applied": piloted.get("applied"),
+        "not_carried_out": piloted.get("invalid"),
+        "unanswered": piloted.get("unanswered"),
+        "ended": piloted.get("ended"),
+        "plans": piloted.get("plans"),
+        "sources": piloted.get("sources"),
+        "roads_add_up": piloted.get("roads_add_up"),
+        "l1_asked": asked.get("asked"),
+        "l1_rtt_ms": asked.get("rtt_ms"),
+        "tokens": cost.get("tokens"),
+        "usd": cost.get("usd"),
     }
 
 
-REFLEX_MEDIANS = ("apm", "apm_steady", "oracle", "oracle_goal", "decisions", "preparation_s", "wall_s")
+REFLEX_MEDIANS = ("apm", "apm_steady", "oracle", "oracle_goal", "decisions", "preparation_s", "wall_s",
+                  "goal_to_first_press_ms", "plans")
+# The autopilot's decisions carried out, in the order a column prints them.
+REFLEX_DECISIONS = ("continue", "pause", "replan")
 
 
 def summarize_reflex(rows, values=None):
@@ -350,23 +370,46 @@ def summarize_reflex(rows, values=None):
             for road, count in (row.get("roads") or {}).items():
                 roads[road] = roads.get(road, 0) + int((count or {}).get("n") or 0)
         entry["roads"] = roads
+        for name, column in (("replan_gap", "replan_gap_ms"), ("l1_rtt", "l1_rtt_ms")):
+            for share in ("p50", "p95"):
+                seen = [row[column][share] for row in judged
+                        if isinstance((row.get(column) or {}).get(share), (int, float))]
+                entry[f"median_{name}_{share}"] = statistics.median(seen) if seen else None
+        piloted = [row for row in judged if row.get("applied") is not None]
+        entry["applied"] = {word: sum(int(row["applied"].get(word) or 0) for row in piloted)
+                            for word in REFLEX_DECISIONS} if piloted else None
+        entry["roads_add_up"] = all(row.get("roads_add_up") for row in piloted) if piloted else None
+        billed = [row for row in piloted if row.get("tokens")]
+        entry["tokens"] = {side: sum(int(row["tokens"].get(side) or 0) for row in billed)
+                           for side in ("input", "output")} if billed else None
+        entry["usd"] = (None if any(row.get("usd") is None for row in billed)
+                        else sum(row["usd"] for row in billed)) if billed else None
         out[key] = entry
     return out
 
 
 def render_reflex(summary):
     lines = ["| scenario | config | runs | pass | APM (goal) | APM (steady) | wrong | oracle | decisions | "
-             "appear→press p50/p95/p99 ms | roads |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "appear→press p50/p95/p99 ms | roads | goal→press ms | plans | applied c/p/r | re-plan gap ms | "
+             "L1 RTT p50/p95 ms | tokens in/out | $ |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for entry in summary.values():
         roads = ", ".join(f"{road} {count}" for road, count in entry["roads"].items()) or "-"
         reaction = "/".join(fmt_n(entry["reaction_" + name]) for name in ("p50", "p95", "p99"))
+        applied = "/".join(str(entry["applied"][word]) for word in REFLEX_DECISIONS) if entry["applied"] else "-"
+        if entry["roads_add_up"] is False:
+            applied += " (roads differ)"
+        rtt = "/".join(fmt_n(entry[f"median_l1_rtt_{share}"]) for share in ("p50", "p95"))
+        tokens = f"{entry['tokens']['input']}/{entry['tokens']['output']}" if entry["tokens"] else "-"
+        usd = f"{entry['usd']:.4f}" if isinstance(entry["usd"], float) else "-"
         lines.append(
             f"| {entry['scenario']} | {entry['config']} | {entry['runs']} | {entry['passed']}/{entry['judged']} | "
             f"{fmt_n(entry['min_apm'] and round(entry['min_apm'], 1))} (≥{entry['apm_floor']:g}) | "
             f"{fmt_n(entry['min_apm_steady'] and round(entry['min_apm_steady'], 1))} | {entry['wrong_inputs']} | "
             f"{fmt_n(entry['min_oracle'] and round(entry['min_oracle'], 4))} | {fmt_n(entry['min_decisions'])} | "
-            f"{reaction} | {roads} |")
+            f"{reaction} | {roads} | {fmt_n(entry['median_goal_to_first_press_ms'])} | "
+            f"{fmt_n(entry['median_plans'])} | {applied} | {fmt_n(entry['median_replan_gap_p50'])} | {rtt} | "
+            f"{tokens} | {usd} |")
     return "\n".join(lines)
 
 

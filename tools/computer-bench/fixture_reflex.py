@@ -12,6 +12,12 @@ run DIR --seed N --driver B announces, waits, re-checks that nobody is at the
                             ignored driver test B (by its absolute path) for one
                             run of the table's length; the first input that is
                             not the hand's stops it for good.
+    [--autopilot [WORDS]]   gives the driver a goal in place of a plan: the
+    [--generator G] [--l1 W] window's reflex autopilot writes its plans (the
+                            window's generator, or `stub`: this runner's plan
+                            answered down the autopilot's road) and carries its
+                            reflex decision out, forced as bench.json's
+                            reflex_goal says, on ledgers in the run's own zo home.
 judge RUN_DIR               judges a run's folder again from its files.
 
 Every number is bench.json's (reflex_*) or the product's reflex table; the
@@ -19,6 +25,8 @@ APM wall starts at the goal and ends at the verdict, and only the fixture's own
 hits are actions.
 """
 import argparse
+import collections
+import getpass
 import json
 import math
 import os
@@ -41,6 +49,18 @@ COLOURS = ("red", "blue")
 SCENARIO = "reflex-fixture"
 # The road this bench drives: the helper straight over its socket (pre-check (iii)).
 CONFIG = "helper-direct"
+# The generator that stands in for a model: this runner's plan, counted as its own.
+STUB = "stub"
+# Where a plan came from when a model wrote it — the autopilot's plans' word.
+MODEL = "model"
+# The helper's reason for a run it was asked to stop: the autopilot's pause and re-plan.
+ON_REQUEST = "request"
+# The autopilot's own end when its decision stopped answering usably.
+ESCALATED = "escalated"
+# The reflex decision's rows that were questions, and the one road that asks.
+ASKED_OUTCOME = "answered"
+JEV_ROAD = "jev"
+DECISION_ROADS = ("memo", "surrogate", JEV_ROAD)
 
 
 def limits():
@@ -323,10 +343,28 @@ def claims(record, limits):
     return {"done": len(done), "confirmed": confirmed, "unconfirmed": len(done) - confirmed}
 
 
+def account(record):
+    """The autopilot's account of a run it carried (its runs, plans, roads
+    and end), or None for a person's plan."""
+    return (record.get("ended") or {}).get("autopilot")
+
+
+def traces(record):
+    """Each run's report, status and the receipts on disk for it: one for a
+    person's plan, one a run the autopilot started."""
+    ended = record.get("ended") or {}
+    runs = ended.get("runs")
+    if runs is None:
+        return [(ended.get("report") or {}, ended.get("status") or {}, len(record["receipts"]))]
+    return [(run.get("report") or {}, run.get("status") or {},
+             sum(1 for receipt in record["receipts"] if receipt.get("run") == run["runId"])) for run in runs]
+
+
 def aborted(record):
     """Why a run says nothing about the reflex, or None: it was stopped by a
     person, a monitor that could not hear, or the runner, or a press or a move
-    reached the fixture from anyone but the run's hand."""
+    reached the fixture from anyone but the run's hand. An autopilot that
+    stopped its own last run (a pause, an escalation) is judged, not excused."""
     if record["run"].get("stoppedBy"):
         return record["run"]["stoppedBy"]
     if not record.get("started") or not record.get("ended"):
@@ -336,9 +374,9 @@ def aborted(record):
     if any(event.get("sourcePid") != helper for event in record["events"]):
         return FOREIGN
     reason = (record["ended"].get("status") or {}).get("reason")
-    if reason != "deadline":
-        return f"ended by {reason}"
-    return None
+    if reason == "deadline" or (account(record) is not None and reason == ON_REQUEST):
+        return None
+    return f"ended by {reason}"
 
 
 def verdict(record, values, limits):
@@ -354,7 +392,9 @@ def verdict(record, values, limits):
     judged_hits = hits(record)
     mistakes = wrong(record)
     claimed = claims(record, limits)
-    report, status = ended.get("report") or {}, ended.get("status") or {}
+    runs = traces(record)
+    whole = sum(1 for report, status, kept in runs
+                if report.get("verified") is True and report.get("through") == status.get("receiptsIssued") == kept)
     ups = sum(1 for event in record["events"] if event["kind"] == "up")
 
     def the_rounds(event):
@@ -382,14 +422,20 @@ def verdict(record, values, limits):
          f"{len(presses(record))} presses, {ups} releases, held {fixture.get('held')}"),
         ("every done click is a fixture hit", claimed["unconfirmed"] == 0,
          f"{claimed['done']} done clicks, {claimed['confirmed']} confirmed"),
-        ("the trace is whole", report.get("verified") is True and report.get("through") == status.get("receiptsIssued")
-         == len(record["receipts"]),
-         f"verified {report.get('verified')}, {report.get('through')} of {status.get('receiptsIssued')} on disk"),
+        ("the trace is whole", whole == len(runs),
+         f"{whole} of {len(runs)} runs verified with every receipt on disk: "
+         + "; ".join(f"{report.get('through')} of {status.get('receiptsIssued')}, {kept} kept"
+                     for report, status, kept in runs)),
         ("the wall starts at the goal", started["requestNs"] >= run["t0Ns"] and start >= run["t0Ns"]
          and run["verdictNs"] > ended["endedNs"]
          and run["verdictNs"] - run["t0Ns"] >= values["reflex_floor"]["wall_s"] * 1_000_000_000,
          f"{(run['verdictNs'] - run['t0Ns']) / 1e9:.3f} s from the goal to the verdict"),
     ]
+    piloted = account(record)
+    if piloted is not None:
+        sources = collections.Counter(plan.get("source") for plan in piloted.get("plans") or [])
+        checks.append(("every plan is the model's", bool(sources) and set(sources) == {MODEL},
+                       f"{sum(sources.values())} plans by source {dict(sources)}"))
     rendered = [{"check": name, "passed": bool(passed), "detail": detail} for name, passed, detail in checks]
     return {"verdict": "pass" if all(row["passed"] for row in rendered) else "fail", "checks": rendered}
 
@@ -455,8 +501,10 @@ def measure(record, values, limits):
             moves.append(len(seen))
             glides += 1 if len(seen) >= 2 else 0
             seen = set()
-    fires = (record["ended"].get("status") or {}).get("fires", 0)
+    fires = sum(status.get("fires", 0) for _report, status, _kept in traces(record))
     passed = verdict(record, values, limits)["verdict"] == "pass"
+    piloted = autopilot_numbers(record)
+    downs = [event["evNs"] for event in presses(record)]
     return {
         "hits": len(judged_hits),
         "hits_in_run": len(in_run),
@@ -476,11 +524,117 @@ def measure(record, values, limits):
         "claims": claims(record, limits),
         "appear_to_press_ms": spread(reaction),
         "leaves": leaves,
-        "roads": {"l0": {"n": fires, "share": 1.0 if fires else None},
-                  **{road: {"n": 0, "share": 0.0} for road in ("memo", "surrogate", "jev", "escalated")}},
+        "roads": roads(fires, piloted),
+        "autopilot": piloted,
+        "goal_to_first_press_ms": (min(downs) - run["t0Ns"]) / 1e6 if downs else None,
+        "replan_gap_ms": spread(replan_gaps(record.get("calls") or [])),
+        "l1": l1_numbers(record) if piloted is not None else None,
+        "cost": plan_cost(record, values) if piloted is not None else None,
+        "plan_rtt_ms": spread([row["rttMs"] for row in plan_rows(record) if isinstance(row.get("rttMs"), (int, float))]),
         "pointer": {"positions_per_press": spread(moves), "visible_glides": glides, "presses": len(moves)},
         "end": {"reason": (record["ended"].get("status") or {}).get("reason"), "held": record["fixture"].get("held")},
     }
+
+
+def autopilot_numbers(record):
+    """What the autopilot's account says it did (t-10223 §2.4), or None for a
+    person's plan: the decisions carried out and not, the questions the door
+    or the wire kept, its end, its plans by source, and whether its roads add
+    up to the decisions it carried out."""
+    piloted = account(record)
+    if piloted is None:
+        return None
+    applied = dict(piloted.get("applied") or {})
+    counted = piloted.get("roads") or {}
+    return {
+        "applied": applied,
+        "invalid": dict(piloted.get("invalid") or {}),
+        "unanswered": piloted.get("unanswered", 0),
+        "door": dict(piloted.get("door") or {}),
+        "wire": dict(piloted.get("wire") or {}),
+        "ended": (piloted.get("ended") or {}).get("reason"),
+        "plans": len(piloted.get("plans") or []),
+        "sources": dict(collections.Counter(plan.get("source") for plan in piloted.get("plans") or [])),
+        "road_counts": {road: counted.get(road, 0) for road in DECISION_ROADS},
+        "roads_add_up": sum(counted.get(road, 0) for road in DECISION_ROADS) == sum(applied.values()),
+    }
+
+
+def roads(fires, piloted):
+    """Every road's count: the hand's fires, and — for an autopilot — each
+    decision road's share of the decisions carried out, and the runs that
+    ended escalated; a person's plan asks no decision."""
+    counts = (piloted or {}).get("road_counts") or {}
+    carried = sum(((piloted or {}).get("applied") or {}).values())
+    rows = {"l0": {"n": fires, "share": 1.0 if fires else None}}
+    for road in DECISION_ROADS:
+        rows[road] = {"n": counts.get(road, 0), "share": counts.get(road, 0) / carried if carried else 0.0}
+    rows[ESCALATED] = {"n": int((piloted or {}).get("ended") == ESCALATED), "share": None}
+    return rows
+
+
+def replan_gaps(calls):
+    """The milliseconds between one plan's hand letting go (its stop asked)
+    and the next plan's hand taking over (its start answered)."""
+    gaps, let_go = [], None
+    started = False
+    for call in sorted(calls, key=lambda call: call["askedNs"]):
+        if call.get("refused"):
+            continue
+        if call["method"] == "reflexStop":
+            let_go = call["askedNs"]
+        elif call["method"] == "reflexStart":
+            if started and let_go is not None:
+                gaps.append((call["answeredNs"] - let_go) / 1e6)
+            started, let_go = True, None
+    return gaps
+
+
+def question_rows(record):
+    """The reflex decision's rows that were questions — its labels aside."""
+    return [row for row in record.get("decisions") or [] if "decision" in row and "outcome" in row]
+
+
+def l1_numbers(record):
+    """The reflex decision's questions from its ledger in the bench's home:
+    asked, answered, forced by the bench, the requests that went and their
+    round trips."""
+    rows = question_rows(record)
+    return {
+        "asked": len(rows),
+        "answered": sum(1 for row in rows if row.get("outcome") == ASKED_OUTCOME),
+        "forced": sum(1 for row in rows if (row.get("provenance") or {}).get("forced") is True),
+        "requests": sum(int(row.get("attempts") or 0) for row in rows),
+        "rtt_ms": spread([row["rttMs"] for row in rows if row.get("road") == JEV_ROAD
+                          and isinstance(row.get("rttMs"), (int, float))]),
+    }
+
+
+def plan_rows(record):
+    """The plans' ledger rows that were plans asked for — their labels aside."""
+    return [row for row in record.get("plans") or [] if "outcome" in row]
+
+
+def plan_cost(record, values):
+    """What the autopilot's plans cost: tokens and requests summed over the
+    plans' ledger, and dollars at bench.json's prices — None when a model
+    that billed tokens has no price there."""
+    prices = values["reflex_usd_per_million"]
+    tokens = {"input": 0, "output": 0}
+    usd = 0.0
+    for row in plan_rows(record):
+        billed = row.get("tokens") or {}
+        for side in tokens:
+            tokens[side] += int(billed.get(side) or 0)
+        if not any(billed.values()):
+            continue
+        price = prices.get(row.get("model"))
+        if price is None or usd is None:
+            usd = None
+            continue
+        usd += sum(int(billed.get(side) or 0) * price[side] / 1e6 for side in tokens)
+    return {"tokens": tokens, "plan_requests": sum(int(row.get("requests") or 0) for row in plan_rows(record)),
+            "usd": usd}
 
 
 def floors(measured, values):
@@ -494,6 +648,14 @@ def floors(measured, values):
         "decisions": measured["decisions"] >= floor["decisions"],
         "wall": measured["wall_s"] >= floor["wall_s"],
     }
+    piloted, asked = measured.get("autopilot"), measured.get("l1") or {}
+    if piloted is not None:
+        # The design's gate for a goal in place of a plan (t-10223 §5.1): no
+        # plan but the model's, every carried-out decision on a road, and
+        # every question the bench forced saying so.
+        rows["model_plans"] = piloted["plans"] > 0 and set(piloted["sources"]) == {MODEL}
+        rows["roads_add_up"] = piloted["roads_add_up"]
+        rows["l1_forced"] = asked.get("asked", 0) > 0 and asked.get("forced") == asked.get("asked")
     return {"apm_floor": apm_floor, **{name: passed for name, passed in rows.items()}}
 
 
@@ -524,6 +686,56 @@ def judged(record, values, limits):
 
 
 # ---------------------------------------------------------------- safety --
+
+def keychain(service, value=False):
+    """One item of the person's keychain: whether it is there — or, asked for
+    its value, the value, which goes into one driver's environment and
+    nowhere else: never printed, never written, never an argument."""
+    command = ["security", "find-generic-password", "-s", service, "-a", getpass.getuser()]
+    done = subprocess.run(command + (["-w"] if value else []), capture_output=True, text=True)
+    if done.returncode != 0:
+        return None
+    return (done.stdout.strip() or None) if value else True
+
+
+def generator_key_name():
+    """The name the value seat's chosen row keeps its key under, after the
+    window's prefix — the key the window's generator asks with — or None for
+    a row that keeps none there."""
+    models = json.loads((FIXTURES / "type-value/models.json").read_text())
+    row = next((row for row in models["rows"] if row["id"] == models.get("chosen")), None)
+    return (row or {}).get("credentialKey")
+
+
+def keys_for(values, generator, read):
+    """The keys one autopilot driver is handed, by the name the window's key
+    store gives them, read with `read` (the keychain): the Jev key its
+    questions ask with, when there is one, and — for the window's own
+    generator — that generator's key, without which nothing starts. A key
+    that is not there is looked for and never read. Answers (env, None), or
+    (None, why)."""
+    keys = values["reflex_goal"]["keys"]
+    env = {}
+    if read(keys["prefix"] + keys["jev"]):
+        env[keys["jev"]] = read(keys["prefix"] + keys["jev"], value=True)
+    if generator != STUB:
+        name = generator_key_name()
+        if not name or not read(keys["prefix"] + name):
+            return None, (f"the window's generator has no key ({keys['prefix']}{name}): it writes no plan, "
+                          f"so an autopilot round runs only with --generator {STUB}")
+        env[name] = read(keys["prefix"] + name, value=True)
+    return {name: key for name, key in env.items() if key}, None
+
+
+def bench_home(run):
+    """The run's own zo home: its settings consent the run's folder (the
+    evidence folder the autopilot's questions come from) and nothing else,
+    and every ledger the driver writes lands under it."""
+    home = run / "home"
+    home.mkdir(mode=0o700)
+    write_atomic(home / "settings.json", {"smart": {"jev": {"workspaces": [str(run)]}}})
+    return home
+
 
 def refusal(idle_s, locked, ready, values):
     """Why a run may not start now, or None: the screen locked, a keyboard or
@@ -592,6 +804,8 @@ SOURCE = HERE / "ReflexFixture.swift"
 DRIVER_TEST = "computer_use::reflex::bench::a_reflex_run_on_the_benchs_own_fixture"
 FOLDER_ENV = "ZEROCODE_REFLEX_BENCH_DIR"
 HELPER_ENV = "ZEROCODE_COMPUTER_MACOS_HELPER_APP_PATH"
+# zo's own config home, first in its order: the bench's settings and ledgers.
+HOME_ENV = "ZO_CONFIG_HOME"
 SHIM = "zerocode-computer"
 
 
@@ -607,6 +821,11 @@ def load(folder):
     folder = str(folder)
     read = lambda name: tally.read_json(folder, name)
     lines = lambda name: tally.read_lines(folder, name)
+    ended = read("ended.json")
+    runs = (ended or {}).get("runs")
+    ledgers = (ended or {}).get("ledgers") or {}
+    receipts = lines("receipts.jsonl") if runs is None else [
+        {**receipt, "run": run["runId"]} for run in runs for receipt in lines(run["receipts"])]
     return {
         "run": read("run.json"),
         "schedule": (read("round.json") or {}).get("schedule"),
@@ -616,8 +835,11 @@ def load(folder):
         "frames": lines("frames.jsonl"),
         "events": lines("events.jsonl"),
         "started": read("started.json"),
-        "receipts": lines("receipts.jsonl"),
-        "ended": read("ended.json"),
+        "receipts": receipts,
+        "ended": ended,
+        "calls": lines("calls.jsonl"),
+        "decisions": lines(ledgers["decisions"]) if ledgers.get("decisions") else [],
+        "plans": lines(ledgers["plans"]) if ledgers.get("plans") else [],
     }
 
 
@@ -730,9 +952,19 @@ class Desk:
         return {"folder": str(run), "frames": fixture.get("frames"), "events": fixture.get("events"),
                 "frame_ms": spread(spans), "shown": sorted({name for frame in frames for name in frame["shown"]})[:12]}
 
-    def run(self, seed, driver, helper_app, rules=None):
-        """One run: announce, re-check, the goal, the driver, the supervision, the verdict."""
+    def run(self, seed, driver, helper_app, rules=None, autopilot=None):
+        """One run: announce, re-check, the goal, the driver, the supervision,
+        the verdict. `autopilot` ({"generator", "words"}) gives the driver
+        bench.json's goal in place of a plan."""
         safety = self.values["reflex_safety"]
+        goal = self.values["reflex_goal"]
+        keys = {}
+        if autopilot is not None:
+            autopilot = {"generator": autopilot.get("generator") or goal["generator"],
+                         "words": autopilot.get("words") or goal["words"], "l1": autopilot.get("l1") or goal["l1"]}
+            keys, why = keys_for(self.values, autopilot["generator"], keychain)
+            if why:
+                raise Refused(why)
         why = self.refused({"pointerInside": True}) or self.another_operator() or self.another_bench()
         if why:
             raise Refused(why)
@@ -742,9 +974,15 @@ class Desk:
         run = self.run_folder(seed)
         ready = self.launch(run, seed)
         many = rules or self.values["reflex_plan"]["rules_per_colour"]
+        config = CONFIG if many == self.values["reflex_plan"]["rules_per_colour"] else f"{CONFIG}+rules{many}"
+        if autopilot is not None:
+            config += f"+autopilot-{autopilot['generator']}"
+            if autopilot["l1"] != goal["l1"]:
+                config += f"-l1{autopilot['l1']}"
         record = {"owner": self.session["owner"], "seed": seed, "fixturePid": ready["pid"], "rules": many,
-                  "config": CONFIG if many == self.values["reflex_plan"]["rules_per_colour"] else f"{CONFIG}+rules{many}",
-                  "readyNs": ready["readyNs"], "stoppedBy": None}
+                  "config": config, "readyNs": ready["readyNs"], "stoppedBy": None}
+        if autopilot is not None:
+            record["autopilot"] = {"generator": autopilot["generator"], "l1": autopilot["l1"]}
         driver_process = None
         try:
             why = self.refused(ready) or self.another_operator() or self.another_bench()
@@ -754,14 +992,21 @@ class Desk:
             record["t0Ns"] = uptime_ns()
             record["load"] = {"goal": list(os.getloadavg())}
             write_atomic(run / "start.json", {"t0Ns": record["t0Ns"]})
-            write_atomic(run / "request.json", {"bundle": self.session["bundle"], "pollMs": safety["poll_ms"],
-                                                "seconds": self.values["reflex_round"]["run_s"], "renew": True,
-                                                "restore": ready["pointer"]})
+            request = {"bundle": self.session["bundle"], "pollMs": safety["poll_ms"],
+                       "seconds": self.values["reflex_round"]["run_s"], "renew": True, "restore": ready["pointer"]}
+            env = {**os.environ, FOLDER_ENV: str(run), HELPER_ENV: helper_app}
+            if autopilot is not None:
+                home = bench_home(run)
+                request.update(goal=autopilot["words"], generator=autopilot["generator"], l1=autopilot["l1"],
+                               home=str(home))
+                env.update({HOME_ENV: str(home), **keys})
+            write_atomic(run / "request.json", request)
             with (run / "driver.log").open("w") as log:
                 driver_process = subprocess.Popen(
                     [os.path.abspath(driver), DRIVER_TEST, "--exact", "--ignored", "--nocapture", "--test-threads", "1"],
                     stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, text=True,
-                    env={**os.environ, FOLDER_ENV: str(run), HELPER_ENV: helper_app}, start_new_session=True)
+                    env=env, start_new_session=True)
+            del env, keys
             record["stoppedBy"] = self.supervise(run, record, driver_process)
         finally:
             if driver_process:
@@ -815,8 +1060,11 @@ class Desk:
             if not planned:
                 if geometry:
                     watch = Supervisor(helper_pid=geometry["helperPid"])
-                    write_atomic(run / "plan.json", plan(geometry, self.values, self.session["bundle"], contract(),
-                                                         rules=record["rules"], table_limits=self.limits))
+                    # A person's plan, or the stand-in's answer; the window's generator writes its own.
+                    if (record.get("autopilot") or {}).get("generator", STUB) == STUB:
+                        write_atomic(run / "plan.json", plan(geometry, self.values, self.session["bundle"],
+                                                             contract(), rules=record["rules"],
+                                                             table_limits=self.limits))
                     planned = True
                 elif uptime_ns() > prep_until:
                     return stop("preparation overran")
@@ -882,6 +1130,12 @@ def main(argv=None):
     parser.add_argument("--driver", help="run: the window crate's test binary (target/debug/deps/zerocode_shell-…)")
     parser.add_argument("--helper-app", help="run: the helper app (default: the one the window names)")
     parser.add_argument("--rules", type=int, help="run: rules a colour (default: the table's rules_per_colour)")
+    parser.add_argument("--autopilot", nargs="?", const="", metavar="WORDS",
+                        help="run: a goal in place of a plan (default words: bench.json's reflex_goal)")
+    parser.add_argument("--generator", choices=["window", STUB],
+                        help="run --autopilot: who writes the plans (default: bench.json's reflex_goal)")
+    parser.add_argument("--l1", choices=["auto", "shadow", "off"],
+                        help="run --autopilot: the reflex decision's forced word (default: bench.json's reflex_goal)")
     args = parser.parse_args(argv)
     values, table_limits = tally.table(), limits()
     signals = Signals().install()
@@ -901,7 +1155,9 @@ def main(argv=None):
                 helper_app = args.helper_app or installed_helper()
                 if not args.driver or not helper_app:
                     parser.error("run needs --driver and a helper app")
-                result = desk.run(args.seed, args.driver, helper_app, rules=args.rules)
+                autopilot = None if args.autopilot is None else {"words": args.autopilot, "generator": args.generator,
+                                                                 "l1": args.l1}
+                result = desk.run(args.seed, args.driver, helper_app, rules=args.rules, autopilot=autopilot)
         print(json.dumps(result, indent=2))
         return 0
     except Refused as why:

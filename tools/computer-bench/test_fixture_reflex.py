@@ -94,6 +94,70 @@ def clean(seed=7):
     }
 
 
+def piloted(seed=7, sources=("model", "model")):
+    """`clean`'s run carried by an autopilot that re-planned once halfway:
+    two runs, each with its receipts, its status and its report, the
+    autopilot's account, the helper's starts and stops as the driver heard
+    them, and the bench home's two ledgers — the reflex decision's rows and
+    the plans'."""
+    record = clean(seed)
+    accepted, deadline = run_window(record)
+    half = accepted + (deadline - accepted) // 2
+    runs = [("rx-1", [r for r in record["receipts"] if r["decidedHostNs"] < half]),
+            ("rx-2", [r for r in record["receipts"] if r["decidedHostNs"] >= half])]
+    receipts, ended_runs = [], []
+    for run, mine in runs:
+        for seq, receipt in enumerate(mine, start=1):
+            receipts.append({**receipt, "seq": seq, "run": run})
+        clicks = sum(1 for receipt in mine if receipt["actionId"].startswith("click"))
+        ended_runs.append({"runId": run, "receipts": f"reflex-{run}.jsonl",
+                           "report": {"verified": True, "through": len(mine), "writeFailures": 0, "ended": True},
+                           "status": {"state": "stopped", "reason": "request" if run == "rx-1" else "deadline",
+                                      "receiptsIssued": len(mine), "fires": clicks, "othersHeard": 0,
+                                      "monitor": "hearing"}})
+    record["receipts"] = receipts
+    stop_ns, start_ns = half, half + 40 * MS
+    record["calls"] = [
+        {"method": "reflexStart", "run": "rx-1", "askedNs": accepted - 30 * MS, "answeredNs": accepted - 20 * MS,
+         "deadlineNs": deadline, "refused": None},
+        {"method": "reflexStop", "run": "rx-1", "askedNs": stop_ns, "answeredNs": stop_ns + 5 * MS,
+         "deadlineNs": None, "refused": None},
+        {"method": "reflexStart", "run": "rx-2", "askedNs": start_ns - 10 * MS, "answeredNs": start_ns,
+         "deadlineNs": deadline, "refused": None},
+    ]
+    plans = [{"run": run, "epoch": epoch, "planHash": f"h{epoch}", "source": source, "promptVersion": 1,
+              "requests": 1, "rttMs": 900 + epoch, "refusals": 0}
+             for epoch, ((run, _), source) in enumerate(zip(runs, sources), start=1)]
+    record["ended"].update({
+        "road": "autopilot",
+        "runs": ended_runs,
+        "report": ended_runs[-1]["report"],
+        "status": ended_runs[-1]["status"],
+        "autopilot": {"id": "ra-1", "l1": {"forced": "auto"},
+                      "roads": {"memo": 0, "surrogate": 0, "jev": 3},
+                      "applied": {"continue": 2, "pause": 0, "replan": 1},
+                      "invalid": {"stale": 1, "epoch_mismatch": 0, "plan_mismatch": 0, "not_auto": 0},
+                      "unanswered": 1, "door": {}, "wire": {}, "plans": plans,
+                      "ended": {"reason": "deadline", "said": "the helper ended the run"}},
+        "ledgers": {"decisions": "home/requests/reflex-decide.jsonl", "plans": "home/requests/reflex-plan.jsonl"},
+    })
+    record["decisions"] = [
+        {"run": "rx-1", "decision": number, "road": "jev", "attempts": 1, "rttMs": rtt, "outcome": outcome,
+         "provenance": {"epoch": 1, "planHash": "h1", "forced": True}, "applied": applied}
+        for number, (rtt, outcome, applied) in enumerate(
+            ((200, "answered", True), (300, "answered", True), (400, "answered", True),
+             (500, "answered", False), (1000, "timeout", False)), start=1)
+    ] + [{"label": "rx-1:1", "requestAt": 1, "kind": "executed_outcome"}]
+    record["plans"] = [
+        {"run": run, "epoch": epoch, "source": source, "model": "claude-haiku-4-5-20251001",
+         "requests": 1, "rttMs": 900 + epoch, "tokens": {"input": 2_000, "output": 800}, "outcome": "answered"}
+        for epoch, ((run, _), source) in enumerate(zip(runs, sources), start=1)
+    ] + [{"label": "rx-1", "requestAt": 1, "kind": "executed_outcome", "share": {}}]
+    record["run"]["autopilot"] = {"generator": "window", "l1": "auto"}
+    record["run"]["config"] = f"{reflex.CONFIG}+autopilot-window"
+    return record
+
+
 def failed(verdict):
     return sorted(check["check"] for check in verdict["checks"] if not check["passed"])
 
@@ -461,7 +525,12 @@ FAKE_DRIVER = textwrap.dedent(r"""
     (run / "geometry.json").write_text(json.dumps({"display": {"index": 0, "x": 0, "y": 0, "width": 1512,
         "height": 982, "scale": 2}, "window": {"id": 1, "x": 100, "y": 100, "width": 720, "height": 440},
         "helperPid": os.getpid()}))
-    while not (run / "plan.json").exists():
+    goal = request.get("goal")
+    if goal:
+        # What the driver was handed: the home it keeps its ledgers in, and whether a Jev key came — never the key.
+        (run / "env.json").write_text(json.dumps({"home": os.environ.get("ZO_CONFIG_HOME"),
+            "jevKey": bool(os.environ.get("TYPESAFE_API_KEY")), "keys": sorted(k for k in os.environ if k.endswith("_KEY"))}))
+    while (not goal or request.get("generator") == "stub") and not (run / "plan.json").exists():
         time.sleep(0.01)
     accepted = now()
     deadline = accepted + int(request["seconds"] * 1e9)
@@ -504,14 +573,52 @@ class Runner(unittest.TestCase):
         import shutil
         shutil.rmtree(self.folder, ignore_errors=True)
 
-    def run_desk(self, seed, **env):
+    def run_desk(self, seed, autopilot=None, keychain=None, **env):
         desk = reflex.Desk(self.folder, self.values, LIMITS)
         with mock.patch.object(reflex.Bench, "hid_idle_s", return_value=VALUES["reflex_safety"]["idle_s"] + 1), \
                 mock.patch.object(reflex.Bench, "screen_locked", return_value=False), \
                 mock.patch.object(reflex.Desk, "another_operator", return_value=None), \
                 mock.patch.object(reflex, "other_benches", return_value=[]), \
+                mock.patch.object(reflex, "keychain", keychain or (lambda service, value=False: None)), \
                 mock.patch.dict(os.environ, env):
-            return desk.run(seed, self.driver, "/nowhere/helper.app"), self.folder / f"run-{seed}"
+            return desk.run(seed, self.driver, "/nowhere/helper.app", autopilot=autopilot), self.folder / f"run-{seed}"
+
+    def test_an_autopilot_round_hands_over_the_goal_and_keeps_its_ledgers_home(self):
+        secret = "k-" + "x" * 24
+        jev = VALUES["reflex_goal"]["keys"]["jev"]
+        keychain = lambda service, value=False: secret if service.endswith(jev) else None
+        result, run = self.run_desk(34, autopilot={"generator": reflex.STUB}, keychain=keychain)
+        request = json.loads((run / "request.json").read_text())
+        self.assertEqual(request["goal"], VALUES["reflex_goal"]["words"])
+        self.assertEqual((request["generator"], request["l1"]), (reflex.STUB, VALUES["reflex_goal"]["l1"]))
+        home = pathlib.Path(request["home"])
+        self.assertEqual(home.parent, run, "the bench's zo home is the run's own")
+        settings = json.loads((home / "settings.json").read_text())
+        self.assertEqual(settings["smart"]["jev"]["workspaces"], [str(run)])
+        handed = json.loads((run / "env.json").read_text())
+        self.assertEqual(handed["home"], str(home))
+        self.assertTrue(handed["jevKey"])
+        self.assertIn(jev, handed["keys"])
+        self.assertNotIn(reflex.generator_key_name(), handed["keys"], "a stand-in is handed no generator key")
+        self.assertTrue((run / "plan.json").exists(), "the stand-in answers with the runner's plan")
+        record = json.loads((run / "run.json").read_text())
+        self.assertEqual(record["autopilot"], {"generator": reflex.STUB, "l1": VALUES["reflex_goal"]["l1"]})
+        self.assertEqual(result["config"], f"{reflex.CONFIG}+autopilot-{reflex.STUB}")
+        for path in run.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(secret, path.read_text(errors="replace"), f"the key reached {path.name}")
+
+    def test_a_round_may_force_another_word_on_the_decision_and_its_config_says_so(self):
+        result, run = self.run_desk(36, autopilot={"generator": reflex.STUB, "l1": "shadow"})
+        self.assertEqual(json.loads((run / "request.json").read_text())["l1"], "shadow")
+        self.assertEqual(result["config"], f"{reflex.CONFIG}+autopilot-{reflex.STUB}-l1shadow")
+
+    def test_the_windows_generator_with_no_key_starts_nothing(self):
+        desk_folder = self.folder / "run-35"
+        with self.assertRaises(reflex.Refused) as refused:
+            self.run_desk(35, autopilot={"generator": "window"})
+        self.assertIn("generator", str(refused.exception))
+        self.assertFalse(desk_folder.exists(), "refused before the fixture came up")
 
     def test_a_run_goes_from_the_goal_to_a_verdict_and_every_file_is_kept(self):
         result, run = self.run_desk(31)
@@ -548,6 +655,150 @@ class Runner(unittest.TestCase):
             with self.assertRaises(reflex.Refused):
                 desk.run(33, self.driver, "/nowhere/helper.app")
         self.assertFalse((self.folder / "run-33").exists(), "refused before the fixture came up")
+
+
+class Autopilot(unittest.TestCase):
+    """A goal in place of a plan (t-10223 R9): the autopilot's runs and plans
+    judged from the files the driver and the bench home keep."""
+
+    def test_an_autopilot_run_is_judged_on_every_run_it_started_and_every_plan_it_ran(self):
+        record = piloted()
+        verdict = reflex.verdict(record, VALUES, LIMITS)
+        self.assertEqual(verdict["verdict"], "pass", failed(verdict))
+        self.assertEqual(len(verdict["checks"]), 10)
+        self.assertEqual(verdict["checks"][-1]["check"], "every plan is the model's")
+        self.assertEqual(len(reflex.verdict(clean(), VALUES, LIMITS)["checks"]), 9, "a person's plan has nine")
+        # A plan the bench's stand-in wrote is never counted as the model's.
+        stub = reflex.verdict(piloted(sources=("model", "stub")), VALUES, LIMITS)
+        self.assertEqual(failed(stub), ["every plan is the model's"])
+        none = piloted()
+        none["ended"]["autopilot"]["plans"] = []
+        self.assertIn("every plan is the model's", failed(reflex.verdict(none, VALUES, LIMITS)))
+        # Every run's trace is whole, not only the last one's.
+        short = piloted()
+        short["receipts"] = [receipt for receipt in short["receipts"] if (receipt["run"], receipt["seq"]) != ("rx-1", 1)]
+        self.assertIn("the trace is whole", failed(reflex.verdict(short, VALUES, LIMITS)))
+        # An autopilot that ended itself early is judged, never excused as aborted.
+        paused = piloted()
+        paused["ended"]["runs"][-1]["status"]["reason"] = "request"
+        paused["ended"]["status"] = paused["ended"]["runs"][-1]["status"]
+        paused["ended"]["autopilot"]["ended"] = {"reason": "paused", "said": "paused"}
+        self.assertNotEqual(reflex.verdict(paused, VALUES, LIMITS)["verdict"], "aborted")
+        # The runner's stop still aborts it.
+        stopped = piloted()
+        stopped["run"]["stoppedBy"] = "person"
+        self.assertEqual(reflex.verdict(stopped, VALUES, LIMITS)["verdict"], "aborted")
+        # A helper that ended the last run on a person's input aborts it too.
+        touched = piloted()
+        touched["ended"]["status"] = {**touched["ended"]["status"], "reason": "external_input"}
+        touched["ended"]["runs"][-1]["status"] = touched["ended"]["status"]
+        self.assertEqual(reflex.verdict(touched, VALUES, LIMITS)["verdict"], "aborted")
+
+    def test_the_roads_are_the_autopilots_account_and_add_up_to_what_was_carried_out(self):
+        measured = reflex.measure(piloted(), VALUES, LIMITS)
+        autopilot = measured["autopilot"]
+        self.assertEqual(measured["roads"]["jev"]["n"], 3)
+        self.assertEqual(measured["roads"]["memo"]["n"], 0)
+        self.assertEqual(measured["roads"]["escalated"]["n"], 0)
+        self.assertEqual(measured["roads"]["l0"]["n"], sum(run["status"]["fires"] for run in piloted()["ended"]["runs"]))
+        self.assertEqual(autopilot["applied"], {"continue": 2, "pause": 0, "replan": 1})
+        self.assertEqual(autopilot["invalid"]["stale"], 1)
+        self.assertEqual(autopilot["unanswered"], 1)
+        self.assertEqual(autopilot["ended"], "deadline")
+        self.assertEqual(autopilot["plans"], 2)
+        self.assertEqual(autopilot["sources"], {"model": 2})
+        self.assertTrue(autopilot["roads_add_up"])
+        # A road count that is not what was carried out is said so, and fails its floor.
+        off = piloted()
+        off["ended"]["autopilot"]["roads"]["jev"] = 2
+        measured = reflex.measure(off, VALUES, LIMITS)
+        self.assertFalse(measured["autopilot"]["roads_add_up"])
+        self.assertFalse(reflex.floors(measured, VALUES)["roads_add_up"])
+        # An escalated end is counted as the runs that ended so.
+        escalated = piloted()
+        escalated["ended"]["autopilot"]["ended"] = {"reason": "escalated", "said": "-"}
+        self.assertEqual(reflex.measure(escalated, VALUES, LIMITS)["roads"]["escalated"]["n"], 1)
+        # A person's plan asks the decision nothing: every road but the hand's is none.
+        hand = reflex.measure(clean(), VALUES, LIMITS)
+        self.assertEqual({road: row["n"] for road, row in hand["roads"].items() if road != "l0"},
+                         {"memo": 0, "surrogate": 0, "jev": 0, "escalated": 0})
+        self.assertIsNone(hand["autopilot"])
+
+    def test_the_new_columns_come_from_the_fixture_the_helper_and_the_ledgers(self):
+        record = piloted()
+        measured = reflex.measure(record, VALUES, LIMITS)
+        first = min(event["evNs"] for event in record["events"] if event["kind"] == "down")
+        self.assertEqual(measured["goal_to_first_press_ms"], (first - T0) / 1e6)
+        self.assertEqual(measured["replan_gap_ms"], {"n": 1, "p50": 40.0, "p95": 40.0, "p99": 40.0})
+        l1 = measured["l1"]
+        self.assertEqual(l1["asked"], 5)
+        self.assertEqual(l1["answered"], 4)
+        self.assertEqual(l1["forced"], 5)
+        self.assertEqual(l1["rtt_ms"]["p50"], 400.0)
+        self.assertEqual(l1["rtt_ms"]["n"], 5)
+        cost = measured["cost"]
+        self.assertEqual(cost["tokens"], {"input": 4_000, "output": 1_600})
+        self.assertEqual(cost["plan_requests"], 2)
+        self.assertAlmostEqual(cost["usd"], 4_000 * 1.0 / 1e6 + 1_600 * 5.0 / 1e6)
+        self.assertEqual(measured["plan_rtt_ms"]["n"], 2)
+        # A model with no price is counted in tokens and never guessed in dollars.
+        unpriced = piloted()
+        unpriced["plans"][0]["model"] = "a-model-with-no-price"
+        self.assertIsNone(reflex.measure(unpriced, VALUES, LIMITS)["cost"]["usd"])
+        # A stand-in's plans cost nothing and say so.
+        stub = piloted(sources=("stub", "stub"))
+        for row in stub["plans"]:
+            row.update(tokens=None, model=None)
+        self.assertEqual(reflex.measure(stub, VALUES, LIMITS)["cost"], {"tokens": {"input": 0, "output": 0},
+                                                                          "plan_requests": 2, "usd": 0.0})
+        # A person's plan has a first press too, and no re-plan, question or plan cost.
+        hand = reflex.measure(clean(), VALUES, LIMITS)
+        self.assertIsNotNone(hand["goal_to_first_press_ms"])
+        self.assertEqual(hand["replan_gap_ms"]["n"], 0)
+        self.assertIsNone(hand["l1"])
+        self.assertIsNone(hand["cost"])
+
+    def test_the_autopilots_floors_are_the_designs(self):
+        record = piloted()
+        gate = reflex.floors(reflex.measure(record, VALUES, LIMITS), VALUES)
+        for name in ("model_plans", "roads_add_up", "l1_forced"):
+            self.assertTrue(gate[name], name)
+        self.assertTrue(reflex.judged(record, VALUES, LIMITS)["success"])
+        stub = reflex.judged(piloted(sources=("stub", "stub")), VALUES, LIMITS)
+        self.assertFalse(stub["floors"]["model_plans"])
+        self.assertFalse(stub["success"], "a stand-in's plans never make the gate")
+        self.assertEqual(stub["config"], f"{reflex.CONFIG}+autopilot-window")
+        unforced = piloted()
+        unforced["decisions"][0]["provenance"]["forced"] = False
+        self.assertFalse(reflex.floors(reflex.measure(unforced, VALUES, LIMITS), VALUES)["l1_forced"])
+        # A person's plan is held to the floors it always was.
+        self.assertNotIn("model_plans", reflex.floors(reflex.measure(clean(), VALUES, LIMITS), VALUES))
+
+    def test_the_keys_go_to_the_driver_by_the_windows_names_and_only_there(self):
+        goal = VALUES["reflex_goal"]
+        harness = (pathlib.Path(reflex.HERE).parents[1] / "crates/zerocode-harness/src/lib.rs").read_text()
+        self.assertIn(f'pub const SERVICE_KEYCHAIN_SERVICE_PREFIX: &str = "{goal["keys"]["prefix"]}";', harness)
+        self.assertIn(f'pub const TYPESAFE_API_KEY_ENV: &str = "{goal["keys"]["jev"]}";', harness)
+        read = []
+
+        def keychain(service, value=False):
+            read.append((service, value))
+            return "k-" + service if service.endswith(goal["keys"]["jev"]) else None
+
+        env, why = reflex.keys_for(VALUES, reflex.STUB, keychain)
+        self.assertIsNone(why)
+        self.assertEqual(sorted(env), [goal["keys"]["jev"]])
+        self.assertEqual(env[goal["keys"]["jev"]], "k-" + goal["keys"]["prefix"] + goal["keys"]["jev"])
+        # The window's generator asks for its row's key; with none there is no run.
+        env, why = reflex.keys_for(VALUES, "window", keychain)
+        self.assertIsNone(env)
+        self.assertIn("generator", why)
+        self.assertFalse(any(value for service, value in read if not service.endswith(goal["keys"]["jev"])),
+                         "a key that is not there is looked for, never read")
+        # No Jev key: the stand-in round runs, its questions refused at the door, and says so.
+        env, why = reflex.keys_for(VALUES, reflex.STUB, lambda service, value=False: None)
+        self.assertEqual(env, {})
+        self.assertIsNone(why)
 
 
 class Retries(unittest.TestCase):
@@ -589,6 +840,34 @@ class Tally(unittest.TestCase):
             rendered = tally.render_reflex(summary)
             for column in ("APM (goal)", "APM (steady)", "wrong", "oracle", "decisions"):
                 self.assertIn(column, rendered)
+
+    def test_an_autopilot_run_is_tallied_with_the_autopilots_columns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for name, record in (("hand", clean()), ("pilot", piloted())):
+                os.mkdir(os.path.join(folder, name))
+                with open(os.path.join(folder, name, tally.REFLEX_RUN), "w", encoding="utf-8") as handle:
+                    json.dump(reflex.judged(record, VALUES, LIMITS), handle)
+            rows = {os.path.basename(row["folder"]): row for row in tally.collect(folder)}
+        pilot = rows["pilot"]
+        self.assertEqual(pilot["roads"]["jev"]["n"], 3)
+        self.assertEqual(pilot["applied"], {"continue": 2, "pause": 0, "replan": 1})
+        self.assertEqual(pilot["plans"], 2)
+        self.assertTrue(pilot["roads_add_up"])
+        self.assertEqual(pilot["replan_gap_ms"]["p50"], 40.0)
+        self.assertEqual(pilot["l1_rtt_ms"]["p50"], 400.0)
+        self.assertEqual(pilot["tokens"], {"input": 4_000, "output": 1_600})
+        self.assertIsNotNone(pilot["goal_to_first_press_ms"])
+        self.assertIsNone(rows["hand"]["l1_rtt_ms"])
+        # The whole tally reads the same rows: no reflex column is mistaken for one of its own.
+        tally.summarize(list(rows.values()), VALUES)
+        self.assertEqual(pilot["not_carried_out"]["stale"], 1)
+        summary = tally.summarize_reflex(list(rows.values()), VALUES)
+        entry = next(entry for entry in summary.values() if entry["runs"] == 1 and entry["median_plans"])
+        self.assertEqual(entry["median_l1_rtt_p50"], 400.0)
+        self.assertAlmostEqual(entry["usd"], 4_000 / 1e6 + 1_600 * 5 / 1e6)
+        rendered = tally.render_reflex(summary)
+        for column in ("goal→press ms", "re-plan gap ms", "L1 RTT p50/p95 ms", "applied c/p/r", "tokens in/out", "$"):
+            self.assertIn(column, rendered)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 
-use super::super::plan::tests::{Scripted, answer_for, capture, scope};
+use super::super::plan::tests::{Named, Scripted, answer_for, capture, scope};
 use super::super::tests::{answer_naming, open, reading_handshake};
 use super::*;
 use crate::systemone::Spent;
@@ -920,4 +920,77 @@ fn the_share_is_counted_in_the_helpers_own_outcome_words() {
             "`{word}` is not a receipt outcome"
         );
     }
+}
+
+/// The autopilot's account names every plan by the generator that wrote it:
+/// a stand-in's plans are never said to be a model's.
+#[test]
+fn the_account_names_the_generator_each_plan_came_from() {
+    let mut fake = Fake::new((JevMode::Auto, true), Vec::new());
+    let mut stub = Named {
+        scripted: Scripted {
+            answers: vec![good()].into(),
+            asked: Vec::new(),
+        },
+        source: "stub",
+    };
+    let (_autopilot, answer) = fake
+        .with(Some(&mut stub), |world| {
+            Autopilot::start(asked(Some(JevMode::Auto)), open(), None, world)
+        })
+        .expect("started");
+    let run = answer["runId"].as_str().expect("a run");
+    let status = report(run).expect("the autopilot's account");
+    assert_eq!(status["plans"][0]["source"], json!("stub"));
+    assert_eq!(fake.plans[0]["source"], json!("stub"));
+}
+
+/// A pause about a hand with nothing to stop — its reading found nothing to
+/// press, and the hand pressed nothing over the collect before — is not
+/// carried out: right after a start, before any target shows, the hand
+/// already waits, and the run goes on. Its row says `idle`, the account
+/// counts it, and nothing counts it toward an escalation. A pause about a
+/// hand that was pressing still stops the run.
+#[test]
+fn a_pause_about_a_hand_with_nothing_to_stop_leaves_the_run_standing() {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+    fake.helper.unknown = Some("occluded");
+    let open = fake.teacher.holds(PAUSE);
+    let (mut autopilot, answer) = fake.start(asked(None)).expect("started");
+    let run = answer["runId"].as_str().expect("a run").to_string();
+    fake.tick(&mut autopilot);
+    open.send(()).expect("the gate");
+    std::thread::sleep(Duration::from_millis(50));
+    fake.until_settled(&mut autopilot);
+    let row = fake.asked_rows()[0].clone();
+    assert_eq!(row["chosen"], json!(PAUSE));
+    assert_eq!(row["applied"], json!(false));
+    assert_eq!(row["why"], json!(Why::Idle.word()));
+    assert!(fake.helper.stops().is_empty(), "the hand was never stopped");
+    assert_eq!(autopilot.ended(), None, "the run goes on");
+    let status = report(&run).expect("the account");
+    assert_eq!(status["invalid"][Why::Idle.word()], json!(1));
+    assert_eq!(status["applied"][PAUSE], json!(0));
+
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+    fake.helper.unknown = Some("occluded");
+    let open = fake.teacher.holds(PAUSE);
+    let (mut autopilot, answer) = fake.start(asked(None)).expect("started");
+    let run = answer["runId"].as_str().expect("a run").to_string();
+    fake.tick(&mut autopilot);
+    // The question went on an empty reading; the hand then pressed a
+    // target it saw.
+    fake.helper.press(&run, 1, 0);
+    fake.helper.unknown = None;
+    fake.tick(&mut autopilot);
+    open.send(()).expect("the gate");
+    std::thread::sleep(Duration::from_millis(50));
+    fake.until_settled(&mut autopilot);
+    let row = fake.asked_rows()[0].clone();
+    assert_eq!(row["applied"], json!(true), "a pressing hand is stopped");
+    assert_eq!(fake.helper.stops(), [run]);
+    assert_eq!(
+        autopilot.ended().map(|ended| ended["reason"].clone()),
+        Some(json!(PAUSED))
+    );
 }

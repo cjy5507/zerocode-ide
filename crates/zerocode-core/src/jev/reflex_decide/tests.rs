@@ -273,7 +273,7 @@ fn an_answer_is_carried_out_only_about_the_run_epoch_and_plan_running_on_a_young
     };
     let young = Some(REFLEX_COLLECT_MS + 3);
     assert_eq!(
-        verdict("rx-1", &stamp(), Some(running), young, true),
+        verdict("rx-1", &stamp(), Some(running), young, false, true),
         Ok(())
     );
     assert_eq!(
@@ -282,6 +282,7 @@ fn an_answer_is_carried_out_only_about_the_run_epoch_and_plan_running_on_a_young
             &stamp(),
             Some(running),
             Some(REFLEX_APPLY_MAX_AGE_MS),
+            false,
             true
         ),
         Ok(()),
@@ -324,7 +325,7 @@ fn an_answer_is_carried_out_only_about_the_run_epoch_and_plan_running_on_a_young
         ("rx-1", Some(running), None, false, Why::Stale),
     ] {
         assert_eq!(
-            verdict(asked, &stamp(), running, age, applies),
+            verdict(asked, &stamp(), running, age, false, applies),
             Err(why),
             "{asked} {running:?} {age:?} {applies}"
         );
@@ -339,7 +340,56 @@ fn an_answer_is_carried_out_only_about_the_run_epoch_and_plan_running_on_a_young
     }
     assert_eq!(
         Why::ALL.map(Why::word),
-        ["not_auto", "stale", "epoch_mismatch", "plan_mismatch"]
+        [
+            "not_auto",
+            "stale",
+            "epoch_mismatch",
+            "plan_mismatch",
+            "idle"
+        ]
+    );
+}
+
+/// A pause about a hand with nothing to stop is never carried out: its
+/// reading found nothing to press and the hand stood quiet. A pause about a
+/// hand that sees a target or has been pressing is; so is any other answer.
+/// Idleness is a ground, read before the seat's word, and after the run's.
+#[test]
+fn a_pause_about_a_hand_with_nothing_to_stop_is_idle() {
+    let nothing = json!({ "sightings": [{ "detector": "red", "value": 0, "unknown": null }] });
+    let blind =
+        json!({ "sightings": [{ "detector": "red", "value": null, "unknown": "occluded" }] });
+    let seen = json!({ "sightings": [{ "detector": "red", "value": 1, "unknown": null }] });
+    assert!(idle(PAUSE, &nothing, true));
+    assert!(idle(PAUSE, &blind, true));
+    assert!(
+        !idle(PAUSE, &seen, true),
+        "a target in sight: the pause stops a hand"
+    );
+    assert!(
+        !idle(PAUSE, &nothing, false),
+        "a hand that was pressing is stopped"
+    );
+    assert!(!idle(CONTINUE, &nothing, true));
+    assert!(!idle(REPLAN, &nothing, true));
+    let running = Running {
+        run: "rx-1",
+        epoch: 3,
+        plan_hash: "h3",
+    };
+    let young = Some(crate::computer_use::REFLEX_COLLECT_MS);
+    assert_eq!(
+        verdict("rx-1", &stamp(), Some(running), young, true, true),
+        Err(Why::Idle)
+    );
+    assert_eq!(
+        verdict("rx-1", &stamp(), Some(running), young, true, false),
+        Err(Why::Idle),
+        "a shadow row says the pause had nothing to stop"
+    );
+    assert_eq!(
+        verdict("rx-0", &stamp(), Some(running), young, true, true),
+        Err(Why::EpochMismatch)
     );
 }
 

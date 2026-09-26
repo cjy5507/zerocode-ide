@@ -298,6 +298,17 @@ impl Run {
         self.series.last().map_or(self.since_ms, |(ms, _, _)| *ms)
     }
 
+    /// Whether the hand stood still: no press over the last collect it was
+    /// read in, and not yet blind for the collects a new plan waits on — a
+    /// pause about it has nothing to stop ([`reflex_decide::idle`]).
+    fn quiet(&self) -> bool {
+        let pressed = match self.series.as_slice() {
+            [.., (_, before, _), (_, after, _)] => after > before,
+            _ => false,
+        };
+        !pressed && self.blind < REFLEX_REPLAN_AFTER_UNKNOWN_PASSES
+    }
+
     /// Whether the hand still stands on the run.
     fn standing(&self) -> bool {
         !self.stopped && self.helper_ended.is_none()
@@ -376,6 +387,8 @@ struct Seat<'a> {
     forced: Option<JevMode>,
     /// The run standing now: its id, its epoch and the plan the helper runs.
     running: Option<(String, u64, String)>,
+    /// The hand on the run standing now stood still ([`Run::quiet`]).
+    quiet: bool,
     now_ms: u64,
     wall_ms: i64,
 }
@@ -422,6 +435,7 @@ impl Carrier for Seat<'_> {
                         &stamp,
                         running,
                         reflex_decide::age_at(&pending.snapshot, self.now_ms),
+                        reflex_decide::idle(chosen, &pending.snapshot.state, self.quiet),
                         applies,
                     )
                 });
@@ -442,9 +456,11 @@ impl Carrier for Seat<'_> {
                     }
                     Err(why) => {
                         *judge.tally.invalid.entry(why.word()).or_default() += 1;
+                        // A pause with nothing to stop was a usable answer
+                        // not carried out: it neither escalates nor clears.
                         judge.streak = if !applies {
                             0
-                        } else if why == Why::NotAuto {
+                        } else if matches!(why, Why::NotAuto | Why::Idle) {
                             judge.streak
                         } else {
                             judge.streak + 1
@@ -727,7 +743,7 @@ impl Autopilot {
             "run": id,
             "epoch": self.epoch,
             "planHash": plan.plan_hash,
-            "source": plan::SOURCE_MODEL,
+            "source": written.source,
             "promptVersion": plan::PROMPT_VERSION,
             "requests": written.requests,
             "rttMs": written.rtt_ms,
@@ -880,6 +896,7 @@ impl Autopilot {
                 )
             });
         let forced = self.asked.forced;
+        let quiet = self.current.as_ref().is_some_and(Run::quiet);
         let runs = self
             .finishing
             .iter_mut()
@@ -892,6 +909,7 @@ impl Autopilot {
                 standing: &mut *world.standing,
                 forced,
                 running: running.clone(),
+                quiet,
                 now_ms: world.now_ms,
                 wall_ms: world.wall_ms,
             };

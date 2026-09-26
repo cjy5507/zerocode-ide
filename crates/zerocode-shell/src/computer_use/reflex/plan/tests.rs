@@ -310,6 +310,31 @@ impl Generator for Scripted {
     }
 }
 
+/// A generator standing in for a model: a script's answers under a word of
+/// its own.
+pub(in crate::computer_use::reflex) struct Named {
+    pub scripted: Scripted,
+    pub source: &'static str,
+}
+
+impl Generator for Named {
+    fn unready(&self) -> Option<&'static str> {
+        self.scripted.unready()
+    }
+
+    fn model(&self) -> Option<String> {
+        None
+    }
+
+    fn ask(&mut self, system: &str, user: &str, left: Duration) -> Result<Said, String> {
+        self.scripted.ask(system, user, left)
+    }
+
+    fn source(&self) -> &'static str {
+        self.source
+    }
+}
+
 fn ask_of<'a>(stage: &'a Stage, palette: &'a Palette, scope: &'a Scope) -> Ask<'a> {
     Ask {
         goal: "press the red dots, never the blue",
@@ -576,4 +601,35 @@ fn measure_the_plan_road() {
             "planReadMs": { "p50": rank(read_ms.clone(), 0.5), "p95": rank(read_ms, 0.95) },
         })
     );
+}
+
+/// A plan says where it came from by its generator's word: the window's
+/// writer is a model's, and a generator standing in for one — the bench's —
+/// is never counted as one on the plan's row.
+#[test]
+fn a_plan_says_which_generator_wrote_it() {
+    assert_eq!(Generator::source(&LiveWriter::window()), SOURCE_MODEL);
+    let (image, stage) = capture();
+    let palette = palette_of(&image, &stage).expect("a palette");
+    let scope = scope();
+    let mut generator = Named {
+        scripted: Scripted {
+            answers: vec![Ok(answer_for(&scope).to_string())].into(),
+            asked: Vec::new(),
+        },
+        source: "stub",
+    };
+    let written = write_plan(&mut generator, &ask_of(&stage, &palette, &scope));
+    assert_eq!(written.source, "stub");
+    let row = ledger_row(
+        1_000,
+        Some("rx-1"),
+        1,
+        "press the red dots, never the blue",
+        &palette,
+        None,
+        &written,
+        "answered",
+    );
+    assert_eq!(row["source"], json!("stub"));
 }
