@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tally Computer Use runs from their evidence folders (docs/design/computer-use-bench.md §2).
 
-Usage: tally.py <evidence-root> [--bench] [--json] [--markdown] [--stages]
+Usage: tally.py <evidence-root> [--bench] [--json] [--markdown] [--stages] [--reflex]
                 [--baseline FILE | --versus BASE:CONFIG] [--write-baseline FILE]
 
 The root is walked for folders holding steps.jsonl. A bench run's own
@@ -9,7 +9,9 @@ bench-run.json names its scenario, lane and config and holds the oracle's
 verdict; any other folder is scored from its files as before (qa-verdict.json,
 state.json). --bench scores only folders that hold bench-run.json. --versus
 compares one config with another that took turns with it in the same runs
-(an A/B), per scenario and pooled over every scenario. Nothing here
+(an A/B), per scenario and pooled over every scenario. A reflex run's own
+reflex-run.json (fixture_reflex.py) is its row as the fixture's oracle judged
+it; --reflex prints those rows' table. Nothing here
 needs the window: files only. This module is also the bench's one reader of a
 shim answer's envelope (first_json_line, refusal_code).
 """
@@ -29,6 +31,8 @@ STEPS = "steps.jsonl"
 VERDICT = "qa-verdict.json"
 STATE = "state.json"
 BENCH_RUN = "bench-run.json"
+# A reflex run's verdict and numbers, as fixture_reflex.py judged them.
+REFLEX_RUN = "reflex-run.json"
 # The walk report the one evidence writer leaves beside steps.jsonl (walk-NNN.json):
 # per step the phases the run closure timed, per walk resolve/report.
 WALK_PREFIX = "walk-"
@@ -84,9 +88,15 @@ def refusal_code(row):
 
 
 def read_steps(folder):
+    return read_lines(folder, STEPS)
+
+
+def read_lines(folder, name):
+    """A folder's JSON-lines file, one object a line; a broken line is skipped
+    and a missing file is empty."""
     rows = []
     try:
-        with open(os.path.join(folder, STEPS), encoding="utf-8") as handle:
+        with open(os.path.join(folder, name), encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
@@ -150,6 +160,9 @@ def stages(folder):
 
 def measure(folder):
     """One run's row, from its files alone."""
+    reflex = read_json(folder, REFLEX_RUN)
+    if isinstance(reflex, dict):
+        return reflex_row(folder, reflex)
     steps = read_steps(folder)
     verdict = read_json(folder, VERDICT) or {}
     state = read_json(folder, STATE) or {}
@@ -264,10 +277,97 @@ def scenario_of(folder):
 
 def walk(root, bench_only=False):
     """Every run folder under root: a bench run by its bench-run.json (a run
-    that never acted has no steps), any other by its step log."""
+    that never acted has no steps), a reflex run by its reflex-run.json, any
+    other by its step log."""
     for dirpath, _dirs, files in os.walk(root):
-        if BENCH_RUN in files or (STEPS in files and not bench_only):
+        if BENCH_RUN in files or REFLEX_RUN in files or (STEPS in files and not bench_only):
             yield dirpath
+
+
+def reflex_row(folder, judged):
+    """A reflex run's row: the oracle's verdict and success (None when a
+    person, a deaf monitor or the runner stopped it: not judged), and its
+    numbers — every count from the fixture's own record."""
+    measured = judged.get("measure") or {}
+    verdict = judged.get("verdict") or {}
+    reaction = measured.get("appear_to_press_ms") or {}
+    return {
+        "folder": folder,
+        "scenario": judged.get("scenario"),
+        "lane": judged.get("lane") or "reflex",
+        "config": str(judged.get("config") or "-"),
+        "success": judged.get("success"),
+        "verdict": verdict.get("verdict"),
+        "failed_checks": [row["check"] for row in verdict.get("checks") or [] if not row.get("passed")],
+        "seed": judged.get("seed"),
+        "hits": measured.get("hits"),
+        "apm": measured.get("apm"),
+        "apm_steady": measured.get("apm_steady"),
+        "verified_apm": measured.get("verified_apm"),
+        "wrong_inputs": measured.get("wrong_inputs"),
+        "oracle": measured.get("oracle"),
+        "oracle_goal": measured.get("oracle_goal"),
+        "decisions": measured.get("decisions"),
+        "decisions_due": measured.get("decisions_due"),
+        "wall_s": measured.get("wall_s"),
+        "preparation_s": measured.get("preparation_s"),
+        "reaction_ms": {name: reaction.get(name) for name in ("n", "p50", "p95", "p99")},
+        "roads": measured.get("roads") or {},
+        "floors": judged.get("floors") or {},
+    }
+
+
+REFLEX_MEDIANS = ("apm", "apm_steady", "oracle", "oracle_goal", "decisions", "preparation_s", "wall_s")
+
+
+def summarize_reflex(rows, values=None):
+    """Per (scenario, config) of the reflex rows: runs, judged and passed runs,
+    the medians of the numbers, the worst of the ones with a floor (lowest APM,
+    oracle and decisions; wrong inputs summed), and the pooled road counts."""
+    values = values or table()
+    groups = {}
+    for row in rows:
+        if row.get("lane") != "reflex":
+            continue
+        key = "|".join((row.get("scenario") or "?", row.get("config") or "-"))
+        groups.setdefault(key, []).append(row)
+    out = {}
+    for key, group in sorted(groups.items()):
+        judged = [row for row in group if row.get("success") is not None]
+        entry = {"scenario": group[0].get("scenario"), "config": group[0].get("config"), "runs": len(group),
+                 "judged": len(judged), "passed": sum(1 for row in judged if row["success"]),
+                 "wrong_inputs": sum(int(row.get("wrong_inputs") or 0) for row in judged),
+                 "apm_floor": 60_000 / values["human_step_ms"]}
+        for name in REFLEX_MEDIANS:
+            seen = [row[name] for row in judged if isinstance(row.get(name), (int, float))]
+            entry["median_" + name] = statistics.median(seen) if seen else None
+            entry["min_" + name] = min(seen) if seen else None
+        for name in ("p50", "p95", "p99"):
+            seen = [row["reaction_ms"][name] for row in judged if isinstance((row.get("reaction_ms") or {}).get(name), (int, float))]
+            entry["reaction_" + name] = statistics.median(seen) if seen else None
+        roads = {}
+        for row in judged:
+            for road, count in (row.get("roads") or {}).items():
+                roads[road] = roads.get(road, 0) + int((count or {}).get("n") or 0)
+        entry["roads"] = roads
+        out[key] = entry
+    return out
+
+
+def render_reflex(summary):
+    lines = ["| scenario | config | runs | pass | APM (goal) | APM (steady) | wrong | oracle | decisions | "
+             "appear→press p50/p95/p99 ms | roads |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for entry in summary.values():
+        roads = ", ".join(f"{road} {count}" for road, count in entry["roads"].items()) or "-"
+        reaction = "/".join(fmt_n(entry["reaction_" + name]) for name in ("p50", "p95", "p99"))
+        lines.append(
+            f"| {entry['scenario']} | {entry['config']} | {entry['runs']} | {entry['passed']}/{entry['judged']} | "
+            f"{fmt_n(entry['min_apm'] and round(entry['min_apm'], 1))} (≥{entry['apm_floor']:g}) | "
+            f"{fmt_n(entry['min_apm_steady'] and round(entry['min_apm_steady'], 1))} | {entry['wrong_inputs']} | "
+            f"{fmt_n(entry['min_oracle'] and round(entry['min_oracle'], 4))} | {fmt_n(entry['min_decisions'])} | "
+            f"{reaction} | {roads} |")
+    return "\n".join(lines)
 
 
 def wilson(passed, judged, z):
@@ -487,8 +587,12 @@ def main(argv):
             json.dump(summary, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
     stage_summary = summarize_stages(rows, values) if "--stages" in args or "--json" in args else None
+    reflex_summary = summarize_reflex(rows, values) if "--reflex" in args or "--json" in args else None
     if "--json" in args:
-        print(json.dumps({"runs": rows, "summary": summary, "compare": verdicts, "stages": stage_summary}, ensure_ascii=False, indent=2))
+        print(json.dumps({"runs": rows, "summary": summary, "compare": verdicts, "stages": stage_summary,
+                          "reflex": reflex_summary}, ensure_ascii=False, indent=2))
+    elif "--reflex" in args:
+        print(render_reflex(reflex_summary))
     elif "--markdown" in args:
         print(markdown(summary, verdicts=verdicts), end="")
     else:

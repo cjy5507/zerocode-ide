@@ -72,6 +72,102 @@
     "value": 1,
     "why": "`evidence --last N` after a run: an evidence read waits for the window's writer to hand over every answered step."
   },
+  "reflex_canvas_pt": {
+    "value": {
+      "width": 720,
+      "height": 440
+    },
+    "why": "The reflex fixture's window, in points (fixture_reflex.py, t-6767): room for a moving target's path and a decoy beside it, small enough to be placed around the pointer on a 1512x982-point laptop display, so every input of a run lands inside the fixture."
+  },
+  "reflex_hud_pt": {
+    "value": 28,
+    "why": "The strip across the fixture's top that shows the phase's colour. The plan's anchors read its middle row, so it stays over twenty capture pixels tall at the eye's ladder scale (0.42 on a 3024-pixel display)."
+  },
+  "reflex_palette": {
+    "value": {
+      "ground": {"r": 0, "g": 0, "b": 0, "tolerance": 40},
+      "red": {"r": 255, "g": 0, "b": 0, "tolerance": 60},
+      "blue": {"r": 0, "g": 0, "b": 255, "tolerance": 60},
+      "curtain": {"r": 14, "g": 14, "b": 14},
+      "idle": {"r": 128, "g": 128, "b": 128}
+    },
+    "why": "The sRGB colours the fixture draws and the plan's palette reads: two target colours and a ground, each inside the perception table's max_tolerance and apart from one another. The curtain lies inside the ground's tolerance, so it hides what it covers without turning the field unknown (an unknown reading never re-arms a rule); idle is no class, so before the round the anchors read no phase."
+  },
+  "reflex_target": {
+    "value": {
+      "radius_pt": [18, 24],
+      "life_ms": [200, 240],
+      "gap_ms": [20, 40],
+      "speed_pt_s": [40, 120],
+      "moving_share": 0.5,
+      "edge_pt": 6
+    },
+    "why": "One target at a time, each drawn from the seed: its size, how long it waits to be hit, the empty field before the next (a clean reading re-arms the rule), and — for half of them — a straight drift. A 250 ms mean cycle offers 240 targets a minute, about 225 once each phase change has waited out its settle and its last short gap, so a run that hits nearly all of them clears the 200 APM floor over the whole wall, preparation included."
+  },
+  "reflex_phase": {
+    "value": {
+      "length_ms": [3000, 4500],
+      "settle_ms": 100
+    },
+    "why": "How long each phase keeps its colour (about 16 changes a minute, over the brief's 12), and how long after the strip changes the phase's first target shows: a capture of the new strip reaches the kernel before a target asks for the new rule."
+  },
+  "reflex_decoy": {
+    "value": {
+      "share": 0.35,
+      "clearance_pt": 16
+    },
+    "why": "The share of targets with a still decoy of the other colour beside them, inside the target's own life so the gap after it stays clean; a press on a decoy is a wrong input. Clearance keeps the two apart all through the target's drift."
+  },
+  "reflex_curtain": {
+    "value": {
+      "every_ms": [5000, 8000],
+      "sweep_ms": [900, 1400],
+      "width_pt": [60, 110]
+    },
+    "why": "A curtain of near-ground colour sweeps across the field now and then and hides what it covers: a hidden part is never pressed, a press on the curtain is a wrong input."
+  },
+  "reflex_round": {
+    "value": {
+      "lead_ms": 2500,
+      "run_s": 60
+    },
+    "why": "The round's first target shows this long after the goal is given (a game's count-in); the wall still starts at the goal, so preparation stays in every APM. run_s is the run policy's length and the per-run cap the safety rules set (60 s)."
+  },
+  "reflex_plan": {
+    "value": {
+      "pointer_ms": 80,
+      "quota": 16,
+      "rules_per_colour": 1,
+      "step_pt": 4,
+      "min_samples": 6,
+      "gate_pt": 24,
+      "max_blobs": 1,
+      "confirm": 1,
+      "anchors": [0.25, 0.5, 0.75]
+    },
+    "why": "The plan the bench writes for the goal: the visible glide (valid_basic's 80 ms), each rule's fire quota under renewal, the blob lattice in reference points (one sample every four, a target at least six samples), the track gate, one blob of a colour, one capture to believe it, where across the strip the anchors read the phase, and one rule a colour (`run --rules N` writes N, the later ones trying a target again while it stands; the quota shrinks to keep the table's expanded-action budget)."
+  },
+  "reflex_safety": {
+    "value": {
+      "idle_s": 120,
+      "announce_s": 30,
+      "runs_max": 3,
+      "ready_s": 10,
+      "prep_s": 15,
+      "grace_s": 10,
+      "poll_ms": 50,
+      "operator_quiet_s": 60
+    },
+    "why": "A run moves the real pointer: only after two minutes with no keyboard or mouse input, thirty seconds after the run was announced (and idle again then), at most three runs, the fixture up within ready_s, the run started within prep_s of the goal and over within grace_s of its deadline; the runner reads the run's status every poll_ms and stops it at the first input that is not the hand's, and refuses while another operator acted in the last operator_quiet_s."
+  },
+  "reflex_floor": {
+    "value": {
+      "oracle": 0.99,
+      "decisions": 12,
+      "wall_s": 60
+    },
+    "why": "The realtime gate (t-6723 §7): at least 99% of the round's targets hit by the fixture's own account, at least 12 phase changes the reflex answered, over at least 60 s from the goal; the APM floor is human_step_ms's, and no wrong input is allowed at all."
+  },
   "allowed_tools": {
     "value": [
       "Computer"
