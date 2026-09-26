@@ -162,6 +162,15 @@ fn the_state_is_the_shape_and_never_the_coordinators_own_choice() {
     for word in ["opus", "model", "effort"] {
         assert!(!said.contains(word), "the state named `{word}`: {said}");
     }
+    // And the question names every key it reads, the state's and each
+    // entry's, by its path (t-9469): a key the words never name is evidence
+    // the model has to guess the meaning of.
+    for key in STATE_KEYS.iter().chain(&AGENT_KEYS) {
+        assert!(
+            INSTRUCTIONS.contains(&format!("`{key}`")),
+            "the question never names `{key}`"
+        );
+    }
 }
 
 /// The head is what leaves, cut to the table's cap here as well as at the

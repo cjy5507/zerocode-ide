@@ -515,6 +515,14 @@ mod tests {
             );
         }
         assert_eq!(asked.questions[QUESTION]["type"], "choice");
+        // The question names every key it reads by its path — the state's,
+        // each candidate's and each result's (t-9469).
+        for key in STATE_KEYS.iter().chain(&CANDIDATE_KEYS).chain(&RESULT_KEYS) {
+            assert!(
+                INSTRUCTIONS.contains(&format!("`{key}`")),
+                "the question never names `{key}`"
+            );
+        }
         // Past the cap, a fourth candidate is not offered at all.
         let four = [
             candidate(1, None),
