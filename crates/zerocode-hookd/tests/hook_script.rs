@@ -8,6 +8,60 @@ use zerocode_core::{ALL_AGENTS, AgentKind};
 use zerocode_hookd::endpoint::EndpointFields;
 use zerocode_hookd::{BridgeState, env_var, install_hook_scripts, serve};
 
+/// agy 1.2.11 rejects a PreToolUse reply without a decision, even when the
+/// status script exits successfully. Reporting must not decide permissions.
+#[test]
+fn antigravity_status_install_does_not_deny_tools_with_an_empty_decision() {
+    use zerocode_hookd::install::{InstallPaths, ScriptHost, install_agent};
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let paths = InstallPaths::new(home.path()).with_host(ScriptHost::Posix);
+    let installed = install_agent(&paths, AgentKind::Antigravity);
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&installed.config_path).expect("config"))
+            .expect("json");
+    let script = zerocode_hookd::install::script_path_for(
+        home.path(),
+        AgentKind::Antigravity,
+        ScriptHost::Posix,
+    );
+    let output = run_script(
+        &script,
+        &[(env_var::ANTIGRAVITY_EVENT, "PreToolUse".to_string())],
+        "{}",
+    );
+    assert!(output.status.success());
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).expect("reply");
+    let missing_decision_is_denied =
+        |reply: &serde_json::Value| reply["decision"].as_str().is_none_or(str::is_empty);
+    assert!(missing_decision_is_denied(&reply));
+    assert!(missing_decision_is_denied(
+        &serde_json::json!({"decision": ""})
+    ));
+
+    // Simulate the vendor executing the installed permission callbacks. No
+    // callback leaves the vendor's ordinary permission flow in charge.
+    for bundle in config.as_object().expect("bundles").values() {
+        if let Some(definitions) = bundle["PreToolUse"].as_array() {
+            for definition in definitions {
+                let command = definition["hooks"][0]["command"].as_str().expect("command");
+                let output = Command::new("/bin/sh")
+                    .args(["-c", command])
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .output()
+                    .expect("installed hook");
+                assert!(output.status.success());
+                let reply = serde_json::from_slice(&output.stdout).expect("reply");
+                assert!(
+                    !missing_decision_is_denied(&reply),
+                    "agy 1.2.11: tool call denied by pre-tool hook: (empty decision)"
+                );
+            }
+        }
+    }
+}
+
 fn run_script(
     path: &std::path::Path,
     env: &[(&str, String)],
