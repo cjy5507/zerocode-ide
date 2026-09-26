@@ -111,14 +111,7 @@ final class RtsArena: NSView {
             }
             if target.kind == "group" {
                 round.ground.color.setFill()
-                let count = round.drawing.unit_grid
-                for row in 1...count {
-                    for column in 1...count {
-                        let x = target.x + Double(column) * target.width / Double(count + 1)
-                        let y = target.y + Double(row) * target.height / Double(count + 1)
-                        CGRect(x: x, y: y, width: round.drawing.unit_pt, height: round.drawing.unit_pt).fill()
-                    }
-                }
+                for unit in unitBoxes(target) { unit.fill() }
             }
             shownAt[target.id] = shownAt[target.id] ?? now
         }
@@ -129,6 +122,17 @@ final class RtsArena: NSView {
     static func names(_ flags: NSEvent.ModifierFlags) -> [String] {
         [("cmd", NSEvent.ModifierFlags.command), ("ctrl", .control), ("opt", .option), ("shift", .shift)]
             .compactMap { flags.contains($0.1) ? $0.0 : nil }
+    }
+
+    private func unitBoxes(_ target: RtsTarget) -> [CGRect] {
+        let count = round.drawing.unit_grid
+        return (1...count).flatMap { row in
+            (1...count).map { column in
+                CGRect(x: target.x + Double(column) * target.width / Double(count + 1),
+                       y: target.y + Double(row) * target.height / Double(count + 1),
+                       width: round.drawing.unit_pt, height: round.drawing.unit_pt)
+            }
+        }
     }
 
     func receive(_ kind: String, _ event: NSEvent) {
@@ -156,6 +160,9 @@ final class RtsArena: NSView {
         default: break
         }
         if kind == "flags" || kind == "keyDown" || kind == "keyUp" { modifiers = mods }
+        if kind == "up", let drag {
+            row["box"] = ["from": ["x": drag.start.x, "y": drag.start.y], "to": ["x": point.x, "y": point.y]]
+        }
         if pairing != nil || kind == "down" || kind == "keyDown" || (kind == "up" && drag != nil) {
             let verdict = pairing.map { ["miss": $0] } ?? judge(kind, event, point, mods)
             row["judged"] = verdict
@@ -165,6 +172,7 @@ final class RtsArena: NSView {
     }
 
     private func judge(_ kind: String, _ event: NSEvent, _ point: CGPoint, _ mods: [String]) -> [String: String] {
+        defer { if kind == "up" { drag = nil } }
         guard let target = displayed, let wanted = round.inputs[target.kind] else { return ["miss": "empty"] }
         func hit(_ input: String) -> [String: String] {
             guard let action = target.actions.first(where: { $0.input == input }), !completed.contains(action.id)
@@ -183,13 +191,13 @@ final class RtsArena: NSView {
         if target.kind == "group" {
             guard event.buttonNumber == 0, mods.isEmpty else { return ["miss": "drag_button"] }
             if kind == "down" {
-                guard point.x <= target.rect.minX, point.y <= target.rect.minY else { return ["miss": "box_start"] }
                 drag = (target.id, point)
                 return ["pending": target.id]
             }
-            defer { drag = nil }
-            guard let drag, drag.id == target.id, point.x >= target.rect.maxX, point.y >= target.rect.maxY,
-                  drag.start.x < point.x, drag.start.y < point.y else { return ["miss": "box_end"] }
+            guard let drag, drag.id == target.id else { return ["miss": "box_end"] }
+            let box = CGRect(x: min(drag.start.x, point.x), y: min(drag.start.y, point.y),
+                             width: abs(drag.start.x - point.x), height: abs(drag.start.y - point.y))
+            guard unitBoxes(target).allSatisfy({ box.contains($0) }) else { return ["miss": "box_end"] }
             return hit("drag")
         }
         guard kind == "down", let button = wanted.button, target.rect.contains(point),
@@ -256,6 +264,21 @@ final class RtsArena: NSView {
             precondition(target.actions.allSatisfy { completed.contains($0.id) }, "\(kind) not received")
             precondition(held.isEmpty && modifiers.isEmpty && misses.isEmpty)
         }
+        let groups = round.schedule.targets.filter { $0.kind == "group" && !completed.contains("\($0.id):drag") }
+        displayed = groups[0]
+        let units = unitBoxes(groups[0]).reduce(CGRect.null) { $0.union($1) }
+        receive("down", mouse(.leftMouseDown, CGPoint(x: units.maxX, y: units.maxY)))
+        receive("up", mouse(.leftMouseUp, CGPoint(x: units.minX, y: units.minY)))
+        precondition(completed.contains("\(groups[0].id):drag"), "a reverse box covering the drawn units selects them")
+        displayed = groups[1]
+        let partial = unitBoxes(groups[1])[0]
+        receive("down", mouse(.leftMouseDown, partial.origin))
+        receive("up", mouse(.leftMouseUp, CGPoint(x: partial.maxX, y: partial.maxY)))
+        precondition(misses["box_end"] == 1, "a box covering one unit does not select the group")
+        receive("down", mouse(.leftMouseDown, partial.origin))
+        displayed = nil
+        receive("up", mouse(.leftMouseUp, partial.origin))
+        precondition(drag == nil && held.isEmpty, "an expired target still ends its drag on release")
         let shift = round.schedule.targets.first { $0.kind == "shift" }!
         displayed = shift
         let point = CGPoint(x: shift.rect.midX, y: shift.rect.midY)

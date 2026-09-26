@@ -47,17 +47,23 @@ class RtsTests(unittest.TestCase):
         golden['plan_hash'] = ''
         self.assertEqual(plan, golden, 'both native contracts validate these exact plan fields')
 
-    def record(self, stress=False):
+    def record(self, stress=False, accepted_ms=0):
         schedule = rts.schedule(11, self.values, stress=stress)
         t0 = 5_000_000_000_000
+        deadline_ms = accepted_ms + self.values['reflex_round']['run_s'] * 1000
         events, frames = [], []
         for target in schedule['targets']:
+            if target['expireMs'] > deadline_ms:
+                continue
             shown = t0 + int(target['appearMs'] * 1_000_000)
             frames.append({'ns': shown, 'shown': [target['id']]})
+            if target['appearMs'] < accepted_ms:
+                continue
             for index, action in enumerate(target['actions']):
                 events.append({'sourcePid': 4242, 'rxNs': shown + (index + 1) * 30_000_000,
                                'judged': {'hit': action['id'], 'input': action['input']}})
-        return {'schedule': schedule, 'run': {'t0Ns': t0, 'verdictNs': t0 + 60_000_000_000, 'stoppedBy': None},
+        return {'schedule': schedule, 'run': {'t0Ns': t0, 'verdictNs': t0 + deadline_ms * 1_000_000, 'stoppedBy': None},
+                'started': {'acceptedNs': t0 + accepted_ms * 1_000_000, 'deadlineNs': t0 + deadline_ms * 1_000_000},
                 'frames': frames, 'events': events, 'geometry': {'helperPid': 4242},
                 'fixture': {'held': [], 'misses': {}, 'becameActive': False},
                 'ended': {'status': {'reason': 'deadline', 'othersHeard': 0, 'monitor': 'hearing'},
@@ -70,6 +76,13 @@ class RtsTests(unittest.TestCase):
         result = rts.judged(record, self.values, reflex.limits())
         self.assertFalse(result['passed'])
         self.assertEqual(result['oracle'], 0)
+
+    def test_preparation_stays_in_wall_apm_and_goal_oracle_but_not_the_hands_offered_window(self):
+        result = rts.judged(self.record(accepted_ms=5000), self.values, reflex.limits())
+        self.assertTrue(result['passed'])
+        self.assertEqual(result['oracle'], 1)
+        self.assertLess(result['goal_oracle'], 1)
+        self.assertEqual(result['wall_s'], 65)
 
     def test_duplicate_hit_foreign_input_and_stuck_modifier_fail(self):
         for change in ('duplicate', 'foreign', 'held', 'wrong'):
@@ -119,7 +132,7 @@ class RtsTests(unittest.TestCase):
             run = subprocess.run([str(binary), '--self-test', str(round_file), str(path)], capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             state = json.loads((path / 'fixture.json').read_text())
-            self.assertEqual(state['misses'], {'click': 1, 'duplicate': 1, 'unpaired_release': 1})
+            self.assertEqual(state['misses'], {'click': 1, 'duplicate': 1, 'unpaired_release': 1, 'box_end': 1, 'empty': 1})
             self.assertEqual(state['held'], [])
 
 

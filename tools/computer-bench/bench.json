@@ -758,7 +758,7 @@
     "why": "R10 acceptance: sustained mixed input at 300 APM, stimulus-to-receipt median at most 150 ms, no wrong input, reflex_floor oracle. Ceiling is the last stress step with at least 95% hits."
   },
   "rts_goal": {
-    "value": "Press A for a yellow A card and 1 for a cyan 1 card. Box-select the green unit group from just outside its top-left to just outside its bottom-right, then press Ctrl+1. Right-click red targets, Shift-click blue targets, and Cmd-click magenta targets. Act only on this fixture window.",
+    "value": "Press A for a yellow A card and 1 for a cyan 1 card. Box-select the green unit group from just outside its top-left to just outside its bottom-right, then press Ctrl+1. Right-click red targets, Shift-click blue targets, and Cmd-click magenta targets. The top {hud} points of the window are a fixed legend; ignore that strip and act only on targets in the field below it. Act only on this fixture window.",
     "why": "The same visible tasks as the hand-written plan, for the real automatic plan generator."
   }
 }

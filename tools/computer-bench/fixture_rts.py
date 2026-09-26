@@ -20,10 +20,13 @@ SCENARIO = 'rts-fixture'
 def schedule(seed, values, stress=False):
     draw = random.Random(seed)
     supply, inputs = values['rts_supply'], values['rts_inputs']
-    length = values['reflex_round']['run_s'] * 1000
+    run_length = values['reflex_round']['run_s'] * 1000
+    length = run_length + values['reflex_safety']['prep_s'] * 1000
     lead = values['reflex_round']['lead_ms']
     rates = supply['steps_apm'] if stress else [supply['apm']]
-    span = (length - lead) / len(rates)
+    # A normal round has stimuli left after an automatic plan's preparation.
+    # Stress fits all supply steps inside one hand's minute.
+    span = ((run_length if stress else length) - lead) / len(rates)
     steps = [{'apm': rate, 'startMs': lead + n * span, 'endMs': lead + (n + 1) * span}
              for n, rate in enumerate(rates)]
     box = reflex.field(values)
@@ -101,11 +104,23 @@ def the_round(owner, seed, values, table_limits, stress=False):
             'schedule': schedule(seed, values, stress)}
 
 
+def goal(values):
+    return values['rts_goal'].format(hud=values['reflex_hud_pt'])
+
+
 def judged(record, values, table_limits):
     """Only fixture hit ids count. Repeated ids, foreign events and held inputs
     invalidate a run, even if the hand claims every action completed."""
     schedule = record['schedule']
     expected = {action['id']: (target, action['input']) for target in schedule['targets'] for action in target['actions']}
+    t0 = record['run']['t0Ns']
+    started = record.get('started') or {}
+    start = started.get('acceptedNs', t0)
+    deadline = started.get('deadlineNs', record['run']['verdictNs'])
+    def inside(target, since):
+        return t0 + int(target['appearMs'] * 1e6) >= since and t0 + int(target['expireMs'] * 1e6) <= deadline
+    due = {identity for identity, (target, _) in expected.items() if inside(target, start)}
+    from_goal = {identity for identity, (target, _) in expected.items() if inside(target, t0)}
     shown = {}
     for frame in record['frames']:
         for identity in frame['shown']:
@@ -132,14 +147,16 @@ def judged(record, values, table_limits):
     wall = (record['run']['verdictNs'] - record['run']['t0Ns']) / 1e9
     per_input = {}
     for name in sorted({name for _, name in expected.values()}):
-        wanted = [identity for identity, (_, input_name) in expected.items() if input_name == name]
-        hits = [identity for identity in wanted if identity in good]
+        named = [identity for identity, (_, input_name) in expected.items() if input_name == name]
+        wanted = [identity for identity in named if identity in due]
+        hits = [identity for identity in named if identity in good]
         latencies = [(good[identity]['rxNs'] - shown[expected[identity][0]['id']]) / 1e6 for identity in hits]
-        per_input[name] = {'offered': len(wanted), 'hits': len(hits), 'apm': len(hits) * 60 / wall if wall > 0 else 0,
+        per_input[name] = {'offered': len(wanted), 'hits': len(set(hits) & due), 'actions': len(hits),
+                           'apm': len(hits) * 60 / wall if wall > 0 else 0,
                            'reaction_ms': reflex.spread(latencies)}
     steps = []
     for index, step in enumerate(schedule['steps']):
-        wanted = [identity for identity, (target, _) in expected.items() if target['step'] == index]
+        wanted = [identity for identity, (target, _) in expected.items() if target['step'] == index and identity in due]
         hits = sum(identity in good for identity in wanted)
         steps.append({**step, 'offered': len(wanted), 'hits': hits, 'oracle': hits / len(wanted) if wanted else 0,
                       'achieved_apm': hits * 60_000 / (step['endMs'] - step['startMs'])})
@@ -147,12 +164,14 @@ def judged(record, values, table_limits):
     ceiling = max((step['apm'] for step in steps if step['oracle'] >= floor['stress_oracle']), default=0)
     latencies = [(event['rxNs'] - shown[expected[identity][0]['id']]) / 1e6 for identity, event in good.items()]
     reaction = reflex.spread(latencies)
-    oracle = len(good) / len(expected) if expected else 0
+    oracle = len(good.keys() & due) / len(due) if due else 0
     apm = len(good) * 60 / wall if wall > 0 else 0
     fixture, ended = record.get('fixture') or {}, record.get('ended') or {}
     status, report = ended.get('status') or {}, ended.get('report') or {}
     autopilot = reflex.autopilot_numbers(record)
     errors = []
+    if not started:
+        errors.append('start')
     if record['run'].get('autopilot') and (
             not autopilot or not autopilot['plans'] or set(autopilot['sources']) != {reflex.MODEL}):
         errors.append('model_plan')
@@ -177,6 +196,8 @@ def judged(record, values, table_limits):
         errors.append('ceiling')
     return {'scenario': SCENARIO, 'seed': schedule['seed'], 'passed': not errors, 'errors': errors,
             'wall_s': wall, 'apm': apm, 'oracle': oracle, 'wrong': len(wrong), 'foreign': foreign,
+            'oracle_offered': len(due), 'oracle_hits': len(good.keys() & due),
+            'goal_oracle': len(good.keys() & from_goal) / len(from_goal) if from_goal else 0,
             'duplicates': duplicate, 'held': fixture.get('held'), 'reaction_ms': reaction,
             'inputs': per_input, 'steps': steps, 'ceiling_apm': ceiling if schedule['stress'] else None,
             'ceiling_capped': schedule['stress'] and ceiling == max(step['apm'] for step in steps),
@@ -228,7 +249,7 @@ def main(argv=None):
             else:
                 if not args.driver or not args.helper_app:
                     parser.error('run needs --driver and --helper-app')
-                autopilot = {'generator': args.generator, 'words': values['rts_goal'], 'l1': args.l1} if args.autopilot else None
+                autopilot = {'generator': args.generator, 'words': goal(values), 'l1': args.l1} if args.autopilot else None
                 result = desk.run(args.seed, args.driver, args.helper_app, autopilot=autopilot)
         print(json.dumps(result, indent=2))
         return 0
