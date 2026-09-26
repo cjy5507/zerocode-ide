@@ -325,6 +325,11 @@ mod tests {
         assert_eq!(win.modifiers, vec![Modifier::Command]);
         assert_eq!(parse_key_spec("Page_Down").unwrap().key, "page_down");
         assert_eq!(parse_key_spec("esc").unwrap().modifiers, vec![]);
+        // The reflex key table's words (t-10384): the function keys, and `opt`.
+        let function = parse_key_spec("opt+F5").unwrap();
+        assert_eq!(function.modifiers, vec![Modifier::Alt]);
+        assert_eq!(function.key, "f5");
+        assert_eq!(parse_key_spec("f12").unwrap().key, "f12");
         let refused = parse_key_spec("ctrl+f13").unwrap_err();
         assert_eq!(refused.code, "invalid_argument");
         assert_eq!(refused.message, "unsupported key 'ctrl+f13'");

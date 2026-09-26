@@ -348,6 +348,21 @@ struct LeafRig {
 }
 
 final class ReflexRuntimeTests: XCTestCase {
+    /// A drag and a key are leaves of their own (t-10384): a fire of a macro
+    /// holding a drag and a key runs the drag, then the key, each on the
+    /// detector the macro names.
+    func test_a_macros_drag_and_key_are_leaves_of_their_own_kind() throws {
+        let plan = try XCTUnwrap(try? ReflexFixtures.plan { object in
+            object["macros"] = [["id": "tap", "repeat": 1, "actions": [
+                ["id": "box1", "kind": "drag", "target": "ball", "from": ["x": -250, "y": -250], "to": ["x": 1250, "y": 1250]],
+                ["id": "assign1", "kind": "key", "target": "ball", "key": "1", "modifiers": ["ctrl"]],
+            ]]]
+        }, "a plan whose macro drags and presses a key validates")
+        let leaves = ReflexMacros.leaves(ruleId: "follow", macroId: "tap", in: plan.plan)
+        XCTAssertEqual(leaves.map(\.kind.rawValue), ["drag", "key"])
+        XCTAssertEqual(leaves.map(\.detector), ["ball", "ball"])
+    }
+
     // MARK: red-first — the eight the brief names
 
     /// A hold with no frame coming and the request's road stalled behind the

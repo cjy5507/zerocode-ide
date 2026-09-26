@@ -69,8 +69,9 @@ final class ReflexContractTests: XCTestCase {
             }
         }
         // R1's 32 cases under version 2, the six version 2 adds, the identifier
-        // bound's two sides (t-9205), and a detector's pick with the R4 bench's plan (t-10242).
-        XCTAssertEqual(names.count, 49)
+        // bound's two sides (t-9205), a detector's pick with the R4 bench's plan (t-10242),
+        // and a key, a click's button and modifiers and a drag (t-10384).
+        XCTAssertEqual(names.count, 75)
         let wireNames = try XCTUnwrap(manifest["wire_negative"] as? [String])
         for name in wireNames {
             let data = try Data(contentsOf: fixtureRoot.appendingPathComponent("\(name).txt"))
@@ -92,8 +93,15 @@ final class ReflexContractTests: XCTestCase {
             let frameData = try JSONSerialization.data(withJSONObject: baseFrame.merging(try XCTUnwrap(row["frame"] as? [String: Any])) { _, new in new })
             let leaseData = try JSONSerialization.data(withJSONObject: baseLease.merging(try XCTUnwrap(row["lease"] as? [String: Any])) { _, new in new })
             let frame = try JSONDecoder().decode(ReflexFrameFacts.self, from: frameData)
-            let lease = try JSONDecoder().decode(ReflexActionLease.self, from: leaseData)
-            let input = try XCTUnwrap(ReflexLeaseInput(rawValue: try XCTUnwrap(row["input"] as? String)))
+            // An input a lease does not name fails its case by name, in the lease or as the input asked for.
+            guard let lease = try? JSONDecoder().decode(ReflexActionLease.self, from: leaseData) else {
+                XCTFail("\(name): the lease names an unknown input")
+                continue
+            }
+            guard let input = ReflexLeaseInput(rawValue: try XCTUnwrap(row["input"] as? String)) else {
+                XCTFail("\(name): the input \(row["input"] ?? "") is not one a lease names")
+                continue
+            }
             XCTAssertEqual(lease.permits(frame, now_host_ns: try XCTUnwrap(row["now_host_ns"] as? UInt64), input: input, limits: limits),
                 try XCTUnwrap(row["expected"] as? Bool), name)
         }
