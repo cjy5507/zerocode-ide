@@ -292,7 +292,7 @@ fn the_version_is_pinned_to_the_words() {
     assert_eq!(crate::jev::questions::CHALLENGER_RUBRIC_VERSION, 1);
     assert_eq!(
         crate::jev::rubric_fingerprint(super::rubric_words),
-        "0000000000000000"
+        "2c7f088c2b26b907"
     );
     let asked = ask(
         "dp-words",

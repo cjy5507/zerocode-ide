@@ -47,7 +47,7 @@ fn the_version_is_pinned_to_the_words() {
     assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 6);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "0000000000000000"
+        "f8e0588f5fb7f459"
     );
 }
 

@@ -748,6 +748,21 @@ pub fn cut(text: &str, cap: Cap) -> String {
 /// this kept.
 #[must_use]
 pub fn newest_within<S: AsRef<str>>(lines: &[S], cap: usize) -> String {
+    lines[newest_from(lines, cap)..]
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Where the newest `lines` that fit `cap` bytes once the door has cleared
+/// them begin — the first line [`newest_within`] keeps, for a caller that
+/// sends the lines as a list of their own rather than as one text (the stall
+/// question's screen and record, t-9469). Counted as [`newest_within`] counts
+/// them: each line at the larger of itself and the mark that may stand in for
+/// it, and one byte between two.
+#[must_use]
+pub fn newest_from<S: AsRef<str>>(lines: &[S], cap: usize) -> usize {
     let mut used = 0;
     let mut start = lines.len();
     for (at, line) in lines.iter().enumerate().rev() {
@@ -759,11 +774,7 @@ pub fn newest_within<S: AsRef<str>>(lines: &[S], cap: usize) -> String {
         used += joined;
         start = at;
     }
-    lines[start..]
-        .iter()
-        .map(AsRef::as_ref)
-        .collect::<Vec<_>>()
-        .join("\n")
+    start
 }
 
 /// Cut in place; answer where the kept words end, before any mark.
