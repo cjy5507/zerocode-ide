@@ -117,4 +117,4 @@ root:shell_path::tests::a_real_shell_is_read_and_a_stuck_one_is_killed
 # 2026-09-26: the window harness's spinner timing check reads dropped frames as extra writes when the machine is under load
 # (frame p95 33 ms at load 22–30; red four times that day in whole runs, 5/6 green alone, the lane judged it solo 3/3 green
 # on 1d39dee7 — see unlisted.txt). Under load the frame loop stretches; the check counts writes per frame.
-ui:window/window:the workspace spinner writes its four dots once a step, not once a frame
+ui:the workspace spinner writes its four dots once a step, not once a frame
