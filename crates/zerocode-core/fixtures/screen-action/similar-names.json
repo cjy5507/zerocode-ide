@@ -1,0 +1,148 @@
+{
+  "goal": "choose “Save As…” from the File menu",
+  "items": [
+    {
+      "mark": 1,
+      "role": "menuitem",
+      "label": "New",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "menuitem",
+      "label": "Open…",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "menuitem",
+      "label": "Open Recent",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "menuitem",
+      "label": "Close",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "menuitem",
+      "label": "Close All",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "menuitem",
+      "label": "Revert",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "menuitem",
+      "label": "Duplicate",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "menuitem",
+      "label": "Rename…",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "menuitem",
+      "label": "Move To…",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "menuitem",
+      "label": "Export…",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "menuitem",
+      "label": "Export as PDF…",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "menuitem",
+      "label": "Share",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "menuitem",
+      "label": "Print…",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "menuitem",
+      "label": "Page Setup…",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "menuitem",
+      "label": "Save",
+      "centerX": 120.0,
+      "centerY": 432.0
+    },
+    {
+      "mark": 16,
+      "role": "menuitem",
+      "label": "Save All",
+      "centerX": 120.0,
+      "centerY": 460.0
+    },
+    {
+      "mark": 17,
+      "role": "menuitem",
+      "label": "Save As…",
+      "centerX": 120.0,
+      "centerY": 488.0
+    },
+    {
+      "mark": 18,
+      "role": "menuitem",
+      "label": "Autosave settings",
+      "centerX": 120.0,
+      "centerY": 516.0
+    },
+    {
+      "mark": 19,
+      "role": "menuitem",
+      "label": "Save as Template…",
+      "centerX": 120.0,
+      "centerY": 544.0
+    },
+    {
+      "mark": 20,
+      "role": "menuitem",
+      "label": "Properties",
+      "centerX": 120.0,
+      "centerY": 572.0
+    }
+  ],
+  "expected": [
+    17
+  ]
+}

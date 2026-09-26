@@ -912,3 +912,314 @@ fn a_guard_at_its_floor_stops_the_press_and_an_instruction_is_named_first() {
         [("instructed", 910), ("walled", 30)]
     );
 }
+
+/// Seventeen controls, the goal's words naming only the thirteenth — the
+/// look a question used to cut before it (t-10324).
+fn thirteenth_named() -> Vec<Value> {
+    (1..=MAX_ACTION_CANDIDATES + 5)
+        .map(|mark| {
+            if mark == 13 {
+                item(mark, "button", "결제 진행")
+            } else {
+                item(mark, "button", "행")
+            }
+        })
+        .collect()
+}
+
+/// A goal walk on a page, asking about `items` with the goal `goal`.
+fn a_goal_of<'a>(goal: &'a str, items: &'a [Value]) -> ActionLook<'a> {
+    ActionLook {
+        goal,
+        ..a_goal(items, &[])
+    }
+}
+
+/// The request's bytes: what the door sends and the judgment cache keys on.
+fn wire(asked: &ActionAsk) -> String {
+    format!("{}{}", asked.state, asked.questions)
+}
+
+/// A control past the cut that the goal names is offered, and pressed by the
+/// number the look gave it: the question offers it as `mark:13`, an answer
+/// naming it reads back as 13, and the rest of the cut is the look's own
+/// order.
+#[test]
+fn a_named_control_past_the_cut_is_offered_by_its_own_number() {
+    let items = thirteenth_named();
+    let asked = ask(&a_goal_of("결제 진행하기", &items)).expect("a long look asks");
+
+    let mut expected: Vec<usize> = (1..MAX_ACTION_CANDIDATES).collect();
+    expected.push(13);
+    assert_eq!(asked.marks(), expected);
+    assert_eq!(asked.seen(), items.len());
+    assert_eq!(asked.signal(), Signal::Matched);
+    assert!(asked.options().contains(&"mark:13".to_string()));
+    let lines = asked.state["candidates"].as_array().unwrap();
+    assert_eq!(lines.len(), MAX_ACTION_CANDIDATES);
+    assert_eq!(
+        lines.last().and_then(Value::as_str),
+        legend_line(&items[12]).as_deref()
+    );
+    let chose = asked
+        .read(&answered(&asked, "mark:13", 0.9))
+        .expect("the offered number reads");
+    assert_eq!(chose.chosen, Chosen::Mark(13));
+    assert_eq!(mark_of("mark:13"), Some(13));
+    // The first number the cut left out is refused, not quietly honoured.
+    let mut wrong = answered(&asked, GIVE_UP, 0.5);
+    wrong["action"]["choice"] = json!(option_of(MAX_ACTION_CANDIDATES));
+    assert_eq!(
+        asked.read(&wrong),
+        Err(ActionRefusal::Choice(ChoiceRefusal::UnknownOption))
+    );
+}
+
+/// A goal that names none of the controls cuts by the look's order and says
+/// so; a look within the cap asks the same bytes whatever the goal names.
+#[test]
+fn a_goal_that_names_nothing_or_a_look_within_the_cap_asks_the_same_bytes() {
+    let items = thirteenth_named();
+    let unnamed = ask(&a_goal_of("장바구니 비우기", &items)).expect("asks");
+    assert_eq!(
+        unnamed.marks(),
+        (1..=MAX_ACTION_CANDIDATES).collect::<Vec<_>>()
+    );
+    assert_eq!(unnamed.signal(), Signal::None);
+    assert_eq!(unnamed.signal().word(), "none");
+
+    // Twelve controls, the named one last: nothing is cut, so nothing moves.
+    let within = &items[4..4 + MAX_ACTION_CANDIDATES];
+    let named = ask(&a_goal_of("결제 진행하기", within)).expect("asks");
+    let before = ask_by(
+        &a_goal_of("결제 진행하기", within),
+        &Beside::default(),
+        Pick::InOrder,
+    )
+    .expect("asks");
+    assert_eq!(named.signal(), Signal::Matched);
+    assert_eq!(wire(&named), wire(&before));
+    assert_eq!(named.marks(), before.marks());
+}
+
+/// The road back: cut by the look's order, a long look asks what every
+/// question before t-10324 asked — its first twelve controls, to the byte.
+#[test]
+fn the_road_back_cuts_by_the_looks_order() {
+    let items = thirteenth_named();
+    let look = a_goal_of("결제 진행하기", &items);
+    let back = ask_by(&look, &Beside::default(), Pick::InOrder).expect("asks");
+    assert_eq!(
+        back.marks(),
+        (1..=MAX_ACTION_CANDIDATES).collect::<Vec<_>>()
+    );
+    let lines: Vec<Value> = items[..MAX_ACTION_CANDIDATES]
+        .iter()
+        .filter_map(legend_line)
+        .map(Value::String)
+        .collect();
+    assert_eq!(back.state["candidates"], Value::Array(lines));
+    assert_eq!(back.signal(), Signal::None);
+    let by_goal = ask_by(&look, &Beside::default(), Pick::ByGoal).expect("asks");
+    assert_ne!(wire(&back), wire(&by_goal));
+    assert_eq!(ask(&look), Some(by_goal), "a walk cuts by the goal");
+}
+
+/// The same look and the same goal cut the same way every time, and the
+/// ranking is a pure function of them.
+#[test]
+fn the_same_look_and_goal_cut_the_same_way() {
+    let items = thirteenth_named();
+    let refs: Vec<&Value> = items.iter().collect();
+    let first = pick(&refs, &[], "결제 진행하기", Pick::ByGoal);
+    let again = pick(&refs, &[], "결제 진행하기", Pick::ByGoal);
+    assert_eq!(first, again);
+    assert_eq!(
+        ranked(&refs, &[], "결제 진행하기"),
+        ranked(&refs, &[], "결제 진행하기")
+    );
+    let (order, signal) = ranked(&refs, &[], "결제 진행하기");
+    assert_eq!(signal, Signal::Matched);
+    assert_eq!(order.first(), Some(&12), "the named control ranks first");
+    assert_eq!(&order[1..4], [0, 1, 2], "ties keep the look's order");
+    assert!(first.kept.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+/// What a field holds is never read: a value equal to the goal's words,
+/// secret or not, moves nothing — only a field's label, placeholder and the
+/// words beside it count.
+#[test]
+fn a_fields_value_is_never_read_by_the_cut() {
+    let items: Vec<Value> = (1..=MAX_ACTION_CANDIDATES + 5)
+        .map(|mark| textbox(mark, "칸"))
+        .collect();
+    let refs: Vec<&Value> = items.iter().collect();
+    let goal = "결제 진행하기";
+    let holding = |mark: usize, secret: bool| {
+        let mut read = field(mark, "text", secret);
+        read[snapshot::FIELD_VALUE_KEY] = json!("결제 진행");
+        read
+    };
+    let fields = [holding(15, true), holding(16, false)];
+    let blind = pick(&refs, &[], goal, Pick::ByGoal);
+    assert_eq!(pick(&refs, &fields, goal, Pick::ByGoal), blind);
+    assert_eq!(blind.signal, Signal::None);
+
+    let mut placed = field(17, "text", false);
+    placed[snapshot::FIELD_PLACEHOLDER_KEY] = json!("결제 진행 메모");
+    let read = pick(&refs, &[placed], goal, Pick::ByGoal);
+    assert!(read.kept.contains(&16), "the field's placeholder names it");
+    assert_eq!(read.signal, Signal::Matched);
+}
+
+/// The weights, cell by cell, as numbers — so a cell changed in the table
+/// is a red test rather than a quiet drift: a quoted phrase (2), each word
+/// of the goal the control's words hold (1; a Korean word with a particle
+/// held by its stem), and the control's own role among the goal's words (1).
+#[test]
+fn a_control_scores_by_the_weights_table() {
+    let terms = goal_terms("press the “Save as” button");
+    assert_eq!(score(&item(1, "button", "Save as copy"), &[], &terms), 5);
+    assert_eq!(score(&item(2, "link", "Save"), &[], &terms), 1);
+    assert_eq!(score(&item(3, "button", "Close"), &[], &terms), 1);
+    assert_eq!(score(&item(4, "link", ""), &[], &terms), 0);
+    let korean = goal_terms("방해 금지 모드를 켜기");
+    assert_eq!(score(&item(5, "button", "방해 금지 모드"), &[], &korean), 3);
+    // A quoted name outranks two of the goal's other words.
+    let quoted = [
+        item(1, "menuitem", "Toolbar menu"),
+        item(2, "menuitem", "Export"),
+    ];
+    let refs: Vec<&Value> = quoted.iter().collect();
+    assert_eq!(
+        ranked(&refs, &[], "click “Export” in the toolbar menu").0,
+        [1, 0]
+    );
+    // One letter names nothing; an unclosed quote is no phrase.
+    assert_eq!(score(&item(6, "button", "a b"), &[], &goal_terms("a b")), 0);
+    assert_eq!(goal_terms("open “Save").phrases, Vec::<String>::new());
+}
+
+/// One case of the regression set (`fixtures/screen-action/README.md`).
+struct Case {
+    name: String,
+    goal: String,
+    items: Vec<Value>,
+    fields: Vec<Value>,
+    expected: Vec<usize>,
+}
+
+/// Every case file directly under `dir`, by name.
+fn cases_in(dir: &std::path::Path) -> Vec<Case> {
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .expect("the case directory reads")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let case: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("reads"))
+                .expect("a case is JSON");
+            let list = |key: &str| case[key].as_array().cloned().unwrap_or_default();
+            Case {
+                name: path.file_stem().unwrap().to_string_lossy().into_owned(),
+                goal: case["goal"].as_str().expect("a goal").to_string(),
+                items: list("items"),
+                fields: list("fields"),
+                expected: list("expected")
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|mark| usize::try_from(mark).unwrap())
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// A case's answer under both cuts, asked the way a walk asks: whether an
+/// expected number was offered, and where the best one stood before the cut
+/// (the look's order) and after it (the goal's ranking), one-based.
+fn judged(case: &Case) -> [(bool, usize); 2] {
+    let beside = Beside {
+        types: true,
+        fields: &case.fields,
+        ..Beside::default()
+    };
+    let look = a_goal_of(&case.goal, &case.items);
+    let refs: Vec<&Value> = case.items.iter().collect();
+    let (order, _) = ranked(&refs, &case.fields, &case.goal);
+    let mark_at = |index: usize| case.items[index]["mark"].as_u64().unwrap() as usize;
+    let best = |positions: &mut dyn Iterator<Item = usize>| {
+        positions
+            .enumerate()
+            .find(|(_, index)| case.expected.contains(&mark_at(*index)))
+            .map_or(usize::MAX, |(rank, _)| rank + 1)
+    };
+    [Pick::InOrder, Pick::ByGoal].map(|how| {
+        let asked = ask_by(&look, &beside, how).expect("a case asks");
+        let offered = asked
+            .marks()
+            .iter()
+            .any(|mark| case.expected.contains(mark));
+        let rank = match how {
+            Pick::InOrder => best(&mut (0..case.items.len())),
+            Pick::ByGoal => best(&mut order.iter().copied()),
+        };
+        (offered, rank)
+    })
+}
+
+/// The regression set: every case's answer is offered under the goal's cut,
+/// and the table beside it says where each stood under the look's order.
+#[test]
+fn the_regression_set_offers_every_answer() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/screen-action");
+    let cases = cases_in(&dir);
+    assert!(cases.len() >= 6, "the set holds its cases");
+    let mut offered = [0usize; 2];
+    for case in &cases {
+        let [before, after] = judged(case);
+        println!(
+            "{:<20} seen {:>2}  before rank {:>2} offered {:<5}  after rank {:>2} offered {}",
+            case.name,
+            case.items.len(),
+            before.1,
+            before.0,
+            after.1,
+            after.0
+        );
+        offered[0] += usize::from(before.0);
+        offered[1] += usize::from(after.0);
+        assert!(after.0, "{}: the answer is offered", case.name);
+    }
+    println!(
+        "offered: before {}/{n}, after {}/{n}",
+        offered[0],
+        offered[1],
+        n = cases.len()
+    );
+}
+
+/// The held-out cases (`fixtures/screen-action/held-out`): reported, never
+/// held to — `cargo test -p zerocode-core held_out -- --ignored --nocapture`.
+#[test]
+#[ignore = "held-out cases are reported, not tested"]
+fn held_out_cases_are_reported() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/screen-action/held-out");
+    for case in cases_in(&dir) {
+        let [before, after] = judged(&case);
+        println!(
+            "{:<20} seen {:>2}  before rank {:>2} offered {:<5}  after rank {:>2} offered {}",
+            case.name,
+            case.items.len(),
+            before.1,
+            before.0,
+            after.1,
+            after.0
+        );
+    }
+}

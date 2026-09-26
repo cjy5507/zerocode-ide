@@ -1,0 +1,127 @@
+{
+  "goal": "Open the Downloads folder",
+  "items": [
+    {
+      "mark": 1,
+      "role": "row",
+      "label": "Recents",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "row",
+      "label": "AirDrop",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "row",
+      "label": "Applications",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "row",
+      "label": "Desktop",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "row",
+      "label": "Documents",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "row",
+      "label": "iCloud Drive",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "row",
+      "label": "Shared",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "row",
+      "label": "Network",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "row",
+      "label": "Macintosh HD",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "row",
+      "label": "Tags",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "row",
+      "label": "Red",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "row",
+      "label": "Orange",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "row",
+      "label": "Downloads",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "row",
+      "label": "Yellow",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "row",
+      "label": "Green",
+      "centerX": 120.0,
+      "centerY": 432.0
+    },
+    {
+      "mark": 16,
+      "role": "row",
+      "label": "Blue",
+      "centerX": 120.0,
+      "centerY": 460.0
+    },
+    {
+      "mark": 17,
+      "role": "row",
+      "label": "Purple",
+      "centerX": 120.0,
+      "centerY": 488.0
+    }
+  ],
+  "expected": [
+    13
+  ]
+}

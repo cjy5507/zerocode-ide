@@ -1,0 +1,155 @@
+{
+  "goal": "새 항목 추가",
+  "items": [
+    {
+      "mark": 1,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 432.0
+    },
+    {
+      "mark": 16,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 460.0
+    },
+    {
+      "mark": 17,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 488.0
+    },
+    {
+      "mark": 18,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 516.0
+    },
+    {
+      "mark": 19,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 544.0
+    },
+    {
+      "mark": 20,
+      "role": "button",
+      "label": "삭제",
+      "centerX": 120.0,
+      "centerY": 572.0
+    },
+    {
+      "mark": 21,
+      "role": "button",
+      "label": "새 항목 추가",
+      "centerX": 120.0,
+      "centerY": 600.0
+    }
+  ],
+  "expected": [
+    21
+  ]
+}

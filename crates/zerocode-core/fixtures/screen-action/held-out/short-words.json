@@ -1,0 +1,148 @@
+{
+  "goal": "go to the cart",
+  "items": [
+    {
+      "mark": 1,
+      "role": "link",
+      "label": "Top deals",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "link",
+      "label": "Today's deals",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "link",
+      "label": "Photos",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "link",
+      "label": "Tools",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "link",
+      "label": "Theme",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "link",
+      "label": "Other stores",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "link",
+      "label": "Google Pay",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "link",
+      "label": "Gift ideas",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "link",
+      "label": "Toys",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "link",
+      "label": "Automotive",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "link",
+      "label": "Motors",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "link",
+      "label": "Customer service",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "link",
+      "label": "Home",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "link",
+      "label": "Books",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "link",
+      "label": "Music",
+      "centerX": 120.0,
+      "centerY": 432.0
+    },
+    {
+      "mark": 16,
+      "role": "link",
+      "label": "Garden",
+      "centerX": 120.0,
+      "centerY": 460.0
+    },
+    {
+      "mark": 17,
+      "role": "link",
+      "label": "Pets",
+      "centerX": 120.0,
+      "centerY": 488.0
+    },
+    {
+      "mark": 18,
+      "role": "link",
+      "label": "Sports",
+      "centerX": 120.0,
+      "centerY": 516.0
+    },
+    {
+      "mark": 19,
+      "role": "link",
+      "label": "Beauty",
+      "centerX": 120.0,
+      "centerY": 544.0
+    },
+    {
+      "mark": 20,
+      "role": "link",
+      "label": "Cart (2)",
+      "centerX": 120.0,
+      "centerY": 572.0
+    }
+  ],
+  "expected": [
+    20
+  ]
+}

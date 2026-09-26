@@ -1,0 +1,127 @@
+{
+  "goal": "알림 설정을 열고 방해 금지 모드를 켜기",
+  "items": [
+    {
+      "mark": 1,
+      "role": "button",
+      "label": "일반",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "button",
+      "label": "디스플레이",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "button",
+      "label": "배경화면",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "button",
+      "label": "사운드",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "button",
+      "label": "개인정보 보호",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "button",
+      "label": "보안",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "button",
+      "label": "배터리",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "button",
+      "label": "저장 공간",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "button",
+      "label": "네트워크",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "button",
+      "label": "블루투스",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "button",
+      "label": "키보드",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "button",
+      "label": "마우스",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "button",
+      "label": "트랙패드",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "button",
+      "label": "손쉬운 사용",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "button",
+      "label": "스크린 타임",
+      "centerX": 120.0,
+      "centerY": 432.0
+    },
+    {
+      "mark": 16,
+      "role": "button",
+      "label": "방해 금지 모드",
+      "centerX": 120.0,
+      "centerY": 460.0
+    },
+    {
+      "mark": 17,
+      "role": "button",
+      "label": "알림",
+      "centerX": 120.0,
+      "centerY": 488.0
+    }
+  ],
+  "expected": [
+    16
+  ]
+}

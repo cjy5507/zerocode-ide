@@ -1,0 +1,113 @@
+{
+  "goal": "환경설정 열기",
+  "items": [
+    {
+      "mark": 1,
+      "role": "button",
+      "label": "파일",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "button",
+      "label": "편집",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "button",
+      "label": "보기",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "button",
+      "label": "이동",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "button",
+      "label": "윈도우",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "button",
+      "label": "도움말",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "button",
+      "label": "새로 만들기",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "button",
+      "label": "열기 전 확인",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "button",
+      "label": "최근 항목",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "button",
+      "label": "닫기",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "button",
+      "label": "인쇄",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "button",
+      "label": "공유",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "button",
+      "label": "내보내기",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "button",
+      "label": "가져오기",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "button",
+      "label": "Settings…",
+      "centerX": 120.0,
+      "centerY": 432.0
+    }
+  ],
+  "expected": [
+    15
+  ]
+}

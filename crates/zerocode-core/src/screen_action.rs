@@ -431,6 +431,218 @@ const ROW_NONE: &str = "None of these rows matches the goal.";
 /// ([`SHOWS_CHAR_CAP`], [`MAX_ACTION_CANDIDATES`]).
 pub const OBSERVED_CHAR_CAP: usize = SHOWS_CHAR_CAP / MAX_ACTION_CANDIDATES;
 
+/// How a look that holds more controls than one question may offer
+/// ([`MAX_ACTION_CANDIDATES`]) is cut (t-10324): by the goal's own words
+/// ([`Pick::ByGoal`]), or the first ones the look numbered ([`Pick::InOrder`]),
+/// as every question before it was cut. Either way the question offers the
+/// kept controls in the order the look numbered them, so a look that holds
+/// no more than the cap — or whose controls the goal's words name none of —
+/// asks exactly what it asked before, to the byte, and the judgment cache
+/// that keys on those bytes still finds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// The first [`MAX_ACTION_CANDIDATES`] the look numbered.
+    InOrder,
+    /// The [`MAX_ACTION_CANDIDATES`] the goal's words name most
+    /// ([`PICK_WEIGHTS`]); a tie goes to the one the look numbered first.
+    ByGoal,
+}
+
+/// How every question is cut. Setting it to [`Pick::InOrder`] is the whole
+/// road back to cutting by the look's order alone.
+pub const CANDIDATE_PICK: Pick = Pick::ByGoal;
+
+/// Whether the goal's words named any control the look held — the word a
+/// ledger row carries under
+/// [`crate::jev::summary::CANDIDATES_SIGNAL`]. Never a word of the question:
+/// the question asks the same words whichever way it was cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// No control scored: the cut was the look's own order.
+    None,
+    /// At least one control scored on the goal's words.
+    Matched,
+}
+
+impl Signal {
+    /// The word a row names this by.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Matched => "matched",
+        }
+    }
+}
+
+/// What one control earns for each thing the goal says of it: a quoted
+/// phrase of the goal its words contain, a word of the goal its words hold,
+/// and its own role named among the goal's words. One table — every weight
+/// the pick reads is a cell of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickWeights {
+    pub phrase: usize,
+    pub word: usize,
+    pub role: usize,
+}
+
+/// The weights the pick reads. A quoted phrase is the person naming the
+/// control outright, so it outweighs a word; a role is the kind of control,
+/// never which one, so it weighs no more than a word.
+pub const PICK_WEIGHTS: PickWeights = PickWeights {
+    phrase: 2,
+    word: 1,
+    role: 1,
+};
+
+/// The fewest characters a word of the goal, or of a control, needs to count:
+/// one letter names nothing, and one Hangul syllable is rarely a word.
+pub const PICK_MIN_TERM_CHARS: usize = 2;
+
+/// The marks that open and close a quoted phrase in a goal. No apostrophe is
+/// among them, straight or curly — `don't` and `don’t` are words, not quotes.
+pub const PICK_QUOTES: [char; 8] = ['"', '`', '“', '”', '「', '」', '『', '』'];
+
+/// A field's own words the pick reads beside its control's label — never its
+/// value ([`snapshot::FIELD_VALUE_KEY`]), which is what a person typed, secret
+/// or not.
+const PICK_FIELD_KEYS: [&str; 3] = [
+    snapshot::LABEL_KEY,
+    snapshot::FIELD_PLACEHOLDER_KEY,
+    snapshot::FIELD_NEAR_KEY,
+];
+
+/// Which of a look's controls one question offers: the indices into `items`
+/// it keeps, in the order the look numbered them, and whether the goal's
+/// words named any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picked {
+    pub kept: Vec<usize>,
+    pub signal: Signal,
+}
+
+/// Every control of `items`, most named by `goal` first; a tie goes to the
+/// one the look numbered first. `fields` are the look's fields
+/// ([`Beside::fields`]) — a control a field names is read with the field's
+/// own words too; a surface that reads none (the desktop, a phone) is read
+/// by its controls' roles and labels alone. The same look and the same goal
+/// rank the same way, every time.
+#[must_use]
+pub fn ranked(items: &[&Value], fields: &[Value], goal: &str) -> (Vec<usize>, Signal) {
+    let terms = goal_terms(goal);
+    let scores: Vec<usize> = items
+        .iter()
+        .map(|item| score(item, fields, &terms))
+        .collect();
+    let signal = if scores.iter().any(|earned| *earned > 0) {
+        Signal::Matched
+    } else {
+        Signal::None
+    };
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    // A stable sort: a tie keeps the look's order.
+    order.sort_by_key(|index| std::cmp::Reverse(scores[*index]));
+    (order, signal)
+}
+
+/// What a goal names controls by: its quoted phrases and its words, each
+/// lower-cased and counted once.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Terms {
+    phrases: Vec<String>,
+    words: Vec<String>,
+}
+
+/// The words of `text` long enough to name something
+/// ([`PICK_MIN_TERM_CHARS`]), split wherever a character is neither a letter
+/// nor a digit — a Hangul syllable is a letter.
+fn words_of(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|word| word.chars().count() >= PICK_MIN_TERM_CHARS)
+}
+
+/// A goal's terms: the phrases between a pair of [`PICK_QUOTES`] (an
+/// unclosed quote opens none) and every word of the whole goal.
+fn goal_terms(goal: &str) -> Terms {
+    let goal = goal.to_lowercase();
+    let pieces: Vec<&str> = goal.trim().split(&PICK_QUOTES[..]).collect();
+    let mut terms = Terms::default();
+    for (index, piece) in pieces.iter().enumerate() {
+        let phrase = piece.trim();
+        if index % 2 == 1
+            && index + 1 < pieces.len()
+            && phrase.chars().count() >= PICK_MIN_TERM_CHARS
+            && !terms.phrases.iter().any(|kept| kept == phrase)
+        {
+            terms.phrases.push(phrase.to_string());
+        }
+    }
+    for word in words_of(&goal) {
+        if !terms.words.iter().any(|kept| kept == word) {
+            terms.words.push(word.to_string());
+        }
+    }
+    terms
+}
+
+/// What the goal's terms earn one control ([`PICK_WEIGHTS`]): each phrase
+/// its words contain, each word its words contain — or that begins with one
+/// of its words, so a Korean word with its particle (`설정을`) is held by the
+/// control that says the stem (`설정`) — and its role, when every word of the
+/// role is a word of the goal. Its words are its label and, when a field
+/// names it, the field's own words ([`PICK_FIELD_KEYS`]); lower-cased and
+/// compared by containment, as a window title is matched
+/// (`crate::computer_use::window_title_matches`).
+fn score(item: &Value, fields: &[Value], terms: &Terms) -> usize {
+    let said = |from: &Value, key: &str| {
+        from.get(key)
+            .and_then(Value::as_str)
+            .map(|words| words.trim().to_lowercase())
+            .unwrap_or_default()
+    };
+    let mark = item.get(snapshot::FIELD_MARK_KEY).and_then(Value::as_u64);
+    let mut text = said(item, snapshot::LABEL_KEY);
+    for field in fields.iter().filter(|field| {
+        mark.is_some() && field.get(snapshot::FIELD_MARK_KEY).and_then(Value::as_u64) == mark
+    }) {
+        for key in PICK_FIELD_KEYS {
+            text.push('\n');
+            text.push_str(&said(field, key));
+        }
+    }
+    let held: Vec<&str> = words_of(&text).collect();
+    let phrases = terms
+        .phrases
+        .iter()
+        .filter(|phrase| text.contains(phrase.as_str()))
+        .count();
+    let words = terms
+        .words
+        .iter()
+        .filter(|word| text.contains(word.as_str()) || held.iter().any(|own| word.starts_with(own)))
+        .count();
+    let role = said(item, snapshot::ROLE_KEY);
+    let mut role_words = words_of(&role).peekable();
+    let role_named = role_words.peek().is_some()
+        && role_words.all(|own| terms.words.iter().any(|word| word == own));
+    phrases * PICK_WEIGHTS.phrase
+        + words * PICK_WEIGHTS.word
+        + usize::from(role_named) * PICK_WEIGHTS.role
+}
+
+/// The controls of `items` one question offers, cut by `how`
+/// ([`CANDIDATE_PICK`]) and handed back in the look's own order.
+#[must_use]
+pub fn pick(items: &[&Value], fields: &[Value], goal: &str, how: Pick) -> Picked {
+    let (order, signal) = match how {
+        Pick::InOrder => ((0..items.len()).collect(), Signal::None),
+        Pick::ByGoal => ranked(items, fields, goal),
+    };
+    let mut kept: Vec<usize> = order.into_iter().take(MAX_ACTION_CANDIDATES).collect();
+    kept.sort_unstable();
+    Picked { kept, signal }
+}
+
 /// What a look read beside its numbered controls, and whether the walk can
 /// type at all — what [`ask_with`] may offer beyond a press. The default is
 /// a look of numbers alone, and it asks exactly what [`ask`] asks.
@@ -616,6 +828,11 @@ pub struct ActionAsk {
     pub questions: Value,
     /// The numbers offered, in the order they were offered.
     marks: Vec<usize>,
+    /// How many controls the walk could still choose among before the cut
+    /// ([`Pick`]) — [`Self::marks`] is how many it offered.
+    seen: usize,
+    /// Whether the goal's words named any of them.
+    signal: Signal,
     /// Whether this question offered [`DONE`].
     ends_itself: bool,
     /// The fields `type_target` offered, in order — empty when the question
@@ -861,14 +1078,17 @@ pub fn ask(look: &ActionLook<'_>) -> Option<ActionAsk> {
 /// stopped walk ask exactly what [`ask`] always asked, to the byte.
 #[must_use]
 pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk> {
+    ask_by(look, beside, CANDIDATE_PICK)
+}
+
+/// [`ask_with`], cut by `how` — the one place a question's controls are
+/// chosen, so the cut a walk asks and the cut a test holds it to are one.
+fn ask_by(look: &ActionLook<'_>, beside: &Beside<'_>, how: Pick) -> Option<ActionAsk> {
     let tried: BTreeSet<usize> = look.tried.iter().copied().collect();
-    let mut marks = Vec::new();
-    let mut criteria = Map::new();
-    let mut candidates = Vec::new();
+    // Every control this walk may still choose, in the look's order; the
+    // pick cuts them to what one question offers.
+    let mut seen = Vec::new();
     for item in look.items {
-        if marks.len() == MAX_ACTION_CANDIDATES {
-            break;
-        }
         let Some(mark) = item.get("mark").and_then(Value::as_u64) else {
             continue;
         };
@@ -881,12 +1101,21 @@ pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk>
         let Some(line) = legend_line(item) else {
             continue;
         };
-        criteria.insert(option_of(mark), Value::String(line.clone()));
-        candidates.push(Value::String(line));
-        marks.push(mark);
+        seen.push((mark, line, item));
     }
-    if marks.is_empty() {
+    if seen.is_empty() {
         return None;
+    }
+    let items: Vec<&Value> = seen.iter().map(|(_, _, item)| *item).collect();
+    let Picked { kept, signal } = pick(&items, beside.fields, look.goal, how);
+    let mut marks = Vec::with_capacity(kept.len());
+    let mut criteria = Map::new();
+    let mut candidates = Vec::with_capacity(kept.len());
+    for index in kept {
+        let (mark, line, _) = &seen[index];
+        criteria.insert(option_of(*mark), Value::String(line.clone()));
+        candidates.push(Value::String(line.clone()));
+        marks.push(*mark);
     }
     // What a goal walk may type into: the offered numbers the look itself
     // read as plain text fields — never a secret, never a field it did not
@@ -1014,6 +1243,8 @@ pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk>
         state: Value::Object(state),
         questions,
         marks,
+        seen: seen.len(),
+        signal,
         ends_itself,
         typing,
         observing,
@@ -1061,6 +1292,18 @@ impl ActionAsk {
     #[must_use]
     pub fn marks(&self) -> &[usize] {
         &self.marks
+    }
+
+    /// How many controls the walk could still choose among before the cut.
+    #[must_use]
+    pub const fn seen(&self) -> usize {
+        self.seen
+    }
+
+    /// Whether the goal's words named any control the look held.
+    #[must_use]
+    pub const fn signal(&self) -> Signal {
+        self.signal
     }
 
     /// The fields `type_target` offered, in order — empty when nothing may
