@@ -8,8 +8,10 @@
 //! lock, so a late stop or status for one run never reaches another. The
 //! receipts leave the helper only when the window acknowledges what it wrote:
 //! one collector per run reads after the last number it has on disk, writes,
-//! syncs, and only then acknowledges. The reflex decision only records
-//! (`zerocode_core::jev::REFLEX_DECIDE`): nothing it answers reaches the hand.
+//! syncs, and only then acknowledges. On a run a person's plan started the
+//! reflex decision (`zerocode_core::jev::REFLEX_DECIDE`) only records; on the
+//! runs of an autopilot — a model's plan from a goal, `reflex-auto` — its
+//! answer is carried out once the seat applies ([`autopilot`], t-10223).
 //!
 //! Whether a run could start here and whether the person lets it are two
 //! words, never one: `capabilities` and `reflex-status` answer both
@@ -31,7 +33,7 @@ use zerocode_core::computer_use_protocol::game_state;
 use zerocode_core::computer_use_protocol::reflex::{
     self, RUN_POLICY_VERSION, ReflexCapability, RunPolicy, Surface, VERSION, ValidatedPlan,
 };
-use zerocode_core::jev::reflex_decide::{self, Decider, Offer, Pending, Wired};
+use zerocode_core::jev::reflex_decide::{self, Decider, Offer, Pending, Stamp, Wired};
 use zerocode_core::jev::{JevMode, REFLEX_DECIDE, REFLEX_DECIDE_DEADLINE_MS};
 
 use super::ComputerUseError;
@@ -118,18 +120,10 @@ fn refused(code: &str, message: impl Into<String>) -> ComputerUseError {
     ComputerUseError::new(code, message)
 }
 
-/// The door every start passes before anything reaches a helper: the
-/// operator not stopped, a platform whose table claims live reflex, the
-/// person's setting on, a Flow document that reads and carries its reflex
-/// sections, no money line and no `guarded` policy, a plan for the macOS
-/// desktop, and the run's policy. A target the helper cannot resolve, or
-/// ZeroCode itself, is the helper's to refuse before its eye or its hand —
-/// the window keeps no copy of that check.
-pub(crate) fn admit(
-    params: &Value,
-    read: impl FnOnce(&Path) -> std::io::Result<String>,
-    facts: &DoorFacts,
-) -> Result<Admitted, ComputerUseError> {
+/// The door's own questions, before any plan is read: the operator not
+/// stopped, a platform whose table claims live reflex, the person's setting
+/// on.
+pub(crate) fn door_opens(facts: &DoorFacts) -> Result<(), ComputerUseError> {
     if let Some(reason) = &facts.stopped {
         return Err(super::guard::refusal(reason));
     }
@@ -142,6 +136,21 @@ pub(crate) fn admit(
             format!("live reflex is off: `{COMPUTER_LIVE_REFLEX}` in the settings turns it on"),
         ));
     }
+    Ok(())
+}
+
+/// The door every start passes before anything reaches a helper: the
+/// door's own questions ([`door_opens`]), a Flow document that reads and
+/// carries its reflex sections, no money line and no `guarded` policy, and
+/// then what every plan passes ([`admit_plan`]). A target the helper cannot
+/// resolve, or ZeroCode itself, is the helper's to refuse before its eye or
+/// its hand — the window keeps no copy of that check.
+pub(crate) fn admit(
+    params: &Value,
+    read: impl FnOnce(&Path) -> std::io::Result<String>,
+    facts: &DoorFacts,
+) -> Result<Admitted, ComputerUseError> {
+    door_opens(facts)?;
     let path = Path::new(
         params
             .get("flow")
@@ -164,6 +173,31 @@ pub(crate) fn admit(
             "a Flow that moves money, or a guarded one, never runs as a reflex",
         ));
     }
+    admitted(plan, params, path.parent().map(Path::to_path_buf))
+}
+
+/// A plan the window wrote rather than read from a person's Flow — the
+/// autopilot's (§2.3) — through the same door: its own questions asked now,
+/// and what every plan passes. Such a plan has no Flow document and so no
+/// money line or policy to weigh; the contract's reader has read its
+/// sections already.
+pub(crate) fn admit_plan(
+    plan: ValidatedPlan,
+    params: &Value,
+    workspace: Option<PathBuf>,
+    facts: &DoorFacts,
+) -> Result<Admitted, ComputerUseError> {
+    door_opens(facts)?;
+    admitted(plan, params, workspace)
+}
+
+/// What every plan passes, whoever wrote it: a plan for the macOS desktop,
+/// and the run's policy.
+fn admitted(
+    plan: ValidatedPlan,
+    params: &Value,
+    workspace: Option<PathBuf>,
+) -> Result<Admitted, ComputerUseError> {
     if plan.plan().scope.surface != Surface::MacosDesktop {
         return Err(refused(
             error_code::UNSUPPORTED_CAPABILITY,
@@ -178,7 +212,7 @@ pub(crate) fn admit(
         plan,
         policy,
         display: params.get("display").and_then(Value::as_u64).unwrap_or(0),
-        workspace: path.parent().map(Path::to_path_buf),
+        workspace,
     })
 }
 
@@ -219,6 +253,11 @@ fn start_params(admitted: &Admitted, run_id: &str) -> Value {
     })
 }
 
+/// Where a run's receipts are kept in an evidence folder.
+pub(crate) fn receipts_file(dir: &Path, run: &str) -> PathBuf {
+    dir.join(format!("reflex-{run}.jsonl"))
+}
+
 /// The helper's road, as a start, a status, a stop and a run's watch call it.
 pub(crate) type Call<'a> = &'a mut dyn FnMut(&str, Value) -> Result<Value, ComputerUseError>;
 
@@ -231,6 +270,13 @@ pub(crate) fn start(
     call: Call<'_>,
 ) -> Result<(Value, Admitted), ComputerUseError> {
     let admitted = admit(params, read, facts)?;
+    let answer = launch(&admitted, call)?;
+    Ok((answer, admitted))
+}
+
+/// An admitted plan to the helper: its handshake, then its start under a
+/// new run's id — every start's second half, whoever's plan it runs.
+pub(crate) fn launch(admitted: &Admitted, call: Call<'_>) -> Result<Value, ComputerUseError> {
     let handshake = call("handshake", json!({}))?;
     if !helper_reads_it(&handshake) {
         return Err(refused(
@@ -239,8 +285,7 @@ pub(crate) fn start(
         ));
     }
     let run_id = new_run_id();
-    let answer = call("reflexStart", start_params(&admitted, &run_id))?;
-    Ok((answer, admitted))
+    call("reflexStart", start_params(admitted, &run_id))
 }
 
 /// Where one run stands, from the helper — read, never taking a receipt —
@@ -259,6 +304,11 @@ pub(crate) fn status(
     if let Some(fields) = answer.as_object_mut() {
         if let Some(report) = watch_report(run) {
             fields.insert("collector".into(), report);
+        }
+        // A run of an autopilot's says the whole autopilot: its plans, its
+        // decisions and why it ended, whichever of its runs is named.
+        if let Some(report) = autopilot::report(run) {
+            fields.insert(autopilot::AUTOPILOT.into(), report);
         }
         fields.insert(LIVE_REFLEX.into(), standing(facts, &handshake));
     }
@@ -360,18 +410,25 @@ fn keep_check(kept: &Path, made: &Value) -> std::io::Result<()> {
     std::fs::rename(&beside, kept)
 }
 
-/// End one run, and no other: the helper compares the run it names.
+/// End one run, and no other: the helper compares the run it names. A run
+/// of an autopilot's ends the autopilot too — it writes no plan after a
+/// person's stop — and the run it moved on to, if it did.
 pub(crate) fn stop(params: &Value, call: Call<'_>) -> Result<Value, ComputerUseError> {
     let run = params
         .get("run")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if let Some(Some(current)) = autopilot::stop_owner(run)
+        && current != run
+    {
+        let _ = call("reflexStop", json!({ "run": current }));
+    }
     call("reflexStop", json!({ "run": run }))
 }
 
-/// The three verbs and `capabilities` as the window answers them: `enabled`
-/// reads the person's setting, asked by a start, a status and the
-/// capabilities, and by nothing else.
+/// The four verbs and `capabilities` as the window answers them: `enabled`
+/// reads the person's setting, asked by a start, an autopilot, a status and
+/// the capabilities, and by nothing else.
 pub(crate) fn answer(
     command: &ComputerCommand,
     enabled: impl FnOnce() -> bool,
@@ -392,7 +449,7 @@ pub(crate) fn answer(
                 .unwrap_or_default()
                 .to_string();
             let evidence = super::evidence::session_dir(crate::project_runtime::now_epoch_ms())
-                .map(|dir| dir.join(format!("reflex-{run}.jsonl")));
+                .map(|dir| receipts_file(&dir, &run));
             watch_in_the_background(&run, evidence.clone(), admitted.workspace);
             Ok(json!({
                 "runId": run,
@@ -401,6 +458,9 @@ pub(crate) fn answer(
                 "runNs": admitted.policy.run_ns,
                 "evidence": evidence,
             }))
+        }
+        ComputerMethod::ReflexAuto => {
+            autopilot::begin(&command.params, DoorFacts::now(enabled()), &mut call)
         }
         ComputerMethod::ReflexStatus => {
             status(&command.params, &DoorFacts::now(enabled()), &mut call)
@@ -483,6 +543,53 @@ impl Report {
 /// account of it — comes back.
 pub(crate) type Asker = Arc<dyn Fn(Value) -> (Wired, Spent) + Send + Sync>;
 
+/// Whoever carries a run's decisions out, as the run's watch meets them: the
+/// mode each pass asks under, the steady clock a reading is stamped on, and
+/// — for every question that settles — the row's word on what became of its
+/// answer. A run nobody carries out (`reflex-start`, the bench) is only
+/// recorded ([`Recording`]); an autopilot's runs are carried
+/// ([`autopilot`]).
+pub(crate) trait Carrier {
+    /// The reflex decision's word this pass.
+    fn mode(&mut self) -> JevMode;
+    /// Milliseconds on the window's steady clock.
+    fn now_ms(&self) -> u64;
+    /// A question came back: its row, stamped with the run's provenance and
+    /// the pass's mode, is this carrier's to judge before it is recorded.
+    fn settled(&mut self, pending: &Pending, row: &mut Value);
+}
+
+/// A run nobody carries out: each pass asks under the seat's word, and every
+/// row says so and that nothing was applied.
+pub(crate) struct Recording<F: Fn() -> JevMode>(pub F);
+
+impl<F: Fn() -> JevMode> Carrier for Recording<F> {
+    fn mode(&mut self) -> JevMode {
+        (self.0)()
+    }
+
+    fn now_ms(&self) -> u64 {
+        steady_ms()
+    }
+
+    fn settled(&mut self, _pending: &Pending, _row: &mut Value) {}
+}
+
+/// Milliseconds since this window first asked: the steady clock a reading's
+/// age is read on ([`reflex_decide::age_at`]).
+pub(crate) fn steady_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(EPOCH.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// What one pass came to: whether the watch is done, and the run's status as
+/// the pass read it — the receipts it kept among it — when the helper
+/// answered.
+pub(crate) struct Passed {
+    pub done: bool,
+    pub read: Option<Value>,
+}
+
 /// One run's watch. Each pass reads the run's receipts after the last number
 /// on disk — the read carries the run's status — keeps them, and only then
 /// acknowledges them; a batch read again is written once. The same status is
@@ -494,6 +601,9 @@ pub(crate) struct Watch {
     report: Report,
     decider: Decider,
     in_flight: Option<(Pending, mpsc::Receiver<(Wired, Spent)>)>,
+    /// What an autopilot remembers of the run beside every question it asks
+    /// (t-10223 §2.2): none for a run a person's plan started.
+    stamp: Option<Stamp>,
 }
 
 impl Watch {
@@ -507,6 +617,15 @@ impl Watch {
             },
             decider: Decider::new(),
             in_flight: None,
+            stamp: None,
+        }
+    }
+
+    /// The watch of an autopilot's run, every row it leaves carrying `stamp`.
+    pub(crate) fn stamped(run: &str, evidence: Option<PathBuf>, stamp: Stamp) -> Self {
+        Self {
+            stamp: Some(stamp),
+            ..Self::new(run, evidence)
         }
     }
 
@@ -516,7 +635,8 @@ impl Watch {
 
     /// One pass; true once the run has ended with every receipt it issued on
     /// disk and no question in flight. `mode` is the reflex decision's word
-    /// now; `record` takes the decision rows to write.
+    /// now; `record` takes the decision rows to write. Nothing is carried
+    /// out.
     pub(crate) fn pass(
         &mut self,
         call: Call<'_>,
@@ -525,40 +645,65 @@ impl Watch {
         ask: &Asker,
         record: &mut dyn FnMut(Vec<Value>),
     ) -> bool {
+        self.pass_carried(call, sink, &mut Recording(mode), ask, record)
+            .done
+    }
+
+    /// [`Self::pass`], with `carrier` judging every question that settles
+    /// before its row is recorded, and the pass's reading handed back.
+    pub(crate) fn pass_carried(
+        &mut self,
+        call: Call<'_>,
+        sink: &mut dyn ReceiptSink,
+        carrier: &mut dyn Carrier,
+        ask: &Asker,
+        record: &mut dyn FnMut(Vec<Value>),
+    ) -> Passed {
         let Ok(read) = call(
             "reflexReceipts",
             json!({ "run": self.run, "after": self.report.through }),
         ) else {
-            return false;
+            return Passed {
+                done: false,
+                read: None,
+            };
         };
         let state = read
             .get("state")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let mode = carrier.mode();
         if state == reflex_missing() {
             // The helper does not know the run: what it did cannot be read.
             self.report.ended = true;
             self.report.verified = Some(false);
-            return self.finish(record);
+            return Passed {
+                done: self.finish(record, mode),
+                read: Some(read),
+            };
         }
         self.keep(&read, call, sink);
         let mut rows = Vec::new();
-        let asks = mode().asks();
+        let asks = mode.asks();
         let ended = state == "stopped";
         // A run that ended is asked about no more.
         if asks && !ended {
-            match self.decider.offer(reflex_decide::snapshot_of(&read)) {
+            let mut snapshot = reflex_decide::snapshot_of(&read);
+            snapshot.read_ms = Some(carrier.now_ms());
+            match self.decider.offer(snapshot) {
                 Offer::Same => {}
                 Offer::Ask(pending) => self.send(pending, ask),
                 Offer::Waiting { coalesced } => {
                     rows.extend(coalesced.map(|merged| {
                         self.count(reflex_decide::ROAD_COALESCED, 0);
-                        reflex_decide::coalesced_row(&self.run, &merged)
+                        let mut row = reflex_decide::coalesced_row(&self.run, &merged);
+                        self.stamp(&mut row, mode);
+                        row
                     }));
                 }
             }
         }
-        rows.extend(self.collect(&read, asks, ended, ask));
+        rows.extend(self.collect(&read, asks, ended, ask, carrier, mode));
         if !rows.is_empty() {
             record(rows);
         }
@@ -570,9 +715,15 @@ impl Watch {
             self.report.ended = true;
             let overflowed = read.get("reason").and_then(Value::as_str) == Some("overflow");
             self.report.verified = Some(!overflowed);
-            return self.finish(record);
+            return Passed {
+                done: self.finish(record, mode),
+                read: Some(read),
+            };
         }
-        false
+        Passed {
+            done: false,
+            read: Some(read),
+        }
     }
 
     /// Write what came after the last durable receipt, then acknowledge it: a
@@ -625,9 +776,17 @@ impl Watch {
         self.in_flight = Some((pending, answer));
     }
 
-    /// The question in flight, if it came back: its row, and the reading
-    /// waiting behind it sent next.
-    fn collect(&mut self, read: &Value, asks: bool, ended: bool, ask: &Asker) -> Vec<Value> {
+    /// The question in flight, if it came back: its row, judged by `carrier`,
+    /// and the reading waiting behind it sent next.
+    fn collect(
+        &mut self,
+        read: &Value,
+        asks: bool,
+        ended: bool,
+        ask: &Asker,
+        carrier: &mut dyn Carrier,
+        mode: JevMode,
+    ) -> Vec<Value> {
         let Some((pending, answer)) = self.in_flight.take() else {
             return Vec::new();
         };
@@ -639,6 +798,8 @@ impl Watch {
         let mut row =
             reflex_decide::asked_row(&self.run, &pending, &wired, now.as_ref(), asks, ended);
         spent.stamp(&mut row);
+        self.stamp(&mut row, mode);
+        carrier.settled(&pending, &mut row);
         let road = row["road"].as_str().unwrap_or_default().to_string();
         self.count(&road, u64::from(wired.attempts));
         if let Some(next) = self.decider.settled(pending.id) {
@@ -647,16 +808,26 @@ impl Watch {
         vec![row]
     }
 
+    /// The run's provenance and the pass's mode on a row it leaves.
+    fn stamp(&self, row: &mut Value, mode: JevMode) {
+        if let Some(stamp) = &self.stamp {
+            stamp.stamp(row);
+        }
+        row["mode"] = json!(mode.key());
+    }
+
     fn count(&mut self, road: &str, attempts: u64) {
         *self.report.roads.entry(road.to_string()).or_default() += 1;
         self.report.attempts += attempts;
     }
 
     /// The run ended: the reading still waiting is recorded as merged.
-    fn finish(&mut self, record: &mut dyn FnMut(Vec<Value>)) -> bool {
+    fn finish(&mut self, record: &mut dyn FnMut(Vec<Value>), mode: JevMode) -> bool {
         if let Some(waiting) = self.decider.close() {
             self.count(reflex_decide::ROAD_COALESCED, 0);
-            record(vec![reflex_decide::coalesced_row(&self.run, &waiting)]);
+            let mut row = reflex_decide::coalesced_row(&self.run, &waiting);
+            self.stamp(&mut row, mode);
+            record(vec![row]);
         }
         true
     }
@@ -712,20 +883,7 @@ fn watch_in_the_background(run: &str, evidence: Option<PathBuf>, workspace: Opti
         let ask = asker(wire, workspace);
         let mut sink = FileSink(evidence.clone());
         let mut watch = Watch::new(&run, evidence);
-        let mut record = |rows: Vec<Value>| {
-            if let Some(ledger) = &ledger {
-                let now = crate::project_runtime::now_epoch_ms();
-                let rows: Vec<Value> = rows
-                    .into_iter()
-                    .map(|mut row| {
-                        row["at"] = json!(now);
-                        row["mode"] = json!(JevMode::Shadow.key());
-                        row
-                    })
-                    .collect();
-                systemone::record_rows(&REFLEX_DECIDE, ledger, &rows, now);
-            }
-        };
+        let mut record = |rows: Vec<Value>| record_decisions(ledger.as_deref(), rows);
         loop {
             if !super::session_stands() {
                 let mut report = watch.report().clone();
@@ -751,14 +909,37 @@ fn watch_in_the_background(run: &str, evidence: Option<PathBuf>, workspace: Opti
     });
 }
 
-fn publish(run: &str, report: Report) {
+/// The reflex decision's rows into its ledger, each at the moment it is
+/// written unless its carrier named the moment already — a label names its
+/// request by it — and judged as every window seat's rows are
+/// ([`systemone::record_rows`]).
+pub(crate) fn record_decisions(ledger: Option<&Path>, rows: Vec<Value>) {
+    let Some(ledger) = ledger else {
+        return;
+    };
+    let now = crate::project_runtime::now_epoch_ms();
+    let rows: Vec<Value> = rows
+        .into_iter()
+        .map(|mut row| {
+            if row.get("at").is_none() {
+                row["at"] = json!(now);
+            }
+            row
+        })
+        .collect();
+    systemone::record_rows(&REFLEX_DECIDE, ledger, &rows, now);
+}
+
+pub(crate) fn publish(run: &str, report: Report) {
     watches()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(run.to_string(), report);
 }
 
+pub(crate) mod autopilot;
 #[cfg(test)]
 mod bench;
+pub(crate) mod plan;
 #[cfg(test)]
 mod tests;

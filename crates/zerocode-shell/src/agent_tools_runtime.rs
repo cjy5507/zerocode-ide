@@ -4749,6 +4749,7 @@ pub(super) fn answer_computer_command(
         ComputerMethod::ReflexStart
             | ComputerMethod::ReflexStatus
             | ComputerMethod::ReflexStop
+            | ComputerMethod::ReflexAuto
             | ComputerMethod::Capabilities
     ) {
         // A live reflex run is the window's to admit and to watch, and

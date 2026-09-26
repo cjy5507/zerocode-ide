@@ -184,6 +184,119 @@ pub(crate) fn endpoint_of(row: &ValueRow) -> Option<String> {
     }
 }
 
+/// What one question down a row's road came back with: the text the answer
+/// wrote, and what asking cost — the bytes each way and, where the endpoint
+/// said, the tokens it billed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Said {
+    pub text: String,
+    pub bytes_out: usize,
+    pub bytes_in: usize,
+    pub tokens: Option<Tokens>,
+}
+
+/// The tokens one answer billed, as its endpoint counted them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tokens {
+    pub input: u64,
+    pub output: u64,
+}
+
+/// One question down `row`'s road, bounded whole by `deadline`: `system` as
+/// the instructions and `user` as the one user message, at most `max_tokens`
+/// of answer — the text the answer wrote, or the wire's word for why there is
+/// none. The one envelope both askers of a generator send (t-10223): the
+/// value a walk types and the plan a reflex run acts on; each road's two
+/// shapes are spelled here and nowhere else.
+pub(crate) async fn ask_road(
+    row: &ValueRow,
+    endpoint: &str,
+    key: &str,
+    system: &str,
+    user: &str,
+    max_tokens: usize,
+    deadline: Instant,
+) -> Result<Said, String> {
+    let client = client().ok_or_else(|| TRANSPORT.to_string())?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| TIMEOUT.to_string())?;
+    let request = client
+        .post(endpoint)
+        .timeout(remaining)
+        .header("Content-Type", "application/json");
+    let (request, body) = match row.road {
+        Road::Anthropic => (
+            request
+                .header(ANTHROPIC_WIRE.key_header, key)
+                .header("anthropic-version", ANTHROPIC_WIRE.version),
+            json!({
+                "model": row.model,
+                "max_tokens": max_tokens,
+                "system": system,
+                "messages": [{ "role": "user", "content": user }],
+            }),
+        ),
+        Road::OpenaiCompat | Road::CodeAssist => (
+            request.bearer_auth(key),
+            json!({
+                "model": row.model,
+                "max_tokens": max_tokens,
+                "messages": [
+                    { "role": "system", "content": system },
+                    { "role": "user", "content": user },
+                ],
+            }),
+        ),
+    };
+    let body = body.to_string();
+    let bytes_out = body.len();
+    let answer = request
+        .body(body)
+        .send()
+        .await
+        .map_err(|err| failure(&err))?;
+    let status = answer.status();
+    if !status.is_success() {
+        return Err(token_for(status.as_u16()));
+    }
+    let text = answer.text().await.map_err(|err| failure(&err))?;
+    let parsed: Value = serde_json::from_str(&text).map_err(|_| SCHEMA.to_string())?;
+    let (written, input, output) = match row.road {
+        Road::Anthropic => (
+            parsed
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|blocks| {
+                    blocks
+                        .iter()
+                        .find(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                        .and_then(|block| block.get("text").and_then(Value::as_str))
+                }),
+            "/usage/input_tokens",
+            "/usage/output_tokens",
+        ),
+        Road::OpenaiCompat | Road::CodeAssist => (
+            parsed
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str),
+            "/usage/prompt_tokens",
+            "/usage/completion_tokens",
+        ),
+    };
+    let tokens = parsed
+        .pointer(input)
+        .and_then(Value::as_u64)
+        .zip(parsed.pointer(output).and_then(Value::as_u64))
+        .map(|(input, output)| Tokens { input, output });
+    Ok(Said {
+        text: written.ok_or_else(|| SCHEMA.to_string())?.to_string(),
+        bytes_out,
+        bytes_in: text.len(),
+        tokens,
+    })
+}
+
 /// The writer that actually asks: the seat's chosen row, down its road, with
 /// the key a person put where the row says.
 pub struct LiveWriter {
@@ -240,79 +353,49 @@ impl LiveWriter {
         self.endpoint.clone().or_else(|| endpoint_of(self.row()?))
     }
 
-    /// One request for one value, bounded whole by `deadline`: the text the
-    /// answer wrote, or the wire's word for why there is none.
-    async fn ask(
-        &self,
-        row: &ValueRow,
-        endpoint: &str,
-        key: &str,
-        look: &FieldLook<'_>,
-        deadline: Instant,
-    ) -> Result<String, String> {
-        let client = client().ok_or_else(|| TRANSPORT.to_string())?;
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| TIMEOUT.to_string())?;
-        // The table's own question: its instructions as the system, the
-        // rendered field as the one user line. A value is a line of at most
-        // the question's cap in characters, so no more tokens than that are
-        // ever worth waiting for.
-        let question = zerocode_core::type_value::asked();
-        let said = zerocode_core::type_value::render(look);
-        let request = client
-            .post(endpoint)
-            .timeout(remaining)
-            .header("Content-Type", "application/json");
-        let request = match row.road {
-            Road::Anthropic => request
-                .header(ANTHROPIC_WIRE.key_header, key)
-                .header("anthropic-version", ANTHROPIC_WIRE.version)
-                .body(
-                    json!({
-                        "model": row.model,
-                        "max_tokens": question.value_char_cap,
-                        "system": question.instructions,
-                        "messages": [{ "role": "user", "content": said }],
-                    })
-                    .to_string(),
-                ),
-            Road::OpenaiCompat | Road::CodeAssist => request.bearer_auth(key).body(
-                json!({
-                    "model": row.model,
-                    "max_tokens": question.value_char_cap,
-                    "messages": [
-                        { "role": "system", "content": question.instructions },
-                        { "role": "user", "content": said },
-                    ],
-                })
-                .to_string(),
-            ),
+    /// Why nobody set this writer up, as the word a row names it by — no row
+    /// chosen, a road this product does not take, no key where the row says
+    /// a person puts it — or `None` for a writer that can ask.
+    #[must_use]
+    pub fn unready(&self) -> Option<&'static str> {
+        let Some(row) = self.row() else {
+            return Some(NO_ROW);
         };
-        let answer = request.send().await.map_err(|err| failure(&err))?;
-        let status = answer.status();
-        if !status.is_success() {
-            return Err(token_for(status.as_u16()));
+        if endpoint_of(row).is_none() {
+            return Some(ROAD_UNSUPPORTED);
         }
-        let text = answer.text().await.map_err(|err| failure(&err))?;
-        let parsed: Value = serde_json::from_str(&text).map_err(|_| SCHEMA.to_string())?;
-        let written = match row.road {
-            Road::Anthropic => parsed
-                .get("content")
-                .and_then(Value::as_array)
-                .and_then(|blocks| {
-                    blocks
-                        .iter()
-                        .find(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-                        .and_then(|block| block.get("text").and_then(Value::as_str))
-                }),
-            Road::OpenaiCompat | Road::CodeAssist => parsed
-                .pointer("/choices/0/message/content")
-                .and_then(Value::as_str),
-        };
-        written
-            .map(str::to_string)
-            .ok_or_else(|| SCHEMA.to_string())
+        self.key().is_none().then_some(NO_KEY)
+    }
+
+    /// One question of this writer's row, down its road, within `left`
+    /// ([`ask_road`]): the text the answer wrote and what it cost, or the
+    /// word for why there is none — the writer's own when nobody set it up.
+    ///
+    /// # Errors
+    ///
+    /// The token a row names the failure by.
+    pub fn ask_text(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: usize,
+        left: Duration,
+    ) -> Result<Said, String> {
+        let row = self.row().ok_or_else(|| NO_ROW.to_string())?;
+        let endpoint = self
+            .endpoint()
+            .filter(|_| endpoint_of(row).is_some())
+            .ok_or_else(|| ROAD_UNSUPPORTED.to_string())?;
+        if left.is_zero() {
+            return Err(TIMEOUT.to_string());
+        }
+        let deadline = Instant::now() + left;
+        let key = self.key().ok_or_else(|| NO_KEY.to_string())?.to_string();
+        // Every asker drives sync roads from a thread of its own, and blocks
+        // on the window's runtime as its judge's wire does.
+        tauri::async_runtime::block_on(ask_road(
+            row, &endpoint, &key, system, user, max_tokens, deadline,
+        ))
     }
 }
 
@@ -322,7 +405,7 @@ impl ValueWriter for LiveWriter {
     }
 
     fn ready(&self) -> bool {
-        self.row().is_some_and(|row| endpoint_of(row).is_some()) && self.key().is_some()
+        self.unready().is_none()
     }
 
     /// A first write in a process paid for the client and the handshake:
@@ -344,25 +427,23 @@ impl ValueWriter for LiveWriter {
     }
 
     fn write(&mut self, look: &FieldLook<'_>, left: Duration) -> Result<Written, String> {
-        let row = self.row().ok_or_else(|| NO_ROW.to_string())?;
-        let endpoint = self
-            .endpoint()
-            .filter(|_| endpoint_of(row).is_some())
-            .ok_or_else(|| ROAD_UNSUPPORTED.to_string())?;
-        if left.is_zero() {
-            return Err(TIMEOUT.to_string());
-        }
         let began = Instant::now();
-        let key = self.key().ok_or_else(|| NO_KEY.to_string())?.to_string();
-        // Every walk drives sync roads from a thread of its own, and blocks
-        // on the window's runtime as its judge's wire does.
-        let said =
-            tauri::async_runtime::block_on(self.ask(row, &endpoint, &key, look, began + left))?;
-        let value = zerocode_core::type_value::read(&said)
+        // The table's own question: its instructions as the system, the
+        // rendered field as the one user line. A value is a line of at most
+        // the question's cap in characters, so no more tokens than that are
+        // ever worth waiting for.
+        let question = zerocode_core::type_value::asked();
+        let said = self.ask_text(
+            &question.instructions,
+            &zerocode_core::type_value::render(look),
+            question.value_char_cap,
+            left,
+        )?;
+        let value = zerocode_core::type_value::read(&said.text)
             .map_err(|refusal| refusal.token().to_string())?;
         Ok(Written {
             value,
-            model: row.model.clone(),
+            model: self.row().map(|row| row.model.clone()).unwrap_or_default(),
             ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
     }

@@ -3886,15 +3886,27 @@ pub const REFLEX_DECIDE_DEADLINE_MS: u64 =
 /// and how the run's actions ended so far. No pixel, no screen's words and no
 /// app's name is sent; detector names are the plan's own ids.
 ///
-/// Record-only: `shadow` is the most it offers, it never promotes and nothing
-/// it answers reaches the hand — its rows are the teacher's labels a local
-/// stand-in is later fitted on. Its consent is its own word: another seat's —
-/// the desktop's included — never switches it on.
+/// Carried out by the reflex autopilot (t-10223 §2.2,
+/// `computer_use::reflex::autopilot`) once the seat applies: a `pause` stops
+/// the run and a `replan` has the next plan written, while `continue` leaves
+/// the hand as it was — and only an answer that came inside one lease, about
+/// a reading still young, for the run, plan and epoch that asked it
+/// (`reflex_decide::verdict`). Its marks are later facts: what the hand did
+/// in the window after each answer, one label row naming the request by its
+/// run, its decision and the time it was asked (`reflex_decide::label_row`).
+/// A run started from a person's own plan (`reflex-start`) only records.
+///
+/// Its lines are the stall seat's, borrowed for the stall seat's own reason
+/// ([`ORCHESTRATION_ANSWER_FLOOR_PERMILLE`]): a decision that does not come
+/// back costs nothing — the hand goes on under its plan, as it did before
+/// the seat existed — and its baseline is the same kind, the one answer the
+/// hand would give with no seat at all. Its consent is its own word: another
+/// seat's — the desktop's included — never switches it on.
 pub const REFLEX_DECIDE: JevUse = JevUse {
     id: "reflex_decide",
     setting: "jevReflexDecide",
-    modes: &[JevMode::Off, JevMode::Shadow],
-    recommended: JevMode::Shadow,
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     repeat: None,
     sends: &[
         Sent {
@@ -3921,24 +3933,27 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
         },
     ],
     ledger: "reflex-decide.jsonl",
-    promotes: false,
-    answer_floor_permille: None,
+    promotes: true,
+    answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: None,
-    agreement_floor_permille: None,
-    // A seat that never rises names no apply deadline; the request's own wire
-    // deadline is `REFLEX_DECIDE_DEADLINE_MS`.
-    apply_deadline_ms: None,
-    window_forgives: None,
-    agreement_rows_wanted: None,
-    agreement_kind: AgreementKind::Comparison,
-    baseline: Baseline::None,
-    negatives_wanted: None,
-    confidence_bands: None,
+    agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
+    // The wall the question already waits on the wire: an answer past one
+    // lease is no answer, and the judge times the seat against the same wall.
+    apply_deadline_ms: Some(REFLEX_DECIDE_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
+    // The hand with no seat: it goes on acting as its plan says.
+    baseline: Baseline::AlwaysSame(reflex_decide::CONTINUE),
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    // Nothing between: a live run has nobody to confirm a decision with, and
+    // the autopilot carries out whatever answer passed its checks.
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
     reads_act_line: false,
     rubric_version: questions::REFLEX_DECIDE_RUBRIC_VERSION,
-    // Its marks — the teacher's answer — sit on the request row itself: no
-    // label row names one of its requests.
-    request_name: &[],
+    // A decision is its run's numbered question: the run alone names many,
+    // and a re-plan starts a new run whose decisions count from one again.
+    request_name: &["run", "decision"],
     names: Naming::Request,
     label_part: &[],
     follows: None,

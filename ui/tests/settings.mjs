@@ -114,7 +114,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "file_pick", setting: "jevFilePick", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "command_guard", setting: "jevCommandGuard", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "tool_text_guard", setting: "jevToolTextGuard", modes: "off shadow on auto", recommended: "auto" }),
-  Object.freeze({ id: "reflex_decide", setting: "jevReflexDecide", modes: "off shadow", recommended: "shadow" }),
+  Object.freeze({ id: "reflex_decide", setting: "jevReflexDecide", modes: "off shadow on auto", recommended: "auto" }),
 ]);
 /* The door's object under `smart` and the one word its folder list may hold
    that is not a folder (`zerocode_core::jev::door::JEV_SETTINGS_KEY`,

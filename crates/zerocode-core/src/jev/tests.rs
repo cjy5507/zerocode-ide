@@ -191,7 +191,7 @@ fn every_use_is_off_until_a_person_says_otherwise() {
 #[test]
 fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
     let stopped = [PATCH_REVIEW.id, STEP_EFFORT.id];
-    let recording = [VAULT_PAIRS.id, REFLEX_DECIDE.id];
+    let recording = [VAULT_PAIRS.id];
     for row in &JEV_USES {
         assert!(
             row.modes.contains(&row.recommended),
@@ -618,6 +618,7 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
             FILE_PICK.id,
             COMMAND_GUARD.id,
             TOOL_TEXT_GUARD.id,
+            REFLEX_DECIDE.id,
         ]
     );
     for row in JEV_USES.iter().filter(|row| row.promotes) {
@@ -641,7 +642,7 @@ fn the_placement_seats_line_sits_where_its_negatives_are() {
         Some(PLACEMENT_ANSWER_FLOOR_PERMILLE)
     );
     const { assert!(PLACEMENT_ANSWER_FLOOR_PERMILLE < ORCHESTRATION_ANSWER_FLOOR_PERMILLE) };
-    for row in [STALL, SUMMON, STEP_EFFORT] {
+    for row in [STALL, SUMMON, STEP_EFFORT, REFLEX_DECIDE] {
         assert_eq!(
             row.answer_floor_permille,
             Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
@@ -690,19 +691,12 @@ fn a_use_that_promotes_has_somewhere_to_rise_from_and_to() {
 /// offers `off | shadow | on`, because an `auto` there could never rise and
 /// would be `shadow` under a name that promises otherwise. One rule for
 /// every row, so a new seat cannot pick a third set: the notify and
-/// branching seats had (t-6155 F7).
-///
-/// One named exception, for the same reason turned the other way: a seat
-/// whose answer nothing in the product carries out yet — the reflex decision,
-/// whose apply stage is a later version's (t-9205) — offers `off | shadow`,
-/// because an `on` it cannot carry out would be `shadow` under a name that
-/// promises otherwise.
+/// branching seats had (t-6155 F7), and so had the reflex decision until the
+/// autopilot carried its answers out (t-10223).
 #[test]
 fn a_seats_mode_set_is_read_off_whether_anything_labels_it() {
     let labeled: &[JevMode] = &JevMode::ALL;
     let unlabeled: &[JevMode] = &[JevMode::Off, JevMode::Shadow, JevMode::On];
-    let recorded: &[JevMode] = &[JevMode::Off, JevMode::Shadow];
-    let nothing_applies = [REFLEX_DECIDE.id];
     for row in JEV_USES.iter() {
         assert_eq!(
             row.promotes,
@@ -710,13 +704,7 @@ fn a_seats_mode_set_is_read_off_whether_anything_labels_it() {
             "{}: a labeled seat names its label sample floor",
             row.id
         );
-        let expected = if row.promotes {
-            labeled
-        } else if nothing_applies.contains(&row.id) {
-            recorded
-        } else {
-            unlabeled
-        };
+        let expected = if row.promotes { labeled } else { unlabeled };
         assert_eq!(row.modes, expected, "{}", row.id);
     }
     assert!(
@@ -2079,32 +2067,76 @@ fn the_tool_text_guard_sends_a_block_head_and_its_source_and_rises_on_hindsight(
     assert_eq!(JEV_USES.get(JEV_USES.len() - 2), Some(&TOOL_TEXT_GUARD));
 }
 
-/// The reflex decision (t-9205): a live reflex run's typed state — each
-/// detector's newest sighting and how its actions ended — put to one closed
-/// choice, `continue`, `pause` or `replan`. It records the teacher's answer
-/// and nothing else: `shadow` is the most it offers, it never promotes, names
-/// no floor, wall or band, and its wire waits one lease.
+/// The reflex decision (t-9205, t-10223): a live reflex run's typed state —
+/// each detector's newest sighting and how its actions ended — put to one
+/// closed choice, `continue`, `pause` or `replan`, whose answer the autopilot
+/// carries out once the seat applies. It rises as the orchestration seats
+/// do, on their lines and for their reason — a decision that does not come
+/// back costs nothing, the hand goes on under its plan — against the one
+/// answer the hand gives with no seat, marked by what the hand did after each
+/// answer and naming the request by its run, its decision and the time it
+/// was asked. Its wire and its apply wall are one lease.
 #[test]
-fn the_reflex_decision_records_teacher_labels_and_never_rises() {
+fn the_reflex_decision_rises_on_what_the_hand_did_after_it() {
     use crate::computer_use_protocol::reflex::LIMITS;
     use crate::jev::questions::{REFLEX_DECIDE_OPTIONS, REFLEX_DECIDE_STATE_KEYS};
 
     assert_eq!(jev_use("reflex_decide"), Some(&REFLEX_DECIDE));
     assert_eq!(REFLEX_DECIDE.setting, "jevReflexDecide");
     assert_eq!(REFLEX_DECIDE.ledger, "reflex-decide.jsonl");
-    assert_eq!(REFLEX_DECIDE.modes, &[JevMode::Off, JevMode::Shadow]);
-    assert_eq!(REFLEX_DECIDE.recommended, JevMode::Shadow);
+    assert_eq!(REFLEX_DECIDE.modes, &JevMode::ALL);
+    assert_eq!(REFLEX_DECIDE.recommended, JevMode::Auto);
     assert_eq!(REFLEX_DECIDE.repeat, None);
-    const { assert!(!REFLEX_DECIDE.promotes) };
-    assert!(
-        REFLEX_DECIDE
-            .modes
-            .iter()
-            .all(|mode| !mode.applies_with(true)),
-        "no mode it offers acts"
+    const { assert!(REFLEX_DECIDE.promotes) };
+    // The stall seat's lines, by name — no number of its own.
+    assert_eq!(
+        REFLEX_DECIDE.answer_floor_permille,
+        Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE)
     );
-    assert_eq!(REFLEX_DECIDE.apply_deadline_ms, None);
-    assert_eq!(REFLEX_DECIDE.confidence_bands, None);
+    assert_eq!(
+        REFLEX_DECIDE.agreement_floor_permille,
+        Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        (
+            REFLEX_DECIDE.answer_floor_permille,
+            REFLEX_DECIDE.agreement_floor_permille
+        ),
+        (STALL.answer_floor_permille, STALL.agreement_floor_permille)
+    );
+    assert_eq!(REFLEX_DECIDE.window_forgives, Some(FORGIVES_A_BAD_MINUTE));
+    assert_eq!(
+        REFLEX_DECIDE.agreement_rows_wanted,
+        Some(A_WINDOW_OF_COMPARISONS)
+    );
+    assert_eq!(REFLEX_DECIDE.negatives_wanted, Some(NEGATIVES_WANTED));
+    assert_eq!(REFLEX_DECIDE.agreement_kind, AgreementKind::Hindsight);
+    assert_eq!(
+        REFLEX_DECIDE.baseline,
+        Baseline::AlwaysSame(reflex_decide::CONTINUE)
+    );
+    assert_eq!(
+        REFLEX_DECIDE.apply_deadline_ms,
+        Some(REFLEX_DECIDE_DEADLINE_MS),
+        "the apply wall is the wire's"
+    );
+    assert!(REFLEX_DECIDE.confidence_bands.is_some());
+    const {
+        assert!(
+            !REFLEX_DECIDE.reads_act_line,
+            "it carries out what passed its checks"
+        );
+    };
+    assert_eq!(
+        REFLEX_DECIDE.press_floor_permille, None,
+        "it presses nothing itself"
+    );
+    assert_eq!(REFLEX_DECIDE.request_name, &["run", "decision"]);
+    assert_eq!(REFLEX_DECIDE.names, Naming::Request);
+    assert!(REFLEX_DECIDE.label_part.is_empty());
+    // Nothing rises unasked: `auto` records until its judge says otherwise.
+    assert!(!REFLEX_DECIDE.recommended.applies());
+    assert!(REFLEX_DECIDE.recommended.applies_with(true));
     assert_eq!(
         REFLEX_DECIDE_DEADLINE_MS * 1_000_000,
         LIMITS.max_lease_ns,
@@ -2128,8 +2160,8 @@ fn the_reflex_decision_records_teacher_labels_and_never_rises() {
 
 /// The desktop's consent — its word, whatever it says — never switches the
 /// reflex decision on, and neither does any other seat's: only its own word
-/// or the one switch does, and even then it only records. A word it does not
-/// offer (`on`, `auto`) reads as off.
+/// or the one switch does, and the switch stands it at `auto`, which records
+/// until its own evidence raises it.
 #[test]
 fn desktop_consent_never_enables_reflex_decide() {
     for row in JEV_USES.iter().filter(|row| row.id != REFLEX_DECIDE.id) {
@@ -2150,20 +2182,16 @@ fn desktop_consent_never_enables_reflex_decide() {
         JevMode::Off,
         "the desktop's `on` is the desktop's"
     );
-    for (word, mode) in [
-        ("shadow", JevMode::Shadow),
-        ("on", JevMode::Off),
-        ("auto", JevMode::Off),
-        ("off", JevMode::Off),
-    ] {
-        let root = json!({ SMART_SETTINGS_KEY: { REFLEX_DECIDE.setting: word } });
-        assert_eq!(REFLEX_DECIDE.mode_in(&root), mode, "{word}");
+    for mode in JevMode::ALL {
+        let root = json!({ SMART_SETTINGS_KEY: { REFLEX_DECIDE.setting: mode.key() } });
+        assert_eq!(REFLEX_DECIDE.mode_in(&root), mode, "{}", mode.key());
     }
-    // The one switch stands it at its recommendation, which only records.
+    // The one switch stands it at its recommendation, which records until
+    // its judge raises it.
     let on =
         json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: { door::ENABLED_SETTING: true } } });
-    assert_eq!(REFLEX_DECIDE.mode_in(&on), JevMode::Shadow);
-    assert!(!REFLEX_DECIDE.mode_in(&on).applies_with(true));
+    assert_eq!(REFLEX_DECIDE.mode_in(&on), JevMode::Auto);
+    assert!(!REFLEX_DECIDE.mode_in(&on).applies());
 }
 
 /// An answer is read by the option's word — whatever place that option stood
@@ -2382,7 +2410,7 @@ fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
             assert!(!word.trim().is_empty(), "{}", row.id);
         }
     }
-    // The two constant answers are words their own seats write.
+    // The constant answers are words their own seats write.
     assert_eq!(
         STALL.baseline,
         Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word())
@@ -2390,6 +2418,10 @@ fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
     assert_eq!(
         PATCH_REVIEW.baseline,
         Baseline::AlwaysSame(PATCH_REVIEW_PERMIT)
+    );
+    assert_eq!(
+        REFLEX_DECIDE.baseline,
+        Baseline::AlwaysSame(reflex_decide::CONTINUE)
     );
     // A seat whose marks grade only its own act has no cheaper reader.
     for seat in [
