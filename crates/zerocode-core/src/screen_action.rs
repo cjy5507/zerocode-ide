@@ -529,25 +529,105 @@ pub struct Picked {
 /// rank the same way, every time.
 #[must_use]
 pub fn ranked(items: &[&Value], fields: &[Value], goal: &str) -> (Vec<usize>, Signal) {
-    let _ = (fields, goal_terms(goal), score);
-    ((0..items.len()).collect(), Signal::None)
+    let terms = goal_terms(goal);
+    let scores: Vec<usize> = items
+        .iter()
+        .map(|item| score(item, fields, &terms))
+        .collect();
+    let signal = if scores.iter().any(|earned| *earned > 0) {
+        Signal::Matched
+    } else {
+        Signal::None
+    };
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    // A stable sort: a tie keeps the look's order.
+    order.sort_by_key(|index| std::cmp::Reverse(scores[*index]));
+    (order, signal)
 }
 
-/// What a goal names controls by: its quoted phrases and its words.
+/// What a goal names controls by: its quoted phrases and its words, each
+/// lower-cased and counted once.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Terms {
     phrases: Vec<String>,
     words: Vec<String>,
 }
 
-fn goal_terms(goal: &str) -> Terms {
-    let _ = goal;
-    Terms::default()
+/// The words of `text` long enough to name something
+/// ([`PICK_MIN_TERM_CHARS`]), split wherever a character is neither a letter
+/// nor a digit — a Hangul syllable is a letter.
+fn words_of(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|word| word.chars().count() >= PICK_MIN_TERM_CHARS)
 }
 
+/// A goal's terms: the phrases between a pair of [`PICK_QUOTES`] (an
+/// unclosed quote opens none) and every word of the whole goal.
+fn goal_terms(goal: &str) -> Terms {
+    let goal = goal.to_lowercase();
+    let pieces: Vec<&str> = goal.trim().split(&PICK_QUOTES[..]).collect();
+    let mut terms = Terms::default();
+    for (index, piece) in pieces.iter().enumerate() {
+        let phrase = piece.trim();
+        if index % 2 == 1
+            && index + 1 < pieces.len()
+            && phrase.chars().count() >= PICK_MIN_TERM_CHARS
+            && !terms.phrases.iter().any(|kept| kept == phrase)
+        {
+            terms.phrases.push(phrase.to_string());
+        }
+    }
+    for word in words_of(&goal) {
+        if !terms.words.iter().any(|kept| kept == word) {
+            terms.words.push(word.to_string());
+        }
+    }
+    terms
+}
+
+/// What the goal's terms earn one control ([`PICK_WEIGHTS`]): each phrase
+/// its words contain, each word its words contain — or that begins with one
+/// of its words, so a Korean word with its particle (`설정을`) is held by the
+/// control that says the stem (`설정`) — and its role, when every word of the
+/// role is a word of the goal. Its words are its label and, when a field
+/// names it, the field's own words ([`PICK_FIELD_KEYS`]); lower-cased and
+/// compared by containment, as a window title is matched
+/// (`crate::computer_use::window_title_matches`).
 fn score(item: &Value, fields: &[Value], terms: &Terms) -> usize {
-    let _ = (item, fields, terms);
-    0
+    let said = |from: &Value, key: &str| {
+        from.get(key)
+            .and_then(Value::as_str)
+            .map(|words| words.trim().to_lowercase())
+            .unwrap_or_default()
+    };
+    let mark = item.get(snapshot::FIELD_MARK_KEY).and_then(Value::as_u64);
+    let mut text = said(item, snapshot::LABEL_KEY);
+    for field in fields.iter().filter(|field| {
+        mark.is_some() && field.get(snapshot::FIELD_MARK_KEY).and_then(Value::as_u64) == mark
+    }) {
+        for key in PICK_FIELD_KEYS {
+            text.push('\n');
+            text.push_str(&said(field, key));
+        }
+    }
+    let held: Vec<&str> = words_of(&text).collect();
+    let phrases = terms
+        .phrases
+        .iter()
+        .filter(|phrase| text.contains(phrase.as_str()))
+        .count();
+    let words = terms
+        .words
+        .iter()
+        .filter(|word| text.contains(word.as_str()) || held.iter().any(|own| word.starts_with(own)))
+        .count();
+    let role = said(item, snapshot::ROLE_KEY);
+    let mut role_words = words_of(&role).peekable();
+    let role_named = role_words.peek().is_some()
+        && role_words.all(|own| terms.words.iter().any(|word| word == own));
+    phrases * PICK_WEIGHTS.phrase
+        + words * PICK_WEIGHTS.word
+        + usize::from(role_named) * PICK_WEIGHTS.role
 }
 
 /// The controls of `items` one question offers, cut by `how`

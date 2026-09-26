@@ -988,10 +988,15 @@ fn a_goal_that_names_nothing_or_a_look_within_the_cap_asks_the_same_bytes() {
     assert_eq!(unnamed.signal(), Signal::None);
     assert_eq!(unnamed.signal().word(), "none");
 
-    let within = &items[..MAX_ACTION_CANDIDATES];
-    let named = ask(&a_goal_of("행", within)).expect("asks");
-    let before = ask_by(&a_goal_of("행", within), &Beside::default(), Pick::InOrder)
-        .expect("asks");
+    // Twelve controls, the named one last: nothing is cut, so nothing moves.
+    let within = &items[4..4 + MAX_ACTION_CANDIDATES];
+    let named = ask(&a_goal_of("결제 진행하기", within)).expect("asks");
+    let before = ask_by(
+        &a_goal_of("결제 진행하기", within),
+        &Beside::default(),
+        Pick::InOrder,
+    )
+    .expect("asks");
     assert_eq!(named.signal(), Signal::Matched);
     assert_eq!(wire(&named), wire(&before));
     assert_eq!(named.marks(), before.marks());
@@ -1004,7 +1009,10 @@ fn the_road_back_cuts_by_the_looks_order() {
     let items = thirteenth_named();
     let look = a_goal_of("결제 진행하기", &items);
     let back = ask_by(&look, &Beside::default(), Pick::InOrder).expect("asks");
-    assert_eq!(back.marks(), (1..=MAX_ACTION_CANDIDATES).collect::<Vec<_>>());
+    assert_eq!(
+        back.marks(),
+        (1..=MAX_ACTION_CANDIDATES).collect::<Vec<_>>()
+    );
     let lines: Vec<Value> = items[..MAX_ACTION_CANDIDATES]
         .iter()
         .filter_map(legend_line)
@@ -1064,27 +1072,28 @@ fn a_fields_value_is_never_read_by_the_cut() {
     assert_eq!(read.signal, Signal::Matched);
 }
 
-/// The weights, cell by cell: a quoted phrase, each word of the goal the
-/// control's words hold (a Korean word with a particle held by its stem),
-/// and the control's own role among the goal's words.
+/// The weights, cell by cell, as numbers — so a cell changed in the table
+/// is a red test rather than a quiet drift: a quoted phrase (2), each word
+/// of the goal the control's words hold (1; a Korean word with a particle
+/// held by its stem), and the control's own role among the goal's words (1).
 #[test]
 fn a_control_scores_by_the_weights_table() {
     let terms = goal_terms("press the “Save as” button");
-    let save_as = item(1, "button", "Save as copy");
-    assert_eq!(
-        score(&save_as, &[], &terms),
-        PICK_WEIGHTS.phrase + 2 * PICK_WEIGHTS.word + PICK_WEIGHTS.role
-    );
-    assert_eq!(
-        score(&item(2, "link", "Save"), &[], &terms),
-        PICK_WEIGHTS.word
-    );
-    assert_eq!(score(&item(3, "button", "Close"), &[], &terms), PICK_WEIGHTS.role);
+    assert_eq!(score(&item(1, "button", "Save as copy"), &[], &terms), 5);
+    assert_eq!(score(&item(2, "link", "Save"), &[], &terms), 1);
+    assert_eq!(score(&item(3, "button", "Close"), &[], &terms), 1);
     assert_eq!(score(&item(4, "link", ""), &[], &terms), 0);
     let korean = goal_terms("방해 금지 모드를 켜기");
+    assert_eq!(score(&item(5, "button", "방해 금지 모드"), &[], &korean), 3);
+    // A quoted name outranks two of the goal's other words.
+    let quoted = [
+        item(1, "menuitem", "Toolbar menu"),
+        item(2, "menuitem", "Export"),
+    ];
+    let refs: Vec<&Value> = quoted.iter().collect();
     assert_eq!(
-        score(&item(5, "button", "방해 금지 모드"), &[], &korean),
-        3 * PICK_WEIGHTS.word
+        ranked(&refs, &[], "click “Export” in the toolbar menu").0,
+        [1, 0]
     );
     // One letter names nothing; an unclosed quote is no phrase.
     assert_eq!(score(&item(6, "button", "a b"), &[], &goal_terms("a b")), 0);
@@ -1112,9 +1121,8 @@ fn cases_in(dir: &std::path::Path) -> Vec<Case> {
     paths
         .into_iter()
         .map(|path| {
-            let case: Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).expect("reads"))
-                    .expect("a case is JSON");
+            let case: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("reads"))
+                .expect("a case is JSON");
             let list = |key: &str| case[key].as_array().cloned().unwrap_or_default();
             Case {
                 name: path.file_stem().unwrap().to_string_lossy().into_owned(),
@@ -1152,7 +1160,10 @@ fn judged(case: &Case) -> [(bool, usize); 2] {
     };
     [Pick::InOrder, Pick::ByGoal].map(|how| {
         let asked = ask_by(&look, &beside, how).expect("a case asks");
-        let offered = asked.marks().iter().any(|mark| case.expected.contains(mark));
+        let offered = asked
+            .marks()
+            .iter()
+            .any(|mark| case.expected.contains(mark));
         let rank = match how {
             Pick::InOrder => best(&mut (0..case.items.len())),
             Pick::ByGoal => best(&mut order.iter().copied()),
@@ -1197,7 +1208,8 @@ fn the_regression_set_offers_every_answer() {
 #[test]
 #[ignore = "held-out cases are reported, not tested"]
 fn held_out_cases_are_reported() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/screen-action/held-out");
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/screen-action/held-out");
     for case in cases_in(&dir) {
         let [before, after] = judged(&case);
         println!(
