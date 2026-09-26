@@ -151,7 +151,11 @@ def judged(record, values, table_limits):
     apm = len(good) * 60 / wall if wall > 0 else 0
     fixture, ended = record.get('fixture') or {}, record.get('ended') or {}
     status, report = ended.get('status') or {}, ended.get('report') or {}
+    autopilot = reflex.autopilot_numbers(record)
     errors = []
+    if record['run'].get('autopilot') and (
+            not autopilot or not autopilot['plans'] or set(autopilot['sources']) != {reflex.MODEL}):
+        errors.append('model_plan')
     if wrong or foreign or duplicate or fixture.get('held'):
         errors.append('input')
     if fixture.get('becameActive'):
@@ -175,7 +179,8 @@ def judged(record, values, table_limits):
             'wall_s': wall, 'apm': apm, 'oracle': oracle, 'wrong': len(wrong), 'foreign': foreign,
             'duplicates': duplicate, 'held': fixture.get('held'), 'reaction_ms': reaction,
             'inputs': per_input, 'steps': steps, 'ceiling_apm': ceiling if schedule['stress'] else None,
-            'ceiling_capped': schedule['stress'] and ceiling == max(step['apm'] for step in steps)}
+            'ceiling_capped': schedule['stress'] and ceiling == max(step['apm'] for step in steps),
+            'autopilot': autopilot}
 
 
 class Desk(reflex.Desk):

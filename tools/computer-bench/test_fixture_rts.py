@@ -97,6 +97,16 @@ class RtsTests(unittest.TestCase):
         self.assertTrue(result['ceiling_capped'])
         self.assertEqual(result['ceiling_apm'], self.values['rts_supply']['steps_apm'][-1])
 
+    def test_an_automatic_run_cannot_call_a_stand_in_plan_a_models_plan(self):
+        record = self.record()
+        record['run']['autopilot'] = {'generator': 'stub'}
+        record['ended'].update(road='autopilot', autopilot={'plans': [{'source': reflex.STUB}]})
+        result = rts.judged(record, self.values, reflex.limits())
+        self.assertEqual(result['oracle'], 1)
+        self.assertIn('model_plan', result['errors'])
+        record['ended']['autopilot']['plans'] = [{'source': reflex.MODEL}]
+        self.assertTrue(rts.judged(record, self.values, reflex.limits())['passed'])
+
     @unittest.skipUnless(sys.platform == 'darwin', 'AppKit oracle runs on macOS')
     def test_native_oracle_receives_each_input_and_rejects_wrong_modifiers_and_duplicates(self):
         with tempfile.TemporaryDirectory() as folder:

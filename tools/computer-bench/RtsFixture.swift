@@ -100,6 +100,15 @@ final class RtsArena: NSView {
         if let target = displayed, let input = round.inputs[target.kind] {
             input.colour.color.setFill()
             target.rect.fill()
+            if input.key != nil, target.kind != "group" {
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.boldSystemFont(ofSize: round.drawing.label_pt), .foregroundColor: round.ground.color,
+                ]
+                let label = input.label as NSString
+                let size = label.size(withAttributes: attributes)
+                label.draw(at: CGPoint(x: target.rect.midX - size.width / 2, y: target.rect.midY - size.height / 2),
+                           withAttributes: attributes)
+            }
             if target.kind == "group" {
                 round.ground.color.setFill()
                 let count = round.drawing.unit_grid
