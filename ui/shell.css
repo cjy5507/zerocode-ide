@@ -39832,7 +39832,7 @@ h4.knowledge-inspector-head::after {
   font-weight: var(--jev-weight-medium);
 }
 
-.jev-status-reason, .jev-status-fact {
+.jev-status-reason, .jev-status-fact, .jev-why {
   margin: 0;
 }
 
@@ -39847,8 +39847,9 @@ h4.knowledge-inspector-head::after {
 }
 
 /* What a feature still owes the judge, in words; the bar is the chart's
-   over the table (t-9633 (c)). */
-.jev-owed {
+   over the table (t-9633 (c)) — and, on the line under it, why its rows
+   compared nothing (t-9935). */
+.jev-owed, .jev-why {
   color: var(--ink-mist);
 }
 

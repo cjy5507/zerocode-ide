@@ -125,17 +125,24 @@ export function jevDashboardFixture(real = null) {
   /* A feature's week, day by day (t-9633): each day's requests and answers,
    * how long they took, the input tokens they billed, and the marks that
    * graded them — the judgment's own and, where one is given (`base`), the
-   * simplest method's over the same marks. `null` is a day nothing asked. */
+   * simplest method's over the same marks — and, where one is given
+   * (`notComparedBy`), why the day's rows that compared nothing say so, word
+   * by word (t-9556). `null` is a day nothing asked. */
   const noMarks = () => ({ compared: 0, agreed: 0, lowerBound: null, controlRows: 0,
-    baselineCompared: 0, baselineAgreed: 0, baselineShare: null, notCompared: 0 });
+    baselineCompared: 0, baselineAgreed: 0, baselineShare: null, notCompared: 0, notComparedBy: {} });
+  /* Rows that compared nothing, by the words their writers gave, and how
+   * many they are — the two numbers zo sends beside every agreement. */
+  const withheld = (by) => ({ notCompared: Object.values(by).reduce((sum, count) => sum + count, 0), notComparedBy: by });
   const days = (list) => list.map((one, at) => ({
     startMs: today - (6 - at) * day,
     tally: one === null ? empty() : counted(one.rows ?? 10, one.answered ?? one.rows ?? 10, {
       p50Ms: one.p50 ?? 200 + at * 10, p95Ms: one.p95 ?? 400 + at * 20, inputTokens: one.tokens ?? 0,
     }),
-    agreement: !one?.compared ? noMarks() : {
-      ...noMarks(), compared: one.compared, agreed: one.agreed, lowerBound: one.bound ?? null,
-      ...(one.base === undefined ? {} : { baselineCompared: one.compared, baselineAgreed: one.base, baselineShare: one.base / one.compared }),
+    agreement: {
+      ...noMarks(),
+      ...(!one?.compared ? {} : { compared: one.compared, agreed: one.agreed, lowerBound: one.bound ?? null }),
+      ...(one?.base === undefined ? {} : { baselineCompared: one.compared, baselineAgreed: one.base, baselineShare: one.base / one.compared }),
+      ...(one?.notComparedBy ? withheld(one.notComparedBy) : {}),
     },
   }));
   const quietWeek = () => days([null, null, null, null, null, null, null]);
@@ -169,6 +176,11 @@ export function jevDashboardFixture(real = null) {
       seat.model = "jev-1.13.0";
       seat.verdict = { verdict: "hold", line: "answered", cutModel: "jev-1.12.0" };
       seat.agreementWeek = { compared: 50, agreed: 20, lowerBound: 0.28 };
+      // Its most confident answers were its worst, so its record draws no
+      // confidence bar (t-9468's `non_monotone`).
+      seat.calibration = { readsActLine: true, actFromPermille: null, reason: "non_monotone", tableLine: null,
+        fixed: { fromPermille: 850, marks: 12, applyShare: 0.3, errorPermille: 500, baselineErrorPermille: 250, underErrorPermille: 300 },
+        drawn: null };
       // Five days that asked, each graded on eight marks; the simplest method
       // was compared on the last two, and did as well on the last one. The
       // days' input tokens are the week's 90,000.
@@ -190,8 +202,11 @@ export function jevDashboardFixture(real = null) {
       seat.week = counted(1005, 935, { applied: 845, p50Ms: 211, p95Ms: 400, inputTokens: 70_000,
         failures: [{ token: "schema", rows: 65 }, { token: "timeout", rows: 5 }] });
       seat.costUsd = 0.31;
-      // Asked every day and graded on none of them: nothing to compare.
-      seat.days = days(Array.from({ length: 7 }, () => ({ rows: 143, answered: 133, tokens: 10_000 })));
+      // Asked every day and graded on none of them: nothing to compare —
+      // its turns touched no note (t-9556), five of them today.
+      seat.days = days(Array.from({ length: 7 }, (unused, at) => ({ rows: 143, answered: 133, tokens: 10_000,
+        ...(at === 6 ? { notComparedBy: { no_note_touched: 5 } } : {}) })));
+      seat.agreementWeek = { ...noMarks(), ...withheld({ no_note_touched: 34 }) };
     }
     if (id === "placement") {
       // A seat under its bar: the window is full and the judge holds it on
@@ -205,12 +220,24 @@ export function jevDashboardFixture(real = null) {
       seat.judged = { window: counted(25, 25), windowWanted: 25, agreement: { compared: 21, agreed: 12, lowerBound: 0.37, controlRows: 0 } };
       seat.verdict = { verdict: "hold", line: "agreement" };
       // Three graded days: the simplest method did as well on the first two
-      // and worse on the last.
+      // and worse on the last — and most of its week compared nothing: a pane
+      // nobody looked at, or one nobody moved out of a room the answer did
+      // not name (t-9556), four of the first today.
       seat.days = days([null, null, null, null,
         { rows: 12, tokens: 400, compared: 7, agreed: 4, bound: 0.18, base: 5 },
         { rows: 12, tokens: 500, compared: 7, agreed: 4, bound: 0.18, base: 4 },
-        { rows: 12, tokens: 500, compared: 7, agreed: 6, bound: 0.49, base: 4 },
+        { rows: 12, tokens: 500, compared: 7, agreed: 6, bound: 0.49, base: 4, notComparedBy: { unseen: 4 } },
       ]);
+      seat.agreementWeek = { ...noMarks(), compared: 21, agreed: 12, lowerBound: 0.37, ...withheld({ unseen: 95, not_carried: 3 }) };
+      // Its record draws a confidence bar and the table holds it (t-9468):
+      // at 0.7 and above it acts on 45% of its answers, wrong 66 times in a
+      // thousand where the simplest method was wrong 333.
+      const line = { fromPermille: 700, marks: 30, applyShare: 0.45, errorPermille: 66, baselineErrorPermille: 333, underErrorPermille: 250 };
+      seat.calibration = { readsActLine: true, actFromPermille: 700, reason: null, tableLine: 700,
+        fixed: { ...line, fromPermille: 850, marks: 9, applyShare: 0.2 }, drawn: line };
+      seat.applyShare = line.applyShare;
+      seat.appliedErrorPermille = line.errorPermille;
+      seat.baselineErrorPermille = line.baselineErrorPermille;
     }
     if (id === "browser") {
       // A small sample: four answers in the week, too few for a lower bound
@@ -246,6 +273,9 @@ export function jevDashboardFixture(real = null) {
       seat.rowsToNextJudgment = 38;
       seat.judged = { window: counted(35, 31), windowWanted: 73, agreement: { compared: 3, agreed: 3, lowerBound: 0.43, controlRows: 1 } };
       seat.verdict = { verdict: "hold", line: "too_few_rows" };
+      // Three marks are too few to read a confidence bar off: the reason is
+      // the judge's own line, by its word (t-9468's `NoLine::Line`).
+      seat.calibration = { readsActLine: true, actFromPermille: null, reason: "too_few_compared", tableLine: null, fixed: null, drawn: null };
       // Asked every day, graded on one day only, under the sample floor.
       seat.days = days([0, 1, 2, 3, 4, 5, 6].map((at) => ({ rows: 5, tokens: 1_000,
         ...(at === 2 ? { compared: 3, agreed: 3, bound: 0.43 } : {}) })));
@@ -666,6 +696,100 @@ export async function testJevDashboard(browser, origin, ok) {
     ok(`a 1080p screen holds the charts and every feature in use before any scroll, and room for ${FIRST_SCREEN_ROWS}`,
       firstScreen.charts && firstScreen.rows === 6 && firstScreen.inside === 6 && firstScreen.tallest * FIRST_SCREEN_ROWS <= firstScreen.room,
       JSON.stringify(firstScreen));
+
+    // Why a feature waiting on comparisons compares nothing (t-9935): held
+    // on a line of the comparing kind — too few compared, no outcome yet, an
+    // outcome that never says wrong — its state names, beside what it still
+    // owes, the reasons its week's rows compared nothing, the most frequent
+    // first, in words and with how many; a reason no table words stands as
+    // itself. The cell still says at most fourteen words with no separator
+    // dots, and the row stands no taller than a 1080p screen has room for.
+    // A feature held on a line of another kind names no reason.
+    const whyRows = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const saved = jevNumbers;
+      const read = (id) => {
+        const holder = view.querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="status"]`);
+        const why = holder.querySelector("[data-jev-why]");
+        const words = holder.textContent.trim().split(/\s+/).filter((word) => word && !/^[·—–\-/|:]+$/.test(word));
+        return {
+          why: why?.textContent ?? null, tip: why?.dataset.tip ?? null,
+          reason: holder.querySelector(".jev-status-reason")?.textContent ?? "",
+          owed: holder.querySelector(".jev-owed")?.textContent ?? null,
+          words: words.length, dots: holder.textContent.includes(" · "),
+        };
+      };
+      const room = () => {
+        view.scrollTop = 0;
+        const rows = [...view.querySelectorAll("[data-jev-dash-row]")];
+        const tallest = rows.reduce((a, b) => (b.getBoundingClientRect().height > a.getBoundingClientRect().height ? b : a));
+        return {
+          height: Math.round(view.querySelector('[data-jev-dash-row="placement"]').getBoundingClientRect().height),
+          tallest: Math.round(tallest.getBoundingClientRect().height),
+          // Which cell holds the tallest row up, for the reader of a failure.
+          tallestCells: [tallest.dataset.jevDashRow, ...[...tallest.querySelectorAll("td")].map((td) =>
+            `${td.dataset.jevCell}:${Math.round(td.firstElementChild?.getBoundingClientRect().height ?? td.getBoundingClientRect().height)}/${Math.round(td.getBoundingClientRect().width)}`)],
+        };
+      };
+      const held = async (line, notComparedBy) => {
+        jevNumbers = saved.map((seat) => (seat.id !== "placement" ? seat : {
+          ...seat, verdict: { verdict: "hold", line },
+          judged: { ...seat.judged, agreement: { ...seat.judged.agreement, compared: 5 } },
+          agreementWeek: { ...seat.agreementWeek, notComparedBy },
+        }));
+        paintJevViews();
+        await window.__PAINTED__();
+        return { ...read("placement"), ...room() };
+      };
+      const agreement = read("placement");
+      const compared = await held("too_few_compared", { away: 1, unseen: 95, not_carried: 3 });
+      const unlabeled = await held("unlabeled", { unseen: 7 });
+      const oneSided = await held("one_sided", { not_carried: 2 });
+      const stranger = await held("too_few_compared", { mystery_word: 5 });
+      jevNumbers = saved;
+      paintJevViews();
+      await window.__PAINTED__();
+      return { agreement, compared, unlabeled, oneSided, stranger, after: read("placement") };
+    });
+    ok("a feature held for want of comparisons names, beside its state, the two reasons its week compared nothing most often",
+      whyRows.agreement.why === null && whyRows.after.why === null
+        && whyRows.compared.why === "아무도 안 봄 95건, 실행 안 됨 3건"
+        && Boolean(whyRows.compared.tip?.includes("비교하지 못한 판단"))
+        && whyRows.compared.owed === "정확도 판정까지 15건"
+        && whyRows.unlabeled.why === "아무도 안 봄 7건"
+        && whyRows.oneSided.why === "실행 안 됨 2건"
+        && whyRows.oneSided.reason === "틀렸다는 결과가 거의 없어 정확도를 믿을 수 없습니다"
+        && whyRows.stranger.why === "mystery_word 5건",
+      JSON.stringify(whyRows));
+    // Measured against the first screen's own room: the row naming its
+    // reasons stands no taller than the table's tallest did, so the seven
+    // rows' room it was measured with still holds.
+    ok(`a feature naming its reasons says at most fourteen words, no separator dots, and still leaves ${FIRST_SCREEN_ROWS} rows' room at 1080p`,
+      whyRows.compared.words <= 14 && !whyRows.compared.dots && !whyRows.unlabeled.dots && !whyRows.oneSided.dots
+        && whyRows.compared.height <= firstScreen.tallest && whyRows.compared.tallest <= firstScreen.tallest
+        && whyRows.compared.tallest * FIRST_SCREEN_ROWS <= firstScreen.room,
+      JSON.stringify({ compared: whyRows.compared, before: { tallest: firstScreen.tallest, room: firstScreen.room } }));
+
+    // A feature whose confidence bar would apply too small a share of its
+    // answers (t-9468's `apply_share`) is held under a line of its own and
+    // says which — not that it cleared the bar.
+    const applyShare = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const saved = jevNumbers;
+      jevNumbers = saved.map((seat) => (seat.id === "placement" ? { ...seat, verdict: { verdict: "hold", line: "apply_share" } } : seat));
+      paintJevViews();
+      await window.__PAINTED__();
+      const reason = view.querySelector('[data-jev-dash-row="placement"] .jev-status-reason');
+      const seen = { reason: reason?.textContent ?? "", under: reason?.classList.contains("is-under") ?? false,
+        strip: view.querySelector('[data-jev-stat="under"] dd').textContent };
+      jevNumbers = saved;
+      paintJevViews();
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok("a feature held because too few answers clear its confidence bar says so, as a feature under its bar",
+      applyShare.reason === "확신도 기준을 넘는 답이 너무 적습니다" && applyShare.under && applyShare.strip === "1",
+      JSON.stringify(applyShare));
     ok("from the click to the drawn table is under the design's 200 ms with the backend answering at once",
       opened.ms < 200, `${opened.ms.toFixed(1)} ms`);
     ok("a counted seat's numbers stand in its cells",
@@ -896,6 +1020,73 @@ export async function testJevDashboard(browser, origin, ok) {
       dr.pinned.scrolled > 0 && Math.abs(dr.pinned.top) <= 1 && Math.abs(dr.pinned.bottom) <= 1 && Math.abs(dr.pinned.right) <= 1
         && dr.escaped.hidden && dr.escaped.focus === "browser" && dr.toggled,
       JSON.stringify({ pinned: dr.pinned, escaped: dr.escaped, toggled: dr.toggled }));
+
+    // What stands between a feature and automatic use, in its drawer
+    // (t-9935): the check's result — the line it is held on, every bar
+    // cleared, or none to clear — the confidence bar it acts from with what
+    // that bar applies and how often that is wrong beside the simplest
+    // method, or why its record draws none (a judge's own line in that
+    // line's words), and why its week's rows compared nothing, reason by
+    // reason with the week's count, its share and today's.
+    const whyDrawer = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const saved = jevNumbers;
+      const read = async (id) => {
+        if (jevDrawerSeat !== id) view.querySelector(`[data-jev-dash-row="${id}"] .jev-row-open`).click();
+        await window.__PAINTED__();
+        const part = view.querySelector('.jev-drawer [data-jev-drawer-part="why"]');
+        if (!part) return null;
+        return {
+          hidden: part.hidden,
+          facts: [...part.querySelectorAll("dt")].map((term) => `${term.textContent}=${term.nextElementSibling?.textContent ?? ""}`),
+          head: part.querySelector("[data-jev-why-head]")?.hidden === false ? part.querySelector("[data-jev-why-head]").textContent : null,
+          reasons: [...part.querySelectorAll("[data-jev-reason]")].map((item) => [item.dataset.jevReason,
+            item.querySelector(".jev-judgment-name")?.textContent ?? "", item.querySelector(".jev-judgment-owed")?.textContent ?? "",
+            item.querySelector('svg[data-jev-picture] [data-values]')?.dataset.values ?? ""].join("|")),
+          text: part.textContent,
+        };
+      };
+      const again = async (id, edit) => {
+        jevNumbers = saved.map((seat) => (seat.id === id ? edit(seat) : seat));
+        paintJevViews();
+        return read(id);
+      };
+      const placement = await read("placement");
+      const summon = await read("summon");
+      const routing = await read("routing");
+      const recall = await read("recall");
+      const unread = await again("summon", (seat) => ({ ...seat, calibration: { ...seat.calibration, readsActLine: false } }));
+      const drawn = await again("summon", (seat) => ({ ...seat, calibration: { ...seat.calibration, reason: null, actFromPermille: 800,
+        drawn: { fromPermille: 800, marks: 25, applyShare: 0.36, errorPermille: 40, baselineErrorPermille: 280, underErrorPermille: 350 } } }));
+      jevNumbers = saved;
+      paintJevViews();
+      setLocale("en");
+      const english = await read("placement");
+      setLocale("ko");
+      view.querySelector(".jev-drawer-close").click();
+      await window.__PAINTED__();
+      return { placement, summon, routing, recall, unread, drawn, english: english?.text ?? null };
+    });
+    const wd = whyDrawer;
+    ok("a drawer says the check's result, the confidence bar the feature acts from with what it applies and how often that is wrong",
+      wd.placement !== null && !wd.placement.hidden
+        && wd.placement.facts.join("|") === "판정 결과=정확도가 기준에 못 미칩니다|확신도 기준=70% 이상|적용 몫=45%|적용한 답의 오류=66‰|단순 방식의 오류=333‰"
+        && wd.summon?.facts.join("|") === "판정 결과=응답률이 기준에 못 미칩니다|확신도 기준=없음 — 확신도가 높은 답이 더 자주 틀림"
+        && wd.routing?.facts.join("|") === "판정 결과=판단 기록이 더 쌓여야 합니다|확신도 기준=없음 — 정확도를 비교할 표본이 더 필요합니다"
+        && wd.recall?.facts.join("|") === "판정 결과=자동 적용 대상이 아니라 기록만 합니다"
+        && wd.unread?.facts.join("|") === "판정 결과=응답률이 기준에 못 미칩니다|확신도 기준=쓰지 않음 — 확신도와 상관없이 답을 모두 적용합니다"
+        && wd.drawn?.facts.join("|") === "판정 결과=응답률이 기준에 못 미칩니다|확신도 기준=80% 이상 — 기록이 가리키지만 아직 쓰지 않음|적용 몫=36%|적용한 답의 오류=40‰|단순 방식의 오류=280‰",
+      JSON.stringify({ placement: wd.placement?.facts, summon: wd.summon?.facts, routing: wd.routing?.facts, recall: wd.recall?.facts,
+        unread: wd.unread?.facts, drawn: wd.drawn?.facts }));
+    ok("a drawer says why its week's rows compared nothing, reason by reason — the week's count, its share and today's — each with its bar",
+      wd.placement?.head === "비교하지 못한 판단 98건 — 지난 7일, 까닭별"
+        && wd.placement.reasons.join(",") === "unseen|아무도 안 봄|95건 (97%) · 오늘 4건|95/98,not_carried|실행 안 됨|3건 (3%) · 오늘 0건|3/98"
+        && wd.recall?.reasons.join(",") === "no_note_touched|노트 안 씀|34건 (100%) · 오늘 5건|34/34"
+        && wd.summon?.head === null && wd.summon.reasons.length === 0,
+      JSON.stringify({ placement: [wd.placement?.head, wd.placement?.reasons], recall: wd.recall?.reasons, summon: [wd.summon?.head, wd.summon?.reasons] }));
+    ok("the drawer's check, bar and reasons speak the language in force",
+      wd.english !== null && !/[가-힣]/.test(wd.english) && wd.english.includes("nobody looked"),
+      JSON.stringify(wd.english));
 
     // Each feature names its id under its name, small, and says what it
     // judges in one sentence as its tip — the first sentence of the paragraph
@@ -1465,6 +1656,7 @@ export async function testJevDashboardPictures(browser, origin, ok) {
       const watch = async (change) => {
         const rows = new Set();
         const charts = new Set();
+        let drawer = false;
         const observer = new MutationObserver((records) => {
           for (const record of records) {
             const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
@@ -1472,6 +1664,7 @@ export async function testJevDashboardPictures(browser, origin, ok) {
             if (row) rows.add(row.dataset.jevDashRow);
             const chart = target?.closest?.("[data-jev-chart]");
             if (chart) charts.add(chart.dataset.jevChart);
+            if (target?.closest?.(".jev-drawer")) drawer = true;
           }
         });
         observer.observe(view, { subtree: true, childList: true, characterData: true, attributes: true });
@@ -1479,7 +1672,7 @@ export async function testJevDashboardPictures(browser, origin, ok) {
         paintJevViews();
         await Promise.resolve();
         observer.disconnect();
-        return { rows: [...rows].sort(), charts: [...charts].sort() };
+        return { rows: [...rows].sort(), charts: [...charts].sort(), drawer };
       };
       const fresh = (edit) => {
         jevNumbers = JSON.parse(JSON.stringify(jevNumbers)).map((seat) => (edit(seat) ?? seat));
@@ -1490,7 +1683,30 @@ export async function testJevDashboardPictures(browser, origin, ok) {
       const tokens = await watch(() => fresh((seat) => (seat.id === "routing"
         ? { ...seat, days: seat.days.map((day, at) => (at === 6 ? { ...day, tally: { ...day.tally, inputTokens: day.tally.inputTokens + 500 } } : day)) }
         : null)));
-      return { same, answer, one, tokens };
+      // The reasons a feature's week compared nothing (t-9935): one more
+      // row that nobody looked at draws that feature's row again — which
+      // says so — and nothing else; the same reasons again draw nothing.
+      const saved = jevNumbers;
+      const why = view.querySelector.bind(view, '[data-jev-dash-row="placement"] [data-jev-why]');
+      await watch(() => fresh((seat) => (seat.id === "placement" ? { ...seat, verdict: { verdict: "hold", line: "too_few_compared" } } : null)));
+      const unseen = (seat) => ({ ...seat, agreementWeek: { ...seat.agreementWeek,
+        notComparedBy: { ...seat.agreementWeek.notComparedBy, unseen: seat.agreementWeek.notComparedBy.unseen + 1 } } });
+      const reason = { ...(await watch(() => fresh((seat) => (seat.id === "placement" ? unseen(seat) : null)))), said: why()?.textContent ?? null };
+      const reasonAgain = await watch(() => fresh(() => null));
+      // Today's reasons are the drawer's alone: one more today draws the open
+      // drawer again, which says so, and no row.
+      jevNumbers = saved;
+      paintJevViews();
+      view.querySelector('[data-jev-dash-row="placement"] .jev-row-open').click();
+      await window.__PAINTED__();
+      const today = await watch(() => fresh((seat) => (seat.id === "placement" ? { ...seat, days: seat.days.map((day, at) => (at !== 6 ? day
+        : { ...day, agreement: { ...day.agreement, notComparedBy: { ...day.agreement.notComparedBy, unseen: day.agreement.notComparedBy.unseen + 1 } } })) } : null)));
+      today.said = view.querySelector('.jev-drawer [data-jev-reason="unseen"] .jev-judgment-owed')?.textContent ?? null;
+      view.querySelector(".jev-drawer-close").click();
+      jevNumbers = saved;
+      paintJevViews();
+      await window.__PAINTED__();
+      return { same, answer, one, tokens, reason, reasonAgain, today };
     });
     ok("a paint draws again only the rows and charts whose numbers moved",
       redrawn.same.rows.length === 0 && redrawn.same.charts.length === 0
@@ -1498,6 +1714,13 @@ export async function testJevDashboardPictures(browser, origin, ok) {
         && redrawn.one.rows.join(",") === "recall" && redrawn.one.charts.length === 0
         && redrawn.tokens.rows.join(",") === "routing" && redrawn.tokens.charts.join(",") === "tokens",
       JSON.stringify(redrawn));
+    ok("a reason that moved draws its feature's row again, which says so, and the same reasons draw nothing; today's move only the open drawer",
+      redrawn.reason.rows.join(",") === "placement" && redrawn.reason.charts.length === 0
+        && redrawn.reason.said === "아무도 안 봄 96건, 실행 안 됨 3건"
+        && redrawn.reasonAgain.rows.length === 0 && redrawn.reasonAgain.charts.length === 0 && !redrawn.reasonAgain.drawer
+        && redrawn.today.rows.length === 0 && redrawn.today.charts.length === 0 && redrawn.today.drawer
+        && redrawn.today.said === "95건 (97%) · 오늘 5건",
+      JSON.stringify({ reason: redrawn.reason, again: redrawn.reasonAgain, today: redrawn.today }));
 
     // A feature whose record has too few misses to trust (one_sided) waits
     // for them: the chart says how many it needs as well as when it is next
@@ -1680,18 +1903,24 @@ export async function testJevDashboardScope(browser, origin, ok) {
       const nothing = (counted) => ({ ...counted, rows: 0, answered: 0, refused: 0, applied: 0, called: 0, requests: 0,
         answeredShare: null, answeredLowerBound: null, p50Ms: null, p95Ms: null, failures: [], refusals: [] });
       /* Two projects' rows added the way the window's sum adds them
-       * (`jev_scope::SEAT`): the counts and the bill twice, and what each
-       * project judged of its own rows — its verdict, its judged window, its
-       * latency percentiles — not carried. */
+       * (`jev_scope::SEAT`): the counts and the bill twice — the reasons
+       * rows compared nothing word by word too — and what each project
+       * judged of its own rows — its verdict, its judged window, its latency
+       * percentiles, its confidence bar and what that bar applies — not
+       * carried. */
       const twice = (window) => ({ ...window, rows: window.rows * 2, answered: window.answered * 2, refused: window.refused * 2,
         applied: window.applied * 2, called: window.called * 2, requests: window.requests * 2, inputTokens: window.inputTokens * 2,
         p50Ms: null, p95Ms: null, failures: window.failures.map((one) => ({ ...one, rows: one.rows * 2 })),
         refusals: window.refusals.map((one) => ({ ...one, rows: one.rows * 2 })) });
+      const twiceMarks = (marks) => (!marks ? marks : { ...marks, compared: marks.compared * 2, agreed: marks.agreed * 2,
+        notCompared: (marks.notCompared ?? 0) * 2,
+        notComparedBy: Object.fromEntries(Object.entries(marks.notComparedBy ?? {}).map(([word, count]) => [word, count * 2])) });
       const summed = (seat) => ({
         ...seat, today: twice(seat.today), week: twice(seat.week), costUsd: seat.costUsd === null ? null : seat.costUsd * 2,
         verdict: null, judged: null, rowsToNextJudgment: null, clearsRiseFloor: null, negativesWanted: null,
-        days: seat.days.map((one) => ({ ...one, tally: twice(one.tally), agreement: { ...one.agreement,
-          compared: one.agreement.compared * 2, agreed: one.agreement.agreed * 2 } })),
+        calibration: null, applyShare: null, appliedErrorPermille: null, baselineErrorPermille: null,
+        agreementWeek: twiceMarks(seat.agreementWeek),
+        days: seat.days.map((one) => ({ ...one, tally: twice(one.tally), agreement: twiceMarks(one.agreement) })),
       });
       window.__ANSWER__.jev_summary = (args) => {
         const answered = base(args);
@@ -1767,6 +1996,19 @@ export async function testJevDashboardScope(browser, origin, ok) {
       const drawnAgain = await until(() => window.__JEV__.asks.length > asked && fact("routing", "week") === "70")
         .then(() => true, () => false);
       const everywhere = { ...read(), pressed, drawnAgain };
+      // A summed feature's drawer (t-9935): its check and its confidence bar
+      // are each project's own, so each is a dash that says so; why its rows
+      // compared nothing is every project's, added.
+      view().querySelector('[data-jev-dash-row="recall"] .jev-row-open')?.click();
+      await window.__PAINTED__();
+      const part = view().querySelector('.jev-drawer [data-jev-drawer-part="why"]');
+      everywhere.drawer = !part ? null : {
+        facts: [...part.querySelectorAll("dt")].map((term) => `${term.textContent}=${term.nextElementSibling?.textContent ?? ""}`),
+        tips: [...part.querySelectorAll("dd")].map((one) => one.dataset.tip ?? ""),
+        reasons: [...part.querySelectorAll("[data-jev-reason]")].map((item) => `${item.dataset.jevReason}|${item.querySelector(".jev-judgment-owed")?.textContent ?? ""}`),
+      };
+      view().querySelector(".jev-drawer-close")?.click();
+      await window.__PAINTED__();
       let kept = null;
       try {
         kept = localStorage.getItem(JEV_SCOPE_KEY);
@@ -1802,6 +2044,11 @@ export async function testJevDashboardScope(browser, origin, ok) {
       !seen.error && here.summon.reach === "machine" && everywhere.summon.reach === "machine"
         && here.summon.week === "50" && everywhere.summon.week === "50" && everywhere.routing.reach === null,
       JSON.stringify(seen.error ?? { here: here.summon, everywhere: everywhere.summon, routing: everywhere.routing.reach }));
+    ok("a summed feature's drawer says its check and its bar are each project's own, and adds up why its rows compared nothing",
+      !seen.error && everywhere.drawer !== null && everywhere.drawer.facts.join("|") === "판정 결과=—|확신도 기준=—"
+        && everywhere.drawer.tips.length === 2 && everywhere.drawer.tips.every((tip) => tip.includes("프로젝트"))
+        && everywhere.drawer.reasons.join(",") === "no_note_touched|68건 (100%) · 오늘 10건",
+      JSON.stringify(seen.error ?? everywhere.drawer));
     ok("the scope chosen is kept for the next open", !seen.error && seen.kept === "projects", JSON.stringify(seen.error ?? seen.kept));
     ok("the scope's dashboard raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {

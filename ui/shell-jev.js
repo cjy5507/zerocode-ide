@@ -61,10 +61,25 @@ const JEV_EVENT_SETTLE_MS = 1_500;
  *   latency      a row's latency picture (d).
  *   tokens       the week's input tokens (e); past `dense` days its columns
  *                draw thinner, so a month still stands apart day by day.
- *   judgment     one feature's bar toward its next judgment (c). */
+ *   judgment     one feature's bar toward its next judgment (c), and in its
+ *                drawer each reason's share of the rows that compared nothing.
+ *   reasonsShown how many of the reasons its week's rows compared nothing a
+ *                row names under its state's chip, the most frequent first
+ *                (t-9935): two stand on one line in the state column's
+ *                width, where the cell keeps to its fourteen words and a
+ *                1080p screen to its seven rows (t-6243 D2, t-9633); the
+ *                drawer lists every one.
+ *
+ * A share is said in whole percents (`jevPercent`) and a rate the core keeps
+ * per thousand in the whole per-thousands it sends (`jevPermille`), so no
+ * picture or sentence rounds a number of its own. And a 1080p screen holds
+ * seven rows under the charts before any scroll (t-9633, the harness's
+ * `FIRST_SCREEN_ROWS`): t-6243 D1's nine, less the two rows' room the charts
+ * took — a decision kept, not a room to win back. */
 const JEV_CHART = Object.freeze({
   trendDays: 3,
   sampleFloor: 5,
+  reasonsShown: 2,
   trend: Object.freeze({ width: 64, height: 18, pad: 2, now: 6, strip: 4, gap: 1 }),
   trendWide: Object.freeze({ width: 360, height: 96, pad: 4, now: 0, samples: 24, column: 0.5 }),
   latency: Object.freeze({ width: 44, height: 18, pad: 2 }),
@@ -319,25 +334,67 @@ function jevFeature(id) {
 /* The line a judgment turned on, by the core's token
  * (`promote::Line::token`): what each one MEANS to a person is this page's,
  * said once here. A line that `wants` more samples holds a seat that has not
- * been measured yet; every other line holds one measured under its bar. */
+ * been measured yet; every other line holds one measured under its bar. A
+ * line that `compares` holds a seat on the marks its rows left — too few, none,
+ * or none that ever said wrong — so its rows that compared nothing, and why,
+ * are the reason to name beside it (t-9935). */
 const JEV_LINES = Object.freeze({
   too_few_rows: { key: "settings.typesafe.lineTooFewRows", word: "판단 기록이 더 쌓여야 합니다", wants: "rows" },
   answered: { key: "settings.typesafe.lineAnswered", word: "응답률이 기준에 못 미칩니다" },
   latency: { key: "settings.typesafe.lineLatency", word: "응답이 너무 느립니다" },
   schema: { key: "settings.typesafe.lineSchema", word: "형식이 잘못된 응답이 있었습니다" },
-  too_few_compared: { key: "settings.typesafe.lineTooFewCompared", word: "정확도를 비교할 표본이 더 필요합니다", wants: "compared" },
+  too_few_compared: { key: "settings.typesafe.lineTooFewCompared", word: "정확도를 비교할 표본이 더 필요합니다", wants: "compared", compares: true },
   agreement: { key: "settings.typesafe.lineAgreement", word: "정확도가 기준에 못 미칩니다" },
-  unlabeled: { key: "settings.typesafe.lineUnlabeled", word: "정확도를 잴 결과가 아직 없습니다", wants: "compared" },
-  one_sided: { key: "settings.typesafe.lineOneSided", word: "틀렸다는 결과가 거의 없어 정확도를 믿을 수 없습니다" },
+  unlabeled: { key: "settings.typesafe.lineUnlabeled", word: "정확도를 잴 결과가 아직 없습니다", wants: "compared", compares: true },
+  one_sided: { key: "settings.typesafe.lineOneSided", word: "틀렸다는 결과가 거의 없어 정확도를 믿을 수 없습니다", compares: true },
   too_few_baseline: { key: "settings.typesafe.lineTooFewBaseline", word: "가장 단순한 방식과 비교할 표본이 더 필요합니다", wants: "baseline" },
   baseline: { key: "settings.typesafe.lineBaseline", word: "가장 단순한 방식보다 낫지 않습니다" },
   labels: { key: "settings.typesafe.lineLabels", word: "사람의 평가에서 기존 방식이 더 나았습니다" },
   fallbacks: { key: "settings.typesafe.lineFallbacks", word: "연속으로 기존 방식으로 되돌아갔습니다" },
+  apply_share: { key: "settings.typesafe.lineApplyShare", word: "확신도 기준을 넘는 답이 너무 적습니다" },
 });
 
 function jevLineWords(line) {
   const said = JEV_LINES[line];
   return said ? t(said.key, said.word) : "";
+}
+
+/* Why a feature's rows compared nothing, by the word each writer put in the
+ * row's place of a mark (`notComparedBy`, t-9556: the placement seat's
+ * `unseen` and `not_carried`, the effort seats' `not_carried` and
+ * `same_as_rule`, the stall seat's `unknown` and `worker_died`, the notice
+ * seat's `away`, the summons' and the mention ranking's `not_offered`, the
+ * summons' `pinned`, recall's `no_note_touched`, routing's `unanswered`, the
+ * file pick's `no_file_edited`, the claim check's `not_model_comparison`) —
+ * and why a feature's record draws no confidence bar to act from
+ * (`calibration.reason`, the core's `threshold::NoLine::token`). What each
+ * means to a person is said once here (t-9935); `jevReasonWords` reads it. */
+const JEV_REASONS = Object.freeze({
+  away: { key: "jev.reason.away", word: "사람 없음" },
+  unseen: { key: "jev.reason.unseen", word: "아무도 안 봄" },
+  not_carried: { key: "jev.reason.notCarried", word: "실행 안 됨" },
+  same_as_rule: { key: "jev.reason.sameAsRule", word: "규칙과 같음" },
+  unknown: { key: "jev.reason.unknown", word: "원인 모름" },
+  worker_died: { key: "jev.reason.workerDied", word: "터미널 닫힘" },
+  not_offered: { key: "jev.reason.notOffered", word: "보기에 없음" },
+  pinned: { key: "jev.reason.pinned", word: "모델 고정" },
+  no_note_touched: { key: "jev.reason.noNoteTouched", word: "노트 안 씀" },
+  unanswered: { key: "jev.reason.unanswered", word: "결과 없음" },
+  no_file_edited: { key: "jev.reason.noFileEdited", word: "편집한 파일 없음" },
+  not_model_comparison: { key: "jev.reason.notModelComparison", word: "모델 비교 아님" },
+  no_confidence: { key: "jev.reason.noConfidence", word: "답에 확신도가 없음" },
+  whole: { key: "jev.reason.whole", word: "모든 답이 이미 기준을 넘음" },
+  one_colour: { key: "jev.reason.oneColour", word: "확신도로 답이 나뉘지 않음" },
+  non_monotone: { key: "jev.reason.nonMonotone", word: "확신도가 높은 답이 더 자주 틀림" },
+  no_lift: { key: "jev.reason.noLift", word: "기준을 그어도 정확도가 거의 같음" },
+});
+
+/* A reason in words: this table's, else — a record that drew no bar because
+ * one of the judge's own lines broke (`NoLine::Line`) — that line's, else the
+ * token itself, so a word no table knows yet still says what zo said. */
+function jevReasonWords(token) {
+  const said = JEV_REASONS[token] ?? JEV_LINES[token];
+  return said ? t(said.key, said.word) : token;
 }
 
 /* The version a change of version cut away from the judged window, when one
@@ -652,9 +709,15 @@ function jevBuildDrawer() {
     section.dataset.jevDrawerPart = name;
     return section;
   };
+  // What stands between the feature and automatic use (t-9935): the check's
+  // result and the confidence bar as facts, then why its week's rows
+  // compared nothing, reason by reason.
+  const whyHead = jevNode("p", "jev-drawer-text");
+  whyHead.dataset.jevWhyHead = "";
   const drawer = jevNode("aside", "jev-drawer", head,
     jevNode("p", "jev-drawer-summary"),
     jevText("jev.drawer.written", "설정 파일에 이 기능만 따로 정해 두어 스위치를 따르지 않습니다. 스위치를 다시 켜면 권장 설정으로 돌아갑니다.", "p", "jev-drawer-written"),
+    part("why", "jev.drawer.why", "자동 적용 판정", jevNode("dl", "jev-drawer-facts"), whyHead, jevNode("ol", "jev-judgment")),
     part("days", "jev.drawer.days", "날마다", jevNode("div", "jev-days-picture"), jevNode("div", "jev-days-legend"),
       jevNode("table", "jev-days-table", jevNode("thead", "", jevNode("tr", "", ...JEV_DAY_COLUMNS.map((column) => {
         const head = jevText(column.key, column.word, "th");
@@ -1261,7 +1324,8 @@ function jevTokensPicture(days, label, box = JEV_CHART.tokens) {
 
 /* One feature's way to its next judgment (t-9633 (c)): a bar filled to the
  * share of what the judge wants that is in hand (`data-values`, have/want),
- * on the track the stylesheet lays behind it. */
+ * on the track the stylesheet lays behind it — and, in a feature's drawer,
+ * one reason's share of the rows that compared nothing (t-9935). */
 function jevJudgmentPicture(entry, label, box = JEV_CHART.judgment) {
   const svg = jevPicture("judgment", box, label, "jev-judgment-bar", true);
   const filled = Math.min(1, entry.have / entry.want) * box.width;
@@ -1747,6 +1811,14 @@ function jevStatusCell(held, choice, standing, head) {
     lead.append(acts);
   }
   const cell = jevNode("div", "jev-status", lead);
+  // Why its rows compared nothing, on a line of its own under the chip: beside
+  // the chip it would widen the column the whole table shares (t-9935).
+  const why = jevWhyWords(held, status);
+  if (why) {
+    const said = jevHint("jev.why.tip", "비교하지 못한 판단의 까닭 — 지난 7일, 많은 순", jevNode("p", "jev-why", document.createTextNode(why)));
+    said.dataset.jevWhy = "";
+    cell.append(said);
+  }
   const other = held.model && held.model !== head
     ? t("settings.typesafe.seatVersion", "모델 {{model}}", { model: held.model }) : "";
   for (const fact of [other, jevCutWords(held)]) {
@@ -1783,6 +1855,26 @@ function jevStatusReason(held, status, choice, counting) {
   return choice?.automatic
     ? t("jev.risingNext", "기준을 넘었습니다 — 다음 판정에서 자동 적용됩니다")
     : t("jev.risingHeld", "기준을 넘었지만 기록만으로 설정되어 있습니다");
+}
+
+/* A feature's reasons its rows compared nothing (`notComparedBy`), the most
+ * frequent first, each with how many rows gave it. */
+function jevReasonsOf(by) {
+  return Object.entries(by ?? {}).sort(([a, one], [b, other]) => other - one || a.localeCompare(b));
+}
+
+/* Why a feature held on a line that `compares` has too few marks, under its
+ * state's chip (t-9935): its week's most frequent reasons its rows compared
+ * nothing (`JEV_CHART.reasonsShown` of them), each with its count — "" for a
+ * feature held on another line or on none, for one a person has to clear
+ * first (the key, a folder's consent) or that asks nothing, and for a sum of
+ * projects, which has no one judgment to explain (t-9091). */
+function jevWhyWords(held, status) {
+  if (status === "dormant" || status === "blocked" || held.across?.summed) return "";
+  if (!JEV_LINES[held.verdict?.line]?.compares) return "";
+  return jevReasonsOf(held.agreementWeek?.notComparedBy).slice(0, JEV_CHART.reasonsShown)
+    .map(([token, count]) => t("jev.why.count", "{{reason}} {{count}}건", { reason: jevReasonWords(token), count: jevCount(count) }))
+    .join(", ");
 }
 
 /* Why the door refused a feature that waits on a person, in a sentence:
@@ -1905,11 +1997,90 @@ function jevToggleDrawer(view, id) {
 }
 
 /* One `<dl>` of facts: a term per row, by its catalog key, and what the
- * feature's numbers say for it. Rebuilt whole: a handful of rows. */
+ * feature's numbers say for it — with a tip, by its own key, where what it
+ * says needs its meaning said. Rebuilt whole: a handful of rows. */
 function jevFacts(list, facts) {
-  list.replaceChildren(...facts.flatMap(({ key, word, said }) => [
-    jevText(key, word, "dt"), jevNode("dd", "", document.createTextNode(said)),
-  ]));
+  list.replaceChildren(...facts.flatMap(({ key, word, said, tip }) => {
+    const value = jevNode("dd", "", document.createTextNode(said));
+    return [jevText(key, word, "dt"), tip ? jevHint(tip.key, tip.word, value) : value];
+  }));
+}
+
+/* A rate the core keeps per thousand, as the whole per-thousand it sends —
+ * the sign is the catalog's — or a dash for none. */
+function jevPermille(permille) {
+  if (permille === null || permille === undefined) return "—";
+  return t("jev.permille", "{{count}}‰", { count: jevCount(permille) });
+}
+
+/* What a sum of projects cannot say — each project judges its own rows
+ * (t-9091) — standing where the fact would, with why as its tip. */
+const JEV_PER_PROJECT = Object.freeze({
+  said: "—",
+  tip: { key: "jev.drawer.perProject", word: "프로젝트마다 따로 판정하는 값이라 합산하지 않습니다 — 이 작업 공간을 고르면 보입니다" },
+});
+
+/* The drawer's check and confidence bar (t-9935): what the check found — the
+ * line the feature is held on, every bar cleared, or no check to clear — and
+ * the bar its answers act from: the table's (with what it applies and how
+ * often that is wrong beside the simplest method), one its record draws that
+ * is not read yet, why its record draws none, or none read at all. A sum of
+ * projects says both are each project's own. */
+function jevWhyFacts(held) {
+  const check = { key: "jev.drawer.check", word: "판정 결과" };
+  const bar = { key: "jev.drawer.act", word: "확신도 기준" };
+  if (held.across?.summed) return [{ ...check, ...JEV_PER_PROJECT }, { ...bar, ...JEV_PER_PROJECT }];
+  const line = held.verdict?.line;
+  const facts = [{ ...check, said: !held.verdict ? t("jev.neverRises", "자동 적용 대상이 아니라 기록만 합니다")
+    : line ? jevLineWords(line) || line : t("jev.drawer.cleared", "모든 기준을 넘었습니다") }];
+  const calibration = held.calibration;
+  if (!calibration) return facts;
+  const at = (from, numbers) => [
+    { ...bar, said: from },
+    { key: "jev.drawer.applyShare", word: "적용 몫", said: jevPercent(numbers.applyShare) },
+    { key: "jev.drawer.appliedError", word: "적용한 답의 오류", said: jevPermille(numbers.errorPermille) },
+    { key: "jev.drawer.baselineError", word: "단순 방식의 오류", said: jevPermille(numbers.baselineErrorPermille) },
+  ];
+  if (!calibration.readsActLine) {
+    return [...facts, { ...bar, said: t("jev.act.unread", "쓰지 않음 — 확신도와 상관없이 답을 모두 적용합니다") }];
+  }
+  if (calibration.tableLine !== null && calibration.tableLine !== undefined) {
+    return [...facts, ...at(t("jev.act.from", "{{line}} 이상", { line: jevFloor(calibration.tableLine) }), {
+      applyShare: held.applyShare, errorPermille: held.appliedErrorPermille, baselineErrorPermille: held.baselineErrorPermille,
+    })];
+  }
+  if (calibration.actFromPermille !== null && calibration.actFromPermille !== undefined) {
+    return [...facts, ...at(t("jev.act.drawn", "{{line}} 이상 — 기록이 가리키지만 아직 쓰지 않음", {
+      line: jevFloor(calibration.actFromPermille),
+    }), calibration.drawn ?? {})];
+  }
+  return [...facts, { ...bar, said: calibration.reason
+    ? t("jev.act.none", "없음 — {{why}}", { why: jevReasonWords(calibration.reason) }) : t("jev.act.unset", "없음") }];
+}
+
+/* The drawer's reasons its rows compared nothing (t-9935): the week's, the
+ * most frequent first, each with its count, its share of them all and
+ * today's count, over a bar of that share — or nothing, for a week whose rows
+ * all compared or said nothing of why. */
+function paintJevWhy(part, held) {
+  const reasons = jevReasonsOf(held.agreementWeek?.notComparedBy);
+  const today = held.days?.at(-1)?.agreement?.notComparedBy ?? {};
+  const total = reasons.reduce((sum, [, count]) => sum + count, 0);
+  const head = part.querySelector("[data-jev-why-head]");
+  head.hidden = total === 0;
+  head.textContent = total === 0 ? "" : t("jev.drawer.notComparedBy", "비교하지 못한 판단 {{count}}건 — 지난 7일, 까닭별", { count: jevCount(total) });
+  part.querySelector(".jev-judgment").replaceChildren(...reasons.map(([token, count]) => {
+    const words = jevReasonWords(token);
+    const said = t("jev.drawer.reasonCount", "{{count}}건 ({{share}}) · 오늘 {{today}}건", {
+      count: jevCount(count), share: jevPercent(count / total), today: jevCount(today[token] ?? 0),
+    });
+    const row = jevNode("li", "jev-judgment-row",
+      jevNode("span", "jev-judgment-name", document.createTextNode(words)),
+      jevNode("span", "jev-judgment-owed", document.createTextNode(said)),
+      jevJudgmentPicture({ have: count, want: total }, `${words} — ${said}`));
+    row.dataset.jevReason = token;
+    return row;
+  }));
 }
 
 /* The open feature's drawer (`id`, or null for none), from what is in hand:
@@ -1939,6 +2110,14 @@ function paintJevDrawer(view, id, held) {
   drawer.querySelector(".jev-drawer-summary").textContent = feature.summary ? t(feature.summary.key, feature.summary.source) : "";
   drawer.querySelector(".jev-drawer-written").hidden = !standing?.written;
   const part = (name) => drawer.querySelector(`[data-jev-drawer-part="${name}"]`);
+
+  // What stands between it and automatic use, once zo has counted it
+  // (t-9935).
+  part("why").hidden = !held;
+  if (held) {
+    jevFacts(part("why").querySelector("dl"), jevWhyFacts(held));
+    paintJevWhy(part("why"), held);
+  }
 
   // Its week, large, with the table of its days (t-9633).
   const days = jevWordsOf(held).read;
