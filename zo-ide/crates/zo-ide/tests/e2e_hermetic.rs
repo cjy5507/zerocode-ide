@@ -7078,3 +7078,110 @@ async fn e2e_a_file_the_turn_read_stands_first_in_the_at_popup() {
     let _ = run.finish();
     assert_eq!(service.request_bodies().await.len(), 2, "the tool turn only");
 }
+
+/// Codex 0.157.1's footer keys in a real pane (t-10232): row two reads
+/// `← for agents · ? for shortcuts`; `?` on the empty prompt opens the card
+/// above the composer and the row says `? / esc close`; esc closes it and
+/// nothing reaches the model; F2 opens the warnings page and esc closes it;
+/// ← opens the agents overview.
+///
+/// With `ZO_E2E_DUMP=<path>` each moment's screen is written to
+/// `<path>.<rows>x<cols>.<moment>.txt` before anything is asserted.
+/// `palette::LateOscGuard::WINDOW`.
+const LATE_OSC_WINDOW: Duration = Duration::from_secs(3);
+
+async fn footer_keys_open_their_views(rows: u16, cols: u16) {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("unused\n")
+        .await
+        .expect("start provider");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_controlling_sized(
+        rows,
+        cols,
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[],
+    )
+    .expect("spawn zo in PTY");
+    run.send(b"\x1b[1;1R").expect("answer cursor position query");
+    run.wait_for("? for shortcuts", TEST_TIMEOUT);
+    // The guard is armed before the first paint, so it lapses at most this
+    // long after the first footer was seen.
+    let painted = std::time::Instant::now();
+    wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
+    let dump = std::env::var("ZO_E2E_DUMP").ok();
+    let screen = |run: &PtyRun, moment: &str| -> Vec<String> {
+        let visible = settled_screen(&run.snapshot_output(), rows).visible();
+        if let Some(path) = &dump {
+            fs::write(format!("{path}.{rows}x{cols}.{moment}.txt"), visible.join("\n"))
+                .expect("dump the screen");
+        }
+        visible
+    };
+
+    let idle = screen(&run, "idle");
+    let last = idle.len() - 1;
+    assert_eq!(idle[last].trim_end(), "  ← for agents · ? for shortcuts", "{idle:#?}");
+    assert!(idle[last - 1].starts_with("  "), "row one above it: {idle:#?}");
+
+    let at = run.output_len();
+    run.send(b"?").expect("open the card");
+    run.wait_for_after("? / esc close", at, TEST_TIMEOUT);
+    wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
+    let card = screen(&run, "card");
+    assert!(card.iter().any(|row| row.contains("Keyboard shortcuts")), "{card:#?}");
+    assert!(card.iter().any(|row| row.contains("Ask zo to do anything")), "the composer stays: {card:#?}");
+    assert_eq!(card[card.len() - 1].trim_end(), "  ? / esc close", "{card:#?}");
+
+    // The harness leaves the palette probe unanswered, so for its first three
+    // seconds zo reads an Esc as the head of a late reply (`LateOscGuard`).
+    std::thread::sleep(LATE_OSC_WINDOW.saturating_sub(painted.elapsed()));
+    let at = run.output_len();
+    run.send(b"\x1b").expect("close the card");
+    run.wait_for_after("? for shortcuts", at, TEST_TIMEOUT);
+
+    // `?` then Enter: the card opens and closes, and no "?" is sent.
+    let at = run.output_len();
+    run.send(b"?").expect("open the card again");
+    run.wait_for_after("? / esc close", at, TEST_TIMEOUT);
+    let at = run.output_len();
+    run.send(b"\r").expect("enter closes the card");
+    run.wait_for_after("? for shortcuts", at, TEST_TIMEOUT);
+
+    let at = run.output_len();
+    run.send(b"\x1bOQ").expect("press F2");
+    run.wait_for_after("No warnings", at, TEST_TIMEOUT);
+    wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
+    let page = screen(&run, "warnings");
+    assert!(page.iter().any(|row| row.trim_end() == "  Warnings"), "{page:#?}");
+    assert!(page.iter().any(|row| row.contains("esc back")), "{page:#?}");
+    let at = run.output_len();
+    run.send(b"\x1b").expect("close the warnings page");
+    run.wait_for_after("? for shortcuts", at, TEST_TIMEOUT);
+
+    let at = run.output_len();
+    run.send(b"\x1b[D").expect("press left on the empty prompt");
+    run.wait_for_after("Running agents", at, TEST_TIMEOUT);
+    wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
+    let _ = screen(&run, "agents");
+    let at = run.output_len();
+    run.send(b"\x1b").expect("close the agents overview");
+    run.wait_for_after("? for shortcuts", at, TEST_TIMEOUT);
+    let _ = run.finish();
+    assert!(service.request_bodies().await.is_empty(), "no key reached the model");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_footer_keys_open_their_views_at_80x24() {
+    footer_keys_open_their_views(24, 80).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_footer_keys_open_their_views_at_120x30() {
+    footer_keys_open_their_views(30, 120).await;
+}

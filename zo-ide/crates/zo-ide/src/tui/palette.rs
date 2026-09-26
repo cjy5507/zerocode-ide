@@ -43,6 +43,7 @@ const LIGHT_COMPOSER_CARET: Color = Color::Rgb(143, 83, 0);
 const LIGHT_FOOTER_MODEL: Color = Color::Rgb(106, 78, 17);
 const LIGHT_FOOTER_CWD: Color = Color::Rgb(40, 96, 48);
 const LIGHT_TABLE_HEADER: Color = Color::Rgb(108, 76, 21);
+const LIGHT_WARNING_NOTICE: Color = Color::Rgb(139, 98, 20);
 
 /// codex 가 `.cyan()` 으로 칠하는 명령 토큰.
 pub const COMMAND_TOKEN: Color = Color::Indexed(6);
@@ -56,6 +57,9 @@ pub const MENTION_PAGE: Color = Color::Indexed(5);
 pub const CARD_EFFORT: Color = Color::Indexed(5);
 /// 경고 셀 `⚠`.
 pub const NOTICE_WARN: Color = Color::Indexed(3);
+/// The footer badge's `N warnings` — codex `style.rs::warning_notice_style`
+/// amber on a dark background (the light one is `LIGHT_WARNING_NOTICE`).
+pub const WARNING_NOTICE: Color = Color::Rgb(196, 167, 103);
 /// 끝난 도구 셀의 성공 불릿.
 pub const TOOL_OK: Color = Color::Indexed(2);
 /// 끝난 도구 셀의 실패 불릿.
@@ -165,6 +169,7 @@ impl TerminalPalette {
             FOOTER_MODEL => LIGHT_FOOTER_MODEL,
             FOOTER_CWD => LIGHT_FOOTER_CWD,
             TABLE_HEADER => LIGHT_TABLE_HEADER,
+            WARNING_NOTICE => LIGHT_WARNING_NOTICE,
             _ => color,
         }
     }

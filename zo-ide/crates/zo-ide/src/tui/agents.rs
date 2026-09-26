@@ -492,6 +492,9 @@ impl Overview {
     }
 }
 
+/// How the footers and the `?` card write the `is_open_key` chord.
+pub const OPEN_KEY_LABEL: &str = "alt+a";
+
 /// Codex's fixed Open Agents binding (`alt+a`). Control is explicitly excluded
 /// so a combined chord cannot steal Ctrl+A from composer home navigation.
 pub(crate) fn is_open_key(key: &KeyEvent) -> bool {
@@ -522,7 +525,7 @@ fn list_view(agents: &[SubagentProgress], selected: usize) -> Picker {
             })
             .collect(),
         selected: selected.min(agents.len().saturating_sub(1)),
-        footer: "enter details · alt+a/esc close".to_string(),
+        footer: format!("enter details · {OPEN_KEY_LABEL}/esc close"),
     }
 }
 

@@ -30,10 +30,6 @@ pub const PLACEHOLDER: &str = "Ask zo to do anything";
 /// 정말 선택적이지만, zo 의 질문은 빈 줄을 답으로 받지 않는다
 /// (`ide::prompt::parse_question_answer` 는 빈 줄에 `None`).
 pub const ANSWER_PLACEHOLDER: &str = "Type your answer";
-/// codex 가 `? for shortcuts` 를 두는 자리(푸터 줄)에 우리도 안내를 건다.
-/// 컴포저가 비어 있을 때만 보인다 — 타이핑을 시작하면 물러난다.
-pub const SHORTCUT_HINT: &str = "? for shortcuts";
-
 /// Fewer than two cells only draw a bare ellipsis, not a recognizable cwd.
 const MIN_FOOTER_CWD_WIDTH: usize = 2;
 
@@ -1111,10 +1107,12 @@ fn two_column(
     ])
 }
 
-/// 푸터 — `  <model> <effort> · <cwd>` 왼쪽과 컨텍스트·힌트 오른쪽.
+/// 푸터 첫 줄 — `  <model> <effort> · <cwd>` 왼쪽과 표시자·컨텍스트 오른쪽.
+/// 키 안내는 둘째 줄([`super::footer_hints::hint_row`])의 몫이다 — codex
+/// 0.157.1 이 상태 줄과 힌트 행을 나눈 그대로.
 ///
-/// cwd 는 **남는 자리만큼만** 쓴다. 힌트를 통째 뒤에 붙이고 줄 전체를 자르면
-/// 긴 경로가 힌트를 잡아먹어 안내가 영영 안 보인다.
+/// cwd 는 **남는 자리만큼만** 쓴다. 오른쪽을 통째 뒤에 붙이고 줄 전체를 자르면
+/// 긴 경로가 표시자를 잡아먹는다.
 #[must_use]
 #[allow(clippy::too_many_arguments)] // This public byte-test seam mirrors the footer's visible facts.
 pub fn footer(
@@ -1123,7 +1121,6 @@ pub fn footer(
     model_note: Option<&str>,
     cwd: &str,
     width: usize,
-    hint: Option<&str>,
     context_left: Option<u8>,
     context_used_tokens: Option<u64>,
     plan_mode: bool,
@@ -1152,8 +1149,8 @@ pub fn footer(
     spans.push(Span::dim(" · "));
     let context = crate::status_format::context_footer_text(context_left, context_used_tokens);
     // Match Codex's right-indicator rule: plan wins over goal, then the IDE
-    // context value joins it.  The hint is zo-only chrome and has the lowest
-    // priority; at narrow widths the order is hint, context, then path.
+    // context value joins it. At narrow widths the context goes before the
+    // path does.
     let indicator = if plan_mode {
         Some(crate::status_format::PLAN_MODE_FOOTER_TEXT)
     } else {
@@ -1161,7 +1158,7 @@ pub fn footer(
             .map(crate::status_format::goal_footer_text)
             .or(loop_status)
     };
-    let make_tail = |include_context: bool, include_hint: bool| {
+    let make_tail = |include_context: bool| {
         let mut tail = Vec::new();
         if let Some(indicator) = indicator {
             tail.push(Span::new(indicator, Style::new().fg(Color::MAGENTA)));
@@ -1176,46 +1173,25 @@ pub fn footer(
                 tail.push(Span::dim(context.to_string()));
             }
         }
-        if include_hint {
-            if let Some(hint) = hint {
-                if tail.is_empty() {
-                    tail.push(Span::dim(format!("   {hint}")));
-                } else {
-                    tail.push(Span::dim(" | "));
-                    tail.push(Span::dim(hint.to_string()));
-                }
-            }
-        }
         tail
     };
     let context_present = context.is_some();
-    let mut tail = make_tail(context_present, hint.is_some());
+    let mut tail = make_tail(context_present);
     let left_width: usize = spans.iter().map(Span::width).sum();
     let tail_width: usize = tail.iter().map(Span::width).sum();
-    // Keep this one-way priority independent of the exact width: hint first,
-    // then context, then cwd. Reconsidering a previously kept tail at a
-    // second threshold is what made the order flip around 40 columns.
-    if hint.is_some() && width < left_width + tail_width + MIN_FOOTER_CWD_WIDTH {
-        tail = make_tail(context_present, false);
-    }
-    let tail_width: usize = tail.iter().map(Span::width).sum();
+    // One-way priority, independent of the exact width: context, then cwd.
     if indicator.is_some()
         && context_present
         && width < left_width + tail_width + MIN_FOOTER_CWD_WIDTH
     {
-        tail = make_tail(false, false);
+        tail = make_tail(false);
     }
     let tail_width: usize = tail.iter().map(Span::width).sum();
     // A visible cwd needs one reserved separator before a right indicator.
     // Without it a path that exactly consumes its budget produces
     // `/workPlan mode`, and truncation can no longer recover that boundary.
     let available = width.saturating_sub(left_width + tail_width);
-    // A hint without context already begins with its captured three-space
-    // gutter. Plan mode and bare context do not, so only those tails reserve
-    // a separate boundary here.
-    let path_separator = usize::from(
-        !tail.is_empty() && available > 0 && (indicator.is_some() || context_present),
-    );
+    let path_separator = usize::from(!tail.is_empty() && available > 0);
     let budget = available.saturating_sub(path_separator);
     let path = Line::new(vec![Span::new(
         cwd.to_string(),
@@ -1313,8 +1289,14 @@ pub struct Frame<'a> {
     /// 팝업과 같은 자리를 쓰고, `@` 토큰이 있으면 이것이 이긴다(codex
     /// `sync_command_popup` 도 `@` 토큰 앞에서 명령 팝업을 접는다).
     pub mention: Option<&'a super::mention::MentionPopup>,
-    /// 컴포저에 `?` 만 있을 때 뜨는 단축키 카드.
-    pub shortcuts: Option<&'a [String]>,
+    /// The `?` card ([`super::shortcuts::card`]), grown above the composer
+    /// while it is open; cut to the rows the frame has.
+    pub shortcuts: Option<&'a [Line]>,
+    /// The F2 viewer's page ([`super::warnings::Viewer::lines`]). It takes
+    /// the viewport as the pager does — the draft waits under it.
+    pub warnings: Option<&'a [Line]>,
+    /// What the footer's second row says ([`super::footer_hints::hint_row`]).
+    pub hints: super::footer_hints::FooterHints,
     pub model: &'a str,
     pub effort: &'a str,
     /// The footer's word for a model swap on the wire, while one stands.
@@ -1392,6 +1374,15 @@ fn build_with_focus(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16,
     if let Some(question) = frame.question {
         return build_question(frame, question, focus);
     }
+    if let Some(page) = frame.warnings {
+        return (page.to_vec(), None);
+    }
+    build_bottom_pane(frame, focus)
+}
+
+/// The bottom pane — status, the `?` card, pending input, the composer and
+/// the two footer rows — with the active cell above it.
+fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16, u16)>) {
     // The bottom pane first — its height decides how many rows the active
     // cell above it may take (`clip_active`).
     let mut rows: Vec<Line> = Vec::new();
@@ -1400,25 +1391,16 @@ fn build_with_focus(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16,
         rows.push(status.line(frame.width));
         rows.extend(status.detail_lines(frame.width));
     }
-    if let Some(shortcuts) = frame.shortcuts {
-        rows.push(Line::empty());
-        for entry in shortcuts {
-            rows.push(
-                Line::new(vec![Span::raw("  "), Span::dim(entry.clone())])
-                    .truncated(frame.width),
-            );
-        }
-    }
-    rows.push(Line::empty());
+    let mut below: Vec<Line> = vec![Line::empty()];
     if let Some(pending_input) = frame.pending_input.filter(|lines| !lines.is_empty()) {
-        rows.extend(
+        below.extend(
             pending_input
                 .iter()
                 .map(|line| line.clone().truncated(frame.width)),
         );
     }
-    rows.push(Line::empty());
-    let composer_row = u16::try_from(rows.len()).unwrap_or(0);
+    below.push(Line::empty());
+    let composer_offset = below.len();
     let (lines, (col, row)) = frame.composer.render_with_effort(
         frame.width,
         PLACEHOLDER,
@@ -1426,27 +1408,24 @@ fn build_with_focus(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16,
         frame.effort_effect,
         frame.now,
     );
-    rows.extend(lines);
-    rows.push(Line::empty());
+    below.extend(lines);
+    below.push(Line::empty());
     // 팝업은 푸터 자리에 앉는다 — 캡처의 `/model` 프레임이 그 자리에서
-    // 모델·cwd 줄을 밀어냈다.
+    // 모델·cwd 줄을 밀어냈다. 둘째 줄도 함께 밀려난다.
     if let Some(mention) = frame.mention {
-        rows.extend(mention.lines(frame.width, focus));
+        below.extend(mention.lines(frame.width, focus));
     } else if let Some(popup) = frame.popup {
-        rows.extend(popup.lines_with_focus(frame.width, focus));
+        below.extend(popup.lines_with_focus(frame.width, focus));
     } else {
         if let Some(dream) = frame.dream {
-            rows.push(dreamer_footer(dream, frame.width));
+            below.push(dreamer_footer(dream, frame.width));
         }
-        let hint =
-            (frame.composer.is_empty() && frame.shortcuts.is_none()).then_some(SHORTCUT_HINT);
         let mut line = footer(
             frame.model,
             frame.effort,
             frame.model_note,
             frame.cwd,
             frame.width,
-            hint,
             frame.context_left,
             frame.context_used_tokens,
             frame.plan_mode,
@@ -1459,8 +1438,21 @@ fn build_with_focus(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16,
         {
             line = effect.footer_line_at(&line, frame.width, frame.now);
         }
-        rows.push(line);
+        below.push(line);
+        below.push(super::footer_hints::hint_row(frame.hints, frame.width));
     }
+    // Codex `composer_layout.rs`: the card grows above the composer and
+    // yields its own rows when the pane is short — the composer, the footer
+    // and the cursor never move for it.
+    if let Some(card) = frame.shortcuts {
+        let room = frame.max_rows.saturating_sub(rows.len() + below.len() + 1);
+        if room > 0 {
+            rows.push(Line::empty());
+            rows.extend(super::shortcuts::fit(card, room));
+        }
+    }
+    let composer_row = u16::try_from(rows.len() + composer_offset).unwrap_or(0);
+    rows.extend(below);
     // 활성 셀이 먼저 — codex 는 그 위에 빈 줄 하나(`top: 1`)를 띄운다.
     let Some(active) = frame.active.filter(|active| !active.is_empty()) else {
         return (rows, Some((col, composer_row + row)));
@@ -1501,7 +1493,8 @@ fn clip_active(active: &[Line], budget: usize) -> Vec<Line> {
     lines
 }
 
-/// `?` 를 눌렀을 때 보이는 keep-list. codex 의 `? for shortcuts` 자리다.
+/// The keep-list of slash commands — the `?` card's last section
+/// ([`super::shortcuts::card`]), where codex prints `/keymap customize`.
 #[must_use]
 pub fn shortcut_card() -> Vec<String> {
     vec![
@@ -1515,11 +1508,11 @@ pub fn shortcut_card() -> Vec<String> {
         "/goal [command]       persistent goal · bounded autonomous gates".to_string(),
         "/loop [command]       bounded count · interval · file-watch loops".to_string(),
         "/status               model · permissions · effort · session · context".to_string(),
+        "/warnings             this conversation's warnings, one page each (F2 too)".to_string(),
         "/help                 this list          /exit  quit (Ctrl-D too)".to_string(),
         "/clear [name]         clear terminal + start a new chat".to_string(),
         "//text                send a literal leading slash".to_string(),
         "@name                 mention a file, skill or vault page — ↑↓ pick · tab/enter insert · esc close".to_string(),
-        "esc interrupt · ctrl-c twice to quit · ↑↓ history · shift+tab cycles permissions".to_string(),
     ]
 }
 
@@ -1562,6 +1555,8 @@ mod tests {
             popup: None,
             mention: None,
             shortcuts: None,
+            warnings: None,
+            hints: crate::tui::footer_hints::FooterHints::default(),
             model: "claude-opus-5",
             effort: "high",
             model_note: None,
@@ -1582,15 +1577,93 @@ mod tests {
         let composer = Composer::new();
         let (rows, cursor) = build(&frame(&composer, None));
         let plain: Vec<String> = rows.iter().map(Line::plain).collect();
-        assert_eq!(plain.len(), 7);
+        assert_eq!(plain.len(), 8);
         assert_eq!(plain[0], "");
         assert_eq!(plain[1], "");
         assert_eq!(plain[2], format!("╭{}╮", "─".repeat(58)));
         assert_eq!(plain[3], format!("│› Ask zo to do anything{}│", " ".repeat(35)));
         assert_eq!(plain[4], format!("╰{}╯", "─".repeat(58)));
         assert_eq!(plain[5], "");
-        assert_eq!(plain[6], "  claude-opus-5 high · /tmp/x   ? for shortcuts");
+        assert_eq!(plain[6], "  claude-opus-5 high · /tmp/x");
+        assert_eq!(plain[7], "  ← for agents · ? for shortcuts");
         assert_eq!(cursor, Some((3, 3)));
+    }
+
+    /// Codex 0.157.1's two-row footer (t-10232): row one is the status
+    /// line as it was, row two says what the keys do and counts warnings.
+    #[test]
+    fn the_footer_is_two_rows_and_the_second_says_what_the_keys_do() {
+        use crate::tui::footer_hints::HintMode;
+
+        let composer = Composer::new();
+        let plain = |frame: &Frame<'_>| -> Vec<String> {
+            build(frame).0.iter().map(Line::plain).collect()
+        };
+        let idle = plain(&frame(&composer, None));
+        assert_eq!(idle[idle.len() - 2], "  claude-opus-5 high · /tmp/x");
+        assert_eq!(idle[idle.len() - 1], "  ← for agents · ? for shortcuts");
+
+        let mut counted = frame(&composer, None);
+        counted.hints.warnings = 2;
+        let rows = plain(&counted);
+        assert!(rows[rows.len() - 1].ends_with("⚠ 2 warnings · f2 to view"), "{rows:#?}");
+        assert_eq!(rows[rows.len() - 2], idle[idle.len() - 2], "row one is untouched");
+
+        let status = Status::working(Duration::from_secs(3));
+        let mut drafting = Composer::new();
+        drafting.insert_str("draft");
+        let mut queued = frame(&drafting, Some(&status));
+        queued.hints.mode = HintMode::Queue;
+        let rows = plain(&queued);
+        assert_eq!(rows[rows.len() - 1], "  tab to queue message");
+    }
+
+    /// Codex `shortcut_help_above_*.snap`: the card grows above the composer;
+    /// the composer, row one and the cursor stay where they were.
+    #[test]
+    fn the_card_grows_above_the_composer_and_row_two_says_how_to_close_it() {
+        use crate::tui::footer_hints::HintMode;
+        use crate::tui::shortcuts;
+
+        let composer = Composer::new();
+        let (idle, idle_cursor) = build(&frame(&composer, None));
+        let card = shortcuts::card(60, false);
+        let mut open = frame(&composer, None);
+        open.shortcuts = Some(&card);
+        open.hints.mode = HintMode::Overlay;
+        let (rows, cursor) = build(&open);
+        let plain: Vec<String> = rows.iter().map(Line::plain).collect();
+        let idle: Vec<String> = idle.iter().map(Line::plain).collect();
+        assert_eq!(plain[1], "  Keyboard shortcuts");
+        assert_eq!(plain[plain.len() - 1], "  ? / esc close");
+        let tail = idle.len() - 1;
+        assert_eq!(
+            plain[plain.len() - 1 - tail..plain.len() - 1],
+            idle[..tail],
+            "the composer and row one are the idle ones"
+        );
+        let grown = u16::try_from(plain.len() - idle.len()).unwrap();
+        assert_eq!(cursor, idle_cursor.map(|(col, row)| (col, row + grown)));
+
+        open.max_rows = 16;
+        let cut: Vec<String> = build(&open).0.iter().map(Line::plain).collect();
+        assert_eq!(cut.len(), 16, "the card yields rows, the composer does not");
+        assert!(cut.iter().any(|row| row.ends_with(shortcuts::RESIZE_NOTICE)), "{cut:#?}");
+        assert_eq!(cut[cut.len() - 1], "  ? / esc close");
+    }
+
+    /// Codex `warnings_view`: the viewer stands in the bottom pane's place,
+    /// the draft hidden under it and no cursor.
+    #[test]
+    fn the_warnings_page_takes_the_viewport_and_hides_the_cursor() {
+        let mut composer = Composer::new();
+        composer.insert_str("draft");
+        let page = vec![Line::from_text("  Warnings · 1 of 1 · Warning")];
+        let mut viewing = frame(&composer, None);
+        viewing.warnings = Some(&page);
+        let (rows, cursor) = build(&viewing);
+        assert_eq!(rows, page);
+        assert_eq!(cursor, None);
     }
 
     #[test]
@@ -1599,7 +1672,7 @@ mod tests {
         let status = Status::working(Duration::from_secs(3));
         let (rows, cursor) = build(&frame(&composer, Some(&status)));
         let plain: Vec<String> = rows.iter().map(Line::plain).collect();
-        assert_eq!(plain.len(), 9);
+        assert_eq!(plain.len(), 10);
         assert_eq!(plain[1], "• Working (3s • esc to interrupt)");
         assert_eq!(plain[5], format!("│› Ask zo to do anything{}│", " ".repeat(35)));
         assert_eq!(cursor, Some((3, 5)));
@@ -1799,7 +1872,7 @@ mod tests {
 
     #[test]
     fn the_footer_colours_model_and_cwd_apart() {
-        let line = footer("m", "high", None, "/tmp", 40, None, None, None, false, None, None);
+        let line = footer("m", "high", None, "/tmp", 40, None, None, false, None, None);
         assert_eq!(line.plain(), "  m high · /tmp");
         assert_eq!(line.spans[1].style.fg, Some(crate::tui::palette::FOOTER_MODEL));
         assert_eq!(line.spans[3].style.fg, Some(crate::tui::palette::FOOTER_CWD));
@@ -1815,7 +1888,6 @@ mod tests {
             Some("safety fallback"),
             "/tmp",
             60,
-            None,
             None,
             None,
             false,
@@ -1847,11 +1919,11 @@ mod tests {
         frame.dream = Some(dream);
         let (rows, _) = build(&frame);
         assert_eq!(
-            rows[rows.len() - 2].plain(),
+            rows[rows.len() - 3].plain(),
             dreamer_footer(dream, frame.width).plain()
         );
         assert!(
-            rows[rows.len() - 2]
+            rows[rows.len() - 3]
                 .spans
                 .iter()
                 .all(|span| span.style.dim),
@@ -1863,7 +1935,7 @@ mod tests {
     fn worktree_context_joins_the_footer_location_without_a_new_colour_axis() {
         let location = footer_location("/repo", Some("wt/task ← main"));
         let line = footer(
-            "m", "high", None, &location, 80, None, None, None, false, None, None,
+            "m", "high", None, &location, 80, None, None, false, None, None,
         );
 
         assert_eq!(line.plain(), "  m high · wt/task ← main · /repo");
@@ -1878,7 +1950,7 @@ mod tests {
             "/private/tmp/a/very/long/repository/path",
             Some("wt/task ← main"),
         );
-        let narrow = footer("m", "", None, &long, 32, None, None, None, false, None, None);
+        let narrow = footer("m", "", None, &long, 32, None, None, false, None, None);
         assert!(narrow.plain().contains("wt/task ← main"));
     }
 
@@ -1982,38 +2054,29 @@ mod tests {
         assert_eq!(short.len(), 10, "the window gave up rows, not the chrome");
     }
 
+    /// The hint has its own row now, so a long path cannot take its seat.
     #[test]
-    fn the_hint_never_loses_its_seat_to_a_long_path() {
+    fn a_long_path_never_reaches_the_second_rows_hint() {
         let long = "/private/tmp/one/two/three/four/five/six/seven/eight/nine";
-        let line = footer(
-            "claude-opus-5",
-            "high", None,
-            long,
-            60,
-            Some("? for shortcuts"),
-            None,
-            None,
-            false,
-            None,
-            None,
-        );
-        assert!(line.width() <= 60);
-        assert!(
-            line.plain().ends_with("   ? for shortcuts"),
-            "footer was {:?}",
-            line.plain()
-        );
+        let composer = Composer::new();
+        let mut frame = frame(&composer, None);
+        frame.cwd = long;
+        let (rows, _) = build(&frame);
+        let plain: Vec<String> = rows.iter().map(Line::plain).collect();
+        assert!(rows[rows.len() - 2].width() <= 60, "{plain:#?}");
+        assert!(plain[plain.len() - 2].ends_with('…'), "{plain:#?}");
+        assert_eq!(plain[plain.len() - 1], "  ← for agents · ? for shortcuts");
     }
 
     #[test]
     fn a_path_that_fills_its_budget_still_separates_plan_mode() {
-        let line = footer("m", "high", None, "/work", 25, None, None, None, true, None, None);
+        let line = footer("m", "high", None, "/work", 25, None, None, true, None, None);
         assert!(line.plain().contains("… Plan mode"), "footer was {line:?}");
         assert!(!line.plain().contains("…Plan mode"), "footer was {line:?}");
     }
 
     #[test]
-    fn narrow_footer_yields_hint_then_context_then_path() {
+    fn narrow_footer_yields_context_then_path() {
         let path = "/private/tmp/project/with/a/long/path";
         for width in 32..=48 {
             let line = footer(
@@ -2021,7 +2084,6 @@ mod tests {
                 "high", None,
                 path,
                 width,
-                Some("? for shortcuts"),
                 Some(80),
                 None,
                 true,
@@ -2029,30 +2091,21 @@ mod tests {
                 None,
             )
             .plain();
-            // The hint is always the first thing to give up. It must never
-            // survive while either higher-priority plan/context information
-            // was removed to retain cwd.
-            if line.contains("? for shortcuts") {
-                assert!(line.contains("Plan mode"), "width {width}: {line:?}");
-                assert!(line.contains("80% context left"), "width {width}: {line:?}");
-            }
-            if !line.contains("80% context left") {
-                assert!(!line.contains("? for shortcuts"), "width {width}: {line:?}");
-            }
+            // Plan mode outranks the context value, which outranks cwd.
+            assert!(line.contains("Plan mode"), "width {width}: {line:?}");
+            assert!(!line.contains("? for shortcuts"), "row one has no hint: {line:?}");
         }
     }
 
     #[test]
-    fn a_full_optional_tail_yields_hint_before_discarding_cwd() {
-        // 57 is exactly the head plus Plan mode, context, and hint. The old
-        // allocator held all of that tail and gave cwd zero columns; adding a
-        // cwd reservation must evict the lowest-priority hint instead.
+    fn a_full_optional_tail_yields_context_before_discarding_cwd() {
+        // 41 is the head, Plan mode and context with two cells for cwd; one
+        // column less and the context goes so cwd keeps a readable piece.
         let line = footer(
             "m",
             "high", None,
             "/private/tmp/project/with/a/long/path",
-            57,
-            Some("? for shortcuts"),
+            40,
             Some(80),
             None,
             true,
@@ -2060,8 +2113,8 @@ mod tests {
             None,
         )
         .plain();
-        assert!(!line.contains("? for shortcuts"), "footer was {line:?}");
-        assert!(line.contains("80% context left"), "footer was {line:?}");
+        assert!(!line.contains("80% context left"), "footer was {line:?}");
+        assert!(line.contains("Plan mode"), "footer was {line:?}");
         assert!(line.contains('/'), "footer was {line:?}");
     }
 
@@ -2069,9 +2122,12 @@ mod tests {
     fn typing_retires_the_shortcut_hint() {
         let mut composer = Composer::new();
         composer.insert_str("x");
-        let (rows, _) = build(&frame(&composer, None));
+        let mut frame = frame(&composer, None);
+        frame.hints.mode = crate::tui::footer_hints::HintMode::Draft;
+        let (rows, _) = build(&frame);
         let footer = rows.last().expect("footer").plain();
         assert!(!footer.contains("? for shortcuts"), "footer was {footer:?}");
+        assert_eq!(rows[rows.len() - 2].plain(), "  claude-opus-5 high · /tmp/x");
     }
 
     #[test]
@@ -2196,23 +2252,24 @@ mod tests {
         let (rows, cursor) = build(&frame);
         let plain: Vec<String> = rows.iter().map(Line::plain).collect();
         assert_eq!(plain.len(), 23, "{plain:#?}");
-        // The bottom pane is the working viewport's 9 rows, the cell above it
-        // gets 23 - 9 - 1 = 13 rows: 12 of its own and the count of the rest.
+        // The bottom pane is the working viewport's 10 rows, the cell above
+        // it gets 23 - 10 - 1 = 12 rows: 11 of its own and the count of the rest.
         assert_eq!(plain[1], "diff line 1");
-        assert_eq!(plain[12], "diff line 12");
-        assert_eq!(plain[13], "… 98 more lines");
-        assert_eq!(plain[14], "");
-        assert_eq!(plain[15], "• Working (3s • esc to interrupt)");
-        assert_eq!(plain[19], format!("│› Ask zo to do anything{}│", " ".repeat(35)));
-        assert_eq!(plain[22], "  claude-opus-5 high · /tmp/x   ? for shortcuts");
-        assert_eq!(cursor, Some((3, 19)));
+        assert_eq!(plain[11], "diff line 11");
+        assert_eq!(plain[12], "… 99 more lines");
+        assert_eq!(plain[13], "");
+        assert_eq!(plain[14], "• Working (3s • esc to interrupt)");
+        assert_eq!(plain[18], format!("│› Ask zo to do anything{}│", " ".repeat(35)));
+        assert_eq!(plain[21], "  claude-opus-5 high · /tmp/x");
+        assert_eq!(plain[22], "  ← for agents · ? for shortcuts");
+        assert_eq!(cursor, Some((3, 18)));
 
         // A cell that fits is drawn whole, as before.
         let short: Vec<Line> = cell[..5].to_vec();
         frame.active = Some(&short);
         let (rows, cursor) = build(&frame);
         let plain: Vec<String> = rows.iter().map(Line::plain).collect();
-        assert_eq!(plain.len(), 15, "{plain:#?}");
+        assert_eq!(plain.len(), 16, "{plain:#?}");
         assert_eq!(plain[5], "diff line 5");
         assert_eq!(plain[7], "• Working (3s • esc to interrupt)");
         assert_eq!(cursor, Some((3, 11)));

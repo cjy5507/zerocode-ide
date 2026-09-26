@@ -13,6 +13,10 @@ use super::wrap::wrap_line;
 
 const PREVIEW_LINE_LIMIT: usize = 3;
 
+/// The key that pulls the last queued message back into the composer — the
+/// preview's hint and the `?` card both name it.
+pub const EDIT_BINDING: &str = "⌥ + ↑";
+
 /// Inputs which have not become committed user turns yet.
 #[derive(Debug)]
 pub struct PendingInputs {
@@ -32,7 +36,7 @@ impl Default for PendingInputs {
             queued_messages: VecDeque::new(),
             submit_steers_after_interrupt: false,
             interrupt_binding: "esc".to_string(),
-            edit_binding: "⌥ + ↑".to_string(),
+            edit_binding: EDIT_BINDING.to_string(),
         }
     }
 }

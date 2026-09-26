@@ -1062,9 +1062,36 @@ fn scan_history_rows(capture: &[u8]) -> Vec<Vec<u8>> {
 
 /// The offset just past the first `needle` at or after `offset` in
 /// `output` — the resume point for a wait on the next occurrence.
+/// Where `needle` ends after `offset`: as bytes, or else as the words a
+/// person reads — the same text with CSI sequences (SGR) between its letters,
+/// as a bold key beside dim words writes it (`? for shortcuts` on the
+/// footer's second row, t-10232). The byte match wins, so a needle ever
+/// found as bytes is found where it was.
 fn match_end_after(output: &[u8], needle: &[u8], offset: usize) -> Option<usize> {
     let suffix = output.get(offset..)?;
-    find_bytes(suffix, needle).map(|at| offset + at + needle.len())
+    if let Some(at) = find_bytes(suffix, needle) {
+        return Some(offset + at + needle.len());
+    }
+    if needle.contains(&0x1b) {
+        return None;
+    }
+    let mut visible = Vec::with_capacity(suffix.len());
+    let mut ends = Vec::with_capacity(suffix.len());
+    let mut index = 0;
+    while index < suffix.len() {
+        if suffix[index] == 0x1b && suffix.get(index + 1) == Some(&b'[') {
+            index += 2;
+            while index < suffix.len() && !(0x40..=0x7e).contains(&suffix[index]) {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        visible.push(suffix[index]);
+        ends.push(index + 1);
+        index += 1;
+    }
+    find_bytes(&visible, needle).map(|at| offset + ends[at + needle.len() - 1])
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1209,6 +1236,17 @@ mod tests {
         assert!(second_end > first_end);
         assert_eq!(match_end_after(output, b"DONE", output.len()), None);
         assert_eq!(match_end_after(output, b"DONE", output.len() + 1), None);
+    }
+
+    /// A bold key and its dim words are one needle to a person and to a
+    /// wait; the end is the raw offset just past the last letter.
+    #[test]
+    fn a_needle_split_by_sgr_is_found_as_the_words_on_screen() {
+        let output = b"  \x1b[1m?\x1b[22m\x1b[2m for shortcuts\x1b[0m tail";
+        let end = match_end_after(output, b"? for shortcuts", 0).expect("the styled hint");
+        assert_eq!(&output[end - 9..end], b"shortcuts");
+        assert_eq!(match_end_after(output, b"? for shortcuts", end), None);
+        assert_eq!(match_end_after(output, b"? for agents", 0), None);
     }
 
     #[test]

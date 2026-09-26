@@ -27,6 +27,8 @@ fn frame<'a>(composer: &'a Composer, status: Option<&'a Status>) -> Frame<'a> {
         popup: None,
         mention: None,
         shortcuts: None,
+        warnings: None,
+        hints: zo_ide::tui::footer_hints::FooterHints::default(),
         model: "claude-fable-5-1",
         effort: "smart",
         model_note: None,
