@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.1.31] — 2026-09-27
+
+_since v1.1.30 (10 commits)_
+
+### core
+- core(t-10372): the value seat's table gains the two login roads and the road a person chooses
+
+### shell
+- shell(t-10372): Computer Use's generator runs on the logins the window runs its agents with
+
+### tools
+- tools(t-10372): the value probes read no login and speak as no client
+
+### ui
+- ui(t-10372): the Computer Use card chooses the generator's road and says whose login it spends
+
+### other
+- Merge branch 'wt/t-10372/computer-use-oauth-cli-claude-p' (17d16e4f) — Computer Use's generators run on the person's login instead of an API key: the value a walk types into a field and the plan the reflex autopilot writes are asked of the vendor's own CLI once — `claude -p` as the window's active Claude account (the reading road, no credential written) or `codex exec --ephemeral` under the window's managed Codex home, the question on stdin, in an empty folder of its own, with no session kept and the whole process group killed at the wall — and never with a token the window reads or an identity it borrows. Settings › Computer Use chooses the road (`computer_generator_road`: auto, Claude login, Codex login, my API key, off; auto by default, Claude first), names each login's account and model and says the calls count against that plan's limits; passing from one road to the next is written on the walk's row, the plan's row and the card (`passedOver: claude_login=quota_wall`), and when no road can answer the field goes back to the agent with every reason. The probe's borrowed-identity Anthropic road and its Code Assist imitation are gone, and a contract keeps any such line out of the generator's files. Measured with the active account, five one-value calls a road: Claude login p50 2,268 / p90 2,618 ms at 434–468 input tokens (5,010 / 6,112 ms and 17,194 tokens when asked from the repository folder with thinking on), Codex login p50 3,833 / p90 4,903 ms; with no API key on this machine a walk typed a field over the Claude login, and a reflex plan that Claude's haiku got wrong three times was passed to the Codex login, which wrote one the contract took on the first request. Merge resolution: R9's `Generator::source` and this branch's `pass_over` both kept, and R9's stand-in generator and plan test moved onto `Setup`/`Answered` (the bench's key road keeps its row). (t-10372; coordinator review)
+- Merge branch 'wt/t-10343/t-10223-r9-fixture-reflex-py-autopilot-b' (4ab844f5) — the reflex bench runs the autopilot from a goal sentence and says where it fell: `fixture_reflex.py run … --autopilot [goal] [--generator window|stub] [--l1 auto|shadow|off]` has the driver start the window's autopilot (`Autopilot::start`) with bench.json's `reflex_goal`, its ledgers in the bench's own home and the Jev key only in the driver's environment; the oracle gains a tenth check (every plan is the model's) and `tally --reflex` reads the autopilot's own account (roads, applied, not carried out, unanswered, ended, plans) instead of fixed zeroes. Measured on the fixture with nobody at the keyboard, seeds 11·12·13, 60 s each: the hand's plan 201.2/209.5/215.3 actions a minute, the autopilot road with the reflex decision recorded but not applied 207.3/209.2/212.8, both with no wrong input and 15–16 phase changes; with the decision applied the run ended within about a second, because Jev answered `pause` over a reading taken before any target — so a pause over a reading with nothing to press and no press since the last collect is no longer carried out (`why: idle`), after which the runs lasted 4.8–7.1 s at 50–110 a minute, Jev answering `pause` to 172 of 177 readings while the hand was pressing (the question is the next fix). The oracle's floor (0.99) is missed at 0.964–0.982 on both roads by targets that moved before the press. The model-written plan was not measured: no generator road stood on this machine (t-10372 lands next). (t-10343, round R9 of t-10223; coordinator review)
+- reflex autopilot: a pause about a hand with nothing to stop is not carried out (t-10343)
+- reflex bench: a run the helper forgot is what it last said (t-10343)
+- reflex bench: a goal in place of a plan — the autopilot's road on the fixture (t-10343, R9 of t-10223)
+
 ## [1.1.30] — 2026-09-26
 
 _since v1.1.29 (9 commits)_
