@@ -498,14 +498,15 @@ struct Replay {
     spec: String,
 }
 
-/// Which arm the replay asks under, named by what the options carry.
+/// Which arm the replay asks under, named by what each offered agent's entry
+/// in the state carries (its option's words until t-9469).
 const ARM_ENV: &str = "ZEROCODE_SUMMON_REPLAY_ARM";
 /// Where the seed is.
 const SEED_ENV: &str = "ZEROCODE_SUMMON_REPLAY_SEED";
-/// The arm whose options carry the quota gauge and nothing else — the
-/// evidence the rubric had before this one.
+/// The arm whose entries carry the quota gauge and no record — the evidence
+/// the rubric had before the record was added.
 const ARM_ROOM: &str = "room";
-/// The arm whose options carry this ledger's record as well.
+/// The arm whose entries carry this ledger's record as well.
 const ARM_RECORD: &str = "record";
 /// How many times each row is asked.
 ///
@@ -517,7 +518,7 @@ const ARM_RECORD: &str = "record";
 const RUNS_ENV: &str = "ZEROCODE_SUMMON_REPLAY_RUNS";
 /// How many times a row is asked when nobody says.
 const RUNS_DEFAULT: usize = 3;
-/// Which quota gauge the replayed options carry.
+/// Which quota gauge the replayed entries carry.
 ///
 /// The gauge is the strongest term in the question and the one the rows do
 /// not record, so a replay reads it from a cache that keeps moving: across
@@ -525,7 +526,7 @@ const RUNS_DEFAULT: usize = 3;
 /// judgment correctly refuses the very agent that is the label on 40 of 54
 /// rows. Every arm-to-arm difference measured against a live gauge is that
 /// number's and not the rubric's. `seed` carries what the seed captured;
-/// `unread` holds every option at "no gauge read", which is a state the
+/// `unread` holds every entry at "no gauge read", which is a state the
 /// product really has, is identical for every option and every arm, and
 /// leaves the record as the only thing that differs between arms. Rows
 /// written from now on carry their own gauge ([`offered`]), which is what
