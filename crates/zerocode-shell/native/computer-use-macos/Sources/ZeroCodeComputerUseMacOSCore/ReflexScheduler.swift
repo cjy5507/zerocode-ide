@@ -808,7 +808,7 @@ public final class ReflexReceipts: @unchecked Sendable {
 /// The old hand and two current aiming strategies for a paired benchmark.
 public enum ReflexPressAim: String, Sendable {
     case resting, latest, predicted
-    public static let production: Self = .latest
+    public static let production: Self = .predicted
 }
 
 /// Runs one leaf action on the hand (realtime v1 §5.4): one admission for the
