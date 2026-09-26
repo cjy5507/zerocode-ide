@@ -298,9 +298,10 @@ pub(super) struct FakeWorld {
     /// What the page shows the moment the press is made, when that is not
     /// what it settles on (a late result, a page still moving).
     pub(super) unsettled_items: Option<Vec<Value>>,
-    /// Whether the page the press left still shows what it showed before the
-    /// press — a result a fetch renders after the press answered — so each
-    /// press sets `unsettled_items` to the page it was made on.
+    /// Whether the page, the moment the press is made, still shows what it
+    /// showed before the press — a result a fetch renders after the press
+    /// answered — so each press sets `unsettled_items` to the page it was
+    /// made on.
     pub(super) unsettled_lags: bool,
     /// How long waiting for that settle holds the walk — what a judgment
     /// begun on the page the press changed runs behind.
@@ -456,8 +457,9 @@ impl World for FakeWorld {
         {
             screen.items.clone_from(leads_to);
         }
-        // The door's own rule (t-9876): the page the press left still reads
-        // the legend it was made on, so its settle ends before it answers.
+        // The door's own rule (t-9876): the page, the moment the press is
+        // made, still reads the legend it was made on, so its settle ends
+        // before it answers.
         if self.settles_a_still_legend && self.settling {
             let left = self
                 .unsettled_items
@@ -2088,7 +2090,7 @@ fn a_page_that_settles_later(world: FakeWorld, note: Value) -> FakeWorld {
 }
 
 /// A page's press that answers before it settles (t-9712): the next question
-/// is begun on the page the press left, the settle is waited for behind it,
+/// is begun on the page the press changed, the settle is waited for behind it,
 /// and when the settled page asks the very same question its answer is used.
 /// Every press's row says how its page settled, in the door's own words.
 #[test]
@@ -2140,7 +2142,7 @@ fn a_page_press_that_settles_later_is_judged_on_the_page_it_left_behind_its_sett
 
 /// A settle that did not end `ready` — a page still moving at the wall,
 /// another document, a settle nobody heard end — cancels the judgment begun
-/// on the page the press left: its answer is never used, the next row says
+/// on the page the press changed: its answer is never used, the next row says
 /// it was cancelled, and the page is asked in turn once it is looked at again.
 #[test]
 fn a_settle_that_did_not_end_ready_cancels_the_judgment_begun_on_the_page_and_asks_again() {
@@ -2165,7 +2167,7 @@ fn a_settle_that_did_not_end_ready_cancels_the_judgment_begun_on_the_page_and_as
         assert_eq!(
             judge.begun.len(),
             1,
-            "begun on the page the first press left: {note}"
+            "begun on the page the first press changed: {note}"
         );
         assert_eq!(
             judge.finished, 0,
@@ -2439,7 +2441,7 @@ fn every_press_that_settles_later_is_settled_but_only_a_walk_that_asks_ahead_beg
 /// judgments take the wire's time and whose every press changes the page,
 /// the settle held inside the press as v1.1.27 holds it (the judgment begun
 /// before the press asks about a page the press then changes) against the
-/// settle waited for behind the judgment begun on the page the press left.
+/// settle waited for behind the judgment begun on the page the press changed.
 /// Printed, and held on the count: every judgment after the first was used,
 /// and each ran behind a whole settle.
 #[test]
@@ -2493,7 +2495,7 @@ fn a_settle_waited_for_behind_the_next_judgment_is_hidden_from_the_walk() {
     assert_eq!(held_asks, 2 * STEPS - 1);
     assert_eq!(
         later_asks, STEPS,
-        "asking on the page the press left asks no more"
+        "asking on the page the press changed asks no more"
     );
     let hidden: Vec<u64> = later
         .rows

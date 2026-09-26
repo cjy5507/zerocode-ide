@@ -405,7 +405,7 @@ fn a_settled_press_that_counted_the_words_ends_the_walk_without_a_look() {
 /// A press asked for a preview (a walk asking ahead, t-6385) hands back the
 /// screen it settled on, numbered as a look of it would be; a phone's world
 /// never asks ahead of its press, and neither does a page's that asks ahead
-/// (t-9712): it asks on the page its press left. A window's still does.
+/// (t-9712): it asks on the page its press changed. A window's still does.
 #[test]
 fn a_press_asked_for_a_preview_hands_back_the_screen_it_settled_on() {
     let road = Road::new(|verb| match verb {
@@ -1316,7 +1316,7 @@ fn words(line: &[&str]) -> Vec<String> {
 }
 
 /// A page walk that asks ahead presses with `--settle-later` (t-9712): the
-/// press hands back the page it left — at the walk's own address — once;
+/// press hands back the page it changed — at the walk's own address — once;
 /// the pane's next look finishes the settle and says how, before the reach
 /// check reads the page; and a page that settled is not read a third time:
 /// its look is the next step's.
@@ -1333,11 +1333,11 @@ fn a_page_press_that_settles_later_hands_back_the_page_it_left_and_its_next_look
     let mut world = a_pane_walk(&mut road, true);
     assert!(
         !world.asks_ahead_of_the_press(),
-        "a page that settles later asks on the page its press left"
+        "a page that settles later asks on the page its press changed"
     );
     world.look().expect("the first look");
     assert!(world.press(1));
-    let left = world.unsettled().expect("the page the press left");
+    let left = world.unsettled().expect("the page the press changed");
     assert_eq!(
         left.at,
         Seen::Page {

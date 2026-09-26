@@ -5964,8 +5964,9 @@ pub(super) async fn answer_browser_command(
         // `click <label> <css>` presses the first element a selector names;
         // `click <label> --mark <n>` presses the control numbered n on the
         // pane's last `marks`, pinned so a moved or changed control is refused;
-        // `--settle-later` answers at once with the page the press left, its
-        // settle finished by the pane's next `marks` (t-9712).
+        // `--settle-later` answers at once with the page the press changed, its
+        // settle finished by the pane's next `marks` (t-9712) — a press that
+        // left the legend as it was settles first, as a plain one does (t-9876).
         ("click", 3) | ("click", 4) | ("click", 5) => {
             use zerocode_core::agent_browser::ClickTarget;
             let pressed = match zerocode_core::agent_browser::parse_click(argv) {
