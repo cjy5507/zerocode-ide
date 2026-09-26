@@ -173,7 +173,9 @@ pub struct ComputerPermissionRow {
 #[serde(rename_all = "kebab-case")]
 pub enum ComputerPermissionGrant {
     /// Allowed under a requirement the bundle satisfies as it is signed now —
-    /// or macOS itself answered granted for the process this row judges.
+    /// or macOS itself answered granted for the process this row judges — or
+    /// allowed by a row that records no requirement, which TCC matches by the
+    /// client's identifier alone ([`COMPUTER_PERMISSION_GRANTS`]).
     Granted,
     /// Allowed, but under a requirement the bundle no longer satisfies: an
     /// older build's signature. Only removing the row and adding the app
@@ -232,7 +234,10 @@ pub enum ComputerPermissionRowAction {
 /// it is the one grant that removing the row repairs, and a reset from any
 /// other row would take away a grant that works or change nothing. The
 /// window's words for each grant are the catalog's, one entry per row here
-/// (a source contract holds the two together).
+/// (a source contract holds the two together). A row that records no
+/// requirement (an empty `csreq`) reads granted: TCC matches it by the
+/// client's identifier — bundle id or path — alone, with no signature to
+/// check, so no build ever makes it stale.
 pub const COMPUTER_PERMISSION_GRANTS: [(ComputerPermissionGrant, &[ComputerPermissionRowAction]);
     4] = [
     (ComputerPermissionGrant::Granted, &[]),

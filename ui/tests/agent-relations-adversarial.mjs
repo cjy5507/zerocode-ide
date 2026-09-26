@@ -85,6 +85,10 @@ export function relationsFixture() {
     merge: [],
   };
   paneActivities.set("term:202", [{ at: now - 5_000, activity: { verb: "edit", target: "src/auth/session.rs", phase: "started" } }]);
+  /* 이 사례들이 누르고 재는 것은 카드 그림이다. 관계 탭은 행성계로 열리고(t-9444) 그 판은
+   * 카드 그림을 접어 아무것도 그리지 않으므로(t-9532) 탭의 토글로 카드를 먼저 고른다 —
+   * 토글이 없는 옛 트리(기준 사본)에서는 건너뛴다. */
+  if (typeof setAgentOrbitChoice === "function") setAgentOrbitChoice(document.getElementById("board-view"), "cards");
   agentBoardMode = "graph";
   agentGraphSelectedKey = null;
   agentGraphOverlayMode = "none";

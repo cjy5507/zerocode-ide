@@ -14,6 +14,9 @@ export async function exercisePermissionCard() {
   const seen = {};
   deny(); await settle();
   seen.shown = !card().hidden;
+  // t-9719: the card's line is the palette's rule — the pixel its literal drew.
+  seen.ruledByTheToken = getComputedStyle(card()).borderTopWidth === "1px"
+    && getComputedStyle(document.documentElement).getPropertyValue("--rule-width").trim() === "1px";
   el("computer-permission-recovery-close").click(); await settle();
   seen.closed = card().hidden;
   const probesAtClose = probes;
@@ -40,6 +43,7 @@ export async function testPermissionCard(browser, origin, ok) {
       seen.shown && seen.closed && seen.retriesDoNotProbe && seen.staysDownForTheSameRow && seen.returnsForAnotherRow && seen.clearsWhenGranted,
       JSON.stringify(seen),
     );
+    ok("the permission card draws its line with the palette's rule, the pixel it drew before", seen.ruledByTheToken, JSON.stringify(seen));
     ok("the permission card raised no renderer errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
 }

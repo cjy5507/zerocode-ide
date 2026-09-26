@@ -13,7 +13,7 @@ use zerocode_core::computer_use::{
     COMPUTER_PERMISSION_GRANTS, ComputerPermissionRowAction, ComputerPermissionUnreadable,
 };
 
-use super::support::{block_after, strip_rust_comments, window_source};
+use super::support::{block_after, strip_comments, strip_rust_comments, window_source};
 
 fn shell_source(name: &str) -> String {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -100,10 +100,45 @@ fn the_tcc_rows_words_are_one_sentence_per_word_the_core_can_say() {
     }
 }
 
+/// Every rule of `styles` with a selector that opens with one of `prefixes`,
+/// as (selectors, body) — innermost rules only, read the way
+/// `a_state_change_is_eased_not_snapped` reads the sheet. Chosen by name, not
+/// by line: the router's table is the next rule down and has pixels of its
+/// own to answer for.
+fn rules_named<'a>(styles: &'a str, prefixes: &[&str]) -> Vec<(&'a str, &'a str)> {
+    let mut rules = Vec::new();
+    let mut opened: Vec<&str> = Vec::new();
+    let mut from = 0;
+    for (at, glyph) in styles.char_indices() {
+        match glyph {
+            '{' => {
+                opened.push(styles[from..at].trim());
+                from = at + 1;
+            }
+            '}' => {
+                let body = styles[from..at].trim();
+                from = at + 1;
+                if let Some(selectors) = opened.pop()
+                    && !body.is_empty()
+                    && selectors
+                        .split(',')
+                        .any(|one| prefixes.iter().any(|prefix| one.trim().starts_with(prefix)))
+                {
+                    rules.push((selectors, body));
+                }
+            }
+            _ => {}
+        }
+    }
+    rules
+}
+
 /// The card paints what the backend read: a row's buttons are the ones the
 /// row carries (`row.actions`, the core table's), and nothing in the window
 /// decides a grant or a button by the grant's name — so no row but a stale
-/// one can ever show a reset.
+/// one can ever show a reset. And it paints in the palette's measures: every
+/// rule named for the rows or the permission cards draws its lines and
+/// corners from tokens, never a pixel of its own (t-9719).
 #[test]
 fn a_tcc_rows_buttons_are_the_ones_the_row_carries() {
     let window = window_source();
@@ -131,6 +166,38 @@ fn a_tcc_rows_buttons_are_the_ones_the_row_carries() {
         main.contains("            computer_use_tcc_row_action,"),
         "the Tauri handler does not expose the row's door"
     );
+
+    let styles = strip_comments(include_str!("../../../../ui/shell.css"));
+    let card = rules_named(&styles, &[".computer-use-tcc-", ".computer-permission-"]);
+    for (rule, tokens) in [
+        (
+            ".computer-use-tcc-judged",
+            &["var(--rule-width)", "var(--radius-pill)"][..],
+        ),
+        (".computer-permission-recovery", &["var(--rule-width)"][..]),
+    ] {
+        let (_, body) = card
+            .iter()
+            .find(|(selectors, _)| *selectors == rule)
+            .unwrap_or_else(|| panic!("`{rule}` is gone from ui/shell.css"));
+        for token in tokens {
+            assert!(
+                body.contains(token),
+                "`{rule}` no longer reads `{token}`:\n{body}"
+            );
+        }
+    }
+    for (selectors, body) in &card {
+        let pixel = body
+            .match_indices("px")
+            .any(|(at, _)| at > 0 && body.as_bytes()[at - 1].is_ascii_digit());
+        assert!(
+            !pixel,
+            "`{selectors}` measures with a pixel of its own — the card's lines, \
+             corners and gaps are the palette's (`--rule-width`, `--radius-*`, \
+             `--space-*`):\n{body}"
+        );
+    }
 }
 
 /// The database is read by one statement, bound to the service and one of

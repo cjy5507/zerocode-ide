@@ -165,7 +165,9 @@ pub(super) fn verdict(
 /// An allowing row's recorded requirement, held against `bundle`.
 fn allows(requirement: Option<&[u8]>, bundle: Option<&Path>) -> RowRead {
     let Some(blob) = requirement else {
-        // A row that records no requirement binds its grant to no build.
+        // TCC matches a row that records no requirement by the client's
+        // identifier alone — no signature is checked, so no build makes it
+        // stale (`COMPUTER_PERMISSION_GRANTS`).
         return RowRead::Allows {
             pin: None,
             satisfied: true,
@@ -472,14 +474,25 @@ mod tests {
                 RowRead::Unreadable(ComputerPermissionUnreadable::Signature)
             );
         }
-        // A row that records no requirement binds its grant to no build.
-        assert_eq!(
-            allows(None, None),
-            RowRead::Allows {
-                pin: None,
-                satisfied: true,
-            }
-        );
+    }
+
+    /// A row that records no requirement is TCC's to match by the client's
+    /// identifier alone: no signature is checked, so it allows this build, a
+    /// bundle that is not there and no bundle at all, and pins none.
+    #[test]
+    fn a_row_without_a_requirement_is_matched_by_its_identifier_alone_so_no_build_is_stale() {
+        let build = this_build();
+        let missing = Path::new("/nonexistent/ZeroCode.app");
+        for bundle in [Some(build.as_path()), Some(missing), None] {
+            assert_eq!(
+                allows(None, bundle),
+                RowRead::Allows {
+                    pin: None,
+                    satisfied: true,
+                },
+                "{bundle:?}"
+            );
+        }
     }
 
     /// Every cell of the verdict: macOS's answer for the judged row first,

@@ -41047,7 +41047,11 @@ const popoutLive = await popoutPage.evaluate(async (columns) => {
   await new Promise((done) => setTimeout(done, 200));
   return {
     reasked: (window.__COUNTS__.board_snapshot ?? 0) - before,
-    agents: document.querySelectorAll("#board-view .agent-graph-node.is-agent").length,
+    // The agents the standing picture draws — the pop-out opens on the orbit
+    // (t-9444), whose folded card picture draws nothing (t-9532).
+    agents: document.querySelectorAll(agentOrbitShowing(document.getElementById("board-view"))
+      ? '#board-view .agent-orbit [data-orbit-key^="agent:"]'
+      : "#board-view .agent-graph-node.is-agent").length,
     badge: window.__COUNTS__.set_dock_badge ?? 0,
   };
 }, POPOUT_COLUMNS);

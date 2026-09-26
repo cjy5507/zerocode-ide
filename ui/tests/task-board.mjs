@@ -226,7 +226,13 @@ export async function testTaskBoard(browser, origin, ok) {
     await page.evaluate(() => applyTheme("light"));
     await page.screenshot({ path: "output/playwright/task-board/light-1440.png" });
     await page.click('[data-board-mode="graph"]');
-    ok("the relations view remains available", await page.locator(".agent-graph-surface").isVisible() && await page.locator(".agent-graph-node.is-agent").count() > 0);
+    // The agents the standing picture draws: the orbit's planets, or the cards'
+    // nodes — the folded card picture draws nothing while the orbit shows (t-9532).
+    ok("the relations view remains available", await page.locator(".agent-graph-surface").isVisible() && await page.evaluate(() => {
+      const view = document.getElementById("board-view");
+      return view.querySelectorAll(agentOrbitShowing(view)
+        ? '.agent-orbit [data-orbit-key^="agent:"]' : ".agent-graph-node.is-agent").length;
+    }) > 0);
     await page.click('[data-board-mode="tasks"]');
     ok("returning to tasks preserves the task list", await page.locator(".task-board-row").count() === 5);
     ok("task board raises no browser errors", faults.length === 0, faults.join("\n"));

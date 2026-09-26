@@ -5130,7 +5130,7 @@ function agentGraphRelationDetail(view, relation, model) {
     /* 「미확인 0」은 전달도 확인도 답장도 증명하지 않는다 (t-7288). 이 판에
      * 오는 것은 미확인 목록 하나뿐이므로, 나머지는 **모른다고 적는다** — 그
      * 문장은 장부의 한 표에서 온다(`AGENT_GRAPH_LIVE_UNKNOWN`). */
-    if (agentGraphLiveOn()) {
+    if (agentGraphLiveDrawn(view)) {
       for (const id of ["delivery", "reply"]) {
         facts.append(taskBoardElement("p", "agent-relation-note", agentGraphLiveUnknownWord(id)));
       }
@@ -5318,7 +5318,7 @@ function paintAgentGraphInspector(view, model) {
       /* 실시간 사건 목록도 이 탭이 그리므로 서명에 든다 (t-7288) — 사건의 키와
        * 나이 낱말, 그리고 사람이 편 줄과 그 근거가 지금 어디에 있는가. 나이를
        * 빼면 시계의 박자가 와도 목록만 옛 나이에 굳는다. */
-      agentGraphLiveOn() ? agentGraphLiveEventsSaid(view) : null]);
+      agentGraphLiveDrawn(view) ? agentGraphLiveEventsSaid(view) : null]);
     if (parts.stamps.relations !== signature) {
       parts.stamps.relations = signature;
       const nodes = relation ? [agentGraphRelationDetail(view, relation, inspection)]
@@ -5327,7 +5327,7 @@ function paintAgentGraphInspector(view, model) {
        * 서므로, 머리에 두면 사람이 방금 누른 선의 메시지 ID 가 그 아래로 밀려
        * 화면 밖에 선다 — 누른 이유가 보이지 않는 인스펙터가 된다. 고른 것이
        * 없을 때만 목록이 머리에 선다. */
-      if (agentGraphLiveOn()) {
+      if (agentGraphLiveDrawn(view)) {
         if (relation) nodes.push(agentGraphLiveEventsNode(view));
         else nodes.unshift(agentGraphLiveEventsNode(view));
       }
@@ -5348,8 +5348,10 @@ function paintAgentGraphInspector(view, model) {
     }
   }
   if (agentGraphInspectorTab === "details") {
+    /* 지도가 서는가도 서명에 든다 — 아래 「누가 불렀는지 모른다」 줄은 지도의 것이라, 손잡이를
+     * 켜고 끄거나 행성계와 카드를 오갈 때 이 탭도 다시 그린다 (t-9532). */
     const signature = JSON.stringify([locale, subject?.key, subject?.label, subject?.project?.label,
-      subject?.workspace?.label, subject?.facts.model, subject?.place, subject?.review]);
+      subject?.workspace?.label, subject?.facts.model, subject?.place, subject?.review, agentGraphLiveDrawn(view)]);
     if (parts.stamps.details !== signature) {
       parts.stamps.details = signature;
       const nodes = subject ? [
@@ -5368,7 +5370,7 @@ function paintAgentGraphInspector(view, model) {
        * (t-7288): `WorkerRow.started_by`가 이 판에 오지 않으므로, 부모가
        * 없다는 뜻이 아니라 모른다는 뜻이다. 빈칸으로 두면 「아무도 부르지
        * 않았다」로 읽힌다. */
-      if (agentGraphLiveOn() && subject && !subject.card.parent
+      if (agentGraphLiveDrawn(view) && subject && !subject.card.parent
           && subject.card.pane.startsWith("worker:")) {
         nodes.push(taskBoardElement("p", "agent-relation-note", agentGraphLiveUnknownWord("summoner")));
       }
@@ -6302,7 +6304,9 @@ function paintAgentGraphEdgeTargets(view, measured, frame) {
 function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
   const model = agentGraphModels.get(view);
   const canvas = view.querySelector(".agent-graph-canvas");
-  if (!model || view.hidden || !canvas.isConnected) return;
+  /* 행성계가 선 판의 간선은 접힌 카드 판에 있다 — 재지도 쓰지도 않는다 (t-9532). 크기 관찰자·
+   * 배율·상세도가 예약한 박자도 여기서 멎고, 카드로 돌아온 판의 관찰자가 다시 부른다. */
+  if (!model || view.hidden || agentOrbitShowing(view) || !canvas.isConnected) return;
   const svg = canvas.querySelector(".agent-graph-edges");
   let geometry = agentGraphEdgeMeasurements.get(view);
   const current = geometry && geometry.signature === model.topologySignature
@@ -7151,6 +7155,85 @@ function paintAgentGraph(view, model) {
     || view.dataset.graphSelectedEdge !== (agentGraphSelectedEdgeKey ?? "");
   view.dataset.graphSelected = agentGraphSelectedKey ?? "";
   view.dataset.graphSelectedEdge = agentGraphSelectedEdgeKey ?? "";
+  /* 그림이 없으면 그림에 딸린 것도 서지 않는다. 없는 선의 범례와 없는 그림의
+   * 배율은 "아직 아무도 시작하지 않았다"를 "무언가 고장 났다"로 읽히게 하는 두
+   * 상자였다 — 빈 판에서 사람이 읽을 것은 한 문장이면 된다. */
+  const drawnNothing = model.bands.length === 0;
+  view.querySelector(".agent-graph-surface").classList.toggle("is-empty", drawnNothing);
+  /* 행성계가 선 판은 카드 그림을 접어 둔다 (t-9444). */
+  const cardsFolded = agentOrbitShowing(view);
+
+  const run = view.querySelector(".agent-graph-run");
+  if (run) {
+    writeTextContent(run.querySelector(".agent-graph-run-count"), String(model.runCount));
+  }
+
+  for (const button of view.querySelectorAll("[data-graph-bucket]")) {
+    const bucket = button.dataset.graphBucket;
+    const count = model.counts.get(bucket) ?? 0;
+    writeTextContent(button.querySelector("[data-graph-count]"), String(count));
+    button.disabled = count === 0;
+    if (!button.onclick) button.onclick = () => pickAgentGraphBucket(view, bucket);
+  }
+  for (const button of view.querySelectorAll("[data-graph-overlay]")) {
+    const active = button.dataset.graphOverlay === agentGraphOverlayMode;
+    writeAttribute(button, "aria-pressed", String(active));
+    button.classList.toggle("is-active", active);
+    if (!button.onclick) {
+      button.onclick = () => agentGraphSetOverlay(view, button.dataset.graphOverlay);
+    }
+  }
+  const follow = view.querySelector(".agent-graph-follow");
+  if (follow) {
+    writeAttribute(follow, "aria-pressed", String(agentGraphFollowing));
+    follow.classList.toggle("is-active", agentGraphFollowing);
+    if (!follow.onclick) {
+      follow.onclick = () => {
+        agentGraphFollowing = !agentGraphFollowing;
+        paintAgentGraph(view, agentGraphModels.get(view));
+      };
+    }
+  }
+  /* 실시간 조율 지도의 손잡이 (t-7288). 세 번째 모드가 아니라 이 그림 위의
+   * 켜고 끄기다 — 작업 목록은 보드의 기본값 그대로이고, 끈 판은 지금까지의
+   * 관계 그림 그대로다. 켜는 판은 **조용히** 선다(`setAgentGraphLive`).
+   *
+   * 지도는 카드 그림 위의 것이다 (t-9532). 행성계가 선 판에서 손잡이는 켜 둔 그대로
+   * 눌린 채 누를 수 없고 — `aria-disabled`라 초점과 손은 받는다 — 팁과 이름이 지도가
+   * 카드 보기에서만 보인다고 말한다. 카드로 돌아오면 같은 손잡이가 그대로 선다. */
+  const liveButton = view.querySelector(".agent-graph-live");
+  if (liveButton) {
+    const key = cardsFolded ? "board.orbit.liveInCards" : "board.live.title";
+    const words = cardsFolded ? t("board.orbit.liveInCards", "실시간 조율은 카드 보기에서만 보입니다")
+      : t("board.live.title", "실시간 조율");
+    writeAttribute(liveButton, "aria-pressed", String(agentGraphLiveOn()));
+    liveButton.classList.toggle("is-active", agentGraphLiveOn());
+    writeAttribute(liveButton, "aria-disabled", String(cardsFolded));
+    writeAttribute(liveButton, "data-i18n-title", key);
+    writeAttribute(liveButton, "data-tip", words);
+    writeAttribute(liveButton, "data-i18n-aria", key);
+    writeAttribute(liveButton, "aria-label", words);
+    if (!liveButton.onclick) {
+      liveButton.onclick = () => {
+        if (agentOrbitShowing(view)) return;
+        setAgentGraphLive(view, !agentGraphLiveOn());
+        void paintBoardView(undefined, { force: true });
+      };
+    }
+  }
+  paintAgentGraphInspector(view, model);
+  wireAgentGraphCanvas(view);
+  applyAgentGraphZoom(view, { remeasure: false });
+  /* 행성계는 이 판이 그린 그 모델을 읽는다 — 서명이 움직인 판에서만 적용한다. */
+  paintAgentOrbit(view, model);
+  /* 접힌 카드 그림에는 아무것도 쓰지 않는다 (t-9532) — 아래의 격자·레인·띠·노드·빈 문장·
+   * 박자·간선·맞춤 모두. 행성계가 기본인 판에서 이것들은 아무도 보지 못할 격자에 쓰였다
+   * (실측, 에이전트 12의 판: 같은 판마다 변이 4, 카드 하나가 끝나면 27, 새 에이전트면 37에
+   * 노드 하나를 짓고 간선을 한 번 잼). 건너뛴 갱신은 잃지 않는다: 카드로 돌아온 첫 판이
+   * 모델 전체로 노드를 맞추고(노드는 위상이 그대로인 판에서도 판마다 맞춘다), 접혔던 판이
+   * 제 크기를 되찾는 순간 크기 관찰자(`watchAgentGraphSize`)가 간선과 맞춤을 한 번 부른다.
+   * 모델(`agentGraphModels`)은 두 보기와 인스펙터가 함께 읽으므로 위에서 판마다 적는다. */
+  if (cardsFolded) return;
   const nodesHost = view.querySelector(".agent-graph-nodes");
   const agentLayers = Math.max(1, model.maxDepth + 1);
   /* 층의 수를 격자에 적어 둔다 (round three). 에이전트 레인의 폭은 실측 폭과
@@ -7224,64 +7307,12 @@ function paintAgentGraph(view, model) {
     }
   }
   reconcileElementOrder(nodesHost, wanted);
-  /* 그림이 없으면 그림에 딸린 것도 서지 않는다. 없는 선의 범례와 없는 그림의
-   * 배율은 "아직 아무도 시작하지 않았다"를 "무언가 고장 났다"로 읽히게 하는 두
-   * 상자였다 — 빈 판에서 사람이 읽을 것은 한 문장이면 된다. */
-  const drawnNothing = model.bands.length === 0;
   const empty = view.querySelector(".agent-graph-empty");
   empty.hidden = !drawnNothing;
   writeAttribute(empty, "data-i18n", agentGraphScopeKey ? "board.graph.scopeEmpty" : "board.graph.empty");
   writeTextContent(empty, agentGraphScopeKey
     ? t("board.graph.scopeEmpty", "이 범위에 표시할 실행이 없습니다. 전체 실행에서 다른 작업을 확인하세요.")
     : t("board.graph.empty", "표시할 활성 에이전트가 없습니다."));
-  view.querySelector(".agent-graph-surface").classList.toggle("is-empty", drawnNothing);
-
-  const run = view.querySelector(".agent-graph-run");
-  if (run) {
-    writeTextContent(run.querySelector(".agent-graph-run-count"), String(model.runCount));
-  }
-
-  for (const button of view.querySelectorAll("[data-graph-bucket]")) {
-    const bucket = button.dataset.graphBucket;
-    const count = model.counts.get(bucket) ?? 0;
-    writeTextContent(button.querySelector("[data-graph-count]"), String(count));
-    button.disabled = count === 0;
-    if (!button.onclick) button.onclick = () => pickAgentGraphBucket(view, bucket);
-  }
-  for (const button of view.querySelectorAll("[data-graph-overlay]")) {
-    const active = button.dataset.graphOverlay === agentGraphOverlayMode;
-    writeAttribute(button, "aria-pressed", String(active));
-    button.classList.toggle("is-active", active);
-    if (!button.onclick) {
-      button.onclick = () => agentGraphSetOverlay(view, button.dataset.graphOverlay);
-    }
-  }
-  const follow = view.querySelector(".agent-graph-follow");
-  if (follow) {
-    writeAttribute(follow, "aria-pressed", String(agentGraphFollowing));
-    follow.classList.toggle("is-active", agentGraphFollowing);
-    if (!follow.onclick) {
-      follow.onclick = () => {
-        agentGraphFollowing = !agentGraphFollowing;
-        paintAgentGraph(view, agentGraphModels.get(view));
-      };
-    }
-  }
-  /* 실시간 조율 지도의 손잡이 (t-7288). 세 번째 모드가 아니라 이 그림 위의
-   * 켜고 끄기다 — 작업 목록은 보드의 기본값 그대로이고, 끈 판은 지금까지의
-   * 관계 그림 그대로다. 켜는 판은 **조용히** 선다(`setAgentGraphLive`). */
-  const liveButton = view.querySelector(".agent-graph-live");
-  if (liveButton) {
-    writeAttribute(liveButton, "aria-pressed", String(agentGraphLiveOn()));
-    liveButton.classList.toggle("is-active", agentGraphLiveOn());
-    if (!liveButton.onclick) {
-      liveButton.onclick = () => {
-        setAgentGraphLive(view, !agentGraphLiveOn());
-        void paintBoardView(undefined, { force: true });
-      };
-    }
-  }
-  paintAgentGraphInspector(view, model);
   /* 맥박을 노드에 다시 얹는다 (t-7288).
    *
    * 장부는 사건을 본 그 자리에서 한 번 얹지만, 그 판이 **처음 서는 카드**의
@@ -7291,11 +7322,7 @@ function paintAgentGraph(view, model) {
    * 하나뿐이고 값이 같으면 쓰지 않으므로, 조용한 판에서 이 줄의 값은 0이다. */
   dressAgentGraphLive(view);
   watchAgentGraphSize(view);
-  wireAgentGraphCanvas(view);
   wireAgentGraphKeys(view);
-  applyAgentGraphZoom(view, { remeasure: false });
-  /* 행성계는 이 판이 그린 그 모델을 읽는다 — 서명이 움직인 판에서만 적용한다. */
-  paintAgentOrbit(view, model);
   if (topologyMoved) scheduleAgentGraphFit(view);
   if (topologyMoved || dressMoved) scheduleAgentGraphEdges(view);
   else if (selectionMoved || overlayMoved) paintAgentGraphEdges(view, { styleOnly: true });

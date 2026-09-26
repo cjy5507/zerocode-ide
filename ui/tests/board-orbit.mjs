@@ -14,6 +14,10 @@
  *   ④ 움직임을 줄이라는 판에서는 정지 화면이다 — 상태가 바뀔 때만 한 장 다시 그린다.
  *   ⑤ 상태 적용은 행성계가 쓰는 사실이 바뀔 때만이다(갱신 호출 수로 단언).
  *   ⑥ 행성을 누르면 기존 선택 길로 인스펙터가 선다; 검색·범위·배율이 그대로 먹는다.
+ *   ⑦ 행성계가 선 동안 접힌 카드 그림에는 아무것도 쓰지 않는다 — 카드로 돌아온 첫 판이
+ *      그 사이의 갱신을 빠짐없이 그리고 맞춤은 한 번 돈다 (t-9532).
+ *   ⑧ 실시간 지도는 카드 그림 위의 것이다 — 행성계에서 그 손잡이는 누를 수 없는 채로
+ *      까닭을 말하고, 지도는 적지도 뛰지도 않는다; 카드로 돌아오면 그대로 선다 (t-9532).
  *
  *   node ui/tests/board-orbit.mjs                     기능 시험 + 무게 표(Chromium)
  *   node ui/tests/board-orbit.mjs --perf --engine webkit --json out.json
@@ -169,6 +173,8 @@ export async function testBoardOrbit(browser, origin, ok) {
     ["gates", () => testOrbitGates(browser, origin, ok)],
     ["stillness", () => testOrbitStillness(browser, origin, ok)],
     ["memory", () => testOrbitRemembered(browser, origin, ok)],
+    ["cards", () => testOrbitLeavesTheCardsAlone(browser, origin, ok)],
+    ["live", () => testOrbitLiveMap(browser, origin, ok)],
   ];
   for (const [name, part] of parts) {
     try {
@@ -526,6 +532,195 @@ async function testOrbitRemembered(browser, origin, ok) {
     ok("a reopened window stands on the saved view", reopened.choice === "cards" && reopened.stage === true
       && reopened.pressed === "true", JSON.stringify(reopened));
     ok("the remembered page raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* ⑦ 행성계가 선 동안 접힌 카드 그림에는 아무것도 쓰지 않는다. 같은 판 세 번, 카드 하나가
+ * 끝난 판, 새 에이전트가 온 판 — 카드 판(`.agent-graph-scroll`) 아래의 변이가 0이고, 카드
+ * 노드를 짓지도 간선을 재지도 않는다. 보는 자리가 카드 판뿐인 것은 행성계가 제 캔버스와
+ * 라벨을 프레임마다 쓰기 때문이다. 모델의 배치(`agentGraphLayoutRuns`)는 행성계도 읽는 모델
+ * 안의 셈이라 수만 적는다.
+ *
+ * 그리고 카드로 돌아온 첫 판이 건너뛴 갱신을 한 번에 그린다: 노드가 모델과 같고(끝난 카드는
+ * 끝난 옷, 새 에이전트는 제 노드), 간선은 새로 재도 같은 자리이며, 맞춤은 한 번 돈다. */
+async function testOrbitLeavesTheCardsAlone(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    /* 무게를 재는 판과 같은 폭 — 하네스의 기본 폭에서 카드 판은 목록 티어(맞춤이 없다)다. */
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await openOrbit(page);
+    const folded = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      let changes = 0;
+      const watch = new MutationObserver((records) => { changes += records.length; });
+      watch.observe(view.querySelector(".agent-graph-scroll"),
+        { subtree: true, childList: true, attributes: true, characterData: true });
+      const counts = () => [agentGraphNodeCreations, agentGraphEdgeMeasureRuns, agentGraphLayoutRuns];
+      const before = counts();
+      const paint = async () => {
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        await window.__ORBIT_FRAMES__(3);
+      };
+      for (let at = 0; at < 3; at += 1) await paint();
+      const working = window.__COLUMNS__.find((column) => column.bucket === "working");
+      const finished = working.cards.find((one) => one.pane === "term:402");
+      working.cards = working.cards.filter((one) => one !== finished);
+      window.__COLUMNS__.find((column) => column.bucket === "done").cards.push({ ...finished, state: "done" });
+      await paint();
+      const now = window.__ORBIT_NOW__;
+      window.__PANES__.push({ term: 413, agent: "codex", state: "working", at: now - 5_000,
+        state_started_at: now - 5_000, resumable: false });
+      window.__LEDGER__.push({ ...window.__LEDGER__[0], worker: "w-413", task: "새 일", task_id: "t-o13",
+        dispatch_id: "dp-o13", term: 413, pane: "%13" });
+      working.cards.push({ ...working.cards[0], pane: "term:413", heading: "새 일", task: "새 일", parent: "" });
+      await paint();
+      changes += watch.takeRecords().length;
+      watch.disconnect();
+      const after = counts();
+      return { orbit: agentOrbitShowing(view), paints: 5, changes, nodeCreations: after[0] - before[0],
+        edgeMeasures: after[1] - before[1], layoutRuns: after[2] - before[2] };
+    });
+    ok("the orbit writes nothing into the folded card picture: no mutation, no card built, no edge measured",
+      folded.orbit && folded.changes === 0 && folded.nodeCreations === 0 && folded.edgeMeasures === 0,
+      JSON.stringify(folded));
+
+    const back = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const fit = window.fitAgentGraph;
+      let fits = 0;
+      window.fitAgentGraph = function fitAgentGraph(target, options = {}) {
+        if (target === view && !options.pass) fits += 1;
+        return fit(target, options);
+      };
+      try {
+        view.querySelector('[data-relations-view="cards"]').click();
+        await window.__BOARD_SETTLED__();
+        await window.__ORBIT_FRAMES__(4);
+      } finally {
+        window.fitAgentGraph = fit;
+      }
+      const drawn = () => [...view.querySelectorAll('.agent-graph-nodes .agent-graph-node[data-graph-key^="agent:"]')]
+        .map((node) => node.dataset.graphKey).sort();
+      const edges = () => [...view.querySelectorAll(".agent-graph-edges [data-graph-edge]")]
+        .map((group) => `${group.dataset.graphEdge} ${group.querySelector("path")?.getAttribute("d")}`);
+      const standing = edges();
+      paintAgentGraphEdges(view);
+      return {
+        fits,
+        nodes: drawn(),
+        wanted: agentGraphModels.get(view).nodes.filter((entity) => entity.type === "agent")
+          .map((entity) => entity.key).sort(),
+        finished: view.querySelector('.agent-graph-node[data-graph-key="agent:term:402"]')
+          ?.classList.contains("is-done") ?? null,
+        arrived: drawn().includes("agent:term:413"),
+        edges: standing.length,
+        remeasuredInPlace: JSON.stringify(standing) === JSON.stringify(edges()),
+      };
+    });
+    ok("the card view it returns to draws every update the orbit skipped, fits once, and its edges stand where a fresh measure puts them",
+      back.fits === 1 && JSON.stringify(back.nodes) === JSON.stringify(back.wanted) && back.finished === true
+      && back.arrived && back.edges > 0 && back.remeasuredInPlace, JSON.stringify(back));
+    ok("the folded-cards page raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* ⑧ 실시간 지도는 카드 그림 위의 것이다. 카드에서 켠 지도를 행성계로 가져가면 손잡이는 눌린
+ * 채로 누를 수 없고(`aria-disabled` — 초점과 손은 받아 팁이 까닭을 말한다), 눌러도 켜진 채다.
+ * 지도는 그동안 사건을 적지도 박자를 얹지도 않고, 인스펙터도 지도의 줄을 싣지 않는다. 카드로
+ * 돌아오면 지도가 그대로 서고 행성계에 있던 동안의 일은 조용한 기준선이 되며, 그 뒤의 새
+ * 사건은 뛴다. */
+async function testOrbitLiveMap(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openOrbit(page);
+    const read = () => page.evaluate(() => {
+      const view = document.querySelector("#board-view");
+      const live = view.querySelector(".agent-graph-live");
+      return {
+        orbit: agentOrbitShowing(view),
+        on: agentGraphLiveOn(),
+        shown: agentGraphLiveShown(),
+        disabled: live.getAttribute("aria-disabled"),
+        pressed: live.getAttribute("aria-pressed"),
+        tip: live.dataset.tip,
+        label: live.getAttribute("aria-label"),
+        key: live.dataset.i18nTitle,
+        cardsOnly: t("board.orbit.liveInCards", ""),
+        title: t("board.live.title", "실시간 조율"),
+        events: agentGraphLiveRecentEvents().length,
+        beats: view.querySelectorAll("[data-live-beat]").length,
+        handles: agentGraphLiveHandles(),
+        inspectorEvents: view.querySelectorAll(".agent-inspector .agent-live-events").length,
+        liveEdges: view.querySelectorAll(".agent-graph-edge.is-live-relation").length,
+      };
+    });
+    /* 우편 링크 하나(401 → 402)에 새 메시지가 실린 판 — 원장이 새 id를 실어 온 그 모양이다. */
+    const mailArrives = (id) => page.evaluate(async (id) => {
+      const now = Date.now();
+      const [first, ...rest] = window.__OVERLAYS__.mail;
+      window.__OVERLAYS__.mail = [{ ...first, count: first.count + 1, unread: 1, at: now,
+        last_message: { ...first.last_message, id, created_ms: now } }, ...rest];
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+    }, id);
+    const choose = (want) => page.evaluate(async (want) => {
+      document.querySelector(`#board-view [data-relations-view="${want}"]`).click();
+      await window.__BOARD_SETTLED__();
+      await window.__ORBIT_FRAMES__(2);
+    }, want);
+
+    await choose("cards");
+    await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      agentGraphInspectorTab = "relations";
+      selectAgentGraphEntity(view, "agent:term:401");
+      view.querySelector(".agent-graph-live").click();
+      await window.__BOARD_SETTLED__();
+    });
+    const cardsOn = await read();
+    await choose("orbit");
+    const orbitOn = await read();
+    await page.evaluate(async () => {
+      document.querySelector("#board-view .agent-graph-live").click();
+      await window.__BOARD_SETTLED__();
+    });
+    const pressed = await read();
+    await mailArrives("m-o-orbit");
+    const orbitMail = await read();
+    ok("in the orbit the live map's handle stays pressed, cannot be pressed, and says the map shows in the card view",
+      cardsOn.on && cardsOn.disabled !== "true" && orbitOn.orbit && orbitOn.on && orbitOn.disabled === "true"
+      && orbitOn.pressed === "true" && orbitOn.cardsOnly !== "" && orbitOn.tip === orbitOn.cardsOnly
+      && orbitOn.label === orbitOn.cardsOnly && orbitOn.key === "board.orbit.liveInCards" && pressed.on,
+      JSON.stringify({ cardsOn, orbitOn, pressedOn: pressed.on }));
+    ok("in the orbit the live map records nothing, beats nothing, and the inspector carries none of its lines",
+      !orbitOn.shown && orbitMail.events === cardsOn.events && orbitMail.beats === 0
+      && orbitMail.handles.timers === 0 && orbitMail.handles.pulses === 0 && orbitMail.inspectorEvents === 0,
+      JSON.stringify({ cardsOn: cardsOn.events, orbitMail }));
+
+    await choose("cards");
+    const returned = await read();
+    /* 토글은 원장을 다시 읽지 않는다 — 돌아온 뒤 첫 읽기가 조용한 기준선이고(`liveBaselineDue`),
+     * 그다음 판의 새 메시지가 사건이다. */
+    await page.evaluate(async () => {
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+    });
+    const baseline = await read();
+    await mailArrives("m-o-cards");
+    const cardsMail = await read();
+    ok("back on the card view the live map stands as it was left and what came in the orbit stays a quiet baseline",
+      returned.shown && returned.disabled !== "true" && returned.tip === returned.title
+      && returned.key === "board.live.title" && returned.liveEdges > 0 && returned.inspectorEvents === 1
+      && returned.events === cardsOn.events && returned.beats === 0
+      && baseline.events === cardsOn.events && baseline.beats === 0, JSON.stringify({ returned, baseline }));
+    ok("back on the card view a new event is recorded and beats",
+      cardsMail.events === baseline.events + 1 && cardsMail.beats > 0, JSON.stringify(cardsMail));
+    ok("the orbit live page raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }

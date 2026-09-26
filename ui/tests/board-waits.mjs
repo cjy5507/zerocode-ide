@@ -27,6 +27,10 @@ export async function testBoardWaits(browser, origin, ok) {
     await installBoardWaits(page);
     await page.evaluate(() => {
       if (typeof agentBoardMode !== "undefined") agentBoardMode = "graph";
+      // The graph geometry this waits for is the card picture's; the relations
+      // tab opens on the orbit (t-9444), which folds the cards and draws none
+      // of them (t-9532), so the card view is chosen through the tab's toggle.
+      if (typeof setAgentOrbitChoice === "function") setAgentOrbitChoice(document.getElementById("board-view"), "cards");
       let released = false;
       const waiting = [];
       const answer = {
