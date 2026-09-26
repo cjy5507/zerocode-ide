@@ -10,7 +10,8 @@ world and, in the build after, the value seat — driven by an ignored test in
 is not the window's is the road: each call is the window's browser CLI, and a
 typed value goes to it on stdin. The build BEFORE is `--before`'s product
 files with this harness laid over them (the harness's `// after-only` lines
-dropped, since the build before has no value seat); the build AFTER is HEAD.
+dropped: what they name, the build before does not have); the build AFTER is
+HEAD.
 Both are built in this checkout's own target, one after the other, and every
 walk alternates the two (ABBA), each on a freshly loaded page. Each run of a
 build walks twice in one process: the first walk pays for the process's cold
@@ -36,9 +37,12 @@ running window's door may predate the one a build expects (a v1.1.25 window
 does not settle a press by number), so the harness stands that door in front
 of it (`probe.rs` `Door`): a press by number settles, by the product's own
 loop, each poll one `eval`; a press that leaves its settle for later answers
-the page it left and the next look finishes the settle. What the stand-in did
-inside a call is kept on that call (`inside`: `settleMs`, `previewMs`,
-`standInMs`) and every table says it.
+the page it left and the next look finishes the settle — or, in a build that
+has the door's rule (t-9876), settles before it answers when that page still
+reads the legend it was made on (the core's own comparison), and answers the
+page read after. What the stand-in did inside a call is kept on that call
+(`inside`: `settleMs`, `previewMs`, `standInMs`) and every table says it,
+settles a press finished before it answered among them.
 
 The page's snapshot the browser door does not carry yet (t-6721 U4) is stood
 in for by `snapshot.js`, one more `eval` after each look, in both builds and
@@ -153,13 +157,17 @@ def inside(call: dict, key: str) -> float:
 
 def steps_of(row: dict) -> list[dict]:
     """A walk's hand steps, from its calls: a step opens at a look (`marks`)
-    and ends where its last press or entry ended; the stand-in snapshot's time
-    inside it is taken out, so a step is what the product's own road costs
-    (a settle the door ran inside a call stays in: it is the product's)."""
+    — or, for a hand with no look before it, where the call before that hand
+    ended: it was judged on the page the last press answered, settled
+    (t-9876) — and ends where its last press or entry ended; the stand-in
+    snapshot's time inside it is taken out, so a step is what the product's
+    own road costs (a settle the door ran inside a call stays in: it is the
+    product's)."""
     calls = row.get("calls") or []
     stand_ins = list(row.get("standInMs") or [])
     steps, current = [], None
     looks = 0
+    ended = None
     for call in calls:
         if call["verb"] == "marks":
             if current and current["end"] is not None:
@@ -168,14 +176,18 @@ def steps_of(row: dict) -> list[dict]:
             stand_in = stand_ins[looks] if looks < len(stand_ins) else inside(call, "standInMs")
             looks += 1
             current = {"start": call["startMs"], "end": None, "kind": "press", "standIn": stand_in}
-        elif call["verb"] in ("click", "type") and current is not None:
-            current["end"] = call["startMs"] + call["ms"]
-            current["standIn"] += inside(call, "standInMs")
-            if call["verb"] == "type":
-                current["kind"] = "type"
+        elif call["verb"] in ("click", "type"):
+            if current is None and ended is not None:
+                current = {"start": ended, "end": None, "kind": "press", "standIn": 0.0}
+            if current is not None:
+                current["end"] = call["startMs"] + call["ms"]
+                current["standIn"] += inside(call, "standInMs")
+                if call["verb"] == "type":
+                    current["kind"] = "type"
         elif call["verb"] == "find" and current is not None and current["end"] is not None:
             steps.append(current)
             current = None
+        ended = call["startMs"] + call["ms"]
     if current and current["end"] is not None:
         steps.append(current)
     return [
@@ -232,7 +244,7 @@ def summarize(rows: list[dict], first: bool = False) -> dict:
                                       "reused": 0, "large": 0, "standIn": [], "loads": [],
                                       "gaps": [], "settles": [], "previews": [], "asks": [],
                                       "overlapped": 0, "discarded": 0, "cancelled": 0,
-                                      "settledReady": 0, "settledAll": 0})
+                                      "settledReady": 0, "settledAll": 0, "settledInPress": 0})
         cell["n"] += 1
         cell["ok"] += succeeded(row["scenario"], row)
         # A walk's own time, less what the stand-in snapshot took inside it.
@@ -249,6 +261,9 @@ def summarize(rows: list[dict], first: bool = False) -> dict:
                 cell["settles"].append(inside(call, "settleMs"))
                 cell["settledAll"] += 1
                 cell["settledReady"] += call["inside"]["settle"] == "ready"
+                # Finished before the press answered: a plain press's, or a
+                # settle-later press's that left its legend (t-9876).
+                cell["settledInPress"] += call["verb"] == "click"
             if inside(call, "previewMs"):
                 cell["previews"].append(inside(call, "previewMs"))
         if row.get("asked") is not None:
@@ -293,6 +308,7 @@ def summarize(rows: list[dict], first: bool = False) -> dict:
             "settle_p95": percentile(cell["settles"], 0.95),
             "settled_ready": cell["settledReady"],
             "settled": cell["settledAll"],
+            "settled_in_press": cell["settledInPress"],
             "preview_p50": percentile(cell["previews"], 0.5),
             "asks_per_walk": (sum(cell["asks"]) / len(cell["asks"])) if cell["asks"] else None,
             "overlapped": cell["overlapped"],
@@ -313,9 +329,10 @@ def table_md(summary: dict, command: str, out: pathlib.Path) -> str:
         f"`{command}` → `{out}`",
         "",
         "| scenario/arm | n | ok | walk p50/p95 | press step p50/p95 | press gap p50/p95 (n) | type step p50/p95 "
-        "| settle p50/p95 (ready/all) | preview p50 | ahead used/dropped/cancelled | asked+begun per walk "
-        "| Jev requests / judged steps | memo | large model | values written/reused | stand-in p50 | load |",
-        "|---|---:|---:|---|---|---|---|---|---:|---|---:|---|---:|---:|---|---:|---|",
+        "| settle p50/p95 (ready/all) | settled in the press | preview p50 | ahead used/dropped/cancelled "
+        "| asked+begun per walk | Jev requests / judged steps | memo | large model | values written/reused "
+        "| stand-in p50 | load |",
+        "|---|---:|---:|---|---|---|---|---|---:|---:|---|---:|---|---:|---:|---|---:|---|",
     ]
     for name, cell in summary.items():
         lines.append(
@@ -324,6 +341,7 @@ def table_md(summary: dict, command: str, out: pathlib.Path) -> str:
             f"| {ms(cell.get('gap_p50'))} / {ms(cell.get('gap_p95'))} ({cell.get('gaps', 0)}) "
             f"| {ms(cell['type_p50'])} / {ms(cell['type_p95'])} "
             f"| {ms(cell.get('settle_p50'))} / {ms(cell.get('settle_p95'))} ({cell.get('settled_ready', 0)}/{cell.get('settled', 0)}) "
+            f"| {cell.get('settled_in_press', 0)} "
             f"| {ms(cell.get('preview_p50'))} "
             f"| {cell.get('overlapped', 0)}/{cell.get('discarded', 0)}/{cell.get('cancelled', 0)} "
             f"| {mean(cell.get('asks_per_walk'))} "

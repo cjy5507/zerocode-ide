@@ -38,7 +38,7 @@ class DriverTests(unittest.TestCase):
             "a region marker survived",
         )
         for needed_after in ("LiveWriter", "value_writer", "ZEROCODE_WALK_PROBE_VALUE_KEY",
-                             "same_legend", "table"):
+                             "same_legend(", "self.legend"):
             self.assertNotIn(needed_after, stripped)
         # Both builds stand the same settling door in front of the window —
         # and the settle-later press the build before already has (t-9712),

@@ -19,7 +19,10 @@
 //! product's own loop and verdict (`settle_with`) with each poll one `eval` of
 //! the door's own settle script; `--settle-later` presses, answers the page as
 //! the press left it (`marks --json`), and holds the settle for the pane's next
-//! `marks`, which finishes it the same way and says how. Each call's row says
+//! `marks`, which finishes it the same way and says how — or, in a build that
+//! has the door's rule (t-9876), when that page still reads the legend the
+//! press was made on (the core's own `same_legend`), settles before it answers
+//! and answers the page read after, as the door does. Each call's row says
 //! what the stand-in door did inside it (`settleMs`, `previewMs`), apart.
 //!
 //! Lines between `// after-only {` and `// after-only }` need what only the
@@ -41,6 +44,9 @@ use zerocode_hookd::TeamAnswer;
 use crate::cmd::browser::{
     BROWSER_OBSERVE_HELPERS, BROWSER_SETTLE_BODY, SettleReport, automation_script, settle_with,
 };
+// after-only {
+use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, same_legend};
+// after-only }
 
 use super::desk::{Aim, GoalWorld};
 use super::live::{Doorway, LiveJudge};
@@ -206,27 +212,46 @@ fn settled_note(settle: &SettleReport) -> Value {
 
 /// The door a build expects, stood in front of the running window's: a
 /// look, with the stand-in snapshot when the scenario needs it; a press by
-/// number that settles before it answers; and — for a build that asks for
-/// it — a press that leaves its settle for the pane's next look.
+/// number that settles before it answers; and — for a walk that asks ahead —
+/// a press that leaves its settle for the pane's next look, or, in a build
+/// that has the door's rule (t-9876), settles before it answers when the page
+/// it left still reads the legend it was made on.
 struct Door<'a> {
     pane: &'a str,
     script: Option<&'a str>,
-    // after-only {
     /// Whether the last press left its settle for the next look.
     held: bool,
+    // after-only {
+    /// The items of the pane's last look — the legend a press by number is
+    /// made on, as the door's own table keeps it (t-9876).
+    legend: Vec<Value>,
     // after-only }
 }
 
 impl Door<'_> {
     /// One look, with the stand-in snapshot merged in when asked for.
-    fn look(&self, argv: &[String], inside: &mut Value) -> TeamAnswer {
+    fn look(&mut self, argv: &[String], inside: &mut Value) -> TeamAnswer {
         let (mut answer, _) = drive(argv);
         if let (Some(script), 0) = (self.script, answer.exit_code)
             && let Some((said, took)) = stand_in(self.pane, script, &answer.stdout)
         {
             answer.stdout = said;
-            inside["standInMs"] = json!(took);
+            // A call that looks twice keeps both looks' stand-in (t-9876).
+            let before = inside
+                .get("standInMs")
+                .and_then(Value::as_f64)
+                .unwrap_or_default();
+            inside["standInMs"] = json!(before + took);
         }
+        // after-only {
+        if answer.exit_code == 0
+            && let Some(items) = serde_json::from_str::<Value>(answer.stdout.trim())
+                .ok()
+                .and_then(|said| said.get(ITEMS_KEY)?.as_array().cloned())
+        {
+            self.legend = items;
+        }
+        // after-only }
         answer
     }
 
@@ -234,27 +259,58 @@ impl Door<'_> {
     fn drive(&mut self, argv: &[String]) -> (TeamAnswer, Value) {
         let mut inside = json!({});
         let verb = argv.first().map(String::as_str);
-        // after-only {
         if verb == Some("click")
             && argv.last().map(String::as_str)
                 == Some(zerocode_core::agent_browser::BROWSER_SETTLE_LATER_FLAG)
         {
+            // after-only {
+            let pressed_on = self.legend.clone();
+            // after-only }
             let (pressed, _) = drive(&argv[..argv.len() - 1]);
             if pressed.exit_code != 0 {
                 return (pressed, inside);
             }
-            self.held = true;
+            let look_argv = [
+                "marks".to_string(),
+                self.pane.to_string(),
+                "--json".to_string(),
+            ];
             let began = Instant::now();
-            let look = self.look(
-                &[
-                    "marks".to_string(),
-                    self.pane.to_string(),
-                    "--json".to_string(),
-                ],
-                &mut inside,
-            );
+            let look = self.look(&look_argv, &mut inside);
             inside["previewMs"] = json!(began.elapsed().as_secs_f64() * 1_000.0);
             let mut said: Value = serde_json::from_str(look.stdout.trim()).unwrap_or(json!({}));
+            // after-only {
+            // The door's own rule, by its own comparison (t-9876): a page that
+            // still reads the legend the press was made on settles before the
+            // press answers, and the answer is the page read after, with how it
+            // settled — nothing held.
+            if said
+                .get(ITEMS_KEY)
+                .and_then(Value::as_array)
+                .is_some_and(|items| same_legend(&pressed_on, items))
+            {
+                let settle = settle_by_eval(self.pane);
+                if let Value::Object(note) = settled_note(&settle) {
+                    for (key, value) in note {
+                        inside[key.as_str()] = value;
+                    }
+                }
+                let look = self.look(&look_argv, &mut inside);
+                said = serde_json::from_str(look.stdout.trim()).unwrap_or(json!({}));
+                said[zerocode_core::agent_browser::BROWSER_SETTLE_KEY] =
+                    zerocode_core::agent_browser::settle_said(settle.state, settle.why, settle.ms);
+                said[crate::cmd::browser::CLICK_SAID_KEY] = json!(pressed.stdout.trim());
+                return (
+                    TeamAnswer {
+                        exit_code: 0,
+                        stdout: said.to_string(),
+                        stderr: String::new(),
+                    },
+                    inside,
+                );
+            }
+            // after-only }
+            self.held = true;
             said[crate::cmd::browser::CLICK_SAID_KEY] = json!(pressed.stdout.trim());
             return (
                 TeamAnswer {
@@ -278,7 +334,6 @@ impl Door<'_> {
             }
             return (look, inside);
         }
-        // after-only }
         match verb {
             Some("marks") => {
                 let look = self.look(argv, &mut inside);
@@ -420,8 +475,9 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
         let mut door = Door {
             pane: &pane,
             script: script.as_deref(),
-            // after-only {
             held: false,
+            // after-only {
+            legend: Vec::new(),
             // after-only }
         };
         let mut road = |_: RecipeTool, argv: &[String], _: &[String]| {
@@ -508,9 +564,7 @@ fn a_goal_walk_timed_on_a_page_of_our_own() {
             "begun": begun,
             "overlapped": walked.overlapped,
             "discarded": walked.discarded,
-            // after-only {
             "cancelled": walked.cancelled,
-            // after-only }
             "calls": calls.into_inner().iter().map(|call| json!({
                 "verb": call.verb, "startMs": call.start_ms, "ms": call.ms, "exit": call.exit,
                 "inside": call.inside,
