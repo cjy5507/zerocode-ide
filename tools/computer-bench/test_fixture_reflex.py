@@ -3,6 +3,7 @@ fixture's own record decides every success, and the runtime's receipts are a
 claim that record must confirm. Nothing here moves the pointer: every run is
 a record written in the shapes the fixture, the driver and the runner write."""
 import copy
+import hashlib
 import json
 import os
 import pathlib
@@ -866,6 +867,25 @@ class Tally(unittest.TestCase):
         rendered = tally.render_reflex(summary)
         for column in ("goal→press ms", "re-plan gap ms", "L1 RTT p50/p95 ms", "applied c/p/r", "tokens in/out", "$"):
             self.assertIn(column, rendered)
+
+
+class DeskHooks(unittest.TestCase):
+    def test_r9_seed_bytes_and_default_plan_and_judgment_survive_the_hooks(self):
+        expected = {
+            11: 'fd9c4b8b4ead56bc9753c9210b026351c6c4fb2ade4e92c9fa0fdee680175e5a',
+            12: '0f9a460f4aa505141b621ddc931ded72f1a16cb5f078cfee2172bfeac20d1886',
+            13: '2b5738b07d47ce61750936ad6db87b0310c0fc3a040f69ec4531e5960fa22eaa',
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder)
+            reflex.write_atomic(path / 'session.json', {'owner': 'owner', 'bundle': 'dev.zerocode.bench.reflex'})
+            desk = reflex.Desk(path, VALUES, LIMITS)
+            for seed, digest in expected.items():
+                wire = json.dumps(desk.round(seed), sort_keys=True, separators=(',', ':')).encode()
+                self.assertEqual(hashlib.sha256(wire).hexdigest(), digest)
+                self.assertEqual(desk.result(clean(seed)), reflex.judged(clean(seed), VALUES, LIMITS))
+            self.assertEqual(desk.plan(GEOMETRY, None),
+                             reflex.plan(GEOMETRY, VALUES, desk.session['bundle'], reflex.contract(), table_limits=LIMITS))
 
 
 if __name__ == "__main__":

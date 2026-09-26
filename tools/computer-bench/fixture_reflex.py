@@ -879,8 +879,18 @@ class Desk:
         path.mkdir(mode=0o700, exist_ok=False)
         return path
 
+    def round(self, seed):
+        return the_round(self.session["owner"], seed, self.values, self.limits)
+
+    def plan(self, geometry, rules):
+        return plan(geometry, self.values, self.session["bundle"], contract(), rules=rules,
+                    table_limits=self.limits)
+
+    def result(self, record):
+        return judged(record, self.values, self.limits)
+
     def launch(self, run, seed):
-        write_atomic(run / "round.json", the_round(self.session["owner"], seed, self.values, self.limits))
+        write_atomic(run / "round.json", self.round(seed))
         with (run / "fixture.log").open("w") as log:
             self.fixture = subprocess.Popen([self.session["executable"], str(run / "round.json"), str(run)],
                                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -1013,7 +1023,7 @@ class Desk:
         record["verdictNs"] = loaded["run"]["verdictNs"] = uptime_ns()
         record.setdefault("load", {})["verdict"] = list(os.getloadavg())
         write_atomic(run / "run.json", record)
-        result = judged(loaded, self.values, self.limits)
+        result = self.result(loaded)
         write_atomic(run / tally.REFLEX_RUN, result)
         return result
 
@@ -1057,9 +1067,7 @@ class Desk:
                     watch = Supervisor(helper_pid=geometry["helperPid"])
                     # A person's plan, or the stand-in's answer; the window's generator writes its own.
                     if (record.get("autopilot") or {}).get("generator", STUB) == STUB:
-                        write_atomic(run / "plan.json", plan(geometry, self.values, self.session["bundle"],
-                                                             contract(), rules=record["rules"],
-                                                             table_limits=self.limits))
+                        write_atomic(run / "plan.json", self.plan(geometry, record["rules"]))
                     planned = True
                 elif uptime_ns() > prep_until:
                     return stop("preparation overran")
