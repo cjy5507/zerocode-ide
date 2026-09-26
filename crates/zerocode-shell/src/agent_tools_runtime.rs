@@ -3305,6 +3305,7 @@ pub(super) fn run_goal(
 ) -> zerocode_hookd::TeamAnswer {
     use computer_use::errand::{self, desk};
     use computer_use::recipe_run::Desk as _;
+    use zerocode_core::computer_use::walk_words as words;
     let RecipeRoads {
         step,
         mut begun,
@@ -3414,10 +3415,10 @@ pub(super) fn run_goal(
         // and the answer says plainly that nothing walked.
         return said(serde_json::json!({
             "goal": goal,
-            "mode": mode.key(),
-            "pressed": 0,
-            "reached": false,
-            "steps": [],
+            (words::MODE): mode.key(),
+            (words::PRESSED): 0,
+            (words::REACHED): false,
+            (words::ROWS): [],
         }));
     }
     let acting = crate::systemone::applies(judge.wire(), seat);
@@ -3443,6 +3444,11 @@ pub(super) fn run_goal(
         .with_snapshots(snapshots)
         .previewing(options.overlap)
         .writing(Box::new(writer));
+    // Whether the caller's own condition already held before the walk's
+    // first look (t-10311): a walk that ends on it shows an effect of its own
+    // only when it did not, or when a check between its presses read it
+    // absent. The one read the walk adds, asked only when `--until` was given.
+    let until_before = errand::World::reached(&mut world);
     let walked = errand::run_with(
         mode,
         acting,
@@ -3470,13 +3476,17 @@ pub(super) fn run_goal(
         crate::project_runtime::now_epoch_ms(),
     );
     judge.write_memo_rows(dir, crate::project_runtime::now_epoch_ms());
-    said(serde_json::json!({
+    let mut answer = serde_json::json!({
         "goal": goal,
-        "mode": mode.key(),
-        "pressed": walked.pressed,
-        "reached": walked.reached.unwrap_or_default(),
-        "steps": walked.rows,
-    }))
+        (words::MODE): mode.key(),
+        (words::PRESSED): walked.pressed,
+        (words::REACHED): walked.reached.unwrap_or_default(),
+        (words::ROWS): walked.rows,
+    });
+    if let Some(until_before) = until_before {
+        answer[words::UNTIL_BEFORE] = serde_json::json!(until_before);
+    }
+    said(answer)
 }
 
 /// An Android AVD's saved states, as a forked step drives them (t-6044): the
@@ -3518,11 +3528,12 @@ impl computer_use::errand::desk::Snapshots for AvdSnapshots {
 /// which is exactly what a walk under a recording seat does not mean
 /// (t-5455).
 pub(super) fn goal_text(said: &serde_json::Value) -> String {
-    let pressed = said["pressed"].as_u64().unwrap_or_default();
-    let reached = said["reached"] == serde_json::Value::Bool(true);
+    use zerocode_core::computer_use::walk_words as words;
+    let pressed = said[words::PRESSED].as_u64().unwrap_or_default();
+    let reached = said[words::REACHED] == serde_json::Value::Bool(true);
     let goal = said["goal"].as_str().unwrap_or_default();
     let got = if reached { "reached" } else { "not reached" };
-    let why = said["steps"]
+    let why = said[words::ROWS]
         .as_array()
         .and_then(|steps| computer_use::errand::no_press_reason(steps))
         .map_or_else(String::new, |reason| format!(" — {reason}"));

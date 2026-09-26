@@ -1756,6 +1756,38 @@ pub fn walk_run(params: &Value) -> crate::jev::Run {
     }
 }
 
+/// The words a goal walk's answer and its rows are read by outside the
+/// window (t-10311): the window writes them and zo's `Computer` walk reads
+/// them, so the two cannot come to spell them differently.
+pub mod walk_words {
+    /// The answer's keys: the seat's mode, the presses made, whether the goal
+    /// was reached, the rows, and — only when the caller gave `--until` —
+    /// whether that condition already held before the walk's first look.
+    pub const MODE: &str = "mode";
+    pub const PRESSED: &str = "pressed";
+    pub const REACHED: &str = "reached";
+    pub const ROWS: &str = "steps";
+    pub const UNTIL_BEFORE: &str = "untilBefore";
+    /// A row's keys: its step (counted from 1), what came of it, the
+    /// caller's condition asked after its press, the judgment's own `done`,
+    /// and why no hand went out.
+    pub const ATTEMPT: &str = "attempt";
+    pub const OUTCOME: &str = "outcome";
+    pub const RECHECK: &str = "recheck";
+    pub const REACHED_BY: &str = "reachedBy";
+    pub const REASON: &str = "reason";
+    /// What the judgment chose: an option, or its own end — `done` or
+    /// `give_up` (`screen_action::DONE`, `screen_action::GIVE_UP`).
+    pub const CHOSEN: &str = crate::jev::recent::CHOSEN.canonical;
+    /// The outcomes that end a walk with nothing to judge: the screen did not
+    /// move for the same-screen limit, or no look came back.
+    pub const STUCK: &str = "stuck";
+    pub const NO_LOOK: &str = "no_look";
+    /// The one barred word that is the judgment's own doubt rather than a
+    /// stop: its confidence under the seat's press floor.
+    pub const LOW_CONFIDENCE: &str = "low_confidence";
+}
+
 #[must_use]
 pub fn walk_steps(params: &Value) -> usize {
     params

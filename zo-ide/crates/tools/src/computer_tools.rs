@@ -31,9 +31,12 @@ use runtime::PermissionMode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use zerocode_core::computer_use::{
-    computer_deadline_ms, ComputerMethod, BATCH_COMMANDS_FLAG, COMPUTER_BATCH_MAX_STEPS, COMPUTER_BRIDGE_GRACE_MS,
-    COMPUTER_MARKS_ENV, WATCH_UNTIL,
+    computer_deadline_ms, walk_steps, walk_words, ComputerMethod, BATCH_COMMANDS_FLAG, COMPUTER_BATCH_MAX_STEPS,
+    COMPUTER_BRIDGE_GRACE_MS, COMPUTER_MARKS_ENV, WALK_OVERLAP_FLAG, WALK_REPLAY_FLAG, WALK_RESCUE_FLAG, WALK_STEPS_MAX,
+    WATCH_UNTIL,
 };
+use zerocode_core::jev::{JevMode, GOAL_CHAR_CAP};
+use zerocode_core::screen_action::GIVE_UP;
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
 use zerocode_core::computer_use_protocol::marks::{legend_line, ITEMS_KEY, LEGEND_KEY, LOOK_ID_KEY, TOOL_ONLY_KEYS};
@@ -87,6 +90,9 @@ const EXIT_POLL: Duration = Duration::from_millis(1);
 
 /// The one action whose steps are actions — named as the core names it.
 const BATCH_ACTION: &str = ComputerMethod::Batch.verb_name();
+/// The one action the window walks toward a goal on its own judgment — the
+/// core's verb, the loop the window's (`run_goal`); the tool never loops.
+const WALK_ACTION: &str = ComputerMethod::Walk.verb_name();
 /// Anthropic's actions, verbatim, and this window's extensions — each with the
 /// core method it runs (`window` runs the `window-<kind>` its `kind` names; the
 /// table holds one of that family). What acts, what presses and what may be a
@@ -135,6 +141,7 @@ pub(crate) const ACTIONS: &[(&str, ComputerMethod)] = &[
     ("recipe_run", ComputerMethod::RecipeRun),
     ("handoff", ComputerMethod::Handoff),
     (BATCH_ACTION, ComputerMethod::Batch),
+    (WALK_ACTION, ComputerMethod::Walk),
 ];
 /// The fields a batch step's actions read — the rest of the tool's fields
 /// belong to actions no step may be (a test probes every step action for it).
@@ -233,8 +240,24 @@ pub(crate) struct ComputerInput {
     pub after: Option<u64>,
     /// The least confidence a heard sound needs to end a `sound_wait`.
     pub min_confidence: Option<f64>,
-    /// `watch`: `change` (the default) or `quiet`.
+    /// `watch`: `change` (the default) or `quiet`. `walk`: the text on the
+    /// screen when it worked.
     pub until: Option<String>,
+    /// `walk`: one sentence saying what to reach.
+    pub goal: Option<String>,
+    /// `walk`: the browser pane it looks at (an `app`, or a `platform` with
+    /// its `device`, instead).
+    pub pane: Option<String>,
+    pub platform: Option<String>,
+    pub device: Option<String>,
+    /// `walk`: the most presses it may spend (the CLI's `--steps`, named apart
+    /// from a batch's `steps`).
+    pub max_steps: Option<u64>,
+    /// `walk`: judge ahead while a press lands; a second reader before the
+    /// person; a repeat of a walk walked before.
+    pub overlap: Option<bool>,
+    pub rescue: Option<bool>,
+    pub replay: Option<bool>,
     /// `batch`: the actions to run in order in one call.
     pub steps: Option<Vec<ComputerInput>>,
     /// A recipe's name (`recipe_save`/`recipe_show`/`recipe_run`).
@@ -295,7 +318,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "after": { "type": "integer", "minimum": 0,
             "description": "sound_read/sound_wait: only sounds heard after this event number" },
         "min_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-        "until": { "type": "string", "enum": WATCH_UNTIL },
+        "until": { "type": "string", "description": format!("watch: {}; walk: the text on screen when it worked", WATCH_UNTIL.join("|")) },
         "element_index": { "type": "integer", "minimum": 0 },
         "settle": { "type": "boolean",
             "description": "Action/batch: false samples immediately, without confirming completion. Default true waits for quiet." },
@@ -303,6 +326,20 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "params": { "type": "object" },
         "start": { "type": "integer", "minimum": 1 }
     });
+    // A walk's own fields: what the CLI's walk takes, and nothing it lacks.
+    let walk = json!({
+        "goal": { "type": "string", "maxLength": GOAL_CHAR_CAP },
+        "pane": { "type": "string" },
+        "platform": { "type": "string" },
+        "device": { "type": "string" },
+        "max_steps": { "type": "integer", "minimum": 1, "maximum": WALK_STEPS_MAX },
+        "overlap": { "type": "boolean" },
+        "rescue": { "type": "boolean" },
+        "replay": { "type": "boolean" }
+    });
+    if let (Some(object), Value::Object(walk)) = (properties.as_object_mut(), walk) {
+        object.extend(walk);
+    }
     // Only a process whose looks carry marks offers the field; otherwise it
     // costs the schema nothing.
     if marks {
@@ -337,7 +374,9 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             of hand steps you would not look between is one batch (steps: [...]): one call, one look after — plan it \
             whole (left_click by label, type, key, wait_for) rather than a look per press. recipe_save \
             keeps a procedure that worked; recipe_run walks it again in one call (params fill its \
-            {{names}}) and says where it stopped and the start to resume from. A code, CAPTCHA or \
+            {{names}}) and says where it stopped and the start to resume from. walk (goal: one sentence; one of \
+            app, pane, or platform with device; until: the text on screen when it worked; max_steps) walks there \
+            in one call on the window's own judgment and answers a status to act on. A code, CAPTCHA or \
             password field (secure_input) is the person's: handoff (text: what they do) waits for them. \
             The person keeps one hand on you: a \
             `stopped` answer means stop and report; a press on a payment, transfer or delete control is \
@@ -523,7 +562,8 @@ pub(crate) fn argv_for(input: &ComputerInput) -> Result<Vec<String>, ToolError> 
         || argv_sound(action, input, &mut argv)
         || argv_eye(action, input, &mut argv)
         || argv_recipes(action, input, &mut argv)?
-        || argv_persons_turn(action, input, &mut argv)?;
+        || argv_persons_turn(action, input, &mut argv)?
+        || argv_walk(action, input, &mut argv);
     if !handled {
         return Err(ToolError::InvalidInput(format!(
             "unknown Computer action {action:?}; one of {}",
@@ -858,6 +898,37 @@ fn argv_persons_turn(action: &str, input: &ComputerInput, argv: &mut Vec<String>
         push(argv, &["--timeout-ms", &ms.to_string()]);
     }
     Ok(true)
+}
+
+/// A walk toward a goal: the CLI's own verb and flags, each given only when
+/// the model gave it — what a walk needs (a goal, one screen) and what it
+/// may not have is the core's parser to say, never a second table here.
+fn argv_walk(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> bool {
+    if !methods(action).any(|method| method == ComputerMethod::Walk) {
+        return false;
+    }
+    push(argv, &[WALK_ACTION]);
+    for (flag, value) in [
+        ("--goal", input.goal.as_deref()),
+        ("--app", input.app.as_deref()),
+        ("--pane", input.pane.as_deref()),
+        ("--platform", input.platform.as_deref()),
+        ("--device", input.device.as_deref()),
+        ("--until", input.until.as_deref()),
+    ] {
+        if let Some(value) = value {
+            push(argv, &[flag, value]);
+        }
+    }
+    if let Some(steps) = input.max_steps {
+        push(argv, &["--steps", &steps.to_string()]);
+    }
+    for (flag, asked) in [(WALK_OVERLAP_FLAG, input.overlap), (WALK_RESCUE_FLAG, input.rescue), (WALK_REPLAY_FLAG, input.replay)] {
+        if asked == Some(true) {
+            argv.push(format!("--{flag}"));
+        }
+    }
+    true
 }
 
 /// Recipes: keep a procedure that worked, list and show them, walk one.
@@ -1324,6 +1395,200 @@ fn run_computer_batch(input: ComputerInput, ctx: &ToolContext, road: &ComputerRo
     }))
 }
 
+/// What a walk came to, for the model to act on (docs/design/
+/// computer-use-fast-path-20260926.md §4.3): the window's answer read into
+/// one word, apart from whether the call went through. Nothing here counts a
+/// press, an `ok` or the judgment's own `done` as the goal reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalkStatus {
+    /// The caller's own condition was read on the screen, and read as the
+    /// walk's doing: absent before it, or absent at a check between presses.
+    Verified,
+    /// The judgment said `done`, or the condition already held before the
+    /// walk: look once to confirm, nothing more.
+    NeedsVerification,
+    /// The walk could not go on — the seat off, no judge, recording only, the
+    /// judgment unsure or unanswered, nothing to press: plan from the reason.
+    NeedsFallback,
+    /// A person's stop, a guard's refusal, or the budget spent: end as a stop
+    /// ends.
+    Stopped,
+    /// A press or a look failed, or the screen would not move: recover from
+    /// the step it names.
+    Failed,
+}
+
+impl WalkStatus {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 5] =
+        [Self::Verified, Self::NeedsVerification, Self::NeedsFallback, Self::Stopped, Self::Failed];
+
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::NeedsVerification => "needs_verification",
+            Self::NeedsFallback => "needs_fallback",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Whether the screen after the walk is one nobody has read yet: the walk
+    /// pressed, and did not end on a screen it read as the goal.
+    const fn leaves_an_unread_screen(self) -> bool {
+        matches!(self, Self::NeedsFallback | Self::Stopped | Self::Failed)
+    }
+}
+
+/// The window's refusals that are a stop — the person's, their answer to a
+/// confirmation, or the budget — rather than a failure.
+const WALK_STOPS: &[&str] = &[
+    error_code::STOPPED,
+    error_code::CONFIRMATION_REFUSED,
+    error_code::CONFIRMATION_TIMEOUT,
+    error_code::BUDGET_EXCEEDED,
+];
+/// The tool's own reasons, where the window's answer has none to give: the
+/// seat is off; the seat is on but there is no judge to ask (no key); the
+/// condition already held before the walk; a press the hand could not make;
+/// every step spent without reaching the goal.
+const SEAT_OFF: &str = "seat_off";
+const NO_JUDGE: &str = "no_judge";
+const UNTIL_HELD_BEFORE: &str = "until_held_before";
+const PRESS_FAILED: &str = "press_failed";
+const STEPS_SPENT: &str = "steps_spent";
+/// How a verified walk got there: the caller's `until`, by the field's name.
+const REACHED_BY_UNTIL: &str = "until";
+
+/// A walk's answer read into its status and the facts beside it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WalkRead {
+    pub status: WalkStatus,
+    pub reason: Option<String>,
+    pub pressed: u64,
+    pub reached_by: Option<String>,
+    /// The step the walk ended at, counted from 1.
+    pub step: Option<u64>,
+    /// The presses the walk's budget still held.
+    pub steps_left: u64,
+    /// The last step whose look the judgment answered on.
+    pub last_observed_step: Option<u64>,
+}
+
+/// Read the window's answer to a walk whose budget was `budget` steps.
+pub(crate) fn read_walk(answer: &Value, budget: u64) -> WalkRead {
+    let said = answer.get("result").unwrap_or(&Value::Null);
+    let rows = said.get(walk_words::ROWS).and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    let word = |row: &Value, key: &str| row.get(key).and_then(Value::as_str).map(str::to_string);
+    let step = rows.iter().filter_map(|row| row.get(walk_words::ATTEMPT)?.as_u64()).max();
+    let mut read = WalkRead {
+        status: WalkStatus::Failed,
+        reason: None,
+        pressed: said.get(walk_words::PRESSED).and_then(Value::as_u64).unwrap_or_default(),
+        reached_by: None,
+        step,
+        steps_left: budget.saturating_sub(step.unwrap_or_default()),
+        last_observed_step: rows
+            .iter()
+            .rev()
+            .find(|row| word(row, walk_words::OUTCOME).as_deref() == Some(zerocode_core::jev::summary::ANSWERED))
+            .and_then(|row| row.get(walk_words::ATTEMPT)?.as_u64()),
+    };
+    if let Some(refused) = refusal(answer) {
+        read.status = if WALK_STOPS.contains(&refused.code.as_str()) {
+            WalkStatus::Stopped
+        } else if refused.code == error_code::PERMISSION_DENIED {
+            WalkStatus::NeedsFallback
+        } else {
+            WalkStatus::Failed
+        };
+        read.reason = Some(refused.code);
+        return read;
+    }
+    let last = rows.last();
+    let recheck = |row: &Value| row.get(walk_words::RECHECK).and_then(Value::as_bool);
+    let (status, reason) = if said.get(walk_words::REACHED) == Some(&Value::Bool(true)) {
+        if let Some(by) = last.and_then(|row| word(row, walk_words::REACHED_BY)) {
+            read.reached_by = Some(by);
+            (WalkStatus::NeedsVerification, None)
+        } else if last.and_then(recheck) == Some(true) {
+            read.reached_by = Some(REACHED_BY_UNTIL.to_string());
+            let absent_before = said.get(walk_words::UNTIL_BEFORE) == Some(&Value::Bool(false));
+            if absent_before || rows.iter().any(|row| recheck(row) == Some(false)) {
+                (WalkStatus::Verified, None)
+            } else {
+                (WalkStatus::NeedsVerification, Some(UNTIL_HELD_BEFORE.to_string()))
+            }
+        } else {
+            (WalkStatus::NeedsVerification, None)
+        }
+    } else if said.get(walk_words::MODE).and_then(Value::as_str) == Some(JevMode::Off.key()) {
+        (WalkStatus::NeedsFallback, Some(SEAT_OFF.to_string()))
+    } else if let Some(row) = last {
+        let outcome = word(row, walk_words::OUTCOME);
+        let barred = word(row, zerocode_core::jev::summary::BARRED.canonical);
+        let why = word(row, walk_words::REASON);
+        if let Some(outcome) = outcome.clone().filter(|outcome| [walk_words::STUCK, walk_words::NO_LOOK].contains(&outcome.as_str())) {
+            (WalkStatus::Failed, Some(outcome))
+        } else if let Some(barred) = barred {
+            let status = if barred == walk_words::LOW_CONFIDENCE { WalkStatus::NeedsFallback } else { WalkStatus::Stopped };
+            (status, Some(why.unwrap_or(barred)))
+        } else if let Some(why) = why {
+            (WalkStatus::NeedsFallback, Some(why))
+        } else if let Some(outcome) = outcome.filter(|outcome| outcome != zerocode_core::jev::summary::ANSWERED) {
+            (WalkStatus::NeedsFallback, Some(outcome))
+        } else if word(row, walk_words::CHOSEN).as_deref() == Some(GIVE_UP) {
+            (WalkStatus::NeedsFallback, Some(GIVE_UP.to_string()))
+        } else if row.get(walk_words::PRESSED) == Some(&Value::Bool(false)) {
+            (WalkStatus::Failed, Some(PRESS_FAILED.to_string()))
+        } else {
+            (WalkStatus::Stopped, Some(STEPS_SPENT.to_string()))
+        }
+    } else {
+        (WalkStatus::NeedsFallback, Some(NO_JUDGE.to_string()))
+    };
+    read.status = status;
+    read.reason = reason;
+    read
+}
+
+/// One walk: checked by the core's own parser before anything moves, one trip
+/// down the shim — the window walks it, observing, choosing, pressing and
+/// checking on its own marks — and one answer. No picture goes before it (a
+/// walk speaks in no pixels) and none after, unless it pressed at an app and
+/// ended on a screen nobody read.
+fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRoad, settle: bool) -> Result<String, ToolError> {
+    let argv = argv_for(input)?;
+    let command = zerocode_core::computer_use::parse_command(&argv).map_err(ToolError::InvalidInput)?;
+    let budget = u64::try_from(walk_steps(&command.params)).unwrap_or(u64::MAX);
+    let answer = call_shim(road, &argv, ctx.cwd.as_deref())?;
+    let walked = read_walk(&answer, budget);
+    let (surface, target) = [("app", &input.app), ("pane", &input.pane), ("device", &input.device)]
+        .into_iter()
+        .find_map(|(surface, target)| target.as_deref().map(|target| (surface, target)))
+        .unwrap_or_default();
+    let looked_after = (LOOK_AFTER_ACT && walked.pressed > 0 && walked.status.leaves_an_unread_screen() && input.app.is_some())
+        .then(|| look_after(road, ctx, settle));
+    let mut result = answer.get("result").cloned().unwrap_or(Value::Null);
+    let last = result.get(walk_words::ROWS).and_then(Value::as_array).and_then(|rows| rows.last()).cloned();
+    if let Some(result) = result.as_object_mut() {
+        result.remove(walk_words::ROWS);
+    }
+    to_pretty_json(json!({
+        "action": WALK_ACTION,
+        "status": walked.status.word(),
+        "reason": walked.reason,
+        "pressed": walked.pressed,
+        "reachedBy": walked.reached_by,
+        "at": { (surface): target, "step": walked.step },
+        "stepsLeft": walked.steps_left,
+        "lastObservedStep": walked.last_observed_step,
+        "result": result,
+        "lastRow": last,
+        "looked_after": looked_after,
+    }))
+}
+
 pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
     let input: ComputerInput = from_value(input)?;
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
@@ -1333,6 +1598,9 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
     }
     if input.steps.is_some() {
         return Err(ToolError::InvalidInput(format!("`steps` belongs to `batch`, not `{action}`")));
+    }
+    if action == WALK_ACTION {
+        return run_computer_walk(&input, ctx, road, settle);
     }
     // A command the tool cannot spell costs no look.
     argv_for(&input)?;
@@ -1537,6 +1805,8 @@ mod tests {
                 &["recipe-run", "--name", "x", "--params", "{\"text-3\":\"hi\"}", "--start", "3", "--json"]),
             (json!({ "action": "handoff", "text": "Type your password", "timeout_ms": 60000 }),
                 &["handoff", "--reason", "Type your password", "--timeout-ms", "60000", "--json"]),
+            (json!({ "action": "walk", "goal": "도움말에서 설치 안내를 연다", "pane": "browser-13", "until": "설치 안내", "max_steps": 6 }),
+                &["walk", "--goal", "도움말에서 설치 안내를 연다", "--pane", "browser-13", "--until", "설치 안내", "--steps", "6", "--json"]),
         ];
         let mut covered = std::collections::BTreeSet::new();
         for (fields, expected) in cases {
@@ -1653,6 +1923,7 @@ mod tests {
 verb="$1"
 echo "$verb" >> '@DIR@/calls'
 [ "$verb" = batch ] && { printf '%s' "$3" > '@DIR@/batch-commands'; cat '@DIR@/batch'; echo; exit 0; }
+[ "$verb" = walk ] && [ -f '@DIR@/walk' ] && { printf '%s\n' "$*" > '@DIR@/walk-argv'; cat '@DIR@/walk'; echo; exit 0; }
 case "$verb" in
   screenshot|observe)
     cp '@PNG@' '@PNG@'.$$
@@ -2097,6 +2368,235 @@ printf '%s
         assert!(items.as_object().unwrap().len() > 1, "a step carries real properties");
     }
 
+    /// The window's answer to a walk, as `run_goal` writes it: the rows it
+    /// walked, the presses, whether it got there, and the condition's standing
+    /// before the first look when one was given.
+    fn walk_answer(mode: &str, pressed: u64, reached: bool, until_before: Option<bool>, rows: &[Value]) -> Value {
+        let mut said = json!({
+            "goal": "g",
+            (walk_words::MODE): mode,
+            (walk_words::PRESSED): pressed,
+            (walk_words::REACHED): reached,
+            (walk_words::ROWS): rows,
+        });
+        if let Some(before) = until_before {
+            said[walk_words::UNTIL_BEFORE] = json!(before);
+        }
+        json!({ "ok": true, "result": said })
+    }
+
+    fn walk_row(attempt: u64, more: Value) -> Value {
+        let mut row = json!({ (walk_words::ATTEMPT): attempt, (walk_words::OUTCOME): zerocode_core::jev::summary::ANSWERED });
+        if let (Some(row), Value::Object(more)) = (row.as_object_mut(), more) {
+            row.extend(more);
+        }
+        row
+    }
+
+    /// The tool's walk is the CLI's walk: the same goal, screen, condition,
+    /// budget and switches read by the core's own parser into the same
+    /// command, so what the window walks — the mode it reads, the presses it
+    /// may spend, where it stops — cannot differ by who asked. Its fields
+    /// are the walk's own; a batch's `steps` stays the batch's.
+    #[test]
+    fn a_walk_is_the_clis_walk_read_by_the_same_parser() {
+        let parse = |words: &[&str]| {
+            zerocode_core::computer_use::parse_command(&words.iter().map(|word| (*word).to_string()).collect::<Vec<_>>())
+                .expect("the CLI's walk")
+        };
+        let cases: Vec<(Value, Vec<&str>)> = vec![
+            (json!({ "action": "walk", "goal": "g", "pane": "browser-13", "until": "u", "max_steps": 6, "overlap": true }),
+                vec!["walk", "--pane", "browser-13", "--goal", "g", "--steps", "6", "--until", "u", "--overlap", "--json"]),
+            (json!({ "action": "walk", "goal": "g", "app": "Calculator", "rescue": true, "replay": true }),
+                vec!["walk", "--app", "Calculator", "--goal", "g", "--rescue", "--replay", "--json"]),
+            (json!({ "action": "walk", "goal": "g", "platform": "android", "device": "emulator-5554" }),
+                vec!["walk", "--platform", "android", "--device", "emulator-5554", "--goal", "g", "--json"]),
+        ];
+        for (fields, words) in cases {
+            let tool = zerocode_core::computer_use::parse_command(&argv_for(&input(fields.clone())).unwrap()).expect("the tool's walk");
+            let cli = parse(&words);
+            assert_eq!((tool.method, &tool.params, tool.json), (cli.method, &cli.params, cli.json), "{fields}");
+            assert_eq!(walk_steps(&tool.params), walk_steps(&cli.params), "the same budget");
+        }
+        // What a walk may not be is the core's to say, read before anything moves.
+        let ctx = ToolContext::new();
+        let road = ComputerRoad { program: PathBuf::from("/nonexistent/zerocode-computer") };
+        for (fields, why) in [
+            (json!({ "action": "walk", "pane": "browser-1" }), "a goal"),
+            (json!({ "action": "walk", "goal": "   ", "pane": "browser-1" }), "a goal that says something"),
+            (json!({ "action": "walk", "goal": "g" }), "one screen"),
+            (json!({ "action": "walk", "goal": "g", "app": "A", "pane": "browser-1" }), "only one screen"),
+            (json!({ "action": "walk", "goal": "g", "device": "d" }), "a device with its platform"),
+            (json!({ "action": "walk", "goal": "g", "app": "A", "max_steps": WALK_STEPS_MAX + 1 }), "the core's ceiling"),
+            (json!({ "action": "walk", "goal": "g", "app": "A", "until": "" }), "a condition that says something"),
+            (json!({ "action": "walk", "goal": "x".repeat(GOAL_CHAR_CAP + 1), "app": "A" }), "a sentence, not a plan"),
+            (json!({ "action": "walk", "goal": "g", "app": "A", "steps": [{ "action": "wait", "duration": 1 }] }), "a batch's steps"),
+        ] {
+            let refused = run_computer(&fields, &ctx, &road).expect_err(why);
+            assert!(matches!(refused, ToolError::InvalidInput(_)), "{why}: {refused}");
+        }
+        let schema = &tool_specs().pop().expect("one spec").input_schema["properties"];
+        assert_eq!(schema["max_steps"]["maximum"], json!(WALK_STEPS_MAX));
+        assert_eq!(schema["goal"]["maxLength"], json!(GOAL_CHAR_CAP));
+        assert!(schema["steps"]["items"]["properties"].get("goal").is_none(), "a walk is never a batch step");
+    }
+
+    /// Every status from one fixed answer, and none from a press, an `ok` or
+    /// the judgment's own `done` alone.
+    #[test]
+    fn a_walks_answer_reads_into_one_of_five_statuses() {
+        let on = JevMode::On.key();
+        let barred = zerocode_core::jev::summary::BARRED.canonical;
+        let pressed = |attempt: u64, recheck: Option<bool>| {
+            let mut row = walk_row(attempt, json!({ (walk_words::PRESSED): true }));
+            if let Some(recheck) = recheck {
+                row[walk_words::RECHECK] = json!(recheck);
+            }
+            row
+        };
+        let cases: Vec<(&str, Value, WalkStatus, Option<&str>)> = vec![
+            ("until read after a press, absent before", walk_answer(on, 2, true, Some(false), &[pressed(1, Some(false)), pressed(2, Some(true))]),
+                WalkStatus::Verified, None),
+            ("until absent at a check between presses", walk_answer(on, 2, true, None, &[pressed(1, Some(false)), pressed(2, Some(true))]),
+                WalkStatus::Verified, None),
+            ("until held before and never read absent", walk_answer(on, 1, true, Some(true), &[pressed(1, Some(true))]),
+                WalkStatus::NeedsVerification, Some(UNTIL_HELD_BEFORE)),
+            ("the judgment's own done", walk_answer(on, 1, true, None, &[pressed(1, None), walk_row(2, json!({ (walk_words::CHOSEN): "done", (walk_words::REACHED_BY): "judgment" }))]),
+                WalkStatus::NeedsVerification, None),
+            ("recording only", walk_answer(on, 0, false, None, &[walk_row(1, json!({ (walk_words::PRESSED): false, (walk_words::REASON): "seat_recording" }))]),
+                WalkStatus::NeedsFallback, Some("seat_recording")),
+            ("unsure", walk_answer(on, 0, false, None, &[walk_row(1, json!({ (walk_words::PRESSED): false, (barred): walk_words::LOW_CONFIDENCE }))]),
+                WalkStatus::NeedsFallback, Some(walk_words::LOW_CONFIDENCE)),
+            ("unanswered", walk_answer(on, 0, false, None, &[json!({ (walk_words::ATTEMPT): 1, (walk_words::OUTCOME): "unauthorized" })]),
+                WalkStatus::NeedsFallback, Some("unauthorized")),
+            ("a dead end", walk_answer(on, 1, false, None, &[pressed(1, None), walk_row(2, json!({ (walk_words::CHOSEN): GIVE_UP }))]),
+                WalkStatus::NeedsFallback, Some(GIVE_UP)),
+            ("a guard's refusal", walk_answer(on, 0, false, None, &[walk_row(1, json!({ (walk_words::PRESSED): false, (barred): "injected", (walk_words::REASON): "injected" }))]),
+                WalkStatus::Stopped, Some("injected")),
+            ("the clock spent", walk_answer(on, 1, false, None, &[pressed(1, None), json!({ (walk_words::ATTEMPT): 2, (walk_words::OUTCOME): "barred", (barred): "no_budget" })]),
+                WalkStatus::Stopped, Some("no_budget")),
+            ("every step spent", walk_answer(on, 2, false, Some(false), &[pressed(1, Some(false)), pressed(2, Some(false))]),
+                WalkStatus::Stopped, Some(STEPS_SPENT)),
+            ("the person's stop", json!({ "ok": false, "error": { "code": error_code::STOPPED, "message": "stopped" } }),
+                WalkStatus::Stopped, Some(error_code::STOPPED)),
+            ("the screen would not move", walk_answer(on, 2, false, None, &[pressed(1, None), pressed(2, None), json!({ (walk_words::ATTEMPT): 3, (walk_words::OUTCOME): walk_words::STUCK, (walk_words::PRESSED): 2 })]),
+                WalkStatus::Failed, Some(walk_words::STUCK)),
+            ("a press the hand could not make", walk_answer(on, 0, false, None, &[walk_row(1, json!({ (walk_words::PRESSED): false }))]),
+                WalkStatus::Failed, Some(PRESS_FAILED)),
+            ("no look came back", walk_answer(on, 0, false, None, &[json!({ (walk_words::ATTEMPT): 1, (walk_words::OUTCOME): walk_words::NO_LOOK })]),
+                WalkStatus::Failed, Some(walk_words::NO_LOOK)),
+            ("a refusal that is no stop", json!({ "ok": false, "error": { "code": error_code::INVALID_ARGUMENT, "message": "x" } }),
+                WalkStatus::Failed, Some(error_code::INVALID_ARGUMENT)),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for (case, answer, status, reason) in cases {
+            let read = read_walk(&answer, 6);
+            assert_eq!((read.status, read.reason.as_deref()), (status, reason), "{case}");
+            seen.insert(status.word());
+        }
+        assert_eq!(seen.len(), WalkStatus::ALL.len(), "every status has a case");
+        // The facts beside the status: where it ended, what the budget still
+        // holds, the last look the judgment answered on, and how it got there.
+        let read = read_walk(&walk_answer(on, 2, true, Some(false), &[pressed(1, Some(false)), pressed(2, Some(true))]), 6);
+        assert_eq!((read.pressed, read.step, read.steps_left, read.last_observed_step), (2, Some(2), 4, Some(2)));
+        assert_eq!(read.reached_by.as_deref(), Some(REACHED_BY_UNTIL));
+        // `ok`, presses and a `reached` with nothing to show for it are not
+        // verified.
+        let bare = read_walk(&walk_answer(on, 3, true, None, &[pressed(1, None), pressed(2, None), pressed(3, None)]), 6);
+        assert_eq!(bare.status, WalkStatus::NeedsVerification);
+    }
+
+    /// A walk that could not start — the seat off, or on with no judge —
+    /// answers so the first time, from one call: no second walk, no click, no
+    /// look, and nothing written (the tool writes no setting at all).
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_that_cannot_apply_says_why_the_first_time() {
+        for (mode, reason) in [(JevMode::Off.key(), SEAT_OFF), (JevMode::On.key(), NO_JUDGE), (JevMode::Auto.key(), NO_JUDGE)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (road, _) = fake_shim(dir.path());
+            std::fs::write(dir.path().join("walk"), walk_answer(mode, 0, false, None, &[]).to_string()).unwrap();
+            let ctx = ToolContext::new();
+            let said: Value = serde_json::from_str(
+                &run_computer(&json!({ "action": "walk", "goal": "g", "app": "Calculator" }), &ctx, &road).unwrap(),
+            )
+            .unwrap();
+            assert_eq!((said["status"].as_str(), said["reason"].as_str()), (Some(WalkStatus::NeedsFallback.word()), Some(reason)), "{mode}");
+            assert_eq!(said["result"][walk_words::MODE], json!(mode), "the seat's standing as the window read it");
+            assert_eq!(calls(dir.path()), ["walk"], "one call, no look, no press: {mode}");
+            assert_eq!(staged(&ctx), 0);
+        }
+    }
+
+    /// A walk carries its own looks: none before it (it speaks in no pixels),
+    /// none after a walk that ended on a screen it read — and one after a walk
+    /// that pressed at an app and ended on a screen nobody read.
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_pays_no_look_it_does_not_need() {
+        let on = JevMode::On.key();
+        let pressed = |attempt: u64, recheck: bool| walk_row(attempt, json!({ (walk_words::PRESSED): true, (walk_words::RECHECK): recheck }));
+        let stuck = json!({ (walk_words::ATTEMPT): 2, (walk_words::OUTCOME): walk_words::STUCK, (walk_words::PRESSED): 1 });
+        for (screen, answer, looks) in [
+            (json!({ "pane": "browser-13" }), walk_answer(on, 1, true, Some(false), &[pressed(1, true)]), false),
+            (json!({ "app": "Calculator" }), walk_answer(on, 1, true, Some(false), &[pressed(1, true)]), false),
+            (json!({ "app": "Calculator" }), walk_answer(on, 1, false, None, &[pressed(1, false), stuck.clone()]), true),
+            (json!({ "pane": "browser-13" }), walk_answer(on, 1, false, None, &[pressed(1, false), stuck.clone()]), false),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (road, _) = fake_shim(dir.path());
+            std::fs::write(dir.path().join("walk"), answer.to_string()).unwrap();
+            let ctx = ToolContext::new();
+            let mut fields = json!({ "action": "walk", "goal": "도움말에서 설치 안내를 연다", "until": "설치 안내", "max_steps": 6 });
+            for (key, value) in screen.as_object().unwrap() {
+                fields[key] = value.clone();
+            }
+            let said: Value = serde_json::from_str(&run_computer(&fields, &ctx, &road).unwrap()).unwrap();
+            let expected: &[&str] = if looks { &["walk", "observe"] } else { &["walk"] };
+            assert_eq!(calls(dir.path()), expected, "{screen}: {said}");
+            assert_eq!(said["looked_after"].is_null(), !looks);
+            assert_eq!(said["first_look"], Value::Null);
+            assert!(said["result"].get(walk_words::ROWS).is_none(), "the rows stay the ledger's; the last is shown");
+            assert!(said["lastRow"].is_object());
+        }
+    }
+
+    /// The skill's road table: every road a model may take, each named by
+    /// the words the zo tool and the CLI actually take, and a walk example
+    /// the tool reads as the CLI's walk.
+    #[test]
+    fn the_skill_names_every_road_by_its_real_words() {
+        let skill = include_str!("../../../../skills/computer-use/SKILL.md");
+        let table = &skill[skill.find("## Choosing a road").expect("the road table")..];
+        let table = &table[..table[3..].find("\n## ").map_or(table.len(), |end| end + 3)];
+        for road in ["batch", "recipe_run", WALK_ACTION, ComputerMethod::ReflexStart.verb_name()] {
+            assert!(table.contains(&format!("`{road}`")) || table.contains(road), "the table names {road}");
+        }
+        for action in ["left_click", BATCH_ACTION, "recipe_run", WALK_ACTION] {
+            assert!(ACTIONS.iter().any(|(name, _)| *name == action), "{action} is a Computer action");
+            assert!(table.contains(&format!("`{action}`")), "the table names the zo action `{action}`");
+        }
+        assert!(table.contains("zerocode-computer walk --goal"), "the one line other agents are given");
+        assert!(
+            table.split_whitespace().collect::<Vec<_>>().join(" ").contains(&format!(
+                "{} by default, {WALK_STEPS_MAX} at most",
+                zerocode_core::computer_use::WALK_STEPS_DEFAULT
+            )),
+            "the table says the core's budget"
+        );
+        let example = table
+            .split("```json")
+            .nth(1)
+            .and_then(|block| block.split("```").next())
+            .expect("a walk example");
+        let example: Value = serde_json::from_str(example).expect("the example is JSON");
+        let command = zerocode_core::computer_use::parse_command(&argv_for(&input(example)).unwrap()).expect("the example walks");
+        assert_eq!(command.method, ComputerMethod::Walk);
+        for status in WalkStatus::ALL {
+            assert!(table.contains(&format!("`{}`", status.word())), "the table says what {} means", status.word());
+        }
+    }
+
     /// A step's fields are exactly the ones a step's actions read: set every
     /// field, take one away, and see whether any batchable action's command
     /// line changes.
@@ -2137,10 +2637,11 @@ printf '%s
     /// (one name in both enums, one field in both, one sentence) ~52, a
     /// look by `observe` and a press by `element_index` (one name, one field,
     /// one sentence; never a batch step) ~42, a press by reading (label and role
-    /// with app, a sentence and the plan-it-whole clause) ~40.
+    /// with app, a sentence and the plan-it-whole clause) ~40, a walk (one
+    /// name, eight fields, `until` read by two actions, one sentence) ~134.
     #[test]
     fn the_computer_schema_is_measured() {
-        const CEILING_TOKENS: usize = 1_685;
+        const CEILING_TOKENS: usize = 1_820;
         let spec = tool_specs().pop().expect("one spec");
         let definition = json!({ "name": spec.name, "description": spec.description, "input_schema": spec.input_schema });
         let compact = serde_json::to_string(&definition).unwrap().chars().count();

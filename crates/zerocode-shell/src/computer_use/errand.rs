@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use zerocode_core::branching::{BranchAsk, NextStep};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
+use zerocode_core::computer_use::walk_words;
 use zerocode_core::guarded::{ControlKind, kind_of};
 use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS, MODEL};
@@ -738,7 +739,7 @@ impl Barred {
             Self::NoResume => "no_resume",
             Self::NoBudget => "no_budget",
             Self::NoSteps => "no_steps",
-            Self::LowConfidence => "low_confidence",
+            Self::LowConfidence => walk_words::LOW_CONFIDENCE,
             Self::Injected => Stopped::Injected.word(),
             Self::Walled => Stopped::Walled.word(),
         }
@@ -862,7 +863,7 @@ const USE_FALLBACK: &str = zerocode_core::jev::ROUTE_USE_FALLBACK;
 /// never went out although the judgment named a number. Written here and read
 /// by [`no_press_reason`] alone, so the walk's rows and the words it answers
 /// in cannot come to spell it differently.
-pub(crate) const REASON: &str = "reason";
+pub(crate) const REASON: &str = walk_words::REASON;
 
 /// The key a row names the kind of control its judgment named under
 /// ([`ControlKind::word`], t-6187): what the press rule read, and what a
@@ -986,7 +987,7 @@ fn row(mode: Mode, at: &Errand<'_>, attempt: usize, more: Value) -> Value {
         "errand": at.key(),
         "mode": mode.key(),
         "rubricVersion": SCREEN_ACTION_RUBRIC_VERSION,
-        "attempt": attempt,
+        (walk_words::ATTEMPT): attempt,
     });
     if let Why::Cleared { stop, step, .. } = at.why
         && let Some(row) = row.as_object_mut()
@@ -1104,7 +1105,7 @@ fn agree(walked: &mut Walked) {
         return;
     };
     for row in &mut walked.rows {
-        if row.get("pressed").and_then(Value::as_bool) == Some(true) {
+        if row.get(walk_words::PRESSED).and_then(Value::as_bool) == Some(true) {
             note(row, AGREED.canonical, json!(agreed));
         }
     }
@@ -1183,9 +1184,12 @@ fn walk(
         }
         let looking = std::time::Instant::now();
         let Some(screen) = world.look() else {
-            walked
-                .rows
-                .push(row(mode, at, attempt, json!({ "outcome": "no_look" })));
+            walked.rows.push(row(
+                mode,
+                at,
+                attempt,
+                json!({ (walk_words::OUTCOME): walk_words::NO_LOOK }),
+            ));
             return walked;
         };
         let look_ms = u64::try_from(looking.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1212,7 +1216,7 @@ fn walk(
                         mode,
                         at,
                         attempt,
-                        json!({ "outcome": "stuck", "pressed": walked.pressed }),
+                        json!({ (walk_words::OUTCOME): walk_words::STUCK, (walk_words::PRESSED): walked.pressed }),
                     ));
                     return walked;
                 }
@@ -1311,7 +1315,7 @@ fn walk(
         let mut said = overlapped(
             stamped(
                 json!({
-                    "outcome": "answered",
+                    (walk_words::OUTCOME): zerocode_core::jev::summary::ANSWERED,
                     "candidates": candidates,
                     "showsLines": shows_lines,
                     "pressedBefore": pressed_so_far.len(),
@@ -1380,7 +1384,7 @@ fn walk(
                     Chosen::Done => zerocode_core::screen_action::DONE,
                     _ => zerocode_core::screen_action::GIVE_UP,
                 };
-                note(&mut said, "chosen", json!(ended));
+                note(&mut said, walk_words::CHOSEN, json!(ended));
                 note(&mut said, "routeUse", json!(USE_FALLBACK));
                 // Giving up is the judgment saying the presses so far led
                 // nowhere; `done` is it saying the opposite about a screen
@@ -1393,14 +1397,14 @@ fn walk(
                     // The weaker of the two ends: nothing was checked, the
                     // judgment simply says it is there. The row says which
                     // end it was, so evidence never reads one as the other.
-                    note(&mut said, "reachedBy", json!("judgment"));
+                    note(&mut said, walk_words::REACHED_BY, json!("judgment"));
                     walked.reached = Some(true);
                 }
                 walked.rows.push(row(mode, at, attempt, said));
                 return walked;
             }
         };
-        note(&mut said, "chosen", json!(option_of(chosen)));
+        note(&mut said, walk_words::CHOSEN, json!(option_of(chosen)));
         if typing {
             note(&mut said, OPERATION, json!(TYPE_TEXT));
         }
@@ -1425,7 +1429,7 @@ fn walk(
         // screen that had nothing worth pressing (t-5455).
         if !acting {
             note(&mut said, "routeUse", json!(USE_SHADOW));
-            note(&mut said, "pressed", json!(false));
+            note(&mut said, walk_words::PRESSED, json!(false));
             note(&mut said, REASON, json!(SEAT_RECORDING));
             walked.rows.push(row(mode, at, attempt, said));
             return walked;
@@ -1441,7 +1445,7 @@ fn walk(
             // The walk's own answer says why no hand went out
             // ([`no_press_reason`]), so the one who asked can tell the person.
             note(&mut said, REASON, json!(word));
-            note(&mut said, "pressed", json!(false));
+            note(&mut said, walk_words::PRESSED, json!(false));
             note(&mut said, "routeUse", json!(USE_FALLBACK));
             walked.rows.push(row(mode, at, attempt, said));
             return walked;
@@ -1496,7 +1500,7 @@ fn walk(
                     walked.rescued += 1;
                     chosen = mark;
                     note(&mut said, RESCUED_BY, json!(RESCUED_BY_TEAM));
-                    note(&mut said, "chosen", json!(option_of(mark)));
+                    note(&mut said, walk_words::CHOSEN, json!(option_of(mark)));
                     note(
                         &mut said,
                         CONTROL_KIND,
@@ -1508,7 +1512,7 @@ fn walk(
                         walked.rescue_failed += 1;
                     }
                     note(&mut said, BARRED, json!(Barred::LowConfidence.as_str()));
-                    note(&mut said, "pressed", json!(false));
+                    note(&mut said, walk_words::PRESSED, json!(false));
                     note(&mut said, "routeUse", json!(USE_FALLBACK));
                     walked.rows.push(row(mode, at, attempt, said));
                     return walked;
@@ -1544,7 +1548,7 @@ fn walk(
                     }
                     walked.pressed += 1;
                     walked.typed += 1;
-                    note(&mut said, "pressed", json!(true));
+                    note(&mut said, walk_words::PRESSED, json!(true));
                     note(&mut said, "routeUse", json!(USE_APPLIED));
                 }
                 Typed::Refused(token) => {
@@ -1554,7 +1558,7 @@ fn walk(
                     note(&mut said, REASON, json!(token));
                     note(&mut said, TYPED, json!({ "outcome": token }));
                     note(&mut said, "routeUse", json!(USE_FALLBACK));
-                    note(&mut said, "pressed", json!(false));
+                    note(&mut said, walk_words::PRESSED, json!(false));
                     walked.rows.push(row(mode, at, attempt, said));
                     return walked;
                 }
@@ -1649,14 +1653,14 @@ fn walk(
             };
             if !pressed {
                 note(&mut said, "routeUse", json!(USE_FALLBACK));
-                note(&mut said, "pressed", json!(false));
+                note(&mut said, walk_words::PRESSED, json!(false));
                 walked.rows.push(row(mode, at, attempt, said));
                 return walked;
             }
             tried.push(chosen);
             pressed_so_far.push(legend);
             walked.pressed += 1;
-            note(&mut said, "pressed", json!(true));
+            note(&mut said, walk_words::PRESSED, json!(true));
             note(&mut said, "routeUse", json!(USE_APPLIED));
             let settled = world.settled();
             if let Some(settled) = &settled {
@@ -1733,7 +1737,7 @@ fn walk(
                 let cleared = after
                     .as_ref()
                     .is_some_and(|report| cleared_past(report, next));
-                note(&mut said, "recheck", json!(cleared));
+                note(&mut said, walk_words::RECHECK, json!(cleared));
                 walked.agreed = Some(cleared);
                 walked.rows.push(row(mode, at, attempt, said));
                 walked.report = after;
@@ -1758,7 +1762,7 @@ fn walk(
                 // word about itself.
                 let reached = world.reached();
                 if let Some(reached) = reached {
-                    note(&mut said, "recheck", json!(reached));
+                    note(&mut said, walk_words::RECHECK, json!(reached));
                     walked.agreed = Some(reached);
                 }
                 walked.rows.push(row(mode, at, attempt, said));
