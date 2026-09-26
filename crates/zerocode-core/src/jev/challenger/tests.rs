@@ -284,6 +284,33 @@ fn every_holding_and_every_side_writes_a_word_of_its_own() {
     assert_ne!(Receipt::Passed.token(), Receipt::Failed.token());
 }
 
+/// 판정자에게 묻는 말 — 질문, 선택지 셋과 그 뜻, state 키 — 은 버전에 핀된다
+/// (t-9469). 말 한 글자가 바뀌면 [`crate::jev::questions::CHALLENGER_RUBRIC_VERSION`]을
+/// 올리고 이 지문을 다시 핀하기 전까지 빨갛다. 요청이 싣는 말은 모두 지문이 읽는 그 말이다.
+#[test]
+fn the_version_is_pinned_to_the_words() {
+    assert_eq!(crate::jev::questions::CHALLENGER_RUBRIC_VERSION, 1);
+    assert_eq!(
+        crate::jev::rubric_fingerprint(super::rubric_words),
+        "2c7f088c2b26b907"
+    );
+    let asked = ask(
+        "dp-words",
+        "task",
+        &Designs {
+            incumbent: "a",
+            challenger: "b",
+        },
+    );
+    let question = &asked.questions[super::QUESTION];
+    assert_eq!(question["instructions"], json!(super::INSTRUCTIONS));
+    let criteria = question["criteria"].as_object().expect("criteria");
+    assert_eq!(criteria.len(), OPTIONS.len());
+    for (option, means) in OPTIONS.iter().zip(super::OPTION_MEANS) {
+        assert_eq!(criteria[*option], json!(means), "{option}");
+    }
+}
+
 /// 판정자는 이름을 보지 않는다 — 상태에는 어느 쪽이 누구인지도, 모델 이름도 없다.
 #[test]
 fn the_judge_is_shown_two_designs_under_no_name_in_the_blinds_order() {

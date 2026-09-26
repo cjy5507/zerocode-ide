@@ -15560,8 +15560,18 @@ fn a_summons_is_judged_over_the_agents_that_could_carry_it_this_minute() {
     let asked = crate::summon_choice::ask(&shadow.look(), &shadow.options)
         .expect("two agents are a question");
     assert_eq!(asked.options(), ["claude", "kimi"]);
+    // The state names agents only as the options it offers — every one, once,
+    // in the order offered, each with its own room and record (t-9469) — so
+    // nothing in it singles out the agent already typed.
+    let named: Vec<&str> = asked.state["agents"]
+        .as_array()
+        .expect("the agents offered")
+        .iter()
+        .map(|agent| agent["id"].as_str().expect("an id"))
+        .collect();
+    assert_eq!(named, asked.options());
     assert!(
-        !asked.state.to_string().contains("claude"),
+        asked.state.get("agent").is_none(),
         "the state named the agent already typed: {}",
         asked.state
     );

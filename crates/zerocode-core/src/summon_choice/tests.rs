@@ -41,13 +41,24 @@ fn look() -> SummonLook<'static> {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    // Version 5 is version 4's words under a label that leaves pinned
-    // summonses unmarked (t-9087), so the fingerprint stands.
-    assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 5);
+    // Version 6 moves each agent's room and record out of its option's
+    // sentence and into the state's `agents` (t-9469): what the question
+    // reads changed, so the series starts again.
+    assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 6);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "1d5d6af8efffc1de"
+        "f8e0588f5fb7f459"
     );
+}
+
+/// The one entry `agents` holds for `id`.
+fn entry<'a>(state: &'a Value, id: &str) -> &'a Value {
+    state[AGENTS_KEY]
+        .as_array()
+        .expect("the agents offered")
+        .iter()
+        .find(|agent| agent[AGENT_KEYS[0]] == json!(id))
+        .unwrap_or_else(|| panic!("no entry for {id}: {state}"))
 }
 
 /// A choice between one agent is not a choice. A summons on a machine with
@@ -61,30 +72,34 @@ fn one_option_is_not_a_question() {
     assert!(ask(&look(), &[room("claude", Some(61)), room("codex", None)]).is_some());
 }
 
-/// Each option says its own id and the room its provider has left, and an
-/// agent whose gauge nobody read says exactly that — which is not the same
-/// sentence as one that has room, and not the same as one that is empty.
+/// Each option says what choosing it means and nothing it weighs: the room
+/// its provider has left is a field of its entry in `agents`, and an agent
+/// whose gauge nobody read carries no number there — which is not the same
+/// as one that has room, and not the same as one that is empty (t-9469).
 #[test]
-fn an_option_says_the_room_this_window_has_actually_read() {
+fn an_option_says_what_choosing_it_means_and_its_room_is_a_field() {
     let asked = ask(&look(), &[room("claude", Some(61)), room("cursor", None)])
         .expect("two agents are a question");
     assert_eq!(asked.options(), ["claude", "cursor"]);
     let criteria = &asked.questions["summon"]["criteria"];
-    assert_eq!(
-        criteria["claude"],
-        json!(
-            "claude. 61% of its weekly quota is already spent on this machine. This window \
-             has never summoned it, so nothing this machine measured says how it does."
-        )
-    );
-    assert_eq!(
-        criteria["cursor"],
-        json!(
-            "cursor. This machine has read no quota gauge for it, so how much room it has is \
-             unknown. This window has never summoned it, so nothing this machine measured \
-             says how it does."
-        )
-    );
+    for id in ["claude", "cursor"] {
+        assert_eq!(
+            criteria[id],
+            json!(OPTION_MEANS.replace("{agent}", id)),
+            "an option's words are its meaning, the same sentence for every agent"
+        );
+        let said = criteria[id].as_str().expect("a description");
+        assert!(
+            !said.chars().any(|glyph| glyph.is_ascii_digit()),
+            "an option carries no number: {said}"
+        );
+    }
+    let claude = entry(&asked.state, "claude");
+    assert_eq!(claude[AGENT_KEYS[1]], json!(61));
+    assert_eq!(claude[AGENT_KEYS[2]], json!("weekly"));
+    let cursor = entry(&asked.state, "cursor");
+    assert_eq!(cursor[AGENT_KEYS[1]], Value::Null, "no gauge was read");
+    assert_eq!(cursor[AGENT_KEYS[2]], Value::Null);
 }
 
 /// The endpoint reads a question's kind off its own tag: a body without one
@@ -100,7 +115,9 @@ fn the_question_wears_the_tag_the_endpoint_reads_its_kind_from() {
 
 /// The state is the summons' shape and not the summons — and above all it
 /// does not carry the agent the coordinator typed. A question that shows the
-/// answer somebody already wrote down is not a second opinion.
+/// answer somebody already wrote down is not a second opinion. The agents it
+/// names are the options, every one of them, each once and in the order
+/// offered, so nothing in it singles one out.
 #[test]
 fn the_state_is_the_shape_and_never_the_coordinators_own_choice() {
     let asked = ask(&look(), &[room("claude", Some(61)), room("codex", Some(9))])
@@ -122,9 +139,37 @@ fn the_state_is_the_shape_and_never_the_coordinators_own_choice() {
     assert_eq!(state["task"], json!(true));
     assert_eq!(state["attempts"], json!(0));
     assert_eq!(state["failures"], json!(0));
+    let named: Vec<&str> = state[AGENTS_KEY]
+        .as_array()
+        .expect("the agents offered")
+        .iter()
+        .map(|agent| agent[AGENT_KEYS[0]].as_str().expect("an id"))
+        .collect();
+    assert_eq!(named, asked.options(), "every option, once, in order");
+    for agent in state[AGENTS_KEY].as_array().expect("the agents offered") {
+        let mut keys: Vec<&str> = agent
+            .as_object()
+            .expect("an entry")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = AGENT_KEYS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "an entry's keys are the fingerprint's");
+    }
     let said = state.to_string();
-    for word in ["claude", "codex", "opus", "model", "effort"] {
+    for word in ["opus", "model", "effort"] {
         assert!(!said.contains(word), "the state named `{word}`: {said}");
+    }
+    // And the question names every key it reads, the state's and each
+    // entry's, by its path (t-9469): a key the words never name is evidence
+    // the model has to guess the meaning of.
+    for key in STATE_KEYS.iter().chain(&AGENT_KEYS) {
+        assert!(
+            INSTRUCTIONS.contains(&format!("`{key}`")),
+            "the question never names `{key}`"
+        );
     }
 }
 
@@ -202,11 +247,12 @@ fn an_answer_is_judged_against_the_set_that_was_asked() {
     assert_eq!(NOT_COMPARED_KEY, "notCompared");
 }
 
-/// An option says what this ledger has summoned the agent for — the free
-/// hindsight a coordinator's own choices leave behind — and says plainly
-/// when it never has, instead of implying a history nobody wrote.
+/// An agent's entry says what this ledger has summoned it for — the free
+/// hindsight a coordinator's own choices leave behind — against the offered
+/// set's own total, and says plainly when it never has: a zero, and no task,
+/// instead of a history nobody wrote.
 #[test]
-fn an_option_carries_the_ledgers_own_summons_history() {
+fn an_entry_carries_the_ledgers_own_summons_history() {
     let seasoned = Summonable {
         record: AgentRecord {
             launched: 12,
@@ -215,11 +261,6 @@ fn an_option_carries_the_ledgers_own_summons_history() {
         },
         ..room("claude", Some(61))
     };
-    let said = seasoned.means(12);
-    assert!(said.contains("summoned it 12 of the 12 times"), "{said}");
-    assert!(said.contains("measure the seat's latency"), "{said}");
-    let fresh = room("kimi", None).means(12);
-    assert!(fresh.contains("never summoned it"), "{fresh}");
     let bare = Summonable {
         record: AgentRecord {
             launched: 1,
@@ -227,16 +268,64 @@ fn an_option_carries_the_ledgers_own_summons_history() {
         },
         ..room("codex", None)
     };
-    assert!(bare.means(1).contains("no task"), "{}", bare.means(1));
+    let asked =
+        ask(&look(), &[seasoned, room("kimi", None), bare]).expect("three agents are a question");
+    assert_eq!(asked.state[SUMMONED_ALL_KEY], json!(13), "12 + 0 + 1");
+    let claude = entry(&asked.state, "claude");
+    assert_eq!(claude[AGENT_KEYS[3]], json!(12));
+    assert_eq!(
+        claude[AGENT_KEYS[7]],
+        json!(["measure the seat's latency on the installed build"])
+    );
+    let kimi = entry(&asked.state, "kimi");
+    assert_eq!(kimi[AGENT_KEYS[3]], json!(0), "never summoned");
+    assert_eq!(kimi[AGENT_KEYS[7]], json!([]));
+    let codex = entry(&asked.state, "codex");
+    assert_eq!(codex[AGENT_KEYS[3]], json!(1));
+    assert_eq!(
+        codex[AGENT_KEYS[7]],
+        json!([]),
+        "a pane summoned with no task"
+    );
 }
 
-/// An option says what became of the work, not only how often it was
-/// chosen. A count alone left the judgment naming an agent this ledger had
-/// never summoned in eleven of seventeen disagreements (t-5873), because
-/// "never summoned" and "summoned 265 times" read as equally neutral facts
-/// when neither says what came back.
+/// A task title is the coordinators' own words: each leaves cut to its cap,
+/// at most the newest few, and only as a field of the state the door clears
+/// (`crate::jev::SUMMON`'s `sends`) — never inside an option's sentence.
 #[test]
-fn an_option_says_what_became_of_the_work_this_ledger_gave_it() {
+fn a_task_title_is_a_field_cut_to_its_cap() {
+    let long = "가".repeat(SUMMON_RECENT_BRIEF_CHAR_CAP + 40);
+    let seasoned = Summonable {
+        record: AgentRecord {
+            launched: 3,
+            recent_briefs: vec![long.clone(), "two".to_string(), "three".to_string()],
+            ..AgentRecord::default()
+        },
+        ..room("claude", Some(61))
+    };
+    let asked = ask(&look(), &[seasoned, room("kimi", None)]).expect("two agents are a question");
+    let titles = entry(&asked.state, "claude")[AGENT_KEYS[7]]
+        .as_array()
+        .expect("titles")
+        .clone();
+    assert_eq!(titles.len(), 3);
+    assert_eq!(
+        titles[0].as_str().map(|title| title.chars().count()),
+        Some(SUMMON_RECENT_BRIEF_CHAR_CAP)
+    );
+    assert!(
+        !asked.questions.to_string().contains("가"),
+        "a title reached an option's words"
+    );
+}
+
+/// An entry says what became of the work, not only how often it was chosen.
+/// A count alone left the judgment naming an agent this ledger had never
+/// summoned in eleven of seventeen disagreements (t-5873), because "never
+/// summoned" and "summoned 265 times" read as equally neutral facts when
+/// neither says what came back.
+#[test]
+fn an_entry_says_what_became_of_the_work_this_ledger_gave_it() {
     let folded = records(&[
         // Three ended: two reached `worker_done`, at 10, 30 and 50 minutes.
         carried("claude", 1_000, Some((1_000 + 10 * 60_000, true))),
@@ -262,27 +351,30 @@ fn an_option_says_what_became_of_the_work_this_ledger_gave_it() {
         ],
         "the newest summonses name the newest tasks, newest first"
     );
-    let said = Summonable {
-        record: claude.clone(),
-        ..room("claude", Some(61))
-    }
-    .means(5);
-    assert!(
-        said.contains("Of the 3 of those whose work has ended"),
-        "{said}"
-    );
-    assert!(said.contains("2 reached worker_done"), "{said}");
-    assert!(said.contains("median 30 minutes"), "{said}");
-
     // An agent summoned once, still running, has a history and no record —
-    // and says so rather than showing a zero that reads as a failure.
+    // and says so rather than showing a median that reads as a failure.
     let codex = folded.get("codex").expect("a record");
     assert_eq!((codex.launched, codex.carried), (1, 0));
     assert_eq!(codex.median_minutes, None);
-    let said = Summonable {
-        record: codex.clone(),
-        ..room("codex", None)
-    }
-    .means(5);
-    assert!(said.contains("None of that work has ended yet"), "{said}");
+    let asked = ask(
+        &look(),
+        &[
+            Summonable {
+                record: claude.clone(),
+                ..room("claude", Some(61))
+            },
+            Summonable {
+                record: codex.clone(),
+                ..room("codex", None)
+            },
+        ],
+    )
+    .expect("two agents are a question");
+    let said = entry(&asked.state, "claude");
+    assert_eq!(said[AGENT_KEYS[4]], json!(3), "ended");
+    assert_eq!(said[AGENT_KEYS[5]], json!(2), "reached worker_done");
+    assert_eq!(said[AGENT_KEYS[6]], json!(30), "median minutes");
+    let said = entry(&asked.state, "codex");
+    assert_eq!(said[AGENT_KEYS[4]], json!(0), "none of it has ended yet");
+    assert_eq!(said[AGENT_KEYS[6]], Value::Null, "no median over nothing");
 }

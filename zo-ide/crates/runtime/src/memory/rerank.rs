@@ -231,6 +231,33 @@ fn position_of(question_id: &str) -> Option<usize> {
     question_id.strip_prefix(QUESTION_ID_PREFIX)?.parse().ok()
 }
 
+/// The state's keys, in the order the fingerprint reads them: the person's
+/// request, and the notes put to the judgment.
+const RERANK_STATE_KEYS: [&str; 2] = ["request", "notes"];
+
+/// The keys of one note in `notes`, in the order the fingerprint reads them.
+const RERANK_NOTE_KEYS: [&str; 2] = ["name", "summary"];
+
+/// The question one note is rated under. It names the note by its path in
+/// the state, because a question id is never sent; spelled once, for the
+/// questions and for the words the version is pinned to ([`rubric_words`]).
+fn rerank_instructions(position: usize) -> String {
+    format!("How much does `notes[{position}]` help with `request`?")
+}
+
+/// The words the recall seat asks, as one string: the question one note is
+/// rated under, the four levels, and the keys the state and each note carry.
+/// [`RERANK_RUBRIC_VERSION`] is pinned to it, so a word changed without a
+/// version is a red test rather than a quiet drift (t-9469).
+#[must_use]
+pub fn rubric_words() -> String {
+    let mut words = vec![rerank_instructions(0)];
+    words.extend(RERANK_LEVELS.iter().map(|level| (*level).to_string()));
+    words.push(RERANK_STATE_KEYS.join(","));
+    words.push(RERANK_NOTE_KEYS.join(","));
+    words.join("\n")
+}
+
 /// One note put to the judgment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerankCandidate {
@@ -283,10 +310,10 @@ pub fn rerank_state(request: &str, candidates: &[RerankCandidate]) -> Value {
         None => request,
     };
     json!({
-        "request": request,
-        "notes": candidates
+        RERANK_STATE_KEYS[0]: request,
+        RERANK_STATE_KEYS[1]: candidates
             .iter()
-            .map(|candidate| json!({"name": candidate.slug, "summary": candidate.summary}))
+            .map(|candidate| json!({RERANK_NOTE_KEYS[0]: candidate.slug, RERANK_NOTE_KEYS[1]: candidate.summary}))
             .collect::<Vec<_>>(),
     })
 }
@@ -301,13 +328,9 @@ pub fn rerank_questions(candidates: &[RerankCandidate]) -> BTreeMap<String, Syst
     candidates
         .iter()
         .map(|candidate| {
-            let instructions = format!(
-                "How much does `notes[{}]` help with `request`?",
-                candidate.position
-            );
             (
                 candidate.question_id.clone(),
-                SystemOneQuestion::score(&instructions, RERANK_LEVELS),
+                SystemOneQuestion::score(&rerank_instructions(candidate.position), RERANK_LEVELS),
             )
         })
         .collect()
@@ -879,6 +902,27 @@ mod tests {
             !rendered.contains("/Users/"),
             "a store path answers nothing about relevance and must not leave: {rendered}"
         );
+    }
+
+    /// The recall seat's words are pinned to its version (t-9469): the
+    /// question a note is rated under, the four levels and the keys the state
+    /// carries. A word changed without a version is red here, and the
+    /// question names every key the state carries.
+    #[test]
+    fn the_version_is_pinned_to_the_words() {
+        assert_eq!(RERANK_RUBRIC_VERSION, 1);
+        assert_eq!(zerocode_core::jev::rubric_fingerprint(rubric_words), "dc314a35f7b09af6");
+        let asked = rerank_instructions(0);
+        for key in RERANK_STATE_KEYS {
+            assert!(asked.contains(&format!("`{key}")), "{key}: {asked}");
+        }
+        let state = rerank_state("request", &rerank_candidates(&[hit("wiki/a", "a claim")]));
+        let mut keys: Vec<&str> = state.as_object().expect("an object").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["notes", "request"]);
+        let mut note: Vec<&str> = state["notes"][0].as_object().expect("a note").keys().map(String::as_str).collect();
+        note.sort_unstable();
+        assert_eq!(note, RERANK_NOTE_KEYS);
     }
 
     #[test]

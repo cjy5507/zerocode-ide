@@ -17,11 +17,16 @@
 //! suggestion. One whose spent number is too old to refuse on IS an option:
 //! the gate would summon it, so the choice has to be able to name it.
 //!
-//! **What this window says about an agent, and what it does not.** The criteria
-//! carry an agent's id, the room its provider has left, and this ledger's own
-//! record of it — how many times the coordinators here chose it, what became
-//! of that work, how long it took, and what its newest summons was for
-//! ([`AgentRecord`]). There is still no table of which agent is good at what,
+//! **What this window says about an agent, and what it does not.** The state
+//! carries, for each agent offered, its id, the room its provider has left,
+//! and this ledger's own record of it — how many times the coordinators here
+//! chose it, what became of that work, how long it took, and what its newest
+//! summonses were for ([`AgentRecord`]) — each a field of the agent's entry in
+//! `agents`, and an option says only what choosing it means (t-9469: until
+//! then each option's words were a sentence the numbers were poured into, so
+//! the judgment had to parse what it weighed out of prose, and the task
+//! titles in them never passed the door). There is still no table of which
+//! agent is good at what,
 //! for the same reason `agent-list` refuses to keep one: such a table is
 //! stale the day a vendor ships. A record is the opposite of that table —
 //! nobody types it, it is derived from the summonses that happened, and it
@@ -32,9 +37,10 @@
 //!
 //! **What the state is.** The shape of the summons, not the summons: the head
 //! of its brief, how long the whole brief was, the three placement facts the
-//! ledger already knows, and the task's own attempt history. The head is what
+//! ledger already knows, the task's own attempt history, and each offered
+//! agent's entry. The head is what
 //! bands a task — it says what is wanted before it starts listing the
-//! constraints it is wanted under — and it is the only text that leaves, cut
+//! constraints it is wanted under — and it is cut
 //! to the use's cap here as well as at the door, so what a row records beside
 //! an answer is what was asked about. Which is also why the head is taken
 //! from the TASK and not from the summons' prompt where there is a task
@@ -65,70 +71,28 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-use crate::jev::choice;
 use crate::jev::{Cap, SUMMON_BRIEF_CHAR_CAP};
+use crate::jev::{choice, door};
 
 /// The one question's name — the caller's key for reading the answer back.
 /// The endpoint never shows a question's name to the model.
 const QUESTION: &str = "summon";
 
 /// The words of the question. They are ours: a summons's own text reaches the
-/// model as state, never as an instruction.
-const INSTRUCTIONS: &str = "An agent is about to be summoned to carry out the work described in `brief`, in a pane of its own. Choose which of the agents offered should be the one. Judge what the work asks for — how hard it is, how much of a codebase it has to hold at once, how many files it will touch, whether it has to measure something and report numbers, and whether earlier attempts on it already failed — against what each agent is, and against how much of its provider's quota this machine has already spent. Every agent offered can be started right now. When `pinnedModel` is not null, the coordinator already chose the model this work runs on, and every agent offered can run it. Each option also carries this machine's own record of that agent: how often this window summoned it, how much of that work reached `worker_done`, and how long it took. That record is the only measured evidence here about how an agent actually does, and how much of it there is counts as much as what it says: a record built on a handful of summonses is weak evidence about the next one, however clean it looks, while one built on hundreds is strong. An agent with no record has not been shown to carry work like this, which is not the same as having been shown to.";
+/// model as state, never as an instruction. Every key the state carries is
+/// named here by its path, so the question says what it reads.
+const INSTRUCTIONS: &str = "An agent is about to be summoned to carry out the work described in `brief` — the head of it; the whole brief is `briefChars` characters long — in a pane of its own. Choose which of the agents offered should be the one. Judge what the work asks for — how hard it is, how much of a codebase it has to hold at once, how many files it will touch, whether it has to measure something and report numbers, whether it gets a checkout of its own (`worktree`), whether it replaces an attempt that already ended (`replaces`), whether it carries a written task at all (`task`), how many earlier `attempts` it has had and how many of the latest ones failed in a row (`failures`) — against what each agent is, and against how much of its provider's quota this machine has already spent. Every agent offered can be started right now. When `pinnedModel` is not null, the coordinator already chose the model this work runs on, and every agent offered can run it. `agents` holds this machine's own record of each agent offered, under the `id` its option names: how much of its provider's quota is already spent (`quotaSpentPercent` of its `quotaWindow`, both null when this machine has read no gauge for it, so its room is unknown rather than empty); how many of the `summonedAll` summonses this window gave any of these agents went to it (`summoned`); how many of those have `ended`, how many of those reached `worker_done` (`reachedWorkerDone`) and the median minutes of work each took (`medianMinutes`, null while none has ended); and what its newest summonses here were for (`newestTasks`, empty for panes summoned with no task). That record is the only measured evidence here about how an agent actually does, and how much of it there is counts as much as what it says: a record built on a handful of summonses is weak evidence about the next one, however clean it looks, while one built on hundreds is strong. An agent with no record — `summoned` is 0 — has not been shown to carry work like this, which is not the same as having been shown to.";
 
-/// What an option says about an agent whose gauge this window has read.
-const ROOM_READ: &str = "{agent}. {spent}% of its {window} quota is already spent on this machine.";
+/// What an option says: what choosing it means, and nothing it weighs — the
+/// agent's room and record are its entry in `agents`. The same sentence for
+/// every agent, filled with its id.
+const OPTION_MEANS: &str =
+    "{agent} carries the work; its quota and this window's record of it are its entry in `agents`.";
 
-/// What an option says about an agent this window has read no gauge for. It
-/// is still summonable — unread is not a wall — and saying so is different
-/// from claiming it is empty.
-const ROOM_UNREAD: &str =
-    "{agent}. This machine has read no quota gauge for it, so how much room it has is unknown.";
-
-/// What an option adds about the summonses this ledger has carried for the
-/// agent — hindsight the window has for free: which agent its coordinators
-/// actually chose, and for what. The count is the ledger's, bounded by
-/// retention; the words are the newest task's title.
-///
-/// The count is said AGAINST the offered set's own total, not alone. A bare
-/// "16 times" reads as experience and a bare "266 times" reads as more of
-/// the same; "16 of 536" and "266 of 536" are the sixteen-fold difference
-/// they actually are. Measured: with the counts bare, the replay named a
-/// five-summons agent over a 266-summons one on fifteen of fifty-four rows
-/// (t-5873).
-const HISTORY_SOME: &str = " This window has summoned it {launched} of the {between} times it summoned any of these agents; its newest summonses here were for: {briefs}";
-
-/// What an option adds about an agent this ledger has never summoned.
-///
-/// It says the absence, rather than leaving a silent option to read as a
-/// clean slate. 2026-09-21 is why: `qwen-code` had carried nothing on this
-/// machine and the judgment named it for eleven of seventeen disagreements,
-/// against a `claude` this ledger had summoned 265 times.
-const HISTORY_NONE: &str =
-    " This window has never summoned it, so nothing this machine measured says how it does.";
-
-/// What an option adds about how the work this ledger gave the agent WENT —
-/// the other half of the hindsight: a count of summonses says the
-/// coordinators kept choosing it, and says nothing about what came back.
-///
-/// Only the summonses whose work has ENDED are in it. An open dispatch has
-/// no outcome yet, and folding it in either direction would be a number
-/// about nothing.
-const RECORD_SOME: &str = " Of the {carried} of those whose work has ended, {finished} reached worker_done, a median {minutes} minutes of work each.";
-
-/// What an option says where an agent's summonses here carried no written
-/// task at all — a pane somebody opened to work with by hand.
-const NO_TASK: &str = "panes summoned with no task";
-
-/// What an option adds about an agent this ledger has summoned but whose
-/// work has not ended — a first summons still running is not a record.
-const RECORD_PENDING: &str =
-    " None of that work has ended yet, so how it goes is still unmeasured here.";
-
-/// How much of a newest task's title an option carries.
+/// How much of a newest task's title an agent's entry carries.
 pub const SUMMON_RECENT_BRIEF_CHAR_CAP: usize = 160;
 
-/// How many of an agent's newest tasks an option names.
+/// How many of an agent's newest tasks its entry names.
 ///
 /// One was not enough. What the coordinators here actually follow is a rule
 /// about the KIND of work — measuring goes to one agent, designing to
@@ -138,11 +102,8 @@ pub const SUMMON_RECENT_BRIEF_CHAR_CAP: usize = 160;
 /// this window has always given a two-hundred-summons one.
 pub const SUMMON_RECENT_BRIEFS: usize = 3;
 
-/// What separates the titles an option lists.
-const BRIEF_SEPARATOR: &str = "; ";
-
 /// The state's keys, in the order the fingerprint reads them.
-const STATE_KEYS: [&str; 8] = [
+const STATE_KEYS: [&str; 10] = [
     "brief",
     "briefChars",
     "worktree",
@@ -151,6 +112,45 @@ const STATE_KEYS: [&str; 8] = [
     "attempts",
     "failures",
     "pinnedModel",
+    "summonedAll",
+    "agents",
+];
+
+/// The state's key for how many summonses this ledger gave the agents
+/// offered, all told — what every entry's `summoned` is read against.
+///
+/// A count said against the offered set's own total, not alone: a bare
+/// "16 times" reads as experience and a bare "266 times" reads as more of
+/// the same; "16 of 536" and "266 of 536" are the sixteen-fold difference
+/// they actually are. Measured: with the counts bare, the replay named a
+/// five-summons agent over a 266-summons one on fifteen of fifty-four rows
+/// (t-5873).
+const SUMMONED_ALL_KEY: &str = STATE_KEYS[8];
+
+/// The state's key for the agents offered, one entry each, in the order
+/// offered.
+const AGENTS_KEY: &str = STATE_KEYS[9];
+
+/// The keys of one agent's entry, in the order the fingerprint reads them:
+/// its id, its provider's room as this window last read it, and this
+/// ledger's record of it ([`AgentRecord`]).
+///
+/// An agent this ledger never summoned says so — `summoned` 0 — rather than
+/// leaving its entry to read as a clean slate: on 2026-09-21 `qwen-code` had
+/// carried nothing on this machine and the judgment named it for eleven of
+/// seventeen disagreements, against a `claude` this ledger had summoned 265
+/// times. And what came back is beside how often it was chosen: only the
+/// summonses whose work has ENDED count toward `ended`, `reachedWorkerDone`
+/// and `medianMinutes`, since an open dispatch has no outcome yet.
+const AGENT_KEYS: [&str; 8] = [
+    "id",
+    "quotaSpentPercent",
+    "quotaWindow",
+    "summoned",
+    "ended",
+    "reachedWorkerDone",
+    "medianMinutes",
+    "newestTasks",
 ];
 
 /// The version of the words above. Bump it when any of them changes: a
@@ -161,9 +161,12 @@ const STATE_KEYS: [&str; 8] = [
 ///
 /// Or when the label they are graded by changes: version 5 asks version 4's
 /// words and marks no summons whose model was pinned ([`PINNED`], t-9087).
-/// The version rides every row, so a reader can tell the series apart;
-/// reading them apart is t-6877's contract.
-pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 5;
+/// Or when what the question reads changes shape: version 6 carries each
+/// agent's room and record as fields of its entry in `agents` where version 5
+/// poured them into the option's sentence (t-9469). The version rides every
+/// row, so a reader can tell the series apart; reading them apart is t-6877's
+/// contract.
+pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 6;
 
 /// The fewest options that make a choice. One agent is not a question, and a
 /// question asked where there was nothing to decide is a row that says the
@@ -240,17 +243,36 @@ pub struct Summonable {
 }
 
 impl Summonable {
-    /// What this option says about itself, against the offered set's own
-    /// total of summonses ([`HISTORY_SOME`]).
-    fn means(&self, between: usize) -> String {
-        let room = match (self.spent_percent, self.window) {
-            (Some(spent), Some(window)) => ROOM_READ
-                .replace("{agent}", &self.id)
-                .replace("{spent}", &spent.to_string())
-                .replace("{window}", window),
-            _ => ROOM_UNREAD.replace("{agent}", &self.id),
+    /// This agent's entry in the state's `agents` — its id, its provider's
+    /// room as this window last read it (both halves or neither: a number
+    /// with no window is not a reading), and this ledger's record of it —
+    /// every fact a field of its own, in [`AGENT_KEYS`]' order, each task
+    /// title cut to [`SUMMON_RECENT_BRIEF_CHAR_CAP`] here as well as at the
+    /// door.
+    fn entry(&self) -> Value {
+        let (spent, window) = match (self.spent_percent, self.window) {
+            (Some(spent), Some(window)) => (Some(spent), Some(window)),
+            _ => (None, None),
         };
-        room + &self.record.means(between)
+        let titles: Vec<Value> = self
+            .record
+            .recent_briefs
+            .iter()
+            .take(SUMMON_RECENT_BRIEFS)
+            .map(|title| Value::from(door::cut(title, Cap::Chars(SUMMON_RECENT_BRIEF_CHAR_CAP))))
+            .collect();
+        Value::Object(Map::from_iter(
+            AGENT_KEYS.map(String::from).into_iter().zip([
+                Value::from(self.id.as_str()),
+                Value::from(spent),
+                Value::from(window),
+                Value::from(self.record.launched),
+                Value::from(self.record.carried),
+                Value::from(self.record.finished),
+                Value::from(self.record.median_minutes),
+                Value::Array(titles),
+            ]),
+        ))
     }
 }
 
@@ -306,37 +328,6 @@ pub struct AgentRecord {
     /// coordinators' own words. At most [`SUMMON_RECENT_BRIEFS`] of them,
     /// each cut to [`SUMMON_RECENT_BRIEF_CHAR_CAP`].
     pub recent_briefs: Vec<String>,
-}
-
-impl AgentRecord {
-    /// What an option says about this record — the history, and then what
-    /// came of it.
-    fn means(&self, between: usize) -> String {
-        if self.launched == 0 {
-            return HISTORY_NONE.to_string();
-        }
-        let briefs = match self.recent_briefs.is_empty() {
-            true => NO_TASK.to_string(),
-            false => self
-                .recent_briefs
-                .iter()
-                .map(|brief| crate::jev::door::cut(brief, Cap::Chars(SUMMON_RECENT_BRIEF_CHAR_CAP)))
-                .collect::<Vec<String>>()
-                .join(BRIEF_SEPARATOR),
-        };
-        let history = HISTORY_SOME
-            .replace("{launched}", &self.launched.to_string())
-            .replace("{between}", &between.to_string())
-            .replace("{briefs}", &briefs);
-        let outcome = match (self.carried, self.median_minutes) {
-            (0, _) | (_, None) => RECORD_PENDING.to_string(),
-            (carried, Some(minutes)) => RECORD_SOME
-                .replace("{carried}", &carried.to_string())
-                .replace("{finished}", &self.finished.to_string())
-                .replace("{minutes}", &minutes.to_string()),
-        };
-        history + &outcome
-    }
 }
 
 /// How many milliseconds make a minute — the unit a median is reported in,
@@ -455,21 +446,19 @@ pub struct SummonPick {
 }
 
 /// The words that define the question, as one string. The version is pinned
-/// to this, not to a date or to a reviewer's memory. The criteria are two
-/// SENTENCE SHAPES rather than sentences — each option fills one with its own
-/// id and numbers — so the fingerprint covers the wording and not the machine
-/// that happened to be asked about.
+/// to this, not to a date or to a reviewer's memory. An option's words are a
+/// SENTENCE SHAPE rather than a sentence — each option fills it with its own
+/// id — so the fingerprint covers the wording and not the machine that
+/// happened to be asked about; and the keys the state and every agent's entry
+/// carry are in it, because what the question reads is as much the question
+/// as what it says.
 #[must_use]
 pub fn rubric_words() -> String {
     [
         INSTRUCTIONS,
-        ROOM_READ,
-        ROOM_UNREAD,
-        HISTORY_SOME,
-        HISTORY_NONE,
-        RECORD_SOME,
-        RECORD_PENDING,
+        OPTION_MEANS,
         &STATE_KEYS.join(","),
+        &AGENT_KEYS.join(","),
     ]
     .join("\n")
 }
@@ -491,36 +480,39 @@ pub fn ask(look: &SummonLook<'_>, summonable: &[Summonable]) -> Option<SummonAsk
     if summonable.len() < FEWEST_OPTIONS {
         return None;
     }
-    // The denominator every option's history is said against: the summonses
-    // this ledger gave the agents offered HERE. Read off the options rather
-    // than the whole ledger, so a question's own numbers add up inside it
-    // and an agent nobody could summon today cannot move them.
+    // The denominator every entry's `summoned` is read against: the
+    // summonses this ledger gave the agents offered HERE. Read off the
+    // options rather than the whole ledger, so a question's own numbers add
+    // up inside it and an agent nobody could summon today cannot move them.
     let between: usize = summonable.iter().map(|agent| agent.record.launched).sum();
     let mut criteria = Map::new();
     let mut offered = Vec::new();
+    let mut agents = Vec::new();
     for agent in summonable {
-        criteria.insert(agent.id.clone(), Value::from(agent.means(between)));
+        criteria.insert(
+            agent.id.clone(),
+            Value::from(OPTION_MEANS.replace("{agent}", &agent.id)),
+        );
+        agents.push(agent.entry());
         offered.push(agent.id.clone());
     }
-    let state = Value::Object(Map::from_iter([
-        (
-            "brief".to_string(),
-            Value::from(crate::jev::door::cut(
-                look.brief,
-                Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
-            )),
-        ),
-        ("briefChars".to_string(), Value::from(look.brief_chars)),
-        ("worktree".to_string(), Value::from(look.worktree)),
-        (
-            "replaces".to_string(),
+    let mut state: Map<String, Value> = STATE_KEYS
+        .iter()
+        .map(|key| (*key).to_string())
+        .zip([
+            Value::from(door::cut(look.brief, Cap::Chars(SUMMON_BRIEF_CHAR_CAP))),
+            Value::from(look.brief_chars),
+            Value::from(look.worktree),
             Value::from(look.replaces_an_attempt),
-        ),
-        ("task".to_string(), Value::from(look.carries_a_task)),
-        ("attempts".to_string(), Value::from(look.attempts)),
-        ("failures".to_string(), Value::from(look.failures)),
-        ("pinnedModel".to_string(), Value::from(look.pinned_model)),
-    ]));
+            Value::from(look.carries_a_task),
+            Value::from(look.attempts),
+            Value::from(look.failures),
+            Value::from(look.pinned_model),
+        ])
+        .collect();
+    state.insert(SUMMONED_ALL_KEY.to_string(), Value::from(between));
+    state.insert(AGENTS_KEY.to_string(), Value::Array(agents));
+    let state = Value::Object(state);
     let questions = choice::asked(QUESTION, INSTRUCTIONS, criteria);
     Some(SummonAsk {
         state,

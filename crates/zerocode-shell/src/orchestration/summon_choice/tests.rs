@@ -159,19 +159,31 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
     );
     assert_eq!(sent["state"]["briefChars"], json!(2_480));
     assert_eq!(sent["state"]["worktree"], json!(true));
+    // Each agent's room and record went as fields of its own entry, in the
+    // order offered, and an option's words say nothing it weighs (t-9469).
+    let agents = sent["state"]["agents"]
+        .as_array()
+        .expect("the agents offered");
+    assert_eq!(agents.len(), 2);
+    assert_eq!(agents[0]["id"], json!("claude"));
+    assert_eq!(agents[0]["quotaSpentPercent"], json!(61));
+    assert_eq!(agents[0]["summoned"], json!(265));
+    assert_eq!(agents[0]["reachedWorkerDone"], json!(121));
+    assert_eq!(
+        agents[0]["newestTasks"],
+        json!(["measure the seat's own latency"])
+    );
+    assert_eq!(agents[1]["id"], json!("kimi"));
+    assert_eq!(agents[1]["quotaSpentPercent"], Value::Null, "no gauge read");
+    assert_eq!(sent["state"]["summonedAll"], json!(265));
     let criteria = &sent["questions"]["summon"]["criteria"];
-    assert!(
-        criteria["claude"]
-            .as_str()
-            .expect("claude's room")
-            .contains("61%")
-    );
-    assert!(
-        criteria["kimi"]
-            .as_str()
-            .expect("kimi's room")
-            .contains("no quota gauge")
-    );
+    for id in ["claude", "kimi"] {
+        let said = criteria[id].as_str().expect("an option's words");
+        assert!(
+            !said.chars().any(|glyph| glyph.is_ascii_digit()),
+            "an option carries no number: {said}"
+        );
+    }
     // The model the coordinator pinned is a constraint the options were
     // already narrowed by, and the state says it (t-6342); the agent it typed
     // is still nowhere in it.
@@ -486,14 +498,15 @@ struct Replay {
     spec: String,
 }
 
-/// Which arm the replay asks under, named by what the options carry.
+/// Which arm the replay asks under, named by what each offered agent's entry
+/// in the state carries (its option's words until t-9469).
 const ARM_ENV: &str = "ZEROCODE_SUMMON_REPLAY_ARM";
 /// Where the seed is.
 const SEED_ENV: &str = "ZEROCODE_SUMMON_REPLAY_SEED";
-/// The arm whose options carry the quota gauge and nothing else — the
-/// evidence the rubric had before this one.
+/// The arm whose entries carry the quota gauge and no record — the evidence
+/// the rubric had before the record was added.
 const ARM_ROOM: &str = "room";
-/// The arm whose options carry this ledger's record as well.
+/// The arm whose entries carry this ledger's record as well.
 const ARM_RECORD: &str = "record";
 /// How many times each row is asked.
 ///
@@ -505,7 +518,7 @@ const ARM_RECORD: &str = "record";
 const RUNS_ENV: &str = "ZEROCODE_SUMMON_REPLAY_RUNS";
 /// How many times a row is asked when nobody says.
 const RUNS_DEFAULT: usize = 3;
-/// Which quota gauge the replayed options carry.
+/// Which quota gauge the replayed entries carry.
 ///
 /// The gauge is the strongest term in the question and the one the rows do
 /// not record, so a replay reads it from a cache that keeps moving: across
@@ -513,7 +526,7 @@ const RUNS_DEFAULT: usize = 3;
 /// judgment correctly refuses the very agent that is the label on 40 of 54
 /// rows. Every arm-to-arm difference measured against a live gauge is that
 /// number's and not the rubric's. `seed` carries what the seed captured;
-/// `unread` holds every option at "no gauge read", which is a state the
+/// `unread` holds every entry at "no gauge read", which is a state the
 /// product really has, is identical for every option and every arm, and
 /// leaves the record as the only thing that differs between arms. Rows
 /// written from now on carry their own gauge ([`offered`]), which is what

@@ -260,6 +260,36 @@ fn position_of(question_id: &str) -> Option<usize> {
     question_id.strip_prefix(QUESTION_ID_PREFIX)?.parse().ok()
 }
 
+/// The explicit search's state keys, in the order the fingerprint reads them:
+/// the task, and the shard's skills.
+const SEARCH_STATE_KEYS: [&str; 2] = ["task", "skills"];
+
+/// The keys of one skill in `skills`, in the order the fingerprint reads them.
+const SEARCH_SKILL_KEYS: [&str; 2] = ["name", "description"];
+
+/// The question one skill of a shard is scored under. It names the skill by
+/// its place in the shard's state, because a question id is never sent;
+/// spelled once, for the questions and for the words the version is pinned
+/// to ([`search_rubric_words`]).
+fn search_instructions(at: usize) -> String {
+    format!("How much does `skills[{at}]` cover `task`?")
+}
+
+/// The words the explicit search asks, as one string: the question a skill is
+/// scored under, the use table's levels and the keys the state and each skill
+/// carry. [`SKILL_RUBRIC_VERSION`] is pinned to it, so a word changed without
+/// a version is a red test rather than a quiet drift (t-9469). The turn
+/// boundary's suggestion is a seat of its own, with words of its own
+/// (`zerocode_core::jev::questions::skill_suggestion_rubric_fingerprint`).
+#[must_use]
+pub fn search_rubric_words() -> String {
+    let mut words = vec![search_instructions(0)];
+    words.extend(SKILL_LEVELS.iter().map(|level| (*level).to_string()));
+    words.push(SEARCH_STATE_KEYS.join(","));
+    words.push(SEARCH_SKILL_KEYS.join(","));
+    words.join("\n")
+}
+
 /// The fewest characters of a task word that are worth matching on. Shorter
 /// than this and a word is a preposition, an article, or a variable name.
 const LEXICAL_WORD_CHARS: usize = 3;
@@ -330,12 +360,12 @@ pub fn skill_shards(candidates: &[SkillCandidate]) -> Vec<&[SkillCandidate]> {
 #[must_use]
 pub fn skill_state(task: &str, shard: &[SkillCandidate]) -> Value {
     json!({
-        "task": cut(task, Cap::Chars(SKILL_TASK_CHAR_CAP)),
-        "skills": shard
+        SEARCH_STATE_KEYS[0]: cut(task, Cap::Chars(SKILL_TASK_CHAR_CAP)),
+        SEARCH_STATE_KEYS[1]: shard
             .iter()
             .map(|candidate| json!({
-                "name": candidate.name,
-                "description": candidate.description,
+                SEARCH_SKILL_KEYS[0]: candidate.name,
+                SEARCH_SKILL_KEYS[1]: candidate.description,
             }))
             .collect::<Vec<_>>(),
     })
@@ -356,10 +386,9 @@ pub fn skill_questions(shard: &[SkillCandidate]) -> BTreeMap<String, SystemOneQu
         .iter()
         .map(|candidate| {
             let at = candidate.position - offset;
-            let instructions = format!("How much does `skills[{at}]` cover `task`?");
             (
                 candidate.question_id.clone(),
-                SystemOneQuestion::score(&instructions, SKILL_LEVELS),
+                SystemOneQuestion::score(&search_instructions(at), SKILL_LEVELS),
             )
         })
         .collect()

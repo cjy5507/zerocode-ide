@@ -5,7 +5,7 @@ use serde_json::json;
 
 use super::super::{
     BROWSER, JEV_USES, ROUTING, ROUTING_TASK_CHAR_CAP, STALL, STALL_SCREEN_BYTE_CAP,
-    STALL_TRANSCRIPT_BYTE_CAP,
+    STALL_TRANSCRIPT_BYTE_CAP, SUMMON,
 };
 use super::*;
 use crate::jev::questions::{ROUTING_FACT_RETRY, ROUTING_STATE_FACTS, ROUTING_STATE_TASK};
@@ -643,9 +643,11 @@ fn a_stopped_walks_question_leaves_no_credential_from_any_field_the_row_names() 
     );
 }
 
-/// A quiet worker's question puts its screen and its transcript's tail in the
-/// state. Both fields the stall row names reach real text, no credential on
-/// either reaches the wire, and what is sent fits the row's caps.
+/// A quiet worker's question puts its screen's lines and its transcript's
+/// last records in the state, each a field of its own (t-9469). Every path
+/// the stall row names reaches real text, no credential on any line reaches
+/// the wire, and what is sent fits the row's caps — the screen's lines and
+/// the records' words each counted whole, as the builder kept them.
 #[test]
 fn a_stalled_panes_question_leaves_no_credential_and_fits_its_caps() {
     let screen =
@@ -666,8 +668,11 @@ fn a_stalled_panes_question_leaves_no_credential_and_fits_its_caps() {
     for sent in STALL.sends {
         let path: Vec<&str> = sent.at.split('/').skip(1).collect();
         let mut reached = 0;
-        visit(&mut body, &path, &mut |_| reached += 1);
-        assert_eq!(reached, 1, "{} names nothing in a real question", sent.at);
+        visit(&mut body, &path, &mut |value| {
+            assert!(value.is_string(), "{} reaches a text: {value}", sent.at);
+            reached += 1;
+        });
+        assert!(reached > 0, "{} names nothing in a real question", sent.at);
     }
 
     let cleared =
@@ -682,22 +687,92 @@ fn a_stalled_panes_question_leaves_no_credential_and_fits_its_caps() {
         "the screen's line and the result's"
     );
     let body: Value = serde_json::from_slice(cleared.bytes()).expect("json");
-    assert!(
-        body["state"]["screen"]
-            .as_str()
-            .is_some_and(|text| text.len() <= STALL_SCREEN_BYTE_CAP)
-    );
-    assert!(
-        body["state"]["transcript"]
-            .as_str()
-            .is_some_and(|text| text.len() <= STALL_TRANSCRIPT_BYTE_CAP)
-    );
+    let lines: Vec<&str> = body["state"]["screen"]
+        .as_array()
+        .expect("the screen's lines")
+        .iter()
+        .map(|line| line.as_str().expect("a line"))
+        .collect();
+    assert_eq!(lines.len(), 4, "one entry a line");
+    assert!(lines.join("\n").len() <= STALL_SCREEN_BYTE_CAP);
+    let words: Vec<&str> = body["state"]["transcript"]
+        .as_array()
+        .expect("the records")
+        .iter()
+        .map(|record| record["words"].as_str().expect("a record's words"))
+        .collect();
+    assert!(words.join("\n").len() <= STALL_TRANSCRIPT_BYTE_CAP);
     assert!(
         body["questions"]["cause"]["criteria"]
             .as_object()
             .is_some_and(|options| options.contains_key("finished_without_report")),
         "the product's own options pass as they were"
     );
+}
+
+/// A summons' question carries the titles of each offered agent's newest
+/// tasks — the coordinators' own words, as free as the brief. Every path the
+/// summon row names reaches real text, and a credential a coordinator pasted
+/// into a title never reaches the wire (t-9469: while the titles rode an
+/// option's sentence, which no `sends` named, the door never read them).
+#[test]
+fn a_summons_question_leaves_no_credential_in_a_task_title() {
+    use crate::summon_choice::{AgentRecord, SummonLook, Summonable};
+    let seasoned = Summonable {
+        id: "claude".to_string(),
+        spent_percent: Some(61),
+        window: Some("weekly"),
+        record: AgentRecord {
+            launched: 2,
+            recent_briefs: vec![
+                "export OPENAI_API_KEY=sk-proj-123".to_string(),
+                "measure the frame time".to_string(),
+            ],
+            ..AgentRecord::default()
+        },
+    };
+    let fresh = Summonable {
+        id: "kimi".to_string(),
+        spent_percent: None,
+        window: None,
+        record: AgentRecord::default(),
+    };
+    let asked = crate::summon_choice::ask(
+        &SummonLook {
+            brief: "measure the terminal's frame time",
+            brief_chars: 33,
+            worktree: true,
+            replaces_an_attempt: false,
+            carries_a_task: true,
+            attempts: 0,
+            failures: 0,
+            pinned_model: None,
+        },
+        &[seasoned, fresh],
+    )
+    .expect("two agents are a question");
+    let mut body =
+        json!({ "state": asked.state, "model": "jev-latest", "questions": asked.questions });
+    for sent in SUMMON.sends {
+        let path: Vec<&str> = sent.at.split('/').skip(1).collect();
+        let mut reached = 0;
+        visit(&mut body, &path, &mut |_| reached += 1);
+        assert!(reached > 0, "{} names nothing in a real question", sent.at);
+    }
+
+    let cleared =
+        may_send(&SUMMON, &asking(&settings(None), Some(APP), 0), body).expect("consented");
+    let sent = String::from_utf8(cleared.bytes().to_vec()).expect("utf-8");
+    assert!(
+        !sent.contains("sk-proj-123"),
+        "a title's secret left: {sent}"
+    );
+    assert_eq!(
+        cleared.withheld_lines(),
+        1,
+        "the one title that may carry it"
+    );
+    assert!(sent.contains("measure the frame time"), "{sent}");
 }
 
 /// A list's cap runs before the texts under it are read, so no line past the

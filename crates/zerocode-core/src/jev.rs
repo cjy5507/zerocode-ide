@@ -141,8 +141,9 @@ pub const GOAL_CHAR_CAP: usize = 400;
 /// ten (p90 5,045 B).
 pub const STALL_SCREEN_BYTE_CAP: usize = 8 * 1024;
 
-/// Bytes of a quiet worker's transcript tail one stall question carries — its
-/// newest turns, one clamped card line each. 4 KiB holds the last 16 turns of
+/// Bytes of a quiet worker's transcript tail one stall question carries — the
+/// words of its newest turns, one clamped card line each (each turn's role
+/// beside them is the product's own word, t-9469). 4 KiB holds the last 16 turns of
 /// every one of the 391 worker transcripts on this machine (2026-09-17; max
 /// 3,280 B) and the last 24 of nine in ten (p90 3,802 B).
 pub const STALL_TRANSCRIPT_BYTE_CAP: usize = 4 * 1024;
@@ -1387,13 +1388,18 @@ pub const STALL: JevUse = JevUse {
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
     repeat: None,
+    // Every line of the screen and the words of every turn of the record,
+    // each cleared on its own (t-9469: each went as one text before). The
+    // builder keeps the newest that fit the two caps together, counted as the
+    // door clears them (`door::newest_from`), so no line is cut here; the cap
+    // on each is the whole's, which no one line the builder kept can pass.
     sends: &[
         Sent {
-            at: "/state/screen",
+            at: "/state/screen/*",
             cap: Cap::Bytes(STALL_SCREEN_BYTE_CAP),
         },
         Sent {
-            at: "/state/transcript",
+            at: "/state/transcript/*/words",
             cap: Cap::Bytes(STALL_TRANSCRIPT_BYTE_CAP),
         },
     ],
@@ -1610,10 +1616,24 @@ pub const SUMMON: JevUse = JevUse {
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
     repeat: None,
-    sends: &[Sent {
-        at: "/state/brief",
-        cap: Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
-    }],
+    // The brief's head, and the titles of each offered agent's newest tasks
+    // — the coordinators' own words, both (t-9469: the titles rode each
+    // option's sentence, which nothing here named, until they became a field
+    // of the agent's entry).
+    sends: &[
+        Sent {
+            at: "/state/brief",
+            cap: Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/agents/*/newestTasks",
+            cap: Cap::Items(crate::summon_choice::SUMMON_RECENT_BRIEFS),
+        },
+        Sent {
+            at: "/state/agents/*/newestTasks/*",
+            cap: Cap::Chars(crate::summon_choice::SUMMON_RECENT_BRIEF_CHAR_CAP),
+        },
+    ],
     ledger: "summon-choice.jsonl",
     promotes: true,
     answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),

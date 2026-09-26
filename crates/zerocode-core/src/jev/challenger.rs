@@ -384,12 +384,34 @@ engineer would act on: the one that answers what was asked, makes the fewer unfo
 assumptions, and leaves the plainer path to verifying it. Name neither when nothing \
 separates them or both miss the request.";
 
+/// What each of [`OPTIONS`] means, in their order.
+const OPTION_MEANS: [&str; 3] = [
+    "the design shown first is the one to act on",
+    "the design shown second is the one to act on",
+    "nothing separates them, or both miss the request",
+];
+
 /// The keys of the request's `state`, in the order the seat's `sends`
 /// name them (`/state/task`, `/state/designs`).
 pub const STATE_KEYS: [&str; 2] = ["task", "designs"];
 
 /// The key each design's text sits under (`/state/designs/*/body`).
 pub const DESIGN_BODY_KEY: &str = "body";
+
+/// The words that define the comparison, as one string — what
+/// [`crate::jev::questions::CHALLENGER_RUBRIC_VERSION`] is pinned to, so a
+/// word changed without a version is a red test rather than a quiet drift
+/// (t-9469).
+#[must_use]
+pub fn rubric_words() -> String {
+    let mut words = vec![INSTRUCTIONS.to_string()];
+    for (option, means) in OPTIONS.iter().zip(OPTION_MEANS) {
+        words.push(format!("{option}\n{means}"));
+    }
+    words.push(STATE_KEYS.join(","));
+    words.push(DESIGN_BODY_KEY.to_string());
+    words.join("\n")
+}
 
 /// One comparison, ready for the wire: the state the door clears, the
 /// question, and the order it was put in.
@@ -421,20 +443,11 @@ pub fn ask(key: &str, task: &str, designs: &Designs<'_>) -> ComparisonAsk {
         STATE_KEYS[0]: task,
         STATE_KEYS[1]: shown,
     });
-    let criteria = Map::from_iter([
-        (
-            OPTIONS[0].to_string(),
-            Value::from("the design shown first is the one to act on"),
-        ),
-        (
-            OPTIONS[1].to_string(),
-            Value::from("the design shown second is the one to act on"),
-        ),
-        (
-            OPTIONS[2].to_string(),
-            Value::from("nothing separates them, or both miss the request"),
-        ),
-    ]);
+    let criteria = OPTIONS
+        .iter()
+        .zip(OPTION_MEANS)
+        .map(|(option, means)| ((*option).to_string(), Value::from(means)))
+        .collect();
     ComparisonAsk {
         state,
         questions: choice::asked(QUESTION, INSTRUCTIONS, criteria),

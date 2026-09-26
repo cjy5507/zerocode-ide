@@ -132,13 +132,53 @@ fn an_answer_is_read_only_through_the_causes_offered() {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    // Version 4 is version 3's words under a four-hour label (t-9087), so the
-    // fingerprint stands.
-    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 4);
+    // Version 5 carries the screen's lines and the record's turns as fields
+    // of their own where version 4 carried each as one text (t-9469): what
+    // the question reads changed shape, so the series starts again.
+    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 5);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "27c6daa20ba4e267"
+        "557d21525cc1dc79"
     );
+}
+
+/// The screen and the record are fields, not one text each (t-9469): the
+/// screen a list of its lines, top to bottom, and the record a list of its
+/// turns, oldest first, each its role and its words — so what the judgment
+/// reads is the shape the pane had, and no line is a sentence to split.
+#[test]
+fn the_screen_and_the_record_are_lists_of_their_own_parts() {
+    let transcript = vec![SUMMARY.to_string(), INTERRUPTED.to_string()];
+    let asked = ask(&a_look("✻ Worked for 27m 0s\n\n❯ ", &transcript)).expect("asks");
+    assert_eq!(
+        asked.state[STATE_KEYS[2]],
+        json!(["✻ Worked for 27m 0s", "", "❯"]),
+        "one entry a line, blank lines inside kept, trailing blanks off"
+    );
+    let turns = asked.state[STATE_KEYS[3]].as_array().expect("the turns");
+    assert_eq!(turns.len(), 3, "{turns:?}");
+    for turn in turns {
+        let mut keys: Vec<&str> = turn
+            .as_object()
+            .expect("a turn")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = TURN_KEYS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "a turn's keys are the fingerprint's");
+    }
+    assert_eq!(
+        turns[2],
+        json!({ TURN_KEYS[0]: "user", TURN_KEYS[1]: "[Request interrupted by user]" })
+    );
+    for key in STATE_KEYS.iter().chain(&TURN_KEYS) {
+        assert!(
+            INSTRUCTIONS.contains(&format!("`{key}`")),
+            "the question names what it reads: {key}"
+        );
+    }
 }
 
 /// The screen's newest lines are kept, blank ends are dropped, and what is
@@ -152,60 +192,96 @@ fn the_screen_tail_keeps_the_newest_lines_and_fits_its_cap_once_cleared() {
         screen.push_str("export X  \n");
     }
     screen.push_str("✻ Worked for 27m 0s · done 2:11 AM   \n\n❯ \n\n\n");
-    let tail = screen_tail(&screen);
+    let asked = ask(&a_look(&screen, &[])).expect("a screen asks");
+    let tail: Vec<String> = asked.state[STATE_KEYS[2]]
+        .as_array()
+        .expect("the screen's lines")
+        .iter()
+        .map(|line| line.as_str().expect("a line").to_string())
+        .collect();
 
     assert!(
-        tail.ends_with("✻ Worked for 27m 0s · done 2:11 AM\n\n❯"),
-        "{tail}"
+        tail.ends_with(&[
+            "✻ Worked for 27m 0s · done 2:11 AM".to_string(),
+            String::new(),
+            "❯".to_string()
+        ]),
+        "{tail:?}"
     );
-    assert!(!tail.contains("  \n"), "a line kept its trailing blanks");
-    let (cleared, withheld) = clear_text(&tail, Cap::Uncut);
     assert!(
-        withheld > 0,
+        tail.iter().all(|line| line.trim_end() == line),
+        "a line kept its trailing blanks"
+    );
+    // Each line as the door clears it (`/state/screen/*`), and the lines
+    // together as they count against the cap.
+    let cleared: Vec<(String, usize)> = tail
+        .iter()
+        .map(|line| clear_text(line, Cap::Bytes(STALL_SCREEN_BYTE_CAP)))
+        .collect();
+    assert!(
+        cleared.iter().any(|(_, withheld)| *withheld > 0),
         "the fixture's lines are ones the door withholds"
     );
+    let kept = cleared
+        .iter()
+        .map(|(line, _)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        cleared.len() <= STALL_SCREEN_BYTE_CAP,
+        kept.len() <= STALL_SCREEN_BYTE_CAP,
         "{} bytes once cleared",
-        cleared.len()
+        kept.len()
     );
-    let (cut, _) = clear_text(&tail, Cap::Bytes(STALL_SCREEN_BYTE_CAP));
-    assert_eq!(cut, cleared, "the door cut what the tail kept");
+    assert!(
+        cleared
+            .iter()
+            .all(|(line, _)| !line.ends_with(crate::jev::CUT_MARK)),
+        "the door cut a line the tail kept"
+    );
     // Not a short tail kept safe by being short: the cap is filled with as
     // many withheld lines as it holds, less the three lines of the footer.
     let holds = STALL_SCREEN_BYTE_CAP / (WITHHELD_LINE.len() + "\n".len());
-    assert!(
-        tail.lines().count() >= holds - 3,
-        "{} lines",
-        tail.lines().count()
-    );
+    assert!(tail.len() >= holds - 3, "{} lines", tail.len());
 }
 
-/// The record's end in the board's own words, one line a turn: what was said,
-/// what was called, what came back, and a person's interruption — never the
-/// agent's reasoning.
+/// The record's end in the board's own words, one entry a turn: what was
+/// said, what was called, what came back, and a person's interruption — each
+/// its role and its words, never the agent's reasoning.
 #[test]
-fn the_transcript_tail_is_the_boards_turns_one_line_each() {
+fn the_transcript_tail_is_the_boards_turns_one_record_each() {
     let result = r#"{"type":"user","uuid":"r","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"Diff in src/a.rs\n  1 file would be reformatted"}]}}"#;
     let transcript = vec![
         SUMMARY.to_string(),
         result.to_string(),
         INTERRUPTED.to_string(),
     ];
-    let tail = transcript_tail(&transcript);
-    let lines: Vec<&str> = tail.lines().collect();
+    let turns = |transcript: &[String]| -> Vec<Value> {
+        ask(&a_look("", transcript)).expect("a record asks").state[STATE_KEYS[3]]
+            .as_array()
+            .expect("the record's turns")
+            .clone()
+    };
+    let tail = turns(&transcript);
+    let turn = |role: &str, words: &str| json!({ TURN_KEYS[0]: role, TURN_KEYS[1]: words });
     assert_eq!(
-        lines,
+        tail,
         [
-            "assistant: All runs had no extra invokes and no errors.",
-            "tool: Bash · just fmt-check",
-            "tool_result: Diff in src/a.rs 1 file would be reformatted",
-            "user: [Request interrupted by user]",
+            turn("assistant", "All runs had no extra invokes and no errors."),
+            turn("tool", "Bash · just fmt-check"),
+            turn(
+                "tool_result",
+                "Diff in src/a.rs 1 file would be reformatted"
+            ),
+            turn("user", "[Request interrupted by user]"),
         ]
     );
-    assert!(!tail.contains("the gate is green"), "reasoning was sent");
+    assert!(
+        !json!(tail).to_string().contains("the gate is green"),
+        "reasoning was sent"
+    );
 
-    // A long record keeps its newest turns within the cap.
+    // A long record keeps its newest turns within the cap, its words counted
+    // whole as the door counts them.
     let many: Vec<String> = (0..500)
         .map(|turn| {
             format!(
@@ -214,12 +290,20 @@ fn the_transcript_tail_is_the_boards_turns_one_line_each() {
             )
         })
         .collect();
-    let tail = transcript_tail(&many);
-    assert!(tail.len() <= STALL_TRANSCRIPT_BYTE_CAP, "{}", tail.len());
+    let tail = turns(&many);
+    let words: Vec<&str> = tail
+        .iter()
+        .map(|turn| turn[TURN_KEYS[1]].as_str().expect("words"))
+        .collect();
     assert!(
-        tail.lines()
+        words.join("\n").len() <= STALL_TRANSCRIPT_BYTE_CAP,
+        "{}",
+        words.join("\n").len()
+    );
+    assert!(
+        words
             .last()
-            .is_some_and(|line| line.starts_with("assistant: turn 499 "))
+            .is_some_and(|line| line.starts_with("turn 499 "))
     );
 }
 

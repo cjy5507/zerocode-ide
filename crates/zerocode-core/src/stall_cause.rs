@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value, json};
 
 use crate::jev::choice::{self, ChoiceRefusal};
-use crate::jev::door::newest_within;
+use crate::jev::door::newest_from;
 use crate::jev::{STALL_SCREEN_BYTE_CAP, STALL_TRANSCRIPT_BYTE_CAP};
 use crate::orchestration::{MessageKind, Run, worker_address};
 
@@ -37,11 +37,17 @@ use crate::orchestration::{MessageKind, Run, worker_address};
 const QUESTION: &str = "cause";
 
 /// The words of the question. The screen and the record reach the model as
-/// state, never as an instruction.
-const INSTRUCTIONS: &str = "A worker agent running in a terminal has printed nothing for `quietSeconds` seconds, and nothing the window has measured for a quota wall, a transient API error or a safety classifier's decline ends its conversation. `screen` is the bottom of its terminal as it stands now and `transcript` the last records of its conversation, oldest first, one per line. Choose why the worker stopped.";
+/// state, never as an instruction — each a list of its own parts, so what
+/// the judgment reads is the shape the pane had and no entry is a text to
+/// split (t-9469).
+const INSTRUCTIONS: &str = "A worker agent running in a terminal has printed nothing for `quietSeconds` seconds, and nothing the window has measured for a quota wall, a transient API error or a safety classifier's decline ends its conversation. `agent` names its program. `screen` is the bottom of its terminal as it stands now, one entry a line, top to bottom, and `transcript` the last records of its conversation, oldest first, each its `role` and its `words`. Choose why the worker stopped.";
 
 /// The state's keys, in the order the fingerprint reads them.
 const STATE_KEYS: [&str; 4] = ["agent", "quietSeconds", "screen", "transcript"];
+
+/// The keys of one turn of `transcript`, in the order the fingerprint reads
+/// them: who spoke, and what was said.
+const TURN_KEYS: [&str; 2] = ["role", "words"];
 
 /// The version of the words in this module. Bump it when any of them changes:
 /// a judgment read under one wording is not evidence about another. The test
@@ -49,10 +55,13 @@ const STATE_KEYS: [&str; 4] = ["agent", "quietSeconds", "screen", "transcript"];
 ///
 /// Or when the label they are graded by changes: version 4 asks version 3's
 /// words and waits [`STALL_LABEL_WINDOW_MS`]'s four hours for what followed,
-/// where version 3's labels were cut at two (t-9087). The version rides every
-/// request row, so a reader can tell the series apart; reading them apart is
-/// t-6877's contract.
-pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 4;
+/// where version 3's labels were cut at two (t-9087). Or when what the
+/// question reads changes shape: version 5 carries the screen as a list of
+/// its lines and the record as a list of turns, each its `role` and its
+/// `words`, where version 4 carried each as one text (t-9469). The version
+/// rides every request row, so a reader can tell the series apart; reading
+/// them apart is t-6877's contract.
+pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 5;
 
 /// How long after a silence was asked about its label waits for what
 /// followed ([`followed`]).
@@ -193,6 +202,8 @@ pub fn rubric_words() -> String {
     }
     words.push('\n');
     words.push_str(&STATE_KEYS.join(","));
+    words.push('\n');
+    words.push_str(&TURN_KEYS.join(","));
     words
 }
 
@@ -275,34 +286,46 @@ impl StallAsk {
     }
 }
 
-/// The bottom of a terminal's screen as the question carries it: trailing
-/// blanks off each line and blank lines off the bottom, then the newest lines
-/// that fit [`STALL_SCREEN_BYTE_CAP`].
+/// The bottom of a terminal's screen as the question carries it, one entry a
+/// line: trailing blanks off each line and blank lines off the bottom, then
+/// the newest lines that fit [`STALL_SCREEN_BYTE_CAP`] once the door has
+/// cleared them ([`newest_from`]) — the cap a whole screen's text was held to
+/// when it went as one, so the same lines go.
 #[must_use]
-pub fn screen_tail(screen: &str) -> String {
+pub fn screen_tail(screen: &str) -> Vec<String> {
     let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
     let end = lines
         .iter()
         .rposition(|line| !line.is_empty())
         .map_or(0, |at| at + 1);
-    newest_within(&lines[..end], STALL_SCREEN_BYTE_CAP)
+    let lines = &lines[..end];
+    lines[newest_from(lines, STALL_SCREEN_BYTE_CAP)..]
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect()
 }
 
 /// The end of a conversation as the question carries it: its turns in the
 /// words the board reads them in (`crate::transcript::turns_in` — a tool call
-/// is its name and target, a result its text), one line each as
-/// `role: words`, each clamped to a card line (`crate::transcript::clamp`),
-/// then the newest that fit [`STALL_TRANSCRIPT_BYTE_CAP`]. Reasoning is left
-/// out: why the agent thought is not why its pane went still.
+/// is its name and target, a result its text), one entry each, its role and
+/// its words (`TURN_KEYS`) clamped to a card line
+/// (`crate::transcript::clamp`), then the newest whose words fit
+/// [`STALL_TRANSCRIPT_BYTE_CAP`] once the door has cleared them
+/// ([`newest_from`]). Reasoning is left out: why the agent thought is not why
+/// its pane went still.
 #[must_use]
-pub fn transcript_tail(lines: &[String]) -> String {
+pub fn transcript_tail(lines: &[String]) -> Vec<Value> {
     let turns = crate::transcript::turns_in(&lines.join("\n"));
-    let said: Vec<String> = turns
+    let said: Vec<(&str, String)> = turns
         .iter()
         .filter(|turn| turn.role != "thinking")
-        .map(|turn| format!("{}: {}", turn.role, crate::transcript::clamp(&turn.text)))
+        .map(|turn| (turn.role.as_str(), crate::transcript::clamp(&turn.text)))
         .collect();
-    newest_within(&said, STALL_TRANSCRIPT_BYTE_CAP)
+    let words: Vec<&str> = said.iter().map(|(_, words)| words.as_str()).collect();
+    said[newest_from(&words, STALL_TRANSCRIPT_BYTE_CAP)..]
+        .iter()
+        .map(|(role, words)| json!({ TURN_KEYS[0]: role, TURN_KEYS[1]: words }))
+        .collect()
 }
 
 /// The one question a stall answer's label asks of both sides: did the

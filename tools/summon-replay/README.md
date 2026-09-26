@@ -30,8 +30,8 @@ ZEROCODE_SUMMON_REPLAY_RUNS=3 \
 
 | 손잡이 | 무엇 |
 | --- | --- |
-| `ZEROCODE_SUMMON_REPLAY_ARM` | `room` = 선택지가 쿼터만 싣는다 · `record` = 원장의 기록까지 싣는다 |
-| `ZEROCODE_SUMMON_REPLAY_GAUGE` | `seed` = 씨앗이 잡은 쿼터 · `unread` = 모든 선택지를 「읽은 게이지 없음」으로 고정 |
+| `ZEROCODE_SUMMON_REPLAY_ARM` | `room` = state의 에이전트 항목(`agents`)이 쿼터만 싣는다 · `record` = 원장의 기록까지 싣는다(t-9469 전에는 선택지 문장이 실었다) |
+| `ZEROCODE_SUMMON_REPLAY_GAUGE` | `seed` = 씨앗이 잡은 쿼터 · `unread` = 모든 에이전트 항목을 「읽은 게이지 없음」으로 고정 |
 | `ZEROCODE_SUMMON_REPLAY_RUNS` | 행마다 몇 번 물을지(기본 3) |
 
 ## 이 하네스가 지키는 세 가지

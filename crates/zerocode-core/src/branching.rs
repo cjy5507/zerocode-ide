@@ -32,7 +32,7 @@ const QUESTION: &str = "best";
 
 /// The words of the question. A screen's own words reach the model as state
 /// and as an option's description, never as an instruction.
-const INSTRUCTIONS: &str = "Someone wants to reach the goal in `goal` on the mobile screen described by `where`, and they can only press things. `before` lists the controls that screen showed, each as the number drawn on it, its role, its words and its centre. The walk saved the device, pressed each candidate in turn, read the screen it led to and put the device back. Every option is one of those candidates, named by the number it pressed: its `action` is the control's own legend line, and its `result` — when the walk explored it — says whether the screen `moved`, the `controls` the new screen shows and their `count`. A candidate with no `result` was not explored; judge it from its action alone. Choose the one candidate whose result is closest to the goal: prefer a screen that plainly moved toward the goal over one that did not move, and never a result that moved away from it.";
+const INSTRUCTIONS: &str = "Someone wants to reach the goal in `goal` on the mobile screen described by `where`, and they can only press things. `before` lists the controls that screen showed, each as the number drawn on it, its role, its words and its centre. The walk saved the device, pressed each candidate in turn, read the screen it led to and put the device back. `candidates` lists them, each under the `option` that names it by the number it pressed: its `action` is the control's own legend line, and its `result` — when the walk explored it — says whether the screen `moved`, the `controls` the new screen shows and their `count`. A candidate with no `result` was not explored; judge it from its action alone. Choose the one candidate whose result is closest to the goal: prefer a screen that plainly moved toward the goal over one that did not move, and never a result that moved away from it.";
 
 /// The state's keys, in the order the fingerprint reads them.
 const STATE_KEYS: [&str; 4] = ["goal", "where", "before", "candidates"];
@@ -43,14 +43,21 @@ const CANDIDATE_KEYS: [&str; 3] = ["option", "action", "result"];
 /// The keys of one explored result, in the order the fingerprint reads them.
 const RESULT_KEYS: [&str; 3] = ["moved", "controls", "count"];
 
-/// How an option's description says its candidate was not explored.
-const UNEXPLORED: &str = "not explored";
+/// What an option says: which press it is — the control's legend line — and
+/// nothing of where the press led, which is the candidate's `result` in the
+/// state, said once (t-9469).
+const OPTION_MEANS: &str = "Pressed {action}.";
 
 /// The version of the words in this module. Bump it when any of them
 /// changes: a judgment read under one wording is not evidence about another.
 /// The test `the_version_is_pinned_to_the_words` holds it to
 /// [`crate::jev::rubric_fingerprint`].
-pub const BRANCHING_RUBRIC_VERSION: u32 = 1;
+///
+/// Version 2 stops restating each candidate's result in its option's words,
+/// where version 1 wrote the screen it led to into both the option and the
+/// state (t-9469): the result is a field the judgment reads, and the option
+/// says only which press it is.
+pub const BRANCHING_RUBRIC_VERSION: u32 = 2;
 
 /// What one explored candidate led to, as the walk read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,7 +194,7 @@ pub fn fork_wanted(choice: &ActionChoice) -> Vec<usize> {
 #[must_use]
 pub fn rubric_words() -> String {
     let mut words = String::from(INSTRUCTIONS);
-    for line in [UNEXPLORED, QUESTION] {
+    for line in [OPTION_MEANS, QUESTION] {
         words.push('\n');
         words.push_str(line);
     }
@@ -213,22 +220,6 @@ fn controls_cut(controls: &[String]) -> Vec<&str> {
         .collect()
 }
 
-/// How an option's description says what its candidate led to.
-fn means(candidate: &Candidate) -> String {
-    match &candidate.result {
-        None => format!("Pressed {} ({UNEXPLORED}).", candidate.action),
-        Some(result) if !result.moved => {
-            format!("Pressed {}; the screen did not move.", candidate.action)
-        }
-        Some(result) => format!(
-            "Pressed {}; the screen moved to one showing {} control(s): {}.",
-            candidate.action,
-            result.count,
-            controls_cut(&result.controls).join(" | ")
-        ),
-    }
-}
-
 /// The question this fork asks, or `None` when there is nothing to choose
 /// between — fewer than two candidates. A caller that gets `None` presses
 /// the first candidate exactly as it would have without a judgment at all.
@@ -242,7 +233,10 @@ pub fn ask(look: &BranchLook<'_>) -> Option<BranchAsk> {
     let mut marks = Vec::new();
     for candidate in look.candidates.iter().take(BRANCHING_K_CAP) {
         let option = option_of(candidate.mark);
-        criteria.insert(option.clone(), Value::String(means(candidate)));
+        criteria.insert(
+            option.clone(),
+            Value::String(OPTION_MEANS.replace("{action}", &candidate.action)),
+        );
         let mut carried = json!({
             CANDIDATE_KEYS[0]: option,
             CANDIDATE_KEYS[1]: candidate.action,
@@ -388,10 +382,13 @@ mod tests {
 
     /// The version is pinned to the words: a wording change without a bump
     /// is a red test, not a quiet drift.
+    /// Version 2 stops restating a candidate's result in its option's words
+    /// (t-9469): what a press led to is the `result` field the state carries,
+    /// and an option says only which press it is.
     #[test]
     fn the_version_is_pinned_to_the_words() {
-        assert_eq!(BRANCHING_RUBRIC_VERSION, 1);
-        assert_eq!(rubric_fingerprint(rubric_words), "8345cffb78ba4bf9");
+        assert_eq!(BRANCHING_RUBRIC_VERSION, 2);
+        assert_eq!(rubric_fingerprint(rubric_words), "0055cb2523c90f9a");
     }
 
     fn choice(chosen: usize, spread: &[(usize, f64)]) -> ActionChoice {
@@ -500,17 +497,32 @@ mod tests {
             .as_object()
             .expect("criteria");
         assert_eq!(criteria.len(), 3);
-        assert!(
-            criteria["mark:7"]
-                .as_str()
-                .is_some_and(|said| said.contains("did not move"))
-        );
-        assert!(
-            criteria["mark:1"]
-                .as_str()
-                .is_some_and(|said| said.contains(UNEXPLORED))
-        );
+        // An option says which press it is and nothing of where the press
+        // led (t-9469): the result is the state's field, said once.
+        for candidate in &candidates {
+            assert_eq!(
+                criteria[&option_of(candidate.mark)],
+                json!(OPTION_MEANS.replace("{action}", &candidate.action)),
+                "mark:{}",
+                candidate.mark
+            );
+        }
+        let options = json!(criteria).to_string();
+        for restated in ["moved", "control", "explored", "항목"] {
+            assert!(
+                !options.contains(restated),
+                "an option restated a result ({restated}): {options}"
+            );
+        }
         assert_eq!(asked.questions[QUESTION]["type"], "choice");
+        // The question names every key it reads by its path — the state's,
+        // each candidate's and each result's (t-9469).
+        for key in STATE_KEYS.iter().chain(&CANDIDATE_KEYS).chain(&RESULT_KEYS) {
+            assert!(
+                INSTRUCTIONS.contains(&format!("`{key}`")),
+                "the question never names `{key}`"
+            );
+        }
         // Past the cap, a fourth candidate is not offered at all.
         let four = [
             candidate(1, None),
