@@ -525,8 +525,8 @@ final class ReflexRuntimeTests: XCTestCase {
         let fence = try LeafRig()
         fence.decide()
         var fenceSeq: UInt64 = 10
-        fence.sleeper.onSleep = { index, _ in
-            if index == 10 { fence.hand.revoke(fence.token, reason: "external_input") }
+        fence.sleeper.onSleep = { _, _ in
+            if !fence.poster.presses.isEmpty { fence.hand.revoke(fence.token, reason: "external_input") }
             fenceSeq += 1
             fence.capture(fenceSeq)
         }
@@ -561,7 +561,10 @@ final class ReflexRuntimeTests: XCTestCase {
                 rig.capture(seq)
             }
             rig.poster.onPost = { event, _ in
-                if event.kind == .pointerMove, rig.poster.moves.count == 10 { change(rig) }
+                if event.kind == .pointerMove, rig.poster.moves.count == 10 {
+                    change(rig)
+                    rig.sleeper.onSleep = nil // The replacement capture stays the newest during settling.
+                }
             }
             return (try rig.runner().run(LeafRig.click, index: 0), rig)
         }
@@ -1513,10 +1516,10 @@ final class ReflexRunBoundaryTests: XCTestCase {
         let rig = try LiveRig(plan: try ReflexFixtures.clickPlan())
         let inFence = Gate()
         inFence.close()
-        rig.sleeper.onSleep = { index, _ in
-            if index < 10 {
+        rig.sleeper.onSleep = { _, _ in
+            if rig.poster.presses.isEmpty {
                 rig.frame(.ball(track: 5, box: LiveRig.box))
-            } else if index == 10 {
+            } else {
                 inFence.pass()
             }
         }
@@ -2610,8 +2613,8 @@ final class ReflexKernelAndPolicyTests: XCTestCase {
             frames.poke()
             _ = eventually { frames.taken(taken) >= 2 }
         }
-        host.sleeper.onSleep = { index, _ in
-            if index < 10 { publish() } else if index == 10 { inFence.pass() }
+        host.sleeper.onSleep = { _, _ in
+            if host.poster.presses.isEmpty { publish() } else { inFence.pass() }
         }
         host.poster.onPost = { [monitor = host.monitor, hand = host.hand] event, tag in
             let me = Int64(getpid())
@@ -2807,10 +2810,10 @@ final class ReflexKernelAndPolicyTests: XCTestCase {
         let rig = try LiveRig(plan: try ReflexFixtures.clickPlan(), scene: scene, kernel: kernel)
         let inFence = Gate()
         inFence.close()
-        rig.sleeper.onSleep = { index, _ in
-            if index < 10 {
+        rig.sleeper.onSleep = { _, _ in
+            if rig.poster.presses.isEmpty {
                 rig.frame(.ball(track: 5, box: LiveRig.box))
-            } else if index == 10 {
+            } else {
                 // The frames stop and the next read sticks inside the kernel.
                 kernel.stick()
                 rig.frames.publish(ReflexFixtures.capture(99, capturedNs: rig.clock.nowNs()))

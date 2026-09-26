@@ -150,6 +150,75 @@ final class ReflexPressTests: XCTestCase {
 
     // MARK: buttons and modifiers
 
+    private func delayedPointerRig() throws -> (LeafRig, AskedBoundary) {
+        let rig = try LeafRig()
+        rig.decide()
+        let posted = Box<SmoothPointerPath.Point>()
+        let standing = Box<SmoothPointerPath.Point>()
+        standing.value = rig.poster.pointerLocation()
+        func delivered() {
+            if let point = posted.value {
+                rig.poster.movePointer(to: point)
+                standing.value = point
+                posted.value = nil
+            }
+        }
+        rig.poster.onPost = { event, _ in
+            if event.kind == .pointerMove {
+                posted.value = SmoothPointerPath.Point(x: event.x, y: event.y)
+                rig.poster.movePointer(to: standing.value!)
+            }
+        }
+        var seq: UInt64 = 10
+        rig.sleeper.onSleep = { _, _ in
+            delivered()
+            seq += 1
+            rig.capture(seq)
+        }
+        let boundary = AskedBoundary()
+        boundary.during = { _ in delivered() }
+        return (rig, boundary)
+    }
+
+    func test_the_hands_queued_move_settles_before_the_clicks_pointer_drift_check() throws {
+        let (rig, boundary) = try delayedPointerRig()
+        let receipt = try rig.runner(boundary: boundary).run(LeafRig.click, index: 0)
+        XCTAssertEqual(receipt.outcome, .done)
+        XCTAssertEqual(rig.poster.presses.count, 1)
+        XCTAssertEqual(rig.poster.releases.count, 1)
+    }
+
+    func test_the_hands_queued_move_settles_before_the_drags_press() throws {
+        let (rig, boundary) = try delayedPointerRig()
+        let receipt = try rig.runner(boundary: boundary).run(box, index: 0)
+        XCTAssertEqual(receipt.outcome, .done)
+        XCTAssertEqual(rig.poster.presses.count, 1)
+        XCTAssertEqual(rig.hand.snapshot.held, [])
+    }
+
+    func test_a_stop_during_pointer_settling_prevents_the_press() throws {
+        let rig = try LeafRig()
+        rig.decide()
+        rig.sleeper.onSleep = { index, _ in
+            if index == 10 { rig.hand.revoke(rig.token, reason: "external_input") }
+            rig.capture(UInt64(index) + 11)
+        }
+        XCTAssertEqual(try rig.runner().run(LeafRig.click, index: 0).outcome, .stopped)
+        XCTAssertTrue(rig.poster.presses.isEmpty)
+        XCTAssertEqual(rig.hand.snapshot.held, [])
+    }
+
+    func test_evidence_revoked_during_pointer_settling_does_not_return_with_a_later_frame() throws {
+        let rig = try LeafRig()
+        rig.decide()
+        rig.sleeper.onSleep = { index, _ in
+            if index == 10 { rig.sightings.revoke() }
+            rig.capture(UInt64(index) + 11)
+        }
+        XCTAssertEqual(try rig.runner().run(LeafRig.click, index: 0).outcome, .evidence)
+        XCTAssertTrue(rig.poster.presses.isEmpty)
+    }
+
     func test_an_unaimable_sliver_does_not_spend_the_edge_before_the_target_is_exposed() throws {
         let rig = try LiveRig(plan: ReflexFixtures.clickPlan(maxFires: 1))
         defer { rig.session.stop(reason: StopReason.request) }
@@ -171,6 +240,7 @@ final class ReflexPressTests: XCTestCase {
         rig.poster.onPost = { event, _ in
             if event.kind == .pointerMove, rig.poster.moves.count == 10 {
                 rig.capture(90, box: moved)
+                rig.sleeper.onSleep = nil
             }
         }
         let receipt = try rig.runner().run(LeafRig.click, index: 0)
@@ -182,7 +252,7 @@ final class ReflexPressTests: XCTestCase {
     }
 
     func test_the_aim_comparison_uses_the_frame_position_or_its_measured_velocity() throws {
-        for (method, expectedX) in [(ReflexPressAim.latest, 16.0), (.predicted, 26.0), (.resting, 16.0)] {
+        for method in [ReflexPressAim.latest, .predicted, .resting] {
             let rig = try LeafRig()
             rig.decide()
             rig.showBall()
@@ -198,11 +268,13 @@ final class ReflexPressTests: XCTestCase {
                         scale: observed.scale, cells: nil, samples: observed.samples
                     )
                     rig.sightings.publish(ReflexFixtures.seen(frame, moving))
+                    rig.sleeper.onSleep = nil
                 }
             }
             var runner = try rig.runner()
             runner.pressAim = method
             XCTAssertEqual(runner.run(LeafRig.click, index: 0).outcome, .done, method.rawValue)
+            let expectedX = method == .predicted ? 26 + Double(rig.limits.pointer_tick_ns) / 1_000_000 : 16
             XCTAssertEqual(rig.poster.presses.first?.x, expectedX, method.rawValue)
         }
     }

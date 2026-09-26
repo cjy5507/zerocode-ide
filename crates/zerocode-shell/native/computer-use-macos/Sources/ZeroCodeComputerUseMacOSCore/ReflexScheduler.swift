@@ -943,6 +943,7 @@ struct ReflexLeafRunner {
                   aim: { moved, at, captured in moved.aim(atHostNs: at, capturedHostNs: captured, maxAgeNs: limits.max_frame_age_ns) },
                   event: { HandEvent(.pointerMove, x: $0.x, y: $0.y) })
         guard leaf.kind == .click else { return }
+        if pressAim != .resting { try settlePointer(after: path) }
 
         // The press: a capture newer than the one the lease came from still
         // shows the same target, the lease holds a click, and the chosen point
@@ -1053,6 +1054,7 @@ struct ReflexLeafRunner {
         }
         try glide(leaf, target, path: toPress, from: here, input: .pointer_move, evidence: evidence, lease: &lease, draft: &draft,
                   aim: carried(from), event: { HandEvent(.pointerMove, x: $0.x, y: $0.y) })
+        try settlePointer(after: toPress)
 
         // The press, read as a click's is: a newer capture still shows the
         // target, the lease holds a click, the pointer stands where the target
@@ -1087,6 +1089,14 @@ struct ReflexLeafRunner {
             try? hand.post(HandEvent(.buttonUp(.left, clickState: 1), x: at.x, y: at.y, flags: flags), by: token)
             throw error
         }
+    }
+
+    /// Posting queues a move in the window server. Give its last waypoint
+    /// one cancellable pointer tick to land; the ordinary frame, lease,
+    /// boundary and pointer checks still run afterward.
+    private func settlePointer(after path: [PointerWaypoint]) throws {
+        guard !path.isEmpty else { return }
+        try hand.sleep(untilNs: hand.nowNs() &+ limits.pointer_tick_ns, by: token)
     }
 
     /// The leaf's record of what it was decided on.
