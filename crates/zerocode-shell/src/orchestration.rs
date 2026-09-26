@@ -235,6 +235,10 @@ struct RuntimeSeat {
     /// The between-turn effort moves this window has judged, typed and not
     /// yet graded (t-5637) — shared with the question asked off the beat.
     moves: Arc<Mutex<step_effort::MoveBook>>,
+    /// The coordinators' letters this window put to Jev and the answers still
+    /// waiting for what the coordinator did next (t-9471) — shared with the
+    /// questions asked off the beat.
+    mail: Arc<Mutex<mail_triage::MailBook>>,
 }
 
 type LiveRuntime = Arc<RuntimeSeat>;
@@ -2325,6 +2329,7 @@ fn install_runtime(actor: RuntimeActor, overrides: LiveOverrides, usage: UsageSo
         usage,
         stalls: Arc::default(),
         moves: Arc::default(),
+        mail: Arc::default(),
     }));
     // Boot seeds the first answer before any webview can restore worker seats.
     refresh_board_ledger();
@@ -6072,6 +6077,10 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // A turn ending is only a row. The existing beat revisits it after the
     // grace interval and is the sole producer of quiet notifications.
     notify_stalled_workers(host, now_ms);
+    // The letters the coordinators this window seats can still be handed are
+    // put to the mail triage, and what they did next is written as its
+    // labels — recorded only, on a ledger that moved (t-9471).
+    mail_triage::sweep(host, now_ms);
     // A decline whose pause dialog stands behind a stale `working` hook, which
     // the sweep cannot see, is told on its own two witnesses (t-6747).
     note_paused_declines(host, now_ms);

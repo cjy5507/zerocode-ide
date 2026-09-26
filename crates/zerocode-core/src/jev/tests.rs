@@ -2401,7 +2401,10 @@ fn the_mail_triage_records_every_letter_and_never_rises() {
     for sent in MAIL_TRIAGE.sends {
         assert_eq!(sent.cap, Cap::Uncut, "{}", sent.at);
         let key = sent.at.trim_start_matches("/state/");
-        assert!(STATE_KEYS.contains(&key), "{key} is not a key the state carries");
+        assert!(
+            STATE_KEYS.contains(&key),
+            "{key} is not a key the state carries"
+        );
         for word in [
             "body", "subject", "payload", "words", "text", "title", "summary",
         ] {

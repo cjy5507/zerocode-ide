@@ -1529,6 +1529,10 @@ mod tests {
                 product(include_str!("orchestration/stall_cause.rs")),
             ),
             (
+                "window mail triage",
+                product(include_str!("orchestration/mail_triage.rs")),
+            ),
+            (
                 "window browser read",
                 product(include_str!("browser_read.rs")),
             ),

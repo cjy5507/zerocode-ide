@@ -365,8 +365,9 @@ function jevLineWords(line) {
  * `same_as_rule`, the stall seat's `unknown` and `worker_died`, the notice
  * seat's `away`, the summons' and the mention ranking's `not_offered`, the
  * summons' `pinned`, recall's `no_note_touched`, routing's `unanswered`, the
- * file pick's `no_file_edited`, the claim check's `not_model_comparison`) —
- * and why a feature's record draws no confidence bar to act from
+ * file pick's `no_file_edited`, the claim check's `not_model_comparison`,
+ * the mail triage's `superseded` and `unhandled`, t-9471) — and why a
+ * feature's record draws no confidence bar to act from
  * (`calibration.reason`, the core's `threshold::NoLine::token`). What each
  * means to a person is said once here (t-9935); `jevReasonWords` reads it. */
 const JEV_REASONS = Object.freeze({
@@ -388,6 +389,8 @@ const JEV_REASONS = Object.freeze({
   one_colour: { key: "jev.reason.oneColour", word: "확신도로 답이 나뉘지 않음" },
   non_monotone: { key: "jev.reason.nonMonotone", word: "확신도가 높은 답이 더 자주 틀림" },
   no_lift: { key: "jev.reason.noLift", word: "기준을 그어도 정확도가 거의 같음" },
+  superseded: { key: "jev.reason.superseded", word: "새 편지가 대신함" },
+  unhandled: { key: "jev.reason.unhandled", word: "코디네이터 행동이 모자람" },
 });
 
 /* A reason in words: this table's, else — a record that drew no bar because

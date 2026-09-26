@@ -19,15 +19,23 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use serde_json::Value;
-use zerocode_core::jev::MAIL_TRIAGE;
-use zerocode_core::mail_triage::{Labeled, Mailroom, NotCompared, Start, Triage};
+use serde_json::{Value, json};
+use zerocode_core::jev::summary::{
+    AGREED, AT, BASELINE_AGREED, LABEL, NOT_COMPARED, OUTCOME, REQUEST_AT, RUBRIC_VERSION,
+};
+use zerocode_core::jev::{JevMode, MAIL_TRIAGE};
+use zerocode_core::mail_triage::{
+    self, Filed, LABEL_HORIZON_MS, Labeled, MAIL_TRIAGE_RUBRIC_VERSION, MailAsk, Mailroom,
+    NotCompared, Start, Triage, kind_rule,
+};
+use zerocode_core::orchestration::task_cost::TASK_STAMP;
 use zerocode_core::orchestration::{Ledger, Message, Run};
 
 use crate::agent_teams::Host;
+use crate::systemone::{SCHEMA, Wire, request_body};
 
 /// How long one question may wait for its answer — the table's wire wall
 /// (`MAIL_TRIAGE_DEADLINE_MS`), read from there so the wait and its reason
@@ -38,6 +46,15 @@ pub(crate) const MAIL_TRIAGE_DEADLINE: Duration =
 /// The key a request row names its letter under, and a label row names it
 /// back — the table's own name for the seat's requests.
 const KEY: &str = MAIL_TRIAGE.request_name[0];
+
+/// The row's outcome for a question Jev answered in shape.
+const ANSWERED: &str = "answered";
+
+/// The keys a request row carries that the tail is read back by — one
+/// spelling for the writer and the reader.
+const RUN: &str = "run";
+const TRIAGE: &str = "triage";
+const DELIVERED_MS: &str = "deliveredMs";
 
 /// What this window remembers about the letters it asked about.
 #[derive(Default)]
@@ -57,6 +74,46 @@ pub(super) struct MailBook {
     waiting: Option<(PathBuf, Vec<Waiting>)>,
 }
 
+impl MailBook {
+    /// Read `ledger`'s tail once: the letters asked about before this window
+    /// and the answers still waiting for their label.
+    fn load(&mut self, ledger: &Path) {
+        if self
+            .waiting
+            .as_ref()
+            .is_some_and(|(held, _)| held == ledger)
+        {
+            return;
+        }
+        let (asked, waiting) = read_tail(ledger);
+        self.asked.extend(asked);
+        self.waiting = Some((ledger.to_path_buf(), waiting));
+    }
+
+    /// The batch `run`'s coordinator holds open, as this window sees it: its
+    /// stamp beside every waiting letter in it, the first time it is seen.
+    fn note_open(&mut self, run: &Run) {
+        let Some((_, waiting)) = self.waiting.as_ref() else {
+            return;
+        };
+        let Some(batch) = run.open_delivery(&run.address()) else {
+            return;
+        };
+        let Some(opened_ms) = batch.opened_ms else {
+            return;
+        };
+        for id in &batch.messages {
+            if waiting.iter().any(|one| one.key == *id) {
+                self.opened.entry(id.clone()).or_insert(opened_ms);
+            }
+        }
+    }
+}
+
+fn kept(book: &Mutex<MailBook>) -> MutexGuard<'_, MailBook> {
+    book.lock().unwrap_or_else(|held| held.into_inner())
+}
+
 /// An answered question waiting for what the coordinator does next.
 #[derive(Debug, Clone, PartialEq)]
 struct Waiting {
@@ -68,51 +125,391 @@ struct Waiting {
     delivered_ms: Option<i64>,
 }
 
+/// One question on its way: the letter's facts as its row keeps them, the
+/// switch it was asked under, when, and what it asks.
+struct Question {
+    key: String,
+    run: String,
+    kind: &'static str,
+    from: String,
+    worker: Option<String>,
+    dispatch: Option<String>,
+    task: Option<String>,
+    created_ms: i64,
+    delivered_ms: Option<i64>,
+    repeats: usize,
+    open_questions: usize,
+    coordinator_busy: Option<bool>,
+    /// The coordinator's own checkout — the workspace the door asks consent
+    /// for.
+    workspace: Option<PathBuf>,
+    mode: JevMode,
+    asked_ms: i64,
+    asked: MailAsk,
+}
+
 /// Put every letter the coordinators this window seats can still be handed,
 /// and nobody has asked about, to Jev — and write the label of every
 /// answered one the ledger now says something about.
-pub(super) fn sweep(_host: &dyn Host, _book: &Arc<Mutex<MailBook>>, _now_ms: i64) {
-    todo!("t-9471")
+pub(super) fn sweep(host: &dyn Host, now_ms: i64) {
+    let Some(wire) = host.jev_wire() else {
+        return;
+    };
+    let Some(path) = crate::systemone::ledger_of(&wire, &MAIL_TRIAGE) else {
+        return;
+    };
+    let Some(held) = super::runtime() else {
+        return;
+    };
+    let Ok(image) = held.actor.view() else {
+        return;
+    };
+    {
+        let mut book = kept(&held.mail);
+        if book.revision == Some(image.revision()) {
+            return;
+        }
+        book.revision = Some(image.revision());
+        book.load(&path);
+    }
+    let Ok(ledger) = super::cached_ledger(&held, &image) else {
+        return;
+    };
+    let teams = crate::agent_teams::teams();
+    let seats = super::index_team_seats(&teams);
+    drop(teams);
+    let seated: Vec<(&Run, u32)> = ledger
+        .runs()
+        .iter()
+        .filter_map(|run| Some((run, seat_term(run, &seats)?)))
+        .collect();
+    let labels = {
+        let mut book = kept(&held.mail);
+        for (run, _) in &seated {
+            book.note_open(run);
+        }
+        label_waiting(&mut book, &ledger, now_ms)
+    };
+    crate::systemone::record_rows(&MAIL_TRIAGE, &path, &labels, now_ms);
+    ask_about(host, &wire, &held.mail, &path, &seated, now_ms);
+}
+
+/// Ask about every fresh letter of the runs this window seats, in one job
+/// off the beat, and keep each answer's wait for its label.
+fn ask_about(
+    host: &dyn Host,
+    wire: &Wire,
+    book: &Arc<Mutex<MailBook>>,
+    path: &Path,
+    seated: &[(&Run, u32)],
+    now_ms: i64,
+) {
+    let mut mode = None;
+    let mut questions = Vec::new();
+    // The question reads no act of the coordinator's: its room holds none.
+    let no_receipts = Vec::new();
+    for (run, term) in seated {
+        let room = Mailroom::of_run(run, &no_receipts);
+        let fresh = fresh_letters(&room, &kept(book).asked);
+        if fresh.is_empty() {
+            continue;
+        }
+        let mode = *mode.get_or_insert_with(|| MAIL_TRIAGE.mode_in(&wire.settings_root()));
+        if !mode.asks() {
+            return;
+        }
+        let coordinator_busy = super::pane_turns()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(term)
+            .map(|turn| matches!(turn, super::PaneTurn::Running));
+        let workspace = host.worktree_of(*term);
+        let open_questions = room.open_questions(run);
+        for letter in &fresh {
+            let look = room.look(run, letter, now_ms, coordinator_busy, open_questions);
+            questions.push(Question {
+                key: letter.id.clone(),
+                run: run.id.clone(),
+                kind: letter.kind.as_str(),
+                from: look.from.to_string(),
+                worker: look.worker.map(str::to_string),
+                dispatch: letter.dispatch.clone(),
+                task: letter.task.clone(),
+                created_ms: letter.created_ms,
+                delivered_ms: match room.start_of(letter, None) {
+                    Start::Opened(at) => Some(at),
+                    Start::Checked(_) | Start::Created(_) => None,
+                },
+                repeats: look.repeats,
+                open_questions,
+                coordinator_busy,
+                workspace: workspace.clone(),
+                mode,
+                asked_ms: now_ms,
+                asked: mail_triage::ask(&look),
+            });
+        }
+        kept(book)
+            .asked
+            .extend(fresh.iter().map(|letter| letter.id.clone()));
+    }
+    if questions.is_empty() {
+        return;
+    }
+    let wire = wire.clone();
+    let path = path.to_path_buf();
+    let book = Arc::clone(book);
+    host.off_the_beat(Box::new(move || {
+        for question in questions {
+            let (row, waiting) = settle(&wire, question);
+            crate::systemone::record_rows(&MAIL_TRIAGE, &path, &[row], now_ms);
+            // A book that has not read the ledger's tail yet reads this row
+            // there; one that has takes it here, once.
+            if let Some(waiting) = waiting
+                && let Some((_, rows)) = kept(&book).waiting.as_mut()
+                && !rows.iter().any(|row| row.key == waiting.key)
+            {
+                rows.push(waiting);
+            }
+        }
+    }));
+}
+
+/// Ask one question and write down what came of it: the row, and — for an
+/// answer — the wait for its label.
+fn settle(wire: &Wire, question: Question) -> (Value, Option<Waiting>) {
+    let Question {
+        key,
+        run,
+        kind,
+        from,
+        worker,
+        dispatch,
+        task,
+        created_ms,
+        delivered_ms,
+        repeats,
+        open_questions,
+        coordinator_busy,
+        workspace,
+        mode,
+        asked_ms,
+        asked,
+    } = question;
+    let mut row = json!({
+        (AT.canonical): asked_ms,
+        KEY: key,
+        RUN: run,
+        "kind": kind,
+        "from": from,
+        "worker": worker,
+        "dispatch": dispatch,
+        TASK_STAMP: task,
+        "mode": mode.key(),
+        (RUBRIC_VERSION.canonical): MAIL_TRIAGE_RUBRIC_VERSION,
+        "createdMs": created_ms,
+        DELIVERED_MS: delivered_ms,
+        "repeats": repeats,
+        "openQuestions": open_questions,
+        "coordinatorBusy": coordinator_busy,
+    });
+    let began = Instant::now();
+    let answer = wire.ask(
+        &MAIL_TRIAGE,
+        workspace.as_deref(),
+        request_body(&asked.state, &asked.questions),
+        MAIL_TRIAGE_DEADLINE,
+    );
+    row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
+    row["requestBytes"] = json!(answer.request_bytes);
+    answer.spent.stamp(&mut row);
+    let read = answer.answer.and_then(|body| {
+        let answers = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|parsed| parsed.get("answers").cloned())
+            .ok_or_else(|| SCHEMA.to_string())?;
+        asked
+            .read(&answers)
+            .map_err(|refusal| refusal.token().to_string())
+    });
+    match read {
+        Ok(read) => {
+            row[OUTCOME.canonical] = json!(ANSWERED);
+            row[TRIAGE] = json!(read.triage.word());
+            row["probabilities"] = json!(read.probabilities);
+            row["confidence"] = json!(read.confidence);
+            row["urgent"] = json!(read.urgent);
+            let waiting = Waiting {
+                key,
+                run,
+                asked_ms,
+                triage: read.triage,
+                delivered_ms,
+            };
+            (row, Some(waiting))
+        }
+        Err(token) => {
+            row[OUTCOME.canonical] = json!(token);
+            (row, None)
+        }
+    }
 }
 
 /// The letters a question may be asked about: those the coordinator can
 /// still be handed — waiting in its inbox, or in the batch it holds open —
 /// that nobody has asked about yet, oldest first.
-fn fresh_letters<'a>(_room: &Mailroom<'a>, _asked: &HashSet<String>) -> Vec<&'a Message> {
-    todo!("t-9471")
+fn fresh_letters<'a>(room: &Mailroom<'a>, asked: &HashSet<String>) -> Vec<&'a Message> {
+    room.letters()
+        .filter(|letter| {
+            (room.is_pending(letter) || room.is_open(letter)) && !asked.contains(&letter.id)
+        })
+        .collect()
 }
 
 /// Every letter the rows at `ledger`'s tail asked about, and the answered
 /// ones no label row names yet.
-fn read_tail(_ledger: &Path) -> (HashSet<String>, Vec<Waiting>) {
-    todo!("t-9471")
+fn read_tail(ledger: &Path) -> (HashSet<String>, Vec<Waiting>) {
+    let Some(lines) = zerocode_core::transcript::tail_lines(ledger) else {
+        return (HashSet::new(), Vec::new());
+    };
+    let rows: Vec<Value> = lines
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let labeled: HashSet<&str> = rows
+        .iter()
+        .filter_map(|row| LABEL.read(row).and_then(Value::as_str))
+        .collect();
+    let mut asked = HashSet::new();
+    let mut waiting: Vec<Waiting> = Vec::new();
+    for row in &rows {
+        let Some(key) = row.get(KEY).and_then(Value::as_str) else {
+            continue;
+        };
+        asked.insert(key.to_string());
+        if OUTCOME.read(row).and_then(Value::as_str) != Some(ANSWERED)
+            || labeled.contains(key)
+            || waiting.iter().any(|one| one.key == key)
+        {
+            continue;
+        }
+        let (Some(run), Some(asked_ms), Some(triage)) = (
+            row.get(RUN).and_then(Value::as_str),
+            AT.read(row).and_then(Value::as_i64),
+            row.get(TRIAGE)
+                .and_then(Value::as_str)
+                .and_then(Triage::from_word),
+        ) else {
+            continue;
+        };
+        waiting.push(Waiting {
+            key: key.to_string(),
+            run: run.to_string(),
+            asked_ms,
+            triage,
+            delivered_ms: row.get(DELIVERED_MS).and_then(Value::as_i64),
+        });
+    }
+    (asked, waiting)
 }
 
 /// The label rows `ledger` can write now for the answered rows waiting in
 /// `book` — each once, and dropped from the book as it is written. A run the
 /// ledger no longer holds cannot say what followed, and its rows stay
 /// unlabeled rather than guessed at; a letter not handed over yet waits.
-fn label_waiting(_book: &mut MailBook, _ledger: &Ledger, _now_ms: i64) -> Vec<Value> {
-    todo!("t-9471")
+fn label_waiting(book: &mut MailBook, ledger: &Ledger, now_ms: i64) -> Vec<Value> {
+    let MailBook {
+        waiting, opened, ..
+    } = book;
+    let Some((_, rows)) = waiting.as_mut() else {
+        return Vec::new();
+    };
+    // The receipts that can speak of a waiting letter: those filed since the
+    // oldest of them was written.
+    let Some(since) = rows
+        .iter()
+        .filter_map(|one| {
+            ledger
+                .run(&one.run)?
+                .message(&one.key)
+                .map(|letter| letter.created_ms)
+        })
+        .min()
+    else {
+        rows.clear();
+        return Vec::new();
+    };
+    let receipts = Filed::of_ledger(ledger, since);
+    let mut rooms: HashMap<&str, Mailroom<'_>> = HashMap::new();
+    let mut labels = Vec::new();
+    rows.retain(|one| {
+        let Some(run) = ledger.run(&one.run) else {
+            return false;
+        };
+        let room = rooms
+            .entry(run.id.as_str())
+            .or_insert_with(|| Mailroom::of_run(run, &receipts));
+        let Some(letter) = room.message(&one.key) else {
+            return false;
+        };
+        if room.is_pending(letter) && now_ms.saturating_sub(letter.created_ms) <= LABEL_HORIZON_MS {
+            return true;
+        }
+        let start = room.start_of(letter, opened.get(&one.key).copied().or(one.delivered_ms));
+        match room.label(letter, start, now_ms) {
+            None => true,
+            Some(outcome) => {
+                labels.push(label_row(one, letter, start, &outcome, now_ms));
+                opened.remove(&one.key);
+                false
+            }
+        }
+    });
+    labels
 }
 
 /// The label row of one answered letter: what the coordinator did, when and
 /// how the label knows the hand-over, and the marks — the answer's and the
 /// kind rule's — or why there are none.
 fn label_row(
-    _one: &Waiting,
-    _letter: &Message,
-    _start: Start,
-    _outcome: &Result<Labeled<'_>, NotCompared>,
-    _now_ms: i64,
+    one: &Waiting,
+    letter: &Message,
+    start: Start,
+    outcome: &Result<Labeled<'_>, NotCompared>,
+    now_ms: i64,
 ) -> Value {
-    todo!("t-9471")
+    let mut row = json!({
+        (AT.canonical): now_ms,
+        (LABEL.canonical): one.key,
+        (REQUEST_AT.canonical): one.asked_ms,
+        RUN: one.run,
+        "kind": letter.kind.as_str(),
+        "start": start.word(),
+        "startMs": start.at(),
+    });
+    match outcome {
+        Ok(labeled) => {
+            row["truth"] = json!(labeled.truth.word());
+            row["urgentTruth"] = json!(labeled.urgent);
+            row["afterActions"] = json!(labeled.after_actions);
+            row["afterMs"] = json!(labeled.after_ms);
+            row["handledBy"] = json!(labeled.handled_by);
+            // The marks the summary counts: the answer against what the
+            // coordinator did, and the kind rule against the same.
+            row[AGREED.canonical] = json!(one.triage == labeled.truth);
+            row[BASELINE_AGREED.canonical] = json!(kind_rule(letter.kind) == labeled.truth);
+        }
+        Err(why) => row[NOT_COMPARED.canonical] = json!(why.word()),
+    }
+    row
 }
 
-/// The run's coordinator seat as `team/pane` and the term this window holds
-/// it in, when it holds it.
-fn seat_term(_run: &Run, _seats: &super::TeamSeatIndex) -> Option<u32> {
-    todo!("t-9471")
+/// The term this window holds `run`'s live coordinator seat (`team/pane`) in,
+/// when it holds it.
+fn seat_term(run: &Run, seats: &super::TeamSeatIndex) -> Option<u32> {
+    let seat = run.coordinator_live()?;
+    let (team, pane) = seat.seat.split_once('/')?;
+    seats.get(team)?.get(pane).copied()
 }
 
 #[cfg(test)]

@@ -1404,7 +1404,7 @@ impl Message {
     /// say so: a question wears whatever `--to` it was given, and a row in
     /// the ledger's voice, or of a kind only the ledger writes, is an
     /// observation about the receiver, not a word from it.
-    fn answers(&self, question: &Message) -> bool {
+    pub(crate) fn answers(&self, question: &Message) -> bool {
         self.thread.as_deref() == Some(question.id.as_str())
             && self.from == question.to
             && self.from != LEDGER_ITSELF
@@ -1440,7 +1440,7 @@ pub const MAX_THREAD_HOPS: usize = 16;
 /// rather than sixteen walks of the whole vector. The index holds only the
 /// messages that carry a thread, which in an ordinary run is a small part of
 /// the mail.
-fn thread_hops(run: &Run, from: &str) -> usize {
+pub(crate) fn thread_hops(run: &Run, from: &str) -> usize {
     let parents: std::collections::HashMap<&str, &str> = run
         .messages()
         .iter()
@@ -5488,6 +5488,19 @@ struct Served {
     expired: bool,
 }
 
+/// One receipt as [`Ledger::receipt_views`] hands it to the rest of this
+/// crate.
+#[derive(Clone, Copy)]
+pub(crate) struct ReceiptView<'a> {
+    pub(crate) caller: Option<&'a str>,
+    pub(crate) verb: Option<&'a str>,
+    pub(crate) filed_ms: Option<i64>,
+    /// What the verb printed, while the ledger keeps it; `None` for a `check`.
+    pub(crate) printed: Option<&'a str>,
+    /// What a `check` answered about.
+    pub(crate) check: Option<&'a CheckV1>,
+}
+
 impl Served {
     /// Give up the answer and keep the key.
     ///
@@ -7355,6 +7368,28 @@ impl Ledger {
         let oldest_kept = newest.saturating_sub(VERB_TALLY_DAYS.saturating_mul(DAY_MS));
         self.verb_tallies
             .retain(|row| row.day_start_ms > oldest_kept);
+    }
+
+    /// Every receipt, as the rest of this crate may read it (t-9471,
+    /// `crate::mail_triage::Filed::of_ledger`): who filed it, which verb,
+    /// when, and what it answered with — the printed answer while the ledger
+    /// keeps it, or the question a `check` answered. Never the retry name or
+    /// the fingerprint, and nothing outside this crate: a receipt's answer is
+    /// prose as often as ids.
+    pub(crate) fn receipt_views(&self) -> impl Iterator<Item = ReceiptView<'_>> {
+        self.served.iter().map(|held| {
+            let (printed, check) = match &held.answer {
+                ServedAnswer::Inline(text) => (Some(text.as_str()), None),
+                ServedAnswer::Check(about) => (None, Some(about)),
+            };
+            ReceiptView {
+                caller: held.caller.as_deref(),
+                verb: held.verb.as_deref(),
+                filed_ms: held.filed_ms,
+                printed,
+                check,
+            }
+        })
     }
 
     /// The verb tallies as they stand, in the order they were opened.

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::jev::{MAIL_TRIAGE, rubric_fingerprint};
 use crate::orchestration::{
-    CheckV1, Draft, LedgerProjectionV1, Priority, ServedAnswer, ServedRow, Text,
+    CheckV1, Draft, LedgerProjectionV1, Priority, ServedAnswer, ServedRow, Text, worker_address,
 };
 
 /// The coordinator's session, as a receipt names it.
@@ -156,7 +156,7 @@ fn room<'a>(
 #[test]
 fn the_version_is_pinned_to_the_words() {
     assert_eq!(MAIL_TRIAGE_RUBRIC_VERSION, 1);
-    assert_eq!(rubric_fingerprint(rubric_words), "e3b0c44298fc1c14");
+    assert_eq!(rubric_fingerprint(rubric_words), "5a4f2984acb4ba2e");
 }
 
 /// The answers are three words in the question's order, each reads back, and
@@ -928,7 +928,7 @@ fn a_live_ledgers_receipts_reach_the_label() {
                 from: worker_address(&started.worker),
                 to: address.clone(),
                 kind: MessageKind::WorkerDone,
-                body: Text::from("{}"),
+                body: Text::from(r#"{"ok":true,"summary":"reviewed words the label never reads"}"#),
                 subject: Text::default(),
                 priority: Priority::Normal,
                 payload: Text::default(),
@@ -1070,6 +1070,10 @@ struct Tally {
     acked_rule: Confusion,
     question_acts: Vec<usize>,
     handled_acts: Vec<usize>,
+    /// The act that first named each letter's subject, however late and
+    /// whatever came between — the uncut spread the two lines are drawn
+    /// from, which the labels themselves cannot show past the no-look line.
+    first_named_acts: Vec<usize>,
 }
 
 /// The kind rule's answers beside the label's, on the letters compared.
@@ -1214,6 +1218,14 @@ fn replay(seed: &Seed) -> Tally {
             tally.letters += 1;
             let start = room.start_of(letter, None);
             *tally.starts.entry(start.word()).or_default() += 1;
+            if let Some(at) = room
+                .acts()
+                .iter()
+                .filter(|act| act.at_ms > start.at())
+                .position(|act| room.handles(letter, act))
+            {
+                tally.first_named_acts.push(at + 1);
+            }
             let outcome = room.label(letter, start, seed.read_at_ms);
             let said = match &outcome {
                 None => "open",
@@ -1228,7 +1240,9 @@ fn replay(seed: &Seed) -> Tally {
                 .or_default() += 1;
             if let Some(Ok(labeled)) = &outcome {
                 tally.kind_rule.count(kind_rule(letter.kind), labeled.truth);
-                if labeled.handled_by.is_some() {
+                // Handled is every truth but "no look": an act an older
+                // window filed with no verb handles a letter too.
+                if labeled.truth != Triage::NoNeed {
                     tally.handled_acts.push(labeled.after_actions);
                     if letter.kind == MessageKind::Question {
                         tally.question_acts.push(labeled.after_actions);
@@ -1282,7 +1296,10 @@ fn tally_json(seed: &Seed, tally: &Tally) -> Value {
             "p50": percentile(values, 0.5),
             "p90": percentile(values, 0.9),
             "p95": percentile(values, 0.95),
+            "p99": percentile(values, 0.99),
+            "first": values.iter().filter(|n| **n == 1).count(),
             "withinAnswerNow": values.iter().filter(|n| **n <= ANSWER_NOW_WITHIN_ACTS).count(),
+            "withinNoNeedLine": values.iter().filter(|n| **n <= NO_NEED_AFTER_ACTS).count(),
         })
     };
     json!({
@@ -1296,6 +1313,7 @@ fn tally_json(seed: &Seed, tally: &Tally) -> Value {
         "ackedRule": tally.acked_rule.json(),
         "questionActs": spread(&tally.question_acts),
         "handledActs": spread(&tally.handled_acts),
+        "firstNamedActs": spread(&tally.first_named_acts),
         "answerNowWithinActs": ANSWER_NOW_WITHIN_ACTS,
         "noNeedAfterActs": NO_NEED_AFTER_ACTS,
         "jevRequests": 0,

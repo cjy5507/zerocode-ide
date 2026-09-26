@@ -69,6 +69,8 @@ def a_store(path: Path, ledgers=("L",)) -> None:
             ("m-2", "run:run-1", "worker:w-1", "question", SECRET, "normal", "m-1", None, None, 200),
             ("m-3", "ledger", "run:run-1", "went_quiet", json.dumps({"workerId": "w-1"}), "high", None, "t-1", "dp-1", 300),
             ("m-4", "worker:w-1", "run:run-1", "worker_done", SECRET, "normal", None, "t-1", "dp-1", 50),
+            ("m-5", "run:run-1", "@worktree:/Users/someone/work/tree", "status", SECRET, "normal", None, None, None, 60),
+            ("m-6", "pane:team-9/%4", "run:run-1", "question", SECRET, "normal", None, None, None, 70),
         ]
         for at, row in enumerate(messages):
             db.execute(
@@ -136,7 +138,7 @@ class Gathering(unittest.TestCase):
 
     def test_messages_wear_the_shape_the_core_reads(self):
         messages = {one["id"]: one for one in self.run_one(self.gathered())["messages"]}
-        self.assertEqual(set(messages), {"m-1", "m-2", "m-3", "m-4"})
+        self.assertEqual(set(messages), {"m-1", "m-2", "m-3", "m-4", "m-5", "m-6"})
         allowed = {"id", "from", "to", "kind", "body", "priority", "thread", "task", "dispatch", "created_ms"}
         for message in messages.values():
             self.assertLessEqual(set(message), allowed)
@@ -145,6 +147,10 @@ class Gathering(unittest.TestCase):
         self.assertEqual(messages["m-3"]["priority"], "high")
         self.assertNotIn("priority", messages["m-1"], "normal is the core's default and left out")
         self.assertEqual(messages["m-1"]["created_ms"], 100)
+        self.assertEqual(messages["m-3"]["from"], "ledger")
+        self.assertEqual(messages["m-5"]["to"], "@worktree:", "a crowd's folder never leaves")
+        self.assertEqual(messages["m-6"]["from"], "pane:", "nor a seat past its head")
+        self.assertNotIn("/Users/someone", json.dumps(self.gathered()))
 
     def test_receipts_carry_ids_and_a_looks_own_word_only(self):
         receipts = self.gathered()["receipts"]
@@ -229,6 +235,8 @@ class Constants(unittest.TestCase):
 
     def test_the_run_address_and_the_look_key_are_the_cores(self):
         self.assertIn(f'const RUN_ADDRESS_PREFIX: &str = "{seed.RUN_ADDRESS_PREFIX}";', CORE)
+        self.assertIn(f'pub const WORKER_ADDRESS_PREFIX: &str = "{seed.WORKER_ADDRESS_PREFIX}";', CORE)
+        self.assertIn(f'pub const LEDGER_ITSELF: &str = "{seed.LEDGER_ITSELF}";', CORE)
         self.assertIn(f'pub const LOOK_MODE_KEY: &str = "{seed.LOOK_MODE_KEY}";', CORE)
 
     def test_an_id_is_the_ledgers_minted_shape(self):

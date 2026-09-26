@@ -7,8 +7,9 @@
 //! page or on the desktop — about a worker whose pane went quiet, about where
 //! a worker's window belongs, about which agent a summons should start,
 //! about which blocks of a page an agent's browser read should fold away
-//! about whether a ring is worth interrupting the person for, and about
-//! which of the screens a forked phone step led to is the one to keep.
+//! about whether a ring is worth interrupting the person for, about
+//! which of the screens a forked phone step led to is the one to keep, and
+//! about when a coordinator should deal with a letter in its inbox.
 //! Each keeps its own wire — the two Cargo workspaces carry different `reqwest` majors
 //! (docs/design/jev-browser-action-20260917.md §1.4) — so what must not fork
 //! lives here, in the one crate both already read:
@@ -4109,6 +4110,7 @@ pub static JEV_USES: [JevUse; 28] = [
     MENTION_RERANK,
     BRANCHING,
     JUDGMENT_CACHE,
+    MAIL_TRIAGE,
     CHALLENGER,
     PATCH_REVIEW,
     CLAIM,

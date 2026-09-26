@@ -29,15 +29,15 @@
 //! acts needed no look. Nothing here touches the network, the clock, a pane
 //! or a file.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
 
 use crate::jev::choice::{self, ChoiceRefusal};
 use crate::jev::noul::{self, NoulRefusal};
 use crate::orchestration::{
-    Delivery, Dispatch, Doing, Ledger, Message, MessageKind, Run, VERBS, WORKER_ADDRESS_PREFIX,
-    worker_address,
+    Delivery, Dispatch, Doing, HISTORY_MODE, LOOK_MODE_KEY, Ledger, Message, MessageKind,
+    PEEK_MODE, Run, VERBS, WORKER_ADDRESS_PREFIX,
 };
 
 /// The closed choice's name. The endpoint does not show a question's name to
@@ -177,7 +177,20 @@ pub const fn kind_rule(kind: MessageKind) -> Triage {
 /// to this, not to a date or to a reviewer's memory.
 #[must_use]
 pub fn rubric_words() -> String {
-    todo!("t-9471")
+    let mut words = String::from(INSTRUCTIONS);
+    for triage in Triage::ALL {
+        words.push('\n');
+        words.push_str(triage.word());
+        words.push('\n');
+        words.push_str(triage.means());
+    }
+    for said in [URGENT_INSTRUCTIONS, URGENT_YES, URGENT_NO] {
+        words.push('\n');
+        words.push_str(said);
+    }
+    words.push('\n');
+    words.push_str(&STATE_KEYS.join(","));
+    words
 }
 
 /// One letter, as the question carries it.
@@ -252,8 +265,41 @@ impl From<NoulRefusal> for MailRefusal {
 /// The question one letter asks: the choice, and the Noul beside it in the
 /// same request — the state is charged once and an answer's output is free.
 #[must_use]
-pub fn ask(_look: &MailLook<'_>) -> MailAsk {
-    todo!("t-9471")
+pub fn ask(look: &MailLook<'_>) -> MailAsk {
+    let criteria: Map<String, Value> = Triage::ALL
+        .iter()
+        .map(|triage| {
+            (
+                triage.word().to_string(),
+                Value::String(triage.means().to_string()),
+            )
+        })
+        .collect();
+    let mut questions = choice::asked(QUESTION, INSTRUCTIONS, criteria);
+    if let Some(asked) = questions.as_object_mut() {
+        asked.insert(
+            URGENT.to_string(),
+            noul::question(URGENT_INSTRUCTIONS, URGENT_YES, URGENT_NO),
+        );
+    }
+    MailAsk {
+        state: json!({
+            STATE_KEYS[0]: look.kind.as_str(),
+            STATE_KEYS[1]: look.from,
+            STATE_KEYS[2]: look.worker,
+            STATE_KEYS[3]: look.task,
+            STATE_KEYS[4]: look.task_status,
+            STATE_KEYS[5]: look.priority,
+            STATE_KEYS[6]: look.awaits_answer,
+            STATE_KEYS[7]: look.thread_depth,
+            STATE_KEYS[8]: crate::notify_call::seconds(look.age_ms),
+            STATE_KEYS[9]: look.delivered,
+            STATE_KEYS[10]: look.repeats,
+            STATE_KEYS[11]: look.coordinator_busy,
+            STATE_KEYS[12]: look.open_questions,
+        }),
+        questions,
+    }
 }
 
 impl MailAsk {
@@ -263,8 +309,19 @@ impl MailAsk {
     /// # Errors
     ///
     /// [`MailRefusal`] names which rule the answer broke.
-    pub fn read(&self, _answers: &Value) -> Result<MailRead, MailRefusal> {
-        todo!("t-9471")
+    pub fn read(&self, answers: &Value) -> Result<MailRead, MailRefusal> {
+        let offered: BTreeSet<String> = Triage::ALL
+            .iter()
+            .map(|triage| triage.word().to_string())
+            .collect();
+        let choice = choice::read(answers, QUESTION, &offered)?;
+        let urgent = noul::read(answers, URGENT)?;
+        Ok(MailRead {
+            triage: Triage::from_word(&choice.chosen).ok_or(ChoiceRefusal::UnknownOption)?,
+            probabilities: choice.probabilities,
+            confidence: choice.confidence,
+            urgent,
+        })
     }
 }
 
@@ -275,27 +332,29 @@ impl MailAsk {
 /// coordinator now: three.
 ///
 /// Measured on the one letter the coordinator treats as blocking by
-/// construction — a question, whose asker waits: over this machine's ledger
-/// in the week to 2026-09-26 the coordinator answered 130 of the 151
-/// questions put to it, the answer being its first act after the question
-/// was handed over for 94 of them, within two for 112 and within three for
-/// 118 (90.8%; p50 1, p90 3). The acts before an answer are the ones a
-/// sitting takes — the question that arrived with it answered first, a word
-/// to another worker — so three is what "now" costs in acts, batches and
-/// all. Each label row keeps the act count and the time beside the word, so
-/// the line can be drawn again without a second label.
+/// construction — a question, whose asker waits — with this module's own
+/// rule over this machine's ledger in the week to 2026-09-26
+/// (`tools/mail-triage-replay`): of the 152 questions put to a coordinator,
+/// 126 were answered, the answer being its first act after the hand-over
+/// for 94 of them and within three for 118 (93.7%; p50 1, p90 3). The acts
+/// before an answer are the ones a sitting takes — the question that
+/// arrived with it answered first, a word to another worker — so three is
+/// what "now" costs in acts, batches and all. Each label row keeps the act
+/// count and the time beside the word, so the line can be drawn again
+/// without a second label.
 pub const ANSWER_NOW_WITHIN_ACTS: usize = 3;
 
 /// How many of the coordinator's acts may pass with nothing handling a
 /// letter before it is read as one that needed no look: thirty.
 ///
-/// The ninety-fifth percentile of the act at which the coordinator handled
-/// what it handled, over the same week: 767 letters handled, at a median act
-/// of 2, p90 18, p95 30 — the long end is the review of a finished task,
-/// whose `task-update` lands after the review it waited for (p90 26). A
-/// letter nothing named for as long as nineteen in twenty handled ones took
-/// is more likely one that asked for nothing than one still in hand; about
-/// an hour and a half of the coordinator's work at this machine's pace.
+/// The ninety-fifth percentile of the act that first named what a letter
+/// was about, however late, over the same week: 1,363 letters named, at a
+/// median act of 3, p90 19, p95 30 and p99 93 — the long end is the review
+/// of a finished task, whose `task-update` lands after the review it waited
+/// for. A letter nothing named for as long as nineteen in twenty named ones
+/// took is more likely one that asked for nothing than one still in hand;
+/// about an hour and a half of the coordinator's work at this machine's
+/// pace (some twenty acts an hour on 2026-09-26).
 pub const NO_NEED_AFTER_ACTS: usize = 30;
 
 /// How long a letter's label may wait for those acts at all, from when it
@@ -323,7 +382,7 @@ pub enum Subject {
 }
 
 impl Subject {
-    /// Every subject, in the order a label row names them.
+    /// Every subject, in the table's order.
     pub const ALL: [Self; 4] = [Self::Thread, Self::Task, Self::Worker, Self::Attempt];
 }
 
@@ -340,6 +399,18 @@ pub const fn handled_by(kind: MessageKind) -> &'static [Subject] {
         _ => &Subject::ALL,
     }
 }
+
+/// The keys the ledger's verbs print the ids they acted on under: the task
+/// (`task-update`, `worker-start`, a gate), the worker (`worker-stop`,
+/// `worker-retain`, …), the message a `send` or a `reply` wrote, the question
+/// an `ask` posted, the attempt a `worker-start` opened and the one it
+/// retried.
+const ANSWER_TASK: &str = "taskId";
+const ANSWER_WORKER: &str = "workerId";
+const ANSWER_MESSAGE: &str = "messageId";
+const ANSWER_QUESTION: &str = "questionId";
+const ANSWER_DISPATCH: &str = "dispatchId";
+const ANSWER_RETRY_OF: &str = "retryOf";
 
 /// What a receipt's own answer named, by the ledger's ids and nothing else:
 /// the task, the worker, the message and the attempt a verb acted on, as the
@@ -358,8 +429,15 @@ impl Names {
     /// ledger's verbs print them under. Anything else in it — a status word,
     /// a title, an answer's prose — is not read.
     #[must_use]
-    pub fn of_answer(_answer: &Value) -> Self {
-        todo!("t-9471")
+    pub fn of_answer(answer: &Value) -> Self {
+        let id = |key: &str| answer.get(key).and_then(Value::as_str).map(str::to_string);
+        Self {
+            task: id(ANSWER_TASK),
+            worker: id(ANSWER_WORKER),
+            message: id(ANSWER_MESSAGE).or_else(|| id(ANSWER_QUESTION)),
+            dispatch: id(ANSWER_DISPATCH),
+            retry_of: id(ANSWER_RETRY_OF),
+        }
     }
 }
 
@@ -390,20 +468,58 @@ impl Filed {
     /// them.
     #[must_use]
     pub fn of_parts(
-        _caller: Option<String>,
-        _verb: Option<String>,
-        _filed_ms: Option<i64>,
-        _answer: &Value,
-        _check: Option<Looked>,
+        caller: Option<String>,
+        verb: Option<String>,
+        filed_ms: Option<i64>,
+        answer: &Value,
+        check: Option<Looked>,
     ) -> Self {
-        todo!("t-9471")
+        let inbox = match verb.as_deref() {
+            Some(verb) => VERBS
+                .iter()
+                .any(|(name, _, doing)| *name == verb && *doing == Doing::Inbox),
+            None => {
+                check.is_some()
+                    || answer
+                        .get(LOOK_MODE_KEY)
+                        .and_then(Value::as_str)
+                        .is_some_and(|page| [PEEK_MODE, HISTORY_MODE].contains(&page))
+            }
+        };
+        Self {
+            caller,
+            verb,
+            filed_ms,
+            names: Names::of_answer(answer),
+            check,
+            inbox,
+        }
     }
 
-    /// Every receipt `ledger` holds that was filed after `since_ms`, oldest
-    /// first as the ledger keeps them.
+    /// Every receipt `ledger` holds that was filed at or after `since_ms`,
+    /// in the order the ledger keeps them.
     #[must_use]
-    pub fn of_ledger(_ledger: &Ledger, _since_ms: i64) -> Vec<Self> {
-        todo!("t-9471")
+    pub fn of_ledger(ledger: &Ledger, since_ms: i64) -> Vec<Self> {
+        ledger
+            .receipt_views()
+            .filter(|view| view.filed_ms.is_some_and(|at| at >= since_ms))
+            .map(|view| {
+                let answer = view
+                    .printed
+                    .and_then(|printed| serde_json::from_str(printed).ok())
+                    .unwrap_or(Value::Null);
+                Self::of_parts(
+                    view.caller.map(str::to_string),
+                    view.verb.map(str::to_string),
+                    view.filed_ms,
+                    &answer,
+                    view.check.map(|about| Looked {
+                        address: about.address.clone(),
+                        messages: about.messages.clone(),
+                    }),
+                )
+            })
+            .collect()
     }
 
     /// Whether the receipt is the inbox's own — a look, or the
@@ -499,7 +615,8 @@ pub struct Labeled<'a> {
     /// And how long after the hand-over it came.
     pub after_ms: i64,
     /// The verb of the act that handled it; `None` for a letter nothing
-    /// handled.
+    /// handled, and for an act whose receipt an older window filed with no
+    /// verb.
     pub handled_by: Option<&'a str>,
 }
 
@@ -525,21 +642,104 @@ impl<'a> Mailroom<'a> {
     /// to read the coordinator's acts from.
     #[must_use]
     pub fn new(
-        _address: String,
-        _seat_actor: Option<&str>,
-        _messages: &'a [Message],
-        _dispatches: &'a [Dispatch],
-        _open: Option<&'a Delivery>,
-        _pending: &[&'a str],
-        _receipts: &'a [Filed],
+        address: String,
+        seat_actor: Option<&str>,
+        messages: &'a [Message],
+        dispatches: &'a [Dispatch],
+        open: Option<&'a Delivery>,
+        pending: &[&'a str],
+        receipts: &'a [Filed],
     ) -> Self {
-        todo!("t-9471")
+        let index: HashMap<&'a str, usize> = messages
+            .iter()
+            .enumerate()
+            .map(|(at, one)| (one.id.as_str(), at))
+            .collect();
+        let wrote = |id: &str| index.get(id).map(|at| &messages[*at]);
+        // The coordinator's sessions: its seat's, and every session the ledger
+        // has seen write in its voice — a restart's new conversation is still
+        // the coordinator, known by the first letter it signs as the run.
+        let mut actors: HashSet<&str> = seat_actor.into_iter().collect();
+        for filed in receipts {
+            if let (Some(caller), Some(said)) = (
+                filed.caller.as_deref(),
+                filed.names.message.as_deref().and_then(wrote),
+            ) && said.from == address
+            {
+                actors.insert(caller);
+            }
+        }
+        let mut acts: Vec<Act<'a>> = receipts
+            .iter()
+            .filter(|filed| {
+                !filed.reads_the_inbox()
+                    && filed
+                        .caller
+                        .as_deref()
+                        .is_some_and(|caller| actors.contains(caller))
+            })
+            .filter_map(|filed| {
+                Some(Act {
+                    at_ms: filed.filed_ms?,
+                    verb: filed.verb.as_deref(),
+                    names: &filed.names,
+                    message: filed.names.message.as_deref().and_then(wrote),
+                })
+            })
+            .collect();
+        acts.sort_by_key(|act| act.at_ms);
+        let mut checked: HashMap<&'a str, i64> = HashMap::new();
+        for filed in receipts {
+            let (Some(looked), Some(at)) = (filed.check.as_ref(), filed.filed_ms) else {
+                continue;
+            };
+            if looked.address != address {
+                continue;
+            }
+            for id in &looked.messages {
+                if let Some(letter) = wrote(id) {
+                    checked
+                        .entry(letter.id.as_str())
+                        .and_modify(|held| *held = (*held).min(at))
+                        .or_insert(at);
+                }
+            }
+        }
+        Self {
+            address,
+            messages,
+            dispatches,
+            open,
+            acts,
+            index,
+            checked,
+            pending: pending.iter().copied().collect(),
+        }
     }
 
     /// The view of `run` as the ledger holds it now.
     #[must_use]
-    pub fn of_run(_run: &'a Run, _receipts: &'a [Filed]) -> Self {
-        todo!("t-9471")
+    pub fn of_run(run: &'a Run, receipts: &'a [Filed]) -> Self {
+        let address = run.address();
+        let pending: Vec<&'a str> = run
+            .pending_messages(&address, &[])
+            .into_iter()
+            .map(|one| one.id.as_str())
+            .collect();
+        let open = run.open_delivery(&address);
+        let seat_actor = run
+            .coordinator
+            .as_ref()
+            .and_then(|seat| seat.actor.as_deref());
+        Self::new(
+            address,
+            seat_actor,
+            run.messages(),
+            &run.dispatches,
+            open,
+            &pending,
+            receipts,
+        )
     }
 
     /// The run's own address — its coordinator's inbox.
@@ -557,10 +757,13 @@ impl<'a> Mailroom<'a> {
     /// Every letter to the coordinator, oldest first: the mail its inbox
     /// holds that it did not write itself.
     pub fn letters(&self) -> impl Iterator<Item = &'a Message> + '_ {
-        let address = self.address.clone();
-        self.messages
-            .iter()
-            .filter(move |one| one.to == address && one.from != address)
+        self.messages.iter().filter(|one| self.is_letter(one))
+    }
+
+    /// Whether `one` is a letter to the coordinator: in its inbox, and not
+    /// its own words.
+    fn is_letter(&self, one: &Message) -> bool {
+        one.to == self.address && one.from != self.address
     }
 
     /// The message `id`, when the run holds one.
@@ -585,23 +788,58 @@ impl<'a> Mailroom<'a> {
     /// The worker `letter` concerns: its sender, when a worker sent it, else
     /// the worker of the attempt it names.
     #[must_use]
-    pub fn worker_of<'m>(&'m self, _letter: &'m Message) -> Option<&'m str> {
-        todo!("t-9471")
+    pub fn worker_of<'m>(&'m self, letter: &'m Message) -> Option<&'m str> {
+        letter.from.strip_prefix(WORKER_ADDRESS_PREFIX).or_else(|| {
+            let attempt = letter.dispatch.as_deref()?;
+            self.dispatches
+                .iter()
+                .find(|one| one.id == attempt)
+                .map(|one| one.worker.as_str())
+        })
+    }
+
+    /// Whether two letters are about the same thing: the same kind, from the
+    /// same sender, about the same worker and task — one silence told again,
+    /// one worker's news on one task.
+    fn same_subject(&self, one: &Message, other: &Message) -> bool {
+        one.kind == other.kind
+            && one.from == other.from
+            && one.task == other.task
+            && self.worker_of(one) == self.worker_of(other)
     }
 
     /// When the coordinator was handed `letter`: the open batch's stamp the
     /// window saw (`seen_opened`) or the one it stands in now, else the first
     /// `check` receipt that handed it over, else when it was written.
     #[must_use]
-    pub fn start_of(&self, _letter: &Message, _seen_opened: Option<i64>) -> Start {
-        todo!("t-9471")
+    pub fn start_of(&self, letter: &Message, seen_opened: Option<i64>) -> Start {
+        if let Some(at) = seen_opened {
+            return Start::Opened(at);
+        }
+        if self.is_open(letter)
+            && let Some(at) = self.open.and_then(|batch| batch.opened_ms)
+        {
+            return Start::Opened(at);
+        }
+        if let Some(at) = self.checked.get(letter.id.as_str()) {
+            return Start::Checked(*at);
+        }
+        Start::Created(letter.created_ms)
     }
 
     /// How many letters of the same kind about the same worker and task came
     /// in the [`LABEL_HORIZON_MS`] before `letter`.
     #[must_use]
-    pub fn repeats(&self, _letter: &Message) -> usize {
-        todo!("t-9471")
+    pub fn repeats(&self, letter: &Message) -> usize {
+        let Some(at) = self.index.get(letter.id.as_str()) else {
+            return 0;
+        };
+        let since = letter.created_ms.saturating_sub(LABEL_HORIZON_MS);
+        self.messages[..*at]
+            .iter()
+            .filter(|one| self.is_letter(one) && one.created_ms >= since)
+            .filter(|one| self.same_subject(letter, one))
+            .count()
     }
 
     /// The label the coordinator's acts wrote for `letter` handed over at
@@ -609,25 +847,61 @@ impl<'a> Mailroom<'a> {
     #[must_use]
     pub fn label(
         &self,
-        _letter: &Message,
-        _start: Start,
-        _now_ms: i64,
+        letter: &Message,
+        start: Start,
+        now_ms: i64,
     ) -> Option<Result<Labeled<'a>, NotCompared>> {
-        todo!("t-9471")
+        label_over(
+            &self.acts,
+            start,
+            self.newer_at(letter),
+            letter.created_ms,
+            now_ms,
+            |_, act| self.handles(letter, act),
+        )
     }
 
     /// Whether `act` handles `letter`, by the table ([`handled_by`]).
     #[must_use]
-    pub fn handles(&self, _letter: &Message, _act: &Act<'_>) -> bool {
-        todo!("t-9471")
+    pub fn handles(&self, letter: &Message, act: &Act<'_>) -> bool {
+        let named = |held: Option<&str>, id: &str| held == Some(id);
+        handled_by(letter.kind).iter().any(|subject| match subject {
+            Subject::Thread => act.message.is_some_and(|said| said.answers(letter)),
+            Subject::Task => letter.task.as_deref().is_some_and(|task| {
+                named(act.names.task.as_deref(), task)
+                    || act
+                        .message
+                        .is_some_and(|said| named(said.task.as_deref(), task))
+            }),
+            Subject::Worker => self.worker_of(letter).is_some_and(|worker| {
+                named(act.names.worker.as_deref(), worker)
+                    || act.message.is_some_and(|said| {
+                        named(said.to.strip_prefix(WORKER_ADDRESS_PREFIX), worker)
+                    })
+            }),
+            Subject::Attempt => letter.dispatch.as_deref().is_some_and(|attempt| {
+                named(act.names.retry_of.as_deref(), attempt)
+                    || named(act.names.dispatch.as_deref(), attempt)
+                    || act
+                        .message
+                        .is_some_and(|said| named(said.dispatch.as_deref(), attempt))
+            }),
+        })
     }
 
     /// When a newer letter of the same kind about the same worker and task
     /// arrived after `letter`, if one did — never for a question, which has
     /// its own answer.
     #[must_use]
-    pub fn newer_at(&self, _letter: &Message) -> Option<i64> {
-        todo!("t-9471")
+    pub fn newer_at(&self, letter: &Message) -> Option<i64> {
+        if letter.kind == MessageKind::Question {
+            return None;
+        }
+        let at = self.index.get(letter.id.as_str())?;
+        self.messages[at + 1..]
+            .iter()
+            .find(|one| self.is_letter(one) && self.same_subject(letter, one))
+            .map(|one| one.created_ms)
     }
 
     /// The question `letter` asks, at `now_ms`: its facts off `run`, whether
@@ -637,21 +911,45 @@ impl<'a> Mailroom<'a> {
     #[must_use]
     pub fn look(
         &'a self,
-        _run: &'a Run,
-        _letter: &'a Message,
-        _now_ms: i64,
-        _coordinator_busy: Option<bool>,
-        _open_questions: usize,
+        run: &'a Run,
+        letter: &'a Message,
+        now_ms: i64,
+        coordinator_busy: Option<bool>,
+        open_questions: usize,
     ) -> MailLook<'a> {
-        todo!("t-9471")
+        let task = letter.task.as_deref();
+        MailLook {
+            kind: letter.kind,
+            // The address's head — `worker`, `ledger`, `pane`, `run` — and
+            // never the seat or the id after it.
+            from: letter
+                .from
+                .split_once(':')
+                .map_or(letter.from.as_str(), |(head, _)| head),
+            worker: self.worker_of(letter),
+            task,
+            task_status: task
+                .and_then(|id| run.task(id))
+                .map(|one| one.status.as_str()),
+            priority: letter.priority.as_str(),
+            awaits_answer: run.awaits_answer(letter),
+            thread_depth: crate::orchestration::thread_hops(run, &letter.id),
+            age_ms: now_ms.saturating_sub(letter.created_ms),
+            delivered: self.is_open(letter),
+            repeats: self.repeats(letter),
+            coordinator_busy,
+            open_questions,
+        }
     }
 
     /// How many questions put to the coordinator wait for an answer that can
     /// still reach their asker — the desk's 「답할 우편」 rule
     /// ([`Run::awaits_answer`], [`Run::question_is_answerable`]).
     #[must_use]
-    pub fn open_questions(&self, _run: &Run) -> usize {
-        todo!("t-9471")
+    pub fn open_questions(&self, run: &Run) -> usize {
+        self.letters()
+            .filter(|one| run.awaits_answer(one) && run.question_is_answerable(one).is_ok())
+            .count()
     }
 }
 
@@ -663,14 +961,51 @@ impl<'a> Mailroom<'a> {
 /// to say, close it. One engine for the rule the seat is graded by and any
 /// other a replay puts beside it.
 pub fn label_over<'a>(
-    _acts: &[Act<'a>],
-    _start: Start,
-    _newer_at: Option<i64>,
-    _created_ms: i64,
-    _now_ms: i64,
-    _handles: impl Fn(usize, &Act<'a>) -> bool,
+    acts: &[Act<'a>],
+    start: Start,
+    newer_at: Option<i64>,
+    created_ms: i64,
+    now_ms: i64,
+    handles: impl Fn(usize, &Act<'a>) -> bool,
 ) -> Option<Result<Labeled<'a>, NotCompared>> {
-    todo!("t-9471")
+    let mut counted = 0;
+    for (at, act) in acts
+        .iter()
+        .enumerate()
+        .filter(|(_, act)| act.at_ms > start.at())
+    {
+        if newer_at.is_some_and(|newer| act.at_ms > newer) {
+            return Some(Err(NotCompared::Superseded));
+        }
+        counted += 1;
+        let after_ms = act.at_ms.saturating_sub(start.at());
+        if handles(at, act) {
+            return Some(Ok(Labeled {
+                truth: if counted <= ANSWER_NOW_WITHIN_ACTS {
+                    Triage::AnswerNow
+                } else {
+                    Triage::CanWait
+                },
+                urgent: counted == 1,
+                after_actions: counted,
+                after_ms,
+                handled_by: act.verb,
+            }));
+        }
+        if counted == NO_NEED_AFTER_ACTS {
+            return Some(Ok(Labeled {
+                truth: Triage::NoNeed,
+                urgent: false,
+                after_actions: counted,
+                after_ms,
+                handled_by: None,
+            }));
+        }
+    }
+    if newer_at.is_some_and(|newer| newer <= now_ms) {
+        return Some(Err(NotCompared::Superseded));
+    }
+    (now_ms.saturating_sub(created_ms) > LABEL_HORIZON_MS).then_some(Err(NotCompared::Unhandled))
 }
 
 #[cfg(test)]
