@@ -31,6 +31,8 @@
 //! `ended.json` carries each run's report and the autopilot's account.
 #![cfg(target_os = "macos")]
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -72,6 +74,8 @@ const STOP: &str = "stop";
 const STUB: &str = "stub";
 /// The file every helper start and stop is a line of.
 const CALLS: &str = "calls.jsonl";
+/// The helper's word for a run it no longer knows.
+const MISSING: &str = "missing";
 
 /// The keys this process's environment holds, by the name a key store's
 /// item carries after the window's prefix: the bench asks with the key the
@@ -242,13 +246,28 @@ fn a_reflex_run_on_the_benchs_own_fixture() {
     let connected_ns = uptime_ns();
     let helper_pid = session.helper_pid();
     let calls = folder.join(CALLS);
+    let known = RefCell::new(BTreeMap::new());
     // Every start and stop the helper answered, as the host's clock saw it
     // asked and answered: where one plan's hand let go and the next took over.
+    // And each run's status as the helper last told it: once a run's receipts
+    // are all acknowledged the helper forgets it, but for the last to end.
     let mut call = |method: &str, params: Value| {
         let asked_ns = uptime_ns();
         let answer = session
             .request(method, params.clone())
             .map_err(|failure| failure.into_error());
+        if let (Some(run), Ok(told)) = (params.get("run").and_then(Value::as_str), answer.as_ref())
+            && told
+                .get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| state != MISSING)
+        {
+            let mut status = told.clone();
+            if let Some(fields) = status.as_object_mut() {
+                fields.remove("receipts");
+            }
+            known.borrow_mut().insert(run.to_string(), status);
+        }
         if matches!(method, "reflexStart" | "reflexStop") {
             let answered = answer.as_ref().ok();
             append(
@@ -285,6 +304,7 @@ fn a_reflex_run_on_the_benchs_own_fixture() {
         }),
     );
     let bench = Bench {
+        known: &known,
         folder: &folder,
         request: &request,
         bundle: &bundle,
@@ -301,6 +321,8 @@ fn a_reflex_run_on_the_benchs_own_fixture() {
 
 /// One run's folder and what the runner asked of it.
 struct Bench<'a> {
+    /// Each run's status as the helper last told it.
+    known: &'a RefCell<BTreeMap<String, Value>>,
     folder: &'a Path,
     request: &'a Value,
     bundle: &'a str,
@@ -600,9 +622,12 @@ impl Bench<'_> {
             .flatten()
             .filter_map(|plan| plan["run"].as_str())
             .map(|run| {
+                // Asked once more; a run the helper forgot is what it last said.
+                let _ = call("reflexStatus", json!({ "run": run }));
+                let status = self.known.borrow().get(run).cloned().unwrap_or(Value::Null);
                 json!({
                     "runId": run,
-                    "status": call("reflexStatus", json!({ "run": run })).unwrap_or(Value::Null),
+                    "status": status,
                     "report": super::watch_report(run),
                     "receipts": receipts_file(Path::new(""), run),
                 })
