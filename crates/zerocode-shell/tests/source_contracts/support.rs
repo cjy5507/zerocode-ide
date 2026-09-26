@@ -166,6 +166,10 @@ pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
     ),
     ("cmd/typesafe.rs", include_str!("../../src/cmd/typesafe.rs")),
     (
+        "cmd/type_value.rs",
+        include_str!("../../src/cmd/type_value.rs"),
+    ),
+    (
         "cmd/worker_room.rs",
         include_str!("../../src/cmd/worker_room.rs"),
     ),

@@ -38,6 +38,37 @@ const TERMINAL_THEME_CATALOG = Object.freeze(JSON.parse(
 /* The keychain item the TypeSafe key lives in — `typesafe_settings.rs`
  * (`SERVICE_KEYCHAIN_SERVICE_PREFIX` + `TYPESAFE_API_KEY_ENV`). */
 const TYPESAFE_SERVICE = "dev.zerocode.key.TYPESAFE_API_KEY";
+/* The value seat's table — the very file the product reads
+ * (`zerocode_core::type_value`) — and the window's key store's prefix
+ * (`zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX`, held here by the Rust
+ * contract `the_settings_harness_mirrors_the_key_stores_prefix`). */
+const TYPE_VALUE_TABLE = Object.freeze(JSON.parse(
+  await readFile(
+    resolve(UI, "..", "crates", "zerocode-core", "fixtures", "type-value", "models.json"),
+    "utf8",
+  ),
+));
+const TYPE_VALUE_KEY_PREFIX = "dev.zerocode.key.";
+/* Mirrors `type_value_keys.rs`: the Computer Use pane offers the key the
+ * chosen row reads, when its road is one the walk's writer takes
+ * (`value::endpoint_of` — no client spoken for, Code Assist not built), kept
+ * in the item the writer reads (`value::key_service`), with every row of the
+ * table that reads that item down a road it takes. */
+const typeValueService = (row) => row.keychainService
+  ?? (row.credentialKey ? `${TYPE_VALUE_KEY_PREFIX}${row.credentialKey}` : null);
+const typeValueTaken = (row) => Boolean(row.credentialKey) && !row.clientFingerprint
+  && (row.road === "anthropic" || (row.road === "openai-compat" && Boolean(row.baseUrl)));
+function typeValueSlots() {
+  const chosen = TYPE_VALUE_TABLE.rows.find((row) => row.id === TYPE_VALUE_TABLE.chosen);
+  if (!chosen || !typeValueTaken(chosen)) return [];
+  const service = typeValueService(chosen);
+  return [{
+    name: chosen.credentialKey,
+    service,
+    chosen: chosen.id,
+    rows: TYPE_VALUE_TABLE.rows.filter((row) => typeValueTaken(row) && typeValueService(row) === service),
+  }];
+}
 /* The routing row of the Jev use table (`zerocode_core::jev::ROUTING`), as
  * `typesafe_settings` answers it: each mode's word and what it does. The Rust
  * contract `the_pane_offers_the_rows_modes_and_asks_registered_commands`
@@ -2765,6 +2796,24 @@ class StatefulBackend {
         return this.typesafeSettings();
       }
       case "check_typesafe_key": return clone(this.typesafeCheck);
+      // Mirrors `type_value_keys.rs`: a name no walk reads is refused before
+      // the key is looked at, an empty key is refused, a machine with no
+      // keychain refuses by kind, and the key is kept trimmed in the item the
+      // walk's writer reads and never sent back.
+      case "type_value_keys": return this.typeValueKeys();
+      case "save_type_value_key": {
+        const slot = this.typeValueSlot(args.credentialKey);
+        const key = String(args.key ?? "").trim();
+        if (!key) throw { kind: "failed", message: "the key is empty" };
+        if (this.routerKeychainUnavailable) {
+          throw { kind: "keychain-unavailable", message: "no keychain for keys" };
+        }
+        this.keychain.set(slot.service, key);
+        return this.typeValueKeys();
+      }
+      case "remove_type_value_key":
+        this.keychain.delete(this.typeValueSlot(args.credentialKey).service);
+        return this.typeValueKeys();
       case "jev_summary":
         if (this.jevSummary === null) throw new Error("unknown argument 'jev'");
         return clone(this.jevSummary);
@@ -2772,6 +2821,24 @@ class StatefulBackend {
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);
     }
+  }
+
+  typeValueSlot(name) {
+    const slot = typeValueSlots().find((one) => one.name === name);
+    if (!slot) throw { kind: "failed", message: "not a key a walk reads" };
+    return slot;
+  }
+
+  typeValueKeys() {
+    return {
+      keysKeptHere: !this.routerKeychainUnavailable,
+      keys: typeValueSlots().map((slot) => ({
+        credentialKey: slot.name,
+        rows: slot.rows.map((row) => ({ id: row.id, model: row.model })),
+        chosen: slot.chosen,
+        keySaved: !this.routerKeychainUnavailable && Boolean(this.keychain.get(slot.service)?.trim()),
+      })),
+    };
   }
 
   typesafeSettings() {
@@ -5206,6 +5273,150 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   await pageA.evaluate(() => refreshApiRouters());
   assert(!(await pageA.locator("#typesafe-key-input").isDisabled()), "a machine with a keychain was left without the key field");
   return `one switch · ${selects.total} select under 고급 · 0 visible`;
+});
+
+// The key typing into a page's fields asks with (t-9537): the Computer Use
+// pane draws one slot per key a walk reads — today the chosen row's alone —
+// from the table the product reads, keeps a saved key in the item the walk's
+// writer reads and never shows it again, and a machine with no keychain is
+// told so in the TypeSafe card's words.
+await test("Computer Use의 글자 입력용 키는 지금 쓰는 키 하나만 칸으로 그리고, 키는 키체인에만 간다", async () => {
+  const slots = typeValueSlots();
+  const [slot] = slots;
+  assert(slot, "the table offers no key a walk reads");
+  backend.keychain.delete(slot.service);
+  const from = backend.calls.length;
+  await openSettings(pageA, "computer-use");
+  await backend.waitForCall("A", "type_value_keys", from);
+  await renderSettled(pageA);
+  const said = (key, fallback, vars) => pageA.evaluate(([one, words, values]) => t(one, words, values), [key, fallback, vars]);
+  const card = pageA.locator("#type-value-card");
+  const drawn = card.locator("[data-type-value-key]");
+  const mine = card.locator(`[data-type-value-key="${slot.name}"]`);
+  const input = mine.locator("[data-type-value-input]");
+  const part = (name) => mine.locator(`[data-type-value-${name}]`);
+  const standsAt = (standing) => standingWord(pageA, standing).then((word) => pageA.waitForFunction(
+    ([name, expected]) => document.querySelector(`[data-type-value-key="${name}"] [data-type-value-state]`)?.textContent === expected,
+    [slot.name, word], { timeout: UI_TIMEOUT },
+  ));
+
+  // One slot, the key a walk reads now: its name, the rows that read it and
+  // the mark — and no slot for a key only a row nothing picks reads.
+  assert(await card.isVisible(), "the Computer Use pane has no key card");
+  assertEqual(await drawn.count(), 1, "the card does not draw exactly the one key a walk reads");
+  assertEqual(await part("name").textContent(), slot.name);
+  assert(await part("now").isVisible(), "the key a walk reads now is not marked");
+  const rowsSaid = await part("rows").textContent();
+  for (const row of slot.rows) {
+    assert(rowsSaid.includes(row.id) && rowsSaid.includes(row.model), `${row.id} is not named on its key`, rowsSaid);
+  }
+  const shown = await card.textContent();
+  for (const row of TYPE_VALUE_TABLE.rows.filter((one) => one.credentialKey && one.credentialKey !== slot.name)) {
+    assert(!shown.includes(row.credentialKey), `${row.credentialKey} has a slot no walk reads`);
+  }
+
+  // Nothing saved: the badge is the one table's word, the field hides what
+  // is typed, and nothing but typing a key is offered — spaces are no key.
+  await standsAt("unchecked");
+  assertEqual(await input.getAttribute("type"), "password", "the key field shows what is typed");
+  assert(await part("save").isDisabled(), "a save was offered with nothing typed");
+  assert(await part("remove").isDisabled(), "a removal was offered with nothing saved");
+  await input.fill("   ");
+  assert(await part("save").isDisabled(), "a key of spaces could be saved");
+
+  // A save sends the trimmed key once under the slot's own name, empties the
+  // field, and the key lands in the item the walk reads — never on the page.
+  await input.fill("  sk-fixture-typing  ");
+  assert(await part("save").isEnabled(), "a typed key could not be saved");
+  const savedAt = backend.calls.length;
+  await part("save").click();
+  const save = await backend.waitForCall("A", "save_type_value_key", savedAt);
+  assertEqual(save.args, { credentialKey: slot.name, key: "sk-fixture-typing" }, "the save did not carry the slot's name and the trimmed key");
+  await standsAt("keySaved");
+  assertEqual(backend.keychain.get(slot.service), "sk-fixture-typing", "the key is not where the walk reads it");
+  assertEqual(await input.inputValue(), "", "the key stayed in the field after the save");
+  assert(
+    !(await pageA.locator('.settings-pane[data-pane="computer-use"]').innerHTML()).includes("sk-fixture-typing"),
+    "the key came back to the page",
+  );
+  assertEqual(
+    await part("status").locator(".settings-status-said").textContent(),
+    await said("computerUse.typeKeySaved", "키체인에 저장했습니다 — {{name}}. 다음 작업부터 빈 칸에 글자를 입력합니다.", { name: slot.name }),
+  );
+  assert(await part("remove").isEnabled(), "a saved key cannot be removed");
+
+  // A name no walk reads is refused and writes nothing — one the table
+  // never held, and every key only a row nothing picks reads.
+  const held = [...backend.keychain.entries()];
+  const others = TYPE_VALUE_TABLE.rows.map((row) => row.credentialKey).filter((name) => name && name !== slot.name);
+  for (const name of ["SOME_OTHER_API_KEY", ...others]) {
+    const refused = await pageA.evaluate((one) => invoke("save_type_value_key", { credentialKey: one, key: "sk-x" })
+      .then(() => "saved", (error) => error?.kind ?? String(error)), name);
+    assertEqual(refused, "failed", `${name} was saved`);
+  }
+  assertEqual([...backend.keychain.entries()], held, "a refused name wrote to the key store");
+
+  // A removal forgets it, and says what that means.
+  const removedAt = backend.calls.length;
+  await part("remove").click();
+  assertEqual((await backend.waitForCall("A", "remove_type_value_key", removedAt)).args, { credentialKey: slot.name });
+  await standsAt("unchecked");
+  assert(!backend.keychain.has(slot.service), "the key outlived its removal");
+  assertEqual(
+    await part("status").locator(".settings-status-said").textContent(),
+    await said("computerUse.typeKeyRemoved", "지웠습니다 — {{name}}. 빈 칸은 입력하지 않고 사람에게 맡깁니다.", { name: slot.name }),
+  );
+
+  // The card draws whatever the backend lists: two keys, one a walk reads
+  // now, are two slots with one mark, and the field settings lands on is the
+  // one a walk reads — in the pane every named control says it lives on.
+  await pageA.evaluate((name) => paintTypeValueKeys({
+    keysKeptHere: true,
+    keys: [
+      { credentialKey: "SPARE_API_KEY", rows: [{ id: "spare", model: "spare-model" }], chosen: null, keySaved: true },
+      { credentialKey: name, rows: [{ id: "asked", model: "asked-model" }], chosen: "asked", keySaved: false },
+    ],
+  }), slot.name);
+  assertEqual(await drawn.count(), 2, "a second key the backend listed was not drawn");
+  assertEqual(await card.locator("[data-type-value-now]:visible").count(), 1, "more than the key a walk reads is marked");
+  const landing = await pageA.evaluate(() => ({
+    pane: PANE_OF["type-value-key-input"] ?? null,
+    slot: document.getElementById("type-value-key-input")?.closest("[data-type-value-key]")?.dataset.typeValueKey ?? null,
+    strays: Object.entries(PANE_OF).flatMap(([id, pane]) => {
+      const lives = document.getElementById(id)?.closest(".settings-pane")?.dataset.pane;
+      return lives === undefined || lives === pane ? [] : [{ id, pane, lives }];
+    }),
+  }));
+  assertEqual(landing, { pane: "computer-use", slot: slot.name, strays: [] }, "settings does not land on the key a walk reads");
+  await pageA.evaluate(() => refreshTypeValueKeys());
+  await pageA.waitForFunction(() => document.querySelectorAll("#type-value-card [data-type-value-key]").length === 1, null, { timeout: UI_TIMEOUT });
+
+  // A machine with no keychain closes the field and says why, in the words
+  // the TypeSafe card says it in.
+  backend.routerKeychainUnavailable = true;
+  try {
+    await pageA.evaluate(() => refreshTypeValueKeys());
+    await pageA.waitForFunction(() => document.getElementById("type-value-no-keychain-hint")?.hidden === false, null, { timeout: UI_TIMEOUT });
+    assert(await input.isDisabled(), "a key field was offered with no keychain");
+    assertEqual(
+      (await pageA.locator("#type-value-no-keychain-hint").textContent()).trim(),
+      (await pageA.locator("#typesafe-no-keychain-hint").textContent()).trim(),
+      "the pane does not say it in the TypeSafe card's words",
+    );
+    const refusal = { kind: "keychain-unavailable", message: "no keychain for keys" };
+    assertEqual(
+      await pageA.evaluate((error) => keyStoreRefusal(error), refusal),
+      await pageA.evaluate((error) => typesafeRefusal(error), refusal),
+      "a refused save is not said in the TypeSafe card's words",
+    );
+  } finally {
+    backend.routerKeychainUnavailable = false;
+    backend.keychain.delete(slot.service);
+  }
+  await pageA.evaluate(() => refreshTypeValueKeys());
+  await pageA.waitForFunction(() => document.getElementById("type-value-no-keychain-hint")?.hidden === true, null, { timeout: UI_TIMEOUT });
+  assert(!(await input.isDisabled()), "a machine with a keychain was left without the key field");
+  return `${await drawn.count()} slot (${slot.name}) of ${TYPE_VALUE_TABLE.rows.filter((row) => row.credentialKey).length} keyed rows`;
 });
 
 await test("분리 전에 손으로 끈 스킬 검색은 업데이트 뒤에도 스킬 제안을 끈 채로 둔다 — 제안은 제 낱말이 생길 때까지 검색의 낱말을 따른다", async () => {

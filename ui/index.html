@@ -5994,6 +5994,58 @@
           <p class="settings-hint" id="computer-guard-line"></p>
         </div>
 
+        <!-- The key typing into a page's fields asks with (t-9537): one slot
+             per key the backend lists (`type_value_keys`), each drawn from
+             the template below by `paintTypeValueKeys`. Which key, which
+             rows read it and whether it is read now are the backend's
+             answer; nothing of the table it comes from is written here. -->
+        <div class="settings-card" id="type-value-card">
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="computerUse.typeKeys">글자 입력용 키</h3>
+            <p class="settings-subhead-desc" data-i18n="computerUse.typeKeysAbout">
+              에이전트가 내장 브라우저에서 빈 입력 칸을 만나면, 칸의 이름표와 주변 글, 작업 목표를 작은 모델에 보내 무엇을 입력할지 묻습니다. 그 모델에 쓸 API 키를 여기에 저장하면 재시작 없이 다음 작업부터 입력합니다. 키는 이 컴퓨터의 키체인에만 저장되고, 칸에 이미 적힌 값은 보내지 않습니다.
+            </p>
+            <p class="settings-subhead-desc" id="type-value-no-keychain-hint" data-i18n="settings.typesafe.noKeychainHint" hidden>
+              이 컴퓨터에는 API 키를 보관할 키체인이 없습니다.
+            </p>
+            <p class="settings-subhead-desc" id="type-value-none" data-i18n="computerUse.typeKeysNone" hidden>
+              지금은 글자 입력에 쓰는 모델이 정해져 있지 않아 저장할 키가 없습니다.
+            </p>
+          </div>
+          <div id="type-value-keys"></div>
+          <!-- A read that failed before any slot could speak says so here;
+               a slot's own steps are said in the slot. -->
+          <div class="settings-status" id="type-value-status" role="status" aria-live="polite"></div>
+        </div>
+        <template id="type-value-key">
+          <div data-type-value-key>
+            <div class="settings-subhead settings-subhead--acts">
+              <div>
+                <div class="settings-label">
+                  <span data-type-value-name></span>
+                  <span class="orch-pill is-on" data-type-value-now data-i18n="computerUse.typeKeyNow" hidden>지금 쓰는 키</span>
+                </div>
+                <span class="settings-row-desc" data-type-value-rows></span>
+              </div>
+              <span class="settings-state" data-type-value-state data-state="unchecked"
+                    role="status" aria-live="polite"></span>
+            </div>
+            <label class="settings-field" data-field="lg">
+              <span class="settings-field-copy">
+                <span class="settings-label" data-i18n="computerUse.typeKeyField">API 키</span>
+                <span class="settings-row-desc" data-type-value-said></span>
+              </span>
+              <input class="settings-input" type="password" data-type-value-input
+                     autocomplete="off" spellcheck="false" />
+            </label>
+            <div class="settings-status" data-type-value-status role="status" aria-live="polite"></div>
+            <div class="settings-action-row">
+              <button class="btn" type="button" data-type-value-remove disabled data-i18n="computerUse.typeKeyRemove">키 지우기</button>
+              <button class="btn btn--primary" type="button" data-type-value-save disabled data-i18n="computerUse.typeKeySave">저장</button>
+            </div>
+          </div>
+        </template>
+
         <div class="settings-card">
           <div class="orch-head">
             <span class="orch-mark"><svg class="icon" aria-hidden="true"><use href="#i-mouse-pointer-click"></use></svg></span>

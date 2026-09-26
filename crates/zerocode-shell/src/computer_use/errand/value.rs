@@ -167,8 +167,10 @@ pub fn key_service(row: &ValueRow) -> Option<String> {
 /// Messages API for [`Road::Anthropic`], a row's own `/chat/completions` for
 /// [`Road::OpenaiCompat`] — unless the row would have the request speak as
 /// another client ([`ValueRow::client_fingerprint`]), which this product
-/// never does. Code Assist is not built here.
-fn endpoint_of(row: &ValueRow) -> Option<String> {
+/// never does. Code Assist is not built here. The Computer Use pane offers a
+/// key only for a row this answers (`crate::type_value_keys`, t-9537): a key
+/// for a road never taken is a key nothing asks with.
+pub(crate) fn endpoint_of(row: &ValueRow) -> Option<String> {
     if row.client_fingerprint.is_some() {
         return None;
     }

@@ -144,6 +144,9 @@ pub(crate) use typesafe::{
     set_jev_enabled, set_jev_model, set_route_classifier, typesafe_settings,
 };
 
+pub(crate) mod type_value;
+pub(crate) use type_value::{remove_type_value_key, save_type_value_key, type_value_keys};
+
 pub(crate) mod worker_room;
 pub(crate) use worker_room::{judge_worker_room, note_worker_room_change, note_worker_room_seen};
 

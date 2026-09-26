@@ -13,6 +13,7 @@ mod readiness;
 mod release_versions;
 mod skills_view;
 mod support;
+mod type_value_keys;
 mod update;
 pub(crate) use support as ui_source;
 
