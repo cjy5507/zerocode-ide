@@ -50,6 +50,7 @@ use super::composer::{Composer, Submission};
 use super::effort_effect::{EffortEffect, EffortTier};
 use super::fast;
 use super::folds::{FoldIds, FoldMode};
+use super::footer_hints::{FooterHints, HintMode, SHORTCUTS_CHAR, WARNINGS_FUNCTION_KEY};
 use super::models::{self, ModelChoice};
 use super::painter::{Painter, MIN_ROWS};
 use super::palette::LateOscGuard;
@@ -57,6 +58,8 @@ use super::pending_input::PendingInputs;
 use super::permissions::{self, active_permission_label, permission_rank};
 use super::question;
 use super::sessions;
+use super::shortcuts;
+use super::warnings;
 use super::mention::{self, MentionKey, Mentions};
 use super::slash;
 use super::summary::{self, SessionSummary};
@@ -112,7 +115,9 @@ const SIZE_POLL: Duration = Duration::from_secs(1);
 const STARTUP_QUIT_GRACE: Duration = Duration::from_millis(800);
 /// 유휴에서 Ctrl-C 두 번이 이 안에 오면 종료.
 const DOUBLE_INTERRUPT_WINDOW: Duration = Duration::from_secs(1);
-const QUIT_SHORTCUT_REMINDER: &str = "ctrl + c again to quit";
+/// The numbered pickers' footer (`/model`'s two stages, `/permissions`) —
+/// codex `bottom_pane/popup_consts.rs::standard_popup_hint_line`.
+const PICKER_FOOTER: &str = "Press enter to confirm or esc to go back";
 /// 한 프레임에서 따라잡을 커밋 틱의 상한.
 ///
 /// codex 는 커밋 애니메이션을 `COMMIT_ANIMATION_TICK`(= `TARGET_FRAME_INTERVAL`
@@ -426,6 +431,14 @@ enum KeyOutcome {
     OpenAgents,
 }
 
+/// What stands in the footer's place for a while — codex's bottom-pane views
+/// that are not popups: the `?` card over the composer, or the F2 viewer in
+/// the composer's place. One at a time.
+enum FooterView {
+    Shortcuts,
+    Warnings(warnings::Viewer),
+}
+
 /// 화면 쪽 상태 전부.
 /// Whether the current text cell's head has been checked for an imitated
 /// `[earlier reasoning]` label: still holding its first bytes, or past that.
@@ -562,6 +575,11 @@ struct Ui {
     permissions: Option<PermissionPicker>,
     /// Alt+A session-scoped in-process agent overview.
     agents: Option<agents::Overview>,
+    /// The `?` card or the F2 viewer, while one is up.
+    footer_view: Option<FooterView>,
+    /// Every distinct warning and error this conversation has shown — the
+    /// footer's badge counts it and F2 pages through it.
+    warnings: warnings::Retained,
     /// Ctrl+T 로 연 트랜스크립트 페이저. 턴 중에도 열린다 — 긴 자율 실행에서
     /// 20분 전 도구가 무엇을 찍었는지 읽으려고 턴을 끊을 수는 없다.
     transcript: Option<transcript::Transcript>,
@@ -1233,7 +1251,8 @@ impl Ui {
     /// 틱을 끈다. 뷰포트에 스스로 움직이는 것을 새로 들이면 여기도 함께
     /// 넓혀야 한다.
     fn animating(&self) -> bool {
-        if self.status.is_some() {
+        // The quit reminder has to be painted away when its second lapses.
+        if self.status.is_some() || self.quit_reminder_until().is_some() {
             return true;
         }
         if self
@@ -1554,6 +1573,8 @@ impl Ui {
         self.parked = None;
         self.permissions = None;
         self.agents = None;
+        self.footer_view = None;
+        self.warnings.clear();
         self.last_commit = None;
         self.effort_effect = None;
         self.mentions.close();
@@ -1631,7 +1652,12 @@ impl Ui {
             .transcript
             .as_mut()
             .map(|view| view.lines(pager_width, pager_rows));
-        let shortcuts = (self.composer.text().trim() == "?").then(view::shortcut_card);
+        let shortcuts = matches!(self.footer_view, Some(FooterView::Shortcuts))
+            .then(|| shortcuts::card(pager_width, self.status.is_some()));
+        let warnings_page = match self.footer_view.as_mut() {
+            Some(FooterView::Warnings(viewer)) => Some(viewer.lines(pager_width, pager_rows)),
+            _ => None,
+        };
         let dialog = self.parked_dialog();
         let question = self
             .parked_question()
@@ -1669,7 +1695,8 @@ impl Ui {
             || pager.is_some()
             || question.is_some()
             || popup.is_some()
-            || self.mentions.is_open();
+            || self.mentions.is_open()
+            || self.footer_view.is_some();
         let max_rows = if whole {
             self.painter.popup_budget()
         } else {
@@ -1693,6 +1720,8 @@ impl Ui {
             popup: popup.as_ref(),
             mention: self.mentions.popup(),
             shortcuts: shortcuts.as_deref(),
+            warnings: warnings_page.as_deref(),
+            hints: self.footer_hints(),
             model: footer_model,
             effort: &display_effort,
             model_note,
@@ -1849,6 +1878,7 @@ impl Ui {
     }
 
     fn note(&mut self, level: SystemLevel, text: &str) {
+        self.warnings.record(level, text);
         let width = self.width();
         let cell = cells::system_cell(level, text, width);
         self.history(&cell);
@@ -1911,6 +1941,7 @@ impl Ui {
             || self.parked.is_some()
             || self.agents.is_some()
             || self.mentions.is_open()
+            || self.warnings_open()
         {
             return None;
         }
@@ -2004,6 +2035,10 @@ impl Ui {
                     self.parked_key(*key);
                     return KeyOutcome::Nothing;
                 }
+                if self.warnings_open() {
+                    self.warnings_key(*key);
+                    return KeyOutcome::Nothing;
+                }
                 let outcome = self.idle_key(*key);
                 self.sync_mentions();
                 outcome
@@ -2024,6 +2059,7 @@ impl Ui {
             || self.parked.is_some()
             || self.agents.is_some()
             || self.transcript.is_some()
+            || self.warnings_open()
         {
             self.mentions.close();
             self.file_search.on_user_query("");
@@ -2144,6 +2180,9 @@ impl Ui {
 
     #[allow(clippy::too_many_lines)] // 평평한 키 match — 한 arm 씩.
     fn idle_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        if self.shortcut_overlay_key(&key) {
+            return KeyOutcome::Nothing;
+        }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if alt
@@ -2165,7 +2204,15 @@ impl Ui {
                 self.open_transcript();
                 KeyOutcome::Nothing
             }
-            _ if agents::is_open_key(&key) => KeyOutcome::OpenAgents,
+            _ if agents::is_open_key(&key) || self.left_opens_agents(&key) => {
+                KeyOutcome::OpenAgents
+            }
+            KeyCode::F(WARNINGS_FUNCTION_KEY) => {
+                if self.popup().is_none() && !self.mentions.is_open() {
+                    self.open_warnings();
+                }
+                KeyOutcome::Nothing
+            }
             KeyCode::Char(ch) if is_paste_image_key(&key, ch) => {
                 self.paste_image();
                 KeyOutcome::Nothing
@@ -2188,7 +2235,6 @@ impl Ui {
                     return KeyOutcome::Nothing;
                 }
                 self.last_interrupt = Some(now);
-                self.note(SystemLevel::Info, QUIT_SHORTCUT_REMINDER);
                 KeyOutcome::Nothing
             }
             KeyCode::Char('d') if control => {
@@ -2376,6 +2422,7 @@ impl Ui {
             || self.sessions.is_some()
             || self.permissions.is_some()
             || self.parked.is_some()
+            || self.warnings_open()
         {
             return;
         }
@@ -2407,6 +2454,114 @@ impl Ui {
             self.note(level, &text);
         }
         KeyOutcome::Nothing
+    }
+
+    // ------------------------------------------------------------------
+    // The footer's keys — the `?` card, ← for agents, F2 for warnings
+    // ------------------------------------------------------------------
+
+    /// What the footer's second row says now — codex `footer_mode()`: the
+    /// card while it is up, then the quit reminder while a second Ctrl+C
+    /// would quit, then the prompt's own state.
+    fn footer_hints(&self) -> FooterHints {
+        let mode = if matches!(self.footer_view, Some(FooterView::Shortcuts)) {
+            HintMode::Overlay
+        } else if self.quit_reminder_until().is_some() {
+            HintMode::QuitReminder
+        } else if self.composer.is_empty() {
+            HintMode::Empty
+        } else if self.status.is_some() {
+            HintMode::Queue
+        } else {
+            HintMode::Draft
+        };
+        FooterHints {
+            mode,
+            warnings: self.warnings.count(),
+        }
+    }
+
+    /// While a second Ctrl+C would quit, the moment that stops being so.
+    fn quit_reminder_until(&self) -> Option<Instant> {
+        self.last_interrupt
+            .map(|last| last + DOUBLE_INTERRUPT_WINDOW)
+            .filter(|until| Instant::now() < *until)
+    }
+
+    /// Codex `handle_empty_prompt_shortcut` for `?` and
+    /// `reset_mode_after_activity`: any key closes the card; `?` (shift or
+    /// not) on a prompt with nothing in it opens or closes it and is eaten,
+    /// and so is the esc that closed it — before an interrupt could read it.
+    /// Every other key goes on to do its own work.
+    fn shortcut_overlay_key(&mut self, key: &KeyEvent) -> bool {
+        let open = matches!(self.footer_view, Some(FooterView::Shortcuts));
+        if open {
+            self.footer_view = None;
+        }
+        let toggle = key.code == KeyCode::Char(SHORTCUTS_CHAR)
+            && (key.modifiers - KeyModifiers::SHIFT).is_empty()
+            && self.composer.is_empty()
+            && self.popup().is_none()
+            && !self.mentions.is_open();
+        if toggle {
+            if !open {
+                self.footer_view = Some(FooterView::Shortcuts);
+            }
+            return true;
+        }
+        open && key.code == KeyCode::Esc
+    }
+
+    /// Codex `agents_navigation_available`: a plain ← on a prompt with
+    /// nothing in it and no popup up.
+    fn left_opens_agents(&self, key: &KeyEvent) -> bool {
+        key.code == KeyCode::Left
+            && key.modifiers.is_empty()
+            && self.composer.is_empty()
+            && self.popup().is_none()
+            && !self.mentions.is_open()
+    }
+
+    /// A key a running turn does not claim is the composer's, as when idle;
+    /// the agents overview idle hands to the App opens here on this turn's
+    /// rows, as Alt+A does mid-turn.
+    fn turn_composer_key(&mut self, key: KeyEvent) {
+        if matches!(self.idle_key(key), KeyOutcome::OpenAgents) {
+            self.open_agents(self.subagent_progress.clone());
+        }
+    }
+
+    /// F2 and `/warnings`: the viewer on the warnings as they stand now.
+    fn open_warnings(&mut self) {
+        if self.overlay().is_some()
+            || self.sessions.is_some()
+            || self.parked.is_some()
+            || self.agents.is_some()
+            || self.transcript.is_some()
+        {
+            return;
+        }
+        self.footer_view = Some(FooterView::Warnings(self.warnings.viewer()));
+    }
+
+    /// `/help`: the `?` card, printed into the transcript whole.
+    fn help_card(&mut self) {
+        let mut card = vec![Line::empty()];
+        card.extend(shortcuts::card(self.width(), self.status.is_some()));
+        self.history(&card);
+    }
+
+    fn warnings_key(&mut self, key: KeyEvent) {
+        let Some(FooterView::Warnings(viewer)) = self.footer_view.as_mut() else {
+            return;
+        };
+        if viewer.key(key) == warnings::Outcome::Close {
+            self.footer_view = None;
+        }
+    }
+
+    fn warnings_open(&self) -> bool {
+        matches!(self.footer_view, Some(FooterView::Warnings(_)))
     }
 
     // ------------------------------------------------------------------
@@ -2484,8 +2639,6 @@ impl Ui {
                 api::context_window_for_model(&self.model),
             )
         });
-        let hint = (self.composer.is_empty() && self.composer.text().trim() != "?")
-            .then_some(view::SHORTCUT_HINT);
         let (model, model_note) = self.footer_model();
         view::footer(
             model,
@@ -2493,7 +2646,6 @@ impl Ui {
             model_note,
             &self.footer_location,
             self.width(),
-            hint,
             context_left,
             context_used_tokens,
             self.permission_mode == PermissionMode::ReadOnly,
@@ -2556,7 +2708,7 @@ impl Ui {
                 .to_string(),
             rows,
             selected,
-            footer: "Press enter to confirm or esc to go back".to_string(),
+            footer: PICKER_FOOTER.to_string(),
         }
     }
 
@@ -2597,7 +2749,7 @@ impl Ui {
                 })
                 .collect(),
             selected,
-            footer: "Press enter to confirm or esc to go back".to_string(),
+            footer: PICKER_FOOTER.to_string(),
         }
     }
 
@@ -2688,7 +2840,7 @@ impl Ui {
                 note: String::new(),
                 rows,
                 selected,
-                footer: "Press enter to confirm or esc to go back".to_string(),
+                footer: PICKER_FOOTER.to_string(),
             },
         });
     }
@@ -3231,6 +3383,14 @@ impl Ui {
             self.parked_key(*key);
             return true;
         }
+        if self.warnings_open() {
+            self.warnings_key(*key);
+            return true;
+        }
+        // The card closes on any key, and esc closing it is not an interrupt.
+        if self.shortcut_overlay_key(key) {
+            return true;
+        }
         if transcript::is_open_key(key) {
             self.open_transcript();
             return true;
@@ -3287,7 +3447,7 @@ impl Ui {
             self.submit_composer_during_turn(turn, exit_after);
             return true;
         }
-        let _ = self.idle_key(*key);
+        self.turn_composer_key(*key);
         true
     }
 
@@ -3365,12 +3525,8 @@ impl Ui {
             None => (command, ""),
         };
         match Slash::from_word(name) {
-            Some(Slash::Help) => {
-                let width = self.width();
-                let body = view::shortcut_card().join("\n");
-                let cell = cells::verbatim_cell(&body, width);
-                self.history(&cell);
-            }
+            Some(Slash::Help) => self.help_card(),
+            Some(Slash::Warnings) => self.open_warnings(),
             Some(Slash::Model) if arg.is_empty() => self.open_model_picker(),
             // codex `SlashCommand::Resume::available_during_task()` 는 참이다 —
             // 턴 중에도 피커를 띄운다. 확정한 세션으로 갈아 끼우는 것만 턴
@@ -3737,8 +3893,7 @@ impl Ui {
                     }
                 } else {
                     self.close_segment();
-                    let cell = cells::system_cell(level, &text, width);
-                    self.history(&cell);
+                    self.note(level, &text);
                 }
             }
             RenderBlock::UserNotice { message, .. } => {
@@ -4191,6 +4346,7 @@ fn tool_result_profile(body: &ToolResultBody) -> String {
 // ============================================================================
 
 impl App {
+    #[allow(clippy::too_many_lines)] // One line per `Ui` field.
     fn new(
         mut session: PlainSession,
         flags: RenderFlags,
@@ -4251,6 +4407,8 @@ impl App {
                 sessions: None,
                 permissions: None,
                 agents: None,
+                footer_view: None,
+                warnings: warnings::Retained::default(),
                 transcript: None,
                 transcript_items: Vec::new(),
                 transcript_answer: String::new(),
@@ -4652,6 +4810,9 @@ impl App {
         if self.session().resumed() {
             self.replay_history();
         }
+        // What was said until now was said at startup (codex
+        // `StartupWarningsCell`); the viewer names the rest by their level.
+        self.ui.warnings.start();
         self.ui.paint();
     }
 
@@ -4841,12 +5002,8 @@ impl App {
         };
         match Slash::from_word(name) {
             Some(Slash::Exit) => self.ui.exit = Some(ExitReason::UserExit),
-            Some(Slash::Help) => {
-                let width = self.ui.width();
-                let body = view::shortcut_card().join("\n");
-                let cell = cells::verbatim_cell(&body, width);
-                self.ui.history(&cell);
-            }
+            Some(Slash::Help) => self.ui.help_card(),
+            Some(Slash::Warnings) => self.ui.open_warnings(),
             // codex 는 `/status` 에 한 줄이 아니라 카드로 답한다 — 조립은
             // `status_format::session_status_card` 한 함수뿐이고, 파이프도
             // 같은 행을 인쇄한다.
@@ -5940,6 +6097,8 @@ fn test_ui() -> Ui {
         sessions: None,
         permissions: None,
         agents: None,
+        footer_view: None,
+        warnings: warnings::Retained::default(),
         transcript: None,
         transcript_items: Vec::new(),
         transcript_answer: String::new(),
@@ -7854,6 +8013,8 @@ mod tests {
             popup: None,
             mention: None,
             shortcuts: None,
+            warnings: None,
+            hints: crate::tui::footer_hints::FooterHints::default(),
             model: "test-model",
             effort: "",
             model_note: None,
@@ -7869,7 +8030,7 @@ mod tests {
         };
         let (rows, _) = crate::tui::view::build(&frame);
         assert!(
-            rows.iter().all(|row| !row.plain().contains("agents")),
+            rows.iter().all(|row| !row.plain().contains("agents 1")),
             "{:?}",
             rows.iter().map(Line::plain).collect::<Vec<_>>()
         );
@@ -7935,13 +8096,6 @@ mod tests {
             last_commit,
             Some(enqueued_at + COMMIT_TICK * MAX_CATCH_UP_TICKS)
         );
-    }
-
-    #[test]
-    fn quit_reminder_matches_codexs_key_hint_literal() {
-        use super::QUIT_SHORTCUT_REMINDER;
-
-        assert_eq!(QUIT_SHORTCUT_REMINDER, "ctrl + c again to quit");
     }
 
     #[test]
@@ -8026,5 +8180,164 @@ mod tests {
         image.write_all(&[0, 1, 2]).expect("write png bytes");
         let images = load_submission_images(&[image.path().to_path_buf()]).expect("read png");
         assert_eq!(images, vec![("image/png".to_string(), "AAEC".to_string())]);
+    }
+}
+
+/// The footer's second row and its three keys (t-10232): codex 0.157.1's
+/// `← for agents`, `? for shortcuts` and `⚠ N warnings · f2 to view`.
+#[cfg(test)]
+mod footer_key_tests {
+    use super::{test_ui, FooterView, KeyCode, KeyEvent, KeyModifiers, KeyOutcome, SystemLevel};
+    use crate::tui::footer_hints::HintMode;
+    use crate::tui::view::Status;
+    use runtime::message_stream::{BlockIdGen, RenderBlock};
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn card_open(ui: &super::Ui) -> bool {
+        matches!(ui.footer_view, Some(FooterView::Shortcuts))
+    }
+
+    fn viewer_open(ui: &super::Ui) -> bool {
+        matches!(ui.footer_view, Some(FooterView::Warnings(_)))
+    }
+
+    /// Codex `handle_empty_prompt_shortcut`: a plain ← on a prompt with
+    /// nothing in it opens the agents — the idle road through
+    /// [`KeyOutcome::OpenAgents`], the mid-turn road on this turn's rows.
+    #[test]
+    fn left_on_an_empty_prompt_opens_the_agents_on_both_roads() {
+        let mut ui = test_ui();
+        assert!(matches!(ui.idle_key(press(KeyCode::Left)), KeyOutcome::OpenAgents));
+        assert!(ui.agents.is_none(), "idle hands the overview to the App");
+        ui.turn_composer_key(press(KeyCode::Left));
+        assert!(ui.agents.is_some(), "mid-turn the screen opens it on this turn's rows");
+    }
+
+    #[test]
+    fn left_with_words_or_a_modifier_stays_the_cursor_key() {
+        let mut ui = test_ui();
+        ui.composer.insert_str("ab");
+        assert!(matches!(ui.idle_key(press(KeyCode::Left)), KeyOutcome::Nothing));
+        assert_eq!(ui.composer.cursor(), 1, "the cursor moved");
+        ui.composer.clear();
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let outcome = ui.idle_key(KeyEvent::new(KeyCode::Left, modifiers));
+            assert!(!matches!(outcome, KeyOutcome::OpenAgents), "{modifiers:?}");
+        }
+    }
+
+    #[test]
+    fn question_mark_toggles_the_card_on_an_empty_prompt_and_types_after_words() {
+        let mut ui = test_ui();
+        let _ = ui.idle_key(press(KeyCode::Char('?')));
+        assert!(card_open(&ui));
+        assert_eq!(ui.composer.text(), "", "the ? is a key, not a letter");
+        assert_eq!(ui.footer_hints().mode, HintMode::Overlay);
+        let _ = ui.idle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+        assert!(!card_open(&ui), "shift+? closes it the same");
+        ui.composer.insert_str("why");
+        let _ = ui.idle_key(press(KeyCode::Char('?')));
+        assert_eq!(ui.composer.text(), "why?");
+        assert!(!card_open(&ui));
+    }
+
+    /// Codex closes the card on esc before an interrupt could read it, and on
+    /// any other key, which then does its own work.
+    #[test]
+    fn esc_closes_the_card_alone_and_any_other_key_closes_it_and_acts() {
+        let mut ui = test_ui();
+        let _ = ui.idle_key(press(KeyCode::Char('?')));
+        assert!(ui.shortcut_overlay_key(&press(KeyCode::Esc)), "esc is eaten, never an interrupt");
+        assert!(!card_open(&ui));
+        let _ = ui.idle_key(press(KeyCode::Char('?')));
+        ui.status = Some(Status::working(std::time::Duration::ZERO));
+        assert!(card_open(&ui), "a turn starting leaves the card up");
+        let _ = ui.idle_key(press(KeyCode::Char('x')));
+        assert!(!card_open(&ui));
+        assert_eq!(ui.composer.text(), "x");
+    }
+
+    /// The old `?` card was the composer's text: Enter sent "?" to the model.
+    #[test]
+    fn question_mark_then_enter_submits_nothing() {
+        let mut ui = test_ui();
+        let _ = ui.idle_key(press(KeyCode::Char('?')));
+        let outcome = ui.idle_key(press(KeyCode::Enter));
+        assert!(
+            !matches!(outcome, KeyOutcome::Submitted(ref line) if !line.text.is_empty()),
+            "? then enter reached the model"
+        );
+        assert!(!card_open(&ui));
+    }
+
+    #[test]
+    fn warnings_are_counted_once_by_their_words_until_a_new_conversation() {
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        ui.block(RenderBlock::System {
+            id: ids.next(),
+            level: SystemLevel::Warn,
+            text: "quota low".to_string(),
+        });
+        ui.note(SystemLevel::Warn, "quota low");
+        ui.note(SystemLevel::Error, "'/new' is disabled while a task is in progress.");
+        ui.note(SystemLevel::Info, "interrupted");
+        assert_eq!(ui.footer_hints().warnings, 2);
+        let history: Vec<String> = ui.pending_history.iter().map(super::Line::plain).collect();
+        assert_eq!(
+            history.iter().filter(|row| row.starts_with("⚠ quota low")).count(),
+            2,
+            "each warning is still its own transcript cell: {history:#?}"
+        );
+        ui.reset_conversation();
+        assert_eq!(ui.footer_hints().warnings, 0);
+    }
+
+    #[test]
+    fn the_second_row_follows_the_prompt_the_turn_and_ctrl_c() {
+        let mut ui = test_ui();
+        assert_eq!(ui.footer_hints().mode, HintMode::Empty);
+        ui.composer.insert_str("draft");
+        assert_eq!(ui.footer_hints().mode, HintMode::Draft);
+        ui.status = Some(Status::working(std::time::Duration::ZERO));
+        assert_eq!(ui.footer_hints().mode, HintMode::Queue);
+        ui.status = None;
+        ui.composer.clear();
+        let _ = ui.idle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(ui.footer_hints().mode, HintMode::QuitReminder);
+        assert!(ui.pending_history.is_empty(), "the reminder is the footer's, not history's");
+        assert!(ui.animating(), "the reminder is repainted away when it lapses");
+    }
+
+    #[test]
+    fn f2_opens_a_frozen_viewer_over_a_kept_draft_and_esc_closes_it() {
+        let mut ui = test_ui();
+        ui.warnings.start();
+        ui.note(SystemLevel::Warn, "first");
+        ui.composer.insert_str("keep me");
+        let _ = ui.idle_key(press(KeyCode::F(2)));
+        assert!(viewer_open(&ui));
+        ui.note(SystemLevel::Warn, "second");
+        let Some(FooterView::Warnings(viewer)) = ui.footer_view.as_mut() else {
+            panic!("the viewer is up");
+        };
+        assert_eq!(viewer.lines(80, 12)[0].plain(), "  Warnings · 1 of 1 · Warning");
+        let _ = ui.idle_event(&crossterm::event::Event::Key(press(KeyCode::Char('z'))));
+        assert!(viewer_open(&ui), "the viewer owns every key");
+        assert_eq!(ui.composer.text(), "keep me");
+        let _ = ui.idle_event(&crossterm::event::Event::Key(press(KeyCode::Esc)));
+        assert!(!viewer_open(&ui));
+        assert_eq!(ui.composer.text(), "keep me", "the draft waited under it");
+        assert_eq!(ui.footer_hints().warnings, 2);
+    }
+
+    #[test]
+    fn slash_warnings_opens_the_viewer_mid_turn_too() {
+        let mut ui = test_ui();
+        ui.turn_slash("warnings");
+        assert!(viewer_open(&ui));
     }
 }

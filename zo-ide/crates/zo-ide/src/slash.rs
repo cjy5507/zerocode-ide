@@ -6,7 +6,7 @@
 
 use crate::tui::fast;
 
-/// zo 가 실제로 처리하는 슬래시 열셋.
+/// zo 가 실제로 처리하는 슬래시 열넷.
 ///
 /// 순서는 팝업이 그리는 순서다. `/new` 는 codex `SlashCommand` 열거와 같이
 /// `/permissions` 와 `/resume` 사이에, `/clear` 는 종료 명령 뒤에 선다.
@@ -34,6 +34,10 @@ pub enum Slash {
     Goal,
     Loop,
     Status,
+    /// codex 0.157.1 `/warnings`: page through the warnings this conversation
+    /// has shown (F2 opens the same viewer). Read-only, so it stands beside
+    /// `/status`.
+    Warnings,
     Help,
     Exit,
     Clear,
@@ -82,6 +86,7 @@ impl Slash {
         Self::Goal,
         Self::Loop,
         Self::Status,
+        Self::Warnings,
         Self::Help,
         Self::Exit,
         Self::Clear,
@@ -101,6 +106,7 @@ impl Slash {
             Self::Goal => "/goal",
             Self::Loop => "/loop",
             Self::Status => "/status",
+            Self::Warnings => "/warnings",
             Self::Help => "/help",
             Self::Exit => "/exit",
             Self::Clear => "/clear",
@@ -131,6 +137,8 @@ impl Slash {
             Self::Goal => "persist a goal and run bounded autonomous checks",
             Self::Loop => "repeat a prompt on a bounded session schedule",
             Self::Status => "model, account, limits, session and context",
+            // codex `slash_command.rs:117`.
+            Self::Warnings => "view retained warnings and diagnostic details",
             Self::Help => "show the shortcut card",
             Self::Exit => "exit zo",
             Self::Clear => "clear the terminal and start a new chat",
@@ -139,9 +147,11 @@ impl Slash {
 
     /// 파이프 프런트엔드(`zo -p`, `ide/run_loop`)가 이 명령을 처리하는가.
     ///
-    /// 다섯이 빠진다. `/resume` 는 뷰포트를 가져가는 피커가 정본이라 append-only
-    /// 스트림에는 그릴 자리가 없고, `/fast` 와 `/thinking` 은 맨 터미널 TUI 에만
-    /// 붙은 토글이다(파이프는 `--show-thinking` 플래그가 같은 일을 한다).
+    /// 여섯이 빠진다. `/resume` 는 뷰포트를 가져가는 피커가 정본이라 append-only
+    /// 스트림에는 그릴 자리가 없고, `/warnings` 도 뷰포트를 가져가는 뷰어라 같다
+    /// (파이프의 경고는 이미 스트림에 한 줄씩 남는다). `/fast` 와 `/thinking` 은
+    /// 맨 터미널 TUI 에만 붙은 토글이다(파이프는 `--show-thinking` 플래그가 같은
+    /// 일을 한다).
     /// `/new` 와 `/clear` 는 여러 채팅을 오가는 대화형 TUI 명령이라 한 번 실행하고
     /// 끝나는 파이프 프런트엔드에는 없다.
     /// `/goal` 은 반대로 **파이프에서도 처리한다**: 상태/진행은 append-only
@@ -153,7 +163,12 @@ impl Slash {
     pub const fn handled_in_pipe(self) -> bool {
         !matches!(
             self,
-            Self::Fast | Self::Thinking | Self::New | Self::Resume | Self::Clear
+            Self::Fast
+                | Self::Thinking
+                | Self::New
+                | Self::Resume
+                | Self::Warnings
+                | Self::Clear
         )
     }
 
@@ -202,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn the_keep_list_is_the_thirteen_commands_zo_handles() {
+    fn the_keep_list_is_the_fourteen_commands_zo_handles() {
         let names: Vec<&str> = Slash::CATALOG.iter().map(|command| command.name()).collect();
         assert_eq!(
             names,
@@ -217,6 +232,7 @@ mod tests {
                 "/goal",
                 "/loop",
                 "/status",
+                "/warnings",
                 "/help",
                 "/exit",
                 "/clear"

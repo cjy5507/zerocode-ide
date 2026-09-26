@@ -703,7 +703,7 @@ fn the_r8_fast_popup_matches_codex_0150() {
 #[test]
 fn the_footer_carries_the_codex_context_value() {
     let line = zo_ide::tui::view::footer(
-        "claude-opus-5", "high", None, "~/work", 80, None, Some(42), None, false, None, None,
+        "claude-opus-5", "high", None, "~/work", 80, Some(42), None, false, None, None,
     );
     let plain = line.plain();
     assert!(
@@ -725,7 +725,7 @@ fn the_footer_carries_the_codex_context_value() {
 #[test]
 fn the_footer_falls_back_to_used_tokens_without_a_window() {
     let line = zo_ide::tui::view::footer(
-        "claude-opus-5", "high", None, "~/work", 80, None, None, Some(6_575), false, None,
+        "claude-opus-5", "high", None, "~/work", 80, None, Some(6_575), false, None,
         None,
     );
     assert!(
@@ -740,7 +740,7 @@ fn the_footer_falls_back_to_used_tokens_without_a_window() {
 #[test]
 fn the_footer_says_nothing_when_the_context_is_unknown() {
     let line = zo_ide::tui::view::footer(
-        "claude-opus-5", "high", None, "~/work", 80, None, None, None, false, None, None,
+        "claude-opus-5", "high", None, "~/work", 80, None, None, false, None, None,
     );
     assert_eq!(line.plain(), "  claude-opus-5 high · ~/work");
 }
@@ -754,7 +754,6 @@ fn the_footer_pins_plan_mode_without_a_false_key_hint() {
         "high", None,
         "~/work",
         120,
-        None,
         Some(42),
         None,
         true,
@@ -792,7 +791,7 @@ fn the_footer_pins_every_goal_status_phrase() {
         (GoalFooterStatus::Achieved, "Goal achieved"),
     ] {
         let line = zo_ide::tui::view::footer(
-            "m", "", None, "", 100, None, None, None, false, Some(status), None,
+            "m", "", None, "", 100, None, None, false, Some(status), None,
         );
         assert!(line.plain().ends_with(expected), "footer was {:?}", line.plain());
 
@@ -814,7 +813,6 @@ fn loop_footer_is_visible_but_yields_to_goal() {
         100,
         None,
         None,
-        None,
         false,
         None,
         Some("loop: every 10m · next 04:12 · quiet ×3"),
@@ -828,7 +826,6 @@ fn loop_footer_is_visible_but_yields_to_goal() {
         100,
         None,
         None,
-        None,
         false,
         Some(zo_ide::goal::GoalFooterStatus::Pursuing),
         Some("loop: every 10m"),
@@ -837,56 +834,42 @@ fn loop_footer_is_visible_but_yields_to_goal() {
     assert!(!with_goal.plain().contains("loop: every 10m"));
 }
 
-/// When the keyboard hint and the context value cannot both fit, the context
-/// value is the one that stays — it is the answer the operator came for.
+/// Codex 0.157.1 moved the key hints off the status line onto a row of their
+/// own (t-10232): row one keeps the context value at any width, and the hint
+/// is row two's.
 #[test]
-fn a_narrow_footer_keeps_the_context_and_drops_the_hint() {
-    let wide = zo_ide::tui::view::footer(
-        "claude-opus-5",
-        "high", None,
-        "~/work",
-        120,
-        Some("? for shortcuts"),
-        Some(7),
-        None,
-        false,
-        None,
-        None,
-    );
-    assert!(wide.plain().contains("? for shortcuts"), "footer was {:?}", wide.plain());
-    assert!(wide.plain().contains("7% context left"));
-
-    let narrow = zo_ide::tui::view::footer(
-        "claude-opus-5",
-        "high", None,
-        "~/work",
-        40,
-        Some("? for shortcuts"),
-        Some(7),
-        None,
-        false,
-        None,
-        None,
-    );
-    assert!(
-        !narrow.plain().contains("? for shortcuts"),
-        "the hint must yield first; footer was {:?}",
-        narrow.plain()
-    );
-    assert!(narrow.plain().contains("7% context left"));
+fn row_one_keeps_the_context_and_the_hint_has_a_row_of_its_own() {
+    for width in [120, 40] {
+        let line = zo_ide::tui::view::footer(
+            "claude-opus-5",
+            "high", None,
+            "~/work",
+            width,
+            Some(7),
+            None,
+            false,
+            None,
+            None,
+        );
+        assert!(line.plain().contains("7% context left"), "footer was {:?}", line.plain());
+        assert!(!line.plain().contains("? for shortcuts"), "footer was {:?}", line.plain());
+    }
+    let hints = zo_ide::tui::footer_hints::FooterHints::default();
+    assert!(zo_ide::tui::footer_hints::hint_row(hints, 40)
+        .plain()
+        .contains("? for shortcuts"));
 }
 
-/// Once the hint has yielded, an active goal keeps its status before the
-/// context value yields.  This makes the new always-visible state stable at
-/// narrow widths rather than letting a changing context percentage displace it.
+/// An active goal keeps its status before the context value yields. This
+/// makes the always-visible state stable at narrow widths rather than letting
+/// a changing context percentage displace it.
 #[test]
-fn a_narrow_footer_keeps_goal_before_context_and_hint() {
+fn a_narrow_footer_keeps_goal_before_context() {
     let line = zo_ide::tui::view::footer(
         "m",
         "", None,
         "",
         30,
-        Some("? for shortcuts"),
         Some(7),
         None,
         false,
@@ -897,6 +880,59 @@ fn a_narrow_footer_keeps_goal_before_context_and_hint() {
     assert!(plain.contains("Pursuing goal"), "footer was {plain:?}");
     assert!(!plain.contains("7% context left"), "footer was {plain:?}");
     assert!(!plain.contains("? for shortcuts"), "footer was {plain:?}");
+}
+
+/// The footer's second row (t-10232), cell for cell against codex 0.157.1
+/// `warning_notice__tests__warning_notice_styles.snap` (80 columns: the badge
+/// at column 54, `3 warnings` at 56, `f2` bold at 69, one clear cell at 79)
+/// and `agents_navigation_enabled.snap` (`  ← for agents · ? for shortcuts`).
+/// zo's secondary text is dim where codex blends the foreground; the amber is
+/// codex `warning_notice_style()` on a dark background.
+#[test]
+fn the_second_footer_row_writes_bold_keys_dim_words_and_an_amber_count() {
+    use zo_ide::tui::footer_hints::{hint_row, FooterHints, HintMode};
+
+    let line = hint_row(
+        FooterHints {
+            mode: HintMode::Empty,
+            warnings: 3,
+        },
+        80,
+    );
+    let plain = line.plain();
+    assert_eq!(plain.find("⚠").map(|byte| plain[..byte].chars().count()), Some(54));
+    assert_eq!(plain.chars().count(), 79, "one clear cell at the right edge");
+    let mut rendered = String::new();
+    write_spans(&line, &mut rendered);
+    let expected = concat!(
+        "  ",
+        "\u{1b}[1m←",
+        "\u{1b}[22m\u{1b}[2m\u{1b}[2m for agents · ",
+        "\u{1b}[22m\u{1b}[1m?",
+        "\u{1b}[22m\u{1b}[2m\u{1b}[2m for shortcuts",
+        "\u{1b}[22m                      ",
+        "\u{1b}[2m⚠ ",
+        "\u{1b}[22m\u{1b}[38;2;196;167;103;49m3 warnings",
+        "\u{1b}[2m\u{1b}[39;49m · ",
+        "\u{1b}[22m\u{1b}[1mf2",
+        "\u{1b}[22m\u{1b}[2m\u{1b}[2m to view",
+    );
+    assert_eq!(rendered, expected);
+
+    let closing = hint_row(
+        FooterHints {
+            mode: HintMode::Overlay,
+            warnings: 3,
+        },
+        80,
+    );
+    let mut rendered = String::new();
+    write_spans(&closing, &mut rendered);
+    assert_eq!(
+        rendered,
+        "  \u{1b}[1m?\u{1b}[22m\u{1b}[2m\u{1b}[2m / \u{1b}[22m\u{1b}[1mesc\u{1b}[22m\u{1b}[2m\u{1b}[2m close",
+        "the card's row is codex `? / esc close`, and the badge waits"
+    );
 }
 
 #[test]
@@ -913,7 +949,6 @@ fn the_r8_fast_footer_token_matches_codex_0150() {
         &fast::display_effort("medium", true), None,
         "~/work",
         120,
-        None,
         None,
         None,
         false,
@@ -2565,6 +2600,8 @@ fn question_frame<'a>(composer: &'a Composer, question: &'a view::Question) -> F
         popup: None,
         mention: None,
         shortcuts: None,
+        warnings: None,
+        hints: zo_ide::tui::footer_hints::FooterHints::default(),
         model: "claude-opus-5",
         effort: "high",
         model_note: None,
@@ -2725,6 +2762,8 @@ fn frame_build_cost() {
         popup: None,
         mention: None,
         shortcuts: None,
+        warnings: None,
+        hints: zo_ide::tui::footer_hints::FooterHints::default(),
         model: "claude-opus-5",
         effort: "high",
         model_note: None,
