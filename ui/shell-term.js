@@ -5449,6 +5449,9 @@ function dropTermView(term) {
   // A shell that has gone has nothing left to want: its bell must not outlive
   // it as a badge on a tab whose other pane is perfectly quiet.
   bellRang.delete(term);
+  // Nor anything withheld from it: the next shell to wear this id has not
+  // been told a thing (t-10159).
+  withheldNotices.delete(term);
   // 누가 이 판을 열었는지도 — **이 판 자신의 항목만**. 이 판이 시작한 판들은
   // 자기 항목을 그대로 들고 뿌리가 된다. 백엔드의 `close_term`이 같은 자리에서
   // 같은 이유로 같은 선택을 하고, 그 이유가 여기서도 그대로 옳다: 계보 규칙은

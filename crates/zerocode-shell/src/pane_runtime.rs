@@ -3589,13 +3589,7 @@ pub(super) fn pump_loop(app: &AppHandle) {
         for (term, outcome, text) in settled {
             let _ = app.emit(
                 "term:prompt",
-                PromptSettled {
-                    term,
-                    delivered: outcome == DeliveryOutcome::Delivered,
-                    pasted: outcome.pasted(),
-                    why: prompt_transaction::withheld(outcome).map(|why| why.says()),
-                    text,
-                },
+                prompt_transaction::settled_event(term, outcome, text),
             );
         }
 

@@ -616,6 +616,32 @@ pub enum Refusal {
 }
 
 impl Refusal {
+    /// Every refusal, for a table that must word each one.
+    pub const ALL: [Self; 6] = [
+        Self::HoldsADraft,
+        Self::HandReached,
+        Self::Parked,
+        Self::LaunchChanged,
+        Self::InputRejected,
+        Self::LaunchRefused,
+    ];
+
+    /// The token the window's notice names this refusal by (t-10159). What
+    /// it means to a person is the window's own table (`TERM_WITHHELD`), in
+    /// the person's language; [`Self::says`] stays the receipt's and the
+    /// black box's.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::HoldsADraft => "holds_a_draft",
+            Self::HandReached => "hand_reached",
+            Self::Parked => "parked",
+            Self::LaunchChanged => "launch_changed",
+            Self::InputRejected => "input_rejected",
+            Self::LaunchRefused => "launch_refused",
+        }
+    }
+
     /// The refusal, in the words a receipt carries.
     #[must_use]
     pub const fn says(self) -> &'static str {
@@ -1820,15 +1846,31 @@ mod tests {
     /// Every refusal says why, in words a receipt can carry.
     #[test]
     fn every_refusal_says_what_it_protected() {
-        for refusal in [
-            Refusal::HoldsADraft,
-            Refusal::HandReached,
-            Refusal::Parked,
-            Refusal::LaunchChanged,
-        ] {
+        for refusal in Refusal::ALL {
             assert!(!refusal.says().trim().is_empty(), "{refusal:?}");
         }
         assert!(Refusal::HoldsADraft.says().contains("appended to them"));
         assert!(Refusal::HandReached.says().contains("left unsubmitted"));
+    }
+
+    /// Every refusal has one token of its own, and a token is a name — the
+    /// window's table is keyed by it, and a sentence there would be a second
+    /// copy of what the receipt already says (t-10159).
+    #[test]
+    fn every_refusal_has_one_token_the_window_can_key() {
+        let tokens = Refusal::ALL.map(Refusal::token);
+        for (refusal, token) in Refusal::ALL.into_iter().zip(tokens) {
+            assert!(
+                !token.is_empty()
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+                "{refusal:?} is named by something other than a token: {token}"
+            );
+            assert_ne!(token, refusal.says(), "{refusal:?}");
+        }
+        let distinct: std::collections::HashSet<&str> = tokens.into_iter().collect();
+        assert_eq!(distinct.len(), tokens.len(), "two refusals share a token");
+        assert_eq!(Refusal::HoldsADraft.token(), "holds_a_draft");
     }
 }
