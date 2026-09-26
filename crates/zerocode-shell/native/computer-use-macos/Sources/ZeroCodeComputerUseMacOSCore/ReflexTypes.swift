@@ -43,6 +43,9 @@ public struct ReflexScale: Codable, Equatable, Sendable {
     }
 }
 public enum ReflexDetectorKind: String, Codable, Sendable { case color, template, motion }
+/// Which blob a colour detector's target follows when it follows none (`reflex::Pick`); the
+/// kernel picks only then (`PerceptionBlobTracks.pick`).
+public enum ReflexPick: String, Codable, CaseIterable, Sendable { case first, nearest, largest, newest, oldest }
 public struct ReflexDetector: Codable, Sendable {
     public let id: String
     public let kind: ReflexDetectorKind
@@ -51,6 +54,35 @@ public struct ReflexDetector: Codable, Sendable {
     public let scale: ReflexScale
     /// What a colour detector reads its ROI with (`game_state::ColorSpec`); required for `color`.
     public let color: PerceptionColorSpec?
+    /// Which blob its target follows when it follows none; the wire leaves the key out when it
+    /// is `first`, as the window's serde type does — so a plan without one keeps its bytes.
+    public let pick: ReflexPick
+}
+
+extension ReflexDetector {
+    private enum CodingKeys: String, CodingKey { case id, kind, roi, patches, scale, color, pick }
+
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try fields.decode(String.self, forKey: .id),
+                  kind: try fields.decode(ReflexDetectorKind.self, forKey: .kind),
+                  roi: try fields.decode(ReflexRoi.self, forKey: .roi),
+                  patches: try fields.decode(UInt64.self, forKey: .patches),
+                  scale: try fields.decode(ReflexScale.self, forKey: .scale),
+                  color: try fields.decodeIfPresent(PerceptionColorSpec.self, forKey: .color),
+                  pick: try fields.decodeIfPresent(ReflexPick.self, forKey: .pick) ?? .first)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(id, forKey: .id)
+        try fields.encode(kind, forKey: .kind)
+        try fields.encode(roi, forKey: .roi)
+        try fields.encode(patches, forKey: .patches)
+        try fields.encode(scale, forKey: .scale)
+        try fields.encodeIfPresent(color, forKey: .color)
+        if pick != .first { try fields.encode(pick, forKey: .pick) }
+    }
 }
 public enum ReflexPredicateOp: String, Codable, Sendable { case known, eq, not, any, all }
 public final class ReflexPredicate: Codable, Sendable {
@@ -335,6 +367,8 @@ public enum ReflexContract {
             } catch {
                 throw ReflexContractError.perception
             }
+            // A pick chooses among blobs: a cells layout has none to choose among.
+            if item.pick != .first, case .cells = color.layout { throw ReflexContractError.unsupported }
         }
         var macroIds = Set<String>()
         var actionIds = Set<String>()
@@ -800,8 +834,12 @@ public struct ReflexPerceptionBudget {
 /// called only there, one frame at a time, so it may keep what it tracks across frames.
 public protocol ReflexPerceptionSession: AnyObject {
     /// The plan's detectors on `frame`, in plan order. `frame` is one the runtime's cursor
-    /// accepted; `pixels` are its buffer, lent for the call.
-    func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation]
+    /// accepted; `pixels` are its buffer, lent for the call. `hand` is where the run's last fire
+    /// sent the hand — the point of the target its last leaf acts on, in frame pixels, as the
+    /// frame it fired on showed it — nil before its first fire: what a detector picking by
+    /// nearness picks near (`ReflexPick.nearest`).
+    func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
+                 budget: inout ReflexPerceptionBudget) -> [ReflexObservation]
 }
 
 /// A kernel that reads a validated plan's detectors (R5's `Perception/`). It never issues

@@ -598,6 +598,8 @@ enum ReflexRuntimeHost {
             "leafIndex": receipt.leafIndex,
             "outcome": receipt.outcome.rawValue,
             "targetId": receipt.targetId.map { $0 as Any } ?? NSNull(),
+            "trackId": time(receipt.trackId),
+            "pick": receipt.pick.rawValue,
             "sourceCapture": time(receipt.sourceCapture),
             "decidedHostNs": time(receipt.decidedHostNs),
             "decidedDeliveredHostNs": time(receipt.decidedDeliveredHostNs),

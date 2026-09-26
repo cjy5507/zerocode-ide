@@ -767,6 +767,44 @@ fn a_flow_detector_line_carries_its_pick() {
     );
 }
 
+/// `Pick::ALL` is the one table of a pick's words: each is its serde name,
+/// `first` is the default and the one the wire leaves out, and every scene of
+/// `pick_cases.json` names each word once for each of its frames — the scenes
+/// Swift reads through its kernel.
+#[test]
+fn a_picks_words_are_one_table() {
+    for pick in Pick::ALL {
+        assert_eq!(serde_json::to_value(pick).unwrap(), pick.word());
+        assert_eq!(
+            serde_json::from_value::<Pick>(pick.word().into()).unwrap(),
+            pick
+        );
+        assert_eq!(pick.is_first(), pick == Pick::default());
+    }
+    assert_eq!(Pick::default(), Pick::First);
+    let words: BTreeSet<&str> = Pick::ALL.iter().map(|pick| pick.word()).collect();
+    assert_eq!(words.len(), Pick::ALL.len());
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/reflex-contract/pick_cases.json"
+    ))
+    .unwrap();
+    let cases = fixture["cases"].as_array().unwrap();
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let frames = case["frames"].as_array().unwrap().len();
+        let expected = case["expected"].as_object().unwrap();
+        assert_eq!(
+            expected.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            words,
+            "{name}"
+        );
+        for (word, targets) in expected {
+            assert_eq!(targets.as_array().unwrap().len(), frames, "{name} {word}");
+        }
+    }
+    assert_eq!(cases.len(), 4);
+}
+
 #[test]
 fn the_reflex_table_the_window_sends_is_the_one_table() {
     let file = include_str!("../../../fixtures/reflex-contract/limits.json");

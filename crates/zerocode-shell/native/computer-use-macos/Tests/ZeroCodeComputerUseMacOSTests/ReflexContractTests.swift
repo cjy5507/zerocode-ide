@@ -264,6 +264,30 @@ final class ReflexContractTests: XCTestCase {
         }
     }
 
+    /// A detector's pick is left out of the wire when it is `first`, as the window's serde type
+    /// leaves it out — so a plan without one keeps its bytes and its hash — and written when it is
+    /// another word (t-10223 R8). A plan that writes `first` out reads as `first` but is not its
+    /// own wire, so the helper refuses it as the window does (`pick_first_written`).
+    func test_first_is_never_written() throws {
+        let (_, omitted) = try golden("pick_omitted")
+        let plan = try JSONDecoder().decode(ReflexPlan.self, from: omitted)
+        XCTAssertEqual(plan.detectors[0].pick, .first)
+        XCTAssertEqual(try ReflexContract.wireBytes(plan), omitted)
+        let detector = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(plan.detectors[0])) as? [String: Any])
+        XCTAssertNil(detector["pick"], "first is never written")
+        for word in ReflexPick.allCases where word != .first {
+            let (_, wire) = try golden("pick_\(word.rawValue)")
+            let read = try JSONDecoder().decode(ReflexPlan.self, from: wire)
+            XCTAssertEqual(read.detectors[0].pick, word)
+            XCTAssertEqual(try ReflexContract.wireBytes(read), wire, word.rawValue)
+            XCTAssertNotEqual(read.plan_hash, plan.plan_hash, "\(word.rawValue) is another plan")
+        }
+        let (_, written) = try golden("pick_first_written")
+        let spelled = try JSONDecoder().decode(ReflexPlan.self, from: written)
+        XCTAssertEqual(spelled.detectors[0].pick, .first)
+        XCTAssertEqual(try ReflexContract.wireBytes(spelled), omitted, "first written out is pick_omitted's plan, not its wire")
+    }
+
     func testPointerAndMacroBudgetsComeFromOneTable() throws {
         let fromCore = try contractLimits()
         let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture("valid_basic")) as? [String: Any])

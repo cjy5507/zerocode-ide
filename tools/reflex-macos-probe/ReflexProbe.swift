@@ -462,7 +462,8 @@ final class BlinkingBall: ReflexPerceptionKernel, @unchecked Sendable {
         let kernel: BlinkingBall
         init(kernel: BlinkingBall) { self.kernel = kernel }
 
-        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
+        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
+                     budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
             guard budget.spend(64), let ref = ReflexFrameRef(frame) else {
                 kernel.ledger.note([], scene: kernel.scene, seq: frame.capture_seq)
                 return []
@@ -504,8 +505,9 @@ final class NotedKernel: ReflexPerceptionKernel, @unchecked Sendable {
             self.kernel = kernel
         }
 
-        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
-            let seen = inner.observe(frame: frame, pixels: pixels, budget: &budget)
+        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
+                     budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
+            let seen = inner.observe(frame: frame, pixels: pixels, hand: hand, budget: &budget)
             kernel.ledger.note(seen, scene: kernel.scene, seq: frame.capture_seq)
             return seen
         }
@@ -641,6 +643,76 @@ struct Fixtures {
 
 enum ProbeError: Error {
     case fixture
+}
+
+// MARK: - The shared pick scenes
+
+/// Every scene of `reflex-contract/pick_cases.json` read by R5's kernel in this optimized
+/// build, a fresh session for each word, as the helper's tests read them in a debug one: each
+/// frame drawn in the spec's first class on its ground, read near the scene's hand, and the
+/// drawn blob the target follows held to the one the scene names. Answers the scenes read and
+/// every frame that followed another blob.
+func pickSceneMismatches(fixtures: Fixtures) throws -> (scenes: Int, mismatches: [String]) {
+    let raw = try Data(contentsOf: fixtures.root.appendingPathComponent("reflex-contract/pick_cases.json"))
+    guard let fixture = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
+          let scenes = fixture["cases"] as? [[String: Any]], let specObject = fixture["spec"], let frameObject = fixture["frame"]
+    else { throw ProbeError.fixture }
+    let spec = try JSONDecoder().decode(PerceptionColorSpec.self, from: JSONSerialization.data(withJSONObject: specObject))
+    let extent = try JSONDecoder().decode(ReflexPixelExtent.self, from: JSONSerialization.data(withJSONObject: frameObject))
+    guard let ground = spec.ground, let ink = spec.classes.first else { throw ProbeError.fixture }
+    let (width, height) = (Int(extent.width), Int(extent.height))
+    let whole = ReflexRoi(x: 0, y: 0, width: Int64(width), height: Int64(height), space: .pixel)
+    let perception = try fixtures.perception()
+    var mismatches: [String] = []
+    for scene in scenes {
+        guard let name = scene["name"] as? String, let frames = scene["frames"] as? [[String: Any]],
+              let expected = scene["expected"] as? [String: [Any]] else { throw ProbeError.fixture }
+        for pick in ReflexPick.allCases {
+            let session = try PerceptionSession(detectors: [("pick", whole, spec, pick)], limits: perception)
+            for (at, frame) in frames.enumerated() {
+                var bytes = [UInt8](repeating: 0, count: width * height * 4)
+                func paint(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ colour: PerceptionColorClass) {
+                    for row in max(0, y)..<min(height, y + h) {
+                        for column in max(0, x)..<min(width, x + w) {
+                            let pixel = (row * width + column) * 4
+                            (bytes[pixel], bytes[pixel + 1], bytes[pixel + 2], bytes[pixel + 3]) = (colour.b, colour.g, colour.r, 0xFF)
+                        }
+                    }
+                }
+                paint(0, 0, width, height, ground)
+                let blobs = frame["blobs"] as? [[String: Int]] ?? []
+                var boxes: [ReflexRoi] = []
+                for blob in blobs {
+                    let (x, y, w, h) = (blob["x"] ?? 0, blob["y"] ?? 0, blob["width"] ?? 0, blob["height"] ?? 0)
+                    paint(x, y, w, h, ink)
+                    if let border = blob["border"] { paint(x + border, y + border, w - 2 * border, h - 2 * border, ground) }
+                    boxes.append(ReflexRoi(x: Int64(x), y: Int64(y), width: Int64(w), height: Int64(h), space: .pixel))
+                }
+                let seq = UInt64(at + 1)
+                let facts = ReflexCapture(
+                    displayId: "pick", region: whole, pixelExtent: extent,
+                    pointTransform: ReflexPointTransform(origin_x: 0, origin_y: 0, points_per_pixel: ReflexScale(numerator: 1, denominator: 1)),
+                    orientation: .up, colorSpace: .srgb, status: .ready, dirty: true, captureGap: 0, deliveredHostNs: seq,
+                    captureSeq: seq, repaintSeq: seq, streamEpoch: 1, geometryEpoch: 1,
+                    clockDomain: ReflexContract.hostUptimeClockDomain, capturedHostNs: seq
+                ).facts(runId: "pick", ownerEpoch: 1, planEpoch: 1)
+                let hand = (frame["hand"] as? [String: Int64]).map { (x: $0["x"] ?? 0, y: $0["y"] ?? 0) }
+                var budget = ReflexPerceptionBudget(samples: perception.max_tick_samples, deadlineHostNs: .max, now: { 0 })
+                let seen = bytes.withUnsafeBytes { raw in
+                    session.observe(frame: facts, pixels: ReflexPixels(base: raw.baseAddress!, width: width, height: height, bytesPerRow: width * 4),
+                                    hand: hand, budget: &budget).first
+                }
+                let followed = seen?.target.flatMap { target in
+                    boxes.firstIndex { $0.contains(x: Double(target.point_x), y: Double(target.point_y)) }
+                }
+                let want = expected[pick.rawValue].flatMap { at < $0.count ? $0[at] as? Int : nil }
+                if seen?.value != Int64(blobs.count) || followed != want {
+                    mismatches.append("\(name) \(pick.rawValue) frame \(seq): followed \(String(describing: followed)), wanted \(String(describing: want))")
+                }
+            }
+        }
+    }
+    return (scenes.count, mismatches)
 }
 
 // MARK: - The oracle
@@ -928,7 +1000,7 @@ func tickSeries(plan: ValidatedReflexPlan, perception: PerceptionLimits, ticks: 
                 let frame = capture.facts(runId: "ticks", ownerEpoch: 1, planEpoch: 1)
                 let buffer = index % 3 == 2 ? hidden : shown
                 let started = nowNs()
-                _ = session.observe(frame: frame, pixels: buffer.pixels, budget: &budget)
+                _ = session.observe(frame: frame, pixels: buffer.pixels, hand: nil, budget: &budget)
                 costs.append(nowNs() - started)
             }
             finished.signal()
@@ -998,7 +1070,15 @@ struct ReflexProbe {
                 FileHandle.standardError.write(Data("oracle self-test failed for: \(failures.joined(separator: ", "))\n".utf8))
                 exit(1)
             }
-            print(#"{"selfTest":"ok","oracle":"a clean run passes on the scripted and the real kernel; kernel-uncalled, inert-poster, restored-state fail on both, wrong-target on the scripted and kernel-blind on the real"}"#)
+            // The kernel's pick, read here in the optimized build the oracle's runs use.
+            let picked = try pickSceneMismatches(fixtures: fixtures)
+            guard picked.mismatches.isEmpty else {
+                FileHandle.standardError.write(Data("pick scenes read otherwise than written:\n\(picked.mismatches.joined(separator: "\n"))\n".utf8))
+                exit(1)
+            }
+            let words = ReflexPick.allCases.map(\.rawValue).joined(separator: ", ")
+            print(#"{"selfTest":"ok","oracle":"a clean run passes on the scripted and the real kernel; kernel-uncalled, inert-poster, restored-state fail on both, wrong-target on the scripted and kernel-blind on the real","pick":"# +
+                  "\"\(picked.scenes) scenes of pick_cases.json read as written for each of \(words)\"}")
             return
         }
         guard let root else {

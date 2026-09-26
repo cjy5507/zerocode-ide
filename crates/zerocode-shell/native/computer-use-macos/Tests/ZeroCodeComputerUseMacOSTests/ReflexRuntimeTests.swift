@@ -258,8 +258,8 @@ enum ReflexFixtures {
 
     /// valid_basic with its macro one click on the ball, its rule firing on
     /// the ball being there (an edge each time it comes back) at most
-    /// `maxFires` times.
-    static func clickPlan(maxFires: Int = 1) throws -> ValidatedReflexPlan {
+    /// `maxFires` times, the ball's target picked by `pick`.
+    static func clickPlan(maxFires: Int = 1, pick: ReflexPick = .first) throws -> ValidatedReflexPlan {
         try plan { object in
             object["macros"] = [["id": "tap", "repeat": 1, "actions": [["id": "click1", "kind": "click", "target": "ball"]]]]
             var rules = object["rules"] as! [[String: Any]]
@@ -267,6 +267,11 @@ enum ReflexFixtures {
             rules[0]["cooldown_ms"] = 0
             rules[0]["predicate"] = ["op": "eq", "value": 1]
             object["rules"] = rules
+            if pick != .first {
+                var detectors = object["detectors"] as! [[String: Any]]
+                detectors[0]["pick"] = pick.rawValue
+                object["detectors"] = detectors
+            }
         }
     }
 
@@ -724,7 +729,7 @@ final class ReflexRuntimeTests: XCTestCase {
         let count = ReflexSession.runFire(leaves, receipts: receipts, acting: { true }, overflowed: { overflowed += 1 }, next: &next) { leaf, index in
             ran.append(leaf.actionId)
             return ReflexReceipt(ruleId: leaf.ruleId, actionId: leaf.actionId, leafIndex: index, outcome: .done, targetId: nil,
-                                 sourceCapture: nil, decidedHostNs: nil, decidedDeliveredHostNs: nil, admittedHostNs: nil, captureWaitNs: 0,
+                                 trackId: nil, pick: .first, sourceCapture: nil, decidedHostNs: nil, decidedDeliveredHostNs: nil, admittedHostNs: nil, captureWaitNs: 0,
                                  firstEventHostNs: nil, firstEventFrameHostNs: nil, firstEventFrameDeliveredHostNs: nil,
                                  downHostNs: nil, upHostNs: nil, endedHostNs: 0, events: 1)
         }
@@ -845,7 +850,8 @@ final class ScriptedFrames: ReflexFrameSource, @unchecked Sendable {
 /// A kernel that answers nothing: these runs are about the hand and the monitor.
 struct SilentKernel: ReflexPerceptionKernel {
     final class Session: ReflexPerceptionSession {
-        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation] { [] }
+        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
+                     budget: inout ReflexPerceptionBudget) -> [ReflexObservation] { [] }
     }
 
     func session(for plan: ValidatedReflexPlan, limits: PerceptionLimits) throws -> any ReflexPerceptionSession { Session() }
@@ -1087,7 +1093,8 @@ final class SceneKernel: ReflexPerceptionKernel, @unchecked Sendable {
         let kernel: SceneKernel
         init(kernel: SceneKernel) { self.kernel = kernel }
 
-        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
+        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
+                     budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
             guard let ref = ReflexFrameRef(frame) else { return [] }
             let unity = ReflexScale(numerator: 1, denominator: 1)
             switch kernel.sight(frame.capture_seq) {
@@ -2190,8 +2197,9 @@ final class LateKernel: ReflexPerceptionKernel, @unchecked Sendable {
             self.kernel = kernel
         }
 
-        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
-            guard kernel.isLate(frame.capture_seq) else { return inner.observe(frame: frame, pixels: pixels, budget: &budget) }
+        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
+                     budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
+            guard kernel.isLate(frame.capture_seq) else { return inner.observe(frame: frame, pixels: pixels, hand: hand, budget: &budget) }
             let deadline = budget.deadlineHostNs
             let reads = Box<Int>()
             var slow = ReflexPerceptionBudget(samples: budget.samples, deadlineHostNs: deadline) {
@@ -2199,7 +2207,7 @@ final class LateKernel: ReflexPerceptionKernel, @unchecked Sendable {
                 reads.value = read + 1
                 return read == 0 ? deadline - 1 : deadline + 6_000_000
             }
-            return inner.observe(frame: frame, pixels: pixels, budget: &slow)
+            return inner.observe(frame: frame, pixels: pixels, hand: hand, budget: &slow)
         }
     }
 
@@ -2209,7 +2217,8 @@ final class LateKernel: ReflexPerceptionKernel, @unchecked Sendable {
 }
 
 /// A kernel that keeps what each session was opened with, the thread class it was
-/// opened and read on, and every session it made; it answers the scene.
+/// opened and read on, every session it made and the hand's point each capture was
+/// read near; it answers the scene.
 final class RecordingKernel: ReflexPerceptionKernel, @unchecked Sendable {
     let scene: SceneKernel
     private let lock = NSLock()
@@ -2217,6 +2226,8 @@ final class RecordingKernel: ReflexPerceptionKernel, @unchecked Sendable {
     private var readQos: [qos_class_t] = []
     /// Each session's number and the runs whose frames it read.
     private var runsRead: [Int: Set<String>] = [:]
+    /// The hand's point each capture was read near, as `[x, y]`; nil for none.
+    private var readNear: [UInt64: [Int64]?] = [:]
 
     init(scene: SceneKernel = SceneKernel()) { self.scene = scene }
 
@@ -2230,17 +2241,26 @@ final class RecordingKernel: ReflexPerceptionKernel, @unchecked Sendable {
             self.number = number
         }
 
-        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
-            kernel.noteRead(qos_class_self(), session: number, run: frame.run_id)
-            return inner.observe(frame: frame, pixels: pixels, budget: &budget)
+        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
+                     budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
+            kernel.noteRead(qos_class_self(), session: number, run: frame.run_id, capture: frame.capture_seq, near: hand)
+            return inner.observe(frame: frame, pixels: pixels, hand: hand, budget: &budget)
         }
     }
 
-    fileprivate func noteRead(_ qos: qos_class_t, session: Int, run: String) {
+    fileprivate func noteRead(_ qos: qos_class_t, session: Int, run: String, capture: UInt64, near hand: (x: Int64, y: Int64)?) {
         lock.lock()
         readQos.append(qos)
         runsRead[session, default: []].insert(run)
+        readNear[capture] = .some(hand.map { [$0.x, $0.y] })
         lock.unlock()
+    }
+
+    /// The hand's point each capture was read near, by capture: `[x, y]`, or nil for none.
+    var near: [UInt64: [Int64]?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return readNear
     }
 
     func session(for plan: ValidatedReflexPlan, limits: PerceptionLimits) throws -> any ReflexPerceptionSession {
@@ -2477,6 +2497,56 @@ final class ReflexKernelAndPolicyTests: XCTestCase {
         XCTAssertTrue(sightings[1]["track"] is NSNull)
         XCTAssertLessThanOrEqual(UInt64(sightings.count), try ReflexFixtures.limits().max_detectors)
         XCTAssertNil(status["receipts"], "a status carries no receipts")
+    }
+
+    /// A kernel that picks by nearness picks near where the run's last fire sent the hand
+    /// (t-10223 R8): every read is handed the point of the target that fire's last leaf acts
+    /// on, as the frame it fired on showed it — nothing before the first fire, and the newer
+    /// fire's point from the capture after it.
+    func test_the_kernel_reads_near_where_the_last_fire_sent_the_hand() throws {
+        let kernel = RecordingKernel()
+        let rig = try LiveRig(plan: try ReflexFixtures.clickPlan(maxFires: 2, pick: .nearest), scene: kernel.scene, kernel: kernel)
+        let shown = Box<ReflexRoi>()
+        rig.sleeper.onSleep = { _, _ in rig.frame(.ball(track: rig.track, box: shown.value ?? LiveRig.box)) }
+        try rig.session.start()
+        defer { rig.session.stop(reason: StopReason.request) }
+        let first = rig.frame(.ball(track: rig.track, box: LiveRig.box))
+        XCTAssertEqual(rig.receipts(1).first?.outcome, .done)
+        // The ball goes, and comes back elsewhere on another track: a new edge, a second fire.
+        let elsewhere = ReflexRoi(x: 16, y: 16, width: 16, height: 16, space: .pixel)
+        shown.value = elsewhere
+        rig.track = 6
+        rig.poster.movePointer(to: SmoothPointerPath.Point(x: 0, y: 0))
+        rig.frame(.absent)
+        let second = rig.frame(.ball(track: rig.track, box: elsewhere))
+        XCTAssertEqual(rig.receipts(1).first?.outcome, .done)
+        let after = rig.frame(.ball(track: rig.track, box: elsewhere))
+        let near = kernel.near
+        XCTAssertEqual(near[first], .some(nil), "no fire before the first capture's read")
+        for capture in (first + 1)...second {
+            XCTAssertEqual(near[capture], .some([16, 16]), "capture \(capture): the first fire's target, the ball's middle")
+        }
+        for capture in (second + 1)...after {
+            XCTAssertEqual(near[capture], .some([24, 24]), "capture \(capture): the second fire's target")
+        }
+        XCTAssertEqual(rig.session.status.fires, 2)
+    }
+
+    /// A receipt names how its leaf's detector picks a target that follows none, and the
+    /// track its leaf was decided on (t-10223 R8) — `first` for a plan that names no pick.
+    func test_a_receipt_names_its_pick_and_its_track() throws {
+        for pick in [ReflexPick.first, .nearest] {
+            let rig = try LiveRig(plan: try ReflexFixtures.clickPlan(pick: pick))
+            rig.sleeper.onSleep = { _, _ in rig.frame(.ball(track: rig.track, box: LiveRig.box)) }
+            try rig.session.start()
+            rig.frame(.ball(track: rig.track, box: LiveRig.box))
+            let receipt = try XCTUnwrap(rig.receipts(1).first, pick.rawValue)
+            XCTAssertEqual(receipt.outcome, .done, pick.rawValue)
+            XCTAssertEqual(receipt.pick, pick)
+            XCTAssertEqual(receipt.trackId, rig.track, pick.rawValue)
+            XCTAssertEqual(receipt.targetId, "ball#\(rig.track)", pick.rawValue)
+            rig.session.stop(reason: StopReason.request)
+        }
     }
 
     /// The window's session closing takes the stop's own road before the helper exits:
@@ -2748,7 +2818,8 @@ final class ReflexKernelAndPolicyTests: XCTestCase {
 /// Two detectors' words: the ball known on track 5, the flag occluded.
 final class PairKernel: ReflexPerceptionKernel, @unchecked Sendable {
     final class Session: ReflexPerceptionSession {
-        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
+        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
+                     budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
             guard let ref = ReflexFrameRef(frame) else { return [] }
             return [
                 ReflexFixtures.ball(on: frame, track: 5, box: LiveRig.box),
@@ -2796,9 +2867,10 @@ final class StuckKernel: ReflexPerceptionKernel, @unchecked Sendable {
             self.kernel = kernel
         }
 
-        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
+        func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
+                     budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
             if kernel.stuck { kernel.gate.pass() }
-            return inner.observe(frame: frame, pixels: pixels, budget: &budget)
+            return inner.observe(frame: frame, pixels: pixels, hand: hand, budget: &budget)
         }
     }
 
@@ -2985,6 +3057,28 @@ final class ReflexRunRoadTests: XCTestCase {
         XCTAssertEqual((ReflexRuntimeHost.receipts(run: "kept", after: 1)["receipts"] as? [[String: Any]])?.count, 0)
         XCTAssertNil(ReflexRuntimeHost.status(run: "kept")["receipts"])
         XCTAssertEqual(ReflexRuntimeHost.receipts(run: "unknown", after: 0)["state"] as? String, ReflexRuntimeHost.missing)
+    }
+
+    /// A receipt as the window's collector reads it keeps every key it had and adds its leaf's
+    /// detector's pick and the track its target was decided on (t-10223 R8): additions only, so
+    /// a reader of the old keys reads them unchanged.
+    func test_a_receipt_adds_its_pick_and_track_beside_its_keys() throws {
+        let rig = HostRig()
+        defer { rig.restore() }
+        _ = try HostStart(runId: "picked", plan: try HostRig.clickWire(), hand: rig.host.hand).start()
+        defer { _ = ReflexRuntimeHost.stop(run: "picked", reason: StopReason.request) }
+        rig.show(.ball(track: 5, box: LiveRig.box))
+        XCTAssertTrue(eventually { (ReflexRuntimeHost.status(run: "picked")["receiptsIssued"] as? UInt64) == 1 })
+        let receipt = try XCTUnwrap((ReflexRuntimeHost.receipts(run: "picked", after: 0)["receipts"] as? [[String: Any]])?.first)
+        let before: Set<String> = [
+            "seq", "ruleId", "actionId", "leafIndex", "outcome", "targetId", "sourceCapture", "decidedHostNs",
+            "decidedDeliveredHostNs", "admittedHostNs", "captureWaitNs", "firstEventHostNs", "firstEventFrameHostNs",
+            "firstEventFrameDeliveredHostNs", "downHostNs", "upHostNs", "endedHostNs", "events",
+        ]
+        XCTAssertEqual(Set(receipt.keys), before.union(["pick", "trackId"]))
+        XCTAssertEqual(receipt["pick"] as? String, "first")
+        XCTAssertEqual(receipt["trackId"] as? UInt64, 5)
+        XCTAssertEqual(receipt["targetId"] as? String, "ball#5")
     }
 
     /// A reader that stopped acknowledging lets the queue fill: the next leaf ends the
