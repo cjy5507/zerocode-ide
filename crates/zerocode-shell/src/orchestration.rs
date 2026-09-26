@@ -28,6 +28,7 @@
 pub(crate) mod coordinator_handover;
 pub(crate) mod cost_book;
 pub(crate) mod desk;
+mod mail_triage;
 pub(crate) mod restart_census;
 mod stall_cause;
 mod step_effort;

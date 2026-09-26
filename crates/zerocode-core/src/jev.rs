@@ -3160,6 +3160,96 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     follows: None,
 };
 
+/// The wall one mail triage question waits for its answer, in milliseconds —
+/// the wire's own, since the seat never rises and names no apply wall.
+///
+/// A record-only question asked off the beat holds nothing but its own
+/// thread, so its wall is set by the answers it would lose. The window's
+/// three seats that ask about orchestration facts got every one of their 967
+/// answers on this machine inside 2,517 ms (2026-09-26: the notify seat's
+/// 558 at p99 895 ms, the summons' 247 at p99 1,464 ms, the stall seat's 162
+/// — with a screen's 8 KB in each — at p99 2,003 ms), and a letter's facts
+/// are fewer bytes than any of them. Five seconds is twice the slowest; an
+/// answer later than that is the row's `timeout`, which says the service was
+/// slow as plainly.
+pub const MAIL_TRIAGE_DEADLINE_MS: u64 = 5_000;
+
+/// The window's mail triage (t-9471, `crate::mail_triage`): for every letter
+/// a run's coordinator is handed while this window holds its seat, whether
+/// the coordinator should deal with it now, later, or not at all — and
+/// whether it should be the very next thing it does.
+///
+/// Record-only: `shadow` is the most it offers and it never rises. Its rows
+/// are the evidence the desk's order will be judged on before it may move a
+/// letter (the harness design's §H6, a later round). What it sends is a
+/// letter's structure — kinds, the ledger's own ids, counts, a priority word
+/// — and never a word of the letter; the table declares every text the
+/// state carries, each a word or an id the product wrote.
+///
+/// The label is what the coordinator did next, read off the ledger alone
+/// (`crate::mail_triage::Mailroom::label`): its acts after the hand-over, the
+/// inbox's own bookkeeping aside, and which of them first named what the
+/// letter was about. The kind rule — a question and a finished task now, a
+/// status later, a silence never (`crate::mail_triage::kind_rule`) — is
+/// marked beside it on every label row as `baselineAgreed`, as the notify
+/// seat marks today's rule; nothing binds it, since nothing rises.
+pub const MAIL_TRIAGE: JevUse = JevUse {
+    id: "mail_triage",
+    setting: "jevMailTriage",
+    modes: &[JevMode::Off, JevMode::Shadow],
+    recommended: JevMode::Shadow,
+    repeat: None,
+    // Every text the state carries: the letter's kind, its sender's address
+    // head, the ledger's ids of the worker and the task, the task's stage
+    // word and the priority word. The rest are numbers and flags.
+    sends: &[
+        Sent {
+            at: "/state/kind",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/from",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/worker",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/task",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/taskStatus",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/priority",
+            cap: Cap::Uncut,
+        },
+    ],
+    ledger: "mail-triage.jsonl",
+    promotes: false,
+    answer_floor_permille: None,
+    press_floor_permille: None,
+    agreement_floor_permille: None,
+    // A seat that never rises names no apply wall; its wire waits
+    // `MAIL_TRIAGE_DEADLINE_MS`.
+    apply_deadline_ms: None,
+    window_forgives: None,
+    agreement_rows_wanted: None,
+    agreement_kind: AgreementKind::Comparison,
+    baseline: Baseline::None,
+    negatives_wanted: None,
+    confidence_bands: None,
+    reads_act_line: false,
+    rubric_version: crate::mail_triage::MAIL_TRIAGE_RUBRIC_VERSION,
+    request_name: &["mail"],
+    names: Naming::Request,
+    label_part: &[],
+    follows: None,
+};
+
 /// How many of a role's eligible attempts try the model nobody has evidence
 /// for: one in five (user decision 2026-09-22, relayed m-6151).
 ///

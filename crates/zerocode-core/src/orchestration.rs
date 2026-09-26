@@ -17644,6 +17644,19 @@ fn question_closed(run: &Run, question: &Message) -> bool {
         .is_some_and(|held| held.ended_ms.is_some())
 }
 
+/// The key a look that hands nothing over names its kind under, in the page
+/// it prints — a peek ([`PEEK_MODE`]) or a history ([`HISTORY_MODE`]). Named
+/// once because a reader leans on it: a receipt an older window filed with
+/// no verb says it was the inbox's only by this page (t-9471,
+/// `crate::mail_triage::Filed::reads_the_inbox`).
+pub const LOOK_MODE_KEY: &str = "mode";
+
+/// The page `check --peek` prints ([`LOOK_MODE_KEY`]).
+pub const PEEK_MODE: &str = "peek";
+
+/// The page `check --all` prints ([`LOOK_MODE_KEY`]).
+pub const HISTORY_MODE: &str = "all";
+
 /// The non-consuming look behind `check --peek`: what is pending, capped at
 /// a page, and left exactly where it is. Waking on it is fine — the same
 /// mail will be in the next delivery.
@@ -17663,7 +17676,7 @@ fn peek_look(
         .collect();
     Ok((
         said(serde_json::json!({
-            "mode": "peek",
+            LOOK_MODE_KEY: PEEK_MODE,
             "count": messages.len(),
             "messages": messages,
         })),
@@ -17693,7 +17706,7 @@ fn history_look(
         .map(message_json)
         .collect();
     Ok(said(serde_json::json!({
-        "mode": "all",
+        LOOK_MODE_KEY: HISTORY_MODE,
         "count": messages.len(),
         "messages": messages,
     })))
