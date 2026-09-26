@@ -60,7 +60,7 @@ use super::{
 };
 use crate::api_routers::{RouterKeys, RouterRefusal};
 use crate::computer_use::ComputerUseError;
-use crate::computer_use::errand::value::{LiveWriter, Said, ValueWriter as _, endpoint_of};
+use crate::computer_use::errand::value::{LiveWriter, Said};
 use crate::computer_use::macos::Session;
 use crate::computer_use::session::ProviderSession as _;
 use crate::systemone::{self, Spent, Wire};
@@ -96,6 +96,27 @@ impl RouterKeys for EnvKeys {
     fn delete(&self, _service: &str) -> Result<(), RouterRefusal> {
         Err(RouterRefusal::from("the bench keeps no key".to_string()))
     }
+}
+
+/// Read the window's selected generator road and account roots.
+fn generator_setup() -> crate::computer_use::errand::value::Setup {
+    use crate::app_paths::{AppPaths, PathClass};
+    let paths = AppPaths::from_platform().expect("the window's application paths");
+    let root = paths.active_root(PathClass::Config);
+    let preferences = crate::settings::SettingsRepository::new(root)
+        .read_json::<crate::settings_runtime::SettingsDocument>(
+            crate::settings_runtime::SETTINGS_DOCUMENT_FILE,
+        )
+        .expect("the window's generator preference");
+    let road = preferences
+        .value
+        .map(|document| document.computer_generator_road)
+        .unwrap_or_default();
+    crate::computer_use::errand::value::Setup::new(
+        road,
+        root.to_path_buf(),
+        paths.active_root(PathClass::LocalData).to_path_buf(),
+    )
 }
 
 /// A generator standing in for a model: every request is answered with the
@@ -497,20 +518,7 @@ impl Bench<'_> {
                 poll: self.poll,
             })
         } else {
-            // The bench's key road, as before t-10372: the row the API-key
-            // road asks, its key read off the runner's environment.
-            let writer = LiveWriter::at(
-                &LiveWriter::window(crate::computer_use::errand::value::Setup::new(
-                    zerocode_core::type_value::GeneratorRoad::ApiKey,
-                    PathBuf::new(),
-                    PathBuf::new(),
-                ))
-                .row()
-                .and_then(endpoint_of)
-                .unwrap_or_default(),
-                Box::new(EnvKeys),
-            );
-            Box::new(writer)
+            Box::new(LiveWriter::window(generator_setup()))
         };
         let asked = Asked::of(&json!({
             "goal": self.request["goal"],

@@ -26,7 +26,6 @@ hits are actions.
 """
 import argparse
 import collections
-import getpass
 import json
 import math
 import os
@@ -691,7 +690,7 @@ def keychain(service, value=False):
     """One item of the person's keychain: whether it is there — or, asked for
     its value, the value, which goes into one driver's environment and
     nowhere else: never printed, never written, never an argument."""
-    command = ["security", "find-generic-password", "-s", service, "-a", getpass.getuser()]
+    command = ["security", "find-generic-password", "-s", service, "-a", subprocess.check_output(["id", "-un"], text=True).strip()]
     done = subprocess.run(command + (["-w"] if value else []), capture_output=True, text=True)
     if done.returncode != 0:
         return None
@@ -710,20 +709,14 @@ def generator_key_name():
 def keys_for(values, generator, read):
     """The keys one autopilot driver is handed, by the name the window's key
     store gives them, read with `read` (the keychain): the Jev key its
-    questions ask with, when there is one, and — for the window's own
-    generator — that generator's key, without which nothing starts. A key
+    questions ask with, when there is one. The window's generator reads its
+    own selected login or key road; an API key is not a prerequisite here. A key
     that is not there is looked for and never read. Answers (env, None), or
     (None, why)."""
     keys = values["reflex_goal"]["keys"]
     env = {}
     if read(keys["prefix"] + keys["jev"]):
         env[keys["jev"]] = read(keys["prefix"] + keys["jev"], value=True)
-    if generator != STUB:
-        name = generator_key_name()
-        if not name or not read(keys["prefix"] + name):
-            return None, (f"the window's generator has no key ({keys['prefix']}{name}): it writes no plan, "
-                          f"so an autopilot round runs only with --generator {STUB}")
-        env[name] = read(keys["prefix"] + name, value=True)
     return {name: key for name, key in env.items() if key}, None
 
 
@@ -994,7 +987,9 @@ class Desk:
             write_atomic(run / "start.json", {"t0Ns": record["t0Ns"]})
             request = {"bundle": self.session["bundle"], "pollMs": safety["poll_ms"],
                        "seconds": self.values["reflex_round"]["run_s"], "renew": True, "restore": ready["pointer"]}
-            env = {**os.environ, FOLDER_ENV: str(run), HELPER_ENV: helper_app}
+            env = {name: value for name, value in os.environ.items()
+                   if name not in (goal["keys"]["jev"], generator_key_name())}
+            env.update({FOLDER_ENV: str(run), HELPER_ENV: helper_app})
             if autopilot is not None:
                 home = bench_home(run)
                 request.update(goal=autopilot["words"], generator=autopilot["generator"], l1=autopilot["l1"],

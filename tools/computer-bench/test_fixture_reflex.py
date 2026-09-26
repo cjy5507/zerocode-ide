@@ -613,12 +613,10 @@ class Runner(unittest.TestCase):
         self.assertEqual(json.loads((run / "request.json").read_text())["l1"], "shadow")
         self.assertEqual(result["config"], f"{reflex.CONFIG}+autopilot-{reflex.STUB}-l1shadow")
 
-    def test_the_windows_generator_with_no_key_starts_nothing(self):
-        desk_folder = self.folder / "run-35"
-        with self.assertRaises(reflex.Refused) as refused:
-            self.run_desk(35, autopilot={"generator": "window"})
-        self.assertIn("generator", str(refused.exception))
-        self.assertFalse(desk_folder.exists(), "refused before the fixture came up")
+    def test_the_windows_login_generator_is_not_refused_for_an_absent_api_key(self):
+        _, run = self.run_desk(35, autopilot={"generator": "window"})
+        self.assertEqual(json.loads((run / "request.json").read_text())["generator"], "window")
+        self.assertFalse((run / "plan.json").exists(), "the runner writes no model plan")
 
     def test_a_run_goes_from_the_goal_to_a_verdict_and_every_file_is_kept(self):
         result, run = self.run_desk(31)
@@ -789,10 +787,10 @@ class Autopilot(unittest.TestCase):
         self.assertIsNone(why)
         self.assertEqual(sorted(env), [goal["keys"]["jev"]])
         self.assertEqual(env[goal["keys"]["jev"]], "k-" + goal["keys"]["prefix"] + goal["keys"]["jev"])
-        # The window's generator asks for its row's key; with none there is no run.
+        # The window's login road does not require an API key.
         env, why = reflex.keys_for(VALUES, "window", keychain)
-        self.assertIsNone(env)
-        self.assertIn("generator", why)
+        self.assertEqual(sorted(env), [goal["keys"]["jev"]])
+        self.assertIsNone(why)
         self.assertFalse(any(value for service, value in read if not service.endswith(goal["keys"]["jev"])),
                          "a key that is not there is looked for, never read")
         # No Jev key: the stand-in round runs, its questions refused at the door, and says so.
