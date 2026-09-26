@@ -60,6 +60,7 @@ tools-test:
     python3 tools/computer-bench/test_marks.py
     python3 tools/computer-bench/test_eye.py
     python3 tools/computer-bench/test_fixture_apm.py
+    python3 tools/computer-bench/test_fixture_reflex.py
     python3 tools/tests/test_decision_shadow_summary.py
     python3 tools/tests/test_jev_token_diet_baseline.py
     python3 tools/tests/test_hedge_replay_seed.py

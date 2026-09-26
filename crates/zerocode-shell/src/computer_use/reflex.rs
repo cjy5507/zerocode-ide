@@ -666,4 +666,6 @@ fn publish(run: &str, report: Report) {
 }
 
 #[cfg(test)]
+mod bench;
+#[cfg(test)]
 mod tests;
