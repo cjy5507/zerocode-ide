@@ -1,0 +1,218 @@
+{
+  "goal": "turn on Dark mode",
+  "items": [
+    {
+      "mark": 1,
+      "role": "button",
+      "label": "Wi-Fi",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "button",
+      "label": "Bluetooth",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "button",
+      "label": "Network",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "button",
+      "label": "Notifications",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "button",
+      "label": "Sound",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "button",
+      "label": "Focus",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "button",
+      "label": "Screen Time",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "button",
+      "label": "General",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "button",
+      "label": "Appearance",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "button",
+      "label": "Accessibility",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "button",
+      "label": "Control Centre",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "button",
+      "label": "Siri & Spotlight",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "button",
+      "label": "Privacy & Security",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "button",
+      "label": "Desktop & Dock",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "button",
+      "label": "Displays",
+      "centerX": 120.0,
+      "centerY": 432.0
+    },
+    {
+      "mark": 16,
+      "role": "button",
+      "label": "Wallpaper",
+      "centerX": 120.0,
+      "centerY": 460.0
+    },
+    {
+      "mark": 17,
+      "role": "button",
+      "label": "Screen Saver",
+      "centerX": 120.0,
+      "centerY": 488.0
+    },
+    {
+      "mark": 18,
+      "role": "button",
+      "label": "Battery",
+      "centerX": 120.0,
+      "centerY": 516.0
+    },
+    {
+      "mark": 19,
+      "role": "button",
+      "label": "Lock Screen",
+      "centerX": 120.0,
+      "centerY": 544.0
+    },
+    {
+      "mark": 20,
+      "role": "button",
+      "label": "Touch ID & Password",
+      "centerX": 120.0,
+      "centerY": 572.0
+    },
+    {
+      "mark": 21,
+      "role": "button",
+      "label": "Users & Groups",
+      "centerX": 120.0,
+      "centerY": 600.0
+    },
+    {
+      "mark": 22,
+      "role": "button",
+      "label": "Passwords",
+      "centerX": 120.0,
+      "centerY": 628.0
+    },
+    {
+      "mark": 23,
+      "role": "button",
+      "label": "Internet Accounts",
+      "centerX": 120.0,
+      "centerY": 656.0
+    },
+    {
+      "mark": 24,
+      "role": "button",
+      "label": "Game Center",
+      "centerX": 120.0,
+      "centerY": 684.0
+    },
+    {
+      "mark": 25,
+      "role": "button",
+      "label": "Keyboard",
+      "centerX": 120.0,
+      "centerY": 712.0
+    },
+    {
+      "mark": 26,
+      "role": "button",
+      "label": "Trackpad",
+      "centerX": 120.0,
+      "centerY": 740.0
+    },
+    {
+      "mark": 27,
+      "role": "button",
+      "label": "Printers & Scanners",
+      "centerX": 120.0,
+      "centerY": 768.0
+    },
+    {
+      "mark": 28,
+      "role": "button",
+      "label": "Location Services",
+      "centerX": 120.0,
+      "centerY": 796.0
+    },
+    {
+      "mark": 29,
+      "role": "button",
+      "label": "Software Update",
+      "centerX": 120.0,
+      "centerY": 824.0
+    },
+    {
+      "mark": 30,
+      "role": "checkbox",
+      "label": "Dark mode",
+      "centerX": 120.0,
+      "centerY": 852.0
+    }
+  ],
+  "expected": [
+    30
+  ]
+}

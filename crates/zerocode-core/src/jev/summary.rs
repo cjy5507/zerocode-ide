@@ -221,6 +221,22 @@ pub const CONTROL_KIND: LedgerKey = LedgerKey {
     also: &[],
 };
 
+/// How many controls a screen question could still choose among before its
+/// cut (t-10324, [`crate::screen_action::Pick`]) — beside the row's
+/// `candidates`, how many it offered; the difference is how many the cut
+/// left out.
+pub const CANDIDATES_SEEN: LedgerKey = LedgerKey {
+    canonical: "candidatesSeen",
+    also: &[],
+};
+/// Whether the goal's words named any control a screen question could choose
+/// among ([`crate::screen_action::Signal::word`]): `none` is a cut by the
+/// look's own order, as every question before t-10324 was cut.
+pub const CANDIDATES_SIGNAL: LedgerKey = LedgerKey {
+    canonical: "candidatesSignal",
+    also: &[],
+};
+
 /// The version of the words that asked a request — the seat's rubric as its
 /// row names it ([`crate::jev::JevUse::rubric_version`]), written by the
 /// writer that asked, on every request and control row. Read by the judge
@@ -248,7 +264,7 @@ pub const RUBRIC_VERSIONS: LedgerKey = LedgerKey {
     also: &[],
 };
 
-/// Every key this module reads, so a contract can walk them.
+/// Every key this module names, so a contract can walk them.
 pub const LEDGER_KEYS: &[LedgerKey] = &[
     AT,
     OUTCOME,
@@ -269,6 +285,8 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     MODEL,
     BARRED,
     CONTROL_KIND,
+    CANDIDATES_SEEN,
+    CANDIDATES_SIGNAL,
     RUBRIC_VERSION,
     RUBRIC_VERSIONS,
 ];

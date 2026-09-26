@@ -54,7 +54,9 @@ use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
 use zerocode_core::guarded::{ControlKind, kind_of};
 use zerocode_core::jev::promote::SEAT_RECORDING;
-use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS, MODEL};
+use zerocode_core::jev::summary::{
+    AGREED, AT, CACHED, CANDIDATES_SEEN, CANDIDATES_SIGNAL, ELAPSED_MS, MODEL,
+};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{
     ActionAsk, ActionChoice, ActionLook, ActionRead, Beside, Chosen, Guard, Observe,
@@ -1249,6 +1251,8 @@ fn walk(
         before = Some(screen);
 
         let candidates = asked.marks().len();
+        let candidates_seen = asked.seen();
+        let candidates_signal = asked.signal().word();
         let judging = std::time::Instant::now();
         // A judgment begun on the last look answers this question only when
         // it IS this question; the row says which way it went, and how much
@@ -1296,6 +1300,8 @@ fn walk(
                             json!({
                                 "outcome": token,
                                 "candidates": candidates,
+                                CANDIDATES_SEEN.canonical: candidates_seen,
+                                CANDIDATES_SIGNAL.canonical: candidates_signal,
                                 "routeUse": USE_FALLBACK,
                             }),
                             spent.as_ref(),
@@ -1313,6 +1319,8 @@ fn walk(
                 json!({
                     "outcome": "answered",
                     "candidates": candidates,
+                    CANDIDATES_SEEN.canonical: candidates_seen,
+                    CANDIDATES_SIGNAL.canonical: candidates_signal,
                     "showsLines": shows_lines,
                     "pressedBefore": pressed_so_far.len(),
                     "confidence": choice.confidence,

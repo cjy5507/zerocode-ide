@@ -1,0 +1,123 @@
+{
+  "goal": "search for red running shoes",
+  "items": [
+    {
+      "mark": 1,
+      "role": "link",
+      "label": "Women",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "link",
+      "label": "Men",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "link",
+      "label": "Kids",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "link",
+      "label": "Sale",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "link",
+      "label": "New arrivals",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "link",
+      "label": "Brands",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "link",
+      "label": "Gift cards",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "link",
+      "label": "Stores",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "link",
+      "label": "Help",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "link",
+      "label": "Account",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "link",
+      "label": "Wishlist",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "link",
+      "label": "Bag",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "link",
+      "label": "Sign in",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "link",
+      "label": "Track order",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "textbox",
+      "label": "",
+      "centerX": 120.0,
+      "centerY": 432.0
+    }
+  ],
+  "fields": [
+    {
+      "mark": 15,
+      "kind": "search",
+      "secret": false,
+      "label": "",
+      "placeholder": "Search products",
+      "near": ""
+    }
+  ],
+  "expected": [
+    15
+  ]
+}

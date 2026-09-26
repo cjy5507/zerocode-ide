@@ -1,0 +1,127 @@
+{
+  "goal": "홍길동에게 메시지 보내기",
+  "items": [
+    {
+      "mark": 1,
+      "role": "button",
+      "label": "채팅",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "button",
+      "label": "친구",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "button",
+      "label": "더보기",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "button",
+      "label": "검색",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "button",
+      "label": "새 채팅",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "button",
+      "label": "설정",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "button",
+      "label": "이모티콘",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "button",
+      "label": "파일 전송",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "button",
+      "label": "사진",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "button",
+      "label": "캡처",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "button",
+      "label": "음성 통화",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "button",
+      "label": "영상 통화",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "button",
+      "label": "일정",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "button",
+      "label": "투표",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "button",
+      "label": "공지",
+      "centerX": 120.0,
+      "centerY": 432.0
+    },
+    {
+      "mark": 16,
+      "role": "button",
+      "label": "메시지 입력",
+      "centerX": 120.0,
+      "centerY": 460.0
+    },
+    {
+      "mark": 17,
+      "role": "button",
+      "label": "보내기",
+      "centerX": 120.0,
+      "centerY": 488.0
+    }
+  ],
+  "expected": [
+    17
+  ]
+}

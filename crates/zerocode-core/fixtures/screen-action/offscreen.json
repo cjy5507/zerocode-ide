@@ -1,0 +1,190 @@
+{
+  "goal": "read the terms of service",
+  "items": [
+    {
+      "mark": 1,
+      "role": "link",
+      "label": "Home",
+      "centerX": 120.0,
+      "centerY": 40.0
+    },
+    {
+      "mark": 2,
+      "role": "link",
+      "label": "Products",
+      "centerX": 120.0,
+      "centerY": 68.0
+    },
+    {
+      "mark": 3,
+      "role": "link",
+      "label": "Pricing",
+      "centerX": 120.0,
+      "centerY": 96.0
+    },
+    {
+      "mark": 4,
+      "role": "link",
+      "label": "Blog",
+      "centerX": 120.0,
+      "centerY": 124.0
+    },
+    {
+      "mark": 5,
+      "role": "link",
+      "label": "Careers",
+      "centerX": 120.0,
+      "centerY": 152.0
+    },
+    {
+      "mark": 6,
+      "role": "link",
+      "label": "Press",
+      "centerX": 120.0,
+      "centerY": 180.0
+    },
+    {
+      "mark": 7,
+      "role": "link",
+      "label": "Contact",
+      "centerX": 120.0,
+      "centerY": 208.0
+    },
+    {
+      "mark": 8,
+      "role": "link",
+      "label": "Partners",
+      "centerX": 120.0,
+      "centerY": 236.0
+    },
+    {
+      "mark": 9,
+      "role": "link",
+      "label": "Investors",
+      "centerX": 120.0,
+      "centerY": 264.0
+    },
+    {
+      "mark": 10,
+      "role": "link",
+      "label": "Status",
+      "centerX": 120.0,
+      "centerY": 292.0
+    },
+    {
+      "mark": 11,
+      "role": "link",
+      "label": "Security",
+      "centerX": 120.0,
+      "centerY": 320.0
+    },
+    {
+      "mark": 12,
+      "role": "link",
+      "label": "Changelog",
+      "centerX": 120.0,
+      "centerY": 348.0
+    },
+    {
+      "mark": 13,
+      "role": "link",
+      "label": "Community",
+      "centerX": 120.0,
+      "centerY": 376.0
+    },
+    {
+      "mark": 14,
+      "role": "link",
+      "label": "Events",
+      "centerX": 120.0,
+      "centerY": 404.0
+    },
+    {
+      "mark": 15,
+      "role": "link",
+      "label": "Webinars",
+      "centerX": 120.0,
+      "centerY": 432.0
+    },
+    {
+      "mark": 16,
+      "role": "link",
+      "label": "Docs",
+      "centerX": 120.0,
+      "centerY": 460.0
+    },
+    {
+      "mark": 17,
+      "role": "link",
+      "label": "API",
+      "centerX": 120.0,
+      "centerY": 488.0
+    },
+    {
+      "mark": 18,
+      "role": "link",
+      "label": "Support",
+      "centerX": 120.0,
+      "centerY": 516.0
+    },
+    {
+      "mark": 19,
+      "role": "link",
+      "label": "Sign in",
+      "centerX": 120.0,
+      "centerY": 544.0
+    },
+    {
+      "mark": 20,
+      "role": "link",
+      "label": "Get started",
+      "centerX": 120.0,
+      "centerY": 572.0
+    },
+    {
+      "mark": 21,
+      "role": "link",
+      "label": "Twitter",
+      "centerX": 120.0,
+      "centerY": 2360.0
+    },
+    {
+      "mark": 22,
+      "role": "link",
+      "label": "GitHub",
+      "centerX": 120.0,
+      "centerY": 2360.0
+    },
+    {
+      "mark": 23,
+      "role": "link",
+      "label": "LinkedIn",
+      "centerX": 120.0,
+      "centerY": 2360.0
+    },
+    {
+      "mark": 24,
+      "role": "link",
+      "label": "Privacy Policy",
+      "centerX": 120.0,
+      "centerY": 2400.0
+    },
+    {
+      "mark": 25,
+      "role": "link",
+      "label": "Cookie settings",
+      "centerX": 120.0,
+      "centerY": 2400.0
+    },
+    {
+      "mark": 26,
+      "role": "link",
+      "label": "Terms of Service",
+      "centerX": 120.0,
+      "centerY": 2400.0
+    }
+  ],
+  "expected": [
+    26
+  ]
+}
