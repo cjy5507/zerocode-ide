@@ -731,8 +731,7 @@
       "edge_pt": 48,
       "unit_grid": 3,
       "unit_pt": 6,
-      "label_pt": 16,
-      "flush_ms": 250
+      "label_pt": 16
     },
     "why": "Mixed input supply and stress steps (actions per minute, a box and its assignment count twice). A full blank capture between tasks rearms their rules. Drawing and flush dimensions live here too."
   },

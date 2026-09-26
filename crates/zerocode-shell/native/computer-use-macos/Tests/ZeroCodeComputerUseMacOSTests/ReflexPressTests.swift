@@ -223,6 +223,15 @@ final class ReflexPressTests: XCTestCase {
         XCTAssertEqual(rig.poster.presses.first?.x, 20)
     }
 
+    func test_a_current_target_does_not_allow_a_click_when_the_pointer_cannot_be_read() throws {
+        let rig = try LeafRig()
+        rig.decide()
+        rig.showBall()
+        rig.poster.forgetPointer()
+        XCTAssertEqual(try rig.runner().run(LeafRig.click, index: 0).outcome, .moved)
+        XCTAssertTrue(rig.poster.presses.isEmpty)
+    }
+
     /// A right click presses the right button; a shift click the left one with
     /// shift's flag on its press and its release — flags on the mouse events
     /// alone, never a key of the desktop's.

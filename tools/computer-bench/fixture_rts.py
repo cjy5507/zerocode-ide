@@ -10,7 +10,7 @@ import random
 import sys
 
 import fixture_reflex as reflex
-import fixture_app
+import fixture_support
 import tally
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -206,8 +206,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     values, limits = tally.table(), reflex.limits()
     if args.command == 'prepare':
-        return fixture_app.prepare(args.folder.resolve(), 'RtsFixture', HERE / 'RtsFixture.swift',
-                                   'dev.zerocode.bench.rts', flags=['-parse-as-library'])
+        return fixture_support.prepare(args.folder.resolve(), 'RtsFixture', HERE / 'RtsFixture.swift',
+                                       'dev.zerocode.bench.rts')
     signals = reflex.Signals().install()
     try:
         if args.command == 'judge':

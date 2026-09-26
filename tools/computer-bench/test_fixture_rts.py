@@ -97,7 +97,7 @@ class RtsTests(unittest.TestCase):
             path = pathlib.Path(folder)
             binary = path / 'rts-fixture'
             subprocess.run(['swiftc', '-O', '-swift-version', '6', '-warnings-as-errors', '-parse-as-library',
-                            str(rts.HERE / 'RtsFixture.swift'), '-o', str(binary)], check=True, capture_output=True)
+                            str(rts.fixture_support.SUPPORT), str(rts.HERE / 'RtsFixture.swift'), '-o', str(binary)], check=True, capture_output=True)
             round_file = path / 'round.json'
             round_file.write_text(json.dumps(rts.the_round('owner', 11, self.values, reflex.limits())))
             run = subprocess.run([str(binary), '--self-test', str(round_file), str(path)], capture_output=True, text=True)

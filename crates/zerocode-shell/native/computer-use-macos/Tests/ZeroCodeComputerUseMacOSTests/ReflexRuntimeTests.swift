@@ -75,7 +75,7 @@ final class RecordingPoster: HandPoster, @unchecked Sendable {
 
     private let lock = NSLock()
     private var posted: [Posted] = []
-    private var location = SmoothPointerPath.Point(x: 0, y: 0)
+    private var location: SmoothPointerPath.Point? = SmoothPointerPath.Point(x: 0, y: 0)
     /// Runs after each post, outside the poster's lock (but inside the hand's:
     /// it must not call the hand).
     var onPost: ((HandEvent, Int64) -> Void)?
@@ -107,6 +107,12 @@ final class RecordingPoster: HandPoster, @unchecked Sendable {
     func movePointer(to point: SmoothPointerPath.Point) {
         lock.lock()
         location = point
+        lock.unlock()
+    }
+
+    func forgetPointer() {
+        lock.lock()
+        location = nil
         lock.unlock()
     }
 

@@ -28,7 +28,7 @@ struct RtsTarget: Decodable {
 
 struct RtsRound: Decodable {
     struct Canvas: Decodable { let width: Double, height: Double }
-    struct Drawing: Decodable { let unit_grid: Int, unit_pt: Double, label_pt: Double, flush_ms: Double }
+    struct Drawing: Decodable { let unit_grid: Int, unit_pt: Double, label_pt: Double }
     struct Schedule: Decodable { let lengthMs: Double; let targets: [RtsTarget] }
     let owner: String
     let seed: Int
@@ -42,39 +42,9 @@ struct RtsRound: Decodable {
 }
 
 @MainActor
-final class RtsLog {
-    let folder: URL
-    private var handles: [String: FileHandle] = [:]
-    init(_ folder: URL) { self.folder = folder }
-
-    func write(_ name: String, _ row: [String: Any]) {
-        do { try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]).write(to: folder.appendingPathComponent(name), options: .atomic) }
-        catch { fail(error) }
-    }
-
-    func append(_ name: String, _ row: [String: Any]) {
-        do {
-            if handles[name] == nil {
-                let url = folder.appendingPathComponent(name)
-                FileManager.default.createFile(atPath: url.path, contents: nil)
-                handles[name] = try FileHandle(forWritingTo: url)
-            }
-            var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
-            data.append(0x0A)
-            try handles[name]?.write(contentsOf: data)
-        } catch { fail(error) }
-    }
-
-    private func fail(_ error: Error) -> Never {
-        FileHandle.standardError.write(Data("fixture recording failed: \(error)\n".utf8))
-        exit(2)
-    }
-}
-
-@MainActor
 final class RtsArena: NSView {
     let round: RtsRound
-    let log: RtsLog
+    let log: Recorder
     var t0: UInt64?
     var displayed: RtsTarget?
     var shownAt: [String: UInt64] = [:]
@@ -87,7 +57,7 @@ final class RtsArena: NSView {
     var events = 0
     var becameActive = false
 
-    init(_ round: RtsRound, _ log: RtsLog) {
+    init(_ round: RtsRound, _ log: Recorder) {
         self.round = round
         self.log = log
         super.init(frame: CGRect(x: 0, y: 0, width: round.canvas.width, height: round.canvas.height))
@@ -121,7 +91,7 @@ final class RtsArena: NSView {
                 .font: NSFont.systemFont(ofSize: round.drawing.label_pt), .foregroundColor: NSColor.black,
             ])
         }
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = uptimeNs()
         guard let t0, now >= t0 else { return }
         let ms = Double(now - t0) / 1_000_000
         displayed = round.schedule.targets.first {
@@ -144,7 +114,7 @@ final class RtsArena: NSView {
             shownAt[target.id] = shownAt[target.id] ?? now
         }
         frames += 1
-        log.append("frames.jsonl", ["seq": frames, "ns": now, "shown": displayed.map { [$0.id] } ?? []])
+        log.frame(["seq": frames, "ns": now, "shown": displayed.map { [$0.id] } ?? []])
     }
 
     static func names(_ flags: NSEvent.ModifierFlags) -> [String] {
@@ -153,7 +123,7 @@ final class RtsArena: NSView {
     }
 
     func receive(_ kind: String, _ event: NSEvent) {
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = uptimeNs()
         let point = convert(event.locationInWindow, from: nil)
         let mods = Self.names(event.modifierFlags)
         var row: [String: Any] = ["kind": kind, "rxNs": now, "evNs": UInt64(max(0, event.timestamp) * 1_000_000_000),
@@ -182,7 +152,7 @@ final class RtsArena: NSView {
             row["judged"] = verdict
             if let miss = verdict["miss"] { misses[miss, default: 0] += 1 }
         }
-        log.append("events.jsonl", row)
+        log.event(row)
     }
 
     private func judge(_ kind: String, _ event: NSEvent, _ point: CGPoint, _ mods: [String]) -> [String: String] {
@@ -219,12 +189,12 @@ final class RtsArena: NSView {
         return hit(wanted.input)
     }
 
-    func flush() {
+    func flush(wait: Bool = false) {
         var state: [String: Any] = ["owner": round.owner, "seed": round.seed, "pid": Int(getpid()),
                                     "frames": frames, "events": events, "hits": completed.count, "misses": misses,
                                     "held": held.sorted() + modifiers, "becameActive": becameActive || NSApp.isActive]
         if let t0 { state["t0Ns"] = t0 }
-        log.write("fixture.json", state)
+        log.flush(state: state, wait: wait)
     }
 
     /// AppKit events delivered directly to the oracle: nothing is posted to
@@ -288,7 +258,7 @@ final class RtsArena: NSView {
         precondition(misses["duplicate"] == 1, "a second press cannot earn another hit")
         receive("up", mouse(.leftMouseUp, point))
         precondition(misses["unpaired_release"] == 1, "every release belongs to a press")
-        flush()
+        flush(wait: true)
         print("RTS oracle self-test passed (no input posted)")
     }
 
@@ -306,9 +276,8 @@ final class RtsFixture: NSObject, NSApplicationDelegate {
     var arena: RtsArena!
     var panel: NSPanel!
     var timers: [Timer] = []
-    var signals: [DispatchSourceSignal] = []
+    var lifetime: FixtureLifetime?
     var keyMonitor: Any?
-    var activity: NSObjectProtocol?
 
     static func main() throws {
         var arguments = Array(CommandLine.arguments.dropFirst())
@@ -318,7 +287,7 @@ final class RtsFixture: NSObject, NSApplicationDelegate {
         let app = NSApplication.shared
         let delegate = RtsFixture()
         let round = try JSONDecoder().decode(RtsRound.self, from: Data(contentsOf: URL(fileURLWithPath: arguments[0])))
-        delegate.arena = RtsArena(round, RtsLog(URL(fileURLWithPath: arguments[1], isDirectory: true)))
+        delegate.arena = RtsArena(round, Recorder(folder: URL(fileURLWithPath: arguments[1], isDirectory: true)))
         if testing { delegate.arena.selfTest(); return }
         app.setActivationPolicy(.regular)
         app.delegate = delegate
@@ -326,50 +295,19 @@ final class RtsFixture: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "RTS input bench")
-        let mouse = NSEvent.mouseLocation
-        let size = arena.bounds.size
-        let visible = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? arena.bounds
-        let origin = CGPoint(x: min(max(mouse.x - size.width / 2, visible.minX), visible.maxX - size.width).rounded(.down),
-                             y: min(max(mouse.y - size.height / 2, visible.minY), visible.maxY - size.height).rounded(.down))
-        let frame = CGRect(origin: origin, size: size)
-        panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.hidesOnDeactivate = false
-        panel.becomesKeyOnlyIfNeeded = true
-        panel.acceptsMouseMovedEvents = true
-        panel.colorSpace = .sRGB
-        panel.contentView = arena
-        panel.orderFrontRegardless()
+        let window = FixtureWindow(view: arena, owner: arena.round.owner, seed: arena.round.seed)
+        panel = window.panel
+        arena.log.write("ready.json", window.ready)
+        lifetime = FixtureLifetime(flush: { [weak self] wait in self?.arena.flush(wait: wait) },
+                                   becameActive: { [weak self] in self?.arena.becameActive = true })
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
             MainActor.assumeIsolated {
                 self?.arena.receive(event.type == .keyDown ? "keyDown" : event.type == .keyUp ? "keyUp" : "flags", event)
             }
             return nil
         }
-        let top = NSScreen.screens.first?.frame.height ?? size.height
-        arena.log.write("ready.json", ["owner": arena.round.owner, "seed": arena.round.seed, "pid": Int(getpid()),
-                                         "bundleId": Bundle.main.bundleIdentifier ?? "", "readyNs": DispatchTime.now().uptimeNanoseconds,
-                                         "pointer": ["x": mouse.x, "y": top - mouse.y], "pointerInside": frame.contains(mouse),
-                                         "active": NSApp.isActive, "events": 0, "hits": 0, "misses": 0,
-                                         "window": ["x": frame.minX, "y": top - frame.maxY, "width": size.width, "height": size.height]])
         timers.append(Timer.scheduledTimer(withTimeInterval: 1 / Double(arena.round.framesPerSecond), repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.arena.tick() }
         })
-        timers.append(Timer.scheduledTimer(withTimeInterval: arena.round.drawing.flush_ms / 1_000, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.arena.flush() }
-        })
-        for number in [SIGTERM, SIGINT] {
-            signal(number, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
-            source.setEventHandler { [weak self] in
-                MainActor.assumeIsolated { self?.arena.flush(); exit(0) }
-            }
-            source.resume()
-            signals.append(source)
-        }
-    }
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        arena.becameActive = true
     }
 }

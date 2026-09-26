@@ -953,7 +953,7 @@ struct ReflexLeafRunner {
         // press, and the press goes only where the boundary was asked.
         let input = leaf.clickInput
         var (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
-        let resting = hand.pointerNow()
+        guard let resting = hand.pointerNow() else { throw Halt.outcome(.moved) }
         let pointer = try pressPoint(leaf, target, input, on: frame, at: now, lease: &lease)
         try within(input, at: pointer, &draft)
         (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
