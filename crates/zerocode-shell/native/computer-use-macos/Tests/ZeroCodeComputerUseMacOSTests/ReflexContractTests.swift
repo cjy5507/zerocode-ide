@@ -51,19 +51,26 @@ final class ReflexContractTests: XCTestCase {
         for name in names {
             let (expected, planData) = try golden(name)
             if expected == "ok" {
-                let validated = try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception)
-                XCTAssertEqual(validated.plan.version, ReflexContract.version)
-                XCTAssertEqual(try ReflexContract.hash(validated.plan), validated.plan.plan_hash)
-                XCTAssertEqual(try ReflexContract.wireBytes(validated.plan), planData)
+                let validated: ValidatedReflexPlan
+                do {
+                    validated = try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception)
+                } catch {
+                    // Every case is judged, so a failure names each case that failed.
+                    XCTFail("\(name): \(error)")
+                    continue
+                }
+                XCTAssertEqual(validated.plan.version, ReflexContract.version, name)
+                XCTAssertEqual(try ReflexContract.hash(validated.plan), validated.plan.plan_hash, name)
+                XCTAssertEqual(try ReflexContract.wireBytes(validated.plan), planData, name)
             } else {
                 XCTAssertThrowsError(try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception), name) { error in
                     XCTAssertEqual((error as? ReflexContractError)?.rawValue, expected, name)
                 }
             }
         }
-        // R1's 32 cases under version 2, the six version 2 adds, and the identifier
-        // bound's two sides (t-9205).
-        XCTAssertEqual(names.count, 40)
+        // R1's 32 cases under version 2, the six version 2 adds, the identifier
+        // bound's two sides (t-9205), and a detector's pick with the R4 bench's plan (t-10242).
+        XCTAssertEqual(names.count, 49)
         let wireNames = try XCTUnwrap(manifest["wire_negative"] as? [String])
         for name in wireNames {
             let data = try Data(contentsOf: fixtureRoot.appendingPathComponent("\(name).txt"))

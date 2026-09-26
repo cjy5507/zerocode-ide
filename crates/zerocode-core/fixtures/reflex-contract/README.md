@@ -31,6 +31,40 @@ re-hashed under version 2 with a valid spec on each colour detector, and
 `valid_cells` are the cases version 2 adds. A version-1 plan is refused,
 never read as a colour detector with nothing to read its ROI with.
 
+## A detector's pick (t-10223 R8)
+
+A colour detector may carry `pick`: which blob its target follows when it
+follows none. `first` is the kernel's first blob — most samples, then top to
+bottom, then left to right — the rule before the word existed; `nearest` the
+blob nearest the point of the target the run's last fire sent the hand to, in
+frame pixels (before the first fire there is no such point, and it picks as
+`first` does); `largest` the blob whose hitbox has the most area; `newest` and
+`oldest` the highest and the lowest track number (numbers only grow, so a blob
+seen later has a higher one). A tie goes to the lower track number. A blob is
+picked only when the target follows none: while its track lives the target
+keeps it, so a newer blob never pulls it away from a press on its way.
+
+`first` is never written, so a plan without a pick keeps the bytes and the hash
+it had and the version stays 2: `pick_omitted`, and `valid_bench_plan` — the
+plan `tools/computer-bench/fixture_reflex.py` writes for the R4 bench on its
+tests' display, hashed by the v1.1.28 core. A wire that writes `"pick":"first"`
+is another spelling of `pick_omitted` under its digest, and both decoders
+refuse it as `wire` (`pick_first_written`). `pick_nearest`, `pick_largest`,
+`pick_newest` and `pick_oldest` are `ok`, each under its own digest; a word
+the contract does not know is `wire` (`pick_unknown_word`); and a pick other
+than `first` on a cells layout, which has no blobs to pick among, is
+`unsupported` (`pick_cells`), checked after the detector's spec.
+
+`pick_cases.json` holds scenes for the helper's kernel: a colour spec, the
+frame's extent, and cases of frames — blobs drawn in the spec's first class on
+its ground (`border` draws an outline that wide and leaves its inside ground)
+and the hand's point when the run has one — each naming, for every word, which
+drawn blob the target follows on each frame (`null`: none). Every case names
+every word: Rust holds them to `Pick::ALL`, and Swift reads each case through
+its kernel (`PerceptionSession`), as `reflex-probe --self-test --fixtures`
+does in an optimized build. A receipt names its leaf's detector's `pick` and
+the `trackId` the leaf was decided on, beside every key it had.
+
 ## Identifiers (t-9205)
 
 Every id a plan carries — a detector, a rule, a macro, an action — and a
@@ -83,7 +117,9 @@ value set to the empty string (the key stays). The form does not depend on
 how a JSON library keeps its maps: Cargo turns serde_json's `preserve_order`
 on for every crate in a build that includes one asking for it (the shell,
 hookd), shipped app included, so Rust sorts the keys itself. A wire whose keys are out of order at any depth is refused, never
-normalized and run (`wire_unsorted_top_level`, `wire_unsorted_nested`).
+normalized and run (`wire_unsorted_top_level`, `wire_unsorted_nested`), and so
+is a wire that is not the typed plan's own: a field written out at the default
+the typed plan leaves out (`pick_first_written`).
 
 ## Action lease
 
