@@ -156,6 +156,15 @@ fn install_one(
     };
     let dir = root.path.join(skill.name);
     let path = dir.join(SKILL_FILE);
+    // A plain file where the skill's directory should stand is somebody
+    // else's: reading "<file>/SKILL.md" would only say "not a directory".
+    if let Standing::Other = standing_of(&dir) {
+        return outcome(
+            path,
+            InstallState::Kept,
+            "스킬 폴더 자리에 다른 파일이 있어 그대로 두었습니다".to_string(),
+        );
+    }
     match std::fs::read_to_string(&path) {
         Ok(existing) if existing == skill.content => {
             outcome(path, InstallState::Unchanged, String::new())
@@ -173,15 +182,65 @@ fn install_one(
     }
 }
 
+/// What stands where the skill's directory should be, before we write into
+/// it. A link whose target is gone is a dead link — a repository install
+/// (`npx skills add` links each agent's folder to one checkout) whose
+/// checkout was removed since; `create_dir_all` answers it with "File exists"
+/// and nothing ever gets installed there, which is how Qwen Code and Grok
+/// stayed at "1 required skill missing" however often the person pressed
+/// install (2026-09-26). It is ours to replace. A link that still reaches a
+/// directory is followed and written through. A plain file is somebody
+/// else's and is kept.
+enum Standing {
+    /// Nothing, or a directory (reached directly or through a live link).
+    Room,
+    /// A symbolic link whose target no longer exists.
+    DeadLink,
+    /// A regular file (or anything else that is not a directory).
+    Other,
+}
+
+fn standing_of(dir: &Path) -> Standing {
+    match std::fs::symlink_metadata(dir) {
+        Err(_) => Standing::Room,
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if dir.is_dir() {
+                Standing::Room
+            } else {
+                Standing::DeadLink
+            }
+        }
+        Ok(meta) if meta.is_dir() => Standing::Room,
+        Ok(_) => Standing::Other,
+    }
+}
+
 fn write_skill(
     dir: &Path,
     path: &Path,
     content: &str,
     outcome: impl Fn(PathBuf, InstallState, String) -> SkillInstallOutcome,
 ) -> SkillInstallOutcome {
+    let mut detail = String::new();
+    match standing_of(dir) {
+        Standing::Room => {}
+        Standing::DeadLink => {
+            if let Err(error) = std::fs::remove_file(dir) {
+                return outcome(path.to_path_buf(), InstallState::Failed, error.to_string());
+            }
+            detail = "끊어진 링크를 지우고 설치했습니다".to_string();
+        }
+        Standing::Other => {
+            return outcome(
+                path.to_path_buf(),
+                InstallState::Kept,
+                "스킬 폴더 자리에 다른 파일이 있어 그대로 두었습니다".to_string(),
+            );
+        }
+    }
     let written = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(path, content));
     match written {
-        Ok(()) => outcome(path.to_path_buf(), InstallState::Written, String::new()),
+        Ok(()) => outcome(path.to_path_buf(), InstallState::Written, detail),
         Err(error) => outcome(path.to_path_buf(), InstallState::Failed, error.to_string()),
     }
 }
@@ -195,6 +254,114 @@ mod tests {
             .iter()
             .map(|(agent, label)| ((*agent).to_string(), (*label).to_string()))
             .collect()
+    }
+
+    /// The skill's directory as one agent's root holds it before an install.
+    fn claude_skill_dir(home: &Path) -> PathBuf {
+        home.join(".claude").join("skills").join("orchestration")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_link_where_the_skill_should_stand_is_replaced_by_the_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = claude_skill_dir(home.path());
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        // `npx skills add` linked this agent's folder to a checkout that is gone.
+        std::os::unix::fs::symlink("../../.agents/skills/orchestration", &dir).unwrap();
+        assert!(!dir.exists() && std::fs::symlink_metadata(&dir).is_ok());
+        let outcomes = install_bundled_skill(
+            "orchestration",
+            home.path(),
+            &detected(&[("claude", "Claude")]),
+        )
+        .unwrap();
+        assert_eq!(
+            outcomes[0].state,
+            InstallState::Written,
+            "{}",
+            outcomes[0].detail
+        );
+        assert!(outcomes[0].detail.contains("끊어진 링크"));
+        assert!(
+            dir.is_dir()
+                && !std::fs::symlink_metadata(&dir)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outcomes[0].path).unwrap(),
+            bundled_skill("orchestration").unwrap().content
+        );
+        // The second press finds the same bytes and changes nothing.
+        let again = install_bundled_skill(
+            "orchestration",
+            home.path(),
+            &detected(&[("claude", "Claude")]),
+        )
+        .unwrap();
+        assert_eq!(again[0].state, InstallState::Unchanged);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_link_to_a_directory_is_written_through_not_replaced() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = claude_skill_dir(home.path());
+        let shared = home
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("orchestration");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&shared, &dir).unwrap();
+        let outcomes = install_bundled_skill(
+            "orchestration",
+            home.path(),
+            &detected(&[("claude", "Claude")]),
+        )
+        .unwrap();
+        assert_eq!(
+            outcomes[0].state,
+            InstallState::Written,
+            "{}",
+            outcomes[0].detail
+        );
+        assert!(
+            std::fs::symlink_metadata(&dir)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the live link stays"
+        );
+        assert!(
+            shared.join(SKILL_FILE).is_file(),
+            "written through the link into the shared root"
+        );
+    }
+
+    #[test]
+    fn a_plain_file_where_the_skill_should_stand_is_kept_and_named() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = claude_skill_dir(home.path());
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(&dir, "not a folder").unwrap();
+        let outcomes = install_bundled_skill(
+            "orchestration",
+            home.path(),
+            &detected(&[("claude", "Claude")]),
+        )
+        .unwrap();
+        assert_eq!(
+            outcomes[0].state,
+            InstallState::Kept,
+            "{}",
+            outcomes[0].detail
+        );
+        assert!(outcomes[0].detail.contains("다른 파일"));
+        assert_eq!(std::fs::read_to_string(&dir).unwrap(), "not a folder");
     }
 
     #[test]
