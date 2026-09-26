@@ -35,17 +35,21 @@ pub fn lock_recovered<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Lazily-built private runtime backing [`run_blocking`] whenever the
-/// ambient runtime (if any) cannot be re-entered. `current_thread` flavor:
-/// it spawns no idle worker threads, and the thread parked inside
-/// `Runtime::block_on` drives the IO/time drivers itself. `enable_all` is
-/// required — bridged futures use timers and sockets (OAuth, MCP, SSE).
+/// ambient runtime (if any) cannot be re-entered.
+///
+/// Keep the IO/time drivers running between calls too. The shared HTTP pool
+/// can hand a later async caller a connection opened by a synchronous call;
+/// parking that connection's driver when `block_on` returns strands it.
+/// The minimum worker count keeps that driver alive without sizing a pool
+/// for work already driven by the caller of `block_on`.
 fn fallback_runtime() -> &'static tokio::runtime::Runtime {
     static FALLBACK: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     FALLBACK.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(std::num::NonZeroUsize::MIN.get())
             .enable_all()
             .build()
-            .expect("sync_bridge fallback runtime: building a current_thread runtime only fails when the OS denies an IO/time driver")
+            .expect("sync_bridge fallback runtime: the IO worker must be available")
     })
 }
 
@@ -93,6 +97,44 @@ mod tests {
     #[test]
     fn no_ambient_runtime_uses_fallback() {
         assert_eq!(run_blocking(probe()), 42);
+    }
+
+    #[test]
+    fn a_pooled_connection_keeps_progressing_after_the_sync_call_returns() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local endpoint");
+        let url = format!("http://{}", listener.local_addr().expect("endpoint address"));
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("the pooled connection");
+            stream.set_read_timeout(Some(Duration::from_secs(5))).expect("bounded server");
+            let mut reader = BufReader::new(stream.try_clone().expect("read the connection"));
+            for _ in 0..2 {
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or_default() == 0 {
+                        return;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+                    .expect("answer without closing the connection");
+            }
+        });
+        let client = crate::providers::shared_http_client();
+        let get = || async { client.get(&url).send().await.expect("a response").text().await.expect("the body") };
+        assert_eq!(run_blocking(get()), "ok");
+
+        let other = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("another runtime");
+        let second = other.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), get()).await
+        });
+        assert_eq!(second.expect("the first call's idle driver must not hold the next call"), "ok");
+        server.join().expect("the endpoint finished both requests");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
