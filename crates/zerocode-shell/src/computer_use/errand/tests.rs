@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::*;
 use zerocode_core::computer_flow::{Confirm, EvidenceLevel, Fingerprint, Money};
+use zerocode_core::computer_use_protocol::marks::same_legend;
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
 use zerocode_core::jev::summary::MODEL;
 use zerocode_core::screen_action::{DONE, GIVE_UP};
@@ -302,8 +303,15 @@ pub(super) struct FakeWorld {
     /// press sets `unsettled_items` to the page it was made on.
     pub(super) unsettled_lags: bool,
     /// How long waiting for that settle holds the walk — what a judgment
-    /// begun on the page the press left runs behind.
+    /// begun on the page the press changed runs behind.
     pub(super) settle_holds: Duration,
+    /// Whether a press that leaves the page's legend as it was pressed on
+    /// settles before it answers, as the browser door's does (t-9876): it
+    /// says how as a settled press ([`World::settled`]) and leaves nothing
+    /// for later; a press that moved the legend still leaves its settle.
+    pub(super) settles_a_still_legend: bool,
+    /// How the last press settled before it answered, when it did.
+    settled_inside: Option<Value>,
     /// Whether the last press left its settle for later, and how many such
     /// settles the walk waited for.
     settling: bool,
@@ -351,6 +359,8 @@ impl FakeWorld {
             unsettled_items: None,
             unsettled_lags: false,
             settle_holds: Duration::ZERO,
+            settles_a_still_legend: false,
+            settled_inside: None,
             settling: false,
             settles_waited: 0,
             looks: 0,
@@ -420,8 +430,10 @@ impl World for FakeWorld {
         self.observed.push(crate::run_evidence::observation());
         self.presses.push(mark);
         self.settling = self.press_takes && self.settles_later.is_some();
+        self.settled_inside = None;
+        let pressed_on = self.screen.as_ref().map(|screen| screen.items.clone());
         if self.unsettled_lags {
-            self.unsettled_items = self.screen.as_ref().map(|screen| screen.items.clone());
+            self.unsettled_items.clone_from(&pressed_on);
         }
         // Time first — the world's own clock, then the door's landing — then
         // whether the screen moved, then where the press led.
@@ -443,7 +455,22 @@ impl World for FakeWorld {
             && let Some(screen) = self.screen.as_mut()
         {
             screen.items.clone_from(leads_to);
-            return true;
+        }
+        // The door's own rule (t-9876): the page the press left still reads
+        // the legend it was made on, so its settle ends before it answers.
+        if self.settles_a_still_legend && self.settling {
+            let left = self
+                .unsettled_items
+                .clone()
+                .or_else(|| self.screen.as_ref().map(|screen| screen.items.clone()));
+            if left
+                .as_deref()
+                .zip(pressed_on.as_deref())
+                .is_some_and(|(left, on)| same_legend(on, left))
+            {
+                self.settling = false;
+                self.settled_inside.clone_from(&self.settles_later);
+            }
         }
         self.press_takes
     }
@@ -483,6 +510,9 @@ impl World for FakeWorld {
         Some(self.reached.remove(0))
     }
     fn settled(&mut self) -> Option<Settled> {
+        if let Some(note) = self.settled_inside.clone() {
+            return Some(Settled { note, screen: None });
+        }
         let note = self.settles.clone()?;
         let screen = self
             .settles_on_screen
@@ -2253,6 +2283,79 @@ fn a_page_that_changes_after_its_press_answered_begins_nothing_on_the_page_it_wa
     assert_eq!(
         (walked.overlapped, walked.discarded, walked.cancelled),
         (2, 0, 0)
+    );
+}
+
+/// A page whose press leaves the legend it was made on — a result a fetch
+/// renders after the press, a field that takes the caret — has that press
+/// settled before it answers, at the door (t-9876): the walk begins nothing,
+/// waits behind a judgment for no settle, asks each settled page in turn —
+/// as many questions as a walk that begins nothing on such a page asks —
+/// and every row says the press's own settle. A page the press changed at
+/// once is still asked on as it was left, its settle waited for behind.
+#[test]
+fn a_page_press_that_left_its_legend_settled_before_it_answered_and_the_walk_begins_nothing() {
+    let walk = |lags: bool| {
+        let mut judge = FakeJudge::chose(&[1; 5]);
+        let mut world = a_page_that_settles_later(FakeWorld::that_moves(&[1, 2]), settle_ready());
+        world.unsettled_lags = lags;
+        world.settles_a_still_legend = true;
+        let walked = run_with(
+            Mode::On,
+            true,
+            Branching::OFF,
+            &goal(3),
+            &mut judge,
+            &mut world,
+            Options {
+                act_line: None,
+                overlap: true,
+                rescue: false,
+            },
+            None,
+        );
+        (walked, judge, world)
+    };
+
+    let (walked, judge, world) = walk(true);
+    assert_eq!(world.presses, vec![1, 1, 1]);
+    // Begun, used, dropped, cancelled: none of them.
+    assert_eq!(
+        (
+            judge.begun.len(),
+            walked.overlapped,
+            walked.discarded,
+            walked.cancelled
+        ),
+        (0, 0, 0, 0),
+        "{:?}",
+        judge.begun
+    );
+    assert_eq!(
+        judge.asked.len(),
+        3,
+        "each settled page asked in turn, once"
+    );
+    assert_eq!(world.settles_waited, 0, "no settle was left to wait behind");
+    for row in &walked.rows {
+        assert_eq!(row[SETTLE], settle_ready(), "{row}");
+        assert!(row.get(OVERLAP).is_none(), "{row}");
+    }
+
+    let (walked, judge, world) = walk(false);
+    assert_eq!(
+        judge.begun.len(),
+        2,
+        "begun on the page each of the first two presses changed"
+    );
+    assert_eq!(judge.asked.len(), 1, "only the first page is asked in turn");
+    assert_eq!(
+        (walked.overlapped, walked.discarded, walked.cancelled),
+        (2, 0, 0)
+    );
+    assert_eq!(
+        world.settles_waited, 3,
+        "a changed page's settle waited behind"
     );
 }
 

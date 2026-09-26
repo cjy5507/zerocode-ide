@@ -3410,7 +3410,7 @@ pub(crate) async fn automate_click_mark(
     label: &str,
     mark_n: usize,
 ) -> Result<BrowserInputReport, String> {
-    let (pane, pin, mut report) = press_mark(app, state, label, mark_n).await?;
+    let (pane, pin, _, mut report) = press_mark(app, state, label, mark_n).await?;
     report.settle = Some(settle_after_press(&pane, &pin.document_epoch, report.pressed_at).await);
     Ok(report)
 }
@@ -3426,28 +3426,65 @@ pub(crate) async fn automate_click_mark_later(
     label: &str,
     mark_n: usize,
 ) -> Result<(BrowserInputReport, Option<BrowserLook>), String> {
-    let (pane, pin, report) = press_mark(app, state, label, mark_n).await?;
-    hold_settle(
+    let (pane, pin, pressed_on, mut report) = press_mark(app, state, label, mark_n).await?;
+    let held = HeldSettle {
+        epoch: pin.document_epoch,
+        since: report.pressed_at,
+    };
+    let (settle, look) = look_after_press(
         label,
-        HeldSettle {
-            epoch: pin.document_epoch,
-            since: report.pressed_at,
-        },
-    );
-    let look = read_look(&pane, label).await.ok();
+        pane,
+        &pressed_on,
+        held,
+        |pane, held| async move { settle_after_press(&pane, &held.epoch, held.since).await },
+        |pane| async move { read_look(&pane, label).await },
+    )
+    .await;
+    report.settle = settle;
     Ok((report, look))
 }
 
+/// What a settle-later press answers with, apart from the window: its settle
+/// held for the pane's next look, and the page `read` reads the moment the
+/// press was made.
+pub(crate) async fn look_after_press<P, S, SF, R, RF>(
+    label: &str,
+    pane: P,
+    pressed_on: &[BrowserMark],
+    held: HeldSettle,
+    settle: S,
+    read: R,
+) -> (Option<SettleReport>, Option<BrowserLook>)
+where
+    P: Clone,
+    S: FnOnce(P, HeldSettle) -> SF,
+    SF: std::future::Future<Output = SettleReport>,
+    R: Fn(P) -> RF,
+    RF: std::future::Future<Output = Result<BrowserLook, String>>,
+{
+    hold_settle(label, held);
+    (None, read(pane).await.ok())
+}
+
 /// The press by number both roads share: the pin proved on the pane's last
-/// marks, then the one press with what the look read. Refused while the
-/// pane's last settle-later press still waits for a look (t-9712): its
-/// numbers are the first look's, and its settle would go unheard.
+/// marks, then the one press with what the look read — answered with the
+/// marks it was made on. Refused while the pane's last settle-later press
+/// still waits for a look (t-9712): its numbers are the first look's, and its
+/// settle would go unheard.
 async fn press_mark(
     app: &AppHandle,
     state: &AppState,
     label: &str,
     mark_n: usize,
-) -> Result<(BrowserPane, BrowserLookPin, BrowserInputReport), String> {
+) -> Result<
+    (
+        BrowserPane,
+        BrowserLookPin,
+        Vec<BrowserMark>,
+        BrowserInputReport,
+    ),
+    String,
+> {
     if settle_held(label) {
         return Err(held_refusal(label));
     }
@@ -3475,7 +3512,7 @@ async fn press_mark(
         "watch": settle_watch(),
     });
     let report = press(&pane, &mark.selector, Some(expect)).await?;
-    Ok((pane, pin, report))
+    Ok((pane, pin, marks, report))
 }
 
 /// A press by number whose settle was left for later (t-9712): the document

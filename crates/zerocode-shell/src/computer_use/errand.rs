@@ -454,20 +454,17 @@ impl Screen {
     /// order, at the same address.
     ///
     /// The comparison is the question's own view of the screen (the legend
-    /// line each control is described by), not the raw items: a caret that
-    /// blinked or a pixel that moved is not a screen that moved, and reading
-    /// the raw items would make every look different and quietly disable the
-    /// rule that ends an unattended walk.
+    /// line each control is described by, [`same_legend`]), not the raw
+    /// items: a caret that blinked or a pixel that moved is not a screen that
+    /// moved, and reading the raw items would make every look different and
+    /// quietly disable the rule that ends an unattended walk. The browser
+    /// door holds a press to the same comparison (t-9876).
+    ///
+    /// [`same_legend`]: zerocode_core::computer_use_protocol::marks::same_legend
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
-        use zerocode_core::computer_use_protocol::marks::legend_line;
         self.at == other.at
-            && self.items.len() == other.items.len()
-            && self
-                .items
-                .iter()
-                .zip(&other.items)
-                .all(|(mine, theirs)| legend_line(mine) == legend_line(theirs))
+            && zerocode_core::computer_use_protocol::marks::same_legend(&self.items, &other.items)
     }
 }
 

@@ -815,5 +815,21 @@ pub fn legend_line(item: &Value) -> Option<String> {
     Some(format!("{mark}{role}{label} @{x},{y}"))
 }
 
+/// Whether two looks' items read as the same legend: as many items, each
+/// read as its [`legend_line`] — the words a question is asked in — in the
+/// same order. A caret that blinked or a pixel that moved is not a legend that
+/// moved; a control renumbered, renamed or moved to another centre is.
+/// The one comparison a walk's two looks (`errand::Screen::same_as`) and a
+/// press's own two looks — the one it was made on, and the page it left
+/// (t-9876) — are held to.
+#[must_use]
+pub fn same_legend(mine: &[Value], theirs: &[Value]) -> bool {
+    mine.len() == theirs.len()
+        && mine
+            .iter()
+            .zip(theirs)
+            .all(|(mine, theirs)| legend_line(mine) == legend_line(theirs))
+}
+
 #[cfg(test)]
 mod tests;
