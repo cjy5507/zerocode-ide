@@ -141,7 +141,8 @@ def judged(record, values, table_limits):
     for index, step in enumerate(schedule['steps']):
         wanted = [identity for identity, (target, _) in expected.items() if target['step'] == index]
         hits = sum(identity in good for identity in wanted)
-        steps.append({**step, 'offered': len(wanted), 'hits': hits, 'oracle': hits / len(wanted) if wanted else 0})
+        steps.append({**step, 'offered': len(wanted), 'hits': hits, 'oracle': hits / len(wanted) if wanted else 0,
+                      'achieved_apm': hits * 60_000 / (step['endMs'] - step['startMs'])})
     floor = values['rts_floor']
     ceiling = max((step['apm'] for step in steps if step['oracle'] >= floor['stress_oracle']), default=0)
     latencies = [(event['rxNs'] - shown[expected[identity][0]['id']]) / 1e6 for identity, event in good.items()]
@@ -173,7 +174,8 @@ def judged(record, values, table_limits):
     return {'scenario': SCENARIO, 'seed': schedule['seed'], 'passed': not errors, 'errors': errors,
             'wall_s': wall, 'apm': apm, 'oracle': oracle, 'wrong': len(wrong), 'foreign': foreign,
             'duplicates': duplicate, 'held': fixture.get('held'), 'reaction_ms': reaction,
-            'inputs': per_input, 'steps': steps, 'ceiling_apm': ceiling if schedule['stress'] else None}
+            'inputs': per_input, 'steps': steps, 'ceiling_apm': ceiling if schedule['stress'] else None,
+            'ceiling_capped': schedule['stress'] and ceiling == max(step['apm'] for step in steps)}
 
 
 class Desk(reflex.Desk):

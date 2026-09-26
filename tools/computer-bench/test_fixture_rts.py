@@ -47,8 +47,8 @@ class RtsTests(unittest.TestCase):
         golden['plan_hash'] = ''
         self.assertEqual(plan, golden, 'both native contracts validate these exact plan fields')
 
-    def record(self):
-        schedule = rts.schedule(11, self.values)
+    def record(self, stress=False):
+        schedule = rts.schedule(11, self.values, stress=stress)
         t0 = 5_000_000_000_000
         events, frames = [], []
         for target in schedule['targets']:
@@ -90,6 +90,12 @@ class RtsTests(unittest.TestCase):
         before = rts.judged(record, self.values, reflex.limits())
         record['receipts'] = [{'outcome': 'done', 'kind': 'key'}] * 1000
         self.assertEqual(rts.judged(record, self.values, reflex.limits())['oracle'], before['oracle'])
+
+    def test_a_passing_last_stress_step_is_reported_as_a_lower_bound_on_the_ceiling(self):
+        result = rts.judged(self.record(stress=True), self.values, reflex.limits())
+        self.assertTrue(result['passed'])
+        self.assertTrue(result['ceiling_capped'])
+        self.assertEqual(result['ceiling_apm'], self.values['rts_supply']['steps_apm'][-1])
 
     @unittest.skipUnless(sys.platform == 'darwin', 'AppKit oracle runs on macOS')
     def test_native_oracle_receives_each_input_and_rejects_wrong_modifiers_and_duplicates(self):
