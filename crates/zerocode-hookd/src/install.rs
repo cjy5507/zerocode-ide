@@ -944,21 +944,20 @@ fn install_copilot(paths: &InstallPaths, config_path: &Path) -> HookStatus {
 
 // -------------------------------------------------------------- antigravity
 
-/// Antigravity's five, measured in Orca's
-/// `out/main/chunks/managed-agent-hook-controls-RcsNtBpP.js:1716-1742`: three
-/// use the `direct` schema and two use the `tool` schema. The same chunk at
-/// :1855-1864 confirms tool entries are claude-shaped with matcher `*`.
+/// Status events only: agy 1.2.11 requires a permission decision from
+/// PreToolUse, so an observing hook's empty reply would deny every tool.
+/// PreInvocation still marks work and PostToolUse reports completed tools;
+/// the window no longer receives a per-tool start before the tool finishes.
 const ANTIGRAVITY_EVENTS: &[(&str, bool)] = &[
     ("PreInvocation", false),
     ("PostInvocation", false),
     ("Stop", false),
-    ("PreToolUse", true),
     ("PostToolUse", true),
 ];
 
 /// Our entries live under ONE bundle key in `~/.gemini/config/hooks.json` —
-/// `zerocode-status`, the whole object ours — rather than merged into shared
-/// event arrays. Removal is deleting the key.
+/// `zerocode-status` — rather than merged into shared event arrays. Both
+/// removal and reinstall preserve any user definitions added under our key.
 const ANTIGRAVITY_BUNDLE: &str = "zerocode-status";
 
 fn install_antigravity(paths: &InstallPaths, config_path: &Path, host: ScriptHost) -> HookStatus {
@@ -967,7 +966,13 @@ fn install_antigravity(paths: &InstallPaths, config_path: &Path, host: ScriptHos
         return unreadable(agent, config_path);
     };
     let script = script_path_for(&paths.home, agent, host);
-    let mut bundle = Map::new();
+    // Clean every old managed event, including ones we no longer install.
+    remove_antigravity_bundle(&mut config, agent);
+    let mut bundle = config
+        .get(ANTIGRAVITY_BUNDLE)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     for (event, is_tool) in ANTIGRAVITY_EVENTS {
         let command = wrapper(host, &script, &[(crate::env_var::ANTIGRAVITY_EVENT, event)]);
         let definition = if *is_tool {
@@ -975,7 +980,13 @@ fn install_antigravity(paths: &InstallPaths, config_path: &Path, host: ScriptHos
         } else {
             json!({"type": "command", "command": command, "timeout": TIMEOUT_SECONDS})
         };
-        bundle.insert((*event).to_string(), Value::Array(vec![definition]));
+        let mut definitions = bundle
+            .get(*event)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        definitions.push(definition);
+        bundle.insert((*event).to_string(), Value::Array(definitions));
     }
     config.insert(ANTIGRAVITY_BUNDLE.to_string(), Value::Object(bundle));
     if write_config(config_path, &config).is_err() {
@@ -1465,18 +1476,114 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_installs_pre_tool_use_as_its_fifth_tool_event() {
+    fn antigravity_reports_work_and_completion_without_permission_hooks() {
         let (_home, paths) = paths();
         let outcome = install_agent(&paths, AgentKind::Antigravity);
         assert_eq!(outcome.state, HookInstallState::Installed, "{outcome:?}");
 
         let config = read_json(&paths.config_path(AgentKind::Antigravity));
         let config = config.as_object().expect("config object");
-        assert_eq!(antigravity_present(config, AgentKind::Antigravity), 5);
-        let pre_tool_use = &config[ANTIGRAVITY_BUNDLE]["PreToolUse"][0];
-        assert_eq!(pre_tool_use["matcher"], "*");
-        assert_eq!(pre_tool_use["hooks"][0]["type"], "command");
-        assert!(pre_tool_use.get("command").is_none());
+        let bundle = config[ANTIGRAVITY_BUNDLE].as_object().expect("bundle");
+        assert!(!bundle.contains_key("PreToolUse"));
+        assert_eq!(bundle.len(), ANTIGRAVITY_EVENTS.len());
+        assert_eq!(
+            antigravity_present(config, AgentKind::Antigravity),
+            ANTIGRAVITY_EVENTS.len()
+        );
+        for (event, expected) in [
+            ("PreInvocation", zerocode_core::hook::HookState::Working),
+            ("PostToolUse", zerocode_core::hook::HookState::Working),
+            ("PostInvocation", zerocode_core::hook::HookState::Done),
+            ("Stop", zerocode_core::hook::HookState::Done),
+        ] {
+            assert!(bundle.contains_key(event), "missing {event}");
+            assert_eq!(zerocode_core::hook::hook_state(event, "{}"), Some(expected));
+        }
+        let post_tool_use = &bundle["PostToolUse"][0];
+        assert_eq!(post_tool_use["matcher"], "*");
+        assert_eq!(post_tool_use["hooks"][0]["type"], "command");
+        assert!(post_tool_use.get("command").is_none());
+    }
+
+    #[test]
+    fn antigravity_reinstall_removes_legacy_permission_hooks_and_keeps_user_entries() {
+        for host in [ScriptHost::Posix, ScriptHost::Cmd] {
+            let home = tempfile::tempdir().expect("tempdir");
+            let paths = InstallPaths::new(home.path()).with_host(host);
+            let agent = AgentKind::Antigravity;
+            install_agent(&paths, agent);
+            let config_path = paths.config_path(agent);
+            let mut config = read_json(&config_path);
+            let command = wrapper(
+                host,
+                &script_path_for(home.path(), agent, host),
+                &[(crate::env_var::ANTIGRAVITY_EVENT, "PreToolUse")],
+            );
+            let legacy = json!([nested_definition(&command, Some("*"), TIMEOUT_SECONDS)]);
+            config[ANTIGRAVITY_BUNDLE]["PreToolUse"] = legacy.clone();
+            std::fs::write(&config_path, config.to_string()).expect("legacy config");
+            assert_eq!(
+                install_agent(&paths, agent).state,
+                HookInstallState::Installed
+            );
+            assert!(
+                read_json(&config_path)[ANTIGRAVITY_BUNDLE]
+                    .get("PreToolUse")
+                    .is_none()
+            );
+            let user_tool = nested_definition("user-tool-hook", Some("*"), TIMEOUT_SECONDS);
+            let user_stop = json!({"type": "command", "command": "user-stop-hook"});
+            let user_bundle = json!({"PreToolUse": [user_tool.clone()]});
+            config["user-bundle"] = user_bundle.clone();
+            let bundle = config[ANTIGRAVITY_BUNDLE].as_object_mut().expect("bundle");
+            bundle.insert("PreToolUse".to_string(), legacy);
+            bundle["PreToolUse"]
+                .as_array_mut()
+                .unwrap()
+                .push(user_tool.clone());
+            bundle["PostToolUse"]
+                .as_array_mut()
+                .unwrap()
+                .push(user_tool.clone());
+            bundle["Stop"]
+                .as_array_mut()
+                .unwrap()
+                .push(user_stop.clone());
+            std::fs::write(&config_path, config.to_string()).expect("legacy config");
+
+            let outcome = install_agent(&paths, agent);
+            assert_eq!(outcome.state, HookInstallState::Installed, "{host:?}");
+            let after = read_json(&config_path);
+            assert_eq!(after["user-bundle"], user_bundle);
+            assert_eq!(
+                after[ANTIGRAVITY_BUNDLE]["PreToolUse"],
+                json!([user_tool.clone()])
+            );
+            assert_eq!(after[ANTIGRAVITY_BUNDLE]["PostToolUse"][0], user_tool);
+            assert_eq!(after[ANTIGRAVITY_BUNDLE]["Stop"][0], user_stop);
+            install_agent(&paths, agent);
+            assert_eq!(read_json(&config_path), after, "reinstall stacked hooks");
+
+            let mut partial = after.clone();
+            partial[ANTIGRAVITY_BUNDLE]
+                .as_object_mut()
+                .unwrap()
+                .remove("PostToolUse");
+            std::fs::write(&config_path, partial.to_string()).expect("partial config");
+            assert_eq!(status_of(&paths, agent).state, HookInstallState::Partial);
+
+            assert_eq!(
+                remove_agent(&paths, agent).state,
+                HookInstallState::NotInstalled
+            );
+            let removed = read_json(&config_path);
+            assert_eq!(removed["user-bundle"], user_bundle);
+            assert_eq!(
+                removed[ANTIGRAVITY_BUNDLE]["PreToolUse"],
+                json!([user_tool])
+            );
+            assert_eq!(removed[ANTIGRAVITY_BUNDLE]["Stop"], json!([user_stop]));
+        }
     }
 
     #[test]
