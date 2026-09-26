@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.32] — 2026-09-27
+
+_since v1.1.31 (2 commits)_
+
+### fix
+- fix(hooks): keep Antigravity status reporting out of permission decisions
+
+### other
+- Merge branch 'wt/t-10461/antigravity-1-2-11' (60992f1c) — Antigravity 1.2.11 asks every pre-tool hook for a permission decision, and the window's status hook answered with none, so every tool call in every Antigravity session on the machine was refused with an empty reason; the window's status bundle now reports work from PreInvocation and PostToolUse only and never sits in the permission path, and a reinstall clears the old managed pre-tool entry while keeping any hook a person added under the same key. Found when an Antigravity worker could not read a file after the CLI updated itself; reproduced with one `agy -p` shell call (refused → `hook-test-ok` once the entry was gone). Coordinator gate on 60992f1c: hookd rc=0 180 passed 0 failed · pii 0 · fmt 0 · lint 0 · shell bins 0 · Windows root 0 · zo 0. (t-10461; coordinator review)
+
 ## [1.1.31] — 2026-09-27
 
 _since v1.1.30 (10 commits)_
