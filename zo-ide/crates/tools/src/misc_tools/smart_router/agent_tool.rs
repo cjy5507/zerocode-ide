@@ -69,6 +69,19 @@ pub const AGENT_TOOL_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::AGENT_
 /// What an `ask` is told to do with the state it is handed.
 const ASK_INSTRUCTIONS: &str = "Read `context`, then answer `question`: is it yes, or no?";
 
+/// What each answer of an `ask` means, in the order of
+/// [`AGENT_TOOL_ASK_OPTIONS`] (t-10010: version 1 offered the two by name
+/// alone). Not being told enough reads as `no`, as every yes-or-no question
+/// the product asks reads it: an agent acts on a `yes`.
+const ASK_OPTION_MEANS: [&str; AGENT_TOOL_ASK_OPTIONS.len()] = [
+    "What `question` and `context` say shows that the answer is yes.",
+    "What `question` and `context` say shows that the answer is no, or is not enough to show that it is yes.",
+];
+
+/// The keys of a question's state, as the instructions name them: the
+/// caller's question, its context, and a score's items.
+const STATE_KEYS: [&str; 3] = ["question", "context", "items"];
+
 /// What a `choose` is told to do.
 const CHOOSE_INSTRUCTIONS: &str =
     "Read `context`, then answer `question` with the one option that fits it best.";
@@ -327,12 +340,12 @@ struct Asking {
 fn requests_of(question: &JevQuestion) -> Vec<Asking> {
     match question {
         JevQuestion::Ask { question, context } => vec![Asking {
-            state: json!({ "question": question, "context": context }),
+            state: json!({ STATE_KEYS[0]: question, STATE_KEYS[1]: context }),
             questions: BTreeMap::from([(
                 ASK_QUESTION_ID.to_string(),
                 SystemOneQuestion::choice(
                     ASK_INSTRUCTIONS,
-                    AGENT_TOOL_ASK_OPTIONS.iter().map(|word| (*word, None)),
+                    AGENT_TOOL_ASK_OPTIONS.iter().zip(ASK_OPTION_MEANS).map(|(word, means)| (*word, Some(means))),
                 ),
             )]),
             items: 0..0,
@@ -341,7 +354,7 @@ fn requests_of(question: &JevQuestion) -> Vec<Asking> {
             let ids: Vec<String> =
                 (0..options.len()).map(|at| format!("{OPTION_ID_PREFIX}{at}")).collect();
             vec![Asking {
-                state: json!({ "question": question, "context": context }),
+                state: json!({ STATE_KEYS[0]: question, STATE_KEYS[1]: context }),
                 questions: BTreeMap::from([(
                     CHOOSE_QUESTION_ID.to_string(),
                     SystemOneQuestion::choice(
@@ -355,7 +368,7 @@ fn requests_of(question: &JevQuestion) -> Vec<Asking> {
         JevQuestion::Score { question, levels, items } => even_shards(items.len(), SKILL_SHARD_TARGET)
             .into_iter()
             .map(|shard| Asking {
-                state: json!({ "question": question, "items": &items[shard.clone()] }),
+                state: json!({ STATE_KEYS[0]: question, STATE_KEYS[2]: &items[shard.clone()] }),
                 questions: shard
                     .clone()
                     .map(|at| {

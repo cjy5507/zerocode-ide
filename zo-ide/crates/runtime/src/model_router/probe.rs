@@ -66,11 +66,12 @@ impl RouteTaskIntent {
 /// prompt rendered from it, the task text both readers are handed
 /// ([`rubric_task_text`]), and the typed questions `decision.rs` asks from it.
 ///
-/// Bump it whenever any of those words change. The decision shadow keys its
-/// memo on it and stamps it on every ledger row, so judgments made under
-/// different words never pool into one measurement. `decision.rs` pins the
-/// rendered words to this number, so an edit that forgets the bump is a red
-/// test rather than a quietly mixed ledger.
+/// Bump it whenever any of those words change. No seat's row names it: the
+/// routing seat asks words of its own (`questions::ROUTING_RUBRIC_VERSION`),
+/// and so does the step governor's (`questions::ZO_STEP_EFFORT_RUBRIC_VERSION`,
+/// t-10010); these typed questions are what the routing replay's first arm
+/// asks. `decision.rs` pins the rendered words to this number, so an edit
+/// that forgets the bump is a red test rather than a quietly moved prompt.
 pub const DECISION_RUBRIC_VERSION: u32 = 1;
 
 /// How many characters of a task a routing judgment reads — the probe's

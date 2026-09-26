@@ -9,7 +9,9 @@
 //!
 //! The explicit search tool retains its original per-skill Score rubric.
 //! The turn-start suggestion asks a wide Choice with three gate Nouls, then
-//! checks three candidates with a second Choice and three fits Nouls.
+//! checks three candidates with a second Choice and three fits Nouls. Every
+//! skill's words are state in both requests, as in the search's own; an
+//! option says which skill it loads, by its place and its name (t-10010).
 //!
 //! Nothing here calls anything. It builds the state and the questions, cuts
 //! them into requests no larger than one request should carry, checks a reply
@@ -35,9 +37,9 @@ use serde_json::{json, Value};
 use zerocode_core::jev::door::cut;
 use zerocode_core::jev::noul;
 use zerocode_core::jev::questions::{
-    SKILL_ACTS_ON_SYSTEM, SKILL_FITS, SKILL_FOLLOWS_PROCEDURE, SKILL_NARROW_QUESTION,
-    SKILL_NO, SKILL_NO_MATCH, SKILL_NO_MATCH_CRITERION, SKILL_PROSE_SUFFICES,
-    SKILL_WIDE_QUESTION, SKILL_YES,
+    SKILL_ACTS_ON_SYSTEM, SKILL_ENTRY_KEYS, SKILL_EXCERPT_KEY, SKILL_FITS, SKILL_FOLLOWS_PROCEDURE,
+    SKILL_NARROW_QUESTION, SKILL_NO, SKILL_NO_MATCH, SKILL_NO_MATCH_CRITERION, SKILL_OPTION,
+    SKILL_PROSE_SUFFICES, SKILL_SHORTLIST_KEY, SKILL_STATE_KEYS, SKILL_WIDE_QUESTION, SKILL_YES,
 };
 use zerocode_core::jev::{
     shard, Cap, SKILL_DESCRIPTION_CHAR_CAP, SKILL_EXCERPT_CHAR_CAP,
@@ -62,20 +64,35 @@ const FOLLOWS_PROCEDURE: &str = "follows_procedure";
 const PROSE_SUFFICES: &str = "prose_suffices";
 const FITS_PREFIX: &str = "fits_";
 
-/// The wide request carries the entire installed catalog in one Choice. The
-/// no-match criterion remains available even when all descriptions sound near.
+/// The wide request's state: the explicit search's own state over the whole
+/// catalog — the task, and every skill's name and description (t-10010).
+/// Version 2 sent the task alone and the catalog as the options' words.
 #[must_use]
-pub fn wide_state(task: &str, _candidates: &[SkillCandidate]) -> Value {
-    json!({"task": cut(task, Cap::Chars(SKILL_TASK_CHAR_CAP))})
+pub fn wide_state(task: &str, candidates: &[SkillCandidate]) -> Value {
+    skill_state(task, candidates)
 }
 
+/// Where a skill stands in a request's state: its place in `list`.
+fn place(list: &str, at: usize) -> String {
+    format!("{list}[{at}]")
+}
+
+/// What choosing the skill at `place` means ([`SKILL_OPTION`]): loading it,
+/// by its name. Its description and instructions are the state's.
+fn option_words(place: &str, name: &str) -> String {
+    SKILL_OPTION.replace("{at}", place).replace("{name}", name)
+}
+
+/// The wide request carries the entire installed catalog in one Choice. The
+/// no-match criterion remains available even when all descriptions sound near.
 #[must_use]
 pub fn wide_questions(candidates: &[SkillCandidate]) -> BTreeMap<String, SystemOneQuestion> {
     let criteria: Vec<(String, Option<String>)> = candidates
         .iter()
-        .map(|candidate| (
+        .enumerate()
+        .map(|(at, candidate)| (
             candidate.question_id.clone(),
-            Some(format!("{}: {}", candidate.name, candidate.description)),
+            Some(option_words(&place(SKILL_STATE_KEYS[1], at), &candidate.name)),
         ))
         .collect();
     let borrowed = criteria.iter().map(|(id, description)| (id.as_str(), description.as_deref()))
@@ -153,19 +170,33 @@ pub struct SkillDetail {
     pub excerpt: String,
 }
 
+/// The shortlist as the narrow request lays it out, in the wide answer's
+/// order: each detail beside the skill it reads, a place in `candidates`
+/// each.
+fn shortlisted<'a>(
+    candidates: &'a [SkillCandidate],
+    details: &'a [SkillDetail],
+) -> impl Iterator<Item = (&'a SkillCandidate, &'a SkillDetail)> {
+    details.iter().filter_map(|detail| candidates.get(detail.position).map(|candidate| (candidate, detail)))
+}
+
+/// The narrow request's state: the task, and each shortlisted skill's name,
+/// description and the head of its instructions — once each (t-10010).
 #[must_use]
 pub fn narrow_state(task: &str, candidates: &[SkillCandidate], details: &[SkillDetail]) -> Value {
     json!({
-        "task": cut(task, Cap::Chars(SKILL_TASK_CHAR_CAP)),
-        "candidates": details.iter().filter_map(|detail| candidates.get(detail.position).map(|candidate| json!({
-            "id": candidate.question_id,
-            "name": candidate.name,
-            "description": candidate.description,
-            "excerpt": cut(&detail.excerpt, Cap::Chars(SKILL_EXCERPT_CHAR_CAP)),
-        }))).collect::<Vec<_>>(),
+        SKILL_STATE_KEYS[0]: cut(task, Cap::Chars(SKILL_TASK_CHAR_CAP)),
+        SKILL_SHORTLIST_KEY: shortlisted(candidates, details).map(|(candidate, detail)| json!({
+            SKILL_ENTRY_KEYS[0]: candidate.name,
+            SKILL_ENTRY_KEYS[1]: candidate.description,
+            SKILL_EXCERPT_KEY: cut(&detail.excerpt, Cap::Chars(SKILL_EXCERPT_CHAR_CAP)),
+        })).collect::<Vec<_>>(),
     })
 }
 
+/// The narrow request's Choice over the shortlist and one fits Noul a
+/// skill, each naming the skill by its place in `candidates` — never
+/// repeating what the state says of it.
 #[must_use]
 pub fn narrow_questions(
     candidates: &[SkillCandidate],
@@ -173,20 +204,13 @@ pub fn narrow_questions(
 ) -> BTreeMap<String, SystemOneQuestion> {
     let mut questions = BTreeMap::new();
     let mut criteria: Vec<(String, Option<String>)> = Vec::new();
-    for detail in details {
-        if let Some(candidate) = candidates.get(detail.position) {
-            criteria.push((candidate.question_id.clone(), Some(format!(
-                "{} — {}", candidate.description, cut(&detail.excerpt, Cap::Chars(SKILL_EXCERPT_CHAR_CAP))
-            ))));
-            questions.insert(
-                format!("{FITS_PREFIX}{}", candidate.question_id),
-                SystemOneQuestion::noul(
-                    &format!("{SKILL_FITS} Skill {}: {}.", candidate.name, candidate.description),
-                    SKILL_YES,
-                    SKILL_NO,
-                ),
-            );
-        }
+    for (at, (candidate, _)) in shortlisted(candidates, details).enumerate() {
+        let place = place(SKILL_SHORTLIST_KEY, at);
+        criteria.push((candidate.question_id.clone(), Some(option_words(&place, &candidate.name))));
+        questions.insert(
+            format!("{FITS_PREFIX}{}", candidate.question_id),
+            SystemOneQuestion::noul(&SKILL_FITS.replace("{at}", &place), SKILL_YES, SKILL_NO),
+        );
     }
     let borrowed = criteria.iter().map(|(id, description)| (id.as_str(), description.as_deref()))
         .chain(std::iter::once((SKILL_NO_MATCH, Some(SKILL_NO_MATCH_CRITERION))));
@@ -199,13 +223,13 @@ pub fn read_narrow(
     candidates: &[SkillCandidate],
     details: &[SkillDetail],
 ) -> Result<Option<SkillReading>, &'static str> {
-    let allowed = details.iter().filter_map(|detail| candidates.get(detail.position))
-        .map(|candidate| candidate.question_id.clone())
+    let allowed = shortlisted(candidates, details)
+        .map(|(candidate, _)| candidate.question_id.clone())
         .chain(std::iter::once(SKILL_NO_MATCH.into())).collect();
     let choice = checked_choice(response, &allowed)?;
     let answers = serde_json::to_value(&response.answers).map_err(|_| "invalid_noul")?;
-    let best_fit = details.iter().filter_map(|detail| candidates.get(detail.position))
-        .map(|candidate| noul::read(&answers, &format!("{FITS_PREFIX}{}", candidate.question_id)))
+    let best_fit = shortlisted(candidates, details)
+        .map(|(candidate, _)| noul::read(&answers, &format!("{FITS_PREFIX}{}", candidate.question_id)))
         .collect::<Result<Vec<_>, _>>().map_err(|_| "invalid_noul")?
         .into_iter().fold(0.0, f64::max);
     if best_fit < f64::from(SKILL_FITS_FLOOR_PERMILLE) / 1_000.0
@@ -260,13 +284,6 @@ fn position_of(question_id: &str) -> Option<usize> {
     question_id.strip_prefix(QUESTION_ID_PREFIX)?.parse().ok()
 }
 
-/// The explicit search's state keys, in the order the fingerprint reads them:
-/// the task, and the shard's skills.
-const SEARCH_STATE_KEYS: [&str; 2] = ["task", "skills"];
-
-/// The keys of one skill in `skills`, in the order the fingerprint reads them.
-const SEARCH_SKILL_KEYS: [&str; 2] = ["name", "description"];
-
 /// The question one skill of a shard is scored under. It names the skill by
 /// its place in the shard's state, because a question id is never sent;
 /// spelled once, for the questions and for the words the version is pinned
@@ -285,8 +302,8 @@ fn search_instructions(at: usize) -> String {
 pub fn search_rubric_words() -> String {
     let mut words = vec![search_instructions(0)];
     words.extend(SKILL_LEVELS.iter().map(|level| (*level).to_string()));
-    words.push(SEARCH_STATE_KEYS.join(","));
-    words.push(SEARCH_SKILL_KEYS.join(","));
+    words.push(SKILL_STATE_KEYS.join(","));
+    words.push(SKILL_ENTRY_KEYS.join(","));
     words.join("\n")
 }
 
@@ -360,12 +377,12 @@ pub fn skill_shards(candidates: &[SkillCandidate]) -> Vec<&[SkillCandidate]> {
 #[must_use]
 pub fn skill_state(task: &str, shard: &[SkillCandidate]) -> Value {
     json!({
-        SEARCH_STATE_KEYS[0]: cut(task, Cap::Chars(SKILL_TASK_CHAR_CAP)),
-        SEARCH_STATE_KEYS[1]: shard
+        SKILL_STATE_KEYS[0]: cut(task, Cap::Chars(SKILL_TASK_CHAR_CAP)),
+        SKILL_STATE_KEYS[1]: shard
             .iter()
             .map(|candidate| json!({
-                SEARCH_SKILL_KEYS[0]: candidate.name,
-                SEARCH_SKILL_KEYS[1]: candidate.description,
+                SKILL_ENTRY_KEYS[0]: candidate.name,
+                SKILL_ENTRY_KEYS[1]: candidate.description,
             }))
             .collect::<Vec<_>>(),
     })

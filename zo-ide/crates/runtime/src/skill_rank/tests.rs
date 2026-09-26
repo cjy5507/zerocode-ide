@@ -18,7 +18,7 @@ fn the_search_version_is_pinned_to_its_words() {
     assert_eq!(SKILL_RUBRIC_VERSION, 1);
     assert_eq!(zerocode_core::jev::rubric_fingerprint(search_rubric_words), "c9de8db4a463432e");
     let asked = search_instructions(0);
-    for key in SEARCH_STATE_KEYS {
+    for key in SKILL_STATE_KEYS {
         assert!(asked.contains(&format!("`{key}")), "{key}: {asked}");
     }
     let candidates = skill_candidates(&catalog(2));

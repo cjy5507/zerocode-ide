@@ -118,7 +118,7 @@ fn the_setting_reads_the_tables_words_and_a_slip_is_off() {
 #[test]
 fn the_rubric_is_pinned_to_its_version() {
     assert_eq!(MENTION_RUBRIC_VERSION, 2);
-    assert_eq!(rubric_pin(), "0000000000000000", "the rubric's words moved: bump MENTION_RUBRIC_VERSION");
+    assert_eq!(rubric_pin(), "5e3cc95d27501896", "the rubric's words moved: bump MENTION_RUBRIC_VERSION");
 }
 
 /// The question names every key it reads (t-10010) — the sentence, the

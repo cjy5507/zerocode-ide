@@ -22,7 +22,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use api::{SystemOneConfig, SystemOneFailure, SYSTEMONE_MODEL};
-use runtime::{RouteTaskComplexity, StepAskContext, StepEffortSeat, StepEvent, StepJudgment};
+use runtime::{
+    RouteTaskComplexity, StepAskContext, StepEffortSeat, StepEvent, StepJudgment, STEP_RUBRIC_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zerocode_core::jev::door::{self, Refused};
@@ -135,6 +137,9 @@ pub struct StepJudgmentRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<String>,
     pub step: u32,
+    /// The version of the words the judgment was asked ([`STEP_RUBRIC_VERSION`],
+    /// t-10010): a row that names none was asked the first version's.
+    pub rubric_version: u32,
     /// Why the seat was asked: the governor's own word.
     pub why: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +163,7 @@ impl StepJudgmentRow {
             at: super::decision_shadow::unix_millis(),
             attempt: ask.attempt.clone(),
             step: ask.step,
+            rubric_version: STEP_RUBRIC_VERSION,
             why: ask.why.clone(),
             model: None,
             outcome,

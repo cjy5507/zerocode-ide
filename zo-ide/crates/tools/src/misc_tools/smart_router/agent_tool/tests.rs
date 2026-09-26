@@ -416,9 +416,15 @@ fn a_row_is_spelled_the_way_every_jev_counter_reads_it_and_the_summary_counts_it
     assert_eq!(seat.judged, None, "nothing judges a seat with no floor");
 }
 
-/// Every sentence this seat asks with, in one string, for the pin.
+/// Every sentence this seat asks with, in one string, for the pin: the three
+/// instructions, what an `ask`'s two answers mean, and the state's keys.
 fn rubric_words() -> String {
-    format!("{ASK_INSTRUCTIONS}\n{CHOOSE_INSTRUCTIONS}\n{}", score_instructions(0))
+    format!(
+        "{ASK_INSTRUCTIONS}\n{CHOOSE_INSTRUCTIONS}\n{}\n{}\n{}",
+        score_instructions(0),
+        ASK_OPTION_MEANS.join("\n"),
+        STATE_KEYS.join(",")
+    )
 }
 
 /// The sentences this seat asks with are pinned to its rubric version: a
@@ -427,7 +433,7 @@ fn rubric_words() -> String {
 #[test]
 fn the_rubric_is_pinned_to_its_version() {
     assert_eq!(AGENT_TOOL_RUBRIC_VERSION, 2);
-    assert_eq!(zerocode_core::jev::rubric_fingerprint(rubric_words), "0000000000000000", "{}", rubric_words());
+    assert_eq!(zerocode_core::jev::rubric_fingerprint(rubric_words), "27dc981795271706", "{}", rubric_words());
 }
 
 /// The shape words are the CLI's verbs and the schema's enum, and the

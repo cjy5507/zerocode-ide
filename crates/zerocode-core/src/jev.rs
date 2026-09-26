@@ -1752,8 +1752,6 @@ pub const SKILL_DESCRIPTION_CHAR_CAP: usize = 1_200;
 
 /// The second pass reads only the first part of each shortlisted SKILL.md.
 pub const SKILL_EXCERPT_CHAR_CAP: usize = 700;
-pub const SKILL_DETAIL_CHAR_CAP: usize = SKILL_DESCRIPTION_CHAR_CAP + SKILL_EXCERPT_CHAR_CAP + 3;
-pub const SKILL_FITS_INSTRUCTIONS_CHAR_CAP: usize = SKILL_DESCRIPTION_CHAR_CAP + 200;
 /// A single Choice is documented at this catalog size. Larger catalogs keep
 /// the existing search path until they have their own measured split policy.
 pub const SKILL_SUGGESTION_CATALOG_CAP: usize = 240;
@@ -1860,6 +1858,12 @@ pub const SKILL_SEARCH_APPLY_DEADLINE_MS: u64 = 10_000;
 /// first 700 characters of SKILL.md. One list for two seats, because the
 /// two questions read the same catalog and a cap named twice is a cap that
 /// drifts.
+///
+/// Every skill's words are state (t-10010): a suggestion's option carries a
+/// skill's place and its name, which the state carries uncut beside it, and
+/// no question's instructions carry a skill's words at all — until then the
+/// options and the fits questions carried descriptions and excerpts again,
+/// under caps of their own.
 const SKILL_SENDS: &[Sent] = &[
     Sent {
         at: "/state/task",
@@ -1882,6 +1886,10 @@ const SKILL_SENDS: &[Sent] = &[
         cap: Cap::Items(SKILL_SUGGESTION_SHORTLIST),
     },
     Sent {
+        at: "/state/candidates/*/name",
+        cap: Cap::Uncut,
+    },
+    Sent {
         at: "/state/candidates/*/excerpt",
         cap: Cap::Chars(SKILL_EXCERPT_CHAR_CAP),
     },
@@ -1891,11 +1899,7 @@ const SKILL_SENDS: &[Sent] = &[
     },
     Sent {
         at: "/questions/which/criteria/*",
-        cap: Cap::Chars(SKILL_DETAIL_CHAR_CAP),
-    },
-    Sent {
-        at: "/questions/*/instructions",
-        cap: Cap::Chars(SKILL_FITS_INSTRUCTIONS_CHAR_CAP),
+        cap: Cap::Uncut,
     },
 ];
 
@@ -2019,17 +2023,18 @@ pub const SKILL_SUGGESTION: JevUse = JevUse {
 pub const ZO_STEP_EFFORT_APPLY_DEADLINE_MS: u64 = 1_500;
 
 /// zo's step effort governor: the band of a step inside the turn — read as
-/// the routing rubric's complexity of the turn's words with the step's
-/// signals after them — so a request may spend a rung less on a routine
-/// step and a rung more on a stuck one
-/// (docs/design/zo-step-effort-governor-20260921.md, t-5633).
+/// the complexity of the turn's words, with the step's counts beside them —
+/// so a request may spend a rung less on a routine step and a rung more on a
+/// stuck one (docs/design/zo-step-effort-governor-20260921.md, t-5633).
 ///
 /// The seat is asked only where the governor's own table is unsure — a
 /// read-only batch that is also slipping — or once every few steps; its
 /// answer moves the NEXT request's effort, never the current one. What is
 /// sent is the same head of the turn the routing seat sends, under the same
-/// cap, with one line of counts (batch kind, repeats, errors, a red check)
-/// that name no file and quote no output.
+/// key and cap, and the step's counts (batch kind, repeats, errors in a row,
+/// a red check) as fields of their own that name no file and quote no
+/// output — until t-10010 a line after the words, which the door's cut of a
+/// long turn took with them.
 ///
 /// `auto` rises on the seat's own evidence: the `agreed` mark its writer
 /// leaves one step after the judgment was consulted — whether that step
@@ -2046,10 +2051,22 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
     repeat: None,
-    sends: &[Sent {
-        at: "/state",
-        cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
-    }],
+    sends: &[
+        Sent {
+            at: "/state/task",
+            cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
+        },
+        // The step and its counts: numbers, booleans and the governor's own
+        // word for the batch — nothing a person typed.
+        Sent {
+            at: "/state/step",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/signals",
+            cap: Cap::Uncut,
+        },
+    ],
     ledger: "step-effort-zo.jsonl",
     promotes: true,
     answer_floor_permille: Some(950),
@@ -2064,7 +2081,7 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: false,
-    rubric_version: questions::UNVERSIONED_RUBRIC,
+    rubric_version: questions::ZO_STEP_EFFORT_RUBRIC_VERSION,
     // A progress mark names the judgment it grades by the turn's attempt and
     // the step that judgment was asked at (t-6877): the label's own `step`
     // is the one the answer was consulted at, which is later.
@@ -2788,9 +2805,10 @@ pub const MENTION_APPLY_DEADLINE_MS: u64 = 1_500;
 /// keystroke discards the older question: one question in flight, ever.
 ///
 /// What is sent is the head of the sentence, the token typed, and one page
-/// of candidate names with the head each row already shows on screen.
-/// Nothing is read from disk for it: no file body, no page body, no
-/// transcript. Every request passes the door; a refusal, a timeout or a
+/// of candidate names with the head each row already shows on screen; each
+/// option names its row by the row's place and the title the row shows —
+/// its name, or a session's first words (t-10010). Nothing is read from
+/// disk for it: no file body, no page body, no transcript. Every request passes the door; a refusal, a timeout or a
 /// reply that breaks the contract leaves the fuzzy page as it was.
 ///
 /// `on` and a risen `auto` are the apply stage: the page's rows take the
@@ -2829,6 +2847,12 @@ pub const MENTION_RERANK: JevUse = JevUse {
         Sent {
             at: "/state/candidates/*/head",
             cap: Cap::Bytes(MENTION_HEAD_BYTE_CAP),
+        },
+        // An option's title is a row's name or its head, which the state
+        // carries under the caps above and the seat cuts before it asks.
+        Sent {
+            at: "/questions/*/criteria/*",
+            cap: Cap::Uncut,
         },
     ],
     ledger: "mention-rerank.jsonl",

@@ -888,7 +888,10 @@ fn the_skill_seat_discloses_the_bounded_second_pass() {
             .map(|sent| sent.cap)
     };
     assert_eq!(cap_of("/questions/which/criteria/*"), Some(Cap::Uncut));
-    assert_eq!(cap_of("/state/candidates/*/name"), cap_of("/state/skills/*/name"));
+    assert_eq!(
+        cap_of("/state/candidates/*/name"),
+        cap_of("/state/skills/*/name")
+    );
 }
 
 /// The skill search's own floor is a line under one skill's relevance, and

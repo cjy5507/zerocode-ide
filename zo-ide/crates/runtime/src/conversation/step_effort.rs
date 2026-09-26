@@ -33,18 +33,21 @@
 //! which is the shadow the A/B is read from.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use ::api::{EffortLevel, SystemOneQuestion, SystemOneRequest};
 use serde::Serialize;
-use serde_json::Value;
-use zerocode_core::jev::questions::ROUTING_STATE_TASK;
+use serde_json::{json, Value};
+use zerocode_core::jev::questions::{
+    ROUTING_COMPLEXITY_LEVELS, ROUTING_INTENT_QUESTION, ROUTING_RISK_LEVELS, ROUTING_RISK_QUESTION,
+    ROUTING_STATE_TASK,
+};
 
 use super::deep_gate::{bash_result_exited_zero, command_is_check_shaped};
 use super::repetition::{fingerprint_tool_call, TOOL_REPETITION_THRESHOLD};
 use super::tool::is_concurrency_safe;
 use super::{ApiClient, ContentBlock, ConversationMessage, ConversationRuntime, ToolExecutor};
-use crate::model_router::RouteTaskComplexity;
+use crate::model_router::{RouteTaskComplexity, RubricAxis, COMPLEXITY_AXIS, INTENT_AXIS, RISK_AXIS};
 use crate::SwitchTrigger;
 
 /// Every this many steps the seat is asked once, signals or no signals — the
@@ -493,27 +496,58 @@ const STEP_STATE_KEYS: [&str; 3] = [ROUTING_STATE_TASK, "step", "signals"];
 /// The keys of `signals`: the table's own counts of the batch the step ran.
 const STEP_SIGNAL_KEYS: [&str; 4] = ["batch", "repeats", "errors_in_a_row", "check_red"];
 
-/// The step's counts on one line, after the turn's words.
-fn signals_line(step: u32, signals: &StepSignals) -> String {
-    format!(
-        "[step {step}] batch={} repeats={} errors_in_a_row={} check_red={}",
-        signals.batch.label(),
-        signals.repeats,
-        signals.error_streak,
-        signals.check_red
-    )
-}
+/// What the seat asks of the band — the one answer the governor reads —
+/// whole, and naming every key of the state (t-10010). Version 1 asked the
+/// chat probe's fragment, "how much reasoning/context the task needs end to
+/// end", of a string whose line of counts no question mentioned.
+const STEP_COMPLEXITY_QUESTION: &str = "How much work does `task` need from start to finish? `step` is how many steps the turn has taken, and `signals` says how its latest step went: `batch` is the kind of tool calls that step made, `repeats` the most times one of those calls has been made this turn, `errors_in_a_row` how many steps in a row had a tool call fail, and `check_red` whether a test or check command failed.";
 
-/// The seat's state for one step.
+const _: () = assert!(
+    ROUTING_COMPLEXITY_LEVELS.len() == COMPLEXITY_AXIS.tokens.len()
+        && ROUTING_RISK_LEVELS.len() == RISK_AXIS.tokens.len(),
+    "a routing level stands at each of the router's tokens"
+);
+
+/// The seat's state for one step: the turn's words under the routing seat's
+/// key — the door cuts them there, by that seat's cap — and the step's
+/// counts as fields of their own, which no cut of the words can take
+/// (t-10010: version 1 wrote them as a line after the words, and a turn
+/// whose words ran past the cap sent no counts at all).
 #[must_use]
 pub fn step_state(task: &str, step: u32, signals: &StepSignals) -> Value {
-    Value::String(format!("{task}\n{}", signals_line(step, signals)))
+    json!({
+        STEP_STATE_KEYS[0]: task,
+        STEP_STATE_KEYS[1]: step,
+        STEP_STATE_KEYS[2]: {
+            STEP_SIGNAL_KEYS[0]: signals.batch.label(),
+            STEP_SIGNAL_KEYS[1]: signals.repeats,
+            STEP_SIGNAL_KEYS[2]: signals.error_streak,
+            STEP_SIGNAL_KEYS[3]: signals.check_red,
+        },
+    })
 }
 
-/// The seat's questions.
+/// The seat's questions, built once: the router's three judged axes asked as
+/// Choices over the router's own tokens — what the decision reader
+/// (`validate_decision`) reads — and every option in words. Complexity's
+/// and risk's are the routing seat's own levels, a token and a level at the
+/// same place on the same scale as that seat's reading already takes them;
+/// intent's are the router's own descriptions.
 #[must_use]
 pub fn step_questions() -> &'static BTreeMap<String, SystemOneQuestion> {
-    crate::model_router::decision_questions()
+    static QUESTIONS: OnceLock<BTreeMap<String, SystemOneQuestion>> = OnceLock::new();
+    QUESTIONS.get_or_init(|| {
+        let leveled = |axis: &RubricAxis, instructions: &str, levels: &[&'static str]| {
+            let options = axis.tokens.iter().zip(levels).map(|(token, level)| (*token, Some(*level)));
+            (axis.name.to_string(), SystemOneQuestion::choice(instructions, options))
+        };
+        let intents = INTENT_AXIS.tokens.iter().map(|token| (*token, INTENT_AXIS.description(token)));
+        BTreeMap::from([
+            leveled(&COMPLEXITY_AXIS, STEP_COMPLEXITY_QUESTION, &ROUTING_COMPLEXITY_LEVELS),
+            leveled(&RISK_AXIS, ROUTING_RISK_QUESTION, &ROUTING_RISK_LEVELS),
+            (INTENT_AXIS.name.to_string(), SystemOneQuestion::choice(ROUTING_INTENT_QUESTION, intents)),
+        ])
+    })
 }
 
 /// The seat's request for one step's state.
@@ -1326,7 +1360,7 @@ mod tests {
         assert_eq!(STEP_RUBRIC_VERSION, 2);
         assert_eq!(
             zerocode_core::jev::rubric_fingerprint(step_rubric_words),
-            "0000000000000000",
+            "7a54303feca84f7e",
             "{}",
             step_rubric_words()
         );
@@ -1342,13 +1376,12 @@ mod tests {
     #[test]
     fn every_option_the_seat_offers_says_what_it_means() {
         use ::api::{SystemOneCriteria, SystemOneQuestionKind};
-        use zerocode_core::jev::questions::{ROUTING_COMPLEXITY_LEVELS, ROUTING_RISK_LEVELS};
         let questions = step_questions();
         let asked: Vec<&str> = questions.keys().map(String::as_str).collect();
         let mut judged: Vec<&str> = crate::model_router::judged_axes().map(|axis| axis.name).collect();
         judged.sort_unstable();
         assert_eq!(asked, judged, "the axes the decision reader reads");
-        let options = |axis: &crate::model_router::RubricAxis| {
+        let options = |axis: &RubricAxis| {
             let question = &questions[axis.name];
             assert_eq!(question.kind, SystemOneQuestionKind::Choice, "{}", axis.name);
             let SystemOneCriteria::Named(criteria) = &question.criteria else {
@@ -1371,10 +1404,7 @@ mod tests {
                 );
             }
         }
-        for (axis, levels) in [
-            (&crate::model_router::COMPLEXITY_AXIS, ROUTING_COMPLEXITY_LEVELS),
-            (&crate::model_router::RISK_AXIS, ROUTING_RISK_LEVELS),
-        ] {
+        for (axis, levels) in [(&COMPLEXITY_AXIS, ROUTING_COMPLEXITY_LEVELS), (&RISK_AXIS, ROUTING_RISK_LEVELS)] {
             let criteria = options(axis);
             for (token, level) in axis.tokens.iter().zip(levels) {
                 assert_eq!(criteria[*token].as_deref(), Some(level), "{}/{token}", axis.name);

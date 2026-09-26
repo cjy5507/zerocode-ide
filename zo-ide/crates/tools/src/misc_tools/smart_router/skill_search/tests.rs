@@ -454,15 +454,9 @@ fn skill_search_request_cost() {
         model: SYSTEMONE_MODEL,
         questions: &wide_questions,
     }).expect("wide request");
-    let duplicate_state = runtime::skill_rank::skill_state(task, &held);
-    let duplicate_wide = jev_gate::body_of(&SystemOneRequest {
-        state: &duplicate_state,
-        model: SYSTEMONE_MODEL,
-        questions: &wide_questions,
-    }).expect("duplicate catalog request");
     println!(
-        "wide state once: {} B versus catalog duplicated: {} B",
-        wide.to_string().len(), duplicate_wide.to_string().len()
+        "wide: state {} B (every skill's name and description), questions {} B (a place and a name an option)",
+        wide["state"].to_string().len(), wide["questions"].to_string().len()
     );
     let details: Vec<runtime::skill_rank::SkillDetail> = skills.iter().take(
         zerocode_core::jev::SKILL_SUGGESTION_SHORTLIST
