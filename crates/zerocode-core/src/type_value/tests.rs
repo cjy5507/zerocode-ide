@@ -107,6 +107,148 @@ fn the_chosen_row_is_one_this_table_holds() {
     );
 }
 
+/// Each road a person can choose in the Computer Use pane names its own row
+/// of this table (t-10372): each login a row its vendor's CLI answers, the
+/// key road the row a key has always been asked with, `auto` the two logins
+/// in order and `off` nobody — and a person who never chose is on `auto`.
+#[test]
+fn each_generator_road_names_its_own_row_and_auto_is_the_two_logins() {
+    assert_eq!(GeneratorRoad::default(), GeneratorRoad::Auto);
+    let claude = chosen_on(GeneratorRoad::ClaudeLogin).expect("the Claude login names a row");
+    assert_eq!(claude.road, Road::ClaudeCli);
+    assert_eq!(Some(claude.id.as_str()), seat().claude_login.as_deref());
+    let codex = chosen_on(GeneratorRoad::CodexLogin).expect("the Codex login names a row");
+    assert_eq!(codex.road, Road::CodexCli);
+    assert_eq!(Some(codex.id.as_str()), seat().codex_login.as_deref());
+    let keyed = chosen_on(GeneratorRoad::ApiKey).expect("the key road names a row");
+    assert_eq!(Some(keyed.id.as_str()), chosen().map(|row| row.id.as_str()));
+    assert!(
+        keyed.credential_key.is_some(),
+        "the key road's row names no key"
+    );
+    assert!(chosen_on(GeneratorRoad::Off).is_none());
+    assert!(
+        chosen_on(GeneratorRoad::Auto).is_none(),
+        "auto is no one road"
+    );
+    assert_eq!(
+        GeneratorRoad::Auto.tries(),
+        [GeneratorRoad::ClaudeLogin, GeneratorRoad::CodexLogin]
+    );
+    assert!(GeneratorRoad::Off.tries().is_empty());
+    for road in GeneratorRoad::ALL {
+        let word = serde_json::to_string(&road).expect("a road is a word");
+        assert_eq!(word, format!("\"{}\"", road.word()));
+        assert_eq!(
+            serde_json::from_str::<GeneratorRoad>(&word).expect("its word reads back"),
+            road
+        );
+        if !matches!(road, GeneratorRoad::Auto | GeneratorRoad::Off) {
+            assert_eq!(road.tries(), [road], "{road:?} asks itself");
+        }
+        // No road the pane offers asks a key a person did not choose.
+        if road != GeneratorRoad::ApiKey {
+            for asked in road.tries() {
+                let row = chosen_on(*asked).expect("a row per road tried");
+                assert!(row.credential_key.is_none(), "{road:?} asks a key");
+            }
+        }
+    }
+    assert!(serde_json::from_str::<GeneratorRoad>("\"gemini_login\"").is_err());
+}
+
+/// The login road's run is one headless answer and nothing else: the row's
+/// model, the system on argv as the one thing ours there, and every door a
+/// pane's session would open shut — no saved session, no tool, no settings
+/// file (and so no pane's hooks), no MCP server, no skill. The question is
+/// never on argv.
+#[test]
+fn the_login_roads_run_is_one_headless_answer_with_every_door_shut() {
+    let row = chosen_on(GeneratorRoad::ClaudeLogin).expect("the Claude login row");
+    let argv = claude_cli_argv(row, "SYSTEM");
+    let pair = |flag: &str| {
+        argv.iter()
+            .position(|word| word == flag)
+            .and_then(|at| argv.get(at + 1))
+            .map(String::as_str)
+    };
+    assert_eq!(argv.first().map(String::as_str), Some("-p"));
+    assert_eq!(pair("--model"), Some(row.model.as_str()));
+    assert_eq!(pair("--output-format"), Some("json"));
+    assert_eq!(pair("--tools"), Some(""));
+    assert_eq!(pair("--setting-sources"), Some(""));
+    assert_eq!(pair("--system-prompt"), Some("SYSTEM"));
+    for shut in [
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+    ] {
+        assert!(argv.iter().any(|word| word == shut), "{shut} is missing");
+    }
+    for spoken in ["--resume", "--continue", "--settings", "--bare"] {
+        assert!(
+            !argv.iter().any(|word| word == spoken),
+            "{spoken} rides along"
+        );
+    }
+    // A one-line value is asked with no thinking budget: the row says so.
+    assert_eq!(row.thinking_level.as_deref(), Some("off"));
+    assert_eq!(
+        claude_cli_env(row),
+        [("MAX_THINKING_TOKENS".to_string(), "0".to_string())]
+    );
+}
+
+/// The Codex login's run is the same one headless answer: the row's model at
+/// its rung, the person's config and rules unread, nothing recorded, a
+/// read-only sandbox, the window's compatibility words, and the question on
+/// stdin (`-`) — never on argv.
+#[test]
+fn the_codex_logins_run_is_one_headless_answer_read_from_stdin() {
+    let row = chosen_on(GeneratorRoad::CodexLogin).expect("the Codex login row");
+    let compat = vec!["-c".to_string(), "compat=1".to_string()];
+    let argv = codex_cli_argv(row, &compat);
+    let pair = |flag: &str| {
+        argv.iter()
+            .position(|word| word == flag)
+            .and_then(|at| argv.get(at + 1))
+            .map(String::as_str)
+    };
+    assert_eq!(argv.first().map(String::as_str), Some("exec"));
+    assert_eq!(
+        argv.last().map(String::as_str),
+        Some("-"),
+        "the question is stdin's"
+    );
+    assert_eq!(pair("--model"), Some(row.model.as_str()));
+    assert_eq!(pair("--sandbox"), Some("read-only"));
+    for shut in [
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "compat=1",
+    ] {
+        assert!(argv.iter().any(|word| word == shut), "{shut} is missing");
+    }
+    let rung = row
+        .thinking_level
+        .as_deref()
+        .expect("the row names its rung");
+    assert!(argv.contains(&format!("model_reasoning_effort={rung}")));
+    for spoken in [
+        "resume",
+        "--full-auto",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ] {
+        assert!(
+            !argv.iter().any(|word| word == spoken),
+            "{spoken} rides along"
+        );
+    }
+}
+
 /// Every row carries what its road needs to be reached, and nothing carries a
 /// key: the table names where a key LIVES, never what it is.
 #[test]
@@ -122,6 +264,18 @@ fn every_row_carries_its_road_and_no_key() {
                 );
             }
             Road::CodeAssist => assert!(row.host.is_some(), "{} has no host", row.id),
+            // The login is the vendor CLI's own, spent where the CLI keeps it
+            // (t-10372): a row of this road names no endpoint, no key and no
+            // client to speak as — nothing of a login ever passes through us.
+            Road::ClaudeCli | Road::CodexCli => assert!(
+                row.base_url.is_none()
+                    && row.credential_key.is_none()
+                    && row.keychain_service.is_none()
+                    && row.client_fingerprint.is_none()
+                    && row.host.is_none(),
+                "{} carries a way around the CLI",
+                row.id
+            ),
             Road::Anthropic => {
                 assert!(row.base_url.is_none(), "{} pins an endpoint", row.id);
                 // A person's own key, by its name in the window's key store:
