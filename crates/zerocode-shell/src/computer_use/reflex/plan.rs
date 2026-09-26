@@ -66,6 +66,11 @@ pub(crate) trait Generator {
     ///
     /// The wire's word for why there is none.
     fn ask(&mut self, system: &str, user: &str, left: Duration) -> Result<Said, String>;
+    /// Where its plans come from, as a plan's row and the autopilot's
+    /// account say it: a model's, unless a bench stands in for one.
+    fn source(&self) -> &'static str {
+        SOURCE_MODEL
+    }
 }
 
 impl Generator for LiveWriter {
@@ -430,6 +435,8 @@ pub(crate) struct Written {
     pub rtt_ms: u64,
     pub tokens: Option<Tokens>,
     pub refusals: Vec<String>,
+    /// Where the plan came from: the generator's word.
+    pub source: &'static str,
 }
 
 /// The word a plan's row names a model's plan that never passed its checks
@@ -450,6 +457,7 @@ pub(crate) fn write_plan(generator: &mut dyn Generator, ask: &Ask<'_>) -> Writte
         rtt_ms: 0,
         tokens: None,
         refusals: Vec::new(),
+        source: generator.source(),
     };
     let mut scope_refused = false;
     for _ in 0..=REFLEX_PLAN_RETRIES {
@@ -520,7 +528,7 @@ pub(crate) fn ledger_row(
         "run": run,
         "epoch": epoch,
         "planHash": written.plan.as_ref().ok().map(|plan| plan.plan().plan_hash.clone()),
-        "source": SOURCE_MODEL,
+        "source": written.source,
         "goalHash": zerocode_core::jev::fingerprint_of(goal),
         "palette": palette.json(),
         "promptVersion": PROMPT_VERSION,
@@ -536,7 +544,7 @@ pub(crate) fn ledger_row(
 }
 
 /// Where a plan came from: written by the model (every plan an autopilot
-/// runs), or by a person (`reflex-start`).
+/// runs in the window), or by a person (`reflex-start`).
 pub(crate) const SOURCE_MODEL: &str = "model";
 
 #[cfg(test)]

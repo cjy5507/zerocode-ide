@@ -727,7 +727,7 @@ impl Autopilot {
             "run": id,
             "epoch": self.epoch,
             "planHash": plan.plan_hash,
-            "source": plan::SOURCE_MODEL,
+            "source": written.source,
             "promptVersion": plan::PROMPT_VERSION,
             "requests": written.requests,
             "rttMs": written.rtt_ms,

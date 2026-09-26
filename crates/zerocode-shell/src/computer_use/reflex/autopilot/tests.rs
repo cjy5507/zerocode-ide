@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 
-use super::super::plan::tests::{Scripted, answer_for, capture, scope};
+use super::super::plan::tests::{Named, Scripted, answer_for, capture, scope};
 use super::super::tests::{answer_naming, open, reading_handshake};
 use super::*;
 use crate::systemone::Spent;
@@ -920,4 +920,27 @@ fn the_share_is_counted_in_the_helpers_own_outcome_words() {
             "`{word}` is not a receipt outcome"
         );
     }
+}
+
+/// The autopilot's account names every plan by the generator that wrote it:
+/// a stand-in's plans are never said to be a model's.
+#[test]
+fn the_account_names_the_generator_each_plan_came_from() {
+    let mut fake = Fake::new((JevMode::Auto, true), Vec::new());
+    let mut stub = Named {
+        scripted: Scripted {
+            answers: vec![good()].into(),
+            asked: Vec::new(),
+        },
+        source: "stub",
+    };
+    let (_autopilot, answer) = fake
+        .with(Some(&mut stub), |world| {
+            Autopilot::start(asked(Some(JevMode::Auto)), open(), None, world)
+        })
+        .expect("started");
+    let run = answer["runId"].as_str().expect("a run");
+    let status = report(run).expect("the autopilot's account");
+    assert_eq!(status["plans"][0]["source"], json!("stub"));
+    assert_eq!(fake.plans[0]["source"], json!("stub"));
 }
