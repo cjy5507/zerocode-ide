@@ -1340,14 +1340,33 @@ fn a_step_effort_question_acts_under_on_and_under_auto_once_its_evidence_stands(
     const { assert!(STEP_EFFORT_APPLY_DEADLINE_MS < STALL_APPLY_DEADLINE_MS) };
 }
 
-/// The one text a summons' question carries is the head of the brief. The
-/// agent the coordinator typed is not in the table's `sends` because it is
-/// not in the state at all — a question that shows the answer somebody
-/// already wrote down is not a second opinion.
+/// The texts a summons' question carries are the head of the brief and the
+/// titles of each offered agent's newest tasks — both the coordinators' own
+/// words, so both pass the door, each under its own cap (t-9469: the titles
+/// rode an option's sentence, which no `sends` named, until they became a
+/// field). The agent the coordinator typed is not in the table's `sends`
+/// because it is not in the state at all — a question that shows the answer
+/// somebody already wrote down is not a second opinion.
 #[test]
-fn a_summon_question_sends_the_brief_and_nothing_else() {
+fn a_summon_question_sends_the_brief_and_the_task_titles_and_nothing_else() {
     let sent: Vec<&str> = SUMMON.sends.iter().map(|sent| sent.at).collect();
-    assert_eq!(sent, ["/state/brief"]);
+    assert_eq!(
+        sent,
+        [
+            "/state/brief",
+            "/state/agents/*/newestTasks",
+            "/state/agents/*/newestTasks/*"
+        ]
+    );
+    let caps: Vec<Cap> = SUMMON.sends.iter().map(|sent| sent.cap).collect();
+    assert_eq!(
+        caps,
+        [
+            Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
+            Cap::Items(crate::summon_choice::SUMMON_RECENT_BRIEFS),
+            Cap::Chars(crate::summon_choice::SUMMON_RECENT_BRIEF_CHAR_CAP),
+        ]
+    );
 }
 
 /// The classifier's four words are zo's four words, and its absent-key answer
@@ -2623,6 +2642,367 @@ fn every_seat_names_its_rubric_and_how_its_labels_name_a_request() {
         &["attempt", "step"],
         "a progress mark names the judgment it grades by the turn and the step it was asked at"
     );
+}
+
+/// Every option, level and outcome a request's `questions` offer that says
+/// nothing of what it means, as `question/option` — the seat audit's second
+/// column (t-9469). The model never sees a question's id, and an option that
+/// carries no words is a name whose meaning it has to guess.
+fn undescribed(questions: &Value) -> Vec<String> {
+    let said = |means: &Value| match means {
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        _ => false,
+    };
+    let mut missing = Vec::new();
+    for (id, question) in questions.as_object().expect("a questions map") {
+        match &question["criteria"] {
+            Value::Object(options) => missing.extend(
+                options
+                    .iter()
+                    .filter(|(_, means)| !said(means))
+                    .map(|(option, _)| format!("{id}/{option}")),
+            ),
+            Value::Array(levels) => missing.extend(
+                levels
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, means)| !said(means))
+                    .map(|(level, _)| format!("{id}/{level}")),
+            ),
+            _ => missing.push(format!("{id}/criteria")),
+        }
+    }
+    missing
+}
+
+/// Where a seat's questions are built, and so where the audit's second
+/// column is held for it (t-9469).
+enum Asked {
+    /// This crate builds them: one fixture request's `questions` for every
+    /// shape the seat asks in.
+    Here(Vec<Value>),
+    /// zo builds them from words this crate spells: the criteria those words
+    /// give, read where they are spelled.
+    Spelled(Vec<&'static str>),
+    /// zo builds them from words of its own, and zo's tests hold their shape.
+    InZo,
+    /// The seat asks no question of its own (the memo's).
+    Nothing,
+}
+
+/// One fixture request of each shape the seats this crate builds ask.
+fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
+    use crate::screen_action::{self as screen, Beside, Errand, Where, snapshot};
+    let items = [
+        json!({ "mark": 1, "role": "button", "label": "Save", "centerX": 10.0, "centerY": 10.0 }),
+        json!({ "mark": 2, "role": "textbox", "label": "Name", "centerX": 10.0, "centerY": 30.0 }),
+    ];
+    let fields = [json!({
+        (snapshot::FIELD_MARK_KEY): 2,
+        (snapshot::FIELD_KIND_KEY): "text",
+        (snapshot::FIELD_SECRET_KEY): false,
+        (snapshot::LABEL_KEY): "Name",
+        (snapshot::FIELD_VALUE_KEY): "",
+    })];
+    let containers = [json!({ "label": "Results", "role": "list", "count": 3 })];
+    let images = [json!({ "alt": "A photo", "width": 200, "height": 100 })];
+    let rows = [json!({ "text": "First result" })];
+    let screen_at = |at: Where<'_>| -> Vec<Value> {
+        let goal = screen::ActionLook {
+            goal: "save the form",
+            errand: Errand::Goal,
+            at,
+            tried: &[],
+            items: &items,
+            pressed: &[],
+            shows: &[],
+        };
+        let beside = Beside {
+            types: true,
+            fields: &fields,
+            containers: &containers,
+            images: &images,
+            rows: &rows,
+        };
+        let stopped = screen::ActionLook {
+            errand: Errand::Clear {
+                stopped: "step_failed",
+                step: "click",
+                refusal: "not found",
+            },
+            ..goal
+        };
+        [
+            screen::ask_with(&goal, &beside),
+            screen::ask(&goal),
+            screen::ask(&stopped),
+        ]
+        .into_iter()
+        .map(|asked| asked.expect("a screen with controls asks").questions)
+        .collect()
+    };
+    let asked = match row.id {
+        id if id == BROWSER.id => screen_at(Where::Page {
+            host: "app.local",
+            path: "/form",
+        }),
+        id if id == DESKTOP.id => screen_at(Where::Desk {
+            app: "Notes",
+            window: "Untitled",
+        }),
+        id if id == EMULATOR.id => screen_at(Where::Phone {
+            platform: "android",
+            device: "Pixel_6",
+        }),
+        id if id == STALL.id => vec![
+            crate::stall_cause::ask(&crate::stall_cause::StallLook {
+                agent: "claude",
+                quiet_ms: 300_000,
+                screen: "❯",
+                transcript: &[],
+            })
+            .expect("a screen asks")
+            .questions,
+        ],
+        id if id == PLACEMENT.id => {
+            use crate::worker_placement::{InFront, PlacementLook, StartedBy, ask};
+            vec![
+                ask(&PlacementLook {
+                    brief: "measure the frame time",
+                    started_by: StartedBy::Person,
+                    in_front: InFront::Terminal,
+                    same_workspace: true,
+                    panes: 1,
+                    may_split: true,
+                })
+                .questions,
+            ]
+        }
+        id if id == SUMMON.id => {
+            use crate::summon_choice::{AgentRecord, SummonLook, Summonable, ask};
+            let agent = |id: &str| Summonable {
+                id: id.to_string(),
+                spent_percent: None,
+                window: None,
+                record: AgentRecord::default(),
+            };
+            vec![
+                ask(
+                    &SummonLook {
+                        brief: "measure the frame time",
+                        brief_chars: 22,
+                        worktree: true,
+                        replaces_an_attempt: false,
+                        carries_a_task: true,
+                        attempts: 0,
+                        failures: 0,
+                        pinned_model: None,
+                    },
+                    &[agent("claude"), agent("codex")],
+                )
+                .expect("two agents are a question")
+                .questions,
+            ]
+        }
+        id if id == STEP_EFFORT.id => {
+            use crate::step_effort::{Signals, Standing, StepLook, ask};
+            vec![
+                ask(&StepLook {
+                    agent: "claude",
+                    signals: &Signals::default(),
+                    standing: &Standing {
+                        current: Some("high"),
+                        floor: None,
+                        raised: false,
+                        stall_cause: None,
+                    },
+                })
+                .questions,
+            ]
+        }
+        id if id == BROWSER_READ.id => {
+            use crate::browser_read::{ReadBlock, ask};
+            let blocks = [
+                ReadBlock::new("body>main>article", "The article."),
+                ReadBlock::new("body>footer", "Terms · Privacy"),
+            ];
+            ask("A page", &blocks)
+                .into_iter()
+                .map(|asked| asked.questions)
+                .collect()
+        }
+        id if id == NOTIFY.id => {
+            use crate::notify::Ring;
+            use crate::notify_call::{Attendance, NotifyLook, ask};
+            vec![
+                ask(&NotifyLook {
+                    ring: Ring::Completion,
+                    interrupted: false,
+                    agent: "claude",
+                    pane: "t-9469",
+                    attendance: Attendance::Away,
+                    words: "done",
+                    since_last_ms: None,
+                    waiting_panes: 0,
+                    recent: &[],
+                })
+                .questions,
+            ]
+        }
+        id if id == BRANCHING.id => {
+            use crate::branching::{BranchLook, Candidate, Outcome, ask};
+            let candidates = [
+                Candidate {
+                    mark: 1,
+                    action: "1 button Wi-Fi @10,10".to_string(),
+                    result: Some(Outcome {
+                        moved: true,
+                        controls: vec!["1 switch Wi-Fi @10,10".to_string()],
+                        count: 1,
+                    }),
+                },
+                Candidate {
+                    mark: 2,
+                    action: "2 button Bluetooth @10,40".to_string(),
+                    result: None,
+                },
+            ];
+            vec![
+                ask(&BranchLook {
+                    goal: "open the Wi-Fi settings",
+                    at: Where::Phone {
+                        platform: "android",
+                        device: "Pixel_6",
+                    },
+                    before: &[],
+                    candidates: &candidates,
+                })
+                .expect("two candidates are a question")
+                .questions,
+            ]
+        }
+        id if id == CHALLENGER.id => vec![
+            challenger::ask(
+                "dp-1",
+                "make the index faster",
+                &challenger::Designs {
+                    incumbent: "cache it",
+                    challenger: "stream it",
+                },
+            )
+            .questions,
+        ],
+        id if id == REFLEX_DECIDE.id => vec![reflex_decide::questions()],
+        _ => return None,
+    };
+    Some(asked)
+}
+
+/// Where every seat of the table is asked, and what it offers: the audit's
+/// second column over all twenty-seven rows (t-9469). A seat this crate
+/// builds is asked here, from a fixture, in every shape it asks in, and no
+/// option, level or outcome of it may go without the words that say what it
+/// means; a seat zo builds from words this crate spells is read where they
+/// are spelled; a seat zo builds from words of its own is zo's tests' to
+/// hold. A row added to the table and placed nowhere is red here.
+#[test]
+fn every_seat_offers_no_option_without_the_words_that_say_what_it_means() {
+    use crate::jev::questions::{self as words, Contrast};
+    let contrast = |option: &Contrast| [option.what, option.not_for];
+    for row in &JEV_USES {
+        let asked = match asked_here(row) {
+            Some(requests) => Asked::Here(requests),
+            None => match row.id {
+                id if id == ROUTING.id => Asked::Spelled(
+                    words::ROUTING_COMPLEXITY_LEVELS
+                        .into_iter()
+                        .chain(words::ROUTING_RISK_LEVELS)
+                        .chain(
+                            words::ROUTING_INTENTS
+                                .iter()
+                                .flat_map(|intent| contrast(&intent.option)),
+                        )
+                        .chain(words::ROUTING_REASONING.iter().flat_map(contrast))
+                        .chain(
+                            words::ROUTING_FACTS
+                                .iter()
+                                .flat_map(|fact| [fact.yes, fact.no]),
+                        )
+                        .collect(),
+                ),
+                id if id == SKILL_SUGGESTION.id => Asked::Spelled(vec![
+                    words::SKILL_NO_MATCH_CRITERION,
+                    words::SKILL_YES,
+                    words::SKILL_NO,
+                ]),
+                id if id == VAULT_PAIRS.id => Asked::Spelled(
+                    words::VAULT_PAIR_LINK_LEVELS
+                        .into_iter()
+                        .chain([words::VAULT_PAIR_YES, words::VAULT_PAIR_NO])
+                        .collect(),
+                ),
+                id if id == COMMAND_GUARD.id => Asked::Spelled(
+                    words::COMMAND_GUARD_QUESTIONS
+                        .iter()
+                        .flat_map(|[_, _, yes, no]| [*yes, *no])
+                        .collect(),
+                ),
+                id if id == TOOL_TEXT_GUARD.id => Asked::Spelled(vec![
+                    words::TOOL_TEXT_INSTRUCTED_YES,
+                    words::TOOL_TEXT_INSTRUCTED_NO,
+                ]),
+                id if [
+                    RECALL.id,
+                    SKILLS.id,
+                    ZO_STEP_EFFORT.id,
+                    COMPACTION.id,
+                    AGENT_TOOL.id,
+                    MENTION_RERANK.id,
+                    PATCH_REVIEW.id,
+                    CLAIM.id,
+                    FILE_PICK.id,
+                ]
+                .contains(&id) =>
+                {
+                    Asked::InZo
+                }
+                id if id == JUDGMENT_CACHE.id => Asked::Nothing,
+                id => panic!("{id}: a seat the audit places nowhere"),
+            },
+        };
+        match asked {
+            Asked::Here(requests) => {
+                assert!(!requests.is_empty(), "{}: asked in no shape", row.id);
+                for questions in &requests {
+                    assert_eq!(
+                        undescribed(questions),
+                        Vec::<String>::new(),
+                        "{}: an option says nothing of what it means",
+                        row.id
+                    );
+                }
+            }
+            Asked::Spelled(criteria) => {
+                assert!(!criteria.is_empty(), "{}", row.id);
+                for means in criteria {
+                    assert!(!means.trim().is_empty(), "{}: an empty criterion", row.id);
+                }
+            }
+            Asked::InZo | Asked::Nothing => {}
+        }
+    }
+    // The checker itself: an option without words is caught, a Noul's two
+    // outcomes and a Score's levels are read as options are.
+    let bare = json!({
+        "which": { "type": "choice", "instructions": "?", "criteria": { "a": "A.", "b": null } },
+        "how": { "type": "score", "instructions": "?", "criteria": ["Low.", ""] },
+        "is": { "type": "noul", "instructions": "?" },
+    });
+    let mut missing = undescribed(&bare);
+    missing.sort_unstable();
+    assert_eq!(missing, ["how/1", "is/criteria", "which/b"]);
 }
 
 /// What a request's name picks out is the table's to say, seat by seat

@@ -6262,10 +6262,22 @@ fn an_unmarked_stall_is_asked_about_once_and_recorded_beside_the_silence() {
         heard[0]
     );
     let sent = heard_body(&heard[0]);
-    let screen = sent["state"]["screen"].as_str().expect("the screen");
+    // The screen's lines and the record's turns, each a field of its own
+    // (t-9469), counted against their caps as the builder kept them.
+    let screen = sent["state"]["screen"]
+        .as_array()
+        .expect("the screen's lines")
+        .iter()
+        .map(|line| line.as_str().expect("a line"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let transcript = sent["state"]["transcript"]
-        .as_str()
-        .expect("the transcript");
+        .as_array()
+        .expect("the record's turns")
+        .iter()
+        .map(|turn| turn["words"].as_str().expect("a turn's words"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(screen.len() <= STALL_SCREEN_BYTE_CAP, "{}", screen.len());
     assert!(
         transcript.len() <= STALL_TRANSCRIPT_BYTE_CAP,

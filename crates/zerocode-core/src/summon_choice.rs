@@ -142,7 +142,7 @@ pub const SUMMON_RECENT_BRIEFS: usize = 3;
 const BRIEF_SEPARATOR: &str = "; ";
 
 /// The state's keys, in the order the fingerprint reads them.
-const STATE_KEYS: [&str; 8] = [
+const STATE_KEYS: [&str; 10] = [
     "brief",
     "briefChars",
     "worktree",
@@ -151,7 +151,32 @@ const STATE_KEYS: [&str; 8] = [
     "attempts",
     "failures",
     "pinnedModel",
+    "agents",
+    "summonedAll",
 ];
+
+/// The state's key for the agents offered, one entry each.
+const AGENTS_KEY: &str = STATE_KEYS[8];
+
+/// The state's key for how many summonses this ledger gave the agents
+/// offered, all told.
+const SUMMONED_ALL_KEY: &str = STATE_KEYS[9];
+
+/// The keys of one agent's entry, in the order the fingerprint reads them.
+const AGENT_KEYS: [&str; 8] = [
+    "id",
+    "quotaSpentPercent",
+    "quotaWindow",
+    "summoned",
+    "ended",
+    "reachedWorkerDone",
+    "medianMinutes",
+    "newestTasks",
+];
+
+/// What an option says: what choosing it means, and nothing it weighs.
+const OPTION_MEANS: &str =
+    "{agent} carries the work; its quota and this window's record of it are its entry in `agents`.";
 
 /// The version of the words above. Bump it when any of them changes: a
 /// judgment read under one wording is not evidence about another. The test

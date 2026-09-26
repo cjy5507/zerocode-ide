@@ -46,6 +46,10 @@ const RESULT_KEYS: [&str; 3] = ["moved", "controls", "count"];
 /// How an option's description says its candidate was not explored.
 const UNEXPLORED: &str = "not explored";
 
+/// What an option says: which press it is — the control's legend line — and
+/// nothing of where the press led, which is the candidate's `result`.
+const OPTION_MEANS: &str = "Pressed {action}.";
+
 /// The version of the words in this module. Bump it when any of them
 /// changes: a judgment read under one wording is not evidence about another.
 /// The test `the_version_is_pinned_to_the_words` holds it to
@@ -388,10 +392,13 @@ mod tests {
 
     /// The version is pinned to the words: a wording change without a bump
     /// is a red test, not a quiet drift.
+    /// Version 2 stops restating a candidate's result in its option's words
+    /// (t-9469): what a press led to is the `result` field the state carries,
+    /// and an option says only which press it is.
     #[test]
     fn the_version_is_pinned_to_the_words() {
-        assert_eq!(BRANCHING_RUBRIC_VERSION, 1);
-        assert_eq!(rubric_fingerprint(rubric_words), "8345cffb78ba4bf9");
+        assert_eq!(BRANCHING_RUBRIC_VERSION, 2);
+        assert_eq!(rubric_fingerprint(rubric_words), "0000000000000000");
     }
 
     fn choice(chosen: usize, spread: &[(usize, f64)]) -> ActionChoice {
@@ -500,16 +507,23 @@ mod tests {
             .as_object()
             .expect("criteria");
         assert_eq!(criteria.len(), 3);
-        assert!(
-            criteria["mark:7"]
-                .as_str()
-                .is_some_and(|said| said.contains("did not move"))
-        );
-        assert!(
-            criteria["mark:1"]
-                .as_str()
-                .is_some_and(|said| said.contains(UNEXPLORED))
-        );
+        // An option says which press it is and nothing of where the press
+        // led (t-9469): the result is the state's field, said once.
+        for candidate in &candidates {
+            assert_eq!(
+                criteria[&option_of(candidate.mark)],
+                json!(OPTION_MEANS.replace("{action}", &candidate.action)),
+                "mark:{}",
+                candidate.mark
+            );
+        }
+        let options = json!(criteria).to_string();
+        for restated in ["moved", "control", "explored", "항목"] {
+            assert!(
+                !options.contains(restated),
+                "an option restated a result ({restated}): {options}"
+            );
+        }
         assert_eq!(asked.questions[QUESTION]["type"], "choice");
         // Past the cap, a fourth candidate is not offered at all.
         let four = [

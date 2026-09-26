@@ -43,6 +43,10 @@ const INSTRUCTIONS: &str = "A worker agent running in a terminal has printed not
 /// The state's keys, in the order the fingerprint reads them.
 const STATE_KEYS: [&str; 4] = ["agent", "quietSeconds", "screen", "transcript"];
 
+/// The keys of one turn of `transcript`, in the order the fingerprint reads
+/// them: who spoke, and what was said.
+const TURN_KEYS: [&str; 2] = ["role", "words"];
+
 /// The version of the words in this module. Bump it when any of them changes:
 /// a judgment read under one wording is not evidence about another. The test
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`].

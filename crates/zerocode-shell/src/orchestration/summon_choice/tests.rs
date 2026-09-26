@@ -159,19 +159,31 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
     );
     assert_eq!(sent["state"]["briefChars"], json!(2_480));
     assert_eq!(sent["state"]["worktree"], json!(true));
+    // Each agent's room and record went as fields of its own entry, in the
+    // order offered, and an option's words say nothing it weighs (t-9469).
+    let agents = sent["state"]["agents"]
+        .as_array()
+        .expect("the agents offered");
+    assert_eq!(agents.len(), 2);
+    assert_eq!(agents[0]["id"], json!("claude"));
+    assert_eq!(agents[0]["quotaSpentPercent"], json!(61));
+    assert_eq!(agents[0]["summoned"], json!(265));
+    assert_eq!(agents[0]["reachedWorkerDone"], json!(121));
+    assert_eq!(
+        agents[0]["newestTasks"],
+        json!(["measure the seat's own latency"])
+    );
+    assert_eq!(agents[1]["id"], json!("kimi"));
+    assert_eq!(agents[1]["quotaSpentPercent"], Value::Null, "no gauge read");
+    assert_eq!(sent["state"]["summonedAll"], json!(265));
     let criteria = &sent["questions"]["summon"]["criteria"];
-    assert!(
-        criteria["claude"]
-            .as_str()
-            .expect("claude's room")
-            .contains("61%")
-    );
-    assert!(
-        criteria["kimi"]
-            .as_str()
-            .expect("kimi's room")
-            .contains("no quota gauge")
-    );
+    for id in ["claude", "kimi"] {
+        let said = criteria[id].as_str().expect("an option's words");
+        assert!(
+            !said.chars().any(|glyph| glyph.is_ascii_digit()),
+            "an option carries no number: {said}"
+        );
+    }
     // The model the coordinator pinned is a constraint the options were
     // already narrowed by, and the state says it (t-6342); the agent it typed
     // is still nowhere in it.
