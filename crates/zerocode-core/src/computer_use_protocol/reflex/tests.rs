@@ -88,9 +88,9 @@ fn shared_golden_runs_through_the_real_validator() {
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
-    // R1's 32 cases under v2, the six v2 adds, and the identifier bound's
-    // two sides (t-9205).
-    assert_eq!(cases.len(), 40);
+    // R1's 32 cases under v2, the six v2 adds, the identifier bound's two
+    // sides (t-9205), and a detector's pick with the R4 bench's plan (t-10242).
+    assert_eq!(cases.len(), 49);
     for name in manifest["wire_negative"].as_array().unwrap() {
         let name = name.as_str().unwrap();
         let path = format!(
@@ -693,6 +693,116 @@ fn a_colour_detector_carries_its_spec_inside_the_plan_hash() {
     old.version = 1;
     old.plan_hash = plan_hash(&old);
     assert_eq!(validate(old).unwrap_err(), ReflexError::Version);
+}
+
+/// A detector whose pick is `first` leaves the word out of the wire, so a plan
+/// written before the word existed keeps its bytes and its hash (t-10223 R8):
+/// `pick_omitted` and the plan the R4 bench writes (`valid_bench_plan`, hashed
+/// by the v1.1.28 core) come back byte for byte under the digest they carry.
+/// Each word written out is another plan under another digest, and without the
+/// word each is `pick_omitted` exactly.
+#[test]
+fn a_plan_without_a_pick_keeps_the_wire_and_the_hash_it_had() {
+    for name in ["pick_omitted", "valid_bench_plan"] {
+        let row = golden(name);
+        let validated = decode_wire(&row.wire).unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        assert_eq!(wire_bytes(validated.plan()), row.wire, "{name}");
+        assert_eq!(
+            plan_hash(validated.plan()),
+            row.plan["plan_hash"].as_str().unwrap(),
+            "{name}"
+        );
+        assert!(!String::from_utf8(row.wire).unwrap().contains("\"pick\""));
+    }
+    let omitted = golden("pick_omitted");
+    for word in ["nearest", "largest", "newest", "oldest"] {
+        let row = golden(&format!("pick_{word}"));
+        let validated = decode_wire(&row.wire).unwrap_or_else(|err| panic!("{word}: {err:?}"));
+        assert_eq!(wire_bytes(validated.plan()), row.wire, "{word}");
+        assert_ne!(
+            validated.plan().plan_hash,
+            omitted.plan["plan_hash"].as_str().unwrap(),
+            "{word}"
+        );
+        let mut without = row.plan.clone();
+        without["detectors"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("pick");
+        let mut typed: ReflexPlan = serde_json::from_value(without).unwrap();
+        typed.plan_hash = plan_hash(&typed);
+        assert_eq!(wire_bytes(&typed), omitted.wire, "{word}");
+    }
+}
+
+/// A Flow document names a detector's pick inside its `detector:` line — the
+/// detector's own JSON, never a line of its own — and writes it back the same
+/// way; a word the contract does not know is refused where the line is read.
+#[test]
+fn a_flow_detector_line_carries_its_pick() {
+    let omitted: ReflexPlan = serde_json::from_value(golden("pick_omitted").plan).unwrap();
+    let nearest = golden("pick_nearest");
+    let text = omitted
+        .written_sections()
+        .replace("\"patches\":1,", "\"patches\":1,\"pick\":\"nearest\",")
+        .replace(
+            &omitted.plan_hash,
+            nearest.plan["plan_hash"].as_str().unwrap(),
+        );
+    let read = read_sections(&text)
+        .unwrap_or_else(|err| panic!("{err}"))
+        .unwrap();
+    assert_eq!(wire_bytes(read.plan()), nearest.wire);
+    let written = read.plan().written_sections();
+    assert!(written.contains("\"pick\":\"nearest\""));
+    assert_eq!(
+        read_sections(&written).unwrap().unwrap().plan(),
+        read.plan()
+    );
+    let unknown = text.replace("\"pick\":\"nearest\"", "\"pick\":\"nearby\"");
+    assert!(
+        read_sections(&unknown)
+            .unwrap_err()
+            .starts_with("detector:")
+    );
+}
+
+/// `Pick::ALL` is the one table of a pick's words: each is its serde name,
+/// `first` is the default and the one the wire leaves out, and every scene of
+/// `pick_cases.json` names each word once for each of its frames — the scenes
+/// Swift reads through its kernel.
+#[test]
+fn a_picks_words_are_one_table() {
+    for pick in Pick::ALL {
+        assert_eq!(serde_json::to_value(pick).unwrap(), pick.word());
+        assert_eq!(
+            serde_json::from_value::<Pick>(pick.word().into()).unwrap(),
+            pick
+        );
+        assert_eq!(pick.is_first(), pick == Pick::default());
+    }
+    assert_eq!(Pick::default(), Pick::First);
+    let words: BTreeSet<&str> = Pick::ALL.iter().map(|pick| pick.word()).collect();
+    assert_eq!(words.len(), Pick::ALL.len());
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/reflex-contract/pick_cases.json"
+    ))
+    .unwrap();
+    let cases = fixture["cases"].as_array().unwrap();
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let frames = case["frames"].as_array().unwrap().len();
+        let expected = case["expected"].as_object().unwrap();
+        assert_eq!(
+            expected.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            words,
+            "{name}"
+        );
+        for (word, targets) in expected {
+            assert_eq!(targets.as_array().unwrap().len(), frames, "{name} {word}");
+        }
+    }
+    assert_eq!(cases.len(), 4);
 }
 
 #[test]

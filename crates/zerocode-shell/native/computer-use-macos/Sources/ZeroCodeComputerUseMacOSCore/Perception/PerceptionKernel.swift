@@ -41,6 +41,8 @@ public final class PerceptionSession: ReflexPerceptionSession {
         /// The detector's ROI, written against its spec's reference extent.
         let roi: ReflexRoi
         let spec: PerceptionColorSpec
+        /// Which blob its target follows when it follows none.
+        let pick: ReflexPick
         let palette: PerceptionPalette
         var confirm = PerceptionConfirm()
         var cells: [Int: UInt64] = [:]
@@ -64,18 +66,18 @@ public final class PerceptionSession: ReflexPerceptionSession {
     convenience init(plan: ValidatedReflexPlan, limits: PerceptionLimits) throws {
         try self.init(detectors: plan.plan.detectors.map { detector in
             guard detector.kind == .color, let spec = detector.color else { throw ReflexContractError.perception }
-            return (detector.id, detector.roi, spec)
+            return (detector.id, detector.roi, spec, detector.pick)
         }, limits: limits)
     }
 
-    /// The detectors in plan order: an id, the ROI written against the spec's reference extent, and
-    /// the spec.
-    init(detectors: [(id: String, roi: ReflexRoi, spec: PerceptionColorSpec)], limits: PerceptionLimits) throws {
+    /// The detectors in plan order: an id, the ROI written against the spec's reference extent, the
+    /// spec and its pick.
+    init(detectors: [(id: String, roi: ReflexRoi, spec: PerceptionColorSpec, pick: ReflexPick)], limits: PerceptionLimits) throws {
         self.detectors = try detectors.map { detector in
             guard (try? PerceptionSpecs.validate(detector.spec, roi: detector.roi, limits: limits)) != nil,
                   let palette = PerceptionPalette(detector.spec)
             else { throw ReflexContractError.perception }
-            return Detector(id: detector.id, roi: detector.roi, spec: detector.spec, palette: palette)
+            return Detector(id: detector.id, roi: detector.roi, spec: detector.spec, pick: detector.pick, palette: palette)
         }
     }
 
@@ -84,7 +86,7 @@ public final class PerceptionSession: ReflexPerceptionSession {
     /// Confirmations and tracks are the session's to settle: a detector that answers `budget`, late
     /// or unread, has already let go of them, so a runtime that drops that answer has nothing of
     /// this session's to take back.
-    public func observe(frame: ReflexFrameFacts, pixels: ReflexPixels,
+    public func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, hand: (x: Int64, y: Int64)?,
                         budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
         guard let reference = ReflexFrameRef(frame) else {
             for at in detectors.indices { detectors[at].forget() }
@@ -102,7 +104,7 @@ public final class PerceptionSession: ReflexPerceptionSession {
         lastCapture = frame.capture_seq
         let plane = PerceptionPlane(pixels)
         var exhausted = false
-        return detectors.indices.map { at in look(&detectors[at], frame, reference, plane, &budget, &exhausted) }
+        return detectors.indices.map { at in look(&detectors[at], frame, reference, plane, hand, &budget, &exhausted) }
     }
 
     /// Why no detector can read this frame, if none can: it is not a ready capture with a known
@@ -127,9 +129,9 @@ public final class PerceptionSession: ReflexPerceptionSession {
     /// does, and no detector after it reads. The samples it read stay on its receipt; the tick paid
     /// them.
     private func look(_ detector: inout Detector, _ frame: ReflexFrameFacts, _ reference: ReflexFrameRef,
-                      _ plane: PerceptionPlane, _ budget: inout ReflexPerceptionBudget,
+                      _ plane: PerceptionPlane, _ hand: (x: Int64, y: Int64)?, _ budget: inout ReflexPerceptionBudget,
                       _ exhausted: inout Bool) -> ReflexObservation {
-        let seen = read(&detector, frame, reference, plane, &budget, &exhausted)
+        let seen = read(&detector, frame, reference, plane, hand, &budget, &exhausted)
         // `spend(0)` is the budget's own deadline test with nothing left to pay.
         if exhausted || budget.spend(0) { return seen }
         exhausted = true
@@ -140,7 +142,7 @@ public final class PerceptionSession: ReflexPerceptionSession {
     /// One detector's reading of a frame every detector can read. It works on the detector in place:
     /// a copy would copy its scratch every frame.
     private func read(_ detector: inout Detector, _ frame: ReflexFrameFacts, _ reference: ReflexFrameRef,
-                      _ plane: PerceptionPlane, _ budget: inout ReflexPerceptionBudget,
+                      _ plane: PerceptionPlane, _ hand: (x: Int64, y: Int64)?, _ budget: inout ReflexPerceptionBudget,
                       _ exhausted: inout Bool) -> ReflexObservation {
         func observation(_ detector: Detector, unknown: ReflexUnknown? = nil, value: Int64? = nil,
                          target: ReflexTarget? = nil, cells: [ReflexCell]? = nil, samples: UInt64 = 0) -> ReflexObservation {
@@ -222,14 +224,12 @@ public final class PerceptionSession: ReflexPerceptionSession {
                 return observation(detector, unknown: .ambiguous, samples: cost)
             }
             let tracks = detector.blobs.follow(scan.blobs, gate: gate, capture: frame.capture_seq,
-                                               hostNs: reference.captured_host_ns, next: &nextTrack)
+                                               hostNs: reference.captured_host_ns, pick: detector.pick, hand: hand,
+                                               next: &nextTrack)
             var target: ReflexTarget?
             if let at = tracks.firstIndex(where: { $0.id == detector.blobs.primary }) {
                 let (blob, track) = (scan.blobs[at], tracks[at])
-                target = ReflexTarget(track_id: track.id,
-                                      roi: ReflexRoi(x: Int64(blob.minX), y: Int64(blob.minY),
-                                                     width: Int64(blob.maxX - blob.minX + 1),
-                                                     height: Int64(blob.maxY - blob.minY + 1), space: .pixel),
+                target = ReflexTarget(track_id: track.id, roi: blob.box,
                                       point_x: Int64(blob.point.x), point_y: Int64(blob.point.y),
                                       velocity_x: track.velocityX, velocity_y: track.velocityY,
                                       uncertainty: UInt64(step))

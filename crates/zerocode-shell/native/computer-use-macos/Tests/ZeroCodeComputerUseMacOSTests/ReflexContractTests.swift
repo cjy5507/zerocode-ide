@@ -51,19 +51,26 @@ final class ReflexContractTests: XCTestCase {
         for name in names {
             let (expected, planData) = try golden(name)
             if expected == "ok" {
-                let validated = try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception)
-                XCTAssertEqual(validated.plan.version, ReflexContract.version)
-                XCTAssertEqual(try ReflexContract.hash(validated.plan), validated.plan.plan_hash)
-                XCTAssertEqual(try ReflexContract.wireBytes(validated.plan), planData)
+                let validated: ValidatedReflexPlan
+                do {
+                    validated = try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception)
+                } catch {
+                    // Every case is judged, so a failure names each case that failed.
+                    XCTFail("\(name): \(error)")
+                    continue
+                }
+                XCTAssertEqual(validated.plan.version, ReflexContract.version, name)
+                XCTAssertEqual(try ReflexContract.hash(validated.plan), validated.plan.plan_hash, name)
+                XCTAssertEqual(try ReflexContract.wireBytes(validated.plan), planData, name)
             } else {
                 XCTAssertThrowsError(try ReflexContract.decodeAndValidate(planData, limits: limits, perception: perception), name) { error in
                     XCTAssertEqual((error as? ReflexContractError)?.rawValue, expected, name)
                 }
             }
         }
-        // R1's 32 cases under version 2, the six version 2 adds, and the identifier
-        // bound's two sides (t-9205).
-        XCTAssertEqual(names.count, 40)
+        // R1's 32 cases under version 2, the six version 2 adds, the identifier
+        // bound's two sides (t-9205), and a detector's pick with the R4 bench's plan (t-10242).
+        XCTAssertEqual(names.count, 49)
         let wireNames = try XCTUnwrap(manifest["wire_negative"] as? [String])
         for name in wireNames {
             let data = try Data(contentsOf: fixtureRoot.appendingPathComponent("\(name).txt"))
@@ -255,6 +262,30 @@ final class ReflexContractTests: XCTestCase {
         XCTAssertThrowsError(try ReflexContract.decodeAndValidate(Data(tampered.utf8), limits: limits, perception: perception)) { error in
             XCTAssertEqual(error as? ReflexContractError, .hash)
         }
+    }
+
+    /// A detector's pick is left out of the wire when it is `first`, as the window's serde type
+    /// leaves it out — so a plan without one keeps its bytes and its hash — and written when it is
+    /// another word (t-10223 R8). A plan that writes `first` out reads as `first` but is not its
+    /// own wire, so the helper refuses it as the window does (`pick_first_written`).
+    func test_first_is_never_written() throws {
+        let (_, omitted) = try golden("pick_omitted")
+        let plan = try JSONDecoder().decode(ReflexPlan.self, from: omitted)
+        XCTAssertEqual(plan.detectors[0].pick, .first)
+        XCTAssertEqual(try ReflexContract.wireBytes(plan), omitted)
+        let detector = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(plan.detectors[0])) as? [String: Any])
+        XCTAssertNil(detector["pick"], "first is never written")
+        for word in ReflexPick.allCases where word != .first {
+            let (_, wire) = try golden("pick_\(word.rawValue)")
+            let read = try JSONDecoder().decode(ReflexPlan.self, from: wire)
+            XCTAssertEqual(read.detectors[0].pick, word)
+            XCTAssertEqual(try ReflexContract.wireBytes(read), wire, word.rawValue)
+            XCTAssertNotEqual(read.plan_hash, plan.plan_hash, "\(word.rawValue) is another plan")
+        }
+        let (_, written) = try golden("pick_first_written")
+        let spelled = try JSONDecoder().decode(ReflexPlan.self, from: written)
+        XCTAssertEqual(spelled.detectors[0].pick, .first)
+        XCTAssertEqual(try ReflexContract.wireBytes(spelled), omitted, "first written out is pick_omitted's plan, not its wire")
     }
 
     func testPointerAndMacroBudgetsComeFromOneTable() throws {

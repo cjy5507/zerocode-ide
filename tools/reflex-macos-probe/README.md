@@ -62,8 +62,11 @@ fixture got — and every check is exact:
 cleared) and `kernel-blind` (the real kernel reads frames whose pixels never
 show the ball the scene says is there). `--self-test --fixtures` runs a short
 clean run of each kernel, which must pass, and each fault that applies to it,
-which must fail; without `--fixtures` it checks the statistics and the seeded
-schedule only.
+which must fail, and then reads every scene of
+`reflex-contract/pick_cases.json` through R5's kernel for each pick word
+(t-10223 R8) — the target must follow the blob the scene names on every frame,
+in this optimized build as in the helper's tests; without `--fixtures` it
+checks the statistics and the seeded schedule only.
 
 ## The run
 

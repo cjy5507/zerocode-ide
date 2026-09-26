@@ -28,9 +28,10 @@ struct PerceptionBlobTracks {
     }
 
     /// The tracks of this capture's blobs, in the blobs' order. `gate` is how far (frame pixels)
-    /// a blob may move per capture; a skipped capture widens it by one gate each.
-    mutating func follow(_ blobs: [PerceptionBlob], gate: Int, capture: UInt64, hostNs: UInt64,
-                         next: inout UInt64) -> [PerceptionTrack] {
+    /// a blob may move per capture; a skipped capture widens it by one gate each. The target keeps
+    /// its track while the track lives; one that follows none follows the track `pick` picks.
+    mutating func follow(_ blobs: [PerceptionBlob], gate: Int, capture: UInt64, hostNs: UInt64, pick: ReflexPick,
+                         hand: (x: Int64, y: Int64)?, next: inout UInt64) -> [PerceptionTrack] {
         var candidates = [[Int]](repeating: [], count: tracks.count)
         var claimants = [[Int]](repeating: [], count: blobs.count)
         for (at, track) in tracks.enumerated() where capture > track.capture {
@@ -65,9 +66,45 @@ struct PerceptionBlobTracks {
             }
         }
         let kept = followed.contains { $0.id == primary }
-        primary = kept ? primary : followed.first?.id
+        primary = kept ? primary : Self.pick(pick, among: followed, blobs: blobs, hand: hand)
         tracks = followed
         return followed
+    }
+
+    /// The track a target that follows none follows (`reflex::Pick`): `first` the first blob in
+    /// scan order; `nearest` the one whose point is nearest `hand`, and the first while there is
+    /// no hand; `largest` the one whose hitbox has the most area; `newest` and `oldest` the
+    /// highest and the lowest number. A tie goes to the lower number. `tracks` are `blobs`'s, in
+    /// their order.
+    static func pick(_ word: ReflexPick, among tracks: [PerceptionTrack], blobs: [PerceptionBlob],
+                     hand: (x: Int64, y: Int64)?) -> UInt64? {
+        // Distances and areas as doubles, as the gate reads them: no size a frame can have traps.
+        func least(_ rank: (Int) -> Double) -> UInt64? {
+            tracks.indices.min { (rank($0), tracks[$0].id) < (rank($1), tracks[$1].id) }.map { tracks[$0].id }
+        }
+        switch word {
+        case .first:
+            return tracks.first?.id
+        case .nearest:
+            guard let hand else { return tracks.first?.id }
+            return least { at in
+                let dx = Double(tracks[at].point.x) - Double(hand.x), dy = Double(tracks[at].point.y) - Double(hand.y)
+                return dx * dx + dy * dy
+            }
+        case .largest:
+            return least { at in -Double(blobs[at].box.width) * Double(blobs[at].box.height) }
+        case .newest:
+            return tracks.map(\.id).max()
+        case .oldest:
+            return tracks.map(\.id).min()
+        }
+    }
+}
+
+extension PerceptionBlob {
+    /// The blob's hitbox in frame pixels: its samples' extent, each sample a pixel wide.
+    var box: ReflexRoi {
+        ReflexRoi(x: Int64(minX), y: Int64(minY), width: Int64(maxX - minX + 1), height: Int64(maxY - minY + 1), space: .pixel)
     }
 }
 

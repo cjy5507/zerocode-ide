@@ -440,12 +440,15 @@ public struct ReflexLeaf: Equatable, Sendable {
     public let actionId: String
     public let kind: ReflexActionKind
     public let detector: String
+    /// How that detector's target is picked when it follows none, for the receipt.
+    public let pick: ReflexPick
 
-    public init(ruleId: String, actionId: String, kind: ReflexActionKind, detector: String) {
+    public init(ruleId: String, actionId: String, kind: ReflexActionKind, detector: String, pick: ReflexPick = .first) {
         self.ruleId = ruleId
         self.actionId = actionId
         self.kind = kind
         self.detector = detector
+        self.pick = pick
     }
 }
 
@@ -455,6 +458,7 @@ public enum ReflexMacros {
     /// validated plan is acyclic and inside `max_expanded_actions`.
     public static func leaves(ruleId: String, macroId: String, in plan: ReflexPlan) -> [ReflexLeaf] {
         let byId = Dictionary(plan.macros.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let picks = Dictionary(plan.detectors.map { ($0.id, $0.pick) }, uniquingKeysWith: { first, _ in first })
         var out: [ReflexLeaf] = []
         func expand(_ id: String) {
             guard let item = byId[id] else { return }
@@ -462,7 +466,9 @@ public enum ReflexMacros {
                 for action in item.actions {
                     switch action.kind {
                     case .macro: expand(action.target)
-                    case .move, .click: out.append(ReflexLeaf(ruleId: ruleId, actionId: action.id, kind: action.kind, detector: action.target))
+                    case .move, .click:
+                        out.append(ReflexLeaf(ruleId: ruleId, actionId: action.id, kind: action.kind, detector: action.target,
+                                              pick: picks[action.target] ?? .first))
                     case .key: continue
                     }
                 }
@@ -579,6 +585,9 @@ public struct ReflexReceipt: Equatable, Sendable {
     public let leafIndex: UInt64
     public let outcome: Outcome
     public let targetId: String?
+    /// The track of that target, and how its detector picks one when it follows none.
+    public let trackId: UInt64?
+    public let pick: ReflexPick
     public let sourceCapture: UInt64?
     public let decidedHostNs: UInt64?
     /// When that frame was delivered: beside its capture time, which a
@@ -710,6 +719,7 @@ struct ReflexLeafRunner {
         let leaf: ReflexLeaf
         let index: UInt64
         var targetId: String?
+        var trackId: UInt64?
         var sourceCapture: UInt64?
         var decidedHostNs: UInt64?
         var decidedDeliveredHostNs: UInt64?
@@ -725,7 +735,7 @@ struct ReflexLeafRunner {
         func end(_ outcome: ReflexReceipt.Outcome, at endedHostNs: UInt64) -> ReflexReceipt {
             ReflexReceipt(
                 ruleId: leaf.ruleId, actionId: leaf.actionId, leafIndex: index, outcome: outcome,
-                targetId: targetId, sourceCapture: sourceCapture, decidedHostNs: decidedHostNs,
+                targetId: targetId, trackId: trackId, pick: leaf.pick, sourceCapture: sourceCapture, decidedHostNs: decidedHostNs,
                 decidedDeliveredHostNs: decidedDeliveredHostNs,
                 admittedHostNs: admittedHostNs, captureWaitNs: captureWaitNs,
                 firstEventHostNs: firstEventHostNs, firstEventFrameHostNs: firstEventFrameHostNs,
@@ -777,6 +787,7 @@ struct ReflexLeafRunner {
             nowNs: issuedNs, deadlineNs: deadlineNs, children: UInt64(path.count) + presses, limits: limits
         )
         draft.targetId = lease.target_id
+        draft.trackId = target.track_id
         draft.sourceCapture = source.capture_seq
         draft.decidedHostNs = source.captured_host_ns
         draft.decidedDeliveredHostNs = source.delivered_host_ns
@@ -1471,7 +1482,16 @@ public final class ReflexSession: @unchecked Sendable {
     private func evaluateFrames(_ perception: any ReflexPerceptionSession, token: OperatorHand.Token) {
         var cursor = ReflexFrameCursor()
         var book = ReflexRuleBook(settings.plan, policy: settings.policy)
-        let detectors = Dictionary(settings.plan.plan.detectors.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let plan = settings.plan.plan
+        let detectors = Dictionary(plan.detectors.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        // The detector each rule's fire sends the hand to last: its last leaf's.
+        let lands = Dictionary(plan.rules.compactMap { rule in
+            ReflexMacros.leaves(ruleId: rule.id, macroId: rule.macro_id, in: plan).last.map { (rule.id, $0.detector) }
+        }, uniquingKeysWith: { first, _ in first })
+        // Where the last fire sent the hand — that target's point on the frame it fired on — for a
+        // kernel that picks by nearness; nil before the first fire. A run's ready frames share one
+        // geometry (a display that changed never reads ready again), so the point stays in their pixels.
+        var firedAt: (x: Int64, y: Int64)?
         let clock: @Sendable () -> UInt64 = { [hand] in hand.nowNs() }
         let look = DispatchTimeInterval.nanoseconds(Int(clamping: settings.limits.max_frame_age_ns))
         var lastRead: (stream: UInt64, capture: UInt64)?
@@ -1500,7 +1520,7 @@ public final class ReflexSession: @unchecked Sendable {
             )
             var seen: [ReflexObservation] = []
             let read = loan.withPixels { pixels in
-                seen = perception.observe(frame: facts, pixels: pixels, budget: &budget)
+                seen = perception.observe(frame: facts, pixels: pixels, hand: firedAt, budget: &budget)
             }
             var byDetector: [String: ReflexObservation] = [:]
             var refused: UInt64 = 0
@@ -1539,6 +1559,9 @@ public final class ReflexSession: @unchecked Sendable {
                 fires += 1
             }
             lock.unlock()
+            if let rule = outcome.fired, let target = lands[rule.id].flatMap({ byDetector[$0]?.target }) {
+                firedAt = (target.point_x, target.point_y)
+            }
             if outcome.fired != nil { mail.signal() }
         }
     }

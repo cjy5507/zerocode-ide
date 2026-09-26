@@ -154,9 +154,9 @@ final class PerceptionTests: XCTestCase {
         ReflexRoi(x: 0, y: 0, width: Int64(width), height: Int64(height), space: .pixel)
     }
 
-    private func session(_ specs: [PerceptionColorSpec], limits: PerceptionLimits? = nil) throws -> PerceptionSession {
+    private func session(_ specs: [PerceptionColorSpec], limits: PerceptionLimits? = nil, pick: ReflexPick = .first) throws -> PerceptionSession {
         try PerceptionSession(detectors: specs.enumerated().map { at, spec in
-            ("d\(at)", wholeRoi(Int(spec.reference_width), Int(spec.reference_height)), spec)
+            ("d\(at)", wholeRoi(Int(spec.reference_width), Int(spec.reference_height)), spec, pick)
         }, limits: limits ?? contractLimits())
     }
 
@@ -172,11 +172,12 @@ final class PerceptionTests: XCTestCase {
 
     private func look(_ session: PerceptionSession, _ canvas: Canvas, capture: UInt64, stream: UInt64 = 1,
                       status: ReflexFrameStatus = .ready, colorSpace: ReflexColorSpace = .srgb,
-                      orientation: ReflexOrientation = .up, budget: ReflexPerceptionBudget? = nil) -> [ReflexObservation] {
+                      orientation: ReflexOrientation = .up, hand: (x: Int64, y: Int64)? = nil,
+                      budget: ReflexPerceptionBudget? = nil) -> [ReflexObservation] {
         var budget = budget ?? unlimited()
         let frame = frameFacts(capture: capture, width: canvas.width, height: canvas.height, stream: stream,
                                status: status, colorSpace: colorSpace, orientation: orientation)
-        return canvas.withPixels { session.observe(frame: frame, pixels: $0, budget: &budget) }
+        return canvas.withPixels { session.observe(frame: frame, pixels: $0, hand: hand, budget: &budget) }
     }
 
     func testUnknownOccludedOrAmbiguousFeaturesAreNotActionable() throws {
@@ -297,6 +298,57 @@ final class PerceptionTests: XCTestCase {
         XCTAssertNotEqual(back, cell)
     }
 
+    /// The shared pick scenes (`reflex-contract/pick_cases.json`, t-10223 R8), each read by a fresh
+    /// session for every word: on each frame the target follows the drawn blob the case names, or
+    /// none. A target keeps its track while the track lives; one that follows none follows the blob
+    /// its word picks, near the hand's point for `nearest` and as `first` while there is none.
+    /// Rust holds the scenes' words to `Pick::ALL`.
+    func testSharedPickCasesRunThroughTheKernel() throws {
+        let raw = try Data(contentsOf: fixtureRoot.deletingLastPathComponent().appendingPathComponent("reflex-contract/pick_cases.json"))
+        let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        let spec = try decode(PerceptionColorSpec.self, fixture["spec"] as Any)
+        let extent = try decode(ReflexPixelExtent.self, fixture["frame"] as Any)
+        let (ink, ground) = (spec.classes[0], try XCTUnwrap(spec.ground))
+        let cases = try XCTUnwrap(fixture["cases"] as? [[String: Any]])
+        var mismatches: [String] = []
+        for row in cases {
+            let name = try XCTUnwrap(row["name"] as? String)
+            let frames = try XCTUnwrap(row["frames"] as? [[String: Any]])
+            let expected = try XCTUnwrap(row["expected"] as? [String: [Any]])
+            XCTAssertEqual(Set(expected.keys), Set(ReflexPick.allCases.map(\.rawValue)), name)
+            for pick in ReflexPick.allCases {
+                let reader = try session([spec], pick: pick)
+                let wanted = try XCTUnwrap(expected[pick.rawValue], name)
+                for (at, frame) in frames.enumerated() {
+                    let blobs = try XCTUnwrap(frame["blobs"] as? [[String: Int]], name)
+                    var canvas = Canvas(width: Int(extent.width), height: Int(extent.height), ground: [ground.r, ground.g, ground.b])
+                    var boxes: [ReflexRoi] = []
+                    for blob in blobs {
+                        let (x, y, width, height) = (blob["x"] ?? 0, blob["y"] ?? 0, blob["width"] ?? 0, blob["height"] ?? 0)
+                        canvas.fill(x, y, width, height, [ink.r, ink.g, ink.b])
+                        if let border = blob["border"] {
+                            canvas.fill(x + border, y + border, width - 2 * border, height - 2 * border, [ground.r, ground.g, ground.b])
+                        }
+                        boxes.append(ReflexRoi(x: Int64(x), y: Int64(y), width: Int64(width), height: Int64(height), space: .pixel))
+                    }
+                    let hand = (frame["hand"] as? [String: Int64]).map { (x: $0["x"] ?? 0, y: $0["y"] ?? 0) }
+                    let seen = look(reader, canvas, capture: UInt64(at + 1), hand: hand)[0]
+                    // The drawn blob the target's point lies in: the point is one of its samples.
+                    let followed = seen.target.flatMap { target in
+                        boxes.firstIndex { $0.contains(x: Double(target.point_x), y: Double(target.point_y)) }
+                    }
+                    let want = wanted[at] as? Int
+                    if seen.value != Int64(blobs.count) || followed != want || (seen.target == nil) != (want == nil) {
+                        mismatches.append("\(name) \(pick.rawValue) frame \(at + 1): value \(String(describing: seen.value)), " +
+                                          "followed \(String(describing: followed)), wanted \(String(describing: want))")
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(mismatches, [])
+        XCTAssertEqual(cases.count, 4)
+    }
+
     func testDetectorBudgetExhaustionReturnsUnknown() throws {
         let one = boardSpec()
         let small = PerceptionColorSpec(
@@ -324,7 +376,7 @@ final class PerceptionTests: XCTestCase {
         // The budget paid exactly what was read.
         let frame = frameFacts(capture: 2, width: 64, height: 64)
         room = budget(samples: 100, deadlineHostNs: .max, now: { 0 })
-        _ = cells.withPixels { reader.observe(frame: frame, pixels: $0, budget: &room) }
+        _ = cells.withPixels { reader.observe(frame: frame, pixels: $0, hand: nil, budget: &room) }
         XCTAssertEqual(room.samples, 16)
         // A deadline already passed reads nothing.
         let late = look(reader, cells, capture: 3, budget: budget(samples: .max, deadlineHostNs: 10, now: { 11 }))
@@ -349,7 +401,7 @@ final class PerceptionTests: XCTestCase {
 
         var tick = lateTick(limits)
         let frame = frameFacts(capture: 2, width: 64, height: 64)
-        let late = cells.withPixels { reader.observe(frame: frame, pixels: $0, budget: &tick) }
+        let late = cells.withPixels { reader.observe(frame: frame, pixels: $0, hand: nil, budget: &tick) }
         XCTAssertEqual(late.map(\.unknown), [.budget, .budget])
         for observation in late {
             XCTAssertNil(observation.value)
@@ -565,7 +617,7 @@ final class PerceptionTests: XCTestCase {
             let id = try XCTUnwrap(row["id"] as? String)
             let frame = try XCTUnwrap(row["frame"] as? [String: String])
             let canvas = try picture(fixtureRoot.appendingPathComponent("scenes/\(id).png"))
-            let reader = try PerceptionSession(detectors: [("board", roi, spec)], limits: limits)
+            let reader = try PerceptionSession(detectors: [("board", roi, spec, .first)], limits: limits)
             let observation = look(reader, canvas, capture: 1,
                                    colorSpace: try XCTUnwrap(ReflexColorSpace(rawValue: frame["color_space"] ?? "")),
                                    orientation: try XCTUnwrap(ReflexOrientation(rawValue: frame["orientation"] ?? "")))[0]

@@ -148,6 +148,60 @@ pub enum DetectorKind {
     Motion,
 }
 
+/// Which blob a colour detector's target follows when it follows none (t-10223
+/// R8). A blob is picked only then: while its track lives the target keeps it,
+/// so a newer blob never pulls it away from a press on its way. A tie goes to
+/// the lower track number. `first` — the rule before the word — is never
+/// written, so a plan without a pick keeps the wire and the hash it had.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pick {
+    /// The kernel's first blob: most samples, then top to bottom, then left
+    /// to right.
+    #[default]
+    First,
+    /// Nearest the point of the target the run's last fire sent the hand to,
+    /// in frame pixels; as `first` before the run's first fire.
+    Nearest,
+    /// The hitbox with the most area.
+    Largest,
+    /// The highest track number: track numbers only grow, so the blob seen
+    /// last.
+    Newest,
+    /// The lowest track number: the blob seen first.
+    Oldest,
+}
+
+impl Pick {
+    /// The one table of the words a plan may write, in the order a grammar
+    /// names them.
+    pub const ALL: [Self; 5] = [
+        Self::First,
+        Self::Nearest,
+        Self::Largest,
+        Self::Newest,
+        Self::Oldest,
+    ];
+
+    /// The word a plan writes for it: its serde name.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::First => "first",
+            Self::Nearest => "nearest",
+            Self::Largest => "largest",
+            Self::Newest => "newest",
+            Self::Oldest => "oldest",
+        }
+    }
+
+    /// Whether the wire leaves it out.
+    #[must_use]
+    pub fn is_first(&self) -> bool {
+        *self == Self::First
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Detector {
@@ -159,6 +213,10 @@ pub struct Detector {
     /// What a colour detector reads its ROI with; required for `color`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<ColorSpec>,
+    /// Which blob its target follows when it follows none; left out when it
+    /// is `first`.
+    #[serde(default, skip_serializing_if = "Pick::is_first")]
+    pub pick: Pick,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,13 +458,18 @@ pub fn wire_bytes(plan: &ReflexPlan) -> Vec<u8> {
 
 /// The receiver accepts only the canonical integer-only wire. Duplicate
 /// keys, non-finite numbers, negative zero, unknown fields and trailing
-/// tokens cannot be normalized into a different executable plan.
+/// tokens cannot be normalized into a different executable plan, and a wire
+/// that is not the typed plan's own — a default written out, such as
+/// `"pick":"first"` — is not read as it: Swift refuses the same bytes.
 pub fn decode_wire(bytes: &[u8]) -> Result<ValidatedPlan, ReflexError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ReflexError::Wire)?;
     if canonical_json(&value) != bytes {
         return Err(ReflexError::Wire);
     }
     let plan: ReflexPlan = serde_json::from_slice(bytes).map_err(|_| ReflexError::Wire)?;
+    if wire_bytes(&plan) != bytes {
+        return Err(ReflexError::Wire);
+    }
     validate(plan)
 }
 
@@ -501,6 +564,10 @@ pub fn validate(plan: ReflexPlan) -> Result<ValidatedPlan, ReflexError> {
         }
         game_state::validate_color(color, &detector.roi, &game_state::LIMITS)
             .map_err(|_| ReflexError::Perception)?;
+        // A pick chooses among blobs: a cells layout has none to choose among.
+        if !detector.pick.is_first() && !matches!(color.layout, Layout::Blobs { .. }) {
+            return Err(ReflexError::Unsupported);
+        }
     }
     let mut macro_ids = BTreeSet::new();
     let mut action_ids = BTreeSet::new();
