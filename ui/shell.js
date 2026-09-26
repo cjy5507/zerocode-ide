@@ -10661,8 +10661,11 @@ listen("hook:agent", (event) => {
   const wasMidTurn = isMidTurn(hookStates.get(term));
   hookStates.set(term, state);
   // The state moved: whatever the notify seat said about the LAST ring of
-  // this pane is over with it (t-6043).
+  // this pane is over with it (t-6043) — and so is what was withheld from
+  // it: a person's own Enter starts a turn, so the next refusal there is
+  // news (t-10159).
   hushedPanes.delete(term);
+  withheldNotices.delete(term);
   // The composer wears the state the pane now has — send or stop, the
   // queue's placeholder or its own words. Painted after the set, not before
   // it: painted above, it wore the old word until the next repaint (measured:
@@ -10814,26 +10817,105 @@ listen(TERMINAL_CLIPBOARD_WRITE_EVENT, (event) => {
   if (typeof text === "string") acceptOsc52ClipboardWrite(text);
 });
 
+/* Why the window did not type a prompt it was handed, by the guard's token
+ * (`zerocode_pty::ready::Refusal::token`, which `term:prompt` carries): what
+ * each means to a person is said here, in their language (t-10159) —
+ * `withheld` for words that never reached the line, `left` for words pasted
+ * there and left unsent, each where the guard can say it — and `tip` is what
+ * the guard saw, for the pointer that wants it. A row that `yields` stood
+ * aside for something a person owns on that line, which is a report, not a
+ * failure. The English sentences stay with the readers they were written
+ * for: the receipts agents read and the black box (`Refusal::says`). */
+const TERM_WITHHELD = Object.freeze({
+  holds_a_draft: {
+    yields: true,
+    withheld: { key: "term.withheld.holdsADraft", word: "터미널 {{term}}에 입력 중인 글이 있어 에이전트에게 보낼 메시지를 넣지 않았습니다." },
+    tip: { key: "term.withheld.holdsADraftTip", word: "누군가 입력한 글이 아직 보내지지 않은 채 있습니다 — 지금 넣으면 그 글 뒤에 붙어 함께 보내집니다." },
+  },
+  hand_reached: {
+    yields: true,
+    left: { key: "term.withheld.handReachedLeft", word: "터미널 {{term}}에 메시지를 붙여넣는 사이 입력이 있어 보내지 않고 입력란에 두었습니다." },
+    tip: { key: "term.withheld.handReachedTip", word: "메시지가 들어가는 사이 누군가 입력란에 손을 댔습니다 — 그 위의 다른 글과 함께 보내지 않도록 붙여넣기만 했습니다." },
+  },
+  parked: {
+    yields: true,
+    withheld: { key: "term.withheld.parked", word: "터미널 {{term}}에 답을 기다리는 질문이 있어 에이전트에게 보낼 메시지를 넣지 않았습니다." },
+    left: { key: "term.withheld.parkedLeft", word: "터미널 {{term}}에 답을 기다리는 질문이 떠서 붙여넣은 메시지를 보내지 않았습니다." },
+    tip: { key: "term.withheld.parkedTip", word: "이 터미널에 질문이나 승인 요청이 떠 있습니다 — 답은 그 질문을 받은 사람이 합니다." },
+  },
+  launch_changed: {
+    withheld: { key: "term.withheld.launchChanged", word: "터미널 {{term}}의 프로그램이 바뀌어 프롬프트를 넣지 않았습니다." },
+    left: { key: "term.withheld.launchChangedLeft", word: "터미널 {{term}}의 프로그램이 바뀌어 붙여넣은 프롬프트를 보내지 않았습니다." },
+    tip: { key: "term.withheld.launchChangedTip", word: "이 터미널에서 지금 도는 프로그램은 이 프롬프트를 받을 프로그램이 아닙니다." },
+  },
+  input_rejected: {
+    withheld: { key: "term.withheld.inputRejected", word: "터미널 {{term}}에서 입력을 받지 않아 프롬프트를 넣지 못했습니다." },
+    left: { key: "term.withheld.inputRejectedLeft", word: "터미널 {{term}}에서 입력을 받지 않아 붙여넣은 프롬프트를 보내지 못했습니다." },
+    tip: { key: "term.withheld.inputRejectedTip", word: "터미널이 이 입력을 받아들이지 않아 전달을 마치지 못했습니다." },
+  },
+  launch_refused: {
+    withheld: { key: "term.withheld.launchRefused", word: "터미널 {{term}}의 zo가 정확 실행 계약을 거부해 브리핑을 넣지 않았습니다." },
+    tip: { key: "term.withheld.launchRefusedTip", word: "이 터미널의 zo가 정확 실행 계약을 거부했습니다 — 실행하지 않을 프로그램에 브리핑을 치지 않고 보류했습니다." },
+  },
+});
+
+/* A refusal the table has no sentence for in the way it arrived: said
+ * without its reason, which the row's tip still carries when there is one. */
+const TERM_WITHHELD_UNWORDED = Object.freeze({
+  withheld: { key: "term.promptWithheld", word: "터미널 {{term}}에 프롬프트를 넣지 않았습니다." },
+  left: { key: "term.promptLeftUnsubmitted", word: "터미널 {{term}}에 프롬프트를 붙여넣었지만 보내지는 않았습니다." },
+});
+
+/* The withheld notices each shell has had since it last took a prompt, by
+ * token, with the words each handed back (t-10159). The mail pointer offers
+ * its advice again every beat while a person's words stand on the line, and
+ * each refusal was a toast of its own — the person saw the same one twice. A
+ * reason is said once now, and again only when the situation is new: a
+ * prompt landed there (`term:prompt`), the pane's state moved (`hook:agent`,
+ * which strikes the notify seat's word about the last ring the same way) or
+ * the shell ended (`dropTermView`). Words other than the ones already handed
+ * back still reach the clipboard, so the silence loses nobody's words. */
+const withheldNotices = new Map();
+
+/* A prompt the guard withheld, said once for the reason it gives. */
+function sayWithheldPrompt(term, why, pasted, text) {
+  if (!withheldNotices.has(term)) withheldNotices.set(term, new Map());
+  const said = withheldNotices.get(term);
+  const told = said.has(why);
+  const words = typeof text === "string" && text.length > 0 ? text : null;
+  if (words !== null && said.get(why) !== words) void clipboardText.write(words);
+  said.set(why, words ?? said.get(why) ?? null);
+  if (told) return;
+  const row = TERM_WITHHELD[why];
+  const way = pasted ? "left" : "withheld";
+  const sentence = row?.[way] ?? TERM_WITHHELD_UNWORDED[way];
+  const note = toast(t(sentence.key, sentence.word, { term }), row?.yields ? "" : "halt");
+  if (note && row?.tip) note.dataset.tip = t(row.tip.key, row.tip.word);
+}
+
 /* The pump said whether a launch prompt actually landed. Only the failure is
  * worth a sentence: the agent is sitting there with nothing to do and no
  * error anywhere else to explain why — the exact silence the backend emits
  * this event to break. */
 listen("term:prompt", (event) => {
   const { term, delivered, pasted, why, text } = event.payload;
-  if (delivered) return;
+  // A prompt that landed had the line to itself, so whatever was withheld
+  // there before is over: the next refusal is news.
+  if (delivered) {
+    withheldNotices.delete(term);
+    return;
+  }
   // A write the window WITHHELD is a different sentence from one that timed
   // out: the guard yielded to something a person owns on that line — their
   // draft, a parked question, a hand that arrived while the words settled —
-  // and says so. Words that reached the composer are on screen already;
-  // words that did not go to the clipboard like a timed-out prompt's.
-  const kept = typeof text === "string" && text.length > 0;
-  if (kept) void clipboardText.write(text);
+  // or the line refused it, and the event names which.
   if (typeof why === "string" && why.length > 0) {
-    showError(pasted
-      ? t("term.promptLeftUnsubmitted", "터미널 {{term}}에 프롬프트를 붙여넣었지만 보내지는 않았습니다 — {{why}}", { term, why })
-      : t("term.promptWithheld", "터미널 {{term}}에 프롬프트를 넣지 않았습니다 — {{why}}", { term, why }));
+    sayWithheldPrompt(term, why, pasted, text);
     return;
   }
+  // Words that did not land go to the clipboard, and the notice says so.
+  const kept = typeof text === "string" && text.length > 0;
+  if (kept) void clipboardText.write(text);
   showError(kept
     ? t("term.promptLostCopied", "터미널 {{term}}의 에이전트가 프롬프트를 받지 못했습니다 — 준비되기 전에 시간이 다 됐습니다. 본문을 클립보드에 복사해 두었으니 붙여넣어 주세요.", { term })
     : t("term.promptLost", "터미널 {{term}}의 에이전트가 프롬프트를 받지 못했습니다 — 준비되기 전에 시간이 다 됐습니다. 직접 붙여넣어 주세요.", { term }));

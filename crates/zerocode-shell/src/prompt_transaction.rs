@@ -145,11 +145,31 @@ pub(super) fn words_to_hand_back(
 }
 
 /// Why a write was withheld, when one was — for the black box and the
-/// `term:prompt` event, in the guard's own words.
+/// `term:prompt` event.
 pub(super) fn withheld(outcome: DeliveryOutcome) -> Option<Refusal> {
     match outcome {
         DeliveryOutcome::Refused(why) | DeliveryOutcome::Unsubmitted(why) => Some(why),
         DeliveryOutcome::Delivered | DeliveryOutcome::TimedOut => None,
+    }
+}
+
+/// What the window hears about a settled delivery (`term:prompt`) — the
+/// pump's settle and a refused zo launch both say it here, so the event has
+/// one shape whoever settled it. A withheld write is named by the guard's
+/// token: the window words it in the person's language from its own table
+/// (t-10159), and the English sentence stays the receipt's and the black
+/// box's.
+pub(super) fn settled_event(
+    term: TermId,
+    outcome: DeliveryOutcome,
+    text: Option<String>,
+) -> PromptSettled {
+    PromptSettled {
+        term,
+        delivered: outcome == DeliveryOutcome::Delivered,
+        pasted: outcome.pasted(),
+        why: withheld(outcome).map(Refusal::token),
+        text,
     }
 }
 
@@ -725,6 +745,53 @@ mod tests {
         );
         assert_eq!(withheld(DeliveryOutcome::Delivered), None);
         assert_eq!(withheld_line(TERM, DeliveryOutcome::TimedOut), None);
+    }
+
+    /// The window hears a withheld write by the guard's token, never by its
+    /// English sentence: the sentence is the receipt's and the black box's,
+    /// and the window words the token in the person's language from a table
+    /// of its own (t-10159). A delivery that landed or ran out of time names
+    /// no refusal at all.
+    #[test]
+    fn the_window_hears_a_withheld_write_by_its_token() {
+        const TERM: TermId = 8_314;
+        let pointer = "\nYou have 2 orchestration messages. Run `zerocode-orc check`.\n";
+        let refused = serde_json::to_value(settled_event(
+            TERM,
+            DeliveryOutcome::Refused(Refusal::HoldsADraft),
+            Some(pointer.to_string()),
+        ))
+        .expect("the event serializes");
+        assert_eq!(
+            refused,
+            serde_json::json!({
+                "term": TERM,
+                "delivered": false,
+                "pasted": false,
+                "why": "holds_a_draft",
+                "text": pointer,
+            })
+        );
+        let left = serde_json::to_value(settled_event(
+            TERM,
+            DeliveryOutcome::Unsubmitted(Refusal::HandReached),
+            None,
+        ))
+        .expect("the event serializes");
+        assert_eq!(left["pasted"], true);
+        assert_eq!(left["why"], "hand_reached");
+        for refusal in Refusal::ALL {
+            let said =
+                serde_json::to_value(settled_event(TERM, DeliveryOutcome::Refused(refusal), None))
+                    .expect("the event serializes");
+            assert_eq!(said["why"], refusal.token(), "{refusal:?}");
+            assert_ne!(said["why"], refusal.says(), "{refusal:?}");
+        }
+        for outcome in [DeliveryOutcome::Delivered, DeliveryOutcome::TimedOut] {
+            let quiet =
+                serde_json::to_value(settled_event(TERM, outcome, None)).expect("serializes");
+            assert_eq!(quiet["why"], serde_json::Value::Null, "{outcome:?}");
+        }
     }
 
     /// A dead shell's receipt reaches its waiter, and a queue behind a

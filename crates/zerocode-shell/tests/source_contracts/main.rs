@@ -31941,7 +31941,7 @@ mod tests {
     ///      reload; `pane_sessions` is its answer, and boot asks.
     ///   2. **A dropped prompt speaks.** `term:prompt` exists to break the
     ///      silence of an agent sitting at an empty composer; a delivered
-    ///      one stays quiet.
+    ///      one stays quiet, and ends whatever was withheld there (t-10159).
     ///   3. **The subscribe snapshot replays through the same switch as the
     ///      live stream** — and a permission prompt counts only as the
     ///      history's LAST word, because one followed by more frames was
@@ -31976,8 +31976,14 @@ mod tests {
             .split_once(r#"listen("term:prompt", (event) => {"#)
             .map(|(_, rest)| &rest[..rest.find("});").unwrap_or(rest.len())])
             .unwrap_or_default();
+        let landed = told
+            .split_once("if (delivered) {")
+            .map(|(_, rest)| &rest[..rest.find('}').unwrap_or(rest.len())])
+            .unwrap_or_default();
         assert!(
-            told.contains("if (delivered) return;") && told.contains("term.promptLost"),
+            landed.contains("withheldNotices.delete(term);")
+                && landed.contains("return;")
+                && told.contains("term.promptLost"),
             "the delivery verdict no longer becomes a notice:\n{told}"
         );
 
@@ -32061,6 +32067,58 @@ mod tests {
             assert!(
                 !source.contains(call),
                 "the window calls a removed command: {call}"
+            );
+        }
+    }
+
+    /// A withheld prompt is worded by the window (t-10159). `term:prompt`
+    /// names the refusal by the guard's token (`Refusal::token`), never by
+    /// the English sentence a receipt carries, and the window's one table of
+    /// those tokens words every one the pump can send — a refusal the guard
+    /// gains turns this red until it is worded. A table's keys are invisible
+    /// to the generic `t("` sweep, so this is what holds each of them to all
+    /// four catalogs; and the notice reads the table, never a `{{why}}` the
+    /// backend fills.
+    #[test]
+    fn a_withheld_prompt_is_worded_by_the_window() {
+        let window = window_source();
+        let table = block_after(window, "const TERM_WITHHELD = Object.freeze({");
+        for refusal in zerocode_pty::ready::Refusal::ALL {
+            let token = refusal.token();
+            assert!(
+                table.contains(&format!("\n  {token}: {{")),
+                "the window's table does not word `{token}` ({refusal:?})"
+            );
+        }
+        let keys: Vec<&str> = table
+            .split("key: \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            keys.len() >= 2 * zerocode_pty::ready::Refusal::ALL.len(),
+            "every refusal carries a sentence and a tip; the table holds {} keys",
+            keys.len()
+        );
+        for language in ["en", "ja", "zh", "es"] {
+            let catalog = block_after(window, &format!("  {language}: {{"));
+            for key in &keys {
+                assert!(
+                    catalog.contains(&format!("\"{key}\":")),
+                    "`{key}` is in the withheld table but not the {language} catalog"
+                );
+            }
+        }
+        let told = block_after(window, "function sayWithheldPrompt(");
+        assert!(
+            told.contains("TERM_WITHHELD[why]") && !told.contains("{ term, why }"),
+            "the withheld notice no longer reads the window's table:\n{told}"
+        );
+        for line in window.lines().filter(|line| line.contains("\"term.prompt")) {
+            assert!(
+                !line.contains("{{why}}"),
+                "a prompt notice still interpolates the backend's words: {}",
+                line.trim()
             );
         }
     }

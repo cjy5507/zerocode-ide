@@ -202,8 +202,10 @@ pub(super) struct PromptSettled {
     /// that pasted and then withheld its Enter, whose words are on the line
     /// where the person can read them.
     pub(super) pasted: bool,
-    /// Why a write was withheld, in the guard's own words, when one was.
-    /// `None` for a delivery that landed or simply timed out.
+    /// Why a write was withheld, as the guard's token
+    /// (`zerocode_pty::ready::Refusal::token`), when one was — the window
+    /// words it (`TERM_WITHHELD`). `None` for a delivery that landed or
+    /// simply timed out.
     pub(super) why: Option<&'static str>,
     /// The words that never landed, when they did not — so the person asked
     /// to paste them has them.

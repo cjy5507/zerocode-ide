@@ -56091,6 +56091,132 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
   }
 });
 
+/* A withheld prompt is said once, in the person's language (t-10159). The
+ * mail pointer offers its advice every beat while a person's words stand on
+ * the coordinator's line, and every refusal was a toast of its own wearing
+ * the guard's English sentence — the person saw it twice, half Korean and
+ * half English. The event names the refusal by token now; the window words
+ * it from `TERM_WITHHELD`, says a reason once per shell until a prompt lands
+ * there, the pane's state moves or the shell ends, and keeps what the guard
+ * saw for the toast's tip. */
+suite("term-withheld", async ({ browser, origin, ok }) => {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const seen = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const settle = () => new Promise((done) => setTimeout(done, 30));
+      const toasts = () => [...document.querySelectorAll(".toast")];
+      const table = typeof TERM_WITHHELD === "object" ? TERM_WITHHELD : {};
+      const words = (row, term) => (row ? t(row.key, row.word, { term }) : "(no table row)");
+      const copied = [];
+      window.__TAURI__.clipboardManager.writeText = async (text) => { copied.push(text); };
+      const seen = {};
+      const term = await openTermTab({ placement: "tab" });
+      const other = await openTermTab({ placement: "tab" });
+      for (const note of toasts()) note.remove();
+      const pointer = "\nYou have 2 orchestration messages. Run `zerocode-orc check`.\n";
+      const draft = { term, delivered: false, pasted: false, why: "holds_a_draft", text: pointer };
+
+      // Two beats of the same refusal at the same pane: one notice.
+      tell("term:prompt", draft);
+      tell("term:prompt", draft);
+      await settle();
+      seen.twice = toasts().length;
+      seen.said = toasts()[0]?.textContent ?? "";
+      seen.want = words(table.holds_a_draft?.withheld, term);
+      seen.tip = toasts()[0]?.dataset.tip ?? "";
+      seen.wantTip = words(table.holds_a_draft?.tip);
+      seen.kind = toasts()[0]?.dataset.kind ?? "";
+      seen.copied = copied.length;
+      // New mail changes the pointer's words, not the situation: the words
+      // reach the clipboard, and no second notice is raised.
+      tell("term:prompt", { ...draft, text: pointer.replace("2", "3") });
+      await settle();
+      seen.newWords = toasts().length;
+      seen.copiedNewWords = copied.length;
+      // Another pane holding a draft is a notice of its own.
+      tell("term:prompt", { ...draft, term: other });
+      await settle();
+      seen.otherPane = toasts().length;
+      // A prompt that lands ends the episode: the next refusal is news.
+      tell("term:prompt", { term, delivered: true, pasted: true });
+      tell("term:prompt", draft);
+      await settle();
+      seen.afterLanded = toasts().length;
+      // So does the pane's state moving — a person's own Enter starts a turn.
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-withheld", resumable: false });
+      tell("hook:agent", { term, state: "done", agent: "claude", session: "s-withheld", resumable: false });
+      tell("term:prompt", draft);
+      tell("term:prompt", draft);
+      await settle();
+      seen.afterMoved = toasts().length;
+      // Words left on the line unsent say the row's other sentence.
+      tell("term:prompt", { term: other, delivered: false, pasted: true, why: "hand_reached" });
+      await settle();
+      seen.left = toasts().at(-1)?.textContent ?? "";
+      seen.wantLeft = words(table.hand_reached?.left, other);
+      // A write the terminal refused is a failure, and says so.
+      tell("term:prompt", { term: other, delivered: false, pasted: false, why: "input_rejected", text: "my own words" });
+      await settle();
+      seen.failure = toasts().at(-1)?.textContent ?? "";
+      seen.wantFailure = words(table.input_rejected?.withheld, other);
+      seen.failureKind = toasts().at(-1)?.dataset.kind ?? "";
+      seen.copiedFailure = copied.at(-1);
+      // In another language the same notice is that language's sentence.
+      setLocale("en", { persist: false });
+      tell("term:prompt", { term: other, delivered: true, pasted: true });
+      tell("term:prompt", { ...draft, term: other });
+      await settle();
+      seen.english = toasts().at(-1)?.textContent ?? "";
+      seen.wantEnglish = words(table.holds_a_draft?.withheld, other);
+      seen.translated = seen.english !== "" && seen.english !== seen.want.replaceAll(String(term), String(other));
+      setLocale("ko", { persist: false });
+      // A shell that ends takes its episodes with it.
+      const standing = toasts().length;
+      tell("term:prompt", draft);
+      await settle();
+      seen.stillSaid = toasts().length === standing;
+      dropTermView(term);
+      tell("term:prompt", draft);
+      await settle();
+      seen.afterDrop = toasts().length - standing;
+      // No toast ever wore a guard's English sentence.
+      seen.guardWords = toasts().filter((note) =>
+        /holding words|appended to them|did not accept the input|reached the line/.test(note.textContent)).length;
+      for (const note of toasts()) note.remove();
+      for (const tab of [...tabs]) dropTab(tab.id);
+      for (const at of [...termViews.keys()]) dropTermView(at);
+      return seen;
+    });
+    ok(
+      "a refusal the mail pointer meets every beat is one notice: one toast in the person's language from the window's table, the guard's reason as its tip, a plain report rather than a failure, and nothing in English",
+      seen.twice === 1 && seen.said === seen.want && seen.want !== "(no table row)" &&
+        seen.tip === seen.wantTip && seen.tip !== "(no table row)" && seen.kind === "" &&
+        seen.copied === 1 && seen.newWords === 1 && seen.copiedNewWords === 2 &&
+        seen.english === seen.wantEnglish && seen.translated && seen.guardWords === 0,
+      JSON.stringify(seen),
+    );
+    ok(
+      "the notice comes back only when the situation is new: another pane, a prompt that landed, the pane's state moving, a shell that ended",
+      seen.otherPane === 2 && seen.afterLanded === 3 && seen.afterMoved === 4 &&
+        seen.stillSaid && seen.afterDrop === 1,
+      JSON.stringify(seen),
+    );
+    ok(
+      "words left on the line and a write the terminal refused say their own sentences, and a failure still hands the words back and wears the failure's tone",
+      seen.left === seen.wantLeft && seen.wantLeft !== "(no table row)" &&
+        seen.failure === seen.wantFailure && seen.wantFailure !== "(no table row)" &&
+        seen.failureKind === "halt" && seen.copiedFailure === "my own words",
+      JSON.stringify(seen),
+    );
+    ok("the withheld notices raised no errors", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+});
+
 /* 컨텍스트 미터 — 세션이 준 두 수로 서는 고리 하나와, 그것을 비울 문. 창을
  * 아는 읽기는 백분율과 고리, 모르는 읽기는 상태바와 같은 낱말에 고리 없음,
  * 읽기가 없으면 알약도 없다. 문은 그 CLI의 명령을 그 길이 나를 수 있을

@@ -1213,7 +1213,7 @@ pub(super) fn activate_zo_worker_delivery(app: &AppHandle, owner: ZoChannelOwner
     // A refused exact launch (t-2773): the parked briefing is settled as
     // withheld before it can reach the line, its waiter told by name — the
     // worker start then fails as a launch that did not accept its briefing,
-    // and the person sees the guard's own sentence in the pane and the board.
+    // and the person is told why in the window's words for the guard's token.
     if zo_integration_runtime::delivery_refusal(app, term).is_some() {
         let Some(delivery) = state.zo_worker_deliveries().remove(&term) else {
             return;
@@ -1225,13 +1225,11 @@ pub(super) fn activate_zo_worker_delivery(app: &AppHandle, owner: ZoChannelOwner
         }
         let _ = app.emit(
             "term:prompt",
-            PromptSettled {
+            prompt_transaction::settled_event(
                 term,
-                delivered: false,
-                pasted: false,
-                why: Some(refusal.says()),
-                text: Some(delivery.text().to_string()),
-            },
+                DeliveryOutcome::Refused(refusal),
+                Some(delivery.text().to_string()),
+            ),
         );
         return;
     }
