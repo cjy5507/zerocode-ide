@@ -1207,6 +1207,45 @@ mod tests {
             offenders.len(),
             offenders.join("\n")
         );
+
+        // The tables that word a token zo answered — the line a judgment
+        // turned on (`JEV_LINES`), and why a feature's rows compared nothing
+        // or its record draws no confidence bar (`JEV_REASONS`, t-9935) —
+        // speak every catalog under every key they name, so a token is never
+        // read in Korean in another language. A token no table words stands
+        // on the screen as itself; that is the tables' reach, not a word
+        // missing from a catalog.
+        let jev = include_str!("../../../ui/shell-jev.js");
+        let catalogs = [
+            ("en", english),
+            ("ja", between(i18n, "\n  ja: {\n", "\n  zh: {\n")),
+            ("zh", between(i18n, "\n  zh: {\n", "\n  es: {\n")),
+            ("es", between(i18n, "\n  es: {\n", "\n};")),
+        ];
+        let mut unspoken: Vec<String> = Vec::new();
+        for table in [
+            "const JEV_LINES = Object.freeze({",
+            "const JEV_REASONS = Object.freeze({",
+        ] {
+            let keys: Vec<&str> = between(jev, table, "\n});")
+                .split("key: \"")
+                .skip(1)
+                .filter_map(|rest| rest.split('"').next())
+                .collect();
+            assert!(!keys.is_empty(), "`{table}` words no token");
+            for key in keys {
+                for (language, catalog) in catalogs {
+                    if !catalog.contains(&format!("\"{key}\": \"")) {
+                        unspoken.push(format!("{language} {key}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            unspoken.is_empty(),
+            "a token's words are missing from a catalog:\n{}",
+            unspoken.join("\n")
+        );
     }
 
     /// The Jev surfaces' styles speak in tokens (t-6277 D10): every size, ink,
@@ -1860,12 +1899,16 @@ mod tests {
                      "called":34,"requests":34,"redactedLines":0,"inputTokens":0,"p50Ms":230,"p95Ms":410,
                      "failures":[]},"windowWanted":34,
                      "agreement":{"compared":44,"agreed":16,"lowerBound":0.24,"controlRows":0,
-                                  "baselineCompared":44,"baselineAgreed":40,"baselineShare":0.91,"notCompared":3}},
+                                  "baselineCompared":44,"baselineAgreed":40,"baselineShare":0.91,"notCompared":3,
+                                  "notComparedBy":{"not_offered":2,"pinned":1}}},
+           "agreementWeek":{"compared":50,"agreed":20,"notCompared":5,
+                            "notComparedBy":{"not_offered":3,"pinned":2}},
            "baseline":"todays_rule","negativesWanted":3,
            "stand":"recording","applies":true,
            "verdict":{"verdict":"hold","line":"answered","cutModel":"jev-1.12.0"},
            "days":[{"startMs":1789900000000,"tally":{"rows":3,"answered":3,"answeredShare":1.0,
-                    "answeredLowerBound":0.43,"p50Ms":220},"agreement":{"compared":3,"agreed":1}}],
+                    "answeredLowerBound":0.43,"p50Ms":220},
+                    "agreement":{"compared":3,"agreed":1,"notCompared":1,"notComparedBy":{"pinned":1}}}],
            "recent":[{"at":1790001955550,"outcome":"answered","elapsedMs":227,"cached":false,
                       "asked":{"task":"t-5807","worker":"w-5814","options":5},"answered":"claude",
                       "confidence":0.19,"applied":null,"agreed":true,"followed":null}]}
@@ -1914,6 +1957,38 @@ mod tests {
         assert_eq!(summon.baseline.as_deref(), Some("todays_rule"));
         assert_eq!(summon.negatives_wanted, Some(3));
         assert_eq!(drawn["judged"]["agreement"]["baselineShare"], 0.91);
+        // Why the rows that compared nothing say so, word by word (t-9556):
+        // the dashboard names them in a row and lists them in its drawer
+        // (t-9935) — the judged window's, the week's and each day's.
+        let words = |pairs: &[(&str, usize)]| -> std::collections::BTreeMap<String, usize> {
+            pairs
+                .iter()
+                .map(|(word, count)| ((*word).to_string(), *count))
+                .collect()
+        };
+        assert_eq!(
+            judged.agreement.not_compared_by,
+            words(&[("not_offered", 2), ("pinned", 1)])
+        );
+        assert_eq!(
+            summon
+                .agreement_week
+                .as_ref()
+                .map(|week| week.not_compared_by.clone()),
+            Some(words(&[("not_offered", 3), ("pinned", 2)]))
+        );
+        assert_eq!(
+            summon.days[0].agreement.not_compared_by,
+            words(&[("pinned", 1)])
+        );
+        assert_eq!(
+            drawn["agreementWeek"]["notComparedBy"],
+            serde_json::json!({ "not_offered": 3, "pinned": 2 })
+        );
+        assert_eq!(
+            drawn["days"][0]["agreement"]["notComparedBy"],
+            serde_json::json!({ "pinned": 1 })
+        );
         assert_eq!(summon.days.len(), 1);
         assert_eq!(summon.days[0].start_ms, 1_789_900_000_000);
         assert_eq!(summon.days[0].tally.rows, 3);
