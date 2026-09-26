@@ -150,6 +150,79 @@ final class ReflexPressTests: XCTestCase {
 
     // MARK: buttons and modifiers
 
+    func test_an_unaimable_sliver_does_not_spend_the_edge_before_the_target_is_exposed() throws {
+        let rig = try LiveRig(plan: ReflexFixtures.clickPlan(maxFires: 1))
+        defer { rig.session.stop(reason: StopReason.request) }
+        rig.sleeper.onSleep = { _, _ in rig.frame(.ball(track: 5, box: LiveRig.box)) }
+        try rig.session.start()
+        rig.frame(.ball(track: 5, box: ReflexRoi(x: 8, y: 8, width: 1, height: 16, space: .pixel)))
+        XCTAssertEqual(rig.session.status.fires, 0, "a detected sliver has no safe aim yet")
+        rig.frame(.ball(track: 5, box: LiveRig.box))
+        XCTAssertEqual(rig.receipts(1).first?.outcome, .done, "the same true edge fires once when its target can be aimed at")
+        XCTAssertEqual(rig.downs, 1)
+        XCTAssertEqual(rig.session.status.fires, 1)
+    }
+
+    func test_a_click_aims_at_the_same_tracks_latest_position_after_its_glide() throws {
+        let rig = try LeafRig()
+        rig.decide()
+        rig.showBall()
+        let moved = ReflexRoi(x: 24, y: 8, width: 16, height: 16, space: .pixel)
+        rig.poster.onPost = { event, _ in
+            if event.kind == .pointerMove, rig.poster.moves.count == 10 {
+                rig.capture(90, box: moved)
+            }
+        }
+        let receipt = try rig.runner().run(LeafRig.click, index: 0)
+        XCTAssertEqual(receipt.outcome, .done)
+        XCTAssertEqual(rig.poster.presses.map { SmoothPointerPath.Point(x: $0.x, y: $0.y) },
+                       [SmoothPointerPath.Point(x: 32, y: 16)])
+        XCTAssertEqual(rig.poster.releases.map { SmoothPointerPath.Point(x: $0.x, y: $0.y) },
+                       [SmoothPointerPath.Point(x: 32, y: 16)])
+    }
+
+    func test_the_aim_comparison_uses_the_frame_position_or_its_measured_velocity() throws {
+        for (method, expectedX) in [(ReflexPressAim.latest, 16.0), (.predicted, 26.0), (.resting, 16.0)] {
+            let rig = try LeafRig()
+            rig.decide()
+            rig.showBall()
+            rig.poster.onPost = { event, _ in
+                if event.kind == .pointerMove, rig.poster.moves.count == 10 {
+                    let frame = ReflexFixtures.frame(capture: 90, capturedNs: rig.clock.nowNs() - 10_000_000,
+                                                     deliveredNs: rig.clock.nowNs(), owner: rig.token.id)
+                    let observed = ReflexFixtures.ball(on: frame, track: 5, box: rig.box)
+                    let moving = ReflexObservation(
+                        detector_id: observed.detector_id, frame: observed.frame, unknown: nil, value: 1,
+                        target: ReflexTarget(track_id: 5, roi: rig.box, point_x: 16, point_y: 16,
+                                             velocity_x: 1_000, velocity_y: 0, uncertainty: 1),
+                        scale: observed.scale, cells: nil, samples: observed.samples
+                    )
+                    rig.sightings.publish(ReflexFixtures.seen(frame, moving))
+                }
+            }
+            var runner = try rig.runner()
+            runner.pressAim = method
+            XCTAssertEqual(runner.run(LeafRig.click, index: 0).outcome, .done, method.rawValue)
+            XCTAssertEqual(rig.poster.presses.first?.x, expectedX, method.rawValue)
+        }
+    }
+
+    func test_a_click_already_inside_its_target_does_not_repeat_the_whole_glide() throws {
+        let rig = try LeafRig()
+        let target = ReflexRoi(x: 12, y: 8, width: 16, height: 16, space: .pixel)
+        rig.capture(10, box: target)
+        rig.poster.movePointer(to: SmoothPointerPath.Point(x: 16, y: 16))
+        var seq: UInt64 = 10
+        rig.sleeper.onSleep = { _, deadline in
+            rig.clock.set(deadline)
+            seq += 1
+            rig.capture(seq, box: target)
+        }
+        XCTAssertEqual(try rig.runner().run(LeafRig.click, index: 0).outcome, .done)
+        XCTAssertEqual(rig.poster.moves.count, 0, "a moving target under the pointer needs a current press point, not another full approach")
+        XCTAssertEqual(rig.poster.presses.first?.x, 20)
+    }
+
     /// A right click presses the right button; a shift click the left one with
     /// shift's flag on its press and its release — flags on the mouse events
     /// alone, never a key of the desktop's.
@@ -341,6 +414,17 @@ final class ReflexPressTests: XCTestCase {
     }
 
     // MARK: through the helper's host
+
+    #if !REFLEX_BENCH
+    func test_a_production_helper_refuses_the_benchmark_aim_selector_before_taking_the_hand() throws {
+        let rig = HostRig()
+        defer { rig.restore() }
+        XCTAssertThrowsError(try HostStart(runId: "bench-only", plan: ReflexFixtures.wire(), hand: rig.host.hand).start(benchPressAim: "resting")) { error in
+            XCTAssertEqual((error as? ProviderError)?.code, "invalid_argument")
+        }
+        XCTAssertNil(rig.host.hand.snapshot.holder)
+    }
+    #endif
 
     /// A key plan started through the helper's host names its codes at the
     /// start and presses its key into the run's app's process on the ball's edge.

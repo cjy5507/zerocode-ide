@@ -91,7 +91,7 @@ fn shared_golden_runs_through_the_real_validator() {
     // R1's 32 cases under v2, the six v2 adds, the identifier bound's two
     // sides (t-9205), a detector's pick with the R4 bench's plan (t-10242),
     // and a key, a click's button and modifiers and a drag (t-10384).
-    assert_eq!(cases.len(), 75);
+    assert_eq!(cases.len(), 76);
     for name in manifest["wire_negative"].as_array().unwrap() {
         let name = name.as_str().unwrap();
         let path = format!(

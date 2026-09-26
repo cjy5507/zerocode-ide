@@ -356,7 +356,8 @@ final class Provider {
                 hand: OperatorHandHost.hand,
                 admit: { OperatorGuardHost.admission() },
                 standing: { OperatorGuardHost.standing() },
-                actingScope: { try actingScope($0) }
+                actingScope: { try actingScope($0) },
+                benchPressAim: params["benchPressAim"]?.string
             )
         case "resume":
             OperatorGuardHost.resume(resetBudget: params["resetBudget"]?.bool == true)

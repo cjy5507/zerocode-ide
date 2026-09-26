@@ -386,10 +386,12 @@ public struct ReflexRuleBook {
     /// on it; a detector missing from it is unknown. `renewal` is asked — at
     /// most once, only under a renewing policy, only while the hand is free and
     /// only once a spent rule is read — whether the run may give spent quotas
-    /// back now; it re-checks the run's standing and admits nothing.
+    /// back now; it re-checks the run's standing and admits nothing. A rule
+    /// whose first action is not `ready` keeps its armed edge and fire quota.
     public mutating func read(
         streamEpoch: UInt64, captureSeq: UInt64, values: [String: Int64], nowNs: UInt64, handFree: Bool,
-        renewal: () -> Bool = { false }
+        renewal: () -> Bool = { false },
+        ready: (ReflexRule) -> Bool = { _ in true }
     ) -> Read {
         if let last = lastFrame, (streamEpoch, captureSeq) <= (last.stream, last.capture) { return Read(fired: nil, renewed: []) }
         lastFrame = (streamEpoch, captureSeq)
@@ -419,7 +421,7 @@ public struct ReflexRuleBook {
                     break
                 }
                 let cooled = arm.lastFireNs.map { nowNs >= $0 && nowNs - $0 >= rule.cooldown_ms &* 1_000_000 } ?? true
-                if chosen == nil, handFree, arm.armed, cooled {
+                if chosen == nil, handFree, arm.armed, cooled, ready(rule) {
                     chosen = rule
                     arm.armed = false
                     arm.fires += 1
@@ -803,6 +805,12 @@ public final class ReflexReceipts: @unchecked Sendable {
 
 // MARK: - One leaf on the hand
 
+/// The old hand and two current aiming strategies for a paired benchmark.
+public enum ReflexPressAim: String, Sendable {
+    case resting, latest, predicted
+    public static let production: Self = .latest
+}
+
 /// Runs one leaf action on the hand (realtime v1 §5.4): one admission for the
 /// leaf; a lease from the frame it was decided on; before every event the
 /// lease read against the newest evaluated frame — never the capture the
@@ -826,6 +834,8 @@ struct ReflexLeafRunner {
     let boundary: any ReflexInputBoundary
     /// The run's one deadline: no lease outlives it.
     let deadlineNs: UInt64
+    // Kept explicit so the two aiming methods can be measured on the same hand.
+    var pressAim: ReflexPressAim = .production
 
     private struct Draft {
         let leaf: ReflexLeaf
@@ -916,7 +926,13 @@ struct ReflexLeafRunner {
         // Where the leaf goes is the run's to act on before anything moves.
         try within(leaf.kind == .click ? leaf.clickInput : .pointer_move, at: end, &draft)
         let start = hand.pointerNow() ?? end
-        let path = PointerSchedule.glide(from: start, to: end, style: style, tickNs: limits.pointer_tick_ns, startNs: issuedNs)
+        // A preceding move may already have reached the target while it
+        // drifted a few pixels. The press takes a fresh aim below; repeating
+        // the full approach would consume another glide of its visible life.
+        let arrived = leaf.kind == .click && pressAim != .resting && source.pixel(ofPoint: start).map {
+            target.roi.contains(x: $0.x, y: $0.y)
+        } == true
+        let path = arrived ? [] : PointerSchedule.glide(from: start, to: end, style: style, tickNs: limits.pointer_tick_ns, startNs: issuedNs)
         let presses: UInt64 = leaf.kind == .click ? 2 : 0
         var lease = ReflexActionLease.issue(
             runId: runId, leaf: leaf, target: target, frame: source,
@@ -929,18 +945,21 @@ struct ReflexLeafRunner {
         guard leaf.kind == .click else { return }
 
         // The press: a capture newer than the one the lease came from still
-        // shows the same target, the lease holds a click, the pointer is inside
-        // where the target is now, and the point is the run's to press. The
+        // shows the same target, the lease holds a click, and the chosen point
+        // is inside where the target is now and the run's to press. The
         // boundary's answer takes its time (the window server is asked), so
         // what became known meanwhile — evidence taken back, a newer capture,
         // the clock past the frame or the lease — is read again before the
         // press, and the press goes only where the boundary was asked.
         let input = leaf.clickInput
         var (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
+        let resting = hand.pointerNow()
         let pointer = try pressPoint(leaf, target, input, on: frame, at: now, lease: &lease)
         try within(input, at: pointer, &draft)
         (frame, now) = try newer(than: lease, evidence: evidence, draft: &draft)
-        guard try pressPoint(leaf, target, input, on: frame, at: now, lease: &lease) == pointer else { throw Halt.outcome(.moved) }
+        // A person can move the pointer before the input monitor reports it.
+        guard hand.pointerNow() == resting else { throw Halt.outcome(.moved) }
+        _ = try pressPoint(leaf, target, input, on: frame, at: now, lease: &lease, checking: pointer)
         let button: MouseButtonSelection = leaf.press.button == .right ? .right : .left
         try hand.post(HandEvent(.buttonDown(button, clickState: 1), x: pointer.x, y: pointer.y, flags: flags), by: token)
         draft.downHostNs = hand.nowNs()
@@ -1122,20 +1141,36 @@ struct ReflexLeafRunner {
 
     /// Where the press goes on `seen` at `now`, `lease` renewed by it: the
     /// leaf's target on that capture, the lease holding `input` then, and the
-    /// aim and the pointer still inside where the target is. A lease that no
+    /// aim still inside where the target is. A lease that no
     /// longer holds ends the leaf as `lease` before the target's place is read.
     private func pressPoint(
         _ leaf: ReflexLeaf, _ target: ReflexTarget, _ input: ReflexLeaseInput, on seen: ReflexSightings.Seen, at now: UInt64,
-        lease: inout ReflexActionLease
+        lease: inout ReflexActionLease, checking point: SmoothPointerPath.Point? = nil
     ) throws -> SmoothPointerPath.Point {
         guard case let (fresh, moved)? = seen.sighting(of: leaf.detector, track: target.track_id) else { throw Halt.outcome(.moved) }
         lease = lease.renewed(by: seen.frame, target: moved, limits: limits)
         guard lease.permits(seen.frame, now_host_ns: now, input: input, limits: limits) else { throw Halt.outcome(.lease) }
-        guard moved.aim(atHostNs: now, capturedHostNs: fresh.frame.captured_host_ns, maxAgeNs: limits.max_frame_age_ns) != nil,
-              let pointer = hand.pointerNow(), let pixel = seen.frame.pixel(ofPoint: pointer),
-              moved.roi.contains(x: pixel.x, y: pixel.y)
+        let captured = fresh.frame.captured_host_ns
+        if pressAim == .resting {
+            guard moved.aim(atHostNs: now, capturedHostNs: captured, maxAgeNs: limits.max_frame_age_ns) != nil,
+                  let pointer = hand.pointerNow(), let pixel = seen.frame.pixel(ofPoint: pointer),
+                  moved.roi.contains(x: pixel.x, y: pixel.y), point == nil || point == pointer
+            else { throw Halt.outcome(.moved) }
+            return pointer
+        }
+        let aimAt = pressAim == .predicted ? now : captured
+        guard let aim = moved.aim(atHostNs: aimAt, capturedHostNs: captured, maxAgeNs: limits.max_frame_age_ns)
         else { throw Halt.outcome(.moved) }
-        return pointer
+        let chosen = point ?? seen.frame.point(ofPixelX: Double(aim.x), y: Double(aim.y))
+        guard let pixel = seen.frame.pixel(ofPoint: chosen) else { throw Halt.outcome(.moved) }
+        // Revalidate the exact point the boundary answered, in the current
+        // hitbox (carried by the same prediction when that method is used).
+        let x = pixel.x - Double(aim.x) + Double(moved.point_x)
+        let y = pixel.y - Double(aim.y) + Double(moved.point_y)
+        let reach = Double(moved.uncertainty)
+        guard moved.roi.contains(x: x - reach, y: y - reach), moved.roi.contains(x: x + reach, y: y + reach)
+        else { throw Halt.outcome(.moved) }
+        return chosen
     }
 
     /// Where a drag presses on `seen` at `now`, `lease` renewed by it: the
@@ -1455,6 +1490,8 @@ public final class ReflexSession: @unchecked Sendable {
         /// the start was accepted (`ReflexPresses.resolve`); an action missing
         /// from it presses nothing it would need a code for.
         public let presses: [String: ReflexPress]
+        /// The production aim unless an explicitly built benchmark compares it.
+        public var pressAim: ReflexPressAim = .production
 
         public init(runId: String, plan: ValidatedReflexPlan, limits: ReflexLimits, perception: PerceptionLimits, planEpoch: UInt64,
                     policy: ReflexRunPolicy, deadlineNs: UInt64, presses: [String: ReflexPress] = [:]) {
@@ -1813,9 +1850,11 @@ public final class ReflexSession: @unchecked Sendable {
         let plan = settings.plan.plan
         let detectors = Dictionary(plan.detectors.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         // The detector each rule's fire sends the hand to last: its last leaf's.
-        let lands = Dictionary(plan.rules.compactMap { rule in
-            ReflexMacros.leaves(ruleId: rule.id, macroId: rule.macro_id, in: plan).last.map { (rule.id, $0.detector) }
+        let leaves = Dictionary(plan.rules.map { rule in
+            (rule.id, ReflexMacros.leaves(ruleId: rule.id, macroId: rule.macro_id, in: plan))
         }, uniquingKeysWith: { first, _ in first })
+        let lands = leaves.compactMapValues { $0.last?.detector }
+        let begins = leaves.compactMapValues(\.first)
         // Where the last fire sent the hand — that target's point on the frame it fired on — for a
         // kernel that picks by nearness; nil before the first fire. A run's ready frames share one
         // geometry (a display that changed never reads ready again), so the point stays in their pixels.
@@ -1878,7 +1917,16 @@ public final class ReflexSession: @unchecked Sendable {
             let free = !handBusy && pendingFire == nil && state == .running && watch.permitsActing && now < settings.deadlineNs
             lock.unlock()
             let outcome = book.read(streamEpoch: facts.stream_epoch, captureSeq: facts.capture_seq, values: values, nowNs: now,
-                                    handFree: free, renewal: { mayRenew(token) })
+                                    handFree: free, renewal: { mayRenew(token) }, ready: { rule in
+                // A partly exposed blob can be known yet too narrow to aim
+                // inside. Keep its edge armed until a capture can support the
+                // first pointer leaf; never re-arm an edge or spend its quota
+                // merely because an unsafe fragment was counted.
+                guard settings.pressAim != .resting, let first = begins[rule.id], first.kind != .key,
+                      let sighting = byDetector[first.detector], let target = sighting.target else { return true }
+                return target.aim(atHostNs: now, capturedHostNs: sighting.frame.captured_host_ns,
+                                  maxAgeNs: settings.limits.max_frame_age_ns) != nil
+            })
             lock.lock()
             renewals += UInt64(outcome.renewed.count)
             renewalGaps.append(contentsOf: outcome.renewed.map(\.spentForNs))
@@ -1931,7 +1979,8 @@ public final class ReflexSession: @unchecked Sendable {
     private func runLeaves(token: OperatorHand.Token, style: PointerStyle) {
         let runner = ReflexLeafRunner(
             runId: settings.runId, hand: hand, token: token, limits: settings.limits, style: style,
-            sightings: sightings, admit: admit, fenceNs: fenceNs, boundary: boundary, deadlineNs: settings.deadlineNs
+            sightings: sightings, admit: admit, fenceNs: fenceNs, boundary: boundary, deadlineNs: settings.deadlineNs,
+            pressAim: settings.pressAim
         )
         var index: UInt64 = 0
         while true {

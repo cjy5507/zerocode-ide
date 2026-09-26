@@ -299,8 +299,22 @@ enum ReflexRuntimeHost {
         hand: OperatorHand,
         admit: @escaping @Sendable () -> GuardAdmission,
         standing: @escaping @Sendable () -> GuardAdmission,
-        actingScope: (ReflexScope) throws -> ReflexActingScope
+        actingScope: (ReflexScope) throws -> ReflexActingScope,
+        benchPressAim: String? = nil
     ) throws -> [String: Any] {
+        let pressAim: ReflexPressAim
+        if let benchPressAim {
+            #if REFLEX_BENCH
+            guard let selected = ReflexPressAim(rawValue: benchPressAim) else {
+                throw ProviderError.coded("invalid_argument", "unknown benchmark press aim")
+            }
+            pressAim = selected
+            #else
+            throw ProviderError.coded("invalid_argument", "press aim comparison needs a benchmark helper build")
+            #endif
+        } else {
+            pressAim = .production
+        }
         let acceptedNs = hand.nowNs()
         if let retried = retriedAnswer(runId) { return retried }
         let limits: ReflexLimits
@@ -388,9 +402,11 @@ enum ReflexRuntimeHost {
             let source = try parts.reader(runId, eye, display, Int(clamping: limits.frames_per_second))
             reader = source
             try keep(mine) { $0.source = source }
+            var settings = ReflexSession.Settings(runId: runId, plan: plan, limits: limits, perception: perception, planEpoch: epoch,
+                                                   policy: policy, deadlineNs: deadlineNs, presses: presses)
+            settings.pressAim = pressAim
             let session = ReflexSession(
-                settings: ReflexSession.Settings(runId: runId, plan: plan, limits: limits, perception: perception, planEpoch: epoch,
-                                                 policy: policy, deadlineNs: deadlineNs, presses: presses),
+                settings: settings,
                 hand: hand,
                 source: source,
                 kernel: kernel,

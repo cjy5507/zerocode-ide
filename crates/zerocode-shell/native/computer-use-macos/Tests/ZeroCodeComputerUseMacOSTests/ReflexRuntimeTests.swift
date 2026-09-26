@@ -543,9 +543,8 @@ final class ReflexRuntimeTests: XCTestCase {
     }
 
     /// The press waits for a capture newer than the one the lease came from,
-    /// still showing the same track with the pointer inside its hitbox: a
-    /// target that moved off, another in its place, or no newer capture at
-    /// all posts no button.
+    /// still showing the same track: its new position is aimed at, while
+    /// another track in its place or no newer capture posts no button.
     func test_moving_target_is_revalidated_before_button_down() throws {
         func click(afterLastWaypoint change: @escaping (LeafRig) -> Void) throws -> (ReflexReceipt, LeafRig) {
             let rig = try LeafRig()
@@ -562,8 +561,9 @@ final class ReflexRuntimeTests: XCTestCase {
         }
         let far = ReflexRoi(x: 0, y: 0, width: 4, height: 4, space: .pixel)
         let (moved, movedRig) = try click { rig in rig.capture(90, box: far) }
-        XCTAssertEqual(moved.outcome, .moved)
-        XCTAssertEqual(movedRig.poster.presses.count, 0, "the target left the pointer: no press")
+        XCTAssertEqual(moved.outcome, .done)
+        XCTAssertEqual(movedRig.poster.presses.map { SmoothPointerPath.Point(x: $0.x, y: $0.y) },
+                       [SmoothPointerPath.Point(x: 2, y: 2)], "the same track is pressed where it moved")
 
         let (replaced, replacedRig) = try click { rig in rig.capture(90, track: 6) }
         XCTAssertEqual(replaced.outcome, .moved)
@@ -2091,14 +2091,15 @@ struct HostStart {
         self.keys = keys
     }
 
-    func start() throws -> [String: Any] {
+    func start(benchPressAim: String? = nil) throws -> [String: Any] {
         let ledger = self.ledger
         return try ReflexRuntimeHost.start(
             runId: runId, plan: plan, limits: ReflexFixtures.limitsWire(), perception: ReflexFixtures.perceptionWire(),
             runPolicy: try policy ?? ReflexFixtures.policyWire(), capability: try capability ?? ReflexFixtures.capabilityWire(liveReflex: true),
             keys: try keys ?? ReflexFixtures.keysWire(),
             eye: Self.eye, display: 0, hand: hand, admit: { ledger.admit() }, standing: { ledger.standing() },
-            actingScope: { ReflexActingScope(surface: $0.surface, target: $0.target, pid: 4_242) }
+            actingScope: { ReflexActingScope(surface: $0.surface, target: $0.target, pid: 4_242) },
+            benchPressAim: benchPressAim
         )
     }
 }

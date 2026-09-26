@@ -76,6 +76,8 @@ const STUB: &str = "stub";
 const CALLS: &str = "calls.jsonl";
 /// The helper's word for a run it no longer knows.
 const MISSING: &str = "missing";
+/// Only a helper built with REFLEX_BENCH accepts this comparison selector.
+const PRESS_AIM_ENV: &str = "ZEROCODE_REFLEX_BENCH_AIM";
 
 /// The keys this process's environment holds, by the name a key store's
 /// item carries after the window's prefix: the bench asks with the key the
@@ -273,11 +275,17 @@ fn a_reflex_run_on_the_benchs_own_fixture() {
     let helper_pid = session.helper_pid();
     let calls = folder.join(CALLS);
     let known = RefCell::new(BTreeMap::new());
+    let press_aim = std::env::var(PRESS_AIM_ENV).ok();
     // Every start and stop the helper answered, as the host's clock saw it
     // asked and answered: where one plan's hand let go and the next took over.
     // And each run's status as the helper last told it: once a run's receipts
     // are all acknowledged the helper forgets it, but for the last to end.
-    let mut call = |method: &str, params: Value| {
+    let mut call = |method: &str, mut params: Value| {
+        if method == "reflexStart"
+            && let Some(aim) = &press_aim
+        {
+            params["benchPressAim"] = json!(aim);
+        }
         let asked_ns = uptime_ns();
         let answer = session
             .request(method, params.clone())
@@ -327,6 +335,7 @@ fn a_reflex_run_on_the_benchs_own_fixture() {
             "helperPid": helper_pid,
             "launchedNs": launched_ns,
             "connectedNs": connected_ns,
+            "benchPressAim": press_aim,
         }),
     );
     let bench = Bench {

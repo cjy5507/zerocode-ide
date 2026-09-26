@@ -77,7 +77,7 @@ final class ReflexContractTests: XCTestCase {
         // R1's 32 cases under version 2, the six version 2 adds, the identifier
         // bound's two sides (t-9205), a detector's pick with the R4 bench's plan (t-10242),
         // and a key, a click's button and modifiers and a drag (t-10384).
-        XCTAssertEqual(names.count, 75)
+        XCTAssertEqual(names.count, 76)
         let wireNames = try XCTUnwrap(manifest["wire_negative"] as? [String])
         for name in wireNames {
             let data = try Data(contentsOf: fixtureRoot.appendingPathComponent("\(name).txt"))
