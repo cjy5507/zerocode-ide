@@ -40334,12 +40334,21 @@ button.jev-token:hover {
     display: none;
   }
 
+  /* Each row as one compact card: the feature and its state on the first
+     line, its five figures in a line under them, and the week's picture at
+     the side spanning both — three lines where the stacked grid took four
+     labelled blocks, so a window this wide shows twice the features. */
   .jev-table tbody tr[data-jev-dash-row] {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(var(--jev-stat-min), 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
+    grid-template-areas:
+      "seat seat seat seat seat trend"
+      "rows answered latency acted cost trend"
+      "status status status status status trend";
     gap: var(--space-2) var(--space-3);
     padding: var(--space-3);
     border-bottom: var(--jev-line) solid var(--edge-rule);
+    align-items: start;
   }
 
   .jev-table tbody tr[data-jev-dash-row] td {
@@ -40349,6 +40358,15 @@ button.jev-token:hover {
     border: 0;
   }
 
+  .jev-table td[data-jev-cell="seat"] { grid-area: seat; }
+  .jev-table td[data-jev-cell="rows"] { grid-area: rows; }
+  .jev-table td[data-jev-cell="answered"] { grid-area: answered; }
+  .jev-table td[data-jev-cell="latency"] { grid-area: latency; }
+  .jev-table td[data-jev-cell="acted"] { grid-area: acted; }
+  .jev-table td[data-jev-cell="cost"] { grid-area: cost; }
+  .jev-table td[data-jev-cell="status"] { grid-area: status; }
+  .jev-table td[data-jev-cell="trend"] { grid-area: trend; }
+
   .jev-table tbody tr[data-jev-dash-row] td::before {
     display: block;
     color: var(--ink-mist);
@@ -40357,26 +40375,23 @@ button.jev-token:hover {
     white-space: normal;
   }
 
-  /* Each column's name, as the table says it (`jevNameColumns`). */
+  /* The five figures wear their column's name, as the table says it
+     (`jevNameColumns`); the state's chip and the week's picture say what
+     they are themselves. */
   .jev-table td[data-jev-cell="rows"]::before { content: var(--jev-label-rows, none); }
   .jev-table td[data-jev-cell="answered"]::before { content: var(--jev-label-answered, none); }
   .jev-table td[data-jev-cell="latency"]::before { content: var(--jev-label-latency, none); }
   .jev-table td[data-jev-cell="acted"]::before { content: var(--jev-label-acted, none); }
   .jev-table td[data-jev-cell="cost"]::before { content: var(--jev-label-cost, none); }
-  .jev-table td[data-jev-cell="status"]::before { content: var(--jev-label-status, none); }
-  .jev-table td[data-jev-cell="trend"]::before { content: var(--jev-label-trend, none); }
-
-  .jev-table td[data-jev-cell="seat"],
-  .jev-table td[data-jev-cell="status"],
-  .jev-table td[data-jev-cell="trend"] {
-    grid-column: 1 / -1;
-  }
-
+  .jev-table td[data-jev-cell="status"]::before,
+  .jev-table td[data-jev-cell="trend"]::before { content: none; }
 
   .jev-table [data-jev-cell="status"] {
     min-width: 0;
   }
 
+  /* A card has room under its figures for the latency picture the table
+     shows only from 90em. */
   .jev-table {
     --jev-latency-shown: 1;
   }
@@ -40392,6 +40407,26 @@ button.jev-token:hover {
 }
 
 @container jev (width < 58em) {
+  /* Too narrow for a line of five figures: the card stacks them, each
+     under its name, with the state and the week across the whole card. */
+  .jev-table tbody tr[data-jev-dash-row] {
+    grid-template-columns: repeat(auto-fill, minmax(var(--jev-stat-min), 1fr));
+    grid-template-areas: none;
+  }
+
+  .jev-table tbody tr[data-jev-dash-row] td {
+    grid-area: auto;
+  }
+
+  .jev-table td[data-jev-cell="seat"],
+  .jev-table td[data-jev-cell="status"],
+  .jev-table td[data-jev-cell="trend"] {
+    grid-column: 1 / -1;
+  }
+
+  .jev-table td[data-jev-cell="status"]::before { content: var(--jev-label-status, none); }
+  .jev-table td[data-jev-cell="trend"]::before { content: var(--jev-label-trend, none); }
+
   .jev-head, .jev-head-side {
     flex-direction: column;
     align-items: flex-start;

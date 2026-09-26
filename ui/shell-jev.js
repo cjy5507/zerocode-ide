@@ -80,9 +80,9 @@ const JEV_CHART = Object.freeze({
   trendDays: 3,
   sampleFloor: 5,
   reasonsShown: 2,
-  trend: Object.freeze({ width: 64, height: 18, pad: 2, now: 6, strip: 4, gap: 1 }),
+  trend: Object.freeze({ width: 64, height: 18, pad: 2, now: 6, strip: 10, gap: 1 }),
   trendWide: Object.freeze({ width: 360, height: 96, pad: 4, now: 0, samples: 24, column: 0.5 }),
-  latency: Object.freeze({ width: 44, height: 18, pad: 2 }),
+  latency: Object.freeze({ width: 72, height: 20, pad: 2 }),
   tokens: Object.freeze({ width: 280, height: 64, dense: 14 }),
   judgment: Object.freeze({ width: 100, height: 6 }),
 });
@@ -444,13 +444,13 @@ function jevNode(tag, className, ...children) {
  * meaning said once carries that sentence as its tip (`tipKey`, `tip`). */
 const JEV_COLUMNS = Object.freeze([
   { cell: "seat", key: "jev.col.seat", word: "기능" },
-  { cell: "rows", key: "jev.col.rows", word: "판단 요청 (오늘 / 7일)" },
-  { cell: "answered", key: "jev.col.answered", word: "응답률 (신뢰 하한)", tipKey: "jev.col.answeredTip", tip: "응답률은 판단을 요청한 것 중 응답을 받은 비율이고, 신뢰 하한은 표본이 적을 때를 감안한 보수적인 값입니다." },
+  { cell: "rows", key: "jev.col.rows", word: "요청 (오늘 · 7일)" },
+  { cell: "answered", key: "jev.col.answered", word: "응답률", tipKey: "jev.col.answeredTip", tip: "응답률은 판단을 요청한 것 중 응답을 받은 비율이고, 신뢰 하한은 표본이 적을 때를 감안한 보수적인 값입니다." },
   { cell: "latency", key: "jev.col.latency", word: "응답 시간" },
-  { cell: "acted", key: "jev.col.acted", word: "실제 적용 · 정확도", tipKey: "jev.col.actedTip", tip: "정확도는 판단이 기존 방식의 판단이나 나중에 확인된 결과와 같았던 비율입니다." },
+  { cell: "acted", key: "jev.col.acted", word: "적용 · 정확도", tipKey: "jev.col.actedTip", tip: "정확도는 판단이 기존 방식의 판단이나 나중에 확인된 결과와 같았던 비율입니다." },
   { cell: "cost", key: "jev.col.cost", word: "비용 (USD)" },
   { cell: "status", key: "jev.col.why", word: "상태와 다음 단계" },
-  { cell: "trend", key: "jev.col.trend", word: "지난 7일 (정확도 · 단순 방식)", tipKey: "jev.col.trendTip", tip: "선은 날마다 판단이 맞은 비율(실선)과 가장 단순한 방식의 비율(점선)이고, 띠는 그 비율의 신뢰 하한까지입니다. 아래 칸은 날마다 한 일입니다: 진한 칸은 비교함, 옅은 칸은 비교가 너무 적음, 회색 칸은 요청만 있음, 주황 칸은 단순 방식이 같거나 나았던 날이고, 끝의 점은 지금 상태입니다." },
+  { cell: "trend", key: "jev.col.trend", word: "지난 7일", tipKey: "jev.col.trendTip", tip: "선은 날마다 판단이 맞은 비율(실선)과 가장 단순한 방식의 비율(점선)이고, 띠는 그 비율의 신뢰 하한까지입니다. 아래 막대는 날마다 한 일입니다: 높이는 그날의 요청 수이고, 진한 막대는 비교함, 옅은 막대는 비교가 너무 적음, 회색 막대는 요청만 있음, 주황 막대는 단순 방식이 같거나 나았던 날이고, 끝의 점은 지금 상태입니다." },
 ]);
 
 /* Where each column stands in a row. */
@@ -1250,9 +1250,17 @@ function jevTimelinePicture(days, status, label, box = JEV_CHART.trend) {
   const svg = jevPicture("timeline", { width: box.width, height: box.strip }, label, "jev-strip");
   const width = box.width - box.now;
   const slot = width / Math.max(1, days.length);
-  const cell = (at) => `M${jevFixed(at * slot + box.gap / 2)} 0h${jevFixed(slot - box.gap)}v${box.strip}h${-jevFixed(slot - box.gap)}Z`;
+  // Each day's cell is a bar as tall as that day's requests against the
+  // busiest day's, so a week of requests that compared nothing still shows
+  // its shape (a day with any at all stands at least one unit tall).
+  const most = Math.max(1, ...days.map((day) => Math.max(day.rows, day.compared)));
+  const cell = (at, rows) => {
+    const tall = Math.max(1, Math.round((rows / most) * box.strip * 10) / 10);
+    return `M${jevFixed(at * slot + box.gap / 2)} ${jevFixed(box.strip - tall)}h${jevFixed(slot - box.gap)}v${jevFixed(tall)}h${-jevFixed(slot - box.gap)}Z`;
+  };
   const states = days.map(jevDayState);
   svg.dataset.states = states.join(",");
+  svg.dataset.rows = days.map((day) => day.rows).join(",");
   // Every day's faint cell as one stroke across the days, dashed a cell and
   // a gap at a time: a month costs what a week does.
   const track = jevMark("jev-strip-track", `M${jevFixed(box.gap / 2)} ${jevFixed(box.strip / 2)}H${jevFixed(width)}`);
@@ -1261,7 +1269,7 @@ function jevTimelinePicture(days, status, label, box = JEV_CHART.trend) {
   svg.append(track);
   const cells = new Map();
   states.forEach((state, at) => {
-    if (state !== "idle") cells.set(state, (cells.get(state) ?? "") + cell(at));
+    if (state !== "idle") cells.set(state, (cells.get(state) ?? "") + cell(at, Math.max(days[at].rows, days[at].compared)));
   });
   for (const { state } of JEV_DAY_STATES) {
     if (!cells.has(state)) continue;
@@ -1792,7 +1800,9 @@ function jevStatusCell(held, choice, standing, head) {
   // many of them it acts instead (`jevOwed` answers nothing for a sum).
   const across = held.across ?? null;
   const owed = jevOwed(held, standing);
-  const counting = owed !== null && owed.wants !== "next";
+  // A feature switched off asks nothing, so nothing counts toward its
+  // next judgment: the chip says off, and no countdown stands beside it.
+  const counting = owed !== null && owed.wants !== "next" && status !== "dormant";
   const lead = jevNode("div", "jev-status-lead", chip);
   if (counting) lead.append(jevNode("span", "jev-owed", document.createTextNode(jevOwedWords(owed, held))));
   const reason = across?.summed ? "" : jevStatusReason(held, status, choice, counting);
@@ -1841,7 +1851,16 @@ function jevStatusReason(held, status, choice, counting) {
   // a feature failing.
   if (held.week.rows === 0) return t("jev.noRequests", "지난 7일 판단 요청이 없었습니다");
   if (status === "applying") {
-    if (!choice?.applies) return t("jev.risen", "근거가 충분해 자동으로 켜졌습니다");
+    if (!choice?.applies) {
+      // The judged window's comparisons are the evidence: said with the
+      // sentence, so a week whose strip compared nothing does not read as
+      // a feature applying on nothing.
+      const agreement = held.judged?.agreement;
+      return agreement?.compared
+        ? t("jev.risenWith", "근거가 충분해 자동으로 켜졌습니다 — 비교 {{count}}건, 신뢰 하한 {{pct}}",
+          { count: jevCount(agreement.compared), pct: jevPercent(agreement.lowerBound) })
+        : t("jev.risen", "근거가 충분해 자동으로 켜졌습니다");
+    }
     if (!held.verdict) return t("jev.byHandNoJudge", "직접 켰습니다 — 이 기능은 자동 적용 대상이 아닙니다");
     if (counting) return t("jev.byHandShort", "직접 켰습니다");
     return because
