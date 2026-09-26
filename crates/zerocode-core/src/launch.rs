@@ -79,6 +79,36 @@ pub const AGENT_REFUSED_ARGS: &[(&str, &[&str])] = &[
     ("kilo", &["--dangerously-skip-permissions"]),
 ];
 
+/// What keeps an agent's CLI STARTING inside this window — not a permission,
+/// so it rides every launch, override or not, and never enters the
+/// permission judgement or the field the settings pane shows and saves.
+///
+/// `codex`, measured on codex-cli 0.157.1: the TUI attaches to a shared
+/// background app-server over a unix socket at
+/// `<CODEX_HOME>/app-server-control/app-server-control.sock`. Under the
+/// window's managed runtime home that path is 122 bytes where macOS's
+/// `sun_path` holds 104, the connect is refused ("path must be shorter than
+/// SUN_LEN") and the tab ended with code 1 about ten seconds after it opened.
+/// A config override is the version-safe spelling: a Codex that predates the
+/// key warns that it is ignoring an unrecognised setting and starts, where
+/// `--no-daemon` is refused by one that predates the flag. With the key off
+/// the TUI runs embedded (measured the same as `--no-daemon`); the window's
+/// own app-server sidecars are explicit `--remote` roads and never touch the
+/// daemon.
+pub const AGENT_LAUNCH_COMPAT_ARGS: &[(&str, &str)] =
+    &[("codex", "-c features.daemon_auto_start=false")];
+
+/// The compatibility words for one agent, split the way the process wants
+/// them; empty for every agent the table does not name.
+#[must_use]
+pub fn compat_launch_args(agent: &str) -> Vec<String> {
+    AGENT_LAUNCH_COMPAT_ARGS
+        .iter()
+        .find(|(id, _)| *id == agent)
+        .map(|(_, args)| args.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// The default arguments for one agent, or `""` for an agent with none.
 pub fn default_launch_args(agent: &str) -> &'static str {
     AGENT_LAUNCH_ARGS
@@ -419,15 +449,19 @@ pub fn launch_plan(agent: &str, held: Option<&LaunchOverride>) -> LaunchPlan {
         modes.push(PermissionMode::of_env(&env_said, yolo_env));
     }
 
+    // Split the way the strings were written to be read: `continue`'s own
+    // measured default is `--allow "*"`, and whitespace alone handed the
+    // agent a literal two-byte `"*"` — and cut a person's quoted path
+    // into pieces (P0-9). An unclosed quote falls back to the old
+    // whitespace split so a legacy override still launches; the save
+    // door refuses to store a new one.
+    let mut args = split_command_line(&args_said)
+        .unwrap_or_else(|_| args_said.split_whitespace().map(str::to_string).collect());
+    // After the person's line, whatever they wrote: the words that keep the
+    // CLI starting here are the window's to add, not a field to edit.
+    args.extend(compat_launch_args(agent));
     LaunchPlan {
-        // Split the way the strings were written to be read: `continue`'s own
-        // measured default is `--allow "*"`, and whitespace alone handed the
-        // agent a literal two-byte `"*"` — and cut a person's quoted path
-        // into pieces (P0-9). An unclosed quote falls back to the old
-        // whitespace split so a legacy override still launches; the save
-        // door refuses to store a new one.
-        args: split_command_line(&args_said)
-            .unwrap_or_else(|_| args_said.split_whitespace().map(str::to_string).collect()),
+        args,
         env: env_said,
         permission: PermissionMode::combine(&modes),
     }
@@ -510,6 +544,20 @@ mod tests {
                 "`{id}` refuses a flag but is not in the catalogue"
             );
         }
+        for (id, words) in AGENT_LAUNCH_COMPAT_ARGS {
+            assert!(
+                AGENT_SPECS.iter().any(|spec| spec.id == *id),
+                "`{id}` has compatibility words but is not in the catalogue"
+            );
+            // The words split cleanly and are nobody's refused flag.
+            let split = split_command_line(words).expect("compatibility words split");
+            assert_eq!(compat_launch_args(id), split);
+            assert!(!split.iter().any(|word| {
+                AGENT_REFUSED_ARGS
+                    .iter()
+                    .any(|(_, refused)| refused.contains(&word.as_str()))
+            }));
+        }
     }
 
     #[test]
@@ -532,6 +580,54 @@ mod tests {
         // somebody else's flag.
         assert_eq!(launch_plan("droid", None).args, Vec::<String>::new());
         assert!(!has_permission_switch("droid"));
+    }
+
+    #[test]
+    fn codex_starts_without_the_shared_daemon_the_managed_home_puts_out_of_reach() {
+        // Measured on codex-cli 0.157.1: under the window's managed home the
+        // shared daemon's socket path is 122 bytes where macOS's `sun_path`
+        // holds 104, the connect is refused, and the tab ended with code 1 ten
+        // seconds in. The compatibility words ride every codex launch —
+        // default, edited or emptied — and are never the permission
+        // judgement's or the settings field's business.
+        let compat = ["-c", "features.daemon_auto_start=false"];
+        let plain = launch_plan("codex", None);
+        assert_eq!(
+            plain.args,
+            [
+                "--dangerously-bypass-approvals-and-sandbox",
+                compat[0],
+                compat[1]
+            ]
+        );
+        assert_eq!(plain.permission, PermissionMode::Unattended);
+
+        let edited = LaunchOverride {
+            args: Some("--model gpt-5.6".into()),
+            env: None,
+        };
+        let plan = launch_plan("codex", Some(&edited));
+        assert_eq!(plan.args, ["--model", "gpt-5.6", compat[0], compat[1]]);
+        assert_eq!(plan.permission, PermissionMode::Mixed);
+
+        let cleared = LaunchOverride {
+            args: Some(String::new()),
+            env: None,
+        };
+        let plan = launch_plan("codex", Some(&cleared));
+        assert_eq!(plan.args, compat);
+        assert_eq!(plan.permission, PermissionMode::Asks);
+
+        // The field the settings pane shows and saves is the person's line,
+        // not the window's compatibility words.
+        assert!(!launch_args_line("codex", None).contains("daemon"));
+        // Nobody else is handed codex's words.
+        assert!(
+            !launch_plan("claude", None)
+                .args
+                .iter()
+                .any(|word| word.contains("daemon"))
+        );
     }
 
     #[test]
