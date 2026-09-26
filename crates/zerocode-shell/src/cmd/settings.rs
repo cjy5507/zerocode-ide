@@ -1324,6 +1324,29 @@ pub(crate) fn set_computer_live_reflex(
     )
 }
 
+/// Which road Computer Use's generator takes (`computer_generator_road`,
+/// t-10372): the Claude Code login, a person's own API key, or nobody. A
+/// writer reads it when it is made, so the next walk or autopilot takes the
+/// road chosen here, with no restart.
+#[tauri::command(async)]
+pub(crate) fn set_computer_generator_road(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    road: zerocode_core::type_value::GeneratorRoad,
+) -> Result<SettingsSnapshot, String> {
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::COMPUTER_GENERATOR_ROAD],
+        move |settings| {
+            settings.computer_generator_road = road;
+            Ok(())
+        },
+    )
+}
+
 /// The person's answer to the operator's question (§1.5).
 #[tauri::command]
 pub(crate) fn computer_confirm_answer(id: String, allow: bool) -> bool {

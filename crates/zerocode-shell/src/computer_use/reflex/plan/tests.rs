@@ -5,6 +5,7 @@ use zerocode_core::computer_use_protocol::reflex::Surface;
 
 use super::*;
 use crate::computer_use::errand::value::Tokens;
+use zerocode_core::type_value::GeneratorRoad;
 
 /// The scope a person named: the macOS desktop, the fixture app.
 pub(in crate::computer_use::reflex) fn scope() -> Scope {
@@ -285,7 +286,7 @@ pub(in crate::computer_use::reflex) struct Scripted {
 }
 
 impl Generator for Scripted {
-    fn unready(&self) -> Option<&'static str> {
+    fn unready(&self) -> Option<String> {
         None
     }
 
@@ -306,6 +307,11 @@ impl Generator for Scripted {
                     output: 10,
                 }),
                 text,
+                answered: Answered {
+                    road: GeneratorRoad::CodexLogin.word(),
+                    model: "a-model".into(),
+                    passed: vec!["claude_login=quota_wall".into()],
+                },
             })
     }
 }
@@ -318,6 +324,116 @@ fn ask_of<'a>(stage: &'a Stage, palette: &'a Palette, scope: &'a Scope) -> Ask<'
         palette,
         previous: None,
     }
+}
+
+/// Two login roads, as `auto` asks them (t-10372): the first answers with
+/// plans the contract refuses, the second with the plan; each answer says
+/// which road gave it and the roads set aside before it.
+struct TwoRoads {
+    first: VecDeque<String>,
+    second: VecDeque<String>,
+    on_second: bool,
+    set_aside: Vec<String>,
+}
+
+impl Generator for TwoRoads {
+    fn unready(&self) -> Option<String> {
+        None
+    }
+
+    fn model(&self) -> Option<String> {
+        Some("first-model".into())
+    }
+
+    fn ask(&mut self, _system: &str, user: &str, _left: Duration) -> Result<Said, String> {
+        let (text, road, model) = if self.on_second {
+            (self.second.pop_front(), "codex_login", "second-model")
+        } else {
+            (self.first.pop_front(), "claude_login", "first-model")
+        };
+        let text = text.expect("an answer scripted");
+        Ok(Said {
+            bytes_out: user.len(),
+            bytes_in: text.len(),
+            tokens: Some(Tokens {
+                input: 100,
+                output: 10,
+            }),
+            text,
+            answered: Answered {
+                road,
+                model: model.into(),
+                passed: self.set_aside.clone(),
+            },
+        })
+    }
+
+    fn pass_over(&mut self, why: &str) -> bool {
+        if self.on_second {
+            return false;
+        }
+        self.on_second = true;
+        self.set_aside.push(format!("claude_login={why}"));
+        true
+    }
+}
+
+/// A road whose every answer the contract refused is set aside for the next
+/// road `auto` asks (t-10372): the next road is asked afresh — none of the
+/// first road's refusals in its question — its plan is the one written, and
+/// the row carries every request, both roads' refusals and the road set
+/// aside with its reason. A generator with no next road ends refused.
+#[test]
+fn a_road_whose_plans_the_contract_refused_is_passed_over_for_the_next_login() {
+    let (image, stage) = capture();
+    let palette = palette_of(&image, &stage).expect("a palette");
+    let scope = scope();
+    let good = answer_for(&scope).to_string();
+    let refused = || VecDeque::from(vec!["no".to_string(), "no".into(), "no".into()]);
+    let mut generator = TwoRoads {
+        first: refused(),
+        second: VecDeque::from(vec![good]),
+        on_second: false,
+        set_aside: Vec::new(),
+    };
+    let written = write_plan(&mut generator, &ask_of(&stage, &palette, &scope));
+    assert!(written.plan.is_ok(), "{:?}", written.plan.as_ref().err());
+    let tries = usize::try_from(REFLEX_PLAN_RETRIES).expect("a count") + 1;
+    assert_eq!(written.requests as usize, tries + 1);
+    assert_eq!(written.refusals.len(), tries);
+    let answered = written.answered.as_ref().expect("an answer");
+    assert_eq!(answered.road, "codex_login");
+    assert_eq!(answered.model, "second-model");
+    assert_eq!(
+        answered.passed,
+        vec![format!("claude_login={PLAN_REFUSED}")]
+    );
+    let row = ledger_row(
+        0,
+        None,
+        1,
+        "g",
+        &palette,
+        Some("first-model"),
+        &written,
+        "answered",
+    );
+    assert_eq!(row["model"], json!("second-model"));
+    assert_eq!(
+        row["passedOver"],
+        json!([format!("claude_login={PLAN_REFUSED}")])
+    );
+
+    // With no road after it, the refusal stands.
+    let mut alone = TwoRoads {
+        first: refused(),
+        second: refused(),
+        on_second: true,
+        set_aside: Vec::new(),
+    };
+    let written = write_plan(&mut alone, &ask_of(&stage, &palette, &scope));
+    assert_eq!(written.plan.err().as_deref(), Some(PLAN_REFUSED));
+    assert_eq!(written.requests as usize, tries);
 }
 
 /// A refused plan is asked for again with every refusal so far attached, at
@@ -485,6 +601,11 @@ fn a_plan_leaves_one_row_with_its_cost_and_the_goal_by_its_fingerprint() {
     assert_eq!(row["requests"], json!(2));
     assert_eq!(row["refusals"].as_array().map(Vec::len), Some(1));
     assert_eq!(row["tokens"], json!({ "input": 200, "output": 20 }));
+    // Which road wrote the plan, the model that answered, and the road
+    // passed over with its reason (t-10372).
+    assert_eq!(row["road"], json!("codex_login"));
+    assert_eq!(row["model"], json!("a-model"));
+    assert_eq!(row["passedOver"], json!(["claude_login=quota_wall"]));
     assert_eq!(
         row["goalHash"],
         json!(zerocode_core::jev::fingerprint_of(goal))

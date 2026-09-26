@@ -593,8 +593,12 @@ pub const TYPE_REFUSED: &str = "type_refused";
 /// Where a typed value came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueSource {
-    /// Written now, by `model`, in `ms`.
-    Written { model: String, ms: u64 },
+    /// Written now, by `model`, in `ms`, down the road `answered` names.
+    Written {
+        model: String,
+        ms: u64,
+        answered: value::Answered,
+    },
     /// Typed again from what an identical input was written before — no
     /// model asked. Kept apart from a written one in every row, so a reused
     /// value is never counted as a sample of a model's speed or accuracy.
@@ -1833,9 +1837,20 @@ fn chosen_word(chosen: Chosen) -> String {
 /// counter reads it as a sample of the model.
 fn typed_note(source: &ValueSource, chars: usize) -> Value {
     let mut note = json!({ "source": source.word(), "chars": chars });
-    if let (ValueSource::Written { model, ms }, Some(fields)) = (source, note.as_object_mut()) {
+    if let (
+        ValueSource::Written {
+            model,
+            ms,
+            answered,
+        },
+        Some(fields),
+    ) = (source, note.as_object_mut())
+    {
         fields.insert(MODEL.canonical.to_string(), json!(model));
         fields.insert("valueMs".to_string(), json!(ms));
+        if let Some(road) = answered.note().as_object() {
+            fields.extend(road.clone());
+        }
     }
     note
 }

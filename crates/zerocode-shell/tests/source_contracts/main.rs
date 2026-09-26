@@ -26611,13 +26611,19 @@ mod tests {
         // stops waiting. Pinned on the runner rather than on each caller, now
         // that there are three of them — a copy that forgot one of these is
         // exactly what factoring it out prevents.
-        let running = block_after(shipped, "fn run_text_generation(");
+        let drafting_road = block_after(shipped, "fn run_text_generation(");
+        let account = block_after(shipped, "fn claude_reading_env(");
+        let running = block_after(shipped, "fn run_once(");
         assert!(
-            running.contains("accounts::reading_env_for(config_root, \"claude\")")
+            drafting_road.contains("claude_reading_env(config_root)")
+                && drafting_road.contains("run_once(")
+                && account.contains("accounts::reading_env_for(config_root, \"claude\")")
+                && account.contains("accounts::prepare_selected_store(config_root)")
                 && running.contains("shell_path::hydrated()")
-                && running.contains("child.kill()"),
+                && running.contains("child.kill()")
+                && running.contains("crate::hooks::PANE_COORDINATES"),
             "the one-shot runner bills the wrong account, cannot find the \
-             agent, or leaks its child past the timeout:\n{running}"
+             agent, leaks its child past the timeout, or runs as a pane:\n{drafting_road}\n{running}"
         );
 
         // And the hand is a function of the staged list, exactly like the
@@ -30889,7 +30895,7 @@ mod tests {
     /// Five zombies were found under one live session — every one a system
     /// opener spawned and dropped, standing in the process table for the
     /// window's whole life (1-fj). The main wiring has exactly three bare
-    /// children — `run_text_generation`, waited, and the `zerocode-pick`
+    /// children — `run_once`, waited, and the `zerocode-pick`
     /// helper (t-2982), spawned with `kill_on_drop` and waited or killed on
     /// every arm of its road, and the watchdog's bounded native sampler
     /// (t-3232), reaped on completion or killed and waited on timeout. The
@@ -30977,8 +30983,10 @@ mod tests {
                 "the emulator owner no longer performs {held}:\n{stopping}"
             );
         }
-        // And the one that remains genuinely waits: deadline, kill, wait.
-        let generating = block_after(shipped, "fn run_text_generation(");
+        // And the one that remains genuinely waits: deadline, kill, wait —
+        // the one-shot runner every text action and the Computer Use
+        // generator's login roads share (t-10372).
+        let generating = block_after(shipped, "fn run_once(");
         for held in ["child.kill()", "child.wait("] {
             assert!(
                 generating.contains(held),

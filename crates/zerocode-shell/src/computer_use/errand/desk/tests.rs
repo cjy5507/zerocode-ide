@@ -627,7 +627,7 @@ use zerocode_core::agent_browser::TYPE_VALUE_FLAG;
 use zerocode_core::screen_action::{ActionChoice, Chosen, Guard};
 
 use super::super::tests::{FakeJudge, Pen, entry, goal, memory, pick};
-use super::super::value::Written;
+use super::super::value::{Answered, Written};
 use super::super::{Judged, Mode, TYPED, Typed, ValueSource, run};
 
 /// The one field a page's look read — a city box — and a button beside it,
@@ -992,6 +992,13 @@ fn generated_value_reaches_stdin_and_is_never_in_argv_or_logs() {
     );
     assert_eq!(walked.rows[0][TYPED]["source"], json!("written"));
     assert_eq!(walked.rows[0][TYPED]["chars"], json!(6));
+    // The row says which road wrote the value and which it passed over, and
+    // why (t-10372): a road `auto` passed over is never a quiet one.
+    assert_eq!(walked.rows[0][TYPED]["road"], json!("codex_login"));
+    assert_eq!(
+        walked.rows[0][TYPED]["passedOver"],
+        json!(["claude_login=quota_wall"])
+    );
     // The model was asked about the words around the box — never what the
     // box held.
     let question = asked.borrow().join("\n");
@@ -1001,6 +1008,7 @@ fn generated_value_reaches_stdin_and_is_never_in_argv_or_logs() {
         value: "London".into(),
         model: "m".into(),
         ms: 1,
+        answered: Answered::default(),
     };
     assert!(!format!("{written:?}").contains("London"));
 }
@@ -1218,6 +1226,117 @@ fn a_subscription_login_never_rides_a_value_request() {
     }
     assert!(verbs.iter().any(|verb| verb == "type"));
     assert_eq!(walked.typed, 1);
+}
+
+/// One walk over a page with a field whose value `writer` writes, toward
+/// `goal` — the page's verbs and the walk.
+fn walk_a_field_for(
+    writer: super::super::value::LiveWriter,
+    goal: &'static str,
+) -> (Vec<String>, super::super::Walked) {
+    let road = Kept::on(a_page_with_a_field("doc-1", "", "#destination"));
+    let mut send = road.road();
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .writing(Box::new(writer))
+    .remembering(memory());
+    let mut judge = FakeJudge::saying(vec![entry(1)]);
+    let errand = super::super::Errand {
+        goal,
+        why: super::super::Why::Goal { steps: 1 },
+        flow: None,
+        moves_money: false,
+    };
+    let walked = run(Mode::On, true, &errand, &mut judge, &mut world);
+    drop(world);
+    (road.verbs(), walked)
+}
+
+/// With no key anywhere, a walk types the value a login wrote (t-10372):
+/// the entry is offered, the Claude login's CLI writes the value, the page is
+/// typed into, and the walk's row says which road wrote it.
+#[test]
+fn a_walk_with_no_key_types_the_value_a_login_wrote() {
+    use super::super::value::tests::{claude_said, fake_cli, login_writer};
+    use zerocode_core::type_value::GeneratorRoad;
+
+    let dir = tempfile::tempdir().expect("a root");
+    let claude = fake_cli(dir.path(), "claude", &claude_said("London", false), 0, 0);
+    let writer = login_writer(dir.path(), GeneratorRoad::Auto, &claude, "/nowhere");
+    let (verbs, walked) = walk_a_field_for(writer, "Search for London");
+    assert!(verbs.iter().any(|verb| verb == "type"), "{verbs:?}");
+    assert_eq!(walked.typed, 1);
+    assert_eq!(walked.rows[0][TYPED]["road"], json!("claude_login"));
+    assert!(walked.rows[0][TYPED].get("passedOver").is_none());
+}
+
+/// With neither login able to answer, the walk types nothing and hands the
+/// field back — its row says each road's reason, and the route is the
+/// agent's to take over (t-10372 §6 (c)).
+#[test]
+fn a_walk_with_no_login_on_either_road_hands_the_field_back_with_both_reasons() {
+    use super::super::value::NO_LOGIN;
+    use super::super::value::tests::{claude_said, codex_failed, fake_cli, login_writer};
+    use zerocode_core::type_value::GeneratorRoad;
+
+    let dir = tempfile::tempdir().expect("a root");
+    let claude = fake_cli(
+        dir.path(),
+        "claude",
+        &claude_said("Not logged in · Please run /login", true),
+        1,
+        0,
+    );
+    let codex = fake_cli(
+        dir.path(),
+        "codex",
+        &codex_failed("unexpected status 401 Unauthorized"),
+        1,
+        0,
+    );
+    let writer = login_writer(dir.path(), GeneratorRoad::Auto, &claude, &codex);
+    let (verbs, walked) = walk_a_field_for(writer, "Search for London");
+    assert!(!verbs.iter().any(|verb| verb == "type"), "{verbs:?}");
+    assert_eq!(walked.typed, 0);
+    let reason = format!("claude_login={NO_LOGIN},codex_login={NO_LOGIN}");
+    assert_eq!(walked.rows[0]["reason"], json!(reason));
+    assert_eq!(walked.rows[0][TYPED]["outcome"], json!(reason));
+    assert_eq!(
+        walked.rows[0]["routeUse"],
+        json!(super::super::USE_FALLBACK)
+    );
+}
+
+/// The same walk, its value written by the person's real login on this
+/// machine — the evidence that a machine with no API key types (t-10372 §6
+/// (a)). Printed; the value itself is not.
+#[test]
+#[ignore = "spends the person's own login on one value; evidence for the report"]
+fn a_walk_on_this_machine_types_the_value_its_login_wrote() {
+    use super::super::value::LiveWriter;
+    use super::super::value::tests::probe_setup;
+    use zerocode_core::type_value::GeneratorRoad;
+
+    let writer = LiveWriter::window(probe_setup(GeneratorRoad::Auto));
+    let (verbs, walked) = walk_a_field_for(writer, "Find a flight from Zurich to London");
+    println!(
+        "{}",
+        json!({
+            "typed": walked.typed,
+            "verbs": verbs,
+            "row": walked.rows.first().map(|row| row[TYPED].clone()),
+            "reason": walked.rows.first().and_then(|row| row.get("reason").cloned()),
+        })
+    );
+    assert_eq!(walked.typed, 1, "the login wrote no value that went in");
 }
 
 // ---- A page's press that leaves its settle for the next look (t-9712) ----

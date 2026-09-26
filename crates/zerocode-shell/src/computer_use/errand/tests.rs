@@ -222,6 +222,13 @@ impl ValueWriter for Pen {
             value: self.value.clone(),
             model: self.row().map(|row| row.model.clone()).unwrap_or_default(),
             ms: 5,
+            // `auto`'s visible passing over: Claude's login at its wall,
+            // Codex's writing (t-10372).
+            answered: value::Answered {
+                road: zerocode_core::type_value::GeneratorRoad::CodexLogin.word(),
+                model: self.row().map(|row| row.model.clone()).unwrap_or_default(),
+                passed: vec![format!("claude_login={}", value::QUOTA_WALL)],
+            },
         })
     }
 }
@@ -3291,7 +3298,8 @@ fn the_windows_walk_hands_its_world_the_windows_writer() {
         .expect("the walk verb's branch")..];
     let branch = &branch[..branch.find("} else {").expect("its end")];
     for needle in [
-        "computer_use::errand::value::LiveWriter::window()",
+        "computer_use::errand::value::LiveWriter::window(",
+        "generator_setup(Some(&app))",
         "run_goal(",
         "writer,",
     ] {

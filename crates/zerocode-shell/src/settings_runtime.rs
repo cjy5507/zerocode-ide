@@ -111,6 +111,7 @@ pub(super) mod setting_key {
     pub const COMPUTER_CONFIRM_TRANSFER: &str = "computer_confirm_transfer";
     pub const COMPUTER_CONFIRM_DELETE: &str = "computer_confirm_delete";
     pub const COMPUTER_LIVE_REFLEX: &str = "computer_live_reflex";
+    pub const COMPUTER_GENERATOR_ROAD: &str = "computer_generator_road";
     pub const OPENCODE_COOKIE_CONFIGURED: &str = "opencode_cookie_configured";
     pub const OPENCODE_WORKSPACE: &str = "opencode_workspace";
     pub const CONFIRM_CLOSE_PINNED: &str = "confirm_close_pinned";
@@ -1806,6 +1807,17 @@ pub(crate) fn computer_live_reflex(repository: &settings::SettingsRepository) ->
         .computer_live_reflex
 }
 
+/// Which road Computer Use's generator takes (`computer_generator_road`),
+/// read from the settings now — a writer asks it when it is made, and nothing
+/// else keeps a copy of it.
+pub(crate) fn computer_generator_road(
+    repository: &settings::SettingsRepository,
+) -> zerocode_core::type_value::GeneratorRoad {
+    load_settings_resilient(repository)
+        .document
+        .computer_generator_road
+}
+
 pub(super) const fn enabled_by_default() -> bool {
     true
 }
@@ -2260,6 +2272,12 @@ pub(super) struct SettingsDocument {
     /// presses at its own pace, so it is theirs to turn on.
     #[serde(default)]
     pub(super) computer_live_reflex: bool,
+    /// Which road Computer Use's generator — the value a walk types, the
+    /// plan a reflex autopilot runs — takes (t-10372). The Claude Code login
+    /// for a person who never chose: it needs nothing they have not already
+    /// set up, and the pane says whose subscription it spends.
+    #[serde(default)]
+    pub(super) computer_generator_road: zerocode_core::type_value::GeneratorRoad,
     #[serde(default)]
     pub(super) browser: BrowserPrefs,
     /// Whether the emulators this window started stay up when it exits
@@ -2428,6 +2446,7 @@ impl Default for SettingsDocument {
             computer_confirm_transfer: true,
             computer_confirm_delete: true,
             computer_live_reflex: false,
+            computer_generator_road: zerocode_core::type_value::GeneratorRoad::default(),
             browser: BrowserPrefs::default(),
             emulator_keep_booted: true,
             emulator_preboot_last_used: true,

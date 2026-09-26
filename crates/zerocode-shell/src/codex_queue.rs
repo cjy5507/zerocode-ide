@@ -370,14 +370,14 @@ impl CodexSidecar {
 }
 
 #[cfg(unix)]
-fn prepare_process_group(command: &mut std::process::Command) {
+pub(crate) fn prepare_process_group(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt as _;
 
     command.process_group(0);
 }
 
 #[cfg(unix)]
-fn signal_process_group(process_group: u32, signal: libc::c_int) -> std::io::Result<()> {
+pub(crate) fn signal_process_group(process_group: u32, signal: libc::c_int) -> std::io::Result<()> {
     let process_group = libc::pid_t::try_from(process_group)
         .map_err(|_| std::io::Error::other("process group id is outside pid_t"))?;
     // SAFETY: the negative, non-zero pid addresses only the fresh process
