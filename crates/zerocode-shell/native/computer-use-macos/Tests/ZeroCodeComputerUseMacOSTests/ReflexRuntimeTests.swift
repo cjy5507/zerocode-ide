@@ -225,14 +225,17 @@ enum ReflexFixtures {
     }
 
     /// A frame of run `run` on the 800 × 500 fixture extent, one point a pixel.
-    static func frame(capture: UInt64, capturedNs: UInt64, owner: UInt64, stream: UInt64 = 1, run: String = "run") -> ReflexFrameFacts {
-        self.capture(capture, capturedNs: capturedNs, stream: stream).facts(runId: run, ownerEpoch: owner, planEpoch: 1)
+    static func frame(capture: UInt64, capturedNs: UInt64, deliveredNs: UInt64? = nil, owner: UInt64, stream: UInt64 = 1,
+                      run: String = "run") -> ReflexFrameFacts {
+        self.capture(capture, capturedNs: capturedNs, deliveredNs: deliveredNs, stream: stream).facts(runId: run, ownerEpoch: owner, planEpoch: 1)
     }
 
     /// Capture `seq` of the 800 × 500 fixture extent, one point a pixel, as a
     /// platform adapter writes it: ready unless `status` says otherwise, its
-    /// capture time unknown when `capturedNs` is nil.
-    static func capture(_ seq: UInt64, capturedNs: UInt64?, status: ReflexFrameStatus = .ready, stream: UInt64 = 1) -> ReflexCapture {
+    /// capture time unknown when `capturedNs` is nil, and delivered when it
+    /// was captured unless `deliveredNs` says otherwise.
+    static func capture(_ seq: UInt64, capturedNs: UInt64?, deliveredNs: UInt64? = nil, status: ReflexFrameStatus = .ready,
+                        stream: UInt64 = 1) -> ReflexCapture {
         ReflexCapture(
             displayId: "fixture",
             region: ReflexRoi(x: 0, y: 0, width: 800, height: 500, space: .pixel),
@@ -243,7 +246,7 @@ enum ReflexFixtures {
             status: status,
             dirty: true,
             captureGap: 0,
-            deliveredHostNs: capturedNs,
+            deliveredHostNs: deliveredNs ?? capturedNs,
             captureSeq: seq,
             repaintSeq: seq,
             streamEpoch: stream,
@@ -307,15 +310,18 @@ struct LeafRig {
         limits = try ReflexFixtures.limits()
     }
 
-    /// The frame the leaf is decided on: capture 10, a millisecond old.
-    func decide() {
-        let source = ReflexFixtures.frame(capture: 10, capturedNs: clock.nowNs() - 1_000_000, owner: token.id)
+    /// The frame the leaf is decided on: capture 10, delivered a millisecond
+    /// ago and stamped `ahead` after its delivery.
+    func decide(ahead: UInt64 = 0) {
+        let delivered = clock.nowNs() - 1_000_000
+        let source = ReflexFixtures.frame(capture: 10, capturedNs: delivered + ahead, deliveredNs: delivered, owner: token.id)
         sightings.publish(ReflexFixtures.seen(source, ReflexFixtures.ball(on: source, track: 5, box: box)))
     }
 
-    /// A newer capture, just taken, showing `sighting` (or the ball where it was).
-    func capture(_ seq: UInt64, track: UInt64 = 5, box moved: ReflexRoi? = nil) {
-        let frame = ReflexFixtures.frame(capture: seq, capturedNs: clock.nowNs(), owner: token.id)
+    /// A newer capture, just delivered and stamped `ahead` after its delivery,
+    /// showing `sighting` (or the ball where it was).
+    func capture(_ seq: UInt64, track: UInt64 = 5, box moved: ReflexRoi? = nil, ahead: UInt64 = 0) {
+        let frame = ReflexFixtures.frame(capture: seq, capturedNs: clock.nowNs() + ahead, deliveredNs: clock.nowNs(), owner: token.id)
         sightings.publish(ReflexFixtures.seen(frame, ReflexFixtures.ball(on: frame, track: track, box: moved ?? box)))
     }
 
@@ -553,6 +559,58 @@ final class ReflexRuntimeTests: XCTestCase {
         XCTAssertEqual(silent.poster.events.count, 0)
     }
 
+    /// ScreenCaptureKit stamps a frame with the time the display shows it,
+    /// which runs ahead of the frame's delivery (t-10127). Every frame here —
+    /// the one the leaf is decided on and each newer one, read the moment it
+    /// is delivered — is stamped 3 ms (within a frame) or 30 ms (past one)
+    /// after its delivery: the leaf aims without carrying the target forward
+    /// or back, its lease holds from each delivery, and it presses. Before,
+    /// the first aim ended it `unaimed`. The receipt keeps both stamps of
+    /// each frame, so the lead shows.
+    func test_frames_stamped_ahead_of_their_delivery_are_read_from_their_delivery() throws {
+        for ahead: UInt64 in [3_000_000, 30_000_000] {
+            let rig = try LeafRig()
+            rig.decide(ahead: ahead)
+            var seq: UInt64 = 10
+            rig.sleeper.onSleep = { _, _ in
+                seq += 1
+                rig.capture(seq, ahead: ahead)
+            }
+            let done = try rig.runner().run(LeafRig.click, index: 0)
+            XCTAssertEqual(done.outcome, .done, "\(ahead) ns ahead")
+            XCTAssertEqual(done.events, 12, "ten waypoints, a press and its release")
+            XCTAssertEqual(rig.poster.presses.map(\.kind), [.buttonDown(.left, clickState: 1)])
+            XCTAssertEqual(rig.poster.releases.map(\.kind), [.buttonUp(.left, clickState: 1)])
+            let decided = try XCTUnwrap(done.decidedHostNs), decidedDelivered = try XCTUnwrap(done.decidedDeliveredHostNs)
+            XCTAssertEqual(decided - decidedDelivered, ahead, "the decided frame's two stamps")
+            let first = try XCTUnwrap(done.firstEventFrameHostNs), firstDelivered = try XCTUnwrap(done.firstEventFrameDeliveredHostNs)
+            XCTAssertEqual(first - firstDelivered, ahead, "the permitting frame's two stamps")
+            XCTAssertLessThan(firstDelivered, first, "delivered before the display time it carries")
+        }
+    }
+
+    /// A lease's target proof runs `max_frame_age_ns` from when its frame was
+    /// in hand — its delivery, for a frame stamped ahead of it — never from a
+    /// display time that stands after the delivery, and a renewal by such a
+    /// frame the same (t-10127).
+    func test_a_lease_proves_its_target_from_when_its_frame_was_in_hand() throws {
+        let rig = try LeafRig()
+        let delivered = rig.clock.nowNs()
+        let ahead: UInt64 = 30_000_000
+        let frame = ReflexFixtures.frame(capture: 10, capturedNs: delivered + ahead, deliveredNs: delivered, owner: rig.token.id)
+        let target = try XCTUnwrap(ReflexFixtures.ball(on: frame, track: 5, box: rig.box).target)
+        let lease = ReflexActionLease.issue(runId: "run", leaf: LeafRig.click, target: target, frame: frame, nowNs: delivered,
+                                            deadlineNs: .max, children: 12, limits: rig.limits)
+        XCTAssertEqual(lease.target_proof_until_host_ns, delivered + rig.limits.max_frame_age_ns)
+        let newer = ReflexFixtures.frame(capture: 11, capturedNs: delivered + 2 * ahead, deliveredNs: delivered + ahead, owner: rig.token.id)
+        XCTAssertEqual(lease.renewed(by: newer, target: target, limits: rig.limits).target_proof_until_host_ns,
+                       delivered + ahead + rig.limits.max_frame_age_ns)
+        // A frame captured before its delivery keeps its capture time.
+        let early = ReflexFixtures.frame(capture: 12, capturedNs: delivered, deliveredNs: delivered + ahead, owner: rig.token.id)
+        XCTAssertEqual(lease.renewed(by: early, target: target, limits: rig.limits).target_proof_until_host_ns,
+                       delivered + rig.limits.max_frame_age_ns)
+    }
+
     /// Edges, not levels: a rule fires on true after it was armed by a false
     /// the run saw; the same capture read twice, a false on a frame the run
     /// never evaluated and an unknown arm nothing.
@@ -666,8 +724,9 @@ final class ReflexRuntimeTests: XCTestCase {
         let count = ReflexSession.runFire(leaves, receipts: receipts, acting: { true }, overflowed: { overflowed += 1 }, next: &next) { leaf, index in
             ran.append(leaf.actionId)
             return ReflexReceipt(ruleId: leaf.ruleId, actionId: leaf.actionId, leafIndex: index, outcome: .done, targetId: nil,
-                                 sourceCapture: nil, decidedHostNs: nil, admittedHostNs: nil, captureWaitNs: 0,
-                                 firstEventHostNs: nil, firstEventFrameHostNs: nil, downHostNs: nil, upHostNs: nil, endedHostNs: 0, events: 1)
+                                 sourceCapture: nil, decidedHostNs: nil, decidedDeliveredHostNs: nil, admittedHostNs: nil, captureWaitNs: 0,
+                                 firstEventHostNs: nil, firstEventFrameHostNs: nil, firstEventFrameDeliveredHostNs: nil,
+                                 downHostNs: nil, upHostNs: nil, endedHostNs: 0, events: 1)
         }
         XCTAssertLessThan(Date().timeIntervalSince(started), 1, "never waited on the reader")
         XCTAssertEqual(count, 2)

@@ -92,9 +92,17 @@ normalized and run (`wire_unsorted_top_level`, `wire_unsorted_nested`).
 - the frame and the lease name the same nonempty run, and the lease allows
   the input;
 - the frame is ready and has a positive pixel width and height;
-- the frame's capture time is known, no later than now, and at most
+- the frame's capture time is known, and the time it was in hand — its
+  capture time, or its delivery time when that came first
+  (`observed_host_ns`) — is no later than now and at most
   `max_frame_age_ns` old; the delivery time never stands in for an unknown
-  capture time;
+  capture time. ScreenCaptureKit stamps a frame with the time the display
+  shows it, which can run ahead of the frame's delivery (t-10127):
+  `capture_ahead_of_its_delivery` and `capture_far_ahead_of_its_delivery`
+  are such frames, read after their delivery; `future_capture` has no
+  delivery time and `delivered_after_now` was not yet delivered, so both are
+  refused; `age_counts_from_a_capture_before_its_delivery` keeps the age of
+  a frame delivered late counting from its capture;
 - the lease was issued no later than now, ends after it was issued, lasts at
   most `max_lease_ns`, and its target proof ends no later than the lease;
 - the target id is nonempty and the target ROI has a positive width and
@@ -150,8 +158,11 @@ permission. `admissible` is true only when all of these hold:
 - no more samples than the tick allowed.
 
 `aim` carries the point forward by the velocity (pixels a second, integer
-division toward zero) from the capture time to the asked time, and answers
-it only while the time does not run backwards or past the frame-age limit,
-no carry overflows, and the square of the uncertainty around the point stays
-inside the hitbox carried the same way. A lease's time proof is the
-runtime's: never later than the capture time plus `max_frame_age_ns`.
+division toward zero) from the capture time to the asked time — a capture
+stamped after the asked time carries nothing, neither forward nor back
+(`a_capture_ahead_of_the_aim_carries_nothing`,
+`a_capture_far_ahead_carries_nothing`) — and answers it only while the time
+does not run past the frame-age limit, no carry overflows, and the square of
+the uncertainty around the point stays inside the hitbox carried the same
+way. A lease's time proof is the runtime's: never later than the time the
+frame was in hand plus `max_frame_age_ns`.

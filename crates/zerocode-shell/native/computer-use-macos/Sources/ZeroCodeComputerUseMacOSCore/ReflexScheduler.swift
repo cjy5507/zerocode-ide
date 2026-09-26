@@ -478,9 +478,10 @@ public enum ReflexMacros {
 extension ReflexActionLease {
     /// A lease for one leaf action, issued from the frame it was decided on:
     /// no longer than the table's `max_lease_ns` nor past the run's deadline,
-    /// its target proof no longer than that frame's `max_frame_age_ns`. The
-    /// kernel invents no time. A lease issued at or after the deadline ends
-    /// where it starts, and so permits nothing.
+    /// its target proof no longer than that frame's `max_frame_age_ns` from
+    /// when it was in hand (`observed_host_ns`, never a display time stamped
+    /// ahead of it). The kernel invents no time. A lease issued at or after
+    /// the deadline ends where it starts, and so permits nothing.
     static func issue(
         runId: String,
         leaf: ReflexLeaf,
@@ -506,7 +507,7 @@ extension ReflexActionLease {
             source_capture_seq: frame.capture_seq,
             issued_host_ns: nowNs,
             valid_until_host_ns: validUntil,
-            target_proof_until_host_ns: min(validUntil, (frame.captured_host_ns ?? 0) &+ limits.max_frame_age_ns),
+            target_proof_until_host_ns: min(validUntil, (frame.observed_host_ns ?? 0) &+ limits.max_frame_age_ns),
             max_children: children,
             used_children: 0
         )
@@ -514,7 +515,8 @@ extension ReflexActionLease {
 
     /// The same lease, its target proof carried by a newer capture's sighting
     /// of the same target: the hitbox where it is now, proven until that
-    /// capture is too old. Source, issue time and end stay.
+    /// capture is too old from when it was in hand. Source, issue time and
+    /// end stay.
     func renewed(by frame: ReflexFrameFacts, target: ReflexTarget, limits: ReflexLimits) -> ReflexActionLease {
         ReflexActionLease(
             run_id: run_id, action_id: action_id, target_id: target_id, target_roi: target.roi,
@@ -522,7 +524,7 @@ extension ReflexActionLease {
             geometry_epoch: geometry_epoch, plan_epoch: plan_epoch, clock_domain: clock_domain,
             source_capture_seq: source_capture_seq, issued_host_ns: issued_host_ns,
             valid_until_host_ns: valid_until_host_ns,
-            target_proof_until_host_ns: min(valid_until_host_ns, (frame.captured_host_ns ?? 0) &+ limits.max_frame_age_ns),
+            target_proof_until_host_ns: min(valid_until_host_ns, (frame.observed_host_ns ?? 0) &+ limits.max_frame_age_ns),
             max_children: max_children, used_children: used_children
         )
     }
@@ -579,6 +581,9 @@ public struct ReflexReceipt: Equatable, Sendable {
     public let targetId: String?
     public let sourceCapture: UInt64?
     public let decidedHostNs: UInt64?
+    /// When that frame was delivered: beside its capture time, which a
+    /// display stream can stamp ahead of its delivery (t-10127).
+    public let decidedDeliveredHostNs: UInt64?
     public let admittedHostNs: UInt64?
     /// How long the first event waited for a capture newer than the one the
     /// lease came from — kept apart from the rest of the first-event delay.
@@ -587,6 +592,8 @@ public struct ReflexReceipt: Equatable, Sendable {
     /// The capture time of the frame that permitted the first event — the
     /// newer capture the lease waited for.
     public let firstEventFrameHostNs: UInt64?
+    /// When that newer capture was delivered, beside its capture time.
+    public let firstEventFrameDeliveredHostNs: UInt64?
     public let downHostNs: UInt64?
     public let upHostNs: UInt64?
     public let endedHostNs: UInt64
@@ -705,10 +712,12 @@ struct ReflexLeafRunner {
         var targetId: String?
         var sourceCapture: UInt64?
         var decidedHostNs: UInt64?
+        var decidedDeliveredHostNs: UInt64?
         var admittedHostNs: UInt64?
         var captureWaitNs: UInt64 = 0
         var firstEventHostNs: UInt64?
         var firstEventFrameHostNs: UInt64?
+        var firstEventFrameDeliveredHostNs: UInt64?
         var downHostNs: UInt64?
         var upHostNs: UInt64?
         var events: UInt64 = 0
@@ -717,8 +726,10 @@ struct ReflexLeafRunner {
             ReflexReceipt(
                 ruleId: leaf.ruleId, actionId: leaf.actionId, leafIndex: index, outcome: outcome,
                 targetId: targetId, sourceCapture: sourceCapture, decidedHostNs: decidedHostNs,
+                decidedDeliveredHostNs: decidedDeliveredHostNs,
                 admittedHostNs: admittedHostNs, captureWaitNs: captureWaitNs,
                 firstEventHostNs: firstEventHostNs, firstEventFrameHostNs: firstEventFrameHostNs,
+                firstEventFrameDeliveredHostNs: firstEventFrameDeliveredHostNs,
                 downHostNs: downHostNs, upHostNs: upHostNs,
                 endedHostNs: endedHostNs, events: events
             )
@@ -768,6 +779,7 @@ struct ReflexLeafRunner {
         draft.targetId = lease.target_id
         draft.sourceCapture = source.capture_seq
         draft.decidedHostNs = source.captured_host_ns
+        draft.decidedDeliveredHostNs = source.delivered_host_ns
 
         var aim = end
         var posted = -1
@@ -790,6 +802,7 @@ struct ReflexLeafRunner {
             if draft.firstEventHostNs == nil {
                 draft.firstEventHostNs = hand.nowNs()
                 draft.firstEventFrameHostNs = frame.frame.captured_host_ns
+                draft.firstEventFrameDeliveredHostNs = frame.frame.delivered_host_ns
             }
             draft.events += 1
             lease = lease.spent()
@@ -814,6 +827,7 @@ struct ReflexLeafRunner {
         if draft.firstEventHostNs == nil {
             draft.firstEventHostNs = draft.downHostNs
             draft.firstEventFrameHostNs = frame.frame.captured_host_ns
+            draft.firstEventFrameDeliveredHostNs = frame.frame.delivered_host_ns
         }
         draft.events += 1
         lease = lease.spent()

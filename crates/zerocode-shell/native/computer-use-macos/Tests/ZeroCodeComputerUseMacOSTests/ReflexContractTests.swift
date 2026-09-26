@@ -152,7 +152,7 @@ final class ReflexContractTests: XCTestCase {
         }
         XCTAssertEqual(mismatches, [])
         XCTAssertEqual(cases.count, 34)
-        XCTAssertEqual(aims.count, 9)
+        XCTAssertEqual(aims.count, 10)
     }
 
     func testTheReflexTableIsReadOnlyInItsCanonicalForm() throws {
