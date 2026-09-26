@@ -557,65 +557,150 @@ pub(super) fn git_text(root: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Run a one-shot text generation and return what it printed.
 ///
-/// The plumbing every source-control TEXT action shares: the hydrated PATH, the
-/// selected account, the prompt over stdin (a staged diff on argv would hit
-/// command-line limits), both pipes drained on their own threads, a bounded
-/// wait that KILLS rather than merely stops waiting, and a bounded read so a
-/// generator that starts streaming a conversation is cut off instead of
-/// buffered.
-///
-/// Factored out at the second caller rather than the third: each of those is a
-/// lesson this window already paid for once, and a copy that forgets one of
-/// them fails in a way nobody notices until it matters.
+/// The source-control TEXT actions' road over [`run_once`]: the draft
+/// model in plan mode, the prompt the action wrote, and what the run printed
+/// — or the action's own sentence for why there is nothing.
 pub(super) fn run_text_generation(
     config_root: &Path,
     root: &Path,
     prompt: &str,
     timed_out: &str,
 ) -> Result<String, String> {
-    use std::io::{Read, Write};
     let program = claude_program().ok_or("claude를 PATH에서 찾지 못했습니다")?;
+    let env = claude_reading_env(config_root)?;
+    let once = run_once(
+        &program,
+        Some(root),
+        &zerocode_core::commit_message::argv(zerocode_core::commit_message::DEFAULT_MODEL),
+        &env,
+        prompt,
+        zerocode_core::commit_message::GENERATION_TIMEOUT,
+    )
+    .map_err(|failure| match failure {
+        OnceFailure::Spawn(said) => said,
+        OnceFailure::TimedOut => timed_out.to_string(),
+    })?;
+    if !once.success {
+        let said = once.stderr_tail.trim();
+        return Err(if said.is_empty() {
+            "claude가 초안을 만들지 못했습니다".to_string()
+        } else {
+            said.chars().take(300).collect()
+        });
+    }
+    Ok(once.stdout)
+}
+
+/// What one headless run came to: whether it exited well, what it printed,
+/// and the tail of what it said on stderr.
+pub(crate) struct Once {
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr_tail: String,
+}
+
+/// Why a headless run never finished.
+#[derive(Debug)]
+pub(crate) enum OnceFailure {
+    /// The program did not start, or could not be waited on.
+    Spawn(String),
+    /// It outlived its wall, and was ended with every process it started.
+    TimedOut,
+}
+
+/// The environment a headless `claude` reads the selected account from, its
+/// secure store prepared first — a READING door: a one-shot installs no
+/// login, and a run that materialized on the way would put a credential
+/// write behind an ordinary button press. Every name comes back with its
+/// value, an empty value meaning "take it out of the child's environment".
+///
+/// # Errors
+/// The selected account's store could not be prepared.
+pub(crate) fn claude_reading_env(config_root: &Path) -> Result<Vec<(String, String)>, String> {
     accounts::prepare_selected_store(config_root)?;
-    let mut command = crate::proc::quiet_command(&program);
+    Ok(accounts::reading_env_for(config_root, "claude"))
+}
+
+/// Run an agent's CLI once, headless — `program` with `argv`, under `env`
+/// (the account it runs as: [`claude_reading_env`] for Claude Code, the Codex
+/// home for Codex).
+///
+/// The plumbing every one-shot shares — the source-control TEXT actions and
+/// the Computer Use generator's login roads (t-10372): the hydrated PATH, the
+/// account, the prompt over stdin (a staged diff or a field's words on argv
+/// would hit command-line limits and sit in every `ps`), both pipes drained
+/// on their own threads, a bounded wait that KILLS — the run's whole process
+/// group — rather than merely stops waiting, and a bounded read so a
+/// generator that starts streaming a conversation is cut off instead of
+/// buffered.
+///
+/// A one-shot is no pane's: the coordinates that tie a process to a pane
+/// ([`crate::hooks::PANE_COORDINATES`]) are taken out of its environment, so
+/// nothing it does can be heard as a pane's turn or counted in a pane's
+/// census, whichever process started the window.
+///
+/// Factored out at the second caller rather than the third: each of those is a
+/// lesson this window already paid for once, and a copy that forgets one of
+/// them fails in a way nobody notices until it matters.
+pub(crate) fn run_once(
+    program: &str,
+    cwd: Option<&Path>,
+    argv: &[String],
+    env: &[(String, String)],
+    prompt: &str,
+    wall: Duration,
+) -> Result<Once, OnceFailure> {
+    use std::io::{Read, Write};
+    let deadline = std::time::Instant::now() + wall;
+    let mut command = crate::proc::quiet_command(program);
     command
-        .args(zerocode_core::commit_message::argv(
-            zerocode_core::commit_message::DEFAULT_MODEL,
-        ))
-        .current_dir(root)
+        .args(argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     if let Some(path) = shell_path::hydrated() {
         command.env("PATH", path);
     }
+    for name in crate::hooks::PANE_COORDINATES {
+        command.env_remove(name);
+    }
     // The account the picker names — same contract as every other spawn: an
     // empty value means "take it out of the child's environment".
-    //
-    // A READING door: writing a commit message installs no login, and a run that
-    // materialized on the way would put a credential write behind an ordinary
-    // button press.
-    for (name, value) in accounts::reading_env_for(config_root, "claude") {
+    for (name, value) in env {
         if value.is_empty() {
             command.env_remove(name);
         } else {
             command.env(name, value);
         }
     }
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    crate::codex_queue::prepare_process_group(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| OnceFailure::Spawn(error.to_string()))?;
 
     // The whole prompt, then EOF — `-p` reads stdin to the end, and a stdin
     // left open is a generator that never starts.
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(prompt.as_bytes());
     }
-    let mut stdout = child.stdout.take().ok_or("no stdout")?;
+    let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
+    // The reader says when the run closed its output, so a run that answers
+    // is read the moment it does rather than at the next poll.
+    let (closed, heard) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let mut held = Vec::new();
-        let _ = stdout
-            .by_ref()
-            .take(zerocode_core::commit_message::MAX_OUTPUT_BYTES as u64)
-            .read_to_end(&mut held);
+        if let Some(pipe) = stdout.as_mut() {
+            let _ = pipe
+                .by_ref()
+                .take(zerocode_core::commit_message::MAX_OUTPUT_BYTES as u64)
+                .read_to_end(&mut held);
+        }
+        let _ = closed.send(());
         held
     });
     let stderr_drain = std::thread::spawn(move || {
@@ -625,31 +710,33 @@ pub(super) fn run_text_generation(
         }
         tail
     });
-
-    let deadline = std::time::Instant::now() + zerocode_core::commit_message::GENERATION_TIMEOUT;
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let _ = heard.recv_timeout(left);
     let status = loop {
-        match child.try_wait().map_err(|error| error.to_string())? {
-            Some(status) => break status,
-            None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(timed_out.to_string());
+        let failure = match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(GENERATION_POLL_EVERY);
+                continue;
             }
-            None => std::thread::sleep(GENERATION_POLL_EVERY),
-        }
+            Ok(None) => OnceFailure::TimedOut,
+            Err(error) => OnceFailure::Spawn(error.to_string()),
+        };
+        // The run's process group was made for it alone, so everything it
+        // started goes with it.
+        #[cfg(unix)]
+        let _ = crate::codex_queue::signal_process_group(child.id(), libc::SIGKILL);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(failure);
     };
     let held = reader.join().unwrap_or_default();
     let tail = stderr_drain.join().unwrap_or_default();
-    if !status.success() {
-        let said = String::from_utf8_lossy(&tail);
-        let said = said.trim();
-        return Err(if said.is_empty() {
-            "claude가 초안을 만들지 못했습니다".to_string()
-        } else {
-            said.chars().take(300).collect()
-        });
-    }
-    Ok(String::from_utf8_lossy(&held).into_owned())
+    Ok(Once {
+        success: status.success(),
+        stdout: String::from_utf8_lossy(&held).into_owned(),
+        stderr_tail: String::from_utf8_lossy(&tail).into_owned(),
+    })
 }
 
 /// What a generated pull request came back as, on its way to the dialog.

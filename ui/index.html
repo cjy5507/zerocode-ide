@@ -6029,25 +6029,55 @@
           </div>
         </div>
 
-        <!-- The key typing into a page's fields asks with (t-9537): one slot
-             per key the backend lists (`type_value_keys`), each drawn from
-             the template below by `paintTypeValueKeys`. Which key, which
-             rows read it and whether it is read now are the backend's
-             answer; nothing of the table it comes from is written here. -->
+        <!-- Computer Use's generator (t-9537, t-10372): which road typing
+             into a page's fields and a reflex autopilot's plans take. The
+             roads are the core's words (`GeneratorRoad`); the login lines —
+             each road's CLI, model and account — and the last answer are
+             the backend's (`type_value_keys`), painted by
+             `paintGeneratorLogins`. A key slot per key the backend lists is
+             drawn from the template below by `paintTypeValueKeys`, and shown
+             only on the key road. The radios wear the update policy's look. -->
         <div class="settings-card" id="type-value-card">
           <div class="settings-subhead">
-            <h3 class="settings-subhead-title" data-i18n="computerUse.typeKeys">글자 입력용 키</h3>
-            <p class="settings-subhead-desc" data-i18n="computerUse.typeKeysAbout">
-              에이전트가 내장 브라우저에서 빈 입력 칸을 만나면, 칸의 이름표와 주변 글, 작업 목표를 작은 모델에 보내 무엇을 입력할지 묻습니다. 그 모델에 쓸 API 키를 여기에 저장하면 재시작 없이 다음 작업부터 입력합니다. 키는 이 컴퓨터의 키체인에만 저장되고, 칸에 이미 적힌 값은 보내지 않습니다.
+            <h3 class="settings-subhead-title" data-i18n="computerUse.generator">글자 입력·자동 조종 계획</h3>
+            <p class="settings-subhead-desc" data-i18n="computerUse.generatorAbout">
+              에이전트가 빈 입력 칸을 만나거나 반사 자동 조종이 계획을 쓸 때 작은 모델에 묻습니다. 기본은 이 창이 에이전트를 여는 로그인입니다 — 공식 CLI를 한 번 불러 그 계정의 구독 한도에서 차감하고, 로그인 정보를 읽거나 보내지 않습니다. 칸에 이미 적힌 값은 보내지 않습니다.
             </p>
+          </div>
+          <fieldset class="update-policy" id="generator-road" role="radiogroup">
+            <legend class="settings-label" data-i18n="computerUse.generatorRoad">쓰는 길</legend>
+            <label class="update-policy-option">
+              <input type="radio" name="generator-road" value="auto" data-generator-road="auto" />
+              <span data-i18n="computerUse.generatorAuto">자동 — Claude 로그인, 안 되면 Codex 로그인 (넘어가면 까닭을 적음)</span>
+            </label>
+            <label class="update-policy-option">
+              <input type="radio" name="generator-road" value="claude_login" data-generator-road="claude_login" />
+              <span data-i18n="computerUse.generatorClaude">Claude Code 로그인만</span>
+            </label>
+            <label class="update-policy-option">
+              <input type="radio" name="generator-road" value="codex_login" data-generator-road="codex_login" />
+              <span data-i18n="computerUse.generatorCodex">Codex 로그인만</span>
+            </label>
+            <label class="update-policy-option">
+              <input type="radio" name="generator-road" value="api_key" data-generator-road="api_key" />
+              <span data-i18n="computerUse.generatorKey">내 API 키 (아래에 저장)</span>
+            </label>
+            <label class="update-policy-option">
+              <input type="radio" name="generator-road" value="off" data-generator-road="off" />
+              <span data-i18n="computerUse.generatorOff">쓰지 않음 — 빈 칸은 사람에게 맡김</span>
+            </label>
+          </fieldset>
+          <dl class="computer-live-reflex-lines" id="generator-logins"></dl>
+          <p class="settings-hint" id="generator-last" role="status" aria-live="polite"></p>
+          <div id="type-value-key-section">
             <p class="settings-subhead-desc" id="type-value-no-keychain-hint" data-i18n="settings.typesafe.noKeychainHint" hidden>
               이 컴퓨터에는 API 키를 보관할 키체인이 없습니다.
             </p>
             <p class="settings-subhead-desc" id="type-value-none" data-i18n="computerUse.typeKeysNone" hidden>
               지금은 글자 입력에 쓰는 모델이 정해져 있지 않아 저장할 키가 없습니다.
             </p>
+            <div id="type-value-keys"></div>
           </div>
-          <div id="type-value-keys"></div>
           <!-- A read that failed before any slot could speak says so here;
                a slot's own steps are said in the slot. -->
           <div class="settings-status" id="type-value-status" role="status" aria-live="polite"></div>

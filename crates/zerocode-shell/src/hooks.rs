@@ -357,6 +357,21 @@ pub fn second_brain_vault() -> Option<String> {
         .filter(|path| !path.is_empty())
 }
 
+/// The names that tie a process to a pane: where the bridge is, the pane and
+/// occupant it reports as, and the checkout it is in — what [`pty_env`] hands
+/// a pane's child. A one-shot run that is no pane's
+/// (`scm_runtime::run_once`) is started without any of them, so its
+/// hooks, if it had any, could not be heard as a pane's.
+pub(crate) const PANE_COORDINATES: &[&str] = &[
+    zerocode_hookd::env_var::PORT,
+    zerocode_hookd::env_var::TOKEN,
+    zerocode_hookd::env_var::ENDPOINT,
+    zerocode_hookd::env_var::PANE_KEY,
+    zerocode_hookd::env_var::TAB_ID,
+    zerocode_hookd::env_var::LAUNCH_TOKEN,
+    zerocode_hookd::env_var::WORKTREE_ID,
+];
+
 /// The hook coordinates a PTY child gets — every terminal, not only agent
 /// launches, because an agent started by hand inside a plain shell should
 /// report exactly like a launched one. `launch_token` is the launched-agent

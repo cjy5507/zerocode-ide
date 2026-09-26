@@ -52,10 +52,13 @@ presses, an `ok` or the judgment's own `done` alone:
 - `needs_verification`: the judgment said it is done, or the `until` text was
   already there before the walk. Check once, then report.
 - `needs_fallback`: the walk could not go on — the seat is off or only
-  recording, there is no key or consent, the judgment was unsure or
-  unanswered, or nothing on the screen fit. `reason` says which; plan the next
-  step yourself from the last look (`lastObservedStep`). Do not send the same
-  walk again, and never turn a setting on for the person.
+  recording, no road could write a field's value (the Claude and Codex logins
+  the window runs you with, or a key the person chose — `reason` names each
+  road's own reason, such as `claude_login=quota_wall`), there is no consent,
+  the judgment was unsure or unanswered, or nothing on the screen fit.
+  `reason` says which; plan the next step yourself from the last look
+  (`lastObservedStep`). Do not send the same walk again, and never turn a
+  setting on for the person.
 - `stopped`: the person stopped it, a guard refused a screen, or the budget
   ran out (`stepsLeft`). Stop and report as any stop.
 - `failed`: a press or a look failed, or the screen would not move. `at.step`

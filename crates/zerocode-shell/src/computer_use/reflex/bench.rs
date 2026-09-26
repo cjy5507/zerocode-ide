@@ -108,7 +108,7 @@ struct Stub {
 }
 
 impl Generator for Stub {
-    fn unready(&self) -> Option<&'static str> {
+    fn unready(&self) -> Option<String> {
         None
     }
 
@@ -130,6 +130,11 @@ impl Generator for Stub {
             bytes_in: text.len(),
             tokens: None,
             text,
+            // The stand-in is no road the person chose: its answers say so.
+            answered: crate::computer_use::errand::value::Answered {
+                road: STUB,
+                ..Default::default()
+            },
         })
     }
 
@@ -492,11 +497,17 @@ impl Bench<'_> {
                 poll: self.poll,
             })
         } else {
+            // The bench's key road, as before t-10372: the row the API-key
+            // road asks, its key read off the runner's environment.
             let writer = LiveWriter::at(
-                &LiveWriter::window()
-                    .row()
-                    .and_then(endpoint_of)
-                    .unwrap_or_default(),
+                &LiveWriter::window(crate::computer_use::errand::value::Setup::new(
+                    zerocode_core::type_value::GeneratorRoad::ApiKey,
+                    PathBuf::new(),
+                    PathBuf::new(),
+                ))
+                .row()
+                .and_then(endpoint_of)
+                .unwrap_or_default(),
                 Box::new(EnvKeys),
             );
             Box::new(writer)

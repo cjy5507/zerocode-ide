@@ -21,11 +21,13 @@
 //! reads the key then, so a key saved here is typed with from the next walk
 //! on — no restart, and nothing here holds it.
 
+use std::path::Path;
+
 use serde::Serialize;
-use zerocode_core::type_value::{self, ValueRow};
+use zerocode_core::type_value::{self, GeneratorRoad, ValueRow};
 
 use crate::api_routers::{RouterKeys, RouterRefusal};
-use crate::computer_use::errand::value::{endpoint_of, key_service};
+use crate::computer_use::errand::value::{LastAnswer, endpoint_of, key_service, last_answered};
 use crate::typesafe_settings::{key_saved_at, remove_key_at, save_key_at};
 
 /// What an empty key is refused in.
@@ -65,6 +67,80 @@ pub struct ValueKey {
 pub struct ValueKeys {
     pub keys_kept_here: bool,
     pub keys: Vec<ValueKey>,
+}
+
+/// One login road as the pane draws it (t-10372): which road, the model its
+/// row asks, whether its CLI is on this machine, and whose account it runs as
+/// — the account the window's panes run as, by the label the accounts pane
+/// shows, or `None` for the machine's own login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginRoad {
+    pub road: GeneratorRoad,
+    pub model: &'static str,
+    pub installed: bool,
+    pub account: Option<String>,
+}
+
+/// The whole card (t-10372): the road the person chose, each login road, the
+/// last question's answer, and the keys a person may keep for the key road.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratorCard {
+    pub road: GeneratorRoad,
+    pub logins: Vec<LoginRoad>,
+    pub last: Option<LastAnswer>,
+    #[serde(flatten)]
+    pub keys: ValueKeys,
+}
+
+/// The account a login road's CLI runs as, by the label its accounts pane
+/// shows — read off the window's account stores, never off a login.
+fn account_of(road: GeneratorRoad, config_root: &Path) -> Option<String> {
+    match road {
+        GeneratorRoad::ClaudeLogin => {
+            let store = crate::accounts::read_store(config_root);
+            zerocode_core::active_account(&store.accounts, &store.selection)
+                .filter(|_| !store.selection.system_default)
+                .map(zerocode_core::ClaudeAccount::label)
+        }
+        GeneratorRoad::CodexLogin => {
+            let store = crate::codex_accounts::read_store(config_root);
+            zerocode_core::codex_account::active_account(&store.accounts, &store.selection)
+                .map(zerocode_core::codex_account::CodexAccount::label)
+        }
+        GeneratorRoad::Auto | GeneratorRoad::ApiKey | GeneratorRoad::Off => None,
+    }
+}
+
+/// The card: `road` as the settings hold it, each login road with its model,
+/// its CLI (`installed` answers whether the catalogue found it) and its
+/// account, the window's last answer, and `keys`.
+#[must_use]
+pub fn card(
+    road: GeneratorRoad,
+    config_root: &Path,
+    installed: impl Fn(GeneratorRoad) -> bool,
+    keys: ValueKeys,
+) -> GeneratorCard {
+    let logins = GeneratorRoad::Auto
+        .tries()
+        .iter()
+        .filter_map(|login| {
+            type_value::chosen_on(*login).map(|row| LoginRoad {
+                road: *login,
+                model: &row.model,
+                installed: installed(*login),
+                account: account_of(*login, config_root),
+            })
+        })
+        .collect();
+    GeneratorCard {
+        road,
+        logins,
+        last: last_answered(),
+        keys,
+    }
 }
 
 /// One key a walk reads: its name, the keychain item the walk's writer reads

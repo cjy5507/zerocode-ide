@@ -54,7 +54,7 @@
 
 use std::sync::OnceLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The question, as both readers hold it.
 const QUESTION_JSON: &str = include_str!("../fixtures/type-value/question.json");
@@ -127,6 +127,78 @@ pub enum Road {
     /// Anything that speaks `/chat/completions` — a gateway preset, or the
     /// person's own endpoint saved as a provider row.
     OpenaiCompat,
+    /// Claude Code's own CLI, asked once headless (`claude -p`) under the
+    /// account the window's panes run as (t-10372). The login is the CLI's:
+    /// this product never reads, holds or sends it, and speaks for no client
+    /// — the vendor's own client is the one asking. A row of this road names
+    /// no endpoint and no key.
+    ClaudeCli,
+    /// Codex's own CLI, asked once headless (`codex exec`) under the Codex
+    /// home the window's panes run with — the same terms as [`Self::ClaudeCli`].
+    CodexCli,
+}
+
+/// Which road the value seat's writer takes, as a person chose it in the
+/// Computer Use pane (`computer_generator_road`, t-10372).
+///
+/// `auto` is what a person who never chose gets: the logins the window
+/// already runs its panes with, Claude's first and Codex's when Claude's
+/// cannot answer — and every answer says which road gave it and why the one
+/// before it did not, so a road passed over is never a quiet one. A person's
+/// own API key is asked only when they choose it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratorRoad {
+    /// [`Self::ClaudeLogin`], then [`Self::CodexLogin`].
+    #[default]
+    Auto,
+    /// The Claude Code login ([`Table::claude_login`], down
+    /// [`Road::ClaudeCli`]), spent from the person's subscription.
+    ClaudeLogin,
+    /// The Codex login ([`Table::codex_login`], down [`Road::CodexCli`]).
+    CodexLogin,
+    /// A person's own API key ([`Table::chosen`]).
+    ApiKey,
+    /// Nobody writes: a walk leaves an empty field to a person, and a reflex
+    /// autopilot does not start.
+    Off,
+}
+
+impl GeneratorRoad {
+    /// Every road, in the order the pane offers them.
+    pub const ALL: [Self; 5] = [
+        Self::Auto,
+        Self::ClaudeLogin,
+        Self::CodexLogin,
+        Self::ApiKey,
+        Self::Off,
+    ];
+
+    /// The word the settings document, the pane and every answered row name
+    /// this road by.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::ClaudeLogin => "claude_login",
+            Self::CodexLogin => "codex_login",
+            Self::ApiKey => "api_key",
+            Self::Off => "off",
+        }
+    }
+
+    /// The roads asked, in order, when a person chose this one: `auto` is
+    /// the two logins, `off` is none, and every other road is itself.
+    #[must_use]
+    pub const fn tries(self) -> &'static [Self] {
+        match self {
+            Self::Auto => &[Self::ClaudeLogin, Self::CodexLogin],
+            Self::ClaudeLogin => &[Self::ClaudeLogin],
+            Self::CodexLogin => &[Self::CodexLogin],
+            Self::ApiKey => &[Self::ApiKey],
+            Self::Off => &[],
+        }
+    }
 }
 
 /// ONE run of one candidate. Milliseconds to the WHOLE one-line value, which
@@ -243,9 +315,17 @@ pub struct ValueRow {
 #[serde(rename_all = "camelCase")]
 pub struct Table {
     pub seat: String,
-    /// The row this seat asks, by [`ValueRow::id`], or `None` while no
+    /// The row a person's own API key is asked with
+    /// ([`GeneratorRoad::ApiKey`]), by [`ValueRow::id`], or `None` while no
     /// candidate has cleared the bar.
     pub chosen: Option<String>,
+    /// The row the Claude Code login is asked with
+    /// ([`GeneratorRoad::ClaudeLogin`]), by [`ValueRow::id`].
+    #[serde(default)]
+    pub claude_login: Option<String>,
+    /// The row the Codex login is asked with ([`GeneratorRoad::CodexLogin`]).
+    #[serde(default)]
+    pub codex_login: Option<String>,
     /// The whole wait a walk gives this seat before it gives up and stops for
     /// a person. Past it the value is no longer worth having.
     pub deadline_ms: u64,
@@ -286,12 +366,27 @@ pub fn row(id: &str) -> Option<&'static ValueRow> {
     rows().iter().find(|row| row.id == id)
 }
 
-/// The row this seat asks, or `None` while none has cleared the bar — which is
-/// an answer too: a walk with no row to ask does not guess a value, it stops
-/// for a person exactly as it would have without a model at all.
+/// The row a person's own key is asked with, or `None` while none has cleared
+/// the bar — which is an answer too: a walk with no row to ask does not guess
+/// a value, it stops for a person exactly as it would have without a model at
+/// all.
 #[must_use]
 pub fn chosen() -> Option<&'static ValueRow> {
     table().chosen.as_deref().and_then(row)
+}
+
+/// The row one road asks — the one function a writer learns its row from, so
+/// the road a person chose and the row that answers cannot part. `off` asks
+/// nobody, and `auto` is no one road: its rows are its
+/// [`GeneratorRoad::tries`]'.
+#[must_use]
+pub fn chosen_on(road: GeneratorRoad) -> Option<&'static ValueRow> {
+    match road {
+        GeneratorRoad::ClaudeLogin => table().claude_login.as_deref().and_then(row),
+        GeneratorRoad::CodexLogin => table().codex_login.as_deref().and_then(row),
+        GeneratorRoad::ApiKey => chosen(),
+        GeneratorRoad::Auto | GeneratorRoad::Off => None,
+    }
 }
 
 /// What the look around one box says, as the question reads it.
@@ -433,6 +528,89 @@ pub const ANTHROPIC_WIRE: AnthropicWire = AnthropicWire {
     version: "2023-06-01",
     key_header: "x-api-key",
 };
+
+/// What the [`Road::ClaudeCli`] road runs after the program's name (t-10372):
+/// Claude Code once, headless, on the row's model, with `system` as the whole
+/// system prompt and the question on stdin — never on argv, where its words
+/// would sit in every `ps` and meet the command line's length. The run is
+/// nobody's session and nobody's workspace: no session is saved, no tool is
+/// offered, no settings file is read (so no hook of a pane's is loaded), no
+/// MCP server and no skill is listed, and the answer comes back as the CLI's
+/// one JSON result.
+///
+/// The CLI takes no cap on an answer's tokens: the seat's reader
+/// ([`read`]) and the asker's wall bound what it may write.
+#[must_use]
+pub fn claude_cli_argv(row: &ValueRow, system: &str) -> Vec<String> {
+    [
+        "-p",
+        "--model",
+        row.model.as_str(),
+        "--output-format",
+        "json",
+        "--no-session-persistence",
+        "--tools",
+        "",
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--system-prompt",
+        system,
+    ]
+    .iter()
+    .map(|word| (*word).to_string())
+    .collect()
+}
+
+/// What the [`Road::CodexCli`] road runs after the program's name (t-10372):
+/// Codex once, headless, on the row's model at the row's reasoning rung
+/// ([`ValueRow::thinking_level`]), reading its instructions and question from
+/// stdin (`-`). Nothing of it is kept or offered: no session is recorded
+/// (`--ephemeral`), the person's `config.toml` and rules are not read (so no
+/// hook, MCP server or pinned provider of theirs rides along — the login
+/// still comes from the Codex home), the sandbox is read-only, and the
+/// answer is the CLI's JSON events. `compat` is the words that keep Codex
+/// starting inside this window (`crate::launch::compat_launch_args`).
+#[must_use]
+pub fn codex_cli_argv(row: &ValueRow, compat: &[String]) -> Vec<String> {
+    let mut argv: Vec<String> = [
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        row.model.as_str(),
+    ]
+    .iter()
+    .map(|word| (*word).to_string())
+    .collect();
+    if let Some(rung) = &row.thinking_level {
+        argv.push("-c".to_string());
+        argv.push(format!("model_reasoning_effort={rung}"));
+    }
+    argv.extend(compat.iter().cloned());
+    argv.push("-".to_string());
+    argv
+}
+
+/// The environment the [`Road::ClaudeCli`] road's run adds: a row whose rung
+/// ([`ValueRow::thinking_level`]) is `off` asks with no thinking budget
+/// (`MAX_THINKING_TOKENS=0`, Claude Code's own variable). Measured on this
+/// machine 2026-09-26, one party-size value on the Claude login: 108 output
+/// tokens, 101 of them thinking, in 1,627 ms — and 5 tokens in 667 ms with
+/// the budget at nothing, the same value.
+#[must_use]
+pub fn claude_cli_env(row: &ValueRow) -> Vec<(String, String)> {
+    match row.thinking_level.as_deref() {
+        Some("off") => vec![("MAX_THINKING_TOKENS".to_string(), "0".to_string())],
+        _ => Vec::new(),
+    }
+}
 
 /// The value an answer names, or why it names none.
 ///

@@ -527,6 +527,10 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
     computerLiveReflex = snapshot.computer_live_reflex === true;
     paintComputerLiveReflex();
   }
+  if (hasSetting(snapshot, "computer_generator_road")) {
+    computerGeneratorRoad = normalizeGeneratorRoad(snapshot.computer_generator_road);
+    paintComputerGeneratorRoad();
+  }
   if (hasSetting(snapshot, "skip_close_terminal_with_running_process_confirm")) {
     const skip = snapshot.skip_close_terminal_with_running_process_confirm === true;
     setConfirmCloseRunning(!skip);
@@ -3461,6 +3465,101 @@ window.addEventListener("focus", () => {
   }
 });
 
+/* ---- the road Computer Use's generator takes (t-10372) ----
+ *
+ * Typing into a page's fields and a reflex autopilot's plans ask a small
+ * model, down the road the person chooses here (`computer_generator_road`):
+ * `auto` — the login the window opens its agents with, Claude's and then
+ * Codex's, every pass said — one login alone, their own API key, or nobody.
+ * The roads are the markup's radios, each spelled with the core's own word
+ * (`data-generator-road`); which CLI, model and account each login runs as,
+ * and what the last question came to, are the backend's answer
+ * (`type_value_keys`), painted by `paintGeneratorLogins`. A login spends the
+ * account's subscription, and the card says so beside it. */
+let computerGeneratorRoad = "auto";
+
+function generatorRoadRadios() {
+  return [...document.querySelectorAll("input[data-generator-road]")];
+}
+
+function normalizeGeneratorRoad(value) {
+  return generatorRoadRadios().some((radio) => radio.dataset.generatorRoad === value)
+    ? value
+    : "auto";
+}
+
+function paintComputerGeneratorRoad() {
+  for (const radio of generatorRoadRadios()) {
+    radio.checked = radio.dataset.generatorRoad === computerGeneratorRoad;
+  }
+  // A key is asked for only on the road that asks with one.
+  el("type-value-key-section").hidden = computerGeneratorRoad !== "api_key";
+}
+
+function setComputerGeneratorRoad(road) {
+  computerGeneratorRoad = normalizeGeneratorRoad(road);
+  paintComputerGeneratorRoad();
+  void commitSetting("computer_generator_road", "set_computer_generator_road", {
+    road: computerGeneratorRoad,
+  });
+}
+
+for (const radio of generatorRoadRadios()) {
+  radio.addEventListener("change", (event) => {
+    if (event.currentTarget.checked) setComputerGeneratorRoad(event.currentTarget.dataset.generatorRoad);
+  });
+}
+
+/* A road by the name a person reads it by. */
+function generatorRoadName(road) {
+  switch (road) {
+    case "claude_login": return t("computerUse.generatorLoginClaude", "Claude Code 로그인");
+    case "codex_login": return t("computerUse.generatorLoginCodex", "Codex 로그인");
+    case "api_key": return t("computerUse.generatorKeyName", "API 키");
+    default: return road;
+  }
+}
+
+/* `claude_login=quota_wall`, as a person reads it. */
+function generatorPassedWords(passed) {
+  return (passed ?? []).map((one) => {
+    const [road, why] = String(one).split("=");
+    return `${generatorRoadName(road)} (${why ?? ""})`;
+  }).join(", ");
+}
+
+function paintGeneratorLogins(state) {
+  const list = el("generator-logins");
+  list.replaceChildren();
+  for (const login of state.logins ?? []) {
+    const term = document.createElement("dt");
+    term.textContent = generatorRoadName(login.road);
+    const line = document.createElement("dd");
+    line.textContent = login.installed
+      ? t("computerUse.generatorLoginLine", "{{account}} · {{model}} · 이 계정의 구독 한도에서 차감", {
+        account: login.account ?? t("computerUse.generatorLoginMachine", "이 컴퓨터의 기본 로그인"),
+        model: login.model,
+      })
+      : t("computerUse.generatorNoCli", "이 컴퓨터에 CLI가 없어 이 길은 쓸 수 없습니다");
+    list.append(term, line);
+  }
+  const last = state.last;
+  say(el("generator-last"), () => {
+    if (!last) return "";
+    if (!last.road) {
+      return t("computerUse.generatorLastNone", "마지막 요청에 답한 길 없음 — {{passed}}", {
+        passed: generatorPassedWords(last.passed),
+      });
+    }
+    return (last.passed ?? []).length > 0
+      ? t("computerUse.generatorLastPassed", "마지막으로 답한 길: {{road}} — 넘어간 길: {{passed}}", {
+        road: generatorRoadName(last.road),
+        passed: generatorPassedWords(last.passed),
+      })
+      : t("computerUse.generatorLast", "마지막으로 답한 길: {{road}}", { road: generatorRoadName(last.road) });
+  });
+}
+
 /* ---- the key typing into a page's fields asks with (t-9537) ----
  *
  * A browser task that meets an empty field asks a small model what to type,
@@ -3522,6 +3621,7 @@ async function refreshTypeValueKeys() {
 
 function paintTypeValueKeys(state) {
   typeValueKeys = state;
+  paintGeneratorLogins(state);
   const kept = Boolean(state.keysKeptHere);
   const keys = state.keys ?? [];
   el("type-value-no-keychain-hint").hidden = kept;

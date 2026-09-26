@@ -354,14 +354,48 @@ pub(crate) fn marker_in(
     let screen = screen?;
     screen.lines().rev().find_map(|line| {
         let line = line.trim();
-        rule.screen
-            .iter()
-            .any(|group| group.iter().all(|phrase| line.contains(phrase)))
-            .then(|| QuotaWallMarker {
-                source: SCREEN.to_string(),
-                line: clipped(line),
-            })
+        screen_says(rule, line).then(|| QuotaWallMarker {
+            source: SCREEN.to_string(),
+            line: clipped(line),
+        })
     })
+}
+
+/// Whether one line carries every phrase of one of the row's screen groups.
+fn screen_says(rule: &StallMarkerRule, line: &str) -> bool {
+    rule.screen
+        .iter()
+        .any(|group| group.iter().all(|phrase| line.contains(phrase)))
+}
+
+/// How each CLI says, when asked once headless, that its login is what
+/// stopped it (t-10372) — measured on this machine, 2026-09-26, with a home
+/// that holds no login: Claude Code 2.1.283 answers its one JSON result with
+/// "Not logged in · Please run /login" (and an expired login's record reads
+/// "Login expired · Please run /login", this table's login row); codex-cli
+/// 0.157.1 retries and ends its turn with "unexpected status 401
+/// Unauthorized: Missing bearer or basic authentication in header".
+const ONE_SHOT_LOGIN: &[(&str, &str)] = &[
+    ("claude", "Please run /login"),
+    ("codex", "401 Unauthorized"),
+];
+
+/// What a one-shot run's own answer says stopped it (t-10372): the quota
+/// wall, by the same screen phrases this table reads off a pane — a headless
+/// run answers with the sentence a pane shows — or the login wall, by the
+/// CLI's own request to sign in ([`ONE_SHOT_LOGIN`]). `None` for anything
+/// else: an error nobody measured is said as the CLI's refusal, not guessed
+/// into a cause.
+pub(crate) fn one_shot_cause(agent: &str, said: &str) -> Option<StallCause> {
+    if let Some(rule) = rule_for(agent, StallCause::QuotaWall)
+        && said.lines().any(|line| screen_says(rule, line.trim()))
+    {
+        return Some(StallCause::QuotaWall);
+    }
+    ONE_SHOT_LOGIN
+        .iter()
+        .any(|(cli, phrase)| *cli == agent && said.contains(phrase))
+        .then_some(StallCause::LoginWall)
 }
 
 /// The transient-error marker for `agent`, read off the bounded tail of its
@@ -1521,6 +1555,44 @@ pub(crate) mod tests {
                 && has_rule("claude", StallCause::QuotaWall)
                 && has_rule("zo", StallCause::QuotaWall)
         );
+    }
+
+    /// A one-shot run's answer is read with this table's own phrases: the
+    /// walls a pane shows, and each CLI's measured request to sign in — and
+    /// another CLI's words, or an error nobody measured, are no cause.
+    #[test]
+    fn a_one_shot_says_its_wall_and_its_login_in_the_words_this_table_reads() {
+        for (agent, said, cause) in [
+            (
+                "claude",
+                "You've hit your session limit · resets 4:10am (Asia/Seoul)",
+                Some(StallCause::QuotaWall),
+            ),
+            (
+                "claude",
+                "You've reached your Fable limit. Run /usage-credits to continue.",
+                Some(StallCause::QuotaWall),
+            ),
+            (
+                "claude",
+                "Not logged in · Please run /login",
+                Some(StallCause::LoginWall),
+            ),
+            (
+                "codex",
+                "You've hit your usage limit. Visit https://example.invalid or try again at 4:10 PM.",
+                Some(StallCause::QuotaWall),
+            ),
+            (
+                "codex",
+                "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header",
+                Some(StallCause::LoginWall),
+            ),
+            ("claude", "model not found", None),
+            ("codex", "Please run /login", None),
+        ] {
+            assert_eq!(one_shot_cause(agent, said), cause, "{agent}: {said}");
+        }
     }
 
     /// The "429 grep" trap, row by row: a bare 429, a tool result quoting

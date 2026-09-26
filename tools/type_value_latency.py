@@ -32,9 +32,16 @@ THE DISCIPLINE, because one fast reading proves nothing:
    scored on one lucky field, and every candidate is asked each case the same
    number of times.
 
-Credentials are read from the stores zo and the window already keep — the
-keychain and `~/.zo/credentials.json` — and are never printed, logged or
-written to the ledger.
+Keys are the ones a person put in the window's key store for a row — the
+keychain item the product's own writer reads (`dev.zerocode.key.<name>`, or
+the item a router row names) — and are never printed, logged or written to
+the ledger. No login is read and no road speaks as a client it is not
+(t-10372): a row whose road would have to — Code Assist under another
+client's identity, a gateway that wants another client's fingerprint — is
+skipped and says so, and the login roads (`claude-cli`, `codex-cli`) are the
+vendors' own CLIs, timed through the product's own road
+(`the_login_roads_timed_on_their_real_clis` in
+`crates/zerocode-shell/src/computer_use/errand/value/tests.rs`).
 
 Rows land in `~/.zo/projects/<project>/state/request-timings/type-value.jsonl`,
 beside the request timings the ledger already keeps, so a later reading can be
@@ -48,7 +55,6 @@ import http.client
 import json
 import os
 import pathlib
-import plistlib
 import subprocess
 import sys
 import time
@@ -58,7 +64,9 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "crates" / "zerocode-core" / "fixtures" / "type-value"
 QUESTION_FILE = FIXTURES / "question.json"
 MODELS_FILE = FIXTURES / "models.json"
-CREDENTIALS = pathlib.Path.home() / ".zo" / "credentials.json"
+# Where the window keeps a key a person put in for a row (the product's
+# `SERVICE_KEYCHAIN_SERVICE_PREFIX`).
+KEY_STORE_PREFIX = "dev.zerocode.key."
 LEDGER_NAME = "type-value.jsonl"
 
 # The most tokens one value may cost. A field's value is a line; a model that
@@ -81,15 +89,8 @@ def load_now() -> float:
 
 
 # --------------------------------------------------------------------------
-# credentials — read, never printed
+# keys — read, never printed
 # --------------------------------------------------------------------------
-
-
-def credentials() -> dict:
-    try:
-        return json.loads(CREDENTIALS.read_text())
-    except (OSError, ValueError):
-        return {}
 
 
 def keychain(service: str) -> str | None:
@@ -106,47 +107,13 @@ def keychain(service: str) -> str | None:
     return key or None
 
 
-def claude_cli_version() -> str:
-    try:
-        done = subprocess.run(
-            ["claude", "--version"], capture_output=True, text=True, timeout=5
-        )
-        word = done.stdout.split()[0]
-        return word if word[0].isdigit() else "2.1.276"
-    except (OSError, subprocess.SubprocessError, IndexError):
-        return "2.1.276"
-
-
-# The Antigravity identity the Code Assist backend gates personal access on —
-# the same three headers `gemini_code_assist.rs` sends, and the same floor
-# version, because a lower one is served a shorter model registry.
-ANTIGRAVITY_FLOOR = "2.9.1"
-ANTIGRAVITY_API_CLIENT = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-CLIENT_METADATA = json.dumps(
-    {"ideType": "ANTIGRAVITY", "platform": "DARWIN_ARM64", "pluginType": "GEMINI"}
-)
-
-
-def antigravity_user_agent() -> str:
-    def installed() -> str | None:
-        for root in ("/Applications", str(pathlib.Path.home() / "Applications")):
-            info = pathlib.Path(root) / "Antigravity.app/Contents/Info.plist"
-            try:
-                version = plistlib.loads(info.read_bytes()).get(
-                    "CFBundleShortVersionString"
-                )
-            except (OSError, ValueError):
-                continue
-            if version:
-                return str(version)
-        return None
-
-    def parts(version: str) -> list[int]:
-        return [int(p) for p in version.split(".") if p.isdigit()]
-
-    here = installed()
-    newest = here if here and parts(here) > parts(ANTIGRAVITY_FLOOR) else ANTIGRAVITY_FLOOR
-    return f"antigravity/{newest} darwin/arm64"
+def row_key(row: dict) -> str | None:
+    """The key a person put in the window's key store for this row."""
+    if row.get("keychainService"):
+        return keychain(row["keychainService"])
+    if row.get("credentialKey"):
+        return keychain(KEY_STORE_PREFIX + row["credentialKey"])
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -277,17 +244,14 @@ def render(question: dict, case: dict) -> str:
 class OpenAiCompatRoad:
     """Every gateway that speaks `/chat/completions` — ours and a person's own."""
 
-    def __init__(self, base: str, key: str | None, user_agent: str | None = None):
+    def __init__(self, base: str, key: str | None):
         self.session = Session(base)
         self.key = key
-        self.user_agent = user_agent
 
     def ask(self, model: str, question: dict, case: dict):
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
         if self.key:
             headers["Authorization"] = f"Bearer {self.key}"
-        if self.user_agent:
-            headers["User-Agent"] = self.user_agent
         body = {
             "model": model,
             "stream": True,
@@ -315,33 +279,25 @@ class OpenAiCompatRoad:
 
 
 class AnthropicRoad:
-    """The subscription road zo and the window already hold a token for."""
+    """The Messages API, asked with the API key a person put in for the row."""
 
-    IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
-
-    def __init__(self, token: str):
+    def __init__(self, key: str):
         self.session = Session("https://api.anthropic.com")
-        self.token = token
-        self.user_agent = f"claude-cli/{claude_cli_version()} (external, cli)"
+        self.key = key
 
     def ask(self, model: str, question: dict, case: dict):
         headers = {
-            "Authorization": f"Bearer {self.token}",
+            "x-api-key": self.key,
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
             "anthropic-version": "2023-06-01",
-            "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": self.user_agent,
         }
         body = {
             "model": model,
             "stream": True,
             "temperature": 0,
             "max_tokens": MAX_TOKENS,
-            "system": [
-                {"type": "text", "text": self.IDENTITY},
-                {"type": "text", "text": question["instructions"]},
-            ],
+            "system": question["instructions"],
             "messages": [{"role": "user", "content": render(question, case)}],
         }
 
@@ -361,91 +317,22 @@ class AnthropicRoad:
         self.session.close()
 
 
-class CodeAssistRoad:
-    """zo's Gemini road: Code Assist `streamGenerateContent`, Antigravity identity.
-
-    `thinking` is the `thinkingLevel` the request asks for — the one field that
-    separates `gemini-3.8-flash` the name from what the backend serves, which is
-    why the roster spells it per row instead of leaving it to a default.
-    """
-
-    def __init__(self, token: str, project: str, host: str, thinking: str | None):
-        self.session = Session(f"https://{host}")
-        self.token = token
-        self.project = project
-        self.thinking = thinking
-        self.user_agent = antigravity_user_agent()
-
-    def ask(self, model: str, question: dict, case: dict):
-        generation = {"temperature": 0, "maxOutputTokens": MAX_TOKENS}
-        if self.thinking:
-            generation["thinkingConfig"] = {
-                "thinkingLevel": self.thinking,
-                "includeThoughts": True,
-            }
-        body = {
-            "model": model,
-            "project": self.project,
-            "userAgent": "antigravity",
-            "requestId": f"type-value-{int(time.time() * 1000)}",
-            "request": {
-                "contents": [
-                    {"role": "user", "parts": [{"text": render(question, case)}]}
-                ],
-                "systemInstruction": {"parts": [{"text": question["instructions"]}]},
-                "generationConfig": generation,
-            },
-        }
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "User-Agent": self.user_agent,
-            "X-Goog-Api-Client": ANTIGRAVITY_API_CLIENT,
-            "Client-Metadata": CLIENT_METADATA,
-        }
-
-        def pick(frame):
-            answer = frame.get("response") or frame
-            for candidate in answer.get("candidates") or []:
-                for part in (candidate.get("content") or {}).get("parts") or []:
-                    if part.get("text"):
-                        return part["text"], ("thought" if part.get("thought") else "value")
-            return None
-
-        return self.session.stream(
-            "/v1internal:streamGenerateContent?alt=sse", headers, body, pick
-        )
-
-    def close(self):
-        self.session.close()
-
-
-def build_road(row: dict, creds: dict):
+def build_road(row: dict):
     """The road a roster row names, or None with the word for why not."""
     kind = row["road"]
-    if kind == "anthropic":
-        token = (creds.get("oauth") or {}).get("accessToken")
-        return (AnthropicRoad(token), None) if token else (None, "no anthropic login")
+    if kind in ("claude-cli", "codex-cli"):
+        return None, "a login road: timed through the product's own road, the vendor's CLI"
     if kind == "code-assist":
-        oauth = creds.get("google_code_assist_oauth") or {}
-        project = (creds.get("google_code_assist_project") or {}).get("project")
-        token = oauth.get("accessToken")
-        if not token or not project:
-            return None, "no google login"
-        return CodeAssistRoad(token, project, row["host"], row.get("thinkingLevel")), None
+        return None, "not asked: its backend is reached only as another client, with a login"
+    if row.get("clientFingerprint"):
+        return None, "not asked: the gateway wants another client's fingerprint"
+    key = row_key(row)
+    if kind == "anthropic":
+        return (AnthropicRoad(key), None) if key else (None, "no key in the window's key store")
     if kind == "openai-compat":
-        key = None
-        if row.get("keychainService"):
-            key = keychain(row["keychainService"])
-        elif row.get("credentialKey"):
-            key = (creds.get("openai_compat_api_keys") or {}).get(row["credentialKey"])
         if row.get("needsKey", True) and not key:
-            return None, "no key"
-        agent = None
-        if row.get("clientFingerprint") == "claude-code":
-            agent = f"claude-cli/{claude_cli_version()} (external, cli)"
-        return OpenAiCompatRoad(row["baseUrl"], key, agent), None
+            return None, "no key in the window's key store"
+        return OpenAiCompatRoad(row["baseUrl"], key), None
     return None, f"unknown road {kind}"
 
 
@@ -547,10 +434,9 @@ def main() -> int:
         print("no roster rows selected", file=sys.stderr)
         return 2
 
-    creds = credentials()
     live, missing = [], []
     for row in rows:
-        road, why = build_road(row, creds)
+        road, why = build_road(row)
         (live if road else missing).append((row, road or why))
     for row, why in missing:
         print(f"{row['id']:26} skipped — {why}")

@@ -2546,9 +2546,13 @@ pub(super) async fn computer_loop(
                             })
                             .flatten();
                         if command.method == zerocode_core::computer_use::ComputerMethod::Walk {
-                            // The value seat's writer (t-6720): the key a person set for it,
-                            // read only when a walk's look has a field to type into.
-                            let writer = computer_use::errand::value::LiveWriter::window();
+                            // The value seat's writer (t-6720): the road the person chose
+                            // (t-10372) — a login the window's panes run with, or a key
+                            // they set — asked only when a walk's look has a field to
+                            // type into.
+                            let writer = computer_use::errand::value::LiveWriter::window(
+                                generator_setup(Some(&app)),
+                            );
                             run_goal(
                                 &command,
                                 deadline_ms,
@@ -4657,6 +4661,31 @@ pub(super) fn emulator_pretty(
     }
 }
 
+/// What Computer Use's generator is built from (t-10372): the road the person
+/// chose (`computer_generator_road`), read now, and where the window keeps the
+/// accounts its panes run as. With no window there is no choice to read and
+/// no account to run as, so nobody writes.
+fn generator_setup(window: Option<&tauri::AppHandle>) -> computer_use::errand::value::Setup {
+    use zerocode_core::type_value::GeneratorRoad;
+    window.map_or_else(
+        || {
+            computer_use::errand::value::Setup::new(
+                GeneratorRoad::Off,
+                PathBuf::new(),
+                PathBuf::new(),
+            )
+        },
+        |app| {
+            let state = app.state::<AppState>();
+            computer_use::errand::value::Setup::new(
+                crate::settings_runtime::computer_generator_road(state.settings()),
+                state.config_root().to_path_buf(),
+                state.local_data_root().to_path_buf(),
+            )
+        },
+    )
+}
+
 pub(super) fn answer_computer_command(
     argv: &[String],
     permission_window: Option<&tauri::AppHandle>,
@@ -4767,11 +4796,17 @@ pub(super) fn answer_computer_command(
         // whether one is supported here and enabled is the window's to say
         // beside the helper's handshake; the person's setting is read only
         // when a start, a status or the capabilities ask.
-        computer_use::reflex::answer(&command, || {
-            permission_window.is_some_and(|app| {
-                crate::settings_runtime::computer_live_reflex(app.state::<AppState>().settings())
-            })
-        })
+        computer_use::reflex::answer(
+            &command,
+            || {
+                permission_window.is_some_and(|app| {
+                    crate::settings_runtime::computer_live_reflex(
+                        app.state::<AppState>().settings(),
+                    )
+                })
+            },
+            || generator_setup(permission_window),
+        )
     } else if command.method == ComputerMethod::Compare {
         desktop_compare(&command.params)
     } else if matches!(

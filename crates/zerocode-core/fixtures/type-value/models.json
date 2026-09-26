@@ -1,6 +1,8 @@
 {
   "seat": "type-value",
   "chosen": "haiku",
+  "claudeLogin": "claude-login",
+  "codexLogin": "codex-login",
   "deadlineMs": 1500,
   "rows": [
     {
@@ -48,6 +50,20 @@
         ],
         "caveat": "The steadiest row read: 617-671 ms across four readings and loads from 7.6 to 25, and every answer was one this seat would type. It does NOT make the 400 ms bar, and nothing reachable by a person of this product did."
       }
+    },
+    {
+      "id": "claude-login",
+      "model": "claude-haiku-4-5-20251001",
+      "road": "claude-cli",
+      "thinkingLevel": "off",
+      "reach": "a person signed in to Claude Code, as the account the window's panes run as — the vendor's own CLI asked once headless, spending that subscription; this product never reads or sends the login"
+    },
+    {
+      "id": "codex-login",
+      "model": "gpt-6-luna",
+      "road": "codex-cli",
+      "thinkingLevel": "low",
+      "reach": "a person signed in to Codex, as the Codex home the window's panes run with — the vendor's own CLI asked once headless, spending that plan; this product never reads or sends the login"
     },
     {
       "id": "diffusiongemma",

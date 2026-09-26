@@ -23,14 +23,16 @@ def run(args):
     assert os.environ.get("ZO_CONFIG_HOME"), "use a temporary configuration home"
     helper=Lines([args.helper,args.device])
     oracle=Path(args.oracle)
-    token=VALUE.credentials()["oauth"]["accessToken"]
-    road=VALUE.AnthropicRoad(token)
-    headers={"Authorization":"Bearer "+token,"Content-Type":"application/json",
-             "Accept":"text/event-stream","anthropic-version":"2023-06-01",
-             "anthropic-beta":"oauth-2025-04-20","User-Agent":road.user_agent}
+    # A person's own key for the value seat's chosen row, from the window's
+    # key store — never a login (t-10372).
+    table=json.loads((VALUE.FIXTURES/"models.json").read_text())
+    key=VALUE.row_key(next(row for row in table["rows"] if row["id"]==table["chosen"]))
+    assert key, "put an API key in the window's key store for the chosen row"
+    road=VALUE.AnthropicRoad(key)
+    headers={"x-api-key":key,"Content-Type":"application/json",
+             "Accept":"text/event-stream","anthropic-version":"2023-06-01"}
     def ask(image):
         body={"model":args.model,"stream":True,"max_tokens":16,
-              "system":[{"type":"text","text":road.IDENTITY}],
               "messages":[{"role":"user","content":[
                   {"type":"image","source":{"type":"base64","media_type":"image/png","data":image}},
                   {"type":"text","text":f"This is a {BOARD['rows']} by {BOARD['columns']} game board. Rows and columns start at 0 from the top left. Return ONLY the index (row*{BOARD['columns']}+column) of the FIRST RED tile in reading order. No explanation."}]}]}

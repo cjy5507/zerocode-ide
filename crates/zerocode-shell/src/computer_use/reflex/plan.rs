@@ -14,10 +14,12 @@
 //! ([`zerocode_core::computer_use::REFLEX_PLAN_RETRIES`] times), so the
 //! grammar is learned from its refusals rather than from a second copy of it.
 //!
-//! The generator is the one the Computer Use pane's key card sets up — the
-//! value seat's chosen row, asked down its road with the key a person put
-//! there ([`LiveWriter`]); with none there is no autopilot. No subscription
-//! login is ever one.
+//! The generator is the value seat's writer ([`LiveWriter`]), on the road the
+//! person chose in the Computer Use pane (t-10372): the login the window's
+//! panes run as — Claude's, then Codex's — asked once through the vendor's
+//! own CLI, or a key the person put there. Each plan's row says which road
+//! wrote it and why any road before it could not; with no road that can
+//! answer there is no autopilot, and the refusal names every road's reason.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -31,7 +33,7 @@ use zerocode_core::computer_use_protocol::reflex::{
     self, Pick, ReflexPlan, Scope, VERSION, ValidatedPlan, plan_hash,
 };
 
-use super::super::errand::value::{LiveWriter, Said, Tokens};
+use super::super::errand::value::{Answered, LiveWriter, Said, Tokens};
 use super::super::screenshot_png::RgbaImage;
 
 /// The version of the words below: a plan's first-thirty-seconds label is
@@ -56,8 +58,9 @@ const EXAMPLE: &str =
 /// replaces. Held on the thread that asks: a key store is read where it is
 /// asked from.
 pub(crate) trait Generator {
-    /// Why nobody set it up, as the value writer's own word, or `None`.
-    fn unready(&self) -> Option<&'static str>;
+    /// Why no road it tries can answer, in the value writer's own words —
+    /// every road's reason — or `None`.
+    fn unready(&self) -> Option<String>;
     /// The model its row names.
     fn model(&self) -> Option<String>;
     /// One request: the text the answer wrote and what it cost.
@@ -71,10 +74,16 @@ pub(crate) trait Generator {
     fn source(&self) -> &'static str {
         SOURCE_MODEL
     }
+
+    /// Set the road that answered last aside, for `why`, when another road
+    /// is left to ask — whether one was. A generator of one road has none.
+    fn pass_over(&mut self, _why: &str) -> bool {
+        false
+    }
 }
 
 impl Generator for LiveWriter {
-    fn unready(&self) -> Option<&'static str> {
+    fn unready(&self) -> Option<String> {
         Self::unready(self)
     }
 
@@ -90,6 +99,10 @@ impl Generator for LiveWriter {
             usize::try_from(REFLEX_PLAN_MAX_TOKENS).unwrap_or(usize::MAX),
             left,
         )
+    }
+
+    fn pass_over(&mut self, why: &str) -> bool {
+        self.set_aside(why)
     }
 }
 
@@ -437,6 +450,9 @@ pub(crate) struct Written {
     pub refusals: Vec<String>,
     /// Where the plan came from: the generator's word.
     pub source: &'static str,
+    /// The road that answered the last request, and every road passed over
+    /// on the way to it.
+    pub answered: Option<Answered>,
 }
 
 /// The word a plan's row names a model's plan that never passed its checks
@@ -448,7 +464,41 @@ pub(crate) const SCOPE_REFUSED: &str = "scope";
 /// attached while the retries last — a second plan for another scope ends
 /// it at once. A request the wire could not answer is not asked again: that
 /// is the network or the key, not the plan.
+///
+/// A road whose every answer the contract refused is a road that cannot
+/// write this plan: when the generator has another road to ask (`auto`'s
+/// logins, t-10372), that road is asked afresh, and the row carries every
+/// request, every refusal and the road set aside with its reason.
 pub(crate) fn write_plan(generator: &mut dyn Generator, ask: &Ask<'_>) -> Written {
+    let mut before: Option<Written> = None;
+    loop {
+        let mut written = write_on_one_road(generator, ask);
+        if let Some(before) = before.take() {
+            written.requests += before.requests;
+            written.bytes_out += before.bytes_out;
+            written.bytes_in += before.bytes_in;
+            written.rtt_ms = written.rtt_ms.saturating_add(before.rtt_ms);
+            written.tokens = match (before.tokens, written.tokens) {
+                (Some(a), Some(b)) => Some(Tokens {
+                    input: a.input + b.input,
+                    output: a.output + b.output,
+                }),
+                (a, b) => a.or(b),
+            };
+            let mut refusals = before.refusals;
+            refusals.append(&mut written.refusals);
+            written.refusals = refusals;
+        }
+        let refused = matches!(&written.plan, Err(word) if word == PLAN_REFUSED);
+        if !(refused && generator.pass_over(PLAN_REFUSED)) {
+            return written;
+        }
+        before = Some(written);
+    }
+}
+
+/// [`write_plan`] down the one road the generator asks now.
+fn write_on_one_road(generator: &mut dyn Generator, ask: &Ask<'_>) -> Written {
     let mut written = Written {
         plan: Err(PLAN_REFUSED.to_string()),
         requests: 0,
@@ -458,6 +508,7 @@ pub(crate) fn write_plan(generator: &mut dyn Generator, ask: &Ask<'_>) -> Writte
         tokens: None,
         refusals: Vec::new(),
         source: generator.source(),
+        answered: None,
     };
     let mut scope_refused = false;
     for _ in 0..=REFLEX_PLAN_RETRIES {
@@ -480,6 +531,7 @@ pub(crate) fn write_plan(generator: &mut dyn Generator, ask: &Ask<'_>) -> Writte
         };
         written.bytes_out += said.bytes_out;
         written.bytes_in += said.bytes_in;
+        written.answered = Some(said.answered.clone());
         if let Some(tokens) = said.tokens {
             let spent = written.tokens.get_or_insert(Tokens {
                 input: 0,
@@ -510,7 +562,8 @@ pub(crate) fn write_plan(generator: &mut dyn Generator, ask: &Ask<'_>) -> Writte
 /// The ledger row one written plan leaves (§2.3): the run it started and its
 /// epoch and hash (none for a plan that never ran), where it came from, the
 /// goal by its fingerprint alone, the palette it was written from, the words
-/// that asked it, what asking cost, every refusal on the way, and what it came
+/// that asked it, the road and model that answered and every road passed over
+/// (t-10372), what asking cost, every refusal on the way, and what it came
 /// to.
 #[allow(clippy::too_many_arguments)] // One row's columns, each from where it is known.
 pub(crate) fn ledger_row(
@@ -523,6 +576,10 @@ pub(crate) fn ledger_row(
     written: &Written,
     outcome: &str,
 ) -> Value {
+    let answered = written.answered.clone().unwrap_or_default();
+    let model = Some(answered.model.as_str())
+        .filter(|model| !model.is_empty())
+        .or(model);
     json!({
         "at": at,
         "run": run,
@@ -533,6 +590,8 @@ pub(crate) fn ledger_row(
         "palette": palette.json(),
         "promptVersion": PROMPT_VERSION,
         "model": model,
+        "road": Some(answered.road).filter(|road| !road.is_empty()),
+        "passedOver": answered.passed,
         "requests": written.requests,
         "bytesOut": written.bytes_out,
         "bytesIn": written.bytes_in,

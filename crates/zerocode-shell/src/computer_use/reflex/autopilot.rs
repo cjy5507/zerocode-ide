@@ -54,7 +54,7 @@ use super::{
     Admitted, Asker, Call, Carrier, DoorFacts, FileSink, ReceiptSink, Watch, admit_plan, launch,
 };
 use crate::computer_use::ComputerUseError;
-use crate::computer_use::errand::value::LiveWriter;
+use crate::computer_use::errand::value::{LiveWriter, Setup};
 use crate::systemone::{self, Wire};
 
 /// The key a status carries an autopilot's own account under.
@@ -588,7 +588,7 @@ impl Autopilot {
             return Err(ComputerUseError::new(
                 error_code::UNSUPPORTED_CAPABILITY,
                 format!(
-                    "{}: the reflex autopilot writes its plans with the generator the Computer Use pane's key card sets up, and none is ({why}); reflex-start runs a plan of your own",
+                    "{}: the reflex autopilot writes its plans with the generator the Computer Use pane sets up — the Claude or Codex login the window runs its panes with, or a key the person chose — and no road of it can answer ({why}); reflex-start runs a plan of your own",
                     plan::NO_GENERATOR
                 ),
             ));
@@ -1168,21 +1168,23 @@ impl Autopilot {
 pub(crate) fn begin(
     params: &Value,
     facts: DoorFacts,
+    generator: Setup,
     call: Call<'_>,
 ) -> Result<Value, ComputerUseError> {
     let asked = Asked::of(params);
     let workspace = super::super::evidence::session_dir(crate::project_runtime::now_epoch_ms());
     let wire = Wire::of_this_machine();
     let ask = super::asker(wire.clone(), workspace.clone());
+    let setup = generator;
     let (autopilot, answer) = {
-        let mut generator = LiveWriter::window();
+        let mut generator = LiveWriter::window(setup.clone());
         let mut roads = Roads::of(&wire, workspace.clone());
         let mut world = roads.world(call, &ask, &mut generator);
         Autopilot::start(asked, facts, workspace.clone(), &mut world)?
     };
     std::thread::spawn(move || {
         let mut autopilot = autopilot;
-        let mut generator = LiveWriter::window();
+        let mut generator = LiveWriter::window(setup);
         let mut roads = Roads::of(&wire, workspace);
         loop {
             if !super::super::session_stands() {

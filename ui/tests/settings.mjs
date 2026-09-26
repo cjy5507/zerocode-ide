@@ -69,6 +69,15 @@ function typeValueSlots() {
     rows: TYPE_VALUE_TABLE.rows.filter((row) => typeValueTaken(row) && typeValueService(row) === service),
   }];
 }
+/* Mirrors `type_value_keys::card` (t-10372): the login roads `auto` tries, in
+ * order, each with the row the table names for it — the words are the core's
+ * `GeneratorRoad`, held to the markup's radios by the Rust contract
+ * `the_generator_road_rides_the_settings_document_and_the_card_says_whose_login`. */
+const GENERATOR_ROADS = Object.freeze(["auto", "claude_login", "codex_login", "api_key", "off"]);
+const GENERATOR_LOGINS = Object.freeze([
+  { road: "claude_login", row: TYPE_VALUE_TABLE.claudeLogin },
+  { road: "codex_login", row: TYPE_VALUE_TABLE.codexLogin },
+]);
 /* The routing row of the Jev use table (`zerocode_core::jev::ROUTING`), as
  * `typesafe_settings` answers it: each mode's word and what it does. The Rust
  * contract `the_pane_offers_the_rows_modes_and_asks_registered_commands`
@@ -340,6 +349,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "computer_confirm_transfer": true,
   "computer_confirm_delete": true,
   "computer_live_reflex": false,
+  "computer_generator_road": "auto",
   "emulator.keepBooted": true,
   "emulator.prebootLastUsed": true,
   "emulator.idleShutdownMinutes": 30,
@@ -744,7 +754,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
   "set_diff_side_by_side", "set_conversation_focus_view", "set_confirm_close_pinned",
-  "set_computer_live_reflex",
+  "set_computer_live_reflex", "set_computer_generator_road",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
   "patch_floating_workspace",
@@ -1350,6 +1360,12 @@ class StatefulBackend {
       case "set_computer_live_reflex":
         this.settings.computer_live_reflex = args.on === true;
         keys = ["computer_live_reflex"];
+        break;
+      case "set_computer_generator_road":
+        // serde's refusal of a word `GeneratorRoad` does not name.
+        if (!GENERATOR_ROADS.includes(args.road)) throw `unknown variant \`${args.road}\``;
+        this.settings.computer_generator_road = args.road;
+        keys = ["computer_generator_road"];
         break;
       case "set_confirm_close_pinned":
         this.settings.confirm_close_pinned = args.on === true;
@@ -2866,6 +2882,17 @@ class StatefulBackend {
 
   typeValueKeys() {
     return {
+      road: this.settings.computer_generator_road,
+      logins: GENERATOR_LOGINS.map(({ road, row }) => {
+        const found = TYPE_VALUE_TABLE.rows.find((one) => one.id === row);
+        return {
+          road,
+          model: found.model,
+          installed: !(this.generatorMissingClis ?? []).includes(road),
+          account: this.generatorAccounts?.[road] ?? null,
+        };
+      }),
+      last: this.generatorLast ?? null,
       keysKeptHere: !this.routerKeychainUnavailable,
       keys: typeValueSlots().map((slot) => ({
         credentialKey: slot.name,
@@ -5502,6 +5529,11 @@ await test("Computer Use의 글자 입력용 키는 지금 쓰는 키 하나만 
   await openSettings(pageA, "computer-use");
   await backend.waitForCall("A", "type_value_keys", from);
   await renderSettled(pageA);
+  // A key is asked for only on the road that asks with one (t-10372).
+  const keyed = backend.calls.length;
+  await pageA.locator('input[data-generator-road="api_key"]').check();
+  await backend.waitForCall("A", "set_computer_generator_road", keyed);
+  await pageA.waitForFunction(() => document.getElementById("type-value-key-section")?.hidden === false, null, { timeout: UI_TIMEOUT });
   const said = (key, fallback, vars) => pageA.evaluate(([one, words, values]) => t(one, words, values), [key, fallback, vars]);
   const card = pageA.locator("#type-value-card");
   const drawn = card.locator("[data-type-value-key]");
@@ -5629,7 +5661,80 @@ await test("Computer Use의 글자 입력용 키는 지금 쓰는 키 하나만 
   await pageA.evaluate(() => refreshTypeValueKeys());
   await pageA.waitForFunction(() => document.getElementById("type-value-no-keychain-hint")?.hidden === true, null, { timeout: UI_TIMEOUT });
   assert(!(await input.isDisabled()), "a machine with a keychain was left without the key field");
+  const back = backend.calls.length;
+  await pageA.locator('input[data-generator-road="auto"]').check();
+  await backend.waitForCall("A", "set_computer_generator_road", back);
   return `${await drawn.count()} slot (${slot.name}) of ${TYPE_VALUE_TABLE.rows.filter((row) => row.credentialKey).length} keyed rows`;
+});
+
+// Computer Use's generator road (t-10372): a person who never chose is on
+// `auto` — the logins the window opens its agents with — and the card says,
+// for each login, whose account it runs as, the model its row asks and that
+// it spends that account's subscription; a login whose CLI is not on the
+// machine says so; the last answer names the road that gave it and every
+// road passed over with its reason; a choice is written through the one
+// settings writer and comes back through the snapshot; and a key is asked
+// for only on the key road.
+await test("Computer Use 생성기는 기본이 로그인(자동)이고, 로그인마다 계정·구독 차감을 말하며, 넘어간 길을 보인다", async () => {
+  backend.generatorAccounts = { claude_login: "ada@example.invalid" };
+  backend.generatorMissingClis = ["codex_login"];
+  backend.generatorLast = {
+    road: "codex_login",
+    model: "a-model",
+    passed: ["claude_login=quota_wall"],
+    atMs: 1,
+  };
+  try {
+    await openSettings(pageA, "computer-use");
+    const from = backend.calls.length;
+    await pageA.evaluate(() => refreshTypeValueKeys());
+    await backend.waitForCall("A", "type_value_keys", from);
+    await renderSettled(pageA);
+    const said = (key, fallback, vars) => pageA.evaluate(([one, words, values]) => t(one, words, values), [key, fallback, vars]);
+    const checked = () => pageA.evaluate(() => document.querySelector("input[data-generator-road]:checked")?.dataset.generatorRoad ?? null);
+    assertEqual(await checked(), "auto", "a person who never chose is not on the logins");
+    assertEqual(
+      await pageA.evaluate(() => [...document.querySelectorAll("input[data-generator-road]")].map((one) => one.dataset.generatorRoad)),
+      [...GENERATOR_ROADS],
+      "the card does not offer the core's roads in its order",
+    );
+    assert(await pageA.locator("#type-value-key-section").isHidden(), "a key was asked for on a login road");
+
+    // Each login: its name, and whose account it runs as, the row's model and
+    // the subscription it spends — or that its CLI is not here.
+    const lines = await pageA.evaluate(() => [...document.querySelectorAll("#generator-logins dd")].map((one) => one.textContent));
+    const claudeRow = TYPE_VALUE_TABLE.rows.find((row) => row.id === TYPE_VALUE_TABLE.claudeLogin);
+    assertEqual(lines, [
+      await said("computerUse.generatorLoginLine", "{{account}} · {{model}} · 이 계정의 구독 한도에서 차감", {
+        account: "ada@example.invalid",
+        model: claudeRow.model,
+      }),
+      await said("computerUse.generatorNoCli", "이 컴퓨터에 CLI가 없어 이 길은 쓸 수 없습니다"),
+    ], "the logins are not said with their account, model and subscription");
+
+    // The last answer names the road that gave it and the one passed over.
+    const last = await pageA.locator("#generator-last").textContent();
+    assertEqual(last, await said("computerUse.generatorLastPassed", "마지막으로 답한 길: {{road}} — 넘어간 길: {{passed}}", {
+      road: await said("computerUse.generatorLoginCodex", "Codex 로그인"),
+      passed: `${await said("computerUse.generatorLoginClaude", "Claude Code 로그인")} (quota_wall)`,
+    }), "the road passed over is a quiet one");
+
+    // A choice goes through the one writer and comes back in the snapshot.
+    const at = backend.calls.length;
+    await pageA.locator('input[data-generator-road="claude_login"]').check();
+    assertEqual((await backend.waitForCall("A", "set_computer_generator_road", at)).args, { road: "claude_login" });
+    assertEqual(backend.settings.computer_generator_road, "claude_login");
+    await pageA.evaluate(() => applySettingsSnapshot({ computer_generator_road: "off" }));
+    assertEqual(await checked(), "off", "the snapshot's road is not painted");
+    await pageA.evaluate(() => applySettingsSnapshot({ computer_generator_road: "gemini_login" }));
+    assertEqual(await checked(), "auto", "a road the core does not name was painted");
+  } finally {
+    delete backend.generatorAccounts;
+    delete backend.generatorMissingClis;
+    delete backend.generatorLast;
+    backend.settings.computer_generator_road = "auto";
+  }
+  return "5 roads · 2 logins · passed over said";
 });
 
 await test("분리 전에 손으로 끈 스킬 검색은 업데이트 뒤에도 스킬 제안을 끈 채로 둔다 — 제안은 제 낱말이 생길 때까지 검색의 낱말을 따른다", async () => {

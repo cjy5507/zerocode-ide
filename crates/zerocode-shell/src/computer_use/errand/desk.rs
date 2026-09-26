@@ -708,14 +708,13 @@ where
         let Some(entry) = self.seen.as_ref().and_then(|seen| Entry::read(seen, mark)) else {
             return Typed::Refused(NO_FIELD.to_string());
         };
-        // The wall a value is written within: the seat's own, never more than
-        // the call has left.
-        let left = Duration::from_millis(self.left_ms()).min(Duration::from_millis(
-            zerocode_core::type_value::seat().deadline_ms,
-        ));
+        // The wall a value is written within: its road's own, never more
+        // than the call has left.
+        let left = Duration::from_millis(self.left_ms());
         let Some(writer) = self.writer.as_mut() else {
             return Typed::Refused(NO_TYPING.to_string());
         };
+        let left = left.min(writer.wall());
         let look = FieldLook {
             goal,
             label: &entry.label,
@@ -749,6 +748,7 @@ where
                         ValueSource::Written {
                             model: written.model,
                             ms: written.ms,
+                            answered: written.answered,
                         },
                     )
                 }

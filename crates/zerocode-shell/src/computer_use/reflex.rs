@@ -428,10 +428,12 @@ pub(crate) fn stop(params: &Value, call: Call<'_>) -> Result<Value, ComputerUseE
 
 /// The four verbs and `capabilities` as the window answers them: `enabled`
 /// reads the person's setting, asked by a start, an autopilot, a status and
-/// the capabilities, and by nothing else.
+/// the capabilities, and by nothing else; `generator` reads the road the
+/// person chose for the autopilot's plans, asked by an autopilot alone.
 pub(crate) fn answer(
     command: &ComputerCommand,
     enabled: impl FnOnce() -> bool,
+    generator: impl FnOnce() -> super::errand::value::Setup,
 ) -> Result<Value, ComputerUseError> {
     let mut call = |method: &str, params: Value| super::call(method, params);
     match command.method {
@@ -459,9 +461,12 @@ pub(crate) fn answer(
                 "evidence": evidence,
             }))
         }
-        ComputerMethod::ReflexAuto => {
-            autopilot::begin(&command.params, DoorFacts::now(enabled()), &mut call)
-        }
+        ComputerMethod::ReflexAuto => autopilot::begin(
+            &command.params,
+            DoorFacts::now(enabled()),
+            generator(),
+            &mut call,
+        ),
         ComputerMethod::ReflexStatus => {
             status(&command.params, &DoorFacts::now(enabled()), &mut call)
         }

@@ -260,8 +260,8 @@ impl ReceiptSink for Kept {
 struct Unset;
 
 impl Generator for Unset {
-    fn unready(&self) -> Option<&'static str> {
-        Some(crate::computer_use::errand::value::NO_KEY)
+    fn unready(&self) -> Option<String> {
+        Some(crate::computer_use::errand::value::NO_KEY.to_string())
     }
 
     fn model(&self) -> Option<String> {
@@ -791,6 +791,37 @@ fn no_generator_or_a_closed_door_starts_nothing() {
         .expect("refused");
     assert_eq!(refused.code, error_code::UNSUPPORTED_CAPABILITY);
     assert!(fake.helper.calls.is_empty() && fake.generator.asked.is_empty());
+}
+
+/// A reflex autopilot starts on a plan the person's real login wrote, on this
+/// machine, with no API key (t-10372 §6 (a)): the plan's row says which road
+/// wrote it and what it cost, and the helper was handed a run. Printed.
+#[test]
+#[ignore = "spends the person's own login on one plan; evidence for the report"]
+fn an_autopilot_on_this_machine_starts_on_the_plan_its_login_wrote() {
+    use crate::computer_use::errand::value::LiveWriter;
+    use crate::computer_use::errand::value::tests::probe_setup;
+    use zerocode_core::type_value::GeneratorRoad;
+
+    let road = std::env::var("ZEROCODE_PROBE_ROAD")
+        .ok()
+        .and_then(|word| serde_json::from_value(json!(word)).ok())
+        .unwrap_or(GeneratorRoad::Auto);
+    let mut writer = LiveWriter::window(probe_setup(road));
+    let mut fake = Fake::new((JevMode::Off, false), Vec::new());
+    let started = fake.with(Some(&mut writer), |world| {
+        Autopilot::start(asked(None), open(), None, world)
+    });
+    println!(
+        "{}",
+        json!({
+            "started": started.as_ref().map(|(_, answer)| answer.clone()).map_err(|error| json!({ "code": error.code, "message": error.message })),
+            "plans": fake.plans,
+            "runs": fake.helper.runs.len(),
+        })
+    );
+    assert!(started.is_ok(), "the autopilot did not start");
+    assert_eq!(fake.helper.runs.len(), 1, "the helper was handed no run");
 }
 
 /// Every plan passes the helper's handshake before a start: a helper that

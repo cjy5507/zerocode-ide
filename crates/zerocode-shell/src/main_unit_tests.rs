@@ -21334,6 +21334,52 @@ fn the_live_reflex_switch_rides_the_settings_document_and_the_doors_own_words() 
     }
 }
 
+/// Computer Use's generator road (t-10372): `computer_generator_road` goes
+/// through the one settings writer and comes back through the snapshot, the
+/// card offers every road the core names by its own word and says whose
+/// subscription a login spends, the card's read answers the road with each
+/// login's account and the last answer, and every command is registered.
+#[test]
+fn the_generator_road_rides_the_settings_document_and_the_card_says_whose_login() {
+    let window = window_source();
+    assert_canonical_setting_round_trip(
+        shipped_backend(),
+        window,
+        "set_computer_generator_road",
+        "setting_key::COMPUTER_GENERATOR_ROAD",
+        "settings.computer_generator_road = road",
+        "function setComputerGeneratorRoad(road) {",
+        "computer_generator_road",
+        "paintComputerGeneratorRoad();",
+    );
+    let markup = include_str!("../../../ui/index.html");
+    for road in zerocode_core::type_value::GeneratorRoad::ALL {
+        assert!(
+            markup.contains(&format!("data-generator-road=\"{}\"", road.word())),
+            "the card offers no `{}` road",
+            road.word()
+        );
+    }
+    let card = block_after(window, "function paintGeneratorLogins(state) {");
+    for held in ["state.logins", "login.account", "state.last"] {
+        assert!(
+            card.contains(held),
+            "the card no longer reads `{held}`:\n{card}"
+        );
+    }
+    let reading = include_str!("cmd/type_value.rs");
+    assert!(
+        reading.contains("computer_generator_road(state.settings())")
+            && reading.contains("type_value_keys::card("),
+        "the card's read no longer answers the road chosen:\n{reading}"
+    );
+    let main = include_str!("main.rs");
+    assert!(
+        main.matches("set_computer_generator_road,").count() >= 2,
+        "`set_computer_generator_road` is not registered with the window"
+    );
+}
+
 /// The browser door's look, settle and pin (t-6721): what the Rust half of
 /// `cmd/browser.rs` does with what the page said. The page halves run for
 /// real in Chromium (`ui/tests/browser-door.mjs`).
