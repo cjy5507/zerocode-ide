@@ -13,7 +13,7 @@ run DIR --seed N --driver B announces, waits, re-checks that nobody is at the
                             run of the table's length; the first input that is
                             not the hand's stops it for good.
     [--autopilot [WORDS]]   gives the driver a goal in place of a plan: the
-    [--generator G]         window's reflex autopilot writes its plans (the
+    [--generator G] [--l1 W] window's reflex autopilot writes its plans (the
                             window's generator, or `stub`: this runner's plan
                             answered down the autopilot's road) and carries its
                             reflex decision out, forced as bench.json's
@@ -961,7 +961,7 @@ class Desk:
         keys = {}
         if autopilot is not None:
             autopilot = {"generator": autopilot.get("generator") or goal["generator"],
-                         "words": autopilot.get("words") or goal["words"], "l1": goal["l1"]}
+                         "words": autopilot.get("words") or goal["words"], "l1": autopilot.get("l1") or goal["l1"]}
             keys, why = keys_for(self.values, autopilot["generator"], keychain)
             if why:
                 raise Refused(why)
@@ -977,6 +977,8 @@ class Desk:
         config = CONFIG if many == self.values["reflex_plan"]["rules_per_colour"] else f"{CONFIG}+rules{many}"
         if autopilot is not None:
             config += f"+autopilot-{autopilot['generator']}"
+            if autopilot["l1"] != goal["l1"]:
+                config += f"-l1{autopilot['l1']}"
         record = {"owner": self.session["owner"], "seed": seed, "fixturePid": ready["pid"], "rules": many,
                   "config": config, "readyNs": ready["readyNs"], "stoppedBy": None}
         if autopilot is not None:
@@ -1132,6 +1134,8 @@ def main(argv=None):
                         help="run: a goal in place of a plan (default words: bench.json's reflex_goal)")
     parser.add_argument("--generator", choices=["window", STUB],
                         help="run --autopilot: who writes the plans (default: bench.json's reflex_goal)")
+    parser.add_argument("--l1", choices=["auto", "shadow", "off"],
+                        help="run --autopilot: the reflex decision's forced word (default: bench.json's reflex_goal)")
     args = parser.parse_args(argv)
     values, table_limits = tally.table(), limits()
     signals = Signals().install()
@@ -1151,7 +1155,8 @@ def main(argv=None):
                 helper_app = args.helper_app or installed_helper()
                 if not args.driver or not helper_app:
                     parser.error("run needs --driver and a helper app")
-                autopilot = None if args.autopilot is None else {"words": args.autopilot, "generator": args.generator}
+                autopilot = None if args.autopilot is None else {"words": args.autopilot, "generator": args.generator,
+                                                                 "l1": args.l1}
                 result = desk.run(args.seed, args.driver, helper_app, rules=args.rules, autopilot=autopilot)
         print(json.dumps(result, indent=2))
         return 0

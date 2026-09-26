@@ -608,6 +608,11 @@ class Runner(unittest.TestCase):
             if path.is_file():
                 self.assertNotIn(secret, path.read_text(errors="replace"), f"the key reached {path.name}")
 
+    def test_a_round_may_force_another_word_on_the_decision_and_its_config_says_so(self):
+        result, run = self.run_desk(36, autopilot={"generator": reflex.STUB, "l1": "shadow"})
+        self.assertEqual(json.loads((run / "request.json").read_text())["l1"], "shadow")
+        self.assertEqual(result["config"], f"{reflex.CONFIG}+autopilot-{reflex.STUB}-l1shadow")
+
     def test_the_windows_generator_with_no_key_starts_nothing(self):
         desk_folder = self.folder / "run-35"
         with self.assertRaises(reflex.Refused) as refused:
