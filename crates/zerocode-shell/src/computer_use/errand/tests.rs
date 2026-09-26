@@ -3458,7 +3458,9 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
         }
     }
 
-    let walk = |with_key: bool| {
+    // `until`: the caller's condition, as the check's count before the walk's
+    // first look and after it (t-10311); `None` gives no `--until`.
+    let walk = |with_key: bool, until: Option<[u64; 2]>| {
         let home = tempfile::tempdir().expect("a zo home");
         let work = home.path().join("work");
         std::fs::create_dir_all(&work).expect("a workspace");
@@ -3474,7 +3476,7 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
         .expect("zo's settings");
         let jev = Endpoint::answering_each("HTTP/1.1 200 OK", judging, 0);
         let value = Endpoint::serving("HTTP/1.1 200 OK", wrote("London"), 0);
-        let words: Vec<String> = [
+        let mut words: Vec<String> = [
             "walk",
             "--pane",
             "browser-9",
@@ -3487,6 +3489,10 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
         .into_iter()
         .map(str::to_string)
         .collect();
+        if until.is_some() {
+            words.extend(["--until".to_string(), "Results".to_string()]);
+        }
+        let finds = std::cell::Cell::new(0usize);
         let command = zerocode_core::computer_use::parse_command(&words).expect("a walk");
         let sent: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
         let answer = run_goal(
@@ -3501,7 +3507,10 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
                         exit_code: 0,
                         stdout: match argv[0].as_str() {
                             "marks" => marks.clone(),
-                            "find" => r#"{"count":0}"#.to_string(),
+                            "find" => {
+                                let at = finds.replace(finds.get() + 1).min(1);
+                                json!({ "count": until.map_or(0, |counts| counts[at]) }).to_string()
+                            }
                             _ => "{}".to_string(),
                         },
                         stderr: String::new(),
@@ -3532,7 +3541,7 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
         (asked, value.asked(), sent.into_inner(), answer)
     };
 
-    let (asked, values, sent, answer) = walk(true);
+    let (asked, values, sent, answer) = walk(true, None);
     assert_eq!(answer.exit_code, 0, "{}", answer.stdout);
     assert_eq!(asked.len(), 1, "one judgment: {asked:?}");
     assert!(
@@ -3557,7 +3566,7 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
         "the walk typed the written value into the field the look read: {sent:?}"
     );
 
-    let (asked, values, sent, answer) = walk(false);
+    let (asked, values, sent, answer) = walk(false, None);
     assert_eq!(answer.exit_code, 0, "{}", answer.stdout);
     assert_eq!(asked.len(), 1, "one judgment: {asked:?}");
     assert!(
@@ -3594,4 +3603,39 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
         Some("marks"),
         "the next look finishes the settle: {sent:?}"
     );
+
+    // The caller's condition before the walk (t-10311): asked once, ahead of
+    // the first look, and answered beside the rows only when it was given.
+    use zerocode_core::computer_use::walk_words as words;
+    let result = |answer: &TeamAnswer| -> Value {
+        serde_json::from_str::<Value>(&answer.stdout).expect("a JSON answer")["result"].clone()
+    };
+    assert!(
+        result(&answer).get(words::UNTIL_BEFORE).is_none(),
+        "no --until, no read and no key"
+    );
+    for (counts, before) in [([1, 1], true), ([0, 1], false)] {
+        let (_, _, sent, answer) = walk(false, Some(counts));
+        assert_eq!(answer.exit_code, 0, "{}", answer.stdout);
+        assert_eq!(
+            sent.first().map(|argv| argv[..].to_vec()),
+            Some(vec![
+                "find".to_string(),
+                "browser-9".to_string(),
+                "Results".to_string()
+            ]),
+            "the condition is read before the first look: {sent:?}"
+        );
+        let said = result(&answer);
+        assert_eq!(said[words::UNTIL_BEFORE], json!(before), "{said}");
+        assert_eq!(said[words::REACHED], json!(true), "{said}");
+        let last = said[words::ROWS]
+            .as_array()
+            .and_then(|rows| rows.last())
+            .cloned();
+        assert_eq!(
+            last.map(|row| row[words::RECHECK].clone()),
+            Some(json!(true))
+        );
+    }
 }

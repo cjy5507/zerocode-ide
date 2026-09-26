@@ -20,6 +20,47 @@ every surface it draws has a command above that reaches the same thing without
 a click. If the user explicitly asks to control the browser application's
 chrome rather than a web page, desktop Computer Use is appropriate.
 
+## Choosing a road
+
+Pick the road by how much of the path you already know. Each road below is one
+call; the column on the right is zo's `Computer` action, the middle one the
+command every other agent runs.
+
+| You know | Road (CLI) | zo `Computer` |
+|---|---|---|
+| The one next press or key | `zerocode-computer click …` / `key …` (or `zerocode-browser click`, `zerocode-emulator tap`) | `left_click`, `key`, `type` |
+| Several hand steps, none needing a look between | `zerocode-computer batch --commands '[…]'` | `batch` with `steps: […]` |
+| A procedure that worked before | `zerocode-computer recipe-run --name <n>` | `recipe_run` |
+| Only the goal: the next press depends on what the screen shows | `zerocode-computer walk --goal "<one sentence>" (--app <a> \| --pane <browser-N> \| --platform ios\|android --device <id>) [--until "<text on screen when it worked>"] [--steps N]` | `walk` |
+| A game or live screen that must be answered faster than a turn | `zerocode-computer reflex-start --flow <file> --display N --seconds N` | none — the CLI only |
+
+A `walk` runs the window's own loop — look at the screen's numbered controls,
+choose, press, check — in one call, up to `--steps` presses (30 by default, 40
+at most) under the call's own deadline. Name the screen by the id a look
+gave you. Give `--until` whenever success shows as text: it is the only check
+that proves the walk got there.
+
+```json
+{"action": "walk", "pane": "browser-13", "goal": "도움말에서 설치 안내 페이지를 연다", "until": "설치 안내", "max_steps": 6}
+```
+
+zo's `walk` answers one `status` beside what the window said — never the
+presses, an `ok` or the judgment's own `done` alone:
+
+- `verified`: the `until` text was read on the screen, and read as the walk's
+  doing (absent before it, or absent at a check between presses). Report.
+- `needs_verification`: the judgment said it is done, or the `until` text was
+  already there before the walk. Check once, then report.
+- `needs_fallback`: the walk could not go on — the seat is off or only
+  recording, there is no key or consent, the judgment was unsure or
+  unanswered, or nothing on the screen fit. `reason` says which; plan the next
+  step yourself from the last look (`lastObservedStep`). Do not send the same
+  walk again, and never turn a setting on for the person.
+- `stopped`: the person stopped it, a guard refused a screen, or the budget
+  ran out (`stepsLeft`). Stop and report as any stop.
+- `failed`: a press or a look failed, or the screen would not move. `at.step`
+  names where; recover from there.
+
 ## Built-in browser and emulator
 
 For a website, open and inspect the page through the pane ZeroCode owns:
