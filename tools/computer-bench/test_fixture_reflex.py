@@ -486,6 +486,7 @@ class Runner(unittest.TestCase):
             self.assertTrue((run / name).exists(), name)
         record = json.loads((run / "run.json").read_text())
         self.assertIsNone(record["stoppedBy"])
+        self.assertEqual(sorted(record["load"]), ["goal", "verdict"], "the machine's load is kept beside the run")
         self.assertLessEqual(record["t0Ns"], json.loads((run / "started.json").read_text())["requestNs"])
         self.assertGreater(record["verdictNs"], json.loads((run / "ended.json").read_text())["endedNs"])
         self.assertEqual(json.loads((run / "plan.json").read_text())["scope"]["target"],

@@ -732,6 +732,7 @@ class Desk:
                 record["refused"] = why
                 raise Refused(why)
             record["t0Ns"] = uptime_ns()
+            record["load"] = {"goal": list(os.getloadavg())}
             write_atomic(run / "start.json", {"t0Ns": record["t0Ns"]})
             write_atomic(run / "request.json", {"bundle": self.session["bundle"], "pollMs": safety["poll_ms"],
                                                 "seconds": self.values["reflex_round"]["run_s"], "renew": True,
@@ -750,6 +751,7 @@ class Desk:
         # The wall ends at the verdict: every file read, the oracle's to judge.
         loaded = load(run)
         record["verdictNs"] = loaded["run"]["verdictNs"] = uptime_ns()
+        record.setdefault("load", {})["verdict"] = list(os.getloadavg())
         write_atomic(run / "run.json", record)
         result = judged(loaded, self.values, self.limits)
         write_atomic(run / tally.REFLEX_RUN, result)
