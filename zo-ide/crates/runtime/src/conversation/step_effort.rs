@@ -32,10 +32,13 @@
 //! the table runs and its rows are filed and the requests go out untouched,
 //! which is the shadow the A/B is read from.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ::api::EffortLevel;
+use ::api::{EffortLevel, SystemOneQuestion, SystemOneRequest};
 use serde::Serialize;
+use serde_json::Value;
+use zerocode_core::jev::questions::ROUTING_STATE_TASK;
 
 use super::deep_gate::{bash_result_exited_zero, command_is_check_shaped};
 use super::repetition::{fingerprint_tool_call, TOOL_REPETITION_THRESHOLD};
@@ -470,10 +473,57 @@ pub type StepEffortObserver = Arc<dyn Fn(&StepEvent) + Send + Sync>;
 pub struct StepAskContext<'a> {
     pub step: u32,
     pub why: StepAsk,
-    /// The turn's own words — what the routing judgment reads — with the
-    /// step's signals on a line after them.
-    pub state: &'a str,
+    /// The seat's state for the step ([`step_state`]): the turn's own words
+    /// — what the routing judgment reads — and the step's counts.
+    pub state: &'a Value,
     pub attempt: &'a str,
+}
+
+// ---- the seat's question (t-10010) -----------------------------------------
+
+/// The version of the words the seat asks — [`step_questions`] of a
+/// [`step_state`] — which every judgment row names: the use table's own
+/// number for the seat, read from there and not respelled.
+pub const STEP_RUBRIC_VERSION: u32 = zerocode_core::jev::questions::ZO_STEP_EFFORT_RUBRIC_VERSION;
+
+/// The keys of the seat's state: the turn's words, under the routing seat's
+/// own key; the step; and the step's counts.
+const STEP_STATE_KEYS: [&str; 3] = [ROUTING_STATE_TASK, "step", "signals"];
+
+/// The keys of `signals`: the table's own counts of the batch the step ran.
+const STEP_SIGNAL_KEYS: [&str; 4] = ["batch", "repeats", "errors_in_a_row", "check_red"];
+
+/// The step's counts on one line, after the turn's words.
+fn signals_line(step: u32, signals: &StepSignals) -> String {
+    format!(
+        "[step {step}] batch={} repeats={} errors_in_a_row={} check_red={}",
+        signals.batch.label(),
+        signals.repeats,
+        signals.error_streak,
+        signals.check_red
+    )
+}
+
+/// The seat's state for one step.
+#[must_use]
+pub fn step_state(task: &str, step: u32, signals: &StepSignals) -> Value {
+    Value::String(format!("{task}\n{}", signals_line(step, signals)))
+}
+
+/// The seat's questions.
+#[must_use]
+pub fn step_questions() -> &'static BTreeMap<String, SystemOneQuestion> {
+    crate::model_router::decision_questions()
+}
+
+/// The seat's request for one step's state.
+#[must_use]
+pub fn step_request<'a>(model: &'a str, state: &'a Value) -> SystemOneRequest<'a, Value> {
+    SystemOneRequest {
+        state,
+        model,
+        questions: step_questions(),
+    }
 }
 
 /// A seat beside the governor: asked, detached, about a step; read at the
@@ -782,7 +832,7 @@ where
                 .latest_user_text()
                 .map(std::borrow::Cow::into_owned)
                 .unwrap_or_default();
-            let state = format!("{words}\n{}", planned.signals_line);
+            let state = step_state(&words, planned.step, &planned.signals);
             seat.ask(&StepAskContext {
                 step: planned.step,
                 why,
@@ -825,7 +875,8 @@ struct PlannedStep {
     /// session's own.
     return_home: bool,
     ask: Option<StepAsk>,
-    signals_line: String,
+    /// What the table read at the step — the counts the seat's state carries.
+    signals: StepSignals,
 }
 
 impl StepEffortState {
@@ -952,13 +1003,7 @@ impl StepEffortState {
             moved_to,
             return_home,
             ask: decision.ask.filter(|_| self.config.seat.is_some()),
-            signals_line: format!(
-                "[step {step}] batch={} repeats={} errors_in_a_row={} check_red={}",
-                kind.label(),
-                signals.repeats,
-                signals.error_streak,
-                signals.check_red
-            ),
+            signals,
         }
     }
 }
@@ -1263,5 +1308,118 @@ mod tests {
         // Carried, but the judgment said what the table said: nothing to grade.
         let same = graded_after(RouteTaskComplexity::Small, true, None);
         assert_eq!((same.agreed, same.not_compared), (None, Some(SAME_AS_RULE)));
+    }
+
+    /// Every word the seat asks, as one string: the questions as they go on
+    /// the wire — each one's instructions and every option's words — and the
+    /// keys of the state they read.
+    fn step_rubric_words() -> String {
+        let questions = serde_json::to_string(step_questions()).expect("the questions serialize");
+        [questions, STEP_STATE_KEYS.join(","), STEP_SIGNAL_KEYS.join(",")].join("\n")
+    }
+
+    /// The seat's words are pinned to its version (t-10010): a question, an
+    /// option's words or a key of the state changed without a version is red,
+    /// not a quiet drift of the series the seat is judged on.
+    #[test]
+    fn the_step_version_is_pinned_to_its_words() {
+        assert_eq!(STEP_RUBRIC_VERSION, 2);
+        assert_eq!(
+            zerocode_core::jev::rubric_fingerprint(step_rubric_words),
+            "0000000000000000",
+            "{}",
+            step_rubric_words()
+        );
+    }
+
+    /// The seat asks what the decision reader reads — the router's judged
+    /// axes, each over its own tokens — and every option says what it means
+    /// (t-10010): complexity's and risk's in the routing seat's own levels, a
+    /// token and a level at the same place on the same scale as that seat's
+    /// reading already takes them; intent's in the router's own words.
+    /// Version 1 described two of complexity's four options and none of
+    /// risk's.
+    #[test]
+    fn every_option_the_seat_offers_says_what_it_means() {
+        use ::api::{SystemOneCriteria, SystemOneQuestionKind};
+        use zerocode_core::jev::questions::{ROUTING_COMPLEXITY_LEVELS, ROUTING_RISK_LEVELS};
+        let questions = step_questions();
+        let asked: Vec<&str> = questions.keys().map(String::as_str).collect();
+        let mut judged: Vec<&str> = crate::model_router::judged_axes().map(|axis| axis.name).collect();
+        judged.sort_unstable();
+        assert_eq!(asked, judged, "the axes the decision reader reads");
+        let options = |axis: &crate::model_router::RubricAxis| {
+            let question = &questions[axis.name];
+            assert_eq!(question.kind, SystemOneQuestionKind::Choice, "{}", axis.name);
+            let SystemOneCriteria::Named(criteria) = &question.criteria else {
+                panic!("{}: an axis offers named options", axis.name);
+            };
+            criteria.clone()
+        };
+        for axis in crate::model_router::judged_axes() {
+            let criteria = options(axis);
+            let mut offered: Vec<&str> = criteria.keys().map(String::as_str).collect();
+            let mut tokens = axis.tokens.to_vec();
+            offered.sort_unstable();
+            tokens.sort_unstable();
+            assert_eq!(offered, tokens, "{}: the router's own tokens", axis.name);
+            for (token, means) in &criteria {
+                assert!(
+                    means.as_deref().is_some_and(|means| !means.trim().is_empty()),
+                    "{}/{token} says nothing of what it means",
+                    axis.name
+                );
+            }
+        }
+        for (axis, levels) in [
+            (&crate::model_router::COMPLEXITY_AXIS, ROUTING_COMPLEXITY_LEVELS),
+            (&crate::model_router::RISK_AXIS, ROUTING_RISK_LEVELS),
+        ] {
+            let criteria = options(axis);
+            for (token, level) in axis.tokens.iter().zip(levels) {
+                assert_eq!(criteria[*token].as_deref(), Some(level), "{}/{token}", axis.name);
+            }
+        }
+    }
+
+    /// The seat asks whole questions of its state (t-10010): every key the
+    /// state carries, and every count under `signals`, is named in backticks
+    /// by a question — where version 1 asked fragments of the chat probe's
+    /// prompt that named nothing the state held.
+    #[test]
+    fn the_seats_questions_name_every_key_of_its_state() {
+        let asked: Vec<&str> = step_questions()
+            .values()
+            .map(|question| question.instructions.as_str())
+            .collect();
+        let asked = asked.join("\n");
+        for key in STEP_STATE_KEYS.iter().chain(&STEP_SIGNAL_KEYS) {
+            assert!(asked.contains(&format!("`{key}`")), "no question names `{key}`:\n{asked}");
+        }
+    }
+
+    /// The step's counts are fields of the state (t-10010), not a line after
+    /// the turn's words: the door cuts the words by their own pointer, and a
+    /// turn past the cap keeps its counts.
+    #[test]
+    fn the_state_carries_the_turns_words_and_the_steps_counts_as_fields() {
+        let counts = signals(StepBatch::ReadOnly, 2, 1, false, 3);
+        let state = step_state("fix the parser", 5, &counts);
+        assert_eq!(
+            state,
+            serde_json::json!({
+                "task": "fix the parser",
+                "step": 5,
+                "signals": { "batch": "read_only", "repeats": 2, "errors_in_a_row": 1, "check_red": false },
+            })
+        );
+        let mut keys: Vec<&str> = state
+            .as_object()
+            .map(|fields| fields.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        keys.sort_unstable();
+        let mut expected = STEP_STATE_KEYS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
     }
 }

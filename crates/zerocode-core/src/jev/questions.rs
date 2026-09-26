@@ -60,6 +60,36 @@ pub const CLAIM_RUBRIC_VERSION: u32 = 1;
 /// (`the_version_is_pinned_to_the_words`, t-9469; the tools crate only asks
 /// them).
 pub const FILE_PICK_RUBRIC_VERSION: u32 = 1;
+/// zo's step effort seat ([`crate::jev::ZO_STEP_EFFORT`]): the band of a
+/// step inside the turn. Its words are zo's
+/// `runtime::conversation::step_effort` — the router's three judged axes
+/// asked as Choices, complexity's and risk's options in the routing seat's
+/// own levels ([`ROUTING_COMPLEXITY_LEVELS`], [`ROUTING_RISK_LEVELS`]) — and
+/// are pinned there (`the_step_version_is_pinned_to_its_words`, t-10010).
+///
+/// Version 1 was never written on a row: every row the seat wrote before
+/// names none. It asked the chat probe's rubric as three Choices over one
+/// string — the turn's words with a line of the step's counts after them,
+/// which the door's cut of a long turn took — with two of complexity's four
+/// options described and none of risk's, and each question a fragment of
+/// the probe's prompt that named nothing the state held. Version 2 sends
+/// the counts as fields, describes every option, and asks whole questions
+/// that name the state's keys.
+pub const ZO_STEP_EFFORT_RUBRIC_VERSION: u32 = 2;
+
+/// The keys both skills seats' state carries (t-10010): the task, and the
+/// skills — the explicit search's shard, or the suggestion's whole catalog
+/// — each by its name and its description. Spelled once for the two seats,
+/// which are cut at one door (`SKILL_SENDS`).
+pub const SKILL_STATE_KEYS: [&str; 2] = ["task", "skills"];
+pub const SKILL_ENTRY_KEYS: [&str; 2] = ["name", "description"];
+/// The suggestion's narrow request: its shortlist, and the head of each
+/// shortlisted skill's instructions, carried beside [`SKILL_ENTRY_KEYS`].
+pub const SKILL_SHORTLIST_KEY: &str = "candidates";
+pub const SKILL_EXCERPT_KEY: &str = "excerpt";
+/// What choosing a skill means in either suggestion request: loading the
+/// skill at `{at}` — its place in the state — which `{name}` names.
+pub const SKILL_OPTION: &str = "Load `{at}`, {name}.";
 
 /// Skill suggestion's two requests share these words and thresholds in its
 /// own row (`SKILL_SUGGESTION`, t-6877). A changed question starts a new
@@ -778,10 +808,34 @@ mod tests {
         assert_eq!(words, ["continue", "pause", "replan"]);
     }
 
+    /// The suggestion's words, keys and option template are one rubric
+    /// (t-10010): a word changed without a version is red, and every
+    /// question names the keys it reads — the task, the catalog or the
+    /// shortlist, and the fields of an entry.
     #[test]
     fn skill_suggestion_version_names_its_exact_words() {
-        assert_eq!(SKILL_SUGGESTION_RUBRIC_VERSION, 2);
-        assert_eq!(skill_suggestion_rubric_fingerprint(), "1f1d6512b02817de");
+        assert_eq!(SKILL_SUGGESTION_RUBRIC_VERSION, 3);
+        assert_eq!(skill_suggestion_rubric_fingerprint(), "0000000000000000");
+        let named = |question: &str, keys: &[&str]| {
+            for key in keys {
+                assert!(question.contains(&format!("`{key}`")), "{key}: {question}");
+            }
+        };
+        named(SKILL_WIDE_QUESTION, &SKILL_STATE_KEYS);
+        named(SKILL_WIDE_QUESTION, &SKILL_ENTRY_KEYS);
+        named(
+            SKILL_NARROW_QUESTION,
+            &[SKILL_STATE_KEYS[0], SKILL_SHORTLIST_KEY, SKILL_EXCERPT_KEY],
+        );
+        named(SKILL_NARROW_QUESTION, &SKILL_ENTRY_KEYS);
+        for gate in [
+            SKILL_ACTS_ON_SYSTEM,
+            SKILL_FOLLOWS_PROCEDURE,
+            SKILL_PROSE_SUFFICES,
+            SKILL_FITS,
+        ] {
+            named(gate, &[SKILL_STATE_KEYS[0]]);
+        }
     }
 
     #[test]

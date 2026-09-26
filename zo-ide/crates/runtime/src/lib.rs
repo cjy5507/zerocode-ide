@@ -143,11 +143,12 @@ pub use config::{
 };
 pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{
-    decide_step_effort, shift_step_effort, EffortStep, RungMove, StepAsk, StepAskContext,
-    StepBatch, StepDecision, StepEffortConfig, StepEffortObserver, StepEffortSeat, StepEvent,
-    StepJudgment, StepJudgmentRow, StepLabel, StepMove, StepReason, StepRow, StepSignals,
-    LABEL_ROW_KIND, NO_IN_TURN_ROAD, ROUTINE_STEPS_FOR_LIGHTER, STEP_JUDGMENT_EVERY,
-    STEP_ROW_KIND, STRONG_STEPS_FOR_HEAVIER,
+    decide_step_effort, shift_step_effort, step_questions, step_request, step_state, EffortStep,
+    RungMove, StepAsk, StepAskContext, StepBatch, StepDecision, StepEffortConfig,
+    StepEffortObserver, StepEffortSeat, StepEvent, StepJudgment, StepJudgmentRow, StepLabel,
+    StepMove, StepReason, StepRow, StepSignals, LABEL_ROW_KIND, NO_IN_TURN_ROAD,
+    ROUTINE_STEPS_FOR_LIGHTER, STEP_JUDGMENT_EVERY, STEP_ROW_KIND, STEP_RUBRIC_VERSION,
+    STRONG_STEPS_FOR_HEAVIER,
 };
 pub use conversation::{
     build_design_guidance_reminder, DESIGN_GUIDANCE_REMINDER_PREFIX, PRELUDE_FANNED_OUT_REMINDER,
