@@ -36,6 +36,17 @@ impl<T: Clone + Send + 'static> ScanCell<T> {
         self.held.lock().ok().and_then(|held| held.clone())
     }
 
+    /// Reads the held answer where it lies, without the copy [`Self::held`]
+    /// makes — for a reader that wants a few facts of a ledger thousands of
+    /// sessions long, on a beat (a task's cost asks when the scan was read on
+    /// every one, t-9470).
+    pub fn with_held<R>(&self, read: impl FnOnce(&T) -> R) -> Option<R> {
+        self.held
+            .lock()
+            .ok()
+            .and_then(|held| held.as_ref().map(read))
+    }
+
     /// Whether a scan is running right now.
     #[must_use]
     pub fn running(&self) -> bool {
@@ -113,6 +124,23 @@ mod tests {
         }
         assert_eq!(CELL.held(), Some(7));
         assert!(!CELL.running(), "the in-flight flag outlived the walk");
+    }
+
+    static READ: ScanCell<String> = ScanCell::new();
+
+    /// The held answer is read where it lies — nothing before a walk has
+    /// finished, the walk's answer after.
+    #[test]
+    fn the_held_answer_is_read_where_it_lies() {
+        assert_eq!(READ.with_held(String::len), None);
+        assert!(READ.start(|| "seven".to_string()));
+        for _ in 0..100 {
+            if READ.with_held(String::len).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(READ.with_held(String::len), Some(5));
     }
 
     static PANICS: ScanCell<u32> = ScanCell::new();

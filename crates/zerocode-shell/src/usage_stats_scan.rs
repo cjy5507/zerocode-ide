@@ -180,6 +180,11 @@ pub fn held() -> Option<Scan> {
     CLAUDE.held()
 }
 
+/// The held scan, read where it lies ([`ScanCell::with_held`]).
+pub fn with_held<R>(read: impl FnOnce(&Scan) -> R) -> Option<R> {
+    CLAUDE.with_held(read)
+}
+
 /// Whether a scan is running right now.
 #[must_use]
 pub fn scanning() -> bool {
@@ -294,6 +299,11 @@ static CODEX: ScanCell<CodexScan> = ScanCell::new();
 #[must_use]
 pub fn codex_held() -> Option<CodexScan> {
     CODEX.held()
+}
+
+/// The held Codex scan, read where it lies ([`ScanCell::with_held`]).
+pub fn with_codex_held<R>(read: impl FnOnce(&CodexScan) -> R) -> Option<R> {
+    CODEX.with_held(read)
 }
 
 /// Whether a Codex scan is running right now.

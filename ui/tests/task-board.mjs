@@ -35,8 +35,24 @@ export function taskBoardFixture() {
     })] },
     { bucket: "idle", cards: [card("term:105", "이전 작업", "idle")] },
   ];
-  window.__PANES__ = [];
-  window.__LEDGER__ = [];
+  /* The finished task's pane, as `pane_agents` answers for it, and its worker
+   * row as the board's beat hands it over: the row lands on that pane's card,
+   * carrying its task's cost laid on from the window's cost book (t-9470). */
+  window.__PANES__ = [{ term: 104, agent: "codex", state: "done", ledger: "active" }];
+  window.__LEDGER__ = [{
+    run: "run-board", worker: "w-104", agent: "codex", state: "working", ledger: "active",
+    hearing: "heard", hearing_at: now - 60_000, checkout: "", task: "관리자 화면 구현", task_id: "t-104",
+    reported: true, dispatch_id: "dp-104", dispatch_started_ms: now - 3_600_000, retry_of: null,
+    review: { verified: false, merged: false, deployed: false, written: false },
+    term: 104, at: now - 3_600_000, model: "gpt-6-astra", effort: "max", pane: "%4", asking: false,
+    wall: null, quiet_at: null, pane_missing_since_ms: null,
+    cost: {
+      attempts: 2, wallMs: 3 * 3_600_000 + 12 * 60_000,
+      generation: { sessionsKnown: 2, sessionsLinked: 2, inputTokens: 40_000, outputTokens: 60_000,
+        cacheReadTokens: 1_100_000, cacheWriteTokens: 100_000, usd: 4.2, usdReason: null },
+      jev: { requests: 7, stampedSeats: 4, unstampedSeats: 23, inputTokens: null },
+    },
+  }];
   paneActivities.set("term:102", [{ at: now - 30_000, activity: { verb: "edit", target: "db/queries.sql", phase: "started" } }]);
   paneActivities.set("term:103", [{ at: now - 15_000, activity: { verb: "bash", target: "npm run test:window", phase: "started" } }]);
   paneModels.set(102, "gpt-6-astra");
@@ -103,6 +119,54 @@ export async function testTaskBoard(browser, origin, ok) {
     ok("grouping requires real lineage or a scoped dispatch; handles cycles and live children of ended parents",
       grouping.count === 8 && grouping.dispatch === "1,1,2" && grouping.live === "working" &&
       grouping.liveMembers === 2 && grouping.title === "요청에서 작업 이름을 읽는다", JSON.stringify(grouping));
+
+    /* ---- 과업이 든 비용 (t-9470): 끝난 과업의 카드에 한 줄, 움직이는 과업에는 없다 ---- */
+    const readCost = () => page.evaluate(() => [...document.querySelectorAll("#board-view .task-board-row")].map((row) => {
+      const line = row.querySelector(".task-board-cost");
+      return { title: row.querySelector(".task-board-title").textContent,
+        cost: line && !line.hidden ? line.textContent : "", tip: line?.dataset.tip ?? "" };
+    }));
+    const costs = await readCost();
+    const finished = costs.find((row) => row.title === "관리자 화면 구현");
+    ok("a finished task's card says what it cost, from the worker row the board's beat laid it on",
+      finished?.cost === "시도 2 · 3시간 12분(대기 포함) · 생성 1.3M 토큰 · $4.20 · Jev 요청 7" &&
+      finished.tip.includes("마지막 세션 기준 합 · 이은 세션 2/2") && finished.tip.includes("API 환산가"),
+      JSON.stringify(costs));
+    ok("a task still moving carries no cost line",
+      costs.filter((row) => row.title !== "관리자 화면 구현").every((row) => row.cost === ""), JSON.stringify(costs));
+    const costWrites = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const where = (record) => (record.target.nodeType === 1 ? record.target : record.target.parentElement);
+      const seen = [];
+      const watch = new MutationObserver((batch) => seen.push(...batch));
+      // A paint reads the ledger rows through the one shared read; one already
+      // in flight answers with the rows it left with.
+      const settled = async () => {
+        while (ledgerAgentsPending) await ledgerAgentsPending.catch(() => {});
+        await paintBoardView();
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        seen.push(...watch.takeRecords());
+        const onCost = seen.filter((record) => where(record)?.classList?.contains("task-board-cost")).length;
+        seen.length = 0;
+        return onCost;
+      };
+      await settled();
+      watch.observe(view, { subtree: true, childList: true, attributes: true, characterData: true });
+      const quiet = await settled();
+      const row = window.__LEDGER__[0];
+      window.__LEDGER__ = [{ ...row, cost: { ...row.cost, generation: { ...row.cost.generation, usd: null,
+        usdReason: "unscanned" } } }];
+      const moved = await settled();
+      watch.disconnect();
+      const line = view.querySelector(".task-board-row .task-board-cost:not([hidden])");
+      const text = line?.textContent ?? "";
+      window.__LEDGER__ = [row];
+      await settled();
+      return { quiet, moved, text };
+    });
+    ok("a quiet repaint leaves the cost line alone, and a cost that moved rewrites it",
+      costWrites.quiet === 0 && costWrites.moved > 0 &&
+      costWrites.text.includes("$— 끝난 뒤 읽은 사용량 스캔 없음 — 통계에서 읽으면 채워짐"), JSON.stringify(costWrites));
 
     await page.click('[data-task-filter="attention"]');
     ok("attention filter shows the actionable task", await page.locator(".task-board-row").count() === 1);

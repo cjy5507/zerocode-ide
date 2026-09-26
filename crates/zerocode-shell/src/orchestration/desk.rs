@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
+use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
     Delivery, Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom, worktree_room,
 };
@@ -39,6 +40,20 @@ pub(crate) struct DeskSnapshot {
     /// The desk's numbers, counted here once: the screen draws them and never
     /// counts letters again (t-9456).
     pub(crate) counts: DeskCounts,
+    /// The batches a coordinator holds open whose notices have all folded
+    /// ([`NewsTable::folded_ack`], t-9548): the folded count offers each
+    /// one's acknowledgement, since no line of news stands to offer it.
+    pub(crate) folded_batches: Vec<DeskBatch>,
+}
+
+/// A batch a coordinator holds open — what an acknowledgement names — and
+/// how many letters it holds, the ledger acknowledging a batch, never one
+/// letter of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DeskBatch {
+    pub(crate) run: String,
+    pub(crate) delivery_id: String,
+    pub(crate) batch: usize,
 }
 
 /// The desk's three numbers (t-9456).
@@ -116,6 +131,13 @@ struct NewsTable {
     /// seven-hour gap. What is older is history, and `inbox` reads history.
     stands_ms: i64,
     kinds: [(MessageKind, NewsLine); 6],
+    /// Where a folded notice can still be acknowledged from the desk: in the
+    /// batch its coordinator holds open, handed over and not acknowledged
+    /// (t-9548) — the folded count then offers that whole batch, as a line
+    /// in it would. A notice not yet handed over offers nothing (the window
+    /// taking it would leave its coordinator never reading it), and one
+    /// acknowledged is owed nothing.
+    folded_ack: &'static str,
 }
 
 /// How many lines one kind of notice earns.
@@ -143,6 +165,7 @@ const DESK_NEWS: NewsTable = NewsTable {
         (MessageKind::ClassifierDeclined, NewsLine::PerNotice),
         (MessageKind::ModelDeviated, NewsLine::PerNotice),
     ],
+    folded_ack: "delivered",
 };
 
 impl NewsTable {
@@ -205,6 +228,9 @@ pub(crate) struct DeskLetters {
     pub(crate) news: Vec<DeskMail>,
     /// The notices owed an acknowledgement that no line stands for.
     pub(crate) folded: usize,
+    /// The open batch holding folded notices when no line stands in it
+    /// ([`NewsTable::folded_ack`]).
+    pub(crate) folded_batch: Option<DeskBatch>,
 }
 
 /// What the coordinator of `run` owes at `now_ms`.
@@ -213,6 +239,7 @@ pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
     let inbox = InboxState::of(run, &address);
     let mut owed = DeskLetters::default();
     let mut episodes: HashMap<&str, usize> = HashMap::new();
+    let mut folded_in_open = false;
     for message in run.messages().iter().filter(|one| one.to == address) {
         if run.awaits_answer(message) {
             if run.question_is_answerable(message).is_ok() {
@@ -230,25 +257,68 @@ pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
             && (line == NewsLine::PerNotice || run.quiet_notice_stands(message));
         if !stands {
             owed.folded += 1;
+            folded_in_open |= inbox.delivery(&message.id) == DESK_NEWS.folded_ack;
             continue;
         }
         let row = mail_row(run, message, &inbox);
         match (line, message.dispatch.as_deref()) {
             (NewsLine::PerEpisode, Some(attempt)) => match episodes.get(attempt) {
                 Some(&at) => {
+                    let id = owed.news[at].id.clone();
                     let notices = owed.news[at].notices + 1;
-                    owed.news[at] = DeskMail { notices, ..row };
+                    owed.news[at] = DeskMail { id, notices, ..row };
                 }
                 None => {
                     episodes.insert(attempt, owed.news.len());
-                    owed.news.push(row);
+                    owed.news.push(DeskMail {
+                        id: episode_line_id(attempt, message),
+                        ..row
+                    });
                 }
             },
             _ => owed.news.push(row),
         }
     }
     owed.news.sort_by_key(|line| line.created_ms);
+    // Folded notices in the batch the coordinator holds open are offered
+    // beside the folded count — where no line of news stands in that batch to
+    // offer it already (a question in it offers its answer, not the batch).
+    if folded_in_open
+        && let Some(batch) = inbox.batch
+        && !owed
+            .news
+            .iter()
+            .any(|line| line.delivery_id.as_deref() == Some(batch.id.as_str()))
+    {
+        owed.folded_batch = Some(DeskBatch {
+            run: run.id.clone(),
+            delivery_id: batch.id.clone(),
+            batch: batch.messages.len(),
+        });
+    }
     owed
+}
+
+/// The key the ledger's quiet notices carry the moment their silence began
+/// under — the same on every notice of one episode.
+const EPISODE_STARTED: &str = "episodeStartedMs";
+
+/// A quiet episode's line is named by its attempt and the moment its silence
+/// began, so it keeps its name while the ledger tells the silence again
+/// every few minutes, and an early notice acknowledged does not rename it
+/// (t-9548). A notice written before the moment was recorded names the line
+/// by itself.
+fn episode_line_id(attempt: &str, notice: &Message) -> String {
+    serde_json::from_str::<serde_json::Value>(notice.body.as_str())
+        .ok()
+        .and_then(|body| {
+            body.get(EPISODE_STARTED)
+                .and_then(serde_json::Value::as_i64)
+        })
+        .map_or_else(
+            || notice.id.clone(),
+            |started| format!("{attempt}@{started}"),
+        )
 }
 
 fn mail_row(run: &Run, message: &Message, inbox: &InboxState) -> DeskMail {
@@ -322,6 +392,9 @@ pub(crate) struct DeskTask {
     /// Its dependencies that failed (`Run::blocked_by`).
     pub(crate) blocked_by: Vec<String>,
     pub(crate) created_ms: i64,
+    /// What the task cost, for a finished one ([`finished`], t-9470) —
+    /// `None` while it is still moving.
+    pub(crate) cost: Option<TaskCost>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -355,6 +428,10 @@ pub(crate) const STAGES: [&str; 8] = [
 /// the ledger hands work out in. The rest are endings, listed newest first.
 const OPEN_STAGES: [&str; 5] = ["pending", "ready", "dispatched", "gate", "blocked"];
 
+/// The stages a finished task stands in — reported, merged — the ones whose
+/// rows carry the task's cost (t-9470).
+const FINISHED_STAGES: [&str; 2] = ["reported", "merged"];
+
 /// The most rows one stage carries across the wire. Its count carries the
 /// rest: a run of two hundred finished tasks is two hundred numbers nobody
 /// reads one by one, and the newest two dozen are what a coordinator checks.
@@ -382,6 +459,11 @@ fn stage_of(run: &Run, task: &Task) -> &'static str {
     }
 }
 
+/// Whether a task is finished: reported, or merged ([`FINISHED_STAGES`]).
+pub(crate) fn finished(run: &Run, task: &Task) -> bool {
+    FINISHED_STAGES.contains(&stage_of(run, task))
+}
+
 /// Whether a run is in play: somebody is coordinating it, or somebody is
 /// still working for it. A finished run with nobody at it is history.
 fn in_play(run: &Run) -> bool {
@@ -393,19 +475,26 @@ fn in_play(run: &Run) -> bool {
 }
 
 /// The desk's reading of `ledger`. `holds_seat` answers whether this window
-/// holds a coordinator seat named `team/pane`.
-pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) -> DeskSnapshot {
+/// holds a coordinator seat named `team/pane`; `cost` what a finished task
+/// cost, asked only of the rows the desk carries.
+pub(crate) fn desk_snapshot(
+    ledger: &Ledger,
+    holds_seat: impl Fn(&str) -> bool,
+    mut cost: impl FnMut(&Run, &Task) -> TaskCost,
+) -> DeskSnapshot {
     let now_ms = crate::now_epoch_ms();
     let mut runs = Vec::new();
-    let mut staged: Vec<(&'static str, DeskTask)> = Vec::new();
+    let mut staged: Vec<(&Run, &Task, DeskTask)> = Vec::new();
     let mut mail = Vec::new();
     let mut news = Vec::new();
     let mut folded = 0;
+    let mut folded_batches = Vec::new();
     for run in ledger.runs().iter().filter(|run| in_play(run)) {
         let owed = desk_letters(run, now_ms);
         mail.extend(owed.mail);
         news.extend(owed.news);
         folded += owed.folded;
+        folded_batches.extend(owed.folded_batch);
         runs.push(DeskRun {
             run: run.id.clone(),
             name: run.name.clone(),
@@ -416,7 +505,8 @@ pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) 
         for task in &run.tasks {
             let stage = stage_of(run, task);
             staged.push((
-                stage,
+                run,
+                task,
                 DeskTask {
                     run: run.id.clone(),
                     id: task.id.clone(),
@@ -428,6 +518,7 @@ pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) 
                     }),
                     blocked_by: run.blocked_by(task),
                     created_ms: task.created_ms,
+                    cost: None,
                 },
             ));
         }
@@ -435,22 +526,27 @@ pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) 
     let mut stages = Vec::with_capacity(STAGES.len());
     let mut tasks = Vec::new();
     for stage in STAGES {
-        let mut rows: Vec<DeskTask> = staged
+        let mut rows: Vec<&(&Run, &Task, DeskTask)> = staged
             .iter()
-            .filter(|(held, _)| *held == stage)
-            .map(|(_, task)| task.clone())
+            .filter(|(_, _, row)| row.stage == stage)
             .collect();
         stages.push(StageCount {
             stage,
             count: rows.len(),
         });
         if OPEN_STAGES.contains(&stage) {
-            rows.sort_by_key(|task| task.created_ms);
+            rows.sort_by_key(|(_, _, row)| row.created_ms);
         } else {
-            rows.sort_by_key(|task| std::cmp::Reverse(task.created_ms));
+            rows.sort_by_key(|(_, _, row)| std::cmp::Reverse(row.created_ms));
         }
         rows.truncate(STAGE_ROWS);
-        tasks.extend(rows);
+        // A finished task's cost, asked of the rows the desk sends and no
+        // other — a stage of two hundred is two dozen rows and a count.
+        let finished = FINISHED_STAGES.contains(&stage);
+        tasks.extend(rows.into_iter().map(|(run, task, row)| DeskTask {
+            cost: finished.then(|| cost(run, task)),
+            ..row.clone()
+        }));
     }
     mail.sort_by_key(|letter| letter.created_ms);
     news.sort_by_key(|line| line.created_ms);
@@ -465,6 +561,7 @@ pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) 
         },
         mail,
         news,
+        folded_batches,
     }
 }
 
@@ -666,6 +763,36 @@ pub(crate) fn machine_load(ledger_volume: &Path) -> MachineLoad {
     }
 }
 
+/// The person's ledger store as it stands, read into a projection: its
+/// snapshot is taken into a scratch file, and only that copy grows the
+/// columns this build reads that an older window's store may not have yet —
+/// the same additive step the window's own open takes. The store itself is
+/// only ever read. For the measurements over the ledger that already
+/// happened (the desk's, t-9456; the costs', t-9470).
+#[cfg(test)]
+pub(crate) fn projection_at_rest(store: &str) -> zerocode_core::orchestration::LedgerProjectionV1 {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let copy = scratch.path().join("authority.sqlite");
+    rusqlite::Connection::open_with_flags(
+        store,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("the store opens read-only")
+    .execute("VACUUM INTO ?1", [copy.display().to_string()])
+    .expect("a snapshot of the store");
+    let connection = rusqlite::Connection::open(&copy).expect("the snapshot opens");
+    zerocode_orchestrator::ledger_store::ensure_ledger_columns(&connection)
+        .expect("the snapshot grows this build's columns");
+    zerocode_orchestrator::ledger_store::read(
+        &connection,
+        "main-ledger",
+        zerocode_core::orchestration::PROJECTION_SCHEMA,
+    )
+    .expect("the store reads")
+    .expect("the store holds the main ledger")
+    .projection
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,10 +805,16 @@ mod tests {
     /// beat below tells the coordinator once more.
     const REMINDED_MS: i64 = 300_000;
 
+    /// A cost nobody asked about — for the tests that read the rest.
+    fn no_cost(_: &Run, _: &Task) -> TaskCost {
+        TaskCost::default()
+    }
+
     /// The desk as the window serializes it. The red tests below read the
     /// JSON the screen reads, so they speak to any shape of the snapshot.
     fn desk_json(ledger: &Ledger) -> serde_json::Value {
-        serde_json::to_value(desk_snapshot(ledger, |_| false)).expect("the desk serializes")
+        serde_json::to_value(desk_snapshot(ledger, |_| false, no_cost))
+            .expect("the desk serializes")
     }
 
     /// Every letter the desk draws, in either of its lists.
@@ -1013,6 +1146,222 @@ mod tests {
         );
     }
 
+    /// One quiet episode is one line with one name (t-9548): the ledger tells
+    /// the silence again every five minutes, and the line keeps the name its
+    /// silence began with — never the newest notice's id, which moved every
+    /// reminder and made the screen draw a new line each time.
+    #[test]
+    fn an_episode_line_keeps_its_name_while_the_silence_is_told_again() {
+        let start = crate::now_epoch_ms() - 3 * HOUR_MS;
+        let mut ledger = Ledger::new();
+        let (run_id, worker) = a_worker_carrying_a_task(&mut ledger, start);
+        let mut names = Vec::new();
+        for beat in 0..3 {
+            assert_eq!(
+                ledger.workers_stalled(
+                    &[(worker.clone(), start + 10)],
+                    start + 200_000 + beat * REMINDED_MS
+                ),
+                1
+            );
+            let desk = desk_json(&ledger);
+            let quiet: Vec<serde_json::Value> = drawn(&desk)
+                .into_iter()
+                .filter(|one| one["kind"] == "went_quiet")
+                .collect();
+            assert_eq!(quiet.len(), 1, "{desk}");
+            names.push(quiet[0]["id"].as_str().unwrap_or_default().to_string());
+        }
+        assert!(
+            names.windows(2).all(|pair| pair[0] == pair[1]) && !names[0].is_empty(),
+            "the line was renamed by a reminder: {names:?}"
+        );
+        let newest = ledger
+            .run(&run_id)
+            .expect("the run")
+            .messages()
+            .iter()
+            .rev()
+            .find(|one| one.kind == MessageKind::WentQuiet)
+            .map(|one| one.id.clone())
+            .expect("a notice");
+        assert_ne!(names[0], newest, "the line wears the newest notice's id");
+    }
+
+    /// Notices that have all folded, in a batch their coordinator holds open,
+    /// are offered for acknowledgement beside the folded count (t-9548) — the
+    /// one batch, whole, as a line in it would offer it. A folded notice not
+    /// yet handed over offers nothing, an acknowledged one is not owed at
+    /// all, and a batch a line still stands in is that line's to offer.
+    #[test]
+    fn folded_notices_in_the_open_batch_offer_that_batch_and_no_other_folds_do() {
+        let now = crate::now_epoch_ms();
+        let mut ledger = Ledger::new();
+        let (run_id, _) = a_worker_carrying_a_task(&mut ledger, now - 30 * HOUR_MS);
+        let notice = |ledger: &mut Ledger, at: i64| {
+            ledger
+                .post(
+                    &run_id,
+                    a_notice(&run_id, MessageKind::WorkerDied, r#"{"workerId":"w-gone"}"#),
+                    at,
+                )
+                .expect("a notice")
+        };
+        let old_a = notice(&mut ledger, now - 27 * HOUR_MS);
+        let old_b = notice(&mut ledger, now - 26 * HOUR_MS);
+        let address = format!("run:{run_id}");
+        let handed = |ledger: &Ledger, batch: &[&String]| {
+            let mut projected = ledger.export();
+            let inbox = projected
+                .inboxes
+                .iter_mut()
+                .find(|row| row.run == run_id && row.address == address)
+                .expect("the run's inbox");
+            inbox.pending.retain(|id| !batch.contains(&id));
+            inbox.open = Some(Delivery {
+                id: "d-folded".into(),
+                messages: batch.iter().map(|id| (*id).clone()).collect(),
+                holder: None,
+                opened_ms: None,
+            });
+            Ledger::rebuild(projected).expect("a batch handed over")
+        };
+
+        let unread = desk_snapshot(&ledger, |_| true, no_cost);
+        assert_eq!(unread.counts.folded, 2);
+        assert!(
+            unread.folded_batches.is_empty(),
+            "a notice nobody was handed is offered: {:?}",
+            unread.folded_batches
+        );
+
+        let held = desk_snapshot(&handed(&ledger, &[&old_a, &old_b]), |_| true, no_cost);
+        assert_eq!(held.counts.folded, 2);
+        assert!(held.news.is_empty(), "{:?}", held.news);
+        assert_eq!(
+            held.folded_batches,
+            vec![DeskBatch {
+                run: run_id.clone(),
+                delivery_id: "d-folded".into(),
+                batch: 2,
+            }]
+        );
+
+        let question = ledger
+            .post(
+                &run_id,
+                Draft {
+                    from: "pane:team-news/%9".into(),
+                    to: address.clone(),
+                    kind: MessageKind::Question,
+                    body: "main에 올릴까요?".into(),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: None,
+                    dispatch: None,
+                },
+                now - 2 * HOUR_MS,
+            )
+            .expect("a question");
+        let asked = desk_snapshot(
+            &handed(&ledger, &[&old_a, &old_b, &question]),
+            |_| true,
+            no_cost,
+        );
+        assert_eq!(asked.mail.len(), 1, "{:?}", asked.mail);
+        assert_eq!(
+            asked.folded_batches.len(),
+            1,
+            "a question in the batch offers its answer, not the batch: {:?}",
+            asked.folded_batches
+        );
+
+        let fresh = notice(&mut ledger, now - HOUR_MS);
+        let standing = desk_snapshot(
+            &handed(&ledger, &[&old_a, &old_b, &question, &fresh]),
+            |_| true,
+            no_cost,
+        );
+        assert_eq!(standing.news.len(), 1, "{:?}", standing.news);
+        assert_eq!(standing.news[0].delivery_id.as_deref(), Some("d-folded"));
+        assert!(
+            standing.folded_batches.is_empty(),
+            "the batch is offered twice: {:?}",
+            standing.folded_batches
+        );
+    }
+
+    /// A finished task's row carries its cost and a moving one's none, and
+    /// the cost is asked only of the rows the desk sends — a stage of thirty
+    /// finished tasks is worked out twenty-four times, not thirty.
+    #[test]
+    fn a_finished_row_carries_its_cost_and_only_the_rows_the_desk_sends_are_costed() {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("costed", 1);
+        ledger
+            .start_worker(&run, "claude", ("team-costed", "%2"), None, 2)
+            .expect("somebody is at it");
+        let finished_count = STAGE_ROWS as i64 + 6;
+        for at in 0..finished_count + 3 {
+            let id = ledger
+                .create_task(&run, "x".into(), format!("t{at}"), vec![], None, 100 + at)
+                .expect("a task");
+            if at < finished_count {
+                ledger
+                    .update_task(
+                        &run,
+                        &id,
+                        Some(TaskStatus::Completed),
+                        None,
+                        ResultAuthor::Ledger,
+                    )
+                    .expect("done");
+            }
+        }
+        let mut asked = Vec::new();
+        let desk = desk_snapshot(
+            &ledger,
+            |_| false,
+            |_, task| {
+                asked.push(task.id.clone());
+                TaskCost {
+                    attempts: 7,
+                    ..TaskCost::default()
+                }
+            },
+        );
+        assert_eq!(
+            asked.len(),
+            STAGE_ROWS,
+            "the cost was asked of rows the desk does not send"
+        );
+        for row in &desk.tasks {
+            let attempts = row.cost.as_ref().map(|one| one.attempts);
+            if FINISHED_STAGES.contains(&row.stage) {
+                assert_eq!(attempts, Some(7), "{row:?}");
+            } else {
+                assert_eq!(attempts, None, "{row:?}");
+            }
+        }
+        let said = serde_json::to_value(&desk).expect("the desk serializes");
+        let costed = said["tasks"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|one| one["stage"] == "reported"))
+            .expect("a reported row");
+        assert_eq!(costed["cost"]["attempts"], 7, "{costed}");
+        assert!(
+            costed["cost"]["generation"]["sessionsKnown"].is_u64(),
+            "{costed}"
+        );
+        let moving = said["tasks"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|one| one["stage"] == "ready"))
+            .expect("a ready row");
+        assert!(moving["cost"].is_null(), "{moving}");
+    }
+
     #[test]
     fn a_question_the_ledger_would_refuse_to_answer_is_not_owed_on_the_desk() {
         let mut ledger = Ledger::new();
@@ -1294,7 +1643,7 @@ mod tests {
             .create_task(&finished, "old".into(), "old".into(), vec![], None, 3)
             .expect("an old task");
 
-        let desk = desk_snapshot(&ledger, |_| false);
+        let desk = desk_snapshot(&ledger, |_| false, no_cost);
         assert_eq!(desk.runs.len(), 1, "{:?}", desk.runs);
         assert!(!desk.runs[0].seat, "a seat this window does not hold");
         let stage = |id: &str| {
@@ -1381,7 +1730,7 @@ mod tests {
                 )
                 .expect("done");
         }
-        let desk = desk_snapshot(&ledger, |_| true);
+        let desk = desk_snapshot(&ledger, |_| true, no_cost);
         let ready: Vec<&DeskTask> = desk
             .tasks
             .iter()
@@ -1442,30 +1791,7 @@ mod tests {
             .ok()
             .and_then(|said| said.parse().ok())
             .unwrap_or(i64::MAX);
-        /* The person's store is only ever read: its snapshot is taken into
-         * a scratch file, and only that copy grows the columns this build
-         * reads that an older window's store may not have yet — the same
-         * additive step the window's own open takes. */
-        let scratch = tempfile::tempdir().expect("a scratch directory");
-        let copy = scratch.path().join("authority.sqlite");
-        rusqlite::Connection::open_with_flags(
-            &store,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .expect("the store opens read-only")
-        .execute("VACUUM INTO ?1", [copy.display().to_string()])
-        .expect("a snapshot of the store");
-        let connection = rusqlite::Connection::open(&copy).expect("the snapshot opens");
-        zerocode_orchestrator::ledger_store::ensure_ledger_columns(&connection)
-            .expect("the snapshot grows this build's columns");
-        let mut projected = zerocode_orchestrator::ledger_store::read(
-            &connection,
-            "main-ledger",
-            zerocode_core::orchestration::PROJECTION_SCHEMA,
-        )
-        .expect("the store reads")
-        .expect("the store holds the main ledger")
-        .projection;
+        let mut projected = projection_at_rest(&store);
         let number = |id: &str| {
             id.rsplit_once('-')
                 .and_then(|(_, number)| number.parse::<u64>().ok())
@@ -1519,7 +1845,7 @@ mod tests {
         let mut took: Vec<u128> = (0..200)
             .map(|_| {
                 let from = std::time::Instant::now();
-                std::hint::black_box(desk_snapshot(&ledger, |_| false));
+                std::hint::black_box(desk_snapshot(&ledger, |_| false, no_cost));
                 from.elapsed().as_micros()
             })
             .collect();

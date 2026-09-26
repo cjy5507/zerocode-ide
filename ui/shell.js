@@ -6637,6 +6637,17 @@ function taskBoardTaskIdentity(entry) {
   return task && run ? JSON.stringify([run, task]) : null;
 }
 
+/* 끝난 과업이 든 비용 (t-9470): 그 과업을 든 워커 행이 들고 온 것 — 보드의 박자가 창의
+ * 비용 장부에서 얹는다(`cost_book`). 한 과업의 행은 모두 같은 과업의 비용을 드니 먼저 찾은
+ * 것이면 되고, 움직이는 과업의 행은 아무것도 들지 않는다. */
+function taskBoardCost(members, rows) {
+  for (const entry of members) {
+    const cost = rows?.get(entry.card.pane)?.cost;
+    if (cost && typeof cost === "object") return cost;
+  }
+  return null;
+}
+
 function taskBoardModel(model, previous = null, now = Date.now(), workspacePath = null) {
   const entries = new Map(model.agents.map((entry) => [entry.card.pane, entry]));
   const rootOf = (entry) => {
@@ -6716,6 +6727,7 @@ function taskBoardModel(model, previous = null, now = Date.now(), workspacePath 
     group.message = message ? agentGraphCleanText(message.card.said) : "";
     group.at = Math.max(0, ...group.members.map((entry) => Number(entry.card.at) || 0));
     group.when = group.at > 0 ? agoWord(group.at, now) : "";
+    group.cost = taskBoardCost(group.members, model.source?.ledger);
   }
   return { groups: ranked, counts: new Map(taskBoardSections().map(({ id }) =>
     [id, ranked.filter((group) => group.bucket === id).length])) };
@@ -6790,7 +6802,7 @@ function taskBoardRow(group, view) {
   action.type = "button";
   action.onclick = () => selectTaskBoardMember(view, row.__group.lead.key);
   foot.append(action);
-  row.append(main, members, message, foot);
+  row.append(main, members, message, taskBoardElement("p", "task-board-cost"), foot);
   return row;
 }
 
@@ -6834,6 +6846,11 @@ function updateTaskBoardRow(row, group, view) {
   writeHidden(message, !group.message || group.message === group.activity);
   writeTextContent(message.firstElementChild, t("board.tasks.message", "최근 메시지"));
   writeTextContent(message.lastElementChild, group.message);
+  const costLine = row.querySelector(".task-board-cost");
+  const cost = group.cost ? taskCostWords(group.cost) : null;
+  writeTextContent(costLine, cost?.text ?? "");
+  writeAttribute(costLine, "data-tip", cost?.tip ?? "");
+  writeHidden(costLine, cost === null);
   writeTextContent(row.querySelector(".task-board-when"), [
     group.members.length === 1 ? group.lead.facts.model : agentGraphCountWord("agent", group.members.length),
     group.when ? t("board.tasks.lastActivity", "마지막 활동 {{time}}", { time: group.when }) : "",
@@ -7414,6 +7431,9 @@ function agentGraphSaid(columns, reviews, places, now, ledger = null) {
     /* 그리고 지도가 원장 행에서 읽는 결과의 사실들 (t-7288). 카드는 `review`를
      * 싣지 않으므로, 여기 없으면 검토만 바뀐 판을 서명이 모른다. */
     results: agentGraphLiveResultsSaid(columns, places, ledger),
+    /* 그리고 과업 카드가 원장 행에서 읽는 비용 (t-9470). 카드는 비용을 싣지 않으므로,
+     * 여기 없으면 비용만 바뀐 판을 서명이 모른다. 끝난 과업의 행만 비용을 든다. */
+    costs: ledger ? [...ledger].filter(([, row]) => row?.cost).map(([pane, row]) => [pane, row.cost]) : [],
     following: agentGraphFollowing,
     draft: selectedDraft
       ? {

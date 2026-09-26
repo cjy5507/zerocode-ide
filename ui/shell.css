@@ -30044,6 +30044,7 @@ details.task-board-section > summary {
 
 .task-board-members[hidden],
 .task-board-message[hidden],
+.task-board-cost[hidden],
 .task-board-empty[hidden] { display: none; }
 
 .task-board-member {
@@ -30072,7 +30073,8 @@ details.task-board-section > summary {
 .task-board-member-work { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-board-member-status { flex: none; font-size: var(--text-2xs); }
 
-.task-board-message {
+.task-board-message,
+.task-board-cost {
   display: flex;
   gap: var(--space-3);
   margin: 0;
@@ -30194,7 +30196,7 @@ details.task-board-section > summary {
   .task-board-main { grid-template-columns: minmax(0, 1fr); padding-inline: var(--space-4); }
   .task-board-state { grid-column: 1; grid-row: 3; }
   .task-board-title { font-size: var(--text-md); }
-  .task-board-members, .task-board-message, .task-board-foot { padding-inline: var(--space-4); }
+  .task-board-members, .task-board-message, .task-board-cost, .task-board-foot { padding-inline: var(--space-4); }
 }
 
 /* ---- 코디네이터 데스크 (t-6588) --------------------------------------------
@@ -30497,6 +30499,12 @@ details.task-board-section > summary {
   margin: var(--space-2) 0 0;
 }
 
+/* The acknowledgement of a batch whose notices all folded stands beside the
+ * folded count (t-9548) — the letter's own door, a word's width away. */
+.board-desk-news-folded-ack {
+  margin-inline-start: var(--space-2);
+}
+
 .board-desk-letter-body[hidden],
 .board-desk-letter-act[hidden],
 .board-desk-letter-note[hidden],
@@ -30712,7 +30720,8 @@ details.task-board-section > summary {
   white-space: nowrap;
 }
 
-.board-desk-task-note {
+.board-desk-task-note,
+.board-desk-task-cost {
   grid-column: 2;
   color: var(--ink-label);
   overflow-wrap: anywhere;
@@ -30726,6 +30735,7 @@ details.task-board-section > summary {
 
 .board-desk-tasks[hidden],
 .board-desk-task-note[hidden],
+.board-desk-task-cost[hidden],
 .board-desk-more[hidden] {
   display: none;
 }
