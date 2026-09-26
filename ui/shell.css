@@ -41923,6 +41923,33 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   padding: 0;
   list-style: none;
 }
+/* The live reflex card's three lines (t-10221): a word and what stands. */
+.computer-live-reflex-lines {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-2) 0 0;
+  padding: 0 var(--space-4);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+.computer-live-reflex-lines dt {
+  color: var(--ink-label);
+}
+.computer-live-reflex-lines dd {
+  margin: 0;
+  color: var(--ink-mist);
+  overflow-wrap: anywhere;
+}
+/* Pressed or not, unpressable: `aria-disabled` so focus and the pointer
+   still reach the line that says why (the t-9532 handle's one look). */
+.settings-check > input[aria-disabled="true"],
+.settings-check:has(> input[aria-disabled="true"]) {
+  cursor: default;
+}
+.settings-check:has(> input[aria-disabled="true"]) > .settings-label {
+  color: var(--ink-disabled);
+}
 .computer-use-tcc-row {
   display: flex;
   flex-wrap: wrap;

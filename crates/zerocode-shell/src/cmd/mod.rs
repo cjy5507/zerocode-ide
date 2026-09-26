@@ -66,12 +66,12 @@ pub(crate) use browser::{
 };
 
 pub(crate) use fs::{
-    browse_dir, browse_places, browser_snapshot, computer_use_capabilities,
-    computer_use_permission_status, computer_use_tcc_row_action, file_version, fs_create,
-    fs_duplicate, fs_move, fs_open_default, fs_redo, fs_rename, fs_reveal, fs_trash, fs_undo,
-    image_diff, list_dir, open_computer_use_permission, open_download, orchestration_runtime_state,
-    path_kinds, paths_exist, read_image_file, read_text_file, render_mermaid,
-    reset_computer_use_permissions, resume_vault_session, reveal_vault_session,
+    browse_dir, browse_places, browser_snapshot, computer_live_reflex_check,
+    computer_use_capabilities, computer_use_permission_status, computer_use_tcc_row_action,
+    file_version, fs_create, fs_duplicate, fs_move, fs_open_default, fs_redo, fs_rename, fs_reveal,
+    fs_trash, fs_undo, image_diff, list_dir, open_computer_use_permission, open_download,
+    orchestration_runtime_state, path_kinds, paths_exist, read_image_file, read_text_file,
+    render_mermaid, reset_computer_use_permissions, resume_vault_session, reveal_vault_session,
     set_clipboard_image, show_download, vault_sessions, watch_files, write_text_file,
 };
 
@@ -221,9 +221,10 @@ pub(crate) use settings::{
     patch_workspace_board_items, patch_workspace_board_status, patch_workspace_creation_prefs,
     read_primary_selection, save_pane_layouts, save_stage_layouts, scm_tree_rows,
     set_agent_teams_mode, set_artifacts_retention_days, set_claude_autoswitch_mode,
-    set_computer_confirm, set_confirm_close_pinned, set_conversation_focus_view,
-    set_ctrl_tab_order_mode, set_default_task_source, set_diff_side_by_side, set_hidden_shortcuts,
-    set_hidden_task_sources, set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
+    set_computer_confirm, set_computer_live_reflex, set_confirm_close_pinned,
+    set_conversation_focus_view, set_ctrl_tab_order_mode, set_default_task_source,
+    set_diff_side_by_side, set_hidden_shortcuts, set_hidden_task_sources,
+    set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_keep_default_branch_awake, set_keybinding, set_panel_width,
     set_panel_widths, set_shortcut_visibility, set_sidebar_view,

@@ -5994,6 +5994,41 @@
           <p class="settings-hint" id="computer-guard-line"></p>
         </div>
 
+        <!-- The live reflex layer (t-10221): the switch the reflex door reads
+             (`computer_live_reflex`) and three lines under it — whether this
+             platform and helper read the kernel (`liveReflex.supported`),
+             whether both permissions are granted (the permission report's
+             own judgment) and whether a check with this helper passed. The
+             switch turns on only when all three stand; off always works. -->
+        <div class="settings-card" id="computer-live-reflex-card">
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="computerUse.liveReflex">실시간 반사 층</h3>
+            <p class="settings-subhead-desc" data-i18n="computerUse.liveReflexAbout">
+              게임처럼 빠른 화면에서, 에이전트가 반사 계획을 시작하면 헬퍼가 화면을 직접 보고 계획대로 누릅니다. 켜 두어도 계획이 시작될 때만 돕니다. 기본은 꺼짐입니다.
+            </p>
+          </div>
+          <label class="settings-check" for="computer-live-reflex">
+            <input type="checkbox" role="switch" id="computer-live-reflex"
+                   aria-describedby="computer-live-reflex-why" aria-disabled="true" />
+            <span class="settings-label" data-i18n="computerUse.liveReflexUse">실시간 반사 층 사용</span>
+          </label>
+          <dl class="computer-live-reflex-lines">
+            <dt data-i18n="computerUse.liveReflexSupport">지원</dt>
+            <dd id="computer-live-reflex-support"></dd>
+            <dt data-i18n="computerUse.liveReflexPermissions">권한</dt>
+            <dd id="computer-live-reflex-permissions"></dd>
+            <dt data-i18n="computerUse.liveReflexCheck">점검</dt>
+            <dd id="computer-live-reflex-check-line"></dd>
+          </dl>
+          <p class="settings-hint" id="computer-live-reflex-why" role="status" aria-live="polite"></p>
+          <p class="settings-hint" data-i18n="computerUse.liveReflexCheckAbout">
+            점검은 헬퍼가 반사 커널과 이 계획 계약을 읽는지, 멈춤이 걸려 있지 않은지만 봅니다. 입력은 보내지 않습니다. 커널이 실제로 화면을 보고 맞히는지는 벤치가 잽니다.
+          </p>
+          <div class="settings-action-row">
+            <button class="btn" type="button" id="computer-live-reflex-check" data-i18n="computerUse.liveReflexCheckRun">지금 점검</button>
+          </div>
+        </div>
+
         <!-- The key typing into a page's fields asks with (t-9537): one slot
              per key the backend lists (`type_value_keys`), each drawn from
              the template below by `paintTypeValueKeys`. Which key, which

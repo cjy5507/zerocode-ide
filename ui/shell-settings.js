@@ -31,6 +31,7 @@ const PANE_OF = {
   // The field of the key a page's typing asks with now (t-9537) — drawn per
   // key, and this id is the one a walk reads (`paintTypeValueSlot`).
   "type-value-key-input": "computer-use",
+  "computer-live-reflex": "computer-use",
   "show-automations": "appearance",
   "show-tasks": "appearance",
   "worktree-prefix": "git",
@@ -521,6 +522,10 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
       computerConfirmPolicy[kind] = snapshot[`computer_confirm_${kind}`] !== false;
       paintComputerConfirm();
     }
+  }
+  if (hasSetting(snapshot, "computer_live_reflex")) {
+    computerLiveReflex = snapshot.computer_live_reflex === true;
+    paintComputerLiveReflex();
   }
   if (hasSetting(snapshot, "skip_close_terminal_with_running_process_confirm")) {
     const skip = snapshot.skip_close_terminal_with_running_process_confirm === true;
@@ -3055,6 +3060,9 @@ async function refreshComputerUse() {
   computerUseLoading = false;
   computerUseSkillLoading = false;
   paintComputerUse();
+  // Live reflex after the permission read, never beside it: that read ends
+  // the helper's session to see a fresh grant, and this one asks the helper.
+  void refreshComputerLiveReflex("computer_use_capabilities");
   // The Flow roster rides the same arrival: it reads the recipe folder and the
   // session folders, so it is spent when the pane is looked at, beside the
   // permission and skill reads above.
@@ -3113,6 +3121,132 @@ for (const kind of COMPUTER_CONFIRM_KINDS) {
   });
 }
 
+/* The live reflex layer (t-10221): the person's switch (`computer_live_reflex`,
+ * which the reflex door reads at every start) and three lines under it. The
+ * platform and helper line is `capabilities`' own `liveReflex.supported`; the
+ * permission line is the permission report's judgment, read once above; the
+ * check is the one the backend kept for this helper. The switch turns on only
+ * when all three stand, is never turned off behind the person's back — a
+ * revoked permission reads "on, cannot run now", and the door refuses the
+ * start — and turning it off always works. */
+let computerLiveReflex = false;
+let computerLiveReflexAnswer = null;
+let computerLiveReflexError = null;
+let computerLiveReflexChecking = false;
+let computerLiveReflexRead = 0;
+
+const COMPUTER_LIVE_REFLEX_WORDS = Object.freeze({
+  // The permission rows' own names, by permission id.
+  accessibility: { key: "computerUse.accessibility", word: "접근성" },
+  screenshots: { key: "computerUse.screenshots", word: "스크린샷" },
+  supported: { key: "computerUse.liveReflexSupported", word: "이 Mac과 헬퍼가 반사 커널을 읽습니다" },
+  helperOld: { key: "computerUse.liveReflexHelperOld", word: "이 헬퍼는 반사 커널을 읽지 않습니다 — Computer Use를 다시 시작하세요" },
+  checkNone: { key: "computerUse.liveReflexCheckNone", word: "이 헬퍼로 한 점검이 없습니다" },
+  checkPassed: { key: "computerUse.liveReflexCheckPassed", word: "통과 · {{time}}" },
+  checkFailed: { key: "computerUse.liveReflexCheckFailed", word: "통과 못 함 · {{time}} — {{reason}}" },
+  needs: { key: "computerUse.liveReflexNeeds", word: "아직 켤 수 없습니다 — {{why}}" },
+  onBlocked: { key: "computerUse.liveReflexOnBlocked", word: "켜짐 · 지금은 못 돎 — {{why}}" },
+  on: { key: "computerUse.liveReflexOn", word: "켜짐 — 에이전트가 반사 계획을 시작할 때만 헬퍼가 화면을 보고 누릅니다." },
+  whySupport: { key: "computerUse.liveReflexWhySupport", word: "이 플랫폼이나 헬퍼가 반사 층을 지원하지 않습니다" },
+  whyPermissions: { key: "computerUse.liveReflexWhyPermissions", word: "접근성과 스크린샷 권한이 모두 허용되어야 합니다" },
+  whyCheck: { key: "computerUse.liveReflexWhyCheck", word: "이 헬퍼로 한 점검이 통과해야 합니다" },
+});
+
+function liveReflexWords(one, values = {}) {
+  const { key, word } = COMPUTER_LIVE_REFLEX_WORDS[one];
+  return t(key, word, values);
+}
+
+/* One permission's state in the words its own row says it in. */
+function computerPermissionWord(status) {
+  if (status === "granted") return t("computerUse.granted", "허용됨");
+  if (status === "unsupported") return t("computerUse.unsupported", "지원되지 않는 플랫폼");
+  return t("computerUse.notEnabled", "허용 안 됨");
+}
+
+/* The first of the three that does not stand yet, or null when all do. */
+function computerLiveReflexMissing() {
+  if (computerLiveReflexAnswer?.liveReflex?.supported !== true) return "whySupport";
+  if (!COMPUTER_PERMISSION_IDS.every((id) => computerUsePermissionState(id) === "granted")) return "whyPermissions";
+  if (computerLiveReflexAnswer?.check?.ok !== true) return "whyCheck";
+  return null;
+}
+
+/* `computer_use_capabilities` reads what stands; `computer_live_reflex_check`
+ * checks now and answers the same shape. The latest read wins. */
+async function refreshComputerLiveReflex(command) {
+  const read = ++computerLiveReflexRead;
+  computerLiveReflexChecking = command === "computer_live_reflex_check";
+  paintComputerLiveReflex();
+  try {
+    const answer = await invoke(command);
+    if (read !== computerLiveReflexRead) return;
+    computerLiveReflexAnswer = answer;
+    computerLiveReflexError = null;
+  } catch (error) {
+    if (read !== computerLiveReflexRead) return;
+    computerLiveReflexError = String(error);
+  }
+  computerLiveReflexChecking = false;
+  paintComputerLiveReflex();
+}
+
+function paintComputerLiveReflex() {
+  const toggle = el("computer-live-reflex");
+  const answer = computerLiveReflexAnswer;
+  const missing = computerLiveReflexMissing();
+  toggle.checked = computerLiveReflex;
+  toggle.setAttribute("aria-disabled", String(!computerLiveReflex && missing !== null));
+  say(el("computer-live-reflex-support"), () => {
+    if (computerLiveReflexError) return computerLiveReflexError;
+    if (!answer) return t("orch.checking", "확인 중…");
+    if (answer.liveReflex?.supported === true) return liveReflexWords("supported");
+    const platform = computerUsePermissions?.platform ?? answer.platform;
+    return platform === "darwin"
+      ? liveReflexWords("helperOld")
+      : t("computerUse.unsupported", "지원되지 않는 플랫폼");
+  });
+  say(el("computer-live-reflex-permissions"), () => COMPUTER_PERMISSION_IDS
+    .map((id) => `${liveReflexWords(id)} ${computerPermissionWord(computerUsePermissionState(id))}`)
+    .join(" · "));
+  say(el("computer-live-reflex-check-line"), () => {
+    if (computerLiveReflexChecking) return t("orch.checking", "확인 중…");
+    const check = answer?.check;
+    if (!check) return liveReflexWords("checkNone");
+    const time = knowledgeClock(check.at_ms, Date.now());
+    return check.ok
+      ? liveReflexWords("checkPassed", { time })
+      : liveReflexWords("checkFailed", { time, reason: check.reason ?? "" });
+  });
+  say(el("computer-live-reflex-why"), () => {
+    if (computerLiveReflex) {
+      return missing === null
+        ? liveReflexWords("on")
+        : liveReflexWords("onBlocked", { why: liveReflexWords(missing) });
+    }
+    return missing === null ? "" : liveReflexWords("needs", { why: liveReflexWords(missing) });
+  });
+  el("computer-live-reflex-check").disabled = computerLiveReflexChecking;
+}
+
+function setComputerLiveReflex(on) {
+  computerLiveReflex = on;
+  paintComputerLiveReflex();
+  void commitSetting("computer_live_reflex", "set_computer_live_reflex", { on });
+}
+
+// An unpressable switch takes focus and the pointer, so its line is read, and
+// changes nothing: the press is stopped before the box flips.
+el("computer-live-reflex").addEventListener("click", (event) => {
+  if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault();
+});
+el("computer-live-reflex").addEventListener("change", (event) => {
+  setComputerLiveReflex(event.currentTarget.checked);
+});
+el("computer-live-reflex-check").addEventListener("click", () => {
+  void refreshComputerLiveReflex("computer_live_reflex_check");
+});
+
 function paintComputerUse() {
   const states = COMPUTER_PERMISSION_IDS;
   const granted = states.filter((id) => computerUsePermissionState(id) === "granted").length;
@@ -3160,11 +3294,7 @@ function paintComputerUse() {
     const status = computerUsePermissionState(id);
     const node = el(`computer-use-${id}-state`);
     node.classList.toggle("is-on", status === "granted");
-    say(node, () => {
-      if (status === "granted") return t("computerUse.granted", "허용됨");
-      if (status === "unsupported") return t("computerUse.unsupported", "지원되지 않는 플랫폼");
-      return t("computerUse.notEnabled", "허용 안 됨");
-    });
+    say(node, () => computerPermissionWord(status));
     const hint = el(`computer-use-${id}-hint`);
     hint.hidden = noSetupDoor || status === "granted" || status === "unsupported";
     say(hint, () => computerPermissionGuidance(id, computerUsePermissions?.helper_app_path));
@@ -3211,6 +3341,8 @@ function paintComputerUse() {
       : t("orch.notReady", "없음");
     chips.appendChild(chip);
   }
+  // The live reflex card's permission line reads the same report.
+  paintComputerLiveReflex();
 }
 
 /* The TCC rows under one permission (t-6058): both bundles' rows, the one the

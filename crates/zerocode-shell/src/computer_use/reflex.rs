@@ -75,6 +75,22 @@ pub(crate) const fn platform_runs_reflex(macos: bool, desktop: ReflexCapability)
 /// The key `capabilities` and `reflex-status` carry [`standing`] under.
 pub(crate) const LIVE_REFLEX: &str = "liveReflex";
 
+/// The key the settings page's answer carries the last [`check`] under,
+/// beside [`standing`] ([`settings_answer`]).
+pub(crate) const CHECK: &str = "check";
+
+/// Where the last [`check`] is kept, under the window's local data root —
+/// beside the person's settings, never in them: the switch is the only road
+/// into those.
+pub(crate) const CHECK_FILE: &str = "computer-use/live-reflex-check.json";
+
+/// What the door says to a platform whose table does not claim live reflex.
+const NOT_HERE: &str = "live reflex runs only on a macOS desktop whose capability table claims it";
+
+/// What a start says to a helper whose handshake does not read what it carries.
+const HELPER_DOES_NOT_READ: &str =
+    "this helper does not read run policy 1 with its kernel installed; restart Computer Use";
+
 /// Live reflex as `capabilities` and `reflex-status` answer it, in two words
 /// never folded into one: `supported` — this platform's row in the table,
 /// the helper's kernel, and the plan contract and run policy it reads
@@ -118,10 +134,7 @@ pub(crate) fn admit(
         return Err(super::guard::refusal(reason));
     }
     if !facts.supported {
-        return Err(refused(
-            error_code::UNSUPPORTED_CAPABILITY,
-            "live reflex runs only on a macOS desktop whose capability table claims it",
-        ));
+        return Err(refused(error_code::UNSUPPORTED_CAPABILITY, NOT_HERE));
     }
     if !facts.enabled {
         return Err(refused(
@@ -222,7 +235,7 @@ pub(crate) fn start(
     if !helper_reads_it(&handshake) {
         return Err(refused(
             error_code::UNSUPPORTED_CAPABILITY,
-            "this helper does not read run policy 1 with its kernel installed; restart Computer Use",
+            HELPER_DOES_NOT_READ,
         ));
     }
     let run_id = new_run_id();
@@ -265,6 +278,86 @@ pub(crate) fn capabilities(
         fields.insert(LIVE_REFLEX.into(), standing);
     }
     Ok(handshake)
+}
+
+/// Which helper a handshake came from: its version and the plan contract it
+/// reads — a [`check`] vouches for this helper and no other.
+pub(crate) fn helper_identity(handshake: &Value) -> Value {
+    json!({
+        "version": handshake["providerVersion"],
+        "planVersion": handshake["supports"]["desktop"]["reflex"]["planVersion"],
+    })
+}
+
+/// The settings page's check before the switch may turn on (t-10221): what
+/// a start's door and handshake read — nobody stopped, in the window or in
+/// the helper; this platform's row; a helper whose kernel reads this plan
+/// contract and run policy — and nothing a run does: no plan, no frame, no
+/// input. A failing road says the sentence the door says for it. Whether the
+/// kernel sees and hits is the bench's to measure, not this check's.
+pub(crate) fn check(
+    facts: &DoorFacts,
+    handshake: &Value,
+    call: Call<'_>,
+    at_ms: i64,
+) -> Result<Value, ComputerUseError> {
+    let reason = if let Some(reason) = &facts.stopped {
+        Some(super::guard::refusal(reason).message)
+    } else if !facts.supported {
+        Some(NOT_HERE.to_string())
+    } else if !helper_reads_it(handshake) {
+        Some(HELPER_DOES_NOT_READ.to_string())
+    } else {
+        // The helper's own stop — the person's chord heard on the desktop.
+        let helper = call("status", json!({}))?;
+        (helper["stopped"] == json!(true))
+            .then(|| super::guard::refusal(helper["reason"].as_str().unwrap_or_default()).message)
+    };
+    Ok(json!({
+        "ok": reason.is_none(),
+        "at_ms": at_ms,
+        "helper": helper_identity(handshake),
+        "reason": reason,
+    }))
+}
+
+/// `capabilities` as the settings page reads it: the helper's handshake with
+/// [`standing`], and under [`CHECK`] the check made now (`now`) and kept at
+/// `kept`, or — with no `now` — the one kept there, only while it names the
+/// helper that answered: an old check never vouches for another helper.
+pub(crate) fn settings_answer(
+    facts: &DoorFacts,
+    call: Call<'_>,
+    kept: &Path,
+    now: Option<i64>,
+) -> Result<Value, String> {
+    let mut answer = capabilities(&json!({}), facts, call).map_err(|error| error.to_string())?;
+    let checked = match now {
+        Some(at_ms) => {
+            let made = check(facts, &answer, call, at_ms).map_err(|error| error.to_string())?;
+            keep_check(kept, &made).map_err(|error| error.to_string())?;
+            made
+        }
+        None => std::fs::read(kept)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .filter(|made| made["helper"] == helper_identity(&answer))
+            .unwrap_or(Value::Null),
+    };
+    if let Some(fields) = answer.as_object_mut() {
+        fields.insert(CHECK.into(), checked);
+    }
+    Ok(answer)
+}
+
+/// Keep a check whole or not at all: written beside, then renamed over.
+fn keep_check(kept: &Path, made: &Value) -> std::io::Result<()> {
+    if let Some(folder) = kept.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let beside = kept.with_extension("json.tmp");
+    std::fs::write(&beside, made.to_string())?;
+    std::fs::rename(&beside, kept)
 }
 
 /// End one run, and no other: the helper compares the run it names.
