@@ -1,4 +1,8 @@
 {
+  "fixture_runtime": {
+    "value": {"flush_ms": 250},
+    "why": "The native fixtures share their recorder and flush cadence. It is bundled beside the executable so adding another scene leaves existing round bytes unchanged."
+  },
   "schema": 1,
   "wilson_z": {
     "value": 1.96,

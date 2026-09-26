@@ -30,13 +30,11 @@ import json
 import math
 import os
 import pathlib
-import plistlib
 import random
 import signal
 import subprocess
 import sys
 import time
-import uuid
 
 import tally
 from bench import Bench, Refused, Signals, Stopped
@@ -847,20 +845,8 @@ def the_round(owner, seed, values, table_limits):
 def prepare(folder):
     """Compile the fixture into an app bundle of its own (a fresh owner, so a
     fresh bundle id the run's scope names); nothing is launched."""
-    folder.mkdir(mode=0o700, parents=False, exist_ok=False)
-    owner = uuid.uuid4().hex[:12]
-    app = folder / f"{EXECUTABLE}-{owner}.app"
-    executable = app / "Contents/MacOS" / EXECUTABLE
-    executable.parent.mkdir(parents=True)
-    with (app / "Contents/Info.plist").open("wb") as handle:
-        plistlib.dump({"CFBundleIdentifier": f"{BUNDLE_PREFIX}.{owner}", "CFBundleExecutable": EXECUTABLE,
-                       "CFBundleName": f"{EXECUTABLE}-{owner}", "CFBundlePackageType": "APPL",
-                       "NSHighResolutionCapable": True}, handle)
-    built = subprocess.run(["swiftc", "-O", "-swift-version", "6", "-warnings-as-errors", str(SOURCE),
-                            "-o", str(executable)])
-    write_atomic(folder / "session.json", {"owner": owner, "app": str(app), "executable": str(executable),
-                                           "bundle": f"{BUNDLE_PREFIX}.{owner}", "swiftc": built.returncode})
-    return built.returncode
+    import fixture_support
+    return fixture_support.prepare(folder, EXECUTABLE, SOURCE, BUNDLE_PREFIX)
 
 
 class Desk:

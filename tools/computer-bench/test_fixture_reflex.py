@@ -472,7 +472,7 @@ class Fixture(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "the fixture is an AppKit app")
     def test_the_fixture_builds_as_the_runner_builds_it(self):
         # prepare's own flags: Swift 6, every warning an error.
-        built = subprocess.run(["swiftc", "-typecheck", "-swift-version", "6", "-warnings-as-errors", str(reflex.SOURCE)],
+        built = subprocess.run(["swiftc", "-typecheck", "-swift-version", "6", "-warnings-as-errors", "-parse-as-library", str(reflex.HERE / "FixtureSupport.swift"), str(reflex.SOURCE)],
                                capture_output=True, text=True)
         self.assertEqual(built.returncode, 0, built.stderr)
 
