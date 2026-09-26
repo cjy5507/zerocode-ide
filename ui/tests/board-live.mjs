@@ -145,6 +145,9 @@ export function liveFixture() {
     ] },
   ];
   window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now);
+  /* 실시간 지도는 카드 그림 위의 것이다 (t-9532). 관계 탭은 행성계로 열리므로 지도를 재는
+   * 이 시험들은 탭의 토글로 카드를 먼저 고른다 — 행성계가 선 판의 지도는 board-orbit ⑧이 잰다. */
+  if (typeof setAgentOrbitChoice === "function") setAgentOrbitChoice(document.getElementById("board-view"), "cards");
   agentBoardMode = "tasks";
   agentGraphSelectedKey = null;
   agentGraphSelectedEdgeKey = null;
@@ -2371,16 +2374,18 @@ async function testLateAnswers(browser, origin, ok) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const server = await createWindowServer();
+  /* 창 서버는 `{ files, origin }`을 돌려준다 — 닫는 것은 그 파일 서버다(board-orbit의 실행기와
+   * 같은 모양). `server.close()`를 부르면 시험을 다 돈 뒤 finally에서 넘어져 보고가 서지 않았다. */
+  const { files, origin } = await createWindowServer();
   const browser = await chromium.launch();
   const lines = [];
   const report = (name, pass, detail = "") =>
     lines.push(`${pass ? "PASS" : "FAIL"}  ${name}${detail ? `  — ${detail}` : ""}`);
   try {
-    await testBoardLive(browser, server.origin, report);
+    await testBoardLive(browser, origin, report);
   } finally {
     await browser.close();
-    await server.close();
+    files.close();
   }
   console.log(lines.join("\n"));
   console.log(`\n${lines.filter((line) => line.startsWith("PASS")).length}/${lines.length} passed`);

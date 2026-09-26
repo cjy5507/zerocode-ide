@@ -27414,6 +27414,17 @@ input[type="search"]::-webkit-search-cancel-button {
   flex: none;
 }
 
+/* 누를 수 없는 손잡이 (t-9532) — 행성계가 선 판의 실시간 지도. `disabled`가 아니라
+ * `aria-disabled`인 것은 초점과 손을 받아 팁이 까닭을 말하게 하려서다. 모양은 이 창에서
+ * 아직 열 수 없는 문이 입는 그 한 벌이다(`.workbench-related-*:disabled`): 잉크가 물러서고
+ * 채움이 물러선다. 손이 얹혀도 그대로다 — 이 판 머리의 문맥이 hover 규칙보다 한 단 좁아서
+ * 따로 hover를 적지 않는다. */
+.agent-graph-head-tools > .icon-btn[aria-disabled="true"] {
+  background: transparent;
+  color: var(--ink-disabled);
+  cursor: default;
+}
+
 /* 서랍 티어의 손잡이. 넓은 판의 곁판은 늘 서 있으므로 여기서는 없다. */
 .icon-btn.agent-inspector-toggle {
   display: none;

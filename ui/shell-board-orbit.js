@@ -274,8 +274,9 @@ function agentOrbitShown(state) {
 
 /* ---- 관계 그림에서 오는 손 --------------------------------------------------- */
 
-/* `paintAgentGraph`가 관계 그림을 다 그린 뒤 부르는 문. 서명이 움직인 판에서만
- * 상태를 적용하고, 선택만 바뀐 판은 라벨 둘과 다음 그림만 고친다. */
+/* `paintAgentGraph`가 모델과 선택과 머리를 적은 뒤, 카드 그림 앞에서 부르는 문 — 행성계가
+ * 선 판은 그 뒤의 카드 그림을 건너뛴다 (t-9532). 서명이 움직인 판에서만 상태를 적용하고,
+ * 선택만 바뀐 판은 라벨 둘과 다음 그림만 고친다. */
 function paintAgentOrbit(view, model) {
   if (!agentOrbitShowing(view)) return;
   const state = agentOrbitState(view);

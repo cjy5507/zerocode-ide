@@ -134,6 +134,15 @@ function agentGraphLiveOn() {
   return agentGraphLive;
 }
 
+/* 이 판에 지도가 그려지는가 — 손잡이가 켜졌고 판이 카드 그림이다 (t-9532). 지도는 카드
+ * 그림 위의 것이라(노드의 박자·간선·기다림의 칸) 행성계가 선 판에는 그릴 자리가 없고, 그
+ * 판의 인스펙터도 지도의 줄(최근 사건·모른다는 줄)을 싣지 않는다 — 손잡이는 누를 수 없는
+ * 채로 그 까닭을 말한다(`paintAgentGraph`). 켜 둔 손잡이는 그대로다: 카드로 돌아온 판에서
+ * 지도는 조용한 기준선으로 다시 선다. */
+function agentGraphLiveDrawn(view) {
+  return agentGraphLive && !agentOrbitShowing(view);
+}
+
 /* 맥박이 **도는가**. 숨긴 판에서는 돌지 않는다 — 보이지 않는 그림의 애니메이션은
  * 아무에게도 말하지 않으면서 프레임을 먹는다. 움직임을 줄이라는 판에서는 맥박이
  * 서지만 돌지는 않는다: 그 판정은 CSS의 같은 미디어 질의가 하고(shell.css의
@@ -145,7 +154,7 @@ function agentGraphLiveAnimating() {
 }
 
 /* 지도가 지금 **보이는가** — 손잡이가 켜졌고, 문서가 앞에 있고, 보드가 작업 목록이
- * 아니며, 관계 그림으로 서서 숨지 않은 판이 하나라도 있다. 장부가 사건을 적을 수
+ * 아니며, 카드 그림으로 서서 숨지 않은 판이 하나라도 있다. 장부가 사건을 적을 수
  * 있는 것은 이 동안뿐이다: 아무도 보지 않는 동안 읽은 것은 사건이 아니라 backlog
  * 이고, 다시 보인 첫 판이 그것을 조용히 기준선으로 삼는다.
  *
@@ -644,16 +653,21 @@ function agentGraphLiveTuning() {
     : null;
 }
 
-/* 지금 그림이 서 있는 보드 판. 작업 목록으로 서 있는 판은 관계 그림이 아니고,
+/* 지금 지도가 서 있는 보드 판. 작업 목록으로 서 있는 판은 관계 그림이 아니고,
  * 제 자신이나 품은 자리가 숨은 판은 아무에게도 보이지 않는다(탭을 옮기면 판이,
- * 무대가 다른 쪽으로 가면 그 위의 자리가 `hidden`을 받는다).
+ * 무대가 다른 쪽으로 가면 그 위의 자리가 `hidden`을 받는다). 그리고 행성계가 선 판은
+ * 카드 그림을 접어 둔다 — 그 판에서 사건을 적고 박자를 얹으면 아무도 못 볼 노드에 DOM을
+ * 쓰고, 돌아온 판이 기준선 대신 그동안의 일을 들고 선다 (t-9532). 행성계를 빼는 것은
+ * `agentGraphViewStands`가 아니라 여기서다: 그 답은 행성계 자신도 프레임마다 묻는다
+ * (`agentOrbitShown`) — 거기서 빼면 행성계의 박자가 선다.
  *
  * 탭 장부가 아니라 **문서**에게 묻는다. 팝아웃으로 보드를 빼면 본창의
  * `boardTab()`은 빈손이 되고(그 탭이 저쪽으로 갔다), 그러면 이 손이 판을 찾지
  * 못해 맥박이 아예 서지 않는다 — 판은 저쪽 문서에 멀쩡히 서 있는데. 문서에
  * 묻는 쪽은 본창·팝아웃·복제된 판을 모두 같은 규칙으로 답한다. */
 function agentGraphLiveViews() {
-  return [...document.querySelectorAll(".agent-board")].filter(agentGraphViewStands);
+  return [...document.querySelectorAll(".agent-board")]
+    .filter((view) => agentGraphViewStands(view) && !agentOrbitShowing(view));
 }
 
 /* 판 한 장이 관계 그림으로 서서 숨지 않았는가 — 제 자신이나 품은 자리가 `hidden`이면
