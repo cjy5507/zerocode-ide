@@ -41902,8 +41902,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 }
 .computer-use-tcc-judged {
   padding: 0 var(--space-1);
-  border: 1px solid var(--edge-rule);
-  border-radius: 999px;
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
   color: var(--ink-mist);
   font-size: var(--text-3xs);
 }
@@ -41937,7 +41937,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   z-index: var(--computer-permission-recovery-layer);
   width: min(var(--computer-permission-recovery-width), calc(100% - var(--space-6)));
   padding: var(--space-3);
-  border: 1px solid var(--edge-rule);
+  border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-edge);
   background: var(--surface-raised);
   color: var(--ink-label);

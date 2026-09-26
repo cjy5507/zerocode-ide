@@ -3639,6 +3639,18 @@ await test("Computer Use's TCC rows say one of four grants in five languages and
       await backend.externalPatch({ locale: previousLocale }, ["locale"]);
       await renderSettled(pageA);
     }
+    // t-9719: the judged mark draws its line and corners from the palette's
+    // rule and pill — the same pixels the two literals drew, so it looks the same.
+    const judgedDress = await pageA.evaluate(() => {
+      const mark = getComputedStyle(document.querySelector(".computer-use-tcc-judged"));
+      const root = getComputedStyle(document.documentElement);
+      return {
+        line: [mark.borderTopWidth, root.getPropertyValue("--rule-width").trim()],
+        corner: [mark.borderTopLeftRadius, root.getPropertyValue("--radius-pill").trim()],
+      };
+    });
+    assertEqual(judgedDress, { line: ["1px", "1px"], corner: ["999px", "999px"] },
+      "the judged mark's line or corners moved");
 
     // The stale row's pane, then its reset: each asks the backend for that row
     // alone, and the reset's answer is painted back — the row now denied.
