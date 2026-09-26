@@ -20,13 +20,19 @@ pub const VAULT_PAIR_RUBRIC_VERSION: u32 = 1;
 /// The challenger arm's comparison: the words the judge is asked
 /// ([`crate::jev::challenger::ask`]) and the two designs' shape. Every row
 /// that asked names it ([`crate::jev::summary::RUBRIC_VERSION`]), so a changed
-/// question starts a series of its own (t-6263 R5).
+/// question starts a series of its own (t-6263 R5). The words are
+/// [`crate::jev::challenger::rubric_words`], pinned to this number by the
+/// challenger's own `the_version_is_pinned_to_the_words` (t-9469).
 pub const CHALLENGER_RUBRIC_VERSION: u32 = 1;
-/// The recall seat's rubric — the levels asked of each note, whose words
-/// are zo's `runtime::memory::rerank::rubric_words` and are pinned there.
+/// The recall seat's rubric — the level asked of each note — whose words are
+/// zo's `runtime::memory::rerank::rubric_words` and are pinned there
+/// (`the_version_is_pinned_to_the_words`, t-9469; the function did not exist
+/// until then, and nothing held the words to this number).
 pub const RECALL_RUBRIC_VERSION: u32 = 1;
 /// The skills seat's explicit search — `skill_search`, the tool an agent
-/// calls — whose words are zo's `runtime::skill_rank` and are pinned there.
+/// calls — whose words are zo's `runtime::skill_rank::search_rubric_words`
+/// and are pinned there (`the_search_version_is_pinned_to_its_words`, t-9469;
+/// until then only this number was compared with itself).
 /// The turn boundary's suggestion asks [`SKILL_SUGGESTION_RUBRIC_VERSION`],
 /// a seat and a ledger of its own (t-6877).
 pub const SKILL_SEARCH_RUBRIC_VERSION: u32 = 1;
@@ -44,10 +50,15 @@ pub const MENTION_RERANK_RUBRIC_VERSION: u32 = 1;
 /// `runtime::patch_review` and are pinned there.
 pub const PATCH_REVIEW_RUBRIC_VERSION: u32 = 1;
 /// The claim seat's rubric, whose words are zo's
-/// `runtime::conversation::claim_check` and are pinned there.
+/// `runtime::claim_check::rubric_words` — the question, spelled beside the
+/// state it reads and asked by the tools crate, the three options of
+/// [`crate::jev::CLAIM_CRITERIA`] and the state's keys — and are pinned there
+/// (`the_version_is_pinned_to_the_words`, t-9469).
 pub const CLAIM_RUBRIC_VERSION: u32 = 1;
-/// The file pick seat's rubric and state shape, zo's
-/// `tools::misc_tools::smart_router::file_pick`, pinned there.
+/// The file pick seat's rubric and state shape, whose words are zo's
+/// `runtime::file_pick::rubric_words` and are pinned there
+/// (`the_version_is_pinned_to_the_words`, t-9469; the tools crate only asks
+/// them).
 pub const FILE_PICK_RUBRIC_VERSION: u32 = 1;
 
 /// Skill suggestion's two requests share these words and thresholds in its

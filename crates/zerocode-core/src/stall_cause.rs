@@ -308,7 +308,7 @@ pub fn screen_tail(screen: &str) -> Vec<String> {
 /// The end of a conversation as the question carries it: its turns in the
 /// words the board reads them in (`crate::transcript::turns_in` — a tool call
 /// is its name and target, a result its text), one entry each, its role and
-/// its words ([`TURN_KEYS`]) clamped to a card line
+/// its words (`TURN_KEYS`) clamped to a card line
 /// (`crate::transcript::clamp`), then the newest whose words fit
 /// [`STALL_TRANSCRIPT_BYTE_CAP`] once the door has cleared them
 /// ([`newest_from`]). Reasoning is left out: why the agent thought is not why

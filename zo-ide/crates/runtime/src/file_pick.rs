@@ -112,20 +112,59 @@ pub fn candidate_id(position: usize) -> String {
     format!("{FILE_PICK_CANDIDATE_ID_PREFIX}{:02}", position.saturating_add(1))
 }
 
+/// The state's keys, in the order the fingerprint reads them: the person's
+/// request, and the candidate files.
+const FILE_PICK_STATE_KEYS: [&str; 2] = ["request", "files"];
+
+/// The keys of one file in `files`, in the order the fingerprint reads them.
+const FILE_PICK_FILE_KEYS: [&str; 3] = ["id", "path", "about"];
+
+/// The no-match question's words: whether any file in the state is needed.
+fn any_instructions() -> String {
+    format!("{FILE_PICK_ANY_QUESTION_INSTRUCTIONS} {FILE_PICK_UNTRUSTED_NOTE}")
+}
+
+/// The question one candidate is asked under. It names the file by the id
+/// the state gives it, because a question id is never sent; spelled once,
+/// for the questions and for the words the version is pinned to
+/// ([`rubric_words`]).
+fn candidate_instructions(id: &str) -> String {
+    format!("Will the work in `request` need to change or read the file with id {id} in `files`? {FILE_PICK_UNTRUSTED_NOTE}")
+}
+
+/// The words the file pick seat asks, as one string: both questions with
+/// what yes and no mean, and the keys the state and each file carry.
+/// `FILE_PICK_RUBRIC_VERSION` is pinned to it, so a word changed without a
+/// version is a red test rather than a quiet drift (t-9469).
+#[must_use]
+pub fn rubric_words() -> String {
+    [
+        any_instructions(),
+        FILE_PICK_ANY_YES.to_string(),
+        FILE_PICK_ANY_NO.to_string(),
+        candidate_instructions(&candidate_id(0)),
+        FILE_PICK_CANDIDATE_YES.to_string(),
+        FILE_PICK_CANDIDATE_NO.to_string(),
+        FILE_PICK_STATE_KEYS.join(","),
+        FILE_PICK_FILE_KEYS.join(","),
+    ]
+    .join("\n")
+}
+
 /// One bounded state for the whole batch. Candidate order is the deterministic
 /// order supplied by search, recent edits and codegraph; Jev only re-ranks it.
 #[must_use]
 pub fn state(request: &str, candidates: &[FilePickCandidate]) -> Value {
     json!({
-        "request": cut(request, Cap::Chars(FILE_PICK_REQUEST_CHAR_CAP)),
-        "files": candidates
+        FILE_PICK_STATE_KEYS[0]: cut(request, Cap::Chars(FILE_PICK_REQUEST_CHAR_CAP)),
+        FILE_PICK_STATE_KEYS[1]: candidates
             .iter()
             .take(FILE_PICK_CANDIDATE_CAP)
             .enumerate()
             .map(|(position, candidate)| json!({
-                "id": candidate_id(position),
-                "path": candidate.path,
-                "about": cut(&candidate.about, Cap::Bytes(FILE_PICK_ABOUT_BYTE_CAP)),
+                FILE_PICK_FILE_KEYS[0]: candidate_id(position),
+                FILE_PICK_FILE_KEYS[1]: candidate.path,
+                FILE_PICK_FILE_KEYS[2]: cut(&candidate.about, Cap::Bytes(FILE_PICK_ABOUT_BYTE_CAP)),
             }))
             .collect::<Vec<_>>(),
     })
@@ -136,21 +175,17 @@ pub fn state(request: &str, candidates: &[FilePickCandidate]) -> Value {
 /// reply can never name a different file than the question did.
 #[must_use]
 pub fn questions(candidates: &[FilePickCandidate]) -> BTreeMap<String, SystemOneQuestion> {
-    let any_instructions =
-        format!("{FILE_PICK_ANY_QUESTION_INSTRUCTIONS} {FILE_PICK_UNTRUSTED_NOTE}");
     let mut questions = BTreeMap::from([(
         FILE_PICK_ANY_QUESTION.to_string(),
         SystemOneQuestion::noul(
-            &any_instructions,
+            &any_instructions(),
             FILE_PICK_ANY_YES,
             FILE_PICK_ANY_NO,
         ),
     )]);
     for (position, _) in candidates.iter().take(FILE_PICK_CANDIDATE_CAP).enumerate() {
         let id = candidate_id(position);
-        let instructions = format!(
-            "Will the work in `request` need to change or read the file with id {id} in `files`? {FILE_PICK_UNTRUSTED_NOTE}"
-        );
+        let instructions = candidate_instructions(&id);
         questions.insert(
             id,
             SystemOneQuestion::noul(
@@ -296,6 +331,30 @@ mod tests {
             path: path.to_string(),
             about: "A source file.".to_string(),
         }
+    }
+
+    /// The file pick seat's words are pinned to its version (t-9469): both
+    /// questions, what yes and no mean, and the keys the state carries. A word
+    /// changed without a version is red here, and a candidate's question names
+    /// every key the state carries.
+    #[test]
+    fn the_version_is_pinned_to_the_words() {
+        use super::{candidate_instructions, rubric_words, FILE_PICK_FILE_KEYS, FILE_PICK_STATE_KEYS};
+        assert_eq!(zerocode_core::jev::questions::FILE_PICK_RUBRIC_VERSION, 1);
+        assert_eq!(zerocode_core::jev::rubric_fingerprint(rubric_words), "5132dc056a853c32");
+        let asked = candidate_instructions("F01");
+        for key in FILE_PICK_STATE_KEYS {
+            assert!(asked.contains(&format!("`{key}`")), "{key}: {asked}");
+        }
+        let sent = state("fix the cut", &[candidate("src/lib.rs")]);
+        let mut keys: Vec<&str> = sent.as_object().expect("an object").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["files", "request"]);
+        let mut file: Vec<&str> = sent["files"][0].as_object().expect("a file").keys().map(String::as_str).collect();
+        file.sort_unstable();
+        let mut expected = FILE_PICK_FILE_KEYS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(file, expected);
     }
 
     #[test]

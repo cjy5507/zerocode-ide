@@ -9,6 +9,28 @@ use serde_json::json;
 
 use super::*;
 
+/// The explicit search's words are pinned to its version (t-9469): the
+/// question a skill is scored under, the use table's levels and the keys the
+/// state carries. A word changed without a version is red here, and the
+/// question names every key the state carries.
+#[test]
+fn the_search_version_is_pinned_to_its_words() {
+    assert_eq!(SKILL_RUBRIC_VERSION, 1);
+    assert_eq!(zerocode_core::jev::rubric_fingerprint(search_rubric_words), "c9de8db4a463432e");
+    let asked = search_instructions(0);
+    for key in SEARCH_STATE_KEYS {
+        assert!(asked.contains(&format!("`{key}")), "{key}: {asked}");
+    }
+    let candidates = skill_candidates(&catalog(2));
+    let state = skill_state("make a file", &candidates);
+    let mut keys: Vec<&str> = state.as_object().expect("an object").keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["skills", "task"]);
+    let mut skill: Vec<&str> = state["skills"][0].as_object().expect("a skill").keys().map(String::as_str).collect();
+    skill.sort_unstable();
+    assert_eq!(skill, ["description", "name"]);
+}
+
 #[test]
 fn a_turn_the_gate_calls_prose_only_suggests_nothing_and_says_so() {
     let candidates = skill_candidates(&catalog(2));
