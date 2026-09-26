@@ -235,9 +235,9 @@ fn recording_is_deferred_and_an_acting_receipt_is_not_asked_twice() {
         assert_eq!(row["worker"], prepared.worker);
         assert_eq!(row["dispatch"], prepared.worker);
         assert_eq!(row["requestAt"], 3);
-        assert_eq!(row["teacher"], difficulty::LADDER[2].0);
-        assert_eq!(row["agreed"], false);
-        assert_eq!(row["baselineAgreed"], true);
+        assert_eq!(row["pinnedEffort"], difficulty::LADDER[2].2);
+        assert!(row.get("agreed").is_none());
+        assert!(row.get("baselineAgreed").is_none());
         assert_eq!(row["applied"], carried);
         assert!(
             row.get("spec").is_none() && row.get("state").is_none(),
@@ -252,7 +252,12 @@ fn an_acting_request_uses_only_its_hosts_scoped_consent_origin() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(), 0);
     let wire = wire(&home, &endpoint, "on");
     let key = ["team-origin", "%1", "origin-request"];
-    let guard = origin(key, Some(home.path().to_path_buf()));
+    let guard = origin_with(
+        key,
+        Some(home.path().to_path_buf()),
+        true,
+        wire.settings_root(),
+    );
     let row = choose_with(&wire, &look(), key).unwrap();
     assert_eq!(row["chosen"], difficulty::LADDER[0].0);
     assert_eq!(endpoint.asked().len(), 1);
@@ -265,10 +270,120 @@ fn an_acting_request_uses_only_its_hosts_scoped_consent_origin() {
         1,
         "a missing origin must never open a socket"
     );
-    let other = origin(
+    let other = origin_with(
         [key[0], key[1], "another-request"],
         Some(home.path().to_path_buf()),
+        true,
+        wire.settings_root(),
     );
     assert_eq!(choose_with(&wire, &look(), key).unwrap()["requests"], 0);
     drop(other);
+}
+
+/// Grade a fixed replay with production outcome and usage readers, from a
+/// read-only authority snapshot. No Jev request or operating ledger write.
+#[test]
+#[ignore = "private read-only replay; requires snapshot, previous answers, output and config root"]
+fn replay_execution_outcomes() {
+    use zerocode_core::orchestration::{Ledger, PROJECTION_SCHEMA, task_cost};
+    let snapshot = std::env::var("ZEROCODE_OUTCOME_SNAPSHOT").expect("snapshot");
+    let previous = std::env::var("ZEROCODE_OUTCOME_ANSWERS").expect("answers");
+    let output = std::env::var("ZEROCODE_OUTCOME_OUTPUT").expect("output");
+    let config = std::env::var("ZEROCODE_OUTCOME_CONFIG").expect("config root");
+    let connection =
+        rusqlite::Connection::open_with_flags(snapshot, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let held =
+        zerocode_orchestrator::ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+            .unwrap()
+            .unwrap();
+    let ledger = Ledger::rebuild(held.projection).unwrap();
+    let mut rows: Vec<Value> =
+        serde_json::from_str(&std::fs::read_to_string(previous).unwrap()).unwrap();
+    let now = crate::now_epoch_ms();
+    let claude = crate::usage_stats_scan::scan(Path::new(&config), &[], 0, now);
+    let codex = crate::usage_stats_scan::codex_scan(Path::new(&config), &[], 0, now);
+    assert!(
+        !claude.capped && !codex.capped,
+        "a capped usage scan is not a complete replay"
+    );
+    let mut sessions = task_cost::SessionBook::default();
+    sessions.read_claude(&claude.ledger, now);
+    sessions.read_codex(&codex.ledger, now);
+    for row in &mut rows {
+        let run = ledger.run(row["run"].as_str().unwrap()).unwrap();
+        let dispatch = run.dispatch(row["dispatch"].as_str().unwrap()).unwrap();
+        let worker = run.worker(&dispatch.worker).unwrap();
+        row["agent"] = json!(worker.agent);
+        row["executionModel"] = json!(worker.model);
+        let high =
+            difficulty::profile(&Value::Null, &worker.agent, difficulty::LADDER[2].0).unwrap();
+        row["baselineHigh"] = json!(
+            high.is_some_and(|p| worker.model.as_deref() == Some(p.model.as_str())
+                && row["effort"].as_str() == Some(p.effort.as_str()))
+        );
+        row["attempt"] = json!(
+            run.dispatches
+                .iter()
+                .filter(|d| d.task == dispatch.task && d.started_ms < dispatch.started_ms)
+                .count()
+        );
+        row["retryOf"] = json!(dispatch.retry_of.is_some());
+        let pin = row["effort"].as_str().map(str::to_owned);
+        difficulty::compare(row, pin.as_deref());
+        let generation = task_cost::attempt_generation(run, dispatch, &sessions);
+        let total = task_cost::task_cost(
+            run,
+            &dispatch.task,
+            &sessions,
+            task_cost::JevTally::default(),
+        );
+        row[difficulty::outcomes::KEY] = serde_json::to_value(difficulty::outcomes::observe(
+            run,
+            dispatch,
+            &generation,
+            &total,
+        ))
+        .unwrap();
+        row["usage"] = serde_json::to_value(generation).unwrap();
+        row["review"] =
+            serde_json::to_value(run.review_of(run.task(&dispatch.task).unwrap())).unwrap();
+        row["head"] = json!(dispatch.source);
+        row["applied"] = json!(false);
+    }
+    std::fs::write(
+        output,
+        serde_json::to_string_pretty(
+            &json!({"at":now, "claudeFiles":claude.files, "codexFiles":codex.files, "rows":rows}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn fresh_summonses_read_the_hosts_table_and_sealed_handovers_keep_their_tuning() {
+    let key = ["profile-team", "%1", "profile-request"];
+    assert!(
+        profile("codex", difficulty::LADDER[0].0, key)
+            .unwrap()
+            .is_none()
+    );
+    let root = json!({"smart":{difficulty::PROFILES_SETTING:{"codex":{"low":{"model":"gpt-test-profile","effort":"high"}}}}});
+    let fresh = origin_with(key, None, true, root.clone());
+    assert_eq!(
+        profile("codex", difficulty::LADDER[0].0, key)
+            .unwrap()
+            .unwrap()
+            .model,
+        "gpt-test-profile"
+    );
+    drop(fresh);
+    let sealed = origin_with(key, None, false, root);
+    assert!(
+        profile("codex", difficulty::LADDER[0].0, key)
+            .unwrap()
+            .is_none()
+    );
+    drop(sealed);
 }

@@ -2071,7 +2071,7 @@ pub(crate) fn refresh_board_ledger() {
     let Some(held) = runtime() else {
         return;
     };
-    let Some(next) = with_ledger_seats(|ledger, seats| {
+    let Some((next, outcomes)) = with_ledger_seats(|ledger, seats| {
         // A finished task's cost is worked out once and remembered; the
         // beat only asks (t-9470, [`cost_book`]).
         let mut costs = cost_book::book();
@@ -2087,11 +2087,13 @@ pub(crate) fn refresh_board_ledger() {
                 |run, task| costs.cost(run, task),
             )),
         };
+        let outcomes = summon_difficulty::observations(ledger, &mut costs);
         costs.end();
-        next
+        (next, outcomes)
     }) else {
         return;
     };
+    summon_difficulty::record_observations(outcomes, crate::now_epoch_ms());
     // Build, allocate and drop old rows outside the publication lock. The
     // main-thread reader holds it only long enough to clone an Arc.
     let next = Arc::new(next);
@@ -2779,6 +2781,15 @@ enum HeadroomSource {
 }
 
 impl Launcher for LiveCatalog {
+    fn difficulty_profile(
+        &self,
+        agent: &str,
+        difficulty: &str,
+        origin: [&str; 3],
+    ) -> Result<Option<zerocode_core::summon_difficulty::Profile>, String> {
+        summon_difficulty::profile(agent, difficulty, origin)
+    }
+
     fn choose_difficulty(
         &self,
         look: &zerocode_core::summon_difficulty::Look,
@@ -7959,7 +7970,7 @@ fn run_seated(
                 .windows(2)
                 .find(|pair| pair[0] == "--retry-request")
                 .map_or("", |pair| pair[1].as_str());
-            summon_difficulty::origin([team_id, pane, request], checkout)
+            summon_difficulty::origin([team_id, pane, request], checkout, authority.is_none())
         });
     let decided = match actor.plan(command) {
         Ok((decided, _)) => *decided,

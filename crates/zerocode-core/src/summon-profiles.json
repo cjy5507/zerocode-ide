@@ -1,0 +1,12 @@
+{
+  "codex": {
+    "low": {"model": "gpt-6-luna", "effort": "max"},
+    "mid": {"model": "gpt-6-sol", "effort": "high"},
+    "high": {"model": "gpt-6-astra", "effort": "xhigh"}
+  },
+  "claude": {
+    "low": {"model": "opus", "effort": "medium"},
+    "mid": {"model": "opus", "effort": "high"},
+    "high": {"model": "opus", "effort": "max"}
+  }
+}

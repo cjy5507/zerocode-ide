@@ -141,7 +141,7 @@ pub(crate) use api_routers::{
 pub(crate) mod typesafe;
 pub(crate) use typesafe::{
     check_typesafe_key, jev_day, jev_summary, remove_typesafe_key, save_typesafe_key,
-    set_jev_enabled, set_jev_model, set_route_classifier, typesafe_settings,
+    set_jev_enabled, set_jev_model, set_route_classifier, set_summon_profiles, typesafe_settings,
 };
 
 pub(crate) mod type_value;

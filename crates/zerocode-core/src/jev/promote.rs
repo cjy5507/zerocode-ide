@@ -790,30 +790,44 @@ pub fn judge_seat_at(
     // is how many marks the line may speak on, not how many it can pass on.
     let reach = marks_that_can_clear(seat).unwrap_or(sample_floor);
     let marks_since = crate::jev::summary::marks_from(marks.iter().copied(), since_ms, reach);
-    let agreement = crate::jev::summary::agreement_rows(marks.iter().copied(), marks_since);
+    let mut agreement = crate::jev::summary::agreement_rows(marks.iter().copied(), marks_since);
     let not_compared_by =
         crate::jev::summary::not_compared_words(marks.iter().copied(), marks_since);
     // The label's whole record on this version, not the window's: a seat
     // that is right almost every time is not held for being right lately.
     let record = crate::jev::summary::agreement_rows(marks.iter().copied(), i64::MIN);
-    let verdict = judge(
-        standing(seat, rows),
-        &Evidence {
-            window: &window,
-            floor_permille: floor,
-            deadline_ms,
-            agreement_floor_permille: agreement_floor,
-            agreement,
-            agreement_rows_wanted: sample_floor,
-            window_forgives: seat.window_forgives.unwrap_or(0),
-            labels: None,
-            fallbacks_in_a_row: failures_in_a_row_of(version.requests.iter().copied()),
-            negatives_wanted: seat.negatives_wanted.unwrap_or(0),
-            disagreed_on_record: record.disagreed(),
-            baseline: seat.baseline,
-            apply_share: apply_share_of(held_with.iter().copied(), line),
-        },
-    );
+    let evidence = Evidence {
+        window: &window,
+        floor_permille: floor,
+        deadline_ms,
+        agreement_floor_permille: agreement_floor,
+        agreement,
+        agreement_rows_wanted: sample_floor,
+        window_forgives: seat.window_forgives.unwrap_or(0),
+        labels: None,
+        fallbacks_in_a_row: failures_in_a_row_of(version.requests.iter().copied()),
+        negatives_wanted: seat.negatives_wanted.unwrap_or(0),
+        disagreed_on_record: record.disagreed(),
+        baseline: seat.baseline,
+        apply_share: apply_share_of(held_with.iter().copied(), line),
+    };
+    let stand = standing(seat, rows);
+    let verdict = if seat.id == crate::summon_difficulty::QUESTION {
+        let current = crate::summon_difficulty::outcomes::latest(version.marks.iter().copied());
+        let (outcome_agreement, broken) = crate::summon_difficulty::outcomes::evidence(&current);
+        agreement = outcome_agreement;
+        let broken = fallback_line(stand, &evidence)
+            .or_else(|| execution_health(&evidence))
+            .or(broken);
+        match (stand, broken) {
+            (Stand::Recording, None) => Verdict::Rise,
+            (Stand::Applying, None) => Verdict::Keep,
+            (Stand::Recording, Some(line)) => Verdict::Hold(line),
+            (Stand::Applying, Some(line)) => Verdict::Fall(line),
+        }
+    } else {
+        judge(stand, &evidence)
+    };
     Some(Judged {
         verdict,
         window,
@@ -926,6 +940,13 @@ pub fn judgment_due(seat: &JevUse, rows: &[Value]) -> bool {
 /// [`judgment_due`] on a series already read ([`on_the_newest_version`]).
 #[must_use]
 pub fn judgment_due_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> bool {
+    if seat.id == crate::summon_difficulty::QUESTION
+        && rows
+            .last()
+            .is_some_and(|row| row.get(crate::summon_difficulty::outcomes::KEY).is_some())
+    {
+        return true;
+    }
     let asked = version.asked();
     let wanted = window_wanted_for(seat).unwrap_or(JUDGED_EVERY_ROWS);
     let at_boundary = asked >= wanted && (asked - wanted).is_multiple_of(JUDGED_EVERY_ROWS);
@@ -1163,6 +1184,12 @@ pub enum Line {
         bound_permille: u16,
         baseline_permille: u16,
     },
+    /// Executed choices reduced first-attempt success at the same difficulty.
+    ExecutionQuality,
+    /// Comparable executions do not all have measured token and wall costs.
+    ExecutionCostsMissing,
+    /// Token and wall costs did not both improve over observed baselines.
+    ExecutionSavings,
     /// A seat acting from an act line acts on too small a share of its
     /// window's answers (t-9468, [`ApplyShare`]).
     ApplyShare {
@@ -1204,10 +1231,7 @@ pub fn schema_rows(window: &Tally) -> usize {
         .sum()
 }
 
-/// The first line the evidence does not clear, in §4's order, or `None` when
-/// it clears them all.
-#[must_use]
-pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
+fn execution_health(evidence: &Evidence) -> Option<Line> {
     let window = evidence.window;
     // The window a floor can be cleared on, not the judgment's cadence: a
     // seat judged every twenty rows on the last twenty could never bound
@@ -1235,6 +1259,16 @@ pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
     let malformed = schema_rows(window);
     if malformed > 0 {
         return Some(Line::Schema { rows: malformed });
+    }
+    None
+}
+
+/// The first line the evidence does not clear, in §4's order, or `None` when
+/// it clears them all.
+#[must_use]
+pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
+    if let Some(line) = execution_health(evidence) {
+        return Some(line);
     }
     // A person's labels, when there are a window's worth, are the last word;
     // otherwise the seat is held to its route-change budget.
@@ -1313,11 +1347,17 @@ pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
 /// other lines can see, and the whole point of that rule is that it does not
 /// wait for the next twenty rows.
 #[must_use]
-pub fn judge(stand: Stand, evidence: &Evidence) -> Verdict {
-    if stand == Stand::Applying && evidence.fallbacks_in_a_row >= FALLBACKS_THAT_END_IT {
-        return Verdict::Fall(Line::Fallbacks {
+fn fallback_line(stand: Stand, evidence: &Evidence) -> Option<Line> {
+    (stand == Stand::Applying && evidence.fallbacks_in_a_row >= FALLBACKS_THAT_END_IT).then_some(
+        Line::Fallbacks {
             in_a_row: evidence.fallbacks_in_a_row,
-        });
+        },
+    )
+}
+
+pub fn judge(stand: Stand, evidence: &Evidence) -> Verdict {
+    if let Some(line) = fallback_line(stand, evidence) {
+        return Verdict::Fall(line);
     }
     match (stand, first_broken_line(evidence)) {
         (Stand::Recording, None) => Verdict::Rise,
@@ -1371,6 +1411,9 @@ impl Line {
             Self::TooFewBaseline { .. } => "too_few_baseline",
             Self::Baseline { .. } => "baseline",
             Self::ApplyShare { .. } => "apply_share",
+            Self::ExecutionQuality => "execution_quality",
+            Self::ExecutionCostsMissing => "execution_costs_missing",
+            Self::ExecutionSavings => "execution_savings",
         }
     }
 }

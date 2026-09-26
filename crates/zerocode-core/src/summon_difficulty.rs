@@ -1,12 +1,80 @@
-//! A summons' difficulty, learned from the coordinator's effort pin.
-//! Comparison marks measure agreement with that teacher, not the outcome of
-//! an effort the worker never ran. Execution outcomes belong to a later note.
+//! A summons' difficulty and editable launch profiles.
+//! Pins describe the executed baseline; only finished work grades a choice.
 use std::collections::BTreeSet;
 
 use crate::jev::{Cap, choice};
 use serde_json::{Value, json};
 
-pub const RUBRIC_VERSION: u32 = 1;
+pub const RUBRIC_VERSION: u32 = 2;
+pub mod outcomes;
+pub const PROFILES_SETTING: &str = "summonProfiles";
+pub const DEFAULT_PROFILES: &str = include_str!("summon-profiles.json");
+pub const FALLBACK_DIFFICULTY: &str = LADDER[1].0;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub model: String,
+    pub effort: String,
+}
+
+#[must_use]
+pub fn profiles(root: &Value) -> Value {
+    root.get(crate::jev::SMART_SETTINGS_KEY)
+        .and_then(|s| s.get(PROFILES_SETTING))
+        .cloned()
+        .unwrap_or_else(|| serde_json::from_str(DEFAULT_PROFILES).unwrap_or_default())
+}
+
+pub fn validate_profiles(table: &Value) -> Result<(), String> {
+    let agents = table
+        .as_object()
+        .ok_or_else(|| format!("{PROFILES_SETTING}: expected an object"))?;
+    let root = json!({crate::jev::SMART_SETTINGS_KEY: {PROFILES_SETTING: table}});
+    for (agent, rows) in agents {
+        if !crate::agent::AGENT_SPECS.iter().any(|s| s.id == agent) {
+            return Err(format!("unknown agent: {agent}"));
+        }
+        if rows
+            .as_object()
+            .is_none_or(|rows| rows.len() != LADDER.len())
+        {
+            return Err(format!("{agent}: expected every difficulty"));
+        }
+        for (difficulty, _, _) in LADDER {
+            profile(&root, agent, difficulty)?
+                .ok_or_else(|| format!("{agent}: missing {difficulty}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// An explicit settings entry replaces its default row, including invalid
+/// entries: a typo must not silently launch an unintended model.
+pub fn profile(root: &Value, agent: &str, difficulty: &str) -> Result<Option<Profile>, String> {
+    let defaults: Value = serde_json::from_str(DEFAULT_PROFILES).map_err(|e| e.to_string())?;
+    let configured = root
+        .get(crate::jev::SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(PROFILES_SETTING));
+    let table = configured.unwrap_or(&defaults);
+    let Some(row) = table.get(agent).and_then(|rows| rows.get(difficulty)) else {
+        return Ok(None);
+    };
+    let profile: Profile = serde_json::from_value(row.clone()).map_err(|e| e.to_string())?;
+    if profile.model.trim().is_empty()
+        || profile.effort.trim().is_empty()
+        || profile.model.chars().any(char::is_whitespace)
+        || profile.effort.chars().any(char::is_whitespace)
+    {
+        return Err(format!(
+            "{PROFILES_SETTING}: model and effort must be nonempty"
+        ));
+    }
+    if crate::orchestration::native_agent(&profile.model).is_some_and(|native| native != agent) {
+        return Err(format!("{agent}: model belongs to another agent"));
+    }
+    Ok(Some(profile))
+}
 pub const SPEC_CHAR_CAP: usize = 400;
 pub const TITLE_CHAR_CAP: usize = crate::summon_choice::SUMMON_RECENT_BRIEF_CHAR_CAP;
 pub const APPLY_DEADLINE_MS: u64 = 2_000;
@@ -59,6 +127,8 @@ pub struct Shadow {
     pub look: Look,
     /// Only the coordinator's explicit effort; never an applied answer.
     pub teacher_effort: Option<String>,
+    /// Whether the executed model/effort matches the configured high row.
+    pub baseline_high: bool,
     /// The acting request's receipt. Its presence prevents a second request.
     pub receipt: Option<Value>,
 }
@@ -83,7 +153,7 @@ pub fn read(answers: &Value) -> Result<choice::Choice, choice::ChoiceRefusal> {
     choice::read(answers, QUESTION, &offered)
 }
 
-/// Reverse the ladder for the teacher. Unsupported pins remain ungraded.
+/// Legacy effort-to-difficulty context for old replay files; never a label.
 #[must_use]
 pub fn teacher(effort: &str) -> Option<&'static str> {
     let effort = if effort == "xhigh" {
@@ -103,15 +173,13 @@ pub fn effort(difficulty: &str) -> Option<&'static str> {
         .find_map(|(key, _, effort)| (*key == difficulty).then_some(*effort))
 }
 
-/// Grade the independent answer against the pin, with the same-task baseline.
+/// Keep the old pin as context, never as a success label.
 pub fn compare(row: &mut Value, teacher_effort: Option<&str>) {
-    let teacher = teacher_effort.and_then(teacher);
-    row["teacher"] = json!(teacher);
-    if let (Some(teacher), Some(chosen)) = (teacher, row["chosen"].as_str()) {
-        row[crate::jev::summary::AGREED.canonical] = json!(chosen == teacher);
-        row[crate::jev::summary::BASELINE_AGREED.canonical] = json!(teacher == LADDER[2].0);
-    } else {
-        row[crate::jev::summary::NOT_COMPARED.canonical] = json!("no_teacher");
+    row["pinnedEffort"] = json!(teacher_effort);
+    if let Some(object) = row.as_object_mut() {
+        object.remove(crate::jev::summary::AGREED.canonical);
+        object.remove(crate::jev::summary::BASELINE_AGREED.canonical);
+        object.remove("teacher");
     }
 }
 
@@ -128,31 +196,42 @@ pub fn rubric_words() -> String {
 mod tests {
     use super::*;
     #[test]
+    fn profiles_use_the_editable_table_and_refuse_invalid_overrides() {
+        let defaults = profiles(&Value::Null);
+        validate_profiles(&defaults).unwrap();
+        for (agent, levels) in defaults.as_object().unwrap() {
+            for (difficulty, configured) in levels.as_object().unwrap() {
+                assert_eq!(
+                    serde_json::to_value(profile(&Value::Null, agent, difficulty).unwrap())
+                        .unwrap(),
+                    *configured
+                );
+            }
+        }
+        let mut changed = defaults.clone();
+        changed["codex"][LADDER[0].0]["model"] = json!("gpt-test-profile");
+        let root = json!({crate::jev::SMART_SETTINGS_KEY:{PROFILES_SETTING:changed}});
+        assert_eq!(
+            profile(&root, "codex", LADDER[0].0).unwrap().unwrap().model,
+            "gpt-test-profile"
+        );
+        changed["codex"][LADDER[0].0]["effort"] = json!("");
+        assert!(validate_profiles(&changed).is_err());
+    }
+    #[test]
+    fn a_pin_is_context_and_cannot_award_success() {
+        let mut row = json!({"chosen": LADDER[2].0});
+        compare(&mut row, Some(LADDER[2].2));
+        assert!(row.get("agreed").is_none());
+        assert!(row.get("baselineAgreed").is_none());
+    }
+    #[test]
     fn rubric_version_is_pinned_to_question_option_meanings_and_evidence_fields() {
-        assert_eq!(RUBRIC_VERSION, 1);
+        assert_eq!(RUBRIC_VERSION, 2);
         assert_eq!(
             crate::jev::rubric_fingerprint(rubric_words),
             "cfd9c076bf3f6257"
         );
-    }
-    #[test]
-    fn comparison_uses_the_pin_and_can_beat_always_high_without_counterfactuals() {
-        let mut row = json!({"chosen": LADDER[0].0});
-        compare(&mut row, Some(LADDER[0].2));
-        assert_eq!(
-            (row["agreed"].as_bool(), row["baselineAgreed"].as_bool()),
-            (Some(true), Some(false))
-        );
-        compare(&mut row, Some(LADDER[2].2));
-        assert_eq!(
-            (row["agreed"].as_bool(), row["baselineAgreed"].as_bool()),
-            (Some(false), Some(true))
-        );
-        assert_eq!(teacher("xhigh"), Some(LADDER[2].0));
-        let mut row = json!({"chosen": LADDER[0].0});
-        compare(&mut row, None);
-        assert_eq!(row["notCompared"], "no_teacher");
-        assert!(row.get("agreed").is_none());
     }
     #[test]
     fn evidence_is_bounded_and_the_pin_never_enters_the_question() {
