@@ -17294,6 +17294,23 @@ pub fn pointer_text(count: usize) -> String {
     format!("\nYou have {count} orchestration {noun}. Run `zerocode-orc check`.\n")
 }
 
+/// Whether `text` is [`pointer_text`] and nothing else — the window's own
+/// line arriving at an agent as its prompt, which says nothing about what the
+/// agent is doing (t-11540). Read back through the one spelling rather than a
+/// second copy of it.
+#[must_use]
+pub fn is_pointer_text(text: &str) -> bool {
+    let said = text.trim();
+    let count: String = said
+        .chars()
+        .skip_while(|one| !one.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    count
+        .parse::<usize>()
+        .is_ok_and(|count| pointer_text(count).trim() == said)
+}
+
 /// The most rows a paged read hands back in one answer, and the cap on a
 /// caller-typed `--limit`. One hundred is a page a person can actually scan
 /// and a program can actually hold; past it, the next page is one cursor away.
