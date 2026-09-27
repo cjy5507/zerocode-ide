@@ -220,7 +220,7 @@ pub(super) fn sweep(host: &dyn Host, now_ms: i64) {
                 // A turn under way when the seat first looks is the next one
                 // to judge; a turn that had already ended is not — it ended
                 // before anybody was watching.
-                seat.prompts_seen = if matches!(heard, Some(PaneTurn::Running)) {
+                seat.prompts_seen = if matches!(heard, Some(PaneTurn::Running { .. })) {
                     prompts.saturating_sub(1)
                 } else {
                     prompts

@@ -65,8 +65,8 @@ impl Turn {
     /// question for the person — which the turn map files as running.
     fn of(heard: Option<PaneTurn>, asking: bool) -> Self {
         match heard {
-            Some(PaneTurn::Running) if asking => Self::Asking,
-            Some(PaneTurn::Running) => Self::Running,
+            Some(PaneTurn::Running { .. }) if asking => Self::Asking,
+            Some(PaneTurn::Running { .. }) => Self::Running,
             Some(PaneTurn::Ended { .. }) => Self::Rest,
             None => Self::Unheard,
         }
@@ -824,8 +824,11 @@ mod tests {
                 switched: None,
             }
         );
-        assert_eq!(Turn::of(Some(PaneTurn::Running), true), Turn::Asking);
-        assert_eq!(Turn::of(Some(PaneTurn::Running), false), Turn::Running);
+        let running = PaneTurn::Running {
+            heard: std::time::Instant::now(),
+        };
+        assert_eq!(Turn::of(Some(running), true), Turn::Asking);
+        assert_eq!(Turn::of(Some(running), false), Turn::Running);
         assert_eq!(
             Turn::of(Some(PaneTurn::Ended { interrupted: false }), true),
             Turn::Rest,

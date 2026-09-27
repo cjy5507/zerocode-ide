@@ -1290,6 +1290,17 @@ pub(super) fn note_pane_state(
             )),
         )
     };
+    // A `working` that is the lead's own `Stop` held back by the work it
+    // left running: the done gate in [`hook_loop`] parked that very event a
+    // moment ago, and every newer word evicts it first. The card stays
+    // working; the lead is at its prompt (t-11233).
+    let lead_rested = ended.is_none()
+        && report.state == zerocode_core::hook::HookState::Working
+        && app
+            .state::<AppState>()
+            .pending_done()
+            .get(&report.term)
+            .is_some_and(|(_, held)| held.event == report.event);
     // A supervised worker that ends a turn saying nothing leaves its task
     // dispatched forever, because the only automatic completion is a
     // `worker_done` the worker RUNS. The ledger decides whether that silence is
@@ -1298,6 +1309,12 @@ pub(super) fn note_pane_state(
     match ended {
         Some((turn_ended_ms, interrupted, now)) => {
             orchestration::pane_turn_ended(report.term, turn_ended_ms, interrupted, now);
+        }
+        // Its composer is the lead's again, so the window writes the rest
+        // down — and only the window: the ledger hears this turn end when
+        // the parked all-clear replays through the arm above.
+        None if lead_rested => {
+            orchestration::pane_lead_rested(report.term, began_ms, report.interrupted);
         }
         // Anything but a finished turn means the pane is NOT at rest: an
         // agent working, or one stopped at a question of its own — and the
