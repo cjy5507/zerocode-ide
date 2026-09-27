@@ -56,6 +56,8 @@ const FILES = Object.freeze([
   "tokens.css",
   "vendor/cm6-LICENSE",
   "vendor/cm6.js",
+  "vendor/three-LICENSE",
+  "vendor/three.js",
 ]);
 
 // The HTML is the consumer of this allowlist. Matching two producer lists

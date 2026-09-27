@@ -5560,7 +5560,7 @@ function wireGraphDrag(surface, { grabbed, onGrab, onDrag, onEnd } = {}) {
       if (!panning
         && Math.hypot(held.clientX - startX, held.clientY - startY) < GRAPH_DRAG_SLOP) return;
       panning = true;
-      onDrag?.(held.clientX - startX, held.clientY - startY);
+      onDrag?.(held.clientX - startX, held.clientY - startY, held);
     };
     const stop = () => {
       onEnd?.(panning);

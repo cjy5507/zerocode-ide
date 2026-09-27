@@ -166,6 +166,8 @@ const UI_FILES: &[&str] = &[
     "tokens.css",
     "vendor/cm6-LICENSE",
     "vendor/cm6.js",
+    "vendor/three-LICENSE",
+    "vendor/three.js",
 ];
 
 /// What this binary IS, written down while the build still knows.

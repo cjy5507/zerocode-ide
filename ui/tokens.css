@@ -275,6 +275,33 @@
   --workspace-board-rose: #f43f5e;
   --workspace-board-zinc: #71717a;
 
+  /* The relations tab's 3D robots wear their MODEL, never their state: a
+   * Claude is warm clay/peach/rust, a Codex graphite/steel, anything else a
+   * neutral grey (the approved 2026-09-27 design). Each family is a span
+   * between two ends per part — head (`main`), body (`light`), ears and hands
+   * (`accent`) — and a hash of the agent's key picks where on the span one
+   * robot stands, so no agent is painted by hand. One value serves both
+   * treatments on purpose: this is the robot's paint, lit by the scene, not
+   * ink laid on the floor — a Claude is the same clay on graphite and white. */
+  --agent-model-claude-main-a: #b4583a;
+  --agent-model-claude-main-b: #e2bd96;
+  --agent-model-claude-light-a: #f0ddcf;
+  --agent-model-claude-light-b: #fdf1e6;
+  --agent-model-claude-accent-a: #6e2c18;
+  --agent-model-claude-accent-b: #b0583a;
+  --agent-model-codex-main-a: #3e4756;
+  --agent-model-codex-main-b: #6b7a90;
+  --agent-model-codex-light-a: #dce3ec;
+  --agent-model-codex-light-b: #eef2f7;
+  --agent-model-codex-accent-a: #151a22;
+  --agent-model-codex-accent-b: #343d4c;
+  --agent-model-other-main-a: #6f747c;
+  --agent-model-other-main-b: #9aa0a8;
+  --agent-model-other-light-a: #e6e7e9;
+  --agent-model-other-light-b: #f4f5f6;
+  --agent-model-other-accent-a: #3a3d42;
+  --agent-model-other-accent-b: #5c6068;
+
   /* "Finished" is not "healthy", and the board is where that shows.
    *
    * A card that has completed wears emerald-500 (`border-emerald-500/40

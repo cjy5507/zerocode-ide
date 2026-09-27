@@ -1,4 +1,4 @@
-/* ---- 지식 그래프의 두 번째 손 — 손으로 쓴 WebGL2 페인터 (6차 P2) ------------
+/* ---- 지식 그래프의 두 번째 손 — three.js 위의 인스턴스 페인터 (6차 P2, 09-27 옮김) ----
  *
  * 왜 두 번째 손인가. 5차의 SVG는 점 하나에 요소 셋이고, 그 값이 만 쪽에서
  * 91,754개가 된다(P0의 표). 브라우저가 그것을 굽는 시간은 우리 호출 밖에 있어서
@@ -6,9 +6,18 @@
  * 래스터화다 — 어느 쪽도 사람이 지도를 미는 동안 견딜 수 있는 수가 아니다.
  * 이 파일은 같은 그림을 **인스턴스 드로우 넷**으로 그린다.
  *
- * 왜 손으로 쓰는가. three.js 코어는 min ~680 KB이고, 필요한 부분만 잘라도
- * ~250 KB이다. 여기서 쓰는 것은 직교 투영 하나·버퍼 몇 개·셰이더 넷뿐이고 그것은
- * 이 파일의 길이다. 외부 의존 0 바이트, CSP `default-src 'self'` 그대로.
+ * 왜 three.js인가. 처음(09-16)에는 손으로 쓴 WebGL2였다 — 「three.js 코어는
+ * min ~680 KB, 여기서 쓰는 것은 직교 투영 하나·버퍼 몇 개·셰이더 넷뿐」이 그때의
+ * 이유였고 외부 의존 0 바이트가 그 값이었다. 그 셈은 2026-09-27에 끝났다: 사람이
+ * 관계 탭의 3D 보기를 three.js로 옮기기로 정했고(「바꾸는김에 지식그래프도 three.js
+ * 쓰던지」), 창은 이미 `ui/vendor/three.js`(r160, IIFE, `window.THREE`)를 싣는다.
+ * 그 뒤로 손으로 쓴 렌더러 하나를 따로 두는 것은 두 벌의 GL 살림(문맥·상태 캐시·
+ * 버퍼 수명·문맥 잃음)을 두 사람이 따로 고치는 일이다. 그래서 이 손은 같은 렌더러
+ * 위에 선다 — 그리는 것은 그대로다: 셰이더 넷은 글자 그대로 `RawShaderMaterial`
+ * (GLSL 300 es)이고, 인스턴스는 `InstancedBufferGeometry`이며, 위치는 여전히 부동소수
+ * 텍스처 한 장(`DataTexture`)이다. three.js가 맡는 것은 프로그램·VAO·버퍼·텍스처의
+ * 수명과 GL 상태의 캐시다 — 문맥은 이 손이 열어 건넨다(`mount`). 필요한 기호는 `ui/vendor/build-three.mjs`의
+ * ENTRY가 전부 든다 — 보이지 않는 기호는 거기에 더하고 다시 짓는다.
  *
  * 무엇을 그리는가(설계 §5):
  *   1. 성운  — 군집마다 빌보드 원판 하나(방사 알파 + 테두리 링)
@@ -27,10 +36,12 @@
  * 계산한 `fill`·`stroke`·`stroke-width`를 읽는다. 색의 식을 JS로 옮겨 적으면
  * 그날부터 두 그림이 갈라지고, 토큰을 고친 사람은 한쪽만 고친 것을 모른다.
  *
- * 무엇을 하지 않는가: 프러스텀 컬링(만 점의 드로우가 컬링 계산보다 싸다),
- * GPU 픽킹(`readPixels`의 동기 정지가 프레임을 먹는다 — 픽킹은 CPU가 투영한
- * 자리에서, `knowledgePickSeat` 한 벌), 3D(P3의 일이다. 이 페인터는 z=0으로
- * SVG와 같은 그림을 그린다). */
+ * 무엇을 하지 않는가: 프러스텀 컬링(만 점의 드로우가 컬링 계산보다 싸다 —
+ * 메시마다 `frustumCulled = false`), GPU 픽킹(`readPixels`의 동기 정지가 프레임을
+ * 먹는다 — 픽킹은 CPU가 투영한 자리에서, `knowledgePickSeat` 한 벌), 3D(P3의
+ * 일이다. 이 페인터는 z=0으로 SVG와 같은 그림을 그린다). three.js의 카메라·행렬은
+ * 쓰지 않는다 — 투영은 셰이더의 두 줄(`KNOWLEDGE_GL_PROJECT`)이고, 렌더러에 주는
+ * 직교 카메라는 `render(scene, camera)`의 서명을 채우는 것뿐이다. */
 
 /* 이 손만의 수. 그림의 나머지 수는 전부 `knowledgeTuning`의 토큰이고 색은 CSS다. */
 const KNOWLEDGE_GL_TOKENS = Object.freeze({
@@ -43,9 +54,17 @@ const KNOWLEDGE_GL_TOKENS = Object.freeze({
   pixelCap: "--knowledge-3d-pixel-cap",
 });
 
-/* 인스턴스 하나가 덮는 사각형. 네 꼭짓점을 두 삼각형으로 — 인덱스 버퍼 없이
- * `TRIANGLE_STRIP`이다. */
+/* 인스턴스 하나가 덮는 사각형. 네 꼭짓점을 두 삼각형으로 — three.js의 `Mesh`는
+ * `TRIANGLES`만 그리므로 스트립 대신 인덱스 여섯이다(같은 두 삼각형). 인덱스는 그릴
+ * 꼭짓점 수이기도 하다: 이 기하에는 `position`이 없어서, 인덱스마저 없으면 r160의
+ * `renderBufferDirect`가 그릴 끝을 무한으로 두고 말없이 건너뛴다 — 인덱스를 빼면
+ * 오류 하나 없이 빈 그림이다. */
 const KNOWLEDGE_GL_QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+const KNOWLEDGE_GL_QUAD_INDEX = [0, 1, 2, 2, 1, 3];
+
+/* 셰이더에 `#version`이 없다 — `RawShaderMaterial`의 `glslVersion: GLSL3`이 그 줄을
+ * 맨 앞에 붙인다(붙인 뒤에 `#define SHADER_NAME …` 두 줄이 따르고 그다음이 이 글자다).
+ * 그 밖에는 원본 그대로다: 정밀도·in/out·`texelFetch`까지 손으로 쓰던 GLSL 300 es다. */
 
 /* 화면으로 옮기는 두 줄 — 세 셰이더가 같은 글자를 쓴다. 캔버스는 **기기 픽셀**이고(`uCamera.z`에
  * dpr이 든다) 점의 반지름·테두리·선 굵기·점선·고리 틈은 **CSS 픽셀**의 약속이라, 셰이더마다 그 길이에
@@ -67,8 +86,7 @@ vec4 knowledgeSeatAt(uint seat) {
 }
 `;
 
-const KNOWLEDGE_GL_NODE_VERT = `#version 300 es
-precision highp float;
+const KNOWLEDGE_GL_NODE_VERT = `precision highp float;
 uniform sampler2D uSeats;
 uniform vec3 uCamera;
 uniform vec2 uViewport;
@@ -163,8 +181,7 @@ function knowledgeGlNodeFragment() {
   const chain = branches.map((one, at) => (at === branches.length - 1
     ? `{ ${one.distance} }`
     : `if (vForm == ${one.code}) { ${one.distance} }`)).join(" else ");
-  return `#version 300 es
-precision highp float;
+  return `precision highp float;
 uniform float uFeather;
 in vec2 vLocal;
 in vec4 vFill;
@@ -206,8 +223,7 @@ void main() {
 `;
 }
 
-const KNOWLEDGE_GL_EDGE_VERT = `#version 300 es
-precision highp float;
+const KNOWLEDGE_GL_EDGE_VERT = `precision highp float;
 uniform sampler2D uSeats;
 uniform vec3 uCamera;
 uniform vec2 uViewport;
@@ -260,8 +276,7 @@ void main() {
 }
 `;
 
-const KNOWLEDGE_GL_EDGE_FRAG = `#version 300 es
-precision highp float;
+const KNOWLEDGE_GL_EDGE_FRAG = `precision highp float;
 uniform float uFeather;
 in vec2 vAlong;
 in vec4 vInk;
@@ -280,8 +295,7 @@ void main() {
 }
 `;
 
-const KNOWLEDGE_GL_DISC_VERT = `#version 300 es
-precision highp float;
+const KNOWLEDGE_GL_DISC_VERT = `precision highp float;
 uniform vec3 uCamera;
 uniform vec2 uViewport;
 uniform float uPixelRatio;
@@ -303,8 +317,7 @@ void main() {
 }
 `;
 
-const KNOWLEDGE_GL_DISC_FRAG = `#version 300 es
-precision highp float;
+const KNOWLEDGE_GL_DISC_FRAG = `precision highp float;
 uniform float uFeather;
 in vec2 vLocal;
 in vec4 vInk;
@@ -322,8 +335,7 @@ void main() {
 }
 `;
 
-const KNOWLEDGE_GL_RING_VERT = `#version 300 es
-precision highp float;
+const KNOWLEDGE_GL_RING_VERT = `precision highp float;
 uniform sampler2D uSeats;
 uniform vec3 uCamera;
 uniform vec2 uViewport;
@@ -353,8 +365,7 @@ void main() {
 }
 `;
 
-const KNOWLEDGE_GL_RING_FRAG = `#version 300 es
-precision highp float;
+const KNOWLEDGE_GL_RING_FRAG = `precision highp float;
 uniform float uFeather;
 in vec2 vLocal;
 in vec4 vInk;
@@ -380,6 +391,11 @@ let knowledgeGlAble = null;
 function knowledgeGlSupported() {
   if (knowledgeGlAble !== null) return knowledgeGlAble;
   try {
+    /* 렌더러가 실리지 않은 창(`ui/vendor/three.js`가 빠진 판)은 그릴 수 없다 — SVG가 선다. */
+    if (typeof THREE !== "object" || typeof THREE.WebGLRenderer !== "function") {
+      knowledgeGlAble = false;
+      return knowledgeGlAble;
+    }
     const probe = document.createElement("canvas");
     const gl = probe.getContext("webgl2");
     knowledgeGlAble = gl !== null && typeof gl.drawArraysInstanced === "function";
@@ -679,71 +695,68 @@ function knowledgeGlPalette(view, held) {
   return palette;
 }
 
-/* 프로그램 하나 — 짓고, 붙이고, 틀리면 이름을 말한다. */
-function knowledgeGlProgram(gl, vertexSource, fragmentSource, name) {
-  const compile = (kind, source) => {
-    const shader = gl.createShader(kind);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      const why = gl.getShaderInfoLog(shader);
-      gl.deleteShader(shader);
-      throw new Error(`knowledge gl ${name}: ${why}`);
-    }
-    return shader;
-  };
-  const vertex = compile(gl.VERTEX_SHADER, vertexSource);
-  const fragment = compile(gl.FRAGMENT_SHADER, fragmentSource);
-  const program = gl.createProgram();
-  gl.attachShader(program, vertex);
-  gl.attachShader(program, fragment);
-  gl.linkProgram(program);
-  gl.deleteShader(vertex);
-  gl.deleteShader(fragment);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const why = gl.getProgramInfoLog(program);
-    gl.deleteProgram(program);
-    throw new Error(`knowledge gl ${name}: ${why}`);
-  }
-  return program;
+/* 재질 하나 — 손으로 쓰던 셰이더의 글자 그대로를 `RawShaderMaterial`에 싣는다. three.js는
+ * 제 `#version`과 `#define` 두 줄만 앞에 붙이고 나머지(정밀도·속성·유니폼·`texelFetch`)는
+ * 이 파일의 것이다. 섞기는 손으로 쓰던 것과 같은 식이다: `NormalBlending`을 곱하지 않은
+ * 알파로(`premultipliedAlpha: false`) 쓰면 three.js가 부르는 것이
+ * `blendFuncSeparate(SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA)`다 — 버퍼는
+ * 알파를 곱한 색이고(`mount`의 문맥 속성) 셰이더는 곧은 색을 낸다. 깊이는 끈다(2D이고
+ * 문맥에 깊이 버퍼도 없다). 양면을 그린다(컬링 없음 — 사각형의 감김을 묻지 않는다).
+ * 유니폼은 네 재질이 **한 기록**을 나눈다: 프레임마다 값을 한 번만 쓰고, 셰이더가 쓰지 않는
+ * 유니폼은 three.js가 프로그램의 활성 유니폼만 올리므로 그냥 지나간다. */
+function knowledgeGlMaterial(name, vertexShader, fragmentShader, uniforms) {
+  return new THREE.RawShaderMaterial({
+    name: `knowledge-${name}`,
+    glslVersion: THREE.GLSL3,
+    vertexShader,
+    fragmentShader,
+    uniforms,
+    transparent: true,
+    blending: THREE.NormalBlending,
+    premultipliedAlpha: false,
+    depthTest: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
 }
 
-/* 한 패스의 살림: 프로그램, VAO, 인스턴스 버퍼들, 유니폼 자리. */
-function knowledgeGlPass(gl, program, spec) {
-  const vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-  const corner = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, corner);
-  gl.bufferData(gl.ARRAY_BUFFER, KNOWLEDGE_GL_QUAD, gl.STATIC_DRAW);
-  const cornerAt = gl.getAttribLocation(program, "aCorner");
-  gl.enableVertexAttribArray(cornerAt);
-  gl.vertexAttribPointer(cornerAt, 2, gl.FLOAT, false, 0, 0);
-  const buffers = {};
-  for (const row of spec) {
-    const buffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    const at = gl.getAttribLocation(program, row.name);
-    gl.enableVertexAttribArray(at);
-    if (row.integer) gl.vertexAttribIPointer(at, row.size, row.type, 0, 0);
-    else gl.vertexAttribPointer(at, row.size, row.type, row.normalized === true, 0, 0);
-    gl.vertexAttribDivisor(at, 1);
-    buffers[row.name] = buffer;
+/* 한 패스의 기하 — 사각형 하나와 인스턴스 속성들. 배열은 페인터의 통이고(`reserve`가
+ * 키운다) 속성은 그 통을 **그대로** 든다: 프레임마다 채우는 것은 통이고, 올리는 것은
+ * `addUpdateRange`가 가리킨 앞부분뿐이다(`DYNAMIC_DRAW`의 `bufferSubData`). 정수 속성
+ * (`Uint32Array`의 번호)은 three.js가 배열의 형에서 `vertexAttribIPointer`를 고르고,
+ * 바이트 속성은 `normalized`로 0..1이 된다 — 손으로 쓰던 판의 포인터와 같다. 통이 자라면
+ * 기하를 새로 짓는다(`rebuild`): three.js는 속성을 갈아 끼운 자리의 옛 버퍼를 놓지 않지만,
+ * 기하를 놓으면(`dispose`) 그 기하의 버퍼와 VAO를 전부 놓는다. */
+function knowledgeGlGeometry(rows) {
+  const geometry = new THREE.InstancedBufferGeometry();
+  geometry.setAttribute("aCorner", new THREE.BufferAttribute(KNOWLEDGE_GL_QUAD, 2));
+  geometry.setIndex(KNOWLEDGE_GL_QUAD_INDEX);
+  geometry.instanceCount = 0;
+  for (const [name, array, size, normalized] of rows) {
+    const attribute = new THREE.InstancedBufferAttribute(array, size, normalized === true);
+    attribute.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute(name, attribute);
   }
-  gl.bindVertexArray(null);
-  return {
-    program,
-    vao,
-    corner,
-    buffers,
-    uniforms: {
-      seats: gl.getUniformLocation(program, "uSeats"),
-      camera: gl.getUniformLocation(program, "uCamera"),
-      viewport: gl.getUniformLocation(program, "uViewport"),
-      seatWide: gl.getUniformLocation(program, "uSeatWide"),
-      feather: gl.getUniformLocation(program, "uFeather"),
-      pixelRatio: gl.getUniformLocation(program, "uPixelRatio"),
-    },
-  };
+  return geometry;
+}
+
+/* 위치 텍스처 — RGBA32F 한 변 `wide`, NEAREST, 밉맵 없음(설계 §9). three.js는 처음 한 번
+ * `texStorage2D`로 자리를 잡고 그 뒤 `needsUpdate`마다 `texSubImage2D`로 덮어쓴다 —
+ * 손으로 쓰던 판의 두 호출 그대로다. 자료는 통(`seatData`)의 앞부분을 보는 창이라 통을
+ * 채우면 텍스처가 그것을 올린다. */
+function knowledgeGlSeatTexture(data, wide) {
+  const texture = new THREE.DataTexture(data.subarray(0, wide * wide * 4), wide, wide,
+    THREE.RGBAFormat, THREE.FloatType);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.generateMipmaps = false;
+  texture.flipY = false;
+  texture.colorSpace = THREE.NoColorSpace;
+  /* 새 텍스처는 첫 쓰임에 올라간다 — `DataTexture`는 스스로 낡았다고 말하지 않는다. */
+  texture.needsUpdate = true;
+  return texture;
 }
 
 /* ---- GL 페인터 -------------------------------------------------------------
@@ -757,11 +770,18 @@ function makeKnowledgeGlPainter() {
     view: null,
     canvas: null,
     gl: null,
+    /* three.js의 살림 — 렌더러 하나, 장면 하나(메시 넷), 서명을 채우는 카메라 하나, 그리고
+     * 네 재질이 나누는 유니폼 기록. */
+    renderer: null,
+    scene: null,
+    camera: null,
+    uniforms: null,
     palette: null,
+    /* 패스 넷(성운·선·점·고리) — 재질·메시·기하와 인스턴스 속성의 이름. */
     passes: null,
     seatTexture: null,
     seatWide: 0,
-    /* 텍스처의 저장소가 잡힌 한 변 — 그림이 자랄 때만 다시 잡는다. */
+    /* 텍스처가 잡힌 한 변 — 그림이 자랄 때만 다시 잡는다(`reserve`). */
     seatStorage: 0,
     /* 프레임마다 다시 채우는 통들. 새로 짓지 않는다 — 만 점에서 프레임마다
      * 배열을 짓는 것은 그리는 값보다 비싸다. */
@@ -806,12 +826,16 @@ function makeKnowledgeGlPainter() {
       this.labels = labels;
       this.labelPool = [];
       view.querySelector(".knowledge-picture")?.classList.add("is-gl");
-      const gl = canvas.getContext("webgl2", {
+      /* 문맥은 **이 손이** 연다. three.js에게 캔버스만 주면 webgl2가 거절된 판에서 webgl1로
+       * 물러나 서고, 그 판에서 300 es 셰이더는 서지 못한 채 빈 그림을 그린다 — 여기서 열어
+       * 없으면 없다고 말하고(2D로 돌아간다), 있으면 그것을 렌더러에 건넨다. 속성도 여기의
+       * 것이다. */
+      const gl = typeof THREE !== "object" ? null : canvas.getContext("webgl2", {
         alpha: true,
         antialias: false,
         depth: false,
         stencil: false,
-        /* 버퍼는 알파를 곱한 색이다 — 아래의 섞기(`SRC_ALPHA`, `ONE_MINUS_SRC_ALPHA`)가 셰이더의
+        /* 버퍼는 알파를 곱한 색이다 — 재질의 섞기(`SRC_ALPHA`, `ONE_MINUS_SRC_ALPHA`)가 셰이더의
          * 곧은 색에 알파를 곱해 쓴다. 곱하지 않은 버퍼(`false`)라고 말하면 합성기가 알파를 한
          * 번 더 곱해 반투명 잉크(원본·흐림·성운)가 SVG보다 옅어진다(실측 09-17, 같은 판: 원본
          * 마름모의 한가운데 SVG (57,69,70) → GL (26,32,34), `true`에서 (58,69,70)). */
@@ -832,7 +856,8 @@ function makeKnowledgeGlPainter() {
         return;
       }
       this.gl = gl;
-      /* 문맥을 잃으면(잠에서 깬 판·드라이버 재시작) 렌즈를 접고 한 줄 알린다. */
+      /* 문맥을 잃으면(잠에서 깬 판·드라이버 재시작) 렌즈를 접고 한 줄 알린다. three.js도
+       * 같은 사건을 듣고 제 문맥을 잃은 것으로 적지만, 돌아가는 길은 이 손의 것이다. */
       this.onLost = (event) => {
         event.preventDefault();
         this.lost = true;
@@ -840,33 +865,63 @@ function makeKnowledgeGlPainter() {
       };
       canvas.addEventListener("webglcontextlost", this.onLost);
       try {
-        this.passes = {
-          disc: knowledgeGlPass(gl,
-            knowledgeGlProgram(gl, KNOWLEDGE_GL_DISC_VERT, KNOWLEDGE_GL_DISC_FRAG, "disc"), [
-              { name: "aDisc", size: 4, type: gl.FLOAT },
-              { name: "aInk", size: 4, type: gl.FLOAT },
-              { name: "aRim", size: 2, type: gl.FLOAT },
-            ]),
-          edge: knowledgeGlPass(gl,
-            knowledgeGlProgram(gl, KNOWLEDGE_GL_EDGE_VERT, KNOWLEDGE_GL_EDGE_FRAG, "edge"), [
-              { name: "aEnds", size: 2, type: gl.UNSIGNED_INT, integer: true },
-              { name: "aInk", size: 4, type: gl.UNSIGNED_BYTE, normalized: true },
-              { name: "aShape", size: 4, type: gl.UNSIGNED_BYTE, normalized: true },
-            ]),
-          node: knowledgeGlPass(gl,
-            knowledgeGlProgram(gl, KNOWLEDGE_GL_NODE_VERT, knowledgeGlNodeFragment(), "node"), [
-              { name: "aSeat", size: 1, type: gl.UNSIGNED_INT, integer: true },
-              { name: "aFill", size: 4, type: gl.UNSIGNED_BYTE, normalized: true },
-              { name: "aStroke", size: 4, type: gl.UNSIGNED_BYTE, normalized: true },
-              { name: "aShape", size: 4, type: gl.UNSIGNED_BYTE, normalized: true },
-            ]),
-          ring: knowledgeGlPass(gl,
-            knowledgeGlProgram(gl, KNOWLEDGE_GL_RING_VERT, KNOWLEDGE_GL_RING_FRAG, "ring"), [
-              { name: "aSeat", size: 1, type: gl.UNSIGNED_INT, integer: true },
-              { name: "aInk", size: 4, type: gl.UNSIGNED_BYTE, normalized: true },
-              { name: "aShape", size: 4, type: gl.UNSIGNED_BYTE, normalized: true },
-            ]),
+        /* 문맥을 건네므로 three.js는 문맥을 만들지 않는다 — 문맥의 속성은 위의 것이 전부이고,
+         * 렌더러가 여기서 읽는 것은 `premultipliedAlpha` 하나다(지우는 색에 알파를 곱할지). 위의
+         * 버퍼와 같은 값이어야 한다. */
+        const renderer = new THREE.WebGLRenderer({
+          canvas,
+          context: gl,
+          premultipliedAlpha: true,
+        });
+        this.renderer = renderer;
+        /* 크기는 기기 픽셀로 직접 준다(`setSize`, dpr 1) — 캔버스의 CSS 크기는 스타일시트의
+         * 것이고(`updateStyle: false`), 셰이더의 자(`uPixelRatio`)는 dpr을 따로 받는다. 정렬은
+         * 끈다: 그리는 순서는 장면에 넣은 순서(성운·선·점·고리)다. 색 공간·톤 매핑은 셰이더가
+         * 낸 색을 그대로 쓰는 값이다(raw 셰이더라 어차피 지나지 않지만, 기본값에 기대지 않는다). */
+        renderer.setPixelRatio(1);
+        renderer.autoClear = true;
+        renderer.sortObjects = false;
+        renderer.setClearColor(0x000000, 0);
+        renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+        renderer.toneMapping = THREE.NoToneMapping;
+        /* 셰이더가 서지 않으면 three.js는 콘솔에 적고 빈 그림을 그린다 — 이 손은 그 대신
+         * 던져서 SVG로 돌아간다(아래 `catch`, 첫 그림이 여기 `render`다). */
+        renderer.debug.onShaderError = (context, program, vertexShader, fragmentShader) => {
+          throw new Error([context.getProgramInfoLog(program),
+            context.getShaderInfoLog(vertexShader), context.getShaderInfoLog(fragmentShader)]
+            .filter((word) => word).join(" / "));
         };
+        this.uniforms = {
+          uSeats: { value: null },
+          uCamera: { value: new THREE.Vector3() },
+          uViewport: { value: new THREE.Vector2() },
+          uPixelRatio: { value: 1 },
+          uSeatWide: { value: 1 },
+          uFeather: { value: 1 },
+        };
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const uniforms = this.uniforms;
+        const pass = (name, vertexShader, fragmentShader) => ({
+          material: knowledgeGlMaterial(name, vertexShader, fragmentShader, uniforms),
+          mesh: null,
+          geometry: null,
+          names: [],
+        });
+        this.passes = {
+          disc: pass("disc", KNOWLEDGE_GL_DISC_VERT, KNOWLEDGE_GL_DISC_FRAG),
+          edge: pass("edge", KNOWLEDGE_GL_EDGE_VERT, KNOWLEDGE_GL_EDGE_FRAG),
+          node: pass("node", KNOWLEDGE_GL_NODE_VERT, knowledgeGlNodeFragment()),
+          ring: pass("ring", KNOWLEDGE_GL_RING_VERT, KNOWLEDGE_GL_RING_FRAG),
+        };
+        /* 통을 하나씩 잡아 메시 넷을 세우고 빈 그림을 한 장 그린다 — 인스턴스 0의 드로우는
+         * 없지만 프로그램은 여기서 서고(three.js는 첫 쓰임에서 링크를 검사한다), 서지 않는
+         * 셰이더는 여기서 던진다. 손으로 쓰던 판도 셰이더를 세우는 값을 첫 그림 전에 치렀다.
+         * 여기서 잡은 한 칸짜리 통은 첫 `paintTopology`가 제 크기로 갈아 끼운다 — 링크 검사를
+         * 앞당기려고 일부러 치르는 값이다. */
+        this.reserveCounts(1, 1, 1);
+        for (const one of Object.values(this.passes)) one.mesh.visible = true;
+        renderer.render(this.scene, this.camera);
       } catch (trouble) {
         /* 셰이더가 서지 않는 판이 있다(드라이버·판 버전). 그 판은 2D로 그린다 —
          * 창을 멈추는 대신. 무엇이 틀렸는지는 창의 오류 파일이 받는다. */
@@ -878,16 +933,6 @@ function makeKnowledgeGlPainter() {
         knowledgeGlFellBack(view);
         return;
       }
-      this.seatTexture = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, this.seatTexture);
-      /* NEAREST만 쓴다 — 부동소수 텍스처의 필터는 판마다 다르고(설계 §9),
-       * `texelFetch`는 애초에 필터를 묻지 않는다. */
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.enable(gl.BLEND);
-      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       this.palette = knowledgeGlPalette(view, null);
     },
 
@@ -924,7 +969,7 @@ function makeKnowledgeGlPainter() {
      * 그리고 그 옷을 따라 우선순위가 바뀐 이름표만 다시 선다. 아직 위상을 올리지
      * 않은 손은 할 일이 없다 — 곧 올 그림이 옷까지 입힌다. */
     paintDress(layout) {
-      if (this.lost || this.gl === null || this.uploaded === -1) return;
+      if (this.lost || this.renderer === null || this.uploaded === -1) return;
       this.dressStale = true;
       paintKnowledgeFrame(this.view, layout, { cameraOnly: true });
     },
@@ -932,41 +977,95 @@ function makeKnowledgeGlPainter() {
     /* 통을 이 그림의 크기에 맞춘다. 자라기만 한다 — 렌즈가 절반을 숨긴 판이
      * 통을 줄였다가 돌아오면 그 자리에서 다시 짓게 된다. */
     reserve(layout) {
-      const count = layout.count;
-      const edgeCount = layout.model.edgeCount;
-      const wide = Math.max(1, Math.ceil(Math.sqrt(count)));
+      this.reserveCounts(layout.count, layout.model.edgeCount, layout.namedCount);
+    },
+
+    /* 통과 그 통을 든 기하·텍스처. 통이 새로 잡힌 패스만 기하를 다시 짓고(옛 기하는
+     * 놓는다), 위치 텍스처는 한 변이 바뀐 프레임에만 다시 잡는다. 처음 부르는 순서
+     * (성운·선·점·고리)가 장면의 순서이고 그것이 그리는 순서다. */
+    reserveCounts(count, edgeCount, named) {
+      /* 떠난 손(문맥을 잃고 놓은 뒤)에는 통도 기하도 없다 — 늦게 온 위상은 그냥 지나간다. */
+      if (this.renderer === null) return;
+      const wide = Math.max(1, Math.ceil(Math.sqrt(Math.max(1, count))));
       if (this.seatData === null || this.seatData.length < wide * wide * 4) {
         this.seatData = new Float32Array(wide * wide * 4);
-        this.seatWide = wide;
         this.uploaded = -1;
+        /* 새 통은 새 창으로 봐야 한다 — 한 변이 같아도 텍스처를 다시 잡는다. */
+        this.seatStorage = 0;
       }
       this.seatWide = wide;
-      if (this.nodeSeat === null || this.nodeSeat.length < count) {
-        this.nodeSeat = new Uint32Array(count);
-        this.nodeFill = new Uint8Array(count * 4);
-        this.nodeStroke = new Uint8Array(count * 4);
-        this.nodeShape = new Uint8Array(count * 4);
-        /* 점 하나에 고리가 둘일 수 있다 — 회상의 고리와 접힘의 고리. */
-        this.ringSeat = new Uint32Array(count * 2);
-        this.ringInk = new Uint8Array(count * 8);
-        this.ringShape = new Uint8Array(count * 8);
+      if (this.seatStorage !== wide) {
+        this.seatTexture?.dispose();
+        this.seatTexture = knowledgeGlSeatTexture(this.seatData, wide);
+        this.seatStorage = wide;
+        this.uniforms.uSeats.value = this.seatTexture;
+      }
+      if (this.discData === null || this.discData.length < Math.max(1, named) * 4) {
+        this.discData = new Float32Array(Math.max(1, named) * 4);
+        this.discInk = new Float32Array(Math.max(1, named) * 4);
+        this.discRim = new Float32Array(Math.max(1, named) * 2);
+        this.rebuild(this.passes.disc, [
+          ["aDisc", this.discData, 4],
+          ["aInk", this.discInk, 4],
+          ["aRim", this.discRim, 2],
+        ]);
       }
       if (this.edgeEnds === null || this.edgeEnds.length < edgeCount * 2) {
         this.edgeEnds = new Uint32Array(Math.max(1, edgeCount) * 2);
         this.edgeInk = new Uint8Array(Math.max(1, edgeCount) * 4);
         this.edgeShape = new Uint8Array(Math.max(1, edgeCount) * 4);
+        this.rebuild(this.passes.edge, [
+          ["aEnds", this.edgeEnds, 2],
+          ["aInk", this.edgeInk, 4, true],
+          ["aShape", this.edgeShape, 4, true],
+        ]);
       }
-      const named = layout.namedCount;
-      if (this.discData === null || this.discData.length < Math.max(1, named) * 4) {
-        this.discData = new Float32Array(Math.max(1, named) * 4);
-        this.discInk = new Float32Array(Math.max(1, named) * 4);
-        this.discRim = new Float32Array(Math.max(1, named) * 2);
+      if (this.nodeSeat === null || this.nodeSeat.length < count) {
+        const room = Math.max(1, count);
+        this.nodeSeat = new Uint32Array(room);
+        this.nodeFill = new Uint8Array(room * 4);
+        this.nodeStroke = new Uint8Array(room * 4);
+        this.nodeShape = new Uint8Array(room * 4);
+        /* 점 하나에 고리가 둘일 수 있다 — 회상의 고리와 접힘의 고리. */
+        this.ringSeat = new Uint32Array(room * 2);
+        this.ringInk = new Uint8Array(room * 8);
+        this.ringShape = new Uint8Array(room * 8);
+        this.rebuild(this.passes.node, [
+          ["aSeat", this.nodeSeat, 1],
+          ["aFill", this.nodeFill, 4, true],
+          ["aStroke", this.nodeStroke, 4, true],
+          ["aShape", this.nodeShape, 4, true],
+        ]);
+        this.rebuild(this.passes.ring, [
+          ["aSeat", this.ringSeat, 1],
+          ["aInk", this.ringInk, 4, true],
+          ["aShape", this.ringShape, 4, true],
+        ]);
+      }
+    },
+
+    /* 패스의 기하를 (다시) 짓는다. 메시는 처음 한 번 장면에 서고 그 뒤로는 기하만 갈아
+     * 끼운다 — 장면의 순서가 그리는 순서라 메시를 빼고 다시 넣지 않는다. */
+    rebuild(pass, rows) {
+      pass.geometry?.dispose();
+      pass.geometry = knowledgeGlGeometry(rows);
+      pass.names = rows.map((row) => row[0]);
+      if (pass.mesh === null) {
+        const mesh = new THREE.Mesh(pass.geometry, pass.material);
+        /* 컬링도 행렬도 없다 — 자리는 셰이더가 텍스처에서 읽고, 화면은 언제나 전부다. */
+        mesh.frustumCulled = false;
+        mesh.matrixAutoUpdate = false;
+        mesh.visible = false;
+        pass.mesh = mesh;
+        this.scene.add(mesh);
+      } else {
+        pass.mesh.geometry = pass.geometry;
       }
     },
 
     paintFrame(layout, camera, { cameraOnly = false } = {}) {
       const view = this.view;
-      if (this.lost || this.gl === null) return;
+      if (this.lost || this.renderer === null) return;
       const picture = view.querySelector(".knowledge-picture");
       const inverse = camera.inverse;
       /* 이름판과 관계의 낱말은 여전히 이 <svg> 안에 산다(군집 수·이웃 수만큼이라
@@ -975,20 +1074,17 @@ function makeKnowledgeGlPainter() {
       this.palette = knowledgeGlPalette(view, this.palette);
       const tuning = layout.tuning;
       const feather = Number.isFinite(tuning.glFeather) ? tuning.glFeather : 1;
-      const gl = this.gl;
       const wide = view.querySelector(".knowledge-canvas").clientWidth;
       const tall = view.querySelector(".knowledge-canvas").clientHeight;
       const cap = Number.isFinite(tuning.glPixelCap) ? tuning.glPixelCap : 2;
       const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, cap));
       const pixelWide = Math.max(1, Math.round(wide * dpr));
       const pixelTall = Math.max(1, Math.round(tall * dpr));
+      /* 렌더러가 캔버스의 기기 픽셀과 뷰포트를 함께 맞춘다(dpr 1로 세웠으므로 준 수 그대로).
+       * 지우기는 렌더러의 몫이다(`autoClear`, 투명한 검정). */
       if (this.canvas.width !== pixelWide || this.canvas.height !== pixelTall) {
-        this.canvas.width = pixelWide;
-        this.canvas.height = pixelTall;
+        this.renderer.setSize(pixelWide, pixelTall, false);
       }
-      gl.viewport(0, 0, pixelWide, pixelTall);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
       /* 두 가지가 따로 낡는다. 자리(위치 텍스처)는 훑기·위상·판이 바뀐 프레임에서,
        * 옷(점·선의 색과 흐림)은 거기에 더해 프레임 없이 클래스만 바뀐 뒤에
        * (`paintDress`). 카메라만 움직인 프레임은 둘 다 올리지 않는다. */
@@ -1243,83 +1339,48 @@ function makeKnowledgeGlPainter() {
       this.counts.discs = discs;
     },
 
-    /* 드로우 넷 — 성운, 선, 점, 고리. 인스턴스가 없는 패스는 호출도 없다.
+    /* 드로우 넷 — 성운, 선, 점, 고리. 인스턴스가 없는 패스는 호출도 없다(메시를 숨긴다 —
+     * 드로우 수는 렌더러가 센 것을 그대로 적는다, `info.render.calls`).
      *
      * 카메라만 움직인 프레임은 **아무것도 올리지 않는다**(설계 §6의 표): 위치도
-     * 옷도 그대로이고 바뀐 것은 행렬 하나뿐이다. 이 한 줄이 만 쪽의 궤도 프레임에서
-     * 프레임마다의 163 KB 텍스처 재할당과 570 KB의 버퍼 쓰기를 없앤다. */
+     * 옷도 그대로이고 바뀐 것은 유니폼 몇뿐이다. 이 한 줄이 만 쪽의 궤도 프레임에서
+     * 프레임마다의 163 KB 텍스처 재할당과 570 KB의 버퍼 쓰기를 없앤다. 올리는 프레임도
+     * 통 전부가 아니라 채운 앞부분만이다(`addUpdateRange`). */
     draw(layout, camera, pixelWide, pixelTall, feather, dpr, seats, dress) {
-      const gl = this.gl;
       const counts = this.counts;
-      counts.draws = 0;
+      const uniforms = this.uniforms;
       /* 카메라는 판 픽셀의 것이고 캔버스는 기기 픽셀이라 배율에 dpr이 든다. */
-      const cameraX = camera.x;
-      const cameraY = camera.y;
-      const scale = camera.scale * dpr;
-      const seatWide = this.seatWide;
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.seatTexture);
-      if (seats) {
-        /* 자리는 한 번 잡고(`texStorage2D`) 그 뒤로는 덮어쓴다 — 프레임마다 저장소를
-         * 다시 잡으면 드라이버가 옛 텍스처를 놓을 때까지 기다린다. */
-        if (this.seatStorage !== seatWide) {
-          gl.deleteTexture(this.seatTexture);
-          this.seatTexture = gl.createTexture();
-          gl.bindTexture(gl.TEXTURE_2D, this.seatTexture);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-          gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, seatWide, seatWide);
-          this.seatStorage = seatWide;
-        }
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, seatWide, seatWide,
-          gl.RGBA, gl.FLOAT, this.seatData);
-      }
-      const run = (pass, count, upload, uploads) => {
+      uniforms.uCamera.value.set(camera.x, camera.y, camera.scale * dpr);
+      uniforms.uViewport.value.set(pixelWide, pixelTall);
+      uniforms.uFeather.value = feather * dpr;
+      uniforms.uPixelRatio.value = dpr;
+      uniforms.uSeatWide.value = this.seatWide;
+      /* 자리는 한 번 잡고(`texStorage2D`, `reserve`) 그 뒤로는 덮어쓴다 — `needsUpdate`가
+       * `texSubImage2D` 한 번이다. */
+      if (seats) this.seatTexture.needsUpdate = true;
+      const show = (pass, count, upload) => {
+        pass.mesh.visible = count > 0;
         if (count === 0) return;
-        gl.useProgram(pass.program);
-        gl.bindVertexArray(pass.vao);
-        if (upload) {
-          for (const [name, data] of uploads) {
-            gl.bindBuffer(gl.ARRAY_BUFFER, pass.buffers[name]);
-            gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
-          }
+        pass.geometry.instanceCount = count;
+        if (!upload) return;
+        for (const name of pass.names) {
+          const attribute = pass.geometry.attributes[name];
+          /* 지난 범위를 먼저 지운다 — 기하를 새로 지은 프레임에는 three.js가 배열 전체를 처음
+           * 올리며 범위를 쓰지 않으므로, 지우지 않으면 그 범위가 다음 옷 프레임에 한 번 더 오른다. */
+          attribute.clearUpdateRanges();
+          attribute.addUpdateRange(0, count * attribute.itemSize);
+          attribute.needsUpdate = true;
         }
-        if (pass.uniforms.seats !== null) gl.uniform1i(pass.uniforms.seats, 0);
-        if (pass.uniforms.seatWide !== null) gl.uniform1i(pass.uniforms.seatWide, seatWide);
-        gl.uniform3f(pass.uniforms.camera, cameraX, cameraY, scale);
-        gl.uniform2f(pass.uniforms.viewport, pixelWide, pixelTall);
-        if (pass.uniforms.feather !== null) gl.uniform1f(pass.uniforms.feather, feather * dpr);
-        if (pass.uniforms.pixelRatio !== null) gl.uniform1f(pass.uniforms.pixelRatio, dpr);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
-        counts.draws += 1;
       };
       /* 성운만은 프레임마다 올린다 — 군집 수만큼의 짧은 배열이고, 그 자리는
        * 카메라가 움직이면 이름판과 함께 다시 정해진다. 점·선·고리는 위상과 옷이
        * 바뀐 프레임에만 올라간다. */
-      run(this.passes.disc, counts.discs, true, [
-        ["aDisc", this.discData.subarray(0, counts.discs * 4)],
-        ["aInk", this.discInk.subarray(0, counts.discs * 4)],
-        ["aRim", this.discRim.subarray(0, counts.discs * 2)],
-      ]);
-      run(this.passes.edge, counts.edges, dress, [
-        ["aEnds", this.edgeEnds.subarray(0, counts.edges * 2)],
-        ["aInk", this.edgeInk.subarray(0, counts.edges * 4)],
-        ["aShape", this.edgeShape.subarray(0, counts.edges * 4)],
-      ]);
-      run(this.passes.node, counts.nodes, dress, [
-        ["aSeat", this.nodeSeat.subarray(0, counts.nodes)],
-        ["aFill", this.nodeFill.subarray(0, counts.nodes * 4)],
-        ["aStroke", this.nodeStroke.subarray(0, counts.nodes * 4)],
-        ["aShape", this.nodeShape.subarray(0, counts.nodes * 4)],
-      ]);
-      run(this.passes.ring, counts.rings, dress, [
-        ["aSeat", this.ringSeat.subarray(0, counts.rings)],
-        ["aInk", this.ringInk.subarray(0, counts.rings * 4)],
-        ["aShape", this.ringShape.subarray(0, counts.rings * 4)],
-      ]);
-      gl.bindVertexArray(null);
+      show(this.passes.disc, counts.discs, true);
+      show(this.passes.edge, counts.edges, dress);
+      show(this.passes.node, counts.nodes, dress);
+      show(this.passes.ring, counts.rings, dress);
+      this.renderer.render(this.scene, this.camera);
+      counts.draws = this.renderer.info.render.calls;
     },
 
     /* 이름표는 HTML이다 — 예산(≤ 46)만큼의 <span>이고 점의 수와 무관하다. 자리는
@@ -1370,34 +1431,41 @@ function makeKnowledgeGlPainter() {
       return layout === undefined ? -1 : knowledgePickSeat(layout, px, py);
     },
 
-    /* 놓는다 — 버퍼·텍스처·프로그램·VAO·리스너·오버레이 전부. 하나라도 남으면
-     * 페인터를 갈아 끼울 때마다 GPU와 힙이 자란다(하네스가 열 번 갈아 끼우고
-     * 그 자리를 잰다). */
+    /* 놓는다 — 기하(버퍼·VAO)·재질(프로그램)·텍스처·렌더러·문맥·리스너·오버레이 전부.
+     * 하나라도 남으면 페인터를 갈아 끼울 때마다 GPU와 힙이 자란다(하네스가 열 번 갈아
+     * 끼우고 그 자리를 재고, 렌더러의 장부 `info.memory`가 0으로 돌아오는지도 묻는다).
+     * 순서가 약속이다: 기하·재질·텍스처의 `dispose()`가 렌더러의 `dispose()`보다 먼저다.
+     * 렌더러는 놓일 때 제 장부(`properties`)를 새로 갈아 끼우므로, 그 뒤에 오는 텍스처·재질의
+     * 놓임은 GL 객체를 찾지 못한다 — `deleteTexture`도 프로그램 해제도 없이 `info.memory`와
+     * `info.programs`에 남는다. */
     dispose() {
       const view = this.view;
-      const gl = this.gl;
-      if (gl !== null && this.passes !== null) {
+      if (this.passes !== null) {
         for (const pass of Object.values(this.passes)) {
-          for (const buffer of Object.values(pass.buffers)) gl.deleteBuffer(buffer);
-          gl.deleteBuffer(pass.corner);
-          gl.deleteVertexArray(pass.vao);
-          gl.deleteProgram(pass.program);
+          pass.geometry?.dispose();
+          pass.material.dispose();
         }
       }
-      if (gl !== null && this.seatTexture !== null) gl.deleteTexture(this.seatTexture);
+      this.seatTexture?.dispose();
       this.seatStorage = 0;
       if (this.canvas !== null && this.onLost !== null) {
         this.canvas.removeEventListener("webglcontextlost", this.onLost);
       }
+      this.renderer?.dispose();
       /* 문맥 자체도 놓는다 — 판마다의 GL 문맥 수는 브라우저가 열여섯 언저리로
-       * 묶어 두고, 넘으면 가장 오래된 것을 말없이 잃는다. */
-      gl?.getExtension("WEBGL_lose_context")?.loseContext();
+       * 묶어 두고, 넘으면 가장 오래된 것을 말없이 잃는다. 렌더러가 서지 못한 판에도
+       * 문맥은 열려 있으므로 렌더러가 아니라 문맥에게 말한다. */
+      this.gl?.getExtension("WEBGL_lose_context")?.loseContext();
       this.canvas?.remove();
       this.labels?.remove();
       this.palette?.swatches?.host.remove();
       this.palette?.swatches?.tracing?.remove();
       view?.querySelector(".knowledge-picture")?.classList.remove("is-gl");
       this.gl = null;
+      this.renderer = null;
+      this.scene = null;
+      this.camera = null;
+      this.uniforms = null;
       this.passes = null;
       this.seatTexture = null;
       this.canvas = null;

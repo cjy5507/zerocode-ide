@@ -6716,8 +6716,9 @@ mod tests {
                 );
             }
         }
-        // And nothing else is loaded either: two scripts, in this order, both
-        // of them ours. A third `<script src>` is how a CDN editor arrives.
+        // And nothing else is loaded either: the vendored files, in this
+        // order, then the window — all of them ours. One more `<script src>`
+        // is how a CDN editor arrives.
         let sources: Vec<String> = markup
             .match_indices("<script defer src=\"")
             .map(|(at, opens)| {
@@ -6728,7 +6729,10 @@ mod tests {
                     .to_string()
             })
             .collect();
-        let mut expected = vec!["./vendor/cm6.js".to_string()];
+        let mut expected = vec![
+            "./vendor/cm6.js".to_string(),
+            "./vendor/three.js".to_string(),
+        ];
         expected.extend(
             crate::ui_source::WINDOW_PARTS
                 .iter()
@@ -6828,6 +6832,53 @@ mod tests {
                 && recipe.contains("\"@codemirror/state\": \""),
             "ui/vendor/build-cm6.mjs no longer says how to rebuild the file it \
              produces, or no longer pins what goes into it"
+        );
+    }
+
+    /// The relations tab's 3D view draws with three.js (WebGL2), vendored on
+    /// the editor's road: one IIFE on `window.THREE`, built offline by a
+    /// pinned recipe, loaded before the window that reads it.
+    #[test]
+    fn the_3d_renderer_is_vendored_three_on_the_editors_road() {
+        let markup = include_str!("../../../../ui/index.html");
+        let tag = "<script defer src=\"./vendor/three.js\"></script>";
+        let vendor_at = markup
+            .find(tag)
+            .expect("ui/index.html does not load the vendored three.js");
+        let view_at = markup
+            .find("./shell-board-orbit.js")
+            .expect("ui/index.html loads the 3D view");
+        assert!(
+            vendor_at < view_at,
+            "three.js is loaded after the view that uses it"
+        );
+
+        // The CSP admits no worker and no `blob:`, and the window's console
+        // is read as signal — three.js's deprecation warnings are stripped.
+        let vendored = include_str!("../../../../ui/vendor/three.js");
+        for smell in ["new Worker(", "blob:", "importScripts(", "console.warn"] {
+            assert!(
+                !vendored.contains(smell),
+                "ui/vendor/three.js contains `{smell}`"
+            );
+        }
+        assert!(
+            vendored.contains("window.THREE="),
+            "ui/vendor/three.js does not attach `window.THREE`"
+        );
+        let licence = include_str!("../../../../ui/vendor/three-LICENSE");
+        assert!(
+            licence.contains("MIT License") && licence.contains("three@"),
+            "ui/vendor/three-LICENSE does not carry the MIT notice and the \
+             package it covers"
+        );
+        let recipe = include_str!("../../../../ui/vendor/build-three.mjs");
+        assert!(
+            recipe.contains("node ui/vendor/build-three.mjs")
+                && recipe.contains("--format=iife")
+                && recipe.contains("three: \""),
+            "ui/vendor/build-three.mjs no longer says how to rebuild the file \
+             it produces, or no longer pins what goes into it"
         );
     }
 

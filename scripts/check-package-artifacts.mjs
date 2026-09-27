@@ -33,6 +33,8 @@ export const requiredRoutes = [
   "/tokens.css",
   "/vendor/cm6-LICENSE",
   "/vendor/cm6.js",
+  "/vendor/three-LICENSE",
+  "/vendor/three.js",
 ];
 
 const forbiddenRoutes = [
@@ -40,6 +42,7 @@ const forbiddenRoutes = [
   "/prototype/",
   "/tests/",
   "/vendor/build-cm6.mjs",
+  "/vendor/build-three.mjs",
 ];
 
 export async function assertEmbeddedRoutes(path, label = "release binary") {

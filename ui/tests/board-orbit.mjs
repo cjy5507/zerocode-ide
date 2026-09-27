@@ -1,7 +1,8 @@
 /* t-9444 → t-10118 · 관계 탭의 「입체」 보기 — 회귀와 무게.
  *
- * 워크스페이스·에이전트·하위 에이전트가 3차원 좌표에 서고, 원근 카메라가 그 공간을
- * 비추며(`ui/shell-board-orbit.js`), 우편과 의존은 공간의 곡선을 따라 흐른다. 픽스처는
+ * 워크스페이스는 떠 있는 판(메인이 왼쪽의 본진, 나머지는 오른쪽의 섬)이고 에이전트는 그
+ * 위의 로봇이며, 지시는 빛의 레일을 따라 왼쪽에서 오른쪽으로 흐르고, 직교 카메라가 그것을
+ * 비스듬히 내려다본다(`ui/shell-board-orbit.js`, three.js 위의 WebGL2). 픽스처는
  * 프로덕션과 같은 네 문으로만 들어간다 — `__PANES__`·`__LEDGER__`·`__COLUMNS__`·
  * `__OVERLAYS__` — 그래야 체크아웃이 원장 행을 타고 `places`까지 와서 워크스페이스
  * 넷으로 갈리는지가 실제로 재어진다.
@@ -20,19 +21,31 @@
  *      그 사이의 갱신을 빠짐없이 그리고 맞춤은 한 번 돈다 (t-9532).
  *   ⑧ 실시간 지도는 카드 그림 위의 것이다 — 입체에서 그 손잡이는 누를 수 없는 채로
  *      까닭을 말하고, 지도는 적지도 뛰지도 않는다; 카드로 돌아오면 그대로 선다 (t-9532).
- *   ⑨ 공간: 같은 입력은 같은 자리이고, 에이전트 하나가 와도 남의 자리는 움직이지 않는다.
- *      메인 워크스페이스는 원점, 다른 워크스페이스는 구면 위, 에이전트는 제 워크스페이스
- *      둘레의 작은 구면, 하위 에이전트는 부모 곁.
- *   ⑩ 투영: 카메라를 90° 돌리면 화면의 가로가 세계의 z를 따른다(원근 — 크기는 깊이에
- *      반비례). 먼 것이 먼저 그려지고 옅으며, 이름은 가까운 몇만 선다.
- *   ⑪ 간선: 구조·계보·의존·우편이 공간의 선이고 우편의 점은 그 곡선 위를 탄다. 카메라가
- *      멈춘 프레임은 간선을 다시 투영하지 않고, 프레임이 쓰는 DOM은 라벨의 style뿐이다.
+ *   ⑨ 자리: 같은 입력은 같은 자리이고, 에이전트 하나가 와도 남의 자리는 움직이지 않는다.
+ *      메인 워크스페이스(본진)가 가장 왼쪽이고, 다른 판의 지시를 받은 섬은 지시한 판의
+ *      오른쪽에 서며, 판끼리는 60 판에서도 겹치지 않는다. 에이전트는 제 판 위에, 하위
+ *      에이전트는 부모 곁에, 조율자는 단 위에 1.5배로 앉는다. 이름표는 6·20·60 판과 좁은
+ *      판에서 서로 겹치지 않는다(비킬 자리가 없으면 칩으로 접힌다). (흐름 보드에서 다시 씀 —
+ *      구면의 자리를 흐름의 자리로.)
+ *   ⑩ 투영: 직교다 — 화면의 자리는 따로 셈한 직교 신탁과 같고, 카메라를 90° 돌리면 화면의
+ *      가로가 세계의 x 대신 z를 따르며, 같은 길이는 깊이와 무관하게 같은 길이로 그려진다.
+ *      (흐름 보드에서 다시 씀 — 원근·안개·화가의 차례를 직교로.)
+ *   ⑪ 레일: 계보는 덮개를 두른 빛의 관, 의존은 덮개 없는 가는 관이고 구조는 선이 아니라
+ *      앉은 자리다. 방금 오간 우편만 보낸 쪽 → 받는 쪽의 호를 탄다. 카메라가 멈춘 프레임은
+ *      이름표를 다시 앉히지 않고, 프레임이 쓰는 DOM은 라벨의 style뿐이다.
  *   ⑫ 카메라: 끌면 돌고 놓으면 미끄러져 선다; 두 번 누르면 맞춤으로 돌아가 다시 돈다.
+ *   ⑬ 그릴 수 없는 창: WebGL2가 없거나 컨텍스트를 잃은 창은 카드로 서고, 입체 단추는 누를
+ *      수 없는 채로 까닭을 말한다; 컨텍스트가 돌아오면 입체로 다시 선다. 토글을 오가도 GPU의
+ *      자원(`renderer.info.memory`)은 자라지 않는다. 둘째 칸에 선 판을 닫아도 첫 판은 입체로 선다.
+ *
+ * 헤드리스 Chromium은 WebGL2를 기본으로 주지 않는다 — 이 시험은 SwiftShader를 켠 판
+ * (`ORBIT_GL_ARGS`)에서 돈다(받은 브라우저가 WebGL2를 주지 않으면 그 곁에 하나를 띄운다).
+ * 그래서 이 판의 프레임 시간은 소프트웨어 래스터라이저의 것이 아니라 JS의 것을 잰다.
  *
  *   node ui/tests/board-orbit.mjs                     기능 시험 + 무게 표(6·20·60, Chromium)
  *   node ui/tests/board-orbit.mjs --perf --engine webkit --json out.json
  *   node ui/tests/board-orbit.mjs --perf --dpr 2       2배 밀도(Chromium, CDP)
- *   node ui/tests/board-orbit.mjs --shots <dir>        6·20·60 × 다크·라이트 사진 여섯 장
+ *   node ui/tests/board-orbit.mjs --shots <dir>        6·20·60 × 다크·라이트 사진 여섯 장 + 좁은 판 한 장
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -56,7 +69,8 @@ const ORBIT_SIZES = Object.freeze({
  * 워크스페이스의 앞 에이전트를 부모로 드는 하위 에이전트), 우편 링크 `links`개 중
  * `fresh`개가 방금 오간 것(그 절반이 미확인), 과업 의존 `deps`개. 페이지 안에서 통째로
  * 도는 함수라 바깥 이름을 쓰지 않는다. */
-export function orbitFixture({ workspaces = 4, agents = 12, links = 40, fresh = 20, deps = 0 } = {}) {
+export function orbitFixture({ workspaces = 4, agents = 12, links = 40, fresh = 20, deps = 0, calm = false,
+  chain = false } = {}) {
   window.__ORBIT_OPENED_AT__ = performance.now();
   const ROOT = "/repos/orbit";
   const trees = [ROOT, ...Array.from({ length: workspaces - 1 }, (_, at) => `/repos/orbit-wt/w${at + 1}`)];
@@ -72,37 +86,49 @@ export function orbitFixture({ workspaces = 4, agents = 12, links = 40, fresh = 
     ["attention", "needs-attention"], ["working", "working"], ["done", "failed"],
     ["idle", "idle"], ["done", "done"],
   ];
+  /* 고요한 판(`calm`): 작업 중과 확인 필요가 대기로 선다 — 흐를 것이 없는 판. */
+  const stateOf = (at) => {
+    const [bucket, state] = STATES[at % STATES.length];
+    return calm && (bucket === "working" || bucket === "attention") ? ["idle", "idle"] : [bucket, state];
+  };
   const TASKS = ["조율", "구현", "독립 검증", "문서", "리팩터", "성능 측정", "릴리즈 노트",
     "재현", "보안 검토", "마이그레이션", "시험 보강", "정리"];
+  /* 이름은 겹치지 않는다: 한 바퀴를 넘으면 조율을 뺀 이름에 바퀴의 번호가 붙는다(「구현 2」). */
+  const taskOf = (at) => at < TASKS.length ? TASKS[at]
+    : `${TASKS[((at - TASKS.length) % (TASKS.length - 1)) + 1]} ${Math.floor((at - TASKS.length) / (TASKS.length - 1)) + 2}`;
   /* 하위 에이전트: 열둘마다 5·10·11번째, 부모는 워크스페이스 수만큼 앞 — 같은 워크스페이스다
-   * (기본 판에서 5→1·10→6·11→7). */
+   * (기본 판에서 5→1·10→6·11→7). 그리고 조율자: 메인의 첫 에이전트가 섬마다 첫 에이전트에게
+   * 지시했다(1·2·3 → 0) — 판을 건너는 계보. */
   const MOONS = new Map(Array.from({ length: agents }, (_, at) => at)
     .filter((at) => [5, 10, 11].includes(at % 12) && at - workspaces >= 0)
     .map((at) => [at, at - workspaces]));
+  /* `chain`: 섬마다 첫 에이전트가 앞 섬의 첫 에이전트에게서 지시를 받는다 — 섬이 열 하나씩 오른쪽에 선다. */
+  for (let at = 1; at < Math.min(workspaces, agents); at += 1) MOONS.set(at, chain ? at - 1 : 0);
   const terms = Array.from({ length: agents }, (_, at) => 401 + at);
   const treeOf = (at) => trees[at % trees.length];
   const branchOf = (at) => (at % trees.length === 0 ? "main" : `wt/w${at % trees.length}`);
   const parentOf = (at) => (MOONS.has(at) ? terms[MOONS.get(at)] : null);
+  /* 모델: 셋에 하나가 Codex, 나머지는 Claude — 몸의 두 계열이 한 판에 함께 선다. */
+  const modelOf = (at) => (at % 3 === 2 ? "codex" : "claude");
 
   window.__PANES__ = terms.map((term, at) => ({
-    term, agent: "codex", state: STATES[at % STATES.length][1] === "needs-attention"
-      ? "needs-attention" : STATES[at % STATES.length][1],
+    term, agent: modelOf(at), state: stateOf(at)[1],
     at: now - 10_000, state_started_at: now - 10_000, resumable: false,
     ...(parentOf(at) ? { parent: parentOf(at) } : {}),
   }));
   window.__LEDGER__ = terms.map((term, at) => ({
-    run: "run-o1", worker: `w-${term}`, agent: "codex", state: "working", ledger: "active",
-    hearing: "pending", hearing_at: now - 120_000, checkout: treeOf(at), task: TASKS[at % TASKS.length],
+    run: "run-o1", worker: `w-${term}`, agent: modelOf(at), state: "working", ledger: "active",
+    hearing: "pending", hearing_at: now - 120_000, checkout: treeOf(at), task: taskOf(at),
     task_id: `t-o${at}`, reported: false, review: null, dispatch_id: `dp-o${at}`,
     dispatch_started_ms: now - 300_000, retry_of: null, term, at: now - 300_000, model: null,
     effort: null, pane: `%${at}`, asking: false, wall: null, quiet_at: null, pane_missing_since_ms: null,
   }));
   const columns = new Map([["attention", []], ["working", []], ["done", []], ["idle", []]]);
   terms.forEach((term, at) => {
-    const [bucket, state] = STATES[at % STATES.length];
+    const [bucket, state] = stateOf(at);
     columns.get(bucket).push({
-      pane: `term:${term}`, heading: TASKS[at % TASKS.length], state, agent: "codex",
-      project: ROOT, worktree: branchOf(at), task: TASKS[at % TASKS.length], you: "", said: "",
+      pane: `term:${term}`, heading: taskOf(at), state, agent: modelOf(at),
+      project: ROOT, worktree: branchOf(at), task: taskOf(at), you: "", said: "",
       ask: bucket === "attention" ? "진행할까요?" : "", parent: parentOf(at) ? `term:${parentOf(at)}` : "",
       ledger: "", unseen: false, changed_at: now - 30_000, at: now - 30_000,
     });
@@ -141,7 +167,7 @@ export function orbitFixture({ workspaces = 4, agents = 12, links = 40, fresh = 
   /* 최근 활동: 작업 중인 에이전트마다 다른 양. */
   paneActivities.clear();
   terms.forEach((term, at) => {
-    if (STATES[at % STATES.length][0] !== "working") return;
+    if (stateOf(at)[0] !== "working") return;
     const busy = [12, 6, 3, 1, 9][at % 5];
     paneActivities.set(`term:${term}`, Array.from({ length: busy }, (_, n) => ({
       at: now - 2_000 - n * 4_000,
@@ -191,28 +217,24 @@ async function installOrbitCounters(page) {
       state.dirty = true;
       agentOrbitWake();
     };
-    /* 신탁: 세계의 한 점을 카메라로. y축(세로) 둘레로 yaw, 그다음 x축 둘레로 pitch, 그리고
-     * 원근 — 깊이는 카메라에서 잰 거리, 화면의 크기는 초점 거리 ÷ 깊이. 프로덕션의 셈을
-     * 부르지 않고 따로 셈한다: 두 셈이 같아야 그림이 3차원에서 온 것이다. */
-    window.__ORBIT_ORACLE__ = ([x, y, z], camera, lens) => {
-      const cosYaw = Math.cos(camera.yaw);
-      const sinYaw = Math.sin(camera.yaw);
-      const cosPitch = Math.cos(camera.pitch);
-      const sinPitch = Math.sin(camera.pitch);
-      const turnedX = x * cosYaw - z * sinYaw;
-      const turnedZ = x * sinYaw + z * cosYaw;
-      const tiltedY = y * cosPitch + turnedZ * sinPitch;
-      const tiltedZ = turnedZ * cosPitch - y * sinPitch;
-      const depth = lens.distance - tiltedZ;
-      const scale = lens.focal / depth;
-      return { x: lens.cx + turnedX * scale, y: lens.cy + tiltedY * scale, depth, scale };
+    /* 신탁: 세계의 한 점을 직교 카메라로. 카메라는 과녁에서 (yaw, pitch) 쪽에 서서 과녁을
+     * 보고, 화면의 가로는 세로축과 시선의 외적, 세로는 그 둘의 외적이다. 크기는 깊이와 무관한
+     * 배율 하나다. 프로덕션의 셈(three.js의 행렬)을 부르지 않고 따로 셈한다: 두 셈이 같아야
+     * 그림이 그 카메라에서 온 것이다. */
+    window.__ORBIT_ORACLE__ = ([x, y, z], lens) => {
+      const [dx, dy, dz] = [x - lens.target[0], y - lens.target[1], z - lens.target[2]];
+      const [cosYaw, sinYaw] = [Math.cos(lens.yaw), Math.sin(lens.yaw)];
+      const [cosPitch, sinPitch] = [Math.cos(lens.pitch), Math.sin(lens.pitch)];
+      const across = dx * cosYaw - dz * sinYaw;
+      const up = -dx * sinPitch * sinYaw + dy * cosPitch - dz * sinPitch * cosYaw;
+      return { x: lens.cx + lens.scale * across, y: lens.cy - lens.scale * up };
     };
     window.__ORBIT_BEZIER__ = ([a, c, b], t) => [0, 1, 2]
       .map((axis) => (1 - t) ** 2 * a[axis] + 2 * (1 - t) * t * c[axis] + t ** 2 * b[axis]);
   });
 }
 
-const openOrbit = async (page, fixture = {}) => {
+export const openOrbit = async (page, fixture = {}) => {
   await installBoardWaits(page);
   await installOrbitCounters(page);
   await page.evaluate(orbitFixture, fixture);
@@ -238,9 +260,11 @@ const stageCorner = (page) => page.evaluate(() => {
 
 /* 묶음들, 각자 제 판에서. 한 묶음이 넘어져도 나머지는 돈다 — 넘어진 묶음은 제 이름의
  * FAIL 한 줄로 남는다. */
-export async function testBoardOrbit(browser, origin, ok) {
+export async function testBoardOrbit(given, origin, ok) {
+  const { browser, own } = await orbitGlBrowser(given);
   const parts = [
     ["table", () => testOrbitShape(ok)],
+    ["fallback", () => testOrbitFallback(browser, origin, ok)],
     ["view", () => testOrbitView(browser, origin, ok)],
     ["space", () => testOrbitSpace(browser, origin, ok)],
     ["camera", () => testOrbitCamera(browser, origin, ok)],
@@ -250,13 +274,173 @@ export async function testBoardOrbit(browser, origin, ok) {
     ["cards", () => testOrbitLeavesTheCardsAlone(browser, origin, ok)],
     ["live", () => testOrbitLiveMap(browser, origin, ok)],
   ];
-  for (const [name, part] of parts) {
-    try {
-      await part();
-    } catch (error) {
-      ok(`the 3D view ${name} checks ran to their end`, false,
-        String(error?.message ?? error).split("\n").slice(0, 2).join(" | "));
+  try {
+    for (const [name, part] of parts) {
+      try {
+        await part();
+      } catch (error) {
+        ok(`the 3D view ${name} checks ran to their end`, false,
+          String(error?.message ?? error).split("\n").slice(0, 2).join(" | "));
+      }
     }
+  } finally {
+    if (own) await browser.close();
+  }
+}
+
+/* 손(올리기·누르기)의 기다림. SwiftShader의 한 장은 붐비는 기계에서 1초에 가깝고, 손은 그림
+ * 몇 장을 기다린다 — 5초는 그 판에서 모자랐다. */
+const ORBIT_ACTION_MS = 20_000;
+
+/* 헤드리스 Chromium에 WebGL2를 주는 손잡이 — SwiftShader(소프트웨어 래스터라이저). */
+export const ORBIT_GL_ARGS = ["--enable-unsafe-swiftshader"];
+
+/* WebGL2를 주는 브라우저: 받은 것이 주면 그것, 아니면(창 전체 시험의 Chromium) 그 곁에
+ * SwiftShader를 켠 하나를 띄워 이 묶음이 닫는다. */
+async function orbitGlBrowser(browser) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const capable = await page.evaluate(() => Boolean(document.createElement("canvas").getContext("webgl2")));
+  await context.close();
+  if (capable || browser.browserType().name() !== "chromium") return { browser, own: false };
+  return { browser: await browser.browserType().launch({ args: ORBIT_GL_ARGS }), own: true };
+}
+
+/* ⑬ 그릴 수 없는 창. WebGL2를 주지 않는 창(초기 스크립트가 `webgl2`를 거절한다)은 카드로
+ * 서고 입체 단추는 까닭을 말한다. 그릴 수 있는 창에서는 컨텍스트를 잃으면 카드로, 돌아오면
+ * 입체로 선다. 토글을 오가도 GPU의 자원은 자라지 않는다. */
+async function testOrbitFallback(browser, origin, ok) {
+  const denied = await openWindowTestPage(browser, origin, { before: (page) => page.addInitScript(() => {
+    const context = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function getContext(kind, ...rest) {
+      return kind === "webgl2" ? null : context.call(this, kind, ...rest);
+    };
+  }) });
+  try {
+    await openOrbit(denied.page);
+    const plain = await denied.page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const button = view.querySelector('[data-relations-view="orbit"]');
+      button.click();
+      await window.__BOARD_SETTLED__();
+      return { showing: agentOrbitShowing(view), broken: window.__ORBIT__()?.broken,
+        cards: view.querySelectorAll(".agent-graph-node.is-agent").length,
+        scroll: view.querySelector(".agent-graph-scroll")?.hidden === false,
+        disabled: button.getAttribute("aria-disabled"), tip: button.dataset.tip ?? "",
+        pressed: view.querySelector('[data-relations-view="cards"]').getAttribute("aria-pressed") };
+    });
+    ok("a window without WebGL2 stands on the card view and the 3D button says why",
+      plain.showing === false && plain.broken === "unsupported" && plain.cards > 0 && plain.scroll && plain.disabled === "true"
+        && plain.pressed === "true" && plain.tip.length > 0, JSON.stringify(plain));
+    ok("the no-WebGL2 page raises no browser errors", denied.faults.length === 0, denied.faults.join("\n"));
+  } finally {
+    await denied.page.close();
+  }
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openOrbit(page);
+    const lost = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const state = window.__ORBIT_STATE__();
+      const loser = state.gl.renderer.getContext().getExtension("WEBGL_lose_context");
+      loser.loseContext();
+      await window.__ORBIT_WAIT__(300);
+      await window.__BOARD_SETTLED__();
+      const button = view.querySelector('[data-relations-view="orbit"]');
+      const during = { showing: agentOrbitShowing(view), broken: window.__ORBIT__().broken,
+        disabled: button.getAttribute("aria-disabled"), tip: button.dataset.tip ?? "",
+        cards: view.querySelectorAll(".agent-graph-node.is-agent").length,
+        scroll: view.querySelector(".agent-graph-scroll")?.hidden === false };
+      loser.restoreContext();
+      await window.__ORBIT_WAIT__(500);
+      await window.__BOARD_SETTLED__();
+      await window.__ORBIT_FRAMES__(4);
+      return { during, after: { showing: agentOrbitShowing(view), broken: window.__ORBIT__().broken,
+        frames: window.__ORBIT__().frames, labels: window.__ORBIT__().labels } };
+    });
+    ok("a lost graphics context stands the board on cards with the reason, and its return stands the 3D view again",
+      lost.during.showing === false && lost.during.broken === "lost" && lost.during.disabled === "true"
+        && lost.during.tip.length > 0 && lost.during.cards > 0 && lost.during.scroll && lost.after.showing === true
+        && lost.after.broken === null && lost.after.labels === 16, JSON.stringify(lost));
+    const memory = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const read = () => {
+        const info = window.__ORBIT_STATE__().gl.renderer.info;
+        return { geometries: info.memory.geometries, textures: info.memory.textures, programs: info.programs.length };
+      };
+      /* 판이 서지 않으면 무엇이 남았는지 한 줄로 말한다: 그림의 모형, 가장자리·맞춤 박자, 새로 읽기, 칠하기
+       * 박자, 받는 중인 것, 그리고 입체 판의 상태. */
+      const settle = async (step) => {
+        try {
+          await window.__BOARD_SETTLED__();
+        } catch (error) {
+          const state = agentOrbitStates.get(view);
+          throw new Error(`${error.message} after ${step}: ${JSON.stringify({ model: agentGraphModels.has(view),
+            edge: agentGraphEdgeFrames.has(view), fit: agentGraphFitFrames.has(view), refreshing: agentGraphRefreshing,
+            paint: agentPaintFrame, flight: ["board_snapshot", "pane_agents", "ledger_agents"]
+              .map((name) => window.__IN_FLIGHT__.get(name) ?? 0), showing: agentOrbitShowing(view),
+            broken: window.__ORBIT__().broken, scene: Boolean(state?.scene), dirty: state?.dirty ?? null,
+            moving: state ? agentOrbitMoving(state) : null })}`);
+        }
+      };
+      const flip = async (round) => {
+        view.querySelector('[data-relations-view="cards"]').click();
+        await settle(`cards ${round}`);
+        view.querySelector('[data-relations-view="orbit"]').click();
+        await settle(`3D ${round}`);
+        await window.__ORBIT_FRAMES__(4);
+      };
+      await flip(0);
+      const first = read();
+      for (let round = 1; round <= 5; round += 1) await flip(round);
+      return { first, last: read(), builds: window.__ORBIT__().builds };
+    }).catch((error) => {
+      /* 앞의 두 줄만 보고되니, 그때까지의 브라우저 오류를 첫 줄에 붙인다. */
+      const [head] = String(error.message).split("\n");
+      throw new Error(`${head} · browser errors so far: ${faults.join(" ¶ ").replace(/\s+/g, " ").slice(0, 900) || "none"}`);
+    });
+    ok("toggling between the views five times grows no GPU resource",
+      JSON.stringify(memory.first) === JSON.stringify(memory.last) && memory.first.geometries > 0, JSON.stringify(memory));
+
+    /* 둘째 칸에 선 판(첫 판의 복제)을 닫는다: 그 판의 컨텍스트는 놓이고, 그 유실의 소식이 창의 그림을
+     * 카드로 넘기지 않는다 — 첫 판은 입체로 선다. */
+    const panes = await page.evaluate(async () => {
+      const first = document.querySelector("#board-view");
+      const tab = boardTab();
+      const added = nextGroupId;
+      nextGroupId += 1;
+      setStageTree(splitStageLeaf(stageTree(), 0, added, "horizontal", "second"));
+      tab.pane = added;
+      setActiveTab(tab.id);
+      renderTabs();
+      updateStage();
+      await paintBoardView(tab, { force: true });
+      const second = docHost(added, "board");
+      for (let wait = 0; wait < 100 && !agentOrbitStates.has(second); wait += 1) await window.__ORBIT_WAIT__(100);
+      await window.__ORBIT_FRAMES__(4);
+      const context = agentOrbitStates.get(second)?.gl?.renderer.getContext() ?? null;
+      const opened = { apart: second !== first, showing: agentOrbitShowing(second), context: Boolean(context) };
+      tab.pane = 0;
+      setActiveTab(tab.id);
+      collapseStageGroup(added);
+      renderTabs();
+      updateStage();
+      await paintBoardView(tab, { force: true });
+      await window.__BOARD_SETTLED__();
+      await window.__ORBIT_FRAMES__(4);
+      await window.__ORBIT_WAIT__(500);
+      await window.__ORBIT_FRAMES__(4);
+      return { opened, closed: { connected: second.isConnected, released: !agentOrbitStates.has(second),
+        lost: context?.isContextLost() ?? null }, broken: window.__ORBIT__().broken, showing: agentOrbitShowing(first),
+        labels: window.__ORBIT__().labels };
+    });
+    ok("closing a second pane's board lets its context go and leaves the first board standing in 3D",
+      panes.opened.apart && panes.opened.showing && panes.opened.context && panes.closed.connected === false
+        && panes.closed.released && panes.closed.lost === true && panes.broken === null && panes.showing === true
+        && panes.labels === 16, JSON.stringify(panes));
+    ok("the context-loss page raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
   }
 }
 
@@ -317,7 +501,7 @@ async function testOrbitShape(ok) {
   const button = markup.match(/data-relations-view="orbit"[^>]*>([^<]*)</)?.[1] ?? "";
   ok("the view is called 입체 — 3D in English and Spanish, 立体 in Japanese and Chinese",
     JSON.stringify(named) === JSON.stringify(["입체", "3D", "立体", "立体", "3D"]) && button === "입체"
-      && hints[0] === "점을 누르면 상세가 열립니다", JSON.stringify({ named, button, hint: hints[0] }));
+      && hints[0] === "캐릭터나 이름표를 누르면 상세가 열립니다", JSON.stringify({ named, button, hint: hints[0] }));
 }
 
 /* ① ⑥ 입체가 서고, 누르면 고른다. */
@@ -349,9 +533,9 @@ async function testOrbitView(browser, origin, ok) {
     ok("the relations tab opens on the 3D view by default", shape.choice === "orbit"
       && shape.stageShown && shape.cardsHidden
       && JSON.stringify(shape.toggle) === JSON.stringify([["orbit", "true"], ["cards", "false"]])
-      && shape.words[0] === "입체" && shape.hint === "점을 누르면 상세가 열립니다",
+      && shape.words[0] === "입체" && shape.hint === "캐릭터나 이름표를 누르면 상세가 열립니다",
       JSON.stringify(shape));
-    ok("the 3D view draws every agent and every workspace as a point with a button",
+    ok("the 3D view draws every agent as a robot and every workspace as a platform, each with a button",
       shape.agents === 12 && shape.workspaces === 4 && shape.handles?.bodies === 16 && shape.buttons,
       JSON.stringify(shape));
     ok("the canvas is an image that says the counts", shape.role === "img"
@@ -380,7 +564,7 @@ async function testOrbitView(browser, origin, ok) {
       }
       return "agent:term:404";
     });
-    await page.hover(`[data-orbit-key="${key}"]`, { force: true, timeout: 5_000 });
+    await page.hover(`[data-orbit-key="${key}"]`, { force: true, timeout: ORBIT_ACTION_MS });
     await page.evaluate(() => window.__ORBIT_WAIT__(500));
     const held = await page.evaluate((wanted) => {
       const label = document.querySelector(`#board-view [data-orbit-key="${wanted}"]`);
@@ -390,7 +574,7 @@ async function testOrbitView(browser, origin, ok) {
     }, key);
     ok("hovering a point stills the camera so it can be clicked", held.paused === true && held.still === true,
       JSON.stringify({ key, ...held }));
-    await page.click(`[data-orbit-key="${key}"]`, { timeout: 5_000 });
+    await page.click(`[data-orbit-key="${key}"]`, { timeout: ORBIT_ACTION_MS });
     const picked = await page.evaluate((wanted) => {
       const view = document.querySelector("#board-view");
       const label = view.querySelector(`[data-orbit-key="${wanted}"]`);
@@ -513,7 +697,107 @@ async function testOrbitView(browser, origin, ok) {
   }
 }
 
-/* ⑨ ⑩ ⑪ 공간·투영·간선. 기본 판에 과업 의존 넷을 더한다. */
+/* ⑨ ⑩ ⑪ 자리·투영·레일. 기본 판에 과업 의존 넷을 더한다 — 조율자가 본진에 앉아 섬마다 첫
+ * 에이전트에게 지시한 판이다. */
+const readSeats = (page) => page.evaluate(() => {
+  const state = window.__ORBIT_STATE__();
+  return Object.fromEntries([...state.bodies.values()].map((body) => [body.key, body.world
+    ? [...body.world] : [body.left, body.right, body.back, body.front]]));
+});
+
+/* 판과 이름표의 네모가 서로 겹치는가 — 판은 빛나는 테까지, 이름표는 화면의 네모. */
+const orbitOverlaps = (page) => page.evaluate(() => {
+  const state = window.__ORBIT_STATE__();
+  const plates = state.plates.map((plate) => ({ key: plate.key, x: plate.left - plate.rim, y: plate.back - plate.rim,
+    w: plate.right - plate.left + plate.rim * 2, h: plate.front - plate.back + plate.rim * 2 }));
+  const hit = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  const pairs = (list) => list.flatMap((one, at) => list.slice(at + 1).filter((two) => hit(one, two))
+    .map((two) => `${one.key} × ${two.key}`));
+  const tags = state.tags;
+  const unnamed = [...state.bodies.values()].filter((body) => body.lead && body.named !== "1").map((body) => body.key);
+  return { plates: pairs(plates), tags: pairs(tags), named: state.named, labels: state.host.childElementCount, unnamed,
+    outside: tags.filter((tag) => tag.x < 0 || tag.y < 0 || tag.x + tag.w > state.width || tag.y + tag.h > state.height)
+      .map((tag) => tag.key), width: state.width };
+});
+
+/* 여는 카메라의 화면에서: 판의 윗면(네 모서리)끼리 겹치는가, 로봇이 제 판의 윗면 안에 서는가,
+ * 로봇(발에서 머리까지)이 다른 판의 윗면을 덮는가, 판이 판 밖이나 흐름 한 줄·범례에 걸리는가,
+ * 이름표가 판의 윗면에 서는가. 반 픽셀 안의 닿음은 겹침이 아니다. */
+export const orbitClearance = (page) => page.evaluate(() => {
+  const state = window.__ORBIT_STATE__();
+  const SLACK = 0.5;
+  const seen = (x, y, z) => {
+    const at = agentOrbitScreen(state, x, y, z, {});
+    return [at.x, at.y];
+  };
+  const top = (plate) => [seen(plate.left, 0, plate.back), seen(plate.right, 0, plate.back),
+    seen(plate.right, 0, plate.front), seen(plate.left, 0, plate.front)];
+  const crosses = (one, two) => [one, two].every((shape) => shape.every(([ax, ay], at) => {
+    const [bx, by] = shape[(at + 1) % shape.length];
+    if (ax === bx && ay === by) return true;
+    const length = Math.hypot(bx - ax, by - ay);
+    const cast = (list) => list.map(([x, y]) => (x * (ay - by) + y * (bx - ax)) / length);
+    const [a, b] = [cast(one), cast(two)];
+    return Math.min(Math.max(...a) - Math.min(...b), Math.max(...b) - Math.min(...a)) > SLACK;
+  }));
+  const within = ([px, py], shape) => {
+    const sides = shape.map(([ax, ay], at) => {
+      const [bx, by] = shape[(at + 1) % shape.length];
+      return ((bx - ax) * (py - ay) - (by - ay) * (px - ax)) / Math.hypot(bx - ax, by - ay);
+    });
+    return sides.every((side) => side >= -SLACK) || sides.every((side) => side <= SLACK);
+  };
+  const box = (rect) => [[rect.x, rect.y], [rect.x + rect.w, rect.y], [rect.x + rect.w, rect.y + rect.h],
+    [rect.x, rect.y + rect.h]];
+  const tops = new Map(state.plates.map((plate) => [plate.key, top(plate)]));
+  const name = (key) => key.split("/").pop();
+  const overlaps = [];
+  const plates = [...tops.entries()];
+  plates.forEach(([one, first], at) => plates.slice(at + 1).forEach(([two, second]) => {
+    if (crosses(first, second)) overlaps.push(`${name(one)} × ${name(two)}`);
+  }));
+  const strays = [];
+  const covers = [];
+  for (const body of state.agents) {
+    const [x, y, z] = body.world;
+    const foot = seen(x, y, z);
+    const head = seen(x, y + ORBIT.bot.tall * body.scale, z);
+    if (!within(foot, tops.get(body.plate.key))) strays.push(body.name);
+    for (const [key, shape] of plates) {
+      if (key !== body.plate.key && crosses([foot, head], shape)) covers.push(`${body.name} → ${name(key)}`);
+    }
+  }
+  const reserved = (state.reserved ?? []).map(box);
+  const blocked = plates.filter(([, shape]) => shape.some(([x, y]) => x < 0 || y < 0 || x > state.width
+    || y > state.height) || reserved.some((rect) => crosses(rect, shape))).map(([key]) => name(key));
+  /* 에이전트의 이름표만 — 판의 이름은 제 판 앞 모서리에 붙은 글이다. */
+  const tagged = (state.tags ?? []).filter((tag) => state.bodies.get(tag.key)?.kind !== "workspace")
+    .filter((tag) => plates.some(([, shape]) => crosses(box(tag), shape)))
+    .map((tag) => state.bodies.get(tag.key)?.name ?? tag.key);
+  /* 판의 이름(판 앞 모서리 밑의 글, 접히면 그 자리의 칩)은 범례와 겹치지 않는다 — 가장 아래 판의 이름까지.
+   * 모듈의 장부가 아니라 문서의 네모로 잰다: 무대 안에 보이는 이름표와 보이는 범례. */
+  const stage = document.querySelector("#board-view .agent-orbit");
+  const rectOf = (node) => {
+    const rect = node?.getBoundingClientRect();
+    const look = node ? getComputedStyle(node) : null;
+    return rect && rect.width > 0 && rect.height > 0 && look.display !== "none" && look.visibility !== "hidden"
+      ? rect : null;
+  };
+  const meet = (one, two) => Math.min(one.right, two.right) - Math.max(one.left, two.left) > SLACK
+    && Math.min(one.bottom, two.bottom) - Math.max(one.top, two.top) > SLACK;
+  const room = rectOf(stage);
+  const legend = rectOf(stage?.querySelector(".agent-orbit-key"));
+  const captions = [...(stage?.querySelectorAll(".agent-orbit-label.is-workspace") ?? [])]
+    .map((node) => ({ node, rect: rectOf(node) })).filter(({ rect }) => rect && room && meet(rect, room));
+  const lowest = captions.reduce((low, one) => (!low || one.rect.bottom > low.rect.bottom ? one : low), null);
+  const said = ({ node }) => node.getAttribute("aria-label")?.split(",")[0] ?? "?";
+  const onLegend = legend ? captions.filter(({ rect }) => meet(rect, legend)).map(said) : [];
+  return { overlaps, strays, covers, blocked, tagged, reserved: reserved.length, fit: state.fit,
+    captions: captions.length, onLegend, legendTop: legend ? Math.round(legend.top - room.top) : null,
+    lowest: lowest ? { name: said(lowest), bottom: Math.round(lowest.rect.bottom - room.top),
+      onLegend: legend ? meet(lowest.rect, legend) : null } : null };
+});
+
 async function testOrbitSpace(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -524,165 +808,140 @@ async function testOrbitSpace(browser, origin, ok) {
     /* ⑨ 자리. */
     const places = await page.evaluate(() => {
       const state = window.__ORBIT_STATE__();
-      const bodies = [...(state?.bodies?.values() ?? [])];
-      const gap = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-      /* 워크스페이스의 키는 프로젝트 경로와 체크아웃 경로를 NUL로 잇는다(`agentGraphModel`). */
-      const main = state?.bodies.get("workspace:/repos/orbit\u0000/repos/orbit");
-      const hubs = bodies.filter((body) => body.kind === "workspace" && body !== main);
-      const agents = bodies.filter((body) => body.kind === "agent");
-      const children = bodies.filter((body) => body.kind === "child");
-      const angle = (a, b) => Math.acos(Math.min(1, Math.max(-1,
-        (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (Math.hypot(...a) * Math.hypot(...b))))) * 180 / Math.PI;
-      const spread = [0, 1, 2].map((axis) => Math.max(...bodies.map((body) => body.world?.[axis] ?? 0))
-        - Math.min(...bodies.map((body) => body.world?.[axis] ?? 0)));
+      const bodies = [...state.bodies.values()];
+      const deck = state.plates.find((plate) => plate.deck);
+      const islands = state.plates.filter((plate) => !plate.deck);
+      const agents = state.agents;
+      const parent = (body) => state.bodies.get(body.parentKey);
+      const lead = agents.find((body) => body.lead) ?? null;
       return {
         count: bodies.length,
-        spread,
-        reach: state?.reach ?? null,
-        main: main?.world ?? null,
-        hubs: hubs.map((hub) => Math.hypot(...hub.world)),
-        hubAngle: Math.min(...hubs.flatMap((one, at) => hubs.slice(at + 1).map((two) => angle(one.world, two.world)))),
-        agents: agents.map((body) => gap(body.world, state.bodies.get(body.hostKey)?.world ?? [NaN, NaN, NaN])),
-        children: children.map((body) => {
-          const parent = state.bodies.get(body.hostKey);
-          const hub = state.bodies.get(parent?.hostKey);
-          return { parent: gap(body.world, parent?.world ?? [NaN, NaN, NaN]),
-            hub: gap(body.world, hub?.world ?? [NaN, NaN, NaN]) };
-        }),
-        radii: { workspace: ORBIT.space?.workspace, agent: ORBIT.space?.agent, child: ORBIT.space?.child },
+        deck: deck ? { left: deck.left, right: deck.right, path: deck.workspace.path } : null,
+        islands: islands.map((plate) => ({ key: plate.key, left: plate.left })),
+        seated: agents.filter((body) => !(body.world[0] > body.plate.left && body.world[0] < body.plate.right
+          && body.world[2] > body.plate.back && body.world[2] < body.plate.front)).map((body) => body.key),
+        crossing: agents.filter((body) => body.parentKey && parent(body).plate !== body.plate)
+          .map((body) => ({ key: body.key, left: body.plate.left, parentRight: parent(body).plate.right })),
+        children: agents.filter((body) => body.kind === "child").map((body) => ({ key: body.key,
+          gap: Math.hypot(body.world[0] - parent(body).world[0], body.world[2] - parent(body).world[2]),
+          seat: body.plate.deck ? ORBIT.deck.seat : ORBIT.island.seat })),
+        lead: lead ? { key: lead.key, deck: lead.plate.deck, scale: lead.scale, lift: lead.world[1],
+          children: lead.children.length } : null,
+        leads: agents.filter((body) => body.lead).length,
+        leadScale: ORBIT.bot.scale.lead,
       };
     });
-    const near = (value, wanted) => Math.abs(value - wanted) < 1e-6;
-    ok("every point stands at a place in three dimensions",
-      places.count === 16 && places.spread.every((width) => width > (places.reach ?? Infinity) * 0.4),
-      JSON.stringify(places));
-    ok("the main workspace stands at the origin and the others on a sphere around it, spread apart",
-      places.main !== null && places.main.every((axis) => axis === 0) && places.hubs.length === 3
-        && places.hubs.every((distance) => near(distance, places.radii.workspace)) && places.hubAngle >= 60,
-      JSON.stringify(places));
-    ok("an agent stands on a small sphere around its workspace and a sub-agent beside its parent",
-      places.agents.length === 9 && places.agents.every((distance) => near(distance, places.radii.agent))
-        && places.children.length === 3
-        && places.children.every((one) => near(one.parent, places.radii.child) && one.parent < one.hub),
-      JSON.stringify(places));
+    ok("every agent sits on its own workspace's platform, and the main workspace is the platform on the far left",
+      places.count === 16 && places.seated.length === 0 && places.deck?.path === "/repos/orbit"
+        && places.deck.right <= 0 && places.islands.length === 3
+        && places.islands.every((island) => island.left > places.deck.right), JSON.stringify(places));
+    ok("a workspace that took its work from another stands to that one's right",
+      places.crossing.length === 3 && places.crossing.every((one) => one.left > one.parentRight), JSON.stringify(places));
+    ok("a sub-agent sits beside its parent, and the coordinator stands on the main platform's dais, half again as large",
+      places.children.length === 3 && places.children.every((one) => one.gap <= one.seat * 1.5)
+        && places.leads === 1 && places.lead?.deck === true && places.lead.scale === places.leadScale
+        && places.lead.lift > 0 && places.lead.children === 3, JSON.stringify(places));
 
-    const worlds = () => page.evaluate(() => Object.fromEntries(
-      [...window.__ORBIT_STATE__().bodies.values()].map((body) => [body.key, [...body.target]])));
-    const first = await worlds();
-    await page.evaluate(async () => {
-      document.querySelector('#board-view [data-relations-view="cards"]').click();
-      await window.__BOARD_SETTLED__();
-      document.querySelector('#board-view [data-relations-view="orbit"]').click();
-      await window.__BOARD_SETTLED__();
-      await window.__ORBIT_FRAMES__(2);
-    });
-    const again = await worlds();
-    ok("the same input stands every point at the same place",
-      Object.keys(first).length === 16 && JSON.stringify(first) === JSON.stringify(again),
-      JSON.stringify({ first, again }));
+    const seats = await readSeats(page);
+    const again = await openWindowTestPage(browser, origin);
+    let same = null;
+    try {
+      await openOrbit(again.page, { deps: 4 });
+      same = await readSeats(again.page);
+    } finally {
+      await again.page.close();
+    }
+    ok("the same input seats every agent and every platform at the same place",
+      Object.keys(seats).length === 16 && JSON.stringify(same) === JSON.stringify(seats),
+      JSON.stringify({ seats, same }));
 
-    /* ⑩ 투영: 카메라를 정면(yaw 0·pitch 0)에 세우고, 90° 돌려 세운다. */
-    const seen = (yaw, pitch) => page.evaluate(async ([yaw, pitch]) => {
-      window.__ORBIT_HOLD_CAMERA__(yaw, pitch);
-      await window.__ORBIT_FRAMES__(3);
+    /* ⑩ 투영: 직교. 카메라를 한 자리에 세우고 프로덕션의 투영(`agentOrbitScreen`)을 신탁과 견준다. */
+    const projection = await page.evaluate(async () => {
       const state = window.__ORBIT_STATE__();
-      const lens = agentOrbitLens(state);
-      const bodies = [...state.bodies.values()];
-      const worst = Math.max(...bodies.map((body) => {
-        const wanted = window.__ORBIT_ORACLE__(body.world, state.camera, lens);
-        return Math.max(Math.abs(wanted.x - body.seen.x), Math.abs(wanted.y - body.seen.y),
-          Math.abs(wanted.depth - body.seen.depth) / wanted.depth);
-      }));
-      /* 90°의 셈을 신탁 없이 한 번 더: 화면의 가로 = −z × 초점 ÷ (거리 − x). */
-      const quarter = Math.max(...bodies.map((body) => Math.abs((body.seen.x - lens.cx)
-        - (-body.world[2]) * lens.focal / (lens.distance - body.world[0]))));
-      const sizes = bodies.map((body) => Math.abs(body.seen.scale * body.seen.depth - lens.focal));
-      return { worst, quarter, size: Math.max(...sizes), focalOverDistance: lens.focal / lens.distance,
-        scale: state.scale, xs: Object.fromEntries(bodies.map((body) => [body.key, body.seen.x])) };
-    }, [yaw, pitch]);
-    const front = await seen(0, 0);
-    const turned = await seen(Math.PI / 2, 0);
-    const moved = Object.keys(front.xs).filter((key) => Math.abs(front.xs[key] - turned.xs[key]) > 1).length;
-    ok("a quarter turn of the camera swaps x and z on the screen: the picture is projected from three dimensions",
-      front.worst < 0.5 && turned.worst < 0.5 && turned.quarter < 0.5 && moved >= 12,
-      JSON.stringify({ front: front.worst, turned: turned.worst, quarter: turned.quarter, moved }));
-    ok("a nearer point is drawn larger: size is the focal length over the depth",
-      front.size < 1e-6 && turned.size < 1e-6 && Math.abs(front.focalOverDistance - front.scale) < 1e-9,
-      JSON.stringify({ front: front.size, turned: turned.size, focalOverDistance: front.focalOverDistance,
-        scale: front.scale }));
+      const agents = state.agents;
+      const look = async (yaw) => {
+        window.__ORBIT_HOLD_CAMERA__(yaw, ORBIT.camera.pitch);
+        await window.__ORBIT_FRAMES__(3);
+        const lens = state.lens;
+        const miss = Math.max(...agents.map((body) => {
+          const seen = agentOrbitScreen(state, ...body.world);
+          const wanted = window.__ORBIT_ORACLE__(body.world, lens);
+          return Math.hypot(seen.x - wanted.x, seen.y - wanted.y);
+        }));
+        /* 세계의 x로 100, z로 100 — 화면의 가로가 무엇을 따르는가. */
+        const [x, y, z] = agents[0].world;
+        const from = agentOrbitScreen(state, x, y, z);
+        const alongX = agentOrbitScreen(state, x + 100, y, z).x - from.x;
+        const alongZ = agentOrbitScreen(state, x, y, z + 100).x - from.x;
+        /* 같은 길이를 가장 가까운 로봇과 가장 먼 로봇에서 — 직교면 같은 길이다. */
+        const depths = agents.map((body) => ({ body, depth: agentOrbitScreen(state, ...body.world).depth }))
+          .sort((left, right) => left.depth - right.depth);
+        const span = (body) => {
+          const [bx, by, bz] = body.world;
+          const a = agentOrbitScreen(state, bx, by, bz);
+          const b = agentOrbitScreen(state, bx + 100, by, bz);
+          return Math.hypot(b.x - a.x, b.y - a.y);
+        };
+        return { miss, alongX, alongZ, near: span(depths[0].body), far: span(depths[depths.length - 1].body),
+          depths: [depths[0].depth, depths[depths.length - 1].depth], scale: lens.scale };
+      };
+      const front = await look(0);
+      const quarter = await look(Math.PI / 2);
+      window.__ORBIT_HOLD_CAMERA__(ORBIT.camera.yaw, ORBIT.camera.pitch);
+      await window.__ORBIT_FRAMES__(3);
+      return { front, quarter };
+    });
+    const { front, quarter } = projection;
+    ok("every robot stands on the screen where an orthographic camera puts it, and a quarter turn swaps x for z",
+      front.miss < 0.5 && quarter.miss < 0.5 && Math.abs(front.alongX - 100 * front.scale) < 0.01
+        && Math.abs(front.alongZ) < 0.01 && Math.abs(quarter.alongX) < 0.01
+        && Math.abs(quarter.alongZ + 100 * quarter.scale) < 0.01, JSON.stringify(projection));
+    ok("nothing is drawn larger for being nearer: the same length is the same on the screen at any depth",
+      front.depths[1] - front.depths[0] > 50 && Math.abs(front.near - front.far) < 0.01, JSON.stringify(front));
 
-    const depth = await page.evaluate(async () => {
+    /* ⑪ 레일과 우편. */
+    const rails = await page.evaluate(() => {
+      const state = window.__ORBIT_STATE__();
+      const flowing = state.links.filter((link) => link.flowing);
+      const on = flowing.map((link) => {
+        const wanted = agentOrbitAlong(link.curve, link.spot, [0, 0, 0]);
+        return Math.hypot(...wanted.map((value, axis) => value - link.head[axis]));
+      });
+      const ends = flowing.every((link) => link.curve[0][0] === link.from.world[0] && link.curve[0][2] === link.from.world[2]
+        && link.curve[2][0] === link.to.world[0] && link.curve[2][2] === link.to.world[2]
+        && link.curve[1][1] > Math.max(link.curve[0][1], link.curve[2][1]));
+      return {
+        handles: window.__ORBIT__(),
+        sheathed: state.rails.filter((rail) => rail.kind === "spawned").every((rail) => rail.sheathRange !== null),
+        bare: state.rails.filter((rail) => rail.kind === "dependency").every((rail) => rail.sheathRange === null),
+        structure: state.rails.filter((rail) => rail.from.kind === "workspace" || rail.to.kind === "workspace").length,
+        fresh: state.links.filter((link) => link.fresh).length, on: Math.max(...on), ends,
+      };
+    });
+    ok("lineage is a sheathed rail, a dependency a bare thin rail, and no line runs to a workspace",
+      rails.handles.edges.spawned === 6 && rails.handles.edges.dependency === 4 && rails.sheathed && rails.bare
+        && rails.structure === 0, JSON.stringify({ ...rails, handles: rails.handles.edges }));
+    ok("only fresh mail flows, from the sender's arc end to the receiver's, riding the arc",
+      rails.handles.links === 40 && rails.handles.particles === 20 && rails.fresh === 20 && rails.on < 1e-6 && rails.ends,
+      JSON.stringify({ ...rails, handles: undefined, particles: rails.handles.particles }));
+
+    /* 멈춘 카메라: 알갱이는 흐르고 이름표는 다시 앉지 않는다; 카메라가 돌면 다시 앉는다. */
+    const cache = await page.evaluate(async () => {
       window.__ORBIT_HOLD_CAMERA__(ORBIT.camera.yaw, ORBIT.camera.pitch);
       await window.__ORBIT_FRAMES__(3);
       const state = window.__ORBIT_STATE__();
-      const order = window.__ORBIT__().order ?? [];
-      const depths = order.map((key) => state.bodies.get(key)?.seen.depth ?? NaN);
-      const fogs = order.map((key) => state.bodies.get(key)?.seen.fog ?? NaN);
-      const others = [...state.bodies.values()].filter((body) => body.kind !== "workspace")
-        .sort((left, right) => left.seen.depth - right.seen.depth);
-      const named = (body) => body.label?.style.getPropertyValue("--orbit-name") === "1";
-      const hubsNamed = [...state.bodies.values()].filter((body) => body.kind === "workspace").every(named);
-      const wantNamed = others.slice(0, ORBIT.label.near).map((body) => body.key);
-      const isNamed = others.filter(named).map((body) => body.key);
-      return { order: order.length, depths, fogs, near: ORBIT.label.near, far: ORBIT.fog.far, hubsNamed,
-        wantNamed, isNamed, handlesNamed: window.__ORBIT__().named };
-    });
-    ok("far points are drawn first: the painter's order runs from the deepest to the nearest",
-      depth.order === 16 && depth.depths.every((value, at) => at === 0 || value <= depth.depths[at - 1]),
-      JSON.stringify(depth.depths));
-    ok("far points fade: the fog thins a point by its depth and never below the table's far alpha",
-      depth.fogs.every((value, at) => value >= depth.far - 1e-9 && value <= 1 + 1e-9
-        && (at === 0 || value >= depth.fogs[at - 1] - 1e-9)) && depth.fogs[depth.fogs.length - 1] > depth.fogs[0],
-      JSON.stringify(depth.fogs));
-    ok("only the nearest points carry their names, and every workspace keeps its own",
-      depth.hubsNamed && depth.near < 12 && JSON.stringify(depth.isNamed) === JSON.stringify(depth.wantNamed)
-        && depth.handlesNamed === depth.near + 4, JSON.stringify(depth));
-
-    /* ⑪ 간선: 구조(메인 → 워크스페이스 셋, 워크스페이스 → 에이전트 아홉)·계보 셋·의존 넷·우편 마흔. */
-    const edges = await page.evaluate(() => {
-      const state = window.__ORBIT_STATE__();
-      const handles = window.__ORBIT__();
-      const outward = (curve) => {
-        const [a, c, b] = curve;
-        const middle = [0, 1, 2].map((axis) => (a[axis] + b[axis]) / 2);
-        return Math.hypot(...middle) < 1 || Math.hypot(...c) > Math.hypot(...middle);
-      };
-      const lens = agentOrbitLens(state);
-      const riders = state.links.flatMap((link) => link.particles.map((particle) => {
-        const wanted = window.__ORBIT_ORACLE__(window.__ORBIT_BEZIER__(link.curve, particle.t), state.camera, lens);
-        return Math.hypot(wanted.x - particle.seen.x, wanted.y - particle.seen.y);
-      }));
-      return {
-        edges: handles.edges,
-        links: handles.links,
-        bent: [...state.links, ...state.edges.filter((edge) => edge.kind === "dependency")]
-          .every((edge) => Array.isArray(edge.curve) && outward(edge.curve)),
-        riders: riders.length,
-        worstRider: Math.max(...riders),
-      };
-    });
-    ok("structure, lineage, dependency and mail are lines in the space",
-      JSON.stringify(edges.edges) === JSON.stringify({ structure: 12, spawned: 3, dependency: 4 })
-        && edges.links === 40, JSON.stringify(edges));
-    ok("mail and dependency curves bow away from the middle and the mail dots ride them",
-      edges.bent && edges.riders === 20 && edges.worstRider < 0.5, JSON.stringify(edges));
-
-    /* 카메라가 멈춘 프레임: 점은 흐르되 간선은 다시 투영하지 않는다. 카메라가 움직이면 한다. */
-    const cache = await page.evaluate(async () => {
-      await window.__ORBIT_FRAMES__(3);
-      const before = window.__ORBIT__();
+      state.flowing = true;
+      const frames = window.__ORBIT__().frames;
+      const projections = window.__ORBIT__().projections;
       await window.__ORBIT_FRAMES__(20);
-      const still = window.__ORBIT__();
-      const state = window.__ORBIT_STATE__();
-      state.camera.yaw += 0.2;
+      const held = { frames: window.__ORBIT__().frames - frames, projections: window.__ORBIT__().projections - projections };
+      state.camera.spin = true;
       state.dirty = true;
       agentOrbitWake();
-      await window.__ORBIT_FRAMES__(3);
-      const turned = window.__ORBIT__();
-      return { frames: still.frames - before.frames, projections: still.projections - before.projections,
-        afterTurn: turned.projections - still.projections };
+      await window.__ORBIT_FRAMES__(5);
+      return { ...held, afterTurn: window.__ORBIT__().projections - projections - held.projections };
     });
-    ok("a still camera reuses its projected edges while the mail dots flow",
+    ok("a still camera leaves the name tags where they stand while the comets flow",
       cache.frames >= 10 && cache.projections === 0 && cache.afterTurn >= 1, JSON.stringify(cache));
 
     /* 프레임의 DOM: 카메라가 도는 동안 라벨의 style(자리·깊이·이름)만 — 새 노드·클래스·글자 0. */
@@ -715,13 +974,14 @@ async function testOrbitSpace(browser, origin, ok) {
       writes.frames >= 10 && writes.styled > 0 && Object.keys(writes.others).length === 0
         && writes.labels === writes.after, JSON.stringify(writes));
 
-    /* ⑨ 에이전트 하나가 와도 남의 자리는 그대로 — 세계에서도, 멈춘 카메라의 화면에서도. */
+    /* ⑨ 빈자리에 앉는 에이전트 하나는 아무도 움직이지 않는다 — 세계에서도, 멈춘 카메라의 화면에서도
+     * (판이 자라지 않으니 맞춤도 그대로다). 판을 자라게 하는 손님은 아래(`growth`)에서 따로 본다. */
     const arrival = await page.evaluate(async () => {
       window.__ORBIT_HOLD_CAMERA__(ORBIT.camera.yaw, ORBIT.camera.pitch);
       await window.__ORBIT_FRAMES__(3);
       const state = window.__ORBIT_STATE__();
-      const read = () => Object.fromEntries([...state.bodies.values()].map((body) =>
-        [body.key, { world: [...body.target], x: body.seen.x, y: body.seen.y }]));
+      const read = () => Object.fromEntries([...state.bodies.values()].filter((body) => body.world).map((body) =>
+        [body.key, { world: [...body.world], x: body.seen.x, y: body.seen.y }]));
       const before = read();
       const now = window.__ORBIT_NOW__;
       window.__PANES__.push({ term: 413, agent: "codex", state: "working", at: now - 5_000,
@@ -739,19 +999,121 @@ async function testOrbitSpace(browser, origin, ok) {
         || Math.abs(before[key].x - after[key].x) > 0.01 || Math.abs(before[key].y - after[key].y) > 0.01);
       return { arrived: Boolean(after["agent:term:413"]), bodies: Object.keys(after).length, shifted };
     });
-    ok("an agent that arrives moves no other point, in the space or on the screen",
-      arrival.arrived && arrival.bodies === 17 && arrival.shifted.length === 0, JSON.stringify(arrival));
+    ok("an agent that takes a spare seat moves no one, on the platforms or on the screen",
+      arrival.arrived && arrival.bodies === 13 && arrival.shifted.length === 0, JSON.stringify(arrival));
     ok("the space page raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }
+
+  /* ⑨ 섬을 자라게 하는 손님들: 섬마다 열이 하나씩 오른쪽에 서는 판(`chain`)에서 첫 섬의 빈자리를 채우고
+   * 자랄 몫(`island.growth`열)을 다 쓴다. 남의 자리와 다른 판은 세계에서 그대로이고(화면은 맞춤이 다시
+   * 서니 움직여도 된다), 자란 섬과 다음 열 사이에는 열의 틈이 남는다. */
+  const grown = await openWindowTestPage(browser, origin);
+  try {
+    await openOrbit(grown.page, { chain: true });
+    await grown.page.mouse.move(1, 1);
+    const growth = await grown.page.evaluate(async () => {
+      const state = window.__ORBIT_STATE__();
+      const plate = state.bodies.get("agent:term:402").plate;
+      const read = () => Object.fromEntries([...state.bodies.values()].map((body) => [body.key, body.world
+        ? [...body.world] : [body.left, body.right, body.back, body.front]]));
+      const before = read();
+      const row = state.rows.get(plate.key);
+      const count = row.rows * row.cols - plate.members.length + ORBIT.island.growth * row.rows;
+      const now = window.__ORBIT_NOW__;
+      const working = window.__COLUMNS__.find((column) => column.bucket === "working");
+      const added = [];
+      for (let at = 0; at < count; at += 1) {
+        const term = 420 + at;
+        window.__PANES__.push({ term, agent: "claude", state: "working", at: now - 5_000,
+          state_started_at: now - 5_000, resumable: false });
+        window.__LEDGER__.push({ ...window.__LEDGER__[1], worker: `w-${term}`, task: `자람 ${term}`,
+          task_id: `t-g${term}`, dispatch_id: `dp-g${term}`, term, pane: `%${term}` });
+        working.cards.push({ ...working.cards[0], pane: `term:${term}`, heading: `자람 ${term}`, task: `자람 ${term}`,
+          worktree: "wt/w1", parent: "" });
+        added.push(`agent:term:${term}`);
+      }
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      await window.__ORBIT_FRAMES__(3);
+      const after = read();
+      const column = state.columns.get(plate.key);
+      const later = state.plates.filter((one) => !one.deck && state.columns.get(one.key) > column);
+      return { count, seated: added.filter((key) => {
+        const body = state.bodies.get(key);
+        return body?.plate === plate && body.world[0] > plate.left && body.world[0] < plate.right;
+      }).length,
+        columns: [state.columns.get(plate.key), ...later.map((one) => state.columns.get(one.key))],
+        grew: after[plate.key][1] - before[plate.key][1], wanted: ORBIT.island.growth * ORBIT.island.seat,
+        moved: Object.keys(before).filter((key) => key !== plate.key && JSON.stringify(before[key]) !== JSON.stringify(after[key])),
+        gap: later.length > 0 ? Math.min(...later.map((one) => one.left)) - plate.right : null, column: ORBIT.flow.column };
+    });
+    const worlds = await orbitOverlaps(grown.page);
+    ok("agents that grow an island by its whole allowance move no one else, and the island stays a column's gap "
+      + "short of the next column",
+    growth.seated === growth.count && growth.count > 0 && growth.grew === growth.wanted && growth.moved.length === 0
+      && growth.columns.length >= 2 && growth.gap >= growth.column && worlds.plates.length === 0,
+    JSON.stringify({ ...growth, overlaps: worlds.plates }));
+    ok("the growing-island page raises no browser errors", grown.faults.length === 0, grown.faults.join("\n"));
+  } finally {
+    await grown.page.close();
+  }
+
+  /* ⑨ 판과 이름표가 겹치지 않는다 — 6·20·60 판과 좁은 판에서. */
+  const crowds = [];
+  for (const [size, width] of [...Object.keys(ORBIT_SIZES).map((size) => [size, 1440]), ["60", 1024]]) {
+    const one = await openWindowTestPage(browser, origin);
+    try {
+      await one.page.setViewportSize({ width, height: 960 });
+      await openOrbit(one.page, ORBIT_SIZES[size]);
+      await one.page.mouse.move(1, 1);
+      await one.page.evaluate(() => {
+        window.__ORBIT_HOLD_CAMERA__(ORBIT.camera.yaw, ORBIT.camera.pitch);
+        return window.__ORBIT_FRAMES__(4);
+      });
+      crowds.push({ size, ...(await orbitOverlaps(one.page)), viewport: width, clear: await orbitClearance(one.page),
+        faults: one.faults.length });
+    } finally {
+      await one.page.close();
+    }
+  }
+  ok("no two platforms overlap and no two name tags overlap, at 6, 20 and 60 agents and on a narrow board",
+    crowds.length === 4 && crowds.every((one) => one.plates.length === 0 && one.tags.length === 0
+      && one.outside.length === 0 && one.named > 0 && one.faults === 0),
+    JSON.stringify(crowds.map(({ clear, ...one }) => one)));
+  /* 이름이 서는 몫의 바닥: 조율자는 늘 이름으로 서고, 판마다 이름표의 이만큼은 칩으로 접히지 않는다
+   * (60 판은 판의 자리가 모자라 본진의 에이전트가 칩으로 접힌다 — 그래서 바닥이 낮다). */
+  const floors = { "6:1440": 0.75, "20:1440": 0.5, "60:1440": 0.2, "60:1024": 0.12 };
+  ok("the coordinator is always named, and on every board a floor of the labels stand named rather than folded",
+    crowds.length === 4 && crowds.every((one) => one.unnamed.length === 0
+      && one.named >= one.labels * floors[`${one.size}:${one.viewport}`]),
+    JSON.stringify(crowds.map((one) => ({ size: one.size, viewport: one.viewport, named: `${one.named}/${one.labels}`,
+      floor: floors[`${one.size}:${one.viewport}`], unnamed: one.unnamed }))));
+  const clearOf = (pick) => JSON.stringify(crowds.map((one) => ({ size: one.size, viewport: one.viewport,
+    fit: one.clear.fit, ...pick(one.clear) })));
+  ok("on the screen no two platform tops overlap, every robot stands inside its own platform's top, and no robot "
+    + "covers another platform, at 6, 20 and 60 agents and on a narrow board",
+  crowds.length === 4 && crowds.every(({ clear }) => clear.overlaps.length === 0 && clear.strays.length === 0
+    && clear.covers.length === 0),
+  clearOf(({ overlaps, strays, covers }) => ({ overlaps, strays, covers })));
+  ok("every platform stands inside the stage, clear of the glance line and the legend",
+    crowds.length === 4 && crowds.every(({ clear }) => clear.blocked.length === 0 && clear.reserved === 2),
+    clearOf(({ blocked, reserved }) => ({ blocked, reserved })));
+  ok("every platform caption, down to the lowest, clears the legend box",
+    crowds.length === 4 && crowds.every(({ clear }) => clear.captions > 0 && clear.legendTop !== null
+      && clear.lowest?.onLegend === false && clear.onLegend.length === 0),
+    clearOf(({ captions, lowest, legendTop, onLegend }) => ({ captions, lowest, legendTop, onLegend })));
+  ok("no agent's name tag stands on a platform's top", crowds.length === 4 && crowds.every(({ clear }) => clear.tagged.length === 0),
+    clearOf(({ tagged }) => ({ tagged })));
 }
 
-/* ⑫ 카메라. 우편이 흐르지 않는 판(방금 오간 것 0) — 멈춘 카메라의 판에 흐를 것이 없다. */
+/* ⑫ 카메라. 흐를 것이 없는 판 — 방금 오간 우편 0, 작업 중·확인 필요 0(`calm`): 멈춘 카메라의
+ * 판에 움직일 것이 없다. 끄는 길이는 표의 yaw 폭(여는 자리에서 ±`range`) 안이다. */
 async function testOrbitCamera(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
-    await openOrbit(page, { fresh: 0 });
+    await openOrbit(page, { fresh: 0, calm: true });
     await page.mouse.move(1, 1);
     const camera = () => page.evaluate(() => ({ ...window.__ORBIT__().camera, zoom: agentGraphZoom }));
     const opened = await camera();
@@ -766,12 +1128,12 @@ async function testOrbitCamera(browser, origin, ok) {
     const before = await camera();
     await page.mouse.move(corner.x, corner.y);
     await page.mouse.down();
-    await page.mouse.move(corner.x + 80, corner.y + 40, { steps: 4 });
-    await page.mouse.move(corner.x + 160, corner.y + 80, { steps: 4 });
+    await page.mouse.move(corner.x + 60, corner.y + 40, { steps: 4 });
+    await page.mouse.move(corner.x + 120, corner.y + 80, { steps: 4 });
     const dragged = await camera();
     await page.mouse.up();
     ok("dragging turns the camera: across is yaw, down is pitch",
-      dragged.spin === false && Math.abs((dragged.yaw - before.yaw) - 160 * turn) < 160 * turn * 0.25
+      dragged.spin === false && Math.abs((dragged.yaw - before.yaw) - 120 * turn) < 120 * turn * 0.25
         && Math.abs((dragged.pitch - before.pitch) - 80 * turn) < 1e-6,
       JSON.stringify({ before, dragged, turn }));
     await page.evaluate(() => window.__ORBIT_WAIT__(1_500));
@@ -814,7 +1176,7 @@ async function testOrbitGates(browser, origin, ok) {
 
     /* 에이전트의 라벨 — 워크스페이스의 키는 NUL을 품어 CSS 선택자로 잡히지 않는다. */
     const key = await page.evaluate(() => document.querySelector('#board-view [data-orbit-key^="agent:"]')?.dataset.orbitKey);
-    await page.hover(`[data-orbit-key="${key}"]`, { force: true, timeout: 5_000 });
+    await page.hover(`[data-orbit-key="${key}"]`, { force: true, timeout: ORBIT_ACTION_MS });
     /* 막 선 판의 점들이 나타나기를 마칠 시간까지 — 멈춤이 0이라고 말하는 것은 그 뒤의 판이다. */
     await page.evaluate(() => window.__ORBIT_WAIT__(1_200));
     const held = await countOver(page, 400);
@@ -1381,11 +1743,13 @@ function orbitTable(measured, engine) {
   const orbit = measured.orbit ?? {};
   const still = measured.still ?? {};
   const edges = orbit.handles?.edges ?? {};
+  const gpu = orbit.handles?.gpu ?? {};
   return [
     `| engine | ${engine} | ${measured.viewport.width}×${measured.viewport.height} @${measured.viewport.dpr}x | ${measured.load} |`,
     `| fixture | ${JSON.stringify(measured.fixture)} | ${measured.product} | |`,
     "|---|---|---|---|",
-    `| bodies · edges (structure/lineage/dependency) · mail links · dots | ${orbit.handles?.bodies} · ${edges.structure}/${edges.spawned}/${edges.dependency} · ${orbit.handles?.links} · ${orbit.handles?.particles} | | |`,
+    `| bodies · rails (lineage/dependency) · mail links · flowing mail | ${orbit.handles?.bodies} · ${edges.spawned}/${edges.dependency} · ${orbit.handles?.links} · ${orbit.handles?.particles} | | |`,
+    `| GPU a frame: draw calls (scene / with bloom) · triangles | ${gpu.sceneCalls} / ${gpu.calls} · ${gpu.triangles} | bloom ${orbit.handles?.bloom} | |`,
     `| turning: frame JS p50 / p95 / max (ms) | ${orbit.frameP50} / ${orbit.frameP95} / ${orbit.frameMax} | budget ≤ ${ORBIT_FRAME_BUDGET_MS} | ${orbit.frames} frames |`,
     `| still camera, dots flowing: frame JS p50 / p95 (ms) | ${still.frameP50 ?? "—"} / ${still.frameP95 ?? "—"} | edge re-projections ${still.projections ?? "—"} (must be 0) | ${still.frames ?? "—"} frames |`,
     `| frames drawn / s | ${orbit.fps} | rAF gap p50/p95 3D ${orbit.gapP50}/${orbit.gapP95} ms | still control ${measured.cards.gapP50}/${measured.cards.gapP95} ms |`,
@@ -1398,20 +1762,23 @@ function orbitTable(measured, engine) {
   ].join("\n");
 }
 
-/* 사진 여섯 장: 판 셋 × 다크·라이트. 카메라는 여는 판의 자리(`agentOrbitAim`, 표의 기울기)에
+/* 사진 여섯 장: 판 셋 × 다크·라이트. 카메라는 여는 판의 자리(표의 `camera.yaw`·`camera.pitch`)에
  * 세운다(옛 트리에서는 그림이 도는 대로) — 같은 판을 같은 각도로 다시 찍을 수 있게. */
 async function shootBoardOrbit(browser, origin, dir, dpr) {
   mkdirSync(dir, { recursive: true });
   const shots = [];
-  for (const [size, fixture] of Object.entries(ORBIT_SIZES)) {
-    for (const theme of ["dark", "light"]) {
+  const plan = Object.entries(ORBIT_SIZES).flatMap(([size, fixture]) =>
+    ["dark", "light"].map((theme) => ({ size, fixture, theme, width: 1440, name: `3d-${size}-${theme}` })));
+  plan.push({ size: "60", fixture: ORBIT_SIZES[60], theme: "dark", width: 1024, name: "3d-60-dark-narrow" });
+  for (const { fixture, theme, width, name } of plan) {
+    {
       const { page } = await openWindowTestPage(browser, origin);
       try {
-        await page.setViewportSize({ width: 1440, height: 960 });
+        await page.setViewportSize({ width, height: 960 });
         if (dpr !== 1) {
           const cdp = await page.context().newCDPSession(page);
           await cdp.send("Emulation.setDeviceMetricsOverride",
-            { width: 1440, height: 960, deviceScaleFactor: dpr, mobile: false });
+            { width, height: 960, deviceScaleFactor: dpr, mobile: false });
         }
         await openOrbit(page, fixture);
         await page.mouse.move(1, 1);
@@ -1420,11 +1787,14 @@ async function shootBoardOrbit(browser, origin, dir, dpr) {
           else delete document.documentElement.dataset.theme;
           await window.__ORBIT_WAIT__(1_200);
           const state = window.__ORBIT_STATE__?.();
-          if (state?.camera) window.__ORBIT_HOLD_CAMERA__(agentOrbitAim(state), ORBIT.camera.pitch);
+          if (state?.camera) window.__ORBIT_HOLD_CAMERA__(ORBIT.camera.yaw, ORBIT.camera.pitch);
           await window.__ORBIT_FRAMES__(4);
         }, theme);
-        const path = join(dir, `3d-${size}-${theme}.png`);
-        await page.locator("#board-view .agent-graph-surface").screenshot({ path, caret: "hide" });
+        const path = join(dir, `${name}.png`);
+        /* 판의 네모를 잘라 찍는다 — 요소 사진은 두 박자 동안 멈춘 요소를 기다리는데, 바쁜 기계의
+         * 소프트웨어 GL에서는 그 두 박자가 제한 시간을 넘는다. */
+        const clip = await page.locator("#board-view .agent-graph-surface").boundingBox();
+        await page.screenshot({ path, clip, caret: "hide", timeout: 60_000 });
         shots.push(path);
       } finally {
         await page.close();
@@ -1445,7 +1815,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const dpr = Number(option("--dpr", 1));
   const { files, origin } = await createWindowServer();
   const browserType = engine === "webkit" ? webkitType() : chromium;
-  const browser = await browserType.launch();
+  const browser = await browserType.launch(engine === "webkit" ? {} : { args: ORBIT_GL_ARGS });
   const lines = [];
   const report = (name, pass, detail = "") =>
     lines.push(`${pass ? "PASS" : "FAIL"}  ${name}${detail ? `  — ${detail}` : ""}`);

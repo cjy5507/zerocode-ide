@@ -817,12 +817,23 @@ export async function measureKnowledgeGlParity(page, ok) {
       };
       return heard;
     };
-    /* 문맥을 잃으면 2D로 돌아오는가 — 판이 스스로 잃게 만들어 본다. */
+    /* 문맥을 잃으면 2D로 돌아오는가 — 판이 스스로 잃게 만들어 본다. 떠나는 손이 GPU의 것을
+     * 다 놓는지는 렌더러(three.js)의 장부로 묻는다: 서 있는 동안 그린 패스마다 기하 하나가
+     * 있고 패스 수(넷)를 넘지 않으며(서자마자 한 칸짜리 통으로 한 번 그린 패스는 인스턴스가
+     * 없어도 장부에 남을 수 있다)·텍스처 하나(위치)·프로그램 넷이고, 떠난 뒤에는 셋 다
+     * 0이다 — 새는지를 가리는 것은 이 0들이다(09-27, 손으로 쓰던 판을
+     * three.js 위로 옮기며 — 렌더러가 장부를 들므로 「놓았는가」를 힙의 어림이 아니라 수로
+     * 묻는다). */
     const canvas = view.querySelector(".knowledge-gl");
     const lost = canvas?.getContext("webgl2")?.getExtension("WEBGL_lose_context");
     let fellBack = null;
     if (lost) {
       const heard = told();
+      const ledger = glHand.renderer.info;
+      const standing = { geometries: ledger.memory.geometries, textures: ledger.memory.textures,
+        programs: ledger.programs.length,
+        passesDrawn: [glHand.counts.discs, glHand.counts.edges, glHand.counts.nodes, glHand.counts.rings]
+          .filter((count) => count > 0).length };
       canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
       for (let round = 0; round < 200; round += 1) {
         await frame();
@@ -831,7 +842,9 @@ export async function measureKnowledgeGlParity(page, ok) {
       fellBack = { kind: knowledgePainterKind,
         canvasGone: view.querySelector(".knowledge-gl") === null,
         nodesBack: view.querySelectorAll(".knowledge-node").length,
-        toasts: heard.stop() };
+        toasts: heard.stop(),
+        ledger: { standing, gone: { geometries: ledger.memory.geometries,
+          textures: ledger.memory.textures, programs: ledger.programs.length } } };
     }
     /* 문맥이 서지 않는 판 — 시작에서 세운 캔버스·오버레이·견본이 남지 않고 2D로
      * 돌아오는가(검증 09-16: 두 실패 길이 캔버스와 GPU 문맥을 판에 남겼다). 판이
@@ -877,6 +890,14 @@ export async function measureKnowledgeGlParity(page, ok) {
     seen.fellBack !== null && seen.fellBack.kind === "svg"
       && seen.fellBack.canvasGone && seen.fellBack.nodesBack > 0 && seen.fellBack.toasts === 0,
     JSON.stringify(seen.fellBack));
+  ok("the GL hand keeps a geometry for every drawn pass and no more than its four, one seat texture and four programs on the renderer's ledger, and leaves none of them behind",
+    seen.fellBack !== null && seen.fellBack.ledger.standing.passesDrawn >= 3
+      && seen.fellBack.ledger.standing.passesDrawn <= seen.fellBack.ledger.standing.geometries
+      && seen.fellBack.ledger.standing.geometries <= 4
+      && seen.fellBack.ledger.standing.textures === 1 && seen.fellBack.ledger.standing.programs === 4
+      && seen.fellBack.ledger.gone.geometries === 0 && seen.fellBack.ledger.gone.textures === 0
+      && seen.fellBack.ledger.gone.programs === 0,
+    JSON.stringify(seen.fellBack?.ledger));
   ok("hovering on the GL hand redraws its dress without a repaint: far pages step back, the lit ones stay, letting go restores them",
     seen.hover.far >= 0 && seen.hover.farDuring < seen.hover.farBefore
       && seen.hover.nearDuring === seen.hover.nearBefore && seen.hover.farAfter === seen.hover.farBefore,
