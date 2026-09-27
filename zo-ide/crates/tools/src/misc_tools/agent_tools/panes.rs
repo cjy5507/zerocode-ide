@@ -187,9 +187,10 @@ fn record_receipt(manifest: &super::AgentOutput, outcome: &SteerOutcome) {
     );
 }
 
-/// Ask a pane child to leave the polite way: stop its turn, then close it.
+/// Ask a pane child to leave the polite way: stop its turn, then close it —
+/// or, for a release (`CloseReason::is_release`), the door alone.
 ///
-/// Both over its channel; `kill-pane` is the caller's last resort after
+/// Over its channel; `kill-pane` is the caller's last resort after
 /// this, never the first move (design §2.2). A child with no channel file
 /// yet — it has not booted — has nothing to be asked, and the caller's kill
 /// is the only road. Answers whether the child took the door: `false` for a
@@ -203,11 +204,15 @@ pub(super) fn close_pane_child(
     let Ok(coordinates) = ChannelCoordinates::read(&directory.join(CHANNEL_FILE)) else {
         return false;
     };
-    let _ = coordinates.call(
-        channel_method::CANCEL_TURN,
-        serde_json::json!({}),
-        limits.channel_timeout,
-    );
+    // A release follows an answer already read: nothing of it is running, and
+    // the turn that may be is the NEXT one the parent just steered in.
+    if !reason.is_release() {
+        let _ = coordinates.call(
+            channel_method::CANCEL_TURN,
+            serde_json::json!({}),
+            limits.channel_timeout,
+        );
+    }
     let closed = coordinates.call(
         channel_method::TEAMMATE_CLOSE,
         serde_json::json!({ "reason": reason.as_str() }),
@@ -418,10 +423,16 @@ fn watch_pane(
     };
     let outcome = wait_for_turn_result(tmux, directory, pane, turn, budget, &cancelled, &close);
     let seen_source = source_watch.and_then(crate::misc_tools::smart_router::ChallengerSourceWatch::seen);
-    // A lane's answer is the last thing asked of it: once it is read, the
-    // pane is released — after the completion is published, so the parent's
-    // collection never waits on the door (`close_grace`).
-    let lane_done = job.one_shot && matches!(outcome, PaneOutcome::Finished(_));
+    // An answered pane is released once its answer is published — after, so
+    // the parent's collection never waits on the door (`close_grace`). A
+    // lane's answer is the last thing asked of it; a teammate's next word, if
+    // one ever comes, re-cuts a pane on the same transcript (t-11753). The
+    // child keeps standing for a person who touched it (`keeps_standing`).
+    let release = matches!(outcome, PaneOutcome::Finished(_)).then_some(if job.one_shot {
+        runtime::subagent_panes::CloseReason::LaneDone
+    } else {
+        runtime::subagent_panes::CloseReason::Delivered
+    });
     let transcript = directory.join(runtime::subagent_panes::result_file_for_turn(turn));
     let completion = match outcome {
         PaneOutcome::Finished(result) => finished(job, &result),
@@ -468,12 +479,8 @@ fn watch_pane(
         ),
     };
     super::spawn::publish_pane_completion(job, completion, seen_source);
-    if lane_done {
-        close_pane_child(
-            directory,
-            &limits,
-            runtime::subagent_panes::CloseReason::LaneDone,
-        );
+    if let Some(reason) = release {
+        close_pane_child(directory, &limits, reason);
     }
 }
 
