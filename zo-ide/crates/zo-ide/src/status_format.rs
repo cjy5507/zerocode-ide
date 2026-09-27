@@ -1041,6 +1041,7 @@ mod card_tests {
             &api::ManagedAccountUpdate {
                 label: Some("joe@example.com · Acme".to_string()),
                 claude_config_dir: Some(managed.clone()),
+                claude_secure_storage_dir: None,
                 codex_home: None,
             },
         );

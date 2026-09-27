@@ -7,9 +7,7 @@
 
 use std::env;
 use std::fmt::Write as _;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -561,41 +559,26 @@ fn inspect_hook_env() -> Finding {
 }
 
 fn inspect_claude_auth() -> Finding {
-    let managed_path = env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|dir| dir.join(".credentials.json"));
-
-    if let Some(path) = managed_path.as_deref().filter(|path| path.is_file()) {
-        return match read_json(path) {
-            Ok(value) => credential_finding("Claude", "CLAUDE_CONFIG_DIR", &value),
-            Err(_) => Finding {
-                label: "Claude".to_string(),
-                status: Status::Fail,
-                value: "CLAUDE_CONFIG_DIR credentials file is unreadable".to_string(),
-            },
-        };
-    }
-
-    if env::var_os("ZO_DISABLE_KEYCHAIN").is_some() {
-        return Finding {
+    // The login zo would use, where it would read it — the CLI's own rule
+    // (t-11045): a window pane's credential folder, else the config folder,
+    // else the machine's keychain. Read only; nothing is renewed.
+    match api::peek_claude_code_login() {
+        Ok((source, blob)) => credential_finding("Claude", source, &blob),
+        Err(api::CredentialMiss::Unusable(why)) => Finding {
             label: "Claude".to_string(),
             status: Status::Warn,
-            value: "no managed credentials; keychain disabled".to_string(),
-        };
-    }
-
-    match read_keychain_blob() {
-        KeychainProbe::Present(value) => credential_finding("Claude", "keychain", &value),
-        KeychainProbe::Missing => Finding {
-            label: "Claude".to_string(),
-            status: Status::Warn,
-            value: "not logged in via CLAUDE_CONFIG_DIR or keychain".to_string(),
+            value: why,
         },
-        KeychainProbe::Unreadable => Finding {
+        Err(api::CredentialMiss::Absent) if env::var_os("ZO_DISABLE_KEYCHAIN").is_some() => Finding {
             label: "Claude".to_string(),
             status: Status::Warn,
-            value: "keychain entry exists but could not be inspected".to_string(),
+            value: "no Claude Code login in a credentials file; keychain disabled".to_string(),
+        },
+        Err(api::CredentialMiss::Absent) => Finding {
+            label: "Claude".to_string(),
+            status: Status::Warn,
+            value: "not logged in via the Claude credential folder, CLAUDE_CONFIG_DIR or keychain"
+                .to_string(),
         },
     }
 }
@@ -703,40 +686,6 @@ fn expiry_finding(
             "logged in via {source}; expires in {}",
             short_duration(expires_at - now)
         ),
-    }
-}
-
-fn read_json(path: &Path) -> std::io::Result<Value> {
-    let contents = fs::read_to_string(path)?;
-    serde_json::from_str(&contents)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-}
-
-enum KeychainProbe {
-    Present(Value),
-    Missing,
-    Unreadable,
-}
-
-/// Read the keychain blob for diagnosis only. The `security` invocation uses
-/// the read operation and never refreshes or writes credentials; the blob is
-/// parsed in memory and no token field is included in the report.
-fn read_keychain_blob() -> KeychainProbe {
-    let Ok(output) = Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
-        .output()
-    else {
-        return KeychainProbe::Missing;
-    };
-    if !output.status.success() {
-        return KeychainProbe::Missing;
-    }
-    let Ok(raw) = String::from_utf8(output.stdout) else {
-        return KeychainProbe::Unreadable;
-    };
-    match serde_json::from_str(raw.trim()) {
-        Ok(value) => KeychainProbe::Present(value),
-        Err(_) => KeychainProbe::Unreadable,
     }
 }
 

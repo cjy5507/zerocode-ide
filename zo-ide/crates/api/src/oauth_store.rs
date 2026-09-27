@@ -18,6 +18,14 @@ use core_types::PkceCodePair;
 
 const OAUTH_KEY: &str = "oauth";
 
+/// The mark a Claude login zo minted itself carries in its saved entry
+/// (t-11045). Until then zo also filed COPIES of Claude Code's login under the
+/// same key — mirrored on every read, saved after every refresh — and a copy's
+/// refresh token belongs to the tool it was copied from: spending it logs that
+/// tool out. An entry without the mark is read while its access token lasts
+/// and never refreshed.
+const MINTED_BY_ZO: &str = "zo";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredOAuthCredentials {
@@ -28,6 +36,9 @@ struct StoredOAuthCredentials {
     expires_at: Option<u64>,
     #[serde(default)]
     scopes: Vec<String>,
+    /// Who minted this login — [`MINTED_BY_ZO`] for zo's own sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    minted_by: Option<String>,
 }
 
 impl From<OAuthTokenSet> for StoredOAuthCredentials {
@@ -37,6 +48,7 @@ impl From<OAuthTokenSet> for StoredOAuthCredentials {
             refresh_token: value.refresh_token,
             expires_at: value.expires_at,
             scopes: value.scopes,
+            minted_by: None,
         }
     }
 }
@@ -48,6 +60,7 @@ impl From<&OAuthTokenSet> for StoredOAuthCredentials {
             refresh_token: value.refresh_token.clone(),
             expires_at: value.expires_at,
             scopes: value.scopes.clone(),
+            minted_by: None,
         }
     }
 }
@@ -141,8 +154,37 @@ pub fn load_oauth_credentials() -> io::Result<Option<OAuthTokenSet>> {
     load_token_set(OAUTH_KEY)
 }
 
+/// zo's saved Claude login, and whether zo minted it ([`MINTED_BY_ZO`]).
+pub fn load_oauth_login() -> io::Result<Option<(OAuthTokenSet, bool)>> {
+    let root = read_credentials_root(&credentials_path()?)?;
+    match root.get(OAUTH_KEY) {
+        Some(entry) if !entry.is_null() => {
+            let stored = StoredOAuthCredentials::deserialize(entry)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let minted = stored.minted_by.as_deref() == Some(MINTED_BY_ZO);
+            Ok(Some((stored.into(), minted)))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub fn save_oauth_credentials(token_set: &OAuthTokenSet) -> io::Result<()> {
     save_token_set(OAUTH_KEY, token_set)
+}
+
+/// Save a Claude login zo minted itself — its own sign-in, or its own refresh
+/// of one — with the mark that lets zo refresh it again (t-11045).
+pub fn save_zo_minted_oauth_credentials(token_set: &OAuthTokenSet) -> io::Result<()> {
+    update_credentials_root(&credentials_path()?, |root| {
+        let stored = StoredOAuthCredentials {
+            minted_by: Some(MINTED_BY_ZO.to_string()),
+            ..StoredOAuthCredentials::from(token_set)
+        };
+        let value = serde_json::to_value(stored)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        root.insert(OAUTH_KEY.to_owned(), value);
+        Ok(())
+    })
 }
 
 pub fn clear_oauth_credentials() -> io::Result<()> {

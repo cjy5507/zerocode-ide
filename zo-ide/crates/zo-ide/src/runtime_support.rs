@@ -1000,8 +1000,8 @@ fn warn_if_saved_oauth_lacks_inference() {
     };
     if !token.scopes.iter().any(|scope| scope == "user:inference") {
         eprintln!(
-            "\x1b[33mZo login token lacks the user:inference scope — run `zo login` again \
-             to use the claude.ai subscription flow (otherwise every turn 403s).\x1b[0m"
+            "\x1b[33mzo's saved Claude login lacks the user:inference scope (every turn would 403) — {}.\x1b[0m",
+            api::CLAUDE_SIGN_IN_AGAIN
         );
     }
 }
@@ -1847,7 +1847,8 @@ where
 {
     resolve_auth().unwrap_or_else(|error| {
         eprintln!(
-            "[zo] Claude auth unavailable at startup: {error}. Opening TUI unauthenticated; run `/login claude` before sending Anthropic requests."
+            "[zo] Claude auth unavailable at startup: {error}. Opening TUI unauthenticated; {}.",
+            api::CLAUDE_SIGN_IN_AGAIN
         );
         note_claude_login_missing(false);
         AuthSource::None
@@ -1918,7 +1919,7 @@ const CLAUDE_LOGIN_FOUND: &str = "Claude login found — this turn uses it, and 
 fn claude_login_still_missing(miss: &api::CredentialMiss) -> String {
     match miss {
         api::CredentialMiss::Absent => {
-            "Claude login still missing — sign in with `claude` or /login claude".to_string()
+            format!("Claude login still missing — {}", api::CLAUDE_SIGN_IN_AGAIN)
         }
         api::CredentialMiss::Unusable(why) => format!("Claude login still unusable — {why}"),
     }
@@ -2675,6 +2676,7 @@ mod oauth_refresh_tests {
             &api::ManagedAccountUpdate {
                 label: Some("work".to_string()),
                 claude_config_dir: Some(switched.clone()),
+                claude_secure_storage_dir: None,
                 codex_home: None,
             },
         );
@@ -2739,6 +2741,7 @@ mod oauth_refresh_tests {
             &api::ManagedAccountUpdate {
                 label: Some("personal".to_string()),
                 claude_config_dir: None,
+                claude_secure_storage_dir: None,
                 codex_home: Some(handed.clone()),
             },
         );

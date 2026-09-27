@@ -560,10 +560,14 @@ pub(super) fn zo_channel_targets(
 /// running child's environment from outside. The label is the display name this
 /// window already shows in the account list — zo must not rebuild the masking
 /// rule (`docs/design/zo-ide-account-oauth.md` §2.3).
+///
+/// Claude takes two folders, as its launch does: the config folder (the shared
+/// runtime home) and the credential folder (the chosen account's own), where
+/// the login lives and where the CLI renews it — zo reads that one (t-11045).
 pub(super) fn auth_reload_params(
     provider: zerocode_core::account::Provider,
     label: Option<&str>,
-    claude_config_dir: Option<&Path>,
+    claude_dirs: Option<ClaudeDirs<'_>>,
     codex_home: Option<&Path>,
 ) -> serde_json::Value {
     let mut params = json!({ "provider": account_provider_slug(provider) });
@@ -575,16 +579,29 @@ pub(super) fn auth_reload_params(
     if let Some(label) = label.map(str::trim) {
         object.insert("label".to_string(), json!(label));
     }
-    if let Some(dir) = claude_config_dir {
+    if let Some(dirs) = claude_dirs {
         object.insert(
             "claude_config_dir".to_string(),
-            json!(dir.to_string_lossy()),
+            json!(dirs.config.to_string_lossy()),
+        );
+        object.insert(
+            "claude_secure_storage_dir".to_string(),
+            json!(dirs.credentials.to_string_lossy()),
         );
     }
     if let Some(home) = codex_home {
         object.insert("codex_home".to_string(), json!(home.to_string_lossy()));
     }
     params
+}
+
+/// A Claude launch's two folders, as `auth.reload` carries them.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ClaudeDirs<'a> {
+    /// `CLAUDE_CONFIG_DIR` — the shared runtime home.
+    pub(super) config: &'a Path,
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` — the chosen account's own folder.
+    pub(super) credentials: &'a Path,
 }
 
 /// The name zo answers to for one provider lane.
@@ -675,10 +692,14 @@ pub(super) fn announce_account_switch(
     // `None` here is the machine's own login, which is a name to CLEAR rather
     // than a name to leave alone — the switch door always knows.
     let label = active_account_label(&config_root, provider).unwrap_or_default();
-    let (claude_config_dir, codex_home) = match provider {
-        zerocode_core::account::Provider::Anthropic => {
-            (Some(named(zerocode_core::account::CONFIG_DIR_VAR)), None)
-        }
+    let (claude_dirs, codex_home) = match provider {
+        zerocode_core::account::Provider::Anthropic => (
+            Some((
+                named(zerocode_core::account::CONFIG_DIR_VAR),
+                named(zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR),
+            )),
+            None,
+        ),
         zerocode_core::account::Provider::OpenAi => {
             (None, Some(named(zerocode_core::codex_account::HOME_VAR)))
         }
@@ -686,7 +707,12 @@ pub(super) fn announce_account_switch(
     let params = auth_reload_params(
         provider,
         Some(label.as_str()),
-        claude_config_dir.as_deref(),
+        claude_dirs
+            .as_ref()
+            .map(|(config, credentials)| ClaudeDirs {
+                config,
+                credentials,
+            }),
         codex_home.as_deref(),
     );
     // The registries are read under their locks and released BEFORE the first

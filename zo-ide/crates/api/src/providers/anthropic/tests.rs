@@ -191,6 +191,7 @@ fn resolve_saved_oauth_token_refreshes_expired_credentials() {
             expires_at: Some(1),
             scopes: vec!["scope:a".to_string()],
         },
+        true,
         |_config, request| {
             assert_eq!(request.refresh_token, "refresh-token");
             Ok(OAuthTokenSet {
@@ -220,10 +221,9 @@ fn resolve_saved_oauth_token_refreshes_expired_credentials() {
 #[test]
 fn a_rejected_refresh_branch_is_not_spent_again() {
     let _guard = env_lock();
-    let config_home = temp_config_home();
-    std::env::set_var("ZO_CONFIG_HOME", &config_home);
-    std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
-    std::env::remove_var("ANTHROPIC_API_KEY");
+    // Whole-store isolation: a refused refresh reads the saved file again
+    // (t-11045), and that read must never reach the machine's own `~/.zo`.
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
     let config = sample_oauth_config("https://console.test/oauth/token".to_string());
     let expired = || OAuthTokenSet {
         access_token: "expired-access-token".to_string(),
@@ -242,7 +242,7 @@ fn a_rejected_refresh_branch_is_not_spent_again() {
     };
 
     let first =
-        resolve_saved_oauth_token_set_with(&config, expired(), |_config, _request| {
+        resolve_saved_oauth_token_set_with(&config, expired(), true, |_config, _request| {
             Err(invalid_grant())
         })
         .expect_err("a rejected grant fails the resolution");
@@ -252,14 +252,14 @@ fn a_rejected_refresh_branch_is_not_spent_again() {
     );
 
     // Second attempt: the closure must never run.
-    let second = resolve_saved_oauth_token_set_with(&config, expired(), |_config, _request| {
+    let second = resolve_saved_oauth_token_set_with(&config, expired(), true, |_config, _request| {
         panic!("a retired branch must not reach the token endpoint again")
     })
     .expect_err("a retired branch still fails, just without the round-trip");
-    assert!(
-        matches!(&second, ApiError::Auth(message) if message.contains("zo login claude")),
-        "the failure has to name the way out: {second}"
-    );
+    match &second {
+        ApiError::Auth(message) => assert_names_a_real_way_back(message),
+        other => panic!("the failure has to name the way out: {other}"),
+    }
 
     // A different token is a different branch: a fresh sign-in is never blocked
     // by the death of the one it replaced.
@@ -267,7 +267,7 @@ fn a_rejected_refresh_branch_is_not_spent_again() {
         refresh_token: Some("freshly-signed-in".to_string()),
         ..expired()
     };
-    let resolved = resolve_saved_oauth_token_set_with(&config, fresh, |_config, request| {
+    let resolved = resolve_saved_oauth_token_set_with(&config, fresh, true, |_config, request| {
         assert_eq!(request.refresh_token, "freshly-signed-in");
         Ok(OAuthTokenSet {
             access_token: "new-access-token".to_string(),
@@ -278,10 +278,6 @@ fn a_rejected_refresh_branch_is_not_spent_again() {
     })
     .expect("an unrelated branch refreshes normally");
     assert_eq!(resolved.access_token, "new-access-token");
-
-    clear_oauth_credentials().expect("clear credentials");
-    std::env::remove_var("ZO_CONFIG_HOME");
-    cleanup_temp_config_home(&config_home);
 }
 
 /// An entry zo did not mint — the copy of a Claude Code login zo filed under
@@ -298,15 +294,17 @@ fn a_saved_copy_is_read_while_it_lasts_and_never_refreshed() {
         expires_at: Some(expires_at),
         scopes: vec!["user:inference".to_string()],
     };
-    save_oauth_credentials(&core_types::OAuthTokenSet {
-        access_token: "copied-access".to_string(),
-        refresh_token: Some("copied-tools-branch".to_string()),
-        expires_at: Some(1),
-        scopes: vec!["user:inference".to_string()],
-    })
-    .expect("the copy zo filed");
 
-    let error = resolve_saved_oauth_token_set_with(&config, copy(1), |_config, _request| {
+    let lasting = resolve_saved_oauth_token_set_with(
+        &config,
+        copy(now_unix_timestamp() + 3_600),
+        false,
+        |_config, _request| panic!("a copy that still lasts needs no refresh"),
+    )
+    .expect("a copy is read while it lasts");
+    assert_eq!(lasting.access_token, "copied-access");
+
+    let error = resolve_saved_oauth_token_set_with(&config, copy(1), false, |_config, _request| {
         panic!("zo spent the refresh token of a login it copied")
     })
     .expect_err("an expired copy is not renewed by zo");
@@ -317,6 +315,62 @@ fn a_saved_copy_is_read_while_it_lasts_and_never_refreshed() {
         }
         other => panic!("expected the copy's refusal, got {other:?}"),
     }
+}
+
+/// The mark rides with zo's own login through zo's refresh of it, so the next
+/// lapse is zo's to refresh too; an entry saved without it reads as a copy.
+#[test]
+fn zo_keeps_the_mark_on_the_login_it_minted() {
+    let _guard = env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let config = sample_oauth_config("https://console.test/oauth/token".to_string());
+    crate::oauth_store::save_zo_minted_oauth_credentials(&core_types::OAuthTokenSet {
+        access_token: "zo-access".to_string(),
+        refresh_token: Some("zo-branch".to_string()),
+        expires_at: Some(1),
+        scopes: vec!["user:inference".to_string()],
+    })
+    .expect("zo's own sign-in");
+    let (saved, minted) = crate::oauth_store::load_oauth_login()
+        .expect("read the saved login")
+        .expect("a saved login");
+    assert!(minted, "zo's own sign-in carries the mark");
+
+    resolve_saved_oauth_token_set_with(
+        &config,
+        OAuthTokenSet {
+            access_token: saved.access_token,
+            refresh_token: saved.refresh_token,
+            expires_at: saved.expires_at,
+            scopes: saved.scopes,
+        },
+        minted,
+        |_config, _request| {
+            Ok(OAuthTokenSet {
+                access_token: "zo-access-next".to_string(),
+                refresh_token: Some("zo-branch-next".to_string()),
+                expires_at: Some(now_unix_timestamp() + 3_600),
+                scopes: vec!["user:inference".to_string()],
+            })
+        },
+    )
+    .expect("zo refreshes its own login");
+    let (_, minted) = crate::oauth_store::load_oauth_login()
+        .expect("read the saved login")
+        .expect("a saved login");
+    assert!(minted, "zo's refresh dropped the mark from its own login");
+
+    save_oauth_credentials(&core_types::OAuthTokenSet {
+        access_token: "copied".to_string(),
+        refresh_token: Some("copied-branch".to_string()),
+        expires_at: Some(1),
+        scopes: Vec::new(),
+    })
+    .expect("an unmarked entry");
+    let (_, minted) = crate::oauth_store::load_oauth_login()
+        .expect("read the saved login")
+        .expect("a saved login");
+    assert!(!minted, "an entry saved without the mark read as zo's own");
 }
 
 /// Every zo process shares the saved-login file, so a refused refresh can be a
@@ -343,7 +397,7 @@ fn a_refresh_lost_to_another_zo_process_takes_its_newer_copy() {
     .expect("seed the shared saved login");
 
     let mut refreshes = 0;
-    let resolved = resolve_saved_oauth_token_set_with(&config, spent, |_config, _request| {
+    let resolved = resolve_saved_oauth_token_set_with(&config, spent, true, |_config, _request| {
         refreshes += 1;
         // The other zo process got there first: it spent the branch and
         // saved the next one, so this one's attempt is refused.
@@ -448,6 +502,7 @@ fn resolve_saved_oauth_token_preserves_refresh_token_when_refresh_response_omits
             expires_at: Some(1),
             scopes: vec!["scope:a".to_string()],
         },
+        true,
         |_config, request| {
             assert_eq!(request.refresh_token, "refresh-token");
             Ok(OAuthTokenSet {
@@ -968,64 +1023,6 @@ impl Drop for EnvVarGuard {
             None => std::env::remove_var(self.key),
         }
     }
-}
-
-/// A credentials file the CLI would write, `expires_at_ms` from now.
-fn cli_blob(access: &str, refresh: &str, expires_at_ms: u64) -> String {
-    serde_json::json!({"claudeAiOauth": {
-        "accessToken": access,
-        "refreshToken": refresh,
-        "expiresAt": expires_at_ms,
-        "scopes": ["user:inference", "user:profile"],
-        "subscriptionType": "max",
-    }})
-    .to_string()
-}
-
-fn an_hour_from_now_ms() -> u64 {
-    (now_unix_timestamp() + 3_600) * 1_000
-}
-
-/// A window pane is launched with two folders: the shared runtime home as its
-/// config (the window's COPY of the chosen account, written at a switch) and
-/// the account's own folder as its credentials — which is where the CLI of
-/// every pane keeps and renews the login. Zo speaks as that login, not as the
-/// copy (t-11045; the copy went stale at the CLI's first renewal and zo then
-/// spent its superseded refresh token).
-#[test]
-fn a_pane_speaks_as_the_login_its_cli_keeps_not_the_windows_copy() {
-    let _guard = env_lock();
-    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
-    let _disable_keychain = EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
-    crate::managed_account::clear();
-    let runtime_home = tempfile::tempdir().expect("the shared runtime home");
-    let account = tempfile::tempdir().expect("the chosen account's folder");
-    std::fs::write(
-        runtime_home.path().join(".credentials.json"),
-        cli_blob("windows-copy-access", "windows-copy-branch", an_hour_from_now_ms()),
-    )
-    .expect("the window's copy");
-    std::fs::write(
-        account.path().join(".credentials.json"),
-        cli_blob("account-live-access", "account-live-branch", an_hour_from_now_ms()),
-    )
-    .expect("the login the CLI keeps");
-    let _config = EnvVarGuard::set(
-        "CLAUDE_CONFIG_DIR",
-        Some(runtime_home.path().to_str().expect("utf8 runtime home")),
-    );
-    let _credentials = EnvVarGuard::set(
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-        Some(account.path().to_str().expect("utf8 account folder")),
-    );
-
-    let resolved = super::resolve_claude_auth_fresh_detailed().expect("the pane's login");
-    assert_eq!(
-        resolved.auth.bearer_token(),
-        Some("account-live-access"),
-        "zo spoke as the window's copy of the login"
-    );
-    crate::managed_account::clear();
 }
 
 #[test]
@@ -2315,17 +2312,16 @@ async fn a_wall_hours_away_is_not_retried_at_the_ladders_cap() {
 
 /// C1 (t-6248): when no Claude credential can be used, the resolution says
 /// which of two things is true. A login that is there and cannot be used —
-/// the window's managed file, expired, its refresh token already refused by
-/// the endpoint — is `Unusable` with the way back in; a machine where no rung
-/// holds anything is `Absent`. The `Option` view every request path reads is
-/// unchanged: `None` either way.
+/// the window's managed file, expired, and its own CLI asked to renew it
+/// without bringing it back — is `Unusable` with the way back in; a machine
+/// where no rung holds anything is `Absent`. The `Option` view every request
+/// path reads is unchanged: `None` either way.
 #[test]
 fn a_refused_managed_login_is_unusable_and_an_empty_machine_is_absent() {
     use crate::credential::CredentialMiss;
     let _guard = env_lock();
     let _isolation = crate::test_env::CredentialEnvIsolation::empty();
     let _disable_keychain = EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
-    let _no_managed = EnvVarGuard::set("CLAUDE_CONFIG_DIR", None);
     crate::managed_account::clear();
     super::keychain::invalidate_claude_code_keychain_cache();
 
@@ -2341,31 +2337,241 @@ fn a_refused_managed_login_is_unusable_and_an_empty_machine_is_absent() {
         r#"{"claudeAiOauth":{"accessToken":"expired-managed-access","refreshToken":"superseded-managed-branch","expiresAt":1000,"scopes":["user:inference"]}}"#,
     )
     .expect("managed credentials");
-    let refused = ApiError::Api {
-        status: reqwest::StatusCode::BAD_REQUEST,
-        error_type: None,
-        message: None,
-        body: r#"{"error": "invalid_grant", "error_description": "refresh token superseded"}"#.to_string(),
-        retryable: false,
-        retry_after: None,
-    };
-    assert!(
-        super::refresh_gate::record_failure("superseded-managed-branch", &refused),
-        "invalid_grant retires the branch"
-    );
     let _claude_home = EnvVarGuard::set(
         "CLAUDE_CONFIG_DIR",
         Some(managed.path().to_str().expect("utf8 managed home")),
     );
+    // The CLI ran to its end and the store still holds the expired login.
+    let _renewer = RenewerGuard::install(|_renewal| super::keychain::RenewalRun::Ran);
 
     let miss = super::resolve_claude_auth_fresh_explained()
-        .expect_err("a refused login resolves to nothing usable");
+        .expect_err("a login its CLI could not renew resolves to nothing usable");
     let CredentialMiss::Unusable(why) = miss else {
         panic!("a login that is there is not absent: {miss:?}");
     };
-    assert!(why.contains("refused") && why.contains("sign in again"), "{why}");
+    assert!(why.contains("could not renew") && why.contains("sign in again"), "{why}");
     assert!(!why.contains("expired-managed-access") && !why.contains("superseded-managed-branch"), "no token in the words: {why}");
     assert!(super::resolve_claude_auth_fresh_detailed().is_none());
+    crate::managed_account::clear();
+}
+
+/// A renewer installed for one test and taken away again, even when an
+/// assertion fails — the slot is process-wide.
+struct RenewerGuard;
+
+impl RenewerGuard {
+    fn install(
+        renewer: impl Fn(&super::keychain::ClaudeLoginRenewal) -> super::keychain::RenewalRun
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        super::keychain::install_claude_login_renewer(Some(std::sync::Arc::new(renewer)));
+        Self
+    }
+}
+
+impl Drop for RenewerGuard {
+    fn drop(&mut self) {
+        super::keychain::install_claude_login_renewer(None);
+    }
+}
+
+/// A credentials file the CLI would write, `expires_at_ms` from now.
+fn cli_blob(access: &str, refresh: &str, expires_at_ms: u64) -> String {
+    serde_json::json!({"claudeAiOauth": {
+        "accessToken": access,
+        "refreshToken": refresh,
+        "expiresAt": expires_at_ms,
+        "scopes": ["user:inference", "user:profile"],
+        "subscriptionType": "max",
+    }})
+    .to_string()
+}
+
+fn an_hour_from_now_ms() -> u64 {
+    (now_unix_timestamp() + 3_600) * 1_000
+}
+
+/// A window pane is launched with two folders: the shared runtime home as its
+/// config (the window's COPY of the chosen account, written at a switch) and
+/// the account's own folder as its credentials — which is where the CLI of
+/// every pane keeps and renews the login. Zo speaks as that login, not as the
+/// copy (t-11045; the copy went stale at the CLI's first renewal and zo then
+/// spent its superseded refresh token).
+#[test]
+fn a_pane_speaks_as_the_login_its_cli_keeps_not_the_windows_copy() {
+    let _guard = env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let _disable_keychain = EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+    crate::managed_account::clear();
+    let runtime_home = tempfile::tempdir().expect("the shared runtime home");
+    let account = tempfile::tempdir().expect("the chosen account's folder");
+    std::fs::write(
+        runtime_home.path().join(".credentials.json"),
+        cli_blob("windows-copy-access", "windows-copy-branch", an_hour_from_now_ms()),
+    )
+    .expect("the window's copy");
+    std::fs::write(
+        account.path().join(".credentials.json"),
+        cli_blob("account-live-access", "account-live-branch", an_hour_from_now_ms()),
+    )
+    .expect("the login the CLI keeps");
+    let _config = EnvVarGuard::set(
+        "CLAUDE_CONFIG_DIR",
+        Some(runtime_home.path().to_str().expect("utf8 runtime home")),
+    );
+    let _credentials = EnvVarGuard::set(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        Some(account.path().to_str().expect("utf8 account folder")),
+    );
+
+    let resolved = super::resolve_claude_auth_fresh_detailed().expect("the pane's login");
+    assert_eq!(
+        resolved.auth.bearer_token(),
+        Some("account-live-access"),
+        "zo spoke as the window's copy of the login"
+    );
+    crate::managed_account::clear();
+}
+
+/// An expired Claude Code login is renewed by its own CLI, asked once with
+/// the store's folder, and read again — zo spends no refresh token, writes
+/// nothing to the store and copies nothing into its own (t-11045).
+#[test]
+fn an_expired_login_is_renewed_by_its_own_cli_and_read_again() {
+    let _guard = env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let _disable_keychain = EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+    crate::managed_account::clear();
+    let account = tempfile::tempdir().expect("the account's folder");
+    let store = account.path().join(".credentials.json");
+    std::fs::write(&store, cli_blob("lapsed-access-renewed-case", "cli-branch", 1_000))
+        .expect("an expired login");
+    let _credentials = EnvVarGuard::set(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        Some(account.path().to_str().expect("utf8 account folder")),
+    );
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let renewed = cli_blob("renewed-access", "cli-branch-next", an_hour_from_now_ms());
+    let _renewer = {
+        let asked = std::sync::Arc::clone(&asked);
+        let store = store.clone();
+        let renewed = renewed.clone();
+        RenewerGuard::install(move |renewal| {
+            asked.lock().expect("asks").push(renewal.folder.clone());
+            // What the CLI does under its own lock: refresh, write its store.
+            std::fs::write(&store, &renewed).expect("the CLI writes its store");
+            super::keychain::RenewalRun::Ran
+        })
+    };
+
+    let resolved = super::resolve_claude_auth_fresh_detailed().expect("renewed by its CLI");
+    assert_eq!(resolved.auth.bearer_token(), Some("renewed-access"));
+    assert_eq!(
+        *asked.lock().expect("asks"),
+        vec![Some(account.path().to_path_buf())],
+        "the CLI is asked once, about this store"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&store).expect("the store"),
+        renewed,
+        "zo rewrote the CLI's store"
+    );
+    assert!(
+        crate::oauth_store::load_oauth_credentials()
+            .expect("zo's own store")
+            .is_none(),
+        "zo copied the CLI's login into its own store"
+    );
+    crate::managed_account::clear();
+}
+
+/// The CLI ran to its end and the login is still expired: the login itself is
+/// gone. Zo says so with the way back, and asks again only when a new sign-in
+/// brings a different login — never on a timer (t-10915's rule for the window).
+#[test]
+fn a_login_its_cli_could_not_renew_is_not_asked_about_again() {
+    use crate::credential::CredentialMiss;
+    let _guard = env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let _disable_keychain = EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+    crate::managed_account::clear();
+    let account = tempfile::tempdir().expect("the account's folder");
+    let store = account.path().join(".credentials.json");
+    std::fs::write(&store, cli_blob("lapsed-access-retired-case", "dead-branch", 1_000))
+        .expect("an expired login");
+    let _credentials = EnvVarGuard::set(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        Some(account.path().to_str().expect("utf8 account folder")),
+    );
+    let asks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _renewer = {
+        let asks = std::sync::Arc::clone(&asks);
+        RenewerGuard::install(move |_renewal| {
+            asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            super::keychain::RenewalRun::Ran
+        })
+    };
+
+    for _ in 0..3 {
+        let miss = super::resolve_claude_auth_fresh_explained().expect_err("still expired");
+        let CredentialMiss::Unusable(why) = miss else {
+            panic!("a login that is there is not absent: {miss:?}");
+        };
+        assert!(why.contains("sign in again"), "{why}");
+    }
+    assert_eq!(asks.load(std::sync::atomic::Ordering::SeqCst), 1, "asked again on a timer");
+
+    // A new sign-in is a different login, and it is simply used.
+    std::fs::write(&store, cli_blob("signed-in-again-access", "new-branch", an_hour_from_now_ms()))
+        .expect("the person signs in again");
+    let resolved = super::resolve_claude_auth_fresh_detailed().expect("the new login");
+    assert_eq!(resolved.auth.bearer_token(), Some("signed-in-again-access"));
+    crate::managed_account::clear();
+}
+
+/// A CLI that could not be asked at all — not on PATH, would not start —
+/// learned nothing about the login: the miss says why and that the next
+/// connection asks again, and a connection a moment later does not re-run it.
+#[test]
+fn a_cli_that_cannot_be_asked_accuses_nobody_and_cools_down() {
+    use crate::credential::CredentialMiss;
+    let _guard = env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let _disable_keychain = EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+    crate::managed_account::clear();
+    let account = tempfile::tempdir().expect("the account's folder");
+    std::fs::write(
+        account.path().join(".credentials.json"),
+        cli_blob("lapsed-access-cooling-case", "live-branch", 1_000),
+    )
+    .expect("an expired login");
+    let _credentials = EnvVarGuard::set(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        Some(account.path().to_str().expect("utf8 account folder")),
+    );
+    let asks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _renewer = {
+        let asks = std::sync::Arc::clone(&asks);
+        RenewerGuard::install(move |_renewal| {
+            asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            super::keychain::RenewalRun::NotRun("no `claude` on PATH".to_string())
+        })
+    };
+
+    let first = super::resolve_claude_auth_fresh_explained().expect_err("not renewed");
+    let CredentialMiss::Unusable(why) = first else {
+        panic!("a login that is there is not absent: {first:?}");
+    };
+    assert!(why.contains("no `claude` on PATH") && why.contains("asks again"), "{why}");
+    assert!(!why.contains("sign in again"), "a CLI that never ran accused the login: {why}");
+    let second = super::resolve_claude_auth_fresh_explained().expect_err("still cooling");
+    assert!(
+        matches!(&second, CredentialMiss::Unusable(why) if why.contains("a moment ago")),
+        "{second:?}"
+    );
+    assert_eq!(asks.load(std::sync::atomic::Ordering::SeqCst), 1);
     crate::managed_account::clear();
 }
 
