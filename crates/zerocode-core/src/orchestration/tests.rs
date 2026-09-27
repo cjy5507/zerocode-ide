@@ -11823,7 +11823,7 @@ fn a_worker_is_tuned_only_as_its_agent_spells_it() {
 
     // And every id the tuning table names exists in the agent catalog,
     // so the two registries cannot drift apart.
-    for (id, _, _) in TUNABLE {
+    for (id, _, _, _) in TUNABLE {
         assert!(
             crate::agent::AGENT_SPECS.iter().any(|spec| spec.id == *id),
             "TUNABLE names {id}, which the agent catalog does not know"
@@ -11951,7 +11951,7 @@ fn agent_list_says_what_is_installed_and_what_takes_a_dial() {
     assert_eq!(untunable["takesModel"], false);
     assert_eq!(untunable["takesEffort"], false);
     assert!(
-        !TUNABLE.iter().any(|(id, _, _)| *id == "copilot"),
+        !TUNABLE.iter().any(|(id, _, _, _)| *id == "copilot"),
         "the test's example moved into the table"
     );
 
@@ -24928,4 +24928,90 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
         "send --type account_switched --body {\"toAccount\":\"x\"}",
     );
     assert_eq!(typed.reply.exit_code, 1, "{}", typed.reply.stdout);
+}
+
+#[test]
+fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_effort() {
+    struct DifficultyLauncher {
+        calls: std::cell::Cell<usize>,
+        receipt: Option<serde_json::Value>,
+    }
+    impl Launcher for DifficultyLauncher {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            Catalog(&["claude", "codex", "antigravity", "cursor"])
+                .command_for(agent, prompt, tuning)
+        }
+        fn choose_difficulty(
+            &self,
+            look: &crate::summon_difficulty::Look,
+            _origin: [&str; 3],
+        ) -> Option<serde_json::Value> {
+            self.calls.set(self.calls.get() + 1);
+            assert_eq!(look.spec, "translate-labels");
+            self.receipt.clone()
+        }
+    }
+    for (receipt, flag, expected, calls) in [
+        (None, "", None, 1),
+        (
+            Some(serde_json::json!({"outcome":"timeout", "applied":false})),
+            "",
+            None,
+            1,
+        ),
+        (
+            Some(serde_json::json!({"chosen":"low", "applied":true})),
+            "",
+            Some("medium"),
+            1,
+        ),
+        (
+            Some(serde_json::json!({"chosen":"low", "applied":true})),
+            "--effort max",
+            Some("max"),
+            0,
+        ),
+        (
+            Some(serde_json::json!({"chosen":"low", "applied":true})),
+            "--effort xhigh",
+            Some("xhigh"),
+            0,
+        ),
+    ] {
+        let mut bench = Bench::new();
+        bench.json("run-create --name difficulty");
+        let launcher = DifficultyLauncher {
+            calls: std::cell::Cell::new(0),
+            receipt,
+        };
+        let planned = planned_on(
+            &mut bench.ledger,
+            &mut bench.team,
+            &launcher,
+            &format!("worker-start --agent claude --model opus --prompt translate-labels {flag}"),
+            bench.clock + 1,
+        );
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+        assert_eq!(reply["model"], "opus");
+        assert_eq!(reply["effort"].as_str(), expected);
+        assert_eq!(launcher.calls.get(), calls);
+        let shadow = planned
+            .prepared_worker_start
+            .unwrap()
+            .difficulty_shadow
+            .unwrap();
+        assert_eq!(
+            shadow.teacher_effort.as_deref(),
+            if calls == 0 { expected } else { None }
+        );
+    }
+    assert_eq!(difficulty_effort("antigravity", "high"), Some("high"));
+    assert_eq!(difficulty_effort("codex", "high"), Some("max"));
+    assert_eq!(difficulty_effort("cursor", "low"), None);
 }

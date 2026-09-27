@@ -4207,6 +4207,11 @@
             <span data-jev-summary data-i18n="settings.typesafe.summonSummary">워커가 맡을 일을 어느 에이전트가 하면 좋을지 판단합니다. 켜면 에이전트를 auto로 부른 소환에서 그 판단대로 고릅니다.</span>
             <p data-jev-hint data-i18n="settings.typesafe.summonHint">워커를 부를 때 그 일을 어느 에이전트가 맡아야 할지 판단합니다. 켜면 에이전트를 auto로 지정한 소환(worker-start --agent auto)에서 그 판단대로 고르고, 직접 지정한 에이전트는 바꾸지 않습니다. 보내는 것은 브리핑 앞 1,200자와 일의 형태 네 가지(브리핑 전체 길이·워크트리를 쓰는지·재시도인지·과업을 지녔는지)이며, 코디네이터가 이미 적은 에이전트는 보내지 않습니다. 후보는 지금 여유가 있는 에이전트뿐이라 사용 한도에 걸린 것은 들어가지 않습니다. 정확도는 실제로 부른 에이전트와 견주어 잽니다.</p>
           </div>
+          <div data-jev-feature="summon_difficulty">
+            <span data-jev-name data-i18n="settings.typesafe.summon_difficulty">소환할 워커의 사고 깊이</span>
+            <span data-jev-summary data-i18n="settings.typesafe.summon_difficultySummary">과업 난이도를 판단해 소환할 워커의 사고 깊이를 정합니다. 자동 적용 전에는 판단을 기록합니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.summon_difficultyHint">과업 제목과 설명 앞 400자, 이전 시도 수·연속 실패 수·재시도 여부로 난이도를 판단합니다. 직접 지정한 사고 깊이와 비교해 배우고, 기존 승격 기준을 통과한 뒤 사고 깊이를 지정하지 않은 소환에만 적용합니다. 기록 중이거나 2초 안에 적용할 답이 없으면 CLI 기본값을 유지합니다. 직접 지정한 모델과 사고 깊이는 보존합니다.</p>
+          </div>
           <div data-jev-feature="effort">
             <span data-jev-name data-i18n="settings.typesafe.effort">워커 사고 깊이 조절</span>
             <span data-jev-summary data-i18n="settings.typesafe.effortSummary">워커의 턴이 막혔는지 판단해 다음 턴의 사고 깊이를 올릴지·내릴지·둘지 정합니다. 켜면 다음 턴 전에 한 단계씩 바꿉니다.</span>

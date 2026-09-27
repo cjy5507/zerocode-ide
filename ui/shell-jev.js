@@ -378,6 +378,7 @@ const JEV_REASONS = Object.freeze({
   worker_died: { key: "jev.reason.workerDied", word: "터미널 닫힘" },
   not_offered: { key: "jev.reason.notOffered", word: "보기에 없음" },
   pinned: { key: "jev.reason.pinned", word: "모델 고정" },
+  no_teacher: { key: "jev.reason.noTeacher", word: "비교할 깊이 지정 없음" },
   no_note_touched: { key: "jev.reason.noNoteTouched", word: "노트 안 씀" },
   unanswered: { key: "jev.reason.unanswered", word: "결과 없음" },
   no_file_edited: { key: "jev.reason.noFileEdited", word: "편집한 파일 없음" },

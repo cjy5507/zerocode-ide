@@ -1655,6 +1655,44 @@ pub const SUMMON: JevUse = JevUse {
     follows: None,
 };
 
+/// Difficulty of a new summons, compared with the coordinator's explicit
+/// effort pin. Outcomes of executed work do not grade this comparison seat.
+pub const SUMMON_DIFFICULTY: JevUse = JevUse {
+    id: crate::summon_difficulty::QUESTION,
+    setting: "summonDifficulty",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/title",
+            cap: Cap::Chars(crate::summon_difficulty::TITLE_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/spec",
+            cap: Cap::Chars(crate::summon_difficulty::SPEC_CHAR_CAP),
+        },
+    ],
+    ledger: "summon-difficulty.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(crate::summon_difficulty::APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
+    baseline: Baseline::AlwaysSame(crate::summon_difficulty::LADDER[2].0),
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: true,
+    rubric_version: crate::summon_difficulty::RUBRIC_VERSION,
+    request_name: &["dispatch"],
+    names: Naming::Request,
+    label_part: &[],
+    follows: None,
+};
+
 /// Characters of the repeated tool call one step-effort question carries —
 /// the call's name and target as the board draws them, one card line
 /// (`crate::transcript::clamp`), which is what the question is about: the
@@ -3960,7 +3998,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 27] = [
+pub static JEV_USES: [JevUse; 28] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -3971,6 +4009,7 @@ pub static JEV_USES: [JevUse; 27] = [
     STALL,
     PLACEMENT,
     SUMMON,
+    SUMMON_DIFFICULTY,
     STEP_EFFORT,
     ZO_STEP_EFFORT,
     COMPACTION,
