@@ -4341,6 +4341,72 @@ await glPage.setViewportSize(zoomSeat);
     JSON.stringify(zoomNames));
 }
 
+/* 테마를 바꾸면 GL 손의 그림도 바뀐다(t-11500). SVG는 스타일시트가 곧 옷이라 저절로 따라오지만,
+ * GL의 점·선은 견본에게 물어 바이트로 올린 색이다 — 창의 테마 단추 길(`setTheme`) 한 번 뒤에
+ * 아무도 건드리지 않은 그림이, 같은 장면·같은 카메라를 그 테마로 처음부터 그린 그림과 픽셀까지
+ * 같아야 한다. 두 방향, 전체 지도와 주변 탐색. 옛 코드는 넷 모두에서 다른 그림이었다(점·선이
+ * 앞 테마의 색으로 남았다 — 카메라를 움직여도). */
+const themeScene = async (mode, from) => glPage.evaluate(async ({ mode, from }) => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  setTheme(from);
+  knowledgePainterKind = "gl";
+  knowledgeQuery = "";
+  knowledgeSelectedKey = null;
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const answer = window.__buildVaultGraph__({ path: `/scene/theme-${mode}`, sources: false },
+    { pages: 160, ghosts: 12, linksPer: 3, tags: ["core", "reading", "tools"] });
+  knowledgeLayouts.delete(view);
+  const host = view.querySelector(".knowledge-nodes");
+  host.dataset.knowledgeSignature = "";
+  host.dataset.knowledgeVault = "";
+  host.replaceChildren();
+  view.querySelector(".knowledge-edges").replaceChildren();
+  noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+  setKnowledgeMode(view, "global", { paint: false });
+  knowledgeReport = answer;
+  await paintKnowledgeView();
+  for (let wait = 0; wait < 1200 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+  if (mode === "local") {
+    setKnowledgeMode(view, "local", { paint: false });
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 1200 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+  }
+  await paintKnowledgeView();
+  for (let wait = 0; wait < 3; wait += 1) await frame();
+  return { painter: knowledgePainterFor(view).id, mode: knowledgeMode };
+}, { mode, from });
+/* 전이(`--motion-fast`)가 끝난 뒤의 캔버스 — 이름표 층도 캔버스 안이라 함께 찍힌다. */
+const themeShot = async () => {
+  await glPage.waitForTimeout(700);
+  return glPage.locator(".knowledge-view:not([hidden]) .knowledge-canvas").screenshot();
+};
+const themeRuns = [];
+for (const mode of ["global", "local"]) {
+  for (const [from, to] of [["dark", "light"], ["light", "dark"]]) {
+    const scene = await themeScene(mode, from);
+    await glPage.evaluate(async (to) => {
+      setTheme(to);
+      for (let wait = 0; wait < 10; wait += 1) await new Promise((done) => requestAnimationFrame(done));
+    }, to);
+    const switched = await themeShot();
+    /* 처음 그린 그림: GL 손을 놓고 새로 세운다 — 새 손은 새 테마의 견본을 처음 묻는다(자리·카메라는 판의 것이라 그대로). */
+    await glPage.evaluate(async () => {
+      knowledgePainterKind = "svg";
+      await paintKnowledgeView();
+      knowledgePainterKind = "gl";
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await new Promise((done) => requestAnimationFrame(done));
+    });
+    const fresh = await themeShot();
+    themeRuns.push({ ...scene, from, to, same: switched.equals(fresh) });
+  }
+}
+await glPage.evaluate(() => setTheme("dark"));
+ok("switching the theme repaints the GL picture as a fresh paint in that theme (both ways, overview and local)",
+  themeRuns.length === 4 && themeRuns.every((run) => run.painter === "gl" && run.same)
+    && themeRuns.filter((run) => run.mode === "local").length === 2,
+  JSON.stringify(themeRuns));
+
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *
  * 다섯 종류의 점 하나씩을 선 없이 한 줄로 세우고, 같은 자리·같은 크기를 SVG 손과 GL 손으로

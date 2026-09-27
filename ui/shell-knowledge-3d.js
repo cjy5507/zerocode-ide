@@ -814,6 +814,7 @@ function makeKnowledgeGlPainter() {
     counts: { nodes: 0, edges: 0, discs: 0, rings: 0, labels: 0, draws: 0 },
     lost: false,
     onLost: null,
+    onTheme: null,
 
     mount(view) {
       this.view = view;
@@ -938,6 +939,13 @@ function makeKnowledgeGlPainter() {
         return;
       }
       this.palette = knowledgeGlPalette(view, null);
+      /* 캔버스는 테마를 모른다 — 창의 테마 단추(`setTheme`)나 시스템 설정이 뿌리의 `data-theme`를
+       * 바꾸면 옷만 다시 입은 프레임 하나를 그린다(자리는 그대로). */
+      this.onTheme = new MutationObserver(() => {
+        const layout = knowledgeLayouts.get(view);
+        if (layout !== undefined) this.paintDress(layout);
+      });
+      this.onTheme.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     },
 
     /* 위상의 순간. SVG는 여기서 만 개의 <g>를 세우고, 이 손은 통의 크기만 맞춘다. */
@@ -1075,7 +1083,11 @@ function makeKnowledgeGlPainter() {
       /* 이름판과 관계의 낱말은 여전히 이 <svg> 안에 산다(군집 수·이웃 수만큼이라
        * DOM이 값을 치르지 않는다). 그래서 카메라는 두 손이 함께 쓴다. */
       writeAttribute(picture, "viewBox", `${camera.x} ${camera.y} ${camera.wide} ${camera.tall}`);
+      /* 테마가 바뀌면 견본이 새 색을 답한다 — 그 프레임은 카메라만 움직였어도 옷을 다시 올린다
+       * (옷은 바이트로 올린 색이라 스타일시트를 따라오지 않는다). */
+      const inked = this.palette?.theme;
       this.palette = knowledgeGlPalette(view, this.palette);
+      if (this.palette.theme !== inked) this.dressStale = true;
       const tuning = layout.tuning;
       const feather = Number.isFinite(tuning.glFeather) ? tuning.glFeather : 1;
       const wide = view.querySelector(".knowledge-canvas").clientWidth;
@@ -1455,6 +1467,8 @@ function makeKnowledgeGlPainter() {
       if (this.canvas !== null && this.onLost !== null) {
         this.canvas.removeEventListener("webglcontextlost", this.onLost);
       }
+      this.onTheme?.disconnect();
+      this.onTheme = null;
       this.renderer?.dispose();
       /* 문맥 자체도 놓는다 — 판마다의 GL 문맥 수는 브라우저가 열여섯 언저리로
        * 묶어 두고, 넘으면 가장 오래된 것을 말없이 잃는다. 렌더러가 서지 못한 판에도

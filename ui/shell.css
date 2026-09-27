@@ -37798,6 +37798,12 @@ details.task-board-section > summary {
   pointer-events: none;
 }
 
+/* 견본은 전이하지 않는다 — 테마가 바뀐 순간 GL 손이 묻는데, 전이 중인 견본은 앞 테마의 색을
+   답하고 그 답이 새 테마의 색으로 외워진다. */
+.knowledge-picture.knowledge-gl-swatch * {
+  transition: none;
+}
+
 /* 색은 군집에서(3차), 그리고 **한 규칙에서**.
  *
  * 여덟 칸의 색은 토큰이 들고(라이트 판의 뒤집기도 토큰이 한다), 이 매핑이 사는
