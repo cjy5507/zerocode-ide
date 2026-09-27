@@ -618,7 +618,7 @@ fn the_pointer_reads_a_panes_wall_once_where_it_would_type_a_fresh_line() {
         pass.find(needle)
             .unwrap_or_else(|| panic!("the pointer pass lost `{needle}`:\n{pass}"))
     };
-    let running = at("matches!(heard, Some(PaneTurn::Running))");
+    let running = at("matches!(heard, Some(PaneTurn::Running { .. }))");
     let deadline = at("Some(Standing::Walled { until_ms, .. }) if now_ms < until_ms => continue");
     let asked = at(".pane_wall(term, &agent)");
     assert!(
