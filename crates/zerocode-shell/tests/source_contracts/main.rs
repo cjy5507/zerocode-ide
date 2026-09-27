@@ -7,6 +7,7 @@ mod computer_use_tcc;
 mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
+mod jev_pane_seats;
 mod quiet_children;
 mod quota_wall;
 mod readiness;

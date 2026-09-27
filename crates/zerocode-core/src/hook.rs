@@ -1230,6 +1230,50 @@ fn first_text(record: &serde_json::Value, keys: &[&str]) -> Option<String> {
         .find_map(|key| record.get(*key).and_then(value_text))
 }
 
+/// A tool call's target read by `text`: the call's input when it is itself
+/// the words, else the first of [`TARGET_KEYS`] in its input, else the first
+/// at the payload's top.
+fn target_with(
+    parsed: &serde_json::Value,
+    text: fn(&serde_json::Value) -> Option<String>,
+) -> Option<String> {
+    let input = INPUT_KEYS.iter().find_map(|key| parsed.get(*key));
+    let first = |record: &serde_json::Value| {
+        TARGET_KEYS
+            .iter()
+            .find_map(|key| record.get(*key).and_then(text))
+    };
+    input
+        .and_then(text)
+        .or_else(|| input.and_then(first))
+        .or_else(|| first(parsed))
+}
+
+/// A value's words as the payload wrote them — a string, or an argv array
+/// joined — trimmed, and neither collapsed nor clamped nor scrubbed.
+fn raw_text(value: &serde_json::Value) -> Option<String> {
+    let text = match value.as_str() {
+        Some(text) => text.to_string(),
+        None => value
+            .as_array()?
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The argument of a tool call that says which file, command or query, as
+/// the payload wrote it — the target [`activity_of_parsed`] reads, whole: for
+/// a reader that needs the path itself rather than a row's line (the file an
+/// edit writes, `crate::hook_guard`, t-11349).
+#[must_use]
+pub fn target_in(parsed: &serde_json::Value) -> Option<String> {
+    target_with(parsed, raw_text)
+}
+
 /// Whether a finished tool actually failed.
 ///
 /// Amp has no failure EVENT — its `tool.result` carries the verdict in the
@@ -1290,11 +1334,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
         // Cursor's shell event names no tool at all — the EVENT is the name,
         // and its payload carries the command at the top level.
         let verb = named.or_else(|| (word == "beforeshellexecution").then_some(Tool::Bash))?;
-        let input = INPUT_KEYS.iter().find_map(|key| parsed.get(*key));
-        let target = input
-            .and_then(value_text)
-            .or_else(|| input.and_then(|held| first_text(held, TARGET_KEYS)))
-            .or_else(|| first_text(parsed, TARGET_KEYS));
+        let target = target_with(parsed, value_text);
         let phase = if phase == Phase::Finished && failed_in(parsed) {
             Phase::Failed
         } else {

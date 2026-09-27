@@ -3428,9 +3428,22 @@ fn main() -> ExitCode {
             // ticks for terminal screens, and a stat that hangs on a dead
             // network mount must stall the file marks, never the shells.
             let watched = app.state::<AppState>().watched().clone();
+            // zo's settings file rides the watcher too: which of the Jev
+            // seats a pane's work is put to is read now, and again whenever
+            // the file moves, so the hook loop reads it from memory
+            // (t-11349).
+            pane_guard::watch_settings(&watched);
             let files = handle.clone();
             std::thread::spawn(move || {
                 watched.run(file_watch::POLL, |events| {
+                    // The Jev settings lane is the pane seats' trigger, and
+                    // nothing the window is told.
+                    let (settings, events): (Vec<_>, Vec<_>) = events
+                        .into_iter()
+                        .partition(|change| change.lane == pane_guard::WATCH_LANE);
+                    if !settings.is_empty() {
+                        pane_guard::settings_moved();
+                    }
                     // The artifact lane is the store's trigger, not the
                     // window's news: it re-walks its folders here, on this
                     // thread, and the window hears `artifacts:changed` only

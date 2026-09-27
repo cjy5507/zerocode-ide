@@ -2698,28 +2698,10 @@ fn traces_base_from(relocated: bool, cwd: &std::path::Path) -> PathBuf {
     }
 }
 
-#[must_use]
-pub fn project_slug(cwd: &std::path::Path) -> String {
-    let sanitized: String = cwd
-        .to_string_lossy()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let tail_start = sanitized.len().saturating_sub(80);
-    let stem = sanitized[tail_start..].trim_matches('-');
-    let hash = crate::sandbox::workspace_scratch_key(cwd);
-    if stem.is_empty() {
-        hash
-    } else {
-        format!("{stem}-{hash}")
-    }
-}
+/// The folder name zo gives a workspace's state — the core's since t-11349
+/// (`zerocode_core::zo_project`), where the window finds a project's zo
+/// ledgers by the same name.
+pub use zerocode_core::zo_project::project_slug;
 
 impl RuntimeHookConfig {
     #[must_use]

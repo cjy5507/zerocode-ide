@@ -183,7 +183,7 @@ pub fn tool_text_guard_path() -> PathBuf {
 
 /// The folder a row's words came from, by its last name — how a row of the
 /// machine's one ledger names its project.
-fn pane_of(project: &Path) -> Option<String> {
+pub(super) fn pane_of(project: &Path) -> Option<String> {
     project.file_name().map(|name| name.to_string_lossy().into_owned())
 }
 

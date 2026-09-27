@@ -414,7 +414,7 @@ const JEV_UNSEEN = Object.freeze({
   own_runtime: { key: "jev.unseen.ownRuntime", word: "zo가 직접 물음" },
   no_hooks: { key: "jev.unseen.noHooks", word: "훅을 설치하지 않는 에이전트" },
   no_event_before: { key: "jev.unseen.noEventBefore", word: "실행 전에 알리지 않아 실행 뒤에 물음" },
-  no_prompt_event: { key: "jev.unseen.noPromptEvent", word: "요청을 알리지 않아 과업 없이 물음" },
+  no_prompt_event: { key: "jev.unseen.noPromptEvent", word: "사람의 요청을 알리지 않음" },
   no_stop_flag: { key: "jev.unseen.noStopFlag", word: "멈춤을 알리지 않음" },
 });
 

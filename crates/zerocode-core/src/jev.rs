@@ -30,8 +30,10 @@ use sha2::{Digest, Sha256};
 
 pub mod challenger;
 pub mod choice;
+pub mod claim;
 pub mod count;
 pub mod door;
+pub mod file_pick;
 pub mod hedge;
 pub mod memo;
 pub mod noul;

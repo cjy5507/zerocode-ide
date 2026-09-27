@@ -66,6 +66,22 @@ pub fn asked(question: &str, instructions: &str, criteria: Map<String, Value>) -
     )]))
 }
 
+/// One closed choice's object among several of a request's questions: its
+/// instructions and each option's word with what it means — [`asked`]'s
+/// envelope, for a seat that asks one choice per item (the completion claim
+/// seat, `crate::jev::claim::questions`).
+#[must_use]
+pub fn question(instructions: &str, criteria: &[(&str, &str)]) -> Value {
+    envelope(
+        CHOICE,
+        instructions,
+        criteria
+            .iter()
+            .map(|(word, meaning)| ((*word).to_string(), Value::from(*meaning)))
+            .collect(),
+    )
+}
+
 /// The key a question and its answer name their primitive under — the
 /// union tag's own key.
 const TAG_KEY: &str = "type";
