@@ -29,7 +29,7 @@ class ConstantsMatchTheirSource(unittest.TestCase):
         self.assertEqual(rust_const(jev, "RECALL_REQUEST_CHAR_CAP").replace("_", ""), str(seed.COMMAND_CHAR_CAP))
 
     def test_the_sources_are_the_runtimes_words(self):
-        guard = (REPO / "zo-ide" / "crates" / "runtime" / "src" / "tool_guard.rs").read_text()
+        guard = (REPO / "crates" / "zerocode-core" / "src" / "jev" / "tool_guard.rs").read_text()
         # The kinds are one impl block; the host's framing words next to it
         # (`HostFraming`) are not kinds of source.
         sources = guard.split("impl TextSource {", 1)[1].split("\nimpl ", 1)[0]
