@@ -611,7 +611,7 @@ pub const HARNESS_FILE: &str = "harness.json";
 /// Overridden from `settings.json` under [`SETTINGS_LIMITS_KEY`], each key a
 /// millisecond count: `idleBudgetMs`, `parentLivenessGraceMs`,
 /// `parentLivenessPollMs`, `resultPollMs`, `channelTimeoutMs`,
-/// `paneBudgetMs`, `closeGraceMs`.
+/// `paneQuietMs`, `paneBudgetMs`, `closeGraceMs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// How long a child waits for its parent's next word before it closes.
@@ -625,8 +625,15 @@ pub struct Limits {
     pub result_poll: Duration,
     /// Connect-and-answer budget for one call on a child's or parent's channel.
     pub channel_timeout: Duration,
-    /// How long a parent waits for one pane turn before ending the pane.
-    pub pane_budget: Duration,
+    /// How long a parent waits for one pane turn to show progress — a line
+    /// more on the child's transcript — before it ends the pane. Time spent
+    /// working does not count against it; time spent stuck does (t-11458).
+    pub pane_quiet: Duration,
+    /// A wall-clock limit on one pane turn, however the child is doing, when
+    /// the person's settings name one (`paneBudgetMs` — the key that meant
+    /// this before `paneQuietMs` existed, so a setting written then keeps its
+    /// meaning). None by default: a working child is not ended for its age.
+    pub pane_wall: Option<Duration>,
     /// After `teammate.close` is accepted, how long the parent gives the child
     /// to write `result-final.json` before it reaches for `kill-pane`.
     pub close_grace: Duration,
@@ -640,7 +647,8 @@ impl Default for Limits {
             parent_liveness_poll: Duration::from_secs(2),
             result_poll: Duration::from_millis(250),
             channel_timeout: Duration::from_secs(3),
-            pane_budget: Duration::from_secs(60 * 60),
+            pane_quiet: Duration::from_secs(60 * 60),
+            pane_wall: None,
             close_grace: Duration::from_secs(2),
         }
     }
@@ -668,14 +676,25 @@ impl Limits {
             ("parentLivenessPollMs", &mut limits.parent_liveness_poll),
             ("resultPollMs", &mut limits.result_poll),
             ("channelTimeoutMs", &mut limits.channel_timeout),
-            ("paneBudgetMs", &mut limits.pane_budget),
+            ("paneQuietMs", &mut limits.pane_quiet),
             ("closeGraceMs", &mut limits.close_grace),
         ] {
             if let Some(value) = millis(key) {
                 *slot = value;
             }
         }
+        limits.pane_wall = millis("paneBudgetMs");
         limits
+    }
+
+    /// What ends one pane turn: a limit the caller named (`time_budget`) or
+    /// the person's settings named is a wall-clock promise; otherwise the
+    /// turn runs as long as the child keeps making progress.
+    #[must_use]
+    pub fn pane_budget(&self, named: Option<Duration>) -> PaneBudget {
+        named
+            .or(self.pane_wall)
+            .map_or(PaneBudget::Quiet(self.pane_quiet), PaneBudget::Wall)
     }
 
     /// The table for this process: `settings.json` in the config home.
@@ -685,6 +704,48 @@ impl Limits {
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
         Self::from_settings(settings.as_ref())
+    }
+}
+
+/// What ends a parent's wait for one pane turn when no answer comes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneBudget {
+    /// The child showed no progress — its transcript did not grow — for this
+    /// long. How long it has been working in all does not matter.
+    Quiet(Duration),
+    /// This long has passed since the turn began, working or not: a limit
+    /// somebody named.
+    Wall(Duration),
+}
+
+impl PaneBudget {
+    /// Why the pane was ended, in words for the parent's model and whoever
+    /// reads its answer.
+    #[must_use]
+    pub fn ended_because(self) -> String {
+        match self {
+            Self::Quiet(quiet) => format!(
+                "the sub-agent showed no progress for {} (its transcript did not grow), so its pane was closed",
+                spoken(quiet)
+            ),
+            Self::Wall(limit) => format!(
+                "the sub-agent's pane wrote no result within its limit of {}, so its pane was closed",
+                spoken(limit)
+            ),
+        }
+    }
+}
+
+/// A duration as a person says it: whole minutes when it is whole minutes,
+/// seconds otherwise.
+fn spoken(duration: Duration) -> String {
+    const MINUTE: u64 = 60;
+    let seconds = duration.as_secs();
+    if seconds >= MINUTE && seconds % MINUTE == 0 {
+        let minutes = seconds / MINUTE;
+        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+    } else {
+        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
     }
 }
 
@@ -718,6 +779,24 @@ pub const CHANNEL_FILE: &str = "channel.addr";
 /// into its manifest; the parent reads its work (tool calls, the call running
 /// now, when it last wrote) from that transcript (t-11354).
 pub const TRANSCRIPT_FILE: &str = "transcript.path";
+
+/// The transcript a pane child named in its `directory`, if it has named one.
+#[must_use]
+pub fn named_transcript(directory: &Path) -> Option<PathBuf> {
+    let named = std::fs::read_to_string(directory.join(TRANSCRIPT_FILE)).ok()?;
+    let named = named.trim();
+    (!named.is_empty()).then(|| PathBuf::from(named))
+}
+
+/// What the parent compares to see a child's work move: its transcript's
+/// size and write time. Only a CHANGE counts, and it is timed on the parent's
+/// own monotonic clock — a write time read as an age would call a child idle
+/// for the hours a laptop lid was shut.
+fn transcript_stamp(directory: &Path) -> Option<(PathBuf, u64, std::time::SystemTime)> {
+    let transcript = named_transcript(directory)?;
+    let metadata = std::fs::metadata(&transcript).ok()?;
+    Some((transcript, metadata.len(), metadata.modified().ok()?))
+}
 
 /// The id every one-shot call on a fresh connection uses: one request per
 /// connection, so there is nothing to tell apart.
@@ -1526,7 +1605,7 @@ pub fn wait_for_result(
     tmux: &Tmux,
     directory: &Path,
     pane: &str,
-    budget: std::time::Duration,
+    budget: PaneBudget,
     cancelled: &dyn Fn() -> bool,
 ) -> PaneOutcome {
     wait_for_turn_result(tmux, directory, pane, 1, budget, cancelled, &|| {})
@@ -1539,13 +1618,17 @@ pub fn wait_for_result(
 /// is cancelled or the budget runs out: the polite road, `session.cancel_turn`
 /// and then `teammate.close` over the child's channel. The pane is still
 /// killed after it, so a child that ignored the door is not left standing.
+///
+/// A [`PaneBudget::Quiet`] budget is counted from the last time the child's
+/// transcript was seen to change, or from the start of the wait before it
+/// first does — a transcript left from an earlier turn is not progress.
 #[allow(clippy::too_many_arguments)] // one wait, one table of ways it ends
 pub fn wait_for_turn_result(
     tmux: &Tmux,
     directory: &Path,
     pane: &str,
     turn: u32,
-    budget: std::time::Duration,
+    budget: PaneBudget,
     cancelled: &dyn Fn() -> bool,
     close: &dyn Fn(),
 ) -> PaneOutcome {
@@ -1560,11 +1643,13 @@ pub fn wait_for_turn_result_on(
     directory: &Path,
     pane: &str,
     turn: u32,
-    budget: std::time::Duration,
+    budget: PaneBudget,
     cancelled: &dyn Fn() -> bool,
     close: &dyn Fn(),
 ) -> PaneOutcome {
     let started = clock.now();
+    let mut seen = transcript_stamp(directory);
+    let mut progressed = started;
     let answered = || {
         TeammateResult::read_turn(directory, turn)
             .map(|result| PaneOutcome::Finished(Box::new(result)))
@@ -1581,7 +1666,19 @@ pub fn wait_for_turn_result_on(
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::Cancelled);
         }
-        if clock.now().duration_since(started) >= budget {
+        let now = clock.now();
+        let (counted, limit) = match budget {
+            PaneBudget::Wall(limit) => (now.duration_since(started), limit),
+            PaneBudget::Quiet(limit) => {
+                let stamp = transcript_stamp(directory);
+                if stamp.is_some() && stamp != seen {
+                    seen = stamp;
+                    progressed = now;
+                }
+                (now.duration_since(progressed), limit)
+            }
+        };
+        if counted >= limit {
             close();
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::TimedOut);
@@ -1955,7 +2052,24 @@ mod tests {
         assert_eq!(limits.parent_liveness_poll, defaults.parent_liveness_poll);
         assert_eq!(limits.channel_timeout, defaults.channel_timeout);
         assert_eq!(limits.result_poll, defaults.result_poll);
-        assert_eq!(limits.pane_budget, defaults.pane_budget);
+        assert_eq!(limits.pane_quiet, defaults.pane_quiet);
+        // Nobody named a wall clock: the turn runs while the child works.
+        assert_eq!(limits.pane_wall, None);
+        assert_eq!(limits.pane_budget(None), PaneBudget::Quiet(defaults.pane_quiet));
+
+        // `paneBudgetMs` keeps the meaning it had when it was written — a
+        // wall clock — and `paneQuietMs` is the progress budget.
+        let settings = serde_json::json!({
+            "subagents": { "paneBudgetMs": 7_200_000, "paneQuietMs": 900_000 }
+        });
+        let limits = Limits::from_settings(Some(&settings));
+        assert_eq!(limits.pane_quiet, Duration::from_millis(900_000));
+        assert_eq!(limits.pane_budget(None), PaneBudget::Wall(Duration::from_millis(7_200_000)));
+        // A caller's own limit is the nearer promise.
+        assert_eq!(
+            limits.pane_budget(Some(Duration::from_secs(5))),
+            PaneBudget::Wall(Duration::from_secs(5))
+        );
     }
 
     /// Turn results are one axis of files, and the closing document is
@@ -2016,7 +2130,8 @@ mod tests {
         TeammateResult::closed("agent-6", CloseReason::IdleBudget)
             .write_final(&child)
             .expect("write final");
-        let outcome = wait_for_turn_result(&tmux, &child, "%9", 2, Duration::from_secs(5), &|| false, &|| {});
+        let named = PaneBudget::Wall(Duration::from_secs(5));
+        let outcome = wait_for_turn_result(&tmux, &child, "%9", 2, named, &|| false, &|| {});
         match outcome {
             PaneOutcome::Closed(result) => assert_eq!(result.reason, Some(CloseReason::IdleBudget)),
             other => panic!("a closing document read as {other:?}"),
@@ -2028,7 +2143,7 @@ mod tests {
             directory.path(),
             "%9",
             2,
-            Duration::from_secs(30),
+            PaneBudget::Wall(Duration::from_secs(30)),
             &|| true,
             &|| knocked.set(true),
         );
@@ -2324,7 +2439,7 @@ mod tests {
             &tmux,
             &child,
             "%9",
-            std::time::Duration::from_secs(5),
+            PaneBudget::Wall(std::time::Duration::from_secs(5)),
             &|| false,
         );
         assert_eq!(outcome, PaneOutcome::Finished(Box::new(wrote)));
@@ -2338,7 +2453,7 @@ mod tests {
                 &gone,
                 empty.path(),
                 "%9",
-                std::time::Duration::from_secs(5),
+                PaneBudget::Wall(std::time::Duration::from_secs(5)),
                 &|| false
             ),
             PaneOutcome::Vanished
@@ -2353,7 +2468,7 @@ mod tests {
             &tmux,
             directory.path(),
             "%9",
-            std::time::Duration::from_secs(30),
+            PaneBudget::Wall(std::time::Duration::from_secs(30)),
             &|| true,
         );
         assert_eq!(outcome, PaneOutcome::Cancelled);
@@ -2372,7 +2487,7 @@ mod tests {
             &tmux,
             directory.path(),
             "%9",
-            std::time::Duration::ZERO,
+            PaneBudget::Wall(std::time::Duration::ZERO),
             &|| false,
         );
         assert_eq!(outcome, PaneOutcome::TimedOut);
@@ -2440,8 +2555,11 @@ mod tests {
         let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
         let child = directory.path().join("agent-8");
         std::fs::create_dir_all(&child).expect("mkdir");
-        let budget = Limits::default().pane_budget;
-        let answer_at = budget + Duration::from_secs(60);
+        let budget = Limits::default().pane_budget(None);
+        let PaneBudget::Quiet(quiet) = budget else {
+            panic!("the default budget is not counted from progress: {budget:?}");
+        };
+        let answer_at = quiet + Duration::from_secs(60);
         let agent = |elapsed: Duration| {
             work_on_transcript(&child, &format!(r#"{{"type":"tool_use","at":{}}}"#, elapsed.as_secs()));
             if elapsed >= answer_at {
@@ -2460,6 +2578,80 @@ mod tests {
             !tmux_log(directory.path()).iter().any(|line| line == "kill-pane -t %9"),
             "a working child's pane was killed"
         );
+    }
+
+    /// A child that stops writing is ended once it has been quiet for the
+    /// budget — counted from its last line, not from the start — and a
+    /// transcript that was already there when the wait began is not progress.
+    #[test]
+    fn a_child_that_stops_making_progress_is_closed_a_quiet_budget_after_its_last_line() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-9");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        work_on_transcript(&child, r#"{"type":"tool_result","turn":1}"#);
+        let quiet = Duration::from_secs(60 * 60);
+        let works_for = Duration::from_secs(10 * 60);
+        let agent = |elapsed: Duration| {
+            if elapsed <= works_for {
+                work_on_transcript(&child, r#"{"type":"tool_use"}"#);
+            }
+        };
+        let clock = SteppedClock::new(Duration::from_secs(60), &agent);
+        let knocked = std::cell::Cell::new(false);
+        let outcome = wait_for_turn_result_on(
+            &clock,
+            &tmux,
+            &child,
+            "%9",
+            2,
+            PaneBudget::Quiet(quiet),
+            &|| false,
+            &|| knocked.set(true),
+        );
+        assert_eq!(outcome, PaneOutcome::TimedOut);
+        assert_eq!(clock.elapsed(), works_for + quiet, "ended an hour after the last line");
+        assert!(knocked.get(), "the door was not tried before the pane was killed");
+
+        // No line at all in this turn: the hour counts from the start.
+        let still = directory.path().join("agent-10");
+        std::fs::create_dir_all(&still).expect("mkdir");
+        work_on_transcript(&still, r#"{"type":"tool_result","turn":1}"#);
+        let idle = SteppedClock::new(Duration::from_secs(60), &|_| {});
+        let quiet_budget = PaneBudget::Quiet(quiet);
+        let outcome = wait_for_turn_result_on(&idle, &tmux, &still, "%9", 2, quiet_budget, &|| false, &|| {});
+        assert_eq!(outcome, PaneOutcome::TimedOut);
+        assert_eq!(idle.elapsed(), quiet);
+    }
+
+    /// A limit somebody named is a wall clock: a child working every minute
+    /// is still ended when it runs out.
+    #[test]
+    fn a_named_limit_ends_a_working_child_when_it_runs_out() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-11");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let agent = |_| work_on_transcript(&child, r#"{"type":"tool_use"}"#);
+        let clock = SteppedClock::new(Duration::from_secs(60), &agent);
+        let limit = Duration::from_secs(30 * 60);
+        let named = Limits::default().pane_budget(Some(limit));
+        assert_eq!(named, PaneBudget::Wall(limit));
+        let outcome = wait_for_turn_result_on(&clock, &tmux, &child, "%9", 1, named, &|| false, &|| {});
+        assert_eq!(outcome, PaneOutcome::TimedOut);
+        assert_eq!(clock.elapsed(), limit);
+    }
+
+    /// What the parent's model reads when a pane is ended says which limit
+    /// ended it, in minutes a person would say.
+    #[test]
+    fn an_ended_pane_says_which_limit_ended_it() {
+        let quiet = PaneBudget::Quiet(Duration::from_secs(60 * 60)).ended_because();
+        assert!(quiet.contains("no progress for 60 minutes"), "{quiet}");
+        let wall = PaneBudget::Wall(Duration::from_secs(90)).ended_because();
+        assert!(wall.contains("within its limit of 90 seconds"), "{wall}");
+        let one = PaneBudget::Wall(Duration::from_secs(60)).ended_because();
+        assert!(one.ends_with("limit of 1 minute, so its pane was closed"), "{one}");
     }
 
     /// A tmux that cannot be asked is not evidence a child died.
