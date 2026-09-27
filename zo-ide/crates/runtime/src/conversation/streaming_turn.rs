@@ -637,6 +637,7 @@ where
         // additional legs of the same user turn and must not double-count it.
         if !internal_subturn {
             self.fold_finished_refusal_turn();
+            self.refusal_compaction = None;
         }
         // Reset the per-leg refusal override before deciding whether the
         // session cooldown should re-arm it below.
@@ -649,6 +650,7 @@ where
         self.refusal_switch_consented_for_turn = false;
         self.refusal_switch_refused_for_turn = false;
         self.refusal_images_asked_for_turn = false;
+        self.refusal_compaction_used = false;
         // Reset the per-turn quota fallback, pre-arming onto it when the session
         // is still inside a recorded quota-dry cooldown (applies to internal
         // subturns too — a quota-dry session applies to every leg). See
@@ -1983,6 +1985,34 @@ where
                                 }
                             }
                         }
+                        // The last rung (t-10956): fold the conversation and ask
+                        // the same model once more, the person's last words as
+                        // they wrote them. Said on screen before it runs; the
+                        // compaction's own lines say what it folded.
+                        RefusalDecision::RetryCompacted(config) => {
+                            let _ = render_tx
+                                .send(RenderBlock::System {
+                                    id: id_gen.next(),
+                                    level: SystemLevel::Warn,
+                                    text: core_types::retry_signal::refusal_compaction_notice(
+                                        &from_model,
+                                    ),
+                                })
+                                .await;
+                            if let Some(event) = self
+                                .apply_auto_compaction_streaming(config, &render_tx, &id_gen)
+                                .await
+                            {
+                                if let Some(usage) = refused_usage {
+                                    self.usage_tracker.record(usage);
+                                }
+                                self.note_refusal_compaction(event);
+                                auto_compaction.get_or_insert(event);
+                                continue 'outer;
+                            }
+                            // Nothing was folded after all: the rung is spent,
+                            // and the ladder answers again.
+                        }
                         other => break other,
                     }
                 };
@@ -2014,7 +2044,8 @@ where
                     }
                     RefusalDecision::Surface
                     | RefusalDecision::Proceed
-                    | RefusalDecision::Ask { .. } => None,
+                    | RefusalDecision::Ask { .. }
+                    | RefusalDecision::RetryCompacted(_) => None,
                 };
                 if let Some((level, text)) = retry_notice {
                     if let Some(usage) = refused_usage {
@@ -2030,6 +2061,7 @@ where
                     | RefusalDecision::RetrySameModel
                     | RefusalDecision::CrossProvider
                     | RefusalDecision::RetryCleaned
+                    | RefusalDecision::RetryCompacted(_)
                     | RefusalDecision::Ask { .. } => unreachable!("handled above"),
                     RefusalDecision::Surface => {
                         if let Some(usage) = refused_usage {
@@ -2042,6 +2074,18 @@ where
                                 text: REFUSAL_SURFACED_NOTICE.to_string(),
                             })
                             .await;
+                        // What stands beside it (t-10956): a compacted retry
+                        // that was declined too, and the pictures from earlier
+                        // in the conversation that ride every request.
+                        for text in self.settle_surfaced_refusal() {
+                            let _ = render_tx
+                                .send(RenderBlock::System {
+                                    id: id_gen.next(),
+                                    level: SystemLevel::Info,
+                                    text,
+                                })
+                                .await;
+                        }
                         // A route nobody could be asked about is said so
                         // (t-7153): `ask` with nobody at the keyboard.
                         if let Some(to) = self.refusal_switch_unasked_to.take() {

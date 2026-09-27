@@ -139,6 +139,26 @@ pub struct TurnRecord {
     /// The session goal in effect, if one was set (`/goal`). Lets a later pass
     /// tie turns to the objective they served.
     pub goal: Option<String>,
+    /// Set when the turn answered a classifier decline by compacting the
+    /// conversation and asking the same model once more (t-10956) — the row
+    /// "how often did a compaction clear a decline" counts. Absent otherwise,
+    /// and in logs written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_compaction: Option<RefusalCompaction>,
+}
+
+/// A classifier decline a turn answered by compacting and asking again
+/// (t-10956): what the compaction cost, and whether the retry was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusalCompaction {
+    /// Messages folded into the summary.
+    pub removed_messages: usize,
+    /// Estimated conversation tokens before and after the compaction.
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    /// `true` when the retry after the compaction was answered; `false` when
+    /// it was declined too and the decline was surfaced.
+    pub resolved: bool,
 }
 
 impl TurnRecord {
@@ -204,6 +224,8 @@ impl TurnRecord {
             head_transitions: Vec::new(),
             output_tokens: summary.usage.output_tokens,
             goal: goal.map(str::to_string),
+            // Filled by `record_completed_with` from the runtime's turn state.
+            refusal_compaction: None,
         }
     }
 
@@ -233,6 +255,7 @@ impl TurnRecord {
             head_transitions: Vec::new(),
             output_tokens: 0,
             goal: goal.map(str::to_string),
+            refusal_compaction: None,
         }
     }
 }
@@ -507,7 +530,22 @@ pub fn record_completed(
     summary: &TurnSummary,
     goal: Option<&str>,
 ) -> Option<TurnRecord> {
+    record_completed_with(cwd, session_id, summary, goal, None)
+}
+
+/// [`record_completed`] for a turn that answered a classifier decline by
+/// compacting the conversation (t-10956): the record carries what it cost
+/// and whether it cleared the decline.
+#[must_use]
+pub fn record_completed_with(
+    cwd: &Path,
+    session_id: &str,
+    summary: &TurnSummary,
+    goal: Option<&str>,
+    refusal_compaction: Option<RefusalCompaction>,
+) -> Option<TurnRecord> {
     let mut record = TurnRecord::from_summary(session_id, next_seq(cwd, session_id), summary, goal);
+    record.refusal_compaction = refusal_compaction;
     // Externalize the commits this turn created (same rationale as
     // `files_edited`: after compaction this record is the only proof the HEAD
     // movement was this session's own work). Snapshot-then-confirm, so a

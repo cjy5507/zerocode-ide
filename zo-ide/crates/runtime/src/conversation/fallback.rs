@@ -84,14 +84,21 @@ pub(super) enum RefusalRung {
     /// The earlier declined exchange dropped from history and the same model
     /// asked once more — for a routed category only.
     Cleaned,
+    /// The conversation compacted — its old context, pictures and all, folded
+    /// into a summary — and the same model asked once more with the person's
+    /// last words as they wrote them (t-10956). Last, and once a turn: what
+    /// the surfaced notice told the person to do on a long session, done for
+    /// them. A conversation too short to fold skips it.
+    Compacted,
 }
 
 /// The ladder, first to last.
-pub(super) const REFUSAL_LADDER: [RefusalRung; 4] = [
+pub(super) const REFUSAL_LADDER: [RefusalRung; 5] = [
     RefusalRung::SameModel,
     RefusalRung::Route,
     RefusalRung::CrossProvider,
     RefusalRung::Cleaned,
+    RefusalRung::Compacted,
 ];
 
 /// What the switching mode says before a rung leaves the model the person
@@ -302,6 +309,10 @@ pub(super) enum RefusalDecision {
     /// history dragging the classifier down. Drop it and re-request the same
     /// model once. Capped at one per turn.
     RetryCleaned,
+    /// Nothing else is left and the conversation can be folded: compact it
+    /// with `config` and re-request the same model once (t-10956). Capped at
+    /// one per turn; a decline after it is surfaced.
+    RetryCompacted(crate::compact::CompactionConfig),
     /// The next rung would leave the model the person chose, and the mode is
     /// `ask` with a person at the keyboard: ask before switching to `to`
     /// (t-6747). A yes is recorded and the ladder decided again.
@@ -743,6 +754,14 @@ where
                         return RefusalDecision::RetryCleaned;
                     }
                 }
+                RefusalRung::Compacted => {
+                    if !self.refusal_compaction_used {
+                        if let Some(config) = self.compaction_config_if_possible() {
+                            self.refusal_compaction_used = true;
+                            return RefusalDecision::RetryCompacted(config);
+                        }
+                    }
+                }
             }
         }
         RefusalDecision::Surface
@@ -804,19 +823,18 @@ where
         Some(count)
     }
 
-    /// The images the declined request carried — every image in the messages
-    /// after the last assistant message, a pasted screenshot or a tool's
-    /// (t-6747). A picture of a declined screen re-declines whoever reads it
-    /// (2026-09-21: three of a coordinator's answers in a row until the
-    /// screenshot left the context), so the ladder asks before sending them
-    /// again.
+    /// The images the declined request carried — every image the conversation
+    /// holds, a pasted screenshot or a tool's (t-6747), from its first
+    /// question on: each one rides every request. A picture of a declined
+    /// screen re-declines whoever reads it (2026-09-21: three of a
+    /// coordinator's answers in a row until the screenshot left the context),
+    /// so the ladder asks before sending them again. Counting only the images
+    /// sent since the last answer never asked about the one that mattered on
+    /// 2026-09-27 — a screenshot in the conversation's first question, on
+    /// every one of six declined requests (t-10956).
     pub(super) fn declined_request_images(&self) -> usize {
-        let messages = &self.session.messages;
-        let since = messages
-            .iter()
-            .rposition(|message| message.role == crate::session::MessageRole::Assistant)
-            .map_or(0, |at| at + 1);
-        messages[since..]
+        self.session
+            .messages
             .iter()
             .flat_map(|message| message.blocks.iter())
             .map(|block| match block {
@@ -827,20 +845,14 @@ where
             .sum()
     }
 
-    /// Withhold the declined request's images from the conversation, each
-    /// replaced by [`DECLINED_IMAGE_PLACEHOLDER`], so no later request in this
-    /// session carries them again. Only on the person's yes. Answers how many
-    /// went.
+    /// Withhold the declined request's images — every one the conversation
+    /// holds ([`Self::declined_request_images`]) — each replaced by
+    /// [`DECLINED_IMAGE_PLACEHOLDER`], so no later request in this session
+    /// carries them again. Only on the person's yes. Answers how many went.
     pub(super) fn withhold_declined_request_images(&mut self) -> usize {
-        let since = self
-            .session
-            .messages
-            .iter()
-            .rposition(|message| message.role == crate::session::MessageRole::Assistant)
-            .map_or(0, |at| at + 1);
         let messages = Arc::make_mut(&mut self.session.messages);
         let mut withheld = 0;
-        for message in &mut messages[since..] {
+        for message in messages.iter_mut() {
             for block in &mut message.blocks {
                 match block {
                     ContentBlock::Image { .. } => {
@@ -863,6 +875,35 @@ where
             self.session.mark_transcript_dirty();
         }
         withheld
+    }
+
+    /// Note the compacted retry the ladder just made (t-10956) for the turn
+    /// record: what the compaction cost, taken as clearing the decline until
+    /// a decline after it says otherwise ([`Self::settle_surfaced_refusal`]).
+    pub(super) fn note_refusal_compaction(&mut self, event: super::AutoCompactionEvent) {
+        self.refusal_compaction = Some(crate::turn_trace::RefusalCompaction {
+            removed_messages: event.removed_message_count,
+            tokens_before: event.tokens_before,
+            tokens_after: event.tokens_after,
+            resolved: true,
+        });
+    }
+
+    /// Settle a decline being surfaced (t-10956) and answer the lines that
+    /// stand beside it: a compacted retry this turn made was declined too —
+    /// its turn record says so — and the pictures still in the conversation
+    /// ride every request, which is what a person can do something about.
+    pub(super) fn settle_surfaced_refusal(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(compaction) = self.refusal_compaction.as_mut() {
+            compaction.resolved = false;
+            lines.push(core_types::retry_signal::REFUSAL_COMPACTED_RETRY_DECLINED.to_string());
+        }
+        let pictures = self.declined_request_images();
+        if pictures > 0 {
+            lines.push(core_types::retry_signal::refusal_pictures_ride_notice(pictures));
+        }
+        lines
     }
 
     /// Fold this refused public turn into the consecutive-refusal streak and,

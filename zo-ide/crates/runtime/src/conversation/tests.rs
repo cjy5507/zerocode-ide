@@ -10166,6 +10166,7 @@ fn manual_compact_reasserts_todos_and_edited_files() {
         head_transitions: Vec::new(),
         output_tokens: 5,
         goal: None,
+        refusal_compaction: None,
     };
     crate::turn_trace::append(dir.path(), &record).expect("append turn record");
 
@@ -14332,6 +14333,7 @@ fn auto_compaction_reinjects_already_edited_files_into_system_prompt() {
         head_transitions: Vec::new(),
         output_tokens: 5,
         goal: None,
+        refusal_compaction: None,
     };
     crate::turn_trace::append(dir.path(), &record).expect("append turn record");
 
@@ -14413,6 +14415,7 @@ fn repeated_auto_compaction_replaces_reminders_instead_of_stacking() {
         head_transitions: Vec::new(),
         output_tokens: 5,
         goal: None,
+        refusal_compaction: None,
     };
     crate::turn_trace::append(dir.path(), &record).expect("append first turn record");
 

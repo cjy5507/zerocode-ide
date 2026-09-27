@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 use crate::ide::channel::wire::TurnOutcome;
 use crate::ide::events::{self, EventsChannel};
 use crate::session::permission_bridge::{run_permission_pump, PermissionBridgeError};
-use crate::session::plain_session::PlainSession;
+use crate::session::plain_session::{CompactReport, PlainSession};
 use crate::session::user_question_bridge::install_tui_user_question_channel;
 
 /// 블록 채널 용량 — 두 프런트엔드가 같은 값을 쓴다.
@@ -204,8 +204,9 @@ impl TurnScaffold {
     /// 턴이 끝났다 — 펌프를 끊고 IDE 에 결과를 알린다.
     ///
     /// 결과 판정은 한 벌이다: 오류면 실패, 오류가 없고 사람이 끊었으면 취소,
-    /// 아니면 완료. 취소된 턴이 실패로 나가면 창의 카드가 빨개진다.
-    pub(crate) fn finish(self, outcome: &Result<TurnSummary, String>) {
+    /// 아니면 완료. 취소된 턴이 실패로 나가면 창의 카드가 빨개진다. 턴과
+    /// `/compact` 가 같은 판정을 지난다 — 결과의 모양만 다르다.
+    pub(crate) fn finish<T>(self, outcome: &Result<T, String>) {
         self.pump.abort();
         let (Some(channel), Some(turn_id)) = (self.ide, self.turn_id) else {
             return;
@@ -270,6 +271,44 @@ impl TurnLaunch {
                     Err(error)
                 }
             };
+            (session, outcome)
+        })
+    }
+
+    /// `/compact` on a session the caller keeps borrowed — the plain loop's
+    /// shape, beside its input (t-10956). The same compaction as
+    /// [`Self::spawn_compact`]: [`PlainSession::compact`], stopped by this
+    /// launch's abort.
+    pub(crate) async fn compact(
+        self,
+        session: &mut PlainSession,
+        focus: Option<String>,
+    ) -> Result<CompactReport, String> {
+        let guarded = Box::pin(catch_lifeline_panic(session.compact(
+            focus.as_deref(),
+            self.blocks,
+            self.abort,
+        )))
+        .await;
+        match guarded {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                session.record_process_event("lifeline_panic", &error);
+                Err(error)
+            }
+        }
+    }
+
+    /// `/compact` on a task of its own, the session carried there and back —
+    /// the TUI's shape, like [`Self::spawn`] for a turn: the screen paints
+    /// and reads keys while the summary streams.
+    pub(crate) fn spawn_compact(
+        self,
+        mut session: PlainSession,
+        focus: Option<String>,
+    ) -> JoinHandle<(PlainSession, Result<CompactReport, String>)> {
+        tokio::spawn(async move {
+            let outcome = self.compact(&mut session, focus).await;
             (session, outcome)
         })
     }

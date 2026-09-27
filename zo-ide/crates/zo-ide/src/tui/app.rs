@@ -729,7 +729,20 @@ struct App {
     /// Answers from the mention seat (t-6042), selected on beside the file
     /// search's snapshots so an answer never waits for a key.
     mention_rerank_rx: tokio::sync::mpsc::UnboundedReceiver<MentionAnswer>,
+    /// The work the slash just dispatched asked for — `/compact` — which
+    /// [`App::submit`] hands to the turn chain instead of running in place.
+    asked: Option<Work>,
     ui: Ui,
+}
+
+/// What a submitted line sets going: a model turn, or a `/compact` (t-10956).
+/// Both run off the screen's loop — the session on a task of its own — one
+/// after the other in [`App::run_turn_chain`], so what was typed while one
+/// ran is taken up the same way after either.
+enum Work {
+    Turn(Submission),
+    /// `/compact [focus]`, with its focus when one was given.
+    Compact(Option<String>),
 }
 
 /// How an idle teammate's wait ended.
@@ -4451,6 +4464,7 @@ impl App {
             close_requested: None,
             file_search_rx,
             mention_rerank_rx,
+            asked: None,
             signals: TerminationSignals::install(),
         })
     }
@@ -4513,11 +4527,11 @@ impl App {
                     Some(Ok(event)) => {
                         match self.ui.idle_event(&event) {
                             KeyOutcome::Submitted(line) => {
-                                if let Some(prompt) = self.submit(&line) {
+                                if let Some(work) = self.submit(&line) {
                                     // Heap-pinned: the chain grew past clippy's large-future line when the
                                     // turn loop learned a fourth command (t-2513), and a turn's future
                                     // carries a screen's worth of state anyway.
-                                    Box::pin(self.run_turn_chain(prompt, &mut events, None)).await;
+                                    Box::pin(self.run_turn_chain(work, &mut events, None)).await;
                                 }
                             }
                             KeyOutcome::Chosen(model, effort) => self.apply_choice(&model, effort),
@@ -4545,7 +4559,7 @@ impl App {
                         text: followup.text.clone(),
                         image_paths: Vec::new(),
                     };
-                    Box::pin(self.run_turn_chain(prompt, &mut events, Some(followup))).await;
+                    Box::pin(self.run_turn_chain(Work::Turn(prompt), &mut events, Some(followup))).await;
                     self.drive_autonomy(&mut events).await;
                     self.ui.draw();
                 },
@@ -4679,7 +4693,8 @@ impl App {
             image_paths: Vec::new(),
         };
         let completion = match self.submit(&submission) {
-            Some(prompt) => Box::pin(self.turn(&prompt, events, None, None)).await,
+            Some(Work::Turn(prompt)) => Box::pin(self.turn(&prompt, events, None, None)).await,
+            Some(Work::Compact(focus)) => Box::pin(self.compaction(focus, events)).await,
             // An empty brief cannot become a turn. The parent gets the same
             // sentence the screen does rather than an empty answer.
             None => TurnOutcome {
@@ -4959,7 +4974,7 @@ impl App {
     }
 
     /// 제출된 한 줄. 턴으로 갈 프롬프트면 그것을 돌려준다.
-    fn submit(&mut self, submission: &Submission) -> Option<Submission> {
+    fn submit(&mut self, submission: &Submission) -> Option<Work> {
         let trimmed = submission.text.trim();
         if trimmed.is_empty() {
             return None;
@@ -4973,25 +4988,26 @@ impl App {
                 // `//foo` 는 슬래시로 시작하는 평문의 이스케이프다.
                 let text = unescaped.to_string();
                 self.ui.user_cell(&text);
-                return Some(Submission {
+                return Some(Work::Turn(Submission {
                     text: mention::expand_page_mentions(&text, self.ui.file_search.roots()),
                     image_paths: submission.image_paths.clone(),
-                });
+                }));
             }
             slash::Line::Command(command) => {
                 self.ui.user_cell(trimmed);
+                self.asked = None;
                 self.slash(command);
-                return None;
+                return self.asked.take();
             }
             slash::Line::Plain | slash::Line::Path => {}
         }
         self.ui.user_cell(trimmed);
         // A `@wiki/…` mention becomes its page's body here — the screen shows
         // what the person typed, the model reads the page.
-        Some(Submission {
+        Some(Work::Turn(Submission {
             text: mention::expand_page_mentions(trimmed, self.ui.file_search.roots()),
             image_paths: submission.image_paths.clone(),
-        })
+        }))
     }
 
     #[allow(clippy::too_many_lines)] // keep-list 슬래시마다 한 arm.
@@ -5060,23 +5076,11 @@ impl App {
                     ),
                 }
             }
+            // Not here: the summary round-trip runs as work of its own
+            // ([`App::compaction`]) so the screen keeps painting and Esc
+            // stops it — it used to hold this loop for the whole summary.
             Some(Slash::Compact) => {
-                let focus = (!arg.is_empty()).then_some(arg);
-                let result = tokio::task::block_in_place(|| self.session_mut().compact(focus));
-                match result {
-                    Ok((0, kept)) => {
-                        let text = format!("compact: nothing to compact ({kept} messages)");
-                        self.ui.note(SystemLevel::Info, &text);
-                    }
-                    Ok((removed, kept)) => {
-                        let text = format!("compact: {removed} removed · {kept} kept");
-                        self.ui.note(SystemLevel::Info, &text);
-                    }
-                    Err(error) => {
-                        let text = format!("compact failed: {error}");
-                        self.ui.note(SystemLevel::Error, &text);
-                    }
-                }
+                self.asked = Some(Work::Compact((!arg.is_empty()).then(|| arg.to_string())));
             }
             Some(Slash::Goal) => self.apply_goal_command(arg),
             Some(Slash::Loop) => self.apply_loop_command(arg),
@@ -5477,13 +5481,18 @@ impl App {
     /// the loop repeats only after that next turn also completes.
     async fn run_turn_chain(
         &mut self,
-        initial: Submission,
+        initial: Work,
         events: &mut EventStream,
         initial_followup: Option<AgentFollowup>,
     ) {
         let mut next_turn = Some((initial, initial_followup));
-        while let Some((input, followup)) = next_turn.take() {
-            let completion = Box::pin(self.turn(&input, events, None, followup.as_ref())).await;
+        while let Some((work, followup)) = next_turn.take() {
+            let completion = match work {
+                Work::Turn(input) => {
+                    Box::pin(self.turn(&input, events, None, followup.as_ref())).await
+                }
+                Work::Compact(focus) => Box::pin(self.compaction(focus, events)).await,
+            };
             if self.ui.exit.is_some() || self.session.is_none() {
                 break;
             }
@@ -5494,10 +5503,10 @@ impl App {
                 .and_then(AgentCompletionPump::try_recv_followup)
             {
                 next_turn = Some((
-                    Submission {
+                    Work::Turn(Submission {
                         text: followup.text.clone(),
                         image_paths: Vec::new(),
-                    },
+                    }),
                     Some(followup),
                 ));
                 continue;
@@ -5505,8 +5514,8 @@ impl App {
 
             let mut pending = self.next_input_after_turn(completion.cancelled);
             while let Some(submission) = pending {
-                if let Some(prompt) = self.submit(&submission) {
-                    next_turn = Some((prompt, None));
+                if let Some(work) = self.submit(&submission) {
+                    next_turn = Some((work, None));
                     break;
                 }
                 // A queued slash command may finish without starting a model
@@ -5908,10 +5917,130 @@ impl App {
         super::paint_probe::end(self.ui.paint_probe.take());
         completion
     }
+
+    /// `/compact` as work of its own (t-10956). The session goes to a task —
+    /// [`crate::session::turn_scaffold::TurnLaunch::spawn_compact`], the one
+    /// compaction the plain loop runs too — while this loop keeps painting,
+    /// reading keys and answering the IDE: the status row counts the clock
+    /// and the summary's characters, Esc (or the IDE's Stop) stops it and
+    /// leaves the conversation as it was, and a line typed meanwhile waits to
+    /// be taken up after it like one typed behind a turn.
+    async fn compaction(&mut self, focus: Option<String>, events: &mut EventStream) -> TurnOutcome {
+        let mut session = self
+            .session
+            .take()
+            .expect("the session is only away while a turn runs");
+        let (mut scaffold, mut block_rx) = TurnScaffold::start(&mut session);
+        let mut job = scaffold.launch().spawn_compact(session, focus);
+        let ui = &mut self.ui;
+        ui.reconcile_size();
+        let started = Instant::now();
+        ui.status = Some(Status::compacting());
+        ui.publish_working_activity(scaffold.ide);
+        ui.draw_with_queue(|| block_rx.len());
+        let mut ticker = tokio::time::interval(FRAME_TICK);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut size_poll = tokio::time::interval(SIZE_POLL);
+        size_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut exit_after = false;
+        // As in a turn: a terminal whose reads failed is not polled again.
+        let mut input_lost = false;
+        let joined = loop {
+            tokio::select! {
+                biased;
+                joined = &mut job => break joined,
+                Some(block) = block_rx.recv() => {
+                    ui.compaction_block(block);
+                    ui.draw_with_queue(|| block_rx.len());
+                }
+                command = events::next_command(scaffold.ide) => match command {
+                    Command::CancelTurn { .. } | Command::Close { .. } => {
+                        scaffold.cancel_turn();
+                        ui.draw_with_queue(|| block_rx.len());
+                    }
+                    // Nothing is listening for a steer while a summary streams.
+                    Command::Steer { .. } => {}
+                    Command::AccountSwitch { label } => {
+                        ui.note(
+                            SystemLevel::Info,
+                            &crate::status_format::account_switch_notice(&label),
+                        );
+                        ui.draw_with_queue(|| block_rx.len());
+                    }
+                },
+                event = events.next(), if !input_lost => {
+                    if let Some(Ok(event)) = event {
+                        if ui.turn_event(&event, &scaffold, &mut exit_after) {
+                            ui.draw_with_queue(|| block_rx.len());
+                        }
+                    } else {
+                        input_lost = true;
+                        scaffold.cancel_turn();
+                        exit_after = true;
+                    }
+                }
+                () = TerminationSignals::delivered(&mut self.signals) => {
+                    scaffold.cancel_turn();
+                    exit_after = true;
+                }
+                _ = size_poll.tick() => if ui.tend_terminal() { ui.draw_with_queue(|| block_rx.len()); },
+                _ = ticker.tick() => {
+                    if let Some(status) = ui.status.as_mut() {
+                        status.elapsed = started.elapsed();
+                    }
+                    ui.publish_working_activity(scaffold.ide);
+                    ui.draw_with_queue(|| block_rx.len());
+                }
+            }
+        };
+        let (outcome, lost_session) = match joined {
+            Ok((session, outcome)) => {
+                self.session = Some(session);
+                (outcome, false)
+            }
+            Err(error) => (Err(format!("compact task ended: {error}")), true),
+        };
+        let ui = &mut self.ui;
+        scaffold.drain(&mut block_rx, |block| ui.compaction_block(block));
+        let cancelled = scaffold.cancelled();
+        ui.status = None;
+        ui.publish_working_activity(scaffold.ide);
+        scaffold.finish(&outcome);
+        match &outcome {
+            Ok(report) => ui.note(report.level(), &report.note()),
+            Err(error) => ui.note(SystemLevel::Error, &format!("compact failed: {error}")),
+        }
+        if exit_after || lost_session {
+            ui.exit = Some(ExitReason::UserExit);
+        }
+        if !lost_session {
+            self.drain_deferred();
+        }
+        self.ui.draw_with_queue(|| block_rx.len());
+        TurnOutcome {
+            summary: None,
+            error: outcome.err(),
+            permission_blocked: false,
+            question_blocked: false,
+            cancelled,
+        }
+    }
 }
 
 /// 하위 에이전트 보고 셀의 호출 id — 묶임 판정에 안 쓰이는 자리표다.
 impl Ui {
+    /// One block of a `/compact` job (t-10956): the summary's progress
+    /// counts on the status row, everything else lands like a turn's block.
+    fn compaction_block(&mut self, block: RenderBlock) {
+        if let RenderBlock::CompactionProgress { streamed_chars } = block {
+            if let Some(status) = self.status.as_mut() {
+                status.set_inline_message(Some(super::strings::compaction_progress(streamed_chars)));
+            }
+            return;
+        }
+        self.block(block);
+    }
+
     /// 방금 파킹된 프롬프트에 채널의 `prompt_id` 를 얹는다(이미 있으면 그대로).
     fn tag_parked(&mut self, published: Option<u64>) {
         if let (Some(parked), Some(id)) = (self.parked.as_mut(), published) {
