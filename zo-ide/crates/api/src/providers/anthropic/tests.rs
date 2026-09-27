@@ -284,6 +284,92 @@ fn a_rejected_refresh_branch_is_not_spent_again() {
     cleanup_temp_config_home(&config_home);
 }
 
+/// An entry zo did not mint — the copy of a Claude Code login zo filed under
+/// its own key until t-11045 — is read while its access token lasts, and its
+/// refresh token, which belongs to the tool it was copied from, is never spent.
+#[test]
+fn a_saved_copy_is_read_while_it_lasts_and_never_refreshed() {
+    let _guard = env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let config = sample_oauth_config("https://console.test/oauth/token".to_string());
+    let copy = |expires_at| OAuthTokenSet {
+        access_token: "copied-access".to_string(),
+        refresh_token: Some("copied-tools-branch".to_string()),
+        expires_at: Some(expires_at),
+        scopes: vec!["user:inference".to_string()],
+    };
+    save_oauth_credentials(&core_types::OAuthTokenSet {
+        access_token: "copied-access".to_string(),
+        refresh_token: Some("copied-tools-branch".to_string()),
+        expires_at: Some(1),
+        scopes: vec!["user:inference".to_string()],
+    })
+    .expect("the copy zo filed");
+
+    let error = resolve_saved_oauth_token_set_with(&config, copy(1), |_config, _request| {
+        panic!("zo spent the refresh token of a login it copied")
+    })
+    .expect_err("an expired copy is not renewed by zo");
+    match error {
+        ApiError::Auth(message) => {
+            assert!(message.contains("copy"), "{message}");
+            assert_names_a_real_way_back(&message);
+        }
+        other => panic!("expected the copy's refusal, got {other:?}"),
+    }
+}
+
+/// Every zo process shares the saved-login file, so a refused refresh can be a
+/// race another zo process won a moment ago, saving the next branch. The
+/// loser reads the file again and takes that copy once instead of dropping the
+/// login (t-11045) — nothing written, nothing refreshed a second time.
+#[test]
+fn a_refresh_lost_to_another_zo_process_takes_its_newer_copy() {
+    let _guard = env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let config = sample_oauth_config("https://console.test/oauth/token".to_string());
+    let spent = OAuthTokenSet {
+        access_token: "lapsed-access".to_string(),
+        refresh_token: Some("branch-both-spent".to_string()),
+        expires_at: Some(1),
+        scopes: vec!["user:inference".to_string()],
+    };
+    save_oauth_credentials(&core_types::OAuthTokenSet {
+        access_token: spent.access_token.clone(),
+        refresh_token: spent.refresh_token.clone(),
+        expires_at: spent.expires_at,
+        scopes: spent.scopes.clone(),
+    })
+    .expect("seed the shared saved login");
+
+    let mut refreshes = 0;
+    let resolved = resolve_saved_oauth_token_set_with(&config, spent, |_config, _request| {
+        refreshes += 1;
+        // The other zo process got there first: it spent the branch and
+        // saved the next one, so this one's attempt is refused.
+        save_oauth_credentials(&core_types::OAuthTokenSet {
+            access_token: "winner-access".to_string(),
+            refresh_token: Some("winner-branch".to_string()),
+            expires_at: Some(now_unix_timestamp() + 3_600),
+            scopes: vec!["user:inference".to_string()],
+        })
+        .expect("the winner saves its branch");
+        Err(ApiError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            error_type: None,
+            message: None,
+            body: r#"{"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}"#
+                .to_string(),
+            retryable: false,
+            retry_after: None,
+        })
+    })
+    .expect("a race lost is not a login lost");
+    assert_eq!(resolved.access_token, "winner-access");
+    assert_eq!(resolved.refresh_token.as_deref(), Some("winner-branch"));
+    assert_eq!(refreshes, 1, "the endpoint is asked once, never again for the winner's copy");
+}
+
 #[test]
 fn resolve_startup_auth_source_uses_saved_oauth_without_loading_config() {
     let _guard = env_lock();
@@ -663,6 +749,20 @@ async fn unauthenticated_client_warmup_does_not_touch_network() {
 
 
 
+/// The words a missing Claude login is met with name a way back this build
+/// has: the window's account row or the account's own CLI — never a
+/// `/login` or a `zo login`, which this build does not have (t-11045).
+fn assert_names_a_real_way_back(message: &str) {
+    assert!(
+        message.contains("Settings › Claude accounts") && message.contains("`claude`"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("/login") && !message.contains("zo login"),
+        "a command this build does not have: {message}"
+    );
+}
+
 #[tokio::test]
 async fn unauthenticated_client_blocks_send_locally_before_external_network() {
     let request = streaming_request();
@@ -675,7 +775,7 @@ async fn unauthenticated_client_blocks_send_locally_before_external_network() {
         .expect_err("missing auth should fail locally");
 
     match error {
-        ApiError::Auth(message) => assert!(message.contains("/login claude")),
+        ApiError::Auth(message) => assert_names_a_real_way_back(&message),
         other => panic!("expected local auth error, got {other:?}"),
     }
 }
@@ -692,7 +792,7 @@ async fn unauthenticated_client_blocks_stream_locally_before_external_network() 
         .expect_err("missing auth should fail locally");
 
     match error {
-        ApiError::Auth(message) => assert!(message.contains("/login claude")),
+        ApiError::Auth(message) => assert_names_a_real_way_back(&message),
         other => panic!("expected local auth error, got {other:?}"),
     }
 }
@@ -868,6 +968,64 @@ impl Drop for EnvVarGuard {
             None => std::env::remove_var(self.key),
         }
     }
+}
+
+/// A credentials file the CLI would write, `expires_at_ms` from now.
+fn cli_blob(access: &str, refresh: &str, expires_at_ms: u64) -> String {
+    serde_json::json!({"claudeAiOauth": {
+        "accessToken": access,
+        "refreshToken": refresh,
+        "expiresAt": expires_at_ms,
+        "scopes": ["user:inference", "user:profile"],
+        "subscriptionType": "max",
+    }})
+    .to_string()
+}
+
+fn an_hour_from_now_ms() -> u64 {
+    (now_unix_timestamp() + 3_600) * 1_000
+}
+
+/// A window pane is launched with two folders: the shared runtime home as its
+/// config (the window's COPY of the chosen account, written at a switch) and
+/// the account's own folder as its credentials — which is where the CLI of
+/// every pane keeps and renews the login. Zo speaks as that login, not as the
+/// copy (t-11045; the copy went stale at the CLI's first renewal and zo then
+/// spent its superseded refresh token).
+#[test]
+fn a_pane_speaks_as_the_login_its_cli_keeps_not_the_windows_copy() {
+    let _guard = env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let _disable_keychain = EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+    crate::managed_account::clear();
+    let runtime_home = tempfile::tempdir().expect("the shared runtime home");
+    let account = tempfile::tempdir().expect("the chosen account's folder");
+    std::fs::write(
+        runtime_home.path().join(".credentials.json"),
+        cli_blob("windows-copy-access", "windows-copy-branch", an_hour_from_now_ms()),
+    )
+    .expect("the window's copy");
+    std::fs::write(
+        account.path().join(".credentials.json"),
+        cli_blob("account-live-access", "account-live-branch", an_hour_from_now_ms()),
+    )
+    .expect("the login the CLI keeps");
+    let _config = EnvVarGuard::set(
+        "CLAUDE_CONFIG_DIR",
+        Some(runtime_home.path().to_str().expect("utf8 runtime home")),
+    );
+    let _credentials = EnvVarGuard::set(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        Some(account.path().to_str().expect("utf8 account folder")),
+    );
+
+    let resolved = super::resolve_claude_auth_fresh_detailed().expect("the pane's login");
+    assert_eq!(
+        resolved.auth.bearer_token(),
+        Some("account-live-access"),
+        "zo spoke as the window's copy of the login"
+    );
+    crate::managed_account::clear();
 }
 
 #[test]
