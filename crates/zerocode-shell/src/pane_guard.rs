@@ -1059,17 +1059,21 @@ fn ask_claim(
 ) {
     let mode = CLAIM.mode_in_run(&wire.settings_root(), Run::Fresh);
     let root = pane.root();
-    let ledger = systemone::project_ledger_of(wire, &CLAIM, &root).filter(|_| mode.asks());
+    let Some(ledger) = systemone::project_ledger_of(wire, &CLAIM, &root).filter(|_| mode.asks())
+    else {
+        settle_claim(guards, wire, pane, judged, None);
+        return;
+    };
     let words = match said {
         SaidAt::Words(words) => Some(words),
         SaidAt::Transcript(path) => zerocode_core::transcript::last_assistant_words(&path)
             .map(|words| zerocode_core::clone::scrub_credentials(&words)),
     };
     let claims = words.map_or_else(Vec::new, |words| claim::scan(evidence, &words));
-    let Some(ledger) = ledger.filter(|_| !claims.is_empty()) else {
+    if claims.is_empty() {
         settle_claim(guards, wire, pane, judged, None);
         return;
-    };
+    }
     let now_ms = crate::usage_runtime::epoch_ms_now();
     let mut row = ClaimCheckRow {
         at: u64::try_from(now_ms).unwrap_or_default(),
