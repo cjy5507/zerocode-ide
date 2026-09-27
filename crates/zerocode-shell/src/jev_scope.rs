@@ -121,6 +121,11 @@ pub struct Places {
     pub sessions: PathBuf,
     /// The machine's temporary roots ([`temporary_roots`]).
     pub temporary: Vec<PathBuf>,
+    /// The folders this window knows — the active project's checkout and
+    /// its worktrees: a project's zo state that no zo session named a
+    /// folder for is found by the name zo gives the folder, where the window
+    /// filed only its panes' rows (t-11349).
+    pub known: Vec<PathBuf>,
 }
 
 /// Read what `scope` asks, with `ask` running zo over one project's
@@ -140,7 +145,7 @@ pub fn read(
     now_ms: i64,
 ) -> Result<JevReading, String> {
     let machine = machine_places(&places.zo_home, &places.sessions);
-    let looked = || recorded_projects(&places.zo_home, now_ms, &places.temporary);
+    let looked = || recorded_projects(&places.zo_home, now_ms, &places.temporary, &places.known);
     let own = || -> Result<(Vec<SeatNumbers>, bool), String> {
         let seats = with_reach(ask(workspace)?, &machine);
         let recorded = has_own_records(&seats);
@@ -320,7 +325,12 @@ pub fn temporary_roots() -> Vec<PathBuf> {
 /// test's `tempfile`, a scratchpad) is not one a person keeps records in;
 /// zo's scoreboard leaves the same out (`is_temporary_workspace`).
 #[must_use]
-pub fn recorded_projects(zo_home: &Path, now_ms: i64, temporary: &[PathBuf]) -> Vec<JevProject> {
+pub fn recorded_projects(
+    zo_home: &Path,
+    now_ms: i64,
+    temporary: &[PathBuf],
+    known: &[PathBuf],
+) -> Vec<JevProject> {
     let since_ms = now_ms.saturating_sub(WINDOW_DAYS * MS_PER_DAY);
     let Ok(entries) = std::fs::read_dir(zo_home.join(ZO_PROJECTS_DIR)) else {
         return Vec::new();
@@ -332,7 +342,9 @@ pub fn recorded_projects(zo_home: &Path, now_ms: i64, temporary: &[PathBuf]) -> 
         let Some(newest_ms) = newest_record_ms(&ledgers).filter(|at| *at >= since_ms) else {
             continue;
         };
-        let Some(workspace) = recorded_workspace(&project) else {
+        let Some(workspace) =
+            recorded_workspace(&project).or_else(|| known_workspace(&project, known))
+        else {
             continue;
         };
         if temporary.iter().any(|root| workspace.starts_with(root)) || !workspace.is_dir() {
@@ -399,6 +411,20 @@ fn recorded_workspace(project: &Path) -> Option<PathBuf> {
         let cwd = recorded.cwd.trim();
         (!cwd.is_empty()).then(|| PathBuf::from(cwd))
     })
+}
+
+/// The folder this window knows whose zo state `project` is: the one zo
+/// names that state by ([`zerocode_core::zo_project::project_slug`] of its
+/// physical path, as zo's own process sees it).
+fn known_workspace(project: &Path, known: &[PathBuf]) -> Option<PathBuf> {
+    let name = project.file_name()?;
+    known
+        .iter()
+        .find(|folder| {
+            let physical = folder.canonicalize().unwrap_or_else(|_| (*folder).clone());
+            *name == *zerocode_core::zo_project::project_slug(&physical)
+        })
+        .cloned()
 }
 
 /// A path's last folder's name, or the whole path when it has none.
@@ -883,7 +909,7 @@ mod tests {
         )
         .expect("a time");
 
-        let found = recorded_projects(home.path(), now_ms, &[temporary.path().to_path_buf()]);
+        let found = recorded_projects(home.path(), now_ms, &[temporary.path().to_path_buf()], &[]);
         let named: Vec<(&str, &str)> = found
             .iter()
             .map(|one| (one.name.as_str(), one.path.as_str()))
@@ -896,7 +922,7 @@ mod tests {
             ]
         );
         assert!(found[0].newest_ms > found[1].newest_ms);
-        assert!(recorded_projects(&home.path().join("nowhere"), now_ms, &[]).is_empty());
+        assert!(recorded_projects(&home.path().join("nowhere"), now_ms, &[], &[]).is_empty());
     }
 
     /// A seat's rows are the machine's when zo read them from `~/.zo/jev` or
@@ -1348,6 +1374,7 @@ mod tests {
             zo_home: home.path().to_path_buf(),
             sessions: places_dir.path().join("sessions"),
             temporary: Vec::new(),
+            known: Vec::new(),
         };
         let own = home
             .path()

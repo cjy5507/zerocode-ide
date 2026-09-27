@@ -845,10 +845,60 @@ export async function testJevDashboard(browser, origin, ok) {
         && askers.drawer.said.claude === "5건"
         && askers.drawer.said.codex === "2건 · 멈춤을 알리지 않음"
         && askers.drawer.said.cursor === "0건"
-        && askers.drawer.said.antigravity === "0건 · 실행 전에 알리지 않아 실행 뒤에 물음 · 요청을 알리지 않아 과업 없이 물음 · 멈춤을 알리지 않음"
+        && askers.drawer.said.antigravity === "0건 · 실행 전에 알리지 않아 실행 뒤에 물음 · 사람의 요청을 알리지 않음 · 멈춤을 알리지 않음"
         && askers.drawer.said.opencode === "못 봄 — 훅을 설치하지 않는 에이전트"
         && askers.elsewhere,
       JSON.stringify(askers));
+    // The completion claim and file pick seats a pane's turns ask too
+    // (t-11349): the same line under each, drawn by the same code off the
+    // same agent lines the backend writes — a count with what is said beside
+    // it, and an agent whose hooks do not report the person's request shown
+    // as not seen for the file pick, whose question needs it.
+    const turnSeats = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const saved = jevNumbers;
+      const lines = {
+        claim: [
+          { agent: "zo", label: "ZO", requests: 1, notes: ["own_runtime"] },
+          { agent: "claude", label: "Claude", requests: 4 },
+          { agent: "antigravity", label: "Antigravity", requests: 2, notes: ["no_prompt_event"] },
+        ],
+        file_pick: [
+          { agent: "zo", label: "ZO", requests: 2, notes: ["own_runtime"] },
+          { agent: "codex", label: "Codex", requests: 3 },
+          { agent: "antigravity", label: "Antigravity", requests: 0, unseen: "no_prompt_event" },
+        ],
+      };
+      jevNumbers = saved.map((seat) => (!lines[seat.id] ? seat : {
+        ...seat, today: { ...seat.today, rows: 3, answered: 3 }, week: { ...seat.week, rows: 7, answered: 7 },
+        askers: lines[seat.id],
+      }));
+      paintJevViews();
+      await window.__PAINTED__();
+      const chips = (id) => [...(view.querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="rows"] [data-jev-askers]`)?.children ?? [])]
+        .map((chip) => chip.textContent);
+      const seen = {
+        claim: chips("claim"),
+        filePick: chips("file_pick"),
+        tip: view.querySelector('[data-jev-dash-row="file_pick"] [data-jev-askers] [data-jev-fact="unseen"]')?.dataset.tip ?? null,
+      };
+      view.querySelector('[data-jev-dash-row="claim"] .jev-row-open').click();
+      await window.__PAINTED__();
+      seen.said = Object.fromEntries([...view.querySelectorAll('.jev-drawer [data-jev-drawer-part="askers"] dd')]
+        .map((said) => [said.dataset.jevAsker, said.textContent]));
+      view.querySelector('[data-jev-dash-row="claim"] .jev-row-open').click();
+      jevNumbers = saved;
+      paintJevViews();
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok("the claim and file pick seats name who asked them and which agents they cannot see, in the same plain words",
+      turnSeats.claim.join("|") === "ZO 1|Claude 4|Antigravity 2"
+        && turnSeats.filePick.join("|") === "ZO 2|Codex 3|못 봄 1"
+        && turnSeats.tip === "Antigravity — 사람의 요청을 알리지 않음"
+        && turnSeats.said.antigravity === "2건 · 사람의 요청을 알리지 않음"
+        && turnSeats.said.claude === "4건",
+      JSON.stringify(turnSeats));
     ok("from the click to the drawn table is under the design's 200 ms with the backend answering at once",
       opened.ms < 200, `${opened.ms.toFixed(1)} ms`);
     ok("a counted seat's numbers stand in its cells",
