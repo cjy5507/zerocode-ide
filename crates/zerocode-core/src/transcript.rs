@@ -503,7 +503,7 @@ pub fn names_the_turn(prompt: &str) -> bool {
     }
     !GO_ON_WORDS.iter().any(|go_on| {
         let times = word.len() / go_on.len();
-        word.len() % go_on.len() == 0 && times > 0 && word == go_on.repeat(times)
+        word.len().is_multiple_of(go_on.len()) && times > 0 && word == go_on.repeat(times)
     })
 }
 
