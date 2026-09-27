@@ -131,6 +131,25 @@ pub fn ledger_of(wire: &Wire, row: &JevUse) -> Option<PathBuf> {
     )
 }
 
+/// Where zo keeps one project's rows of a seat it keeps per project — the
+/// completion claim and file pick seats (t-11349): under zo's config home,
+/// the project's own state folder by the name zo gives `workspace`
+/// ([`zerocode_core::zo_project::project_slug`]), in the folder every zo
+/// seat appends its ledger in. `workspace` is the folder as zo's own
+/// process sees it — its physical path, symlinks resolved — so a pane's
+/// rows land in the file zo writes from the same folder.
+#[must_use]
+pub fn project_ledger_of(wire: &Wire, row: &JevUse, workspace: &Path) -> Option<PathBuf> {
+    Some(
+        wire.config_home()?
+            .join(crate::jev_scope::ZO_PROJECTS_DIR)
+            .join(zerocode_core::zo_project::project_slug(workspace))
+            .join(crate::jev_scope::ZO_PROJECT_STATE_DIR)
+            .join(crate::jev_scope::JEV_LEDGER_DIR)
+            .join(row.ledger),
+    )
+}
+
 /// Where the judgment memo lives: one file beside the seats' ledgers and the
 /// day's count, so a reader finds every Jev artifact in one folder and a
 /// memo written by one walk is read by the next, restart or not

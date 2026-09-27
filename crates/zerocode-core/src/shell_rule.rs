@@ -17,10 +17,12 @@
 
 use std::path::{Component, Path, PathBuf};
 
+pub mod check;
 mod classify;
 pub mod parse;
 pub mod scope;
 
+pub use check::command_is_check_shaped;
 pub use classify::classify_command;
 pub use parse::split_command_segments;
 use parse::{

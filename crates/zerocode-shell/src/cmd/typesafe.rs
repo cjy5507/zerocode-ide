@@ -137,6 +137,10 @@ pub(crate) async fn jev_summary(
     // append under the project's own state directory, so the card asks about
     // the checkout the person is looking at, not the window's cwd.
     let workspace = state.active_root();
+    // The folders the window knows: a checkout whose zo state only its
+    // panes' rows filled has no zo session naming it (t-11349).
+    let here = state.active();
+    let mut known = vec![here.root.clone()];
     // zo's home, where every project's records are: the settings file's
     // folder, the same one `jev_day` counts the day in.
     let zo_home = settings_path()
@@ -145,6 +149,13 @@ pub(crate) async fn jev_summary(
         .map(std::path::Path::to_path_buf)
         .ok_or_else(|| "zo's settings file has no folder".to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
+        if let Some(listed) = here
+            .orchestrator
+            .as_ref()
+            .and_then(|orchestrator| orchestrator.list().ok())
+        {
+            known.extend(listed.into_iter().map(|worktree| worktree.path));
+        }
         let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
         let bin = crate::zo_companion::zo_path_under(&home);
         if !bin.exists() {
@@ -177,6 +188,7 @@ pub(crate) async fn jev_summary(
             zo_home,
             sessions: sessions.clone(),
             temporary: jev_scope::temporary_roots(),
+            known,
         };
         jev_scope::read(
             &ask,

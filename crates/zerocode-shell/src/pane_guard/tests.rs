@@ -149,6 +149,7 @@ fn a_panes_command_is_asked_and_graded_on_what_became_of_it() {
         guards,
         &wire,
         &claude,
+        Asking::ALL,
         vec![prompt, about("call-1", "rm -rf build", project.path())],
         1,
     ));
@@ -158,6 +159,7 @@ fn a_panes_command_is_asked_and_graded_on_what_became_of_it() {
         guards,
         &wire,
         &claude,
+        Asking::ALL,
         vec![ran("call-1", "rm -rf build", project.path())],
         2,
     ));
@@ -165,10 +167,14 @@ fn a_panes_command_is_asked_and_graded_on_what_became_of_it() {
         guards,
         &wire,
         &claude,
+        Asking::ALL,
         vec![
             about("call-2", "git checkout -- build", project.path()),
             ran("call-2", "git checkout -- build", project.path()),
-            Moment::TurnEnded { stopped: false },
+            Moment::TurnEnded {
+                stopped: false,
+                said: None,
+            },
         ],
         3,
     ));
@@ -247,6 +253,7 @@ fn a_repeated_command_is_answered_once() {
         guards,
         &wire,
         &codex,
+        Asking::ALL,
         vec![about("call-1", "cargo test -p tools", project.path())],
         1,
     ));
@@ -254,6 +261,7 @@ fn a_repeated_command_is_answered_once() {
         guards,
         &wire,
         &codex,
+        Asking::ALL,
         vec![about("call-2", "cargo test -p tools", project.path())],
         2,
     ));
@@ -289,6 +297,7 @@ fn off_asks_nothing_and_a_read_only_command_is_never_asked() {
         guards,
         &wire,
         &claude,
+        Asking::ALL,
         vec![about("call-1", "rm -rf build", project.path())],
         1,
     ));
@@ -298,6 +307,7 @@ fn off_asks_nothing_and_a_read_only_command_is_never_asked() {
         guards,
         &wire,
         &claude,
+        Asking::ALL,
         vec![about("call-2", "git status --short", project.path())],
         2,
     ));
@@ -318,6 +328,7 @@ fn a_stopped_turn_settles_only_the_call_it_stopped() {
         guards,
         &wire,
         &claude,
+        Asking::ALL,
         vec![
             about("call-1", "cargo build --release", project.path()),
             ran("call-1", "cargo build --release", project.path()),
@@ -329,7 +340,11 @@ fn a_stopped_turn_settles_only_the_call_it_stopped() {
         guards,
         &wire,
         &claude,
-        vec![Moment::TurnEnded { stopped: true }],
+        Asking::ALL,
+        vec![Moment::TurnEnded {
+            stopped: true,
+            said: None,
+        }],
         2,
     ));
     let held = rows(&home, &COMMAND_GUARD, 3);
@@ -381,11 +396,13 @@ fn a_panes_text_is_asked_and_its_label_says_whether_the_next_step_carried_it_out
         call_id: Some(id.to_string()),
         tool: tool.to_string(),
         words: words.map(str::to_string),
+        paths: Vec::new(),
     };
     join(note(
         guards,
         &wire,
         &claude,
+        Asking::ALL,
         vec![
             Moment::Prompt("summarize the notes".to_string()),
             read("read-1"),
@@ -397,6 +414,7 @@ fn a_panes_text_is_asked_and_its_label_says_whether_the_next_step_carried_it_out
         guards,
         &wire,
         &claude,
+        Asking::ALL,
         vec![
             start(
                 "call-2",
@@ -405,22 +423,35 @@ fn a_panes_text_is_asked_and_its_label_says_whether_the_next_step_carried_it_out
             ),
             Moment::Finished {
                 call_id: Some("call-2".to_string()),
+                evidence: None,
             },
         ],
         2,
     ));
     // A second block, left alone by the step after it.
-    join(note(guards, &wire, &claude, vec![read("read-3")], 3));
     join(note(
         guards,
         &wire,
         &claude,
+        Asking::ALL,
+        vec![read("read-3")],
+        3,
+    ));
+    join(note(
+        guards,
+        &wire,
+        &claude,
+        Asking::ALL,
         vec![
             start("call-4", "Read", None),
             Moment::Finished {
                 call_id: Some("call-4".to_string()),
+                evidence: None,
             },
-            Moment::TurnEnded { stopped: false },
+            Moment::TurnEnded {
+                stopped: false,
+                said: None,
+            },
         ],
         4,
     ));
@@ -470,6 +501,7 @@ fn an_agent_seen_only_after_a_tool_ran_is_asked_then_and_keeps_no_hindsight() {
         guards,
         &wire,
         &agy,
+        Asking::ALL,
         vec![ran("call-1", "rm -rf build", project.path())],
         1,
     ));
@@ -477,7 +509,11 @@ fn an_agent_seen_only_after_a_tool_ran_is_asked_then_and_keeps_no_hindsight() {
         guards,
         &wire,
         &agy,
-        vec![Moment::TurnEnded { stopped: false }],
+        Asking::ALL,
+        vec![Moment::TurnEnded {
+            stopped: false,
+            said: None,
+        }],
         2,
     ));
     let held = rows(&home, &COMMAND_GUARD, 1);
@@ -508,11 +544,19 @@ fn a_new_session_in_a_pane_starts_its_book_over() {
         &GUARDS_OF_THIS_CASE,
         &wire,
         &claude,
+        Asking::ALL,
         vec![Moment::Prompt("first".to_string())],
         1,
     ));
     claude.session = Some("session-2".to_string());
-    join(note(&GUARDS_OF_THIS_CASE, &wire, &claude, vec![], 2));
+    join(note(
+        &GUARDS_OF_THIS_CASE,
+        &wire,
+        &claude,
+        Asking::ALL,
+        vec![],
+        2,
+    ));
     let held = GUARDS_OF_THIS_CASE.lock().expect("the books");
     assert_eq!(
         (held.panes[&7].owner.as_str(), held.panes[&7].task.as_str()),
@@ -540,6 +584,7 @@ fn a_call_reported_twice_before_it_runs_is_asked_once() {
         guards,
         &wire,
         &cursor,
+        Asking::ALL,
         vec![unnamed, about("call-1", "rm -rf dist", project.path())],
         1,
     ));
@@ -548,11 +593,15 @@ fn a_call_reported_twice_before_it_runs_is_asked_once() {
         guards,
         &wire,
         &cursor,
+        Asking::ALL,
         vec![
             ran("call-1", "rm -rf dist", project.path()),
             about("call-2", "git checkout -- dist", project.path()),
             ran("call-2", "git checkout -- dist", project.path()),
-            Moment::TurnEnded { stopped: false },
+            Moment::TurnEnded {
+                stopped: false,
+                said: None,
+            },
         ],
         2,
     ));
@@ -580,10 +629,495 @@ fn a_closed_pane_takes_its_book_with_it() {
         &GUARDS,
         &wire,
         &closing,
+        Asking::ALL,
         vec![Moment::Prompt("first".to_string())],
         1,
     ));
     assert!(GUARDS.lock().expect("the books").panes.contains_key(&91));
     forget_term(91);
     assert!(!GUARDS.lock().expect("the books").panes.contains_key(&91));
+}
+
+/* ---- the claim and file pick seats (t-11349) ------------------------------------ */
+
+/// A temporary zo home whose settings consent to `project` and hold the pane
+/// seats `asked` at `mode`, every other one off, and the wire that reads it.
+fn home_with(
+    endpoint: &Endpoint,
+    project: &Path,
+    asked: &[&JevUse],
+    mode: JevMode,
+) -> (tempfile::TempDir, Wire) {
+    let home = tempfile::tempdir().expect("a zo home");
+    let settings = home.path().join("settings.json");
+    write_seats(&settings, project, asked, mode);
+    (home, Wire::at(&endpoint.base(), "test-key", Some(settings)))
+}
+
+/// Write zo's settings at `settings`: consent to `project`, the seats
+/// `asked` at `mode`, every other pane seat off.
+fn write_seats(settings: &Path, project: &Path, asked: &[&JevUse], mode: JevMode) {
+    let mut smart = serde_json::Map::new();
+    for seat in PANE_SEATS {
+        let word = if asked.iter().any(|one| one.id == seat.id) {
+            mode
+        } else {
+            JevMode::Off
+        };
+        smart.insert(seat.setting.to_string(), json!(word.key()));
+    }
+    smart.insert(
+        "jev".to_string(),
+        json!({ "workspaces": [project.to_string_lossy()] }),
+    );
+    std::fs::write(settings, json!({ SMART_SETTINGS_KEY: smart }).to_string())
+        .expect("zo's settings");
+}
+
+/// An endpoint that finds every claim supported and, of a file pick's
+/// candidates, `src/parser.rs` alone needed — reading the request as the
+/// door sent it — and counts what it was asked.
+fn judging() -> Endpoint {
+    Endpoint::answering_each(
+        "HTTP/1.1 200 OK",
+        |request| {
+            let body: Value = request
+                .split("\r\n\r\n")
+                .nth(1)
+                .and_then(|body| serde_json::from_str(body).ok())
+                .unwrap_or(Value::Null);
+            let needed: Option<&str> = body["state"]["files"].as_array().and_then(|files| {
+                files
+                    .iter()
+                    .find(|file| file["path"] == "src/parser.rs")
+                    .and_then(|file| file["id"].as_str())
+            });
+            let answers: serde_json::Map<String, Value> = body["questions"]
+                .as_object()
+                .map(|questions| {
+                    questions
+                        .iter()
+                        .map(|(id, question)| {
+                            let answer = if question["type"] == "choice" {
+                                json!({"type": "choice", "choice": "supports",
+                                    "probabilities": {"supports": 0.9, "contradicts": 0.05, "says_nothing": 0.05},
+                                    "confidence": 0.9})
+                            } else {
+                                let yes = if id == "any" || Some(id.as_str()) == needed { 0.93 } else { 0.2 };
+                                json!({"type": "noul", "noul": yes})
+                            };
+                            (id.clone(), answer)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({"model": "jev-test", "answers": answers, "usage": {"input_tokens": 300, "output_tokens": 3}})
+                .to_string()
+        },
+        0,
+    )
+}
+
+/// Every row of `seat`'s ledger zo keeps for `project`, in the zo home
+/// `wire` reads, once `count` are there.
+fn project_rows(wire: &Wire, seat: &JevUse, project: &Path, count: usize) -> Vec<Value> {
+    let root = project.canonicalize().expect("the project");
+    let ledger = systemone::project_ledger_of(wire, seat, &root).expect("a zo home");
+    for _ in 0..200 {
+        let held = systemone::read_rows(&ledger);
+        if held.len() >= count {
+            return held;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    systemone::read_rows(&ledger)
+}
+
+/// A shell call's result, as the claim seat keeps it.
+fn cited(command: &str, printed: &str) -> Moment {
+    Moment::Finished {
+        call_id: Some(format!("{command}-call")),
+        evidence: Some(Evidence {
+            command: Some(command.to_string()),
+            output: json!({ "stdout": printed, "stderr": "" }).to_string(),
+            is_error: false,
+            nonzero: false,
+        }),
+    }
+}
+
+/// A Claude pane's turn claims its tests passed over the turn's own green
+/// run: the claim is asked with zo's question, its row goes to the ledger zo
+/// keeps for the pane's folder — naming the agent and the folder, carrying no
+/// word of the answer — and the person's next prompt grades it: a turn that
+/// did not hold, where "supports" called no alert.
+#[test]
+fn a_panes_claim_is_asked_over_its_turn_and_graded_by_the_next_prompt() {
+    let endpoint = judging();
+    let project = tempfile::tempdir().expect("a project");
+    let (_home, wire) = home_with(&endpoint, project.path(), &[&CLAIM], JevMode::Shadow);
+    let guards = fresh_guards();
+    let claude = pane(AgentKind::Claude, project.path());
+    let answer = "Rewrote the retry path.\n\n`cargo test -p retry` passed.";
+    join(note(
+        guards,
+        &wire,
+        &claude,
+        Asking::of([&CLAIM]),
+        vec![
+            Moment::Prompt("make the retry path wait longer".to_string()),
+            cited("cargo test -p retry", "test result: ok. 12 passed"),
+            Moment::TurnEnded {
+                stopped: false,
+                said: Some(SaidAt::Words(answer.to_string())),
+            },
+        ],
+        1,
+    ));
+    join(note(
+        guards,
+        &wire,
+        &claude,
+        Asking::of([&CLAIM]),
+        vec![Moment::Prompt(format!(
+            "{}, the retry still gives up",
+            claim::FAILURE_OPENINGS[4]
+        ))],
+        2,
+    ));
+    let held = project_rows(&wire, &CLAIM, project.path(), 2);
+    let asked = requests(&held);
+    assert_eq!(asked.len(), 1, "{held:?}");
+    let row = asked[0];
+    assert_eq!(
+        (
+            &row["from"],
+            &row["verdict"],
+            &row["outcome"],
+            &row["claims"]
+        ),
+        (
+            &json!("claude"),
+            &json!("supports"),
+            &json!(ANSWERED_OUTCOME),
+            &json!(1)
+        )
+    );
+    assert_eq!(
+        row["pane"],
+        project
+            .path()
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .as_ref()
+    );
+    let label = labels(&held);
+    assert_eq!(label.len(), 1, "{held:?}");
+    assert_eq!(label[0]["label"], row["judged"].to_string());
+    assert_eq!(
+        (
+            &label[0]["hindsight"],
+            &label[0]["agreed"],
+            &label[0]["baselineAgreed"]
+        ),
+        (
+            &json!(claim::NEXT_PERSON_FAILED),
+            &json!(false),
+            &json!(false)
+        )
+    );
+    // What left: zo's question over the claim and its lines; what stayed:
+    // no word of the answer, the claim or its lines.
+    let sent = endpoint.asked();
+    let body: Value =
+        serde_json::from_str(sent[0].split("\r\n\r\n").nth(1).expect("a body")).expect("JSON");
+    assert_eq!(
+        body["state"]["claims"][0]["text"],
+        "`cargo test -p retry` passed."
+    );
+    assert_eq!(
+        body["state"]["evidence"]["C1"],
+        "test result: ok. 12 passed"
+    );
+    let root = project.path().canonicalize().expect("the project");
+    let written = std::fs::read_to_string(
+        systemone::project_ledger_of(&wire, &CLAIM, &root).expect("the ledger"),
+    )
+    .expect("the ledger");
+    for words in ["retry", "cargo test", "12 passed", "Rewrote"] {
+        assert!(!written.contains(words), "{words} in {written}");
+    }
+}
+
+/// A turn whose answer claims nothing, or whose claim cites nothing the
+/// turn ran, asks nothing: no row, no request.
+#[test]
+fn an_answer_that_claims_nothing_the_turn_ran_asks_nothing() {
+    let endpoint = judging();
+    let project = tempfile::tempdir().expect("a project");
+    let (_home, wire) = home_with(&endpoint, project.path(), &[&CLAIM], JevMode::Shadow);
+    let guards = fresh_guards();
+    let codex = pane(AgentKind::Codex, project.path());
+    join(note(
+        guards,
+        &wire,
+        &codex,
+        Asking::of([&CLAIM]),
+        vec![Moment::TurnEnded {
+            stopped: false,
+            said: Some(SaidAt::Words("Here is how the parser works.".to_string())),
+        }],
+        1,
+    ));
+    let cited_row = project_rows(&wire, &CLAIM, project.path(), 1);
+    assert!(requests(&cited_row).is_empty());
+    assert!(endpoint.asked().is_empty());
+    assert!(
+        guards.lock().expect("the books").panes[&7]
+            .claims
+            .is_empty()
+    );
+}
+
+/// A code task a pane's person asks is put to the file pick seat over the
+/// files the window's own search finds and the files this session edited;
+/// its row names the agent and the folder and carries no path or word, and
+/// the turn's edits grade it once it ends.
+#[test]
+fn a_panes_file_pick_is_asked_at_a_code_task_and_graded_on_its_turns_edits() {
+    let endpoint = judging();
+    let project = tempfile::tempdir().expect("a project");
+    std::fs::create_dir(project.path().join("src")).expect("its sources");
+    std::fs::write(
+        project.path().join("src/parser.rs"),
+        "//! The parser, which turns a line into tokens.\npub fn parse() {}\n",
+    )
+    .expect("a source file");
+    std::fs::write(
+        project.path().join("src/lexer.rs"),
+        "//! Splits a line for the parser.\npub fn lex() {}\n",
+    )
+    .expect("another");
+    let (_home, wire) = home_with(&endpoint, project.path(), &[&FILE_PICK], JevMode::Shadow);
+    let guards = fresh_guards();
+    let codex = pane(AgentKind::Codex, project.path());
+    let asking = Asking::of([&FILE_PICK]);
+    join(note(
+        guards,
+        &wire,
+        &codex,
+        asking,
+        vec![Moment::Prompt(
+            "fix the parser crash on an empty line".to_string(),
+        )],
+        1,
+    ));
+    let edited = project.path().join("src/parser.rs");
+    join(note(
+        guards,
+        &wire,
+        &codex,
+        asking,
+        vec![
+            Moment::Started {
+                call_id: Some("call-1".to_string()),
+                tool: "apply_patch".to_string(),
+                words: None,
+                paths: vec![edited.to_string_lossy().into_owned()],
+            },
+            Moment::TurnEnded {
+                stopped: false,
+                said: None,
+            },
+        ],
+        2,
+    ));
+    let held = project_rows(&wire, &FILE_PICK, project.path(), 2);
+    let asked = requests(&held);
+    assert_eq!(asked.len(), 1, "{held:?}");
+    let row = asked[0];
+    assert_eq!(
+        (&row["from"], &row["outcome"], &row["graphCandidates"]),
+        (&json!("codex"), &json!(ANSWERED_OUTCOME), &json!(0))
+    );
+    assert!(row["searchCandidates"].as_u64() >= Some(2), "{row}");
+    assert_eq!(
+        row["rankedPaths"][0],
+        json!(fingerprint_of("src/parser.rs"))
+    );
+    let label = labels(&held);
+    assert_eq!(label.len(), 1, "{held:?}");
+    assert_eq!(label[0]["label"], row["judged"].to_string());
+    assert_eq!(
+        (&label[0]["agreed"], &label[0]["filesEdited"]),
+        (&json!(true), &json!(1))
+    );
+    let written = std::fs::read_to_string(
+        systemone::project_ledger_of(
+            &wire,
+            &FILE_PICK,
+            &project.path().canonicalize().expect("the project"),
+        )
+        .expect("the ledger"),
+    )
+    .expect("the ledger");
+    for words in ["parser", "lexer", "empty line", "src/"] {
+        assert!(!written.contains(words), "{words} in {written}");
+    }
+}
+
+/// A question that is not a code task asks the file pick seat nothing, and a
+/// seat left off asks nothing whatever the moments.
+#[test]
+fn a_file_pick_asks_only_a_code_task_of_a_seat_left_on() {
+    let endpoint = judging();
+    let project = tempfile::tempdir().expect("a project");
+    let (_home, wire) = home_with(&endpoint, project.path(), &[&FILE_PICK], JevMode::Off);
+    let guards = fresh_guards();
+    let claude = pane(AgentKind::Claude, project.path());
+    // The pane's snapshot still says asked: the seat's own mode, read off
+    // the hook loop, says off.
+    join(note(
+        guards,
+        &wire,
+        &claude,
+        Asking::of([&FILE_PICK]),
+        vec![Moment::Prompt("fix the parser".to_string())],
+        1,
+    ));
+    let (_on, wire_on) = home_with(&endpoint, project.path(), &[&FILE_PICK], JevMode::Shadow);
+    join(note(
+        guards,
+        &wire_on,
+        &claude,
+        Asking::of([&FILE_PICK]),
+        vec![Moment::Prompt("what does the parser do?".to_string())],
+        2,
+    ));
+    assert!(endpoint.asked().is_empty());
+    assert!(project_rows(&wire, &FILE_PICK, project.path(), 0).is_empty());
+    assert!(guards.lock().expect("the books").panes[&7].picks.is_empty());
+}
+
+/// Which seats are asked is read off zo's settings: every seat off — and a
+/// file that does not read — asks nothing, and the window's file watcher
+/// brings a change in within one of its ticks, on and off.
+#[test]
+fn the_standing_follows_zos_settings_file_on_and_off_within_a_tick() {
+    let endpoint = judging();
+    let project = tempfile::tempdir().expect("a project");
+    let (home, wire) = home_with(&endpoint, project.path(), &[], JevMode::Shadow);
+    let settings = home.path().join("settings.json");
+    let standing: &'static Standing = Box::leak(Box::new(Standing::default()));
+    standing.read(&wire);
+    assert!(standing.asking().nothing());
+    // The watcher, on a short tick of its own, reading on a change.
+    let tick = Duration::from_millis(40);
+    let watched: &'static crate::file_watch::WatchSet =
+        Box::leak(Box::new(crate::file_watch::WatchSet::default()));
+    watched.replace_lane(
+        WATCH_LANE,
+        vec![(
+            settings.to_string_lossy().into_owned(),
+            Some(settings.clone()),
+        )],
+        false,
+    );
+    let reading = wire.clone();
+    std::thread::spawn(move || {
+        watched.run(tick, |events| {
+            if events.iter().any(|change| change.lane == WATCH_LANE) {
+                standing.read(&reading);
+            }
+        });
+    });
+    let within_a_tick = |wanted: fn(Asking) -> bool| {
+        let began = Instant::now();
+        while began.elapsed() < tick * 3 {
+            if wanted(standing.asking()) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    };
+    write_seats(
+        &settings,
+        project.path(),
+        &[&CLAIM, &FILE_PICK],
+        JevMode::Shadow,
+    );
+    assert!(within_a_tick(|asking| asking.claim
+        && asking.file_pick
+        && !asking.command));
+    write_seats(&settings, project.path(), &[], JevMode::Shadow);
+    assert!(within_a_tick(Asking::nothing));
+    write_seats(
+        &settings,
+        project.path(),
+        &[&COMMAND_GUARD],
+        JevMode::Shadow,
+    );
+    assert!(within_a_tick(|asking| asking.command));
+    std::fs::write(&settings, "{ not json").expect("a broken file");
+    assert!(within_a_tick(Asking::nothing));
+}
+
+/// With every seat off, a pane's moments are none and nothing is filed or
+/// spawned: the command guard's stamps and a question's thread are its own
+/// seat's, asked only while it is on.
+#[test]
+fn every_seat_off_files_nothing_and_spawns_nothing() {
+    let endpoint = judging();
+    let project = tempfile::tempdir().expect("a project");
+    let (_home, wire) = home_with(&endpoint, project.path(), &[], JevMode::Shadow);
+    let guards = fresh_guards();
+    let claude = pane(AgentKind::Claude, project.path());
+    let off = Asking::default();
+    let about = json!({
+        "session_id": "session-1", "cwd": project.path(), "hook_event_name": "PreToolUse",
+        "tool_name": "Bash", "tool_use_id": "call-1",
+        "tool_input": {"command": "rm -rf build"},
+    })
+    .to_string();
+    let moments = hook_guard::moments_parsed(
+        AgentKind::Claude,
+        "PreToolUse",
+        &zerocode_core::payload::HookPayload::of(&about),
+        off,
+    );
+    assert!(moments.is_empty());
+    assert!(note(guards, &wire, &claude, off, moments, 1).is_empty());
+    assert!(endpoint.asked().is_empty());
+}
+
+/// A pane's folder is named as zo names the same folder from its own
+/// process — its physical path, as `pwd -P` prints it — so a worker's
+/// worktree, reached through a path with a link in it, files its rows in
+/// the very file zo writes there.
+#[test]
+fn a_panes_folder_is_named_as_zo_names_it_from_inside() {
+    let base = tempfile::tempdir().expect("a folder");
+    let worktree = base.path().join("workspaces/zerocode/t-1-demo");
+    std::fs::create_dir_all(&worktree).expect("a worktree");
+    let endpoint = judging();
+    let (_home, wire) = home_with(&endpoint, &worktree, &[&CLAIM], JevMode::Shadow);
+    let from_inside = crate::proc::quiet_command("/bin/pwd")
+        .arg("-P")
+        .current_dir(&worktree)
+        .output()
+        .expect("pwd");
+    let physical = PathBuf::from(String::from_utf8_lossy(&from_inside.stdout).trim());
+    let pane = pane(AgentKind::Claude, &worktree);
+    assert_eq!(
+        systemone::project_ledger_of(&wire, &CLAIM, &pane.root()),
+        systemone::project_ledger_of(&wire, &CLAIM, &physical),
+    );
+    assert!(
+        systemone::project_ledger_of(&wire, &CLAIM, &physical)
+            .expect("a ledger")
+            .to_string_lossy()
+            .contains(&zerocode_core::zo_project::project_slug(&physical))
+    );
 }

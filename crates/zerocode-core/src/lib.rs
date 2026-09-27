@@ -122,6 +122,7 @@ pub mod workitem;
 pub mod workspace_cleanup;
 pub mod workspace_space;
 pub mod worktree_ownership;
+pub mod zo_project;
 
 pub use account::{
     AccountSelection, CONFIG_DIR_VAR, ClaudeAccount, ClaudeIdentity, OVERRIDING_AUTH_VARS,

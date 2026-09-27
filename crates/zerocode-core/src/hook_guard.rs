@@ -1,13 +1,19 @@
-//! What the two tool guards (`crate::jev::tool_guard`) can see of an agent's
-//! work through the hooks this window installs for it (t-10916).
+//! What the Jev seats a pane's work is put to — the two tool guards
+//! (`crate::jev::tool_guard`, t-10916), the completion claim seat
+//! (`crate::jev::claim`) and the file pick seat (`crate::jev::file_pick`,
+//! t-11349) — can see of an agent's work through the hooks this window
+//! installs for it.
 //!
 //! One layer over the events [`crate::hook`] already reads, in the moments the
-//! guards ask and grade at ([`Moment`], [`moments`]): a shell command about to
+//! seats ask and grade at ([`Moment`], [`moments`]): a shell command about to
 //! run and one that ran, a tool's text handed back, another call starting —
-//! the step after a text — a call waiting on the person's permission, the
-//! person's prompt, and a turn's end. The events and the tools arrive here
-//! normalized ([`crate::hook::activity_of_parsed`], [`crate::hook::Tool`]), so
-//! nothing here spells a vendor's event name.
+//! the step after a text, and the files an edit writes — a call coming back
+//! with what a claim may cite of it, a call waiting on the person's
+//! permission, the person's prompt, and a turn's end with the agent's
+//! answer. The events and the tools arrive here normalized
+//! ([`crate::hook::activity_of_parsed`], [`crate::hook::Tool`]), so nothing
+//! here spells a vendor's event name. Only the seats being asked are read
+//! for ([`Asking`]): with every seat off a pane's event is read for nothing.
 //!
 //! What differs by agent is one row each ([`sight`]): which of those moments
 //! its installed hooks carry — and, where one is missing, the word that says
@@ -25,9 +31,11 @@ use serde_json::Value;
 
 use crate::agent::{ALL_AGENTS, AgentKind};
 use crate::hook::{self, HookState, Phase, Tool};
+use crate::jev::claim::{self, Evidence};
 use crate::jev::tool_guard::{MCP_TOOL_PREFIX, TextSource, WRITTEN_WORDS_KEYS};
-use crate::jev::{COMMAND_GUARD, JevUse, TOOL_TEXT_GUARD};
+use crate::jev::{CLAIM, COMMAND_GUARD, FILE_PICK, JevUse, TOOL_TEXT_GUARD};
 use crate::payload::HookPayload;
+use crate::transcript::SaidAt;
 
 /// Why an agent's hooks do not carry a moment the guards read — the word a
 /// row names it by.
@@ -115,6 +123,12 @@ pub struct Sight {
     /// The person stopping a call while it ran — the call's own flag, or a
     /// turn end that says it was stopped while the call had no result yet.
     pub stopped_call: Sees,
+    /// A turn's end with the agent's answer — its words in the payload, or
+    /// the transcript that holds them: where the claim seat asks.
+    pub turn_answer: Sees,
+    /// The files an edit or a write is about to change: what a file pick is
+    /// graded on.
+    pub edited_path: Sees,
     /// Where a finished tool's text lives when the common readers do not find
     /// it: JSON pointers into the payload, tried first.
     pub result_at: &'static [&'static str],
@@ -122,7 +136,8 @@ pub struct Sight {
 
 /// Claude's family, as the hooks this window installs report it: every
 /// moment, its Read tool's text under `file.content` (measured on the
-/// installed 2.1.283, whose `PostToolUseFailure` also carries `is_interrupt`).
+/// installed 2.1.283, whose `PostToolUseFailure` also carries `is_interrupt`
+/// and whose `Stop` carries `last_assistant_message`).
 const CLAUDE: Sight = Sight {
     before: Sees::Yes,
     after: Sees::Yes,
@@ -130,6 +145,8 @@ const CLAUDE: Sight = Sight {
     prompt: Sees::Yes,
     turn_end: Sees::Yes,
     stopped_call: Sees::Yes,
+    turn_answer: Sees::Yes,
+    edited_path: Sees::Yes,
     result_at: &["/tool_response/file/content"],
 };
 
@@ -157,6 +174,8 @@ const fn none(why: Unseen) -> Sight {
         prompt: Sees::No(why),
         turn_end: Sees::No(why),
         stopped_call: Sees::No(why),
+        turn_answer: Sees::No(why),
+        edited_path: Sees::No(why),
         result_at: &[],
     }
 }
@@ -183,8 +202,10 @@ pub const fn sight(agent: AgentKind) -> Sight {
             prompt: Sees::No(Unseen::NoPromptEvent),
             ..NO_STOP
         },
+        // Nothing before a tool runs: neither a command's nor an edit's.
         AgentKind::Antigravity => Sight {
             before: Sees::No(Unseen::NoEventBefore),
+            edited_path: Sees::No(Unseen::NoEventBefore),
             prompt: Sees::No(Unseen::NoPromptEvent),
             ..NO_STOP
         },
@@ -200,9 +221,10 @@ pub fn sights() -> Vec<(AgentKind, Sight)> {
         .collect()
 }
 
-/// What one of the two guard seats reads of an agent's panes: whether its
-/// question is asked there at all, and — when it is — each reason part of
-/// what the seat reads is missing, once, in [`Unseen::ALL`]'s order.
+/// What one of the seats a pane's moments serve reads of an agent's panes:
+/// whether its question is asked there at all, and — when it is — each
+/// reason part of what the seat reads is missing, once, in [`Unseen::ALL`]'s
+/// order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeatSight {
     pub asked: Sees,
@@ -213,8 +235,11 @@ pub struct SeatSight {
 /// is asked before a shell command runs — after it ran, where nothing comes
 /// before — and reads the prompt for its task line, the turn's end and a
 /// stopped call for its hindsight; the text guard is asked on a tool's text
-/// and reads the prompt and the turn's end. `None` for a seat no moment of a
-/// pane asks.
+/// and reads the prompt and the turn's end; the claim seat is asked at a
+/// turn's end over its answer, cites the turn's finished calls and is graded
+/// on the person's next prompt; the file pick seat is asked on the person's
+/// prompt and graded on the files the turn's edits wrote once it ends.
+/// `None` for a seat no moment of a pane asks.
 #[must_use]
 pub fn seat_sight(seat: &JevUse, agent: AgentKind) -> Option<SeatSight> {
     let row = sight(agent);
@@ -230,6 +255,10 @@ pub fn seat_sight(seat: &JevUse, agent: AgentKind) -> Option<SeatSight> {
         )
     } else if seat.id == TOOL_TEXT_GUARD.id {
         (row.text, vec![row.prompt, row.turn_end])
+    } else if seat.id == CLAIM.id {
+        (row.turn_answer, vec![row.prompt, row.after])
+    } else if seat.id == FILE_PICK.id {
+        (row.prompt, vec![row.edited_path, row.turn_end])
     } else {
         return None;
     };
@@ -242,6 +271,65 @@ pub fn seat_sight(seat: &JevUse, agent: AgentKind) -> Option<SeatSight> {
         Vec::new()
     };
     Some(SeatSight { asked, misses })
+}
+
+/// The seats a pane's moments serve, each one the window asks or leaves
+/// off by its own switch.
+pub const PANE_SEATS: [&JevUse; 4] = [&COMMAND_GUARD, &TOOL_TEXT_GUARD, &CLAIM, &FILE_PICK];
+
+/// Which of the seats a pane's moments serve ([`PANE_SEATS`]) are asked now
+/// (t-11349): the one gate before anything of a pane's work is read — a seat
+/// left off is read nothing for, and with every seat off nothing is read at
+/// all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)] // one switch per seat, not a state machine
+pub struct Asking {
+    pub command: bool,
+    pub text: bool,
+    pub claim: bool,
+    pub file_pick: bool,
+}
+
+impl Asking {
+    /// Every seat asked — a reader no switch gates.
+    pub const ALL: Self = Self {
+        command: true,
+        text: true,
+        claim: true,
+        file_pick: true,
+    };
+
+    /// The seats `asked` names, each by its row.
+    #[must_use]
+    pub fn of<'a>(asked: impl IntoIterator<Item = &'a JevUse>) -> Self {
+        asked.into_iter().fold(Self::default(), |mut asking, seat| {
+            if seat.id == COMMAND_GUARD.id {
+                asking.command = true;
+            } else if seat.id == TOOL_TEXT_GUARD.id {
+                asking.text = true;
+            } else if seat.id == CLAIM.id {
+                asking.claim = true;
+            } else if seat.id == FILE_PICK.id {
+                asking.file_pick = true;
+            }
+            asking
+        })
+    }
+
+    /// Whether `seat` is asked.
+    #[must_use]
+    pub fn asks(self, seat: &JevUse) -> bool {
+        (seat.id == COMMAND_GUARD.id && self.command)
+            || (seat.id == TOOL_TEXT_GUARD.id && self.text)
+            || (seat.id == CLAIM.id && self.claim)
+            || (seat.id == FILE_PICK.id && self.file_pick)
+    }
+
+    /// Whether no seat is asked.
+    #[must_use]
+    pub const fn nothing(self) -> bool {
+        !(self.command || self.text || self.claim || self.file_pick)
+    }
 }
 
 /* ---- the moments -------------------------------------------------------------- */
@@ -279,21 +367,29 @@ pub enum Moment {
         text: String,
     },
     /// A call started — any tool: what it carries out, a shell command or the
-    /// words an edit writes, for the step after a text.
+    /// words an edit writes, for the step after a text; and, for an edit or a
+    /// write while the file pick seat is asked, the files it writes.
     Started {
         call_id: Option<String>,
         tool: String,
         words: Option<String>,
+        paths: Vec<String>,
     },
     /// A shell call waits on the person's permission.
     Asked { command: Option<String> },
     /// The person's words that began a turn, whole.
     Prompt(String),
     /// A call came back — any tool, finished or failed: the calls after a
-    /// text have begun to answer, and the step after it is over.
-    Finished { call_id: Option<String> },
-    /// The turn ended: `stopped` when its end says the person stopped it.
-    TurnEnded { stopped: bool },
+    /// text have begun to answer, and the step after it is over; while the
+    /// claim seat is asked, what a claim may cite of it.
+    Finished {
+        call_id: Option<String>,
+        evidence: Option<Evidence<String>>,
+    },
+    /// The turn ended: `stopped` when its end says the person stopped it;
+    /// while the claim seat is asked, where its answer is — the payload's own
+    /// words, credentials scrubbed, or the transcript to read them from.
+    TurnEnded { stopped: bool, said: Option<SaidAt> },
 }
 
 /// The kind of text a finished tool handed back, told from its normalized
@@ -314,26 +410,35 @@ pub fn text_source(verb: &Tool, text: &str) -> Option<TextSource> {
     }
 }
 
-/// The moments one hook event of `agent`'s holds, in the order the guards
-/// read them — none for an event the guards do not read, and none that the
+/// The moments one hook event of `agent`'s holds for every seat, in the order
+/// the seats read them — none for an event no seat reads, and none that the
 /// agent's row cannot see ([`sight`]).
 #[must_use]
 pub fn moments(agent: AgentKind, event: &str, payload: &str) -> Vec<Moment> {
-    moments_parsed(agent, event, &HookPayload::of(payload))
+    moments_parsed(agent, event, &HookPayload::of(payload), Asking::ALL)
 }
 
-/// [`moments`], for a caller that already holds the payload's parse: every
-/// field is read off that one tree.
+/// [`moments`], for the seats `asking` asks and a caller that already holds
+/// the payload's parse: every field is read off that one tree, and only for
+/// a seat that reads it — nothing at all while no seat is asked.
 #[must_use]
-pub fn moments_parsed(agent: AgentKind, event: &str, parsed: &HookPayload<'_>) -> Vec<Moment> {
+pub fn moments_parsed(
+    agent: AgentKind,
+    event: &str,
+    parsed: &HookPayload<'_>,
+    asking: Asking,
+) -> Vec<Moment> {
+    let mut found = Vec::new();
+    if asking.nothing() {
+        return found;
+    }
     let row = sight(agent);
     let tree = parsed.tree_or_null();
-    let mut found = Vec::new();
     // A permission request is attention, not a tool's phase: the one fact the
     // guards take from it is that a shell call waits on the person.
     if hook::hook_state_parsed(event, parsed) == Some(HookState::NeedsAttention) {
         let tool = hook::tool_name_in_parsed(parsed).and_then(|name| Tool::named(&name));
-        if tool == Some(Tool::Bash) && row.before.yes() {
+        if asking.command && tool == Some(Tool::Bash) && row.before.yes() {
             found.push(Moment::Asked {
                 command: command_in(tree),
             });
@@ -349,6 +454,8 @@ pub fn moments_parsed(agent: AgentKind, event: &str, parsed: &HookPayload<'_>) -
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.trim().is_empty())
         .map(PathBuf::from);
+    // The step after a text reads what every call carries out.
+    let steps = asking.text && row.text.yes();
     match activity.phase {
         Phase::Started => {
             let words = match activity.verb {
@@ -356,25 +463,34 @@ pub fn moments_parsed(agent: AgentKind, event: &str, parsed: &HookPayload<'_>) -
                 Tool::Edit | Tool::Write => written_in(tree),
                 _ => None,
             };
-            if activity.verb == Tool::Bash && row.before.yes() && words.is_some() {
+            if asking.command && activity.verb == Tool::Bash && row.before.yes() && words.is_some()
+            {
                 found.push(Moment::CommandAbout(Call {
                     id: call_id.clone(),
                     command: words.clone(),
                     cwd,
                 }));
             }
-            // What the call carries out matters to the step after a text.
-            if row.text.yes() {
+            let paths = if asking.file_pick
+                && row.edited_path.yes()
+                && matches!(activity.verb, Tool::Edit | Tool::Write)
+            {
+                edited_paths_in(tree)
+            } else {
+                Vec::new()
+            };
+            if steps || !paths.is_empty() {
                 found.push(Moment::Started {
                     call_id,
                     tool: tool_name(parsed, &activity.verb),
                     words,
+                    paths,
                 });
             }
         }
         Phase::Finished | Phase::Failed => {
             let failed = activity.phase == Phase::Failed;
-            if activity.verb == Tool::Bash && row.after.yes() {
+            if asking.command && activity.verb == Tool::Bash && row.after.yes() {
                 found.push(Moment::CommandRan {
                     call: Call {
                         id: call_id.clone(),
@@ -385,8 +501,8 @@ pub fn moments_parsed(agent: AgentKind, event: &str, parsed: &HookPayload<'_>) -
                     stopped: failed && row.stopped_call.yes() && hook::call_says_interrupted(tree),
                 });
             }
-            if !failed
-                && row.text.yes()
+            if steps
+                && !failed
                 && let Some(text) = result_text(&row, tree)
                 && let Some(source) = text_source(&activity.verb, &text)
             {
@@ -397,8 +513,13 @@ pub fn moments_parsed(agent: AgentKind, event: &str, parsed: &HookPayload<'_>) -
                     text,
                 });
             }
-            if row.text.yes() {
-                found.push(Moment::Finished { call_id });
+            let evidence = if asking.claim && row.after.yes() {
+                evidence_in(&row, &activity.verb, tree, failed)
+            } else {
+                None
+            };
+            if steps || evidence.is_some() {
+                found.push(Moment::Finished { call_id, evidence });
             }
         }
         Phase::Prompted => {
@@ -410,9 +531,20 @@ pub fn moments_parsed(agent: AgentKind, event: &str, parsed: &HookPayload<'_>) -
         }
         Phase::Stopped => {
             if row.turn_end.yes() {
+                let said = if asking.claim && row.turn_answer.yes() {
+                    crate::transcript::said_at_in_parsed(parsed).map(|said| match said {
+                        SaidAt::Words(words) => {
+                            SaidAt::Words(crate::clone::scrub_credentials(&words))
+                        }
+                        transcript @ SaidAt::Transcript(_) => transcript,
+                    })
+                } else {
+                    None
+                };
                 found.push(Moment::TurnEnded {
                     stopped: row.stopped_call.yes()
                         && hook::interrupt_declared(agent, event, parsed.text(), false),
+                    said,
                 });
             }
         }
@@ -444,6 +576,71 @@ fn written_in(tree: &Value) -> Option<String> {
         .iter()
         .find_map(|key| input.get(*key).and_then(Value::as_str))
         .map(crate::clone::scrub_credentials)
+}
+
+/// The files an edit or a write changes, as its call names them: the path it
+/// targets ([`hook::target_in`]), or — for a patch — every file the patch
+/// updates, adds or deletes ([`crate::transcript::patch_edits`]).
+fn edited_paths_in(tree: &Value) -> Vec<String> {
+    let Some(target) = hook::target_in(tree) else {
+        return Vec::new();
+    };
+    let patched: Vec<String> = crate::transcript::patch_edits(&target)
+        .into_iter()
+        .map(|edit| edit.path)
+        .collect();
+    if patched.is_empty() {
+        vec![target]
+    } else {
+        patched
+    }
+}
+
+/// What a claim may cite of a finished call ([`claim::Evidence`]): the shell
+/// command that made it, and its output as the claim seat reads zo's — a
+/// shell's two streams under their own keys, any other tool's text, a
+/// failure's own words — scrubbed of credentials as the person's words are,
+/// each kept to its end ([`claim::tail`]). A shell that failed exited
+/// non-zero, unless the person stopped it; any other failure is the tool's
+/// error.
+fn evidence_in(row: &Sight, verb: &Tool, tree: &Value, failed: bool) -> Option<Evidence<String>> {
+    let shell = *verb == Tool::Bash;
+    let streams = hook::RESULT_KEYS
+        .iter()
+        .find_map(|key| tree.get(*key))
+        .and_then(Value::as_object)
+        .filter(|streams| {
+            shell
+                && claim::STREAM_KEYS
+                    .iter()
+                    .any(|key| streams.get(*key).is_some_and(Value::is_string))
+        });
+    let output = if let Some(streams) = streams {
+        Value::Object(
+            claim::STREAM_KEYS
+                .iter()
+                .filter_map(|key| {
+                    let text = crate::clone::scrub_credentials(streams.get(*key)?.as_str()?);
+                    Some(((*key).to_string(), Value::from(claim::tail(&text))))
+                })
+                .collect(),
+        )
+        .to_string()
+    } else {
+        let failure = failed
+            .then(|| crate::transcript::tool_failure_words(tree))
+            .flatten()
+            .map(|words| crate::clone::scrub_credentials(&words));
+        let text = failure.or_else(|| result_text(row, tree))?;
+        claim::tail(&text).to_string()
+    };
+    let nonzero = shell && failed && !hook::call_says_interrupted(tree);
+    Some(Evidence {
+        command: if shell { command_in(tree) } else { None },
+        output,
+        is_error: failed && !nonzero,
+        nonzero,
+    })
 }
 
 /// A finished tool's text: under the agent's own pointers first, then the
