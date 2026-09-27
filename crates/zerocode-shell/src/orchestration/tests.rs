@@ -20581,6 +20581,10 @@ mod restore_door;
 mod restore_goodbye;
 /// t-7812: the host seams those roads added (`tests/restore_seams.rs`).
 mod restore_seams;
+/// t-11548 and t-11537: after a restart, a worker at rest hears of its mail
+/// and a working coordinator goes on without being spoken to
+/// (`tests/restore_wake.rs`).
+mod restore_wake;
 
 /* ---- account switch: the same seat, another login (t-7538) --------------- */
 
