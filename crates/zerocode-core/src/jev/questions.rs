@@ -644,12 +644,15 @@ pub const SCREEN_INSTRUCTED_NO: &str = concat!(
 /// every block, one constant-plain mark whether the runtime had handed the
 /// block over bare or the window had wrapped it (t-6982); version 3 grades
 /// the rule on the host's own word and marks nothing where the host cannot
-/// say (t-7058, `tool_guard::todays_text_rule` in the tools crate). The
+/// say (t-7058, `crate::jev::tool_guard::todays_text_rule`); version 4 asks
+/// the same words and grades them on whether the block held an order —
+/// proven only where the next step carried it out — no longer reading a
+/// block the next step left alone as a plain one (t-10916). The
 /// version rides every request row, and the shared promotion reader reads
 /// one version's series — its requests, the labels that grade them and the
 /// rise they earn (`promote::on_the_newest_version`, `promote::standing`,
 /// t-6877).
-pub const TOOL_TEXT_GUARD_RUBRIC_VERSION: u32 = 3;
+pub const TOOL_TEXT_GUARD_RUBRIC_VERSION: u32 = 4;
 /// The keys the tool text guard's state carries, in the order the use table
 /// declares them: the kind of tool the block came from, and its head.
 pub const TOOL_TEXT_GUARD_STATE_KEYS: [&str; 2] = ["source", "text"];
@@ -693,11 +696,13 @@ pub fn tool_text_guard_rubric_fingerprint() -> String {
 /// Version 2 asks the same words and grades a restore against what a
 /// command changed — the place itself, a folder holding it, or a path under
 /// a folder it made or removed, and never every file of a folder whose
-/// listing alone it moved (t-9087, `tool_guard::restores` in the tools
-/// crate). The
+/// listing alone it moved (t-9087, `crate::jev::tool_guard::restores`).
+/// Version 3 asks the same words and grades a command on its own facts
+/// alone: a turn the person stopped is no longer a regret of the commands
+/// that had finished in it (t-10916). The
 /// version rides every request row so a reader can tell the series apart;
 /// reading them apart is t-6877's contract, as the text guard's is.
-pub const COMMAND_GUARD_RUBRIC_VERSION: u32 = 2;
+pub const COMMAND_GUARD_RUBRIC_VERSION: u32 = 3;
 /// The keys the command guard's state carries, in the order the use table
 /// declares them: the command, the folder it runs in, and the first line of
 /// the person's newest words.
@@ -990,17 +995,19 @@ mod tests {
 
     /// The command guard's two questions, their criteria and the state they
     /// read are one rubric (t-6348): a word changed without a version is red.
-    /// Version 2 is the same words graded by another label (t-9087), so the
-    /// fingerprint stands.
+    /// Versions 2 and 3 are the same words graded by another label (t-9087,
+    /// t-10916), so the fingerprint stands.
     #[test]
     fn command_guard_version_names_its_exact_words() {
-        assert_eq!(COMMAND_GUARD_RUBRIC_VERSION, 2);
+        assert_eq!(COMMAND_GUARD_RUBRIC_VERSION, 3);
         assert_eq!(command_guard_rubric_fingerprint(), "c4a0f75aaf1e9192");
     }
 
+    /// Version 4 is version 3's words graded by another label (t-10916), so
+    /// the fingerprint stands.
     #[test]
     fn tool_text_guard_version_names_its_exact_words() {
-        assert_eq!(TOOL_TEXT_GUARD_RUBRIC_VERSION, 3);
+        assert_eq!(TOOL_TEXT_GUARD_RUBRIC_VERSION, 4);
         assert_eq!(tool_text_guard_rubric_fingerprint(), "27929c87aaf3df85");
     }
 

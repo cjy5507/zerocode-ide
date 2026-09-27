@@ -1284,12 +1284,13 @@ mod tests {
         );
 
         // The tables that word a token zo answered — the line a judgment
-        // turned on (`JEV_LINES`), and why a feature's rows compared nothing
-        // or its record draws no confidence bar (`JEV_REASONS`, t-9935) —
-        // speak every catalog under every key they name, so a token is never
-        // read in Korean in another language. A token no table words stands
-        // on the screen as itself; that is the tables' reach, not a word
-        // missing from a catalog.
+        // turned on (`JEV_LINES`), why a feature's rows compared nothing or
+        // its record draws no confidence bar (`JEV_REASONS`, t-9935), and why
+        // an agent's work is not asked or what its hooks miss (`JEV_UNSEEN`,
+        // t-10916) — speak every catalog under every key they name, so a
+        // token is never read in Korean in another language. A token no table
+        // words stands on the screen as itself; that is the tables' reach, not
+        // a word missing from a catalog.
         let jev = include_str!("../../../ui/shell-jev.js");
         let catalogs = [
             ("en", english),
@@ -1301,6 +1302,7 @@ mod tests {
         for table in [
             "const JEV_LINES = Object.freeze({",
             "const JEV_REASONS = Object.freeze({",
+            "const JEV_UNSEEN = Object.freeze({",
         ] {
             let keys: Vec<&str> = between(jev, table, "\n});")
                 .split("key: \"")
@@ -2311,6 +2313,17 @@ pub struct SeatNumbers {
     pub applied_error_permille: Option<u16>,
     #[serde(default)]
     pub baseline_error_permille: Option<u16>,
+    /// The week's requests by who asked them — zo, or the agent of a window
+    /// pane (t-10916) — for a seat several programs ask into one ledger;
+    /// empty from a zo older than the column. Sent even when empty: a sum
+    /// reads every reading's map, and one a reading left out is no map.
+    #[serde(default)]
+    pub askers_week: std::collections::BTreeMap<String, usize>,
+    /// For a seat a pane's moments ask, every agent's line: its requests of
+    /// the week, and what its hooks show the seat
+    /// ([`crate::jev_scope::with_askers`]); empty for every other seat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub askers: Vec<SeatAsker>,
     /// The file zo read the seat's rows from — kept to say where they are
     /// kept ([`crate::jev_scope::with_reach`]), never sent on: a path of the
     /// person's disk is not the dashboard's to draw.
@@ -2326,6 +2339,26 @@ pub struct SeatNumbers {
     /// reading of one checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub across: Option<crate::jev_scope::SeatAcross>,
+}
+
+/// One agent's line under a seat a pane's moments ask (t-10916): its
+/// requests of the week and, by the core's words
+/// ([`zerocode_core::hook_guard::Unseen::word`]), why the window cannot ask
+/// the seat of its work (`unseen`) — or, when it can, what is said beside
+/// the count (`notes`): what of the seat's reading its hooks miss, or that
+/// its own runtime asks. A count of zero with no `unseen` is an agent nobody
+/// ran; with one, an agent whose work the window cannot see.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatAsker {
+    /// The agent's catalog slug, and the name a person calls it.
+    pub agent: String,
+    pub label: String,
+    pub requests: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unseen: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// What a seat's graded answers say of its act line (t-9468), as the

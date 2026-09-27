@@ -180,8 +180,43 @@ pub fn read(
             projects,
             window_days: WINDOW_DAYS,
         },
-        seats,
+        seats: with_askers(seats),
     })
+}
+
+/// Every seat a pane's moments ask, told each agent's line (t-10916): its
+/// requests of the week off `askersWeek` — a sum's added counts or one
+/// reading's own — and what its hooks show the seat, off the core's row
+/// ([`zerocode_core::hook_guard::seat_sight`]), in the catalog's order. An
+/// agent the window cannot ask for says why; one whose own runtime asks (zo)
+/// is a count like any other, with that said beside it.
+#[must_use]
+pub fn with_askers(mut seats: Vec<SeatNumbers>) -> Vec<SeatNumbers> {
+    use zerocode_core::hook_guard::{Sees, seat_sight};
+    for seat in &mut seats {
+        let Some(row) = zerocode_core::jev::jev_use(&seat.id) else {
+            continue;
+        };
+        seat.askers = zerocode_core::agent::ALL_AGENTS
+            .into_iter()
+            .filter_map(|agent| {
+                let sight = seat_sight(row, agent)?;
+                let (unseen, notes) = match sight.asked {
+                    Sees::Yes => (None, sight.misses),
+                    Sees::No(why) if why.asked_elsewhere() => (None, vec![why]),
+                    Sees::No(why) => (Some(why), Vec::new()),
+                };
+                Some(crate::typesafe_settings::SeatAsker {
+                    agent: agent.slug().to_string(),
+                    label: agent.label().to_string(),
+                    requests: seat.askers_week.get(agent.slug()).copied().unwrap_or(0),
+                    unseen: unseen.map(|why| why.word().to_string()),
+                    notes: notes.iter().map(|why| why.word().to_string()).collect(),
+                })
+            })
+            .collect();
+    }
+    seats
 }
 
 /// Every listed project's zo, [`PROJECT_ASKS_AT_ONCE`] at a time, each with
@@ -439,6 +474,8 @@ pub const SEAT: &[(&str, Carry)] = &[
     ("applyShare", Carry::Own),
     ("appliedErrorPermille", Carry::Own),
     ("baselineErrorPermille", Carry::Own),
+    ("askersWeek", Carry::Add),
+    ("askers", Carry::Recounted),
     ("reach", Carry::Across),
     ("across", Carry::Across),
 ];
@@ -1117,6 +1154,85 @@ mod tests {
         );
     }
 
+    /// A seat a pane's moments ask says each agent's requests and what it
+    /// cannot see (t-10916): the machine's one file read once whichever
+    /// projects asked, projects' own files added, every agent of the catalog
+    /// a line — zo's own, the ones the window hooks, and OpenCode's with why
+    /// — and no line under a seat no pane's moment asks.
+    #[test]
+    fn a_guard_seat_says_each_agents_requests_and_what_it_cannot_see() {
+        let machine = machine_places(Path::new("/h/.zo"), Path::new("/w/sessions"));
+        // As zo sends a seat: its week's marks ride beside its askers.
+        let guard = |found: &str, askers: Value| {
+            seat(
+                "command_guard",
+                Some(found),
+                (10, 10, 0),
+                false,
+                json!({ "askersWeek": askers, "agreementWeek": { "compared": 0, "agreed": 0 } }),
+            )
+        };
+        let here = with_reach(
+            reading(&[guard(
+                "/h/.zo/jev/command-guard.jsonl",
+                json!({ "zo": 3, "claude": 5, "codex": 2 }),
+            )]),
+            &machine,
+        );
+        let seats = with_askers(summed(&[here.clone(), here]).expect("a sum"));
+        let lines = &of(&seats, "command_guard").askers;
+        assert_eq!(lines.len(), zerocode_core::agent::ALL_AGENTS.len());
+        let line = |slug: &str| {
+            lines
+                .iter()
+                .find(|one| one.agent == slug)
+                .cloned()
+                .expect("the agent's line")
+        };
+        let said = |slug: &str| {
+            let one = line(slug);
+            (one.requests, one.unseen, one.notes)
+        };
+        assert_eq!(said("zo"), (3, None, vec!["own_runtime".to_string()]));
+        assert_eq!(said("claude"), (5, None, vec![]));
+        assert_eq!(said("codex"), (2, None, vec!["no_stop_flag".to_string()]));
+        assert_eq!(said("opencode"), (0, Some("no_hooks".to_string()), vec![]));
+        assert_eq!(
+            said("antigravity").2,
+            ["no_event_before", "no_prompt_event", "no_stop_flag"]
+        );
+        assert_eq!(line("claude").label, "Claude");
+
+        let project = |name: &str, askers: Value| {
+            guard(
+                &format!("/h/.zo/projects/{name}/state/smart-router/command-guard.jsonl"),
+                askers,
+            )
+        };
+        let a = with_reach(reading(&[project("a", json!({ "zo": 1 }))]), &machine);
+        let b = with_reach(
+            reading(&[project("b", json!({ "zo": 2, "claude": 1 }))]),
+            &machine,
+        );
+        let seats = with_askers(summed(&[a, b]).expect("a sum"));
+        let lines = &of(&seats, "command_guard").askers;
+        let requests: Vec<(&str, usize)> = lines
+            .iter()
+            .filter(|one| one.requests > 0)
+            .map(|one| (one.agent.as_str(), one.requests))
+            .collect();
+        assert_eq!(requests, [("zo", 3), ("claude", 1)]);
+
+        let quiet = with_askers(reading(&[seat(
+            "routing",
+            None,
+            (0, 0, 0),
+            false,
+            json!({}),
+        )]));
+        assert!(quiet[0].askers.is_empty());
+    }
+
     /// Every number a seat carries has one rule in the tables, and every
     /// rule names a number a seat carries: a field added to the reader is a
     /// red here until the sum says what becomes of it. The rules read again
@@ -1138,6 +1254,8 @@ mod tests {
             "days": [{ "startMs": 1, "tally": window, "agreement": marks }],
             "recent": [], "found": "/h/.zo/jev/a.jsonl", "reach": "machine",
             "across": { "projects": 1, "applying": 0, "summed": false },
+            "askersWeek": { "zo": 1 },
+            "askers": [{ "agent": "opencode", "label": "OpenCode", "requests": 0, "unseen": "no_hooks", "notes": ["no_stop_flag"] }],
         }))
         .expect("a full seat");
         let sent = serde_json::to_value(&full).expect("the seat, sent");

@@ -319,6 +319,34 @@ fn the_json_says_why_the_rows_compare_nothing_word_by_word() {
     );
 }
 
+/// A seat several programs ask says in the JSON who asked it this week
+/// (t-10916) — the name the window's dashboard reads it by.
+#[test]
+fn the_json_says_who_asked_a_seat_this_week() {
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::COMMAND_GUARD;
+    let asked = |at: i64, from: &str| {
+        serde_json::json!({"at": at, "outcome": "answered", "elapsedMs": 40, "requests": 1, "from": from,
+                           "rubricVersion": seat.rubric_version})
+    };
+    let rows = [asked(100, "zo"), asked(110, "claude"), asked(120, "claude")];
+    std::fs::write(
+        home.path().join(seat.ledger),
+        rows.iter().map(|row| row.to_string() + "\n").collect::<String>(),
+    )
+    .expect("write");
+    let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
+    let guard = value["seats"]
+        .as_array()
+        .expect("seats")
+        .iter()
+        .find(|row| row["id"] == seat.id)
+        .expect("the command guard");
+    assert_eq!(guard["askersWeek"], serde_json::json!({ "claude": 2, "zo": 1 }));
+}
+
 /// A seat's act line, end to end (t-9468): the summary says the line the
 /// seat's graded answers draw and the row the replay would keep for it; the
 /// row, kept beside the ledger, is the line the product then reads — the

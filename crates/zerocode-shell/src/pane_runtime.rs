@@ -234,6 +234,11 @@ pub(super) async fn hook_loop(
         // it wrote are registered from the tail. Before the classifiers, for
         // the same reason the activity is: nothing here `continue`s.
         artifact_runtime::note_hook(&app, &envelope);
+        // The two tool guards (t-10916): what this pane's agent is about to
+        // run, ran and read, asked of Jev beside the work. The bridge already
+        // answered the hook; the questions leave on threads of their own, and
+        // nothing here `continue`s either.
+        pane_guard::note_hook(&app, &envelope, expected.as_deref());
         // What the agent just DID, before either classifier gets a chance to
         // end the iteration. This road does not `continue`: a tool call is
         // also the event that says the pane is working, and the two facts

@@ -369,8 +369,9 @@ function jevLineWords(line) {
  * seat's `away`, the summons' and the mention ranking's `not_offered`, the
  * summons' `pinned`, recall's `no_note_touched`, routing's `unanswered`, the
  * file pick's `no_file_edited`, the claim check's `not_model_comparison`,
- * the mail triage's `superseded` and `unhandled`, t-9471) — and why a
- * feature's record draws no confidence bar to act from
+ * the mail triage's `superseded` and `unhandled`, t-9471, the tool text
+ * guard's `ignored`) — and why a feature's record draws no confidence bar to
+ * act from
  * (`calibration.reason`, the core's `threshold::NoLine::token`). What each
  * means to a person is said once here (t-9935); `jevReasonWords` reads it. */
 const JEV_REASONS = Object.freeze({
@@ -387,6 +388,7 @@ const JEV_REASONS = Object.freeze({
   unanswered: { key: "jev.reason.unanswered", word: "결과 없음" },
   no_file_edited: { key: "jev.reason.noFileEdited", word: "편집한 파일 없음" },
   not_model_comparison: { key: "jev.reason.notModelComparison", word: "모델 비교 아님" },
+  ignored: { key: "jev.reason.ignored", word: "다음 걸음이 따르지 않음" },
   no_confidence: { key: "jev.reason.noConfidence", word: "답에 확신도가 없음" },
   whole: { key: "jev.reason.whole", word: "모든 답이 이미 기준을 넘음" },
   one_colour: { key: "jev.reason.oneColour", word: "확신도로 답이 나뉘지 않음" },
@@ -402,6 +404,51 @@ const JEV_REASONS = Object.freeze({
 function jevReasonWords(token) {
   const said = JEV_REASONS[token] ?? JEV_LINES[token];
   return said ? t(said.key, said.word) : token;
+}
+
+/* Why the window cannot ask a feature of an agent's work, or what is said
+ * beside the agent's count — what of the feature's reading its hooks miss,
+ * or that its own runtime asks (t-10916): the core's words
+ * (`hook_guard::Unseen`), else the word itself. */
+const JEV_UNSEEN = Object.freeze({
+  own_runtime: { key: "jev.unseen.ownRuntime", word: "zo가 직접 물음" },
+  no_hooks: { key: "jev.unseen.noHooks", word: "훅을 설치하지 않는 에이전트" },
+  no_event_before: { key: "jev.unseen.noEventBefore", word: "실행 전에 알리지 않아 실행 뒤에 물음" },
+  no_prompt_event: { key: "jev.unseen.noPromptEvent", word: "요청을 알리지 않아 과업 없이 물음" },
+  no_stop_flag: { key: "jev.unseen.noStopFlag", word: "멈춤을 알리지 않음" },
+});
+
+function jevUnseenWords(token) {
+  const said = JEV_UNSEEN[token];
+  return said ? t(said.key, said.word) : token;
+}
+
+/* One agent's line under a feature a pane's hooks ask: that the window
+ * cannot see its work and why, or its week's count with what is said beside
+ * it. */
+function jevAskerWords(one) {
+  if (one.unseen) return t("jev.askers.unseen", "못 봄 — {{why}}", { why: jevUnseenWords(one.unseen) });
+  return [t("jev.askers.count", "{{count}}건", { count: jevCount(one.requests) }), ...(one.notes ?? []).map(jevUnseenWords)].join(" · ");
+}
+
+/* Under a feature's week count, who asked it (t-10916): each agent with
+ * requests this week, by name and count, and how many agents' work the
+ * window cannot see — which, and why, as that chip's tip. Nothing for a
+ * feature no pane's hooks ask. */
+function jevAskersLine(held) {
+  const askers = held.askers ?? [];
+  const blind = askers.filter((one) => one.unseen);
+  const chips = askers.filter((one) => one.requests > 0 && !one.unseen)
+    .map((one) => jevFact("asker", `${one.label} ${jevCount(one.requests)}`, "jev-token"));
+  if (blind.length > 0) {
+    const chip = jevFact("unseen", t("jev.askers.unseenCount", "못 봄 {{count}}", { count: jevCount(blind.length) }), "jev-token");
+    chip.dataset.tip = blind.map((one) => `${one.label} — ${jevUnseenWords(one.unseen)}`).join(" · ");
+    chips.push(chip);
+  }
+  if (chips.length === 0) return null;
+  const line = jevNode("div", "jev-tokens", ...chips);
+  line.dataset.jevAskers = "";
+  return line;
 }
 
 /* The version a change of version cut away from the judged window, when one
@@ -731,6 +778,7 @@ function jevBuildDrawer() {
         head.scope = "col";
         return head;
       }))), document.createElement("tbody"))),
+    part("askers", "jev.drawer.askers", "누가 물었나", jevNode("dl", "jev-drawer-facts")),
     part("recent", "jev.recent.title", "최근 판단", jevNode("ol", "jev-recent-list"),
       jevText("jev.recent.empty", "아직 판단 기록이 없습니다.", "p", "jev-recent-empty")),
     part("agreement", "jev.drawer.agreement", "정확도 비교", jevNode("dl", "jev-drawer-facts")),
@@ -2151,6 +2199,16 @@ function paintJevDrawer(view, id, held) {
   part("days").hidden = !asked;
   if (asked) paintJevDays(part("days"), days);
 
+  // Who asked it this week, agent by agent — zo's own, every agent a pane
+  // runs, and the ones whose work the window cannot see, with why (t-10916).
+  const askers = held?.askers ?? [];
+  part("askers").hidden = askers.length === 0;
+  part("askers").querySelector("dl").replaceChildren(...askers.flatMap((one) => {
+    const said = jevNode("dd", "", document.createTextNode(jevAskerWords(one)));
+    said.dataset.jevAsker = one.agent;
+    return [jevNode("dt", "", document.createTextNode(one.label)), said];
+  }));
+
   const decisions = held?.recent ?? [];
   const now = Date.now();
   part("recent").querySelector(".jev-recent-list").replaceChildren(...decisions.map((decision) => jevDecisionNode(decision, now)));
@@ -2302,6 +2360,8 @@ function paintJevRow(row, id, held, standing, head, latency) {
   } else if (held.week.refused > 0) {
     rows.append(jevNode("div", "jev-tokens", jevFact("refused", t("jev.refusedCount", "거절 {{count}}건", { count: jevCount(held.week.refused) }), "jev-token")));
   }
+  const askers = jevAskersLine(held);
+  if (askers) rows.append(askers);
   const share = cell("answered");
   share.replaceChildren();
   if (held.week.rows === 0) {

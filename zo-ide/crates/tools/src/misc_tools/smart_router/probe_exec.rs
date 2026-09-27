@@ -301,22 +301,10 @@ fn probe_cache() -> &'static Mutex<HashMap<u64, Option<ProbeAssessment>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// FNV-1a over both text fields with a length-prefixed separator, so
-/// (`"ab"`, `"c"`) and (`"a"`, `"bc"`) cannot collide by concatenation. The
-/// decision shadow's rows and the label evaluation join on this same key.
-#[must_use]
-pub fn task_fingerprint(description: &str, prompt: &str) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = FNV_OFFSET;
-    for chunk in [description.len().to_le_bytes().as_slice(), description.as_bytes(), prompt.as_bytes()] {
-        for byte in chunk {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-    }
-    hash
-}
+/// The key a probe task and a guarded call are named by — core's
+/// ([`zerocode_core::jev::task_fingerprint`], t-10916), so the window names a
+/// pane's calls the way zo names its own.
+pub use zerocode_core::jev::task_fingerprint;
 
 /// Resolve the model the probe itself runs on: the router's own Fast-role
 /// pick from the already-loaded inventory — the probe reuses the engine it

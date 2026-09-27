@@ -2199,6 +2199,28 @@ pub fn activity_of(
     Some((pane, activity))
 }
 
+/// The pane and the event of an envelope, for the two tool guards
+/// (`crate::pane_guard`, t-10916) — the fifth road off one envelope, behind
+/// the launch-token gate the others walk: a report carrying somebody else's
+/// token is a previous occupant of the pane.
+pub fn guard_event_of(
+    envelope: &zerocode_core::HookEnvelope,
+    payload: &zerocode_core::payload::HookPayload<'_>,
+    expected_launch_token: Option<&str>,
+) -> Option<(u32, String)> {
+    let term = term_of_pane_key(&envelope.pane_key)?;
+    if let Some(expected) = expected_launch_token
+        && !envelope.launch_token.is_empty()
+        && envelope.launch_token != expected
+    {
+        return None;
+    }
+    Some((
+        term,
+        zerocode_core::hook::envelope_event_name_parsed(envelope, payload)?,
+    ))
+}
+
 /// The pane whose agent says its session ended, or nothing — the fourth road
 /// off one envelope, beside [`report_of`], [`subagent_of`] and
 /// [`activity_of`], behind the same launch-token gate: a report carrying

@@ -204,7 +204,7 @@ fn a_restore_regrets_the_command_that_changed_what_it_put_back_and_no_other() {
         std::fs::write(cwd.join("src/a.rs"), "fn b() { 1 }\n").expect("the command's edit");
         assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran("shell-2"))), None);
         // Both answered: each verdict is in the book before the turn ends.
-        assert_eq!(rows_of(&command_guard_path(cwd), 2).len(), 2);
+        assert_eq!(rows_of(&command_guard_path(), 2).len(), 2);
 
         let shell = |id: &str, command: &str| call(id, SHELL_TOOL, &serde_json::json!({"command": command}));
         let turn = vec![
@@ -215,7 +215,7 @@ fn a_restore_regrets_the_command_that_changed_what_it_put_back_and_no_other() {
             said("put it back"),
         ];
         assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&turn)), 1, "the edit alone was put back");
-        let labels: Vec<CommandGuardLabelRow> = read_shadow_rows::<Value>(&command_guard_path(cwd))
+        let labels: Vec<CommandGuardLabelRow> = read_shadow_rows::<Value>(&command_guard_path())
             .into_iter()
             .filter_map(|row| serde_json::from_value(row).ok())
             .collect();
@@ -273,7 +273,7 @@ fn a_restore_of_one_file_regrets_no_command_that_only_changed_another_in_its_fol
         assert_ne!(stamp(cwd), root_made, "the root's own stamp moved again");
         assert_eq!(std::fs::read(cwd.join("src/a.rs")).expect("the file's bytes"), a_rs, "neither touched it");
         // Both answered: each verdict is in the book before the turn ends.
-        assert_eq!(rows_of(&command_guard_path(cwd), 2).len(), 2);
+        assert_eq!(rows_of(&command_guard_path(), 2).len(), 2);
 
         let shell = |id: &str, command: &str| call(id, SHELL_TOOL, &serde_json::json!({"command": command}));
         let turn = vec![
@@ -351,7 +351,7 @@ fn off_asks_nothing_and_hands_back_nothing() {
         };
         assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran)), None);
         std::thread::sleep(Duration::from_millis(200));
-        assert!(read_shadow_rows::<Value>(&command_guard_path(cwd)).is_empty());
+        assert!(read_shadow_rows::<Value>(&command_guard_path()).is_empty());
     });
     machine(&TOOL_TEXT_GUARD, JevMode::Off.key(), &mock.base_url, |cwd| {
         forget_waiting(cwd);
@@ -359,7 +359,7 @@ fn off_asks_nothing_and_hands_back_nothing() {
         let ask = text_ask("turn-1", "read-1", "read_file", ORDER).expect("a file is read");
         assert_eq!(api::sync_bridge::run_blocking(judge.text(ask)), TextGuard::default());
         std::thread::sleep(Duration::from_millis(200));
-        assert!(read_shadow_rows::<Value>(&tool_text_guard_path(cwd)).is_empty());
+        assert!(read_shadow_rows::<Value>(&tool_text_guard_path()).is_empty());
     });
     assert!(mock.requests().is_empty());
 }
@@ -384,7 +384,7 @@ fn a_recording_command_guard_asks_beside_the_command_and_its_row_carries_no_word
             cancelled: false,
         };
         assert_eq!(api::sync_bridge::run_blocking(judge.command_ran(ran)), None, "recording adds no line");
-        let rows = rows_of(&command_guard_path(cwd), 1);
+        let rows = rows_of(&command_guard_path(), 1);
         assert_eq!(rows.len(), 1, "{rows:?}");
         let row: CommandGuardRow = serde_json::from_value(rows[0].clone()).expect("a command row");
         assert_eq!(row.asked.outcome, TOOL_GUARD_OUTCOME_ANSWERED, "{row:?}");
@@ -431,7 +431,7 @@ fn an_acting_command_guard_hands_back_its_line_after_the_command_ran() {
             Some("[zo:command-guard] Jev read this command as one that cannot be undone (0.91) — check it did what the task asked before building on it; it was not stopped.")
         );
         let row: CommandGuardRow =
-            serde_json::from_value(rows_of(&command_guard_path(cwd), 1)[0].clone()).expect("a row");
+            serde_json::from_value(rows_of(&command_guard_path(), 1)[0].clone()).expect("a row");
         assert_eq!((row.asked.route_use.as_str(), row.asked.applied, row.noted), (ROUTE_USE_APPLIED, true, true));
     });
 }
@@ -469,7 +469,7 @@ fn a_recording_text_guard_asks_beside_the_read_and_an_acting_one_fences_it() {
         let ask = text_ask("turn-1", "read-1", "read_file", ORDER).expect("a file is read");
         assert_eq!(api::sync_bridge::run_blocking(judge.text(ask)), TextGuard::default());
         let row: ToolTextGuardRow =
-            serde_json::from_value(rows_of(&tool_text_guard_path(cwd), 1)[0].clone()).expect("a text row");
+            serde_json::from_value(rows_of(&tool_text_guard_path(), 1)[0].clone()).expect("a text row");
         assert_eq!((row.verdict.as_str(), row.source.as_str(), row.tool.as_str()), ("flagged", "file", "read_file"));
         assert_eq!(
             (row.asked.route_use.as_str(), row.fenced, row.noted, row.framing.as_str()),
@@ -577,7 +577,7 @@ fn a_command_label_grades_the_verdict_and_todays_rule_on_what_became_of_it() {
         // The restore puts back what every command before it named; the
         // stop is read first. One turn settles all four.
         assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&turn)), 4);
-        let labels: Vec<CommandGuardLabelRow> = rows_of(&command_guard_path(cwd), 4)
+        let labels: Vec<CommandGuardLabelRow> = rows_of(&command_guard_path(), 4)
             .into_iter()
             .filter_map(|row| serde_json::from_value(row).ok())
             .collect();
@@ -601,26 +601,40 @@ fn a_command_label_grades_the_verdict_and_todays_rule_on_what_became_of_it() {
         }
         assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&quiet)), 1);
         let stood: CommandGuardLabelRow =
-            serde_json::from_value(rows_of(&command_guard_path(cwd), 5)[4].clone()).expect("a label");
+            serde_json::from_value(rows_of(&command_guard_path(), 5)[4].clone()).expect("a label");
         assert_eq!(
             (stood.hindsight.as_str(), stood.agreed, stood.baseline_agreed, stood.turns_later),
             ("stood", true, false, COMMAND_GUARD_REGRET_TURNS)
         );
 
-        // A turn the person stopped stops the commands it ran.
+        // A turn the person stopped settles nothing by itself (t-10916): the
+        // command it ran that nobody stopped waits, and the stopped turn is
+        // none of its turns; the call the person stopped is settled.
         {
             let mut book = command_book().lock().expect("book");
-            book.insert(cwd.to_path_buf(), vec![waiting_command(6, "shell-6", cwd, false, Verdict::Plain)]);
+            let mut stopped_call = waiting_command(7, "shell-7", cwd, false, Verdict::Plain);
+            stopped_call.cancelled = true;
+            book.insert(
+                cwd.to_path_buf(),
+                vec![waiting_command(6, "shell-6", cwd, false, Verdict::Plain), stopped_call],
+            );
         }
-        assert_eq!(note_tool_guard_turn(cwd, "turn-1", None), 1);
+        assert_eq!(note_tool_guard_turn(cwd, "turn-1", None), 1, "the stopped call alone");
         let stopped: CommandGuardLabelRow =
-            serde_json::from_value(rows_of(&command_guard_path(cwd), 6)[5].clone()).expect("a label");
-        assert_eq!((stopped.hindsight.as_str(), stopped.agreed), ("stopped", false));
+            serde_json::from_value(rows_of(&command_guard_path(), 6)[5].clone()).expect("a label");
+        assert_eq!((stopped.label.as_str(), stopped.hindsight.as_str(), stopped.agreed), ("7", "stopped", false));
+        let waiting: Vec<(u64, u32, bool)> = command_book().lock().expect("book")[cwd]
+            .iter()
+            .map(|one| (one.judged, one.turns, one.decided.is_some()))
+            .collect();
+        assert_eq!(waiting, [(6, 0, false)], "the finished command waits, its window unmoved");
     });
 }
 
-/// Hindsight on texts: the verdict and the window's fence are both marked on
-/// whether the next step carried the block out.
+/// Hindsight on texts: the verdict and the host's fence are both marked on
+/// the order a next step that carried the block out proves was there; a
+/// block the next step left alone proves nothing, and its row says so rather
+/// than marking anything (t-10916).
 #[test]
 fn a_text_label_grades_the_verdict_and_the_windows_fence_on_what_the_next_step_did() {
     machine(&TOOL_TEXT_GUARD, JevMode::Shadow.key(), "http://127.0.0.1:9", |cwd| {
@@ -665,30 +679,44 @@ fn a_text_label_grades_the_verdict_and_the_windows_fence_on_what_the_next_step_d
             said("done"),
         ];
         assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&turn)), 1, "the second waits on its verdict");
-        let label: ToolTextGuardLabelRow =
-            serde_json::from_value(rows_of(&tool_text_guard_path(cwd), 1)[0].clone()).expect("a label");
+        let label = rows_of(&tool_text_guard_path(), 1)[0].clone();
         assert_eq!(
-            (label.hindsight.as_str(), label.agreed, label.baseline_agreed, label.next_tool.as_deref()),
-            (FOLLOWED, true, Some(false), Some(SHELL_TOOL))
+            (&label["hindsight"], &label["followed"], &label["instructed"], &label["agreed"], &label["baselineAgreed"]),
+            (&Value::from(FOLLOWED), &Value::Bool(true), &Value::Bool(true), &Value::Bool(true), &Value::Bool(false)),
+            "{label}"
         );
-        assert_eq!(label.framing, HostFraming::Unfenced.word());
-        assert_eq!(label.confidence, Some(0.76));
-        // The second's verdict arrives after its turn: its label is written then.
-        settle_text(cwd, 8, Verdict::Plain, Some(0.9), false);
-        let late: ToolTextGuardLabelRow =
-            serde_json::from_value(rows_of(&tool_text_guard_path(cwd), 2)[1].clone()).expect("a label");
-        assert_eq!((late.hindsight.as_str(), late.agreed, late.baseline_agreed), (IGNORED, true, Some(false)));
-        assert_eq!(late.framing, HostFraming::Fenced.word());
+        assert_eq!(label["nextTool"], SHELL_TOOL);
+        assert_eq!(label["framing"], HostFraming::Unfenced.word());
+        assert_eq!(label["confidence"], 0.76);
+        // The second's verdict arrives after its turn: its label is written
+        // then — and marks nothing, since nothing carried the block out.
+        settle_text(cwd, &tool_text_guard_path(), 8, Verdict::Plain, Some(0.9), false);
+        let late = rows_of(&tool_text_guard_path(), 2)[1].clone();
+        assert_eq!(
+            (&late["hindsight"], &late["followed"], late.get("instructed"), late.get("agreed"), late.get("baselineAgreed")),
+            (&Value::from(IGNORED), &Value::Bool(false), None, None, None),
+            "{late}"
+        );
+        assert_eq!(late["notCompared"], IGNORED);
+        assert_eq!(late["framing"], HostFraming::Fenced.word());
     });
 }
 
 #[test]
 fn another_runtime_in_the_same_cwd_keeps_its_hindsight() {
     let temp = tempfile::tempdir().expect("temporary project");
+    // The label it settles lands in the machine's one ledger (t-10916): a
+    // config home of its own, held under the crate's environment lock like
+    // every case that writes one, so it lands in no other case's.
+    let home = tempfile::tempdir().expect("a config home");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", &home.path().to_string_lossy());
     let cwd = temp.path();
     forget_waiting(cwd);
     let mut first = waiting_command(1, "shell-1", cwd, true, Verdict::Flagged);
     first.owner = "runtime-a".into();
+    // Runtime A's own call stopped: the one fact of a stopped turn that
+    // settles a command (t-10916).
+    first.cancelled = true;
     let mut second = waiting_command(2, "shell-1", cwd, true, Verdict::Flagged);
     second.owner = "runtime-b".into();
     command_book().lock().expect("command book").insert(cwd.to_path_buf(), vec![first, second]);
@@ -748,7 +776,7 @@ fn the_command_path_pays_microseconds_for_a_recording_guard() {
                 spent.push(started.elapsed().as_micros());
             }
             // Let the recording rows land inside this machine's config home.
-            let _ = rows_of(&command_guard_path(cwd), if mode.asks() { RUNS } else { 0 });
+            let _ = rows_of(&command_guard_path(), if mode.asks() { RUNS } else { 0 });
             forget_waiting(cwd);
         });
     }
@@ -798,10 +826,10 @@ fn guard_window_that_rises(rubric: u32, first: u64, at: u64) -> Vec<Value> {
     rows
 }
 
-/// The text guard's own ledger under `cwd`, holding `rows` as its writer
-/// appends them.
-pub(super) fn guard_ledger_with(cwd: &Path, rows: &[Value]) -> PathBuf {
-    let ledger = tool_text_guard_path(cwd);
+/// The text guard's own ledger — this machine's one (t-10916) — holding
+/// `rows` as its writer appends them.
+pub(super) fn guard_ledger_with(rows: &[Value]) -> PathBuf {
+    let ledger = tool_text_guard_path();
     for row in rows {
         append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES).expect("a row");
     }
@@ -832,13 +860,13 @@ fn a_rubric_change_returns_a_risen_seat_to_recording() {
     use zerocode_core::jev::promote::ROSE;
     use zerocode_core::jev::summary::TRANSITION;
     let (today, _) = today_and_before();
-    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
+    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |_| {
         let mut rows = guard_window_that_rises(1, 1, 0);
         rows.push(serde_json::json!({"at": 5_000, (TRANSITION.canonical): ROSE}));
-        let ledger = guard_ledger_with(cwd, &rows);
-        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "version 1's rise is not today's words'");
-        refresh_standing(cwd, &TOOL_TEXT_GUARD);
-        assert!(!raised(cwd, &TEXT), "nor for the guard's cache");
+        let ledger = guard_ledger_with(&rows);
+        assert!(!guard_applies(&TOOL_TEXT_GUARD), "version 1's rise is not today's words'");
+        refresh_standing(&TOOL_TEXT_GUARD, &tool_text_guard_path());
+        assert!(!raised(&TEXT), "nor for the guard's cache");
 
         append_shadow_row(
             &ledger,
@@ -846,9 +874,9 @@ fn a_rubric_change_returns_a_risen_seat_to_recording() {
             SHADOW_LEDGER_MAX_BYTES,
         )
         .expect("a rise");
-        assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "a rise naming today's words stands");
-        refresh_standing(cwd, &TOOL_TEXT_GUARD);
-        assert!(raised(cwd, &TEXT));
+        assert!(guard_applies(&TOOL_TEXT_GUARD), "a rise naming today's words stands");
+        refresh_standing(&TOOL_TEXT_GUARD, &tool_text_guard_path());
+        assert!(raised(&TEXT));
     });
 }
 
@@ -862,18 +890,18 @@ fn todays_words_rise_again_on_their_own_sample() {
     use zerocode_core::jev::promote::{Verdict, ROSE};
     use zerocode_core::jev::summary::TRANSITION;
     let (today, before) = today_and_before();
-    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
+    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |_| {
         let mut rows = guard_window_that_rises(before, 1, 0);
         rows.push(serde_json::json!({"at": 5_000, (TRANSITION.canonical): ROSE, "rubricVersions": [before]}));
         rows.extend(guard_window_that_rises(today, 1_000, 10_000));
-        let ledger = guard_ledger_with(cwd, &rows);
+        let ledger = guard_ledger_with(&rows);
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
         assert_eq!(verdict, Some(Verdict::Rise), "today's own window and marks");
         let written = transitions_in(&ledger);
         assert_eq!(written.len(), 2, "the older words' rise, and now today's");
         assert_eq!(TRANSITION.read(&written[1]).and_then(Value::as_str), Some(ROSE));
         assert_eq!(written[1]["rubricVersions"], serde_json::json!([today]), "the transition names its rubric");
-        assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD));
+        assert!(guard_applies(&TOOL_TEXT_GUARD));
     });
 }
 
@@ -886,12 +914,12 @@ fn a_no_model_timeout_stays_in_the_current_rubrics_requests() {
     use zerocode_core::jev::promote::{Line, Verdict, FALLBACKS_THAT_END_IT, FELL, ROSE};
     use zerocode_core::jev::summary::TRANSITION;
     let (today, _) = today_and_before();
-    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
+    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |_| {
         let mut rows = guard_window_that_rises(today, 1_000, 10_000);
         rows.push(serde_json::json!({"at": 15_000, (TRANSITION.canonical): ROSE, "rubricVersions": [today]}));
         rows.extend((0..u64::from(FALLBACKS_THAT_END_IT)).map(|n| guard_request(20_000 + n, 5_000 + n, today, None, "timeout")));
-        let ledger = guard_ledger_with(cwd, &rows);
-        assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "acting, until the wire fails three times");
+        let ledger = guard_ledger_with(&rows);
+        assert!(guard_applies(&TOOL_TEXT_GUARD), "acting, until the wire fails three times");
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
         assert_eq!(
             verdict,
@@ -901,7 +929,7 @@ fn a_no_model_timeout_stays_in_the_current_rubrics_requests() {
         let written = transitions_in(&ledger);
         assert_eq!(TRANSITION.read(&written[1]).and_then(Value::as_str), Some(FELL));
         assert_eq!(written[1]["rubricVersions"], serde_json::json!([today]));
-        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD));
+        assert!(!guard_applies(&TOOL_TEXT_GUARD));
     });
 }
 
@@ -912,8 +940,8 @@ fn a_no_model_timeout_stays_in_the_current_rubrics_requests() {
 /// (t-6346 took the standing read from 35.6 ms to 2.3 ms by parsing only
 /// transition lines). Twenty repetitions each, the median and the worst
 /// printed, through the real entrypoints: `judge_seat_ledger` at a judgment
-/// boundary (the whole judge), `runtime::jev_seat_applies` (every row
-/// parsed, then the standing) and `jev_summary::raised_in` (transition lines
+/// boundary (the whole judge), the guard's own standing read
+/// (`guard_applies`, t-10916) and `jev_summary::raised_in` (transition lines
 /// only).
 #[test]
 #[ignore = "a measurement: prints what the judge and the standing reads cost on a full ledger"]
@@ -921,7 +949,7 @@ fn what_a_full_ledger_costs_the_guards_judge_and_standing() {
     use zerocode_core::jev::promote::window_wanted_for;
     const REQUESTS: u64 = 16_000;
     const REPS: usize = 20;
-    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
+    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |_| {
         let wanted = u64::try_from(window_wanted_for(&TOOL_TEXT_GUARD).expect("the guard rises")).expect("small");
         // Requests as the guard files them — the flattened `asked` columns
         // and all — every other one labelled, the count landing on the
@@ -950,7 +978,7 @@ fn what_a_full_ledger_costs_the_guards_judge_and_standing() {
                 text.push('\n');
             }
         }
-        let ledger = tool_text_guard_path(cwd);
+        let ledger = tool_text_guard_path();
         std::fs::create_dir_all(ledger.parent().expect("a parent")).expect("dir");
         std::fs::write(&ledger, &text).expect("the ledger writes");
         let rows = text.lines().count();
@@ -975,13 +1003,13 @@ fn what_a_full_ledger_costs_the_guards_judge_and_standing() {
             "a hold writes nothing"
         );
         let (applies_p50, applies_max) = timed(&|| {
-            assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD));
+            assert!(!guard_applies(&TOOL_TEXT_GUARD));
         });
         let (lines_p50, lines_max) = timed(&|| {
             assert!(!super::super::jev_summary::raised_in(&TOOL_TEXT_GUARD, &ledger));
         });
         println!(
-            "ledger {} B, {rows} rows ({total} requests) · judge_seat_ledger p50 {judge_p50} µs (max {judge_max}) · jev_seat_applies p50 {applies_p50} µs (max {applies_max}) · raised_in p50 {lines_p50} µs (max {lines_max})",
+            "ledger {} B, {rows} rows ({total} requests) · judge_seat_ledger p50 {judge_p50} µs (max {judge_max}) · guard_applies p50 {applies_p50} µs (max {applies_max}) · raised_in p50 {lines_p50} µs (max {lines_max})",
             text.len()
         );
     });
@@ -999,7 +1027,7 @@ fn what_a_full_ledger_costs_the_guards_judge_and_standing() {
 fn a_late_label_of_the_older_model_does_not_rise_the_newer_one() {
     use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Line, Verdict};
     let (today, _) = today_and_before();
-    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
+    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |_| {
         let wanted = u64::try_from(window_wanted_for(&TOOL_TEXT_GUARD).expect("the guard rises")).expect("small");
         let misses = u64::try_from(TOOL_TEXT_GUARD.negatives_wanted.expect("negatives")).expect("small");
         let marks = u64::try_from(marks_that_can_clear(&TOOL_TEXT_GUARD).expect("a width")).expect("small");
@@ -1007,7 +1035,7 @@ fn a_late_label_of_the_older_model_does_not_rise_the_newer_one() {
             (0..wanted).map(|n| guard_request(n, 1 + n, today, Some("jev-1.12.0"), TOOL_GUARD_OUTCOME_ANSWERED)).collect();
         rows.extend((0..wanted).map(|n| guard_request(1_000 + n, 1_000 + n, today, Some(ANSWERING), TOOL_GUARD_OUTCOME_ANSWERED)));
         rows.extend((0..marks).map(|n| guard_label(5_000 + n, 1 + n, n >= misses)));
-        let ledger = guard_ledger_with(cwd, &rows);
+        let ledger = guard_ledger_with(&rows);
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
         assert_eq!(
             verdict,
@@ -1018,6 +1046,6 @@ fn a_late_label_of_the_older_model_does_not_rise_the_newer_one() {
             "the late marks grade the older model's requests"
         );
         assert!(transitions_in(&ledger).is_empty(), "no rise was written on them");
-        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD));
+        assert!(!guard_applies(&TOOL_TEXT_GUARD));
     });
 }

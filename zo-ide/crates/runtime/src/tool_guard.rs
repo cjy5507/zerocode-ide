@@ -27,11 +27,13 @@ use zerocode_core::jev::door::cut;
 use zerocode_core::jev::{Cap, TOOL_TEXT_GUARD_TEXT_CHAR_CAP};
 use zerocode_core::untrusted;
 
-use crate::bash_validation::{classify_command, required_mode_for_command, CommandIntent};
 use crate::context_compression::{wire_tool_output, WireRewrite};
 use crate::patch_review::persons_words;
-use crate::permissions::PermissionMode;
 use crate::session::ConversationMessage;
+use zerocode_core::jev::tool_guard::{asks_about, task_line_of};
+// The kind of a text and what its host says of its fence are the two guards'
+// shared words (t-10916): the window asks the same seats of its panes.
+pub use zerocode_core::jev::tool_guard::{HostFraming, TextSource};
 
 /// zo's shell tool — the one tool the command guard reads, and the one whose
 /// answers the window's fence arrives in.
@@ -42,79 +44,6 @@ pub const COMMAND_GUARD_NOTE_PREFIX: &str = "[zo:command-guard]";
 
 /// What the one line an acting tool text guard adds to a result opens with.
 pub const TOOL_TEXT_GUARD_NOTE_PREFIX: &str = "[zo:tool-text-guard]";
-
-/// The kind of tool a block the text guard reads came from — the `source` its
-/// state names, so the judgment knows a web page from a file of the project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextSource {
-    /// A file the agent read (`read_file`).
-    File,
-    /// A page or a search a web tool fetched (`WebFetch`, `WebSearch`).
-    Web,
-    /// An answer the window put inside its fence before the shell tool handed
-    /// it back — the window's browser above all (`zerocode-browser read`),
-    /// and the emulator's and an issue tracker's words, which arrive the same
-    /// way.
-    Browser,
-    /// What an MCP server's tool or resource handed back.
-    Mcp,
-}
-
-impl TextSource {
-    /// The word the state and a row name this kind by.
-    #[must_use]
-    pub const fn word(self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::Web => "web",
-            Self::Browser => "browser",
-            Self::Mcp => "mcp",
-        }
-    }
-}
-
-/// What the host that hands a block to the model can say of the fence around
-/// it — the host's own word, never the block's bytes (t-6982). One fact, two
-/// readers asking two questions of it (t-7058): the acting guard skips its
-/// own fence only on [`Self::Fenced`], and today's rule is graded on the fact
-/// where there is one (`tool_guard::todays_text_rule` in the tools crate).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostFraming {
-    /// A host attested, out of band, that the block reached the model inside
-    /// its fence. Nothing in this runtime says so today: a shell answer that
-    /// looks like the window's is bytes, and bytes attest to nothing.
-    Fenced,
-    /// This runtime handed the bytes over bare: its own file, web and MCP
-    /// tools put nothing around their answers before the guard.
-    Unfenced,
-    /// The bytes may carry another host's fence — the window's browser CLI's —
-    /// which this runtime cannot verify. Nothing is known, and nothing is
-    /// guessed: no fence is skipped on it, and no rule is graded on it.
-    Unknown,
-}
-
-impl HostFraming {
-    /// The word a row carries.
-    #[must_use]
-    pub const fn word(self) -> &'static str {
-        match self {
-            Self::Fenced => "fenced",
-            Self::Unfenced => "unfenced",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    /// What this runtime can say at its own seam of a block of `source`: it
-    /// fenced none of its own tools' answers, and it cannot read another
-    /// host's fence off a shell answer's bytes.
-    #[must_use]
-    pub const fn at_this_runtimes_seam(source: TextSource) -> Self {
-        match source {
-            TextSource::File | TextSource::Web | TextSource::Mcp => Self::Unfenced,
-            TextSource::Browser => Self::Unknown,
-        }
-    }
-}
 
 /// The tools whose answers the text guard reads by name, each with the kind
 /// it names. MCP tools are read by their prefix and the window's answers by
@@ -232,9 +161,7 @@ fn guarded_shell_input(tool_name: &str, input: &str) -> Option<ShellInput> {
         return None;
     }
     let shell = serde_json::from_str::<ShellInput>(input).ok()?;
-    let proven_read_only = classify_command(&shell.command) == CommandIntent::ReadOnly
-        && required_mode_for_command(&shell.command) == PermissionMode::ReadOnly;
-    (!shell.command.trim().is_empty() && !proven_read_only).then_some(shell)
+    asks_about(&shell.command).then_some(shell)
 }
 
 /// The command and effective cwd the Bash executor will use. A server-supplied
@@ -254,13 +181,7 @@ pub fn command_with_cwd(tool_name: &str, input: &str, context_cwd: Option<&Path>
 
 /// The command a call asks the shell to run, when the guard asks about it —
 /// `None` for another tool, an input with no command, and a command today's
-/// rules prove read-only: every segment a program the intent table knows reads
-/// only ([`classify_command`]) and nothing in it that writes, redirects or
-/// escapes ([`required_mode_for_command`]). The product already knows what
-/// that one does, and a question whose answer code has is not one to pay the
-/// wire for. The read-only check alone is not the proof: it passes a program
-/// it has no row for — `terraform destroy`, `redis-cli FLUSHALL` — which is
-/// exactly the command the guard is for.
+/// rules prove read-only ([`asks_about`]).
 #[must_use]
 pub fn command_of(tool_name: &str, input: &str) -> Option<String> {
     guarded_shell_input(tool_name, input).map(|shell| shell.command)
@@ -270,12 +191,7 @@ pub fn command_of(tool_name: &str, input: &str) -> Option<String> {
 /// person's newest message — what the person said the turn is for.
 #[must_use]
 pub fn task_line(messages: &[ConversationMessage]) -> String {
-    persons_words(messages)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-        .to_string()
+    task_line_of(&persons_words(messages))
 }
 
 /// The text ask for one tool's own `output`, or `None` when the text guard

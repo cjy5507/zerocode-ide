@@ -699,13 +699,7 @@ pub fn interrupt_declared(
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(payload) else {
         return false;
     };
-    // STRICT `true`, the way Orca writes it (`=== true`): a truthy `1` or the
-    // string `"true"` is a payload we do not understand, and guessing that it
-    // means the person pressed a key would synthesize a stop nobody asked for.
-    let says_interrupt = parsed
-        .get("is_interrupt")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true);
+    let says_interrupt = call_says_interrupted(&parsed);
     match agent {
         AgentKind::Claude => !child_attributed(&parsed) && says_interrupt,
         AgentKind::Devin | AgentKind::Kimi => says_interrupt,
@@ -721,6 +715,24 @@ pub fn interrupt_declared(
             .is_some_and(|status| status != "completed"),
         _ => false,
     }
+}
+
+/// The key a payload says the person stopped the work under — a turn's end
+/// (Claude, Devin, Kimi) and a failed call's (Claude's `PostToolUseFailure`,
+/// measured on the installed 2.1.283).
+pub const INTERRUPT_FLAG: &str = "is_interrupt";
+
+/// Whether a payload says the person stopped the work it reports:
+/// [`INTERRUPT_FLAG`], STRICT `true`, the way Orca writes it (`=== true`) — a
+/// truthy `1` or the string `"true"` is a payload we do not understand, and
+/// guessing that it means the person pressed a key would synthesize a stop
+/// nobody asked for.
+#[must_use]
+pub fn call_says_interrupted(parsed: &serde_json::Value) -> bool {
+    parsed
+        .get(INTERRUPT_FLAG)
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 
 /// Whether a turn-ending payload itself says work is still running.
@@ -1077,7 +1089,7 @@ fn tool_phase(word: &str) -> Option<Phase> {
 /// The keys a vendor puts its tool's arguments under. Tried in order, first
 /// present wins — the same defensive shape [`subagent_in_payload`] uses,
 /// because the payload is the vendor's own schema and changes without notice.
-const INPUT_KEYS: &[&str] = &[
+pub const INPUT_KEYS: &[&str] = &[
     "tool_input",
     "toolInput",
     "input",
@@ -1115,6 +1127,28 @@ const TARGET_KEYS: &[&str] = &[
     "description",
     "prompt",
 ];
+
+/// The keys a vendor names a tool call's tool under, tried in order: Amp's
+/// plugin writes `tool`, everyone else `tool_name`.
+pub const TOOL_NAME_KEYS: &[&str] = &["tool_name", "toolName", "tool", "name"];
+
+/// The tool a tool event names, as the vendor spelled it.
+fn tool_named_in(parsed: &serde_json::Value) -> Option<&str> {
+    TOOL_NAME_KEYS
+        .iter()
+        .find_map(|key| parsed.get(*key).and_then(serde_json::Value::as_str))
+}
+
+/// The tool a tool event names, for a caller holding the payload — the keys
+/// of [`TOOL_NAME_KEYS`], trimmed; `None` for a blank name, which is the
+/// vendor saying nothing.
+#[must_use]
+pub fn tool_name_in_parsed(payload: &HookPayload<'_>) -> Option<String> {
+    tool_named_in(payload.tree()?)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
 
 /// One line, scrubbed and clamped, or nothing.
 ///
@@ -1252,10 +1286,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
     if let Some(phase) = tool_phase(&word) {
         // The tool's name, however the vendor spells the field — Amp's plugin
         // writes `tool`, everyone else writes `tool_name`.
-        let named = ["tool_name", "toolName", "tool", "name"]
-            .iter()
-            .find_map(|key| parsed.get(*key).and_then(serde_json::Value::as_str))
-            .and_then(Tool::named);
+        let named = tool_named_in(parsed).and_then(Tool::named);
         // Cursor's shell event names no tool at all — the EVENT is the name,
         // and its payload carries the command at the top level.
         let verb = named.or_else(|| (word == "beforeshellexecution").then_some(Tool::Bash))?;
@@ -1594,7 +1625,12 @@ pub fn model_in_parsed(payload: &HookPayload<'_>) -> Option<String> {
 /// The run id a tool event carries, however the vendor spells it.
 #[must_use]
 pub fn worker_call_id(payload: &str) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(payload).ok()?;
+    worker_call_id_in(&serde_json::from_str(payload).ok()?)
+}
+
+/// [`worker_call_id`], for a caller that already paid the parse.
+#[must_use]
+pub fn worker_call_id_in(parsed: &serde_json::Value) -> Option<String> {
     [
         "tool_use_id",
         "toolUseId",
@@ -1639,7 +1675,12 @@ fn worker_text(value: &serde_json::Value, keys: &[&str], cap: usize) -> Option<(
 /// The whole command a tool call named, for the viewer's own page.
 #[must_use]
 pub fn worker_command(payload: &str) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(payload).ok()?;
+    worker_command_in(&serde_json::from_str(payload).ok()?)
+}
+
+/// [`worker_command`], for a caller that already paid the parse.
+#[must_use]
+pub fn worker_command_in(parsed: &serde_json::Value) -> Option<String> {
     let input = INPUT_KEYS.iter().find_map(|key| parsed.get(*key))?;
     let held = input
         .get("command")
@@ -1648,21 +1689,27 @@ pub fn worker_command(payload: &str) -> Option<String> {
     worker_text(held, &["command", "cmd"], WORKER_COMMAND_CHARS).map(|(text, _)| text)
 }
 
+/// The keys a vendor keeps a finished call's answer under, tried in order.
+pub const RESULT_KEYS: &[&str] = &[
+    "tool_response",
+    "toolResponse",
+    "tool_result",
+    "toolResult",
+    "output",
+    "result",
+    "response",
+];
+
 /// The text a finished tool call brought back, and whether the cap cut it.
 #[must_use]
 pub fn worker_output(payload: &str) -> Option<(String, bool)> {
-    let parsed: serde_json::Value = serde_json::from_str(payload).ok()?;
-    let held = [
-        "tool_response",
-        "toolResponse",
-        "tool_result",
-        "toolResult",
-        "output",
-        "result",
-        "response",
-    ]
-    .iter()
-    .find_map(|key| parsed.get(*key))?;
+    worker_output_in(&serde_json::from_str(payload).ok()?)
+}
+
+/// [`worker_output`], for a caller that already paid the parse.
+#[must_use]
+pub fn worker_output_in(parsed: &serde_json::Value) -> Option<(String, bool)> {
+    let held = RESULT_KEYS.iter().find_map(|key| parsed.get(*key))?;
     worker_text(
         held,
         &["stdout", "output", "text", "content", "result", "stderr"],

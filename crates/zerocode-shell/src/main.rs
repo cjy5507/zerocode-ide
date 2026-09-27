@@ -127,6 +127,7 @@ mod orchestration;
 mod orchestration_notify;
 mod orchestration_pointer_mailbox;
 mod pane_cwd_runtime;
+mod pane_guard;
 mod pane_layout;
 mod pane_runtime;
 mod pick_runtime;

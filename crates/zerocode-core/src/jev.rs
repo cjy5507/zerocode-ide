@@ -42,6 +42,7 @@ pub mod reflex_decide;
 pub mod shard;
 pub mod summary;
 pub mod threshold;
+pub mod tool_guard;
 
 /// The object zo's settings keep every Jev switch under.
 pub const SMART_SETTINGS_KEY: &str = "smart";
@@ -3917,11 +3918,12 @@ pub const COMMAND_GUARD_REGRET_TURNS: u32 = PATCH_REVIEW_REGRET_TURNS;
 ///
 /// The `agreed` rule is hindsight, one label per answered command, written
 /// when its turn ends or its window of turns closes: the command was regretted
-/// when the person stopped it (Esc while it ran, or the turn it ran in),
-/// when a path it named outside the project changed under it, or when a later
-/// command restored a path it named and changed
-/// ([`COMMAND_GUARD_REGRET_TURNS`], t-9087); it stood otherwise. A failed
-/// command is recorded, not graded. `flagged` agreed when
+/// when the person stopped the call itself (Esc while it ran, or refused
+/// it when asked — a turn the person stopped is not by itself a regret of the
+/// commands that finished in it, t-10916), when a path it named outside the
+/// project changed under it, or when a later command restored a path it named
+/// and changed ([`COMMAND_GUARD_REGRET_TURNS`], t-9087); it stood otherwise.
+/// A failed command is recorded, not graded. `flagged` agreed when
 /// the command was regretted, `plain` when it stood. The baseline is today's
 /// rule: zo's destructive and path tables, its shared-tree table, and the
 /// Computer Use words a control that cannot be taken back carries
@@ -4018,8 +4020,9 @@ pub const TOOL_TEXT_GUARD_AGREEMENT_FLOOR_PERMILLE: u16 = COMMAND_GUARD_AGREEMEN
 /// The `agreed` rule is hindsight, one label per answered block, written when
 /// the turn ends: the block was followed when a call in the agent's next step
 /// carried out a command or wrote a file the block spelled and the person's
-/// words did not; it was not when that step made no such call. `instructed`
-/// agreed when the block was followed, `plain` when it was not. The baseline
+/// words did not — which proves the block held an order, and `instructed`
+/// agreed there, `plain` did not. A block that step left alone proves
+/// nothing either way and carries no mark (t-10916). The baseline
 /// is today's rule — the block arrived already fenced — graded on what the
 /// host itself says of the fence, and marked on no row where the host cannot
 /// say (a shell answer carrying another host's marker; t-7058).
@@ -4469,6 +4472,29 @@ pub fn fingerprint_of(words: &str) -> String {
 /// The bytes of a SHA-256 a fingerprint keeps: sixteen hex digits, enough to
 /// tell apart everything one ledger names and short enough to read.
 const FINGERPRINT_BYTES: usize = 8;
+
+/// FNV-1a over both text fields with a length-prefixed separator, so
+/// (`"ab"`, `"c"`) and (`"a"`, `"bc"`) cannot collide by concatenation. The
+/// decision shadow's rows and the label evaluation join on this same key, and
+/// the tool guards name a call by it — its turn and its id — in zo and in the
+/// window alike (t-10916).
+#[must_use]
+pub fn task_fingerprint(description: &str, prompt: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for chunk in [
+        description.len().to_le_bytes().as_slice(),
+        description.as_bytes(),
+        prompt.as_bytes(),
+    ] {
+        for byte in chunk {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    hash
+}
 
 /// The whole SHA-256, in hex, of what one request was — the seat that asked,
 /// the version of its rubric, the model it asked for, and the body's bytes as

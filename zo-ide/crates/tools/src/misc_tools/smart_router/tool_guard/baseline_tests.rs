@@ -54,7 +54,7 @@ fn a_label_marks_the_baseline_only_where_the_host_can_say_what_it_fenced() {
         let shell = text_ask("turn-1", "shell-7", SHELL_TOOL, &browser).expect("a fenced answer");
         api::sync_bridge::run_blocking(judge.text(file));
         api::sync_bridge::run_blocking(judge.text(shell));
-        let ledger = tool_text_guard_path(cwd);
+        let ledger = tool_text_guard_path();
         assert_eq!(rows_of(&ledger, 2).len(), 2, "both verdicts are in before the turn ends");
 
         let turn = vec![
@@ -79,11 +79,13 @@ fn a_label_marks_the_baseline_only_where_the_host_can_say_what_it_fenced() {
         // cannot attest to: the rule has nothing to say, and the row says so
         // by carrying no mark rather than a `true` a reader would count.
         assert_eq!(browser_label.get("baselineAgreed"), None, "{browser_label}");
+        // The ignored block proves no order either way: no mark for the
+        // verdict or the rule (t-10916).
         let agreement = agreement_since(&labels, i64::MIN);
         assert_eq!(
-            (agreement.compared, agreement.baseline_compared, agreement.baseline_agreed),
-            (2, 1, 0),
-            "the judge counts one baseline mark, and it disagreed"
+            (agreement.compared, agreement.baseline_compared, agreement.baseline_agreed, agreement.not_compared),
+            (1, 1, 0, 1),
+            "the judge counts one mark of each, and the rule's disagreed"
         );
     });
 }
@@ -113,7 +115,7 @@ fn the_live_label_and_the_replay_grade_one_rule_on_every_kind() {
     machine(&TOOL_TEXT_GUARD, JevMode::Shadow.key(), &mock.base_url, |cwd| {
         forget_waiting(cwd);
         let judge = ToolGuardJudge::at(cwd);
-        let ledger = tool_text_guard_path(cwd);
+        let ledger = tool_text_guard_path();
         for (kind, rule) in MANIFEST {
             let case = built.iter().find(|case| case.id == kind).expect("the replay builds every kind");
             let (tool, output) = (super::replay::tool_of(kind), case.raw.clone().expect("a text case's output"));
@@ -130,10 +132,11 @@ fn the_live_label_and_the_replay_grade_one_rule_on_every_kind() {
                 assert_eq!(label["label"], request["judged"].to_string(), "{turn_id}: the label grades its own request");
                 assert_eq!(label["hindsight"], if followed { FOLLOWED } else { IGNORED }, "{turn_id}");
                 // Both readers, side by side: the replay's rule on the case,
-                // and the live mark on the row.
+                // and the live mark on the row — marked where the next step
+                // proved an order, and nowhere else (t-10916).
                 assert_eq!(
                     (serde_json::json!(case.rule_flags), label.get("baselineAgreed").cloned()),
-                    (serde_json::json!(rule), rule.map(|flags| Value::Bool(flags == followed))),
+                    (serde_json::json!(rule), rule.filter(|_| followed).map(|flags| Value::Bool(flags == followed))),
                     "{turn_id}: {label}"
                 );
             }
@@ -142,34 +145,46 @@ fn the_live_label_and_the_replay_grade_one_rule_on_every_kind() {
 }
 
 /// A series of blocks read through the real seat under `tool`, each handed
-/// back as `output`, then one turn whose next steps carried out all but the
-/// first `misses` of them — labeled at the turn's end, judged there on the
-/// guard's own ledger. Enough blocks for a window the answer floor can be
+/// back as `output`, then one turn whose next steps carried out every one —
+/// labeled at the turn's end, judged there on the guard's own ledger. The
+/// guard's misses are its own: the wire answers plain for the first
+/// `misses` blocks ([`missing_the_first`]) — a block the next step leaves
+/// alone marks nothing (t-10916). Enough blocks for a window the answer floor can be
 /// cleared on and marks the agreement floor can be cleared on, landing on a
 /// judgment's boundary. One block at a time, so each answer's time is one
 /// round trip and not a queue behind the others.
-fn a_graded_series(cwd: &Path, tool: &str, output: &str, misses: usize) -> PathBuf {
+fn a_graded_series(cwd: &Path, tool: &str, output: &str) -> PathBuf {
     let wanted = window_wanted_for(&TOOL_TEXT_GUARD).expect("the text guard rises");
     let marks = marks_that_can_clear(&TOOL_TEXT_GUARD).expect("a width the line can be cleared on");
     // The first judgment boundary at or past the marks the line needs.
     let blocks = wanted + marks.saturating_sub(wanted).div_ceil(JUDGED_EVERY_ROWS) * JUDGED_EVERY_ROWS;
     let judge = ToolGuardJudge::at(cwd);
-    let ledger = tool_text_guard_path(cwd);
+    let ledger = tool_text_guard_path();
     let mut turn = vec![user("summarize the notes")];
     for n in 0..blocks {
         let id = format!("read-{n}");
         api::sync_bridge::run_blocking(judge.text(text_ask("turn-1", &id, tool, output).expect("a text the guard reads")));
         assert_eq!(rows_of(&ledger, n + 1).len(), n + 1, "block {n}'s request");
         turn.extend([call(&id, tool, &serde_json::json!({})), result(&id, tool, output)]);
-        if n < misses {
-            turn.push(said("noted"));
-        } else {
-            let run = format!("shell-{n}");
-            turn.extend([call(&run, SHELL_TOOL, &curl()), result(&run, SHELL_TOOL, "{}")]);
-        }
+        let run = format!("shell-{n}");
+        turn.extend([call(&run, SHELL_TOOL, &curl()), result(&run, SHELL_TOOL, "{}")]);
     }
     assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&turn)), blocks);
     ledger
+}
+
+/// A wire that answers plain — no order to the agent — for the first
+/// `misses` blocks it is asked about, and reads an order in every one after.
+fn missing_the_first(misses: usize) -> Mock {
+    let asked = std::sync::atomic::AtomicUsize::new(0);
+    Mock::answering(move |_| {
+        let yes = if asked.fetch_add(1, Ordering::SeqCst) < misses { 0.08 } else { 0.88 };
+        (200, serde_json::json!({
+            "model": "jev-test",
+            "answers": {INSTRUCTED: {"type": "noul", "noul": yes}},
+            "usage": {"input_tokens": 212, "output_tokens": 2}
+        }).to_string())
+    })
 }
 
 /// A series the host cannot vouch for does not rise on marks it never had:
@@ -179,12 +194,12 @@ fn a_graded_series(cwd: &Path, tool: &str, output: &str, misses: usize) -> PathB
 /// runtime's standing reader nor the guard's cached `auto` acts.
 #[test]
 fn a_series_the_host_cannot_vouch_for_does_not_rise_on_marks_it_never_had() {
-    let mock = Mock::serving(200, addresses_the_agent());
+    let misses = TOOL_TEXT_GUARD.negatives_wanted.expect("the guard's negatives");
+    let mock = missing_the_first(misses);
     machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), &mock.base_url, |cwd| {
         forget_waiting(cwd);
-        let misses = TOOL_TEXT_GUARD.negatives_wanted.expect("the guard's negatives");
         let browser = zerocode_core::untrusted::fence("browser-3", ORDER, usize::MAX);
-        let ledger = a_graded_series(cwd, SHELL_TOOL, &browser, misses);
+        let ledger = a_graded_series(cwd, SHELL_TOOL, &browser);
         assert_eq!(transitions_in(&ledger), Vec::<Value>::new(), "no rise on a rule graded on nothing");
         let rows: Vec<Value> = read_shadow_rows(&ledger);
         let judged = promote::judge_seat(&TOOL_TEXT_GUARD, &rows).expect("the guard is judged");
@@ -194,9 +209,9 @@ fn a_series_the_host_cannot_vouch_for_does_not_rise_on_marks_it_never_had() {
             judged.verdict,
             judged.agreement
         );
-        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "the runtime's reader: recording");
-        refresh_standing(cwd, &TOOL_TEXT_GUARD);
-        assert!(!raised(cwd, &TEXT), "the guard's cached auto: recording");
+        assert!(!guard_applies(&TOOL_TEXT_GUARD), "the ledger's standing: recording");
+        refresh_standing(&TOOL_TEXT_GUARD, &tool_text_guard_path());
+        assert!(!raised(&TEXT), "the guard's cached auto: recording");
         forget_waiting(cwd);
     });
 }
@@ -207,16 +222,16 @@ fn a_series_the_host_cannot_vouch_for_does_not_rise_on_marks_it_never_had() {
 /// acts. The hold above is the missing marks, not a seat that can never rise.
 #[test]
 fn a_series_graded_on_the_hosts_word_rises_on_its_own_marks() {
-    let mock = Mock::serving(200, addresses_the_agent());
+    let misses = TOOL_TEXT_GUARD.negatives_wanted.expect("the guard's negatives");
+    let mock = missing_the_first(misses);
     machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), &mock.base_url, |cwd| {
         forget_waiting(cwd);
-        let misses = TOOL_TEXT_GUARD.negatives_wanted.expect("the guard's negatives");
-        let ledger = a_graded_series(cwd, "read_file", ORDER, misses);
+        let ledger = a_graded_series(cwd, "read_file", ORDER);
         let rose: Vec<Value> = transitions_in(&ledger).into_iter().filter(|row| TRANSITION.read(row) == Some(&Value::from(promote::ROSE))).collect();
         assert!(!rose.is_empty(), "{:?}", read_shadow_rows::<Value>(&ledger).last());
-        assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "the runtime's reader: applying");
-        refresh_standing(cwd, &TOOL_TEXT_GUARD);
-        assert!(raised(cwd, &TEXT), "the guard's cached auto: acting");
+        assert!(guard_applies(&TOOL_TEXT_GUARD), "the ledger's standing: applying");
+        refresh_standing(&TOOL_TEXT_GUARD, &tool_text_guard_path());
+        assert!(raised(&TEXT), "the guard's cached auto: acting");
         forget_waiting(cwd);
     });
 }
@@ -236,7 +251,7 @@ fn a_series_graded_on_the_hosts_word_rises_on_its_own_marks() {
 #[test]
 fn a_thick_series_of_the_words_before_does_not_judge_a_thin_window_of_todays() {
     let (today, before) = today_and_before();
-    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
+    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |_| {
         let wanted = u64::try_from(window_wanted_for(&TOOL_TEXT_GUARD).expect("the guard rises")).expect("small");
         let marks = u64::try_from(marks_that_can_clear(&TOOL_TEXT_GUARD).expect("a width")).expect("small");
         let misses = u64::try_from(TOOL_TEXT_GUARD.negatives_wanted.expect("negatives")).expect("small");
@@ -256,13 +271,13 @@ fn a_thick_series_of_the_words_before_does_not_judge_a_thin_window_of_todays() {
             })
         }));
         rows.extend((0..thin).map(|n| answered(10_000 + n, 1_000 + n, today)));
-        let ledger = guard_ledger_with(cwd, &rows);
+        let ledger = guard_ledger_with(&rows);
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
         assert_eq!(verdict, None, "{thin} requests of today's words are not a window of {wanted}: nothing is judged");
         assert!(transitions_in(&ledger).is_empty(), "no rise is written on the evidence of the words before");
-        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "the runtime's reader: recording");
-        refresh_standing(cwd, &TOOL_TEXT_GUARD);
-        assert!(!raised(cwd, &TEXT), "the guard's cached auto: recording");
+        assert!(!guard_applies(&TOOL_TEXT_GUARD), "the ledger's standing: recording");
+        refresh_standing(&TOOL_TEXT_GUARD, &tool_text_guard_path());
+        assert!(!raised(&TEXT), "the guard's cached auto: recording");
     });
 }
 
@@ -346,8 +361,9 @@ fn waiting_texts(cwd: &Path) -> Vec<(String, bool)> {
 /// — with both guards recording. A's text verdict comes back late, after A's
 /// turn was stopped; A's stopped turn's messages turn up after it too. None
 /// of it moves B: B's block waits and is labeled once, at B's end, by B's
-/// fingerprint; B's command stands its own turns. A's stopped command is
-/// labeled stopped once; A's next turn is its own. Every command is filed
+/// fingerprint; B's command stands its own turns. A's stopped turn labels
+/// nothing of A's — its command had finished, and a stopped turn is no
+/// regret of it (t-10916) — and A's next turn is its own. Every command is filed
 /// under the folder the Bash tool would run it in — no executor folder, so
 /// the process's.
 #[test]
@@ -371,7 +387,7 @@ fn two_runtime_owners_in_one_cwd_and_one_tool_use_id_keep_their_own_hindsight() 
     machine(&TOOL_TEXT_GUARD, JevMode::Shadow.key(), &mock.base_url, |cwd| {
         also_asking(&COMMAND_GUARD, JevMode::Shadow);
         forget_waiting(cwd);
-        let (texts, commands) = (tool_text_guard_path(cwd), command_guard_path(cwd));
+        let (texts, commands) = (tool_text_guard_path(), command_guard_path());
         let mut a = owner_in(cwd, &a_notes);
         let mut b = owner_in(cwd, &b_notes);
         let (a_id, b_id) = (a.session().session_id.clone(), b.session().session_id.clone());
@@ -394,25 +410,26 @@ fn two_runtime_owners_in_one_cwd_and_one_tool_use_id_keep_their_own_hindsight() 
             "no executor folder: the Bash tool runs where the process stands"
         );
 
-        // A is stopped: its command is labeled stopped; its block will never
-        // be. B's block and command wait untouched.
-        assert_eq!(note_tool_guard_turn(cwd, &a_id, None), 1, "A's command, stopped");
+        // A is stopped: nothing of A's is labeled — its command had finished,
+        // and the stopped turn is none of its turns; its block will never be.
+        // B's block and command wait untouched.
+        assert_eq!(note_tool_guard_turn(cwd, &a_id, None), 0, "a stopped turn labels nothing by itself");
         assert_eq!(waiting_texts(cwd), [(b_id.clone(), true)]);
-        assert_eq!(waiting_commands(cwd), [(b_id.clone(), 0)]);
+        assert_eq!(waiting_commands(cwd), [(a_id.clone(), 0), (b_id.clone(), 0)]);
         // A's verdict lands late: a request row, and nothing else moves.
         let text_rows = rows_of(&texts, 2);
         let a_judged = request_of(&text_rows, &a_first)["judged"].clone();
         assert_ne!(a_judged, b_judged, "one call id, two owners, two fingerprints");
         assert_eq!(waiting_texts(cwd), [(b_id.clone(), true)]);
         // A's stopped turn's messages, turning up after all, label nothing
-        // and stand none of B's turns.
+        // and stand none of B's turns — A's own command stands one.
         assert_eq!(note_tool_guard_turn(cwd, &a_id, Some(&a.session().messages[a_from..])), 0);
-        assert_eq!(waiting_commands(cwd), [(b_id.clone(), 0)]);
+        assert_eq!(waiting_commands(cwd), [(a_id.clone(), 1), (b_id.clone(), 0)]);
 
         // B's end: its block, once, by B's fingerprint; its command stood a turn.
         assert_eq!(note_tool_guard_turn(cwd, &b_id, Some(&b.session().messages[b_from..])), 1);
         assert!(waiting_texts(cwd).is_empty());
-        assert_eq!(waiting_commands(cwd), [(b_id.clone(), 1)]);
+        assert_eq!(waiting_commands(cwd), [(a_id.clone(), 1), (b_id.clone(), 1)]);
 
         // A's next turn is its own: its block labeled once, its command one turn.
         let a_from = a.session().messages.len();
@@ -420,19 +437,19 @@ fn two_runtime_owners_in_one_cwd_and_one_tool_use_id_keep_their_own_hindsight() 
         let text_rows = rows_of(&texts, 4);
         let a_again = request_of(&text_rows, a.attempt())["judged"].clone();
         assert!(![&a_judged, &b_judged].contains(&&a_again));
-        let _ = rows_of(&commands, 4);
+        let _ = rows_of(&commands, 3);
         assert_eq!(note_tool_guard_turn(cwd, &a_id, Some(&a.session().messages[a_from..])), 1);
-        assert_eq!(waiting_commands(cwd), [(b_id.clone(), 1), (a_id.clone(), 1)]);
+        assert_eq!(waiting_commands(cwd), [(a_id.clone(), 2), (b_id.clone(), 1), (a_id.clone(), 1)]);
 
         let text_labels = labels_in(&rows_of(&texts, 5));
         let graded: Vec<&Value> = text_labels.iter().map(|label| &label["label"]).collect();
         assert_eq!(graded, [&Value::from(b_judged.to_string()), &Value::from(a_again.to_string())], "{text_labels:?}");
         assert!(text_labels.iter().all(|label| label["hindsight"] == FOLLOWED));
-        let command_labels = labels_in(&rows_of(&commands, 4));
-        assert_eq!(command_labels.len(), 1, "{command_labels:?}");
-        assert_eq!(command_labels[0]["hindsight"], CommandHindsight::Stopped.word());
+        assert!(labels_in(&rows_of(&commands, 3)).is_empty(), "no command's window has closed");
         let a_command = command_rows.iter().find(|row| row["attempt"] == a_first.as_str()).expect("A's command row");
-        assert_eq!(command_labels[0]["label"], a_command["judged"].to_string());
+        assert!(command_book().lock().expect("the command book")[cwd]
+            .iter()
+            .any(|one| a_command["judged"] == one.judged));
         forget_waiting(cwd);
     });
 }
@@ -482,12 +499,14 @@ mod host_word {
 
     /// Today's rule, per word of the host's, against either hindsight: what
     /// the rule says of the block and the mark the label files — the table
-    /// the t-7058 report prints beside version 2's constant-plain mark.
+    /// the t-7058 report prints beside version 2's constant-plain mark. A
+    /// block the next step left alone proves no order either way and is
+    /// marked on nothing, whatever the host said (t-10916).
     const MANIFEST: [(HostFraming, Option<bool>, bool, Option<bool>); 6] = [
         (HostFraming::Fenced, Some(true), true, Some(true)),
-        (HostFraming::Fenced, Some(true), false, Some(false)),
+        (HostFraming::Fenced, Some(true), false, None),
         (HostFraming::Unfenced, Some(false), true, Some(false)),
-        (HostFraming::Unfenced, Some(false), false, Some(true)),
+        (HostFraming::Unfenced, Some(false), false, None),
         (HostFraming::Unknown, None, true, None),
         (HostFraming::Unknown, None, false, None),
     ];
@@ -515,8 +534,8 @@ mod host_word {
                     }
                 })
                 .collect();
-            assert_eq!(write_text_labels(cwd, done), MANIFEST.len());
-            let labels: Vec<ToolTextGuardLabelRow> = read_shadow_rows(&tool_text_guard_path(cwd));
+            assert_eq!(write_text_labels(&tool_text_guard_path(), done), MANIFEST.len());
+            let labels: Vec<ToolTextGuardLabelRow> = read_shadow_rows(&tool_text_guard_path());
             assert_eq!(labels.len(), MANIFEST.len());
             for ((framing, _, followed, mark), label) in MANIFEST.iter().zip(&labels) {
                 assert_eq!(label.baseline_agreed, *mark, "{framing:?} followed={followed}");

@@ -60,6 +60,12 @@ impl<'a> HookPayload<'a> {
     pub fn tree_or_null(&self) -> &serde_json::Value {
         self.tree().unwrap_or(&NULL)
     }
+
+    /// The payload as it came, for a reader that takes the text.
+    #[must_use]
+    pub fn text(&self) -> &'a str {
+        self.text
+    }
 }
 
 #[cfg(test)]
