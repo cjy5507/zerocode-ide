@@ -611,7 +611,7 @@ pub const HARNESS_FILE: &str = "harness.json";
 /// Overridden from `settings.json` under [`SETTINGS_LIMITS_KEY`], each key a
 /// millisecond count: `idleBudgetMs`, `parentLivenessGraceMs`,
 /// `parentLivenessPollMs`, `resultPollMs`, `channelTimeoutMs`,
-/// `paneQuietMs`, `paneBudgetMs`, `closeGraceMs`.
+/// `paneQuietMs`, `paneAskPollMs`, `paneBudgetMs`, `closeGraceMs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// How long a child waits for its parent's next word before it closes.
@@ -627,8 +627,12 @@ pub struct Limits {
     pub channel_timeout: Duration,
     /// How long a parent waits for one pane turn to show progress — a line
     /// more on the child's transcript — before it ends the pane. Time spent
-    /// working does not count against it; time spent stuck does (t-11458).
+    /// working does not count against it, nor does time spent waiting on a
+    /// person; time spent stuck does (t-11458).
     pub pane_quiet: Duration,
+    /// While a pane child is quiet, how often its parent asks it whether it
+    /// is waiting on a person (the open questions on its `session.list`).
+    pub pane_ask_poll: Duration,
     /// A wall-clock limit on one pane turn, however the child is doing, when
     /// the person's settings name one (`paneBudgetMs` — the key that meant
     /// this before `paneQuietMs` existed, so a setting written then keeps its
@@ -648,6 +652,7 @@ impl Default for Limits {
             result_poll: Duration::from_millis(250),
             channel_timeout: Duration::from_secs(3),
             pane_quiet: Duration::from_secs(60 * 60),
+            pane_ask_poll: Duration::from_secs(10),
             pane_wall: None,
             close_grace: Duration::from_secs(2),
         }
@@ -677,6 +682,7 @@ impl Limits {
             ("resultPollMs", &mut limits.result_poll),
             ("channelTimeoutMs", &mut limits.channel_timeout),
             ("paneQuietMs", &mut limits.pane_quiet),
+            ("paneAskPollMs", &mut limits.pane_ask_poll),
             ("closeGraceMs", &mut limits.close_grace),
         ] {
             if let Some(value) = millis(key) {
@@ -692,9 +698,12 @@ impl Limits {
     /// turn runs as long as the child keeps making progress.
     #[must_use]
     pub fn pane_budget(&self, named: Option<Duration>) -> PaneBudget {
-        named
-            .or(self.pane_wall)
-            .map_or(PaneBudget::Quiet(self.pane_quiet), PaneBudget::Wall)
+        let quiet = PaneBudget::Quiet {
+            limit: self.pane_quiet,
+            ask_every: self.pane_ask_poll,
+            ask_timeout: self.channel_timeout,
+        };
+        named.or(self.pane_wall).map_or(quiet, PaneBudget::Wall)
     }
 
     /// The table for this process: `settings.json` in the config home.
@@ -710,9 +719,17 @@ impl Limits {
 /// What ends a parent's wait for one pane turn when no answer comes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneBudget {
-    /// The child showed no progress — its transcript did not grow — for this
-    /// long. How long it has been working in all does not matter.
-    Quiet(Duration),
+    /// The child showed no progress — its transcript did not grow — for
+    /// `limit`, and was not waiting on a person over that time: every
+    /// `ask_every` of quiet the parent asks the child's channel whether a
+    /// question to a person stands open (bounded by `ask_timeout`), and one
+    /// that does counts as progress. How long it has been working in all does
+    /// not matter.
+    Quiet {
+        limit: Duration,
+        ask_every: Duration,
+        ask_timeout: Duration,
+    },
     /// This long has passed since the turn began, working or not: a limit
     /// somebody named.
     Wall(Duration),
@@ -724,9 +741,10 @@ impl PaneBudget {
     #[must_use]
     pub fn ended_because(self) -> String {
         match self {
-            Self::Quiet(quiet) => format!(
-                "the sub-agent showed no progress for {} (its transcript did not grow), so its pane was closed",
-                core_types::retry_signal::human_reset_wait(quiet)
+            Self::Quiet { limit, .. } => format!(
+                "the sub-agent showed no progress for {} (its transcript did not grow and it was not \
+                 waiting on anyone), so its pane was closed",
+                core_types::retry_signal::human_reset_wait(limit)
             ),
             Self::Wall(limit) => format!(
                 "the sub-agent's pane wrote no result within its limit of {}, so its pane was closed",
@@ -756,6 +774,12 @@ pub mod channel_method {
     pub const MCP_CALL: &str = "mcp.call";
 }
 
+/// The field of a child's `session.list` entry that counts its questions to a
+/// person standing open — permission prompts and questions it asked, waiting
+/// for an answer from the pane or the window. The parent reads it to tell a
+/// child waiting on a person from one that stopped (t-11458).
+pub const LIST_ASKING: &str = "asking";
+
 /// The child's channel file inside its directory — the discovery record
 /// (address, token, session id) copied where the parent can find it without
 /// knowing the child's pid.
@@ -773,6 +797,16 @@ pub fn named_transcript(directory: &Path) -> Option<PathBuf> {
     let named = std::fs::read_to_string(directory.join(TRANSCRIPT_FILE)).ok()?;
     let named = named.trim();
     (!named.is_empty()).then(|| PathBuf::from(named))
+}
+
+/// Whether the child in `directory` has a question to a person open now, by
+/// its channel. A child with no channel yet, or one that does not answer, is
+/// not waiting on anybody.
+fn waits_on_a_person(directory: &Path, timeout: Duration) -> bool {
+    ChannelCoordinates::read(&directory.join(CHANNEL_FILE))
+        .ok()
+        .and_then(|coordinates| coordinates.open_questions(timeout))
+        .is_some_and(|open| open > 0)
 }
 
 /// What the parent compares to see a child's work move: its transcript's
@@ -922,6 +956,15 @@ impl ChannelCoordinates {
             }
             return Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null));
         }
+    }
+
+    /// How many questions to a person the child has open, by its
+    /// `session.list` answer ([`LIST_ASKING`]). None when nobody answered or
+    /// the answer does not say — a child from before the field.
+    #[must_use]
+    pub fn open_questions(&self, timeout: Duration) -> Option<u64> {
+        let listed = self.call(channel_method::LIST, serde_json::json!({}), timeout).ok()?;
+        listed.get(0)?.get(LIST_ASKING)?.as_u64()
     }
 
     /// Does a process still answer here? Any answer — even a refusal — is a
@@ -1607,8 +1650,9 @@ pub fn wait_for_result(
 /// killed after it, so a child that ignored the door is not left standing.
 ///
 /// A [`PaneBudget::Quiet`] budget is counted from the last time the child's
-/// transcript was seen to change, or from the start of the wait before it
-/// first does — a transcript left from an earlier turn is not progress.
+/// transcript was seen to change or the child was seen waiting on a person,
+/// or from the start of the wait before either — a transcript left from an
+/// earlier turn is not progress.
 #[allow(clippy::too_many_arguments)] // one wait, one table of ways it ends
 pub fn wait_for_turn_result(
     tmux: &Tmux,
@@ -1637,6 +1681,7 @@ pub fn wait_for_turn_result_on(
     let started = clock.now();
     let mut seen = transcript_stamp(directory);
     let mut progressed = started;
+    let mut asked = started;
     let answered = || {
         TeammateResult::read_turn(directory, turn)
             .map(|result| PaneOutcome::Finished(Box::new(result)))
@@ -1656,11 +1701,16 @@ pub fn wait_for_turn_result_on(
         let now = clock.now();
         let (counted, limit) = match budget {
             PaneBudget::Wall(limit) => (now.duration_since(started), limit),
-            PaneBudget::Quiet(limit) => {
+            PaneBudget::Quiet { limit, ask_every, ask_timeout } => {
                 let stamp = transcript_stamp(directory);
                 if stamp.is_some() && stamp != seen {
                     seen = stamp;
                     progressed = now;
+                } else if now.duration_since(asked) >= ask_every {
+                    asked = now;
+                    if waits_on_a_person(directory, ask_timeout) {
+                        progressed = now;
+                    }
                 }
                 (now.duration_since(progressed), limit)
             }
@@ -2042,15 +2092,20 @@ mod tests {
         assert_eq!(limits.pane_quiet, defaults.pane_quiet);
         // Nobody named a wall clock: the turn runs while the child works.
         assert_eq!(limits.pane_wall, None);
-        assert_eq!(limits.pane_budget(None), PaneBudget::Quiet(defaults.pane_quiet));
+        assert!(
+            matches!(limits.pane_budget(None), PaneBudget::Quiet { limit, .. } if limit == defaults.pane_quiet),
+            "{:?}",
+            limits.pane_budget(None)
+        );
 
         // `paneBudgetMs` keeps the meaning it had when it was written — a
         // wall clock — and `paneQuietMs` is the progress budget.
         let settings = serde_json::json!({
-            "subagents": { "paneBudgetMs": 7_200_000, "paneQuietMs": 900_000 }
+            "subagents": { "paneBudgetMs": 7_200_000, "paneQuietMs": 900_000, "paneAskPollMs": 4_000 }
         });
         let limits = Limits::from_settings(Some(&settings));
         assert_eq!(limits.pane_quiet, Duration::from_millis(900_000));
+        assert_eq!(limits.pane_ask_poll, Duration::from_millis(4_000));
         assert_eq!(limits.pane_budget(None), PaneBudget::Wall(Duration::from_millis(7_200_000)));
         // A caller's own limit is the nearer promise.
         assert_eq!(
@@ -2566,7 +2621,11 @@ mod tests {
 
     /// The default budget with its quiet limit set to `limit`.
     fn quiet_budget(limit: Duration) -> PaneBudget {
-        PaneBudget::Quiet(limit)
+        Limits {
+            pane_quiet: limit,
+            ..Limits::default()
+        }
+        .pane_budget(None)
     }
 
     /// A child's channel that answers every `session.list` the way a child
@@ -2611,7 +2670,7 @@ mod tests {
                         "result": [{
                             "id": "child-session",
                             "messages": 3,
-                            "asking": serving.load(Ordering::SeqCst),
+                            LIST_ASKING: serving.load(Ordering::SeqCst),
                         }],
                     });
                     let mut writer = stream;
