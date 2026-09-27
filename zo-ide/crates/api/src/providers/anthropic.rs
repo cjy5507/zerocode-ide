@@ -248,7 +248,7 @@ macro_rules! claude_sign_in_again {
     };
 }
 
-/// [`claude_sign_in_again!`] for callers outside this crate.
+/// `claude_sign_in_again!` for callers outside this crate.
 pub const CLAUDE_SIGN_IN_AGAIN: &str = claude_sign_in_again!();
 
 /// What a request is refused with when no Claude login can be found — one

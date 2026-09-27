@@ -154,7 +154,7 @@ pub fn load_oauth_credentials() -> io::Result<Option<OAuthTokenSet>> {
     load_token_set(OAUTH_KEY)
 }
 
-/// zo's saved Claude login, and whether zo minted it ([`MINTED_BY_ZO`]).
+/// zo's saved Claude login, and whether zo minted it (`MINTED_BY_ZO`).
 pub fn load_oauth_login() -> io::Result<Option<(OAuthTokenSet, bool)>> {
     let root = read_credentials_root(&credentials_path()?)?;
     match root.get(OAUTH_KEY) {
