@@ -47,7 +47,7 @@ use zerocode_core::jev::{JevMode, JevUse, ROUTE_USE_APPLIED, ROUTE_USE_FALLBACK,
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::{remember_bounded, task_fingerprint};
 use super::settings::{skill_search_mode_from, skill_suggestion_mode_from};
-use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
+use super::shadow_ledger::{append_shadow_row, judge_seat_ledger, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 
 /// The skill search's ledger file — the Jev use table's name for this seat.
 pub const SKILL_SEARCH_FILE: &str = SKILLS.ledger;
@@ -243,6 +243,14 @@ impl SkillRequestName {
     }
 }
 
+/// Both questions judge their own evidence after a request or a late label
+/// lands. Merely reading a standing cannot create the transition it needs.
+fn record_row(seat: &JevUse, ledger: &Path, row: &impl Serialize) {
+    if append_shadow_row(ledger, row, SHADOW_LEDGER_MAX_BYTES).is_ok() {
+        let _ = judge_seat_ledger(seat, ledger, super::decision_shadow::now_ms());
+    }
+}
+
 fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -409,7 +417,7 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
         }
     };
     row.route_use.clone_from(&searched.route_use);
-    let _ = append_shadow_row(&skill_search_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+    record_row(&SKILLS, &skill_search_path(cwd), &row);
     searched
 }
 
@@ -467,7 +475,7 @@ pub fn note_loaded_skill(cwd: &Path, loaded: &str) {
         return;
     };
     let row = label_row(loaded, &named, request);
-    let _ = append_shadow_row(&skill_search_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+    record_row(&SKILLS, &skill_search_path(cwd), &row);
 }
 
 /// The mark itself: whether the skill the turn loaded was one the judgment
@@ -575,7 +583,7 @@ fn finish_turn_suggestion(cwd: &Path, turn: &[ConversationMessage]) {
     }
     let pending = turn_pending().lock().ok().and_then(|mut rows| rows.remove(cwd));
     if let Some(row) = pending.and_then(|pending| judged_label(pending, turn)) {
-        let _ = append_shadow_row(&skill_suggestion_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+        record_row(&SKILL_SUGGESTION, &skill_suggestion_path(cwd), &row);
     }
 }
 
@@ -748,13 +756,13 @@ async fn judge_suggestion(
     let Some(client) = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client) else {
         row.outcome = Refused::NoKey.token().into();
         telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, Refused::NoKey.token());
-        let _ = append_shadow_row(&skill_suggestion_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+        record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
         return None;
     };
     let started = Instant::now();
     let wide = ask_wide(&door, &client, &task, &candidates, acting, &mut row).await;
     let Some(wide) = wide else {
-        let _ = append_shadow_row(&skill_suggestion_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+        record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
         return None;
     };
     row.gate_score = Some(wide.gate);
@@ -767,7 +775,7 @@ async fn judge_suggestion(
             Err(reason) => {
                 row.outcome = SystemOneFailure::Schema.ledger_token();
                 row.rejected = Some(reason);
-                let _ = append_shadow_row(&skill_suggestion_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+                record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
                 return None;
             }
         }
@@ -776,7 +784,7 @@ async fn judge_suggestion(
     telemetry::attest_fired(telemetry::HarnessFeature::SkillSearch);
     row.chosen = winner.iter().map(Chosen::from).collect();
     row.route_use = if acting { ROUTE_USE_APPLIED.into() } else { mode.key().into() };
-    let _ = append_shadow_row(&skill_suggestion_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+    record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
     // The absence of a skill is a prediction too. It stays until this turn
     // ends so a no-load turn contributes a negative label.
     if let Some(generation) = generation {

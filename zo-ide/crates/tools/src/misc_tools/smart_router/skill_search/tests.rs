@@ -516,6 +516,54 @@ fn ledger_with(path: &Path, rows: &[Value]) {
     }
 }
 
+#[test]
+fn a_search_label_that_completes_the_evidence_records_its_rise() {
+    let root = tempfile::tempdir().expect("a temp root");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
+    let cwd = root.path().canonicalize().expect("a canonical root");
+    let mut rows = skills_window_that_rises(&SKILLS, SKILLS.rubric_version, 1, 0);
+    let last = rows.pop().expect("the last comparison");
+    let asked = rows.iter().find(|row| row["at"] == last["requestAt"]).expect("the request");
+    let request = SkillRequestName {
+        task: asked["task"].as_u64().expect("task"),
+        catalog: asked["catalog"].as_u64().expect("catalog"),
+        at: asked["at"].as_u64().expect("at"),
+    };
+    ledger_with(&skill_search_path(&cwd), &rows);
+    assert!(!runtime::jev_seat_applies(&cwd, &SKILLS));
+
+    note_search_answer(&cwd, &[String::from("docx")], request);
+    note_loaded_skill(&cwd, "docx");
+
+    assert!(runtime::jev_seat_applies(&cwd, &SKILLS), "the writer must judge the evidence it completed");
+    assert!(!runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION));
+}
+
+#[test]
+fn a_suggestion_label_that_completes_the_evidence_records_its_own_rise() {
+    let root = tempfile::tempdir().expect("a temp root");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
+    let cwd = root.path().canonicalize().expect("a canonical root");
+    let mut rows = skills_window_that_rises(&SKILL_SUGGESTION, SKILL_SUGGESTION.rubric_version, 1, 0);
+    let last = rows.pop().expect("the last comparison");
+    let asked = rows.iter().find(|row| row["at"] == last["requestAt"]).expect("the request");
+    let request = SkillRequestName {
+        task: asked["task"].as_u64().expect("task"),
+        catalog: asked["catalog"].as_u64().expect("catalog"),
+        at: asked["at"].as_u64().expect("at"),
+    };
+    ledger_with(&skill_suggestion_path(&cwd), &rows);
+    assert!(!runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION));
+
+    let generation = start_pending_suggestion(&cwd, false).expect("turn");
+    mark_pending_suggestion_judged(&cwd, generation, Some("docx"), request);
+    note_loaded_skill(&cwd, "docx");
+    finish_turn_suggestion(&cwd, &[]);
+
+    assert!(runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION), "the writer must judge its own seat");
+    assert!(!runtime::jev_seat_applies(&cwd, &SKILLS));
+}
+
 /// A rise decided on two questions at once stands for neither (t-6877
 /// round 2, astra R3): the search's ledger holds the search's full window
 /// and marks and the rise the judge wrote while the skills seat asked two
@@ -651,4 +699,31 @@ fn the_suggestion_asks_nothing_where_its_person_turned_the_search_off() {
     assert!(own.0 && own.1 >= 1 && own.2 >= 1, "the suggestion's own auto asks: {own:?}");
     let neither = ask(&[]);
     assert!(neither.0 && neither.1 >= 1 && neither.2 >= 1, "neither word: asked as before the split: {neither:?}");
+}
+
+#[test]
+fn judging_a_skill_label_does_not_invent_a_missing_baseline() {
+    use zerocode_core::jev::promote::{judge_seat, Line, Verdict};
+    let root = tempfile::tempdir().expect("a temp root");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
+    let cwd = root.path().canonicalize().expect("a canonical root");
+    let mut rows = skills_window_that_rises(&SKILLS, SKILLS.rubric_version, 1, 0);
+    for row in &mut rows {
+        row.as_object_mut().expect("a ledger row").remove("baselineAgreed");
+    }
+    let last = rows.pop().expect("the last comparison");
+    let asked = rows.iter().find(|row| row["at"] == last["requestAt"]).expect("the request");
+    let request = SkillRequestName {
+        task: asked["task"].as_u64().expect("task"),
+        catalog: asked["catalog"].as_u64().expect("catalog"),
+        at: asked["at"].as_u64().expect("at"),
+    };
+    let ledger = skill_search_path(&cwd);
+    ledger_with(&ledger, &rows);
+    note_search_answer(&cwd, &[String::from("docx")], request);
+    note_loaded_skill(&cwd, "docx");
+    let recorded = super::super::jev_summary::read_rows(&ledger);
+    assert!(matches!(judge_seat(&SKILLS, &recorded).expect("judged").verdict,
+        Verdict::Hold(Line::TooFewBaseline { compared: 0, .. })));
+    assert!(!runtime::jev_seat_applies(&cwd, &SKILLS));
 }
