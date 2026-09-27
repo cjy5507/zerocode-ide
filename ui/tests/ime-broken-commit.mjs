@@ -18,7 +18,12 @@
  * 그러니 「반쪽 글자만 든 커밋 뒤에 아무 키도 오지 않는다」가 사건의 서명이다.
  * 이 수트는 그 서명을 다섯 번 재생해 낱자가 판에 닿는지 세고, 같은 로그에서
  * 뽑은 성한 조합들(가·받침 교정·ㅋㅋ)과 조합 중 Enter·백스페이스·훔쳐진
- * 머리(계속)를 대조군으로 둔다. */
+ * 머리(계속)를 대조군으로 둔다.
+ *
+ * 그 링은 사람이 친 한국어를 음절째로 로그에 적었다(t-11740). 이제 덤프는
+ * 글자 대신 모양만 싣는다 — 홑자음 c, 홑모음 v, 받침 없는 음절 s, 받침 있는
+ * 음절 S. 이 수트는 사건 다섯의 덤프를 떠서, 모양만으로도 「반쪽을 든 채
+ * 닫힌 조합」이 읽히는지 함께 본다. */
 
 import { openWindowTestPage } from "./window-boot.mjs";
 
@@ -26,13 +31,13 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * `update`의 글은 그 순간 조합 상자에 선 글자 — 드레인이 읽는 sink 값이다. */
 const LEAKS = [
   // 6467줄: 「…데」 뒤 `니`를 백스페이스로 `ㄴ`까지 지웠더니 98 ms 뒤 혼자 끊겼다.
-  { jamo: "ㄴ", ring: [
+  { jamo: "ㄴ", shape: "c", ring: [
     [0, "start"], [0, "update", "니"], [1, "key", "ㅣ"],
     [490, "update", "ㄴ"], [1, "key", "Backspace"],
     [98, "update", "ㄴ"], [2, "end", "ㄴ"],
   ] },
   // 6714줄: `ㅎ` 하나를 친 뒤 410 ms, 그리고 99 ms 뒤 사람은 `아…`를 이어 쳤다.
-  { jamo: "ㅎ", ring: [
+  { jamo: "ㅎ", shape: "c", ring: [
     [0, "start"], [0, "update", "ㅎ"], [2, "key", "ㅎ"],
     [410, "update", "ㅎ"], [2, "end", "ㅎ"],
     [99, "start"], [0, "update", "ㅇ"], [2, "key", "ㅇ"],
@@ -41,7 +46,7 @@ const LEAKS = [
     [202, "update", "아"], [4, "end", "아"],
   ], thenTyped: "아" },
   // 6921줄: 「그렇게 」 뒤 같은 모양, 그리고 105 ms 뒤 `안…`.
-  { jamo: "ㅎ", ring: [
+  { jamo: "ㅎ", shape: "c", ring: [
     [0, "start"], [0, "update", "ㅎ"], [2, "key", "ㅎ"],
     [308, "update", "ㅎ"], [2, "end", "ㅎ"],
     [105, "start"], [0, "update", "ㅇ"], [2, "key", "ㅇ"],
@@ -51,13 +56,13 @@ const LEAKS = [
     [75, "update", "안"], [2, "end", "안"],
   ], thenTyped: "안" },
   // 7143줄: 초점이 판 여기저기를 오간 뒤 `ㅁ` 하나, 581 ms, 그리고 아무것도.
-  { jamo: "ㅁ", ring: [
+  { jamo: "ㅁ", shape: "c", ring: [
     [0, "start"], [0, "update", "ㅁ"], [2, "key", "ㅁ"],
     [581, "update", "ㅁ"], [2, "end", "ㅁ"],
   ] },
   // 7371줄: 성한 `미` 하나가 먼저 나가고(대조군이 사건 안에 들어 있다),
   // 이어진 `ㅣ` 조합이 481 ms 뒤 혼자 끊겼다.
-  { jamo: "ㅣ", ring: [
+  { jamo: "ㅣ", shape: "v", ring: [
     [0, "start"], [0, "update", "ㅁ"], [1, "key", "ㅁ"],
     [160, "update", "미"], [1, "key", "ㅣ"],
     [98, "update", "미"], [2, "end", "미"],
@@ -70,7 +75,7 @@ const LEAKS = [
  * `sends`는 이 열이 판에 내놓아야 하는 글월 전부, 친 차례대로. */
 const HEALTHY = [
   // 가: 한 음절이 통째로 커밋되고, 그것을 일으킨 다음 조합이 2 ms 뒤에 선다.
-  { name: "가", ring: [
+  { name: "가", shape: "s", ring: [
     [0, "start"], [0, "update", "ㄱ"], [2, "key", "ㄱ"],
     [116, "update", "가"], [1, "key", "ㅏ"],
     [140, "update", "가"], [2, "end", "가"],
@@ -78,7 +83,7 @@ const HEALTHY = [
   ], sends: "가" },
   // 받침 교정: 로그 6467줄 링의 머리 그대로 — 풋에 ㅜ가 오면 ㅅ이 다음
   // 음절로 옮겨 가 푸가 커밋되고 수가 새로 선다.
-  { name: "받침교정", ring: [
+  { name: "받침교정", shape: "s", ring: [
     [0, "start"], [0, "update", "ㅍ"], [2, "key", "ㅍ"],
     [56, "update", "푸"], [1, "key", "ㅜ"],
     [155, "update", "풋"], [1, "key", "ㅅ"],
@@ -150,6 +155,24 @@ const LATENCY = [
   },
 ];
 
+/* 덤프가 모양으로 말하는 것: 조합 상자가 닫힐 때(`comp.end`)마다 그 직전
+ * `comp.update`가 세운 모양, 그리고 붙들린 반쪽(`half.hold`)의 모양. 첫 줄은
+ * 머리 줄이고, 링의 줄은 「시각 종류 모양」이다. */
+function dumpReads(dump) {
+  const closed = [];
+  const held = [];
+  let standing = null;
+  for (const line of dump.split("\n").slice(1)) {
+    const [, kind, ...rest] = line.split(" ");
+    if (kind === "comp.update") standing = rest.join(" ");
+    if (kind === "comp.end") closed.push(standing);
+    if (kind === "half.hold") held.push(rest.join(" "));
+  }
+  return { closed, held };
+}
+
+const HANGUL = /[\u3130-\u318f\uac00-\ud7a3]/;
+
 /* 한 박자 더 — 붙들린 반쪽이 있으면 여기서 판가름난다. 흔적 링의 사건들이
  * 다음 사건을 본 가장 이른 시각(97 ms)보다 넉넉히 길게. */
 const SETTLE_MS = 160;
@@ -162,7 +185,12 @@ const LATENCY_BOUND_MS = 16;
 export async function exerciseBrokenCommit(script) {
   const wait = (ms) => new Promise((done) => setTimeout(done, ms));
   const settle = () => wait(script.settleMs);
-  const seen = { leaked: [], kept: [], healthy: [], habits: [], latency: {} };
+  const seen = {
+    leaked: [], kept: [], healthy: [], habits: [], latency: {},
+    dumps: { leaks: [], healthy: [] },
+    // 「ㄱ ㅖ 속」은 갈라진 계속이다 — 모양으로도 온전한 계속과 갈린다.
+    split: imeShape("ㄱ ㅖ 속"), whole: imeShape("계속"),
+  };
   const term = await openTermTab();
   termView(term);
   const sink = document.getElementById("key-sink");
@@ -205,8 +233,10 @@ export async function exerciseBrokenCommit(script) {
   // 사건 다섯. 끊긴 커밋이 판에 내놓은 낱자만 센다.
   for (const incident of script.leaks) {
     texts.length = 0;
+    imeTrace.length = 0;
     await replay(incident.ring);
     await settle();
+    seen.dumps.leaks.push(imeDump("drain", incident.jamo));
     const strayed = texts.filter(onlyJamo);
     if (strayed.length) seen.leaked.push(`${incident.jamo}:${strayed.join("")}`);
     // 사람이 이어 친 글은 그대로 가야 한다.
@@ -218,8 +248,10 @@ export async function exerciseBrokenCommit(script) {
   // 성한 조합들. 낼 것을 내고, 낼 것만 낸다.
   for (const one of script.healthy) {
     texts.length = 0;
+    imeTrace.length = 0;
     await replay(one.ring);
     await settle();
+    seen.dumps.healthy.push(imeDump("drain", one.name));
     seen.healthy.push(`${one.name}=${texts.join("|")}`);
   }
 
@@ -281,6 +313,23 @@ export async function testImeBrokenCommit(browser, origin, ok) {
       LATENCY.every((one) =>
         seen.latency[one.name] !== null && seen.latency[one.name] < LATENCY_BOUND_MS),
       JSON.stringify(seen.latency),
+    );
+    const dumps = [...seen.dumps.leaks, ...seen.dumps.healthy];
+    const leakReads = seen.dumps.leaks.map(dumpReads);
+    const syllables = HEALTHY.flatMap((one, at) => (one.shape ? [dumpReads(seen.dumps.healthy[at])] : []));
+    ok(
+      "덤프는 글자 없이 모양만 싣고도 반쪽 커밋을 알아보게 한다 — 사건마다 조합이 홑자모 모양을 든 채 닫혀 붙들렸고, 성한 음절은 음절 모양으로 닫혔다",
+      dumps.length === LEAKS.length + HEALTHY.length &&
+        dumps.every((dump) => !HANGUL.test(dump)) &&
+        seen.dumps.leaks.every((dump, at) =>
+          dump.startsWith(`ime: bare jamo left through drain: ${LEAKS[at].shape} `)) &&
+        leakReads.every((read, at) =>
+          read.closed.includes(LEAKS[at].shape) && read.held.includes(LEAKS[at].shape)) &&
+        syllables.every((read) => read.closed.length > 0 &&
+          read.closed.every((shape) => shape === "s") && read.held.length === 0) &&
+        seen.split === "c v S" && seen.whole === "sS",
+      JSON.stringify({ reads: [...leakReads, ...syllables], split: seen.split, whole: seen.whole,
+        spelled: dumps.filter((dump) => HANGUL.test(dump)).length }),
     );
     ok("반쪽 커밋을 재생하는 동안 렌더러 오류는 없었다", faults.length === 0, faults.join("\n"));
   } finally {

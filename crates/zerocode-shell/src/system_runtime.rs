@@ -248,11 +248,15 @@ pub(super) fn previewed_last_sent() -> &'static std::sync::Mutex<HashMap<TermId,
     SENT.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// The window's black box, and the one rotation it keeps.
+pub(crate) const WINDOW_LOG: &str = "window-errors.log";
+pub(crate) const WINDOW_LOG_ROTATED: &str = "window-errors.log.1";
+
 pub(super) fn note_window_event(local_data_root: &Path, line: &str) {
     use std::io::Write;
-    let path = local_data_root.join("window-errors.log");
+    let path = local_data_root.join(WINDOW_LOG);
     if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 1_000_000) {
-        let _ = std::fs::rename(&path, local_data_root.join("window-errors.log.1"));
+        let _ = std::fs::rename(&path, local_data_root.join(WINDOW_LOG_ROTATED));
     }
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
