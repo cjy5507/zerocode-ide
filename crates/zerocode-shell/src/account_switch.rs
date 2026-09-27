@@ -1851,8 +1851,12 @@ mod tests {
             serde_json::to_string(&store).unwrap(),
         )
         .unwrap();
-        let sent =
-            refresh_inactive_claude_accounts(config.path(), data.path(), AccountPoll::Ambient);
+        let sent = refresh_inactive_claude_accounts(
+            config.path(),
+            data.path(),
+            AccountPoll::Ambient,
+            &HashSet::new(),
+        );
         assert_eq!(sent, 1, "only the inactive account is read here");
         let began = Instant::now();
         while claude_account_scanning_now(bare_id) && began.elapsed() < Duration::from_secs(10) {
@@ -1878,7 +1882,12 @@ mod tests {
         // Inside the ambient floor: nothing goes out, however often asked.
         for _ in 0..10 {
             assert_eq!(
-                refresh_inactive_claude_accounts(config.path(), data.path(), AccountPoll::Ambient),
+                refresh_inactive_claude_accounts(
+                    config.path(),
+                    data.path(),
+                    AccountPoll::Ambient,
+                    &HashSet::new()
+                ),
                 0
             );
         }
@@ -2119,19 +2128,30 @@ mod tests {
             row.updated_at -= 24 * 60 * 60_000;
         }
         assert_eq!(
-            refresh_inactive_claude_accounts(config_c.path(), data_c.path(), AccountPoll::Ambient),
+            refresh_inactive_claude_accounts(
+                config_c.path(),
+                data_c.path(),
+                AccountPoll::Ambient,
+                &HashSet::new()
+            ),
             0
         );
         assert_eq!(
             refresh_inactive_claude_accounts(
                 config_c.path(),
                 data_c.path(),
-                AccountPoll::Candidate
+                AccountPoll::Candidate,
+                &HashSet::new()
             ),
             0
         );
         assert_eq!(
-            refresh_inactive_claude_accounts(config_c.path(), data_c.path(), AccountPoll::Person),
+            refresh_inactive_claude_accounts(
+                config_c.path(),
+                data_c.path(),
+                AccountPoll::Person,
+                &HashSet::new()
+            ),
             1
         );
         let began = Instant::now();
@@ -2354,5 +2374,272 @@ mod tests {
                 "{said}"
             );
         }
+    }
+
+    /* ---- a login nobody runs is renewed by its own CLI (t-10915) -------- */
+
+    /// A fake `claude` in `dir`: it writes down what it was started with —
+    /// its home, its store, where it ran, its words and its stdin — and,
+    /// when `renews`, rewrites the login in the store it was named, the way
+    /// the real CLI refreshes its own. Its answer is the headless result of
+    /// a slash command: no turn, no token.
+    fn fake_claude(dir: &Path, renews: bool) -> PathBuf {
+        let path = dir.join(if renews {
+            "renewing-claude"
+        } else {
+            "dead-claude"
+        });
+        let renewal = if renews {
+            "printf '%s' '{\"claudeAiOauth\":{\"accessToken\":\"renewed-login\",\"expiresAt\":1}}' \
+             > \"$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json\""
+        } else {
+            ":"
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n\
+                 {{ printf 'config=%s\\n' \"$CLAUDE_CONFIG_DIR\"; \
+                 printf 'store=%s\\n' \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\"; \
+                 printf 'cwd=%s\\n' \"$(pwd -P)\"; \
+                 printf 'argv='; for word in \"$@\"; do printf '[%s]' \"$word\"; done; printf '\\n'; \
+                 printf 'stdin=%s\\n' \"$(cat)\"; }} >> \"$0.said\"\n\
+                 {renewal}\n\
+                 printf '%s\\n' '{{\"type\":\"result\",\"is_error\":false,\"num_turns\":0,\"result\":\"plan\",\"usage\":{{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}}'\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    /// The endpoint as the account's login meets it: the renewed login
+    /// reads, anything else is refused for its token, as the real one
+    /// refused four of five accounts on 2026-09-27 (HTTP 401).
+    fn endpoint_for_renewed(
+        asked: &std::cell::RefCell<Vec<String>>,
+    ) -> impl FnMut(&str, i64) -> Result<crate::usage_oauth::OauthUsage, crate::usage_http::Failure> + '_
+    {
+        move |login, _| {
+            asked.borrow_mut().push(login.to_string());
+            if login.contains("renewed-login") {
+                Ok(a_reading(20.0))
+            } else {
+                Err(crate::usage_http::Failure {
+                    recovery: zerocode_core::usage_limit::classify_http(401, ""),
+                    retry_at_ms: None,
+                    message: "HTTP 401".to_string(),
+                    skip_cli_fallback: true,
+                })
+            }
+        }
+    }
+
+    fn expired_login_in(account: &zerocode_core::ClaudeAccount) {
+        std::fs::write(
+            Path::new(&account.config_dir).join(accounts::CREDENTIALS_FILE),
+            r#"{"claudeAiOauth":{"accessToken":"expired-login","expiresAt":1}}"#,
+        )
+        .unwrap();
+    }
+
+    /// The cause and its cure (t-10915). An account nobody runs keeps the
+    /// token its CLI last wrote; it expires, the endpoint refuses it (401,
+    /// stale-token), and before this nothing ever renewed it — every read
+    /// said 「읽지 못함」 until a person logged in again. Now the refused read
+    /// runs the account's own CLI once, in the account's own directory
+    /// (home AND store — never the runtime home a pane of the selected
+    /// account reads), from an empty directory, with the renewal row's
+    /// words and `/cost` on stdin; the CLI renews its own store, and the
+    /// read that follows asks with the renewed login and lands a number.
+    #[test]
+    fn a_stale_account_is_renewed_by_its_own_cli_once_and_then_reads() {
+        let config = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let b = inactive_fixture(config.path(), "t10915-renew-b");
+        expired_login_in(&b);
+        let cli = fake_claude(bin.path(), true);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let mut runs = 0;
+        let (scanned, renewal) = scan_claude_account_usage_renewing(
+            &b,
+            accounts::account_login,
+            endpoint_for_renewed(&asked),
+            |account| {
+                runs += 1;
+                accounts::renew_login(&cli.to_string_lossy(), account)
+                    .map_or(Renewed::Failed, Renewed::Ran)
+            },
+        );
+        assert_eq!(scanned.usage.status, "ok", "{:?}", scanned.usage.error);
+        assert_eq!(
+            scanned.usage.session.as_ref().map(|held| held.used_percent),
+            Some(20)
+        );
+        assert_eq!(scanned.usage.account.as_deref(), Some("t10915-renew-b"));
+        assert_eq!(runs, 1);
+        assert!(
+            matches!(
+                renewal,
+                Renewal::Ran {
+                    tokens: Some(0),
+                    ..
+                }
+            ),
+            "{renewal:?}"
+        );
+        let asked = asked.into_inner();
+        assert_eq!(asked.len(), 2, "one refused read, one renewed read");
+        assert!(asked[0].contains("expired-login") && asked[1].contains("renewed-login"));
+        // What the CLI was started with.
+        let said = std::fs::read_to_string(format!("{}.said", cli.display())).unwrap();
+        let line = |key: &str| {
+            said.lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(line("config"), b.config_dir, "the CLI's home");
+        assert_eq!(line("store"), b.config_dir, "the CLI's store");
+        let row = zerocode_core::login_renewal::CLAUDE_RENEWAL;
+        let words: String = row.argv.iter().map(|word| format!("[{word}]")).collect();
+        assert_eq!(line("argv"), words);
+        assert_eq!(line("stdin"), row.stdin);
+        let empty = crate::computer_use::errand::value::one_shot_dir()
+            .and_then(|dir| dir.canonicalize().ok())
+            .unwrap();
+        assert_eq!(Path::new(&line("cwd")), empty.as_path());
+        // The log line carries a word, a duration and a count — no login.
+        let words = renewal.words();
+        assert!(words.contains("renewal=ran") && words.contains("renew_tokens=0"));
+        assert!(!words.contains("login"), "{words}");
+    }
+
+    /// A login its own CLI could not renew is dead, and says so (t-10915):
+    /// the read after the renewal is still refused, so the account is
+    /// 「로그인 만료 — 다시 로그인」 — not 「읽지 못함」 — and no timer answers
+    /// that with another renewal: the ambient beat and a switch's
+    /// candidate read leave it alone, and only a person's press asks again.
+    #[test]
+    fn a_login_its_cli_cannot_renew_is_expired_and_no_timer_renews_it_again() {
+        let config = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let b = inactive_fixture(config.path(), "t10915-dead-b");
+        expired_login_in(&b);
+        let cli = fake_claude(bin.path(), false);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let (scanned, renewal) = scan_claude_account_usage_renewing(
+            &b,
+            accounts::account_login,
+            endpoint_for_renewed(&asked),
+            |account| {
+                accounts::renew_login(&cli.to_string_lossy(), account)
+                    .map_or(Renewed::Failed, Renewed::Ran)
+            },
+        );
+        assert_eq!(scanned.usage.status, ACCOUNT_LOGIN_EXPIRED);
+        assert!(matches!(renewal, Renewal::Ran { .. }), "{renewal:?}");
+        assert_eq!(asked.borrow().len(), 2);
+        assert!(land_claude_account_usage(
+            config.path(),
+            data.path(),
+            &b,
+            scanned.usage
+        ));
+        {
+            let mut held = claude_account_usage_cache(data.path())
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let row = &mut held.get_mut("t10915-dead-b").expect("B's reading").usage;
+            // Past every floor, so only the verdict can hold it.
+            row.updated_at -= 24 * 60 * 60_000;
+        }
+        let nobody = HashSet::new();
+        for why in [AccountPoll::Ambient, AccountPoll::Candidate] {
+            assert_eq!(
+                refresh_inactive_claude_accounts(config.path(), data.path(), why, &nobody),
+                0,
+                "{why:?} asked a dead login again"
+            );
+        }
+        // A person's press asks again — of a store that now holds nothing,
+        // so the read is answered on this machine and no CLI is started.
+        std::fs::remove_file(Path::new(&b.config_dir).join(accounts::CREDENTIALS_FILE)).unwrap();
+        assert_eq!(
+            refresh_inactive_claude_accounts(
+                config.path(),
+                data.path(),
+                AccountPoll::Person,
+                &nobody
+            ),
+            1
+        );
+        let began = Instant::now();
+        while claude_account_scanning_now("t10915-dead-b")
+            && began.elapsed() < Duration::from_secs(10)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Two processes refreshing one login at once can end it, so a login a
+    /// live pane runs as is left to that pane's CLI (t-10915): the read is
+    /// made and stays refused, and nothing is started. A CLI that is not
+    /// there — or would not start, or outlived its wall — learned nothing
+    /// about the login: the refused read stands as 「읽지 못함」 and is tried
+    /// again on the ordinary beat, never called dead.
+    #[test]
+    fn a_renewal_is_withheld_under_a_live_pane_and_a_cli_that_never_ran_accuses_nobody() {
+        let config = tempfile::tempdir().unwrap();
+        let b = inactive_fixture(config.path(), "t10915-kept-b");
+        expired_login_in(&b);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let (kept, renewal) = scan_claude_account_usage_renewing(
+            &b,
+            accounts::account_login,
+            endpoint_for_renewed(&asked),
+            |_| Renewed::Withheld,
+        );
+        assert_eq!(renewal, Renewal::Withheld);
+        assert_eq!(kept.usage.status, "error");
+        assert_eq!(
+            kept.usage.failure_kind,
+            Some(zerocode_core::usage_limit::FailureKind::StaleToken)
+        );
+        assert_eq!(asked.borrow().len(), 1, "a withheld renewal read twice");
+
+        let (unran, renewal) = scan_claude_account_usage_renewing(
+            &b,
+            accounts::account_login,
+            endpoint_for_renewed(&asked),
+            |account| {
+                accounts::renew_login("/no-such-t10915-cli", account)
+                    .map_or(Renewed::Failed, Renewed::Ran)
+            },
+        );
+        assert!(matches!(renewal, Renewal::Failed { .. }), "{renewal:?}");
+        assert_eq!(unran.usage.status, "error");
+        assert_ne!(unran.usage.status, ACCOUNT_LOGIN_EXPIRED);
+
+        // A read that was not refused for its token starts nothing.
+        let (healthy, renewal) = scan_claude_account_usage_renewing(
+            &b,
+            |_| {
+                accounts::AccountLogin::Found(
+                    "renewed-login".to_string(),
+                    accounts::LoginFrom::File,
+                )
+            },
+            endpoint_for_renewed(&asked),
+            |_| panic!("a readable account was renewed"),
+        );
+        assert_eq!(healthy.usage.status, "ok");
+        assert_eq!(renewal, Renewal::NotNeeded);
+        assert_eq!(renewal.words(), "");
     }
 }

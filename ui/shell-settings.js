@@ -4665,6 +4665,9 @@ function accountGaugeWords(id) {
   }
   if (usage?.status === "denied") parts.push(t("settings.accounts.gaugeDenied", "키체인 거절 — 눌러서 다시"));
   else if (usage?.status === "signed_out") parts.push(t("settings.accounts.gaugeSignedOut", "로그인 없음"));
+  // 그 계정의 CLI가 로그인을 갱신하지 못했다(t-10915) — 일시 오류의 「읽지 못함」과
+  // 달리 사람 몫이다. 행마다 있는 「다시 로그인」 단추가 그 길이다.
+  else if (usage?.status === "login_expired") parts.push(t("settings.accounts.gaugeLoginExpired", "로그인 만료 — 다시 로그인"));
   else if (fit?.unfit === "blocked") parts.push(t("settings.accounts.gaugeBlocked", "한도"));
   else if (fit?.unfit === "stale") parts.push(t("settings.accounts.gaugeStale", "오래됨"));
   else if (fit?.unfit || !usage) parts.push(t("settings.accounts.gaugeUnknown", "읽지 못함"));
