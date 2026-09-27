@@ -767,6 +767,10 @@ function knowledgeGlSeatTexture(data, wide) {
 function makeKnowledgeGlPainter() {
   return {
     id: "gl",
+    /* 이름표는 캔버스 위의 HTML 층이라 어느 점보다도 위에 선다 — 그래서 격자는 확대한
+     * 판에서 이 손의 이름이 남의 점을 덮게 둔다(`placeKnowledgeLabels`). SVG 손은 이름이
+     * 제 점의 <g> 안에 있어 뒤에 그려진 점이 글자를 가리므로 이 약속을 하지 않는다. */
+    labelsOverPoints: true,
     view: null,
     canvas: null,
     gl: null,
@@ -1383,9 +1387,9 @@ function makeKnowledgeGlPainter() {
       counts.draws = this.renderer.info.render.calls;
     },
 
-    /* 이름표는 HTML이다 — 예산(≤ 46)만큼의 <span>이고 점의 수와 무관하다. 자리는
-     * 격자가 **예약한 상자의 한가운데**다: 격자가 그 자리를 지켰으므로 겹치지
-     * 않는다는 약속이 그림에서도 참이 된다. */
+    /* 이름표는 HTML이다 — 예산(넓은 판의 배율 1에서 46, 배율에 비례)만큼의 <span>이고
+     * 점의 수와 무관하다. 자리는 격자가 **예약한 상자의 한가운데**다: 격자가 그 자리를
+     * 지켰으므로 겹치지 않는다는 약속이 그림에서도 참이 된다. */
     paintLabels(layout) {
       const tuning = layout.tuning;
       const titles = layout.model.titles;

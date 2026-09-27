@@ -155,6 +155,7 @@ const KNOWLEDGE_TOKENS = Object.freeze({
   labelPadY: "--knowledge-label-pad-y",
   labelEmWide: "--knowledge-label-em-wide",
   labelEmNarrow: "--knowledge-label-em-narrow",
+  labelCoverZoom: "--knowledge-label-cover-zoom",
   clusterLabelLift: "--knowledge-cluster-label-lift",
   clusterCountPx: "--knowledge-cluster-count-px",
   clusterLeadMax: "--knowledge-cluster-lead-max",
@@ -4429,8 +4430,24 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
     if (where >= 0) wear(at, where);
   }
   /* (3)~(6) 예산 안에서 순서대로. 펼친 군집의 멤버가 먼저다 — 군집을 고른 손이
-   * 묻는 것은 그 주제의 세부이므로. */
-  let budget = tuning.labelBudget[tierWord] ?? tuning.labelBudget.wide;
+   * 묻는 것은 그 주제의 세부이므로.
+   *
+   * 확대하면 이름이 선다(09-28). 예산은 배율에 비례해 자라고, 덮개 배율부터 이름은
+   * 남의 점을 덮어도 된다 — 남의 이름은 여전히 덮지 않는다. 점을 피하기만 하던 격자는
+   * 실제 볼트(876점)에서 배율 2에 19개, 4에 27개를 세웠다: 예산 46은 한 번도 차지
+   * 않았고, 막은 것은 긴 제목이 빽빽한 점 사이에서 빈 칸을 못 찾는 일이었다. 덮는 것은
+   * 이름표가 모든 점 위에 서는 손(`labelsOverPoints`)에서만이다 — 점 아래에 깔린
+   * 이름은 덮은 것이 아니라 가려진 것이다.
+   *
+   * 덮개 배율 아래의 전체 지도에서는 이름 없는 군집의 쪽과 유령(바깥 띠의 부스러기)이
+   * 예산을 쓰지 않는다 — 빈 띠에 선 이름이 먼저 읽히면 가장 덜 중요한 점이 지도의
+   * 첫 낱말이 된다(같은 실측: 선 이름 11개 중 8개가 부스러기의 것). 렌즈가 더한 점
+   * (공급망의 부품·취약점, 코드, 출처)은 쪽이 아니라 이름 있는 군집이 될 수 없으므로 띠에
+   * 서도 부스러기가 아니다 — 그 이름이 렌즈의 답이다. */
+  const zoomedIn = !onRing && layout.zoom >= tuning.labelCoverZoom;
+  const cover = zoomedIn && knowledgePainters.get(view)?.labelsOverPoints === true;
+  let budget = Math.round((tuning.labelBudget[tierWord] ?? tuning.labelBudget.wide)
+    * (onRing ? 1 : Math.max(1, layout.zoom)));
   /* 「+n」이 세는 것은 **쪽**이다 — 유령(아직 없는 페이지)은 이 주제의 쪽이 아니고,
    * 군집 줄의 「42쪽」과 다른 것을 세면 두 수가 서로를 반박한다. */
   const kinds = layout.model.kinds;
@@ -4442,6 +4459,8 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
       const at = order[seat];
       if (shown[at] === 1) continue;
       if (drawn !== null && drawn[at] === 0) continue;
+      if (!onRing && !zoomedIn && community[at] >= layout.namedCount
+        && (kinds[at] === "page" || kinds[at] === "ghost")) continue;
       const inSpot = spot >= 0 && community[at] === spot;
       if (rounds === 2 && (round === 0) !== inSpot) continue;
       if (budget <= 0) {
@@ -4452,7 +4471,7 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
       const centreY = screenY(at);
       if (centreX < 0 || centreY < 0 || centreX > box.wide * box.scale
         || centreY > box.tall * box.scale) continue;
-      const where = seatLabel(at);
+      const where = seatLabel(at, cover);
       if (where >= 0) {
         wear(at, where);
         budget -= 1;
