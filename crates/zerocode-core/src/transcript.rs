@@ -473,6 +473,12 @@ pub fn last_naming_prompt(path: &Path) -> Option<String> {
     })
 }
 
+/// Whether a person typed the prompt the CLI numbered `prompt_id` (t-11540).
+pub fn prompt_typed_by_a_person(path: &Path, prompt_id: &str) -> Option<bool> {
+    let _ = (path, prompt_id);
+    None
+}
+
 /// What a person typed, out of one transcript line, or nothing.
 fn typed_prompt(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
@@ -2580,6 +2586,72 @@ mod tests {
         text.push_str(&format!("{}\n", user("계속")));
         std::fs::write(&path, text).expect("write");
         assert_eq!(last_naming_prompt(&path).as_deref(), Some("cut the release"));
+    }
+
+    /// A prompt is a person's only when its own record says so: the record
+    /// the CLI numbered with the hook's `prompt_id`, written after the hook
+    /// fired — a check the agent scheduled on itself and a background task's
+    /// notice are the CLI's own words, what was typed or queued is the
+    /// person's; not yet written is not known (t-11540).
+    #[test]
+    fn a_prompt_is_a_persons_only_when_its_own_record_says_so() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let said = |id: &str, source: &str, origin: &str, meta: bool, content: &str| {
+            let mut record = serde_json::json!({
+                "type": "user", "promptId": id, "promptSource": source, "turnOrigin": origin,
+                "message": { "role": "user", "content": content },
+            });
+            if meta {
+                record["isMeta"] = true.into();
+            }
+            format!("{record}\n")
+        };
+        let result = |id: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({ "type": "user", "promptId": id, "message": { "role": "user", "content": [{ "type": "tool_result", "content": "ok" }] } })
+            )
+        };
+        let mut text = said("p-1", "typed", "human", false, "draw the map");
+        text.push_str(&result("p-1"));
+        text.push_str(&format!("{}\n", serde_json::json!({ "type": "queue-operation", "operation": "enqueue", "content": "read the mail every ten minutes" })));
+        text.push_str(&said("p-2", "system", "scheduled", true, "read the mail every ten minutes"));
+        text.push_str(&result("p-2"));
+        text.push_str(&said("p-3", "typed", "human", false, "fix the board name"));
+        text.push_str(&result("p-3"));
+        text.push_str(&said("p-4", "system", "task_notification", false, "the background build finished"));
+        text.push_str(&said("p-5", "queued", "human", false, "then land it"));
+        text.push_str(r#"{"type":"user","promptId":"p-6","promptSource":"typed""#);
+        std::fs::write(&path, text).expect("write");
+
+        assert_eq!(prompt_typed_by_a_person(&path, "p-1"), Some(true));
+        assert_eq!(prompt_typed_by_a_person(&path, "p-2"), Some(false));
+        assert_eq!(prompt_typed_by_a_person(&path, "p-3"), Some(true));
+        assert_eq!(prompt_typed_by_a_person(&path, "p-4"), Some(false));
+        assert_eq!(prompt_typed_by_a_person(&path, "p-5"), Some(true));
+        // Half written, never written, no file: not known yet.
+        assert_eq!(prompt_typed_by_a_person(&path, "p-6"), None);
+        assert_eq!(prompt_typed_by_a_person(&path, "p-9"), None);
+        assert_eq!(prompt_typed_by_a_person(&dir.path().join("absent.jsonl"), "p-3"), None);
+    }
+
+    /// The CLI's own prompt names nothing, even when it is not marked meta:
+    /// a background task's notice rides a plain `user` record whose source
+    /// is the CLI (t-11540).
+    #[test]
+    fn a_prompt_the_cli_sent_itself_is_not_a_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let text = [
+            serde_json::json!({ "type": "user", "promptSource": "typed", "turnOrigin": "human", "message": { "role": "user", "content": "fix the board name" } }),
+            serde_json::json!({ "type": "user", "promptSource": "system", "turnOrigin": "task_notification", "message": { "role": "user", "content": "the background build finished" } }),
+        ]
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+        std::fs::write(&path, text).expect("write");
+        assert_eq!(last_naming_prompt(&path).as_deref(), Some("fix the board name"));
     }
 
     /// The frame a CLI writes around a pasted block is not a title (t-10993).

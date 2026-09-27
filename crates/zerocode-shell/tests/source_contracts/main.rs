@@ -37041,3 +37041,43 @@ fn an_agent_is_called_one_thing_on_every_surface() {
         "a restored tab keeps a stored name that only says go on"
     );
 }
+
+/// t-11540, second round: a prompt names its pane only once its own record
+/// says a person typed it. Claude Code fires `UserPromptSubmit` for a check
+/// the agent scheduled on itself too, and says so only in the transcript it
+/// writes after the hook — so the window's hook loop holds a numbered prompt
+/// and settles it on the pane's next event (the core reads the record), and
+/// the window takes the settled name from the report's `named`.
+#[test]
+fn a_prompt_names_its_pane_only_once_its_record_says_a_person_typed_it() {
+    let hooks = include_str!("../../src/hooks.rs");
+    let settling = support::block_after(hooks, "pub fn settle_prompt_name(");
+    assert!(
+        settling.contains("settle_prompt_name_in("),
+        "the loop's settling is not the tested one:\n{settling}"
+    );
+    assert!(
+        support::block_after(hooks, "fn settle_prompt_name_in(")
+            .contains("zerocode_core::transcript::prompt_typed_by_a_person("),
+        "a held prompt is settled by something other than its own record"
+    );
+    let runtime = include_str!("../../src/pane_runtime.rs");
+    let settled = runtime
+        .find("hooks::settle_prompt_name(&mut report);")
+        .expect("the hook loop settles each report's name");
+    let noted = runtime
+        .find("note_pane_state(&app, Some(&envelope.worktree_id), &report);")
+        .expect("the hook loop notes each report");
+    let gated = runtime
+        .find("if !report_speaks_for_its_pane(&app, &report) {")
+        .expect("the hook loop gates a nested run's report");
+    assert!(
+        gated < settled && settled < noted,
+        "the name is settled after the pane's own gate and before the window hears it"
+    );
+    let hooked = support::block_after(support::window_source(), r#"listen("hook:agent", (event) => {"#);
+    assert!(
+        hooked.contains("if (event.payload.named) panePrompts.set(term, event.payload.named);"),
+        "the window does not take a settled name:\n{hooked}"
+    );
+}

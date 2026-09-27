@@ -927,6 +927,8 @@ pub(super) fn note_zo_pane_state(
             session,
             prompt: None,
             prompt_names_nothing: false,
+            prompt_id: None,
+            named: None,
             said: None,
             ask,
             ask_prompt: None,

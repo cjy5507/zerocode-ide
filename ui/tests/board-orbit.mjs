@@ -275,6 +275,7 @@ export async function testBoardOrbit(given, origin, ok) {
     ["cards", () => testOrbitLeavesTheCardsAlone(browser, origin, ok)],
     ["live", () => testOrbitLiveMap(browser, origin, ok)],
     ["main name", () => testOrbitMainName(browser, origin, ok)],
+    ["main name held", () => testOrbitMainName(browser, origin, ok, { held: true })],
   ];
   try {
     for (const [name, part] of parts) {
@@ -1718,8 +1719,13 @@ export async function measureBoardOrbit(page, { seconds = 3, fixture = {} } = {}
 /* t-11540 · 마지막 입력이 「계속」인 메인 판. 조율자 하나가 메인 워크스페이스에서 워커 둘을
  * 부렸고, 사람은 그 판에 뜻 있는 요청을 한 번 쳤고, 창은 우편 안내를 한 번 쳤고, 사람은 마지막에
  * 「계속」을 쳤다 — 셋 다 프로덕션의 한 문(`hook:agent`)으로 들어간다. 이어 가라는 말과 안내는 보고가
- * 「이름 아님」이라 싣는다(판정은 core의 한 표). 조율자의 이름은 앞의 요청이어야 한다. */
-export function mainNameFixture() {
+ * 「이름 아님」이라 싣는다(판정은 core의 한 표). 조율자의 이름은 앞의 요청이어야 한다.
+ *
+ * `held`(2회차): Claude Code는 에이전트가 제 세션에 걸어 둔 주기 점검 글에도 같은 훅을 울리고,
+ * 누가 쳤는지는 훅 뒤에 쓰는 기록에만 적는다 — 그래서 창은 번호 붙은 프롬프트를 이름 아님으로
+ * 붙잡았다가, 그 판의 다음 이벤트에서 기록이 사람 줄이라고 말하면 `named`로 싣는다. 요청은 그
+ * 길로 이름이 되고, 뒤에 온 점검 글은 붙잡힌 채 끝내 이름이 되지 않는다. */
+export function mainNameFixture({ held = false } = {}) {
   const LEAD = 7101;
   const WORKERS = [7102, 7103];
   const ASKED = "보드 이름 고치고 릴리즈까지";
@@ -1746,9 +1752,20 @@ export function mainNameFixture() {
   };
   said(WORKERS[0], "사이드바 이름 한 함수로", false);
   said(WORKERS[1], "입체 보기 이름표 시험", false);
-  said(LEAD, ASKED, false);
+  const next = (term, named) => {
+    for (const listener of window.__LISTENERS__["hook:agent"] ?? []) {
+      listener({ payload: { term, agent: "claude", state: "working", event: "PreToolUse", resumable: false,
+        ...(named ? { named } : {}) } });
+    }
+  };
+  said(LEAD, ASKED, held);
+  if (held) next(LEAD, ASKED);
   said(LEAD, "You have 1 orchestration message. Run `zerocode-orc check`.", true);
   said(LEAD, "계속", true);
+  if (held) {
+    said(LEAD, "[점검 — 10분마다] 우편을 읽고 도는 워커를 본다", true);
+    next(LEAD, null);
+  }
   agentBoardMode = "graph";
   agentGraphSelectedKey = null;
   agentGraphScopeKey = "";
@@ -1761,12 +1778,12 @@ export function mainNameFixture() {
 /* 조율자 판의 이름은 어디서나 하나다: 사이드바의 행, 상황판의 카드와 상세 패널, 입체 보기의
  * 이름표, 한 줄 요약의 주어 — 모두 앞의 뜻 있는 요청이고 「계속」은 어디에도 없다. 요약은
  * 이미 있는 문장 그대로 지시한 작업의 수를 말한다(새 문구 0). */
-export async function testOrbitMainName(browser, origin, ok) {
+export async function testOrbitMainName(browser, origin, ok, { held = false } = {}) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await installBoardWaits(page);
     await installOrbitCounters(page);
-    const { lead, asked } = await page.evaluate(mainNameFixture);
+    const { lead, asked } = await page.evaluate(mainNameFixture, { held });
     await page.evaluate(() => window.__BOARD_SETTLED__());
     await page.waitForFunction((key) => document.querySelector(`#board-view [data-orbit-key="${key}"]`),
       `agent:term:${lead}`, { timeout: ORBIT_ACTION_MS });
@@ -1791,7 +1808,9 @@ export async function testOrbitMainName(browser, origin, ok) {
     }, { term: lead, key: `agent:term:${lead}` });
     const everywhere = [named.prompt, named.sidebar, named.sidebarDrawn, named.heading, named.identity,
       named.entity, named.glance[1], named.tab];
-    ok("a go-on word and the window's pointer never name the main pane: every surface says the request",
+    ok(held
+      ? "a held request names the main pane once its record says a person typed it, and a scheduled check never does"
+      : "a go-on word and the window's pointer never name the main pane: every surface says the request",
       everywhere.every((word) => word === asked) && named.label.includes(asked), JSON.stringify(named));
     ok("the one-line story counts the coordinator's work in the words it already had, under the request's name",
       named.glance.join("") === `${asked}가 작업 2개에 지시를 보냈고, 모두 작업 중입니다.`, JSON.stringify(named.glance));
