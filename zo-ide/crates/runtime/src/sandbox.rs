@@ -1,7 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -656,13 +654,9 @@ fn sandbox_scratch_base(cwd: &Path) -> PathBuf {
 }
 
 /// A short, stable, filesystem-safe key derived from the workspace path so
-/// concurrent runs in different repos never share scratch state.
-#[must_use]
-pub fn workspace_scratch_key(cwd: &Path) -> String {
-    let mut hasher = DefaultHasher::new();
-    cwd.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
+/// concurrent runs in different repos never share scratch state — the core's
+/// since t-11349, beside the project slug it names (`zerocode_core::zo_project`).
+pub use zerocode_core::zo_project::workspace_scratch_key;
 
 fn normalize_mounts(mounts: &[String], cwd: &Path) -> Vec<String> {
     let cwd = cwd.to_path_buf();

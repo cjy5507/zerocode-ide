@@ -67,9 +67,11 @@ class TheNamesAreTheRusts(unittest.TestCase):
         self.assertIn('.join("state")', rust("zo-ide/crates/runtime/src/config/mod.rs"))
 
     def test_the_slug_keeps_the_stem_zo_keeps_and_a_hash_of_its_width(self) -> None:
-        config = rust("zo-ide/crates/runtime/src/config/mod.rs")
-        self.assertIn(f"sanitized.len().saturating_sub({replay.SLUG_STEM_CHARS})", config)
-        self.assertIn('format!("{:016x}", hasher.finish())', rust("zo-ide/crates/runtime/src/sandbox.rs"))
+        # zo's rule, kept in the core since t-11349 so the window names a
+        # project's folder as zo does.
+        slug = rust("crates/zerocode-core/src/zo_project.rs")
+        self.assertIn(f"sanitized.len().saturating_sub({replay.SLUG_STEM_CHARS})", slug)
+        self.assertIn('format!("{:016x}", hasher.finish())', slug)
         self.assertEqual(replay.slug_stem(Path("/Users/someone/2026/zerocode")), "Users-someone-2026-zerocode")
         # One dash per character, as Rust's `chars()` counts them: the slash,
         # then each of the two syllables.
