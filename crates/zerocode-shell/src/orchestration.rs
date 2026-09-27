@@ -2602,7 +2602,7 @@ fn composer_at_rest(
             }
         }
         Some(PaneTurn::Ended { interrupted: true }) => Err(THE_PERSON_HOLDS_IT),
-        Some(PaneTurn::Running) => Err(A_TURN_IS_RUNNING),
+        Some(PaneTurn::Running { .. }) => Err(A_TURN_IS_RUNNING),
         None => Err(NOTHING_WAS_EVER_HEARD),
     }
 }
@@ -3536,10 +3536,40 @@ fn wait_for_mail(seen: u64, deadline: std::time::Instant) -> u64 {
 #[derive(Clone, Copy)]
 enum PaneTurn {
     /// A turn is under way — the window heard this pane say something that
-    /// was not a turn ending.
-    Running,
+    /// was not a turn ending, the last time at `heard`.
+    Running { heard: std::time::Instant },
     /// The last turn ended, and how it ended.
     Ended { interrupted: bool },
+}
+
+impl PaneTurn {
+    /// The turn as a door that types reads it.
+    ///
+    /// A running turn nothing has spoken for in
+    /// [`zerocode_core::interrupt::STALE_AFTER_MS`] is not a turn — the decay
+    /// the board already applies to the same reports ([`pane_turn_is_alive`]),
+    /// for the same reason. A turn at work speaks at every tool it reaches
+    /// for; one that has said nothing for half an hour lost its ending on the
+    /// way — the hook script gives a turn end one and a half seconds to reach
+    /// a loaded window and says nothing when it does not (t-11233). Read as
+    /// running, that pane's mail waited on its shelf for a turn end that had
+    /// already happened; read at rest, the pointer's other doors still stand
+    /// (a person's words in the line, a shell in front).
+    ///
+    /// [`pane_turn_is_alive`]: crate::pane_runtime::pane_turn_is_alive
+    fn as_read(self) -> Self {
+        let stale = std::time::Duration::from_millis(
+            zerocode_core::interrupt::STALE_AFTER_MS.unsigned_abs(),
+        );
+        match self {
+            Self::Running { heard }
+                if crate::standing_clock::now().saturating_duration_since(heard) > stale =>
+            {
+                Self::Ended { interrupted: false }
+            }
+            turn => turn,
+        }
+    }
 }
 
 /// What each pane's turn was last measured doing, off the same hook event that
@@ -4667,13 +4697,42 @@ pub(crate) fn pane_turn_began(term: u32, began_ms: i64) {
     pane_turns()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
-        .insert(term, PaneTurn::Running);
+        .insert(
+            term,
+            PaneTurn::Running {
+                heard: crate::standing_clock::now(),
+            },
+        );
     // A hold on the pane's own question stands: the wait is this window's
     // fact, and a report from inside the same turn does not end it.
     pointed()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .retain(|_, held| held.term != Some(term) || held.standing == Standing::Asking);
+}
+
+/// A pane's LEAD ended its turn: the window's own half of a turn end, and
+/// the whole of it when work the lead left running holds its card at working
+/// (t-11233).
+///
+/// The hook loop holds such a `Stop` back — a background shell or helper is
+/// still going, so the card must not ring a completion, and the ledger must
+/// not hear that a worker went quiet (the parked all-clear tells it when that
+/// work ends). Both are about the WORK. The composer is a different fact: the
+/// lead is back at its prompt, a line typed there is read, and its next turn
+/// end comes only once somebody gives it a turn. Written down as running, a
+/// coordinator whose `until` shell waited on a gate chain had its workers'
+/// questions parked for that turn end for two hours (2026-09-27).
+///
+/// So this writes the window's facts and nothing else: the sound, and the
+/// rest. An interrupted end is remembered AS interrupted — the person typed,
+/// and the second condition says that pane is theirs, not ours.
+pub(crate) fn pane_lead_rested(term: u32, turn_ended_ms: i64, interrupted: bool) {
+    heard(term, turn_ended_ms);
+    pane_turns()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(term, PaneTurn::Ended { interrupted });
 }
 
 /// A pane's turn ended. Tell the ledger, in case that pane is a worker's.
@@ -4695,7 +4754,7 @@ pub(crate) fn pane_turn_ended(term: u32, turn_ended_ms: i64, interrupted: bool, 
     // window, but it does not run in a degraded window — the beat's sweep
     // still must not report a pane the window plainly heard. Heard at the
     // moment the turn ended, the moment the actor road reads it at too.
-    heard(term, turn_ended_ms);
+    //
     // Nobody to refuse on this road — it is a hook event, not a verb — so it
     // simply does not run in a degraded window. See [`unavailable`]; the
     // window already said why, once, at boot. A silence the store refuses is
@@ -4704,12 +4763,8 @@ pub(crate) fn pane_turn_ended(term: u32, turn_ended_ms: i64, interrupted: bool, 
     // again rather than a half-written silence surviving.
     /* The idle fact is written down whatever the runtime's state: it is a
      * window fact, not a ledger one, and the pointer pass reads it on the
-     * next beat. An interrupted end is remembered AS interrupted — the person
-     * typed, and the second condition says that pane is theirs, not ours. */
-    pane_turns()
-        .lock()
-        .unwrap_or_else(|held| held.into_inner())
-        .insert(term, PaneTurn::Ended { interrupted });
+     * next beat. */
+    pane_lead_rested(term, turn_ended_ms, interrupted);
     if unavailable().is_some() {
         return;
     }
@@ -5898,7 +5953,8 @@ fn resume_stalled_workers(
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .get(&one.term)
-            .copied();
+            .copied()
+            .map(PaneTurn::as_read);
         if composer_at_rest(host, one.term, heard).is_err() {
             quiet.push((one.worker, one.since_ms));
             continue;
@@ -6383,7 +6439,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * finished turn, and a pane the window has never heard from
                  * may have no hook wired at all, in which case its silence
                  * outlasts the run. */
-                let heard = turns.get(&term).copied();
+                let heard = turns.get(&term).copied().map(PaneTurn::as_read);
                 /* The moment a WORKING pane can be reached without a
                  * keystroke, and the one this pass used to have nothing to
                  * say about.
@@ -6406,7 +6462,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * the ordinary road below speaks about it the moment the turn
                  * is over. A parked pointer can only make the composer road
                  * unnecessary; it can never make it unavailable. */
-                if matches!(heard, Some(PaneTurn::Running)) {
+                if matches!(heard, Some(PaneTurn::Running { .. })) {
                     /* Unless the turn is held inside the pane's own question
                      * (t-8938): the wait this window runs for it is out, and
                      * a pointer handed over at that tool call's end would

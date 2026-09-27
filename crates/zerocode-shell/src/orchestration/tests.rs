@@ -12497,6 +12497,57 @@ fn a_pane_the_window_never_heard_is_told_apart_from_one_at_work() {
     crate::agent_teams::forget_term(WORKER);
 }
 
+/// Sends land; the pane holds the measured provider.
+#[derive(Default)]
+struct Pointing {
+    sent: Mutex<Vec<(u32, String)>>,
+}
+
+impl Pointing {
+    /// Every line typed so far, by terminal.
+    fn typed(&self) -> Vec<(u32, String)> {
+        self.sent
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
+    }
+}
+
+impl Host for Pointing {
+    fn split(
+        &self,
+        _team: &str,
+        _leader_term: u32,
+        _from_term: u32,
+        _pane: &str,
+        _direction: zerocode_core::agent_teams::Direction,
+        _command: &str,
+        _token: &str,
+    ) -> Option<u32> {
+        None
+    }
+    fn send(&self, term: u32, text: &str) -> bool {
+        self.sent
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push((term, text.to_string()));
+        true
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        None
+    }
+    fn focus(&self, _term: u32) -> bool {
+        false
+    }
+    fn close(&self, _term: u32) {}
+    fn actor_for(&self, term: u32) -> Option<String> {
+        Some(test_actor(term))
+    }
+    fn agent_of(&self, _term: u32) -> Option<String> {
+        Some(zerocode_core::AgentKind::Claude.slug().to_string())
+    }
+}
+
 /// A WORKING pane of a measured provider is reached without a keystroke.
 ///
 /// This is the whole of the default-coordination answer. Mail that arrives
@@ -12530,53 +12581,8 @@ fn a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_compos
     let team = format!("team-parked-{LEADER}");
     let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
 
-    /// Sends land; the pane holds the measured provider.
-    struct Pointing {
-        sent: Mutex<Vec<(u32, String)>>,
-    }
-    impl Host for Pointing {
-        fn split(
-            &self,
-            _team: &str,
-            _leader_term: u32,
-            _from_term: u32,
-            _pane: &str,
-            _direction: zerocode_core::agent_teams::Direction,
-            _command: &str,
-            _token: &str,
-        ) -> Option<u32> {
-            None
-        }
-        fn send(&self, term: u32, text: &str) -> bool {
-            self.sent
-                .lock()
-                .unwrap_or_else(|held| held.into_inner())
-                .push((term, text.to_string()));
-            true
-        }
-        fn capture(&self, _term: u32) -> Option<String> {
-            None
-        }
-        fn focus(&self, _term: u32) -> bool {
-            false
-        }
-        fn close(&self, _term: u32) {}
-        fn actor_for(&self, term: u32) -> Option<String> {
-            Some(test_actor(term))
-        }
-        fn agent_of(&self, _term: u32) -> Option<String> {
-            Some(zerocode_core::AgentKind::Claude.slug().to_string())
-        }
-    }
-    let host = Pointing {
-        sent: Mutex::new(Vec::new()),
-    };
-    let typed = |host: &Pointing| -> Vec<(u32, String)> {
-        host.sent
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .clone()
-    };
+    let host = Pointing::default();
+    let typed = Pointing::typed;
     let blackbox = super::BLACKBOX
         .get()
         .expect("the bench window's black box")
@@ -12733,6 +12739,171 @@ fn a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_compos
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
     crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
+/// The bound past which a turn nothing has spoken for is not a turn, as a
+/// duration on the clock the turn facts are stamped on.
+fn stale_turn() -> std::time::Duration {
+    std::time::Duration::from_millis(zerocode_core::interrupt::STALE_AFTER_MS.unsigned_abs())
+}
+
+/// A coordinator at rest beside its own background work is told about its
+/// mail at its composer (t-11233).
+///
+/// The real window's order: the coordinator's turn starts an `until` shell
+/// in the background and ends; the hook loop holds that `Stop` back so the
+/// card does not ring over a shell still running, and hands the window the
+/// lead's rest instead ([`super::pane_lead_rested`]); a worker's question
+/// lands. Written down as a running turn, the pointer parked this mail for a
+/// turn end that never came — two hours on 2026-09-27, with the worker's
+/// measurement window lost to it. At rest, the next beat types the line and
+/// its Enter, exactly as for a turn that ended with nothing running.
+#[test]
+fn a_lead_at_rest_beside_its_own_background_work_is_pointed_at_through_its_composer() {
+    const LEADER: u32 = 11_233;
+    const WORKER: u32 = 11_234;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
+    let team = format!("team-rested-{LEADER}");
+    let (_run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = Pointing::default();
+
+    super::pane_turn_began(LEADER, clock());
+    super::pane_lead_rested(LEADER, clock(), false);
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let asked = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words(&format!(
+            "send --type status --body question --retry-request rested-{worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(asked.exit_code, 0, "{}", asked.stderr);
+    super::tick(&host, &[], clock());
+    assert_eq!(
+        host.typed(),
+        vec![
+            (LEADER, zerocode_core::orchestration::pointer_text(1)),
+            (LEADER, "\r".to_string())
+        ],
+        "a lead at its prompt beside a running shell was not told about its mail"
+    );
+
+    super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
+/// A turn whose ending never reached the window stops holding its mail once
+/// it has said nothing for the stale bound (t-11233).
+///
+/// The hook script gives a turn end a second and a half to reach the window
+/// and says nothing when a loaded machine does not answer in time. The pane
+/// then reads as running forever, and a pointer parked for its turn end waits
+/// for a knock that already came. A turn at work speaks at every tool it
+/// reaches for, so one silent for half an hour is read at rest: the parked
+/// pointer is taken back, and the composer road speaks.
+#[test]
+fn a_turn_silent_past_the_stale_bound_hands_its_parked_pointer_to_the_composer() {
+    const LEADER: u32 = 11_235;
+    const WORKER: u32 = 11_236;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
+    let team = format!("team-silent-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = Pointing::default();
+
+    super::pane_turn_began(LEADER, clock());
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let asked = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words(&format!(
+            "send --type status --body question --retry-request silent-{worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(asked.exit_code, 0, "{}", asked.stderr);
+    super::tick(&host, &[], clock());
+    assert_eq!(
+        host.typed(),
+        Vec::new(),
+        "a turn that is still speaking was typed at"
+    );
+
+    // Nothing more is heard from the pane, and its turn end is lost.
+    let long_ago = crate::standing_clock::now()
+        .checked_sub(stale_turn() * 2)
+        .expect("the machine has been up past the stale bound twice");
+    super::pane_turns()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(LEADER, super::PaneTurn::Running { heard: long_ago });
+    crate::orchestration_pointer_mailbox::age_parked(LEADER, stale_turn());
+    super::tick(&host, &[], clock());
+    assert_eq!(
+        host.typed(),
+        vec![
+            (LEADER, zerocode_core::orchestration::pointer_text(1)),
+            (LEADER, "\r".to_string())
+        ],
+        "mail parked for a turn end that never came waited on"
+    );
+    let blackbox = super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    let taken_back = std::fs::read_to_string(&blackbox)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| {
+            line.contains(&format!(
+                "terminal {LEADER}'s turn-end hook never collected the pointer for \
+                 run:{run_id} in {run_id}"
+            ))
+        })
+        .count();
+    assert_eq!(taken_back, 1, "the black box was not told the road changed");
+
+    super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
+/// The stale bound decays a running turn and nothing else: a turn heard
+/// inside it stays running, and an end — at rest or under a person's hand —
+/// is read as it was measured.
+#[test]
+fn only_a_running_turn_silent_past_the_stale_bound_reads_at_rest() {
+    let _stood = crate::standing_clock::stand_still();
+    let now = crate::standing_clock::now();
+    let inside = now.checked_sub(stale_turn()).expect("an uptime");
+    let past = now.checked_sub(stale_turn() * 2).expect("an uptime");
+    assert!(matches!(
+        super::PaneTurn::Running { heard: inside }.as_read(),
+        super::PaneTurn::Running { .. }
+    ));
+    assert!(matches!(
+        super::PaneTurn::Running { heard: past }.as_read(),
+        super::PaneTurn::Ended { interrupted: false }
+    ));
+    assert!(matches!(
+        super::PaneTurn::Ended { interrupted: true }.as_read(),
+        super::PaneTurn::Ended { interrupted: true }
+    ));
 }
 
 /// A coordinator's pane as a CLI at its wall keeps it (t-6560): every line

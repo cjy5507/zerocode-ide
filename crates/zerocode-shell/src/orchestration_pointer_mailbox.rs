@@ -406,6 +406,21 @@ pub(crate) fn collect_stale(
 /// unproven delivery would have cost.
 pub(crate) const RENOTIFY_AFTER: Duration = Duration::from_secs(60);
 
+/// Age what stands on a pane's shelf by `by`, as though it had been parked
+/// that much earlier — a test's hand on the one clock it cannot stand past.
+#[cfg(test)]
+pub(crate) fn age_parked(term: u32, by: Duration) {
+    if let Some(standing) = shelf()
+        .waiting
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_mut(&term)
+        && let Some(earlier) = standing.since.checked_sub(by)
+    {
+        standing.since = earlier;
+    }
+}
+
 /// Forget a pane's shelf. Every road out of a terminal reaches this.
 pub(crate) fn forget_term(term: u32) {
     shelf()

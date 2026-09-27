@@ -7991,6 +7991,48 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
     );
 }
 
+/// A `Stop` the done gate holds back is still the lead's rest (t-11233).
+///
+/// The gate keeps the CARD at working while a background shell or helper of
+/// the lead's runs, and keeps the ledger from hearing that the worker went
+/// quiet. It must not keep the mail pointer from the lead's composer: written
+/// down through `pane_turn_began`, a coordinator whose `until` shell waited
+/// on a gate chain had its workers' questions parked for a turn end that
+/// never came, for two hours. So the state door hands the window that very
+/// held event as the lead's rest — the parked event, matched by its word,
+/// never a later one that happens to find a park standing — and the ledger
+/// still hears the end only through the all-clear's replay.
+#[test]
+fn a_held_stop_is_the_leads_rest_to_the_window_and_not_to_the_ledger() {
+    let shipped = shipped_backend();
+    let noting = block_after(shipped, "fn note_pane_state(");
+    let resting = noting
+        .find("None if lead_rested =>")
+        .expect("the state door no longer hands a held stop to the window as rest");
+    let beginning = noting
+        .find("None => orchestration::pane_turn_began(report.term, began_ms),")
+        .expect("the state door stopped writing a running turn down");
+    assert!(
+        resting < beginning,
+        "a held stop falls through to the running arm first:\n{noting}"
+    );
+    assert!(
+        noting.contains(
+            "orchestration::pane_lead_rested(report.term, began_ms, report.interrupted);"
+        ) && noting.contains(".is_some_and(|(_, held)| held.event == report.event);"),
+        "the rest is written for some event other than the held one:\n{noting}"
+    );
+    let rested = block_after(
+        include_str!("orchestration.rs"),
+        "pub(crate) fn pane_lead_rested(",
+    );
+    assert!(
+        !rested.contains("actor"),
+        "the window's rest reached the ledger, which the done gate keeps \
+         from hearing a turn end while work still runs:\n{rested}"
+    );
+}
+
 /// An agent that leaves without saying so still leaves.
 ///
 /// The reported break: `codex` ran in a terminal, the person quit it back
