@@ -4883,6 +4883,7 @@ dependencies = [
 name = "zerocode-core"
 version = "1.1.33"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "sha2",

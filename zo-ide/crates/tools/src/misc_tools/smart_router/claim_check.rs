@@ -1,8 +1,12 @@
 //! Record-only completion claim seat beside r43's turn receipt. The same
 //! turn's result lines supply the citation; the person's next turn supplies
 //! the hindsight label.
+//!
+//! The question, the rows, what a reply comes to and what a label makes of
+//! the next turn live in the core since t-11349 (`zerocode_core::jev::claim`):
+//! the window asks the same seat of its panes' agents with them.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -10,76 +14,20 @@ use std::time::Duration;
 use api::{SystemOneConfig, SystemOneQuestion, SystemOneRequest, SystemOneResponse, SYSTEMONE_MODEL};
 use runtime::claim_check::{self, ClaimCandidate, CodeVerdict, CLAIM_RUBRIC_VERSION};
 use runtime::{ContentBlock, ConversationMessage, MessageRole};
-use serde::{Deserialize, Serialize};
+use zerocode_core::jev::claim::{self as shared, ClaimAnswer, ClaimWaiting as Pending};
+pub use zerocode_core::jev::claim::{ClaimCheckRow, ClaimLabelRow};
+use zerocode_core::jev::claim::UNAVAILABLE;
+#[cfg(test)]
+use zerocode_core::jev::claim::{alerts, CONTRADICTS, SAYS_NOTHING};
 use zerocode_core::jev::door::Refused;
 use zerocode_core::jev::summary::CONTROL;
-use zerocode_core::jev::choice;
-use zerocode_core::jev::{digest_of, fingerprint_of, JevMode, CLAIM, CLAIM_APPLY_DEADLINE_MS, CLAIM_CHOICE_FLOOR_PERMILLE, CLAIM_CRITERIA, ROUTE_USE_FALLBACK};
+use zerocode_core::jev::{digest_of, fingerprint_of, JevMode, CLAIM, CLAIM_APPLY_DEADLINE_MS, ROUTE_USE_FALLBACK};
 
 use super::jev_gate::{self, JevDoor};
 use super::patch_review::detach;
 use super::probe_exec::task_fingerprint;
 use super::settings::jev_claim_mode_from;
 use super::shadow_ledger::{append_shadow_row, read_shadow_rows, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
-
-const SUPPORTS: &str = CLAIM_CRITERIA[0].0;
-const CONTRADICTS: &str = CLAIM_CRITERIA[1].0;
-const SAYS_NOTHING: &str = CLAIM_CRITERIA[2].0;
-const UNAVAILABLE: &str = "unavailable";
-
-fn alerts(verdict: &str) -> bool {
-    verdict == CONTRADICTS
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaimCheckRow {
-    pub at: u64,
-    pub judged: u64,
-    /// Fingerprint of the transcript, never its path.
-    pub session: String,
-    pub rubric_version: u32,
-    pub claims: usize,
-    pub code_settled: usize,
-    pub outcome: String,
-    pub verdict: String,
-    pub answers: BTreeMap<String, String>,
-    pub route_use: String,
-    pub applied: bool,
-    pub elapsed_ms: u64,
-    pub requests: u32,
-    pub redacted_lines: u32,
-    pub model: Option<String>,
-    pub input_tokens: Option<u64>,
-    pub request_digest: Option<String>,
-    pub confidence: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaimLabelRow {
-    pub kind: String,
-    pub at: u64,
-    pub label: String,
-    pub verdict: String,
-    pub applied: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agreed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_agreed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub not_compared: Option<String>,
-    pub hindsight: String,
-    pub confidence: Option<f64>,
-}
-
-struct Pending {
-    judged: u64,
-    verdict: Option<String>,
-    failure: Option<bool>,
-    confidence: Option<f64>,
-    compared: bool,
-}
 
 type Book = HashMap<PathBuf, Vec<Pending>>;
 fn book() -> &'static Mutex<Book> {
@@ -120,16 +68,13 @@ pub fn note_claim_turn(cwd: &Path, session: &Path, attempt: &str, turn: &[Conver
     detach(async move { ask_and_record(cwd, session, judged, claims, mode).await; });
 }
 
+/// The person's words that opened `turn`, read for the hindsight
+/// ([`shared::next_person_failed`]).
 fn next_person_failed(turn: &[ConversationMessage]) -> Option<bool> {
     let words = turn.iter().find(|message| message.role == MessageRole::User)?
         .blocks.iter().filter_map(|block| match block { ContentBlock::Text { text } => Some(text.as_str()), _ => None })
         .collect::<Vec<_>>().join("\n");
-    let words = words.trim_start();
-    if words.starts_with("[zo:") {
-        return None;
-    }
-    Some(["안 됐다", "안됐다", "안 돼", "안돼", "didn't work", "doesn't work"]
-        .iter().any(|prefix| words.to_lowercase().starts_with(prefix)))
+    shared::next_person_failed(&words)
 }
 
 fn label_previous(cwd: &Path, session: &Path, turn: &[ConversationMessage]) {
@@ -162,9 +107,10 @@ fn label_from_ledger(cwd: &Path, session: &Path, failure: bool) {
             verdict: row.get("verdict").and_then(serde_json::Value::as_str).map(str::to_string),
             failure: Some(failure),
             confidence: row.get("confidence").and_then(serde_json::Value::as_f64),
-            compared: row.get("outcome").and_then(serde_json::Value::as_str)
-                == Some(zerocode_core::jev::door::ANSWERED_OUTCOME)
-                && row.get("codeSettled").and_then(serde_json::Value::as_u64) == Some(0),
+            compared: shared::compared(
+                row.get("outcome").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                row.get("codeSettled").and_then(serde_json::Value::as_u64),
+            ),
         })
     });
     if let Some(done) = pending { write_label(cwd, done); }
@@ -184,45 +130,19 @@ fn settle(cwd: &Path, session: &Path, judged: u64, verdict: &str, confidence: Op
 }
 
 fn write_label(cwd: &Path, done: Pending) {
-    let (Some(verdict), Some(failure)) = (done.verdict, done.failure) else { return; };
-    let row = ClaimLabelRow {
-        kind: "label".to_string(),
-        at: super::decision_shadow::unix_millis(),
-        label: done.judged.to_string(),
-        agreed: done.compared.then(|| alerts(&verdict) == failure),
-        baseline_agreed: done.compared.then_some(!failure),
-        not_compared: (!done.compared).then(|| "not_model_comparison".to_string()),
-        verdict,
-        applied: false,
-        hindsight: if failure { "next_person_failed" } else { "next_person_continued" }.to_string(),
-        confidence: done.confidence,
-    };
+    let Some(row) = done.label(super::decision_shadow::unix_millis()) else { return; };
     let _ = append_shadow_row(&claim_check_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
 }
 
 fn questions(claims: &[ClaimCandidate]) -> BTreeMap<String, SystemOneQuestion> {
-    claims.iter().filter(|claim| claim.code == CodeVerdict::NeedsReading)
-        .map(|claim| {
-            (claim.id.clone(), SystemOneQuestion::choice(&claim_check::instructions(&claim.id), CLAIM_CRITERIA.iter().map(|(word, meaning)| (*word, Some(*meaning)))))
-        }).collect()
-}
-
-struct ClaimAnswer {
-    word: String,
-    confidence: f64,
+    shared::questions(claims, |instructions, criteria| {
+        SystemOneQuestion::choice(instructions, criteria.iter().map(|(word, meaning)| (*word, Some(*meaning))))
+    })
 }
 
 fn read_choices(response: &SystemOneResponse, asked: &BTreeMap<String, SystemOneQuestion>) -> Option<BTreeMap<String, ClaimAnswer>> {
     if response.answers.len() != asked.len() { return None; }
-    let answers = serde_json::to_value(&response.answers).ok()?;
-    let offered: BTreeSet<String> = CLAIM_CRITERIA.iter().map(|(word, _)| (*word).to_string()).collect();
-    asked.keys().map(|id| {
-        let answer = choice::read(&answers, id, &offered).ok()?;
-        let word = if answer.confidence >= f64::from(CLAIM_CHOICE_FLOOR_PERMILLE) / 1_000.0 {
-            answer.chosen
-        } else { SAYS_NOTHING.to_string() };
-        Some((id.clone(), ClaimAnswer { word, confidence: answer.confidence }))
-    }).collect()
+    shared::read_choices(&serde_json::to_value(&response.answers).ok()?, asked.keys())
 }
 
 async fn ask_and_record(cwd: PathBuf, session: PathBuf, judged: u64, claims: Vec<ClaimCandidate>, mode: JevMode) {
@@ -237,8 +157,7 @@ async fn ask_and_record(cwd: PathBuf, session: PathBuf, judged: u64, claims: Vec
         model: None, input_tokens: None, request_digest: None,
         confidence: None,
     };
-    let mut verdicts = claims.iter().filter(|claim| claim.code != CodeVerdict::NeedsReading)
-        .map(|claim| match claim.code { CodeVerdict::Contradicted => CONTRADICTS, _ => SAYS_NOTHING }).collect::<Vec<_>>();
+    let mut verdicts = shared::code_verdicts(&claims);
     let asked = questions(&claims);
     if !asked.is_empty() {
         let state = claim_check::state(&claims);
@@ -263,7 +182,7 @@ async fn ask_and_record(cwd: PathBuf, session: PathBuf, judged: u64, claims: Vec
                                     row.confidence = answers.values().map(|answer| answer.confidence)
                                         .min_by(f64::total_cmp);
                                     for (id, answer) in answers {
-                                        verdicts.push(match answer.word.as_str() { SUPPORTS => SUPPORTS, CONTRADICTS => CONTRADICTS, _ => SAYS_NOTHING });
+                                        verdicts.push(shared::answered_verdict(&answer.word));
                                         row.answers.insert(id, answer.word);
                                     }
                                 } else { row.outcome = "schema".to_string(); }
@@ -276,12 +195,12 @@ async fn ask_and_record(cwd: PathBuf, session: PathBuf, judged: u64, claims: Vec
             }
         } else { row.outcome = "invalid_request".to_string(); }
     }
-    row.verdict = if verdicts.contains(&CONTRADICTS) { CONTRADICTS } else if verdicts.len() == claims.len() && verdicts.iter().all(|word| *word == SUPPORTS) { SUPPORTS } else { SAYS_NOTHING }.to_string();
+    row.verdict = shared::turn_verdict(&verdicts, claims.len()).to_string();
     row.route_use = if row.outcome == zerocode_core::jev::door::ANSWERED_OUTCOME || row.outcome == CONTROL { mode.key() } else { ROUTE_USE_FALLBACK }.to_string();
     let ledger = claim_check_path(&cwd);
     let verdict = row.verdict.clone();
     let confidence = row.confidence;
-    let compared = row.outcome == zerocode_core::jev::door::ANSWERED_OUTCOME && row.code_settled == 0;
+    let compared = shared::compared(&row.outcome, u64::try_from(row.code_settled).ok());
     let _ = tokio::task::spawn_blocking(move || {
         let _ = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES);
         let _ = super::shadow_ledger::judge_seat_ledger(&CLAIM, &ledger, super::decision_shadow::now_ms());
