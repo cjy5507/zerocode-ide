@@ -259,7 +259,7 @@ fn turn(slug: &str, turn: usize) -> Vec<Step> {
         Step::Shell(format!("git checkout -- {build}"), String::new()),
         Step::Shell("git status --short".to_string(), String::new()),
         Step::Stop(format!(
-            "Cleaned the {build} folder.\n\nFixed src/{slug}.rs and `{tests}` passed."
+            "Cleaned the {build} folder and fixed src/{slug}.rs.\n\n`{tests}` passed."
         )),
     ]
 }
@@ -334,8 +334,15 @@ impl Shape {
         }
     }
 
-    /// One turn's events, in order, each with its event's name.
-    fn events(self, session: &str, project: &Path, steps: &[Step]) -> Vec<(String, String)> {
+    /// Turn `turn`'s events, in order, each with its event's name — every
+    /// call named by its session, its turn and its step.
+    fn events(
+        self,
+        session: &str,
+        turn: usize,
+        project: &Path,
+        steps: &[Step],
+    ) -> Vec<(String, String)> {
         let cwd = project.to_string_lossy().into_owned();
         let place = Place { session, cwd: &cwd };
         let mut out: Vec<(String, String)> = Vec::new();
@@ -363,7 +370,7 @@ impl Shape {
                 ));
             };
         for (at, step) in steps.iter().enumerate() {
-            let id = format!("{session}-call-{at}");
+            let id = format!("{session}-{turn}-call-{at}");
             match step {
                 Step::Prompt(words) => {
                     let Some(event) = self.prompt else { continue };
@@ -474,7 +481,7 @@ fn envelopes(project: &Path) -> Vec<(Shape, String, HookEnvelope)> {
         let slug = shape.agent.slug();
         let session = format!("{slug}-session");
         for at in 0..2 {
-            for (event, payload) in shape.events(&session, project, &turn(slug, at)) {
+            for (event, payload) in shape.events(&session, at, project, &turn(slug, at)) {
                 let envelope = HookEnvelope {
                     agent: shape.agent,
                     pane_key: crate::hooks::pane_key_of(TERM),
