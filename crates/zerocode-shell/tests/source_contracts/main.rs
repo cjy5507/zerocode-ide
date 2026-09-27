@@ -13693,6 +13693,35 @@ mod tests {
         );
     }
 
+    /// A failed request that carried the person's typing leaves the device's
+    /// words out of the window log (t-11740).
+    ///
+    /// Android hands typed text to the device's shell (`adb shell input
+    /// text`), and the shell's error quotes pieces of it back; the window
+    /// logged that error whole. The toast was always a fixed sentence, so
+    /// only the log changes: the two doors that send typing report the one
+    /// sentence that says it failed.
+    #[test]
+    fn a_typed_text_failure_leaves_the_devices_words_out_of_the_log() {
+        let window = window_source();
+        let sending = block_after(window, "function sendEmulatorInput(");
+        assert!(
+            sending.contains(r#"verb === "text" ? EMULATOR_TYPED_FAILURE : error"#),
+            "a failed typing request logs the device's words again:\n{sending}"
+        );
+        let routing = block_after(window, "function routeText(text) {");
+        let emulator = routing
+            .split("const target = keyboardTarget();")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            emulator.contains("reportEmulatorError(")
+                && emulator.contains("EMULATOR_TYPED_FAILURE")
+                && !emulator.contains("error,"),
+            "the terminal's typing into a device logs the device's words again:\n{emulator}"
+        );
+    }
+
     /// Typing in a diff is saved by the save that already exists.
     ///
     /// Orca's `readOnly: !editable` / `originalEditable: false` pair, and the
