@@ -481,7 +481,7 @@ const GO_ON_WORDS: &[&str] = &[
 /// before it may name a conversation (t-11540).
 ///
 /// Two kinds of prompt name nothing: one that is only a word telling the
-/// agent to go on ([`GO_ON_WORDS`], or one of them said again — `ㄱㄱㄱ`),
+/// agent to go on (`GO_ON_WORDS`, or one of them said again — `ㄱㄱㄱ`),
 /// and the one line this window types at an idle pane when mail is waiting
 /// ([`crate::orchestration::is_pointer_text`]), which a coordinator's pane
 /// receives more often than anything a person types. The whole prompt is
