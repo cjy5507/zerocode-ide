@@ -1717,6 +1717,14 @@ pub struct PaneHookReport {
     /// `UserPromptSubmit` payload's own field, clamped for a card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// That prompt says nothing about what the turn is for — a word telling
+    /// the agent to go on, or the window's own mail pointer
+    /// ([`zerocode_core::transcript::names_the_turn`]). It is still what was
+    /// asked, and still the evidence a prompt went in; it is only not a name,
+    /// so the window keeps the conversation's name it had (t-11540). Decided
+    /// here because the list of such words is the core's.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub prompt_names_nothing: bool,
     /// What the agent answered, when this event ends a turn — the payload's
     /// explicit field, or the tail of the transcript it names.
     ///
@@ -2399,6 +2407,9 @@ pub fn report_of(
             .is_some_and(|one| zerocode_core::resume_argv(envelope.agent, one).is_some()),
         session,
         event,
+        prompt_names_nothing: prompt
+            .as_deref()
+            .is_some_and(|said| !zerocode_core::transcript::names_the_turn(said)),
         prompt,
         said,
         ask,

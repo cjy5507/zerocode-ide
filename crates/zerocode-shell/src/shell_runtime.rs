@@ -926,6 +926,7 @@ pub(super) fn note_zo_pane_state(
             resumable: session.is_some(),
             session,
             prompt: None,
+            prompt_names_nothing: false,
             said: None,
             ask,
             ask_prompt: None,

@@ -303,6 +303,44 @@ impl TabLayout {
     }
 }
 
+impl TabLayout {
+    /// This tab with every pane name that names nothing replaced (t-11540).
+    ///
+    /// A name a pane was stored under is often the prompt that was last
+    /// typed into it, and the prompt a long conversation last got is `계속`:
+    /// the coordinator's pane came back from each restart named 「계속」 on
+    /// the board, the sidebar and the relation map, and a stored name outranks
+    /// every later prompt. So a title or born name that fails
+    /// [`zerocode_core::transcript::names_the_turn`] is replaced by the newest
+    /// prompt that passes in the conversation asleep in that leaf, or dropped
+    /// when there is none — the card then says the workspace, which is better
+    /// than a word that says go on. Asked where the window restores a tab, not
+    /// in [`TabLayout::normalized`]: this one reads a file.
+    #[must_use]
+    pub fn named_by_their_turns(mut self) -> TabLayout {
+        let agents = &self.agents;
+        let rename = |words: &mut HashMap<usize, String>| {
+            words.retain(|at, said| {
+                if zerocode_core::transcript::names_the_turn(said) {
+                    return true;
+                }
+                let named = agents
+                    .get(at)
+                    .and_then(|held| held.transcript_path.as_deref())
+                    .and_then(|path| zerocode_core::transcript::last_naming_prompt(Path::new(path)));
+                let Some(named) = named else {
+                    return false;
+                };
+                *said = named;
+                true
+            });
+        };
+        rename(&mut self.titles);
+        rename(&mut self.names);
+        self
+    }
+}
+
 /// Every worktree's terminal tabs, by the worktree's absolute path.
 pub type Layouts = HashMap<String, Vec<TabLayout>>;
 
@@ -508,6 +546,50 @@ mod tests {
         assert_eq!(
             layout.expanded, None,
             "an expanded pane past the end is none"
+        );
+    }
+
+    /// A stored name that only says go on is replaced by the newest request
+    /// in the conversation asleep in its leaf, or dropped when that leaf has
+    /// none to read; a name that names something is left alone (t-11540).
+    #[test]
+    fn a_stored_go_on_name_is_renamed_by_its_conversation_or_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transcript = dir.path().join("session.jsonl");
+        let line = |content: &str| {
+            serde_json::json!({ "type": "user", "message": { "role": "user", "content": content } })
+                .to_string()
+        };
+        std::fs::write(
+            &transcript,
+            format!("{}\n{}\n", line("land the board fix"), line("계속")),
+        )
+        .expect("write");
+        let wake = WakeAgent {
+            agent: "claude".to_string(),
+            key: "session_id".to_string(),
+            id: "7f0c2e7e-3a52-4d2b-9d0e-2f3b2c1d0a9e".to_string(),
+            transcript_path: Some(transcript.to_string_lossy().into_owned()),
+            interrupted: false,
+        };
+        let layout = TabLayout {
+            titles: HashMap::from([(0, "계속".to_string()), (1, "ㄱㄱ".to_string())]),
+            names: HashMap::from([(0, "계속".to_string()), (1, "ZO".to_string())]),
+            agents: HashMap::from([(0, wake)]),
+            ..bare(split(None))
+        }
+        .named_by_their_turns();
+        assert_eq!(
+            layout.titles,
+            HashMap::from([(0, "land the board fix".to_string())]),
+            "a leaf with no conversation to read loses the word"
+        );
+        assert_eq!(
+            layout.names,
+            HashMap::from([
+                (0, "land the board fix".to_string()),
+                (1, "ZO".to_string())
+            ])
         );
     }
 
