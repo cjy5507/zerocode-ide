@@ -1906,6 +1906,47 @@ fn require_unchanged_identity(config_root: &Path, account: &ClaudeAccount) -> Re
     Ok(())
 }
 
+/// Ask one account's own CLI to renew its login (t-10915) — the one road by
+/// which a login this window reads but does not run gets a fresh token.
+///
+/// The vendor's program, once ([`crate::scm_runtime::run_once`]): the
+/// renewal row's words ([`zerocode_core::login_renewal::CLAUDE_RENEWAL`]),
+/// an empty directory of this product's own to start in, no pane's
+/// coordinates, a wall that ends the whole process group. The CLI refreshes
+/// its token in its own store, as it does at every start; this window never
+/// sees the token, calls no token endpoint and writes nothing.
+///
+/// **The account's own directory as the home, not the runtime home a pane
+/// of it gets.** The run writes the CLI's account profile and caches into
+/// `CLAUDE_CONFIG_DIR` (measured: `.claude.json` rewritten), and the runtime
+/// home is the SELECTED account's — a renewal there would put another
+/// account's profile under every pane running now. The account's directory
+/// is where its own login wrote those, and the environment is the one
+/// [`probe_identity`] asks the same directory with: the launch environment
+/// ([`zerocode_core::launch_env`]) with that directory as both home and
+/// store, so the overriding variables are blanked the same way.
+///
+/// Whether the login came back is not this run's to say — the CLI exits 0
+/// over a refresh that failed. The caller reads the account again.
+pub(crate) fn renew_login(
+    program: &str,
+    account: &ClaudeAccount,
+) -> Result<crate::scm_runtime::Once, crate::scm_runtime::OnceFailure> {
+    let row = zerocode_core::login_renewal::CLAUDE_RENEWAL;
+    let dir = account.config_dir.as_str();
+    let headers = std::env::var(zerocode_core::account::CUSTOM_HEADERS_VAR).ok();
+    let env = zerocode_core::launch_env(headers.as_deref(), Some(dir), Some(dir));
+    let argv: Vec<String> = row.argv.iter().map(|word| (*word).to_string()).collect();
+    crate::scm_runtime::run_once(
+        program,
+        crate::computer_use::errand::value::one_shot_dir().as_deref(),
+        &argv,
+        &env,
+        row.stdin,
+        LOGIN_PROBE_DEADLINE,
+    )
+}
+
 /// How long one row's probe may take before it is abandoned as unanswered.
 ///
 /// Every probe is a CLI start, and the settings panel runs one per account at

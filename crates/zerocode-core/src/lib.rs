@@ -60,6 +60,7 @@ pub mod lane;
 pub mod launch;
 pub mod linear;
 pub mod localhost_label;
+pub mod login_renewal;
 pub mod mermaid;
 pub mod notify;
 pub mod notify_call;

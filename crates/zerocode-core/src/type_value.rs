@@ -542,26 +542,37 @@ pub const ANTHROPIC_WIRE: AnthropicWire = AnthropicWire {
 /// ([`read`]) and the asker's wall bound what it may write.
 #[must_use]
 pub fn claude_cli_argv(row: &ValueRow, system: &str) -> Vec<String> {
-    [
-        "-p",
-        "--model",
-        row.model.as_str(),
-        "--output-format",
-        "json",
-        "--no-session-persistence",
-        "--tools",
-        "",
-        "--setting-sources",
-        "",
-        "--strict-mcp-config",
-        "--disable-slash-commands",
-        "--system-prompt",
-        system,
-    ]
-    .iter()
-    .map(|word| (*word).to_string())
-    .collect()
+    CLAUDE_HEADLESS
+        .iter()
+        .copied()
+        .chain([
+            "--model",
+            row.model.as_str(),
+            "--disable-slash-commands",
+            "--system-prompt",
+            system,
+        ])
+        .map(str::to_string)
+        .collect()
 }
+
+/// Claude Code once, headless, with every door a pane's session would open
+/// shut: no session saved, no tool offered, no settings file read (so no
+/// pane's hook is loaded), no MCP server, and the answer as the CLI's one
+/// JSON result. The words every headless Claude run of this window starts
+/// with — the login road's question ([`claude_cli_argv`]) and the login
+/// renewal ([`crate::login_renewal`]).
+pub const CLAUDE_HEADLESS: &[&str] = &[
+    "-p",
+    "--output-format",
+    "json",
+    "--no-session-persistence",
+    "--tools",
+    "",
+    "--setting-sources",
+    "",
+    "--strict-mcp-config",
+];
 
 /// What the [`Road::CodexCli`] road runs after the program's name (t-10372):
 /// Codex once, headless, on the row's model at the row's reasoning rung
