@@ -491,10 +491,10 @@ function routeText(text) {
     const target = emulator.platform === "android"
       ? { serial: emulator.udid }
       : { udid: emulator.udid };
-    invoke(`${prefix}_text`, { ...target, text }).catch((error) =>
+    invoke(`${prefix}_text`, { ...target, text }).catch(() =>
       reportEmulatorError(
         emulator,
-        error,
+        EMULATOR_TYPED_FAILURE,
         "emulator.inputFailed",
         true,
       )
