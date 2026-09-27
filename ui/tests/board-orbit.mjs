@@ -47,6 +47,7 @@
  *   node ui/tests/board-orbit.mjs --perf --dpr 2       2배 밀도(Chromium, CDP)
  *   node ui/tests/board-orbit.mjs --shots <dir>        6·20·60 × 다크·라이트 사진 여섯 장 + 좁은 판 한 장
  *   node ui/tests/board-orbit.mjs --main-shots <dir>   마지막 입력이 「계속」인 메인 판: 입체·카드·사이드바 한 장씩
+ *   node ui/tests/board-orbit.mjs --main-shots <dir> --scheduled before|after   예약 점검 글이 들어온 뒤(고치기 전/뒤)
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -1724,8 +1725,10 @@ export async function measureBoardOrbit(page, { seconds = 3, fixture = {} } = {}
  * `held`(2회차): Claude Code는 에이전트가 제 세션에 걸어 둔 주기 점검 글에도 같은 훅을 울리고,
  * 누가 쳤는지는 훅 뒤에 쓰는 기록에만 적는다 — 그래서 창은 번호 붙은 프롬프트를 이름 아님으로
  * 붙잡았다가, 그 판의 다음 이벤트에서 기록이 사람 줄이라고 말하면 `named`로 싣는다. 요청은 그
- * 길로 이름이 되고, 뒤에 온 점검 글은 붙잡힌 채 끝내 이름이 되지 않는다. */
-export function mainNameFixture({ held = false } = {}) {
+ * 길로 이름이 되고, 뒤에 온 점검 글은 붙잡힌 채 끝내 이름이 되지 않는다. `scheduledNamed`는 고치기
+ * 전의 훅 길 — 점검 글이 그대로 이름감으로 온다(전 사진만). */
+export function mainNameFixture({ held = false, scheduledNamed = false } = {}) {
+  const CHECK = "[점검 — 10분마다] 우편을 읽고 도는 워커를 본다";
   const LEAD = 7101;
   const WORKERS = [7102, 7103];
   const ASKED = "보드 이름 고치고 릴리즈까지";
@@ -1763,9 +1766,10 @@ export function mainNameFixture({ held = false } = {}) {
   said(LEAD, "You have 1 orchestration message. Run `zerocode-orc check`.", true);
   said(LEAD, "계속", true);
   if (held) {
-    said(LEAD, "[점검 — 10분마다] 우편을 읽고 도는 워커를 본다", true);
+    said(LEAD, CHECK, true);
     next(LEAD, null);
   }
+  if (scheduledNamed) said(LEAD, CHECK, false);
   agentBoardMode = "graph";
   agentGraphSelectedKey = null;
   agentGraphScopeKey = "";
@@ -1820,8 +1824,9 @@ export async function testOrbitMainName(browser, origin, ok, { held = false } = 
   }
 }
 
-/* 전/후 사진(t-11540): 같은 픽스처를 입체 보기·카드 보기·사이드바에서 한 장씩. */
-async function shootMainName(browser, origin, dir) {
+/* 전/후 사진(t-11540): 같은 픽스처를 입체 보기·카드 보기·사이드바에서 한 장씩. `fixture`는
+ * 2회차의 두 장면(예약 점검 글이 들어온 뒤 — 고치기 전 `scheduledNamed`, 뒤 `held`). */
+async function shootMainName(browser, origin, dir, fixture = {}) {
   mkdirSync(dir, { recursive: true });
   const { page } = await openWindowTestPage(browser, origin);
   const shots = [];
@@ -1829,7 +1834,7 @@ async function shootMainName(browser, origin, dir) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await installBoardWaits(page);
     await installOrbitCounters(page);
-    const { lead } = await page.evaluate(mainNameFixture);
+    const { lead } = await page.evaluate(mainNameFixture, fixture);
     await page.evaluate(() => window.__BOARD_SETTLED__());
     await page.waitForFunction((key) => document.querySelector(`#board-view [data-orbit-key="${key}"]`),
       `agent:term:${lead}`, { timeout: ORBIT_ACTION_MS });
@@ -1954,6 +1959,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const perfOnly = process.argv.includes("--perf");
   const shotDir = option("--shots", null);
   const mainShotDir = option("--main-shots", null);
+  const scheduled = option("--scheduled", "");
   const dpr = Number(option("--dpr", 1));
   const { files, origin } = await createWindowServer();
   const browserType = engine === "webkit" ? webkitType() : chromium;
@@ -1966,7 +1972,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     if (mainShotDir) {
       const { browser: drawing, own } = await orbitGlBrowser(browser);
-      console.log((await shootMainName(drawing, origin, resolve(mainShotDir))).join("\n"));
+      const fixture = { before: { scheduledNamed: true }, after: { held: true } }[scheduled] ?? {};
+      console.log((await shootMainName(drawing, origin, resolve(mainShotDir), fixture)).join("\n"));
       if (own) await drawing.close();
     } else if (shotDir) {
       const shots = await shootBoardOrbit(browser, origin, resolve(shotDir), dpr);
