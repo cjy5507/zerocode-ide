@@ -16,7 +16,8 @@ const WORKER_ACTOR: &str = "actor-v1:worker";
 const ADDRESS: &str = "run:run-1";
 
 /// One message, as the ledger holds it — with no words, which the label
-/// never reads.
+/// never reads. A letter about one attempt names it after
+/// (`the_ledgers_notice`).
 fn posted(
     id: &str,
     from: &str,
@@ -25,7 +26,6 @@ fn posted(
     at: i64,
     thread: Option<&str>,
     task: Option<&str>,
-    dispatch: Option<&str>,
 ) -> Message {
     Message {
         id: id.to_string(),
@@ -38,7 +38,7 @@ fn posted(
         payload: Text::default(),
         thread: thread.map(str::to_string),
         task: task.map(str::to_string),
-        dispatch: dispatch.map(str::to_string),
+        dispatch: None,
         author_seat: None,
         created_ms: at,
     }
@@ -46,16 +46,7 @@ fn posted(
 
 /// A worker's letter to the coordinator.
 fn from_worker(id: &str, worker: &str, kind: MessageKind, at: i64, task: Option<&str>) -> Message {
-    posted(
-        id,
-        &worker_address(worker),
-        ADDRESS,
-        kind,
-        at,
-        None,
-        task,
-        None,
-    )
+    posted(id, &worker_address(worker), ADDRESS, kind, at, None, task)
 }
 
 /// The coordinator's own message.
@@ -66,7 +57,23 @@ fn from_coordinator(
     thread: Option<&str>,
     task: Option<&str>,
 ) -> Message {
-    posted(id, ADDRESS, to, MessageKind::Status, at, thread, task, None)
+    posted(id, ADDRESS, to, MessageKind::Status, at, thread, task)
+}
+
+/// The ledger's notice that attempt `dp-1` of task `t-1` went quiet.
+fn the_ledgers_notice(id: &str, at: i64) -> Message {
+    Message {
+        dispatch: Some("dp-1".to_string()),
+        ..posted(
+            id,
+            "ledger",
+            ADDRESS,
+            MessageKind::WentQuiet,
+            at,
+            None,
+            Some("t-1"),
+        )
+    }
 }
 
 /// One attempt.
@@ -587,16 +594,7 @@ fn a_finished_task_is_handled_only_by_an_act_naming_its_task() {
 #[test]
 fn a_notice_is_handled_by_an_act_naming_what_it_is_about() {
     let dispatches = vec![attempt("dp-1", "t-1", "w-1", 1)];
-    let notice = posted(
-        "m-1",
-        "ledger",
-        ADDRESS,
-        MessageKind::WentQuiet,
-        100,
-        None,
-        Some("t-1"),
-        Some("dp-1"),
-    );
+    let notice = the_ledgers_notice("m-1", 100);
     for (verb, answer) in [
         (
             "worker-stop",
@@ -745,21 +743,9 @@ fn the_start_is_the_open_batch_then_a_check_then_the_writing() {
 #[test]
 fn a_newer_letter_about_the_same_thing_supersedes_an_unhandled_one() {
     let dispatches = vec![attempt("dp-1", "t-1", "w-1", 1)];
-    let quiet = |id: &str, at: i64| {
-        posted(
-            id,
-            "ledger",
-            ADDRESS,
-            MessageKind::WentQuiet,
-            at,
-            None,
-            Some("t-1"),
-            Some("dp-1"),
-        )
-    };
     let messages = vec![
-        quiet("m-1", 100),
-        quiet("m-2", 400),
+        the_ledgers_notice("m-1", 100),
+        the_ledgers_notice("m-2", 400),
         from_coordinator("m-3", "worker:w-1", 500, None, None),
     ];
     let receipts = vec![

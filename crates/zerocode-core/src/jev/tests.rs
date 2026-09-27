@@ -2380,7 +2380,7 @@ fn the_mail_triage_records_every_letter_and_never_rises() {
     assert_eq!(MAIL_TRIAGE.apply_deadline_ms, None);
     assert_eq!(MAIL_TRIAGE.confidence_bands, None);
     assert_eq!(MAIL_TRIAGE.baseline, Baseline::None);
-    assert!(!MAIL_TRIAGE.reads_act_line);
+    const { assert!(!MAIL_TRIAGE.reads_act_line) };
     assert_eq!(MAIL_TRIAGE.rubric_version, MAIL_TRIAGE_RUBRIC_VERSION);
     assert_eq!(MAIL_TRIAGE.request_name, &["mail"]);
     assert_eq!(MAIL_TRIAGE.names, Naming::Request);

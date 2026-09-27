@@ -782,7 +782,7 @@ impl<'a> Mailroom<'a> {
     #[must_use]
     pub fn is_open(&self, letter: &Message) -> bool {
         self.open
-            .is_some_and(|batch| batch.messages.iter().any(|id| *id == letter.id))
+            .is_some_and(|batch| batch.messages.contains(&letter.id))
     }
 
     /// The worker `letter` concerns: its sender, when a worker sent it, else
