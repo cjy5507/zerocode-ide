@@ -2908,6 +2908,83 @@ mod oauth_refresh_tests {
         std::fs::remove_dir_all(managed_home).ok();
     }
 
+    /// A login a held request found mid-turn (t-11045) — or a 401 recovery —
+    /// lands in the process memo; the long-lived client takes it at the next
+    /// turn's start rather than sending the refused credential again.
+    #[test]
+    fn the_next_turn_takes_the_login_a_held_request_found() {
+        let _env_lock = crate::test_env_lock();
+        let config_home = crate::support::temp_dir("held-login-config");
+        let managed_home = crate::support::temp_dir("held-login-account");
+        let _config_home = crate::support::EnvVarGuard::set(
+            "ZO_CONFIG_HOME",
+            Some(config_home.to_str().expect("utf8 config home")),
+        );
+        let _zo_home = crate::support::EnvVarGuard::set("ZO_HOME", None);
+        let _home = crate::support::EnvVarGuard::set(
+            "HOME",
+            Some(config_home.to_str().expect("utf8 home")),
+        );
+        let _claude_home = crate::support::EnvVarGuard::set(
+            "CLAUDE_CONFIG_DIR",
+            Some(managed_home.to_str().expect("utf8 managed home")),
+        );
+        let _disable_keychain = crate::support::EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+        let _no_discovery = crate::support::EnvVarGuard::set("ZO_DISABLE_MODEL_DISCOVERY", Some("1"));
+        let _api_key = crate::support::EnvVarGuard::set("ANTHROPIC_API_KEY", None);
+        let _auth_token = crate::support::EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", None);
+        api::managed_account::clear();
+        api::invalidate_claude_code_keychain_cache();
+        let cache = CACHED_AUTH.get_or_init(|| std::sync::Mutex::new(None));
+        *cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let mut client = AnthropicRuntimeClient {
+            client: ProviderClient::Anthropic(api::AnthropicClient::from_auth(
+                api::AuthSource::BearerToken("refused-bearer".to_string()),
+            )),
+            session_id: "held-login-test".to_string(),
+            model: "claude-opus-5".to_string(),
+            auth_route: AuthRoute::Auto,
+            enable_tools: false,
+            emit_output: false,
+            allowed_tools: None,
+            tool_registry: GlobalToolRegistry::builtin(),
+            thinking: None,
+            named_effort: None,
+            effort_band_ceiling: None,
+            session_tracer: None,
+        };
+
+        // What the held request's look recorded when the login came back.
+        super::update_cached_claude_auth(
+            &api::AuthSource::BearerToken("found-while-held".to_string()),
+            AuthOrigin::Keychain,
+            Some(u64::MAX),
+            None,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(refresh_oauth_if_near_expiry(&mut client, true));
+
+        let ProviderClient::Anthropic(anthropic) = &client.client else {
+            panic!("still the Anthropic client");
+        };
+        assert_eq!(
+            anthropic.auth().bearer_token(),
+            Some("found-while-held"),
+            "the next turn sent the refused credential again"
+        );
+        *cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        api::managed_account::clear();
+        std::fs::remove_dir_all(config_home).ok();
+        std::fs::remove_dir_all(managed_home).ok();
+    }
+
     /// C3's two triggers: a person's turn looks once, and a change to the
     /// window's managed credentials file looks again whoever's turn it is; a
     /// look that failed is not repeated on every later turn.

@@ -1252,4 +1252,181 @@ mod tests {
         );
         std::fs::remove_dir_all(config_home).ok();
     }
+
+    /// An endpoint that answers only the login it was told to expect: a
+    /// request without it gets the 401 a revoked or expired login gets, one
+    /// with it a short streamed answer. Every authorization it saw is kept.
+    /// (The mock API answers without any login — the client lets a loopback
+    /// endpoint go unauthenticated — so it cannot stand in for a refusal.)
+    async fn a_login_gate(expected: &'static str) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the gate");
+        let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let heard = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 8192];
+                // Headers, then as much body as they announce.
+                while let Ok(read) = socket.read(&mut chunk).await {
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&request).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&request).to_string();
+                let authorization = text
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("authorization").then(|| value.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                heard.lock().expect("seen").push(authorization.clone());
+                let reply = if authorization == format!("Bearer {expected}") {
+                    let body = concat!(
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_gate\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"back\"}}\n\n",
+                        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n",
+                        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    );
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    let body = r#"{"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired"}}"#;
+                    format!(
+                        "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = socket.write_all(reply.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (base_url, seen)
+    }
+
+    /// A request whose Claude login is gone does not end the turn (t-11045):
+    /// it waits where it stands, says why once, and when a login appears in the
+    /// store it goes on as the same request, sent with that login.
+    #[test]
+    fn a_request_whose_claude_login_is_gone_waits_and_goes_on_once_one_is_back() {
+        let _lock = crate::test_env_lock();
+        let home = tempfile::tempdir().expect("an empty zo home");
+        let store = tempfile::tempdir().expect("the Claude folder");
+        let home_path = home.path().to_str().expect("utf8 home");
+        let _config_home = crate::support::EnvVarGuard::set("ZO_CONFIG_HOME", Some(home_path));
+        let _zo_home = crate::support::EnvVarGuard::set("ZO_HOME", None);
+        let _home = crate::support::EnvVarGuard::set("HOME", Some(home_path));
+        let _claude_home = crate::support::EnvVarGuard::set(
+            "CLAUDE_CONFIG_DIR",
+            Some(store.path().to_str().expect("utf8 store")),
+        );
+        let _disable_keychain = crate::support::EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+        let _no_discovery = crate::support::EnvVarGuard::set("ZO_DISABLE_MODEL_DISCOVERY", Some("1"));
+        let _api_key = crate::support::EnvVarGuard::set("ANTHROPIC_API_KEY", None);
+        let _auth_token = crate::support::EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", None);
+        api::managed_account::clear();
+        api::invalidate_claude_code_keychain_cache();
+        crate::runtime_support::forget_cached_claude_auth();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(async {
+            let (gate, seen) = a_login_gate("signed-in-again").await;
+            // The login this client was built with has since been refused.
+            let client = ProviderClient::Anthropic(
+                api::AnthropicClient::from_auth(api::AuthSource::BearerToken(
+                    "refused-login".to_string(),
+                ))
+                .with_base_url(gate),
+            );
+            let live = LiveAsyncApiClient::new(
+                client,
+                "claude-sonnet-4-6".to_string(),
+                AuthRoute::Auto,
+                false,
+                None,
+                GlobalToolRegistry::builtin(),
+                None,
+                None,
+                None,
+            );
+            let request = ApiRequest {
+                system_prompt: Arc::from(Vec::<String>::new()),
+                wire_reminders: Arc::from(Vec::<String>::new()),
+                messages: Arc::new(vec![runtime::ConversationMessage::user_text("go on")]),
+                tool_choice: None,
+                effort_override: None,
+                effort_step: None,
+                model_override: None,
+            };
+            let (render_tx, mut render_rx) = mpsc::channel(256);
+            let held = tokio::spawn(async move {
+                live.stream_async(request, render_tx, BlockId(1)).await
+            });
+
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(!held.is_finished(), "the request ended instead of waiting for a login");
+
+            // The person signs in again; the store holds a login.
+            std::fs::write(
+                store.path().join(".credentials.json"),
+                r#"{"claudeAiOauth":{"accessToken":"signed-in-again","scopes":["user:inference"]}}"#,
+            )
+            .expect("the login comes back");
+            let events = tokio::time::timeout(std::time::Duration::from_secs(20), held)
+                .await
+                .expect("the request went on once the login was back")
+                .expect("the request task")
+                .expect("the same request, answered");
+            assert!(!events.is_empty(), "the answer streamed");
+
+            let seen = seen.lock().expect("seen").clone();
+            assert_eq!(
+                seen,
+                vec!["Bearer refused-login".to_string(), "Bearer signed-in-again".to_string()],
+                "refused once, sent again only with the login that came back"
+            );
+            let mut rows = Vec::new();
+            while let Ok(block) = render_rx.try_recv() {
+                if let RenderBlock::System { text, .. } = block {
+                    rows.push(text);
+                }
+            }
+            assert!(
+                rows.iter().any(|row| row.starts_with("Claude login needed")),
+                "the wait said why: {rows:?}"
+            );
+            assert!(
+                rows.iter().any(|row| row.starts_with("Claude login is back")),
+                "and that it was over: {rows:?}"
+            );
+        });
+        crate::runtime_support::forget_cached_claude_auth();
+        api::managed_account::clear();
+    }
 }
