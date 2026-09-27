@@ -152,10 +152,127 @@ fn account_backoff_key(id: &str) -> String {
 /// both with no request made; a refused or failed request answers `error`
 /// with the endpoint's own classification, and the number stays unknown —
 /// never 0%, never somebody else's.
-pub(super) fn scan_claude_account_usage_now(account: &zerocode_core::ClaudeAccount) -> Scanned {
-    scan_claude_account_usage_with(account, accounts::account_login, |login, now_ms| {
-        usage_oauth::claude(Some(login), now_ms)
-    })
+///
+/// A read refused for a stale token asks the account's own CLI to renew the
+/// login once and reads again ([`scan_claude_account_usage_renewing`]) —
+/// unless `may_renew` is false: a live pane runs as this account, and its
+/// CLI keeps that login itself.
+pub(super) fn scan_claude_account_usage_now(
+    account: &zerocode_core::ClaudeAccount,
+    may_renew: bool,
+) -> (Scanned, Renewal) {
+    scan_claude_account_usage_renewing(
+        account,
+        accounts::account_login,
+        |login, now_ms| usage_oauth::claude(Some(login), now_ms),
+        |account| {
+            if !may_renew {
+                return Renewed::Withheld;
+            }
+            claude_program()
+                .and_then(|program| accounts::renew_login(&program, account).ok())
+                .map_or(Renewed::Failed, Renewed::Ran)
+        },
+    )
+}
+
+/// What a renewal asked of the account's own CLI came back as.
+pub(super) enum Renewed {
+    /// The CLI ran to its end — which says nothing yet about the login.
+    Ran(crate::scm_runtime::Once),
+    /// No CLI on this machine, or it would not start or outlived its wall.
+    Failed,
+    /// Not asked: a live pane runs as this account (t-10915).
+    Withheld,
+}
+
+/// What one read did about a stale token, for its log line — a word, a
+/// duration and a token count; never a token, never the CLI's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Renewal {
+    /// The read was not refused for its token.
+    NotNeeded,
+    Withheld,
+    /// The CLI could not run to its end, in `ms`; the read stands.
+    Failed {
+        ms: u128,
+    },
+    /// The CLI ran, in `ms`, and its own result says it spent `tokens`.
+    Ran {
+        ms: u128,
+        tokens: Option<u64>,
+    },
+}
+
+impl Renewal {
+    /// The log line's words: nothing for a read that needed no renewal.
+    pub(super) fn words(self) -> String {
+        match self {
+            Self::NotNeeded => String::new(),
+            Self::Withheld => " renewal=withheld".to_string(),
+            Self::Failed { ms } => format!(" renewal=failed renew_ms={ms}"),
+            Self::Ran { ms, tokens } => format!(
+                " renewal=ran renew_ms={ms} renew_tokens={}",
+                tokens.map_or_else(|| "?".to_string(), |tokens| tokens.to_string())
+            ),
+        }
+    }
+}
+
+/// Whether a read was refused because the login's token is no longer good —
+/// the one refusal a renewal can answer.
+fn refused_for_its_token(usage: &usage::ProviderUsage) -> bool {
+    usage.status == "error"
+        && usage.failure_kind == Some(zerocode_core::usage_limit::FailureKind::StaleToken)
+}
+
+/// [`scan_claude_account_usage_with`], and — when that read was refused for
+/// a stale token — one renewal by the account's own CLI (`renew`) and one
+/// read more (t-10915).
+///
+/// The renewal is judged by that second read and nothing else, since the
+/// CLI exits 0 over a refresh that failed: still refused, or the store now
+/// empty, and the login itself is gone — [`ACCOUNT_LOGIN_EXPIRED`], a
+/// person's "log in again", which no timer answers with another renewal. A
+/// CLI that never ran to its end learned nothing, and the first read stands
+/// as it was: unread, and tried again on the ordinary beat.
+pub(super) fn scan_claude_account_usage_renewing(
+    account: &zerocode_core::ClaudeAccount,
+    mut read_login: impl FnMut(&zerocode_core::ClaudeAccount) -> accounts::AccountLogin,
+    mut ask: impl FnMut(&str, i64) -> Result<usage_oauth::OauthUsage, usage_http::Failure>,
+    renew: impl FnOnce(&zerocode_core::ClaudeAccount) -> Renewed,
+) -> (Scanned, Renewal) {
+    let first = scan_claude_account_usage_with(account, &mut read_login, &mut ask);
+    if !refused_for_its_token(&first.usage) {
+        return (first, Renewal::NotNeeded);
+    }
+    let started = Instant::now();
+    let once = match renew(account) {
+        Renewed::Withheld => return (first, Renewal::Withheld),
+        Renewed::Failed => {
+            let ms = started.elapsed().as_millis();
+            return (first, Renewal::Failed { ms });
+        }
+        Renewed::Ran(once) => once,
+    };
+    let renewal = Renewal::Ran {
+        ms: started.elapsed().as_millis(),
+        tokens: crate::computer_use::errand::value::read_claude(&once, 0)
+            .ok()
+            .and_then(|said| said.tokens)
+            .map(|tokens| tokens.input + tokens.output),
+    };
+    let mut second = scan_claude_account_usage_with(account, &mut read_login, &mut ask);
+    if refused_for_its_token(&second.usage) || second.usage.status == "signed_out" {
+        second.usage = claude_reading_failed(
+            ACCOUNT_LOGIN_EXPIRED,
+            "이 계정의 CLI가 로그인을 갱신하지 못했습니다 — 다시 로그인하세요".to_string(),
+            None,
+            None,
+            Some(account.id.clone()),
+        );
+    }
+    (second, renewal)
 }
 
 /// The same read with its two doors handed in — the account's own login and
@@ -272,6 +389,12 @@ pub(super) fn land_claude_account_usage(
 /// person asks again (t-7538, astra A2).
 pub(super) const ACCOUNT_LOGIN_REFUSED: &str = "denied";
 
+/// The status of an account whose own CLI was asked to renew its login and
+/// that still would not read (t-10915): the login itself is gone, and only
+/// a person's "log in again" brings it back. Held like a refused keychain:
+/// the answer to a failed renewal is never another renewal on a timer.
+pub(super) const ACCOUNT_LOGIN_EXPIRED: &str = "login_expired";
+
 /// The status of a read whose figures were outside 0–100 (astra R6).
 pub(super) const ACCOUNT_READING_INVALID: &str = "invalid";
 
@@ -303,10 +426,15 @@ impl AccountPoll {
 /// request per login per floor, however many roads ask.
 ///
 /// Answers how many reads went out.
+///
+/// `kept` names the accounts a live pane runs as: their reads are made, but
+/// a stale token is not renewed under them — the pane's CLI keeps that login
+/// itself, and two processes refreshing one login at once can end it.
 pub(super) fn refresh_inactive_claude_accounts(
     config_root: &Path,
     local_data_root: &Path,
     why: AccountPoll,
+    kept: &std::collections::HashSet<String>,
 ) -> usize {
     let store = accounts::read_store(config_root);
     let active = zerocode_core::active_account(&store.accounts, &store.selection)
@@ -328,11 +456,13 @@ pub(super) fn refresh_inactive_claude_accounts(
             .as_ref()
             .is_some_and(|snapshot| now - snapshot.updated_at < why.floor_ms());
         // A keychain that refused is asked again by a person's press and by
-        // nothing else: every automated ask would be one more dialog.
+        // nothing else: every automated ask would be one more dialog. A
+        // login its own CLI could not renew is held the same way — the
+        // answer to a failed renewal is a person, never another renewal.
         let refused = why != AccountPoll::Person
-            && held
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.status == ACCOUNT_LOGIN_REFUSED);
+            && held.as_ref().is_some_and(|snapshot| {
+                [ACCOUNT_LOGIN_REFUSED, ACCOUNT_LOGIN_EXPIRED].contains(&snapshot.status.as_str())
+            });
         if young
             || refused
             || usage_scan_holds_for(
@@ -354,9 +484,10 @@ pub(super) fn refresh_inactive_claude_accounts(
         sent += 1;
         let config_root = config_root.to_path_buf();
         let local_data_root = local_data_root.to_path_buf();
+        let may_renew = !kept.contains(&account.id);
         std::thread::spawn(move || {
             let started = Instant::now();
-            let result = scan_claude_account_usage_now(&account);
+            let (result, renewal) = scan_claude_account_usage_now(&account, may_renew);
             let line = usage_read_line(
                 "claude-account",
                 result.road,
@@ -372,7 +503,11 @@ pub(super) fn refresh_inactive_claude_accounts(
                 .remove(&account.id);
             note_window_event(
                 &local_data_root,
-                &format!("{line} account={} landed={landed}", account.id),
+                &format!(
+                    "{line} account={} landed={landed}{}",
+                    account.id,
+                    renewal.words()
+                ),
             );
         });
     }

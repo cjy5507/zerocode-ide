@@ -293,7 +293,14 @@ pub(crate) fn claude_account_usage(
     } else {
         AccountPoll::Ambient
     };
-    let sent = refresh_inactive_claude_accounts(state.config_root(), state.local_data_root(), why);
+    // The accounts a live pane runs as keep their own logins (t-10915).
+    let kept = state
+        .pane_accounts()
+        .values()
+        .map(|pane| pane.account.clone())
+        .collect();
+    let sent =
+        refresh_inactive_claude_accounts(state.config_root(), state.local_data_root(), why, &kept);
     let plan = first;
     let store = accounts::read_store(state.config_root());
     let map = claude_account_usage_cache(state.local_data_root())

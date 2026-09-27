@@ -124,7 +124,7 @@ impl Setup {
 /// instructions, its remembered notes — and none of that is the question:
 /// one value asked from a checkout carried 17,194 input tokens, the same
 /// value from an empty directory 501 (2026-09-26, the Claude login).
-fn one_shot_dir() -> Option<PathBuf> {
+pub(crate) fn one_shot_dir() -> Option<PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join("zerocode-one-shot");
@@ -524,7 +524,7 @@ fn once_word(failure: OnceFailure) -> String {
 /// What Claude Code's one JSON result says (`--output-format json`): the
 /// text of `result`, and what the request carried and wrote — or, when the
 /// result is an error, the word for why.
-fn read_claude(once: &Once, bytes_out: usize) -> Result<Said, String> {
+pub(crate) fn read_claude(once: &Once, bytes_out: usize) -> Result<Said, String> {
     let Ok(parsed) = serde_json::from_str::<Value>(once.stdout.trim()) else {
         return Err(if once.success {
             SCHEMA.to_string()
