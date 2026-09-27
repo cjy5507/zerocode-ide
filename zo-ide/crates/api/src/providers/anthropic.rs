@@ -238,13 +238,12 @@ fn adaptive_thinking_for_model(model: &str) -> crate::types::ThinkingConfig {
 }
 
 /// The ways back in to a Claude login this build offers, said once for every
-/// message that names them: the window's account row, or the account's own
-/// CLI. Zo keeps no Claude sign-in of its own — there is no `zo login` and no
-/// `/login` in this build — so a message that sends a person to either sends
-/// them nowhere (t-11045).
+/// message that names them — the road is [`crate::sign_in::CLAUDE`]'s. Zo
+/// keeps no Claude sign-in of its own, so a message that sends a person to
+/// `/login` sends them nowhere (t-11045).
 macro_rules! claude_sign_in_again {
     () => {
-        "sign in again — the window's Settings › Claude accounts › Sign in again, or `claude` in a terminal"
+        concat!("sign in again — ", claude_sign_in_road!())
     };
 }
 

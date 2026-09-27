@@ -1,3 +1,6 @@
+// First, so the sign-in macros are in scope for every module after it.
+#[macro_use]
+pub mod sign_in;
 mod client;
 mod credential;
 mod error;

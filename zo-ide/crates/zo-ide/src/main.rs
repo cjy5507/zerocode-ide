@@ -82,10 +82,13 @@ fn answered_before_a_session(argv: &[String]) -> Option<Answered> {
         .map(|(_, answer)| answer(rest))
 }
 
+/// How a verb answers, given the words after it.
+type Answer = fn(&[String]) -> Answered;
+
 /// The verbs themselves, by the word a person types. Data rather than a
 /// `match`, so a message that names a `zo` verb can be checked against the
 /// verbs this build really has (`main_tests`).
-const ANSWERED_BEFORE_A_SESSION: &[(&str, fn(&[String]) -> Answered)] = &[
+const ANSWERED_BEFORE_A_SESSION: &[(&str, Answer)] = &[
     ("--doctor", run_doctor),
     ("cron", run_cron),
     ("scoreboard", run_scoreboard),
