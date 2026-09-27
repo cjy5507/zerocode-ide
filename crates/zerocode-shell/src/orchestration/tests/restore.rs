@@ -253,7 +253,11 @@ pub(super) fn the_window_goes(census: &dyn Fn() -> restart_census::RestartCensus
 /// The census as the goodbye reads it, off this window's own tables, with
 /// no process table to read commands from.
 pub(super) fn census_without_commands() -> restart_census::RestartCensus {
-    restart_census::take(&|_| None, &|| Err("no process table here".to_string()))
+    restart_census::take(
+        &|_| None,
+        &|| Err("no process table here".to_string()),
+        &Vec::new,
+    )
 }
 
 pub(super) fn row(worker: &str) -> zerocode_core::orchestration::WorkerRow {
@@ -761,11 +765,15 @@ fn eight_tabs_come_back_as_seven_conversations_and_one_notice() {
     );
     let w3_term = w3.2;
     let census = || {
-        restart_census::take(&|term| (term == w3_term).then_some(ROOT), &|| {
-            Ok(crate::resource_usage::ProcessSample::from_ps_listing(
-                &listing,
-            ))
-        })
+        restart_census::take(
+            &|term| (term == w3_term).then_some(ROOT),
+            &|| {
+                Ok(crate::resource_usage::ProcessSample::from_ps_listing(
+                    &listing,
+                ))
+            },
+            &Vec::new,
+        )
     };
     timeline.mark("goodbye".to_string());
     the_window_goes(&census, &[w1.2, w2.2, w3.2, w4.2, w5.2, w6.2]);

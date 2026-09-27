@@ -184,6 +184,7 @@ fn a_wake_hears_only_what_the_goodbye_cut_and_hears_it_once() {
             },
         ],
         coordinators: Vec::new(),
+        tabs: Vec::new(),
         took_ms: 0,
     };
     restart_census::leave_cut(root.path(), &census, &|_| false).expect("the goodbye's note");

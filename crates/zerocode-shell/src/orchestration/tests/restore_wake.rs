@@ -573,6 +573,7 @@ fn a_rest_the_goodbye_kept_never_overwrites_what_the_pane_said_since() {
         &restart_census::RestartCensus {
             workers: vec![at_rest("w-spoke", SPOKE), at_rest("w-silent", SILENT)],
             coordinators: Vec::new(),
+            tabs: Vec::new(),
             took_ms: 0,
         },
         &|_| false,
@@ -797,5 +798,100 @@ fn a_coordinator_is_told_nothing_when_its_run_was_idle_or_its_pane_was_the_perso
         );
         assert_eq!(door.typed(tab).0, 0, "{shape}");
         crate::agent_teams::forget_term(tab);
+    }
+}
+
+/// t-11537 C, the person's report at 06:33: the window restarted at the
+/// update notice's 「지금」, their zo tab came back mid-plan with two items
+/// left, and sat until they typed 「계속」 (`term 1 resumed zo session-
+/// nudge=none receipt=none`). A person's own tab whose turn the restart cut
+/// is told once to go on, by the road a worker's wake takes — without the
+/// ledger's seat sentence, it has none. A tab at rest, and one the person's
+/// own hand stopped, come back as they stood; the same restart's second
+/// wake of the tab says nothing.
+#[test]
+fn a_persons_tab_whose_turn_the_restart_cut_is_told_once_to_go_on() {
+    const RUNNING: u32 = 1_153_800;
+    const RESTED: u32 = 1_153_801;
+    const HELD: u32 = 1_153_802;
+    const RUNNING_BACK: u32 = 1_153_806;
+    const RESTED_BACK: u32 = 1_153_807;
+    const HELD_BACK: u32 = 1_153_808;
+    const AGAIN: u32 = 1_153_809;
+    const NO_LEADER: u32 = 1_153_810;
+    let (_window, store) = PrivateWindow::boot();
+    let _beat = one_beat_at_a_time();
+    let checkout = tempfile::tempdir().expect("the person's checkout");
+    let session = |id: &str| zerocode_core::ProviderSession {
+        key: zerocode_core::SessionKey::SessionId,
+        id: id.to_string(),
+        transcript_path: None,
+    };
+    let tabs = [
+        (RUNNING, "session-t11537-tab-running"),
+        (RESTED, "session-t11537-tab-rested"),
+        (HELD, "session-t11537-tab-held"),
+    ];
+    super::super::pane_turn_began(RUNNING, clock());
+    for (term, interrupted) in [(RESTED, false), (HELD, true)] {
+        super::super::pane_turn_began(term, clock());
+        super::super::pane_turn_ended(term, clock(), interrupted, clock());
+    }
+    let census = || {
+        restart_census::take(
+            &|_| None,
+            &|| Err("no process table here".to_string()),
+            &|| {
+                tabs.iter()
+                    .map(|(term, id)| restart_census::KeyedPane {
+                        key: restart_census::tab_key("zo", &session(id)),
+                        term: *term,
+                    })
+                    .collect()
+            },
+        )
+    };
+    the_window_goes(&census, &[]);
+    assert_eq!(
+        logged(&format!("exit: tab on terminal {RUNNING} · turn running")),
+        1,
+        "the goodbye did not name the tab whose turn it cut"
+    );
+    the_ledger_reopens(&store);
+    the_next_boot(NO_LEADER);
+
+    let door = Door::new(checkout.path());
+    for ((_, id), back) in tabs.iter().zip([RUNNING_BACK, RESTED_BACK, HELD_BACK]) {
+        door.wake(back, "zo", id).expect("the tab's wake");
+    }
+    door.settle();
+    let (asked, reached) = door.typed(RUNNING_BACK);
+    assert_eq!(
+        asked, 1,
+        "the tab whose turn was cut was not told once to go on"
+    );
+    assert!(reached[0].starts_with(crate::RESTART_NUDGE), "{reached:?}");
+    assert!(
+        !reached[0].contains(crate::restart_nudge_runtime::RESEATED_NUDGE),
+        "a person's tab was told of a ledger seat: {reached:?}"
+    );
+    for back in [RESTED_BACK, HELD_BACK] {
+        assert_eq!(door.typed(back).0, 0, "terminal {back} was told to go on");
+    }
+    for back in [RUNNING_BACK, RESTED_BACK, HELD_BACK] {
+        crate::agent_teams::forget_term(back);
+    }
+
+    // The same restart, the tab opened again: nothing more is owed.
+    let again = Door::new(checkout.path());
+    again.wake(AGAIN, "zo", tabs[0].1).expect("the second wake");
+    again.settle();
+    assert_eq!(again.typed(AGAIN).0, 0, "the same restart was said twice");
+    crate::agent_teams::forget_term(AGAIN);
+    for (term, _) in tabs {
+        super::super::pane_turns()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .remove(&term);
     }
 }

@@ -1102,6 +1102,7 @@ mod tests {
                 .map(cut)
                 .collect(),
                 coordinators: Vec::new(),
+                tabs: Vec::new(),
                 took_ms: 0,
             },
             &|_| false,
@@ -1189,6 +1190,7 @@ mod tests {
                     })
                     .collect(),
                 coordinators: Vec::new(),
+                tabs: Vec::new(),
                 took_ms: 0,
             },
             &|_| false,

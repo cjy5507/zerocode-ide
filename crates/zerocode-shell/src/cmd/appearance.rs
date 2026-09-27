@@ -963,7 +963,29 @@ pub(crate) fn take_census(app: &AppHandle) -> crate::orchestration::restart_cens
             .handle(term)
             .and_then(|held| lock_pty(&held).pid())
     };
-    crate::orchestration::restart_census::take(&root_of, &resource_usage::enumerate_processes)
+    // Every pane holding a conversation the window knows, each by the key its
+    // tab is filed under (t-11537 C): the census keeps the workers' and the
+    // coordinators' own, and the rest are a person's tabs.
+    let conversations = || {
+        let agents = state.agent_terms().clone();
+        let sessions = state.pane_sessions().clone();
+        agents
+            .into_iter()
+            .filter_map(|(term, agent)| {
+                sessions
+                    .get(&term)
+                    .map(|session| crate::orchestration::restart_census::KeyedPane {
+                        key: crate::orchestration::restart_census::tab_key(agent, session),
+                        term,
+                    })
+            })
+            .collect()
+    };
+    crate::orchestration::restart_census::take(
+        &root_of,
+        &resource_usage::enumerate_processes,
+        &conversations,
+    )
 }
 
 /// Close and reopen this process, so a material asked for at startup can be

@@ -14489,11 +14489,15 @@ fn the_goodbye_names_its_road_and_what_it_cuts_under_each_worker() {
          501 64282 64281 64282 0 1 Thu Sep 24 01:00:00 2026 /bin/zsh -lc just shell-test\n"
     );
     let census = || {
-        super::restart_census::take(&|term| (term == WORKER).then_some(ROOT), &|| {
-            Ok(crate::resource_usage::ProcessSample::from_ps_listing(
-                &listing,
-            ))
-        })
+        super::restart_census::take(
+            &|term| (term == WORKER).then_some(ROOT),
+            &|| {
+                Ok(crate::resource_usage::ProcessSample::from_ps_listing(
+                    &listing,
+                ))
+            },
+            &Vec::new,
+        )
     };
 
     super::window_exiting(clock(), crate::exit_runtime::ExitRoad::Close, &census);

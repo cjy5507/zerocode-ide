@@ -4499,7 +4499,10 @@ pub(crate) fn window_exiting(
     // Once per exit for the road, and whenever there are workers to name:
     // the first call is the one that finds them, before they sleep.
     let first = !GOODBYE_SAID.swap(true, std::sync::atomic::Ordering::SeqCst);
-    if (first || !taken.workers.is_empty() || !taken.coordinators.is_empty())
+    if (first
+        || !taken.workers.is_empty()
+        || !taken.coordinators.is_empty()
+        || !taken.tabs.is_empty())
         && let Some(root) = BLACKBOX.get()
     {
         // What each worker's wake will be told was cut (t-6428 ⑤) — left
@@ -4837,7 +4840,7 @@ pub(crate) fn seated_live_workers() -> Vec<restart_census::Seated> {
 /// that holds it (t-11537): the run's live seat, where this window's team
 /// table maps it. What the goodbye writes down beside the workers, so the
 /// wake that brings the coordinator's conversation back knows it was here.
-pub(crate) fn seated_coordinators() -> Vec<restart_census::SeatedCoordinator> {
+pub(crate) fn seated_coordinators() -> Vec<restart_census::KeyedPane> {
     with_ledger_seats(|ledger, seats| {
         ledger
             .runs()
@@ -4845,8 +4848,8 @@ pub(crate) fn seated_coordinators() -> Vec<restart_census::SeatedCoordinator> {
             .filter_map(|run| {
                 let (team, pane) = run.coordinator_live()?.seat.split_once('/')?;
                 let term = seats.get(team).and_then(|panes| panes.get(pane))?;
-                Some(restart_census::SeatedCoordinator {
-                    address: run.address(),
+                Some(restart_census::KeyedPane {
+                    key: run.address(),
                     term: *term,
                 })
             })

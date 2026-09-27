@@ -112,24 +112,40 @@ pub(crate) struct WorkerCut {
     pub(crate) commands: Option<Vec<String>>,
 }
 
-/// One run's coordinator seated in this window — the run's live seat, at a
-/// pane this window's team table maps to a terminal (t-11537).
+/// A pane the goodbye files under a key other than a worker's id: a run's
+/// coordinator under the run's address, `run:<id>` (t-11537), and a
+/// person's tab under its conversation ([`tab_key`], t-11537 C) — each at
+/// the terminal this window holds it in.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SeatedCoordinator {
-    /// The run's address, `run:<id>` — the key its entry in the goodbye's
-    /// note is filed under, beside the workers' ids.
-    pub(crate) address: String,
+pub(crate) struct KeyedPane {
+    pub(crate) key: String,
     pub(crate) term: u32,
 }
 
-/// One run's coordinator, as the census found it: only its turn. What it
-/// was coordinating is the ledger's to say, at the wake.
+/// One such pane, as the census found it: only its turn. What a
+/// coordinator was coordinating is the ledger's to say, at the wake.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CoordinatorCut {
-    pub(crate) address: String,
+pub(crate) struct KeyedCut {
+    pub(crate) key: String,
     pub(crate) term: u32,
     pub(crate) turn: Turn,
 }
+
+/// What a person's tab is filed under in the goodbye's note: its
+/// conversation's identity as the ledger spells a caller
+/// ([`zerocode_core::orchestration::receipt_actor`]) — a digest, so the note
+/// never holds the conversation's id, which is private restart material.
+/// The goodbye and the wake that resumes the tab both ask here.
+pub(crate) fn tab_key(agent: &str, session: &zerocode_core::ProviderSession) -> String {
+    format!(
+        "{TAB_KEY_PREFIX}{}",
+        zerocode_core::orchestration::receipt_actor(agent, session.key, &session.id)
+    )
+}
+
+/// The prefix a person's tab is filed under, beside `w-` workers and `run:`
+/// coordinators.
+const TAB_KEY_PREFIX: &str = "tab:";
 
 /// Every live worker seated in this window, read at one moment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -139,7 +155,11 @@ pub(crate) struct RestartCensus {
     /// [`Self::busy`]: the restart question is about work a restart cuts,
     /// and a coordinator's pane is the person's conversation — its wake reads
     /// its entry, and nothing asks the person about it.
-    pub(crate) coordinators: Vec<CoordinatorCut>,
+    pub(crate) coordinators: Vec<KeyedCut>,
+    /// Every other pane holding a conversation this window knows — a
+    /// person's own tab (t-11537 C) — by its turn alone, and outside
+    /// [`Self::busy`] for the same reason.
+    pub(crate) tabs: Vec<KeyedCut>,
     /// What the reading cost, for the goodbye's line.
     pub(crate) took_ms: u64,
 }
@@ -209,21 +229,32 @@ impl RestartCensus {
 /// Read the census. `root_of` answers the process at the root of a terminal
 /// (the window's pty table); `table` reads the host's process table, once,
 /// and only when some worker is seated here at all. Every run's coordinator
-/// seated here is read beside them, by its turn alone (t-11537).
+/// seated here is read beside them, by its turn alone (t-11537), and so is
+/// every other pane `conversations` names (term and [`tab_key`]) — a
+/// person's tab (t-11537 C).
 pub(crate) fn take(
     root_of: &dyn Fn(u32) -> Option<u32>,
     table: &dyn Fn() -> Result<ProcessSample, String>,
+    conversations: &dyn Fn() -> Vec<KeyedPane>,
 ) -> RestartCensus {
     let started = Instant::now();
     let seated = super::seated_live_workers();
     let coordinators = super::seated_coordinators();
-    if seated.is_empty() && coordinators.is_empty() {
+    let tabs: Vec<KeyedPane> = conversations()
+        .into_iter()
+        .filter(|one| {
+            !seated.iter().any(|worker| worker.term == one.term)
+                && !coordinators.iter().any(|seat| seat.term == one.term)
+        })
+        .collect();
+    if seated.is_empty() && coordinators.is_empty() && tabs.is_empty() {
         return RestartCensus::default();
     }
     let terms: std::collections::HashSet<u32> = seated
         .iter()
         .map(|one| one.term)
         .chain(coordinators.iter().map(|one| one.term))
+        .chain(tabs.iter().map(|one| one.term))
         .collect();
     let turns: HashMap<u32, PaneTurn> = {
         let held = super::pane_turns()
@@ -269,17 +300,20 @@ pub(crate) fn take(
             }
         })
         .collect();
-    let coordinators = coordinators
-        .into_iter()
-        .map(|one| CoordinatorCut {
-            turn: turn_of(one.term),
-            address: one.address,
-            term: one.term,
-        })
-        .collect();
+    let keyed = |panes: Vec<KeyedPane>| -> Vec<KeyedCut> {
+        panes
+            .into_iter()
+            .map(|one| KeyedCut {
+                turn: turn_of(one.term),
+                key: one.key,
+                term: one.term,
+            })
+            .collect()
+    };
     RestartCensus {
         workers,
-        coordinators,
+        coordinators: keyed(coordinators),
+        tabs: keyed(tabs),
         took_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     }
 }
@@ -553,10 +587,21 @@ pub(crate) fn leave_cut(
         })
         .chain(census.coordinators.iter().map(|one| {
             (
-                one.address.clone(),
+                one.key.clone(),
                 Cut {
                     turn: one.turn == Turn::Running,
                     ended: one.turn.ended(),
+                    ..Cut::default()
+                },
+            )
+        }))
+        // A person's tab is owed a word only for a turn the restart cut: one
+        // at rest, or one their own hand stopped, comes back as it stood.
+        .chain(census.tabs.iter().map(|one| {
+            (
+                one.key.clone(),
+                Cut {
+                    turn: one.turn == Turn::Running,
                     ..Cut::default()
                 },
             )
@@ -711,7 +756,14 @@ pub(crate) fn goodbye_lines(road: &str, choice: &str, census: &RestartCensus) ->
     for one in &census.coordinators {
         lines.push(format!(
             "exit: coordinator of {} on terminal {} · turn {}",
-            one.address,
+            one.key,
+            one.term,
+            one.turn.word()
+        ));
+    }
+    for one in &census.tabs {
+        lines.push(format!(
+            "exit: tab on terminal {} · turn {}",
             one.term,
             one.turn.word()
         ));
@@ -739,6 +791,7 @@ mod tests {
             RestartCensus {
                 workers,
                 coordinators: Vec::new(),
+                tabs: Vec::new(),
                 took_ms: 0,
             }
             .busy()
@@ -770,6 +823,7 @@ mod tests {
             RestartCensus {
                 workers,
                 coordinators: Vec::new(),
+                tabs: Vec::new(),
                 took_ms: 0,
             }
             .busy()
@@ -813,6 +867,7 @@ mod tests {
                 named("w-3", None),
             ],
             coordinators: Vec::new(),
+            tabs: Vec::new(),
             took_ms: 0,
         };
         leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye leaves its note");
@@ -839,6 +894,7 @@ mod tests {
                 ..worker(Turn::Unheard, None)
             }],
             coordinators: Vec::new(),
+            tabs: Vec::new(),
             took_ms: 0,
         };
         leave_cut(later.path(), &unheard, &nobody_asleep).expect("no note");
@@ -847,6 +903,7 @@ mod tests {
         let rested = RestartCensus {
             workers: vec![named("w-4", Some(&[]))],
             coordinators: Vec::new(),
+            tabs: Vec::new(),
             took_ms: 0,
         };
         leave_cut(later.path(), &rested, &nobody_asleep).expect("the rest's note");
@@ -875,6 +932,7 @@ mod tests {
                 named("w-unheard", Turn::Unheard, None),
             ],
             coordinators: Vec::new(),
+            tabs: Vec::new(),
             took_ms: 0,
         };
         leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye leaves its note");
@@ -936,6 +994,7 @@ mod tests {
                 ..worker(Turn::Asking, Some(&[]))
             }],
             coordinators: Vec::new(),
+            tabs: Vec::new(),
             took_ms: 0,
         };
         let busy = asking.busy();
@@ -953,6 +1012,7 @@ mod tests {
                 ..worker(Turn::Asking, Some(&["just gate"]))
             }],
             coordinators: Vec::new(),
+            tabs: Vec::new(),
             took_ms: 0,
         };
         leave_cut(root.path(), &gate, &nobody_asleep).expect("the goodbye");
@@ -991,8 +1051,8 @@ mod tests {
             worker: id.to_string(),
             ..worker(turn, commands)
         };
-        let coordinator = |run: &str, turn: Turn| CoordinatorCut {
-            address: format!("run:{run}"),
+        let coordinator = |run: &str, turn: Turn| KeyedCut {
+            key: format!("run:{run}"),
             term: 7,
             turn,
         };
@@ -1009,6 +1069,7 @@ mod tests {
                 coordinator("run-asks", Turn::Asking),
                 coordinator("run-unheard", Turn::Unheard),
             ],
+            tabs: Vec::new(),
             took_ms: 0,
         };
         leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye");
@@ -1111,11 +1172,12 @@ mod tests {
                     ..worker(Turn::Interrupted, Some(&[]))
                 },
             ],
-            coordinators: vec![CoordinatorCut {
-                address: "run:run-1".to_string(),
+            coordinators: vec![KeyedCut {
+                key: "run:run-1".to_string(),
                 term: 7,
                 turn: Turn::Rest,
             }],
+            tabs: Vec::new(),
             took_ms: 0,
         };
         leave_cut(newer.path(), &census, &nobody_asleep).expect("the goodbye");
@@ -1153,6 +1215,7 @@ mod tests {
                 },
             ],
             coordinators: Vec::new(),
+            tabs: Vec::new(),
             took_ms: 0,
         };
         leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye");
@@ -1195,6 +1258,7 @@ mod tests {
                     named("w-back", Turn::Running, Some(&[])),
                 ],
                 coordinators: Vec::new(),
+                tabs: Vec::new(),
                 took_ms: 0,
             },
             &asleep,
@@ -1208,6 +1272,7 @@ mod tests {
             &RestartCensus {
                 workers: vec![named("w-live", Turn::Rest, Some(&["just gate"]))],
                 coordinators: Vec::new(),
+                tabs: Vec::new(),
                 took_ms: 0,
             },
             &asleep,
@@ -1240,6 +1305,7 @@ mod tests {
                     named("w-ended", Turn::Running, Some(&[])),
                 ],
                 coordinators: Vec::new(),
+                tabs: Vec::new(),
                 took_ms: 0,
             },
             &asleep,
@@ -1252,6 +1318,7 @@ mod tests {
             &RestartCensus {
                 workers: vec![named("w-back-2", Turn::Rest, Some(&["just gate"]))],
                 coordinators: Vec::new(),
+                tabs: Vec::new(),
                 took_ms: 0,
             },
             &asleep,
@@ -1337,6 +1404,7 @@ mod tests {
                 },
             ],
             coordinators: Vec::new(),
+            tabs: Vec::new(),
             took_ms: 38,
         };
         let lines = goodbye_lines("close", "gap", &census);
