@@ -851,7 +851,8 @@ function dressAgentGraphWait(chip, wait) {
  * 서고 사실의 단계가 되지 않는다.
  *
  * `flag`는 그 seam이 그 낱말을 고를 때 읽는 원장 행의 칸이다(`reported`는 행의
- * 보고, 나머지는 `review`의 칸). 지난 결과 사건을 누를 때 그 사건이 적은 사실이
+ * 보고, `failed`는 그 보고가 실패였다는 행의 칸(t-10993), 나머지는 `review`의 칸).
+ * 지난 결과 사건을 누를 때 그 사건이 적은 사실이
  * 지금도 **같은 사실로** 서 있는지 이 칸으로 묻는다(`agentGraphLiveStageHolds`). */
 const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
   { stage: "deployed", flag: "deployed", key: "board.deployed", word: "배포됨" },
@@ -860,6 +861,7 @@ const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
   { stage: "claimed-deployed", flag: "claimed_deployed", key: "board.claimedDeployed", word: "배포됐다 함" },
   { stage: "claimed-merged", flag: "claimed_merged", key: "board.claimedMerged", word: "병합됐다 함" },
   { stage: "claimed-verified", flag: "claimed_verified", key: "board.claimedVerified", word: "검증됐다 함" },
+  { stage: "failed", flag: "failed", key: "board.desk.stageFailed", word: "실패" },
   { stage: "reported", flag: "reported", key: "board.awaitingReview", word: "검증 대기" },
 ]);
 
@@ -870,6 +872,7 @@ const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
 function ledgerReviewStage(place, row) {
   const said = ledgerReviewWord({
     reported: place?.reported === true || row?.reported === true,
+    failed: row?.failed === true,
     review: row?.review ?? null,
   });
   return AGENT_GRAPH_LIVE_STAGES.find((one) => t(one.key, one.word) === said)?.stage
@@ -886,9 +889,9 @@ function agentGraphLiveStageHolds(stage, place, row) {
 
 /* 표의 한 줄이 가리키는 원장 칸이 참인가 — 위와 아래(서명)가 같은 이 한 손으로 묻는다. */
 function agentGraphLiveFlagHolds(held, place, row) {
-  return held.flag === "reported"
-    ? place?.reported === true || row?.reported === true
-    : row?.review?.[held.flag] === true;
+  if (held.flag === "reported") return place?.reported === true || row?.reported === true;
+  if (held.flag === "failed") return row?.failed === true;
+  return row?.review?.[held.flag] === true;
 }
 
 /* 판의 서명에 드는 결과의 사실들 — 카드마다, 지금 서 있는 단계의 칸들. 지도가

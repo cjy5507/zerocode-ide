@@ -311,9 +311,47 @@ fn past_the_envelopes(prompt: &str) -> &str {
     rest
 }
 
+/// The frame a CLI writes around a block the person pasted:
+/// `<pasted_content id="…">` before it and `</pasted_content id="…">` after.
+const PASTED_FRAMES: [&str; 2] = ["<pasted_content", "</pasted_content"];
+
+/// `text` without the frames a CLI wrote around what was pasted into it —
+/// what was pasted stays, the frame tags go (t-10993).
+///
+/// A title that shows the frame shows this window's plumbing instead of the
+/// words: a finished worker's sidebar row read `<pasted_content id="8a76">
+/// You are a worke…`. The one reading of that frame — the card prompt, a
+/// restart's remembered prompt, a stored session's title and the pointer
+/// replay all ask here. A frame that never closes swallows the rest, as an
+/// unclosed envelope does (`past_the_envelopes`). Text with no frame is
+/// handed back as it is.
+#[must_use]
+pub fn without_pasted_frames(text: &str) -> std::borrow::Cow<'_, str> {
+    let next_frame = |rest: &str| PASTED_FRAMES.iter().filter_map(|tag| rest.find(tag)).min();
+    let Some(mut at) = next_frame(text) else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        kept.push_str(&rest[..at]);
+        let Some(end) = rest[at..].find('>') else {
+            return std::borrow::Cow::Owned(kept);
+        };
+        rest = &rest[at + end + 1..];
+        match next_frame(rest) {
+            Some(found) => at = found,
+            None => break,
+        }
+    }
+    kept.push_str(rest);
+    std::borrow::Cow::Owned(kept)
+}
+
 /// The prompt a `UserPromptSubmit` hook payload carries, clamped for a card.
 ///
-/// Machine envelopes are dropped first (see `MACHINE_ENVELOPES`), so a card
+/// The frames around a pasted block ([`without_pasted_frames`]) and the
+/// machine envelopes are dropped first (see `MACHINE_ENVELOPES`), so a card
 /// shows the sentence a person typed under the scaffolding rather than the
 /// scaffolding — and shows nothing at all when the whole turn was machinery.
 pub fn prompt_in_payload(payload: &str) -> Option<String> {
@@ -324,7 +362,8 @@ pub fn prompt_in_payload(payload: &str) -> Option<String> {
 #[must_use]
 pub fn prompt_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<String> {
     let value = payload.tree()?;
-    let prompt = past_the_envelopes(value.get("prompt")?.as_str()?).trim();
+    let unframed = without_pasted_frames(value.get("prompt")?.as_str()?);
+    let prompt = past_the_envelopes(&unframed).trim();
     (!prompt.is_empty()).then(|| clamp(prompt))
 }
 
@@ -2260,6 +2299,37 @@ mod tests {
         assert_eq!(
             prompt_in_payload(&payload("<div>keep me</div>")).as_deref(),
             Some("<div>keep me</div>")
+        );
+    }
+
+    /// The frame a CLI writes around a pasted block is not a title (t-10993).
+    ///
+    /// Reported from the sidebar on 2026-09-27: a finished worker's row read
+    /// `<pasted_content id="8a76"> You are a worke…`. The brief was pasted,
+    /// the CLI framed it, and the row printed the frame. What was pasted
+    /// stays — only the frame goes, open and close alike, on the prompt road
+    /// and over a line a card already clamped to one.
+    #[test]
+    fn a_pasted_frame_is_not_part_of_the_prompt() {
+        let payload = |prompt: &str| serde_json::json!({ "prompt": prompt }).to_string();
+        let pasted = "<pasted_content id=\"8a76\">\nYou are a worker in this window.\n</pasted_content id=\"8a76\">\n\nNow do this: fix the sidebar";
+        assert_eq!(
+            prompt_in_payload(&payload(pasted)).as_deref(),
+            Some("You are a worker in this window. Now do this: fix the sidebar")
+        );
+        assert_eq!(
+            without_pasted_frames("<pasted_content id=\"8a76\"> You are a worke…").trim(),
+            "You are a worke…"
+        );
+        // Nothing framed, nothing copied.
+        assert!(matches!(
+            without_pasted_frames("<div>keep me</div>"),
+            std::borrow::Cow::Borrowed("<div>keep me</div>")
+        ));
+        // A frame that never closes has nothing after it to keep.
+        assert_eq!(
+            without_pasted_frames("kept <pasted_content id=\"x"),
+            "kept "
         );
     }
 

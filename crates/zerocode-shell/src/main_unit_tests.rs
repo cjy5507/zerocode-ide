@@ -15220,6 +15220,16 @@ fn a_retained_session_is_scanned_named_and_gated() {
         Some("orca 를 완벽하게 리버스")
     );
     assert_eq!(claude_session_title("{\"type\":\"summary\"}\n"), None);
+    // A pasted brief titles the session by what was pasted, never by the
+    // frame the CLI wrote around it (t-10993).
+    let pasted = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":",
+        "\"<pasted_content id=\\\"8a76\\\">\\nYou are a worker\\n</pasted_content id=\\\"8a76\\\">\"}}\n",
+    );
+    assert_eq!(
+        claude_session_title(pasted).as_deref(),
+        Some("You are a worker")
+    );
 
     let launching = block_after(shipped_backend(), "fn launch_agent_tab(");
     assert!(

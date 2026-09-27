@@ -465,8 +465,9 @@ pub(crate) fn finished(run: &Run, task: &Task) -> bool {
 }
 
 /// Whether a run is in play: somebody is coordinating it, or somebody is
-/// still working for it. A finished run with nobody at it is history.
-fn in_play(run: &Run) -> bool {
+/// still working for it. A finished run with nobody at it is history — on the
+/// desk, and for the board's rows of finished work (`ledger_agents_for_seats`).
+pub(crate) fn in_play(run: &Run) -> bool {
     run.coordinator_live().is_some()
         || run
             .workers

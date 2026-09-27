@@ -1469,11 +1469,31 @@ pub(crate) fn settled_checkouts() -> Vec<SettledCheckout> {
         return Vec::new();
     };
     drop(image);
+    let mut answered: Vec<SettledCheckout> = settled_workers(&ledger)
+        .into_iter()
+        .map(|(_, worker, at)| SettledCheckout {
+            path: at.to_string(),
+            worker: worker.id.clone(),
+            agent: worker.agent.clone(),
+        })
+        .collect();
+    // Sorted so a sweep that judges only a few per pass walks them in the
+    // same order every time rather than in a hash map's.
+    answered.sort_by(|left, right| left.path.cmp(&right.path));
+    answered
+}
+
+/// Every settled checkout ([`settled_checkouts`]) with the last worker to sit
+/// in it and that worker's run — the one walk behind the reclaim's listing and
+/// the board's rows for finished work ([`ledger_agents_for_seats`], t-10993).
+fn settled_workers(ledger: &Ledger) -> Vec<(&zerocode_core::orchestration::Run, &Worker, &str)> {
     let mut summoned: std::collections::HashSet<&str> = std::collections::HashSet::new();
     // Keyed by path, holding the newest settled worker seen for it — a
     // checkout handed from one worker to the next reports the last one.
-    let mut settled: std::collections::HashMap<&str, (i64, &Worker)> =
-        std::collections::HashMap::new();
+    let mut settled: std::collections::HashMap<
+        &str,
+        (&zerocode_core::orchestration::Run, &Worker),
+    > = std::collections::HashMap::new();
     for run in ledger.runs() {
         for worker in &run.workers {
             let Some(checkout) = worker.checkout.as_deref() else {
@@ -1487,25 +1507,17 @@ pub(crate) fn settled_checkouts() -> Vec<SettledCheckout> {
                 summoned.insert(at);
                 continue;
             }
-            let entry = settled.entry(at).or_insert((worker.started_ms, worker));
-            if worker.started_ms >= entry.0 {
-                *entry = (worker.started_ms, worker);
+            let entry = settled.entry(at).or_insert((run, worker));
+            if worker.started_ms >= entry.1.started_ms {
+                *entry = (run, worker);
             }
         }
     }
-    let mut answered: Vec<SettledCheckout> = settled
+    settled
         .into_iter()
         .filter(|(at, _)| !summoned.contains(at))
-        .map(|(at, (_, worker))| SettledCheckout {
-            path: at.to_string(),
-            worker: worker.id.clone(),
-            agent: worker.agent.clone(),
-        })
-        .collect();
-    // Sorted so a sweep that judges only a few per pass walks them in the
-    // same order every time rather than in a hash map's.
-    answered.sort_by(|left, right| left.path.cmp(&right.path));
-    answered
+        .map(|(at, (run, worker))| (run, worker, at))
+        .collect()
 }
 
 /// Ask the same question again about ONE checkout, right before acting on it.
@@ -1748,6 +1760,20 @@ pub(crate) struct LedgerAgent {
     /// reported, and the ledger wrote the ending down. This is the worker's
     /// own claim of being done; what a coordinator made of it is `review`.
     pub(crate) reported: bool,
+    /// Whether that closed dispatch ended WITHOUT a successful report — a
+    /// `worker_done` saying `ok:false`, or an attempt stopped or abandoned
+    /// (`Dispatch::succeeded` other than `Some(true)`). The row then says the
+    /// attempt failed rather than that it waits for review.
+    pub(crate) failed: bool,
+    /// A row for a worker the ledger RELEASED, kept because the work it
+    /// finished still stands in its checkout ([`settled_workers`]): no seat, no
+    /// summons — the board shows the work, and the roster of summoned workers
+    /// leaves it out (t-10993).
+    pub(crate) settled: bool,
+    /// The provider conversation the worker ran in (`Worker::session`), by id —
+    /// what lets a surface holding that conversation's own row name the row
+    /// after the task instead of after the prompt.
+    pub(crate) session: Option<String>,
     pub(crate) dispatch_id: String,
     pub(crate) dispatch_started_ms: i64,
     pub(crate) retry_of: Option<String>,
@@ -2040,11 +2066,19 @@ fn graph_overlay_snapshot_for_seats(
     }
 }
 
-/// Every worker the ledger still holds, seat or no seat.
+/// Every worker the ledger still holds, seat or no seat — and the work a
+/// released worker finished, while it still stands.
 ///
 /// Bounded by the ledger's OUTSTANDING rows, not its history: a released
 /// worker is a summons somebody answered and is not drawn. One run in this
-/// window holds sixty-five released rows beside two live ones.
+/// window holds sixty-five released rows beside two live ones. The one
+/// exception is the last worker of a checkout nobody holds any more
+/// ([`settled_workers`]) whose last attempt closed, in a run still in play,
+/// while that checkout stands on disk (t-10993): its pane went with the
+/// `worker_done`, but its work is still there waiting for a coordinator, and
+/// a board without it showed finished work by vanishing. That row is
+/// `settled`, seatless, and leaves when the checkout is reclaimed or the run
+/// goes quiet — five on this machine the day it was written.
 pub(crate) fn ledger_agents() -> Vec<LedgerAgent> {
     with_ledger_seats(ledger_agents_for_seats).unwrap_or_default()
 }
@@ -2152,35 +2186,57 @@ fn latest_worker_dispatches(
 
 fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<LedgerAgent> {
     let mut listed = Vec::new();
+    // The released workers whose work may still stand (t-10993), by run and
+    // worker; which of them does is asked below, once their run is in play.
+    let settled: std::collections::HashMap<(&str, &str), &str> = settled_workers(ledger)
+        .into_iter()
+        .map(|(run, worker, at)| ((run.id.as_str(), worker.id.as_str()), at))
+        .collect();
     for run in ledger.runs() {
         let latest_dispatches = latest_worker_dispatches(run);
+        let in_play = desk::in_play(run);
         for worker in &run.workers {
-            if !worker.state.still_summoned() {
+            let finished = !worker.state.still_summoned();
+            if finished
+                && !(in_play
+                    && settled
+                        .get(&(run.id.as_str(), worker.id.as_str()))
+                        .is_some_and(|at| std::path::Path::new(at).is_dir()))
+            {
                 continue;
             }
             /* Pane names are reusable, so a seat only belongs to the worker
              * occupying it NOW — the same filter `worker-list` applies for
              * the same reason. A historical row that kept the pane name must
-             * not borrow its replacement's terminal. */
+             * not borrow its replacement's terminal. A released worker has
+             * no seat: its pane went with it. */
             let term = seats
                 .get(worker.team.as_str())
                 .and_then(|team| team.get(worker.pane.as_str()))
                 .copied()
                 .filter(|_| {
-                    run.worker_in_pane(&worker.team, &worker.pane)
-                        .is_some_and(|current| current.id == worker.id)
+                    !finished
+                        && run
+                            .worker_in_pane(&worker.team, &worker.pane)
+                            .is_some_and(|current| current.id == worker.id)
                 });
             let dispatch = worker
                 .dispatch
                 .as_ref()
                 .and_then(|id| run.dispatch(id))
                 .or_else(|| latest_dispatches.get(worker.id.as_str()).copied());
+            // Finished work is an attempt that closed; a released worker whose
+            // last attempt never did has nothing here to show.
+            if finished && dispatch.is_none_or(|one| one.is_open()) {
+                continue;
+            }
             let carried = dispatch.and_then(|one| run.task(&one.task));
             let task = carried
                 .map(|held| held.display_name().to_string())
                 .unwrap_or_default();
             let task_id = carried.map(|held| held.id.clone()).unwrap_or_default();
             let reported = dispatch.is_some_and(|one| !one.is_open());
+            let failed = dispatch.is_some_and(|one| !one.is_open() && one.succeeded != Some(true));
             let dispatch_id = dispatch.map(|one| one.id.clone()).unwrap_or_default();
             let dispatch_started_ms = dispatch.map_or(0, |one| one.started_ms);
             let retry_of = dispatch.and_then(|one| one.retry_of.clone());
@@ -2214,12 +2270,23 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 task,
                 task_id,
                 reported,
+                failed,
+                settled: finished,
+                session: worker.session.as_ref().map(|session| session.id.clone()),
                 dispatch_id,
                 dispatch_started_ms,
                 retry_of,
                 review,
                 term,
-                at: worker.started_ms,
+                // Finished work is dated by when its attempt ended — the
+                // moment the board's card and the sidebar's clock count from.
+                at: if finished {
+                    dispatch
+                        .and_then(|one| one.ended_ms)
+                        .unwrap_or(worker.started_ms)
+                } else {
+                    worker.started_ms
+                },
                 model: worker.model.clone(),
                 effort: worker.effort.clone(),
                 pane: worker.pane.clone(),
