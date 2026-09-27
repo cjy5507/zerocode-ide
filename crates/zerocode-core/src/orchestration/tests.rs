@@ -25015,3 +25015,99 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
     assert_eq!(difficulty_effort("codex", "high"), Some("max"));
     assert_eq!(difficulty_effort("cursor", "low"), None);
 }
+
+#[test]
+fn summon_outcome_requires_receipt_and_bound_landing_and_a_retry_revokes_success() {
+    use crate::summon_difficulty::outcomes::observe;
+    let mut bench = Bench::new();
+    bench.json("run-create --name outcomes");
+    let task = bench.json("task-create --spec translate")["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let worker = bench.json(&format!(
+        "worker-start --agent claude --task {task} --prompt translate"
+    ));
+    let pane = worker["pane"].as_str().unwrap();
+    let dispatch = bench.ledger.runs()[0].dispatches[0].id.clone();
+    let cost = task_cost::GenerationCost {
+        usd_reason: Some(task_cost::UsdReason::Unlinked),
+        ..Default::default()
+    };
+    let read = |bench: &Bench| {
+        let run = &bench.ledger.runs()[0];
+        let total = task_cost::task_cost(
+            run,
+            &task,
+            &task_cost::SessionBook::default(),
+            task_cost::JevTally::default(),
+        );
+        observe(run, run.dispatch(&dispatch).unwrap(), &cost, &total).unwrap()
+    };
+    assert_eq!(read(&bench).first_attempt_success, None);
+    bench.json_at(pane, "send --type worker_done --body {\"ok\":true,\"head\":\"abc1234\",\"verified\":true,\"merged\":true}");
+    assert!(read(&bench).done_with_receipts);
+    assert_eq!(read(&bench).first_attempt_success, None);
+    assert_eq!(read(&bench).tokens, None);
+    bench.json(&format!("task-update --task {task} --result {{\"verified\":true,\"merged\":true}} --attempt {dispatch} --source abc1234"));
+    assert_eq!(read(&bench).first_attempt_success, Some(true));
+    bench.json(&format!("task-update --task {task} --status ready"));
+    bench.json(&format!(
+        "worker-start --agent claude --task {task} --prompt retry --retry-of {dispatch}"
+    ));
+    let revised = read(&bench);
+    assert_eq!(revised.first_attempt_success, Some(false));
+    assert_eq!((revised.rework_rounds, revised.retry_count), (1, 1));
+}
+
+#[test]
+fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin() {
+    struct Profiles;
+    impl Launcher for Profiles {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            Catalog(&["codex", "claude"]).command_for(agent, prompt, tuning)
+        }
+        fn difficulty_profile(
+            &self,
+            agent: &str,
+            difficulty: &str,
+            _: [&str; 3],
+        ) -> Result<Option<crate::summon_difficulty::Profile>, String> {
+            crate::summon_difficulty::profile(&serde_json::Value::Null, agent, difficulty)
+        }
+        fn choose_difficulty(
+            &self,
+            _: &crate::summon_difficulty::Look,
+            _: [&str; 3],
+        ) -> Option<serde_json::Value> {
+            Some(serde_json::json!({"chosen":"low", "applied":true}))
+        }
+    }
+    let default = crate::summon_difficulty::profile(&serde_json::Value::Null, "codex", "low")
+        .unwrap()
+        .unwrap();
+    for (flags, model, effort) in [
+        ("", default.model.as_str(), default.effort.as_str()),
+        ("--effort high", default.model.as_str(), "high"),
+        ("--model gpt-custom --effort xhigh", "gpt-custom", "xhigh"),
+    ] {
+        let mut bench = Bench::new();
+        bench.json("run-create --name profiles");
+        let planned = planned_on(
+            &mut bench.ledger,
+            &mut bench.team,
+            &Profiles,
+            &format!("worker-start --agent codex --prompt translate {flags}"),
+            bench.clock + 1,
+        );
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+        assert_eq!(reply["model"], model);
+        assert_eq!(reply["effort"], effort);
+    }
+}

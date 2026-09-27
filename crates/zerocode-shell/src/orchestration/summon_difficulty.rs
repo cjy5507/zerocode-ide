@@ -53,10 +53,15 @@ fn ask(wire: &Wire, look: &Look, checkout: Option<&Path>) -> Value {
 }
 
 type OriginKey = [String; 3];
-fn origins() -> &'static std::sync::Mutex<std::collections::HashMap<OriginKey, std::path::PathBuf>>
-{
+#[derive(Clone)]
+struct HostOrigin {
+    checkout: Option<std::path::PathBuf>,
+    settings: Value,
+    fresh: bool,
+}
+fn origins() -> &'static std::sync::Mutex<std::collections::HashMap<OriginKey, HostOrigin>> {
     static ORIGINS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<OriginKey, std::path::PathBuf>>,
+        std::sync::Mutex<std::collections::HashMap<OriginKey, HostOrigin>>,
     > = std::sync::OnceLock::new();
     ORIGINS.get_or_init(Default::default)
 }
@@ -70,16 +75,52 @@ impl Drop for Origin {
             .remove(&self.0);
     }
 }
-pub(super) fn origin(key: [&str; 3], checkout: Option<std::path::PathBuf>) -> Origin {
+pub(super) fn origin(key: [&str; 3], checkout: Option<std::path::PathBuf>, fresh: bool) -> Origin {
+    // Read the table outside the ledger actor. A handover has already sealed
+    // its launch settings, including an explicitly inherited CLI default.
+    origin_with(
+        key,
+        checkout,
+        fresh,
+        Wire::of_this_machine().settings_root(),
+    )
+}
+fn origin_with(
+    key: [&str; 3],
+    checkout: Option<std::path::PathBuf>,
+    fresh: bool,
+    settings: Value,
+) -> Origin {
     let key = key.map(str::to_string);
-    let mut held = origins()
+    origins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            key.clone(),
+            HostOrigin {
+                checkout,
+                settings,
+                fresh,
+            },
+        );
+    Origin(key)
+}
+
+pub(super) fn profile(
+    agent: &str,
+    level: &str,
+    origin: [&str; 3],
+) -> Result<Option<difficulty::Profile>, String> {
+    let held = origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    held.remove(&key);
-    if let Some(checkout) = checkout {
-        held.insert(key.clone(), checkout);
-    }
-    Origin(key)
+    let Some(origin) = held
+        .get(&origin.map(str::to_string))
+        .filter(|origin| origin.fresh)
+    else {
+        return Ok(None);
+    };
+    difficulty::profile(&origin.settings, agent, level)
 }
 
 pub(super) fn choose(look: &Look, origin: [&str; 3]) -> Option<Value> {
@@ -90,11 +131,15 @@ fn choose_with(wire: &Wire, look: &Look, origin: [&str; 3]) -> Option<Value> {
     if !crate::systemone::applies(wire, &SUMMON_DIFFICULTY) {
         return None;
     }
-    let checkout = origins()
+    let context = origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&origin.map(str::to_string))
         .cloned();
+    if context.as_ref().is_some_and(|origin| !origin.fresh) {
+        return None;
+    }
+    let checkout = context.and_then(|origin| origin.checkout);
     Some(ask(wire, look, checkout.as_deref()))
 }
 
@@ -118,6 +163,11 @@ pub(super) fn record(
     let worker = prepared.worker.clone();
     let dispatch = prepared.dispatch.clone();
     let task = prepared.task.clone();
+    let agent = prepared.agent.clone();
+    let execution_model = prepared
+        .summon_shadow
+        .as_ref()
+        .and_then(|shadow| shadow.pinned.model.clone());
     let executed_effort = prepared
         .summon_shadow
         .as_ref()
@@ -139,13 +189,115 @@ pub(super) fn record(
         row["dispatch"] = json!(dispatch.unwrap_or(worker));
         row["task"] = json!(task);
         row["mode"] = json!(mode.key());
+        row["agent"] = json!(agent);
+        row["executionModel"] = json!(execution_model);
         row["effort"] = json!(executed_effort);
         row["pinnedEffort"] = json!(shadow.teacher_effort);
+        row["baselineHigh"] = json!(shadow.baseline_high);
         if row["outcome"] == "answered" {
             difficulty::compare(&mut row, shadow.teacher_effort.as_deref());
         }
         crate::systemone::record_rows(&SUMMON_DIFFICULTY, &ledger, &[row], now_ms);
     }));
+}
+
+/// Current observations, including revisions after a retry or late usage scan.
+/// Request identity and the launch fields are carried, never reconstructed
+/// from mutable worker tuning. No transcript or human ledger is written.
+pub(super) fn observations(
+    ledger: &zerocode_core::orchestration::Ledger,
+    costs: &mut super::cost_book::CostBook,
+) -> Option<(std::path::PathBuf, Vec<Value>)> {
+    let wire = Wire::of_this_machine();
+    let path = crate::systemone::ledger_of(&wire, &SUMMON_DIFFICULTY)?;
+    let rows = crate::systemone::read_rows(&path);
+    let latest = difficulty::outcomes::latest(rows.iter());
+    let mut changed = Vec::new();
+    for request in rows.iter().filter(|row| {
+        row["outcome"] == "answered" && row["rubricVersion"] == difficulty::RUBRIC_VERSION
+    }) {
+        let Some(run) = request["run"].as_str().and_then(|id| ledger.run(id)) else {
+            continue;
+        };
+        let Some(dispatch) = request["dispatch"].as_str().and_then(|id| run.dispatch(id)) else {
+            continue;
+        };
+        let generation = costs.attempt_generation(run, dispatch);
+        let total = costs.cost(run, run.task(&dispatch.task)?);
+        let Some(outcome) = difficulty::outcomes::observe(run, dispatch, &generation, &total)
+        else {
+            continue;
+        };
+        let outcome = serde_json::to_value(outcome).ok()?;
+        if latest.iter().any(|row| {
+            row["run"] == request["run"]
+                && row["dispatch"] == request["dispatch"]
+                && row["requestAt"] == request["requestAt"]
+                && row[difficulty::outcomes::KEY] == outcome
+        }) {
+            continue;
+        }
+        let mut row = json!({"label": request["dispatch"], difficulty::outcomes::KEY: outcome});
+        for key in [
+            "run",
+            "worker",
+            "task",
+            "dispatch",
+            "requestAt",
+            "rubricVersion",
+            "chosen",
+            "agent",
+            "executionModel",
+            "effort",
+            "pinnedEffort",
+            "baselineHigh",
+            "applied",
+            "attempt",
+            "retryOf",
+        ] {
+            row[key] = request[key].clone();
+        }
+        if request["applied"] == true {
+            if let Some(success) = row[difficulty::outcomes::KEY]["firstAttemptSuccess"].as_bool() {
+                row[zerocode_core::jev::summary::AGREED.canonical] = json!(success);
+            }
+        } else if let Some(success) =
+            row[difficulty::outcomes::KEY]["firstAttemptSuccess"].as_bool()
+        {
+            row[zerocode_core::jev::summary::BASELINE_AGREED.canonical] = json!(success);
+        }
+        changed.push(row);
+    }
+    Some((path, changed))
+}
+
+pub(super) fn record_observations(
+    observations: Option<(std::path::PathBuf, Vec<Value>)>,
+    now_ms: i64,
+) {
+    static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    if let Some((path, mut rows)) = observations.filter(|(_, rows)| !rows.is_empty()) {
+        let _writer = WRITER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = crate::systemone::read_rows(&path);
+        let latest = difficulty::outcomes::latest(&held);
+        rows.retain(|row| {
+            !latest.iter().any(|old| {
+                old["run"] == row["run"]
+                    && old["dispatch"] == row["dispatch"]
+                    && old["requestAt"] == row["requestAt"]
+                    && old[difficulty::outcomes::KEY] == row[difficulty::outcomes::KEY]
+            })
+        });
+        if rows.is_empty() {
+            return;
+        }
+        for row in &mut rows {
+            row["at"] = json!(now_ms);
+        }
+        crate::systemone::record_rows(&SUMMON_DIFFICULTY, &path, &rows, now_ms);
+    }
 }
 
 #[cfg(test)]

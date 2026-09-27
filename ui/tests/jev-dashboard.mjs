@@ -1376,7 +1376,39 @@ export async function testJevDashboard(browser, origin, ok) {
           document.getElementById("typesafe-advanced").open = true;
           await window.__PAINTED__();
         });
+        const frame = page.locator(".settings-frame");
+        const scrollBefore = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
+        const clipped = await page.locator("#typesafe-key-input").evaluate((node) =>
+          node.getBoundingClientRect().top >= node.closest(".settings-frame").getBoundingClientRect().bottom);
         const card = await contrastTable(page, AxeBuilder, "#typesafe-card");
+        const scrollAfter = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
+        const key = card.find((row) => row.target === "#typesafe-key-input");
+        ok(`${theme}: the offscreen key placeholder is measured and the card's scroll is restored`,
+          clipped && key?.ratio >= CONTRAST_FLOOR && key.fg !== null && key.bg !== null
+            && JSON.stringify(scrollBefore) === JSON.stringify(scrollAfter),
+          JSON.stringify({ key, clipped, scrollBefore, scrollAfter }));
+
+        // A hidden-pass retry must also catch bad ink. Give the same input
+        // text whose ink equals its ground; this must remain below the gate.
+        const input = page.locator("#typesafe-key-input");
+        const saved = await input.evaluate((node) => {
+          const held = { value: node.value, style: node.style.cssText };
+          node.value = node.placeholder;
+          node.style.color = getComputedStyle(node).backgroundColor;
+          return held;
+        });
+        try {
+          const bad = await contrastTable(page, AxeBuilder, "#typesafe-card");
+          const badKey = bad.find((row) => row.target === key?.target);
+          ok(`${theme}: low contrast in the offscreen input still fails the contrast floor`,
+            badKey?.ratio !== null && badKey?.ratio < CONTRAST_FLOOR,
+            JSON.stringify(badKey));
+        } finally {
+          await input.evaluate((node, held) => {
+            node.value = held.value;
+            node.style.cssText = held.style;
+          }, saved);
+        }
         await page.evaluate(() => {
           document.getElementById("typesafe-advanced").open = false;
           setSettingsOpen(false);

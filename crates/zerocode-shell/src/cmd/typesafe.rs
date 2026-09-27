@@ -62,6 +62,14 @@ pub(crate) fn set_route_classifier(mode: String) -> Result<TypeSafeSettings, Rou
     settings_now()
 }
 
+#[tauri::command(async)]
+pub(crate) fn set_summon_profiles(
+    profiles: serde_json::Value,
+) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::set_summon_profiles(&settings_path()?, &profiles)?;
+    settings_now()
+}
+
 /// Pin the model every Jev request names, or unpin it with an empty word
 /// (`smart.jevModel`, t-6187). Its own door, like the classifier's: no seat's
 /// switch, and a model id rather than a mode.

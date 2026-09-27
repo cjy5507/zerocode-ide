@@ -144,6 +144,17 @@ fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
         );
         let mut marked = rows.clone();
         marked.extend(marks_that_rise(seat, asked));
+        if seat.id == crate::summon_difficulty::QUESTION {
+            assert_eq!(
+                judge_seat(seat, &marked).unwrap().verdict,
+                Verdict::Hold(Line::TooFewCompared {
+                    compared: 0,
+                    wanted: floor
+                }),
+                "agreement marks are not executions"
+            );
+            continue;
+        }
         assert_eq!(
             judge_seat(seat, &marked).expect("judged").verdict,
             Verdict::Rise,
@@ -1357,6 +1368,16 @@ fn a_seat_whose_labels_never_say_no_cannot_rise() {
                 })
                 .collect()
         });
+        if seat.id == crate::summon_difficulty::QUESTION {
+            assert_eq!(
+                judge_seat(seat, &all_yes).unwrap().verdict,
+                Verdict::Hold(Line::TooFewCompared {
+                    compared: 0,
+                    wanted: crate::summon_difficulty::outcomes::MIN_EXECUTIONS
+                })
+            );
+            continue;
+        }
         assert_eq!(
             judge_seat(seat, &all_yes).expect("judged").verdict,
             Verdict::Hold(Line::OneSided {
