@@ -4375,10 +4375,26 @@ const themeScene = async (mode, from) => glPage.evaluate(async ({ mode, from }) 
   for (let wait = 0; wait < 3; wait += 1) await frame();
   return { painter: knowledgePainterFor(view).id, mode: knowledgeMode };
 }, { mode, from });
-/* 전이(`--motion-fast`)가 끝난 뒤의 캔버스 — 이름표 층도 캔버스 안이라 함께 찍힌다. */
+/* 전이가 끝난 뒤의 **GL 층** — 캔버스 위의 HTML·SVG 층(범례, 배율 단추, 알림, 이름판의 <svg>, 이름표
+ * 오버레이)은 숨기고 찍는다. 그 층들은 스타일시트가 곧 옷이라 이 결함과 무관하고, 범례 점의 가장자리
+ * 한 픽셀이 합성의 반올림으로 한 단계 달라지는 일이 있다(실측 Chromium: GL 층은 0, 범례 점 1픽셀). 끝이
+ * 있는 애니메이션(테마가 건 CSS 전이)도 다 끝나기를 기다린다. */
 const themeShot = async () => {
   await glPage.waitForTimeout(700);
-  return glPage.locator(".knowledge-view:not([hidden]) .knowledge-canvas").screenshot();
+  await glPage.evaluate(() => Promise.all(document.getAnimations()
+    .filter((one) => Number.isFinite(one.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY))
+    .map((one) => one.finished.catch(() => null))));
+  const layers = ".knowledge-cluster-legend, .knowledge-zoom, .knowledge-error, .knowledge-crumb, .knowledge-legend,"
+    + " .knowledge-picture, .knowledge-gl-labels";
+  await glPage.evaluate((layers) => {
+    for (const one of document.querySelectorAll(layers)) one.style.visibility = "hidden";
+    return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  }, layers);
+  const shot = await glPage.locator(".knowledge-view:not([hidden]) .knowledge-canvas").screenshot();
+  await glPage.evaluate((layers) => {
+    for (const one of document.querySelectorAll(layers)) one.style.visibility = "";
+  }, layers);
+  return shot;
 };
 const themeRuns = [];
 for (const mode of ["global", "local"]) {
@@ -4540,6 +4556,111 @@ ok("GL local exploration wears the SVG's grammar: no nebula, spokes apart from c
     && Math.abs(localGrammar.centreRadius - localGrammar.centreBody * localGrammar.centreScale) < 0.01
     && localGrammar.centreHalo !== "none" && localGrammar.centreRing,
   JSON.stringify(localGrammar));
+
+/* 주제의 이름판은 그리는 글자만큼 자리를 쥔다(t-11500). 쪽 수 줄은 이름표가 판 다음에 앉은 뒤에야
+ * 「48쪽 · 이름 +48」이 되므로, 판이 설 때 「48쪽」으로 재면 그린 줄의 대부분이 격자가 모르는 칸에
+ * 선다(옛 코드: 선 판 모두). 판이 그린 줄마다 그 가운데 줄의 칸이 모두 이번 격자에 쥐어졌는지,
+ * 판의 줄끼리·판과 이름이 겹치지 않는지, 세 줄이 설 곳 없는 판이 접히는 대신 한 줄로 서는지를
+ * 두 손에서 묻는다 — 판 여섯·스물(넓은 판)과 빽빽한 좁은 판. */
+const plateScene = (tags, pages) => glPage.evaluate(async ({ tags, pages }) => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const rows = [];
+  try {
+    for (const hand of ["svg", "gl"]) {
+      knowledgePainterKind = hand;
+      knowledgeQuery = "";
+      knowledgeSelectedKey = null;
+      knowledgeClusterPicked = -1;
+      const answer = window.__buildVaultGraph__({ path: `/scene/plates-${tags}`, sources: false },
+        { pages, ghosts: 30, linksPer: 3, tags: Array.from({ length: tags }, (unused, at) => `topic-${at}`) });
+      knowledgeLayouts.delete(view);
+      const host = view.querySelector(".knowledge-nodes");
+      host.dataset.knowledgeSignature = "";
+      host.dataset.knowledgeVault = "";
+      host.replaceChildren();
+      view.querySelector(".knowledge-edges").replaceChildren();
+      noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+      setKnowledgeMode(view, "global", { paint: false });
+      knowledgeReport = answer;
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 1500 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+      const layout = knowledgeLayouts.get(view);
+      fitKnowledgeGraph(view, layout);
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const canvas = view.querySelector(".knowledge-canvas").getBoundingClientRect();
+      const cell = Math.max(1, layout.tuning.labelCell);
+      const { labelCells, labelCols, labelRows, labelGeneration } = layout;
+      const lines = [];
+      let unreserved = 0;
+      let standing = 0;
+      let oneLine = 0;
+      let folded = 0;
+      for (let rank = 0; rank < layout.namedCount; rank += 1) {
+        const held = layout.clusterEls[rank];
+        if (!held || layout.clusterTally[rank] === 0) continue;
+        if (held.label.classList.contains("is-folded")) {
+          folded += 1;
+          continue;
+        }
+        standing += 1;
+        if (held.label.classList.contains("is-one-line")) oneLine += 1;
+        for (const line of held.label.querySelectorAll(
+          ".knowledge-cluster-name, .knowledge-cluster-lead, .knowledge-cluster-count")) {
+          if (getComputedStyle(line).display === "none") continue;
+          const seat = line.getBoundingClientRect();
+          if (seat.width === 0) continue;
+          lines.push({ rank, box: [seat.left, seat.top, seat.right, seat.bottom] });
+          /* 그 줄의 가운데 줄의 칸 — 글자가 서는 모든 칸이 이번 격자에 쥐어져 있어야 한다. */
+          const row = Math.floor(((seat.top + seat.bottom) / 2 - canvas.top) / cell);
+          for (let col = Math.floor((seat.left + 1 - canvas.left) / cell);
+            col <= Math.floor((seat.right - 1 - canvas.left) / cell); col += 1) {
+            if (row < 0 || col < 0 || row >= labelRows || col >= labelCols) continue;
+            if (labelCells[row * labelCols + col] !== labelGeneration) unreserved += 1;
+          }
+        }
+      }
+      const hit = (one, two) => one[2] - two[0] > 0.5 && two[2] - one[0] > 0.5
+        && one[3] - two[1] > 0.5 && two[3] - one[1] > 0.5;
+      let overlaps = 0;
+      for (let one = 0; one < lines.length; one += 1) {
+        for (let two = one + 1; two < lines.length; two += 1) {
+          if (lines[one].rank !== lines[two].rank && hit(lines[one].box, lines[two].box)) overlaps += 1;
+        }
+      }
+      const words = [...view.querySelectorAll(".knowledge-node.is-named .knowledge-label, .knowledge-gl-label:not([hidden])")]
+        .map((word) => {
+          const seat = word.getBoundingClientRect();
+          return [seat.left, seat.top, seat.right, seat.bottom];
+        })
+        .filter((box) => box[2] > box[0]);
+      for (const line of lines) for (const word of words) if (hit(line.box, word)) overlaps += 1;
+      rows.push({ tags, hand: knowledgePainterFor(view).id, standing, oneLine, folded, unreserved, overlaps });
+    }
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error), rows };
+  } finally {
+    knowledgePainterKind = null;
+  }
+}, { tags, pages });
+const plateSeat = glPage.viewportSize();
+const plateSeats = { rows: [] };
+for (const [tags, pages, wide, tall] of [[6, 359, 1280, 860], [20, 600, 1280, 860], [20, 600, 900, 700]]) {
+  await glPage.setViewportSize({ width: wide, height: tall });
+  const scene = await plateScene(tags, pages);
+  if (scene.thrown) plateSeats.thrown = scene.thrown;
+  plateSeats.rows.push(...scene.rows.map((row) => ({ ...row, wide })));
+}
+await glPage.setViewportSize(plateSeat);
+ok("cluster plates reserve the words they wear: every drawn line sits on its own cells, no plate line meets another plate or a name, and a plate without room for three lines stands as one",
+  !plateSeats.thrown && plateSeats.rows.length === 6
+    && plateSeats.rows.every((row) => row.unreserved === 0 && row.overlaps === 0 && row.standing > 0)
+    && plateSeats.rows.filter((row) => row.wide === 1280).some((row) => row.oneLine > 0)
+    && [0, 2, 4].every((at) => JSON.stringify({ ...plateSeats.rows[at], hand: "" })
+      === JSON.stringify({ ...plateSeats.rows[at + 1], hand: "" })),
+  JSON.stringify(plateSeats));
 
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *

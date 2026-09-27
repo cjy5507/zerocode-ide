@@ -37890,9 +37890,12 @@ details.task-board-section > summary {
 }
 
 /* 좁은 판에서 이름판은 주제의 이름 한 줄이다 — 대표 지식과 쪽 수는 인스펙터와
- * 군집 범례가 계속 말한다(`placeKnowledgeLabels`가 같은 답으로 자리를 잡는다). */
+ * 군집 범례가 계속 말한다(`placeKnowledgeLabels`가 같은 답으로 자리를 잡는다). 넓은 판에서도
+ * 세 줄이 설 곳이 없는 판 하나는 같은 옷의 한 줄로 선다(`is-one-line`) — 접히는 대신. */
 .knowledge-picture.is-short-plate .knowledge-cluster-lead,
-.knowledge-picture.is-short-plate .knowledge-cluster-count {
+.knowledge-picture.is-short-plate .knowledge-cluster-count,
+.knowledge-cluster-label.is-one-line .knowledge-cluster-lead,
+.knowledge-cluster-label.is-one-line .knowledge-cluster-count {
   display: none;
 }
 
