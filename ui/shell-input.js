@@ -1718,32 +1718,60 @@ const STRAY_JAMO = /[\u3130-\u318f]/;
 const STRAY_JAMO_REPORT_EVERY_MS = 60_000;
 let strayJamoReportedAt = 0;
 
-/* Only hangul survives onto disk. The ring's memory-only promise stands for
- * everything else it heard — a password drained into a shell moments before
- * must not ride a ㅋㅋ report into a log file. The stamp and the kind are
- * the ring's own words and stay; in the payload every non-hangul character
- * becomes a dot, position kept, so the journey still reads. */
-function scrubImePayload(payload) {
-  return payload.replace(/[^\u3130-\u318f\uac00-\ud7a3 ]/g, "\u00b7");
+/* What reaches disk is the typing's SHAPE, never its letters (t-11740).
+ *
+ * The ring's memory-only promise stands for everything it heard. An earlier
+ * version let hangul through and dotted the rest, and the log then read as
+ * the person's own sentences, syllable by syllable — a file agents read to
+ * diagnose this window, whose words go on to a model provider. A half-letter
+ * bug does not need the letter: it needs to know that a composition closed
+ * on a bare consonant, where a syllable was due. So every character of a
+ * payload becomes one mark from this table — length kept, so the journey
+ * still reads: 계속 is `sS`, the split "ㄱ ㅖ 속" is `c v S`. The stamp and
+ * the kind are the ring's own words and stay. */
+const IME_SHAPE = {
+  consonant: "c", // a bare consonant jamo: 초 alone
+  vowel: "v", // a bare vowel jamo: 중 alone
+  open: "s", // a syllable without a final: 초+중
+  closed: "S", // a syllable with one: 초+중+종
+  other: "\u00b7", // anything not hangul — a password must not ride a ㅋㅋ report
+};
+const IME_SHAPE_LEGEND = `(${Object.entries(IME_SHAPE).map(([name, mark]) => `${mark}=${name}`).join(" ")})`;
+
+function imeShapeOf(ch) {
+  if (ch === " ") return ch;
+  const code = ch.codePointAt(0);
+  if (code >= 0xac00 && code <= 0xd7a3) {
+    return (code - 0xac00) % 28 ? IME_SHAPE.closed : IME_SHAPE.open;
+  }
+  if (!HANGUL_ANY.test(ch)) return IME_SHAPE.other;
+  return HANGUL_JUNG.includes(ch) ? IME_SHAPE.vowel : IME_SHAPE.consonant;
 }
 
-function scrubbedImeTrace() {
+function imeShape(text) {
+  return Array.from(text, imeShapeOf).join("");
+}
+
+function shapedImeTrace() {
   return imeTrace.map((line) => {
     const stampEnd = line.indexOf(" ");
     const kindEnd = line.indexOf(" ", stampEnd + 1);
     if (kindEnd < 0) return line;
-    return line.slice(0, kindEnd + 1) + scrubImePayload(line.slice(kindEnd + 1));
+    return line.slice(0, kindEnd + 1) + imeShape(line.slice(kindEnd + 1));
   });
+}
+
+/* The husk's one sentence: the road's name, then shapes only. */
+function imeDump(road, text) {
+  return `ime: bare jamo left through ${road}: ${imeShape(text)} ${IME_SHAPE_LEGEND}\n${shapedImeTrace().join("\n")}`;
 }
 
 function reportStrayJamo(road, text) {
   const now = Date.now();
   if (now - strayJamoReportedAt < STRAY_JAMO_REPORT_EVERY_MS) return;
   strayJamoReportedAt = now;
-  const leaked = scrubImePayload(text);
-  const trail = scrubbedImeTrace().join("\n");
   void invoke("log_window_error", {
-    message: `ime: bare jamo left through ${road}: ${leaked}\n${trail}`,
+    message: imeDump(road, text),
   });
 }
 

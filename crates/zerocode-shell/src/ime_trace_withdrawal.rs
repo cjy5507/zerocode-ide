@@ -16,6 +16,9 @@
 
 use std::path::Path;
 
+use crate::durable_file;
+use crate::system_runtime::{WINDOW_LOG, WINDOW_LOG_ROTATED, note_window_event};
+
 /// How a dump's header opens as the log holds it: `note_window_event` puts
 /// `window: ` ahead of the words `reportStrayJamo` sends.
 const DUMP_OPENS: &str = "window: ime: bare jamo left through ";
@@ -25,7 +28,6 @@ const WITHDRAWN_MARK: &str = "window-errors.ime-withdrawn";
 
 /// The log and the one rotation `note_window_event` keeps.
 const LOGS: [&str; 2] = [WINDOW_LOG, WINDOW_LOG_ROTATED];
-use crate::system_runtime::{WINDOW_LOG, WINDOW_LOG_ROTATED};
 
 /// Withdraw every old dump from the window's log, once per data folder.
 ///
@@ -34,14 +36,122 @@ use crate::system_runtime::{WINDOW_LOG, WINDOW_LOG_ROTATED};
 /// read or replaced is said on stderr, and the mark is left unwritten so the
 /// next boot tries again.
 pub(crate) fn withdraw_once(local_data_root: &Path) {
-    let _ = local_data_root;
+    let mark = local_data_root.join(WITHDRAWN_MARK);
+    if mark.exists() {
+        return;
+    }
+    let mut dumps = 0;
+    for name in LOGS {
+        match withdraw_from(&local_data_root.join(name)) {
+            Ok(count) => dumps += count,
+            Err(error) => {
+                eprintln!(
+                    "zerocode-shell: the old Korean-input traces in {name} could not be withdrawn: {error}"
+                );
+                return;
+            }
+        }
+    }
+    if dumps > 0 {
+        note_window_event(
+            local_data_root,
+            &format!("withdrew {dumps} Korean-input traces that carried typed text"),
+        );
+    }
+    if let Err(error) = durable_file::replace_bytes(&mark, b"") {
+        eprintln!("zerocode-shell: the Korean-input withdrawal could not be marked done: {error}");
+    }
+}
+
+/// One file's old dumps withdrawn, replaced whole or not at all.
+fn withdraw_from(path: &Path) -> std::io::Result<usize> {
+    let log = match std::fs::read(path) {
+        Ok(log) => log,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let Some((clean, dumps)) = withdrawn(&log) else {
+        return Ok(0);
+    };
+    durable_file::replace_bytes(path, &clean)?;
+    Ok(dumps)
 }
 
 /// The log with every old dump withdrawn, and how many there were — `None`
 /// when there was nothing to withdraw.
+///
+/// A dump is ONE write: `note_window_event` writes the header and the trace
+/// beneath it with a single `write_all`, so nothing can land between them.
+/// The trace lines carry the ring's own stamps, all taken before the header
+/// was written; the next write's stamp is the window's clock after it. So a
+/// dump runs from its header to the first line stamped later than the
+/// header, and a line with no stamp at all — a trace line a pasted newline
+/// broke in two, before payloads were scrubbed — is still inside it. A
+/// write stamped in the very millisecond of the header is taken with the
+/// dump: losing one such line is the price of never leaving typed text.
 fn withdrawn(log: &[u8]) -> Option<(Vec<u8>, usize)> {
-    let _ = log;
-    None
+    let mut clean = Vec::with_capacity(log.len());
+    let mut dumps = 0;
+    let mut lines = log.split_inclusive(|byte| *byte == b'\n').peekable();
+    while let Some(line) = lines.next() {
+        let Some((stamp, road)) = old_dump(line) else {
+            clean.extend_from_slice(line);
+            continue;
+        };
+        dumps += 1;
+        let mut trace = 0;
+        while lines
+            .next_if(|next| stamp_of(next).is_none_or(|at| at <= stamp))
+            .is_some()
+        {
+            trace += 1;
+        }
+        clean.extend_from_slice(
+            format!(
+                "{stamp} {DUMP_OPENS}{road} — withdrawn with its {trace}-line trace: it carried typed text\n"
+            )
+            .as_bytes(),
+        );
+    }
+    (dumps > 0).then_some((clean, dumps))
+}
+
+/// A dump header an earlier build wrote: its stamp and road. Such a header
+/// names the leaked letter itself, so hangul after the opening words is
+/// what tells it from a dump written in shapes.
+fn old_dump(line: &[u8]) -> Option<(u64, &str)> {
+    let stamp = stamp_of(line)?;
+    let text = std::str::from_utf8(line).ok()?;
+    let (_, rest) = text.split_once(' ')?;
+    let told = rest.strip_prefix(DUMP_OPENS)?;
+    if !told.chars().any(is_hangul) {
+        return None;
+    }
+    let road = told.split(':').next().unwrap_or_default();
+    let road = if road
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.')
+    {
+        road
+    } else {
+        ""
+    };
+    Some((stamp, road))
+}
+
+/// The epoch-millisecond stamp every write to the log opens with.
+fn stamp_of(line: &[u8]) -> Option<u64> {
+    let digits = line.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    if digits == 0 || line.get(digits) != Some(&b' ') {
+        return None;
+    }
+    std::str::from_utf8(&line[..digits]).ok()?.parse().ok()
+}
+
+/// Hangul as the window's husk hears it: a compatibility jamo or a finished
+/// syllable (`HANGUL_ANY` in `ui/shell-input.js`).
+fn is_hangul(ch: char) -> bool {
+    ('\u{3130}'..='\u{318f}').contains(&ch) || ('\u{ac00}'..='\u{d7a3}').contains(&ch)
 }
 
 #[cfg(test)]
@@ -70,9 +180,7 @@ mod tests {
     }
 
     fn hangul_in(text: &str) -> bool {
-        text.chars().any(|ch| {
-            ('\u{3130}'..='\u{318f}').contains(&ch) || ('\u{ac00}'..='\u{d7a3}').contains(&ch)
-        })
+        text.chars().any(is_hangul)
     }
 
     #[test]
