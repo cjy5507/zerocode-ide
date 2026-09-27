@@ -497,10 +497,10 @@ async fn exchange_google_oauth_code(
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| {
-            ApiError::Auth(
-                "Google OAuth response carried no refresh_token; retry `/login google` so Zo can request offline access/consent"
-                    .into(),
-            )
+            ApiError::Auth(format!(
+                "Google OAuth response carried no refresh_token, so the login cannot be renewed; sign in again — {}",
+                crate::sign_in::GEMINI.road
+            ))
         })?;
     Ok(GoogleOAuthTokenResponse {
         access_token,

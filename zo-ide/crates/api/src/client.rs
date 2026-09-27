@@ -743,7 +743,8 @@ fn load_openai_login() -> Result<OpenAiLogin, CredentialMiss> {
                 // it. Say so rather than discarding the error.
                 eprintln!(
                     "\x1b[33mwarning: refreshed ChatGPT token could not be saved ({error}); \
-                     run `zo login openai` if the next request fails.\x1b[0m"
+                     if the next request fails, sign in again — {}.\x1b[0m",
+                    crate::sign_in::CHATGPT.road
                 );
             }
             Ok(OpenAiLogin::Fresh(refreshed))
@@ -775,15 +776,17 @@ fn load_openai_login() -> Result<OpenAiLogin, CredentialMiss> {
 /// account a metre away — and until t-5777 a zo started outside a pane never
 /// looked at it, said "expired", and sent them to log in again for the second
 /// time this month.
-fn openai_reconnect_hint(source: crate::oauth_store::OpenAiAuthSource) -> &'static str {
+///
+/// zo's own store can no longer be made again in this build (there is no
+/// `zo login`), so both ways back are the ones zo follows (t-11378).
+fn openai_reconnect_hint(source: crate::oauth_store::OpenAiAuthSource) -> String {
+    let road = crate::sign_in::CHATGPT.road;
     match source {
-        crate::oauth_store::OpenAiAuthSource::OwnLogin => {
-            "ZeroCode 창에 로그인돼 있으면 그 계정을 따라갑니다 — 창 밖이면 `zo login openai` \
-             (또는 /login openai)."
-        }
-        crate::oauth_store::OpenAiAuthSource::CodexHome(_) => {
-            "Run `zo login openai` (or /login openai) to reconnect."
-        }
+        crate::oauth_store::OpenAiAuthSource::OwnLogin => format!(
+            "this is a login an earlier zo saved, which this build cannot sign in again; sign in \
+             where zo follows one and zo uses the ZeroCode window's account — {road}."
+        ),
+        crate::oauth_store::OpenAiAuthSource::CodexHome(_) => format!("sign in again — {road}."),
     }
 }
 
@@ -808,13 +811,13 @@ mod tests {
     #[test]
     fn a_dead_own_login_is_told_the_window_would_be_followed() {
         let own = super::openai_reconnect_hint(crate::oauth_store::OpenAiAuthSource::OwnLogin);
-        assert!(own.contains("ZeroCode 창"), "{own}");
-        assert!(own.contains("zo login openai"), "{own}");
+        assert!(own.contains("ZeroCode window"), "{own}");
+        assert!(own.contains(crate::sign_in::CHATGPT.road), "{own}");
         let borrowed = super::openai_reconnect_hint(crate::oauth_store::OpenAiAuthSource::CodexHome(
             crate::managed_account::CodexHomeSource::IdeManaged,
         ));
         assert!(
-            !borrowed.contains("ZeroCode 창"),
+            !borrowed.contains("ZeroCode window"),
             "the window's own account is already the one that failed: {borrowed}"
         );
     }
@@ -845,7 +848,7 @@ mod tests {
         let Some(super::CredentialMiss::Unusable(why)) = super::resolve_openai_oauth_explained().err() else {
             panic!("an expired login is there, so it is not absent");
         };
-        assert!(why.contains("expired") && why.contains("zo login openai"), "{why}");
+        assert!(why.contains("expired") && why.contains(crate::sign_in::CHATGPT.road), "{why}");
         assert!(!why.contains("stale-openai-access"), "no token in the words: {why}");
         assert_eq!(
             super::resolve_openai_oauth_fresh().map(|tokens| tokens.access_token).as_deref(),

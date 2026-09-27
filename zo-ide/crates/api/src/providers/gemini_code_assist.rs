@@ -441,9 +441,10 @@ pub async fn exchange_code(
         .await?
         .into_token_set(fallback_refresh);
     if tokens.refresh_token.is_none() {
-        return Err(ApiError::Auth(
-            "Google OAuth response carried no refresh_token; retry `/login google` so Zo can request offline access/consent".into(),
-        ));
+        return Err(ApiError::Auth(format!(
+            "Google OAuth response carried no refresh_token, so the login cannot be renewed; sign in again — {}",
+            crate::sign_in::GEMINI.road
+        )));
     }
     Ok(tokens)
 }
@@ -550,7 +551,8 @@ pub fn load_fresh_oauth() -> Option<OAuthTokenSet> {
             if let Err(error) = crate::oauth_store::save_google_code_assist_oauth(&refreshed) {
                 eprintln!(
                     "\x1b[33mwarning: refreshed Gemini token could not be saved ({error}); \
-                     run `zo login google` if the next request fails.\x1b[0m"
+                     if the next request fails, sign in again — {}.\x1b[0m",
+                    crate::sign_in::GEMINI.road
                 );
             }
             Some(refreshed)
@@ -560,7 +562,8 @@ pub fn load_fresh_oauth() -> Option<OAuthTokenSet> {
             if crate::providers::refresh_gate::record_failure(&refresh_token, &error) {
                 eprintln!(
                     "\x1b[33mGemini login can no longer be refreshed ({error}).\n  \
-                     Run `zo login google` (or /login google) to reconnect.\x1b[0m"
+                     Sign in again — {}.\x1b[0m",
+                    crate::sign_in::GEMINI.road
                 );
             }
             Some(tokens)
@@ -1491,9 +1494,10 @@ pub async fn setup_saved_user() -> Result<Option<String>, ApiError> {
 
 async fn setup_saved_user_inner() -> Result<Option<String>, ApiError> {
     let Some(tokens) = load_fresh_oauth() else {
-        return Err(ApiError::Auth(
-            "Google Gemini OAuth token not found; run `/login google` first".into(),
-        ));
+        return Err(ApiError::Auth(format!(
+            "Google Gemini login not found; sign in first — {}",
+            crate::sign_in::GEMINI.road
+        )));
     };
     GeminiCodeAssistClient::from_oauth(&tokens)
         .setup_user()

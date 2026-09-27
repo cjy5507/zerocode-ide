@@ -368,7 +368,7 @@ impl ApiError {
                 if status.as_u16() == 401 {
                     // A 401 that rejects the *client* (provider fingerprint /
                     // WAF whitelist), not the credential, can never be fixed by
-                    // an OAuth refresh or `zo login` — fail fast instead of
+                    // an OAuth refresh or a new sign-in — fail fast instead of
                     // routing it through the auth-recovery retry.
                     if is_client_rejection_text(parts.iter().copied().flatten()) {
                         return ProviderErrorClass::NonRetryable;
@@ -709,7 +709,7 @@ fn classify_provider_error_text<'a>(
 /// phrase "rate limit", and a classifier reading it re-derived "account
 /// throttle" from the very sentence denying it.
 const PROVIDER_CAPACITY_HINT_BODY: &str = "Provider capacity issue — the PROVIDER shed this request. This is NOT your account's rate limit (it fires with the window nearly empty) and NOT a local permission or workspace-trust failure.
-  zo already re-opened the stream and, when a fallback model is configured, tried escaping to it. The fastest way through is a lighter model (/model sonnet) or a lower /effort; capacity usually frees up within seconds to minutes.";
+  zo already re-opened the stream and, when a fallback model is configured, tried escaping to it. The fastest way through is a lighter model (/model sonnet, or a lower effort in its picker); capacity usually frees up within seconds to minutes.";
 
 /// Explanation appended to a usage-limit refusal (ChatGPT `usage_limit_reached`
 /// and its kin): what the wall is, when it lifts in clock words, and the two
@@ -722,7 +722,7 @@ fn usage_limit_hint(retry_after: Option<Duration>) -> String {
     );
     format!(
         "This account's usage limit for the provider is reached — a plan window, not a fault, \
-         so zo does not retry it; it resets {lifts}. With a quota fallback configured (/smart) \
+         so zo does not retry it; it resets {lifts}. With a quota fallback configured \
          the turn continues on another model; otherwise wait for the reset or switch with /model."
     )
 }
@@ -746,10 +746,11 @@ impl Display for ApiError {
                     f,
                     "missing {provider} credentials; {credential_hint} before calling the {provider} API"
                 )?;
-                if matches!(*provider, "Anthropic" | "OpenAI" | "Google") {
+                if let Some(road) = crate::sign_in::road_for(provider) {
                     write!(
                         f,
-                        "\n\n  No credentials found — authenticate this provider, then retry:\n    • TUI:    /login [provider]      (e.g. /login google, /login openai; bare /login = Claude)\n    • shell:  zo login [provider]"
+                        "\n\n  No {} login found — sign in: {}, then retry.",
+                        road.account, road.road
                     )
                 } else {
                     write!(
@@ -825,16 +826,19 @@ impl Display for ApiError {
                         // sending the user in a login loop.
                         write!(
                             f,
-                            "\n\n  This provider rejected zo as an unauthorized client — not an expired credential. Re-running /login will not help.\n  The endpoint only accepts requests whose wire image matches a whitelisted client (User-Agent / SDK headers).\n  Fix: give this provider a client fingerprint in settings.json — add \"client_fingerprint\": \"codex\" (or \"claude-code\") to its providers[] entry, or set a raw \"user_agent\". If the endpoint accepts generic API clients instead, no fingerprint is needed."
+                            "\n\n  This provider rejected zo as an unauthorized client — not an expired credential. Signing in again will not help.\n  The endpoint only accepts requests whose wire image matches a whitelisted client (User-Agent / SDK headers).\n  Fix: give this provider a client fingerprint in settings.json — add \"client_fingerprint\": \"codex\" (or \"claude-code\") to its providers[] entry, or set a raw \"user_agent\". If the endpoint accepts generic API clients instead, no fingerprint is needed."
                         )?;
                     } else {
                         // Provider-neutral: a 401 can come from any backend (Claude,
-                        // Gemini, ChatGPT, …), so point at re-login generically rather
-                        // than assuming an Anthropic credential.
-                        write!(
-                            f,
-                            "\n\n  Authentication failed — credentials expired or invalid.\n  Re-authenticate this model's provider, then retry:\n    • TUI:    /login [provider]      (e.g. /login google, /login openai; bare /login = Claude)\n    • shell:  zo login [provider]"
-                        )?;
+                        // Gemini, ChatGPT, …), so every provider's road is named
+                        // (`sign_in`). A revoked token is a login something else
+                        // already replaced, so its first step differs.
+                        let trouble = crate::sign_in::LoginTrouble::of_refusal(
+                            [error_type.as_deref(), message.as_deref(), Some(body.as_str())]
+                                .into_iter()
+                                .flatten(),
+                        );
+                        write!(f, "\n\n  {}", trouble.advice())?;
                     }
                 }
                 // A 529 is the provider shedding load. The same explanation the
@@ -893,7 +897,7 @@ impl Display for ApiError {
                 if msg.contains("429") || msg.contains("rate_limit") || msg.contains("529") {
                     write!(
                         f,
-                        "\n\n  Rate limited. Try:\n    1. zo login     (get your own OAuth token)\n    2. --model sonnet  (lower rate limits)\n    3. Wait a minute and retry"
+                        "\n\n  Rate limited. Try:\n    1. /model sonnet  (lower rate limits)\n    2. Wait a minute and retry"
                     )?;
                 }
                 Ok(())
@@ -953,10 +957,27 @@ mod tests {
         };
         let rendered = err.to_string();
         assert!(
-            rendered.contains("zo login"),
-            "401 must point at re-auth: {rendered}"
+            rendered.contains(crate::sign_in::CLAUDE.road) && rendered.contains(crate::sign_in::CHATGPT.road),
+            "401 must name where each provider's login is signed in again: {rendered}"
         );
         assert!(rendered.contains("authentication_error"));
+    }
+
+    /// The person's 401 (t-11378): a revoked token is a login that was
+    /// replaced elsewhere, so trying again comes first.
+    #[test]
+    fn a_revoked_401_says_try_again_before_sign_in_again() {
+        let err = ApiError::Api {
+            status: StatusCode::UNAUTHORIZED,
+            error_type: Some("authentication_error".to_string()),
+            message: Some("OAuth access token has been revoked.".to_string()),
+            body: String::new(),
+            retryable: false,
+            retry_after: None,
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("Try again first"), "{rendered}");
+        assert!(rendered.contains(crate::sign_in::CLAUDE.road), "{rendered}");
     }
 
     #[test]
@@ -968,8 +989,8 @@ mod tests {
             "must still name the env var: {rendered}"
         );
         assert!(
-            rendered.contains("/login") && rendered.contains("zo login"),
-            "missing credentials must point at the login flow: {rendered}"
+            rendered.contains(crate::sign_in::CLAUDE.road),
+            "missing credentials must name where the Claude login is made: {rendered}"
         );
     }
 
@@ -985,7 +1006,7 @@ mod tests {
         };
         let rendered = err.to_string();
         assert!(
-            !rendered.contains("zo login"),
+            !rendered.to_lowercase().contains("sign in"),
             "non-401 must not nag about login: {rendered}"
         );
     }
@@ -1537,11 +1558,11 @@ mod tests {
         let rendered = err.to_string();
         assert!(
             rendered.contains("unauthorized client")
-                && rendered.contains("Re-running /login will not help"),
+                && rendered.contains("Signing in again will not help"),
             "message must explain it is a client rejection, not a credential expiry: {rendered}"
         );
         assert!(
-            !rendered.contains("zo login [provider]"),
+            !rendered.contains(crate::sign_in::CLAUDE.road),
             "must not send the user into a futile re-login loop: {rendered}"
         );
         assert!(
@@ -1564,7 +1585,7 @@ mod tests {
         );
         assert_eq!(err.provider_error_class(), ProviderErrorClass::AuthExpired);
         assert!(err.is_unauthorized());
-        assert!(err.to_string().contains("zo login [provider]"));
+        assert!(err.to_string().contains("Sign in again where this model's provider keeps its login"));
     }
 
     #[test]
