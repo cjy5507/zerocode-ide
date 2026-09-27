@@ -872,6 +872,7 @@ mod tests {
                 turn: true,
                 commands: Vec::new(),
                 switched: None,
+                ended: None,
             }
         );
         assert_eq!(
@@ -880,6 +881,7 @@ mod tests {
                 turn: false,
                 commands: vec!["just gate".to_string()],
                 switched: None,
+                ended: None,
             }
         );
         assert!(
@@ -903,6 +905,7 @@ mod tests {
                 turn: false,
                 commands: vec!["cargo test -p zerocode-core".to_string()],
                 switched: None,
+                ended: None,
             }
         );
     }
@@ -947,6 +950,7 @@ mod tests {
                 turn: false,
                 commands: vec!["just gate".to_string()],
                 switched: None,
+                ended: None,
             }
         );
         let running = PaneTurn::Running {
@@ -1203,6 +1207,7 @@ mod tests {
                 turn: true,
                 commands: Vec::new(),
                 switched: None,
+                ended: None,
             },
             "a sleeper's cut turn was lost between two windows"
         );
@@ -1246,6 +1251,7 @@ mod tests {
                 turn: false,
                 commands: vec!["cargo test".to_string()],
                 switched: None,
+                ended: None,
             },
             "an unread note was lost for a worker still asleep"
         );
@@ -1255,6 +1261,7 @@ mod tests {
                 turn: false,
                 commands: vec!["just gate".to_string()],
                 switched: None,
+                ended: None,
             },
             "the newer goodbye's own reading of a worker is the one that stands"
         );
