@@ -199,6 +199,13 @@ function readLedgerAgents() {
 }
 
 const paneLedger = new Map();
+/* And the work the ledger keeps for a checkout after releasing the worker that
+ * did it (t-10993): the pane is gone, so no term names it, but the checkout
+ * still stands with the finished work in it — and that checkout's card still
+ * owes the task's title and where its review stands. Keyed by the checkout
+ * path, the one identity a workspace has here; the ledger sends at most one
+ * row per checkout (`settled_workers`). */
+const checkoutLedger = new Map();
 let paneLedgerAsking = false;
 async function refreshPaneLedger() {
   if (paneLedgerAsking) return;
@@ -206,25 +213,38 @@ async function refreshPaneLedger() {
   try {
     const rows = await readLedgerAgents();
     const next = new Map();
+    const settled = new Map();
     for (const row of rows ?? []) {
-      if (typeof row?.term !== "number") continue;
-      next.set(row.term, {
-        run: row.run ?? "",
-        worker: row.worker ?? "",
-        task: row.task ?? "",
-        taskId: row.task_id ?? "",
-        ledger: row.ledger ?? "",
-        reported: row.reported === true,
-        review: row.review ?? null,
-      });
+      const facts = {
+        run: row?.run ?? "",
+        worker: row?.worker ?? "",
+        task: row?.task ?? "",
+        taskId: row?.task_id ?? "",
+        ledger: row?.ledger ?? "",
+        reported: row?.reported === true,
+        failed: row?.failed === true,
+        review: row?.review ?? null,
+      };
+      if (typeof row?.term === "number") next.set(row.term, facts);
+      else if (row?.settled === true && row.checkout) {
+        settled.set(checkoutKey(row.checkout), {
+          ...facts, agent: row.agent ?? "", session: row.session ?? null, at: Number(row.at) || 0,
+        });
+      }
     }
     // Replaced whole, so a seat the ledger released stops wearing its old
     // task — and only a real change costs a repaint.
-    if (paneLedgerSaid(next) !== paneLedgerSaid(paneLedger)) {
+    const moved = paneLedgerSaid(next) !== paneLedgerSaid(paneLedger);
+    const kept = JSON.stringify([...settled]) !== JSON.stringify([...checkoutLedger]);
+    if (moved) {
       paneLedger.clear();
       for (const [term, facts] of next) paneLedger.set(term, facts);
-      scheduleAgentPaint(["cards", "board"]);
     }
+    if (kept) {
+      checkoutLedger.clear();
+      for (const [checkout, facts] of settled) checkoutLedger.set(checkout, facts);
+    }
+    if (moved || kept) scheduleAgentPaint(["cards", "board"]);
   } catch {
     // The ledger may be unavailable in this window; the rows then say what
     // the hooks say, which is what they said before this map existed.
@@ -236,8 +256,15 @@ function paneLedgerSaid(map) {
   return [...map.entries()]
     .sort(([a], [b]) => a - b)
     .map(([term, f]) =>
-      `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${JSON.stringify(f.review)}`)
+      `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}` +
+      `:${JSON.stringify(f.review)}`)
     .join(",");
+}
+
+/* A checkout path as a key: the ledger and the catalog can differ by a
+ * trailing separator, and one checkout is one key. */
+function checkoutKey(path) {
+  return String(path ?? "").replace(/\/+$/, "");
 }
 listen("ledger:changed", () => {
   void refreshPaneLedger();
@@ -249,7 +276,8 @@ listen("ledger:changed", () => {
  * words when the provider's own turn has nothing better to say. Only the
  * facts the ledger holds: reported is the worker's claim; verified, merged
  * and deployed are the coordinator's. A turn that ended without a report is
- * not "awaiting review" — nothing was handed in. */
+ * not "awaiting review" — nothing was handed in, and an attempt that ended
+ * without a successful report says it failed. */
 function paneLedgerWord(term) {
   const facts = paneLedger.get(term);
   return facts ? ledgerReviewWord(facts) : "";
@@ -267,8 +295,15 @@ function ledgerReviewWord(facts) {
   if (review.claimed_deployed) return t("board.claimedDeployed", "배포됐다 함");
   if (review.claimed_merged) return t("board.claimedMerged", "병합됐다 함");
   if (review.claimed_verified) return t("board.claimedVerified", "검증됐다 함");
+  if (facts.failed) return t("board.desk.stageFailed", "실패");
   if (facts.reported) return t("board.awaitingReview", "검증 대기");
   return "";
+}
+
+/* Whether a coordinator has stood behind the work — verified, merged or
+ * deployed in the ledger (`ReviewFacts`); a worker's claim never is. */
+function ledgerVouched(review) {
+  return Boolean(review && (review.verified || review.merged || review.deployed));
 }
 
 function seedPaneAgents() {
@@ -6732,9 +6767,19 @@ function taskBoardModel(model, previous = null, now = Date.now(), workspacePath 
     group.at = Math.max(0, ...group.members.map((entry) => Number(entry.card.at) || 0));
     group.when = group.at > 0 ? agoWord(group.at, now) : "";
     group.cost = taskBoardCost(group.members, model.source?.ledger);
+    group.stageWord = taskBoardStageWord(group, model.source?.ledger);
   }
   return { groups: ranked, counts: new Map(taskBoardSections().map(({ id }) =>
     [id, ranked.filter((group) => group.bucket === id).length])) };
+}
+
+/* 끝난 과업이 선 단계(t-10993): 칸은 「응답·종료」여도 그 칸 안의 과업은 원장이
+ * 적은 만큼 왔다 — 검증 대기·검증됨·병합됨·배포됨·실패. 사이드바와 같은 낱말
+ * (`ledgerReviewWord`)이고, 원장 행이 없거나 아무 말도 없으면 칸의 낱말 그대로다. */
+function taskBoardStageWord(group, rows) {
+  if (group.bucket !== "done" && group.bucket !== "idle") return "";
+  const row = rows?.get(group.lead.card.pane);
+  return row ? ledgerReviewWord(row) : "";
 }
 
 function taskBoardActivity(entry) {
@@ -6820,7 +6865,7 @@ function updateTaskBoardRow(row, group, view) {
   writeAttribute(row.querySelector(".task-board-main"), "aria-pressed", String(selected));
   const state = group.bucket === "attention" ? "needs-attention" : group.bucket;
   dressAgentGraphStateMark(row.querySelector(".task-board-state > :first-child"), state);
-  const stateWord = taskBoardSections().find(({ id }) => id === group.bucket).word;
+  const stateWord = group.stageWord || taskBoardSections().find(({ id }) => id === group.bucket).word;
   writeTextContent(row.querySelector(".task-board-state-word"), stateWord);
   const host = row.querySelector(".task-board-members");
   const held = new Map([...host.children].map((node) => [node.dataset.memberKey, node]));
@@ -9411,8 +9456,7 @@ function agentRowStatusWord(row, state) {
  * green; a turn that merely ended keeps a quiet check. */
 function agentRowVerified(row) {
   if (row.sub || row.history) return false;
-  const review = paneLedger.get(row.term)?.review;
-  return Boolean(review && (review.verified || review.merged || review.deployed));
+  return ledgerVouched(paneLedger.get(row.term)?.review);
 }
 
 /* The task a workspace is working on, when the ledger seated one in a pane
@@ -9424,7 +9468,9 @@ function worktreeTaskTitle(path) {
     const task = paneLedger.get(row.term)?.task?.trim();
     if (task) return task;
   }
-  return "";
+  // No pane here carries a task, but the work a released worker finished in
+  // this checkout still does (t-10993).
+  return checkoutLedger.get(checkoutKey(path))?.task?.trim() ?? "";
 }
 
 /* Whether this row IS the pane on stage — Orca's `isFocusedPane`, which fills
@@ -9932,19 +9978,63 @@ function lastNewsFor(path) {
   return lastNews.filter((one) => one.worktree === path);
 }
 
+/* 원장이 이 체크아웃에 든 끝난 작업, 그 워커의 대화를 이 창이 아는 대로 덧붙여
+ * (`conversation` — 재시작 장부의 되살릴 수 있는 소식이나 디스크 스캔의 그 대화).
+ * 판 없는 카드만 묻는다: 판이 살아 있으면 그 판이 곧 그 작업의 줄이다. */
+function finishedWorkIn(path) {
+  const work = checkoutLedger.get(checkoutKey(path));
+  if (!work?.reported) return null;
+  const conversation = work.session == null ? null : [
+    ...lastNewsFor(path).filter((one) => one.resumable).map((one) => one.session),
+    ...retainedSessionsFor(path).map((one) => one.session),
+  ].find((session) => session?.id === work.session) ?? null;
+  return { ...work, conversation };
+}
+
 /* 원장의 한 줄 — 지난 세션 행과 같은 옷(.is-retained)을 입되 얼굴은 그
  * 판의 에이전트, 낱말은 마지막 상태다. 눌러 되살릴 수 있는 것만 문이
  * 된다: resumable이 아닌 소식은 사실이지 초대가 아니다. */
 function makeSurvivorRow(one) {
-  const canResume = Boolean(one.resumable && one.session);
+  return makePastRow({
+    agent: one.agent,
+    name: one.you ?? agentName(one.agent),
+    said: bucketWord(one.state === "needs-attention" ? "attention" : one.state),
+    at: one.at,
+    worktree: one.worktree,
+    session: one.resumable ? one.session : null,
+  });
+}
+
+/* 원장이 끝난 작업으로 든 워커의 한 줄(t-10993) — 판은 은퇴했고 작업은 체크아웃에
+ * 남았다. 이름은 과업, 낱말은 원장의 단계(검증 대기·검증됨·병합됨·배포됨·실패 —
+ * 보드와 같은 `ledgerReviewWord`), 시계는 시도가 끝난 때. 그 워커의 대화를 이
+ * 창이 알면 누르면 되살아나고, 같은 대화의 지난 소식 줄은 이 줄이 대신한다. */
+function makeFinishedWorkRow(path, work) {
+  const node = makePastRow({
+    agent: work.agent,
+    name: work.task || work.taskId,
+    said: ledgerReviewWord(work),
+    at: work.at,
+    worktree: path,
+    session: work.conversation ?? null,
+  });
+  if (ledgerVouched(work.review)) node.classList.add("is-verified");
+  return node;
+}
+
+/* 지난 행 하나의 몸 — 재시작 장부의 소식과 원장의 끝난 작업이 같은 옷을 입는다
+ * (.is-retained). 되살릴 대화가 있을 때만 문이 된다: 없는 대화는 사실이지
+ * 초대가 아니다. */
+function makePastRow({ agent, name: words, said: word, at, worktree, session }) {
+  const canResume = Boolean(session);
   const node = document.createElement(canResume ? "button" : "div");
   if (canResume) node.type = "button";
   node.className = "wt-agent is-retained";
   const dot = document.createElement("span");
   dot.className = "wt-agent-dot";
   dot.setAttribute("aria-hidden", "true");
-  const reg = agentRows.find((row) => row.id === one.agent);
-  const face = agentIcon(reg ?? { id: one.agent, name: agentName(one.agent), favicon_domain: "" });
+  const reg = agentRows.find((row) => row.id === agent);
+  const face = agentIcon(reg ?? { id: agent, name: agentName(agent), favicon_domain: "" });
   face.classList.add("wt-agent-face");
   // 같은 행 문법의 한 몸통: 이름과 상태어가 한 절단 안에 서고, 시계는 압축
   // 어휘를 쓴다 — 살아있는 행과 지난 행이 같은 칸을 다르게 접으면 목록이
@@ -9953,20 +10043,20 @@ function makeSurvivorRow(one) {
   body.className = "wt-agent-body";
   const name = document.createElement("span");
   name.className = "wt-agent-name";
-  name.textContent = one.you ?? agentName(one.agent);
+  name.textContent = words;
   const said = document.createElement("span");
   said.className = "wt-agent-said";
-  said.textContent = bucketWord(one.state === "needs-attention" ? "attention" : one.state);
+  said.textContent = word;
   body.append(name, said);
   const when = document.createElement("span");
   when.className = "wt-agent-when";
-  when.textContent = shortAgo(one.at, Date.now());
+  when.textContent = shortAgo(at, Date.now());
   node.append(dot, face, body, when);
   node.dataset.tip = `${name.textContent} - ${said.textContent}`;
   if (canResume) {
     node.addEventListener("click", (event) => {
       event.stopPropagation();
-      void reopenConversationIn(one.worktree, { agent: one.agent, session: one.session });
+      void reopenConversationIn(worktree, { agent, session });
     });
   }
   return node;
@@ -10183,7 +10273,7 @@ const twistDrawn = new WeakMap();
  * joined list before the one-session summary makes the newest row win even
  * when either source answered in a different order. */
 function restartSessionAt(item) {
-  return item.kind === "survivor" ? (item.row.at ?? 0) : (item.row.at_ms ?? 0);
+  return item.kind === "retained" ? (item.row.at_ms ?? 0) : (item.row.at ?? 0);
 }
 
 function restartSessionsSaid(items) {
@@ -10217,17 +10307,25 @@ function paintWorktreeAgents() {
     // drift into different folding rules.
     const liveSummary = summarizeAgentRows(all, { open, full });
     const rows = liveSummary.rows;
-    const survivors = rows.length === 0 ? lastNewsFor(path) : [];
+    // 원장이 이 체크아웃에 든 끝난 작업(t-10993)이 그 워커의 대화 줄을 대신한다 —
+    // 과업과 단계를 아는 쪽이 그 줄의 더 나은 화자다.
+    const finished = rows.length === 0 ? finishedWorkIn(path) : null;
+    const spoken = (session) => finished?.session != null && session?.id === finished.session;
+    const survivors = rows.length === 0
+      ? lastNewsFor(path).filter((one) => !spoken(one.session))
+      : [];
     // 같은 대화가 원장과 디스크 스캔에 다 있으면 원장이 이긴다 — 상태와
     // 낱말을 아는 쪽이 그 줄의 더 나은 화자다.
     const retained = rows.length === 0
       ? retainedSessionsFor(path).filter(
-          (one) => !survivors.some((past) => past.session?.id === one.session.id),
+          (one) => !spoken(one.session) &&
+            !survivors.some((past) => past.session?.id === one.session.id),
         )
       : [];
     const restoring = rows.length === 0 ? restoringWorkers.get(path) : null;
     const restartSessions = rows.length === 0
       ? [
+        ...(finished ? [{ kind: "finished", row: finished }] : []),
         ...survivors.map((row) => ({ kind: "survivor", row })),
         ...retained.map((row) => ({ kind: "retained", row })),
       ]
@@ -10280,9 +10378,11 @@ function paintWorktreeAgents() {
       }
     } else {
       host.replaceChildren(
-        ...deadSummary.rows.map(({ kind, row }) => kind === "survivor"
-          ? makeSurvivorRow(row)
-          : makeRetainedRow(path, row)),
+        ...deadSummary.rows.map(({ kind, row }) => kind === "finished"
+          ? makeFinishedWorkRow(path, row)
+          : kind === "survivor"
+            ? makeSurvivorRow(row)
+            : makeRetainedRow(path, row)),
         ...(restoring ? [makeRestoreWaitingRow(restoring)] : []),
       );
     }

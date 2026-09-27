@@ -54861,6 +54861,99 @@ suite("sidebar-nav-redesign", async ({ browser, origin, ok }) => {
   }
 });
 
+/* ---- 끝난 작업은 끝났다고 보인다 (t-10993) ---------------------------------
+ *
+ * 2026-09-27 14:0x 설치본 1.1.33의 화면 그대로: 워커가 worker_done(ok)을 보내자 창이
+ * 그 판을 은퇴시켰고 원장은 워커를 released로 적었다. 판 없는 카드는 재시작 장부의
+ * 지난 소식 줄(붙여 넣은 프롬프트의 틀 그대로)과 브랜치 이름을 그렸고, 끝났다는
+ * 표시는 어디에도 없었다. 원장은 그 워커의 행을 체크아웃 기준으로 든다(`settled`,
+ * 판 없음): 카드의 제목은 과업 제목, 그 워커의 대화 줄은 과업과 원장의 단계 낱말,
+ * 코디가 적으면 다음 읽기에 그 낱말로. */
+suite("finished-work", async ({ browser, origin, ok }) => {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.evaluate(async () => {
+      const root = "/tmp/zerocode-finished-work";
+      const wt = `${root}-t-9471`;
+      const now = Date.now();
+      window.__ANSWER__.project_catalog = () => [{ name: "zerocode", path: root, worktrees: [
+        { path: root, branch: "main", is_main: true, active: true },
+        { path: wt, branch: "wt/t-9471/h6-mail-triage-shadow-2", base: "main", is_main: false, active: false },
+      ] }];
+      lastNews = [{
+        worktree: wt, agent: "claude", state: "idle", at: now - 14 * 60_000,
+        state_started_at: now - 14 * 60_000, you: '<pasted_content id="8a76"> You are a worke…',
+        session: { key: "session_id", id: "s-finished" }, resumable: true, received_at: now - 14 * 60_000,
+      }];
+      const finished = (review, extra = {}) => ({
+        run: "run-1", worker: "w-10923", agent: "claude", state: "waiting", ledger: "released",
+        hearing: "gone", hearing_at: now - 3_600_000, checkout: wt, task: "H6 코디 우편 분류 좌석",
+        task_id: "t-9471", reported: true, failed: false, settled: true, session: "s-finished",
+        dispatch_id: "dp-10924", dispatch_started_ms: now - 3_600_000, retry_of: null,
+        review: { verified: false, merged: false, deployed: false, written: false, ...review },
+        term: null, at: now - 14 * 60_000, model: "opus", effort: "high", pane: "%5", asking: false,
+        wall: null, quiet_at: null, pane_missing_since_ms: null, cost: null, ...extra,
+      });
+      window.__FINISHED_SETTLE__ = async (review, extra) => {
+        window.__LEDGER__ = [finished(review, extra)];
+        for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 1 });
+        while (paneLedgerAsking || ledgerAgentsPending) {
+          await new Promise((done) => setTimeout(done, 10));
+        }
+        await window.__PAINTED__();
+      };
+      window.__FINISHED_READ__ = () => {
+        const card = [...document.querySelectorAll("#worktrees .wt-row")]
+          .find((row) => row.dataset.worktreePath === wt);
+        const host = document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(wt)}"]`);
+        return {
+          title: card?.querySelector(".wt-title")?.textContent ?? null,
+          rows: [...(host?.querySelectorAll(".wt-agent") ?? [])].map((row) => ({
+            name: row.querySelector(".wt-agent-name")?.textContent ?? "",
+            said: row.querySelector(".wt-agent-said")?.textContent ?? "",
+            tip: row.dataset.tip ?? "",
+          })),
+        };
+      };
+      await refreshWorktrees();
+      await window.__FINISHED_SETTLE__({});
+    });
+    await page.locator("#worktrees").screenshot({ path: "/tmp/zerocode-finished-work-sidebar.png" });
+    const seen = await page.evaluate(async () => {
+      const out = { awaiting: window.__FINISHED_READ__() };
+      await window.__FINISHED_SETTLE__({ verified: true });
+      out.verified = window.__FINISHED_READ__();
+      await window.__FINISHED_SETTLE__({ verified: true, merged: true });
+      out.merged = window.__FINISHED_READ__();
+      await window.__FINISHED_SETTLE__({}, { failed: true });
+      out.failed = window.__FINISHED_READ__();
+      await window.__FINISHED_SETTLE__({ claimed_merged: true });
+      out.claimed = window.__FINISHED_READ__();
+      out.words = {
+        awaiting: t("board.awaitingReview", "검증 대기"), verified: t("board.verified", "검증됨"),
+        merged: t("board.merged", "병합됨"), failed: t("board.desk.stageFailed", "실패"),
+        claimed: t("board.claimedMerged", "병합됐다 함"),
+      };
+      return out;
+    });
+    const task = "H6 코디 우편 분류 좌석";
+    const saysStage = (read, word) => read.title === task && read.rows.length === 1 &&
+      read.rows[0].name === task && read.rows[0].said === word;
+    ok("a finished worker's card leads with its task, and its row says the work awaits review",
+      saysStage(seen.awaiting, seen.words.awaiting), JSON.stringify(seen.awaiting));
+    ok("no row of it is titled by the frame of a pasted prompt",
+      !JSON.stringify(seen).includes("<pasted_content"), JSON.stringify(seen.awaiting));
+    ok("the row moves to the coordinator's word on the next read of the ledger — verified, merged, failed",
+      saysStage(seen.verified, seen.words.verified) && saysStage(seen.merged, seen.words.merged) &&
+      saysStage(seen.failed, seen.words.failed), JSON.stringify(seen));
+    ok("a worker's own claim stays its claim (t-6815)",
+      saysStage(seen.claimed, seen.words.claimed), JSON.stringify(seen.claimed));
+    ok("the finished work raises no browser errors", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+});
+
 /* ---- focused iteration on rigs the shared flow runs in place -------------
  *
  * Reached by name only (ARTIFACT_GALLERY_ONLY=1, WINDOW_SUITES=attach, …):
