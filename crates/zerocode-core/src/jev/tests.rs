@@ -723,7 +723,13 @@ fn a_seats_mode_set_is_read_off_whether_anything_labels_it() {
             "{}: a labeled seat names its label sample floor",
             row.id
         );
-        let expected = if row.promotes { labeled } else { unlabeled };
+        let expected = if row.promotes {
+            labeled
+        } else if nothing_applies.contains(&row.id) {
+            recorded
+        } else {
+            unlabeled
+        };
         assert_eq!(row.modes, expected, "{}", row.id);
     }
     assert!(
@@ -1642,7 +1648,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 28);
+    assert_eq!(JEV_USES.len(), 29);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1944,7 +1950,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 28);
+    assert_eq!(JEV_USES.len(), 29);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 4), Some(&FILE_PICK));
 }
 
@@ -3066,6 +3072,28 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
                 .questions,
             ]
         }
+        id if id == MAIL_TRIAGE.id => {
+            use crate::mail_triage::{MailLook, ask};
+            use crate::orchestration::MessageKind;
+            vec![
+                ask(&MailLook {
+                    kind: MessageKind::Question,
+                    from: "worker",
+                    worker: Some("w-7"),
+                    task: Some("t-3"),
+                    task_status: Some("dispatched"),
+                    priority: "normal",
+                    awaits_answer: true,
+                    thread_depth: 0,
+                    age_ms: 42_500,
+                    delivered: false,
+                    repeats: 0,
+                    coordinator_busy: None,
+                    open_questions: 1,
+                })
+                .questions,
+            ]
+        }
         id if id == CHALLENGER.id => vec![
             challenger::ask(
                 "dp-1",
@@ -3084,12 +3112,12 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
 }
 
 /// Where every seat of the table is asked, and what it offers: the audit's
-/// second column over all twenty-seven rows (t-9469). A seat this crate
-/// builds is asked here, from a fixture, in every shape it asks in, and no
-/// option, level or outcome of it may go without the words that say what it
-/// means; a seat zo builds from words this crate spells is read where they
-/// are spelled; a seat zo builds from words of its own is zo's tests' to
-/// hold. A row added to the table and placed nowhere is red here.
+/// second column over every row (t-9469). A seat this crate builds is asked
+/// here, from a fixture, in every shape it asks in, and no option, level or
+/// outcome of it may go without the words that say what it means; a seat zo
+/// builds from words this crate spells is read where they are spelled; a seat
+/// zo builds from words of its own is zo's tests' to hold. A row added to the
+/// table and placed nowhere is red here.
 #[test]
 fn every_seat_offers_no_option_without_the_words_that_say_what_it_means() {
     use crate::jev::questions::{self as words, Contrast};

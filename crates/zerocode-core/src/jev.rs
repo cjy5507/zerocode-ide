@@ -4089,7 +4089,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 28] = [
+pub static JEV_USES: [JevUse; 29] = [
     ROUTING,
     RECALL,
     SKILLS,

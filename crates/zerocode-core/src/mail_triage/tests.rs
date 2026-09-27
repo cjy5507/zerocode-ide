@@ -1182,7 +1182,13 @@ fn replay(seed: &Seed) -> Tally {
     assert_eq!(seed.schema, SEED_SCHEMA, "a seed this replay cannot read");
     let receipts = filed_of(seed);
     let mut tally = Tally::default();
+    let mut seen = std::collections::HashSet::new();
     for run in &seed.runs {
+        assert!(
+            seen.insert(run.id.as_str()),
+            "the seed holds run {} twice",
+            run.id
+        );
         let pending: Vec<&str> = run.pending.iter().map(String::as_str).collect();
         let room = Mailroom::new(
             run.address.clone(),
