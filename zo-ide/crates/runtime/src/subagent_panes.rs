@@ -720,32 +720,19 @@ pub enum PaneBudget {
 
 impl PaneBudget {
     /// Why the pane was ended, in words for the parent's model and whoever
-    /// reads its answer.
+    /// reads its answer — the limit as a clock reads it (`1h 0m`, `30m`).
     #[must_use]
     pub fn ended_because(self) -> String {
         match self {
             Self::Quiet(quiet) => format!(
                 "the sub-agent showed no progress for {} (its transcript did not grow), so its pane was closed",
-                spoken(quiet)
+                core_types::retry_signal::human_reset_wait(quiet)
             ),
             Self::Wall(limit) => format!(
                 "the sub-agent's pane wrote no result within its limit of {}, so its pane was closed",
-                spoken(limit)
+                core_types::retry_signal::human_reset_wait(limit)
             ),
         }
-    }
-}
-
-/// A duration as a person says it: whole minutes when it is whole minutes,
-/// seconds otherwise.
-fn spoken(duration: Duration) -> String {
-    const MINUTE: u64 = 60;
-    let seconds = duration.as_secs();
-    if seconds >= MINUTE && seconds % MINUTE == 0 {
-        let minutes = seconds / MINUTE;
-        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
-    } else {
-        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
     }
 }
 
@@ -2643,15 +2630,13 @@ mod tests {
     }
 
     /// What the parent's model reads when a pane is ended says which limit
-    /// ended it, in minutes a person would say.
+    /// ended it.
     #[test]
     fn an_ended_pane_says_which_limit_ended_it() {
         let quiet = PaneBudget::Quiet(Duration::from_secs(60 * 60)).ended_because();
-        assert!(quiet.contains("no progress for 60 minutes"), "{quiet}");
-        let wall = PaneBudget::Wall(Duration::from_secs(90)).ended_because();
-        assert!(wall.contains("within its limit of 90 seconds"), "{wall}");
-        let one = PaneBudget::Wall(Duration::from_secs(60)).ended_because();
-        assert!(one.ends_with("limit of 1 minute, so its pane was closed"), "{one}");
+        assert!(quiet.contains("no progress for 1h 0m"), "{quiet}");
+        let wall = PaneBudget::Wall(Duration::from_secs(30 * 60)).ended_because();
+        assert!(wall.contains("within its limit of 30m"), "{wall}");
     }
 
     /// A tmux that cannot be asked is not evidence a child died.
