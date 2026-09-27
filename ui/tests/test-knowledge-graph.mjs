@@ -4803,6 +4803,57 @@ ok("the rim of stray pages hugs the named discs' outline, a spiral step at most,
     && rimHug.firstExcess <= rimHug.pitch && rimHug.closest >= rimHug.gap,
   JSON.stringify(rimHug));
 
+/* 이웃한 군집은 같은 색을 입지 않는다(t-11500). 색 칸은 여덟이고 주제는 스물 — 순위로 돌려 쓰던
+ * 색은 1·9·17위에게 같은 금색을 입혀 이웃에 세웠다. 원반마다 가장 가까운 이름 있는 원반과 색이
+ * 다른지, 앞의 여덟은 오늘의 색(순위의 칸) 그대로인지 묻는다. 색은 여덟 칸의 토큰에서만 온다 —
+ * 두 테마의 대비는 그 토큰의 시험(Test 8)이 이미 지킨다. */
+const clusterInks = await glPage.evaluate(async () => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  try {
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    const answer = window.__buildVaultGraph__({ path: "/scene/cluster-inks", sources: false },
+      { pages: 600, ghosts: 30, linksPer: 3, tags: Array.from({ length: 20 }, (unused, at) => `topic-${at}`) });
+    knowledgeLayouts.delete(view);
+    const host = view.querySelector(".knowledge-nodes");
+    host.dataset.knowledgeSignature = "";
+    host.dataset.knowledgeVault = "";
+    host.replaceChildren();
+    view.querySelector(".knowledge-edges").replaceChildren();
+    noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+    setKnowledgeMode(view, "global", { paint: false });
+    knowledgeReport = answer;
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 1500 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+    const layout = knowledgeLayouts.get(view);
+    const { communityHomeX: homeX, communityHomeY: homeY, communityHomeR: homeR, communityHue: hue,
+      namedCount: named } = layout;
+    let sameAsNearest = 0;
+    let firstEightMoved = 0;
+    for (let rank = 0; rank < named; rank += 1) {
+      let nearest = -1;
+      let room = Number.POSITIVE_INFINITY;
+      for (let other = 0; other < named; other += 1) {
+        if (other === rank) continue;
+        const gap = Math.hypot(homeX[rank] - homeX[other], homeY[rank] - homeY[other]) - homeR[rank] - homeR[other];
+        if (gap < room) {
+          room = gap;
+          nearest = other;
+        }
+      }
+      if (nearest >= 0 && hue[nearest] === hue[rank]) sameAsNearest += 1;
+      if (rank < 8 && hue[rank] !== rank) firstEightMoved += 1;
+    }
+    const cells = new Set([...hue.slice(0, named)]);
+    return { named, sameAsNearest, firstEightMoved, cells: [...cells].sort() };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error) };
+  }
+});
+ok("neighbouring clusters wear different hues: no disc shares its hue with its nearest named disc, and the first eight keep their colour",
+  !clusterInks.thrown && clusterInks.named > 8 && clusterInks.sameAsNearest === 0
+    && clusterInks.firstEightMoved === 0 && clusterInks.cells.length === 8,
+  JSON.stringify(clusterInks));
+
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *
  * 다섯 종류의 점 하나씩을 선 없이 한 줄로 세우고, 같은 자리·같은 크기를 SVG 손과 GL 손으로

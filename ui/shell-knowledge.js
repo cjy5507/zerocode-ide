@@ -2999,7 +2999,7 @@ function knowledgeLouvain(count, from, to, weight, edgeCount) {
  * 하나도 없는 군집은 연결이 가장 많은 멤버의 제목을 쓴다. 동률은 이름순 —
  * 이 목록도 그림처럼 결정적이어야 한다. 칩의 색은 그 태그가 가장 많이 사는
  * 군집의 색이다. */
-function knowledgeClusterNames(model, of, size, named) {
+function knowledgeClusterNames(model, of, size, named, hue) {
   const count = model.count;
   const tagShare = new Map();
   for (let at = 0; at < count; at += 1) {
@@ -3059,7 +3059,7 @@ function knowledgeClusterNames(model, of, size, named) {
     for (let rank = 0; rank < named; rank += 1) {
       if (held[rank] > 0 && (home < 0 || held[rank] > held[home])) home = rank;
     }
-    if (home >= 0) tagHue.set(row.tag, home % KNOWLEDGE_HUES);
+    if (home >= 0) tagHue.set(row.tag, hue[home]);
   }
   /* `strongest`는 군집의 **대표 페이지**이기도 하다(09-16): 배치가 그것을 원반의
    * 가운데에 앉히고, 이름표 격자가 이름을 가장 먼저 세운다. 여기서 이미 세었으므로
@@ -3119,17 +3119,44 @@ function knowledgeCommunities(model, tuning) {
   const of = new Int32Array(count);
   for (let at = 0; at < count; at += 1) of[at] = rankOf[membership[at]];
   const size = new Int32Array(ids);
-  const hue = new Int8Array(ids);
   let named = 0;
   for (let rank = 0; rank < ids; rank += 1) {
     size[rank] = pages[order[rank]];
-    const eligible = size[rank] >= KNOWLEDGE_COMMUNITY.minSize;
-    hue[rank] = eligible ? rank % KNOWLEDGE_HUES : -1;
-    if (eligible) named += 1;
+    if (size[rank] >= KNOWLEDGE_COMMUNITY.minSize) named += 1;
   }
   const { homeX, homeY, homed, homeR } = knowledgeClusterHomes(model, of, ids, named, tuning);
-  const { names, tagHue, core } = knowledgeClusterNames(model, of, size, named);
+  const hue = knowledgeClusterHues(ids, named, homeX, homeY, homeR);
+  const { names, tagHue, core } = knowledgeClusterNames(model, of, size, named, hue);
   return { count: ids, of, size, hue, names, homeX, homeY, homed, homeR, named, tagHue, core };
+}
+
+/* 군집의 색 칸(t-11500). 색 칸은 여덟뿐이고(`KNOWLEDGE_HUES`, 토큰이 두 테마에서 대비를 지키는 칸)
+ * 볼트의 주제는 그보다 많다 — 순위로 돌려 쓰면(`순위 % 8`) 1·9·17위가 같은 색이고, 그 셋이 이웃에
+ * 서면 지도가 세 주제를 한 주제로 말한다(실측 200% 범례: 세 군집이 모두 금색). 그래서 순위대로,
+ * 이미 그 색을 입은 원반들과의 가장 가까운 간격(가장자리 사이)이 가장 먼 칸을 고른다. 여덟까지는
+ * 모든 칸이 비어 있어 순위의 칸 그대로이고(오늘의 색), 동률은 순위의 칸부터 차례로 — 난수 없이
+ * 같은 볼트는 같은 색이다. 되풀이되는 색은 지도에서 가장 먼 원반끼리 나눈다. */
+function knowledgeClusterHues(ids, named, homeX, homeY, homeR) {
+  const hue = new Int8Array(ids).fill(-1);
+  for (let rank = 0; rank < named; rank += 1) {
+    let best = rank % KNOWLEDGE_HUES;
+    let bestRoom = Number.NEGATIVE_INFINITY;
+    for (let step = 0; step < KNOWLEDGE_HUES; step += 1) {
+      const cell = (rank + step) % KNOWLEDGE_HUES;
+      let room = Number.POSITIVE_INFINITY;
+      for (let other = 0; other < rank; other += 1) {
+        if (hue[other] !== cell) continue;
+        room = Math.min(room, Math.hypot(homeX[rank] - homeX[other], homeY[rank] - homeY[other])
+          - homeR[rank] - homeR[other]);
+      }
+      if (room > bestRoom) {
+        bestRoom = room;
+        best = cell;
+      }
+    }
+    hue[rank] = best;
+  }
+  return hue;
 }
 
 /* 군집 원반의 자리 (성좌 배치, 09-16).
@@ -3305,7 +3332,8 @@ function knowledgeLayout(view, model) {
   }
   if (held?.signature === model.signature) {
     if (held.model !== model) {
-      const names = knowledgeClusterNames(model, held.community, held.communitySize, held.namedCount);
+      const names = knowledgeClusterNames(model, held.community, held.communitySize, held.namedCount,
+        held.communityHue);
       held.communityNames = names.names;
       held.tagHue = names.tagHue;
       /* 같은 위상이면 차수도 같으므로 대표 페이지는 그대로다 — 제목만 새로 읽는다. */
