@@ -290,7 +290,7 @@ pub fn ask(look: &NotifyLook<'_>) -> NotifyAsk {
 
 /// Whole seconds, never negative: the question reads time in the unit a
 /// person would say it in.
-const fn seconds(ms: i64) -> i64 {
+pub(crate) const fn seconds(ms: i64) -> i64 {
     if ms < 0 { 0 } else { ms / 1_000 }
 }
 
