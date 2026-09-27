@@ -703,7 +703,7 @@ impl ProviderRuntimeClient {
             ProviderClient::Anthropic(client) if client.auth().api_key().is_none() => {
                 client.auth().bearer_token().map(str::to_string)
             }
-            _ => return LoginRecovery::NotALogin,
+            _ => return LoginRecovery::Fails,
         };
         if !std::mem::replace(recovery_attempted, true) && self.try_recover_unauthorized().await {
             return LoginRecovery::Retry;
@@ -737,7 +737,7 @@ impl ProviderRuntimeClient {
                 client.set_auth(found);
                 LoginRecovery::Retry
             }
-            (Some(_), _) => LoginRecovery::NotALogin,
+            (Some(_), _) => LoginRecovery::Fails,
             (None, _) => LoginRecovery::Cancelled,
         }
     }
@@ -750,8 +750,9 @@ enum LoginRecovery {
     Retry,
     /// The agent was cancelled while it waited.
     Cancelled,
-    /// Not a login a person brings back (a key): fail as before.
-    NotALogin,
+    /// Fail as before: a refused key is a bad key, not a login a person
+    /// brings back.
+    Fails,
 }
 
 /// Wait for a Claude login other than `refused` (t-11045): `look` every
@@ -1230,7 +1231,7 @@ impl ApiClient for ProviderRuntimeClient {
                                 LoginRecovery::Cancelled => {
                                     return Err(RuntimeError::new("agent cancelled"));
                                 }
-                                LoginRecovery::NotALogin => {
+                                LoginRecovery::Fails => {
                                     return Err(RuntimeError::from_api_error(&error));
                                 }
                             }
@@ -1629,7 +1630,7 @@ impl ApiClient for ProviderRuntimeClient {
                                 LoginRecovery::Cancelled => {
                                     return Err(RuntimeError::new("agent cancelled"));
                                 }
-                                LoginRecovery::NotALogin => {
+                                LoginRecovery::Fails => {
                                     return Err(RuntimeError::from_api_error(&error));
                                 }
                             }
@@ -1970,6 +1971,54 @@ mod tests {
         ));
         assert!(waited.is_none(), "a cancelled agent went on");
         assert_eq!(looks.load(Ordering::SeqCst), 0, "a cancelled wait looked");
+    }
+
+    /// Only a person signs in again (t-11045): an agent working for a turn
+    /// nobody attends — a headless run, or a turn the window or the goal
+    /// controller drives; no host in this test binary ever declares one
+    /// attended — does not wait for a login, which would only hang the run.
+    /// Its refused request fails as it always did.
+    #[test]
+    fn an_unattended_agent_whose_claude_login_is_refused_fails_as_before() {
+        assert_eq!(runtime::declared_attendance(), runtime::Attendance::Unattended);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let mut agent = super::ProviderRuntimeClient {
+            run_generation: None,
+            handle: runtime.handle().clone(),
+            client: api::ProviderClient::Anthropic(api::AnthropicClient::from_auth(
+                api::AuthSource::BearerToken("refused".to_string()),
+            )),
+            model: String::new(),
+            allowed_tools: std::collections::BTreeSet::new(),
+            mcp_tools: Vec::new(),
+            structured_schema: None,
+            token_history: std::sync::Arc::default(),
+            output_tokens_total: std::sync::Arc::default(),
+            workflow_member: false,
+            thinking_budget_tokens: None,
+            route_effort: None,
+            api_concurrency: None,
+            rate_limit_fallback_models: std::collections::VecDeque::new(),
+            cancel_signal: None,
+            manifest_path: None,
+            agent_identity: None,
+        };
+        // Its one recovery was already tried and found nothing.
+        let mut recovery_attempted = true;
+        let outcome = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                agent.recover_or_wait_for_a_claude_login(&mut recovery_attempted),
+            )
+            .await
+        });
+        assert_eq!(
+            outcome.expect("an unattended agent waited for a login nobody brings back"),
+            super::LoginRecovery::Fails
+        );
     }
 
     #[test]

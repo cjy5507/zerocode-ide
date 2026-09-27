@@ -347,6 +347,10 @@ pub struct LiveAsyncApiClient {
     /// How often a request held for its Claude login looks for one
     /// ([`api::CLAUDE_LOGIN_LOOK_EVERY`]; a test shortens it).
     login_look_every: std::time::Duration,
+    /// Who attends the turns this client serves: `None` reads what the host
+    /// declared on the way into the turn ([`runtime::declared_attendance`]);
+    /// a test pins it.
+    attendance: Option<runtime::Attendance>,
 }
 
 impl LiveAsyncApiClient {
@@ -377,15 +381,8 @@ impl LiveAsyncApiClient {
             named_effort,
             effort_band_ceiling,
             login_look_every: api::CLAUDE_LOGIN_LOOK_EVERY,
+            attendance: None,
         }
-    }
-
-    /// Look for a Claude login this often while a request waits for one.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn with_login_look_every(mut self, every: std::time::Duration) -> Self {
-        self.login_look_every = every;
-        self
     }
 }
 
@@ -1513,64 +1510,112 @@ mod tests {
         (base_url, seen)
     }
 
+    /// A world with no Claude login in it: an empty zo home, an empty Claude
+    /// folder the store rule reads — where a person's new login lands — and
+    /// no keychain, key or model list. The caller holds the test env lock.
+    struct NoLoginAnywhere {
+        store: tempfile::TempDir,
+        _home: tempfile::TempDir,
+        _env: Vec<crate::support::EnvVarGuard>,
+    }
+
+    impl NoLoginAnywhere {
+        fn new() -> Self {
+            let home = tempfile::tempdir().expect("an empty zo home");
+            let store = tempfile::tempdir().expect("the Claude folder");
+            let home_path = home.path().to_str().expect("utf8 home");
+            let store_path = store.path().to_str().expect("utf8 store");
+            let env = vec![
+                crate::support::EnvVarGuard::set("ZO_CONFIG_HOME", Some(home_path)),
+                crate::support::EnvVarGuard::set("ZO_HOME", None),
+                crate::support::EnvVarGuard::set("HOME", Some(home_path)),
+                crate::support::EnvVarGuard::set("CLAUDE_CONFIG_DIR", Some(store_path)),
+                crate::support::EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1")),
+                crate::support::EnvVarGuard::set("ZO_DISABLE_MODEL_DISCOVERY", Some("1")),
+                crate::support::EnvVarGuard::set("ANTHROPIC_API_KEY", None),
+                crate::support::EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", None),
+            ];
+            api::managed_account::clear();
+            api::invalidate_claude_code_keychain_cache();
+            crate::runtime_support::forget_cached_claude_auth();
+            Self {
+                store,
+                _home: home,
+                _env: env,
+            }
+        }
+    }
+
+    impl Drop for NoLoginAnywhere {
+        fn drop(&mut self) {
+            crate::runtime_support::forget_cached_claude_auth();
+            api::managed_account::clear();
+        }
+    }
+
+    /// A live client whose login was refused, in a turn attended as
+    /// `attendance`, and the turn's one request. The gate it talks to answers
+    /// only `signed-in-again`, the login a person brings back; the third part
+    /// is what the gate heard.
+    async fn a_refused_request(
+        attendance: runtime::Attendance,
+    ) -> (LiveAsyncApiClient, ApiRequest, Arc<std::sync::Mutex<Vec<String>>>) {
+        let (gate, seen) = a_login_gate("signed-in-again").await;
+        let client = ProviderClient::Anthropic(
+            api::AnthropicClient::from_auth(api::AuthSource::BearerToken(
+                "refused-login".to_string(),
+            ))
+            .with_base_url(gate),
+        );
+        let mut live = LiveAsyncApiClient::new(
+            client,
+            "claude-sonnet-4-6".to_string(),
+            AuthRoute::Auto,
+            false,
+            None,
+            GlobalToolRegistry::builtin(),
+            None,
+            None,
+            None,
+        );
+        live.login_look_every = std::time::Duration::from_millis(20);
+        live.attendance = Some(attendance);
+        let request = ApiRequest {
+            system_prompt: Arc::from(Vec::<String>::new()),
+            wire_reminders: Arc::from(Vec::<String>::new()),
+            messages: Arc::new(vec![runtime::ConversationMessage::user_text("go on")]),
+            tool_choice: None,
+            effort_override: None,
+            effort_step: None,
+            model_override: None,
+        };
+        (live, request, seen)
+    }
+
+    /// The system rows a request rendered.
+    fn system_rows(render_rx: &mut mpsc::Receiver<RenderBlock>) -> Vec<String> {
+        let mut rows = Vec::new();
+        while let Ok(block) = render_rx.try_recv() {
+            if let RenderBlock::System { text, .. } = block {
+                rows.push(text);
+            }
+        }
+        rows
+    }
+
     /// A request whose Claude login is gone does not end the turn (t-11045):
     /// it waits where it stands, says why once, and when a login appears in the
     /// store it goes on as the same request, sent with that login.
     #[test]
     fn a_request_whose_claude_login_is_gone_waits_and_goes_on_once_one_is_back() {
         let _lock = crate::test_env_lock();
-        let home = tempfile::tempdir().expect("an empty zo home");
-        let store = tempfile::tempdir().expect("the Claude folder");
-        let home_path = home.path().to_str().expect("utf8 home");
-        let _config_home = crate::support::EnvVarGuard::set("ZO_CONFIG_HOME", Some(home_path));
-        let _zo_home = crate::support::EnvVarGuard::set("ZO_HOME", None);
-        let _home = crate::support::EnvVarGuard::set("HOME", Some(home_path));
-        let _claude_home = crate::support::EnvVarGuard::set(
-            "CLAUDE_CONFIG_DIR",
-            Some(store.path().to_str().expect("utf8 store")),
-        );
-        let _disable_keychain = crate::support::EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
-        let _no_discovery = crate::support::EnvVarGuard::set("ZO_DISABLE_MODEL_DISCOVERY", Some("1"));
-        let _api_key = crate::support::EnvVarGuard::set("ANTHROPIC_API_KEY", None);
-        let _auth_token = crate::support::EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", None);
-        api::managed_account::clear();
-        api::invalidate_claude_code_keychain_cache();
-        crate::runtime_support::forget_cached_claude_auth();
-
+        let world = NoLoginAnywhere::new();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
         runtime.block_on(async {
-            let (gate, seen) = a_login_gate("signed-in-again").await;
-            // The login this client was built with has since been refused.
-            let client = ProviderClient::Anthropic(
-                api::AnthropicClient::from_auth(api::AuthSource::BearerToken(
-                    "refused-login".to_string(),
-                ))
-                .with_base_url(gate),
-            );
-            let live = LiveAsyncApiClient::new(
-                client,
-                "claude-sonnet-4-6".to_string(),
-                AuthRoute::Auto,
-                false,
-                None,
-                GlobalToolRegistry::builtin(),
-                None,
-                None,
-                None,
-            )
-            .with_login_look_every(std::time::Duration::from_millis(20));
-            let request = ApiRequest {
-                system_prompt: Arc::from(Vec::<String>::new()),
-                wire_reminders: Arc::from(Vec::<String>::new()),
-                messages: Arc::new(vec![runtime::ConversationMessage::user_text("go on")]),
-                tool_choice: None,
-                effort_override: None,
-                effort_step: None,
-                model_override: None,
-            };
+            let (live, request, seen) = a_refused_request(runtime::Attendance::Attended).await;
             let (render_tx, mut render_rx) = mpsc::channel(256);
             let held = tokio::spawn(async move {
                 live.stream_async(request, render_tx, BlockId(1)).await
@@ -1581,7 +1626,7 @@ mod tests {
 
             // The person signs in again; the store holds a login.
             std::fs::write(
-                store.path().join(".credentials.json"),
+                world.store.path().join(".credentials.json"),
                 r#"{"claudeAiOauth":{"accessToken":"signed-in-again","scopes":["user:inference"]}}"#,
             )
             .expect("the login comes back");
@@ -1598,12 +1643,7 @@ mod tests {
                 vec!["Bearer refused-login".to_string(), "Bearer signed-in-again".to_string()],
                 "refused once, sent again only with the login that came back"
             );
-            let mut rows = Vec::new();
-            while let Ok(block) = render_rx.try_recv() {
-                if let RenderBlock::System { text, .. } = block {
-                    rows.push(text);
-                }
-            }
+            let rows = system_rows(&mut render_rx);
             assert!(
                 rows.iter().any(|row| row.starts_with("Claude login needed")),
                 "the wait said why: {rows:?}"
@@ -1613,7 +1653,42 @@ mod tests {
                 "and that it was over: {rows:?}"
             );
         });
-        crate::runtime_support::forget_cached_claude_auth();
-        api::managed_account::clear();
+    }
+
+    /// Only a person signs in again (t-11045): a turn nobody attends — a
+    /// headless run, or a turn the window or the goal controller drives —
+    /// does not wait for a login, which would only hang it. Its refused
+    /// request fails as it always did, after the one recovery that finds
+    /// nothing, and speaks of no wait.
+    #[test]
+    fn an_unattended_request_whose_claude_login_is_refused_fails_as_before() {
+        let _lock = crate::test_env_lock();
+        let _world = NoLoginAnywhere::new();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(async {
+            let (live, request, seen) = a_refused_request(runtime::Attendance::Unattended).await;
+            let (render_tx, mut render_rx) = mpsc::channel(256);
+            let answer = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                live.stream_async(request, render_tx, BlockId(1)),
+            )
+            .await
+            .expect("an unattended request waited for a login nobody brings back");
+            assert!(answer.is_err(), "the refused request failed");
+
+            assert_eq!(
+                seen.lock().expect("seen").clone(),
+                vec!["Bearer refused-login".to_string()],
+                "sent once, and never again with the login it was refused with"
+            );
+            let rows = system_rows(&mut render_rx);
+            assert!(
+                !rows.iter().any(|row| row.starts_with("Claude login needed")),
+                "an unattended turn announced a wait: {rows:?}"
+            );
+        });
     }
 }
