@@ -29,6 +29,13 @@
          This file is that same working surface at 1.38 MB, one thread, no
          worker and no `blob:` URL — which is why the CSP below is untouched. -->
     <script defer src="./vendor/cm6.js"></script>
+    <!-- The window's one WebGL renderer, vendored the same way: three.js
+         built offline into one IIFE on `window.THREE` — see
+         ui/vendor/build-three.mjs for which symbols are in it and how to
+         remake it. Before the window for the same `defer` reason, so
+         `shell-knowledge-3d.js` and `shell-board-orbit.js` find `THREE`
+         defined. No worker, no `blob:`. -->
+    <script defer src="./vendor/three.js"></script>
     <script defer src="./shell-boot.js"></script>
     <script defer src="./shell-i18n.js"></script>
     <script defer src="./shell-term-selection.js"></script>

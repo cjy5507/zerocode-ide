@@ -150,6 +150,8 @@ const WINDOW_GLOBALS: &[&str] = &[
     "ResizeObserver",
     "Set",
     "String",
+    // 관계 탭 입체 보기의 렌더러 — `ui/vendor/three.js`가 창보다 먼저 거는 전역.
+    "THREE",
     // The address bar's parser (1-fy) — Orca classifies with `new URL`
     // and so does the port, because a hand-rolled URL parser is a CVE
     // generator.
