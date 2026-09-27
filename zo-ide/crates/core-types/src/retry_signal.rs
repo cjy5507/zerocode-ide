@@ -528,6 +528,42 @@ pub const REFUSAL_CONTEXT_CLEANED_WARN: &str =
     "No provider fallback is available — asked the same model again with the earlier declined \
      exchange dropped from context.";
 
+/// What the ladder says before its last rung (t-10956): a long conversation
+/// the classifier keeps declining is compacted — its old context, pictures
+/// and all, becomes a summary — and the same model is asked once more with
+/// the person's last message as they wrote it. It is what the surfaced
+/// notice told the person to do ("on a long session, /compact can too"),
+/// done for them, once.
+#[must_use]
+pub fn refusal_compaction_notice(model: &str) -> String {
+    format!(
+        "The safety classifier declined this long conversation twice — compacting it and asking \
+         {model} once more, your last message as you wrote it."
+    )
+}
+
+/// What stands beside the surfaced decline when the compacted retry was
+/// declined too (t-10956): nothing more is tried on its own.
+pub const REFUSAL_COMPACTED_RETRY_DECLINED: &str =
+    "The compacted conversation was declined too — nothing more is tried on its own.";
+
+/// What stands beside a surfaced decline while pictures from earlier in the
+/// conversation are still in it (t-10956): each rides every request, the
+/// declined ones too — the declines of 2026-09-27 carried a screenshot from
+/// the conversation's first question on every one of six requests.
+#[must_use]
+pub fn refusal_pictures_ride_notice(count: usize) -> String {
+    let (what, ride, them) = if count == 1 {
+        ("image", "rides", "it")
+    } else {
+        ("images", "ride", "them")
+    };
+    format!(
+        "{count} {what} from earlier in this conversation {ride} every request, the declined \
+         ones too — /compact or /new leaves {them} behind."
+    )
+}
+
 /// System warning on the first turn pre-armed by the session-scoped refusal
 /// cooldown, naming the model the session now continues on (a same-provider
 /// Opus override or a cross-provider peer) — or "the refusal fallback" when

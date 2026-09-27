@@ -195,6 +195,15 @@ impl Status {
         }
     }
 
+    /// The row a `/compact` stands on while its summary streams (t-10956): its
+    /// own word, the clock, and the key that stops it.
+    #[must_use]
+    pub fn compacting() -> Self {
+        let mut status = Self::working(Duration::ZERO);
+        status.header = strings::COMPACTING.to_string();
+        status
+    }
+
     /// A host event that should occupy the status row for one paint without
     /// claiming that a model turn is running or advertising an interrupt key.
     #[must_use]

@@ -153,11 +153,13 @@ async fn compact_streaming_routes_summary_through_async_client_and_emits_notice(
 
     let (tx, rx) = mpsc::channel::<RenderBlock>(64);
     let ids = fresh_id_gen();
-    let result = runtime
+    let done = runtime
         .compact_streaming(COMPACT_CONFIG, &tx, &ids, None)
         .await;
     drop(tx);
     let blocks = drain(rx).await;
+    assert_eq!(done.local_summary_reason, None, "the model's summary came");
+    let result = done.result;
 
     // The async client produced exactly one summary round-trip — proving the
     // await-suspending path ran, not the blocking sync `ApiClient::stream`.
@@ -190,7 +192,8 @@ async fn compact_streaming_without_async_client_matches_sync_compact() {
     let ids = fresh_id_gen();
     let streaming_result = streaming_runtime
         .compact_streaming(COMPACT_CONFIG, &tx, &ids, None)
-        .await;
+        .await
+        .result;
     drop(tx);
     let blocks = drain(rx).await;
 
@@ -224,7 +227,8 @@ async fn compact_streaming_threads_focus_into_async_summary_request() {
     let ids = fresh_id_gen();
     let result = runtime
         .compact_streaming(COMPACT_CONFIG, &tx, &ids, Some(focus))
-        .await;
+        .await
+        .result;
     drop(tx);
     let _ = drain(rx).await;
 
@@ -249,5 +253,46 @@ async fn compact_streaming_threads_focus_into_async_summary_request() {
     assert!(
         result.removed_message_count > 0,
         "focused compaction should have removed messages"
+    );
+}
+
+/// Async client whose summary round-trip fails, the way a provider that
+/// rejects the summary request (a conversation too long for it, a wall) does.
+struct FailingAsyncApi;
+impl AsyncApiClient for FailingAsyncApi {
+    fn stream_async<'a>(
+        &'a self,
+        _request: ApiRequest,
+        _render_tx: mpsc::Sender<RenderBlock>,
+        _text_block_id: BlockId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        Box::pin(async move { Err(RuntimeError::new("prompt is too long: 1200000 tokens > 1000000 maximum")) })
+    }
+}
+
+#[tokio::test]
+async fn compact_streaming_says_why_the_local_summary_stands_in() {
+    // t-10956: when the model's summary does not come, `/compact` still folds
+    // the conversation with the deterministic local summary — and says why,
+    // instead of handing over a thinner summary in silence.
+    let mut runtime = compactable_runtime(PlainSyncApi);
+    runtime.set_async_api_client(Arc::new(FailingAsyncApi) as Arc<dyn AsyncApiClient>);
+
+    let (tx, rx) = mpsc::channel::<RenderBlock>(64);
+    let ids = fresh_id_gen();
+    let done = runtime
+        .compact_streaming(COMPACT_CONFIG, &tx, &ids, None)
+        .await;
+    drop(tx);
+    let _ = drain(rx).await;
+
+    assert!(
+        done.result.removed_message_count > 0,
+        "the local summary still folds the conversation"
+    );
+    let reason = done.local_summary_reason.expect("the reason the local summary stood in");
+    assert!(
+        reason.contains("prompt is too long"),
+        "the reason names what the provider said: {reason}"
     );
 }

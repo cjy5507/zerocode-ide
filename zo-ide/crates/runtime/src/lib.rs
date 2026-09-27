@@ -157,14 +157,14 @@ pub use conversation::{
 pub use conversation::{AgentNotification, AgentNotificationInbox, AgentNotificationKind};
 pub use conversation::{
     auto_compaction_tail_budget, auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, bash_result_exited_zero, MICROCOMPACT_MIN_OUTPUT_BYTES,
-    detect_check_command,
+    detect_check_command, format_kilo_tokens,
     declare_attendance, declare_classifier_fallback, declared_attendance,
     declared_classifier_fallback, env_deadline_extension, env_turn_budgets,
     final_assistant_text, read_only_bash_allow_rules, ClassifierFallback,
     take_verifier_calibration_events, VerifierCalibrationEvent,
     flush_pending_tool_events, prompt_cache_record_to_event, record_non_anthropic_prompt_cache_usage, push_output_block, push_refusal_category, redacted_thinking_data_to_string, refusal_category_of, response_to_events, ApiClient, ApiRequest,
     AssistantEvent, AsyncApiClient, Attendance, AutoCompactionEvent, BudgetExhausted,
-    ConcurrentDispatchFn, ConversationRuntime, DeepGateConfig, DeepMode,
+    ConcurrentDispatchFn, ConversationRuntime, DeepGateConfig, DeepMode, ManualCompaction,
     DeepOutcome, ExecContract, PromptCacheEvent, ProviderStateBlob, RuntimeError, StaticToolExecutor,
     StreamingTurnError, ToolError, ToolExecutor, ToolTextKind, TurnSummary, AUTO_RETRY_MARKER,
     DEEP_EXEC_MARKER, DEEP_PLAN_MARKER, DEEP_VERIFY_MARKER,

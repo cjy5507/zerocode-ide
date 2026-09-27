@@ -10166,6 +10166,7 @@ fn manual_compact_reasserts_todos_and_edited_files() {
         head_transitions: Vec::new(),
         output_tokens: 5,
         goal: None,
+        refusal_compaction: None,
     };
     crate::turn_trace::append(dir.path(), &record).expect("append turn record");
 
@@ -14332,6 +14333,7 @@ fn auto_compaction_reinjects_already_edited_files_into_system_prompt() {
         head_transitions: Vec::new(),
         output_tokens: 5,
         goal: None,
+        refusal_compaction: None,
     };
     crate::turn_trace::append(dir.path(), &record).expect("append turn record");
 
@@ -14413,6 +14415,7 @@ fn repeated_auto_compaction_replaces_reminders_instead_of_stacking() {
         head_transitions: Vec::new(),
         output_tokens: 5,
         goal: None,
+        refusal_compaction: None,
     };
     crate::turn_trace::append(dir.path(), &record).expect("append first turn record");
 
@@ -17023,7 +17026,11 @@ fn a_zo_turn_declined_twice_offers_the_fallback_rung() {
     use super::RefusalDecision;
     use crate::ClassifierFallback;
 
-    assert_eq!(REFUSAL_LADDER.len(), 4, "the one table: same model, route, across, cleaned");
+    assert_eq!(
+        REFUSAL_LADDER.len(),
+        5,
+        "the one table: same model, route, across, cleaned, compacted"
+    );
     let mut runtime = refusal_dry_test_runtime("claude-fable-5-1");
     runtime.set_attendance(crate::Attendance::Attended);
     runtime.set_classifier_fallback(ClassifierFallback::Ask);
@@ -18469,4 +18476,471 @@ fn the_streaming_loop_guards_the_same_calls_and_nothing_else() {
     assert_eq!(commands[0].task, "clean the build folder");
     assert_eq!(seat.ran.lock().expect("ran").len(), 2);
     assert_eq!(seat.texts.lock().expect("texts").len(), 1);
+}
+
+// ── t-10956: a declined long conversation is compacted once and asked again ──
+//
+// 2026-09-27 13:32: a long conversation carried from gpt-6-astra to Opus 5.5
+// was declined by the classifier on every request (three turns, six
+// requests, no category). The ladder's same-model retry spent, nothing else
+// applied, and the notice told the person "on a long session, /compact can
+// too". These pin zo doing that itself — once, on screen, with the person's
+// last words sent as they wrote them.
+
+/// The words the person sent when the classifier declined — they must reach
+/// the model again exactly as written.
+const DECLINED_LAST_WORDS: &str =
+    "make the board look like what is trending on X, not like this";
+
+/// A long conversation for the classifier to keep declining: twelve earlier
+/// exchanges, the first carrying a screenshot when `image` says so.
+fn long_declined_conversation(image: bool) -> Vec<ConversationMessage> {
+    let mut messages = Vec::new();
+    for exchange in 0..12 {
+        let question = format!("question {exchange}: {}", "detail ".repeat(40));
+        if exchange == 0 && image {
+            messages.push(ConversationMessage::user_with_images(
+                &question,
+                vec![("image/png".to_string(), "c2NyZWVuc2hvdA==".to_string())],
+            ));
+        } else {
+            messages.push(ConversationMessage::user_text(question));
+        }
+        messages.push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: format!("answer {exchange}: {}", "reply ".repeat(40)),
+        }]));
+    }
+    messages
+}
+
+/// Whether `request` is a compaction's summary round-trip — its prompt opens
+/// with the compaction prompt's first line, in the system prompt (fresh
+/// shape) or the final user turn (cached-prefix shape).
+fn is_summary_request(request: &ApiRequest) -> bool {
+    let marker = COMPACTION_SYSTEM_PROMPT.lines().next().unwrap_or_default();
+    request.system_prompt.iter().any(|prompt| prompt.contains(marker))
+        || request.messages.last().is_some_and(|message| {
+            message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text.contains(marker)))
+        })
+}
+
+/// A provider whose classifier declines the conversation's turn requests
+/// `declines` times with no category, then answers; a compaction's summary
+/// request is always answered. Keeps every request it was sent.
+struct DecliningProvider {
+    declines: usize,
+    turn_calls: AtomicUsize,
+    requests: Mutex<Vec<ApiRequest>>,
+}
+
+impl DecliningProvider {
+    fn new(declines: usize) -> Self {
+        Self {
+            declines,
+            turn_calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<ApiRequest> {
+        self.requests.lock().expect("requests").clone()
+    }
+}
+
+impl AsyncApiClient for DecliningProvider {
+    fn stream_async<'a>(
+        &'a self,
+        request: ApiRequest,
+        render_tx: tokio::sync::mpsc::Sender<crate::message_stream::types::RenderBlock>,
+        text_block_id: crate::message_stream::types::BlockId,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let summary = is_summary_request(&request);
+            self.requests.lock().expect("requests").push(request);
+            if summary {
+                return Ok(vec![
+                    AssistantEvent::TextDelta(
+                        "<summary>\n- Current state: redesigning the board.\n</summary>".to_string(),
+                    ),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            if self.turn_calls.fetch_add(1, Ordering::SeqCst) < self.declines {
+                return Ok(vec![
+                    AssistantEvent::StopReason("refusal".to_string()),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            let _ = render_tx
+                .send(crate::message_stream::types::RenderBlock::TextDelta {
+                    id: text_block_id,
+                    text: "here is a bolder board".to_string(),
+                    done: true,
+                })
+                .await;
+            Ok(vec![
+                AssistantEvent::TextDelta("here is a bolder board".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        })
+    }
+}
+
+/// What one declined turn over the long conversation came to: how it ended,
+/// the provider (for its requests), every block the screen was sent, and the
+/// runtime after it.
+struct DeclinedTurn {
+    ended: Result<TurnSummary, super::StreamingTurnError>,
+    provider: Arc<DecliningProvider>,
+    blocks: Vec<crate::message_stream::types::RenderBlock>,
+    runtime: ConversationRuntime<StopApiClient, StaticToolExecutor>,
+}
+
+/// Run one streaming turn of `DECLINED_LAST_WORDS` on Opus 5.5 over the long
+/// conversation, the turn record written under `cwd`.
+fn declined_long_turn(declines: usize, image: bool, cwd: &std::path::Path) -> DeclinedTurn {
+    let provider = Arc::new(DecliningProvider::new(declines));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        StopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_async_api_client(Arc::clone(&provider) as Arc<dyn AsyncApiClient>);
+    runtime.session.messages = Arc::new(long_declined_conversation(image));
+    runtime.set_context_model("claude-opus-5-5");
+    runtime.set_workspace_cwd(cwd.to_path_buf());
+    let prompter = Arc::new(RecordingPrompter {
+        answer: crate::permission::PermissionDecision::Deny,
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let (ended, blocks) = rt.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(256);
+        let screen = tokio::spawn(async move {
+            let mut blocks = Vec::new();
+            while let Some(block) = render_rx.recv().await {
+                blocks.push(block);
+            }
+            blocks
+        });
+        let ended = runtime
+            .run_turn_streaming_maybe_deep(DECLINED_LAST_WORDS, Vec::new(), render_tx, prompter)
+            .await;
+        (ended, screen.await.expect("the screen task"))
+    });
+    DeclinedTurn {
+        ended,
+        provider,
+        blocks,
+        runtime,
+    }
+}
+
+fn system_lines(blocks: &[crate::message_stream::types::RenderBlock]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            crate::message_stream::types::RenderBlock::System { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn last_user_words(request: &ApiRequest) -> Option<String> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .and_then(|message| {
+            message.blocks.iter().find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        })
+}
+
+/// Every turn record written under `cwd`, as JSON.
+fn turn_records(cwd: &std::path::Path) -> Vec<serde_json::Value> {
+    let dir = crate::traces_base(cwd)
+        .join(core_types::paths::ZO_DIR_NAME)
+        .join("turns");
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let body = fs::read_to_string(entry.path()).unwrap_or_default();
+        records.extend(body.lines().filter_map(|line| serde_json::from_str(line).ok()));
+    }
+    records
+}
+
+/// The classifier declines a long conversation twice (the request and the
+/// same-model retry). zo compacts it once, says why on screen beside the
+/// ordinary "Compacted conversation" line, and asks the same model again
+/// with the person's last words exactly as they were written — and the turn
+/// record says the compaction cleared the decline.
+#[test]
+fn a_declined_long_conversation_is_compacted_once_and_asked_again_with_the_same_words() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-compaction-cleared");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let DeclinedTurn {
+        ended,
+        provider,
+        blocks,
+        runtime,
+    } = declined_long_turn(2, false, &cwd);
+    let summary = ended.expect("the compacted retry is answered");
+
+    let requests = provider.requests();
+    let kinds: Vec<bool> = requests.iter().map(is_summary_request).collect();
+    assert_eq!(
+        kinds,
+        vec![false, false, true, false],
+        "the request, the same-model retry, ONE summary, ONE retry after it"
+    );
+    let retried = &requests[3];
+    assert_eq!(
+        last_user_words(retried).as_deref(),
+        Some(DECLINED_LAST_WORDS),
+        "the person's last words reach the model as they wrote them"
+    );
+    assert!(
+        retried.messages.len() < requests[0].messages.len(),
+        "the retry carries the compacted conversation: {} → {} messages",
+        requests[0].messages.len(),
+        retried.messages.len()
+    );
+    assert!(
+        !format!("{:?}", retried.messages).contains("question 0:"),
+        "the oldest exchange was folded into the summary"
+    );
+
+    let lines = system_lines(&blocks);
+    let compacted = lines
+        .iter()
+        .position(|line| line.starts_with("Compacted conversation"))
+        .unwrap_or_else(|| panic!("the ordinary compaction notice is shown: {lines:?}"));
+    assert!(
+        lines[..compacted]
+            .iter()
+            .any(|line| line.contains("declined") && line.contains("compact")),
+        "one line says why the conversation is being compacted: {lines:?}"
+    );
+    let answer = summary
+        .assistant_messages
+        .last()
+        .and_then(|message| message.blocks.first())
+        .and_then(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        });
+    assert_eq!(answer.as_deref(), Some("here is a bolder board"));
+    assert!(
+        !runtime
+            .session
+            .messages
+            .iter()
+            .any(|message| format!("{:?}", message.blocks).contains("safety classifier declined")),
+        "a cleared decline leaves no surfaced notice in the conversation"
+    );
+
+    let records = turn_records(&cwd);
+    let record = records
+        .last()
+        .unwrap_or_else(|| panic!("the turn was recorded under {}", cwd.display()));
+    assert_eq!(
+        record["refusal_compaction"]["resolved"],
+        serde_json::json!(true),
+        "the turn record counts a decline the compaction cleared: {record}"
+    );
+    assert!(
+        record["refusal_compaction"]["tokens_after"].as_u64()
+            < record["refusal_compaction"]["tokens_before"].as_u64(),
+        "and what it cost: {record}"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+/// The compacted retry is declined too: that decline is surfaced as it is and
+/// the turn stops — no second compaction, no other change of words or model.
+/// The screen says the compacted retry was declined and how many pictures
+/// from earlier in the conversation ride every request; the turn record says
+/// the compaction did not clear it.
+#[test]
+fn a_decline_after_the_compacted_retry_is_surfaced_and_nothing_more_is_tried() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-compaction-stood");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let DeclinedTurn {
+        ended,
+        provider,
+        blocks,
+        runtime,
+    } = declined_long_turn(usize::MAX, true, &cwd);
+    ended.expect("a surfaced decline ends the turn cleanly");
+
+    let kinds: Vec<bool> = provider.requests().iter().map(is_summary_request).collect();
+    assert_eq!(
+        kinds,
+        vec![false, false, true, false],
+        "one compaction and one retry after it — then nothing more"
+    );
+    let last = runtime.session.messages.last().expect("the surfaced notice");
+    assert!(
+        matches!(
+            last.blocks.first(),
+            Some(ContentBlock::Text { text }) if text == super::fallback::REFUSAL_SURFACED_NOTICE
+        ),
+        "the decline is surfaced as it is: {last:?}"
+    );
+    let lines = system_lines(&blocks);
+    let surfaced = lines
+        .iter()
+        .position(|line| line == super::fallback::REFUSAL_SURFACED_NOTICE)
+        .unwrap_or_else(|| panic!("the refusal notice is shown: {lines:?}"));
+    assert!(
+        lines[surfaced..]
+            .iter()
+            .any(|line| line.contains("compact") && line.contains("declined")),
+        "the screen says the compacted retry was declined too: {lines:?}"
+    );
+
+    let records = turn_records(&cwd);
+    let record = records
+        .last()
+        .unwrap_or_else(|| panic!("the turn was recorded under {}", cwd.display()));
+    assert_eq!(
+        record["refusal_compaction"]["resolved"],
+        serde_json::json!(false),
+        "the turn record counts a decline the compaction did not clear: {record}"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+/// A picture from earlier in the conversation rides every request, the
+/// declined ones too: when nobody can be asked about it and the conversation
+/// is too short to fold it away, the surfaced decline says how many there
+/// are. (A long conversation folds it into the summary on the last rung —
+/// then nothing rides, and nothing is said.)
+#[test]
+fn a_surfaced_decline_names_the_pictures_riding_every_request() {
+    let _todo_store = HermeticTodoStore::pin();
+    let provider = Arc::new(DecliningProvider::new(usize::MAX));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        StopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_async_api_client(Arc::clone(&provider) as Arc<dyn AsyncApiClient>);
+    let mut short = long_declined_conversation(true);
+    short.truncate(2);
+    runtime.session.messages = Arc::new(short);
+    runtime.set_context_model("claude-opus-5-5");
+    let prompter = Arc::new(RecordingPrompter {
+        answer: crate::permission::PermissionDecision::Deny,
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let blocks = rt.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+        let screen = tokio::spawn(async move {
+            let mut blocks = Vec::new();
+            while let Some(block) = render_rx.recv().await {
+                blocks.push(block);
+            }
+            blocks
+        });
+        runtime
+            .run_turn_streaming_maybe_deep(DECLINED_LAST_WORDS, Vec::new(), render_tx, prompter)
+            .await
+            .expect("the decline is surfaced");
+        screen.await.expect("the screen task")
+    });
+    let lines = system_lines(&blocks);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("1 image") && line.contains("every request")),
+        "the one picture from the first question is named: {lines:?}"
+    );
+    let kinds: Vec<bool> = provider.requests().iter().map(is_summary_request).collect();
+    assert_eq!(kinds, vec![false, false], "too short to fold: no summary request");
+}
+
+/// The declined request carried every image the conversation holds, not only
+/// the ones sent since the last answer: a screenshot from the first question
+/// is asked about, and withheld on a yes, like one sent this turn.
+#[test]
+fn a_declined_requests_images_include_the_ones_from_earlier_questions() {
+    let mut runtime = refusal_dry_test_runtime("claude-opus-5-5");
+    let mut messages = long_declined_conversation(true);
+    messages.push(ConversationMessage::user_text(DECLINED_LAST_WORDS));
+    runtime.session.messages = Arc::new(messages);
+    assert_eq!(runtime.declined_request_images(), 1, "the first question's screenshot");
+    runtime.set_attendance(crate::Attendance::Attended);
+    assert_eq!(runtime.declined_images_to_ask_about(), Some(1));
+    assert_eq!(runtime.withhold_declined_request_images(), 1);
+    assert_eq!(runtime.declined_request_images(), 0);
+    assert!(
+        !runtime
+            .session
+            .messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .any(|block| matches!(block, ContentBlock::Image { .. })),
+        "withheld from the conversation every later request is built from"
+    );
+}
+
+/// A short conversation has nothing to fold: two declines are surfaced as
+/// before, and no summary request is sent.
+#[test]
+fn a_short_declined_conversation_is_surfaced_without_compacting() {
+    let _todo_store = HermeticTodoStore::pin();
+    let provider = Arc::new(DecliningProvider::new(usize::MAX));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        StopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_async_api_client(Arc::clone(&provider) as Arc<dyn AsyncApiClient>);
+    runtime.set_context_model("claude-opus-5-5");
+    let prompter = Arc::new(RecordingPrompter {
+        answer: crate::permission::PermissionDecision::Deny,
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move { while render_rx.recv().await.is_some() {} });
+        runtime
+            .run_turn_streaming_maybe_deep(DECLINED_LAST_WORDS, Vec::new(), render_tx, prompter)
+            .await
+            .expect("the decline is surfaced");
+    });
+    let kinds: Vec<bool> = provider.requests().iter().map(is_summary_request).collect();
+    assert_eq!(kinds, vec![false, false], "the request and the same-model retry only");
 }

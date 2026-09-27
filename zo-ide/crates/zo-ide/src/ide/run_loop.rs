@@ -291,6 +291,9 @@ async fn run_frontend(
                                     break ExitReason::UserExit;
                                 }
                             }
+                            SlashOutcome::Compact(focus) => {
+                                run_compaction(&mut session, focus, &mut renderer).await;
+                            }
                         }
                     } else if run_one_turn(&mut session, trimmed, &mut renderer, &mut input_rx, reporter.as_ref(), false, false).await.exit
                         == TurnExit::ExitAfter
@@ -490,6 +493,8 @@ enum SlashOutcome {
     Exit,
     /// 슬래시가 아닌 것으로 판정돼 프롬프트로 보낼 텍스트(예: `//` 이스케이프).
     Turn(String),
+    /// `/compact [focus]` — run beside the input by [`run_compaction`] (t-10956).
+    Compact(Option<String>),
 }
 
 #[expect(
@@ -564,20 +569,7 @@ fn handle_slash<W: Write>(
             }
             SlashOutcome::Continue
         }
-        Some(Slash::Compact) => {
-            let focus = (!arg.is_empty()).then_some(arg);
-            let result = tokio::task::block_in_place(|| session.compact(focus));
-            match result {
-                Ok((0, kept)) => {
-                    note(renderer, &format!("compact: 압축할 것이 없음 ({kept} messages)"));
-                }
-                Ok((removed, kept)) => {
-                    note(renderer, &format!("compact: {removed} removed · {kept} kept"));
-                }
-                Err(error) => note(renderer, &format!("compact 실패: {error}")),
-            }
-            SlashOutcome::Continue
-        }
+        Some(Slash::Compact) => SlashOutcome::Compact((!arg.is_empty()).then(|| arg.to_string())),
         Some(Slash::Goal) => {
             match session.goal_command(arg) {
                 Ok(result) => {
@@ -1085,6 +1077,48 @@ fn banner_for(session: &PlainSession, flags: RenderFlags) -> SessionBanner {
 /// 한 번 묻고, 답이 없으면(리다이렉트) POSIX 기본값 80칸으로 그린다.
 fn terminal_width() -> usize {
     crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns).max(20))
+}
+
+/// `/compact` in the plain loop (t-10956): the compaction the TUI runs too
+/// ([`crate::session::turn_scaffold::TurnLaunch::compact`]), its notices
+/// rendered as they come, stopped by Ctrl-C or the IDE's Stop — which leaves
+/// the conversation as it was. The input is not read meanwhile: a line typed
+/// (or piped) behind `/compact` waits in the channel and runs after it.
+async fn run_compaction<W: Write>(
+    session: &mut PlainSession,
+    focus: Option<String>,
+    renderer: &mut Renderer<W>,
+) {
+    let (mut turn_scaffold, mut block_rx) = TurnScaffold::start(session);
+    let outcome = {
+        let mut compaction = Box::pin(turn_scaffold.launch().compact(session, focus));
+        loop {
+            tokio::select! {
+                biased;
+                outcome = &mut compaction => break outcome,
+                Some(block) = block_rx.recv() => {
+                    let _ = turn_scaffold.publish(&block);
+                    let _ = renderer.push(block);
+                }
+                command = events::next_command(turn_scaffold.ide) => match command {
+                    Command::CancelTurn { .. } | Command::Close { .. } => turn_scaffold.cancel_turn(),
+                    Command::Steer { .. } => {}
+                    Command::AccountSwitch { label } => {
+                        note(renderer, &crate::status_format::account_switch_notice(&label));
+                    }
+                },
+                _ = tokio::signal::ctrl_c() => turn_scaffold.cancel_turn(),
+            }
+        }
+    };
+    turn_scaffold.drain(&mut block_rx, |block| {
+        let _ = renderer.push(block);
+    });
+    turn_scaffold.finish(&outcome);
+    match &outcome {
+        Ok(report) => note(renderer, &report.note()),
+        Err(error) => note(renderer, &format!("compact failed: {error}")),
+    }
 }
 
 /// 시스템 노트 한 줄 — 파킹될 일이 없는 블록이라 반환값을 버린다.

@@ -472,6 +472,21 @@ pub fn final_assistant_text(summary: &TurnSummary) -> String {
         .unwrap_or_default()
 }
 
+/// What `/compact` produced (t-10956): the compaction to apply, and — when
+/// the deterministic local summary stands in for the model's — why the
+/// model's summary did not come, so the person is told rather than handed a
+/// thinner summary in silence.
+#[derive(Debug, Clone)]
+pub struct ManualCompaction {
+    pub result: CompactionResult,
+    pub local_summary_reason: Option<String>,
+}
+
+/// Why the summary round-trip was not tried at all: the provider's quota
+/// cooldown is on (see `compaction_provider_rate_limited`).
+const COMPACTION_SKIPPED_UNDER_QUOTA_COOLDOWN: &str =
+    "the provider is rate-limited and its cooldown is still on";
+
 /// Details about automatic session compaction applied during a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoCompactionEvent {
@@ -803,7 +818,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         lines.join("\n")
     }
 
-    fn compaction_config_if_possible(&self) -> Option<CompactionConfig> {
+    pub(super) fn compaction_config_if_possible(&self) -> Option<CompactionConfig> {
         // Check if compaction is even possible before invoking the full
         // pipeline. This avoids a full Session clone in the no-op path.
         let config = CompactionConfig {
@@ -1381,7 +1396,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         files
     }
 
-    fn apply_auto_compaction(&mut self, config: CompactionConfig) -> Option<AutoCompactionEvent> {
+    pub(super) fn apply_auto_compaction(&mut self, config: CompactionConfig) -> Option<AutoCompactionEvent> {
         let _ = self.run_lifecycle_hook(
             HookEvent::PreCompact,
             &json!({"message_count": self.session.messages.len()}),
@@ -1412,7 +1427,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             &json!({"message_count": self.session.messages.len()}),
         );
         // Auto-compaction has no user focus directive.
-        let result = self
+        let (result, _) = self
             .compact_with_api_fallback_async(config, id_gen, None, progress)
             .await;
         let _ = self.run_lifecycle_hook(
@@ -1635,7 +1650,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         true
     }
 
-    async fn apply_auto_compaction_streaming(
+    pub(super) async fn apply_auto_compaction_streaming(
         &mut self,
         config: CompactionConfig,
         render_tx: &mpsc::Sender<RenderBlock>,
@@ -1728,14 +1743,32 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         config: CompactionConfig,
         focus: Option<&str>,
     ) -> CompactionResult {
+        self.compact_with_api_fallback_explained(config, focus).0
+    }
+
+    /// [`Self::compact_with_api_fallback`], and why the local summary stood
+    /// in when it did.
+    fn compact_with_api_fallback_explained(
+        &mut self,
+        config: CompactionConfig,
+        focus: Option<&str>,
+    ) -> (CompactionResult, Option<String>) {
         // Under an active cooldown the API round-trip is doomed to retry-then-
         // fall-back; go straight to the deterministic local summarizer so the
         // session compacts instantly instead of hanging on the walled provider.
         if self.compaction_provider_rate_limited() {
-            return local_compaction(&self.session, config, focus);
+            return (
+                local_compaction(&self.session, config, focus),
+                Some(COMPACTION_SKIPPED_UNDER_QUOTA_COOLDOWN.to_string()),
+            );
         }
-        self.compact_with_api(config, focus)
-            .unwrap_or_else(|_| local_compaction(&self.session, config, focus))
+        match self.compact_with_api(config, focus) {
+            Ok(result) => (result, None),
+            Err(error) => (
+                local_compaction(&self.session, config, focus),
+                Some(error.to_string()),
+            ),
+        }
     }
 
     /// Streaming sibling of [`Self::compact`] for the interactive `/compact`
@@ -1744,17 +1777,19 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// await-suspends instead of blocking the caller's `select!` drive-loop
     /// task — the synchronous [`Self::compact`] freezes the spinner/reveal/input
     /// for the whole summary stream. Headless `-p` (no async client) keeps the
-    /// synchronous path. Returns the [`CompactionResult`] for the caller to
-    /// rebuild the session from; it never mutates `self`'s session in place, so
-    /// `/compact`'s rebuild-and-replace contract is preserved (the done report
-    /// is surfaced by the caller, so no done notice is emitted here).
+    /// synchronous path. Returns the [`ManualCompaction`] for the caller to
+    /// apply; it never mutates `self`'s session in place, so `/compact`'s
+    /// apply-in-place contract is preserved (the done report is surfaced by
+    /// the caller, so no done notice is emitted here) — and a caller that
+    /// drops this future before it resolves (Esc) leaves the conversation as
+    /// it was (t-10956).
     pub async fn compact_streaming(
         &mut self,
         config: CompactionConfig,
         render_tx: &mpsc::Sender<RenderBlock>,
         id_gen: &BlockIdGen,
         focus: Option<&str>,
-    ) -> CompactionResult {
+    ) -> ManualCompaction {
         // Only announce when compaction will actually run: a below-threshold
         // `/compact` otherwise printed "Compacting conversation…" alongside its
         // own "skipped" report, reading as a wedged compaction.
@@ -1769,11 +1804,15 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             tokio::task::yield_now().await;
         }
 
-        if self.async_api_client.is_some() {
+        let (result, local_summary_reason) = if self.async_api_client.is_some() {
             self.compact_with_api_fallback_async(config, id_gen, focus, Some(render_tx))
                 .await
         } else {
-            self.compact_with_api_fallback(config, focus)
+            self.compact_with_api_fallback_explained(config, focus)
+        };
+        ManualCompaction {
+            result,
+            local_summary_reason,
         }
     }
 
@@ -1910,22 +1949,28 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         }
     }
 
-    /// Async sibling of [`Self::compact_with_api_fallback`].
+    /// Async sibling of [`Self::compact_with_api_fallback_explained`].
     async fn compact_with_api_fallback_async(
         &mut self,
         config: CompactionConfig,
         id_gen: &BlockIdGen,
         focus: Option<&str>,
         progress: Option<&mpsc::Sender<RenderBlock>>,
-    ) -> CompactionResult {
+    ) -> (CompactionResult, Option<String>) {
         // See [`Self::compaction_provider_rate_limited`]: skip the doomed API
         // round-trip while the provider is walled and compact locally at once.
         if self.compaction_provider_rate_limited() {
-            return local_compaction(&self.session, config, focus);
+            return (
+                local_compaction(&self.session, config, focus),
+                Some(COMPACTION_SKIPPED_UNDER_QUOTA_COOLDOWN.to_string()),
+            );
         }
         match self.compact_with_api_async(config, id_gen, focus, progress).await {
-            Ok(result) => result,
-            Err(_) => local_compaction(&self.session, config, focus),
+            Ok(result) => (result, None),
+            Err(error) => (
+                local_compaction(&self.session, config, focus),
+                Some(error.to_string()),
+            ),
         }
     }
 
@@ -2093,7 +2138,12 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             let mut streamed_chars: u64 = 0;
             let mut last_reported: u64 = 0;
             while let Some(block) = sink_rx.recv().await {
-                if let RenderBlock::TextDelta { text, .. } = &block {
+                // The summarizer's reasoning counts as well as its text: at a
+                // high effort a summary's first minute is thinking, and a
+                // counter that waits for text reads as a stall (t-10956).
+                if let RenderBlock::TextDelta { text, .. } | RenderBlock::Reasoning { text, .. } =
+                    &block
+                {
                     streamed_chars += text.chars().count() as u64;
                     if streamed_chars.saturating_sub(last_reported) >= 2_000 {
                         last_reported = streamed_chars;
