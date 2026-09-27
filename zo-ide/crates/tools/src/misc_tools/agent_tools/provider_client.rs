@@ -694,7 +694,10 @@ impl ProviderRuntimeClient {
     /// for one, as the foreground turn waits: the parent's turn is waiting on
     /// this agent, and a login the person brings back carries both on. The
     /// parent hears once why this agent is parked. A key that is refused is a
-    /// bad key, not a login a person brings back, and fails as before.
+    /// bad key, not a login a person brings back, and fails as before; so does
+    /// an agent working for a turn nobody attends (a headless run, or a turn
+    /// the window or the goal controller drives), where a wait would only hang
+    /// the run.
     async fn recover_or_wait_for_a_claude_login(
         &mut self,
         recovery_attempted: &mut bool,
@@ -707,6 +710,9 @@ impl ProviderRuntimeClient {
         };
         if !std::mem::replace(recovery_attempted, true) && self.try_recover_unauthorized().await {
             return LoginRecovery::Retry;
+        }
+        if runtime::declared_attendance() != runtime::Attendance::Attended {
+            return LoginRecovery::Fails;
         }
         self.send_starvation_notice(format!(
             "{} waits for a Claude login — {}",
@@ -751,7 +757,7 @@ enum LoginRecovery {
     /// The agent was cancelled while it waited.
     Cancelled,
     /// Fail as before: a refused key is a bad key, not a login a person
-    /// brings back.
+    /// brings back, and a turn nobody attends has nobody to bring one back.
     Fails,
 }
 

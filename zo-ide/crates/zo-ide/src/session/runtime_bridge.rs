@@ -501,7 +501,9 @@ impl AsyncApiClient for LiveAsyncApiClient {
             // the same request once one is back. Every credential this request
             // was refused with is remembered and never sent again, so the loop
             // moves only when a different login appears; the runtime races the
-            // request against the turn's cancel, so Esc ends the wait.
+            // request against the turn's cancel, so Esc ends the wait. Only a
+            // turn a person attends waits: nobody signs in again for a headless
+            // or window-driven turn, which fails as before.
             let mut client = client;
             let mut refused_logins: Vec<Option<String>> = Vec::new();
             let stream = loop {
@@ -512,7 +514,8 @@ impl AsyncApiClient for LiveAsyncApiClient {
                 if !(refused.is_unauthorized() || api::is_missing_claude_login(&refused)) {
                     return Err(RuntimeBridgeError::from_api_error(&refused).into());
                 }
-                if !waits_for_a_claude_login(&client, self.auth_route) {
+                let attendance = self.attendance.unwrap_or_else(runtime::declared_attendance);
+                if !waits_for_a_claude_login(&client, self.auth_route, attendance) {
                     let Some(recovered) =
                         recover_oauth_client_after_401(&client, self.auth_route).await
                     else {
@@ -667,16 +670,24 @@ fn anthropic_bearer(client: &ProviderClient) -> Option<&str> {
 }
 
 /// Whether a request refused for its credential waits for a Claude login: an
-/// Anthropic client on a subscription route holding a login or none. A key —
-/// pinned by the route or set in the environment — that is refused is a bad
-/// key, not a login a person brings back, and fails as it always did.
-fn waits_for_a_claude_login(client: &ProviderClient, auth_route: AuthRoute) -> bool {
-    match client {
-        ProviderClient::Anthropic(anthropic) => {
-            auth_route != AuthRoute::ApiKey && anthropic.auth().api_key().is_none()
+/// Anthropic client on a subscription route holding a login or none, in a
+/// turn a person attends. A key — pinned by the route or set in the
+/// environment — that is refused is a bad key, not a login a person brings
+/// back, and fails as it always did; so does a refused login in a turn nobody
+/// attends (a headless run, or a turn the window or the goal controller
+/// drives): only a person signs in again, and a wait there would only hang it.
+fn waits_for_a_claude_login(
+    client: &ProviderClient,
+    auth_route: AuthRoute,
+    attendance: runtime::Attendance,
+) -> bool {
+    attendance == runtime::Attendance::Attended
+        && match client {
+            ProviderClient::Anthropic(anthropic) => {
+                auth_route != AuthRoute::ApiKey && anthropic.auth().api_key().is_none()
+            }
+            _ => false,
         }
-        _ => false,
-    }
 }
 
 /// The one row a held request shows: why, and the ways back this build has.
