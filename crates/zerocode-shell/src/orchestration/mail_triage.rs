@@ -222,7 +222,7 @@ fn ask_about(
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .get(term)
-            .map(|turn| matches!(turn, super::PaneTurn::Running));
+            .map(|turn| matches!(turn.as_read(), super::PaneTurn::Running { .. }));
         let workspace = host.worktree_of(*term);
         let open_questions = room.open_questions(run);
         for letter in &fresh {
