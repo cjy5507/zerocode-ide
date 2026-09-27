@@ -835,6 +835,31 @@ async fn unauthenticated_client_blocks_send_locally_before_external_network() {
     }
 }
 
+/// A turn that waits for a Claude login (t-11045) knows the refusal by value:
+/// the local "no login" refusal is one, a server 401 or another auth error is
+/// not.
+#[tokio::test]
+async fn a_missing_claude_login_is_known_by_its_refusal() {
+    let client = AnthropicClient::from_auth(AuthSource::None)
+        .with_base_url("https://api.anthropic.com");
+    let refused = client
+        .send_message(&streaming_request())
+        .await
+        .expect_err("no login");
+    assert!(super::is_missing_claude_login(&refused), "{refused}");
+    assert!(!super::is_missing_claude_login(&ApiError::Auth(
+        "a different auth failure".to_string()
+    )));
+    assert!(!super::is_missing_claude_login(&ApiError::Api {
+        status: reqwest::StatusCode::UNAUTHORIZED,
+        error_type: None,
+        message: None,
+        body: String::new(),
+        retryable: false,
+        retry_after: None,
+    }));
+}
+
 #[tokio::test]
 async fn unauthenticated_client_blocks_stream_locally_before_external_network() {
     let request = streaming_request();

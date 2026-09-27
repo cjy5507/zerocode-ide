@@ -20,7 +20,8 @@ use super::manifest::{
 use super::rate_limit::{
     QUOTA_SNAPSHOT_FRESH, RateGovernor, agent_rate_governor, binding_window,
     mark_capacity_stall_from, rate_limit_cooldown_remaining_ms, rate_limit_headroom_low,
-    shared_agent_runtime, wait_for_rate_limit_cooldown_cancellable, workflow_rate_governor,
+    shared_agent_runtime, sleep_cancellable, wait_for_rate_limit_cooldown_cancellable,
+    workflow_rate_governor,
 };
 use super::subagent_profile::starvation_demotion;
 
@@ -687,6 +688,93 @@ impl ProviderRuntimeClient {
             _ => false,
         }
     }
+
+    /// A request refused for its Claude login (t-11045): one recovery — a
+    /// newer or renewed login in the stores — and when there is none, a wait
+    /// for one, as the foreground turn waits: the parent's turn is waiting on
+    /// this agent, and a login the person brings back carries both on. The
+    /// parent hears once why this agent is parked. A key that is refused is a
+    /// bad key, not a login a person brings back, and fails as before.
+    async fn recover_or_wait_for_a_claude_login(
+        &mut self,
+        recovery_attempted: &mut bool,
+    ) -> LoginRecovery {
+        let refused = match &self.client {
+            ProviderClient::Anthropic(client) if client.auth().api_key().is_none() => {
+                client.auth().bearer_token().map(str::to_string)
+            }
+            _ => return LoginRecovery::NotALogin,
+        };
+        if !std::mem::replace(recovery_attempted, true) && self.try_recover_unauthorized().await {
+            return LoginRecovery::Retry;
+        }
+        self.send_starvation_notice(format!(
+            "{} waits for a Claude login — {}",
+            self.model,
+            api::CLAUDE_SIGN_IN_AGAIN
+        ));
+        let found = wait_for_a_claude_login(
+            refused.as_deref(),
+            self.cancel_flag(),
+            api::CLAUDE_LOGIN_LOOK_EVERY,
+            || {
+                let stale = refused.clone();
+                async move {
+                    // The shared recovery: a login the parent already found
+                    // is adopted; otherwise the stores are read again.
+                    tokio::task::spawn_blocking(move || {
+                        api::refresh_claude_auth_after_unauthorized(stale.as_deref())
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                }
+            },
+        )
+        .await;
+        match (found, &mut self.client) {
+            (Some(found), ProviderClient::Anthropic(client)) => {
+                client.set_auth(found);
+                LoginRecovery::Retry
+            }
+            (Some(_), _) => LoginRecovery::NotALogin,
+            (None, _) => LoginRecovery::Cancelled,
+        }
+    }
+}
+
+/// What a request refused for its Claude login comes to (t-11045).
+#[derive(Debug, PartialEq, Eq)]
+enum LoginRecovery {
+    /// A login this agent was not refused with is in hand: send again.
+    Retry,
+    /// The agent was cancelled while it waited.
+    Cancelled,
+    /// Not a login a person brings back (a key): fail as before.
+    NotALogin,
+}
+
+/// Wait for a Claude login other than `refused` (t-11045): `look` every
+/// `every` — a read of the stores, never a renewal on a timer — until one
+/// appears, or `None` when `cancel` is raised first.
+async fn wait_for_a_claude_login<L, F>(
+    refused: Option<&str>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    every: std::time::Duration,
+    mut look: L,
+) -> Option<api::AuthSource>
+where
+    L: FnMut() -> F,
+    F: std::future::Future<Output = Option<api::AuthSource>>,
+{
+    loop {
+        if !sleep_cancellable(every, cancel).await {
+            return None;
+        }
+        if let Some(found) = look().await.filter(|found| found.bearer_token() != refused) {
+            return Some(found);
+        }
+    }
 }
 
 /// Accumulate one turn's `output_tokens` onto the never-lossy budget total and
@@ -797,6 +885,10 @@ fn build_provider_client_for_agent_with_rate_limit_failover(
             match api::AuthSource::cached().or_else(api::resolve_claude_auth_fresh) {
                 Some(auth) => auth,
                 None if api::cloud_gateway_active() => api::AuthSource::None,
+                // A Claude login that is there but cannot be used right now
+                // (t-11045): the agent starts, and its first request waits for
+                // the login as the foreground turn does.
+                None if api::claude_credential_configured() => api::AuthSource::None,
                 None => {
                     return Err(
                         "Anthropic credentials unavailable for background agent".to_string()
@@ -1128,13 +1220,20 @@ impl ApiClient for ProviderRuntimeClient {
                             );
                             continue 'retry;
                         }
-                        if error.is_unauthorized() && !auth_recovery_attempted {
-                            auth_recovery_attempted = true;
+                        if error.is_unauthorized() || api::is_missing_claude_login(&error) {
                             drop(permit);
-                            if self.try_recover_unauthorized().await {
-                                continue 'retry;
+                            match self
+                                .recover_or_wait_for_a_claude_login(&mut auth_recovery_attempted)
+                                .await
+                            {
+                                LoginRecovery::Retry => continue 'retry,
+                                LoginRecovery::Cancelled => {
+                                    return Err(RuntimeError::new("agent cancelled"));
+                                }
+                                LoginRecovery::NotALogin => {
+                                    return Err(RuntimeError::from_api_error(&error));
+                                }
                             }
-                            return Err(RuntimeError::from_api_error(&error));
                         }
                         if error.is_retryable() {
                             drop(permit);
@@ -1520,13 +1619,20 @@ impl ApiClient for ProviderRuntimeClient {
                             );
                             continue 'retry;
                         }
-                        if error.is_unauthorized() && !auth_recovery_attempted {
-                            auth_recovery_attempted = true;
+                        if error.is_unauthorized() || api::is_missing_claude_login(&error) {
                             drop(permit);
-                            if self.try_recover_unauthorized().await {
-                                continue 'retry;
+                            match self
+                                .recover_or_wait_for_a_claude_login(&mut auth_recovery_attempted)
+                                .await
+                            {
+                                LoginRecovery::Retry => continue 'retry,
+                                LoginRecovery::Cancelled => {
+                                    return Err(RuntimeError::new("agent cancelled"));
+                                }
+                                LoginRecovery::NotALogin => {
+                                    return Err(RuntimeError::from_api_error(&error));
+                                }
                             }
-                            return Err(RuntimeError::from_api_error(&error));
                         }
                         if error.is_retryable() {
                             drop(permit);
@@ -1819,6 +1925,51 @@ mod tests {
             .get("outputTail")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
+    }
+
+    /// A sub-agent held for its Claude login (t-11045) goes on with the first
+    /// login it was not refused with — a look that finds nothing, or hands
+    /// back the refused login, keeps it waiting — and a cancel ends the wait
+    /// before any look.
+    #[test]
+    fn a_held_agent_takes_a_new_login_and_a_cancel_ends_its_wait() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let every = Duration::from_millis(1);
+        let answers = Mutex::new(std::collections::VecDeque::from([
+            None,
+            Some(api::AuthSource::BearerToken("refused".to_string())),
+            Some(api::AuthSource::BearerToken("signed-in-again".to_string())),
+        ]));
+        let found = runtime.block_on(super::wait_for_a_claude_login(
+            Some("refused"),
+            None,
+            every,
+            || {
+                let answer = answers.lock().expect("answers").pop_front().flatten();
+                async move { answer }
+            },
+        ));
+        assert_eq!(
+            found.as_ref().and_then(api::AuthSource::bearer_token),
+            Some("signed-in-again")
+        );
+
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let looks = std::sync::atomic::AtomicUsize::new(0);
+        let waited = runtime.block_on(super::wait_for_a_claude_login(
+            None,
+            Some(&cancelled),
+            every,
+            || {
+                looks.fetch_add(1, Ordering::SeqCst);
+                async { None }
+            },
+        ));
+        assert!(waited.is_none(), "a cancelled agent went on");
+        assert_eq!(looks.load(Ordering::SeqCst), 0, "a cancelled wait looked");
     }
 
     #[test]

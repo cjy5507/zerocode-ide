@@ -251,6 +251,24 @@ macro_rules! claude_sign_in_again {
 /// [`claude_sign_in_again!`] for callers outside this crate.
 pub const CLAUDE_SIGN_IN_AGAIN: &str = claude_sign_in_again!();
 
+/// What a request is refused with when no Claude login can be found — one
+/// spelling, so a turn that waits for a login knows the refusal by value
+/// ([`is_missing_claude_login`]) and never by guessing at its words.
+const MISSING_CLAUDE_LOGIN: &str = concat!("Claude auth unavailable; ", claude_sign_in_again!());
+
+/// Whether a request was refused because no Claude login could be found at
+/// all (t-11045) — the refusal a waiting turn answers by waiting for one.
+#[must_use]
+pub fn is_missing_claude_login(error: &ApiError) -> bool {
+    matches!(error, ApiError::Auth(message) if message == MISSING_CLAUDE_LOGIN)
+}
+
+/// How often a request held for its Claude login looks for one (t-11045): a
+/// read of the stores, never a renewal on a timer — the login's own CLI was
+/// asked when it expired, and the answer to a renewal that did not bring it
+/// back is a person.
+pub const CLAUDE_LOGIN_LOOK_EVERY: Duration = Duration::from_secs(5);
+
 pub mod keychain;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -980,7 +998,7 @@ impl AnthropicClient {
     }
 
     fn missing_auth_error() -> ApiError {
-        ApiError::Auth(concat!("Claude auth unavailable; ", claude_sign_in_again!()).to_string())
+        ApiError::Auth(MISSING_CLAUDE_LOGIN.to_string())
     }
 
     fn allow_unauthenticated_request_to_base_url(&self) -> bool {

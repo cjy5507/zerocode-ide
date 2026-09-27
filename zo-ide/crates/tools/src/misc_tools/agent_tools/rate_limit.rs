@@ -380,6 +380,27 @@ fn default_workflow_concurrency() -> usize {
 /// completion-store cancel poll cadence.
 const COOLDOWN_CANCEL_POLL_SLICE_MS: u64 = 200;
 
+/// Sleep `total`, waking every [`COOLDOWN_CANCEL_POLL_SLICE_MS`] to honor the
+/// same cooperative cancel flag the cool-down wait honors. `false` when the
+/// flag cut the sleep short.
+pub(super) async fn sleep_cancellable(
+    total: std::time::Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> bool {
+    let deadline = std::time::Instant::now() + total;
+    let slice = std::time::Duration::from_millis(COOLDOWN_CANCEL_POLL_SLICE_MS);
+    loop {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return false;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        tokio::time::sleep(left.min(slice)).await;
+    }
+}
+
 /// Sleep until `kind`'s active cool-down (if any) expires, observing a
 /// cooperative cancel flag so an agent parked in an open-ended rate-limit wait
 /// still wakes on a foreground Ctrl+C / agent-stop instead of being

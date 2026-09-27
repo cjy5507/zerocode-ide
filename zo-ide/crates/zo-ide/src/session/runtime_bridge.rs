@@ -344,6 +344,9 @@ pub struct LiveAsyncApiClient {
     /// (Xhigh) rather than a static pin — threaded straight through to
     /// [`build_message_request`] every request this client builds.
     effort_band_ceiling: Option<api::EffortLevel>,
+    /// How often a request held for its Claude login looks for one
+    /// ([`api::CLAUDE_LOGIN_LOOK_EVERY`]; a test shortens it).
+    login_look_every: std::time::Duration,
 }
 
 impl LiveAsyncApiClient {
@@ -373,7 +376,16 @@ impl LiveAsyncApiClient {
             thinking,
             named_effort,
             effort_band_ceiling,
+            login_look_every: api::CLAUDE_LOGIN_LOOK_EVERY,
         }
+    }
+
+    /// Look for a Claude login this often while a request waits for one.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_login_look_every(mut self, every: std::time::Duration) -> Self {
+        self.login_look_every = every;
+        self
     }
 }
 
@@ -475,27 +487,55 @@ impl AsyncApiClient for LiveAsyncApiClient {
 
             // Establish the upstream stream. A cached OAuth bearer that lapsed
             // mid-turn surfaces as a server 401 here (the request path uses a
-            // bare snapshot and never refreshes per-request), so refresh once
-            // and retry instead of failing the turn until the process restarts.
-            // The 401 is raised at establishment, before any block is rendered,
-            // so the retry never double-renders. Recovery is per-provider: the
-            // Anthropic client swaps its bearer in place, while OAuth-backed
-            // non-Anthropic clients (Gemini Code Assist / ChatGPT) capture their
-            // bearer at construction and only rotate by rebuilding — a plain
-            // `with_anthropic_auth` swap is a no-op for them and would retry with
-            // the identical stale token and 401 again.
-            let stream = match client.stream_message(&wire).await {
-                Ok(stream) => stream,
-                Err(err) if err.is_unauthorized() => {
-                    match recover_oauth_client_after_401(&client, self.auth_route).await {
-                        Some(recovered) => recovered
-                            .stream_message(&wire)
-                            .await
-                            .map_err(|err| RuntimeBridgeError::from_api_error(&err))?,
-                        None => return Err(RuntimeBridgeError::from_api_error(&err).into()),
-                    }
+            // bare snapshot and never refreshes per-request), so the credential
+            // is taken again and the request retried instead of failing the
+            // turn until the process restarts. The 401 is raised at
+            // establishment, before any block is rendered, so the retry never
+            // double-renders. Recovery is per-provider: the Anthropic client
+            // swaps its bearer in place, while OAuth-backed non-Anthropic
+            // clients (Gemini Code Assist / ChatGPT) capture their bearer at
+            // construction and only rotate by rebuilding — a plain
+            // `with_anthropic_auth` swap is a no-op for them and would retry
+            // with the identical stale token and 401 again.
+            //
+            // A Claude login that cannot be found at all — refused, expired and
+            // not renewed by its own CLI, or never there — does not end the
+            // turn (t-11045): the request waits here for a login and goes on as
+            // the same request once one is back. Every credential this request
+            // was refused with is remembered and never sent again, so the loop
+            // moves only when a different login appears; the runtime races the
+            // request against the turn's cancel, so Esc ends the wait.
+            let mut client = client;
+            let mut refused_logins: Vec<Option<String>> = Vec::new();
+            let stream = loop {
+                let refused = match client.stream_message(&wire).await {
+                    Ok(stream) => break stream,
+                    Err(err) => err,
+                };
+                if !(refused.is_unauthorized() || api::is_missing_claude_login(&refused)) {
+                    return Err(RuntimeBridgeError::from_api_error(&refused).into());
                 }
-                Err(err) => return Err(RuntimeBridgeError::from_api_error(&err).into()),
+                if !waits_for_a_claude_login(&client, self.auth_route) {
+                    let Some(recovered) =
+                        recover_oauth_client_after_401(&client, self.auth_route).await
+                    else {
+                        return Err(RuntimeBridgeError::from_api_error(&refused).into());
+                    };
+                    break recovered
+                        .stream_message(&wire)
+                        .await
+                        .map_err(|err| RuntimeBridgeError::from_api_error(&err))?;
+                }
+                refused_logins.push(anthropic_bearer(&client).map(str::to_string));
+                client = wait_for_a_claude_login(
+                    &client,
+                    &refused_logins,
+                    &render_tx,
+                    &ids,
+                    self.login_look_every,
+                    crate::runtime_support::refresh_claude_oauth_explained,
+                )
+                .await;
             };
 
             // Surface the streaming backends' internal mid-stream restarts (a
@@ -619,6 +659,92 @@ async fn recover_oauth_client_after_401(
     }
     let fresh = crate::runtime_support::refresh_claude_oauth().await?;
     Some(client.clone().with_anthropic_auth(fresh))
+}
+
+/// The bearer an Anthropic client sends, when it sends one.
+fn anthropic_bearer(client: &ProviderClient) -> Option<&str> {
+    match client {
+        ProviderClient::Anthropic(client) => client.auth().bearer_token(),
+        _ => None,
+    }
+}
+
+/// Whether a request refused for its credential waits for a Claude login: an
+/// Anthropic client on a subscription route holding a login or none. A key —
+/// pinned by the route or set in the environment — that is refused is a bad
+/// key, not a login a person brings back, and fails as it always did.
+fn waits_for_a_claude_login(client: &ProviderClient, auth_route: AuthRoute) -> bool {
+    match client {
+        ProviderClient::Anthropic(anthropic) => {
+            auth_route != AuthRoute::ApiKey && anthropic.auth().api_key().is_none()
+        }
+        _ => false,
+    }
+}
+
+/// The one row a held request shows: why, and the ways back this build has.
+fn claude_login_needed_row(why: &str) -> String {
+    format!(
+        "Claude login needed — {why}. This turn waits and goes on by itself once a login is back ({}).",
+        api::CLAUDE_SIGN_IN_AGAIN
+    )
+}
+
+/// The row that says the wait is over.
+const CLAUDE_LOGIN_BACK: &str = "Claude login is back — this turn goes on";
+
+/// Take the Claude login again from the stores and hand back a client that
+/// carries one this request was not refused with (t-11045). `look` resolves
+/// the credential chain — the store the CLI keeps, renewed by its own CLI when
+/// it expired; zo's own saved login; the environment — and is asked at once
+/// (a lapsed bearer is usually just renewed), then, when it finds nothing
+/// new, once every `every` after one row that says why and how to bring a
+/// login back. A look re-reads; it never renews on a timer: a renewal that
+/// did not bring the login back is not asked again, and the answer to it is a
+/// person. The caller's cancel ends the wait.
+async fn wait_for_a_claude_login<L, F>(
+    client: &ProviderClient,
+    refused: &[Option<String>],
+    render_tx: &mpsc::Sender<RenderBlock>,
+    ids: &BlockIdGen,
+    every: std::time::Duration,
+    mut look: L,
+) -> ProviderClient
+where
+    L: FnMut() -> F,
+    F: std::future::Future<Output = Result<api::AuthSource, api::CredentialMiss>>,
+{
+    let mut announced = false;
+    loop {
+        let why = match look().await {
+            Ok(auth)
+                if !refused
+                    .iter()
+                    .any(|login| login.as_deref() == auth.bearer_token()) =>
+            {
+                if announced {
+                    let _ = render_tx.try_send(RenderBlock::System {
+                        id: ids.next(),
+                        level: SystemLevel::Info,
+                        text: CLAUDE_LOGIN_BACK.to_string(),
+                    });
+                }
+                return client.clone().with_anthropic_auth(auth);
+            }
+            Ok(_) => "the Claude login zo holds was refused".to_string(),
+            Err(api::CredentialMiss::Absent) => "no Claude login is kept".to_string(),
+            Err(api::CredentialMiss::Unusable(why)) => why,
+        };
+        if !announced {
+            let _ = render_tx.try_send(RenderBlock::System {
+                id: ids.next(),
+                level: SystemLevel::Warn,
+                text: claude_login_needed_row(&why),
+            });
+            announced = true;
+        }
+        tokio::time::sleep(every).await;
+    }
 }
 
 #[cfg(test)]
@@ -1253,6 +1379,66 @@ mod tests {
         std::fs::remove_dir_all(config_home).ok();
     }
 
+    /// The wait's three answers (t-11045): a look that finds a new login at
+    /// once goes on silently (a lapsed bearer renewed); one that finds nothing
+    /// says why once and looks again until a login this request was not
+    /// refused with appears; a look that hands back the refused login keeps
+    /// waiting.
+    #[test]
+    fn a_held_request_goes_on_only_with_a_login_it_was_not_refused_with() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let client = ProviderClient::Anthropic(api::AnthropicClient::from_auth(
+            api::AuthSource::BearerToken("refused".to_string()),
+        ));
+        let refused = vec![Some("refused".to_string())];
+        let every = std::time::Duration::from_millis(1);
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let renewed = runtime.block_on(wait_for_a_claude_login(
+            &client,
+            &refused,
+            &tx,
+            &BlockIdGen::default(),
+            every,
+            || async { Ok(api::AuthSource::BearerToken("renewed".to_string())) },
+        ));
+        assert_eq!(anthropic_bearer(&renewed), Some("renewed"));
+        assert!(rx.try_recv().is_err(), "a login found at once needs no row");
+
+        let answers = std::sync::Mutex::new(std::collections::VecDeque::from([
+            Err(api::CredentialMiss::Unusable("the sign-in expired".to_string())),
+            Ok(api::AuthSource::BearerToken("refused".to_string())),
+            Err(api::CredentialMiss::Absent),
+            Ok(api::AuthSource::BearerToken("signed-in-again".to_string())),
+        ]));
+        let looks = std::sync::atomic::AtomicUsize::new(0);
+        let back = runtime.block_on(wait_for_a_claude_login(
+            &client,
+            &refused,
+            &tx,
+            &BlockIdGen::default(),
+            every,
+            || {
+                looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let answer = answers.lock().expect("answers").pop_front().expect("an answer");
+                async move { answer }
+            },
+        ));
+        assert_eq!(anthropic_bearer(&back), Some("signed-in-again"));
+        assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 4);
+        let mut rows = Vec::new();
+        while let Ok(RenderBlock::System { text, .. }) = rx.try_recv() {
+            rows.push(text);
+        }
+        assert_eq!(rows.len(), 2, "one row for the wait, one for its end: {rows:?}");
+        assert!(rows[0].starts_with("Claude login needed — the sign-in expired."), "{rows:?}");
+        assert!(rows[0].contains(api::CLAUDE_SIGN_IN_AGAIN), "{rows:?}");
+        assert_eq!(rows[1], CLAUDE_LOGIN_BACK);
+    }
+
     /// An endpoint that answers only the login it was told to expect: a
     /// request without it gets the 401 a revoked or expired login gets, one
     /// with it a short streamed answer. Every authorization it saw is kept.
@@ -1374,7 +1560,8 @@ mod tests {
                 None,
                 None,
                 None,
-            );
+            )
+            .with_login_look_every(std::time::Duration::from_millis(20));
             let request = ApiRequest {
                 system_prompt: Arc::from(Vec::<String>::new()),
                 wire_reminders: Arc::from(Vec::<String>::new()),
@@ -1422,7 +1609,7 @@ mod tests {
                 "the wait said why: {rows:?}"
             );
             assert!(
-                rows.iter().any(|row| row.starts_with("Claude login is back")),
+                rows.iter().any(|row| row == CLAUDE_LOGIN_BACK),
                 "and that it was over: {rows:?}"
             );
         });

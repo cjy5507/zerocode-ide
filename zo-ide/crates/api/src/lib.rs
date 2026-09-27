@@ -50,7 +50,8 @@ pub use providers::anthropic::keychain::{
 };
 pub use providers::anthropic::latest_claude_auth_origin;
 pub use providers::anthropic::{
-    AnthropicClient, AnthropicClient as ApiClient, AuthSource, CLAUDE_SIGN_IN_AGAIN, ClaudeAuthOrigin,
+    AnthropicClient, AnthropicClient as ApiClient, AuthSource, CLAUDE_LOGIN_LOOK_EVERY,
+    CLAUDE_SIGN_IN_AGAIN, ClaudeAuthOrigin, is_missing_claude_login,
     ResolvedClaudeAuth, anthropic_context_editing_enabled, claude_credential_configured,
     managed_claude_auth_changed,
     refresh_claude_auth_after_unauthorized, resolve_claude_auth_fresh,

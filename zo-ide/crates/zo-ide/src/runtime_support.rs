@@ -937,6 +937,24 @@ pub(crate) fn forget_cached_claude_auth() {
     }
 }
 
+/// The credential the process memo holds — what the last resolution found.
+fn memo_claude_auth() -> Option<AuthSource> {
+    CACHED_AUTH.get().and_then(|lock| {
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|cached| cached.auth.clone())
+    })
+}
+
+/// The bearer the long-lived Anthropic client sends, when it sends one.
+fn anthropic_bearer(client: &AnthropicRuntimeClient) -> Option<&str> {
+    match &client.client {
+        ProviderClient::Anthropic(anthropic) => anthropic.auth().bearer_token(),
+        _ => None,
+    }
+}
+
 fn managed_file_cache_current(cached: &CachedClaudeAuth) -> bool {
     let Some(expected) = cached.managed_file_stamp.as_ref() else {
         return false;
@@ -1119,6 +1137,17 @@ async fn refresh_oauth_near_expiry(client: &mut AnthropicRuntimeClient) {
             client.set_auth(auth);
         }
         return;
+    }
+
+    // A login the process found after this client was built — by a request
+    // held for one (t-11045) or a 401 recovery, each on a per-turn clone —
+    // sits in the memo. The long-lived client takes it before this turn's
+    // clone instead of sending the credential that was refused; the checks
+    // below still run, so a memo that is itself due is renewed as ever.
+    if let Some(found) = memo_claude_auth()
+        .filter(|found| found.bearer_token().is_some() && found.bearer_token() != anthropic_bearer(client))
+    {
+        client.set_auth(found);
     }
 
     // IDE-managed credentials are checked once per turn by metadata. Only a
@@ -2123,7 +2152,7 @@ pub(crate) async fn refresh_claude_oauth() -> Option<AuthSource> {
 
 /// [`refresh_claude_oauth`], and when every lane fails, why — the one road a
 /// 401 recovery and a turn that looks for a missing login both take.
-async fn refresh_claude_oauth_explained() -> Result<AuthSource, api::CredentialMiss> {
+pub(crate) async fn refresh_claude_oauth_explained() -> Result<AuthSource, api::CredentialMiss> {
     tokio::task::spawn_blocking(|| {
         // Recovery path: the memoized keychain session is exactly what just
         // lapsed/401'd, so drop it before re-resolving.
