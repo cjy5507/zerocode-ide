@@ -732,11 +732,12 @@ where
         // the audit trail, independent of telemetry export. Rooted at the
         // session's stable workspace so it survives `EnterWorktree` chdirs.
         if let Some(cwd) = self.trace_cwd() {
-            let _ = crate::turn_trace::record_completed(
+            let _ = crate::turn_trace::record_completed_with(
                 &cwd,
                 &self.session.session_id,
                 summary,
                 self.session.session_goal.as_deref(),
+                self.refusal_compaction,
             );
         }
 

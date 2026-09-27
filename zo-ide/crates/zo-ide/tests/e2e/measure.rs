@@ -32,12 +32,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-/// The marker the compaction system prompt opens with. Matching the real
-/// constant's first sentence (rather than a shape guess) is what keeps a
-/// summary request from being mistaken for an ordinary turn — which would end
-/// the measurement with "compaction never fired" and no way to tell that apart
-/// from a threshold that was set too high.
-const COMPACTION_MARKER: &str = "You are summarizing a coding conversation";
+use super::scripted::COMPACTION_MARKER;
 
 /// The text every scripted turn ends with, so the PTY driver can wait for the
 /// turn to settle without matching anything the composer echoed.

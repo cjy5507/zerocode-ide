@@ -44,7 +44,7 @@ use compaction::{auto_compaction_threshold_from_env_or_policy, ContextPolicy};
 pub use compaction::{
     auto_compaction_tail_budget, auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, MICROCOMPACT_MIN_OUTPUT_BYTES,
     count_progress_tool_results, final_assistant_text, AutoCompactionEvent, BudgetExhausted,
-    TurnSummary,
+    ManualCompaction, TurnSummary,
 };
 pub use config::{
     declare_attendance, declare_classifier_fallback, declared_attendance,
@@ -336,8 +336,10 @@ fn format_auto_compaction_done_notice(
 }
 
 /// `254_100` → `"254.1k"`, sub-thousand values stay raw. Matches the HUD's
-/// ctx-figure style so the done notice reads on the same scale.
-fn format_kilo_tokens(tokens: usize) -> String {
+/// ctx-figure style so the done notice reads on the same scale — and the
+/// `/compact` report a front-end writes (t-10956), so both say it one way.
+#[must_use]
+pub fn format_kilo_tokens(tokens: usize) -> String {
     if tokens >= 1_000 {
         let tenths = tokens / 100;
         format!("{}.{}k", tenths / 10, tenths % 10)
@@ -1094,6 +1096,14 @@ pub struct ConversationRuntime<C, T> {
     /// Whether this public turn already asked about the declined request's
     /// images — asked once, whatever the answer.
     refusal_images_asked_for_turn: bool,
+    /// Whether this public turn already spent its one compacted retry (the
+    /// ladder's last rung, t-10956). Reset at every public turn begin, like
+    /// the same-model retry.
+    refusal_compaction_used: bool,
+    /// The compacted retry this turn made, for its turn record: what the
+    /// compaction cost and whether the retry cleared the decline. Cleared at
+    /// every public turn begin.
+    refusal_compaction: Option<crate::turn_trace::RefusalCompaction>,
     /// The category of the refusal that armed [`Self::refusal_dry_until`]:
     /// the pre-arm routes that category, and only a routed one arms it.
     refusal_dry_category: Option<String>,
@@ -1825,6 +1835,8 @@ where
             refusal_switch_refused_for_turn: false,
             refusal_switch_unasked_to: None,
             refusal_images_asked_for_turn: false,
+            refusal_compaction_used: false,
+            refusal_compaction: None,
             refusal_dry_category: None,
             escalation_model_override: None,
             escalation_armed_fresh: false,
@@ -2208,6 +2220,7 @@ where
         // additional legs of the same user turn and must not double-count it.
         if !is_continuation {
             self.fold_finished_refusal_turn();
+            self.refusal_compaction = None;
         }
         // Clear the per-leg refusal override before deciding whether the
         // session cooldown should re-arm it below.
@@ -2218,6 +2231,7 @@ where
         self.refusal_switch_refused_for_turn = false;
         self.refusal_switch_unasked_to = None;
         self.refusal_images_asked_for_turn = false;
+        self.refusal_compaction_used = false;
         // Reset the per-turn quota fallback, pre-arming onto it when the session
         // is still inside a recorded quota-dry cooldown. See
         // [`Self::begin_turn_quota_fallback`].
@@ -2618,11 +2632,27 @@ where
                                 )
                             );
                         }
+                        // The last rung (t-10956), folded where it is decided;
+                        // a compaction that folded nothing leaves the ladder
+                        // to answer again with the rung spent.
+                        RefusalDecision::RetryCompacted(config) => {
+                            eprintln!(
+                                "[zo] {}",
+                                core_types::retry_signal::refusal_compaction_notice(&from_model)
+                            );
+                            if let Some(event) = self.apply_auto_compaction(config) {
+                                self.note_refusal_compaction(event);
+                                auto_compaction.get_or_insert(event);
+                                break RefusalDecision::RetryCompacted(config);
+                            }
+                        }
                         other => break other,
                     }
                 };
                 match decision {
-                    RefusalDecision::RetrySameModel => {
+                    // The compacted retry was folded where it was decided;
+                    // like the same-model retry, all that is left is to ask.
+                    RefusalDecision::RetrySameModel | RefusalDecision::RetryCompacted(_) => {
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);
                         }
@@ -2663,6 +2693,9 @@ where
                     RefusalDecision::Surface => {
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);
+                        }
+                        for line in self.settle_surfaced_refusal() {
+                            eprintln!("[zo] {line}");
                         }
                         // A route nobody could be asked about is said so (t-7153).
                         if let Some(to) = self.refusal_switch_unasked_to.take() {
