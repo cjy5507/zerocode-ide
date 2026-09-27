@@ -4,6 +4,7 @@
 
 use serde_json::json;
 use zerocode_core::jev::door::{REQUESTS_KEY, Refused};
+use zerocode_core::jev::summary::{AGREED, BASELINE_AGREED};
 use zerocode_core::jev::{NOTIFY_LABEL_WINDOW_MS, SMART_SETTINGS_KEY};
 
 use super::*;
@@ -144,6 +145,51 @@ fn the_bell_rings_todays_way_unless_the_seat_acts_and_answered() {
     assert_eq!(Call::today(), Call::Interrupt);
 }
 
+/// A ring the person is away from rings today's way whatever the seat
+/// stands at (t-11010): its label grades it neither way, so the bell does
+/// not take the seat's call there — not even a confident one under `on` or
+/// a raised `auto` — and does not wait for it; a ring they are present for
+/// is the seat's to call, as before.
+#[test]
+fn an_away_ring_rings_todays_way_whatever_the_seat_stands_at() {
+    assert!(!takes_the_call(true, Attendance::Away));
+    assert!(takes_the_call(true, Attendance::Present));
+    assert!(!takes_the_call(false, Attendance::Present));
+    for call in Call::ALL {
+        assert_eq!(
+            chosen(
+                takes_the_call(true, Attendance::Away),
+                Some((call, 0.99)),
+                None
+            ),
+            (Call::today(), false),
+            "an away ring is today's, answered {call:?}"
+        );
+        assert_eq!(
+            chosen(
+                takes_the_call(true, Attendance::Present),
+                Some((call, 0.99)),
+                None
+            ),
+            (call, true)
+        );
+    }
+    // And the bell reads it where it decides whether to wait: an away ring
+    // is abandoned at once, as shadow's is, and rings through today's rungs.
+    let seat = include_str!("../notify_call.rs");
+    let calling = crate::tests::block_after(seat, "pub(crate) fn call_at_the_bell(");
+    let looked = calling
+        .find(".look_at(term, bell.ring, bell.interrupted, bell.focused, now_ms)")
+        .expect("the attendance is read");
+    let taken = calling
+        .find("let applies = takes_the_call(applies, context.attendance);")
+        .expect("the bell asks whether it takes the call");
+    let abandoned = calling
+        .find("if !applies {\n        handoff.abandon();\n        return today;\n    }")
+        .expect("a call not taken rings today's way at once");
+    assert!(looked < taken && taken < abandoned, "{calling}");
+}
+
 /// The book: attendance from the last hand, the pane's last rings capped
 /// and oldest first, and the interval since the pane last rang.
 #[test]
@@ -202,7 +248,8 @@ fn waiting(term: TermId, asked_ms: i64, call: Call, attendance: Attendance) -> W
 }
 
 /// A hand on the pane inside the minute labels every waiting row of that
-/// pane as reacted — `agreed` iff the call rang — and leaves the other
+/// pane as reacted — `agreed` iff the call rang, for a ring the person was
+/// present for; none for one they were away from — and leaves the other
 /// panes' rows waiting.
 #[test]
 fn a_hand_inside_the_minute_labels_the_panes_rows_as_reacted() {
@@ -233,9 +280,13 @@ fn a_hand_inside_the_minute_labels_the_panes_rows_as_reacted() {
     assert_eq!(rang["attendance"], "present");
     let held = by_key(&format!("7@{}", asked + 1));
     assert_eq!(held["reacted"], true);
+    assert!(
+        held.get(AGREED.canonical).is_none() && held.get(BASELINE_AGREED.canonical).is_none(),
+        "the person was away: a hand that came back grades nothing (t-11010)"
+    );
     assert_eq!(
-        held[AGREED.canonical], false,
-        "it held and the person came anyway"
+        held[zerocode_core::jev::summary::NOT_COMPARED.canonical],
+        Attendance::Away.word()
     );
     assert_eq!(book.waiting_len(), 1, "pane 8 still waits");
     assert_eq!(book.rings_of(7), vec![(asked, Some(true))]);
