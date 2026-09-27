@@ -139,6 +139,9 @@ pub const LABEL: LedgerKey = LedgerKey {
     canonical: "label",
     also: &[],
 };
+/// The word a label row carries as its kind (`kind`) — every seat's label
+/// writer's, in zo and in the window alike.
+pub const LABEL_ROW_KIND: &str = "label";
 /// When the request a label row grades was made — that request row's
 /// [`AT`], copied by the writer that knows which request it graded
 /// (t-6877). A name alone ([`LABEL`]) picks out one request only while it

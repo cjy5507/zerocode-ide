@@ -41,6 +41,7 @@ pub mod reflex_decide;
 pub mod shard;
 pub mod summary;
 pub mod threshold;
+pub mod tool_guard;
 
 /// The object zo's settings keep every Jev switch under.
 pub const SMART_SETTINGS_KEY: &str = "smart";
@@ -4310,6 +4311,29 @@ pub fn fingerprint_of(words: &str) -> String {
 /// The bytes of a SHA-256 a fingerprint keeps: sixteen hex digits, enough to
 /// tell apart everything one ledger names and short enough to read.
 const FINGERPRINT_BYTES: usize = 8;
+
+/// FNV-1a over both text fields with a length-prefixed separator, so
+/// (`"ab"`, `"c"`) and (`"a"`, `"bc"`) cannot collide by concatenation. The
+/// decision shadow's rows and the label evaluation join on this same key, and
+/// the tool guards name a call by it — its turn and its id — in zo and in the
+/// window alike (t-10916).
+#[must_use]
+pub fn task_fingerprint(description: &str, prompt: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for chunk in [
+        description.len().to_le_bytes().as_slice(),
+        description.as_bytes(),
+        prompt.as_bytes(),
+    ] {
+        for byte in chunk {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    hash
+}
 
 /// The whole SHA-256, in hex, of what one request was — the seat that asked,
 /// the version of its rubric, the model it asked for, and the body's bytes as

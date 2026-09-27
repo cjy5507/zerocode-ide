@@ -464,8 +464,9 @@ pub struct StepLabel {
 
 /// The word a decision row carries as its kind.
 pub const STEP_ROW_KIND: &str = "step";
-/// The word a progress mark carries as its kind.
-pub const LABEL_ROW_KIND: &str = "label";
+/// The word a progress mark carries as its kind — every seat's label row's
+/// (`zerocode_core::jev::summary::LABEL_ROW_KIND`, t-10916).
+pub use zerocode_core::jev::summary::LABEL_ROW_KIND;
 
 /// Told every decision the governor makes. Installed by the host that files
 /// the step ledger; the runtime records nothing itself.
