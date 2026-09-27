@@ -18,6 +18,7 @@
 // `ide::run_loop`)가 아직 없어 dead_code/unused_imports 가 정직하게 울린다.
 // plain_session 이 배선되면 이 두 allow 는 제거한다 — 그 전까지 게이트 소음을 막는 임시 조치.
 
+pub mod claude_renewal;
 pub mod cli_args;
 pub mod autonomy;
 pub mod cli_tool_executor;
@@ -159,6 +160,22 @@ mod main_contract {
         assert_eq!(
             api::managed_account::CODEX_HOME_ENV,
             zerocode_core::codex_account::HOME_VAR
+        );
+    }
+
+    /// The two Claude folders a window pane is launched with are spelled as
+    /// the window spells them: zo reads the login in the credential folder the
+    /// launch names (t-11045), and a rename on either side turns this red
+    /// before zo reads the window's copy again.
+    #[test]
+    fn the_claude_folders_are_spelled_the_windows_way() {
+        assert_eq!(
+            api::managed_account::CLAUDE_CONFIG_DIR_ENV,
+            zerocode_core::account::CONFIG_DIR_VAR
+        );
+        assert_eq!(
+            api::managed_account::CLAUDE_SECURE_STORAGE_DIR_ENV,
+            zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR
         );
     }
 

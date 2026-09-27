@@ -41,15 +41,17 @@ pub use prompt_cache::{
     PROMPT_CACHE_MAX_SESSION_DIRS, PROMPT_CACHE_RETENTION_DAYS,
 };
 pub use providers::anthropic::keychain::{
-    KeychainSession, ManagedCredentialsStamp, claude_code_login_configured,
-    claude_code_oauth_config, invalidate_claude_code_keychain_cache,
-    managed_claude_credentials_stamp,
-    read_claude_code_keychain_session, read_claude_code_keychain_session_explained,
+    ClaudeLoginRenewal, ClaudeLoginRenewer, KeychainSession, ManagedCredentialsStamp, RenewalRun,
+    claude_code_login_configured, claude_code_oauth_config, install_claude_login_renewer,
+    invalidate_claude_code_keychain_cache, managed_claude_credentials_stamp,
+    peek_claude_code_login, read_claude_code_keychain_session,
+    read_claude_code_keychain_session_explained,
     read_claude_code_keychain_token,
 };
 pub use providers::anthropic::latest_claude_auth_origin;
 pub use providers::anthropic::{
-    AnthropicClient, AnthropicClient as ApiClient, AuthSource, ClaudeAuthOrigin,
+    AnthropicClient, AnthropicClient as ApiClient, AuthSource, CLAUDE_LOGIN_LOOK_EVERY,
+    CLAUDE_SIGN_IN_AGAIN, ClaudeAuthOrigin, is_missing_claude_login,
     ResolvedClaudeAuth, anthropic_context_editing_enabled, claude_credential_configured,
     managed_claude_auth_changed,
     refresh_claude_auth_after_unauthorized, resolve_claude_auth_fresh,
@@ -200,12 +202,18 @@ pub(crate) mod test_env {
     /// Every environment variable that can steer the saved-credential lookup or
     /// the api-key/OAuth env fallbacks. Isolating all of them in one list keeps
     /// the policy defined once rather than re-listed per test.
+    ///
+    /// The two Claude folders are here because a test runs inside a window
+    /// pane, whose environment names the person's real account folder: a
+    /// resolution that inherited it would read the real login (t-11045).
     const CREDENTIAL_VARS: &[&str] = &[
         "HOME",
         core_types::paths::ZO_HOME_ENV,
         core_types::paths::ZO_CONFIG_HOME_ENV,
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
+        crate::managed_account::CLAUDE_CONFIG_DIR_ENV,
+        crate::managed_account::CLAUDE_SECURE_STORAGE_DIR_ENV,
     ];
 
     /// RAII guard that isolates the credential-relevant environment for the

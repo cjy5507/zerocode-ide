@@ -9,7 +9,7 @@ use core_types::{
     RateLimitWindow, RateLimitWindowKind, format_usd,
 };
 
-use crate::oauth_store::{load_oauth_credentials, save_oauth_credentials};
+use crate::oauth_store::{load_oauth_credentials, save_zo_minted_oauth_credentials};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, SessionTracer};
@@ -236,6 +236,38 @@ fn adaptive_thinking_for_model(model: &str) -> crate::types::ThinkingConfig {
         crate::types::ThinkingConfig::adaptive()
     }
 }
+
+/// The ways back in to a Claude login this build offers, said once for every
+/// message that names them: the window's account row, or the account's own
+/// CLI. Zo keeps no Claude sign-in of its own — there is no `zo login` and no
+/// `/login` in this build — so a message that sends a person to either sends
+/// them nowhere (t-11045).
+macro_rules! claude_sign_in_again {
+    () => {
+        "sign in again — the window's Settings › Claude accounts › Sign in again, or `claude` in a terminal"
+    };
+}
+
+/// [`claude_sign_in_again!`] for callers outside this crate.
+pub const CLAUDE_SIGN_IN_AGAIN: &str = claude_sign_in_again!();
+
+/// What a request is refused with when no Claude login can be found — one
+/// spelling, so a turn that waits for a login knows the refusal by value
+/// ([`is_missing_claude_login`]) and never by guessing at its words.
+const MISSING_CLAUDE_LOGIN: &str = concat!("Claude auth unavailable; ", claude_sign_in_again!());
+
+/// Whether a request was refused because no Claude login could be found at
+/// all (t-11045) — the refusal a waiting turn answers by waiting for one.
+#[must_use]
+pub fn is_missing_claude_login(error: &ApiError) -> bool {
+    matches!(error, ApiError::Auth(message) if message == MISSING_CLAUDE_LOGIN)
+}
+
+/// How often a request held for its Claude login looks for one (t-11045): a
+/// read of the stores, never a renewal on a timer — the login's own CLI was
+/// asked when it expired, and the answer to a renewal that did not bring it
+/// back is a person.
+pub const CLAUDE_LOGIN_LOOK_EVERY: Duration = Duration::from_secs(5);
 
 pub mod keychain;
 
@@ -966,10 +998,7 @@ impl AnthropicClient {
     }
 
     fn missing_auth_error() -> ApiError {
-        ApiError::Auth(
-            "Claude auth unavailable; run `/login claude` before sending Anthropic requests."
-                .to_string(),
-        )
+        ApiError::Auth(MISSING_CLAUDE_LOGIN.to_string())
     }
 
     fn allow_unauthenticated_request_to_base_url(&self) -> bool {
@@ -1655,10 +1684,10 @@ pub fn oauth_token_is_expired(token_set: &OAuthTokenSet) -> bool {
 }
 
 pub fn resolve_saved_oauth_token(config: &OAuthConfig) -> Result<Option<OAuthTokenSet>, ApiError> {
-    let Some(token_set) = load_saved_oauth_token()? else {
+    let Some((token_set, minted_by_zo)) = load_saved_oauth_login()? else {
         return Ok(None);
     };
-    resolve_saved_oauth_token_set(config, token_set).map(Some)
+    resolve_saved_oauth_token_set(config, token_set, minted_by_zo).map(Some)
 }
 
 pub fn has_auth_from_env_or_saved() -> Result<bool, ApiError> {
@@ -1684,7 +1713,7 @@ where
         return Ok(AuthSource::BearerToken(bearer_token));
     }
 
-    let Some(token_set) = load_saved_oauth_token()? else {
+    let Some((token_set, minted_by_zo)) = load_saved_oauth_login()? else {
         return Err(ApiError::missing_credentials(
             "Anthropic",
             &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
@@ -1713,7 +1742,9 @@ where
     // come up empty, so a keychain probe at this point could only repeat that
     // answer.
     Ok(AuthSource::from(resolve_saved_oauth_token_set(
-        &config, token_set,
+        &config,
+        token_set,
+        minted_by_zo,
     )?))
 }
 
@@ -1743,12 +1774,12 @@ pub struct ResolvedClaudeAuth {
     pub managed_file_stamp: Option<keychain::ManagedCredentialsStamp>,
 }
 
-/// Full Claude credential resolution with refresh — the one chain every
+/// Full Claude credential resolution with renewal — the one chain every
 /// consumer (interactive client, sub-agents, 401 recovery) shares. Zo is an
 /// OAuth-subscription-first tool, so managed OAuth outranks static env keys:
-/// 1) the IDE-managed Claude credentials file when `CLAUDE_CONFIG_DIR` names
-///    one, otherwise the Claude Code keychain (refreshing an expired token in
-///    place, exactly as Claude Code itself would),
+/// 1) the Claude Code login where the CLI keeps it — the credential folder a
+///    window pane is handed, the config folder, or the machine's own keychain
+///    item — an expired one renewed by its own CLI, never by zo (t-11045),
 /// 2) saved `zo login` OAuth (refreshing against the default subscription
 ///    config, so no `.zo` OAuth config is required),
 /// 3) env `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` as the metered
@@ -1879,12 +1910,15 @@ pub fn claude_credential_configured() -> bool {
 fn saved_login_unusable(error: &ApiError) -> String {
     match error {
         ApiError::Auth(message) => message.clone(),
-        ApiError::ExpiredOAuthToken => {
-            "zo's saved Claude login expired and holds no refresh token — run `zo login claude`".to_string()
-        }
+        ApiError::ExpiredOAuthToken => concat!(
+            "zo's saved Claude login expired and holds no refresh token — ",
+            claude_sign_in_again!()
+        )
+        .to_string(),
         other => format!(
-            "zo's saved Claude login could not be refreshed ({}) — run `zo login claude` if it keeps failing",
-            single_line_reason(other)
+            "zo's saved Claude login could not be refreshed ({}) — if it keeps failing, {}",
+            single_line_reason(other),
+            claude_sign_in_again!()
         ),
     }
 }
@@ -1899,9 +1933,10 @@ pub fn resolve_claude_auth_fresh() -> Option<AuthSource> {
 static REFRESH_FLIGHT: Mutex<()> = Mutex::new(());
 
 /// One-shot recovery for a request that just 401'd: re-run the full resolution
-/// chain (refreshing keychain / saved tokens as needed) under a process-wide
+/// chain (reading the Claude Code store again — renewed by its own CLI when it
+/// expired — and refreshing zo's saved login as needed) under a process-wide
 /// single-flight lock, so N parallel agents hitting the same lapse trigger one
-/// refresh instead of N racing ones (a rotating refresh token tolerates being
+/// renewal instead of N racing ones (a rotating refresh token tolerates being
 /// spent once, not N times). `stale_bearer` is the credential that failed:
 /// when another thread already refreshed past it the cached result is adopted
 /// without touching the network, and when re-resolution yields the *same*
@@ -1930,8 +1965,9 @@ pub fn refresh_claude_auth_after_unauthorized(stale_bearer: Option<&str>) -> Opt
 fn resolve_saved_oauth_token_set(
     config: &OAuthConfig,
     token_set: OAuthTokenSet,
+    minted_by_zo: bool,
 ) -> Result<OAuthTokenSet, ApiError> {
-    resolve_saved_oauth_token_set_with(config, token_set, |config, request| {
+    resolve_saved_oauth_token_set_with(config, token_set, minted_by_zo, |config, request| {
         let client = AnthropicClient::from_auth(AuthSource::None).with_base_url(read_base_url());
         client_runtime_block_on(async { client.refresh_oauth_token(config, &request).await })
     })
@@ -1944,10 +1980,10 @@ fn resolve_saved_oauth_token_set(
 fn resolve_saved_oauth_token_any_context(
     config: &OAuthConfig,
 ) -> Result<Option<OAuthTokenSet>, ApiError> {
-    let Some(token_set) = load_saved_oauth_token()? else {
+    let Some((token_set, minted_by_zo)) = load_saved_oauth_login()? else {
         return Ok(None);
     };
-    resolve_saved_oauth_token_set_with(config, token_set, |config, request| {
+    resolve_saved_oauth_token_set_with(config, token_set, minted_by_zo, |config, request| {
         keychain::refresh_token_set_on_own_thread(config, &request)
     })
     .map(Some)
@@ -1956,6 +1992,7 @@ fn resolve_saved_oauth_token_any_context(
 fn resolve_saved_oauth_token_set_with<F>(
     config: &OAuthConfig,
     mut token_set: OAuthTokenSet,
+    minted_by_zo: bool,
     refresh: F,
 ) -> Result<OAuthTokenSet, ApiError>
 where
@@ -1967,6 +2004,12 @@ where
     let Some(saved_refresh_token) = token_set.refresh_token.take() else {
         return Err(ApiError::ExpiredOAuthToken);
     };
+    // Only a login zo minted is zo's to refresh (t-11045). An unmarked entry
+    // is a copy zo once filed of another tool's login, and its refresh token
+    // is that tool's: spending it logs the tool out.
+    if !minted_by_zo {
+        return Err(saved_copy_not_renewed());
+    }
     // A branch the endpoint already rejected cannot be revived by trying again.
     // Without this the saved rung spent a doomed round-trip on every credential
     // resolution — the keychain rung has had this guard from the start.
@@ -1987,12 +2030,23 @@ where
             refreshed
         }
         Err(error) => {
-            if refresh_gate::record_failure(&saved_refresh_token, &error) {
+            let retired = refresh_gate::record_failure(&saved_refresh_token, &error);
+            // Every zo process shares this file, so a refusal can mean another
+            // one spent the same branch a moment ago and saved the next: a race
+            // lost, not the login (t-11045). Its copy is taken once; nothing is
+            // written and nothing is refreshed again.
+            if let Some(newer) = saved_login_refreshed_elsewhere(&saved_refresh_token) {
+                eprintln!(
+                    "\x1b[2mZo's saved Claude login was refreshed by another zo process; using the newer copy.\x1b[0m"
+                );
+                return Ok(newer);
+            }
+            if retired {
                 // Once per dead branch, not once per turn: the operator needs the
                 // route out, and the raw 400 body does not carry one.
                 eprintln!(
-                    "\x1b[33mZo's saved Claude login can no longer be refreshed ({error}).\n  \
-                     Run `zo login claude` (or /login claude) to reconnect this account.\x1b[0m"
+                    "\x1b[33mZo's saved Claude login can no longer be refreshed ({error}).\n  {}.\x1b[0m",
+                    claude_sign_in_again!()
                 );
             }
             return Err(error);
@@ -2004,7 +2058,7 @@ where
         expires_at: refreshed.expires_at,
         scopes: refreshed.scopes,
     };
-    save_oauth_credentials(&core_types::OAuthTokenSet {
+    save_zo_minted_oauth_credentials(&core_types::OAuthTokenSet {
         access_token: resolved.access_token.clone(),
         refresh_token: resolved.refresh_token.clone(),
         expires_at: resolved.expires_at,
@@ -2014,13 +2068,40 @@ where
     Ok(resolved)
 }
 
+/// zo's saved login as another zo process left it after refreshing the branch
+/// this one just spent: `Some` only when the file now carries a different
+/// refresh token beside an access token that is still good.
+fn saved_login_refreshed_elsewhere(spent_refresh_token: &str) -> Option<OAuthTokenSet> {
+    let saved = load_saved_oauth_token().ok().flatten()?;
+    let moved_on = saved
+        .refresh_token
+        .as_deref()
+        .is_some_and(|held| held != spent_refresh_token);
+    (moved_on && !oauth_token_is_expired(&saved)).then_some(saved)
+}
+
+/// Why an unmarked saved login is not refreshed: it is a copy of another
+/// tool's sign-in, and its refresh token is that tool's (t-11045).
+fn saved_copy_not_renewed() -> ApiError {
+    ApiError::Auth(
+        concat!(
+            "zo's saved Claude login is a copy of an earlier Claude Code sign-in, and zo does not \
+             renew another tool's login — ",
+            claude_sign_in_again!()
+        )
+        .to_string(),
+    )
+}
+
 /// Why the saved rung declined to try, phrased for whoever reads the failure.
 fn saved_refresh_unavailable(block: refresh_gate::RefreshBlock) -> ApiError {
     match block {
         refresh_gate::RefreshBlock::Retired => ApiError::Auth(
-            "zo's saved Claude login was rejected by the token endpoint and cannot be \
-             refreshed — run `zo login claude` to reconnect"
-                .to_string(),
+            concat!(
+                "zo's saved Claude login was rejected by the token endpoint and cannot be refreshed — ",
+                claude_sign_in_again!()
+            )
+            .to_string(),
         ),
         refresh_gate::RefreshBlock::CoolingDown => ApiError::Auth(
             "zo's saved Claude login could not be refreshed a moment ago; retrying shortly"
@@ -2036,6 +2117,22 @@ where
     tokio::runtime::Runtime::new()
         .map_err(ApiError::from)?
         .block_on(future)
+}
+
+/// zo's saved login and whether zo minted it ([`crate::oauth_store::load_oauth_login`]).
+fn load_saved_oauth_login() -> Result<Option<(OAuthTokenSet, bool)>, ApiError> {
+    let saved = crate::oauth_store::load_oauth_login().map_err(ApiError::from)?;
+    Ok(saved.map(|(token_set, minted_by_zo)| {
+        (
+            OAuthTokenSet {
+                access_token: token_set.access_token,
+                refresh_token: token_set.refresh_token,
+                expires_at: token_set.expires_at,
+                scopes: token_set.scopes,
+            },
+            minted_by_zo,
+        )
+    }))
 }
 
 fn load_saved_oauth_token() -> Result<Option<OAuthTokenSet>, ApiError> {
@@ -2489,3 +2586,5 @@ struct AnthropicErrorBody {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod race_tests;

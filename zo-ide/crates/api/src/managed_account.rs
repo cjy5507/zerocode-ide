@@ -80,16 +80,22 @@ impl ManagedProvider {
 /// 세 필드 모두 세 가지를 말한다: `None` 은 **말하지 않았다**(그 자리는 그대로),
 /// 빈 값은 **없다**(창이 「시스템 기본값」으로 돌아갔다 — env 로 되돌아가지 않고
 /// 관리 계정이 없음을 못 박는다), 값이 있으면 그것.
+///
+/// `claude_secure_storage_dir` 는 `claude_config_dir` 와 한 쌍으로만 앉는다
+/// ([`apply`]): 창의 판은 설정 폴더(공유 런타임 홈)와 자격 폴더(고른 계정의
+/// 폴더)를 따로 받고, CLI 는 자격을 **자격 폴더**에서 읽고 갱신한다(t-11045).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagedAccountUpdate {
     pub label: Option<String>,
     pub claude_config_dir: Option<PathBuf>,
+    pub claude_secure_storage_dir: Option<PathBuf>,
     pub codex_home: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
 struct ManagedAccounts {
     claude_config_dir: Option<PathBuf>,
+    claude_secure_storage_dir: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     anthropic_label: Option<String>,
     openai_label: Option<String>,
@@ -118,8 +124,15 @@ pub fn apply(provider: ManagedProvider, update: &ManagedAccountUpdate) {
     let managed = guard.get_or_insert_with(ManagedAccounts::default);
     match provider {
         ManagedProvider::Anthropic => {
+            // The two folders move together: a switch that names only the
+            // config folder (a window from before t-11045) leaves no credential
+            // folder standing from the launch — the store then follows the
+            // config folder, as it did before.
             if update.claude_config_dir.is_some() {
                 managed.claude_config_dir.clone_from(&update.claude_config_dir);
+                managed
+                    .claude_secure_storage_dir
+                    .clone_from(&update.claude_secure_storage_dir);
             }
             if update.label.is_some() {
                 managed.anthropic_label.clone_from(&update.label);
@@ -195,6 +208,30 @@ pub fn claude_config_dir() -> Option<OsString> {
         return (!dir.as_os_str().is_empty()).then(|| dir.into_os_string());
     }
     std::env::var_os(CLAUDE_CONFIG_DIR_ENV).filter(|value| !value.is_empty())
+}
+
+/// Claude 자격 폴더(`CLAUDE_SECURESTORAGE_CONFIG_DIR`) — 덮어쓰기가 먼저, 없으면
+/// 프로세스 env. CLI 는 이 변수가 **있으면** 설정 폴더 대신 이 폴더로 자격을
+/// 두고 갱신한다(Claude Code 2.1.283 `JL()`·`Bw()`) — 그래서 창의 판에서
+/// 로그인의 진짜 자리는 공유 런타임 홈이 아니라 여기다(t-11045).
+///
+/// 세 가지 답: `None` 은 변수가 없다(설정 폴더의 규칙을 따른다), 빈 값은
+/// 있되 비었다(CLI 에게 그것은 이 기계의 기본 로그인이다), 값은 그 폴더.
+/// 채널이 설정 폴더를 말했으면 env 는 더 보지 않는다 — 그 env 는 사람이
+/// 방금 떠난 계정을 가리킨다.
+#[must_use]
+pub fn claude_secure_storage_dir() -> Option<OsString> {
+    if let Some(named) = with_managed(|managed| {
+        managed
+            .claude_config_dir
+            .is_some()
+            .then(|| managed.claude_secure_storage_dir.clone())
+    })
+    .flatten()
+    {
+        return named.map(PathBuf::into_os_string);
+    }
+    std::env::var_os(CLAUDE_SECURE_STORAGE_DIR_ENV)
 }
 
 /// Codex 계정 홈 — [`resolve_codex_home`] 의 답에서 경로만.
@@ -368,6 +405,10 @@ pub fn external_credentials_disabled() -> bool {
 
 /// Claude Code 의 설정 폴더 변수. 정본은 여기 하나다.
 pub const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+/// Claude Code 의 자격 폴더 변수. 창 쪽 정본은
+/// `zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR` 이고, 두 철자는
+/// `zo-ide` 의 시험이 묶는다.
+pub const CLAUDE_SECURE_STORAGE_DIR_ENV: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 /// Codex 의 홈 변수. `oauth_store::codex_auth` 가 다시 내보낸다.
 pub const CODEX_HOME_ENV: &str = "CODEX_HOME";
 /// 이 기계의 바깥 자격 저장소를 전부 가리는 스위치.
@@ -449,6 +490,7 @@ mod tests {
             &ManagedAccountUpdate {
                 label: Some("work".to_string()),
                 claude_config_dir: Some(switched.clone()),
+                claude_secure_storage_dir: None,
                 codex_home: None,
             },
         );
@@ -457,6 +499,7 @@ mod tests {
             &ManagedAccountUpdate {
                 label: Some("personal".to_string()),
                 claude_config_dir: None,
+                claude_secure_storage_dir: None,
                 codex_home: Some(switched.clone()),
             },
         );
@@ -467,6 +510,62 @@ mod tests {
         assert_eq!(label(ManagedProvider::OpenAi).as_deref(), Some("personal"));
         clear();
         assert_eq!(claude_config_dir(), Some(env_home.into_os_string()));
+    }
+
+    /// The credential folder the window hands a pane (t-11045): the launch
+    /// environment until the channel speaks, then the channel's pair — and a
+    /// channel that names only the config folder leaves none standing, so the
+    /// store follows the config folder rather than the account the person left.
+    #[test]
+    fn the_credential_folder_travels_with_the_config_folder() {
+        let _lock = crate::test_env_lock();
+        clear();
+        let _config = EnvVarGuard::set(CLAUDE_CONFIG_DIR_ENV, "/tmp/zo-secure-runtime-home");
+        let _unset = EnvVarGuard::clear(CLAUDE_SECURE_STORAGE_DIR_ENV);
+        assert_eq!(claude_secure_storage_dir(), None, "no variable, no folder");
+
+        let _launched = EnvVarGuard::set(CLAUDE_SECURE_STORAGE_DIR_ENV, "/tmp/zo-secure-left");
+        assert_eq!(
+            claude_secure_storage_dir(),
+            Some(OsString::from("/tmp/zo-secure-left"))
+        );
+        {
+            // Set but empty is the machine's own login to the CLI, not "unset".
+            let _empty = EnvVarGuard::set(CLAUDE_SECURE_STORAGE_DIR_ENV, "");
+            assert_eq!(claude_secure_storage_dir(), Some(OsString::new()));
+        }
+
+        let chosen = PathBuf::from("/tmp/zo-secure-chosen");
+        apply(
+            ManagedProvider::Anthropic,
+            &ManagedAccountUpdate {
+                label: None,
+                claude_config_dir: Some(PathBuf::from("/tmp/zo-secure-runtime-home")),
+                claude_secure_storage_dir: Some(chosen.clone()),
+                codex_home: None,
+            },
+        );
+        assert_eq!(claude_secure_storage_dir(), Some(chosen.into_os_string()));
+
+        apply(
+            ManagedProvider::Anthropic,
+            &ManagedAccountUpdate {
+                label: None,
+                claude_config_dir: Some(PathBuf::from("/tmp/zo-secure-runtime-home")),
+                claude_secure_storage_dir: None,
+                codex_home: None,
+            },
+        );
+        assert_eq!(
+            claude_secure_storage_dir(),
+            None,
+            "a switch that names no credential folder must not keep the launch's"
+        );
+        clear();
+        assert_eq!(
+            claude_secure_storage_dir(),
+            Some(OsString::from("/tmp/zo-secure-left"))
+        );
     }
 
     #[test]
@@ -481,6 +580,7 @@ mod tests {
             &ManagedAccountUpdate {
                 label: Some("still me".to_string()),
                 claude_config_dir: None,
+                claude_secure_storage_dir: None,
                 codex_home: None,
             },
         );
@@ -620,6 +720,7 @@ mod tests {
             &ManagedAccountUpdate {
                 label: Some("personal".to_string()),
                 claude_config_dir: None,
+                claude_secure_storage_dir: None,
                 codex_home: Some(channel_home.clone()),
             },
         );
@@ -634,6 +735,7 @@ mod tests {
             &ManagedAccountUpdate {
                 label: None,
                 claude_config_dir: None,
+                claude_secure_storage_dir: None,
                 codex_home: Some(PathBuf::new()),
             },
         );

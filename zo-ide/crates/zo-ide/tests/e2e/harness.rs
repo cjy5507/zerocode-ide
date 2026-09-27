@@ -747,6 +747,10 @@ fn configure_command(
         .env("CODEX_HOME", home.join("codex"))
         .env("ZO_CODEX_HOME", home.join("codex"))
         .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+        // A pane of this window also names the person's real account folder as
+        // the Claude credential folder, which zo reads before the config folder
+        // (t-11045): a hermetic run carries none.
+        .env_remove(api::managed_account::CLAUDE_SECURE_STORAGE_DIR_ENV)
         .env("ZO_SESSION_ROOT", sessions)
         .env("ZO_STATE_DIR", state)
         .env("ANTHROPIC_BASE_URL", base_url)

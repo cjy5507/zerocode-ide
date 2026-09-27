@@ -36,11 +36,11 @@ pub(crate) const MAX_PLUGIN_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// The captured result of a finished plugin subprocess.
 #[derive(Debug)]
-pub(crate) struct PluginProcessOutput {
-    pub(crate) success: bool,
-    pub(crate) status: std::process::ExitStatus,
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
+pub struct PluginProcessOutput {
+    pub success: bool,
+    pub status: std::process::ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 /// Spawn `command`, optionally write `stdin_data` to its stdin, then wait up to
@@ -56,6 +56,19 @@ pub(crate) fn run_plugin_process(
     context: &str,
 ) -> Result<PluginProcessOutput, PluginError> {
     run_plugin_process_with_timeout(command, stdin_data, context, PLUGIN_PROCESS_TIMEOUT)
+}
+
+/// The same safety for a caller outside this crate that runs another tool
+/// once with a wall of its own — zo asking a Claude Code CLI to renew its
+/// login (t-11045) — so that caller inherits the process-group kill and the
+/// bounded capture instead of re-deriving them.
+pub fn run_bounded_process(
+    command: Command,
+    stdin_data: Option<&[u8]>,
+    context: &str,
+    wall: Duration,
+) -> Result<PluginProcessOutput, PluginError> {
+    run_plugin_process_with_timeout(command, stdin_data, context, wall)
 }
 
 /// Like [`run_plugin_process`] but with an explicit timeout, so the kill path

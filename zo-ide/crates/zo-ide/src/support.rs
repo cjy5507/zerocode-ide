@@ -397,6 +397,11 @@ pub(crate) fn test_env_mutex() -> &'static std::sync::Mutex<()> {
         // "oauth-token"`, `account_id: "acct"`)이 미러 auth.json 을 덮어 codex
         // 패인이 전부 "access token could not be refreshed" 로 죽었다.
         std::env::set_var("CODEX_HOME", &home);
+        // The same trap for Claude: a pane names the person's real account
+        // folder as the credential folder, and zo reads the login there before
+        // any config folder a test sets (t-11045). Tests that want one set it
+        // themselves.
+        std::env::remove_var(api::managed_account::CLAUDE_SECURE_STORAGE_DIR_ENV);
         std::sync::Mutex::new(())
     })
 }

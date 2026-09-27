@@ -937,6 +937,24 @@ pub(crate) fn forget_cached_claude_auth() {
     }
 }
 
+/// The credential the process memo holds — what the last resolution found.
+fn memo_claude_auth() -> Option<AuthSource> {
+    CACHED_AUTH.get().and_then(|lock| {
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|cached| cached.auth.clone())
+    })
+}
+
+/// The bearer the long-lived Anthropic client sends, when it sends one.
+fn anthropic_bearer(client: &AnthropicRuntimeClient) -> Option<&str> {
+    match &client.client {
+        ProviderClient::Anthropic(anthropic) => anthropic.auth().bearer_token(),
+        _ => None,
+    }
+}
+
 fn managed_file_cache_current(cached: &CachedClaudeAuth) -> bool {
     let Some(expected) = cached.managed_file_stamp.as_ref() else {
         return false;
@@ -1000,8 +1018,8 @@ fn warn_if_saved_oauth_lacks_inference() {
     };
     if !token.scopes.iter().any(|scope| scope == "user:inference") {
         eprintln!(
-            "\x1b[33mZo login token lacks the user:inference scope — run `zo login` again \
-             to use the claude.ai subscription flow (otherwise every turn 403s).\x1b[0m"
+            "\x1b[33mzo's saved Claude login lacks the user:inference scope (every turn would 403) — {}.\x1b[0m",
+            api::CLAUDE_SIGN_IN_AGAIN
         );
     }
 }
@@ -1119,6 +1137,17 @@ async fn refresh_oauth_near_expiry(client: &mut AnthropicRuntimeClient) {
             client.set_auth(auth);
         }
         return;
+    }
+
+    // A login the process found after this client was built — by a request
+    // held for one (t-11045) or a 401 recovery, each on a per-turn clone —
+    // sits in the memo. The long-lived client takes it before this turn's
+    // clone instead of sending the credential that was refused; the checks
+    // below still run, so a memo that is itself due is renewed as ever.
+    if let Some(found) = memo_claude_auth()
+        .filter(|found| found.bearer_token().is_some() && found.bearer_token() != anthropic_bearer(client))
+    {
+        client.set_auth(found);
     }
 
     // IDE-managed credentials are checked once per turn by metadata. Only a
@@ -1847,7 +1876,8 @@ where
 {
     resolve_auth().unwrap_or_else(|error| {
         eprintln!(
-            "[zo] Claude auth unavailable at startup: {error}. Opening TUI unauthenticated; run `/login claude` before sending Anthropic requests."
+            "[zo] Claude auth unavailable at startup: {error}. Opening TUI unauthenticated; {}.",
+            api::CLAUDE_SIGN_IN_AGAIN
         );
         note_claude_login_missing(false);
         AuthSource::None
@@ -1918,7 +1948,7 @@ const CLAUDE_LOGIN_FOUND: &str = "Claude login found — this turn uses it, and 
 fn claude_login_still_missing(miss: &api::CredentialMiss) -> String {
     match miss {
         api::CredentialMiss::Absent => {
-            "Claude login still missing — sign in with `claude` or /login claude".to_string()
+            format!("Claude login still missing — {}", api::CLAUDE_SIGN_IN_AGAIN)
         }
         api::CredentialMiss::Unusable(why) => format!("Claude login still unusable — {why}"),
     }
@@ -2122,7 +2152,7 @@ pub(crate) async fn refresh_claude_oauth() -> Option<AuthSource> {
 
 /// [`refresh_claude_oauth`], and when every lane fails, why — the one road a
 /// 401 recovery and a turn that looks for a missing login both take.
-async fn refresh_claude_oauth_explained() -> Result<AuthSource, api::CredentialMiss> {
+pub(crate) async fn refresh_claude_oauth_explained() -> Result<AuthSource, api::CredentialMiss> {
     tokio::task::spawn_blocking(|| {
         // Recovery path: the memoized keychain session is exactly what just
         // lapsed/401'd, so drop it before re-resolving.
@@ -2675,6 +2705,7 @@ mod oauth_refresh_tests {
             &api::ManagedAccountUpdate {
                 label: Some("work".to_string()),
                 claude_config_dir: Some(switched.clone()),
+                claude_secure_storage_dir: None,
                 codex_home: None,
             },
         );
@@ -2739,6 +2770,7 @@ mod oauth_refresh_tests {
             &api::ManagedAccountUpdate {
                 label: Some("personal".to_string()),
                 claude_config_dir: None,
+                claude_secure_storage_dir: None,
                 codex_home: Some(handed.clone()),
             },
         );
@@ -2900,6 +2932,83 @@ mod oauth_refresh_tests {
             None,
             "the next turn has nothing to look for"
         );
+        api::managed_account::clear();
+        std::fs::remove_dir_all(config_home).ok();
+        std::fs::remove_dir_all(managed_home).ok();
+    }
+
+    /// A login a held request found mid-turn (t-11045) — or a 401 recovery —
+    /// lands in the process memo; the long-lived client takes it at the next
+    /// turn's start rather than sending the refused credential again.
+    #[test]
+    fn the_next_turn_takes_the_login_a_held_request_found() {
+        let _env_lock = crate::test_env_lock();
+        let config_home = crate::support::temp_dir("held-login-config");
+        let managed_home = crate::support::temp_dir("held-login-account");
+        let _config_home = crate::support::EnvVarGuard::set(
+            "ZO_CONFIG_HOME",
+            Some(config_home.to_str().expect("utf8 config home")),
+        );
+        let _zo_home = crate::support::EnvVarGuard::set("ZO_HOME", None);
+        let _home = crate::support::EnvVarGuard::set(
+            "HOME",
+            Some(config_home.to_str().expect("utf8 home")),
+        );
+        let _claude_home = crate::support::EnvVarGuard::set(
+            "CLAUDE_CONFIG_DIR",
+            Some(managed_home.to_str().expect("utf8 managed home")),
+        );
+        let _disable_keychain = crate::support::EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+        let _no_discovery = crate::support::EnvVarGuard::set("ZO_DISABLE_MODEL_DISCOVERY", Some("1"));
+        let _api_key = crate::support::EnvVarGuard::set("ANTHROPIC_API_KEY", None);
+        let _auth_token = crate::support::EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", None);
+        api::managed_account::clear();
+        api::invalidate_claude_code_keychain_cache();
+        let cache = CACHED_AUTH.get_or_init(|| std::sync::Mutex::new(None));
+        *cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let mut client = AnthropicRuntimeClient {
+            client: ProviderClient::Anthropic(api::AnthropicClient::from_auth(
+                api::AuthSource::BearerToken("refused-bearer".to_string()),
+            )),
+            session_id: "held-login-test".to_string(),
+            model: "claude-opus-5".to_string(),
+            auth_route: AuthRoute::Auto,
+            enable_tools: false,
+            emit_output: false,
+            allowed_tools: None,
+            tool_registry: GlobalToolRegistry::builtin(),
+            thinking: None,
+            named_effort: None,
+            effort_band_ceiling: None,
+            session_tracer: None,
+        };
+
+        // What the held request's look recorded when the login came back.
+        super::update_cached_claude_auth(
+            &api::AuthSource::BearerToken("found-while-held".to_string()),
+            AuthOrigin::Keychain,
+            Some(u64::MAX),
+            None,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(refresh_oauth_if_near_expiry(&mut client, true));
+
+        let ProviderClient::Anthropic(anthropic) = &client.client else {
+            panic!("still the Anthropic client");
+        };
+        assert_eq!(
+            anthropic.auth().bearer_token(),
+            Some("found-while-held"),
+            "the next turn sent the refused credential again"
+        );
+        *cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         api::managed_account::clear();
         std::fs::remove_dir_all(config_home).ok();
         std::fs::remove_dir_all(managed_home).ok();

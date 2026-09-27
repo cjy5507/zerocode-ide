@@ -11822,7 +11822,10 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
     let params = auth_reload_params(
         zerocode_core::account::Provider::Anthropic,
         Some("joe@example.com · Acme"),
-        Some(Path::new("/data/runtime/claude")),
+        Some(ClaudeDirs {
+            config: Path::new("/data/runtime/claude"),
+            credentials: Path::new("/data/claude-accounts/a-1"),
+        }),
         None,
     );
     let mut sent: Vec<String> = Vec::new();
@@ -11840,36 +11843,54 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
 /// already frozen. A lane back on the machine's own login carries an EMPTY
 /// path — "no managed account" — which is not the same as carrying nothing:
 /// silence would leave the pane on the account the person just left.
+///
+/// Claude's switch carries both folders: the credential folder is where the
+/// login lives and its CLI renews it, and a zo told only the runtime home read
+/// the window's copy of the login and spent its stale refresh token (t-11045).
 #[test]
 fn a_reload_carries_the_new_paths_and_says_so_when_there_are_none() {
     let switched = auth_reload_params(
         zerocode_core::account::Provider::Anthropic,
         Some("  joe@example.com  "),
-        Some(Path::new("/data/runtime/claude")),
+        Some(ClaudeDirs {
+            config: Path::new("/data/runtime/claude"),
+            credentials: Path::new("/data/claude-accounts/a-1"),
+        }),
         None,
     );
     assert_eq!(switched["provider"], "anthropic");
     assert_eq!(switched["label"], "joe@example.com");
     assert_eq!(switched["claude_config_dir"], "/data/runtime/claude");
+    assert_eq!(
+        switched["claude_secure_storage_dir"],
+        "/data/claude-accounts/a-1"
+    );
     assert!(switched.get("codex_home").is_none());
 
-    // Back on the machine's own login: an EMPTY directory and an EMPTY
-    // name. Both say "no managed account" — leaving either key out would
-    // leave the pane on, and showing, the account it just left.
+    // Back on the machine's own login: EMPTY directories and an EMPTY
+    // name. All say "no managed account" — leaving a key out would leave the
+    // pane on, and showing, the account it just left.
     let system_default = auth_reload_params(
         zerocode_core::account::Provider::Anthropic,
         Some(""),
-        Some(Path::new("")),
+        Some(ClaudeDirs {
+            config: Path::new(""),
+            credentials: Path::new(""),
+        }),
         None,
     );
     assert_eq!(system_default["claude_config_dir"], "");
+    assert_eq!(system_default["claude_secure_storage_dir"], "");
     assert_eq!(system_default["label"], "");
 
     // A caller that is not speaking about the name at all leaves it alone.
     let silent = auth_reload_params(
         zerocode_core::account::Provider::Anthropic,
         None,
-        Some(Path::new("/data/runtime/claude")),
+        Some(ClaudeDirs {
+            config: Path::new("/data/runtime/claude"),
+            credentials: Path::new("/data/claude-accounts/a-1"),
+        }),
         None,
     );
     assert!(
@@ -11886,6 +11907,7 @@ fn a_reload_carries_the_new_paths_and_says_so_when_there_are_none() {
     assert_eq!(codex["provider"], "openai");
     assert_eq!(codex["codex_home"], "/data/runtime/codex");
     assert!(codex.get("claude_config_dir").is_none());
+    assert!(codex.get("claude_secure_storage_dir").is_none());
 }
 
 /// A pane that died between the enumeration and the call is not a failed

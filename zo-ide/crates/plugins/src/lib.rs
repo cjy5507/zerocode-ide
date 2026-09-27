@@ -38,6 +38,7 @@ mod tests;
 
 pub use builtin::builtin_plugins;
 pub use error::{PluginError, PluginManifestValidationError};
+pub use process_runner::{PluginProcessOutput, run_bounded_process};
 pub use installed::{InstalledPluginRecord, InstalledPluginRegistry, PluginInstallSource};
 pub use manager::{InstallOutcome, PluginManager, UpdateOutcome};
 pub use manifest::{

@@ -39,6 +39,9 @@ fn main() -> ExitCode {
         &[api::SYSTEMONE_API_KEY_ENV],
         zo_ide::ide::SERVICE_KEYCHAIN_SERVICE_PREFIX,
     );
+    // An expired Claude Code login is renewed by its own CLI, never by zo
+    // (t-11045): this is the road the credential chain asks.
+    zo_ide::claude_renewal::install();
     // This process owns its workspaces: zo's own bookkeeping (`.zo/turns`,
     // `.zo/dream`) lives beside the transcript under `~/.zo/projects/<slug>`,
     // never in the person's checkout. The crates keep the in-tree default for

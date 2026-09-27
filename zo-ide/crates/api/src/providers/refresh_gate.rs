@@ -1,11 +1,14 @@
 //! Per-branch memory of failed OAuth refresh attempts.
 //!
 //! A rotating refresh token can be spent exactly once: the token endpoint hands
-//! back a replacement and forgets its predecessor. Zo holds the Claude
-//! subscription grant in two places — the Claude Code keychain and its own
-//! credential file — so a branch that was superseded by whoever refreshed last
-//! is still on disk, still looks like a credential, and can only ever answer
-//! `invalid_grant`.
+//! back a replacement and forgets its predecessor. A branch superseded by
+//! whoever refreshed last is still on disk, still looks like a credential, and
+//! can only ever answer `invalid_grant`.
+//!
+//! Two kinds of attempt are remembered here: zo's refresh of its own saved
+//! login, keyed on the refresh token it spent, and — since zo stopped spending
+//! a Claude Code login's refresh token itself (t-11045) — the renewal it asked
+//! of that login's own CLI, keyed on the expired access token the ask was about.
 //!
 //! Retrying such a branch is not a recoverable error, it is a guaranteed
 //! round-trip to a 400 on the path that resolves credentials — once per turn.
@@ -80,8 +83,15 @@ pub(crate) fn refresh_blocked(refresh_token: &str) -> Option<RefreshBlock> {
 /// Record a failed refresh. Returns `true` the first time this branch is
 /// retired, so the caller can tell the user once instead of once per turn.
 pub(crate) fn record_failure(refresh_token: &str, error: &ApiError) -> bool {
-    let key = fingerprint(refresh_token);
-    let terminal = is_terminal_rejection(error);
+    record_outcome(refresh_token, is_terminal_rejection(error))
+}
+
+/// Record a failure already judged: `terminal` retires the branch, anything
+/// else cools it down. The judgement of a renewal asked of a Claude Code CLI
+/// (t-11045) is the store read again, not an HTTP answer, so it arrives here
+/// already made. Returns `true` the first time this branch is retired.
+pub(crate) fn record_outcome(token: &str, terminal: bool) -> bool {
+    let key = fingerprint(token);
     with_failures(|failures| {
         let already_retired = matches!(failures.get(&key), Some(Failure::Retired));
         failures.insert(

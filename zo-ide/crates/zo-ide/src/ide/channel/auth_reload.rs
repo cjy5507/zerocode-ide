@@ -12,9 +12,14 @@
 //!
 //! ```text
 //! → {"method":"auth.reload","params":{"provider":"anthropic","label":"work",
-//!                                     "claude_config_dir":"/…/accounts/a"}}
+//!                                     "claude_config_dir":"/…/.claude",
+//!                                     "claude_secure_storage_dir":"/…/accounts/a"}}
 //! ← {"reloaded":["anthropic"],"account":{"provider":"anthropic","label":"work"}}
 //! ```
+//!
+//! Claude 는 폴더가 둘이다: 설정 폴더(창의 공유 런타임 홈)와 자격 폴더(고른
+//! 계정의 폴더). 로그인은 자격 폴더에 있고 CLI 도 거기서 갱신하므로, 전환은
+//! 둘을 함께 싣는다(t-11045).
 //!
 //! `provider` 가 없거나 `null` 이면 셋 다. 모르는 이름은 `-32602`.
 
@@ -85,6 +90,7 @@ fn update_from(params: &Value) -> ManagedAccountUpdate {
     ManagedAccountUpdate {
         label: text("label"),
         claude_config_dir: text("claude_config_dir").map(PathBuf::from),
+        claude_secure_storage_dir: text("claude_secure_storage_dir").map(PathBuf::from),
         codex_home: text("codex_home").map(PathBuf::from),
     }
 }
@@ -148,6 +154,34 @@ mod tests {
         assert!(
             !managed_account::reload_pending(ManagedProvider::OpenAi),
             "an Anthropic switch rebuilt the OpenAI client too"
+        );
+        managed_account::clear();
+    }
+
+    /// A Claude switch carries the credential folder with the config folder
+    /// (t-11045): the login lives in the first, and a zo told only the
+    /// runtime home read the window's copy of it.
+    #[test]
+    fn a_claude_switch_carries_the_credential_folder_with_the_config_folder() {
+        let _lock = crate::ide::channel::auth_reload::tests_support::lock();
+        managed_account::clear();
+        let response = handle(
+            &json!({
+                "provider": "anthropic",
+                "claude_config_dir": "/tmp/zo-auth-reload-runtime-home",
+                "claude_secure_storage_dir": "/tmp/zo-auth-reload-account"
+            }),
+            8,
+        );
+
+        assert!(response.error.is_none(), "{response:?}");
+        assert_eq!(
+            managed_account::claude_config_dir(),
+            Some("/tmp/zo-auth-reload-runtime-home".into())
+        );
+        assert_eq!(
+            managed_account::claude_secure_storage_dir(),
+            Some("/tmp/zo-auth-reload-account".into())
         );
         managed_account::clear();
     }
