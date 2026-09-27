@@ -75,21 +75,30 @@ type Answered = Result<(&'static str, u8), Box<dyn std::error::Error>>;
 /// without credentials, a trusted workspace or a provider runtime, and the
 /// others reach programs of their own for the same reason.
 fn answered_before_a_session(argv: &[String]) -> Option<Answered> {
-    let verb = argv.first()?.as_str();
-    let rest = &argv[1..];
-    match verb {
-        "--doctor" => Some(std::env::current_dir().map_err(Into::into).map(|cwd| {
-            println!("{}", zo_ide::doctor::run(&cwd));
-            success("doctor")
-        })),
-        "cron" => Some(run_cron(rest)),
-        "scoreboard" => Some(run_scoreboard(rest)),
-        "decision-shadow" => Some(run_decision_shadow(rest)),
-        "jev" => Some(run_jev(rest)),
-        "mcp" => Some(run_mcp(rest)),
-        "vault" => Some(run_vault(rest)),
-        _ => None,
-    }
+    let (verb, rest) = argv.split_first()?;
+    ANSWERED_BEFORE_A_SESSION
+        .iter()
+        .find(|(name, _)| name == verb)
+        .map(|(_, answer)| answer(rest))
+}
+
+/// The verbs themselves, by the word a person types. Data rather than a
+/// `match`, so a message that names a `zo` verb can be checked against the
+/// verbs this build really has (`main_tests`).
+const ANSWERED_BEFORE_A_SESSION: &[(&str, fn(&[String]) -> Answered)] = &[
+    ("--doctor", run_doctor),
+    ("cron", run_cron),
+    ("scoreboard", run_scoreboard),
+    ("decision-shadow", run_decision_shadow),
+    ("jev", run_jev),
+    ("mcp", run_mcp),
+    ("vault", run_vault),
+];
+
+fn run_doctor(_: &[String]) -> Answered {
+    let cwd = std::env::current_dir()?;
+    println!("{}", zo_ide::doctor::run(&cwd));
+    Ok(success("doctor"))
 }
 
 fn run(
@@ -819,3 +828,6 @@ fn run_teammate(
     let _ = life.turns;
     Ok(success("teammate"))
 }
+
+#[cfg(test)]
+mod main_tests;
