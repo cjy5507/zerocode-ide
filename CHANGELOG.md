@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.1.33] — 2026-09-27
+
+_since v1.1.32 (22 commits)_
+
+### feat
+- feat(reflex): prepare RTS input oracle and current-target aiming comparison
+
+### fix
+- fix(reflex): select predicted aiming from matched fast-input trials
+- fix(jev): pair baseline labels and bind recall evidence
+- fix(reflex): settle queued pointer motion before a press
+- fix(api): keep pooled connections driven between sync calls
+- fix(jev): judge skill seats after recording their evidence
+- fix(bench): score the active hand and keep preparation visible
+- fix(bench): distinguish supplied stress ceiling from achieved input rate
+- fix(reflex): keep pointer refusal and reuse fixture support for RTS
+- fix(bench): use the configured login generator for automatic plans
+
+### release
+- release: two zo verifier tests that wait on spawn-thread rows are load flakes
+
+### other
+- Merge branch 'wt/t-10384/r10-scope-pid-shift-cmd' (70fcc0c8) — the reflex hand presses keys and chords, right and modified clicks, and drag boxes, keys only to the process of the plan's app with every modifier released in pairs and the closing and switching chords refused from one table; it lets its own queued pointer move settle (8 ms) before a press and aims where the target will be when it presses. Measured on the fixtures with nobody at the keyboard: an RTS-style board mixing keys, box drags, right clicks and shift clicks ran 324.2 actions a minute (hit share 0.994) with a median reaction of 55.7 ms and no wrong input; the stress mode kept pace through 600 targets a minute (377 a minute overall, no wrong input); and with a 16 ms pointer the predicted aim hit at least 0.9954 on each of the R9 seeds 11, 12 and 13 (at 80 ms no aim reached 0.99 on both seeds), so predicted is the default. The model-written plan arm is not measured: the window's Claude login had expired and Codex hit the 30 s plan wall; it waits for the login. Coordinator gate on the whole landing (42abb688): pii, fmt, lint, doc, workspace test, shell bins, tools, swift, settings and window harnesses (1846 of 1846), zo fmt, clippy and e2e, and the Windows cross-checks of root and zo, all 0; zo test 0 but for two runtime tests that failed once in the parallel run and then passed alone three times each and in a full parallel rerun (2456 of 2456), judged as the lane judges an unlisted flake. (t-10384, R10 of t-10223; coordinator review)
+- Merge branch 'wt/t-10618/jev-1-4-recall' (5fdd1322) — four Jev seats can be compared with the simple way they stand in for, on the same facts: skill search and skill suggestion mark whether the word-match ranking at the same cut found the skill the turn loaded, compaction whether keeping every block was right by the block being read again within five turns, and branching the outcome observed while exploring, marked as such; every baseline can be wrong (golden cases 0 to 19). Recall labels join their request exactly by query, notes and request time, and a request's settled mark is posted only after its row is on file, so a turn that ends between the two no longer strands a label above its request (0 misattributed; the 103 older labels are left unattributed). Merge resolution: skill search's label carries its baseline and is recorded through the seat judge (t-10575's record_row), and t-10575's two tests call the new signature with the baseline their comparison had. Coordinator gate on the whole landing (42abb688): pii, fmt, lint, doc, workspace test, shell bins, tools, swift, settings and window harnesses (1846 of 1846), zo fmt, clippy and e2e, and the Windows cross-checks of root and zo, all 0; zo test 0 but for two runtime tests that failed once in the parallel run and then passed alone three times each and in a full parallel rerun (2456 of 2456), judged as the lane judges an unlisted flake. (t-10618; coordinator review)
+- Merge branch 'wt/t-10246/jev-summon-effort-09-26-16-3x-jev-max' (01c9a0bc) — a summons that names no effort asks Jev how hard its task is (a new seat, summon_difficulty, the 28th) and turns the answer into the agent's effort through the launch table's own ladder and each agent's ceiling; a coordinator's pinned effort is never replaced, and the seat keeps recording until it is graded. Its first grading, agreement with the coordinator's pins (82 of 276 against 250 for always high), measures how well it imitates the coordinator rather than whether an effort was right, so grading by what the summonses came to (first-try finish, rework, tokens) follows in t-10638. The Jev tab shows the seat. Coordinator gate on the whole landing (42abb688): pii, fmt, lint, doc, workspace test, shell bins, tools, swift, settings and window harnesses (1846 of 1846), zo fmt, clippy and e2e, and the Windows cross-checks of root and zo, all 0; zo test 0 but for two runtime tests that failed once in the parallel run and then passed alone three times each and in a full parallel rerun (2456 of 2456), judged as the lane judges an unlisted flake. (t-10246; coordinator review)
+- Merge branch 'wt/t-10575/jev-27' (576b09f1) — every Jev judgment was walked once for real: all 27 seats of the window and zo asked a live question, got an answer and wrote their row in a scratch home (27/27), and the audit report says for each whether it is asked, right and applied (before any fix: 0 applying, 7 broken, 17 blocked, 3 unmeasurable). Two causes are fixed here. zo's recall, mention and step-effort questions timed out (1.5 to 10 s) whenever a synchronous Jev call had run earlier in the same process, because the shared HTTP client kept a pooled connection that no runtime drove between calls; the fallback runtime now keeps one I/O worker running (red on a local keep-alive server, then green). And the two skill seats recorded their evidence without ever being judged for promotion; their writers now call the seat judge. Thresholds, pins and settings are unchanged. Coordinator gate on the whole landing (42abb688): pii, fmt, lint, doc, workspace test, shell bins, tools, swift, settings and window harnesses (1846 of 1846), zo fmt, clippy and e2e, and the Windows cross-checks of root and zo, all 0; zo test 0 but for two runtime tests that failed once in the parallel run and then passed alone three times each and in a full parallel rerun (2456 of 2456), judged as the lane judges an unlisted flake. (t-10575; coordinator review)
+- Add learned summon difficulty and effort selection
+- WIP feat(reflex): the fast hand presses keys to its app's process, right and modified clicks, and drags (t-10384)
+
 ## [1.1.32] — 2026-09-27
 
 _since v1.1.31 (2 commits)_
