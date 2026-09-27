@@ -9132,25 +9132,41 @@ function worktreeAgentRows(path) {
     for (const sub of running) {
       ordered.push({ ...row, depth: depth + 1, sub, kids: 0, kidsShown: false });
     }
-    if (!hideBelow && done.length > 0) {
-      const historyShown = agentHistoryShown.has(row.term);
-      if (historyShown) {
-        for (const sub of done) {
-          ordered.push({ ...row, depth: depth + 1, sub, kids: 0, kidsShown: false });
-        }
-      }
-      ordered.push({
-        ...row, depth: depth + 1, sub: null, kids: 0, kidsShown: false,
-        history: done.length, historyShown,
-      });
-    }
-    for (let child of children) {
+    // 판으로 뜬 자식도 같은 규칙이다(t-11753): 끝난 자식 판 — zo의 판 헬퍼,
+    // Claude Code의 팀원 — 은 작업 중인 줄 사이에 같은 무게로 서지 않고 같은
+    // 「완료 N개」로 간다. 판이 닫히기 전에도(사람이 손댄 판은 남는다). 남는
+    // 것은 셋: 일하거나 묻는 자식(밑에 산 것이 있는 자식 포함), 사람이 보고
+    // 있는 판(무대 위), 그리고 원장이 검증을 기다리는 워커 — 코디가 아직 할
+    // 일이 있는 줄이다.
+    const dressed = children.map((child) => {
       const wearing = (paneSubagents.get(row.term) ?? []).find(
         (sub) => sub.id === paneHelpers.get(child.term),
       );
       // 접어 입은 판은 헬퍼의 이름과 손을 달고 내려간다(t-3024).
-      if (wearing) child = { ...child, sub: wearing, subHost: row.term };
-      walk(child, depth + 1, hideBelow);
+      return wearing ? { ...child, sub: wearing, subHost: row.term } : child;
+    });
+    const settled = (child) =>
+      !LIVE_HOOK_STATES.has(agentRowState(child)) &&
+      !liveBelow(child) &&
+      !agentRowHere(child) &&
+      !(paneLedger.get(child.term)?.task && !ledgerVouched(paneLedger.get(child.term)?.review));
+    const standing = dressed.filter((child) => !settled(child));
+    const finished = dressed.filter(settled);
+    for (const child of standing) walk(child, depth + 1, hideBelow);
+    const history = done.length + finished.length;
+    const historyShown = agentHistoryShown.has(row.term);
+    if (!hideBelow && historyShown) {
+      for (const sub of done) {
+        ordered.push({ ...row, depth: depth + 1, sub, kids: 0, kidsShown: false });
+      }
+    }
+    // 접힌 자식 판도 소비는 된다(seen) — 고아 패스가 되살려 루트로 세우지 않게.
+    for (const child of finished) walk(child, depth + 1, hideBelow || !historyShown);
+    if (!hideBelow && history > 0) {
+      ordered.push({
+        ...row, depth: depth + 1, sub: null, kids: 0, kidsShown: false,
+        history, historyShown,
+      });
     }
   };
   for (const row of here) {
