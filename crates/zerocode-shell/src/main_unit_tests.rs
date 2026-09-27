@@ -136,6 +136,9 @@ const WINDOW_GLOBALS: &[&str] = &[
     "Uint32Array",
     // 태그 군집의 색 — 노드마다 hue 하나(없으면 -1)라 부호 있는 바이트면 된다.
     "Int8Array",
+    // GL 페인터가 견본의 계산된 `transform`에서 배율을 읽는 브라우저 내장 —
+    // 주변 탐색의 중심 확대와 후광을 CSS가 정한 값 그대로 그린다 (t-11500).
+    "DOMMatrixReadOnly",
     // How the browser panes hear about the overlays without a hook in
     // every dialog: the scrims' `hidden` attribute is the fact, and the
     // observer watches the fact (1-fy).
