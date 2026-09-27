@@ -3273,6 +3273,29 @@ mod tests {
         assert_eq!(report.model, None);
     }
 
+    /// A prompt that only says go on, or the window's own mail pointer, is
+    /// still the prompt — the evidence one went in — and the report says it
+    /// names nothing, so the window keeps the name it had (t-11540). Only a
+    /// prompt event carries the flag.
+    #[test]
+    fn a_go_on_prompt_is_reported_as_naming_nothing() {
+        let asking = |prompt: &str| {
+            let payload = serde_json::json!({ "hook_event_name": "UserPromptSubmit", "prompt": prompt });
+            report_of(&envelope("term-3", "", &payload.to_string()), None).expect("a report")
+        };
+        let go_on = asking("계속");
+        assert_eq!(go_on.prompt.as_deref(), Some("계속"));
+        assert!(go_on.prompt_names_nothing);
+        assert!(asking(&zerocode_core::orchestration::pointer_text(1)).prompt_names_nothing);
+        let asked = asking("계속 진행하되 시험부터");
+        assert!(!asked.prompt_names_nothing);
+        let json = serde_json::to_value(&asked).expect("serializes");
+        assert!(json.get("prompt_names_nothing").is_none(), "a naming prompt adds nothing to the wire");
+        let ended = report_of(&envelope("term-3", "", r#"{"hook_event_name":"Stop"}"#), None)
+            .expect("a report");
+        assert!(!ended.prompt_names_nothing);
+    }
+
     /// Hook text is display data. C0 editing bytes may be present in vendor
     /// transcripts, but they must not become boxes on the board or sidebar.
     #[test]
