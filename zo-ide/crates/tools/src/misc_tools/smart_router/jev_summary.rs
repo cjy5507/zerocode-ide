@@ -299,10 +299,13 @@ pub fn rows_of(seat: &JevUse, roots: &[PathBuf], sessions: Option<&Path>) -> (Op
     // what the door was actually asked. The root is read when it has the
     // file; the session copies are what a seat whose rows predate that
     // change still has, and they are read only then.
-    let rows = match under_roots.as_deref() {
+    let mut rows: Vec<Value> = match under_roots.as_deref() {
         Some(ledger) => read_rows(ledger),
         None => per_session.iter().flat_map(|ledger| read_rows(ledger)).collect(),
     };
+    // Marked as the seat's label writer marks them today (t-11010), so the
+    // numbers here and the judge in the window read one mark per fact.
+    seat.marked_now(&mut rows);
     (found, rows)
 }
 

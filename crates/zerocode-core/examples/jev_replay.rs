@@ -44,7 +44,8 @@ fn main() -> Result<(), String> {
         }
     }
     let seat = jev_use(seat_id).ok_or_else(|| format!("no seat named '{seat_id}'"))?;
-    let source = read_rows(&ledger)?;
+    let mut source = read_rows(&ledger)?;
+    seat.marked_now(&mut source);
     let replayed = replay(seat, &source, quiet);
     if let Some(dir) = out {
         let copy = dir.join(seat.ledger);

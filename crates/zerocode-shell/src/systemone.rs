@@ -160,7 +160,8 @@ pub fn record_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
     if !seat.promotes {
         return;
     }
-    let held = read_rows(ledger);
+    let mut held = read_rows(ledger);
+    seat.marked_now(&mut held);
     let version = zerocode_core::jev::promote::on_the_newest_version(seat, &held);
     if !zerocode_core::jev::promote::judgment_due_on(seat, &version, &held) {
         return;

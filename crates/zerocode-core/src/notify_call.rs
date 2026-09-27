@@ -15,15 +15,18 @@
 //! to, and how many panes wait. Nothing here touches the network, the clock, a
 //! pane or a file.
 //!
-//! The answer is judged against the person: a hand on the ring's pane inside
-//! [`NOTIFY_LABEL_WINDOW_MS`] says it was worth the interruption
-//! ([`agreed`]).
+//! The answer is judged against the person: while they are at the window, a
+//! hand on the ring's pane inside [`NOTIFY_LABEL_WINDOW_MS`] says it was
+//! worth the interruption and none says it was not ([`agreed`]); a ring they
+//! were away from is graded neither way, and the seat's call does not act on
+//! it ([`acts_under`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
 use crate::jev::choice::{self, ChoiceRefusal};
+use crate::jev::summary::{AGREED, BASELINE_AGREED, LABEL, NOT_COMPARED};
 use crate::jev::{
     NOTIFY_ATTENDANCE_WINDOW_MS, NOTIFY_BATCH, NOTIFY_IGNORE, NOTIFY_INTERRUPT,
     NOTIFY_LABEL_WINDOW_MS, NOTIFY_RECENT_CAP, NOTIFY_WORDS_CHAR_CAP,
@@ -330,28 +333,110 @@ pub const fn window_closed(asked_ms: i64, now_ms: i64) -> bool {
 }
 
 /// The mark the judge counts (§4 of the settings design), from what the
-/// person did: a hand on the pane inside the window says the ring was worth
-/// the interruption, so the call agreed iff it rang; no hand while the person
-/// was present at the window says it was not, so the call agreed iff it did
-/// not ring; no hand while they were away says nothing — a person who was
-/// not there could not have turned to it — and leaves no mark.
+/// person did while they were at the window: a hand on the pane inside the
+/// window says the ring was worth the interruption, so the call agreed iff
+/// it rang; no hand says it was not, so the call agreed iff it did not ring.
+/// A ring the person was away from leaves no mark, whether a hand came back
+/// inside the minute or not (t-11010): with no hand it says nothing — a
+/// person who was not there could not have turned to it — and a mark only
+/// for the hand that came back is a label that can say "it should have
+/// rung" and never "it need not have". On 2026-09-27 this machine's ledger
+/// held 479 away rings and marked the 11 a hand came back to, every one
+/// against the seat when it held the ring; those were 7 of the 10 wrong
+/// marks among its 13 most confident answers.
 ///
 /// # Errors
 ///
 /// The attendance's own word ([`Attendance::word`], `away`) for a ring the
-/// person was away from and did not turn to — what its label row names
-/// under the summary's `notCompared`, so a reader counts it among the rows
-/// that compare nothing rather than among none (t-9427: 325 of this
-/// machine's 460 label rows on 2026-09-26).
+/// person was away from — what its label row names under the summary's
+/// `notCompared`, so a reader counts it among the rows that compare nothing
+/// rather than among none (t-9427: 325 of this machine's 460 label rows on
+/// 2026-09-26).
 pub const fn agreed(
     call: Call,
     reacted: bool,
     attendance: Attendance,
 ) -> Result<bool, &'static str> {
     match (reacted, attendance) {
-        (true, _) => Ok(call.rings()),
+        (_, Attendance::Away) => Err(Attendance::Away.word()),
+        (true, Attendance::Present) => Ok(call.rings()),
         (false, Attendance::Present) => Ok(!call.rings()),
-        (false, Attendance::Away) => Err(Attendance::Away.word()),
+    }
+}
+
+/// The keys a label row keeps the facts its mark is read from under — the
+/// call the ring was answered with, where the person was, and whether they
+/// turned to the pane ([`grade`]).
+const LABEL_CALL: &str = "call";
+const LABEL_ATTENDANCE: &str = "attendance";
+const LABEL_REACTED: &str = "reacted";
+
+/// Whether the seat's call may act on a ring the person is at `attendance`
+/// for: only where its label can say both that a ring was worth the
+/// interruption and that it was not ([`agreed`]). A ring the person was
+/// away from is graded neither way, and a call nothing grades is one the
+/// bell does not take (t-11010): it rings today's way, and the seat's
+/// answer is recorded beside it.
+#[must_use]
+pub const fn acts_under(attendance: Attendance) -> bool {
+    agreed(Call::today(), true, attendance).is_ok()
+        && agreed(Call::today(), false, attendance).is_ok()
+}
+
+/// Write onto `label` the facts one ring's mark is read from — the `call`
+/// it was answered with, the person's `attendance`, whether they `reacted`
+/// — and the mark today's rule reads off them ([`agreed`]): the seat's and
+/// the baseline's side by side ([`Call::today`], t-6342), or why there is
+/// none (t-9427). Any mark the row already carried is replaced, so the
+/// label writer and [`regrade`] cannot leave two readings on one row.
+pub fn grade(label: &mut Value, call: Call, attendance: Attendance, reacted: bool) {
+    let Some(row) = label.as_object_mut() else {
+        return;
+    };
+    for key in [AGREED, BASELINE_AGREED, NOT_COMPARED] {
+        for spelling in key.spellings() {
+            row.remove(spelling);
+        }
+    }
+    row.insert(LABEL_CALL.to_string(), json!(call.word()));
+    row.insert(LABEL_ATTENDANCE.to_string(), json!(attendance.word()));
+    row.insert(LABEL_REACTED.to_string(), json!(reacted));
+    match agreed(call, reacted, attendance) {
+        Ok(mark) => {
+            row.insert(AGREED.canonical.to_string(), json!(mark));
+            if let Ok(baseline) = agreed(Call::today(), reacted, attendance) {
+                row.insert(BASELINE_AGREED.canonical.to_string(), json!(baseline));
+            }
+        }
+        Err(why) => {
+            row.insert(NOT_COMPARED.canonical.to_string(), json!(why));
+        }
+    }
+}
+
+/// A label row of this seat's ledger as today's rule marks it (t-11010,
+/// [`crate::jev::JevUse::regrade`]): the mark is a function of the facts
+/// the row carries ([`grade`]), so a row written under an older rule — the
+/// 37 of 2026-09-23 written before the baseline's mark was, the away rings
+/// marked because a hand came back — is read on the same facts the way a
+/// row written today is. A row whose facts do not say a mark — a request,
+/// a restart's unknown reaction, a call or an attendance no longer spelled
+/// — is left as written.
+pub fn regrade(row: &mut Value) {
+    if LABEL.read(row).is_none() {
+        return;
+    }
+    let call = row
+        .get(LABEL_CALL)
+        .and_then(Value::as_str)
+        .and_then(Call::from_word);
+    let attendance = row
+        .get(LABEL_ATTENDANCE)
+        .and_then(Value::as_str)
+        .and_then(Attendance::from_word);
+    let reacted = row.get(LABEL_REACTED).and_then(Value::as_bool);
+    if let (Some(call), Some(attendance), Some(reacted)) = (call, attendance, reacted) {
+        grade(row, call, attendance, reacted);
     }
 }
 
@@ -548,15 +633,14 @@ mod tests {
         assert!(window_closed(asked, asked + NOTIFY_LABEL_WINDOW_MS + 1));
     }
 
-    /// The mark: a hand says the ring was worth it; no hand while present
-    /// says it was not; no hand while away says nothing.
+    /// The mark: while the person is present, a hand says the ring was worth
+    /// it and no hand says it was not; a ring they were away from leaves no
+    /// mark, whether a hand came back inside the minute or not (t-11010).
     #[test]
     fn the_persons_hand_writes_the_mark_and_an_absent_person_writes_none() {
-        for attendance in Attendance::ALL {
-            assert_eq!(agreed(Call::Interrupt, true, attendance), Ok(true));
-            assert_eq!(agreed(Call::Batch, true, attendance), Ok(false));
-            assert_eq!(agreed(Call::Ignore, true, attendance), Ok(false));
-        }
+        assert_eq!(agreed(Call::Interrupt, true, Attendance::Present), Ok(true));
+        assert_eq!(agreed(Call::Batch, true, Attendance::Present), Ok(false));
+        assert_eq!(agreed(Call::Ignore, true, Attendance::Present), Ok(false));
         assert_eq!(
             agreed(Call::Interrupt, false, Attendance::Present),
             Ok(false)
@@ -564,11 +648,100 @@ mod tests {
         assert_eq!(agreed(Call::Batch, false, Attendance::Present), Ok(true));
         assert_eq!(agreed(Call::Ignore, false, Attendance::Present), Ok(true));
         for call in Call::ALL {
-            assert_eq!(
-                agreed(call, false, Attendance::Away),
-                Err(Attendance::Away.word()),
-                "no mark, and the reason is the person's absence"
-            );
+            for reacted in [true, false] {
+                assert_eq!(
+                    agreed(call, reacted, Attendance::Away),
+                    Err(Attendance::Away.word()),
+                    "no mark, and the reason is the person's absence"
+                );
+            }
+        }
+        assert!(acts_under(Attendance::Present));
+        assert!(!acts_under(Attendance::Away));
+    }
+
+    /// The seat's ledger is read on one set of facts for the seat and for
+    /// its baseline (t-11010): a label written before the baseline's mark was
+    /// is compared on both sides, and an away ring a hand came back to on
+    /// neither — so the two share counts one denominator, as the judge
+    /// compares them.
+    #[test]
+    fn the_seat_and_its_baseline_are_counted_on_the_same_marks() {
+        let request = |at: i64| {
+            json!({"at": at, "notify": format!("3@{at}"), "outcome": "answered",
+                "call": NOTIFY_BATCH, "confidence": 0.9, "rubricVersion": NOTIFY_CALL_RUBRIC_VERSION})
+        };
+        let mut rows = vec![
+            request(10),
+            json!({"at": 70_010, "label": "3@10", "call": NOTIFY_BATCH,
+                "attendance": "present", "reacted": false, "agreed": true}),
+            request(20),
+            json!({"at": 70_020, "label": "3@20", "call": NOTIFY_BATCH,
+                "attendance": "away", "reacted": true, "agreed": false}),
+        ];
+        let written = crate::jev::promote::on_the_newest_version(&crate::jev::NOTIFY, &rows);
+        let before = crate::jev::summary::agreement_rows(written.marks.iter().copied(), i64::MIN);
+        assert_eq!(
+            (before.compared, before.baseline_compared),
+            (2, 0),
+            "as written: two marks, no baseline beside either"
+        );
+        crate::jev::NOTIFY.marked_now(&mut rows);
+        let now = crate::jev::promote::on_the_newest_version(&crate::jev::NOTIFY, &rows);
+        let after = crate::jev::summary::agreement_rows(now.marks.iter().copied(), i64::MIN);
+        assert_eq!(
+            (
+                after.compared,
+                after.agreed,
+                after.baseline_compared,
+                after.baseline_agreed,
+                after.not_compared
+            ),
+            (1, 1, 1, 0, 1)
+        );
+    }
+
+    /// A label row carries the facts its mark is read from, and a row one
+    /// written under an older rule reads as today's rule marks those facts:
+    /// the mark and the baseline's from the same facts, a stale mark gone.
+    #[test]
+    fn a_label_is_marked_from_its_own_facts_and_an_old_one_is_marked_again() {
+        let mut present = json!({"label": "3@10"});
+        grade(&mut present, Call::Batch, Attendance::Present, false);
+        assert_eq!(present["call"], NOTIFY_BATCH);
+        assert_eq!(present["attendance"], "present");
+        assert_eq!(present["reacted"], false);
+        assert_eq!(present[AGREED.canonical], true);
+        assert_eq!(present[BASELINE_AGREED.canonical], false);
+        assert!(present.get(NOT_COMPARED.canonical).is_none());
+
+        // Written before the baseline was (t-6342): the facts give it back.
+        let mut old = json!({"label": "3@20", "call": NOTIFY_IGNORE,
+            "attendance": "present", "reacted": false, "agreed": true});
+        regrade(&mut old);
+        assert_eq!(old[AGREED.canonical], true);
+        assert_eq!(old[BASELINE_AGREED.canonical], false);
+
+        // Away and turned to, marked under the old rule: no mark now.
+        let mut away = json!({"label": "3@30", "call": NOTIFY_BATCH,
+            "attendance": "away", "reacted": true, "agreed": false});
+        regrade(&mut away);
+        assert!(away.get(AGREED.canonical).is_none());
+        assert!(away.get(BASELINE_AGREED.canonical).is_none());
+        assert_eq!(away[NOT_COMPARED.canonical], "away");
+
+        // A row whose facts do not say a mark is left as written: a restart's
+        // unknown reaction, a request row, a label naming a call no longer
+        // offered.
+        for untouched in [
+            json!({"label": "3@40", "reacted": null}),
+            json!({"notify": "3@50", "call": NOTIFY_BATCH, "attendance": "present"}),
+            json!({"label": "3@60", "call": "snooze", "attendance": "present",
+                "reacted": false, "agreed": true}),
+        ] {
+            let mut row = untouched.clone();
+            regrade(&mut row);
+            assert_eq!(row, untouched);
         }
     }
 }

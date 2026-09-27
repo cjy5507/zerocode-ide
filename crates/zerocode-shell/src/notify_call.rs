@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use zerocode_core::jev::summary::{AGREED, APPLIED, BASELINE_AGREED, LABEL, NOT_COMPARED};
+use zerocode_core::jev::summary::{APPLIED, LABEL};
 use zerocode_core::jev::{JevMode, NOTIFY, NOTIFY_APPLY_DEADLINE_MS, NOTIFY_RECENT_CAP};
 use zerocode_core::notify::{self, Notice, Ring};
 use zerocode_core::notify_call::{
@@ -242,29 +242,28 @@ impl NotifyBook {
 
 /// The label row for one waiting row: the person's reaction, how long after
 /// the ring, the attendance the ring was judged under, and the mark — when
-/// the rule leaves one, and why not when it leaves none (t-9427).
+/// the rule leaves one, and why not when it leaves none (t-9427) — written
+/// by the one function a reader marks an older row again with
+/// ([`notify_call::grade`], t-11010).
 fn label_row(one: &Waiting, reacted: bool, now_ms: i64) -> Value {
     let mut label = json!({
         "at": now_ms,
         (LABEL.canonical): one.key,
         "term": one.term,
         "askedMs": one.asked_ms,
-        "call": one.call.word(),
-        "attendance": one.attendance.word(),
-        "reacted": reacted,
         "afterMs": now_ms.saturating_sub(one.asked_ms),
     });
-    match notify_call::agreed(one.call, reacted, one.attendance) {
-        Ok(agreed) => {
-            label[AGREED.canonical] = json!(agreed);
-            // Today's rule on the same ring: the seat's baseline (t-6342).
-            if let Ok(baseline) = notify_call::agreed(Call::today(), reacted, one.attendance) {
-                label[BASELINE_AGREED.canonical] = json!(baseline);
-            }
-        }
-        Err(why) => label[NOT_COMPARED.canonical] = json!(why),
-    }
+    notify_call::grade(&mut label, one.call, one.attendance, reacted);
     label
+}
+
+/// Whether the bell takes the seat's call for a ring the person is at
+/// `attendance` for: the seat acts (`applies`), and the ring is one its
+/// label grades both ways ([`notify_call::acts_under`], t-11010). A ring
+/// the person is away from rings today's way at once, whatever the seat
+/// stands at — nothing ever said the seat is right there.
+pub(crate) fn takes_the_call(applies: bool, attendance: Attendance) -> bool {
+    applies && notify_call::acts_under(attendance)
 }
 
 /// One question on its way: the ring, the switch it was asked under, when,
@@ -408,6 +407,7 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
         state
             .notify_book()
             .look_at(term, bell.ring, bell.interrupted, bell.focused, now_ms);
+    let applies = takes_the_call(applies, context.attendance);
     let pane = crate::pane_runtime::place_of(bell.worktree);
     let look = NotifyLook {
         ring: bell.ring,
