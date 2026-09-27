@@ -184,6 +184,17 @@ pub fn load(path: &Path, now_ms: i64) -> Result<Hydrated, String> {
         entry.session_boundary =
             zerocode_core::hook::done_provenance(entry.state, entry.session_boundary);
         entry.interrupted = zerocode_core::hook::done_provenance(entry.state, entry.interrupted);
+        // 붙여 넣은 글의 틀(`<pasted_content …>`)은 제목이 아니다(t-10993) — 새
+        // 소식은 프롬프트 길이 이미 걷어 오고, 옛 빌드가 적은 줄은 여기서 걷는다.
+        entry.you = entry
+            .you
+            .as_deref()
+            .map(|you| {
+                zerocode_core::transcript::without_pasted_frames(you)
+                    .trim()
+                    .to_string()
+            })
+            .filter(|you| !you.is_empty());
         entries.insert(key, entry);
     }
     Ok(Hydrated {
@@ -491,6 +502,32 @@ mod tests {
             a_status(1_000).state,
             "a settled state was touched by the demotion"
         );
+    }
+
+    /// 옛 빌드가 적은 프롬프트의 붙여 넣기 틀은 되읽을 때 걷힌다(t-10993) —
+    /// 끝난 워커의 사이드바 줄이 `<pasted_content id="8a76"> You are a worke…`로
+    /// 섰던 그 줄이다. 틀만 남은 프롬프트는 없는 프롬프트다.
+    #[test]
+    fn a_pasted_frame_in_a_remembered_prompt_is_shed_at_hydrate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("last-status.json");
+        let mut framed = a_status(1_000);
+        framed.you = Some("<pasted_content id=\"8a76\"> You are a worke…".into());
+        let mut bare = a_status(1_000);
+        bare.you = Some("<pasted_content id=\"8a76\">".into());
+        let mut entries = HashMap::new();
+        entries.insert(key("wt-1", 1), framed);
+        entries.insert(key("wt-1", 2), bare);
+        entries.insert(key("wt-1", 3), a_status(1_000));
+        save(&path, &entries, None).expect("save");
+
+        let loaded = load(&path, 2_000).expect("load").entries;
+        assert_eq!(
+            loaded[&key("wt-1", 1)].you.as_deref(),
+            Some("You are a worke…")
+        );
+        assert_eq!(loaded[&key("wt-1", 2)].you, None);
+        assert_eq!(loaded[&key("wt-1", 3)].you, a_status(1_000).you);
     }
 
     /// 판 번호 하나는 행을 지목하지 못한다 — 자리(열쇠 전체)만이 지목한다.

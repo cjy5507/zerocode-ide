@@ -91,10 +91,14 @@ function refreshDeskLedger() {
     .then(([answer, agents]) => {
       const said = JSON.stringify([answer ?? null, agents ?? []]);
       if (said === deskLedgerSaid) return;
-      const fresh = deskAgents.length === 0 && Array.isArray(agents) && agents.length > 0;
+      // The roster is the workers still summoned (`worker-list`): a row the
+      // ledger keeps only for the finished work in its checkout (`settled`,
+      // t-10993) is on the board as that work, not here as a worker.
+      const summoned = Array.isArray(agents) ? agents.filter((row) => row?.settled !== true) : [];
+      const fresh = deskAgents.length === 0 && summoned.length > 0;
       deskLedgerSaid = said;
       deskLedger = answer && typeof answer === "object" ? answer : null;
-      deskAgents = Array.isArray(agents) ? agents : [];
+      deskAgents = summoned;
       if (fresh) askDeskCheckouts();
       scheduleDeskPaint();
     })
@@ -828,7 +832,7 @@ function paintDeskWorkers(block, now, view) {
     const at = deskWorkerAt(row, card);
     writeTextContent(node.querySelector(".board-desk-worker-age"), at > 0
       ? t("board.desk.mailAge", "{{time}} 전", { time: agoWord(at, now) }) : "");
-    const review = ledgerReviewWord({ reported: row.reported, review: row.review });
+    const review = ledgerReviewWord(row);
     writeTextContent(node.querySelector(".board-desk-worker-task"),
       [row.task || row.task_id, review].filter(Boolean).join(" · "));
     writeTextContent(node.querySelector(".board-desk-worker-facts"), deskWorkerFacts(row, now));

@@ -19014,6 +19014,146 @@ fn relation_rows_keep_a_closed_attempts_identity_while_its_worker_is_still_summo
     );
 }
 
+/* ---- t-10993: 끝난 작업은 끝났다고 보인다 ----------------------------------
+ *
+ * 2026-09-27 14:0x 설치본 1.1.33: 워커 둘이 `worker_done`(ok)을 보냈고, 창은 그
+ * 판을 곧바로 은퇴시켰고, 원장은 워커를 `released`로 적었다. `ledger_agents`는
+ * released 행을 빼므로 사이드바는 과업 제목·「검증 대기」 대신 브랜치 이름과 붙여
+ * 넣은 프롬프트의 틀을 그렸고, 작업 상황판에서는 카드가 칸을 옮기는 대신 사라졌다.
+ * 그 작업은 아직 체크아웃에 서 있고, 코디의 검토를 기다린다. */
+
+/// A worker the ledger released after it FINISHED is still listed while its
+/// work stands in a checkout nobody else holds, in a run still in play — with
+/// its task, its report, whether the report was a failure, what the
+/// coordinator wrote, and the conversation it ran in. It has no seat (its
+/// pane is gone), and says so: `settled`, so the roster of summoned workers
+/// can leave it out.
+#[test]
+fn a_finished_worker_is_listed_while_its_checkout_stands() {
+    use zerocode_core::orchestration::{Ledger, MessageKind, WorkerState, worker_address};
+    let standing = tempfile::tempdir().expect("the finished worker's checkout");
+    let standing = standing.path().to_string_lossy().into_owned();
+    let failing = tempfile::tempdir().expect("the failed worker's checkout");
+    let failing = failing.path().to_string_lossy().into_owned();
+    let reclaimed = format!("{standing}-reclaimed");
+    let history = tempfile::tempdir().expect("a finished run's checkout");
+    let history = history.path().to_string_lossy().into_owned();
+
+    let mut ledger = Ledger::new();
+    let finish = |ledger: &mut Ledger, run: &str, pane: &str, checkout: &str, ok: bool, at: i64| {
+        let task = ledger
+            .create_task(run, "do".into(), format!("task {pane}"), vec![], None, at)
+            .unwrap();
+        let worker = ledger
+            .start_worker(run, "claude", ("team", pane), Some(&task), at + 1)
+            .unwrap()
+            .worker;
+        assert!(ledger.worker_seated(("team", pane), checkout));
+        assert!(ledger.worker_session_reported(
+            ("team", pane),
+            zerocode_core::ProviderSession {
+                key: zerocode_core::provider_session::SessionKey::SessionId,
+                id: format!("s{pane}"),
+                transcript_path: None,
+            },
+        ));
+        let dispatch = ledger
+            .run(run)
+            .unwrap()
+            .worker(&worker)
+            .unwrap()
+            .dispatch
+            .clone();
+        ledger
+            .send(
+                run,
+                zerocode_core::orchestration::Message {
+                    dispatch,
+                    task: Some(task.clone()),
+                    ..relation_test_message(
+                        &worker_address(&worker),
+                        &format!("run:{run}"),
+                        MessageKind::WorkerDone,
+                        &format!("{{\"ok\":{ok}}}"),
+                        at + 2,
+                    )
+                },
+            )
+            .unwrap();
+        ledger.begin_release(&worker).unwrap();
+        assert_eq!(ledger.finish_release(&worker, None), WorkerState::Released);
+        (task, worker)
+    };
+
+    let run = ledger.create_run("finished work", 1);
+    // Somebody still works for this run: it is in play.
+    let carrying = ledger
+        .create_task(&run, "do".into(), "still going".into(), vec![], None, 2)
+        .unwrap();
+    ledger
+        .start_worker(&run, "codex", ("team", "%9"), Some(&carrying), 3)
+        .unwrap();
+    let (done, done_worker) = finish(&mut ledger, &run, "%2", &standing, true, 10);
+    let (failed, _) = finish(&mut ledger, &run, "%3", &failing, false, 20);
+    let (gone, _) = finish(&mut ledger, &run, "%4", &reclaimed, true, 30);
+    // A run with nobody at it is history, as the desk reads it.
+    let old = ledger.create_run("history", 40);
+    let (past, _) = finish(&mut ledger, &old, "%5", &history, true, 41);
+
+    let seats = super::TeamSeatIndex::new();
+    let rows = super::ledger_agents_for_seats(&ledger, &seats);
+    let row = |task: &str| rows.iter().find(|row| row.task_id == task);
+    let finished = row(&done).expect("the finished worker is listed while its checkout stands");
+    assert_eq!(
+        (
+            finished.worker.as_str(),
+            finished.task.as_str(),
+            finished.reported,
+            finished.failed,
+            finished.settled,
+            finished.term,
+            finished.ledger.as_str(),
+            finished.session.as_deref(),
+            finished.at,
+        ),
+        (
+            done_worker.as_str(),
+            "task %2",
+            true,
+            false,
+            true,
+            None,
+            "released",
+            Some("s%2"),
+            12
+        ),
+        "{finished:?}"
+    );
+    let failure = row(&failed).expect("a failed report is listed too, as a failure");
+    assert!(
+        failure.reported && failure.failed && failure.settled,
+        "{failure:?}"
+    );
+    assert!(
+        row(&gone).is_none(),
+        "a checkout that is gone holds no work to show"
+    );
+    assert!(row(&past).is_none(), "a run nobody is at is history");
+    let live = row(&carrying).expect("the summoned worker");
+    assert!(!live.settled && !live.failed, "{live:?}");
+
+    // A newer summons in the same checkout speaks for it.
+    ledger
+        .start_worker(&run, "codex", ("team", "%6"), None, 50)
+        .unwrap();
+    assert!(ledger.worker_seated(("team", "%6"), &standing));
+    let rows = super::ledger_agents_for_seats(&ledger, &seats);
+    assert!(
+        !rows.iter().any(|row| row.task_id == done),
+        "a checkout somebody was summoned into again is theirs"
+    );
+}
+
 /* ---- worktree-evidence, through the door an agent uses ----------------- */
 
 /// A host that knows where it put one pane and does nothing else.

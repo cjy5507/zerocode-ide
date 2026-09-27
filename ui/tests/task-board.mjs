@@ -202,6 +202,84 @@ export async function testTaskBoard(browser, origin, ok) {
     ok("search expands history without overwriting the person's collapsed preference",
       await page.locator('details[data-task-section="idle"]').evaluate((node) => !node.open));
 
+    /* ---- 끝난 작업은 끝났다고 보인다 (t-10993) ----
+     * 워커가 worker_done(ok)을 보내고 판이 은퇴하면 원장은 워커를 released로 적는다.
+     * 체크아웃이 남은 동안 원장은 그 행을 `settled`로 들고 오고(판 없음), Rust의 칸
+     * 규칙은 은퇴한 워커의 카드를 끝남 칸에 세운다(`zerocode_core::board`, Rust에서
+     * 시험됨 — 여기서는 그 답을 그대로 준다). 과업 카드는 그 칸에서 원장의 단계
+     * 낱말을 말하고, 코디가 적으면 다음 읽기에 그 낱말로 옮긴다. 데스크의 워커
+     * 명부는 아직 소환 중인 워커만 센다. */
+    const finishedWork = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const now = Date.now();
+      const checkout = "/repos/zerocode-t-9471";
+      const finished = (review, extra = {}) => ({
+        run: "run-board", worker: "w-10923", agent: "claude", state: "waiting", ledger: "released",
+        hearing: "gone", hearing_at: now - 3_600_000, checkout, task: "H6 코디 우편 분류 좌석",
+        task_id: "t-9471", reported: true, failed: false, settled: true, session: "s-finished",
+        dispatch_id: "dp-10924", dispatch_started_ms: now - 3_600_000, retry_of: null,
+        review: { verified: false, merged: false, deployed: false, written: false, ...review },
+        term: null, at: now - 14 * 60_000, model: "opus", effort: "high", pane: "%5", asking: false,
+        wall: null, quiet_at: null, pane_missing_since_ms: null, cost: null, ...extra,
+      });
+      const summoned = {
+        ...finished({}), worker: "w-10994", task: "끝난 작업 표시", task_id: "t-10993",
+        reported: false, settled: false, session: null, dispatch_id: "dp-10995", state: "working",
+        ledger: "active", hearing: "pending", checkout: "/repos/zerocode-t-10993", pane: "%7",
+      };
+      const heldDesk = window.__ANSWER__.board_desk;
+      window.__ANSWER__.board_desk = () => null;
+      window.__PANES__ = [];
+      window.__COLUMNS__ = [
+        { bucket: "working", cards: [{ pane: "worker:w-10994", heading: "끝난 작업 표시", state: "working",
+          agent: "claude", project: "/repos/zerocode", worktree: "t-10993", task: "", ask: "", said: "",
+          you: "", parent: "", ledger: "active", at: now - 60_000, changed_at: now - 60_000, unseen: true }] },
+        { bucket: "done", cards: [{ pane: "worker:w-10923", heading: "H6 코디 우편 분류 좌석", state: "waiting",
+          agent: "claude", project: "/repos/zerocode", worktree: "t-9471", task: "", ask: "", said: "",
+          you: "", parent: "", ledger: "released", at: now - 14 * 60_000, changed_at: now - 14 * 60_000,
+          unseen: true }] },
+      ];
+      const read = async (row) => {
+        window.__LEDGER__ = [row, summoned];
+        while (ledgerAgentsPending) await ledgerAgentsPending.catch(() => {});
+        await paintBoardView(boardTab(), { force: true });
+        const card = [...view.querySelectorAll(".task-board-row")]
+          .find((one) => one.querySelector(".task-board-title")?.textContent === "H6 코디 우편 분류 좌석");
+        return {
+          section: card?.closest("[data-task-section]")?.dataset.taskSection ?? null,
+          word: card?.querySelector(".task-board-state-word")?.textContent ?? null,
+        };
+      };
+      const seen = {
+        awaiting: await read(finished({})),
+        verified: await read(finished({ verified: true })),
+        merged: await read(finished({ verified: true, merged: true })),
+        failed: await read(finished({}, { failed: true })),
+        claimed: await read(finished({ claimed_merged: true })),
+      };
+      refreshDeskLedger();
+      for (let tries = 0; tries < 40 && deskLedgerAsking; tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
+      seen.roster = deskAgents.map((row) => row.worker);
+      seen.words = {
+        awaiting: t("board.awaitingReview", "검증 대기"), verified: t("board.verified", "검증됨"),
+        merged: t("board.merged", "병합됨"), failed: t("board.desk.stageFailed", "실패"),
+        claimed: t("board.claimedMerged", "병합됐다 함"),
+      };
+      if (heldDesk) window.__ANSWER__.board_desk = heldDesk;
+      else delete window.__ANSWER__.board_desk;
+      return seen;
+    });
+    ok("a finished worker's task stands among the endings saying it awaits review, and moves when the coordinator writes",
+      ["awaiting", "verified", "merged", "failed"].every((stage) =>
+        finishedWork[stage].section === "done" && finishedWork[stage].word === finishedWork.words[stage]),
+      JSON.stringify(finishedWork));
+    ok("a worker's own claim never moves the card to a coordinator's word (t-6815)",
+      finishedWork.claimed.word === finishedWork.words.claimed, JSON.stringify(finishedWork.claimed));
+    ok("the desk's roster counts the workers still summoned, not the finished work kept for its checkout",
+      JSON.stringify(finishedWork.roster) === JSON.stringify(["w-10994"]), JSON.stringify(finishedWork.roster));
+
     // Screenshots tell the example's story, without the mutations used above.
     await page.evaluate(taskBoardFixture);
     await page.waitForFunction(() => document.querySelector(".task-board-message-text") !== null &&

@@ -798,8 +798,9 @@ async function testLiveMap(browser, origin, ok) {
        * 행을 seam이 그 줄의 낱말로 읽어야 하고, 지난 결과 사건이 「그 사실이 지금도
        * 서 있는가」를 물을 때(`agentGraphLiveStageHolds`) 그 행에서 참이어야 한다. */
       const misnamed = AGENT_GRAPH_LIVE_STAGES.filter((one) => {
-        const row = one.flag === "reported"
-          ? { reported: true, review: null }
+        // `reported`와 `failed`는 행의 칸이고(실패도 닫힌 보고다), 나머지는 검토의 칸이다.
+        const row = one.flag === "reported" || one.flag === "failed"
+          ? { reported: true, [one.flag]: true, review: null }
           : { reported: false, review: { [one.flag]: true } };
         return ledgerReviewWord(row) !== t(one.key, one.word)
           || !agentGraphLiveStageHolds(one.stage, null, row);

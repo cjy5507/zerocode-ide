@@ -1992,12 +1992,7 @@ pub(crate) mod tests {
             held_at_end: bool,
         }
         let pointer = |text: &str| -> bool {
-            let bare = text
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("<pasted_content"))
-                .filter(|line| !line.trim_start().starts_with("</pasted_content"))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let bare = zerocode_core::transcript::without_pasted_frames(text);
             (1..=64).any(|count| {
                 bare.trim() == zerocode_core::orchestration::pointer_text(count).trim()
             })

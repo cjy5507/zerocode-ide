@@ -199,7 +199,11 @@ pub(super) fn claude_session_title(head: &str) -> Option<String> {
                 .unwrap_or_default(),
             _ => String::new(),
         };
-        let folded = spoken.split_whitespace().collect::<Vec<_>>().join(" ");
+        // What was pasted is a person's words; the frame around it is not.
+        let folded = zerocode_core::transcript::without_pasted_frames(&spoken)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         if folded.is_empty() || folded.starts_with('<') {
             continue;
         }
