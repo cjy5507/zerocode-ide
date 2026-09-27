@@ -1493,6 +1493,29 @@ pub enum PaneOutcome {
 /// the same fact a few milliseconds sooner.
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// The time a wait for a child reads, and the rest it takes between looks.
+///
+/// The live wait reads the monotonic clock and sleeps; a test hands in a clock
+/// whose rest moves time on by as much as it likes, so an hour of waiting is
+/// sixty looks rather than an hour.
+pub trait WaitClock {
+    fn now(&self) -> std::time::Instant;
+    fn rest(&self, interval: std::time::Duration);
+}
+
+/// [`WaitClock`] on the process's own monotonic clock.
+pub struct SystemWaitClock;
+
+impl WaitClock for SystemWaitClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn rest(&self, interval: std::time::Duration) {
+        std::thread::sleep(interval);
+    }
+}
+
 /// Wait for one child, ending its pane if the parent's turn is cancelled.
 ///
 /// Every exit checks for a result FIRST. A child that wrote its answer in the
@@ -1526,7 +1549,22 @@ pub fn wait_for_turn_result(
     cancelled: &dyn Fn() -> bool,
     close: &dyn Fn(),
 ) -> PaneOutcome {
-    let started = std::time::Instant::now();
+    wait_for_turn_result_on(&SystemWaitClock, tmux, directory, pane, turn, budget, cancelled, close)
+}
+
+/// [`wait_for_turn_result`] on a clock of the caller's.
+#[allow(clippy::too_many_arguments)] // one wait, one table of ways it ends
+pub fn wait_for_turn_result_on(
+    clock: &dyn WaitClock,
+    tmux: &Tmux,
+    directory: &Path,
+    pane: &str,
+    turn: u32,
+    budget: std::time::Duration,
+    cancelled: &dyn Fn() -> bool,
+    close: &dyn Fn(),
+) -> PaneOutcome {
+    let started = clock.now();
     let answered = || {
         TeammateResult::read_turn(directory, turn)
             .map(|result| PaneOutcome::Finished(Box::new(result)))
@@ -1543,7 +1581,7 @@ pub fn wait_for_turn_result(
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::Cancelled);
         }
-        if started.elapsed() >= budget {
+        if clock.now().duration_since(started) >= budget {
             close();
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::TimedOut);
@@ -1552,7 +1590,7 @@ pub fn wait_for_turn_result(
             // The child may have written between the read above and this ask.
             return answered().unwrap_or(PaneOutcome::Vanished);
         }
-        std::thread::sleep(POLL_INTERVAL);
+        clock.rest(POLL_INTERVAL);
     }
 }
 
@@ -2341,6 +2379,87 @@ mod tests {
         assert!(tmux_log(directory.path())
             .iter()
             .any(|line| line == "kill-pane -t %9"));
+    }
+
+    /// A clock that stands still until the wait rests, and then moves on by
+    /// `step` — after which `on_rest` runs, the child's side of that step.
+    struct SteppedClock<'a> {
+        at: std::cell::Cell<std::time::Instant>,
+        step: Duration,
+        on_rest: &'a dyn Fn(Duration),
+        started: std::time::Instant,
+    }
+
+    impl<'a> SteppedClock<'a> {
+        fn new(step: Duration, on_rest: &'a dyn Fn(Duration)) -> Self {
+            let started = std::time::Instant::now();
+            Self {
+                at: std::cell::Cell::new(started),
+                step,
+                on_rest,
+                started,
+            }
+        }
+
+        fn elapsed(&self) -> Duration {
+            self.at.get().duration_since(self.started)
+        }
+    }
+
+    impl WaitClock for SteppedClock<'_> {
+        fn now(&self) -> std::time::Instant {
+            self.at.get()
+        }
+
+        fn rest(&self, _interval: Duration) {
+            self.at.set(self.at.get() + self.step);
+            (self.on_rest)(self.elapsed());
+        }
+    }
+
+    /// The child's transcript, named where a pane child names it, with one
+    /// more line of work on it.
+    fn work_on_transcript(child: &Path, line: &str) {
+        use std::io::Write as _;
+        let transcript = child.join("session.jsonl");
+        std::fs::write(child.join(TRANSCRIPT_FILE), transcript.display().to_string()).expect("name transcript");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&transcript)
+            .expect("open transcript");
+        writeln!(file, "{line}").expect("append transcript");
+    }
+
+    /// A child that keeps working — a line on its transcript every minute —
+    /// is waited for past the default budget, and its answer at minute 61 is
+    /// read as an answer (t-11458).
+    #[test]
+    fn a_child_still_working_past_the_default_budget_is_not_closed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-8");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let budget = Limits::default().pane_budget;
+        let answer_at = budget + Duration::from_secs(60);
+        let agent = |elapsed: Duration| {
+            work_on_transcript(&child, &format!(r#"{{"type":"tool_use","at":{}}}"#, elapsed.as_secs()));
+            if elapsed >= answer_at {
+                let mut result = TeammateResult::new("agent-8", Exit::Ok);
+                result.final_message = "done after an hour of work".to_string();
+                result.write(&child).expect("write result");
+            }
+        };
+        let clock = SteppedClock::new(Duration::from_secs(60), &agent);
+        let outcome = wait_for_turn_result_on(&clock, &tmux, &child, "%9", 1, budget, &|| false, &|| {});
+        match outcome {
+            PaneOutcome::Finished(result) => assert_eq!(result.final_message, "done after an hour of work"),
+            other => panic!("a child working every minute was ended at {:?}: {other:?}", clock.elapsed()),
+        }
+        assert!(
+            !tmux_log(directory.path()).iter().any(|line| line == "kill-pane -t %9"),
+            "a working child's pane was killed"
+        );
     }
 
     /// A tmux that cannot be asked is not evidence a child died.
