@@ -10684,6 +10684,10 @@ listen("hook:agent", (event) => {
   // 이어 가라는 말뿐인 프롬프트는 물은 것이지만 이름은 아니다(t-11540) —
   // 판정은 core의 한 표가 하고, 보고가 그 답을 싣는다.
   if (event.payload.prompt && !event.payload.prompt_names_nothing) panePrompts.set(term, event.payload.prompt);
+  // 번호 붙은 프롬프트는 제 기록이 「사람이 쳤다」고 말할 때까지 붙잡혀 있다가 그 판의
+  // 다음 이벤트에 `named`로 온다(t-11540) — 에이전트가 제 세션에 걸어 둔 주기 점검 글도
+  // 같은 훅을 울리기 때문이다.
+  if (event.payload.named) panePrompts.set(term, event.payload.named);
   if (event.payload.said) paneSaid.set(term, event.payload.said);
   // Which agent, for the pane header's continue button — the same fact the
   // backend's ledger holds, kept current here so the button never waits.
