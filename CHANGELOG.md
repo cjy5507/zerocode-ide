@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.1.35] — 2026-09-28
+
+_since v1.1.34 (10 commits)_
+
+### feat
+- feat(jev): the dashboard finds a pane's folder zo never ran in, and says a missing request in words every seat can wear
+- feat(jev): the claim and file pick seats are asked of every agent's panes, through the one layer
+
+### fix
+- fix(pane_guard): a claim question checks its seat is on before it reads a transcript (t-11349)
+
+### ui
+- ui(knowledge): zooming in names more of the map, and the rim's pages stop taking the overview's names
+
+### other
+- Merge branch 'wt/t-11349/jev-t-10916' (b79d5e98) — the completion claim and the file pick seats are asked of every agent in this window's panes, through the layer the two tool guards stand on: a person's prompt that is a code task asks the file pick of the window's own project search and the session's recent edits, and a turn that ends saying it is done or passing asks the claim check of what that turn's own calls returned; both are labelled as zo labels them (the files the turn edited, the person's next words), filed in the zo project ledger of the pane's folder with who asked, and judged in the one series. It records only: the hook's reply and the agent's work are untouched and no permission is decided. With all four seats off the hook loop reads nothing (p50 43 → 0 µs an envelope); the seats' modes are a snapshot the window's file watch refreshes when zo's settings change, and settings that cannot be read are off. Rows carry no words, only fingerprints and counts; a turn's evidence is scrubbed of credentials before it is kept, bounded, and dropped when the turn ends. zo's halves of both seats and the name zo gives a project's folder moved to core unchanged (move-only commits). The Jev tab counts both seats agent by agent and says why an agent cannot be seen (one that reports no prompt, in five languages). Measured: a replay over 13 agents was answered 22 of 22 and 16 of 16 (Jev p50 200 and 204 ms); the hook's round trip p50 15.48 → 15.90 ms. Coordinator gate on the whole landing (63863842): pii, fmt, lint of the workspace and of the window, doc, workspace test, shell bins and source contracts, tools, the window runner, the settings, window and knowledge harnesses, zo fmt, doc, clippy, test and e2e, and the Windows cross-checks of root and zo, all 0 but for what is named here. 1 unlisted test name(s) failed once in the parallel run, beside a release build, and passed alone three times each. They are judged as the lane judges them. (t-11349; coordinator review)
+- Merge branch 'wt/knowledge/label-zoom' (68e1adbf) — the knowledge graph names more of the map as a person zooms in, and its overview stops naming the crumbs: the label budget grows with the zoom, from the covering zoom (1.5, a token) a name may stand over another page's point where the painter draws names above every point (the GL painter; never over another name, a plate or a control), and below it the pages and ghosts of unnamed clusters on the rim spend none of the budget. Measured on WebKit, the engine the app runs on, with a vault of 843 pages: names at twice the zoom 18 → 59 and at four times 28 → 56, clusters with a name at 1.5 and at 2 of 17 from 9 and 11 to 17, names on the rim's crumbs in the overview 9 → 0, no page error; the SVG painter, whose names sit under later points, keeps avoiding points. Written by a person's zo session and landed by the coordinator at the person's word. Coordinator gate on the whole landing (63863842): pii, fmt, lint of the workspace and of the window, doc, workspace test, shell bins and source contracts, tools, the window runner, the settings, window and knowledge harnesses, zo fmt, doc, clippy, test and e2e, and the Windows cross-checks of root and zo, all 0 but for what is named here. 1 unlisted test name(s) failed once in the parallel run, beside a release build, and passed alone three times each. They are judged as the lane judges them. (t-11493; coordinator review)
+
 ## [1.1.34] — 2026-09-28
 
 _since v1.1.33 (53 commits)_
