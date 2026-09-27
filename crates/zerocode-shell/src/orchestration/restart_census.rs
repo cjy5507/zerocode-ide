@@ -53,8 +53,12 @@ pub(crate) enum Turn {
     /// turn is the person's to answer, not the restart's to cut, so its wake
     /// is never told to go on (t-7812 E).
     Asking,
-    /// Ended, however it ended: the agent is not in a turn.
+    /// Ended on its own: the agent is not in a turn.
     Rest,
+    /// Ended under a person's hand — the pane is theirs until their next
+    /// finished turn, and a door that types unasked stays shut at it
+    /// ([`super::composer_at_rest`]). Not in a turn either.
+    Interrupted,
     /// Nothing heard from the pane since this window began — an agent whose
     /// hooks never report, or a pane that has not reported yet.
     Unheard,
@@ -67,8 +71,20 @@ impl Turn {
         match heard {
             Some(PaneTurn::Running { .. }) if asking => Self::Asking,
             Some(PaneTurn::Running { .. }) => Self::Running,
-            Some(PaneTurn::Ended { .. }) => Self::Rest,
+            Some(PaneTurn::Ended { interrupted: false }) => Self::Rest,
+            Some(PaneTurn::Ended { interrupted: true }) => Self::Interrupted,
             None => Self::Unheard,
+        }
+    }
+
+    /// The turn as a goodbye's note keeps it for the wake (t-11548): how it
+    /// had ended, when it had — never a guess about a turn still going or a
+    /// pane never heard.
+    fn ended(self) -> Option<Ended> {
+        match self {
+            Self::Rest => Some(Ended { interrupted: false }),
+            Self::Interrupted => Some(Ended { interrupted: true }),
+            Self::Running | Self::Asking | Self::Unheard => None,
         }
     }
 
@@ -77,6 +93,7 @@ impl Turn {
             Self::Running => "running",
             Self::Asking => "asking",
             Self::Rest => "rest",
+            Self::Interrupted => "interrupted",
             Self::Unheard => "unheard",
         }
     }
@@ -95,10 +112,34 @@ pub(crate) struct WorkerCut {
     pub(crate) commands: Option<Vec<String>>,
 }
 
+/// One run's coordinator seated in this window — the run's live seat, at a
+/// pane this window's team table maps to a terminal (t-11537).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SeatedCoordinator {
+    /// The run's address, `run:<id>` — the key its entry in the goodbye's
+    /// note is filed under, beside the workers' ids.
+    pub(crate) address: String,
+    pub(crate) term: u32,
+}
+
+/// One run's coordinator, as the census found it: only its turn. What it
+/// was coordinating is the ledger's to say, at the wake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoordinatorCut {
+    pub(crate) address: String,
+    pub(crate) term: u32,
+    pub(crate) turn: Turn,
+}
+
 /// Every live worker seated in this window, read at one moment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RestartCensus {
     pub(crate) workers: Vec<WorkerCut>,
+    /// Every run's coordinator seated here (t-11537). Not counted in
+    /// [`Self::busy`]: the restart question is about work a restart cuts,
+    /// and a coordinator's pane is the person's conversation — its wake reads
+    /// its entry, and nothing asks the person about it.
+    pub(crate) coordinators: Vec<CoordinatorCut>,
     /// What the reading cost, for the goodbye's line.
     pub(crate) took_ms: u64,
 }
@@ -150,8 +191,10 @@ impl RestartCensus {
         for one in &self.workers {
             match (one.turn, &one.commands) {
                 (Turn::Running | Turn::Asking, _) => said.turning += 1,
-                (Turn::Unheard, _) | (Turn::Rest, None) => said.unknown += 1,
-                (Turn::Rest, Some(commands)) => said.background += commands.len(),
+                (Turn::Unheard, _) | (Turn::Rest | Turn::Interrupted, None) => said.unknown += 1,
+                (Turn::Rest | Turn::Interrupted, Some(commands)) => {
+                    said.background += commands.len();
+                }
             }
             said.running += one.commands.as_ref().map_or(0, Vec::len);
         }
@@ -165,23 +208,30 @@ impl RestartCensus {
 
 /// Read the census. `root_of` answers the process at the root of a terminal
 /// (the window's pty table); `table` reads the host's process table, once,
-/// and only when some worker is seated here at all.
+/// and only when some worker is seated here at all. Every run's coordinator
+/// seated here is read beside them, by its turn alone (t-11537).
 pub(crate) fn take(
     root_of: &dyn Fn(u32) -> Option<u32>,
     table: &dyn Fn() -> Result<ProcessSample, String>,
 ) -> RestartCensus {
     let started = Instant::now();
     let seated = super::seated_live_workers();
-    if seated.is_empty() {
+    let coordinators = super::seated_coordinators();
+    if seated.is_empty() && coordinators.is_empty() {
         return RestartCensus::default();
     }
+    let terms: std::collections::HashSet<u32> = seated
+        .iter()
+        .map(|one| one.term)
+        .chain(coordinators.iter().map(|one| one.term))
+        .collect();
     let turns: HashMap<u32, PaneTurn> = {
         let held = super::pane_turns()
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        seated
+        terms
             .iter()
-            .filter_map(|one| held.get(&one.term).map(|turn| (one.term, *turn)))
+            .filter_map(|term| held.get(term).map(|turn| (*term, *turn)))
             .collect()
     };
     // The panes whose last report was a question for the person: the same
@@ -190,13 +240,14 @@ pub(crate) fn take(
         let held = super::pane_attention()
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        seated
+        terms
             .iter()
-            .filter(|one| matches!(held.get(&one.term), Some(Some(_))))
-            .map(|one| one.term)
+            .filter(|term| matches!(held.get(*term), Some(Some(_))))
+            .copied()
             .collect()
     };
-    let sample = table().ok();
+    let turn_of = |term: u32| Turn::of(turns.get(&term).copied(), asking.contains(&term));
+    let sample = (!seated.is_empty()).then(table).and_then(Result::ok);
     let workers = seated
         .into_iter()
         .map(|one| {
@@ -210,7 +261,7 @@ pub(crate) fn take(
                         .collect()
                 });
             WorkerCut {
-                turn: Turn::of(turns.get(&one.term).copied(), asking.contains(&one.term)),
+                turn: turn_of(one.term),
                 commands,
                 worker: one.worker,
                 agent: one.agent,
@@ -218,8 +269,17 @@ pub(crate) fn take(
             }
         })
         .collect();
+    let coordinators = coordinators
+        .into_iter()
+        .map(|one| CoordinatorCut {
+            turn: turn_of(one.term),
+            address: one.address,
+            term: one.term,
+        })
+        .collect();
     RestartCensus {
         workers,
+        coordinators,
         took_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     }
 }
@@ -380,12 +440,49 @@ pub(crate) struct Cut {
     /// happened. Owed, read and spent like any other word in this note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) switched: Option<String>,
+    /// The pane's last turn had ENDED when the window went, with nothing
+    /// cut under it (t-11548) — what the window's turn map held for it
+    /// ([`PaneTurn::Ended`]), kept for the wake: a pane resumed into the
+    /// same conversation is at the same rest, and the next window has heard
+    /// nothing from it yet. Owes no words ([`Self::any`]); a wake that seats
+    /// the pane writes the rest back down, and spends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ended: Option<Ended>,
+}
+
+/// How a turn had ended, as the note keeps it — [`PaneTurn::Ended`] on disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Ended {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) interrupted: bool,
+}
+
+impl Ended {
+    /// The turn map's own value for it.
+    pub(super) const fn turn(self) -> PaneTurn {
+        PaneTurn::Ended {
+            interrupted: self.interrupted,
+        }
+    }
 }
 
 impl Cut {
     /// Whether this note owes the worker's wake anything at all.
     pub(crate) fn any(&self) -> bool {
         self.turn || !self.commands.is_empty() || self.switched.is_some()
+    }
+
+    /// Whether this note says anything at all: words owed, or a rest to
+    /// write back down (t-11548).
+    pub(crate) fn kept(&self) -> bool {
+        self.any() || self.ended.is_some()
+    }
+
+    /// The rest a wake writes back down for the pane: only where no words
+    /// are owed — a continuation starts a turn, and the turn is the words'
+    /// to speak for.
+    pub(super) fn rest(&self) -> Option<PaneTurn> {
+        (!self.any()).then_some(self.ended?.turn())
     }
 }
 
@@ -404,9 +501,8 @@ impl From<CutEntry> for Cut {
         match entry {
             CutEntry::Cut(cut) => cut,
             CutEntry::Commands(commands) => Cut {
-                turn: false,
                 commands,
-                switched: None,
+                ..Cut::default()
             },
         }
     }
@@ -424,8 +520,10 @@ fn cut_book() -> &'static Mutex<CutBook> {
 
 /// Leave what the goodbye cut for each worker's wake: the workers whose turn
 /// was under way (t-7812 E) and the ones with commands running under their
-/// panes (t-6428 ⑤), as the window went. A goodbye that cut nothing leaves
-/// no file.
+/// panes (t-6428 ⑤), as the window went — and the rest of those it cut
+/// nothing of (t-11548). Each run's coordinator seated here is written down
+/// the same way under its run's address (t-11537): its turn cut, or its
+/// rest. A goodbye with nothing to say leaves no file.
 ///
 /// An earlier goodbye's word is stale for every worker this one read. For a
 /// worker it did not read that is still `asleep` — no road brought it back
@@ -442,16 +540,28 @@ pub(crate) fn leave_cut(
         .workers
         .iter()
         .map(|one| {
+            let commands = one.commands.clone().unwrap_or_default();
             (
                 one.worker.clone(),
                 Cut {
                     turn: one.turn == Turn::Running,
-                    commands: one.commands.clone().unwrap_or_default(),
+                    ended: one.turn.ended().filter(|_| commands.is_empty()),
+                    commands,
                     switched: None,
                 },
             )
         })
-        .filter(|(_, cut)| cut.any())
+        .chain(census.coordinators.iter().map(|one| {
+            (
+                one.address.clone(),
+                Cut {
+                    turn: one.turn == Turn::Running,
+                    ended: one.turn.ended(),
+                    ..Cut::default()
+                },
+            )
+        }))
+        .filter(|(_, cut)| cut.kept())
         .collect();
     let path = root.join(CUT_FILE);
     // What this process's book still holds for this root, and a note on disk
@@ -470,7 +580,7 @@ pub(crate) fn leave_cut(
         .map(|one| one.worker.as_str())
         .collect();
     for (worker, owed) in unsaid {
-        if owed.any() && !read.contains(worker.as_str()) && asleep(&worker) {
+        if owed.kept() && !read.contains(worker.as_str()) && asleep(&worker) {
             cut.entry(worker).or_insert(owed);
         }
     }
@@ -598,6 +708,14 @@ pub(crate) fn goodbye_lines(road: &str, choice: &str, census: &RestartCensus) ->
             one.turn.word()
         ));
     }
+    for one in &census.coordinators {
+        lines.push(format!(
+            "exit: coordinator of {} on terminal {} · turn {}",
+            one.address,
+            one.term,
+            one.turn.word()
+        ));
+    }
     lines
 }
 
@@ -620,6 +738,7 @@ mod tests {
         let census = |workers: Vec<WorkerCut>| {
             RestartCensus {
                 workers,
+                coordinators: Vec::new(),
                 took_ms: 0,
             }
             .busy()
@@ -650,6 +769,7 @@ mod tests {
         let census = |workers: Vec<WorkerCut>| {
             RestartCensus {
                 workers,
+                coordinators: Vec::new(),
                 took_ms: 0,
             }
             .busy()
@@ -692,6 +812,7 @@ mod tests {
                 named("w-2", Some(&[])),
                 named("w-3", None),
             ],
+            coordinators: Vec::new(),
             took_ms: 0,
         };
         leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye leaves its note");
@@ -713,6 +834,7 @@ mod tests {
             later.path(),
             &RestartCensus {
                 workers: vec![named("w-4", Some(&[]))],
+                coordinators: Vec::new(),
                 took_ms: 0,
             },
             &nobody_asleep,
@@ -740,6 +862,7 @@ mod tests {
                 named("w-idle", Turn::Rest, Some(&[])),
                 named("w-unheard", Turn::Unheard, None),
             ],
+            coordinators: Vec::new(),
             took_ms: 0,
         };
         leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye leaves its note");
@@ -797,6 +920,7 @@ mod tests {
                 worker: "w-asks".to_string(),
                 ..worker(Turn::Asking, Some(&[]))
             }],
+            coordinators: Vec::new(),
             took_ms: 0,
         };
         let busy = asking.busy();
@@ -813,6 +937,7 @@ mod tests {
                 worker: "w-asks".to_string(),
                 ..worker(Turn::Asking, Some(&["just gate"]))
             }],
+            coordinators: Vec::new(),
             took_ms: 0,
         };
         leave_cut(root.path(), &gate, &nobody_asleep).expect("the goodbye");
@@ -836,6 +961,163 @@ mod tests {
         );
     }
 
+    /// t-11548 and t-11537: the goodbye keeps what a wake needs beyond the
+    /// words it owes. A worker whose turn had ended with nothing under it is
+    /// kept at that rest — a person's hand kept as theirs — and owes no
+    /// words; one that owes words keeps no rest, the words' turn speaks for
+    /// it. Each run's coordinator is kept under its run's address, by its
+    /// turn: cut, or at rest. A question for the person and a pane never
+    /// heard are no reading at all.
+    #[test]
+    fn the_goodbye_keeps_a_rest_it_heard_and_each_coordinators_turn() {
+        let root = tempfile::tempdir().expect("a data root");
+        let named = |id: &str, turn: Turn, commands: Option<&[&str]>| WorkerCut {
+            worker: id.to_string(),
+            ..worker(turn, commands)
+        };
+        let coordinator = |run: &str, turn: Turn| CoordinatorCut {
+            address: format!("run:{run}"),
+            term: 7,
+            turn,
+        };
+        let census = RestartCensus {
+            workers: vec![
+                named("w-idle", Turn::Rest, Some(&[])),
+                named("w-held", Turn::Interrupted, Some(&[])),
+                named("w-gate", Turn::Rest, Some(&["just gate"])),
+                named("w-mid", Turn::Running, Some(&[])),
+            ],
+            coordinators: vec![
+                coordinator("run-rest", Turn::Rest),
+                coordinator("run-cut", Turn::Running),
+                coordinator("run-asks", Turn::Asking),
+                coordinator("run-unheard", Turn::Unheard),
+            ],
+            took_ms: 0,
+        };
+        leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye");
+        let idle = peek_cut(root.path(), "w-idle");
+        assert!(!idle.any(), "an idle worker was owed words");
+        assert!(matches!(
+            idle.rest(),
+            Some(PaneTurn::Ended { interrupted: false })
+        ));
+        assert!(matches!(
+            peek_cut(root.path(), "w-held").rest(),
+            Some(PaneTurn::Ended { interrupted: true })
+        ));
+        for owes in ["w-gate", "w-mid"] {
+            let cut = peek_cut(root.path(), owes);
+            assert!(
+                cut.any() && cut.ended.is_none() && cut.rest().is_none(),
+                "{owes}"
+            );
+        }
+        assert!(matches!(
+            peek_cut(root.path(), "run:run-rest").rest(),
+            Some(PaneTurn::Ended { .. })
+        ));
+        assert!(peek_cut(root.path(), "run:run-cut").turn);
+        for nothing in ["run:run-asks", "run:run-unheard"] {
+            assert!(!peek_cut(root.path(), nothing).kept(), "{nothing}");
+        }
+        // Spent once written back down, and never read again.
+        spend_cut(root.path(), "w-idle");
+        assert!(peek_cut(root.path(), "w-idle").rest().is_none());
+        let lines = goodbye_lines("close", "gap", &census);
+        assert!(
+            lines.contains(
+                &"exit: coordinator of run:run-cut on terminal 7 · turn running".to_string()
+            ),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(
+                &"exit: worker w-held on terminal 41 (claude) · turn interrupted · 0 command(s)"
+                    .to_string()
+            ),
+            "{lines:#?}"
+        );
+        assert_eq!(
+            Turn::of(Some(PaneTurn::Ended { interrupted: true }), false),
+            Turn::Interrupted
+        );
+    }
+
+    /// The note as the window before t-11548 read it: this entry without its
+    /// rest, and no coordinator — the shape the window at 4df01fcb decodes.
+    #[derive(Debug, serde::Deserialize)]
+    struct CutBeforeRest {
+        #[serde(default)]
+        turn: bool,
+        #[serde(default)]
+        commands: Vec<String>,
+        #[serde(default)]
+        switched: Option<String>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(untagged)]
+    enum EntryBeforeRest {
+        Cut(CutBeforeRest),
+        Commands(Vec<String>),
+    }
+
+    /// t-11548: a window crossing this upgrade reads the note either way. A
+    /// note the older window left — no rest, no coordinator — reads here as
+    /// the words it owes and no rest to write down. A note this window
+    /// leaves reads in the older one as the same words it always owed: a
+    /// rest is a field it skips, an entry that is only a rest owes it
+    /// nothing, and a run's address is a key no wake of its asks for.
+    #[test]
+    fn the_note_reads_across_the_upgrade_both_ways() {
+        let older = tempfile::tempdir().expect("an older window's data root");
+        std::fs::write(
+            older.path().join(CUT_FILE),
+            br#"{"w-mid":{"turn":true},"w-gate":["just gate"]}"#,
+        )
+        .expect("the older window's note");
+        let mid = peek_cut(older.path(), "w-mid");
+        assert!(mid.turn && mid.ended.is_none() && mid.rest().is_none());
+        let gate = peek_cut(older.path(), "w-gate");
+        assert_eq!(gate.commands, vec!["just gate".to_string()]);
+        assert!(gate.rest().is_none());
+
+        let newer = tempfile::tempdir().expect("this window's data root");
+        let census = RestartCensus {
+            workers: vec![
+                WorkerCut {
+                    worker: "w-mid".to_string(),
+                    ..worker(Turn::Running, Some(&[]))
+                },
+                WorkerCut {
+                    worker: "w-idle".to_string(),
+                    ..worker(Turn::Interrupted, Some(&[]))
+                },
+            ],
+            coordinators: vec![CoordinatorCut {
+                address: "run:run-1".to_string(),
+                term: 7,
+                turn: Turn::Rest,
+            }],
+            took_ms: 0,
+        };
+        leave_cut(newer.path(), &census, &nobody_asleep).expect("the goodbye");
+        let bytes = std::fs::read(newer.path().join(CUT_FILE)).expect("the note");
+        let read: HashMap<String, EntryBeforeRest> =
+            serde_json::from_slice(&bytes).expect("the older window reads the newer note");
+        let owed = |key: &str| match read.get(key) {
+            Some(EntryBeforeRest::Cut(cut)) => {
+                cut.turn || !cut.commands.is_empty() || cut.switched.is_some()
+            }
+            Some(EntryBeforeRest::Commands(commands)) => !commands.is_empty(),
+            None => false,
+        };
+        assert!(owed("w-mid"), "{read:?}");
+        assert!(!owed("w-idle"), "a rest read as words owed: {read:?}");
+        assert!(!owed("run:run-1"), "{read:?}");
+    }
+
     /// t-7812 R2: reading a worker's entry is not saying it. A wake that
     /// started nothing leaves it for the next road; only the wake that
     /// handed the words to a pane spends it, and then nobody reads it again.
@@ -854,6 +1136,7 @@ mod tests {
                     ..worker(Turn::Running, Some(&[]))
                 },
             ],
+            coordinators: Vec::new(),
             took_ms: 0,
         };
         leave_cut(root.path(), &census, &nobody_asleep).expect("the goodbye");
@@ -895,6 +1178,7 @@ mod tests {
                     named("w-asleep-1", Turn::Running, Some(&[])),
                     named("w-back", Turn::Running, Some(&[])),
                 ],
+                coordinators: Vec::new(),
                 took_ms: 0,
             },
             &asleep,
@@ -907,6 +1191,7 @@ mod tests {
             root.path(),
             &RestartCensus {
                 workers: vec![named("w-live", Turn::Rest, Some(&["just gate"]))],
+                coordinators: Vec::new(),
                 took_ms: 0,
             },
             &asleep,
@@ -937,6 +1222,7 @@ mod tests {
                     named("w-back-2", Turn::Running, Some(&[])),
                     named("w-ended", Turn::Running, Some(&[])),
                 ],
+                coordinators: Vec::new(),
                 took_ms: 0,
             },
             &asleep,
@@ -948,6 +1234,7 @@ mod tests {
             unread.path(),
             &RestartCensus {
                 workers: vec![named("w-back-2", Turn::Rest, Some(&["just gate"]))],
+                coordinators: Vec::new(),
                 took_ms: 0,
             },
             &asleep,
@@ -1030,6 +1317,7 @@ mod tests {
                     commands: None,
                 },
             ],
+            coordinators: Vec::new(),
             took_ms: 38,
         };
         let lines = goodbye_lines("close", "gap", &census);

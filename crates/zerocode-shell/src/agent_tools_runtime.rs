@@ -734,6 +734,12 @@ impl agent_teams::Host for TeamWindow {
         receipt_actor_of(&self.app.state::<AppState>(), term)
     }
 
+    /// The wake's own table, which its receipt watch walks: a row stands
+    /// until the pane's `working` hook or the watch's give-up removes it.
+    fn wake_words_pending(&self, term: TermId) -> bool {
+        self.app.state::<AppState>().pending_nudges().holds(term)
+    }
+
     /// The launch this terminal is holding, straight from the window's own
     /// record. See [`agent_teams::Host::launch_token_of`] for why the pointer
     /// road is the one that has to ask.

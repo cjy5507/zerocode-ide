@@ -175,6 +175,60 @@ pub(super) fn worker_nudge(root: &Path, worker: &str, checkout: Option<&Path>) -
     Some(resume_nudge(cut.turn, true, state.as_ref(), &cut.commands))
 }
 
+/// What a coordinator whose run was still working is told on its way back
+/// up when the window did not cut its own turn (t-11537) — beside
+/// [`RESTART_NUDGE`], which says it for a turn the restart did cut.
+pub(super) const COORDINATOR_NUDGE: &str = "The window restarted while your run was still working.";
+
+/// What the restart took from a coordinator that no ledger row holds: the
+/// timers of its own session. A check it scheduled to come back to its mail
+/// lived in the CLI's memory and ended with the process.
+pub(super) const COORDINATOR_TIMERS_NUDGE: &str = "Any periodic check you had scheduled in this \
+session ended with the restart; set it again if you still need it, then carry on.";
+
+/// The words a resumed coordinator's wake carries, or none (t-11537) — one
+/// line, built like a worker's ([`resume_nudge`]) and placed by the same
+/// road ([`place_words`]).
+///
+/// Only a run that was working: the coordinator's own turn cut, a worker
+/// still carrying a dispatch, or a task dispatched. A coordinator whose
+/// run stood idle is not told to go on — its last turn ended, and the
+/// window restarting is not the person asking for more. Nor one whose last
+/// turn a person's hand ended: that pane is theirs. The counts are the
+/// ledger's, and the mail is named the way the pointer names it.
+pub(super) fn coordinator_nudge(
+    standing: &crate::orchestration::CoordinatorStanding,
+) -> Option<String> {
+    let cut = &standing.cut;
+    if cut.ended.is_some_and(|ended| ended.interrupted) {
+        return None;
+    }
+    if !cut.turn && standing.workers == 0 && standing.dispatched == 0 {
+        return None;
+    }
+    let mut parts = vec![
+        if cut.turn {
+            RESTART_NUDGE
+        } else {
+            COORDINATOR_NUDGE
+        }
+        .to_string(),
+        format!(
+            "{} has {} worker(s) carrying a dispatch and {} task(s) dispatched.",
+            standing.address, standing.workers, standing.dispatched
+        ),
+    ];
+    if standing.unread > 0 {
+        parts.push(
+            zerocode_core::orchestration::pointer_text(standing.unread)
+                .trim()
+                .to_string(),
+        );
+    }
+    parts.push(COORDINATOR_TIMERS_NUDGE.to_string());
+    Some(parts.join(" "))
+}
+
 /// `worker`'s words were handed to a pane that holds it (t-7812 R2): they
 /// reached it, or may have — and words that may have landed are never said
 /// a second time. The goodbye's word about that worker is spent.
@@ -183,8 +237,9 @@ pub(super) fn nudge_spent(root: &Path, worker: &str) {
 }
 
 /// The goodbye's word a wake's words came from: the data root its note lives
-/// in and the worker it was about, so the words are spent exactly when they
-/// may have reached the pane (t-7812 R2).
+/// in and the worker it was about — or, for a coordinator's wake, its run's
+/// address (t-11537) — so the words are spent exactly when they may have
+/// reached the pane (t-7812 R2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Owed {
     pub(super) root: PathBuf,
@@ -1046,6 +1101,7 @@ mod tests {
                 .into_iter()
                 .map(cut)
                 .collect(),
+                coordinators: Vec::new(),
                 took_ms: 0,
             },
             &|_| false,
@@ -1132,6 +1188,7 @@ mod tests {
                         commands: Some(Vec::new()),
                     })
                     .collect(),
+                coordinators: Vec::new(),
                 took_ms: 0,
             },
             &|_| false,

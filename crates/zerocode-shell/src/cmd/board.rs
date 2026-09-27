@@ -1197,6 +1197,22 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     let nudge = reseating.as_deref().and_then(|worker| {
         restart_nudge_runtime::worker_nudge(&data_root, worker, Some(root.as_path()))
     });
+    // A coordinator's conversation is a person's tab, and still owed a word
+    // when its run was working as the window went (t-11537): no pane types
+    // to it unasked, no worker's check wakes it, and the timers it had set
+    // in its own session died with the process — a run whose coordinator
+    // came back silent waited on the person to say anything at all. The
+    // goodbye wrote the coordinator's pane down under its run; the ledger
+    // says what the run holds now. The words ride the worker's road below,
+    // owed and spent the same way.
+    let coordinating = (reseating.is_none() && !fresh)
+        .then(|| crate::orchestration::coordinator_awaiting(&data_root, agent, &session))
+        .flatten();
+    let nudge = nudge.or_else(|| {
+        coordinating
+            .as_ref()
+            .and_then(restart_nudge_runtime::coordinator_nudge)
+    });
     // And a sleeper's conversation comes back as the launch the ledger would
     // have cut (t-7812 B): its model, its effort, its peer name. The pane the
     // 2026-09-25 restart reopened without them was a default-model CLI that
@@ -1293,7 +1309,10 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     };
     let resumed_session_id = session.id.clone();
     window.record(term, session);
-    match (reseating, nudge) {
+    // Whose word in the goodbye's note this wake speaks for: the sleeper's,
+    // or the coordinator's run's.
+    let owed = reseating.or_else(|| coordinating.map(|standing| standing.address));
+    match (owed, nudge) {
         (Some(worker), Some(words)) => {
             let road = agent_spec(kind.slug())
                 .map_or(zerocode_core::NudgeRoad::Composer, |spec| spec.resume_nudge);
@@ -1313,13 +1332,20 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
             );
             window.arm(term, pending, delivery);
         }
-        _ => window.note(&restart_nudge_runtime::log_line(
-            term,
-            kind.slug(),
-            &resumed_session_id,
-            None,
-            None,
-        )),
+        (owed, _) => {
+            // Nothing to say: a pane the goodbye saw at rest is at that rest
+            // again, and its mail can be pointed at (t-11548).
+            if let Some(key) = owed {
+                crate::orchestration::resumed_at_rest(&data_root, term, &key);
+            }
+            window.note(&restart_nudge_runtime::log_line(
+                term,
+                kind.slug(),
+                &resumed_session_id,
+                None,
+                None,
+            ));
+        }
     }
     window.attach(term, channel);
     window.stir();

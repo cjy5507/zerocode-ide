@@ -91,6 +91,8 @@ fn logged(needle: &str) -> usize {
 /// `Delivered` once the script for that pane runs out — and written down.
 struct Beat<'a> {
     inner: &'a Restoring,
+    /// The door whose wakes' receipts this window is waiting on, if any.
+    waking: Option<&'a Door>,
     script: Mutex<HashMap<u32, VecDeque<DeliveryOutcome>>>,
     pointed: Mutex<Vec<(u32, String, DeliveryOutcome)>>,
 }
@@ -99,8 +101,17 @@ impl<'a> Beat<'a> {
     fn new(inner: &'a Restoring) -> Self {
         Self {
             inner,
+            waking: None,
             script: Mutex::new(HashMap::new()),
             pointed: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The same window, whose wakes through `door` wait on their receipts.
+    fn waking(inner: &'a Restoring, door: &'a Door) -> Self {
+        Self {
+            waking: Some(door),
+            ..Self::new(inner)
         }
     }
 
@@ -190,6 +201,10 @@ impl Host for Beat<'_> {
     }
     fn actor_for(&self, term: u32) -> Option<String> {
         self.inner.actor_for(term)
+    }
+    fn wake_words_pending(&self, term: u32) -> bool {
+        self.waking
+            .is_some_and(|door| crate::restart_nudge_runtime::WakeReceipts::rows(door).holds(term))
     }
 }
 
@@ -472,6 +487,123 @@ fn a_worker_cut_mid_turn_hears_its_continuation_and_no_pointer_beside_it() {
     assert_eq!(beat.pointed_at(DOOR), (1, 1));
     for term in [DOOR, NEW_LEADER] {
         crate::agent_teams::forget_term(term);
+    }
+}
+
+/// t-11537, the breath between a resumed Claude's two reports: its
+/// `SessionStart` lands as the idle boundary it is, and the prompt its argv
+/// carried begins the continued turn a moment later. A pointer typed in
+/// that breath is a second line behind the continuation — the coordinator
+/// told its run's mail twice. The wake's words own the composer until the
+/// pane is heard taking them; then the ordinary road speaks, once, when the
+/// continued turn is over.
+#[test]
+fn a_pointer_waits_until_the_pane_has_taken_its_continuation() {
+    const OLD_LEADER: u32 = 1_153_780;
+    const WORKER: u32 = 1_153_781;
+    const DOOR: u32 = 1_153_786;
+    const NEW_LEADER: u32 = 1_153_790;
+    let (_window, _store) = PrivateWindow::boot();
+    let _beat = one_beat_at_a_time();
+    a_pointer_that_has_said_nothing();
+    let checkout = tempfile::tempdir().expect("the worker's checkout");
+    let host = Restoring::new(
+        checkout.path(),
+        WORKER,
+        (NEW_LEADER, test_actor(OLD_LEADER)),
+    );
+    let (team, _run) = a_run(&host, OLD_LEADER, "breath");
+    let session = "11537b0c-0000-4000-8000-000000000786";
+    let (_, worker, term) = a_worker(&host, &team, "--agent claude", Some(session));
+    super::super::pane_turn_began(term, clock());
+    the_window_goes(&census_without_commands, &[term]);
+    the_next_boot(OLD_LEADER);
+    host.cut.lock().unwrap().clear();
+    let door = Door::new(checkout.path());
+    door.wake(DOOR, "claude", session).expect("the wake");
+    assert_eq!(
+        door.started()[0].1.matches(crate::RESTART_NUDGE).count(),
+        1,
+        "the continuation did not ride the launch"
+    );
+    coordinator_back(&host, "breath", OLD_LEADER, NEW_LEADER);
+    a_status_to(&host, &back_team("breath", NEW_LEADER), &worker);
+
+    let beat = Beat::waking(&host, &door);
+    // The boundary: a rest, heard before the argv's prompt is.
+    super::super::pane_turn_ended(DOOR, clock(), false, clock());
+    beat.beats(2);
+    assert_eq!(
+        beat.pointed_at(DOOR),
+        (0, 0),
+        "a pointer was typed while the continuation waited for its pane"
+    );
+    // The pane takes the prompt: the wake's receipt, and the turn.
+    let _ = crate::restart_nudge_runtime::WakeReceipts::rows(&door)
+        .working(DOOR, std::time::Instant::now());
+    super::super::pane_turn_began(DOOR, clock());
+    beat.beats(1);
+    assert_eq!(beat.pointed_at(DOOR), (0, 0), "typed into the running turn");
+    super::super::pane_turn_ended(DOOR, clock(), false, clock());
+    beat.beats(2);
+    assert_eq!(beat.pointed_at(DOOR), (1, 1));
+    for term in [DOOR, NEW_LEADER] {
+        crate::agent_teams::forget_term(term);
+    }
+}
+
+/// t-11548: the rest a goodbye kept fills a silence and nothing else. A
+/// pane already heard in this window — its turn begun before its wake got
+/// round to writing the rest down — keeps what it said; the note is spent
+/// either way, so no later wake writes that rest over a later word.
+#[test]
+fn a_rest_the_goodbye_kept_never_overwrites_what_the_pane_said_since() {
+    const SPOKE: u32 = 1_154_860;
+    const SILENT: u32 = 1_154_861;
+    let root = tempfile::tempdir().expect("a data root");
+    let at_rest = |worker: &str, term: u32| restart_census::WorkerCut {
+        worker: worker.to_string(),
+        agent: "codex".to_string(),
+        term,
+        turn: restart_census::Turn::Rest,
+        commands: Some(Vec::new()),
+    };
+    restart_census::leave_cut(
+        root.path(),
+        &restart_census::RestartCensus {
+            workers: vec![at_rest("w-spoke", SPOKE), at_rest("w-silent", SILENT)],
+            coordinators: Vec::new(),
+            took_ms: 0,
+        },
+        &|_| false,
+    )
+    .expect("the goodbye");
+    super::super::pane_turn_began(SPOKE, clock());
+    super::super::resumed_at_rest(root.path(), SPOKE, "w-spoke");
+    super::super::resumed_at_rest(root.path(), SILENT, "w-silent");
+    let turns = super::super::pane_turns()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clone();
+    assert!(
+        matches!(turns.get(&SPOKE), Some(PaneTurn::Running { .. })),
+        "the goodbye's rest was written over a turn the pane began"
+    );
+    assert!(matches!(
+        turns.get(&SILENT),
+        Some(PaneTurn::Ended { interrupted: false })
+    ));
+    for (worker, term) in [("w-spoke", SPOKE), ("w-silent", SILENT)] {
+        assert!(
+            restart_census::peek_cut(root.path(), worker)
+                .rest()
+                .is_none(),
+            "{worker}'s rest is still there to write down"
+        );
+        super::super::pane_turns()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .remove(&term);
     }
 }
 

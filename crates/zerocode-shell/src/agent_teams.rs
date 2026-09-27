@@ -1145,6 +1145,16 @@ pub trait Host {
     fn shell_in_front(&self, _term: u32) -> bool {
         false
     }
+    /// Whether a wake's words still wait on this pane's receipt (t-7812):
+    /// its conversation was resumed with a continuation the pane has not
+    /// yet been heard taking. The composer is the continuation's until then
+    /// — a resumed Claude reports its `SessionStart` boundary as a rest a
+    /// breath before the argv's own prompt begins its turn, and a pointer
+    /// typed in that breath is a second line behind the continuation
+    /// (t-11537). Hosts that wake nothing — tmux, tests — answer `false`.
+    fn wake_words_pending(&self, _term: u32) -> bool {
+        false
+    }
 }
 
 /// Why a spawned worker could not become usable, with its bounded last screen.
