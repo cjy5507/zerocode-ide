@@ -2579,6 +2579,9 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
     // teardown because it is the same fact about the same terminal.
     crate::orchestration_pointer_mailbox::forget_term(term);
     crate::human_input::forget_term(term);
+    // The calls its agent left waiting on the tool guards' hindsight never
+    // get it (t-10916); the next occupant of the id starts a book of its own.
+    crate::pane_guard::forget_term(term);
     zo_integration_runtime::prune_owner(state, ZoChannelOwner::Term(term));
     state.zo_worker_deliveries().remove(&term);
     state.agent_terms().remove(&term);
