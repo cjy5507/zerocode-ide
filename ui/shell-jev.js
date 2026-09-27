@@ -351,6 +351,9 @@ const JEV_LINES = Object.freeze({
   baseline: { key: "settings.typesafe.lineBaseline", word: "가장 단순한 방식보다 낫지 않습니다" },
   labels: { key: "settings.typesafe.lineLabels", word: "사람의 평가에서 기존 방식이 더 나았습니다" },
   fallbacks: { key: "settings.typesafe.lineFallbacks", word: "연속으로 기존 방식으로 되돌아갔습니다" },
+  execution_quality: { key: "settings.typesafe.lineExecutionQuality", word: "같은 난이도에서 첫 시도 성공률이 낮아졌습니다" },
+  execution_costs_missing: { key: "settings.typesafe.lineExecutionCostsMissing", word: "비교할 실행의 토큰·시간 측정이 부족합니다" },
+  execution_savings: { key: "settings.typesafe.lineExecutionSavings", word: "첫 시도 성공률을 유지하며 토큰과 시간을 줄인 증거가 부족합니다" },
   apply_share: { key: "settings.typesafe.lineApplyShare", word: "확신도 기준을 넘는 답이 너무 적습니다" },
 });
 

@@ -210,6 +210,14 @@ impl CostBook {
         cost
     }
 
+    pub(super) fn attempt_generation(
+        &self,
+        run: &Run,
+        dispatch: &zerocode_core::orchestration::Dispatch,
+    ) -> task_cost::GenerationCost {
+        task_cost::attempt_generation(run, dispatch, &self.sessions)
+    }
+
     /// The worker rows the board draws, each carrying its task's cost where
     /// the task is finished ([`super::desk::finished`]).
     pub(crate) fn dress(

@@ -381,15 +381,19 @@ impl Fake {
 
     /// Collect, the clock standing, until one more question settled.
     fn until_settled(&mut self, autopilot: &mut Autopilot) {
-        let before = self.asked_rows().len();
+        self.until_rows(autopilot, self.asked_rows().len() + 1);
+    }
+
+    /// A preceding explicit tick may already have settled this question.
+    fn until_rows(&mut self, autopilot: &mut Autopilot, wanted: usize) {
         for _ in 0..400 {
-            self.tick(autopilot);
-            if self.asked_rows().len() > before {
+            if self.asked_rows().len() >= wanted {
                 return;
             }
+            self.tick(autopilot);
             std::thread::sleep(Duration::from_millis(5));
         }
-        panic!("no question settled");
+        panic!("question {wanted} did not settle");
     }
 
     /// Collect until the autopilot is done, a second a collect.
@@ -643,14 +647,14 @@ fn a_stale_or_mismatched_or_late_answer_is_never_carried_out() {
     fake.helper.age_ns = 2_500_000_000;
     fake.teacher.says(PAUSE);
     let (mut autopilot, _) = fake.start(asked(None)).expect("started");
-    fake.until_settled(&mut autopilot);
+    fake.until_rows(&mut autopilot, 1);
     assert_eq!(fake.asked_rows()[0]["why"], json!(Why::Stale.word()));
     fake.helper.age_ns = 3_000_000;
     fake.helper.plan_hash = Some("another");
     fake.helper.moment += 1;
     fake.teacher.says(PAUSE);
     fake.tick(&mut autopilot);
-    fake.until_settled(&mut autopilot);
+    fake.until_rows(&mut autopilot, 2);
     assert_eq!(fake.asked_rows()[1]["why"], json!(Why::PlanMismatch.word()));
     assert!(fake.helper.stops().is_empty(), "neither stopped the run");
     // A question in flight when a person stops the autopilot lands on a run
@@ -664,7 +668,8 @@ fn a_stale_or_mismatched_or_late_answer_is_never_carried_out() {
     assert_eq!(stop_owner(&run), Some(Some(run.clone())));
     fake.tick(&mut autopilot);
     open.send(()).expect("the gate");
-    fake.until_settled(&mut autopilot);
+    fake.until_rows(&mut autopilot, 3);
+    assert_eq!(fake.asked_rows().len(), 3);
     let late = fake.asked_rows().last().copied().cloned().expect("a row");
     assert_eq!(late["why"], json!(Why::EpochMismatch.word()));
     assert_eq!(late["applied"], json!(false));

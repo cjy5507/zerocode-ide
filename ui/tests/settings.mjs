@@ -29,6 +29,7 @@ import {
 } from "./settings-quality.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const SUMMON_PROFILES = JSON.parse(await readFile(resolve(UI, "..", "crates", "zerocode-core", "src", "summon-profiles.json"), "utf8"));
 const TERMINAL_THEME_CATALOG = Object.freeze(JSON.parse(
   await readFile(
     resolve(UI, "..", "crates", "zerocode-shell", "src", "terminal_themes.json"),
@@ -2817,6 +2818,10 @@ class StatefulBackend {
         };
         return this.typesafeSettings();
       }
+      case "set_summon_profiles": {
+        this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), summonProfiles: clone(args.profiles) };
+        return this.typesafeSettings();
+      }
       case "set_jev_model": {
         // Mirrors `typesafe_settings::set_model`: an empty word unpins (the
         // key leaves the file), a pin the door would not read is refused.
@@ -2945,6 +2950,7 @@ class StatefulBackend {
       keysKeptHere: !this.routerKeychainUnavailable,
       keySaved: Boolean(this.keychain.get(TYPESAFE_SERVICE)?.trim()),
       jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
+      summonProfiles: clone(smart.summonProfiles ?? SUMMON_PROFILES),
       model: {
         setting: JEV_MODEL_SETTING,
         model: pin ?? JEV_MODEL_ALIAS,
@@ -5462,6 +5468,17 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   // empty field unpins — the key leaves the file — and a pin the door would
   // not read is refused and writes nothing.
   await pageA.locator("#typesafe-advanced > summary").click();
+  const profileModel = pageA.locator('#summon-profiles-table input[data-agent="codex"][data-difficulty="low"][data-field="model"]');
+  assertEqual(await profileModel.inputValue(), SUMMON_PROFILES.codex.low.model);
+  await profileModel.fill("gpt-test-profile");
+  const profileAt = backend.calls.length;
+  await pageA.click("#summon-profiles-save");
+  const savedProfile = await backend.waitForCall("A", "set_summon_profiles", profileAt);
+  assertEqual(savedProfile.args.profiles.codex.low.model, "gpt-test-profile");
+  assertEqual(savedProfile.args.profiles.claude, SUMMON_PROFILES.claude);
+  await statusIs(await said("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
+  await pageA.evaluate(() => refreshApiRouters());
+  assertEqual(await profileModel.inputValue(), "gpt-test-profile");
   const modelInput = pageA.locator("#typesafe-model-input");
   assertEqual(await modelInput.inputValue(), "", "an unpinned card showed a pin");
   assertEqual(await modelInput.getAttribute("placeholder"), JEV_MODEL_ALIAS);

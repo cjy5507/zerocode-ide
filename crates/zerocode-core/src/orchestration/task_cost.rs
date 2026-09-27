@@ -62,10 +62,11 @@ pub const TASK_STAMP: &str = "task";
 /// ([`TASK_STAMP`]): a silence judged, a worker placed, a summons chosen, a
 /// step's effort moved. Each writes the run, worker, attempt and task beside
 /// its answer; a seat that does not is not counted toward any task.
-pub const TASK_STAMPED: [&JevUse; 4] = [
+pub const TASK_STAMPED: [&JevUse; 5] = [
     &jev::STALL,
     &jev::PLACEMENT,
     &jev::SUMMON,
+    &jev::SUMMON_DIFFICULTY,
     &jev::STEP_EFFORT,
 ];
 
@@ -271,7 +272,9 @@ impl JevBook {
 
 /// Why a task's generation dollars are not a number, most fundamental first
 /// — the one a task carries is the first that holds for any of its attempts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum UsdReason {
     /// An attempt ran on an agent with no usage ledger (zo, and every CLI no
@@ -373,6 +376,25 @@ pub fn task_cost(run: &Run, task_id: &str, sessions: &SessionBook, jev: JevTally
         generation: generation(run, task_id, &attempts, sessions),
         jev: JevCost::of(jev),
     }
+}
+
+/// One attempt's usage, only when its worker carried exactly this attempt.
+/// Session totals cannot be split across repeated dispatches on one pane.
+#[must_use]
+pub fn attempt_generation(run: &Run, attempt: &Dispatch, sessions: &SessionBook) -> GenerationCost {
+    if run
+        .dispatches
+        .iter()
+        .filter(|d| d.worker == attempt.worker)
+        .count()
+        != 1
+    {
+        return GenerationCost {
+            usd_reason: Some(UsdReason::Unlinked),
+            ..GenerationCost::default()
+        };
+    }
+    generation(run, &attempt.task, &[attempt], sessions)
 }
 
 /// First start to last end, or `None` while any attempt is open.

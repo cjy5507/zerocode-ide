@@ -6404,6 +6404,14 @@ function initTypeSafeEvents() {
         : t("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 빠른 등급 모델에게 묻지 않습니다.");
     });
   });
+  el("summon-profiles-save")?.addEventListener("click", () => {
+    const profiles = JSON.parse(JSON.stringify(typesafeState?.summonProfiles ?? {}));
+    el("summon-profiles-table")?.querySelectorAll("input").forEach((input) => {
+      profiles[input.dataset.agent][input.dataset.difficulty][input.dataset.field] = input.value.trim();
+    });
+    void runTypeSafe(() => invoke("set_summon_profiles", { profiles }), () =>
+      t("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
+  });
   // The model pin (`smart.jevModel`): an empty field unpins. The backend
   // refuses a pin its door would not read, and the refusal is said here.
   el("typesafe-model-input")?.addEventListener("change", (event) => {
@@ -6425,6 +6433,35 @@ function paintTypeSafeModel(state) {
   input.placeholder = state.model.alias;
   if (document.activeElement !== input) input.value = state.model.pinned ? state.model.model : "";
   input.disabled = typesafeBusy;
+}
+
+function paintSummonProfiles(state) {
+  const table = el("summon-profiles-table");
+  if (!table || table.contains(document.activeElement)) return;
+  table.replaceChildren();
+  for (const [agent, levels] of Object.entries(state.summonProfiles ?? {})) {
+    for (const [difficulty, profile] of Object.entries(levels)) {
+      for (const field of ["model", "effort"]) {
+        const label = document.createElement("label");
+        label.className = "settings-field";
+        label.dataset.field = "md";
+        const name = document.createElement("span");
+        name.className = "settings-field-copy";
+        name.textContent = `${agent} · ${difficulty} · ${field}`;
+        label.append(name);
+        const input = document.createElement("input");
+        input.className = "settings-input";
+        input.value = profile[field];
+        input.dataset.agent = agent;
+        input.dataset.difficulty = difficulty;
+        input.dataset.field = field;
+        input.disabled = typesafeBusy;
+        label.append(input);
+        table.append(label);
+      }
+    }
+  }
+  el("summon-profiles-save").disabled = typesafeBusy;
 }
 
 /* One seat's row of the backend's answer, by the use's own name. The words a
@@ -6515,6 +6552,7 @@ function paintTypeSafe(state) {
     if (button) button.disabled = typesafeBusy || !state.keySaved;
   }
   paintTypeSafeModel(state);
+  paintSummonProfiles(state);
   paintClassifierGate(state);
   paintTypeSafeSave();
   // The dashboard wears the same switch and reads the same features; a press

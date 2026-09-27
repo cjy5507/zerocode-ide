@@ -5,9 +5,9 @@ use serde_json::json;
 use super::*;
 
 #[test]
-fn summon_difficulty_learns_the_pin_against_always_high() {
+fn summon_difficulty_grades_executed_outcomes() {
     let seat = jev_use("summon_difficulty").expect("a distinct difficulty seat");
-    assert_eq!(seat.agreement_kind, AgreementKind::Comparison);
+    assert_eq!(seat.agreement_kind, AgreementKind::Hindsight);
     assert_eq!(seat.baseline, Baseline::AlwaysSame("high"));
     assert_eq!(seat.request_name, &["dispatch"]);
     assert_eq!(seat.apply_deadline_ms, Some(2_000));
@@ -621,6 +621,7 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
         vec![
             RECALL.id,
             PLACEMENT.id,
+            SUMMON_DIFFICULTY.id,
             COMPACTION.id,
             PATCH_REVIEW.id,
             CLAIM.id,
@@ -634,7 +635,11 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
     for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert_eq!(
             row.agreement_rows_wanted,
-            Some(A_WINDOW_OF_COMPARISONS),
+            Some(if row.id == SUMMON_DIFFICULTY.id {
+                crate::summon_difficulty::outcomes::MIN_EXECUTIONS
+            } else {
+                A_WINDOW_OF_COMPARISONS
+            }),
             "{}",
             row.id
         );
@@ -2411,7 +2416,16 @@ fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
             );
         }
         if let Some(wanted) = row.negatives_wanted {
-            assert_eq!(wanted, NEGATIVES_WANTED, "{}", row.id);
+            assert_eq!(
+                wanted,
+                if row.id == SUMMON_DIFFICULTY.id {
+                    crate::summon_difficulty::outcomes::MIN_NEGATIVES
+                } else {
+                    NEGATIVES_WANTED
+                },
+                "{}",
+                row.id
+            );
         }
         if !compared {
             assert_eq!(row.baseline, Baseline::None, "{}", row.id);

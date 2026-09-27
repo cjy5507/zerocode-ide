@@ -1655,8 +1655,7 @@ pub const SUMMON: JevUse = JevUse {
     follows: None,
 };
 
-/// Difficulty of a new summons, compared with the coordinator's explicit
-/// effort pin. Outcomes of executed work do not grade this comparison seat.
+/// Difficulty of new work, graded by completed executions at the same difficulty.
 pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     id: crate::summon_difficulty::QUESTION,
     setting: "summonDifficulty",
@@ -1680,10 +1679,10 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(crate::summon_difficulty::APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
-    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
-    agreement_kind: AgreementKind::Comparison,
+    agreement_rows_wanted: Some(crate::summon_difficulty::outcomes::MIN_EXECUTIONS),
+    agreement_kind: AgreementKind::Hindsight,
     baseline: Baseline::AlwaysSame(crate::summon_difficulty::LADDER[2].0),
-    negatives_wanted: Some(NEGATIVES_WANTED),
+    negatives_wanted: Some(crate::summon_difficulty::outcomes::MIN_NEGATIVES),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: true,
     rubric_version: crate::summon_difficulty::RUBRIC_VERSION,

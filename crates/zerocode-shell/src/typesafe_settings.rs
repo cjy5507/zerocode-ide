@@ -232,6 +232,7 @@ pub struct TypeSafeSettings {
     pub jev: JevSwitch,
     /// The model every seat's request names — the pin, or the alias.
     pub model: ModelRow,
+    pub summon_profiles: Value,
     /// Every row of the use table, in the table's order — what the dashboard
     /// reads each feature's standing off.
     pub switches: Vec<SwitchRow>,
@@ -260,6 +261,7 @@ pub fn read_settings(
         key_saved,
         jev: JevSwitch::of(&document),
         model: ModelRow::of(&root),
+        summon_profiles: zerocode_core::summon_difficulty::profiles(&document),
         switches: JEV_USES
             .iter()
             .map(|row| SwitchRow {
@@ -427,6 +429,18 @@ pub fn set_classifier(path: &Path, mode: &str) -> Result<(), String> {
     })
 }
 
+/// Save the editable launch table without changing any other settings.
+pub fn set_summon_profiles(path: &Path, profiles: &Value) -> Result<(), String> {
+    zerocode_core::summon_difficulty::validate_profiles(profiles)?;
+    update_smart(path, |smart| {
+        smart.insert(
+            zerocode_core::summon_difficulty::PROFILES_SETTING.to_string(),
+            profiles.clone(),
+        );
+        Ok(())
+    })
+}
+
 /// Pin the model every Jev request names (`smart.jevModel`, t-6187), or
 /// unpin it with an empty word, leaving every other key as it stood — and
 /// answer the row as the card paints it.
@@ -520,6 +534,27 @@ pub fn read_day(path: &Path) -> DayBudget {
 mod tests {
     use super::*;
     use crate::api_routers::{HeldKeys, Keychain, RouterRefusalKind};
+
+    #[test]
+    fn summon_profiles_save_only_the_table_and_refuse_bad_rows() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let before = serde_json::json!({"smart":{"jevModel":"held"}, "theme":"dark"});
+        std::fs::write(&path, before.to_string()).unwrap();
+        let profiles = zerocode_core::summon_difficulty::profiles(&Value::Null);
+        set_summon_profiles(&path, &profiles).unwrap();
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["theme"], before["theme"]);
+        assert_eq!(after["smart"]["jevModel"], before["smart"]["jevModel"]);
+        assert_eq!(
+            after["smart"][zerocode_core::summon_difficulty::PROFILES_SETTING],
+            profiles
+        );
+        assert!(set_summon_profiles(&path, &serde_json::json!({"unknown":{}})).is_err());
+        let refused: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(refused, after);
+    }
 
     #[test]
     fn the_key_lives_in_the_item_zo_reads() {

@@ -4090,6 +4090,12 @@
               <input class="settings-input" id="typesafe-model-input" type="text"
                      autocomplete="off" spellcheck="false" />
             </label>
+            <section aria-labelledby="summon-profiles-title">
+              <h4 id="summon-profiles-title" data-i18n="settings.typesafe.profiles">난이도별 워커 모델·사고 깊이</h4>
+              <p class="settings-row-desc" data-i18n="settings.typesafe.profilesHint">모델을 생략하면 이 표를 씁니다. 판단을 기록 중이거나 답이 없으면 보통 난이도를 씁니다. 직접 지정한 값은 보존합니다.</p>
+              <div id="summon-profiles-table"></div>
+              <button type="button" id="summon-profiles-save" data-i18n="settings.typesafe.profilesSave">선택 표 저장</button>
+            </section>
             <!-- The gate in front of the routing seat.
                  `smart.autoClassifier` decides how a spawn's difficulty is read,
                  whether the chat probe is called (the probing word only), and
@@ -4208,9 +4214,9 @@
             <p data-jev-hint data-i18n="settings.typesafe.summonHint">워커를 부를 때 그 일을 어느 에이전트가 맡아야 할지 판단합니다. 켜면 에이전트를 auto로 지정한 소환(worker-start --agent auto)에서 그 판단대로 고르고, 직접 지정한 에이전트는 바꾸지 않습니다. 보내는 것은 브리핑 앞 1,200자와 일의 형태 네 가지(브리핑 전체 길이·워크트리를 쓰는지·재시도인지·과업을 지녔는지)이며, 코디네이터가 이미 적은 에이전트는 보내지 않습니다. 후보는 지금 여유가 있는 에이전트뿐이라 사용 한도에 걸린 것은 들어가지 않습니다. 정확도는 실제로 부른 에이전트와 견주어 잽니다.</p>
           </div>
           <div data-jev-feature="summon_difficulty">
-            <span data-jev-name data-i18n="settings.typesafe.summon_difficulty">소환할 워커의 사고 깊이</span>
-            <span data-jev-summary data-i18n="settings.typesafe.summon_difficultySummary">과업 난이도를 판단해 소환할 워커의 사고 깊이를 정합니다. 자동 적용 전에는 판단을 기록합니다.</span>
-            <p data-jev-hint data-i18n="settings.typesafe.summon_difficultyHint">과업 제목과 설명 앞 400자, 이전 시도 수·연속 실패 수·재시도 여부로 난이도를 판단합니다. 직접 지정한 사고 깊이와 비교해 배우고, 기존 승격 기준을 통과한 뒤 사고 깊이를 지정하지 않은 소환에만 적용합니다. 기록 중이거나 2초 안에 적용할 답이 없으면 CLI 기본값을 유지합니다. 직접 지정한 모델과 사고 깊이는 보존합니다.</p>
+            <span data-jev-name data-i18n="settings.typesafe.summon_difficulty">워커 모델·사고 깊이</span>
+            <span data-jev-summary data-i18n="settings.typesafe.summon_difficultySummary">과업 난이도로 워커의 모델과 사고 깊이를 고릅니다. 자동 적용 전에는 판단을 기록합니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.summon_difficultyHint">같은 난이도에서 실제 실행한 선택의 첫 시도 성공률과 재작업, 토큰, 시간을 비교합니다. 영수증과 코디 착지를 확인하며, 측정하지 못한 값은 비워 둡니다. 명시한 모델과 사고 깊이는 보존합니다.</p>
           </div>
           <div data-jev-feature="effort">
             <span data-jev-name data-i18n="settings.typesafe.effort">워커 사고 깊이 조절</span>
