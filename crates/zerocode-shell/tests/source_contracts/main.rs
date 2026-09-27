@@ -28278,8 +28278,24 @@ mod tests {
              checkout, starts an empty agent beside it, or asks while its own \
              restore is still waking it:\n{reopening}"
         );
+        // 지난 행은 한 몸(`makePastRow`)을 입는다(t-10993): 재시작 장부의 소식
+        // 행과 원장의 끝난 작업 행은 그 몸을 부를 뿐 제 문을 들지 않고, 문은 그
+        // 몸과 디스크 스캔의 「지난 세션」 행 둘에만 선다.
         for row in [
             "function makeSurvivorRow(one) {",
+            "function makeFinishedWorkRow(path, work) {",
+        ] {
+            let body = block_after(window, row);
+            assert!(
+                body.contains("makePastRow(")
+                    && !body.contains("reopenConversationIn(")
+                    && !body.contains("resumeSession(")
+                    && !body.contains("invoke(\"resume_session\""),
+                "a sidebar row grew its own door:\n{body}"
+            );
+        }
+        for row in [
+            "function makePastRow({ agent, name: words, said: word, at, worktree, session }) {",
             "function makeRetainedRow(path, row) {",
         ] {
             assert!(
