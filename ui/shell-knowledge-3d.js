@@ -444,6 +444,17 @@ function knowledgeRestingNodeInk(palette, tuning, layout, model, at) {
   const code = kind === "code_file" ? palette.codeFile
     : kind === "code_symbol" ? palette.codeSymbol : null;
   const plain = ghost ? palette.ghost : source ? palette.source : code;
+  /* 주변 탐색의 페이지는 `is-local` 절의 옷을 입는다 — 군집의 색으로 칠한 점, 그리고 중심은 제 몸의 줄. */
+  const local = layout.ring !== null && kind === "page" ? palette.local : null;
+  if (local !== null && at === layout.ring.seat) {
+    const centre = hue + 1;
+    return { fill: local.centreFill, fillAt: centre * 4, stroke: local.centreStroke, strokeAt: centre * 4,
+      strokePx: local.centreWidth[centre], dashed: false };
+  }
+  if (local !== null) {
+    return { fill: local.nodeFill, fillAt: row * 4, stroke: local.nodeStroke, strokeAt: row * 4,
+      strokePx: local.nodeWidth[row], dashed: false };
+  }
   return {
     fill: plain ?? (own !== null ? own.fill : palette.nodeFill),
     fillAt: plain !== null ? 0 : own !== null ? ownAt * 4 : row * 4,
@@ -461,24 +472,37 @@ function knowledgeRestingNodeInk(palette, tuning, layout, model, at) {
 
 /* 선 하나의 쉬는 옷: 유령의 선, 이름 있는 관계·merge 물음의 제 잉크와 점선, 군집 안의 본문
  * 링크, 군집을 건너는 본문 링크 — 이 순서로 하나가 이긴다. 밝힘·짚기의 옷은 `fillEdges`가
- * 덧입힌다. */
-function knowledgeRestingEdgeInk(palette, tuning, layout, model, at) {
+ * 덧입힌다. 주변 탐색에서는 관계의 가족(종류, 유령), 판의 포커스(`focused` — 판이 `is-focused`인가)와
+ * 그 선이 밝혀졌는가, 바퀴살인가가 줄을 고르고, 그 줄의 불투명도가 따로 온다(전체 지도의
+ * 불투명도는 잉크에 이미 곱해져 있어 1이다). */
+function knowledgeRestingEdgeInk(palette, tuning, layout, model, at, focused = false) {
   const head = model.from[at];
   const tail = model.to[at];
   const code = model.kind[at];
   const word = KNOWLEDGE_EDGE_KINDS[code];
   const typed = code !== KNOWLEDGE_EDGE_CODE.mentions && word !== "merge";
+  if (layout.ring !== null) {
+    const local = palette.local;
+    const family = model.ghost[at] === 1 ? KNOWLEDGE_EDGE_KINDS.length : code;
+    const spoke = head === layout.ring.seat || tail === layout.ring.seat;
+    const focus = !focused ? 0 : layout.focusEdgeVisited[at] === 1 ? 2 : 4;
+    const row = family * 6 + focus + (spoke ? 1 : 0);
+    return { ink: local.edgeInk, inkAt: row * 4, width: local.edgeWidth[row], dash: local.edgeDash[row],
+      opacity: local.edgeOpacity[row] };
+  }
   if (model.ghost[at] === 1) {
-    return { ink: palette.ghostEdge, inkAt: 0, width: tuning.edgeMentionsWidth, dash: tuning.edgeGhostDash };
+    return { ink: palette.ghostEdge, inkAt: 0, width: tuning.edgeMentionsWidth, dash: tuning.edgeGhostDash, opacity: 1 };
   }
   if (typed || word === "merge") {
     return { ink: palette.typed, inkAt: code * 4, width: palette.widths[code],
-      dash: palette.widths[KNOWLEDGE_EDGE_KINDS.length + code] };
+      dash: palette.widths[KNOWLEDGE_EDGE_KINDS.length + code], opacity: 1 };
   }
   const intra = layout.community[head] === layout.community[tail];
   const hue = intra ? layout.communityHue[layout.community[head]] : -1;
-  if (intra && hue >= 0) return { ink: palette.intra, inkAt: hue * 4, width: tuning.edgeMentionsWidth, dash: 0 };
-  return { ink: palette.inter, inkAt: 0, width: tuning.edgeMentionsWidth, dash: 0 };
+  if (intra && hue >= 0) {
+    return { ink: palette.intra, inkAt: hue * 4, width: tuning.edgeMentionsWidth, dash: 0, opacity: 1 };
+  }
+  return { ink: palette.inter, inkAt: 0, width: tuning.edgeMentionsWidth, dash: 0, opacity: 1 };
 }
 
 /* 팔레트 — SVG가 입는 옷을 그대로 입힌 견본에게 물어서 얻는다.
@@ -518,6 +542,8 @@ function knowledgeGlPalette(view, held) {
     nebula: null,
     /* 관계 종류마다 굵기 하나와 점선 하나 — 종류의 수가 자리를 정한다. */
     widths: new Float32Array(KNOWLEDGE_EDGE_KINDS.length * 2),
+    /* 주변 탐색의 옷(`.knowledge-picture.is-local` 절) — 제 견본 판에서 읽는다(`knowledgeGlLocalPalette`). */
+    local: null,
   };
   const theme = `${document.documentElement.dataset.theme ?? "dark"}`;
   if (palette.swatches !== null && palette.theme === theme) return palette;
@@ -527,7 +553,7 @@ function knowledgeGlPalette(view, held) {
     const host = document.createElementNS(SVG_NS, "svg");
     host.setAttribute("class", "knowledge-picture knowledge-gl-swatch");
     host.setAttribute("aria-hidden", "true");
-    const add = (className, hue, tier, words = {}) => {
+    const add = (className, hue, tier, words = {}, into = host) => {
       const group = document.createElementNS(SVG_NS, "g");
       group.setAttribute("class", className);
       if (hue >= 0) group.dataset.hue = String(hue);
@@ -537,18 +563,22 @@ function knowledgeGlPalette(view, held) {
       const dot = document.createElementNS(SVG_NS, "circle");
       dot.setAttribute("class", "knowledge-dot");
       group.appendChild(dot);
-      host.appendChild(group);
+      into.appendChild(group);
       return dot;
     };
-    const line = (className, hue) => {
+    const line = (className, hue, into = host) => {
       const group = document.createElementNS(SVG_NS, "g");
       if (hue >= 0) group.dataset.hue = String(hue);
       const path = document.createElementNS(SVG_NS, "path");
       path.setAttribute("class", className);
       group.appendChild(path);
-      host.appendChild(group);
+      into.appendChild(group);
       return path;
     };
+    /* 관계 종류의 클래스 — SVG 손(`paintKnowledgeFrame`의 선 옷)이 입히는 이름 그대로. */
+    const edgeClass = (kind) => (kind === "mentions"
+      ? "knowledge-edge"
+      : `knowledge-edge ${kind === "merge" ? "kind-merge" : `is-typed kind-${kind}`}`);
     const dots = [];
     for (let hue = 0; hue < hues; hue += 1) {
       for (const tier of tiers) dots.push(add("knowledge-node is-page", hue, tier));
@@ -614,9 +644,7 @@ function knowledgeGlPalette(view, held) {
       inter: line("knowledge-edge is-inter", -1),
       ghostEdge: line("knowledge-edge is-ghost", -1),
       lit: line("knowledge-edge is-lit", -1),
-      typed: KNOWLEDGE_EDGE_KINDS.map((kind) => line(kind === "mentions"
-        ? "knowledge-edge"
-        : `knowledge-edge ${kind === "merge" ? "kind-merge" : `is-typed kind-${kind}`}`, -1)),
+      typed: KNOWLEDGE_EDGE_KINDS.map((kind) => line(edgeClass(kind), -1)),
     };
     /* 짚는 중 물러선 선의 잉크는 **판**의 클래스가 정한다(`.is-tracing`). 그래서 그
      * 견본만은 제 판을 따로 가진다 — 한 판에 `is-tracing`을 걸면 그 판의 모든 선
@@ -630,7 +658,49 @@ function knowledgeGlPalette(view, held) {
     tracing.appendChild(far);
     palette.swatches.far = far;
     palette.swatches.tracing = tracing;
-    view.append(host, tracing);
+    /* 주변 탐색의 옷도 **판**의 클래스(`is-local`)가 정한다 — 그래서 제 판을 따로 가진다. 점은
+     * 전체 지도의 견본과 같은 색 칸 × 단이고, 중심(`is-selected`)은 색 칸마다 몸과 후광 하나다.
+     * 선은 관계의 가족(종류 + 유령)마다 여섯 줄이다: 포커스 없는 판의 (맥락, 바퀴살), 포커스가 선
+     * 판(`is-focused` — 중심이 골라져 있으니 주변 탐색의 보통)에서 밝혀진 (맥락, 바퀴살)과 물러선
+     * (맥락, 바퀴살). 그 판의 규칙들이 특이도로 서로를 이기므로(밝혀진 바퀴살은 바퀴살의 잉크가
+     * 아니라 주변의 잉크를 입는다) 줄마다 계산값을 읽는다. 포커스 판의 물러선 점 하나가 그
+     * 불투명도를 답한다. */
+    const localHost = document.createElementNS(SVG_NS, "svg");
+    localHost.setAttribute("class", "knowledge-picture is-local knowledge-gl-swatch");
+    localHost.setAttribute("aria-hidden", "true");
+    const localDots = [];
+    for (let hue = 0; hue < hues; hue += 1) {
+      for (const tier of tiers) localDots.push(add("knowledge-node is-page", hue, tier, {}, localHost));
+    }
+    for (const tier of tiers) localDots.push(add("knowledge-node is-page", -1, tier, {}, localHost));
+    const centres = [];
+    for (let hue = -1; hue < hues; hue += 1) {
+      const dot = add("knowledge-node is-page is-selected", hue, "leaf", {}, localHost);
+      const halo = document.createElementNS(SVG_NS, "circle");
+      halo.setAttribute("class", "knowledge-halo");
+      dot.parentNode.appendChild(halo);
+      centres.push({ dot, halo });
+    }
+    const families = [...KNOWLEDGE_EDGE_KINDS.map((kind) => edgeClass(kind)), "knowledge-edge is-ghost"];
+    const focusHost = document.createElementNS(SVG_NS, "svg");
+    focusHost.setAttribute("class", "knowledge-picture is-local is-focused knowledge-gl-swatch");
+    focusHost.setAttribute("aria-hidden", "true");
+    const localEdges = [];
+    for (const family of families) {
+      localEdges.push(line(family, -1, localHost), line(`${family} is-spoke`, -1, localHost),
+        line(`${family} is-focus-lit`, -1, focusHost), line(`${family} is-focus-lit is-spoke`, -1, focusHost),
+        line(family, -1, focusHost), line(`${family} is-spoke`, -1, focusHost));
+    }
+    const localNebulaGroup = document.createElementNS(SVG_NS, "g");
+    localNebulaGroup.dataset.hue = "0";
+    const localNebula = document.createElementNS(SVG_NS, "ellipse");
+    localNebula.setAttribute("class", "knowledge-nebula");
+    localNebulaGroup.appendChild(localNebula);
+    localHost.appendChild(localNebulaGroup);
+    const focusDot = add("knowledge-node is-page", 0, "leaf", {}, focusHost);
+    palette.swatches.local = { host: localHost, focusHost, dots: localDots, centres, edges: localEdges,
+      nebula: localNebula, focusNode: focusDot.parentNode };
+    view.append(host, tracing, localHost, focusHost);
     palette.nodeFill = new Float32Array((hues + 1) * tiers.length * 4);
     palette.nodeStroke = new Float32Array((hues + 1) * tiers.length * 4);
     palette.intra = new Float32Array(hues * 4);
@@ -691,8 +761,66 @@ function knowledgeGlPalette(view, held) {
     palette.widths[at] = Number.parseFloat(style.strokeWidth) || 1;
     palette.widths[kinds + at] = Number.parseFloat(style.strokeDasharray) || 0;
   }
+  palette.local = knowledgeGlLocalPalette(swatches.local, palette.local);
   palette.theme = theme;
   return palette;
+}
+
+/* 주변 탐색의 팔레트 — 견본이 입은 `is-local` 절의 계산값. 불투명도는 잉크와 따로 든다: 포커스가
+ * 선 판에서는 CSS가 선의 불투명도를 **바꿔 끼우고**(곱하지 않는다), 잉크는 그대로다. 중심의 몸은
+ * `transform: scale(…)`로 커지고 테두리·후광의 굵기는 그 배율로 나눠 적혀 있다 — 화면 픽셀로
+ * 되돌려 둔다(GL은 자리의 반지름을 키워 그린다). */
+function knowledgeGlLocalPalette(swatches, held) {
+  const rows = swatches.dots.length;
+  const centres = swatches.centres.length;
+  const edges = swatches.edges.length;
+  const local = held ?? {
+    nodeFill: new Float32Array(rows * 4),
+    nodeStroke: new Float32Array(rows * 4),
+    nodeWidth: new Float32Array(rows),
+    centreFill: new Float32Array(centres * 4),
+    centreStroke: new Float32Array(centres * 4),
+    centreWidth: new Float32Array(centres),
+    halo: new Float32Array(centres * 4),
+    haloWidth: new Float32Array(centres),
+    centreScale: 1,
+    edgeInk: new Float32Array(edges * 4),
+    edgeOpacity: new Float32Array(edges),
+    edgeWidth: new Float32Array(edges),
+    edgeDash: new Float32Array(edges),
+    discs: true,
+    farNode: 1,
+  };
+  const read = (node) => getComputedStyle(node);
+  swatches.dots.forEach((dot, at) => {
+    const style = read(dot);
+    knowledgeGlColor(style.fill, local.nodeFill, at * 4);
+    knowledgeGlColor(style.stroke, local.nodeStroke, at * 4);
+    local.nodeWidth[at] = Number.parseFloat(style.strokeWidth) || 0;
+  });
+  swatches.centres.forEach(({ dot, halo }, at) => {
+    const style = read(dot);
+    const scale = style.transform === "none" ? 1 : new DOMMatrixReadOnly(style.transform).a;
+    local.centreScale = scale;
+    knowledgeGlColor(style.fill, local.centreFill, at * 4);
+    knowledgeGlColor(style.stroke, local.centreStroke, at * 4);
+    local.centreWidth[at] = (Number.parseFloat(style.strokeWidth) || 0) * scale;
+    const ring = read(halo);
+    const ringScale = ring.transform === "none" ? 1 : new DOMMatrixReadOnly(ring.transform).a;
+    knowledgeGlColor(ring.display === "none" ? "none" : ring.stroke, local.halo, at * 4);
+    local.halo[at * 4 + 3] *= Number.parseFloat(ring.opacity) || 0;
+    local.haloWidth[at] = (Number.parseFloat(ring.strokeWidth) || 0) * ringScale;
+  });
+  swatches.edges.forEach((path, at) => {
+    const style = read(path);
+    knowledgeGlColor(style.stroke, local.edgeInk, at * 4);
+    local.edgeOpacity[at] = Number.parseFloat(style.opacity);
+    local.edgeWidth[at] = Number.parseFloat(style.strokeWidth) || 1;
+    local.edgeDash[at] = Number.parseFloat(style.strokeDasharray) || 0;
+  });
+  local.discs = read(swatches.nebula).display !== "none";
+  local.farNode = Number.parseFloat(read(swatches.focusNode).opacity);
+  return local;
 }
 
 /* 재질 하나 — 손으로 쓰던 셰이더의 글자 그대로를 `RawShaderMaterial`에 싣는다. three.js는
@@ -1150,13 +1278,17 @@ function makeKnowledgeGlPainter() {
     fillSeats(layout) {
       const { count, x, drawY, radius, drawn } = layout;
       const data = this.seatData;
+      /* 주변 탐색의 중심은 SVG에서 `transform: scale(…)`로 커진다 — 여기서는 자리의 반지름이다
+       * (선은 그 몸의 가장자리에서 끝나고, 후광은 그 몸에서 떨어져 선다). */
+      const centre = layout.ring === null ? -1 : layout.ring.seat;
       for (let at = 0; at < count; at += 1) {
         const seat = at * 4;
         data[seat] = x[at];
         data[seat + 1] = drawY[at];
         data[seat + 2] = 0;
         /* 그려지지 않는 점은 반지름 0으로 둔다 — 선이 그 점에서 잘리지 않게. */
-        data[seat + 3] = drawn !== null && drawn[at] === 0 ? 0 : radius[at];
+        data[seat + 3] = drawn !== null && drawn[at] === 0 ? 0
+          : at === centre ? radius[at] * this.palette.local.centreScale : radius[at];
       }
     },
 
@@ -1180,6 +1312,11 @@ function makeKnowledgeGlPainter() {
       const spot = knowledgeClusterPicked;
       const selectedSeat = knowledgeSelectedKey === null ? -1
         : model.keys.indexOf(knowledgeSelectedKey);
+      /* 주변 탐색: 중심은 제 줄의 옷(고름의 테두리를 덧입지 않는다)과 후광, 포커스가 물린 점은
+       * 그 절의 불투명도로 물러선다. */
+      const local = layout.ring === null ? null : palette.local;
+      const centre = local === null ? -1 : layout.ring.seat;
+      const focusFar = local === null ? dim : local.farNode;
       let nodes = 0;
       let rings = 0;
       for (let at = 0; at < layout.count; at += 1) {
@@ -1196,7 +1333,7 @@ function makeKnowledgeGlPainter() {
          * 그 점은 물러선다. CSS에서는 마지막 규칙이 이기고, 여기서는 최솟값이다. */
         let alpha = 1;
         if (tracing && !lit) alpha = Math.min(alpha, far);
-        if (focused && layout.focusVisited[at] !== 1) alpha = Math.min(alpha, dim);
+        if (focused && layout.focusVisited[at] !== 1) alpha = Math.min(alpha, focusFar);
         if (searching && searchOn && !match) alpha = Math.min(alpha, dim);
         if (sliced && layout.sliceMatch[at] === 0) alpha = Math.min(alpha, dim);
         if (spotlight && spot >= 0 && rank !== spot) alpha = Math.min(alpha, dim);
@@ -1207,7 +1344,7 @@ function makeKnowledgeGlPainter() {
         const resting = knowledgeRestingNodeInk(palette, tuning, layout, model, at);
         const fill = resting.fill;
         const fillAt = resting.fillAt;
-        const stated = !ghost && !source && (selected || lit || pathLit);
+        const stated = !ghost && !source && ((selected && at !== centre) || lit || pathLit);
         const strokeSource = stated ? (pathLit ? palette.highlight : palette.tint)
           : !ghost && !source && match ? palette.highlight
           : resting.stroke;
@@ -1229,6 +1366,18 @@ function makeKnowledgeGlPainter() {
           : 0;
         this.nodeShape[seat * 4 + 3] = form.code;
         nodes += 1;
+        /* 중심의 후광 — SVG의 halo 원(반지름 × `haloScale`, 중심과 같은 배율)과 같은 자리·굵기. */
+        if (at === centre && kind === "page") {
+          const hue = layout.communityHue[rank] + 1;
+          this.ringSeat[rings] = at;
+          this.writeInk(this.ringInk, rings * 4, local.halo, hue * 4, alpha);
+          this.ringShape[rings * 4] = Math.min(255,
+            Math.round(layout.radius[at] * local.centreScale * (tuning.haloScale - 1) * 4));
+          this.ringShape[rings * 4 + 1] = Math.min(255, Math.round(local.haloWidth[hue] * 8));
+          this.ringShape[rings * 4 + 2] = 0;
+          this.ringShape[rings * 4 + 3] = 0;
+          rings += 1;
+        }
         if (model.recalledNow[at] === 1) {
           this.ringSeat[rings] = at;
           this.writeInk(this.ringInk, rings * 4, palette.ring, 0, alpha);
@@ -1283,6 +1432,9 @@ function makeKnowledgeGlPainter() {
       const searchOn = knowledgeQuery.trim() !== "";
       const { from, to, edgeCount } = model;
       const drawnEdge = layout.drawnEdge;
+      /* 주변 탐색에서 포커스는 쉬는 옷의 줄이 말한다(밝혀진 선도 물러선 선도 그 절의 옷) — 밝힘의
+       * 옷은 짚은 선만 입는다. */
+      const local = layout.ring !== null;
       let edges = 0;
       for (let at = 0; at < edgeCount; at += 1) {
         if (drawnEdge !== null && drawnEdge[at] === 0) continue;
@@ -1294,22 +1446,22 @@ function makeKnowledgeGlPainter() {
         const spotlit = spot >= 0 && layout.community[head] === spot
           && layout.community[tail] === spot;
         const pathLit = layout.pathEdge[at] === 1;
-        let alpha = 1;
+        /* 쉬는 옷은 한 함수(`knowledgeRestingEdgeInk`)가 고른다 — 내보내기가 같은 손으로 읽는다. */
+        const resting = knowledgeRestingEdgeInk(palette, tuning, layout, model, at, focused);
+        let alpha = lit || (pathed && pathLit) ? 1 : resting.opacity;
         if (tracing && !lit) alpha = Math.min(alpha, far);
-        if (focused && !focusLit) alpha = Math.min(alpha, dim);
+        if (!local && focused && !focusLit) alpha = Math.min(alpha, dim);
         if (searching && searchOn && !match) alpha = Math.min(alpha, dim);
         if (sliced && (layout.sliceMatch[head] === 0 || layout.sliceMatch[tail] === 0)) {
           alpha = Math.min(alpha, dim);
         }
         if (spotlight && !spotlit) alpha = Math.min(alpha, dim);
         if (pathed && !pathLit) alpha = Math.min(alpha, dim);
-        /* 쉬는 옷은 한 함수(`knowledgeRestingEdgeInk`)가 고른다 — 내보내기가 같은 손으로 읽는다. */
-        const resting = knowledgeRestingEdgeInk(palette, tuning, layout, model, at);
         let ink = resting.ink;
         let inkAt = resting.inkAt;
         let width = resting.width;
         const dash = resting.dash;
-        if (lit || (focused && focusLit)) {
+        if (lit || (!local && focused && focusLit)) {
           ink = palette.litEdge;
           inkAt = 0;
           width = tuning.edgeLitWidth;
@@ -1335,6 +1487,11 @@ function makeKnowledgeGlPainter() {
       const palette = this.palette;
       const tuning = layout.tuning;
       let discs = 0;
+      /* 주변 탐색에는 전체 지도의 성운이 없다 — 견본의 `display`가 그렇게 말하면 한 장도 없다. */
+      if (layout.ring !== null && !palette.local.discs) {
+        this.counts.discs = 0;
+        return;
+      }
       for (let rank = 0; rank < layout.namedCount; rank += 1) {
         if (layout.clusterTally[rank] === 0) continue;
         const hue = layout.communityHue[rank];
@@ -1427,6 +1584,9 @@ function makeKnowledgeGlPainter() {
         const said = knowledgeShortWord(titles[at], tuning.labelMax)
           + (fold > 0 ? ` +${fold}` : "");
         if (word.textContent !== said) word.textContent = said;
+        /* 주변 탐색의 중심 이름 — SVG의 `is-selected .knowledge-label`과 같은 옷(더 크고, 몸 아래로). */
+        const centre = layout.ring !== null && at === layout.ring.seat;
+        if (word.classList.contains("is-centre") !== centre) word.classList.toggle("is-centre", centre);
         /* 이름을 누르면 그 점이 골라진다 — SVG에서 이름이 점의 <g> 안에 있는 것과
          * 같은 손(`knowledgeUnder`가 이 열쇠를 읽는다). */
         const key = layout.model.keys[at];
@@ -1478,6 +1638,8 @@ function makeKnowledgeGlPainter() {
       this.labels?.remove();
       this.palette?.swatches?.host.remove();
       this.palette?.swatches?.tracing?.remove();
+      this.palette?.swatches?.local?.host.remove();
+      this.palette?.swatches?.local?.focusHost.remove();
       view?.querySelector(".knowledge-picture")?.classList.remove("is-gl");
       this.gl = null;
       this.renderer = null;

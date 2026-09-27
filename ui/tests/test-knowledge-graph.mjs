@@ -4407,6 +4407,140 @@ ok("switching the theme repaints the GL picture as a fresh paint in that theme (
     && themeRuns.filter((run) => run.mode === "local").length === 2,
   JSON.stringify(themeRuns));
 
+/* 주변 탐색은 두 손이 같은 문법으로 그린다(t-11500). SVG의 `is-local` 절은 성운(전체 지도의 배경
+ * 원)을 숨기고, 중심에 닿는 바퀴살만 또렷하게 두고 이웃끼리 잇는 선은 옅게 두며, 점을 군집의
+ * 색으로 칠하고 중심을 키워 후광을 두른다. 같은 장면을 두 손으로 세워 SVG가 계산한 옷과 GL이
+ * 올린 바이트를 선마다·점마다 견준다. 옛 GL은 성운을 그렸고 모든 선을 한 옷으로 그렸다. */
+const localGrammar = await glPage.evaluate(async () => {
+  try {
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+    const settle = async () => {
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      /* 점과 선의 옷은 전이(`--motion-fast`)로 바뀐다 — 끝난 값을 읽는다. */
+      await new Promise((done) => setTimeout(done, 400));
+    };
+    knowledgeQuery = "";
+    knowledgeSelectedKey = null;
+    knowledgeClusterPicked = -1;
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    const answer = window.__buildVaultGraph__({ path: "/scene/local-grammar", sources: false },
+      { pages: 160, ghosts: 12, linksPer: 3, tags: ["core", "reading", "tools"] });
+    knowledgeLayouts.delete(view);
+    const host = view.querySelector(".knowledge-nodes");
+    host.dataset.knowledgeSignature = "";
+    host.dataset.knowledgeVault = "";
+    host.replaceChildren();
+    view.querySelector(".knowledge-edges").replaceChildren();
+    noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+    setKnowledgeMode(view, "global", { paint: false });
+    knowledgePainterKind = "svg";
+    knowledgeReport = answer;
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 1200 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+    setKnowledgeMode(view, "local", { paint: false });
+    await paintKnowledgeView();
+    await settle();
+    const layout = knowledgeLayouts.get(view);
+    const ink = (word, opacity = 1) => {
+      const into = new Float32Array(4);
+      knowledgeGlColor(word, into, 0);
+      into[3] *= opacity;
+      return [...into];
+    };
+    /* SVG의 답: 계산된 옷. */
+    const svgEdges = new Map();
+    for (let at = 0; at < layout.model.edgeCount; at += 1) {
+      const line = knowledgeEdgeLine(layout, at);
+      if (line === null) continue;
+      const style = getComputedStyle(line);
+      svgEdges.set(at, { ink: ink(style.stroke, Number.parseFloat(style.opacity)),
+        width: Number.parseFloat(style.strokeWidth),
+        spoke: line.classList.contains("is-spoke") });
+    }
+    const centre = layout.ring.seat;
+    const svgNodes = new Map();
+    for (let at = 0; at < layout.count; at += 1) {
+      const dot = layout.nodeEls[at]?.querySelector(".knowledge-dot");
+      if (dot === undefined || dot === null || layout.model.kinds[at] !== "page") continue;
+      const style = getComputedStyle(dot);
+      svgNodes.set(at, { fill: ink(style.fill), stroke: ink(style.stroke) });
+    }
+    const centreDot = getComputedStyle(layout.nodeEls[centre].querySelector(".knowledge-dot"));
+    const centreScale = new DOMMatrix(centreDot.transform).a;
+    const centreHalo = getComputedStyle(layout.nodeEls[centre].querySelector(".knowledge-halo")).display;
+    const nebula = view.querySelector(".knowledge-picture .knowledge-nebula");
+    const svgNebula = nebula === null ? "none" : getComputedStyle(nebula).display;
+    /* GL의 답: 올린 바이트. */
+    knowledgePainterKind = "gl";
+    await paintKnowledgeView();
+    await settle();
+    const painter = knowledgePainters.get(view);
+    const near = (one, two, slack) => one.every((value, at) => Math.abs(value - two[at]) <= slack);
+    const byte = 2.5 / 255;
+    let edgeMisses = 0;
+    const edgeMissed = [];
+    const glWidths = { spoke: new Set(), context: new Set() };
+    for (let seat = 0; seat < painter.counts.edges; seat += 1) {
+      const head = painter.edgeEnds[seat * 2];
+      const tail = painter.edgeEnds[seat * 2 + 1];
+      let at = -1;
+      for (let edge = 0; edge < layout.model.edgeCount; edge += 1) {
+        if (layout.model.from[edge] === head && layout.model.to[edge] === tail && svgEdges.has(edge)) { at = edge; break; }
+      }
+      if (at < 0) continue;
+      const svg = svgEdges.get(at);
+      const gl = [0, 1, 2, 3].map((channel) => painter.edgeInk[seat * 4 + channel] / 255);
+      const width = painter.edgeShape[seat * 4] / 8;
+      glWidths[svg.spoke ? "spoke" : "context"].add(`${width}/${Math.round(gl[3] * 255)}`);
+      if (!near(gl, svg.ink, byte) || Math.abs(width - svg.width) > 1 / 8) {
+        edgeMisses += 1;
+        if (edgeMissed.length < 3) edgeMissed.push({ at, spoke: svg.spoke, svg, gl, width });
+      }
+    }
+    let nodeMisses = 0;
+    const nodeMissed = [];
+    for (let seat = 0; seat < painter.counts.nodes; seat += 1) {
+      const at = painter.nodeSeat[seat];
+      const svg = svgNodes.get(at);
+      if (svg === undefined) continue;
+      const fill = [0, 1, 2, 3].map((channel) => painter.nodeFill[seat * 4 + channel] / 255);
+      const stroke = [0, 1, 2, 3].map((channel) => painter.nodeStroke[seat * 4 + channel] / 255);
+      if (!near(fill, svg.fill, byte) || !near(stroke, svg.stroke, byte)) {
+        nodeMisses += 1;
+        if (nodeMissed.length < 3) nodeMissed.push({ at, centre: at === centre, svg, fill, stroke });
+      }
+    }
+    const centreRadius = painter.seatData[centre * 4 + 3];
+    let centreRing = false;
+    for (let ring = 0; ring < painter.counts.rings; ring += 1) {
+      if (painter.ringSeat[ring] === centre) centreRing = true;
+    }
+    const result = {
+      svgEdges: svgEdges.size, glEdges: painter.counts.edges, edgeMisses, edgeMissed,
+      svgNodes: svgNodes.size, nodeMisses, nodeMissed,
+      glWidths: { spoke: [...glWidths.spoke], context: [...glWidths.context] },
+      svgNebula, glDiscs: painter.counts.discs,
+      centreScale, centreRadius, centreBody: layout.radius[centre], centreHalo, centreRing,
+    };
+    knowledgePainterKind = null;
+    setKnowledgeMode(view, "global", { paint: false });
+    await paintKnowledgeView();
+    return result;
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error) };
+  }
+});
+ok("GL local exploration wears the SVG's grammar: no nebula, spokes apart from context lines, cluster-coloured points, a larger centre with its halo",
+  !localGrammar.thrown && localGrammar.svgNebula === "none" && localGrammar.glDiscs === 0
+    && localGrammar.svgEdges > 10 && localGrammar.edgeMisses === 0
+    && localGrammar.glWidths.spoke.length > 0 && localGrammar.glWidths.context.length > 0
+    && localGrammar.glWidths.spoke.every((row) => !localGrammar.glWidths.context.includes(row))
+    && localGrammar.svgNodes > 5 && localGrammar.nodeMisses === 0
+    && localGrammar.centreScale > 1
+    && Math.abs(localGrammar.centreRadius - localGrammar.centreBody * localGrammar.centreScale) < 0.01
+    && localGrammar.centreHalo !== "none" && localGrammar.centreRing,
+  JSON.stringify(localGrammar));
+
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *
  * 다섯 종류의 점 하나씩을 선 없이 한 줄로 세우고, 같은 자리·같은 크기를 SVG 손과 GL 손으로

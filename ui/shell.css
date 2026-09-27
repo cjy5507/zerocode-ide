@@ -37787,6 +37787,15 @@ details.task-board-section > summary {
   pointer-events: auto;
 }
 
+/* 주변 탐색의 중심 이름 — SVG의 `.is-local .is-selected .knowledge-label`과 같은 토큰. 자리 옮김은
+   `transform`이 쥐고 있어 내려 앉힘은 따로 선 `translate`가 한다(둘은 겹쳐 적용된다). */
+.knowledge-gl-label.is-centre {
+  translate: 0 var(--knowledge-centre-label-shift);
+  color: var(--ink-chalk);
+  font-size: calc(var(--knowledge-label-px) * var(--knowledge-centre-label-scale) * 1px);
+  font-weight: 500;
+}
+
 /* 색을 묻는 견본. 그려지지는 않지만 계산은 된다 — `display: none`이면 브라우저가
    값을 풀어 주지 않는 판이 있어 크기를 0으로 두고 숨긴다. */
 .knowledge-gl-swatch {

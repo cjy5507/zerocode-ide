@@ -8055,9 +8055,9 @@ function knowledgeTab() {
  * 값(`knowledgeGlPalette`) — 창의 옷을 옮겨 적은 것이 아니라 계산된 것이라, 창 밖 브라우저도
  * 같은 잉크를 본다. 옛 답(근거 없는 선)은 싣지 않는다. */
 /* 실수 넷을 CSS 색 낱말로. */
-function knowledgeInkWord(table, at) {
+function knowledgeInkWord(table, at, opacity = 1) {
   const channel = (value) => Math.round(value * 255);
-  const alpha = Math.round(table[at + 3] * 1000) / 1000;
+  const alpha = Math.round(table[at + 3] * opacity * 1000) / 1000;
   return `rgba(${channel(table[at])}, ${channel(table[at + 1])}, ${channel(table[at + 2])}, ${alpha})`;
 }
 
@@ -8102,15 +8102,16 @@ function collectKnowledgeExport(view, layout) {
   }
   const edges = [];
   const legend = new Map();
+  const focused = view.querySelector(".knowledge-picture").classList.contains("is-focused");
   for (let at = 0; at < model.edgeCount; at += 1) {
     if (layout.drawnEdge !== null && layout.drawnEdge[at] === 0) continue;
     const from = seatOf[model.from[at]];
     const to = seatOf[model.to[at]];
     const road = KNOWLEDGE_EDGE_PROVENANCES[model.provenance[at]]?.id;
     if (from < 0 || to < 0 || road === undefined) continue;
-    const ink = knowledgeRestingEdgeInk(palette, tuning, layout, model, at);
+    const ink = knowledgeRestingEdgeInk(palette, tuning, layout, model, at, focused);
     const kind = KNOWLEDGE_EDGE_KINDS[model.kind[at]];
-    const word = knowledgeInkWord(ink.ink, ink.inkAt);
+    const word = knowledgeInkWord(ink.ink, ink.inkAt, ink.opacity);
     edges.push({ from, to, kind, provenance: road, ink: word, width: ink.width, dash: ink.dash,
       directed: KNOWLEDGE_EDGE_DIRECTED.includes(kind) });
     if (!legend.has(kind)) legend.set(kind, { kind, ink: word, dash: ink.dash });
@@ -8123,6 +8124,8 @@ function collectKnowledgeExport(view, layout) {
   const vault = knowledgeReport?.vault ?? "";
   palette.swatches.host.remove();
   palette.swatches.tracing.remove();
+  palette.swatches.local.host.remove();
+  palette.swatches.local.focusHost.remove();
   return {
     title: t("knowledge.exportTitle", "{{vault}} 지식 그래프", { vault: vault.split("/").filter(Boolean).pop() ?? vault }),
     vault,
