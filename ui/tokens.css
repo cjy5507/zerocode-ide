@@ -1680,6 +1680,11 @@
   --knowledge-label-budget-middle: 34;
   --knowledge-label-budget-compact: 22;
   --knowledge-label-budget-tiny: 12;
+  /* 확대하면 이름이 선다(09-28). budget은 배율에 비례해 자라고, 이 배율부터 이름은
+     남의 점을 덮어도 된다 — 남의 이름은 여전히 덮지 않고, 이름표의 테두리가 점
+     위에서도 글자를 읽히게 한다. 이 배율 아래의 전체 지도에서는 이름 없는 군집의 쪽과
+     유령(바깥 띠의 부스러기)이 budget을 쓰지 않는다. */
+  --knowledge-label-cover-zoom: 1.5;
   /* 한글은 한 글자가 한 몸, 로마자는 그 절반 남짓 — 이름표의 폭을 DOM에 묻지
      않고 글자에서 어림하는 계수(em). 재기 위해 레이아웃을 강제하면 한 프레임에
      사백 번의 동기 리플로가 된다. */

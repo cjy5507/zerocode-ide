@@ -4243,6 +4243,104 @@ ok("P1 G2: where WebGL2 stands the window draws with GL on its own — nothing p
 await measureKnowledgeSupplyParity(glPage, ok);
 await measureKnowledgeSupplyScene(glPage, ok, { painter: "gl" });
 
+/* 확대하면 이름이 선다(09-28, `placeKnowledgeLabels`). 같은 판을 두 손으로 배율 1과 2에서
+ * 세운다. 배율 1에서는 두 손이 같은 격자의 답을 입는다. 이름표가 모든 점 위에 서는 GL 손은
+ * 확대한 판에서 이름이 남의 점을 덮어도 되므로 제 배율 1보다, 그리고 같은 배율의 SVG 손보다
+ * 많은 이름을 세운다 — 어느 손도 이름끼리는 덮지 않고, 예산(배율에 비례)을 넘지 않는다.
+ * 제목은 실제 볼트처럼 문장이고(짧은 이름은 점 사이에도 선다), 이름 없는 군집의 쪽들이 바깥
+ * 띠에 선다 — 배율 1의 전체 지도에서 그 쪽들은 예산을 쓰지 않는다(옛 격자는 같은 판에서 이름
+ * 40개 중 36개를 띠에 세웠다). 판은 공급망 장면과 같은 넓은 창이다. */
+const zoomSeat = glPage.viewportSize();
+await glPage.setViewportSize({ width: 1998, height: 1069 });
+const zoomNames = await glPage.evaluate(async () => {
+  try {
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    setKnowledgeMode(view, "global", { paint: false });
+    knowledgeSelectedKey = null;
+    knowledgeQuery = "";
+    const pages = 400;
+    const answer = window.__buildVaultGraph__({ path: "/scene/zoom-names", sources: false }, {
+      pages, ghosts: 10, linksPer: 3, tags: ["core", "reading", "tools"],
+      titles: Array.from({ length: pages }, (unused, at) => `개념 ${at}의 제목은 문장이라 점 사이에 서기 어렵다`),
+    });
+    for (let at = 0; at < 12; at += 1) {
+      answer.graph.nodes.push({ ...answer.graph.nodes[0], id: `wiki/Alone-${at}.md`, title: `홀로 선 쪽 ${at}` });
+    }
+    answer.graph.pages += 12;
+    knowledgeLayouts.delete(view);
+    const host = view.querySelector(".knowledge-nodes");
+    host.dataset.knowledgeSignature = "";
+    host.dataset.knowledgeVault = "";
+    host.replaceChildren();
+    view.querySelector(".knowledge-edges").replaceChildren();
+    /* 새 볼트의 첫 방문은 주변 탐색이다(t-4140 S2) — 이 판이 묻는 것은 전체 지도다. */
+    noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+    knowledgeReport = answer;
+    knowledgeAskedAt = Date.now();
+    const read = () => {
+      const layout = knowledgeLayouts.get(view);
+      const { count, labelShown, community, namedCount, labelAtX, labelAtY, labelEm, tuning } = layout;
+      const kinds = layout.model.kinds;
+      const boxes = [];
+      let named = 0;
+      let strays = 0;
+      let strayNamed = 0;
+      for (let at = 0; at < count; at += 1) {
+        const stray = community[at] >= namedCount && (kinds[at] === "page" || kinds[at] === "ghost");
+        if (stray) strays += 1;
+        if (labelShown[at] !== 1) continue;
+        named += 1;
+        if (stray) strayNamed += 1;
+        const half = (labelEm[at] * tuning.labelPx) / 2;
+        boxes.push([labelAtX[at] - half, labelAtY[at] - tuning.labelPx / 2,
+          labelAtX[at] + half, labelAtY[at] + tuning.labelPx / 2]);
+      }
+      let overlaps = 0;
+      for (let left = 0; left < boxes.length; left += 1) {
+        for (let right = left + 1; right < boxes.length; right += 1) {
+          const one = boxes[left];
+          const two = boxes[right];
+          if (one[0] < two[2] && two[0] < one[2] && one[1] < two[3] && two[1] < one[3]) overlaps += 1;
+        }
+      }
+      const budget = Math.round(tuning.labelBudget[view.dataset.knowledgeTier ?? "wide"] * layout.zoom);
+      return { painter: knowledgePainterFor(view).id, ring: layout.ring !== null, count, zoom: layout.zoom,
+        named, budget, strays, strayNamed, overlaps };
+    };
+    const at = async (hand, zoom) => {
+      knowledgePainterKind = hand;
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 1200 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+      const layout = knowledgeLayouts.get(view);
+      if (zoom === 1) fitKnowledgeGraph(view, layout);
+      else takeKnowledgeZoom(view, layout, zoom);
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      return read();
+    };
+    const rows = [await at("svg", 1), await at("gl", 1), await at("svg", 2), await at("gl", 2)];
+    knowledgePainterKind = null;
+    fitKnowledgeGraph(view, knowledgeLayouts.get(view));
+    await paintKnowledgeView();
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error) };
+  }
+});
+await glPage.setViewportSize(zoomSeat);
+{
+  const [svgFit, glFit, svgZoomed, glZoomed] = zoomNames.rows ?? [];
+  ok("zooming in names more of the map: GL names may cover other points but never other names, and the rim's pages stay quiet at the overview",
+    !zoomNames.thrown
+      && zoomNames.rows.every((row) => !row.ring && row.overlaps === 0 && row.named <= row.budget)
+      && svgFit.painter === "svg" && glFit.painter === "gl" && glZoomed.zoom === 2
+      && svgFit.named === glFit.named
+      && glZoomed.named > glFit.named && glZoomed.named > svgZoomed.named
+      && svgFit.strays > 0 && svgFit.strayNamed === 0 && glFit.strayNamed === 0,
+    JSON.stringify(zoomNames));
+}
+
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *
  * 다섯 종류의 점 하나씩을 선 없이 한 줄로 세우고, 같은 자리·같은 크기를 SVG 손과 GL 손으로
