@@ -118,3 +118,5 @@ root:shell_path::tests::a_real_shell_is_read_and_a_stuck_one_is_killed
 # (frame p95 33 ms at load 22–30; red four times that day in whole runs, 5/6 green alone, the lane judged it solo 3/3 green
 # on 1d39dee7 — see unlisted.txt). Under load the frame loop stretches; the check counts writes per frame.
 ui:the workspace spinner writes its four dots once a step, not once a frame
+zo:a_verifier_is_watched_over_a_file_its_tree_holds_that_the_index_let_go_of
+zo:a_verifier_names_the_source_it_read_from_its_start_and_never_one_it_did_not_see
