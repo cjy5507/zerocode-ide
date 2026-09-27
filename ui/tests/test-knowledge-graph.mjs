@@ -4335,11 +4335,524 @@ await glPage.setViewportSize(zoomSeat);
     !zoomNames.thrown
       && zoomNames.rows.every((row) => !row.ring && row.overlaps === 0 && row.named <= row.budget)
       && svgFit.painter === "svg" && glFit.painter === "gl" && glZoomed.zoom === 2
-      && svgFit.named === glFit.named
+      /* 배율 1에서 GL은 SVG만큼은 이름을 세운다 — 같지는 않다: GL의 주제 이름판은 부스러기 점 위에도
+       * 서므로(t-11500) 이름판이 남긴 자리가 두 손에서 다르다. */
+      && glFit.named >= svgFit.named
       && glZoomed.named > glFit.named && glZoomed.named > svgZoomed.named
       && svgFit.strays > 0 && svgFit.strayNamed === 0 && glFit.strayNamed === 0,
     JSON.stringify(zoomNames));
 }
+
+/* 테마를 바꾸면 GL 손의 그림도 바뀐다(t-11500). SVG는 스타일시트가 곧 옷이라 저절로 따라오지만,
+ * GL의 점·선은 견본에게 물어 바이트로 올린 색이다 — 창의 테마 단추 길(`setTheme`) 한 번 뒤에
+ * 아무도 건드리지 않은 그림이, 같은 장면·같은 카메라를 그 테마로 처음부터 그린 그림과 픽셀까지
+ * 같아야 한다. 두 방향, 전체 지도와 주변 탐색. 옛 코드는 넷 모두에서 다른 그림이었다(점·선이
+ * 앞 테마의 색으로 남았다 — 카메라를 움직여도). */
+const themeScene = async (mode, from) => glPage.evaluate(async ({ mode, from }) => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  setTheme(from);
+  knowledgePainterKind = "gl";
+  knowledgeQuery = "";
+  knowledgeSelectedKey = null;
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const answer = window.__buildVaultGraph__({ path: `/scene/theme-${mode}`, sources: false },
+    { pages: 160, ghosts: 12, linksPer: 3, tags: ["core", "reading", "tools"] });
+  knowledgeLayouts.delete(view);
+  const host = view.querySelector(".knowledge-nodes");
+  host.dataset.knowledgeSignature = "";
+  host.dataset.knowledgeVault = "";
+  host.replaceChildren();
+  view.querySelector(".knowledge-edges").replaceChildren();
+  noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+  setKnowledgeMode(view, "global", { paint: false });
+  knowledgeReport = answer;
+  await paintKnowledgeView();
+  for (let wait = 0; wait < 1200 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+  if (mode === "local") {
+    setKnowledgeMode(view, "local", { paint: false });
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 1200 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+  }
+  await paintKnowledgeView();
+  for (let wait = 0; wait < 3; wait += 1) await frame();
+  return { painter: knowledgePainterFor(view).id, mode: knowledgeMode };
+}, { mode, from });
+/* 전이가 끝난 뒤의 **GL 층** — 캔버스 위의 HTML·SVG 층(범례, 배율 단추, 알림, 이름판의 <svg>, 이름표
+ * 오버레이)은 숨기고 찍는다. 그 층들은 스타일시트가 곧 옷이라 이 결함과 무관하고, 범례 점의 가장자리
+ * 한 픽셀이 합성의 반올림으로 한 단계 달라지는 일이 있다(실측 Chromium: GL 층은 0, 범례 점 1픽셀). 끝이
+ * 있는 애니메이션(테마가 건 CSS 전이)도 다 끝나기를 기다린다. */
+const themeShot = async () => {
+  await glPage.waitForTimeout(700);
+  await glPage.evaluate(() => Promise.all(document.getAnimations()
+    .filter((one) => Number.isFinite(one.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY))
+    .map((one) => one.finished.catch(() => null))));
+  const layers = ".knowledge-cluster-legend, .knowledge-zoom, .knowledge-error, .knowledge-crumb, .knowledge-legend,"
+    + " .knowledge-picture, .knowledge-gl-labels";
+  await glPage.evaluate((layers) => {
+    for (const one of document.querySelectorAll(layers)) one.style.visibility = "hidden";
+    return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  }, layers);
+  const shot = await glPage.locator(".knowledge-view:not([hidden]) .knowledge-canvas").screenshot();
+  await glPage.evaluate((layers) => {
+    for (const one of document.querySelectorAll(layers)) one.style.visibility = "";
+  }, layers);
+  return shot;
+};
+const themeRuns = [];
+for (const mode of ["global", "local"]) {
+  for (const [from, to] of [["dark", "light"], ["light", "dark"]]) {
+    const scene = await themeScene(mode, from);
+    await glPage.evaluate(async (to) => {
+      setTheme(to);
+      for (let wait = 0; wait < 10; wait += 1) await new Promise((done) => requestAnimationFrame(done));
+    }, to);
+    const switched = await themeShot();
+    /* 처음 그린 그림: GL 손을 놓고 새로 세운다 — 새 손은 새 테마의 견본을 처음 묻는다(자리·카메라는 판의 것이라 그대로). */
+    await glPage.evaluate(async () => {
+      knowledgePainterKind = "svg";
+      await paintKnowledgeView();
+      knowledgePainterKind = "gl";
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await new Promise((done) => requestAnimationFrame(done));
+    });
+    const fresh = await themeShot();
+    themeRuns.push({ ...scene, from, to, same: switched.equals(fresh) });
+  }
+}
+await glPage.evaluate(() => setTheme("dark"));
+ok("switching the theme repaints the GL picture as a fresh paint in that theme (both ways, overview and local)",
+  themeRuns.length === 4 && themeRuns.every((run) => run.painter === "gl" && run.same)
+    && themeRuns.filter((run) => run.mode === "local").length === 2,
+  JSON.stringify(themeRuns));
+
+/* 주변 탐색은 두 손이 같은 문법으로 그린다(t-11500). SVG의 `is-local` 절은 성운(전체 지도의 배경
+ * 원)을 숨기고, 중심에 닿는 바퀴살만 또렷하게 두고 이웃끼리 잇는 선은 옅게 두며, 점을 군집의
+ * 색으로 칠하고 중심을 키워 후광을 두른다. 같은 장면을 두 손으로 세워 SVG가 계산한 옷과 GL이
+ * 올린 바이트를 선마다·점마다 견준다. 옛 GL은 성운을 그렸고 모든 선을 한 옷으로 그렸다. */
+const localGrammar = await glPage.evaluate(async () => {
+  try {
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+    const settle = async () => {
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      /* 점과 선의 옷은 전이(`--motion-fast`)로 바뀐다 — 끝난 값을 읽는다. */
+      await new Promise((done) => setTimeout(done, 400));
+    };
+    knowledgeQuery = "";
+    knowledgeSelectedKey = null;
+    knowledgeClusterPicked = -1;
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    const answer = window.__buildVaultGraph__({ path: "/scene/local-grammar", sources: false },
+      { pages: 160, ghosts: 12, linksPer: 3, tags: ["core", "reading", "tools"] });
+    knowledgeLayouts.delete(view);
+    const host = view.querySelector(".knowledge-nodes");
+    host.dataset.knowledgeSignature = "";
+    host.dataset.knowledgeVault = "";
+    host.replaceChildren();
+    view.querySelector(".knowledge-edges").replaceChildren();
+    noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+    setKnowledgeMode(view, "global", { paint: false });
+    knowledgePainterKind = "svg";
+    knowledgeReport = answer;
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 1200 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+    setKnowledgeMode(view, "local", { paint: false });
+    await paintKnowledgeView();
+    await settle();
+    const layout = knowledgeLayouts.get(view);
+    const ink = (word, opacity = 1) => {
+      const into = new Float32Array(4);
+      knowledgeGlColor(word, into, 0);
+      into[3] *= opacity;
+      return [...into];
+    };
+    /* SVG의 답: 계산된 옷. */
+    const svgEdges = new Map();
+    for (let at = 0; at < layout.model.edgeCount; at += 1) {
+      const line = knowledgeEdgeLine(layout, at);
+      if (line === null) continue;
+      const style = getComputedStyle(line);
+      svgEdges.set(at, { ink: ink(style.stroke, Number.parseFloat(style.opacity)),
+        width: Number.parseFloat(style.strokeWidth),
+        spoke: line.classList.contains("is-spoke") });
+    }
+    const centre = layout.ring.seat;
+    const svgNodes = new Map();
+    for (let at = 0; at < layout.count; at += 1) {
+      const dot = layout.nodeEls[at]?.querySelector(".knowledge-dot");
+      if (dot === undefined || dot === null || layout.model.kinds[at] !== "page") continue;
+      const style = getComputedStyle(dot);
+      svgNodes.set(at, { fill: ink(style.fill), stroke: ink(style.stroke) });
+    }
+    const centreDot = getComputedStyle(layout.nodeEls[centre].querySelector(".knowledge-dot"));
+    const centreScale = new DOMMatrix(centreDot.transform).a;
+    const centreHalo = getComputedStyle(layout.nodeEls[centre].querySelector(".knowledge-halo")).display;
+    const nebula = view.querySelector(".knowledge-picture .knowledge-nebula");
+    const svgNebula = nebula === null ? "none" : getComputedStyle(nebula).display;
+    /* GL의 답: 올린 바이트. */
+    knowledgePainterKind = "gl";
+    await paintKnowledgeView();
+    await settle();
+    const painter = knowledgePainters.get(view);
+    const near = (one, two, slack) => one.every((value, at) => Math.abs(value - two[at]) <= slack);
+    const byte = 2.5 / 255;
+    let edgeMisses = 0;
+    const edgeMissed = [];
+    const glWidths = { spoke: new Set(), context: new Set() };
+    for (let seat = 0; seat < painter.counts.edges; seat += 1) {
+      const head = painter.edgeEnds[seat * 2];
+      const tail = painter.edgeEnds[seat * 2 + 1];
+      let at = -1;
+      for (let edge = 0; edge < layout.model.edgeCount; edge += 1) {
+        if (layout.model.from[edge] === head && layout.model.to[edge] === tail && svgEdges.has(edge)) { at = edge; break; }
+      }
+      if (at < 0) continue;
+      const svg = svgEdges.get(at);
+      const gl = [0, 1, 2, 3].map((channel) => painter.edgeInk[seat * 4 + channel] / 255);
+      const width = painter.edgeShape[seat * 4] / 8;
+      glWidths[svg.spoke ? "spoke" : "context"].add(`${width}/${Math.round(gl[3] * 255)}`);
+      if (!near(gl, svg.ink, byte) || Math.abs(width - svg.width) > 1 / 8) {
+        edgeMisses += 1;
+        if (edgeMissed.length < 3) edgeMissed.push({ at, spoke: svg.spoke, svg, gl, width });
+      }
+    }
+    let nodeMisses = 0;
+    const nodeMissed = [];
+    for (let seat = 0; seat < painter.counts.nodes; seat += 1) {
+      const at = painter.nodeSeat[seat];
+      const svg = svgNodes.get(at);
+      if (svg === undefined) continue;
+      const fill = [0, 1, 2, 3].map((channel) => painter.nodeFill[seat * 4 + channel] / 255);
+      const stroke = [0, 1, 2, 3].map((channel) => painter.nodeStroke[seat * 4 + channel] / 255);
+      if (!near(fill, svg.fill, byte) || !near(stroke, svg.stroke, byte)) {
+        nodeMisses += 1;
+        if (nodeMissed.length < 3) nodeMissed.push({ at, centre: at === centre, svg, fill, stroke });
+      }
+    }
+    const centreRadius = painter.seatData[centre * 4 + 3];
+    let centreRing = false;
+    for (let ring = 0; ring < painter.counts.rings; ring += 1) {
+      if (painter.ringSeat[ring] === centre) centreRing = true;
+    }
+    const result = {
+      svgEdges: svgEdges.size, glEdges: painter.counts.edges, edgeMisses, edgeMissed,
+      svgNodes: svgNodes.size, nodeMisses, nodeMissed,
+      glWidths: { spoke: [...glWidths.spoke], context: [...glWidths.context] },
+      svgNebula, glDiscs: painter.counts.discs,
+      centreScale, centreRadius, centreBody: layout.radius[centre], centreHalo, centreRing,
+    };
+    knowledgePainterKind = null;
+    setKnowledgeMode(view, "global", { paint: false });
+    await paintKnowledgeView();
+    return result;
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error) };
+  }
+});
+ok("GL local exploration wears the SVG's grammar: no nebula, spokes apart from context lines, cluster-coloured points, a larger centre with its halo",
+  !localGrammar.thrown && localGrammar.svgNebula === "none" && localGrammar.glDiscs === 0
+    && localGrammar.svgEdges > 10 && localGrammar.edgeMisses === 0
+    && localGrammar.glWidths.spoke.length > 0 && localGrammar.glWidths.context.length > 0
+    && localGrammar.glWidths.spoke.every((row) => !localGrammar.glWidths.context.includes(row))
+    && localGrammar.svgNodes > 5 && localGrammar.nodeMisses === 0
+    && localGrammar.centreScale > 1
+    && Math.abs(localGrammar.centreRadius - localGrammar.centreBody * localGrammar.centreScale) < 0.01
+    && localGrammar.centreHalo !== "none" && localGrammar.centreRing,
+  JSON.stringify(localGrammar));
+
+/* 주제의 이름판은 그리는 글자만큼 자리를 쥔다(t-11500). 쪽 수 줄은 이름표가 판 다음에 앉은 뒤에야
+ * 「48쪽 · 이름 +48」이 되므로, 판이 설 때 「48쪽」으로 재면 그린 줄의 대부분이 격자가 모르는 칸에
+ * 선다(옛 코드: 선 판 모두). 판이 그린 줄마다 그 가운데 줄의 칸이 모두 이번 격자에 쥐어졌는지,
+ * 판의 줄끼리·판과 이름이 겹치지 않는지, 세 줄이 설 곳 없는 판이 접히는 대신 한 줄로 서는지를
+ * 두 손에서 묻는다 — 판 여섯·스물(넓은 판)과 빽빽한 좁은 판. */
+const plateScene = (tags, pages) => glPage.evaluate(async ({ tags, pages }) => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const rows = [];
+  try {
+    for (const hand of ["svg", "gl"]) {
+      knowledgePainterKind = hand;
+      knowledgeQuery = "";
+      knowledgeSelectedKey = null;
+      knowledgeClusterPicked = -1;
+      const answer = window.__buildVaultGraph__({ path: `/scene/plates-${tags}`, sources: false },
+        { pages, ghosts: 30, linksPer: 3, tags: Array.from({ length: tags }, (unused, at) => `topic-${at}`) });
+      knowledgeLayouts.delete(view);
+      const host = view.querySelector(".knowledge-nodes");
+      host.dataset.knowledgeSignature = "";
+      host.dataset.knowledgeVault = "";
+      host.replaceChildren();
+      view.querySelector(".knowledge-edges").replaceChildren();
+      noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+      setKnowledgeMode(view, "global", { paint: false });
+      knowledgeReport = answer;
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 1500 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+      const layout = knowledgeLayouts.get(view);
+      fitKnowledgeGraph(view, layout);
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const canvas = view.querySelector(".knowledge-canvas").getBoundingClientRect();
+      const cell = Math.max(1, layout.tuning.labelCell);
+      const { labelCells, labelCols, labelRows, labelGeneration } = layout;
+      const lines = [];
+      let unreserved = 0;
+      let standing = 0;
+      let oneLine = 0;
+      let folded = 0;
+      for (let rank = 0; rank < layout.namedCount; rank += 1) {
+        const held = layout.clusterEls[rank];
+        if (!held || layout.clusterTally[rank] === 0) continue;
+        if (held.label.classList.contains("is-folded")) {
+          folded += 1;
+          continue;
+        }
+        standing += 1;
+        if (held.label.classList.contains("is-one-line")) oneLine += 1;
+        for (const line of held.label.querySelectorAll(
+          ".knowledge-cluster-name, .knowledge-cluster-lead, .knowledge-cluster-count")) {
+          if (getComputedStyle(line).display === "none") continue;
+          const seat = line.getBoundingClientRect();
+          if (seat.width === 0) continue;
+          lines.push({ rank, box: [seat.left, seat.top, seat.right, seat.bottom] });
+          /* 그 줄의 가운데 줄의 칸 — 글자가 서는 모든 칸이 이번 격자에 쥐어져 있어야 한다. */
+          const row = Math.floor(((seat.top + seat.bottom) / 2 - canvas.top) / cell);
+          for (let col = Math.floor((seat.left + 1 - canvas.left) / cell);
+            col <= Math.floor((seat.right - 1 - canvas.left) / cell); col += 1) {
+            if (row < 0 || col < 0 || row >= labelRows || col >= labelCols) continue;
+            if (labelCells[row * labelCols + col] !== labelGeneration) unreserved += 1;
+          }
+        }
+      }
+      const hit = (one, two) => one[2] - two[0] > 0.5 && two[2] - one[0] > 0.5
+        && one[3] - two[1] > 0.5 && two[3] - one[1] > 0.5;
+      let overlaps = 0;
+      for (let one = 0; one < lines.length; one += 1) {
+        for (let two = one + 1; two < lines.length; two += 1) {
+          if (lines[one].rank !== lines[two].rank && hit(lines[one].box, lines[two].box)) overlaps += 1;
+        }
+      }
+      const words = [...view.querySelectorAll(".knowledge-node.is-named .knowledge-label, .knowledge-gl-label:not([hidden])")]
+        .map((word) => {
+          const seat = word.getBoundingClientRect();
+          return [seat.left, seat.top, seat.right, seat.bottom];
+        })
+        .filter((box) => box[2] > box[0]);
+      for (const line of lines) for (const word of words) if (hit(line.box, word)) overlaps += 1;
+      /* 조작부(범례·배율 단추·빵부스러기)와는 겹치지 않는다. */
+      for (const control of view.querySelectorAll(".knowledge-cluster-legend, .knowledge-zoom, .knowledge-crumb, .knowledge-legend")) {
+        const seat = control.getBoundingClientRect();
+        if (seat.width === 0 || control.hidden || getComputedStyle(control).display === "none") continue;
+        for (const line of lines) if (hit(line.box, [seat.left, seat.top, seat.right, seat.bottom])) overlaps += 1;
+      }
+      /* 판의 줄 아래에 깔린 점: 부스러기(이름 없는 군집의 쪽·유령)만 되고, 그것도 GL에서만(t-11500 E). */
+      let underRim = 0;
+      let underOther = 0;
+      const kinds = layout.model.kinds;
+      for (let at = 0; at < layout.count; at += 1) {
+        if (layout.drawn !== null && layout.drawn[at] === 0) continue;
+        const px = canvas.left + layout.project.screenX(at);
+        const py = canvas.top + layout.project.screenY(at);
+        const body = [px - layout.radius[at], py - layout.radius[at], px + layout.radius[at], py + layout.radius[at]];
+        if (!lines.some((line) => hit(line.box, body))) continue;
+        const rim = layout.community[at] >= layout.namedCount && (kinds[at] === "page" || kinds[at] === "ghost");
+        if (rim) underRim += 1;
+        else underOther += 1;
+      }
+      rows.push({ tags, hand: knowledgePainterFor(view).id, standing, oneLine, folded, unreserved, overlaps,
+        underRim, underOther });
+    }
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error), rows };
+  } finally {
+    knowledgePainterKind = null;
+  }
+}, { tags, pages });
+const plateSeat = glPage.viewportSize();
+const plateSeats = { rows: [] };
+for (const [tags, pages, wide, tall] of [[6, 359, 1280, 860], [20, 600, 1280, 860], [20, 600, 900, 700]]) {
+  await glPage.setViewportSize({ width: wide, height: tall });
+  const scene = await plateScene(tags, pages);
+  if (scene.thrown) plateSeats.thrown = scene.thrown;
+  plateSeats.rows.push(...scene.rows.map((row) => ({ ...row, wide })));
+}
+await glPage.setViewportSize(plateSeat);
+ok("cluster plates reserve the words they wear: every drawn line sits on its own cells, no plate line meets another plate, a name or a control, a plate without room for three lines stands as one, and only GL plates stand over stray dots",
+  !plateSeats.thrown && plateSeats.rows.length === 6
+    && plateSeats.rows.every((row) => row.unreserved === 0 && row.overlaps === 0 && row.standing > 0)
+    && plateSeats.rows.filter((row) => row.wide === 1280).some((row) => row.oneLine > 0)
+    && plateSeats.rows.every((row) => row.underOther === 0 && (row.hand === "gl" || row.underRim === 0)),
+  JSON.stringify(plateSeats));
+
+/* 이름판의 글자는 두 테마에서 바탕과 대비를 지킨다(t-11500 E) — GL의 판은 부스러기 점 위에도 서므로, 글자는
+ * 제 바탕색 테두리 위에 선다: 잴 것은 글자와 판의 바탕. 주제의 이름은 색 칸의 잉크(Test 8과 같은 3:1),
+ * 대표 지식과 쪽 수 줄은 작은 글자의 4.5:1. 색은 Test 8처럼 픽셀로 읽는다. */
+const plateInk = await glPage.evaluate(async () => {
+  const paint = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  const parse = (color) => {
+    const sentinel = "#010203";
+    paint.fillStyle = sentinel;
+    paint.fillStyle = color;
+    if (paint.fillStyle === sentinel) return null;
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillRect(0, 0, 1, 1);
+    const held = paint.getImageData(0, 0, 1, 1).data;
+    return [held[0] / 255, held[1] / 255, held[2] / 255];
+  };
+  const luminance = (color) => {
+    const channels = parse(color);
+    if (!channels) return null;
+    return channels.map((channel) => (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4))
+      .reduce((sum, channel, at) => sum + channel * [0.2126, 0.7152, 0.0722][at], 0);
+  };
+  const ratio = (left, right) => {
+    const a = luminance(left);
+    const b = luminance(right);
+    return a === null || b === null ? 0 : (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  };
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const rows = [];
+  for (const theme of ["dark", "light"]) {
+    setTheme(theme);
+    await new Promise((done) => setTimeout(done, 700));
+    const ground = getComputedStyle(view.querySelector(".knowledge-canvas")).backgroundColor;
+    const layout = knowledgeLayouts.get(view);
+    for (let rank = 0; rank < layout.namedCount; rank += 1) {
+      const label = layout.clusterEls[rank]?.label;
+      if (!label || label.classList.contains("is-folded")) continue;
+      for (const [line, least] of [[".knowledge-cluster-name", 3], [".knowledge-cluster-lead", 4.5],
+        [".knowledge-cluster-count", 4.5]]) {
+        const word = label.querySelector(line);
+        if (!word) continue;
+        const style = getComputedStyle(word);
+        rows.push({ theme, rank, line, least, ratio: Math.round(ratio(style.fill, ground) * 100) / 100,
+          outline: ratio(style.stroke, ground) < 1.01 });
+      }
+    }
+  }
+  setTheme("dark");
+  return rows;
+});
+ok("cluster plate words keep their contrast on the graph ground in both themes, standing on an outline of that ground",
+  plateInk.length > 0 && ["dark", "light"].every((theme) => plateInk.some((row) => row.theme === theme))
+    && plateInk.every((row) => row.ratio >= row.least && row.outline),
+  JSON.stringify(plateInk.filter((row) => row.ratio < row.least || !row.outline).slice(0, 8)));
+
+/* 부스러기 띠는 이름 있는 원반들의 윤곽에 붙는다(t-11500). 원반 둘이 아령처럼 선 볼트(주제 둘 × 120쪽,
+ * 한 가닥으로 이어짐)에 고아 40쪽을 두면, 가장 먼 원반 끝을 반지름으로 한 원 밖에서 띠를 시작하는
+ * 옛 배치는 아령의 옆구리에서 원반 반지름만큼의 빈 땅을 남긴다. 윤곽(원반들의 볼록 껍질 — 지지 함수
+ * h(u) = max(c·u + r))에서 첫 부스러기들까지의 거리가 나선 한 걸음 안이고, 모든 부스러기가 모든
+ * 원반과 여전히 gap 이상 떨어지는지 묻는다. */
+const rimHug = await glPage.evaluate(async () => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  try {
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    const side = 120;
+    const lonely = 40;
+    const customEdges = [];
+    for (const base of [0, side]) {
+      for (let at = 0; at < side; at += 1) {
+        customEdges.push({ from: base + at, to: base + ((at + 1) % side) },
+          { from: base + at, to: base + ((at + 2) % side) });
+      }
+    }
+    customEdges.push({ from: 0, to: side });
+    const answer = window.__buildVaultGraph__({ path: "/scene/rim-hug", sources: false },
+      { pages: side * 2 + lonely, ghosts: 0, tags: ["core", "reading"], customEdges });
+    knowledgeLayouts.delete(view);
+    const host = view.querySelector(".knowledge-nodes");
+    host.dataset.knowledgeSignature = "";
+    host.dataset.knowledgeVault = "";
+    host.replaceChildren();
+    view.querySelector(".knowledge-edges").replaceChildren();
+    noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+    setKnowledgeMode(view, "global", { paint: false });
+    knowledgeReport = answer;
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 1500 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+    const layout = knowledgeLayouts.get(view);
+    const { communityHomeX: homeX, communityHomeY: homeY, communityHomeR: homeR, namedCount: named, tuning } = layout;
+    const ids = homeR.length;
+    let widest = 0;
+    for (let rank = named; rank < ids; rank += 1) widest = Math.max(widest, homeR[rank]);
+    const pitch = 2 * widest + tuning.clusterPitch;
+    let firstExcess = 0;
+    let closest = Number.POSITIVE_INFINITY;
+    for (let rank = named; rank < ids; rank += 1) {
+      const reach = Math.hypot(homeX[rank], homeY[rank]);
+      const alongX = homeX[rank] / reach;
+      const alongY = homeY[rank] / reach;
+      let outline = 0;
+      for (let disc = 0; disc < named; disc += 1) {
+        outline = Math.max(outline, homeX[disc] * alongX + homeY[disc] * alongY + homeR[disc]);
+        closest = Math.min(closest, Math.hypot(homeX[rank] - homeX[disc], homeY[rank] - homeY[disc])
+          - homeR[rank] - homeR[disc]);
+      }
+      /* 첫 여덟 자리(황금각이 판을 한 바퀴 두른다) — 윤곽 밖으로 gap + 가장 큰 부스러기만큼 떨어진 곳이
+       * 첫 줄이고, 나선은 거기서 한 걸음 안에서 자란다. */
+      if (rank - named < 8) firstExcess = Math.max(firstExcess, reach - outline - tuning.clusterGap - widest);
+    }
+    return { named, strays: ids - named, pitch: Math.round(pitch), gap: tuning.clusterGap,
+      firstExcess: Math.round(firstExcess), closest: Math.round(closest) };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error) };
+  }
+});
+ok("the rim of stray pages hugs the named discs' outline, a spiral step at most, and keeps its gap from every disc",
+  !rimHug.thrown && rimHug.named >= 2 && rimHug.strays >= 40
+    && rimHug.firstExcess <= rimHug.pitch && rimHug.closest >= rimHug.gap,
+  JSON.stringify(rimHug));
+
+/* 이웃한 군집은 같은 색을 입지 않는다(t-11500). 색 칸은 여덟이고 주제는 스물 — 순위로 돌려 쓰던
+ * 색은 1·9·17위에게 같은 금색을 입혀 이웃에 세웠다. 원반마다 가장 가까운 이름 있는 원반과 색이
+ * 다른지, 앞의 여덟은 오늘의 색(순위의 칸) 그대로인지 묻는다. 색은 여덟 칸의 토큰에서만 온다 —
+ * 두 테마의 대비는 그 토큰의 시험(Test 8)이 이미 지킨다. */
+const clusterInks = await glPage.evaluate(async () => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  try {
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    const answer = window.__buildVaultGraph__({ path: "/scene/cluster-inks", sources: false },
+      { pages: 600, ghosts: 30, linksPer: 3, tags: Array.from({ length: 20 }, (unused, at) => `topic-${at}`) });
+    knowledgeLayouts.delete(view);
+    const host = view.querySelector(".knowledge-nodes");
+    host.dataset.knowledgeSignature = "";
+    host.dataset.knowledgeVault = "";
+    host.replaceChildren();
+    view.querySelector(".knowledge-edges").replaceChildren();
+    noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+    setKnowledgeMode(view, "global", { paint: false });
+    knowledgeReport = answer;
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 1500 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+    const layout = knowledgeLayouts.get(view);
+    const { communityHomeX: homeX, communityHomeY: homeY, communityHomeR: homeR, communityHue: hue,
+      namedCount: named } = layout;
+    let sameAsNearest = 0;
+    let firstEightMoved = 0;
+    for (let rank = 0; rank < named; rank += 1) {
+      let nearest = -1;
+      let room = Number.POSITIVE_INFINITY;
+      for (let other = 0; other < named; other += 1) {
+        if (other === rank) continue;
+        const gap = Math.hypot(homeX[rank] - homeX[other], homeY[rank] - homeY[other]) - homeR[rank] - homeR[other];
+        if (gap < room) {
+          room = gap;
+          nearest = other;
+        }
+      }
+      if (nearest >= 0 && hue[nearest] === hue[rank]) sameAsNearest += 1;
+      if (rank < 8 && hue[rank] !== rank) firstEightMoved += 1;
+    }
+    const cells = new Set([...hue.slice(0, named)]);
+    return { named, sameAsNearest, firstEightMoved, cells: [...cells].sort() };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error) };
+  }
+});
+ok("neighbouring clusters wear different hues: no disc shares its hue with its nearest named disc, and the first eight keep their colour",
+  !clusterInks.thrown && clusterInks.named > 8 && clusterInks.sameAsNearest === 0
+    && clusterInks.firstEightMoved === 0 && clusterInks.cells.length === 8,
+  JSON.stringify(clusterInks));
 
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *

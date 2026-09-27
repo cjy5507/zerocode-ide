@@ -2999,7 +2999,7 @@ function knowledgeLouvain(count, from, to, weight, edgeCount) {
  * 하나도 없는 군집은 연결이 가장 많은 멤버의 제목을 쓴다. 동률은 이름순 —
  * 이 목록도 그림처럼 결정적이어야 한다. 칩의 색은 그 태그가 가장 많이 사는
  * 군집의 색이다. */
-function knowledgeClusterNames(model, of, size, named) {
+function knowledgeClusterNames(model, of, size, named, hue) {
   const count = model.count;
   const tagShare = new Map();
   for (let at = 0; at < count; at += 1) {
@@ -3059,7 +3059,7 @@ function knowledgeClusterNames(model, of, size, named) {
     for (let rank = 0; rank < named; rank += 1) {
       if (held[rank] > 0 && (home < 0 || held[rank] > held[home])) home = rank;
     }
-    if (home >= 0) tagHue.set(row.tag, home % KNOWLEDGE_HUES);
+    if (home >= 0) tagHue.set(row.tag, hue[home]);
   }
   /* `strongest`는 군집의 **대표 페이지**이기도 하다(09-16): 배치가 그것을 원반의
    * 가운데에 앉히고, 이름표 격자가 이름을 가장 먼저 세운다. 여기서 이미 세었으므로
@@ -3119,17 +3119,44 @@ function knowledgeCommunities(model, tuning) {
   const of = new Int32Array(count);
   for (let at = 0; at < count; at += 1) of[at] = rankOf[membership[at]];
   const size = new Int32Array(ids);
-  const hue = new Int8Array(ids);
   let named = 0;
   for (let rank = 0; rank < ids; rank += 1) {
     size[rank] = pages[order[rank]];
-    const eligible = size[rank] >= KNOWLEDGE_COMMUNITY.minSize;
-    hue[rank] = eligible ? rank % KNOWLEDGE_HUES : -1;
-    if (eligible) named += 1;
+    if (size[rank] >= KNOWLEDGE_COMMUNITY.minSize) named += 1;
   }
   const { homeX, homeY, homed, homeR } = knowledgeClusterHomes(model, of, ids, named, tuning);
-  const { names, tagHue, core } = knowledgeClusterNames(model, of, size, named);
+  const hue = knowledgeClusterHues(ids, named, homeX, homeY, homeR);
+  const { names, tagHue, core } = knowledgeClusterNames(model, of, size, named, hue);
   return { count: ids, of, size, hue, names, homeX, homeY, homed, homeR, named, tagHue, core };
+}
+
+/* 군집의 색 칸(t-11500). 색 칸은 여덟뿐이고(`KNOWLEDGE_HUES`, 토큰이 두 테마에서 대비를 지키는 칸)
+ * 볼트의 주제는 그보다 많다 — 순위로 돌려 쓰면(`순위 % 8`) 1·9·17위가 같은 색이고, 그 셋이 이웃에
+ * 서면 지도가 세 주제를 한 주제로 말한다(실측 200% 범례: 세 군집이 모두 금색). 그래서 순위대로,
+ * 이미 그 색을 입은 원반들과의 가장 가까운 간격(가장자리 사이)이 가장 먼 칸을 고른다. 여덟까지는
+ * 모든 칸이 비어 있어 순위의 칸 그대로이고(오늘의 색), 동률은 순위의 칸부터 차례로 — 난수 없이
+ * 같은 볼트는 같은 색이다. 되풀이되는 색은 지도에서 가장 먼 원반끼리 나눈다. */
+function knowledgeClusterHues(ids, named, homeX, homeY, homeR) {
+  const hue = new Int8Array(ids).fill(-1);
+  for (let rank = 0; rank < named; rank += 1) {
+    let best = rank % KNOWLEDGE_HUES;
+    let bestRoom = Number.NEGATIVE_INFINITY;
+    for (let step = 0; step < KNOWLEDGE_HUES; step += 1) {
+      const cell = (rank + step) % KNOWLEDGE_HUES;
+      let room = Number.POSITIVE_INFINITY;
+      for (let other = 0; other < rank; other += 1) {
+        if (hue[other] !== cell) continue;
+        room = Math.min(room, Math.hypot(homeX[rank] - homeX[other], homeY[rank] - homeY[other])
+          - homeR[rank] - homeR[other]);
+      }
+      if (room > bestRoom) {
+        bestRoom = room;
+        best = cell;
+      }
+    }
+    hue[rank] = best;
+  }
+  return hue;
 }
 
 /* 군집 원반의 자리 (성좌 배치, 09-16).
@@ -3237,30 +3264,36 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
       }
     }
   }
-  /* 이름 없는 군집은 바깥 고리에 — 고리의 반지름은 이름 있는 원반들이 닿는
-   * 가장 먼 자리에서 한 칸 더 나간 곳이고, 고리 위의 자리 사이는 서로의 반지름
-   * 합보다 넓다. */
-  let fringe = 0;
-  for (let rank = 0; rank < named; rank += 1) {
-    fringe = Math.max(fringe, Math.hypot(homeX[rank], homeY[rank]) + homeR[rank]);
-  }
   const strays = ids - named;
   if (strays > 0) {
     /* 이름 없는 군집 — 고아와 그 부스러기 — 은 이름 있는 벌판 바깥의 띠에 황금각
      * 나선으로 앉는다. 한 줄짜리 고리로 두르면 그 고리의 둘레가 티끌의 수에 비례해
      * 자라고, 그림의 크기를 정하는 것이 주제가 아니라 고아가 된다(실측: 천 쪽 중
      * 이백넷이 고아인 판에서 그림의 폭이 12,860 — 스프링 길이의 280배). 나선은
-     * 넓이로 자라므로 그 수가 제곱근으로만 들어온다. */
+     * 넓이로 자라므로 그 수가 제곱근으로만 들어온다.
+     *
+     * 띠는 이름 있는 원반들의 **윤곽**에 붙는다(t-11500). 나선이 가장 먼 원반 끝을 반지름으로
+     * 한 원 밖에서 시작하면, 원반들이 길쭉하게 선 볼트에서 그 원과 원반 사이의 빈 땅만큼 그림이
+     * 커지고 주제는 판의 가운데 작게 선다. 방향마다 원반들이 닿는 가장 먼 거리(지지 함수
+     * h(θ) = max(c·u + r))에서 시작하면 그 빈 땅이 없고, 그 자리에서 원반 중심까지의 거리는
+     * 언제나 h(θ) − c·u + (gap + widest) ≥ r + gap + widest다 — 모든 원반과 여전히 gap
+     * 이상 떨어진다. */
     let widest = 0;
     for (let rank = named; rank < ids; rank += 1) widest = Math.max(widest, homeR[rank]);
     const pitch = 2 * widest + tuning.clusterPitch;
-    const inner = fringe + gap + widest;
     for (let rank = named; rank < ids; rank += 1) {
       const seat = rank - named;
       const angle = seat * KNOWLEDGE_GOLDEN_ANGLE;
+      const alongX = Math.cos(angle);
+      const alongY = Math.sin(angle);
+      let outline = 0;
+      for (let disc = 0; disc < named; disc += 1) {
+        outline = Math.max(outline, homeX[disc] * alongX + homeY[disc] * alongY + homeR[disc]);
+      }
+      const inner = outline + gap + widest;
       const reach = Math.sqrt(inner * inner + (seat * pitch * pitch) / Math.PI);
-      homeX[rank] = Math.cos(angle) * reach;
-      homeY[rank] = Math.sin(angle) * reach;
+      homeX[rank] = alongX * reach;
+      homeY[rank] = alongY * reach;
     }
   }
   return { homeX, homeY, homed, homeR };
@@ -3299,7 +3332,8 @@ function knowledgeLayout(view, model) {
   }
   if (held?.signature === model.signature) {
     if (held.model !== model) {
-      const names = knowledgeClusterNames(model, held.community, held.communitySize, held.namedCount);
+      const names = knowledgeClusterNames(model, held.community, held.communitySize, held.namedCount,
+        held.communityHue);
       held.communityNames = names.names;
       held.tagHue = names.tagHue;
       /* 같은 위상이면 차수도 같으므로 대표 페이지는 그대로다 — 제목만 새로 읽는다. */
@@ -3436,6 +3470,8 @@ function knowledgeLayout(view, model) {
      * 값을 내지 않는다). */
     labelCells: null,
     labelOwner: null,
+    /* 이름판이 덮어도 되는 점(부스러기)의 표 — 격자가 프레임마다 다시 채운다(`placeKnowledgeLabels`). */
+    plateRim: null,
     labelCols: 0,
     labelRows: 0,
     labelGeneration: 0,
@@ -4106,13 +4142,16 @@ function knowledgeLabelBoxFree(layout, left, top, right, bottom, self = -1, over
  * 「빈 자리가 있는가」(`…Free`)로는 자리를 **고를** 수 없다: 여섯 자리가 모두 조금씩
  * 차 있으면 어느 것이 덜 찼는지를 묻게 되고, 그 답이 있어야 주제의 이름판이 가장
  * 한산한 곳에 선다. */
-function knowledgeLabelBoxLoad(layout, left, top, right, bottom) {
-  const { labelCells, labelCols, labelRows, labelGeneration } = layout;
+/* `through`(점마다 1/0)가 1이라고 말하는 점의 몸이 쥔 칸은 세지 않는다 — 이름판이 부스러기 점 위에
+ * 설 때(`placeKnowledgeLabels`의 (1)). 칸의 임자는 몸이 쥔 칸에서 그 점의 번호 + 1이다. */
+function knowledgeLabelBoxLoad(layout, left, top, right, bottom, through = null) {
+  const { labelCells, labelOwner, labelCols, labelRows, labelGeneration } = layout;
   let load = 0;
   for (let row = top; row <= bottom; row += 1) {
     for (let col = left; col <= right; col += 1) {
       if (row < 0 || col < 0 || row >= labelRows || col >= labelCols) load += 1;
-      else if (labelCells[row * labelCols + col] === labelGeneration) load += 1;
+      else if (labelCells[row * labelCols + col] === labelGeneration
+        && (through === null || through[labelOwner[row * labelCols + col] - 1] !== 1)) load += 1;
     }
   }
   return load;
@@ -4185,8 +4224,6 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
   };
   const free = (centreX, middleY2, emWidth, px = tuning.labelPx, self = -1, overBodies = false) =>
     knowledgeLabelBoxFree(layout, ...boxOf(centreX, middleY2, emWidth, px), self, overBodies);
-  const load = (centreX, middleY2, emWidth, px = tuning.labelPx) =>
-    knowledgeLabelBoxLoad(layout, ...boxOf(centreX, middleY2, emWidth, px));
   const mark = (centreX, middleY2, emWidth, px = tuning.labelPx) =>
     markKnowledgeLabelBox(layout, ...boxOf(centreX, middleY2, emWidth, px));
   const claim = (centreX, middleY2, emWidth, px = tuning.labelPx, self = -1, overBodies = false) => {
@@ -4299,6 +4336,18 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
     if (where < 0) standAnyway(selectedSeat);
     wear(selectedSeat, Math.max(0, where));
   }
+  /* (0-d) 전체 지도의 「+N」(공급망 멤버의 접힌 구성요소, P4)은 펼치는 문의 이름이다 — 주제의
+   * 이름판보다 먼저 자리를 쥔다. 판에는 물러설 길(한 줄, 그리고 접기 — 범례가 부른다)이 있고 이
+   * 표시에는 없다. 격자의 규칙은 지키되, 네 자리가 다 막히면 남의 점 위에는 선다(남의 이름표
+   * 위에는 서지 않는다). 주변 탐색의 접힌 허브는 제 옷(`data-label-tier`)이 이미 세운다. */
+  if (layout.folded !== null && !onRing) {
+    for (let at = 0; at < count; at += 1) {
+      if (layout.folded[at] <= 0 || shown[at] === 1 || (drawn !== null && drawn[at] === 0)) continue;
+      let where = seatLabel(at);
+      if (where < 0) where = seatLabel(at, true);
+      if (where >= 0) wear(at, where);
+    }
+  }
   /* (1) 군집의 이름과 그 아래 두 줄. */
   const spot = knowledgeClusterPicked;
   const tierWord = view.dataset.knowledgeTier ?? "wide";
@@ -4310,8 +4359,27 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
     const canvasWide = box.wide * box.scale;
     const short = canvasWide < tuning.plateWide;
     view.querySelector(".knowledge-picture").classList.toggle("is-short-plate", short);
-    const lift = short ? tuning.clusterLabelPx * 2
-      : tuning.clusterLabelPx + tuning.clusterCountGap + tuning.clusterCountPx;
+    const growing = [];
+    /* 이름판은 부스러기 점(이름 없는 군집의 쪽과 유령 — 바깥 띠) 위에 설 수 있다. 띠가 원반들의
+     * 윤곽에 붙은 뒤로(`knowledgeClusterHomes`) 판이 서던 빈 땅이 줄었고, 작은 판에서는 판의
+     * 절반이 접혔다(900×700 합성: 여섯 → 셋). 판의 글자는 바탕색 테두리를 둘러 점 위에서도
+     * 읽힌다. 덮지 않는 것: 쪽의 이름표·남의 이름·다른 판·조작부(이것들은 몸이 아니라 임자 0의
+     * 칸이다), 그리고 사람이 지금 보는 점 — 고른 점, 찾기에 걸린 점, 짚어 밝힌 점, 경로의 점
+     * (그때는 판이 비키거나 한 줄이 되거나 접힌다). 이름표가 점 위에 서는 손(GL, `labelsOverPoints`)
+     * 에서만이다: SVG는 판이 점 **뒤**의 층이라 점이 판의 글자를 가린다. 가리키기는 판 아래에서도
+     * 점에 닿는다(GL은 좌표로 고른다, `knowledgeUnder`). */
+    const overRim = knowledgePainters.get(view)?.labelsOverPoints === true;
+    if (overRim && layout.plateRim?.length !== count) layout.plateRim = new Uint8Array(count);
+    const rim = overRim ? layout.plateRim : null;
+    if (rim !== null) {
+      const kinds = layout.model.kinds;
+      const searching = knowledgeQuery.trim() !== "";
+      for (let at = 0; at < count; at += 1) {
+        rim[at] = community[at] >= layout.namedCount && (kinds[at] === "page" || kinds[at] === "ghost")
+          && at !== selectedSeat && !(searching && layout.searchMatch[at] === 1)
+          && !layout.litNodes.has(at) && layout.pathNode[at] !== 1 ? 1 : 0;
+      }
+    }
     for (let rank = 0; rank < layout.namedCount; rank += 1) {
       const held = layout.clusterEls[rank];
       if (!held || layout.clusterTally[rank] === 0) continue;
@@ -4321,9 +4389,13 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
       const anchorY = (layout.clusterAt[rank * 2 + 1] - box.y) * box.scale;
       const wideEm = knowledgeLabelEm(name, tuning);
       /* 아래 두 줄은 제 글자로 잰다 — 대표 지식의 제목도, 「15쪽 · 이름 +13」도
-       * 주제의 이름보다 길다. */
+       * 주제의 이름보다 길다. 쪽 수 줄은 이 판이 **입을 수 있는 가장 넓은** 글자로 잰다: 접은
+       * 이름의 수는 쪽의 이름표가 판 다음에 앉은 뒤에야 정해지고((3)~(6)), 그 수는 쪽 수를 넘지
+       * 못한다. 접은 것이 없을 때의 「48쪽」으로 재면 판은 프레임 끝에 「48쪽 · 이름 +48」을 입고
+       * 예약한 폭의 세 배를 그린다(실측 WebKit: 23 px 예약에 73~77 px). */
       const leadEm = knowledgeLabelEm(knowledgeClusterLeadWord(layout, rank), tuning);
-      const tallyEm = knowledgeLabelEm(knowledgeClusterCountWord(layout, rank), tuning);
+      const tallyEm = knowledgeLabelEm(
+        knowledgeClusterCountWord(layout, rank, layout.communitySize[rank]), tuning);
       /* 원반의 위가 막혔으면 둘레를 돌며 빈 자리를 찾는다 — 위, 한 줄 더 위,
        * 두 줄 더 위, 그리고 아래. 이웃한 두 원반의 이름이 같은 자리를 원하는 일은
        * 흔하고(순위가 높은 군집이 먼저 쥔다), 빈 자리를 못 찾은 이름은 그래도
@@ -4331,63 +4403,99 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
        * 쥐어 두어 뒤에 오는 이름표들이 피해 간다. */
       const reach = layout.clusterReach[rank] * box.scale * knowledgeYScale(view, layout);
       const homeY = (layout.clusterY[rank] - box.y) * box.scale;
-      const sideways = (Math.max(wideEm * tuning.clusterLabelPx,
-        leadEm * tuning.clusterCountPx, tallyEm * tuning.clusterCountPx) / 2)
-        + tuning.clusterLabelLift;
+      /* 판은 **한 상자**다 — 가장 넓은 줄의 폭 × 이름에서 쪽 수 줄까지의 높이. 줄마다 따로 쥐면
+       * 이웃 판의 넓은 줄이 이 판의 좁은 줄 옆 빈틈으로 맞물린다. 한 줄 판(좁은 판, 그리고 세
+       * 줄이 설 곳 없는 판)은 이름의 상자다. */
+      const plateWide = (full) => (full ? Math.max(wideEm * tuning.clusterLabelPx,
+        leadEm * tuning.clusterCountPx, tallyEm * tuning.clusterCountPx)
+        : wideEm * tuning.clusterLabelPx);
+      const plateCells = (seatX, seatY, full) => {
+        const half = plateWide(full) / 2 + tuning.labelPadX;
+        const top = seatY - tuning.clusterLabelPx / 2 - tuning.labelPadY;
+        const bottom = (full ? seatY + tuning.clusterCountGap + tuning.clusterCountPx / 2
+          : seatY + tuning.clusterLabelPx / 2) + tuning.labelPadY;
+        return [cellOf(seatX - half), cellOf(top), cellOf(seatX + half), cellOf(bottom)];
+      };
       const below = homeY + reach + tuning.clusterLabelLift + tuning.clusterLabelPx;
       /* 원반의 위·아래·양옆 여섯 자리 중 **가장 한산한** 곳. 빈 자리를 찾을 때까지
        * 훑고 첫 빈 자리에 서는 방식은, 여섯이 다 조금씩 차 있을 때 마지막 자리에
        * 그냥 서게 만든다(실측 09-16: 주제 이름판 일곱이 남의 공 위에 얹혔다). */
       /* 위로 셋, 아래로 둘, 양옆으로 하나씩 — 그리고 각각을 좌우로 한 칸씩 밀어
        * 본 자리까지 — 원반 하나에 서른다섯 자리. 재는 값은 칸 몇 개를 세는 일이고,
-       * 그 값으로 열세 개의 이름판이 서로를 피한다. */
-      const seats = [];
-      for (const [seatX, seatY] of [
-        [homeX, anchorY], [homeX, anchorY - lift], [homeX, anchorY - lift * 2],
-        [homeX, below], [homeX, below + lift],
-        [homeX - reach - sideways, homeY], [homeX + reach + sideways, homeY],
-      ]) {
-        seats.push([seatX, seatY],
-          [seatX - sideways, seatY], [seatX + sideways, seatY],
-          [seatX - sideways * 2, seatY], [seatX + sideways * 2, seatY]);
-      }
+       * 그 값으로 열세 개의 이름판이 서로를 피한다. 걸음(위아래 한 판, 좌우 반 판)은 그 판의
+       * 줄 수대로의 크기다. */
+      const seatsFor = (full) => {
+        const lift = full ? tuning.clusterLabelPx + tuning.clusterCountGap + tuning.clusterCountPx
+          : tuning.clusterLabelPx * 2;
+        const sideways = plateWide(full) / 2 + tuning.clusterLabelLift;
+        const seats = [];
+        for (const [seatX, seatY] of [
+          [homeX, anchorY], [homeX, anchorY - lift], [homeX, anchorY - lift * 2],
+          [homeX, below], [homeX, below + lift],
+          [homeX - reach - sideways, homeY], [homeX + reach + sideways, homeY],
+        ]) {
+          seats.push([seatX, seatY],
+            [seatX - sideways, seatY], [seatX + sideways, seatY],
+            [seatX - sideways * 2, seatY], [seatX + sideways * 2, seatY]);
+        }
+        return seats;
+      };
       /* 좁은 판의 이름판은 **한 줄**이다 — 주제의 이름만. 대표 지식과 쪽 수는
        * 인스펙터와 군집 범례에 그대로 있고, 좁은 화면에서 줄어드는 것은 글자
        * 크기가 아니라 표시량이다(사용자 조건). 세 줄짜리 판 열셋은 560px 판에서
        * 둘만 남겼다; 한 줄짜리는 열셋이 다 선다. */
-      const plateLoad = (seatX, seatY) => load(seatX, seatY, wideEm, tuning.clusterLabelPx)
-        + (short ? 0 : load(seatX, seatY + tuning.clusterLeadGap, leadEm, tuning.clusterCountPx)
-          + load(seatX, seatY + tuning.clusterCountGap, tallyEm, tuning.clusterCountPx));
-      let [centreX, centreY] = seats[0];
-      let lightest = Number.POSITIVE_INFINITY;
-      for (const [seatX, seatY] of seats) {
-        const weight = plateLoad(seatX, seatY);
-        if (weight >= lightest) continue;
-        lightest = weight;
-        centreX = seatX;
-        centreY = seatY;
-        if (weight === 0) break;
-      }
-      /* 스물한 자리를 다 봐도 빈 곳이 없으면 그 이름판은 **접는다** — 폭을
+      /* 서른다섯 자리 중 가장 한산한 곳. 판은 두 걸음으로 선다: 이 고리에서는 모든 판이 **이름 한
+       * 줄**의 자리만 쥐고(세 줄이 설 수 있는 자리가 있으면 그 자리를 고른다), 고리가 끝난 뒤
+       * 순위대로 아래 두 줄의 칸이 아직 비어 있는 판만 세 줄로 넓힌다. 순위가 큰 판이 세 줄을
+       * 먼저 쥐면 뒤 순위의 이름이 한 줄로도 설 곳을 잃는다(조용한 그래프 장면: 원반 여섯에
+       * 이름 다섯) — 주제의 이름은 지도의 첫 낱말이고, 대표 지식과 쪽 수는 인스펙터와 범례에도
+       * 있다. */
+      const lightestOf = (seats, full) => {
+        let best = null;
+        let weight = Number.POSITIVE_INFINITY;
+        for (const [seatX, seatY] of seats) {
+          const load = knowledgeLabelBoxLoad(layout, ...plateCells(seatX, seatY, full), rim);
+          if (load >= weight) continue;
+          weight = load;
+          best = [seatX, seatY];
+          if (load === 0) break;
+        }
+        return { best, weight };
+      };
+      const roomy = short ? null : lightestOf(seatsFor(true), true);
+      const wants = roomy !== null && roomy.weight <= KNOWLEDGE_FORCE.plateSlack;
+      const chosen = wants ? roomy
+        : lightestOf(short ? seatsFor(false) : [...seatsFor(true), ...seatsFor(false)], false);
+      /* 모든 자리를 다 봐도 빈 곳이 없으면 그 이름판은 **접는다** — 폭을
        * 묻지 않는다. 겹쳐 선 이름은 서 있어도 읽히지 않으므로, 그것이 「표시량을
        * 줄인다」의 뜻이다(글자를 줄이지 않는다 — 사용자 조건). 순위가 큰 주제부터
        * 자리를 고르므로 남는 것은 언제나 큰 주제들이고, 접힌 주제는 아래 왼쪽의
-       * 군집 범례가 여전히 이름으로 부른다. 넓은 판에서는 자리가 늘 있어 아무것도
-       * 접히지 않는다(실측 1600×1000: 열셋 전부). */
-      const folds = lightest > KNOWLEDGE_FORCE.plateSlack;
+       * 군집 범례가 여전히 이름으로 부른다. */
+      const folds = chosen.weight > KNOWLEDGE_FORCE.plateSlack;
       held.label.classList.toggle("is-folded", folds);
-      if (folds) continue;
-      mark(centreX, centreY, wideEm, tuning.clusterLabelPx);
-      if (!short) {
-        mark(centreX, centreY + tuning.clusterLeadGap, leadEm, tuning.clusterCountPx);
-        mark(centreX, centreY + tuning.clusterCountGap, tallyEm, tuning.clusterCountPx);
+      if (folds) {
+        held.label.classList.remove("is-one-line");
+        continue;
       }
+      const [centreX, centreY] = chosen.best;
+      markKnowledgeLabelBox(layout, ...plateCells(centreX, centreY, false));
+      if (!short) growing.push({ held, wants, name: plateCells(centreX, centreY, false),
+        whole: plateCells(centreX, centreY, true) });
       const graphX = box.x + centreX / box.scale;
       const graphY = box.y + centreY / box.scale;
       layout.clusterAt[rank * 2] = graphX;
       layout.clusterAt[rank * 2 + 1] = graphY;
       writeAttribute(held.label, "transform",
         `translate(${graphX.toFixed(digits)} ${graphY.toFixed(digits)}) scale(${inverse})`);
+    }
+    /* 둘째 걸음: 순위대로 세 줄로 넓힌다 — 이름 줄은 이미 제 것이므로, 판 전체의 상자에서 그
+     * 이름 상자를 뺀 칸(대표 지식과 쪽 수 줄)이 비어 있어야 한다. 못 넓힌 판은 한 줄이다(좁은
+     * 판과 같은 옷). */
+    for (const plate of growing) {
+      const full = plate.wants && knowledgeLabelBoxLoad(layout, ...plate.whole, rim)
+        - knowledgeLabelBoxLoad(layout, ...plate.name, rim) <= KNOWLEDGE_FORCE.plateSlack;
+      if (full) markKnowledgeLabelBox(layout, ...plate.whole);
+      plate.held.label.classList.toggle("is-one-line", !full);
     }
   }
   /* (2) 사람이 지금 묻고 있는 것. 예산 밖이고 서로 겹치지도 않는다 — 고른 점의
@@ -4411,11 +4519,6 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
     }
   }
   for (const at of layout.litNodes) ask(at);
-  /* 전체 지도의 「+N」(공급망 멤버의 접힌 구성요소, P4)은 펼치는 문의 이름이다 — 격자의 규칙은 지키되
-   * 먼저 고른다. 주변 탐색의 접힌 허브는 제 옷(`data-label-tier`)이 이미 세운다. */
-  if (layout.folded !== null && !onRing) {
-    for (let at = 0; at < count; at += 1) if (layout.folded[at] > 0) ask(at);
-  }
   if (knowledgeQuery.trim() !== "") {
     for (let at = 0; at < count; at += 1) if (layout.searchMatch[at] === 1) ask(at);
   }
@@ -4423,10 +4526,8 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
     /* 이웃들은 먼저 고를 권리를 얻되 규칙은 지킨다: 스물넷의 이웃을 무조건
      * 세우면 스물네 쌍이 서로를 덮고(실측 09-16), 그 화면은 「무엇과 연결되는가」에
      * 답하지 못한다. 자리를 못 얻은 이웃의 제목은 인스펙터의 관계 목록에 온전히 있다.
-     * 접힌 점만 예외다(위) — 「+N」은 접힌 것이 있다는 유일한 표시다. */
-    let where = seatLabel(at);
-    /* 접힌 점만 한 번 더 묻는다 — 남의 점 위에 서도 좋으냐고. 남의 **이름표** 위에는 서지 않는다. */
-    if (where < 0 && !onRing && (layout.folded?.[at] ?? 0) > 0) where = seatLabel(at, true);
+     * 접힌 점은 판보다 먼저 제 자리를 이미 골랐다(0-d). */
+    const where = seatLabel(at);
     if (where >= 0) wear(at, where);
   }
   /* (3)~(6) 예산 안에서 순서대로. 펼친 군집의 멤버가 먼저다 — 군집을 고른 손이
@@ -4511,10 +4612,10 @@ function knowledgeClusterLeadWord(layout, rank) {
   return knowledgeShortWord(layout.model.titles[seat], layout.tuning.clusterLeadMax);
 }
 
-/* 군집 이름 아래 한 줄: 「쪽 n」, 접은 이름이 있으면 「쪽 n · 이름 +m」. */
-function knowledgeClusterCountWord(layout, rank) {
+/* 군집 이름 아래 한 줄: 「쪽 n」, 접은 이름이 있으면 「쪽 n · 이름 +m」. `hidden`을 주면 그 수로 —
+ * 격자가 판의 자리를 잡을 때 가장 넓은 글자를 잰다. */
+function knowledgeClusterCountWord(layout, rank, hidden = layout.clusterFolded[rank]) {
   const pages = layout.communitySize[rank];
-  const hidden = layout.clusterFolded[rank];
   if (hidden <= 0) return t("knowledge.clusterPages", "{{count}}쪽", { count: pages });
   return t("knowledge.clusterPagesFolded", "{{count}}쪽 · 이름 +{{folded}}",
     { count: pages, folded: hidden });
@@ -8055,9 +8156,9 @@ function knowledgeTab() {
  * 값(`knowledgeGlPalette`) — 창의 옷을 옮겨 적은 것이 아니라 계산된 것이라, 창 밖 브라우저도
  * 같은 잉크를 본다. 옛 답(근거 없는 선)은 싣지 않는다. */
 /* 실수 넷을 CSS 색 낱말로. */
-function knowledgeInkWord(table, at) {
+function knowledgeInkWord(table, at, opacity = 1) {
   const channel = (value) => Math.round(value * 255);
-  const alpha = Math.round(table[at + 3] * 1000) / 1000;
+  const alpha = Math.round(table[at + 3] * opacity * 1000) / 1000;
   return `rgba(${channel(table[at])}, ${channel(table[at + 1])}, ${channel(table[at + 2])}, ${alpha})`;
 }
 
@@ -8102,15 +8203,16 @@ function collectKnowledgeExport(view, layout) {
   }
   const edges = [];
   const legend = new Map();
+  const focused = view.querySelector(".knowledge-picture").classList.contains("is-focused");
   for (let at = 0; at < model.edgeCount; at += 1) {
     if (layout.drawnEdge !== null && layout.drawnEdge[at] === 0) continue;
     const from = seatOf[model.from[at]];
     const to = seatOf[model.to[at]];
     const road = KNOWLEDGE_EDGE_PROVENANCES[model.provenance[at]]?.id;
     if (from < 0 || to < 0 || road === undefined) continue;
-    const ink = knowledgeRestingEdgeInk(palette, tuning, layout, model, at);
+    const ink = knowledgeRestingEdgeInk(palette, tuning, layout, model, at, focused);
     const kind = KNOWLEDGE_EDGE_KINDS[model.kind[at]];
-    const word = knowledgeInkWord(ink.ink, ink.inkAt);
+    const word = knowledgeInkWord(ink.ink, ink.inkAt, ink.opacity);
     edges.push({ from, to, kind, provenance: road, ink: word, width: ink.width, dash: ink.dash,
       directed: KNOWLEDGE_EDGE_DIRECTED.includes(kind) });
     if (!legend.has(kind)) legend.set(kind, { kind, ink: word, dash: ink.dash });
@@ -8123,6 +8225,8 @@ function collectKnowledgeExport(view, layout) {
   const vault = knowledgeReport?.vault ?? "";
   palette.swatches.host.remove();
   palette.swatches.tracing.remove();
+  palette.swatches.local.host.remove();
+  palette.swatches.local.focusHost.remove();
   return {
     title: t("knowledge.exportTitle", "{{vault}} 지식 그래프", { vault: vault.split("/").filter(Boolean).pop() ?? vault }),
     vault,

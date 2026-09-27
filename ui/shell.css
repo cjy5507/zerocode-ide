@@ -37787,6 +37787,15 @@ details.task-board-section > summary {
   pointer-events: auto;
 }
 
+/* 주변 탐색의 중심 이름 — SVG의 `.is-local .is-selected .knowledge-label`과 같은 토큰. 자리 옮김은
+   `transform`이 쥐고 있어 내려 앉힘은 따로 선 `translate`가 한다(둘은 겹쳐 적용된다). */
+.knowledge-gl-label.is-centre {
+  translate: 0 var(--knowledge-centre-label-shift);
+  color: var(--ink-chalk);
+  font-size: calc(var(--knowledge-label-px) * var(--knowledge-centre-label-scale) * 1px);
+  font-weight: 500;
+}
+
 /* 색을 묻는 견본. 그려지지는 않지만 계산은 된다 — `display: none`이면 브라우저가
    값을 풀어 주지 않는 판이 있어 크기를 0으로 두고 숨긴다. */
 .knowledge-gl-swatch {
@@ -37796,6 +37805,12 @@ details.task-board-section > summary {
   overflow: hidden;
   opacity: 0;
   pointer-events: none;
+}
+
+/* 견본은 전이하지 않는다 — 테마가 바뀐 순간 GL 손이 묻는데, 전이 중인 견본은 앞 테마의 색을
+   답하고 그 답이 새 테마의 색으로 외워진다. */
+.knowledge-picture.knowledge-gl-swatch * {
+  transition: none;
 }
 
 /* 색은 군집에서(3차), 그리고 **한 규칙에서**.
@@ -37875,9 +37890,12 @@ details.task-board-section > summary {
 }
 
 /* 좁은 판에서 이름판은 주제의 이름 한 줄이다 — 대표 지식과 쪽 수는 인스펙터와
- * 군집 범례가 계속 말한다(`placeKnowledgeLabels`가 같은 답으로 자리를 잡는다). */
+ * 군집 범례가 계속 말한다(`placeKnowledgeLabels`가 같은 답으로 자리를 잡는다). 넓은 판에서도
+ * 세 줄이 설 곳이 없는 판 하나는 같은 옷의 한 줄로 선다(`is-one-line`) — 접히는 대신. */
 .knowledge-picture.is-short-plate .knowledge-cluster-lead,
-.knowledge-picture.is-short-plate .knowledge-cluster-count {
+.knowledge-picture.is-short-plate .knowledge-cluster-count,
+.knowledge-cluster-label.is-one-line .knowledge-cluster-lead,
+.knowledge-cluster-label.is-one-line .knowledge-cluster-count {
   display: none;
 }
 
