@@ -16135,8 +16135,9 @@ mod tests {
 
         let primary = block_after(window, "function agentRowPrimary(row, state) {");
         assert!(
-            primary.contains("agentConversationName(row)")
-                && primary.contains("panePrompts.get(row.term)?.trim()")
+            primary.contains("agentPaneName(row.tab, row.term, row.agent)")
+                && block_after(window, "function agentPaneName(tab, term, agent = \"\") {")
+                    .contains("panePrompts.get(term)?.trim()")
                 && primary
                     .contains(r#"bucketWord(state === "needs-attention" ? "attention" : state)"#),
             "the first-words ladder lost a rung:\n{primary}"
@@ -16151,7 +16152,7 @@ mod tests {
         let hooked = block_after(window, r#"listen("hook:agent", (event) => {"#);
         assert!(
             hooked
-                .contains("if (event.payload.prompt) panePrompts.set(term, event.payload.prompt);")
+                .contains("if (event.payload.prompt && !event.payload.prompt_names_nothing) panePrompts.set(term, event.payload.prompt);")
                 && hooked
                     .contains("if (event.payload.said) paneSaid.set(term, event.payload.said);"),
             "the ladder's raw feeds no longer ride the hook event:\n{hooked}"
@@ -29658,7 +29659,9 @@ mod tests {
 
         // The reader is bounded and read-only: these are the vendors' files.
         assert!(
-            reader.contains("take(MAX_TAIL_BYTES)"),
+            reader.contains("file.take(window)")
+                && reader.contains("Self::read_within(path, MAX_TAIL_BYTES)")
+                && reader.contains("Tail::read_within(path, NAMING_PROMPT_SEARCH_BYTES)"),
             "the tail read lost its bound, so a 2 GB transcript is read whole"
         );
         for forbidden in ["fs::write", "fs::rename", "OpenOptions", "fs::remove"] {
@@ -36965,4 +36968,76 @@ fn the_emulator_pane_opens_on_a_resumed_device() {
             "`{key}` is missing from one of the en/ja/zh/es catalogs"
         );
     }
+}
+
+/// t-11540: an agent is called one thing wherever the window names it. The
+/// sidebar's row and the board's card ask the one pane-name function, and
+/// every surface of the board — the relation map's label, its one-line story,
+/// the detail panel, the scope list, the peek — reads the card through
+/// `agentGraphIdentity`. A prompt that only says go on, or the window's own
+/// mail pointer, is judged by the core's one list (`names_the_turn`), carried
+/// on the report, and never becomes the name; a stored name that fails the
+/// same test is renamed where the window restores a tab.
+#[test]
+fn an_agent_is_called_one_thing_on_every_surface() {
+    let window = support::window_source();
+    let orbit = include_str!("../../../../ui/shell-board-orbit.js");
+    assert_eq!(
+        window.matches("function agentPaneName(").count(),
+        1,
+        "the pane's name is worked out in one place"
+    );
+    assert!(
+        !window.contains("function agentConversationName("),
+        "a second name ladder is back"
+    );
+    let cards = support::block_after(window, "function cardsFromPanes(panes) {");
+    assert!(
+        cards.contains(
+            "heading: tab ? agentPaneName(tab, pane.term, pane.agent) || where || tabLabel(tab) : pane.agent,"
+        ),
+        "the card's heading stopped asking the one name, then the workspace:\n{cards}"
+    );
+    assert!(
+        support::block_after(window, "function agentRowPrimary(row, state) {")
+            .contains("agentPaneName(row.tab, row.term, row.agent)"),
+        "the sidebar's row names its agent some other way"
+    );
+    assert!(
+        support::block_after(window, "function agentGraphIdentity(card) {")
+            .contains("agentGraphCleanText(card.task) || agentGraphCleanText(card.heading) || card.pane"),
+        "the board's surfaces stopped reading the card's name"
+    );
+    for (surface, said) in [
+        ("the detail panel", "identity: agentGraphIdentity(card),"),
+        ("the relation map's entity", "label: agentGraphIdentity(entry.card),"),
+        ("the peek", "el(\"peek-title\").textContent = agentGraphIdentity(card);"),
+        ("the scope list", "entity?.label ?? agentGraphIdentity(entry.card)"),
+    ] {
+        assert!(window.contains(said), "{surface} names an agent some other way");
+    }
+    assert!(
+        orbit.contains("name: agentGraphIdentity(entry.card),"),
+        "the 3D view's label names an agent some other way"
+    );
+    // The one-line story's subject is that same name, in the sentence it
+    // already had — the counts live there and nowhere else (coordinator,
+    // m-11649).
+    let glance = support::block_after(orbit, "function agentOrbitGlance(state) {");
+    assert!(
+        glance.contains("subject: subject(lead), count: lead.children.length")
+            && glance.contains("named = lead.name;"),
+        "the story's subject stopped being the lead's own name:\n{glance}"
+    );
+
+    let hooks = include_str!("../../src/hooks.rs");
+    assert!(
+        support::block_after(hooks, "pub fn report_of(")
+            .contains("zerocode_core::transcript::names_the_turn(said)"),
+        "the report no longer says which prompts name nothing"
+    );
+    assert!(
+        include_str!("../../src/system_runtime.rs").contains("layout.named_by_their_turns()"),
+        "a restored tab keeps a stored name that only says go on"
+    );
 }
