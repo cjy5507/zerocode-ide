@@ -826,27 +826,39 @@ mod tests {
         assert!(!peek_cut(root.path(), "w-1").any(), "said once");
         assert!(!peek_cut(root.path(), "w-2").any());
         assert!(!peek_cut(root.path(), "w-3").any());
-        // A goodbye that cut nothing leaves nothing — an older note included,
-        // when nobody it named is still asleep.
+        // A goodbye with nothing to say leaves nothing — an older note
+        // included, when nobody it named is still asleep. A worker at rest
+        // with nothing under it is something to say since t-11548 (its rest,
+        // owing no words), so the goodbye that says nothing is one whose
+        // worker was never heard.
         let later = tempfile::tempdir().expect("another data root");
         leave_cut(later.path(), &census, &nobody_asleep).expect("a note");
-        leave_cut(
-            later.path(),
-            &RestartCensus {
-                workers: vec![named("w-4", Some(&[]))],
-                coordinators: Vec::new(),
-                took_ms: 0,
-            },
-            &nobody_asleep,
-        )
-        .expect("no note");
+        let unheard = RestartCensus {
+            workers: vec![WorkerCut {
+                worker: "w-4".to_string(),
+                ..worker(Turn::Unheard, None)
+            }],
+            coordinators: Vec::new(),
+            took_ms: 0,
+        };
+        leave_cut(later.path(), &unheard, &nobody_asleep).expect("no note");
         assert!(!later.path().join(CUT_FILE).exists());
+        // The same goodbye with that worker at rest leaves the rest alone.
+        let rested = RestartCensus {
+            workers: vec![named("w-4", Some(&[]))],
+            coordinators: Vec::new(),
+            took_ms: 0,
+        };
+        leave_cut(later.path(), &rested, &nobody_asleep).expect("the rest's note");
+        let kept = peek_cut(later.path(), "w-4");
+        assert!(!kept.any() && kept.rest().is_some(), "{kept:?}");
     }
 
     /// t-7812 E: the goodbye also writes down whose TURN it cut — the one
     /// fact a wake needs to tell a worker cut mid-turn from one at rest, and
     /// the only witness the wakes read for it. A worker at rest with nothing
-    /// under it leaves no entry; a note written before this field existed
+    /// under it is owed no words (its entry keeps only its rest, t-11548); a
+    /// note written before this field existed
     /// (a list of commands) still reads, as commands and no turn.
     #[test]
     fn the_goodbye_leaves_whose_turn_it_cut_and_reads_the_older_note_too() {
