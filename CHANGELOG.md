@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.1.36] — 2026-09-28
+
+_since v1.1.35 (9 commits)_
+
+### feat
+- feat(knowledge): the rim of stray pages hugs the named discs, and GL plates may stand on it (t-11500)
+
+### fix
+- fix(knowledge): neighbouring clusters wear different hues (t-11500)
+- fix(knowledge): cluster plates reserve the words they wear, and stand as one line before they fold (t-11500)
+- fix(knowledge): GL local exploration wears the SVG's grammar (t-11500)
+- fix(knowledge): switching the theme repaints the GL picture in the new theme (t-11500)
+
+### other
+- Merge branch 'wt/t-11500/gl' (ad5e73fe) — the knowledge graph's GL picture follows the theme, its local exploration reads as the SVG's does, and the map fills more of the screen: switching the theme repaints the points and lines in the new theme at once (the painter watches the theme, a frame that only moved the camera uploads the new colours, and the swatches it reads do not transition); local exploration under GL drops the overview's backdrop discs and tells spokes from neighbour lines, with the centre enlarged and haloed as the stylesheet says; a cluster's plate reserves the words it wears and stands as one line before it folds; the rim of stray pages starts at the named discs' outline rather than at a circle round the farthest one, and under GL a plate may stand over the rim's unnamed points; neighbouring clusters wear different hues. Measured on WebKit, the engine the app runs on: pixels differing between a switched theme and a fresh draw 38,278 and 58,535 → 0 (overview and local exploration); lines and points that disagreed with the SVG in local exploration 17 of 17 and 10 of 10 → 0; on a person's vault at zoom 1, plate cells outside what was reserved 17 → 0 and overlapping names 2 pairs → 0, the discs' share of the canvas 44% × 48% → 52% × 57%; neighbouring clusters of one hue 3 → 0. Coordinator gate on the landing (15eb7af1): the change is ui files and the window's list of browser built-ins, so it ran what reads them — pii, tools, the window runner, the settings, window and knowledge harnesses, the window's Rust tests and its source contracts — all 0 but for what is named here; the rest of the Rust tree is the one the release lane gated at 4df01fcb. The window's test of what it may call failed on the merged tree (DOMMatrixReadOnly was not listed) and passes with the coordinator's commit that lists it. 1 browser suite(s) held a check that failed once in the run, beside a release build, and passed alone three times; judged as the lane judges them. (t-11500; coordinator review)
+
 ## [1.1.35] — 2026-09-28
 
 _since v1.1.34 (10 commits)_
