@@ -542,7 +542,7 @@ pub fn last_naming_prompt(path: &Path) -> Option<String> {
 /// itself and a background task's notice — and the hook's payload does not
 /// say which (2.1.283: `session_id`, `transcript_path`, `prompt_id`, …, no
 /// source). The record it writes AFTER the hook does: the same `promptId`,
-/// with the CLI's own voice marked ([`spoken_by_the_cli`]). `None` is not
+/// with the CLI's own voice marked (`spoken_by_the_cli`). `None` is not
 /// known: not written yet (the hook fires first), or not in the card's
 /// tail window ([`MAX_TAIL_BYTES`]) — the record lands just before the turn's
 /// first answer, so the pane's next event finds it there.
