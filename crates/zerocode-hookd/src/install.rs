@@ -1676,13 +1676,14 @@ mod tests {
         );
     }
 
-    /// The two tool guards' rows (`zerocode_core::hook_guard`, t-10916) say
-    /// what each agent's hooks carry, and the events this installer puts on
-    /// disk are what they carry: a row that sees a command before it runs
+    /// The pane seats' rows (`zerocode_core::hook_guard`, t-10916, t-11349)
+    /// say what each agent's hooks carry, and the events this installer puts
+    /// on disk are what they carry: a row that sees a command before it runs
     /// names an agent given a pre-tool event, one that says it cannot names
     /// an agent given none — Antigravity since t-10461 — and the same for a
-    /// tool's result and the person's prompt. A row and an installer that
-    /// drift apart would count a quiet zero as "cannot see", or the reverse.
+    /// tool's result, the person's prompt, a turn's answer and an edit's
+    /// files. A row and an installer that drift apart would count a quiet zero
+    /// as "cannot see", or the reverse.
     #[test]
     fn the_guard_rows_see_what_the_installers_put_on_disk() {
         use zerocode_core::hook_guard::sight;
@@ -1782,6 +1783,18 @@ mod tests {
                 "{agent:?} prompt"
             );
             assert_eq!(row.turn_end.yes(), carries(&["stop"]), "{agent:?} turn end");
+            // The claim and file pick seats (t-11349): an answer rides the
+            // turn's end, and an edit's files the event before a tool runs.
+            assert_eq!(
+                row.turn_answer.yes(),
+                carries(&["stop"]),
+                "{agent:?} turn answer"
+            );
+            assert_eq!(
+                row.edited_path.yes(),
+                carries(&["pretooluse"]),
+                "{agent:?} edited path"
+            );
         }
     }
 }

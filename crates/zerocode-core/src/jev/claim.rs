@@ -291,8 +291,8 @@ pub fn state(claims: &[ClaimCandidate]) -> Value {
 
 /// One Choice per claim code could not settle, by the claim's id, each built
 /// by the asking program's own constructor for a Choice (`choice` — zo's
-/// typed question) over the instructions and the criteria's words and
-/// meanings.
+/// typed question, the window's [`choice::question`]) over the instructions
+/// and the criteria's words and meanings.
 #[must_use]
 pub fn questions<Q>(
     claims: &[ClaimCandidate],
@@ -436,6 +436,18 @@ pub struct ClaimCheckRow {
     pub input_tokens: Option<u64>,
     pub request_digest: Option<String>,
     pub confidence: Option<f64>,
+    /// Who asked ([`crate::jev::summary::FROM`]): zo's own runtime, or the
+    /// agent of a window pane (t-11349) — so rows every program asks into
+    /// one project's ledger keep their source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The folder the words came from, by its last name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
+    /// The answer came from the memo, for bytes asked before: no request left
+    /// ([`crate::jev::summary::CACHED`] — out of the latency population).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
 }
 
 /// One turn's hindsight: what the person's next turn said of the answer.

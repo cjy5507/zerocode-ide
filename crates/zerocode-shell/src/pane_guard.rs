@@ -1,10 +1,15 @@
-//! The two tool guards asked of the agents in this window's panes (t-10916):
-//! what a pane's agent is about to run, ran and read — the moments its hooks
-//! carry ([`zerocode_core::hook_guard::moments`]) — put to the command guard
-//! and the tool text guard with the questions zo asks
-//! ([`zerocode_core::jev::tool_guard`]), and hindsight's label on what became
-//! of each, filed where zo files its own ([`systemone::ledger_of`]): one
-//! ledger per seat on this machine, one series, one judge, one standing.
+//! The Jev seats asked of the agents in this window's panes: the two tool
+//! guards (t-10916) — what a pane's agent is about to run, ran and read — and
+//! the completion claim and file pick seats (t-11349) — what it says its turn
+//! finished, and which files the person's request needed. Each moment its
+//! hooks carry ([`zerocode_core::hook_guard::moments`]) is put to its seat
+//! with the questions zo asks ([`zerocode_core::jev::tool_guard`],
+//! [`zerocode_core::jev::claim`], [`zerocode_core::jev::file_pick`]), and
+//! hindsight's label on what became of each is filed where zo files its own:
+//! the guards' in the machine's one ledger per seat ([`systemone::ledger_of`]),
+//! the claim and file pick seats' in the ledger zo keeps for the pane's own
+//! folder ([`systemone::project_ledger_of`]) — one series, one judge, one
+//! standing with zo's.
 //!
 //! # Nothing waits, nothing is decided
 //!
@@ -16,6 +21,15 @@
 //! on a thread of its own. It records only: whatever the seat's mode, an
 //! answer changes nothing the agent sees.
 //!
+//! # A seat left off costs nothing
+//!
+//! Which seats are asked is read off a snapshot ([`Standing`]) that the
+//! window's file watcher refreshes whenever zo's settings file changes
+//! ([`WATCH_LANE`]); a file that does not read switches every seat off. The
+//! hook loop reads the snapshot before anything else: a seat left off reads
+//! nothing of a pane's event — no `stat`, no thread, no text copied — and
+//! with every seat off the event is not read at all.
+//!
 //! # What waits on hindsight
 //!
 //! Each pane keeps a book ([`PaneBook`]): the commands asked about and not yet
@@ -24,6 +38,9 @@
 //! began the turn. A turn's end settles what its facts settle through the
 //! same entries zo's books hold ([`CommandWaiting::settle_turn`]); a block
 //! is settled by the calls that start after it, once one of them comes back.
+//! A turn's file pick waits on its answer and on the files the turn's edits
+//! wrote, and is settled when the turn ends; a turn's claims wait on their
+//! verdict and on the person's next prompt ([`ClaimWaiting::label`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -33,18 +50,22 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use zerocode_core::AgentKind;
-use zerocode_core::hook_guard::{self, Moment, Sees};
+use zerocode_core::hook_guard::{self, Asking, Moment, PANE_SEATS, Sees};
+use zerocode_core::jev::claim::{self, ClaimCheckRow, ClaimWaiting, CodeVerdict, Evidence};
 use zerocode_core::jev::door::{ANSWERED_OUTCOME, Memo};
+use zerocode_core::jev::file_pick::{self, CandidateBatch, FilePickAsk, FilePickRow};
+use zerocode_core::jev::summary::CONTROL;
 use zerocode_core::jev::tool_guard::{
     ASKED_AFTER, ASKED_BEFORE, Asked, CommandGuardRow, CommandWaiting, HostFraming, TextSource,
     TextWaiting, ToolTextGuardRow, Verdict, asks_about, carries_out, command_questions,
     command_state, confidence_of, shelve, squeezed, task_line_of, text_questions, text_state,
 };
 use zerocode_core::jev::{
-    COMMAND_GUARD, COMMAND_GUARD_FLAG_FLOOR_PERMILLE, JevMode, JevUse, ROUTE_USE_FALLBACK,
-    TOOL_TEXT_GUARD, TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE, fingerprint_of, memo, noul,
-    task_fingerprint,
+    CLAIM, COMMAND_GUARD, COMMAND_GUARD_FLAG_FLOOR_PERMILLE, FILE_PICK, FILE_PICK_CANDIDATE_CAP,
+    JevMode, JevUse, ROUTE_USE_FALLBACK, Run, TOOL_TEXT_GUARD, TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE,
+    choice, fingerprint_of, memo, noul, task_fingerprint,
 };
+use zerocode_core::transcript::SaidAt;
 
 use crate::systemone::{self, SCHEMA, Wire, request_body};
 
@@ -65,12 +86,65 @@ const TEXT: Guard = Guard {
     flag_floor_permille: TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE,
 };
 
-impl Guard {
-    /// The wall one question waits for its answer — the seat's own.
-    fn deadline(&self) -> Duration {
-        Duration::from_millis(self.seat.apply_deadline_ms.unwrap_or_default())
+/// The wall one question of `seat`'s waits for its answer — the seat's own.
+fn deadline_of(seat: &JevUse) -> Duration {
+    Duration::from_millis(seat.apply_deadline_ms.unwrap_or_default())
+}
+
+/* ---- which seats are asked ------------------------------------------------------ */
+
+/// The file watcher's lane zo's settings file rides in: a change re-reads
+/// which seats are asked ([`settings_moved`]).
+pub(crate) const WATCH_LANE: &str = "jev-settings";
+
+/// Which of the seats a pane's moments serve are asked, as zo's settings
+/// were last read — what the hook loop reads before anything else.
+#[derive(Debug, Default)]
+pub(crate) struct Standing {
+    asking: Mutex<Asking>,
+}
+
+impl Standing {
+    /// The seats asked now.
+    pub(crate) fn asking(&self) -> Asking {
+        *self.asking.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Read `wire`'s settings again: each seat is asked while its mode asks,
+    /// and a file that does not read leaves every seat off.
+    pub(crate) fn read(&self, wire: &Wire) {
+        let root = wire.settings_root();
+        let asking = Asking::of(
+            PANE_SEATS
+                .into_iter()
+                .filter(|seat| seat.mode_in_run(&root, Run::Fresh).asks()),
+        );
+        *self.asking.lock().unwrap_or_else(PoisonError::into_inner) = asking;
     }
 }
+
+/// The window's standing.
+static STANDING: LazyLock<Standing> = LazyLock::new(Standing::default);
+
+/// Put zo's settings file on the window's file watcher, and read which seats
+/// are asked now — the window's boot.
+pub(crate) fn watch_settings(watched: &crate::file_watch::WatchSet) {
+    if let Some(settings) = crate::api_routers::zo_settings_path() {
+        watched.replace_lane(
+            WATCH_LANE,
+            vec![(settings.to_string_lossy().into_owned(), Some(settings))],
+            false,
+        );
+    }
+    STANDING.read(&Wire::of_this_machine());
+}
+
+/// zo's settings file changed: read which seats are asked again.
+pub(crate) fn settings_moved() {
+    STANDING.read(&Wire::of_this_machine());
+}
+
+/* ---- the books ---------------------------------------------------------------- */
 
 /// The pane a moment is about.
 #[derive(Debug, Clone)]
@@ -100,6 +174,20 @@ impl Pane {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
     }
+
+    /// The folder as the agent's own process sees it — its physical path,
+    /// symlinks resolved — which zo run in the same folder keeps its
+    /// project's rows under. Read off the hook loop.
+    fn root(&self) -> PathBuf {
+        self.worktree
+            .canonicalize()
+            .unwrap_or_else(|_| self.worktree.clone())
+    }
+
+    /// Who asked, as a row names it.
+    fn asker(&self) -> Option<String> {
+        Some(self.agent.slug().to_string())
+    }
 }
 
 /// A block of text whose next step is being gathered.
@@ -110,6 +198,59 @@ struct Step {
     block: String,
     /// The calls started after it: their ids, tools and what each carries out.
     calls: Vec<(Option<String>, String, Option<String>)>,
+}
+
+/// A turn's claims, waiting on their verdict and the person's next prompt,
+/// and the ledger their request was filed in.
+#[derive(Debug)]
+struct ClaimEntry {
+    waiting: ClaimWaiting,
+    ledger: Option<PathBuf>,
+}
+
+impl ClaimEntry {
+    /// Its label as it leaves the book, once both halves are in
+    /// ([`ClaimWaiting::label`]).
+    fn label(self, at: u64) -> Option<Filed> {
+        Some(Filed {
+            seat: &CLAIM,
+            ledger: Some(self.ledger?),
+            row: serde_json::to_value(self.waiting.label(at)?).ok()?,
+        })
+    }
+}
+
+/// A turn's file pick, waiting on its answer and on the files its turn's
+/// edits wrote.
+#[derive(Debug)]
+struct PickWaiting {
+    judged: u64,
+    /// The answered request's row, the folder it was asked from — its
+    /// physical path — and the ledger it was filed in.
+    asked: Option<(Value, PathBuf, PathBuf)>,
+    /// The files its turn's edits wrote, once the turn ended.
+    edited: Option<Vec<String>>,
+}
+
+impl PickWaiting {
+    /// Its label, once both halves are in ([`file_pick::label_row`]): the
+    /// edits read under the folder's physical path, or under `handed` — the
+    /// spelling the pane was handed, which an agent may name its files by.
+    fn label(&self, handed: &Path, at: u64) -> Option<Filed> {
+        let ((row, root, ledger), edited) = (self.asked.as_ref()?, self.edited.as_ref()?);
+        let label = file_pick::label_row(
+            row,
+            self.judged,
+            &file_pick::edited_fingerprints(&[root.as_path(), handed], edited),
+            None,
+            at,
+        );
+        Some(Filed {
+            seat: &FILE_PICK,
+            ledger: Some(ledger.clone()),
+            row: serde_json::to_value(label).ok()?,
+        })
+    }
 }
 
 /// What one pane's agent has asked about and done that waits on hindsight.
@@ -137,6 +278,21 @@ struct PaneBook {
     steps: Vec<Step>,
     /// How a call its payload names no id for is named.
     unnamed: u64,
+    /// The turns the book has seen end: what a turn's claim and file pick
+    /// are named by.
+    turns: u64,
+    /// The turn's finished calls, as a claim may cite them — gathered while
+    /// the claim seat is asked, and dropped when the turn ends.
+    evidence: Vec<Evidence<String>>,
+    /// The files this session's edits wrote, newest first: the recent-edit
+    /// order a file pick is held against, and a source of its candidates.
+    edited: Vec<String>,
+    /// The files this turn's edits wrote.
+    turn_edited: Vec<String>,
+    /// Turns' claims waiting on their verdict and the person's next prompt.
+    claims: Vec<ClaimEntry>,
+    /// Turns' file picks waiting on their answer and their turn's edits.
+    picks: Vec<PickWaiting>,
 }
 
 /// How the book names a call its payload named none, before its count.
@@ -149,6 +305,15 @@ impl PaneBook {
             self.unnamed += 1;
             format!("{UNNAMED}{}", self.unnamed)
         })
+    }
+
+    /// The name the turn under way is asked under — its claim's and its
+    /// file pick's: the book's owner and the turns it has seen end.
+    fn attempt(&self) -> String {
+        format!(
+            "{:016x}",
+            task_fingerprint(&self.owner, &self.turns.to_string())
+        )
     }
 }
 
@@ -172,6 +337,30 @@ enum Question {
         source: TextSource,
         text: String,
     },
+    /// A turn's claims: where its answer is, and the turn's finished calls
+    /// they may cite.
+    Claim {
+        judged: u64,
+        said: SaidAt,
+        evidence: Vec<Evidence<String>>,
+    },
+    /// A turn's file pick: the person's request, and the files this
+    /// session's edits wrote before it, newest first.
+    FilePick {
+        judged: u64,
+        attempt: String,
+        request: String,
+        edited: Vec<String>,
+    },
+}
+
+/// A row to write off the hook loop: its seat's, in `ledger` when it names
+/// one, else in the seat's machine ledger.
+#[derive(Debug)]
+struct Filed {
+    seat: &'static JevUse,
+    ledger: Option<PathBuf>,
+    row: Value,
 }
 
 /// Every pane's book.
@@ -183,16 +372,17 @@ pub(crate) struct Guards {
 /// The window's books.
 static GUARDS: LazyLock<Mutex<Guards>> = LazyLock::new(Mutex::default);
 
-/// Read one envelope the hook loop received, for the two guards: its
-/// moments, if its agent's row sees any, from the pane it speaks for. Takes
-/// the stamps a command needs before it runs and hands every question to a
-/// thread; returns before any leaves.
+/// Read one envelope the hook loop received, for the seats a pane's work is
+/// put to: nothing at all while none is asked; else its moments, if its
+/// agent's row sees any, from the pane it speaks for. Takes the stamps a
+/// command needs before it runs and hands every question to a thread;
+/// returns before any leaves.
 pub(crate) fn note_hook(
     app: &tauri::AppHandle,
     envelope: &zerocode_core::HookEnvelope,
     expected_launch_token: Option<&str>,
 ) {
-    // A payload the guards cannot read leaves that envelope unasked and the
+    // A payload the seats cannot read leaves that envelope unasked and the
     // hook loop standing: every road after this one reads the same envelope.
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         read_hook(app, envelope, expected_launch_token);
@@ -210,13 +400,17 @@ fn read_hook(
     envelope: &zerocode_core::HookEnvelope,
     expected_launch_token: Option<&str>,
 ) {
+    let asking = STANDING.asking();
+    if asking.nothing() {
+        return;
+    }
     let payload = zerocode_core::payload::HookPayload::of(&envelope.payload);
     let Some((term, event)) =
         crate::hooks::guard_event_of(envelope, &payload, expected_launch_token)
     else {
         return;
     };
-    let moments = hook_guard::moments_parsed(envelope.agent, &event, &payload);
+    let moments = hook_guard::moments_parsed(envelope.agent, &event, &payload, asking);
     if moments.is_empty() {
         return;
     }
@@ -243,6 +437,7 @@ fn read_hook(
         &GUARDS,
         &Wire::of_this_machine(),
         &pane,
+        asking,
         moments,
         crate::usage_runtime::epoch_ms_now(),
     ));
@@ -259,18 +454,19 @@ pub(crate) fn forget_term(term: u32) {
 }
 
 /// [`note_hook`]'s body, with the books and the wire handed in: file each
-/// moment in `pane`'s book, write the labels a turn's end settles, and ask
-/// each question on a thread of its own — whose handles are answered, for a
-/// caller that waits on them.
+/// moment in `pane`'s book for the seats `asking` asks, write the labels a
+/// turn's end settles, and ask each question on a thread of its own — whose
+/// handles are answered, for a caller that waits on them.
 pub(crate) fn note(
     guards: &'static Mutex<Guards>,
     wire: &Wire,
     pane: &Pane,
+    asking: Asking,
     moments: Vec<Moment>,
     now_ms: i64,
 ) -> Vec<JoinHandle<()>> {
     let mut questions = Vec::new();
-    let mut labels: Vec<(&'static JevUse, Value)> = Vec::new();
+    let mut labels: Vec<Filed> = Vec::new();
     {
         let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
         let owner = pane.owner();
@@ -283,7 +479,7 @@ pub(crate) fn note(
         }
         let at = u64::try_from(now_ms).unwrap_or_default();
         for moment in moments {
-            file(book, pane, moment, at, &mut questions, &mut labels);
+            file(book, pane, asking, moment, at, &mut questions, &mut labels);
         }
     }
     record_labels(wire, labels, now_ms);
@@ -304,13 +500,43 @@ pub(crate) fn note(
 fn file(
     book: &mut PaneBook,
     pane: &Pane,
+    asking: Asking,
     moment: Moment,
     at: u64,
     questions: &mut Vec<Question>,
-    labels: &mut Vec<(&'static JevUse, Value)>,
+    labels: &mut Vec<Filed>,
 ) {
     match moment {
         Moment::Prompt(words) => {
+            // What the turn before left: its file pick is settled on the
+            // files its edits wrote so far, and the answer before this
+            // prompt is graded by what the person opened it with.
+            settle_picks(book, pane, at, labels);
+            if let Some(failure) = claim::next_person_failed(&words) {
+                grade_claims(book, failure, at, labels);
+            }
+            book.turn_edited.clear();
+            book.evidence.clear();
+            if asking.file_pick && file_pick::is_code_edit_intent(&words) {
+                let attempt = book.attempt();
+                let judged = task_fingerprint(&attempt, FILE_PICK.id);
+                if !book.picks.iter().any(|pick| pick.judged == judged) {
+                    shelve(
+                        &mut book.picks,
+                        PickWaiting {
+                            judged,
+                            asked: None,
+                            edited: None,
+                        },
+                    );
+                    questions.push(Question::FilePick {
+                        judged,
+                        attempt,
+                        request: words.clone(),
+                        edited: book.edited.clone(),
+                    });
+                }
+            }
             book.task = task_line_of(&words);
             book.persons = squeezed(&words);
         }
@@ -318,10 +544,14 @@ fn file(
             call_id,
             tool,
             words,
+            paths,
         } => {
             for step in &mut book.steps {
                 step.calls
                     .push((call_id.clone(), tool.clone(), words.clone()));
+            }
+            for path in paths {
+                note_edit(book, path);
             }
         }
         Moment::CommandAbout(call) => {
@@ -476,7 +706,10 @@ fn file(
                 text,
             });
         }
-        Moment::Finished { call_id } => {
+        Moment::Finished { call_id, evidence } => {
+            if let Some(evidence) = evidence {
+                shelve(&mut book.evidence, evidence);
+            }
             let Some(call_id) = call_id else {
                 return;
             };
@@ -489,7 +722,74 @@ fn file(
                 decide_step(book, step, at, labels);
             }
         }
-        Moment::TurnEnded { stopped } => end_turn(book, stopped, at, labels),
+        Moment::TurnEnded { stopped, said } => {
+            end_turn(book, stopped, at, labels);
+            settle_picks(book, pane, at, labels);
+            book.turn_edited.clear();
+            let evidence = std::mem::take(&mut book.evidence);
+            if let Some(said) = said {
+                let judged = task_fingerprint(&book.owner, &book.attempt());
+                shelve(
+                    &mut book.claims,
+                    ClaimEntry {
+                        waiting: ClaimWaiting {
+                            judged,
+                            verdict: None,
+                            failure: None,
+                            confidence: None,
+                            compared: false,
+                        },
+                        ledger: None,
+                    },
+                );
+                questions.push(Question::Claim {
+                    judged,
+                    said,
+                    evidence,
+                });
+            }
+            book.turns += 1;
+        }
+    }
+}
+
+/// An edit wrote `path`: the turn's, and this session's newest.
+fn note_edit(book: &mut PaneBook, path: String) {
+    book.edited.retain(|held| *held != path);
+    book.edited.insert(0, path.clone());
+    book.edited.truncate(FILE_PICK_CANDIDATE_CAP);
+    shelve(&mut book.turn_edited, path);
+}
+
+/// A turn ended, or the next one began: every file pick still waiting on its
+/// turn's edits has them now, and each whose answer is in is labeled.
+fn settle_picks(book: &mut PaneBook, pane: &Pane, at: u64, labels: &mut Vec<Filed>) {
+    for pick in &mut book.picks {
+        if pick.edited.is_none() {
+            pick.edited = Some(book.turn_edited.clone());
+        }
+    }
+    for pick in extract(&mut book.picks, |pick| {
+        pick.asked.is_some() && pick.edited.is_some()
+    }) {
+        labels.extend(pick.label(&pane.worktree, at));
+    }
+}
+
+/// The person's next prompt opened with `failure` or not: the newest claim
+/// still waiting on it is graded — labeled now when its verdict is in.
+fn grade_claims(book: &mut PaneBook, failure: bool, at: u64, labels: &mut Vec<Filed>) {
+    let Some(at_entry) = book
+        .claims
+        .iter()
+        .rposition(|entry| entry.waiting.failure.is_none())
+    else {
+        return;
+    };
+    book.claims[at_entry].waiting.failure = Some(failure);
+    if book.claims[at_entry].waiting.verdict.is_some() {
+        let entry = book.claims.remove(at_entry);
+        labels.extend(entry.label(at));
     }
 }
 
@@ -526,12 +826,7 @@ fn extract<T>(from: &mut Vec<T>, take: impl Fn(&T) -> bool) -> Vec<T> {
 
 /// Settle a block on the step after it: followed when one of the calls that
 /// started after it carried out words it spelled and the person's did not.
-fn decide_step(
-    book: &mut PaneBook,
-    step: Step,
-    at: u64,
-    labels: &mut Vec<(&'static JevUse, Value)>,
-) {
+fn decide_step(book: &mut PaneBook, step: Step, at: u64, labels: &mut Vec<Filed>) {
     let followed = step.calls.iter().find_map(|(_, tool, words)| {
         words
             .as_deref()
@@ -550,12 +845,7 @@ fn decide_step(
 }
 
 /// A turn of the pane's ended: settle what its facts settle.
-fn end_turn(
-    book: &mut PaneBook,
-    stopped: bool,
-    at: u64,
-    labels: &mut Vec<(&'static JevUse, Value)>,
-) {
+fn end_turn(book: &mut PaneBook, stopped: bool, at: u64, labels: &mut Vec<Filed>) {
     // A call still open when the turn ends: stopped with it when the person
     // stopped the turn while it ran, refused when the person was asked to
     // allow it and it never ran; otherwise nothing says what became of it.
@@ -597,50 +887,74 @@ fn end_turn(
     }
 }
 
-fn push_label<R: serde::Serialize>(
-    labels: &mut Vec<(&'static JevUse, Value)>,
-    guard: &Guard,
-    row: Option<R>,
-) {
+fn push_label<R: serde::Serialize>(labels: &mut Vec<Filed>, guard: &Guard, row: Option<R>) {
     if let Some(row) = row.and_then(|row| serde_json::to_value(row).ok()) {
-        labels.push((guard.seat, row));
+        labels.push(Filed {
+            seat: guard.seat,
+            ledger: None,
+            row,
+        });
     }
 }
 
-/// Write each seat's labels to its ledger, off the hook loop.
-fn record_labels(wire: &Wire, labels: Vec<(&'static JevUse, Value)>, now_ms: i64) {
+/// Write each ledger's labels, off the hook loop: a seat's machine ledger,
+/// or the one a row names.
+fn record_labels(wire: &Wire, labels: Vec<Filed>, now_ms: i64) {
     if labels.is_empty() {
         return;
     }
     let wire = wire.clone();
     drop(std::thread::spawn(move || {
-        let mut by_seat: BTreeMap<&'static str, (&'static JevUse, Vec<Value>)> = BTreeMap::new();
-        for (seat, row) in labels {
-            by_seat
-                .entry(seat.id)
-                .or_insert((seat, Vec::new()))
+        let mut by_ledger: BTreeMap<PathBuf, (&'static JevUse, Vec<Value>)> = BTreeMap::new();
+        for filed in labels {
+            let Some(ledger) = filed
+                .ledger
+                .or_else(|| systemone::ledger_of(&wire, filed.seat))
+            else {
+                continue;
+            };
+            by_ledger
+                .entry(ledger)
+                .or_insert((filed.seat, Vec::new()))
                 .1
-                .push(row);
+                .push(filed.row);
         }
-        for (seat, rows) in by_seat.into_values() {
-            if let Some(ledger) = systemone::ledger_of(&wire, seat) {
-                systemone::record_rows(seat, &ledger, &rows, now_ms);
-            }
+        for (ledger, (seat, rows)) in by_ledger {
+            systemone::record_rows(seat, &ledger, &rows, now_ms);
         }
     }));
 }
 
-/// Ask one question and file what came of it: the row, and the verdict in
-/// the book — whose label, when its hindsight is already in, is written now.
+/* ---- the questions --------------------------------------------------------------- */
+
+/// Ask one question and file what came of it.
 fn ask(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Question) {
-    let guard = match question {
-        Question::Command { .. } => &COMMAND,
-        Question::Text { .. } => &TEXT,
+    match question {
+        Question::Claim {
+            judged,
+            said,
+            evidence,
+        } => ask_claim(guards, wire, pane, judged, said, &evidence),
+        Question::FilePick {
+            judged,
+            attempt,
+            request,
+            edited,
+        } => ask_file_pick(guards, wire, pane, judged, attempt, request, &edited),
+        guarded => ask_guard(guards, wire, pane, guarded),
+    }
+}
+
+/// Ask one guard's question and file what came of it: the row, and the
+/// verdict in the book — whose label, when its hindsight is already in, is
+/// written now.
+fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Question) {
+    let (guard, judged) = match &question {
+        Question::Command { judged, .. } => (&COMMAND, *judged),
+        Question::Text { judged, .. } => (&TEXT, *judged),
+        Question::Claim { .. } | Question::FilePick { .. } => return,
     };
-    let judged = match &question {
-        Question::Command { judged, .. } | Question::Text { judged, .. } => *judged,
-    };
-    let (mode, _) = systemone::standing_in(wire, guard.seat, zerocode_core::jev::Run::Fresh);
+    let (mode, _) = systemone::standing_in(wire, guard.seat, Run::Fresh);
     let Some(ledger) = systemone::ledger_of(wire, guard.seat).filter(|_| mode.asks()) else {
         settle(guards, wire, pane, judged, Verdict::Unavailable, None);
         return;
@@ -659,7 +973,7 @@ fn ask(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Quest
             moment,
         } => {
             let questions = command_questions(noul::question);
-            let asked = put(
+            let asked = put_nouls(
                 wire,
                 guard,
                 &cwd,
@@ -680,7 +994,7 @@ fn ask(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Quest
                 outside_paths,
                 verdict: verdict.word().to_string(),
                 noted: false,
-                from: Some(pane.agent.slug().to_string()),
+                from: pane.asker(),
                 moment: Some(moment.to_string()),
                 pane: pane.place(),
                 asked,
@@ -695,7 +1009,7 @@ fn ask(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Quest
             text,
         } => {
             let questions = text_questions(noul::question);
-            let asked = put(
+            let asked = put_nouls(
                 wire,
                 guard,
                 &pane.worktree,
@@ -717,12 +1031,13 @@ fn ask(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Quest
                 verdict: verdict.word().to_string(),
                 fenced: false,
                 noted: false,
-                from: Some(pane.agent.slug().to_string()),
+                from: pane.asker(),
                 pane: pane.place(),
                 asked,
             };
             (serde_json::to_value(row).ok(), verdict, confidence)
         }
+        Question::Claim { .. } | Question::FilePick { .. } => return,
     };
     if let Some(row) = row {
         systemone::record_rows(guard.seat, &ledger, &[row], now_ms);
@@ -730,18 +1045,261 @@ fn ask(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Quest
     settle(guards, wire, pane, judged, verdict, confidence);
 }
 
+/// Ask a turn's claims — the claims its answer's last paragraph makes, over
+/// the turn's finished calls ([`claim::scan`]) — and file what came of them:
+/// the row in the ledger zo keeps for the pane's folder, and the verdict in
+/// the book. A turn whose answer claims nothing is asked nothing.
+fn ask_claim(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    pane: &Pane,
+    judged: u64,
+    said: SaidAt,
+    evidence: &[Evidence<String>],
+) {
+    let mode = CLAIM.mode_in_run(&wire.settings_root(), Run::Fresh);
+    let root = pane.root();
+    let ledger = systemone::project_ledger_of(wire, &CLAIM, &root).filter(|_| mode.asks());
+    let words = match said {
+        SaidAt::Words(words) => Some(words),
+        SaidAt::Transcript(path) => zerocode_core::transcript::last_assistant_words(&path)
+            .map(|words| zerocode_core::clone::scrub_credentials(&words)),
+    };
+    let claims = words.map_or_else(Vec::new, |words| claim::scan(evidence, &words));
+    let Some(ledger) = ledger.filter(|_| !claims.is_empty()) else {
+        settle_claim(guards, wire, pane, judged, None);
+        return;
+    };
+    let now_ms = crate::usage_runtime::epoch_ms_now();
+    let mut row = ClaimCheckRow {
+        at: u64::try_from(now_ms).unwrap_or_default(),
+        judged,
+        session: fingerprint_of(&pane.owner()),
+        rubric_version: claim::CLAIM_RUBRIC_VERSION,
+        claims: claims.len(),
+        code_settled: claims
+            .iter()
+            .filter(|claim| claim.code != CodeVerdict::NeedsReading)
+            .count(),
+        outcome: CONTROL.to_string(),
+        verdict: claim::UNAVAILABLE.to_string(),
+        answers: BTreeMap::new(),
+        route_use: ROUTE_USE_FALLBACK.to_string(),
+        applied: false,
+        elapsed_ms: 0,
+        requests: 0,
+        redacted_lines: 0,
+        model: None,
+        input_tokens: None,
+        request_digest: None,
+        confidence: None,
+        from: pane.asker(),
+        pane: pane.place(),
+        cached: false,
+    };
+    let mut verdicts = claim::code_verdicts(&claims);
+    let questions = claim::questions(&claims, choice::question);
+    if !questions.is_empty() {
+        let (trip, answers) = put(
+            wire,
+            &CLAIM,
+            &root,
+            claim::state(&claims),
+            &questions,
+            |answers| {
+                claim::read_choices(answers, questions.keys()).ok_or_else(|| SCHEMA.to_string())
+            },
+        );
+        row.outcome = trip.outcome;
+        row.elapsed_ms = trip.elapsed_ms;
+        row.requests = trip.requests;
+        row.redacted_lines = trip.redacted_lines;
+        row.model = trip.model;
+        row.input_tokens = trip.input_tokens;
+        row.cached = trip.cached;
+        if let Some(answers) = answers {
+            row.confidence = answers
+                .values()
+                .map(|answer| answer.confidence)
+                .min_by(f64::total_cmp);
+            for (id, answer) in answers {
+                verdicts.push(claim::answered_verdict(&answer.word));
+                row.answers.insert(id, answer.word);
+            }
+        }
+    }
+    row.verdict = claim::turn_verdict(&verdicts, claims.len()).to_string();
+    row.route_use = if row.outcome == ANSWERED_OUTCOME || row.outcome == CONTROL {
+        mode.key()
+    } else {
+        ROUTE_USE_FALLBACK
+    }
+    .to_string();
+    let compared = claim::compared(&row.outcome, u64::try_from(row.code_settled).ok());
+    let (verdict, confidence) = (row.verdict.clone(), row.confidence);
+    if let Ok(value) = serde_json::to_value(&row) {
+        systemone::record_rows(&CLAIM, &ledger, &[value], now_ms);
+    }
+    settle_claim(
+        guards,
+        wire,
+        pane,
+        judged,
+        Some((verdict, confidence, compared, ledger)),
+    );
+}
+
+/// Ask a turn's file pick: the files the window's own search finds for the
+/// request's words, beside the files this session's edits wrote, put to the
+/// seat in one batch ([`file_pick::questions`]), and file what came of it —
+/// the row in the ledger zo keeps for the pane's folder, and, when it was
+/// answered, the request its turn's edits will grade.
+fn ask_file_pick(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    pane: &Pane,
+    judged: u64,
+    attempt: String,
+    request: String,
+    edited: &[String],
+) {
+    let mode = FILE_PICK.mode_in_run(&wire.settings_root(), Run::Fresh);
+    let root = pane.root();
+    let Some(ledger) =
+        systemone::project_ledger_of(wire, &FILE_PICK, &root).filter(|_| mode.asks())
+    else {
+        settle_pick(guards, wire, pane, judged, None);
+        return;
+    };
+    let began = Instant::now();
+    let search = searched(&root, &file_pick::search_terms(&request));
+    let recent: Vec<String> = edited
+        .iter()
+        .filter_map(|path| file_pick::workspace_relative_path(&root, Path::new(path)))
+        .filter(|path| root.join(path).is_file())
+        .collect();
+    let batch = CandidateBatch {
+        files: file_pick::interleave(&root, &[&search, &recent]),
+        recent_paths: recent,
+        search_candidates: search.len(),
+        graph_candidates: 0,
+    };
+    let candidate_elapsed_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let now_ms = crate::usage_runtime::epoch_ms_now();
+    let ask = FilePickAsk {
+        attempt,
+        session_id: pane.owner(),
+        request,
+    };
+    let mut row = FilePickRow::of_batch(
+        u64::try_from(now_ms).unwrap_or_default(),
+        &ask,
+        &batch,
+        candidate_elapsed_ms,
+    );
+    row.from = pane.asker();
+    row.pane = pane.place();
+    let questions = file_pick::questions(&batch.files, noul::question);
+    let (trip, answered) = put(
+        wire,
+        &FILE_PICK,
+        &root,
+        file_pick::state(&ask.request, &batch.files),
+        &questions,
+        |answers| {
+            file_pick::read_answers_naming(&batch.files, answers)
+                .map(|readings| (answers.clone(), readings))
+                .map_err(|(question, refusal)| format!("{question}: {}", refusal.token()))
+        },
+    );
+    row.outcome = trip.outcome;
+    row.elapsed_ms = trip.elapsed_ms;
+    row.requests = trip.requests;
+    row.redacted_lines = trip.redacted_lines;
+    row.model = trip.model;
+    row.input_tokens = trip.input_tokens;
+    row.output_tokens = trip.output_tokens;
+    row.cached = trip.cached;
+    row.rejected = trip.rejected;
+    if let Some((value, readings)) = answered {
+        row.answers = Some(file_pick::probabilities(readings));
+        row.ranked_paths = file_pick::rank_candidates(&batch.files, &value)
+            .iter()
+            .map(|path| fingerprint_of(path))
+            .collect();
+        row.selected_paths = file_pick::select_candidates(&batch.files, &value)
+            .iter()
+            .map(|path| fingerprint_of(path))
+            .collect();
+        row.route_use = mode.key().to_string();
+    }
+    let Ok(value) = serde_json::to_value(&row) else {
+        settle_pick(guards, wire, pane, judged, None);
+        return;
+    };
+    systemone::record_rows(&FILE_PICK, &ledger, std::slice::from_ref(&value), now_ms);
+    let answered = (row.outcome == ANSWERED_OUTCOME).then_some((value, root, ledger));
+    settle_pick(guards, wire, pane, judged, answered);
+}
+
+/// The files the window's own project search finds for `terms` in `root` —
+/// each file one of whose lines names a term — in the order it finds them,
+/// each once, at most the seat's candidate cap; under the search's own
+/// deadline (`ExplorerPolicy`), past which it finds nothing.
+fn searched(root: &Path, terms: &[String]) -> Vec<String> {
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let policy = crate::explorer_policy::ExplorerPolicy::default();
+    // The terms are words — letters, digits and `_` ([`file_pick::search_terms`]),
+    // so they join as alternatives of one pattern.
+    let options = crate::project_search::SearchOptions {
+        regex: true,
+        ..crate::project_search::SearchOptions::default()
+    };
+    let hits = crate::project_search::search(root, &terms.join("|"), Some(&options), &policy)
+        .unwrap_or_default();
+    let mut paths: Vec<String> = Vec::new();
+    for hit in hits {
+        if paths.len() == FILE_PICK_CANDIDATE_CAP {
+            break;
+        }
+        if !paths.contains(&hit.path) {
+            paths.push(hit.path);
+        }
+    }
+    paths
+}
+
+/// What one request's trip through the door came to — the facts every row
+/// the window writes for a pane carries, whatever its seat.
+#[derive(Debug, Default)]
+struct Trip {
+    outcome: String,
+    elapsed_ms: u64,
+    requests: u32,
+    redacted_lines: u32,
+    model: Option<String>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    request_bytes: Option<usize>,
+    cached: bool,
+    rejected: Option<String>,
+}
+
 /// Put `questions` over `state`, from words of `workspace`, through the door
 /// and its memo: an answer the memo held for these exact bytes answers a
-/// repeat with no request (`cached`), and a fresh one is remembered. Read the
-/// way zo reads the same answer: every Noul, or the rule that broke.
-fn put(
+/// repeat with no request (`cached`), and a fresh one is remembered once
+/// `read` — the seat's own reader of a reply's answers — takes it; one it
+/// refuses is the reply's schema breaking, and `read` says which rule.
+fn put<R>(
     wire: &Wire,
-    guard: &Guard,
+    seat: &'static JevUse,
     workspace: &Path,
     state: Value,
     questions: &BTreeMap<String, Value>,
-    mode: JevMode,
-) -> Asked {
+    read: impl FnOnce(&Value) -> Result<R, String>,
+) -> (Trip, Option<R>) {
     let memo_file = systemone::memo_path(wire);
     let began = Instant::now();
     let body = request_body(
@@ -754,76 +1312,106 @@ fn put(
         ),
     );
     let answered = wire.ask_remembering(
-        guard.seat,
+        seat,
         Some(workspace),
         body,
-        guard.deadline(),
+        deadline_of(seat),
         memo_file.as_deref().map(|path| Memo {
             path,
-            seat: guard.seat,
+            seat,
             applying: true,
         }),
     );
     let cached = answered.memo.as_ref().is_some_and(|memoed| memoed.answered);
-    let mut asked = Asked {
-        outcome: String::new(),
-        answers: None,
-        route_use: ROUTE_USE_FALLBACK.to_string(),
-        applied: false,
+    let mut trip = Trip {
         elapsed_ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
-        retries: 0,
         requests: answered.spent.requests,
         redacted_lines: u32::try_from(answered.spent.redacted_lines).unwrap_or(u32::MAX),
         model: answered.spent.model.clone(),
-        input_tokens: None,
         request_bytes: (answered.request_bytes > 0).then_some(answered.request_bytes),
-        request_digest: None,
-        rejected: None,
         cached,
+        ..Trip::default()
     };
     let body = match answered.answer {
         Ok(body) => body,
         Err(token) => {
-            asked.outcome = token;
-            return asked;
+            trip.outcome = token;
+            return (trip, None);
         }
     };
     let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    asked.input_tokens = parsed
+    trip.input_tokens = parsed
         .pointer("/usage/input_tokens")
         .and_then(Value::as_u64);
+    trip.output_tokens = parsed
+        .pointer("/usage/output_tokens")
+        .and_then(Value::as_u64);
     let answers = parsed.get("answers").cloned().unwrap_or(Value::Null);
-    let read: Result<BTreeMap<String, f64>, &'static str> = questions
-        .keys()
-        .map(|id| {
-            noul::read(&answers, id)
-                .map(|yes| (id.clone(), yes))
-                .map_err(noul::NoulRefusal::token)
-        })
-        .collect();
-    match read {
+    match read(&answers) {
         Ok(read) => {
-            asked.outcome = ANSWERED_OUTCOME.to_string();
-            asked.answers = Some(read);
-            asked.route_use = mode.key().to_string();
+            trip.outcome = ANSWERED_OUTCOME.to_string();
             if !cached
                 && let (Some(path), Some(memoed)) = (memo_file.as_deref(), answered.memo.as_ref())
             {
                 let _ = memo::remember(
                     path,
-                    guard.seat,
+                    seat,
                     &memoed.key,
                     &body,
                     crate::usage_runtime::epoch_ms_now(),
                 );
             }
+            (trip, Some(read))
         }
         Err(rule) => {
-            asked.outcome = SCHEMA.to_string();
-            asked.rejected = Some(rule.to_string());
+            trip.outcome = SCHEMA.to_string();
+            trip.rejected = Some(rule);
+            (trip, None)
         }
     }
-    asked
+}
+
+/// A guard's Nouls through [`put`], read the way zo reads the same answer:
+/// every Noul, or the rule that broke.
+fn put_nouls(
+    wire: &Wire,
+    guard: &Guard,
+    workspace: &Path,
+    state: Value,
+    questions: &BTreeMap<String, Value>,
+    mode: JevMode,
+) -> Asked {
+    let (trip, answers) = put(wire, guard.seat, workspace, state, questions, |answers| {
+        questions
+            .keys()
+            .map(|id| {
+                noul::read(answers, id)
+                    .map(|yes| (id.clone(), yes))
+                    .map_err(|refusal| refusal.token().to_string())
+            })
+            .collect::<Result<BTreeMap<String, f64>, String>>()
+    });
+    Asked {
+        outcome: trip.outcome,
+        route_use: if answers.is_some() {
+            mode.key()
+        } else {
+            ROUTE_USE_FALLBACK
+        }
+        .to_string(),
+        answers,
+        applied: false,
+        elapsed_ms: trip.elapsed_ms,
+        retries: 0,
+        requests: trip.requests,
+        redacted_lines: trip.redacted_lines,
+        model: trip.model,
+        input_tokens: trip.input_tokens,
+        request_bytes: trip.request_bytes,
+        request_digest: None,
+        rejected: trip.rejected,
+        cached: trip.cached,
+    }
 }
 
 /// The verdict of the call `judged` names has answered — or has not: one
@@ -870,6 +1458,82 @@ fn settle(
                     push_label(&mut labels, &TEXT, one.label(at));
                 }
             }
+        }
+    }
+    record_labels(wire, labels, crate::usage_runtime::epoch_ms_now());
+}
+
+/// The claims `judged` names came to `answered` — their verdict, its
+/// confidence, whether it was the model's alone, and the ledger their row
+/// went to — or to nothing, which takes them out of the book. Labeled now
+/// when the person's next prompt is already in.
+fn settle_claim(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    pane: &Pane,
+    judged: u64,
+    answered: Option<(String, Option<f64>, bool, PathBuf)>,
+) {
+    let mut labels = Vec::new();
+    {
+        let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(book) = held.panes.get_mut(&pane.term) else {
+            return;
+        };
+        let Some(at_entry) = book
+            .claims
+            .iter()
+            .position(|entry| entry.waiting.judged == judged)
+        else {
+            return;
+        };
+        let Some((verdict, confidence, compared, ledger)) = answered else {
+            book.claims.remove(at_entry);
+            return;
+        };
+        let entry = &mut book.claims[at_entry];
+        entry.waiting.verdict = Some(verdict);
+        entry.waiting.confidence = confidence;
+        entry.waiting.compared = compared;
+        entry.ledger = Some(ledger);
+        if entry.waiting.failure.is_some() {
+            let at = u64::try_from(crate::usage_runtime::epoch_ms_now()).unwrap_or_default();
+            let entry = book.claims.remove(at_entry);
+            labels.extend(entry.label(at));
+        }
+    }
+    record_labels(wire, labels, crate::usage_runtime::epoch_ms_now());
+}
+
+/// The file pick `judged` names came back `answered` — its row, the folder
+/// it was asked from and the ledger it went to — or unanswered, which takes
+/// it out of the book: only an answered request is graded. Labeled now when
+/// its turn's edits are already in.
+fn settle_pick(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    pane: &Pane,
+    judged: u64,
+    answered: Option<(Value, PathBuf, PathBuf)>,
+) {
+    let mut labels = Vec::new();
+    {
+        let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(book) = held.panes.get_mut(&pane.term) else {
+            return;
+        };
+        let Some(at_entry) = book.picks.iter().position(|pick| pick.judged == judged) else {
+            return;
+        };
+        if answered.is_none() {
+            book.picks.remove(at_entry);
+            return;
+        }
+        book.picks[at_entry].asked = answered;
+        if book.picks[at_entry].edited.is_some() {
+            let at = u64::try_from(crate::usage_runtime::epoch_ms_now()).unwrap_or_default();
+            let pick = book.picks.remove(at_entry);
+            labels.extend(pick.label(&pane.worktree, at));
         }
     }
     record_labels(wire, labels, crate::usage_runtime::epoch_ms_now());

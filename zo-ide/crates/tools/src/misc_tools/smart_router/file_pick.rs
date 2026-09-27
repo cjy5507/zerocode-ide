@@ -27,6 +27,7 @@ use zerocode_core::jev::file_pick::{
 use zerocode_core::jev::file_pick::FILE_PICK_NO_EDIT_LABEL;
 pub use zerocode_core::jev::file_pick::{FilePickLabelRow, FilePickRow};
 use zerocode_core::jev::promote;
+use zerocode_core::AgentKind;
 use zerocode_core::jev::{
     digest_of, fingerprint_of, FILE_PICK, FILE_PICK_APPLY_DEADLINE_MS,
     FILE_PICK_CANDIDATE_CAP,
@@ -168,6 +169,8 @@ async fn score_candidates(
         questions: &questions,
     };
     let mut row = FilePickRow::new(ask, batch, candidate_elapsed_ms);
+    row.from = Some(AgentKind::Zo.slug().to_string());
+    row.pane = super::tool_guard::pane_of(cwd);
     let Some(body) = jev_gate::body_of(&request) else {
         row.outcome = SystemOneFailure::InvalidRequest.ledger_token();
         write_request_and_judge(cwd, &row);

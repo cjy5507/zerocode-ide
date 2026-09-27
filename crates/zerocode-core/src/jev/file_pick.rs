@@ -544,6 +544,13 @@ pub struct FilePickRow {
     pub request_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected: Option<String>,
+    /// Who asked ([`crate::jev::summary::FROM`]): zo's own runtime, or the
+    /// agent of a window pane (t-11349).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The folder the words came from, by its last name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
 }
 
 /// One hindsight mark. File names remain local and are reduced to fingerprints.
@@ -627,6 +634,8 @@ impl FilePickRow {
             redacted_lines: 0,
             request_digest: None,
             rejected: None,
+            from: None,
+            pane: None,
         }
     }
 }

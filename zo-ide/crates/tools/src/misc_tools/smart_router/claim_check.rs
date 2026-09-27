@@ -20,6 +20,7 @@ use zerocode_core::jev::claim::UNAVAILABLE;
 #[cfg(test)]
 use zerocode_core::jev::claim::{alerts, CONTRADICTS, SAYS_NOTHING};
 use zerocode_core::jev::door::Refused;
+use zerocode_core::AgentKind;
 use zerocode_core::jev::summary::CONTROL;
 use zerocode_core::jev::{digest_of, fingerprint_of, JevMode, CLAIM, CLAIM_APPLY_DEADLINE_MS, ROUTE_USE_FALLBACK};
 
@@ -156,6 +157,9 @@ async fn ask_and_record(cwd: PathBuf, session: PathBuf, judged: u64, claims: Vec
         applied: false, elapsed_ms: 0, requests: 0, redacted_lines: 0,
         model: None, input_tokens: None, request_digest: None,
         confidence: None,
+        from: Some(AgentKind::Zo.slug().to_string()),
+        pane: super::tool_guard::pane_of(&cwd),
+        cached: false,
     };
     let mut verdicts = shared::code_verdicts(&claims);
     let asked = questions(&claims);

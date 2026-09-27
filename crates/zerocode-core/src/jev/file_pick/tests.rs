@@ -53,3 +53,126 @@ fn a_reply_ranks_and_a_label_reads_the_edited_files() {
     assert_eq!(none.not_compared.as_deref(), Some(FILE_PICK_NO_EDIT_LABEL));
 }
 
+/// The file pick seat's label, golden (t-11349) — the one zo and a window
+/// pane both write ([`label_row`] over [`edited_fingerprints`]). The judgment
+/// is the ranked top three; today's rule is the session's recent-edit order
+/// (the seat's baseline); hindsight is the files the turn's edits wrote.
+#[test]
+fn the_file_pick_label_golden_table() {
+    struct Case {
+        ranked: &'static [&'static str],
+        baseline: &'static [&'static str],
+        edited: &'static [&'static str],
+        agreed: Option<bool>,
+        baseline_agreed: Option<bool>,
+        not_compared: Option<&'static str>,
+    }
+    let cases = [
+        // The judgment found the file the turn edited; today's recent-edit
+        // order did not — the rule wrong, the judgment right.
+        Case {
+            ranked: &["src/a.rs"],
+            baseline: &["src/old.rs"],
+            edited: &["/w/p/src/a.rs"],
+            agreed: Some(true),
+            baseline_agreed: Some(false),
+            not_compared: None,
+        },
+        // The recent-edit order found it and the judgment did not.
+        Case {
+            ranked: &["src/b.rs"],
+            baseline: &["src/a.rs"],
+            edited: &["/w/p/src/a.rs"],
+            agreed: Some(false),
+            baseline_agreed: Some(true),
+            not_compared: None,
+        },
+        // Both found it; neither did.
+        Case {
+            ranked: &["src/a.rs"],
+            baseline: &["src/a.rs"],
+            edited: &["/w/p/src/a.rs"],
+            agreed: Some(true),
+            baseline_agreed: Some(true),
+            not_compared: None,
+        },
+        Case {
+            ranked: &["src/b.rs"],
+            baseline: &["src/c.rs"],
+            edited: &["/w/p/src/a.rs"],
+            agreed: Some(false),
+            baseline_agreed: Some(false),
+            not_compared: None,
+        },
+        // The file named by the pane's own spelling of its folder.
+        Case {
+            ranked: &["src/a.rs"],
+            baseline: &[],
+            edited: &["/link/p/src/a.rs"],
+            agreed: Some(true),
+            baseline_agreed: Some(false),
+            not_compared: None,
+        },
+        // A turn that edited no file of the project is no comparison.
+        Case {
+            ranked: &["src/a.rs"],
+            baseline: &["src/a.rs"],
+            edited: &[],
+            agreed: None,
+            baseline_agreed: None,
+            not_compared: Some(FILE_PICK_NO_EDIT_LABEL),
+        },
+        Case {
+            ranked: &["src/a.rs"],
+            baseline: &["src/a.rs"],
+            edited: &["/elsewhere/a.rs"],
+            agreed: None,
+            baseline_agreed: None,
+            not_compared: Some(FILE_PICK_NO_EDIT_LABEL),
+        },
+    ];
+    let roots = [Path::new("/w/p"), Path::new("/link/p")];
+    for case in cases {
+        let fingerprints = |paths: &[&str]| {
+            paths
+                .iter()
+                .map(|path| fingerprint_of(path))
+                .collect::<Vec<_>>()
+        };
+        let request = json!({
+            "rankedPaths": fingerprints(case.ranked),
+            "baselineCandidates": fingerprints(case.baseline),
+            "candidatePaths": fingerprints(case.ranked),
+            "selectedPaths": [],
+            "applied": false,
+        });
+        let edited: Vec<String> = case.edited.iter().map(|path| (*path).to_string()).collect();
+        let label = label_row(
+            &request,
+            9,
+            &edited_fingerprints(&roots, &edited),
+            Some(2),
+            1,
+        );
+        assert_eq!(
+            (
+                label.agreed,
+                label.baseline_agreed,
+                label.not_compared.as_deref()
+            ),
+            (case.agreed, case.baseline_agreed, case.not_compared),
+            "{:?} {:?} {:?}",
+            case.ranked,
+            case.baseline,
+            case.edited
+        );
+        assert_eq!(
+            (
+                label.kind.as_str(),
+                label.label.as_str(),
+                label.hindsight.as_str()
+            ),
+            ("label", "9", FILE_PICK_LABEL_HINDSIGHT)
+        );
+    }
+}

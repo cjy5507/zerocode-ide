@@ -190,11 +190,18 @@ pub fn tail_lines(path: &Path) -> Option<Vec<String>> {
 ///
 /// A bounded read of the file's tail, scanned backwards line by line.
 pub fn last_assistant_message(path: &Path) -> Option<String> {
+    last_assistant_words(path).map(|said| clamp(&said))
+}
+
+/// [`last_assistant_message`], whole: the words as the transcript holds
+/// them, paragraphs and all — for a reader of what the answer says rather
+/// than a card's line (the completion claim seat, t-11349).
+#[must_use]
+pub fn last_assistant_words(path: &Path) -> Option<String> {
     let tail = Tail::read(path)?;
     tail.lines()
         .rev()
         .find_map(|line| assistant_line_text(line.trim()))
-        .map(|said| clamp(&said))
 }
 
 /// Codex's own words for the two edges of a turn, as its rollout records them:
@@ -391,19 +398,38 @@ pub fn said_in_payload(payload: &str) -> Option<String> {
 /// [`said_in_payload`], for a caller that already paid the parse.
 #[must_use]
 pub fn said_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<String> {
+    match said_at_in_parsed(payload)? {
+        SaidAt::Words(words) => Some(clamp(&words)),
+        SaidAt::Transcript(path) => last_assistant_message(&path),
+    }
+}
+
+/// Where a turn-ending payload keeps what the agent said: its own words, or
+/// the transcript whose tail holds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaidAt {
+    Words(String),
+    Transcript(std::path::PathBuf),
+}
+
+/// Where a `Stop`-family payload keeps the agent's answer — Orca's first two
+/// answers ([`said_in_payload`]), neither read nor clamped yet: the payload's
+/// explicit field, else the transcript it names.
+#[must_use]
+pub fn said_at_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<SaidAt> {
     let value = payload.tree()?;
     for key in ["last_assistant_message", "lastAssistantMessage", "message"] {
         if let Some(direct) = value.get(key).and_then(|v| v.as_str())
             && !direct.trim().is_empty()
         {
-            return Some(clamp(direct));
+            return Some(SaidAt::Words(direct.to_string()));
         }
     }
     let path = value
         .get("transcript_path")
         .or_else(|| value.get("transcriptPath"))?
         .as_str()?;
-    last_assistant_message(Path::new(path))
+    Some(SaidAt::Transcript(Path::new(path).to_path_buf()))
 }
 
 /// What a tool answered mid-turn, from a `PostToolUse`-family payload.
@@ -436,8 +462,15 @@ pub fn tool_failure_in_payload(payload: &str) -> Option<String> {
 /// [`tool_failure_in_payload`], for a caller that already paid the parse.
 #[must_use]
 pub fn tool_failure_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<String> {
-    let value = payload.tree()?;
-    let said = value
+    tool_failure_words(payload.tree()?).map(|said| clamp(&said))
+}
+
+/// [`tool_failure_in_payload`]'s words, whole: the failed tool's own text, or
+/// the payload's `error`, or its `message` — for a reader of what a failure
+/// said rather than a card's line (the completion claim seat, t-11349).
+#[must_use]
+pub fn tool_failure_words(value: &serde_json::Value) -> Option<String> {
+    value
         .get("tool_response")
         .and_then(tool_response_text)
         .or_else(|| {
@@ -449,8 +482,7 @@ pub fn tool_failure_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Opti
                     .filter(|text| !text.is_empty())
                     .map(str::to_string)
             })
-        })?;
-    Some(clamp(&said))
+        })
 }
 
 /// `extractToolResponseText` (:9067), shape for shape — also the tool
