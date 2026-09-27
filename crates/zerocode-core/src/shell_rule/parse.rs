@@ -234,6 +234,10 @@ pub(super) fn extract_sudo_inner(command: &str) -> &str {
 
 /// Find the end of a value in `KEY=value rest` (handles basic quoting).
 fn find_end_of_value(s: &str) -> Option<usize> {
+    // The index is into `s` as the caller holds it: the value starts after
+    // any whitespace, and a position counted from the trimmed copy would land
+    // that many bytes short — inside a letter wider than a byte (t-10916).
+    let lead = s.len() - s.trim_start().len();
     let s = s.trim_start();
     if s.is_empty() {
         return None;
@@ -251,13 +255,13 @@ fn find_end_of_value(s: &str) -> Option<usize> {
                 while i < s.len() && !s.as_bytes()[i].is_ascii_whitespace() {
                     i += 1;
                 }
-                return if i < s.len() { Some(i) } else { None };
+                return if i < s.len() { Some(lead + i) } else { None };
             }
             i += 1;
         }
         None
     } else {
-        s.find(char::is_whitespace)
+        s.find(char::is_whitespace).map(|at| lead + at)
     }
 }
 

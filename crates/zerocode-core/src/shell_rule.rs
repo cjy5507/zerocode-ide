@@ -1139,3 +1139,6 @@ pub fn validate_paths(command: &str, workspace: &Path) -> ValidationResult {
 
     ValidationResult::Allow
 }
+
+#[cfg(test)]
+mod tests;
