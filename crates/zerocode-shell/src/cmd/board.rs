@@ -1190,7 +1190,8 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     // one policy the ledger's reseat keeps too — the turn the goodbye read as
     // under way, or the commands it cut under the pane (t-6428 ⑤). A
     // person's conversation comes back as it stood, whatever its tab's mark
-    // said; and a wake with no goodbye to read (a crash) is told nothing
+    // said, unless the goodbye itself read its turn as cut (t-11537 C,
+    // below); and a wake with no goodbye to read (a crash) is told nothing
     // rather than guessed at. Read here and spent only once the words reach
     // the pane (t-7812 R2): a wake that starts nothing leaves them owed.
     let data_root = window.data_root();
@@ -1212,6 +1213,17 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         coordinating
             .as_ref()
             .and_then(restart_nudge_runtime::coordinator_nudge)
+    });
+    // Any other conversation is a person's own tab: told to go on only when
+    // the goodbye read its turn as under way — the restart cut it, the person
+    // did not (t-11537 C, 2026-09-28 06:33: a zo tab sat mid-plan until they
+    // typed 「계속」). Filed under the conversation's digest, and owed and
+    // spent on the same road.
+    let tab = (reseating.is_none() && coordinating.is_none() && !fresh)
+        .then(|| crate::orchestration::restart_census::tab_key(agent, &session));
+    let nudge = nudge.or_else(|| {
+        tab.as_deref()
+            .and_then(|key| restart_nudge_runtime::tab_nudge(&data_root, key, Some(root.as_path())))
     });
     // And a sleeper's conversation comes back as the launch the ledger would
     // have cut (t-7812 B): its model, its effort, its peer name. The pane the
@@ -1310,8 +1322,10 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     let resumed_session_id = session.id.clone();
     window.record(term, session);
     // Whose word in the goodbye's note this wake speaks for: the sleeper's,
-    // or the coordinator's run's.
-    let owed = reseating.or_else(|| coordinating.map(|standing| standing.address));
+    // the coordinator's run's, or the person's tab's.
+    let owed = reseating
+        .or_else(|| coordinating.map(|standing| standing.address))
+        .or(tab);
     match (owed, nudge) {
         (Some(worker), Some(words)) => {
             let road = agent_spec(kind.slug())

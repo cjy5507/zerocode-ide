@@ -166,13 +166,33 @@ pub(super) fn worker_nudge(root: &Path, worker: &str, checkout: Option<&Path>) -
     if !cut.any() {
         return None;
     }
-    let state = checkout.and_then(|checkout| {
+    let state = checkout_state(checkout);
+    Some(resume_nudge(cut.turn, true, state.as_ref(), &cut.commands))
+}
+
+/// Where the checkout stands as a wake reads it, when it has one.
+fn checkout_state(checkout: Option<&Path>) -> Option<WorktreeState> {
+    checkout.and_then(|checkout| {
         worktree_state(
             checkout,
             u64::try_from(now_epoch_ms() / 1_000).unwrap_or_default(),
         )
-    });
-    Some(resume_nudge(cut.turn, true, state.as_ref(), &cut.commands))
+    })
+}
+
+/// The words a person's resumed tab carries, or none (t-11537 C) — a
+/// worker's continuation ([`resume_nudge`]) without the seat sentence, for
+/// the one case the person did not choose: the goodbye read the tab's turn
+/// as under way, so the restart cut it. A tab at rest, or one their own hand
+/// stopped, left no entry and comes back as it stood. Read, not spent, like
+/// a worker's: the words are spent once they may have reached the pane.
+pub(super) fn tab_nudge(root: &Path, key: &str, checkout: Option<&Path>) -> Option<String> {
+    let cut = crate::orchestration::restart_census::peek_cut(root, key);
+    if !cut.turn {
+        return None;
+    }
+    let state = checkout_state(checkout);
+    Some(resume_nudge(true, false, state.as_ref(), &cut.commands))
 }
 
 /// What a coordinator whose run was still working is told on its way back
