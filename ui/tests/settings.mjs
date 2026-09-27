@@ -118,6 +118,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "mention_rerank", setting: "jevMentionRerank", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "branching", setting: "jevBranching", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "judgment_cache", setting: "jevJudgmentCache", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "mail_triage", setting: "jevMailTriage", modes: "off shadow", recommended: "shadow" }),
   Object.freeze({ id: "challenger", setting: "jevChallenger", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "patch_review", setting: "jevPatchReview", modes: "off shadow on auto", recommended: "off" }),
   Object.freeze({ id: "claim", setting: "jevClaimCheck", modes: "off shadow on auto", recommended: "auto" }),

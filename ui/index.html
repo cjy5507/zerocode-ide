@@ -4263,6 +4263,11 @@
             <span data-jev-summary data-i18n="settings.typesafe.judgment_cacheSummary">같은 화면에 같은 지시로 하는 단계는 이미 받은 판단을 다시 씁니다. 켜면 Flow를 다시 돌릴 때 판단 요청이 0건이 됩니다.</span>
             <p data-jev-hint data-i18n="settings.typesafe.judgment_cacheHint">브라우저·데스크톱·휴대폰 자동 조작이 화면 판단을 보내기 직전, 보낼 내용(가릴 줄을 가리고 자른 뒤) 그대로를 기준으로 전에 받은 판단을 찾습니다. 찾으면 아무것도 보내지 않아 하루 요청 수도 늘지 않고, 판단 기록에 재사용 표시가 붙습니다. 보내기 전 네 가지 확인(키·켜짐·동의·하루 한도)은 찾기 전에 그대로 합니다. 「기록만」은 지금처럼 새 판단을 받으면서 저장한 판단이 같은 번호를 골랐는지만 기록하고, 「항상 적용」은 저장한 판단으로 바로 진행하며(사람이 직접 고른 선택), 「자동」은 그 일치율의 신뢰 하한이 기준(열에 아홉)을 넘은 뒤에만 저장한 판단으로 진행합니다. 저장한 판단을 더는 읽을 수 없으면 바로 새로 요청합니다. 저장은 zo 설정 폴더의 파일 하나(judgment-memo.jsonl)에 하고 화면의 글은 담지 않습니다.</p>
           </div>
+          <div data-jev-feature="mail_triage">
+            <span data-jev-name data-i18n="settings.typesafe.mail_triage">코디네이터 우편 분류</span>
+            <span data-jev-summary data-i18n="settings.typesafe.mail_triageSummary">코디네이터에게 온 편지마다 지금 답할지·기다려도 될지·볼 필요 없는지와 급한지를 판단해 기록합니다. 지금은 기록만 하고 우편 목록 순서는 바꾸지 않습니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.mail_triageHint">코디네이터가 맡은 실행에 편지(질문·작업 완료 보고·상태·작업자가 멈췄다는 알림 등)가 오면, 이 앱이 그 코디네이터의 터미널을 띄우고 있을 때만 편지 한 통마다 한 번 판단을 요청합니다. 보내는 것은 편지의 종류, 보낸 쪽의 종류(작업자·앱이 쓴 알림 등), 작업자와 작업의 번호와 작업의 진행 상태, 우선순위, 답을 기다리는지, 대화 깊이, 기다린 시간, 코디네이터에게 이미 넘어갔는지, 같은 내용이 그날 몇 번째인지, 코디네이터가 작업 중인지, 답을 기다리는 질문 수뿐이며 편지의 글은 한 글자도 보내지 않습니다. 판단은 기록만 하고 목록 순서는 바꾸지 않습니다. 정확도는 코디네이터가 그 뒤 실제로 한 일의 순서로 잽니다 — 세 번째 행동 안에 그 편지를 가리키는 일(답장, 그 작업·작업자를 가리키는 명령)을 했으면 「지금 답함」, 그 뒤에 했으면 「기다려도 됨」, 서른 번의 행동 동안 하지 않았으면 「볼 필요 없음」이고, 받은편지함 확인은 행동으로 세지 않습니다.</p>
+          </div>
           <div data-jev-feature="challenger">
             <span data-jev-name data-i18n="settings.typesafe.challenger">새 모델 시험</span>
             <span data-jev-summary data-i18n="settings.typesafe.challengerSummary">새로 나온 모델에게 다섯 번에 한 번 같은 설계를 물어, 이름을 가린 채 지금 모델과 비교합니다. 켜면 새 모델이 더 나은 역할부터 모델을 바꿉니다.</span>

@@ -60,14 +60,16 @@ pub const TASK_STAMP: &str = "task";
 
 /// The seats whose request rows carry the task they were asked for
 /// ([`TASK_STAMP`]): a silence judged, a worker placed, a summons chosen, a
-/// step's effort moved. Each writes the run, worker, attempt and task beside
-/// its answer; a seat that does not is not counted toward any task.
-pub const TASK_STAMPED: [&JevUse; 5] = [
+/// step's effort moved, a coordinator's letter triaged (t-9471). Each writes
+/// the run, worker, attempt and task beside its answer; a seat that does not
+/// is not counted toward any task.
+pub const TASK_STAMPED: [&JevUse; 6] = [
     &jev::STALL,
     &jev::PLACEMENT,
     &jev::SUMMON,
     &jev::SUMMON_DIFFICULTY,
     &jev::STEP_EFFORT,
+    &jev::MAIL_TRIAGE,
 ];
 
 /// A vendor ledger the usage scan reads — where a conversation's tokens can be
