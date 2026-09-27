@@ -463,6 +463,26 @@ where
         self.attendance = attendance;
     }
 
+    /// Install (or clear) the count of this session's background work still
+    /// out — [`super::BackgroundWorkProbe`]. Set by the host every turn beside
+    /// the attendance, for the same reason: a rebuilt runtime starts without
+    /// one, which reads as "nothing will come back".
+    pub fn set_background_work_probe(&mut self, probe: Option<super::BackgroundWorkProbe>) {
+        self.background_work = probe;
+    }
+
+    /// A person is at the keyboard and this session has background work out
+    /// that the host will bring back as a message: all that is left of the
+    /// turn may be those results, and waiting for them in-turn only keeps the
+    /// person from talking (t-11354).
+    pub(super) fn waits_on_background_work(&self) -> bool {
+        self.attendance == Attendance::Attended
+            && self
+                .background_work
+                .as_ref()
+                .is_some_and(|probe| probe() > 0)
+    }
+
     /// The refusal ladder's switching mode for the turns this runtime runs
     /// ([`ClassifierFallback`]) — the setting, under the launch's declared
     /// mode when there is one. The host sets it every turn, beside the

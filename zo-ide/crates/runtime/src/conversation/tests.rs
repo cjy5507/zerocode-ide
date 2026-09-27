@@ -4125,6 +4125,28 @@ fn sync_run_turn_folds_steering_into_the_tool_result_boundary() {
     );
 }
 
+/// A steer that asks something is answered in words first (t-11354). On
+/// 2026-09-27 a person typed "현재 상황" into a turn that was waiting on its
+/// agents; the model said "I'll check quickly" and went on calling tools for
+/// six minutes without the answer. The preamble tells the model that a
+/// question is answered in its next reply, before any further tool call — and
+/// keeps every course-correcting clause it had.
+#[test]
+fn a_steer_that_asks_something_is_answered_in_words_before_the_next_tool_call() {
+    let folded = super::steering_message("현재 상황");
+    assert!(folded.starts_with("[User steering"), "{folded}");
+    assert!(folded.ends_with("\n현재 상황"), "{folded}");
+    assert!(
+        folded.contains("answer it in words") && folded.contains("before any further tool call"),
+        "the preamble must ask for the answer in words first: {folded}"
+    );
+    assert!(
+        folded.contains("launch a background `Agent` for it immediately")
+            && folded.contains("only when it modifies the very thing you are editing"),
+        "the course-correction policy stays: {folded}"
+    );
+}
+
 /// The sync loop must drain the agent-notification inbox at the tool-result
 /// boundary, mirroring the steering drain right above it — the seam that lets
 /// a main model keep working after spawning background agents and still learn

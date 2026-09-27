@@ -90,8 +90,8 @@ use streaming::{
     build_async_permission_request, tool_preview_from, tool_summary_line, CapturePrompter,
 };
 use tool::{
-    is_concurrency_safe, is_long_running, sleep_tool_execution_input, tool_execution_input,
-    unblock_tool_execute,
+    is_concurrency_safe, is_long_running, sleep_tool_cut_short, sleep_tool_execution_input,
+    tool_execution_input, unblock_tool_execute,
 };
 use repetition::{ReadFileRange, ToolBatchRepetitionHardStops};
 // Turn-stop policy (cost breaker vs behavior heuristic). Shared with the
@@ -401,12 +401,16 @@ fn empty_stream_exhausted_message() -> ConversationMessage {
 /// override the original request. Kept as one constant so the tool-result and
 /// the text-only-turn steering paths inject identical wording.
 ///
+/// The answer clause (t-11354): a steer that asks is answered in words before
+/// the next tool call. On 2026-09-27 a person's "현재 상황" reached a turn
+/// that said "I'll check quickly" and went on calling tools for six minutes.
+///
 /// The absorption clause is the orchestrator policy: a steer that adds a NEW,
 /// separable requirement must not stall the work already in flight — it is
 /// delegated to a background agent and the current lane keeps running, which
 /// is what makes typing mid-turn cheap for the user instead of a context
 /// switch that serializes everything behind it.
-const STEERING_PREAMBLE: &str = "[User steering — the user sent this mid-turn to correct course. Treat it as a higher-priority instruction that supersedes any conflicting earlier guidance, and adjust your plan and current work accordingly before continuing. If it introduces a NEW requirement that is separable from what you are doing right now, do not serialize it: launch a background `Agent` for it immediately and keep working on your current task — you will be notified when that agent completes. Fold it into your current work instead only when it modifies the very thing you are editing.]";
+const STEERING_PREAMBLE: &str = "[User steering — the user sent this mid-turn to correct course or to ask. If it asks you something — a question, or where the work stands — answer it in words at the start of your very next reply, before any further tool call, then carry on. Treat it as a higher-priority instruction that supersedes any conflicting earlier guidance, and adjust your plan and current work accordingly before continuing. If it introduces a NEW requirement that is separable from what you are doing right now, do not serialize it: launch a background `Agent` for it immediately and keep working on your current task — you will be notified when that agent completes. Fold it into your current work instead only when it modifies the very thing you are editing.]";
 
 /// Transcript echo prefix stamped when a mid-turn steering message is folded
 /// into the live turn. The TUI matches on this exact prefix to clear that
@@ -834,6 +838,10 @@ pub struct ConversationRuntime<C, T> {
     /// [`ConversationRuntime::agent_notification_inbox`] and re-queues
     /// whatever the turn never folded as follow-up turns.
     agent_notifications: AgentNotificationInbox,
+    /// How much of this session's background work is still out — see
+    /// [`BackgroundWorkProbe`]. `None` on every host that brings no result
+    /// back as a message.
+    background_work: Option<BackgroundWorkProbe>,
     /// True when nobody can answer a mid-run question on this surface
     /// (headless one-shots). Turns the turn-end gate's question lint on; the
     /// promise lint runs regardless. Set by the host via
@@ -1658,6 +1666,14 @@ pub struct AgentNotification {
 /// the two drain points never run concurrently.
 pub type AgentNotificationInbox = Arc<Mutex<Vec<AgentNotification>>>;
 
+/// How many of this session's background jobs — agents, background shell
+/// tasks — are still out and will come back as a message when they finish.
+/// Installed by the one host that brings them back (the interactive session
+/// that owns the completion pump), read at a turn's natural end: a turn whose
+/// remaining work is only those results may end on "when they land, I'll …",
+/// the way a Claude Code turn ends while its agents run (t-11354).
+pub type BackgroundWorkProbe = Arc<dyn Fn() -> usize + Send + Sync>;
+
 impl<C, T> ConversationRuntime<C, T>
 where
     C: ApiClient,
@@ -1786,6 +1802,7 @@ where
             steering_observer: None,
             switch_observer: None,
             agent_notifications: Arc::new(Mutex::new(Vec::new())),
+            background_work: None,
             autonomous_surface: false,
             deep_subturn_depth: 0,
             long_running_tool_names: BTreeSet::new(),

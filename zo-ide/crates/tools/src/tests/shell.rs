@@ -109,6 +109,84 @@ fn bash_background_launch_uses_session_and_stop_waits_for_reap() {
     let _ = fs::remove_dir_all(cwd);
 }
 
+/// A poll in a turn a person attends is started in the background (t-11354):
+/// the call returns at once so the person's words are not queued behind it,
+/// and the command itself is not touched — it waits as written, writes what
+/// it writes after the wait, and its exit code reaches the conversation once,
+/// as the task's completion.
+#[test]
+fn an_attended_poll_starts_in_the_background_and_ends_as_written_once() {
+    let cwd = sandbox_disabled_cwd("bash-attended-poll-cwd");
+    let world = cwd.join("released");
+    let written = cwd.join("written");
+    let command = format!(
+        "until [ -e '{}' ]; do sleep 1; done; printf 'after the wait' > '{}'; exit 3",
+        world.display(),
+        written.display()
+    );
+    let tasks = runtime::task_registry::TaskRegistry::new();
+    let completions: Arc<Mutex<Vec<(runtime::task_registry::TaskStatus, String)>>> =
+        Arc::default();
+    let seen = Arc::clone(&completions);
+    let callback: runtime::task_registry::TaskCompletionCallback =
+        Box::new(move |_task_id, status, output, _session| {
+            seen.lock().expect("completions").push((status, output));
+        });
+    tasks.set_completion_callback(Some(Arc::new(callback)));
+    // The world the poll waits on arrives two seconds in; a poll run in the
+    // foreground holds the call that long.
+    let arrives = thread::spawn(move || {
+        thread::sleep(Duration::from_secs(2));
+        fs::write(world, b"go").expect("release the poll");
+    });
+
+    let input: runtime::BashCommandInput =
+        serde_json::from_value(json!({ "command": command })).expect("bash input");
+    let started = std::time::Instant::now();
+    let output = crate::bash_tools::run_bash(
+        input,
+        Some(&cwd),
+        Some(&tasks),
+        Some("attended-poll-session"),
+        true,
+    )
+    .expect("the poll starts");
+    let returned_after = started.elapsed();
+    let output: serde_json::Value = serde_json::from_str(&output).expect("json");
+    assert!(
+        returned_after < Duration::from_secs(1),
+        "the call waited {returned_after:?} for the poll: {output}"
+    );
+    assert_eq!(output["assistantAutoBackgrounded"], true, "{output}");
+    let task_id = output["backgroundTaskId"]
+        .as_str()
+        .expect("a background task id")
+        .to_string();
+
+    arrives.join().expect("the world arrives");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while completions.lock().expect("completions").is_empty()
+        && std::time::Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    // A moment more, so a second report — which must not come — would.
+    thread::sleep(Duration::from_millis(300));
+    let completions = completions.lock().expect("completions");
+    assert_eq!(completions.len(), 1, "one completion: {completions:?}");
+    let (_, log) = &completions[0];
+    assert!(
+        runtime::background_log::completion_summary(&task_id, log).contains("exited (code 3)"),
+        "the exit code is reported: {log}"
+    );
+    assert_eq!(
+        fs::read_to_string(&written).expect("the command wrote after its wait"),
+        "after the wait"
+    );
+    drop(completions);
+    let _ = fs::remove_dir_all(cwd);
+}
+
 #[test]
 fn bash_tool_surfaces_destructive_safety_warning() {
     // A command matching a known destructive pattern still runs but

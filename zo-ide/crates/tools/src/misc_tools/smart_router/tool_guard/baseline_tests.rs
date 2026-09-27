@@ -479,7 +479,7 @@ fn the_command_guard_files_the_folder_the_bash_tool_runs_in() {
             input["cwd"] = Value::from(own.to_string_lossy().into_owned());
         }
         let (_, filed) = command_with_cwd(SHELL_TOOL, &input.to_string(), context).expect("a command the guard asks about");
-        let ran = crate::bash_tools::run_bash(serde_json::from_value(input).expect("a Bash input"), context, None, None).expect("the command runs");
+        let ran = crate::bash_tools::run_bash(serde_json::from_value(input).expect("a Bash input"), context, None, None, false).expect("the command runs");
         let ran: Value = serde_json::from_str(&ran).expect("the Bash tool's JSON");
         let stood = ran["stdout"].as_str().expect("its output").trim();
         assert_eq!(

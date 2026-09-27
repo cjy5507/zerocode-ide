@@ -189,7 +189,8 @@ pub use misc_tools::ToolSearchOutput;
 pub use misc_tools::{
     agent_message_source_id,
     agent_worker_is_live, background_completion_matches_session, clear_background_agent,
-    execute_config, execute_enter_plan_mode, execute_exit_plan_mode, is_background_agent,
+    background_agent_ids_snapshot, execute_config, execute_enter_plan_mode,
+    execute_exit_plan_mode, is_background_agent,
     reconcile_dead_agent_worker,
     mark_background_agent,
     background_task_completion, notify_background_task_completion, notify_remote,

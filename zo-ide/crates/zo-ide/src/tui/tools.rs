@@ -1672,7 +1672,7 @@ pub(crate) fn background_command_cell(
     // A log without a code (a signal, a watch error) still has the task's
     // verdict; the foreground failure cell shows no code word either.
     let exit_code = log.exit_code.unwrap_or(match status {
-        AgentResultStatus::Completed => 0,
+        AgentResultStatus::Completed | AgentResultStatus::Running => 0,
         AgentResultStatus::Failed => 1,
     });
     let result = BashResult {

@@ -153,7 +153,13 @@ pub(crate) fn dispatch(
                             return run_bash_as_dedicated_read(&read, &inp.command, ctx, enforcer, cwd);
                         }
                         mark_shell_checkpoint_if_write_intent(ctx, &inp.command);
-                        run_bash(inp, cwd, Some(&ctx.tasks), session_id.as_deref())
+                        run_bash(
+                            inp,
+                            cwd,
+                            Some(&ctx.tasks),
+                            session_id.as_deref(),
+                            polls_start_detached(ctx),
+                        )
                     })
                 })
             }),
@@ -237,18 +243,34 @@ fn run_bash_as_dedicated_read(
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
+/// Whether a poll this context runs starts in the background: the
+/// conversation is one a person attends, and a background result comes back
+/// to it as a message (the host that re-injects them opted this context into
+/// detached agents). A sub-agent's context, a headless run and a turn the
+/// window drives keep every poll in the foreground, as before (t-11354).
+fn polls_start_detached(ctx: &ToolContext) -> bool {
+    ctx.background_agent_default()
+        && runtime::declared_attendance() == runtime::Attendance::Attended
+}
+
+/// Run one `bash` call. `detach_polls` says whether a poll starts in the
+/// background ([`polls_start_detached`]).
 pub(crate) fn run_bash(
     mut input: BashCommandInput,
     cwd: Option<&Path>,
     tasks: Option<&runtime::task_registry::TaskRegistry>,
     session_id: Option<&str>,
+    detach_polls: bool,
 ) -> Result<String, ToolError> {
     // A wait on other agents is started in the background whether or not the
     // model asked: in the foreground it blocks the whole turn for as long as
     // they take (seen live: nineteen minutes in `check --wait`, the person's
     // message queued behind it), and its completion reaches the model as a
     // task notification either way.
-    let auto_backgrounded = crate::bash_redirect::is_agent_wait(&input.command)
+    // In a turn a person attends, a poll whose sleeps add up to a wait is
+    // one too — the loops that held a person's words for hours (t-11354).
+    let auto_backgrounded = (crate::bash_redirect::is_agent_wait(&input.command)
+        || (detach_polls && crate::bash_redirect::is_polling_wait(&input.command)))
         && input.run_in_background != Some(true);
     if auto_backgrounded {
         input.run_in_background = Some(true);
@@ -1266,7 +1288,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("ZO_WORKSPACE_GUARD", "1");
         let cwd = std::env::current_dir().expect("cwd");
-        let output = run_bash(bash_input("cargo fmt -p tools"), Some(&cwd), None, None)
+        let output = run_bash(bash_input("cargo fmt -p tools"), Some(&cwd), None, None, false)
             .expect("guard returns synthetic output");
         std::env::remove_var("ZO_WORKSPACE_GUARD");
 
@@ -1286,6 +1308,7 @@ mod tests {
             Some(&cwd),
             None,
             None,
+            false,
         )
         .expect("file-scoped check should execute");
         std::env::remove_var("ZO_WORKSPACE_GUARD");

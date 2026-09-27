@@ -2449,6 +2449,212 @@ async fn e2e_esc_with_pending_steer_resubmits_it_as_a_fresh_turn() {
     );
 }
 
+/// The model's own latency in the t-11354 scenarios: every answer is held
+/// this long, so "answered" is measured against a model that takes time.
+const TALK_LATENCY_MS: u64 = 300;
+
+/// How long the person reads the main's reply before asking. Long enough that
+/// whatever the main does next after that reply is under way — on 2026-09-27
+/// the person's words met a poll already running, not one still being
+/// written (a call still being written is abandoned for the words at once).
+const TALK_ASK_AFTER: Duration = Duration::from_secs(2);
+
+/// The last message of one recorded request, as sent.
+fn last_message(row: &e2e::measure::Recorded) -> String {
+    serde_json::from_str::<serde_json::Value>(&row.body)
+        .ok()
+        .and_then(|body| {
+            body.get("messages")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|messages| messages.last())
+                .map(serde_json::Value::to_string)
+        })
+        .unwrap_or_default()
+}
+
+/// One t-11354 session up to the moment the person asks: the main has handed
+/// its task to a background agent and replied with what it awaits. Returns
+/// the run and the screen offset of that reply.
+fn talk_session(layout: &Layout, service: &e2e::measure::MeasureService) -> (PtyRun, usize) {
+    let mut run = pty(layout, service.base_url(), &interactive_args());
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(format!("{} build the board\r", e2e::measure::TALK_DELEGATE).as_bytes())
+        .expect("send the task");
+    let promised = run.wait_for(e2e::measure::TALK_PROMISE, TEST_TIMEOUT);
+    (run, promised)
+}
+
+/// Talking to the main while its agent works (t-11354). On 2026-09-27 a
+/// person could not reach the main for hours: the turn-end gate sent back the
+/// reply that handed the work to background agents, and the main polled their
+/// state with sleep loops that held every line typed at it. Here the main
+/// hands a task to a background agent and replies with what it awaits; the
+/// person asks, and is answered at once; the agent keeps working — every
+/// step, one run — and its result reaches the main exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_person_is_answered_while_a_background_agent_works_and_its_result_lands_once() {
+    let plan = e2e::measure::Plan {
+        latency_ms: TALK_LATENCY_MS,
+        child_steps: 5,
+        child_sleep_secs: 3,
+        ..e2e::measure::Plan::default()
+    };
+    let layout = Layout::new();
+    layout.model_led();
+    let service = e2e::measure::MeasureService::start(plan)
+        .await
+        .expect("start the talk provider");
+    let (mut run, promised) = talk_session(&layout, &service);
+    tokio::time::sleep(TALK_ASK_AFTER).await;
+
+    let asked = Instant::now();
+    run.send(format!("{} 1 현재 상황\r", e2e::measure::TALK_ASK).as_bytes())
+        .expect("ask while the agent works");
+    let answer = format!("{} 1", e2e::measure::TALK_ANSWER);
+    let answered = run.wait_for_after(&answer, promised, TEST_TIMEOUT);
+    let answered_in = asked.elapsed();
+    eprintln!("[t-11354] typed → answered in {} ms", answered_in.as_millis());
+
+    run.wait_for_after(e2e::measure::TALK_NOTED, answered, Duration::from_secs(60));
+    let recorded = service.recorded().await;
+    let _ = run.finish();
+
+    let is_child = |row: &&e2e::measure::Recorded| row.opens_with(e2e::measure::TALK_CHILD);
+    let child: Vec<&e2e::measure::Recorded> = recorded.iter().filter(is_child).collect();
+    assert_eq!(
+        child.len(),
+        plan.child_steps + 1,
+        "the agent took every step in one run — nothing cancelled or restarted it"
+    );
+    let asked_at = recorded
+        .iter()
+        .filter(|row| !is_child(row))
+        .find(|row| last_message(row).contains(e2e::measure::TALK_ASK))
+        .map(|row| row.at_ms)
+        .expect("the person's words reached the main");
+    assert!(
+        child.iter().any(|row| row.at_ms > asked_at),
+        "the agent was still working after the person was answered"
+    );
+    let delivered: Vec<String> = recorded
+        .iter()
+        .filter(|row| !is_child(row))
+        .map(last_message)
+        .filter(|last| last.contains(e2e::measure::TALK_CHILD_DONE))
+        .collect();
+    assert_eq!(delivered.len(), 1, "the agent's result reached the main once: {delivered:#?}");
+    assert_eq!(
+        delivered[0].matches(e2e::measure::TALK_CHILD_DONE).count(),
+        1,
+        "and once within that message"
+    );
+}
+
+/// Esc while the main's own tool runs and its background agent works
+/// (t-11354): the pending line says the agents keep running, Esc sends the
+/// person's words at once, and the agent is untouched — it takes every step
+/// and its result still reaches the main, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_esc_sends_the_words_now_and_leaves_the_background_agent_running() {
+    let plan = e2e::measure::Plan {
+        latency_ms: TALK_LATENCY_MS,
+        child_steps: 6,
+        child_sleep_secs: 3,
+        ..e2e::measure::Plan::default()
+    };
+    let layout = Layout::new();
+    layout.model_led();
+    let service = e2e::measure::MeasureService::start(plan)
+        .await
+        .expect("start the talk provider");
+    let (mut run, promised) = talk_session(&layout, &service);
+    tokio::time::sleep(TALK_ASK_AFTER).await;
+
+    run.send(format!("{} run the check\r", e2e::measure::TALK_SLOW).as_bytes())
+        .expect("ask for a foreground check");
+    // The tool cell names its command once it runs.
+    let running = run.wait_for_after("sleep 5", promised, TEST_TIMEOUT);
+    run.send(format!("{} 2\r", e2e::measure::TALK_ASK).as_bytes())
+        .expect("type while the check runs");
+    let pending = run.wait_for_after(
+        "to interrupt and send immediately — agents keep running",
+        running,
+        TEST_TIMEOUT,
+    );
+    run.send(b"\x1b").expect("Esc: send now");
+    let answer = format!("{} 2", e2e::measure::TALK_ANSWER);
+    let answered = run.wait_for_after(&answer, pending, TEST_TIMEOUT);
+    run.wait_for_after(e2e::measure::TALK_NOTED, answered, Duration::from_secs(60));
+    let recorded = service.recorded().await;
+    let _ = run.finish();
+
+    let is_child = |row: &&e2e::measure::Recorded| row.opens_with(e2e::measure::TALK_CHILD);
+    assert_eq!(
+        recorded.iter().filter(is_child).count(),
+        plan.child_steps + 1,
+        "Esc ended the main's turn only — the agent took every step in one run"
+    );
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|row| !is_child(row))
+            .filter(|row| last_message(row).contains(e2e::measure::TALK_CHILD_DONE))
+            .count(),
+        1,
+        "the agent's result reached the main once"
+    );
+}
+
+/// The number the brief asks for: from the moment the person types to the
+/// moment the main's answer is on screen, p50 and p95 over fresh sessions,
+/// against a model that takes `TALK_LATENCY_MS` to answer. Run against any
+/// build with `ZO_E2E_BIN` to put the before and after side by side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement, not a contract"]
+async fn t11354_talk_while_an_agent_works_latency() {
+    let samples = measure_env("TALK_SAMPLES", 5_usize);
+    let ask_after = Duration::from_millis(measure_env(
+        "TALK_ASK_AFTER_MS",
+        u64::try_from(TALK_ASK_AFTER.as_millis()).unwrap_or(u64::MAX),
+    ));
+    let plan = e2e::measure::Plan {
+        latency_ms: measure_env("TALK_LATENCY_MS", TALK_LATENCY_MS),
+        child_steps: 30,
+        child_sleep_secs: 4,
+        ..e2e::measure::Plan::default()
+    };
+    let mut took = Vec::with_capacity(samples);
+    for sample in 1..=samples {
+        let layout = Layout::new();
+        layout.model_led();
+        let service = e2e::measure::MeasureService::start(plan)
+            .await
+            .expect("start the talk provider");
+        let (mut run, promised) = talk_session(&layout, &service);
+        tokio::time::sleep(ask_after).await;
+        let asked = Instant::now();
+        run.send(format!("{} {sample}\r", e2e::measure::TALK_ASK).as_bytes())
+            .expect("ask");
+        run.wait_for_after(
+            &format!("{} {sample}", e2e::measure::TALK_ANSWER),
+            promised,
+            Duration::from_secs(e2e::measure::TALK_POLL_SECS * 2),
+        );
+        took.push(asked.elapsed());
+        let _ = run.finish();
+    }
+    took.sort_unstable();
+    let at = |percent: usize| took[(took.len() * percent).div_ceil(100).max(1) - 1];
+    eprintln!(
+        "[t-11354-talk] samples={samples} model_latency={}ms asked_after={}ms → p50={}ms p95={}ms all={:?}",
+        plan.latency_ms,
+        ask_after.as_millis(),
+        at(50).as_millis(),
+        at(95).as_millis(),
+        took.iter().map(Duration::as_millis).collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_table_answer_is_held_until_the_final_commit() {
     let layout = Layout::new();

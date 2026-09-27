@@ -12,6 +12,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tools::AgentCompletion;
 
+use super::subagent_progress::{SubagentProgress, POLL_INTERVAL};
+
 /// Keep a useful head and tail without allowing a full worker transcript to
 /// consume the parent model's remaining context.
 const MAX_REINJECTED_RESULT_CHARS: usize = 16_000;
@@ -72,6 +74,8 @@ pub(crate) struct AgentCompletionPump {
     followup_tx: mpsc::UnboundedSender<AgentFollowup>,
     followup_rx: mpsc::UnboundedReceiver<AgentFollowup>,
     task: Option<JoinHandle<()>>,
+    /// The stall watch ([`Self::watch_stalls`]), once a host starts one.
+    stall_watch: Option<JoinHandle<()>>,
 }
 
 impl AgentCompletionPump {
@@ -94,7 +98,45 @@ impl AgentCompletionPump {
             followup_tx,
             followup_rx,
             task: Some(task),
+            stall_watch: None,
         }
+    }
+
+    /// Tell the main conversation, once per run, about a background helper of
+    /// this session that may be stuck (t-11354): every [`POLL_INTERVAL`]
+    /// while any background helper is out, read the session's helpers and
+    /// route what the [`StallBell`] rings the way a completion goes — into
+    /// the running turn, or as a follow-up turn when none runs.
+    pub(crate) fn watch_stalls(&mut self, registry: Arc<tools::AgentRegistry>) {
+        let route = Arc::clone(&self.route);
+        let followup_tx = self.followup_tx.clone();
+        self.stall_watch = Some(tokio::spawn(async move {
+            let mut bell = StallBell::default();
+            let mut interval = tokio::time::interval(POLL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if tools::background_agent_ids_snapshot().is_empty() {
+                    continue;
+                }
+                let session_id = route
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .session_id
+                    .clone();
+                let registry = Arc::clone(&registry);
+                let Ok(rows) = tokio::task::spawn_blocking(move || {
+                    super::subagent_progress::snapshot_for_session(&registry, &session_id)
+                })
+                .await
+                else {
+                    continue;
+                };
+                for notice in bell.ring(&rows) {
+                    deliver(&route, &followup_tx, notice);
+                }
+            }
+        }));
     }
 
     /// Route new completions to this turn's runtime inbox. The route lock is
@@ -158,6 +200,9 @@ impl Drop for AgentCompletionPump {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+        if let Some(watch) = self.stall_watch.take() {
+            watch.abort();
+        }
     }
 }
 
@@ -174,14 +219,37 @@ async fn relay_completions(
         else {
             continue;
         };
-        if let DeliveryPhase::Turning(inbox) = &route.phase {
-            if let Ok(mut inbox) = inbox.lock() {
-                inbox.push(notification);
-                continue;
-            }
-        }
-        let _ = followup_tx.send(notification.into());
+        route_notification(&route, &followup_tx, notification);
     }
+}
+
+/// Put one notification where the main conversation takes it: into the
+/// running turn's inbox, or on the idle follow-up queue. The caller holds the
+/// route lock, so a notification lands on one side of a turn boundary only.
+fn route_notification(
+    route: &DeliveryRoute,
+    followup_tx: &mpsc::UnboundedSender<AgentFollowup>,
+    notification: AgentNotification,
+) {
+    if let DeliveryPhase::Turning(inbox) = &route.phase {
+        if let Ok(mut inbox) = inbox.lock() {
+            inbox.push(notification);
+            return;
+        }
+    }
+    let _ = followup_tx.send(notification.into());
+}
+
+/// [`route_notification`] under the route lock.
+fn deliver(
+    route: &Mutex<DeliveryRoute>,
+    followup_tx: &mpsc::UnboundedSender<AgentFollowup>,
+    notification: AgentNotification,
+) {
+    let route = route
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    route_notification(&route, followup_tx, notification);
 }
 
 fn build_background_notification(
@@ -222,6 +290,51 @@ fn build_background_notification(
         .or_else(|| (completion.status != "completed").then(|| error.clone()).flatten())
         .unwrap_or_else(|| tools::AGENT_NOTIFICATION_EMPTY_RESULT.to_string());
     Some(completion_notification(completion, &body, error.as_deref()))
+}
+
+/// Word to the main conversation about a helper that may be stuck
+/// ([`SubagentProgress::may_be_stuck`]), once per run of that helper
+/// (t-11354): the main can ask it what it is doing or stop it, and the
+/// person is not told twice about the same silence.
+#[derive(Debug, Default)]
+pub(crate) struct StallBell {
+    /// `(agent id, the run's start)` already rung for.
+    rung: std::collections::HashSet<(String, u64)>,
+}
+
+impl StallBell {
+    /// The notices this snapshot owes: one for each helper that may be stuck
+    /// and has not been rung for in this run.
+    pub(crate) fn ring(&mut self, rows: &[SubagentProgress]) -> Vec<AgentNotification> {
+        rows.iter()
+            .filter(|row| row.may_be_stuck())
+            .filter(|row| self.rung.insert((row.agent_id.clone(), row.started_epoch)))
+            .map(stall_notice)
+            .collect()
+    }
+}
+
+/// The main conversation's word about one helper that may be stuck: who,
+/// how long it has been silent, that it still runs, and the two things the
+/// main can do. Framed as the host's, so it never reads as the person's.
+fn stall_notice(row: &SubagentProgress) -> AgentNotification {
+    let quiet = row
+        .no_new_output_for
+        .map(|quiet| core_types::helper_run::elapsed_compact(quiet.as_secs()))
+        .unwrap_or_default();
+    AgentNotification {
+        label: row.label.clone(),
+        status: AgentResultStatus::Running,
+        text: format!(
+            "[host notice — background agent `{label}` (id: {id}) is still running but has made no tool call and written nothing for {quiet}; it may be stuck. Ask it where it stands with SendMessage, or end it with StopAgent if it is no longer worth its cost. This is not a user message.]",
+            label = row.label,
+            id = row.agent_id,
+        ),
+        kind: AgentNotificationKind::Message {
+            agent_id: row.agent_id.clone(),
+        },
+        summary: None,
+    }
 }
 
 /// A headless host has no idle follow-up loop, but a background process that
@@ -323,6 +436,61 @@ mod tests {
         })
         .await
         .expect("completion pump did not stage the notification")
+    }
+
+    fn helper_row(
+        label: &str,
+        started_epoch: u64,
+        quiet: Option<Duration>,
+        in_tool: bool,
+    ) -> crate::session::subagent_progress::SubagentProgress {
+        crate::session::subagent_progress::SubagentProgress {
+            agent_id: format!("agent-{label}"),
+            tool_call_id: None,
+            label: label.to_string(),
+            model: None,
+            activity: "working".to_string(),
+            recent_tools: Vec::new(),
+            tool_calls: 0,
+            output_tail: String::new(),
+            started_epoch,
+            elapsed: quiet.unwrap_or_default(),
+            no_new_output_for: quiet,
+            transcript_path: None,
+            pane: None,
+            last_receipt: None,
+            in_tool,
+        }
+    }
+
+    /// A helper that may be stuck is told to the main conversation once per
+    /// run (t-11354): the notice names it, says it is still running, and
+    /// names the two things the main can do; a second look at the same
+    /// silence rings nothing, a helper busy in a tool rings nothing, and the
+    /// same helper's next run may be told again.
+    #[test]
+    fn a_helper_that_may_be_stuck_is_told_to_the_main_once_per_run() {
+        let quiet = Some(Duration::from_secs(33 * 60 + 34));
+        let stuck = helper_row("board3d-impl", 100, quiet, false);
+        let busy = helper_row("scout", 100, quiet, true);
+        let mut bell = super::StallBell::default();
+
+        let first = bell.ring(&[stuck.clone(), busy.clone()]);
+        assert_eq!(first.len(), 1, "one helper may be stuck: {first:?}");
+        let notice = &first[0];
+        assert_eq!(notice.label, "board3d-impl");
+        assert!(
+            matches!(&notice.kind, AgentNotificationKind::Message { agent_id } if agent_id == "agent-board3d-impl"),
+            "{notice:?}"
+        );
+        assert_eq!(notice.status, AgentResultStatus::Running);
+        for said in ["board3d-impl", "still running", "33m", "SendMessage", "StopAgent"] {
+            assert!(notice.text.contains(said), "{said}: {}", notice.text);
+        }
+
+        assert!(bell.ring(&[stuck.clone(), busy]).is_empty(), "the same silence is told once");
+        let next_run = helper_row("board3d-impl", 200, quiet, false);
+        assert_eq!(bell.ring(&[next_run]).len(), 1, "a new run is a new silence");
     }
 
     #[test]

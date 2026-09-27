@@ -17,6 +17,22 @@
 //! | mentions `R23_SLEEP` | one `bash` that sleeps `child_sleep_secs` |
 //! | anything else | the final text |
 //!
+//! And the t-11354 conversation — a person talking to the main while its
+//! background agent works — which reads the LAST message the same way:
+//!
+//! | the request | the answer |
+//! |---|---|
+//! | the child's (first message names [`TALK_CHILD`]) | `bash` steps of `child_sleep_secs`, `child_steps` of them, then [`TALK_CHILD_DONE`] |
+//! | the last message asks ([`TALK_ASK`] n) | [`TALK_ANSWER`] n for each n asked |
+//! | the last message carries the child's result | [`TALK_NOTED`] |
+//! | the last message says [`TALK_DELEGATE`] | one background `Agent` |
+//! | the last message says [`TALK_SLOW`] | one foreground `bash` of a few seconds — no wait |
+//! | the last message answers that `Agent` call | a reply that ends on "I'll …" |
+//! | the last message is the turn-end gate's | the poll the 2026-09-27 main ran: `bash` sleeping [`TALK_POLL_SECS`] |
+//!
+//! `latency_ms` holds every answer that long — the model's own latency, the
+//! part of a reply no harness can take away.
+//!
 //! Every recorded body is kept with its arrival instant, because half of what
 //! r23 asks is not about the screen at all — it is about what compaction does
 //! to the *bytes on the wire*.
@@ -44,6 +60,30 @@ pub const TURN_SETTLED: &str = "r23-turn-settled";
 /// children as one 3-second turn.
 pub const CHILD_SETTLED: &str = "r23-child-settled";
 
+/// The person hands the main a task it delegates to a background agent.
+pub const TALK_DELEGATE: &str = "TALK_DELEGATE";
+/// What the delegated agent is told — and how its requests are known.
+pub const TALK_CHILD: &str = "TALK_CHILD";
+/// The delegated agent's final words.
+pub const TALK_CHILD_DONE: &str = "TALK_CHILD_DONE";
+/// The person asks the main something while the agent works: `TALK_ASK <n>`.
+pub const TALK_ASK: &str = "TALK_ASK";
+/// The main's answer to ask `<n>`: `TALK_ANSWER <n>`.
+pub const TALK_ANSWER: &str = "TALK_ANSWER";
+/// The main's words once the agent's result has reached it.
+pub const TALK_NOTED: &str = "TALK_NOTED";
+/// The person asks for something the main does itself, in the foreground.
+pub const TALK_SLOW: &str = "TALK_SLOW";
+/// The foreground command [`TALK_SLOW`] runs: a few seconds, not a wait.
+pub const TALK_SLOW_COMMAND: &str = "sleep 5 && printf 'talk slow done'";
+/// The end of the main's reply after delegating: a promise about the result.
+pub const TALK_PROMISE: &str = "I'll report once it passes.";
+/// How long the main's poll sleeps in all, in short sleeps inside a `for`
+/// loop — the shape of the loops that held the person's words for hours.
+pub const TALK_POLL_SECS: u64 = 60;
+const TALK_POLL_STEP_SECS: u64 = 2;
+const TALK_SPAWN_ID: &str = "toolu_talk_spawn";
+
 /// What this server should do with a turn request.
 #[derive(Debug, Clone, Copy)]
 pub struct Plan {
@@ -66,6 +106,11 @@ pub struct Plan {
     /// session actually defaults to. The two answers are different by an
     /// order of magnitude, so the measurement has to name which it took.
     pub background: bool,
+    /// How long every answer is held before it is written — the model's own
+    /// latency. `0` answers at once, as the r23 measurements always did.
+    pub latency_ms: u64,
+    /// `bash` steps a [`TALK_CHILD`] agent takes before its final words.
+    pub child_steps: usize,
 }
 
 impl Default for Plan {
@@ -76,6 +121,8 @@ impl Default for Plan {
             payload_lines: 90,
             child_sleep_secs: 3,
             background: false,
+            latency_ms: 0,
+            child_steps: 0,
         }
     }
 }
@@ -211,6 +258,9 @@ async fn serve(
         return Ok(());
     }
     let answer = answer_for(&body, plan);
+    if plan.latency_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(plan.latency_ms)).await;
+    }
     let nonce = nonces.fetch_add(1, Ordering::Relaxed);
     let input_tokens = approximate_input_tokens(&body);
     if std::env::var_os("MEASURE_TRACE").is_some() {
@@ -244,7 +294,7 @@ async fn serve(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Answer {
     Summary,
     Tools,
@@ -253,11 +303,53 @@ enum Answer {
     Sleep,
     ChildText,
     Text,
+    TalkDelegate,
+    TalkPromise,
+    TalkPoll,
+    TalkChildStep(usize),
+    TalkChildDone,
+    /// The asks to answer, and whether the child's result came with them.
+    TalkReply(Vec<String>, bool),
+    TalkNoted,
+    TalkSlow,
 }
 
 impl Answer {
-    fn sse(self, plan: Plan, nonce: usize, input_tokens: u32) -> String {
+    fn sse(&self, plan: Plan, nonce: usize, input_tokens: u32) -> String {
         match self {
+            Self::TalkDelegate => talk_delegate_sse(plan, input_tokens),
+            Self::TalkPromise => text_sse(
+                "msg_talk_promise",
+                &format!("The agent is working in the background; its result comes back here when it lands.\n\n{TALK_PROMISE}"),
+                input_tokens,
+            ),
+            Self::TalkPoll => talk_bash_sse(
+                "toolu_talk_poll",
+                &format!(
+                    "for i in $(seq 1 {}); do sleep {TALK_POLL_STEP_SECS}; done; echo polled",
+                    TALK_POLL_SECS / TALK_POLL_STEP_SECS
+                ),
+                TALK_POLL_SECS * 2 * 1000,
+                input_tokens,
+            ),
+            Self::TalkChildStep(step) => talk_bash_sse(
+                &format!("toolu_talk_child_{step}"),
+                &format!("sleep {} && printf 'talk child step {step}'", plan.child_sleep_secs),
+                60_000,
+                input_tokens,
+            ),
+            Self::TalkSlow => talk_bash_sse("toolu_talk_slow", TALK_SLOW_COMMAND, 20_000, input_tokens),
+            Self::TalkChildDone => text_sse(
+                "msg_talk_child_done",
+                &format!("### Done\n\n- {TALK_CHILD_DONE}\n"),
+                input_tokens,
+            ),
+            Self::TalkReply(asks, noted) => talk_reply_sse(asks, *noted, input_tokens),
+            Self::TalkNoted => text_sse(
+                "msg_talk_noted",
+                &format!("### Result\n\n- {TALK_NOTED}\n"),
+                input_tokens,
+            ),
             Self::Summary => text_sse("msg_r23_summary", &summary_body(), input_tokens),
             Self::Tools => tools_sse(plan.tools, input_tokens),
             Self::Spawn => spawn_sse(plan, input_tokens),
@@ -295,7 +387,7 @@ fn approximate_input_tokens(body: &str) -> u32 {
 /// Deliberately reads only the LAST message: the trigger words stay in the
 /// transcript forever once typed, so a whole-body search would keep re-firing
 /// the first turn's tool burst on every later turn of the same session.
-fn answer_for(body: &str, _plan: Plan) -> Answer {
+fn answer_for(body: &str, plan: Plan) -> Answer {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return Answer::Text;
     };
@@ -306,6 +398,9 @@ fn answer_for(body: &str, _plan: Plan) -> Answer {
     else {
         return Answer::Text;
     };
+    if let Some(talk) = talk_answer(&value, last, plan) {
+        return talk;
+    }
     let child = value
         .get("messages")
         .and_then(Value::as_array)
@@ -336,6 +431,109 @@ fn answer_for(body: &str, _plan: Plan) -> Answer {
         return Answer::Sleep;
     }
     Answer::Text
+}
+
+/// The one background `Agent` the main hands its task to.
+fn talk_delegate_sse(plan: Plan, input_tokens: u32) -> String {
+    let mut body = message_start("msg_talk_delegate", input_tokens);
+    append_tool_use(
+        &mut body,
+        0,
+        TALK_SPAWN_ID,
+        "Agent",
+        &json!({
+            "description": "talk child",
+            "subagent_type": "general-purpose",
+            "background": true,
+            "prompt": format!("{TALK_CHILD}: take {} steps and report", plan.child_steps),
+        })
+        .to_string(),
+    );
+    finish_tool_message(&mut body, input_tokens);
+    body
+}
+
+/// One `bash` call of the t-11354 conversation.
+fn talk_bash_sse(id: &str, command: &str, timeout_ms: u64, input_tokens: u32) -> String {
+    let mut body = message_start("msg_talk_bash", input_tokens);
+    append_tool_use(
+        &mut body,
+        0,
+        id,
+        "bash",
+        &json!({"command": command, "timeout": timeout_ms}).to_string(),
+    );
+    finish_tool_message(&mut body, input_tokens);
+    body
+}
+
+/// The main's answer to every ask the last message carried — and to the
+/// agent's result, when it came with them.
+fn talk_reply_sse(asks: &[String], noted: bool, input_tokens: u32) -> String {
+    let mut text = asks
+        .iter()
+        .map(|ask| format!("- {TALK_ANSWER} {ask}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if noted {
+        text.push_str("\n- ");
+        text.push_str(TALK_NOTED);
+    }
+    text_sse("msg_talk_answer", &format!("### Status\n\n{text}\n"), input_tokens)
+}
+
+/// The t-11354 conversation's answer to this request, when it is part of it.
+fn talk_answer(value: &Value, last: &Value, plan: Plan) -> Option<Answer> {
+    let messages = value.get("messages").and_then(Value::as_array)?;
+    let first = messages.first().map(Value::to_string).unwrap_or_default();
+    if first.contains(TALK_CHILD) && !first.contains(TALK_DELEGATE) {
+        let results = messages
+            .iter()
+            .filter_map(|message| message.get("content").and_then(Value::as_array))
+            .flatten()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+            .count();
+        return Some(if results < plan.child_steps {
+            Answer::TalkChildStep(results)
+        } else {
+            Answer::TalkChildDone
+        });
+    }
+    let text = last.to_string();
+    if text.contains(COMPACTION_MARKER) {
+        return None;
+    }
+    let noted = text.contains(TALK_CHILD_DONE);
+    let asks: Vec<String> = text
+        .match_indices(TALK_ASK)
+        .filter_map(|(at, _)| {
+            text[at + TALK_ASK.len()..]
+                .split(|ch: char| !ch.is_ascii_digit() && ch != ' ')
+                .next()
+                .map(str::trim)
+                .filter(|number| !number.is_empty())
+                .map(str::to_string)
+        })
+        .collect();
+    if !asks.is_empty() {
+        return Some(Answer::TalkReply(asks, noted));
+    }
+    if noted {
+        return Some(Answer::TalkNoted);
+    }
+    if text.contains(TALK_DELEGATE) {
+        return Some(Answer::TalkDelegate);
+    }
+    if text.contains(TALK_SLOW) && !text.contains("tool_result") {
+        return Some(Answer::TalkSlow);
+    }
+    if text.contains(TALK_SPAWN_ID) {
+        return Some(Answer::TalkPromise);
+    }
+    if text.contains("[zo:turn-end-gate]") && first.contains(TALK_DELEGATE) {
+        return Some(Answer::TalkPoll);
+    }
+    None
 }
 
 /// An eight-section summary with no backtick spans and no path-like tokens.

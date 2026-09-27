@@ -568,6 +568,7 @@ pub(crate) mod serializable {
         match status {
             AgentResultStatus::Completed => "completed",
             AgentResultStatus::Failed => "failed",
+            AgentResultStatus::Running => "running",
         }
     }
 
@@ -845,6 +846,7 @@ pub(crate) mod serializable {
     fn agent_status_from_tag(tag: &str) -> AgentResultStatus {
         match tag {
             "failed" => AgentResultStatus::Failed,
+            "running" => AgentResultStatus::Running,
             _ => AgentResultStatus::Completed,
         }
     }

@@ -944,6 +944,10 @@ fn subagent_status_detail(progress: &SubagentProgress) -> String {
             "no new output for {}",
             super::shimmer::fmt_elapsed_compact(quiet.as_secs())
         );
+        if progress.may_be_stuck() {
+            line.push_str(core_types::helper_run::FACT_SEPARATOR);
+            line.push_str(&super::strings::helper_may_be_stuck());
+        }
     }
     line
 }
@@ -1190,6 +1194,9 @@ impl Ui {
     }
 
     fn draw_with_queue(&mut self, pending_blocks: impl FnOnce() -> usize) {
+        // The interrupt hint says what Esc does to running helpers (t-11354).
+        self.pending_input
+            .set_running_agents(tools::background_agent_ids_snapshot().len());
         let sample = super::paint_probe::start(
             self.paint_probe.is_some(),
             || pending_blocks() + self.pending_history.len() + match &self.segment {
@@ -4623,6 +4630,15 @@ impl App {
         self.ui.note(SystemLevel::Info, &banner);
         let mut events = EventStream::new();
         let transcript = self.session().handle.path.clone();
+        // Without it the parent reads this pane as "0 tool uses · no new
+        // output" for as long as it works (t-11354); it says less, never
+        // something false, when the write fails.
+        if let Err(error) = crate::teammate::publish_transcript(&lifecycle.directory, &transcript) {
+            self.ui.note(
+                SystemLevel::Warn,
+                &format!("could not tell the parent where this pane's transcript is: {error}"),
+            );
+        }
         let mut turn = lifecycle.first_turn;
         let mut answered = 0_u32;
         let mut prior_output_tokens = 0_u64;
@@ -6302,6 +6318,7 @@ mod tests {
             transcript_path: None,
             pane: None,
             last_receipt: None,
+            in_tool: false,
         }
     }
 
@@ -6322,6 +6339,33 @@ mod tests {
                 "scout · 3 tool uses · 9s · Read · tui/view.rs",
                 "reviewer · 1 tool use · 4s · Bash · cargo",
             ]
+        );
+    }
+
+    /// A helper quiet past the bar outside any tool call is said to be
+    /// possibly stuck, with the one place to stop or message just it
+    /// (t-11354); one quiet inside a long tool call is only quiet.
+    #[test]
+    fn a_helper_row_quiet_outside_any_tool_says_it_may_be_stuck_and_where_to_reach_it() {
+        let mut ui = test_ui();
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(12)));
+        let quiet = Some(Duration::from_secs(33 * 60 + 34));
+        let mut silent = running_helper("agent-a", "board3d-impl", "working", 41, 2014);
+        silent.no_new_output_for = quiet;
+        let mut in_a_tool = running_helper("agent-b", "harness", "Bash · node ui/tests/board.mjs", 3, 2014);
+        in_a_tool.no_new_output_for = quiet;
+        in_a_tool.in_tool = true;
+        ui.set_subagent_progress(vec![silent, in_a_tool]);
+
+        let details = &ui.status.as_ref().expect("working status").details;
+        assert_eq!(
+            details[1],
+            "board3d-impl · 41 tool uses · 33m 34s · working · no new output for 33m 34s · may be stuck — alt+a to stop or message it"
+        );
+        assert!(
+            details[2].ends_with("no new output for 33m 34s"),
+            "a helper inside a tool call is working: {}",
+            details[2]
         );
     }
 
@@ -6807,6 +6851,7 @@ mod tests {
                 transcript_path: None,
                 pane: None,
                 last_receipt: None,
+                in_tool: false,
             }]})
             .expect("roster change");
 

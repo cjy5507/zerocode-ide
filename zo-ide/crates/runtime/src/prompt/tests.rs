@@ -683,6 +683,40 @@ fn turn_discipline_section_varies_by_prompt_mode() {
     );
 }
 
+/// Waiting on background results is not work the turn can do (t-11354): the
+/// interactive discipline says so beside the last-paragraph check, or a model
+/// that handed its work to background agents reads that check as "keep the
+/// turn open" and polls their state with sleep loops while the person waits
+/// to talk. A headless run has no message to be woken by, so it is not told.
+#[test]
+fn an_interactive_turn_is_told_to_end_when_only_background_results_are_left() {
+    let interactive = SystemPromptBuilder::new().build();
+    let finishing = interactive
+        .iter()
+        .find(|s| s.starts_with("# Finishing the turn"))
+        .expect("interactive prompt carries the finishing-the-turn discipline");
+    assert!(
+        finishing.contains("background") && finishing.contains("end the turn"),
+        "the interactive discipline must say a turn left waiting on background results ends: {finishing}"
+    );
+    assert!(
+        finishing.contains("sleep"),
+        "the interactive discipline must name the polling it replaces: {finishing}"
+    );
+
+    let autonomous = SystemPromptBuilder::new()
+        .with_mode(PromptMode::Autonomous)
+        .build();
+    let autonomy = autonomous
+        .iter()
+        .find(|s| s.starts_with("# Operating autonomously"))
+        .expect("autonomous prompt carries its contract");
+    assert!(
+        !autonomy.contains("background"),
+        "a headless run is not told to end its turn on background work: {autonomy}"
+    );
+}
+
 #[test]
 fn build_includes_clarification_section_before_boundary() {
     let sections = SystemPromptBuilder::new().build();

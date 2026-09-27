@@ -131,6 +131,14 @@ pub fn helper(
     parts.join(core_types::helper_run::FACT_SEPARATOR)
 }
 
+/// What a helper's row adds once it has been quiet past the bar outside any
+/// tool call (t-11354): a doubt, and the one place to stop or message just
+/// that helper.
+#[must_use]
+pub fn helper_may_be_stuck() -> String {
+    format!("may be stuck — {} to stop or message it", super::agents::OPEN_KEY_LABEL)
+}
+
 #[must_use]
 pub fn waiting_for_model(elapsed: Duration) -> String {
     format!("waiting for the model {}", fmt_elapsed_compact(elapsed.as_secs()))

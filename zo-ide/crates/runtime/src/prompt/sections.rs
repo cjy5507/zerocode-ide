@@ -298,6 +298,7 @@ pub(super) fn get_turn_discipline_section(mode: super::PromptMode) -> Option<Str
         super::PromptMode::Interactive => {
             let items = prepend_bullets(vec![
                 last_paragraph_check.to_string(),
+                "When all that is left is what background agents or background commands will report, that is no work to do now: end the turn — each result arrives as its own message and wakes you. Do not poll their state or output with sleep loops.".to_string(),
                 "Exception: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop — do not apply a fix until they ask for one.".to_string(),
             ]);
             Some(

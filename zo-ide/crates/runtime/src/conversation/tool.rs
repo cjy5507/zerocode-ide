@@ -296,6 +296,20 @@ pub(super) fn sleep_tool_execution_input(
     Some((Duration::from_millis(duration_ms), value.to_string()))
 }
 
+/// The `Sleep` execution input for a wait the person's words cut short
+/// (t-11354): `duration_ms` becomes the time it actually waited, so the tool
+/// reports what happened rather than what was asked for.
+pub(super) fn sleep_tool_cut_short(input: &str, slept: Duration) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(input) else {
+        return input.to_string();
+    };
+    if let Value::Object(map) = &mut value {
+        let waited = u64::try_from(slept.as_millis()).unwrap_or(u64::MAX);
+        map.insert("duration_ms".to_string(), Value::from(waited));
+    }
+    value.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

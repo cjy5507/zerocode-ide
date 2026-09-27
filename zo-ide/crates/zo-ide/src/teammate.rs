@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use runtime::subagent_panes::{
     parent_channel_alive, Brief, ChannelCoordinates, CloseReason, Exit, Limits, TeammateResult,
-    Usage, CHANNEL_FILE,
+    Usage, CHANNEL_FILE, TRANSCRIPT_FILE,
 };
 
 /// What a teammate's loop was given: where it writes, who it is, whom it
@@ -191,6 +191,14 @@ impl ParentWatch {
     pub fn probe(discovery: &Path, timeout: Duration) -> bool {
         parent_channel_alive(discovery, timeout)
     }
+}
+
+/// Name this child's own session transcript in its directory, first thing
+/// (t-11354): a pane child writes no progress into its manifest, so its
+/// parent reads what it is doing — its tool calls, the one running, when it
+/// last wrote — from that transcript.
+pub fn publish_transcript(directory: &Path, transcript: &Path) -> std::io::Result<()> {
+    std::fs::write(directory.join(TRANSCRIPT_FILE), transcript.display().to_string())
 }
 
 /// The closing document, written last.

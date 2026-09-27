@@ -23,7 +23,7 @@ use super::{
     parallel_waves, pre_hook_denial_outcome, ConcurrentDispatchFn,
     overload_demotion_warn, quota_fallback_swap_warn, quota_wait_hold_warn,
     refusal_surfaced_message,
-    sleep_tool_execution_input,
+    sleep_tool_cut_short, sleep_tool_execution_input,
     agent_notification_text, steering_message, tool_execution_input,
     take_truncation_continuation, tool_preview_from,
     tool_result_message, tool_summary_line, unblock_tool_execute, ApiClient, AssistantEvent,
@@ -232,6 +232,22 @@ const STEERING_INTERRUPT_POLL_INTERVAL: std::time::Duration =
 /// steering", exactly like the drain does.
 fn steering_pending(queue: &SteeringQueue) -> bool {
     queue.lock().map(|queue| !queue.is_empty()).unwrap_or(false)
+}
+
+/// A `Sleep` tool call's wait: `delay`, or until the person has typed
+/// steering, whichever comes first (t-11354). The wait holds the turn for the
+/// model's sake, never against the person's words — they are what the model
+/// reads next. Checked on the same tick as a silent generation. Returns the
+/// time actually slept.
+async fn sleep_unless_steered(delay: Duration, steering: &SteeringQueue) -> Duration {
+    let started = std::time::Instant::now();
+    loop {
+        let slept = started.elapsed();
+        if slept >= delay || steering_pending(steering) {
+            return slept.min(delay);
+        }
+        tokio::time::sleep(STEERING_INTERRUPT_POLL_INTERVAL.min(delay.saturating_sub(slept))).await;
+    }
 }
 
 /// How a streaming provider call stopped being consumed.
@@ -2712,10 +2728,12 @@ where
                                 let execution_input = if let Some((delay, input)) =
                                     sleep_tool_execution_input(&p.tool_name, &p.effective_input)
                                 {
-                                    if !delay.is_zero() {
-                                        tokio::time::sleep(delay).await;
-                                    }
-                                    Cow::Owned(input)
+                                    let slept = sleep_unless_steered(delay, &self.steering).await;
+                                    Cow::Owned(if slept < delay {
+                                        sleep_tool_cut_short(&input, slept)
+                                    } else {
+                                        input
+                                    })
                                 } else if let Some(input) = tool_execution_input(
                                     &p.tool_name,
                                     &p.tool_use_id,

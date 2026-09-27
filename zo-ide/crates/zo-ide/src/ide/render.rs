@@ -849,6 +849,7 @@ impl<W: Write> Renderer<W> {
         let verdict = match status {
             AgentResultStatus::Completed => "completed",
             AgentResultStatus::Failed => "failed",
+            AgentResultStatus::Running => "running",
         };
         self.emit(&format!("{BOLD}{label}{RESET} {verdict}\n"));
         if !body.trim().is_empty() {

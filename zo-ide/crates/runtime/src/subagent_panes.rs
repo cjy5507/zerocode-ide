@@ -713,6 +713,12 @@ pub mod channel_method {
 /// knowing the child's pid.
 pub const CHANNEL_FILE: &str = "channel.addr";
 
+/// Where the child's own session transcript is — one line, its path — written
+/// into its directory when the child starts. A pane child writes no progress
+/// into its manifest; the parent reads its work (tool calls, the call running
+/// now, when it last wrote) from that transcript (t-11354).
+pub const TRANSCRIPT_FILE: &str = "transcript.path";
+
 /// The id every one-shot call on a fresh connection uses: one request per
 /// connection, so there is nothing to tell apart.
 const REQUEST_ID: u64 = 1;

@@ -154,7 +154,9 @@ pub use conversation::{
     build_design_guidance_reminder, DESIGN_GUIDANCE_REMINDER_PREFIX, PRELUDE_FANNED_OUT_REMINDER,
     ROUTE_HINT_REMINDER_PREFIX,
 };
-pub use conversation::{AgentNotification, AgentNotificationInbox, AgentNotificationKind};
+pub use conversation::{
+    AgentNotification, AgentNotificationInbox, AgentNotificationKind, BackgroundWorkProbe,
+};
 pub use conversation::{
     auto_compaction_tail_budget, auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, bash_result_exited_zero, MICROCOMPACT_MIN_OUTPUT_BYTES,
     detect_check_command, format_kilo_tokens,

@@ -838,6 +838,9 @@ pub enum AgentResultStatus {
     Completed,
     /// The sub-agent failed, was stopped, or gave up.
     Failed,
+    /// The sub-agent is still running: this is word about it, not its end —
+    /// one that may be stuck (t-11354).
+    Running,
 }
 
 /// Severity tint for [`RenderBlock::System`].

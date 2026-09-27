@@ -26,6 +26,9 @@ pub struct PendingInputs {
     submit_steers_after_interrupt: bool,
     interrupt_binding: String,
     edit_binding: String,
+    /// Helpers of this session running in the background — the interrupt
+    /// hint says they keep running.
+    running_agents: usize,
 }
 
 impl Default for PendingInputs {
@@ -37,6 +40,7 @@ impl Default for PendingInputs {
             submit_steers_after_interrupt: false,
             interrupt_binding: "esc".to_string(),
             edit_binding: EDIT_BINDING.to_string(),
+            running_agents: 0,
         }
     }
 }
@@ -103,6 +107,12 @@ impl PendingInputs {
         }
     }
 
+    /// How many helpers of this session are running now — the interrupt
+    /// hint says what the interrupt does to them.
+    pub fn set_running_agents(&mut self, running: usize) {
+        self.running_agents = running;
+    }
+
     pub fn set_edit_binding(&mut self, binding: impl Into<String>) {
         let binding = binding.into();
         if !binding.trim().is_empty() {
@@ -145,7 +155,10 @@ impl PendingInputs {
                 &mut lines,
                 width,
                 "Messages to be submitted after next tool call",
-                Some(&self.interrupt_binding),
+                Some(Interrupt {
+                    binding: &self.interrupt_binding,
+                    agents_keep_running: self.running_agents > 0,
+                }),
             );
             for steer in &self.pending_steers {
                 push_preview(&mut lines, steer, width, false);
@@ -193,25 +206,37 @@ fn separate(lines: &mut Vec<Line>) {
     }
 }
 
+/// The interrupt a pending-steer header offers: its key, and whether helpers
+/// run that it leaves running (t-11354 — Esc ends this turn, not them).
+#[derive(Clone, Copy)]
+struct Interrupt<'a> {
+    binding: &'a str,
+    agents_keep_running: bool,
+}
+
 fn push_header(
     lines: &mut Vec<Line>,
     width: usize,
     title: &str,
-    interrupt_binding: Option<&str>,
+    interrupt: Option<Interrupt<'_>>,
 ) {
     let mut spans = vec![Span::dim("• "), Span::raw(title)];
-    if let Some(binding) = interrupt_binding {
+    if let Some(interrupt) = &interrupt {
         spans.push(Span::dim(" (press "));
-        spans.push(Span::dim(binding.to_string()));
-        spans.push(Span::dim(" to interrupt and send immediately)"));
+        spans.push(Span::dim(interrupt.binding.to_string()));
+        spans.push(Span::dim(if interrupt.agents_keep_running {
+            " to interrupt and send immediately — agents keep running)"
+        } else {
+            " to interrupt and send immediately)"
+        }));
     }
     let mut wrapped = wrap_line(
         &Line::new(spans),
         width,
         &Span::dim("  "),
     );
-    if let Some(binding) = interrupt_binding {
-        isolate_hint_span(&mut wrapped, binding);
+    if let Some(interrupt) = &interrupt {
+        isolate_hint_span(&mut wrapped, interrupt.binding);
     }
     lines.extend(wrapped);
 }
@@ -289,6 +314,28 @@ mod tests {
                 "    third",
                 "    …",
             ]
+        );
+    }
+
+    /// With helpers running, the header says what the interrupt does to them
+    /// (t-11354): nothing — they keep running, and their results still come
+    /// back. With none, the header is the captured one, byte for byte.
+    #[test]
+    fn the_interrupt_hint_says_running_agents_keep_going() {
+        let mut input = PendingInputs::default();
+        input.push_steer("현재 상황".to_string());
+        input.set_running_agents(1);
+        assert_eq!(
+            plain(&input, 160),
+            [
+                "• Messages to be submitted after next tool call (press esc to interrupt and send immediately — agents keep running)",
+                "  ↳ 현재 상황",
+            ]
+        );
+        input.set_running_agents(0);
+        assert_eq!(
+            plain(&input, 160)[0],
+            "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)"
         );
     }
 

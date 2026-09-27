@@ -9,6 +9,11 @@
 //! autonomous surface) a question nobody is present to answer, the loop
 //! re-prompts with a bounded reminder instead of ending the turn.
 //!
+//! One promise is not screened: a person's turn whose remaining work is out
+//! in the background (agents, background commands) may end on what those
+//! results will bring — they come back as their own messages, and holding the
+//! turn open for them only keeps the person from talking (t-11354).
+//!
 //! Deterministic and conservative by design: a missed promise costs the user
 //! one manual nudge, while a false positive costs a whole extra model
 //! iteration — so the marker lists are tight, and every "waiting on the user"
@@ -361,6 +366,9 @@ where
                 ))
             .then_some(TurnEndingIssue::UnverifiedCompletion)
         })?;
+        if issue == TurnEndingIssue::Promise && self.waits_on_background_work() {
+            return None;
+        }
         *reprompts += 1;
         Some(issue)
     }

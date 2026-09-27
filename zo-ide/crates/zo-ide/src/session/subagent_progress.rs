@@ -5,8 +5,9 @@
 //! sends owned snapshots to the UI task. The renderer therefore only reads
 //! memory: no frame, width calculation, or paint call ever touches the disk.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -20,7 +21,7 @@ use tools::AgentRegistry;
 /// an alarm. Even after this threshold the UI reports only the measured lack
 /// of new output; it never diagnoses the agent as stuck.
 const NO_NEW_OUTPUT_AFTER: Duration = Duration::from_secs(5 * 60);
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +61,21 @@ pub(crate) struct SubagentProgress {
     /// until somebody sends. Carried so a window can say "queued since …"
     /// beside a helper instead of only "running".
     pub(crate) last_receipt: Option<runtime::subagent_panes::SteerReceiptRecord>,
+    /// A tool call of the helper's is running now. A helper inside a long
+    /// tool is working however long it has been quiet; one quiet past
+    /// [`NO_NEW_OUTPUT_AFTER`] outside any tool may be stuck
+    /// ([`Self::may_be_stuck`]).
+    pub(crate) in_tool: bool,
+}
+
+impl SubagentProgress {
+    /// Quiet past [`NO_NEW_OUTPUT_AFTER`] — no tool call, no output — and no
+    /// tool running: the helper may be stuck (t-11354). A measured lack of
+    /// activity, said as a doubt; the helper is never stopped for it.
+    #[must_use]
+    pub(crate) fn may_be_stuck(&self) -> bool {
+        self.no_new_output_for.is_some() && !self.in_tool
+    }
 }
 
 /// One observation of the session's running children, with the registry's
@@ -288,6 +304,10 @@ struct AgentManifest {
     /// the tools crate flattens onto the manifest.
     #[serde(rename = "lastReceipt", default)]
     last_receipt: Option<runtime::subagent_panes::SteerReceiptRecord>,
+    /// A pane child's own session transcript, once a result of its named it
+    /// (another flattened lifecycle key).
+    #[serde(default)]
+    transcript: Option<PathBuf>,
 }
 
 /// Every running child of `parent_session_id` across the registry's stores
@@ -329,7 +349,21 @@ fn scan_registry(
         if started_at_floor.is_some_and(|floor| started_at < floor) {
             continue;
         }
-        let transcript_path = transcript_path_for(&path, &manifest.agent_id);
+        // A helper in a pane of its own writes no progress into its
+        // manifest: its work is in its own session transcript, which it named
+        // when it started (t-11354 — the row read "0 tool uses · no new output
+        // for 33m" while that transcript grew by sixty requests).
+        let pane_transcript = manifest
+            .pane
+            .is_some()
+            .then(|| {
+                pane_transcript_path(&path, &manifest.agent_id)
+                    .or_else(|| manifest.transcript.clone())
+            })
+            .flatten();
+        let tally = pane_transcript.as_deref().and_then(transcript_tally);
+        let transcript_path =
+            pane_transcript.or_else(|| transcript_path_for(&path, &manifest.agent_id));
         let last_output_at = transcript_path
             .as_deref()
             .and_then(modified_epoch_of)
@@ -342,16 +376,23 @@ fn scan_registry(
         // cleared currentTool between calls. Prefer the detailed matching tool
         // stamp, then the live tool/phase, and use a neutral fact when none has
         // landed yet.
-        let activity = manifest
-            .current_tool
-            .as_deref()
-            .and_then(|tool| {
+        // A pane child's running call, when its transcript shows one, is
+        // what it is doing; the manifest has nothing newer for it.
+        let running_tool = tally.as_ref().and_then(|tally| tally.running.clone());
+        let activity = running_tool
+            .clone()
+            .or_else(|| {
                 manifest
-                    .recent_tools
-                    .last()
-                    .filter(|recent| recent.starts_with(tool))
+                    .current_tool
+                    .as_deref()
+                    .and_then(|tool| {
+                        manifest
+                            .recent_tools
+                            .last()
+                            .filter(|recent| recent.starts_with(tool))
+                    })
+                    .cloned()
             })
-            .cloned()
             .or_else(|| manifest.current_tool.clone())
             .or_else(|| manifest.current_phase.clone())
             .unwrap_or_else(|| "working".to_string());
@@ -366,7 +407,7 @@ fn scan_registry(
             model: manifest.resolved_model.or(manifest.model),
             activity,
             recent_tools: manifest.recent_tools,
-            tool_calls: manifest.tool_calls,
+            tool_calls: tally.as_ref().map_or(manifest.tool_calls, |tally| tally.tool_calls),
             output_tail: manifest.output_tail,
             started_epoch: started_at,
             elapsed: Duration::from_secs(now_epoch_seconds.saturating_sub(started_at)),
@@ -374,6 +415,11 @@ fn scan_registry(
             transcript_path,
             pane: manifest.pane,
             last_receipt: manifest.last_receipt,
+            in_tool: if tally.is_some() {
+                running_tool.is_some()
+            } else {
+                manifest.current_tool.is_some()
+            },
         });
     }
     progress.sort_by(|left, right| {
@@ -394,6 +440,143 @@ fn scan_store(
 ) -> Vec<SubagentProgress> {
     let registry = AgentRegistry::at_root_for_tests(parent_session_id, store);
     scan_registry(&registry, parent_session_id, now_epoch_seconds, started_at_floor)
+}
+
+/// Where a pane child said its session transcript is
+/// (`<store>/<agent_id>/`[`runtime::subagent_panes::TRANSCRIPT_FILE`]).
+fn pane_transcript_path(manifest_path: &Path, agent_id: &str) -> Option<PathBuf> {
+    let named = std::fs::read_to_string(
+        manifest_path
+            .parent()?
+            .join(agent_id)
+            .join(runtime::subagent_panes::TRANSCRIPT_FILE),
+    )
+    .ok()?;
+    let named = named.trim();
+    (!named.is_empty()).then(|| PathBuf::from(named))
+}
+
+/// A transcript's marks for a tool call, a tool result and a prompt. The
+/// session writes compact JSON, so none can occur inside a string, where
+/// quotes are escaped.
+const TOOL_USE_MARK: &str = "\"type\":\"tool_use\"";
+const TOOL_RESULT_MARK: &str = "\"type\":\"tool_result\"";
+const PROMPT_MARK: &str = "\"role\":\"user\"";
+
+/// What a pane child's transcript says of its work in this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranscriptTally {
+    /// Tool calls since the run's prompt — beside the run's elapsed time, the
+    /// count an in-process helper's row shows.
+    tool_calls: u64,
+    /// The call it is making now: the last one with no result yet.
+    running: Option<String>,
+}
+
+/// One transcript file read.
+#[derive(Debug, Clone)]
+struct FileTally {
+    uses: u64,
+    results: u64,
+    /// Tool calls after the file's last prompt — all of them when it has none.
+    uses_since_prompt: u64,
+    /// The file holds a prompt, so the run began in it or after.
+    prompted: bool,
+    last_tool: Option<String>,
+}
+
+/// The run's tally from `transcript` and, when the run began before a
+/// compaction rotated the file, its rotated siblings (`<stem>.rot-<ms>.jsonl`)
+/// newest first, back to the prompt. Each file is read again only when its
+/// size or time changes — the watcher asks every second, the files change
+/// every few.
+fn transcript_tally(transcript: &Path) -> Option<TranscriptTally> {
+    let live = file_tally(transcript)?;
+    let mut tool_calls = live.uses_since_prompt;
+    if !live.prompted {
+        let stem = transcript.file_stem()?.to_str()?;
+        let rotated_prefix = format!("{stem}.rot-");
+        let mut rotated: Vec<(u64, PathBuf)> = std::fs::read_dir(transcript.parent()?)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter_map(|path| {
+                let at = path
+                    .file_name()?
+                    .to_str()?
+                    .strip_prefix(&rotated_prefix)?
+                    .strip_suffix(".jsonl")?
+                    .parse::<u64>()
+                    .ok()?;
+                Some((at, path))
+            })
+            .collect();
+        rotated.sort_unstable_by_key(|(at, _)| std::cmp::Reverse(*at));
+        for (_, path) in rotated {
+            let Some(tally) = file_tally(&path) else {
+                break;
+            };
+            tool_calls += tally.uses_since_prompt;
+            if tally.prompted {
+                break;
+            }
+        }
+    }
+    Some(TranscriptTally {
+        tool_calls,
+        running: (live.uses > live.results).then_some(live.last_tool).flatten(),
+    })
+}
+
+/// Each transcript file's last read: its size and time then, and its tally.
+type SeenTallies = Mutex<HashMap<PathBuf, (u64, SystemTime, FileTally)>>;
+
+fn file_tally(path: &Path) -> Option<FileTally> {
+    static SEEN: OnceLock<SeenTallies> = OnceLock::new();
+    let metadata = std::fs::metadata(path).ok()?;
+    let stamp = (metadata.len(), metadata.modified().ok()?);
+    let seen = SEEN.get_or_init(Mutex::default);
+    if let Some((len, modified, tally)) = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(path)
+    {
+        if (*len, *modified) == stamp {
+            return Some(tally.clone());
+        }
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let prompt_at = text.rfind(PROMPT_MARK);
+    let since_prompt = prompt_at.map_or(text.as_str(), |at| &text[at..]);
+    let tally = FileTally {
+        uses: text.matches(TOOL_USE_MARK).count() as u64,
+        results: text.matches(TOOL_RESULT_MARK).count() as u64,
+        uses_since_prompt: since_prompt.matches(TOOL_USE_MARK).count() as u64,
+        prompted: prompt_at.is_some(),
+        last_tool: text
+            .lines()
+            .rev()
+            .find(|line| line.contains(TOOL_USE_MARK))
+            .and_then(last_tool_in_line),
+    };
+    seen.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path.to_path_buf(), (stamp.0, stamp.1, tally.clone()));
+    Some(tally)
+}
+
+/// The name of the last tool call in one transcript line.
+fn last_tool_in_line(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    value
+        .pointer("/message/blocks")?
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use"))?
+        .get("name")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Where this helper's own transcript is, beside its manifest
@@ -428,7 +611,110 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{scan_store, NO_NEW_OUTPUT_AFTER};
+    use super::{epoch_seconds_now, scan_store, NO_NEW_OUTPUT_AFTER};
+
+    /// One line of a zo session transcript, as the session writes it.
+    fn transcript_line(role: &str, blocks: &serde_json::Value) -> String {
+        format!(
+            "{}\n",
+            json!({"message": {"blocks": blocks, "role": role}, "type": "message"})
+        )
+    }
+
+    /// A helper running in a pane of its own writes no progress into its
+    /// manifest: its work is in its own session transcript (t-11354 —
+    /// board3d-impl read "0 tool uses · 33m 34s · working · no new output for
+    /// 33m 34s" while its session made 60 model requests). The row reads that
+    /// transcript, wherever the pane said it is: the tool calls it made, the
+    /// one running now, and when it last wrote.
+    #[test]
+    fn a_pane_helpers_row_reads_the_transcript_it_named() {
+        let store = tempfile::tempdir().expect("store");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let transcript = sessions.path().join("session-child.jsonl");
+        let mut lines = transcript_line("user", &json!([{"type": "text", "text": "the brief"}]));
+        lines += &transcript_line(
+            "assistant",
+            &json!([
+                {"id": "t1", "input": "{}", "name": "bash", "type": "tool_use"},
+                {"id": "t2", "input": "{}", "name": "read_file", "type": "tool_use"}
+            ]),
+        );
+        for (id, name) in [("t1", "bash"), ("t2", "read_file")] {
+            lines += &transcript_line(
+                "tool",
+                &json!([{"is_error": false, "output": "ok", "tool_name": name, "tool_use_id": id, "type": "tool_result"}]),
+            );
+        }
+        lines += &transcript_line("system", &json!([{"type": "text", "text": "<system-reminder>"}]));
+        lines += &transcript_line(
+            "assistant",
+            &json!([{"id": "t3", "input": "{\"command\":\"node ui/tests/board-orbit.mjs\"}", "name": "bash", "type": "tool_use"}]),
+        );
+        fs::write(&transcript, lines).expect("transcript");
+        fs::write(
+            store.path().join("agent-pane.json"),
+            serde_json::to_vec(&json!({
+                "agentId": "agent-pane", "parentSessionId": "session-a", "name": "board3d-impl",
+                "status": "running", "startedAt": "100", "lastActivityAt": 100,
+                "execution": "pane", "pane": "%3"
+            }))
+            .expect("json"),
+        )
+        .expect("manifest");
+        let directory = store.path().join("agent-pane");
+        fs::create_dir_all(&directory).expect("agent directory");
+        fs::write(
+            directory.join(runtime::subagent_panes::TRANSCRIPT_FILE),
+            transcript.display().to_string(),
+        )
+        .expect("the pane names its transcript");
+
+        let now = epoch_seconds_now() + 30;
+        let rows = scan_store(store.path(), "session-a", now, None);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.tool_calls, 3, "the calls in its transcript: {row:?}");
+        assert!(row.in_tool, "its last call has no result yet: {row:?}");
+        assert_eq!(row.activity, "bash", "{row:?}");
+        assert_eq!(row.no_new_output_for, None, "it wrote seconds ago: {row:?}");
+        assert!(!row.may_be_stuck());
+        assert_eq!(row.transcript_path.as_deref(), Some(transcript.as_path()));
+    }
+
+    /// Quiet past the bar with no tool running may be stuck; the same quiet
+    /// inside a tool call is a long tool, and is only reported as quiet.
+    #[test]
+    fn a_helper_quiet_past_the_bar_outside_any_tool_may_be_stuck() {
+        let store = tempfile::tempdir().expect("store");
+        for (id, current_tool) in [("agent-silent", None), ("agent-in-a-tool", Some("bash"))] {
+            let mut manifest = json!({
+                "agentId": id, "parentSessionId": "session-a", "name": id,
+                "status": "running", "startedAt": "100", "lastActivityAt": 100
+            });
+            if let Some(tool) = current_tool {
+                manifest["currentTool"] = json!(tool);
+            }
+            fs::write(
+                store.path().join(format!("{id}.json")),
+                serde_json::to_vec(&manifest).expect("json"),
+            )
+            .expect("manifest");
+        }
+        let now = 100 + NO_NEW_OUTPUT_AFTER.as_secs() + 1;
+        let rows = scan_store(store.path(), "session-a", now, None);
+        let row = |id: &str| {
+            rows.iter()
+                .find(|row| row.agent_id == id)
+                .unwrap_or_else(|| panic!("{id} is not a row"))
+        };
+        assert!(row("agent-silent").may_be_stuck(), "{:?}", row("agent-silent"));
+        assert!(row("agent-in-a-tool").no_new_output_for.is_some());
+        assert!(
+            !row("agent-in-a-tool").may_be_stuck(),
+            "a helper inside a tool call is working"
+        );
+    }
 
     #[test]
     fn internal_classifiers_do_not_become_visible_workers() {

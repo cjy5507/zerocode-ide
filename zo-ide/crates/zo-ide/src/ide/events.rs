@@ -865,6 +865,7 @@ pub fn history_from_replay(items: &[ReplayItem]) -> Vec<HistoryEntry> {
                 let verdict = match status {
                     runtime::message_stream::AgentResultStatus::Completed => "completed",
                     runtime::message_stream::AgentResultStatus::Failed => "failed",
+                    runtime::message_stream::AgentResultStatus::Running => "running",
                 };
                 HistoryEntry {
                     role: "tool".to_string(),
@@ -1301,6 +1302,7 @@ mod tests {
                 transcript_path: None,
                 pane: None,
                 last_receipt: None,
+                in_tool: false,
             })
             .collect()
     }

@@ -1192,6 +1192,7 @@ mod tests {
             transcript_path: None,
             pane: None,
             last_receipt: None,
+            in_tool: false,
         }
     }
 
