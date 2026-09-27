@@ -343,6 +343,7 @@ mod tests {
         assert!(!channel.exists());
         assert_eq!(close_reason_from("parent_lost"), CloseReason::ParentLost);
         assert_eq!(close_reason_from("lane_done"), CloseReason::LaneDone);
+        assert_eq!(close_reason_from("delivered"), CloseReason::Delivered);
         assert_eq!(close_reason_from("whatever"), CloseReason::ClosedByParent);
     }
 }

@@ -2108,9 +2108,32 @@ mod tests {
             CloseReason::ClosedByParent,
             CloseReason::UserExit,
             CloseReason::LaneDone,
+            CloseReason::Delivered,
         ] {
             assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
         }
+    }
+
+    /// The two words the parent says after reading an answer only release a
+    /// pane (t-11753): a pane a person pressed a key in declines them, and
+    /// every other word still ends it, attended or not.
+    #[test]
+    fn a_release_is_declined_only_by_a_pane_a_person_touched() {
+        for release in [CloseReason::LaneDone, CloseReason::Delivered] {
+            assert!(release.is_release(), "{release:?}");
+            assert!(release.keeps_standing(true), "{release:?} to a touched pane");
+            assert!(!release.keeps_standing(false), "{release:?} to an untouched pane");
+        }
+        for order in [
+            CloseReason::ParentLost,
+            CloseReason::IdleBudget,
+            CloseReason::ClosedByParent,
+            CloseReason::UserExit,
+        ] {
+            assert!(!order.is_release(), "{order:?}");
+            assert!(!order.keeps_standing(true), "{order:?} ends even a touched pane");
+        }
+        assert_eq!(CloseReason::Delivered.as_str(), "delivered");
     }
 
     /// The parent's own channel is a process fact, declared once.
