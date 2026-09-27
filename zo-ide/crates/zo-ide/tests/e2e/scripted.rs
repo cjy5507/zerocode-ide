@@ -74,6 +74,19 @@ enum Script {
     /// One assistant answer streamed in pieces with a gap between them, so a
     /// test can kill zo while the text is still arriving.
     DribbledText { text: String, pieces: usize, gap: Duration },
+    /// Every request answered with `text` at once — except a compaction's
+    /// summary request, whose `<summary>` is written in `pieces` writes `gap`
+    /// apart: a `/compact` that takes as long as the summary of a large
+    /// conversation does (t-10956).
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    SlowSummary { text: String, pieces: usize, gap: Duration },
+    /// A provider whose window is `limit` tokens, counted the rough way — a
+    /// body's length over four: a request past it is refused the way
+    /// Anthropic refuses one (`400 prompt is too long: N tokens > limit
+    /// maximum`); under it, a compaction's summary request gets a summary
+    /// and any other request `text` (t-10956).
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    Window { limit: usize, text: String },
     /// A committed context-trim notice followed by a slow tool on the next
     /// turn. This reproduces the screen shape from the Zed report: the notice
     /// is directly above a live spinner when the terminal grows.
@@ -156,6 +169,16 @@ impl Script {
                 dribbled_text_sse("msg_dribbled", text, *pieces)
             }
             Self::DribbledText { text, .. } => text_sse("msg_dribbled_again", text),
+            Self::SlowSummary { .. } if is_compaction_summary(request) => text_sse(
+                "msg_slow_summary",
+                "<summary>\n1. Primary Request and Intent: keep the board work going.\n</summary>",
+            ),
+            Self::SlowSummary { text, .. } => text_sse("msg_slow_summary_turn", text),
+            Self::Window { .. } if is_compaction_summary(request) => text_sse(
+                "msg_window_summary",
+                "<summary>\n1. Primary Request and Intent: keep the board work going.\n</summary>",
+            ),
+            Self::Window { text, .. } => text_sse("msg_window_turn", text),
             Self::ContextTrimThenSlowTool if request_index == 0 => text_sse(
                 "msg_context_trim",
                 "Context trim · cleared 3 old tool result(s) (~12k tokens freed)\n",
@@ -212,10 +235,38 @@ impl Script {
     /// Only the first request of a dribbling script is slowed — the resumed
     /// turn wants to *finish*, and making the test wait out the gap twice buys
     /// nothing.
-    fn pacing(&self, request_index: usize) -> (usize, Duration) {
+    fn pacing(&self, request_index: usize, request: &str) -> (usize, Duration) {
         match self {
             Self::DribbledText { pieces, gap, .. } if request_index == 0 => (*pieces, *gap),
+            Self::SlowSummary { pieces, gap, .. } if is_compaction_summary(request) => {
+                (*pieces, *gap)
+            }
             _ => (1, Duration::ZERO),
+        }
+    }
+
+    /// The whole HTTP answer for a request this script refuses — a body past
+    /// a [`Script::Window`]'s limit — or `None` to answer it.
+    fn refusal(&self, request: &str) -> Option<String> {
+        match self {
+            Self::Window { limit, .. } if request.len() / 4 > *limit => {
+                let body = json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": format!(
+                            "prompt is too long: {} tokens > {limit} maximum",
+                            request.len() / 4
+                        ),
+                    },
+                })
+                .to_string();
+                Some(format!(
+                    "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                ))
+            }
+            _ => None,
         }
     }
 
@@ -407,6 +458,32 @@ impl ScriptedAnthropicService {
         .await
     }
 
+    /// Answer every turn with `text`, and a compaction's summary slowly — in
+    /// `pieces` writes `gap` apart (t-10956).
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    pub async fn slow_summary(
+        text: impl Into<String>,
+        pieces: usize,
+        gap: Duration,
+    ) -> io::Result<Self> {
+        Self::spawn(Script::SlowSummary {
+            text: text.into(),
+            pieces,
+            gap,
+        })
+        .await
+    }
+
+    /// A provider with a `limit`-token window: see [`Script::Window`].
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    pub async fn window(limit: usize, text: impl Into<String>) -> io::Result<Self> {
+        Self::spawn(Script::Window {
+            limit,
+            text: text.into(),
+        })
+        .await
+    }
+
     /// Commit a context-trim line, then keep the next turn live in a tool.
     pub async fn context_trim_then_slow_tool() -> io::Result<Self> {
         Self::spawn(Script::ContextTrimThenSlowTool).await
@@ -546,13 +623,20 @@ async fn handle_connection(
 ) -> io::Result<()> {
     let (method, body) = read_http_request(&mut socket).await?;
     if method.eq_ignore_ascii_case("POST") {
-        let (request_index, response) = {
+        let (request_index, response, (pieces, gap), refusal) = {
             let mut captured = requests.lock().await;
             let request_index = captured.len();
             let response = script.response(request_index, &body);
+            let pacing = script.pacing(request_index, &body);
+            let refusal = script.refusal(&body);
             captured.push(body);
-            (request_index, response)
+            (request_index, response, pacing, refusal)
         };
+        if let Some(refusal) = refusal {
+            socket.write_all(refusal.as_bytes()).await?;
+            socket.flush().await?;
+            return Ok(());
+        }
         let mut emitted = [0_u64; 3];
         for line in response.lines().filter_map(|line| line.strip_prefix("data: ")) {
             if let Ok(event) = serde_json::from_str::<Value>(line) {
@@ -563,7 +647,6 @@ async fn handle_connection(
             }
         }
         { let mut total = usage.lock().await; for (i, count) in emitted.iter().enumerate() { total[i] += count; } }
-        let (pieces, gap) = script.pacing(request_index);
         let hold = script.delay_before(request_index);
         if !hold.is_zero() {
             tokio::time::sleep(hold).await;
@@ -670,6 +753,19 @@ async fn read_http_request(socket: &mut TcpStream) -> io::Result<(String, String
 /// The split is deliberately byte-arithmetic rather than SSE-aware: a client
 /// that only parses whole events when they happen to arrive whole is a client
 /// that will break on a real network, and this harness exists to catch that.
+/// The marker the compaction system prompt opens with. Matching the real
+/// constant's first sentence (rather than a shape guess) is what keeps a
+/// summary request from being mistaken for an ordinary turn — which would end
+/// a measurement with "compaction never fired" and no way to tell that apart
+/// from a threshold that was set too high.
+pub const COMPACTION_MARKER: &str = "You are summarizing a coding conversation";
+
+/// Whether a request body is a compaction's summary round-trip — it carries
+/// the compaction prompt, whose opening words are the same in every shape.
+pub fn is_compaction_summary(request: &str) -> bool {
+    request.contains(COMPACTION_MARKER)
+}
+
 fn split_evenly(body: &str, pieces: usize) -> Vec<&str> {
     if pieces <= 1 {
         return vec![body];

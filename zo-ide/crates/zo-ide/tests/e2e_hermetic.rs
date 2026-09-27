@@ -3983,6 +3983,424 @@ const R26_PARKED_SECONDS: u64 = 20;
 /// 10s [`TEST_TIMEOUT`] is for screens, not for these.
 const R26_TURN_TIMEOUT: Duration = Duration::from_secs(60);
 
+// ── t-10956: `/compact` runs off the screen's loop ──────────────────────────
+//
+// Before: both front-ends ran the summary round-trip synchronously on the loop
+// that paints and reads keys. Measured on 1.1.32 and on 7401b973 alike: a
+// 60 s summary left the terminal without a single byte for 59.5 s, Esc did
+// nothing, and whatever was typed appeared only after it. On 2026-09-22 a
+// person waited 27 s on a real one (102.8k tokens in, 8,196 out) and opened
+// another pane.
+
+/// A resumable transcript long enough to fold: `exchanges` question/answer
+/// pairs, each message `lines` lines of about fifty characters, written the
+/// way zo writes one. Answers the transcript's path.
+fn write_long_transcript(
+    layout: &Layout,
+    session_id: &str,
+    exchanges: usize,
+    lines: usize,
+) -> PathBuf {
+    let dir = layout.sessions.join("sessions");
+    fs::create_dir_all(&dir).expect("session directory");
+    let path = dir.join(format!("{session_id}.jsonl"));
+    let mut records = vec![serde_json::json!({
+        "created_at_ms": 1_790_000_000_000_u64,
+        "session_id": session_id,
+        "type": "session_meta",
+        "updated_at_ms": 1_790_000_000_000_u64,
+        "version": 1,
+    })];
+    for exchange in 0..exchanges {
+        let body = format!("fn synthetic_{exchange}(value: u64) -> u64 {{ value ^ {exchange} }}\n")
+            .repeat(lines);
+        for (role, text) in [
+            ("user", format!("C10956 question {exchange}\n{body}")),
+            ("assistant", format!("C10956 answer {exchange}\n{body}")),
+        ] {
+            let turn_index = records.len() - 1;
+            records.push(serde_json::json!({
+                "message": {"blocks": [{"text": text, "type": "text"}], "role": role},
+                "turn_index": turn_index,
+                "type": "message",
+                "updated_at_ms": 1_790_000_000_000_u64,
+            }));
+        }
+    }
+    fs::write(&path, jsonl(&records)).expect("write the long transcript");
+    path
+}
+
+/// Records as a transcript's lines: one JSON object a line.
+fn jsonl(records: &[serde_json::Value]) -> String {
+    let mut body = String::new();
+    for record in records {
+        body.push_str(&record.to_string());
+        body.push('\n');
+    }
+    body
+}
+
+/// Wait until the service has received a compaction's summary request: the
+/// `/compact` is then in flight, its summary still streaming.
+async fn wait_for_summary_request(service: &ScriptedAnthropicService) {
+    let deadline = Instant::now() + C10956_TIMEOUT;
+    loop {
+        if service
+            .request_bodies()
+            .await
+            .iter()
+            .any(|body| e2e::scripted::is_compaction_summary(body))
+        {
+            return;
+        }
+        assert!(Instant::now() < deadline, "no summary request reached the provider");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Whether the terminal received bytes in each of `beats` consecutive
+/// windows of `beat` — a screen that is painting, not one held still.
+fn painted_every_beat(run: &PtyRun, beats: usize, beat: Duration) -> Vec<usize> {
+    let mut grown = Vec::with_capacity(beats);
+    for _ in 0..beats {
+        let before = run.output_len();
+        std::thread::sleep(beat);
+        grown.push(run.output_len() - before);
+    }
+    grown
+}
+
+/// `/compact` over a long conversation while its summary is still streaming:
+/// the screen keeps painting, Esc stops it, and the conversation is left
+/// exactly as it was — the transcript byte for byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_compact_keeps_the_screen_live_and_esc_leaves_the_conversation_untouched() {
+    let layout = Layout::new();
+    let transcript = write_long_transcript(&layout, C10956_SESSION, C10956_EXCHANGES, C10956_LINES);
+    let service = ScriptedAnthropicService::slow_summary("C10956 ok", C10956_PIECES, C10956_GAP)
+        .await
+        .expect("start the slow-summary provider");
+    let args = ["--resume", C10956_SESSION, "--permission-mode", "danger-full-access"];
+    let mut run = pty(&layout, service.base_url(), &args);
+    run.wait_for(&format!("C10956 answer {}", C10956_EXCHANGES - 1), C10956_TIMEOUT);
+    let before = fs::read(&transcript).expect("the transcript before /compact");
+
+    run.send(b"/compact\r").expect("run /compact");
+    wait_for_summary_request(&service).await;
+    let grown = painted_every_beat(&run, C10956_BEATS, C10956_BEAT);
+    assert!(
+        grown.iter().all(|bytes| *bytes > 0),
+        "the screen painted nothing for a whole beat while the summary streamed \
+         (bytes per {C10956_BEAT:?}: {grown:?})"
+    );
+
+    let offset = run.output_len();
+    run.send(b"\x1b").expect("press Esc");
+    run.wait_for_after("compact cancelled", offset, C10956_ESC_WAIT);
+    let after = fs::read(&transcript).expect("the transcript after the cancel");
+    assert!(
+        before == after,
+        "a cancelled /compact changed the conversation: {} bytes → {} bytes",
+        before.len(),
+        after.len()
+    );
+    let _ = run.finish();
+}
+
+/// `/compact` that is left to finish: the screen paints while the summary
+/// streams, the result is reported, and the transcript is the compacted one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_compact_that_finishes_paints_while_it_works_and_reports_what_it_did() {
+    let layout = Layout::new();
+    let transcript = write_long_transcript(&layout, C10956_SESSION, C10956_EXCHANGES, C10956_LINES);
+    let service = ScriptedAnthropicService::slow_summary("C10956 ok", C10956_PIECES, C10956_GAP)
+        .await
+        .expect("start the slow-summary provider");
+    let args = ["--resume", C10956_SESSION, "--permission-mode", "danger-full-access"];
+    let mut run = pty(&layout, service.base_url(), &args);
+    run.wait_for(&format!("C10956 answer {}", C10956_EXCHANGES - 1), C10956_TIMEOUT);
+    let before = fs::read(&transcript).expect("the transcript before /compact");
+
+    let offset = run.output_len();
+    run.send(b"/compact\r").expect("run /compact");
+    wait_for_summary_request(&service).await;
+    let grown = painted_every_beat(&run, C10956_BEATS, C10956_BEAT);
+    assert!(
+        grown.iter().all(|bytes| *bytes > 0),
+        "the screen painted nothing for a whole beat while the summary streamed \
+         (bytes per {C10956_BEAT:?}: {grown:?})"
+    );
+    run.wait_for_after(" removed · ", offset, C10956_TIMEOUT);
+    let after = fs::read_to_string(&transcript).expect("the compacted transcript");
+    assert!(
+        after.len() < before.len() && after.contains("keep the board work going"),
+        "the transcript is the compacted one ({} → {} bytes)",
+        before.len(),
+        after.len()
+    );
+    let _ = run.finish();
+}
+
+/// The plain front-end (a pane driven line by line, `--plain`) runs the same
+/// `/compact`: an interrupt stops it and leaves the conversation as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_plain_compact_stops_on_an_interrupt_and_leaves_the_conversation_untouched() {
+    let layout = Layout::new();
+    let transcript = write_long_transcript(&layout, C10956_SESSION, C10956_EXCHANGES, C10956_LINES);
+    let service = ScriptedAnthropicService::slow_summary("C10956 ok", C10956_PIECES, C10956_GAP)
+        .await
+        .expect("start the slow-summary provider");
+    let args = [
+        "--plain",
+        "--resume",
+        C10956_SESSION,
+        "--permission-mode",
+        "danger-full-access",
+    ];
+    let mut run = pty(&layout, service.base_url(), &args);
+    let before = fs::read(&transcript).expect("the transcript before /compact");
+    run.send(b"/compact\r").expect("run /compact");
+    wait_for_summary_request(&service).await;
+
+    let offset = run.output_len();
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(run.pid()).expect("pid fits"));
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT).expect("interrupt zo");
+    run.wait_for_after("compact cancelled", offset, C10956_ESC_WAIT);
+    let after = fs::read(&transcript).expect("the transcript after the interrupt");
+    assert!(
+        before == after,
+        "an interrupted /compact changed the conversation: {} bytes → {} bytes",
+        before.len(),
+        after.len()
+    );
+    let _ = run.finish();
+}
+
+/// A conversation OpenAI's model wrote, the way zo records one: `call_…`
+/// tool ids, reasoning items carried with their encrypted content, thinking
+/// with no signature. Nothing in it comes from a real conversation.
+fn write_gpt_transcript(layout: &Layout, session_id: &str) {
+    let dir = layout.sessions.join("sessions");
+    fs::create_dir_all(&dir).expect("session directory");
+    let mut lines = vec![serde_json::json!({
+        "created_at_ms": 1_790_000_000_000_u64,
+        "session_id": session_id,
+        "type": "session_meta",
+        "updated_at_ms": 1_790_000_000_000_u64,
+        "version": 1,
+    })];
+    let mut push = |message: serde_json::Value| {
+        let turn_index = lines.len() - 1;
+        lines.push(serde_json::json!({
+            "message": message,
+            "turn_index": turn_index,
+            "type": "message",
+            "updated_at_ms": 1_790_000_000_000_u64,
+        }));
+    };
+    for step in 0..4 {
+        let call = format!("call_c10956gpt{step:02}");
+        push(serde_json::json!({
+            "blocks": [{"text": format!("C10956 gpt question {step}"), "type": "text"}],
+            "role": "user",
+        }));
+        push(serde_json::json!({
+            "blocks": [
+                {"signature": "", "thinking": format!("**Reading step {step}**"), "type": "thinking"},
+                {"text": format!("Reading step {step}."), "type": "text"},
+                {"id": call, "input": format!("{{\"path\":\"step{step}.txt\"}}"), "name": "read_file", "type": "tool_use"},
+            ],
+            "model": "gpt-6-astra",
+            "reasoning_replay": serde_json::json!([{
+                "call_id": call,
+                "items": [{"content": [], "encrypted_content": "gAAAAC10956", "summary": [], "type": "reasoning"}],
+            }]).to_string(),
+            "role": "assistant",
+            "usage": {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 10, "output_tokens": 5},
+        }));
+        push(serde_json::json!({
+            "blocks": [{"is_error": false, "output": format!("step {step} body"), "tool_name": "read_file", "tool_use_id": call, "type": "tool_result"}],
+            "role": "tool",
+        }));
+        push(serde_json::json!({
+            "blocks": [{"text": format!("C10956 gpt answer {step}"), "type": "text"}],
+            "model": "gpt-6-astra",
+            "role": "assistant",
+        }));
+    }
+    fs::write(dir.join(format!("{session_id}.jsonl")), jsonl(&lines))
+        .expect("write the gpt transcript");
+}
+
+/// The first request on Claude after a conversation GPT wrote (t-10956 §1.4):
+/// one the Anthropic API takes — tool uses answered, no thinking block without
+/// the signature Anthropic issued, none of OpenAI's encrypted reasoning — and
+/// it is answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_conversation_gpt_wrote_continues_on_claude() {
+    let layout = Layout::new();
+    write_gpt_transcript(&layout, C10956_GPT_SESSION);
+    let service = ScriptedAnthropicService::text("C10956 continued on claude")
+        .await
+        .expect("start the provider");
+    let args = [
+        "--resume",
+        C10956_GPT_SESSION,
+        "--model",
+        "claude-opus-5-5",
+        "--permission-mode",
+        "danger-full-access",
+    ];
+    let mut run = pty(&layout, service.base_url(), &args);
+    run.wait_for("C10956 gpt answer 3", C10956_TIMEOUT);
+    let offset = run.output_len();
+    run.send(b"C10956 go on\r").expect("send the next words");
+    run.wait_for_after("C10956 continued on claude", offset, C10956_TIMEOUT);
+    let _ = run.finish();
+
+    let bodies = service.request_bodies().await;
+    let first = bodies
+        .iter()
+        .find(|body| body.contains("C10956 go on"))
+        .expect("the first request after the switch");
+    assert_wire_contract(first, "the first request on Claude after GPT");
+    let parsed: serde_json::Value = serde_json::from_str(first).expect("a JSON body");
+    let unsigned: Vec<&serde_json::Value> = parsed["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .filter(|block| {
+            block["type"] == "thinking"
+                && block["signature"].as_str().is_none_or(str::is_empty)
+        })
+        .collect();
+    assert!(unsigned.is_empty(), "thinking Anthropic did not sign: {unsigned:?}");
+    assert!(
+        !first.contains("gAAAAC10956"),
+        "OpenAI's encrypted reasoning never reaches Anthropic"
+    );
+}
+
+const C10956_GPT_SESSION: &str = "session-1790000010956-1";
+/// ③ (t-10956): a conversation larger than the next model's window is
+/// compacted before the first request on it — a 1M-window model's
+/// conversation taken up by a 258k one — and the request that follows fits
+/// and is answered. The summary request cannot fit that window either; the
+/// local fold ends the compaction, as it did before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_conversation_larger_than_the_next_models_window_is_compacted_before_it_is_sent() {
+    let layout = Layout::new();
+    write_long_transcript(&layout, C10956_WIDE_SESSION, C10956_WIDE_EXCHANGES, C10956_WIDE_LINES);
+    let service = ScriptedAnthropicService::window(C10956_SMALL_WINDOW, "C10956 fits now")
+        .await
+        .expect("start the window-limited provider");
+    let args = [
+        "--resume",
+        C10956_WIDE_SESSION,
+        "--model",
+        "claude-haiku-4-5-20251001",
+        "--permission-mode",
+        "danger-full-access",
+    ];
+    let mut run = pty(&layout, service.base_url(), &args);
+    run.wait_for(&format!("C10956 answer {}", C10956_WIDE_EXCHANGES - 1), C10956_TIMEOUT);
+    let offset = run.output_len();
+    run.send(b"C10956 next\r").expect("send the next words");
+    run.wait_for_after("C10956 fits now", offset, C10956_TIMEOUT);
+    let screen = strip_ansi(&String::from_utf8_lossy(&run.finish()));
+
+    let bodies = service.request_bodies().await;
+    let turns: Vec<&String> = bodies
+        .iter()
+        .filter(|body| body.contains("C10956 next") && !e2e::scripted::is_compaction_summary(body))
+        .collect();
+    assert_eq!(turns.len(), 1, "one request carried the new words, and it fit the window");
+    assert!(
+        turns[0].len() / 4 <= C10956_SMALL_WINDOW,
+        "{} estimated tokens against a {C10956_SMALL_WINDOW}-token window",
+        turns[0].len() / 4
+    );
+    assert!(
+        screen.contains("Compacted conversation"),
+        "the compaction is said on screen"
+    );
+}
+
+/// ③ (t-10956): a provider that serves less than the window zo was told — a
+/// 200k ceiling under a model declared at 1M — refuses the request as too
+/// long; zo learns the ceiling, compacts, and sends the request once more,
+/// and that one is answered. Once: a second refusal would be surfaced, not
+/// retried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_provider_ceiling_below_the_declared_window_is_answered_by_one_compaction() {
+    let layout = Layout::new();
+    write_long_transcript(&layout, C10956_CEILING_SESSION, C10956_CEILING_EXCHANGES, C10956_WIDE_LINES);
+    let service = ScriptedAnthropicService::window(C10956_CEILING, "C10956 fits now")
+        .await
+        .expect("start the window-limited provider");
+    let args = [
+        "--resume",
+        C10956_CEILING_SESSION,
+        "--model",
+        "claude-opus-5-5",
+        "--permission-mode",
+        "danger-full-access",
+    ];
+    let mut run = pty(&layout, service.base_url(), &args);
+    run.wait_for(&format!("C10956 answer {}", C10956_CEILING_EXCHANGES - 1), C10956_TIMEOUT);
+    let offset = run.output_len();
+    run.send(b"C10956 again\r").expect("send the next words");
+    run.wait_for_after("C10956 fits now", offset, C10956_TIMEOUT);
+    let _ = run.finish();
+
+    let bodies = service.request_bodies().await;
+    let turns: Vec<usize> = bodies
+        .iter()
+        .filter(|body| body.contains("C10956 again") && !e2e::scripted::is_compaction_summary(body))
+        .map(|body| body.len() / 4)
+        .collect();
+    assert_eq!(
+        turns.len(),
+        2,
+        "the refused request and ONE resend after the compaction: {turns:?} estimated tokens"
+    );
+    assert!(turns[0] > C10956_CEILING && turns[1] <= C10956_CEILING, "{turns:?}");
+}
+
+const C10956_WIDE_SESSION: &str = "session-1790000010956-2";
+const C10956_CEILING_SESSION: &str = "session-1790000010956-3";
+/// Lines per message in the wide transcripts: about ten thousand characters.
+const C10956_WIDE_LINES: usize = 200;
+/// Exchanges past a 258k window (about 300k estimated tokens) and past a
+/// 200k ceiling but inside the declared 1M (about 230k).
+const C10956_WIDE_EXCHANGES: usize = 60;
+const C10956_CEILING_EXCHANGES: usize = 46;
+/// The smaller model's window, and the ceiling a provider serves under the
+/// window declared for its model — the one measured on 2026-09-10 (`211352
+/// tokens > 200000 maximum`).
+const C10956_SMALL_WINDOW: usize = 258_000;
+const C10956_CEILING: usize = 200_000;
+const C10956_SESSION: &str = "session-1790000010956-0";
+/// Exchanges in the long transcript, and lines per message: about 48k
+/// characters, well past the 10k estimated tokens `CompactionConfig::default`
+/// gates `/compact` on.
+const C10956_EXCHANGES: usize = 24;
+const C10956_LINES: usize = 30;
+/// The summary is written in this many pieces this far apart — about ten
+/// seconds, long enough to watch the screen and to press Esc inside it.
+const C10956_PIECES: usize = 40;
+const C10956_GAP: Duration = Duration::from_millis(250);
+/// The screen is watched for this many beats of this length while the
+/// summary streams; each must carry bytes.
+const C10956_BEATS: usize = 3;
+const C10956_BEAT: Duration = Duration::from_millis(700);
+/// How long an Esc (or an interrupt) may take to end the compaction — far
+/// less than what is left of the summary.
+const C10956_ESC_WAIT: Duration = Duration::from_secs(4);
+const C10956_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Seconds the doomed tool parks for. Long enough that "kill it while the tool
 /// runs" is not a race against a fast machine; short enough that the orphaned
 /// `sleep` the kill leaves behind is gone before the suite ends.
