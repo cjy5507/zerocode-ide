@@ -3083,3 +3083,21 @@ fn a_request_that_says_no_confidence_is_read_by_its_labels_copy() {
         "the window is the last requests, as ever"
     );
 }
+
+#[test]
+fn a_recall_label_whose_key_columns_disagree_with_its_name_grades_nothing() {
+    let seat = &crate::jev::RECALL;
+    let request = asked_by(seat, 10);
+    let mut label = label_of(seat, 20, 10);
+    label[AGREED.canonical] = json!(true);
+    label[BASELINE_AGREED.canonical] = json!(false);
+    for key in seat.request_name {
+        label[*key] = json!(11);
+    }
+    let rows = [request, label];
+    let series = on_the_newest_version(seat, &rows);
+    assert!(
+        series.marks.iter().all(|row| LABEL.read(row).is_none()),
+        "a mismatched tuple joined: {series:?}"
+    );
+}

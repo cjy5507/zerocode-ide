@@ -542,9 +542,9 @@ fn apply(cwd: &Path, query: &str, hits: Vec<MemoryHit>, label: &ReadingSlot) -> 
         .and_then(|judged| apply_order(&hits, &judged.proposed, &judged.dropped));
     row.applied = read.is_some();
     let ledger = rerank_shadow_path(cwd);
-    let _ = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES);
-    judge_detached(ledger);
-    note_settled(label, &row, &hits);
+    if record_settled(&ledger, label, &row, &hits) {
+        judge_detached(ledger);
+    }
     read.unwrap_or(hits)
 }
 
@@ -564,10 +564,11 @@ async fn run(shot: Shot, answer: Option<RowSender>) {
     let Some(row) = kept(row, answer).await else {
         return;
     };
-    note_settled(&label, &row, &hits);
     let _ = tokio::task::spawn_blocking(move || {
-        let written = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES);
-        judge_ledger(&ledger, now_ms());
+        let written = record_settled(&ledger, &label, &row, &hits);
+        if written {
+            judge_ledger(&ledger, now_ms());
+        }
         written
     })
     .await;
@@ -766,6 +767,17 @@ fn heard(cwd: &Path, attempt: &str, progress: runtime::TurnProgress<'_>) {
 /// is configured, which no demand ranks anything of.
 fn vault_fingerprint() -> Option<u64> {
     runtime::SecondBrain::from_env().map(|vault| task_fingerprint("", &vault.root().to_string_lossy()))
+}
+
+/// Record the request and publish the reading its label will grade.
+fn record_settled(ledger: &Path, slot: &ReadingSlot, row: &RerankShadowRow, hits: &[MemoryHit]) -> bool {
+    if append_shadow_row(ledger, row, SHADOW_LEDGER_MAX_BYTES).is_err() {
+        return false;
+    }
+    // A turn may end as soon as this target is visible. Its request must
+    // already be above the label in the ledger, including in shadow mode.
+    note_settled(slot, row, hits);
+    true
 }
 
 /// Remember the order a reading settled on, when it settled on one: a row
@@ -2656,6 +2668,77 @@ mod tests {
         });
         note_settled(&slot, &row, &hits);
         assert!(!last_settled().lock().expect("book").contains_key(&(work.path().to_path_buf(), TEST_ATTEMPT.to_string())));
+    }
+
+    #[test]
+    fn a_recall_whose_request_write_failed_cannot_publish_a_label_target() {
+        let root = tempfile::tempdir().expect("ledger root");
+        let hits = three();
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let row = judged(&client, "failed request write", &hits);
+        let slot = Arc::new(Mutex::new(Reading { answered: true, ..Reading::default() }));
+        assert!(!record_settled(root.path(), &slot, &row, &hits), "a directory cannot hold a JSONL row");
+        let reading = slot.lock().expect("reading");
+        assert_eq!(label_row(&reading).request_at, None, "a label cannot name an unrecorded request");
+    }
+
+    #[test]
+    fn a_recall_request_is_recorded_before_its_label_target_can_be_published() {
+        let root = tempfile::tempdir().expect("ledger root");
+        let ledger = root.path().join(RECALL.ledger);
+        let hits = three();
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let row = judged(&client, "record before publication", &hits);
+        let slot = Arc::new(Mutex::new(Reading::default()));
+        let held = slot.lock().expect("hold publication");
+        let (ready, started) = std::sync::mpsc::channel();
+        let recording = ledger.clone();
+        let publishing = Arc::clone(&slot);
+        let writer = std::thread::spawn(move || {
+            ready.send(()).expect("started");
+            record_settled(&recording, &publishing, &row, &hits)
+        });
+        started.recv_timeout(RERANK_APPLY_DEADLINE).expect("writer started");
+        let waiting = std::time::Instant::now();
+        let mut recorded = false;
+        while waiting.elapsed() < RERANK_APPLY_DEADLINE {
+            if super::super::jev_summary::read_rows(&ledger).len() == 1 {
+                recorded = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        drop(held);
+        assert!(writer.join().expect("writer"));
+        assert!(recorded, "publishing the target blocked the request write");
+    }
+
+    #[test]
+    fn a_recall_label_joins_its_recorded_request_behind_an_earlier_identical_key() {
+        let root = tempfile::tempdir().expect("ledger root");
+        let ledger = root.path().join(RECALL.ledger);
+        let hits = three();
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let mut row = judged(&client, "repeated request key", &hits);
+        row.at = 20;
+        let mut earlier = row.clone();
+        earlier.at = 10;
+        append_shadow_row(&ledger, &earlier, SHADOW_LEDGER_MAX_BYTES).expect("earlier request");
+        let slot = Arc::new(Mutex::new(Reading { answered: true, ..Reading::default() }));
+        assert!(record_settled(&ledger, &slot, &row, &hits));
+        let mut reading = slot.lock().expect("reading");
+        reading.seen.touch(Touch::Read(hits[1].entry.path.clone()));
+        let label = label_row(&reading);
+        assert_eq!((label.query, label.notes, label.request_at), (row.query, row.notes, Some(row.at)));
+        append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("label");
+        let rows = super::super::jev_summary::read_rows(&ledger);
+        let series = zerocode_core::jev::promote::on_the_newest_version(&RECALL, &rows);
+        let marks: Vec<_> = series.marks.iter().filter(|row| row.get("label").is_some()).collect();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0][zerocode_core::jev::summary::REQUEST_AT.canonical], row.at);
     }
 
     #[test]

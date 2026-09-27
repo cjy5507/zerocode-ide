@@ -345,6 +345,8 @@ pub struct Searched {
     /// The request the judgment answered, for the label that grades it —
     /// `None` when no judgment answered.
     pub judged_request: Option<SkillRequestName>,
+    /// The word match on the same task and catalog, before any judgment.
+    pub baseline_names: Vec<String>,
 }
 
 impl Searched {
@@ -365,12 +367,15 @@ impl Searched {
 #[must_use]
 pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
     let candidates = skill_candidates(skills);
+    let baseline = lexical_rank(task, &candidates);
+    let baseline_names: Vec<String> = baseline.iter().map(|reading| reading.name.clone()).collect();
     let fallback = |outcome: &str| Searched {
-        ranked: lexical_rank(task, &candidates),
+        ranked: baseline.clone(),
         route_use: ROUTE_USE_FALLBACK.to_string(),
         outcome: outcome.to_string(),
         judged_names: None,
         judged_request: None,
+        baseline_names: baseline_names.clone(),
     };
     if candidates.is_empty() || task.trim().is_empty() {
         return fallback(NOTHING_TO_ASK);
@@ -402,10 +407,11 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
             outcome: row.outcome.clone(),
             judged_names,
             judged_request,
+            baseline_names,
         }
     } else {
         Searched {
-            ranked: lexical_rank(task, &candidates),
+            ranked: baseline,
             route_use: if judged {
                 mode.key().to_string()
             } else {
@@ -414,6 +420,7 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
             outcome: row.outcome.clone(),
             judged_names,
             judged_request,
+            baseline_names,
         }
     };
     row.route_use.clone_from(&searched.route_use);
@@ -429,8 +436,8 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
 /// back from a ledger row could be a search somebody else's session made an
 /// hour ago.
 /// Per project: the names the last search's judgment handed back, and the
-/// request it answered.
-type AnswerBook = HashMap<PathBuf, (Vec<String>, SkillRequestName)>;
+/// request it answered, beside the same-width word-match shortlist.
+type AnswerBook = HashMap<PathBuf, (Vec<String>, Vec<String>, SkillRequestName)>;
 
 fn last_answer() -> &'static Mutex<AnswerBook> {
     static ANSWERED: OnceLock<Mutex<AnswerBook>> = OnceLock::new();
@@ -440,14 +447,15 @@ fn last_answer() -> &'static Mutex<AnswerBook> {
 /// Remember what a search handed back, and which request it was, so a load
 /// that follows can be read as agreeing with it or not — and its label can
 /// name the request it grades.
-pub fn note_search_answer(cwd: &Path, named: &[String], request: SkillRequestName) {
+pub fn note_search_answer(cwd: &Path, named: &[String], baseline: &[String], wanted: usize, request: SkillRequestName) {
     if let Ok(mut answered) = last_answer().lock() {
-        answered.insert(cwd.to_path_buf(), (named.to_vec(), request));
+        let [named, baseline] = [named, baseline].map(|names| names.iter().take(wanted).cloned().collect());
+        answered.insert(cwd.to_path_buf(), (named, baseline, request));
     }
 }
 
 /// Write this seat's `agreed` mark: the turn loaded `loaded`, and the last
-/// search either named it or did not.
+/// search's requested shortlist either named it or did not.
 ///
 /// It is a row of its own rather than a column on the search's row, because
 /// the search's row is written before anybody knows what the turn will do —
@@ -464,36 +472,41 @@ pub fn note_loaded_skill(cwd: &Path, loaded: &str) {
             if turn.loaded.is_none() {
                 turn.loaded = Some(loaded.to_string());
             }
-            return;
         }
     }
-    let Some((named, request)) = last_answer()
+    let Some((named, baseline, request)) = last_answer()
         .lock()
         .ok()
         .and_then(|mut answered| answered.remove(cwd))
     else {
         return;
     };
-    let row = label_row(loaded, &named, request);
+    let row = label_row(loaded, &named, Some(&baseline), request);
     record_row(&SKILLS, &skill_search_path(cwd), &row);
 }
 
 /// The mark itself: whether the skill the turn loaded was one the judgment
 /// `request` named, and where in the ranking it sat.
-fn label_row(loaded: &str, named: &[String], request: SkillRequestName) -> SkillLabelRow {
-    let rank = named.iter().position(|name| name == loaded);
+fn label_row(loaded: &str, named: &[String], baseline: Option<&[String]>, request: SkillRequestName) -> SkillLabelRow {
+    let (agreed, rank) = skill_mark(loaded, named);
     SkillLabelRow {
         at: unix_millis(),
         label: request.label(),
         request_at: request.at,
         loaded: loaded.to_string(),
-        agreed: rank.is_some() || (loaded.is_empty() && named.is_empty()),
+        agreed,
         rank,
-        baseline_agreed: None,
+        baseline_agreed: baseline.map(|names| skill_mark(loaded, names).0),
         baseline_loaded: None,
         unused_load: None,
         baseline_unused_load: None,
     }
+}
+
+/// Both readers are graded on the same first load and the same shortlist.
+fn skill_mark(loaded: &str, named: &[String]) -> (bool, Option<usize>) {
+    let rank = named.iter().position(|name| name == loaded);
+    (rank.is_some() || (loaded.is_empty() && named.is_empty()), rank)
 }
 
 /// The turn boundary's two-stage suggestion: a seat of its own with a ledger
@@ -532,6 +545,7 @@ impl SkillSuggestionSeat for SkillSuggestionJudge {
 struct PendingSuggestion {
     generation: u64,
     suggested: Option<String>,
+    baseline: Option<String>,
     loaded: Option<String>,
     acting: bool,
     judged: Option<SkillRequestName>,
@@ -551,6 +565,7 @@ fn start_pending_suggestion(cwd: &Path, acting: bool) -> Option<u64> {
     pending.insert(cwd.to_path_buf(), PendingSuggestion {
         generation,
         suggested: None,
+        baseline: None,
         loaded: None,
         acting,
         judged: None,
@@ -597,11 +612,12 @@ fn judged_label(pending: PendingSuggestion, turn: &[ConversationMessage]) -> Opt
 
 fn label_turn(pending: PendingSuggestion, request: SkillRequestName, turn: &[ConversationMessage]) -> SkillLabelRow {
     let loaded = pending.loaded.as_deref().unwrap_or_default();
-    let mut row = label_row(loaded, &pending.suggested.into_iter().collect::<Vec<_>>(), request);
+    let baseline = pending.baseline.iter().cloned().collect::<Vec<_>>();
+    let mut row = label_row(loaded, &pending.suggested.into_iter().collect::<Vec<_>>(), Some(&baseline), request);
+    row.baseline_loaded = pending.baseline;
     row.unused_load = (!loaded.is_empty()).then(|| skill_used_after_load(turn, loaded))
         .flatten().map(|used| !used);
-    if !pending.acting {
-        row.baseline_loaded = pending.loaded;
+    if !pending.acting && row.baseline_loaded == pending.loaded {
         row.baseline_unused_load = row.unused_load;
     }
     row
@@ -721,7 +737,15 @@ async fn suggest_at(cwd: PathBuf, task: String) -> Option<String> {
     if candidates.len() > zerocode_core::jev::SKILL_SUGGESTION_CATALOG_CAP {
         return None;
     }
+    let baseline = lexical_rank(&task, &candidates).first().map(|reading| reading.name.clone());
     let generation = start_pending_suggestion(&cwd, acting);
+    if let Some(generation) = generation {
+        if let Ok(mut pending) = turn_pending().lock() {
+            if let Some(turn) = pending.get_mut(&cwd).filter(|turn| turn.generation == generation) {
+                turn.baseline = baseline;
+            }
+        }
+    }
     let judged = judge_suggestion(cwd, task, skills, candidates, mode, acting, generation);
     if acting {
         judged.await

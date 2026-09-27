@@ -1617,3 +1617,97 @@ fn a_fork_never_explores_a_control_a_press_cannot_take_back() {
     assert!(!world.snapshot_log.is_empty(), "two plain controls fork");
     assert_eq!(walked.forks.len(), 1);
 }
+
+#[test]
+fn branching_labels_compare_todays_actual_press_on_the_same_next_step() {
+    use zerocode_core::jev::summary::BASELINE_AGREED;
+    for (same_pick, next, expected) in [
+        (false, NextStep::MovedOn, (Some(false), Some(true))),
+        (true, NextStep::SameScreen, (Some(false), Some(false))),
+        (true, NextStep::MovedOn, (Some(true), Some(true))),
+        (false, NextStep::SameScreen, (None, None)),
+        (true, NextStep::Unknown, (None, None)),
+    ] {
+        let mut walked = super::Walked {
+            forks: vec![
+                json!({"routeUse": "shadow", "today": "mark:2", "chosen": if same_pick { "mark:2" } else { "mark:1" }}),
+            ],
+            ..super::Walked::default()
+        };
+        super::settle(
+            &mut walked,
+            Some(super::Pending { row: 0, same_pick }),
+            next,
+        );
+        let row = &walked.forks[0];
+        assert_eq!(
+            (
+                row[AGREED.canonical].as_bool(),
+                row[BASELINE_AGREED.canonical].as_bool()
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+fn an_acting_branch_preserves_todays_explored_result_as_a_distinct_baseline() {
+    use zerocode_core::jev::summary::BASELINE_AGREED;
+    for (today_moves, alternative_moves, expected) in
+        [(false, true, (true, false)), (true, false, (false, true))]
+    {
+        let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
+        if today_moves {
+            world.leads_to.insert(2, vec![control(3, "다음")]);
+        }
+        if !alternative_moves {
+            world.leads_to.remove(&1);
+        }
+        let walked = run_with(
+            Mode::On,
+            true,
+            RAISED,
+            &goal(2),
+            &mut judge,
+            &mut world,
+            Options::default(),
+            None,
+        );
+        let row = &walked.forks[0];
+        assert_eq!(
+            (
+                row[AGREED.canonical].as_bool(),
+                row[BASELINE_AGREED.canonical].as_bool()
+            ),
+            (Some(expected.0), Some(expected.1))
+        );
+        assert_eq!(
+            super::baseline_observation(row)
+                .expect("observed baseline")
+                .source,
+            super::BaselineSource::Explored
+        );
+    }
+}
+
+#[test]
+fn a_shadow_branch_names_its_baseline_as_the_actual_next_step() {
+    let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
+    world.leads_to.insert(2, vec![control(3, "다음")]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        SHADOW,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
+    assert_eq!(
+        super::baseline_observation(&walked.forks[0])
+            .expect("actual baseline")
+            .source,
+        super::BaselineSource::Next
+    );
+}

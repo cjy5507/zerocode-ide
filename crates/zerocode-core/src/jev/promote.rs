@@ -507,7 +507,20 @@ fn request_of(
     from: usize,
 ) -> Option<usize> {
     let label = &rows[at];
-    let asked = named.get(&Name::of_label(seat.request_name, label)?)?;
+    let name = Name::of_label(seat.request_name, label)?;
+    // A word-key label can repeat the fingerprints beside its joined name.
+    // If it does, both spellings must identify the same request; the time
+    // cannot make a contradictory tuple into evidence.
+    if seat.names == Naming::Words
+        && seat
+            .request_name
+            .iter()
+            .any(|key| label.get(*key).is_some())
+        && Name::of(seat.request_name, label).as_ref() != Some(&name)
+    {
+        return None;
+    }
+    let asked = named.get(&name)?;
     let above = &asked[..asked.partition_point(|index| *index < at)];
     let when = match REQUEST_AT.read(label) {
         // A time that is not a time names no request.

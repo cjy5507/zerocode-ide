@@ -174,10 +174,10 @@ fn a_search_nothing_answered_says_which_rule_refused_it() {
 fn the_agreed_mark_says_whether_the_turn_loaded_what_the_search_named() {
     let named: Vec<String> = ["dataviz", "docx", "pdf"].into_iter().map(str::to_string).collect();
     let request = SkillRequestName { task: 7, catalog: 11, at: 1_700_000_000_000 };
-    let agreed = label_row("docx", &named, request);
+    let agreed = label_row("docx", &named, None, request);
     assert!(agreed.agreed);
     assert_eq!(agreed.rank, Some(1));
-    let disagreed = label_row("second-brain", &named, request);
+    let disagreed = label_row("second-brain", &named, None, request);
     assert!(!disagreed.agreed);
     assert_eq!(disagreed.rank, None);
     // The judge reads the mark off the row without knowing anything about
@@ -187,8 +187,8 @@ fn the_agreed_mark_says_whether_the_turn_loaded_what_the_search_named() {
     assert_eq!(summary::AGREED.read(&value), Some(&json!(true)));
     assert_eq!(summary::LABEL.read(&value), Some(&json!("7:11")));
     assert_eq!(summary::REQUEST_AT.read(&value), Some(&json!(1_700_000_000_000_u64)));
-    assert!(label_row("", &[], request).agreed, "no suggestion followed by no load is a negative match");
-    assert!(!label_row("", &[String::from("docx")], request).agreed,
+    assert!(label_row("", &[], None, request).agreed, "no suggestion followed by no load is a negative match");
+    assert!(!label_row("", &[String::from("docx")], None, request).agreed,
         "a suggestion ignored by the turn must be able to say no");
 }
 
@@ -232,6 +232,7 @@ fn a_loaded_skill_with_no_following_tool_or_body_quote_is_an_unused_proxy() {
     let label = label_turn(PendingSuggestion {
         generation: 0,
         suggested: Some("docx".into()),
+        baseline: Some("docx".into()),
         loaded: Some("docx".into()),
         acting: false,
         judged: Some(request),
@@ -252,7 +253,7 @@ fn a_turn_whose_judgment_never_landed_writes_no_label() {
     let cwd = root.path().canonicalize().expect("a canonical root");
     turn_pending().lock().expect("pending lock").insert(
         cwd.clone(),
-        PendingSuggestion { generation: 0, suggested: None, loaded: None, acting: false, judged: None },
+        PendingSuggestion { generation: 0, baseline: None, suggested: None, loaded: None, acting: false, judged: None },
     );
     note_loaded_skill(&cwd, "docx");
     let unjudged = turn_pending()
@@ -267,6 +268,7 @@ fn a_turn_whose_judgment_never_landed_writes_no_label() {
     let judged = PendingSuggestion {
         generation: 0,
         suggested: Some("docx".into()),
+        baseline: Some("docx".into()),
         loaded: Some("docx".into()),
         acting: false,
         judged: Some(request),
@@ -353,7 +355,7 @@ fn a_label_row_is_not_counted_as_a_request() {
         append_shadow_row(&ledger, &answered, SHADOW_LEDGER_MAX_BYTES).expect("the search row");
         append_shadow_row(
             &ledger,
-            &label_row(loaded, &["skill-000".to_string()], SkillRequestName::of(&answered)),
+            &label_row(loaded, &["skill-000".to_string()], None, SkillRequestName::of(&answered)),
             SHADOW_LEDGER_MAX_BYTES,
         )
         .expect("a label row");
@@ -532,7 +534,13 @@ fn a_search_label_that_completes_the_evidence_records_its_rise() {
     ledger_with(&skill_search_path(&cwd), &rows);
     assert!(!runtime::jev_seat_applies(&cwd, &SKILLS));
 
-    note_search_answer(&cwd, &[String::from("docx")], request);
+    // The completing label marks the baseline as the comparison it replaces did.
+    let baseline = if last["baselineAgreed"].as_bool() == Some(true) {
+        [String::from("docx")]
+    } else {
+        [String::from("pdf")]
+    };
+    note_search_answer(&cwd, &[String::from("docx")], &baseline, 1, request);
     note_loaded_skill(&cwd, "docx");
 
     assert!(runtime::jev_seat_applies(&cwd, &SKILLS), "the writer must judge the evidence it completed");
@@ -720,10 +728,69 @@ fn judging_a_skill_label_does_not_invent_a_missing_baseline() {
     };
     let ledger = skill_search_path(&cwd);
     ledger_with(&ledger, &rows);
-    note_search_answer(&cwd, &[String::from("docx")], request);
+    note_search_answer(&cwd, &[String::from("docx")], &[String::from("docx")], 1, request);
     note_loaded_skill(&cwd, "docx");
     let recorded = super::super::jev_summary::read_rows(&ledger);
     assert!(matches!(judge_seat(&SKILLS, &recorded).expect("judged").verdict,
-        Verdict::Hold(Line::TooFewBaseline { compared: 0, .. })));
+        Verdict::Hold(Line::TooFewBaseline { compared: 1, .. })));
     assert!(!runtime::jev_seat_applies(&cwd, &SKILLS));
+}
+
+#[test]
+fn skill_search_labels_compare_the_word_match_on_the_same_loaded_skill() {
+    let request = SkillRequestName { task: 1, catalog: 2, at: 3 };
+    for (named, baseline, loaded, expected) in [
+        (vec!["pdf".to_string()], vec!["docx".to_string()], "docx", (false, Some(true))),
+        (vec!["docx".to_string()], vec!["pdf".to_string()], "docx", (true, Some(false))),
+        (vec!["docx".to_string()], vec!["docx".to_string()], "docx", (true, Some(true))),
+        (vec!["pdf".to_string()], vec!["pdf".to_string()], "docx", (false, Some(false))),
+        (Vec::new(), Vec::new(), "", (true, Some(true))),
+    ] {
+        let label = label_row(loaded, &named, Some(&baseline), request);
+        assert_eq!((label.agreed, label.baseline_agreed), expected);
+    }
+}
+
+#[test]
+fn skill_suggestion_labels_compare_the_lexical_first_choice_on_the_same_turn() {
+    let request = SkillRequestName { task: 1, catalog: 2, at: 3 };
+    for (suggested, baseline, loaded, expected) in [
+        (Some("pdf"), Some("docx"), Some("docx"), (false, Some(true))),
+        (Some("docx"), Some("pdf"), Some("docx"), (true, Some(false))),
+        (Some("docx"), Some("docx"), Some("docx"), (true, Some(true))),
+        (Some("pdf"), Some("pdf"), Some("docx"), (false, Some(false))),
+        (None, None, None, (true, Some(true))),
+    ] {
+        let label = label_turn(PendingSuggestion {
+            generation: 0, suggested: suggested.map(str::to_string),
+            baseline: baseline.map(str::to_string), loaded: loaded.map(str::to_string),
+            acting: true, judged: Some(request),
+        }, request, &[]);
+        assert_eq!((label.agreed, label.baseline_agreed), expected);
+    }
+}
+
+#[test]
+fn skill_search_cuts_both_rankings_at_the_requested_width() {
+    let cwd = tempfile::tempdir().expect("project");
+    let request = SkillRequestName { task: 1, catalog: 2, at: 3 };
+    let named = vec!["docx".to_string(), "pdf".to_string()];
+    let baseline = vec!["pdf".to_string(), "docx".to_string()];
+    note_search_answer(cwd.path(), &named, &baseline, 1, request);
+    let (named, baseline, request) = last_answer().lock().expect("answer book").remove(cwd.path()).expect("answer");
+    let label = label_row("docx", &named, Some(&baseline), request);
+    assert_eq!((label.agreed, label.baseline_agreed), (true, Some(false)), "the load below lexical k is a baseline miss");
+}
+
+#[test]
+fn a_skill_load_labels_its_explicit_search_even_while_a_suggestion_waits() {
+    let root = tempfile::tempdir().expect("home");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 home"));
+    let cwd = root.path().canonicalize().expect("project");
+    let request = SkillRequestName { task: 1, catalog: 2, at: 3 };
+    start_pending_suggestion(&cwd, false).expect("turn");
+    note_search_answer(&cwd, &["docx".to_string()], &["pdf".to_string()], 1, request);
+    note_loaded_skill(&cwd, "docx");
+    assert!(skill_search_path(&cwd).is_file(), "the pending suggestion swallowed the search label");
+    finish_turn_suggestion(&cwd, &[]);
 }
