@@ -1706,7 +1706,9 @@ pub fn wait_for_turn_result_on(
                 if stamp.is_some() && stamp != seen {
                     seen = stamp;
                     progressed = now;
-                } else if now.duration_since(asked) >= ask_every {
+                } else if now.duration_since(progressed.max(asked)) >= ask_every {
+                    // Asked only of a child quiet for a while, and at most
+                    // once an interval: a writing child is not asked at all.
                     asked = now;
                     if waits_on_a_person(directory, ask_timeout) {
                         progressed = now;
