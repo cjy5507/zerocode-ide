@@ -142,6 +142,14 @@ pub const LABEL: LedgerKey = LedgerKey {
 /// The word a label row carries as its kind (`kind`) — every seat's label
 /// writer's, in zo and in the window alike.
 pub const LABEL_ROW_KIND: &str = "label";
+/// Who asked a request, on a seat whose rows several programs write into one
+/// ledger (t-10916): `zo`'s own runtime, or the agent of a window pane. A
+/// count of a seat's requests told apart by it keeps the source of each
+/// ([`askers_since`]).
+pub const FROM: LedgerKey = LedgerKey {
+    canonical: "from",
+    also: &[],
+};
 /// When the request a label row grades was made — that request row's
 /// [`AT`], copied by the writer that knows which request it graded
 /// (t-6877). A name alone ([`LABEL`]) picks out one request only while it
@@ -748,6 +756,25 @@ pub fn agreement_rows<'a>(
         }
     }
     agreement
+}
+
+/// How many of the requests at or after `since_ms` each asker made
+/// ([`FROM`]) — requests only, and only the ones that name who asked.
+#[must_use]
+pub fn askers_since<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    since_ms: i64,
+) -> BTreeMap<String, usize> {
+    let mut askers: BTreeMap<String, usize> = BTreeMap::new();
+    for row in rows {
+        if asked_something(row).is_none() || !at_or_after(row, since_ms) {
+            continue;
+        }
+        if let Some(from) = FROM.read(row).and_then(Value::as_str) {
+            *askers.entry(from.to_string()).or_default() += 1;
+        }
+    }
+    askers
 }
 
 /// Why the rows at or after `since_ms` that grade a request carry no mark,

@@ -1675,4 +1675,113 @@ mod tests {
             HookInstallState::Partial
         );
     }
+
+    /// The two tool guards' rows (`zerocode_core::hook_guard`, t-10916) say
+    /// what each agent's hooks carry, and the events this installer puts on
+    /// disk are what they carry: a row that sees a command before it runs
+    /// names an agent given a pre-tool event, one that says it cannot names
+    /// an agent given none — Antigravity since t-10461 — and the same for a
+    /// tool's result and the person's prompt. A row and an installer that
+    /// drift apart would count a quiet zero as "cannot see", or the reverse.
+    #[test]
+    fn the_guard_rows_see_what_the_installers_put_on_disk() {
+        use zerocode_core::hook_guard::sight;
+        let folded = |event: &str| {
+            event
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+                .to_ascii_lowercase()
+        };
+        let installed: Vec<(AgentKind, Vec<String>)> = vec![
+            (
+                AgentKind::Claude,
+                CLAUDE_EVENTS
+                    .iter()
+                    .map(|event| folded(event.name))
+                    .collect(),
+            ),
+            (
+                AgentKind::Droid,
+                DROID_EVENTS
+                    .iter()
+                    .map(|event| folded(event.name))
+                    .collect(),
+            ),
+            (
+                AgentKind::CommandCode,
+                COMMAND_CODE_EVENTS
+                    .iter()
+                    .map(|event| folded(event.name))
+                    .collect(),
+            ),
+            (
+                AgentKind::Grok,
+                GROK_EVENTS.iter().map(|event| folded(event.name)).collect(),
+            ),
+            (
+                AgentKind::Devin,
+                DEVIN_EVENTS
+                    .iter()
+                    .map(|event| folded(event.name))
+                    .collect(),
+            ),
+            (
+                AgentKind::Cursor,
+                CURSOR_EVENTS.iter().map(|event| folded(event)).collect(),
+            ),
+            (
+                AgentKind::Copilot,
+                COPILOT_EVENTS.iter().map(|event| folded(event)).collect(),
+            ),
+            (
+                AgentKind::Antigravity,
+                ANTIGRAVITY_EVENTS
+                    .iter()
+                    .map(|(event, _)| folded(event))
+                    .collect(),
+            ),
+            (
+                AgentKind::Kimi,
+                KIMI_EVENTS.iter().map(|event| folded(event)).collect(),
+            ),
+            (
+                AgentKind::Codex,
+                crate::codex_trust::CODEX_EVENTS
+                    .iter()
+                    .map(|(event, _)| folded(event))
+                    .collect(),
+            ),
+        ];
+        assert_eq!(
+            installed.len(),
+            MANAGED_TARGETS.len() + 1,
+            "every managed agent and Codex"
+        );
+        for (agent, events) in installed {
+            let carries = |names: &[&str]| {
+                names
+                    .iter()
+                    .any(|name| events.iter().any(|event| event == name))
+            };
+            let row = sight(agent);
+            assert_eq!(
+                row.before.yes(),
+                carries(&["pretooluse", "beforeshellexecution"]),
+                "{agent:?} before"
+            );
+            assert_eq!(
+                row.after.yes(),
+                carries(&["posttooluse"]),
+                "{agent:?} after"
+            );
+            assert_eq!(row.text.yes(), carries(&["posttooluse"]), "{agent:?} text");
+            assert_eq!(
+                row.prompt.yes(),
+                carries(&["userpromptsubmit", "beforesubmitprompt"]),
+                "{agent:?} prompt"
+            );
+            assert_eq!(row.turn_end.yes(), carries(&["stop"]), "{agent:?} turn end");
+        }
+    }
 }

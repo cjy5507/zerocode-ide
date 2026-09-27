@@ -116,6 +116,10 @@ pub struct SeatReport {
     /// ([`summary::not_compared_words`], t-9556) — `agreement_week`'s
     /// `not_compared`, told apart.
     pub not_compared_week: BTreeMap<String, usize>,
+    /// The week's requests of the current series, by who asked them
+    /// ([`summary::askers_since`], t-10916): zo, or the agent of a window
+    /// pane — a seat several programs ask keeps each one's share.
+    pub askers_week: BTreeMap<String, usize>,
     /// The requests the judgment's cadence counts: every one the newest
     /// answering version was asked ([`promote::asked_toward_judgment`]).
     pub asked_toward_judgment: usize,
@@ -195,10 +199,14 @@ pub fn deadline_ms_for(seat: &JevUse) -> Option<u64> {
     seat.apply_deadline_ms
 }
 
-/// Both roots a seat's ledger may live under, in the order they are asked.
+/// Both roots a seat's ledger may live under, in the order they are asked:
+/// this machine's one place first — a seat whose rows the machine keeps is
+/// the same seat whichever project asks, and a project's own file of the
+/// same name is one it kept before its rows moved there (the tool guards,
+/// t-10916) — then the project's own state.
 #[must_use]
 pub fn ledger_roots(cwd: &Path) -> [PathBuf; 2] {
-    [shadow_ledger_dir(cwd), runtime::default_config_home().join(REQUESTS_DIR)]
+    [runtime::default_config_home().join(REQUESTS_DIR), shadow_ledger_dir(cwd)]
 }
 
 /// The rows of one ledger, newest last, skipping lines that do not parse —
@@ -360,6 +368,7 @@ fn one_with(
     let week = summary::summarize_rows(version.rows.iter().copied(), week_since_ms);
     let agreement_week = summary::agreement_rows(version.marks.iter().copied(), week_since_ms);
     let not_compared_week = summary::not_compared_words(version.marks.iter().copied(), week_since_ms);
+    let askers_week = summary::askers_since(version.rows.iter().copied(), week_since_ms);
     let asked_model = zerocode_core::jev::model_in(settings.unwrap_or(&Value::Null)).to_string();
     let cost_usd = cost_of(summary::summarize(&rows, week_since_ms).input_tokens, &asked_model);
     let asked_toward_judgment = version.asked();
@@ -393,6 +402,7 @@ fn one_with(
         judged,
         agreement_week,
         not_compared_week,
+        askers_week,
         asked_toward_judgment,
         baseline: seat.baseline.kind(),
         negatives_wanted: seat.negatives_wanted,

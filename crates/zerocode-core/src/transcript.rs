@@ -323,9 +323,18 @@ pub fn prompt_in_payload(payload: &str) -> Option<String> {
 /// [`prompt_in_payload`], for a caller that already paid the parse.
 #[must_use]
 pub fn prompt_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<String> {
+    prompt_words_in_parsed(payload).map(clamp)
+}
+
+/// What a person typed in a `UserPromptSubmit`-family payload, whole: past
+/// the machine envelopes and uncut, its lines kept — for a reader that needs
+/// the words themselves rather than a card's line (the tool guards' task
+/// line and the words an order in a tool's text must not be, t-10916).
+#[must_use]
+pub fn prompt_words_in_parsed<'p>(payload: &'p crate::payload::HookPayload<'_>) -> Option<&'p str> {
     let value = payload.tree()?;
     let prompt = past_the_envelopes(value.get("prompt")?.as_str()?).trim();
-    (!prompt.is_empty()).then(|| clamp(prompt))
+    (!prompt.is_empty()).then_some(prompt)
 }
 
 /// What the agent said as its turn ended, from a `Stop`-family payload.
@@ -404,8 +413,9 @@ pub fn tool_failure_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Opti
     Some(clamp(&said))
 }
 
-/// `extractToolResponseText` (:9067), shape for shape.
-fn tool_response_text(response: &serde_json::Value) -> Option<String> {
+/// `extractToolResponseText` (:9067), shape for shape — also the tool
+/// guards' last reader of a finished tool's text (`crate::hook_guard`).
+pub(crate) fn tool_response_text(response: &serde_json::Value) -> Option<String> {
     if let Some(text) = response.as_str() {
         return (!text.is_empty()).then(|| text.to_string());
     }

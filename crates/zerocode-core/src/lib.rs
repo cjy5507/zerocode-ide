@@ -52,6 +52,7 @@ pub mod guarded;
 pub mod guide;
 pub mod hook;
 pub mod hook_continuation;
+pub mod hook_guard;
 pub mod host;
 pub mod interrupt;
 pub mod jev;

@@ -450,6 +450,34 @@ fn the_rows_that_compared_nothing_are_told_apart_by_the_word_they_wrote() {
     assert!(not_compared_words([].iter(), i64::MIN).is_empty());
 }
 
+/// Who asked a seat's requests is counted request by request over the rows
+/// that name it (t-10916): a label or a control row is no request, a row
+/// before the cut is not counted, a memo's answer is a request its asker
+/// made, and a request that names no asker — one written before the column
+/// — is in no one's count.
+#[test]
+fn a_seats_requests_are_counted_by_who_asked_them() {
+    let rows = [
+        json!({"at": 4, "outcome": ANSWERED, "from": "zo"}),
+        json!({"at": 5, "outcome": ANSWERED, "from": "zo"}),
+        json!({"at": 6, "outcome": "timeout", "from": "claude"}),
+        json!({"at": 7, "outcome": ANSWERED, "from": "codex", "cached": true}),
+        json!({"at": 8, "outcome": ANSWERED}),
+        json!({"at": 9, "kind": LABEL_ROW_KIND, "label": "x", "from": "claude"}),
+        json!({"at": 10, "outcome": CONTROL, "from": "zo"}),
+    ];
+    assert_eq!(
+        askers_since(rows.iter(), 5),
+        BTreeMap::from([
+            ("claude".to_string(), 1),
+            ("codex".to_string(), 1),
+            ("zo".to_string(), 1)
+        ])
+    );
+    assert_eq!(askers_since(rows.iter(), i64::MIN)["zo"], 2);
+    assert!(askers_since([].iter(), i64::MIN).is_empty());
+}
+
 /// What a screen seat's guards stopped and what it handed to the person are
 /// counted once, here, off the rows' own words (t-6187's `barred` and
 /// `controlKind`, the dashboard's drawer, t-6277 D6): a press the screen's own

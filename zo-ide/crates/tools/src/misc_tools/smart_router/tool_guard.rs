@@ -73,7 +73,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Map;
 use serde_json::Value;
+use zerocode_core::jev::count::REQUESTS_DIR;
 use zerocode_core::jev::door::{Refused, ANSWERED_OUTCOME};
+use zerocode_core::AgentKind;
 #[cfg(test)]
 use zerocode_core::jev::questions::TOOL_TEXT_INSTRUCTED_ASKS;
 use zerocode_core::jev::questions::{
@@ -106,7 +108,7 @@ use super::jev_gate::{self, JevDoor};
 use super::patch_review::detach;
 use super::probe_exec::task_fingerprint;
 use super::settings::{jev_command_guard_mode_from, jev_tool_text_guard_mode_from};
-use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
+use super::shadow_ledger::{append_shadow_row, SHADOW_LEDGER_MAX_BYTES};
 
 /// Outcome of a row whose question answered and checked out — the door's
 /// word, because the one counter every seat shares reads it.
@@ -158,16 +160,31 @@ const _: () = assert!(
     "each guard's row names the wall its stage waits"
 );
 
-/// Where a project's command guard ledger lives.
-#[must_use]
-pub fn command_guard_path(cwd: &Path) -> PathBuf {
-    shadow_ledger_path(cwd, COMMAND_GUARD_FILE)
+/// Where a guard's rows live: this machine's one place for the seats the
+/// window asks too — zo's config home's Jev folder, where the window files
+/// the rows it asks of its panes' agents (t-10916). One ledger per seat, so a
+/// command asked here and one asked in a pane are one series, one judge and
+/// one standing, and every project's reading counts them once.
+fn guard_ledger(seat: &JevUse) -> PathBuf {
+    runtime::default_config_home().join(REQUESTS_DIR).join(seat.ledger)
 }
 
-/// Where a project's tool text guard ledger lives.
+/// Where the command guard's ledger lives.
 #[must_use]
-pub fn tool_text_guard_path(cwd: &Path) -> PathBuf {
-    shadow_ledger_path(cwd, TOOL_TEXT_GUARD_FILE)
+pub fn command_guard_path() -> PathBuf {
+    guard_ledger(COMMAND.seat)
+}
+
+/// Where the tool text guard's ledger lives.
+#[must_use]
+pub fn tool_text_guard_path() -> PathBuf {
+    guard_ledger(TEXT.seat)
+}
+
+/// The folder a row's words came from, by its last name — how a row of the
+/// machine's one ledger names its project.
+fn pane_of(project: &Path) -> Option<String> {
+    project.file_name().map(|name| name.to_string_lossy().into_owned())
 }
 
 /* ---- the question: state, Nouls, and what an answer says -------------------- */
@@ -334,9 +351,9 @@ fn asking_mode(cwd: &Path, guard: &Guard) -> Option<JevMode> {
 
 /// Whether `guard` acts in `mode`: a person's `on`, or an `auto` its own
 /// evidence raised ([`raised`]).
-fn acting(cwd: &Path, guard: &Guard, mode: JevMode) -> bool {
+fn acting(guard: &Guard, mode: JevMode) -> bool {
     if mode.automatic() {
-        mode.applies_with(raised(cwd, guard))
+        mode.applies_with(raised(guard))
     } else {
         mode.applies()
     }
@@ -349,38 +366,45 @@ fn standings() -> &'static Mutex<Standings> {
     STANDINGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Whether `guard`'s `auto` stands raised in this project, as last read —
-/// never read on a call's path: the standing is the whole ledger
-/// (`runtime::jev_seat_applies`, up to [`SHADOW_LEDGER_MAX_BYTES`]), and it is
-/// read again after each row is written ([`refresh_standing`]). A project this
-/// process has not read yet stands where every seat starts, and is read now,
-/// beside the call.
-fn raised(cwd: &Path, guard: &Guard) -> bool {
-    let ledger = shadow_ledger_path(cwd, guard.seat.ledger);
+/// Whether `guard`'s `auto` stands raised, as last read — never read on a
+/// call's path: the standing is the ledger's transitions
+/// ([`super::jev_summary::raised_in`], up to [`SHADOW_LEDGER_MAX_BYTES`]),
+/// and it is read again after each row is written ([`refresh_standing`]). A
+/// ledger this process has not read yet stands where every seat starts, and
+/// is read now, beside the call.
+fn raised(guard: &Guard) -> bool {
+    let ledger = guard_ledger(guard.seat);
     if let Some(standing) = standings().lock().ok().and_then(|known| known.get(&ledger).copied()) {
         return standing;
     }
-    let cwd = cwd.to_path_buf();
     let seat = guard.seat;
-    drop(std::thread::spawn(move || refresh_standing(&cwd, seat)));
+    drop(std::thread::spawn(move || refresh_standing(seat, &ledger)));
     false
 }
 
-fn refresh_standing(cwd: &Path, seat: &JevUse) {
-    let applies = runtime::jev_seat_applies(cwd, seat);
+/// Whether `seat` stands raised on its ledger, read now — what
+/// [`refresh_standing`] caches, for a test that asks it directly.
+#[cfg(test)]
+fn guard_applies(seat: &JevUse) -> bool {
+    super::jev_summary::raised_in(seat, &guard_ledger(seat))
+}
+
+/// Read `seat`'s standing on `ledger` again, and keep it for [`raised`].
+fn refresh_standing(seat: &JevUse, ledger: &Path) {
+    let applies = super::jev_summary::raised_in(seat, ledger);
     if let Ok(mut known) = standings().lock() {
-        known.insert(shadow_ledger_path(cwd, seat.ledger), applies);
+        known.insert(ledger.to_path_buf(), applies);
     }
 }
 
-/// Write one row, judge the ledger it joined, and read the standing again —
-/// none of it on a call's path.
-fn write_row<R: Serialize + Send + 'static>(cwd: PathBuf, seat: &'static JevUse, row: R) {
+/// Write one row to `ledger` — the seat's, as it was named when the call was
+/// asked about — judge it, and read the standing again: none of it on a
+/// call's path.
+fn write_row<R: Serialize + Send + 'static>(ledger: PathBuf, seat: &'static JevUse, row: R) {
     drop(tokio::task::spawn_blocking(move || {
-        let ledger = shadow_ledger_path(&cwd, seat.ledger);
         let _ = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES);
         let _ = super::shadow_ledger::judge_seat_ledger(seat, &ledger, super::decision_shadow::now_ms());
-        refresh_standing(&cwd, seat);
+        refresh_standing(seat, &ledger);
     }));
 }
 
@@ -449,7 +473,7 @@ fn guard_command(project: &Path, ask: CommandAsk) {
     let Some(mode) = asking_mode(project, &COMMAND) else {
         return;
     };
-    let acting = acting(project, &COMMAND, mode);
+    let acting = acting(&COMMAND, mode);
     let judged = task_fingerprint(&ask.attempt, &ask.tool_use_id);
     let waiting = CommandWaiting::asked(judged, &ask.owner, &ask.tool_use_id, &ask.command, &ask.cwd, project);
     let (rule, outside_paths) = (waiting.rule(), waiting.outside.len());
@@ -469,10 +493,14 @@ fn guard_command(project: &Path, ask: CommandAsk) {
         outside_paths,
         verdict: Verdict::Unavailable.word().to_string(),
         noted: false,
+        from: Some(AgentKind::Zo.slug().to_string()),
+        moment: None,
+        pane: pane_of(project),
         asked: Asked::default(),
     };
     let key = (project.to_path_buf(), ask.owner.clone(), ask.tool_use_id.clone());
-    let judgment = judge_command(project.to_path_buf(), ask, row, mode, acting).boxed().shared();
+    let ledger = guard_ledger(COMMAND.seat);
+    let judgment = judge_command(project.to_path_buf(), ledger, ask, row, mode, acting).boxed().shared();
     if acting {
         if let Ok(mut waiting) = pending().lock() {
             waiting.insert(key, (Instant::now(), judgment.clone()));
@@ -487,6 +515,7 @@ fn guard_command(project: &Path, ask: CommandAsk) {
 /// hand back the line an acting guard adds.
 async fn judge_command(
     project: PathBuf,
+    ledger: PathBuf,
     ask: CommandAsk,
     mut row: CommandGuardRow,
     mode: JevMode,
@@ -512,8 +541,8 @@ async fn judge_command(
     let note = row.asked.answers.as_ref().filter(|_| row.asked.applied).and_then(command_note);
     row.noted = note.is_some();
     let confidence = row.asked.answers.as_ref().and_then(confidence_of);
-    settle_command(&project, row.judged, verdict, confidence, row.asked.applied);
-    write_row(project, COMMAND.seat, row);
+    settle_command(&project, &ledger, row.judged, verdict, confidence, row.asked.applied);
+    write_row(ledger, COMMAND.seat, row);
     note
 }
 
@@ -545,7 +574,7 @@ fn forget_command(project: &Path, judged: u64) {
 /// The verdict of the command `judged` names has answered — or has not. One
 /// that reached no verdict leaves the book; one whose hindsight is already in
 /// writes its label now.
-fn settle_command(project: &Path, judged: u64, verdict: Verdict, confidence: Option<f64>, applied: bool) {
+fn settle_command(project: &Path, ledger: &Path, judged: u64, verdict: Verdict, confidence: Option<f64>, applied: bool) {
     let ready = {
         let Ok(mut book) = command_book().lock() else {
             return;
@@ -567,29 +596,28 @@ fn settle_command(project: &Path, judged: u64, verdict: Verdict, confidence: Opt
         }
     };
     if let Some(done) = ready {
-        write_command_labels(project, vec![done]);
+        write_command_labels(ledger, vec![done]);
     }
 }
 
-fn write_command_labels(project: &Path, done: Vec<CommandWaiting>) -> usize {
+fn write_command_labels(ledger: &Path, done: Vec<CommandWaiting>) -> usize {
     let at = super::decision_shadow::unix_millis();
     let rows: Vec<CommandGuardLabelRow> = done.into_iter().filter_map(|one| one.label(at)).collect();
-    write_labels(project, COMMAND.seat, &rows)
+    write_labels(ledger, COMMAND.seat, &rows)
 }
 
 /// Append label rows to `seat`'s ledger and judge it once — off nobody's path,
 /// since a label is written at a turn's end.
-fn write_labels<R: Serialize>(project: &Path, seat: &JevUse, rows: &[R]) -> usize {
+fn write_labels<R: Serialize>(ledger: &Path, seat: &JevUse, rows: &[R]) -> usize {
     if rows.is_empty() {
         return 0;
     }
-    let ledger = shadow_ledger_path(project, seat.ledger);
     let written = rows
         .iter()
-        .filter(|row| append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES).is_ok())
+        .filter(|row| append_shadow_row(ledger, row, SHADOW_LEDGER_MAX_BYTES).is_ok())
         .count();
-    let _ = super::shadow_ledger::judge_seat_ledger(seat, &ledger, super::decision_shadow::now_ms());
-    refresh_standing(project, seat);
+    let _ = super::shadow_ledger::judge_seat_ledger(seat, ledger, super::decision_shadow::now_ms());
+    refresh_standing(seat, ledger);
     written
 }
 
@@ -650,7 +678,7 @@ fn label_commands(project: &Path, owner: &str, turn: Option<&[ConversationMessag
         }
         done
     };
-    write_command_labels(project, done)
+    write_command_labels(&guard_ledger(COMMAND.seat), done)
 }
 
 /* ---- the tool text guard ---------------------------------------------------- */
@@ -669,7 +697,7 @@ async fn guard_text(project: PathBuf, ask: TextAsk) -> TextGuard {
     let Some(mode) = asking_mode(&project, &TEXT) else {
         return TextGuard::default();
     };
-    let acting = acting(&project, &TEXT, mode);
+    let acting = acting(&TEXT, mode);
     let judged = task_fingerprint(&ask.attempt, &ask.tool_use_id);
     if let Ok(mut book) = text_book().lock() {
         shelve(
@@ -686,7 +714,8 @@ async fn guard_text(project: PathBuf, ask: TextAsk) -> TextGuard {
             },
         );
     }
-    let judged_text = judge_text(project, ask, judged, mode, acting);
+    let ledger = guard_ledger(TEXT.seat);
+    let judged_text = judge_text(project, ledger, ask, judged, mode, acting);
     if acting {
         return judged_text.await;
     }
@@ -696,7 +725,7 @@ async fn guard_text(project: PathBuf, ask: TextAsk) -> TextGuard {
     TextGuard::default()
 }
 
-async fn judge_text(project: PathBuf, ask: TextAsk, judged: u64, mode: JevMode, acting: bool) -> TextGuard {
+async fn judge_text(project: PathBuf, ledger: PathBuf, ask: TextAsk, judged: u64, mode: JevMode, acting: bool) -> TextGuard {
     let Some((door, client)) = door_and_client(&project).await else {
         forget_text(&project, judged);
         return TextGuard::default();
@@ -720,7 +749,7 @@ async fn judge_text(project: PathBuf, ask: TextAsk, judged: u64, mode: JevMode, 
         .map(|answers| text_guard_for(&ask, answers))
         .unwrap_or_default();
     let confidence = asked.answers.as_ref().and_then(confidence_of);
-    settle_text(&project, judged, verdict, confidence, asked.applied);
+    settle_text(&project, &ledger, judged, verdict, confidence, asked.applied);
     let row = ToolTextGuardRow {
         at: super::decision_shadow::unix_millis(),
         attempt: Some(ask.attempt.trim())
@@ -735,9 +764,11 @@ async fn judge_text(project: PathBuf, ask: TextAsk, judged: u64, mode: JevMode, 
         verdict: verdict.word().to_string(),
         fenced: guard.fence.is_some(),
         noted: guard.note.is_some(),
+        from: Some(AgentKind::Zo.slug().to_string()),
+        pane: pane_of(&project),
         asked,
     };
-    write_row(project, TEXT.seat, row);
+    write_row(ledger, TEXT.seat, row);
     guard
 }
 
@@ -749,7 +780,7 @@ fn forget_text(project: &Path, judged: u64) {
     }
 }
 
-fn settle_text(project: &Path, judged: u64, verdict: Verdict, confidence: Option<f64>, applied: bool) {
+fn settle_text(project: &Path, ledger: &Path, judged: u64, verdict: Verdict, confidence: Option<f64>, applied: bool) {
     let ready = {
         let Ok(mut book) = text_book().lock() else {
             return;
@@ -771,14 +802,14 @@ fn settle_text(project: &Path, judged: u64, verdict: Verdict, confidence: Option
         }
     };
     if let Some(done) = ready {
-        write_text_labels(project, vec![done]);
+        write_text_labels(ledger, vec![done]);
     }
 }
 
-fn write_text_labels(project: &Path, done: Vec<TextWaiting>) -> usize {
+fn write_text_labels(ledger: &Path, done: Vec<TextWaiting>) -> usize {
     let at = super::decision_shadow::unix_millis();
     let rows: Vec<ToolTextGuardLabelRow> = done.into_iter().filter_map(|one| one.label(at)).collect();
-    write_labels(project, TEXT.seat, &rows)
+    write_labels(ledger, TEXT.seat, &rows)
 }
 
 /// The words a call carries out: a shell command, or the text an edit tool
@@ -851,7 +882,7 @@ fn label_texts(project: &Path, owner: &str, turn: Option<&[ConversationMessage]>
         }
         done
     };
-    write_text_labels(project, done)
+    write_text_labels(&guard_ledger(TEXT.seat), done)
 }
 
 /// Write both guards' hindsight for the turn that just ended, judged on `turn`

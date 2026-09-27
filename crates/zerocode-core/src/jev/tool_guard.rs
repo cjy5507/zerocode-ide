@@ -71,6 +71,11 @@ pub const IGNORED: &str = "ignored";
 /// a call of the step after a text carries out when it is not a shell command.
 pub const WRITTEN_WORDS_KEYS: [&str; 2] = ["content", "new_string"];
 
+/// What every MCP tool's name opens with — the prefix an agent hosting MCP
+/// writes before the server's name (`mcp__<server>__<tool>`): an MCP tool's
+/// answer is a text the text guard reads.
+pub const MCP_TOOL_PREFIX: &str = "mcp__";
+
 /* ---- the kind of text, and what its host says of its fence ------------------ */
 
 /// The kind of tool a block the text guard reads came from — the `source` its
@@ -332,7 +337,17 @@ pub struct Asked {
     /// `schema`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected: Option<String>,
+    /// The answer came from the memo, for bytes asked before: no request left
+    /// ([`crate::jev::summary::CACHED`] — out of the latency population).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
 }
+
+/// What a command row says of when a window pane's command was asked: right
+/// before it ran — or, for an agent whose hooks carry nothing before a tool
+/// runs, after (`crate::hook_guard::Unseen::NoEventBefore`).
+pub const ASKED_BEFORE: &str = "before";
+pub const ASKED_AFTER: &str = "after";
 
 /// One command's row: what was asked, what came back, what the code made of it
 /// and whether a line joined the result. No words and no path: the command is
@@ -360,6 +375,20 @@ pub struct CommandGuardRow {
     pub verdict: String,
     /// Whether a line joined the result the model read.
     pub noted: bool,
+    /// Who asked ([`crate::jev::summary::FROM`]): `zo`'s own runtime, or the
+    /// agent of a window pane (t-10916) — so rows asked by every program
+    /// that shares this seat's ledger keep their source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// For a pane's command, when it was asked ([`ASKED_BEFORE`],
+    /// [`ASKED_AFTER`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moment: Option<String>,
+    /// The folder the words came from, by its last name — the project a
+    /// row of this machine's one ledger belongs to, as the window's other
+    /// seats name a pane's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
     #[serde(flatten)]
     pub asked: Asked,
 }
@@ -452,6 +481,12 @@ pub struct ToolTextGuardRow {
     pub fenced: bool,
     /// Whether a line joined the result.
     pub noted: bool,
+    /// Who asked, as a command row says it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The folder the words came from, by its last name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
     #[serde(flatten)]
     pub asked: Asked,
 }

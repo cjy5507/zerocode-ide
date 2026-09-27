@@ -161,6 +161,46 @@ fn a_screen_seat_is_counted_once_when_its_root_ledger_holds_what_a_session_copie
     assert_eq!(report.asked_toward_judgment, walk.len());
 }
 
+/// A guard seat zo and the window both ask counts its week by who asked it
+/// (t-10916), and the machine's one ledger is the seat's even where a project
+/// kept a file of the same name before its rows moved there.
+#[test]
+fn a_guard_seats_week_is_counted_by_who_asked_it_from_the_machines_ledger() {
+    let home = tempfile::tempdir().expect("tmp");
+    let machine = home.path().join("jev");
+    let project = home.path().join("project-state");
+    let seat = &zerocode_core::jev::COMMAND_GUARD;
+    let asked = |at: i64, from: &str| {
+        asked_by(
+            seat,
+            json!({"at": at, "outcome": "answered", "elapsedMs": 40, "requests": 1, "from": from}),
+        )
+    };
+    write(&machine, seat.ledger, &[asked(10, "zo"), asked(11, "claude"), asked(12, "claude"), asked(13, "codex")]);
+    write(&project, seat.ledger, &[asked(9, "zo")]);
+
+    let report = one(seat, &[machine.clone(), project], None, None, 1_000, 0);
+
+    assert_eq!(report.found.as_deref(), Some(machine.join(seat.ledger).as_path()));
+    assert_eq!(report.week.rows, 4);
+    assert_eq!(
+        report.askers_week,
+        BTreeMap::from([("claude".to_string(), 2), ("codex".to_string(), 1), ("zo".to_string(), 1)])
+    );
+}
+
+/// The machine's place is asked before the project's: a seat whose rows the
+/// machine keeps is the same seat whichever project asks.
+#[test]
+fn the_machines_place_is_asked_before_the_projects() {
+    let _env = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cwd = Path::new("/w/project");
+    assert_eq!(
+        ledger_roots(cwd),
+        [runtime::default_config_home().join(REQUESTS_DIR), shadow_ledger_dir(cwd)]
+    );
+}
+
 /// The rows a walk writes under `~/.zo/jev` are read by the same counter the
 /// orchestration seats' are, and they carry the seat all the way to a rise
 /// (§4, decision 3 and 5).

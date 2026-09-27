@@ -506,6 +506,9 @@ fn render_json(seats: &[SeatReport], act_lines: bool) -> Value {
                 // seat rises — the recall seat's only agreement number, and
                 // the routing seat's turn labels beside its probe axes.
                 "agreementWeek": agreement_json(&seat.agreement_week, &seat.not_compared_week),
+                // The week's requests by who asked them — zo, or the agent of
+                // a window pane (t-10916).
+                "askersWeek": seat.askers_week,
                 // The reader the seat is held against and how many times its
                 // label must have said no (t-6342), from the table.
                 "baseline": seat.baseline,

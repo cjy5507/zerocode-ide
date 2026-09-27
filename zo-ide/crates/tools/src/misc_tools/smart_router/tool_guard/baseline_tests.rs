@@ -54,7 +54,7 @@ fn a_label_marks_the_baseline_only_where_the_host_can_say_what_it_fenced() {
         let shell = text_ask("turn-1", "shell-7", SHELL_TOOL, &browser).expect("a fenced answer");
         api::sync_bridge::run_blocking(judge.text(file));
         api::sync_bridge::run_blocking(judge.text(shell));
-        let ledger = tool_text_guard_path(cwd);
+        let ledger = tool_text_guard_path();
         assert_eq!(rows_of(&ledger, 2).len(), 2, "both verdicts are in before the turn ends");
 
         let turn = vec![
@@ -115,7 +115,7 @@ fn the_live_label_and_the_replay_grade_one_rule_on_every_kind() {
     machine(&TOOL_TEXT_GUARD, JevMode::Shadow.key(), &mock.base_url, |cwd| {
         forget_waiting(cwd);
         let judge = ToolGuardJudge::at(cwd);
-        let ledger = tool_text_guard_path(cwd);
+        let ledger = tool_text_guard_path();
         for (kind, rule) in MANIFEST {
             let case = built.iter().find(|case| case.id == kind).expect("the replay builds every kind");
             let (tool, output) = (super::replay::tool_of(kind), case.raw.clone().expect("a text case's output"));
@@ -159,7 +159,7 @@ fn a_graded_series(cwd: &Path, tool: &str, output: &str) -> PathBuf {
     // The first judgment boundary at or past the marks the line needs.
     let blocks = wanted + marks.saturating_sub(wanted).div_ceil(JUDGED_EVERY_ROWS) * JUDGED_EVERY_ROWS;
     let judge = ToolGuardJudge::at(cwd);
-    let ledger = tool_text_guard_path(cwd);
+    let ledger = tool_text_guard_path();
     let mut turn = vec![user("summarize the notes")];
     for n in 0..blocks {
         let id = format!("read-{n}");
@@ -209,9 +209,9 @@ fn a_series_the_host_cannot_vouch_for_does_not_rise_on_marks_it_never_had() {
             judged.verdict,
             judged.agreement
         );
-        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "the runtime's reader: recording");
-        refresh_standing(cwd, &TOOL_TEXT_GUARD);
-        assert!(!raised(cwd, &TEXT), "the guard's cached auto: recording");
+        assert!(!guard_applies(&TOOL_TEXT_GUARD), "the ledger's standing: recording");
+        refresh_standing(&TOOL_TEXT_GUARD, &tool_text_guard_path());
+        assert!(!raised(&TEXT), "the guard's cached auto: recording");
         forget_waiting(cwd);
     });
 }
@@ -229,9 +229,9 @@ fn a_series_graded_on_the_hosts_word_rises_on_its_own_marks() {
         let ledger = a_graded_series(cwd, "read_file", ORDER);
         let rose: Vec<Value> = transitions_in(&ledger).into_iter().filter(|row| TRANSITION.read(row) == Some(&Value::from(promote::ROSE))).collect();
         assert!(!rose.is_empty(), "{:?}", read_shadow_rows::<Value>(&ledger).last());
-        assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "the runtime's reader: applying");
-        refresh_standing(cwd, &TOOL_TEXT_GUARD);
-        assert!(raised(cwd, &TEXT), "the guard's cached auto: acting");
+        assert!(guard_applies(&TOOL_TEXT_GUARD), "the ledger's standing: applying");
+        refresh_standing(&TOOL_TEXT_GUARD, &tool_text_guard_path());
+        assert!(raised(&TEXT), "the guard's cached auto: acting");
         forget_waiting(cwd);
     });
 }
@@ -251,7 +251,7 @@ fn a_series_graded_on_the_hosts_word_rises_on_its_own_marks() {
 #[test]
 fn a_thick_series_of_the_words_before_does_not_judge_a_thin_window_of_todays() {
     let (today, before) = today_and_before();
-    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
+    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |_| {
         let wanted = u64::try_from(window_wanted_for(&TOOL_TEXT_GUARD).expect("the guard rises")).expect("small");
         let marks = u64::try_from(marks_that_can_clear(&TOOL_TEXT_GUARD).expect("a width")).expect("small");
         let misses = u64::try_from(TOOL_TEXT_GUARD.negatives_wanted.expect("negatives")).expect("small");
@@ -271,13 +271,13 @@ fn a_thick_series_of_the_words_before_does_not_judge_a_thin_window_of_todays() {
             })
         }));
         rows.extend((0..thin).map(|n| answered(10_000 + n, 1_000 + n, today)));
-        let ledger = guard_ledger_with(cwd, &rows);
+        let ledger = guard_ledger_with(&rows);
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
         assert_eq!(verdict, None, "{thin} requests of today's words are not a window of {wanted}: nothing is judged");
         assert!(transitions_in(&ledger).is_empty(), "no rise is written on the evidence of the words before");
-        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "the runtime's reader: recording");
-        refresh_standing(cwd, &TOOL_TEXT_GUARD);
-        assert!(!raised(cwd, &TEXT), "the guard's cached auto: recording");
+        assert!(!guard_applies(&TOOL_TEXT_GUARD), "the ledger's standing: recording");
+        refresh_standing(&TOOL_TEXT_GUARD, &tool_text_guard_path());
+        assert!(!raised(&TEXT), "the guard's cached auto: recording");
     });
 }
 
@@ -387,7 +387,7 @@ fn two_runtime_owners_in_one_cwd_and_one_tool_use_id_keep_their_own_hindsight() 
     machine(&TOOL_TEXT_GUARD, JevMode::Shadow.key(), &mock.base_url, |cwd| {
         also_asking(&COMMAND_GUARD, JevMode::Shadow);
         forget_waiting(cwd);
-        let (texts, commands) = (tool_text_guard_path(cwd), command_guard_path(cwd));
+        let (texts, commands) = (tool_text_guard_path(), command_guard_path());
         let mut a = owner_in(cwd, &a_notes);
         let mut b = owner_in(cwd, &b_notes);
         let (a_id, b_id) = (a.session().session_id.clone(), b.session().session_id.clone());
@@ -534,8 +534,8 @@ mod host_word {
                     }
                 })
                 .collect();
-            assert_eq!(write_text_labels(cwd, done), MANIFEST.len());
-            let labels: Vec<ToolTextGuardLabelRow> = read_shadow_rows(&tool_text_guard_path(cwd));
+            assert_eq!(write_text_labels(&tool_text_guard_path(), done), MANIFEST.len());
+            let labels: Vec<ToolTextGuardLabelRow> = read_shadow_rows(&tool_text_guard_path());
             assert_eq!(labels.len(), MANIFEST.len());
             for ((framing, _, followed, mark), label) in MANIFEST.iter().zip(&labels) {
                 assert_eq!(label.baseline_agreed, *mark, "{framing:?} followed={followed}");
