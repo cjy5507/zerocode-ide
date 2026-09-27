@@ -37004,17 +37004,30 @@ fn an_agent_is_called_one_thing_on_every_surface() {
         "the sidebar's row names its agent some other way"
     );
     assert!(
-        support::block_after(window, "function agentGraphIdentity(card) {")
-            .contains("agentGraphCleanText(card.task) || agentGraphCleanText(card.heading) || card.pane"),
+        support::block_after(window, "function agentGraphIdentity(card) {").contains(
+            "agentGraphCleanText(card.task) || agentGraphCleanText(card.heading) || card.pane"
+        ),
         "the board's surfaces stopped reading the card's name"
     );
     for (surface, said) in [
         ("the detail panel", "identity: agentGraphIdentity(card),"),
-        ("the relation map's entity", "label: agentGraphIdentity(entry.card),"),
-        ("the peek", "el(\"peek-title\").textContent = agentGraphIdentity(card);"),
-        ("the scope list", "entity?.label ?? agentGraphIdentity(entry.card)"),
+        (
+            "the relation map's entity",
+            "label: agentGraphIdentity(entry.card),",
+        ),
+        (
+            "the peek",
+            "el(\"peek-title\").textContent = agentGraphIdentity(card);",
+        ),
+        (
+            "the scope list",
+            "entity?.label ?? agentGraphIdentity(entry.card)",
+        ),
     ] {
-        assert!(window.contains(said), "{surface} names an agent some other way");
+        assert!(
+            window.contains(said),
+            "{surface} names an agent some other way"
+        );
     }
     assert!(
         orbit.contains("name: agentGraphIdentity(entry.card),"),
@@ -37075,7 +37088,10 @@ fn a_prompt_names_its_pane_only_once_its_record_says_a_person_typed_it() {
         gated < settled && settled < noted,
         "the name is settled after the pane's own gate and before the window hears it"
     );
-    let hooked = support::block_after(support::window_source(), r#"listen("hook:agent", (event) => {"#);
+    let hooked = support::block_after(
+        support::window_source(),
+        r#"listen("hook:agent", (event) => {"#,
+    );
     assert!(
         hooked.contains("if (event.payload.named) panePrompts.set(term, event.payload.named);"),
         "the window does not take a settled name:\n{hooked}"

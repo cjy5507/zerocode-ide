@@ -327,7 +327,9 @@ impl TabLayout {
                 let named = agents
                     .get(at)
                     .and_then(|held| held.transcript_path.as_deref())
-                    .and_then(|path| zerocode_core::transcript::last_naming_prompt(Path::new(path)));
+                    .and_then(|path| {
+                        zerocode_core::transcript::last_naming_prompt(Path::new(path))
+                    });
                 let Some(named) = named else {
                     return false;
                 };
@@ -586,10 +588,7 @@ mod tests {
         );
         assert_eq!(
             layout.names,
-            HashMap::from([
-                (0, "land the board fix".to_string()),
-                (1, "ZO".to_string())
-            ])
+            HashMap::from([(0, "land the board fix".to_string()), (1, "ZO".to_string())])
         );
     }
 
