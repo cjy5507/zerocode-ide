@@ -4335,7 +4335,9 @@ await glPage.setViewportSize(zoomSeat);
     !zoomNames.thrown
       && zoomNames.rows.every((row) => !row.ring && row.overlaps === 0 && row.named <= row.budget)
       && svgFit.painter === "svg" && glFit.painter === "gl" && glZoomed.zoom === 2
-      && svgFit.named === glFit.named
+      /* 배율 1에서 GL은 SVG만큼은 이름을 세운다 — 같지는 않다: GL의 주제 이름판은 부스러기 점 위에도
+       * 서므로(t-11500) 이름판이 남긴 자리가 두 손에서 다르다. */
+      && glFit.named >= svgFit.named
       && glZoomed.named > glFit.named && glZoomed.named > svgZoomed.named
       && svgFit.strays > 0 && svgFit.strayNamed === 0 && glFit.strayNamed === 0,
     JSON.stringify(zoomNames));
@@ -4636,7 +4638,28 @@ const plateScene = (tags, pages) => glPage.evaluate(async ({ tags, pages }) => {
         })
         .filter((box) => box[2] > box[0]);
       for (const line of lines) for (const word of words) if (hit(line.box, word)) overlaps += 1;
-      rows.push({ tags, hand: knowledgePainterFor(view).id, standing, oneLine, folded, unreserved, overlaps });
+      /* 조작부(범례·배율 단추·빵부스러기)와는 겹치지 않는다. */
+      for (const control of view.querySelectorAll(".knowledge-cluster-legend, .knowledge-zoom, .knowledge-crumb, .knowledge-legend")) {
+        const seat = control.getBoundingClientRect();
+        if (seat.width === 0 || control.hidden || getComputedStyle(control).display === "none") continue;
+        for (const line of lines) if (hit(line.box, [seat.left, seat.top, seat.right, seat.bottom])) overlaps += 1;
+      }
+      /* 판의 줄 아래에 깔린 점: 부스러기(이름 없는 군집의 쪽·유령)만 되고, 그것도 GL에서만(t-11500 E). */
+      let underRim = 0;
+      let underOther = 0;
+      const kinds = layout.model.kinds;
+      for (let at = 0; at < layout.count; at += 1) {
+        if (layout.drawn !== null && layout.drawn[at] === 0) continue;
+        const px = canvas.left + layout.project.screenX(at);
+        const py = canvas.top + layout.project.screenY(at);
+        const body = [px - layout.radius[at], py - layout.radius[at], px + layout.radius[at], py + layout.radius[at]];
+        if (!lines.some((line) => hit(line.box, body))) continue;
+        const rim = layout.community[at] >= layout.namedCount && (kinds[at] === "page" || kinds[at] === "ghost");
+        if (rim) underRim += 1;
+        else underOther += 1;
+      }
+      rows.push({ tags, hand: knowledgePainterFor(view).id, standing, oneLine, folded, unreserved, overlaps,
+        underRim, underOther });
     }
     return { rows };
   } catch (error) {
@@ -4654,13 +4677,131 @@ for (const [tags, pages, wide, tall] of [[6, 359, 1280, 860], [20, 600, 1280, 86
   plateSeats.rows.push(...scene.rows.map((row) => ({ ...row, wide })));
 }
 await glPage.setViewportSize(plateSeat);
-ok("cluster plates reserve the words they wear: every drawn line sits on its own cells, no plate line meets another plate or a name, and a plate without room for three lines stands as one",
+ok("cluster plates reserve the words they wear: every drawn line sits on its own cells, no plate line meets another plate, a name or a control, a plate without room for three lines stands as one, and only GL plates stand over stray dots",
   !plateSeats.thrown && plateSeats.rows.length === 6
     && plateSeats.rows.every((row) => row.unreserved === 0 && row.overlaps === 0 && row.standing > 0)
     && plateSeats.rows.filter((row) => row.wide === 1280).some((row) => row.oneLine > 0)
-    && [0, 2, 4].every((at) => JSON.stringify({ ...plateSeats.rows[at], hand: "" })
-      === JSON.stringify({ ...plateSeats.rows[at + 1], hand: "" })),
+    && plateSeats.rows.every((row) => row.underOther === 0 && (row.hand === "gl" || row.underRim === 0)),
   JSON.stringify(plateSeats));
+
+/* 이름판의 글자는 두 테마에서 바탕과 대비를 지킨다(t-11500 E) — GL의 판은 부스러기 점 위에도 서므로, 글자는
+ * 제 바탕색 테두리 위에 선다: 잴 것은 글자와 판의 바탕. 주제의 이름은 색 칸의 잉크(Test 8과 같은 3:1),
+ * 대표 지식과 쪽 수 줄은 작은 글자의 4.5:1. 색은 Test 8처럼 픽셀로 읽는다. */
+const plateInk = await glPage.evaluate(async () => {
+  const paint = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  const parse = (color) => {
+    const sentinel = "#010203";
+    paint.fillStyle = sentinel;
+    paint.fillStyle = color;
+    if (paint.fillStyle === sentinel) return null;
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillRect(0, 0, 1, 1);
+    const held = paint.getImageData(0, 0, 1, 1).data;
+    return [held[0] / 255, held[1] / 255, held[2] / 255];
+  };
+  const luminance = (color) => {
+    const channels = parse(color);
+    if (!channels) return null;
+    return channels.map((channel) => (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4))
+      .reduce((sum, channel, at) => sum + channel * [0.2126, 0.7152, 0.0722][at], 0);
+  };
+  const ratio = (left, right) => {
+    const a = luminance(left);
+    const b = luminance(right);
+    return a === null || b === null ? 0 : (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  };
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const rows = [];
+  for (const theme of ["dark", "light"]) {
+    setTheme(theme);
+    await new Promise((done) => setTimeout(done, 700));
+    const ground = getComputedStyle(view.querySelector(".knowledge-canvas")).backgroundColor;
+    const layout = knowledgeLayouts.get(view);
+    for (let rank = 0; rank < layout.namedCount; rank += 1) {
+      const label = layout.clusterEls[rank]?.label;
+      if (!label || label.classList.contains("is-folded")) continue;
+      for (const [line, least] of [[".knowledge-cluster-name", 3], [".knowledge-cluster-lead", 4.5],
+        [".knowledge-cluster-count", 4.5]]) {
+        const word = label.querySelector(line);
+        if (!word) continue;
+        const style = getComputedStyle(word);
+        rows.push({ theme, rank, line, least, ratio: Math.round(ratio(style.fill, ground) * 100) / 100,
+          outline: ratio(style.stroke, ground) < 1.01 });
+      }
+    }
+  }
+  setTheme("dark");
+  return rows;
+});
+ok("cluster plate words keep their contrast on the graph ground in both themes, standing on an outline of that ground",
+  plateInk.length > 0 && ["dark", "light"].every((theme) => plateInk.some((row) => row.theme === theme))
+    && plateInk.every((row) => row.ratio >= row.least && row.outline),
+  JSON.stringify(plateInk.filter((row) => row.ratio < row.least || !row.outline).slice(0, 8)));
+
+/* 부스러기 띠는 이름 있는 원반들의 윤곽에 붙는다(t-11500). 원반 둘이 아령처럼 선 볼트(주제 둘 × 120쪽,
+ * 한 가닥으로 이어짐)에 고아 40쪽을 두면, 가장 먼 원반 끝을 반지름으로 한 원 밖에서 띠를 시작하는
+ * 옛 배치는 아령의 옆구리에서 원반 반지름만큼의 빈 땅을 남긴다. 윤곽(원반들의 볼록 껍질 — 지지 함수
+ * h(u) = max(c·u + r))에서 첫 부스러기들까지의 거리가 나선 한 걸음 안이고, 모든 부스러기가 모든
+ * 원반과 여전히 gap 이상 떨어지는지 묻는다. */
+const rimHug = await glPage.evaluate(async () => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  try {
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    const side = 120;
+    const lonely = 40;
+    const customEdges = [];
+    for (const base of [0, side]) {
+      for (let at = 0; at < side; at += 1) {
+        customEdges.push({ from: base + at, to: base + ((at + 1) % side) },
+          { from: base + at, to: base + ((at + 2) % side) });
+      }
+    }
+    customEdges.push({ from: 0, to: side });
+    const answer = window.__buildVaultGraph__({ path: "/scene/rim-hug", sources: false },
+      { pages: side * 2 + lonely, ghosts: 0, tags: ["core", "reading"], customEdges });
+    knowledgeLayouts.delete(view);
+    const host = view.querySelector(".knowledge-nodes");
+    host.dataset.knowledgeSignature = "";
+    host.dataset.knowledgeVault = "";
+    host.replaceChildren();
+    view.querySelector(".knowledge-edges").replaceChildren();
+    noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+    setKnowledgeMode(view, "global", { paint: false });
+    knowledgeReport = answer;
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 1500 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+    const layout = knowledgeLayouts.get(view);
+    const { communityHomeX: homeX, communityHomeY: homeY, communityHomeR: homeR, namedCount: named, tuning } = layout;
+    const ids = homeR.length;
+    let widest = 0;
+    for (let rank = named; rank < ids; rank += 1) widest = Math.max(widest, homeR[rank]);
+    const pitch = 2 * widest + tuning.clusterPitch;
+    let firstExcess = 0;
+    let closest = Number.POSITIVE_INFINITY;
+    for (let rank = named; rank < ids; rank += 1) {
+      const reach = Math.hypot(homeX[rank], homeY[rank]);
+      const alongX = homeX[rank] / reach;
+      const alongY = homeY[rank] / reach;
+      let outline = 0;
+      for (let disc = 0; disc < named; disc += 1) {
+        outline = Math.max(outline, homeX[disc] * alongX + homeY[disc] * alongY + homeR[disc]);
+        closest = Math.min(closest, Math.hypot(homeX[rank] - homeX[disc], homeY[rank] - homeY[disc])
+          - homeR[rank] - homeR[disc]);
+      }
+      /* 첫 여덟 자리(황금각이 판을 한 바퀴 두른다) — 윤곽 밖으로 gap + 가장 큰 부스러기만큼 떨어진 곳이
+       * 첫 줄이고, 나선은 거기서 한 걸음 안에서 자란다. */
+      if (rank - named < 8) firstExcess = Math.max(firstExcess, reach - outline - tuning.clusterGap - widest);
+    }
+    return { named, strays: ids - named, pitch: Math.round(pitch), gap: tuning.clusterGap,
+      firstExcess: Math.round(firstExcess), closest: Math.round(closest) };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error) };
+  }
+});
+ok("the rim of stray pages hugs the named discs' outline, a spiral step at most, and keeps its gap from every disc",
+  !rimHug.thrown && rimHug.named >= 2 && rimHug.strays >= 40
+    && rimHug.firstExcess <= rimHug.pitch && rimHug.closest >= rimHug.gap,
+  JSON.stringify(rimHug));
 
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *

@@ -728,7 +728,13 @@ export async function measureKnowledgeGlParity(page, ok) {
     hover.nearDuring = inkAlpha(near);
     litKnowledge(view, held, null);
     hover.farAfter = inkAlpha(far);
-    /* 오버레이의 이름표는 격자가 쥔 상자의 한가운데에 선다(`labelAtX/Y`). */
+    /* 오버레이의 이름표는 격자가 쥔 상자의 한가운데에 선다(`labelAtX/Y`). 재는 것은 선 이름표의 자리라
+     * 이름표가 서는 배율에서 잰다 — 부스러기 띠가 원반들의 윤곽에 붙은 뒤로(t-11500) 이 빽빽한 판의
+     * 배율 1에서는 주제의 이름판이 원반 곁을 먼저 쥐어 쪽의 이름이 서지 않는다(실측: 6 → 0; 실제
+     * 볼트의 배율 1은 4 → 6). 배율 2의 GL은 이름이 점을 덮어도 되는 판이라 이름이 선다. */
+    takeKnowledgeZoom(view, held, 2);
+    await paintKnowledgeView();
+    await frame();
     const standsAtGrid = (() => {
       const spans = [...view.querySelectorAll(".knowledge-gl-label:not([hidden])")];
       let read = 0;
@@ -763,6 +769,7 @@ export async function measureKnowledgeGlParity(page, ok) {
     const pressable = { plate: plateHit?.hit === true, label: wordHit?.hit === true,
       picked: picked !== null && picked === word?.dataset.graphKey };
     selectKnowledgeNode(view, null);
+    fitKnowledgeGraph(view, held);
     /* 주변 탐색(첫 방문의 기본)도 같은 손으로 — 고리의 이름표는 격자가 쥔 상자에 서고
      * 서로 겹치지 않는다. 고리의 자리 셈(`knowledgeRingLabelSeat`)을 GL이 부르지
      * 않던 판에서는 격자가 비어 있는 자리로 상자를 쥐었다(검증 09-16). */

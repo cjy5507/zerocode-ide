@@ -3237,30 +3237,36 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
       }
     }
   }
-  /* 이름 없는 군집은 바깥 고리에 — 고리의 반지름은 이름 있는 원반들이 닿는
-   * 가장 먼 자리에서 한 칸 더 나간 곳이고, 고리 위의 자리 사이는 서로의 반지름
-   * 합보다 넓다. */
-  let fringe = 0;
-  for (let rank = 0; rank < named; rank += 1) {
-    fringe = Math.max(fringe, Math.hypot(homeX[rank], homeY[rank]) + homeR[rank]);
-  }
   const strays = ids - named;
   if (strays > 0) {
     /* 이름 없는 군집 — 고아와 그 부스러기 — 은 이름 있는 벌판 바깥의 띠에 황금각
      * 나선으로 앉는다. 한 줄짜리 고리로 두르면 그 고리의 둘레가 티끌의 수에 비례해
      * 자라고, 그림의 크기를 정하는 것이 주제가 아니라 고아가 된다(실측: 천 쪽 중
      * 이백넷이 고아인 판에서 그림의 폭이 12,860 — 스프링 길이의 280배). 나선은
-     * 넓이로 자라므로 그 수가 제곱근으로만 들어온다. */
+     * 넓이로 자라므로 그 수가 제곱근으로만 들어온다.
+     *
+     * 띠는 이름 있는 원반들의 **윤곽**에 붙는다(t-11500). 나선이 가장 먼 원반 끝을 반지름으로
+     * 한 원 밖에서 시작하면, 원반들이 길쭉하게 선 볼트에서 그 원과 원반 사이의 빈 땅만큼 그림이
+     * 커지고 주제는 판의 가운데 작게 선다. 방향마다 원반들이 닿는 가장 먼 거리(지지 함수
+     * h(θ) = max(c·u + r))에서 시작하면 그 빈 땅이 없고, 그 자리에서 원반 중심까지의 거리는
+     * 언제나 h(θ) − c·u + (gap + widest) ≥ r + gap + widest다 — 모든 원반과 여전히 gap
+     * 이상 떨어진다. */
     let widest = 0;
     for (let rank = named; rank < ids; rank += 1) widest = Math.max(widest, homeR[rank]);
     const pitch = 2 * widest + tuning.clusterPitch;
-    const inner = fringe + gap + widest;
     for (let rank = named; rank < ids; rank += 1) {
       const seat = rank - named;
       const angle = seat * KNOWLEDGE_GOLDEN_ANGLE;
+      const alongX = Math.cos(angle);
+      const alongY = Math.sin(angle);
+      let outline = 0;
+      for (let disc = 0; disc < named; disc += 1) {
+        outline = Math.max(outline, homeX[disc] * alongX + homeY[disc] * alongY + homeR[disc]);
+      }
+      const inner = outline + gap + widest;
       const reach = Math.sqrt(inner * inner + (seat * pitch * pitch) / Math.PI);
-      homeX[rank] = Math.cos(angle) * reach;
-      homeY[rank] = Math.sin(angle) * reach;
+      homeX[rank] = alongX * reach;
+      homeY[rank] = alongY * reach;
     }
   }
   return { homeX, homeY, homed, homeR };
@@ -3436,6 +3442,8 @@ function knowledgeLayout(view, model) {
      * 값을 내지 않는다). */
     labelCells: null,
     labelOwner: null,
+    /* 이름판이 덮어도 되는 점(부스러기)의 표 — 격자가 프레임마다 다시 채운다(`placeKnowledgeLabels`). */
+    plateRim: null,
     labelCols: 0,
     labelRows: 0,
     labelGeneration: 0,
@@ -4106,13 +4114,16 @@ function knowledgeLabelBoxFree(layout, left, top, right, bottom, self = -1, over
  * 「빈 자리가 있는가」(`…Free`)로는 자리를 **고를** 수 없다: 여섯 자리가 모두 조금씩
  * 차 있으면 어느 것이 덜 찼는지를 묻게 되고, 그 답이 있어야 주제의 이름판이 가장
  * 한산한 곳에 선다. */
-function knowledgeLabelBoxLoad(layout, left, top, right, bottom) {
-  const { labelCells, labelCols, labelRows, labelGeneration } = layout;
+/* `through`(점마다 1/0)가 1이라고 말하는 점의 몸이 쥔 칸은 세지 않는다 — 이름판이 부스러기 점 위에
+ * 설 때(`placeKnowledgeLabels`의 (1)). 칸의 임자는 몸이 쥔 칸에서 그 점의 번호 + 1이다. */
+function knowledgeLabelBoxLoad(layout, left, top, right, bottom, through = null) {
+  const { labelCells, labelOwner, labelCols, labelRows, labelGeneration } = layout;
   let load = 0;
   for (let row = top; row <= bottom; row += 1) {
     for (let col = left; col <= right; col += 1) {
       if (row < 0 || col < 0 || row >= labelRows || col >= labelCols) load += 1;
-      else if (labelCells[row * labelCols + col] === labelGeneration) load += 1;
+      else if (labelCells[row * labelCols + col] === labelGeneration
+        && (through === null || through[labelOwner[row * labelCols + col] - 1] !== 1)) load += 1;
     }
   }
   return load;
@@ -4321,6 +4332,26 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
     const short = canvasWide < tuning.plateWide;
     view.querySelector(".knowledge-picture").classList.toggle("is-short-plate", short);
     const growing = [];
+    /* 이름판은 부스러기 점(이름 없는 군집의 쪽과 유령 — 바깥 띠) 위에 설 수 있다. 띠가 원반들의
+     * 윤곽에 붙은 뒤로(`knowledgeClusterHomes`) 판이 서던 빈 땅이 줄었고, 작은 판에서는 판의
+     * 절반이 접혔다(900×700 합성: 여섯 → 셋). 판의 글자는 바탕색 테두리를 둘러 점 위에서도
+     * 읽힌다. 덮지 않는 것: 쪽의 이름표·남의 이름·다른 판·조작부(이것들은 몸이 아니라 임자 0의
+     * 칸이다), 그리고 사람이 지금 보는 점 — 고른 점, 찾기에 걸린 점, 짚어 밝힌 점, 경로의 점
+     * (그때는 판이 비키거나 한 줄이 되거나 접힌다). 이름표가 점 위에 서는 손(GL, `labelsOverPoints`)
+     * 에서만이다: SVG는 판이 점 **뒤**의 층이라 점이 판의 글자를 가린다. 가리키기는 판 아래에서도
+     * 점에 닿는다(GL은 좌표로 고른다, `knowledgeUnder`). */
+    const overRim = knowledgePainters.get(view)?.labelsOverPoints === true;
+    if (overRim && layout.plateRim?.length !== count) layout.plateRim = new Uint8Array(count);
+    const rim = overRim ? layout.plateRim : null;
+    if (rim !== null) {
+      const kinds = layout.model.kinds;
+      const searching = knowledgeQuery.trim() !== "";
+      for (let at = 0; at < count; at += 1) {
+        rim[at] = community[at] >= layout.namedCount && (kinds[at] === "page" || kinds[at] === "ghost")
+          && at !== selectedSeat && !(searching && layout.searchMatch[at] === 1)
+          && !layout.litNodes.has(at) && layout.pathNode[at] !== 1 ? 1 : 0;
+      }
+    }
     for (let rank = 0; rank < layout.namedCount; rank += 1) {
       const held = layout.clusterEls[rank];
       if (!held || layout.clusterTally[rank] === 0) continue;
@@ -4395,7 +4426,7 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
         let best = null;
         let weight = Number.POSITIVE_INFINITY;
         for (const [seatX, seatY] of seats) {
-          const load = knowledgeLabelBoxLoad(layout, ...plateCells(seatX, seatY, full));
+          const load = knowledgeLabelBoxLoad(layout, ...plateCells(seatX, seatY, full), rim);
           if (load >= weight) continue;
           weight = load;
           best = [seatX, seatY];
@@ -4433,8 +4464,8 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
      * 이름 상자를 뺀 칸(대표 지식과 쪽 수 줄)이 비어 있어야 한다. 못 넓힌 판은 한 줄이다(좁은
      * 판과 같은 옷). */
     for (const plate of growing) {
-      const full = plate.wants && knowledgeLabelBoxLoad(layout, ...plate.whole)
-        - knowledgeLabelBoxLoad(layout, ...plate.name) <= KNOWLEDGE_FORCE.plateSlack;
+      const full = plate.wants && knowledgeLabelBoxLoad(layout, ...plate.whole, rim)
+        - knowledgeLabelBoxLoad(layout, ...plate.name, rim) <= KNOWLEDGE_FORCE.plateSlack;
       if (full) markKnowledgeLabelBox(layout, ...plate.whole);
       plate.held.label.classList.toggle("is-one-line", !full);
     }
