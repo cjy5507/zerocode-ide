@@ -73,7 +73,7 @@ pub fn split_command_segments(command: &str) -> Vec<&str> {
 /// real first token. Conservative: when unsure how many arguments a wrapper
 /// consumes it stops early, leaving the remainder to be treated as `Unknown`
 /// rather than silently trusted.
-pub(super) fn strip_command_wrappers(segment: &str) -> &str {
+pub fn strip_command_wrappers(segment: &str) -> &str {
     let mut rest = segment.trim();
     // Bounded loop: each iteration must consume at least the wrapper token,
     // and `WRAPPER_COMMANDS` is small, so this terminates quickly.
@@ -137,12 +137,11 @@ fn skip_wrapper_args<'a>(wrapper: &str, after: &'a str) -> &'a str {
                     tok,
                     "-n" | "-s" | "--signal" | "-k" | "-c" | "-o" | "-e" | "-i"
                 );
-            if takes_value {
-                if let Some(val) = rest.split_whitespace().next() {
-                    if !val.starts_with('-') {
-                        rest = rest[val.len()..].trim_start();
-                    }
-                }
+            if takes_value
+                && let Some(val) = rest.split_whitespace().next()
+                && !val.starts_with('-')
+            {
+                rest = rest[val.len()..].trim_start();
             }
         } else {
             break;
@@ -152,10 +151,10 @@ fn skip_wrapper_args<'a>(wrapper: &str, after: &'a str) -> &'a str {
     match wrapper {
         // `timeout DURATION cmd` / `time` (bash builtin form has none).
         "timeout" => {
-            if let Some(tok) = rest.split_whitespace().next() {
-                if tok.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                    rest = rest[tok.len()..].trim_start();
-                }
+            if let Some(tok) = rest.split_whitespace().next()
+                && tok.chars().next().is_some_and(|c| c.is_ascii_digit())
+            {
+                rest = rest[tok.len()..].trim_start();
             }
         }
         // `env KEY=VAL... cmd`.
@@ -177,7 +176,7 @@ fn skip_wrapper_args<'a>(wrapper: &str, after: &'a str) -> &'a str {
 }
 
 /// Extract the first bare command from a pipeline/chain, stripping env vars and sudo.
-pub(super) fn extract_first_command(command: &str) -> String {
+pub fn extract_first_command(command: &str) -> String {
     let trimmed = command.trim();
 
     // Skip leading environment variable assignments (KEY=val cmd ...).

@@ -91,6 +91,7 @@ pub mod second_brain_relate;
 pub mod second_brain_related;
 pub mod session;
 pub mod shell_history;
+pub mod shell_rule;
 pub mod skill;
 pub mod skill_install;
 pub mod source_control_ai;

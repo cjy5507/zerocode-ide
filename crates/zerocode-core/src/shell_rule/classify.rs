@@ -7,8 +7,8 @@
 
 use super::parse::{extract_first_command, split_command_segments, strip_command_wrappers};
 use super::{
-    find_uses_mutating_primary, CommandIntent, ALWAYS_DESTRUCTIVE_COMMANDS, AWK_COMMANDS,
-    GIT_READ_ONLY_SUBCOMMANDS, WRITE_COMMANDS,
+    ALWAYS_DESTRUCTIVE_COMMANDS, AWK_COMMANDS, CommandIntent, GIT_READ_ONLY_SUBCOMMANDS,
+    WRITE_COMMANDS, find_uses_mutating_primary,
 };
 
 /// Commands that are read-only (no filesystem or state modification).
