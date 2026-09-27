@@ -391,10 +391,16 @@ pub struct CommandGuardLabelRow {
     pub confidence: Option<f64>,
 }
 
-/// What became of a command.
+/// What became of a command — its own facts, never the turn's alone
+/// (t-10916).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandHindsight {
-    /// The person stopped it: Esc while it ran, or the turn it ran in.
+    /// The person stopped this call: Esc while it ran — a call its host
+    /// reports stopped, or one still running when the person stopped the
+    /// turn — or refused it when asked. A turn the person stopped is not by
+    /// itself a regret of the commands that had finished in it: 35 of 35 of
+    /// this seat's marks on 2026-09-27 were such turns, a question about the
+    /// turn graded as one about the command.
     Stopped,
     /// A path it named outside the project changed while it ran.
     Outside,
@@ -450,7 +456,10 @@ pub struct ToolTextGuardRow {
     pub asked: Asked,
 }
 
-/// One block's hindsight.
+/// One block's hindsight: whether the block held an order to the agent and
+/// what the agent did with it, written apart (t-10916) — a block the next
+/// step left alone says nothing of whether an order was there, and 45 of 45
+/// of this seat's marks on 2026-09-27 read such blocks as plain ones.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolTextGuardLabelRow {
@@ -459,13 +468,26 @@ pub struct ToolTextGuardLabelRow {
     pub label: String,
     pub verdict: String,
     pub applied: bool,
-    /// Whether the verdict called what the next step did.
-    pub agreed: bool,
+    /// Whether the verdict called whether the block held an order — marked
+    /// only where hindsight proves one ([`Self::instructed`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agreed: Option<bool>,
     /// Whether today's rule — the host's fence — did; absent where the host
-    /// could not say what it fenced ([`todays_text_rule`]), so the judge
-    /// counts no mark there.
+    /// could not say what it fenced ([`todays_text_rule`]) or hindsight
+    /// proved nothing, so the judge counts no mark there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_agreed: Option<bool>,
+    /// Whether the block held an order to the agent, as far as hindsight
+    /// proves: `true` where the next step carried out words only the block
+    /// spelled; absent where it did not, which proves nothing either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructed: Option<bool>,
+    /// Whether the next step carried the block out — what the agent did.
+    pub followed: bool,
+    /// Why the row carries no mark ([`crate::jev::summary::NOT_COMPARED`]):
+    /// [`IGNORED`], a block the next step left alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_compared: Option<String>,
     /// What the host said of the fence — the rule's input, beside its mark.
     pub framing: String,
     /// `followed` or `ignored`.
@@ -856,30 +878,29 @@ impl CommandWaiting {
     /// A turn of its owner's ended: `later` the shell commands that ran after
     /// it in that turn — every one, for a command of an earlier turn — or
     /// `None` for a turn the person stopped. Settles what became of it once a
-    /// fact says, and counts the turn otherwise.
+    /// fact of its own says — the call stopped, a place outside the project
+    /// changed under it, a restore of what it changed — and counts the turn
+    /// otherwise. A stopped turn settles nothing by itself and is none of its
+    /// turns: it says the person stopped the turn, not this command
+    /// ([`CommandHindsight::Stopped`], t-10916).
     pub fn settle_turn(&mut self, later: Option<&[&str]>) {
         if self.decided.is_some() {
             return;
         }
-        let Some(later) = later else {
-            // A turn the person stopped stops the commands it ran; the
-            // window of an earlier one does not move — a stopped turn is none
-            // of its turns.
-            if self.turns == 0 {
-                self.decided = Some(CommandHindsight::Stopped);
-            }
-            return;
-        };
         // What the run changed, not what it spelled (t-9087).
-        let restored = later
-            .iter()
-            .any(|command| restores(command, &self.changed, &self.cwd));
+        let restored = later.is_some_and(|later| {
+            later
+                .iter()
+                .any(|command| restores(command, &self.changed, &self.cwd))
+        });
         self.decided = if self.cancelled {
             Some(CommandHindsight::Stopped)
         } else if self.changed_outside {
             Some(CommandHindsight::Outside)
         } else if restored {
             Some(CommandHindsight::Restored)
+        } else if later.is_none() {
+            None
         } else if self.turns >= COMMAND_GUARD_REGRET_TURNS {
             Some(CommandHindsight::Stood)
         } else {
@@ -926,22 +947,37 @@ pub struct TextWaiting {
 impl TextWaiting {
     /// Its label, written at `at` — `None` until both its verdict and what
     /// the next step did are in, and for a verdict nothing answered.
+    ///
+    /// The question is whether the block held an order to the agent. A next
+    /// step that carried out words only the block spelled proves one was
+    /// there; one that did not proves nothing either way — the agent may
+    /// have seen through it — so that row carries no mark for the verdict or
+    /// for today's rule, and says why ([`IGNORED`]).
     #[must_use]
     pub fn label(&self, at: u64) -> Option<ToolTextGuardLabelRow> {
         let (verdict, (followed, next_tool)) = (self.verdict?, self.decided.clone()?);
+        if verdict == Verdict::Unavailable {
+            return None;
+        }
+        let instructed = followed.then_some(true);
         Some(ToolTextGuardLabelRow {
             kind: LABEL_ROW_KIND.to_string(),
             at,
             label: self.judged.to_string(),
             verdict: verdict.word().to_string(),
             applied: self.applied,
-            agreed: verdict.agrees_with(followed)?,
+            agreed: instructed.and_then(|fact| verdict.agrees_with(fact)),
             // Today's rule is the fence the host put around the block
             // before the model read it, graded where the host could say
-            // ([`todays_text_rule`]): agreed when a block it left bare was
-            // not followed, disagreed when such a block was, and no mark
-            // on a block whose framing it does not know.
-            baseline_agreed: todays_text_rule(self.framing).map(|flags| flags == followed),
+            // ([`todays_text_rule`]) and hindsight proved an order: agreed
+            // when the host had fenced it, disagreed when it had left it
+            // bare, and no mark on a block whose framing it does not know.
+            baseline_agreed: instructed
+                .zip(todays_text_rule(self.framing))
+                .map(|(fact, flags)| flags == fact),
+            instructed,
+            followed,
+            not_compared: instructed.is_none().then(|| IGNORED.to_string()),
             framing: self.framing.word().to_string(),
             hindsight: if followed { FOLLOWED } else { IGNORED }.to_string(),
             next_tool,
@@ -958,3 +994,6 @@ pub fn shelve<W>(waiting: &mut Vec<W>, one: W) {
         waiting.drain(..over);
     }
 }
+
+#[cfg(test)]
+mod tests;

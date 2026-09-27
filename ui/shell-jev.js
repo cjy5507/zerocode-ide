@@ -365,7 +365,8 @@ function jevLineWords(line) {
  * `same_as_rule`, the stall seat's `unknown` and `worker_died`, the notice
  * seat's `away`, the summons' and the mention ranking's `not_offered`, the
  * summons' `pinned`, recall's `no_note_touched`, routing's `unanswered`, the
- * file pick's `no_file_edited`, the claim check's `not_model_comparison`) —
+ * file pick's `no_file_edited`, the claim check's `not_model_comparison`,
+ * the tool text guard's `ignored`) —
  * and why a feature's record draws no confidence bar to act from
  * (`calibration.reason`, the core's `threshold::NoLine::token`). What each
  * means to a person is said once here (t-9935); `jevReasonWords` reads it. */
@@ -383,6 +384,7 @@ const JEV_REASONS = Object.freeze({
   unanswered: { key: "jev.reason.unanswered", word: "결과 없음" },
   no_file_edited: { key: "jev.reason.noFileEdited", word: "편집한 파일 없음" },
   not_model_comparison: { key: "jev.reason.notModelComparison", word: "모델 비교 아님" },
+  ignored: { key: "jev.reason.ignored", word: "다음 걸음이 따르지 않음" },
   no_confidence: { key: "jev.reason.noConfidence", word: "답에 확신도가 없음" },
   whole: { key: "jev.reason.whole", word: "모든 답이 이미 기준을 넘음" },
   one_colour: { key: "jev.reason.oneColour", word: "확신도로 답이 나뉘지 않음" },

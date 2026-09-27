@@ -607,20 +607,34 @@ fn a_command_label_grades_the_verdict_and_todays_rule_on_what_became_of_it() {
             ("stood", true, false, COMMAND_GUARD_REGRET_TURNS)
         );
 
-        // A turn the person stopped stops the commands it ran.
+        // A turn the person stopped settles nothing by itself (t-10916): the
+        // command it ran that nobody stopped waits, and the stopped turn is
+        // none of its turns; the call the person stopped is settled.
         {
             let mut book = command_book().lock().expect("book");
-            book.insert(cwd.to_path_buf(), vec![waiting_command(6, "shell-6", cwd, false, Verdict::Plain)]);
+            let mut stopped_call = waiting_command(7, "shell-7", cwd, false, Verdict::Plain);
+            stopped_call.cancelled = true;
+            book.insert(
+                cwd.to_path_buf(),
+                vec![waiting_command(6, "shell-6", cwd, false, Verdict::Plain), stopped_call],
+            );
         }
-        assert_eq!(note_tool_guard_turn(cwd, "turn-1", None), 1);
+        assert_eq!(note_tool_guard_turn(cwd, "turn-1", None), 1, "the stopped call alone");
         let stopped: CommandGuardLabelRow =
             serde_json::from_value(rows_of(&command_guard_path(cwd), 6)[5].clone()).expect("a label");
-        assert_eq!((stopped.hindsight.as_str(), stopped.agreed), ("stopped", false));
+        assert_eq!((stopped.label.as_str(), stopped.hindsight.as_str(), stopped.agreed), ("7", "stopped", false));
+        let waiting: Vec<(u64, u32, bool)> = command_book().lock().expect("book")[cwd]
+            .iter()
+            .map(|one| (one.judged, one.turns, one.decided.is_some()))
+            .collect();
+        assert_eq!(waiting, [(6, 0, false)], "the finished command waits, its window unmoved");
     });
 }
 
-/// Hindsight on texts: the verdict and the window's fence are both marked on
-/// whether the next step carried the block out.
+/// Hindsight on texts: the verdict and the host's fence are both marked on
+/// the order a next step that carried the block out proves was there; a
+/// block the next step left alone proves nothing, and its row says so rather
+/// than marking anything (t-10916).
 #[test]
 fn a_text_label_grades_the_verdict_and_the_windows_fence_on_what_the_next_step_did() {
     machine(&TOOL_TEXT_GUARD, JevMode::Shadow.key(), "http://127.0.0.1:9", |cwd| {
@@ -665,20 +679,26 @@ fn a_text_label_grades_the_verdict_and_the_windows_fence_on_what_the_next_step_d
             said("done"),
         ];
         assert_eq!(note_tool_guard_turn(cwd, "turn-1", Some(&turn)), 1, "the second waits on its verdict");
-        let label: ToolTextGuardLabelRow =
-            serde_json::from_value(rows_of(&tool_text_guard_path(cwd), 1)[0].clone()).expect("a label");
+        let label = rows_of(&tool_text_guard_path(cwd), 1)[0].clone();
         assert_eq!(
-            (label.hindsight.as_str(), label.agreed, label.baseline_agreed, label.next_tool.as_deref()),
-            (FOLLOWED, true, Some(false), Some(SHELL_TOOL))
+            (&label["hindsight"], &label["followed"], &label["instructed"], &label["agreed"], &label["baselineAgreed"]),
+            (&Value::from(FOLLOWED), &Value::Bool(true), &Value::Bool(true), &Value::Bool(true), &Value::Bool(false)),
+            "{label}"
         );
-        assert_eq!(label.framing, HostFraming::Unfenced.word());
-        assert_eq!(label.confidence, Some(0.76));
-        // The second's verdict arrives after its turn: its label is written then.
+        assert_eq!(label["nextTool"], SHELL_TOOL);
+        assert_eq!(label["framing"], HostFraming::Unfenced.word());
+        assert_eq!(label["confidence"], 0.76);
+        // The second's verdict arrives after its turn: its label is written
+        // then — and marks nothing, since nothing carried the block out.
         settle_text(cwd, 8, Verdict::Plain, Some(0.9), false);
-        let late: ToolTextGuardLabelRow =
-            serde_json::from_value(rows_of(&tool_text_guard_path(cwd), 2)[1].clone()).expect("a label");
-        assert_eq!((late.hindsight.as_str(), late.agreed, late.baseline_agreed), (IGNORED, true, Some(false)));
-        assert_eq!(late.framing, HostFraming::Fenced.word());
+        let late = rows_of(&tool_text_guard_path(cwd), 2)[1].clone();
+        assert_eq!(
+            (&late["hindsight"], &late["followed"], late.get("instructed"), late.get("agreed"), late.get("baselineAgreed")),
+            (&Value::from(IGNORED), &Value::Bool(false), None, None, None),
+            "{late}"
+        );
+        assert_eq!(late["notCompared"], IGNORED);
+        assert_eq!(late["framing"], HostFraming::Fenced.word());
     });
 }
 
@@ -689,6 +709,9 @@ fn another_runtime_in_the_same_cwd_keeps_its_hindsight() {
     forget_waiting(cwd);
     let mut first = waiting_command(1, "shell-1", cwd, true, Verdict::Flagged);
     first.owner = "runtime-a".into();
+    // Runtime A's own call stopped: the one fact of a stopped turn that
+    // settles a command (t-10916).
+    first.cancelled = true;
     let mut second = waiting_command(2, "shell-1", cwd, true, Verdict::Flagged);
     second.owner = "runtime-b".into();
     command_book().lock().expect("command book").insert(cwd.to_path_buf(), vec![first, second]);

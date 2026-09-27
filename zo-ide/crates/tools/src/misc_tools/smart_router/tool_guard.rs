@@ -35,11 +35,12 @@
 //! # The labels are hindsight
 //!
 //! One label row per answered question, written by [`note_tool_guard_turn`]
-//! at a turn's end. A command was regretted when the person stopped it — Esc
-//! while it ran, or the turn it ran in — when a path it named outside the
-//! project changed under it, or when a later command restored a path it named
-//! and changed within [`zerocode_core::jev::COMMAND_GUARD_REGRET_TURNS`] turns;
-//! it stood otherwise.
+//! at a turn's end. A command was regretted when the person stopped the call
+//! itself (Esc while it ran — a turn the person stopped is no regret of the
+//! commands that had finished in it, t-10916), when a path it named outside
+//! the project changed under it, or when a later command restored a path it
+//! named and changed within [`zerocode_core::jev::COMMAND_GUARD_REGRET_TURNS`]
+//! turns; it stood otherwise.
 //! Changed, and not only named (t-9087): a restore puts back what a command
 //! did, and a folder a command merely spelled — the one it runs in, the root,
 //! one holding the file — is not something one file's restore took back. Nor
@@ -47,9 +48,11 @@
 //! file in it: that one of its children changed says nothing of which
 //! ([`zerocode_core::jev::tool_guard::Changed`]).
 //! A text was followed when a call of the agent's next step carried out a
-//! command or wrote words the text spelled and the person's words did not. `agreed` is
-//! whether the verdict called it; `baselineAgreed` whether today's rule did —
-//! and, for a text, only where the host could say what it fenced
+//! command or wrote words the text spelled and the person's words did not —
+//! which proves it held an order; a text the next step left alone proves
+//! nothing either way and carries no mark (t-10916). `agreed` is whether the
+//! verdict called it; `baselineAgreed` whether today's rule did — and, for a
+//! text, only where the host could say what it fenced
 //! ([`zerocode_core::jev::tool_guard::todays_text_rule`]): a row the rule
 //! cannot be graded on carries no mark.
 
@@ -88,8 +91,8 @@ use zerocode_core::jev::tool_guard::{
 pub use zerocode_core::jev::tool_guard::{CommandGuardLabelRow, CommandGuardRow, ToolTextGuardLabelRow, ToolTextGuardRow};
 #[cfg(test)]
 use zerocode_core::jev::tool_guard::{
-    named_places, outside_places, resolve_place, restores, stamp, todays_rule, todays_text_rule, Changed,
-    CommandHindsight, Stamp, FOLLOWED, IGNORED,
+    named_places, outside_places, resolve_place, restores, stamp, todays_rule, todays_text_rule, Changed, Stamp,
+    FOLLOWED, IGNORED,
 };
 #[cfg(test)]
 use zerocode_core::jev::COMMAND_GUARD_REGRET_TURNS;

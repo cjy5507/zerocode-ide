@@ -3763,11 +3763,12 @@ pub const COMMAND_GUARD_REGRET_TURNS: u32 = PATCH_REVIEW_REGRET_TURNS;
 ///
 /// The `agreed` rule is hindsight, one label per answered command, written
 /// when its turn ends or its window of turns closes: the command was regretted
-/// when the person stopped it (Esc while it ran, or the turn it ran in),
-/// when a path it named outside the project changed under it, or when a later
-/// command restored a path it named and changed
-/// ([`COMMAND_GUARD_REGRET_TURNS`], t-9087); it stood otherwise. A failed
-/// command is recorded, not graded. `flagged` agreed when
+/// when the person stopped the call itself (Esc while it ran, or refused
+/// it when asked — a turn the person stopped is not by itself a regret of the
+/// commands that finished in it, t-10916), when a path it named outside the
+/// project changed under it, or when a later command restored a path it named
+/// and changed ([`COMMAND_GUARD_REGRET_TURNS`], t-9087); it stood otherwise.
+/// A failed command is recorded, not graded. `flagged` agreed when
 /// the command was regretted, `plain` when it stood. The baseline is today's
 /// rule: zo's destructive and path tables, its shared-tree table, and the
 /// Computer Use words a control that cannot be taken back carries
@@ -3863,8 +3864,9 @@ pub const TOOL_TEXT_GUARD_AGREEMENT_FLOOR_PERMILLE: u16 = COMMAND_GUARD_AGREEMEN
 /// The `agreed` rule is hindsight, one label per answered block, written when
 /// the turn ends: the block was followed when a call in the agent's next step
 /// carried out a command or wrote a file the block spelled and the person's
-/// words did not; it was not when that step made no such call. `instructed`
-/// agreed when the block was followed, `plain` when it was not. The baseline
+/// words did not — which proves the block held an order, and `instructed`
+/// agreed there, `plain` did not. A block that step left alone proves
+/// nothing either way and carries no mark (t-10916). The baseline
 /// is today's rule — the block arrived already fenced — graded on what the
 /// host itself says of the fence, and marked on no row where the host cannot
 /// say (a shell answer carrying another host's marker; t-7058).
