@@ -790,6 +790,65 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("a feature held because too few answers clear its confidence bar says so, as a feature under its bar",
       applyShare.reason === "확신도 기준을 넘는 답이 너무 적습니다" && applyShare.under && applyShare.strip === "1",
       JSON.stringify(applyShare));
+
+    // Who asked a feature a pane's hooks ask (t-10916): under its week's
+    // count, each agent with requests by name and count — zo's own among
+    // them — and how many agents' work the window cannot see, which and why
+    // as that chip's tip; its drawer says every agent's line, a count with
+    // what is said beside it, or "못 봄" with why. No other feature shows
+    // such a line.
+    const askers = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const saved = jevNumbers;
+      const lines = [
+        { agent: "zo", label: "ZO", requests: 3, notes: ["own_runtime"] },
+        { agent: "claude", label: "Claude", requests: 5 },
+        { agent: "codex", label: "Codex", requests: 2, notes: ["no_stop_flag"] },
+        { agent: "cursor", label: "Cursor", requests: 0 },
+        { agent: "antigravity", label: "Antigravity", requests: 0, notes: ["no_event_before", "no_prompt_event", "no_stop_flag"] },
+        { agent: "opencode", label: "OpenCode", requests: 0, unseen: "no_hooks" },
+      ];
+      jevNumbers = saved.map((seat) => (seat.id !== "command_guard" ? seat : {
+        ...seat, today: { ...seat.today, rows: 4, answered: 4 }, week: { ...seat.week, rows: 10, answered: 10 },
+        askersWeek: { zo: 3, claude: 5, codex: 2 }, askers: lines,
+      }));
+      paintJevViews();
+      await window.__PAINTED__();
+      const row = view.querySelector('[data-jev-dash-row="command_guard"]');
+      const line = row.querySelector('[data-jev-cell="rows"] [data-jev-askers]');
+      const seen = {
+        chips: [...(line?.children ?? [])].map((chip) => chip.textContent),
+        tip: line?.querySelector('[data-jev-fact="unseen"]')?.dataset.tip ?? null,
+        others: view.querySelectorAll('[data-jev-dash-row]:not([data-jev-dash-row="command_guard"]) [data-jev-askers]').length,
+      };
+      row.querySelector(".jev-row-open").click();
+      await window.__PAINTED__();
+      const part = view.querySelector('.jev-drawer [data-jev-drawer-part="askers"]');
+      seen.drawer = { hidden: part.hidden,
+        said: Object.fromEntries([...part.querySelectorAll("dd")].map((said) => [said.dataset.jevAsker, said.textContent])),
+        names: [...part.querySelectorAll("dt")].map((name) => name.textContent) };
+      view.querySelector('[data-jev-dash-row="summon"] .jev-row-open').click();
+      await window.__PAINTED__();
+      seen.elsewhere = view.querySelector('.jev-drawer [data-jev-drawer-part="askers"]').hidden;
+      view.querySelector('[data-jev-dash-row="summon"] .jev-row-open').click();
+      jevNumbers = saved;
+      paintJevViews();
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok("a feature a pane's hooks ask names who asked it and how many agents it cannot see, and its drawer says every agent's line",
+      askers.chips.join("|") === "ZO 3|Claude 5|Codex 2|못 봄 1"
+        && askers.tip === "OpenCode — 훅을 설치하지 않는 에이전트"
+        && askers.others === 0
+        && !askers.drawer.hidden && askers.drawer.names.join("|") === "ZO|Claude|Codex|Cursor|Antigravity|OpenCode"
+        && askers.drawer.said.zo === "3건 · zo가 직접 물음"
+        && askers.drawer.said.claude === "5건"
+        && askers.drawer.said.codex === "2건 · 멈춤을 알리지 않음"
+        && askers.drawer.said.cursor === "0건"
+        && askers.drawer.said.antigravity === "0건 · 실행 전에 알리지 않아 실행 뒤에 물음 · 요청을 알리지 않아 과업 없이 물음 · 멈춤을 알리지 않음"
+        && askers.drawer.said.opencode === "못 봄 — 훅을 설치하지 않는 에이전트"
+        && askers.elsewhere,
+      JSON.stringify(askers));
     ok("from the click to the drawn table is under the design's 200 ms with the backend answering at once",
       opened.ms < 200, `${opened.ms.toFixed(1)} ms`);
     ok("a counted seat's numbers stand in its cells",
