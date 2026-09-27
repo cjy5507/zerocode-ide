@@ -5800,14 +5800,14 @@ impl App {
                         );
                         ui.draw_with_queue(|| block_rx.len());
                     }
-                    // The parent closes this teammate mid-turn (t-2513 §2.2):
-                    // the turn ends the way Stop ends it, and the reason is
-                    // kept for the closing document the teammate loop writes.
                     // A release (the parent read an answer) never ends a turn:
                     // the one running is the next word the parent steered in,
                     // and its own answer will be released in its turn.
                     Command::Close { reason }
                         if crate::teammate::close_reason_from(&reason).is_release() => {}
+                    // The parent closes this teammate mid-turn (t-2513 §2.2):
+                    // the turn ends the way Stop ends it, and the reason is
+                    // kept for the closing document the teammate loop writes.
                     Command::Close { reason } => {
                         if let Some(parked) = ui.parked.take() {
                             events::retire_prompt(parked.prompt_id, ResolvedBy::Dismissed);
