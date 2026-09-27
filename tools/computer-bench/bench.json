@@ -1,4 +1,8 @@
 {
+  "fixture_runtime": {
+    "value": {"flush_ms": 250},
+    "why": "The native fixtures share their recorder and flush cadence. It is bundled beside the executable so adding another scene leaves existing round bytes unchanged."
+  },
   "schema": 1,
   "wilson_z": {
     "value": 1.96,
@@ -628,5 +632,133 @@
       }
     ],
     "why": "The first three run on apps that ship with macOS, judged by oracles outside the model (file bytes, a tree, Calculator's display). Safari holds the person's tabs and logins: wave 2, behind a guard. Calculator restores its last value on launch, so setup clears it (escape, three times) and requires 0 showing and not the answer: a model that only states the product cannot pass. The runner keeps the person's whole clipboard (every item and type) for the bench and clears it before each run, so no scenario saves it."
+  },
+  "rts_inputs": {
+    "value": {
+      "letter": {
+        "label": "A",
+        "colour": {
+          "r": 255,
+          "g": 255,
+          "b": 0,
+          "tolerance": 40
+        },
+        "key": "a",
+        "modifiers": [],
+        "input": "letter"
+      },
+      "number": {
+        "label": "1",
+        "colour": {
+          "r": 0,
+          "g": 255,
+          "b": 255,
+          "tolerance": 40
+        },
+        "key": "1",
+        "modifiers": [],
+        "input": "number"
+      },
+      "group": {
+        "label": "BOX then Ctrl+1",
+        "colour": {
+          "r": 0,
+          "g": 255,
+          "b": 0,
+          "tolerance": 40
+        },
+        "key": "1",
+        "modifiers": [
+          "ctrl"
+        ],
+        "input": "control_group"
+      },
+      "right": {
+        "label": "RIGHT",
+        "colour": {
+          "r": 255,
+          "g": 0,
+          "b": 0,
+          "tolerance": 40
+        },
+        "button": "right",
+        "modifiers": [],
+        "input": "right_click"
+      },
+      "shift": {
+        "label": "SHIFT",
+        "colour": {
+          "r": 0,
+          "g": 0,
+          "b": 255,
+          "tolerance": 40
+        },
+        "button": "left",
+        "modifiers": [
+          "shift"
+        ],
+        "input": "shift_click"
+      },
+      "cmd": {
+        "label": "CMD",
+        "colour": {
+          "r": 255,
+          "g": 0,
+          "b": 255,
+          "tolerance": 40
+        },
+        "button": "left",
+        "modifiers": [
+          "cmd"
+        ],
+        "input": "cmd_click"
+      }
+    },
+    "why": "The RTS tasks: letters and numbers, box-select then assign Ctrl+1, right-click orders, Shift and Cmd clicks. The fixture judges the received key/button/modifiers against these tasks; plans are written separately."
+  },
+  "rts_supply": {
+    "value": {
+      "apm": 360,
+      "steps_apm": [
+        200,
+        300,
+        400,
+        500,
+        600
+      ],
+      "gap_ms": 34,
+      "target_pt": 64,
+      "edge_pt": 48,
+      "unit_grid": 3,
+      "unit_pt": 6,
+      "label_pt": 16
+    },
+    "why": "Mixed input supply and stress steps (actions per minute, a box and its assignment count twice). A full blank capture between tasks rearms their rules. Drawing and flush dimensions live here too."
+  },
+  "rts_plan": {
+    "value": {
+      "pointer_ms": 16,
+      "drag_from": {
+        "x": -250,
+        "y": -250
+      },
+      "drag_to": {
+        "x": 1250,
+        "y": 1250
+      }
+    },
+    "why": "Two existing 8 ms pointer ticks a glide, and the selection box a quarter of its target extent outside each corner. Quotas come from the existing expansion budget."
+  },
+  "rts_floor": {
+    "value": {
+      "apm": 300,
+      "reaction_p50_ms": 150,
+      "stress_oracle": 0.95
+    },
+    "why": "R10 acceptance: sustained mixed input at 300 APM, stimulus-to-receipt median at most 150 ms, no wrong input, reflex_floor oracle. Ceiling is the last stress step with at least 95% hits."
+  },
+  "rts_goal": {
+    "value": "Press A for a yellow A card and 1 for a cyan 1 card. Box-select the green unit group from just outside its top-left to just outside its bottom-right, then press Ctrl+1. Right-click red targets, Shift-click blue targets, and Cmd-click magenta targets. The top {hud} points of the window are a fixed legend; ignore that strip and act only on targets in the field below it. Act only on this fixture window.",
+    "why": "The same visible tasks as the hand-written plan, for the real automatic plan generator."
   }
 }

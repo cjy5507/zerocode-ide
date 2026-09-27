@@ -350,12 +350,14 @@ final class Provider {
                 perception: Data(try requiredString(params, "perception").utf8),
                 runPolicy: Data(try requiredString(params, "runPolicy").utf8),
                 capability: Data(try requiredString(params, "capability").utf8),
+                keys: Data(try requiredString(params, "keys").utf8),
                 eye: eye,
                 display: try requiredInteger(params, "display"),
                 hand: OperatorHandHost.hand,
                 admit: { OperatorGuardHost.admission() },
                 standing: { OperatorGuardHost.standing() },
-                actingScope: { try actingScope($0) }
+                actingScope: { try actingScope($0) },
+                benchPressAim: params["benchPressAim"]?.string
             )
         case "resume":
             OperatorGuardHost.resume(resetBudget: params["resetBudget"]?.bool == true)
@@ -3462,23 +3464,18 @@ private enum Input {
         }
     }
 
+    /// A chord on the desktop (`KeyChordStroke`, the sequence a reflex key
+    /// posts to its app's process): the key lets go under its modifiers, and
+    /// each modifier that went down lets go whatever stopped the chord — the
+    /// hand posts a release only of what the hold still holds.
     static func pressKey(_ key: String, pid: pid_t) throws {
-        let parsed = try KeyMap.parse(key)
-        var flags = CGEventFlags()
-        var pressedModifiers: [KeyModifier] = []
+        let stroke = try KeyMap.parse(key).stroke
+        let ups = stroke.ups(route: .desktop)
         defer {
-            for modifier in pressedModifiers.reversed() {
-                flags.remove(modifier.flag)
-                try? keyEvent(modifier.keyCode, down: false, flags: flags, pid: pid)
-            }
+            for modifier in ups.dropFirst() { try? OperatorHandHost.post(modifier) }
         }
-        for modifier in parsed.modifiers {
-            flags.insert(modifier.flag)
-            try keyEvent(modifier.keyCode, down: true, flags: flags, pid: pid, holding: modifier.flag)
-            pressedModifiers.append(modifier)
-        }
-        try keyEvent(parsed.keyCode, down: true, flags: flags, pid: pid)
-        try keyEvent(parsed.keyCode, down: false, flags: flags, pid: pid)
+        for press in stroke.downs(route: .desktop) { try OperatorHandHost.post(press) }
+        try OperatorHandHost.post(ups[0])
     }
 
     /// How long a posted ⌘V is given to be consumed before the previous
@@ -3514,11 +3511,6 @@ private enum Input {
     /// as the app verbs always made it.
     private static func mouse(_ kind: HandEvent.Kind, at point: CGPoint, flags: CGEventFlags = [], pid: pid_t) throws {
         try OperatorHandHost.post(HandEvent(kind, x: point.x, y: point.y, flags: flags.rawValue, route: .process(pid), source: .session))
-    }
-
-    /// A key on the desktop; a modifier key names the flag it holds while down.
-    private static func keyEvent(_ keyCode: CGKeyCode, down: Bool, flags: CGEventFlags, pid: pid_t, holding modifier: CGEventFlags = []) throws {
-        try OperatorHandHost.post(HandEvent(.key(code: keyCode, down: down, modifier: modifier.rawValue), flags: flags.rawValue))
     }
 }
 
@@ -3663,17 +3655,35 @@ private func isPrimaryHotkey(_ key: String, letter: String) -> Bool {
     return parts.dropLast().contains { KeyboardInputSafety.primaryModifierNames.contains($0) }
 }
 
-private struct KeyModifier {
+struct KeyModifier {
     let keyCode: CGKeyCode
     let flag: CGEventFlags
 }
 
-private struct ParsedKey {
+struct ParsedKey {
     let keyCode: CGKeyCode
     let modifiers: [KeyModifier]
+
+    /// The chord as the hand posts it.
+    var stroke: KeyChordStroke {
+        KeyChordStroke(key: keyCode, modifiers: modifiers.map { KeyChordStroke.Modifier(code: $0.keyCode, flag: $0.flag.rawValue) })
+    }
 }
 
-private enum KeyMap {
+/// The helper's own key table as a reflex run reads it (`ReflexKeyboard`,
+/// t-10384): the names, codes and flags the key verbs post from.
+struct KeyMapKeyboard: ReflexKeyboard {
+    func chord(key: String, modifiers: [String]) -> KeyChordStroke? {
+        try? KeyMap.parse((modifiers + [key]).joined(separator: "+")).stroke
+    }
+
+    func flags(_ modifiers: [String]) -> UInt64? {
+        guard let held = try? KeyMap.parseModifiers(modifiers.joined(separator: "+")) else { return nil }
+        return held.reduce(UInt64(0)) { $0 | $1.flag.rawValue }
+    }
+}
+
+enum KeyMap {
     static func parse(_ spec: String) throws -> ParsedKey {
         let parts = spec.split(separator: "+").map { String($0).lowercased() }
         var modifiers: [KeyModifier] = []
@@ -3714,7 +3724,7 @@ private enum KeyMap {
             return KeyModifier(keyCode: 55, flag: .maskCommand)
         case "ctrl", "control":
             return KeyModifier(keyCode: 59, flag: .maskControl)
-        case "alt", "option":
+        case "alt", "option", "opt":
             return KeyModifier(keyCode: 58, flag: .maskAlternate)
         case "shift":
             return KeyModifier(keyCode: 56, flag: .maskShift)
@@ -3733,6 +3743,8 @@ private enum KeyMap {
         "backspace": 51, "delete": 51, "escape": 53, "esc": 53, "left": 123, "right": 124,
         "down": 125, "up": 126, "insert": 114, "home": 115, "pageup": 116, "page_up": 116,
         "forwarddelete": 117, "end": 119, "pagedown": 121, "page_down": 121,
+        "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98, "f8": 100,
+        "f9": 101, "f10": 109, "f11": 103, "f12": 111,
     ]
 }
 
@@ -5647,19 +5659,10 @@ extension Input {
     /// Hold a chord for `milliseconds` on the hand's clock: a stop lets go of
     /// every key it holds at once, on the stopping thread, and ends the hold.
     static func desktopHoldKey(_ key: String, milliseconds: Int) throws {
-        let parsed = try KeyMap.parse(key)
-        var flags = CGEventFlags()
-        for modifier in parsed.modifiers {
-            flags.insert(modifier.flag)
-            try keyEvent(modifier.keyCode, down: true, flags: flags, pid: 0, holding: modifier.flag)
-        }
-        try keyEvent(parsed.keyCode, down: true, flags: flags, pid: 0)
+        let stroke = try KeyMap.parse(key).stroke
+        for press in stroke.downs(route: .desktop) { try OperatorHandHost.post(press) }
         try OperatorHandHost.sleep(nanoseconds: UInt64(max(0, milliseconds)) * 1_000_000)
-        try keyEvent(parsed.keyCode, down: false, flags: flags, pid: 0)
-        for modifier in parsed.modifiers.reversed() {
-            flags.remove(modifier.flag)
-            try keyEvent(modifier.keyCode, down: false, flags: flags, pid: 0)
-        }
+        for release in stroke.ups(route: .desktop) { try OperatorHandHost.post(release) }
     }
 
     /// A mouse event on the desktop, made with no source as the desktop verbs

@@ -124,11 +124,90 @@ public struct ReflexRule: Codable, Sendable {
     public let cooldown_ms: UInt64
     public let max_fires: UInt64
 }
-public enum ReflexActionKind: String, Codable, Sendable { case move, click, key, macro }
+public enum ReflexActionKind: String, Codable, Sendable { case move, click, key, drag, macro }
+/// Which button a click presses (`reflex::Button`); the wire leaves `left` out.
+public enum ReflexButton: String, Codable, Sendable { case left, right }
+/// Where a drag presses or lets go (`reflex::DragPoint`): a point relative to its target's hitbox,
+/// in `ReflexContract.permille` of the hitbox's width and height — 0 its left or top edge, 1000 its
+/// right or bottom one.
+public struct ReflexDragPoint: Codable, Equatable, Sendable {
+    public let x: Int64
+    public let y: Int64
+
+    public init(x: Int64, y: Int64) {
+        self.x = x
+        self.y = y
+    }
+
+    /// Whether it lies within `reach` permille of the hitbox on each side (`DragPoint::within`).
+    public func within(_ reach: UInt64) -> Bool {
+        let reach = Int64(clamping: reach)
+        let (sum, overflow) = ReflexContract.permille.addingReportingOverflow(reach)
+        let far = overflow ? Int64.max : sum
+        return x >= -reach && x <= far && y >= -reach && y <= far
+    }
+}
+/// One action of a macro (`reflex::Action`). Beside its id, kind and target it carries what it
+/// presses (t-10384), each field left out of the wire at its default — no key, no modifiers, the
+/// left button, no ends — so a plan written before them keeps its bytes and its hash.
 public struct ReflexAction: Codable, Sendable {
     public let id: String
     public let kind: ReflexActionKind
     public let target: String
+    /// A key action's key, a word of the window's key table: a key names one, and nothing else does.
+    public let key: String?
+    /// What a key, a click or a drag holds while it presses: modifiers of the key table, a set the
+    /// wire writes in byte order, each once.
+    public let modifiers: [String]
+    /// A click's button.
+    public let button: ReflexButton
+    /// Where a drag presses and where it lets go: a drag names both, and nothing else names either.
+    public let from: ReflexDragPoint?
+    public let to: ReflexDragPoint?
+
+    /// Whether it carries what its kind may and needs (`Action::shaped`): a key its key, a drag both
+    /// its ends, a click alone a button other than the left, and modifiers only a key, a click or a
+    /// drag.
+    var shaped: Bool {
+        let key = (self.key != nil) == (kind == .key)
+        let ends = (from != nil) == (kind == .drag) && (to != nil) == (kind == .drag)
+        let button = self.button == .left || kind == .click
+        let modifiers = self.modifiers.isEmpty || kind == .key || kind == .click || kind == .drag
+        return key && ends && button && modifiers
+    }
+}
+
+extension ReflexAction {
+    private enum CodingKeys: String, CodingKey { case id, kind, target, key, modifiers, button, from, to }
+
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try fields.decode(String.self, forKey: .id),
+                  kind: try fields.decode(ReflexActionKind.self, forKey: .kind),
+                  target: try fields.decode(String.self, forKey: .target),
+                  key: try fields.decodeIfPresent(String.self, forKey: .key),
+                  modifiers: try fields.decodeIfPresent([String].self, forKey: .modifiers) ?? [],
+                  button: try fields.decodeIfPresent(ReflexButton.self, forKey: .button) ?? .left,
+                  from: try fields.decodeIfPresent(ReflexDragPoint.self, forKey: .from),
+                  to: try fields.decodeIfPresent(ReflexDragPoint.self, forKey: .to))
+    }
+
+    /// The typed action's own wire, as the window's serde type writes it: its modifiers a set in
+    /// byte order, and every field at its default left out — so a wire that spells one out, or
+    /// writes a modifier twice or out of order, is not this action's (`wire`).
+    public func encode(to encoder: Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(id, forKey: .id)
+        try fields.encode(kind, forKey: .kind)
+        try fields.encode(target, forKey: .target)
+        try fields.encodeIfPresent(key, forKey: .key)
+        if !modifiers.isEmpty {
+            try fields.encode(Set(modifiers).sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }, forKey: .modifiers)
+        }
+        if button != .left { try fields.encode(button, forKey: .button) }
+        try fields.encodeIfPresent(from, forKey: .from)
+        try fields.encodeIfPresent(to, forKey: .to)
+    }
 }
 public struct ReflexMacro: Codable, Sendable {
     public let id: String
@@ -162,6 +241,9 @@ public struct ReflexLimits: Codable, Equatable, Sendable {
     public let max_frame_age_ns: UInt64
     public let frames_per_second: UInt64
     public let pointer_tick_ns: UInt64
+    /// How far beyond its target's hitbox a drag's end may lie, in permille of the hitbox's width
+    /// and height, on each side (`ReflexDragPoint`).
+    public let max_drag_reach_permille: UInt64
 }
 
 // MARK: - The window's reflex table
@@ -171,7 +253,9 @@ public struct ReflexLimits: Codable, Equatable, Sendable {
 /// The helper keeps no copy of these numbers.
 public enum ReflexTable {
     /// Every bound a run waits or divides by is positive, and the longest
-    /// glide plus a press and its release fit one lease's children.
+    /// glide plus a press and its release fit one lease's children. A drag
+    /// whose two glides do not fit is a lease its children refuse
+    /// (`permits`), so it presses nothing.
     public static func check(_ limits: ReflexLimits) throws {
         guard limits.max_frame_age_ns > 0, limits.max_lease_ns > 0, limits.max_run_ns > 0,
               limits.frames_per_second > 0, limits.pointer_tick_ns > 0,
@@ -189,7 +273,28 @@ public enum ReflexTable {
     }
 }
 
-public enum ReflexContractError: String, Error { case wire, version, hash, scope, id, duplicate, reference, cycle, budget, unsupported, perception }
+public enum ReflexContractError: String, Error { case wire, version, hash, scope, id, duplicate, reference, cycle, budget, unsupported, perception, chord }
+
+/// The one table of a key action's words (`reflex::KeyTable`, `fixtures/reflex-contract/keys.json`)
+/// as the window sends it with a start: the keys a plan may press, the modifiers it may hold and the
+/// chords it may not press. The helper keeps no copy of it; its own key table names each key's code.
+public struct ReflexKeyTable: Codable, Equatable, Sendable {
+    public let keys: [String]
+    public let modifiers: [String]
+    public let refused: [ReflexRefusedChord]
+
+    /// Whether `key` held with `modifiers` is a chord the table refuses (`KeyTable::refuses`): a
+    /// row names the key and every modifier the row names is held.
+    public func refuses(_ key: String, modifiers held: [String]) -> Bool {
+        refused.contains { $0.key == key && Set($0.modifiers).isSubset(of: held) }
+    }
+}
+
+/// One refused row: its key, held with at least its modifiers.
+public struct ReflexRefusedChord: Codable, Equatable, Sendable {
+    public let key: String
+    public let modifiers: [String]
+}
 
 /// A helper must use this return type, never a decoded `ReflexPlan`, for input.
 public struct ValidatedReflexPlan: Sendable {
@@ -209,6 +314,8 @@ public enum ReflexContract {
     /// The longest id a plan, a rule, a macro, an action or a run may carry
     /// (`reflex::MAX_IDENTIFIER_BYTES`), pinned for both by the shared plan cases.
     public static let maxIdentifierBytes = 64
+    /// A hitbox's width or height in the units a drag's ends are written in (`reflex::PERMILLE`).
+    public static let permille: Int64 = 1_000
 
     /// The reflex table as the window sends it (`reflex::limits_wire`): only the canonical
     /// form is read, so a field the helper does not know cannot be dropped silently.
@@ -221,7 +328,10 @@ public enum ReflexContract {
         return limits
     }
 
-    public static func decodeAndValidate(_ data: Data, limits: ReflexLimits, perception: PerceptionLimits) throws -> ValidatedReflexPlan {
+    /// `keys` is the window's key table (`decodeKeys`); a helper without one presses no key and
+    /// holds no modifier.
+    public static func decodeAndValidate(_ data: Data, limits: ReflexLimits, perception: PerceptionLimits,
+                                         keys: ReflexKeyTable? = nil) throws -> ValidatedReflexPlan {
         guard let object = try? JSONSerialization.jsonObject(with: data),
               let canonical = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]),
               canonical == data,
@@ -229,7 +339,18 @@ public enum ReflexContract {
         else { throw ReflexContractError.wire }
         guard let typedWire = try? wireBytes(plan), typedWire == data else { throw ReflexContractError.wire }
         for rule in plan.rules { try predicateShape(rule.predicate) }
-        return try validate(plan, limits: limits, perception: perception)
+        return try validate(plan, limits: limits, perception: perception, keys: keys)
+    }
+
+    /// The key table as the window sends it (`reflex::decode_keys`): only the canonical form with
+    /// every field known is read.
+    public static func decodeKeys(_ data: Data) throws -> ReflexKeyTable {
+        guard let table = try? JSONDecoder().decode(ReflexKeyTable.self, from: data),
+              let again = try? JSONEncoder().encode(table),
+              let object = try? JSONSerialization.jsonObject(with: again),
+              canonical(object) == data
+        else { throw ReflexContractError.wire }
+        return table
     }
 
     /// Whether `text` is an id this contract carries: 1 to `maxIdentifierBytes` bytes of
@@ -334,7 +455,8 @@ public enum ReflexContract {
         }
     }
 
-    public static func validate(_ plan: ReflexPlan, limits: ReflexLimits, perception: PerceptionLimits) throws -> ValidatedReflexPlan {
+    public static func validate(_ plan: ReflexPlan, limits: ReflexLimits, perception: PerceptionLimits,
+                                keys: ReflexKeyTable? = nil) throws -> ValidatedReflexPlan {
         if plan.version != version { throw ReflexContractError.version }
         if try hash(plan) != plan.plan_hash { throw ReflexContractError.hash }
         if plan.scope.target.isEmpty || plan.scope.target.utf8.count > 128 || !plan.scope.target.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95 }) { throw ReflexContractError.scope }
@@ -382,8 +504,16 @@ public enum ReflexContract {
             for action in item.actions {
                 if !identifier(action.id) || !identifier(action.target) { throw ReflexContractError.id }
                 if !actionIds.insert(action.id).inserted { throw ReflexContractError.duplicate }
-                if (action.kind == .move || action.kind == .click) && !detectors.contains(action.target) { throw ReflexContractError.reference }
-                if action.kind == .key { throw ReflexContractError.unsupported }
+                // What a kind may carry is its own before its target is looked up.
+                if !action.shaped || action.key.map({ keys?.keys.contains($0) != true }) == true ||
+                    action.modifiers.contains(where: { keys?.modifiers.contains($0) != true }) {
+                    throw ReflexContractError.unsupported
+                }
+                if action.kind != .macro && !detectors.contains(action.target) { throw ReflexContractError.reference }
+                if let key = action.key, let keys, keys.refuses(key, modifiers: action.modifiers) { throw ReflexContractError.chord }
+                if [action.from, action.to].contains(where: { $0.map { !$0.within(limits.max_drag_reach_permille) } ?? false }) {
+                    throw ReflexContractError.budget
+                }
             }
         }
         let byId = Dictionary(uniqueKeysWithValues: plan.macros.map { ($0.id, $0) })
@@ -476,7 +606,9 @@ public struct ReflexFrameFacts: Codable, Equatable, Sendable {
     }
 }
 
-public enum ReflexLeaseInput: String, Codable, Sendable { case pointer_move, left_click }
+/// What a lease may let a leaf post (`reflex::LeaseInput`): a key's chord, a right click and a
+/// drag's held moves beside the pointer's move and the left click (t-10384).
+public enum ReflexLeaseInput: String, Codable, Sendable { case pointer_move, left_click, right_click, key_press, button_drag }
 
 public struct ReflexActionLease: Codable, Equatable, Sendable {
     public let run_id: String
@@ -702,6 +834,25 @@ public struct ReflexTarget: Codable, Equatable, Sendable {
               let north = less(y, reach), let south = add(y, reach)
         else { return nil }
         return west >= left && east < right && north >= top && south < bottom ? (x, y) : nil
+    }
+
+    /// Where `point` — relative to the hitbox, in permille of its width and height — stands at
+    /// `atHostNs` (a drag's end, t-10384): the hitbox carried as `aim` carries it, while the aim
+    /// holds then. Nil when it does not, or a sum overflows.
+    public func point(_ point: ReflexDragPoint, atHostNs: UInt64, capturedHostNs: UInt64, maxAgeNs: UInt64) -> (x: Int64, y: Int64)? {
+        guard let aimed = aim(atHostNs: atHostNs, capturedHostNs: capturedHostNs, maxAgeNs: maxAgeNs) else { return nil }
+        func along(_ origin: Int64, _ carried: Int64, _ span: Int64, _ share: Int64) -> Int64? {
+            let (moved, movedOver) = origin.addingReportingOverflow(carried)
+            let (part, partOver) = span.multipliedReportingOverflow(by: share)
+            guard !movedOver, !partOver else { return nil }
+            let (at, atOver) = moved.addingReportingOverflow(part / ReflexContract.permille)
+            return atOver ? nil : at
+        }
+        // The carry `aim` made is how far it moved the point.
+        guard let x = along(roi.x, aimed.x &- point_x, roi.width, point.x),
+              let y = along(roi.y, aimed.y &- point_y, roi.height, point.y)
+        else { return nil }
+        return (x, y)
     }
 }
 

@@ -237,8 +237,8 @@ fn new_run_id() -> String {
 }
 
 /// The start the helper is sent: the plan's canonical wire, the window's
-/// reflex, perception and eye tables, the run's policy and the capability
-/// table — every number the run keeps is the window's.
+/// reflex, perception and eye tables, the run's policy, the capability table
+/// and the key table — every number and word the run keeps is the window's.
 fn start_params(admitted: &Admitted, run_id: &str) -> Value {
     let text = |bytes: Vec<u8>| String::from_utf8(bytes).unwrap_or_default();
     json!({
@@ -249,6 +249,7 @@ fn start_params(admitted: &Admitted, run_id: &str) -> Value {
         "eye": Value::Object(eye_table()),
         "runPolicy": text(admitted.policy.wire()),
         "capability": text(reflex::capability_wire().to_vec()),
+        "keys": text(reflex::keys_wire().to_vec()),
         "display": admitted.display,
     })
 }

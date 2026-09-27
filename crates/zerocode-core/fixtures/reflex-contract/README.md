@@ -65,6 +65,61 @@ its kernel (`PerceptionSession`), as `reflex-probe --self-test --fixtures`
 does in an optimized build. A receipt names its leaf's detector's `pick` and
 the `trackId` the leaf was decided on, beside every key it had.
 
+## Keys, buttons, modifiers and drags (t-10384 R10)
+
+An action may carry, beside its id, kind and target, what it presses: `key`
+(a `key` action's key, which it must name), `modifiers` (held with a key, a
+click or a drag), `button` (a click's, `left` or `right`) and `from` and `to`
+(a `drag`'s two ends, which it must name both of). Each is left out at its
+default — no key, no modifiers, the left button, no ends — so every plan
+written before them keeps its bytes and its hash, and the version stays 2. A
+default written out is another spelling of the plan under its digest, and
+both decoders refuse it as `wire`: `"button":"left"` (`click_left_written`),
+`"modifiers":[]` (`key_no_modifiers_written`). `modifiers` is a set, written
+in byte order with each word once; any other order or a word twice is `wire`
+(`key_modifiers_unsorted`, `key_modifier_twice`).
+
+A key, a click and a drag act on their target — a detector, as a move does
+(`key_on_a_macro` is `reference`): a key goes while the target that decided it
+still shows, as a press does. What each kind may carry is checked before the
+target is looked up, so a field on the wrong kind is `unsupported` whatever it
+names: a key without its key (`unsupported_action`, `key_without_name`), a
+button on a key (`key_with_button`) or a drag (`drag_right_button`, a drag
+presses the left button), a key on a click (`click_with_key`) or a macro
+(`macro_with_key_name`), modifiers on a move (`move_with_modifiers`), ends on
+a click (`click_with_from`), a drag with one end (`drag_without_to`).
+
+`keys.json` is the one table of the words a key action may use: its `keys`,
+its `modifiers` and the chords it `refused`. Like the capability table it is
+not a copy of one: the window compiles the file in (`reflex::keys_wire`),
+sends its bytes with every start, and the helper decodes the same bytes
+(`ReflexContract.decodeKeys`) and validates with them; a helper with no table
+presses no key. A key or a modifier outside the table is `unsupported`
+(`key_unknown_name`, `key_unknown_modifier`). A chord is refused — `chord` —
+when its key is a refused row's and it holds at least that row's modifiers:
+`cmd+q` (`key_refused_chord`), `cmd+shift+w` under the `cmd+w` row
+(`key_refused_wider_chord`), `f11` under a row that names no modifier
+(`key_refused_bare`). The rows are the chords that close, hide or move an app
+or a window, or take the keyboard to another app — and the person's own stop
+chord. The helper posts a key only to the process the run's scope resolved to
+when it started, never to the desktop; every key names a code the helper's
+own key table has, or the start is refused.
+
+A drag's `from` and `to` are points relative to its target's hitbox, in
+permille of its width and height: `{"x":0,"y":0}` its top-left corner,
+`{"x":1000,"y":1000}` its bottom-right, `{"x":500,"y":500}` its middle. Each
+lies at most `max_drag_reach_permille` (a number of the reflex table) beyond
+the hitbox on each side (`drag_beyond_reach` is `budget`). The hand glides to
+`from`, presses, drags to `to` at the table's pointer tick and lets go: one
+leaf, whose lease carries the glide, the press, the drag and the release, so
+the table must fit two of the longest glides and a press and its release
+inside one lease's children. A key is one leaf too, and every key counts in
+the plan's action budget (`key_over_budget`).
+
+`lease_cases.json` adds the three inputs these leaves post: `key_press`,
+`right_click` and `button_drag`, each permitted only by a lease that allows
+it.
+
 ## Identifiers (t-9205)
 
 Every id a plan carries — a detector, a rule, a macro, an action — and a

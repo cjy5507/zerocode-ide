@@ -89,8 +89,9 @@ fn shared_golden_runs_through_the_real_validator() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
     // R1's 32 cases under v2, the six v2 adds, the identifier bound's two
-    // sides (t-9205), and a detector's pick with the R4 bench's plan (t-10242).
-    assert_eq!(cases.len(), 49);
+    // sides (t-9205), a detector's pick with the R4 bench's plan (t-10242),
+    // and a key, a click's button and modifiers and a drag (t-10384).
+    assert_eq!(cases.len(), 76);
     for name in manifest["wire_negative"].as_array().unwrap() {
         let name = name.as_str().unwrap();
         let path = format!(
@@ -152,17 +153,27 @@ fn shared_lease_cases_exercise_permits_and_frame_cursor() {
     };
     let mut mismatches = Vec::new();
     for case in fixture["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
         let frame: FrameFacts =
             serde_json::from_value(patched(&fixture["frame"], &case["frame"])).unwrap();
-        let lease: ActionLease =
-            serde_json::from_value(patched(&fixture["lease"], &case["lease"])).unwrap();
-        let input: LeaseInput = serde_json::from_value(case["input"].clone()).unwrap();
+        // An input a lease does not name fails its case by name, in the lease
+        // or as the input asked for.
+        let Ok(lease) =
+            serde_json::from_value::<ActionLease>(patched(&fixture["lease"], &case["lease"]))
+        else {
+            mismatches.push(format!("permits {name}: the lease names an unknown input"));
+            continue;
+        };
+        let Ok(input) = serde_json::from_value::<LeaseInput>(case["input"].clone()) else {
+            mismatches.push(format!(
+                "permits {name}: the input {} is not one a lease names",
+                case["input"]
+            ));
+            continue;
+        };
         let got = lease.permits(&frame, case["now_host_ns"].as_u64().unwrap(), input);
         if got != case["expected"].as_bool().unwrap() {
-            mismatches.push(format!(
-                "permits {}: got {got}",
-                case["name"].as_str().unwrap()
-            ));
+            mismatches.push(format!("permits {name}: got {got}"));
         }
     }
     for case in fixture["cursor_cases"].as_array().unwrap() {
@@ -809,8 +820,112 @@ fn a_picks_words_are_one_table() {
 fn the_reflex_table_the_window_sends_is_the_one_table() {
     let file = include_str!("../../../fixtures/reflex-contract/limits.json");
     assert_eq!(limits_wire(), file.trim_end().as_bytes());
+    // A drag's lease carries two of the longest glides — to its press and to
+    // its release — beside the press and the release themselves.
     let longest_glide = LIMITS.max_pointer_duration_ms * 1_000_000 / LIMITS.pointer_tick_ns;
-    assert!(longest_glide + 2 <= LIMITS.max_expanded_actions);
+    assert!(2 * longest_glide + 2 <= LIMITS.max_expanded_actions);
+}
+
+/// `keys.json` is the one table of a key action's words (t-10384): every key
+/// is one the agents' key vocabulary names and every modifier one it parses,
+/// so the helper's own key table — the one the general key verbs post from —
+/// has a code for each; every refused chord is written in the table's words,
+/// its modifiers a set in byte order.
+#[test]
+fn the_key_table_speaks_the_key_vocabulary() {
+    use super::super::keys;
+    let table: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/reflex-contract/keys.json")).unwrap();
+    let words = |name: &str| -> Vec<String> {
+        table[name]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|word| word.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (names, modifiers) = (words("keys"), words("modifiers"));
+    let unknown: Vec<&String> = names
+        .iter()
+        .filter(|name| !keys::KEY_NAMES.contains(&name.as_str()))
+        .collect();
+    assert!(unknown.is_empty(), "keys the vocabulary lacks: {unknown:?}");
+    let unparsed: Vec<&String> = modifiers
+        .iter()
+        .filter(|word| keys::Modifier::parse(word).is_none())
+        .collect();
+    assert!(
+        unparsed.is_empty(),
+        "modifiers it does not parse: {unparsed:?}"
+    );
+    let mut sorted = modifiers.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted, modifiers, "the modifiers are a set in byte order");
+    for row in table["refused"].as_array().unwrap() {
+        let key = row["key"].as_str().unwrap();
+        assert!(names.iter().any(|name| name == key), "{row}");
+        let held: Vec<&str> = row["modifiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|word| word.as_str().unwrap())
+            .collect();
+        assert!(held.windows(2).all(|pair| pair[0] < pair[1]), "{row}");
+        assert!(
+            held.iter()
+                .all(|word| modifiers.iter().any(|known| known == word)),
+            "{row}"
+        );
+    }
+}
+
+/// The key table the window sends is the file's own bytes, read as the helper
+/// reads them; a row refuses its key held with at least its modifiers, and a
+/// table that is not canonical is not read (t-10384).
+#[test]
+fn the_key_table_the_window_sends_is_the_one_table() {
+    let file = include_str!("../../../fixtures/reflex-contract/keys.json");
+    assert_eq!(keys_wire(), file.trim_end().as_bytes());
+    assert_eq!(&decode_keys(keys_wire()).unwrap(), key_table());
+    let held = |words: &[&str]| -> BTreeSet<String> {
+        words.iter().map(|word| (*word).to_string()).collect()
+    };
+    let table = key_table();
+    assert!(table.refuses("q", &held(&["cmd"])));
+    assert!(
+        table.refuses("q", &held(&["cmd", "shift"])),
+        "a wider chord"
+    );
+    assert!(!table.refuses("q", &held(&["shift"])));
+    assert!(!table.refuses("q", &held(&[])));
+    assert!(
+        table.refuses("f11", &held(&[])),
+        "a row that names no modifier"
+    );
+    assert!(table.refuses("f11", &held(&["opt"])));
+    assert!(!table.refuses("1", &held(&["ctrl"])), "a group's key");
+    let spaced = format!(" {}", file.trim_end());
+    assert_eq!(
+        decode_keys(spaced.as_bytes()).unwrap_err(),
+        ReflexError::Wire
+    );
+}
+
+/// A Flow document names a key, a click's button and modifiers and a drag's
+/// ends inside its `macro:` lines — the macro's own JSON — and writes them
+/// back the same way (t-10384).
+#[test]
+fn a_flow_macro_line_carries_what_its_actions_press() {
+    for name in ["key_chord", "click_right", "click_modifiers", "drag_box"] {
+        let row = golden(name);
+        let typed: ReflexPlan =
+            serde_json::from_value(row.plan).unwrap_or_else(|err| panic!("{name}: {err}"));
+        let read = read_sections(&typed.written_sections())
+            .unwrap_or_else(|err| panic!("{name}: {err}"))
+            .unwrap();
+        assert_eq!(wire_bytes(read.plan()), row.wire, "{name}");
+    }
 }
 
 #[test]

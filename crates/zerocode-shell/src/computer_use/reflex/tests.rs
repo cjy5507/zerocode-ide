@@ -561,7 +561,7 @@ fn one_hand_remains_owned_after_start_returns() {
         sent["runId"].as_str().unwrap_or_default()
     ));
     // What the start carries is the window's: the plan's canonical wire, its
-    // tables, the run's policy and the capability table.
+    // tables, the run's policy, the capability table and the key table.
     assert_eq!(
         sent["plan"],
         json!(String::from_utf8(reflex::wire_bytes(admitted.plan.plan())).unwrap())
@@ -581,6 +581,10 @@ fn one_hand_remains_owned_after_start_returns() {
     assert_eq!(
         sent["capability"],
         json!(String::from_utf8(reflex::capability_wire().to_vec()).unwrap())
+    );
+    assert_eq!(
+        sent["keys"],
+        json!(String::from_utf8(reflex::keys_wire().to_vec()).unwrap())
     );
     assert!(
         calls

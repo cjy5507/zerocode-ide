@@ -3,6 +3,7 @@ fixture's own record decides every success, and the runtime's receipts are a
 claim that record must confirm. Nothing here moves the pointer: every run is
 a record written in the shapes the fixture, the driver and the runner write."""
 import copy
+import hashlib
 import json
 import os
 import pathlib
@@ -471,7 +472,7 @@ class Fixture(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "the fixture is an AppKit app")
     def test_the_fixture_builds_as_the_runner_builds_it(self):
         # prepare's own flags: Swift 6, every warning an error.
-        built = subprocess.run(["swiftc", "-typecheck", "-swift-version", "6", "-warnings-as-errors", str(reflex.SOURCE)],
+        built = subprocess.run(["swiftc", "-typecheck", "-swift-version", "6", "-warnings-as-errors", "-parse-as-library", str(reflex.HERE / "FixtureSupport.swift"), str(reflex.SOURCE)],
                                capture_output=True, text=True)
         self.assertEqual(built.returncode, 0, built.stderr)
 
@@ -613,12 +614,10 @@ class Runner(unittest.TestCase):
         self.assertEqual(json.loads((run / "request.json").read_text())["l1"], "shadow")
         self.assertEqual(result["config"], f"{reflex.CONFIG}+autopilot-{reflex.STUB}-l1shadow")
 
-    def test_the_windows_generator_with_no_key_starts_nothing(self):
-        desk_folder = self.folder / "run-35"
-        with self.assertRaises(reflex.Refused) as refused:
-            self.run_desk(35, autopilot={"generator": "window"})
-        self.assertIn("generator", str(refused.exception))
-        self.assertFalse(desk_folder.exists(), "refused before the fixture came up")
+    def test_the_windows_login_generator_is_not_refused_for_an_absent_api_key(self):
+        _, run = self.run_desk(35, autopilot={"generator": "window"})
+        self.assertEqual(json.loads((run / "request.json").read_text())["generator"], "window")
+        self.assertFalse((run / "plan.json").exists(), "the runner writes no model plan")
 
     def test_a_run_goes_from_the_goal_to_a_verdict_and_every_file_is_kept(self):
         result, run = self.run_desk(31)
@@ -789,10 +788,10 @@ class Autopilot(unittest.TestCase):
         self.assertIsNone(why)
         self.assertEqual(sorted(env), [goal["keys"]["jev"]])
         self.assertEqual(env[goal["keys"]["jev"]], "k-" + goal["keys"]["prefix"] + goal["keys"]["jev"])
-        # The window's generator asks for its row's key; with none there is no run.
+        # The window's login road does not require an API key.
         env, why = reflex.keys_for(VALUES, "window", keychain)
-        self.assertIsNone(env)
-        self.assertIn("generator", why)
+        self.assertEqual(sorted(env), [goal["keys"]["jev"]])
+        self.assertIsNone(why)
         self.assertFalse(any(value for service, value in read if not service.endswith(goal["keys"]["jev"])),
                          "a key that is not there is looked for, never read")
         # No Jev key: the stand-in round runs, its questions refused at the door, and says so.
@@ -868,6 +867,25 @@ class Tally(unittest.TestCase):
         rendered = tally.render_reflex(summary)
         for column in ("goal→press ms", "re-plan gap ms", "L1 RTT p50/p95 ms", "applied c/p/r", "tokens in/out", "$"):
             self.assertIn(column, rendered)
+
+
+class DeskHooks(unittest.TestCase):
+    def test_r9_seed_bytes_and_default_plan_and_judgment_survive_the_hooks(self):
+        expected = {
+            11: 'fd9c4b8b4ead56bc9753c9210b026351c6c4fb2ade4e92c9fa0fdee680175e5a',
+            12: '0f9a460f4aa505141b621ddc931ded72f1a16cb5f078cfee2172bfeac20d1886',
+            13: '2b5738b07d47ce61750936ad6db87b0310c0fc3a040f69ec4531e5960fa22eaa',
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder)
+            reflex.write_atomic(path / 'session.json', {'owner': 'owner', 'bundle': 'dev.zerocode.bench.reflex'})
+            desk = reflex.Desk(path, VALUES, LIMITS)
+            for seed, digest in expected.items():
+                wire = json.dumps(desk.round(seed), sort_keys=True, separators=(',', ':')).encode()
+                self.assertEqual(hashlib.sha256(wire).hexdigest(), digest)
+                self.assertEqual(desk.result(clean(seed)), reflex.judged(clean(seed), VALUES, LIMITS))
+            self.assertEqual(desk.plan(GEOMETRY, None),
+                             reflex.plan(GEOMETRY, VALUES, desk.session['bundle'], reflex.contract(), table_limits=LIMITS))
 
 
 if __name__ == "__main__":

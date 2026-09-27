@@ -22,13 +22,15 @@ final class AgentEntrypointSourceSafetyTests: XCTestCase {
     func testSyntheticModifiersHaveGuaranteedReleaseAndModifiedClicksUseFlags() throws {
         let source = try agentEntrypointSource()
 
-        XCTAssertTrue(source.contains("var pressedModifiers: [KeyModifier] = []"))
+        // One chord sequence for the key verbs and a reflex key (t-10384, `KeyChordStroke`): each
+        // modifier's release is deferred, so it goes whatever stops the chord.
+        XCTAssertTrue(source.contains("let stroke = try KeyMap.parse(key).stroke"))
         XCTAssertTrue(source.contains(
             """
-            defer {
-                        for modifier in pressedModifiers.reversed() {
-                            flags.remove(modifier.flag)
-                            try? keyEvent(modifier.keyCode, down: false, flags: flags, pid: pid)
+            let ups = stroke.ups(route: .desktop)
+                    defer {
+                        for modifier in ups.dropFirst() { try? OperatorHandHost.post(modifier) }
+                    }
             """
         ))
         // Moved with the one hand (t-6765): an app-level click and drag still carry the verb's

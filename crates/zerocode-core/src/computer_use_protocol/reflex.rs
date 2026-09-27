@@ -59,6 +59,11 @@ pub struct ReflexLimits {
     /// (`mouseMove --steps`, the desktop drag), the baseline R4 calibrates
     /// against, not a tuned value.
     pub pointer_tick_ns: u64,
+    /// How far beyond its target's hitbox a drag's end may lie, in permille
+    /// of the hitbox's width and height, on each side ([`DragPoint`],
+    /// t-10384): one hitbox beyond every edge, room for a selection box
+    /// drawn around what the target covers.
+    pub max_drag_reach_permille: u64,
 }
 
 pub const LIMITS: ReflexLimits = ReflexLimits {
@@ -80,14 +85,20 @@ pub const LIMITS: ReflexLimits = ReflexLimits {
     max_frame_age_ns: 50_000_000,
     frames_per_second: 60,
     pointer_tick_ns: 8_000_000,
+    max_drag_reach_permille: 1_000,
 };
 
-// The longest glide plus a press and its release fits one lease's children.
+// A drag's two longest glides — to its press and, the button held, to its
+// release — plus the press and the release fit one lease's children, and so
+// does a click's one glide. The helper holds a table the window sends to a
+// click's fit (`ReflexTable.check`); a drag that does not fit a lease presses
+// nothing (`ActionLease::permits`).
 const _: () = assert!(
     LIMITS
         .max_pointer_duration_ms
         .saturating_mul(1_000_000)
         .div_ceil(LIMITS.pointer_tick_ns)
+        .saturating_mul(2)
         .saturating_add(2)
         <= LIMITS.max_expanded_actions
 );
@@ -326,15 +337,109 @@ pub enum ActionKind {
     Move,
     Click,
     Key,
+    /// A press, a move with the button held and its release, as one action
+    /// (t-10384).
+    Drag,
     Macro,
 }
 
+impl ActionKind {
+    /// Whether a leaf of this kind presses a button or a key, beyond putting
+    /// the pointer somewhere: what a run's receipt counts as pressed.
+    #[must_use]
+    pub const fn presses(self) -> bool {
+        matches!(self, Self::Click | Self::Key | Self::Drag)
+    }
+}
+
+/// Which button a click presses (t-10384). `left` — the only one before the
+/// word — is never written, so a plan without a button keeps the wire and the
+/// hash it had.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Button {
+    #[default]
+    Left,
+    Right,
+}
+
+impl Button {
+    /// Whether the wire leaves it out.
+    #[must_use]
+    pub fn is_left(&self) -> bool {
+        *self == Self::Left
+    }
+}
+
+/// A hitbox's width or height in the units a drag's ends are written in.
+pub const PERMILLE: i64 = 1_000;
+
+/// Where a drag presses or lets go (t-10384): a point relative to its
+/// target's hitbox, in [`PERMILLE`] of the hitbox's width and height — `0`
+/// its left or top edge, `1000` its right or bottom one — at most
+/// [`ReflexLimits::max_drag_reach_permille`] beyond it on each side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DragPoint {
+    pub x: i64,
+    pub y: i64,
+}
+
+impl DragPoint {
+    /// Whether it lies within `reach` permille of the hitbox on each side.
+    #[must_use]
+    pub fn within(self, reach: u64) -> bool {
+        let reach = i64::try_from(reach).unwrap_or(i64::MAX);
+        let inside = |at: i64| at >= -reach && at <= PERMILLE.saturating_add(reach);
+        inside(self.x) && inside(self.y)
+    }
+}
+
+/// One action of a macro. Beside its id, kind and target it carries what it
+/// presses (t-10384), each field left out at its default — so every plan
+/// written before them keeps its bytes and its hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
     pub id: String,
     pub kind: ActionKind,
     pub target: String,
+    /// A key action's key, a word of the key table ([`key_table`]): a key
+    /// names one, and nothing else does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// What a key, a click or a drag holds while it presses: modifiers of the
+    /// key table, a set — written in byte order, each once.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub modifiers: BTreeSet<String>,
+    /// A click's button.
+    #[serde(default, skip_serializing_if = "Button::is_left")]
+    pub button: Button,
+    /// Where a drag presses: a drag names both its ends, and nothing else
+    /// names either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DragPoint>,
+    /// Where a drag lets go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DragPoint>,
+}
+
+impl Action {
+    /// Whether it carries what its kind may and needs: a key its key, a drag
+    /// both its ends, a click alone a button other than the left, and
+    /// modifiers only a key, a click or a drag.
+    fn shaped(&self) -> bool {
+        let key = self.key.is_some() == (self.kind == ActionKind::Key);
+        let ends = self.from.is_some() == (self.kind == ActionKind::Drag)
+            && self.to.is_some() == (self.kind == ActionKind::Drag);
+        let button = self.button.is_left() || self.kind == ActionKind::Click;
+        let modifiers = self.modifiers.is_empty()
+            || matches!(
+                self.kind,
+                ActionKind::Key | ActionKind::Click | ActionKind::Drag
+            );
+        key && ends && button && modifiers
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +503,8 @@ pub enum ReflexError {
     /// A colour detector without its spec, or a spec
     /// `game_state::validate_color` refuses.
     Perception,
+    /// A key chord the key table refuses ([`KeyTable::refuses`]).
+    Chord,
 }
 
 /// Whether `s` is an id this contract carries: 1 to [`MAX_IDENTIFIER_BYTES`]
@@ -572,6 +679,7 @@ pub fn validate(plan: ReflexPlan) -> Result<ValidatedPlan, ReflexError> {
     let mut macro_ids = BTreeSet::new();
     let mut action_ids = BTreeSet::new();
     let mut actions = 0_u64;
+    let table = key_table();
     for item in &plan.macros {
         if !identifier(&item.id) {
             return Err(ReflexError::Id);
@@ -595,13 +703,35 @@ pub fn validate(plan: ReflexPlan) -> Result<ValidatedPlan, ReflexError> {
             if !action_ids.insert(action.id.as_str()) {
                 return Err(ReflexError::Duplicate);
             }
-            if matches!(action.kind, ActionKind::Move | ActionKind::Click)
-                && !detector_ids.contains(action.target.as_str())
+            // What a kind may carry is its own before its target is looked up.
+            if !action.shaped()
+                || action
+                    .key
+                    .as_ref()
+                    .is_some_and(|key| !table.keys.contains(key))
+                || action
+                    .modifiers
+                    .iter()
+                    .any(|held| !table.modifiers.contains(held))
             {
+                return Err(ReflexError::Unsupported);
+            }
+            if action.kind != ActionKind::Macro && !detector_ids.contains(action.target.as_str()) {
                 return Err(ReflexError::Reference);
             }
-            if matches!(action.kind, ActionKind::Key) {
-                return Err(ReflexError::Unsupported);
+            if action
+                .key
+                .as_ref()
+                .is_some_and(|key| table.refuses(key, &action.modifiers))
+            {
+                return Err(ReflexError::Chord);
+            }
+            if [action.from, action.to]
+                .into_iter()
+                .flatten()
+                .any(|end| !end.within(LIMITS.max_drag_reach_permille))
+            {
+                return Err(ReflexError::Budget);
             }
         }
     }
@@ -799,6 +929,68 @@ impl CapabilityTable {
     }
 }
 
+/// The key table's file, compiled in: the table itself, not a copy.
+const KEYS_FILE: &str = include_str!("../../fixtures/reflex-contract/keys.json");
+
+/// The one table of a key action's words (`fixtures/reflex-contract/keys.json`,
+/// t-10384): the keys it may press, the modifiers it may hold, and the chords
+/// it may not press — those that close, hide or move an app or a window, take
+/// the keyboard to another app, or are the person's own stop chord. The window
+/// sends its bytes with every start, and the helper validates with the same
+/// bytes; the helper's own key table names each key's code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyTable {
+    pub keys: Vec<String>,
+    pub modifiers: Vec<String>,
+    pub refused: Vec<RefusedChord>,
+}
+
+/// One refused row: its key, held with at least its modifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefusedChord {
+    pub key: String,
+    pub modifiers: BTreeSet<String>,
+}
+
+impl KeyTable {
+    /// Whether `key` held with `modifiers` is a chord the table refuses: a
+    /// row names the key and every modifier the row names is held.
+    #[must_use]
+    pub fn refuses(&self, key: &str, modifiers: &BTreeSet<String>) -> bool {
+        self.refused
+            .iter()
+            .any(|row| row.key == key && row.modifiers.is_subset(modifiers))
+    }
+}
+
+/// The key table as the window sends it: the file's canonical bytes.
+#[must_use]
+pub fn keys_wire() -> &'static [u8] {
+    KEYS_FILE.trim_end().as_bytes()
+}
+
+/// A key table read as the helper reads it: canonical, and every field known.
+///
+/// # Errors
+/// [`ReflexError::Wire`] for anything else.
+pub fn decode_keys(bytes: &[u8]) -> Result<KeyTable, ReflexError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ReflexError::Wire)?;
+    if canonical_json(&value) != bytes {
+        return Err(ReflexError::Wire);
+    }
+    serde_json::from_value(value).map_err(|_| ReflexError::Wire)
+}
+
+/// The key table this build carries.
+#[must_use]
+pub fn key_table() -> &'static KeyTable {
+    static TABLE: std::sync::LazyLock<KeyTable> =
+        std::sync::LazyLock::new(|| decode_keys(keys_wire()).expect("the key table is canonical"));
+    &TABLE
+}
+
 /// The capability table's file, compiled in: the table itself, not a copy.
 const CAPABILITY_FILE: &str = include_str!("../../fixtures/reflex-contract/capability.json");
 
@@ -953,6 +1145,12 @@ impl FrameFacts {
 pub enum LeaseInput {
     PointerMove,
     LeftClick,
+    /// A right click's press and release (t-10384).
+    RightClick,
+    /// A key chord's presses and releases, to the run's own app.
+    KeyPress,
+    /// A drag's moves with the button held.
+    ButtonDrag,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

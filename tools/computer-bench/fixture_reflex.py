@@ -26,18 +26,15 @@ hits are actions.
 """
 import argparse
 import collections
-import getpass
 import json
 import math
 import os
 import pathlib
-import plistlib
 import random
 import signal
 import subprocess
 import sys
 import time
-import uuid
 
 import tally
 from bench import Bench, Refused, Signals, Stopped
@@ -691,7 +688,7 @@ def keychain(service, value=False):
     """One item of the person's keychain: whether it is there — or, asked for
     its value, the value, which goes into one driver's environment and
     nowhere else: never printed, never written, never an argument."""
-    command = ["security", "find-generic-password", "-s", service, "-a", getpass.getuser()]
+    command = ["security", "find-generic-password", "-s", service, "-a", subprocess.check_output(["id", "-un"], text=True).strip()]
     done = subprocess.run(command + (["-w"] if value else []), capture_output=True, text=True)
     if done.returncode != 0:
         return None
@@ -710,20 +707,14 @@ def generator_key_name():
 def keys_for(values, generator, read):
     """The keys one autopilot driver is handed, by the name the window's key
     store gives them, read with `read` (the keychain): the Jev key its
-    questions ask with, when there is one, and — for the window's own
-    generator — that generator's key, without which nothing starts. A key
+    questions ask with, when there is one. The window's generator reads its
+    own selected login or key road; an API key is not a prerequisite here. A key
     that is not there is looked for and never read. Answers (env, None), or
     (None, why)."""
     keys = values["reflex_goal"]["keys"]
     env = {}
     if read(keys["prefix"] + keys["jev"]):
         env[keys["jev"]] = read(keys["prefix"] + keys["jev"], value=True)
-    if generator != STUB:
-        name = generator_key_name()
-        if not name or not read(keys["prefix"] + name):
-            return None, (f"the window's generator has no key ({keys['prefix']}{name}): it writes no plan, "
-                          f"so an autopilot round runs only with --generator {STUB}")
-        env[name] = read(keys["prefix"] + name, value=True)
     return {name: key for name, key in env.items() if key}, None
 
 
@@ -854,20 +845,8 @@ def the_round(owner, seed, values, table_limits):
 def prepare(folder):
     """Compile the fixture into an app bundle of its own (a fresh owner, so a
     fresh bundle id the run's scope names); nothing is launched."""
-    folder.mkdir(mode=0o700, parents=False, exist_ok=False)
-    owner = uuid.uuid4().hex[:12]
-    app = folder / f"{EXECUTABLE}-{owner}.app"
-    executable = app / "Contents/MacOS" / EXECUTABLE
-    executable.parent.mkdir(parents=True)
-    with (app / "Contents/Info.plist").open("wb") as handle:
-        plistlib.dump({"CFBundleIdentifier": f"{BUNDLE_PREFIX}.{owner}", "CFBundleExecutable": EXECUTABLE,
-                       "CFBundleName": f"{EXECUTABLE}-{owner}", "CFBundlePackageType": "APPL",
-                       "NSHighResolutionCapable": True}, handle)
-    built = subprocess.run(["swiftc", "-O", "-swift-version", "6", "-warnings-as-errors", str(SOURCE),
-                            "-o", str(executable)])
-    write_atomic(folder / "session.json", {"owner": owner, "app": str(app), "executable": str(executable),
-                                           "bundle": f"{BUNDLE_PREFIX}.{owner}", "swiftc": built.returncode})
-    return built.returncode
+    import fixture_support
+    return fixture_support.prepare(folder, EXECUTABLE, SOURCE, BUNDLE_PREFIX)
 
 
 class Desk:
@@ -886,8 +865,18 @@ class Desk:
         path.mkdir(mode=0o700, exist_ok=False)
         return path
 
+    def round(self, seed):
+        return the_round(self.session["owner"], seed, self.values, self.limits)
+
+    def plan(self, geometry, rules):
+        return plan(geometry, self.values, self.session["bundle"], contract(), rules=rules,
+                    table_limits=self.limits)
+
+    def result(self, record):
+        return judged(record, self.values, self.limits)
+
     def launch(self, run, seed):
-        write_atomic(run / "round.json", the_round(self.session["owner"], seed, self.values, self.limits))
+        write_atomic(run / "round.json", self.round(seed))
         with (run / "fixture.log").open("w") as log:
             self.fixture = subprocess.Popen([self.session["executable"], str(run / "round.json"), str(run)],
                                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -994,7 +983,9 @@ class Desk:
             write_atomic(run / "start.json", {"t0Ns": record["t0Ns"]})
             request = {"bundle": self.session["bundle"], "pollMs": safety["poll_ms"],
                        "seconds": self.values["reflex_round"]["run_s"], "renew": True, "restore": ready["pointer"]}
-            env = {**os.environ, FOLDER_ENV: str(run), HELPER_ENV: helper_app}
+            env = {name: value for name, value in os.environ.items()
+                   if name not in (goal["keys"]["jev"], generator_key_name())}
+            env.update({FOLDER_ENV: str(run), HELPER_ENV: helper_app})
             if autopilot is not None:
                 home = bench_home(run)
                 request.update(goal=autopilot["words"], generator=autopilot["generator"], l1=autopilot["l1"],
@@ -1018,7 +1009,7 @@ class Desk:
         record["verdictNs"] = loaded["run"]["verdictNs"] = uptime_ns()
         record.setdefault("load", {})["verdict"] = list(os.getloadavg())
         write_atomic(run / "run.json", record)
-        result = judged(loaded, self.values, self.limits)
+        result = self.result(loaded)
         write_atomic(run / tally.REFLEX_RUN, result)
         return result
 
@@ -1062,9 +1053,7 @@ class Desk:
                     watch = Supervisor(helper_pid=geometry["helperPid"])
                     # A person's plan, or the stand-in's answer; the window's generator writes its own.
                     if (record.get("autopilot") or {}).get("generator", STUB) == STUB:
-                        write_atomic(run / "plan.json", plan(geometry, self.values, self.session["bundle"],
-                                                             contract(), rules=record["rules"],
-                                                             table_limits=self.limits))
+                        write_atomic(run / "plan.json", self.plan(geometry, record["rules"]))
                     planned = True
                 elif uptime_ns() > prep_until:
                     return stop("preparation overran")

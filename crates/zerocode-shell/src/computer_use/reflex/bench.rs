@@ -60,7 +60,7 @@ use super::{
 };
 use crate::api_routers::{RouterKeys, RouterRefusal};
 use crate::computer_use::ComputerUseError;
-use crate::computer_use::errand::value::{LiveWriter, Said, ValueWriter as _, endpoint_of};
+use crate::computer_use::errand::value::{LiveWriter, Said};
 use crate::computer_use::macos::Session;
 use crate::computer_use::session::ProviderSession as _;
 use crate::systemone::{self, Spent, Wire};
@@ -76,6 +76,8 @@ const STUB: &str = "stub";
 const CALLS: &str = "calls.jsonl";
 /// The helper's word for a run it no longer knows.
 const MISSING: &str = "missing";
+/// Only a helper built with REFLEX_BENCH accepts this comparison selector.
+const PRESS_AIM_ENV: &str = "ZEROCODE_REFLEX_BENCH_AIM";
 
 /// The keys this process's environment holds, by the name a key store's
 /// item carries after the window's prefix: the bench asks with the key the
@@ -96,6 +98,27 @@ impl RouterKeys for EnvKeys {
     fn delete(&self, _service: &str) -> Result<(), RouterRefusal> {
         Err(RouterRefusal::from("the bench keeps no key".to_string()))
     }
+}
+
+/// Read the window's selected generator road and account roots.
+fn generator_setup() -> crate::computer_use::errand::value::Setup {
+    use crate::app_paths::{AppPaths, PathClass};
+    let paths = AppPaths::from_platform().expect("the window's application paths");
+    let root = paths.active_root(PathClass::Config);
+    let preferences = crate::settings::SettingsRepository::new(root)
+        .read_json::<crate::settings_runtime::SettingsDocument>(
+            crate::settings_runtime::SETTINGS_DOCUMENT_FILE,
+        )
+        .expect("the window's generator preference");
+    let road = preferences
+        .value
+        .map(|document| document.computer_generator_road)
+        .unwrap_or_default();
+    crate::computer_use::errand::value::Setup::new(
+        road,
+        root.to_path_buf(),
+        paths.active_root(PathClass::LocalData).to_path_buf(),
+    )
 }
 
 /// A generator standing in for a model: every request is answered with the
@@ -252,11 +275,17 @@ fn a_reflex_run_on_the_benchs_own_fixture() {
     let helper_pid = session.helper_pid();
     let calls = folder.join(CALLS);
     let known = RefCell::new(BTreeMap::new());
+    let press_aim = std::env::var(PRESS_AIM_ENV).ok();
     // Every start and stop the helper answered, as the host's clock saw it
     // asked and answered: where one plan's hand let go and the next took over.
     // And each run's status as the helper last told it: once a run's receipts
     // are all acknowledged the helper forgets it, but for the last to end.
-    let mut call = |method: &str, params: Value| {
+    let mut call = |method: &str, mut params: Value| {
+        if method == "reflexStart"
+            && let Some(aim) = &press_aim
+        {
+            params["benchPressAim"] = json!(aim);
+        }
         let asked_ns = uptime_ns();
         let answer = session
             .request(method, params.clone())
@@ -306,6 +335,7 @@ fn a_reflex_run_on_the_benchs_own_fixture() {
             "helperPid": helper_pid,
             "launchedNs": launched_ns,
             "connectedNs": connected_ns,
+            "benchPressAim": press_aim,
         }),
     );
     let bench = Bench {
@@ -497,20 +527,7 @@ impl Bench<'_> {
                 poll: self.poll,
             })
         } else {
-            // The bench's key road, as before t-10372: the row the API-key
-            // road asks, its key read off the runner's environment.
-            let writer = LiveWriter::at(
-                &LiveWriter::window(crate::computer_use::errand::value::Setup::new(
-                    zerocode_core::type_value::GeneratorRoad::ApiKey,
-                    PathBuf::new(),
-                    PathBuf::new(),
-                ))
-                .row()
-                .and_then(endpoint_of)
-                .unwrap_or_default(),
-                Box::new(EnvKeys),
-            );
-            Box::new(writer)
+            Box::new(LiveWriter::window(generator_setup()))
         };
         let asked = Asked::of(&json!({
             "goal": self.request["goal"],

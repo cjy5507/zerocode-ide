@@ -18,7 +18,7 @@ pub enum Modifier {
     Command,
     /// `ctrl`, `control`.
     Control,
-    /// `alt`, `option`.
+    /// `alt`, `option`, `opt`.
     Alt,
     /// `shift`.
     Shift,
@@ -39,7 +39,7 @@ impl Modifier {
             "cmdorctrl" | "commandorcontrol" => Some(Self::Primary),
             "cmd" | "command" | "meta" | "super" | "win" => Some(Self::Command),
             "ctrl" | "control" => Some(Self::Control),
-            "alt" | "option" => Some(Self::Alt),
+            "alt" | "option" | "opt" => Some(Self::Alt),
             "shift" => Some(Self::Shift),
             _ => None,
         }
@@ -131,6 +131,18 @@ pub const KEY_NAMES: &[&str] = &[
     "end",
     "pagedown",
     "page_down",
+    "f1",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "f6",
+    "f7",
+    "f8",
+    "f9",
+    "f10",
+    "f11",
+    "f12",
 ];
 
 /// The letter a person selects everything with, and the one they paste with —
@@ -325,6 +337,11 @@ mod tests {
         assert_eq!(win.modifiers, vec![Modifier::Command]);
         assert_eq!(parse_key_spec("Page_Down").unwrap().key, "page_down");
         assert_eq!(parse_key_spec("esc").unwrap().modifiers, vec![]);
+        // The reflex key table's words (t-10384): the function keys, and `opt`.
+        let function = parse_key_spec("opt+F5").unwrap();
+        assert_eq!(function.modifiers, vec![Modifier::Alt]);
+        assert_eq!(function.key, "f5");
+        assert_eq!(parse_key_spec("f12").unwrap().key, "f12");
         let refused = parse_key_spec("ctrl+f13").unwrap_err();
         assert_eq!(refused.code, "invalid_argument");
         assert_eq!(refused.message, "unsupported key 'ctrl+f13'");
@@ -481,9 +498,12 @@ mod tests {
 
     #[test]
     fn the_vocabulary_is_the_helpers_table() {
-        assert_eq!(KEY_NAMES.len(), 67);
+        // The helper's 67 names and the function keys the reflex key table
+        // presses (t-10384).
+        assert_eq!(KEY_NAMES.len(), 79);
         assert!(KEY_NAMES.contains(&"forwarddelete"));
         assert!(KEY_NAMES.contains(&"\\"));
-        assert!(!KEY_NAMES.contains(&"f1"));
+        assert!(KEY_NAMES.contains(&"f1") && KEY_NAMES.contains(&"f12"));
+        assert!(!KEY_NAMES.contains(&"f13"));
     }
 }

@@ -37,9 +37,7 @@ use zerocode_core::computer_use::{
     REFLEX_REPLAN_AFTER_UNKNOWN_PASSES, REFLEX_REPLAN_COMPARE_MS,
 };
 use zerocode_core::computer_use_protocol::error_code;
-use zerocode_core::computer_use_protocol::reflex::{
-    ActionKind, ReflexPlan, Scope, Surface, ValidatedPlan,
-};
+use zerocode_core::computer_use_protocol::reflex::{ReflexPlan, Scope, Surface, ValidatedPlan};
 use zerocode_core::jev::promote::names_a_schema_failure;
 use zerocode_core::jev::reflex_decide::{
     self, ANSWERED, CONTINUE, KIND_KEY, LABEL_KIND, NOT_REPLANNED, PAUSE, Pending, REPLAN,
@@ -198,7 +196,7 @@ impl Run {
             .macros
             .iter()
             .flat_map(|item| &item.actions)
-            .filter(|action| action.kind == ActionKind::Click)
+            .filter(|action| action.kind.presses())
             .map(|action| action.id.clone())
             .collect();
         Self {

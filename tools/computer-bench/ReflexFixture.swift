@@ -78,8 +78,6 @@ struct Round: Decodable {
     let schedule: Schedule
 }
 
-func uptimeNs() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
-
 /// One shape as a frame drew it, in the window's content points (top-left origin).
 struct Drawn {
     enum Kind: String { case target, decoy }
@@ -103,62 +101,6 @@ struct Frame {
     let curtains: [CGRect]
 
     func curtained(_ point: CGPoint) -> Bool { curtains.contains { $0.contains(point) } }
-}
-
-/// The fixture's record: lines appended to its files off the main thread, and
-/// its state rewritten whole each time.
-final class Recorder: @unchecked Sendable {
-    let folder: URL
-    private let queue = DispatchQueue(label: "reflex-fixture.recorder")
-    private var events: [[String: Any]] = []
-    private var frames: [[String: Any]] = []
-
-    init(folder: URL) {
-        self.folder = folder
-    }
-
-    func event(_ row: [String: Any]) { events.append(row) }
-    func frame(_ row: [String: Any]) { frames.append(row) }
-
-    func write(_ name: String, _ object: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return }
-        try? data.write(to: folder.appendingPathComponent(name), options: .atomic)
-    }
-
-    /// Append what came since the last flush, then the state: encoded here,
-    /// written on the recorder's own queue.
-    func flush(state: [String: Any], wait: Bool = false) {
-        func lines(_ rows: [[String: Any]]) -> Data {
-            var text = Data()
-            for row in rows {
-                guard let line = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]) else { continue }
-                text.append(line)
-                text.append(0x0A)
-            }
-            return text
-        }
-        let appended = [("events.jsonl", lines(events)), ("frames.jsonl", lines(frames))]
-        events = []
-        frames = []
-        let whole = (try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])) ?? Data()
-        let folder = self.folder
-        let work: @Sendable () -> Void = {
-            for (name, text) in appended where !text.isEmpty {
-                let url = folder.appendingPathComponent(name)
-                if let handle = try? FileHandle(forWritingTo: url) {
-                    handle.seekToEndOfFile()
-                    handle.write(text)
-                    try? handle.close()
-                } else {
-                    try? text.write(to: url)
-                }
-            }
-            if !whole.isEmpty {
-                try? whole.write(to: folder.appendingPathComponent("fixture.json"), options: .atomic)
-            }
-        }
-        if wait { queue.sync(execute: work) } else { queue.async(execute: work) }
-    }
 }
 
 /// The scene: the round played on the host clock from the goal's moment
@@ -398,10 +340,8 @@ final class Fixture: NSObject, NSApplicationDelegate {
     let recorder: Recorder
     var panel: NSPanel?
     var arena: Arena?
-    var flushTimer: Timer?
+    var lifetime: FixtureLifetime?
     var becameActive = false
-    var activity: NSObjectProtocol?
-    var signals: [DispatchSourceSignal] = []
 
     init(round: Round, recorder: Recorder) {
         self.round = round
@@ -409,68 +349,19 @@ final class Fixture: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // A visible round keeps its frame rate: no App Nap, no timer coalescing.
-        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical],
-                                                         reason: "a reflex bench round")
-        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil,
-                                               queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.becameActive = true }
-        }
         let size = CGSize(width: round.canvas.width, height: round.canvas.height)
-        // Around the pointer, inside the screen it is on: the run's first glide
-        // starts where the pointer rests, so it never crosses another app.
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? CGRect(origin: .zero, size: size)
-        // Whole points, so the window server names the window exactly where it is.
-        let origin = CGPoint(x: min(max(mouse.x - size.width / 2, visible.minX), visible.maxX - size.width).rounded(.down),
-                             y: min(max(mouse.y - size.height / 2, visible.minY), visible.maxY - size.height).rounded(.down))
-        let frame = CGRect(origin: origin, size: size)
-        let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.isFloatingPanel = false
-        panel.level = .normal
-        panel.hidesOnDeactivate = false
-        panel.becomesKeyOnlyIfNeeded = true
-        panel.acceptsMouseMovedEvents = true
-        panel.isReleasedWhenClosed = false
-        panel.colorSpace = .sRGB
         let arena = Arena(round: round, recorder: recorder)
         let view = ArenaView(frame: CGRect(origin: .zero, size: size))
         view.preferredFramesPerSecond = round.framesPerSecond
         view.ignoresSiblingOrder = true
         view.arena = arena
         view.presentScene(arena)
-        panel.contentView = view
-        panel.orderFrontRegardless()
-        self.panel = panel
+        let window = FixtureWindow(view: view, owner: round.owner, seed: round.seed)
+        self.panel = window.panel
         self.arena = arena
-        // Quartz's global space (top-left of the main display), the space a run's points are in.
-        let mainHeight = NSScreen.screens.first?.frame.height ?? size.height
-        let quartz = CGRect(x: frame.minX, y: mainHeight - frame.maxY, width: frame.width, height: frame.height)
-        recorder.write("ready.json", [
-            "owner": round.owner, "seed": round.seed, "pid": Int(getpid()),
-            "bundleId": Bundle.main.bundleIdentifier ?? "",
-            "window": ["x": quartz.minX, "y": quartz.minY, "width": quartz.width, "height": quartz.height],
-            "pointer": ["x": mouse.x, "y": mainHeight - mouse.y],
-            "pointerInside": NSMouseInRect(mouse, frame, false),
-            "readyNs": uptimeNs(), "events": 0, "hits": 0, "misses": 0,
-            "active": NSApp.isActive,
-        ])
-        flushTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.flush() }
-        }
-        for signalNumber in [SIGTERM, SIGINT] {
-            signal(signalNumber, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
-            source.setEventHandler { [weak self] in
-                MainActor.assumeIsolated {
-                    self?.flush(wait: true)
-                    exit(0)
-                }
-            }
-            source.resume()
-            signals.append(source)
-        }
+        recorder.write("ready.json", window.ready)
+        lifetime = FixtureLifetime(flush: { [weak self] wait in self?.flush(wait: wait) },
+                                   becameActive: { [weak self] in self?.becameActive = true })
     }
 
     func flush(wait: Bool = false) {
@@ -482,22 +373,28 @@ final class Fixture: NSObject, NSApplicationDelegate {
     }
 }
 
-let arguments = CommandLine.arguments
-guard arguments.count == 3 else {
-    FileHandle.standardError.write(Data("usage: ReflexFixture <round.json> <state-folder>\n".utf8))
-    exit(2)
+@main
+@MainActor
+struct ReflexFixtureMain {
+    static func main() {
+        let arguments = CommandLine.arguments
+        guard arguments.count == 3 else {
+            FileHandle.standardError.write(Data("usage: ReflexFixture <round.json> <state-folder>\n".utf8))
+            exit(2)
+        }
+        let folder = URL(fileURLWithPath: arguments[2], isDirectory: true)
+        guard let data = FileManager.default.contents(atPath: arguments[1]),
+              let round = try? JSONDecoder().decode(Round.self, from: data)
+        else {
+            FileHandle.standardError.write(Data("the round file does not read\n".utf8))
+            exit(2)
+        }
+        let fixture = Fixture(round: round, recorder: Recorder(folder: folder))
+        let app = NSApplication.shared
+        // A regular app, so the helper can resolve the run's scope by this bundle's id;
+        // it never activates itself and its window takes no focus.
+        app.setActivationPolicy(.regular)
+        app.delegate = fixture
+        withExtendedLifetime(fixture) { app.run() }
+    }
 }
-let folder = URL(fileURLWithPath: arguments[2], isDirectory: true)
-guard let data = FileManager.default.contents(atPath: arguments[1]),
-      let round = try? JSONDecoder().decode(Round.self, from: data)
-else {
-    FileHandle.standardError.write(Data("the round file does not read\n".utf8))
-    exit(2)
-}
-let fixture = MainActor.assumeIsolated { Fixture(round: round, recorder: Recorder(folder: folder)) }
-let app = NSApplication.shared
-// A regular app, so the helper can resolve the run's scope by this bundle's id;
-// it never activates itself and its window takes no focus.
-app.setActivationPolicy(.regular)
-app.delegate = fixture
-app.run()

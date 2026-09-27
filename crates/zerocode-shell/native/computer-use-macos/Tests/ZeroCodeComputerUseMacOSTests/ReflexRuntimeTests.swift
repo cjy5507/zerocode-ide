@@ -75,7 +75,7 @@ final class RecordingPoster: HandPoster, @unchecked Sendable {
 
     private let lock = NSLock()
     private var posted: [Posted] = []
-    private var location = SmoothPointerPath.Point(x: 0, y: 0)
+    private var location: SmoothPointerPath.Point? = SmoothPointerPath.Point(x: 0, y: 0)
     /// Runs after each post, outside the poster's lock (but inside the hand's:
     /// it must not call the hand).
     var onPost: ((HandEvent, Int64) -> Void)?
@@ -107,6 +107,12 @@ final class RecordingPoster: HandPoster, @unchecked Sendable {
     func movePointer(to point: SmoothPointerPath.Point) {
         lock.lock()
         location = point
+        lock.unlock()
+    }
+
+    func forgetPointer() {
+        lock.lock()
+        location = nil
         lock.unlock()
     }
 
@@ -179,6 +185,10 @@ enum ReflexFixtures {
         try PerceptionSpecs.decodeLimits(Data(try Data(contentsOf: root.appendingPathComponent("game-state/limits.json")).dropLast()))
     }
 
+    /// The window's key table (`reflex::keys_wire`): the file's own bytes.
+    static func keysWire() throws -> Data { Data(try Data(contentsOf: root.appendingPathComponent("reflex-contract/keys.json")).dropLast()) }
+    static func keys() throws -> ReflexKeyTable { try ReflexContract.decodeKeys(keysWire()) }
+
     /// The window's tables as a start carries them: the files' own bytes.
     static func limitsWire() throws -> Data { Data(try Data(contentsOf: root.appendingPathComponent("reflex-contract/limits.json")).dropLast()) }
     static func perceptionWire() throws -> Data { Data(try Data(contentsOf: root.appendingPathComponent("game-state/limits.json")).dropLast()) }
@@ -208,7 +218,7 @@ enum ReflexFixtures {
     /// valid_basic's plan, changed by `change`, hashed again and validated
     /// under both tables.
     static func plan(_ change: (inout [String: Any]) -> Void = { _ in }) throws -> ValidatedReflexPlan {
-        try ReflexContract.decodeAndValidate(wire(change), limits: limits(), perception: perception())
+        try ReflexContract.decodeAndValidate(wire(change), limits: limits(), perception: perception(), keys: keys())
     }
 
     /// valid_basic's plan, changed by `change` and hashed again, as the
@@ -348,6 +358,21 @@ struct LeafRig {
 }
 
 final class ReflexRuntimeTests: XCTestCase {
+    /// A drag and a key are leaves of their own (t-10384): a fire of a macro
+    /// holding a drag and a key runs the drag, then the key, each on the
+    /// detector the macro names.
+    func test_a_macros_drag_and_key_are_leaves_of_their_own_kind() throws {
+        let plan = try XCTUnwrap(try? ReflexFixtures.plan { object in
+            object["macros"] = [["id": "tap", "repeat": 1, "actions": [
+                ["id": "box1", "kind": "drag", "target": "ball", "from": ["x": -250, "y": -250], "to": ["x": 1250, "y": 1250]],
+                ["id": "assign1", "kind": "key", "target": "ball", "key": "1", "modifiers": ["ctrl"]],
+            ]]]
+        }, "a plan whose macro drags and presses a key validates")
+        let leaves = ReflexMacros.leaves(ruleId: "follow", macroId: "tap", in: plan.plan)
+        XCTAssertEqual(leaves.map(\.kind.rawValue), ["drag", "key"])
+        XCTAssertEqual(leaves.map(\.detector), ["ball", "ball"])
+    }
+
     // MARK: red-first — the eight the brief names
 
     /// A hold with no frame coming and the request's road stalled behind the
@@ -500,8 +525,8 @@ final class ReflexRuntimeTests: XCTestCase {
         let fence = try LeafRig()
         fence.decide()
         var fenceSeq: UInt64 = 10
-        fence.sleeper.onSleep = { index, _ in
-            if index == 10 { fence.hand.revoke(fence.token, reason: "external_input") }
+        fence.sleeper.onSleep = { _, _ in
+            if !fence.poster.presses.isEmpty { fence.hand.revoke(fence.token, reason: "external_input") }
             fenceSeq += 1
             fence.capture(fenceSeq)
         }
@@ -524,9 +549,8 @@ final class ReflexRuntimeTests: XCTestCase {
     }
 
     /// The press waits for a capture newer than the one the lease came from,
-    /// still showing the same track with the pointer inside its hitbox: a
-    /// target that moved off, another in its place, or no newer capture at
-    /// all posts no button.
+    /// still showing the same track: its new position is aimed at, while
+    /// another track in its place or no newer capture posts no button.
     func test_moving_target_is_revalidated_before_button_down() throws {
         func click(afterLastWaypoint change: @escaping (LeafRig) -> Void) throws -> (ReflexReceipt, LeafRig) {
             let rig = try LeafRig()
@@ -537,14 +561,18 @@ final class ReflexRuntimeTests: XCTestCase {
                 rig.capture(seq)
             }
             rig.poster.onPost = { event, _ in
-                if event.kind == .pointerMove, rig.poster.moves.count == 10 { change(rig) }
+                if event.kind == .pointerMove, rig.poster.moves.count == 10 {
+                    change(rig)
+                    rig.sleeper.onSleep = nil // The replacement capture stays the newest during settling.
+                }
             }
             return (try rig.runner().run(LeafRig.click, index: 0), rig)
         }
         let far = ReflexRoi(x: 0, y: 0, width: 4, height: 4, space: .pixel)
         let (moved, movedRig) = try click { rig in rig.capture(90, box: far) }
-        XCTAssertEqual(moved.outcome, .moved)
-        XCTAssertEqual(movedRig.poster.presses.count, 0, "the target left the pointer: no press")
+        XCTAssertEqual(moved.outcome, .done)
+        XCTAssertEqual(movedRig.poster.presses.map { SmoothPointerPath.Point(x: $0.x, y: $0.y) },
+                       [SmoothPointerPath.Point(x: 2, y: 2)], "the same track is pressed where it moved")
 
         let (replaced, replacedRig) = try click { rig in rig.capture(90, track: 6) }
         XCTAssertEqual(replaced.outcome, .moved)
@@ -731,7 +759,8 @@ final class ReflexRuntimeTests: XCTestCase {
             return ReflexReceipt(ruleId: leaf.ruleId, actionId: leaf.actionId, leafIndex: index, outcome: .done, targetId: nil,
                                  trackId: nil, pick: .first, sourceCapture: nil, decidedHostNs: nil, decidedDeliveredHostNs: nil, admittedHostNs: nil, captureWaitNs: 0,
                                  firstEventHostNs: nil, firstEventFrameHostNs: nil, firstEventFrameDeliveredHostNs: nil,
-                                 downHostNs: nil, upHostNs: nil, endedHostNs: 0, events: 1)
+                                 downHostNs: nil, upHostNs: nil, endedHostNs: 0, events: 1,
+                                 kind: leaf.kind, key: nil, button: nil, modifiers: [], reason: nil)
         }
         XCTAssertLessThan(Date().timeIntervalSince(started), 1, "never waited on the reader")
         XCTAssertEqual(count, 2)
@@ -785,12 +814,13 @@ final class ReflexRuntimeTests: XCTestCase {
         let table = String(decoding: try ReflexFixtures.capabilityWire(liveReflex: false), as: UTF8.self)
         // The window's own table, as it sends it: the file's canonical bytes.
         let golden = String(decoding: Data(try Data(contentsOf: fixtures.appendingPathComponent("reflex-contract/capability.json")).dropLast()), as: UTF8.self)
+        let keys = String(decoding: try ReflexFixtures.keysWire(), as: UTF8.self)
         var said = ""
         func start(_ change: (inout [String: JSONValue]) -> Void) -> String? {
             var params: [String: JSONValue] = [
                 "runId": .string("wiring"), "plan": .string(wire), "limits": .string(limits),
                 "perception": .string(perception), "runPolicy": .string(policy), "capability": .string(claimed),
-                "eye": eye, "display": .number(0),
+                "keys": .string(keys), "eye": eye, "display": .number(0),
             ]
             change(&params)
             do {
@@ -821,6 +851,8 @@ final class ReflexRuntimeTests: XCTestCase {
         XCTAssertEqual(start { $0["limits"] = .string(limits.replacingOccurrences(of: "\"pointer_tick_ns\":8000000", with: "\"pointer_tick_ns\":7")) }, "invalid_argument",
                        "a table whose longest glide overflows one lease is refused, not trimmed")
         XCTAssertEqual(start { $0["limits"] = nil }, "invalid_argument", "no table, no run")
+        XCTAssertEqual(start { $0["keys"] = nil }, "invalid_argument", "no key table, no run")
+        XCTAssertEqual(start { $0["keys"] = .string(" " + keys) }, "invalid_argument", "only the key table's canonical bytes")
         XCTAssertEqual(start { $0["runId"] = .string("") }, "invalid_argument")
         XCTAssertEqual(OperatorHandHost.hand.snapshot.holder, nil)
     }
@@ -1484,10 +1516,10 @@ final class ReflexRunBoundaryTests: XCTestCase {
         let rig = try LiveRig(plan: try ReflexFixtures.clickPlan())
         let inFence = Gate()
         inFence.close()
-        rig.sleeper.onSleep = { index, _ in
-            if index < 10 {
+        rig.sleeper.onSleep = { _, _ in
+            if rig.poster.presses.isEmpty {
                 rig.frame(.ball(track: 5, box: LiveRig.box))
-            } else if index == 10 {
+            } else {
                 inFence.pass()
             }
         }
@@ -1813,7 +1845,7 @@ final class ReflexRunBoundaryTests: XCTestCase {
                 _ = try Provider().handle(method: "reflexStart", params: [
                     "runId": .string("binding\(runs)"), "plan": .string(String(decoding: wire, as: UTF8.self)), "limits": .string(limits),
                     "perception": .string(perception), "runPolicy": .string(policy), "capability": .string(claimed),
-                    "eye": eye, "display": .number(0),
+                    "keys": .string(String(decoding: try ReflexFixtures.keysWire(), as: UTF8.self)), "eye": eye, "display": .number(0),
                 ])
                 return nil
             } catch {
@@ -2056,23 +2088,27 @@ struct HostStart {
     var hand: OperatorHand
     var policy: Data?
     var capability: Data?
+    var keys: Data?
     var ledger = TestLedger()
 
-    init(runId: String, plan: Data, hand: OperatorHand, policy: Data? = nil, capability: Data? = nil) {
+    init(runId: String, plan: Data, hand: OperatorHand, policy: Data? = nil, capability: Data? = nil, keys: Data? = nil) {
         self.runId = runId
         self.plan = plan
         self.hand = hand
         self.policy = policy
         self.capability = capability
+        self.keys = keys
     }
 
-    func start() throws -> [String: Any] {
+    func start(benchPressAim: String? = nil) throws -> [String: Any] {
         let ledger = self.ledger
         return try ReflexRuntimeHost.start(
             runId: runId, plan: plan, limits: ReflexFixtures.limitsWire(), perception: ReflexFixtures.perceptionWire(),
             runPolicy: try policy ?? ReflexFixtures.policyWire(), capability: try capability ?? ReflexFixtures.capabilityWire(liveReflex: true),
+            keys: try keys ?? ReflexFixtures.keysWire(),
             eye: Self.eye, display: 0, hand: hand, admit: { ledger.admit() }, standing: { ledger.standing() },
-            actingScope: { ReflexActingScope(surface: $0.surface, target: $0.target, pid: 4_242) }
+            actingScope: { ReflexActingScope(surface: $0.surface, target: $0.target, pid: 4_242) },
+            benchPressAim: benchPressAim
         )
     }
 }
@@ -2577,8 +2613,8 @@ final class ReflexKernelAndPolicyTests: XCTestCase {
             frames.poke()
             _ = eventually { frames.taken(taken) >= 2 }
         }
-        host.sleeper.onSleep = { index, _ in
-            if index < 10 { publish() } else if index == 10 { inFence.pass() }
+        host.sleeper.onSleep = { _, _ in
+            if host.poster.presses.isEmpty { publish() } else { inFence.pass() }
         }
         host.poster.onPost = { [monitor = host.monitor, hand = host.hand] event, tag in
             let me = Int64(getpid())
@@ -2774,10 +2810,10 @@ final class ReflexKernelAndPolicyTests: XCTestCase {
         let rig = try LiveRig(plan: try ReflexFixtures.clickPlan(), scene: scene, kernel: kernel)
         let inFence = Gate()
         inFence.close()
-        rig.sleeper.onSleep = { index, _ in
-            if index < 10 {
+        rig.sleeper.onSleep = { _, _ in
+            if rig.poster.presses.isEmpty {
                 rig.frame(.ball(track: 5, box: LiveRig.box))
-            } else if index == 10 {
+            } else {
                 // The frames stop and the next read sticks inside the kernel.
                 kernel.stick()
                 rig.frames.publish(ReflexFixtures.capture(99, capturedNs: rig.clock.nowNs()))
@@ -3060,8 +3096,9 @@ final class ReflexRunRoadTests: XCTestCase {
     }
 
     /// A receipt as the window's collector reads it keeps every key it had and adds its leaf's
-    /// detector's pick and the track its target was decided on (t-10223 R8): additions only, so
-    /// a reader of the old keys reads them unchanged.
+    /// detector's pick and the track its target was decided on (t-10223 R8), and what the leaf
+    /// pressed — its kind, key, button and modifiers — and why it pressed nothing when something
+    /// refused it (t-10384): additions only, so a reader of the old keys reads them unchanged.
     func test_a_receipt_adds_its_pick_and_track_beside_its_keys() throws {
         let rig = HostRig()
         defer { rig.restore() }
@@ -3075,7 +3112,11 @@ final class ReflexRunRoadTests: XCTestCase {
             "decidedDeliveredHostNs", "admittedHostNs", "captureWaitNs", "firstEventHostNs", "firstEventFrameHostNs",
             "firstEventFrameDeliveredHostNs", "downHostNs", "upHostNs", "endedHostNs", "events",
         ]
-        XCTAssertEqual(Set(receipt.keys), before.union(["pick", "trackId"]))
+        XCTAssertEqual(Set(receipt.keys), before.union(["pick", "trackId"]).union(["kind", "key", "button", "modifiers", "reason"]))
+        XCTAssertEqual(receipt["kind"] as? String, "click")
+        XCTAssertEqual(receipt["button"] as? String, "left")
+        XCTAssertEqual(receipt["modifiers"] as? [String], [])
+        XCTAssertTrue(receipt["key"] is NSNull && receipt["reason"] is NSNull)
         XCTAssertEqual(receipt["pick"] as? String, "first")
         XCTAssertEqual(receipt["trackId"] as? UInt64, 5)
         XCTAssertEqual(receipt["targetId"] as? String, "ball#5")
