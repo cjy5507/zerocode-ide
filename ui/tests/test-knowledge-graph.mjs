@@ -5379,6 +5379,124 @@ ok("a cluster's name is one line: every standing plate draws only its name, colo
     && row.fitOpacity > 0.9 && row.zoomedOpacity < 0.5),
   JSON.stringify(oneLines));
 
+/* 놀라운 연결(t-12029, 승인된 시안 v2 「bridges」). 다섯 주제(40·32·24·18·12쪽)에서 한 가닥으로만 이어진 쌍은
+ * 0–2·1–2·1–3(다리), 두 가닥인 2–3과 작은 쪽이 15쪽이 못 되는 3–4는 다리가 아니다. 두 손 모두: 다리는 작은 쪽이 큰
+ * 순서로 그 셋이고, 두 끝 군집의 색으로 이은 곡선(그라데이션의 두 멈춤이 두 색)과 1부터의 번호 원이며, 번호 원
+ * 위에는 어느 이름도 서지 않는다. 「놀라운 연결」 목록은 같은 순서·같은 번호에 두 끝 쪽의 제목을 팁으로 들고,
+ * 줄을 짚으면 그 다리만 굵어지고 나머지는 물러서며, 누르면 그 한 가닥의 앞 쪽이 골라진다. 주변 탐색에는 다리가
+ * 없다. */
+const bridgeVault = topicVault({ sizes: [40, 32, 24, 18, 12],
+  between: [[0, 1, 12], [0, 2, 1], [1, 2, 1], [1, 3, 1], [2, 3, 2], [3, 4, 1]], lonely: 3 });
+const bridgeScene = await glPage.evaluate(async ({ spec, starts }) => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  const paint = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  const rgb = (color) => {
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillStyle = "#000";
+    paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1);
+    return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+  };
+  const near = (one, two) => one.every((value, at) => Math.abs(value - two[at]) <= 2);
+  const hit = (one, two) => one.left < two.right && two.left < one.right && one.top < two.bottom && two.top < one.bottom;
+  const rows = [];
+  try {
+    for (const hand of ["svg", "gl"]) {
+      const { view, layout } = await window.__standKnowledgeScene__("/scene/bridges", spec, hand);
+      const { from, to, edgeCount, keys, titles } = layout.model;
+      const { community, communitySize: size, namedCount: named } = layout;
+      const topicRank = starts.map((first) => community[first]);
+      /* 기대: 그려지는 선에서 이름 있는 쌍마다 세어, 한 가닥이고 작은 쪽이 15쪽 이상인 쌍. */
+      const pairs = new Map();
+      for (let at = 0; at < edgeCount; at += 1) {
+        const left = Math.min(community[from[at]], community[to[at]]);
+        const right = Math.max(community[from[at]], community[to[at]]);
+        if (left === right || right >= named) continue;
+        const held = pairs.get(`${left}|${right}`) ?? { left, right, count: 0 };
+        held.count += 1;
+        pairs.set(`${left}|${right}`, held);
+      }
+      const wanted = [...pairs.values()].filter((pair) => pair.count === 1 && Math.min(size[pair.left], size[pair.right]) >= 15)
+        .sort((one, two) => Math.min(size[two.left], size[two.right]) - Math.min(size[one.left], size[one.right])
+          || Math.max(size[two.left], size[two.right]) - Math.max(size[one.left], size[one.right]))
+        .map((pair) => `${pair.left}|${pair.right}`);
+      const got = layout.bridges.map((bridge) => `${bridge.left}|${bridge.right}`);
+      const root = getComputedStyle(view);
+      const inkOf = (rank) => rgb((layout.communityHue[rank] >= 0 ? root.getPropertyValue(`--knowledge-hue-${layout.communityHue[rank]}`)
+        : root.getPropertyValue("--ink-mist")).trim());
+      const groups = [...view.querySelectorAll(".knowledge-underlay .knowledge-bridges > g")];
+      let inkMiss = 0;
+      const numbers = [];
+      groups.forEach((group, at) => {
+        const bridge = layout.bridges[at];
+        const line = group.querySelector(".knowledge-bridge");
+        const id = /url\(["']?#([^"')]+)/u.exec(line.getAttribute("stroke") ?? "")?.[1];
+        const stops = [...(view.querySelector(`#${id}`)?.querySelectorAll("stop") ?? [])]
+          .map((stop) => rgb(getComputedStyle(stop).stopColor));
+        const head = from[bridge.first];
+        const tail = to[bridge.first];
+        if (stops.length !== 2 || !near(stops[0], inkOf(community[head])) || !near(stops[1], inkOf(community[tail]))) {
+          inkMiss += 1;
+        }
+        numbers.push(group.querySelector(".knowledge-bridge-badge text").textContent);
+      });
+      /* 번호 원 위의 이름 — 주제의 이름판과 쪽의 이름표 둘 다. */
+      const badges = groups.map((group) => group.querySelector(".knowledge-bridge-badge circle").getBoundingClientRect());
+      const words = [...view.querySelectorAll(".knowledge-cluster-label:not(.is-folded) text, .knowledge-node.is-named .knowledge-label, .knowledge-gl-label:not([hidden])")]
+        .map((word) => word.getBoundingClientRect()).filter((box) => box.width > 0);
+      const covered = badges.filter((badge) => words.some((word) => hit(badge, word))).length;
+      /* 목록. */
+      const listRows = [...view.querySelectorAll(".knowledge-overview-bridges .knowledge-inspector-row")];
+      const listed = listRows.map((row) => row.parentElement.querySelector(".knowledge-inspector-note").textContent);
+      const tipsOk = listRows.every((row, at) => {
+        const bridge = layout.bridges[at];
+        return row.dataset.tip.includes(titles[from[bridge.first]]) && row.dataset.tip.includes(titles[to[bridge.first]]);
+      });
+      /* 둘째 줄을 짚는다 — 그 다리만 굵고 나머지는 물러선다. */
+      let hot = null;
+      if (listRows.length > 1) {
+        listRows[1].dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+        await frame();
+        hot = groups.map((group) => ({ width: Number(group.querySelector(".knowledge-bridge").getAttribute("stroke-width")),
+          opacity: Number(group.getAttribute("opacity")) }));
+        view.querySelector(".knowledge-inspector").dispatchEvent(new PointerEvent("pointerleave"));
+        await frame();
+      }
+      /* 첫 줄을 누른다 — 그 한 가닥의 앞 쪽이 골라진다. */
+      listRows[0]?.click();
+      await frame();
+      const picked = knowledgeSelectedKey === keys[from[layout.bridges[0].first]];
+      knowledgeSelectedKey = null;
+      await paintKnowledgeView();
+      /* 주변 탐색 — 다리가 없다. */
+      setKnowledgeMode(view, "local", { centre: keys[starts[0]], paint: false });
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const localBridges = view.querySelectorAll(".knowledge-underlay .knowledge-bridges > g").length;
+      setKnowledgeMode(view, "global");
+      knowledgeSelectedKey = null;
+      await paintKnowledgeView();
+      rows.push({ hand: knowledgePainterFor(view).id, topics: new Set(topicRank).size, wanted, got, drawn: groups.length,
+        inkMiss, numbers, covered, listed, tipsOk, hot, picked, localBridges,
+        least: layout.tuning.bridgeLeast });
+    }
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error), rows };
+  } finally {
+    knowledgePainterKind = null;
+  }
+}, { spec: bridgeVault.spec, starts: bridgeVault.starts });
+ok("surprising links stand out: the single lines between two large topics are curves in both clusters' inks with numbers no name covers, listed in the same order with their pages in a tip; pointing at a row thickens that bridge and quiets the rest, pressing it picks the line's first page — on both hands",
+  !bridgeScene.thrown && bridgeScene.rows.length === 2 && bridgeScene.rows.every((row) => row.topics === 5
+    && row.least === 15 && row.wanted.length === 3 && JSON.stringify(row.got) === JSON.stringify(row.wanted)
+    && row.drawn === 3 && row.inkMiss === 0 && JSON.stringify(row.numbers) === JSON.stringify(["1", "2", "3"])
+    && row.covered === 0 && JSON.stringify(row.listed) === JSON.stringify(["1", "2", "3"]) && row.tipsOk
+    && row.hot !== null && row.hot[1].width === 2.6 && row.hot[1].opacity === 1
+    && row.hot[0].opacity === 0.3 && row.hot[2].opacity === 0.3
+    && row.picked && row.localBridges === 0),
+  JSON.stringify(bridgeScene));
+
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *
  * 다섯 종류의 점 하나씩을 선 없이 한 줄로 세우고, 같은 자리·같은 크기를 SVG 손과 GL 손으로

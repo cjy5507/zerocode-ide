@@ -171,6 +171,16 @@ const KNOWLEDGE_TOKENS = Object.freeze({
   tieHot: "--knowledge-tie-hot",
   tieHotWidth: "--knowledge-tie-hot-width",
   tiesListed: "--knowledge-ties-listed",
+  /* 놀라운 연결(t-12029) — 몇 쪽부터 큰 주제인가, 몇 쌍까지, 휨·굵기·번호 원, 물러섬. */
+  bridgeLeast: "--knowledge-bridge-least",
+  bridgesListed: "--knowledge-bridges-listed",
+  bridgeBend: "--knowledge-bridge-bend",
+  bridgeBendMax: "--knowledge-bridge-bend-max",
+  bridgeWidth: "--knowledge-bridge-width",
+  bridgeHotWidth: "--knowledge-bridge-hot-width",
+  bridgeBadge: "--knowledge-bridge-badge",
+  bridgeBadgeStroke: "--knowledge-bridge-badge-stroke",
+  bridgeQuiet: "--knowledge-bridge-quiet",
   /* 위계의 세 크기와 대표 지식의 몫. */
   coreRadius: "--knowledge-core-radius",
   majorRadius: "--knowledge-major-radius",
@@ -440,6 +450,8 @@ let knowledgeClusterPicked = -1;
 let knowledgeClusterHover = -1;
 /* 「강한 묶음」 목록에서 짚은 묶음의 자리(`layout.ties`의 번호), 없으면 -1. */
 let knowledgeTieHot = -1;
+/* 「놀라운 연결」 목록에서 짚은 다리의 자리(`layout.bridges`의 번호), 없으면 -1(t-12029). */
+let knowledgeBridgeHot = -1;
 /* 탐색 모드(t-4140)와 그 살림. 주변 탐색의 중심은 고른 점(`knowledgeSelectedKey`)이다 —
  * 중심 없는 주변은 없으므로 그 모드에서 고르기를 놓는 것은 전체 지도로 돌아가는
  * 일이다. 방문 이력은 중심·깊이·배율의 스택이고 ← 이전이 되짚는다. 펼친 허브는
@@ -1340,7 +1352,12 @@ function buildKnowledgeView() {
   underlay.setAttribute("aria-hidden", "true");
   const ties = document.createElementNS(SVG_NS, "g");
   ties.setAttribute("class", "knowledge-ties");
-  underlay.appendChild(ties);
+  /* 놀라운 연결(t-12029)의 곡선과 번호, 그리고 곡선마다의 그라데이션. */
+  const bridgeInks = document.createElementNS(SVG_NS, "defs");
+  bridgeInks.setAttribute("class", "knowledge-bridge-inks");
+  const bridges = document.createElementNS(SVG_NS, "g");
+  bridges.setAttribute("class", "knowledge-bridges");
+  underlay.append(bridgeInks, ties, bridges);
   canvas.append(underlay, picture);
 
   /* 배율의 세 단추. 낱말은 에이전트 그래프의 것을 그대로 쓴다 — 같은 동작에
@@ -1742,6 +1759,8 @@ function buildKnowledgeOverview() {
     knowledgeListSection("knowledge-overview-clusters", "knowledge.clusters", t("knowledge.clusters", "군집")),
     /* 그림 옆의 「강한 묶음」(t-12029) — 지도가 굵은 줄 하나로 묶은 군집 쌍을 글로. */
     knowledgeListSection("knowledge-overview-ties", "knowledge.ties", t("knowledge.ties", "강한 묶음")),
+    /* 그림 옆의 「놀라운 연결」(t-12029) — 지도가 번호로 밝힌 다리를 글로. */
+    knowledgeListSection("knowledge-overview-bridges", "knowledge.bridges", t("knowledge.bridges", "놀라운 연결")),
     knowledgeListSection("knowledge-overview-hubs", "knowledge.hubs", t("knowledge.hubs", "허브")),
     knowledgeListSection("knowledge-overview-tags", "knowledge.tagShare", t("knowledge.tagShare", "태그 분포")),
     knowledgeListSection("knowledge-overview-kinds", "knowledge.relationKinds", t("knowledge.relationKinds", "관계 종류")),
@@ -3618,6 +3637,11 @@ function knowledgeLayout(view, model) {
     tiesDrawn: 0,
     /* 「강한 묶음」 목록이 마지막으로 쓴 모델 — 이름만 바뀐 답도 목록을 다시 쓰게. */
     tieListModel: null,
+    /* 놀라운 연결(t-12029, `knowledgeTies`가 함께 센다): 큰 두 주제 사이의 단 한 가닥들, 순서대로. 이번 프레임에
+     * 그어진 다리의 수와 「놀라운 연결」 목록이 마지막으로 쓴 모델. */
+    bridges: [],
+    bridgesDrawn: 0,
+    bridgeListModel: null,
   };
   layout.labelOrder = knowledgeLabelOrder(model, tier);
   layout.project = knowledgeProjector(layout);
@@ -3639,6 +3663,7 @@ function knowledgeLayout(view, model) {
   knowledgeClusterPicked = -1;
   knowledgeClusterHover = -1;
   knowledgeTieHot = -1;
+  knowledgeBridgeHot = -1;
   knowledgeLayouts.set(view, layout);
   return layout;
 }
@@ -4211,6 +4236,16 @@ function knowledgeTies(layout) {
   layout.tiePairs = [...tally.values()].sort((one, two) => two.count - one.count
     || one.left - two.left || one.right - two.right);
   layout.ties = layout.tiePairs.filter((pair) => pair.count >= layout.tuning.tieLeast);
+  /* 놀라운 연결(t-12029, 시안 v2 「bridges」) — 이름 있는 두 군집 사이에 그려지는 선이 **단 한 가닥**이고 작은 쪽도
+   * `bridgeLeast` 쪽 이상인 쌍. 큰 두 주제가 한 쪽의 한 링크로만 이어져 있다는 것은 수백 가닥에 묻혀서는 보이지
+   * 않는 사실이다. 작은 쪽이 큰 순서, 그다음 큰 쪽이 큰 순서, 그다음 선의 앞 점 — 같은 볼트는 같은 목록. */
+  const size = layout.communitySize;
+  layout.bridges = layout.tiePairs
+    .filter((pair) => pair.count === 1 && Math.min(size[pair.left], size[pair.right]) >= layout.tuning.bridgeLeast)
+    .map((pair) => ({ ...pair, small: Math.min(size[pair.left], size[pair.right]),
+      big: Math.max(size[pair.left], size[pair.right]) }))
+    .sort((one, two) => two.small - one.small || two.big - one.big || from[one.first] - from[two.first])
+    .slice(0, Math.max(0, layout.tuning.bridgesListed));
   layout.tieStamp = layout.drawnStamp;
   layout.tieModel = layout.model;
   return layout.ties;
@@ -4246,7 +4281,9 @@ function hotKnowledgeTie(view, at) {
   const layout = knowledgeLayouts.get(view);
   if (!layout || at === knowledgeTieHot) return;
   knowledgeTieHot = at;
-  paintKnowledgeTies(view, layout, knowledgeCamera(view, layout));
+  const camera = knowledgeCamera(view, layout);
+  paintKnowledgeTies(view, layout, camera);
+  paintKnowledgeBridges(view, layout, camera);
 }
 
 /* ---- 이름표 격자 (09-16) --------------------------------------------------
@@ -4482,6 +4519,19 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
       markKnowledgeLabelBox(layout,
         cellOf(seat.left - canvasBox.left), cellOf(seat.top - canvasBox.top),
         cellOf(seat.right - canvasBox.left), cellOf(seat.bottom - canvasBox.top));
+    }
+  }
+  /* 놀라운 연결의 번호 원(t-12029)도 찬 자리다 — 번호는 목록과 그림을 잇는 유일한 표시라 이름이 그 위에 서지 않는다.
+   * 곡선은 그리는 손과 같은 셈(`knowledgeBridgeCurve`)으로 잰다. */
+  if (!onRing && layout.bridges.length > 0) {
+    const centre = knowledgeMapCentre(layout, box);
+    const badge = tuning.bridgeBadge + tuning.bridgeBadgeStroke;
+    for (const bridge of layout.bridges) {
+      const curve = knowledgeBridgeCurve(layout, bridge, box, centre);
+      const badgeX = (curve.badgeX - box.x) * box.scale;
+      const badgeY = (curve.badgeY - box.y) * box.scale;
+      markKnowledgeLabelBox(layout, cellOf(badgeX - badge), cellOf(badgeY - badge),
+        cellOf(badgeX + badge), cellOf(badgeY + badge));
     }
   }
   /* (0-c) 사람이 **지금 고른** 쪽의 이름은 주제의 이름판보다 먼저 자리를 쥔다.
@@ -5159,6 +5209,7 @@ function paintKnowledgeFrame(view, layout, { cameraOnly = false } = {}) {
   const camera = knowledgeCamera(view, layout);
   knowledgePainterFor(view).paintFrame(layout, camera, { cameraOnly });
   paintKnowledgeTies(view, layout, camera);
+  paintKnowledgeBridges(view, layout, camera);
   /* 확대할수록 주제의 이름은 물러선다(t-12029, 시안 v2) — 배율 `clusterFadeFrom`부터 `clusterFadeSpan`에 걸쳐
    * `clusterFadeFloor`까지. 두 손의 이름판이 같은 <svg>에 있으므로 판 하나에 수 하나다. */
   const tuning = layout.tuning;
@@ -5183,23 +5234,12 @@ function paintKnowledgeTies(view, layout, camera) {
   const tuning = layout.tuning;
   const { yScale, middleY, scale } = camera;
   const drawY = (rank) => middleY + (layout.clusterY[rank] - middleY) * yScale;
-  let centreX = 0;
-  let centreY = 0;
-  let weight = 0;
-  for (let rank = 0; rank < layout.namedCount; rank += 1) {
-    if (layout.clusterTally[rank] === 0) continue;
-    const pages = Math.max(1, layout.communitySize[rank]);
-    centreX += layout.clusterX[rank] * pages;
-    centreY += drawY(rank) * pages;
-    weight += pages;
-  }
-  centreX /= Math.max(1, weight);
-  centreY /= Math.max(1, weight);
+  const { x: centreX, y: centreY } = knowledgeMapCentre(layout, camera);
   const widest = ties.length > 0 ? ties[0].count : 1;
   const fade = Math.min(1, Math.max(tuning.tieFadeFloor, tuning.tieFadeFrom - tuning.tieFadePer * layout.zoom));
   const spot = knowledgeSpotRank();
-  const asking = spot >= 0 || knowledgeTieHot >= 0 || layout.litNodes.size > 0 || knowledgeSelectedKey !== null
-    || knowledgeQuery.trim() !== "" || layout.pathShown;
+  const asking = spot >= 0 || knowledgeTieHot >= 0 || knowledgeBridgeHot >= 0 || layout.litNodes.size > 0
+    || knowledgeSelectedKey !== null || knowledgeQuery.trim() !== "" || layout.pathShown;
   /* 배율 1의 배율 — 휨의 상한을 px로 약속했으므로 그림 좌표로는 이만큼이다. */
   const fitScale = scale / Math.max(layout.zoom, KNOWLEDGE_COMMUNITY.epsilon);
   const digits = KNOWLEDGE_FORCE.coordinateDigits;
@@ -5251,6 +5291,129 @@ function paintKnowledgeTies(view, layout, camera) {
   }
   while (host.children.length > drawn) host.lastElementChild.remove();
   layout.tiesDrawn = drawn;
+}
+
+/* 지도의 가운데 — 원반의 가운데를 쪽 수로 무게 지은 곳(그린 좌표, 눌린 판에서는 눌린 y). 묶음과 다리가 이
+ * 가운데에서 바깥으로 휜다(t-12029). */
+function knowledgeMapCentre(layout, camera) {
+  let centreX = 0;
+  let centreY = 0;
+  let weight = 0;
+  for (let rank = 0; rank < layout.namedCount; rank += 1) {
+    if (layout.clusterTally[rank] === 0) continue;
+    const pages = Math.max(1, layout.communitySize[rank]);
+    centreX += layout.clusterX[rank] * pages;
+    centreY += (camera.middleY + (layout.clusterY[rank] - camera.middleY) * camera.yScale) * pages;
+    weight += pages;
+  }
+  return { x: centreX / Math.max(1, weight), y: centreY / Math.max(1, weight) };
+}
+
+/* 다리 하나의 곡선(t-12029) — 그 한 가닥의 두 끝 점을 잇는 이차 곡선이고, 지도의 가운데에서 바깥으로 길이의
+ * `bridgeBend`만큼(배율 1에서 `bridgeBendMax` px까지 — 확대해도 모양이 같다) 휜다. 가운데(t = ½)가 번호 원의
+ * 자리다. 그림 좌표로 돌려준다 — 그리는 손(`paintKnowledgeBridges`)과 이름표 격자(번호 원을 비워 두는 곳)가 이
+ * 한 셈을 읽는다. */
+function knowledgeBridgeCurve(layout, bridge, camera, centre) {
+  const { from, to } = layout.model;
+  const head = from[bridge.first];
+  const tail = to[bridge.first];
+  const drawY = (at) => camera.middleY + (layout.y[at] - camera.middleY) * camera.yScale;
+  const fromX = layout.x[head];
+  const fromY = drawY(head);
+  const toX = layout.x[tail];
+  const toY = drawY(tail);
+  const midX = (fromX + toX) / 2;
+  const midY = (fromY + toY) / 2;
+  const reach = Math.hypot(toX - fromX, toY - fromY) || KNOWLEDGE_COMMUNITY.epsilon;
+  const normalX = -(toY - fromY) / reach;
+  const normalY = (toX - fromX) / reach;
+  const side = (midX - centre.x) * normalX + (midY - centre.y) * normalY >= 0 ? 1 : -1;
+  const fitScale = camera.scale / Math.max(layout.zoom, KNOWLEDGE_COMMUNITY.epsilon);
+  const bend = Math.min(layout.tuning.bridgeBendMax / fitScale, reach * layout.tuning.bridgeBend) * side;
+  const controlX = midX + normalX * bend;
+  const controlY = midY + normalY * bend;
+  return { head, tail, fromX, fromY, controlX, controlY, toX, toY,
+    badgeX: 0.25 * fromX + 0.5 * controlX + 0.25 * toX, badgeY: 0.25 * fromY + 0.5 * controlY + 0.25 * toY };
+}
+
+/* 놀라운 연결(t-12029, 시안 v2 「bridges」) — 밑층에, 두 손에 한 벌. 다리마다 두 군집의 색으로 이은 곡선(선형
+ * 그라데이션, 앞 끝의 군집 → 뒤 끝의 군집; 색 없는 군집은 안개색)과 가운데의 번호 원(목록의 번호와 같은 수). 목록에서
+ * 짚은 다리는 굵게, 사람이 다른 것을 묻는 동안(짚기·고르기·찾기·다른 다리·묶음)은 모두 `bridgeQuiet`까지 물러선다.
+ * 그 한 가닥은 묶음 안의 선이라 쉬는 지도의 선 층에는 없다 — 다리가 그 선이다. 주변 탐색에는 다리가 없다. */
+function paintKnowledgeBridges(view, layout, camera) {
+  const host = view.querySelector(".knowledge-bridges");
+  if (host === null) return;
+  const inks = view.querySelector(".knowledge-bridge-inks");
+  const bridges = layout.ring === null ? layout.bridges : [];
+  const tuning = layout.tuning;
+  const centre = knowledgeMapCentre(layout, camera);
+  const digits = KNOWLEDGE_FORCE.coordinateDigits;
+  const inverse = camera.inverse;
+  const asking = knowledgeSpotRank() >= 0 || knowledgeTieHot >= 0 || knowledgeBridgeHot >= 0
+    || layout.litNodes.size > 0 || knowledgeSelectedKey !== null || knowledgeQuery.trim() !== "" || layout.pathShown;
+  const hueInk = (at) => {
+    const hue = layout.communityHue[layout.community[at]];
+    return hue >= 0 ? `var(--knowledge-hue-${hue})` : "var(--ink-mist)";
+  };
+  let drawn = 0;
+  for (let at = 0; at < bridges.length; at += 1) {
+    const curve = knowledgeBridgeCurve(layout, bridges[at], camera, centre);
+    const hot = at === knowledgeBridgeHot;
+    const quiet = asking && !hot;
+    let group = host.children[drawn];
+    if (!group) {
+      group = document.createElementNS(SVG_NS, "g");
+      const line = document.createElementNS(SVG_NS, "path");
+      line.setAttribute("class", "knowledge-bridge");
+      const badge = document.createElementNS(SVG_NS, "g");
+      badge.setAttribute("class", "knowledge-bridge-badge");
+      badge.append(document.createElementNS(SVG_NS, "circle"), document.createElementNS(SVG_NS, "text"));
+      group.append(line, badge);
+      host.appendChild(group);
+    }
+    let ink = inks.children[drawn];
+    if (!ink) {
+      ink = document.createElementNS(SVG_NS, "linearGradient");
+      ink.setAttribute("gradientUnits", "userSpaceOnUse");
+      ink.id = `knowledge-bridge-ink-${drawn}`;
+      ink.append(document.createElementNS(SVG_NS, "stop"), document.createElementNS(SVG_NS, "stop"));
+      writeAttribute(ink.lastElementChild, "offset", "1");
+      inks.appendChild(ink);
+    }
+    writeAttribute(ink, "x1", curve.fromX.toFixed(digits));
+    writeAttribute(ink, "y1", curve.fromY.toFixed(digits));
+    writeAttribute(ink, "x2", curve.toX.toFixed(digits));
+    writeAttribute(ink, "y2", curve.toY.toFixed(digits));
+    writeAttribute(ink.firstElementChild, "style", `stop-color: ${hueInk(curve.head)}`);
+    writeAttribute(ink.lastElementChild, "style", `stop-color: ${hueInk(curve.tail)}`);
+    const [line, badge] = group.children;
+    writeAttribute(group, "data-bridge", String(at));
+    writeAttribute(group, "opacity", quiet ? String(tuning.bridgeQuiet) : "1");
+    writeAttribute(line, "d", `M ${curve.fromX.toFixed(digits)} ${curve.fromY.toFixed(digits)} `
+      + `Q ${curve.controlX.toFixed(digits)} ${curve.controlY.toFixed(digits)} `
+      + `${curve.toX.toFixed(digits)} ${curve.toY.toFixed(digits)}`);
+    writeAttribute(line, "stroke", `url(#${ink.id})`);
+    writeAttribute(line, "stroke-width", String(hot ? tuning.bridgeHotWidth : tuning.bridgeWidth));
+    writeAttribute(badge, "transform",
+      `translate(${curve.badgeX.toFixed(digits)} ${curve.badgeY.toFixed(digits)}) scale(${inverse})`);
+    writeAttribute(badge.firstElementChild, "r", String(tuning.bridgeBadge));
+    writeAttribute(badge.firstElementChild, "stroke-width", String(tuning.bridgeBadgeStroke));
+    writeTextContent(badge.lastElementChild, String(at + 1));
+    drawn += 1;
+  }
+  while (host.children.length > drawn) host.lastElementChild.remove();
+  while (inks.children.length > drawn) inks.lastElementChild.remove();
+  layout.bridgesDrawn = drawn;
+}
+
+/* 「놀라운 연결」 목록의 줄을 짚는다(t-12029) — 그림에서 그 다리가 굵어지고 나머지는 물러선다. -1이면 놓는다. */
+function hotKnowledgeBridge(view, at) {
+  const layout = knowledgeLayouts.get(view);
+  if (!layout || at === knowledgeBridgeHot) return;
+  knowledgeBridgeHot = at;
+  const camera = knowledgeCamera(view, layout);
+  paintKnowledgeTies(view, layout, camera);
+  paintKnowledgeBridges(view, layout, camera);
 }
 
 /* Labels face away from the ring, leaving the connections in its centre clear.
@@ -6907,8 +7070,9 @@ function paintKnowledgeOverview(layout, box) {
   paintKnowledgeHealth(layout, box);
   /* 공급망의 절(P4)도 위상과 따로 바뀐다 — 조회 상태의 한 줄은 답이 오기 전에도 말한다. */
   paintKnowledgeSupplyOverview(layout, box);
-  /* 묶음은 그려지는 부분집합의 것이다(목차·일지를 펴면 달라진다) — 위상의 서명 앞에서 제 도장으로. */
+  /* 묶음과 다리는 그려지는 부분집합의 것이다(목차·일지를 펴면 달라진다) — 위상의 서명 앞에서 제 도장으로. */
   paintKnowledgeTieList(layout, box);
+  paintKnowledgeBridgeList(layout, box);
   if (box.dataset.knowledgeStamp === model.signature && layout.overviewModel === model) return;
   box.dataset.knowledgeStamp = model.signature;
   layout.overviewModel = model;
@@ -7060,6 +7224,40 @@ function paintKnowledgeTieList(layout, box) {
     return row;
   }));
   section.hidden = listed.length === 0;
+}
+
+/* 「놀라운 연결」(t-12029, 시안 v2의 그림 옆 목록) — 지도가 번호로 밝힌 다리, 같은 순서·같은 번호. 줄은 단추다:
+ * 누르면 그 한 가닥의 앞 쪽을 고르고(고른 쪽의 이웃이 밝아지니 다리 건너편 쪽이 함께 선다), 올리거나 키보드로 서면
+ * 그림에서 그 다리가 굵어진다(`hotKnowledgeBridge`). 두 끝 쪽의 제목은 팁과 읽는 이의 이름이 말한다. 다리가 없는
+ * 볼트에는 절이 서지 않는다. */
+function paintKnowledgeBridgeList(layout, box) {
+  const section = box.querySelector(".knowledge-overview-bridges");
+  if (section === null) return;
+  knowledgeTies(layout);
+  const stamp = `${layout.model.signature}|${layout.tieStamp}`;
+  if (section.dataset.knowledgeStamp === stamp && layout.bridgeListModel === layout.model) return;
+  section.dataset.knowledgeStamp = stamp;
+  layout.bridgeListModel = layout.model;
+  const { from, to, keys, titles } = layout.model;
+  reconcileElementOrder(section.querySelector(".knowledge-inspector-list"), layout.bridges.map((bridge, at) => {
+    const head = from[bridge.first];
+    const tail = to[bridge.first];
+    const row = knowledgeListRow(
+      keys[head],
+      t("knowledge.tiePair", "{{left}} ↔ {{right}}", {
+        left: knowledgeClusterWord(layout, layout.community[head]),
+        right: knowledgeClusterWord(layout, layout.community[tail]),
+      }),
+      String(at + 1),
+    );
+    const press = row.querySelector("button");
+    const ends = t("knowledge.bridgeEnds", "{{from}} → {{to}}", { from: titles[head], to: titles[tail] });
+    press.dataset.knowledgeBridge = String(at);
+    press.dataset.tip = ends;
+    press.setAttribute("aria-label", t("knowledge.bridgeLabel", "{{pair}} — {{ends}}", { pair: press.textContent, ends }));
+    return row;
+  }));
+  section.hidden = layout.bridges.length === 0;
 }
 
 /* 볼트 건강(3차): 카파시의 lint 넷, 그리고 라이브 층의 셋(t-2931). 줄은 서 있고
@@ -8204,9 +8402,11 @@ function wireKnowledgeView(view) {
   panel.onpointerover = (event) => {
     const layout = knowledgeLayouts.get(view);
     if (!layout) return;
-    /* 「강한 묶음」의 줄은 그림의 그 줄을 밝힌다(t-12029). */
+    /* 「강한 묶음」·「놀라운 연결」의 줄은 그림의 그 줄·그 다리를 밝힌다(t-12029). */
     const tie = event.target.closest("[data-knowledge-tie]");
     hotKnowledgeTie(view, tie ? Number(tie.dataset.knowledgeTie) : -1);
+    const bridge = event.target.closest("[data-knowledge-bridge]");
+    hotKnowledgeBridge(view, bridge ? Number(bridge.dataset.knowledgeBridge) : -1);
     const key = event.target.closest("[data-knowledge-key]")?.dataset.knowledgeKey ?? null;
     const next = key !== null && layout.model.keys.includes(key) ? key : null;
     if (next === knowledgeHoverKey) return;
@@ -8215,6 +8415,7 @@ function wireKnowledgeView(view) {
   };
   panel.onpointerleave = () => {
     hotKnowledgeTie(view, -1);
+    hotKnowledgeBridge(view, -1);
     const layout = knowledgeLayouts.get(view);
     if (!layout || knowledgeHoverKey === null) return;
     knowledgeHoverKey = null;
@@ -8224,9 +8425,12 @@ function wireKnowledgeView(view) {
   panel.addEventListener("focusin", (event) => {
     const tie = event.target.closest?.("[data-knowledge-tie]");
     if (tie) hotKnowledgeTie(view, Number(tie.dataset.knowledgeTie));
+    const bridge = event.target.closest?.("[data-knowledge-bridge]");
+    if (bridge) hotKnowledgeBridge(view, Number(bridge.dataset.knowledgeBridge));
   });
   panel.addEventListener("focusout", (event) => {
     if (event.target.closest?.("[data-knowledge-tie]")) hotKnowledgeTie(view, -1);
+    if (event.target.closest?.("[data-knowledge-bridge]")) hotKnowledgeBridge(view, -1);
   });
   wireKnowledgeNodeDrag(view, canvas);
   for (const button of view.querySelectorAll("[data-knowledge-flag]")) {

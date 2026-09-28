@@ -37757,6 +37757,27 @@ details.task-board-section > summary {
   stroke: var(--knowledge-tie-hot-ink);
 }
 
+/* 놀라운 연결(t-12029) — 두 군집의 색으로 이은 곡선(잉크는 줄마다의 그라데이션, `paintKnowledgeBridges`)과 가운데의
+   번호 원. 번호 원은 화면 픽셀로 서므로 배율의 역수를 transform으로 입는다(이름판과 같은 손). */
+.knowledge-bridge {
+  fill: none;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.knowledge-bridge-badge circle {
+  fill: var(--knowledge-ground);
+  stroke: var(--ink-chalk);
+}
+
+.knowledge-bridge-badge text {
+  fill: var(--ink-chalk);
+  font-size: calc(var(--knowledge-bridge-number-px) * 1px);
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
 /* 묶음 안의 선(t-12029) — 쉬는 전체 지도의 군집 사이 낱선. 사람이 그 선을 묻는 순간(짚기·포커스·경로·
    고르거나 올린 군집) 클래스가 떨어지고, 짚기는 프레임 없이 `is-lit`만 붙으므로 그 옷이 이긴다. */
 .knowledge-picture:not(.is-local) .knowledge-edge.is-bundled:not(.is-lit) {
