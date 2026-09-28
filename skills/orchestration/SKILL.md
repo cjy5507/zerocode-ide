@@ -644,8 +644,8 @@ These are the ones that cost you a run when you get them wrong.
   continues the declined turn on the model the provider routes the category
   to (`cyber` → Opus 4.8) instead of pausing — the flag rides that worker's
   launch only; the person's settings, their panes and yours are untouched.
-  A worker launched on a model — yours from `--model`, or its profile row's
-  when you left the dial to Jev — is pinned: its CLI is launched with
+  A worker summoned with `--model` is pinned, and so is one launched on its
+  profile row's model when you left the dial to Jev: its CLI is launched with
   that switch OFF (zo: `--classifier-fallback off`), whatever the person's
   file says, because the model it launched on is binding and the CLI's own route
   is neither that model nor a rung you declared; where its task goes is
