@@ -303,6 +303,30 @@ fn a_question_refused_with_a_status_leaves_its_connection_for_the_next() {
     );
 }
 
+/// A client let go takes its pool with it, and the warm-up record of its
+/// origin with the pool: the next door warms the origin again rather than
+/// skip it for a socket that is gone. A late failure on a client already let
+/// go forgets nothing — the record by then is the replacement's.
+#[test]
+fn a_client_let_go_lets_the_next_door_warm_its_origin_again() {
+    // A documentation address, never dialled: only the record is read.
+    let origin = "http://192.0.2.1:9";
+    let socket = socket_for(Speaks::Http1);
+    let lent = socket.lend().expect("a client");
+    assert!(warm_due(origin), "the first door warms");
+    assert!(!warm_due(origin), "the next skips: the socket is pooled");
+    let_go(socket, &lent, origin);
+    assert!(
+        warm_due(origin),
+        "after its client was let go, the next door skipped the origin"
+    );
+    let_go(socket, &lent, origin);
+    assert!(
+        !warm_due(origin),
+        "a late failure on a client already let go forgot the replacement's warm-up"
+    );
+}
+
 /// A fair coin for one connection of one trial, the same on every run: the
 /// standard library's fixed-key hasher over the pair, its low bit.
 fn coin(trial: u64, ordinal: usize) -> bool {

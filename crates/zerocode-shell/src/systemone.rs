@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use jev_socket::Socket;
+use jev_socket::{Lent, Socket};
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
@@ -538,18 +538,29 @@ impl Wire {
         let Some(lent) = self.socket.lend() else {
             return;
         };
-        let base = self.base.trim_end_matches('/').to_string();
+        let base = self.origin().to_string();
         if !warm_due(&base) {
             return;
         }
+        let socket = self.socket;
         tauri::async_runtime::spawn(async move {
-            let _ = lent
+            let warmed = lent
                 .client
                 .get(&base)
                 .timeout(ACTION_WARM_TIMEOUT)
                 .send()
                 .await;
+            // A warm-up nothing came back for would leave the next question
+            // a socket that may have gone quiet under it.
+            if warmed.is_err() {
+                let_go(socket, &lent, &base);
+            }
         });
+    }
+
+    /// The origin this wire asks, as the pool and the warm-up record key it.
+    fn origin(&self) -> &str {
+        self.base.trim_end_matches('/')
     }
 
     /// One question of `row`'s about words from `workspace`, whole: the door,
@@ -647,7 +658,7 @@ impl Wire {
             return Err(TIMEOUT.to_string());
         }
         let lent = self.socket.lend().ok_or_else(|| TRANSPORT.to_string())?;
-        let url = format!("{}{SYSTEMONE_PATH}", self.base.trim_end_matches('/'));
+        let url = format!("{}{SYSTEMONE_PATH}", self.origin());
         // Key/consent checks, runtime startup and client construction spend
         // this call's budget too; the socket never starts a fresh deadline.
         let remaining = deadline
@@ -662,13 +673,25 @@ impl Wire {
             .body(cleared.into_bytes())
             .send()
             .await
-            .map_err(|err| failure(&err))?;
+            .map_err(|err| self.unanswered(&lent, &err))?;
         let status = answer.status();
         if !status.is_success() {
             return Err(token_for(status.as_u16()));
         }
         // The body is read inside the same deadline the request was given.
-        answer.text().await.map_err(|err| failure(&err))
+        answer
+            .text()
+            .await
+            .map_err(|err| self.unanswered(&lent, &err))
+    }
+
+    /// The word a question nothing came back for is refused with — its
+    /// deadline passed or its socket broke — having let go of the client it
+    /// rode, so the question after it opens a connection of its own. A
+    /// status, any status, is an answer from the server and never lands here.
+    fn unanswered(&self, lent: &Lent<reqwest::Client>, err: &reqwest::Error) -> String {
+        let_go(self.socket, lent, self.origin());
+        failure(err)
     }
 }
 
@@ -698,6 +721,9 @@ fn warm_off_thread(wire: Wire) {
     std::thread::spawn(move || wire.warm());
 }
 
+/// The origins warmed in the last [`POOL_IDLE`], and when ([`warm_due`]).
+static WARMED: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+
 /// Whether a warm-up to `origin` would buy anything, and a record that it is
 /// about to if it would.
 ///
@@ -708,9 +734,10 @@ fn warm_off_thread(wire: Wire) {
 /// keyed by origin — a socket opened to one endpoint is no help to another,
 /// which is what the test override points the wire at. A row older than the
 /// window names a socket the pool has already dropped and is dropped with
-/// it, so this holds one row per origin warmed in the last [`POOL_IDLE`].
+/// it, so this holds one row per origin warmed in the last [`POOL_IDLE`]; a
+/// client let go takes its pool with it, and the row with the pool
+/// ([`let_go`]).
 fn warm_due(origin: &str) -> bool {
-    static WARMED: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
     let mut warmed = WARMED.lock().unwrap_or_else(PoisonError::into_inner);
     let now = Instant::now();
     warmed.retain(|(_, at)| now.duration_since(*at) < POOL_IDLE);
@@ -721,13 +748,29 @@ fn warm_due(origin: &str) -> bool {
     true
 }
 
+/// Let go of `lent`'s client after a request on it that nothing came back
+/// for (`jev_socket`, t-13199): over HTTP/2 the pool would otherwise hand the
+/// very connection that went quiet to every question behind it. The pool goes
+/// with the client, and `origin`'s warm-up record with the pool, so the next
+/// door warms the origin again. A client another failure already let go is
+/// left to the one that replaced it, and the record to that one's warm-up.
+fn let_go(socket: &Socket<reqwest::Client>, lent: &Lent<reqwest::Client>, origin: &str) {
+    if socket.unanswered(lent) {
+        WARMED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(seen, _)| seen != origin);
+    }
+}
+
 /// The one socket every question the window asks goes through: its client's
 /// connection pool keeps the endpoint's TLS session alive between asks, so a
 /// walk's second question rides the first's socket instead of opening its
 /// own. A client per ask was a handshake per ask — see §2 of
 /// docs/design/jev-seats-accuracy-wave-20260921.md for the bench that timed
-/// both on the same look. No client at all, one that cannot be built, is
-/// refused as `transport`.
+/// both on the same look. A question nothing came back for lets the client
+/// go ([`let_go`]), and the next one opens a connection of its own. No client
+/// at all, one that cannot be built, is refused as `transport`.
 static SOCKET: Socket<reqwest::Client> = Socket::new(built);
 
 /// A client as the wire's socket builds one. Its idle window is

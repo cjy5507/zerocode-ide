@@ -132,6 +132,13 @@ impl SystemOneFailure {
     const fn retryable(self) -> bool {
         matches!(self, Self::RateLimited | Self::Overloaded)
     }
+
+    /// Whether nothing came back from the server: the deadline passed, or the
+    /// socket broke. A request that ends so lets go of the client it rode
+    /// (t-13199); a status, any status, is a response and leaves it standing.
+    const fn unanswered(self) -> bool {
+        matches!(self, Self::Transport | Self::Timeout)
+    }
 }
 
 /// The criteria key under which a Noul says what its yes means.
@@ -677,10 +684,15 @@ impl SystemOneClient {
             };
             requests.fetch_add(1, Ordering::Relaxed);
             let failure = match tokio::time::timeout(remaining, self.send_once(&lent.client, body)).await {
-                Err(_) => return finish(Err(SystemOneFailure::Timeout), retries),
                 Ok(Ok(response)) => return finish(Ok(response), retries),
                 Ok(Err(failure)) => failure,
+                Err(_) => SystemOneFailure::Timeout,
             };
+            // Over HTTP/2 the pool would hand the connection that went quiet
+            // to every request behind this one; the next opens its own.
+            if failure.unanswered() {
+                self.socket.unanswered(&lent);
+            }
             let backoff = SYSTEMONE_RETRY_BASE_DELAY.saturating_mul(2u32.saturating_pow(retries));
             if !failure.retryable()
                 || retries >= max_retries
@@ -1269,6 +1281,13 @@ mod tests {
         assert_eq!(SystemOneFailure::from_status(418), SystemOneFailure::Http(418));
         assert!(SystemOneFailure::RateLimited.retryable() && SystemOneFailure::Overloaded.retryable());
         assert!(!SystemOneFailure::Unauthorized.retryable() && !SystemOneFailure::Schema.retryable());
+        assert!(SystemOneFailure::Timeout.unanswered() && SystemOneFailure::Transport.unanswered());
+        assert!(
+            [SystemOneFailure::Http(503), SystemOneFailure::Overloaded, SystemOneFailure::Schema]
+                .iter()
+                .all(|failure| !failure.unanswered()),
+            "a status or a malformed answer is a response"
+        );
     }
 
     /// Which connection a request rides (t-13199): the one the request before
