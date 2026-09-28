@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use core_types::usage::TokenUsage;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers,
+    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -50,6 +50,7 @@ use super::composer::{Composer, Submission};
 use super::effort_effect::{EffortEffect, EffortTier};
 use super::fast;
 use super::folds::{FoldIds, FoldMode};
+use super::input::TerminalEvents;
 use super::footer_hints::{FooterHints, HintMode, SHORTCUTS_CHAR, WARNINGS_FUNCTION_KEY};
 use super::models::{self, ModelChoice};
 use super::painter::{Painter, MIN_ROWS};
@@ -767,7 +768,7 @@ async fn recv_agent_followup(pump: &mut Option<AgentCompletionPump>) -> AgentFol
 /// screen, reporter) and the event stream a turn reads.
 struct TuiFrontend<'a> {
     app: &'a mut App,
-    events: &'a mut EventStream,
+    events: &'a mut TerminalEvents,
 }
 
 impl driver::AutonomyFrontend for TuiFrontend<'_> {
@@ -4509,7 +4510,7 @@ impl App {
         mut self,
     ) -> Result<(ExitReason, Option<SessionSummary>, String), Box<dyn std::error::Error>> {
         self.boot();
-        let mut events = EventStream::new();
+        let mut events = TerminalEvents::new();
         let mut ticker = tokio::time::interval(FRAME_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut size_poll = tokio::time::interval(SIZE_POLL);
@@ -4628,7 +4629,7 @@ impl App {
         // this pane by hand has to be able to tell it from a session they
         // started themselves.
         self.ui.note(SystemLevel::Info, &banner);
-        let mut events = EventStream::new();
+        let mut events = TerminalEvents::new();
         let transcript = self.session().handle.path.clone();
         // Without it the parent reads this pane as "0 tool uses · no new
         // output" for as long as it works (t-11354); it says less, never
@@ -4701,7 +4702,7 @@ impl App {
     async fn teammate_turn(
         &mut self,
         prompt: String,
-        events: &mut EventStream,
+        events: &mut TerminalEvents,
         prior_output_tokens: &mut u64,
     ) -> crate::teammate::TurnReport {
         let submission = Submission {
@@ -4746,7 +4747,7 @@ impl App {
     async fn await_parent(
         &mut self,
         lifecycle: &crate::teammate::Lifecycle,
-        events: &mut EventStream,
+        events: &mut TerminalEvents,
     ) -> IdleOutcome {
         use crate::teammate::{IdleClock, ParentWatch};
         use runtime::subagent_panes::CloseReason;
@@ -5498,7 +5499,7 @@ impl App {
     async fn run_turn_chain(
         &mut self,
         initial: Work,
-        events: &mut EventStream,
+        events: &mut TerminalEvents,
         initial_followup: Option<AgentFollowup>,
     ) {
         let mut next_turn = Some((initial, initial_followup));
@@ -5586,7 +5587,7 @@ impl App {
     /// Every due `/goal` and `/loop` turn, through the driver both frontends
     /// share (`autonomy::driver`). There is no idle timer: when nothing is
     /// armed this returns at once and the 10-second idle draw contract stays.
-    async fn drive_autonomy(&mut self, events: &mut EventStream) {
+    async fn drive_autonomy(&mut self, events: &mut TerminalEvents) {
         let mut front = TuiFrontend { app: self, events };
         driver::drive(&mut front).await;
     }
@@ -5597,7 +5598,7 @@ impl App {
     async fn turn(
         &mut self,
         input: &Submission,
-        events: &mut EventStream,
+        events: &mut TerminalEvents,
         autonomous_allow_writes: Option<bool>,
         agent_followup: Option<&AgentFollowup>,
     ) -> TurnOutcome {
@@ -5941,7 +5942,7 @@ impl App {
     /// and the summary's characters, Esc (or the IDE's Stop) stops it and
     /// leaves the conversation as it was, and a line typed meanwhile waits to
     /// be taken up after it like one typed behind a turn.
-    async fn compaction(&mut self, focus: Option<String>, events: &mut EventStream) -> TurnOutcome {
+    async fn compaction(&mut self, focus: Option<String>, events: &mut TerminalEvents) -> TurnOutcome {
         let mut session = self
             .session
             .take()

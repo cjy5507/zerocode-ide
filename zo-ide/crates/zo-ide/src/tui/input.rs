@@ -82,8 +82,19 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        // 등록이 표시 확인보다 먼저다: 확인과 등록 사이에 온 깨움이 옛
+        // 태스크로 새지 않는다.
         this.wakeup.task.register(cx.waker());
-        Pin::new(&mut this.inner).poll_next(cx)
+        let woken = this.wakeup.woken.swap(false, Ordering::AcqRel);
+        if this.armed && !woken {
+            return Poll::Pending;
+        }
+        // 안쪽에는 언제나 우리 waker 를 건넨다 — 배경 스레드의 깨움이 표시를
+        // 세운 뒤에 태스크로 간다.
+        let waker = Waker::from(Arc::clone(&this.wakeup));
+        let polled = Pin::new(&mut this.inner).poll_next(&mut Context::from_waker(&waker));
+        this.armed = polled.is_pending();
+        polled
     }
 }
 
