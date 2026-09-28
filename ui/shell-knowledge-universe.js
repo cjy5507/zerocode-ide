@@ -195,7 +195,11 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   plateBottom: "--knowledge-3d-plate-bottom",
   plateRoom: "--knowledge-3d-plate-room",
   plateLarge: "--knowledge-3d-plate-large",
+  /* 「가까이」의 문턱 = max(처음 거리 × `close-in`, (은하로 날아온 거리 5.2R + 40) × `close-in-fly`) — R은 고른 은하(없으면
+   * 고른 쪽이 든 은하)의 반지름. 날아온 자리는 은하의 크기와 상관없이 가깝고, 조금 더 물러나면 먼 모습이다
+   * (디자이너 m-12642). */
   closeIn: "--knowledge-3d-close-in",
+  closeInFly: "--knowledge-3d-close-in-fly",
   /* 쪽 이름: 풀, 쉴 때 이름을 다는 가장 밝은 별의 수, 후보 수와 화면 반지름 문턱, 초점의 이웃·찾은 것의 덤, 후보를
    * 고르는 위·아래 띠, 별에서 비킨 거리(반지름의 몫·최소·여백), 판 가장자리 여백, 놓는 위·아래 띠, 한 줄의 높이. */
   labels: "--knowledge-3d-labels",
@@ -216,6 +220,8 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   flowTags: "--knowledge-3d-flow-tags",
   flowTagAt: "--knowledge-3d-flow-tag-at",
   flowTagAhead: "--knowledge-3d-flow-tag-ahead",
+  /* 가운데 자리가 막히면 그 앞 · 뒤로 이만큼 옮긴 자리를 차례로 시험한다(디자이너 m-12642). */
+  flowTagShift: "--knowledge-3d-flow-tag-shift",
   flowTagTall: "--knowledge-3d-flow-tag-tall",
   flowTagRoom: "--knowledge-3d-flow-tag-room",
   flowTagTurn: "--knowledge-3d-flow-tag-turn",
@@ -2018,9 +2024,13 @@ function makeKnowledgeUniverse(view) {
       this.projVersion = -1;
       this.viewProjection = new THREE.Matrix4();
       this.hover = -1;
-      /* 쉬는 먼 자리에서 이름을 다는 별 — 연결이 가장 많은 쪽들(같으면 자리 순, 시안 `G.bright`). */
+      /* 쉬는 먼 자리에서 이름을 다는 별 — 연결이 가장 많은 쪽들(같으면 자리 순, 시안 `G.bright`). 제목이 제 은하의
+       * 이름과 같은 별(이름 없는 군집은 허브 제목이 이름이다)은 명판과 두 번 서지 않게 건너뛴다(디자이너 m-12642). */
+      const sameAsGalaxy = (seat) => map.rowOf[seat] >= 0
+        && knowledgeShortWord(model.titles[seat], KNOWLEDGE_COMMUNITY.labelMax) === knowledgeClusterWord(layout, map.rowOf[seat]);
       this.bright = Array.from({ length: count }, (unused, at) => at)
-        .sort((one, two) => model.degree[two] - model.degree[one] || one - two).slice(0, U.labelsRest);
+        .sort((one, two) => model.degree[two] - model.degree[one] || one - two)
+        .filter((seat) => !sameAsGalaxy(seat)).slice(0, U.labelsRest);
       this.applyInks();
       this.computeHome();
       this.buildLabels();
@@ -2346,7 +2356,7 @@ function makeKnowledgeUniverse(view) {
         ? t("knowledge.starTipAgo", "{{galaxy}} · 연결 {{links}} (선언 {{declared}} · 추론 {{inferred}}) · 고친 때 {{ago}}",
           { ...words, ago: knowledgeUniverseAgo(modified, model.nowMs) })
         : t("knowledge.starTip", "{{galaxy}} · 연결 {{links}} (선언 {{declared}} · 추론 {{inferred}})", words));
-      const x = Math.min(this.width - U.tipRoom, this.pointer.x + U.tipRight);
+      const x = Math.max(0, Math.min(this.width - U.tipRoom, this.pointer.x + U.tipRight));
       const y = Math.max(U.tipTop, this.pointer.y - U.tipUp);
       tip.style.transform = `translate3d(${Math.round(x)}px,${Math.round(y)}px,0)`;
       tip.classList.add("is-on");
@@ -2427,9 +2437,12 @@ function makeKnowledgeUniverse(view) {
         layer.appendChild(tag);
         const from = map.galaxy[one.from];
         const to = map.galaxy[one.to];
-        return { element: tag, arrow, wide: 0, on: false, x: -1, y: -1, turn: Number.NaN,
-          mid: knowledgeUniverseFilamentPoint(from, to, one.bend, U.flowTagAt),
-          ahead: knowledgeUniverseFilamentPoint(from, to, one.bend, U.flowTagAhead) };
+        /* 설 자리 셋 — 가운데, 그 앞, 그 뒤. 화살은 자리마다 흐름 쪽으로 조금 앞선 점을 가리킨다. */
+        const lead = U.flowTagAhead - U.flowTagAt;
+        const spots = [U.flowTagAt, U.flowTagAt - U.flowTagShift, U.flowTagAt + U.flowTagShift].map((at) => ({
+          mid: knowledgeUniverseFilamentPoint(from, to, one.bend, at),
+          ahead: knowledgeUniverseFilamentPoint(from, to, one.bend, at + lead) }));
+        return { element: tag, arrow, wide: 0, on: false, x: -1, y: -1, turn: Number.NaN, spots };
       });
       const tip = document.createElement("div");
       tip.className = "knowledge-universe-tip";
@@ -2490,13 +2503,18 @@ function makeKnowledgeUniverse(view) {
       return true;
     },
 
-    /* 쪽 이름 하나의 넓이(CSS px) — 쪽마다 한 번 잰다. 초점의 이름은 테두리만큼 넓다. */
+    /* 쪽 이름의 글 — 평면처럼 `label-max`에서 말줄임으로 자른다(`knowledgeShortWord`). 온 제목은 팁·카드·인스펙터가 든다. */
+    nameWord(seat) {
+      return knowledgeShortWord(this.layout.model.titles[seat], this.layout.tuning.labelMax);
+    },
+
+    /* 쪽 이름 하나의 넓이(CSS px) — 자른 글로, 쪽마다 한 번 잰다. 초점의 이름은 테두리만큼 넓다. */
     nameWide(seat, hot) {
       let wide = this.nameWidths[seat];
       if (wide === 0) {
         this.nameContext ??= document.createElement("canvas").getContext("2d");
         this.nameContext.font = this.nameFont;
-        wide = Math.ceil(this.nameContext.measureText(this.layout.model.titles[seat]).width);
+        wide = Math.ceil(this.nameContext.measureText(this.nameWord(seat)).width);
         this.nameWidths[seat] = wide;
       }
       return wide + (hot ? this.nameHotPad : this.namePad);
@@ -2613,7 +2631,9 @@ function makeKnowledgeUniverse(view) {
       const picked = knowledgeClusterPicked >= 0 && knowledgeClusterPicked < map.rows ? knowledgeClusterPicked : -1;
       const selected = this.selectedSeat;
       const focusSeat = this.hover >= 0 ? this.hover : selected;
-      const closeIn = this.dist < this.home.dist * U.closeIn;
+      const near = picked >= 0 ? picked : selected >= 0 ? map.rowOf[selected] : -1;
+      const flown = near >= 0 ? (map.galaxy[near].radius * U.flyGalaxyReach + U.flyGalaxyPad) * U.closeInFly : 0;
+      const closeIn = this.dist < Math.max(this.home.dist * U.closeIn, flown);
       /* 은하 명판 — 고른 은하가 먼저, 그다음 순위. 고른(또는 고른 쪽의) 은하는 크게 선다. */
       const galaxies = map.galaxies;
       const order = this.order;
@@ -2665,24 +2685,25 @@ function makeKnowledgeUniverse(view) {
       const flowsShown = !closeIn && this.hover < 0 && selected < 0 && picked < 0 && this.hits === 0;
       for (const tag of this.flowTags) {
         let on = false;
-        if (flowsShown && this.screenAt(tag.mid[0], tag.mid[1], tag.mid[2])) {
+        for (const spot of flowsShown ? tag.spots : []) {
+          if (!this.screenAt(spot.mid[0], spot.mid[1], spot.mid[2])) continue;
           const mx = this.spot[0];
           const my = this.spot[1];
-          const turn = this.screenAt(tag.ahead[0], tag.ahead[1], tag.ahead[2])
+          const turn = this.screenAt(spot.ahead[0], spot.ahead[1], spot.ahead[2])
             ? Math.atan2(this.spot[1] - my, this.spot[0] - mx) : 0;
           const x = mx - tag.wide / 2;
           const y = my - U.flowTagTall / 2;
-          if (x > U.plateEdge && x < wide - tag.wide - U.plateEdge && y > U.labelTop && y < tall - U.labelBottom
-            && !this.hit(x, y, tag.wide, U.flowTagTall)) {
-            on = true;
-            this.pushBox(x - U.flowTagRoom, y - U.flowTagRoom, tag.wide + U.flowTagRoom * 2, U.flowTagTall + U.flowTagRoom * 2);
-            this.moveLabel(tag, x, y);
-            const step = Math.round(turn * U.flowTagTurn) / U.flowTagTurn;
-            if (step !== tag.turn) {
-              tag.arrow.style.transform = `rotate(${step}rad)`;
-              tag.turn = step;
-            }
+          if (x <= U.plateEdge || x >= wide - tag.wide - U.plateEdge || y <= U.labelTop || y >= tall - U.labelBottom
+            || this.hit(x, y, tag.wide, U.flowTagTall)) continue;
+          on = true;
+          this.pushBox(x - U.flowTagRoom, y - U.flowTagRoom, tag.wide + U.flowTagRoom * 2, U.flowTagTall + U.flowTagRoom * 2);
+          this.moveLabel(tag, x, y);
+          const step = Math.round(turn * U.flowTagTurn) / U.flowTagTurn;
+          if (step !== tag.turn) {
+            tag.arrow.style.transform = `rotate(${step}rad)`;
+            tag.turn = step;
           }
+          break;
         }
         this.showLabel(tag, on);
       }
@@ -2767,7 +2788,7 @@ function makeKnowledgeUniverse(view) {
         const name = this.names[used];
         used += 1;
         if (name.seat !== seat) {
-          name.element.textContent = model.titles[seat];
+          name.element.textContent = this.nameWord(seat);
           name.seat = seat;
         }
         this.moveLabel(name, x, y);

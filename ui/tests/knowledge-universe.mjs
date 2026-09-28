@@ -1126,10 +1126,19 @@ export async function testKnowledgeUniverseLabels(page, ok) {
       const restFlows = shown(".knowledge-universe-flow");
       const restNames = shown(".knowledge-universe-name");
       const restBoxes = [...restPlates, ...restFlows, ...restNames].map(box);
+      /* 쉬는 밝은 별: 연결이 가장 많은 쪽들 — 제목이 제 은하의 이름과 같은 별(이름 없는 군집은 허브 제목이 이름이다)은
+       * 명판과 두 번 서지 않게 건너뛴다(디자이너 m-12642). 이름은 평면처럼 `label-max`에서 자른다. */
+      const cut = (seat) => knowledgeShortWord(model.titles[seat], layout.tuning.labelMax);
+      const sameAsGalaxy = (seat) => map.rowOf[seat] >= 0
+        && knowledgeShortWord(model.titles[seat], KNOWLEDGE_COMMUNITY.labelMax) === knowledgeClusterWord(layout, map.rowOf[seat]);
       const bright = Array.from({ length: layout.count }, (unused, at) => at)
-        .sort((one, two) => model.degree[two] - model.degree[one] || one - two).slice(0, 5).map((at) => model.titles[at]);
+        .sort((one, two) => model.degree[two] - model.degree[one] || one - two)
+        .filter((at) => !sameAsGalaxy(at)).slice(0, 5).map(cut);
+      const long = Array.from({ length: layout.count }, (unused, at) => at)
+        .filter((at) => model.titles[at].length > layout.tuning.labelMax).length;
       const rest = { plates: restPlates.length, galaxies: map.galaxies, flows: restFlows.length,
-        filaments: map.filaments.length, names: restNames.map((one) => one.textContent), bright,
+        filaments: map.filaments.length, names: restNames.map((one) => one.textContent), bright, long,
+        longest: Math.max(...restNames.map((one) => one.textContent.length), 0), labelMax: layout.tuning.labelMax,
         clashes: clashes(restBoxes), onZoom: restBoxes.filter((one) => overlap(one, zoom)).length,
         plateNames: restPlates.map((one) => one.querySelector(".knowledge-universe-plate-name")?.textContent ?? ""),
         wantNames: restPlates.map((one) => knowledgeClusterWord(layout, Number(one.dataset.knowledgeCluster))),
@@ -1147,7 +1156,7 @@ export async function testKnowledgeUniverseLabels(page, ok) {
       await until(() => universe.hover === hub, 60);
       await frames(2);
       const neighbours = new Set();
-      for (let slot = model.start[hub]; slot < model.start[hub + 1]; slot += 1) neighbours.add(model.titles[model.neighbour[slot]]);
+      for (let slot = model.start[hub]; slot < model.start[hub + 1]; slot += 1) neighbours.add(cut(model.neighbour[slot]));
       const tip = universe.host.querySelector(".knowledge-universe-tip");
       const hoverNames = shown(".knowledge-universe-name").map((one) => one.textContent);
       const hoverBoxes = [...shown(".knowledge-universe-plate"), ...shown(".knowledge-universe-name")].map(box);
@@ -1159,21 +1168,27 @@ export async function testKnowledgeUniverseLabels(page, ok) {
         tipWords: tip?.textContent ?? "", title: model.titles[hub], degree: String(model.degree[hub]),
         cluster: knowledgeClusterWord(layout, map.rowOf[hub]), flows: shown(".knowledge-universe-flow").length,
         names: hoverNames.length, neighbourNames: hoverNames.filter((word) => neighbours.has(word)).length,
-        ownName: hoverNames.includes(model.titles[hub]),
-        clashes: clashes(hoverBoxes), underTip };
+        ownName: hoverNames.includes(cut(hub)),
+        clashes: clashes(hoverBoxes), underTip,
+        tipInside: tipBox !== null && tipBox.x >= 0 && tipBox.x + tipBox.w <= host.width + 0.5,
+        tipRoom: tipBox === null ? 0 : tipBox.w, room: knowledgeUniverseTuning(view).tipRoom };
       universe.host.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false, pointerId: 1 }));
       await frames(2);
       const left = { tipOn: tip?.classList.contains("is-on") ?? false, flows: shown(".knowledge-universe-flow").length };
-      /* 은하 고르기 — 가장 작은 은하로 날아가 가까이 서면(처음 거리 × close-in 밑) 그 명판만 크게, 쪽 이름은 그
-       * 은하의 별만(시안 05-close). 합성 볼트에서 순위 0은 두 주제가 합쳐진 큰 은하라 그 거리가 문턱 밖이다. */
-      const small = map.galaxies - 1;
+      /* 은하 고르기 — 날아온 자리는 은하의 크기와 상관없이 「가까이」다(문턱 = max(처음 거리 × close-in, (5.2R + 40) ×
+       * close-in-fly), 디자이너 m-12642): 그 명판만 크게, 쪽 이름은 그 은하의 별만(시안 05-close). 합성 볼트의 순위 0은 두
+       * 주제가 합쳐진 큰 은하라 처음 거리의 문턱만으로는 밖이다. */
+      const small = 0;
       toggleKnowledgeCluster(view, small);
       await until(() => !universe.tween.on, 400);
       await frames(2);
       const closePlates = shown(".knowledge-universe-plate");
       const closeNames = shown(".knowledge-universe-name").map((one) => one.textContent);
-      const members = new Set(map.members[small].map((at) => model.titles[at]));
-      const close = { closeIn: universe.dist < universe.home.dist * knowledgeUniverseTuning(view).closeIn,
+      const members = new Set(map.members[small].map(cut));
+      const reach = (map.galaxy[small].radius * knowledgeUniverseTuning(view).flyGalaxyReach
+        + knowledgeUniverseTuning(view).flyGalaxyPad) * knowledgeUniverseTuning(view).closeInFly;
+      const close = { closeIn: universe.dist < Math.max(universe.home.dist * knowledgeUniverseTuning(view).closeIn, reach),
+        homeOnly: universe.dist < universe.home.dist * knowledgeUniverseTuning(view).closeIn,
         plates: closePlates.map((one) => Number(one.dataset.knowledgeCluster)),
         full: closePlates.map((one) => one.classList.contains("is-full")),
         pressed: closePlates.map((one) => one.getAttribute("aria-pressed")),
@@ -1226,6 +1241,7 @@ export async function testKnowledgeUniverseLabels(page, ok) {
   const detail = JSON.stringify(seen).slice(0, 4000);
   ok("t-12443 ⑥: at rest every galaxy that fits wears its plate (name and pages), the thickest filaments their line counts, and the five most linked pages their names — nothing overlaps, nothing sits on the zoom box",
     !seen.thrown && seen.rest.plates >= Math.min(4, seen.rest.galaxies) && seen.rest.plates <= seen.rest.galaxies
+      && seen.rest.longest <= seen.rest.labelMax
       && seen.rest.plateNames.every((word, at) => word === seen.rest.wantNames[at])
       && seen.rest.plateCounts.every((word, at) => word === seen.rest.wantCounts[at])
       && seen.rest.flows >= 1 && seen.rest.flows <= Math.min(6, seen.rest.filaments)
@@ -1238,10 +1254,11 @@ export async function testKnowledgeUniverseLabels(page, ok) {
     !seen.thrown && seen.hovered.tipOn && seen.hovered.tipWords.includes(seen.hovered.title)
       && seen.hovered.tipWords.includes(seen.hovered.cluster) && seen.hovered.tipWords.includes(seen.hovered.degree)
       && seen.hovered.flows === 0 && seen.hovered.neighbourNames >= 1 && !seen.hovered.ownName
-      && seen.hovered.clashes === 0 && seen.hovered.underTip === 0 && !seen.left.tipOn && seen.left.flows >= 1,
+      && seen.hovered.clashes === 0 && seen.hovered.underTip === 0 && !seen.left.tipOn && seen.left.flows >= 1
+      && seen.hovered.tipInside && seen.hovered.tipRoom <= seen.hovered.room,
     detail);
-  ok("t-12443 ⑥: close to a picked galaxy only its plate stays, full and pressed, and the names are its own stars",
-    !seen.thrown && seen.close.closeIn && seen.close.plates.length === 1 && seen.close.plates[0] === seen.close.small
+  ok("t-12443 ⑥: a picked galaxy is close wherever it flew — even the biggest, outside the home-distance threshold — so only its plate stays, full and pressed, and the names are its own stars",
+    !seen.thrown && seen.close.closeIn && !seen.close.homeOnly && seen.close.plates.length === 1 && seen.close.plates[0] === seen.close.small
       && seen.close.full[0] === true && seen.close.pressed[0] === "true" && seen.close.names >= 1
       && seen.close.strangers === 0 && seen.close.flows === 0 && seen.close.clashes === 0,
     detail);

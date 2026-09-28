@@ -1660,6 +1660,7 @@
   --knowledge-3d-plate-room: 4;
   --knowledge-3d-plate-large: 8;
   --knowledge-3d-close-in: 0.42;
+  --knowledge-3d-close-in-fly: 1.1;
   /* 쪽 이름: 풀, 쉴 때 이름을 다는 가장 밝은 별의 수, 후보 수와 화면 반지름 문턱, 초점의 이웃 · 찾은 것의 덤,
    * 후보를 고르는 위 · 아래 띠, 별에서 비킨 거리(반지름의 몫 · 최소 · 여백), 판 가장자리 여백, 놓는 위 · 아래 띠,
    * 한 줄의 높이. */
@@ -1681,6 +1682,7 @@
   --knowledge-3d-flow-tags: 6;
   --knowledge-3d-flow-tag-at: 0.5;
   --knowledge-3d-flow-tag-ahead: 0.56;
+  --knowledge-3d-flow-tag-shift: 0.12;
   --knowledge-3d-flow-tag-tall: 18;
   --knowledge-3d-flow-tag-room: 3;
   --knowledge-3d-flow-tag-turn: 20;

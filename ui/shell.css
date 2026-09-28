@@ -38155,7 +38155,9 @@ details.task-board-section > summary {
   box-shadow: var(--shadow-soft);
   color: var(--ink-chalk);
   font-size: var(--text-xs);
-  white-space: nowrap;
+  /* 문장 제목도 판 안에서 줄을 바꾼다 — 팁이 비워 둔 넓이(`tip-room`)가 곧 폭이다(디자이너 m-12642). */
+  max-width: calc(var(--knowledge-3d-tip-room) * 1px);
+  overflow-wrap: anywhere;
   opacity: 0;
   pointer-events: none;
   backdrop-filter: var(--knowledge-inspector-blur);
