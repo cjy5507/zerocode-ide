@@ -25801,7 +25801,7 @@ mod tests {
         // can panic on an input nobody predicted — and a panic that skipped the
         // flag reset left the segment saying "reading…" for the rest of the
         // session, with every later ask seeing a scan already running.
-        let spawning = block_after(shipped, "fn usage_report(");
+        let spawning = block_after(shipped, "fn usage_report_at(");
         assert!(
             shipped.contains("impl Drop for ScanFlag")
                 && spawning

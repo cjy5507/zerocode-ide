@@ -317,8 +317,22 @@ pub(crate) fn signed_in_as(raw: &str, now_ms: i64) -> Option<String> {
     }
 }
 
+/// Who the session file under `home` says is signed in — the account the
+/// gauge's filter compares a held reading against (`grok_usage`). `None` when
+/// there is no home or no session in it.
+pub(crate) fn signed_in_at(home: Option<&Path>, now_ms: i64) -> Option<String> {
+    let text = std::fs::read_to_string(auth_file(home?)).ok()?;
+    signed_in_as(&text, now_ms)
+}
+
 /// One reading of Grok's plan usage. Writes nothing, anywhere.
 pub fn scan(now_ms: i64) -> ProviderUsage {
+    scan_in(grok_home(), now_ms)
+}
+
+/// [`scan`] against a named home — the same read, for a caller that already
+/// resolved where the CLI keeps its session.
+pub(crate) fn scan_in(home: Option<PathBuf>, now_ms: i64) -> ProviderUsage {
     let answer = |status: &str, error: Option<String>, kind: Option<FailureKind>| ProviderUsage {
         provider: "grok".to_string(),
         session: None,
@@ -335,7 +349,7 @@ pub fn scan(now_ms: i64) -> ProviderUsage {
         reset_credits: None,
         account: None,
     };
-    let Some(home) = grok_home() else {
+    let Some(home) = home else {
         return answer(
             "error",
             Some("홈 디렉터리를 찾지 못했습니다".to_string()),
@@ -361,19 +375,28 @@ pub fn scan(now_ms: i64) -> ProviderUsage {
         }
         Auth::Held(session) => session,
     };
+    // Whose session this is, expired or not: the gauge keeps a reading only
+    // under the account `signed_in_as` reads off this same file, and a
+    // reading it drops is no reading — the next ask goes out at once, past
+    // the refetch floor and the failure backoff (t-11645: an expired session
+    // answered as nobody's and was read on every two-second ask).
+    let account = whose(&held);
     if !is_fresh(&held, now_ms) {
         // Reaching here always means a stored, refreshable session — a real
         // sign-out answered `Absent` above. So the repair is running `grok`,
         // not `grok login` (`grok-fetcher.ts:253-258`, issue #8497).
-        return answer(
-            "error",
-            Some(
-                "Grok 로그인이 만료되었습니다 — 이 컴퓨터에서 grok을 한 번 실행하세요".to_string(),
-            ),
-            Some(FailureKind::DelegatedRefreshRequired),
-        );
+        return ProviderUsage {
+            account,
+            ..answer(
+                "error",
+                Some(
+                    "Grok 로그인이 만료되었습니다 — 이 컴퓨터에서 grok을 한 번 실행하세요"
+                        .to_string(),
+                ),
+                Some(FailureKind::DelegatedRefreshRequired),
+            )
+        };
     }
-    let account = whose(&held);
     let bearer = format!("Bearer {}", held.access_token);
     let mut headers: Vec<(&str, &str)> = vec![
         ("Authorization", &bearer),
@@ -653,6 +676,55 @@ mod tests {
             default_billing_url().len() - BILLING_DEFAULT_PATH.len(),
             "the two views drifted onto different bases"
         );
+    }
+
+    /// Every answer the read gives off the session file names the account
+    /// the gauge's filter reads off that same file (t-11645). The filter
+    /// drops a held reading whose account differs, and a dropped reading is
+    /// no reading: the next ask goes out at once, whatever the refetch floor
+    /// and the failure backoff say. An expired session answered with no
+    /// account, so the window asked again on its two-second follow-up tick —
+    /// 4,436 lines in 2 h 17 min of the window's log on 2026-09-28. Only the
+    /// shapes that answer without a request: a fresh session goes to the
+    /// network, and its answers already carried the account.
+    #[test]
+    fn every_answer_off_the_file_names_the_account_the_gauge_keeps_it_under() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let file = auth_file(home.path());
+        let now = epoch_ms_of_iso("2026-09-28T00:00:00Z").expect("now");
+        let past = "2026-09-27T23:00:00Z";
+        let mut with_email = entry("expired", Some(past));
+        with_email["email"] = serde_json::Value::String("someone@example.test".to_string());
+        let shapes = [
+            ("no file", None),
+            ("not json", Some("{".to_string())),
+            (
+                "expired, id only",
+                Some(
+                    serde_json::json!({ PREFERRED_ISSUER: entry("expired", Some(past)) })
+                        .to_string(),
+                ),
+            ),
+            (
+                "expired, with email",
+                Some(serde_json::json!({ PREFERRED_ISSUER: with_email }).to_string()),
+            ),
+        ];
+        for (shape, body) in shapes {
+            match body {
+                Some(text) => std::fs::write(&file, text).expect("write"),
+                None => {
+                    let _ = std::fs::remove_file(&file);
+                }
+            }
+            let read = scan_in(Some(home.path().to_path_buf()), now);
+            assert_eq!(
+                read.account,
+                signed_in_at(Some(home.path()), now),
+                "{shape}: the answer ({}) names another account than the gauge keeps it under",
+                read.status
+            );
+        }
     }
 
     /// The reading says whose it is — email first, id second.
