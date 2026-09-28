@@ -224,7 +224,12 @@ pub struct Origin {
     pub task: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
-    /// The seat, as the ledger spells it: `<team>/<pane>`.
+    /// The pane it came from. A worker's report names its seat as the
+    /// ledger spells it, `<team>/<pane>`; a publication names the window's
+    /// own pane key, `term-<n>` (what the pane's `ZEROCODE_PANE_KEY` holds).
+    /// Terminal numbers start over at every launch of the window, so a
+    /// `term-<n>` is that live pane only while the pane is older than the
+    /// row's `modified_ms`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -5534,6 +5534,127 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   return `one switch · ${selects.total} select under 고급 · 0 visible`;
 });
 
+// While Jev is on, the card says for each feature whether it acts or still
+// records, and what a recording one waits on (t-11989) — read off the
+// numbers `zo jev summary` answers, the dashboard's own reading: the two
+// summons seats, which start acting, say so first; one the door refused for
+// consent says what it waits for; one counting its window says how much of
+// it is in, and one measured under its bar says that. A feature that asks
+// nothing is not listed, the list is gone while the switch is off, and a zo
+// that does not answer is said. Set `JEV_STANDING_SHOTS` to a folder to keep
+// the card in both treatments.
+await test("Jev를 켜면 카드가 기능마다 적용 중인지, 기록 중이면 판정까지 얼마나 모였는지 zo의 숫자로 말한다", async () => {
+  await openSettings(pageA, "api-routers");
+  const said = (key, fallback, vars) => pageA.evaluate(([one, words, values]) => t(one, words, values), [key, fallback, vars]);
+  const tally = (rows, answered = rows, failures = []) => ({
+    rows, answered, refused: rows - answered, applied: 0, called: answered, requests: rows, redactedLines: 0,
+    inputTokens: 0, p50Ms: rows ? 300 : null, p95Ms: rows ? 600 : null, failures,
+  });
+  const numbers = (id, extra = {}) => ({
+    id, stand: "recording", applies: false, verdict: null, rowsToNextJudgment: null, judged: null,
+    today: tally(0), week: tally(0), days: [], recent: [], askersWeek: {}, ...extra,
+  });
+  const judged = (rows, wanted) => ({ window: tally(rows), windowWanted: wanted, agreement: { compared: 0, agreed: 0 } });
+  const refusedForConsent = tally(4, 0, [{ token: "not_consented", rows: 4 }]);
+  backend.keychain.set(TYPESAFE_SERVICE, "apikey_fixture");
+  backend.zoSettings.smart = { [JEV_SETTINGS_KEY]: { enabled: true, workspaces: [JEV_EVERY_WORKSPACE] } };
+  backend.jevSummary = {
+    scope: { scope: "workspace", workspace: "/Users/dev/project", workspaceName: "project", recorded: true, projects: [], windowDays: 7 },
+    seats: [
+      numbers("routing", { verdict: { verdict: "hold", line: "too_few_rows" }, rowsToNextJudgment: 40, judged: judged(13, 53), week: tally(13) }),
+      numbers("placement", { verdict: { verdict: "hold", line: "agreement" }, rowsToNextJudgment: 5, judged: judged(25, 25), week: tally(25) }),
+      numbers("summon", { stand: "applying", applies: true, verdict: { verdict: "keep", line: null }, judged: judged(3, 53), week: tally(3) }),
+      numbers("summon_difficulty", { stand: "applying", applies: true, verdict: { verdict: "keep", line: null }, judged: judged(12, 53), week: tally(12) }),
+      numbers("notify", { week: refusedForConsent, today: refusedForConsent }),
+      // Stopped on its own evidence: switched on, it still asks nothing.
+      numbers("patch_review", { week: tally(2) }),
+    ],
+  };
+  const summaryAt = backend.count("A", "jev_summary");
+  await pageA.evaluate(() => refreshApiRouters());
+  const list = pageA.locator("#typesafe-card [data-jev-standings]");
+  await pageA.waitForFunction(
+    () => document.querySelectorAll("#typesafe-card [data-jev-standing]").length === 5,
+    null, { timeout: UI_TIMEOUT },
+  );
+  assert(backend.count("A", "jev_summary") > summaryAt, "the card drew standings nobody asked zo for");
+  assert(await list.isVisible(), "a card with Jev on shows no standings");
+  const rows = await pageA.locator("#typesafe-card [data-jev-standing]").evaluateAll((all) => all.map((row) => {
+    const standing = row.querySelector(".settings-jev-standing");
+    return {
+      id: row.dataset.jevStanding,
+      name: row.querySelector(".settings-jev-standing-name").textContent,
+      said: standing.textContent,
+      status: standing.dataset.status,
+      tip: standing.dataset.tip ?? null,
+    };
+  }));
+  const applying = await said("jev.status.applying", "적용 중");
+  const recording = await said("jev.status.recording", "기록 중");
+  const counted = (detail) => said("settings.typesafe.standingWith", "{{state}} · {{detail}}", { state: recording, detail });
+  assertEqual(rows.map((row) => [row.id, row.said, row.status]), [
+    ["summon", applying, "applying"],
+    ["summon_difficulty", applying, "applying"],
+    ["notify", await said("jev.status.needsConsent", "동의 필요"), "blocked"],
+    ["routing", await counted("13/53"), "recording"],
+    ["placement", await counted(await said("jev.status.under", "기준 미달")), "recording"],
+  ], "the card's standings");
+  assertEqual(rows.find((row) => row.id === "routing").tip,
+    await said("jev.window", "판정 표본 {{rows}}/{{wanted}}건", { rows: "13", wanted: "53" }),
+    "the counted sample's tip is the table's sentence");
+  const names = await pageA.evaluate(() => Object.fromEntries(["summon", "summon_difficulty"].map((id) => {
+    const words = jevFeature(id).name;
+    return [id, t(words.key, words.source)];
+  })));
+  assertEqual(rows.slice(0, 2).map((row) => row.name), [names.summon, names.summon_difficulty], "a feature is named by the template");
+  // In words, not by colour alone: every state says itself, and no two
+  // states say the same thing.
+  assert(rows.every((row) => row.said.trim() !== ""), "a state was drawn with no words", rows);
+  assertEqual(new Set(rows.map((row) => row.status)).size, new Set(rows.map((row) => row.said.split(" · ")[0])).size,
+    "two states read the same");
+
+  const shots = process.env.JEV_STANDING_SHOTS;
+  if (shots) {
+    const card = pageA.locator("#typesafe-card");
+    for (const theme of ["dark", "light"]) {
+      await pageA.evaluate((treatment) => { document.documentElement.dataset.theme = treatment; }, theme);
+      await renderSettled(pageA);
+      await list.scrollIntoViewIfNeeded();
+      await card.screenshot({ path: resolve(shots, `jev-standings-${theme}.png`), animations: "disabled" });
+    }
+    await pageA.evaluate(() => { delete document.documentElement.dataset.theme; });
+  }
+
+  // A zo that does not answer is said, not drawn as nothing.
+  backend.jevSummary = null;
+  await pageA.evaluate(async () => {
+    jevNumbers = null;
+    await refreshApiRouters();
+    await jevNumbersAsking;
+  });
+  await pageA.waitForFunction(
+    () => document.querySelector("#typesafe-card [data-jev-standings-note]")?.hidden === false,
+    null, { timeout: UI_TIMEOUT },
+  );
+  assertEqual(
+    (await pageA.locator("#typesafe-card [data-jev-standings-note]").textContent()).trim(),
+    await said("settings.typesafe.standingsUnanswered", "zo가 기능별 상태를 알려 주지 않았습니다."),
+  );
+  assertEqual(await pageA.locator("#typesafe-card [data-jev-standing]").count(), 0, "a silent zo left rows standing");
+
+  // Off: no standings at all.
+  backend.zoSettings.smart = { [JEV_SETTINGS_KEY]: { enabled: false, workspaces: [JEV_EVERY_WORKSPACE] } };
+  await pageA.evaluate(() => refreshApiRouters());
+  await pageA.waitForFunction(
+    () => document.querySelector("#typesafe-card [data-jev-standings]")?.hidden === true,
+    null, { timeout: UI_TIMEOUT },
+  );
+  delete backend.zoSettings.smart;
+  backend.keychain.delete(TYPESAFE_SERVICE);
+  await pageA.evaluate(() => refreshApiRouters());
+  return `${rows.length} standings · ${rows.filter((row) => row.status === "applying").length} applying`;
+});
+
 // The key typing into a page's fields asks with (t-9537): the Computer Use
 // pane draws one slot per key a walk reads — today the chosen row's alone —
 // from the table the product reads, keeps a saved key in the item the walk's

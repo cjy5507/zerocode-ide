@@ -132,53 +132,71 @@ fn replay_recorded_summonses() {
     );
 }
 
+/// A host that keeps the jobs it is handed off the beat until the test runs
+/// them, so a test sees what the summons did before any socket opened.
+struct Deferred {
+    wire: Wire,
+    jobs: std::cell::RefCell<Vec<Box<dyn FnOnce() + Send>>>,
+}
+impl Deferred {
+    fn on(wire: &Wire) -> Self {
+        Self {
+            wire: wire.clone(),
+            jobs: Default::default(),
+        }
+    }
+    /// Run every job handed off the beat so far.
+    fn drain(&self) {
+        let jobs: Vec<_> = self.jobs.borrow_mut().drain(..).collect();
+        for job in jobs {
+            job();
+        }
+    }
+}
+impl Host for Deferred {
+    fn split(
+        &self,
+        _team: &str,
+        _leader_term: u32,
+        _from_term: u32,
+        _pane: &str,
+        _direction: zerocode_core::agent_teams::Direction,
+        _command: &str,
+        _token: &str,
+    ) -> Option<u32> {
+        None
+    }
+    fn send(&self, _term: u32, _text: &str) -> bool {
+        false
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        None
+    }
+    fn focus(&self, _term: u32) -> bool {
+        false
+    }
+    fn close(&self, _term: u32) {}
+    fn jev_wire(&self) -> Option<Wire> {
+        Some(self.wire.clone())
+    }
+    fn off_the_beat(&self, job: Box<dyn FnOnce() + Send>) {
+        self.jobs.borrow_mut().push(job);
+    }
+}
+struct Launch;
+impl zerocode_core::orchestration::Launcher for Launch {
+    fn command_for(
+        &self,
+        _agent: &str,
+        _prompt: &str,
+        _tuning: &[String],
+    ) -> Result<String, String> {
+        Ok("claude".into())
+    }
+}
+
 #[test]
 fn recording_is_deferred_and_an_acting_receipt_is_not_asked_twice() {
-    struct Deferred {
-        wire: Wire,
-        jobs: std::cell::RefCell<Vec<Box<dyn FnOnce() + Send>>>,
-    }
-    impl Host for Deferred {
-        fn split(
-            &self,
-            _team: &str,
-            _leader_term: u32,
-            _from_term: u32,
-            _pane: &str,
-            _direction: zerocode_core::agent_teams::Direction,
-            _command: &str,
-            _token: &str,
-        ) -> Option<u32> {
-            None
-        }
-        fn send(&self, _term: u32, _text: &str) -> bool {
-            false
-        }
-        fn capture(&self, _term: u32) -> Option<String> {
-            None
-        }
-        fn focus(&self, _term: u32) -> bool {
-            false
-        }
-        fn close(&self, _term: u32) {}
-        fn jev_wire(&self) -> Option<Wire> {
-            Some(self.wire.clone())
-        }
-        fn off_the_beat(&self, job: Box<dyn FnOnce() + Send>) {
-            self.jobs.borrow_mut().push(job);
-        }
-    }
-    struct Launch;
-    impl zerocode_core::orchestration::Launcher for Launch {
-        fn command_for(
-            &self,
-            _agent: &str,
-            _prompt: &str,
-            _tuning: &[String],
-        ) -> Result<String, String> {
-            Ok("claude".into())
-        }
-    }
     let mut ledger = zerocode_core::orchestration::Ledger::new();
     let mut team = zerocode_core::agent_teams::Team::new("team-test", "test-token", 1);
     let mut prepared = None;
@@ -386,4 +404,594 @@ fn fresh_summonses_read_the_hosts_table_and_sealed_handovers_keep_their_tuning()
             .is_none()
     );
     drop(sealed);
+}
+
+/* ---- the one switch (t-11989) ---- */
+
+/// Settings as a person who turned Jev on from the settings card holds them
+/// (§6.1): the switch on, every folder consented, and — unless `word` says
+/// one — no word of the difficulty seat's own.
+fn switched_on(home: &tempfile::TempDir, endpoint: &Endpoint, word: Option<&str>) -> Wire {
+    use zerocode_core::jev::door::{ENABLED_SETTING, EVERY_WORKSPACE, JEV_SETTINGS_KEY};
+    let settings = home.path().join("settings.json");
+    let mut smart =
+        json!({JEV_SETTINGS_KEY: {ENABLED_SETTING: true, "workspaces": [EVERY_WORKSPACE]}});
+    if let Some(word) = word {
+        smart[SUMMON_DIFFICULTY.setting] = json!(word);
+    }
+    std::fs::write(&settings, json!({"smart": smart}).to_string()).unwrap();
+    Wire::at(&endpoint.base(), "test-key", Some(settings))
+}
+
+/// A launcher whose difficulty seat and table are this window's own, asked
+/// on `wire` — the roads the live catalog takes, on a socket of the test's.
+struct Seated<'a> {
+    wire: &'a Wire,
+}
+impl zerocode_core::orchestration::Launcher for Seated<'_> {
+    fn command_for(
+        &self,
+        _agent: &str,
+        _prompt: &str,
+        _tuning: &[String],
+    ) -> Result<String, String> {
+        Ok("claude".into())
+    }
+    fn choose_difficulty(&self, look: &Look, origin: [&str; 3]) -> Option<Value> {
+        choose_with(self.wire, look, origin)
+    }
+    fn choose_agent(
+        &self,
+        look: &zerocode_core::summon_choice::SummonLook<'_>,
+        options: &[zerocode_core::summon_choice::Summonable],
+        origin: [&str; 3],
+    ) -> Option<String> {
+        super::super::summon_choice::choose_with(self.wire, look, options, origin)
+    }
+    fn difficulty_profile(
+        &self,
+        agent: &str,
+        level: &str,
+        origin: [&str; 3],
+    ) -> Result<Option<difficulty::Profile>, String> {
+        profile(agent, level, origin)
+    }
+}
+
+/// One `worker-start` of a claude worker with `flags`, planned by the ledger
+/// on the seats of `wire` from a coordinator's checkout at `checkout`: the
+/// reply, and the reservation the window carries on.
+fn summoned(
+    wire: &Wire,
+    checkout: &Path,
+    flags: &str,
+    request: &str,
+) -> (Value, PreparedWorkerStart) {
+    let mut ledger = zerocode_core::orchestration::Ledger::new();
+    let mut team = zerocode_core::agent_teams::Team::new("team-switch", "test-token", 1);
+    let launcher = Seated { wire };
+    // The window's own observation of the summoning pane, under the key
+    // the ledger names it by.
+    let _origin = origin_with(
+        [team.id.as_str(), "%1", request],
+        Some(checkout.to_path_buf()),
+        true,
+        wire.settings_root(),
+    );
+    let mut reply = Value::Null;
+    let mut prepared = None;
+    for (at, command) in [
+        (
+            1,
+            "run-create --name switch --retry-request create".to_string(),
+        ),
+        (
+            2,
+            format!(
+                "worker-start --agent claude --prompt translate {flags} --retry-request {request}"
+            ),
+        ),
+    ] {
+        let argv = command
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let planned = zerocode_core::orchestration::plan(
+            &mut ledger,
+            &mut team,
+            &launcher,
+            &argv,
+            "%1",
+            at,
+            Some("test-actor"),
+        );
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        ledger.file_receipt(&planned, at);
+        if planned.prepared_worker_start.is_some() {
+            reply = serde_json::from_str(&planned.reply.stdout).unwrap();
+            prepared = planned.prepared_worker_start;
+        }
+    }
+    (reply, prepared.expect("a worker was reserved"))
+}
+
+/// The row the window wrote for a summons, once its off-the-beat job ran.
+fn recorded(wire: &Wire, prepared: &PreparedWorkerStart, checkout: &Path) -> Vec<Value> {
+    let host = Deferred::on(wire);
+    record(&host, prepared, checkout.to_str(), 3);
+    host.drain();
+    crate::systemone::read_rows(&crate::systemone::ledger_of(wire, &SUMMON_DIFFICULTY).unwrap())
+}
+
+/// With the one switch on and no word for the seat, a summons whose
+/// coordinator left `--model` and `--effort` out launches on the profile row
+/// of Jev's answer, asked once on the beat; its row says the answer was
+/// carried out and is that request's own receipt — asked once, not again off
+/// the beat — so what became of the work grades the seat.
+#[test]
+fn a_switch_left_on_carries_out_the_difficulty_answer_for_an_open_dial() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(), 0);
+    let wire = switched_on(&home, &endpoint, None);
+    let (reply, prepared) = summoned(&wire, home.path(), "", "open-dials");
+    let low = difficulty::profile(&Value::Null, "claude", difficulty::LADDER[0].0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply["model"], json!(low.model), "{reply}");
+    assert_eq!(reply["effort"], json!(low.effort), "{reply}");
+    assert_eq!(
+        endpoint.asked().len(),
+        1,
+        "asked once, while the summons waited"
+    );
+    let rows = recorded(&wire, &prepared, home.path());
+    assert_eq!(
+        endpoint.asked().len(),
+        1,
+        "the acting receipt is not asked twice"
+    );
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row["applied"], true, "{row}");
+    assert_eq!(row["chosen"], difficulty::LADDER[0].0, "{row}");
+    assert_eq!(
+        row["mode"],
+        zerocode_core::jev::JevMode::Auto.key(),
+        "{row}"
+    );
+    assert_eq!(row["requests"], 1, "{row}");
+    assert_eq!(row["executionModel"], json!(low.model), "{row}");
+    assert_eq!(row["effort"], json!(low.effort), "{row}");
+    assert!(
+        row["pinnedEffort"].is_null(),
+        "nobody pinned an effort: {row}"
+    );
+}
+
+/// What the switch leaves alone: a summons whose coordinator named both
+/// dials applies no answer — the seat asks off the beat and the row says it
+/// was not carried out — and a person's own `off` for the seat asks nothing
+/// at all, the summons launching on the middle row as before.
+#[test]
+fn under_the_switch_a_pin_applies_no_answer_and_a_persons_off_asks_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(), 0);
+    let wire = switched_on(&home, &endpoint, None);
+    let (reply, prepared) = summoned(&wire, home.path(), "--model opus --effort max", "pinned");
+    assert_eq!(
+        (reply["model"].as_str(), reply["effort"].as_str()),
+        (Some("opus"), Some("max"))
+    );
+    assert!(
+        endpoint.asked().is_empty(),
+        "a pinned summons waits on no question"
+    );
+    let rows = recorded(&wire, &prepared, home.path());
+    assert_eq!(endpoint.asked().len(), 1, "recorded off the beat");
+    assert_eq!(rows[0]["applied"], false, "{}", rows[0]);
+    assert_eq!(rows[0]["pinnedEffort"], "max", "{}", rows[0]);
+
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(), 0);
+    let wire = switched_on(
+        &home,
+        &endpoint,
+        Some(zerocode_core::jev::JevMode::Off.key()),
+    );
+    let (reply, prepared) = summoned(&wire, home.path(), "", "off");
+    let mid = difficulty::profile(&Value::Null, "claude", difficulty::FALLBACK_DIFFICULTY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply["model"], json!(mid.model), "{reply}");
+    assert_eq!(reply["effort"], json!(mid.effort), "{reply}");
+    assert!(recorded(&wire, &prepared, home.path()).is_empty());
+    assert!(endpoint.asked().is_empty(), "a person's off sends nothing");
+}
+
+/// An answer that does not come back inside the seat's two seconds is no
+/// answer: the summons launches on the middle row within the wall, and the
+/// row says nothing was carried out.
+#[test]
+fn under_the_switch_a_late_answer_falls_back_to_the_middle_row_within_the_wall() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::serving(
+        "HTTP/1.1 200 OK",
+        answer(),
+        difficulty::APPLY_DEADLINE_MS + 500,
+    );
+    let wire = switched_on(&home, &endpoint, None);
+    let began = Instant::now();
+    let (reply, prepared) = summoned(&wire, home.path(), "", "late");
+    assert!(began.elapsed() < Duration::from_millis(difficulty::APPLY_DEADLINE_MS + 400));
+    let mid = difficulty::profile(&Value::Null, "claude", difficulty::FALLBACK_DIFFICULTY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply["model"], json!(mid.model), "{reply}");
+    assert_eq!(reply["effort"], json!(mid.effort), "{reply}");
+    let receipt = prepared
+        .difficulty_shadow
+        .as_ref()
+        .and_then(|shadow| shadow.receipt.clone())
+        .expect("the request that was waited on is the row's own");
+    assert_eq!(receipt["applied"], false, "{receipt}");
+    assert!(receipt.get("chosen").is_none(), "{receipt}");
+}
+
+/// One task summoned, reported with its head and landed by the coordinator
+/// as verified and merged — a first attempt that succeeded — in `ledger`'s
+/// run: the dispatch it was carried on.
+fn landed_attempt(
+    ledger: &mut zerocode_core::orchestration::Ledger,
+    team: &mut zerocode_core::agent_teams::Team,
+    n: i64,
+) -> String {
+    let mut at = n * 10;
+    let mut planned = |team: &mut zerocode_core::agent_teams::Team,
+                       ledger: &mut zerocode_core::orchestration::Ledger,
+                       pane: &str,
+                       actor: &str,
+                       argv: Vec<String>| {
+        at += 1;
+        let planned =
+            zerocode_core::orchestration::plan(ledger, team, &Launch, &argv, pane, at, Some(actor));
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        ledger.file_receipt(&planned, at);
+        planned
+    };
+    let words = |line: String| {
+        line.split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let task = planned(
+        team,
+        ledger,
+        "%1",
+        "test-actor",
+        words(format!(
+            "task-create --spec translate-{n} --retry-request task-{n}"
+        )),
+    );
+    let task: Value = serde_json::from_str(&task.reply.stdout).unwrap();
+    let task = task["taskId"].as_str().unwrap().to_string();
+    let started = planned(
+        team,
+        ledger,
+        "%1",
+        "test-actor",
+        words(format!(
+            "worker-start --agent claude --task {task} --prompt translate --retry-request start-{n}"
+        )),
+    );
+    let zerocode_core::agent_teams::Effect::Split {
+        pane,
+        from,
+        direction,
+        ..
+    } = started.effect.clone()
+    else {
+        panic!("no split: {:?}", started.effect);
+    };
+    team.record_split(&pane, u32::try_from(100 + n).unwrap(), &from, direction);
+    let dispatch = started
+        .prepared_worker_start
+        .as_ref()
+        .and_then(|prepared| prepared.dispatch.clone())
+        .expect("a dispatch");
+    planned(
+        team,
+        ledger,
+        &pane,
+        "worker-actor",
+        vec![
+            "send".into(),
+            "--type".into(),
+            "worker_done".into(),
+            "--body".into(),
+            r#"{"ok":true,"head":"abc1234"}"#.into(),
+            "--retry-request".into(),
+            format!("done-{n}"),
+        ],
+    );
+    planned(
+        team,
+        ledger,
+        "%1",
+        "test-actor",
+        vec![
+            "task-update".into(),
+            "--task".into(),
+            task,
+            "--result".into(),
+            r#"{"verified":true,"merged":true}"#.into(),
+            "--attempt".into(),
+            dispatch.clone(),
+            "--source".into(),
+            "abc1234".into(),
+            "--retry-request".into(),
+            format!("land-{n}"),
+        ],
+    );
+    dispatch
+}
+
+/// What became of a summons' work grades the seat only where the seat's
+/// answer was carried out: an applied request's first attempt is its
+/// `agreed` mark, and a request whose answer was not applied — a pin ran
+/// instead — grades the pin, as the baseline's mark, never the seat.
+#[test]
+fn a_carried_out_answers_first_attempt_is_the_seats_mark() {
+    let mut ledger = zerocode_core::orchestration::Ledger::new();
+    let mut team = zerocode_core::agent_teams::Team::new("team-marks", "test-token", 1);
+    let created = zerocode_core::orchestration::plan(
+        &mut ledger,
+        &mut team,
+        &Launch,
+        &["run-create", "--name", "marks", "--retry-request", "create"].map(str::to_string),
+        "%1",
+        1,
+        Some("test-actor"),
+    );
+    assert_eq!(created.reply.exit_code, 0, "{}", created.reply.stderr);
+    ledger.file_receipt(&created, 1);
+    let run = ledger.runs()[0].id.clone();
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join(SUMMON_DIFFICULTY.ledger);
+    let mut requests = String::new();
+    let mut dispatches = Vec::new();
+    for (n, applied) in [(1, true), (2, false)] {
+        let dispatch = landed_attempt(&mut ledger, &mut team, n);
+        requests.push_str(
+            &json!({"at": n, "requestAt": n, "run": run, "dispatch": dispatch,
+                "rubricVersion": difficulty::RUBRIC_VERSION, "outcome": "answered",
+                "chosen": difficulty::LADDER[0].0, "agent": "claude", "applied": applied,
+                "attempt": 0, "retryOf": false})
+            .to_string(),
+        );
+        requests.push('\n');
+        dispatches.push((dispatch, applied));
+    }
+    std::fs::write(&path, requests).unwrap();
+    let mut costs = super::super::cost_book::CostBook::default();
+    let (_, observed) = observations_at(path, &ledger, &mut costs).expect("a ledger to read");
+    assert_eq!(observed.len(), 2, "{observed:?}");
+    for (dispatch, applied) in dispatches {
+        let row = observed
+            .iter()
+            .find(|row| row["dispatch"] == dispatch.as_str())
+            .expect("an observation of each request");
+        assert_eq!(
+            row[difficulty::outcomes::KEY]["firstAttemptSuccess"],
+            true,
+            "{row}"
+        );
+        let (mark, other) = if applied {
+            (
+                zerocode_core::jev::summary::AGREED,
+                zerocode_core::jev::summary::BASELINE_AGREED,
+            )
+        } else {
+            (
+                zerocode_core::jev::summary::BASELINE_AGREED,
+                zerocode_core::jev::summary::AGREED,
+            )
+        };
+        assert_eq!(row[mark.canonical], true, "{row}");
+        assert!(row.get(other.canonical).is_none(), "{row}");
+    }
+}
+
+/// The live check t-11989 hands in, on the real Jev service: with the one
+/// switch on and no word of either seat's own, a summons whose coordinator
+/// left both dials out launches on the profile row of Jev's real answer and
+/// its row says the answer was carried out; and a summons typed
+/// `--agent auto` lands on the agent the summon question really chose. It
+/// plans through the ledger's own `worker-start` on a ledger of its own, under
+/// a zo home of its own — the settings, the day's count and the seats' ledgers
+/// are that home's — and opens no pane, so the person's files and screen are
+/// untouched. The key rides one command's environment and is never printed.
+///
+/// ```sh
+/// TYPESAFE_API_KEY="$(security find-generic-password \
+///     -s dev.zerocode.key.TYPESAFE_API_KEY -a "$USER" -w)" \
+///   cargo test -p zerocode-shell --bin zerocode-shell \
+///   orchestration::summon_difficulty::tests::live_the_switch_carries_out_real_answers \
+///   -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "live Jev requests; requires a command-scoped key"]
+fn live_the_switch_carries_out_real_answers() {
+    use zerocode_core::jev::door::{ENABLED_SETTING, EVERY_WORKSPACE, JEV_SETTINGS_KEY};
+    let key = std::env::var("TYPESAFE_API_KEY").expect("a command-scoped key");
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {JEV_SETTINGS_KEY: {ENABLED_SETTING: true, "workspaces": [EVERY_WORKSPACE]}}})
+            .to_string(),
+    )
+    .unwrap();
+    let wire = Wire::at(crate::systemone::SYSTEMONE_BASE_URL, &key, Some(settings));
+    /// The seats of [`Seated`], and what this machine has on its `PATH` — the
+    /// set the summon question chooses among, as the live catalog measures it.
+    struct OnThisMachine<'a>(Seated<'a>);
+    impl zerocode_core::orchestration::Launcher for OnThisMachine<'_> {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            self.0.command_for(agent, prompt, tuning)
+        }
+        fn choose_agent(
+            &self,
+            look: &zerocode_core::summon_choice::SummonLook<'_>,
+            options: &[zerocode_core::summon_choice::Summonable],
+            origin: [&str; 3],
+        ) -> Option<String> {
+            self.0.choose_agent(look, options, origin)
+        }
+        fn choose_difficulty(&self, look: &Look, origin: [&str; 3]) -> Option<Value> {
+            self.0.choose_difficulty(look, origin)
+        }
+        fn difficulty_profile(
+            &self,
+            agent: &str,
+            level: &str,
+            origin: [&str; 3],
+        ) -> Result<Option<difficulty::Profile>, String> {
+            self.0.difficulty_profile(agent, level, origin)
+        }
+        fn presence(&self) -> Option<Vec<zerocode_core::agent::AgentPresence>> {
+            Some(zerocode_core::agent::agent_presence(
+                std::env::var_os("PATH").as_deref(),
+                std::env::consts::OS,
+            ))
+        }
+    }
+    let launcher = OnThisMachine(Seated { wire: &wire });
+    let mut ledger = zerocode_core::orchestration::Ledger::new();
+    let mut team = zerocode_core::agent_teams::Team::new("team-live", "test-token", 1);
+    let mut summon = |at: i64, argv: Vec<String>| {
+        let request = argv.last().cloned().unwrap_or_default();
+        let _origin = origin_with(
+            [team.id.as_str(), "%1", request.as_str()],
+            Some(home.path().to_path_buf()),
+            true,
+            wire.settings_root(),
+        );
+        let planned = zerocode_core::orchestration::plan(
+            &mut ledger,
+            &mut team,
+            &launcher,
+            &argv,
+            "%1",
+            at,
+            Some("test-actor"),
+        );
+        ledger.file_receipt(&planned, at);
+        planned
+    };
+    let created = summon(
+        1,
+        [
+            "run-create",
+            "--name",
+            "live-switch",
+            "--retry-request",
+            "create",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    );
+    assert_eq!(created.reply.exit_code, 0, "{}", created.reply.stderr);
+
+    // The difficulty: a small documentation fix, both dials left out.
+    let started = summon(
+        2,
+        [
+            "worker-start",
+            "--agent",
+            "claude",
+            "--prompt",
+            "Fix the typo in the README install section: 'recieve' should read 'receive'. Change nothing else.",
+            "--retry-request",
+            "live-difficulty",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    );
+    assert_eq!(started.reply.exit_code, 0, "{}", started.reply.stderr);
+    let reply: Value = serde_json::from_str(&started.reply.stdout).unwrap();
+    let prepared = started
+        .prepared_worker_start
+        .expect("a worker was reserved");
+    let rows = recorded(&wire, &prepared, home.path());
+    let row = rows.first().expect("the summons' row");
+    let row_of = |level: &str| {
+        difficulty::profile(&Value::Null, "claude", level)
+            .unwrap()
+            .unwrap()
+    };
+    println!(
+        "difficulty: outcome={} chosen={} confidence={} applied={} requests={} elapsedMs={} -> launched model={} effort={}",
+        row["outcome"],
+        row["chosen"],
+        row["confidence"],
+        row["applied"],
+        row["requests"],
+        row["elapsedMs"],
+        reply["model"],
+        reply["effort"]
+    );
+    if let Some(level) = row["chosen"].as_str() {
+        let profile = row_of(level);
+        assert_eq!(row["applied"], true, "{row}");
+        assert_eq!(reply["model"], json!(profile.model), "{reply}");
+        assert_eq!(reply["effort"], json!(profile.effort), "{reply}");
+        println!(
+            "difficulty: the launch is the {level} row ({} / {})",
+            profile.model, profile.effort
+        );
+    } else {
+        let mid = row_of(difficulty::FALLBACK_DIFFICULTY);
+        assert_eq!(row["applied"], false, "{row}");
+        assert_eq!(reply["model"], json!(mid.model), "{reply}");
+        println!("difficulty: no answer inside the wall, so the middle row");
+    }
+
+    // The agent: `--agent auto`, and the seat's pick is the summons' agent.
+    let auto = summon(
+        3,
+        [
+            "worker-start",
+            "--agent",
+            "auto",
+            "--prompt",
+            "Write unit tests for the date parser's leap-year branch.",
+            "--retry-request",
+            "live-agent",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    );
+    println!(
+        "agent auto: exit={} agent={} stderr={}",
+        auto.reply.exit_code,
+        serde_json::from_str::<Value>(&auto.reply.stdout)
+            .map_or(Value::Null, |reply| reply["agent"].clone()),
+        auto.reply.stderr.trim()
+    );
+    assert_eq!(auto.reply.exit_code, 0, "{}", auto.reply.stderr);
+    let shadow = auto
+        .prepared_worker_start
+        .as_ref()
+        .and_then(|prepared| prepared.summon_shadow.as_ref())
+        .expect("the summons' judgment half");
+    assert!(shadow.auto, "the receipt says the seat chose");
+    assert_ne!(
+        shadow.pinned.agent,
+        zerocode_core::orchestration::SUMMON_AUTO_AGENT
+    );
 }

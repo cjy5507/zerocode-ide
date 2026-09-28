@@ -614,6 +614,69 @@ function jevUnderBar(held) {
   return Boolean(line) && !JEV_LINES[line]?.wants && !held.applies;
 }
 
+/* The order the settings card lists features in (t-11989): the ones acting
+ * first, then the ones waiting on a person, then the ones still recording —
+ * the table's own order inside each. */
+const JEV_STANDING_ORDER = Object.freeze(["applying", "blocked", "recording"]);
+
+/* The settings card's line per feature while Jev is on (t-11989): where it
+ * stands — acting, or recording with the samples its next judgment waits on,
+ * or measured under its bar — read off the numbers zo answered (`zo jev
+ * summary`, the table's own reading: `jevSeatStatus`, `jevOwed`), never off
+ * a mode word. A feature whose mode asks nothing is left out, and the list is
+ * hidden while the switch is off. The state is said in words; the dot beside
+ * them only repeats it. */
+function paintJevStandings(root = document) {
+  const holder = root.querySelector("[data-jev-standings]");
+  if (!holder) return;
+  const on = Boolean(typesafeState?.jev?.on);
+  holder.hidden = !on;
+  if (!on) return;
+  const heldOf = new Map((jevNumbers ?? []).map((held) => [held.id, held]));
+  const rows = [];
+  for (const seat of typesafeState.switches ?? []) {
+    const choice = jevSeatChoice(typesafeState, seat.id);
+    const held = heldOf.get(seat.id);
+    if (!choice?.asks || !held) continue;
+    rows.push({ seat, held, status: jevSeatStatus(held, choice) });
+  }
+  rows.sort((a, b) => JEV_STANDING_ORDER.indexOf(a.status) - JEV_STANDING_ORDER.indexOf(b.status));
+  const note = holder.querySelector("[data-jev-standings-note]");
+  if (note) {
+    note.hidden = rows.length > 0;
+    note.textContent = rows.length > 0 ? ""
+      : jevNumbers === null && jevNumbersError
+        ? t("settings.typesafe.standingsUnanswered", "zo가 기능별 상태를 알려 주지 않았습니다.")
+        : t("settings.typesafe.standingsAsking", "zo에게 기능별 상태를 묻는 중입니다.");
+  }
+  holder.querySelector("[data-jev-standings-list]")?.replaceChildren(...rows.map(jevStandingRow));
+}
+
+/* One feature's line on the card: its name, and its state with what the
+ * state is waiting on — 「기록 중 · 13/53」 while the judge counts samples
+ * (the sentence the table says, 「판정 표본 13/53건」, as its tip), 「기록 중
+ * · 기준 미달」 once measured under its bar, the state alone otherwise. */
+function jevStandingRow({ seat, held, status }) {
+  const words = jevFeature(seat.id).name;
+  const name = jevNode("span", "settings-jev-standing-name",
+    document.createTextNode(words ? t(words.key, words.source) : seat.id));
+  const state = JEV_STATUSES.find((one) => one.status === status);
+  const word = state.waits?.[jevWaitsFor(held)] ?? state;
+  const said = t(word.key, word.word);
+  const owed = status === "recording" ? jevOwed(held, seat) : null;
+  const counting = owed !== null && owed.wants !== "next";
+  const detail = counting ? `${jevCount(owed.have)}/${jevCount(owed.want)}`
+    : status === "recording" && jevUnderBar(held) ? t(JEV_UNDER.key, JEV_UNDER.word) : "";
+  const standing = jevNode("span", "settings-jev-standing", document.createTextNode(detail
+    ? t("settings.typesafe.standingWith", "{{state}} · {{detail}}", { state: said, detail })
+    : said));
+  standing.dataset.status = status;
+  if (counting) standing.dataset.tip = jevSampleSaid(owed);
+  const row = jevNode("li", "settings-jev-standing-row", name, standing);
+  row.dataset.jevStanding = seat.id;
+  return row;
+}
+
 /* The busiest first: today's requests, then the week's, then the card's own
  * order — the order a person reading "what is running" wants, and the one
  * the card keeps when nothing tells two features apart. */
@@ -976,6 +1039,8 @@ function jevLanguage() {
 }
 
 function paintJevViews() {
+  // The settings card's standing lines read the same numbers (t-11989).
+  paintJevStandings();
   for (const tab of tabs) {
     if (tab.kind !== "jev") continue;
     const host = groups.get(tab.pane)?.jevView;

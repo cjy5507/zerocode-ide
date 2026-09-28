@@ -9216,7 +9216,7 @@ mod tests {
         for owned in [
             "open_ssh_terminal(app.clone()",
             "ssh_open_remote_term(state,",
-            "open_term_tab(state, rows, cols, Some(true), cwd, None)",
+            "open_term_tab(state, rows, cols, Some(true), cwd, None, None)",
             r#"emit_to("main", "ssh:agent-open""#,
         ] {
             assert!(opening.contains(owned), "the remote open road lost {owned}");
@@ -27771,16 +27771,19 @@ mod tests {
         let mounting = block_after(window, "async function mountStoredLayout(");
         assert!(
             mounting.contains("{ worktree, id: record.id, ordinal: at }")
-                && mounting.contains("spawnStoredLeaf(wake, record.running?.[at], grid, restore)")
+                && mounting.contains(
+                    "spawnStoredLeaf(wake, record.running?.[at], grid, restore, worktree)"
+                )
                 && !window.contains(r#"invoke("replay_scrollback""#),
             "a restored leaf comes back blank, or its screen is replayed after its program started:\n{mounting}"
         );
         let leaf = block_after(window, "async function spawnStoredLeaf(");
         assert!(
-            leaf.contains("{ rows, cols }, restore)")
+            leaf.contains("{ rows, cols }, restore, worktree)")
                 && leaf.contains(r#"rows, cols, restore })"#)
-                && leaf
-                    .contains(r#"invoke("open_term_tab", { rows, cols, plain: true, restore })"#),
+                && leaf.contains(
+                    r#"invoke("open_term_tab", { rows, cols, plain: true, restore, notice })"#
+                ),
             "a spawn road a restored leaf takes drops its stored screen:\n{leaf}"
         );
     }
@@ -28131,7 +28134,7 @@ mod tests {
         let spawn_at = mounting.find("spawnStoredLeaf(").expect("the leaves spawn");
         let paint_at = mounting.find("renderPanes(").expect("the tab paints");
         assert!(
-            spawn_at < paint_at && mounting.contains("grid, restore)"),
+            spawn_at < paint_at && mounting.contains("grid, restore, worktree)"),
             "a restored tab paints before its shells exist:\n{mounting}"
         );
 
@@ -28416,7 +28419,7 @@ mod tests {
             .find("storedWakesSettled(path)")
             .expect("the door asks before the restore it started has landed");
         let asked = reopening
-            .find("resumeSession(known)")
+            .find("resumeSession(known, path)")
             .expect("the door no longer opens through the judged road");
         assert!(
             reopening.contains("activateWorktree(path, { firstTerminal: false })")
@@ -28452,7 +28455,10 @@ mod tests {
             );
         }
         // 「서 있다」는 답은 그 판으로 간다 — 탭 메뉴의 「이 대화 다시 열기」도.
-        let going = block_after(window, "async function resumeSession(known) {");
+        let going = block_after(
+            window,
+            "async function resumeSession(known, worktree = null) {",
+        );
         let standing_at = going
             .find("if (woke.standing) {")
             .expect("a door no longer tells an opened pane from a standing one");
@@ -36059,6 +36065,7 @@ mod tests {
             "pub(crate) fn artifact_delete(",
             "pub(crate) fn artifact_register(",
             "pub(crate) fn artifact_versions(",
+            "pub(crate) fn artifact_page_at(",
             "pub(crate) fn artifact_import_transcripts(",
             "pub(crate) async fn artifact_thumbnail(",
         ] {
@@ -36194,14 +36201,23 @@ mod tests {
             "artifacts.jump.task",
             "artifacts.jump.worktree",
             "settings.artifacts.retention",
-            // The gallery (t-3233): three kinds, three segments, the card's
-            // line, the new-artifact draft, the header strip and share.
+            // 갤러리는 세 출처 세그먼트 대신 페이지·보고서·증거 탭과 다시 찾기
+            // 고르개를 쓴다. 새 낱말이 네 카탈로그에 모두 있어야 한다.
             "artifacts.kind.page",
             "artifacts.kind.document",
             "artifacts.kind.web",
-            "artifacts.source.all",
-            "artifacts.source.local",
-            "artifacts.source.remote",
+            "artifacts.tab.pages",
+            "artifacts.pick.project",
+            "artifacts.pick.agent",
+            "artifacts.pick.period",
+            "artifacts.pick.all",
+            "artifacts.period.today",
+            "artifacts.period.week",
+            "artifacts.missing.hidden",
+            "artifacts.missing.shown",
+            "artifacts.missing.show",
+            "artifacts.missing.hide",
+            "artifacts.feedbackCount",
             "artifacts.new",
             "artifacts.newDraft",
             "artifacts.editedOn",
@@ -36357,8 +36373,8 @@ mod tests {
         }
         let sheet = include_str!("../../../../ui/shell.css");
         assert!(
-            sheet.contains(".artifact-strip {") && sheet.contains(".artifacts-sources {"),
-            "the header strip or the source segments have no sheet"
+            sheet.contains(".artifact-strip {") && sheet.contains(".artifacts-tabs {"),
+            "the header strip or the gallery's tabs have no sheet"
         );
         let tokens = include_str!("../../../../ui/tokens.css");
         for token in [

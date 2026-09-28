@@ -295,7 +295,7 @@ use cmd::{
     reopen_onboarding, reorder_projects, repo_trust_standing, request_developer_permission,
     reset_agent_launch, reset_computer_use_permissions, resize_lane,
     resolve_claude_account_identity, resolve_mr_base, resolve_pr_base, resource_snapshot,
-    respond_permission, resume_session, resume_vault_session, reveal_board_agent,
+    respond_permission, resume_line, resume_session, resume_vault_session, reveal_board_agent,
     reveal_run_evidence, reveal_skill, reveal_vault_session, run_automation, save_agent_launch,
     save_agent_launch_env, save_api_router, save_automation, save_clipboard_image, save_diff_note,
     save_launch_recipe, save_onboarding_step, save_pane_layouts, save_pasted_image,
@@ -357,9 +357,9 @@ use cmd::{
 };
 use cmd::{
     artifact_copy_path, artifact_counts, artifact_delete, artifact_import_transcripts,
-    artifact_open, artifact_preview, artifact_register, artifact_reveal, artifact_search,
-    artifact_thumbnail, artifact_versions, artifacts_list, set_artifacts_retention_days,
-    set_vault_session_limit,
+    artifact_open, artifact_page_at, artifact_preview, artifact_register, artifact_reveal,
+    artifact_search, artifact_thumbnail, artifact_versions, artifacts_list,
+    set_artifacts_retention_days, set_vault_session_limit,
 };
 use cmd::{
     claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs,
@@ -2978,6 +2978,7 @@ fn main() -> ExitCode {
             save_launch_recipe,
             launch_plan_for_action,
             resume_session,
+            resume_line,
             list_quick_commands,
             save_quick_command,
             delete_quick_command,
@@ -3008,6 +3009,7 @@ fn main() -> ExitCode {
             artifact_delete,
             artifact_register,
             artifact_versions,
+            artifact_page_at,
             artifact_thumbnail,
             artifact_import_transcripts,
             set_artifacts_retention_days, set_vault_session_limit,

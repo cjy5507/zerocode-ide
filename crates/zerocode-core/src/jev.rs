@@ -236,8 +236,10 @@ pub enum JevMode {
     Shadow,
     /// Ask, and act on an answer that passed its checks.
     On,
-    /// Ask and record until the use's own evidence promotes it (§4). Nothing
-    /// promotes yet, so today this is [`Self::Shadow`] under another name.
+    /// Ask, and let the use's own evidence decide whether it acts (§4): it
+    /// starts where its row says ([`JevUse::auto_starts`] — recording for
+    /// most seats, acting for a seat that only fills what its caller left
+    /// open), and its judge raises or lowers it from there.
     Auto,
 }
 
@@ -263,8 +265,9 @@ impl JevMode {
     }
 
     /// Whether a use in this mode acts on what it is told, read without a
-    /// judgment to hand — `auto` reads as recording, which is where it starts
-    /// and where it stays until [`crate::jev::promote`] raises it.
+    /// judgment or a seat to hand — `auto` reads as recording, where most
+    /// seats start ([`JevUse::auto_starts`]); where one stands is
+    /// [`crate::jev::promote::standing`]'s to say.
     #[must_use]
     pub const fn applies(self) -> bool {
         self.applies_with(false)
@@ -509,6 +512,37 @@ pub struct JevUse {
     /// How a label row this use wrote under an older label rule is read
     /// now ([`Regrade`], t-11010).
     pub regrade: Regrade,
+    /// Where this use stands under `auto` before its judge has decided
+    /// anything under the words it asks now (t-11989) — what
+    /// [`promote::standing`] reads while the ledger holds no transition of
+    /// those words.
+    ///
+    /// [`promote::Stand::Recording`] for a use whose act takes the place of
+    /// a reader that works without it: a probe's route, a rule's move, a
+    /// pane's room. Recording beside that reader costs nothing, and the
+    /// rows it leaves are what says replacing it changes little (§4).
+    ///
+    /// [`promote::Stand::Applying`] for a use whose act only fills a choice
+    /// its caller left open, where nothing stands without it but a fixed
+    /// placeholder: the summons' difficulty, asked only when a coordinator
+    /// left `--model` or `--effort` out (the placeholder is the middle
+    /// profile row), and the agent choice, which acts only on
+    /// `--agent auto` (the placeholder is a refusal). Recording there
+    /// compared the answer with no reader, carried the placeholder out
+    /// instead, and — for the difficulty seat, whose marks come only from
+    /// answers that were carried out
+    /// ([`crate::summon_difficulty::outcomes::evidence`]) — earned nothing
+    /// to rise on: every row of this machine's difficulty ledger said
+    /// `applied: false` and its judge `too_few_compared` 0 of 30
+    /// (2026-09-28). Such a use is still judged, and falls on a line its
+    /// own marks break — answers carried out that did worse than the pins,
+    /// or that coordinators' own choices disagree with — though not on the
+    /// wire's health, since for it a fall is for good and a late or missing
+    /// answer already falls back request by request ([`promote::judge`]); a
+    /// contract holds it to a row the judge reads, because a use that acts
+    /// from the start with no judge to stop it would be `on` under another
+    /// name.
+    pub auto_starts: promote::Stand,
 }
 
 impl JevUse {
@@ -1033,6 +1067,7 @@ pub const ROUTING: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The wall zo's routing waits for a judgment when the seat acts: the batch
@@ -1212,6 +1247,7 @@ pub const RECALL: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -1323,6 +1359,7 @@ pub const BROWSER: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -1372,6 +1409,7 @@ pub const DESKTOP: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -1418,6 +1456,7 @@ pub const EMULATOR: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -1466,6 +1505,7 @@ pub const STALL: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// What the placement seat's answers must bound above before `auto` rises to
@@ -1578,6 +1618,7 @@ pub const PLACEMENT: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -1596,10 +1637,12 @@ pub const PLACEMENT: JevUse = JevUse {
 /// room when it refuses one (`orchestration::summonable`), so an agent at its
 /// wall cannot be offered as an answer nobody could carry out.
 ///
-/// Recording only, and the coordinator's own words keep summoning every
-/// worker. `auto` records too: what a later stage would promote on is the row
-/// beside what the summons actually did and what became of that worker, and
-/// no such judge exists yet.
+/// A coordinator's named agent keeps summoning every worker it names; the
+/// seat acts only where the coordinator wrote `--agent auto` and so left the
+/// choice to it — from the first such summons under `auto`
+/// ([`JevUse::auto_starts`], t-11989), where recording used to refuse the
+/// summons by name. Its judge reads the comparisons below and makes it fall
+/// on a line it breaks.
 ///
 /// The `agreed` rule (t-5873). The answer agreed when it named the agent this
 /// summons actually landed on — `--agent` as the quota gate left it, which is
@@ -1699,6 +1742,9 @@ pub const SUMMON: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    // It acts only on `--agent auto`, where recording refused the summons
+    // (t-11989).
+    auto_starts: promote::Stand::Applying,
 };
 
 /// Difficulty of new work, graded by completed executions at the same difficulty.
@@ -1737,6 +1783,9 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    // It acts only on a dial the coordinator left open, and its marks come
+    // only from answers that were carried out (t-11989).
+    auto_starts: promote::Stand::Applying,
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
@@ -1813,6 +1862,7 @@ pub const STEP_EFFORT: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -2043,6 +2093,7 @@ pub const SKILLS: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// zo's turn-start skill suggestion (t-6347): the two-stage question asked
@@ -2093,6 +2144,7 @@ pub const SKILL_SUGGESTION: JevUse = JevUse {
     label_part: &[],
     follows: Some(SKILLS.setting),
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -2177,6 +2229,7 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Characters of the person's last request one compaction judgment reads
@@ -2361,6 +2414,7 @@ pub const COMPACTION: JevUse = JevUse {
     label_part: &["block"],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Characters of one text an agent's own question carries — the question,
@@ -2468,6 +2522,7 @@ pub const AGENT_TOOL: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Characters of a page's title one browser-read question carries — the head
@@ -2655,6 +2710,7 @@ pub const BROWSER_READ: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The closed answer every notify question offers, spelled once: ring now,
@@ -2834,6 +2890,7 @@ pub const NOTIFY: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::NotifyFacts,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Characters of the sentence a person is writing that one mention
@@ -2972,6 +3029,7 @@ pub const MENTION_RERANK: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// How many of the emulator seat's candidates a forked phone step tries
@@ -3157,6 +3215,7 @@ pub const BRANCHING: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The judgment cache: a memo in front of the wire that answers a screen
@@ -3220,6 +3279,7 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The wall one mail triage question waits for its answer, in milliseconds —
@@ -3311,6 +3371,7 @@ pub const MAIL_TRIAGE: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// How many of a role's eligible attempts try the model nobody has evidence
@@ -3470,6 +3531,7 @@ pub const CHALLENGER: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Characters of the person's words one patch review reads as the task the
@@ -3659,6 +3721,7 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// One turn's completion claims put beside the tool output that can support
@@ -3727,6 +3790,7 @@ pub const CLAIM: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The vault pair seat only suggests relations for a person's weekly review.
@@ -3803,6 +3867,7 @@ pub const VAULT_PAIRS: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Re-rank likely files for a code task, with one Noul for each candidate.
@@ -3859,6 +3924,7 @@ pub const FILE_PICK: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Characters of a shell command one command-guard question carries (t-6348).
@@ -3978,6 +4044,7 @@ pub const COMMAND_GUARD: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Characters of a tool block's head one tool-text question carries
@@ -4070,6 +4137,7 @@ pub const TOOL_TEXT_GUARD: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// The wall one reflex decision waits for its answer, in milliseconds: one
@@ -4158,6 +4226,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
 };
 
 /// Every place this product asks Jev something.

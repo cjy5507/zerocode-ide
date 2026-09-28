@@ -158,6 +158,17 @@ pub(crate) struct Filter {
     /// can read and export by version (t-3952), exactly what the headless
     /// catalog holds.
     pub(crate) published: Option<bool>,
+    /// 갤러리 탭이 묶는 종류. 「페이지·문서」는 page·document·web이고,
+    /// 모르는 종류는 `kind`처럼 무시한다. 빈 목록이면 모든 종류를 받는다.
+    pub(crate) kinds: Vec<String>,
+    /// 창만이 한 프로젝트의 루트와 워크트리를 함께 아니까 그 경로들을 받는다.
+    /// 행의 출처 경로가 그 아래에 있으면 속하며, 빈 목록이면 모두 받는다.
+    pub(crate) roots: Vec<PathBuf>,
+    /// 오늘·이번 주의 경계는 창의 시계와 시간대로 정하고 epoch ms로 건넨다.
+    pub(crate) since_ms: Option<i64>,
+    /// `Some(true)`는 파일이 있는 행만 받는다. 파일 없는 claude.ai 행은
+    /// 늘 살아 있으며, `Some(false)`는 파일이 사라진 행만 받는다.
+    pub(crate) present: Option<bool>,
 }
 
 /// One snapshot of a page or document (t-3233 §5), or one kept version of a
@@ -174,13 +185,28 @@ pub(crate) struct Version {
     pub(crate) sha256: Option<String>,
 }
 
-/// One listing answer: rows newest first, the count behind them, and whether
-/// the table's row cap cut the answer.
+/// What a page address names in this store ([`Store::page_at`]): the
+/// publication, and the kept version the address is — `None` for the page's
+/// current file.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct PageAt {
+    pub(crate) artifact: Artifact,
+    pub(crate) version: Option<u32>,
+}
+
+/// 목록 상한이 행을 잘라도 탭과 사라진 파일의 수는 전체를 센다.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Listing {
     pub(crate) rows: Vec<Artifact>,
     pub(crate) total: usize,
     pub(crate) truncated: bool,
+    /// `rows`의 모양은 그대로 두고 사라진 파일의 id만 창에 따로 건넨다.
+    /// 창은 디스크에 다시 묻지 않는다.
+    pub(crate) missing: Vec<String>,
+    /// `present`만 빼고 거르개에 맞는 사라진 파일의 수다.
+    pub(crate) missing_total: usize,
+    /// 종류만 빼고 거르개에 맞는 전체 행을 종류별로 센다.
+    pub(crate) by_kind: BTreeMap<String, usize>,
 }
 
 /// Counts by origin, for the chips other surfaces wear — the board card, the
@@ -403,15 +429,18 @@ impl Store {
     }
 
     /// Publish into this catalog under its existing lock; no watcher or timer of its own.
+    /// The row wears `origin` whole — a republish records its own publisher,
+    /// not the first one's.
     pub(crate) fn publish_page(
         &self,
         input: &zerocode_core::artifact_publish::PublishInput,
+        origin: Origin,
     ) -> Result<zerocode_core::artifact_publish::PageMeta, String> {
         let limits = self.limits();
         let mut index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
         let _lock = zerocode_core::artifact_publish::lock_store(&self.root)?;
         let meta = zerocode_core::artifact_publish::publish(&self.root, input, &limits)?;
-        let artifact = meta.artifact(Origin::default());
+        let artifact = meta.artifact(origin);
         let row = Row {
             tokens: Self::tokens_of_words(
                 &[&meta.title, meta.description.as_deref().unwrap_or_default()],
@@ -827,6 +856,47 @@ impl Store {
                 version
             })
             .collect()
+    }
+
+    /// The publication a path names: its current file under `pages/<id>/`,
+    /// or one of its kept versions. Judged on resolved paths under this
+    /// store's own folder, so a link into the store opens as the artifact it
+    /// is and nothing outside it is taken for one; any other file — outside
+    /// the store, a page's metadata, a row since deleted — is `None`.
+    pub(crate) fn page_at(&self, path: &Path) -> Option<PageAt> {
+        let pages = self
+            .root
+            .join(zerocode_core::artifact_publish::PAGES_DIR)
+            .canonicalize()
+            .ok()?;
+        let asked = path.canonicalize().ok()?;
+        let id = asked
+            .strip_prefix(&pages)
+            .ok()?
+            .components()
+            .next()?
+            .as_os_str()
+            .to_str()?
+            .to_string();
+        let artifact = self.get(&id).filter(is_publication)?;
+        if artifact
+            .path
+            .canonicalize()
+            .is_ok_and(|current| current == asked)
+        {
+            return Some(PageAt {
+                artifact,
+                version: None,
+            });
+        }
+        let version = zerocode_core::artifact_publish::versions(&self.root, &id)
+            .into_iter()
+            .find(|kept| kept.path.canonicalize().is_ok_and(|kept| kept == asked))?
+            .n;
+        Some(PageAt {
+            artifact,
+            version: Some(version),
+        })
     }
 
     /// The scan's snapshots of one page or document, oldest first, without
@@ -1500,14 +1570,27 @@ impl Store {
     }
 
     /// List rows the filter admits, newest first, bounded by the table.
+    ///
+    /// 파일 존재는 저렴한 거르개를 지난 행마다 목록을 만들 때 한 번만 묻는다.
+    /// 지워진 Computer Use 세션 폴더처럼 감시가 끝난 경로도 있으므로
+    /// 스캔만으로는 알 수 없고, 창은 그릴 때마다 디스크에 묻지 않는다.
     pub(crate) fn list(&self, filter: &Filter) -> Listing {
         let limits = self.limits();
         let kind = filter.kind.as_deref().and_then(ArtifactKind::parse);
+        let kinds: Vec<ArtifactKind> = filter
+            .kinds
+            .iter()
+            .filter_map(|word| ArtifactKind::parse(word))
+            .collect();
+        let of_kind = |artifact: &Artifact| {
+            kind.is_none_or(|wanted| artifact.kind == wanted)
+                && (kinds.is_empty() || kinds.contains(&artifact.kind))
+        };
+        let present = |gone: bool| filter.present.is_none_or(|wanted| wanted != gone);
         let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut rows: Vec<&Row> = index
+        let held: Vec<(&Row, bool)> = index
             .rows
             .values()
-            .filter(|row| kind.is_none_or(|wanted| row.artifact.kind == wanted))
             .filter(|row| {
                 filter
                     .remote
@@ -1536,10 +1619,40 @@ impl Store {
                     })
             })
             .filter(|row| {
+                let origin = &row.artifact.origin;
+                filter.roots.is_empty()
+                    || [origin.project.as_deref(), origin.worktree.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|path| filter.roots.iter().any(|root| path.starts_with(root)))
+            })
+            .filter(|row| {
+                filter
+                    .since_ms
+                    .is_none_or(|since| row.artifact.modified_ms >= since)
+            })
+            .filter(|row| {
                 filter.query.trim().is_empty() || query_matches(&filter.query, &row.tokens)
             })
+            .map(|row| (row, is_gone(&row.artifact)))
             .collect();
-        rows.sort_by(|a, b| {
+        let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
+        let mut missing_total = 0;
+        for (row, gone) in &held {
+            if present(*gone) {
+                *by_kind
+                    .entry(row.artifact.kind.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
+            if *gone && of_kind(&row.artifact) {
+                missing_total += 1;
+            }
+        }
+        let mut rows: Vec<(&Row, bool)> = held
+            .into_iter()
+            .filter(|(row, gone)| of_kind(&row.artifact) && present(*gone))
+            .collect();
+        rows.sort_by(|(a, _), (b, _)| {
             b.artifact
                 .modified_ms
                 .cmp(&a.artifact.modified_ms)
@@ -1547,14 +1660,21 @@ impl Store {
         });
         let total = rows.len();
         let truncated = total > limits.list_rows_max;
+        rows.truncate(limits.list_rows_max);
         Listing {
+            missing: rows
+                .iter()
+                .filter(|(_, gone)| *gone)
+                .map(|(row, _)| row.artifact.id.clone())
+                .collect(),
             rows: rows
                 .into_iter()
-                .take(limits.list_rows_max)
-                .map(|row| row.artifact.clone())
+                .map(|(row, _)| row.artifact.clone())
                 .collect(),
             total,
             truncated,
+            missing_total,
+            by_kind,
         }
     }
 
@@ -1658,6 +1778,22 @@ impl Store {
         }
         let meta = std::fs::metadata(&artifact.path).map_err(|error| error.to_string())?;
         let bytes = meta.len();
+        // 페이지 그림은 현재 행 키로 숨은 판이 만든 썸네일이다. 아직 없다는
+        // 답은 기억하지 않는다 — 카드가 뒤에 그린 뒤 다시 물으면 찾아야 한다.
+        if artifact.kind == ArtifactKind::Page {
+            use crate::artifact_thumbs::{Cached, cached, data_url_of, key_of};
+            let png = key_of(&artifact).and_then(|key| match cached(&self.root, id, &key) {
+                Cached::Picture(png) => Some(png),
+                Cached::Failed | Cached::Nothing => None,
+            });
+            return Ok(Arc::new(PreviewPayload {
+                kind: if png.is_some() { "image" } else { "none" },
+                text: None,
+                data_url: png.as_deref().map(data_url_of),
+                bytes,
+                truncated: false,
+            }));
+        }
         let payload = match artifact.kind {
             ArtifactKind::Screenshot => {
                 if bytes > limits.preview_image_bytes_max {
@@ -1762,6 +1898,11 @@ impl ScanBudget {
 /// version number of their own, written by `artifact_publish::PageMeta`.
 fn is_publication(artifact: &Artifact) -> bool {
     artifact.kind == ArtifactKind::Page && artifact.version.is_some()
+}
+
+/// 파일을 이름 붙인 행만 존재를 묻는다. claude.ai 행에는 파일이 없다.
+fn is_gone(artifact: &Artifact) -> bool {
+    !artifact.path.as_os_str().is_empty() && !artifact.path.is_file()
 }
 
 /// Whether a document is Markdown rather than a PDF — by extension, the way
@@ -2010,13 +2151,202 @@ pub(crate) struct ArtifactDoor;
 impl zerocode_hookd::ArtifactCommands for ArtifactDoor {
     fn execute(&self, request: serde_json::Value) -> Result<serde_json::Value, String> {
         let store = store().ok_or("artifact store is not ready")?;
-        artifact_request(&store, request)
+        let app = store
+            .window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        artifact_request(&store, request, &|caller| {
+            app.as_ref()
+                .map_or_else(Origin::default, |app| window_origin(app, caller))
+        })
     }
+}
+
+/// What the window knows about the pane a publication came from. The run,
+/// worker and task are the ledger's seat in that pane, when it holds one.
+#[derive(Default)]
+struct PaneFacts {
+    agent: Option<String>,
+    model: Option<String>,
+    run: Option<String>,
+    worker: Option<String>,
+    task: Option<String>,
+}
+
+/// A project this window keeps, and the workspaces it knows for it.
+struct KnownProject {
+    root: PathBuf,
+    workspaces: Vec<PathBuf>,
+}
+
+/// The origin a publication's pane vouches for: the pane under the window's
+/// own spelling of its key, the project and workspace this window keeps that
+/// hold the folder the publish was asked from, and the agent, model and ledger
+/// seat the window already knows for that pane. A publish from no pane this window
+/// holds — a shell outside it, a key of another spelling, a pane since
+/// closed — records nothing at all; a folder no known workspace holds names
+/// no project rather than being promoted to one. A label, like every origin:
+/// nothing is authorized by it.
+fn publication_origin(
+    caller: &zerocode_core::artifact_publish::Caller,
+    pane: impl FnOnce(crate::TermId) -> Option<PaneFacts>,
+    known: impl FnOnce(&Path) -> Vec<KnownProject>,
+) -> Origin {
+    let Some(term) = caller
+        .pane
+        .as_deref()
+        .and_then(crate::hooks::term_of_pane_key)
+    else {
+        return Origin::default();
+    };
+    let Some(facts) = pane(term) else {
+        return Origin::default();
+    };
+    let (project, worktree) = caller
+        .cwd
+        .as_deref()
+        .filter(|cwd| cwd.is_absolute())
+        .map_or((None, None), |cwd| place_of(cwd, &known(cwd)));
+    Origin {
+        pane: Some(crate::hooks::pane_key_of(term)),
+        agent: facts.agent,
+        model: facts.model,
+        run: facts.run,
+        worker: facts.worker,
+        task: facts.task,
+        worktree,
+        project,
+        ..Origin::default()
+    }
+}
+
+/// The known project and workspace that hold `cwd` — the deepest workspace
+/// wins, so a checkout nested inside another names itself. The spellings are
+/// the catalog's and git's own, which is what the worktree chip keys on; only
+/// the comparison is made on resolved paths.
+fn place_of(cwd: &Path, known: &[KnownProject]) -> (Option<PathBuf>, Option<PathBuf>) {
+    let Ok(cwd) = cwd.canonicalize() else {
+        return (None, None);
+    };
+    let mut best: Option<(usize, &KnownProject, &PathBuf)> = None;
+    for project in known {
+        for workspace in &project.workspaces {
+            let Ok(held) = workspace.canonicalize() else {
+                continue;
+            };
+            let depth = held.components().count();
+            if cwd.starts_with(&held) && best.is_none_or(|(deepest, ..)| depth > deepest) {
+                best = Some((depth, project, workspace));
+            }
+        }
+    }
+    best.map_or((None, None), |(_, project, workspace)| {
+        (Some(project.root.clone()), Some(workspace.clone()))
+    })
+}
+
+/// The projects this window keeps, each with the workspaces it knows for it.
+/// Only the repository `cwd` stands in is asked for its worktree list — one
+/// `rev-parse` and one `worktree list`, however many projects the catalog
+/// holds; every other project is its own folder (its main checkout, or a
+/// folder workspace). A repository no stored project belongs to lends its
+/// list to nobody.
+fn known_projects(config_root: &Path, cwd: &Path) -> Vec<KnownProject> {
+    let listed: Vec<PathBuf> = zerocode_orchestrator::Orchestrator::open(cwd)
+        .and_then(|repository| repository.list())
+        .map(|worktrees| {
+            worktrees
+                .into_iter()
+                .map(|worktree| worktree.path)
+                .collect()
+        })
+        .unwrap_or_default();
+    let resolved = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let listed_resolved: Vec<PathBuf> = listed.iter().map(|path| resolved(path)).collect();
+    crate::shell_runtime::stored_projects(config_root)
+        .into_iter()
+        .map(PathBuf::from)
+        .map(|root| {
+            let workspaces = if listed_resolved.contains(&resolved(&root)) {
+                listed.clone()
+            } else {
+                vec![root.clone()]
+            };
+            KnownProject { root, workspaces }
+        })
+        .collect()
+}
+
+/// The ledger's seat in a pane, as [`pane_facts`] reads it.
+struct Seat<'a> {
+    agent: &'a str,
+    model: Option<&'a str>,
+    run: &'a str,
+    worker: &'a str,
+    task: &'a str,
+}
+
+/// A pane's facts: the agent the window seated or heard there, else the
+/// seat's; the seat's model, run, worker and task only while the seat's agent
+/// is the one the pane runs — a seat another agent now sits over vouches for
+/// nothing. The ledger's empty word is absence (`LedgerAgent::task_id`).
+fn pane_facts(heard: Option<&str>, seat: Option<Seat<'_>>) -> PaneFacts {
+    let agent = heard.or(seat.as_ref().map(|seat| seat.agent));
+    let Some(seat) = seat.filter(|seat| agent == Some(seat.agent)) else {
+        return PaneFacts {
+            agent: agent.map(str::to_string),
+            ..PaneFacts::default()
+        };
+    };
+    let named = |value: &str| (!value.is_empty()).then(|| value.to_string());
+    PaneFacts {
+        agent: Some(seat.agent.to_string()),
+        model: seat.model.map(str::to_string),
+        run: named(seat.run),
+        worker: named(seat.worker),
+        task: named(seat.task),
+    }
+}
+
+/// This window's answer for [`publication_origin`]: a pane it holds, what
+/// [`pane_facts`] makes of the agent it seated or heard there and of the
+/// ledger's seat in it.
+fn window_origin(
+    app: &tauri::AppHandle,
+    caller: &zerocode_core::artifact_publish::Caller,
+) -> Origin {
+    use tauri::Manager as _;
+    let state = app.state::<AppState>();
+    publication_origin(
+        caller,
+        |term| {
+            if !state.terminals().contains_key(&term) {
+                return None;
+            }
+            let heard = state.agent_terms().get(&term).copied();
+            let ledger = crate::orchestration::board_ledger_snapshot();
+            let seat = ledger
+                .agents
+                .iter()
+                .find(|row| row.term == Some(term))
+                .map(|row| Seat {
+                    agent: &row.agent,
+                    model: row.model.as_deref(),
+                    run: &row.run,
+                    worker: &row.worker,
+                    task: &row.task_id,
+                });
+            Some(pane_facts(heard, seat))
+        },
+        |cwd| known_projects(state.config_root(), cwd),
+    )
 }
 
 fn artifact_request(
     store: &Store,
     mut request: serde_json::Value,
+    origin_of: &dyn Fn(&zerocode_core::artifact_publish::Caller) -> Origin,
 ) -> Result<serde_json::Value, String> {
     let action = request
         .get("action")
@@ -2025,12 +2355,8 @@ fn artifact_request(
         .to_string();
     match action.as_str() {
         "publish" => {
-            request
-                .as_object_mut()
-                .ok_or("expected object")?
-                .remove("action");
-            let input = serde_json::from_value(request).map_err(|e| e.to_string())?;
-            let meta = store.publish_page(&input)?;
+            let (input, caller) = zerocode_core::artifact_publish::publish_parts(request)?;
+            let meta = store.publish_page(&input, origin_of(&caller))?;
             if let Some(app) = store
                 .window
                 .lock()
@@ -2127,6 +2453,11 @@ mod tests {
         std::fs::write(path, text).expect("write");
     }
 
+    /// A publish asked from no pane this window holds.
+    fn nobody(_: &zerocode_core::artifact_publish::Caller) -> Origin {
+        Origin::default()
+    }
+
     fn origin(worker: &str) -> Origin {
         Origin {
             run: Some("run-1".into()),
@@ -2199,13 +2530,14 @@ mod tests {
         let out = dir.path().join("share.html");
         touch(&source, "<main>first</main>");
         let request = serde_json::json!({"action":"publish", "file_path":source});
-        let first = artifact_request(&store, request.clone()).unwrap();
+        let first = artifact_request(&store, request.clone(), &nobody).unwrap();
         touch(&source, "<main>second</main>");
-        artifact_request(&store, request).unwrap();
+        artifact_request(&store, request, &nobody).unwrap();
         std::fs::remove_file(source).unwrap();
         let answer = artifact_request(
             &store,
             serde_json::json!({"action":"export", "id":first["id"], "version":1, "out":out}),
+            &nobody,
         )
         .unwrap();
         assert_eq!(answer["version"], 1);
@@ -2238,9 +2570,9 @@ mod tests {
             favicon: Some("🌿".into()),
             ..Default::default()
         };
-        let one = store.publish_page(&input).unwrap();
+        let one = store.publish_page(&input, Origin::default()).unwrap();
         touch(&source, "<main>revised</main>");
-        let two = store.publish_page(&input).unwrap();
+        let two = store.publish_page(&input, Origin::default()).unwrap();
         assert_eq!(one.url, two.url);
         assert_eq!(two.version, 2);
         let store = Store::open(dir.path(), Limits::default());
@@ -2269,9 +2601,9 @@ mod tests {
         let source = dir.path().join("deck.html");
         touch(&source, "<main>first</main>");
         let request = serde_json::json!({"action":"publish", "file_path":source});
-        let first = artifact_request(&store, request.clone()).unwrap();
+        let first = artifact_request(&store, request.clone(), &nobody).unwrap();
         touch(&source, "<main>second</main>");
-        let second = artifact_request(&store, request).unwrap();
+        let second = artifact_request(&store, request, &nobody).unwrap();
         let id = first["id"].as_str().unwrap().to_string();
         let versions = store.versions(&id);
         assert_eq!(
@@ -2302,7 +2634,8 @@ mod tests {
             ..Filter::default()
         });
         assert_eq!(pages.total, 2);
-        let listed = artifact_request(&store, serde_json::json!({"action":"list"})).unwrap();
+        let listed =
+            artifact_request(&store, serde_json::json!({"action":"list"}), &nobody).unwrap();
         assert_eq!(listed["total"], 1, "{listed}");
         assert_eq!(listed["rows"][0]["id"], id.as_str());
         let page = store.agent_pages().remove(0);
@@ -2327,6 +2660,392 @@ mod tests {
             reopened.get(&id).unwrap().source_path,
             Some(source.canonicalize().unwrap())
         );
+    }
+
+    /// A publication from a pane records the pane under the window's own
+    /// spelling, the project and workspace the window keeps that hold its
+    /// folder — the deepest one, a linked checkout outside the project
+    /// included — and the agent, model and ledger seat the window knows for
+    /// that pane. An unknown folder names no project; a pane the window does
+    /// not hold, or a publish with no pane at all, records nothing and asks
+    /// nothing.
+    #[test]
+    fn a_publication_origin_is_what_the_window_knows_about_its_pane_and_folder() {
+        use zerocode_core::artifact_publish::Caller;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let nested = project.join(".worktrees").join("side");
+        let linked = dir.path().join("workspaces").join("feature");
+        let elsewhere = dir.path().join("elsewhere");
+        for folder in [
+            project.join("src"),
+            nested.join("src"),
+            linked.join("ui"),
+            elsewhere.clone(),
+        ] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let known = || {
+            vec![KnownProject {
+                root: project.clone(),
+                workspaces: vec![project.clone(), nested.clone(), linked.clone()],
+            }]
+        };
+        let facts = |term| {
+            (term == 7).then(|| PaneFacts {
+                agent: Some("claude".into()),
+                model: Some("claude-opus-5".into()),
+                run: Some("run-1".into()),
+                worker: Some("w-1".into()),
+                task: Some("t-1".into()),
+            })
+        };
+        let from = |pane: &str, cwd: &Path| {
+            publication_origin(
+                &Caller {
+                    pane: Some(pane.to_string()),
+                    cwd: Some(cwd.to_path_buf()),
+                },
+                facts,
+                |_| known(),
+            )
+        };
+        assert_eq!(
+            from("term-7", &linked.join("ui")),
+            Origin {
+                pane: Some("term-7".into()),
+                agent: Some("claude".into()),
+                model: Some("claude-opus-5".into()),
+                run: Some("run-1".into()),
+                worker: Some("w-1".into()),
+                task: Some("t-1".into()),
+                worktree: Some(linked.clone()),
+                project: Some(project.clone()),
+                ..Origin::default()
+            }
+        );
+        let in_project = from("term-7", &project.join("src"));
+        assert_eq!(
+            (in_project.project, in_project.worktree),
+            (Some(project.clone()), Some(project.clone()))
+        );
+        assert_eq!(
+            from("term-7", &nested.join("src")).worktree,
+            Some(nested.clone()),
+            "the deepest workspace names itself"
+        );
+        let unknown = from("term-7", &elsewhere);
+        assert_eq!(
+            (unknown.pane.as_deref(), unknown.project, unknown.worktree),
+            (Some("term-7"), None, None)
+        );
+        assert_eq!(from("term-7", Path::new("project/src")).project, None);
+        for pane in [None, Some("term-9"), Some("tab-1/leaf-2")] {
+            let asked = std::cell::Cell::new(false);
+            let origin = publication_origin(
+                &Caller {
+                    pane: pane.map(str::to_string),
+                    cwd: Some(linked.clone()),
+                },
+                facts,
+                |_| {
+                    asked.set(true);
+                    known()
+                },
+            );
+            assert!(origin.is_empty(), "{pane:?}: {origin:?}");
+            assert!(!asked.get(), "{pane:?} asked the catalog");
+        }
+    }
+
+    /// A pane's facts take the ledger's seat only while the seat's agent is the
+    /// one the pane runs: the seat's model, run, worker and task then ride
+    /// with it, an empty ledger word is no fact, and a seat another agent now
+    /// sits over lends nothing but leaves the heard agent standing. With
+    /// nothing heard, the seat's own agent is the pane's.
+    #[test]
+    fn a_pane_takes_its_ledger_seat_only_while_the_seat_is_its_agent() {
+        let seat = |agent| Seat {
+            agent,
+            model: Some("claude-opus-5"),
+            run: "run-1",
+            worker: "w-1",
+            task: "",
+        };
+        let facts = pane_facts(Some("claude"), Some(seat("claude")));
+        assert_eq!(
+            (
+                facts.agent.as_deref(),
+                facts.model.as_deref(),
+                facts.run.as_deref(),
+                facts.worker.as_deref(),
+                facts.task.as_deref()
+            ),
+            (
+                Some("claude"),
+                Some("claude-opus-5"),
+                Some("run-1"),
+                Some("w-1"),
+                None
+            )
+        );
+        let seated = pane_facts(None, Some(seat("codex")));
+        assert_eq!(
+            (seated.agent.as_deref(), seated.worker.as_deref()),
+            (Some("codex"), Some("w-1"))
+        );
+        let other = pane_facts(Some("claude"), Some(seat("codex")));
+        assert_eq!(
+            (
+                other.agent.as_deref(),
+                other.model,
+                other.run,
+                other.worker,
+                other.task
+            ),
+            (Some("claude"), None, None, None, None)
+        );
+        let alone = pane_facts(None, None);
+        assert_eq!((alone.agent, alone.worker), (None, None));
+    }
+
+    /// Through the door: a publication from a pane in a known workspace is
+    /// counted on that workspace's chip; a republish from another pane and
+    /// folder records the newer publisher and the chip follows it; a publish
+    /// from no pane keeps an empty origin; the rows read back as written.
+    #[test]
+    fn a_publication_carries_its_publishers_origin_onto_the_worktree_chip() {
+        use zerocode_core::artifact_publish::Caller;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let project = dir.path().join("project");
+        let linked = dir.path().join("feature");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        let store = Store::open(&data, Limits::default());
+        let window = |caller: &Caller| {
+            publication_origin(
+                caller,
+                |term| {
+                    Some(PaneFacts {
+                        agent: Some(if term == 7 { "claude" } else { "codex" }.into()),
+                        ..PaneFacts::default()
+                    })
+                },
+                |_| {
+                    vec![KnownProject {
+                        root: project.clone(),
+                        workspaces: vec![project.clone(), linked.clone()],
+                    }]
+                },
+            )
+        };
+        let source = dir.path().join("deck.html");
+        touch(&source, "<main>first</main>");
+        let publish = |pane: &str, cwd: &Path| {
+            artifact_request(
+                &store,
+                serde_json::json!({"action":"publish", "file_path":source, "pane":pane, "cwd":cwd}),
+                &window,
+            )
+            .unwrap()
+        };
+        let chip = |store: &Store, path: &Path| {
+            store
+                .counts()
+                .by_worktree
+                .get(&path.display().to_string())
+                .copied()
+        };
+        let first = publish("term-7", &linked);
+        let id = first["id"].as_str().unwrap().to_string();
+        let row = store.get(&id).unwrap();
+        assert_eq!(row.origin.pane.as_deref(), Some("term-7"));
+        assert_eq!(row.origin.worktree.as_deref(), Some(linked.as_path()));
+        assert_eq!(chip(&store, &linked), Some(1));
+        touch(&source, "<main>second</main>");
+        publish("term-8", &project);
+        let row = store.get(&id).unwrap();
+        assert_eq!(
+            (
+                row.version,
+                row.origin.pane.as_deref(),
+                row.origin.agent.as_deref()
+            ),
+            (Some(2), Some("term-8"), Some("codex"))
+        );
+        assert_eq!(
+            (chip(&store, &linked), chip(&store, &project)),
+            (None, Some(1))
+        );
+        let other = dir.path().join("other.html");
+        touch(&other, "<main>plain</main>");
+        let plain = artifact_request(
+            &store,
+            serde_json::json!({"action":"publish", "file_path":other, "cwd":linked}),
+            &window,
+        )
+        .unwrap();
+        assert!(
+            store
+                .get(plain["id"].as_str().unwrap())
+                .unwrap()
+                .origin
+                .is_empty()
+        );
+        drop(store);
+        let reopened = Store::open(&data, Limits::default());
+        assert_eq!(reopened.get(&id).unwrap().origin, row.origin);
+        assert_eq!(chip(&reopened, &project), Some(1));
+    }
+
+    /// End to end on a real repository: the argv the door sends from a
+    /// subfolder of a linked checkout, read the way the bridge reads it, into
+    /// the store. The project is the one the window keeps, spelled as it keeps
+    /// it; the worktree is git's own spelling of the linked checkout — the one
+    /// the sidebar's worktree row carries and its chip is keyed on — and the
+    /// chip counts the publication. The catalog is asked about the folder only
+    /// through `known_projects`, as the window asks it.
+    #[test]
+    fn a_publication_from_a_linked_checkout_names_the_kept_project_and_gits_worktree() {
+        let git = |repo: &Path, args: &[&str]| {
+            let output = crate::proc::quiet_command("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let repo = dir.path().join("repo");
+        let linked = dir.path().join("wt-feature");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "ZeroCode Test"]);
+        git(&repo, &["config", "user.email", "test@zerocode"]);
+        git(&repo, &["commit", "--allow-empty", "-q", "-m", "first"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                &linked.to_string_lossy(),
+            ],
+        );
+        std::fs::write(
+            crate::project_runtime::recent_projects_file(&config),
+            serde_json::to_string(&[repo.display().to_string()]).unwrap(),
+        )
+        .unwrap();
+        let spelled = zerocode_orchestrator::Orchestrator::open(&repo)
+            .unwrap()
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|worktree| worktree.path)
+            .find(|path| path.ends_with("wt-feature"))
+            .expect("git lists the linked checkout");
+        let folder = linked.join("ui");
+        std::fs::create_dir_all(&folder).unwrap();
+        let source = folder.join("deck.html");
+        touch(&source, "<main>deck</main>");
+        let argv: Vec<String> = [
+            "publish",
+            "--file-path",
+            &source.to_string_lossy(),
+            "--cwd",
+            &folder.to_string_lossy(),
+            "--pane",
+            "term-7",
+        ]
+        .iter()
+        .map(|word| (*word).to_string())
+        .collect();
+        let request = zerocode_core::artifact_publish::request_from_argv(&argv).unwrap();
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let answer = artifact_request(&store, request, &|caller| {
+            publication_origin(
+                caller,
+                |_| {
+                    Some(PaneFacts {
+                        agent: Some("claude".into()),
+                        model: Some("claude-opus-5".into()),
+                        ..PaneFacts::default()
+                    })
+                },
+                |cwd| known_projects(&config, cwd),
+            )
+        })
+        .unwrap();
+        let origin = store.get(answer["id"].as_str().unwrap()).unwrap().origin;
+        println!(
+            "recorded origin: {}",
+            serde_json::to_string(&origin).unwrap()
+        );
+        assert_eq!(
+            origin,
+            Origin {
+                pane: Some("term-7".into()),
+                agent: Some("claude".into()),
+                model: Some("claude-opus-5".into()),
+                worktree: Some(spelled.clone()),
+                project: Some(repo.clone()),
+                ..Origin::default()
+            }
+        );
+        assert_eq!(
+            store
+                .counts()
+                .by_worktree
+                .get(&spelled.display().to_string()),
+            Some(&1)
+        );
+    }
+
+    /// A path into the store's `pages/<id>/` names that publication: its
+    /// current file, or a kept version by number. Its metadata, a file
+    /// outside the store, and a deleted page name nothing.
+    #[test]
+    fn a_store_page_address_names_its_publication_and_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let source = dir.path().join("deck.html");
+        touch(&source, "<main>first</main>");
+        let request = serde_json::json!({"action":"publish", "file_path":source});
+        let first = artifact_request(&store, request.clone(), &nobody).unwrap();
+        touch(&source, "<main>second</main>");
+        artifact_request(&store, request, &nobody).unwrap();
+        let id = first["id"].as_str().unwrap();
+        let seat = store.root().join("pages").join(id);
+        let current = store
+            .page_at(&seat.join("index.html"))
+            .expect("the current file");
+        assert_eq!((current.artifact.id.as_str(), current.version), (id, None));
+        let kept = store
+            .page_at(&seat.join("v1").join("index.html"))
+            .expect("a kept version");
+        assert_eq!(kept.version, Some(1));
+        assert_eq!(
+            store
+                .page_at(&seat.join("v1").join("..").join("index.html"))
+                .map(|at| at.version),
+            Some(None),
+            "the same file by a longer road is the same file"
+        );
+        assert_eq!(store.page_at(&seat.join("meta.json")), None);
+        assert_eq!(store.page_at(&source), None);
+        assert!(store.delete(id, true).unwrap());
+        assert_eq!(store.page_at(&seat.join("index.html")), None);
     }
 
     #[test]
@@ -2673,6 +3392,265 @@ mod tests {
         let forgotten = store.forget_under(&[dir.path().join("evidence")]);
         assert_eq!(forgotten, 1);
         assert_eq!(store.len(), 3);
+    }
+
+    /// 런타임이 탭·프로젝트·기간·파일 존재를 함께 거르고, 목록 상한 뒤의
+    /// 탭 수와 사라진 파일 수도 센다. 창은 디스크에 묻지 않는다.
+    #[test]
+    fn listing_answers_the_gallerys_tabs_projects_periods_and_missing_files_past_the_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("data");
+        let store = Store::open(
+            &data,
+            Limits {
+                list_rows_max: 2,
+                ..Limits::default()
+            },
+        );
+        let limits = store.limits();
+        let project = dir.path().join("acme");
+        let worktree = dir.path().join("acme-wt");
+        let file = |name: &str| {
+            let path = dir.path().join("files").join(name);
+            touch(&path, "x");
+            path
+        };
+        let gone = dir.path().join("sessions/gone/0.png");
+        let rows = [
+            (
+                "page",
+                ArtifactKind::Page,
+                file("site.html"),
+                5_000,
+                Origin {
+                    project: Some(project.join("sub")),
+                    agent: Some("claude".into()),
+                    ..Origin::default()
+                },
+            ),
+            (
+                "doc",
+                ArtifactKind::Document,
+                file("plan.md"),
+                1_000,
+                Origin {
+                    worktree: Some(worktree.clone()),
+                    ..Origin::default()
+                },
+            ),
+            (
+                "web",
+                ArtifactKind::Web,
+                PathBuf::new(),
+                4_000,
+                Origin {
+                    agent: Some("claude".into()),
+                    ..Origin::default()
+                },
+            ),
+            (
+                "report",
+                ArtifactKind::Report,
+                file("report.md"),
+                3_000,
+                Origin {
+                    worktree: Some(dir.path().join("elsewhere")),
+                    agent: Some("codex".into()),
+                    ..Origin::default()
+                },
+            ),
+            (
+                "shot-a",
+                ArtifactKind::Screenshot,
+                gone.clone(),
+                6_000,
+                Origin::default(),
+            ),
+            (
+                "shot-b",
+                ArtifactKind::Screenshot,
+                gone.with_file_name("1.png"),
+                2_000,
+                Origin::default(),
+            ),
+            (
+                "steps",
+                ArtifactKind::Evidence,
+                file("steps.jsonl"),
+                7_000,
+                Origin::default(),
+            ),
+        ];
+        {
+            let mut index = store.index.lock().unwrap();
+            for (id, kind, path, modified_ms, origin) in rows {
+                let artifact = Artifact {
+                    id: id.into(),
+                    kind,
+                    title: id.into(),
+                    path,
+                    bytes: 1,
+                    created_ms: modified_ms,
+                    modified_ms,
+                    url: (kind == ArtifactKind::Web).then(|| "https://example.com/a".into()),
+                    favicon: None,
+                    description: None,
+                    version: None,
+                    source_path: None,
+                    origin,
+                    tags: Vec::new(),
+                    preview: Preview::default(),
+                    source: Source::default(),
+                };
+                let row = Row {
+                    artifact,
+                    tokens: Vec::new(),
+                    stamp: None,
+                };
+                store.insert_row(&mut index, row, &limits).unwrap();
+            }
+        }
+        let words = |kinds: &[&str]| kinds.iter().map(|kind| (*kind).to_string()).collect();
+        let ids = |listing: &Listing| {
+            listing
+                .rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let pages = store.list(&Filter {
+            kinds: words(&["page", "document", "web"]),
+            present: Some(true),
+            ..Filter::default()
+        });
+        assert_eq!((pages.total, pages.truncated), (3, true));
+        assert_eq!(ids(&pages), ["page", "web"]);
+        assert_eq!(pages.missing_total, 0);
+        assert_eq!(
+            pages.by_kind,
+            BTreeMap::from(
+                [
+                    ("document", 1),
+                    ("evidence", 1),
+                    ("page", 1),
+                    ("report", 1),
+                    ("web", 1)
+                ]
+                .map(|(kind, n)| (kind.to_string(), n))
+            ),
+            "the tabs' counts are whole past the cap and leave the dead screenshots out"
+        );
+
+        let evidence = store.list(&Filter {
+            kinds: words(&["screenshot", "evidence"]),
+            present: Some(true),
+            ..Filter::default()
+        });
+        assert_eq!(ids(&evidence), ["steps"]);
+        assert_eq!(evidence.missing_total, 2);
+        assert!(evidence.missing.is_empty());
+
+        let shown = store.list(&Filter {
+            kinds: words(&["screenshot", "evidence"]),
+            ..Filter::default()
+        });
+        assert_eq!(
+            (shown.total, ids(&shown)),
+            (3, vec!["steps".into(), "shot-a".into()])
+        );
+        assert_eq!(shown.missing, ["shot-a"]);
+        assert_eq!(shown.missing_total, 2);
+        assert_eq!(
+            store
+                .list(&Filter {
+                    present: Some(false),
+                    ..Filter::default()
+                })
+                .total,
+            2
+        );
+
+        let mine = store.list(&Filter {
+            roots: vec![project.clone(), worktree.clone()],
+            ..Filter::default()
+        });
+        assert_eq!(
+            (mine.total, ids(&mine)),
+            (2, vec!["page".into(), "doc".into()])
+        );
+        assert_eq!(
+            store
+                .list(&Filter {
+                    roots: vec![dir.path().join("acme-w")],
+                    ..Filter::default()
+                })
+                .total,
+            0,
+            "a root is a path, not a prefix of a name"
+        );
+
+        let recent = store.list(&Filter {
+            kinds: words(&["page", "document", "web"]),
+            since_ms: Some(4_000),
+            ..Filter::default()
+        });
+        assert_eq!(ids(&recent), ["page", "web"]);
+        let codex = store.list(&Filter {
+            agent: Some("codex".into()),
+            ..Filter::default()
+        });
+        assert_eq!(ids(&codex), ["report"]);
+        assert_eq!(
+            store
+                .list(&Filter {
+                    kinds: words(&["picture"]),
+                    ..Filter::default()
+                })
+                .total,
+            7,
+            "an unknown kind word filtered rather than being ignored"
+        );
+    }
+
+    /// 페이지 서랍은 현재 행 키의 썸네일을 읽는다. 아직 없다는 답은
+    /// 기억하지 않으므로 카드가 그린 뒤 다시 물으면 그림을 찾는다.
+    #[test]
+    fn a_pages_preview_is_its_rendered_thumbnail_once_there_is_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let project = dir.path().join("project");
+        touch(&project.join("site.html"), "<title>Site</title>");
+        let page = store
+            .register_page(
+                &PageFact {
+                    path: project.join("site.html"),
+                    at_ms: Some(1),
+                    session: Some("s-1".into()),
+                    project: Some(project.clone()),
+                },
+                "claude",
+                1,
+            )
+            .unwrap()
+            .expect("the created page is a row");
+        let before = store.preview(&page.id).unwrap();
+        assert_eq!((before.kind, before.data_url.is_none()), ("none", true));
+        assert_eq!(store.preview_cache_bytes(), 0);
+        let key = crate::artifact_thumbs::key_of(&page).expect("a page renders a thumbnail");
+        crate::artifact_thumbs::remember(store.root(), &page.id, &key, b"\x89PNG").unwrap();
+        let after = store.preview(&page.id).unwrap();
+        assert_eq!(after.kind, "image");
+        assert_eq!(
+            after.data_url.as_deref(),
+            Some(crate::artifact_thumbs::data_url_of(b"\x89PNG").as_str())
+        );
+        crate::artifact_thumbs::remember(store.root(), &page.id, "an older key", b"old").unwrap();
+        assert_eq!(
+            store.preview(&page.id).unwrap().kind,
+            "none",
+            "a picture under another key is not this page's"
+        );
     }
 
     /// A claude.ai artifact is one row per url (t-3233 §2a): the same url

@@ -224,6 +224,42 @@ fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
     assert_eq!(AGENT_TOOL.recommended, JevMode::On);
 }
 
+/// Where `auto` starts is the table's column (t-11989), and only the two
+/// seats whose act fills a choice the coordinator left open start acting:
+/// the summons' difficulty (an omitted `--model` or `--effort`) and the
+/// agent choice (`--agent auto`). A seat that starts acting is one its
+/// judge can stop: it rises and falls (`promotes`), names every line the
+/// judge reads — the answer floor, the agreement floor, the apply wall, the
+/// sample it may speak on — and offers `auto`, the only mode the column
+/// speaks for. A seat that acted from the start with no judge behind it
+/// would be `on` under another name.
+#[test]
+fn only_a_seat_that_fills_what_its_caller_left_open_starts_acting() {
+    use crate::jev::promote::Stand;
+    let acting = [SUMMON.id, SUMMON_DIFFICULTY.id];
+    for row in &JEV_USES {
+        let expected = if acting.contains(&row.id) {
+            Stand::Applying
+        } else {
+            Stand::Recording
+        };
+        assert_eq!(row.auto_starts, expected, "{}", row.id);
+        if row.auto_starts == Stand::Applying {
+            assert!(row.promotes, "{} acts with no judge", row.id);
+            assert!(row.modes.contains(&JevMode::Auto), "{}", row.id);
+            assert!(row.answer_floor_permille.is_some(), "{}", row.id);
+            assert!(row.agreement_floor_permille.is_some(), "{}", row.id);
+            assert!(row.apply_deadline_ms.is_some(), "{}", row.id);
+            assert!(row.agreement_rows_wanted.is_some(), "{}", row.id);
+            assert!(
+                crate::jev::promote::judge_seat(row, &[]).is_some(),
+                "{} is a seat its judge reads",
+                row.id
+            );
+        }
+    }
+}
+
 /// A repeated run moves only the rows that say so (t-6385): the judgment
 /// cache, left `auto` by word or by the switch, stands `on` when the run
 /// walks what was walked before; any other word its person wrote stands; an

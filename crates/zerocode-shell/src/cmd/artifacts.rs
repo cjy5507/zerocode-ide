@@ -18,6 +18,9 @@ pub(crate) struct ArtifactListing {
     pub(crate) rows: Vec<Artifact>,
     pub(crate) total: usize,
     pub(crate) truncated: bool,
+    pub(crate) missing: Vec<String>,
+    pub(crate) missing_total: usize,
+    pub(crate) by_kind: std::collections::BTreeMap<String, usize>,
     pub(crate) retention_days: u32,
     pub(crate) thumb: ThumbTable,
 }
@@ -37,6 +40,9 @@ pub(crate) fn artifacts_list(filter: artifact_runtime::Filter) -> Result<Artifac
         rows: listing.rows,
         total: listing.total,
         truncated: listing.truncated,
+        missing: listing.missing,
+        missing_total: listing.missing_total,
+        by_kind: listing.by_kind,
         retention_days: limits.retention_days,
         thumb: ThumbTable {
             width: limits.thumb_width,
@@ -128,6 +134,16 @@ pub(crate) struct ThumbTable {
 #[tauri::command(async)]
 pub(crate) fn artifact_versions(id: String) -> Result<Vec<artifact_runtime::Version>, String> {
     Ok(store_or_refuse()?.versions(&id))
+}
+
+/// The publication a `file://` address a terminal printed points at — its
+/// current file or one of its kept versions — so the window opens it as that
+/// artifact, with its header band, rather than as a bare page. The store
+/// judges ([`artifact_runtime::Store::page_at`]); the window never guesses
+/// where the store is. `None` for anything else.
+#[tauri::command(async)]
+pub(crate) fn artifact_page_at(path: String) -> Result<Option<artifact_runtime::PageAt>, String> {
+    Ok(store_or_refuse()?.page_at(Path::new(&path)))
 }
 
 /// The refresh button's road into the transcripts (t-3233 §2): the same

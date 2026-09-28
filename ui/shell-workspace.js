@@ -1657,7 +1657,7 @@ function tabMenuAt(tab, x, y, opener = null) {
       items.push(
         {
           label: t("session.resume", "이 대화 다시 열기"),
-          run: () => resumeSession(known),
+          run: () => resumeSession(known, tab.worktree),
         },
         { separator: true },
       );

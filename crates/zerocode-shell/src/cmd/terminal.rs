@@ -53,6 +53,31 @@ pub(crate) fn open_terminal(
     Ok(label)
 }
 
+/// How long a pane's notice may be: a few sentences, never a page.
+const NOTICE_CHARS: usize = 1_024;
+
+/// A pane's notice as the bytes its screen is fed (t-12063): the words the
+/// webview sent, each line on its own row, after the restored screen and
+/// before the shell's prompt. Control characters go — this is text to read,
+/// and a sequence riding in it would set modes on a terminal the shell is
+/// about to own — and so does anything past [`NOTICE_CHARS`].
+pub(crate) fn notice_bytes(words: &str) -> Vec<u8> {
+    let kept: String = words
+        .chars()
+        .filter(|one| *one == '\n' || !one.is_control())
+        .take(NOTICE_CHARS)
+        .collect();
+    let lines: Vec<&str> = kept
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    format!("\r\n{}\r\n", lines.join("\r\n")).into_bytes()
+}
+
 /// Open a shell of its own for a new terminal tab, and say which it is.
 ///
 /// Orca's centre opens terminals as tabs and each one is a separate process
@@ -69,6 +94,11 @@ pub(crate) fn open_term_tab(
     // A restored leaf's closed-window screen, put back before the shell's
     // first byte is parsed (`replay_stored_screen`).
     restore: Option<super::settings::StoredScreen>,
+    // Words the pane says before its shell's first byte (t-12063): what the
+    // shell stands in for — a conversation that could not come back, or one
+    // already open in another pane — in the person's language, from the
+    // webview. Drawn on the pane's screen, never typed at the shell.
+    notice: Option<String>,
 ) -> Result<TermId, String> {
     // 트리의 "Open in Terminal"(Orca :204-212)이 앉힐 자리 — 담장 안의
     // 디렉터리만. 인자가 없으면 지금까지처럼 활성 루트에 앉는다.
@@ -97,6 +127,9 @@ pub(crate) fn open_term_tab(
     let (mut pty, program) = spawn_shell(&state, id, rows, cols, startup, seat)?;
     if let Some(screen) = &restore {
         super::settings::replay_stored_screen(state.config_root(), screen, pty.terminal_mut());
+    }
+    if let Some(words) = notice.as_deref() {
+        pty.terminal_mut().feed(&notice_bytes(words));
     }
     state.hold_terminal(id, pty);
     // A terminal whose configured command IS an agent was an agent session

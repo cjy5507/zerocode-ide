@@ -5880,11 +5880,8 @@ const ARTIFACT_TOKENS = Object.freeze({
   tierCompact: "--artifact-tier-compact",
   thumbCache: "--artifact-thumb-cache",
   searchDebounce: "--artifact-search-debounce",
+  groupHead: "--artifact-group-head",
 });
-/* 종류의 순서는 백엔드 `ArtifactKind::ALL`의 것이다 — 세그먼트가 그 순서로 선다. */
-const ARTIFACT_KINDS = Object.freeze([
-  "report", "screenshot", "evidence", "export", "transcript", "page", "document", "web", "other",
-]);
 const ARTIFACT_KIND_GLYPH = Object.freeze({
   report: "ft-file-text",
   screenshot: "image",
@@ -5898,7 +5895,6 @@ const ARTIFACT_KIND_GLYPH = Object.freeze({
 });
 /* 낱말은 행이 들고 다니고 `t`가 갈아입힌다 — 지식 그래프의 깃발과 같은 문법. */
 const ARTIFACT_KIND_WORDS = Object.freeze({
-  all: { key: "artifacts.kind.all", word: "전체" },
   report: { key: "artifacts.kind.report", word: "보고서" },
   screenshot: { key: "artifacts.kind.screenshot", word: "스크린샷" },
   evidence: { key: "artifacts.kind.evidence", word: "증거" },
@@ -5909,14 +5905,33 @@ const ARTIFACT_KIND_WORDS = Object.freeze({
   web: { key: "artifacts.kind.web", word: "claude.ai" },
   other: { key: "artifacts.kind.other", word: "기타" },
 });
-/* claude.ai의 세그먼트 셋(전체 / 내 것 / 공유됨)에 해당하는 우리 셋 — 전체 /
- * 이 기계 / claude.ai (t-3233 §4). `remote`는 백엔드 `Filter.remote`의 낱말이고,
- * 창은 이미 든 행을 종류로 가른다(web이 곧 원격). */
-const ARTIFACT_SOURCES = Object.freeze([
-  { source: "all", key: "artifacts.source.all", word: "전체" },
-  { source: "local", key: "artifacts.source.local", word: "이 기계" },
-  { source: "remote", key: "artifacts.source.remote", word: "claude.ai" },
+/* 첫 화면의 탭. 행의 91%가 보고서·스크린샷·증거라 종류 전부를 한 줄에 세우면
+ * 페이지가 그 아래 묻힌다 — 그래서 페이지·문서(claude.ai 포함)가 기본이고,
+ * 나머지는 제 탭으로 간다. 기타는 행이 있을 때만 선다. `kinds`는 백엔드
+ * `Filter.kinds`의 낱말이다. */
+const ARTIFACT_TABS = Object.freeze([
+  { tab: "pages", kinds: ["page", "document", "web"], key: "artifacts.tab.pages", word: "페이지·문서" },
+  { tab: "reports", kinds: ["report"], key: "artifacts.kind.report", word: "보고서" },
+  { tab: "evidence", kinds: ["screenshot", "evidence"], key: "artifacts.kind.evidence", word: "증거" },
+  { tab: "other", kinds: ["export", "transcript", "other"], key: "artifacts.kind.other", word: "기타" },
 ]);
+const ARTIFACT_TAB_OF_KIND = new Map(ARTIFACT_TABS.flatMap((row) => row.kinds.map((kind) => [kind, row.tab])));
+/* 기간과 날의 무리는 한 표다: 무리는 새것부터 오늘 → 이번 주 → 이전이고,
+ * 기간 고르개는 그중 앞의 둘까지 좁힌다. 이번 주는 달력의 주가 아니라
+ * 오늘을 포함한 이레다 — 월요일 아침에 어제 것이 「이전」으로 가지 않게. */
+const ARTIFACT_PERIODS = Object.freeze([
+  { period: "today", key: "artifacts.period.today", word: "오늘" },
+  { period: "week", key: "artifacts.period.week", word: "이번 주" },
+  { period: "older", key: "artifacts.period.older", word: "이전" },
+]);
+const ARTIFACT_WEEK_DAYS = 7;
+/* 머리의 고르개 셋 — 칸(`pick`)이 곧 `artifactFilter`의 이름이다. */
+const ARTIFACT_PICKS = Object.freeze([
+  { pick: "project", key: "artifacts.pick.project", word: "프로젝트" },
+  { pick: "agent", key: "artifacts.pick.agent", word: "에이전트" },
+  { pick: "period", key: "artifacts.pick.period", word: "기간" },
+]);
+const ARTIFACT_PICK_ALL = Object.freeze({ key: "artifacts.pick.all", word: "전체" });
 /* 카드 아래 줄의 표식 — claude.ai의 🌐(공유됨)/🔒(비공개)를 우리 뜻으로: 🌐는
  * claude.ai에 올라간 것, 🔒는 이 기계에만 있는 것. 낱말이 아니라 글리프라
  * 카탈로그를 타지 않는다. */
@@ -5960,8 +5975,10 @@ const ARTIFACT_ACTIONS = Object.freeze([
 // Dynamic data-i18n nodes start with the source words; applyLocale reads
 // their keys after construction. Shared actions keep their existing row.
 const ARTIFACT_LABELS = Object.freeze({
-  sources: { key: "artifacts.sources", word: "출처" },
-  fresh: { key: "artifacts.new", word: "새 아티팩트" },
+  fresh: { key: "artifacts.new", word: "새로 만들기" },
+  blank: { key: "artifacts.blankDraft", word: "빈 초안" },
+  blankHint: { key: "artifacts.newTip", word: "초안을 받을 에이전트를 고릅니다" },
+  studio: { key: "artifacts.studio.eyebrow", word: "디자인 스튜디오" },
   versions: { key: "artifacts.strip.versions", word: "버전" },
   share: { key: "artifacts.strip.share", word: "공유" },
   reveal: ARTIFACT_ACTIONS.find((row) => row.action === "reveal"),
@@ -5971,17 +5988,39 @@ const ARTIFACT_LABELS = Object.freeze({
 const artifactRows = new Map();
 /* 필터·정렬을 지난 뒤의 id, 새것부터. 그리기는 이 배열만 읽는다. */
 let artifactOrder = [];
-const artifactFilter = { query: "", kind: "all", origin: null, source: "all" };
-/* 스튜디오를 접었는가 — 창 안에서 유지되는 사람의 선택(워크스페이스 보드의 보기
- * 선택과 같은 수명). 접힌 스튜디오는 한 줄이고, 갤러리가 그 높이를 받는다. */
-let artifactStudioFolded = false;
+/* `artifactOrder`를 날로 가른 무리 — `{ period, start, count }`, 새것부터. 정렬이
+ * 이미 시각 순이라 무리는 늘 이어진 한 토막이다. */
+let artifactGroups = [];
+/* 고르개의 기본값은 좁히지 않는 것이다: 프로젝트·에이전트·기간 전체, 사라진
+ * 파일은 숨김. 탭만 페이지·문서로 선다. */
+const artifactFilter = {
+  query: "", tab: "pages", origin: null, project: null, agent: null, period: "all", showMissing: false,
+};
+/* 사람이 탭을 골랐는가. 고르기 전에는, 페이지가 하나도 없는 카탈로그가 빈 탭이
+ * 아니라 행이 있는 첫 탭으로 열린다. */
+let artifactTabPicked = false;
+/* 파일이 사라진 행 — 목록의 답(`missing`)이 말한 id. 창은 디스크에 묻지 않는다. */
+const artifactMissing = new Set();
+/* 지금 거르개로 탭마다 몇 행인가, 숨긴 사라진 행은 몇인가 — 머리가 읽는다. */
+let artifactTabCounts = new Map();
+let artifactMissingCount = 0;
+/* 프로젝트 고르개의 칸 — `{ value, label, roots }`. 창이 아는 프로젝트(뿌리와
+ * 그 워크트리들)이거나, 창이 모르는 경로 하나다. */
+let artifactProjects = [];
 /* 본문 검색이 골라 준 id — Enter로 한 번 묻고, 다음 글자에 지운다. */
 let artifactBodyMatches = null;
 let artifactSelectedId = null;
-let artifactListing = { total: 0, truncated: false, retentionDays: 0, thumb: null };
+let artifactListing = {
+  total: 0, truncated: false, retentionDays: 0, thumb: null, filtered: false, byKind: null, missingTotal: 0,
+};
 let artifactError = null;
 let artifactAskedAt = 0;
 let artifactAsking = false;
+/* 묻는 사이 거르개가 바뀌었다 — 답이 오면 한 번 더 묻는다(표 상한에 잘린 때만). */
+let artifactAskAgain = false;
+/* 표 상한에 잘린 창에 범위를 들고 온 도착 — `{ select }`. 든 행이 앞 탭의 것이라
+ * 설 탭은 종류를 가리지 않은 답이 정한다(고른 행의 탭, 아니면 행이 있는 첫 탭). */
+let artifactLanding = null;
 /* 하네스가 세는 수 — 카드 노드가 몇 번 만들어졌는가. 풀이 제 일을 하면 첫 그림
  * 뒤로는 자라지 않는다. */
 let artifactCardCreations = 0;
@@ -6027,6 +6066,7 @@ function artifactTuning(view) {
     tierCompact: read(ARTIFACT_TOKENS.tierCompact, 560),
     thumbCache: read(ARTIFACT_TOKENS.thumbCache, 120),
     searchDebounce: read(ARTIFACT_TOKENS.searchDebounce, 120),
+    groupHead: read(ARTIFACT_TOKENS.groupHead, 28),
   };
   artifactTunings.set(view, tuning);
   return tuning;
@@ -6053,11 +6093,26 @@ function noteArtifactSeats() {
 }
 
 /* 문을 여는 두 손. 사이드바(`fresh`)는 「보겠다」는 청이라 다시 읽고, 칩과
- * 링크는 이미 손에 든 행을 다른 각도로 보는 것이라 묻지 않는다. */
+ * 링크는 이미 손에 든 행을 다른 각도로 보는 것이라 묻지 않는다. 범위를 들고
+ * 온 도착은 그 범위가 말하는 것을 보여야 한다: 고르개는 전체로 돌아가고, 탭은
+ * 고른 행의 탭이거나 그 범위에 행이 있는 첫 탭이다 — 워크트리 칩의 「아티팩트
+ * 6」이 페이지 탭의 빈 판으로 열리지 않게. */
 function openArtifacts({ origin, select = null, fresh = false } = {}) {
   if (origin !== undefined) artifactFilter.origin = origin;
   if (select) artifactSelectedId = select;
   if (fresh) artifactAskedAt = 0;
+  if (origin || select) {
+    artifactFilter.project = null;
+    artifactFilter.agent = null;
+    artifactFilter.period = "all";
+    const row = select ? artifactRows.get(select) : null;
+    if (row && artifactMissing.has(row.id)) artifactFilter.showMissing = true;
+    artifactFilter.tab = row ? artifactTabOf(row) : artifactFirstTabWithRows() ?? artifactFilter.tab;
+  }
+  if (artifactListing.filtered && (origin || select)) {
+    artifactLanding = { select };
+    void refreshArtifacts();
+  }
   applyArtifactFilter();
   openTab({ ...ARTIFACTS_TAB });
 }
@@ -6069,11 +6124,43 @@ function paintArtifactsStage(tab) {
   return paintArtifactsView(tab);
 }
 
+/* 백엔드에 건넬 거르개. 창이 카탈로그를 다 들고 있으면 빈 거르개 하나로 묻고
+ * 거르기는 창 안에서 한다(전환마다 묻지 않는다). 표 상한이 답을 잘랐으면 창이
+ * 든 행은 전부가 아니다 — 그때는 탭·프로젝트·에이전트·기간·사라진 파일을
+ * 런타임이 거르고 세어야, 상한 너머의 행이 거르개에 가려지지 않는다. 검색어는
+ * 창의 것으로 남는다(본문은 Enter가 따로 묻는다). */
+function artifactQuery() {
+  if (!artifactListing.filtered) return {};
+  const kinds = artifactLanding && !artifactLanding.narrowed ? [] : artifactTabRow(artifactFilter.tab).kinds;
+  const query = { kinds, present: artifactFilter.showMissing ? null : true };
+  const project = artifactProjects.find((row) => row.value === artifactFilter.project);
+  if (project) query.roots = project.roots;
+  if (artifactFilter.agent) query.agent = artifactFilter.agent;
+  const since = artifactSinceMs(artifactFilter.period);
+  if (since !== null) query.since_ms = since;
+  const origin = artifactFilter.origin;
+  if (origin && ["run", "task", "worker", "worktree", "automation"].includes(origin.field)) query[origin.field] = origin.value;
+  return query;
+}
+
 async function refreshArtifacts() {
-  if (artifactAsking) return;
+  if (artifactAsking) {
+    artifactAskAgain = true;
+    return;
+  }
   artifactAsking = true;
+  // 도착의 답은 그 도착을 싣고 물은 답뿐이다 — 이미 날아가던 답이 정하지 않는다.
+  const landing = artifactLanding;
   try {
-    const answer = await invoke("artifacts_list", { filter: {} });
+    let filter = artifactQuery();
+    let answer = await invoke("artifacts_list", { filter });
+    // 잘렸다는 것을 처음 안 답은 전부의 답이었다 — 거르개를 실어 한 번 더 묻고,
+    // 이 창은 그 뒤로 거르개가 바뀔 때마다 묻는다.
+    if (answer?.truncated === true && !artifactListing.filtered) {
+      artifactListing.filtered = true;
+      filter = artifactQuery();
+      answer = await invoke("artifacts_list", { filter });
+    }
     const incoming = new Map((answer?.rows ?? []).map((row) => [row.id, row]));
     for (const [id, previous] of artifactRows) {
       if (artifactThumbnailKey(previous) === artifactThumbnailKey(incoming.get(id))) continue;
@@ -6083,11 +6170,17 @@ async function refreshArtifacts() {
     }
     artifactRows.clear();
     for (const [id, row] of incoming) artifactRows.set(id, row);
+    artifactMissing.clear();
+    for (const id of answer?.missing ?? []) artifactMissing.add(id);
+    const filtered = artifactListing.filtered;
     artifactListing = {
       total: answer?.total ?? artifactRows.size,
       truncated: answer?.truncated === true,
       retentionDays: answer?.retention_days ?? 0,
       thumb: answer?.thumb ?? null,
+      filtered,
+      byKind: filtered ? answer?.by_kind ?? {} : null,
+      missingTotal: answer?.missing_total ?? artifactMissing.size,
     };
     artifactError = null;
   } catch (error) {
@@ -6097,9 +6190,48 @@ async function refreshArtifacts() {
     artifactAskedAt = Date.now();
   }
   artifactBodyMatches = null;
-  if (artifactSelectedId && !artifactRows.has(artifactSelectedId)) artifactSelectedId = null;
+  if (artifactSelectedId && !artifactRows.has(artifactSelectedId)
+      && artifactLanding?.select !== artifactSelectedId) artifactSelectedId = null;
+  artifactProjects = artifactProjectChoices();
+  if (landing && landing === artifactLanding && !landing.narrowed) {
+    const row = landing.select ? artifactRows.get(landing.select) : null;
+    landing.narrowed = true;
+    applyArtifactFilter();
+    const first = ARTIFACT_TABS.find((one) => (artifactTabCounts.get(one.tab) ?? 0) > 0);
+    artifactFilter.tab = row ? artifactTabOf(row) : first?.tab ?? artifactFilter.tab;
+    // 이 답은 종류를 가리지 않은 것이었다 — 선 탭의 행으로 한 번 더 묻는다.
+    artifactAskAgain = true;
+  } else if (landing && landing === artifactLanding) {
+    artifactLanding = null;
+  }
   applyArtifactFilter();
+  const unnarrowed = !artifactFilter.origin && !artifactFilter.project && !artifactFilter.agent
+    && artifactFilter.period === "all" && artifactFilter.query.trim() === "";
+  if (!artifactTabPicked && unnarrowed && artifactOrder.length === 0) {
+    const first = ARTIFACT_TABS.find((row) => (artifactTabCounts.get(row.tab) ?? 0) > 0);
+    if (first && first.tab !== artifactFilter.tab) {
+      artifactFilter.tab = first.tab;
+      applyArtifactFilter();
+      // 표 상한에 잘린 창이 든 행은 앞 탭의 것이었다 — 새 탭으로 한 번 더 묻는다.
+      if (artifactListing.filtered) artifactAskAgain = true;
+    }
+  }
   void paintArtifactsView();
+  if (artifactAskAgain) {
+    artifactAskAgain = false;
+    void refreshArtifacts();
+  }
+}
+
+/* 거르개가 바뀌었다. 창이 카탈로그를 다 들고 있으면 거르기만 하고, 표 상한에
+ * 잘린 창이면 런타임에 다시 묻는다 — 그 답이 오면 그림이 따라온다. */
+function changeArtifactFilter(view) {
+  applyArtifactFilter();
+  view.querySelector(".artifacts-grid").scrollTop = 0;
+  paintArtifactCards(view);
+  paintArtifactHead(view);
+  paintArtifactDrawer(view);
+  if (artifactListing.filtered) void refreshArtifacts();
 }
 
 /* 출처별 수 — 원장이 움직일 때와 카탈로그가 움직일 때 다시 읽는다. 폴러가 아니다. */
@@ -6190,23 +6322,158 @@ function artifactMatchesQuery(row, needle) {
   return needle.split(/\s+/).filter(Boolean).every((word) => hay.includes(word));
 }
 
+function artifactTabRow(tab) {
+  return ARTIFACT_TABS.find((row) => row.tab === tab) ?? ARTIFACT_TABS[0];
+}
+
+function artifactTabOf(row) {
+  return ARTIFACT_TAB_OF_KIND.get(row.kind) ?? "other";
+}
+
+/* 선 탭: 페이지·문서는 늘, 나머지는 카탈로그에 그 종류의 행이 하나라도 있을 때
+ * — 거르개가 0으로 만든 탭은 서 있고, 행이 아예 없는 종류(오늘은 내보내기·
+ * 대화록·기타)는 서지 않는다. */
+function artifactVisibleTabs() {
+  const held = new Set();
+  for (const row of artifactRows.values()) held.add(artifactTabOf(row));
+  if (artifactListing.byKind) {
+    for (const [kind, n] of Object.entries(artifactListing.byKind)) if (n > 0) held.add(ARTIFACT_TAB_OF_KIND.get(kind) ?? "other");
+  }
+  return ARTIFACT_TABS.filter((row) => row.tab === "pages" || held.has(row.tab));
+}
+
+/* 범위를 들고 온 도착이 설 탭 — 그 범위에 행이 있는 첫 탭. */
+function artifactFirstTabWithRows() {
+  const origin = artifactFilter.origin;
+  for (const { tab } of ARTIFACT_TABS) {
+    for (const row of artifactRows.values()) {
+      if (artifactTabOf(row) !== tab) continue;
+      if (origin && String(row.origin?.[origin.field] ?? "") !== origin.value) continue;
+      if (!artifactFilter.showMissing && artifactMissing.has(row.id)) continue;
+      return tab;
+    }
+  }
+  return null;
+}
+
+/* 날의 시작 — 창의 시계와 시간대로. 기간과 무리가 같은 경계를 읽는다. */
+function artifactDayStart(daysAgo, now = new Date()) {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo).getTime();
+}
+
+function artifactSinceMs(period) {
+  if (period === "today") return artifactDayStart(0);
+  if (period === "week") return artifactDayStart(ARTIFACT_WEEK_DAYS - 1);
+  return null;
+}
+
+function artifactPeriodOf(ms, today, week) {
+  return ms >= today ? "today" : ms >= week ? "week" : "older";
+}
+
+/* 한 경로가 뿌리 아래인가 — 구성요소 단위로(`/a/acme-w`는 `/a/acme` 아래가
+ * 아니다). 런타임의 `Path::starts_with`와 같은 판정. */
+function artifactPathUnder(path, root) {
+  if (!path || !root) return false;
+  if (path === root) return true;
+  const base = root.replace(/[\\/]+$/, "");
+  return path.startsWith(`${base}/`) || path.startsWith(`${base}\\`);
+}
+
+function artifactInRoots(row, roots) {
+  const origin = row.origin ?? {};
+  return [origin.project, origin.worktree].some((path) => roots.some((root) => artifactPathUnder(path, root)));
+}
+
+/* 프로젝트 고르개의 칸. 창이 아는 프로젝트는 뿌리와 워크트리들을 함께 들고
+ * (행의 워크트리는 프로젝트 폴더 밖에 산다), 창이 모르는 경로는 제 이름으로
+ * 선다. 수가 많은 것부터. 표 상한에 잘린 창은 든 행이 탭 하나의 것이라, 앞서
+ * 본 칸을 버리지 않는다. */
+function artifactProjectChoices() {
+  const known = projects.map((project) => ({
+    value: project.path,
+    label: project.name ?? basename(project.path),
+    roots: [...new Set([project.path, ...project.worktrees.map((worktree) => worktree.path)])],
+    n: 0,
+  }));
+  const stray = new Map();
+  for (const row of artifactRows.values()) {
+    const origin = row.origin ?? {};
+    const path = origin.project ?? origin.worktree;
+    if (!path) continue;
+    const home = known.find((choice) => artifactInRoots(row, choice.roots));
+    if (home) {
+      home.n += 1;
+      continue;
+    }
+    const held = stray.get(path) ?? { value: path, label: basename(path), roots: [path], n: 0 };
+    held.n += 1;
+    stray.set(path, held);
+  }
+  const choices = [...known.filter((choice) => choice.n > 0), ...stray.values()];
+  for (const previous of artifactProjects) {
+    const keep = artifactListing.filtered || previous.value === artifactFilter.project;
+    if (keep && !choices.some((choice) => choice.value === previous.value)) choices.push({ ...previous, n: 0 });
+  }
+  return choices.sort((a, b) => (b.n - a.n) || a.label.localeCompare(b.label));
+}
+
+/* 에이전트 고르개의 칸 — 행의 `origin.agent`, 수가 많은 것부터. */
+function artifactAgentChoices() {
+  const counts = new Map();
+  for (const row of artifactRows.values()) {
+    const agent = row.origin?.agent;
+    if (agent) counts.set(agent, (counts.get(agent) ?? 0) + 1);
+  }
+  if (artifactFilter.agent && !counts.has(artifactFilter.agent)) counts.set(artifactFilter.agent, 0);
+  return [...counts].sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0])).map(([agent]) => agent);
+}
+
+/* 거르기 — 탭을 뺀 모든 칸을 지난 행을 탭마다 세고, 그중 지금 탭의 것을
+ * 새것부터 세운 뒤 날로 가른다. 탭의 수는 지금 거르개에서 그 탭을 누르면 설
+ * 행의 수다. 표 상한에 잘린 창은 그 수를 런타임의 답(`by_kind`)에서 읽는다. */
 function applyArtifactFilter() {
   const needle = artifactFilter.query.trim().toLowerCase();
-  const kind = artifactFilter.kind;
+  const tab = artifactTabRow(artifactFilter.tab).tab;
   const origin = artifactFilter.origin;
-  const source = artifactFilter.source;
+  const roots = artifactProjects.find((row) => row.value === artifactFilter.project)?.roots ?? null;
+  const agent = artifactFilter.agent;
+  const since = artifactSinceMs(artifactFilter.period);
+  const counts = new Map(ARTIFACT_TABS.map((row) => [row.tab, 0]));
+  let missing = 0;
   const kept = [];
   for (const row of artifactRows.values()) {
-    if (kind !== "all" && row.kind !== kind) continue;
-    if (source === "remote" && row.kind !== "web") continue;
-    if (source === "local" && row.kind === "web") continue;
     if (origin && String(row.origin?.[origin.field] ?? "") !== origin.value) continue;
+    if (roots && !artifactInRoots(row, roots)) continue;
+    if (agent && row.origin?.agent !== agent) continue;
+    if (since !== null && row.modified_ms < since) continue;
     if (!artifactMatchesQuery(row, needle)) continue;
-    kept.push(row);
+    const gone = artifactMissing.has(row.id);
+    const rowTab = artifactTabOf(row);
+    if (gone && rowTab === tab) missing += 1;
+    if (gone && !artifactFilter.showMissing) continue;
+    counts.set(rowTab, counts.get(rowTab) + 1);
+    if (rowTab === tab) kept.push(row);
   }
+  if (artifactListing.byKind) {
+    for (const row of ARTIFACT_TABS) counts.set(row.tab, row.kinds.reduce((sum, kind) => sum + (artifactListing.byKind[kind] ?? 0), 0));
+    missing = artifactListing.missingTotal;
+  }
+  artifactTabCounts = counts;
+  artifactMissingCount = missing;
   kept.sort((a, b) => (b.modified_ms - a.modified_ms) || (a.id < b.id ? -1 : 1));
   artifactOrder = kept.map((row) => row.id);
-  if (artifactSelectedId && !artifactOrder.includes(artifactSelectedId)) artifactSelectedId = null;
+  const today = artifactDayStart(0);
+  const week = artifactDayStart(ARTIFACT_WEEK_DAYS - 1);
+  artifactGroups = [];
+  kept.forEach((row, at) => {
+    const period = artifactPeriodOf(row.modified_ms, today, week);
+    const last = artifactGroups[artifactGroups.length - 1];
+    if (last?.period === period) last.count += 1;
+    else artifactGroups.push({ period, start: at, count: 1 });
+  });
+  if (artifactSelectedId && !artifactOrder.includes(artifactSelectedId)
+      && artifactLanding?.select !== artifactSelectedId) artifactSelectedId = null;
 }
 
 /* 본문 검색 — Enter 한 번이 백엔드의 회상 색인을 묻는 유일한 순간이다. 답은 id의
@@ -6253,60 +6520,22 @@ function artifactStudioText(tag, className, key, word) {
 function buildArtifactStudio() {
   const studio = document.createElement("section");
   studio.className = "artifacts-studio";
+  studio.hidden = true;
   const studioLabel = { key: "artifacts.studio.label", word: "아티팩트 디자인 스튜디오" };
   studio.dataset.i18nAria = studioLabel.key;
   studio.dataset.i18nSourcearialabel = studioLabel.word;
   studio.setAttribute("aria-label", t(studioLabel.key, studioLabel.word));
+  // 고른 목적이 판의 머리다 — 글은 고를 때 입고(`openArtifactStudio`), 키를 달아
+  // 로케일이 바뀌면 따라온다.
   const intro = document.createElement("div");
   intro.className = "artifacts-studio-intro";
-  const copy = document.createElement("div");
-  copy.className = "artifacts-studio-copy";
-  copy.append(
-    artifactStudioText("span", "artifacts-studio-eyebrow", "artifacts.studio.eyebrow", "디자인 스튜디오"),
-    artifactStudioText("h2", "artifacts-studio-title", "artifacts.studio.title", "아이디어를, 완성된 화면으로."),
-    artifactStudioText("p", "artifacts-studio-hint", "artifacts.studio.hint", "목적을 고르고, 원하는 표현으로 디자인 초안을 시작하세요."),
-  );
-  const orbit = document.createElement("div");
-  orbit.className = "artifacts-studio-orbit";
-  orbit.setAttribute("aria-hidden", "true");
-  for (const surface of ARTIFACT_STUDIO_SURFACES) {
-    const tile = document.createElement("span");
-    tile.className = "artifacts-studio-orbit-tile";
-    tile.dataset.surface = surface.id;
-    tile.style.setProperty("--artifact-studio-accent", "var(--artifact-kind-" + surface.kind + ")");
-    tile.innerHTML = icon(ARTIFACT_KIND_GLYPH[surface.kind]);
-    orbit.appendChild(tile);
-  }
-  // 접힌 줄의 오른쪽 끝 — 접힘을 되돌리는 유일한 손. 접히지 않은 스튜디오에서는 서지 않는다(CSS).
-  const expand = artifactStudioText("button", "btn artifacts-studio-expand", "artifacts.studio.expand", "펼치기");
-  expand.type = "button";
-  intro.append(copy, orbit, expand);
-  const choices = document.createElement("div");
-  choices.className = "artifacts-studio-choices";
-  choices.setAttribute("role", "group");
-  const purposeLabel = { key: "artifacts.studio.purpose", word: "사용 목적" };
-  choices.dataset.i18nAria = purposeLabel.key;
-  choices.dataset.i18nSourcearialabel = purposeLabel.word;
-  choices.setAttribute("aria-label", t(purposeLabel.key, purposeLabel.word));
-  for (const surface of ARTIFACT_STUDIO_SURFACES) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "artifacts-studio-choice";
-    button.dataset.surface = surface.id;
-    button.style.setProperty("--artifact-studio-accent", "var(--artifact-kind-" + surface.kind + ")");
-    button.setAttribute("aria-pressed", "false");
-    const glyph = document.createElement("span");
-    glyph.className = "artifacts-studio-glyph";
-    glyph.innerHTML = icon(ARTIFACT_KIND_GLYPH[surface.kind]);
-    const words = document.createElement("span");
-    words.className = "artifacts-studio-choice-copy";
-    words.append(
-      artifactStudioText("strong", "artifacts-studio-choice-title", surface.title.key, surface.title.word),
-      artifactStudioText("span", "artifacts-studio-choice-hint", surface.hint.key, surface.hint.word),
-    );
-    button.append(glyph, words);
-    choices.appendChild(button);
-  }
+  const glyph = document.createElement("span");
+  glyph.className = "artifacts-studio-glyph";
+  const heading = document.createElement("h2");
+  heading.className = "artifacts-studio-title";
+  const hint = document.createElement("span");
+  hint.className = "artifacts-studio-hint";
+  intro.append(glyph, heading, hint);
 
   const form = document.createElement("form");
   form.className = "artifacts-studio-form";
@@ -6368,32 +6597,105 @@ function buildArtifactStudio() {
   send.disabled = true;
   actions.append(status, close, send);
   form.append(briefLabel, options, destinationLabel, actions);
-  // 닫기는 판의 오른쪽 위 — 「접기」(폼만 닫음)와 다른 손이다: 스튜디오 전체가
-  // 한 줄로 접히고(`foldArtifactStudio`), 그 줄의 「펼치기」가 되돌린다.
-  const dismiss = document.createElement("button");
-  dismiss.type = "button";
-  dismiss.className = "foot-icon artifacts-studio-dismiss";
-  const dismissLabel = { key: "artifacts.studio.dismiss", word: "스튜디오 닫기" };
-  dismiss.dataset.i18nAria = dismissLabel.key;
-  dismiss.dataset.i18nSourcearialabel = dismissLabel.word;
-  dismiss.setAttribute("aria-label", t(dismissLabel.key, dismissLabel.word));
-  dismiss.innerHTML = icon("x");
-  studio.append(intro, choices, form, dismiss);
+  studio.append(intro, form);
   applyLocale(studio);
   return studio;
+}
+
+/* 「새로 만들기 ▾」의 메뉴 — 스튜디오의 목적 넷과 빈 초안 하나. 스튜디오 띠가
+ * 첫 화면의 229px를 쓰던 것을 이 한 단추가 대신한다. 목적을 고르면 그 목적의
+ * 초안 폼이 갤러리 위에 서고, 빈 초안은 받을 에이전트를 묻는다(t-3952). */
+function buildArtifactNewMenu() {
+  const menu = document.createElement("div");
+  menu.className = "note-pop artifacts-new-menu";
+  menu.setAttribute("role", "menu");
+  menu.dataset.i18nAria = ARTIFACT_LABELS.fresh.key;
+  menu.dataset.i18nSourcearialabel = ARTIFACT_LABELS.fresh.word;
+  menu.setAttribute("aria-label", t(ARTIFACT_LABELS.fresh.key, ARTIFACT_LABELS.fresh.word));
+  // 창은 편집 중이 아닌 키를 스테이지의 키 싱크로 되돌린다 — 열린 동안 화살표는 메뉴의 것이다.
+  menu.dataset.keyboardOwner = "true";
+  menu.hidden = true;
+  const item = (className, glyphName, title, hint) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `note-pop-row artifacts-new-item ${className}`;
+    button.setAttribute("role", "menuitem");
+    const glyph = document.createElement("span");
+    glyph.className = "artifacts-studio-glyph";
+    glyph.innerHTML = icon(glyphName);
+    const words = document.createElement("span");
+    words.className = "artifacts-studio-choice-copy";
+    words.append(
+      artifactStudioText("strong", "artifacts-studio-choice-title", title.key, title.word),
+      artifactStudioText("span", "artifacts-studio-choice-hint", hint.key, hint.word),
+    );
+    button.append(glyph, words);
+    menu.appendChild(button);
+    return button;
+  };
+  menu.appendChild(artifactStudioText("div", "note-pop-label", ARTIFACT_LABELS.studio.key, ARTIFACT_LABELS.studio.word));
+  for (const surface of ARTIFACT_STUDIO_SURFACES) {
+    const button = item("artifacts-studio-choice", ARTIFACT_KIND_GLYPH[surface.kind], surface.title, surface.hint);
+    button.dataset.surface = surface.id;
+    button.style.setProperty("--artifact-studio-accent", "var(--artifact-kind-" + surface.kind + ")");
+  }
+  const rule = document.createElement("div");
+  rule.className = "artifacts-new-rule";
+  rule.setAttribute("role", "separator");
+  menu.appendChild(rule);
+  item("artifacts-new-blank", "plus", ARTIFACT_LABELS.blank, ARTIFACT_LABELS.blankHint);
+  applyLocale(menu);
+  return menu;
+}
+
+function artifactNewMenuItems(view) {
+  return [...view.querySelectorAll('.artifacts-new-menu [role="menuitem"]')];
+}
+
+function openArtifactNewMenu(view) {
+  const menu = view.querySelector(".artifacts-new-menu");
+  const button = view.querySelector(".artifacts-new");
+  if (!overlayClosed(menu)) {
+    closeArtifactNewMenu(view);
+    return;
+  }
+  showing(menu);
+  button.setAttribute("aria-expanded", "true");
+  // 단추 아래, 오른쪽 끝을 맞춘다 — 창의 가장자리 안으로 들이는 여백은 간격 토큰 하나.
+  const gap = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-1")) || 0;
+  const at = button.getBoundingClientRect();
+  const box = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(gap, Math.min(at.right - box.width, window.innerWidth - box.width - gap))}px`;
+  menu.style.top = `${Math.max(gap, Math.min(at.bottom + gap, window.innerHeight - box.height - gap))}px`;
+  artifactNewMenuItems(view)[0]?.focus();
+}
+
+function closeArtifactNewMenu(view, { refocus = true } = {}) {
+  const menu = view.querySelector(".artifacts-new-menu");
+  if (overlayClosed(menu)) return;
+  closing(menu);
+  const button = view.querySelector(".artifacts-new");
+  button.setAttribute("aria-expanded", "false");
+  if (refocus) button.focus();
 }
 
 function openArtifactStudio(view, surfaceId) {
   const surface = ARTIFACT_STUDIO_SURFACES.find((row) => row.id === surfaceId);
   if (!surface) return;
+  const studio = view.querySelector(".artifacts-studio");
   const form = view.querySelector(".artifacts-studio-form");
+  if (form.dataset.surface !== surface.id || form.hidden) invalidateArtifactStudio(view);
   form.dataset.surface = surface.id;
-  invalidateArtifactStudio(view);
   form.hidden = false;
-  view.querySelector(".artifacts-studio").classList.add("is-composing");
-  for (const button of view.querySelectorAll(".artifacts-studio-choice")) {
-    button.setAttribute("aria-pressed", button.dataset.surface === surface.id ? "true" : "false");
-  }
+  studio.hidden = false;
+  studio.style.setProperty("--artifact-studio-accent", "var(--artifact-kind-" + surface.kind + ")");
+  studio.querySelector(".artifacts-studio-glyph").innerHTML = icon(ARTIFACT_KIND_GLYPH[surface.kind]);
+  const heading = studio.querySelector(".artifacts-studio-title");
+  heading.dataset.i18n = surface.title.key;
+  heading.textContent = t(surface.title.key, surface.title.word);
+  const hint = studio.querySelector(".artifacts-studio-hint");
+  hint.dataset.i18n = surface.hint.key;
+  hint.textContent = t(surface.hint.key, surface.hint.word);
   view.querySelector(".artifacts-studio-brief").focus();
   paintArtifactCards(view);
   paintArtifactStudio(view);
@@ -6404,33 +6706,16 @@ function openArtifactStudio(view, surfaceId) {
 function leaveArtifactStudioForm(view) {
   const form = view.querySelector(".artifacts-studio-form");
   form.hidden = true;
+  view.querySelector(".artifacts-studio").hidden = true;
   invalidateArtifactStudio(view);
-  view.querySelector(".artifacts-studio").classList.remove("is-composing");
-  for (const button of view.querySelectorAll(".artifacts-studio-choice")) button.setAttribute("aria-pressed", "false");
 }
 
+/* 「접기」와 Esc — 폼이 물러나고 갤러리가 그 높이를 되받으며, 초점은 폼을 연
+ * 단추로 돌아간다. */
 function closeArtifactStudio(view) {
-  const surface = view.querySelector(".artifacts-studio-form").dataset.surface;
   leaveArtifactStudioForm(view);
-  view.querySelector(`.artifacts-studio-choice[data-surface="${surface}"]`)?.focus();
+  view.querySelector(".artifacts-new").focus();
   paintArtifactCards(view);
-}
-
-/* 닫기: 스튜디오 전체가 한 줄로 접힌다(`is-folded`) — 「접기」가 폼만 닫는 것과
- * 다른 손이다. 갤러리가 그 높이를 받고, 그 줄의 「펼치기」가 되돌린다. 접힘은
- * 창 안에서 유지되는 사람의 선택이라 판을 옮겨도(복제된 판도) 같다. */
-function foldArtifactStudio(view) {
-  artifactStudioFolded = true;
-  paintArtifactStudio(view);
-  paintArtifactCards(view);
-  view.querySelector(".artifacts-studio-expand").focus();
-}
-
-function unfoldArtifactStudio(view) {
-  artifactStudioFolded = false;
-  paintArtifactStudio(view);
-  paintArtifactCards(view);
-  view.querySelector(".artifacts-studio-choice").focus();
 }
 
 function invalidateArtifactStudio(view) {
@@ -6441,12 +6726,7 @@ function invalidateArtifactStudio(view) {
 }
 
 function paintArtifactStudio(view) {
-  const studio = view.querySelector(".artifacts-studio");
   const form = view.querySelector(".artifacts-studio-form");
-  // 접힌 스튜디오에 열린 폼은 없다 — 범위 지정 도착이 작성 중에 접었으면 폼을
-  // 떠난다(글은 남는다). 초점은 건드리지 않는다: 그림이지 몸짓이 아니다.
-  if (artifactStudioFolded && !form.hidden) leaveArtifactStudioForm(view);
-  studio.classList.toggle("is-folded", artifactStudioFolded);
   const destination = view.querySelector(".artifacts-studio-destination");
   const seats = artifactDraftSeats();
   const previous = destination.value;
@@ -6540,38 +6820,42 @@ function buildArtifactsView() {
   query.dataset.i18nAria = "artifacts.search";
   query.setAttribute("aria-label", t("artifacts.search", "제목·본문 검색 (Enter: 본문까지)"));
   const kinds = document.createElement("div");
-  kinds.className = "artifacts-kinds";
-  kinds.setAttribute("role", "group");
+  kinds.className = "artifacts-tabs";
+  kinds.setAttribute("role", "tablist");
+  // 화살표는 탭 목록의 것 — 키 싱크가 누를 때마다 초점을 가져가지 않게.
+  kinds.dataset.keyboardOwner = "true";
   kinds.dataset.i18nAria = "artifacts.kinds";
   kinds.setAttribute("aria-label", t("artifacts.kinds", "종류"));
-  for (const kind of ["all", ...ARTIFACT_KINDS]) {
+  for (const row of ARTIFACT_TABS) {
     const one = document.createElement("button");
     one.type = "button";
-    one.className = "btn artifacts-kind";
-    one.dataset.artifactKind = kind;
-    one.setAttribute("aria-pressed", kind === "all" ? "true" : "false");
-    if (kind !== "all") one.innerHTML = icon(ARTIFACT_KIND_GLYPH[kind]);
+    one.className = "artifacts-tab";
+    one.setAttribute("role", "tab");
+    one.dataset.artifactTab = row.tab;
+    one.setAttribute("aria-selected", row.tab === "pages" ? "true" : "false");
+    one.tabIndex = row.tab === "pages" ? 0 : -1;
     const word = document.createElement("span");
-    word.dataset.i18n = ARTIFACT_KIND_WORDS[kind].key;
-    word.textContent = t(ARTIFACT_KIND_WORDS[kind].key, ARTIFACT_KIND_WORDS[kind].word);
-    one.appendChild(word);
+    word.dataset.i18n = row.key;
+    word.textContent = row.word;
+    const count = document.createElement("span");
+    count.className = "artifacts-tab-count";
+    one.append(word, count);
     kinds.appendChild(one);
   }
-  const sources = document.createElement("div");
-  sources.className = "artifacts-sources";
-  sources.setAttribute("role", "group");
-  sources.dataset.i18nAria = ARTIFACT_LABELS.sources.key;
-  sources.setAttribute("aria-label", ARTIFACT_LABELS.sources.word);
-  for (const row of ARTIFACT_SOURCES) {
-    const one = document.createElement("button");
-    one.type = "button";
-    one.className = "btn artifacts-source";
-    one.dataset.artifactSource = row.source;
-    one.setAttribute("aria-pressed", row.source === "all" ? "true" : "false");
-    one.dataset.i18n = row.key;
-    one.textContent = row.word;
-    sources.appendChild(one);
-  }
+  // 고르개 셋은 제 이름표를 단 기본 select다 — 키보드·보조 기술이 거저 온다.
+  const picks = ARTIFACT_PICKS.map((row) => {
+    const label = document.createElement("label");
+    label.className = "artifacts-pick";
+    const name = document.createElement("span");
+    name.className = "artifacts-pick-name";
+    name.dataset.i18n = row.key;
+    name.textContent = row.word;
+    const select = document.createElement("select");
+    select.className = "settings-input artifacts-pick-select";
+    select.dataset.artifactPick = row.pick;
+    label.append(name, select);
+    return label;
+  });
   const origins = document.createElement("div");
   origins.className = "artifacts-origins";
   const originChip = document.createElement("span");
@@ -6595,17 +6879,27 @@ function buildArtifactsView() {
   refresh.innerHTML = icon("refresh");
   refresh.dataset.i18nAria = "artifacts.refresh";
   refresh.setAttribute("aria-label", t("artifacts.refresh", "다시 읽기"));
-  // 「새 아티팩트」(t-3233 §4): 사람이 고른 에이전트의 입력줄에 초안을 넣는다
-  // (t-3952) — 창이 직접 만들 길은 없고, 받을 곳을 창이 짐작하지도 않는다.
+  // 「새로 만들기 ▾」: 스튜디오의 목적 넷과 빈 초안을 여는 메뉴. 어느 길이든
+  // 사람이 고른 에이전트의 입력줄에 초안을 넣는다(t-3952) — 창이 직접 만들 길은
+  // 없고, 받을 곳을 창이 짐작하지도 않는다.
   const fresh = document.createElement("button");
   fresh.type = "button";
   fresh.className = "btn btn--primary artifacts-new";
+  fresh.setAttribute("aria-haspopup", "menu");
+  fresh.setAttribute("aria-expanded", "false");
+  // 초점이 여기 있는 동안 Enter·Space 는 이 단추의 것 — 창의 키 싱크 되찾기
+  // (shell-input.js `rearmKeySink`)가 Esc 로 돌아온 초점을 다시 가져가지 않게.
+  fresh.dataset.keyboardOwner = "true";
   fresh.innerHTML = icon("plus");
   const freshWord = document.createElement("span");
   freshWord.dataset.i18n = ARTIFACT_LABELS.fresh.key;
   freshWord.textContent = ARTIFACT_LABELS.fresh.word;
-  fresh.appendChild(freshWord);
-  head.append(name, query, sources, kinds, origins, gap, stat, refresh, fresh);
+  const freshChevron = document.createElement("span");
+  freshChevron.className = "artifacts-new-chevron";
+  freshChevron.setAttribute("aria-hidden", "true");
+  freshChevron.innerHTML = icon("chevron-down");
+  fresh.append(freshWord, freshChevron);
+  head.append(name, kinds, ...picks, query, origins, gap, stat, refresh, fresh);
 
   const trouble = document.createElement("p");
   trouble.className = "artifacts-error";
@@ -6623,6 +6917,33 @@ function buildArtifactsView() {
   spacer.className = "artifacts-spacer";
   const cards = document.createElement("div");
   cards.className = "artifacts-cards";
+  // 날의 무리 머리 셋 — 판마다 한 번 짓고, 그리기는 자리만 옮긴다(카드 풀과 같은
+  // 규칙: 전환이 노드를 만들지 않는다). 목록 상자 안의 머리라 읽는 기계에는
+  // 숨긴다 — 카드마다 제 날의 낱말(「…에 편집됨」)을 이미 말한다.
+  for (const row of ARTIFACT_PERIODS) {
+    const group = document.createElement("p");
+    group.className = "artifacts-group";
+    group.dataset.period = row.period;
+    group.setAttribute("aria-hidden", "true");
+    group.dataset.i18n = row.key;
+    group.textContent = row.word;
+    group.hidden = true;
+    cards.appendChild(group);
+  }
+  // 사라진 파일의 한 줄은 목록 아래 바닥에 선다 — 긴 목록의 끝에 묻히지 않고,
+  // 목록 상자 안에 단추를 두지 않는다.
+  const missing = document.createElement("p");
+  missing.className = "artifacts-missing";
+  missing.hidden = true;
+  const missingWord = document.createElement("span");
+  missingWord.className = "artifacts-missing-word";
+  const missingSep = document.createElement("span");
+  missingSep.setAttribute("aria-hidden", "true");
+  missingSep.textContent = "·";
+  const missingToggle = document.createElement("button");
+  missingToggle.type = "button";
+  missingToggle.className = "artifacts-missing-toggle";
+  missing.append(missingWord, missingSep, missingToggle);
   const empty = document.createElement("div");
   empty.className = "artifacts-empty";
   empty.hidden = true;
@@ -6639,8 +6960,11 @@ function buildArtifactsView() {
   );
   empty.append(emptyWord, emptyHint);
   grid.append(spacer, cards, empty);
-  body.append(grid, buildArtifactDrawer());
-  root.append(head, buildArtifactStudio(), trouble, body);
+  const main = document.createElement("div");
+  main.className = "artifacts-main";
+  main.append(grid, missing);
+  body.append(main, buildArtifactDrawer());
+  root.append(head, buildArtifactStudio(), trouble, body, buildArtifactNewMenu());
   return root;
 }
 
@@ -6701,6 +7025,12 @@ function buildArtifactDrawer() {
   for (const row of ARTIFACT_META_ROWS) artifactMetaRow(meta, row);
   for (const row of ARTIFACT_ORIGIN_FIELDS) artifactMetaRow(meta, row);
   artifactMetaRow(meta, ARTIFACT_META_RETENTION);
+  // 출처 칸이 하나도 서지 않는 행 — 카드는 그 자리를 비워 두고, 여기서만 말한다.
+  const noOrigin = document.createElement("p");
+  noOrigin.className = "artifact-no-origin";
+  noOrigin.dataset.i18n = "artifacts.noOrigin";
+  noOrigin.textContent = t("artifacts.noOrigin", "출처 없음");
+  noOrigin.hidden = true;
 
   const links = document.createElement("div");
   links.className = "artifact-origin-links";
@@ -6731,7 +7061,7 @@ function buildArtifactDrawer() {
     one.appendChild(label);
     actions.appendChild(one);
   }
-  detail.append(head, preview, meta, links, actions);
+  detail.append(head, preview, meta, noOrigin, links, actions);
   drawer.append(empty, detail);
   return drawer;
 }
@@ -6741,15 +7071,29 @@ function buildArtifactDrawer() {
 function wireArtifactsView(view) {
   if (view._artifactsWired) return;
   view._artifactsWired = true;
-  view.querySelector(".artifacts-studio-choices").addEventListener("click", (event) => {
-    const button = event.target.closest(".artifacts-studio-choice");
-    if (!button) return;
-    // 눌린 타일을 다시 누르면 닫힌다 — 같은 손이 여닫는다.
-    if (button.getAttribute("aria-pressed") === "true") closeArtifactStudio(view);
-    else openArtifactStudio(view, button.dataset.surface);
+  const menu = view.querySelector(".artifacts-new-menu");
+  view.querySelector(".artifacts-new").addEventListener("click", () => openArtifactNewMenu(view));
+  // 바깥 누름은 초점을 두고 닫고, Esc는 단추로 초점을 돌린다 — 단추 자체는 토글이다.
+  dismissable(menu, (event) => closeArtifactNewMenu(view, { refocus: !event }), view.querySelector(".artifacts-new"));
+  menu.addEventListener("click", (event) => {
+    const item = event.target.closest('[role="menuitem"]');
+    if (!item) return;
+    closeArtifactNewMenu(view, { refocus: false });
+    if (item.dataset.surface) openArtifactStudio(view, item.dataset.surface);
+    else void draftNewArtifact(view.querySelector(".artifacts-new"));
   });
-  view.querySelector(".artifacts-studio-dismiss").addEventListener("click", () => foldArtifactStudio(view));
-  view.querySelector(".artifacts-studio-expand").addEventListener("click", () => unfoldArtifactStudio(view));
+  menu.addEventListener("keydown", (event) => {
+    if (event.isComposing || event.key === "Process" || event.keyCode === 229) return;
+    const items = artifactNewMenuItems(view);
+    const at = items.indexOf(document.activeElement);
+    const next = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: items.length - 1 }[event.key];
+    if (next !== undefined) {
+      event.preventDefault();
+      items[((next % items.length) + items.length) % items.length]?.focus();
+    } else if (event.key === "Tab") {
+      closeArtifactNewMenu(view, { refocus: false });
+    }
+  });
   view.querySelector(".artifacts-studio-form").addEventListener("submit", (event) => {
     event.preventDefault();
     void sendArtifactStudio(view);
@@ -6783,36 +7127,42 @@ function wireArtifactsView(view) {
     event.preventDefault();
     void searchArtifactBodies(view);
   });
-  view.querySelector(".artifacts-kinds").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-artifact-kind]");
-    if (!button) return;
-    artifactFilter.kind = button.dataset.artifactKind;
-    applyArtifactFilter();
-    view.querySelector(".artifacts-grid").scrollTop = 0;
-    paintArtifactCards(view);
-    paintArtifactHead(view);
-    paintArtifactDrawer(view);
+  const tabs = view.querySelector(".artifacts-tabs");
+  tabs.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-artifact-tab]");
+    if (!button || button.dataset.artifactTab === artifactFilter.tab) return;
+    artifactTabPicked = true;
+    artifactFilter.tab = button.dataset.artifactTab;
+    changeArtifactFilter(view);
   });
-  view.querySelector(".artifacts-sources").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-artifact-source]");
-    if (!button) return;
-    artifactFilter.source = button.dataset.artifactSource;
-    applyArtifactFilter();
-    view.querySelector(".artifacts-grid").scrollTop = 0;
-    paintArtifactCards(view);
-    paintArtifactHead(view);
-    paintArtifactDrawer(view);
+  // 탭 목록의 화살표 — 선 탭 사이를 돌며 고른다(WAI-ARIA 탭의 자동 선택).
+  tabs.addEventListener("keydown", (event) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    if (step === undefined) return;
+    event.preventDefault();
+    const shown = [...tabs.querySelectorAll("[data-artifact-tab]")].filter((one) => !one.hidden);
+    const at = shown.findIndex((one) => one.dataset.artifactTab === artifactFilter.tab);
+    const next = shown[(at + step + shown.length) % shown.length];
+    artifactTabPicked = true;
+    artifactFilter.tab = next.dataset.artifactTab;
+    changeArtifactFilter(view);
+    next.focus();
   });
-  view.querySelector(".artifacts-new").addEventListener("click", (event) => {
-    void draftNewArtifact(event.currentTarget);
+  for (const select of view.querySelectorAll("[data-artifact-pick]")) {
+    select.addEventListener("change", () => {
+      artifactFilter[select.dataset.artifactPick] = select.value === ""
+        ? (select.dataset.artifactPick === "period" ? "all" : null)
+        : select.value;
+      changeArtifactFilter(view);
+    });
+  }
+  view.querySelector(".artifacts-missing-toggle").addEventListener("click", () => {
+    artifactFilter.showMissing = !artifactFilter.showMissing;
+    changeArtifactFilter(view);
   });
   view.querySelector(".artifacts-origin-clear").addEventListener("click", () => {
     artifactFilter.origin = null;
-    applyArtifactFilter();
-    view.querySelector(".artifacts-grid").scrollTop = 0;
-    paintArtifactCards(view);
-    paintArtifactHead(view);
-    paintArtifactDrawer(view);
+    changeArtifactFilter(view);
   });
   view.querySelector(".artifacts-refresh").addEventListener("click", async () => {
     artifactAskedAt = 0;
@@ -6836,12 +7186,14 @@ function wireArtifactsView(view) {
   // 썸네일 큐는 스크롤에 맞춰 다시 청한다 — 보이는 카드만이라 `paintArtifactCards`가
   // 옷을 입힐 때 청하고, 그 사이 사라진 카드는 펌프가 건너뛴다.
   grid.addEventListener("keydown", (event) => {
-    const columns = artifactColumns(view);
     const at = artifactOrder.indexOf(artifactSelectedId);
-    const step = { ArrowDown: columns, ArrowUp: -columns, ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    const step = { ArrowDown: 1, ArrowUp: -1, ArrowRight: 1, ArrowLeft: -1 }[event.key];
     if (step !== undefined) {
       event.preventDefault();
-      const next = Math.min(artifactOrder.length - 1, Math.max(0, (at < 0 ? -1 : at) + step));
+      const vertical = event.key === "ArrowDown" || event.key === "ArrowUp";
+      const next = at < 0
+        ? 0
+        : vertical ? artifactVerticalStep(view, at, step) : Math.min(artifactOrder.length - 1, Math.max(0, at + step));
       if (artifactOrder[next]) selectArtifact(view, artifactOrder[next], { reveal: true });
       return;
     }
@@ -6904,21 +7256,30 @@ function paintArtifactTier(view) {
 
 function paintArtifactHead(view) {
   paintArtifactStudio(view);
-  for (const button of view.querySelectorAll("[data-artifact-kind]")) {
-    button.setAttribute("aria-pressed", button.dataset.artifactKind === artifactFilter.kind ? "true" : "false");
+  const shownTabs = new Set(artifactVisibleTabs().map((row) => row.tab));
+  for (const button of view.querySelectorAll("[data-artifact-tab]")) {
+    const tab = button.dataset.artifactTab;
+    const on = tab === artifactTabRow(artifactFilter.tab).tab;
+    button.hidden = !shownTabs.has(tab) && !on;
+    button.setAttribute("aria-selected", on ? "true" : "false");
+    button.tabIndex = on ? 0 : -1;
+    button.querySelector(".artifacts-tab-count").textContent = String(artifactTabCounts.get(tab) ?? 0);
   }
-  for (const button of view.querySelectorAll("[data-artifact-source]")) {
-    button.setAttribute(
-      "aria-pressed",
-      button.dataset.artifactSource === artifactFilter.source ? "true" : "false",
-    );
+  paintArtifactPicks(view);
+  const missing = view.querySelector(".artifacts-missing");
+  missing.hidden = artifactMissingCount === 0;
+  if (artifactMissingCount > 0) {
+    const shown = artifactFilter.showMissing;
+    missing.querySelector(".artifacts-missing-word").textContent = shown
+      ? t("artifacts.missing.shown", "사라진 파일 {{n}}행 보는 중", { n: artifactMissingCount })
+      : t("artifacts.missing.hidden", "사라진 파일 {{n}}행 숨김", { n: artifactMissingCount });
+    missing.querySelector(".artifacts-missing-toggle").textContent = shown
+      ? t("artifacts.missing.hide", "숨기기")
+      : t("artifacts.missing.show", "보기");
   }
   // 받을 에이전트는 사람이 고른다(t-3952) — 「보낼 곳」 고르개가 도는 판과 새
   // 에이전트를 함께 내놓으니, 판이 없어도 이 손은 선다.
-  const fresh = view.querySelector(".artifacts-new");
-  fresh.disabled = false;
-  fresh.dataset.tip = t("artifacts.newTip", "초안을 받을 에이전트를 고릅니다");
-  fresh.setAttribute("aria-label", fresh.dataset.tip);
+  view.querySelector(".artifacts-new").disabled = false;
   const chip = view.querySelector(".artifacts-origin-chip");
   const clear = view.querySelector(".artifacts-origin-clear");
   const origin = artifactFilter.origin;
@@ -6932,15 +7293,45 @@ function paintArtifactHead(view) {
       name: origin.label ?? origin.value,
     });
   }
+  // 수는 탭이 말한다. 머리의 이 자리는 표 상한이 답을 잘랐을 때만 그 사실을 말한다.
   const stat = view.querySelector(".artifacts-stat");
-  const shown = artifactOrder.length;
-  const total = artifactListing.total || artifactRows.size;
-  stat.textContent = shown === total
-    ? t("artifacts.count", "{{n}}개", { n: total })
-    : t("artifacts.countOf", "{{shown}} / {{n}}개", { shown, n: total });
-  if (artifactListing.truncated) {
-    stat.textContent += ` · ${t("artifacts.truncated", "표 상한까지만")}`;
-  }
+  stat.hidden = !artifactListing.truncated;
+  stat.textContent = artifactListing.truncated
+    ? t("artifacts.countOf", "{{shown}} / {{n}}개", { shown: artifactOrder.length, n: artifactListing.total })
+      + ` · ${t("artifacts.truncated", "표 상한까지만")}`
+    : "";
+}
+
+/* 고르개 셋의 칸을 다시 채운다 — 값이 바뀐 칸만. 고른 것이 목록에서 빠졌으면
+ * (다시 읽기가 그 프로젝트의 행을 다 지웠다) 그 칸은 제 이름으로 남는다. */
+function paintArtifactPicks(view) {
+  const everything = t(ARTIFACT_PICK_ALL.key, ARTIFACT_PICK_ALL.word);
+  const fill = (select, options, value) => {
+    const wanted = [["", everything], ...options];
+    const same = select.options.length === wanted.length
+      && wanted.every(([key, label], at) => select.options[at].value === key && select.options[at].textContent === label);
+    if (!same) {
+      select.replaceChildren(...wanted.map(([key, label]) => {
+        const option = document.createElement("option");
+        option.value = key;
+        option.textContent = label;
+        return option;
+      }));
+    }
+    select.value = value ?? "";
+  };
+  const project = view.querySelector('[data-artifact-pick="project"]');
+  fill(project, artifactProjects.map((row) => [row.value, row.label]), artifactFilter.project);
+  fill(
+    view.querySelector('[data-artifact-pick="agent"]'),
+    artifactAgentChoices().map((agent) => [agent, agentName(agent)]),
+    artifactFilter.agent,
+  );
+  fill(
+    view.querySelector('[data-artifact-pick="period"]'),
+    ARTIFACT_PERIODS.slice(0, 2).map((row) => [row.period, t(row.key, row.word)]),
+    artifactFilter.period === "all" ? "" : artifactFilter.period,
+  );
 }
 
 function artifactColumns(view) {
@@ -6956,24 +7347,22 @@ function dressArtifactCard(node, row, selected) {
     node._artifactRow = row;
     node.dataset.id = row.id;
     node.dataset.kind = row.kind;
-    node.querySelector(".artifact-card-title").textContent = row.title;
-    const origin = row.origin ?? {};
-    const parts = [
-      origin.agent ?? "",
-      origin.task ?? origin.automation ?? "",
-      origin.worktree ? basename(origin.worktree) : "",
-    ].filter(Boolean);
-    node.querySelector(".artifact-card-origin").textContent = parts.length
-      ? parts.join(" · ")
-      : t("artifacts.noOrigin", "출처 없음");
-    node.querySelector(".artifact-card-description").textContent = row.description ?? "";
-    node.querySelector(".artifact-card-description").dataset.tip = row.description ?? "";
+    const title = node.querySelector(".artifact-card-title");
+    title.textContent = row.title;
+    // 발행한 페이지의 설명은 제목의 풍선이다 — 카드의 셋째 줄은 만든 이의 것이다.
+    title.dataset.tip = row.description ?? "";
+    node.classList.toggle("is-missing", artifactMissing.has(row.id));
+    dressArtifactMaker(node.querySelector(".artifact-card-maker"), row.origin ?? {});
     node.querySelector(".artifact-card-kind").textContent = row.version
       ? t("artifacts.publishedVersion", "발행 · 버전 {{n}}", { n: row.version })
       : t(
       ARTIFACT_KIND_WORDS[row.kind]?.key ?? "artifacts.kind.other",
       ARTIFACT_KIND_WORDS[row.kind]?.word ?? "기타",
     );
+    const feedback = node.querySelector(".artifact-card-feedback");
+    const said = Number(row.feedback_count) || 0;
+    feedback.hidden = said === 0;
+    feedback.textContent = said > 0 ? t("artifacts.feedbackCount", "피드백 {{n}}", { n: said }) : "";
     node.querySelector(".artifact-card-glyph use")
       .setAttribute("href", `#i-${ARTIFACT_KIND_GLYPH[row.kind] ?? "file"}`);
     // claude.ai 아티팩트는 제 파비콘(이모지)을 글리프 자리에 입는다.
@@ -6992,12 +7381,51 @@ function dressArtifactCard(node, row, selected) {
     const src = rendered ?? held?.data_url ?? "";
     thumb.hidden = src === "";
     thumb.src = src;
-    if (row.kind === "screenshot" && !held) void askArtifactThumb(node, row.id);
+    if (row.kind === "screenshot" && !held && !artifactMissing.has(row.id)) void askArtifactThumb(node, row.id);
   }
-  if (ARTIFACT_THUMB_KINDS.has(row.kind)) askArtifactThumbnail(row);
+  if (ARTIFACT_THUMB_KINDS.has(row.kind) && !artifactMissing.has(row.id)) askArtifactThumbnail(row);
   node.querySelector(".artifact-card-when").textContent = artifactWhenWords(row);
   node.classList.toggle("is-selected", selected);
   node.setAttribute("aria-selected", selected ? "true" : "false");
+}
+
+/* 만든 이의 한 줄 — 에이전트의 표식(모델 계열), 판, 브랜치. 출처가 말하는 것만
+ * 서고, 아무것도 말하지 않으면 줄째 숨는다: 「출처 없음」은 서랍의 말이다. */
+function dressArtifactMaker(line, origin) {
+  const agent = origin.agent ?? "";
+  const pane = artifactPaneWord(origin.pane);
+  const branch = artifactBranchWord(origin);
+  const mark = line.querySelector(".artifact-card-maker-mark");
+  if (line.dataset.agent !== agent) {
+    line.dataset.agent = agent;
+    mark.replaceChildren();
+    if (agent) mark.appendChild(agentIcon(agentRows.find((held) => held.id === agent) ?? { id: agent, name: agentName(agent) }));
+  }
+  mark.hidden = agent === "";
+  mark.dataset.tip = agent ? [agentName(agent), origin.model].filter(Boolean).join(" · ") : "";
+  const paneNode = line.querySelector(".artifact-card-maker-pane");
+  paneNode.textContent = pane;
+  paneNode.hidden = pane === "";
+  const branchNode = line.querySelector(".artifact-card-maker-branch");
+  branchNode.textContent = branch;
+  branchNode.hidden = branch === "";
+  line.querySelector(".artifact-card-maker-sep").hidden = pane === "" || branch === "";
+  line.hidden = agent === "" && pane === "" && branch === "";
+}
+
+/* 판의 이름 — 훅의 판 키(`term-4`)는 판이 머리에 다는 `term:4`로 읽는다. */
+function artifactPaneWord(pane) {
+  if (!pane) return "";
+  const term = /^term-(\d+)$/.exec(pane);
+  return term ? `term:${term[1]}` : pane;
+}
+
+/* 브랜치 — 워크트리가 없는 출처의 프로젝트 이름을 브랜치인 듯 보이지 않는다.
+ * 창이 아는 워크트리면 그 브랜치, 모르면 워크트리 폴더의 이름. */
+function artifactBranchWord(origin) {
+  const path = origin.worktree;
+  if (!path) return "";
+  return worktreeAt(path)?.branch ?? basename(path);
 }
 
 /* 카드 아래 줄: 「🌐 9월 1일에 편집됨」/「🔒 …」. 오늘 것은 상대 낱말(`spaceAgo`,
@@ -7059,23 +7487,37 @@ function makeArtifactCardNode() {
   thumb.className = "artifact-card-thumb";
   thumb.alt = "";
   thumb.hidden = true;
-  // 출처 한 줄은 얼굴 위에 눕고 가리킬 때만 보인다(t-3233 §4: 출처 칩은
-  // hover/드로어). 글은 늘 노드에 있어 하네스와 보조 기술이 읽는다.
-  const origin = document.createElement("span");
-  origin.className = "artifact-card-origin";
-  face.append(glyph, emoji, doc, thumb, origin);
+  face.append(glyph, emoji, doc, thumb);
   const title = document.createElement("span");
   title.className = "artifact-card-title";
+  const maker = document.createElement("span");
+  maker.className = "artifact-card-maker";
+  maker.hidden = true;
+  const mark = document.createElement("span");
+  mark.className = "artifact-card-maker-mark";
+  const pane = document.createElement("span");
+  pane.className = "artifact-card-maker-pane";
+  const sep = document.createElement("span");
+  sep.className = "artifact-card-maker-sep";
+  sep.setAttribute("aria-hidden", "true");
+  sep.textContent = "·";
+  const branch = document.createElement("span");
+  branch.className = "artifact-card-maker-branch";
+  maker.append(mark, pane, sep, branch);
   const foot = document.createElement("span");
   foot.className = "artifact-card-foot";
+  const said = document.createElement("span");
+  said.className = "artifact-card-said";
   const kind = document.createElement("span");
   kind.className = "artifact-card-kind";
+  const feedback = document.createElement("span");
+  feedback.className = "artifact-card-feedback";
+  feedback.hidden = true;
+  said.append(kind, feedback);
   const when = document.createElement("span");
   when.className = "artifact-card-when";
-  foot.append(kind, when);
-  const description = document.createElement("span");
-  description.className = "artifact-card-origin artifact-card-description";
-  node.append(face, title, description, foot);
+  foot.append(said, when);
+  node.append(face, title, maker, foot);
   return node;
 }
 
@@ -7089,11 +7531,45 @@ function artifactGridLayout(view) {
   const width = Math.max(0, grid.clientWidth - tuning.gap * (columns + 1));
   const cardWidth = Math.floor(width / columns);
   const cardHeight = tuning.cardHeight + (cardWidth - tuning.cardMin) * tuning.faceRatio;
-  return { tuning, grid, columns, cardWidth, cardHeight, rowHeight: cardHeight + tuning.gap };
+  const rowHeight = cardHeight + tuning.gap;
+  // 무리마다 머리 한 줄과 그 카드의 행들 — 세로 자리는 이 표 하나가 정한다.
+  let top = 0;
+  const places = artifactGroups.map((group) => {
+    const head = top;
+    const first = head + tuning.groupHead;
+    const rows = Math.ceil(group.count / columns);
+    top = first + rows * rowHeight;
+    return { ...group, head, first, rows };
+  });
+  return { tuning, grid, columns, cardWidth, cardHeight, rowHeight, places, height: top + tuning.gap };
+}
+
+/* 카드 한 장의 윗변 — 제 무리의 첫 행에서 몇 행 아래인가. */
+function artifactCardTop(layout, index) {
+  const place = layout.places.find((one) => index >= one.start && index < one.start + one.count);
+  if (!place) return 0;
+  return place.first + Math.floor((index - place.start) / layout.columns) * layout.rowHeight;
+}
+
+/* 위아래 화살표 — 같은 열의 위아래 행으로, 무리의 경계를 넘으면 이웃 무리의
+ * 가장 가까운 행으로. 무리가 행을 끊으므로 「열 수만큼」은 틀린 걸음이다. */
+function artifactVerticalStep(view, at, step) {
+  const { columns, places } = artifactGridLayout(view);
+  const g = places.findIndex((one) => at >= one.start && at < one.start + one.count);
+  if (g < 0) return at;
+  const place = places[g];
+  const column = (at - place.start) % columns;
+  const row = Math.floor((at - place.start) / columns) + step;
+  if (row >= 0 && row < place.rows) return place.start + Math.min(row * columns + column, place.count - 1);
+  const next = places[g + step];
+  if (!next) return at;
+  const nextRow = step > 0 ? 0 : next.rows - 1;
+  return next.start + Math.min(nextRow * columns + column, next.count - 1);
 }
 
 function paintArtifactCards(view) {
-  const { tuning, grid, columns, cardWidth, cardHeight, rowHeight } = artifactGridLayout(view);
+  const layout = artifactGridLayout(view);
+  const { tuning, grid, columns, cardWidth, cardHeight, rowHeight, places } = layout;
   const cards = view.querySelector(".artifacts-cards");
   const spacer = view.querySelector(".artifacts-spacer");
   const empty = view.querySelector(".artifacts-empty");
@@ -7102,15 +7578,26 @@ function paintArtifactCards(view) {
     pool = { nodes: [], byId: new Map() };
     artifactCardPools.set(view, pool);
   }
-  const rows = Math.ceil(artifactOrder.length / columns);
-  spacer.style.height = `${rows * rowHeight + tuning.gap}px`;
+  spacer.style.height = `${layout.height}px`;
   empty.hidden = artifactOrder.length > 0 || artifactError !== null;
-  const firstRow = Math.max(0, Math.floor(grid.scrollTop / rowHeight) - tuning.overscan);
-  const lastRow = Math.min(rows, Math.ceil((grid.scrollTop + grid.clientHeight) / rowHeight) + tuning.overscan);
-  const first = firstRow * columns;
-  const last = Math.min(artifactOrder.length, lastRow * columns);
-  const wanted = artifactOrder.slice(first, last);
-  const wantedSet = new Set(wanted);
+  for (const head of cards.querySelectorAll(".artifacts-group")) {
+    const place = places.find((one) => one.period === head.dataset.period);
+    head.hidden = !place;
+    if (!place) continue;
+    head.style.transform = `translate(${tuning.gap}px, ${place.head}px)`;
+    head.style.width = `${Math.max(0, grid.clientWidth - tuning.gap * 2)}px`;
+    head.style.height = `${tuning.groupHead}px`;
+  }
+  const lo = grid.scrollTop - tuning.overscan * rowHeight;
+  const hi = grid.scrollTop + grid.clientHeight + tuning.overscan * rowHeight;
+  const wanted = [];
+  for (const place of places) {
+    const rowStart = Math.max(0, Math.floor((lo - place.first) / rowHeight));
+    const rowEnd = Math.min(place.rows, Math.ceil((hi - place.first) / rowHeight));
+    const end = Math.min(place.start + place.count, place.start + rowEnd * columns);
+    for (let index = place.start + rowStart * columns; index < end; index += 1) wanted.push(index);
+  }
+  const wantedSet = new Set(wanted.map((index) => artifactOrder[index]));
   // Nodes that still show a wanted id keep it; the rest are free.
   const free = [];
   for (const node of pool.nodes) {
@@ -7119,8 +7606,8 @@ function paintArtifactCards(view) {
       pool.byId.delete(node.dataset.id);
     }
   }
-  for (let at = 0; at < wanted.length; at += 1) {
-    const id = wanted[at];
+  for (const index of wanted) {
+    const id = artifactOrder[index];
     let node = pool.byId.get(id);
     if (!node) {
       node = free.pop();
@@ -7133,9 +7620,10 @@ function paintArtifactCards(view) {
     const row = artifactRows.get(id);
     if (!row) continue;
     dressArtifactCard(node, row, id === artifactSelectedId);
-    const index = first + at;
-    const x = tuning.gap + (index % columns) * (cardWidth + tuning.gap);
-    const y = tuning.gap + Math.floor(index / columns) * rowHeight;
+    const place = places.find((one) => index >= one.start && index < one.start + one.count);
+    const local = index - place.start;
+    const x = tuning.gap + (local % columns) * (cardWidth + tuning.gap);
+    const y = place.first + Math.floor(local / columns) * rowHeight;
     node.style.transform = `translate(${x}px, ${y}px)`;
     node.style.width = `${cardWidth}px`;
     node.style.height = `${cardHeight}px`;
@@ -7164,6 +7652,8 @@ async function askArtifactPreview(id) {
   const ask = (async () => {
     try {
       const payload = await invoke("artifact_preview", { id });
+      // 「없음」은 기억하지 않는다 — 페이지의 썸네일은 뒤에 그려진다.
+      if (payload?.kind === "none") return payload;
       const cap = artifactTuning(artifactsView() ?? document.documentElement).thumbCache;
       while (artifactPreviews.size >= cap) {
         const oldest = artifactPreviews.keys().next().value;
@@ -7234,6 +7724,9 @@ async function pumpArtifactThumbs() {
           thumb.src = answer.data_url;
           thumb.hidden = false;
         }
+        // 서랍이 이 페이지를 들고 있으면 그 미리보기도 이 그림이다.
+        const view = artifactsView();
+        if (view && artifactSelectedId === id) void paintArtifactPreview(view, artifactRows.get(id));
       } else {
         artifactThumbFailed.add(id);
       }
@@ -7279,10 +7772,13 @@ function selectArtifact(view, id, { reveal = false } = {}) {
     // geometry before asking the DOM to reveal the selected card.
     const index = artifactOrder.indexOf(id);
     if (index >= 0) {
-      const { tuning, grid, columns, rowHeight, cardHeight } = artifactGridLayout(view);
-      const top = tuning.gap + Math.floor(index / columns) * rowHeight;
+      const layout = artifactGridLayout(view);
+      const { grid, columns, cardHeight, places } = layout;
+      const top = artifactCardTop(layout, index);
       if (top < grid.scrollTop || top + cardHeight > grid.scrollTop + grid.clientHeight) {
-        grid.scrollTop = top;
+        // 무리의 첫 행이면 그 무리의 머리까지 함께 든다.
+        const place = places.find((one) => index >= one.start && index < one.start + one.count);
+        grid.scrollTop = place && index - place.start < columns ? place.head : top;
       }
     }
   }
@@ -7330,9 +7826,11 @@ function paintArtifactDrawer(view) {
   put("modified", row.modified_ms ? `${new Date(row.modified_ms).toLocaleString()} (${spaceAgo(row.modified_ms)})` : "");
   put("path", row.url ?? row.path);
   for (const { field } of ARTIFACT_ORIGIN_FIELDS) put(field, row.origin?.[field] ?? "");
+  drawer.querySelector(".artifact-no-origin").hidden = ARTIFACT_ORIGIN_FIELDS.some(({ field }) => row.origin?.[field]);
   // claude.ai 아티팩트에는 파일이 없다: Finder와 경로 복사는 설 자리가 없다.
+  // 사라진 파일도 Finder에 보일 것이 없다.
   const fileless = !row.path;
-  drawer.querySelector('[data-artifact-action="reveal"]').disabled = fileless;
+  drawer.querySelector('[data-artifact-action="reveal"]').disabled = fileless || artifactMissing.has(row.id);
   drawer.querySelector('[data-artifact-action="copy"]').disabled = fileless;
   put(
     "retention",
@@ -7358,7 +7856,15 @@ async function paintArtifactPreview(view, row) {
   const text = drawer.querySelector(".artifact-preview-text");
   const none = drawer.querySelector(".artifact-preview-none");
   const truncated = drawer.querySelector(".artifact-preview-truncated");
-  const payload = await askArtifactPreview(row.id);
+  // 페이지의 미리보기는 제 카드가 이미 그린 썸네일이다 — 들고 있으면 묻지 않고,
+  // 없으면 런타임이 그 썸네일을(아직 없으면 「없음」을) 답한다. 사라진 파일은
+  // 묻지 않고 그렇다고 말한다.
+  const rendered = ARTIFACT_THUMB_KINDS.has(row.kind) ? artifactThumbs.get(row.id) : null;
+  const payload = artifactMissing.has(row.id)
+    ? { kind: "none", error: t("artifacts.missing.file", "파일이 사라졌습니다 — 카탈로그의 행만 남았습니다.") }
+    : rendered
+      ? { kind: "image", data_url: rendered }
+      : await askArtifactPreview(row.id);
   // 기다리는 사이 다른 카드로 옮겼으면 그 카드의 그림이 이긴다.
   if (drawer.querySelector(".artifacts-detail").dataset.artifactId !== row.id) return;
   md.hidden = payload.kind !== "markdown";
@@ -7396,7 +7902,7 @@ function artifactSeatFor(row) {
   for (const [term, facts] of paneLedger) {
     if ((worker && facts.worker === worker) || (!worker && task && facts.taskId === task)) return term;
   }
-  return null;
+  return artifactMakerTerm(row);
 }
 
 /* 보드는 열리면서 제 기본 선택을 고르므로(`openBoard`), 고르는 손은 그 첫 그림
@@ -7472,7 +7978,7 @@ async function artifactAction(view, action, id) {
  * 도 같은 문으로 `file://`을 열되 창의 머리띠 한 줄을 얹고, 문서(md)는 기존
  * 마크다운 뷰어에 같은 머리띠를 얹는다. 열었으면 true, 이 길이 아닌 종류면
  * false — 그러면 부르는 쪽이 시스템 기본 앱으로 간다. */
-async function openArtifactPage(row) {
+async function openArtifactPage(row, { version = null } = {}) {
   if (row.kind === "web") {
     if (!row.url) return false;
     await openBrowserTab(row.url);
@@ -7480,6 +7986,7 @@ async function openArtifactPage(row) {
   }
   if (row.kind === "page") {
     const facts = artifactStripFacts(row);
+    if (version != null) facts.version = version;
     let path = row.path;
     if (facts.current != null) {
       const origin = activeTabId;
@@ -7509,6 +8016,39 @@ async function openArtifactPage(row) {
     return true;
   }
   return false;
+}
+
+/* 터미널이 찍은 `file://` 주소가 스토어의 발행물 — 현재 파일이나 보관된 판 —
+ * 이면 그 아티팩트로, 머리띠를 얹어 연다. 판정은 스토어의 것이다
+ * (`artifact_page_at`): 창은 스토어가 어디 있는지 추측하지 않는다. 스토어의
+ * 것이 아니거나 물을 수 없으면 false — 부르는 쪽이 경로로 연다. */
+async function openArtifactPageAt(path) {
+  let found = null;
+  try {
+    found = await invoke("artifact_page_at", { path });
+  } catch {
+    return false;
+  }
+  if (!found?.artifact) return false;
+  try {
+    return await openArtifactPage(found.artifact, { version: found.version ?? null });
+  } catch (error) {
+    showError(String(error));
+    return true;
+  }
+}
+
+/* 발행한 판이 지금 이 창에 서 있으면 그 판 — `origin.pane` 은 창의 판 열쇠
+ * (`term-<n>`)다. 판 번호는 창을 띄울 때마다 새로 나오므로 같은 번호가 같은
+ * 판인 것은 그 판이 발행보다 먼저 태어났을 때뿐이다(`paneBorn`). 보드가 카드로
+ * 보여 줄 수 있는 판(에이전트가 앉은 판)만 답하고, 아니면 `null`. */
+function artifactMakerTerm(row) {
+  const key = /^term-(\d+)$/.exec(row?.origin?.pane ?? "");
+  if (key === null) return null;
+  const term = Number(key[1]);
+  const born = paneBorn.get(term);
+  if (born === undefined || born > (row.modified_ms ?? 0)) return null;
+  return paneAgents.has(term) ? term : null;
 }
 
 // Catalog changes invalidate version lists, including an in-flight answer.

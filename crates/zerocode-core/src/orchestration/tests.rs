@@ -103,6 +103,7 @@ impl Launcher for Catalog {
         &self,
         _look: &crate::summon_choice::SummonLook<'_>,
         _options: &[crate::summon_choice::Summonable],
+        _origin: [&str; 3],
     ) -> Option<String> {
         self.0.first().map(|agent| (*agent).to_string())
     }
@@ -2188,6 +2189,30 @@ fn an_auto_summons_lands_on_the_seats_choice_and_says_so() {
         .expect("a summons with words is judged");
     assert!(shadow.auto, "the receipt says the seat chose");
     assert_eq!(shadow.pinned.agent, "claude");
+}
+
+/// A named agent is binding whatever the seat would choose (t-11989): the
+/// test seat names claude for every summons it is asked, and a summons that
+/// names codex lands on codex without the seat being asked — the receipt
+/// says the coordinator chose.
+#[test]
+fn a_named_agent_stays_binding_beside_a_seat_that_acts() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name named-agent");
+    let planned = bench.at(
+        agent_teams::LEADER_PANE,
+        "worker-start --agent codex --prompt look-at-this",
+    );
+    assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+    let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).expect("json");
+    assert_eq!(reply["agent"], "codex");
+    let shadow = planned
+        .prepared_worker_start
+        .as_ref()
+        .and_then(|prepared| prepared.summon_shadow.as_ref())
+        .expect("a summons with words is judged");
+    assert!(!shadow.auto, "the coordinator chose");
+    assert_eq!(shadow.pinned.agent, "codex");
 }
 
 /// Mail a released worker can never read is taken back by the run that

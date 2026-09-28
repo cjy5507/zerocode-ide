@@ -110,7 +110,7 @@ pub(crate) fn address_of(artifact: &Artifact) -> Result<tauri::Url, String> {
     }
 }
 
-fn data_url_of(png: &[u8]) -> String {
+pub(crate) fn data_url_of(png: &[u8]) -> String {
     use base64::Engine as _;
     format!(
         "data:image/png;base64,{}",

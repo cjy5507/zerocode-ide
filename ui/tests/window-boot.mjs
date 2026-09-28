@@ -1290,8 +1290,13 @@ const stubBackend = ({ boot, pollers }) => {
       window.__ARTIFACT_ASKED__ = args;
       const rows = window.__buildArtifacts__(window.__ARTIFACTS__ ?? { count: 0 });
       window.__ARTIFACTS_ANSWERED_AT__ = performance.now();
-      // 썸네일 표는 백엔드의 것(`Limits`): 창은 이 수로 큐를 잰다.
-      return { rows, total: rows.length, truncated: false, thumb: { width: 320, height: 240, queue_max: window.__THUMB_QUEUE_MAX__ ?? 24 } };
+      // 썸네일 표는 백엔드의 것(`Limits`): 창은 이 수로 큐를 잰다. 파일이 사라진
+      // 행은 런타임이 목록에서 말한다(`missing`) — 창은 디스크에 묻지 않는다.
+      const missing = (window.__ARTIFACT_MISSING__ ?? []).filter((id) => rows.some((row) => row.id === id));
+      return {
+        rows, total: rows.length, truncated: false, missing, missing_total: missing.length,
+        thumb: { width: 320, height: 240, queue_max: window.__THUMB_QUEUE_MAX__ ?? 24 },
+      };
     },
     artifact_preview: (args) => {
       window.__PREVIEW_ASKS__ = (window.__PREVIEW_ASKS__ ?? []);

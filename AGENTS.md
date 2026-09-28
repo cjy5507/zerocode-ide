@@ -27,6 +27,12 @@ provider, another model, a provider-native teammate, or cross-session
 messaging; if that exact launch cannot start, report the blocker without a
 fallback. Check the `worker-start` response before claiming what began.
 
+When the user named no model or effort, leave `--model` and `--effort` out
+(unless a quota handover names them): the ledger asks Jev how hard the work
+is and launches on that row of the person's summon profiles, and a pin
+teaches Jev nothing. `--agent auto` leaves the agent to Jev as well; when Jev
+is not acting, the summons is refused and you name the agent.
+
 The `orca` CLI on this machine belongs to a different product. Never use it
 here — its workers land in the other product's windows, not this one.
 

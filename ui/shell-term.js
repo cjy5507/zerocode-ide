@@ -1546,10 +1546,39 @@ function askTermPathStands(absolute) {
   });
 }
 
+/* `file://` 주소가 가리키는 이 기계의 경로. 에이전트가 찍는 주소는 인코딩된
+ * 채다(`Application%20Support`) — 풀지 않고 물으면 있는 파일이 링크를 잃는다.
+ * 호스트는 비었거나 `localhost` 일 때만 이 기계이고, 질의·조각은 파일이 아니며,
+ * `file:///C:/…` 의 드라이브 앞 `/` 는 주소의 것이다. 깨진 이스케이프(`%E0%A4%A`,
+ * `%zz`)나 제어 문자로 풀리는 주소는 `null` — 어디를 여는지 모르는 링크는
+ * 링크가 없는 것보다 나쁘다. */
+function fileUrlPath(href) {
+  const address = /^file:\/\/(?:localhost)?(\/[^?#]*)/.exec(href);
+  if (address === null) return null;
+  let path;
+  try {
+    path = decodeURIComponent(address[1]);
+  } catch {
+    return null;
+  }
+  if (/\p{Cc}/u.test(path)) return null;
+  return /^\/[A-Za-z]:\//.test(path) ? path.slice(1) : path;
+}
+
 /* 이 주소가 링크로 설 수 있는가. `marksOf` 가 동기로 읽는 답. */
 function termLinkStands(href) {
   // URL 은 파일 시스템의 것이 아니다.
   if (/^https?:\/\//.test(href)) return true;
+  // `file://` 은 URL 의 모양을 한 경로다: 풀어서 경로처럼 묻는다. 줄 번호는
+  // 주소에 없고, 뿌리 예외도 없다(끝의 구분자는 경로 규칙대로 거절).
+  if (/^file:/.test(href)) {
+    const path = fileUrlPath(href);
+    if (path === null || /[/\\]$/.test(path)) return false;
+    const held = termPathHeld(path);
+    if (held !== undefined) return held;
+    askTermPathStands(path);
+    return false;
+  }
   const named = href.match(/^(.*?)(?::(\d+))?(?::(\d+))?$/);
   const path = named ? named[1] : href;
   const absolute = path.startsWith("/") ? path : `${activeWorktreePath}/${path}`;
@@ -1595,7 +1624,7 @@ function trimUrlTail(url) {
 }
 
 const TERM_LINK_PATTERN = new RegExp(
-  `(https?://[A-Za-z0-9\\-._~:/?#\\[\\]@!$&*+,;=%()]+)` +
+  `((?:https?|file)://[A-Za-z0-9\\-._~:/?#\\[\\]@!$&*+,;=%()]+)` +
     `|((?:\\.{1,2}/|/|~/)[^\\s:<>"'\\x60|${PATH_DRAWING_BLOCKS}]+` +
     `|[\\w.-]+(?:/[\\w.-]+)+\\.\\w+)(?::(\\d+))?(?::(\\d+))?`,
   "g",
@@ -2290,7 +2319,8 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
         head: found.index,
         tail: found.index + href.length - 1,
         href,
-        dev: found[1] !== undefined,
+        // A dev server speaks http; a `file://` page is not one.
+        dev: found[1] !== undefined && !href.startsWith("file:"),
       });
       found = TERM_LINK_PATTERN.exec(text);
     }
@@ -3900,6 +3930,8 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // 이 링크가 말해진 기계 — SSH 판의 링크는 목적지 표가 시스템 문
     // 하나로 준다(발주서 link-source-owner.md).
     const sshSource = termLinkSpokenOverSsh(owner.address()?.term);
+    // `file://` 주소는 풀린 경로로 경로의 문을 탄다(`openTermFileLink`).
+    const filePath = fileUrlPath(href);
     if (!terminalLinkDirectActivation(event)) {
       // 수식키 없는 일반 클릭도 URL 위에서는 제스처다 — 두 목적지가 행으로
       // 서는 액션 팝오버. 단 문지기가 먼저다: 4px 넘게 긁었거나 눌렀을 때
@@ -3913,6 +3945,10 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
         if (browserPrefs.terminal_link_action_popover === false) return;
         event.preventDefault();
         linkPressClaimed = true;
+        if (filePath !== null) {
+          void openTermFileLink(filePath, { x: event.clientX ?? 0, y: event.clientY ?? 0 });
+          return;
+        }
         openFileLinkMenu(href, event.clientX ?? 0, event.clientY ?? 0);
         return;
       }
@@ -3925,6 +3961,14 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     linkPressClaimed = true;
     // ⌘클릭은 표의 primary로 직행한다 — 설정이 정한 그 목적지.
     if (routeHttpLink(href, event, { table: true, sshSource })) return;
+    if (filePath !== null) {
+      if (event.shiftKey) {
+        void invoke("fs_open_default", { path: filePath }).catch((error) => showError(String(error)));
+        return;
+      }
+      void openTermFileLink(filePath);
+      return;
+    }
     const named = href.match(/^(.*?)(?::(\d+))?(?::(\d+))?$/);
     const path = named ? named[1] : href;
     const line = named?.[2] ? Number(named[2]) : undefined;
@@ -4029,6 +4073,18 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
  * clicks it rather than reading it. */
 async function openTermLink(path, line) {
   await openPath(path.replace(/^\.\//, ""), { preview: true, line });
+}
+
+/* A `file://` address a terminal printed, already a path (`fileUrlPath`).
+ *
+ * A page the artifact store published — its current file or a kept version —
+ * opens as that artifact, with its header band (`openArtifactPageAt`), not as
+ * a bare browser tab. Anything else is a path and opens the way a printed path
+ * does: the menu for a bare click (`menuAt`), the editor for ⌘. */
+async function openTermFileLink(path, menuAt = null) {
+  if (await openArtifactPageAt(path)) return;
+  if (menuAt) openFileLinkMenu(path, menuAt.x, menuAt.y);
+  else await openTermLink(path);
 }
 
 /* Whether the modifier that opens a link is down, as a class on the body.
@@ -6361,6 +6417,9 @@ function tabLayoutRecord(tab) {
       expanded: leaves.indexOf(expandedPaneOf(tab)),
     }),
     ...(tab.pinned && { pinned: true }),
+    // Conversations this tab stood for that a newer one took the place of
+    // (t-12063): kept in the file until some pane holds them again.
+    ...(Array.isArray(tab.owed) && tab.owed.length > 0 && { owed: tab.owed }),
     // Which tab the eye was on — Orca's `activeTabId`, kept in the same
     // record as the set. It is what decides, on the way back, which single
     // tab of the set starts a shell.
@@ -6970,11 +7029,114 @@ function storedLeafGrid(root, ordinal, tab) {
  *
  * A pane this door opened is written down straight away, the way the backend
  * records its own copy: the agent's first event may be minutes off, and a
- * persist before it would drop the tab as an agent tab with no way back. */
-async function wakeConversation(agent, session, grid, restore = null) {
-  const woke = await invoke("resume_session", { agent, session, ...grid, restore });
+ * persist before it would drop the tab as an agent tab with no way back.
+ *
+ * `worktree` is the workspace the conversation belongs to — the tab it was
+ * stored under, the row that named it (t-12063). The backend opens the pane in
+ * that workspace's folder, never merely the one in front: zo looks a
+ * conversation up in the store of the folder it starts in, and a wake that
+ * crossed a workspace switch opened nothing ("session not found", 2026-09-28,
+ * one zo pane of three back). */
+async function wakeConversation(agent, session, grid, restore = null, worktree = null) {
+  const woke = await invoke("resume_session", { agent, session, ...grid, restore, worktree });
   if (!woke.standing) paneSessions.set(woke.term, { agent, session, resumable: true });
+  if (!woke.standing) settleOwed(agent, session.id);
   return woke;
+}
+
+/* What a person types to go on with `session` — the backend spells it from
+ * its own table of vendor resumes, led by a `cd` into `worktree` (a workspace
+ * its catalog knows): zo finds a conversation only from its own folder, and
+ * the shell it is typed into may stand anywhere. Null where no line can be
+ * spelled safely, or the window knows no way back. Words to read, never run
+ * by the window. */
+async function resumeLineOf(agent, session, worktree = null) {
+  try {
+    const line = await invoke("resume_line", { agent, session, worktree });
+    return typeof line === "string" && line.trim() !== "" ? line.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/* How to go on with a conversation, in words: the command when there is one,
+ * else the sidebar row that reopens it. */
+async function wayBackTo(agent, session, worktree = null) {
+  const line = await resumeLineOf(agent, session, worktree);
+  return line ?? t("session.owedRow", "사이드바의 그 대화 줄");
+}
+
+/* ---- conversations a pane could not bring back (t-12063) ----
+ *
+ * A stored wake that refused leaves a plain shell carrying its conversation
+ * (`carriedOnly`). On 2026-09-28 the person typed `zo` into that shell, the
+ * new conversation's first report took the pane, and the old one left the
+ * file with it. So a conversation a newer one takes the place of is kept on
+ * its tab as OWED — written to the file, named in one line when a new
+ * conversation starts in its workspace, and never woken on its own. It stops
+ * being owed the moment any pane holds it again. */
+const owedTold = new Set();
+
+function owedKey(agent, id) {
+  return `${agent}\u0000${id}`;
+}
+
+/* A conversation stands in a pane again: no tab owes it any more — an awake
+ * tab's own list, or the record an asleep one will echo on the next save. */
+function settleOwed(agent, id) {
+  for (const tab of tabs) {
+    for (const holder of [tab, tab.asleep]) {
+      if (!Array.isArray(holder?.owed)) continue;
+      const kept = holder.owed.filter((one) => !(one.agent === agent && one.id === id));
+      if (kept.length === holder.owed.length) continue;
+      if (kept.length > 0) holder.owed = kept;
+      else delete holder.owed;
+      persistPaneLayouts(tab.worktree);
+    }
+  }
+}
+
+/* The pane at `term` held `replaced` only as a carried line, and a new
+ * conversation has just taken it: keep the old one on the tab, and say so. */
+function keepOwed(term, replaced) {
+  const tab = tabOfTerm(term);
+  if (!tab || !replaced?.session?.id) return;
+  const { agent, session } = replaced;
+  const kept = (tab.owed ?? []).filter((one) => !(one.agent === agent && one.id === session.id));
+  kept.push({
+    agent,
+    key: session.key,
+    id: session.id,
+    ...(session.transcript_path && { transcript_path: session.transcript_path }),
+  });
+  tab.owed = kept;
+  persistPaneLayouts(tab.worktree);
+  void tellOwed(tab.worktree);
+}
+
+/* One line for the owed conversations of `worktree` this window has not
+ * named yet — the newest by name, with how to go on, and how many more. */
+async function tellOwed(worktree) {
+  const owed = tabs
+    .filter((tab) => tab.worktree === worktree && Array.isArray(tab.owed ?? tab.asleep?.owed))
+    .flatMap((tab) => tab.owed ?? tab.asleep.owed)
+    .filter((one) => !owedTold.has(owedKey(one.agent, one.id)));
+  if (owed.length === 0) return;
+  for (const one of owed) owedTold.add(owedKey(one.agent, one.id));
+  const newest = owed.at(-1);
+  const how = await wayBackTo(newest.agent, { key: newest.key, id: newest.id }, worktree);
+  toast(
+    owed.length === 1
+      ? t("session.owed", "지난 {{agent}} 대화가 이 작업 공간에서 이어지지 않았습니다 — 이어 가려면: {{how}}", {
+          agent: agentName(newest.agent),
+          how,
+        })
+      : t("session.owedMany", "지난 {{agent}} 대화 {{count}}개가 이 작업 공간에서 이어지지 않았습니다 — 가장 최근 것을 이어 가려면: {{how}}", {
+          agent: agentName(newest.agent),
+          count: owed.length,
+          how,
+        }),
+  );
 }
 
 /* One leaf's shell, woken or fresh. A leaf holding a sleeping conversation
@@ -6982,7 +7144,7 @@ async function wakeConversation(agent, session, grid, restore = null) {
  * launch token, the session pre-seeded so the pane IS that conversation);
  * a wake that refuses falls back to a plain shell rather than a hole, which
  * is Orca's fallback too (`startFreshSpawn(null)` when the plan fails). */
-async function spawnStoredLeaf(wake, launched, grid = null, restore = null) {
+async function spawnStoredLeaf(wake, launched, grid = null, restore = null, worktree = null) {
   // A wake that refused, kept for whatever pane stands in its place. Losing
   // it is how a single bad morning erased four workspaces: the fallback pane
   // holds no session, so the next persist writes a record with no `agents`,
@@ -6995,6 +7157,10 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null) {
   // plain shell and nothing else — not the program that was here, which would
   // be the very second process the judge exists to prevent.
   let duplicate = false;
+  // What the shell standing in the leaf's place says on its own screen
+  // (t-12063): a toast is gone in six seconds, and on 2026-09-28 the person
+  // read a bare shell where their conversation had been and typed `zo`.
+  let notice = null;
   const targetGrid = grid ?? spawnGrid();
   const rows = targetGrid.rows;
   const cols = targetGrid.cols;
@@ -7009,7 +7175,7 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null) {
       // a wake is told to go on is the backend's to say, from the goodbye's
       // own reading of a WORKER's turn; a person's conversation comes back as
       // it stood, whatever its record's mid-turn mark says.
-      const woke = await wakeConversation(wake.agent, session, { rows, cols }, restore);
+      const woke = await wakeConversation(wake.agent, session, { rows, cols }, restore, worktree);
       if (!woke.standing) return { term: woke.term, woke: true, agent: wake.agent };
       // One conversation, one process. Two records naming the same session used
       // to resume it twice on every restart: the second `zo --resume` met the
@@ -7023,6 +7189,9 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null) {
       // a record that named it twice is what put two resumes on one transcript
       // to begin with.
       duplicate = true;
+      notice = t("session.wakeStanding", "{{agent}} 대화는 이미 다른 판에서 열려 있어, 이 판은 빈 셸로 섭니다", {
+        agent: agentName(wake.agent),
+      });
       console.warn(`[restore] ${wake.agent} ${wake.id} is already standing in term ${woke.term}; this leaf opens as a plain shell`);
     } catch (error) {
       // The agent left the PATH, or the vendor dropped the session. The layout
@@ -7045,6 +7214,20 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null) {
           reason: String(error),
         }),
       );
+      // And the pane itself says it, with the way back — the vendor's own
+      // resume where the window knows one, else the sidebar row.
+      const line = await resumeLineOf(wake.agent, session, worktree);
+      notice = [
+        t("session.wakeRefusedPane", "이 판의 {{agent}} 대화를 이어서 열지 못했습니다 — {{reason}}", {
+          agent: agentName(wake.agent),
+          reason: String(error),
+        }),
+        line
+          ? t("session.wakeRefusedHow", "이어 가려면 이 셸에서: {{command}} — 새로 시작하면 새 대화가 됩니다", {
+              command: line,
+            })
+          : t("session.wakeRefusedRow", "이어 가려면 사이드바의 그 대화 줄을 누르세요 — 새로 시작하면 새 대화가 됩니다"),
+      ].join("\n");
     }
   }
   // No conversation to re-enter, but a program that was here — started fresh,
@@ -7069,7 +7252,7 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null) {
     }
   }
   try {
-    const term = await invoke("open_term_tab", { rows, cols, plain: true, restore });
+    const term = await invoke("open_term_tab", { rows, cols, plain: true, restore, notice });
     // The pane is a plain shell and is not going to pretend otherwise — the
     // tab keeps no agent's name over a shell nobody can talk to. But the
     // conversation it stood in for rides along, so the next window asks for
@@ -7111,7 +7294,7 @@ async function mountStoredLayout(record, worktree, tab) {
     // from a file written before those names existed has no screens this
     // window can find, and asks for none rather than guessing at a position.
     const restore = record.id != null ? { worktree, id: record.id, ordinal: at } : null;
-    const spawned = await spawnStoredLeaf(wake, record.running?.[at], grid, restore);
+    const spawned = await spawnStoredLeaf(wake, record.running?.[at], grid, restore, worktree);
     if (!spawned) break;
     terms.push(spawned.term);
     if (spawned.woke && !wokeAgent) wokeAgent = wake.agent;
@@ -7142,6 +7325,8 @@ async function mountStoredLayout(record, worktree, tab) {
   tab.term = leaves[0];
   tab.layout = layout;
   tab.activePane = leaves[record.active ?? 0] ?? leaves[0];
+  // The conversations this tab owes (t-12063) stay with it once it wakes.
+  if (Array.isArray(record.owed) && record.owed.length > 0) tab.owed = record.owed;
   if (Object.keys(titles).length > 0) tab.paneTitles = titles;
   if (Object.keys(names).length > 0) tab.paneNames = names;
   if (record.expanded != null && leaves[record.expanded] !== undefined) {
