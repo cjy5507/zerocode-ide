@@ -370,6 +370,11 @@ impl ManifestCache {
     /// The manifest at `path`, read again only when its file changed.
     fn manifest(&mut self, path: &Path, metadata: &std::fs::Metadata) -> Option<Arc<AgentManifest>> {
         let stamp = FileStamp::of(metadata);
+        if let Some(cached) = self.files.get(path) {
+            if cached.stamp == stamp {
+                return cached.manifest.clone();
+            }
+        }
         self.reads += 1;
         let manifest = read_manifest(path, metadata).map(Arc::new);
         self.files.insert(

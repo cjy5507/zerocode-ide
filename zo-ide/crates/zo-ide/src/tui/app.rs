@@ -1966,7 +1966,12 @@ impl Ui {
         {
             return None;
         }
-        let hits = slash::matches_for_model(self.composer.text(), fast::supported(&self.model));
+        let text = self.composer.text();
+        // `fast::supported` resolves the model through the published catalog,
+        // which reads the settings and the catalog from disk: asked while the
+        // composer could list /fast, never by a spinner frame.
+        let fast = slash::could_list_fast(text) && fast::supported(&self.model);
+        let hits = slash::matches_for_model(text, fast);
         if hits.is_empty() {
             return None;
         }
