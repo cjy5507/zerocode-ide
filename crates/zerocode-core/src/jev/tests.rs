@@ -243,6 +243,7 @@ fn only_a_seat_that_fills_what_its_caller_left_open_starts_acting() {
         BROWSER.id,
         DESKTOP.id,
         EMULATOR.id,
+        COVER.id,
     ];
     for row in &JEV_USES {
         let expected = if acting.contains(&row.id) {
@@ -664,6 +665,7 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
         hindsight,
         vec![
             RECALL.id,
+            COVER.id,
             PLACEMENT.id,
             SUMMON_DIFFICULTY.id,
             COMPACTION.id,
@@ -1696,7 +1698,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 29);
+    assert_eq!(JEV_USES.len(), 30);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1998,7 +2000,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 29);
+    assert_eq!(JEV_USES.len(), 30);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 4), Some(&FILE_PICK));
 }
 
@@ -3163,6 +3165,32 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
             .questions,
         ],
         id if id == REFLEX_DECIDE.id => vec![reflex_decide::questions()],
+        id if id == COVER.id => {
+            use crate::computer_use_protocol::cover::{Cover, Coverer, Owner};
+            use crate::computer_use_protocol::render::Rect;
+            let over = Rect::new(0.0, 0.0, 120.0, 80.0);
+            vec![
+                cover::ask(&Cover {
+                    target: 5,
+                    app: "Notes".to_string(),
+                    layer: 0,
+                    window: Rect::new(0.0, 0.0, 300.0, 200.0),
+                    spot: Rect::new(10.0, 10.0, 40.0, 20.0),
+                    coverers: vec![Coverer {
+                        id: 7,
+                        app: "Finder".to_string(),
+                        owner: Owner::OtherApp,
+                        layer: 3,
+                        bounds: over,
+                        hides_permille: 1_000,
+                    }],
+                    in_front: vec![over],
+                    hidden_permille: 1_000,
+                    centre_hidden: true,
+                })
+                .questions,
+            ]
+        }
         _ => return None,
     };
     Some(asked)
@@ -3353,4 +3381,46 @@ fn a_seat_follows_only_the_seat_it_was_split_from() {
         }
     }
     assert_eq!(SKILL_SUGGESTION.follows, Some(SKILLS.setting));
+}
+
+/// The cover seat is a row of its own (t-12979): its own word and ledger, the
+/// screen family's lines, acting from the start under `auto` and judged on
+/// hindsight against today's rule, and a request that sends the scene's facts
+/// alone — whose each window is, its app, its layer and its bounds — each
+/// under a key its state carries.
+#[test]
+fn the_cover_seat_is_a_row_of_its_own_that_sends_the_scenes_facts_alone() {
+    use crate::jev::questions::COVER_STATE_KEYS;
+    assert_eq!(jev_use("cover"), Some(&COVER));
+    assert_eq!(COVER.setting, "jevCover");
+    assert_eq!(COVER.ledger, "cover.jsonl");
+    assert_eq!(COVER.modes, &JevMode::ALL);
+    assert_eq!(COVER.recommended, JevMode::Auto);
+    assert_eq!(COVER.auto_starts, promote::Stand::Applying);
+    assert_eq!(COVER.agreement_kind, AgreementKind::Hindsight);
+    assert_eq!(COVER.baseline, Baseline::TodaysRule);
+    assert_eq!(COVER.apply_deadline_ms, Some(SCREEN_APPLY_DEADLINE_MS));
+    assert_eq!(
+        COVER.press_floor_permille,
+        Some(SCREEN_PRESS_FLOOR_PERMILLE)
+    );
+    assert_eq!(COVER.request_name, &["asked"]);
+    assert_eq!(COVER_OVER_CAP, SCREEN_CANDIDATE_CAP);
+    const { assert!(COVER_RUNNER_UP_FLOOR_PERMILLE < SCREEN_PRESS_FLOOR_PERMILLE) };
+    let sent: Vec<&str> = COVER.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(
+        sent,
+        ["/state/target/app", "/state/over", "/state/over/*/app"]
+    );
+    for sent in &sent {
+        assert!(
+            COVER_STATE_KEYS
+                .iter()
+                .any(|key| sent.starts_with(&format!("/state/{key}"))),
+            "{sent}"
+        );
+    }
+    // Another seat's word — the desktop's included — never switches it on.
+    let desktop = json!({ SMART_SETTINGS_KEY: { DESKTOP.setting: "on" } });
+    assert_eq!(COVER.mode_in(&desktop), JevMode::Off);
 }

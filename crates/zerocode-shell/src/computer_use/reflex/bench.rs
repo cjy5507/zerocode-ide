@@ -554,6 +554,15 @@ impl Bench<'_> {
                 Box::new(FileSink(Some(receipts))) as Box<dyn ReceiptSink + Send>,
             )
         };
+        // A covered fixture is uncovered as the window would uncover it: the
+        // cover seat stands as the bench home's settings say, and its rows go
+        // to the bench home's ledger (t-12979); nobody is at the machine to
+        // ask, so a hold ends the round for the person.
+        let mut cover = crate::computer_use::cover::LiveJudge::on(wire.clone(), Some(folder));
+        let mut pause = std::thread::sleep;
+        let mut person = |_line: &crate::computer_use::cover::Said| {
+            crate::computer_use::confirm::Decision::Refused
+        };
         macro_rules! world {
             () => {
                 World {
@@ -568,6 +577,9 @@ impl Bench<'_> {
                     now_ms: steady_ms(),
                     wall_ms: crate::project_runtime::now_epoch_ms(),
                     stopped: None,
+                    cover: &mut cover,
+                    pause: &mut pause,
+                    person: &mut person,
                 }
             };
         }

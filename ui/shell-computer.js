@@ -129,9 +129,23 @@ function paintComputerHandoffClock() {
   el("computer-handoff-clock").textContent = t("computer.handoff.clock", "{{seconds}}초 남음", { seconds: left });
 }
 
+/* The window's own reasons for handing the desk over, in the source
+ * language (a covered press, t-12979): the key the window sends picks one,
+ * and `{{app}}` is the covering window's app — never its title. */
+const COMPUTER_HANDOFF_WORDS = Object.freeze({
+  "computer.cover.ask": "누를 곳을 「{{app}}」의 창이 가리고 있어 멈췄습니다. 그 창은 읽거나 닫지 않았습니다. 직접 정리한 뒤 「다 했어요」를 눌러 주세요.",
+  "computer.cover.stuck": "대상 창을 앞으로 가져오고 옮겨 봤지만 누를 곳이 아직 「{{app}}」의 창에 가려져 있습니다. 직접 정리한 뒤 「다 했어요」를 눌러 주세요.",
+  "computer.cover.gone": "누르려던 창이 화면에 없습니다(최소화했거나 다른 데스크톱에 있음). 창이 보이게 한 뒤 「다 했어요」를 눌러 주세요.",
+});
+
+function computerHandoffText(handoff) {
+  const source = COMPUTER_HANDOFF_WORDS[handoff.reasonKey];
+  return source ? t(handoff.reasonKey, source, handoff.reasonArgs ?? {}) : (handoff.reason ?? "");
+}
+
 function showComputerHandoff(handoff) {
   computerHandoffOpen = { id: handoff.id, until: Date.now() + (handoff.timeoutMs ?? 0) };
-  el("computer-handoff-text").textContent = handoff.reason ?? "";
+  el("computer-handoff-text").textContent = computerHandoffText(handoff);
   el("computer-handoff").hidden = false;
   clearInterval(computerHandoffClock);
   paintComputerHandoffClock();

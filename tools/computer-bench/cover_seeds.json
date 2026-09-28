@@ -1,0 +1,32 @@
+{
+ "why": "The covered rounds a measurement is taken on (t-12979): drawn from the operating system's randomness after the grader was committed (2c10e9d7) and before any scene of them was drawn. `seeds` are measured; `heldOut` are opened only once the code under test is frozen.",
+ "fixedAfter": "2c10e9d7",
+ "seeds": [
+  4508537034308,
+  266806810016338,
+  281437028276846,
+  64431496024895,
+  150211298729457,
+  32103153828290,
+  219212459195967,
+  265263607223752,
+  4219588237789,
+  164581984072458,
+  178762432418671,
+  22577766918460
+ ],
+ "heldOut": [
+  106349313935487,
+  250052345135733,
+  64538887663356,
+  37073729742306,
+  37193549748177,
+  114744188389573,
+  26240911507902,
+  230297631400206,
+  227327437858881,
+  231726284149612,
+  112768005039109,
+  7937129709961
+ ]
+}

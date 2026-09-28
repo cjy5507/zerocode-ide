@@ -131,3 +131,72 @@ final class FixtureLifetime {
         }
     }
 }
+
+/// A window over the fixture for a covered round (t-12979): of the kind the
+/// scene names, where it names in the screen's top-left points, shown when the
+/// scene says, and counting every press it takes — a press on it is a wrong
+/// input. Its title is empty and it draws nothing but its ground: nothing on it
+/// is anything to read.
+@MainActor
+final class CoverSheet {
+    let window: NSWindow
+    private(set) var downs = 0
+    private(set) var shownNs: UInt64?
+
+    init(kind: String, quartz: CGRect) {
+        let mainHeight = NSScreen.screens.first?.frame.height ?? quartz.maxY
+        let frame = CGRect(x: quartz.minX, y: mainHeight - quartz.maxY, width: quartz.width, height: quartz.height)
+        switch kind {
+        case "fixture_panel":
+            // A second sheet of the fixture's own app, floating over its window.
+            let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
+                                backing: .buffered, defer: false)
+            panel.level = .floating
+            panel.hidesOnDeactivate = false
+            window = panel
+        case "modal":
+            // Another app's dialog, standing above ordinary windows until it is answered.
+            let panel = NSPanel(contentRect: frame, styleMask: [.titled, .nonactivatingPanel],
+                                backing: .buffered, defer: false)
+            panel.level = .modalPanel
+            panel.hidesOnDeactivate = false
+            window = panel
+        default:
+            // Another app's ordinary window.
+            window = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
+            window.level = .normal
+        }
+        window.title = ""
+        window.isReleasedWhenClosed = false
+        let view = CoverView(frame: CGRect(origin: .zero, size: frame.size))
+        view.onDown = { [weak self] in self?.downs += 1 }
+        window.contentView = view
+    }
+
+    func show() {
+        window.orderFrontRegardless()
+        shownNs = shownNs ?? uptimeNs()
+    }
+
+    var state: [String: Any] {
+        var state: [String: Any] = ["downs": downs, "pid": Int(getpid())]
+        if let shownNs { state["shownNs"] = shownNs }
+        return state
+    }
+}
+
+/// A cover's content: its ground, and a count of the presses it takes.
+@MainActor
+final class CoverView: NSView {
+    var onDown: (@MainActor () -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { onDown?() }
+    override func rightMouseDown(with event: NSEvent) { onDown?() }
+    override func otherMouseDown(with event: NSEvent) { onDown?() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
+    }
+}

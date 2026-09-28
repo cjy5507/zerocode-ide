@@ -3192,6 +3192,7 @@ fn a_seat_that_fills_what_its_caller_left_open_starts_acting() {
         crate::jev::BROWSER.id,
         crate::jev::DESKTOP.id,
         crate::jev::EMULATOR.id,
+        crate::jev::COVER.id,
     ];
     for seat in &crate::jev::JEV_USES {
         let starts = if acting_from_the_start.contains(&seat.id) {

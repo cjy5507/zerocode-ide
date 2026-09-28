@@ -9,6 +9,12 @@ finish DIR checks the complete plan and final stop state before accepting APM.
 hands DIR --actions 180 replays the predictable fixture, refreshing each index.
 hands DIR --actions 10 --input-path coordinate --batch-size 5 measures batches.
 eyes DIR --rounds 10 compares existing latest-frame and settled desktop looks.
+covered DIR --cover-seed N --actions 12 puts the scene cover_scenes.py draws
+    from N over the buttons (another app's window, floating panel or dialog,
+    from CoverFixture) and presses them by number (observe --marks, then
+    click --mark), each by its label: the oracle, the cover's own count of
+    presses it took, the press's `uncovered` or `covered` answer and its wall
+    are written to covered-N.json with the grade (t-12979).
 close DIR quits only its verified PID, unless stopped (then leaves it alone).
 
 Announce desk acquisition/release in the ledger around open..close. Random
@@ -100,6 +106,13 @@ def prepare(folder, mode):
     print(json.dumps({"swiftc_exit": result.returncode}))
     if result.returncode:
         return result.returncode
+    # The other app a covered run's window comes from (t-12979).
+    import cover_scenes
+    import fixture_support
+    built = fixture_support.prepare(folder / cover_scenes.FOLDER, cover_scenes.EXECUTABLE,
+                                    cover_scenes.SOURCE, cover_scenes.BUNDLE_PREFIX)
+    if built:
+        return built
     write(folder / "session.json", {"owner": owner, "app": str(app), "mode": mode,
                                     "executable": str(executable), "rounds": [], "clock": CLOCK_ID})
     return 0
@@ -383,6 +396,71 @@ class Desk(Bench):
         return self.finish()
 
     @recorded
+    def covered(self, seed, actions):
+        """Presses by number with the scene `seed` draws over the buttons: the
+        cover comes before the first press, or halfway through when the scene
+        comes in the middle of a round, and every press is read by the
+        fixture's oracle and the cover's own count (t-12979)."""
+        import cover_scenes
+        import tally
+        if self.session["mode"] != "alternate" or not 1 <= actions <= 60:
+            raise ValueError("covered: alternate mode and 1..60 actions")
+        self.guard()
+        state = self.snapshot()
+        app = f"pid:{state['pid']}"
+        window = self.checked(["get-app-state", "--app", app, "--no-screenshot"])["snapshot"]["window"]
+        frames = button_frames(self.checked(["find", "--app", app, "--role", "button"]), window)
+        box = {"x": min(frame["x"] for frame in frames.values()),
+               "y": min(frame["y"] for frame in frames.values())}
+        box["width"] = max(frame["x"] + frame["width"] for frame in frames.values()) - box["x"]
+        box["height"] = max(frame["y"] + frame["height"] for frame in frames.values()) - box["y"]
+        scene = cover_scenes.draw(seed, tally.table(), box)
+        comes = 0 if not scene["appearMs"] else actions // 2
+        run = self.folder / f"covered-{seed}"
+        run.mkdir(mode=0o700)
+        cover, rows = None, []
+        try:
+            for n in range(actions):
+                if n == comes:
+                    # The fixture shows no sheet of its own: every cover is the other app's.
+                    cover = cover_scenes.put_up({**scene, "appearMs": 0}, self.folder, run,
+                                                {"window": window}, uptime_ns(), own_sheet_from_fixture=False)
+                    self.shown(run)
+                label = ("Amber", "Blue")[n % 2]
+                self.guard()
+                before = self.snapshot()
+                marks = (self.checked(["observe", "--app", app, "--marks", "--no-screenshot"]).get("marks") or {})
+                item = next(item for item in marks.get("items") or [] if item.get("label") == label)
+                answer = self.shim(["click", "--mark", str(item["mark"]), "--look", marks["lookId"],
+                                    "--no-screenshot"])
+                wall = self.last_ms
+                self.refused_by_the_desk(answer)
+                after = self.snapshot()
+                rows.append({"label": label, "under": n >= comes and cover_scenes.covered(
+                                 {"x": frames[label]["x"] + frames[label]["width"] / 2,
+                                  "y": frames[label]["y"] + frames[label]["height"] / 2}, scene["rect"]),
+                             "hit": oracle_delta(before, after, [label]), "errorsAfter": after["errors"],
+                             "code": (answer.get("error") or {}).get("code"),
+                             "uncovered": (answer.get("result") or {}).get("uncovered"), "wallMs": wall})
+        finally:
+            cover_scenes.take_down(cover, 10)
+        shown = cover_scenes.account(scene, run, own_sheet_from_fixture=False)
+        report = {"scene": scene, "presses": rows, "cover": shown,
+                  "grade": cover_scenes.press_grade(rows, scene, shown)}
+        write(self.folder / f"covered-{seed}.json", report)
+        return report
+
+    def shown(self, run, wait_s=3):
+        """Wait for the cover's app to say its window is up."""
+        deadline = time.monotonic() + wait_s
+        state = run / "cover" / "fixture.json"
+        while time.monotonic() < deadline:
+            if state.exists() and json.loads(state.read_text()).get("shownNs"):
+                return
+            time.sleep(0.05)
+        raise RuntimeError("the cover did not come up")
+
+    @recorded
     def close(self):
         self.guard()  # A stop also forbids cleanup.
         state = self.snapshot()
@@ -443,6 +521,22 @@ def fixture_observation(result, pid, owner):
             "buttons": {label: int(index) for index, label in buttons}}
 
 
+def button_frames(result, window):
+    """Each fixture button's frame in the window's content points, from a
+    fresh find: where a covered run's scene is drawn."""
+    frames = {}
+    for match in result.get("matches", []):
+        label, frame = match.get("label"), match.get("frame")
+        if label in ("Amber", "Blue") and isinstance(frame, dict):
+            if label in frames:
+                raise RuntimeError("ambiguous fixture button")
+            frames[label] = {"x": frame["x"] - window["x"], "y": frame["y"] - window["y"],
+                             "width": frame["width"], "height": frame["height"]}
+    if len(frames) != 2:
+        raise RuntimeError(f"fixture buttons did not expose fresh geometry: {result}")
+    return frames
+
+
 def button_points(result, window):
     """Window-local coordinates from a fresh fixture observation."""
     if result.get("coordinateSpace") != "screen" or result.get("window", {}).get("id") != window["id"]:
@@ -465,7 +559,8 @@ def button_points(result, window):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["prepare", "open", "look", "begin", "act", "finish", "hands", "eyes", "close"])
+    parser.add_argument("command", choices=["prepare", "open", "look", "begin", "act", "finish", "hands", "eyes",
+                                            "covered", "close"])
     parser.add_argument("folder", type=Path)
     parser.add_argument("--mode", choices=["alternate", "random"], default="alternate")
     parser.add_argument("--labels", default="")
@@ -475,6 +570,7 @@ def main():
     parser.add_argument("--input-path", choices=["semantic", "coordinate", "text"], default="semantic")
     parser.add_argument("--reuse-state", action="store_true", help="reuse a verified post-action AX state")
     parser.add_argument("--compact", action="store_true", help="print fixture tree and metrics only")
+    parser.add_argument("--cover-seed", type=int, help="covered: the scene's seed (cover_scenes.py)")
     args = parser.parse_args()
     signals = Signals().install()
     try:
@@ -489,6 +585,10 @@ def main():
             result = desk.hands(args.actions, args.batch_size, args.input_path, reuse_state=args.reuse_state)
         elif args.command == "eyes":
             result = desk.eyes(args.rounds)
+        elif args.command == "covered":
+            if args.cover_seed is None:
+                parser.error("covered needs --cover-seed")
+            result = desk.covered(args.cover_seed, args.actions)
         else:
             result = getattr(desk, args.command)()
         if args.compact:
