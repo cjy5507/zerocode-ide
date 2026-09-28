@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
 };
-use zerocode_core::jev::summary::MODEL;
+use zerocode_core::jev::summary::{HTTP_VERSION, MODEL};
 use zerocode_core::jev::{JevUse, count, memo};
 
 use crate::api_routers::{Keychain, RouterKeys};
@@ -305,8 +305,8 @@ pub(crate) fn base_url() -> String {
 }
 
 /// What asking came to at the Jev door: the requests it sent, the lines the
-/// door withheld from them, and the version that answered — what every Jev
-/// ledger row the window writes carries.
+/// door withheld from them, the version that answered and the HTTP version
+/// it answered over — what every Jev ledger row the window writes carries.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Spent {
     pub requests: u32,
@@ -314,12 +314,17 @@ pub struct Spent {
     /// The version the answer named ([`answered_by`], t-6187); `None` when
     /// nothing answered — a refusal at the door, a failure, a wall.
     pub model: Option<String>,
+    /// The HTTP version the response came back on ([`version_word`],
+    /// t-13199); `None` when nothing came back, and for the memo's answer,
+    /// which crossed no wire.
+    pub version: Option<String>,
 }
 
 impl Spent {
     /// Write this ask's account onto `row`: the door's two counts and, when
     /// an answer named one, the version that answered, under the key table's
-    /// spelling ([`MODEL`]).
+    /// spelling ([`MODEL`]); and, when a response came back, the HTTP version
+    /// it came over ([`HTTP_VERSION`]).
     ///
     /// The one writer of those keys for every seat the window asks — each
     /// seat writes its own words and hands its row here — so a seat cannot
@@ -333,11 +338,15 @@ impl Spent {
         if let Some(model) = self.model.as_deref() {
             fields.insert(MODEL.canonical.to_string(), json!(model));
         }
+        if let Some(version) = self.version.as_deref() {
+            fields.insert(HTTP_VERSION.canonical.to_string(), json!(version));
+        }
     }
 
     /// What several asks of one judgment came to together — a sharded
     /// question's requests side by side: their requests and withheld lines
-    /// added, and the version the first answer among them named.
+    /// added, and the versions the first answer among them named and came
+    /// over.
     #[must_use]
     pub fn together<'spent>(asks: impl IntoIterator<Item = &'spent Self>) -> Self {
         asks.into_iter().fold(Self::default(), |mut all, one| {
@@ -345,6 +354,9 @@ impl Spent {
             all.redacted_lines += one.redacted_lines;
             if all.model.is_none() {
                 all.model.clone_from(&one.model);
+            }
+            if all.version.is_none() {
+                all.version.clone_from(&one.version);
             }
             all
         })
@@ -625,6 +637,7 @@ impl Wire {
                     // The version that gave the remembered answer, read off
                     // the body the memo kept whole.
                     model: answered_by(&remembered.answer),
+                    version: None,
                 },
                 request_bytes,
                 memo,
@@ -633,11 +646,13 @@ impl Wire {
         // Every caller is sync — a walk drives sync roads, a question asked
         // off the beat has a thread of its own — and blocks on the window's
         // runtime the same way.
-        let answer = tauri::async_runtime::block_on(self.ask_once(&key, cleared, deadline));
+        let (answer, version) =
+            tauri::async_runtime::block_on(self.ask_once(&key, cleared, deadline));
         let spent = Spent {
             requests: 1,
             redacted_lines,
             model: answer.as_deref().ok().and_then(answered_by),
+            version,
         };
         Asked {
             answer,
@@ -647,24 +662,28 @@ impl Wire {
         }
     }
 
-    /// One call carrying the door's bytes, bounded whole by `deadline`.
+    /// One call carrying the door's bytes, bounded whole by `deadline`: the
+    /// endpoint's body or the word it failed with, and the HTTP version the
+    /// response came back on — `None` when none came back.
     async fn ask_once(
         &self,
         key: &str,
         cleared: door::Cleared,
         deadline: Instant,
-    ) -> Result<String, String> {
+    ) -> (Result<String, String>, Option<String>) {
         if Instant::now() >= deadline {
-            return Err(TIMEOUT.to_string());
+            return (Err(TIMEOUT.to_string()), None);
         }
-        let lent = self.socket.lend().ok_or_else(|| TRANSPORT.to_string())?;
+        let Some(lent) = self.socket.lend() else {
+            return (Err(TRANSPORT.to_string()), None);
+        };
         let url = format!("{}{SYSTEMONE_PATH}", self.origin());
         // Key/consent checks, runtime startup and client construction spend
         // this call's budget too; the socket never starts a fresh deadline.
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| TIMEOUT.to_string())?;
-        let answer = lent
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return (Err(TIMEOUT.to_string()), None);
+        };
+        let sent = lent
             .client
             .post(&url)
             .timeout(remaining)
@@ -672,17 +691,22 @@ impl Wire {
             .header("Content-Type", "application/json")
             .body(cleared.into_bytes())
             .send()
-            .await
-            .map_err(|err| self.unanswered(&lent, &err))?;
+            .await;
+        let answer = match sent {
+            Ok(answer) => answer,
+            Err(err) => return (Err(self.unanswered(&lent, &err)), None),
+        };
+        let version = Some(version_word(answer.version()));
         let status = answer.status();
         if !status.is_success() {
-            return Err(token_for(status.as_u16()));
+            return (Err(token_for(status.as_u16())), version);
         }
         // The body is read inside the same deadline the request was given.
-        answer
+        let body = answer
             .text()
             .await
-            .map_err(|err| self.unanswered(&lent, &err))
+            .map_err(|err| self.unanswered(&lent, &err));
+        (body, version)
     }
 
     /// The word a question nothing came back for is refused with — its
@@ -782,6 +806,12 @@ fn builder() -> reqwest::ClientBuilder {
 
 fn built() -> Option<reqwest::Client> {
     builder().build().ok()
+}
+
+/// An HTTP version as a row keeps it: the `http` crate's own spelling
+/// (`HTTP/1.1`, `HTTP/2.0`).
+pub(crate) fn version_word(version: reqwest::Version) -> String {
+    format!("{version:?}")
 }
 
 /// The word a request that never answered is refused with.

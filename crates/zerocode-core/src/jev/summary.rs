@@ -204,6 +204,16 @@ pub const MODEL: LedgerKey = LedgerKey {
     also: &[],
 };
 
+/// The HTTP version a request's response came back on, as the `http` crate
+/// spells it (`HTTP/1.1`, `HTTP/2.0`): whether a program's questions share
+/// one multiplexed connection — the connection a server that stops answering
+/// silences them all on (t-13199). Absent on a row nothing came back for,
+/// and on an answer the memo gave, which crossed no wire.
+pub const HTTP_VERSION: LedgerKey = LedgerKey {
+    canonical: "httpVersion",
+    also: &[],
+};
+
 /// The model a step of a zo turn ran on, on the step governor's own rows —
 /// never the version that answered anything, which is [`MODEL`]'s alone.
 ///
@@ -300,6 +310,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     CANDIDATES_SIGNAL,
     RUBRIC_VERSION,
     RUBRIC_VERSIONS,
+    HTTP_VERSION,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.

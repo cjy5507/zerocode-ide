@@ -206,6 +206,11 @@ fn socket_for(speaks: Speaks) -> &'static Socket<reqwest::Client> {
 /// One question down `wire`, bounded by `wall`: the door's bytes for a key
 /// check — no one's words — posted the way every seat's question is.
 fn ask(wire: &Wire, wall: Duration) -> Result<String, String> {
+    posted(wire, wall).0
+}
+
+/// [`ask`], with the HTTP version the response came back over.
+fn posted(wire: &Wire, wall: Duration) -> (Result<String, String>, Option<String>) {
     let settings = JevSettings::from_root(&Value::Null);
     let cleared = door::may_check_key(
         &door::Asking {
@@ -300,6 +305,41 @@ fn a_question_refused_with_a_status_leaves_its_connection_for_the_next() {
         stage.rode(),
         [0, 0],
         "a question refused with a status let its connection go"
+    );
+}
+
+/// A response names the HTTP version it came back over — the one the row
+/// keeps (t-13199), and the fact that tells a reader whether a program's
+/// questions shared one connection. A refusal is a response and names it
+/// too; a question nothing came back for names none.
+#[test]
+fn a_response_names_the_http_version_it_came_back_over() {
+    for (speaks, version) in [
+        (Speaks::Http1, reqwest::Version::HTTP_11),
+        (Speaks::Http2, reqwest::Version::HTTP_2),
+    ] {
+        let stage = Stage::open(speaks, 200, |_| false);
+        let wire = Wire::at(&stage.base(), "test-key", None).on(socket_for(speaks));
+        let (answer, heard) = posted(&wire, UNHURRIED);
+        assert!(answer.is_ok(), "{answer:?}");
+        assert_eq!(heard, Some(version_word(version)), "over {speaks:?}");
+    }
+    let refusing = Stage::open(Speaks::Http2, 503, |_| false);
+    let wire = Wire::at(&refusing.base(), "test-key", None).on(socket_for(Speaks::Http2));
+    assert_eq!(
+        posted(&wire, UNHURRIED),
+        (
+            Err(token_for(503)),
+            Some(version_word(reqwest::Version::HTTP_2))
+        ),
+        "a refusal is a response"
+    );
+    let silent = Stage::open(Speaks::Http2, 200, |_| true);
+    let wire = Wire::at(&silent.base(), "test-key", None).on(socket_for(Speaks::Http2));
+    assert_eq!(
+        posted(&wire, QUIET),
+        (Err(TIMEOUT.to_string()), None),
+        "nothing came back"
     );
 }
 
