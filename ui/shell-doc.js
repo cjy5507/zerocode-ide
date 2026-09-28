@@ -8460,9 +8460,14 @@ function paintArtifactUnseenPill(host, className, count, tip, before = null) {
   if (pill.dataset.tip !== tip) pill.dataset.tip = tip;
 }
 
+/* 탭 줄은 창이 이름을 바꾸는 프레임마다 그린다 — 새 것이 없고 알약도 없던
+ * 탭은 문서를 묻지도 않고 지나간다. 마지막으로 그린 낱말(언어가 바뀌어도
+ * 다시 그리도록 수가 아니라 낱말)은 노드가 든다. */
 function paintTabUnseen(node, tab) {
   const count = artifactUnseenOnTab(tab);
-  if (count === 0 && !node.querySelector(":scope > .tab-new")) return;
+  const words = count === 0 ? "" : t("artifacts.unseen", "새 {{n}}", { n: count });
+  if (words === (node._unseen ?? "")) return;
+  node._unseen = words;
   paintArtifactUnseenPill(node, "tab-new", count,
     t("artifacts.unseenTab", "이 판이 발행하고 아직 열지 않은 페이지 {{n}}개", { n: count }),
     node.querySelector(".tab-label"));
