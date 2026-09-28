@@ -42254,8 +42254,11 @@ button.jev-token:hover {
  * 옷으로 선다. 숫자·색은 토큰. */
 .artifact-strip {
   display: flex;
+  /* 만든 판 옆의 좁은 자리(t-11958)에서는 단추가 다음 줄로 내려가고 제목이
+   * 남는다 — 한 줄로 두면 줄어드는 것은 제목뿐이었다. */
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
   min-width: 0;
   padding: var(--space-1) var(--space-2);
   border-bottom: var(--rule-width) solid var(--edge-rule);
