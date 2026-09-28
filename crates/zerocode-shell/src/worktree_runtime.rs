@@ -2257,8 +2257,9 @@ impl CheckoutHeld {
         let mut held = checkouts_held()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // (red) Every request granted, as before there was a claim at all:
-        // the roads never asked each other.
+        if held.iter().any(|one| same_worktree_path(one, path)) {
+            return None;
+        }
         held.push(path.to_path_buf());
         Some(Self {
             path: path.to_path_buf(),

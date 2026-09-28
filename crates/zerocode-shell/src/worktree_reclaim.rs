@@ -516,12 +516,7 @@ fn settle(
             return Settled::Kept;
         }
     };
-    // (red) The report road as it stood: git's own "clean" was the only
-    // question it put, whatever else was in the directory.
-    let (verdict, examined) = match road {
-        Road::Report(_) => (git_clean_only(&orchestrator, &known), Examined::Landed),
-        Road::Sweep { .. } => look(&orchestrator, &known, &here.active),
-    };
+    let (verdict, examined) = look(&orchestrator, &known, &here.active);
     let standing = if matches!(examined, Examined::Shared) {
         Standing::NotOurs
     } else {
@@ -598,27 +593,6 @@ fn settle(
             remember(candidate, Standing::Kept, &refusal, data_root, now_ms);
             Settled::Kept
         }
-    }
-}
-
-/// (red) What the report road asked before it took the one judgment: nothing
-/// but what `remove_automatic_worktree` asks itself. The names are read the
-/// way `look` reads them, so the removal line can say them.
-fn git_clean_only(orchestrator: &Orchestrator, known: &Worktree) -> Verdict {
-    let branch = known.branch.clone().unwrap_or_default();
-    let base = orchestrator
-        .creation_bases()
-        .get(&branch)
-        .cloned()
-        .unwrap_or_default();
-    let takes = orchestrator
-        .pending_loss(&known.path)
-        .map(|loss| loss.ignored)
-        .unwrap_or_default();
-    Verdict::Reclaim {
-        branch,
-        base,
-        takes,
     }
 }
 
