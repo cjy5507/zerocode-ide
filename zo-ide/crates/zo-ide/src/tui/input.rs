@@ -184,6 +184,32 @@ mod tests {
         assert_eq!(terminal.polls(), 3, "one ask per wake and one to re-arm");
     }
 
+    /// 루프들은 터미널을 이 모듈로만 읽는다 — `select!` 에서 폴링하는 맨
+    /// `EventStream` 이 곧 이 모듈이 없앤 스핀이다.
+    #[test]
+    fn no_loop_polls_crosstermss_stream_directly() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let mut offenders = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src is readable").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && !path.ends_with("tui/input.rs")
+                    && std::fs::read_to_string(&path).is_ok_and(|text| {
+                        text.lines()
+                            .any(|line| !line.trim_start().starts_with("//") && line.contains("EventStream"))
+                    })
+                {
+                    offenders.push(path);
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "these read crossterm's stream around TerminalEvents: {offenders:?}");
+    }
+
     /// 한 깨움에 여러 키가 쌓였으면 비울 때까지 묻는다 — 붙여넣기 뒤의 Enter 가
     /// 다음 틱까지 밀리면 안 된다.
     #[test]

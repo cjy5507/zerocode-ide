@@ -27,6 +27,7 @@
 //! 14. `AskUserQuestion` 오버레이 세 갈래 — 단일·다중·자유 서술
 //!     (codex `bottom_pane/request_user_input` 의 스냅샷 문법)
 //! 15. `/status`의 지속 목표와 autonomous 네 한도 행
+//! 16. 답이 길어져도 델타 하나가 내보내는 바이트는 평평하다
 
 use std::time::{Duration, Instant};
 
@@ -3078,5 +3079,59 @@ fn composer_border_is_confined_to_its_own_block() {
             .footer_line_at(&current, 32, frame_zero + Duration::from_millis(1_500))
             .plain(),
         "           S M A R T"
+    );
+}
+
+// ============================================================================
+// 16. 답이 길어져도 델타 하나가 내보내는 바이트는 평평하다
+// ============================================================================
+
+/// A long answer's late deltas cost what its early ones did.
+///
+/// The stream commits only lines that finished and the painter writes only
+/// the rows that changed, so what one delta sends does not depend on how much
+/// of the answer came before it. A renderer that rewrote the growing answer,
+/// or its whole live region, would send more per delta as the answer grew —
+/// and the window's terminal parses every byte of it. The answer repeats one
+/// section, so the first and the last fifth carry the same kinds of lines.
+#[test]
+fn bytes_per_delta_stay_flat_as_an_answer_grows() {
+    let mut source = String::new();
+    for section in 0..24 {
+        source.push_str(&format!("## Section {section}\n\n"));
+        source.push_str("A paragraph that says one thing, in plain words, and wraps once the pane is narrow enough to need it.\n\n");
+        source.push_str("- the first point of the list\n- the second point, with `code` in it\n\n");
+        source.push_str("```rust\nfn step(input: &str) -> usize {\n    input.len()\n}\n```\n\n");
+    }
+    let mut painter = Painter::new(Vec::new(), 120, 40, 12, true);
+    painter.set_height(3);
+    painter.take_frame();
+    let mut stream = MarkdownStream::answer(118);
+    let start = Instant::now();
+    let chars: Vec<char> = source.chars().collect();
+    let mut per_delta = Vec::new();
+    for (index, delta) in chars.chunks(10).enumerate() {
+        stream.push(&delta.iter().collect::<String>());
+        let now = start + Duration::from_millis(25 * index as u64);
+        let mut lines = Vec::new();
+        for tick in 0..3 {
+            lines.extend(stream.tick(now + Duration::from_millis(9 * tick)));
+        }
+        painter.insert_history(&lines);
+        let mut rows: Vec<Line> = stream.tail().into_iter().take(1).collect();
+        rows.resize(1, Line::empty());
+        rows.push(Line::from_text("• Working (3s • esc to interrupt)"));
+        rows.push(Line::from_text("› "));
+        painter.paint(&rows);
+        per_delta.push(painter.take_frame().len());
+    }
+    let fifth = per_delta.len() / 5;
+    let mean = |deltas: &[usize]| deltas.iter().sum::<usize>() / deltas.len();
+    let early = mean(&per_delta[..fifth]);
+    let late = mean(&per_delta[per_delta.len() - fifth..]);
+    assert!(
+        late * 4 <= early * 5,
+        "{} deltas: early {early} bytes each, late {late} bytes each",
+        per_delta.len()
     );
 }
