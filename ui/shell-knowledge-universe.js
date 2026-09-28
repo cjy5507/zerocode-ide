@@ -234,6 +234,19 @@ function knowledgeUniverseFloat(value) {
 
 /* 은하의 형태 번호 — 셰이더가 텍셀 1의 w로 읽는다(시안 `kg-data.js`의 `TYPE`). */
 const KNOWLEDGE_UNIVERSE_TYPES = Object.freeze({ spiral: 0, barred: 1, elliptical: 2, irregular: 3, cluster: 4 });
+/* 형태의 낱말 — 번호가 곧 자리다(시안 `TYPE_NAME`). */
+const KNOWLEDGE_UNIVERSE_TYPE_WORDS = Object.freeze([
+  Object.freeze({ key: "knowledge.galaxySpiral", word: "나선 은하" }),
+  Object.freeze({ key: "knowledge.galaxyBarred", word: "막대 나선 은하" }),
+  Object.freeze({ key: "knowledge.galaxyElliptical", word: "타원 은하" }),
+  Object.freeze({ key: "knowledge.galaxyIrregular", word: "불규칙 은하" }),
+  Object.freeze({ key: "knowledge.galaxyCluster", word: "산개 성단" }),
+]);
+
+/* 인스펙터의 우주 절(디자이너 m-12467의 6): 필라멘트 몇 줄, 「얼마 전」의 문턱(시안 `ageText`: 하루 밑은 오늘, 두 주
+ * 밑은 날, 두 달 밑은 주, 한 해 밑은 달, 그 위는 해). */
+const KNOWLEDGE_UNIVERSE_LISTED = 6;
+const KNOWLEDGE_UNIVERSE_AGE = Object.freeze({ today: 1, days: 14, weeks: 60, months: 365, week: 7, month: 30, year: 365 });
 
 /* 이름 있는 별의 자리 — 시안 `universe` 3의 모양 수. 셰이더의 몸 입자와 같은 식이라 모양을 정하는 수이고,
  * 셰이더 안의 수처럼 이 표 한 곳에 산다: 핵(쪽의 몫·반지름·두께), 팔(안쪽·폭·거듭제곱·흔들림·각의 흔들림·
@@ -369,7 +382,9 @@ function leaveKnowledgeUniverse(view) {
   view.classList.remove("is-universe");
   universe?.dispose();
   const layout = knowledgeLayouts.get(view);
-  if (layout !== undefined) paintKnowledgeFrame(view, layout);
+  if (layout === undefined) return;
+  paintKnowledgeUniverseInspector(view, layout);
+  paintKnowledgeFrame(view, layout);
 }
 
 /* 그림의 문(`paintKnowledgeView`)이 끝에 부른다: 우주가 서야 하면 세우고(처음이면 짓는다), 아니면
@@ -403,6 +418,7 @@ function paintKnowledgeUniverse(view, layout) {
     }
     universe.enter(knowledgeUniverseRising);
     knowledgeUniverseRising = false;
+    paintKnowledgeUniverseInspector(view, layout);
     return;
   }
   if (universe.layout !== layout && !universe.build(layout)) {
@@ -412,12 +428,17 @@ function paintKnowledgeUniverse(view, layout) {
     return;
   }
   universe.dress();
+  paintKnowledgeUniverseInspector(view, layout);
 }
 
 /* 옷이 바뀐 순간(고름·밝힘·찾기·군집) — 평면의 프레임 문(`paintKnowledgeFrame`)이 부른다. 서 있는
  * 우주는 다음 프레임 한 장으로 따라온다. */
 function dressKnowledgeUniverse(view) {
-  knowledgeUniverses.get(view)?.dress();
+  const universe = knowledgeUniverses.get(view);
+  if (universe === undefined) return;
+  universe.dress();
+  const layout = knowledgeLayouts.get(view);
+  if (layout !== undefined) paintKnowledgeUniverseInspector(view, layout);
 }
 
 /* 우주 안의 배율 단추 셋 — 서 있는 우주가 받으면 참이다(평면의 단추 손은 건너뛴다). */
@@ -440,6 +461,76 @@ function knowledgeUniverseKey(view, event) {
   event.preventDefault();
   universe.turn(way[0], way[1]);
   return true;
+}
+
+/* 고친 때를 「얼마 전」으로(시안 `ageText`) — 말은 로케일의 상대 시각이다. */
+function knowledgeUniverseAgo(ms, nowMs) {
+  const A = KNOWLEDGE_UNIVERSE_AGE;
+  const days = Math.max(0, (nowMs - ms) / 86_400_000);
+  const words = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+  if (days < A.today) return words.format(0, "day");
+  if (days < A.days) return words.format(-Math.round(days), "day");
+  if (days < A.weeks) return words.format(-Math.round(days / A.week), "week");
+  if (days < A.months) return words.format(-Math.round(days / A.month), "month");
+  return words.format(-Math.round((days / A.year) * 10) / 10, "year");
+}
+
+/* 인스펙터의 우주 절 — 우주가 서 있는 동안만: 가장 굵은 필라멘트(보낸 은하 → 받는 은하) 여섯, 그리고 고른 은하의
+ * 형태·쪽 수·최근 두 주에 고친 몫과 그 은하의 필라멘트. 「아름다운 3D, 글자로는 0」이라는 비판에 대한 글자의
+ * 답이다(디자이너 m-12467의 6). 줄은 단추이고 누르면 그 흐름으로 난다(`knowledgeUniverseFlow`). */
+function paintKnowledgeUniverseInspector(view, layout) {
+  const overview = view.querySelector(".knowledge-overview");
+  if (overview === null) return;
+  const universe = knowledgeUniverses.get(view);
+  const map = universe?.map ?? null;
+  let flows = overview.querySelector(".knowledge-overview-filaments");
+  let galaxy = overview.querySelector(".knowledge-overview-galaxy");
+  if (flows === null) {
+    flows = knowledgeListSection("knowledge-overview-filaments", "knowledge.filaments",
+      t("knowledge.filaments", "가장 굵은 필라멘트 (보낸 은하 → 받는 은하)"));
+    galaxy = document.createElement("section");
+    galaxy.className = "knowledge-overview-galaxy";
+    const head = document.createElement("h4");
+    head.className = "knowledge-inspector-head";
+    const about = document.createElement("p");
+    about.className = "knowledge-overview-galaxy-about";
+    const list = document.createElement("ul");
+    list.className = "knowledge-inspector-list";
+    galaxy.append(head, about, list);
+    overview.querySelector(".knowledge-overview-counts")?.after(galaxy, flows);
+  }
+  const rank = knowledgeClusterPicked;
+  flows.hidden = map === null || map.filaments.length === 0;
+  galaxy.hidden = map === null || rank < 0 || rank >= map.rows;
+  if (map === null) return;
+  const most = map.filaments[0]?.n ?? 1;
+  const row = (one, at) => {
+    const line = knowledgeListRow(`flow:${at}`, t("knowledge.flowPair", "{{from}} → {{to}}", {
+      from: knowledgeClusterWord(layout, one.from), to: knowledgeClusterWord(layout, one.to) }),
+    `${one.sent}/${one.n}`, one.n / most);
+    line.querySelector("button").dataset.knowledgeFlow = `${one.from},${one.to}`;
+    return line;
+  };
+  reconcileElementOrder(flows.querySelector(".knowledge-inspector-list"),
+    map.filaments.slice(0, KNOWLEDGE_UNIVERSE_LISTED).map(row));
+  if (galaxy.hidden) return;
+  const picked = map.galaxy[rank];
+  const shape = KNOWLEDGE_UNIVERSE_TYPE_WORDS[picked.type];
+  writeTextContent(galaxy.querySelector(".knowledge-inspector-head"), t("knowledge.galaxyAbout",
+    "{{name}} · {{shape}} · {{pages}}쪽", { name: knowledgeClusterWord(layout, rank), shape: t(shape.key, shape.word),
+      pages: layout.communitySize[rank] }));
+  writeTextContent(galaxy.querySelector(".knowledge-overview-galaxy-about"), t("knowledge.galaxyRecent",
+    "최근 2주에 고친 쪽 {{percent}}", { percent: `${Math.round(picked.activity * 100)}%` }));
+  const own = map.filaments.filter((one) => one.from === rank || one.to === rank).slice(0, KNOWLEDGE_UNIVERSE_LISTED);
+  reconcileElementOrder(galaxy.querySelector(".knowledge-inspector-list"), own.map(row));
+}
+
+/* 필라멘트 줄을 눌렀다(시안 `showFlow`): 보낸 은하를 고르고 그 흐름을 옆에서 보는 자리로 난다. */
+function knowledgeUniverseFlow(view, from, to) {
+  const universe = knowledgeUniverses.get(view);
+  if (universe === undefined || universe.map === null) return;
+  if (knowledgeClusterPicked !== from) toggleKnowledgeCluster(view, from);
+  universe.flyToFlow(from, to);
 }
 
 /* ---- 셰이더 — 시안의 글자 그대로 -----------------------------------------------------

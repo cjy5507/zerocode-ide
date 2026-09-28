@@ -2527,6 +2527,11 @@ function openKnowledgeLinkForm(view, { target = null } = {}) {
   const layout = knowledgeLayouts.get(view);
   const seat = knowledgeSelectedKey === null ? -1 : layout?.model.keys.indexOf(knowledgeSelectedKey) ?? -1;
   if (!layout || seat < 0 || layout.model.kinds[seat] !== "page") return;
+  /* 관계 편집은 평면의 일이다(t-12443, 6차 설계 §4-f) — 우주에서 누르면 평면으로 내려앉아 같은 점을 가운데에 둔다. */
+  if (knowledgeUniverses.has(view)) {
+    setKnowledgeDimension(view, "2d");
+    knowledgeCenterOn(view, layout, seat);
+  }
   const form = view.querySelector(".knowledge-link-form");
   knowledgeLinkTarget = target !== null && layout.model.keys.includes(target) ? target : null;
   knowledgeLinkCandidateAt = -1;
@@ -7568,7 +7573,12 @@ function paintKnowledgeCard(layout, box, seat) {
   }
   const when = box.querySelector(".knowledge-modified");
   when.hidden = ghost || !model.modified[seat];
-  if (!when.hidden) {
+  /* 우주(t-12443)에서는 별의 빛깔이 곧 최근 고침이라 「얼마 전」을 함께 말한다 — 확인할 자리(디자이너 m-12467의 6). */
+  if (!when.hidden && knowledgeUniverses.has(layout.view)) {
+    say(when, () => t("knowledge.modifiedAgo", "수정 {{when}} · {{ago}}", {
+      when: knowledgeWhen(model.modified[seat]), ago: knowledgeUniverseAgo(model.modified[seat], model.nowMs),
+    }));
+  } else if (!when.hidden) {
     say(when, () => t("knowledge.modified", "수정 {{when}}", {
       when: knowledgeWhen(model.modified[seat]),
     }));
@@ -8306,6 +8316,13 @@ function wireKnowledgeView(view) {
       knowledgeUnfolded.add(unfold.dataset.knowledgeUnfold);
       knowledgeUnfoldGeneration += 1;
       void paintKnowledgeView();
+      return;
+    }
+    /* 우주의 필라멘트 줄(t-12443) — 보낸 은하를 고르고 그 흐름으로 난다. */
+    const flow = event.target.closest("[data-knowledge-flow]");
+    if (flow) {
+      const [from, to] = flow.dataset.knowledgeFlow.split(",").map(Number);
+      knowledgeUniverseFlow(view, from, to);
       return;
     }
     const cluster = event.target.closest("[data-knowledge-cluster]");

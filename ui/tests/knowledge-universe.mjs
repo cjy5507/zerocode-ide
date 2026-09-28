@@ -918,3 +918,129 @@ export async function testKnowledgeUniverseFocus(page, ok) {
     !seen.thrown && seen.path.nodes > 1 && seen.path.lit && seen.path.lines === seen.path.edges && seen.path.focus === 1,
     detail);
 }
+
+/* ---- ⑤ 인스펙터와 평면의 일 ------------------------------------------------------------------------
+ *
+ * 「Beautiful 3D graph. Zero output.」 비판에 대한 글자의 답(디자이너 m-12467의 6): 우주가 서 있는 동안 개요는
+ * 가장 굵은 필라멘트(보낸 은하 → 받는 은하) 여섯을 글로 적고, 누르면 그 흐름으로 난다. 은하를 고르면 그 은하의
+ * 형태·최근 2주에 고친 쪽의 몫·그 은하의 필라멘트가 선다. 쪽 카드는 고친 때를 날짜와 「얼마 전」으로 말한다. 관계
+ * 편집은 평면의 일이다 — 우주에서 누르면 평면의 같은 점으로 내려앉는다(설계 §4-f). */
+export async function testKnowledgeUniverseInspector(page, ok) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const seen = await page.evaluate(async () => {
+    try {
+      const view = document.querySelector(".knowledge-view:not([hidden])");
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const frames = async (count) => {
+        for (let at = 0; at < count; at += 1) await frame();
+      };
+      const until = async (wanted, rounds = 900) => {
+        for (let round = 0; round < rounds; round += 1) {
+          if (wanted()) return true;
+          await frame();
+        }
+        return false;
+      };
+      const heldDimension = knowledgeDimension;
+      const heldVault = secondBrainVault;
+      const sizes = [60, 48, 36, 24];
+      const starts = [0, 60, 108, 144];
+      const edges = [];
+      sizes.forEach((size, group) => {
+        const first = starts[group];
+        for (let step = 1; step < size; step += 1) {
+          edges.push({ from: first + step, to: first, kind: "mentions" });
+          if (step > 1) edges.push({ from: first + step, to: first + step - 1, kind: "mentions" });
+        }
+      });
+      /* 굵은 흐름 둘 — 서로 다른 쪽들 사이라 한 쪽이 두 흐름에 걸려 무리를 옮기지 않는다. */
+      for (let one = 0; one < 12; one += 1) edges.push({ from: 10 + one, to: 70 + one, kind: "mentions" });
+      for (let one = 0; one < 12; one += 1) edges.push({ from: 110 + one, to: 30 + one, kind: "related" });
+      const nowMs = Date.now();
+      const modifiedMs = Array.from({ length: 168 }, (unused, at) => (at < 60 && at % 2 === 0 ? nowMs - 3 * 86_400_000
+        : nowMs - 90 * 86_400_000));
+      const answer = window.__buildVaultGraph__({ path: "/inspector", sources: false },
+        { pages: 168, ghosts: 0, tags: [], customEdges: edges, modifiedMs });
+      window.__GRAPH_BUILT__ = answer;
+      noteKnowledgeExploreLines({});
+      secondBrainVault = answer.vault;
+      knowledgeDimension = "3d";
+      knowledgeQuery = "";
+      knowledgeSelectedKey = null;
+      knowledgeClusterPicked = -1;
+      setKnowledgeMode(view, "global", { paint: false });
+      knowledgeReport = answer;
+      await paintKnowledgeView();
+      await until(() => (knowledgeLayouts.get(view)?.left ?? 1) === 0);
+      await paintKnowledgeView();
+      await frames(2);
+      const layout = knowledgeLayouts.get(view);
+      const universe = knowledgeUniverses.get(view);
+      const map = universe.map;
+      const flows = view.querySelector(".knowledge-overview-filaments");
+      const rows = [...(flows?.querySelectorAll("[data-knowledge-flow]") ?? [])];
+      const overview = { shown: flows !== null && !flows.hidden, rows: rows.length, filaments: map.filaments.length,
+        first: rows[0]?.textContent ?? "", note: rows[0]?.parentElement.querySelector(".knowledge-inspector-note")?.textContent ?? "",
+        want: map.filaments[0] === undefined ? "" : `${knowledgeClusterWord(layout, map.filaments[0].from)}`,
+        wantNote: map.filaments[0] === undefined ? "" : `${map.filaments[0].sent}/${map.filaments[0].n}` };
+      /* 줄을 누르면 보낸 은하가 골라지고 그 흐름을 옆에서 보는 자리로 난다. */
+      rows[0]?.click();
+      await frames(3);
+      const one = map.filaments[0];
+      const a = map.galaxy[one?.from ?? 0];
+      const b = map.galaxy[one?.to ?? 0];
+      const flown = { picked: knowledgeClusterPicked, want: one?.from,
+        target: [universe.tx, universe.ty, universe.tz], middle: [(a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2] };
+      /* 은하 칸: 형태·쪽 수·최근 2주의 몫, 그 은하의 필라멘트. */
+      const galaxy = view.querySelector(".knowledge-overview-galaxy");
+      const galaxyRows = [...(galaxy?.querySelectorAll("[data-knowledge-flow]") ?? [])];
+      const galaxyWords = galaxy?.textContent ?? "";
+      const recent = map.galaxy[knowledgeClusterPicked]?.activity ?? -1;
+      const card = { shown: galaxy !== null && !galaxy.hidden, words: galaxyWords, rows: galaxyRows.length,
+        typeWord: KNOWLEDGE_UNIVERSE_TYPE_WORDS[map.galaxy[knowledgeClusterPicked]?.type]?.key ?? "",
+        percent: `${Math.round(recent * 100)}%` };
+      toggleKnowledgeCluster(view, knowledgeClusterPicked);
+      await frames(2);
+      /* 쪽 카드의 고친 때: 날짜와 「얼마 전」. */
+      const seat = layout.model.keys.indexOf(answer.graph.nodes[2].id);
+      selectKnowledgeNode(view, layout.model.keys[seat]);
+      await frames(2);
+      const modified = view.querySelector(".knowledge-card .knowledge-modified")?.textContent ?? "";
+      const ago = new Intl.RelativeTimeFormat(locale, { numeric: "auto" }).format(-3, "day");
+      /* 관계 편집은 평면의 일: 우주에서 열면 평면의 같은 점으로. */
+      openKnowledgeLinkForm(view);
+      await frames(3);
+      const editing = { mounted: knowledgeUniverses.has(view), universe: view.classList.contains("is-universe"),
+        selected: knowledgeSelectedKey === layout.model.keys[seat], form: !view.querySelector(".knowledge-link-form")?.hidden };
+      closeKnowledgeLinkForm(view);
+      /* 평면에서는 우주의 절이 서지 않는다. */
+      const flatFlows = view.querySelector(".knowledge-overview-filaments");
+      const flat = { hidden: flatFlows === null || flatFlows.hidden };
+      selectKnowledgeNode(view, null);
+      knowledgeDimension = heldDimension;
+      secondBrainVault = heldVault;
+      await paintKnowledgeView();
+      return { overview, flown, card, modified, ago, editing, flat };
+    } catch (error) {
+      return { thrown: String(error?.stack ?? error) };
+    }
+  });
+  const detail = JSON.stringify(seen);
+  const near = (one, two) => one.every((value, at) => Math.abs(value - two[at]) < 1e-3);
+  ok("t-12443 ⑤: while the universe stands the overview lists the thickest filaments as sender → receiver with sent/lines, and a row flies to that flow",
+    !seen.thrown && seen.overview.shown && seen.overview.filaments >= 2
+      && seen.overview.rows === Math.min(6, seen.overview.filaments)
+      && seen.overview.first.includes(seen.overview.want) && seen.overview.note === seen.overview.wantNote
+      && seen.flown.picked === seen.flown.want && near(seen.flown.target, seen.flown.middle),
+    detail);
+  ok("t-12443 ⑤: a picked galaxy shows its shape, its pages and the share changed in two weeks, and its own filaments",
+    !seen.thrown && seen.card.shown && seen.card.typeWord !== "" && seen.card.words.includes(seen.card.percent)
+      && seen.card.rows >= 1,
+    detail);
+  ok("t-12443 ⑤: a page's card says when it was changed as a date and as how long ago",
+    !seen.thrown && seen.modified.includes(seen.ago), detail);
+  ok("t-12443 ⑤: editing a relation is flat work — from the universe it lands on the flat map with the same page picked and the form open",
+    !seen.thrown && !seen.editing.mounted && !seen.editing.universe && seen.editing.selected && seen.editing.form
+      && seen.flat.hidden,
+    detail);
+}
