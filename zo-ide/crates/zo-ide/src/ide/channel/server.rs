@@ -194,9 +194,16 @@ fn dispatch(
     let id = request.id;
     let params = &request.params;
     match request.method.as_str() {
+        // The questions to a person standing open ride on the liveness probe:
+        // a parent waiting on this pane reads them to tell a pane waiting on
+        // somebody from one that stopped (t-11458).
         method::LIST => RpcResponse::ok(
             id,
-            json!([{ "id": state.session_id(), "messages": state.history().len() }]),
+            json!([{
+                "id": state.session_id(),
+                "messages": state.history().len(),
+                runtime::subagent_panes::LIST_ASKING: state.live_prompts(),
+            }]),
         ),
         method::CAPABILITIES => {
             if !params.is_null() && !params.is_object() {

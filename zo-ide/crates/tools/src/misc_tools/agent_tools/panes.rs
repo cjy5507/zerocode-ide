@@ -397,7 +397,7 @@ fn watch_pane(
 ) {
     let _registration = super::spawn::pane_worker_registration(job);
     let limits = Limits::load();
-    let budget = job.time_budget.unwrap_or(limits.pane_budget);
+    let budget = limits.pane_budget(job.time_budget);
     let channel_seen = std::cell::Cell::new(job.manifest.lifecycle.channel.is_some());
     let cancelled = || {
         if !channel_seen.get() && directory.join(CHANNEL_FILE).is_file() {
@@ -444,15 +444,7 @@ fn watch_pane(
             None,
             Some("the parent's turn was cancelled, so this pane was closed".to_string()),
         ),
-        PaneOutcome::TimedOut => settled(
-            job,
-            "failed",
-            None,
-            Some(format!(
-                "the sub-agent's pane wrote no result within {} seconds; its pane was closed",
-                budget.as_secs()
-            )),
-        ),
+        PaneOutcome::TimedOut => settled(job, "failed", None, Some(budget.ended_because())),
         // The one case that has to name a path. A child that died without
         // writing is a bug in something, and the only place left to look is
         // its own transcript — which is on screen too, in a pane the window
