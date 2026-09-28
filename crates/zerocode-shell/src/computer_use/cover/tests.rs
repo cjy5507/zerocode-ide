@@ -36,9 +36,15 @@ impl Desk {
     /// The target at (100, 100) 400×300 under another app's window at
     /// `layer` over its middle.
     fn with_over(layer: i64) -> Self {
+        Self::owned_over(20, "Other", layer)
+    }
+
+    /// The target under a window of the app `pid` at `layer` over its middle —
+    /// the target's own app when `pid` is the target's.
+    fn owned_over(pid: i64, app: &str, layer: i64) -> Self {
         Self {
             windows: vec![
-                row(OVER, 20, "Other", layer, (200.0, 150.0, 300.0, 200.0)),
+                row(OVER, pid, app, layer, (200.0, 150.0, 300.0, 200.0)),
                 row(TARGET, 10, "Target", 0, (100.0, 100.0, 400.0, 300.0)),
             ],
             acted: Vec::new(),
@@ -284,27 +290,52 @@ fn a_panel_that_stays_on_top_takes_the_runner_up_its_answer_ranked() {
     );
 }
 
-/// The seat acts and its answer does not come inside the wall: the hand
-/// stays still — no window moves — and the person is asked once, in the
-/// page's words; the press does not go on under the old plan.
+/// The seat acts and its answer does not come inside the wall — tonight the
+/// judgment answered one request in three — and the target's own panel
+/// covers the mark: the hand goes on by today's rule, the rule a hand with
+/// Jev switched off keeps, whose moves are the target's own window's and
+/// can be undone. It brings the window forward, moves it clear and presses;
+/// the row says the answer was not carried out and why.
 #[test]
-fn a_silent_seat_holds_the_hand_and_asks_the_person_once() {
-    let mut desk = Desk::with_over(0);
+fn a_silent_seat_leaves_the_hand_to_todays_rule_which_uncovers_and_presses() {
+    let mut desk = Desk::owned_over(10, "Target", 3);
+    let mut seat = Seat::at(JevMode::Auto, true, Err("timeout".into()));
+    let (answered, presses, shown) = press_on(&mut desk, &mut seat, Decision::Refused);
+    assert_eq!(presses, 2, "refused, then pressed");
+    assert!(shown.is_empty(), "{shown:?}");
+    assert_eq!(
+        answered.expect("pressed once uncovered")["uncovered"]["moves"],
+        json!(["raise_target", "move_target"])
+    );
+    assert_eq!(
+        desk.moved(),
+        [(TARGET, "focus".to_string()), (TARGET, "move".to_string())]
+    );
+    assert_eq!(seat.rows[0]["outcome"], "timeout");
+    assert_eq!(seat.rows[0]["applied"], false);
+    assert_eq!(seat.rows[0]["why"], Held::Unanswered.word());
+}
+
+/// With no answer, another app's window above ordinary ones is still the
+/// person's: today's rule cannot tell it from the system's, so nothing moves
+/// and the person is asked in one line — for what stands there, not for the
+/// silence.
+#[test]
+fn a_silent_seat_still_leaves_another_apps_top_window_to_the_person() {
+    let mut desk = Desk::with_over(3);
     let mut seat = Seat::at(JevMode::Auto, true, Err("timeout".into()));
     let (ended, shown) = run(&mut desk, &mut seat, Decision::TimedOut, None);
     assert_eq!(
         ended.expect("listed"),
         Uncovered::Held {
-            held: Held::Unanswered,
+            held: Held::Theirs,
             over: "Other".into()
         }
     );
     assert!(desk.acted.is_empty(), "{:?}", desk.acted);
     assert_eq!(shown.len(), 1);
-    assert_eq!(shown[0].key, "computer.cover.unanswered");
+    assert_eq!(shown[0].key, "computer.cover.ask");
     assert_eq!(shown[0].args, json!({ "app": "Other" }));
-    assert_eq!(seat.rows[0]["held"], "unanswered");
-    assert_eq!(seat.rows[0]["outcome"], "timeout");
 }
 
 /// The system's window over the place is never acted on: nothing moves,

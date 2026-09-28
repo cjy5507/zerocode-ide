@@ -3400,12 +3400,18 @@ fn the_cover_seat_is_a_row_of_its_own_that_sends_the_scenes_facts_alone() {
     assert_eq!(COVER.agreement_kind, AgreementKind::Hindsight);
     assert_eq!(COVER.baseline, Baseline::TodaysRule);
     assert_eq!(COVER.apply_deadline_ms, Some(SCREEN_APPLY_DEADLINE_MS));
-    assert_eq!(COVER.press_floor_permille, Some(SCREEN_PRESS_FLOOR_PERMILLE));
+    assert_eq!(
+        COVER.press_floor_permille,
+        Some(SCREEN_PRESS_FLOOR_PERMILLE)
+    );
     assert_eq!(COVER.request_name, &["asked"]);
     assert_eq!(COVER_OVER_CAP, SCREEN_CANDIDATE_CAP);
     const { assert!(COVER_RUNNER_UP_FLOOR_PERMILLE < SCREEN_PRESS_FLOOR_PERMILLE) };
     let sent: Vec<&str> = COVER.sends.iter().map(|sent| sent.at).collect();
-    assert_eq!(sent, ["/state/target/app", "/state/over", "/state/over/*/app"]);
+    assert_eq!(
+        sent,
+        ["/state/target/app", "/state/over", "/state/over/*/app"]
+    );
     for sent in &sent {
         assert!(
             COVER_STATE_KEYS
