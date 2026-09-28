@@ -5681,6 +5681,11 @@ const SHAPE_PIXELS = Object.freeze({
   /* 크기가 약속한 반지름(px). 삼각형의 외접원이 56 px이 되고, 아래 판정 자리 중 가장 좁은
    * 여유(사각 모서리 안쪽 점 3.7 px)가 테두리(≤ 1.5 px)와 가장자리 부드러움(1 px)보다 넓다. */
   radius: 36,
+  /* 그 반지름을 입히는 크기 토큰 — √차수 램프의 넷과, 전체 지도에서 쪽과 유령이 입는 지도 크기
+   * 다섯(t-12029). 지도 크기를 빼면 쪽은 2 px·유령은 2.2 px로 서서 모양을 가르지 못한다. */
+  sizeTokens: Object.freeze(["--knowledge-node-radius-min", "--knowledge-node-radius-max",
+    "--knowledge-core-radius", "--knowledge-major-radius", "--knowledge-map-leaf", "--knowledge-map-major",
+    "--knowledge-map-core", "--knowledge-map-ghost", "--knowledge-map-stray"]),
   /* 점 사이(그래프 단위) — 폭에 맞춘 카메라에서 이웃 외접원이 닿지 않는지는 아래에서 묻는다. */
   pitch: 100,
   /* 점의 상자를 외접원 밖으로 넓히는 폭(px) — 테두리와 부드러움이 상자 안에 들게. */
@@ -5727,10 +5732,7 @@ const shapePixelsOn = async (target) => {
       if (!knowledgeGlSupported()) return { skip: "this browser has no WebGL2 context" };
       const view = document.querySelector(".knowledge-view:not([hidden])");
       const frame = () => new Promise((done) => requestAnimationFrame(done));
-      for (const name of ["--knowledge-node-radius-min", "--knowledge-node-radius-max",
-        "--knowledge-core-radius", "--knowledge-major-radius"]) {
-        view.style.setProperty(name, String(tune.radius));
-      }
+      for (const name of tune.sizeTokens) view.style.setProperty(name, String(tune.radius));
       knowledgeTunings.delete(view);
       const spec = { pages: 1, ghosts: 1, tags: [], customEdges: [],
         supply: { components: 1, vulnerabilities: 1 }, code: { files: 1, symbols: 1 } };
@@ -5984,18 +5986,15 @@ const shapePixelsOn = async (target) => {
       return { thrown: String(error?.stack ?? error) };
     }
   }, { drawn, shots, tune: SHAPE_PIXELS, ideal: IDEAL_REACH });
-  await target.evaluate(() => {
+  await target.evaluate((tune) => {
     document.getElementById("knowledge-shape-pixels")?.remove();
     const view = document.querySelector(".knowledge-view:not([hidden])");
-    for (const name of ["--knowledge-node-radius-min", "--knowledge-node-radius-max",
-      "--knowledge-core-radius", "--knowledge-major-radius"]) {
-      view?.style.removeProperty(name);
-    }
+    for (const name of tune.sizeTokens) view?.style.removeProperty(name);
     if (view) knowledgeTunings.delete(view);
     knowledgePainterKind = null;
     knowledgeShowSources = false;
     knowledgeShowCode = false;
-  });
+  }, SHAPE_PIXELS);
   if (seatWas) await target.setViewportSize(seatWas);
   return pixels;
 };
