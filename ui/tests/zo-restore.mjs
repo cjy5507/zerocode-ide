@@ -95,7 +95,7 @@ export async function exerciseZoRestore() {
   await mountStoredLayout(lostTab.asleep, A, lostTab);
   const stand = shells[shellsBefore];
   seen.refusedPaneSays = Boolean(
-    stand?.notice?.includes("session not found") && stand.notice.includes(`zo --resume ${lost}`),
+    stand?.notice?.includes("session not found") && stand.notice.includes(`cd ${A} && zo --resume ${lost}`),
   );
   seen.carried = paneSessions.get(stand?.term)?.carriedOnly === true;
 
@@ -109,7 +109,7 @@ export async function exerciseZoRestore() {
   }
   await settle();
   const told = [...document.querySelectorAll(".toast")].slice(toastsBefore).map((note) => note.textContent);
-  seen.toldOwed = told.some((said) => said.includes(`zo --resume ${lost}`));
+  seen.toldOwed = told.some((said) => said.includes(`cd ${A} && zo --resume ${lost}`));
   persistPaneLayouts(A);
   const lastA = saves.slice(savesBefore).filter((save) => save.worktree === A).at(-1);
   const heldTab = lastA?.layouts?.find((layout) => layout.agents?.[0]?.id === fresh);

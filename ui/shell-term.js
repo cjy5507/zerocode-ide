@@ -6989,20 +6989,27 @@ async function wakeConversation(agent, session, grid, restore = null, worktree =
 }
 
 /* What a person types to go on with `session`, from the backend's own table
- * of vendor resumes — or null where the window knows no way back. */
-async function resumeLineOf(agent, session) {
+ * of vendor resumes — or null where the window knows no way back. Led by a
+ * `cd` into `worktree` when the door knows it: zo finds a conversation only
+ * from its own workspace's folder, and the shell the person types it into
+ * may stand anywhere. Words to read, never run by the window. */
+async function resumeLineOf(agent, session, worktree = null) {
+  let line;
   try {
-    const line = await invoke("resume_line", { agent, session });
-    return typeof line === "string" && line.trim() !== "" ? line.trim() : null;
+    line = await invoke("resume_line", { agent, session });
   } catch {
     return null;
   }
+  if (typeof line !== "string" || line.trim() === "") return null;
+  if (!worktree) return line.trim();
+  const folder = /^[\w./-]+$/.test(worktree) ? worktree : `'${worktree.replaceAll("'", "'\\''")}'`;
+  return `cd ${folder} && ${line.trim()}`;
 }
 
 /* How to go on with a conversation, in words: the command when there is one,
  * else the sidebar row that reopens it. */
-async function wayBackTo(agent, session) {
-  const line = await resumeLineOf(agent, session);
+async function wayBackTo(agent, session, worktree = null) {
+  const line = await resumeLineOf(agent, session, worktree);
   return line ?? t("session.owedRow", "사이드바의 그 대화 줄");
 }
 
@@ -7064,7 +7071,7 @@ async function tellOwed(worktree) {
   if (owed.length === 0) return;
   for (const one of owed) owedTold.add(owedKey(one.agent, one.id));
   const newest = owed.at(-1);
-  const how = await wayBackTo(newest.agent, { key: newest.key, id: newest.id });
+  const how = await wayBackTo(newest.agent, { key: newest.key, id: newest.id }, worktree);
   toast(
     owed.length === 1
       ? t("session.owed", "지난 {{agent}} 대화가 이 작업 공간에서 이어지지 않았습니다 — 이어 가려면: {{how}}", {
@@ -7156,7 +7163,7 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null, work
       );
       // And the pane itself says it, with the way back — the vendor's own
       // resume where the window knows one, else the sidebar row.
-      const line = await resumeLineOf(wake.agent, session);
+      const line = await resumeLineOf(wake.agent, session, worktree);
       notice = [
         t("session.wakeRefusedPane", "이 판의 {{agent}} 대화를 이어서 열지 못했습니다 — {{reason}}", {
           agent: agentName(wake.agent),
