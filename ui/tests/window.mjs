@@ -23,7 +23,7 @@ import { createRunner } from "./window-runner.mjs";
 
 import { testVaultSubagents } from "./vault-subagents.mjs";
 import { testKnowledgeLive } from "./knowledge-live.mjs";
-import { testArtifactCatalog, testArtifactChrome, testArtifactPages, testArtifactStudio, testArtifactStudioFold, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
+import { testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
@@ -158,8 +158,10 @@ const artifactGallery = async (page, ok) => {
   await testArtifactCatalog(page, ok, join(UI, "..", "output/playwright"));
   await testArtifactChrome(page, ok);
   await testArtifactPages(page, ok);
+  await testArtifactFirstScreen(page, ok);
+  await testArtifactRecall(page, ok);
   await testArtifactStudio(page, ok);
-  await testArtifactStudioFold(page, ok);
+  await testArtifactNewMenu(page, ok);
   await testArtifactStudioLayout(page, ok);
   await testArtifactStudioOwnership(page, ok);
 };

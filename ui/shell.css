@@ -41172,116 +41172,44 @@ button.jev-token:hover {
 
 
 /* Artifact creation is an expressive surface. Its material, motion and
- * breakpoints use the shared tokens and the existing pane-width tiers. */
+ * breakpoints use the shared tokens and the existing pane-width tiers. The
+ * studio stands only while a brief is being written: 「새로 만들기 ▾」 picks
+ * the purpose, and the gallery keeps the first screen the rest of the time. */
 .artifacts-studio {
   position: relative;
   flex: 0 1 auto;
   min-height: 0;
   max-height: var(--artifact-studio-max-share);
   margin: var(--space-3) var(--space-4) 0;
-  padding: var(--space-4);
+  padding: var(--space-3) var(--space-4);
   overflow: auto;
   border: var(--rule-width) solid var(--artifact-studio-edge);
   border-radius: var(--artifact-studio-radius);
   background: var(--artifact-studio-background);
   box-shadow: var(--artifact-studio-shadow);
 }
+.artifacts-studio[hidden] { display: none; }
 .artifacts-studio-intro {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-.artifacts-studio.is-composing .artifacts-studio-intro { display: none; }
-.artifacts-studio.is-composing .artifacts-studio-choices { margin-top: 0; }
-.artifacts-studio.is-composing .artifacts-studio-choice { padding: var(--space-2); justify-content: center; text-align: center; }
-.artifacts-studio.is-composing .artifacts-studio-choice-hint,
-.artifacts-studio.is-composing .artifacts-studio-glyph { display: none; }
-.artifacts-studio-copy { min-width: 0; }
-.artifacts-studio-eyebrow {
-  display: block;
-  margin-bottom: var(--space-2);
-  color: var(--ink-label);
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  font-weight: var(--artifact-studio-weight);
-  letter-spacing: var(--artifact-studio-tracking);
-}
-.artifacts-studio-title {
-  margin: 0;
-  color: var(--ink-chalk);
-  font-family: var(--font-display);
-  font-size: var(--artifact-studio-title-size);
-  font-weight: var(--artifact-studio-weight);
-  line-height: var(--artifact-studio-title-leading);
-  letter-spacing: var(--artifact-studio-title-tracking);
-  word-break: keep-all;
-}
-.artifacts-studio-hint {
-  margin: var(--space-2) 0 0;
-  color: var(--ink-mist);
-  font-size: var(--text-xs);
-  line-height: var(--artifact-studio-copy-leading);
-  word-break: keep-all;
-}
-.artifacts-studio-orbit {
-  display: grid;
-  flex: none;
-  grid-template-columns: repeat(2, var(--artifact-studio-orbit-side));
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
-  transform: rotate(var(--artifact-studio-orbit-angle));
-  pointer-events: none;
-}
-.artifacts-studio-orbit-tile {
-  display: grid;
-  place-items: center;
-  width: var(--artifact-studio-orbit-side);
-  height: var(--artifact-studio-orbit-side);
-  color: var(--ink-chalk);
-  border: var(--rule-width) solid var(--artifact-studio-edge);
-  border-radius: var(--artifact-studio-radius);
-  background: var(--artifact-studio-tile-background);
-  box-shadow: var(--artifact-studio-shadow);
-}
-.artifacts-studio-orbit-tile:nth-child(even) {
-  transform: translateY(var(--space-2));
-}
-.artifacts-studio-orbit-tile .icon {
-  width: var(--artifact-studio-orbit-glyph);
-  height: var(--artifact-studio-orbit-glyph);
-}
-.artifacts-studio-choices {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--artifact-studio-choice-min)), 1fr));
-  gap: var(--space-2);
-  margin-top: var(--space-4);
-}
-.artifacts-studio-choice {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  padding: var(--space-3);
-  text-align: left;
+}
+.artifacts-studio-title {
+  flex: none;
+  margin: 0;
   color: var(--ink-chalk);
-  border: var(--rule-width) solid var(--artifact-studio-edge);
-  border-radius: var(--artifact-studio-radius);
-  background: var(--artifact-studio-choice-background);
-  cursor: pointer;
-  transition: background var(--motion-fast) var(--ease-standard),
-    border-color var(--motion-fast) var(--ease-standard),
-    box-shadow var(--motion-fast) var(--ease-standard);
+  font-size: var(--text-sm);
+  font-weight: var(--artifact-studio-weight);
+  word-break: keep-all;
 }
-.artifacts-studio-choice:hover,
-.artifacts-studio-choice[aria-pressed="true"] {
-  border-color: var(--artifact-studio-accent);
-  background: var(--artifact-studio-choice-selected);
-  box-shadow: var(--artifact-studio-choice-shadow);
-}
-.artifacts-studio-choice:focus-visible {
-  outline: var(--artifact-studio-focus-width) solid var(--ink-chalk);
-  outline-offset: var(--space-1);
+.artifacts-studio-hint {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .artifacts-studio-glyph {
   display: grid;
@@ -41297,15 +41225,13 @@ button.jev-token:hover {
 .artifacts-studio-choice-title,
 .artifacts-studio-choice-hint { display: block; word-break: keep-all; }
 .artifacts-studio-choice-title { font-size: var(--text-xs); font-weight: var(--artifact-studio-weight); }
-.artifacts-studio-choice-hint { margin-top: var(--space-1); font-size: var(--text-2xs); color: var(--ink-mist); }
+.artifacts-studio-choice-hint { margin-top: 2px; font-size: var(--text-2xs); color: var(--ink-mist); }
 
 .artifacts-studio-form {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  margin-top: var(--space-4);
-  padding-top: var(--space-4);
-  border-top: var(--rule-width) solid var(--artifact-studio-edge);
+  margin-top: var(--space-3);
 }
 .artifacts-studio-form[hidden] { display: none; }
 .artifacts-studio-brief-label,
@@ -41334,39 +41260,33 @@ button.jev-token:hover {
 .artifacts-studio-status { flex: 1 1 100%; min-width: 0; color: var(--ink-mist); font-size: var(--text-2xs); word-break: keep-all; }
 .artifacts-studio-close,
 .artifacts-studio-send { flex: none; white-space: nowrap; }
-/* 닫기(X)는 판의 오른쪽 위, 「펼치기」는 접힌 줄의 오른쪽 끝. 접힌 스튜디오는
- * 눈썹·제목·펼치기 한 줄이고(`is-folded`), 나머지는 display:none — 갤러리가
- * 그 높이를 받는다(`.artifacts-body`의 flex가 나머지를 채운다). */
-.artifacts-studio-dismiss {
-  position: absolute;
-  top: var(--space-2);
-  right: var(--space-2);
-}
-.artifacts-studio:not(.is-folded) .artifacts-studio-intro,
-.artifacts-studio:not(.is-folded) .artifacts-studio-choices { padding-right: var(--space-6); }
-.artifacts-studio-expand { display: none; flex: none; white-space: nowrap; }
-.artifacts-studio.is-folded { padding: var(--space-2) var(--space-4); }
-.artifacts-studio.is-folded .artifacts-studio-intro { display: flex; }
-.artifacts-studio.is-folded .artifacts-studio-copy {
-  display: flex;
-  flex: 1 1 auto;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0 var(--space-3);
-}
-.artifacts-studio.is-folded .artifacts-studio-eyebrow { margin-bottom: 0; }
-.artifacts-studio.is-folded .artifacts-studio-title { font-size: var(--text-sm); }
-.artifacts-studio.is-folded .artifacts-studio-expand { display: inline-flex; }
-.artifacts-studio.is-folded .artifacts-studio-hint,
-.artifacts-studio.is-folded .artifacts-studio-orbit,
-.artifacts-studio.is-folded .artifacts-studio-choices,
-.artifacts-studio.is-folded .artifacts-studio-form,
-.artifacts-studio.is-folded .artifacts-studio-dismiss { display: none; }
 .artifacts-view.is-tier-compact .artifacts-studio { margin-inline: var(--space-2); padding: var(--space-3); }
-.artifacts-view.is-tier-compact .artifacts-studio-orbit { display: none; }
-.artifacts-view.is-tier-compact .artifacts-studio-title { font-size: var(--text-xl); }
-.artifacts-view.is-tier-compact .artifacts-studio-choices { grid-template-columns: repeat(auto-fit, minmax(min(100%, max(var(--artifact-studio-choice-min), calc((100% - var(--space-2)) / 2))), 1fr)); }
 .artifacts-view.is-tier-compact .artifacts-studio-options { grid-template-columns: minmax(0, 1fr); }
+
+/* 「새로 만들기 ▾」의 메뉴 — 창의 메뉴 해부(`.note-pop`)를 입고, 목적 넷은
+ * 제 색의 글리프와 두 줄 글로 선다. 폭만 이 메뉴의 것이다. */
+.artifacts-new-menu {
+  width: var(--artifact-new-menu-width);
+  max-width: calc(100vw - var(--space-4));
+}
+.artifacts-new-menu[hidden] { display: none; }
+.artifacts-new-item {
+  align-items: center;
+  text-align: left;
+}
+.artifacts-new-item .artifacts-studio-glyph {
+  width: var(--artifact-new-glyph-side);
+  height: var(--artifact-new-glyph-side);
+}
+.artifacts-new-item .artifacts-studio-glyph .icon { width: 14px; height: 14px; }
+.artifacts-new-blank .artifacts-studio-glyph { color: var(--ink-mist); }
+.artifacts-new-rule {
+  height: 0;
+  margin: var(--space-1) 0;
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+.artifacts-new-chevron { display: inline-flex; margin-left: 2px; opacity: 0.8; }
+.artifacts-new-chevron .icon { width: 12px; height: 12px; }
 
 .artifacts-head {
   position: relative;
@@ -41393,61 +41313,88 @@ button.jev-token:hover {
 }
 
 .artifacts-view .artifacts-query {
-  flex: none;
+  flex: 0 1 var(--artifact-search-width);
   width: var(--artifact-search-width);
   max-width: 100%;
 }
 
-.artifacts-kinds {
+/* 머리의 칸은 모두 한 높이 — 워크벤치 머리의 28px 줄(`--control-height-sm`). */
+.artifacts-view .artifacts-head :is(.artifacts-query, .artifacts-pick-select) {
+  height: var(--control-height-sm);
+  padding-block: 0;
+}
+
+.artifacts-head .btn {
+  height: var(--control-height-sm);
+  padding-block: 0;
+  font-size: var(--text-xs);
+}
+
+/* 첫 화면의 탭 — 각 탭이 제 수를 단다(t-3233의 종류 세그먼트를 셋으로 모은 것).
+ * 행이 없는 종류의 탭은 서지 않는다(`hidden`). */
+.artifacts-tabs {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
   max-width: 100%;
-  display: flex;
-  flex: none;
-  gap: 0;
-  overflow: hidden;
+  padding: 2px;
+  overflow-x: auto;
   border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-sm);
+  background: var(--surface-well);
 }
 
-.artifacts-kind {
+.artifacts-tab {
+  display: inline-flex;
+  align-items: baseline;
   gap: var(--space-1);
+  padding: 2px var(--space-2);
   border: 0;
-  border-radius: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--text-xs);
   white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
 }
 
-.artifacts-kind + .artifacts-kind {
-  border-left: var(--rule-width) solid var(--edge-rule);
-}
+.artifacts-tab[hidden] { display: none; }
 
-.artifacts-kind[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--ink-chalk) 12%, transparent);
+.artifacts-tab:hover { color: var(--ink-chalk); }
+
+.artifacts-tab[aria-selected="true"] {
+  background: var(--surface-raised);
   color: var(--ink-chalk);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
 }
 
-/* 출처 세그먼트 셋(전체 / 이 기계 / claude.ai, t-3233 §4) — 종류 세그먼트와 같은
- * 옷, 그 왼쪽에 선다. */
-.artifacts-sources {
-  display: flex;
+.artifacts-tab:focus-visible {
+  outline: var(--artifact-studio-focus-width) solid var(--ink-chalk);
+  outline-offset: 1px;
+}
+
+.artifacts-tab-count {
+  color: var(--ink-label);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 고르개 셋 — 이름표와 select 한 벌. select는 판의 입력 옷(`.settings-input`)이다. */
+.artifacts-pick {
+  display: inline-flex;
   flex: none;
-  gap: 0;
-  overflow: hidden;
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-sm);
-}
-
-.artifacts-source {
-  border: 0;
-  border-radius: 0;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
   white-space: nowrap;
 }
 
-.artifacts-source + .artifacts-source {
-  border-left: var(--rule-width) solid var(--edge-rule);
-}
-
-.artifacts-source[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--ink-chalk) 12%, transparent);
-  color: var(--ink-chalk);
+.artifacts-view .artifacts-pick-select {
+  width: auto;
+  max-width: var(--artifact-pick-max-width);
 }
 
 .artifacts-new {
@@ -41482,6 +41429,8 @@ button.jev-token:hover {
   flex: 1;
 }
 
+.artifacts-stat[hidden] { display: none; }
+
 .artifacts-stat {
   flex: none;
   color: var(--ink-label);
@@ -41510,6 +41459,15 @@ button.jev-token:hover {
   container: artifacts / inline-size;
 }
 
+/* 목록과 그 바닥의 한 줄(사라진 파일) — 서랍 옆의 세로 한 기둥. */
+.artifacts-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
 .artifacts-grid {
   position: relative;
   flex: 1;
@@ -41518,6 +41476,50 @@ button.jev-token:hover {
   overflow-x: hidden;
   overflow-y: auto;
   outline: none;
+}
+
+/* 날의 무리 머리(오늘 · 이번 주 · 이전) — 카드처럼 절대 좌표로 서고, 높이는
+ * 가상화가 읽는 토큰(`--artifact-group-head`)이다. */
+.artifacts-group {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: flex-end;
+  box-sizing: border-box;
+  margin: 0;
+  padding-bottom: var(--space-1);
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.artifacts-group[hidden] { display: none; }
+
+.artifacts-missing {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-1) var(--space-4);
+  border-top: var(--rule-width) solid var(--edge-rule);
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+}
+
+.artifacts-missing[hidden] { display: none; }
+
+.artifacts-missing-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
 }
 
 .artifacts-grid:focus-visible {
@@ -41628,23 +41630,6 @@ button.jev-token:hover {
   word-break: break-word;
 }
 
-/* 출처 한 줄은 얼굴 위에 눕고 가리킬 때만 보인다(hover) — 글은 늘 노드에 있다. */
-.artifact-card-face .artifact-card-origin {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  padding: var(--space-1) var(--space-2);
-  background: var(--artifact-origin-scrim);
-  opacity: 0;
-  transition: opacity var(--motion-fast) var(--ease-standard);
-}
-
-.artifact-card:hover .artifact-card-face .artifact-card-origin,
-.artifact-card.is-selected .artifact-card-face .artifact-card-origin {
-  opacity: 1;
-}
-
 .artifact-card-title {
   overflow: hidden;
   font-size: var(--text-sm);
@@ -41653,13 +41638,69 @@ button.jev-token:hover {
   white-space: nowrap;
 }
 
-.artifact-card-origin {
+/* 만든 이의 한 줄 — 에이전트 표식 · 판 · 브랜치. 출처가 비면 줄째 숨는다. */
+.artifact-card-maker {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
   overflow: hidden;
   color: var(--artifact-card-ink-soft);
-  font-size: var(--text-xs);
-  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
   white-space: nowrap;
 }
+
+.artifact-card-maker[hidden],
+.artifact-card-maker > [hidden] { display: none; }
+
+.artifact-card-maker > * { flex: none; }
+
+.artifact-card-maker-branch {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.artifact-card-maker-mark { display: inline-flex; }
+
+.artifact-card-said {
+  display: inline-flex;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.artifact-card-feedback {
+  color: var(--workbench-hue-tasks);
+  font-weight: 600;
+}
+
+.artifact-card-feedback::before {
+  content: "·";
+  margin-right: var(--space-1);
+  color: var(--artifact-card-ink-soft);
+  font-weight: 400;
+}
+
+.artifact-card-feedback[hidden] { display: none; }
+
+/* 사라진 파일을 가리키는 행 — 「보기」로 불러냈을 때만 서고, 흐리게 선다. */
+.artifact-card.is-missing .artifact-card-face,
+.artifact-card.is-missing .artifact-card-title {
+  opacity: 0.55;
+}
+
+.artifact-no-origin {
+  margin: 0;
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+}
+
+.artifact-no-origin[hidden] { display: none; }
 
 .artifact-card-foot {
   display: flex;
@@ -41792,9 +41833,18 @@ button.jev-token:hover {
   }
 }
 
+/* 중간 폭의 판에서 빈 서랍은 자리를 내준다 — 첫 화면은 카드의 것이고, 서랍은
+ * 카드를 고를 때 선다. 넓은 판은 둘 다 들어가니 서랍이 늘 선다. */
+@container artifacts style(--artifact-tier: middle) {
+  .artifacts-drawer:has(.artifacts-detail[hidden]) {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .artifacts-drawer,
   .artifacts-studio-choice,
+  .artifacts-tab,
   .artifact-card {
     transition: none;
   }
@@ -42696,8 +42746,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
     transition: none;
   }
 }
-
-.artifacts-kinds, .artifacts-sources { overflow-x: auto; max-width: 100%; }
 
 /* Preserve the card's existing grid while exposing its nested controls as
  * one cell of a selectable row to desktop accessibility clients. */

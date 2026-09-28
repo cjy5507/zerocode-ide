@@ -36194,14 +36194,23 @@ mod tests {
             "artifacts.jump.task",
             "artifacts.jump.worktree",
             "settings.artifacts.retention",
-            // The gallery (t-3233): three kinds, three segments, the card's
-            // line, the new-artifact draft, the header strip and share.
+            // 갤러리는 세 출처 세그먼트 대신 페이지·보고서·증거 탭과 다시 찾기
+            // 고르개를 쓴다. 새 낱말이 네 카탈로그에 모두 있어야 한다.
             "artifacts.kind.page",
             "artifacts.kind.document",
             "artifacts.kind.web",
-            "artifacts.source.all",
-            "artifacts.source.local",
-            "artifacts.source.remote",
+            "artifacts.tab.pages",
+            "artifacts.pick.project",
+            "artifacts.pick.agent",
+            "artifacts.pick.period",
+            "artifacts.pick.all",
+            "artifacts.period.today",
+            "artifacts.period.week",
+            "artifacts.missing.hidden",
+            "artifacts.missing.shown",
+            "artifacts.missing.show",
+            "artifacts.missing.hide",
+            "artifacts.feedbackCount",
             "artifacts.new",
             "artifacts.newDraft",
             "artifacts.editedOn",
@@ -36357,8 +36366,8 @@ mod tests {
         }
         let sheet = include_str!("../../../../ui/shell.css");
         assert!(
-            sheet.contains(".artifact-strip {") && sheet.contains(".artifacts-sources {"),
-            "the header strip or the source segments have no sheet"
+            sheet.contains(".artifact-strip {") && sheet.contains(".artifacts-tabs {"),
+            "the header strip or the gallery's tabs have no sheet"
         );
         let tokens = include_str!("../../../../ui/tokens.css");
         for token in [
