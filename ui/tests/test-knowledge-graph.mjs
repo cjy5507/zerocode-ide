@@ -5116,6 +5116,64 @@ ok("the overview bundles the lines between clusters: at rest only a cluster's ow
     && row.litHasBetween && row.localTies === 0 && row.localBetween > 0),
   JSON.stringify(bundles));
 
+/* 묶음이 하나도 없는 지도는 선을 잃지 않는다(t-12029). 「쉬는 지도에서 군집을 건너는 낱선은 묶음이 말한다」는 시안의
+ * 규칙은 수백 가닥이 가운데를 덮는 볼트의 것이다 — 8가닥에 닿는 쌍이 없는 작은 볼트(창 하네스의 12쪽 볼트: 선 25개
+ * 중 11개)에서는 그 선을 대신 말할 줄이 없어 주제들이 끊긴 섬으로 보였다. 세 주제(12·9·6쪽)에 주제 사이 3·2·1가닥:
+ * 두 손 모두 모든 선이 선다. 다리는 묶음이 없어도 곡선과 번호로 서고 그 한 가닥만 선 층에서 비킨다 — 곡선이 그
+ * 선이다: 다리 장면(40·32·24·18·12쪽)에서 8가닥 쌍만 뺀 볼트는 묶음 0·다리 셋이고, 선 층에 없는 선은 그 셋뿐이다. */
+const tielessVault = topicVault({ sizes: [12, 9, 6], between: [[0, 1, 3], [1, 2, 2], [0, 2, 1]], lonely: 2 });
+const bridgeOnlyVault = topicVault({ sizes: [40, 32, 24, 18, 12],
+  between: [[0, 2, 1], [1, 2, 1], [1, 3, 1], [2, 3, 2], [3, 4, 1]], lonely: 3 });
+const tieless = await glPage.evaluate(async ({ small, lone }) => {
+  const rows = [];
+  try {
+    for (const hand of ["svg", "gl"]) {
+      for (const [path, spec] of [["/scene/tieless", small], ["/scene/bridge-only", lone]]) {
+        const { view, layout } = await window.__standKnowledgeScene__(path, spec, hand);
+        const { from, to, edgeCount } = layout.model;
+        const painter = knowledgePainterFor(view);
+        const seen = new Set();
+        if (painter.id === "gl") {
+          const ends = new Map();
+          for (let at = 0; at < edgeCount; at += 1) ends.set(`${from[at]}>${to[at]}`, at);
+          for (let seat = 0; seat < painter.counts.edges; seat += 1) {
+            const at = ends.get(`${painter.edgeEnds[seat * 2]}>${painter.edgeEnds[seat * 2 + 1]}`);
+            if (at !== undefined) seen.add(at);
+          }
+        } else {
+          for (let at = 0; at < edgeCount; at += 1) {
+            const line = layout.edgeEls[at];
+            if (line && getComputedStyle(line).display !== "none") seen.add(at);
+          }
+        }
+        let between = 0;
+        const missing = [];
+        for (let at = 0; at < edgeCount; at += 1) {
+          if (layout.drawnEdge !== null && layout.drawnEdge[at] === 0) continue;
+          if (layout.community[from[at]] !== layout.community[to[at]]) between += 1;
+          if (!seen.has(at)) missing.push(at);
+        }
+        rows.push({ hand: painter.id, path, named: layout.namedCount, ties: layout.ties.length,
+          tiesDrawn: layout.tiesDrawn, between, bridges: layout.bridges.map((bridge) => bridge.first),
+          bridgesDrawn: layout.bridgesDrawn, missing });
+      }
+    }
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error), rows };
+  } finally {
+    knowledgePainterKind = null;
+  }
+}, { small: tielessVault.spec, lone: bridgeOnlyVault.spec });
+ok("a map with no tie keeps every line between its topics, and a bridge still stands as its curve with only its one line stepping aside — on both hands",
+  !tieless.thrown && tieless.rows.length === 4 && tieless.rows.every((row) => row.ties === 0 && row.tiesDrawn === 0
+    && (row.path === "/scene/tieless"
+      ? row.named >= 3 && row.between >= 6 && row.missing.length === 0 && row.bridges.length === 0
+      : row.named >= 5 && row.between >= 6 && row.bridges.length === 3 && row.bridgesDrawn === 3
+        && JSON.stringify([...row.missing].sort((a, b) => a - b))
+          === JSON.stringify([...row.bridges].sort((a, b) => a - b)))),
+  JSON.stringify(tieless));
+
 /* 가지가 보이는 군집(t-12029, 승인된 시안 v2 「spread」). 다섯 주제(64·52·44·34·26쪽)에 유령 셋을 더한 볼트에서 두 손 모두: 전체
  * 지도의 쪽은 작은 점이다 — 잎 2.4 · 대표 지식 5.5 · 중심 10 px, 유령 2.2, 부스러기 2(두 손이 그린 크기로 잰다, SVG는
  * 점의 `r`, GL은 위치 텍스처의 반지름). 원반은 이완이 정한 반지름(√멤버 × pitch, 최소 반지름)의 1.3배이고 서로

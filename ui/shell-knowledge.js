@@ -3647,6 +3647,7 @@ function knowledgeLayout(view, model) {
     /* 놀라운 연결(t-12029, `knowledgeTies`가 함께 센다): 큰 두 주제 사이의 단 한 가닥들, 순서대로. 이번 프레임에
      * 그어진 다리의 수와 「놀라운 연결」 목록이 마지막으로 쓴 모델. */
     bridges: [],
+    bridgeLines: new Set(),
     bridgesDrawn: 0,
     bridgeListModel: null,
   };
@@ -4218,8 +4219,8 @@ function knowledgeSpotRank() {
  * 쉬는 전체 지도에서 두 군집을 건너는 선은 낱낱이 서지 않는다 — 실제 볼트(점 874·선 2,584)에서 그 480가닥이
  * 군집 안의 선과 같은 잉크로 지도의 가운데를 덮었다. 이름 있는 군집 쌍마다 한 줄이 그 수를 굵기로 말하되
  * `tieLeast` 가닥 이상인 쌍만이다(같은 볼트에서 19쌍 = 306가닥). 그보다 적은 쌍은 줄을 얻지 않는다: 한두
- * 가닥은 「이 둘이 통한다」가 아니라 스쳐 간 대괄호다. 낱낱의 선은 사람이 묻는 순간 돌아온다
- * (`knowledgeEdgeBundled`).
+ * 가닥은 「이 둘이 통한다」가 아니라 스쳐 간 대괄호다. 낱낱의 선은 사람이 묻는 순간 돌아오고, 묶음이 하나도
+ * 없는 지도(작은 볼트)에서는 처음부터 선다(`knowledgeEdgeBundled`).
  *
  * 세는 것은 **그려지는** 선이다 — 목차·일지의 가면을 지난 선이고, 렌즈가 모델을 줄이면 그 모델의 선이다.
  * 쌍의 표(`tiePairs`)는 이름 있는 군집 쌍마다 한 줄(수와 첫 선의 번호)이고, 묶음은 그중 문턱을 넘는 것을
@@ -4258,15 +4259,20 @@ function knowledgeTies(layout) {
       big: Math.max(size[pair.left], size[pair.right]) }))
     .sort((one, two) => two.small - one.small || two.big - one.big || from[one.first] - from[two.first])
     .slice(0, Math.max(0, layout.tuning.bridgesListed));
+  /* 다리마다 그 한 가닥 — 선 층에서 비키는 선이다(곡선이 그 선이다). */
+  layout.bridgeLines = new Set(layout.bridges.map((bridge) => bridge.first));
   layout.tieStamp = layout.drawnStamp;
   layout.tieModel = layout.model;
   return layout.ties;
 }
 
 /* 이 선이 지금 묶음 안에 있는가(t-12029) — 전체 지도의 군집 사이 선이고, 사람이 그 선을 묻고 있지 않다: 짚은
- * 점의 선(`lit`)도, 고른 점의 포커스도, 경로도, 고르거나 이름판에 올라 선 군집에 닿는 선도 아니다. 두 손이 이
- * 한 물음을 읽는다 — SVG는 `is-bundled` 옷으로(짚기는 프레임 없이 `is-lit`만 붙이므로 그 옷이 이긴다), GL은
- * 선 패스에서 빼는 것으로. 주변 탐색에는 묶음이 없다. */
+ * 점의 선(`lit`)도, 고른 점의 포커스도, 경로도, 고르거나 이름판에 올라 선 군집에 닿는 선도 아니다. 그리고 그
+ * 선을 대신 말하는 것이 지도에 있다: 묶음이 하나라도 있거나(시안의 규칙 — 문턱 아래 쌍의 선도 함께 비킨다), 그
+ * 선이 다리의 한 가닥이다. 묶음이 하나도 없는 지도(8가닥에 닿는 쌍이 없는 작은 볼트 — 창 하네스의 12쪽 볼트에서
+ * 선 25개 중 11개)에서 그 선을 빼면 주제들이 끊긴 섬으로 보인다. 두 손이 이 한 물음을 읽는다 — SVG는
+ * `is-bundled` 옷으로(짚기는 프레임 없이 `is-lit`만 붙이므로 그 옷이 이긴다), GL은 선 패스에서 빼는 것으로.
+ * 주변 탐색에는 묶음이 없다. */
 function knowledgeEdgeBundled(layout, at) {
   if (layout.ring !== null || layout.edgeBetween === null || layout.edgeBetween[at] === 0) return false;
   if (layout.lit.has(at) || layout.pathEdge[at] === 1 || layout.focusEdgeVisited[at] === 1) return false;
@@ -4275,7 +4281,8 @@ function knowledgeEdgeBundled(layout, at) {
   const picked = knowledgeClusterPicked;
   const hovered = knowledgeClusterHover;
   if (picked >= 0 && (left === picked || right === picked)) return false;
-  return !(hovered >= 0 && (left === hovered || right === hovered));
+  if (hovered >= 0 && (left === hovered || right === hovered)) return false;
+  return layout.ties.length > 0 || layout.bridgeLines.has(at);
 }
 
 /* 이름판에 올라선다(포인터든 키보드 포커스든, t-12029) — 그 군집을 밝히고 그 군집을 건너는 낱낱의 선을 묶음에서
