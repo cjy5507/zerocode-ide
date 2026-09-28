@@ -1240,7 +1240,7 @@ impl Ui {
     /// screen waits for the next event to notice. `true` when the screen was
     /// resized; the caller draws.
     fn reconcile_size(&mut self) -> bool {
-        let Ok((cols, rows)) = crossterm::terminal::size() else {
+        let Ok((cols, rows)) = tty::size() else {
             return false;
         };
         // `Painter::resize` clamps; compare against what it would keep, or a

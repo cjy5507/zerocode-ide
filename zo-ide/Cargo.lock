@@ -5009,6 +5009,7 @@ dependencies = [
  "rand 0.9.2",
  "reqwest",
  "runtime",
+ "rustix",
  "serde",
  "serde_json",
  "session-corpus",
