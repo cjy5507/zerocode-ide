@@ -821,6 +821,29 @@ pub(crate) fn set_artifacts_retention_days(
     Ok(snapshot)
 }
 
+/// Whether a first publish opens beside the pane that made it (t-11958).
+/// A view preference like the diff's shape: asked once, and every later
+/// publication follows it. The window's hint line under the header band
+/// turns it off in place, through this same door.
+#[tauri::command(async)]
+pub(crate) fn set_artifacts_auto_open_beside(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    on: bool,
+) -> Result<SettingsSnapshot, String> {
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::ARTIFACTS_AUTO_OPEN_BESIDE],
+        move |settings| {
+            settings.artifacts_auto_open_beside = on;
+            Ok(())
+        },
+    )
+}
+
 /// Which shape a diff opens in. Orca's `renderSideBySide` toggle, stored.
 ///
 /// A view preference and not a document one: it is asked once per person, not

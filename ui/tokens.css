@@ -1744,6 +1744,11 @@
   --artifact-strip-ink: var(--ink-chalk);
   --artifact-strip-ink-soft: var(--ink-mist);
   --artifact-strip-version-inset: calc(var(--space-1) / 2);
+  /* 「새 N」·머리띠 아래 안내 줄·상태 줄 알림(t-11958). 새 것의 표시는 파란
+   * 강조 하나이고, 낱말(「새」)이 늘 함께 서서 색만으로 말하지 않는다. */
+  --artifact-new-ink: var(--workbench-hue-tasks);
+  --artifact-new-bg: color-mix(in srgb, var(--workbench-hue-tasks) 16%, transparent);
+  --artifact-hint-bg: color-mix(in srgb, var(--workbench-hue-tasks) 8%, var(--surface-well));
   --artifact-card-bg: var(--surface-raised);
   --artifact-card-edge: var(--edge-rule);
   --artifact-card-ink: var(--ink-chalk);
@@ -2530,6 +2535,9 @@
    * other six hold their value in both themes (I18nProvider-DPbv01TU.css). */
   --git-graph-ref: #007acc;
   --git-graph-lane-3: #994f00;
+  /* 「새 N」·안내 줄의 파랑이 종이 위 옅은 바탕에서 글자로 읽히려면 한 단계
+   * 짙어야 한다(t-11958: #007acc 그대로는 안내 줄 바탕에 3.73:1). */
+  --artifact-new-ink: color-mix(in srgb, var(--workbench-hue-tasks) 78%, var(--ink-chalk));
   /* A nebula on a white ground needs less paint to be seen. */
   --knowledge-nebula-core: 0.1;
   /* 종이 위에서는 테두리 한 올이 더 일해야 원반의 경계가 읽힌다. */

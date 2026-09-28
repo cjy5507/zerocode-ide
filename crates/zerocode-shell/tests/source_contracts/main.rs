@@ -8894,12 +8894,16 @@ mod tests {
         // The occlusion answer is one function, and it reads EVERY scrim from
         // the markup rather than four by name (review finding 5), plus the
         // full-page views that cover the stage without one.
+        // The full-page views are one list since t-11958, because an
+        // artifact's maker pane asks the same question of them.
         let ducking = block_after(window, "function browserCovered() {");
+        let pages = block_after(window, "function stagePagesCover() {");
         assert!(
             ducking.contains("termFloat.hidden")
                 && ducking.contains("browserShades.some")
-                && ducking.contains("settings-view"),
-            "the native pane no longer ducks under the window's overlays:\n{ducking}"
+                && ducking.contains("stagePagesCover()")
+                && pages.contains("settings-view"),
+            "the native pane no longer ducks under the window's overlays:\n{ducking}\n{pages}"
         );
         assert!(
             window.contains(r#"document.querySelectorAll('[id$="-scrim"]')"#),
@@ -33425,6 +33429,31 @@ mod tests {
         assert!(
             !export.contains("<html") && !export.contains("<script"),
             "the export command writes markup of its own — the page is core's template"
+        );
+    }
+
+    /// t-11958: a page the door publishes reaches the window as the row the
+    /// catalog now holds, beside the catalog's own `artifacts:changed`, and
+    /// the window decides from that row alone — open beside its maker,
+    /// update in place, or raise 「새 N」. A publish that told the window
+    /// only that the catalog moved could do none of the three.
+    #[test]
+    fn a_door_publish_hands_the_window_its_row() {
+        let backend = shipped_backend();
+        let door = block_after(backend, "fn artifact_request(");
+        assert!(
+            door.contains("app.emit(CHANGED_EVENT, ())")
+                && door.contains("app.emit(PUBLISHED_EVENT, meta.artifact(origin))"),
+            "the publish arm no longer hands the window the row it published:\n{door}"
+        );
+        assert!(
+            backend.contains("pub(crate) const PUBLISHED_EVENT: &str = \"artifacts:published\";"),
+            "the published event lost its name"
+        );
+        let window = crate::ui_source::window_source();
+        assert!(
+            window.contains("listen(\"artifacts:published\", (event) => noteArtifactPublished("),
+            "the window no longer hears a publication"
         );
     }
 

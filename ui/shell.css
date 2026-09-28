@@ -36175,6 +36175,12 @@ details.task-board-section > summary {
 .browser-view {
   display: flex;
   flex-direction: column;
+  /* 판(`.pane`)의 열은 암묵 `auto`라, 이 둘이 없으면 도구 줄의 최소 폭(466px)이
+   * 판을 그룹 밖으로 밀어낸다 — 만든 판 옆의 400px 자리에서 머리띠 아래 안내
+   * 줄의 끝이 잘리고, 판을 따라 놓이는 네이티브 페이지는 이웃 그룹 위로 넘쳤다
+   * (t-11958). 넘치는 도구는 판 안에서 잘린다. */
+  min-width: 0;
+  overflow-x: clip;
 }
 
 /* 시뮬레이터 거울(1-g28): 위 한 줄 툴바, 아래는 프레임이 앉는 어두운 몸.
@@ -42263,8 +42269,11 @@ button.jev-token:hover {
  * 옷으로 선다. 숫자·색은 토큰. */
 .artifact-strip {
   display: flex;
+  /* 만든 판 옆의 좁은 자리(t-11958)에서는 단추가 다음 줄로 내려가고 제목이
+   * 남는다 — 한 줄로 두면 줄어드는 것은 제목뿐이었다. */
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
   min-width: 0;
   padding: var(--space-1) var(--space-2);
   border-bottom: var(--rule-width) solid var(--edge-rule);
@@ -42321,6 +42330,108 @@ button.jev-token:hover {
   flex: 1 0 100%;
   margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-4)) var(--space-2);
   padding-inline: var(--space-4);
+}
+
+/* 「새 N」(t-11958): 만든 판의 탭과 사이드바 「아티팩트」 줄에 같은 알약. */
+.artifact-new {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--artifact-new-bg);
+  color: var(--artifact-new-ink);
+  font-size: var(--text-3xs);
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+.nav-row > .nav-new {
+  margin-left: auto;
+}
+
+/* 머리띠 아래 안내 한 줄: 저절로 옆에 열었을 때만. 판이 `.browser-body`를
+ * 따라가므로 이 줄이 서고 떠나면 페이지도 함께 내려앉고 올라간다. */
+.artifact-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--artifact-hint-bg);
+  color: var(--artifact-strip-ink-soft);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  word-break: keep-all;
+}
+
+.artifact-hint-words {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 안내 줄의 행동은 낱말 하나 — 테두리 단추는 좁은 옆 자리에서 줄을 밀어낸다. */
+.artifact-hint-act {
+  flex: none;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--artifact-new-ink);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--motion-fast);
+}
+
+.artifact-hint-act:hover,
+.artifact-hint-act:focus-visible {
+  background: var(--artifact-new-bg);
+}
+
+.artifact-hint-close {
+  width: 20px;
+  height: 20px;
+  border-color: transparent;
+  background: none;
+}
+
+/* 상태 표시줄의 한 줄: 만든 판이 화면에 없을 때만 선다. */
+.sb-artifact-notice {
+  min-width: 0;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.sb-artifact-notice > .icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--artifact-new-ink);
+}
+
+.sb-artifact-notice-words {
+  overflow: hidden;
+  max-width: 40ch;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-artifact-notice-open {
+  color: var(--artifact-new-ink);
+  white-space: nowrap;
+}
+
+.sb-artifact-notice-close .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.note-pop-maker {
+  color: var(--artifact-new-ink);
+  font-size: var(--text-3xs);
 }
 
 .artifacts-empty {

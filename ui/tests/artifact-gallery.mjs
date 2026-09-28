@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { axeViolations } from "./settings-quality.mjs";
 import { installHarnessWaits } from "./harness-waits.mjs";
+import { openWindowTestPage } from "./window-boot.mjs";
 
 export async function testArtifactChrome(page, ok) {
 await installHarnessWaits(page);
@@ -1861,4 +1862,317 @@ export async function testArtifactProvenance(page, ok) {
     seen.worktreeGoesThere && seen.cardLandsOnThePane && seen.taskLandsOnTheWorker,
     JSON.stringify(seen),
   );
+}
+
+/* 새 발행이 사람에게 닿는 길 (t-11958): 「새 N」, 상태 줄 한 줄, 만든 판 옆.
+ *
+ * 문이 발행을 마치면 백엔드가 그 행을 `artifacts:published`로 보낸다. 이 스위트는
+ * 그 이벤트를 가짜 백엔드에서 쏘고 창이 하는 일을 잰다. 규칙은 디자인 검토의
+ * 것이다(output/design/artifacts-20260928): 사람이 보고 있는 판의 첫 발행은 그
+ * 옆에 열고, 다시 발행은 선 자리에서 바뀌며(새 나눔 없음), 좁은 판은 같은 그룹의
+ * 탭, 워커의 발행은 「새 N」만, 설정을 끄면 아무것도 열지 않는다. 만든 판이 화면에
+ * 없을 때만 상태 줄이 말하고, 주석의 초안은 만든 판이 받을 곳의 기본이며 쓰던
+ * 입력 뒤에 붙을 뿐 보내지지 않는다. 본 것은 다시 읽어도 남는다. */
+export async function testArtifactBeside(browser, origin, ok, outputDir) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  const axeModule = createRequire(import.meta.url)("@axe-core/playwright");
+  const AxeBuilder = axeModule.default ?? axeModule;
+  await mkdir(outputDir, { recursive: true });
+  // 두 테마로 그 자리를 찍고, 새로 선 것들의 접근성을 axe로 묻는다.
+  const inBothThemes = async (name, include) => {
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate((next) => document.documentElement.setAttribute("data-theme", next), theme);
+      await new Promise((done) => setTimeout(done, 300));
+      await page.screenshot({ path: join(outputDir, `artifacts-r2-${theme}-${name}.png`) });
+      // 그 자리가 서지 않았으면 axe가 던진다 — 그것도 실패로 센다.
+      const violations = await axeViolations(page, AxeBuilder, include).catch((error) => [String(error)]);
+      ok(`the ${name} marks pass axe in ${theme}`, violations.length === 0, JSON.stringify(violations));
+    }
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+  };
+  try {
+    const install = () => page.evaluate(() => {
+      window.__BESIDE__ = { opens: [], navigations: [], settings: [], pastes: [], prompts: [] };
+      let born = 0;
+      window.__ANSWER__.open_browser_pane = (args) => {
+        born += 1;
+        window.__BESIDE__.opens.push(args.url);
+        return `browser-beside-${born}`;
+      };
+      window.__ANSWER__.browser_zoom = () => null;
+      window.__ANSWER__.browser_navigate = (args) => (window.__BESIDE__.navigations.push({ ...args }), null);
+      window.__ANSWER__.artifact_versions = (args) => {
+        const top = window.__BESIDE_VERSIONS__?.[args.id] ?? 1;
+        return Array.from({ length: top }, (_, at) => ({
+          n: at + 1,
+          path: `/tmp/zerocode-window-test/artifacts/versions/${args.id}/${at + 1}/index.html`,
+          sha256: `sha-${at + 1}`,
+        }));
+      };
+      window.__ANSWER__.set_artifacts_auto_open_beside = (args) => (window.__BESIDE__.settings.push(args.on), null);
+      window.__ANSWER__.term_paste = (args) => (window.__BESIDE__.pastes.push({ ...args }), null);
+      window.__ANSWER__.send_prompt = (args) => (window.__BESIDE__.prompts.push({ ...args }), null);
+    });
+    const settle = () => page.evaluate(() => new Promise((done) => setTimeout(done, 160)));
+    const clear = () => page.evaluate(() => {
+      for (const tab of [...tabs]) dropTab(tab.id);
+      for (const term of [...termViews.keys()]) dropTermView(term);
+      for (const group of stageGroups()) collapseStageGroup(group);
+      globalThis.hideArtifactNotice?.();
+      renderTabs();
+      updateStage();
+    });
+    // 한 번의 발행: 문이 기록한 출처를 입은 행, 지금 시각에 — 판이 그보다 먼저 태어났다.
+    const publish = (id, version, origin) => page.evaluate(({ id: key, version: n, origin: made }) => {
+      window.__BESIDE_VERSIONS__ = { ...(window.__BESIDE_VERSIONS__ ?? {}), [key]: n };
+      const at = Date.now();
+      const row = {
+        id: key, kind: "page", title: `${key} 시안`, bytes: 10, created_ms: at, modified_ms: at, version: n,
+        path: `/tmp/zerocode-window-test/artifacts/pages/${key}/index.html`,
+        url: `file:///tmp/zerocode-window-test/artifacts/pages/${key}/index.html`,
+        source_path: `/tmp/zerocode-window-test/${key}.html`, origin: made, tags: [],
+        preview: { kind: "text", text: "" }, source: "manual",
+      };
+      for (const handler of window.__LISTENERS__["artifacts:published"] ?? []) handler({ payload: row });
+    }, { id, version, origin });
+    // 새 판은 `group`에 탭으로 선다 — 안 주면 지금 초점 그룹에.
+    const seat = async (group = null) => {
+      const term = await page.evaluate(async (at) => {
+        if (at !== null) focusedPane = at;
+        const made = await openTermTab({ placement: "tab" });
+        paneAgents.set(made, "claude");
+        renderTabs();
+        return made;
+      }, group);
+      await settle();
+      return term;
+    };
+    const look = (maker) => page.evaluate((term) => {
+      const tab = tabOfTerm(term);
+      const strip = tab ? document.querySelector(`[data-tab="${CSS.escape(tab.id)}"]`) : null;
+      const browsers = tabs.filter((one) => one.kind === "browser");
+      const notice = document.getElementById("sb-artifact-notice");
+      return {
+        opens: window.__BESIDE__.opens.length,
+        navigations: window.__BESIDE__.navigations.map((one) => one.url),
+        groups: stageGroups().length,
+        makerGroup: tab?.pane ?? null,
+        makerWidth: Math.round(termViews.get(term)?.host?.getBoundingClientRect().width ?? 0),
+        makerActive: activeTabId === tab?.id,
+        browsers: browsers.map((one) => ({ id: one.artifact?.id ?? null, pane: one.pane, current: one.artifact?.current ?? null })),
+        tabPill: strip?.querySelector(".tab-new")?.textContent ?? "",
+        navPill: document.querySelector("#nav-artifacts .nav-new")?.textContent ?? "",
+        unseen: typeof artifactUnseen === "undefined" ? null : [...artifactUnseen.keys()],
+        notice: notice && !notice.hidden ? notice.textContent.trim() : "",
+        noticeOpen: notice?.querySelector(".sb-artifact-notice-open")?.textContent ?? "",
+      };
+    }, maker);
+    const hintOf = (id) => page.evaluate((key) => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === key);
+      const hint = tab ? docHost(tab.pane, "browser").querySelector(".artifact-hint") : null;
+      return {
+        shown: hint ? hint.hidden === false : false,
+        words: hint?.querySelector(".artifact-hint-words")?.textContent ?? "",
+        act: hint?.querySelector(".artifact-hint-act")?.textContent ?? "",
+      };
+    }, id);
+    await install();
+    // 첫 장면들은 넓은 판에서 — 사이드바와 오른쪽 열을 빼고도 720px이 남게.
+    await page.setViewportSize({ width: 1440, height: 860 });
+
+    /* ---- 1. 보고 있는 판의 첫 발행은 그 옆에 선다 --------------------------- */
+    await clear();
+    const maker = await seat();
+    const before = await look(maker);
+    await publish("p-first", 1, { pane: `term-${maker}`, agent: "claude" });
+    await settle();
+    const first = await look(maker);
+    const firstHint = await hintOf("p-first");
+    ok(
+      "a first publish from the pane the person is looking at opens beside that pane, leaves the focus there and says so under the header band",
+      before.makerWidth >= 720 && first.opens === 1 && first.groups === before.groups + 1
+        && first.browsers.length === 1 && first.browsers[0].id === "p-first"
+        && first.browsers[0].pane !== first.makerGroup && first.makerActive
+        && first.unseen?.length === 0 && first.tabPill === "" && first.navPill === "" && first.notice === ""
+        && firstHint.shown && firstHint.words.includes("처음 발행이라 만든 판 옆에 열었습니다")
+        && firstHint.act === "자동으로 열지 않기",
+      JSON.stringify({ before, first, firstHint }),
+    );
+    await inBothThemes("beside", ".artifact-hint:not([hidden])");
+
+    /* ---- 2. 다시 발행은 선 자리에서 바뀐다 ---------------------------------- */
+    const tree = await page.evaluate(() => JSON.stringify(stageTree()));
+    await publish("p-first", 2, { pane: `term-${maker}`, agent: "claude" });
+    await settle();
+    const again = await look(maker);
+    const treeAfter = await page.evaluate(() => JSON.stringify(stageTree()));
+    ok(
+      "a republish updates the open page in place: no new pane, no new split, the new version on the same tab",
+      again.opens === 1 && treeAfter === tree && again.browsers.length === 1
+        && again.browsers[0].current === 2
+        && again.navigations.at(-1) === "file:///tmp/zerocode-window-test/artifacts/pages/p-first/index.html"
+        && again.unseen?.length === 0,
+      JSON.stringify({ again, tree, treeAfter }),
+    );
+
+    /* ---- 3. 워커의 발행은 열지 않고 「새 N」만 ------------------------------ */
+    await publish("p-worker", 1, { pane: `term-${maker}`, agent: "claude", run: "run-1", worker: "w-1", task: "t-1" });
+    await settle();
+    const worker = await look(maker);
+    ok(
+      "a background worker's publication never opens: the maker pane's tab and the sidebar wear 「새 1」 and the status bar stays quiet",
+      worker.opens === 1 && worker.browsers.length === 1 && worker.tabPill === "새 1" && worker.navPill === "새 1"
+        && worker.notice === "" && worker.unseen?.join() === "p-worker",
+      JSON.stringify(worker),
+    );
+
+    /* ---- 4. 안내 줄의 「자동으로 열지 않기」 = 설정 끔 → 아무것도 열지 않는다 ---- */
+    await page.evaluate(() => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-first");
+      if (tab) docHost(tab.pane, "browser").querySelector(".artifact-hint-act")?.click();
+    });
+    await settle();
+    const offHint = await hintOf("p-first");
+    await publish("p-off", 1, { pane: `term-${maker}`, agent: "claude" });
+    await settle();
+    const off = await look(maker);
+    const offSetting = await page.evaluate(() => ({
+      saved: [...window.__BESIDE__.settings],
+      field: document.getElementById("artifacts-auto-open-beside")?.checked ?? null,
+    }));
+    ok(
+      "with automatic opening off — from the hint line or the settings field — a first publish opens nothing and only raises 「새 N」",
+      offSetting.saved.join() === "false" && offSetting.field === false
+        && offHint.words.includes("자동 열기를 껐습니다") && offHint.act === "되돌리기"
+        && off.opens === 1 && off.tabPill === "새 2" && off.navPill === "새 2" && off.notice === "",
+      JSON.stringify({ offSetting, offHint, off }),
+    );
+    await page.evaluate(() => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-first");
+      if (tab) docHost(tab.pane, "browser").querySelector(".artifact-hint-act")?.click();
+    });
+    await settle();
+    const undone = await page.evaluate(() => ({
+      saved: [...window.__BESIDE__.settings],
+      on: typeof artifactsAutoOpenBeside === "undefined" ? null : artifactsAutoOpenBeside,
+    }));
+    ok("the hint's 「되돌리기」 turns automatic opening back on through the same setting",
+      undone.saved.join() === "false,true" && undone.on === true, JSON.stringify(undone));
+
+    /* ---- 5. 만든 판이 화면에 없으면 상태 줄 한 줄, 「옆에 열기」로 그 옆에 ----- */
+    // 사람은 만든 판과 같은 그룹의 다른 판으로 넘어갔다 — 만든 판은 가려졌다.
+    const other = await seat(first.makerGroup);
+    await publish("p-away", 1, { pane: `term-${maker}`, agent: "claude" });
+    await settle();
+    const away = await look(maker);
+    ok(
+      "a publish whose maker pane is off screen opens nothing and says one line on the status bar",
+      away.opens === 1 && away.notice.includes("p-away 시안") && away.noticeOpen === "옆에 열기"
+        && away.tabPill === "새 3" && away.navPill === "새 3" && !away.makerActive && other !== maker,
+      JSON.stringify(away),
+    );
+    await inBothThemes("notice", "#sb-artifact-notice, .tab-new, .nav-new");
+    await page.evaluate(() => document.querySelector("#sb-artifact-notice .sb-artifact-notice-open")?.click());
+    await settle();
+    const opened = await look(maker);
+    ok(
+      "the status line's 「옆에 열기」 brings the maker pane forward, opens the page beside it and takes the page off 「새 N」",
+      opened.opens === 2 && opened.makerActive && opened.notice === ""
+        && opened.browsers.some((one) => one.id === "p-away" && one.pane !== opened.makerGroup)
+        && opened.tabPill === "새 2" && opened.unseen !== null && !opened.unseen.includes("p-away"),
+      JSON.stringify(opened),
+    );
+
+    /* ---- 6. 다시 읽어도 본 것과 안 본 것은 남는다 ---------------------------- */
+    await page.reload();
+    await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+    await install();
+    await settle();
+    const reloaded = await page.evaluate(() => ({
+      nav: document.querySelector("#nav-artifacts .nav-new")?.textContent ?? "",
+      unseen: typeof artifactUnseen === "undefined" ? null : [...artifactUnseen.keys()],
+    }));
+    await page.evaluate(async () => {
+      await openArtifactPage({
+        id: "p-worker", kind: "page", title: "p-worker 시안", version: 1, modified_ms: Date.now(),
+        path: "/tmp/zerocode-window-test/artifacts/pages/p-worker/index.html", origin: {},
+      });
+    });
+    await settle();
+    const seenAfter = await page.evaluate(() => ({
+      nav: document.querySelector("#nav-artifacts .nav-new")?.textContent ?? "",
+      stored: JSON.parse(localStorage.getItem("zerocode.artifacts.unseen.v1") ?? "[]").map((one) => one.id),
+    }));
+    ok(
+      "unseen publications survive a reload, and opening one takes it off the sidebar's 「새 N」 and out of storage",
+      reloaded.nav === "새 2" && reloaded.unseen?.join() === "p-worker,p-off"
+        && seenAfter.nav === "새 1" && seenAfter.stored.join() === "p-off",
+      JSON.stringify({ reloaded, seenAfter }),
+    );
+
+    /* ---- 7. 좁은 판은 나누지 않고 같은 그룹의 탭 ----------------------------- */
+    await clear();
+    await page.setViewportSize({ width: 860, height: 860 });
+    const narrowMaker = await seat();
+    const narrowBefore = await look(narrowMaker);
+    await publish("p-narrow", 1, { pane: `term-${narrowMaker}`, agent: "claude" });
+    await settle();
+    const narrow = await look(narrowMaker);
+    ok(
+      "a maker pane narrower than 720px gets the page as a tab in its own group instead of a split",
+      narrowBefore.makerWidth > 0 && narrowBefore.makerWidth < 720 && narrow.opens === narrowBefore.opens + 1
+        && narrow.groups === narrowBefore.groups
+        && narrow.browsers.some((one) => one.id === "p-narrow" && one.pane === narrow.makerGroup),
+      JSON.stringify({ narrowBefore, narrow }),
+    );
+    await page.setViewportSize({ width: 1280, height: 860 });
+
+    /* ---- 8. 주석의 받을 곳은 만든 판, 초안은 쓰던 입력 뒤에 붙고 보내지 않는다 -- */
+    const draft = await page.evaluate(async (term) => {
+      const elsewhere = await openTermTab({ placement: "tab" });
+      paneAgents.set(elsewhere, "codex");
+      window.__ANSWER__.agent_terms = () => [[elsewhere, "codex"], [term, "claude"]];
+      // 앞 장면이 연 탭 — 없으면(좁은 판 장면이 열지 못했으면) 갤러리의 길로 연다.
+      if (!tabs.some((one) => one.kind === "browser" && one.artifact?.id === "p-narrow")) {
+        await openArtifactPage({
+          id: "p-narrow", kind: "page", title: "p-narrow 시안", version: 1, modified_ms: Date.now(),
+          path: "/tmp/zerocode-window-test/artifacts/pages/p-narrow/index.html", origin: { pane: `term-${term}`, agent: "claude" },
+        });
+      }
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-narrow");
+      browserAnnotations.set(tab.label, [
+        { intent: "change", comment: "핀 번호가 카드 글자를 가립니다", selector: ".pin", tag: "div" },
+      ]);
+      setActiveTab(tab.id);
+      await deliverAnnotations(docHost(tab.pane, "browser"), tab);
+      await new Promise((done) => setTimeout(done, 80));
+      const rows = [...document.querySelectorAll("#note-pop .note-pop-row")];
+      const first = rows[0] ?? null;
+      const picked = {
+        firstIsMaker: first?.classList.contains("is-maker") ?? false,
+        firstWords: first?.textContent ?? "",
+        focused: document.activeElement === first,
+        makers: rows.filter((row) => row.classList.contains("is-maker")).length,
+      };
+      first?.click();
+      await new Promise((done) => setTimeout(done, 120));
+      delete window.__ANSWER__.agent_terms;
+      return {
+        ...picked,
+        elsewhere,
+        pastes: window.__BESIDE__.pastes.map((one) => ({ term: one.term, ends: one.text.slice(-12), has: one.text.includes("핀 번호가 카드 글자를 가립니다") })),
+        prompts: window.__BESIDE__.prompts.length,
+      };
+    }, narrowMaker);
+    ok(
+      "an annotation on an artifact defaults to its maker pane, and the draft is pasted after what is typed there — no clearing keys, never sent",
+      draft.firstIsMaker && draft.makers === 1 && draft.focused && draft.firstWords.includes("만든 에이전트")
+        && draft.pastes.length === 1 && draft.pastes[0].term === narrowMaker && draft.pastes[0].has
+        && !draft.pastes[0].ends.includes("\r") && draft.prompts === 0,
+      JSON.stringify(draft),
+    );
+    ok("the window raised no errors", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
 }

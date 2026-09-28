@@ -7978,7 +7978,7 @@ async function artifactAction(view, action, id) {
  * 도 같은 문으로 `file://`을 열되 창의 머리띠 한 줄을 얹고, 문서(md)는 기존
  * 마크다운 뷰어에 같은 머리띠를 얹는다. 열었으면 true, 이 길이 아닌 종류면
  * false — 그러면 부르는 쪽이 시스템 기본 앱으로 간다. */
-async function openArtifactPage(row, { version = null } = {}) {
+async function openArtifactPage(row, { version = null, seat = null, hint = null } = {}) {
   if (row.kind === "web") {
     if (!row.url) return false;
     await openBrowserTab(row.url);
@@ -7998,11 +7998,17 @@ async function openArtifactPage(row, { version = null } = {}) {
       path = artifactShownPath(facts);
       if (!path) throw new Error(t("artifacts.versionUnavailable", "선택한 발행 버전을 찾을 수 없습니다. 갤러리를 다시 읽어 주세요."));
     }
-    const label = await openBrowserTab(pathAsFileUrl(path));
+    // 만든 판 옆에 여는 길(`seat`)은 초점을 그 판에 둔다: 사람은 그 판에서
+    // 쓰던 중이고, 페이지는 옆에 서기만 한다.
+    const label = await openBrowserTab(pathAsFileUrl(path), seat === null ? {} : { makerSeat: seat, focus: false });
     const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
     if (tab) {
+      facts.hint = hint;
       tab.artifact = facts;
       if (stillShowing(tab)) paintBrowserView(tab);
+      // 여는 길이 무엇이든 탭이 섰으면 본 것이다 — 「새 N」은 여기서 내려간다
+      // (t-11958). 버전을 묻는 사이 사람이 자리를 옮겨 열지 않았으면 남는다.
+      markArtifactSeen(row.id);
     }
     return true;
   }
@@ -8068,6 +8074,11 @@ function artifactStripFacts(row) {
     sourcePath: row.source_path ?? null,
     versions: null,
     version: row.version ?? null,
+    // 만든 판의 열쇠와 그 발행 시각 — 주석의 받을 곳이 `artifactMakerTerm`의
+    // 같은 물음(그 판이 발행보다 먼저 태어났는가)으로 판을 찾는다(t-11958).
+    maker: row.origin?.pane ?? null,
+    madeAt: row.modified_ms ?? 0,
+    hint: null,
   };
 }
 
@@ -8333,6 +8344,354 @@ async function draftIntoAgentPane(seat, text, options = {}) {
   }
   return true;
 }
+
+/* ---- 새 발행: 「새 N」, 상태 줄 한 줄, 만든 판 옆 (t-11958) ---------------
+ *
+ * 문이 발행을 마치면 백엔드가 그 행을 `artifacts:published`로 보낸다. 창은 그
+ * 행 하나로 정한다:
+ *   - 이미 열린 탭이 그 아티팩트면(다시 발행) 그 탭이 제자리에서 바뀐다 — 판을
+ *     새로 나누지 않는다.
+ *   - 사람이 보고 있는 판의 첫 발행(v1)은, 워커가 아니고 설정이 켜져 있으면,
+ *     그 판 옆에 열린다. 판이 좁으면(720px 미만) 나누지 않고 같은 그룹의 탭이다.
+ *   - 나머지는 「새 N」만 올린다 — 만든 판의 탭과 사이드바의 「아티팩트」. 만든
+ *     판이 화면에 없고 워커가 아니면 상태 표시줄에 한 줄이 선다.
+ * 본 것은 이 창의 로컬 저장소에 남는다: 다시 읽어도 「새 N」은 사람이 열어 볼
+ * 때까지 선다. 출처는 표지일 뿐이라 이 판정은 무엇도 허락하지 않는다. */
+const ARTIFACT_UNSEEN_KEY = "zerocode.artifacts.unseen.v1";
+const ARTIFACT_HINT_KEY = "zerocode.artifacts.beside-hint.v1";
+// 저장소가 끝없이 자라지 않게 — 가장 오래된 것부터 잊는다.
+const ARTIFACT_UNSEEN_MAX = 200;
+// 이보다 좁은 판은 반으로 나누면 둘 다 못 쓴다: 옆 자리 대신 같은 그룹의 탭.
+const ARTIFACT_BESIDE_MIN_PX = 720;
+
+// 저장소에서 읽은 값은 남이 쓴 것일 수 있다 — 글자가 아니면 없는 것이다.
+function artifactUnseenText(value) {
+  return typeof value === "string" ? value : null;
+}
+
+function artifactUnseenEntry(value) {
+  const id = artifactUnseenText(value?.id);
+  if (!id) return null;
+  return {
+    id,
+    version: Number.isInteger(value.version) ? value.version : null,
+    title: artifactUnseenText(value.title) ?? "",
+    pane: artifactUnseenText(value.pane),
+    agent: artifactUnseenText(value.agent),
+    worker: artifactUnseenText(value.worker),
+    at: Number.isFinite(value.at) ? value.at : 0,
+  };
+}
+
+function loadArtifactUnseen() {
+  try {
+    const held = JSON.parse(localStorage.getItem(ARTIFACT_UNSEEN_KEY) ?? "[]");
+    const rows = (Array.isArray(held) ? held : []).map(artifactUnseenEntry).filter(Boolean);
+    return new Map(rows.map((one) => [one.id, one]));
+  } catch {
+    return new Map();
+  }
+}
+
+// id → 아직 아무도 열지 않은 발행. 순서가 곧 도착 순서다.
+let artifactUnseen = loadArtifactUnseen();
+// 상태 표시줄이 지금 말하는 발행의 행, 없으면 null.
+let artifactNoticeRow = null;
+
+function saveArtifactUnseen() {
+  try {
+    localStorage.setItem(ARTIFACT_UNSEEN_KEY, JSON.stringify([...artifactUnseen.values()]));
+  } catch {
+    // 저장소가 막혀도 이 창이 떠 있는 동안의 「새 N」은 선다.
+  }
+}
+
+function rememberArtifactUnseen(row) {
+  artifactUnseen.delete(row.id);
+  artifactUnseen.set(row.id, artifactUnseenEntry({
+    id: row.id,
+    version: row.version,
+    title: row.title,
+    pane: row.origin?.pane,
+    agent: row.origin?.agent,
+    worker: row.origin?.worker,
+    at: row.modified_ms,
+  }));
+  while (artifactUnseen.size > ARTIFACT_UNSEEN_MAX) artifactUnseen.delete(artifactUnseen.keys().next().value);
+  saveArtifactUnseen();
+  paintArtifactUnseen();
+}
+
+function markArtifactSeen(id) {
+  if (artifactNoticeRow?.id === id) hideArtifactNotice();
+  if (!artifactUnseen.delete(id)) return;
+  saveArtifactUnseen();
+  paintArtifactUnseen();
+}
+
+/* 이 탭의 판들이 발행하고 아직 열리지 않은 수 — 탭 줄이 그릴 때마다 묻는다.
+ * 판 번호는 기동마다 새로 나오므로 `artifactMakerTerm`과 같은 물음으로 잇는다. */
+function artifactUnseenOnTab(tab) {
+  if (artifactUnseen.size === 0 || tab.kind !== "term") return 0;
+  const leaves = paneLeaves(tab.layout);
+  let count = 0;
+  for (const one of artifactUnseen.values()) {
+    const term = artifactMakerTerm({ origin: { pane: one.pane }, modified_ms: one.at });
+    if (term !== null && leaves.includes(term)) count += 1;
+  }
+  return count;
+}
+
+/* 「새 N」 알약 — 판 탭과 사이드바가 같은 조립기로 짓는다. 수가 없으면 떠난다. */
+function paintArtifactUnseenPill(host, className, count, tip, before = null) {
+  let pill = host.querySelector(`:scope > .${className}`);
+  if (count === 0) {
+    pill?.remove();
+    return;
+  }
+  if (!pill) {
+    pill = document.createElement("span");
+    pill.className = `artifact-new ${className}`;
+    if (before) before.after(pill);
+    else host.appendChild(pill);
+  }
+  const words = t("artifacts.unseen", "새 {{n}}", { n: count });
+  if (pill.textContent !== words) pill.textContent = words;
+  if (pill.dataset.tip !== tip) pill.dataset.tip = tip;
+}
+
+/* 탭 줄은 창이 이름을 바꾸는 프레임마다 그린다 — 새 것이 없고 알약도 없던
+ * 탭은 문서를 묻지도 않고 지나간다. 마지막으로 그린 낱말(언어가 바뀌어도
+ * 다시 그리도록 수가 아니라 낱말)은 노드가 든다. */
+function paintTabUnseen(node, tab) {
+  const count = artifactUnseenOnTab(tab);
+  const words = count === 0 ? "" : t("artifacts.unseen", "새 {{n}}", { n: count });
+  if (words === (node._unseen ?? "")) return;
+  node._unseen = words;
+  paintArtifactUnseenPill(node, "tab-new", count,
+    t("artifacts.unseenTab", "이 판이 발행하고 아직 열지 않은 페이지 {{n}}개", { n: count }),
+    node.querySelector(".tab-label"));
+}
+
+function paintArtifactUnseenNav() {
+  const count = artifactUnseen.size;
+  paintArtifactUnseenPill(el("nav-artifacts"), "nav-new", count,
+    t("artifacts.unseenNav", "아직 열지 않은 새 페이지 {{n}}개", { n: count }));
+}
+
+function paintArtifactUnseen() {
+  paintArtifactUnseenNav();
+  renderTabs();
+}
+
+/* 만든 판이 지금 사람의 화면에 서 있는가: 그 셸이 무대에 드러나 있고, 무대를
+ * 덮는 페이지(설정·작업 등)가 없고, 창이 가려지지 않았다. */
+function artifactTermShown(term) {
+  const view = termViews.get(term);
+  if (!view || !termShown(view)) return false;
+  if (document.visibilityState === "hidden") return false;
+  return !stagePagesCover();
+}
+
+/* 탭이 지금 제 그룹의 앞에 서 있는가 — 다시 발행이 그 자리에서 바뀐 것을 사람이
+ * 본 것으로 칠 수 있는지. */
+function artifactTabShown(tab) {
+  return stageGroups().includes(tab.pane) && activeTabIn(tab.pane)?.id === tab.id && !stagePagesCover();
+}
+
+/* 발행한 판 옆에 연다. 그 판이 이 체크아웃에 서 있을 때만 옆이고, 아니면 여는
+ * 길은 갤러리의 「열기」와 같다. 오른쪽에 이미 이웃 그룹이 있으면 그 자리가
+ * 옆이다 — 아무것도 새로 나누지 않는다. 이웃이 없을 때만 나누고, 그 판이 좁으면
+ * (그 셸이 지금 입은 폭) 나누는 대신 같은 그룹의 탭이다. */
+async function openArtifactBeside(row, maker, { hint = null } = {}) {
+  const tab = maker === null ? null : tabOfTerm(maker);
+  let seat = null;
+  if (tab && (tab.worktree ?? activeWorktreePath) === activeWorktreePath && stageGroups().includes(tab.pane)) {
+    const width = termViews.get(maker)?.host?.getBoundingClientRect().width ?? 0;
+    const neighbour = stageRightOf(stageTree(), tab.pane).seat !== null;
+    seat = { group: tab.pane, split: neighbour || width >= ARTIFACT_BESIDE_MIN_PX };
+  }
+  try {
+    return await openArtifactPage(row, { seat, hint });
+  } catch (error) {
+    showError(String(error));
+    return true;
+  }
+}
+
+/* 다시 발행: 그 아티팩트를 든 탭이 선 자리에서 새 판으로 바뀐다. 사람이 지난
+ * 번호를 골라 보고 있으면 그 선택을 넘어 가지 않는다 — 고르개에 새 번호만 선다. */
+function refreshArtifactTab(tab, row) {
+  const held = tab.artifact;
+  const picked = held.version != null && held.current != null && held.version !== held.current;
+  const facts = artifactStripFacts(row);
+  facts.hint = held.hint;
+  if (picked) facts.version = held.version;
+  tab.artifact = facts;
+  if (picked) {
+    if (stillShowing(tab)) paintBrowserView(tab);
+    return;
+  }
+  submitBrowserAddress(tab, pathAsFileUrl(row.path));
+}
+
+function noteArtifactPublished(row) {
+  if (!row || typeof row.id !== "string" || row.kind !== "page" || isPopout) return;
+  const open = tabs.filter((one) => one.kind === "browser" && one.artifact?.id === row.id);
+  if (open.length > 0) {
+    for (const tab of open) refreshArtifactTab(tab, row);
+    if (open.some(artifactTabShown)) markArtifactSeen(row.id);
+    else rememberArtifactUnseen(row);
+    return;
+  }
+  const maker = artifactMakerTerm(row);
+  const worker = Boolean(row.origin?.worker);
+  const shown = maker !== null && artifactTermShown(maker);
+  if (!worker && shown && row.version === 1 && artifactsAutoOpenBeside) {
+    void openArtifactBeside(row, maker, { hint: artifactHintDismissed() ? null : "opened" });
+    return;
+  }
+  rememberArtifactUnseen(row);
+  if (!worker && !shown) showArtifactNotice(row, maker);
+}
+
+/* ---- 상태 표시줄의 한 줄 — 떠 있는 상자가 아니다(디자인 검토: 알림 상자가
+ * 미리보기를 가렸다). 가장 새 발행 하나만 말하고, 열거나 닫거나 그 페이지를
+ * 다른 길로 열면 내려간다. */
+function artifactNoticeNode() {
+  let node = el("sb-artifact-notice");
+  if (node) return node;
+  node = document.createElement("span");
+  node.className = "sb-item sb-artifact-notice";
+  node.id = "sb-artifact-notice";
+  node.setAttribute("role", "status");
+  node.hidden = true;
+  node.innerHTML = icon("ft-file-box");
+  const words = document.createElement("span");
+  words.className = "sb-artifact-notice-words";
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "sb-button sb-artifact-notice-open";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "sb-button sb-artifact-notice-close";
+  close.innerHTML = icon("x");
+  node.append(words, open, close);
+  open.addEventListener("click", () => {
+    const row = artifactNoticeRow;
+    if (!row) return;
+    hideArtifactNotice();
+    const maker = artifactMakerTerm(row);
+    const tab = maker === null ? null : tabOfTerm(maker);
+    if (tab && (tab.worktree ?? activeWorktreePath) === activeWorktreePath) {
+      leavePagesForStage();
+      setActiveTab(tab.id);
+      setActivePane(tab, maker);
+    }
+    void openArtifactBeside(row, maker);
+  });
+  close.addEventListener("click", hideArtifactNotice);
+  document.querySelector(".statusbar .sb-spacer").before(node);
+  return node;
+}
+
+function showArtifactNotice(row, maker) {
+  const node = artifactNoticeNode();
+  artifactNoticeRow = row;
+  const who = row.origin?.agent ? agentName(row.origin.agent) : t("artifacts.notice.someone", "에이전트");
+  node.querySelector(".sb-artifact-notice-words").textContent =
+    t("artifacts.notice.published", "{{who}} · ‘{{title}}’ 발행", { who, title: row.title });
+  const open = node.querySelector(".sb-artifact-notice-open");
+  open.textContent = maker === null
+    ? t("artifacts.notice.open", "열기")
+    : t("artifacts.notice.beside", "옆에 열기");
+  const close = node.querySelector(".sb-artifact-notice-close");
+  const closing = t("artifacts.notice.close", "알림 닫기");
+  close.setAttribute("aria-label", closing);
+  close.dataset.tip = closing;
+  node.hidden = false;
+}
+
+function hideArtifactNotice() {
+  artifactNoticeRow = null;
+  const node = el("sb-artifact-notice");
+  if (node) node.hidden = true;
+}
+
+/* ---- 머리띠 아래 안내 한 줄: 저절로 옆에 열었을 때만 선다. 거기서 자동 열기를
+ * 끄고 되돌릴 수 있고, ✕로 닫으면 다음 자동 열기부터 서지 않는다. */
+function artifactHintDismissed() {
+  try {
+    return localStorage.getItem(ARTIFACT_HINT_KEY) === "dismissed";
+  } catch {
+    return false;
+  }
+}
+
+function artifactHintNode() {
+  const hint = document.createElement("div");
+  hint.className = "artifact-hint";
+  hint.setAttribute("role", "status");
+  hint.hidden = true;
+  const words = document.createElement("span");
+  words.className = "artifact-hint-words";
+  const act = document.createElement("button");
+  act.type = "button";
+  act.className = "artifact-hint-act";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "icon-btn artifact-hint-close";
+  close.innerHTML = icon("x");
+  hint.append(words, act, close);
+  return hint;
+}
+
+function paintArtifactHint(hint, tab) {
+  if (!hint) return;
+  const facts = tab?.artifact ?? null;
+  const state = facts?.hint ?? null;
+  hint.hidden = state === null;
+  if (state === null) return;
+  const repaint = () => {
+    if (stillShowing(tab)) paintBrowserView(tab);
+  };
+  hint.querySelector(".artifact-hint-words").textContent = state === "off"
+    ? t("artifacts.hint.off", "자동 열기를 껐습니다. 새 발행은 판 탭의 「새 N」으로만 알립니다.")
+    : t("artifacts.hint.opened", "처음 발행이라 만든 판 옆에 열었습니다. 다시 발행하면 이 자리에서 바뀝니다.");
+  const act = hint.querySelector(".artifact-hint-act");
+  act.textContent = state === "off"
+    ? t("artifacts.hint.undo", "되돌리기")
+    : t("artifacts.hint.stop", "자동으로 열지 않기");
+  act.onclick = () => {
+    const on = facts.hint === "off";
+    facts.hint = on ? "opened" : "off";
+    commitArtifactsAutoOpen(on);
+    repaint();
+  };
+  const close = hint.querySelector(".artifact-hint-close");
+  const closing = t("artifacts.hint.close", "안내 닫기");
+  close.setAttribute("aria-label", closing);
+  close.dataset.tip = closing;
+  close.onclick = () => {
+    facts.hint = null;
+    try {
+      localStorage.setItem(ARTIFACT_HINT_KEY, "dismissed");
+    } catch {
+      // 이 탭에서는 닫혔다. 다음 자동 열기에 다시 설 뿐이다.
+    }
+    repaint();
+  };
+}
+
+/* 머리띠가 든 만든 판 — 주석의 받을 곳이 기본으로 고른다. 없으면 null. */
+function artifactFactsMaker(facts) {
+  if (!facts?.maker) return null;
+  return artifactMakerTerm({ origin: { pane: facts.maker }, modified_ms: facts.madeAt });
+}
+
+listen("artifacts:published", (event) => noteArtifactPublished(event?.payload ?? null));
+// 지난번 창이 남긴 「새 N」 — 탭의 알약은 탭 줄이 처음 그릴 때 선다.
+paintArtifactUnseenNav();
 
 /* 카탈로그가 움직였다는 백엔드의 말: 판이 서 있으면 다시 읽고, 칩의 수는 늘 다시
  * 센다. 폴러가 아니다 — 이 이벤트가 곧 폴이다. */
