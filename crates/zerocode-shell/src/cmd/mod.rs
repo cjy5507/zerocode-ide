@@ -251,8 +251,8 @@ pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};
 
 pub(crate) use artifacts::{
     artifact_copy_path, artifact_counts, artifact_delete, artifact_import_transcripts,
-    artifact_open, artifact_preview, artifact_register, artifact_reveal, artifact_search,
-    artifact_thumbnail, artifact_versions, artifacts_list,
+    artifact_open, artifact_page_at, artifact_preview, artifact_register, artifact_reveal,
+    artifact_search, artifact_thumbnail, artifact_versions, artifacts_list,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,

@@ -174,6 +174,15 @@ pub(crate) struct Version {
     pub(crate) sha256: Option<String>,
 }
 
+/// What a page address names in this store ([`Store::page_at`]): the
+/// publication, and the kept version the address is — `None` for the page's
+/// current file.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct PageAt {
+    pub(crate) artifact: Artifact,
+    pub(crate) version: Option<u32>,
+}
+
 /// One listing answer: rows newest first, the count behind them, and whether
 /// the table's row cap cut the answer.
 #[derive(Debug, Clone, Serialize)]
@@ -403,14 +412,18 @@ impl Store {
     }
 
     /// Publish into this catalog under its existing lock; no watcher or timer of its own.
+    /// The row wears `origin` whole — a republish records its own publisher,
+    /// not the first one's.
     pub(crate) fn publish_page(
         &self,
         input: &zerocode_core::artifact_publish::PublishInput,
+        origin: Origin,
     ) -> Result<zerocode_core::artifact_publish::PageMeta, String> {
         let limits = self.limits();
         let mut index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
         let _lock = zerocode_core::artifact_publish::lock_store(&self.root)?;
         let meta = zerocode_core::artifact_publish::publish(&self.root, input, &limits)?;
+        let _ = origin;
         let artifact = meta.artifact(Origin::default());
         let row = Row {
             tokens: Self::tokens_of_words(
@@ -827,6 +840,16 @@ impl Store {
                 version
             })
             .collect()
+    }
+
+    /// The publication a path names: its current file under `pages/<id>/`,
+    /// or one of its kept versions. Judged on resolved paths under this
+    /// store's own folder, so a link into the store opens as the artifact it
+    /// is and nothing outside it is taken for one; any other file — outside
+    /// the store, a page's metadata, a row since deleted — is `None`.
+    pub(crate) fn page_at(&self, path: &Path) -> Option<PageAt> {
+        let _ = path;
+        None
     }
 
     /// The scan's snapshots of one page or document, oldest first, without
@@ -2010,13 +2033,56 @@ pub(crate) struct ArtifactDoor;
 impl zerocode_hookd::ArtifactCommands for ArtifactDoor {
     fn execute(&self, request: serde_json::Value) -> Result<serde_json::Value, String> {
         let store = store().ok_or("artifact store is not ready")?;
-        artifact_request(&store, request)
+        artifact_request(&store, request, &|_| Origin::default())
     }
+}
+
+/// What the window knows about the pane a publication came from. The run,
+/// worker and task are the ledger's seat in that pane, when it holds one.
+#[derive(Default)]
+struct PaneFacts {
+    agent: Option<String>,
+    model: Option<String>,
+    run: Option<String>,
+    worker: Option<String>,
+    task: Option<String>,
+}
+
+/// A project this window keeps, and the workspaces it knows for it.
+struct KnownProject {
+    root: PathBuf,
+    workspaces: Vec<PathBuf>,
+}
+
+/// The ledger's seat in a pane, as [`pane_facts`] reads it.
+struct Seat<'a> {
+    agent: &'a str,
+    model: Option<&'a str>,
+    run: &'a str,
+    worker: &'a str,
+    task: &'a str,
+}
+
+fn pane_facts(_heard: Option<&str>, _seat: Option<Seat<'_>>) -> PaneFacts {
+    PaneFacts::default()
+}
+
+fn publication_origin(
+    _caller: &zerocode_core::artifact_publish::Caller,
+    _pane: impl FnOnce(crate::TermId) -> Option<PaneFacts>,
+    _known: impl FnOnce(&Path) -> Vec<KnownProject>,
+) -> Origin {
+    Origin::default()
+}
+
+fn known_projects(_config_root: &Path, _cwd: &Path) -> Vec<KnownProject> {
+    Vec::new()
 }
 
 fn artifact_request(
     store: &Store,
     mut request: serde_json::Value,
+    origin_of: &dyn Fn(&zerocode_core::artifact_publish::Caller) -> Origin,
 ) -> Result<serde_json::Value, String> {
     let action = request
         .get("action")
@@ -2025,12 +2091,8 @@ fn artifact_request(
         .to_string();
     match action.as_str() {
         "publish" => {
-            request
-                .as_object_mut()
-                .ok_or("expected object")?
-                .remove("action");
-            let input = serde_json::from_value(request).map_err(|e| e.to_string())?;
-            let meta = store.publish_page(&input)?;
+            let (input, caller) = zerocode_core::artifact_publish::publish_parts(request)?;
+            let meta = store.publish_page(&input, origin_of(&caller))?;
             if let Some(app) = store
                 .window
                 .lock()
@@ -2127,6 +2189,11 @@ mod tests {
         std::fs::write(path, text).expect("write");
     }
 
+    /// A publish asked from no pane this window holds.
+    fn nobody(_: &zerocode_core::artifact_publish::Caller) -> Origin {
+        Origin::default()
+    }
+
     fn origin(worker: &str) -> Origin {
         Origin {
             run: Some("run-1".into()),
@@ -2199,13 +2266,14 @@ mod tests {
         let out = dir.path().join("share.html");
         touch(&source, "<main>first</main>");
         let request = serde_json::json!({"action":"publish", "file_path":source});
-        let first = artifact_request(&store, request.clone()).unwrap();
+        let first = artifact_request(&store, request.clone(), &nobody).unwrap();
         touch(&source, "<main>second</main>");
-        artifact_request(&store, request).unwrap();
+        artifact_request(&store, request, &nobody).unwrap();
         std::fs::remove_file(source).unwrap();
         let answer = artifact_request(
             &store,
             serde_json::json!({"action":"export", "id":first["id"], "version":1, "out":out}),
+            &nobody,
         )
         .unwrap();
         assert_eq!(answer["version"], 1);
@@ -2238,9 +2306,9 @@ mod tests {
             favicon: Some("🌿".into()),
             ..Default::default()
         };
-        let one = store.publish_page(&input).unwrap();
+        let one = store.publish_page(&input, Origin::default()).unwrap();
         touch(&source, "<main>revised</main>");
-        let two = store.publish_page(&input).unwrap();
+        let two = store.publish_page(&input, Origin::default()).unwrap();
         assert_eq!(one.url, two.url);
         assert_eq!(two.version, 2);
         let store = Store::open(dir.path(), Limits::default());
@@ -2269,9 +2337,9 @@ mod tests {
         let source = dir.path().join("deck.html");
         touch(&source, "<main>first</main>");
         let request = serde_json::json!({"action":"publish", "file_path":source});
-        let first = artifact_request(&store, request.clone()).unwrap();
+        let first = artifact_request(&store, request.clone(), &nobody).unwrap();
         touch(&source, "<main>second</main>");
-        let second = artifact_request(&store, request).unwrap();
+        let second = artifact_request(&store, request, &nobody).unwrap();
         let id = first["id"].as_str().unwrap().to_string();
         let versions = store.versions(&id);
         assert_eq!(
@@ -2302,7 +2370,8 @@ mod tests {
             ..Filter::default()
         });
         assert_eq!(pages.total, 2);
-        let listed = artifact_request(&store, serde_json::json!({"action":"list"})).unwrap();
+        let listed =
+            artifact_request(&store, serde_json::json!({"action":"list"}), &nobody).unwrap();
         assert_eq!(listed["total"], 1, "{listed}");
         assert_eq!(listed["rows"][0]["id"], id.as_str());
         let page = store.agent_pages().remove(0);
@@ -2327,6 +2396,392 @@ mod tests {
             reopened.get(&id).unwrap().source_path,
             Some(source.canonicalize().unwrap())
         );
+    }
+
+    /// A publication from a pane records the pane under the window's own
+    /// spelling, the project and workspace the window keeps that hold its
+    /// folder — the deepest one, a linked checkout outside the project
+    /// included — and the agent, model and ledger seat the window knows for
+    /// that pane. An unknown folder names no project; a pane the window does
+    /// not hold, or a publish with no pane at all, records nothing and asks
+    /// nothing.
+    #[test]
+    fn a_publication_origin_is_what_the_window_knows_about_its_pane_and_folder() {
+        use zerocode_core::artifact_publish::Caller;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let nested = project.join(".worktrees").join("side");
+        let linked = dir.path().join("workspaces").join("feature");
+        let elsewhere = dir.path().join("elsewhere");
+        for folder in [
+            project.join("src"),
+            nested.join("src"),
+            linked.join("ui"),
+            elsewhere.clone(),
+        ] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let known = || {
+            vec![KnownProject {
+                root: project.clone(),
+                workspaces: vec![project.clone(), nested.clone(), linked.clone()],
+            }]
+        };
+        let facts = |term| {
+            (term == 7).then(|| PaneFacts {
+                agent: Some("claude".into()),
+                model: Some("claude-opus-5".into()),
+                run: Some("run-1".into()),
+                worker: Some("w-1".into()),
+                task: Some("t-1".into()),
+            })
+        };
+        let from = |pane: &str, cwd: &Path| {
+            publication_origin(
+                &Caller {
+                    pane: Some(pane.to_string()),
+                    cwd: Some(cwd.to_path_buf()),
+                },
+                facts,
+                |_| known(),
+            )
+        };
+        assert_eq!(
+            from("term-7", &linked.join("ui")),
+            Origin {
+                pane: Some("term-7".into()),
+                agent: Some("claude".into()),
+                model: Some("claude-opus-5".into()),
+                run: Some("run-1".into()),
+                worker: Some("w-1".into()),
+                task: Some("t-1".into()),
+                worktree: Some(linked.clone()),
+                project: Some(project.clone()),
+                ..Origin::default()
+            }
+        );
+        let in_project = from("term-7", &project.join("src"));
+        assert_eq!(
+            (in_project.project, in_project.worktree),
+            (Some(project.clone()), Some(project.clone()))
+        );
+        assert_eq!(
+            from("term-7", &nested.join("src")).worktree,
+            Some(nested.clone()),
+            "the deepest workspace names itself"
+        );
+        let unknown = from("term-7", &elsewhere);
+        assert_eq!(
+            (unknown.pane.as_deref(), unknown.project, unknown.worktree),
+            (Some("term-7"), None, None)
+        );
+        assert_eq!(from("term-7", Path::new("project/src")).project, None);
+        for pane in [None, Some("term-9"), Some("tab-1/leaf-2")] {
+            let asked = std::cell::Cell::new(false);
+            let origin = publication_origin(
+                &Caller {
+                    pane: pane.map(str::to_string),
+                    cwd: Some(linked.clone()),
+                },
+                facts,
+                |_| {
+                    asked.set(true);
+                    known()
+                },
+            );
+            assert!(origin.is_empty(), "{pane:?}: {origin:?}");
+            assert!(!asked.get(), "{pane:?} asked the catalog");
+        }
+    }
+
+    /// A pane's facts take the ledger's seat only while the seat's agent is the
+    /// one the pane runs: the seat's model, run, worker and task then ride
+    /// with it, an empty ledger word is no fact, and a seat another agent now
+    /// sits over lends nothing but leaves the heard agent standing. With
+    /// nothing heard, the seat's own agent is the pane's.
+    #[test]
+    fn a_pane_takes_its_ledger_seat_only_while_the_seat_is_its_agent() {
+        let seat = |agent| Seat {
+            agent,
+            model: Some("claude-opus-5"),
+            run: "run-1",
+            worker: "w-1",
+            task: "",
+        };
+        let facts = pane_facts(Some("claude"), Some(seat("claude")));
+        assert_eq!(
+            (
+                facts.agent.as_deref(),
+                facts.model.as_deref(),
+                facts.run.as_deref(),
+                facts.worker.as_deref(),
+                facts.task.as_deref()
+            ),
+            (
+                Some("claude"),
+                Some("claude-opus-5"),
+                Some("run-1"),
+                Some("w-1"),
+                None
+            )
+        );
+        let seated = pane_facts(None, Some(seat("codex")));
+        assert_eq!(
+            (seated.agent.as_deref(), seated.worker.as_deref()),
+            (Some("codex"), Some("w-1"))
+        );
+        let other = pane_facts(Some("claude"), Some(seat("codex")));
+        assert_eq!(
+            (
+                other.agent.as_deref(),
+                other.model,
+                other.run,
+                other.worker,
+                other.task
+            ),
+            (Some("claude"), None, None, None, None)
+        );
+        let alone = pane_facts(None, None);
+        assert_eq!((alone.agent, alone.worker), (None, None));
+    }
+
+    /// Through the door: a publication from a pane in a known workspace is
+    /// counted on that workspace's chip; a republish from another pane and
+    /// folder records the newer publisher and the chip follows it; a publish
+    /// from no pane keeps an empty origin; the rows read back as written.
+    #[test]
+    fn a_publication_carries_its_publishers_origin_onto_the_worktree_chip() {
+        use zerocode_core::artifact_publish::Caller;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let project = dir.path().join("project");
+        let linked = dir.path().join("feature");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        let store = Store::open(&data, Limits::default());
+        let window = |caller: &Caller| {
+            publication_origin(
+                caller,
+                |term| {
+                    Some(PaneFacts {
+                        agent: Some(if term == 7 { "claude" } else { "codex" }.into()),
+                        ..PaneFacts::default()
+                    })
+                },
+                |_| {
+                    vec![KnownProject {
+                        root: project.clone(),
+                        workspaces: vec![project.clone(), linked.clone()],
+                    }]
+                },
+            )
+        };
+        let source = dir.path().join("deck.html");
+        touch(&source, "<main>first</main>");
+        let publish = |pane: &str, cwd: &Path| {
+            artifact_request(
+                &store,
+                serde_json::json!({"action":"publish", "file_path":source, "pane":pane, "cwd":cwd}),
+                &window,
+            )
+            .unwrap()
+        };
+        let chip = |store: &Store, path: &Path| {
+            store
+                .counts()
+                .by_worktree
+                .get(&path.display().to_string())
+                .copied()
+        };
+        let first = publish("term-7", &linked);
+        let id = first["id"].as_str().unwrap().to_string();
+        let row = store.get(&id).unwrap();
+        assert_eq!(row.origin.pane.as_deref(), Some("term-7"));
+        assert_eq!(row.origin.worktree.as_deref(), Some(linked.as_path()));
+        assert_eq!(chip(&store, &linked), Some(1));
+        touch(&source, "<main>second</main>");
+        publish("term-8", &project);
+        let row = store.get(&id).unwrap();
+        assert_eq!(
+            (
+                row.version,
+                row.origin.pane.as_deref(),
+                row.origin.agent.as_deref()
+            ),
+            (Some(2), Some("term-8"), Some("codex"))
+        );
+        assert_eq!(
+            (chip(&store, &linked), chip(&store, &project)),
+            (None, Some(1))
+        );
+        let other = dir.path().join("other.html");
+        touch(&other, "<main>plain</main>");
+        let plain = artifact_request(
+            &store,
+            serde_json::json!({"action":"publish", "file_path":other, "cwd":linked}),
+            &window,
+        )
+        .unwrap();
+        assert!(
+            store
+                .get(plain["id"].as_str().unwrap())
+                .unwrap()
+                .origin
+                .is_empty()
+        );
+        drop(store);
+        let reopened = Store::open(&data, Limits::default());
+        assert_eq!(reopened.get(&id).unwrap().origin, row.origin);
+        assert_eq!(chip(&reopened, &project), Some(1));
+    }
+
+    /// End to end on a real repository: the argv the door sends from a
+    /// subfolder of a linked checkout, read the way the bridge reads it, into
+    /// the store. The project is the one the window keeps, spelled as it keeps
+    /// it; the worktree is git's own spelling of the linked checkout — the one
+    /// the sidebar's worktree row carries and its chip is keyed on — and the
+    /// chip counts the publication. The catalog is asked about the folder only
+    /// through `known_projects`, as the window asks it.
+    #[test]
+    fn a_publication_from_a_linked_checkout_names_the_kept_project_and_gits_worktree() {
+        let git = |repo: &Path, args: &[&str]| {
+            let output = crate::proc::quiet_command("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let repo = dir.path().join("repo");
+        let linked = dir.path().join("wt-feature");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "ZeroCode Test"]);
+        git(&repo, &["config", "user.email", "test@zerocode"]);
+        git(&repo, &["commit", "--allow-empty", "-q", "-m", "first"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                &linked.to_string_lossy(),
+            ],
+        );
+        std::fs::write(
+            crate::project_runtime::recent_projects_file(&config),
+            serde_json::to_string(&[repo.display().to_string()]).unwrap(),
+        )
+        .unwrap();
+        let spelled = zerocode_orchestrator::Orchestrator::open(&repo)
+            .unwrap()
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|worktree| worktree.path)
+            .find(|path| path.ends_with("wt-feature"))
+            .expect("git lists the linked checkout");
+        let folder = linked.join("ui");
+        std::fs::create_dir_all(&folder).unwrap();
+        let source = folder.join("deck.html");
+        touch(&source, "<main>deck</main>");
+        let argv: Vec<String> = [
+            "publish",
+            "--file-path",
+            &source.to_string_lossy(),
+            "--cwd",
+            &folder.to_string_lossy(),
+            "--pane",
+            "term-7",
+        ]
+        .iter()
+        .map(|word| (*word).to_string())
+        .collect();
+        let request = zerocode_core::artifact_publish::request_from_argv(&argv).unwrap();
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let answer = artifact_request(&store, request, &|caller| {
+            publication_origin(
+                caller,
+                |_| {
+                    Some(PaneFacts {
+                        agent: Some("claude".into()),
+                        model: Some("claude-opus-5".into()),
+                        ..PaneFacts::default()
+                    })
+                },
+                |cwd| known_projects(&config, cwd),
+            )
+        })
+        .unwrap();
+        let origin = store.get(answer["id"].as_str().unwrap()).unwrap().origin;
+        println!(
+            "recorded origin: {}",
+            serde_json::to_string(&origin).unwrap()
+        );
+        assert_eq!(
+            origin,
+            Origin {
+                pane: Some("term-7".into()),
+                agent: Some("claude".into()),
+                model: Some("claude-opus-5".into()),
+                worktree: Some(spelled.clone()),
+                project: Some(repo.clone()),
+                ..Origin::default()
+            }
+        );
+        assert_eq!(
+            store
+                .counts()
+                .by_worktree
+                .get(&spelled.display().to_string()),
+            Some(&1)
+        );
+    }
+
+    /// A path into the store's `pages/<id>/` names that publication: its
+    /// current file, or a kept version by number. Its metadata, a file
+    /// outside the store, and a deleted page name nothing.
+    #[test]
+    fn a_store_page_address_names_its_publication_and_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let source = dir.path().join("deck.html");
+        touch(&source, "<main>first</main>");
+        let request = serde_json::json!({"action":"publish", "file_path":source});
+        let first = artifact_request(&store, request.clone(), &nobody).unwrap();
+        touch(&source, "<main>second</main>");
+        artifact_request(&store, request, &nobody).unwrap();
+        let id = first["id"].as_str().unwrap();
+        let seat = store.root().join("pages").join(id);
+        let current = store
+            .page_at(&seat.join("index.html"))
+            .expect("the current file");
+        assert_eq!((current.artifact.id.as_str(), current.version), (id, None));
+        let kept = store
+            .page_at(&seat.join("v1").join("index.html"))
+            .expect("a kept version");
+        assert_eq!(kept.version, Some(1));
+        assert_eq!(
+            store
+                .page_at(&seat.join("v1").join("..").join("index.html"))
+                .map(|at| at.version),
+            Some(None),
+            "the same file by a longer road is the same file"
+        );
+        assert_eq!(store.page_at(&seat.join("meta.json")), None);
+        assert_eq!(store.page_at(&source), None);
+        assert!(store.delete(id, true).unwrap());
+        assert_eq!(store.page_at(&seat.join("index.html")), None);
     }
 
     #[test]

@@ -4504,6 +4504,15 @@ mod tests {
                     || powershell.contains(&format!("$tokenFile = $env:{file_var}")),
                 "{door}.ps1 does not read its private token file"
             );
+            // The publishing pane and its folder ride the artifact door's
+            // argv, as its POSIX twin sends them; no other door names either.
+            let names_its_pane = powershell.contains("@('--pane', $env:ZEROCODE_PANE_KEY)")
+                && powershell.contains("@('--cwd', (Get-Location).Path)");
+            assert_eq!(
+                names_its_pane,
+                door == "zerocode-artifact",
+                "{door}.ps1 pane and folder:\n{powershell}"
+            );
             let route = if door == "zerocode-browser" {
                 "/browser"
             } else if door == "zerocode-artifact" {

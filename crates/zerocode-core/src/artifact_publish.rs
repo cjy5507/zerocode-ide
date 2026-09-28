@@ -40,6 +40,27 @@ pub struct PublishInput {
     pub label: Option<String>,
 }
 
+/// Where a publish was asked from, as the door says it: the pane key its
+/// shell carried (`ZEROCODE_PANE_KEY`) and the folder it stood in. Carried
+/// beside [`PublishInput`], never in it, so the input stays strict; the
+/// window resolves it into the row's `Origin` and it authorizes nothing.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Caller {
+    pub pane: Option<String>,
+    pub cwd: Option<PathBuf>,
+}
+
+/// A publish request split into its strict input and the caller beside it
+/// ([`request_from_argv`] puts `pane` and `cwd` next to the input's fields).
+pub fn publish_parts(mut request: serde_json::Value) -> Result<(PublishInput, Caller), String> {
+    request
+        .as_object_mut()
+        .ok_or("expected object")?
+        .remove("action");
+    let input = serde_json::from_value(request).map_err(|e| e.to_string())?;
+    Ok((input, Caller::default()))
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExportInput {
@@ -651,6 +672,132 @@ mod tests {
         );
         let powershell = shim_script("TEST_PORT", "TEST_TOKEN", true);
         assert!(powershell.contains("@('--cwd', (Get-Location).Path)"));
+    }
+
+    /// A publish carries the pane its shell sits in and the folder it stands
+    /// in, after the caller's own words so the door's are the ones that
+    /// stand; a shell with no pane key sends none. The PowerShell twin says
+    /// the same.
+    #[cfg(unix)]
+    #[test]
+    fn artifact_publish_shim_carries_the_pane_and_the_folder_beside_the_input() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join(SHIM);
+        std::fs::write(&shim, shim_script("TEST_PORT", "TEST_TOKEN", false)).unwrap();
+        let curl = dir.path().join("curl");
+        std::fs::write(
+            &curl,
+            "#!/bin/sh\ncat > request.argv\nprintf 'true\\n200'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let publish = |pane: Option<&str>, words: &[&str]| {
+            let mut command = std::process::Command::new("sh");
+            command
+                .arg(&shim)
+                .arg("publish")
+                .args(words)
+                .current_dir(dir.path())
+                .env("TEST_PORT", "1")
+                .env("TEST_TOKEN", "fixture")
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+                .env_remove(crate::hook::PANE_KEY_ENV);
+            if let Some(pane) = pane {
+                command.env(crate::hook::PANE_KEY_ENV, pane);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let packed = std::fs::read_to_string(dir.path().join("request.argv")).unwrap();
+            publish_parts(request_from_argv(&crate::agent_teams::unpack_argv(&packed)).unwrap())
+                .unwrap()
+        };
+        let (input, caller) = publish(
+            Some("term-7"),
+            &["--file-path", "/tmp/page.html", "--pane", "term-1"],
+        );
+        assert_eq!(input.file_path, PathBuf::from("/tmp/page.html"));
+        assert_eq!(caller.pane.as_deref(), Some("term-7"));
+        assert_eq!(
+            caller.cwd.unwrap().canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+        let (_, caller) = publish(None, &["--file-path", "/tmp/page.html"]);
+        assert_eq!(caller.pane, None, "a shell with no pane key names none");
+        assert!(caller.cwd.is_some());
+        let powershell = shim_script("TEST_PORT", "TEST_TOKEN", true);
+        assert!(
+            powershell.contains(
+                "if ($env:ZEROCODE_PANE_KEY) { $args = @($args) + @('--pane', $env:ZEROCODE_PANE_KEY) }"
+            ),
+            "{powershell}"
+        );
+    }
+
+    /// Publish keeps the pane and the folder beside its input, and the input
+    /// stays strict; the other verbs take the door's words and drop them.
+    #[test]
+    fn artifact_publish_request_splits_the_caller_from_a_strict_input() {
+        let argv = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        let request = request_from_argv(&argv(&[
+            "publish",
+            "--file-path",
+            "/work/deck.html",
+            "--title",
+            "Deck",
+            "--cwd",
+            "/work",
+            "--pane",
+            "term-4",
+        ]))
+        .unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({"action":"publish", "file_path":"/work/deck.html", "title":"Deck",
+                "cwd":"/work", "pane":"term-4"})
+        );
+        let (input, caller) = publish_parts(request).unwrap();
+        assert_eq!(input.title.as_deref(), Some("Deck"));
+        assert_eq!(
+            caller,
+            Caller {
+                pane: Some("term-4".into()),
+                cwd: Some(PathBuf::from("/work")),
+            }
+        );
+        let (_, nobody) =
+            publish_parts(serde_json::json!({"action":"publish", "file_path":"/x.html"})).unwrap();
+        assert_eq!(nobody, Caller::default());
+        assert!(
+            publish_parts(
+                serde_json::json!({"action":"publish", "file_path":"/x.html", "origin":{}})
+            )
+            .is_err(),
+            "an unknown field is still refused"
+        );
+        for verb in ["list", "read"] {
+            let request =
+                request_from_argv(&argv(&[verb, "--cwd", "/work", "--pane", "term-4"])).unwrap();
+            assert_eq!(request, serde_json::json!({"action": verb}));
+        }
+        let export = request_from_argv(&argv(&[
+            "export", "p-1", "--out", "a.html", "--cwd", "/work", "--pane", "term-4",
+        ]))
+        .unwrap();
+        assert_eq!(
+            export,
+            serde_json::json!({"action":"export", "id":"p-1", "out":"/work/a.html"})
+        );
+        assert!(request_from_argv(&argv(&["publish", "--pane"])).is_err());
     }
 
     #[test]
