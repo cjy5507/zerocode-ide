@@ -52,6 +52,10 @@ sha2 = { workspace = true }
 # "Open browser devtools" button on every browser toolbar, and ours is a
 # button too, not a debug-only accident.
 tauri = { version = "2", features = ["macos-private-api", "unstable", "devtools", "tray-icon"] }
+# Which connection a Jev question rides: the client is kept while its
+# questions are answered and let go after one the server never answered
+# (t-13199) — one rule, read by zo's wire too.
+jev-socket = { workspace = true }
 model-prices = { workspace = true }
 zerocode-core = { workspace = true }
 zerocode-harness = { workspace = true }
@@ -302,6 +306,13 @@ windows = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# A loopback System One that speaks HTTP/2 as well as HTTP/1.1, for the
+# tests of which connection a question rides (t-13199). All three are in the
+# lock already, beneath reqwest's `http2` feature; named here because the
+# tests use them.
+bytes = "1"
+h2 = "0.4"
+http = "1"
 tempfile = { workspace = true }
 # A paused clock for the tests that assert time the code counted, not time the
 # machine took (t-8938) — the same feature zerocode-ssh's tests already bring

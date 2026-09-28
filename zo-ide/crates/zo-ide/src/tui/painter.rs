@@ -1360,6 +1360,26 @@ mod tests {
         let _ = drain(&mut painter);
     }
 
+    /// Nothing changed, nothing written: a frame of the rows and the cursor
+    /// the terminal already shows sends not one byte — not the sync pair, not
+    /// the cursor. A spinner frame is a change; a tick that moved nothing is
+    /// not.
+    #[test]
+    fn a_frame_that_changes_nothing_writes_nothing() {
+        let written = |painter: &mut Painter<Vec<u8>>| std::mem::take(&mut painter.out);
+        let mut painter = painter(24, 10);
+        painter.set_height(2);
+        let rows = [Line::from_text("a"), Line::from_text("b")];
+        painter.paint(&rows);
+        painter.end(Some((2, 1)));
+        assert!(!written(&mut painter).is_empty());
+        for _ in 0..3 {
+            painter.paint(&rows);
+            painter.end(Some((2, 1)));
+            assert!(written(&mut painter).is_empty(), "an unchanged frame was written");
+        }
+    }
+
     #[test]
     fn a_frame_is_wrapped_in_the_synchronised_update_pair() {
         let mut painter = painter(24, 10);

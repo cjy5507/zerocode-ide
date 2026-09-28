@@ -31,6 +31,8 @@ const BROWSER_READ: &str = include_str!("../../src/browser_read.rs");
 const WALKS: &str = include_str!("../../src/agent_tools_runtime.rs");
 const ERRAND: &str = include_str!("../../src/computer_use/errand.rs");
 const BRANCH: &str = include_str!("../../src/computer_use/errand/branch.rs");
+const COVER_HAND: &str = include_str!("../../src/computer_use/cover.rs");
+const COVER_SEAT: &str = include_str!("../../../zerocode-core/src/jev/cover.rs");
 const ROUTING_STAGE: &str =
     include_str!("../../../../zo-ide/crates/tools/src/misc_tools/smart_router/decision_shadow.rs");
 const ROUTING_BAND: &str =
@@ -133,6 +135,14 @@ const READS: &[(&str, &[(&str, &str)])] = &[
                 "act_line: crate::systemone::act_line(judge.wire(), forks)",
             ),
             (BRANCH, "press_rule(&BRANCHING, line, screen"),
+        ],
+    ),
+    (
+        "cover",
+        &[
+            (COVER_HAND, "systemone::act_line(&self.wire, &COVER)"),
+            (COVER_SEAT, "COVER.acts_on(read.kind.confidence, line)"),
+            (COVER_SEAT, "COVER.acts_on(read.moves.confidence, line)"),
         ],
     ),
 ];

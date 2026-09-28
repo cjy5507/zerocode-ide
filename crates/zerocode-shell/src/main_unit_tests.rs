@@ -12401,6 +12401,106 @@ fn a_usage_read_leaves_one_closed_line_in_the_window_log() {
     assert_eq!(held.error.as_deref(), Some(sentence));
 }
 
+/// An hour of the window asking after an expired Grok login, on a stopped
+/// clock (t-11645). On 2026-09-28 the window's log held
+/// `usage grok road=api ms=0 status=error kind=delegated-refresh-required`
+/// 4,436 times in 2 h 17 min: the read answered with no account, the gauge's
+/// filter dropped it for not being the file's account, and a gauge holding no
+/// reading asks again at once — so every follow-up tick of the window was a
+/// read, a log line and another tick. A failure the person repairs is read on
+/// the ordinary cadence: the refetch floor bounds the hour, and the last ask
+/// leaves the failure standing for the accounts card to say.
+#[test]
+fn an_expired_grok_login_is_read_on_the_ordinary_cadence_and_not_on_every_ask() {
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    static CACHE: Mutex<Option<usage::ProviderUsage>> = Mutex::new(None);
+    static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static NOW: AtomicI64 = AtomicI64::new(0);
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    fn clock() -> i64 {
+        NOW.load(Ordering::SeqCst)
+    }
+    // The window's follow-up tick while a read is out (`USAGE_STATS_RETRY_MS`,
+    // ui/shell-status.js) — the cadence the log showed.
+    const ASK_EVERY_MS: i64 = 2_000;
+    const HOUR_MS: i64 = 60 * 60 * 1_000;
+
+    let directory = tempfile::tempdir().expect("data root");
+    let home = tempfile::tempdir().expect("grok home");
+    std::fs::write(
+        usage_grok::auth_file(home.path()),
+        serde_json::json!({
+            zerocode_core::cli_login_files::grok::PREFERRED_ISSUER: {
+                "key": "expired",
+                "user_id": "u-1",
+                "email": "someone@example.test",
+                "expires_at": "2026-09-27T23:00:00Z",
+            }
+        })
+        .to_string(),
+    )
+    .expect("auth file");
+    let start = zerocode_core::civil::epoch_ms_of_iso("2026-09-28T00:00:00Z").expect("start");
+    NOW.store(start, Ordering::SeqCst);
+
+    let mut kept_asking = 0_usize;
+    let mut last = None;
+    while clock() - start < HOUR_MS {
+        // What `grok_usage` does on each ask, on the stopped clock.
+        let whose = usage_grok::signed_in_at(Some(home.path()), clock());
+        let at = home.path().to_path_buf();
+        let report = usage_report_at(
+            UsageGauge {
+                provider: "grok",
+                cache: &CACHE,
+                file: directory.path().join("grok-usage.json"),
+                scanning: &SCANNING,
+                log_root: directory.path().to_path_buf(),
+            },
+            move |snapshot| snapshot.account == whose,
+            false,
+            clock,
+            move || {
+                READS.fetch_add(1, Ordering::SeqCst);
+                Scanned::api(usage_grok::scan_in(Some(at), clock()))
+            },
+        );
+        while SCANNING.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        kept_asking += usize::from(report.fetching);
+        last = Some(report);
+        NOW.fetch_add(ASK_EVERY_MS, Ordering::SeqCst);
+    }
+
+    let lines = std::fs::read_to_string(directory.path().join("window-errors.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(" usage grok road=api "))
+        .count();
+    let reads = READS.load(Ordering::SeqCst);
+    let asks = HOUR_MS / ASK_EVERY_MS;
+    let floor = usage::MIN_REFETCH.as_millis() as i64;
+    let ceiling = usize::try_from(1 + HOUR_MS / floor).expect("a small count");
+    println!(
+        "measured: {asks} asks in an hour on an expired Grok login — {reads} reads, \
+         {lines} log lines, {kept_asking} answers that kept the window asking"
+    );
+    assert!(
+        reads <= ceiling && lines <= ceiling && kept_asking <= ceiling,
+        "an expired login was read {reads} times ({lines} log lines, {kept_asking} answers \
+         kept the window asking) in an hour of asks every {ASK_EVERY_MS} ms — the refetch \
+         floor allows {ceiling}"
+    );
+    let last = last.expect("the hour asked");
+    assert!(!last.fetching, "the hour ended with a read still out");
+    assert_eq!(
+        last.usage.and_then(|held| held.failure_kind),
+        Some(zerocode_core::usage_limit::FailureKind::DelegatedRefreshRequired),
+        "the expired login's failure is not standing for the accounts card to say"
+    );
+}
+
 /// The bar's segment never stands without a word (t-7170): when a reading
 /// has no figures, the segment's word comes off ONE table keyed by the
 /// reading's failure kind, the paint reads that table, the roster's offer and
@@ -14109,7 +14209,14 @@ fn the_plan_segment_walks_the_measured_cadence() {
     assert_eq!(usage::STALE_AFTER_MINUTES, 30);
     // One door for every provider now, which is also what keeps the
     // debounce from drifting between them.
-    let commanding = block_after(shipped_backend(), "fn usage_report(");
+    // The door's body takes its clock (t-11645); the window's door hands it
+    // the wall's.
+    let door = block_after(shipped_backend(), "fn usage_report(");
+    assert!(
+        door.contains("usage_report_at(gauge, keep, force, epoch_ms_now, scan)"),
+        "the window's usage door stopped reading the wall clock:\n{door}"
+    );
+    let commanding = block_after(shipped_backend(), "fn usage_report_at(");
     assert!(
         commanding.contains("usage_scan_holds("),
         "nothing keeps a mashed refresh from five scans:\n{commanding}"

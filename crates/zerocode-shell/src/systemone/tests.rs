@@ -5,6 +5,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -22,6 +23,25 @@ pub(crate) const ANSWERING_VERSION: &str = "jev-1.13.0";
 pub(crate) struct Endpoint {
     addr: SocketAddr,
     seen: Arc<Mutex<Vec<String>>>,
+    /// Raised when the endpoint is dropped: its accept loop leaves, and the
+    /// loopback seat closes with it.
+    closed: Arc<AtomicBool>,
+}
+
+/// How long a dropped endpoint waits on the one connection that wakes its
+/// accept loop — a loopback connect, so far past what it takes.
+const LEAVING: Duration = Duration::from_millis(200);
+
+impl Drop for Endpoint {
+    /// The seat is given back when its test is done. Every endpoint used to
+    /// keep listening until the process ended, one open descriptor each and
+    /// a thread beside it: a suite of them held 173 at once (2026-09-29), and
+    /// the release lane's process may hold 256, so tests that opened a file
+    /// or ran `git` failed with "Too many open files".
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect_timeout(&self.addr, LEAVING);
+    }
 }
 
 impl Endpoint {
@@ -66,8 +86,13 @@ impl Endpoint {
         let addr = listener.local_addr().expect("its address");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let heard = Arc::clone(&seen);
+        let closed = Arc::new(AtomicBool::new(false));
+        let leaving = Arc::clone(&closed);
         thread::spawn(move || {
             for socket in listener.incoming() {
+                if leaving.load(Ordering::SeqCst) {
+                    return;
+                }
                 let Ok(mut socket) = socket else {
                     return;
                 };
@@ -94,7 +119,7 @@ impl Endpoint {
                 }
             }
         });
-        Self { addr, seen }
+        Self { addr, seen, closed }
     }
 
     pub(crate) fn base(&self) -> String {
@@ -120,25 +145,29 @@ fn read_request(socket: &mut std::net::TcpStream) -> String {
             break;
         }
         raw.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&raw);
-        let Some(head_end) = text.find("\r\n\r\n") else {
-            continue;
-        };
-        let length = text[..head_end]
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.trim()
-                    .eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().ok())
-                    .flatten()
-            })
-            .unwrap_or(0);
-        if raw.len() >= head_end + 4 + length {
+        if request_end(&raw).is_some() {
             break;
         }
     }
     String::from_utf8_lossy(&raw).into_owned()
+}
+
+/// Where the first whole request in `raw` ends — its head, then as many body
+/// bytes as its `Content-Length` names — or `None` while it has not all
+/// arrived.
+fn request_end(raw: &[u8]) -> Option<usize> {
+    let head_end = raw.windows(4).position(|four| four == b"\r\n\r\n")? + 4;
+    let length = String::from_utf8_lossy(&raw[..head_end])
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    (raw.len() >= head_end + length).then_some(head_end + length)
 }
 
 #[test]
@@ -168,8 +197,10 @@ fn an_expired_call_opens_no_socket() {
     )
     .expect("a key check carries no workspace words");
 
-    let answer = tauri::async_runtime::block_on(wire.ask_once("test-key", cleared, Instant::now()));
+    let (answer, version) =
+        tauri::async_runtime::block_on(wire.ask_once("test-key", cleared, Instant::now()));
     assert_eq!(answer, Err(TIMEOUT.to_string()));
+    assert_eq!(version, None, "nothing came back");
     assert!(
         endpoint.asked().is_empty(),
         "expiry cannot authorize a POST"
@@ -219,17 +250,18 @@ fn the_door_is_the_only_road_to_the_wire_in_the_window() {
 }
 
 /// What the wire hands back names the version that answered — the answer's
-/// own `model`, not the alias the request asked for — and the one writer
-/// every seat's row goes through puts it on the row under the key table's
-/// spelling, beside the door's two counts (t-6187). An ask nothing answered
-/// names no version, and its row carries no such key: a refusal at the door,
-/// and a wall the answer never came back inside. The request itself names
-/// the person's pin, whatever the body was built with.
+/// own `model`, not the alias the request asked for — and the HTTP version it
+/// came back over (t-13199), and the one writer every seat's row goes through
+/// puts both on the row under the key table's spellings, beside the door's
+/// two counts (t-6187). An ask nothing answered names neither, and its row
+/// carries no such key: a refusal at the door, and a wall the answer never
+/// came back inside. The request itself names the person's pin, whatever
+/// the body was built with.
 #[test]
 fn an_answer_names_its_version_on_the_row_and_an_unanswered_ask_names_none() {
     use zerocode_core::jev::STALL;
     use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
-    use zerocode_core::jev::summary::MODEL;
+    use zerocode_core::jev::summary::{HTTP_VERSION, MODEL};
 
     let home = tempfile::tempdir().expect("a zo home");
     let workspace = tempfile::tempdir().expect("a workspace");
@@ -256,6 +288,11 @@ fn an_answer_names_its_version_on_the_row_and_an_unanswered_ask_names_none() {
     let mut row = json!({"outcome": "answered"});
     asked.spent.stamp(&mut row);
     assert_eq!(row[MODEL.canonical], json!("jev-1.13.0"));
+    assert_eq!(
+        row[HTTP_VERSION.canonical],
+        json!(version_word(reqwest::Version::HTTP_11)),
+        "the loopback endpoint speaks HTTP/1.1"
+    );
     assert_eq!(row[REQUESTS_KEY], json!(1));
     assert_eq!(row[REDACTED_LINES_KEY], json!(0));
     let sent = endpoint.asked();
@@ -280,6 +317,7 @@ fn an_answer_names_its_version_on_the_row_and_an_unanswered_ask_names_none() {
     refused.spent.stamp(&mut row);
     assert_eq!(refused.spent.model, None);
     assert!(row.get(MODEL.canonical).is_none(), "{row}");
+    assert!(row.get(HTTP_VERSION.canonical).is_none(), "{row}");
 
     // Past the wall: an answer that arrives too late is no answer.
     let slow = Endpoint::serving("HTTP/1.1 200 OK", answer.to_string(), 500);
@@ -291,6 +329,10 @@ fn an_answer_names_its_version_on_the_row_and_an_unanswered_ask_names_none() {
     );
     assert_eq!(late.answer, Err(TIMEOUT.to_string()));
     assert_eq!(late.spent.model, None);
+    assert_eq!(
+        late.spent.version, None,
+        "nothing came back inside the wall"
+    );
 }
 
 /// Every request `endpoint` has heard once it has heard `many` of them, or
@@ -477,3 +519,6 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
     assert_eq!(fell["line"], json!("fallbacks"));
     assert_eq!(stand_from(&rows), Stand::Recording);
 }
+
+/// Which connection a question rides (t-13199).
+mod socket;

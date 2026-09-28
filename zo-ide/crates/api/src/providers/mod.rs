@@ -1136,6 +1136,13 @@ pub(crate) fn poison_escape_http_client() -> reqwest::Client {
 }
 
 fn tuned_http_client() -> reqwest::Client {
+    tuned_http_builder().build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// The shared tuning, unbuilt: what the System One wire's socket builds its
+/// own clients from (t-13199), and a test the same client with one more
+/// setting.
+pub(crate) fn tuned_http_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .tcp_nodelay(true)
         // Bound the connect phase only — a dead/blackholed host must not
@@ -1147,8 +1154,6 @@ fn tuned_http_client() -> reqwest::Client {
         .pool_idle_timeout(Some(Duration::from_secs(300)))
         .http2_keep_alive_interval(Some(Duration::from_secs(30)))
         .http2_keep_alive_while_idle(true)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

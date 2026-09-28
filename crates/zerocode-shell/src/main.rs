@@ -356,9 +356,10 @@ use cmd::{
     worktree_stamp, write_primary_selection, write_text_file,
 };
 use cmd::{
-    artifact_copy_path, artifact_counts, artifact_delete, artifact_import_transcripts,
-    artifact_open, artifact_page_at, artifact_preview, artifact_register, artifact_reveal,
-    artifact_search, artifact_thumbnail, artifact_versions, artifacts_list,
+    artifact_copy_path, artifact_counts, artifact_delete, artifact_export,
+    artifact_feedback_record, artifact_import_transcripts, artifact_open, artifact_page_at,
+    artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_thumbnail,
+    artifact_versions, artifacts_list, set_artifacts_auto_open_beside,
     set_artifacts_retention_days, set_vault_session_limit,
 };
 use cmd::{
@@ -3010,9 +3011,12 @@ fn main() -> ExitCode {
             artifact_register,
             artifact_versions,
             artifact_page_at,
+            artifact_feedback_record,
+            artifact_export,
             artifact_thumbnail,
             artifact_import_transcripts,
             set_artifacts_retention_days, set_vault_session_limit,
+            set_artifacts_auto_open_beside,
             automation_born_worktrees,
             set_hide_automation_workspaces,
             set_hide_default_branch_workspaces,

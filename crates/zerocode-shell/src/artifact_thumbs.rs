@@ -355,6 +355,8 @@ mod tests {
             description: None,
             version: None,
             source_path: None,
+            feedback_count: None,
+            feedback_version: None,
             origin: Origin::default(),
             tags: Vec::new(),
             preview: Preview::None,

@@ -53,6 +53,8 @@ pub(crate) struct WorkflowSpec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PhaseSpec {
+    #[serde(flatten)]
+    pub launch: crate::misc_tools::agent_tools::ledger::Launch,
     #[serde(default)]
     pub id: String,
     /// Static fan-out list. `"$input"` is a sentinel expanded against the
@@ -95,6 +97,8 @@ pub(crate) enum PhaseStrategy {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RepairStepSpec {
+    #[serde(flatten)]
+    pub launch: crate::misc_tools::agent_tools::ledger::Launch,
     #[serde(default)]
     pub prompt: String,
     #[serde(default)]
@@ -154,6 +158,8 @@ pub(crate) struct BudgetSpec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SynthesizeSpec {
+    #[serde(flatten)]
+    pub launch: crate::misc_tools::agent_tools::ledger::Launch,
     #[serde(default)]
     pub prompt: String,
     #[serde(default)]
@@ -169,6 +175,8 @@ pub(crate) struct SynthesizeSpec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct JudgeSpec {
+    #[serde(flatten)]
+    pub launch: crate::misc_tools::agent_tools::ledger::Launch,
     #[serde(default)]
     pub prompt: String,
     #[serde(default)]
@@ -255,6 +263,7 @@ pub(crate) struct RepeatPolicy {
 
 #[derive(Debug, Clone)]
 pub(crate) struct NormalizedPhase {
+    pub launch: crate::misc_tools::agent_tools::ledger::Launch,
     pub id: String,
     pub source: PhaseSource,
     pub prompt: String,
@@ -267,6 +276,7 @@ pub(crate) struct NormalizedPhase {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepairStep {
+    pub launch: crate::misc_tools::agent_tools::ledger::Launch,
     pub prompt: String,
     pub subagent_type: Option<String>,
     pub model: Option<String>,
@@ -288,6 +298,7 @@ pub(crate) struct FixUntilVerified {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Synthesize {
+    pub launch: crate::misc_tools::agent_tools::ledger::Launch,
     pub prompt: String,
     pub subagent_type: Option<String>,
     pub model: Option<String>,
@@ -295,6 +306,7 @@ pub(crate) struct Synthesize {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Judge {
+    pub launch: crate::misc_tools::agent_tools::ledger::Launch,
     pub prompt: String,
     pub subagent_type: Option<String>,
     pub model: Option<String>,
@@ -427,6 +439,7 @@ impl WorkflowSpec {
 
             prior_ids.push(id.clone());
             phases.push(NormalizedPhase {
+                launch: phase.launch,
                 id,
                 source,
                 prompt: phase.prompt,
@@ -645,6 +658,7 @@ fn normalize_repair_step(
         )));
     }
     Ok(RepairStep {
+        launch: spec.launch,
         prompt: spec.prompt,
         subagent_type: clean_opt(spec.subagent_type),
         model: clean_opt(spec.model),
@@ -668,6 +682,7 @@ fn normalize_synthesize(spec: SynthesizeSpec) -> Result<Synthesize, ToolError> {
         return Err(invalid("`synthesize.prompt` must not be empty"));
     }
     Ok(Synthesize {
+        launch: spec.launch,
         prompt: spec.prompt,
         subagent_type: clean_opt(spec.subagent_type),
         model: clean_opt(spec.model),
@@ -679,6 +694,7 @@ fn normalize_judge(spec: JudgeSpec) -> Result<Judge, ToolError> {
         return Err(invalid("`judge.prompt` must not be empty"));
     }
     Ok(Judge {
+        launch: spec.launch,
         prompt: spec.prompt,
         subagent_type: clean_opt(spec.subagent_type),
         model: clean_opt(spec.model),

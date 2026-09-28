@@ -609,7 +609,7 @@ function buildBrowserView() {
   body.appendChild(failure);
   // 아티팩트 페이지의 머리띠(t-3233 §5): 갤러리에서 연 페이지에만 서고, 판이
   // .browser-body 사각형을 따라가므로 이 줄도 서면 판이 내려앉는다.
-  host.append(bar, artifactStripNode(), suggest, dlbar, notes, grabbar, findbar, body);
+  host.append(bar, artifactStripNode(), artifactHintNode(), suggest, dlbar, notes, grabbar, findbar, body);
   return host;
 }
 
@@ -3596,9 +3596,14 @@ function paintBrowserView(tab) {
   wireBrowserHost(host);
   host._browserTab = tab;
   paintBrowserFailure(host, tab);
+  // 머리띠의 「주석」은 도구줄의 연필과 같은 모드 스위치다(t-11959).
   paintArtifactStrip(host.querySelector(".artifact-strip"), tab, (version) => {
     submitBrowserAddress(tab, pathAsFileUrl(version.path));
+  }, {
+    annotate: () => toggleBrowserGrab(host, "annotate"),
+    armed: browserGrab !== null && browserGrab.label === tab.label && browserGrab.mode === "annotate",
   });
+  paintArtifactHint(host.querySelector(".artifact-hint"), tab);
   const reload = host.querySelector(".browser-reload");
   // The face is markup, so it is only rebuilt when it CHANGES — a paint per
   // frame rewriting identical SVG would cost layout for nothing.
@@ -4178,15 +4183,20 @@ async function deliverAnnotations(host, tab) {
   if (held.length === 0) return;
   if (browserGrab !== null && browserGrab.label === tab.label) stopBrowserGrab(true);
   const button = host.querySelector(".browser-annotate");
+  // 아티팩트의 판에 단 주석은 만든 판이 받을 곳의 기본이고(첫 줄, 초점), 초안은
+  // 사람이 쓰던 입력 뒤에 붙여 넣는다 — 지우는 키도 Enter도 없다(t-11958).
   await openSendToAgent(
     button,
     formatAnnotationsText(tab.label, tab.url, artifactFeedbackContext(tab)),
-    async () => {
-      // 전달된 주석은 떠난다 — 뱃지가 비고, 다음 묶음이 새로 모인다.
+    async (recipient) => {
+      // 전달된 주석은 떠난다 — 뱃지가 비고, 다음 묶음이 새로 모인다. 아티팩트의
+      // 판에 단 것이면 떠난 뒤에도 그 페이지의 기록에 남는다(t-11959).
+      const delivered = browserAnnotations.get(tab.label) ?? [];
       browserAnnotations.delete(tab.label);
       refreshGrabButtons();
+      await recordArtifactFeedback(tab, delivered, recipient);
     },
-    { submit: false },
+    { submit: false, maker: artifactFactsMaker(tab.artifact), append: true },
   );
 }
 
@@ -4220,6 +4230,13 @@ function browserCovered() {
   // asked from (1-g13), and a menu swallowed by the page is a menu whose
   // rows cannot be clicked.
   if (!sidebarMenu.hidden) return true;
+  return stagePagesCover();
+}
+
+/* The four full-page views that stand over the whole stage while open. A pane
+ * under one is on no screen, whatever its own host says — the browser's shades
+ * above and an artifact's maker pane (t-11958) both ask. */
+function stagePagesCover() {
   return ["space-view", "settings-view", "task-view", "auto-view"].some(
     (page) => el(page)?.hidden === false,
   );
@@ -4794,6 +4811,7 @@ async function openBrowserTab(
     from = null,
     label: reserved = null,
     focus = true,
+    makerSeat = null,
   } = {},
 ) {
   // The pop-out runs this same script, but a pane it opened would attach to
@@ -4879,8 +4897,15 @@ async function openBrowserTab(
   }
   // `beside` is the + palette's word only: a restored session or a popup
   // replays MANY opens, and each splitting the stage would shatter it.
-  const stood = beside && !away ? standBesideFocused() : null;
-  if (stood !== null) optimizeRichStageGroup(stood);
+  // `makerSeat` is an artifact's maker pane (t-11958): `split` stands beside that
+  // pane's group the way an agent's own open does (a right neighbour is reused,
+  // only a rightmost group is divided), and otherwise the page is a tab of that
+  // pane's own group — the caller's answer for a pane too narrow to divide.
+  const splitSeat = makerSeat !== null && makerSeat.split ? standBeside(makerSeat.group) : null;
+  const stood = makerSeat !== null
+    ? (splitSeat ?? makerSeat.group)
+    : beside && !away ? standBesideFocused() : null;
+  if (stood !== null && (makerSeat === null || splitSeat !== null)) optimizeRichStageGroup(stood);
   openTab({
     id: "browser:" + label,
     kind: "browser",

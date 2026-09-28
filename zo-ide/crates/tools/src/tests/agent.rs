@@ -786,6 +786,7 @@ fn agent_persists_handoff_metadata() {
     let manifest = execute_agent_with_spawn(
         AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "Audit the branch".to_string(),
@@ -946,6 +947,7 @@ fn agent_input_cwd_threads_into_job() {
     execute_agent_with_spawn(
         AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "Worktree task".to_string(),
@@ -1029,6 +1031,7 @@ fn agent_hook_config_threads_into_job() {
     execute_agent_with_spawn_and_parent_model_and_hooks(
         AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "Hooked task".to_string(),
@@ -1103,6 +1106,7 @@ fn agent_manifest_records_requested_and_resolved_model_separately() {
     let output = execute_agent_with_spawn_and_parent_model_and_hooks(
         AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "Review hard provider routing bug".to_string(),
@@ -1202,6 +1206,7 @@ fn agent_fake_runner_can_persist_completion_and_failure() {
     let completed = execute_agent_with_spawn(
         AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "Complete the task".to_string(),
@@ -1269,6 +1274,7 @@ fn agent_fake_runner_can_persist_completion_and_failure() {
     let failed = execute_agent_with_spawn(
         AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "Fail the task".to_string(),
@@ -1345,6 +1351,7 @@ fn agent_fake_runner_can_persist_completion_and_failure() {
     let spawn_error = execute_agent_with_spawn(
         AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "Spawn error task".to_string(),
@@ -1708,6 +1715,7 @@ fn a_spawn_writes_into_the_sessions_registry_root_not_the_process_store() {
         let manifest = execute_agent_with_spawn(
             AgentInput {
                 route_probe_confidence: None,
+                launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
                 fork_source: None,
                 allow_cross_provider: false,
                 description: description.to_string(),
@@ -1855,6 +1863,7 @@ fn fork_parent_transcript(dir: &Path) -> (PathBuf, core_types::session::Session)
 fn fork_agent_input(source: Option<crate::ForkSource>) -> AgentInput {
     AgentInput {
         route_probe_confidence: None,
+        launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
         fork_source: source,
         allow_cross_provider: false,
         description: "answer from context".to_string(),

@@ -259,6 +259,7 @@ impl Teacher {
                     requests: attempts,
                     redacted_lines: 0,
                     model: answered.then(|| ANSWERING_VERSION.to_string()),
+                    version: None,
                 },
             )
         })

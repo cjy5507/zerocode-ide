@@ -3001,3 +3001,19 @@ fn an_empty_message_is_refused_before_any_surface_is_asked() {
     assert!(matches!(error, ToolError::InvalidInput(_)), "{error:?}");
     assert!(channel.seen.lock().expect("notice lock").is_none());
 }
+
+#[test]
+fn ledger_launch_fields_are_exposed_for_single_and_multi_agents() {
+    let specs = super::mvp_tool_specs();
+    for name in ["Agent", "SpawnMultiAgent"] {
+        let spec = specs.iter().find(|spec| spec.name == name).unwrap();
+        let properties = if name == "Agent" {
+            &spec.input_schema["properties"]
+        } else {
+            &spec.input_schema["properties"]["agents"]["items"]["properties"]
+        };
+        for field in ["agent", "effort", "worktree"] {
+            assert!(!properties[field].is_null(), "{name} cannot express {field}");
+        }
+    }
+}

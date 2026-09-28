@@ -26,14 +26,15 @@
 //! the day's count.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use jev_socket::{Lent, Socket};
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
 };
-use zerocode_core::jev::summary::MODEL;
+use zerocode_core::jev::summary::{HTTP_VERSION, MODEL};
 use zerocode_core::jev::{JevUse, count, memo};
 
 use crate::api_routers::{Keychain, RouterKeys};
@@ -317,8 +318,8 @@ pub(crate) fn base_url() -> String {
 }
 
 /// What asking came to at the Jev door: the requests it sent, the lines the
-/// door withheld from them, and the version that answered — what every Jev
-/// ledger row the window writes carries.
+/// door withheld from them, the version that answered and the HTTP version
+/// it answered over — what every Jev ledger row the window writes carries.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Spent {
     pub requests: u32,
@@ -326,12 +327,17 @@ pub struct Spent {
     /// The version the answer named ([`answered_by`], t-6187); `None` when
     /// nothing answered — a refusal at the door, a failure, a wall.
     pub model: Option<String>,
+    /// The HTTP version the response came back on ([`version_word`],
+    /// t-13199); `None` when nothing came back, and for the memo's answer,
+    /// which crossed no wire.
+    pub version: Option<String>,
 }
 
 impl Spent {
     /// Write this ask's account onto `row`: the door's two counts and, when
     /// an answer named one, the version that answered, under the key table's
-    /// spelling ([`MODEL`]).
+    /// spelling ([`MODEL`]); and, when a response came back, the HTTP version
+    /// it came over ([`HTTP_VERSION`]).
     ///
     /// The one writer of those keys for every seat the window asks — each
     /// seat writes its own words and hands its row here — so a seat cannot
@@ -345,11 +351,15 @@ impl Spent {
         if let Some(model) = self.model.as_deref() {
             fields.insert(MODEL.canonical.to_string(), json!(model));
         }
+        if let Some(version) = self.version.as_deref() {
+            fields.insert(HTTP_VERSION.canonical.to_string(), json!(version));
+        }
     }
 
     /// What several asks of one judgment came to together — a sharded
     /// question's requests side by side: their requests and withheld lines
-    /// added, and the version the first answer among them named.
+    /// added, and the versions the first answer among them named and came
+    /// over.
     #[must_use]
     pub fn together<'spent>(asks: impl IntoIterator<Item = &'spent Self>) -> Self {
         asks.into_iter().fold(Self::default(), |mut all, one| {
@@ -357,6 +367,9 @@ impl Spent {
             all.redacted_lines += one.redacted_lines;
             if all.model.is_none() {
                 all.model.clone_from(&one.model);
+            }
+            if all.version.is_none() {
+                all.version.clone_from(&one.version);
             }
             all
         })
@@ -389,8 +402,8 @@ enum KeySource {
     Keychain,
 }
 
-/// The wire: where the key comes from, the origin, and the person's settings
-/// file the door reads.
+/// The wire: where the key comes from, the origin, the person's settings
+/// file the door reads, and the socket its questions ride.
 #[derive(Clone)]
 pub struct Wire {
     keys: KeySource,
@@ -399,6 +412,9 @@ pub struct Wire {
     /// Its folder keeps the day's count. `None` when no home resolves, which
     /// consents to nothing.
     settings: Option<PathBuf>,
+    /// The window's one socket ([`SOCKET`]); a test points a wire at a socket
+    /// of its own (`Wire::on`).
+    socket: &'static Socket<reqwest::Client>,
 }
 
 /// A key as the wire keeps it: trimmed, and empty is none.
@@ -420,6 +436,7 @@ impl Wire {
             )),
             base: base_url(),
             settings: crate::api_routers::zo_settings_path(),
+            socket: &SOCKET,
         }
     }
 
@@ -431,6 +448,7 @@ impl Wire {
             keys: KeySource::Keychain,
             base: base_url(),
             settings: crate::api_routers::zo_settings_path(),
+            socket: &SOCKET,
         }
     }
 
@@ -444,7 +462,18 @@ impl Wire {
             keys: KeySource::Read(trimmed(Some(key.to_string()))),
             base: base.trim().to_string(),
             settings,
+            socket: &SOCKET,
         }
+    }
+
+    /// This wire, riding `socket` rather than the window's: how a test
+    /// watches which connection its own questions ride without another
+    /// test's questions moving the socket under it.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn on(mut self, socket: &'static Socket<reqwest::Client>) -> Self {
+        self.socket = socket;
+        self
     }
 
     /// The key, read now.
@@ -531,16 +560,32 @@ impl Wire {
         if self.key().is_none() {
             return;
         }
-        let Some(client) = client() else {
+        let Some(lent) = self.socket.lend() else {
             return;
         };
-        let base = self.base.trim_end_matches('/').to_string();
+        let base = self.origin().to_string();
         if !warm_due(&base) {
             return;
         }
+        let socket = self.socket;
         tauri::async_runtime::spawn(async move {
-            let _ = client.get(&base).timeout(ACTION_WARM_TIMEOUT).send().await;
+            let warmed = lent
+                .client
+                .get(&base)
+                .timeout(ACTION_WARM_TIMEOUT)
+                .send()
+                .await;
+            // A warm-up nothing came back for would leave the next question
+            // a socket that may have gone quiet under it.
+            if warmed.is_err() {
+                let_go(socket, &lent, &base);
+            }
         });
+    }
+
+    /// The origin this wire asks, as the pool and the warm-up record key it.
+    fn origin(&self) -> &str {
+        self.base.trim_end_matches('/')
     }
 
     /// One question of `row`'s about words from `workspace`, whole: the door,
@@ -605,6 +650,7 @@ impl Wire {
                     // The version that gave the remembered answer, read off
                     // the body the memo kept whole.
                     model: answered_by(&remembered.answer),
+                    version: None,
                 },
                 request_bytes,
                 memo,
@@ -613,11 +659,13 @@ impl Wire {
         // Every caller is sync — a walk drives sync roads, a question asked
         // off the beat has a thread of its own — and blocks on the window's
         // runtime the same way.
-        let answer = tauri::async_runtime::block_on(self.ask_once(&key, cleared, deadline));
+        let (answer, version) =
+            tauri::async_runtime::block_on(self.ask_once(&key, cleared, deadline));
         let spent = Spent {
             requests: 1,
             redacted_lines,
             model: answer.as_deref().ok().and_then(answered_by),
+            version,
         };
         Asked {
             answer,
@@ -627,38 +675,60 @@ impl Wire {
         }
     }
 
-    /// One call carrying the door's bytes, bounded whole by `deadline`.
+    /// One call carrying the door's bytes, bounded whole by `deadline`: the
+    /// endpoint's body or the word it failed with, and the HTTP version the
+    /// response came back on — `None` when none came back.
     async fn ask_once(
         &self,
         key: &str,
         cleared: door::Cleared,
         deadline: Instant,
-    ) -> Result<String, String> {
+    ) -> (Result<String, String>, Option<String>) {
         if Instant::now() >= deadline {
-            return Err(TIMEOUT.to_string());
+            return (Err(TIMEOUT.to_string()), None);
         }
-        let client = client().ok_or_else(|| TRANSPORT.to_string())?;
-        let url = format!("{}{SYSTEMONE_PATH}", self.base.trim_end_matches('/'));
+        let Some(lent) = self.socket.lend() else {
+            return (Err(TRANSPORT.to_string()), None);
+        };
+        let url = format!("{}{SYSTEMONE_PATH}", self.origin());
         // Key/consent checks, runtime startup and client construction spend
         // this call's budget too; the socket never starts a fresh deadline.
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| TIMEOUT.to_string())?;
-        let answer = client
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return (Err(TIMEOUT.to_string()), None);
+        };
+        let sent = lent
+            .client
             .post(&url)
             .timeout(remaining)
             .header("Authorization", format!("Bearer {key}"))
             .header("Content-Type", "application/json")
             .body(cleared.into_bytes())
             .send()
-            .await
-            .map_err(|err| failure(&err))?;
+            .await;
+        let answer = match sent {
+            Ok(answer) => answer,
+            Err(err) => return (Err(self.unanswered(&lent, &err)), None),
+        };
+        let version = Some(version_word(answer.version()));
         let status = answer.status();
         if !status.is_success() {
-            return Err(token_for(status.as_u16()));
+            return (Err(token_for(status.as_u16())), version);
         }
         // The body is read inside the same deadline the request was given.
-        answer.text().await.map_err(|err| failure(&err))
+        let body = answer
+            .text()
+            .await
+            .map_err(|err| self.unanswered(&lent, &err));
+        (body, version)
+    }
+
+    /// The word a question nothing came back for is refused with — its
+    /// deadline passed or its socket broke — having let go of the client it
+    /// rode, so the question after it opens a connection of its own. A
+    /// status, any status, is an answer from the server and never lands here.
+    fn unanswered(&self, lent: &Lent<reqwest::Client>, err: &reqwest::Error) -> String {
+        let_go(self.socket, lent, self.origin());
+        failure(err)
     }
 }
 
@@ -688,6 +758,9 @@ fn warm_off_thread(wire: Wire) {
     std::thread::spawn(move || wire.warm());
 }
 
+/// The origins warmed in the last [`POOL_IDLE`], and when ([`warm_due`]).
+static WARMED: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+
 /// Whether a warm-up to `origin` would buy anything, and a record that it is
 /// about to if it would.
 ///
@@ -698,9 +771,10 @@ fn warm_off_thread(wire: Wire) {
 /// keyed by origin — a socket opened to one endpoint is no help to another,
 /// which is what the test override points the wire at. A row older than the
 /// window names a socket the pool has already dropped and is dropped with
-/// it, so this holds one row per origin warmed in the last [`POOL_IDLE`].
+/// it, so this holds one row per origin warmed in the last [`POOL_IDLE`]; a
+/// client let go takes its pool with it, and the row with the pool
+/// ([`let_go`]).
 fn warm_due(origin: &str) -> bool {
-    static WARMED: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
     let mut warmed = WARMED.lock().unwrap_or_else(PoisonError::into_inner);
     let now = Instant::now();
     warmed.retain(|(_, at)| now.duration_since(*at) < POOL_IDLE);
@@ -711,25 +785,46 @@ fn warm_due(origin: &str) -> bool {
     true
 }
 
-/// The one HTTP client every question the window asks goes through: its
-/// connection pool keeps the endpoint's TLS session alive between asks, so
-/// a walk's second question rides the first's socket instead of opening its
+/// Let go of `lent`'s client after a request on it that nothing came back
+/// for (`jev_socket`, t-13199): over HTTP/2 the pool would otherwise hand the
+/// very connection that went quiet to every question behind it. The pool goes
+/// with the client, and `origin`'s warm-up record with the pool, so the next
+/// door warms the origin again. A client another failure already let go is
+/// left to the one that replaced it, and the record to that one's warm-up.
+fn let_go(socket: &Socket<reqwest::Client>, lent: &Lent<reqwest::Client>, origin: &str) {
+    if socket.unanswered(lent) {
+        WARMED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(seen, _)| seen != origin);
+    }
+}
+
+/// The one socket every question the window asks goes through: its client's
+/// connection pool keeps the endpoint's TLS session alive between asks, so a
+/// walk's second question rides the first's socket instead of opening its
 /// own. A client per ask was a handshake per ask — see §2 of
 /// docs/design/jev-seats-accuracy-wave-20260921.md for the bench that timed
-/// both on the same look. Its idle window is [`POOL_IDLE`], named rather
-/// than inherited so a warm-up can be skipped on the same number the socket
-/// lives by. `None` only when the client cannot be built at all, which the
-/// ask refuses as `transport`.
-fn client() -> Option<&'static reqwest::Client> {
-    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .pool_idle_timeout(POOL_IDLE)
-                .build()
-                .ok()
-        })
-        .as_ref()
+/// both on the same look. A question nothing came back for lets the client
+/// go ([`let_go`]), and the next one opens a connection of its own. No client
+/// at all, one that cannot be built, is refused as `transport`.
+static SOCKET: Socket<reqwest::Client> = Socket::new(built);
+
+/// A client as the wire's socket builds one. Its idle window is
+/// [`POOL_IDLE`], named rather than inherited so a warm-up can be skipped on
+/// the same number the socket lives by.
+fn builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().pool_idle_timeout(POOL_IDLE)
+}
+
+fn built() -> Option<reqwest::Client> {
+    builder().build().ok()
+}
+
+/// An HTTP version as a row keeps it: the `http` crate's own spelling
+/// (`HTTP/1.1`, `HTTP/2.0`).
+pub(crate) fn version_word(version: reqwest::Version) -> String {
+    format!("{version:?}")
 }
 
 /// The word a request that never answered is refused with.

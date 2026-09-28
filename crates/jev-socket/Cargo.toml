@@ -1,0 +1,15 @@
+[package]
+name = "jev-socket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Which connection a Jev question rides — the rule for when the client it asks
+# through is kept and when it is let go. Two trees ask Jev (the window's wire
+# and zo's), separate cargo workspaces on two reqwest majors, so they cannot
+# share a client, only this rule; and like model-prices this crate is
+# leaf-shaped for that reason: generic over the client it holds, and no
+# dependency at all. A dependency here would have to be carried by both.
+[dependencies]

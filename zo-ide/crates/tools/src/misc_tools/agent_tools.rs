@@ -5,6 +5,7 @@ mod completion;
 mod custom;
 mod fork;
 mod labels;
+pub(crate) mod ledger;
 mod manifest;
 mod panes;
 mod provider_client;
@@ -146,6 +147,8 @@ use self::subagent_profile::{
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AgentInput {
+    #[serde(flatten)]
+    pub launch: ledger::Launch,
     pub description: String,
     pub prompt: String,
     pub subagent_type: Option<String>,
@@ -647,6 +650,8 @@ pub(crate) struct AgentOutput {
 /// (`docs/design/zo-teammate-lifecycle-contract.md` §2.5).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AgentLifecycle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ledger: Option<ledger::Seat>,
     /// `inline` (a thread of the spawning process) or `pane` (a zo of its
     /// own beside it). Absent on a manifest written before the stamp existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -941,6 +946,15 @@ pub(crate) fn execute_agent_with_parent_model_and_hooks(
     parent_lsp: Option<&LspRegistry>,
     hook_config: Option<&RuntimeHookConfig>,
 ) -> Result<AgentOutput, ToolError> {
+    let internal_classifier = input.subagent_type.as_deref() == Some("classifier")
+        && input.tool_call_id.is_none() && !input.workflow_member && input.launch.agent.is_none();
+    if ledger::available() && !internal_classifier {
+        return ledger::execute(input, parent_model, parent_lsp, hook_config);
+    }
+    if input.launch.agent.as_deref().is_some_and(|agent| agent != "zo")
+        || input.launch.effort.is_some() || input.launch.worktree.is_some() {
+        return Err(ToolError::Execution("the requested agent/effort/worktree requires a ZeroCode ledger grant and zerocode-orc on PATH".into()));
+    }
     match spawn_mode_for(runtime::subagent_panes::mode(), input.subagent_type.as_deref()) {
         runtime::subagent_panes::SubagentMode::Panes => {
             execute_agent_with_spawn_and_parent_model_and_hooks(
@@ -1171,7 +1185,12 @@ where
     // that env var is the user's explicit all-agents override and still wins.
     // Otherwise the route is NOT re-gated by provider family the way an
     // untrusted on-wire `model` field is.
-    let selection = match input
+    let selection = if input.launch.selected {
+        AgentModelSelection {
+            model: input.launch.model(&input).unwrap_or_else(|| "cli-default".into()),
+            thinking_budget_tokens: None,
+        }
+    } else { match input
         .route_model
         .as_deref()
         .or_else(|| input.model.as_deref().filter(|model| route_is_person_pin || person_selected(model)))
@@ -1196,6 +1215,7 @@ where
             &input.prompt,
         )
         .map_err(|error| ToolError::InvalidInput(error.to_string()))?,
+    }
     };
     // Model-authored explicit ids are normalized by `try_resolve` above.
     // Trusted Smart routes and host-computed inventory fallbacks stay exact;
@@ -1204,13 +1224,13 @@ where
         model,
         thinking_budget_tokens,
     } = selection;
-    let requested_model = requested_agent_model(
+    let requested_model = if input.launch.selected { input.launch.model(&input) } else { requested_agent_model(
         input.model.as_deref(),
         custom_agent
             .as_ref()
             .and_then(|agent| agent.model.as_deref()),
         parent_model,
-    );
+    ) };
     // `route_role` is absent when an Agent/Workflow phase supplied an explicit
     // model because Smart correctly preserves that choice. Recover the same
     // effective role from either the built-in profile or task text (needed for
@@ -1236,11 +1256,11 @@ where
     let implementation_route = supports_file_edits(implementation_kind)
         && (matches!(input.route_role.as_deref(), Some("coding" | "debugging"))
             || implementation_task(implementation_kind, &implementation_description, &input.prompt));
-    let person_model_pin = route_is_person_pin || person_selected(&model)
+    let person_model_pin = input.launch.selected || route_is_person_pin || person_selected(&model)
         || custom_agent.as_ref().and_then(|agent| agent.model.as_deref())
             .is_some_and(|pin| same_model(pin, &model))
         || std::env::var(AGENT_MODEL_ENV).ok().is_some_and(|pin| !pin.trim().is_empty());
-    if implementation_route {
+    if implementation_route && !input.launch.selected {
         if let Some(reason) = implementation_model_refusal(&model, parent_model, person_model_pin) {
             return Err(ToolError::Declined(reason));
         }
@@ -1390,7 +1410,10 @@ where
             fallback_models: route_fallback_models.clone(),
             ..AgentActivityTelemetry::default()
         },
-        lifecycle: AgentLifecycle::default(),
+        lifecycle: AgentLifecycle {
+            execution: input.launch.selected.then(|| "ledger".into()),
+            ..AgentLifecycle::default()
+        },
     };
     let cancel_signal = runtime::HookAbortSignal::new();
     register_agent_cancel_signal(
@@ -1525,6 +1548,9 @@ where
     }
     materialise_agent_resume_files(&manifest, &harness, &resume_snapshot);
 
+    if input.launch.selected {
+        return load_agent_manifest_from_scanned_path(Path::new(&manifest.manifest_file)).map_err(ToolError::Execution);
+    }
     Ok(manifest)
 }
 
@@ -1640,6 +1666,9 @@ pub(crate) fn resume_agent_with_message(
     // a re-cut one on the same transcript when it is not — and a thread
     // continues as a thread. Nothing here turns one into the other.
     match manifest.lifecycle.execution.as_deref() {
+        Some("ledger") => Err(ToolError::Execution(
+            "this ledger task has ended; start a new Agent task with the previous report as context".into(),
+        )),
         Some(EXECUTION_PANE) => resume_agent_with_spawn(
             registry,
             manifest,

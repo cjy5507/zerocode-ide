@@ -17,6 +17,10 @@ core-types = { path = "../core-types" }
 # only its config/data/home roots.
 dirs = "6"
 memchr = "2"
+# Which connection a Jev question rides — kept while its questions are
+# answered, let go after one the server never answered (t-13199): the rule
+# the window's wire follows, in a crate both cargo workspaces compile.
+jev-socket = { path = "../../../crates/jev-socket" }
 # The window's price table, at the top of this repository — one crate both
 # cargo workspaces compile, so the plan scorer and the window's token scanners
 # cannot come to disagree about what a turn cost (t-4290).
@@ -41,6 +45,13 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 nix = { version = "0.29", features = ["fs"] }
 
 [dev-dependencies]
+# A loopback System One that speaks HTTP/2 as well as HTTP/1.1, for the tests
+# of which connection a request rides (t-13199). All three are in the lock
+# already, beneath reqwest's `http2` feature; named here because the tests use
+# them.
+bytes = "1"
+h2 = "0.4"
+http = "1"
 # Panic-safe temp dirs for credential-store test isolation; auto-removed on drop,
 # so the shared `CredentialEnvIsolation` helper no longer hand-rolls a timestamp
 # path plus manual `remove_dir_all`. Uses the workspace-pinned version.

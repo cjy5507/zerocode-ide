@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/jev-socket",
     "crates/model-prices",
     "crates/zerocode-core",
     "crates/zerocode-devproxy",
@@ -19,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.1.38"
+version = "1.1.40"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -42,6 +43,7 @@ lto = "fat"
 codegen-units = 1
 
 [workspace.dependencies]
+jev-socket = { path = "crates/jev-socket" }
 model-prices = { path = "crates/model-prices" }
 zerocode-core = { path = "crates/zerocode-core" }
 zerocode-devproxy = { path = "crates/zerocode-devproxy" }

@@ -64,6 +64,10 @@ workspace = true
 # 트러스트 스토어 파일 권한(0600) 검증에 쓰인다. 워크스페이스 정책이
 # `unsafe_code = "forbid"` 이므로 libc 직접 호출 대신 nix.
 nix = { version = "0.29", features = ["fs", "process", "signal", "term"] }
+# 프레임마다 묻는 판 크기를 zo 가 그리는 터미널에 ioctl 한 번으로 — crossterm
+# 의 `terminal::size` 는 부를 때마다 /dev/tty 를 연다. crossterm 이 이미 쓰는
+# 그 rustix 를 같은 기능으로 부르므로 새로 들어오는 크레이트는 없다.
+rustix = { version = "1", default-features = false, features = ["std", "termios"] }
 
 [dev-dependencies]
 session-corpus = { path = "../session-corpus" }

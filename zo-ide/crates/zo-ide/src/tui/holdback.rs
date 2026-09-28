@@ -6,7 +6,8 @@
 //! 행이 다시 잡힌다. 그래서 codex 는 표가 열려 있는 동안 그 구역을 **미확정
 //! 꼬리**로 붙잡아 두고(`controller.rs` 머리말: "keeps content from the table
 //! header onward as mutable tail until the stream finalizes"), 끝날 때 한 번에
-//! 커밋한다.
+//! 커밋한다. 여기서는 빈 줄이 표를 닫으면(GFM) 놓는다 — 그 뒤는 표를 바꿀 수
+//! 없으므로, 표와 그 뒤 답이 오는 대로 흐른다.
 //!
 //! 스캐너는 일부러 보수적이다 — 꼬리가 어디서 시작해야 하는지만 정하고 표
 //! 전체를 검증하거나 최종 배치를 예측하지 않는다(원본 머리말).
@@ -201,6 +202,14 @@ impl Scanner {
             }
         }
 
+        // 빈 줄이 표를 닫는다(GFM) — 그 뒤 어떤 줄도 표의 열 폭을 바꿀 수
+        // 없다. codex 는 스트림이 끝날 때까지 붙잡아서, 표 뒤의 답 전체가 꼬리에
+        // 쌓여 접힌 채 끝에 한꺼번에 내려갔다(t-11961: 21 줄, 6.7 KB).
+        if fence_kind == FenceKind::Outside && line.trim().is_empty() {
+            self.confirmed_table_start = None;
+            self.pending_header_start = None;
+        }
+
         self.previous_line = Some(PreviousLine {
             source_start,
             fence_kind,
@@ -366,6 +375,19 @@ mod tests {
         assert!(matches!(scanner.state(), State::PendingHeader { .. }));
         scanner.push_source_chunk("just prose\n");
         assert_eq!(scanner.state(), State::None);
+    }
+
+    /// 빈 줄이 표를 닫는다(GFM) — 그 뒤로는 어떤 줄도 표의 열 폭을 바꿀 수
+    /// 없으므로 더 붙잡지 않는다. 담장 밖의 빈 줄만 센다.
+    #[test]
+    fn a_blank_line_after_the_table_releases_it() {
+        let mut scanner = Scanner::new();
+        scanner.push_source_chunk("| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+        assert!(matches!(scanner.state(), State::Confirmed { .. }));
+        scanner.push_source_chunk("\n");
+        assert_eq!(scanner.state(), State::None, "a closed table was still held");
+        scanner.push_source_chunk("| C | D |\n| --- | --- |\n");
+        assert!(matches!(scanner.state(), State::Confirmed { .. }), "the next table holds again");
     }
 
     /// 담장 안의 파이프는 코드다 — codex 는 `Other` 담장을 건너뛴다.

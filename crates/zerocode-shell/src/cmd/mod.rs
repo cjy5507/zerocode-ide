@@ -221,11 +221,11 @@ pub(crate) use settings::{
     patch_editing_prefs, patch_floating_workspace, patch_open_in_applications,
     patch_workspace_board_items, patch_workspace_board_status, patch_workspace_creation_prefs,
     read_primary_selection, save_pane_layouts, save_stage_layouts, scm_tree_rows,
-    set_agent_teams_mode, set_artifacts_retention_days, set_claude_autoswitch_mode,
-    set_computer_confirm, set_computer_generator_road, set_computer_live_reflex,
-    set_confirm_close_pinned, set_conversation_focus_view, set_ctrl_tab_order_mode,
-    set_default_task_source, set_diff_side_by_side, set_hidden_shortcuts, set_hidden_task_sources,
-    set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
+    set_agent_teams_mode, set_artifacts_auto_open_beside, set_artifacts_retention_days,
+    set_claude_autoswitch_mode, set_computer_confirm, set_computer_generator_road,
+    set_computer_live_reflex, set_confirm_close_pinned, set_conversation_focus_view,
+    set_ctrl_tab_order_mode, set_default_task_source, set_diff_side_by_side, set_hidden_shortcuts,
+    set_hidden_task_sources, set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_keep_default_branch_awake, set_keybinding, set_panel_width,
     set_panel_widths, set_shortcut_visibility, set_sidebar_view,
@@ -251,9 +251,10 @@ pub(crate) use second_brain::{
 pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};
 
 pub(crate) use artifacts::{
-    artifact_copy_path, artifact_counts, artifact_delete, artifact_import_transcripts,
-    artifact_open, artifact_page_at, artifact_preview, artifact_register, artifact_reveal,
-    artifact_search, artifact_thumbnail, artifact_versions, artifacts_list,
+    artifact_copy_path, artifact_counts, artifact_delete, artifact_export,
+    artifact_feedback_record, artifact_import_transcripts, artifact_open, artifact_page_at,
+    artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_thumbnail,
+    artifact_versions, artifacts_list,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,

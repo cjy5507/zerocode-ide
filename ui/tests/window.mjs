@@ -23,7 +23,7 @@ import { createRunner } from "./window-runner.mjs";
 
 import { testVaultSubagents } from "./vault-subagents.mjs";
 import { testKnowledgeLive } from "./knowledge-live.mjs";
-import { testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
+import { testArtifactBand, testArtifactBeside, testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
@@ -213,6 +213,8 @@ suite("agent-conversation", ({ browser, origin, ok }) => testAgentConversation(b
 suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(browser, origin, ok));
 suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
 suite("emulator-seat", ({ browser, origin, ok }) => testEmulatorSeat(browser, origin, ok));
+suite("artifact-beside", ({ browser, origin, ok }) => testArtifactBeside(browser, origin, ok, join(UI, "..", "output/playwright")));
+suite("artifact-band", ({ browser, origin, ok }) => testArtifactBand(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("emulator-loans", ({ browser, origin, ok }) => testEmulatorLoans(browser, origin, ok));
 suite("coordinator-panel", ({ browser, origin, ok }) => testCoordinatorPanel(browser, origin, ok));
 suite("jev-dashboard", async ({ browser, origin, ok }) => {
@@ -12594,14 +12596,24 @@ const annotate = await page.evaluate(async () => {
   seen.tiledOffered =
     runningRows.some((row) => row.name === "Codex" && row.where === splitSeat) &&
     runningRows.some((row) => row.name === "Claude" && row.where === tiledSeat);
+  // 주석 묶음은 사람의 붙여넣기와 같은 문(`term_paste`)으로 쓰던 입력 뒤에 붙는다
+  // (t-11958) — 컴포저를 비우는 키가 앞서는 `send_prompt`는 이 길에 없고, 끝에
+  // Enter도 없다.
   let sent = null;
+  let pasted = null;
   window.__ANSWER__.send_prompt = (args) => ((sent = args), null);
+  const heldPaste = window.__ANSWER__.term_paste;
+  window.__ANSWER__.term_paste = (args) => ((pasted = args), null);
   pop.querySelector(".note-pop-row").click();
   await new Promise((done) => setTimeout(done, 250));
   delete window.__ANSWER__.send_prompt;
-  const text = sent?.text ?? "";
+  if (heldPaste === undefined) delete window.__ANSWER__.term_paste;
+  else window.__ANSWER__.term_paste = heldPaste;
+  const text = pasted?.text ?? "";
   seen.bundle =
-    sent?.submit === false &&
+    sent === null &&
+    pasted?.term === term &&
+    !/[\r\n]$/.test(text) &&
     text.includes("여백 좀 줄여줘") &&
     text.includes(`[${t("browser.annotate.change", "변경")}]`) &&
     text.includes(`[${t("browser.annotate.ask", "질문")}]`) &&
@@ -52756,6 +52768,7 @@ const brain = await page.evaluate(async () => {
     labelStrokeWidth: labelStyle?.strokeWidth ?? "",
     initialFitRatio: ((graphLayout.bounds.maxX - graphLayout.bounds.minX) * graphLayout.scale)
       / view.querySelector(".knowledge-canvas").clientWidth,
+    initialFitWanted: graphLayout.tuning.mapFit,
     gradients: view.querySelectorAll("defs radialGradient[id^='knowledge-node-gradient-']").length,
     halos: view.querySelectorAll(".knowledge-halo").length,
     /* 서 있는 줄만 센다 — 공급망 렌즈(P4)의 줄은 그 렌즈가 켜졌을 때만 선다. */
@@ -52794,10 +52807,10 @@ ok(
     brain.edgeLayers === 1 &&
     brain.labelPaintOrder.includes("stroke") &&
     parseFloat(brain.labelStrokeWidth) === 2 &&
-    // 카메라는 두 축을 다 판 안에 넣으므로(contain, 09-16) 폭의 몫은 토큰의 몫
-    // **이하**다 — 묶는 축이 높이일 때 그보다 작다.
+    // 카메라는 두 축을 다 판 안에 넣으므로(contain, 09-16) 폭의 몫은 전체 지도 맞춤
+    // 토큰(`--knowledge-map-fit`, t-12029)의 몫 **이하**다 — 묶는 축이 높이일 때 그보다 작다.
     brain.initialFitRatio > 0.3 &&
-    brain.initialFitRatio <= 0.74 &&
+    brain.initialFitRatio <= brain.initialFitWanted + 0.02 &&
     brain.gradients === 8 &&
     brain.halos === brain.nodeCount &&
     // 범례는 점 넷(페이지·유령·원본·회상됨)과 선 일곱(여섯 관계 + merge?) — t-2931.

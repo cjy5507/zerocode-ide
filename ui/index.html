@@ -45,6 +45,7 @@
     <script defer src="./shell-knowledge-3d.js"></script>
     <script defer src="./shell-knowledge.js"></script>
     <script defer src="./shell-knowledge-supply.js"></script>
+    <script defer src="./shell-knowledge-universe.js"></script>
     <script defer src="./shell-scm.js"></script>
     <script defer src="./shell-browser.js"></script>
     <script defer src="./shell-workspace.js"></script>
@@ -5168,6 +5169,11 @@
             </span>
             <input class="settings-input" id="artifacts-retention-days" type="number"
                    inputmode="numeric" aria-describedby="artifacts-retention-days-hint" />
+          </label>
+          <!-- 첫 발행을 만든 판 옆에 열기(t-11958). 끄면 발행은 「새 N」으로만 알린다. -->
+          <label class="settings-check">
+            <input type="checkbox" id="artifacts-auto-open-beside" />
+            <span class="settings-label" data-i18n="settings.artifacts.autoOpenBeside">처음 발행한 페이지를 만든 판 옆에 열기</span>
           </label>
           <div class="settings-action-row">
             <button class="btn" id="settings-open-artifacts" type="button"

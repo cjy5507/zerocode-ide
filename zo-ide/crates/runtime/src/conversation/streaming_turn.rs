@@ -3169,6 +3169,10 @@ where
     /// Re-sending the `ToolCall` block with `ToolCallStatus::Cancelled` merges
     /// in place on `tool_call_id`, so the row reads as "you stopped this", which
     /// is the whole difference the user needs to see.
+    ///
+    /// A tool cancelled together with the turn's own stop ends the turn here
+    /// (`Err`): that pair is the host's Esc, and the turn is over, not only
+    /// its tool.
     async fn mark_streaming_tool_cancelled(
         &mut self,
         iterations: usize,
@@ -3206,6 +3210,19 @@ where
         // bounded by the code's, and per-call detail is a stated non-goal of
         // the ledger (see the `harness_attest` module doc).
         telemetry::attest_fired(telemetry::HarnessFeature::ToolCancelSettled);
+        // The host's Esc raises the turn's stop and then cancels the tool
+        // (`TurnScaffold::cancel_turn`). The cancel wakes this turn at once;
+        // the stop is a flag its host looks at every 25 ms. Running on from
+        // here — to this tool's "the turn continues" result, the steering
+        // boundary and the next request — raced that look, and on a quick
+        // machine a steer typed during the tool rode the continuation instead
+        // of the fresh turn Esc asked for. The tool_use keeps no result and is
+        // sealed as interrupted, as a turn dropped by its host leaves it.
+        if let Some(stopped) =
+            self.cancel_streaming_turn_if_aborted(iterations, "tool cancelled by the turn's stop")
+        {
+            return Err(stopped);
+        }
         Ok(())
     }
 

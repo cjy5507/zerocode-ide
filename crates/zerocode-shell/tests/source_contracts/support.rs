@@ -583,6 +583,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
         "shell-knowledge-supply.js",
         include_str!("../../../../ui/shell-knowledge-supply.js"),
     ),
+    (
+        "shell-knowledge-universe.js",
+        include_str!("../../../../ui/shell-knowledge-universe.js"),
+    ),
     ("shell-scm.js", include_str!("../../../../ui/shell-scm.js")),
     (
         "shell-browser.js",

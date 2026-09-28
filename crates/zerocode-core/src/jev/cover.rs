@@ -366,7 +366,7 @@ fn mark_of(first: Move, outcome: &Outcome) -> Result<bool, &'static str> {
 pub const NOT_TRIED: &str = "not_tried";
 
 /// The answer's mark and today's rule's, for one scene — the answer's first
-/// move and the rule's, each graded by [`mark_of`].
+/// move and the rule's, each graded by `mark_of`.
 ///
 /// # Errors
 ///
