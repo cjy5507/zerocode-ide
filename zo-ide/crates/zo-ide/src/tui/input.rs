@@ -3,7 +3,7 @@
 //! `EventStream::poll_next` 는 부를 때마다 crossterm 의 전역 입력 잠금을
 //! `try_lock_for(0)` 으로 잡아 본다. 그런데 키를 기다리는 동안 그 잠금은
 //! `EventStream` 자신의 배경 스레드가 쥐고 있다(`poll_internal(None)` 안에서
-//! 블록). 그래서 키가 없는 매 폴링이 parking_lot 의 `lock_slow` 로 떨어지고,
+//! 블록). 그래서 키가 없는 매 폴링이 `parking_lot` 의 `lock_slow` 로 떨어지고,
 //! 거기서 `sched_yield` 를 일곱 번 부른 뒤에야 `Pending` 을 돌려준다.
 //!
 //! 턴 루프의 `select!` 는 틱·블록·감시자 — 무엇이 깨우든 이 팔을 다시
