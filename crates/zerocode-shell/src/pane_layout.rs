@@ -226,7 +226,19 @@ pub struct TabLayout {
     /// owns, replayed into the fresh shells on restore.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub buffers: HashMap<usize, String>,
+    /// The conversations this tab stood for that did not come back, and that
+    /// a newer conversation took the place of (t-12063). The file keeps them
+    /// so a pane that could not wake is not forgotten the moment somebody
+    /// types a new `zo` into the shell standing in for it — which is how
+    /// 2026-09-28's lost the 08:30 conversation — and the window names them
+    /// in one line when a new conversation starts in the workspace. Never
+    /// woken on their own: which conversation a pane holds is the person's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owed: Vec<WakeAgent>,
 }
+
+/// How many owed conversations one tab keeps: the newest few, never a pile.
+const MAX_OWED: usize = 8;
 
 /// Words by leaf ordinal, bounded against the tree they point into: entries
 /// past the last leaf and entries that say nothing go. One reader for a
@@ -256,7 +268,7 @@ impl TabLayout {
         }
         let titles = leaf_words(self.titles, leaves);
         let names = leaf_words(self.names, leaves);
-        let agents = self
+        let agents: HashMap<usize, WakeAgent> = self
             .agents
             .into_iter()
             .filter(|(at, held)| *at < leaves && held.keeps())
@@ -286,6 +298,17 @@ impl TabLayout {
                     && held.len() <= zerocode_pty::SCROLLBACK_BUFFER_BYTE_LIMIT
             })
             .collect();
+        // Owed conversations that could be named again, once each, the
+        // newest kept — and never one a leaf of this tab now holds.
+        let mut owed: Vec<WakeAgent> = Vec::new();
+        for held in self.owed.into_iter().rev() {
+            let named = |one: &WakeAgent| one.agent == held.agent && one.id == held.id;
+            if held.keeps() && !owed.iter().any(named) && !agents.values().any(named) {
+                owed.push(held);
+            }
+        }
+        owed.truncate(MAX_OWED);
+        owed.reverse();
         Some(TabLayout {
             id: self.id,
             root: self.root.normalized(),
@@ -299,6 +322,7 @@ impl TabLayout {
             focused: self.focused,
             terms,
             buffers,
+            owed,
         })
     }
 }
@@ -461,6 +485,64 @@ pub fn store(layouts: &mut Layouts, worktree: String, tabs: Vec<TabLayout>) {
     }
 }
 
+/// A pane the window found running a conversation as it went: its shell,
+/// the workspace its agent last reported from, and the conversation.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LivePane {
+    pub(crate) term: u32,
+    pub(crate) worktree: String,
+    pub(crate) wake: WakeAgent,
+}
+
+/// Write down every live pane no stored tab holds, each as a tab of its own
+/// in the set of the workspace it reported from (t-12063). Answers how many.
+///
+/// The webview's saves are the list the next window restores, and on
+/// 2026-09-28 one of them had no line for a zo pane that was open and whose
+/// conversation the backend knew by id: the restart never tried it. The exit
+/// runs this inside its own write, before the screens are captured, so a tab
+/// it writes carries its last screen like any other. A pane some tab already
+/// holds, or whose conversation some tab already names, is left to that tab —
+/// one conversation, one wake.
+pub(crate) fn file_unheld(layouts: &mut Layouts, live: Vec<LivePane>) -> usize {
+    let held: std::collections::HashSet<u32> = layouts
+        .values()
+        .flatten()
+        .flat_map(|tab| tab.terms.values().copied())
+        .collect();
+    let mut filed = 0;
+    for pane in live {
+        let named = layouts.values().flatten().any(|tab| {
+            tab.agents
+                .values()
+                .any(|one| one.agent == pane.wake.agent && one.id == pane.wake.id)
+        });
+        if held.contains(&pane.term) || named || !pane.wake.keeps() {
+            continue;
+        }
+        let tabs = layouts.entry(pane.worktree).or_default();
+        let id = tabs.iter().filter_map(|tab| tab.id).max().unwrap_or(0) + 1;
+        let agent = pane.wake.agent.clone();
+        tabs.push(TabLayout {
+            id: Some(id),
+            root: PaneNode::Leaf,
+            titles: HashMap::new(),
+            names: HashMap::new(),
+            agents: HashMap::from([(0, pane.wake)]),
+            running: HashMap::from([(0, agent)]),
+            active: 0,
+            expanded: None,
+            pinned: false,
+            focused: false,
+            terms: HashMap::from([(0, pane.term)]),
+            buffers: HashMap::new(),
+            owed: Vec::new(),
+        });
+        filed += 1;
+    }
+    filed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +580,7 @@ mod tests {
             focused: false,
             terms: HashMap::new(),
             buffers: HashMap::new(),
+            owed: Vec::new(),
         }
     }
 
@@ -941,5 +1024,115 @@ mod tests {
         })
         .expect("the snapshot");
         assert_eq!(read(&file)[&tree][0].buffers[&0], "last screen");
+    }
+
+    fn zo(id: &str) -> WakeAgent {
+        WakeAgent {
+            agent: "zo".to_string(),
+            key: "session_id".to_string(),
+            id: id.to_string(),
+            transcript_path: None,
+            interrupted: false,
+        }
+    }
+
+    /// A conversation a newer one took the place of stays in the file, once,
+    /// the newest few — and never one a leaf of the same tab holds again
+    /// (t-12063).
+    #[test]
+    fn an_owed_conversation_is_kept_once_and_never_one_the_tab_holds() {
+        let mut owed: Vec<WakeAgent> = (0..12)
+            .map(|at| zo(&format!("session-17900000000{at:02}-0")))
+            .collect();
+        owed.push(zo("session-1790000000011-0"));
+        owed.push(zo("session-1790000000099-0"));
+        owed.push(WakeAgent {
+            key: "neither".to_string(),
+            ..zo("session-1790000000098-0")
+        });
+        let layout = TabLayout {
+            agents: HashMap::from([(0, zo("session-1790000000099-0"))]),
+            owed,
+            ..bare(PaneNode::Leaf)
+        }
+        .normalized()
+        .expect("a one-leaf tab keeps");
+        let kept: Vec<&str> = layout.owed.iter().map(|one| one.id.as_str()).collect();
+        assert_eq!(
+            kept,
+            vec![
+                "session-1790000000004-0",
+                "session-1790000000005-0",
+                "session-1790000000006-0",
+                "session-1790000000007-0",
+                "session-1790000000008-0",
+                "session-1790000000009-0",
+                "session-1790000000010-0",
+                "session-1790000000011-0",
+            ],
+            "the newest eight, once each, none the tab holds, none that could never wake"
+        );
+        let text = serde_json::to_string(&bare(PaneNode::Leaf)).expect("serialise");
+        assert!(
+            !text.contains("owed"),
+            "a tab that owes nothing stores no field: {text}"
+        );
+    }
+
+    /// The exit writes down a live pane no stored tab holds, as a tab of its
+    /// own in its workspace, and leaves alone a pane a tab holds and a
+    /// conversation a tab already names (t-12063).
+    #[test]
+    fn a_live_pane_no_tab_holds_is_written_down_in_its_own_workspace() {
+        let mut layouts = Layouts::new();
+        layouts.insert(
+            "/w/a".to_string(),
+            vec![TabLayout {
+                id: Some(52),
+                agents: HashMap::from([(0, zo("session-1790000000001-0"))]),
+                terms: HashMap::from([(0, 3)]),
+                ..bare(PaneNode::Leaf)
+            }],
+        );
+        layouts.insert(
+            "/w/b".to_string(),
+            vec![TabLayout {
+                id: Some(7),
+                agents: HashMap::from([(0, zo("session-1790000000009-0"))]),
+                ..bare(PaneNode::Leaf)
+            }],
+        );
+        let live = |term: u32, worktree: &str, id: &str| LivePane {
+            term,
+            worktree: worktree.to_string(),
+            wake: zo(id),
+        };
+        let filed = file_unheld(
+            &mut layouts,
+            vec![
+                live(3, "/w/a", "session-1790000000001-0"),
+                live(5, "/w/a", "session-1790000000002-0"),
+                live(21, "/w/c", "session-1790000000003-0"),
+                live(8, "/w/a", "session-1790000000009-0"),
+                live(9, "/w/a", "not a session id"),
+            ],
+        );
+        assert_eq!(filed, 2, "the two panes nobody holds, and only those");
+        let a = &layouts["/w/a"];
+        assert_eq!(a.len(), 2);
+        let written = &a[1];
+        assert_eq!(written.id, Some(53), "named past the set's own names");
+        assert_eq!(written.agents[&0].id, "session-1790000000002-0");
+        assert_eq!(written.running[&0], "zo");
+        assert_eq!(written.terms[&0], 5, "the exit's capture finds its screen");
+        assert!(!written.focused);
+        let c = &layouts["/w/c"];
+        assert_eq!(c.len(), 1, "a workspace with no set gets one");
+        assert_eq!(c[0].id, Some(1));
+        assert_eq!(
+            layouts["/w/b"].len(),
+            1,
+            "a conversation a tab names is that tab's"
+        );
     }
 }

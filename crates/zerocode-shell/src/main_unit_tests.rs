@@ -12858,6 +12858,76 @@ fn a_wake_with_nothing_written_starts_what_the_launch_button_starts() {
     }
 }
 
+/// t-12063: the shell that stands in for a conversation that could not come
+/// back says so on its own screen — the webview's words, each line on its own
+/// row, control characters and anything past the cap gone — and names the
+/// vendor's own resume, spelled by the window's table rather than the webview.
+#[test]
+fn a_stand_in_pane_says_what_it_stands_in_for_and_how_to_go_on() {
+    let said = cmd::terminal::notice_bytes(
+        "zo 대화를 이어서 열지 못했습니다\x1b[?2004l — session not found\n이어 가려면: zo --resume x\n\n",
+    );
+    assert_eq!(
+        String::from_utf8(said).expect("text"),
+        "\r\nzo 대화를 이어서 열지 못했습니다[?2004l — session not found\r\n이어 가려면: zo --resume x\r\n",
+        "no escape reaches the terminal, and every line is its own row"
+    );
+    assert!(
+        cmd::terminal::notice_bytes(" \n\u{7} ").is_empty(),
+        "nothing to say says nothing"
+    );
+    assert!(
+        cmd::terminal::notice_bytes(&"가".repeat(5_000)).len() <= 1_024 * 3 + 4,
+        "a notice is a few sentences, never a page"
+    );
+
+    let session = |key, id: &str| zerocode_core::ProviderSession {
+        key,
+        id: id.to_string(),
+        transcript_path: None,
+    };
+    assert_eq!(
+        cmd::board::resume_line(
+            "zo".to_string(),
+            session(
+                zerocode_core::SessionKey::SessionId,
+                "session-1790551803628-0"
+            )
+        )
+        .as_deref(),
+        Some("zo --resume session-1790551803628-0")
+    );
+    assert_eq!(
+        cmd::board::resume_line(
+            "claude".to_string(),
+            session(
+                zerocode_core::SessionKey::SessionId,
+                "3f1e2d4c-0000-4000-8000-00000000c1a0"
+            )
+        )
+        .as_deref(),
+        Some("claude --resume 3f1e2d4c-0000-4000-8000-00000000c1a0")
+    );
+    assert_eq!(
+        cmd::board::resume_line(
+            "zo".to_string(),
+            session(zerocode_core::SessionKey::SessionId, "not an id; rm -rf ~")
+        ),
+        None,
+        "an id no vendor mints is never spelled as a command"
+    );
+    assert_eq!(
+        cmd::board::resume_line(
+            "no-such-agent".to_string(),
+            session(
+                zerocode_core::SessionKey::SessionId,
+                "session-1790551803628-0"
+            )
+        ),
+        None
+    );
+}
+
 /// t-4398: one conversation, one process — judged once, on the road every
 /// resume door takes, before anything of the wake happens. On 2026-09-16 a
 /// sidebar row resumed the zo session its own activation was still waking,
@@ -13158,6 +13228,7 @@ fn a_restored_zo_pane_reopens_its_private_channel() {
         focused: true,
         terms: HashMap::from([(0, term)]),
         buffers: HashMap::new(),
+        owed: Vec::new(),
     }];
     let sessions = HashMap::from([(
         term,

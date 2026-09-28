@@ -900,6 +900,21 @@ pub(crate) fn pane_sessions(state: State<'_, AppState>) -> Vec<PaneSession> {
     listed
 }
 
+/// The command a person types to go on with a conversation (t-12063): the
+/// vendor's own resume, spelled by the one table this window keeps
+/// (`resume_argv`) rather than by the webview. Said by the shell that stands
+/// in for a conversation that could not come back, and by the line that names
+/// a conversation a new one took the place of. `None` for an agent this window
+/// has no way back for — the sentence then names the sidebar row alone.
+#[tauri::command]
+pub(crate) fn resume_line(
+    agent: String,
+    session: zerocode_core::ProviderSession,
+) -> Option<String> {
+    let kind = zerocode_core::AgentKind::from_slug(&agent)?;
+    zerocode_core::resume_argv(kind, &session).map(|argv| argv.join(" "))
+}
+
 /// One fully assembled provider-resume command.
 ///
 /// Private to the backend: the Tauri wire never accepts cwd or raw argv. A
@@ -1008,14 +1023,55 @@ pub(crate) fn resume_session(
     // any other door that re-enters a conversation outside a restore sends
     // none.
     restore: Option<super::settings::StoredScreen>,
+    // The workspace the conversation belongs to, as the door names it — the
+    // tab it was stored under, the row that lists it (t-12063). A name, never
+    // a place to open in: [`wake_root`] resolves it through the window's own
+    // catalog, and a door that names none opens in the workspace in front.
+    worktree: Option<String>,
 ) -> Result<ConversationWake, String> {
+    let root = wake_root(state.inner(), worktree.as_deref())?;
     let door = ResumeDoor {
         app: &app,
         state: state.inner(),
         restore,
+        root,
     };
     let term = state.take_term_id();
     wake_conversation(&door, term, &agent, session, rows, cols)
+}
+
+/// The folder a conversation's pane opens in (t-12063): the workspace the
+/// door names, resolved the way a workspace click is (`set_active_worktree`:
+/// the catalog this window built, then git's list and the stored folders), or
+/// the workspace in front when the door names none.
+///
+/// Not the workspace in front whatever the door says. zo looks a conversation
+/// up in the store of the folder it is started in, and a wake that crossed a
+/// workspace switch started it in the wrong one: `session not found` in zo's
+/// own log seven times since 2026-09-13, every one a conversation sitting
+/// whole in another workspace's store. On 2026-09-28 11:56 that is how a
+/// restart brought back one zo pane of three.
+fn wake_root(state: &AppState, named: Option<&str>) -> Result<PathBuf, String> {
+    let Some(named) = named else {
+        return Ok(state.active_root());
+    };
+    let remembered = state
+        .catalog_owners()
+        .get(named)
+        .map(|(_, chosen)| chosen.clone());
+    if let Some(chosen) = remembered
+        && !chosen.prunable
+        && chosen.path.is_dir()
+    {
+        return Ok(chosen.path);
+    }
+    match known_workspace_context(state.config_root(), named) {
+        Ok(KnownWorkspace::Git(_, chosen)) if !chosen.prunable => Ok(chosen.path),
+        Ok(KnownWorkspace::Folder(folder)) => Ok(folder),
+        _ => Err(format!(
+            "{named}은(는) 이 창이 아는 작업 공간이 아니어서 그 대화를 열지 않았습니다"
+        )),
+    }
 }
 
 /// The window a conversation's wake opens its pane in (t-7812): what the
@@ -1372,6 +1428,8 @@ pub(crate) struct ResumeDoor<'a> {
     app: &'a AppHandle,
     state: &'a AppState,
     restore: Option<super::settings::StoredScreen>,
+    /// The folder the pane opens in ([`wake_root`]).
+    root: PathBuf,
 }
 
 /// One resume's launch, built and seated and not yet started: the program,
@@ -1403,7 +1461,7 @@ impl WakeWindow for ResumeDoor<'_> {
     type Channel = ZoChannel;
 
     fn root(&self) -> PathBuf {
-        self.state.active_root()
+        self.root.clone()
     }
 
     fn data_root(&self) -> PathBuf {
@@ -1434,7 +1492,7 @@ impl WakeWindow for ResumeDoor<'_> {
             plan,
         } = command;
         let agent = kind.slug();
-        let root = state.active_root();
+        let root = self.root();
         // The row's answers for the two decisions below that used to be
         // spelled by name: which trust menu to pre-answer, and how the pane
         // is opened.

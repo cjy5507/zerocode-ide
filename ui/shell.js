@@ -434,9 +434,15 @@ function resumableSessionOf(tab) {
  * goes to that pane rather than starting a second writer on its transcript; a
  * pane whose agent was quit back to its shell holds nothing, and reopening that
  * conversation is what the row is for. */
-async function resumeSession(known) {
+async function resumeSession(known, worktree = null) {
   try {
-    const woke = await wakeConversation(known.agent, known.session, spawnGrid({ placement: "tab" }));
+    const woke = await wakeConversation(
+      known.agent,
+      known.session,
+      spawnGrid({ placement: "tab" }),
+      null,
+      worktree,
+    );
     if (woke.standing) {
       // Held in a tab: that pane is the answer. In none yet: the door that is
       // opening it puts it on the stage itself.
@@ -10082,14 +10088,32 @@ function makePastRow({ agent, name: words, said: word, at, worktree, session }) 
  * 그것이다. 활성화가 첫 터미널까지 세우면(`openLedgerSeatedAgent`), 원장
  * 워커가 끝난 체크아웃에서는 그 워커의 에이전트가 빈 채로 먼저 뜨고 이 문의
  * 대화가 그 옆에 한 판 더 선다. 2026-09-25 01:04 재시작 뒤 여섯 체크아웃이
- * 모두 그랬다(빈 판이 143~249 ms 먼저, t-7812). */
+ * 모두 그랬다(빈 판이 143~249 ms 먼저, t-7812).
+ *
+ * 그리고 같은 행을 두 번 누르면, 두 번째는 첫 번째의 이동이 끝나기를 기다린다
+ * (t-12063, `arrivals`): 첫 번째가 `activeWorktreePath`를 먼저 옮기므로 두 번째는
+ * 「이미 여기」로 읽는데, 백엔드의 루트와 복원은 아직 옛 자리다. 2026-09-28
+ * 11:56에 두 번째가 옛 루트에서 대화를 깨웠고, 첫 번째의 복원은 그 대화가 깨는
+ * 중인 것을 보고 빈 셸을 세웠다. */
 async function reopenConversationIn(path, known) {
   if (path && path !== activeWorktreePath) {
-    if (!(await activateWorktree(path, { firstTerminal: false }))) return;
+    const going = activateWorktree(path, { firstTerminal: false });
+    arrivals.set(path, going);
+    try {
+      if (!(await going)) return;
+    } finally {
+      if (arrivals.get(path) === going) arrivals.delete(path);
+    }
+  } else if (path && arrivals.has(path) && !(await arrivals.get(path))) {
+    return;
   }
   await storedWakesSettled(path);
-  await resumeSession(known);
+  await resumeSession(known, path);
 }
+
+/* The moves `reopenConversationIn` started that are still under way, by
+ * workspace path — what a second press on the same row waits on (t-12063). */
+const arrivals = new Map();
 
 function retainedRowKey(row) {
   return JSON.stringify(row);
@@ -10730,7 +10754,14 @@ listen("hook:agent", (event) => {
     paneAutonomy.delete(term);
   }
   const named = Boolean(session) && paneSessions.get(term)?.session?.id !== session.id;
+  // A pane that stood in for a conversation it could not bring back, and that
+  // a new conversation has now taken (t-12063): the old one is kept as owed
+  // once the new one holds the pane, never dropped with the old record.
+  const replaced = named && paneSessions.get(term)?.carriedOnly ? paneSessions.get(term) : null;
   if (session) paneSessions.set(term, { agent, session, resumable: event.payload.resumable });
+  if (named) settleOwed(agent, session.id);
+  if (replaced) keepOwed(term, replaced);
+  else if (named) void tellOwed(tabOfTerm(term)?.worktree);
   // The session id a hand-over needs arrived (or changed) while the person
   // already had the conversation up as the transcript view: the wire is
   // tried now — between turns; mid-turn `handPaneToWire` waits for the end.
