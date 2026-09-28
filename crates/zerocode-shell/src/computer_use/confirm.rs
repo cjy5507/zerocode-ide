@@ -121,6 +121,13 @@ pub fn install_asker(asker: Box<Asker>) {
 pub struct Handoff {
     pub id: String,
     pub reason: String,
+    /// The page's words for the reason, when the window wrote it rather than
+    /// an agent: an i18n key and what fills it — `reason` stays the words for
+    /// a page that does not know the key.
+    #[serde(rename = "reasonKey", skip_serializing_if = "Option::is_none")]
+    pub reason_key: Option<&'static str>,
+    #[serde(rename = "reasonArgs", skip_serializing_if = "Value::is_null")]
+    pub reason_args: Value,
     #[serde(rename = "timeoutMs")]
     pub timeout_ms: u64,
 }
@@ -136,11 +143,29 @@ pub fn install_handoff_asker(asker: Box<HandoffAsker>) {
 /// hand to, the answer is a refusal — the work does not pretend it went on.
 #[must_use]
 pub fn handoff(reason: &str, timeout_ms: u64) -> Decision {
-    let ask = Handoff {
+    hand_over(Handoff {
         id: next_id(),
         reason: reason.to_string(),
+        reason_key: None,
+        reason_args: Value::Null,
         timeout_ms,
-    };
+    })
+}
+
+/// [`handoff`], with the reason in the page's own words: `key` and `args`
+/// for the page, `reason` for a reader that has only the words.
+#[must_use]
+pub fn handoff_said(reason: &str, key: &'static str, args: Value, timeout_ms: u64) -> Decision {
+    hand_over(Handoff {
+        id: next_id(),
+        reason: reason.to_string(),
+        reason_key: Some(key),
+        reason_args: args,
+        timeout_ms,
+    })
+}
+
+fn hand_over(ask: Handoff) -> Decision {
     HANDOFF_ASKER
         .get()
         .map_or(Decision::Refused, |asker| asker(&ask))

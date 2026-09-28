@@ -460,6 +460,11 @@ pub struct PinnedClick {
     /// a walk rings on the frame after the press (plan D11), read from the
     /// table, never from the tree again.
     pub frame: zerocode_core::computer_use_protocol::render::Rect,
+    /// The look's window, and the mark's rectangle from its top-left corner:
+    /// where the press lands wherever that window stands now, which is what a
+    /// covered press uncovers (t-12979).
+    pub window_id: u64,
+    pub local: zerocode_core::computer_use_protocol::render::Rect,
 }
 
 /// Turn `click --mark N --look L` into the element click on the look's
@@ -519,6 +524,8 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
         element_index: placed.element_index,
         app: table.window.app,
         frame: placed.screen,
+        window_id: table.window.window_id,
+        local: placed.local,
     })
 }
 

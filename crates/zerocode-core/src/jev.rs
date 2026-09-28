@@ -32,6 +32,7 @@ pub mod challenger;
 pub mod choice;
 pub mod claim;
 pub mod count;
+pub mod cover;
 pub mod door;
 pub mod file_pick;
 pub mod hedge;
@@ -1478,6 +1479,86 @@ pub const EMULATOR: JevUse = JevUse {
     regrade: Regrade::AsWritten,
     // A goal walk fills what its caller left open and is marked only on
     // its presses (t-13091).
+    auto_starts: promote::Stand::Applying,
+};
+
+/// How many windows over one place a cover question describes, front first:
+/// the screen question's own cut, because it is the same kind of list — what
+/// one closed choice can be asked to weigh.
+pub const COVER_OVER_CAP: usize = SCREEN_CANDIDATE_CAP;
+
+/// What a move the cover answer ranked after its first must reach, per
+/// thousand, before a hand whose first move left the place covered makes it
+/// without asking again (t-12979, the runner-up of one answer): three in
+/// twenty — the margin outside judgment libraries try a runner-up within
+/// (the field survey's C3, Footwork's 0.15). A policy line, not a calibrated
+/// accuracy claim, like [`SCREEN_PRESS_FLOOR_PERMILLE`]: a move the answer
+/// gave less than this is one it did not mean.
+pub const COVER_RUNNER_UP_FLOOR_PERMILLE: u16 = 150;
+
+/// A press whose place another window hides (t-12979,
+/// `computer_use_protocol::cover`): would a press land on something else,
+/// what stands in front as a person would call it, which move comes first —
+/// the target's window to the front, moved clear, a second look, or the
+/// person — and can moves of the target's own window do it at all. Asked of
+/// the scene's facts alone: whose each window is beside the target, its app,
+/// its layer and its bounds; never a title, never what a window shows.
+///
+/// A seat of its own because a seat is one question: the desktop seat's is
+/// which numbered control to press, and its marks grade presses; these grade
+/// whether the move put first is the one that left the place clear
+/// ([`cover::marks`]), against today's rule ([`cover::todays_rule`]).
+///
+/// It decides from acting (t-13091's rule, [`JevUse::auto_starts`]): its
+/// moves change only the target's own window, can be undone, and never touch
+/// what stands in front, while the lines that matter are the code's — the
+/// system's, an app waiting on an answer or anything unknown holds the hand
+/// for the person, as does an answer that does not come inside the wall. A
+/// seat that started recording would be marked only on the moves today's
+/// rule made, which leave most of its answers uncompared, and would not rise
+/// for the same reason the screen seats did not. `shadow` records, `off`
+/// asks nothing, and under either the hand makes today's rule's moves.
+pub const COVER: JevUse = JevUse {
+    id: "cover",
+    setting: "jevCover",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/target/app",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/over",
+            cap: Cap::Items(COVER_OVER_CAP),
+        },
+        Sent {
+            at: "/state/over/*/app",
+            cap: Cap::Uncut,
+        },
+    ],
+    ledger: "cover.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(SCREEN_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
+    agreement_floor_permille: Some(SCREEN_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
+    // Bring it to the front, then move it: what the hand does with no seat.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
+    reads_act_line: true,
+    rubric_version: questions::COVER_RUBRIC_VERSION,
+    // One question per covered press, named by an id the window made for it.
+    request_name: &["asked"],
+    names: Naming::Request,
+    label_part: &[],
+    follows: None,
+    regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Applying,
 };
 
@@ -4252,7 +4333,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 29] = [
+pub static JEV_USES: [JevUse; 30] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -4260,6 +4341,7 @@ pub static JEV_USES: [JevUse; 29] = [
     BROWSER,
     DESKTOP,
     EMULATOR,
+    COVER,
     STALL,
     PLACEMENT,
     SUMMON,

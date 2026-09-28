@@ -375,12 +375,20 @@ pub fn desktop_target(windows: &[DesktopWindow], picture: Rect) -> Option<usize>
 }
 
 /// What covers the target: every window in front of it that hides what is
-/// under it — a menu, a panel, ZeroCode's own; not an overlay.
-#[must_use]
-pub fn occluders(windows: &[DesktopWindow], target: usize) -> Vec<Rect> {
+/// under it — a menu, a panel, ZeroCode's own; not an overlay. The one
+/// answer to "what stands over this window", window by window: the marks
+/// leave out what it hides ([`occluders`]) and a press that finds its place
+/// hidden reads who hides it (`super::cover`, t-12979).
+pub fn in_front(windows: &[DesktopWindow], target: usize) -> impl Iterator<Item = &DesktopWindow> {
     windows[..target.min(windows.len())]
         .iter()
         .filter(|window| window.covers())
+}
+
+/// [`in_front`]'s rectangles.
+#[must_use]
+pub fn occluders(windows: &[DesktopWindow], target: usize) -> Vec<Rect> {
+    in_front(windows, target)
         .map(|window| window.rect)
         .collect()
 }

@@ -453,6 +453,8 @@ fn a_mark_click_answers_what_it_pressed_and_keeps_the_window_for_evidence() {
         element_index: 12,
         app: "TextEdit".into(),
         frame: zerocode_core::computer_use_protocol::render::Rect::new(10.0, 20.0, 30.0, 40.0),
+        window_id: 3,
+        local: zerocode_core::computer_use_protocol::render::Rect::new(5.0, 5.0, 30.0, 40.0),
     };
     let answered = click_answer(
         json!({ "snapshot": { "window": { "id": 3 }, "treeText": "long" }, "screenshot": { "data": "x" },

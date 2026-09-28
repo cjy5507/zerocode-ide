@@ -18763,6 +18763,7 @@ pub(crate) mod computer_desktop_wait {
             argv,
             None,
             crate::computer_use::confirm::Asking::Person,
+            None,
         )
     }
 

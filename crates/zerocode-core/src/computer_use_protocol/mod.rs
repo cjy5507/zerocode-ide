@@ -19,6 +19,7 @@
 pub mod cache;
 pub mod click_plan;
 pub mod coerce;
+pub mod cover;
 pub mod eye;
 pub mod frame;
 pub mod game_state;
@@ -137,6 +138,12 @@ pub mod error_code {
     /// An action came while the person was being asked about another step
     /// (or had the desk): refused, so nothing answers the question for them.
     pub const PERSON_ASKED: &str = "person_asked";
+    /// The place a press lands on is hidden by another window the hand did
+    /// not uncover — the system's, an app's waiting on an answer, or one no
+    /// move of the target's own window cleared (t-12979). Nothing was
+    /// pressed and nothing in front was read, moved or closed; the message
+    /// names whose window it is, never its title. The person clears it.
+    pub const COVERED: &str = "covered";
     pub const CONFIRMATION_TIMEOUT: &str = "confirmation_timeout";
     /// A walked step answered ok, but its result says its work did not
     /// happen — a program killed or failed, an app that showed no window, did

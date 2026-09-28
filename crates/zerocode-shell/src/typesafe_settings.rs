@@ -1109,7 +1109,7 @@ mod tests {
         ];
         /// The uses of a metaphor's word that mean the plain thing, each with
         /// the reason it is plain here.
-        const PLAIN_USES: [(&str, &str, &str); 2] = [
+        const PLAIN_USES: [(&str, &str, &str); 6] = [
             (
                 "창",
                 "워커 창 배치",
@@ -1119,6 +1119,26 @@ mod tests {
                 "창",
                 "창 제목",
                 "a desktop app's window title, sent as it is",
+            ),
+            (
+                "창",
+                "대상 창",
+                "the desktop app's window a press lands in (t-12979)",
+            ),
+            (
+                "창",
+                "다른 창",
+                "another app's window standing over the place to press",
+            ),
+            (
+                "창",
+                "덮은 창",
+                "the window standing over the place to press",
+            ),
+            (
+                "창",
+                "떠 있는 창",
+                "another app's window that floats above ordinary ones",
             ),
         ];
         /// The English catalog's metaphors, matched as whole words.

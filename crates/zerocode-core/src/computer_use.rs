@@ -425,6 +425,11 @@ pub const OBSERVE_DIFF_RECTS: usize = 20;
 pub const OBSERVE_FRAMES_MAX: usize = 8;
 /// The person's turn (§7.4): how long a handoff waits for them.
 pub const COMPUTER_HANDOFF_TIMEOUT_MS: u64 = 600_000;
+/// How long a hand whose place is covered waits before it lists the windows
+/// again, when what stands in front looks like it is passing — a
+/// notification sliding in or out, a window being dragged (t-12979): the
+/// eye's own longest settle, the most a repaint is given anywhere.
+pub const COVER_LOOK_AGAIN_MS: u64 = EYE_SETTLE_MAX_MS;
 /// Stuck (§7.4): the same action this many times with nothing changing on
 /// the screen is a loop, not progress.
 pub const COMPUTER_STUCK_REPEATS: u32 = 2;

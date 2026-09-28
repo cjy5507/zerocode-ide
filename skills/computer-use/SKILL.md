@@ -505,9 +505,12 @@ Recording permission the screenshots use — no new prompt.
   presses control N through the element path — the same stop, confirmation
   and evidence as every press. It is refused `element_not_found` when that
   control moved or changed since the look (a row whose text changed counts,
-  and so does a star that now sits in another row), when something covers
-  its centre now, or when the look is older than two minutes or was
-  replaced: look again with `--marks`.
+  and so does a star that now sits in another row), or when the look is
+  older than two minutes or was replaced: look again with `--marks`. When
+  another window covers its centre, the press uncovers it first — the
+  target's own window to the front, else moved clear, checked again — and
+  presses; the answer's `uncovered` says what moved. What it may not touch
+  (the system's alert, a dialog waiting for an answer) is refused `covered`.
   - `--look` is required: it names the picture you read, so another agent's
     look is never pressed by your number. A later look at the same place
     whose pixels are exactly the same keeps the numbers (`sameAsLastLook:
@@ -678,6 +681,10 @@ a failed step in the log and is filed as a task for a person; write
 - `window_not_focused`: retry once with `--restore-window`; if still unfocused,
   stop retrying and use a semantic action or ask the user to foreground it.
 - `element_not_found`: observe again and use a fresh index.
+- `covered`: another window stands over the place and the hand did not move
+  it — the message names whose app it is. The person was asked in one line
+  when a person is there; do not look again or retry until it is cleared,
+  and never close or answer the covering window yourself.
 - `eye_history_lost`: the screen stream restarted or lost change records.
   Observe the current target again and verify the pending step before
   continuing; a missed interval is not evidence that nothing changed.

@@ -34,6 +34,7 @@ mod session;
 mod clipboard_formats;
 pub mod compare;
 pub mod confirm;
+pub(crate) mod cover;
 pub mod errand;
 pub mod evidence;
 pub mod eye;
