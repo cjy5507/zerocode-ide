@@ -57,7 +57,8 @@ export async function exerciseZoRestore() {
     shells.push({ term, notice: args.notice ?? null });
     return term;
   };
-  window.__ANSWER__.resume_line = (args) => `${args.agent} --resume ${args.session.id}`;
+  window.__ANSWER__.resume_line = (args) =>
+    `${args.worktree ? `cd ${args.worktree} && ` : ""}${args.agent} --resume ${args.session.id}`;
   window.__ANSWER__.save_pane_layouts = (args) => {
     saves.push(JSON.parse(JSON.stringify(args)));
     return null;

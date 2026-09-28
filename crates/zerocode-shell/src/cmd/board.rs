@@ -902,17 +902,70 @@ pub(crate) fn pane_sessions(state: State<'_, AppState>) -> Vec<PaneSession> {
 
 /// The command a person types to go on with a conversation (t-12063): the
 /// vendor's own resume, spelled by the one table this window keeps
-/// (`resume_argv`) rather than by the webview. Said by the shell that stands
-/// in for a conversation that could not come back, and by the line that names
-/// a conversation a new one took the place of. `None` for an agent this window
-/// has no way back for — the sentence then names the sidebar row alone.
-#[tauri::command]
+/// (`resume_argv`) rather than by the webview, led by a `cd` into the
+/// workspace the conversation belongs to — zo finds a conversation only from
+/// its own folder, and the shell the person types into may stand anywhere.
+/// Said by the shell that stands in for a conversation that could not come
+/// back, and by the line that names a conversation a new one took the place
+/// of. `None` for an agent this window has no way back for — the sentence
+/// then names the sidebar row alone. Off the main thread: naming the folder
+/// can ask git (`wake_root`).
+#[tauri::command(async)]
 pub(crate) fn resume_line(
+    state: State<'_, AppState>,
     agent: String,
     session: zerocode_core::ProviderSession,
+    worktree: Option<String>,
 ) -> Option<String> {
-    let kind = zerocode_core::AgentKind::from_slug(&agent)?;
-    zerocode_core::resume_argv(kind, &session).map(|argv| argv.join(" "))
+    let _crumb = crate::crumbs::Command::enter("resume_line");
+    let folder = worktree
+        .as_deref()
+        .and_then(|named| wake_root(state.inner(), Some(named)).ok());
+    spelled_resume(&agent, &session, folder.as_deref())
+}
+
+/// The longest word [`spelled_resume`] will put on a line a person types.
+const SPELLED_WORD_MAX: usize = 256;
+
+/// Whether `word` can stand on a shell line exactly as it is (t-12063): the
+/// characters vendor ids, flags and ordinary paths are made of, and nothing a
+/// shell reads as syntax. A session id only has to be a safe argv element to
+/// be resumed (`is_usable_session_id` lets a space or a `;` through, and argv
+/// never parses them), but a line a person copies into a shell is parsed — so
+/// a word that is not plainly safe is never spelled at all, rather than quoted
+/// and trusted. (An id that could pass for a flag is already refused by
+/// `is_usable_session_id`; the flags themselves are the vendor table's.)
+fn plain_shell_word(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= SPELLED_WORD_MAX
+        && word
+            .chars()
+            .all(|one| one.is_ascii_alphanumeric() || matches!(one, '_' | '.' | ':' | '/' | '-'))
+}
+
+/// The resume a person types for `session`, from `folder` when one is known —
+/// every word plainly safe ([`plain_shell_word`]), or no line at all.
+pub(crate) fn spelled_resume(
+    agent: &str,
+    session: &zerocode_core::ProviderSession,
+    folder: Option<&Path>,
+) -> Option<String> {
+    let kind = zerocode_core::AgentKind::from_slug(agent)?;
+    let argv = zerocode_core::resume_argv(kind, session)?;
+    let (program, rest) = argv.split_first()?;
+    if !rest.iter().all(|word| plain_shell_word(word))
+        || !program
+            .chars()
+            .all(|one| one.is_ascii_alphanumeric() || one == '-')
+    {
+        return None;
+    }
+    let line = argv.join(" ");
+    let Some(folder) = folder else {
+        return Some(line);
+    };
+    let spelled = folder.to_str()?;
+    (folder.is_absolute() && plain_shell_word(spelled)).then(|| format!("cd {spelled} && {line}"))
 }
 
 /// One fully assembled provider-resume command.

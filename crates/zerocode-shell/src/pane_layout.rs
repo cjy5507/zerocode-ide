@@ -1114,7 +1114,7 @@ mod tests {
                 live(5, "/w/a", "session-1790000000002-0"),
                 live(21, "/w/c", "session-1790000000003-0"),
                 live(8, "/w/a", "session-1790000000009-0"),
-                live(9, "/w/a", "not a session id"),
+                live(9, "/w/a", "--resume"),
             ],
         );
         assert_eq!(filed, 2, "the two panes nobody holds, and only those");

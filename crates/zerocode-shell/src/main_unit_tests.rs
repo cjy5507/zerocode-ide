@@ -12881,49 +12881,56 @@ fn a_stand_in_pane_says_what_it_stands_in_for_and_how_to_go_on() {
         "a notice is a few sentences, never a page"
     );
 
-    let session = |key, id: &str| zerocode_core::ProviderSession {
-        key,
+    let session = |id: &str| zerocode_core::ProviderSession {
+        key: zerocode_core::SessionKey::SessionId,
         id: id.to_string(),
         transcript_path: None,
     };
+    let spelled = |agent: &str, id: &str, folder: Option<&str>| {
+        cmd::board::spelled_resume(agent, &session(id), folder.map(std::path::Path::new))
+    };
     assert_eq!(
-        cmd::board::resume_line(
-            "zo".to_string(),
-            session(
-                zerocode_core::SessionKey::SessionId,
-                "session-1790551803628-0"
-            )
-        )
-        .as_deref(),
-        Some("zo --resume session-1790551803628-0")
+        spelled("zo", "session-1790551803628-0", Some("/Users/dev/work")).as_deref(),
+        Some("cd /Users/dev/work && zo --resume session-1790551803628-0")
     );
     assert_eq!(
-        cmd::board::resume_line(
-            "claude".to_string(),
-            session(
-                zerocode_core::SessionKey::SessionId,
-                "3f1e2d4c-0000-4000-8000-00000000c1a0"
-            )
-        )
-        .as_deref(),
+        spelled("claude", "3f1e2d4c-0000-4000-8000-00000000c1a0", None).as_deref(),
         Some("claude --resume 3f1e2d4c-0000-4000-8000-00000000c1a0")
     );
+    // An id is resumed as one argv element, where a space or a `;` is inert;
+    // a line a person copies into a shell is parsed, so no such word is ever
+    // spelled — not quoted, not at all.
+    for hostile in [
+        "not an id; rm -rf ~",
+        "a$(touch x)",
+        "a`id`",
+        "it's",
+        "a|b",
+        "a&&b",
+        "a>b",
+    ] {
+        assert_eq!(
+            spelled("zo", hostile, None),
+            None,
+            "{hostile:?} was spelled as a command"
+        );
+    }
     assert_eq!(
-        cmd::board::resume_line(
-            "zo".to_string(),
-            session(zerocode_core::SessionKey::SessionId, "not an id; rm -rf ~")
+        spelled(
+            "zo",
+            "session-1790551803628-0",
+            Some("/Users/dev/my work; rm -rf ~")
         ),
         None,
-        "an id no vendor mints is never spelled as a command"
+        "a folder that is not plainly safe leads no line at all"
     );
     assert_eq!(
-        cmd::board::resume_line(
-            "no-such-agent".to_string(),
-            session(
-                zerocode_core::SessionKey::SessionId,
-                "session-1790551803628-0"
-            )
-        ),
+        spelled("zo", "session-1790551803628-0", Some("work")),
+        None,
+        "a folder is an absolute path or nothing"
+    );
+    assert_eq!(
+        spelled("no-such-agent", "session-1790551803628-0", None),
         None
     );
 }

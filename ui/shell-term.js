@@ -6988,22 +6988,19 @@ async function wakeConversation(agent, session, grid, restore = null, worktree =
   return woke;
 }
 
-/* What a person types to go on with `session`, from the backend's own table
- * of vendor resumes — or null where the window knows no way back. Led by a
- * `cd` into `worktree` when the door knows it: zo finds a conversation only
- * from its own workspace's folder, and the shell the person types it into
- * may stand anywhere. Words to read, never run by the window. */
+/* What a person types to go on with `session` — the backend spells it from
+ * its own table of vendor resumes, led by a `cd` into `worktree` (a workspace
+ * its catalog knows): zo finds a conversation only from its own folder, and
+ * the shell it is typed into may stand anywhere. Null where no line can be
+ * spelled safely, or the window knows no way back. Words to read, never run
+ * by the window. */
 async function resumeLineOf(agent, session, worktree = null) {
-  let line;
   try {
-    line = await invoke("resume_line", { agent, session });
+    const line = await invoke("resume_line", { agent, session, worktree });
+    return typeof line === "string" && line.trim() !== "" ? line.trim() : null;
   } catch {
     return null;
   }
-  if (typeof line !== "string" || line.trim() === "") return null;
-  if (!worktree) return line.trim();
-  const folder = /^[\w./-]+$/.test(worktree) ? worktree : `'${worktree.replaceAll("'", "'\\''")}'`;
-  return `cd ${folder} && ${line.trim()}`;
 }
 
 /* How to go on with a conversation, in words: the command when there is one,
