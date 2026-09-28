@@ -18235,10 +18235,16 @@ const boardMarks = await page.evaluate(async (columns) => {
     };
     const answer = {
       attentionShape: attention ? getComputedStyle(attention).boxShadow : "",
-      workingSpins: working
+      /* 오르빗 문법의 카드(방향 D)에서 작업 중의 점은 돌지 않는다 — 판에 상시 모션은 없고,
+       * 작업 중은 제 색의 점과 곁의 낱말로 완료와 갈린다. */
+      workingStill: working
         ? getComputedStyle(working.querySelector(".agent-graph-node-state"), "::before")
           .animationName
-        : "none",
+        : "",
+      workingFill: working
+        ? getComputedStyle(working.querySelector(".agent-graph-node-state"), "::before")
+          .backgroundColor
+        : "",
       doneFill: done
         ? getComputedStyle(done.querySelector(".agent-graph-node-state"), "::before")
           .backgroundColor
@@ -18308,7 +18314,8 @@ const boardMarks = await page.evaluate(async (columns) => {
 ok(
   "the graph wears distinct attention, working and done shapes and keeps its clock bounded",
   boardMarks.attentionShape !== "none" && boardMarks.attentionShape !== "" &&
-    boardMarks.workingSpins !== "none" && boardMarks.doneFill !== "" &&
+    boardMarks.workingStill === "none" && boardMarks.workingFill !== "" &&
+    boardMarks.doneFill !== "" && boardMarks.workingFill !== boardMarks.doneFill &&
     boardMarks.nodes === 4 &&
     boardMarks.keysSaid === boardMarks.keysSpelled &&
     boardMarks.clockArmed &&
@@ -18375,7 +18382,9 @@ const elapsedClock = await page.evaluate(async () => {
   // 빈 칸은 낱말이 아니다 (t-2374): 상태 줄의 다섯 자리는 이제 언제나 서 있고
   // — 조건부 자식이 카드를 다시 짓게 만들기 때문에 — 말할 것이 없는 칸만
   // 화면에서 물러난다. 이 줄이 묻는 것은 카드가 **적은 낱말**이다.
-  const metaOf = (pane) => [...(nodeOf(pane)?.querySelectorAll(".agent-graph-node-clock") ?? [])]
+  /* 오르빗 문법의 카드(방향 D)는 발치가 없고 나이는 「지금」 줄 끝에 한 번만 선다 — 두 칸이
+   * 서면 이 줄이 `A · B`로 그것을 말한다. 이 턴의 경과는 인스펙터 카드가 든다(아래). */
+  const metaOf = (pane) => [...(nodeOf(pane)?.querySelectorAll(".agent-card-activity-when") ?? [])]
     .map((one) => one.textContent).filter(Boolean).join(" · ");
   const open = async (pane) => {
     nodeOf(pane)?.click();
@@ -18526,8 +18535,8 @@ ok(
     elapsedClock.running.runningWord === "50분째" &&
     elapsedClock.running.clockCount === 2 &&
     elapsedClock.quiet.word === "50분" && !elapsedClock.quiet.dressed &&
-    // 그래프의 노드도 같은 손으로 같은 낱말을 적는다.
-    elapsedClock.graph["term:1153"] === "방금 · 50분째" &&
+    // 그래프의 노드는 같은 손의 낱말 하나 — 마지막으로 말한 때 — 만 적는다.
+    elapsedClock.graph["term:1153"] === "방금" &&
     elapsedClock.graph["term:1156"] === "50분" &&
     // 얇은 데이터는 지어내지 않는다: 1분 아래는 두 답이 같으니 옛 낱말,
     // 시작이 0인 판도 옛 낱말, 한 번도 말하지 않은 판은 시계가 없다.
@@ -19635,6 +19644,12 @@ const graphSwimlanes = await page.evaluate(async () => {
     seen.lod = view.querySelector(".agent-graph-surface")?.classList.contains("is-lod") === true;
     seen.lodWireHidden = workingAfter?.querySelector(".agent-graph-wire") == null ||
       getComputedStyle(workingAfter.querySelector(".agent-graph-wire")).display === "none";
+    /* 이름만 남은 카드에서 이름은 카드의 폭을 쓴다 — 방향 D의 첫 줄 세 칸이 이 티어에 남으면
+     * 타일이 물러난 자리(20px)에 제목이 들어가 한두 글자로 잘렸다. */
+    const lodTitle = workingAfter?.querySelector(".agent-graph-node-title");
+    seen.lodTitleShare = lodTitle && workingAfter
+      ? Math.round((lodTitle.getBoundingClientRect().width / workingAfter.clientWidth) * 100) / 100
+      : 0;
     return { ...seen, seatBefore };
   } finally {
     projects = heldProjects;
@@ -19654,7 +19669,8 @@ ok(
     graphSwimlanes.keyed && graphSwimlanes.seat === graphSwimlanes.seatBefore &&
     graphSwimlanes.states.join(",") ===
       "done,failed,idle,idle,needs-attention,working,working" &&
-    graphSwimlanes.quiet && graphSwimlanes.lod && graphSwimlanes.lodWireHidden,
+    graphSwimlanes.quiet && graphSwimlanes.lod && graphSwimlanes.lodWireHidden &&
+    graphSwimlanes.lodTitleShare > 0.5,
   JSON.stringify(graphSwimlanes),
 );
 
@@ -19840,7 +19856,9 @@ const graphStateBudget = await page.evaluate(async () => {
       node.querySelector(".agent-card-doing"),
       node.querySelector(".agent-card-activity"),
       node.querySelector(".agent-card-ticker"),
-      node.querySelector(".agent-card-meter"),
+      node.querySelector(".agent-graph-node-context"),
+      node.querySelector(".agent-graph-bubble"),
+      node.querySelector(".agent-graph-reply"),
       ...node.querySelectorAll(".agent-card-tick"),
     ];
     const beforeDoing = beforeNodes.flatMap(doingParts);
@@ -19913,7 +19931,8 @@ ok(
     graphStateBudget.nodeCreations === 0 && graphStateBudget.edgeMeasurements === 0 &&
     !graphStateBudget.edgeScheduled && graphStateBudget.nodesReused &&
     // 활동을 그리는 세 조각도 같은 요소로 남았다 — 갈린 것은 글자와 속성뿐.
-    graphStateBudget.doingParts === 4 * (4 + 8) && graphStateBudget.doingReused &&
+    // 넷에 둘: 방향 D의 말풍선과 답하기도 상태가 백 번 갈리는 동안 같은 요소로 남는다.
+    graphStateBudget.doingParts === 4 * (6 + 8) && graphStateBudget.doingReused &&
     graphStateBudget.activityMoved &&
     graphStateBudget.coalesceMs >= 150 &&
     graphStateBudget.coalesceMs <= 250 && !graphStateBudget.canvasReplaceChildren,
@@ -20331,8 +20350,11 @@ ok(
 
 /* And an edge follows its cards when a card grows.
  *
- * The first tool call an agent makes puts a live wire under its heading, and
- * that makes the card taller — which moves every row below it. Nothing else
+ * The Orbit-grammar card (direction D) already stands its Now line whenever it
+ * has an age, so the first tool call only fills that line. What grows the card
+ * is the trail: the second call puts the first one on a row under the Now line
+ * (detailed density), and that makes the card taller — which moves every row
+ * below it. Nothing else
  * moved: same topology, same selection, and on a graph smaller than its own
  * canvas the canvas does not resize either, so neither the topology guard nor
  * the ResizeObserver has anything to say. Measured as the edge's own endpoint
@@ -20340,6 +20362,8 @@ ok(
  * "the line is on the card" is. */
 const wireReflow = await page.evaluate(async (fixtures) => {
   const columns = fixtures.cross;
+  const heldDetails = agentGraphCardDetails;
+  agentGraphCardDetails = true;
   window.__COLUMNS__ = columns;
   window.__PANES__ = [];
   if (activeTabId === "board") dropTab("board");
@@ -20390,6 +20414,7 @@ const wireReflow = await page.evaluate(async (fixtures) => {
   // Hand the board back the way it was found: the scene below this one reads
   // the surface that is already standing rather than raising its own.
   window.__COLUMNS__ = fixtures.lineage;
+  agentGraphCardDetails = heldDetails;
   await paintBoardView();
   await new Promise((done) => setTimeout(done, 140));
   return {
@@ -20410,6 +20435,143 @@ ok(
     !wireReflow.wireSays.includes("--workspace") &&
     wireReflow.grew && wireReflow.lands && !wireReflow.landsOnOldRow,
   JSON.stringify(wireReflow),
+);
+
+/* ---- 오르빗 문법의 카드 (방향 D, 2026-09-28) --------------------------------
+ *
+ * 위의 계약들이 볼 수 없는 새 말들. (1) 상태 말풍선은 오르빗 이름표가 읽는 그 말
+ * (`agentOrbitBubbleWord`)이고, 작업 중에는 없다. (2) 부모 → 자식의 레일은 곡선이고,
+ * 자식이 일하거나 사람을 기다리면 밝고 아니면 물러나며, 끝의 구슬은 자식의 상태 색으로
+ * 카드 왼쪽 모서리 **바깥**에 온전히 앉는다. (3) 자식의 상태만 갈린 판도 레일이 옷을
+ * 갈아입는다. (4) 「답하기」는 인스펙터의 「터미널 열기」와 같은 곳 — 그 판의 탭 — 을 연다.
+ * (5) 새 낱말은 카탈로그 넷에 다 실려 있다.
+ *
+ * 1280px 창에서 이 판은 649px이라 늘 목록 티어이고, 그 티어의 레일은 자식이 부모 아래에 들여
+ * 서므로 직각 길을 탄다(`agentGraphRailPath`). 넓은 판을 재려고 이 시험만 창을 넓혔다 되돌린다. */
+await page.setViewportSize({ width: 1920, height: 1000 });
+const orbitCard = await page.evaluate(async (fixtures) => {
+  const term = await openTermTab();
+  const now = Date.now();
+  const card = (pane, state, parent, extra = {}) => ({
+    pane, agent: "claude", state, heading: pane, worktree: "main", project: "/p", task: "",
+    parent, unseen: false, changed_at: now - 60_000, at: now - 20_000,
+    lineage: { depth: parent ? 1 : 0, is_first_sibling: true, is_last_sibling: true,
+      child_count: parent ? 0 : 3 },
+    ...extra,
+  });
+  const asker = `term:${term}`;
+  const columns = (doneState) => [
+    { bucket: "attention", cards: [card(asker, "needs-attention", "term:71", { ask: "올릴까요?" })] },
+    { bucket: "working", cards: [
+      card("term:71", "working", ""),
+      card("term:72", "working", "term:71"),
+      ...(doneState === "working" ? [card("term:73", "working", "term:71")] : []),
+    ] },
+    ...(doneState === "done" ? [{ bucket: "done", cards: [card("term:73", "done", "term:71")] }] : []),
+  ];
+  window.__COLUMNS__ = columns("done");
+  window.__PANES__ = [];
+  if (activeTabId === "board") dropTab("board");
+  document.getElementById("nav-agents").click();
+  await new Promise((done) => setTimeout(done, 220));
+  const board = () => [...document.querySelectorAll("#board-view, .file-view")]
+    .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
+  /* 옆에 선 인스펙터도 판을 좁히고, 앞 시험이 남긴 검색어는 레일을 흐린다 — 재는 동안 서랍을
+   * 닫고 검색어를 비운다(둘 다 끝에 되돌린다). */
+  const heldInspector = board().classList.contains("is-inspector-open");
+  const heldQuery = boardQuery;
+  boardQuery = "";
+  setAgentGraphInspectorOpen(board(), false);
+  await paintBoardView();
+  await new Promise((done) => setTimeout(done, 260));
+  await window.__PAINTED__();
+  await new Promise((done) => setTimeout(done, 160));
+  const node = (pane) => board().querySelector(`.agent-graph-node[data-graph-key="agent:${pane}"]`);
+  const rail = (pane) => {
+    // 보이는 층의 무리 — 같은 열쇠를 든 클릭 영역의 무리가 먼저 선다.
+    const group = board().querySelector(`.agent-graph-edges [data-graph-edge="agent:term:71>agent:${pane}:spawned"]`);
+    const path = group?.querySelector(".agent-graph-edge");
+    const bead = group?.querySelector(".agent-graph-rail-bead");
+    const child = node(pane)?.getBoundingClientRect();
+    const round = bead?.getBoundingClientRect();
+    return {
+      lit: path?.classList.contains("is-lit") ?? null,
+      dim: path?.classList.contains("is-dim") ?? null,
+      curved: / C /.test(path?.getAttribute("d") ?? ""),
+      marker: path ? getComputedStyle(path).markerEnd : "",
+      bead: bead?.getAttribute("class") ?? "",
+      outside: Boolean(round && child) && round.right <= child.left + 0.5 && round.width > 0,
+      level: Boolean(round && child) &&
+        round.top + round.height / 2 > child.top && round.top + round.height / 2 < child.bottom,
+    };
+  };
+  const bubble = (pane) => {
+    const held = node(pane)?.querySelector(".agent-graph-bubble");
+    return { said: held?.textContent ?? null, shown: (held?.getClientRects().length ?? 0) > 0 };
+  };
+  const seen = {
+    wideTier: !board().classList.contains("is-graph-list"),
+    words: {
+      attention: agentOrbitBubbleWord("needs-attention"),
+      done: agentOrbitBubbleWord("done"),
+      working: agentOrbitBubbleWord("working"),
+    },
+    bubbles: { asker: bubble(asker), done: bubble("term:73"), working: bubble("term:72") },
+    rails: { asker: rail(asker), working: rail("term:72"), done: rail("term:73") },
+    kids: node("term:71")?.querySelector(".agent-graph-node-kids")?.textContent ?? "",
+    replies: [asker, "term:71", "term:72", "term:73"].map((pane) =>
+      (node(pane)?.querySelector(".agent-graph-reply")?.getClientRects().length ?? 0) > 0),
+    replyPane: node(asker)?.querySelector(".agent-graph-reply-pane")?.textContent ?? "",
+    replyTag: node(asker)?.querySelector(".agent-graph-reply")?.tagName ?? "",
+    replyDisabled: node(asker)?.querySelector(".agent-graph-reply")?.disabled ?? null,
+    foot: board().querySelectorAll(".agent-graph-node .agent-card-meta").length,
+  };
+  // 자식 하나가 끝에서 다시 일로 — 기하는 그대로이고, 레일만 옷을 간다.
+  window.__COLUMNS__ = columns("working");
+  await paintBoardView();
+  await window.__PAINTED__();
+  seen.relit = rail("term:73");
+  seen.replyWent = false;
+  node(asker)?.querySelector(".agent-graph-reply")?.click();
+  await new Promise((done) => setTimeout(done, 160));
+  seen.replyWent = activeTabId === tabOfTerm(term)?.id;
+  seen.catalogs = ["en", "ja", "zh", "es"].map((code) => [
+    "board.graph.reply", "board.graph.children", "board.graph.quietFor", "board.graph.contextUsed",
+  ].every((key) => typeof CATALOG[code]?.[key] === "string" && CATALOG[code][key] !== ""));
+  window.__COLUMNS__ = fixtures.lineage;
+  if (activeTabId === "board") dropTab("board");
+  document.getElementById("nav-agents").click();
+  await new Promise((done) => setTimeout(done, 220));
+  boardQuery = heldQuery;
+  setAgentGraphInspectorOpen(board(), heldInspector);
+  await paintBoardView();
+  return seen;
+}, { lineage: LINEAGE });
+await page.setViewportSize({ width: 1280, height: 860 });
+ok(
+  "the orbit-grammar card: bubbles speak orbit's words, rails light by the child's state with the bead outside the card, and 답하기 opens that pane",
+  orbitCard.wideTier &&
+    orbitCard.words.attention !== "" && orbitCard.words.done !== "" && orbitCard.words.working === "" &&
+    orbitCard.bubbles.asker.said === orbitCard.words.attention && orbitCard.bubbles.asker.shown &&
+    orbitCard.bubbles.done.said === orbitCard.words.done && orbitCard.bubbles.done.shown &&
+    !orbitCard.bubbles.working.shown &&
+    orbitCard.rails.asker.lit && orbitCard.rails.working.lit &&
+    orbitCard.rails.done.dim && !orbitCard.rails.done.lit &&
+    // 앞 시험이 남긴 검색어를 지웠으니 레일은 흐리지 않다 — 흐림도 옷이라 다시 입는다.
+    ["asker", "working", "done"].every((key) =>
+      orbitCard.rails[key].curved && orbitCard.rails[key].marker === "none" &&
+      orbitCard.rails[key].outside && orbitCard.rails[key].level &&
+      !orbitCard.rails[key].bead.includes("is-search-dimmed")) &&
+    orbitCard.rails.asker.bead.includes("is-needs-attention") &&
+    orbitCard.rails.done.bead.includes("is-done") &&
+    orbitCard.relit.lit && orbitCard.relit.bead.includes("is-working") &&
+    orbitCard.kids.includes("3") &&
+    orbitCard.replies.join(",") === "true,false,false,false" &&
+    orbitCard.replyTag === "BUTTON" && orbitCard.replyDisabled === false &&
+    orbitCard.replyPane.startsWith("term:") && orbitCard.replyWent &&
+    orbitCard.foot === 0 &&
+    orbitCard.catalogs.every(Boolean),
+  JSON.stringify(orbitCard),
 );
 
 /* Both ends of the one fact. The backend reports which pane asked for a pane
@@ -20566,12 +20728,15 @@ const cardFacts = await page.evaluate(async () => {
   const read = (host, selector) => host?.querySelector(selector) ?? null;
   const known = node("term:2374");
   const unknown = node("term:2375");
-  const meter = read(known, ".agent-card-meter");
+  const meter = read(known, ".agent-graph-node-context");
   const ticks = [...(known?.querySelectorAll(".agent-card-tick") ?? [])];
   const seen = {
-    // 칩은 실제 모델 id, 모르면 벤더 이름.
-    model: read(known, ".agent-card-model")?.textContent ?? "",
-    vendorFallback: read(unknown, ".agent-card-model")?.textContent ?? "",
+    /* 그래프 카드(방향 D)의 첫 줄 오른쪽은 벤더를 뗀 모델 id이고 전문은 툴팁이 든다 —
+     * 벤더는 타일이 이미 말한다. 모르면 칸이 물러나고 벤더 이름으로 채우지 않는다. */
+    model: read(known, ".agent-graph-node-model")?.textContent ?? "",
+    modelTip: read(known, ".agent-graph-node-model")?.dataset.tip ?? "",
+    unknownModel: read(unknown, ".agent-graph-node-model")?.textContent ?? null,
+    unknownModelShown: (read(unknown, ".agent-graph-node-model")?.getClientRects().length ?? 0) > 0,
     // 단계는 상태 낱말 **옆에** 서고 상태 낱말은 그대로다.
     stateWord: read(known, ".agent-graph-state-word")?.textContent ?? "",
     phase: read(known, ".agent-card-phase")?.textContent ?? "",
@@ -20588,11 +20753,13 @@ const cardFacts = await page.evaluate(async () => {
     lastTick: ticks.filter((held) => held.classList.contains("is-last")).length,
     tipped: ticks.filter((held) => !held.classList.contains("is-empty"))
       .every((held) => (held.dataset.tip ?? "").length > 0),
-    // 미터: 값이 있으면 비율, 없으면 DOM에 둔 채 `hidden`.
+    // 컨텍스트 고리: 값이 있으면 비율과 퍼센트, 없으면 DOM에 둔 채 `hidden`.
     meterHidden: meter?.hidden ?? null,
-    meterRatio: Number.parseFloat(meter?.style.getPropertyValue("--meter-ratio") ?? "NaN"),
-    unknownMeterHidden: read(unknown, ".agent-card-meter")?.hidden ?? null,
-    unknownMeterInDom: read(unknown, ".agent-card-meter") !== null,
+    meterRatio: Number.parseFloat(meter?.style.getPropertyValue("--context-ratio") ?? "NaN"),
+    meterWord: read(known, ".agent-graph-node-context-word")?.textContent ?? "",
+    meterSaid: meter?.getAttribute("aria-label") ?? "",
+    unknownMeterHidden: read(unknown, ".agent-graph-node-context")?.hidden ?? null,
+    unknownMeterInDom: read(unknown, ".agent-graph-node-context") !== null,
     // 낱말은 카탈로그의 것이다 — 이 판이 서 있는 말로 견준다.
     words: {
       working: t("board.working", "작업 중"),
@@ -20627,7 +20794,8 @@ const cardFacts = await page.evaluate(async () => {
 });
 ok(
   "a card says what it is doing: the real model, the turn phase, the last tool and its context meter",
-  cardFacts.model === "claude-opus-5" && cardFacts.vendorFallback === "Claude" &&
+  cardFacts.model === "opus-5" && cardFacts.modelTip === "claude-opus-5" &&
+    cardFacts.unknownModel === "" && !cardFacts.unknownModelShown &&
     cardFacts.stateWord === cardFacts.words.working &&
     cardFacts.phase === cardFacts.words.tooling &&
     cardFacts.verb === cardFacts.words.edit &&
@@ -20640,6 +20808,7 @@ ok(
     cardFacts.lastTick === 1 && cardFacts.tipped &&
     cardFacts.meterHidden === false &&
     cardFacts.meterRatio > 0.12 && cardFacts.meterRatio < 0.13 &&
+    cardFacts.meterWord === "12%" && cardFacts.meterSaid.includes("24,489") &&
     cardFacts.unknownMeterInDom && cardFacts.unknownMeterHidden === true &&
     // 그리고 인스펙터 카드는 같은 조립기에서 같은 여섯을 받는다.
     cardFacts.inspectorModel === "claude-opus-5" &&
@@ -21264,7 +21433,7 @@ const INK_PROBES = [
   ["working", ".agent-graph-legend-list.is-states .agent-graph-pip.is-working"],
   ["done", ".agent-graph-legend-list.is-states .agent-graph-pip.is-done"],
   ["failed", ".agent-graph-legend-list.is-states .agent-graph-pip.is-failed"],
-  ["meter", ".agent-card-meter:not([hidden]) .agent-card-meter-fill"],
+  ["meter", ".agent-graph-node-context:not([hidden]) .agent-graph-node-context-ring"],
   ["activity", ".agent-card-activity:not(.is-none) .agent-card-activity-target"],
 ];
 for (const [name, selector] of INK_PROBES) {
@@ -45930,7 +46099,7 @@ const boardOntologyPromise = page.evaluate(async ({ capture, filePanel }) => {
     })(),
     title: childNode?.querySelector(".agent-graph-node-title")?.textContent ?? "",
     status: childNode?.querySelector(".agent-graph-node-status")?.textContent.trim() ?? "",
-    model: childNode?.querySelector(".agent-card-model")?.textContent ?? "",
+    model: childNode?.querySelector(".agent-graph-node-head .agent-graph-node-model")?.textContent ?? null,
     phase: childNode?.querySelector(".agent-card-phase")?.textContent ?? "",
     message: childNode?.querySelector(".agent-graph-node-message")?.textContent ?? "",
     /* 카드의 활동은 이제 줄 하나와 띠 여덟이다 (t-2374). 줄은 마지막 호출을
@@ -45968,7 +46137,8 @@ const boardOntologyPromise = page.evaluate(async ({ capture, filePanel }) => {
       const status = childNode?.querySelector(".agent-graph-node-status");
       const activity = childNode?.querySelector(".agent-card-doing");
       const meta = childNode?.querySelector(".agent-card-meta");
-      const tops = [title, status, activity, meta]
+      /* 오르빗 문법의 카드(방향 D)에는 발치가 없다: 제목 · 상태 줄 · 「지금」 셋이 차례로 선다. */
+      const tops = [title, status, activity]
         .map((one) => one?.getBoundingClientRect().top ?? 0);
       return {
         tops,
@@ -45989,8 +46159,10 @@ const boardOntologyPromise = page.evaluate(async ({ capture, filePanel }) => {
         })(),
         titleWeight: title ? getComputedStyle(title).fontWeight : "",
         stateMark: status?.querySelector(".agent-graph-node-state") !== null,
-        statusHasModel: status?.querySelector(".agent-card-model") !== null,
-        meta: meta?.textContent.trim() ?? "",
+        statusHasModel: status?.querySelector(".agent-card-model, .agent-graph-node-model") !== null,
+        foot: meta !== null,
+        vendorSaid: childNode?.querySelector(".agent-graph-node-icon")?.getAttribute("aria-label") ?? "",
+        vendorTip: childNode?.querySelector(".agent-graph-node-icon")?.dataset.tip ?? "",
       };
     })(),
     repeat: [...(childNode?.querySelectorAll(".agent-card-tick") ?? [])]
@@ -46116,18 +46288,22 @@ ok(
     Math.abs(Number.parseFloat(boardOntologyUx.hierarchy.titleSize) - boardOntologyUx.hierarchy.titleWanted) < 0.05 &&
     boardOntologyUx.hierarchy.titleWeight === "600" &&
     boardOntologyUx.hierarchy.stateMark && !boardOntologyUx.hierarchy.statusHasModel &&
-    boardOntologyUx.hierarchy.meta.includes("Claude") &&
-    // 이 판은 `paneModels`에 없으므로 칩은 벤더 이름으로 물러난다 — 그것이
-    // 폴백이 하는 일이고, 아는 판은 제 모델 id를 적는다(그 케이스는 위에).
-    boardOntologyUx.model === "Claude" &&
+    !boardOntologyUx.hierarchy.foot &&
+    // 벤더는 타일이 말한다(읽는 이에게도 마우스에도). 이 판은 `paneModels`에 없으므로
+    // 첫 줄의 모델 칸은 비어 물러난다 — 벤더 이름으로 채우면 타일과 같은 말을 두 번 한다.
+    // 아는 판은 벤더를 뗀 모델 id를 적는다(그 케이스는 위에).
+    boardOntologyUx.hierarchy.vendorSaid === "Claude" &&
+    boardOntologyUx.hierarchy.vendorTip === "Claude" &&
+    boardOntologyUx.model === "" &&
     boardOntologyUx.phase === "목표 · 다음 실행 대기 · 게이트 1/2 · 04:12에 재개" &&
     boardOntologyUx.message === "Keep going" &&
     !boardOntologyUx.message.includes("Exit code 1") &&
     boardOntologyUx.cardActivity === "물음 · worker_done" &&
     boardOntologyUx.cardTicks.join(",") === "read,read,read,read,read,run,edit,ask" &&
     boardOntologyUx.cardTrail.more === "+5" &&
-    boardOntologyUx.cardTrail.tools.join("|") ===
-      "실행df|고치기…/ui/shell.js|질문worker_done" &&
+    // 흔적은 「지금」 줄 앞의 호출들, 새것부터, 파일은 이름만 — 줄이 이미 말한 마지막
+    // 호출(질문 worker_done)을 한 줄 아래 다시 적지 않는다.
+    boardOntologyUx.cardTrail.tools.join("|") === "고치기shell.js|실행df" &&
     boardOntologyUx.cardTrail.tickerVisible && !boardOntologyUx.cardTrail.glyphsVisible &&
     boardOntologyUx.cardTrail.shellCharacters === 0 &&
     boardOntologyUx.cardTrail.wordCap <= 3 && boardOntologyUx.cardTrail.rawTipKept &&
