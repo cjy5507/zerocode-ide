@@ -639,4 +639,46 @@ mod tests {
         let held = layout.normalized().expect("the valid board remains");
         assert_eq!(held.groups[0].tabs, vec![tab("board", None)]);
     }
+
+    /// A group holding only terminals is a group (t-14036). The record names
+    /// each terminal tab by the name the pane file gave it and its seat in
+    /// the strip; a stage divided into a board on one side and conversations
+    /// on the other folded to the board alone, and every terminal came back
+    /// on the board's side.
+    #[test]
+    fn a_group_of_terminals_alone_is_kept_with_its_seats() {
+        let written = serde_json::json!({
+            "root": {
+                "type": "split",
+                "direction": "vertical",
+                "first": { "type": "leaf" },
+                "second": { "type": "leaf" }
+            },
+            "groups": [
+                { "tabs": [{ "kind": "board" }], "active": 0, "terms": [{ "id": 3, "at": 0 }] },
+                { "tabs": [], "active": 0, "terms": [{ "id": 2, "at": 0 }, { "id": 1, "at": 1 }] }
+            ],
+            "focused": 1
+        });
+        let layout: StageLayout = serde_json::from_value(written).expect("a stage record");
+
+        let held = layout.normalized().expect("both groups hold something");
+        let back = serde_json::to_value(&held).expect("serialises");
+        assert_eq!(
+            back["groups"].as_array().map(Vec::len),
+            Some(2),
+            "the group of terminals folded away: {back}"
+        );
+        assert_eq!(back["focused"], 1, "the eye left the group of terminals: {back}");
+        assert_eq!(
+            back["groups"][1]["terms"],
+            serde_json::json!([{ "id": 2, "at": 0 }, { "id": 1, "at": 1 }]),
+            "the terminals lost their seats: {back}"
+        );
+        assert_eq!(
+            back["groups"][0]["terms"],
+            serde_json::json!([{ "id": 3, "at": 0 }]),
+            "a terminal beside a document lost its seat: {back}"
+        );
+    }
 }
