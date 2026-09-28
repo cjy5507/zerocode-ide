@@ -309,6 +309,14 @@ pub struct Artifact {
     /// that is not a publication; the store's copies are never the source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<PathBuf>,
+    /// The annotations delivered on a publication (t-11959): how many lines
+    /// its `feedback.jsonl` holds, and the version the newest was made on.
+    /// Filled by the store when it answers the window, never written to the
+    /// index — the page's own file is the record, this is its count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_version: Option<u32>,
     #[serde(default)]
     pub origin: Origin,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1072,6 +1080,8 @@ mod tests {
             description: None,
             version: None,
             source_path: None,
+            feedback_count: None,
+            feedback_version: None,
             origin: Origin {
                 agent: Some("claude".into()),
                 session: Some("s-1".into()),

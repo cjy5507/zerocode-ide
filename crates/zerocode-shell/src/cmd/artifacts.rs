@@ -146,6 +146,37 @@ pub(crate) fn artifact_page_at(path: String) -> Result<Option<artifact_runtime::
     Ok(store_or_refuse()?.page_at(Path::new(&path)))
 }
 
+/// 사람이 고른 판에 초안으로 넣은 주석을 그 페이지의 기록에 남긴다(t-11959).
+/// 초안을 넣은 것은 창이고 이 문은 적기만 한다 — 판에 무엇을 보내지도, Enter를
+/// 치지도 않는다. 줄은 스토어가 검사하고(`record_feedback`), 갤러리가 새 수를
+/// 보도록 카탈로그가 움직였다고 알린다.
+#[tauri::command(async)]
+pub(crate) fn artifact_feedback_record(
+    webview: tauri::Webview,
+    feedback: artifact_runtime::FeedbackAsk,
+) -> Result<artifact_runtime::FeedbackSummary, String> {
+    from_the_main_webview(&webview)?;
+    let summary = store_or_refuse()?.record_feedback(feedback, now_epoch_ms())?;
+    if let Some(app) = artifact_runtime::window_handle() {
+        let _ = app.emit(artifact_runtime::CHANGED_EVENT, ());
+    }
+    Ok(summary)
+}
+
+/// 머리띠의 「내보내기」: 발행물의 한 판을 사람이 고른 폴더에 새 파일로 쓴다. 폴더는
+/// 창이 폴더 대화상자(`choose_project`)로 받아 온 것이고, 쓰는 것은 문의 내보내기와
+/// 같은 불변 스냅샷이다. 있는 파일은 덮지 않는다.
+#[tauri::command(async)]
+pub(crate) fn artifact_export(
+    webview: tauri::Webview,
+    id: String,
+    version: u32,
+    folder: String,
+) -> Result<zerocode_core::artifact_publish::ExportedFile, String> {
+    from_the_main_webview(&webview)?;
+    store_or_refuse()?.export_into(&id, version, Path::new(&folder))
+}
+
 /// The refresh button's road into the transcripts (t-3233 §2): the same
 /// bounded, incremental pass the boot runs, on the person's ask.
 #[tauri::command(async)]

@@ -2176,3 +2176,285 @@ export async function testArtifactBeside(browser, origin, ok, outputDir) {
     await page.close();
   }
 }
+
+/* 머리띠(t-11959): 만든 이 한 줄, 첫 행동 「주석」, 「피드백 N · vN」, 「나란히」,
+ * 「내보내기」, 그리고 480px 아래에서 단추를 한 메뉴로 접는 것. 주석을 사람이 고른
+ * 판에 초안으로 넣은 순간 그 기록이 백엔드의 문(`artifact_feedback_record`)으로
+ * 간다 — 보낸 것은 없다(Enter도 `send_prompt`도 없음). */
+export async function testArtifactBand(browser, origin, ok, outputDir) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  const axeModule = createRequire(import.meta.url)("@axe-core/playwright");
+  const AxeBuilder = axeModule.default ?? axeModule;
+  await mkdir(outputDir, { recursive: true });
+  const shoot = async (name, include) => {
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate((next) => document.documentElement.setAttribute("data-theme", next), theme);
+      await new Promise((done) => setTimeout(done, 300));
+      await page.screenshot({ path: join(outputDir, `artifacts-r3-${theme}-${name}.png`) });
+      const violations = await axeViolations(page, AxeBuilder, include).catch((error) => [String(error)]);
+      ok(`the band (${name}) passes axe in ${theme}`, violations.length === 0, JSON.stringify(violations));
+    }
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+  };
+  try {
+    await page.setViewportSize({ width: 1440, height: 860 });
+    await page.evaluate(() => {
+      window.__BAND__ = { opens: [], navigations: [], pastes: [], prompts: [], records: [], exports: [], folders: 0 };
+      let born = 0;
+      window.__ANSWER__.open_browser_pane = (args) => {
+        born += 1;
+        window.__BAND__.opens.push(args.url);
+        return `browser-band-${born}`;
+      };
+      window.__ANSWER__.browser_zoom = () => null;
+      window.__ANSWER__.browser_navigate = (args) => (window.__BAND__.navigations.push({ ...args }), null);
+      window.__ANSWER__.artifact_versions = (args) => Array.from({ length: args.id === "p-lone" ? 1 : 3 }, (_, at) => ({
+        n: at + 1,
+        path: `/tmp/zerocode-window-test/artifacts/pages/${args.id}/v${at + 1}/index.html`,
+        sha256: `sha-${at + 1}`,
+      }));
+      window.__ANSWER__.term_paste = (args) => (window.__BAND__.pastes.push({ ...args }), null);
+      window.__ANSWER__.send_prompt = (args) => (window.__BAND__.prompts.push({ ...args }), null);
+      window.__ANSWER__.artifact_feedback_record = (args) => {
+        window.__BAND__.records.push(JSON.parse(JSON.stringify(args)));
+        return { count: 2 + window.__BAND__.records.length, version: args.feedback.version };
+      };
+      window.__ANSWER__.choose_project = () => ((window.__BAND__.folders += 1), "/tmp/zerocode-window-test/shared");
+      window.__ANSWER__.artifact_export = (args) => {
+        window.__BAND__.exports.push({ ...args });
+        return { id: args.id, version: args.version, path: `${args.folder}/card-v${args.version}.html`, bytes: 10 };
+      };
+      for (const tab of [...tabs]) dropTab(tab.id);
+      renderTabs();
+      updateStage();
+    });
+    const settle = () => page.evaluate(() => new Promise((done) => setTimeout(done, 160)));
+    // 만든 판 하나 — 발행보다 먼저 태어난 claude 판.
+    const maker = await page.evaluate(async () => {
+      const made = await openTermTab({ placement: "tab" });
+      paneAgents.set(made, "claude");
+      renderTabs();
+      return made;
+    });
+    await settle();
+    const row = (id, version) => ({
+      id, kind: "page", title: `${id} 카드 시안`, bytes: 10, created_ms: Date.now(), modified_ms: Date.now(), version,
+      path: `/tmp/zerocode-window-test/artifacts/pages/${id}/index.html`,
+      url: `file:///tmp/zerocode-window-test/artifacts/pages/${id}/index.html`,
+      source_path: `/tmp/zerocode-window-test/${id}.html`,
+      origin: { pane: `term-${maker}`, agent: "claude", worktree: "/tmp/zerocode-window-test/orbit-card" },
+      feedback_count: 2, feedback_version: 2, tags: [], preview: { kind: "text", text: "" }, source: "manual",
+    });
+    await page.evaluate(async (made) => { await openArtifactPage(made); }, row("p-band", 3));
+    await settle();
+    const band = (id) => page.evaluate((key) => {
+      const shownAt = (node) => Boolean(node) && !node.hidden && getComputedStyle(node).display !== "none"
+        && node.getBoundingClientRect().width > 0;
+      return tabs.filter((one) => one.kind === "browser" && one.artifact?.id === key).map((tab) => {
+        const strip = docHost(tab.pane, "browser").querySelector(".artifact-strip");
+        const q = (selector) => strip.querySelector(selector);
+        const actions = [...strip.querySelectorAll(".artifact-strip-actions > button")];
+        return {
+          tab: tab.id,
+          pane: tab.pane,
+          url: tab.url,
+          width: Math.round(strip.getBoundingClientRect().width),
+          overflows: strip.scrollWidth > strip.clientWidth + 1,
+          maker: shownAt(q(".artifact-strip-maker")) ? q(".artifact-strip-maker").textContent.trim() : "",
+          makerMark: shownAt(q(".artifact-strip-maker .artifact-card-maker-mark svg, .artifact-strip-maker .artifact-card-maker-mark img, .artifact-strip-maker .artifact-card-maker-mark .agent-icon")),
+          feedback: shownAt(q(".artifact-strip-feedback")) ? q(".artifact-strip-feedback").textContent.trim() : "",
+          annotate: shownAt(q(".artifact-strip-annotate")) ? q(".artifact-strip-annotate").textContent.trim() : "",
+          annotatePrimary: q(".artifact-strip-annotate")?.classList.contains("is-primary") ?? false,
+          annotatePressed: q(".artifact-strip-annotate")?.getAttribute("aria-pressed") ?? "",
+          firstAction: actions.find(shownAt)?.className ?? "",
+          compare: shownAt(q(".artifact-strip-compare")) ? q(".artifact-strip-compare").textContent.trim() : "",
+          compareDisabled: q(".artifact-strip-compare")?.disabled ?? null,
+          exportWord: shownAt(q(".artifact-strip-export")) ? q(".artifact-strip-export").textContent.trim() : "",
+          share: shownAt(q(".artifact-strip-share")),
+          reveal: shownAt(q(".artifact-strip-reveal")),
+          more: shownAt(q(".artifact-strip-more")),
+          version: q(".artifact-strip-version")?.value ?? "",
+        };
+      });
+    }, id);
+
+    /* ---- 1. 넓은 머리띠: 만든 이, 「주석」이 첫 행동, 피드백 수, 나란히, 내보내기 ---- */
+    const [wide] = await band("p-band");
+    ok(
+      "the header band names its maker (agent tile, pane, branch), leads with 「주석」, says 「피드백 2 · v2」 and offers 「나란히」 and 「내보내기」",
+      wide !== undefined && wide.maker.includes("claude") && wide.maker.includes(`term:${maker}`)
+        && wide.maker.includes("orbit-card") && wide.makerMark
+        && wide.annotate === "주석" && wide.annotatePrimary && wide.firstAction.includes("artifact-strip-annotate")
+        && wide.feedback === "피드백 2 · v2" && wide.compare === "나란히" && wide.compareDisabled === false
+        && wide.exportWord === "내보내기" && wide.share && wide.reveal && !wide.more && !wide.overflows
+        && wide.url.endsWith("/pages/p-band/v3/index.html"),
+      JSON.stringify(wide),
+    );
+    await shoot("band-wide", ".artifact-strip:not([hidden])");
+
+    /* ---- 2. 「주석」은 주석 모드를 켜고 끈다 -------------------------------------- */
+    const armed = await page.evaluate(async () => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
+      const strip = docHost(tab.pane, "browser").querySelector(".artifact-strip");
+      strip.querySelector(".artifact-strip-annotate").click();
+      await new Promise((done) => setTimeout(done, 60));
+      const on = { mode: browserGrab?.mode ?? null, pressed: strip.querySelector(".artifact-strip-annotate").getAttribute("aria-pressed") };
+      strip.querySelector(".artifact-strip-annotate").click();
+      await new Promise((done) => setTimeout(done, 60));
+      return { on, off: { mode: browserGrab?.mode ?? null, pressed: strip.querySelector(".artifact-strip-annotate").getAttribute("aria-pressed") } };
+    });
+    ok("the band's 「주석」 arms the annotation crosshair on this page and disarms it again",
+      armed.on.mode === "annotate" && armed.on.pressed === "true" && armed.off.mode === null && armed.off.pressed === "false",
+      JSON.stringify(armed));
+
+    /* ---- 3. 초안으로 넣은 주석은 기록되고, 머리띠의 수가 오른다 --------------------- */
+    const delivered = await page.evaluate(async (term) => {
+      window.__ANSWER__.agent_terms = () => [[term, "claude"]];
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
+      const host = docHost(tab.pane, "browser");
+      const deliver = async (notes) => {
+        browserAnnotations.set(tab.label, notes);
+        setActiveTab(tab.id);
+        await deliverAnnotations(host, tab);
+        await new Promise((done) => setTimeout(done, 80));
+        document.querySelector("#note-pop .note-pop-row")?.click();
+        await new Promise((done) => setTimeout(done, 160));
+      };
+      await deliver([
+        { intent: "change", comment: "핀 번호가 카드 글자를 가립니다", selector: ".pin", tag: "div" },
+        { intent: "question", comment: "답하기가 너무 작지 않나요?", selector: ".e-reply", tag: "button" },
+      ]);
+      const after = {
+        records: window.__BAND__.records.slice(),
+        pastes: window.__BAND__.pastes.length,
+        prompts: window.__BAND__.prompts.length,
+        pasteEndsInEnter: /[\r\n]$/.test(window.__BAND__.pastes.at(-1)?.text ?? ""),
+        feedback: host.querySelector(".artifact-strip-feedback")?.textContent.trim() ?? "",
+      };
+      // 링크를 따라 아티팩트 밖으로 나간 페이지의 주석은 판에 넣되 기록하지 않는다.
+      const was = tab.url;
+      tab.url = "https://example.com/elsewhere";
+      await deliver([{ intent: "change", comment: "바깥 페이지", selector: "h1", tag: "h1" }]);
+      tab.url = was;
+      delete window.__ANSWER__.agent_terms;
+      return { ...after, recordsAfterElsewhere: window.__BAND__.records.length, pastesAfterElsewhere: window.__BAND__.pastes.length };
+    }, maker);
+    const record = delivered.records[0]?.feedback ?? null;
+    ok(
+      "annotations pasted into the chosen pane are recorded once — id, the version they were made on, their selectors and comments, the receiving pane and its agent — and the band says 「피드백 3 · v3」; nothing was sent",
+      delivered.records.length === 1 && record?.id === "p-band" && record?.version === 3
+        && JSON.stringify(record?.items) === JSON.stringify([
+          { selector: ".pin", comment: "핀 번호가 카드 글자를 가립니다" },
+          { selector: ".e-reply", comment: "답하기가 너무 작지 않나요?" },
+        ])
+        && record?.recipient?.pane === `term-${maker}` && record?.recipient?.agent === "claude"
+        && Object.keys(record ?? {}).sort().join() === "id,items,recipient,version"
+        && delivered.pastes === 1 && delivered.prompts === 0 && !delivered.pasteEndsInEnter
+        && delivered.feedback === "피드백 3 · v3",
+      JSON.stringify(delivered),
+    );
+    ok("annotations on a page the tab followed away from the artifact are pasted but not recorded",
+      delivered.pastesAfterElsewhere === 2 && delivered.recordsAfterElsewhere === 1, JSON.stringify(delivered));
+
+    /* ---- 4. 「내보내기」: 폴더를 묻고 본 판을 쓰며, 공개라고 말하지 않는다 ---------- */
+    const exported = await page.evaluate(async () => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
+      setActiveTab(tab.id);
+      document.querySelectorAll(".toast").forEach((one) => one.remove());
+      docHost(tab.pane, "browser").querySelector(".artifact-strip-export").click();
+      await new Promise((done) => setTimeout(done, 160));
+      return {
+        folders: window.__BAND__.folders,
+        exports: window.__BAND__.exports.slice(),
+        toast: [...document.querySelectorAll(".toast")].map((one) => one.textContent).join(" | "),
+      };
+    });
+    ok(
+      "「내보내기」 asks for a folder and exports the immutable version on screen there, and its notice names the local file without calling it public",
+      exported.folders === 1 && exported.exports.length === 1 && exported.exports[0].id === "p-band"
+        && exported.exports[0].version === 3 && exported.exports[0].folder === "/tmp/zerocode-window-test/shared"
+        && exported.toast.includes("/tmp/zerocode-window-test/shared/card-v3.html")
+        && exported.toast.includes("내보냈습니다") && !/공개|public|공유 링크/i.test(exported.toast),
+      JSON.stringify(exported),
+    );
+
+    /* ---- 5. 「나란히」: 두 불변 판이 나란히 선다 ----------------------------------- */
+    const groupsBefore = await page.evaluate(() => stageGroups().length);
+    await page.evaluate(() => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
+      setActiveTab(tab.id);
+      docHost(tab.pane, "browser").querySelector(".artifact-strip-compare").click();
+    });
+    await page.evaluate(() => new Promise((done) => setTimeout(done, 400)));
+    const pair = await band("p-band");
+    const groupsAfter = await page.evaluate(() => stageGroups().length);
+    const pairUrls = pair.map((one) => one.url).sort();
+    ok(
+      "「나란히」 stands the version before the one on screen beside it: two tabs of the same artifact in two groups, each on its own immutable snapshot, never the mutable latest copy",
+      pair.length === 2 && pair[0].pane !== pair[1].pane && groupsAfter === groupsBefore + 1
+        && pairUrls[0].endsWith("/pages/p-band/v2/index.html") && pairUrls[1].endsWith("/pages/p-band/v3/index.html")
+        && pair.map((one) => one.version).sort().join() === "2,3"
+        && !pairUrls.some((url) => url.endsWith("/pages/p-band/index.html")),
+      JSON.stringify({ pair, groupsBefore, groupsAfter }),
+    );
+    await shoot("side-by-side", ".artifact-strip:not([hidden])");
+    const again = await page.evaluate(async () => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band" && one.artifact?.version === 3);
+      const opens = window.__BAND__.opens.length;
+      docHost(tab.pane, "browser").querySelector(".artifact-strip-compare").click();
+      await new Promise((done) => setTimeout(done, 200));
+      return { opens: window.__BAND__.opens.length - opens, tabs: tabs.filter((one) => one.artifact?.id === "p-band").length };
+    });
+    ok("a second 「나란히」 with the pair already standing opens nothing new", again.opens === 0 && again.tabs === 2, JSON.stringify(again));
+
+    /* ---- 6. 판이 하나뿐이면 나란히 볼 것이 없다 ---------------------------------- */
+    await page.evaluate(async (made) => { await openArtifactPage(made); }, row("p-lone", 1));
+    await settle();
+    const [lone] = await band("p-lone");
+    ok("a publication with one kept version offers 「나란히」 disabled", lone?.compareDisabled === true, JSON.stringify(lone));
+
+    /* ---- 7. 480px 아래: 단추는 한 메뉴로 접히고 모든 행동이 닿는다 ------------------- */
+    await page.evaluate(() => {
+      for (const tab of tabs.filter((one) => one.kind === "browser" && one.artifact?.id !== "p-band")) dropTab(tab.id);
+      const held = tabs.filter((one) => one.kind === "browser" && one.artifact?.id === "p-band");
+      for (const tab of held.slice(1)) dropTab(tab.id);
+      for (const group of stageGroups()) collapseStageGroup(group);
+      setActiveTab(held[0].id);
+      renderTabs();
+      updateStage();
+    });
+    await page.setViewportSize({ width: 720, height: 860 });
+    await settle();
+    const [narrow] = await band("p-band");
+    ok(
+      "under 480px the band folds 「나란히」, 「내보내기」, 「공유」 and Finder into one menu button, keeps 「주석」 and 「피드백 N · vN」, and nothing runs off its edge",
+      narrow !== undefined && narrow.width < 480 && narrow.width > 0 && narrow.more && narrow.annotate === "주석"
+        && narrow.compare === "" && narrow.exportWord === "" && !narrow.share && !narrow.reveal
+        && narrow.feedback.startsWith("피드백") && !narrow.overflows,
+      JSON.stringify(narrow),
+    );
+    const menu = await page.evaluate(async () => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
+      const strip = docHost(tab.pane, "browser").querySelector(".artifact-strip");
+      strip.querySelector(".artifact-strip-more").click();
+      await new Promise((done) => setTimeout(done, 80));
+      const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
+      const words = rows.map((one) => one.textContent.trim());
+      const expanded = strip.querySelector(".artifact-strip-more").getAttribute("aria-expanded");
+      const exports = window.__BAND__.exports.length;
+      rows.find((one) => one.textContent.includes("내보내기"))?.click();
+      await new Promise((done) => setTimeout(done, 160));
+      return { words, expanded, exported: window.__BAND__.exports.length - exports };
+    });
+    ok(
+      "the folded menu holds every action the band hid — 「나란히」, 「내보내기」, 「공유」, 「Finder에서 보기」 — and its 「내보내기」 acts",
+      ["나란히", "내보내기", "공유", "Finder에서 보기"].every((word) => menu.words.some((one) => one.includes(word)))
+        && menu.expanded === "true" && menu.exported === 1,
+      JSON.stringify(menu),
+    );
+    await shoot("band-narrow", ".artifact-strip:not([hidden])");
+    ok("the window raised no errors", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
