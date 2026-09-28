@@ -3596,8 +3596,12 @@ function paintBrowserView(tab) {
   wireBrowserHost(host);
   host._browserTab = tab;
   paintBrowserFailure(host, tab);
+  // 머리띠의 「주석」은 도구줄의 연필과 같은 모드 스위치다(t-11959).
   paintArtifactStrip(host.querySelector(".artifact-strip"), tab, (version) => {
     submitBrowserAddress(tab, pathAsFileUrl(version.path));
+  }, {
+    annotate: () => toggleBrowserGrab(host, "annotate"),
+    armed: browserGrab !== null && browserGrab.label === tab.label && browserGrab.mode === "annotate",
   });
   paintArtifactHint(host.querySelector(".artifact-hint"), tab);
   const reload = host.querySelector(".browser-reload");
@@ -4184,10 +4188,13 @@ async function deliverAnnotations(host, tab) {
   await openSendToAgent(
     button,
     formatAnnotationsText(tab.label, tab.url, artifactFeedbackContext(tab)),
-    async () => {
-      // 전달된 주석은 떠난다 — 뱃지가 비고, 다음 묶음이 새로 모인다.
+    async (recipient) => {
+      // 전달된 주석은 떠난다 — 뱃지가 비고, 다음 묶음이 새로 모인다. 아티팩트의
+      // 판에 단 것이면 떠난 뒤에도 그 페이지의 기록에 남는다(t-11959).
+      const delivered = browserAnnotations.get(tab.label) ?? [];
       browserAnnotations.delete(tab.label);
       refreshGrabButtons();
+      await recordArtifactFeedback(tab, delivered, recipient);
     },
     { submit: false, maker: artifactFactsMaker(tab.artifact), append: true },
   );

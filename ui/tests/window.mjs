@@ -23,7 +23,7 @@ import { createRunner } from "./window-runner.mjs";
 
 import { testVaultSubagents } from "./vault-subagents.mjs";
 import { testKnowledgeLive } from "./knowledge-live.mjs";
-import { testArtifactBeside, testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
+import { testArtifactBand, testArtifactBeside, testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
@@ -214,6 +214,7 @@ suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(brows
 suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
 suite("emulator-seat", ({ browser, origin, ok }) => testEmulatorSeat(browser, origin, ok));
 suite("artifact-beside", ({ browser, origin, ok }) => testArtifactBeside(browser, origin, ok, join(UI, "..", "output/playwright")));
+suite("artifact-band", ({ browser, origin, ok }) => testArtifactBand(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("emulator-loans", ({ browser, origin, ok }) => testEmulatorLoans(browser, origin, ok));
 suite("coordinator-panel", ({ browser, origin, ok }) => testCoordinatorPanel(browser, origin, ok));
 suite("jev-dashboard", async ({ browser, origin, ok }) => {
@@ -12595,14 +12596,24 @@ const annotate = await page.evaluate(async () => {
   seen.tiledOffered =
     runningRows.some((row) => row.name === "Codex" && row.where === splitSeat) &&
     runningRows.some((row) => row.name === "Claude" && row.where === tiledSeat);
+  // 주석 묶음은 사람의 붙여넣기와 같은 문(`term_paste`)으로 쓰던 입력 뒤에 붙는다
+  // (t-11958) — 컴포저를 비우는 키가 앞서는 `send_prompt`는 이 길에 없고, 끝에
+  // Enter도 없다.
   let sent = null;
+  let pasted = null;
   window.__ANSWER__.send_prompt = (args) => ((sent = args), null);
+  const heldPaste = window.__ANSWER__.term_paste;
+  window.__ANSWER__.term_paste = (args) => ((pasted = args), null);
   pop.querySelector(".note-pop-row").click();
   await new Promise((done) => setTimeout(done, 250));
   delete window.__ANSWER__.send_prompt;
-  const text = sent?.text ?? "";
+  if (heldPaste === undefined) delete window.__ANSWER__.term_paste;
+  else window.__ANSWER__.term_paste = heldPaste;
+  const text = pasted?.text ?? "";
   seen.bundle =
-    sent?.submit === false &&
+    sent === null &&
+    pasted?.term === term &&
+    !/[\r\n]$/.test(text) &&
     text.includes("여백 좀 줄여줘") &&
     text.includes(`[${t("browser.annotate.change", "변경")}]`) &&
     text.includes(`[${t("browser.annotate.ask", "질문")}]`) &&

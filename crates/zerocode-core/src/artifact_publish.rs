@@ -169,6 +169,8 @@ impl PageMeta {
             description: self.description.clone(),
             version: Some(self.version),
             source_path: Some(self.source_path.clone()),
+            feedback_count: None,
+            feedback_version: None,
             origin,
             tags: self.label.iter().cloned().collect(),
             source: Source::Manual,

@@ -42264,16 +42264,14 @@ button.jev-token:hover {
   white-space: nowrap;
 }
 
-/* 아티팩트 페이지의 머리띠(t-3233 §5): 「제목 · <agent>가 만듦 · <프로젝트> ·
- * 버전 N ⌄ · 공유 · Finder에서 보기」. 브라우저 판 위와 파일 뷰의 머리 안에 같은
- * 옷으로 선다. 숫자·색은 토큰. */
+/* 아티팩트 페이지의 머리띠(t-3233 §5, t-11959): 첫 줄은 「제목 · 피드백 N · vN ·
+ * 주석 · 나란히 · 내보내기 · 공유 · Finder에서 보기」, 둘째 줄은 만든 이 · 프로젝트 ·
+ * 버전 ⌄. 브라우저 판 위와 파일 뷰의 머리 안에 같은 옷으로 선다. 숫자·색은 토큰.
+ * 머리띠가 제 폭의 컨테이너라서, 좁은 옆 자리는 창의 폭과 상관없이 접힌다. */
 .artifact-strip {
   display: flex;
-  /* 만든 판 옆의 좁은 자리(t-11958)에서는 단추가 다음 줄로 내려가고 제목이
-   * 남는다 — 한 줄로 두면 줄어드는 것은 제목뿐이었다. */
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1) var(--space-2);
+  flex-direction: column;
+  gap: var(--space-1);
   min-width: 0;
   padding: var(--space-1) var(--space-2);
   border-bottom: var(--rule-width) solid var(--edge-rule);
@@ -42281,24 +42279,114 @@ button.jev-token:hover {
   color: var(--artifact-strip-ink);
   font-family: var(--font-ui);
   font-size: var(--text-xs);
+  word-break: keep-all;
+  container-type: inline-size;
 }
 
+.artifact-strip[hidden] { display: none; }
+
+.artifact-strip-head,
+.artifact-strip-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+/* 첫 줄은 접히지 않는다 — 줄어드는 것은 제목뿐이고, 좁으면 행동이 메뉴로 간다. */
+.artifact-strip-head { flex-wrap: nowrap; }
+.artifact-strip-meta { flex-wrap: wrap; }
+
 .artifact-strip-title {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.artifact-strip-by,
+/* 「피드백 N · vN」 — 낱말이 뜻을 말하고, 알약의 색은 「새 N」과 같은 표지일 뿐이다. */
+.artifact-strip-feedback {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--artifact-new-bg);
+  color: var(--artifact-new-ink);
+  font-size: var(--text-3xs);
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.artifact-strip-feedback[hidden] { display: none; }
+
+.artifact-strip-gap {
+  flex: 1;
+  min-width: 0;
+}
+
+.artifact-strip-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.artifact-strip-act,
+.artifact-strip-more {
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  transition: background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+}
+
+.artifact-strip-act[hidden] { display: none; }
+
+.artifact-strip-act:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 주석 모드가 켜진 동안의 「주석」: 주석의 표지색(파랑)과 눌린 상태의 낱말 둘 다로. */
+.artifact-strip-annotate[aria-pressed="true"] {
+  border-color: var(--artifact-new-ink);
+  background: var(--artifact-new-bg);
+  color: var(--artifact-new-ink);
+}
+
+.artifact-strip-more { display: none; }
+
+@container (max-width: 479.98px) {
+  .artifact-strip-act.is-secondary { display: none; }
+  .artifact-strip-more { display: inline-flex; }
+}
+
+.artifact-strip-maker {
+  flex: 0 1 auto;
+  color: var(--artifact-strip-ink-soft);
+  font-size: var(--text-2xs);
+}
+
+.artifact-strip-by {
+  font-family: var(--font-ui);
+}
+
+.artifact-strip-by:not(:empty) + .artifact-card-maker-pane:not([hidden])::before {
+  content: "·";
+  margin-right: var(--space-1);
+}
+
 .artifact-strip-project {
   flex: none;
   color: var(--artifact-strip-ink-soft);
   white-space: nowrap;
 }
 
-.artifact-strip-by:not(:empty)::before,
-.artifact-strip-project:not(:empty)::before {
+.artifact-strip-project:empty { display: none; }
+
+.artifact-strip-maker:not([hidden]) + .artifact-strip-project:not(:empty)::before {
   content: "·";
   margin-right: var(--space-2);
 }
@@ -42307,18 +42395,14 @@ button.jev-token:hover {
   flex: none;
   width: auto;
   min-width: 0;
+  margin-left: auto;
   padding-block: var(--artifact-strip-version-inset);
   font-size: var(--text-xs);
 }
 
-.artifact-strip-gap {
-  flex: 1;
-}
-
-.artifact-strip-share,
-.artifact-strip-reveal {
-  gap: var(--space-1);
-  white-space: nowrap;
+@media (prefers-reduced-motion: reduce) {
+  .artifact-strip-act,
+  .artifact-strip-more { transition: none; }
 }
 
 /* 파일 뷰의 머리는 한 줄 플렉스라 머리띠가 서면 두 줄로 접힌다. */

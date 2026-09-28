@@ -199,6 +199,77 @@ pub(crate) struct PageAt {
     pub(crate) version: Option<u32>,
 }
 
+/// 발행한 페이지에 전달된 주석의 기록(t-11959): `pages/<id>/feedback.jsonl`, 전달
+/// 한 번에 한 줄. 덧붙이기만 하고 다시 쓰지 않는다 — 버전 폴더(`v<n>`)가 아니라서
+/// 버전 목록·내보내기·주소 판정 어느 것도 이 파일을 판으로 읽지 않는다.
+pub(crate) const FEEDBACK_FILE: &str = "feedback.jsonl";
+/// 한 페이지의 기록이 자랄 수 있는 끝. 넘으면 초안은 여전히 판에 들어가지만 기록은
+/// 거절된다 — 파일을 줄여 자리를 내는 일은 이 파일이 하지 않는다(덧붙이기만).
+pub(crate) const FEEDBACK_FILE_MAX_BYTES: u64 = 1024 * 1024;
+/// 전달 한 번의 줄이 가질 수 있는 바이트.
+pub(crate) const FEEDBACK_LINE_MAX_BYTES: usize = 64 * 1024;
+/// 전달 한 번에 실을 수 있는 주석의 수.
+pub(crate) const FEEDBACK_ITEMS_MAX: usize = 50;
+/// 주석 하나의 선택자와 코멘트가 가질 수 있는 글자 수.
+pub(crate) const FEEDBACK_SELECTOR_MAX: usize = 1024;
+pub(crate) const FEEDBACK_COMMENT_MAX: usize = 4000;
+/// 받는 판의 에이전트 id가 가질 수 있는 글자 수.
+pub(crate) const FEEDBACK_AGENT_MAX: usize = 64;
+/// 내보낼 파일 이름이 이미 있을 때 번호를 붙여 볼 횟수.
+const EXPORT_NAME_TRIES: u32 = 100;
+/// 내보낼 파일 이름에서 제목이 차지할 수 있는 글자 수.
+const EXPORT_STEM_MAX: usize = 60;
+
+/// 창이 청하는 기록 한 줄: 어느 발행물의 몇 번 판에 단 주석을 어느 판에 넣었는가.
+/// 그 판의 SHA와 고칠 원본은 창이 말하지 않는다 — 스토어가 제 기록에서 적는다.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FeedbackAsk {
+    pub(crate) id: String,
+    pub(crate) version: u32,
+    pub(crate) items: Vec<FeedbackItem>,
+    pub(crate) recipient: FeedbackRecipient,
+}
+
+/// 주석 하나 — 찍은 요소의 선택자와 사람이 쓴 말.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FeedbackItem {
+    pub(crate) selector: String,
+    pub(crate) comment: String,
+}
+
+/// 초안을 받은 판: 창의 판 열쇠(`term-<n>`)와 그 판의 에이전트. 표지일 뿐 무엇도
+/// 허락하지 않는다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FeedbackRecipient {
+    pub(crate) pane: String,
+    pub(crate) agent: String,
+}
+
+/// `feedback.jsonl`의 한 줄. 읽을 때는 모르는 필드를 버린다 — 뒤의 빌드가 보탠
+/// 필드가 앞의 줄들을 버리게 하지 않는다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FeedbackLine {
+    pub(crate) id: String,
+    pub(crate) version: u32,
+    #[serde(default)]
+    pub(crate) sha256: Option<String>,
+    #[serde(default)]
+    pub(crate) source_path: Option<PathBuf>,
+    pub(crate) recipient: FeedbackRecipient,
+    pub(crate) items: Vec<FeedbackItem>,
+    pub(crate) at_ms: i64,
+}
+
+/// 한 페이지의 기록을 센 것: 읽히는 줄의 수와 가장 새 줄이 단 판.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct FeedbackSummary {
+    pub(crate) count: u32,
+    pub(crate) version: Option<u32>,
+}
+
 /// 목록 상한이 행을 잘라도 탭과 사라진 파일의 수는 전체를 센다.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Listing {
@@ -332,6 +403,9 @@ pub(crate) struct Store {
     /// The ledger's `swept_at_ms` this store last swept beside; the artifact
     /// sweep rides the ledger's own hour rather than keeping a second clock.
     swept_beside: Mutex<Option<i64>>,
+    /// 페이지마다 마지막으로 센 피드백과 그때 파일의 도장. 목록은 도장이 같으면
+    /// 파일을 다시 읽지 않는다.
+    feedback: Mutex<HashMap<String, (Stamp, FeedbackSummary)>>,
 }
 
 fn store_cell() -> &'static Mutex<Option<Arc<Store>>> {
@@ -430,6 +504,7 @@ impl Store {
             sources: Mutex::new(Vec::new()),
             transcript_reads: Mutex::new(()),
             swept_beside: Mutex::new(None),
+            feedback: Mutex::new(HashMap::new()),
         }
     }
 
@@ -582,6 +657,8 @@ impl Store {
                 description: None,
                 version: None,
                 source_path: None,
+                feedback_count: None,
+                feedback_version: None,
                 origin,
                 tags: Vec::new(),
                 preview,
@@ -883,7 +960,8 @@ impl Store {
             .as_os_str()
             .to_str()?
             .to_string();
-        let artifact = self.get(&id).filter(is_publication)?;
+        let mut artifact = self.get(&id).filter(is_publication)?;
+        self.fill_feedback(&mut artifact);
         if artifact
             .path
             .canonicalize()
@@ -902,6 +980,197 @@ impl Store {
             artifact,
             version: Some(version),
         })
+    }
+
+    /// 전달된 주석 한 묶음을 그 페이지의 기록에 한 줄로 덧붙인다(t-11959). 판의 SHA와
+    /// 고칠 원본은 스토어가 제 기록에서 적는다 — 창이 말한 것을 믿지 않는다. 틀린
+    /// 청, 발행물이 아닌 행, 아직 없는 판, 상한에 닿은 기록은 한 바이트도 쓰지 않고
+    /// 거절한다. 카탈로그의 자물쇠 아래에서 쓰므로 두 전달도, 전달과 삭제도 섞이지
+    /// 않는다.
+    pub(crate) fn record_feedback(
+        &self,
+        ask: FeedbackAsk,
+        at_ms: i64,
+    ) -> Result<FeedbackSummary, String> {
+        use std::io::{Read as _, Seek as _, Write as _};
+        validate_feedback(&ask)?;
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        let row = index
+            .rows
+            .get(&ask.id)
+            .map(|row| row.artifact.clone())
+            .filter(is_publication)
+            .ok_or("피드백은 이 창이 발행한 페이지에만 남깁니다")?;
+        if ask.version > row.version.unwrap_or(0) {
+            return Err(format!(
+                "{}의 버전 {}은 발행된 적이 없습니다",
+                ask.id, ask.version
+            ));
+        }
+        // 그 판이 보관에서 밀려났어도 주석은 이미 판에 들어갔다 — 기록은 남기되 SHA는 모른다.
+        let sha256 = zerocode_core::artifact_publish::versions(&self.root, &ask.id)
+            .into_iter()
+            .find(|kept| kept.n == ask.version)
+            .and_then(|kept| kept.sha256);
+        let line = FeedbackLine {
+            id: ask.id,
+            version: ask.version,
+            sha256,
+            source_path: row.source_path,
+            recipient: ask.recipient,
+            items: ask.items,
+            at_ms,
+        };
+        let encoded = serde_json::to_vec(&line).map_err(|error| error.to_string())?;
+        if encoded.len() > FEEDBACK_LINE_MAX_BYTES {
+            return Err(format!(
+                "피드백 한 줄은 {FEEDBACK_LINE_MAX_BYTES}바이트를 넘을 수 없습니다"
+            ));
+        }
+        let path = self.feedback_path(&line.id);
+        let held = match std::fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.is_file() => {
+                return Err("피드백 기록이 보통 파일이 아닙니다".into());
+            }
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        };
+        // 끝이 잘린 줄 뒤에 붙이면 두 줄이 한 줄로 읽힌다 — 새 줄은 제 줄에서 시작한다.
+        let torn = held > 0
+            && std::fs::File::open(&path)
+                .and_then(|mut file| {
+                    file.seek(std::io::SeekFrom::End(-1))?;
+                    let mut last = [0u8; 1];
+                    file.read_exact(&mut last)?;
+                    Ok(last[0] != b'\n')
+                })
+                .map_err(|error| error.to_string())?;
+        let mut bytes = Vec::with_capacity(encoded.len() + 2);
+        if torn {
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(&encoded);
+        bytes.push(b'\n');
+        if held + bytes.len() as u64 > FEEDBACK_FILE_MAX_BYTES {
+            return Err(format!(
+                "이 페이지의 피드백 기록이 상한({FEEDBACK_FILE_MAX_BYTES}바이트)에 닿았습니다"
+            ));
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&bytes))
+            .map_err(|error| error.to_string())?;
+        drop(index);
+        Ok(self.feedback_summary(&line.id))
+    }
+
+    fn feedback_path(&self, id: &str) -> PathBuf {
+        self.root
+            .join(zerocode_core::artifact_publish::PAGES_DIR)
+            .join(id)
+            .join(FEEDBACK_FILE)
+    }
+
+    /// 한 페이지의 기록을 센다: 읽히고 그 페이지를 말하는 줄의 수와, 그중 가장 새
+    /// 줄의 판. 파일의 도장이 지난번과 같으면 다시 읽지 않고, 상한 너머는 읽지 않는다.
+    pub(crate) fn feedback_summary(&self, id: &str) -> FeedbackSummary {
+        use std::io::Read as _;
+        let path = self.feedback_path(id);
+        let mut cache = self.feedback.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(stamp) = stamp_of(&path) else {
+            cache.remove(id);
+            return FeedbackSummary::default();
+        };
+        if let Some((seen, summary)) = cache.get(id)
+            && *seen == stamp
+        {
+            return *summary;
+        }
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(&path)
+            .and_then(|file| file.take(FEEDBACK_FILE_MAX_BYTES).read_to_end(&mut bytes));
+        let mut summary = FeedbackSummary::default();
+        if read.is_ok() {
+            for line in String::from_utf8_lossy(&bytes).lines() {
+                if let Ok(line) = serde_json::from_str::<FeedbackLine>(line)
+                    && line.id == id
+                {
+                    summary.count = summary.count.saturating_add(1);
+                    summary.version = Some(line.version);
+                }
+            }
+        }
+        cache.insert(id.to_string(), (stamp, summary));
+        summary
+    }
+
+    /// 발행물 행에 그 기록의 수와 판을 입힌다 — 창에 답하는 사본에만. 다른 행은
+    /// 두 필드가 없는 채로 둔다.
+    pub(crate) fn fill_feedback(&self, artifact: &mut Artifact) {
+        if !is_publication(artifact) {
+            return;
+        }
+        let summary = self.feedback_summary(&artifact.id);
+        artifact.feedback_count = Some(summary.count);
+        artifact.feedback_version = summary.version;
+    }
+
+    /// 발행물의 한 판을 사람이 고른 폴더에 새 파일(`<제목>-v<n>.html`)로 내보낸다.
+    /// 쓰는 것은 문의 내보내기(`artifact_publish::export`)와 같은 불변 스냅샷이고,
+    /// 이름이 있으면 번호를 붙여 새 이름을 찾는다 — 있는 파일은 덮지 않는다. 스토어
+    /// 안으로는 내보내지 않는다.
+    pub(crate) fn export_into(
+        &self,
+        id: &str,
+        version: u32,
+        folder: &Path,
+    ) -> Result<zerocode_core::artifact_publish::ExportedFile, String> {
+        let row = self
+            .get(id)
+            .filter(is_publication)
+            .ok_or("내보낼 수 있는 것은 이 창이 발행한 페이지뿐입니다")?;
+        if !folder.is_absolute() {
+            return Err("내보낼 폴더는 절대 경로여야 합니다".into());
+        }
+        let folder = folder.canonicalize().map_err(|error| error.to_string())?;
+        if !folder.is_dir() {
+            return Err("내보낼 곳이 폴더가 아닙니다".into());
+        }
+        if self
+            .root
+            .canonicalize()
+            .is_ok_and(|store| folder.starts_with(store))
+        {
+            return Err("아티팩트 스토어 안으로는 내보내지 않습니다".into());
+        }
+        let stem = export_stem(&row.title, id);
+        for n in 1..=EXPORT_NAME_TRIES {
+            let name = if n == 1 {
+                format!("{stem}-v{version}.html")
+            } else {
+                format!("{stem}-v{version} ({n}).html")
+            };
+            let out = folder.join(name);
+            if out.symlink_metadata().is_ok() {
+                continue;
+            }
+            let input = zerocode_core::artifact_publish::ExportInput {
+                id: id.to_string(),
+                version: Some(version),
+                out: out.clone(),
+            };
+            match zerocode_core::artifact_publish::export(&self.root, &input) {
+                Ok(done) => return Ok(done),
+                // 물은 사이에 누가 그 이름을 썼다 — 다음 번호로.
+                Err(_) if out.symlink_metadata().is_ok() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(format!(
+            "{stem}-v{version}.html 이름의 파일이 이미 {EXPORT_NAME_TRIES}개 있습니다"
+        ))
     }
 
     /// The scan's snapshots of one page or document, oldest first, without
@@ -986,6 +1255,8 @@ impl Store {
                 description: None,
                 version: None,
                 source_path: None,
+                feedback_count: None,
+                feedback_version: None,
                 origin: Origin {
                     agent: Some(agent.to_string()),
                     session: fact.session.clone(),
@@ -1455,6 +1726,10 @@ impl Store {
     /// The store's own files beside a row — its versions and its rendered
     /// thumbnail — go with the row, whoever owned the file itself.
     fn forget_sidecars(&self, id: &str) {
+        self.feedback
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
         let _ = std::fs::remove_dir_all(
             self.root
                 .join(zerocode_core::artifact_publish::PAGES_DIR)
@@ -1666,7 +1941,7 @@ impl Store {
         let total = rows.len();
         let truncated = total > limits.list_rows_max;
         rows.truncate(limits.list_rows_max);
-        Listing {
+        let mut listing = Listing {
             missing: rows
                 .iter()
                 .filter(|(_, gone)| *gone)
@@ -1680,7 +1955,13 @@ impl Store {
             truncated,
             missing_total,
             by_kind,
+        };
+        // 기록을 세는 읽기는 카탈로그의 자물쇠 밖에서 — 행은 이미 사본이다.
+        drop(index);
+        for row in &mut listing.rows {
+            self.fill_feedback(row);
         }
+        listing
     }
 
     /// Counts by origin, for the chips.
@@ -1901,6 +2182,75 @@ impl ScanBudget {
 
 /// Whether a row is a publication (t-3952): the only rows that carry a
 /// version number of their own, written by `artifact_publish::PageMeta`.
+/// 창이 청한 피드백 한 줄의 모양: 판 번호, 주석의 수와 길이, 받는 판의 열쇠와
+/// 에이전트 id. 판에 그대로 붙여 넣은 말이라도 기록에는 터미널 제어 문자를 받지 않는다.
+fn validate_feedback(ask: &FeedbackAsk) -> Result<(), String> {
+    if ask.version == 0 {
+        return Err("피드백의 버전은 1부터입니다".into());
+    }
+    if ask.items.is_empty() || ask.items.len() > FEEDBACK_ITEMS_MAX {
+        return Err(format!("주석은 1–{FEEDBACK_ITEMS_MAX}개여야 합니다"));
+    }
+    let plain = |text: &str, lines: bool| {
+        !text
+            .chars()
+            .any(|c| c.is_control() && !(lines && (c == '\n' || c == '\t')))
+    };
+    for item in &ask.items {
+        if item.selector.chars().count() > FEEDBACK_SELECTOR_MAX
+            || item.comment.chars().count() > FEEDBACK_COMMENT_MAX
+        {
+            return Err(format!(
+                "선택자는 {FEEDBACK_SELECTOR_MAX}자, 코멘트는 {FEEDBACK_COMMENT_MAX}자까지입니다"
+            ));
+        }
+        if !plain(&item.selector, false) || !plain(&item.comment, true) {
+            return Err("주석에 제어 문자가 들어 있습니다".into());
+        }
+        if item.selector.trim().is_empty() && item.comment.trim().is_empty() {
+            return Err("아무것도 말하지 않는 주석입니다".into());
+        }
+    }
+    let pane = &ask.recipient.pane;
+    let digits = pane.strip_prefix("term-").unwrap_or_default();
+    if digits.is_empty() || digits.len() > 10 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("받는 판은 창의 판 열쇠(term-<n>)여야 합니다".into());
+    }
+    let agent = &ask.recipient.agent;
+    if agent.is_empty()
+        || agent.len() > FEEDBACK_AGENT_MAX
+        || !agent
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return Err("받는 판의 에이전트 id가 아닙니다".into());
+    }
+    Ok(())
+}
+
+/// 내보낼 파일 이름의 앞부분: 제목에서 경로와 셸이 달리 읽는 글자를 빼고, 비면 id.
+fn export_stem(title: &str, id: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let stem = artifact::truncate_chars(
+        cleaned.trim().trim_matches(['.', '-', ' ']),
+        EXPORT_STEM_MAX,
+    );
+    if stem.is_empty() {
+        id.to_string()
+    } else {
+        stem
+    }
+}
+
 fn is_publication(artifact: &Artifact) -> bool {
     artifact.kind == ArtifactKind::Page && artifact.version.is_some()
 }
@@ -2371,7 +2721,9 @@ fn artifact_request(
             {
                 use tauri::Emitter as _;
                 let _ = app.emit(CHANGED_EVENT, ());
-                let _ = app.emit(PUBLISHED_EVENT, meta.artifact(origin));
+                let mut row = meta.artifact(origin);
+                store.fill_feedback(&mut row);
+                let _ = app.emit(PUBLISHED_EVENT, row);
             }
             serde_json::to_value(meta).map_err(|e| e.to_string())
         }
@@ -3504,6 +3856,8 @@ mod tests {
                     description: None,
                     version: None,
                     source_path: None,
+                    feedback_count: None,
+                    feedback_version: None,
                     origin,
                     tags: Vec::new(),
                     preview: Preview::default(),
@@ -4128,5 +4482,339 @@ mod tests {
             None,
             "a relative path is not a report"
         );
+    }
+
+    /// 두 판을 발행한 페이지 하나와 그 id, 고칠 원본 — 피드백 시험의 바탕.
+    fn published_twice(dir: &Path) -> (Store, String, PathBuf) {
+        let store = Store::open(&dir.join("store"), Limits::default());
+        let source = dir.join("card.html");
+        touch(&source, "<main>one</main>");
+        let request = serde_json::json!({"action":"publish", "file_path":source});
+        let first = artifact_request(&store, request.clone(), &nobody).unwrap();
+        touch(&source, "<main>two</main>");
+        artifact_request(&store, request, &nobody).unwrap();
+        let id = first["id"].as_str().unwrap().to_string();
+        (store, id, source.canonicalize().unwrap())
+    }
+
+    fn feedback_ask(id: &str, version: u32, comment: &str) -> FeedbackAsk {
+        FeedbackAsk {
+            id: id.to_string(),
+            version,
+            items: vec![FeedbackItem {
+                selector: ".pin".into(),
+                comment: comment.into(),
+            }],
+            recipient: FeedbackRecipient {
+                pane: "term-4".into(),
+                agent: "claude".into(),
+            },
+        }
+    }
+
+    fn feedback_file(store: &Store, id: &str) -> PathBuf {
+        store.root().join("pages").join(id).join(FEEDBACK_FILE)
+    }
+
+    /// 전달된 주석은 그 페이지의 `feedback.jsonl`에 한 줄씩 덧붙는다. 줄은 판의
+    /// 번호와 그 판의 SHA, 고칠 원본, 받은 판과 에이전트, 주석을 적고, SHA와 원본은
+    /// 창이 아니라 스토어가 적는다. 틀린 청은 파일을 한 바이트도 바꾸지 않고
+    /// 거절되며, 상한에 닿은 기록은 더 받지 않는다.
+    #[test]
+    fn delivered_feedback_is_validated_bounded_and_appended_line_by_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, source) = published_twice(dir.path());
+        let file = feedback_file(&store, &id);
+
+        let one = store
+            .record_feedback(feedback_ask(&id, 1, "핀 번호가 글자를 가립니다"), 10)
+            .unwrap();
+        assert_eq!(
+            one,
+            FeedbackSummary {
+                count: 1,
+                version: Some(1)
+            }
+        );
+        let after_one = std::fs::read(&file).unwrap();
+        let two = store
+            .record_feedback(feedback_ask(&id, 2, "답하기 단추를 조금 더 크게"), 20)
+            .unwrap();
+        assert_eq!(
+            two,
+            FeedbackSummary {
+                count: 2,
+                version: Some(2)
+            }
+        );
+        let after_two = std::fs::read(&file).unwrap();
+        assert!(
+            after_two.starts_with(&after_one),
+            "the second delivery rewrote the first line"
+        );
+        let text = String::from_utf8(after_two.clone()).unwrap();
+        let lines: Vec<FeedbackLine> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let kept = zerocode_core::artifact_publish::versions(store.root(), &id);
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0].id.as_str(), lines[0].version), (id.as_str(), 1));
+        assert_eq!(lines[0].sha256, kept[0].sha256);
+        assert!(lines[0].sha256.is_some());
+        assert_eq!(lines[1].sha256, kept[1].sha256);
+        assert_ne!(lines[0].sha256, lines[1].sha256);
+        assert_eq!(lines[0].source_path.as_deref(), Some(source.as_path()));
+        assert_eq!(
+            lines[0].recipient,
+            FeedbackRecipient {
+                pane: "term-4".into(),
+                agent: "claude".into()
+            }
+        );
+        assert_eq!(lines[0].items[0].comment, "핀 번호가 글자를 가립니다");
+        assert_eq!((lines[0].at_ms, lines[1].at_ms), (10, 20));
+
+        let report = dir.path().join("report.md");
+        touch(&report, "# report");
+        let copied = store
+            .register_copy(&report, Source::Manual, Origin::default(), 1)
+            .unwrap();
+        let with = |edit: &dyn Fn(&mut FeedbackAsk)| {
+            let mut ask = feedback_ask(&id, 2, "좋습니다");
+            edit(&mut ask);
+            ask
+        };
+        let refused: Vec<(&str, FeedbackAsk)> = vec![
+            ("an unknown id", with(&|ask| ask.id = "p-nothere".into())),
+            (
+                "a row that is no publication",
+                with(&|ask| ask.id.clone_from(&copied.id)),
+            ),
+            ("version zero", with(&|ask| ask.version = 0)),
+            ("a version not yet published", with(&|ask| ask.version = 3)),
+            ("no items", with(&|ask| ask.items.clear())),
+            (
+                "too many items",
+                with(&|ask| ask.items = vec![ask.items[0].clone(); FEEDBACK_ITEMS_MAX + 1]),
+            ),
+            (
+                "a comment past its bound",
+                with(&|ask| ask.items[0].comment = "가".repeat(FEEDBACK_COMMENT_MAX + 1)),
+            ),
+            (
+                "a selector past its bound",
+                with(&|ask| ask.items[0].selector = "a".repeat(FEEDBACK_SELECTOR_MAX + 1)),
+            ),
+            (
+                "a terminal escape in a comment",
+                with(&|ask| ask.items[0].comment = "\u{1b}[2J 지워라".into()),
+            ),
+            (
+                "an item that says nothing",
+                with(&|ask| {
+                    ask.items[0] = FeedbackItem {
+                        selector: String::new(),
+                        comment: "  ".into(),
+                    };
+                }),
+            ),
+            (
+                "a pane key of another shape",
+                with(&|ask| ask.recipient.pane = "../term-4".into()),
+            ),
+            (
+                "a pane key without a number",
+                with(&|ask| ask.recipient.pane = "term-".into()),
+            ),
+            (
+                "an agent id with words in it",
+                with(&|ask| ask.recipient.agent = "claude; rm".into()),
+            ),
+            ("no agent", with(&|ask| ask.recipient.agent = String::new())),
+            (
+                "an agent id past its bound",
+                with(&|ask| ask.recipient.agent = "a".repeat(FEEDBACK_AGENT_MAX + 1)),
+            ),
+        ];
+        for (why, ask) in refused {
+            assert!(store.record_feedback(ask, 30).is_err(), "took {why}");
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), after_two, "a refusal wrote");
+        assert!(
+            !store.root().join("pages").join(&copied.id).exists(),
+            "a refusal made a page seat"
+        );
+        let unknown_field = serde_json::from_value::<FeedbackAsk>(serde_json::json!({
+            "id": id, "version": 1, "submit": true,
+            "items": [{"selector": ".pin", "comment": "x"}],
+            "recipient": {"pane": "term-4", "agent": "claude"},
+        }));
+        assert!(
+            unknown_field.is_err(),
+            "the ask took a field it does not know"
+        );
+
+        // 상한에 닿은 기록: 더 받지 않고, 있던 것은 그대로다.
+        let mut full = after_two.clone();
+        let filler = usize::try_from(FEEDBACK_FILE_MAX_BYTES).unwrap() - full.len() - 64;
+        full.extend(std::iter::repeat_n(b'x', filler));
+        full.push(b'\n');
+        std::fs::write(&file, &full).unwrap();
+        assert!(
+            store
+                .record_feedback(feedback_ask(&id, 2, "하나 더"), 40)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), full);
+        assert_eq!(store.feedback_summary(&id).count, 2);
+    }
+
+    /// 한 줄이 깨져도 기록은 선다: 읽히지 않는 줄과 다른 페이지를 말하는 줄은 세지
+    /// 않고, 끝이 잘린 줄 뒤의 다음 전달은 제 줄에서 시작한다 — 깨진 조각은 지우지
+    /// 않는다(덧붙이기만).
+    #[test]
+    fn a_corrupt_feedback_line_is_skipped_and_the_next_delivery_starts_its_own_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _) = published_twice(dir.path());
+        let file = feedback_file(&store, &id);
+        let stranger = serde_json::to_string(&FeedbackLine {
+            id: "p-other".into(),
+            version: 1,
+            sha256: None,
+            source_path: None,
+            recipient: FeedbackRecipient {
+                pane: "term-1".into(),
+                agent: "codex".into(),
+            },
+            items: Vec::new(),
+            at_ms: 1,
+        })
+        .unwrap();
+        std::fs::write(&file, format!("not json\n{stranger}\n{{\"id\":")).unwrap();
+        assert_eq!(store.feedback_summary(&id), FeedbackSummary::default());
+        let listed = store.list(&Filter::default());
+        assert_eq!(listed.rows[0].feedback_count, Some(0));
+        assert_eq!(listed.rows[0].feedback_version, None);
+
+        let summary = store
+            .record_feedback(feedback_ask(&id, 1, "색이 너무 옅습니다"), 5)
+            .unwrap();
+        assert_eq!(
+            summary,
+            FeedbackSummary {
+                count: 1,
+                version: Some(1)
+            }
+        );
+        let text = std::fs::read_to_string(&file).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text}");
+        assert_eq!(lines[..3], ["not json", stranger.as_str(), "{\"id\":"]);
+        let parsed: FeedbackLine = serde_json::from_str(lines[3]).unwrap();
+        assert_eq!(
+            (parsed.version, parsed.items[0].comment.as_str()),
+            (1, "색이 너무 옅습니다")
+        );
+        assert!(text.ends_with('\n'));
+    }
+
+    /// 기록 파일은 판이 아니다: 버전 목록, 주소 판정, 문의 내보내기와 목록은 그 파일이
+    /// 없던 때와 같게 답하고, 목록의 발행물 행만 기록의 수와 판을 입는다 — 그 수는
+    /// 카탈로그에 적히지 않고 다시 열어도 파일에서 다시 센다. 창의 내보내기는 고른
+    /// 폴더에 그 판을 새 파일로 쓰고, 있는 파일은 덮지 않는다.
+    #[test]
+    fn the_feedback_file_is_no_version_and_leaves_listing_versions_and_export_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _) = published_twice(dir.path());
+        let report = dir.path().join("report.md");
+        touch(&report, "# report");
+        let copied = store
+            .register_copy(&report, Source::Manual, Origin::default(), 1)
+            .unwrap();
+        store
+            .record_feedback(feedback_ask(&id, 1, "첫 판에"), 1)
+            .unwrap();
+        store
+            .record_feedback(feedback_ask(&id, 2, "둘째 판에"), 2)
+            .unwrap();
+        let file = feedback_file(&store, &id);
+        assert!(file.is_file());
+
+        let numbers = |kept: Vec<u32>| kept;
+        assert_eq!(
+            numbers(store.versions(&id).iter().map(|one| one.n).collect()),
+            [1, 2]
+        );
+        assert_eq!(
+            numbers(
+                zerocode_core::artifact_publish::versions(store.root(), &id)
+                    .iter()
+                    .map(|one| one.n)
+                    .collect()
+            ),
+            [1, 2]
+        );
+        assert_eq!(store.page_at(&file), None);
+        let current = store.get(&id).unwrap().path;
+        let at = store.page_at(&current).unwrap();
+        assert_eq!(
+            (at.artifact.feedback_count, at.artifact.feedback_version),
+            (Some(2), Some(2))
+        );
+
+        let listing = store.list(&Filter::default());
+        assert_eq!(listing.total, 2);
+        let page = listing.rows.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(page.version, Some(2));
+        assert_eq!(
+            (page.feedback_count, page.feedback_version),
+            (Some(2), Some(2))
+        );
+        let other = listing.rows.iter().find(|row| row.id == copied.id).unwrap();
+        assert_eq!((other.feedback_count, other.feedback_version), (None, None));
+        let door = artifact_request(&store, serde_json::json!({"action":"list"}), &nobody).unwrap();
+        assert_eq!(door["total"], 1);
+        let catalog = std::fs::read_to_string(store.root().join(INDEX_FILE)).unwrap();
+        assert!(
+            !catalog.contains("feedback"),
+            "the count was written down: {catalog}"
+        );
+
+        let snapshot =
+            std::fs::read(store.root().join("pages").join(&id).join("v1/index.html")).unwrap();
+        let out = dir.path().join("door.html");
+        artifact_request(
+            &store,
+            serde_json::json!({"action":"export", "id":id, "version":1, "out":out}),
+            &nobody,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), snapshot);
+
+        let folder = dir.path().join("shared");
+        std::fs::create_dir_all(&folder).unwrap();
+        let first = store.export_into(&id, 1, &folder).unwrap();
+        let second = store.export_into(&id, 1, &folder).unwrap();
+        assert_eq!(first.path.file_name().unwrap(), "card-v1.html");
+        assert_eq!(second.path.file_name().unwrap(), "card-v1 (2).html");
+        assert_eq!(std::fs::read(&first.path).unwrap(), snapshot);
+        assert_eq!(std::fs::read(&second.path).unwrap(), snapshot);
+        assert_eq!((first.version, second.version), (1, 1));
+        assert!(store.export_into(&id, 1, Path::new("shared")).is_err());
+        assert!(store.export_into(&id, 1, store.root()).is_err());
+        assert!(store.export_into(&id, 9, &folder).is_err());
+        assert!(store.export_into(&copied.id, 1, &folder).is_err());
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+
+        let reopened = Store::open(&dir.path().join("store"), Limits::default());
+        let again = reopened.list(&Filter::default());
+        let page = again.rows.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(
+            (page.feedback_count, page.feedback_version),
+            (Some(2), Some(2))
+        );
+        assert!(reopened.delete(&id, true).unwrap());
+        assert!(!file.exists());
     }
 }
