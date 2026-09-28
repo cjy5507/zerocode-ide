@@ -477,26 +477,50 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
     }
     // A narrow window (t-9633): the rows stand as cards and the charts one
     // under the other, every word whole, nothing wider than the page — the
-    // window as tall as the page, so the picture is the whole of it.
+    // window as tall as the page, so the picture is the whole of it. Every
+    // row holds the same figures, a short line and a long one (a judged
+    // window of a hundred), so the check does not ride on what this machine
+    // happened to count; they are set again as the page is read, so a
+    // refresh in between cannot put the machine's back.
+    await page.evaluate(() => {
+      window.__JEV_FIGURES__ = (figures) => {
+        for (const row of document.querySelectorAll("#jev-view [data-jev-dash-row]")) {
+          const nodes = [row.querySelector('[data-jev-fact="applied"]'), row.querySelector('[data-jev-fact="agreement"]'),
+            row.querySelector('[data-jev-cell="cost"]')];
+          row.__jevFigures ??= nodes.map((node) => node?.textContent ?? null);
+          const texts = figures ? [figures.applied, figures.agreement, figures.cost] : row.__jevFigures;
+          nodes.forEach((node, at) => { if (node && texts[at] !== null) node.textContent = texts[at]; });
+        }
+      };
+    });
+    const FIGURES = [
+      { applied: "7", agreement: "8/9 (52%)", cost: "$0", shot: "" },
+      { applied: "1,418", agreement: "98/100 (93%)", cost: "$0.192", shot: "-long" },
+    ];
     for (const theme of ["dark", "light"]) {
       await setQualityTheme(page, theme);
-      await standNarrow(page);
-      const seen = await page.evaluate(() => {
-        const view = document.querySelector("#jev-view");
-        view.scrollTop = 0;
-        const wide = [view, ...view.querySelectorAll(".jev-table-wrap, [data-jev-chart]")]
-          .filter((one) => one.scrollWidth > one.clientWidth + 1).map((one) => one.className);
-        return {
-          faults: window.__JEV_TEXT_FAULTS__(view), wide, width: Math.round(view.getBoundingClientRect().width),
-          theme: document.documentElement.dataset.theme ?? "dark",
-        };
-      });
-      const path = join(EVIDENCE_DIR, `jev-dashboard-narrow-${theme}.png`);
-      await page.screenshot({ path });
-      ok(`the ${theme} dashboard in a narrow window keeps every word whole and nothing wider than the page`,
-        seen.faults.length === 0 && seen.wide.length === 0 && seen.theme === theme,
-        JSON.stringify({ ...seen, faults: seen.faults.slice(0, 6), path }));
+      for (const figures of FIGURES) {
+        await page.evaluate((one) => window.__JEV_FIGURES__(one), figures);
+        await standNarrow(page);
+        const seen = await page.evaluate((one) => {
+          window.__JEV_FIGURES__(one);
+          const view = document.querySelector("#jev-view");
+          view.scrollTop = 0;
+          const wide = [view, ...view.querySelectorAll(".jev-table-wrap, [data-jev-chart]")]
+            .filter((node) => node.scrollWidth > node.clientWidth + 1).map((node) => node.className);
+          return {
+            faults: window.__JEV_TEXT_FAULTS__(view), wide, width: Math.round(view.getBoundingClientRect().width),
+            theme: document.documentElement.dataset.theme ?? "dark",
+          };
+        }, figures);
+        const path = join(EVIDENCE_DIR, `jev-dashboard-narrow-${theme}${figures.shot}.png`);
+        await page.screenshot({ path });
+        ok(`the ${theme} dashboard in a narrow window keeps every word whole and nothing wider than the page, ${figures.agreement} judged`,
+          seen.faults.length === 0 && seen.wide.length === 0 && seen.theme === theme,
+          JSON.stringify({ ...seen, faults: seen.faults.slice(0, 6), path }));
+      }
     }
+    await page.evaluate(() => window.__JEV_FIGURES__(null));
     ok("the evidence carries this machine's own count when zo answers, and says which",
       true,
       real ? `real: ${real.zo}${real.recent ? " --recent 12" : " (no recent list: that zo predates the flag)"}` : "fixture: no zo answered");

@@ -4137,7 +4137,7 @@ pub(super) async fn ssh_agent_open(
             // terminal becomes an agent, and an agent that opened one would be
             // launching a second agent instead of getting the shell it asked
             // for. `--cwd` is still fenced to the workspace by `open_term_tab`.
-            open_term_tab(state, rows, cols, Some(true), cwd, None)?
+            open_term_tab(state, rows, cols, Some(true), cwd, None, None)?
         };
         (term, None, None)
     } else {

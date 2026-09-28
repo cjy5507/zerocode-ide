@@ -211,3 +211,20 @@ fn named_commands(text: &str) -> Vec<Command> {
     }
     commands
 }
+
+/// A zo that cannot open its session says why on its terminal as well as in
+/// its log (t-12063): the folder it was started in, and zo's own reason, on
+/// the one line a pane's last words are read from.
+#[test]
+fn a_refusal_names_the_folder_zo_was_started_in() {
+    let line = super::terminal_exit_line(
+        "session not found: session-1790000000001-0\nHint: managed sessions live elsewhere",
+        Some(Path::new("/tmp/elsewhere")),
+    );
+    assert_eq!(
+        line,
+        "zo could not start in /tmp/elsewhere: session not found: session-1790000000001-0 \
+         Hint: managed sessions live elsewhere"
+    );
+    assert_eq!(super::terminal_exit_line("no", None), "zo could not start: no");
+}

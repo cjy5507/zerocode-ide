@@ -9220,7 +9220,7 @@ mod tests {
         for owned in [
             "open_ssh_terminal(app.clone()",
             "ssh_open_remote_term(state,",
-            "open_term_tab(state, rows, cols, Some(true), cwd, None)",
+            "open_term_tab(state, rows, cols, Some(true), cwd, None, None)",
             r#"emit_to("main", "ssh:agent-open""#,
         ] {
             assert!(opening.contains(owned), "the remote open road lost {owned}");
@@ -27775,16 +27775,19 @@ mod tests {
         let mounting = block_after(window, "async function mountStoredLayout(");
         assert!(
             mounting.contains("{ worktree, id: record.id, ordinal: at }")
-                && mounting.contains("spawnStoredLeaf(wake, record.running?.[at], grid, restore)")
+                && mounting.contains(
+                    "spawnStoredLeaf(wake, record.running?.[at], grid, restore, worktree)"
+                )
                 && !window.contains(r#"invoke("replay_scrollback""#),
             "a restored leaf comes back blank, or its screen is replayed after its program started:\n{mounting}"
         );
         let leaf = block_after(window, "async function spawnStoredLeaf(");
         assert!(
-            leaf.contains("{ rows, cols }, restore)")
+            leaf.contains("{ rows, cols }, restore, worktree)")
                 && leaf.contains(r#"rows, cols, restore })"#)
-                && leaf
-                    .contains(r#"invoke("open_term_tab", { rows, cols, plain: true, restore })"#),
+                && leaf.contains(
+                    r#"invoke("open_term_tab", { rows, cols, plain: true, restore, notice })"#
+                ),
             "a spawn road a restored leaf takes drops its stored screen:\n{leaf}"
         );
     }
@@ -28135,7 +28138,7 @@ mod tests {
         let spawn_at = mounting.find("spawnStoredLeaf(").expect("the leaves spawn");
         let paint_at = mounting.find("renderPanes(").expect("the tab paints");
         assert!(
-            spawn_at < paint_at && mounting.contains("grid, restore)"),
+            spawn_at < paint_at && mounting.contains("grid, restore, worktree)"),
             "a restored tab paints before its shells exist:\n{mounting}"
         );
 
@@ -28420,7 +28423,7 @@ mod tests {
             .find("storedWakesSettled(path)")
             .expect("the door asks before the restore it started has landed");
         let asked = reopening
-            .find("resumeSession(known)")
+            .find("resumeSession(known, path)")
             .expect("the door no longer opens through the judged road");
         assert!(
             reopening.contains("activateWorktree(path, { firstTerminal: false })")
@@ -28456,7 +28459,10 @@ mod tests {
             );
         }
         // 「서 있다」는 답은 그 판으로 간다 — 탭 메뉴의 「이 대화 다시 열기」도.
-        let going = block_after(window, "async function resumeSession(known) {");
+        let going = block_after(
+            window,
+            "async function resumeSession(known, worktree = null) {",
+        );
         let standing_at = going
             .find("if (woke.standing) {")
             .expect("a door no longer tells an opened pane from a standing one");

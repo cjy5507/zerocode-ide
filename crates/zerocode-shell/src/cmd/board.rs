@@ -900,6 +900,74 @@ pub(crate) fn pane_sessions(state: State<'_, AppState>) -> Vec<PaneSession> {
     listed
 }
 
+/// The command a person types to go on with a conversation (t-12063): the
+/// vendor's own resume, spelled by the one table this window keeps
+/// (`resume_argv`) rather than by the webview, led by a `cd` into the
+/// workspace the conversation belongs to — zo finds a conversation only from
+/// its own folder, and the shell the person types into may stand anywhere.
+/// Said by the shell that stands in for a conversation that could not come
+/// back, and by the line that names a conversation a new one took the place
+/// of. `None` for an agent this window has no way back for — the sentence
+/// then names the sidebar row alone. Off the main thread: naming the folder
+/// can ask git (`wake_root`).
+#[tauri::command(async)]
+pub(crate) fn resume_line(
+    state: State<'_, AppState>,
+    agent: String,
+    session: zerocode_core::ProviderSession,
+    worktree: Option<String>,
+) -> Option<String> {
+    let _crumb = crate::crumbs::Command::enter("resume_line");
+    let folder = worktree
+        .as_deref()
+        .and_then(|named| wake_root(state.inner(), Some(named)).ok());
+    spelled_resume(&agent, &session, folder.as_deref())
+}
+
+/// The longest word [`spelled_resume`] will put on a line a person types.
+const SPELLED_WORD_MAX: usize = 256;
+
+/// Whether `word` can stand on a shell line exactly as it is (t-12063): the
+/// characters vendor ids, flags and ordinary paths are made of, and nothing a
+/// shell reads as syntax. A session id only has to be a safe argv element to
+/// be resumed (`is_usable_session_id` lets a space or a `;` through, and argv
+/// never parses them), but a line a person copies into a shell is parsed — so
+/// a word that is not plainly safe is never spelled at all, rather than quoted
+/// and trusted. (An id that could pass for a flag is already refused by
+/// `is_usable_session_id`; the flags themselves are the vendor table's.)
+fn plain_shell_word(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= SPELLED_WORD_MAX
+        && word
+            .chars()
+            .all(|one| one.is_ascii_alphanumeric() || matches!(one, '_' | '.' | ':' | '/' | '-'))
+}
+
+/// The resume a person types for `session`, from `folder` when one is known —
+/// every word plainly safe ([`plain_shell_word`]), or no line at all.
+pub(crate) fn spelled_resume(
+    agent: &str,
+    session: &zerocode_core::ProviderSession,
+    folder: Option<&Path>,
+) -> Option<String> {
+    let kind = zerocode_core::AgentKind::from_slug(agent)?;
+    let argv = zerocode_core::resume_argv(kind, session)?;
+    let (program, rest) = argv.split_first()?;
+    if !rest.iter().all(|word| plain_shell_word(word))
+        || !program
+            .chars()
+            .all(|one| one.is_ascii_alphanumeric() || one == '-')
+    {
+        return None;
+    }
+    let line = argv.join(" ");
+    let Some(folder) = folder else {
+        return Some(line);
+    };
+    let spelled = folder.to_str()?;
+    (folder.is_absolute() && plain_shell_word(spelled)).then(|| format!("cd {spelled} && {line}"))
+}
+
 /// One fully assembled provider-resume command.
 ///
 /// Private to the backend: the Tauri wire never accepts cwd or raw argv. A
@@ -985,9 +1053,10 @@ pub(crate) fn definitely_absent(path: &Path) -> bool {
     std::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Five wire arguments: a `#[tauri::command]`'s payload parameters ARE its
-/// wire shape (`launch_agent_tab` says the same), so folding `restore` into a
-/// struct would rename what every door sends. `AppHandle` and `State` are
+/// Six wire arguments: a `#[tauri::command]`'s payload parameters ARE its
+/// wire shape (`launch_agent_tab` says the same), so folding `restore` and
+/// `worktree` into a struct would rename what every door sends — a payload
+/// change to quiet a lint about a payload. `AppHandle` and `State` are
 /// injected by Tauri and are not wire fields. A door still sending the old
 /// `interrupted` mark sends a field nothing reads: whether a wake is told to
 /// go on is the goodbye's word about a worker (t-7812 E), never a tab's.
@@ -995,6 +1064,7 @@ pub(crate) fn definitely_absent(path: &Path) -> bool {
 /// The road itself is [`wake_conversation`], over this window's own app and
 /// state ([`ResumeDoor`]): every decision of the wake is made there, and
 /// every effect that needs a real terminal here.
+#[allow(clippy::too_many_arguments)] // Tauri command arguments are the public IPC wire.
 #[tauri::command(async)]
 pub(crate) fn resume_session(
     app: AppHandle,
@@ -1008,14 +1078,55 @@ pub(crate) fn resume_session(
     // any other door that re-enters a conversation outside a restore sends
     // none.
     restore: Option<super::settings::StoredScreen>,
+    // The workspace the conversation belongs to, as the door names it — the
+    // tab it was stored under, the row that lists it (t-12063). A name, never
+    // a place to open in: [`wake_root`] resolves it through the window's own
+    // catalog, and a door that names none opens in the workspace in front.
+    worktree: Option<String>,
 ) -> Result<ConversationWake, String> {
+    let root = wake_root(state.inner(), worktree.as_deref())?;
     let door = ResumeDoor {
         app: &app,
         state: state.inner(),
         restore,
+        root,
     };
     let term = state.take_term_id();
     wake_conversation(&door, term, &agent, session, rows, cols)
+}
+
+/// The folder a conversation's pane opens in (t-12063): the workspace the
+/// door names, resolved the way a workspace click is (`set_active_worktree`:
+/// the catalog this window built, then git's list and the stored folders), or
+/// the workspace in front when the door names none.
+///
+/// Not the workspace in front whatever the door says. zo looks a conversation
+/// up in the store of the folder it is started in, and a wake that crossed a
+/// workspace switch started it in the wrong one: `session not found` in zo's
+/// own log seven times since 2026-09-13, every one a conversation sitting
+/// whole in another workspace's store. On 2026-09-28 11:56 that is how a
+/// restart brought back one zo pane of three.
+fn wake_root(state: &AppState, named: Option<&str>) -> Result<PathBuf, String> {
+    let Some(named) = named else {
+        return Ok(state.active_root());
+    };
+    let remembered = state
+        .catalog_owners()
+        .get(named)
+        .map(|(_, chosen)| chosen.clone());
+    if let Some(chosen) = remembered
+        && !chosen.prunable
+        && chosen.path.is_dir()
+    {
+        return Ok(chosen.path);
+    }
+    match known_workspace_context(state.config_root(), named) {
+        Ok(KnownWorkspace::Git(_, chosen)) if !chosen.prunable => Ok(chosen.path),
+        Ok(KnownWorkspace::Folder(folder)) => Ok(folder),
+        _ => Err(format!(
+            "{named}은(는) 이 창이 아는 작업 공간이 아니어서 그 대화를 열지 않았습니다"
+        )),
+    }
 }
 
 /// The window a conversation's wake opens its pane in (t-7812): what the
@@ -1372,6 +1483,8 @@ pub(crate) struct ResumeDoor<'a> {
     app: &'a AppHandle,
     state: &'a AppState,
     restore: Option<super::settings::StoredScreen>,
+    /// The folder the pane opens in ([`wake_root`]).
+    root: PathBuf,
 }
 
 /// One resume's launch, built and seated and not yet started: the program,
@@ -1403,7 +1516,7 @@ impl WakeWindow for ResumeDoor<'_> {
     type Channel = ZoChannel;
 
     fn root(&self) -> PathBuf {
-        self.state.active_root()
+        self.root.clone()
     }
 
     fn data_root(&self) -> PathBuf {
@@ -1434,7 +1547,7 @@ impl WakeWindow for ResumeDoor<'_> {
             plan,
         } = command;
         let agent = kind.slug();
-        let root = state.active_root();
+        let root = self.root();
         // The row's answers for the two decisions below that used to be
         // spelled by name: which trust menu to pre-answer, and how the pane
         // is opened.

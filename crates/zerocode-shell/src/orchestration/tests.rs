@@ -6796,9 +6796,10 @@ fn the_reseat_journal_names_the_exact_resume_command_the_host_runs() {
     );
 }
 
-/// Cwd never crosses the renderer resume wire. Interactive resume keeps
-/// the active root, while worker resume carries the ledger's checkout only
-/// as typed host placement.
+/// Cwd never crosses the renderer resume wire. Interactive resume opens in
+/// the workspace its door names, resolved through the window's own catalog
+/// (t-12063) — a name, never a path to open in — while worker resume carries
+/// the ledger's checkout only as typed host placement.
 #[test]
 fn a_worker_resume_root_comes_only_from_the_durable_checkout() {
     let board = include_str!("../cmd/board.rs");
@@ -6818,11 +6819,24 @@ fn a_worker_resume_root_comes_only_from_the_durable_checkout() {
             "{door} opened a renderer/path input: {signature}"
         );
     }
-    let resume_wrapper = board
-        .split_once("pub(crate) fn resume_session(")
-        .expect("resume wrapper")
-        .1;
-    assert!(resume_wrapper.contains("let root = state.active_root();"));
+    let body = |opens: &str| -> &'static str {
+        board
+            .split_once(opens)
+            .unwrap_or_else(|| panic!("{opens} disappeared"))
+            .1
+            .split_once("\n}\n")
+            .expect("function body")
+            .0
+    };
+    let resume_wrapper = body("pub(crate) fn resume_session(");
+    assert!(resume_wrapper.contains("let root = wake_root(state.inner(), worktree.as_deref())?;"));
+    let resolving = body("fn wake_root(");
+    assert!(
+        resolving.contains("return Ok(state.active_root());")
+            && resolving.contains("known_workspace_context(state.config_root(), named)")
+            && !resolving.contains("PathBuf::from(named)"),
+        "a named workspace is opened some other way than through the catalog:\n{resolving}"
+    );
 
     let durable = tempfile::tempdir().expect("durable checkout");
     let placement = crate::agent_teams::WorkerHostPlacement::Existing(
