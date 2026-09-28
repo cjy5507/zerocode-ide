@@ -134,7 +134,6 @@ function paintComputerHandoffClock() {
  * and `{{app}}` is the covering window's app — never its title. */
 const COMPUTER_HANDOFF_WORDS = Object.freeze({
   "computer.cover.ask": "누를 곳을 「{{app}}」의 창이 가리고 있어 멈췄습니다. 그 창은 읽거나 닫지 않았습니다. 직접 정리한 뒤 「다 했어요」를 눌러 주세요.",
-  "computer.cover.unanswered": "누를 곳이 「{{app}}」의 창에 가려져 있는데 판단이 제때 오지 않아 멈췄습니다. 직접 정리한 뒤 「다 했어요」를 눌러 주세요.",
   "computer.cover.stuck": "대상 창을 앞으로 가져오고 옮겨 봤지만 누를 곳이 아직 「{{app}}」의 창에 가려져 있습니다. 직접 정리한 뒤 「다 했어요」를 눌러 주세요.",
   "computer.cover.gone": "누르려던 창이 화면에 없습니다(최소화했거나 다른 데스크톱에 있음). 창이 보이게 한 뒤 「다 했어요」를 눌러 주세요.",
 });

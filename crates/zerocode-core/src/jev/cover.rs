@@ -14,8 +14,9 @@
 //! The line the code holds, whatever the answer: a move changes the target's
 //! own window and can be undone; what stands in front is never read, answered,
 //! moved or closed; a kind that is the system's, an app waiting on an answer,
-//! or not known — and an answer that did not come, or came unsure — holds the
-//! hand and asks the person. A move that left the place covered hands on to
+//! or not known — and an answer that came unsure — holds the hand and asks
+//! the person. An answer that did not come usable is no answer: the hand goes
+//! by today's rule ([`todays_rule`]), as it does with Jev switched off. A move that left the place covered hands on to
 //! the next the same answer ranked, while it ranked it at all
 //! ([`crate::jev::COVER_RUNNER_UP_FLOOR_PERMILLE`]), with no second question.
 //! Its marks are later facts: whether the move the answer put first is the one
@@ -77,7 +78,9 @@ impl Move {
 /// and the window's sentence is chosen by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Held {
-    /// The question came back with nothing usable inside its wall.
+    /// The question came back with nothing usable inside its wall — a row's
+    /// word alone: the hand goes on by today's rule, and the person is never
+    /// asked for the silence.
     Unanswered,
     /// What stands in front may be the system's, or an app's that waits on
     /// an answer, or is not known: it is the person's.

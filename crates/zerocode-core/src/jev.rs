@@ -1513,7 +1513,8 @@ pub const COVER_RUNNER_UP_FLOOR_PERMILLE: u16 = 150;
 /// moves change only the target's own window, can be undone, and never touch
 /// what stands in front, while the lines that matter are the code's — the
 /// system's, an app waiting on an answer or anything unknown holds the hand
-/// for the person, as does an answer that does not come inside the wall. A
+/// for the person, and an answer that does not come usable inside the wall
+/// leaves the hand to today's rule, whose moves are as safe without it. A
 /// seat that started recording would be marked only on the moves today's
 /// rule made, which leave most of its answers uncompared, and would not rise
 /// for the same reason the screen seats did not. `shadow` records, `off`

@@ -13,9 +13,11 @@
 //!
 //! What never moves: a move changes the target's own window and nothing in
 //! front is read, answered, moved or closed; under a seat that acts, an answer
-//! that does not come inside its wall holds the hand for the person — the
-//! press never goes on as though nothing stood there; under `shadow` or `off`
-//! the hand makes today's rule's moves and a `shadow` answer is only kept.
+//! that does not come usable inside its wall leaves the hand to today's rule —
+//! the rule a hand with Jev switched off keeps, which asks the person itself
+//! for what it cannot tell from the system's — and never to the plan the hand
+//! had before it looked; under `shadow` or `off` the hand makes today's
+//! rule's moves and a `shadow` answer is only kept.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -100,17 +102,13 @@ pub(crate) enum Uncovered {
 }
 
 /// The page's words for why the hand stopped, by the reason: an app's
-/// window it may not touch, a seat that did not answer, moves that did not
-/// clear it, or a window that is not on the screen.
+/// window it may not touch, moves that did not clear it, or a window that is
+/// not on the screen.
 fn said(held: Held, cover: Option<&Cover>) -> Said {
     let app = cover
         .and_then(|cover| cover.coverers.first())
         .map_or_else(String::new, |over| over.app.clone());
     let (key, reason) = match held {
-        Held::Unanswered => (
-            "computer.cover.unanswered",
-            "the place to press is covered and the cover judgment did not answer in time; the hand stopped",
-        ),
         Held::NothingCleared => (
             "computer.cover.stuck",
             "the target's window was brought to the front and moved, and the place is still covered",
@@ -119,7 +117,7 @@ fn said(held: Held, cover: Option<&Cover>) -> Said {
             "computer.cover.gone",
             "the target's window is not on the screen (minimized, or on another desktop)",
         ),
-        Held::Theirs | Held::Unsure | Held::NotReversible | Held::Chosen => (
+        Held::Theirs | Held::Unsure | Held::NotReversible | Held::Chosen | Held::Unanswered => (
             "computer.cover.ask",
             "another window covers the place to press; it was not read or closed",
         ),
@@ -189,19 +187,19 @@ pub(crate) fn uncover(
         row["attempts"] = json!(wired.attempts);
         row["requestBytes"] = json!(wired.request_bytes);
         row["rttMs"] = json!(wired.rtt_ms);
-        // The door refusing the question — the switch, the folder's consent,
-        // the day's count — is the seat not asked here, and the hand goes as
-        // it goes with no seat; a question that left and brought nothing
-        // usable back holds it.
-        let asked_the_wire = wired.attempts > 0;
-        let ladder = if applies && asked_the_wire {
-            answer
-                .as_ref()
-                .map_or(Err(Held::Unanswered), |read| seat::ladder(read, line))
-        } else {
-            rule.clone()
+        // An answer carried out, or the hand as it goes with no seat: the door
+        // refusing the question (the switch, the folder's consent, the day's
+        // count) and a question that brought nothing usable back inside its
+        // wall both leave it to today's rule, and the row says which.
+        let ladder = match (&answer, applies) {
+            (Ok(read), true) => seat::ladder(read, line),
+            (Err(_), true) => {
+                row["why"] = json!(Held::Unanswered.word());
+                rule.clone()
+            }
+            (_, false) => rule.clone(),
         };
-        row["applied"] = json!(applies && asked_the_wire && answer.is_ok());
+        row["applied"] = json!(applies && answer.is_ok());
         if let Err(held) = &ladder {
             row["held"] = json!(held.word());
         }
