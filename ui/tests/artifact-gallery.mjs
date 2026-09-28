@@ -2006,11 +2006,12 @@ export async function testArtifactBeside(browser, origin, ok, outputDir) {
     await settle();
     const again = await look(maker);
     const treeAfter = await page.evaluate(() => JSON.stringify(stageTree()));
+    // 새 판도 그 번호의 불변 스냅샷으로 선다 — 바뀌는 최신 사본이 아니다(t-11959).
     ok(
-      "a republish updates the open page in place: no new pane, no new split, the new version on the same tab",
+      "a republish updates the open page in place: no new pane, no new split, the new version's immutable snapshot on the same tab",
       again.opens === 1 && treeAfter === tree && again.browsers.length === 1
         && again.browsers[0].current === 2
-        && again.navigations.at(-1) === "file:///tmp/zerocode-window-test/artifacts/pages/p-first/index.html"
+        && again.navigations.at(-1) === "file:///tmp/zerocode-window-test/artifacts/versions/p-first/2/index.html"
         && again.unseen?.length === 0,
       JSON.stringify({ again, tree, treeAfter }),
     );
@@ -2261,7 +2262,7 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
           width: Math.round(strip.getBoundingClientRect().width),
           overflows: strip.scrollWidth > strip.clientWidth + 1,
           maker: shownAt(q(".artifact-strip-maker")) ? q(".artifact-strip-maker").textContent.trim() : "",
-          makerMark: shownAt(q(".artifact-strip-maker .artifact-card-maker-mark svg, .artifact-strip-maker .artifact-card-maker-mark img, .artifact-strip-maker .artifact-card-maker-mark .agent-icon")),
+          makerMark: shownAt(q(".artifact-strip-maker .artifact-card-maker-mark svg, .artifact-strip-maker .artifact-card-maker-mark img, .artifact-strip-maker .artifact-card-maker-mark .agent-ico")),
           feedback: shownAt(q(".artifact-strip-feedback")) ? q(".artifact-strip-feedback").textContent.trim() : "",
           annotate: shownAt(q(".artifact-strip-annotate")) ? q(".artifact-strip-annotate").textContent.trim() : "",
           annotatePrimary: q(".artifact-strip-annotate")?.classList.contains("is-primary") ?? false,
@@ -2329,8 +2330,11 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
         pastes: window.__BAND__.pastes.length,
         prompts: window.__BAND__.prompts.length,
         pasteEndsInEnter: /[\r\n]$/.test(window.__BAND__.pastes.at(-1)?.text ?? ""),
-        feedback: host.querySelector(".artifact-strip-feedback")?.textContent.trim() ?? "",
       };
+      // 초안을 받은 판이 앞으로 왔다 — 페이지로 돌아오면 머리띠가 새 수를 말한다.
+      setActiveTab(tab.id);
+      await window.__PAINTED__();
+      after.feedback = host.querySelector(".artifact-strip-feedback")?.textContent.trim() ?? "";
       // 링크를 따라 아티팩트 밖으로 나간 페이지의 주석은 판에 넣되 기록하지 않는다.
       const was = tab.url;
       tab.url = "https://example.com/elsewhere";

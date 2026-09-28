@@ -982,36 +982,195 @@ impl Store {
         })
     }
 
-    /// 전달된 주석 한 묶음을 그 페이지의 기록에 한 줄로 덧붙인다(t-11959).
+    /// 전달된 주석 한 묶음을 그 페이지의 기록에 한 줄로 덧붙인다(t-11959). 판의 SHA와
+    /// 고칠 원본은 스토어가 제 기록에서 적는다 — 창이 말한 것을 믿지 않는다. 틀린
+    /// 청, 발행물이 아닌 행, 아직 없는 판, 상한에 닿은 기록은 한 바이트도 쓰지 않고
+    /// 거절한다. 카탈로그의 자물쇠 아래에서 쓰므로 두 전달도, 전달과 삭제도 섞이지
+    /// 않는다.
     pub(crate) fn record_feedback(
         &self,
         ask: FeedbackAsk,
         at_ms: i64,
     ) -> Result<FeedbackSummary, String> {
-        let _ = (ask, at_ms);
-        Err("피드백 기록은 아직 없습니다".into())
+        use std::io::{Read as _, Seek as _, Write as _};
+        validate_feedback(&ask)?;
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        let row = index
+            .rows
+            .get(&ask.id)
+            .map(|row| row.artifact.clone())
+            .filter(is_publication)
+            .ok_or("피드백은 이 창이 발행한 페이지에만 남깁니다")?;
+        if ask.version > row.version.unwrap_or(0) {
+            return Err(format!(
+                "{}의 버전 {}은 발행된 적이 없습니다",
+                ask.id, ask.version
+            ));
+        }
+        // 그 판이 보관에서 밀려났어도 주석은 이미 판에 들어갔다 — 기록은 남기되 SHA는 모른다.
+        let sha256 = zerocode_core::artifact_publish::versions(&self.root, &ask.id)
+            .into_iter()
+            .find(|kept| kept.n == ask.version)
+            .and_then(|kept| kept.sha256);
+        let line = FeedbackLine {
+            id: ask.id,
+            version: ask.version,
+            sha256,
+            source_path: row.source_path,
+            recipient: ask.recipient,
+            items: ask.items,
+            at_ms,
+        };
+        let encoded = serde_json::to_vec(&line).map_err(|error| error.to_string())?;
+        if encoded.len() > FEEDBACK_LINE_MAX_BYTES {
+            return Err(format!(
+                "피드백 한 줄은 {FEEDBACK_LINE_MAX_BYTES}바이트를 넘을 수 없습니다"
+            ));
+        }
+        let path = self.feedback_path(&line.id);
+        let held = match std::fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.is_file() => {
+                return Err("피드백 기록이 보통 파일이 아닙니다".into());
+            }
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        };
+        // 끝이 잘린 줄 뒤에 붙이면 두 줄이 한 줄로 읽힌다 — 새 줄은 제 줄에서 시작한다.
+        let torn = held > 0
+            && std::fs::File::open(&path)
+                .and_then(|mut file| {
+                    file.seek(std::io::SeekFrom::End(-1))?;
+                    let mut last = [0u8; 1];
+                    file.read_exact(&mut last)?;
+                    Ok(last[0] != b'\n')
+                })
+                .map_err(|error| error.to_string())?;
+        let mut bytes = Vec::with_capacity(encoded.len() + 2);
+        if torn {
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(&encoded);
+        bytes.push(b'\n');
+        if held + bytes.len() as u64 > FEEDBACK_FILE_MAX_BYTES {
+            return Err(format!(
+                "이 페이지의 피드백 기록이 상한({FEEDBACK_FILE_MAX_BYTES}바이트)에 닿았습니다"
+            ));
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&bytes))
+            .map_err(|error| error.to_string())?;
+        drop(index);
+        Ok(self.feedback_summary(&line.id))
     }
 
-    /// 한 페이지의 기록을 센다.
+    fn feedback_path(&self, id: &str) -> PathBuf {
+        self.root
+            .join(zerocode_core::artifact_publish::PAGES_DIR)
+            .join(id)
+            .join(FEEDBACK_FILE)
+    }
+
+    /// 한 페이지의 기록을 센다: 읽히고 그 페이지를 말하는 줄의 수와, 그중 가장 새
+    /// 줄의 판. 파일의 도장이 지난번과 같으면 다시 읽지 않고, 상한 너머는 읽지 않는다.
     pub(crate) fn feedback_summary(&self, id: &str) -> FeedbackSummary {
-        let _ = id;
-        FeedbackSummary::default()
+        use std::io::Read as _;
+        let path = self.feedback_path(id);
+        let mut cache = self.feedback.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(stamp) = stamp_of(&path) else {
+            cache.remove(id);
+            return FeedbackSummary::default();
+        };
+        if let Some((seen, summary)) = cache.get(id)
+            && *seen == stamp
+        {
+            return *summary;
+        }
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(&path)
+            .and_then(|file| file.take(FEEDBACK_FILE_MAX_BYTES).read_to_end(&mut bytes));
+        let mut summary = FeedbackSummary::default();
+        if read.is_ok() {
+            for line in String::from_utf8_lossy(&bytes).lines() {
+                if let Ok(line) = serde_json::from_str::<FeedbackLine>(line)
+                    && line.id == id
+                {
+                    summary.count = summary.count.saturating_add(1);
+                    summary.version = Some(line.version);
+                }
+            }
+        }
+        cache.insert(id.to_string(), (stamp, summary));
+        summary
     }
 
-    /// 발행물 행에 그 기록의 수와 판을 입힌다.
+    /// 발행물 행에 그 기록의 수와 판을 입힌다 — 창에 답하는 사본에만. 다른 행은
+    /// 두 필드가 없는 채로 둔다.
     pub(crate) fn fill_feedback(&self, artifact: &mut Artifact) {
-        let _ = artifact;
+        if !is_publication(artifact) {
+            return;
+        }
+        let summary = self.feedback_summary(&artifact.id);
+        artifact.feedback_count = Some(summary.count);
+        artifact.feedback_version = summary.version;
     }
 
-    /// 발행물의 한 판을 사람이 고른 폴더에 내보낸다.
+    /// 발행물의 한 판을 사람이 고른 폴더에 새 파일(`<제목>-v<n>.html`)로 내보낸다.
+    /// 쓰는 것은 문의 내보내기(`artifact_publish::export`)와 같은 불변 스냅샷이고,
+    /// 이름이 있으면 번호를 붙여 새 이름을 찾는다 — 있는 파일은 덮지 않는다. 스토어
+    /// 안으로는 내보내지 않는다.
     pub(crate) fn export_into(
         &self,
         id: &str,
         version: u32,
         folder: &Path,
     ) -> Result<zerocode_core::artifact_publish::ExportedFile, String> {
-        let _ = (id, version, folder);
-        Err("창의 내보내기는 아직 없습니다".into())
+        let row = self
+            .get(id)
+            .filter(is_publication)
+            .ok_or("내보낼 수 있는 것은 이 창이 발행한 페이지뿐입니다")?;
+        if !folder.is_absolute() {
+            return Err("내보낼 폴더는 절대 경로여야 합니다".into());
+        }
+        let folder = folder.canonicalize().map_err(|error| error.to_string())?;
+        if !folder.is_dir() {
+            return Err("내보낼 곳이 폴더가 아닙니다".into());
+        }
+        if self
+            .root
+            .canonicalize()
+            .is_ok_and(|store| folder.starts_with(store))
+        {
+            return Err("아티팩트 스토어 안으로는 내보내지 않습니다".into());
+        }
+        let stem = export_stem(&row.title, id);
+        for n in 1..=EXPORT_NAME_TRIES {
+            let name = if n == 1 {
+                format!("{stem}-v{version}.html")
+            } else {
+                format!("{stem}-v{version} ({n}).html")
+            };
+            let out = folder.join(name);
+            if out.symlink_metadata().is_ok() {
+                continue;
+            }
+            let input = zerocode_core::artifact_publish::ExportInput {
+                id: id.to_string(),
+                version: Some(version),
+                out: out.clone(),
+            };
+            match zerocode_core::artifact_publish::export(&self.root, &input) {
+                Ok(done) => return Ok(done),
+                // 물은 사이에 누가 그 이름을 썼다 — 다음 번호로.
+                Err(_) if out.symlink_metadata().is_ok() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(format!(
+            "{stem}-v{version}.html 이름의 파일이 이미 {EXPORT_NAME_TRIES}개 있습니다"
+        ))
     }
 
     /// The scan's snapshots of one page or document, oldest first, without
@@ -1567,6 +1726,10 @@ impl Store {
     /// The store's own files beside a row — its versions and its rendered
     /// thumbnail — go with the row, whoever owned the file itself.
     fn forget_sidecars(&self, id: &str) {
+        self.feedback
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
         let _ = std::fs::remove_dir_all(
             self.root
                 .join(zerocode_core::artifact_publish::PAGES_DIR)
@@ -2019,6 +2182,75 @@ impl ScanBudget {
 
 /// Whether a row is a publication (t-3952): the only rows that carry a
 /// version number of their own, written by `artifact_publish::PageMeta`.
+/// 창이 청한 피드백 한 줄의 모양: 판 번호, 주석의 수와 길이, 받는 판의 열쇠와
+/// 에이전트 id. 판에 그대로 붙여 넣은 말이라도 기록에는 터미널 제어 문자를 받지 않는다.
+fn validate_feedback(ask: &FeedbackAsk) -> Result<(), String> {
+    if ask.version == 0 {
+        return Err("피드백의 버전은 1부터입니다".into());
+    }
+    if ask.items.is_empty() || ask.items.len() > FEEDBACK_ITEMS_MAX {
+        return Err(format!("주석은 1–{FEEDBACK_ITEMS_MAX}개여야 합니다"));
+    }
+    let plain = |text: &str, lines: bool| {
+        !text
+            .chars()
+            .any(|c| c.is_control() && !(lines && (c == '\n' || c == '\t')))
+    };
+    for item in &ask.items {
+        if item.selector.chars().count() > FEEDBACK_SELECTOR_MAX
+            || item.comment.chars().count() > FEEDBACK_COMMENT_MAX
+        {
+            return Err(format!(
+                "선택자는 {FEEDBACK_SELECTOR_MAX}자, 코멘트는 {FEEDBACK_COMMENT_MAX}자까지입니다"
+            ));
+        }
+        if !plain(&item.selector, false) || !plain(&item.comment, true) {
+            return Err("주석에 제어 문자가 들어 있습니다".into());
+        }
+        if item.selector.trim().is_empty() && item.comment.trim().is_empty() {
+            return Err("아무것도 말하지 않는 주석입니다".into());
+        }
+    }
+    let pane = &ask.recipient.pane;
+    let digits = pane.strip_prefix("term-").unwrap_or_default();
+    if digits.is_empty() || digits.len() > 10 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("받는 판은 창의 판 열쇠(term-<n>)여야 합니다".into());
+    }
+    let agent = &ask.recipient.agent;
+    if agent.is_empty()
+        || agent.len() > FEEDBACK_AGENT_MAX
+        || !agent
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return Err("받는 판의 에이전트 id가 아닙니다".into());
+    }
+    Ok(())
+}
+
+/// 내보낼 파일 이름의 앞부분: 제목에서 경로와 셸이 달리 읽는 글자를 빼고, 비면 id.
+fn export_stem(title: &str, id: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let stem = artifact::truncate_chars(
+        cleaned.trim().trim_matches(['.', '-', ' ']),
+        EXPORT_STEM_MAX,
+    );
+    if stem.is_empty() {
+        id.to_string()
+    } else {
+        stem
+    }
+}
+
 fn is_publication(artifact: &Artifact) -> bool {
     artifact.kind == ArtifactKind::Page && artifact.version.is_some()
 }

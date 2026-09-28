@@ -7881,14 +7881,16 @@ async function openSendToAgent(button, prompt, onDelivered, { submit = true, age
     host.appendChild(line);
   };
   let sending = false;
+  // `send`는 초안을 받은 판을 `{ term, agent }`로 돌려준다 — 전달을 기록하는 쪽
+  // (아티팩트 주석, t-11959)이 받을 곳을 짐작하지 않게.
   const deliver = async (send) => {
     if (sending || !current()) return;
     sending = true;
     for (const choice of host.querySelectorAll("button")) choice.disabled = true;
     try {
-      await send();
+      const recipient = await send();
       if (generation === noteSendGeneration) closeNoteSend();
-      await onDelivered?.();
+      await onDelivered?.(recipient ?? null);
     } catch (error) {
       showError(error);
     } finally {
@@ -7970,6 +7972,7 @@ async function openSendToAgent(button, prompt, onDelivered, { submit = true, age
         // 사용자가 스테이징된 입력을 본다 (라이브 보고 2026-08-14: 브라우저
         // 탭에서 보내면 아무 일도 안 일어난 것처럼 보였다).
         if (current()) setActiveTab(target.tab.id);
+        return { term: target.term, agent: target.spec.id };
       }),
     );
     host.appendChild(pick);
@@ -8009,6 +8012,7 @@ async function openSendToAgent(button, prompt, onDelivered, { submit = true, age
         } finally {
           mountTermTab(term, { agent: row.name, worktree: originWorktree }, { focus: current() });
         }
+        return { term, agent: row.id };
       }),
     );
     host.appendChild(item);

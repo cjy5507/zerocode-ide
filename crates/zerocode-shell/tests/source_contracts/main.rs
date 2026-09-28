@@ -33441,9 +33441,13 @@ mod tests {
     fn a_door_publish_hands_the_window_its_row() {
         let backend = shipped_backend();
         let door = block_after(backend, "fn artifact_request(");
+        // The row goes out with its feedback count on it (t-11959): the same
+        // row the catalog holds, filled by the store, then emitted.
         assert!(
             door.contains("app.emit(CHANGED_EVENT, ())")
-                && door.contains("app.emit(PUBLISHED_EVENT, meta.artifact(origin))"),
+                && door.contains("let mut row = meta.artifact(origin);")
+                && door.contains("store.fill_feedback(&mut row);")
+                && door.contains("app.emit(PUBLISHED_EVENT, row)"),
             "the publish arm no longer hands the window the row it published:\n{door}"
         );
         assert!(
