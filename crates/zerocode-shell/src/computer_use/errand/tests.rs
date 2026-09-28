@@ -1652,44 +1652,15 @@ fn a_walks_rows_land_in_its_evidence_folder_and_in_the_seats_one_ledger() {
     );
 }
 
+/// A screen seat left at `auto` presses from a goal walk's first step
+/// (t-13091): with no transition in its ledger it acts. Answers that never
+/// came back do not take it back — each already stepped the walk back to its
+/// caller, and for a seat that starts pressing a fall is for good — while a
+/// window of presses the walks were still stuck after does, on its own
+/// marks, and the next walk records.
 #[test]
-fn a_screen_seats_auto_rises_on_its_own_rows_and_falls_when_the_wire_does() {
-    let home = tempfile::tempdir().expect("a zo home");
+fn a_screen_seats_auto_presses_from_the_start_and_falls_on_its_own_misses() {
     let seat = seat_of(Surface::Page);
-    let wire = wire_at(&home, seat, Mode::Auto);
-    let ledger = crate::systemone::ledger_of(&wire, seat).expect("the seat's ledger");
-    assert!(
-        !crate::systemone::applies(&wire, seat),
-        "an auto nobody has raised records"
-    );
-
-    // A window's worth of presses the walks went on to confirm — the seat's
-    // own width, read from the table, so the count lands on the judgment's
-    // first cadence and the window it reads is full. The width is not spelled
-    // here: it moves with the seat's floor and with what its window forgives.
-    // The oldest few the walks were still stuck after: a label that has
-    // never said no is not evidence (t-6342).
-    let wanted = zerocode_core::jev::promote::window_wanted_for(seat).expect("a screen seat rises");
-    let misses = seat.negatives_wanted.expect("a screen seat rises") as i64;
-    let rows: Vec<Value> = (0..wanted as i64)
-        .map(|n| answered_press(1_000 + n, n >= misses))
-        .collect();
-    write_rows(seat, &wire, None, &rows, 90_000);
-
-    let judged = crate::systemone::read_rows(&ledger);
-    let transition = judged.last().expect("a judgment stands beside the rows");
-    assert_eq!(
-        transition[zerocode_core::jev::summary::TRANSITION.canonical],
-        json!(zerocode_core::jev::promote::ROSE),
-        "{transition}"
-    );
-    assert!(
-        crate::systemone::applies(&wire, seat),
-        "and the next walk presses"
-    );
-
-    // Three answers in a row that never came back end it at once, whatever
-    // the cadence says: that is the wire, the key or the model.
     let dead: Vec<Value> = (0..3)
         .map(|n| {
             json!({
@@ -1699,15 +1670,49 @@ fn a_screen_seats_auto_rises_on_its_own_rows_and_falls_when_the_wire_does() {
             })
         })
         .collect();
-    write_rows(seat, &wire, None, &dead, 95_000);
 
-    let judged = crate::systemone::read_rows(&ledger);
-    assert_eq!(
-        judged.last().expect("a fall stands too")
-            [zerocode_core::jev::summary::TRANSITION.canonical],
-        json!(zerocode_core::jev::promote::FELL)
+    let home = tempfile::tempdir().expect("a zo home");
+    let wire = wire_at(&home, seat, Mode::Auto);
+    let ledger = crate::systemone::ledger_of(&wire, seat).expect("the seat's ledger");
+    assert!(
+        crate::systemone::applies(&wire, seat),
+        "an auto nobody has judged presses a goal walk"
     );
-    assert!(!crate::systemone::applies(&wire, seat));
+    write_rows(seat, &wire, None, &dead, 5_000);
+    assert!(
+        crate::systemone::applies(&wire, seat),
+        "a wire that never answered does not take back a seat that starts pressing"
+    );
+    assert!(
+        crate::systemone::read_rows(&ledger).iter().all(|row| row
+            .get(zerocode_core::jev::summary::TRANSITION.canonical)
+            .is_none()),
+        "no judgment on the wire's health alone"
+    );
+
+    // A window's worth of presses the walks were still stuck after — the
+    // seat's own width, read from the table, so the count lands on the
+    // judgment's first cadence and the window it reads is full.
+    let home = tempfile::tempdir().expect("a zo home");
+    let wire = wire_at(&home, seat, Mode::Auto);
+    let ledger = crate::systemone::ledger_of(&wire, seat).expect("the seat's ledger");
+    let wanted =
+        zerocode_core::jev::promote::window_wanted_for(seat).expect("a screen seat is judged");
+    let rows: Vec<Value> = (0..wanted as i64)
+        .map(|n| answered_press(1_000 + n, false))
+        .collect();
+    write_rows(seat, &wire, None, &rows, 90_000);
+    let judged = crate::systemone::read_rows(&ledger);
+    let transition = judged.last().expect("a judgment stands beside the rows");
+    assert_eq!(
+        transition[zerocode_core::jev::summary::TRANSITION.canonical],
+        json!(zerocode_core::jev::promote::FELL),
+        "{transition}"
+    );
+    assert!(
+        !crate::systemone::applies(&wire, seat),
+        "and the next walk records"
+    );
 }
 
 // ---- asking ahead of the look (t-6132 S2) ----------------------------------
@@ -3310,20 +3315,30 @@ fn the_windows_walk_hands_its_world_the_windows_writer() {
     }
 }
 
-/// The walk verb types through `run_goal` itself (t-6721, the review t-6720
-/// left open): a walk read from the CLI's own words; a page answered by the
-/// browser door's own reader and writer (`look_of` → `marks_json`) with the
-/// field it read; a judge and the value seat each across a real socket; zo's
-/// settings in a folder of the case's own. With a key a person set, the one
-/// request offers the entry and a `type --value` goes down the road; with
-/// none, the request offers no entry and nothing is typed. No keychain, no
-/// screen, no person's settings or ledger. And the switches the walk reads
-/// come from the file its judge asks through — for the window's judge, the
-/// very file `mode_now` reads, through the same reader.
-#[test]
-fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
+/// What one walk down the window's own goal road came to ([`goal_road`]):
+/// the judgments it asked, the value seat's requests, every command it sent
+/// down the road, its answer, and the browser seat's one ledger after it.
+pub(super) struct GoalRoad {
+    pub asked: Vec<Value>,
+    pub values: Vec<String>,
+    pub sent: Vec<Vec<String>>,
+    pub answer: zerocode_hookd::TeamAnswer,
+    pub ledger: Vec<Value>,
+}
+
+/// One walk of a flight search page through `run_goal` itself — the road
+/// `zerocode-computer walk` takes (t-6721): a walk read from the CLI's own
+/// words; a page answered by the browser door's own reader and writer
+/// (`look_of` → `marks_json`) with the field it read; a judge and the value
+/// seat each across a real socket; zo's settings in a folder of the case's
+/// own, putting the browser seat at `mode`, with no transition in its
+/// ledger. `with_key` says whether a person set the value seat's key;
+/// `until` is the caller's condition, as the check's count before the walk's
+/// first look and after it (t-10311), and `None` gives no `--until`. No
+/// keychain, no screen, no person's settings or ledger. The caller holds the
+/// one hand ([`crate::tests::computer_desktop_wait::ONE_HAND`]).
+pub(super) fn goal_road(mode: Mode, with_key: bool, until: Option<[u64; 2]>) -> GoalRoad {
     use std::cell::RefCell;
-    use std::path::Path;
 
     use zerocode_core::computer_recipe::RecipeTool;
     use zerocode_core::computer_use_protocol::frame::ShotFrame;
@@ -3335,50 +3350,6 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
     use super::value::tests::{store, wrote};
     use crate::agent_tools_runtime::{RecipeRoads, run_goal};
     use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
-
-    let _hand = crate::tests::computer_desktop_wait::ONE_HAND
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    // The window's judge reads where `mode_now` reads: the same file (no
-    // file is read here) through the same reader.
-    let window = crate::systemone::Wire::new(&crate::api_routers::HeldKeys::default());
-    assert_eq!(
-        window.config_home().map(Path::to_path_buf),
-        crate::api_routers::zo_settings_path()
-            .and_then(|file| file.parent().map(Path::to_path_buf)),
-        "the window's judge and `mode_now` read one settings file"
-    );
-    let source = |file: &str, from: &str| {
-        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(file))
-            .expect("a source");
-        let at = text
-            .find(from)
-            .unwrap_or_else(|| panic!("{from} in {file}"));
-        let body = &text[at..];
-        body[..body.find("\n}\n").expect("its end")].to_string()
-    };
-    for (file, from) in [
-        ("src/computer_use/errand.rs", "pub fn mode_now("),
-        ("src/systemone.rs", "pub fn settings_root("),
-    ] {
-        assert!(
-            source(file, from).contains("read_zo_settings_root"),
-            "{from} stopped reading through the one reader"
-        );
-    }
-    assert!(
-        source("src/systemone.rs", "pub fn new(keys").contains("zo_settings_path()"),
-        "the window's wire stopped reading zo's own settings file"
-    );
-    let goal = source("src/agent_tools_runtime.rs", "pub(super) fn run_goal(");
-    assert!(
-        goal.contains("let settings = judge.wire().settings_root();")
-            && goal.contains("seat.mode_in(&settings)")
-            && goal.contains("forks.mode_in(&settings)")
-            && !goal.contains("mode_now("),
-        "the walk reads its switches from its judge's settings file"
-    );
 
     // The page as the browser door answers it — the page's own pass, read
     // and written by the door.
@@ -3466,87 +3437,161 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
         }
     }
 
-    // `until`: the caller's condition, as the check's count before the walk's
-    // first look and after it (t-10311); `None` gives no `--until`.
-    let walk = |with_key: bool, until: Option<[u64; 2]>| {
-        let home = tempfile::tempdir().expect("a zo home");
-        let work = home.path().join("work");
-        std::fs::create_dir_all(&work).expect("a workspace");
-        let settings = home.path().join("settings.json");
-        std::fs::write(
-            &settings,
-            json!({ "smart": {
-                (zerocode_core::jev::BROWSER.setting): zerocode_core::jev::JevMode::On.key(),
-                "jev": { "workspaces": [work.display().to_string()] },
-            } })
-            .to_string(),
-        )
-        .expect("zo's settings");
-        let jev = Endpoint::answering_each("HTTP/1.1 200 OK", judging, 0);
-        let value = Endpoint::serving("HTTP/1.1 200 OK", wrote("London"), 0);
-        let mut words: Vec<String> = [
-            "walk",
-            "--pane",
-            "browser-9",
-            "--goal",
-            "Search flights to London",
-            "--steps",
-            "1",
-            "--json",
-        ]
-        .into_iter()
-        .map(str::to_string)
+    let home = tempfile::tempdir().expect("a zo home");
+    let work = home.path().join("work");
+    std::fs::create_dir_all(&work).expect("a workspace");
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({ "smart": {
+            (zerocode_core::jev::BROWSER.setting): mode.key(),
+            "jev": { "workspaces": [work.display().to_string()] },
+        } })
+        .to_string(),
+    )
+    .expect("zo's settings");
+    let jev = Endpoint::answering_each("HTTP/1.1 200 OK", judging, 0);
+    let value = Endpoint::serving("HTTP/1.1 200 OK", wrote("London"), 0);
+    let mut words: Vec<String> = [
+        "walk",
+        "--pane",
+        "browser-9",
+        "--goal",
+        "Search flights to London",
+        "--steps",
+        "1",
+        "--json",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    if until.is_some() {
+        words.extend(["--until".to_string(), "Results".to_string()]);
+    }
+    let finds = std::cell::Cell::new(0usize);
+    let command = zerocode_core::computer_use::parse_command(&words).expect("a walk");
+    let sent: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+    let answer = run_goal(
+        &command,
+        60_000,
+        None,
+        Some(&work),
+        RecipeRoads::new(
+            |_: RecipeTool, argv: &[String], _: &[String]| {
+                sent.borrow_mut().push(argv.to_vec());
+                TeamAnswer {
+                    exit_code: 0,
+                    stdout: match argv[0].as_str() {
+                        "marks" => marks.clone(),
+                        "find" => {
+                            let at = finds.replace(finds.get() + 1).min(1);
+                            json!({ "count": until.map_or(0, |counts| counts[at]) }).to_string()
+                        }
+                        _ => "{}".to_string(),
+                    },
+                    stderr: String::new(),
+                }
+            },
+            |_: &[String], _: &[String], _: &TeamAnswer| {},
+            |_| {},
+            |_| {},
+        ),
+        || PaneDesk,
+        None,
+        LiveWriter::at(&format!("{}/v1/messages", value.base()), store(with_key)),
+        Some(LiveJudge::at(
+            &jev.base(),
+            "test-key",
+            Doorway {
+                settings: Some(settings.clone()),
+                workspace: Some(work.clone()),
+                seat: &zerocode_core::jev::BROWSER,
+            },
+        )),
+    );
+    let asked: Vec<Value> = jev
+        .asked()
+        .iter()
+        .filter_map(|request| serde_json::from_str(request.split("\r\n\r\n").nth(1)?).ok())
         .collect();
-        if until.is_some() {
-            words.extend(["--until".to_string(), "Results".to_string()]);
-        }
-        let finds = std::cell::Cell::new(0usize);
-        let command = zerocode_core::computer_use::parse_command(&words).expect("a walk");
-        let sent: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
-        let answer = run_goal(
-            &command,
-            60_000,
-            None,
-            Some(&work),
-            RecipeRoads::new(
-                |_: RecipeTool, argv: &[String], _: &[String]| {
-                    sent.borrow_mut().push(argv.to_vec());
-                    TeamAnswer {
-                        exit_code: 0,
-                        stdout: match argv[0].as_str() {
-                            "marks" => marks.clone(),
-                            "find" => {
-                                let at = finds.replace(finds.get() + 1).min(1);
-                                json!({ "count": until.map_or(0, |counts| counts[at]) }).to_string()
-                            }
-                            _ => "{}".to_string(),
-                        },
-                        stderr: String::new(),
-                    }
-                },
-                |_: &[String], _: &[String], _: &TeamAnswer| {},
-                |_| {},
-                |_| {},
-            ),
-            || PaneDesk,
-            None,
-            LiveWriter::at(&format!("{}/v1/messages", value.base()), store(with_key)),
-            Some(LiveJudge::at(
-                &jev.base(),
-                "test-key",
-                Doorway {
-                    settings: Some(settings.clone()),
-                    workspace: Some(work.clone()),
-                    seat: &zerocode_core::jev::BROWSER,
-                },
-            )),
+    // The seat's one ledger, read where the product reads it: the wire the
+    // judge asked through, from the settings file it was handed.
+    let wire = crate::systemone::Wire::at("http://127.0.0.1:1", "test-key", Some(settings));
+    let ledger = crate::systemone::ledger_of(&wire, &zerocode_core::jev::BROWSER)
+        .map(|ledger| crate::systemone::read_rows(&ledger))
+        .unwrap_or_default();
+    GoalRoad {
+        asked,
+        values: value.asked(),
+        sent: sent.into_inner(),
+        answer,
+        ledger,
+    }
+}
+
+/// The walk verb types through `run_goal` itself (t-6721, the review t-6720
+/// left open): a walk read from the CLI's own words; a page answered by the
+/// browser door's own reader and writer (`look_of` → `marks_json`) with the
+/// field it read; a judge and the value seat each across a real socket; zo's
+/// settings in a folder of the case's own. With a key a person set, the one
+/// request offers the entry and a `type --value` goes down the road; with
+/// none, the request offers no entry and nothing is typed. No keychain, no
+/// screen, no person's settings or ledger. And the switches the walk reads
+/// come from the file its judge asks through — for the window's judge, the
+/// very file `mode_now` reads, through the same reader.
+#[test]
+fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
+    use std::path::Path;
+
+    use zerocode_hookd::TeamAnswer;
+
+    let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // The window's judge reads where `mode_now` reads: the same file (no
+    // file is read here) through the same reader.
+    let window = crate::systemone::Wire::new(&crate::api_routers::HeldKeys::default());
+    assert_eq!(
+        window.config_home().map(Path::to_path_buf),
+        crate::api_routers::zo_settings_path()
+            .and_then(|file| file.parent().map(Path::to_path_buf)),
+        "the window's judge and `mode_now` read one settings file"
+    );
+    let source = |file: &str, from: &str| {
+        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(file))
+            .expect("a source");
+        let at = text
+            .find(from)
+            .unwrap_or_else(|| panic!("{from} in {file}"));
+        let body = &text[at..];
+        body[..body.find("\n}\n").expect("its end")].to_string()
+    };
+    for (file, from) in [
+        ("src/computer_use/errand.rs", "pub fn mode_now("),
+        ("src/systemone.rs", "pub fn settings_root("),
+    ] {
+        assert!(
+            source(file, from).contains("read_zo_settings_root"),
+            "{from} stopped reading through the one reader"
         );
-        let asked: Vec<Value> = jev
-            .asked()
-            .iter()
-            .filter_map(|request| serde_json::from_str(request.split("\r\n\r\n").nth(1)?).ok())
-            .collect();
-        (asked, value.asked(), sent.into_inner(), answer)
+    }
+    assert!(
+        source("src/systemone.rs", "pub fn new(keys").contains("zo_settings_path()"),
+        "the window's wire stopped reading zo's own settings file"
+    );
+    let goal = source("src/agent_tools_runtime.rs", "pub(super) fn run_goal(");
+    assert!(
+        goal.contains("let settings = judge.wire().settings_root();")
+            && goal.contains("seat.mode_in(&settings)")
+            && goal.contains("forks.mode_in(&settings)")
+            && !goal.contains("mode_now("),
+        "the walk reads its switches from its judge's settings file"
+    );
+
+    let walk = |with_key: bool, until: Option<[u64; 2]>| {
+        let road = goal_road(Mode::On, with_key, until);
+        (road.asked, road.values, road.sent, road.answer)
     };
 
     let (asked, values, sent, answer) = walk(true, None);
@@ -3646,4 +3691,94 @@ fn a_walk_verb_types_through_run_goal_only_with_a_key_a_person_set() {
             Some(json!(true))
         );
     }
+}
+
+/// A goal walk left at `auto` presses from its first step (t-13091): down the
+/// window's own road, with no transition in the browser seat's ledger, the
+/// walk presses the control its judgment named, the caller's condition reads
+/// it reached, and the row the ledger keeps carries the walk's mark — the one
+/// thing a screen seat's judge reads. Recording, the same walk pressed
+/// nothing, said `seat_recording` and left a row no mark could reach, which
+/// is how seven days of this machine's Computer Use asked the screen seats
+/// nothing. A person's `shadow` still records, and their `off` asks nothing.
+#[test]
+fn a_goal_walk_left_at_auto_presses_from_its_first_step_and_its_row_is_marked() {
+    use zerocode_core::computer_use::walk_words as words;
+
+    let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let result = |road: &GoalRoad| -> Value {
+        assert_eq!(road.answer.exit_code, 0, "{}", road.answer.stdout);
+        serde_json::from_str::<Value>(&road.answer.stdout).expect("a JSON answer")["result"].clone()
+    };
+    let clicked = |road: &GoalRoad| road.sent.iter().any(|argv| argv[0] == "click");
+    // The condition is absent before the walk and read after its press.
+    let until = Some([0, 1]);
+
+    let auto = goal_road(Mode::Auto, false, until);
+    let said = result(&auto);
+    assert_eq!(
+        said[words::PRESSED],
+        json!(1),
+        "an auto nobody has judged presses the goal walk: {said}"
+    );
+    assert_eq!(said[words::REACHED], json!(true), "{said}");
+    assert!(
+        clicked(&auto),
+        "the press went down the road: {:?}",
+        auto.sent
+    );
+    let pressed: Vec<&Value> = auto
+        .ledger
+        .iter()
+        .filter(|row| row[words::PRESSED] == json!(true))
+        .collect();
+    assert_eq!(
+        pressed.len(),
+        1,
+        "the seat's ledger keeps the press: {:?}",
+        auto.ledger
+    );
+    assert_eq!(
+        pressed[0][AGREED.canonical],
+        json!(true),
+        "the walk's mark reaches the row the seat is judged on: {}",
+        pressed[0]
+    );
+    assert_eq!(pressed[0]["mode"], json!(Mode::Auto.key()));
+
+    let shadow = goal_road(Mode::Shadow, false, until);
+    let said = result(&shadow);
+    assert_eq!(
+        said[words::PRESSED],
+        json!(0),
+        "a person's shadow records: {said}"
+    );
+    assert_eq!(
+        no_press_reason(said[words::ROWS].as_array().expect("its rows")),
+        Some(SEAT_RECORDING)
+    );
+    assert!(!clicked(&shadow), "{:?}", shadow.sent);
+    assert!(
+        shadow
+            .ledger
+            .iter()
+            .all(|row| row.get(AGREED.canonical).is_none()),
+        "{:?}",
+        shadow.ledger
+    );
+
+    let off = goal_road(Mode::Off, false, until);
+    assert_eq!(result(&off)[words::PRESSED], json!(0));
+    assert!(
+        off.asked.is_empty(),
+        "a person's off asks nothing: {:?}",
+        off.asked
+    );
+    assert!(
+        off.ledger.is_empty() && off.sent.is_empty(),
+        "{:?}",
+        off.sent
+    );
 }

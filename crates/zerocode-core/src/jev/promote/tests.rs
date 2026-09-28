@@ -3177,15 +3177,22 @@ fn a_recall_label_whose_key_columns_disagree_with_its_name_grades_nothing() {
 
 /// A seat whose act only fills a choice its caller left open starts acting
 /// under `auto` (t-11989): with no transition of the words it asks now, the
-/// summons' difficulty and the agent choice stand at applying, and every
-/// other seat at recording, as before — read off the rows and off the
+/// summons' difficulty, the agent choice and the three screen seats
+/// (t-13091) stand at applying, and every other seat at recording, as
+/// before — read off the rows and off the
 /// ledger's text alike. A request row says nothing of where a seat stands;
 /// a fall decided on the words it asks now stands it at recording; and a
 /// transition decided on other words is no standing under these, so the
 /// seat stands where it starts.
 #[test]
 fn a_seat_that_fills_what_its_caller_left_open_starts_acting() {
-    let acting_from_the_start = [crate::jev::SUMMON.id, crate::jev::SUMMON_DIFFICULTY.id];
+    let acting_from_the_start = [
+        crate::jev::SUMMON.id,
+        crate::jev::SUMMON_DIFFICULTY.id,
+        crate::jev::BROWSER.id,
+        crate::jev::DESKTOP.id,
+        crate::jev::EMULATOR.id,
+    ];
     for seat in &crate::jev::JEV_USES {
         let starts = if acting_from_the_start.contains(&seat.id) {
             Stand::Applying
