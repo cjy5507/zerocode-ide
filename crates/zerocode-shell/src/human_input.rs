@@ -108,6 +108,36 @@ fn next_generation() -> u64 {
     *next
 }
 
+/// How many prompts each pane's program has reported taking, ever
+/// (t-14037) — the receipt a delivery's Enter waits for. Bumped by the
+/// provider's own word and nothing else, never rolled back, gone with the
+/// pane: a delivery compares it across its Enter, so only its moving says
+/// the Enter was a send.
+fn taken_counts() -> &'static Mutex<HashMap<u32, u64>> {
+    static TAKEN: OnceLock<Mutex<HashMap<u32, u64>>> = OnceLock::new();
+    TAKEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The pane's program reported taking a prompt — its hook's word, or zo's
+/// channel's turn start.
+pub(crate) fn took(term: u32) {
+    let mut taken = taken_counts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let count = taken.entry(term).or_default();
+    *count = count.wrapping_add(1);
+}
+
+/// How many prompts the pane's program has reported taking so far.
+pub(crate) fn taken(term: u32) -> u64 {
+    taken_counts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&term)
+        .copied()
+        .unwrap_or_default()
+}
+
 /// A person's hand reached this pane's line.
 pub(crate) fn typed(term: u32) {
     let generation = next_generation();
@@ -173,6 +203,7 @@ pub(crate) fn entered(term: u32) {
 /// touched the line" are different facts, and a door mid-paste needs the
 /// second one.
 pub(crate) fn submitted(term: u32) {
+    took(term);
     if let Some(held) = hands()
         .typed
         .lock()
@@ -193,6 +224,10 @@ pub(crate) fn submitted(term: u32) {
 pub(crate) fn forget_term(term: u32) {
     hands()
         .typed
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&term);
+    taken_counts()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(&term);

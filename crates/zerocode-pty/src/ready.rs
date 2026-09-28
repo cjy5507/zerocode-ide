@@ -521,6 +521,14 @@ pub struct Line {
     /// Which launch the pane holds right now, as the window fingerprints it
     /// — `None` where the window recorded none.
     pub launch: Option<u64>,
+    /// How many prompts the pane's program has reported taking, ever — its
+    /// own receipt (a `UserPromptSubmit` hook, a channel's turn start) —
+    /// or `None` for a program whose agent row reports none. The one witness
+    /// that an Enter was a send (t-14037): compared across the Enter.
+    pub taken: Option<u64>,
+    /// The pane's program says it is mid-turn. A prompt entered there waits
+    /// in the program's own queue, and its receipt comes when it is dequeued.
+    pub busy: bool,
 }
 
 /// What a delivery refuses to write over.
@@ -691,6 +699,27 @@ pub struct PromptDelivery {
     hand_at_paste: Option<u64>,
     wait: Readiness,
     phase: Phase,
+    /// How long an Enter waits for its pane's receipt before it is pressed
+    /// again, and how long a silent pane is waited for before the words are
+    /// left to a person (t-14037) — [`SUBMIT_ACK_TIMEOUT`] and [`TIMEOUT`]
+    /// everywhere but a test's short clock.
+    receipt: ReceiptClock,
+}
+
+/// The receipt's two clocks (t-14037).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReceiptClock {
+    window: Duration,
+    patience: Duration,
+}
+
+impl Default for ReceiptClock {
+    fn default() -> Self {
+        Self {
+            window: SUBMIT_ACK_TIMEOUT,
+            patience: TIMEOUT,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -713,6 +742,7 @@ impl PromptDelivery {
             hand_at_paste: None,
             wait: Readiness::new(signal, now),
             phase: Phase::Waiting,
+            receipt: ReceiptClock::default(),
         }
     }
 
@@ -753,6 +783,7 @@ impl PromptDelivery {
             hand_at_paste: None,
             wait: Readiness::with_deadlines(signal, now, quiet, timeout),
             phase: Phase::Waiting,
+            receipt: ReceiptClock::default(),
         }
     }
 
@@ -764,6 +795,16 @@ impl PromptDelivery {
     #[must_use]
     pub const fn clearing(mut self, clearing: bool) -> Self {
         self.clearing = clearing;
+        self
+    }
+
+    /// The receipt's clocks on a short scale, for a test that drives a real
+    /// program: `window` before the Enter is pressed again, `patience` of
+    /// silence before the words are left to a person. The product's are
+    /// [`SUBMIT_ACK_TIMEOUT`] and [`TIMEOUT`].
+    #[must_use]
+    pub const fn receipt_clock(mut self, window: Duration, patience: Duration) -> Self {
+        self.receipt = ReceiptClock { window, patience };
         self
     }
 
@@ -1795,6 +1836,7 @@ mod tests {
             hand: Some(1),
             parked: true,
             launch: Some(41),
+            ..Line::default()
         };
         own.poll_line(seen(true, true, 0, false), busy, start);
         assert!(matches!(
@@ -1824,6 +1866,7 @@ mod tests {
             hand: Some(1),
             parked: true,
             launch: Some(9),
+            ..Line::default()
         };
         delivery.poll_line(seen(true, true, 0, false), busy, start);
         assert!(matches!(
@@ -1840,6 +1883,251 @@ mod tests {
                 start + SUBMIT_GAP * 2
             ),
             Step::Submit(b"\r".to_vec())
+        );
+    }
+
+    /* ---- the receipt is the witness of a send (t-14037) ---------------- */
+
+    /// A receipt clock short enough for a test, long enough to read.
+    const WINDOW: Duration = Duration::from_millis(200);
+    const SILENCE: Duration = Duration::from_millis(800);
+
+    /// A pane whose program reports the prompts it takes, `taken` so far.
+    fn reporting(taken: u64) -> Line {
+        Line {
+            taken: Some(taken),
+            ..Line::default()
+        }
+    }
+
+    /// A delivery on somebody else's line, pasted and entered at a pane that
+    /// has reported `taken` prompts: answers the delivery and the instant its
+    /// Enter went.
+    fn entered_at(guard: Guard, line: Line, start: Instant) -> (PromptDelivery, Instant) {
+        let mut delivery =
+            PromptDelivery::new("go on".into(), true, ReadySignal::CursorShown, start)
+                .clearing(false)
+                .guarded(guard)
+                .receipt_clock(WINDOW, SILENCE);
+        delivery.poll_line(seen(true, true, 0, false), line, start);
+        assert!(matches!(
+            delivery.poll_line(seen(true, true, 1, false), line, start + SUBMIT_GAP),
+            Step::Write(_)
+        ));
+        let entered = start + SUBMIT_GAP * 2;
+        assert_eq!(
+            delivery.poll_line(seen(false, true, 1, false), line, entered),
+            Step::Submit(b"\r".to_vec())
+        );
+        (delivery, entered)
+    }
+
+    /// 07:09 on 2026-09-29, two restored workers: the continuation was
+    /// pasted, its Enter written, and the program — still busy booting —
+    /// never took it; the words sat in the composer until a person pressed
+    /// Enter two minutes later. A pane that reports the prompts it takes is
+    /// not done at its Enter: the delivery waits for that report, and when
+    /// the window closes without it, presses Enter again — only Enter: the
+    /// words are on the line, and typing them twice would send them twice.
+    #[test]
+    fn an_enter_the_pane_never_took_is_pressed_again_and_the_words_are_never_retyped() {
+        let start = Instant::now();
+        let (mut delivery, entered) =
+            entered_at(Guard::for_somebody_elses_line(None), reporting(4), start);
+        assert_eq!(
+            delivery.poll_line(
+                seen(false, true, 1, false),
+                reporting(4),
+                entered + WINDOW / 2
+            ),
+            Step::Waiting,
+            "the delivery settled before its pane said it took the words"
+        );
+        let again = entered + WINDOW;
+        assert_eq!(
+            delivery.poll_line(seen(false, true, 1, false), reporting(4), again),
+            Step::Submit(b"\r".to_vec()),
+            "a closed receipt window did not press Enter again"
+        );
+        assert!(delivery.pasted());
+        assert_eq!(
+            delivery.poll_line(
+                seen(false, true, 1, false),
+                reporting(5),
+                again + SUBMIT_GAP
+            ),
+            Step::Done(Outcome::Delivered),
+            "the pane's receipt did not settle the delivery"
+        );
+    }
+
+    /// The receipt inside the window settles it with the one Enter: an Enter
+    /// the pane took is never pressed a second time.
+    #[test]
+    fn a_receipt_inside_the_window_settles_with_one_enter() {
+        let start = Instant::now();
+        let (mut delivery, entered) =
+            entered_at(Guard::for_somebody_elses_line(None), reporting(0), start);
+        assert_eq!(
+            delivery.poll_line(
+                seen(true, true, 1, false),
+                reporting(1),
+                entered + WINDOW / 2
+            ),
+            Step::Done(Outcome::Delivered)
+        );
+        assert_eq!(
+            delivery.poll_line(
+                seen(false, true, 1, false),
+                reporting(1),
+                entered + WINDOW * 4
+            ),
+            Step::Done(Outcome::Delivered)
+        );
+    }
+
+    /// The Enter pressed again is the last one. A program busy booting takes
+    /// what it was given late — measured on Claude Code 2.1.284, a receipt
+    /// up to nine seconds after the first Enter — so the delivery keeps
+    /// waiting for it without pressing anything more, and a pane that never
+    /// answers inside the patience leaves the words on its line for a
+    /// person: pasted, not delivered.
+    #[test]
+    fn the_enter_pressed_again_is_the_last_and_an_unanswered_pane_keeps_the_words() {
+        let start = Instant::now();
+        let (mut late, entered) =
+            entered_at(Guard::for_somebody_elses_line(None), reporting(2), start);
+        let again = entered + WINDOW;
+        assert_eq!(
+            late.poll_line(seen(false, true, 1, false), reporting(2), again),
+            Step::Submit(b"\r".to_vec())
+        );
+        let mut now = again;
+        while now < entered + WINDOW + SILENCE / 2 {
+            now += SUBMIT_GAP;
+            let step = late.poll_line(seen(true, true, 1, false), reporting(2), now);
+            assert_eq!(step, Step::Waiting, "a third write went to the pane");
+        }
+        assert_eq!(
+            late.poll_line(seen(false, true, 1, false), reporting(3), now),
+            Step::Done(Outcome::Delivered),
+            "a late receipt was not waited for"
+        );
+
+        let (mut unanswered, entered) =
+            entered_at(Guard::for_somebody_elses_line(None), reporting(2), start);
+        let mut now = entered;
+        let mut last = Step::Waiting;
+        let mut enters = 0;
+        while now <= entered + WINDOW + SILENCE + SUBMIT_GAP {
+            now += SUBMIT_GAP;
+            last = unanswered.poll_line(seen(false, true, 1, false), reporting(2), now);
+            assert!(
+                !matches!(last, Step::Write(_)),
+                "the words were typed again"
+            );
+            enters += usize::from(matches!(last, Step::Submit(_)));
+            if matches!(last, Step::Done(_)) {
+                break;
+            }
+        }
+        assert_eq!(
+            enters, 1,
+            "an unanswered pane was pressed {enters} more times"
+        );
+        let Step::Done(outcome) = last else {
+            panic!("an unanswered pane was waited on past its patience: {last:?}");
+        };
+        assert!(
+            outcome.pasted() && outcome != Outcome::Delivered,
+            "words no receipt answered were called delivered: {outcome:?}"
+        );
+    }
+
+    /// Nobody's Enter lands on a person's words. A hand on the line since the
+    /// paste, a question parked there, or another program under the pane
+    /// stops the Enter pressed again — whoever the delivery was for, its
+    /// own line or somebody else's.
+    #[test]
+    fn a_hand_a_question_or_a_relaunch_stops_the_enter_pressed_again() {
+        for guard in [
+            Guard::for_somebody_elses_line(Some(7)),
+            Guard::for_its_own_line(Some(7)),
+        ] {
+            for (name, line) in [
+                (
+                    "a hand",
+                    Line {
+                        hand: Some(1),
+                        draft: true,
+                        ..reporting(3)
+                    },
+                ),
+                (
+                    "a question",
+                    Line {
+                        parked: true,
+                        ..reporting(3)
+                    },
+                ),
+                (
+                    "a relaunch",
+                    Line {
+                        launch: Some(8),
+                        ..reporting(3)
+                    },
+                ),
+            ] {
+                let start = Instant::now();
+                let before = Line {
+                    launch: Some(7),
+                    ..reporting(3)
+                };
+                let (mut delivery, entered) = entered_at(guard, before, start);
+                let line = Line {
+                    launch: line.launch.or(Some(7)),
+                    ..line
+                };
+                let step = delivery.poll_line(seen(false, true, 1, false), line, entered + WINDOW);
+                assert!(
+                    matches!(step, Step::Done(outcome) if outcome.pasted() && outcome != Outcome::Delivered),
+                    "{name} ({guard:?}): {step:?}"
+                );
+            }
+        }
+    }
+
+    /// A program mid-turn queues what it is given and reports it when it
+    /// takes it from the queue, a turn later: its silence is not a lost
+    /// Enter, and nothing is pressed into it.
+    #[test]
+    fn a_busy_pane_queues_the_words_and_is_not_pressed_again() {
+        let start = Instant::now();
+        let busy = Line {
+            busy: true,
+            ..reporting(9)
+        };
+        let (mut delivery, entered) = entered_at(Guard::for_somebody_elses_line(None), busy, start);
+        assert_eq!(
+            delivery.poll_line(seen(false, true, 1, false), busy, entered + WINDOW),
+            Step::Done(Outcome::Delivered)
+        );
+    }
+
+    /// A program whose row reports nothing keeps the one Enter it always had:
+    /// there is no receipt to wait for.
+    #[test]
+    fn a_pane_that_reports_nothing_is_done_at_its_enter() {
+        let start = Instant::now();
+        let (mut delivery, entered) =
+            entered_at(Guard::for_somebody_elses_line(None), Line::default(), start);
+        assert_eq!(
+            delivery.poll_line(
+                seen(false, true, 1, false),
+                Line::default(),
+                entered + SUBMIT_GAP
+            ),
+            Step::Done(Outcome::Delivered)
         );
     }
 
