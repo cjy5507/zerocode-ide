@@ -83,13 +83,41 @@ def covered(target, rect):
 
 
 def grade(record, scene, cover):
-    """What a run earned on `scene` — as a bench that reads only the hand's
-    own hits would grade it (the red before the grade: t-12979)."""
-    due = reflex.due(record, tally.table(), reflex.limits())["run"]
-    hit = [event for event in reflex.hits(record) if event["judged"]["hit"] in due]
-    return {"kind": scene["kind"], "under": len(due), "hits": len(hit), "pressesAfter": len(reflex.presses(record)),
-            "wrong": dict(reflex.wrong(record)), "recoverMs": None, "asked": cover.get("asked", 0),
-            "score": len(hit) / len(due) if due else None}
+    """What a run earned on `scene`: the round's targets that showed under the
+    cover after it came, how many of them the fixture says were hit, the wrong
+    inputs (the fixture's, and every press the cover itself took), how long
+    from the cover's arrival to the first hit under it, how often the person
+    was asked (`cover`, the bench's account of the cover it put up: when it
+    stood and what it heard), and the score."""
+    start, deadline = reflex.acting(record)
+    came = max(reflex.at_ns(record, scene["appearMs"]), start)
+    under = [target for target in record["schedule"]["targets"]
+             if covered(target, scene["rect"])
+             and reflex.at_ns(record, target["appearMs"]) >= came
+             and reflex.at_ns(record, target["expireMs"]) <= deadline]
+    names = {target["id"] for target in under}
+    hit_at = sorted(event["evNs"] for event in reflex.hits(record) if event["judged"]["hit"] in names)
+    after = [event for event in reflex.presses(record) if event["evNs"] >= came]
+    mistakes = dict(reflex.wrong(record))
+    if cover.get("downs"):
+        mistakes["on_the_cover"] = cover["downs"]
+    asked = cover.get("asked", 0)
+    if mistakes:
+        score = 0.0
+    elif scene["kind"] == MODAL:
+        score = 1.0 if not after and asked > 0 else 0.0
+    else:
+        score = len(hit_at) / len(under) if under else None
+    return {
+        "kind": scene["kind"],
+        "under": len(under),
+        "hits": len(hit_at),
+        "pressesAfter": len(after),
+        "wrong": mistakes,
+        "recoverMs": (hit_at[0] - came) / 1_000_000 if hit_at else None,
+        "asked": asked,
+        "score": score,
+    }
 
 
 def seeds():
