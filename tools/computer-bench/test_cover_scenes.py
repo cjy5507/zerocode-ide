@@ -142,5 +142,69 @@ class PutUpTest(unittest.TestCase):
             self.assertEqual(cover.account(other, run), {"scene": other, "shownNs": 9, "downs": 2, "asked": 1})
 
 
+class PressGradeTest(unittest.TestCase):
+    """Presses by number on a covered fixture (fixture_apm.py covered): the
+    grade reads the oracle, the cover's count and the press's own answer."""
+
+    @staticmethod
+    def press(label, under, hit, code=None, uncovered=None, wall=40.0, errors=0):
+        return {"label": label, "under": under, "hit": hit, "errorsAfter": errors, "code": code,
+                "uncovered": uncovered, "wallMs": wall}
+
+    def test_presses_that_only_stopped_or_did_nothing_score_zero(self):
+        scene = {"kind": "fixture_panel"}
+        stopped = [self.press("Amber", True, False, code="element_not_found") for _ in range(4)]
+        self.assertEqual(cover.press_grade(stopped, scene, {"downs": 0})["score"], 0.0)
+        idle = [self.press("Amber", True, False) for _ in range(4)]
+        self.assertEqual(cover.press_grade(idle, scene, {})["score"], 0.0)
+
+    def test_uncovered_presses_score_their_hits_and_time_the_uncovering(self):
+        moves = {"moves": ["raise_target", "move_target"], "byPerson": False}
+        presses = [self.press("Amber", False, True, wall=30.0),
+                   self.press("Blue", True, True, uncovered=moves, wall=900.0),
+                   self.press("Amber", True, True, wall=35.0),
+                   self.press("Blue", True, False, code="element_not_found")]
+        graded = cover.press_grade(presses, {"kind": "other_window"}, {"downs": 0})
+        self.assertEqual((graded["under"], graded["hits"]), (3, 2))
+        self.assertAlmostEqual(graded["score"], 2 / 3)
+        self.assertEqual(graded["recoverMs"]["p50"], 900.0)
+
+    def test_a_press_the_cover_took_or_a_wrong_button_scores_zero(self):
+        presses = [self.press("Amber", True, True)]
+        self.assertEqual(cover.press_grade(presses, {"kind": "other_window"}, {"downs": 1})["score"], 0.0)
+        wrong = [self.press("Amber", True, False, errors=1)]
+        self.assertEqual(cover.press_grade(wrong, {"kind": "other_window"}, {})["wrong"], {"oracle": 1})
+
+    def test_under_a_dialog_the_right_press_is_none_and_one_line_to_the_person(self):
+        asked = [self.press("Amber", True, False, code=cover.COVERED)]
+        self.assertEqual(cover.press_grade(asked, {"kind": cover.MODAL}, {})["score"], 1.0)
+        silent = [self.press("Amber", True, False, code="element_not_found")]
+        self.assertEqual(cover.press_grade(silent, {"kind": cover.MODAL}, {})["score"], 0.0)
+        through = [self.press("Amber", True, True)]
+        self.assertEqual(cover.press_grade(through, {"kind": cover.MODAL}, {})["score"], 0.0)
+
+    def test_a_scene_over_the_buttons_is_drawn_in_their_box(self):
+        box = {"x": 50, "y": 150, "width": 435, "height": 72}
+        for seed in range(50):
+            rect = cover.draw(seed, VALUES, box)["rect"]
+            self.assertLess(rect["x"], box["x"] + box["width"])
+            self.assertLess(rect["y"], box["y"] + box["height"])
+            self.assertGreater(rect["x"] + rect["width"], box["x"])
+            self.assertGreater(rect["y"] + rect["height"], box["y"])
+
+    def test_the_fixtures_buttons_are_read_in_its_windows_points(self):
+        import fixture_apm
+        window = {"id": 3, "x": 160, "y": 200, "width": 540, "height": 280}
+        found = {"matches": [
+            {"label": "Amber", "frame": {"x": 210, "y": 353, "width": 190, "height": 72}},
+            {"label": "Blue", "frame": {"x": 455, "y": 353, "width": 190, "height": 72}},
+            {"label": "Note", "frame": {"x": 0, "y": 0, "width": 1, "height": 1}},
+        ]}
+        self.assertEqual(fixture_apm.button_frames(found, window), {
+            "Amber": {"x": 50, "y": 153, "width": 190, "height": 72},
+            "Blue": {"x": 295, "y": 153, "width": 190, "height": 72},
+        })
+
+
 if __name__ == "__main__":
     unittest.main()

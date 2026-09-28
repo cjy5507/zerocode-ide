@@ -56,20 +56,22 @@ OWN_SHEET = "fixture_panel"
 # hand for the person carries.
 LEDGER = "cover.jsonl"
 HELD = "held"
+# The code a press answers when the hand left the place to the person.
+COVERED = "covered"
 # The kinds a hand may clear by moves of the fixture's own window, and the
 # one it may not.
 CLEARABLE = ("fixture_panel", "other_window")
 MODAL = "modal"
 
 
-def draw(seed, values):
+def draw(seed, values, box=None):
     """The scene `seed` draws from the table alone: its kind, whether it hides
-    part of the field or all of it, where (in the fixture window's content
-    points, the field's own origin), and when it comes, in the round's
-    milliseconds (0: it stands from the goal)."""
+    part of `box` — the reflex fixture's field unless another is named, in its
+    window's content points — or all of it, where, and when it comes, in the
+    round's milliseconds (0: it stands from the goal)."""
     table = values["cover_scene"]
     rng = random.Random(seed)
-    box = reflex.field(values)
+    box = box or reflex.field(values)
     kind = rng.choice(table["kinds"])
     full = rng.random() < table["full_share"]
     if full:
@@ -155,11 +157,12 @@ def on_screen(scene, ready):
             "width": rect["width"], "height": rect["height"]}
 
 
-def put_up(scene, session_folder, run, ready, t0_ns):
+def put_up(scene, session_folder, run, ready, t0_ns, own_sheet_from_fixture=True):
     """Start the other app whose window or dialog the scene puts over the
     fixture, due at its moment of the round; None when the fixture shows the
-    cover itself."""
-    if scene is None or scene["kind"] == OWN_SHEET:
+    cover itself — its own second sheet, unless the fixture cannot
+    (`own_sheet_from_fixture` false: the other app floats a panel instead)."""
+    if scene is None or (scene["kind"] == OWN_SHEET and own_sheet_from_fixture):
         return None
     session = json.loads((session_folder / FOLDER / "session.json").read_text())
     place = on_screen(scene, ready)
@@ -198,10 +201,11 @@ def held_for_the_person(run):
     return held
 
 
-def account(scene, run):
+def account(scene, run, own_sheet_from_fixture=True):
     """cover.json: the scene, when its cover showed, the presses it took, and
     how often the hand held for the person — read from whoever showed it."""
-    shown_by = run / FOLDER / "fixture.json" if scene["kind"] != OWN_SHEET else None
+    by_fixture = scene["kind"] == OWN_SHEET and own_sheet_from_fixture
+    shown_by = None if by_fixture else run / FOLDER / "fixture.json"
     if shown_by is not None:
         state = json.loads(shown_by.read_text()) if shown_by.exists() else {}
     else:
@@ -209,6 +213,41 @@ def account(scene, run):
         state = (json.loads(fixture.read_text()) if fixture.exists() else {}).get("cover") or {}
     return {"scene": scene, "shownNs": state.get("shownNs"), "downs": state.get("downs", 0),
             "asked": held_for_the_person(run)}
+
+
+def press_grade(presses, scene, cover):
+    """What a run of presses by number earned on `scene` (fixture_apm.py
+    covered): the presses whose button's centre the cover stood over, how
+    many of those the fixture's oracle took as the right button, the wrong
+    inputs (the oracle's errors, and every press the cover itself took), the
+    time a press that had to uncover its button took (median and p95, in
+    milliseconds), how often the press was refused `covered` for the person,
+    and the score by the same rules as a reflex round's."""
+    under = [press for press in presses if press["under"]]
+    hits = sum(1 for press in under if press["hit"])
+    mistakes = {}
+    errors = max([press["errorsAfter"] for press in presses] or [0])
+    if errors:
+        mistakes["oracle"] = errors
+    if cover.get("downs"):
+        mistakes["on_the_cover"] = cover["downs"]
+    asked = sum(1 for press in presses if press.get("code") == COVERED)
+    took = sorted(press["wallMs"] for press in under if press.get("uncovered"))
+    if mistakes:
+        score = 0.0
+    elif scene["kind"] == MODAL:
+        score = 1.0 if under and hits == 0 and asked > 0 else 0.0
+    else:
+        score = hits / len(under) if under else None
+    return {
+        "kind": scene["kind"],
+        "under": len(under),
+        "hits": hits,
+        "wrong": mistakes,
+        "recoverMs": {key: reflex.spread(took)[key] for key in ("p50", "p95")},
+        "asked": asked,
+        "score": score,
+    }
 
 
 def seeds():
