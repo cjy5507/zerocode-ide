@@ -5,7 +5,7 @@
 //! sends owned snapshots to the UI task. The renderer therefore only reads
 //! memory: no frame, width calculation, or paint call ever touches the disk.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -105,7 +105,13 @@ pub(crate) fn snapshot_for_session(
     registry: &AgentRegistry,
     parent_session_id: &str,
 ) -> Vec<SubagentProgress> {
-    scan_registry(registry, parent_session_id, epoch_seconds_now(), None)
+    scan_registry(
+        registry,
+        parent_session_id,
+        epoch_seconds_now(),
+        None,
+        &mut ManifestCache::default(),
+    )
 }
 
 /// This session's live helpers, in the shape the window's roster reads.
@@ -178,16 +184,20 @@ impl SubagentProgressWatcher {
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(POLL_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let cache = Arc::new(Mutex::new(ManifestCache::default()));
             loop {
                 interval.tick().await;
                 let registry = Arc::clone(&registry);
                 let session_id = parent_session_id.clone();
+                let cache = Arc::clone(&cache);
                 let scan = tokio::task::spawn_blocking(move || {
+                    let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let agents = scan_registry(
                         &registry,
                         &session_id,
                         epoch_seconds_now(),
                         started_at_floor,
+                        &mut cache,
                     );
                     // Noted on the blocking pool: a roster change may rewrite
                     // the registry record, and that is a disk write nobody
@@ -310,6 +320,88 @@ struct AgentManifest {
     transcript: Option<PathBuf>,
 }
 
+/// What a watcher last read of each manifest file in its stores.
+///
+/// A project's store keeps every helper it ever ran — 432 manifests in the
+/// person's zerocode project on 2026-09-28, 2,875 in another — and the
+/// watcher asks every second, twice during a turn (the turn's own watcher and
+/// the IDE relay's). Reading and parsing all of them each time cost 2.6% CPU
+/// at idle with 432 in the store; a manifest whose file has not changed says
+/// what it said last time.
+#[derive(Default)]
+pub(crate) struct ManifestCache {
+    files: HashMap<PathBuf, CachedManifest>,
+    /// Manifest files read since the last [`Self::take_reads`].
+    reads: usize,
+}
+
+/// One manifest file as last read: what identifies its bytes, and what they
+/// said (`None` — not a manifest this watcher can use).
+struct CachedManifest {
+    stamp: FileStamp,
+    manifest: Option<Arc<AgentManifest>>,
+}
+
+/// Length, time and (on unix) inode: a rewrite through a temporary file and
+/// a rename — how the tools crate writes every manifest — is a new inode even
+/// when it lands within the clock's resolution at the same length.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    inode: u64,
+}
+
+impl FileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(metadata);
+        #[cfg(not(unix))]
+        let inode = 0;
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            inode,
+        }
+    }
+}
+
+impl ManifestCache {
+    /// The manifest at `path`, read again only when its file changed.
+    fn manifest(&mut self, path: &Path, metadata: &std::fs::Metadata) -> Option<Arc<AgentManifest>> {
+        let stamp = FileStamp::of(metadata);
+        self.reads += 1;
+        let manifest = read_manifest(path, metadata).map(Arc::new);
+        self.files.insert(
+            path.to_path_buf(),
+            CachedManifest {
+                stamp,
+                manifest: manifest.clone(),
+            },
+        );
+        manifest
+    }
+
+    /// Forget files the last scan did not see — a store only grows between
+    /// sweeps, and a swept manifest must not be remembered forever.
+    fn keep_only(&mut self, seen: &HashSet<PathBuf>) {
+        self.files.retain(|path, _| seen.contains(path));
+    }
+
+    #[cfg(test)]
+    fn take_reads(&mut self) -> usize {
+        std::mem::take(&mut self.reads)
+    }
+}
+
+fn read_manifest(path: &Path, metadata: &std::fs::Metadata) -> Option<AgentManifest> {
+    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
+        return None;
+    }
+    let contents = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<AgentManifest>(&contents).ok()
+}
+
 /// Every running child of `parent_session_id` across the registry's stores
 /// (root first, then adopted mirrors; a duplicated id resolved to its canonical
 /// copy by the registry), sorted by `(started_at, agent_id)` — a stable order
@@ -319,19 +411,17 @@ fn scan_registry(
     parent_session_id: &str,
     now_epoch_seconds: u64,
     started_at_floor: Option<u64>,
+    cache: &mut ManifestCache,
 ) -> Vec<SubagentProgress> {
     let mut progress = Vec::new();
+    let mut seen = HashSet::new();
     for path in registry.manifest_paths() {
         let Ok(metadata) = std::fs::metadata(&path) else {
             continue;
         };
-        if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
-            continue;
-        }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(manifest) = serde_json::from_str::<AgentManifest>(&contents) else {
+        let manifest = cache.manifest(&path, &metadata);
+        seen.insert(path.clone());
+        let Some(manifest) = manifest else {
             continue;
         };
         if manifest.status != "running"
@@ -398,23 +488,24 @@ fn scan_registry(
             .unwrap_or_else(|| "working".to_string());
         let label = manifest
             .label
+            .clone()
             .filter(|label| !label.trim().is_empty())
-            .unwrap_or(manifest.name);
+            .unwrap_or_else(|| manifest.name.clone());
         progress.push(SubagentProgress {
-            agent_id: manifest.agent_id,
-            tool_call_id: manifest.tool_call_id,
+            agent_id: manifest.agent_id.clone(),
+            tool_call_id: manifest.tool_call_id.clone(),
             label,
-            model: manifest.resolved_model.or(manifest.model),
+            model: manifest.resolved_model.clone().or_else(|| manifest.model.clone()),
             activity,
-            recent_tools: manifest.recent_tools,
+            recent_tools: manifest.recent_tools.clone(),
             tool_calls: tally.as_ref().map_or(manifest.tool_calls, |tally| tally.tool_calls),
-            output_tail: manifest.output_tail,
+            output_tail: manifest.output_tail.clone(),
             started_epoch: started_at,
             elapsed: Duration::from_secs(now_epoch_seconds.saturating_sub(started_at)),
             no_new_output_for: (quiet >= NO_NEW_OUTPUT_AFTER).then_some(quiet),
             transcript_path,
-            pane: manifest.pane,
-            last_receipt: manifest.last_receipt,
+            pane: manifest.pane.clone(),
+            last_receipt: manifest.last_receipt.clone(),
             in_tool: if tally.is_some() {
                 running_tool.is_some()
             } else {
@@ -422,6 +513,7 @@ fn scan_registry(
             },
         });
     }
+    cache.keep_only(&seen);
     progress.sort_by(|left, right| {
         left.started_epoch
             .cmp(&right.started_epoch)
@@ -439,7 +531,13 @@ fn scan_store(
     started_at_floor: Option<u64>,
 ) -> Vec<SubagentProgress> {
     let registry = AgentRegistry::at_root_for_tests(parent_session_id, store);
-    scan_registry(&registry, parent_session_id, now_epoch_seconds, started_at_floor)
+    scan_registry(
+        &registry,
+        parent_session_id,
+        now_epoch_seconds,
+        started_at_floor,
+        &mut ManifestCache::default(),
+    )
 }
 
 /// Where a pane child said its session transcript is
@@ -611,7 +709,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{epoch_seconds_now, scan_store, NO_NEW_OUTPUT_AFTER};
+    use super::{epoch_seconds_now, scan_registry, scan_store, ManifestCache, NO_NEW_OUTPUT_AFTER};
 
     /// One line of a zo session transcript, as the session writes it.
     fn transcript_line(role: &str, blocks: &serde_json::Value) -> String {
@@ -1031,5 +1129,51 @@ mod tests {
             rows.iter().map(|row| row.agent_id.as_str()).collect::<Vec<_>>(),
             ["this-turn"]
         );
+    }
+
+    /// A store that did not change is not read again: the watcher stats each
+    /// manifest and reuses what its bytes said. A rewrite — the tools crate's
+    /// temporary file and rename — is read once, and a swept file is dropped.
+    #[test]
+    fn an_unchanged_store_is_not_read_again() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let write = |id: &str, session: &str, status: &str| {
+            let staged = temp.path().join(format!(".{id}.json.tmp"));
+            fs::write(
+                &staged,
+                serde_json::to_vec(&json!({
+                    "agentId": id,
+                    "parentSessionId": session,
+                    "name": id,
+                    "status": status,
+                    "startedAt": "100",
+                }))
+                .expect("manifest json"),
+            )
+            .expect("write manifest");
+            fs::rename(staged, temp.path().join(format!("{id}.json"))).expect("publish manifest");
+        };
+        for index in 0..5 {
+            write(&format!("finished-{index}"), "session-other", "completed");
+        }
+        write("live", "session-a", "running");
+        let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
+        let mut cache = ManifestCache::default();
+
+        let first = scan_registry(&registry, "session-a", 200, None, &mut cache);
+        assert_eq!(first.len(), 1);
+        assert_eq!(cache.take_reads(), 6);
+
+        let second = scan_registry(&registry, "session-a", 200, None, &mut cache);
+        assert_eq!(second, first);
+        assert_eq!(cache.take_reads(), 0, "an unchanged store was read again");
+
+        write("live", "session-a", "completed");
+        assert!(scan_registry(&registry, "session-a", 200, None, &mut cache).is_empty());
+        assert_eq!(cache.take_reads(), 1, "only the rewritten manifest is read");
+
+        fs::remove_file(temp.path().join("finished-0.json")).expect("sweep");
+        let _ = scan_registry(&registry, "session-a", 200, None, &mut cache);
+        assert_eq!(cache.files.len(), 5, "a swept manifest stays remembered");
     }
 }

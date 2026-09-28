@@ -6297,6 +6297,27 @@ mod tests {
     };
     use serde_json::{Value, json};
 
+    /// 턴 내내 프레임마다 도는 팝업 판정은 컴포저가 `/fast` 를 띄울 수 있을
+    /// 때만 모델 카탈로그를 묻는다. 한 번 묻는 일이 설정과 카탈로그 파일을
+    /// 디스크에서 읽는 일이라, 스피너 프레임마다 메인 스레드가 파일을 열고
+    /// 있었다(2026-09-28 `sample`: 대기 중 메인 스레드 `__open` 의 13/20).
+    #[test]
+    fn a_frame_asks_the_model_catalog_only_while_fast_could_be_listed() {
+        let asked = crate::runtime_support::catalog_publishes;
+        let mut ui = test_ui();
+        let before = asked();
+        for text in ["", "hello", "/mo", "/fast now"] {
+            ui.composer.clear();
+            ui.composer.insert_str(text);
+            let _ = ui.popup();
+        }
+        assert_eq!(asked(), before, "a frame read the model catalog");
+        ui.composer.clear();
+        ui.composer.insert_str("/f");
+        let _ = ui.popup();
+        assert!(asked() > before, "a composer that could list /fast must ask whether it may");
+    }
+
     fn running_helper(
         id: &str,
         label: &str,
