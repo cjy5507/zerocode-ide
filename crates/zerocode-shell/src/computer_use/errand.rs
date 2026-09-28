@@ -115,9 +115,11 @@ pub enum Surface {
 /// What the person set for this surface's seat. The ladder is the routing
 /// card's, because it is the same question: does anything go to the vendor,
 /// and may it change what the product does. `off` asks nothing and is what an
-/// unknown word reads as; `shadow` and `auto` ask and record while the walk
-/// goes exactly as it would have — nothing promotes a press — and `on`
-/// presses what it chose.
+/// unknown word reads as; `shadow` asks and records while the walk goes
+/// exactly as it would have, `on` presses what it chose, and `auto` presses
+/// where its seat stands acting — a goal walk from the first step, until the
+/// seat's own marks take it back, and a stopped walk's clearing only once the
+/// judge raised the seat (t-13091).
 pub type Mode = JevMode;
 
 /// What a judgment answered.
@@ -1025,9 +1027,11 @@ fn note(said: &mut Value, key: &str, value: Value) {
 /// `off_and_shadow_change_nothing_about_the_walk` holds it.
 ///
 /// `acting` is whether this seat presses at all, and it is the caller's to
-/// answer rather than the mode's: under `auto` a seat presses once its own
-/// ledger has promoted it (`crate::systemone::applies`), and the ledger is a
-/// file this module has no business reading in the middle of a walk. `mode`
+/// answer rather than the mode's: under `auto` a seat presses where its own
+/// ledger stands it (`crate::systemone::applies` for a goal walk,
+/// `crate::systemone::applies_once_risen` for a stopped walk's clearing,
+/// t-13091), and the ledger is a file this module has no business reading in
+/// the middle of a walk. `mode`
 /// still says whether anything is ASKED, and still names itself on every row.
 ///
 /// The window's two callers ask through [`run_with`], with the switches the

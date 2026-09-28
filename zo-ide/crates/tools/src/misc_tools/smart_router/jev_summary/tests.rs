@@ -203,9 +203,12 @@ fn the_machines_place_is_asked_before_the_projects() {
 
 /// The rows a walk writes under `~/.zo/jev` are read by the same counter the
 /// orchestration seats' are, and they carry the seat all the way to a rise
-/// (§4, decision 3 and 5).
+/// (§4, decision 3 and 5) — here from a fall, since a screen seat left at
+/// `auto` starts pressing (t-13091) and a fall is its one road to recording.
 #[test]
 fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
+    use zerocode_core::jev::promote::FELL;
+    use zerocode_core::jev::summary::TRANSITION;
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().join("jev")];
     let seat = &zerocode_core::jev::BROWSER;
@@ -213,8 +216,9 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
     // The oldest few presses left the walk stuck: a label that never says no
     // is not evidence (t-6342).
     let misses = seat.negatives_wanted.expect("a rise line");
-    let walk: Vec<Value> = (0..wanted)
-        .map(|n| {
+    let fell = json!({"at": 1, (TRANSITION.canonical): FELL, "rubricVersions": [seat.rubric_version]});
+    let walk: Vec<Value> = std::iter::once(fell)
+        .chain((0..wanted).map(|n| {
             asked_by(seat, json!({
                 "at": 10 + i64::try_from(n).unwrap_or_default(),
                 "outcome": "answered",
@@ -223,7 +227,7 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
                 "pressed": true,
                 "agreed": n >= misses,
             }))
-        })
+        }))
         .collect();
     write(&roots[0], seat.ledger, &walk);
     let settings = json!({

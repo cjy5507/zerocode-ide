@@ -3217,8 +3217,11 @@ pub(super) fn run_recipe(
                 // Whether the seat presses: a person's `on`, or an `auto`
                 // its own ledger has promoted — read off the wire the
                 // questions go down, so the standing and the answers come
-                // from one settings file and one ledger root.
-                let acting = crate::systemone::applies(judge.wire(), seat);
+                // from one settings file and one ledger root. Only a rise
+                // the judge recorded: the goal walk starts pressing under
+                // `auto`, a press in the middle of a written-down walk does
+                // not (t-13091).
+                let acting = crate::systemone::applies_once_risen(judge.wire(), seat);
                 let options = computer_use::errand::Options {
                     overlap: false,
                     rescue: rescue.is_some(),
@@ -3431,6 +3434,8 @@ pub(super) fn run_goal(
             (words::ROWS): [],
         }));
     }
+    // A person's `on`, or an `auto` its own marks have not taken back: the
+    // screen seats start pressing (t-13091), and a person's `shadow` records.
     let acting = crate::systemone::applies(judge.wire(), seat);
     // The branching seat's standing (t-6044), read off the same wire and the
     // same settings file as the screen seat's: whether a phone step whose

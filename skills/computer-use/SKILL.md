@@ -52,7 +52,8 @@ presses, an `ok` or the judgment's own `done` alone:
 - `needs_verification`: the judgment said it is done, or the `until` text was
   already there before the walk. Check once, then report.
 - `needs_fallback`: the walk could not go on — the seat is off or only
-  recording, no road could write a field's value (the Claude and Codex logins
+  recording (the person chose Record only, or Auto took the seat back on its
+  own misses; left at Auto, a walk presses from its first step), no road could write a field's value (the Claude and Codex logins
   the window runs you with, or a key the person chose — `reason` names each
   road's own reason, such as `claude_login=quota_wall`), there is no consent,
   the judgment was unsure or unanswered, or nothing on the screen fit.

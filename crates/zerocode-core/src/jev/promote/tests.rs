@@ -3312,3 +3312,34 @@ fn a_seat_that_starts_acting_is_taken_back_on_its_marks_alone() {
         Verdict::Fall(Line::Agreement { .. })
     ));
 }
+
+/// Whether the judge raised a seat itself (t-13091): a screen seat starts
+/// acting, and `risen` still reads it recording until a rise of the words it
+/// asks now — the reading a stopped walk's clearing presses on. A fall, a
+/// rise of other words and a newer rubric's request all read as not risen;
+/// for a seat that starts recording, `risen` is its standing.
+#[test]
+fn risen_reads_only_a_rise_the_judge_recorded_under_the_words_asked_now() {
+    use serde_json::json;
+    let seat = &crate::jev::BROWSER;
+    assert_eq!(seat.auto_starts, Stand::Applying);
+    assert_eq!(standing(seat, &[]), Stand::Applying);
+    assert!(!risen(seat, &[]), "where the seat starts is not a rise");
+    assert!(risen(seat, &[rose(seat)]));
+    assert!(!risen(seat, &[rose(seat), recording(seat)[0].clone()]));
+    let other_words =
+        json!({(TRANSITION.canonical): ROSE, "rubricVersions": [seat.rubric_version + 1]});
+    assert!(!risen(seat, &[other_words]), "a rise of other words");
+    let newer = json!({"at": 2, "outcome": "answered",
+        "rubricVersion": seat.rubric_version + 1});
+    assert!(!risen(seat, &[rose(seat), newer]), "behind a newer series");
+
+    let recording_seat = &crate::jev::ROUTING;
+    assert_eq!(recording_seat.auto_starts, Stand::Recording);
+    for rows in [Vec::new(), vec![rose(recording_seat)]] {
+        assert_eq!(
+            risen(recording_seat, &rows),
+            standing(recording_seat, &rows) == Stand::Applying
+        );
+    }
+}

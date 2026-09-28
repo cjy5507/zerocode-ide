@@ -534,9 +534,15 @@ pub struct JevUse {
     /// ([`crate::summon_difficulty::outcomes::evidence`]) — earned nothing
     /// to rise on: every row of this machine's difficulty ledger said
     /// `applied: false` and its judge `too_few_compared` 0 of 30
-    /// (2026-09-28). Such a use is still judged, and falls on a line its
-    /// own marks break — answers carried out that did worse than the pins,
-    /// or that coordinators' own choices disagree with — though not on the
+    /// (2026-09-28). The three screen seats are such uses too (t-13091): a
+    /// goal walk is asked only when a caller handed over the goal and not
+    /// the presses (the placeholder is `needs_fallback`), and its marks come
+    /// only from presses the walk went on to confirm or not — seven days of
+    /// this machine's Computer Use, 26,124 steps, asked them nothing. Such a
+    /// use is still judged, and falls on a line its own marks break —
+    /// answers carried out that did worse than the pins, that coordinators'
+    /// own choices disagree with, or presses the walk was still stuck
+    /// after — though not on the
     /// wire's health, since for it a fall is for good and a late or missing
     /// answer already falls back request by request ([`promote::judge`]); a
     /// contract holds it to a row the judge reads, because a use that acts
@@ -1332,6 +1338,16 @@ const DESKTOP_SENDS: [Sent; 6] = [
 /// A person's `off`, `shadow` and `on` still outrank the judge in both
 /// directions; `auto` is the mode that says "decide on the evidence", and it
 /// now does.
+///
+/// It decides from pressing (t-13091, [`JevUse::auto_starts`]). Recording,
+/// a goal walk asked once, pressed nothing, and so was never marked, and a
+/// seat that is never marked never rises: in seven days of this machine's
+/// Computer Use the three screen seats were asked nothing. What still stands
+/// between a judgment and a press is every door that stood before — the
+/// press floor and its destructive rung, the money bar, the injected and
+/// walled screens, the pin checked again at the press. A recorded walk that
+/// stopped is cleared under `auto` only on a rise
+/// ([`promote::risen`]), as it was.
 pub const BROWSER: JevUse = JevUse {
     id: "browser",
     setting: "browserAction",
@@ -1359,7 +1375,9 @@ pub const BROWSER: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
-    auto_starts: promote::Stand::Recording,
+    // A goal walk fills what its caller left open and is marked only on
+    // its presses (t-13091).
+    auto_starts: promote::Stand::Applying,
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -1379,9 +1397,9 @@ pub const BROWSER: JevUse = JevUse {
 ///    open question this seat exists to answer, and a ledger that mixes them
 ///    cannot answer it for either.
 ///
-/// `auto` rises here on this seat's own evidence, as [`BROWSER`]'s does, and
-/// on nothing the other surface earned — which is reason 3 above holding at
-/// the moment it matters.
+/// `auto` presses here from a goal walk's first step and falls on this
+/// seat's own marks, as [`BROWSER`]'s does, and on nothing the other surface
+/// earned — which is reason 3 above holding at the moment it matters.
 pub const DESKTOP: JevUse = JevUse {
     id: "desktop",
     setting: "desktopAction",
@@ -1409,13 +1427,15 @@ pub const DESKTOP: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
-    auto_starts: promote::Stand::Recording,
+    // A goal walk fills what its caller left open and is marked only on
+    // its presses (t-13091).
+    auto_starts: promote::Stand::Applying,
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
-/// browser/desktop settings never enable it, and its `auto` rises — as
-/// [`BROWSER`]'s and [`DESKTOP`]'s do — only on the presses this surface's own
-/// walks confirmed.
+/// browser/desktop settings never enable it, and its `auto` — pressing from a
+/// goal walk's first step, as [`BROWSER`]'s and [`DESKTOP`]'s do — falls only
+/// on the presses this surface's own walks marked.
 pub const EMULATOR: JevUse = JevUse {
     id: "emulator",
     setting: "emulatorAction",
@@ -1456,7 +1476,9 @@ pub const EMULATOR: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
-    auto_starts: promote::Stand::Recording,
+    // A goal walk fills what its caller left open and is marked only on
+    // its presses (t-13091).
+    auto_starts: promote::Stand::Applying,
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured

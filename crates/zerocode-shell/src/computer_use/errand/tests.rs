@@ -653,8 +653,9 @@ fn off_asks_nothing_presses_nothing_and_writes_nothing() {
 
 #[test]
 fn shadow_records_what_it_would_have_pressed_and_presses_nothing() {
-    // `auto` records until its own ledger promotes it, so an `auto` nobody
-    // has raised is held to every word `shadow` is.
+    // A stopped walk's clearing under `auto` records until the judge raises
+    // the seat (t-13091), so an `auto` nobody has raised is held to every
+    // word `shadow` is.
     for mode in [Mode::Shadow, Mode::Auto] {
         let mut judge = FakeJudge::chose(&[2]);
         let mut world = FakeWorld::showing(&[1, 2]);
@@ -1678,6 +1679,10 @@ fn a_screen_seats_auto_presses_from_the_start_and_falls_on_its_own_misses() {
         crate::systemone::applies(&wire, seat),
         "an auto nobody has judged presses a goal walk"
     );
+    assert!(
+        !crate::systemone::applies_once_risen(&wire, seat),
+        "and a stopped walk's clearing still waits for a rise"
+    );
     write_rows(seat, &wire, None, &dead, 5_000);
     assert!(
         crate::systemone::applies(&wire, seat),
@@ -1712,6 +1717,69 @@ fn a_screen_seats_auto_presses_from_the_start_and_falls_on_its_own_misses() {
     assert!(
         !crate::systemone::applies(&wire, seat),
         "and the next walk records"
+    );
+}
+
+/// A stopped recorded walk's clearing presses under `auto` only on a rise
+/// the judge recorded (t-13091), as it did before the goal walk started
+/// pressing: the window's clearing reads `applies_once_risen` and its goal
+/// walk `applies`, off one wire each; a person's `on` presses both, and their
+/// `shadow` and `off` neither.
+#[test]
+fn a_stopped_walks_clearing_presses_under_auto_only_on_a_rise() {
+    use zerocode_core::jev::summary::{RUBRIC_VERSIONS, TRANSITION};
+    let seat = seat_of(Surface::Page);
+    for (mode, goal, clearing) in [
+        (Mode::Auto, true, false),
+        (Mode::On, true, true),
+        (Mode::Shadow, false, false),
+        (Mode::Off, false, false),
+    ] {
+        let home = tempfile::tempdir().expect("a zo home");
+        let wire = wire_at(&home, seat, mode);
+        assert_eq!(crate::systemone::applies(&wire, seat), goal, "{mode:?}");
+        assert_eq!(
+            crate::systemone::applies_once_risen(&wire, seat),
+            clearing,
+            "{mode:?}"
+        );
+    }
+    let home = tempfile::tempdir().expect("a zo home");
+    let wire = wire_at(&home, seat, Mode::Auto);
+    let ledger = crate::systemone::ledger_of(&wire, seat).expect("the seat's ledger");
+    crate::systemone::append_rows(
+        &ledger,
+        &[json!({
+            (TRANSITION.canonical): zerocode_core::jev::promote::ROSE,
+            (RUBRIC_VERSIONS.canonical): [SCREEN_ACTION_RUBRIC_VERSION],
+        })],
+    );
+    assert!(
+        crate::systemone::applies_once_risen(&wire, seat),
+        "a rise the judge recorded"
+    );
+
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agent_tools_runtime.rs"),
+    )
+    .expect("the loop's source");
+    let cleared = &source[source
+        .find("why: computer_use::errand::Why::Cleared {")
+        .expect("the stopped walk's clearing")..];
+    let cleared = &cleared[..cleared
+        .find("computer_use::errand::run_with(")
+        .expect("its walk")];
+    assert!(
+        cleared.contains("crate::systemone::applies_once_risen(judge.wire(), seat)"),
+        "the clearing presses only on a rise"
+    );
+    let goal = &source[source
+        .find("pub(super) fn run_goal(")
+        .expect("the goal walk")..];
+    let goal = &goal[..goal.find("\n}\n").expect("its end")];
+    assert!(
+        goal.contains("let acting = crate::systemone::applies(judge.wire(), seat);"),
+        "the goal walk presses where its seat stands"
     );
 }
 
