@@ -646,15 +646,7 @@ fn scan_store(
 /// Where a pane child said its session transcript is
 /// (`<store>/<agent_id>/`[`runtime::subagent_panes::TRANSCRIPT_FILE`]).
 fn pane_transcript_path(manifest_path: &Path, agent_id: &str) -> Option<PathBuf> {
-    let named = std::fs::read_to_string(
-        manifest_path
-            .parent()?
-            .join(agent_id)
-            .join(runtime::subagent_panes::TRANSCRIPT_FILE),
-    )
-    .ok()?;
-    let named = named.trim();
-    (!named.is_empty()).then(|| PathBuf::from(named))
+    runtime::subagent_panes::named_transcript(&manifest_path.parent()?.join(agent_id))
 }
 
 /// A transcript's marks for a tool call, a tool result and a prompt. The
