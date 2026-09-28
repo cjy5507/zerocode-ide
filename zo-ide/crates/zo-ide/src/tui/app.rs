@@ -4791,7 +4791,14 @@ impl App {
                 command = crate::ide::events::next_command(crate::ide::events::channel()) => match command {
                     Command::Steer { text } => return IdleOutcome::NextTurn(text),
                     Command::Close { reason } => {
-                        return IdleOutcome::Close(crate::teammate::close_reason_from(&reason));
+                        let reason = crate::teammate::close_reason_from(&reason);
+                        if !reason.keeps_standing(crate::teammate::person_touched()) {
+                            return IdleOutcome::Close(reason);
+                        }
+                        // Released with its answer in hand, but a person has
+                        // their hands on this pane: it stays for them.
+                        self.ui.note(SystemLevel::Info, super::strings::TEAMMATE_KEPT_FOR_PERSON);
+                        self.ui.draw();
                     }
                     // Nothing is running; a Stop that arrives now is late.
                     Command::CancelTurn { .. } => {}
@@ -5793,6 +5800,11 @@ impl App {
                         );
                         ui.draw_with_queue(|| block_rx.len());
                     }
+                    // A release (the parent read an answer) never ends a turn:
+                    // the one running is the next word the parent steered in,
+                    // and its own answer will be released in its turn.
+                    Command::Close { reason }
+                        if crate::teammate::close_reason_from(&reason).is_release() => {}
                     // The parent closes this teammate mid-turn (t-2513 §2.2):
                     // the turn ends the way Stop ends it, and the reason is
                     // kept for the closing document the teammate loop writes.

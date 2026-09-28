@@ -4313,6 +4313,11 @@ function makeWorktreeNode(worktree, held) {
   const agents = document.createElement("div");
   agents.className = "wt-agents";
   agents.dataset.worktreePath = worktree.path;
+  // The rows own the keys that reach them (t-11827): the window hands every
+  // other key to the terminal on screen, which took Enter from a focused row
+  // before the row could be pressed, and the arrows step between rows here.
+  agents.dataset.keyboardOwner = "true";
+  agents.addEventListener("keydown", stepAgentRows);
   // A directory without a pane is still a real checkout. Say which list is
   // empty, beside the branch, without inventing an agent or moving a process.
   const unseated = document.createElement("span");
