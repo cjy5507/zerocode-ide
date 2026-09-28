@@ -211,8 +211,13 @@ def account(scene, run, own_sheet_from_fixture=True):
     else:
         fixture = run / "fixture.json"
         state = (json.loads(fixture.read_text()) if fixture.exists() else {}).get("cover") or {}
+    # A hold the seat was never asked about (it was off) still ends the
+    # autopilot `covered`, for the person: that is the run's one ask.
+    ended = run / "ended.json"
+    piloted = (json.loads(ended.read_text()) if ended.exists() else {}).get("autopilot") or {}
+    ended_covered = (piloted.get("ended") or {}).get("reason") == COVERED
     return {"scene": scene, "shownNs": state.get("shownNs"), "downs": state.get("downs", 0),
-            "asked": held_for_the_person(run)}
+            "asked": held_for_the_person(run) or int(ended_covered)}
 
 
 def press_grade(presses, scene, cover):

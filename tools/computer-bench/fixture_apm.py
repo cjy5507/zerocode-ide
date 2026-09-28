@@ -9,6 +9,9 @@ finish DIR checks the complete plan and final stop state before accepting APM.
 hands DIR --actions 180 replays the predictable fixture, refreshing each index.
 hands DIR --actions 10 --input-path coordinate --batch-size 5 measures batches.
 eyes DIR --rounds 10 compares existing latest-frame and settled desktop looks.
+by-hand DIR --cover-seed N --actions 12 the person's baseline on the same scene
+    (with their leave): the cover comes up and the person presses; the
+    oracle times it into covered-hand-N.json. Nothing is pressed for them.
 covered DIR --cover-seed N --actions 12 puts the scene cover_scenes.py draws
     from N over the buttons (another app's window, floating panel or dialog,
     from CoverFixture) and presses them by number (observe --marks, then
@@ -402,19 +405,10 @@ class Desk(Bench):
         comes in the middle of a round, and every press is read by the
         fixture's oracle and the cover's own count (t-12979)."""
         import cover_scenes
-        import tally
         if self.session["mode"] != "alternate" or not 1 <= actions <= 60:
             raise ValueError("covered: alternate mode and 1..60 actions")
         self.guard()
-        state = self.snapshot()
-        app = f"pid:{state['pid']}"
-        window = self.checked(["get-app-state", "--app", app, "--no-screenshot"])["snapshot"]["window"]
-        frames = button_frames(self.checked(["find", "--app", app, "--role", "button"]), window)
-        box = {"x": min(frame["x"] for frame in frames.values()),
-               "y": min(frame["y"] for frame in frames.values())}
-        box["width"] = max(frame["x"] + frame["width"] for frame in frames.values()) - box["x"]
-        box["height"] = max(frame["y"] + frame["height"] for frame in frames.values()) - box["y"]
-        scene = cover_scenes.draw(seed, tally.table(), box)
+        app, window, frames, scene = self.scene_over_buttons(seed)
         comes = 0 if not scene["appearMs"] else actions // 2
         run = self.folder / f"covered-{seed}"
         run.mkdir(mode=0o700)
@@ -448,6 +442,63 @@ class Desk(Bench):
         report = {"scene": scene, "presses": rows, "cover": shown,
                   "grade": cover_scenes.press_grade(rows, scene, shown)}
         write(self.folder / f"covered-{seed}.json", report)
+        return report
+
+    def scene_over_buttons(self, seed):
+        """The fixture as it stands — its app, window and buttons' frames, read
+        fresh — and the scene `seed` draws over the box round the buttons."""
+        import cover_scenes
+        import tally
+        state = self.snapshot()
+        app = f"pid:{state['pid']}"
+        window = self.checked(["get-app-state", "--app", app, "--no-screenshot"])["snapshot"]["window"]
+        frames = button_frames(self.checked(["find", "--app", app, "--role", "button"]), window)
+        box = {"x": min(frame["x"] for frame in frames.values()),
+               "y": min(frame["y"] for frame in frames.values())}
+        box["width"] = max(frame["x"] + frame["width"] for frame in frames.values()) - box["x"]
+        box["height"] = max(frame["y"] + frame["height"] for frame in frames.values()) - box["y"]
+        return app, window, frames, cover_scenes.draw(seed, tally.table(), box)
+
+    @recorded
+    def by_hand(self, seed, actions):
+        """The person's baseline on the same scene (with their leave): the
+        cover comes up over the buttons and the person clears it as they
+        would and presses Amber, Blue, … `actions` times; the fixture's
+        oracle times every press. Nothing here presses anything."""
+        import cover_scenes
+        import tally
+        if self.session["mode"] != "alternate" or not 1 <= actions <= 60:
+            raise ValueError("by-hand: alternate mode and 1..60 actions")
+        self.guard()
+        _, window, _, scene = self.scene_over_buttons(seed)
+        run = self.folder / f"covered-hand-{seed}"
+        run.mkdir(mode=0o700)
+        before = self.snapshot()
+        # The person's own hands are the input: the HID watch that stops a
+        # run of the operator's does not apply to theirs.
+        self.session.pop("watch_hid_since_ns", None)
+        self.save()
+        cover = cover_scenes.put_up({**scene, "appearMs": 0}, self.folder, run, {"window": window}, uptime_ns(),
+                                    own_sheet_from_fixture=False)
+        try:
+            self.shown(run)
+            came = json.loads((run / cover_scenes.FOLDER / "fixture.json").read_text())["shownNs"]
+            print(f"covered by hand: press Amber, Blue, … {actions} times in the fixture", file=sys.stderr, flush=True)
+            deadline = time.monotonic() + tally.table()["cover_scene"]["by_hand_s"]
+            after = before
+            while time.monotonic() < deadline and after["count"] - before["count"] < actions:
+                time.sleep(0.2)
+                after = self.snapshot()
+        finally:
+            cover_scenes.take_down(cover, 10)
+        shown = cover_scenes.account(scene, run, own_sheet_from_fixture=False)
+        pressed = after["events"][len(before["events"]):]
+        times = [(event["uptime_ns"] - came) / 1e6 for event in pressed if event["correct"]]
+        report = {"scene": scene, "cover": shown, "pressed": len(pressed),
+                  "correct": len(times), "errors": after["errors"] - before["errors"],
+                  "firstHitMs": times[0] if times else None, "allMs": times[-1] if times else None,
+                  "done": after["count"] - before["count"] >= actions}
+        write(self.folder / f"covered-hand-{seed}.json", report)
         return report
 
     def shown(self, run, wait_s=3):
@@ -560,7 +611,7 @@ def button_points(result, window):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["prepare", "open", "look", "begin", "act", "finish", "hands", "eyes",
-                                            "covered", "close"])
+                                            "covered", "by-hand", "close"])
     parser.add_argument("folder", type=Path)
     parser.add_argument("--mode", choices=["alternate", "random"], default="alternate")
     parser.add_argument("--labels", default="")
@@ -585,10 +636,11 @@ def main():
             result = desk.hands(args.actions, args.batch_size, args.input_path, reuse_state=args.reuse_state)
         elif args.command == "eyes":
             result = desk.eyes(args.rounds)
-        elif args.command == "covered":
+        elif args.command in ("covered", "by-hand"):
             if args.cover_seed is None:
-                parser.error("covered needs --cover-seed")
-            result = desk.covered(args.cover_seed, args.actions)
+                parser.error(f"{args.command} needs --cover-seed")
+            walk = desk.covered if args.command == "covered" else desk.by_hand
+            result = walk(args.cover_seed, args.actions)
         else:
             result = getattr(desk, args.command)()
         if args.compact:
