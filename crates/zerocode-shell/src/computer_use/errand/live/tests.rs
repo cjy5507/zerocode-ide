@@ -19,7 +19,7 @@ use crate::computer_use::errand::{ActionJudge, Mode, run};
 use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
 use crate::systemone::{
     INVALID_REQUEST, RATE_LIMITED, SYSTEMONE_MODEL, SYSTEMONE_PATH, TIMEOUT, TRANSPORT,
-    UNAUTHORIZED,
+    UNAUTHORIZED, version_word,
 };
 
 /// The question every case here asks.
@@ -367,6 +367,7 @@ fn a_credential_on_the_screen_never_reaches_the_wire() {
             requests: 1,
             redacted_lines: 3,
             model: Some(ANSWERING_VERSION.to_string()),
+            version: Some(version_word(reqwest::Version::HTTP_11)),
         })
     );
 }
@@ -559,6 +560,7 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
             requests: 1,
             redacted_lines: 0,
             model: Some(ANSWERING_VERSION.to_string()),
+            version: Some(version_word(reqwest::Version::HTTP_11)),
         })
     );
     let heard = endpoint.asked();
@@ -773,8 +775,10 @@ fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
         Some(Spent {
             requests: 0,
             redacted_lines: 0,
-            // The version that gave the answer the memo kept.
+            // The version that gave the answer the memo kept, and no HTTP
+            // version: the memo's answer crossed no wire.
             model: Some(ANSWERING_VERSION.to_string()),
+            version: None,
         })
     );
     assert_eq!(endpoint.asked().len(), 2, "the third question never left");

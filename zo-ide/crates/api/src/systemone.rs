@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
+use jev_socket::Socket;
 use serde::{Deserialize, Serialize};
 
 /// The public endpoint's origin.
@@ -130,6 +131,13 @@ impl SystemOneFailure {
     /// same answer the second time.
     const fn retryable(self) -> bool {
         matches!(self, Self::RateLimited | Self::Overloaded)
+    }
+
+    /// Whether nothing came back from the server: the deadline passed, or the
+    /// socket broke. A request that ends so lets go of the client it rode
+    /// (t-13199); a status, any status, is a response and leaves it standing.
+    const fn unanswered(self) -> bool {
+        matches!(self, Self::Transport | Self::Timeout)
     }
 }
 
@@ -430,10 +438,23 @@ fn millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// The one socket every System One request zo makes goes through: a client of
+/// its own rather than the providers' shared pool, since the origin is Jev's
+/// alone and when its client is kept or let go is Jev's rule (`jev_socket`),
+/// not a chat stream's. Built with the shared pool's tuning; a client that
+/// cannot be built is `transport`, and the next request tries again.
+static SOCKET: Socket<reqwest::Client> = Socket::new(built);
+
+fn built() -> Option<reqwest::Client> {
+    crate::providers::tuned_http_builder().build().ok()
+}
+
 /// A System One client bound to one origin and one key.
 #[derive(Clone)]
 pub struct SystemOneClient {
-    http: reqwest::Client,
+    /// The process's one System One socket ([`SOCKET`]); a test points a
+    /// client at a socket of its own.
+    socket: &'static Socket<reqwest::Client>,
     endpoint: String,
     api_key: String,
 }
@@ -515,15 +536,25 @@ impl SystemOneConfig {
 }
 
 impl SystemOneClient {
-    /// A client for `base_url` speaking with `api_key`, on the process's shared
-    /// connection pool.
+    /// A client for `base_url` speaking with `api_key`, on the process's one
+    /// System One socket.
     #[must_use]
     pub fn new(base_url: &str, api_key: impl Into<String>) -> Self {
         Self {
-            http: crate::providers::shared_http_client(),
+            socket: &SOCKET,
             endpoint: format!("{}{SYSTEMONE_PATH}", base_url.trim_end_matches('/')),
             api_key: api_key.into(),
         }
+    }
+
+    /// This client, riding `socket` rather than the process's: how a test
+    /// watches which connection its own requests ride without another test's
+    /// requests moving the socket under it.
+    #[cfg(test)]
+    #[must_use]
+    fn on(mut self, socket: &'static Socket<reqwest::Client>) -> Self {
+        self.socket = socket;
+        self
     }
 
     /// Send a request body the door cleared, re-sending only after a 429 or
@@ -648,12 +679,20 @@ impl SystemOneClient {
             let Some(remaining) = deadline.checked_sub(opened.elapsed()) else {
                 return finish(Err(SystemOneFailure::Timeout), retries);
             };
+            let Some(lent) = self.socket.lend() else {
+                return finish(Err(SystemOneFailure::Transport), retries);
+            };
             requests.fetch_add(1, Ordering::Relaxed);
-            let failure = match tokio::time::timeout(remaining, self.send_once(body)).await {
-                Err(_) => return finish(Err(SystemOneFailure::Timeout), retries),
+            let failure = match tokio::time::timeout(remaining, self.send_once(&lent.client, body)).await {
                 Ok(Ok(response)) => return finish(Ok(response), retries),
                 Ok(Err(failure)) => failure,
+                Err(_) => SystemOneFailure::Timeout,
             };
+            // Over HTTP/2 the pool would hand the connection that went quiet
+            // to every request behind this one; the next opens its own.
+            if failure.unanswered() {
+                self.socket.unanswered(&lent);
+            }
             let backoff = SYSTEMONE_RETRY_BASE_DELAY.saturating_mul(2u32.saturating_pow(retries));
             if !failure.retryable()
                 || retries >= max_retries
@@ -666,9 +705,8 @@ impl SystemOneClient {
         }
     }
 
-    async fn send_once(&self, body: &[u8]) -> Result<SystemOneResponse, SystemOneFailure> {
-        let response = self
-            .http
+    async fn send_once(&self, http: &reqwest::Client, body: &[u8]) -> Result<SystemOneResponse, SystemOneFailure> {
+        let response = http
             .post(&self.endpoint)
             .bearer_auth(&self.api_key)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -1243,5 +1281,343 @@ mod tests {
         assert_eq!(SystemOneFailure::from_status(418), SystemOneFailure::Http(418));
         assert!(SystemOneFailure::RateLimited.retryable() && SystemOneFailure::Overloaded.retryable());
         assert!(!SystemOneFailure::Unauthorized.retryable() && !SystemOneFailure::Schema.retryable());
+        assert!(SystemOneFailure::Timeout.unanswered() && SystemOneFailure::Transport.unanswered());
+        assert!(
+            [SystemOneFailure::Http(503), SystemOneFailure::Overloaded, SystemOneFailure::Schema]
+                .iter()
+                .all(|failure| !failure.unanswered()),
+            "a status or a malformed answer is a response"
+        );
+    }
+
+    /// Which connection a request rides (t-13199): the one the request before
+    /// it was answered on, and never one that went quiet under a request
+    /// nobody answered.
+    ///
+    /// The stage keeps its connections open — the mock above closes each one
+    /// after its reply, so nothing is ever reused on it — and speaks HTTP/1.1
+    /// or HTTP/2, answering on some connections and holding the rest silent:
+    /// the connection stays up and nothing comes back on it, which is what a
+    /// server that has stopped answering looks like from the client. It
+    /// records which connection carried each request, counted from zero in
+    /// the order the connections were accepted. HTTP/2 is spoken with prior
+    /// knowledge, since a loopback stage has no TLS to negotiate it over; the
+    /// pool keeps the connection the same way however it was chosen.
+    mod socket {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        use std::sync::atomic::AtomicUsize;
+
+        use bytes::Bytes;
+
+        use super::*;
+
+        #[derive(Debug, Clone, Copy)]
+        enum Speaks {
+            Http1,
+            Http2,
+        }
+
+        /// The wall a request on a silent connection runs into: many loopback
+        /// answers long, and short enough to wait out.
+        const QUIET: Duration = Duration::from_millis(300);
+
+        struct Stage {
+            base_url: String,
+            /// The connection each request arrived on, in the order they arrived.
+            rode: Arc<Mutex<Vec<usize>>>,
+            /// Connections accepted so far.
+            opened: Arc<AtomicUsize>,
+        }
+
+        impl Stage {
+            /// A stage speaking `speaks` that answers `status` with the
+            /// contract's answer on every connection but those `silent` names
+            /// by ordinal — which hear their requests and say nothing.
+            async fn open(speaks: Speaks, status: u16, silent: impl Fn(usize) -> bool + Send + 'static) -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind the stage");
+                let base_url = format!("http://{}", listener.local_addr().expect("stage address"));
+                let rode = Arc::new(Mutex::new(Vec::new()));
+                let opened = Arc::new(AtomicUsize::new(0));
+                let (heard, counted) = (Arc::clone(&rode), Arc::clone(&opened));
+                let answer = Bytes::from(contract_answer());
+                tokio::spawn(async move {
+                    while let Ok((stream, _)) = listener.accept().await {
+                        let ordinal = counted.fetch_add(1, Ordering::SeqCst);
+                        let spoken = (!silent(ordinal)).then(|| (status, answer.clone()));
+                        let heard = Arc::clone(&heard);
+                        match speaks {
+                            Speaks::Http1 => tokio::spawn(http1(stream, ordinal, spoken, heard)),
+                            Speaks::Http2 => tokio::spawn(http2(stream, ordinal, spoken, heard)),
+                        };
+                    }
+                });
+                Self { base_url, rode, opened }
+            }
+
+            fn rode(&self) -> Vec<usize> {
+                self.rode.lock().map(|rode| rode.clone()).unwrap_or_default()
+            }
+
+            fn opened(&self) -> usize {
+                self.opened.load(Ordering::SeqCst)
+            }
+        }
+
+        /// One HTTP/1.1 connection: each whole request recorded, then answered
+        /// with the connection kept open for the next — or, on a silent
+        /// connection, heard and left without a word until the client goes.
+        async fn http1(mut stream: TcpStream, ordinal: usize, spoken: Option<(u16, Bytes)>, heard: Arc<Mutex<Vec<usize>>>) {
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                while let Some(end) = request_end(&raw) {
+                    raw.drain(..end);
+                    if let Ok(mut heard) = heard.lock() {
+                        heard.push(ordinal);
+                    }
+                    let Some((status, answer)) = &spoken else { continue };
+                    let opening = format!(
+                        "HTTP/1.1 {status} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                        answer.len()
+                    );
+                    if stream.write_all(opening.as_bytes()).await.is_err() || stream.write_all(answer).await.is_err() {
+                        return;
+                    }
+                }
+                match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => raw.extend_from_slice(&chunk[..read]),
+                }
+            }
+        }
+
+        /// Where the first whole request in `raw` ends — its head, then the
+        /// body its content-length names — or `None` while it has not all
+        /// arrived.
+        fn request_end(raw: &[u8]) -> Option<usize> {
+            let head_end = raw.windows(4).position(|four| four == b"\r\n\r\n")? + 4;
+            let length = String::from_utf8_lossy(&raw[..head_end])
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            (raw.len() >= head_end + length).then_some(head_end + length)
+        }
+
+        /// One HTTP/2 connection: each stream recorded and answered on a task
+        /// of its own, the connection kept for the next — or, on a silent
+        /// connection, each stream held without a word until the client
+        /// resets it.
+        async fn http2(stream: TcpStream, ordinal: usize, spoken: Option<(u16, Bytes)>, heard: Arc<Mutex<Vec<usize>>>) {
+            let Ok(mut connection) = h2::server::handshake(stream).await else { return };
+            while let Some(Ok((request, respond))) = connection.accept().await {
+                if let Ok(mut heard) = heard.lock() {
+                    heard.push(ordinal);
+                }
+                tokio::spawn(answer_stream(request, respond, spoken.clone()));
+            }
+        }
+
+        async fn answer_stream(
+            request: http::Request<h2::RecvStream>,
+            mut respond: h2::server::SendResponse<Bytes>,
+            spoken: Option<(u16, Bytes)>,
+        ) {
+            // The body is read whole and its window given back, so a
+            // connection that carries a hundred requests never stalls on flow
+            // control.
+            let mut body = request.into_body();
+            while let Some(Ok(chunk)) = body.data().await {
+                let _ = body.flow_control().release_capacity(chunk.len());
+            }
+            let Some((status, answer)) = spoken else {
+                let _ = std::future::poll_fn(|context| respond.poll_reset(context)).await;
+                return;
+            };
+            let Ok(head) = http::Response::builder().status(status).header("content-type", "application/json").body(())
+            else {
+                return;
+            };
+            if let Ok(mut sending) = respond.send_response(head, false) {
+                let _ = sending.send_data(answer, true);
+            }
+        }
+
+        /// A socket of the test's own, building its clients the way zo's does
+        /// — the same tuning, told to speak HTTP/2 when the stage does.
+        fn socket_for(speaks: Speaks) -> &'static Socket<reqwest::Client> {
+            fn speaking_http2() -> Option<reqwest::Client> {
+                crate::providers::tuned_http_builder().http2_prior_knowledge().build().ok()
+            }
+            let build: fn() -> Option<reqwest::Client> = match speaks {
+                Speaks::Http1 => built,
+                Speaks::Http2 => speaking_http2,
+            };
+            Box::leak(Box::new(Socket::new(build)))
+        }
+
+        async fn ask(client: &SystemOneClient, wall: Duration) -> SystemOneCall {
+            client.decide_body(b"{}".to_vec(), wall, None).await
+        }
+
+        /// Before t-13199 a request that ran out of time left its client
+        /// standing, and over HTTP/2 the next request rode the very connection
+        /// that had gone quiet. The request after an unanswered one opens a
+        /// connection of its own, and is answered there.
+        async fn the_request_after_an_unanswered_one_opens_a_connection_of_its_own(speaks: Speaks) {
+            // The first connection hears and says nothing; every later one answers.
+            let stage = Stage::open(speaks, 200, |ordinal| ordinal == 0).await;
+            let client = SystemOneClient::new(&stage.base_url, "test-key").on(socket_for(speaks));
+            assert_eq!(ask(&client, QUIET).await.outcome, Err(SystemOneFailure::Timeout), "the first connection says nothing");
+            let next = ask(&client, UNHURRIED).await;
+            assert_eq!(
+                stage.rode(),
+                [0, 1],
+                "over {speaks:?} the request after an unanswered one rode the connection that had gone quiet"
+            );
+            assert!(next.outcome.is_ok(), "a connection of its own answered it: {:?}", next.outcome);
+        }
+
+        #[tokio::test]
+        async fn over_http2_the_request_after_an_unanswered_one_opens_a_connection_of_its_own() {
+            the_request_after_an_unanswered_one_opens_a_connection_of_its_own(Speaks::Http2).await;
+        }
+
+        /// HTTP/1.1 closes a connection whose request was dropped, so this
+        /// held before t-13199 as well — the fact the HTTP/2 case is measured
+        /// against.
+        #[tokio::test]
+        async fn over_http1_the_request_after_an_unanswered_one_opens_a_connection_of_its_own() {
+            the_request_after_an_unanswered_one_opens_a_connection_of_its_own(Speaks::Http1).await;
+        }
+
+        /// A request the server answered leaves its connection for the next:
+        /// two answered requests ride one connection.
+        async fn an_answered_request_leaves_its_connection_for_the_next(speaks: Speaks) {
+            let stage = Stage::open(speaks, 200, |_| false).await;
+            let client = SystemOneClient::new(&stage.base_url, "test-key").on(socket_for(speaks));
+            for _ in 0..2 {
+                let call = ask(&client, UNHURRIED).await;
+                assert!(call.outcome.is_ok(), "{:?}", call.outcome);
+            }
+            assert_eq!(stage.rode(), [0, 0], "over {speaks:?} an answered request's connection was not ridden again");
+        }
+
+        #[tokio::test]
+        async fn over_http2_an_answered_request_leaves_its_connection_for_the_next() {
+            an_answered_request_leaves_its_connection_for_the_next(Speaks::Http2).await;
+        }
+
+        #[tokio::test]
+        async fn over_http1_an_answered_request_leaves_its_connection_for_the_next() {
+            an_answered_request_leaves_its_connection_for_the_next(Speaks::Http1).await;
+        }
+
+        /// A status is a response, and a response proves the socket carries:
+        /// a request refused with one leaves its connection for the next.
+        /// Asked over HTTP/2, where the pool keeps a connection whatever
+        /// becomes of one stream, so only the wire letting its client go could
+        /// move the next request.
+        #[tokio::test]
+        async fn a_request_refused_with_a_status_leaves_its_connection_for_the_next() {
+            let stage = Stage::open(Speaks::Http2, 503, |_| false).await;
+            let client = SystemOneClient::new(&stage.base_url, "test-key").on(socket_for(Speaks::Http2));
+            for _ in 0..2 {
+                assert_eq!(ask(&client, UNHURRIED).await.outcome, Err(SystemOneFailure::Http(503)));
+            }
+            assert_eq!(stage.rode(), [0, 0], "a request refused with a status let its connection go");
+        }
+
+        /// A fair coin for one connection of one trial, the same on every run:
+        /// the standard library's fixed-key hasher over the pair, its low bit.
+        fn coin(trial: u64, ordinal: usize) -> bool {
+            let mut hasher = DefaultHasher::new();
+            (trial, ordinal).hash(&mut hasher);
+            hasher.finish() & 1 == 1
+        }
+
+        /// The value at `share` of the way up `sorted`.
+        fn at(sorted: &[u64], share: usize) -> Option<u64> {
+            sorted.get(sorted.len().checked_sub(1)? * share / 100).copied()
+        }
+
+        /// What the rule buys and what it costs, printed one line a measure —
+        /// the window's measure of its own wire, on zo's (t-13199): answers
+        /// out of a hundred on stages that hold half their connections silent,
+        /// latency and connections on a stage that answers them all, time and
+        /// connections on a stage that answers none, and what building one
+        /// client costs. Run on the commit before the rule and on the rule's
+        /// own.
+        #[tokio::test]
+        #[ignore = "measurement, not a rule: run with --ignored --nocapture"]
+        async fn measure_the_rule_on_stages_that_answer_all_half_and_none() {
+            const QUESTIONS: usize = 100;
+            const TRIALS: u64 = 10;
+            const WALL: Duration = Duration::from_millis(150);
+            async fn asked(stage: &Stage, speaks: Speaks) -> (usize, Vec<u64>, u64) {
+                let client = SystemOneClient::new(&stage.base_url, "test-key").on(socket_for(speaks));
+                let began = Instant::now();
+                let mut spans = Vec::with_capacity(QUESTIONS);
+                let mut answered = 0;
+                for _ in 0..QUESTIONS {
+                    let one = Instant::now();
+                    if ask(&client, WALL).await.outcome.is_ok() {
+                        answered += 1;
+                    }
+                    spans.push(u64::try_from(one.elapsed().as_micros()).unwrap_or(u64::MAX));
+                }
+                spans.sort_unstable();
+                (answered, spans, millis(began.elapsed()))
+            }
+            for speaks in [Speaks::Http1, Speaks::Http2] {
+                let mut trials = Vec::new();
+                for trial in 0..TRIALS {
+                    let stage = Stage::open(speaks, 200, move |ordinal| coin(trial, ordinal)).await;
+                    let (answered, _, _) = asked(&stage, speaks).await;
+                    trials.push(serde_json::json!({"trial": trial, "firstSilent": coin(trial, 0),
+                                                   "answered": answered, "opened": stage.opened()}));
+                }
+                let total: u64 = trials.iter().filter_map(|row| row["answered"].as_u64()).sum();
+                println!(
+                    "zo_jev_socket {}",
+                    serde_json::json!({"speaks": format!("{speaks:?}"), "stage": "half_silent",
+                                       "questionsPerTrial": QUESTIONS, "wallMs": millis(WALL),
+                                       "answered": total, "of": QUESTIONS * trials.len(), "trials": trials})
+                );
+                let stage = Stage::open(speaks, 200, |_| false).await;
+                let (answered, spans, _) = asked(&stage, speaks).await;
+                println!(
+                    "zo_jev_socket {}",
+                    serde_json::json!({"speaks": format!("{speaks:?}"), "stage": "healthy",
+                                       "answered": answered, "of": QUESTIONS, "opened": stage.opened(),
+                                       "p50Us": at(&spans, 50), "p95Us": at(&spans, 95), "maxUs": spans.last()})
+                );
+                let stage = Stage::open(speaks, 200, |_| true).await;
+                let (answered, _, total_ms) = asked(&stage, speaks).await;
+                println!(
+                    "zo_jev_socket {}",
+                    serde_json::json!({"speaks": format!("{speaks:?}"), "stage": "all_silent",
+                                       "wallMs": millis(WALL), "answered": answered, "of": QUESTIONS,
+                                       "totalMs": total_ms, "opened": stage.opened()})
+                );
+            }
+            let mut builds: Vec<u64> = (0..200)
+                .map(|_| {
+                    let began = Instant::now();
+                    let client = built();
+                    let spent = u64::try_from(began.elapsed().as_micros()).unwrap_or(u64::MAX);
+                    assert!(client.is_some(), "a client is built");
+                    spent
+                })
+                .collect();
+            builds.sort_unstable();
+            println!(
+                "zo_jev_socket {}",
+                serde_json::json!({"measure": "build_client", "n": builds.len(),
+                                   "p50Us": at(&builds, 50), "p95Us": at(&builds, 95), "maxUs": builds.last()})
+            );
+        }
     }
 }
