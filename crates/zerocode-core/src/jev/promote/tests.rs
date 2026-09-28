@@ -3289,7 +3289,10 @@ fn a_seat_that_starts_acting_is_taken_back_on_its_marks_alone() {
         !judgment_due(seat, &rows),
         "fallbacks running call no judgment for a seat they cannot end"
     );
-    assert_eq!(judge_seat(seat, &rows).expect("judged").verdict, Verdict::Keep);
+    assert_eq!(
+        judge_seat(seat, &rows).expect("judged").verdict,
+        Verdict::Keep
+    );
     let mut fell = recording(seat);
     fell.extend(rows.iter().cloned());
     assert!(matches!(

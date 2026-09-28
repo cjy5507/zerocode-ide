@@ -282,7 +282,7 @@ pub(crate) fn choose(
 /// observed or a handover whose launch was sealed. Asked with no workspace,
 /// the door refuses every request as not consented: until t-11989 that was
 /// this road's only answer, so a seat that acted still refused.
-fn choose_with(
+pub(super) fn choose_with(
     wire: &Wire,
     look: &zerocode_core::summon_choice::SummonLook<'_>,
     options: &[zerocode_core::summon_choice::Summonable],

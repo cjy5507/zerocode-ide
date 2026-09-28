@@ -440,6 +440,14 @@ impl zerocode_core::orchestration::Launcher for Seated<'_> {
     fn choose_difficulty(&self, look: &Look, origin: [&str; 3]) -> Option<Value> {
         choose_with(self.wire, look, origin)
     }
+    fn choose_agent(
+        &self,
+        look: &zerocode_core::summon_choice::SummonLook<'_>,
+        options: &[zerocode_core::summon_choice::Summonable],
+        origin: [&str; 3],
+    ) -> Option<String> {
+        super::super::summon_choice::choose_with(self.wire, look, options, origin)
+    }
     fn difficulty_profile(
         &self,
         agent: &str,
@@ -791,4 +799,199 @@ fn a_carried_out_answers_first_attempt_is_the_seats_mark() {
         assert_eq!(row[mark.canonical], true, "{row}");
         assert!(row.get(other.canonical).is_none(), "{row}");
     }
+}
+
+/// The live check t-11989 hands in, on the real Jev service: with the one
+/// switch on and no word of either seat's own, a summons whose coordinator
+/// left both dials out launches on the profile row of Jev's real answer and
+/// its row says the answer was carried out; and a summons typed
+/// `--agent auto` lands on the agent the summon question really chose. It
+/// plans through the ledger's own `worker-start` on a ledger of its own, under
+/// a zo home of its own — the settings, the day's count and the seats' ledgers
+/// are that home's — and opens no pane, so the person's files and screen are
+/// untouched. The key rides one command's environment and is never printed.
+///
+/// ```sh
+/// TYPESAFE_API_KEY="$(security find-generic-password \
+///     -s dev.zerocode.key.TYPESAFE_API_KEY -a "$USER" -w)" \
+///   cargo test -p zerocode-shell --bin zerocode-shell \
+///   orchestration::summon_difficulty::tests::live_the_switch_carries_out_real_answers \
+///   -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "live Jev requests; requires a command-scoped key"]
+fn live_the_switch_carries_out_real_answers() {
+    use zerocode_core::jev::door::{ENABLED_SETTING, EVERY_WORKSPACE, JEV_SETTINGS_KEY};
+    let key = std::env::var("TYPESAFE_API_KEY").expect("a command-scoped key");
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {JEV_SETTINGS_KEY: {ENABLED_SETTING: true, "workspaces": [EVERY_WORKSPACE]}}})
+            .to_string(),
+    )
+    .unwrap();
+    let wire = Wire::at(crate::systemone::SYSTEMONE_BASE_URL, &key, Some(settings));
+    /// The seats of [`Seated`], and what this machine has on its `PATH` — the
+    /// set the summon question chooses among, as the live catalog measures it.
+    struct OnThisMachine<'a>(Seated<'a>);
+    impl zerocode_core::orchestration::Launcher for OnThisMachine<'_> {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            self.0.command_for(agent, prompt, tuning)
+        }
+        fn choose_agent(
+            &self,
+            look: &zerocode_core::summon_choice::SummonLook<'_>,
+            options: &[zerocode_core::summon_choice::Summonable],
+            origin: [&str; 3],
+        ) -> Option<String> {
+            self.0.choose_agent(look, options, origin)
+        }
+        fn choose_difficulty(&self, look: &Look, origin: [&str; 3]) -> Option<Value> {
+            self.0.choose_difficulty(look, origin)
+        }
+        fn difficulty_profile(
+            &self,
+            agent: &str,
+            level: &str,
+            origin: [&str; 3],
+        ) -> Result<Option<difficulty::Profile>, String> {
+            self.0.difficulty_profile(agent, level, origin)
+        }
+        fn presence(&self) -> Option<Vec<zerocode_core::agent::AgentPresence>> {
+            Some(zerocode_core::agent::agent_presence(
+                std::env::var_os("PATH").as_deref(),
+                std::env::consts::OS,
+            ))
+        }
+    }
+    let launcher = OnThisMachine(Seated { wire: &wire });
+    let mut ledger = zerocode_core::orchestration::Ledger::new();
+    let mut team = zerocode_core::agent_teams::Team::new("team-live", "test-token", 1);
+    let mut summon = |at: i64, argv: Vec<String>| {
+        let request = argv.last().cloned().unwrap_or_default();
+        let _origin = origin_with(
+            [team.id.as_str(), "%1", request.as_str()],
+            Some(home.path().to_path_buf()),
+            true,
+            wire.settings_root(),
+        );
+        let planned = zerocode_core::orchestration::plan(
+            &mut ledger,
+            &mut team,
+            &launcher,
+            &argv,
+            "%1",
+            at,
+            Some("test-actor"),
+        );
+        ledger.file_receipt(&planned, at);
+        planned
+    };
+    let created = summon(
+        1,
+        [
+            "run-create",
+            "--name",
+            "live-switch",
+            "--retry-request",
+            "create",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    );
+    assert_eq!(created.reply.exit_code, 0, "{}", created.reply.stderr);
+
+    // The difficulty: a small documentation fix, both dials left out.
+    let started = summon(
+        2,
+        [
+            "worker-start",
+            "--agent",
+            "claude",
+            "--prompt",
+            "Fix the typo in the README install section: 'recieve' should read 'receive'. Change nothing else.",
+            "--retry-request",
+            "live-difficulty",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    );
+    assert_eq!(started.reply.exit_code, 0, "{}", started.reply.stderr);
+    let reply: Value = serde_json::from_str(&started.reply.stdout).unwrap();
+    let prepared = started
+        .prepared_worker_start
+        .expect("a worker was reserved");
+    let rows = recorded(&wire, &prepared, home.path());
+    let row = rows.first().expect("the summons' row");
+    let row_of = |level: &str| {
+        difficulty::profile(&Value::Null, "claude", level)
+            .unwrap()
+            .unwrap()
+    };
+    println!(
+        "difficulty: outcome={} chosen={} confidence={} applied={} requests={} elapsedMs={} -> launched model={} effort={}",
+        row["outcome"],
+        row["chosen"],
+        row["confidence"],
+        row["applied"],
+        row["requests"],
+        row["elapsedMs"],
+        reply["model"],
+        reply["effort"]
+    );
+    if let Some(level) = row["chosen"].as_str() {
+        let profile = row_of(level);
+        assert_eq!(row["applied"], true, "{row}");
+        assert_eq!(reply["model"], json!(profile.model), "{reply}");
+        assert_eq!(reply["effort"], json!(profile.effort), "{reply}");
+        println!(
+            "difficulty: the launch is the {level} row ({} / {})",
+            profile.model, profile.effort
+        );
+    } else {
+        let mid = row_of(difficulty::FALLBACK_DIFFICULTY);
+        assert_eq!(row["applied"], false, "{row}");
+        assert_eq!(reply["model"], json!(mid.model), "{reply}");
+        println!("difficulty: no answer inside the wall, so the middle row");
+    }
+
+    // The agent: `--agent auto`, and the seat's pick is the summons' agent.
+    let auto = summon(
+        3,
+        [
+            "worker-start",
+            "--agent",
+            "auto",
+            "--prompt",
+            "Write unit tests for the date parser's leap-year branch.",
+            "--retry-request",
+            "live-agent",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    );
+    println!(
+        "agent auto: exit={} agent={} stderr={}",
+        auto.reply.exit_code,
+        serde_json::from_str::<Value>(&auto.reply.stdout)
+            .map_or(Value::Null, |reply| reply["agent"].clone()),
+        auto.reply.stderr.trim()
+    );
+    assert_eq!(auto.reply.exit_code, 0, "{}", auto.reply.stderr);
+    let shadow = auto
+        .prepared_worker_start
+        .as_ref()
+        .and_then(|prepared| prepared.summon_shadow.as_ref())
+        .expect("the summons' judgment half");
+    assert!(shadow.auto, "the receipt says the seat chose");
+    assert_ne!(
+        shadow.pinned.agent,
+        zerocode_core::orchestration::SUMMON_AUTO_AGENT
+    );
 }
