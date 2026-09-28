@@ -435,6 +435,7 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       await frame();
       await frame();
       const draws = universe.renderer.info.render.calls;
+      const sceneDraws = universe.scene.children.filter((object) => object.visible).length;
       const targets = { scene: universe.post.target !== null, mips: universe.post.mips.length,
         half: universe.post.target?.texture.type === THREE.HalfFloatType, floats: universe.floatTargets };
       knowledgeDimension = heldDimension;
@@ -444,7 +445,7 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       return { named: layout.namedCount, communities: layout.communityCount, sizes: Array.from(layout.communitySize),
         galaxies: map.galaxies, wantGalaxies, least, rowsCount: map.rows, rows, strays, strayRows,
         lumWorst, tempRange, unknownTemp, rebuilt, darkTints, lightTints, darkComp, lightComp,
-        neutral: knowledgeUniverseInks(view, universe.probe ?? document.body).neutral, draws, targets,
+        neutral: knowledgeUniverseInks(view, universe.probe ?? document.body).neutral, draws, sceneDraws, targets,
         bloomLevels: tune.bloomLevels };
     } catch (error) {
       return { thrown: String(error?.stack ?? error) };
@@ -479,9 +480,133 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       && seen.lightComp.dark === 0 && seen.lightComp.exposure === 1.25
       && seen.lightComp.paper.join(",") === "0.8,0.77,0.7",
     detail);
-  ok("t-12443 ②: one frame is the stars plus the bloom ladder down and up and the composite, into one scene target and the token's levels",
-    !seen.thrown && seen.draws === 1 + seen.bloomLevels + (seen.bloomLevels - 1) + 1
+  ok("t-12443 ②: one frame is the scene plus the bloom ladder down and up and the composite, into one scene target and the token's levels",
+    !seen.thrown && seen.sceneDraws >= 1 && seen.draws === seen.sceneDraws + seen.bloomLevels + (seen.bloomLevels - 1) + 1
       && seen.targets.scene && seen.targets.mips === seen.bloomLevels
       && seen.targets.half === seen.targets.floats,
+    detail);
+}
+
+/* ---- ③ 은하의 몸 — 원반·핵·성운과 이름 없는 별·배경 별 ------------------------------------------
+ *
+ * 몸은 셰이더가 번호에서 짓는다(입자마다 float 하나): 줄마다 제 장식 수만큼, 그 뒤 배경 별. 원반·핵·성운은
+ * 사각형 인스턴스이고, 성운은 앞 열두 성단에만 두른다(fbm 조각이 가장 비싸다). 한 장은 시안의 열셋이다. */
+export async function testKnowledgeUniverseBodies(page, ok) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const seen = await page.evaluate(async ({ sizes, alone, galaxySizes }) => {
+    try {
+      const view = document.querySelector(".knowledge-view:not([hidden])");
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const until = async (wanted, rounds = 900) => {
+        for (let round = 0; round < rounds; round += 1) {
+          if (wanted()) return true;
+          await frame();
+        }
+        return false;
+      };
+      const heldDimension = knowledgeDimension;
+      const heldVault = secondBrainVault;
+      const edges = [];
+      const starts = [];
+      let at = 0;
+      sizes.forEach((size) => { starts.push(at); at += size; });
+      /* 큰 무리는 이웃 무리와 한 가닥으로 잇고, 작은 무리(성단이 될 것)는 홀로 선 완전 그래프로 둔다 — 서로 이으면
+       * 평면 지도가 작은 무리들을 한 군집으로 합친다. */
+      sizes.forEach((size, group) => {
+        const first = starts[group];
+        const small = group >= galaxySizes;
+        for (let step = 1; step < size; step += 1) {
+          edges.push({ from: first + step, to: first + step - 1, kind: "mentions" });
+          if (small) {
+            for (let back = 0; back < step - 1; back += 1) edges.push({ from: first + step, to: first + back, kind: "mentions" });
+          } else if (step > 2) {
+            edges.push({ from: first + step, to: first + ((step * 7) % (step - 1)), kind: "mentions" });
+          }
+        }
+        if (group > 0 && !small) edges.push({ from: first, to: starts[group - 1], kind: "mentions" });
+      });
+      const answer = window.__buildVaultGraph__({ path: "/bodies", sources: false },
+        { pages: at + alone, ghosts: 0, tags: [], customEdges: edges });
+      noteKnowledgeExploreLines({});
+      secondBrainVault = answer.vault;
+      knowledgeDimension = "3d";
+      setKnowledgeMode(view, "global", { paint: false });
+      knowledgeReport = answer;
+      await paintKnowledgeView();
+      await until(() => (knowledgeLayouts.get(view)?.left ?? 1) === 0);
+      await paintKnowledgeView();
+      await frame();
+      const universe = knowledgeUniverses.get(view);
+      const map = universe.map;
+      const tune = knowledgeUniverseTuning(view);
+      const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
+      const T = KNOWLEDGE_UNIVERSE_TYPES;
+      const keyed = (key) => universe.scene.children.find((object) => object.userData.key === key) ?? null;
+      const decor = keyed("decor");
+      const glows = keyed("glows");
+      const codes = decor?.geometry.attributes.position.array ?? new Float32Array(0);
+      /* 줄마다의 장식 수(텍셀 6의 x)와 번호의 무리가 맞는가, 그 뒤 배경 별이 토큰의 수만큼인가. */
+      const perRow = new Map();
+      let sky = 0;
+      let largest = 0;
+      for (const code of codes) {
+        largest = Math.max(largest, code);
+        const group = Math.floor(code / SHAPE.groupSpan + 1e-4);
+        if (group === SHAPE.skyGroup) sky += 1;
+        else if (group < SHAPE.rows) perRow.set(group, (perRow.get(group) ?? 0) + 1);
+      }
+      const decorAgrees = map.galaxy.every((row) => (perRow.get(row.rank) ?? 0) === row.decor
+        && map.gal[(row.rank * SHAPE.texels + 6) * 4] === row.decor);
+      const wantDecor = map.galaxy.every((row) => row.decor === (row.type === T.cluster ? tune.decorCluster
+        : Math.round(tune.decorLeast + tune.decorGrow * Math.sqrt(knowledgeLayouts.get(view).communitySize[row.rank]
+          / knowledgeLayouts.get(view).communitySize[0]))));
+      /* 원반·핵·성운의 인스턴스: 나선·막대·불규칙은 원반과 핵, 타원은 핵 하나, 성운은 앞 열두 성단에 셋씩. */
+      const bb = glows?.geometry.attributes.aBB.array ?? new Float32Array(0);
+      const instances = glows?.geometry.instanceCount ?? 0;
+      const byRow = new Map();
+      for (let one = 0; one < instances; one += 1) {
+        const row = bb[one * 4];
+        const kind = bb[one * 4 + 1];
+        const list = byRow.get(row) ?? [];
+        list.push(kind);
+        byRow.set(row, list);
+      }
+      let clustersSeen = 0;
+      const glowsAgree = map.galaxy.every((row) => {
+        const kinds = (byRow.get(row.rank) ?? []).join(",");
+        if (row.type === T.cluster) {
+          clustersSeen += 1;
+          return kinds === (clustersSeen <= tune.nebulaMax ? "2,2,2" : "");
+        }
+        return kinds === (row.type === T.elliptical ? "1" : "0,1");
+      });
+      universe.invalidate();
+      await frame();
+      await frame();
+      const draws = universe.renderer.info.render.calls;
+      const points = universe.renderer.info.render.points;
+      const orders = universe.scene.children.map((object) => `${object.userData.key}:${object.renderOrder}`).join(" ");
+      const stars = knowledgeLayouts.get(view)?.count;
+      knowledgeDimension = heldDimension;
+      secondBrainVault = heldVault;
+      await paintKnowledgeView();
+      return { rows: map.rows, galaxies: map.galaxies, codes: codes.length, sky, largest, decorAgrees, wantDecor,
+        instances, glowsAgree, clusters: map.rows - map.galaxies, draws, points, stars, orders,
+        bloomLevels: tune.bloomLevels, decorSky: tune.decorSky };
+    } catch (error) {
+      return { thrown: String(error?.stack ?? error) };
+    }
+  }, { sizes: [...GALAXY_SIZES, 6, 5, 5, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3], alone: GALAXY_ALONE,
+    galaxySizes: GALAXY_SIZES.length });
+  const detail = JSON.stringify(seen);
+  ok("t-12443 ③: every galaxy and cluster carries its body's nameless stars in the prototype's count (texel 6), and the sky carries the token's count after them",
+    !seen.thrown && seen.decorAgrees && seen.wantDecor && seen.sky === seen.decorSky
+      && seen.largest < 2 ** 24,
+    detail);
+  ok("t-12443 ③: discs and cores stand for the galaxies (one core for an elliptical) and nebulae only around the first twelve clusters",
+    !seen.thrown && seen.clusters > 12 && seen.glowsAgree, detail);
+  ok("t-12443 ③: one frame is the prototype's thirteen draws — discs, bodies and stars in that order, the bloom ladder and the composite",
+    !seen.thrown && seen.draws === 3 + seen.bloomLevels + (seen.bloomLevels - 1) + 1
+      && seen.orders === "glows:0 decor:1 stars:2",
     detail);
 }

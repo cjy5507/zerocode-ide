@@ -1599,6 +1599,13 @@
   --knowledge-3d-decor-grow: 2600;
   --knowledge-3d-decor-cluster: 150;
   --knowledge-3d-decor-sky: 6000;
+  /* 원반·핵·성운의 사각형 반지름(R의 배수, 시안 `bb`) — 원반, 핵, 타원의 핵, 성단의 성운 셋. */
+  --knowledge-3d-disk: 1.25;
+  --knowledge-3d-core: 0.42;
+  --knowledge-3d-core-elliptical: 1.15;
+  --knowledge-3d-nebula-outer: 1.7;
+  --knowledge-3d-nebula-mid: 1.3;
+  --knowledge-3d-nebula-inner: 0.95;
   /* 은하 빛깔 = base + (1 − base) × 선형(원천). 원천은 색 칸의 어두운 테마 값이다 — 밝은 테마는 합성에서 음화로
    * 뒤집으므로 두 테마에서 같은 빛깔을 쓴다(PORTING.md §4). 색 없는 군집은 회색 대신 고정값(선형, m-12493). */
   --knowledge-3d-galaxy-tint-base: 0.7;

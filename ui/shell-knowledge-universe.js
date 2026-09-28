@@ -145,6 +145,13 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   decorGrow: "--knowledge-3d-decor-grow",
   decorCluster: "--knowledge-3d-decor-cluster",
   decorSky: "--knowledge-3d-decor-sky",
+  /* 원반·핵·성운의 사각형 반지름(R의 배수, 시안 `bb`): 원반, 핵, 타원의 핵, 성단의 성운 셋. */
+  disk: "--knowledge-3d-disk",
+  core: "--knowledge-3d-core",
+  coreElliptical: "--knowledge-3d-core-elliptical",
+  nebulaOuter: "--knowledge-3d-nebula-outer",
+  nebulaMid: "--knowledge-3d-nebula-mid",
+  nebulaInner: "--knowledge-3d-nebula-inner",
   /* 은하 빛깔 = `galaxy-tint-base` + (1 − base) × 선형(색 칸의 어두운 테마 값). */
   galaxyTintBase: "--knowledge-3d-galaxy-tint-base",
   /* 빛 번짐 사다리의 단 수와 세기(문턱 없음), 합성의 노출(테마마다). */
@@ -404,6 +411,233 @@ float armField(float r, float th, float arms, float K, float th0){
   float lg = log(max(r, 0.1) / 0.1);
   return pow(0.5 + 0.5 * cos(arms * (th - th0 - K * lg)), 4.0) * smoothstep(0.08, 0.26, r);
 }`;
+
+/* 값 노이즈 fbm 4옥타브 — 시안 `NOISE`(성운과 불규칙 은하의 무늬). */
+const KNOWLEDGE_UNIVERSE_NOISE = `
+float h3(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+float vnoise(vec3 p){ vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  float a = h3(i), b = h3(i + vec3(1.0, 0.0, 0.0)), c = h3(i + vec3(0.0, 1.0, 0.0)), d = h3(i + vec3(1.0, 1.0, 0.0));
+  float e = h3(i + vec3(0.0, 0.0, 1.0)), f1 = h3(i + vec3(1.0, 0.0, 1.0)), g = h3(i + vec3(0.0, 1.0, 1.0)), h = h3(i + vec3(1.0, 1.0, 1.0));
+  return mix(mix(mix(a, b, f.x), mix(c, d, f.x), f.y), mix(mix(e, f1, f.x), mix(g, h, f.x), f.y), f.z); }
+float fbm(vec3 p){ float a = 0.5, s = 0.0; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p = p * 2.03 + 1.7; a *= 0.5; } return s; }`;
+
+/* 은하의 원반(기울어진 사각형 하나에 풀리지 않은 별빛·팔·먼지 띠·막대)과 핵의 빛, 성단의 반사 성운 — 시안
+ * `materials.glows`. */
+const KNOWLEDGE_UNIVERSE_GLOWS_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
+      attribute vec4 aBB; uniform float uLift; uniform float uFocusGal;
+      varying vec2 vQ; varying float vType; varying vec4 vP1; varying vec4 vP2; varying vec3 vTint; varying vec3 vW; varying vec3 vN; varying float vVar; varying float vFoc; varying float vNear;
+      void main(){
+        int c = int(aBB.x + 0.5);
+        vec4 G0 = gal(c, 0), G1 = gal(c, 1), G2 = gal(c, 2), G3 = gal(c, 3), G4 = gal(c, 4), G5 = gal(c, 5), G6 = gal(c, 6);
+        vec3 center = mix(G4.xyz, G0.xyz, uLift);
+        float R = G0.w * aBB.z;
+        vNear = mix(0.3, 1.0, smoothstep(1.6, 5.5, length(cameraPosition - center) / max(G0.w, 1.0)));
+        vec3 w;
+        if (aBB.y < 0.5) { vec3 N = G1.xyz, Ux = G2.xyz, V = cross(N, Ux); w = center + (Ux * position.x + V * position.y) * R * uLift; vN = N; }
+        else {
+          vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]); vec3 up = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+          w = center + (right * position.x + up * position.y) * R * uLift; vN = vec3(0.0);
+        }
+        vQ = position.xy * aBB.z; vType = aBB.y; vVar = aBB.w;
+        vP1 = vec4(G2.w, G3.x, G6.y, G3.y); vP2 = vec4(G3.z, G3.w, G5.w, G1.w);
+        vTint = G5.rgb; vW = w;
+        vFoc = uFocusGal < -0.5 ? 1.0 : (abs(float(c) - uFocusGal) < 0.5 ? 1.12 : 0.3);
+        gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+      }`;
+
+const KNOWLEDGE_UNIVERSE_GLOWS_FRAG = `${KNOWLEDGE_UNIVERSE_NOISE}
+      uniform float uLift; uniform float uTime;
+      varying vec2 vQ; varying float vType; varying vec4 vP1; varying vec4 vP2; varying vec3 vTint; varying vec3 vW; varying vec3 vN; varying float vVar; varying float vFoc; varying float vNear;
+      void main(){
+        vec2 q = vQ; float r = length(q);
+        vec3 o = vec3(0.0); float alpha = 0.0;
+        if (vType < 0.5) {
+          float arms = vP1.x, K = vP1.y, th0 = vP1.z, bar = vP1.w, act = vP2.y, dust = vP2.z, gtype = vP2.w;
+          float th = atan(q.y, q.x);
+          float lg = log(max(r, 0.1) / 0.1);
+          float ph = arms * (th - th0 - K * lg);
+          float edge = 1.0 - smoothstep(0.7, 1.12, r);
+          float disk = exp(-r / 0.3) * edge;
+          float armR = exp(-r / 0.55) * edge;
+          float arm = pow(0.5 + 0.5 * cos(ph), 3.0) * smoothstep(0.06, 0.22, r);
+          float lane = pow(0.5 + 0.5 * cos(ph + 0.85), 12.0) * smoothstep(0.12, 0.3, r) * (1.0 - smoothstep(0.6, 0.95, r)) * dust;
+          float barL = 0.0;
+          if (gtype > 0.5 && gtype < 1.5) { float cs = cos(th0), sn = sin(th0); vec2 b = vec2(cs * q.x + sn * q.y, -sn * q.x + cs * q.y); barL = exp(-pow(abs(b.x) / max(bar, 0.01), 3.0) - pow(b.y / 0.05, 2.0)); }
+          if (gtype > 2.5) { arm = smoothstep(0.35, 0.8, fbm(vec3(q * 3.2, th0))); lane = 0.0; }
+          vec3 warm = vec3(1.0, 0.86, 0.7), cool = vec3(0.6, 0.73, 1.0);
+          vec3 light = warm * (disk * 0.22 + barL * 0.6) + mix(warm, cool, 0.75) * armR * arm * (0.5 + 0.8 * act);
+          light += vec3(1.0, 0.26, 0.4) * armR * arm * arm * act * 0.4;
+          light *= 1.0 - lane * 0.85;
+          float facing = abs(dot(normalize(cameraPosition - vW), vN));
+          o = light * vTint * 0.9 / max(facing, 0.35);
+          alpha = min(0.55, lane * disk * 2.6);
+        } else if (vType < 1.5) {
+          float gtype = vP2.w;
+          float I = gtype > 1.5 && gtype < 2.5 ? exp(-pow(r / 0.2, 0.75) * 2.3) * 1.25 : exp(-pow(r / 0.06, 0.8) * 2.0) * 1.9;
+          I *= 1.0 - smoothstep(0.75, 1.0, r / max(vVar, 0.5));
+          o = vec3(1.0, 0.8, 0.6) * vTint * I;
+        } else {
+          float n = fbm(vec3(q * (1.5 + vVar * 0.6) + vVar * 7.3, vVar * 3.1 + uTime * 0.004));
+          float m = smoothstep(0.38, 0.95, n) * exp(-r * r * 2.4);
+          vec3 cc = mix(vec3(0.3, 0.48, 1.0), vec3(1.0, 0.32, 0.5), step(1.5, vVar) * min(1.0, vP2.y * 3.0));
+          o = cc * m * 0.1;
+        }
+        o *= vFoc * uLift * uLift * (vType < 1.5 ? vNear : 1.0);
+        alpha *= vFoc * uLift;
+        gl_FragColor = vec4(o, alpha);
+      }`;
+
+/* 이름 없는 별·먼지·H II 매듭·필라멘트의 가스·무한히 먼 배경 별 — 한 드로우, 번호에서 셰이더가 짓는다(입자마다
+ * float 하나) — 시안 `materials.decor`. 무리의 문턱과 필라멘트 배열의 크기만 `KNOWLEDGE_UNIVERSE_SHAPE`에서 든다. */
+const KNOWLEDGE_UNIVERSE_DECOR_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
+      uniform float uTime; uniform float uLift; uniform float uPx; uniform float uDpr; uniform float uRef; uniform float uFocus; uniform float uFlow; uniform float uFocusGal;
+      uniform vec4 uBundle[${KNOWLEDGE_UNIVERSE_SHAPE.bundles}]; uniform vec4 uBundle2[${KNOWLEDGE_UNIVERSE_SHAPE.bundles}];
+      varying vec3 vCol; varying float vA; varying float vKind;
+      void main(){
+        float code = position.x;
+        float grp = floor(code / ${KNOWLEDGE_UNIVERSE_SHAPE.groupSpan}.0 + 1e-4);
+        float j = code - grp * ${KNOWLEDGE_UNIVERSE_SHAPE.groupSpan}.0;
+        uint s = hu(uint(code + 0.5) * 747796405u + 2891336453u);
+        float r0 = hf(s), r1 = hf(s + 11u), r2 = hf(s + 23u), r3 = hf(s + 37u), r4 = hf(s + 41u), r5 = hf(s + 53u), r6 = hf(s + 67u);
+        vec3 world = vec3(0.0); vec3 col = vec3(1.0); float inten = 0.0; float px = 1.6; float ext = 0.0; float dustA = 0.0; float kind = 0.0; float extR = 1.0; float extMax = 64.0;
+        vA = 0.0; vKind = 0.0;
+        float lift2 = uLift * uLift;
+        if (grp > ${KNOWLEDGE_UNIVERSE_SHAPE.bundleGroup - 0.5}) {
+          int b = int(grp - ${KNOWLEDGE_UNIVERSE_SHAPE.bundleGroup}.0 + 0.5);
+          vec4 B0 = uBundle[b], B1 = uBundle2[b];
+          int ga = int(B0.x + 0.5), gb = int(B0.y + 0.5);
+          vec4 CA = gal(ga, 0), CB = gal(gb, 0);
+          vec3 d = CB.xyz - CA.xyz; float L = max(length(d), 1.0); vec3 dir = d / L;
+          vec3 side = cross(dir, vec3(0.0, 1.0, 0.0)); side = length(side) < 1e-3 ? vec3(1.0, 0.0, 0.0) : normalize(side);
+          vec3 up2 = cross(side, dir);
+          float t = fract(r0 + uTime * (4.0 + 4.0 * r1) / L);
+          float ta = min(0.42, CA.w * 0.55 / L), tb = max(0.58, 1.0 - CB.w * 0.55 / L);
+          float tt = mix(ta, tb, t);
+          float arc = sin(3.14159265 * tt);
+          vec3 P = CA.xyz + d * tt + side * (B1.x * L * 0.1 * arc) + up2 * (L * 0.04 * arc);
+          float strong = B0.z * B0.z;
+          float w = (0.6 + 6.0 * pow(B0.z, 1.5)) * (0.45 + 0.55 * arc) * (0.65 + 0.35 * sin(tt * (9.0 + 5.0 * B1.y) + B1.y * 6.0));
+          float gr = sqrt(-2.0 * log(max(r2, 1e-4))) * 0.5, ang = 6.2831853 * r3;
+          world = P + (side * cos(ang) + up2 * sin(ang)) * gr * w;
+          float fade = smoothstep(0.0, 0.1, t) * smoothstep(1.0, 0.86, t);
+          inten = (0.035 + 0.22 * strong) * fade;
+          col = mix(gal(ga, 5).rgb, gal(gb, 5).rgb, tt) * vec3(0.68, 0.78, 1.0);
+          if (r4 < 0.05) { inten *= 5.0; px = 2.6; col = mix(col, vec3(1.0), 0.45); }
+          else if (r4 < 0.3) { kind = 1.0; ext = 0.8 + 3.0 * B0.z; extMax = 20.0; inten = (0.01 + 0.05 * strong) * fade; col = mix(col, vec3(0.45, 0.58, 1.0), 0.35); }
+          float onB = (abs(B0.x - uFocusGal) < 0.5 || abs(B0.y - uFocusGal) < 0.5) ? 1.0 : 0.0;
+          inten *= uFocusGal < -0.5 ? 1.0 : mix(0.15, 1.9, onB);
+          inten *= lift2;
+        } else if (grp > ${KNOWLEDGE_UNIVERSE_SHAPE.skyGroup - 0.5}) {
+          float z = r0 * 2.0 - 1.0, ph = 6.2831853 * r1, rr = sqrt(max(0.0, 1.0 - z * z));
+          vec3 dir = vec3(rr * cos(ph), z, rr * sin(ph));
+          vec4 clip = projectionMatrix * vec4(mat3(viewMatrix) * dir, 0.0);
+          if (clip.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vCol = vec3(0.0); return; }
+          clip.z = clip.w * 0.9999;
+          gl_Position = clip;
+          float m = pow(r2, 9.0);
+          float I = (0.045 + 0.07 * r3 + 2.4 * m) * lift2 * (uFocus > 0.5 ? 0.55 : 1.0);
+          if (j < 48.0) { vKind = 3.0; vCol = vec3(1.0, 0.88, 0.76) * (0.05 + 0.05 * r3) * lift2; vA = r5 * 3.1416; gl_PointSize = (4.0 + 6.0 * r4) * uDpr; return; }
+          vCol = starColor(0.08 + 0.84 * r4) * I;
+          gl_PointSize = (1.15 + 2.2 * sqrt(m)) * uDpr;
+          return;
+        } else {
+          int c = int(grp + 0.5);
+          vec4 G0 = gal(c, 0), G1 = gal(c, 1), G2 = gal(c, 2), G3 = gal(c, 3), G4 = gal(c, 4), G5 = gal(c, 5), G6 = gal(c, 6);
+          float R = G0.w; int type = int(G1.w + 0.5);
+          vec3 N = G1.xyz, Ux = G2.xyz, V = cross(N, Ux);
+          float arms = G2.w, K = G3.x, bar = G3.y, bulge = G3.z, act = G3.w, dust = G5.w, count = G6.x, th0 = G6.y;
+          float f = (j + 0.5) / max(count, 1.0);
+          vec3 l = vec3(0.0);
+          float spin = uTime;
+          extR = R;
+          if (type <= 1) {
+            float fDust = 0.14 * dust / 0.6, fBulge = fDust + bulge, fYoung = fBulge + 0.2 + 0.12 * act, fHII = fYoung + 0.025 + 0.07 * act, fHalo = fHII + 0.03;
+            if (f < fDust) {
+              float r = clamp(0.1 + 0.34 * -log(1.0 - r1 * 0.93), 0.1, 0.95);
+              float a = th0 + floor(r2 * arms) * 6.2831853 / arms + K * log(max(r, 0.1) / 0.1) - 0.26 + gauss(r3, r4) * 0.06;
+              l = vec3(cos(a) * r, sin(a) * r, gauss(r5, r6) * 0.012);
+              kind = 2.0; dustA = 0.3 * (1.0 - smoothstep(0.6, 0.95, r)); ext = 0.07; col = vec3(0.0);
+            } else if (f < fBulge) {
+              float r = 0.2 * pow(r1, 1.8);
+              float z = r2 * 2.0 - 1.0, ph = 6.2831853 * r3 + spin * 0.05 / (0.05 + r), q = sqrt(max(0.0, 1.0 - z * z));
+              l = vec3(q * cos(ph) * r, q * sin(ph) * r, z * r * 0.62);
+              col = starColor(0.12 + 0.2 * r4); inten = 0.5 + 0.9 * r5 * r5; px = 1.6;
+            } else if (f < fYoung) {
+              float r = clamp(0.12 + 0.36 * -log(1.0 - r1 * 0.9), 0.12, 1.0);
+              float a;
+              if (type == 1 && r < bar) a = th0 + floor(r2 * 2.0) * 3.14159265 + gauss(r3, r4) * 0.06;
+              else a = th0 + floor(r2 * arms) * 6.2831853 / arms + K * log(max(r, 0.1) / 0.1) + gauss(r3, r4) * 0.11;
+              l = vec3(cos(a) * r, sin(a) * r, gauss(r5, r6) * 0.01);
+              col = starColor(0.62 + 0.36 * r5); inten = (0.32 + 0.9 * pow(r6, 3.0)) * (0.7 + 0.8 * act); px = 1.5 + r6;
+            } else if (f < fHII) {
+              uint ks = hu(uint(c) * 9781u + uint(floor(j / 7.0)) * 6271u);
+              float kr = clamp(0.18 + 0.3 * -log(1.0 - hf(ks) * 0.9), 0.15, 0.92);
+              float ka = th0 + floor(hf(ks + 3u) * arms) * 6.2831853 / arms + K * log(kr / 0.1) + (hf(ks + 5u) - 0.5) * 0.12;
+              l = vec3(cos(ka) * kr, sin(ka) * kr, 0.0) + vec3(gauss(r1, r2), gauss(r3, r4), gauss(r5, r6) * 0.3) * 0.018;
+              kind = 1.0; col = vec3(1.0, 0.28, 0.42); inten = 0.16 + 0.2 * act; ext = 0.028;
+            } else if (f < fHalo) {
+              float r = 0.3 + 0.9 * r1;
+              float z = r2 * 2.0 - 1.0, ph = 6.2831853 * r3, q = sqrt(max(0.0, 1.0 - z * z));
+              l = vec3(q * cos(ph), q * sin(ph), z * 0.7) * r;
+              col = starColor(0.08 + 0.15 * r4); inten = 0.1 + 0.12 * r5;
+            } else {
+              float r = clamp(0.03 + 0.3 * -log(1.0 - r1 * 0.96), 0.03, 1.05);
+              float a = 6.2831853 * r2 + spin * 0.035 / (0.08 + r);
+              if (type == 1 && r < bar && r3 < 0.35) a = th0 + floor(r4 * 2.0) * 3.14159265 + gauss(r5, r6) * 0.07;
+              l = vec3(cos(a) * r, sin(a) * r, gauss(r5, r6) * 0.02 * (1.0 - 0.5 * r));
+              float arm = armField(r, a, arms, K, th0);
+              col = starColor(0.2 + 0.3 * r4 + 0.25 * arm); inten = (0.13 + 0.3 * r5) * (0.35 + 1.6 * arm); px = 1.3 + 0.6 * r6;
+            }
+          } else if (type == 2) {
+            float r = 0.85 * pow(r1, 1.7);
+            float z = r2 * 2.0 - 1.0, ph = 6.2831853 * r3 + spin * 0.02 / (0.1 + r), q = sqrt(max(0.0, 1.0 - z * z));
+            l = vec3(q * cos(ph) * r, q * sin(ph) * r * 0.78, z * r * 0.6);
+            col = starColor(0.1 + 0.22 * r4); inten = (0.3 + 0.55 * r5 * r5) * (1.0 - 0.6 * r); px = 1.4 + 0.5 * r6;
+          } else if (type == 3) {
+            float clump = floor(r1 * 4.0);
+            float ca = th0 + clump * 1.9, cr = 0.12 + 0.2 * clump;
+            l = vec3(cos(ca) * cr, sin(ca) * cr, 0.0) + vec3(gauss(r2, r3), gauss(r4, r5), gauss(r6, r1) * 0.35) * 0.2;
+            bool hii = r6 < 0.1;
+            col = hii ? vec3(1.0, 0.28, 0.42) : starColor(0.45 + 0.5 * r4);
+            inten = hii ? 0.2 : 0.25 + 0.6 * r5 * r5; kind = hii ? 1.0 : 0.0; ext = hii ? 0.05 : 0.0;
+          } else if (type == 4) {
+            float r = 0.9 * pow(r1, 1.4);
+            float z = r2 * 2.0 - 1.0, ph = 6.2831853 * r3, q = sqrt(max(0.0, 1.0 - z * z));
+            l = vec3(q * cos(ph), q * sin(ph), z) * r;
+            col = starColor(0.55 + 0.45 * r4); inten = 0.25 + 1.1 * pow(r5, 4.0); px = 1.4 + 0.8 * r6;
+          }
+          world = mix(G4.xyz, G0.xyz + (Ux * l.x + V * l.y + N * l.z) * R, uLift);
+          col *= G5.rgb;
+          float foc = uFocusGal < -0.5 ? 1.0 : (abs(float(c) - uFocusGal) < 0.5 ? 1.15 : 0.3);
+          inten *= foc * lift2;
+          dustA *= foc * uLift;
+        }
+        vec4 clip = projectionMatrix * viewMatrix * vec4(world, 1.0);
+        gl_Position = clip;
+        float dist = max(clip.w, 1.0);
+        if (ext > 0.0) {
+          float sz = ext * extR * uPx / dist, sc = clamp(sz, 1.5 * uDpr, extMax * uDpr), keep = min(1.0, (sz * sz) / (sc * sc)) * min(1.0, sc / sz + 0.35);
+          gl_PointSize = sc; vCol = col * inten * keep; vA = dustA * keep;
+        } else {
+          gl_PointSize = px * uDpr;
+          vCol = col * inten * clamp(pow(uRef / dist, 2.0), 0.1, 4.0);
+          vA = 0.0;
+        }
+        vKind = kind;
+      }`;
+
+const KNOWLEDGE_UNIVERSE_DECOR_FRAG = `varying vec3 vCol; varying float vA; varying float vKind;
+      void main(){
+        vec2 p = gl_PointCoord - 0.5;
+        float r2 = dot(p, p) * 4.0;
+        float inside = step(r2, 1.0);
+        vec4 o;
+        if (vKind < 0.5) o = vec4(vCol * exp(-r2 * 4.5), 0.0);
+        else if (vKind < 1.5) o = vec4(vCol * exp(-r2 * 3.5) * (1.0 - r2), 0.0);
+        else if (vKind < 2.5) { float s = max(0.0, 1.0 - r2); o = vec4(0.0, 0.0, 0.0, vA * s * s); }
+        else { float ca = cos(vA), sa = sin(vA); vec2 q = mat2(ca, -sa, sa, ca) * p; o = vec4(vCol * exp(-(q.x * q.x * 4.0 + q.y * q.y * 26.0) * 4.0), 0.0); }
+        gl_FragColor = o * inside;
+      }`;
 
 /* 이름 있는 별(쪽): 밝기 = 연결 수(등급 척도), 색 = 최근 고침(흑체 색), 밝은 별은 빛살, 찾은 별은
  * 조준 고리 — 시안 `materials.stars`. */
@@ -803,6 +1037,7 @@ function makeKnowledgeUniverse(view) {
     /* 우주의 자료(`knowledgeUniverseMap`)와 그 텍스처, 색(`knowledgeUniverseInks`)과 견본, 후처리의 살림. */
     map: null,
     galTexture: null,
+    decorCount: 0,
     inks: null,
     probe: null,
     post: null,
@@ -904,7 +1139,11 @@ function makeKnowledgeUniverse(view) {
         uniforms: this.uniforms, vertexShader, fragmentShader, transparent: true, depthTest: false, depthWrite: false,
         blending: THREE.NormalBlending, premultipliedAlpha: true,
       });
-      this.materials = { stars: material(KNOWLEDGE_UNIVERSE_STARS_VERT, KNOWLEDGE_UNIVERSE_STARS_FRAG) };
+      this.materials = {
+        glows: material(KNOWLEDGE_UNIVERSE_GLOWS_VERT, KNOWLEDGE_UNIVERSE_GLOWS_FRAG),
+        decor: material(KNOWLEDGE_UNIVERSE_DECOR_VERT, KNOWLEDGE_UNIVERSE_DECOR_FRAG),
+        stars: material(KNOWLEDGE_UNIVERSE_STARS_VERT, KNOWLEDGE_UNIVERSE_STARS_FRAG),
+      };
       this.floatTargets = renderer.extensions.has("EXT_color_buffer_float")
         || renderer.extensions.has("EXT_color_buffer_half_float");
       this.makePost();
@@ -1171,6 +1410,55 @@ function makeKnowledgeUniverse(view) {
         star[at * 4 + 2] = map.rowOf[at];
       }
       this.placeSeats();
+      /* 그리는 차례(시안 `renderOrder`): 원반·성운 0 → 장식 입자 1 → 이름 있는 별 2 → 별자리 선 3. 장면에 넣는
+       * 차례가 그 차례다(정렬은 끈다). */
+      const add = (object, order, key) => {
+        object.frustumCulled = false;
+        object.renderOrder = order;
+        object.userData.key = key;
+        this.scene.add(object);
+        this.built.objects.push(object);
+        return object;
+      };
+      /* 원반·핵·성운(시안 `bb`): 나선·막대·불규칙은 원반과 핵, 타원은 핵 하나, 성단은 성운 셋 — 성운은 앞
+       * `nebula-max` 성단에만(fbm 조각이 가장 비싸다, 디자이너 답 m-12467). */
+      const TYPE = KNOWLEDGE_UNIVERSE_TYPES;
+      const glows = [];
+      let clusters = 0;
+      for (const row of map.galaxy) {
+        if (row.type === TYPE.cluster) {
+          if (clusters < U.nebulaMax) {
+            glows.push(row.rank, 2, U.nebulaOuter, 0, row.rank, 2, U.nebulaMid, 1, row.rank, 2, U.nebulaInner, 2);
+          }
+          clusters += 1;
+        } else if (row.type === TYPE.elliptical) {
+          glows.push(row.rank, 1, U.coreElliptical, 1);
+        } else {
+          glows.push(row.rank, 0, U.disk, 0, row.rank, 1, U.core, 1);
+        }
+      }
+      const glowGeometry = new THREE.InstancedBufferGeometry();
+      glowGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]), 3));
+      glowGeometry.setIndex([0, 1, 2, 0, 2, 3]);
+      glowGeometry.setAttribute("aBB", new THREE.InstancedBufferAttribute(new Float32Array(glows), 4));
+      glowGeometry.instanceCount = glows.length / 4;
+      this.built.geometries.push(glowGeometry);
+      add(new THREE.Mesh(glowGeometry, this.materials.glows), 0, "glows");
+      /* 몸의 이름 없는 별(시안 `buildScene`의 장식 입자): 번호 = 무리 × `groupSpan` + 차례 — 줄마다 제 장식 수만큼,
+       * 그 뒤 배경 별. 필라멘트의 번호는 그 뒤에 선다(④). */
+      let total = U.decorSky;
+      for (const row of map.galaxy) total += row.decor;
+      const codes = new Float32Array(total);
+      let code = 0;
+      for (const row of map.galaxy) {
+        for (let step = 0; step < row.decor; step += 1) codes[code++] = row.rank * SHAPE.groupSpan + step;
+      }
+      for (let step = 0; step < U.decorSky; step += 1) codes[code++] = SHAPE.skyGroup * SHAPE.groupSpan + step;
+      const decorGeometry = new THREE.BufferGeometry();
+      decorGeometry.setAttribute("position", new THREE.BufferAttribute(codes, 1));
+      this.built.geometries.push(decorGeometry);
+      this.decorCount = total;
+      add(new THREE.Points(decorGeometry, this.materials.decor), 1, "decor");
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.BufferAttribute(this.pos3, 3));
       geometry.setAttribute("aPos2", new THREE.BufferAttribute(this.pos2, 3));
@@ -1181,12 +1469,7 @@ function makeKnowledgeUniverse(view) {
       geometry.setAttribute("aState", this.starStateAttr);
       this.built.geometries.push(geometry);
       this.starGeometry = geometry;
-      const stars = new THREE.Points(geometry, this.materials.stars);
-      stars.frustumCulled = false;
-      /* 그리는 차례(시안 `renderOrder`): 원반·성운 0 → 장식 입자 1 → 이름 있는 별 2 → 별자리 선 3. */
-      stars.renderOrder = 2;
-      this.scene.add(stars);
-      this.built.objects.push(stars);
+      add(new THREE.Points(geometry, this.materials.stars), 2, "stars");
       this.applyInks();
       this.computeHome();
       writeAttribute(this.canvas, "aria-label", t("knowledge.universeSummary", "지식 그래프 우주 · 주제 {{topics}} · 쪽 {{pages}}",
