@@ -110,7 +110,7 @@ pub(crate) fn snapshot_for_session(
         parent_session_id,
         epoch_seconds_now(),
         None,
-        &mut ManifestCache::default(),
+        &mut ManifestCache::shared(),
     )
 }
 
@@ -184,7 +184,7 @@ impl SubagentProgressWatcher {
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(POLL_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let cache = Arc::new(Mutex::new(ManifestCache::default()));
+            let cache = Arc::new(Mutex::new(ManifestCache::shared()));
             loop {
                 interval.tick().await;
                 let registry = Arc::clone(&registry);
@@ -320,23 +320,22 @@ struct AgentManifest {
     transcript: Option<PathBuf>,
 }
 
-/// What a watcher last read of each manifest file in its stores.
+/// What this process last read of each manifest file, whichever watcher
+/// read it.
 ///
 /// A project's store keeps every helper it ever ran — 432 manifests in the
-/// person's zerocode project on 2026-09-28, 2,875 in another — and the
-/// watcher asks every second, twice during a turn (the turn's own watcher and
-/// the IDE relay's). Reading and parsing all of them each time cost 2.6% CPU
-/// at idle with 432 in the store; a manifest whose file has not changed says
-/// what it said last time.
+/// person's zerocode project on 2026-09-28, 2,875 in another — and a watcher
+/// asks every second, twice during a turn (the turn's own watcher and the IDE
+/// relay's). Reading and parsing all of them each time cost 2.6% CPU at idle
+/// with 432 in the store; a manifest whose file has not changed says what it
+/// said last time.
 #[derive(Default)]
-pub(crate) struct ManifestCache {
+struct ManifestFiles {
     files: HashMap<PathBuf, CachedManifest>,
-    /// Manifest files read since the last [`Self::take_reads`].
-    reads: usize,
 }
 
 /// One manifest file as last read: what identifies its bytes, and what they
-/// said (`None` — not a manifest this watcher can use).
+/// said (`None` — not a manifest a watcher can use).
 struct CachedManifest {
     stamp: FileStamp,
     manifest: Option<Arc<AgentManifest>>,
@@ -366,16 +365,16 @@ impl FileStamp {
     }
 }
 
-impl ManifestCache {
-    /// The manifest at `path`, read again only when its file changed.
-    fn manifest(&mut self, path: &Path, metadata: &std::fs::Metadata) -> Option<Arc<AgentManifest>> {
+impl ManifestFiles {
+    /// The manifest at `path`, and whether its file had to be read — only
+    /// when it changed since anybody last read it.
+    fn manifest(&mut self, path: &Path, metadata: &std::fs::Metadata) -> (Option<Arc<AgentManifest>>, bool) {
         let stamp = FileStamp::of(metadata);
         if let Some(cached) = self.files.get(path) {
             if cached.stamp == stamp {
-                return cached.manifest.clone();
+                return (cached.manifest.clone(), false);
             }
         }
-        self.reads += 1;
         let manifest = read_manifest(path, metadata).map(Arc::new);
         self.files.insert(
             path.to_path_buf(),
@@ -384,19 +383,87 @@ impl ManifestCache {
                 manifest: manifest.clone(),
             },
         );
-        manifest
+        (manifest, true)
     }
 
-    /// Forget files the last scan did not see — a store only grows between
-    /// sweeps, and a swept manifest must not be remembered forever.
-    fn keep_only(&mut self, seen: &HashSet<PathBuf>) {
-        self.files.retain(|path, _| seen.contains(path));
+    /// Forget files of the listed stores that the listing did not see — a
+    /// swept manifest must not be remembered forever. Another store's files
+    /// are another watcher's to keep.
+    fn keep_only(&mut self, seen: &HashSet<PathBuf>, stores: &[(PathBuf, Option<SystemTime>)]) {
+        self.files.retain(|path, _| {
+            seen.contains(path)
+                || !path
+                    .parent()
+                    .is_some_and(|parent| stores.iter().any(|(store, _)| store == parent))
+        });
+    }
+}
+
+/// One watcher's view of the stores: the files every watcher shares, and
+/// whether its own last listing found nothing running — which depends on the
+/// watcher, since a turn's watcher leaves out what started before its turn.
+#[derive(Default)]
+pub(crate) struct ManifestCache {
+    files: Arc<Mutex<ManifestFiles>>,
+    /// Each store directory's time at the last listing, kept while that
+    /// listing found nothing of this session running.
+    quiet: Option<Vec<(PathBuf, Option<SystemTime>)>>,
+    /// Listings skipped since the last one made.
+    skipped: u32,
+    /// Manifest files this watcher read since the last `take_reads`.
+    reads: usize,
+    /// Store listings since the last `take_listings` (the tests' count).
+    listings: usize,
+}
+
+/// A quiet store is listed anyway once in this many scans — the bound on how
+/// long a change that moved no directory's time could go unseen.
+const QUIET_RELIST_EVERY: u32 = 30;
+
+impl ManifestCache {
+    /// A watcher's cache over what every watcher of this process has read.
+    pub(crate) fn shared() -> Self {
+        Self::default()
+    }
+
+    /// Whether the stores can be left unlisted this time.
+    fn still_quiet(&mut self, _stores: &[(PathBuf, Option<SystemTime>)]) -> bool {
+        false
+    }
+
+    /// What a listing found: the stores' times, kept only when nothing of
+    /// this session was running.
+    fn settle(&mut self, stores: Vec<(PathBuf, Option<SystemTime>)>, nothing_running: bool) {
+        self.quiet = nothing_running.then_some(stores);
+        self.skipped = 0;
     }
 
     #[cfg(test)]
     fn take_reads(&mut self) -> usize {
         std::mem::take(&mut self.reads)
     }
+
+    #[cfg(test)]
+    fn take_listings(&mut self) -> usize {
+        std::mem::take(&mut self.listings)
+    }
+
+    #[cfg(test)]
+    fn remembered(&self) -> usize {
+        self.files.lock().expect("manifest files").files.len()
+    }
+}
+
+/// Each store directory of `registry` with its own modification time.
+fn store_times(registry: &AgentRegistry) -> Vec<(PathBuf, Option<SystemTime>)> {
+    registry
+        .stores()
+        .into_iter()
+        .map(|store| {
+            let modified = std::fs::metadata(&store).and_then(|metadata| metadata.modified()).ok();
+            (store, modified)
+        })
+        .collect()
 }
 
 fn read_manifest(path: &Path, metadata: &std::fs::Metadata) -> Option<AgentManifest> {
@@ -418,13 +485,21 @@ fn scan_registry(
     started_at_floor: Option<u64>,
     cache: &mut ManifestCache,
 ) -> Vec<SubagentProgress> {
+    let stores = store_times(registry);
+    if cache.still_quiet(&stores) {
+        return Vec::new();
+    }
+    cache.listings += 1;
     let mut progress = Vec::new();
     let mut seen = HashSet::new();
+    let files = Arc::clone(&cache.files);
+    let mut files = files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for path in registry.manifest_paths() {
         let Ok(metadata) = std::fs::metadata(&path) else {
             continue;
         };
-        let manifest = cache.manifest(&path, &metadata);
+        let (manifest, read) = files.manifest(&path, &metadata);
+        cache.reads += usize::from(read);
         seen.insert(path.clone());
         let Some(manifest) = manifest else {
             continue;
@@ -518,7 +593,9 @@ fn scan_registry(
             },
         });
     }
-    cache.keep_only(&seen);
+    files.keep_only(&seen, &stores);
+    drop(files);
+    cache.settle(stores, progress.is_empty());
     progress.sort_by(|left, right| {
         left.started_epoch
             .cmp(&right.started_epoch)
@@ -1179,6 +1256,84 @@ mod tests {
 
         fs::remove_file(temp.path().join("finished-0.json")).expect("sweep");
         let _ = scan_registry(&registry, "session-a", 200, None, &mut cache);
-        assert_eq!(cache.files.len(), 5, "a swept manifest stays remembered");
+        assert_eq!(cache.remembered(), 5, "a swept manifest stays remembered");
+    }
+
+    /// A store where nothing of this session runs is not listed again until
+    /// a manifest lands in it: the tools crate publishes every manifest by a
+    /// rename, which moves the directory's time. While something runs, every
+    /// scan lists — its row's clock moves each second.
+    #[test]
+    fn a_quiet_store_is_not_listed_again_until_a_manifest_lands() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let publish = |id: &str, session: &str, status: &str| {
+            let staged = temp.path().join(format!(".{id}.json.tmp"));
+            fs::write(
+                &staged,
+                serde_json::to_vec(&json!({
+                    "agentId": id,
+                    "parentSessionId": session,
+                    "name": id,
+                    "status": status,
+                    "startedAt": "100",
+                }))
+                .expect("manifest json"),
+            )
+            .expect("write manifest");
+            fs::rename(staged, temp.path().join(format!("{id}.json"))).expect("publish manifest");
+        };
+        for index in 0..3 {
+            publish(&format!("finished-{index}"), "session-other", "completed");
+        }
+        let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
+        let mut cache = ManifestCache::default();
+        let scan = |cache: &mut ManifestCache| scan_registry(&registry, "session-a", 200, None, cache);
+
+        assert!(scan(&mut cache).is_empty());
+        assert_eq!(cache.take_listings(), 1);
+        for _ in 0..3 {
+            assert!(scan(&mut cache).is_empty());
+        }
+        assert_eq!(cache.take_listings(), 0, "a quiet store was listed again");
+
+        publish("live", "session-a", "running");
+        assert_eq!(scan(&mut cache).len(), 1, "a manifest that landed was not seen");
+        assert_eq!(scan(&mut cache).len(), 1);
+        assert_eq!(cache.take_listings(), 2, "a store with a running helper is listed every time");
+    }
+
+    /// A turn's watcher starts with each turn and finds the session's files
+    /// already read: the store is not read again at every turn's start.
+    #[test]
+    fn a_new_turns_watcher_reads_nothing_the_session_already_read() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for (id, session, status) in [
+            ("finished-0", "session-other", "completed"),
+            ("finished-1", "session-other", "completed"),
+            ("finished-2", "session-other", "completed"),
+            ("live", "session-a", "running"),
+        ] {
+            fs::write(
+                temp.path().join(format!("{id}.json")),
+                serde_json::to_vec(&json!({
+                    "agentId": id,
+                    "parentSessionId": session,
+                    "name": id,
+                    "status": status,
+                    "startedAt": "100",
+                }))
+                .expect("manifest json"),
+            )
+            .expect("write manifest");
+        }
+        let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
+        let mut session_watcher = ManifestCache::shared();
+        let rows = scan_registry(&registry, "session-a", 200, None, &mut session_watcher);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(session_watcher.take_reads(), 4);
+
+        let mut turn_watcher = ManifestCache::shared();
+        assert_eq!(scan_registry(&registry, "session-a", 200, Some(100), &mut turn_watcher), rows);
+        assert_eq!(turn_watcher.take_reads(), 0, "a new turn's watcher read the store again");
     }
 }
