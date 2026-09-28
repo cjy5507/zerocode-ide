@@ -1666,6 +1666,7 @@
    * 한 줄의 높이. */
   --knowledge-3d-labels: 30;
   --knowledge-3d-labels-rest: 5;
+  --knowledge-3d-labels-close: 12;
   --knowledge-3d-labels-candidates: 40;
   --knowledge-3d-label-least: 2.2;
   --knowledge-3d-label-neighbour: 30;

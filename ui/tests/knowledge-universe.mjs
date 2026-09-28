@@ -1147,7 +1147,10 @@ export async function testKnowledgeUniverseLabels(page, ok) {
         flowCounts: restFlows.map((one) => one.textContent.trim()),
         wantFlows: map.filaments.slice(0, 6).map((one) => String(one.n)),
         pressed: restPlates.filter((one) => one.getAttribute("aria-pressed") === "true").length,
-        full: restPlates.filter((one) => one.classList.contains("is-full")).length };
+        full: restPlates.filter((one) => one.classList.contains("is-full")).length,
+        /* 선 명판은 키보드로도 닿고(단추, Tab), 숨은 명판은 닿지 않는다. */
+        tabbable: restPlates.every((one) => one.tabIndex === 0)
+          && [...universe.host.querySelectorAll(".knowledge-universe-plate:not(.is-on)")].every((one) => one.tabIndex === -1) };
       /* 올리기 — 순위 1 은하의 허브에 포인터를 둔다(시안 06-hover). */
       const hub = map.members[1][0];
       const spot = universe.project(hub);
@@ -1193,6 +1196,7 @@ export async function testKnowledgeUniverseLabels(page, ok) {
         full: closePlates.map((one) => one.classList.contains("is-full")),
         pressed: closePlates.map((one) => one.getAttribute("aria-pressed")),
         names: closeNames.length, strangers: closeNames.filter((word) => !members.has(word)).length,
+        most: knowledgeUniverseTuning(view).labelsClose,
         flows: shown(".knowledge-universe-flow").length,
         small, clashes: clashes([...closePlates, ...shown(".knowledge-universe-name")].map(box)) };
       toggleKnowledgeCluster(view, small);
@@ -1248,7 +1252,8 @@ export async function testKnowledgeUniverseLabels(page, ok) {
       && seen.rest.flowCounts.every((word) => seen.rest.wantFlows.includes(word))
       && seen.rest.names.length >= 1 && seen.rest.names.length <= 5
       && seen.rest.names.every((word) => seen.rest.bright.includes(word))
-      && seen.rest.clashes === 0 && seen.rest.onZoom === 0 && seen.rest.pressed === 0 && seen.rest.full === 0,
+      && seen.rest.clashes === 0 && seen.rest.onZoom === 0 && seen.rest.pressed === 0 && seen.rest.full === 0
+      && seen.rest.tabbable,
     detail);
   ok("t-12443 ⑥: pointing at a star shows its tip (title, galaxy, links) beside it, names its neighbours but not itself, and lets the filament counts go; leaving takes the tip away",
     !seen.thrown && seen.hovered.tipOn && seen.hovered.tipWords.includes(seen.hovered.title)
@@ -1257,9 +1262,10 @@ export async function testKnowledgeUniverseLabels(page, ok) {
       && seen.hovered.clashes === 0 && seen.hovered.underTip === 0 && !seen.left.tipOn && seen.left.flows >= 1
       && seen.hovered.tipInside && seen.hovered.tipRoom <= seen.hovered.room,
     detail);
-  ok("t-12443 ⑥: a picked galaxy is close wherever it flew — even the biggest, outside the home-distance threshold — so only its plate stays, full and pressed, and the names are its own stars",
+  ok("t-12443 ⑥: a picked galaxy is close wherever it flew — even the biggest, outside the home-distance threshold — so only its plate stays, full and pressed, and its own stars carry names spread over it, up to labels-close (designer m-12670)",
     !seen.thrown && seen.close.closeIn && !seen.close.homeOnly && seen.close.plates.length === 1 && seen.close.plates[0] === seen.close.small
-      && seen.close.full[0] === true && seen.close.pressed[0] === "true" && seen.close.names >= 1
+      && seen.close.full[0] === true && seen.close.pressed[0] === "true" && seen.close.names >= 8
+      && seen.close.names <= seen.close.most
       && seen.close.strangers === 0 && seen.close.flows === 0 && seen.close.clashes === 0,
     detail);
   ok("t-12443 ⑥: while the universe stands the legend shows its four rows (brightness, recency, filaments, pointed lines) and hides the flat rows; flat shows the flat rows only",

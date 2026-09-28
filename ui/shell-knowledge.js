@@ -3427,7 +3427,8 @@ function knowledgeDiscsApart(homeX, homeY, homeR, named, gap) {
 /* 그림 위의 낱말은 짧다 — 제목은 문장이고 문장 서른다섯 개는 안개다. 온전한
  * 제목은 카드의 것이다. */
 function knowledgeShortWord(word, max) {
-  return word.length > max ? `${word.slice(0, Math.max(1, max - 1))}…` : word;
+  /* 자른 자리가 빈칸이면 빈칸을 떼고 말줄임표를 붙인다 — 「… 완료가 …」가 아니라 「… 완료가…」. */
+  return word.length > max ? `${word.slice(0, Math.max(1, max - 1)).trimEnd()}…` : word;
 }
 
 /* 군집의 낱말 — 이름이 없으면 순위로 부른다. */
@@ -7945,6 +7946,8 @@ function wireKnowledgeView(view) {
       return;
     }
     if (!layout || event.metaKey || event.ctrlKey || event.altKey) return;
+    /* 우주의 명판(t-12443)은 제 단추가 Enter·Space를 받는다 — 판의 Enter(고른 쪽 열기)가 가로채지 않는다. */
+    if (event.target.closest?.(".knowledge-universe-plate") && (event.key === "Enter" || event.key === " ")) return;
     /* 주제의 이름판은 키보드로도 눌린다(09-16) — 그것이 「이 주제를 펼쳐라」의
      * 단추이므로, 마우스에만 달린 문은 문이 아니다. */
     const plate = event.target.closest?.(".knowledge-cluster-label");

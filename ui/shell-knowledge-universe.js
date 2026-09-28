@@ -204,6 +204,8 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
    * 고르는 위·아래 띠, 별에서 비킨 거리(반지름의 몫·최소·여백), 판 가장자리 여백, 놓는 위·아래 띠, 한 줄의 높이. */
   labels: "--knowledge-3d-labels",
   labelsRest: "--knowledge-3d-labels-rest",
+  /* 고른 은하 가까이(쪽 초점도 찾기도 없을 때)의 이름 수 — 후보는 그 은하의 쪽 전부다(디자이너 m-12670). */
+  labelsClose: "--knowledge-3d-labels-close",
   labelsCandidates: "--knowledge-3d-labels-candidates",
   labelLeast: "--knowledge-3d-label-least",
   labelNeighbour: "--knowledge-3d-label-neighbour",
@@ -2602,10 +2604,13 @@ function makeKnowledgeUniverse(view) {
       if (on === label.on) return;
       label.on = on;
       label.element.classList.toggle("is-on", on);
+      /* 선 명판은 키보드로도 닿는다(단추) — 숨은 명판은 탭 차례에서 빠진다. */
+      if (label.element.tagName === "BUTTON") label.element.tabIndex = on ? 0 : -1;
     },
 
     hideLabels() {
       if (this.labelVersion === -1) return;
+      /* 숨은 명판은 탭 차례에서도 빠진다(`showLabel`). */
       this.tip?.classList.remove("is-on");
       this.tipBox = null;
       for (const plate of this.plates) this.showLabel(plate, false);
@@ -2710,11 +2715,20 @@ function makeKnowledgeUniverse(view) {
       /* 쪽 이름 — 가까이 왔거나 초점이 있으면 화면에서 밝게(크게) 보이는 별부터, 쉬는 먼 자리에서는 가장 밝은 별들. */
       const proj = this.proj;
       const state = this.starState;
-      const candidates = this.candidates;
+      let candidates = this.candidates;
       const scores = this.candidateScores;
       const room = candidates.length;
       let found = 0;
-      if (closeIn || focusSeat >= 0 || this.hits > 0) {
+      let most = this.names.length;
+      /* 고른 은하 가까이, 쪽 초점도 찾기도 없으면(디자이너 m-12670): 후보는 그 은하의 쪽 전부이고 이름은
+       * `labels-close`개까지 — 연결이 많은 차례(`members`)가 곧 화면에서 큰 차례에 가깝다(크기 = 광도 × 깊이). 화면
+       * 크기 상위 40만 보면 핵 둘레에 몰린 허브들이 서로를 막아 다섯만 섰다. */
+      const galaxyClose = closeIn && picked >= 0 && focusSeat < 0 && this.hits === 0;
+      if (galaxyClose) {
+        candidates = map.members[picked];
+        found = candidates.length;
+        most = Math.min(most, U.labelsClose);
+      } else if (closeIn || focusSeat >= 0 || this.hits > 0) {
         for (let seat = 0; seat < layout.count; seat += 1) {
           if (proj[seat * 4 + 3] < 0) continue;
           const sx = proj[seat * 4];
@@ -2772,9 +2786,11 @@ function makeKnowledgeUniverse(view) {
         this.pushBox(x - U.tipGap, y - U.tipGap, tipWide + U.tipGap * 2, tipTall + U.tipGap * 2);
       }
       let used = 0;
-      for (let at = 0; at < found && used < this.names.length; at += 1) {
+      for (let at = 0; at < found && used < most; at += 1) {
         const seat = candidates[at];
         if (proj[seat * 4 + 3] < 0) continue;
+        if (galaxyClose && (proj[seat * 4] < 0 || proj[seat * 4] > wide || proj[seat * 4 + 1] < U.labelScan
+          || proj[seat * 4 + 1] > tall - U.labelScan || proj[seat * 4 + 2] < U.labelLeast)) continue;
         const hot = seat === focusSeat;
         const nameWide = this.nameWide(seat, hot);
         const off = Math.max(U.labelOffLeast, proj[seat * 4 + 2] * U.labelOff) + U.labelOffPad;
