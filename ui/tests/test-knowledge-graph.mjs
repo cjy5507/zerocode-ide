@@ -4564,11 +4564,11 @@ ok("GL local exploration wears the SVG's grammar: no nebula, spokes apart from c
     && localGrammar.centreHalo !== "none" && localGrammar.centreRing,
   JSON.stringify(localGrammar));
 
-/* 주제의 이름판은 그리는 글자만큼 자리를 쥔다(t-11500). 쪽 수 줄은 이름표가 판 다음에 앉은 뒤에야
- * 「48쪽 · 이름 +48」이 되므로, 판이 설 때 「48쪽」으로 재면 그린 줄의 대부분이 격자가 모르는 칸에
- * 선다(옛 코드: 선 판 모두). 판이 그린 줄마다 그 가운데 줄의 칸이 모두 이번 격자에 쥐어졌는지,
- * 판의 줄끼리·판과 이름이 겹치지 않는지, 세 줄이 설 곳 없는 판이 접히는 대신 한 줄로 서는지를
- * 두 손에서 묻는다 — 판 여섯·스물(넓은 판)과 빽빽한 좁은 판. */
+/* 주제의 이름판은 그리는 글자만큼 자리를 쥔다(t-11500). 판이 그린 줄마다 그 가운데 줄의 칸이 모두
+ * 이번 격자에 쥐어졌는지, 판의 줄끼리·판과 이름이 겹치지 않는지를 두 손에서 묻는다 — 판 여섯·스물(넓은
+ * 판)과 빽빽한 좁은 판. 판은 이름 한 줄이다(t-12029, 시안 v2 「oneLine」): 선 판마다 보이는 줄이 꼭 하나. SVG의
+ * 판은 점을 덮지 않는다(점이 판의 글자 위에 그려지므로). GL의 판은 점 위의 층이라 제 원반 곁에 선다 — 가까운
+ * 자리가 다 막힌 판은 점을 덮고서라도(t-12029): 모든 GL 판이 원반 가장자리의 가까운 세 겹 안이다. */
 const plateScene = (tags, pages) => glPage.evaluate(async ({ tags, pages }) => {
   const frame = () => new Promise((done) => requestAnimationFrame(done));
   const view = document.querySelector(".knowledge-view:not([hidden])");
@@ -4602,7 +4602,7 @@ const plateScene = (tags, pages) => glPage.evaluate(async ({ tags, pages }) => {
       const lines = [];
       let unreserved = 0;
       let standing = 0;
-      let oneLine = 0;
+      let drawnLines = 0;
       let folded = 0;
       for (let rank = 0; rank < layout.namedCount; rank += 1) {
         const held = layout.clusterEls[rank];
@@ -4612,12 +4612,11 @@ const plateScene = (tags, pages) => glPage.evaluate(async ({ tags, pages }) => {
           continue;
         }
         standing += 1;
-        if (held.label.classList.contains("is-one-line")) oneLine += 1;
-        for (const line of held.label.querySelectorAll(
-          ".knowledge-cluster-name, .knowledge-cluster-lead, .knowledge-cluster-count")) {
+        for (const line of held.label.querySelectorAll("text")) {
           if (getComputedStyle(line).display === "none") continue;
           const seat = line.getBoundingClientRect();
           if (seat.width === 0) continue;
+          drawnLines += 1;
           lines.push({ rank, box: [seat.left, seat.top, seat.right, seat.bottom] });
           /* 그 줄의 가운데 줄의 칸 — 글자가 서는 모든 칸이 이번 격자에 쥐어져 있어야 한다. */
           const row = Math.floor(((seat.top + seat.bottom) / 2 - canvas.top) / cell);
@@ -4663,8 +4662,22 @@ const plateScene = (tags, pages) => glPage.evaluate(async ({ tags, pages }) => {
         if (rim) underRim += 1;
         else underOther += 1;
       }
-      rows.push({ tags, hand: knowledgePainterFor(view).id, standing, oneLine, folded, unreserved, overlaps,
-        underRim, underOther });
+      /* 판의 가운데에서 제 원반 가장자리까지(화면 px) — 가장 먼 판. */
+      let farthest = 0;
+      for (let rank = 0; rank < layout.namedCount; rank += 1) {
+        const held = layout.clusterEls[rank];
+        if (!held || layout.clusterTally[rank] === 0 || held.label.classList.contains("is-folded")) continue;
+        const seat = held.label.querySelector("text").getBoundingClientRect();
+        const discX = canvas.left + (layout.clusterX[rank] - layout.viewBoxRect.x) * layout.scale;
+        const camera = layout.viewBoxRect;
+        const discY = canvas.top + (camera.middleY + (layout.clusterY[rank] - camera.middleY) * camera.yScale
+          - camera.y) * layout.scale;
+        const gapX = Math.max(0, Math.abs((seat.left + seat.right) / 2 - discX) - seat.width / 2);
+        const gapY = Math.max(0, Math.abs((seat.top + seat.bottom) / 2 - discY) - seat.height / 2);
+        farthest = Math.max(farthest, Math.hypot(gapX, gapY) - layout.clusterReach[rank] * layout.scale);
+      }
+      rows.push({ tags, hand: knowledgePainterFor(view).id, standing, drawnLines, folded, unreserved, overlaps,
+        underRim, underOther, farthest: Math.round(farthest) });
     }
     return { rows };
   } catch (error) {
@@ -4673,6 +4686,9 @@ const plateScene = (tags, pages) => glPage.evaluate(async ({ tags, pages }) => {
     knowledgePainterKind = null;
   }
 }, { tags, pages });
+/* 시안의 가까운 세 겹(원반 가장자리에서 px) — GL 판 가운데 가장 먼 것도 가장 먼 겹의 두 배 안이다(대각선은
+ * 가장자리의 0.72라 겹보다 조금 더 멀다; 옛 판은 124 px 밖에 섰다). */
+const KNOWLEDGE_PLATE_GAPS = await glPage.evaluate(() => [...KNOWLEDGE_PLATE_SEATS.gaps]);
 const plateSeat = glPage.viewportSize();
 const plateSeats = { rows: [] };
 for (const [tags, pages, wide, tall] of [[6, 359, 1280, 860], [20, 600, 1280, 860], [20, 600, 900, 700]]) {
@@ -4682,16 +4698,17 @@ for (const [tags, pages, wide, tall] of [[6, 359, 1280, 860], [20, 600, 1280, 86
   plateSeats.rows.push(...scene.rows.map((row) => ({ ...row, wide })));
 }
 await glPage.setViewportSize(plateSeat);
-ok("cluster plates reserve the words they wear: every drawn line sits on its own cells, no plate line meets another plate, a name or a control, a plate without room for three lines stands as one, and only GL plates stand over stray dots",
+ok("cluster plates reserve the words they wear: every plate is one drawn line on its own cells, no plate meets another plate, a name or a control, SVG plates cover no point, and every GL plate stands at its own disc's edge",
   !plateSeats.thrown && plateSeats.rows.length === 6
     && plateSeats.rows.every((row) => row.unreserved === 0 && row.overlaps === 0 && row.standing > 0)
-    && plateSeats.rows.filter((row) => row.wide === 1280).some((row) => row.oneLine > 0)
-    && plateSeats.rows.every((row) => row.underOther === 0 && (row.hand === "gl" || row.underRim === 0)),
+    && plateSeats.rows.every((row) => row.drawnLines === row.standing)
+    && plateSeats.rows.every((row) => (row.hand === "gl"
+      ? row.farthest < 2 * Math.max(...KNOWLEDGE_PLATE_GAPS) : row.underOther === 0 && row.underRim === 0)),
   JSON.stringify(plateSeats));
 
 /* 이름판의 글자는 두 테마에서 바탕과 대비를 지킨다(t-11500 E) — GL의 판은 부스러기 점 위에도 서므로, 글자는
- * 제 바탕색 테두리 위에 선다: 잴 것은 글자와 판의 바탕. 주제의 이름은 색 칸의 잉크(Test 8과 같은 3:1),
- * 대표 지식과 쪽 수 줄은 작은 글자의 4.5:1. 색은 Test 8처럼 픽셀로 읽는다. */
+ * 제 바탕색 테두리 위에 선다: 잴 것은 글자와 판의 바탕. 색 있는 주제의 이름은 색 칸의 잉크(Test 8과 같은 3:1),
+ * 색 없는 주제의 작은 이름(t-12029)은 작은 글자의 4.5:1. 색은 Test 8처럼 픽셀로 읽는다. */
 const plateInk = await glPage.evaluate(async () => {
   const paint = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
   const parse = (color) => {
@@ -4725,8 +4742,8 @@ const plateInk = await glPage.evaluate(async () => {
     for (let rank = 0; rank < layout.namedCount; rank += 1) {
       const label = layout.clusterEls[rank]?.label;
       if (!label || label.classList.contains("is-folded")) continue;
-      for (const [line, least] of [[".knowledge-cluster-name", 3], [".knowledge-cluster-lead", 4.5],
-        [".knowledge-cluster-count", 4.5]]) {
+      const quiet = label.classList.contains("is-quiet");
+      for (const [line, least] of [[".knowledge-cluster-name", quiet ? 4.5 : 3]]) {
         const word = label.querySelector(line);
         if (!word) continue;
         const style = getComputedStyle(word);
@@ -4939,6 +4956,11 @@ await glPage.evaluate(() => {
     return { view, layout };
   };
 });
+
+/* 열넷의 주제(40…10쪽) — 색 여덟과 회색 여섯을 세우는 볼트. 색(「colour」)과 한 줄 이름(「oneLine」)의 두 검사가 같이
+ * 선다(t-12029). */
+const fourteenTopics = topicVault({ sizes: [40, 36, 32, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10],
+  between: [[0, 1, 3], [2, 3, 2], [4, 5, 2], [6, 7, 2], [8, 9, 1], [10, 11, 1], [12, 13, 1]] });
 
 /* 군집 사이 선은 묶어서(t-12029, 승인된 시안 v2 「bundle」). 다섯 주제(30·24·20·16·12쪽)에 주제 사이 선
  * 12·9·3·2·1·1가닥과 고아 넷. 쉬는 전체 지도에서 두 손 모두: 그려진 선은 한 군집 안의 선뿐이고(군집을 건너는
@@ -5200,8 +5222,6 @@ await glPage.setViewportSize(spreadSeat);
  * (SVG의 칠을 픽셀로). 모든 이름 있는 군집이 원반을 갖고(색 없는 군집은 안개색 원반 — GL은 예전에 그 원반을 아예
  * 그리지 않았다), 쉬는 원반에는 테두리가 없으며 밝힌 군집의 원반에만 선다(두 손). 범례는 색 여덟과 「작은 주제
  * n」 한 줄. */
-const colourVault = topicVault({ sizes: [40, 36, 32, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10],
-  between: [[0, 1, 3], [2, 3, 2], [4, 5, 2], [6, 7, 2], [8, 9, 1], [10, 11, 1], [12, 13, 1]] });
 const colours = await glPage.evaluate(async ({ spec }) => {
   const frame = () => new Promise((done) => requestAnimationFrame(done));
   const paint = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
@@ -5269,7 +5289,7 @@ const colours = await glPage.evaluate(async ({ spec }) => {
   } finally {
     knowledgePainterKind = null;
   }
-}, { spec: colourVault.spec });
+}, { spec: fourteenTopics.spec });
 ok("colour sorts the topics again: the eight largest clusters wear the eight hues and the rest are quiet grey, leaves wear their cluster's full ink, every cluster has a flat disc whose edge stands only when lit, and the legend says eight colours and the smaller topics — on both hands",
   !colours.thrown && colours.rows.length === 2 && colours.rows.every((row) => row.named > 8 && row.huesOk
     && row.discs === row.named && row.restRims === 0 && row.pickedRims === 1
@@ -5277,6 +5297,87 @@ ok("colour sorts the topics again: the eight largest clusters wear the eight hue
     && row.quiet.includes(String(row.quietCount)))
     && colours.rows[0].leafChecked > 100 && colours.rows[0].leafMiss === 0,
   JSON.stringify(colours));
+
+/* 군집 이름은 한 줄(t-12029, 승인된 시안 v2 「oneLine」). 같은 열넷의 주제(색 여덟 + 회색 여섯)에서 두 손 모두: 선
+ * 이름판마다 보이는 글자는 이름 한 줄이고(대표 지식·쪽 수 줄이 없다), 색 있는 판은 제 색의 13 px, 회색 판은 안개색의
+ * 11.5 px다. 쪽 수와 대표 지식은 이름에 올리면 나온다 — 판의 팁(`data-tip`)과 읽는 이의 이름이 그것을 말하고,
+ * 키보드로 판에 서면 창의 팁이 곧바로 선다. 배율 1의 이름은 또렷하고 확대할수록 물러선다(배율 3에서 0.3 쪽으로). */
+const oneLines = await glPage.evaluate(async ({ spec }) => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  const paint = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  const rgb = (color) => {
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillStyle = "#000";
+    paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1);
+    return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+  };
+  const near = (one, two) => one.every((value, at) => Math.abs(value - two[at]) <= 2);
+  const rows = [];
+  try {
+    for (const hand of ["svg", "gl"]) {
+      const { view, layout } = await window.__standKnowledgeScene__("/scene/one-line", spec, hand);
+      const root = getComputedStyle(view);
+      let standing = 0;
+      let manyLines = 0;
+      let styleMiss = 0;
+      let tipMiss = 0;
+      let quietStanding = 0;
+      let firstPlate = null;
+      for (let rank = 0; rank < layout.namedCount; rank += 1) {
+        const label = layout.clusterEls[rank]?.label;
+        if (!label || layout.clusterTally[rank] === 0 || label.classList.contains("is-folded")) continue;
+        standing += 1;
+        firstPlate ??= label;
+        const texts = [...label.querySelectorAll("text")]
+          .filter((one) => getComputedStyle(one).display !== "none" && one.getBoundingClientRect().width > 0);
+        if (texts.length !== 1) manyLines += 1;
+        const name = label.querySelector(".knowledge-cluster-name");
+        const style = getComputedStyle(name);
+        const hue = layout.communityHue[rank];
+        if (hue < 0) quietStanding += 1;
+        const wantPx = hue >= 0 ? 13 : 11.5;
+        const wantInk = hue >= 0 ? root.getPropertyValue(`--knowledge-hue-${hue}`) : root.getPropertyValue("--ink-mist");
+        if (Math.abs(Number.parseFloat(style.fontSize) - wantPx) > 0.01 || !near(rgb(style.fill), rgb(wantInk.trim()))) {
+          styleMiss += 1;
+        }
+        const core = layout.communityCore[rank];
+        const tip = label.dataset.tip ?? "";
+        if (!tip.includes(String(layout.communitySize[rank])) || (core >= 0 && !tip.includes(layout.model.titles[core]))
+          || !(label.getAttribute("aria-label") ?? "").includes(tip)) tipMiss += 1;
+      }
+      /* 키보드로 판에 선다 — 창의 팁이 곧바로 그 말을 한다. */
+      firstPlate.focus();
+      await frame();
+      const tipNode = document.querySelector('.tooltip[role="tooltip"]');
+      const focusTip = { shown: tipNode !== null && !tipNode.hidden, words: tipNode?.textContent ?? "",
+        want: firstPlate.dataset.tip };
+      firstPlate.blur();
+      /* 확대하면 이름이 물러선다. */
+      const nameOf = () => firstPlate.querySelector(".knowledge-cluster-name");
+      const fitOpacity = Number(getComputedStyle(nameOf()).opacity);
+      takeKnowledgeZoom(view, layout, 3);
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const zoomedOpacity = Number(getComputedStyle(nameOf()).opacity);
+      fitKnowledgeGraph(view, layout);
+      await paintKnowledgeView();
+      rows.push({ hand: knowledgePainterFor(view).id, standing, quietStanding, manyLines, styleMiss, tipMiss,
+        focusTip, fitOpacity, zoomedOpacity });
+    }
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error), rows };
+  } finally {
+    knowledgePainterKind = null;
+  }
+}, { spec: fourteenTopics.spec });
+ok("a cluster's name is one line: every standing plate draws only its name, coloured in its ink at 13 px or quiet mist at 11.5 px, its pages and main page are in its tip and accessible name, the tip stands when the keyboard reaches it, and the names step back as the map zooms in — on both hands",
+  !oneLines.thrown && oneLines.rows.length === 2 && oneLines.rows.every((row) => row.standing > 8
+    && row.quietStanding > 0 && row.manyLines === 0 && row.styleMiss === 0 && row.tipMiss === 0
+    && row.focusTip.shown && row.focusTip.words === row.focusTip.want
+    && row.fitOpacity > 0.9 && row.zoomedOpacity < 0.5),
+  JSON.stringify(oneLines));
 
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *

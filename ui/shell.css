@@ -37906,52 +37906,25 @@ details.task-board-section > summary {
   transition: opacity var(--motion-fast) var(--ease-standard);
 }
 
+/* 주제의 이름 한 줄(t-12029, 시안 v2 「oneLine」) — 색 있는 군집은 제 색으로, 확대할수록 물러선다
+   (`--knowledge-cluster-fade`, 프레임이 배율에서 쓴다). */
 .knowledge-cluster-name {
   fill: var(--knowledge-tint, var(--ink-label));
   font-size: calc(var(--knowledge-cluster-label-px) * 1px);
-  font-weight: 650;
-  letter-spacing: var(--knowledge-cluster-label-tracking);
+  font-weight: 600;
   dominant-baseline: middle;
-  opacity: var(--knowledge-cluster-label-opacity);
+  opacity: calc(var(--knowledge-cluster-label-opacity) * var(--knowledge-cluster-fade, 1));
   paint-order: stroke;
   stroke: var(--knowledge-ground);
   stroke-width: calc(var(--knowledge-label-outline-px) * 3px);
   stroke-linejoin: round;
 }
 
-/* 주제의 대표 지식 — 그 군집에서 연결이 가장 많은 쪽의 제목. 이름표 경쟁에
- * 맡기지 않고 주제의 이름 바로 아래 붙인다: 전체 지도의 약속이 「주제와 대표
- * 지식」이므로 그 둘은 함께 서야 한다. */
-.knowledge-cluster-lead {
-  fill: var(--ink-chalk);
-  font-size: calc(var(--knowledge-cluster-count-px) * 1px);
-  dominant-baseline: middle;
-  paint-order: stroke;
-  stroke: var(--knowledge-ground);
-  stroke-width: calc(var(--knowledge-label-outline-px) * 3px);
-  stroke-linejoin: round;
-}
-
-/* 좁은 판에서 이름판은 주제의 이름 한 줄이다 — 대표 지식과 쪽 수는 인스펙터와
- * 군집 범례가 계속 말한다(`placeKnowledgeLabels`가 같은 답으로 자리를 잡는다). 넓은 판에서도
- * 세 줄이 설 곳이 없는 판 하나는 같은 옷의 한 줄로 선다(`is-one-line`) — 접히는 대신. */
-.knowledge-picture.is-short-plate .knowledge-cluster-lead,
-.knowledge-picture.is-short-plate .knowledge-cluster-count,
-.knowledge-cluster-label.is-one-line .knowledge-cluster-lead,
-.knowledge-cluster-label.is-one-line .knowledge-cluster-count {
-  display: none;
-}
-
-/* 「쪽 n · 이름 +m」 — 이 주제에 몇 쪽이 있고 그중 몇 개의 이름을 접었는가.
- * 접었다는 사실을 그림이 스스로 말한다(사용자 조건). */
-.knowledge-cluster-count {
-  fill: var(--ink-label);
-  font-size: calc(var(--knowledge-cluster-count-px) * 1px);
-  dominant-baseline: middle;
-  paint-order: stroke;
-  stroke: var(--knowledge-ground);
-  stroke-width: calc(var(--knowledge-label-outline-px) * 2px);
-  stroke-linejoin: round;
+/* 색 없는 군집의 이름 — 안개색의 작은 한 줄(쪽 수와 대표 지식은 팁이 말한다). */
+.knowledge-cluster-label.is-quiet .knowledge-cluster-name {
+  fill: var(--ink-mist);
+  font-size: calc(var(--knowledge-cluster-quiet-px) * 1px);
+  font-weight: 500;
 }
 
 .knowledge-cluster-label:focus-visible {

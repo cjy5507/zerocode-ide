@@ -1449,24 +1449,23 @@
      원반 사이의 여백이 말하고, 테두리 열일곱은 원반보다 테두리를 먼저 읽게 했다. */
   --knowledge-nebula-edge-weight: 30%;
   --knowledge-nebula-edge-width: 1;
-  /* The cluster's name over its nebula: screen pixels, like every label. It
-   * steps back once the person has zoomed this far past the fit — by then the
-   * page names are what is being read. A zoom factor, not an absolute scale:
-   * a 35-page vault already fits above the label LOD's absolute thresholds. */
-  --knowledge-cluster-label-px: 15;
+  /* The cluster's name over its nebula, one line (t-12029, the approved
+   * design v2 "oneLine"): screen pixels, like every label — a coloured
+   * cluster's name at label-px in its ink, a quiet cluster's at quiet-px in
+   * mist. It fades as the person zooms in (fade-from, gone to fade-floor over
+   * fade-span of zoom — by then the page names are what is being read) and
+   * steps back entirely at label-until. Zoom factors, not absolute scales: a
+   * 35-page vault already fits above the label LOD's absolute thresholds. */
+  --knowledge-cluster-label-px: 13;
+  --knowledge-cluster-quiet-px: 11.5;
   --knowledge-cluster-label-opacity: 0.96;
-  --knowledge-cluster-label-tracking: 0.04em;
+  --knowledge-cluster-fade-from: 1.7;
+  --knowledge-cluster-fade-span: 1.1;
+  --knowledge-cluster-fade-floor: 0.3;
   --knowledge-cluster-label-until: 4;
   /* 군집 이름은 원반의 **위**에 선다 — 가운데에 세우면 대표 페이지의 점과 그
-     이름표를 덮는다. 원반 반지름에 이만큼(그림 단위) 더 올린 자리. 그 아래의
-     작은 줄이 「쪽 n · 이름 접힘 +m」이다. */
+     이름표를 덮는다. 원반 반지름에 이만큼(그림 단위) 더 올린 자리. */
   --knowledge-cluster-label-lift: 22;
-  --knowledge-cluster-count-px: 11;
-  /* 이름판 안의 대표 지식은 점 곁의 이름표보다 짧게 끊는다 — 이름판의 폭은 이
-     한 줄이 정하고, 그 폭이 넓을수록 자리를 못 찾는 주제가 는다. */
-  --knowledge-cluster-lead-max: 13;
-  --knowledge-cluster-lead-gap: 19;
-  --knowledge-cluster-count-gap: 34;
   /* A page's name under its point is cut here (with an ellipsis); the whole
    * title lives in the card. Real titles are sentences — 35 of them at once
    * were a fog over the picture. */
@@ -1714,9 +1713,6 @@
      이름표 상자에 더하는 여백, budget은 한 판에 설 수 있는 이름표의 수다.
      좁은 판일수록 budget이 작다: 작은 화면은 「같은 것을 작게」가 아니라
      「더 적게」 본다. */
-  /* 세 줄짜리 주제 이름판(이름 · 대표 지식 · 쪽 수)을 감당하는 캔버스의 폭.
-     그 아래에서는 이름 한 줄만 서고 나머지 둘은 인스펙터와 군집 범례가 말한다. */
-  --knowledge-plate-wide: 520;
   --knowledge-label-cell: 14;
   --knowledge-label-pad-x: 6;
   --knowledge-label-pad-y: 4;
