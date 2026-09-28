@@ -1213,7 +1213,8 @@ function buildKnowledgeView() {
   lensToggle.setAttribute("aria-expanded", "false");
   const lenses = document.createElement("div");
   lenses.className = "knowledge-lens-popover";
-  lenses.append(sift, provenance, tags);
+  /* 우주의 줄(t-12443) — 「움직임」. 우주가 서 있는 동안만 보인다. */
+  lenses.append(sift, provenance, tags, buildKnowledgeUniverseControls());
 
   const gap = document.createElement("span");
   gap.className = "knowledge-gap";

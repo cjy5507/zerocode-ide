@@ -38171,6 +38171,17 @@ details.task-board-section > summary {
   font-size: var(--text-2xs);
 }
 
+/* 「보기」의 우주 줄 — 우주가 서 있는 동안만. */
+.knowledge-view:not(.is-universe) .knowledge-universe-controls {
+  display: none;
+}
+
+.knowledge-universe-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
 /* 범례의 우주 네 줄(시안 CSS 41–54) — 우주가 서 있는 동안만, 그리고 그동안 평면의 줄은 가린다. */
 .knowledge-view:not(.is-universe) .knowledge-legend-list > [data-legend-universe],
 .knowledge-view.is-universe .knowledge-legend-list > li:not([data-legend-universe]) {

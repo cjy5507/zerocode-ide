@@ -372,6 +372,9 @@ let knowledgeUniverseFailed = false;
 /* 사람이 3D를 누른 판 — 다음에 서는 우주는 평면 자리에서 떠오른다(z가 나는 전환). 문을 연 판은
  * 곧바로 처음 자리에 선다. */
 let knowledgeUniverseRising = false;
+/* 사람의 「움직임」(시안 `setMotion`, 디자이너 m-12467의 5) — 쉬고 9초 뒤의 느린 돌기와 필라멘트의 흐름·별의 반짝임이
+ * 한 단추에 묶인다. 이 창에서 한 번 고르면 다음에 서는 우주도 따른다. 움직임을 줄이라는 판에서는 늘 멈춘다. */
+let knowledgeUniverseMotion = true;
 
 /* 이 창이 우주를 그릴 수 있는가 — WebGL2와 렌더러(`knowledgeGlSupported`). */
 function knowledgeUniverseAble() {
@@ -606,6 +609,36 @@ function knowledgeUniverseFlow(view, from, to) {
   if (universe === undefined || universe.map === null) return;
   if (knowledgeClusterPicked !== from) toggleKnowledgeCluster(view, from);
   universe.flyToFlow(from, to);
+}
+
+/* 「보기」 메뉴의 우주 줄 — 우주가 서 있는 동안만 보인다(CSS `.knowledge-view.is-universe`). 「움직임」 하나. */
+function buildKnowledgeUniverseControls() {
+  const box = document.createElement("div");
+  box.className = "knowledge-universe-controls";
+  box.setAttribute("role", "group");
+  box.dataset.i18nAria = "knowledge.universeControls";
+  box.setAttribute("aria-label", t("knowledge.universeControls", "우주"));
+  const motion = document.createElement("button");
+  motion.type = "button";
+  motion.className = "btn knowledge-flag knowledge-universe-motion";
+  motion.setAttribute("aria-pressed", String(knowledgeUniverseMotion));
+  motion.dataset.i18n = "knowledge.universeMotion";
+  motion.textContent = t("knowledge.universeMotion", "움직임");
+  motion.dataset.i18nTitle = "knowledge.universeMotionTip";
+  motion.dataset.tip = t("knowledge.universeMotionTip", "쉬는 동안 천천히 돌고 필라멘트가 흐릅니다");
+  motion.onclick = () => {
+    const view = motion.closest(".knowledge-view");
+    if (view !== null) setKnowledgeUniverseMotion(view, !knowledgeUniverseMotion);
+  };
+  box.appendChild(motion);
+  return box;
+}
+
+function setKnowledgeUniverseMotion(view, on) {
+  knowledgeUniverseMotion = on;
+  const button = view.querySelector(".knowledge-universe-motion");
+  if (button !== null) writeAttribute(button, "aria-pressed", String(on));
+  knowledgeUniverses.get(view)?.setMotion(on);
 }
 
 /* 필라멘트 위의 한 점(시안 `filamentPoint`) — 장식 셰이더가 그리는 곡선과 같은 식이라 필라멘트 수가 그 빛 위에
@@ -1495,7 +1528,7 @@ function makeKnowledgeUniverse(view) {
     lost: false,
     folding: false,
     /* 사람의 「움직임」 — 끈 판과 움직임을 줄이라는 판에서는 돌지도 흐르지도 않는다. */
-    motion: true,
+    motion: knowledgeUniverseMotion,
     down: null,
     moved: { x: 0, y: 0, t: 0 },
     clickable: false,
@@ -2353,6 +2386,7 @@ function makeKnowledgeUniverse(view) {
         const said = document.createElement("span");
         const best = knowledgeUniverseStrongest(map, row);
         if (best === null) {
+          said.dataset.i18n = "knowledge.flowInside";
           said.textContent = t("knowledge.flowInside", "안에서 이어짐");
         } else {
           const other = document.createElement("em");
@@ -2880,6 +2914,13 @@ function makeKnowledgeUniverse(view) {
 
     moving() {
       return this.motion && !knowledgeMotionReduced();
+    },
+
+    /* 「움직임」을 켜고 끈다(시안 `setMotion`) — 켜면 이미 쉰 것으로 쳐서(`wake-rest`) 곧 돈다. */
+    setMotion(on) {
+      this.motion = on;
+      if (on) this.lastTouch = performance.now() - U.wakeRest;
+      this.invalidate();
     },
 
     /* 한 장(시안 `frame`). 비행·미끄러짐·움직임 중에만 다음 장을 청한다 — 쉬면 멈춘다. */

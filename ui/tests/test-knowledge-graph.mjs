@@ -11,8 +11,8 @@ import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.m
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { measureKnowledgeSupplyParity, measureKnowledgeSupplyScene, testKnowledgeSupply } from "./knowledge-supply.mjs";
 import { testKnowledgeUniverse, testKnowledgeUniverseBodies, testKnowledgeUniverseFilaments, testKnowledgeUniverseFocus,
-  testKnowledgeUniverseGalaxies, testKnowledgeUniverseInspector, testKnowledgeUniverseLabels, testKnowledgeUniverseUnable }
-  from "./knowledge-universe.mjs";
+  testKnowledgeUniverseGalaxies, testKnowledgeUniverseInspector, testKnowledgeUniverseLabels, testKnowledgeUniverseMotion,
+  testKnowledgeUniverseUnable } from "./knowledge-universe.mjs";
 import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -6080,6 +6080,7 @@ await testKnowledgeUniverseFilaments(glPage, ok);
 await testKnowledgeUniverseFocus(glPage, ok);
 await testKnowledgeUniverseInspector(glPage, ok);
 await testKnowledgeUniverseLabels(glPage, ok);
+await testKnowledgeUniverseMotion(glPage, ok);
 await glBrowser.close();
 
 console.log(`METRIC knowledge graph 1020 nodes: first paint ${brainScale.firstPaint}ms; `

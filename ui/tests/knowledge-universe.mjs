@@ -1253,3 +1253,109 @@ export async function testKnowledgeUniverseLabels(page, ok) {
     !seen.thrown && seen.pressed.rank >= 0 && seen.pressed.picked === seen.pressed.rank && seen.rising.on === 0,
     detail);
 }
+
+/* ⑦ 「움직임」과 밝은 테마(시안 `setMotion`·`applyTheme`, 디자이너 m-12467의 5) — 「보기」의 단추 하나가 쉬고 9초 뒤의 느린
+ * 돌기와 필라멘트의 흐름을 함께 켜고 끈다. 끈 판은 쉬는 동안 한 장도 그리지 않고, 켜면 이미 쉰 것으로 쳐 곧 돈다.
+ * 고른 값은 다음에 서는 우주도 따른다. 밝은 테마에서 이름표는 종이 위의 먹빛이다. */
+export async function testKnowledgeUniverseMotion(page, ok) {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  const seen = await page.evaluate(async () => {
+    try {
+      const view = document.querySelector(".knowledge-view:not([hidden])");
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const frames = async (count) => {
+        for (let at = 0; at < count; at += 1) await frame();
+      };
+      const until = async (wanted, rounds = 900) => {
+        for (let round = 0; round < rounds; round += 1) {
+          if (wanted()) return true;
+          await frame();
+        }
+        return false;
+      };
+      const heldDimension = knowledgeDimension;
+      const heldVault = secondBrainVault;
+      const heldTheme = document.documentElement.dataset.theme ?? "dark";
+      const answer = window.__buildVaultGraph__({ path: "/motion", sources: false },
+        window.__universeVaultSpec__(200, Date.now()));
+      window.__GRAPH_BUILT__ = answer;
+      noteKnowledgeExploreLines({});
+      secondBrainVault = answer.vault;
+      knowledgeDimension = "3d";
+      knowledgeQuery = "";
+      knowledgeSelectedKey = null;
+      knowledgeClusterPicked = -1;
+      setKnowledgeMode(view, "global", { paint: false });
+      knowledgeReport = answer;
+      await paintKnowledgeView();
+      await until(() => (knowledgeLayouts.get(view)?.left ?? 1) === 0, 3000);
+      await paintKnowledgeView();
+      await until(() => knowledgeUniverses.get(view)?.tween.on === false, 600);
+      await frames(2);
+      const universe = knowledgeUniverses.get(view);
+      const tune = knowledgeUniverseTuning(view);
+      const button = view.querySelector(".knowledge-universe-motion");
+      const showing = () => button !== null && getComputedStyle(button.closest(".knowledge-universe-controls") ?? button)
+        .display !== "none";
+      const up = { exists: button !== null, shown: showing(), pressed: button?.getAttribute("aria-pressed") ?? "",
+        moving: universe.moving() };
+      /* 끈다 — 쉬는 동안 한 장도 그리지 않는다. */
+      button?.click();
+      await frames(3);
+      const before = universe.frames;
+      await frames(30);
+      const off = { pressed: button?.getAttribute("aria-pressed") ?? "", motion: universe.motion,
+        drawn: universe.frames - before, flow: universe.uniforms.uFlow.value };
+      /* 켠다 — 이미 쉰 것으로 쳐서(시안 8000 ms) 곧 돈다. */
+      button?.click();
+      const rested = performance.now() - universe.lastTouch;
+      await frames(3);
+      const beforeOn = universe.frames;
+      await frames(10);
+      const on = { pressed: button?.getAttribute("aria-pressed") ?? "", motion: universe.motion, rested,
+        wake: tune.wakeRest, drawn: universe.frames - beforeOn };
+      /* 고른 값은 다음 우주도 따른다 — 끈 채로 평면에 갔다가 돌아온다. */
+      button?.click();
+      setKnowledgeDimension(view, "2d");
+      await until(() => !knowledgeUniverses.has(view), 200);
+      await frames(2);
+      const flatShown = showing();
+      setKnowledgeDimension(view, "3d");
+      await until(() => knowledgeUniverses.get(view)?.tween.on === false, 600);
+      await frames(2);
+      const next = knowledgeUniverses.get(view);
+      const again = { motion: next?.motion ?? null, pressed: button?.getAttribute("aria-pressed") ?? "" };
+      button?.click();
+      /* 밝은 테마 — 이름표의 글자는 종이 위의 먹빛이다. */
+      const plate = next?.host.querySelector(".knowledge-universe-plate") ?? null;
+      const shade = (element) => {
+        const [r, g, b] = getComputedStyle(element).color.match(/[\d.]+/g).map(Number);
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+      };
+      const dark = plate === null ? -1 : shade(plate);
+      setTheme("light");
+      await frames(3);
+      const light = plate === null ? -1 : shade(plate);
+      setTheme(heldTheme);
+      await frames(2);
+      knowledgeDimension = heldDimension;
+      secondBrainVault = heldVault;
+      await paintKnowledgeView();
+      return { up, off, on, flatShown, again, dark, light };
+    } catch (error) {
+      return { thrown: String(error?.stack ?? error) };
+    }
+  });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const detail = JSON.stringify(seen).slice(0, 3000);
+  ok("t-12443 ⑦: while the universe stands the view menu carries 「움직임」, pressed; switched off the universe draws nothing at rest and its filaments stop",
+    !seen.thrown && seen.up.exists && seen.up.shown && seen.up.pressed === "true" && seen.up.moving
+      && seen.off.pressed === "false" && !seen.off.motion && seen.off.drawn === 0 && seen.off.flow === 0,
+    detail);
+  ok("t-12443 ⑦: switched back on it counts as already rested (v4's 8000 ms) and keeps drawing; the choice holds for the next universe; the flat map has no such switch",
+    !seen.thrown && seen.on.pressed === "true" && seen.on.motion && seen.on.rested >= seen.on.wake - 50
+      && seen.on.drawn >= 5 && seen.again.motion === false && seen.again.pressed === "false" && !seen.flatShown,
+    detail);
+  ok("t-12443 ⑦: in the light theme the labels are ink on paper — darker than in the dark theme",
+    !seen.thrown && seen.dark > 0.6 && seen.light >= 0 && seen.light < 0.4, detail);
+}
