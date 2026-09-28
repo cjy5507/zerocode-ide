@@ -2652,8 +2652,9 @@ function makeKnowledgeUniverse(view) {
       const picked = knowledgeClusterPicked >= 0 && knowledgeClusterPicked < map.rows ? knowledgeClusterPicked : -1;
       const selected = this.selectedSeat;
       const focusSeat = this.hover >= 0 ? this.hover : selected;
-      const near = picked >= 0 ? picked : selected >= 0 ? map.rowOf[selected] : -1;
-      const flown = near >= 0 ? (map.galaxy[near].radius * U.flyGalaxyReach + U.flyGalaxyPad) * U.closeInFly : 0;
+      /* 고른 은하(없으면 고른 쪽의 은하) — 크게 서는 명판이고, 「가까이」의 문턱이 그 반지름을 따른다. */
+      const keep = picked >= 0 ? picked : selected >= 0 ? map.rowOf[selected] : -1;
+      const flown = keep >= 0 ? (map.galaxy[keep].radius * U.flyGalaxyReach + U.flyGalaxyPad) * U.closeInFly : 0;
       const closeIn = this.dist < Math.max(this.home.dist * U.closeIn, flown);
       /* 은하 명판 — 고른 은하가 먼저, 그다음 순위. 고른(또는 고른 쪽의) 은하는 크게 선다. */
       const galaxies = map.galaxies;
@@ -2666,7 +2667,6 @@ function makeKnowledgeUniverse(view) {
         order.copyWithin(1, 0, picked);
         order[0] = picked;
       }
-      const keep = picked >= 0 ? picked : selected >= 0 ? map.rowOf[selected] : -1;
       for (let at = 0; at < galaxies; at += 1) {
         const row = order[at];
         const plate = this.plates[row];
@@ -2706,7 +2706,8 @@ function makeKnowledgeUniverse(view) {
       const flowsShown = !closeIn && this.hover < 0 && selected < 0 && picked < 0 && this.hits === 0;
       for (const tag of this.flowTags) {
         let on = false;
-        for (const spot of flowsShown ? tag.spots : []) {
+        for (let at = 0; flowsShown && at < tag.spots.length; at += 1) {
+          const spot = tag.spots[at];
           if (!this.screenAt(spot.mid[0], spot.mid[1], spot.mid[2])) continue;
           const mx = this.spot[0];
           const my = this.spot[1];
