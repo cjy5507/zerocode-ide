@@ -4069,6 +4069,19 @@ function placeTip(anchor) {
   // place the tooltip from a box that is still moving.
   const pillWidth = tipNode.offsetWidth;
   const pillHeight = tipNode.offsetHeight;
+  // A control in a dense list asks to be explained from BESIDE it
+  // (`data-tip-side="end"` on it or a row around it): below, the pill stands
+  // over the next row of the list (t-11827). Beside it when it fits, and the
+  // ordinary placement when the window has no room there.
+  const end = box.right + TIP_GAP;
+  if (anchor.closest("[data-tip-side]")?.dataset.tipSide === "end" &&
+      end + pillWidth <= window.innerWidth - TIP_GAP) {
+    const middle = box.top + box.height / 2 - pillHeight / 2;
+    tipNode.dataset.side = "end";
+    tipNode.style.left = `${Math.round(end)}px`;
+    tipNode.style.top = `${Math.round(Math.max(TIP_GAP, Math.min(middle, window.innerHeight - pillHeight - TIP_GAP)))}px`;
+    return;
+  }
   const below = box.bottom + TIP_GAP;
   const room = window.innerHeight - below >= pillHeight;
   const top = room ? below : box.top - TIP_GAP - pillHeight;

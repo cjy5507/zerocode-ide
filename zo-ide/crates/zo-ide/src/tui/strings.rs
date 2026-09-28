@@ -248,9 +248,13 @@ pub fn teammate_closing_reason(reason: runtime::subagent_panes::CloseReason) -> 
         CloseReason::IdleBudget => "유휴 상한이 지나 닫는다",
         CloseReason::ClosedByParent => "부모가 닫았다",
         CloseReason::UserExit => "사람이 닫았다",
-        CloseReason::LaneDone => "답이 부모에게 닿아 닫는다",
+        CloseReason::LaneDone | CloseReason::Delivered => "답이 부모에게 닿아 닫는다",
     }
 }
+/// The parent released this pane with its answer in hand, and a person has
+/// pressed a key here — so it stays for them (t-11753). Esc twice still closes
+/// it, and the idle budget still does.
+pub const TEAMMATE_KEPT_FOR_PERSON: &str = "답은 부모에게 닿았다 · 여기서 손을 대서 판을 남긴다";
 
 /* ---- a background command's completion cell (t-3177) ---- */
 

@@ -215,6 +215,11 @@ async fn the_pane_answering_first_retires_the_prompt() {
     let channel = open(None).await;
     let (block, parked, runtime_side) = parked_permission(0);
     let prompt_id = channel.publish(&block).expect("prompt id");
+    // 답을 기다리는 물음은 정체 확인 답에 실린다 — 부모 zo 는 이것으로 사람을
+    // 기다리는 패인을 멈춘 패인과 가른다(t-11458).
+    let asking = |listed: Value| listed[0][runtime::subagent_panes::LIST_ASKING].as_u64();
+    let listed = connect(&channel, None).await.call(method::LIST, json!({})).await.expect("list");
+    assert_eq!(asking(listed), Some(1), "an open prompt is counted");
 
     // 패인 쪽 승리: 파킹된 프롬프트가 제 responder 로 답하고, 프런트엔드가
     // 채널에서 그 프롬프트를 내린다.
@@ -235,6 +240,8 @@ async fn the_pane_answering_first_retires_the_prompt() {
         other => panic!("unexpected error: {other}"),
     }
     assert_eq!(channel.live_prompts(), 0);
+    let listed = connect(&channel, None).await.call(method::LIST, json!({})).await.expect("list");
+    assert_eq!(asking(listed), Some(0), "an answered prompt is not waited on");
 }
 
 /// 도는 턴이 없으면 스티어는 거절된다(`-32003`), 있으면 명령으로 도착한다.

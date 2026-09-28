@@ -208,9 +208,10 @@ pub(crate) struct AgentInput {
     /// A fan-out lane — one member of a `SpawnMultiAgent` batch. Its answer
     /// is consumed with its siblings' in one summary and nothing more is
     /// asked of it, so a pane cut for it is released the moment the parent
-    /// reads the answer (2026-09-07). A lone `Agent` is a teammate and keeps
-    /// its pane idle for `idle_budget`. Never set from tool input — the
-    /// fan-out sets it for every member.
+    /// reads the answer (2026-09-07), with `lane_done`. A lone `Agent` is a
+    /// teammate: its pane is released with `delivered` once its answer is on
+    /// the manifest, and a later `SendMessage` re-cuts it (t-11753). Never set
+    /// from tool input — the fan-out sets it for every member.
     #[serde(skip)]
     pub one_shot: bool,
     /// The plan shape this spawn is part of, when the HOST laid it out: the

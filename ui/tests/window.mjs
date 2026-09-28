@@ -72,6 +72,7 @@ import { testComposerAttach } from "./attach.mjs";
 import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
+import { testSidebarAgents } from "./sidebar-agents.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
@@ -234,6 +235,7 @@ suite("vault", async ({ browser, origin }) => {
   }
 });
 suite("workers", testWorkers);
+suite("sidebar-agents", testSidebarAgents);
 /* The conversation view against the Claude Code extension's own webview
  * (t-6323, docs/design/agent-conversation-claude-code-grammar-20260915.md
  * §10): each suite one difference that was closed, read off the laid-out page. */
@@ -43493,6 +43495,14 @@ const agentDotClock = await page.evaluate(async () => {
   say(mate, "done");
   say(asks, "needs-attention");
   await window.__PAINTED__();
+  // A finished pane folds into the one line that counts the finished
+  // (t-11753): its mark and its clock are read once that line is opened.
+  const folded = rows().find((one) => one.dataset.history);
+  seen.doneFolds =
+    folded?.dataset.history === "1" && !rows().some((one) => one.dataset.term === String(mate));
+  folded?.click();
+  await window.__PAINTED__();
+  const standing = () => rows().filter((one) => !one.dataset.history);
   const dotOf = (at) =>
     rows().find((one) => one.dataset.term === String(at))?.querySelector(".wt-agent-dot") ?? null;
   const marked = (at, id) =>
@@ -43506,8 +43516,8 @@ const agentDotClock = await page.evaluate(async () => {
   seen.doneWearsCheck = marked(mate, "#i-circle-check");
   seen.waitingAsks = marked(asks, "#i-msg-ask");
 
-  const whens = rows().map((one) => one.querySelector(".wt-agent-when")?.textContent ?? "");
-  seen.rows = rows().length;
+  const whens = standing().map((one) => one.querySelector(".wt-agent-when")?.textContent ?? "");
+  seen.rows = standing().length;
   seen.everyRowHasWhen = whens.length === seen.rows && whens.every((word) => word.length > 0);
   // 태어난 시각은 손으로 넣어 준 것이 아니라 뷰가 처음 설 때 저절로 찍힌 것이어야
   // 한다 — 이 장부가 비면 시계는 상태 전이 시각으로 미끄러져 "방금"만 말한다.
@@ -43519,6 +43529,7 @@ const agentDotClock = await page.evaluate(async () => {
   paneBorn.set(term, Date.now() - 90_000);
   seen.signatureMoves = agentRowsSaid(worktreeAgentRows(path)) !== before;
 
+  agentHistoryShown.delete(term);
   for (const tab of [...tabs]) dropTab(tab.id);
   for (const at of [...termViews.keys()]) dropTermView(at);
   for (const at of [term, mate, asks]) dropTermView(at);
@@ -43526,7 +43537,8 @@ const agentDotClock = await page.evaluate(async () => {
 });
 ok(
   "a session row wears Orca's dot and its own clock",
-  agentDotClock.workingSpins && agentDotClock.doneWearsCheck && agentDotClock.waitingAsks &&
+  agentDotClock.doneFolds &&
+    agentDotClock.workingSpins && agentDotClock.doneWearsCheck && agentDotClock.waitingAsks &&
     agentDotClock.rows === 3 && agentDotClock.everyRowHasWhen && agentDotClock.bornStamped &&
     agentDotClock.clockRidesSignature && agentDotClock.signatureMoves,
   JSON.stringify(agentDotClock),

@@ -208,6 +208,15 @@ pub fn write_closing(lifecycle: &Lifecycle, reason: CloseReason, turns_answered:
     closing.write_final(&lifecycle.directory)
 }
 
+/// Whether a person has pressed a key in this pane — the one keyboard this
+/// process serves ([`tools::KeyboardPresence`], stamped on every key, idle or
+/// mid-turn). What a release asks before it closes the pane under them
+/// ([`CloseReason::keeps_standing`]).
+#[must_use]
+pub fn person_touched() -> bool {
+    tools::KeyboardPresence::process().attended_within(Duration::MAX)
+}
+
 /// Read a parent's word for why it closed the child back into the reason
 /// vocabulary; an unknown word is the parent's decision all the same.
 #[must_use]
@@ -217,6 +226,7 @@ pub fn close_reason_from(word: &str) -> CloseReason {
         "idle_budget" => CloseReason::IdleBudget,
         "user_exit" => CloseReason::UserExit,
         "lane_done" => CloseReason::LaneDone,
+        "delivered" => CloseReason::Delivered,
         _ => CloseReason::ClosedByParent,
     }
 }
@@ -343,6 +353,7 @@ mod tests {
         assert!(!channel.exists());
         assert_eq!(close_reason_from("parent_lost"), CloseReason::ParentLost);
         assert_eq!(close_reason_from("lane_done"), CloseReason::LaneDone);
+        assert_eq!(close_reason_from("delivered"), CloseReason::Delivered);
         assert_eq!(close_reason_from("whatever"), CloseReason::ClosedByParent);
     }
 }
