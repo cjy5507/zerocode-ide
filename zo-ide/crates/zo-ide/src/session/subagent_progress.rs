@@ -463,6 +463,12 @@ impl ManifestCache {
     fn remembered(&self) -> usize {
         self.files.lock().expect("manifest files").files.len()
     }
+
+    #[cfg(test)]
+    fn bodies_kept(&self) -> usize {
+        let files = self.files.lock().expect("manifest files");
+        files.files.values().filter(|cached| cached.manifest.is_some()).count()
+    }
 }
 
 /// Each store directory of `registry` with its own modification time.
@@ -1346,5 +1352,40 @@ mod tests {
         let mut turn_watcher = ManifestCache::shared();
         assert_eq!(scan_registry(&registry, "session-a", 200, Some(100), &mut turn_watcher), rows);
         assert_eq!(turn_watcher.take_reads(), 0, "a new turn's watcher read the store again");
+    }
+
+    /// A finished helper's manifest is remembered by its stamp alone: it
+    /// cannot become a row until it is rewritten, and a rewrite changes the
+    /// stamp. A store of thousands then costs the process no copy of their
+    /// bodies — only the running ones are kept whole.
+    #[test]
+    fn a_finished_manifest_is_remembered_without_its_body() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for (id, session, status) in [
+            ("finished-0", "session-other", "completed"),
+            ("finished-1", "session-a", "failed"),
+            ("finished-2", "session-a", "completed"),
+            ("live", "session-a", "running"),
+            ("elsewhere", "session-other", "running"),
+        ] {
+            fs::write(
+                temp.path().join(format!("{id}.json")),
+                serde_json::to_vec(&json!({
+                    "agentId": id,
+                    "parentSessionId": session,
+                    "name": id,
+                    "status": status,
+                    "startedAt": "100",
+                    "outputTail": "a long tail of output that a finished helper left behind",
+                }))
+                .expect("manifest json"),
+            )
+            .expect("write manifest");
+        }
+        let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
+        let mut cache = ManifestCache::default();
+        assert_eq!(scan_registry(&registry, "session-a", 200, None, &mut cache).len(), 1);
+        assert_eq!(cache.remembered(), 5);
+        assert_eq!(cache.bodies_kept(), 2, "finished manifests were kept whole");
     }
 }
