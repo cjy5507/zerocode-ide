@@ -149,24 +149,121 @@ pub(crate) fn uncover(
     hand: &mut Hand<'_>,
     judge: &mut dyn Judge,
 ) -> Result<Uncovered, ComputerUseError> {
-    // Today (the red before t-12979): the hand stops in front of what covers
-    // its place and moves nothing.
-    let _ = judge;
     let listed = desktop_windows(hand.call)?;
-    Ok(match cover_of(&listed, place.window, place.local) {
-        Some(cover) if place.needs.met(&cover) => Uncovered::Clear {
+    let Some(cover) = cover_of(&listed, place.window, place.local) else {
+        return Ok(to_person(Held::Gone, None, place, hand));
+    };
+    if place.needs.met(&cover) {
+        return Ok(Uncovered::Clear {
             moves: Vec::new(),
             by_person: false,
-        },
-        Some(_) => Uncovered::Held {
-            held: Held::NothingCleared,
-            over: String::new(),
-        },
-        None => Uncovered::Held {
-            held: Held::Gone,
-            over: String::new(),
-        },
-    })
+        });
+    }
+    let rule = seat::todays_rule(&cover);
+    let (mode, applies, line) = judge.standing();
+    let asked_at = (hand.wall_ms)();
+    let asked = format!("cv-{asked_at}-{}", place.window);
+    let mut rows = Vec::new();
+    let mut read: Option<CoverRead> = None;
+    let ladder: Ladder = if mode == JevMode::Off {
+        rule.clone()
+    } else {
+        let question = seat::ask(&cover);
+        let wired = judge.ask(&question);
+        let answer = wired.answer.clone().and_then(|body| {
+            serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|parsed| parsed.get("answers").cloned())
+                .ok_or_else(|| {
+                    zerocode_core::jev::choice::ChoiceRefusal::NoAnswer
+                        .token()
+                        .to_string()
+                })
+                .and_then(|answers| {
+                    seat::read(&answers).map_err(|refusal| refusal.token().to_string())
+                })
+        });
+        let mut row = seat::request_row(&asked, &question, answer.as_ref().map_err(String::as_str));
+        row["at"] = json!(asked_at);
+        row["mode"] = json!(mode.key());
+        row["attempts"] = json!(wired.attempts);
+        row["requestBytes"] = json!(wired.request_bytes);
+        row["rttMs"] = json!(wired.rtt_ms);
+        // The door refusing the question — the switch, the folder's consent,
+        // the day's count — is the seat not asked here, and the hand goes as
+        // it goes with no seat; a question that left and brought nothing
+        // usable back holds it.
+        let asked_the_wire = wired.attempts > 0;
+        let ladder = if applies && asked_the_wire {
+            answer
+                .as_ref()
+                .map_or(Err(Held::Unanswered), |read| seat::ladder(read, line))
+        } else {
+            rule.clone()
+        };
+        row["applied"] = json!(applies && asked_the_wire && answer.is_ok());
+        if let Err(held) = &ladder {
+            row["held"] = json!(held.word());
+        }
+        rows.push(row);
+        read = answer.ok();
+        ladder
+    };
+    let mut outcome = Outcome::default();
+    let ended = match ladder {
+        Err(held) => to_person(held, Some(&cover), place, hand),
+        Ok(moves) => {
+            let mut now = Some(cover);
+            for next in moves {
+                let Some(standing) = &now else {
+                    break;
+                };
+                outcome.tried.push(next);
+                let looked = make(next, standing, hand)
+                    .and_then(|()| desktop_windows(hand.call))
+                    .map(|listed| cover_of(&listed, place.window, place.local));
+                match looked {
+                    Ok(after) => now = after,
+                    Err(refusal) => {
+                        record(
+                            judge,
+                            rows,
+                            read.as_ref(),
+                            &rule,
+                            &outcome,
+                            &asked,
+                            asked_at,
+                        );
+                        return Err(refusal);
+                    }
+                }
+                if now.as_ref().is_some_and(|after| place.needs.met(after)) {
+                    outcome.cleared_by = Some(next);
+                    break;
+                }
+            }
+            match (&now, outcome.cleared_by) {
+                (_, Some(_)) => Uncovered::Clear {
+                    moves: outcome.tried.clone(),
+                    by_person: false,
+                },
+                (None, None) => to_person(Held::Gone, None, place, hand),
+                (Some(standing), None) => {
+                    to_person(Held::NothingCleared, Some(standing), place, hand)
+                }
+            }
+        }
+    };
+    record(
+        judge,
+        rows,
+        read.as_ref(),
+        &rule,
+        &outcome,
+        &asked,
+        asked_at,
+    );
+    Ok(ended)
 }
 
 /// One move of the target's own window.
@@ -294,9 +391,52 @@ pub(crate) fn press_mark(
     hand: &mut Hand<'_>,
     judge: &mut dyn Judge,
 ) -> Result<Value, ComputerUseError> {
-    // Today (the red before t-12979): the press's own answer, refused or not.
-    let _ = (mark, hand, judge);
-    press()
+    let refused = match press() {
+        Err(error) if error.code == error_code::ELEMENT_NOT_FOUND => error,
+        pressed => return pressed,
+    };
+    let place = Place {
+        window: mark.window_id,
+        local: Some(mark.local),
+        needs: Needs::Centre,
+    };
+    match uncover(place, hand, judge)? {
+        Uncovered::Clear { moves, by_person } if by_person || !moves.is_empty() => {
+            let mut answer = press()?;
+            if let Some(object) = answer.as_object_mut() {
+                object.insert(
+                    "uncovered".into(),
+                    json!({
+                        "moves": moves.iter().map(|each| each.word()).collect::<Vec<_>>(),
+                        "byPerson": by_person,
+                    }),
+                );
+            }
+            Ok(answer)
+        }
+        Uncovered::Clear { .. } => Err(refused),
+        Uncovered::Held { held, over } => {
+            let named = [Some(mark.role.as_str()), mark.label.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|word| !word.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let whose = if over.is_empty() {
+                "another window".to_string()
+            } else {
+                format!("a window of {over}")
+            };
+            Err(ComputerUseError::new(
+                error_code::COVERED,
+                format!(
+                    "mark {} ({named}) is covered at its centre by {whose} ({}); nothing was pressed and nothing in front was moved or closed — the person clears it, then press again",
+                    mark.mark,
+                    held.word()
+                ),
+            ))
+        }
+    }
 }
 
 /// The cover seat on this machine: the person's settings and its own
