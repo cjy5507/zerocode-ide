@@ -43,6 +43,7 @@
 //! | [`view`] | 뷰포트 레이아웃(상태·컴포저·푸터·다이얼로그) |
 //! | [`paths`] | 부팅 카드 경로의 가운데 자르기 |
 //! | [`painter`] | 스크롤 영역 삽입과 뷰포트 그리기 |
+//! | [`input`] | 터미널 입력 스트림 — 깨움이 온 때만 crossterm 을 묻는다 |
 //! | [`app`] | 상태기계 — 키·블록·턴 |
 
 pub mod ansi;
@@ -61,6 +62,7 @@ pub mod footer_hints;
 pub mod folds;
 pub mod highlight;
 pub mod holdback;
+pub mod input;
 pub mod markdown;
 pub mod mention;
 pub mod rerank;
