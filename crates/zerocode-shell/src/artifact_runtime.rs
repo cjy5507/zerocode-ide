@@ -158,6 +158,17 @@ pub(crate) struct Filter {
     /// can read and export by version (t-3952), exactly what the headless
     /// catalog holds.
     pub(crate) published: Option<bool>,
+    /// 갤러리 탭이 묶는 종류. 「페이지·문서」는 page·document·web이고,
+    /// 모르는 종류는 `kind`처럼 무시한다. 빈 목록이면 모든 종류를 받는다.
+    pub(crate) kinds: Vec<String>,
+    /// 창만이 한 프로젝트의 루트와 워크트리를 함께 아니까 그 경로들을 받는다.
+    /// 행의 출처 경로가 그 아래에 있으면 속하며, 빈 목록이면 모두 받는다.
+    pub(crate) roots: Vec<PathBuf>,
+    /// 오늘·이번 주의 경계는 창의 시계와 시간대로 정하고 epoch ms로 건넨다.
+    pub(crate) since_ms: Option<i64>,
+    /// `Some(true)`는 파일이 있는 행만 받는다. 파일 없는 claude.ai 행은
+    /// 늘 살아 있으며, `Some(false)`는 파일이 사라진 행만 받는다.
+    pub(crate) present: Option<bool>,
 }
 
 /// One snapshot of a page or document (t-3233 §5), or one kept version of a
@@ -174,13 +185,19 @@ pub(crate) struct Version {
     pub(crate) sha256: Option<String>,
 }
 
-/// One listing answer: rows newest first, the count behind them, and whether
-/// the table's row cap cut the answer.
+/// 목록 상한이 행을 잘라도 탭과 사라진 파일의 수는 전체를 센다.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Listing {
     pub(crate) rows: Vec<Artifact>,
     pub(crate) total: usize,
     pub(crate) truncated: bool,
+    /// `rows`의 모양은 그대로 두고 사라진 파일의 id만 창에 따로 건넨다.
+    /// 창은 디스크에 다시 묻지 않는다.
+    pub(crate) missing: Vec<String>,
+    /// `present`만 빼고 거르개에 맞는 사라진 파일의 수다.
+    pub(crate) missing_total: usize,
+    /// 종류만 빼고 거르개에 맞는 전체 행을 종류별로 센다.
+    pub(crate) by_kind: BTreeMap<String, usize>,
 }
 
 /// Counts by origin, for the chips other surfaces wear — the board card, the
@@ -1500,14 +1517,27 @@ impl Store {
     }
 
     /// List rows the filter admits, newest first, bounded by the table.
+    ///
+    /// 파일 존재는 저렴한 거르개를 지난 행마다 목록을 만들 때 한 번만 묻는다.
+    /// 지워진 Computer Use 세션 폴더처럼 감시가 끝난 경로도 있으므로
+    /// 스캔만으로는 알 수 없고, 창은 그릴 때마다 디스크에 묻지 않는다.
     pub(crate) fn list(&self, filter: &Filter) -> Listing {
         let limits = self.limits();
         let kind = filter.kind.as_deref().and_then(ArtifactKind::parse);
+        let kinds: Vec<ArtifactKind> = filter
+            .kinds
+            .iter()
+            .filter_map(|word| ArtifactKind::parse(word))
+            .collect();
+        let of_kind = |artifact: &Artifact| {
+            kind.is_none_or(|wanted| artifact.kind == wanted)
+                && (kinds.is_empty() || kinds.contains(&artifact.kind))
+        };
+        let present = |gone: bool| filter.present.is_none_or(|wanted| wanted != gone);
         let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut rows: Vec<&Row> = index
+        let held: Vec<(&Row, bool)> = index
             .rows
             .values()
-            .filter(|row| kind.is_none_or(|wanted| row.artifact.kind == wanted))
             .filter(|row| {
                 filter
                     .remote
@@ -1536,10 +1566,40 @@ impl Store {
                     })
             })
             .filter(|row| {
+                let origin = &row.artifact.origin;
+                filter.roots.is_empty()
+                    || [origin.project.as_deref(), origin.worktree.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|path| filter.roots.iter().any(|root| path.starts_with(root)))
+            })
+            .filter(|row| {
+                filter
+                    .since_ms
+                    .is_none_or(|since| row.artifact.modified_ms >= since)
+            })
+            .filter(|row| {
                 filter.query.trim().is_empty() || query_matches(&filter.query, &row.tokens)
             })
+            .map(|row| (row, is_gone(&row.artifact)))
             .collect();
-        rows.sort_by(|a, b| {
+        let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
+        let mut missing_total = 0;
+        for (row, gone) in &held {
+            if present(*gone) {
+                *by_kind
+                    .entry(row.artifact.kind.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
+            if *gone && of_kind(&row.artifact) {
+                missing_total += 1;
+            }
+        }
+        let mut rows: Vec<(&Row, bool)> = held
+            .into_iter()
+            .filter(|(row, gone)| of_kind(&row.artifact) && present(*gone))
+            .collect();
+        rows.sort_by(|(a, _), (b, _)| {
             b.artifact
                 .modified_ms
                 .cmp(&a.artifact.modified_ms)
@@ -1547,14 +1607,21 @@ impl Store {
         });
         let total = rows.len();
         let truncated = total > limits.list_rows_max;
+        rows.truncate(limits.list_rows_max);
         Listing {
+            missing: rows
+                .iter()
+                .filter(|(_, gone)| *gone)
+                .map(|(row, _)| row.artifact.id.clone())
+                .collect(),
             rows: rows
                 .into_iter()
-                .take(limits.list_rows_max)
-                .map(|row| row.artifact.clone())
+                .map(|(row, _)| row.artifact.clone())
                 .collect(),
             total,
             truncated,
+            missing_total,
+            by_kind,
         }
     }
 
@@ -1658,6 +1725,22 @@ impl Store {
         }
         let meta = std::fs::metadata(&artifact.path).map_err(|error| error.to_string())?;
         let bytes = meta.len();
+        // 페이지 그림은 현재 행 키로 숨은 판이 만든 썸네일이다. 아직 없다는
+        // 답은 기억하지 않는다 — 카드가 뒤에 그린 뒤 다시 물으면 찾아야 한다.
+        if artifact.kind == ArtifactKind::Page {
+            use crate::artifact_thumbs::{Cached, cached, data_url_of, key_of};
+            let png = key_of(&artifact).and_then(|key| match cached(&self.root, id, &key) {
+                Cached::Picture(png) => Some(png),
+                Cached::Failed | Cached::Nothing => None,
+            });
+            return Ok(Arc::new(PreviewPayload {
+                kind: if png.is_some() { "image" } else { "none" },
+                text: None,
+                data_url: png.as_deref().map(data_url_of),
+                bytes,
+                truncated: false,
+            }));
+        }
         let payload = match artifact.kind {
             ArtifactKind::Screenshot => {
                 if bytes > limits.preview_image_bytes_max {
@@ -1762,6 +1845,11 @@ impl ScanBudget {
 /// version number of their own, written by `artifact_publish::PageMeta`.
 fn is_publication(artifact: &Artifact) -> bool {
     artifact.kind == ArtifactKind::Page && artifact.version.is_some()
+}
+
+/// 파일을 이름 붙인 행만 존재를 묻는다. claude.ai 행에는 파일이 없다.
+fn is_gone(artifact: &Artifact) -> bool {
+    !artifact.path.as_os_str().is_empty() && !artifact.path.is_file()
 }
 
 /// Whether a document is Markdown rather than a PDF — by extension, the way
@@ -2673,6 +2761,265 @@ mod tests {
         let forgotten = store.forget_under(&[dir.path().join("evidence")]);
         assert_eq!(forgotten, 1);
         assert_eq!(store.len(), 3);
+    }
+
+    /// 런타임이 탭·프로젝트·기간·파일 존재를 함께 거르고, 목록 상한 뒤의
+    /// 탭 수와 사라진 파일 수도 센다. 창은 디스크에 묻지 않는다.
+    #[test]
+    fn listing_answers_the_gallerys_tabs_projects_periods_and_missing_files_past_the_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("data");
+        let store = Store::open(
+            &data,
+            Limits {
+                list_rows_max: 2,
+                ..Limits::default()
+            },
+        );
+        let limits = store.limits();
+        let project = dir.path().join("acme");
+        let worktree = dir.path().join("acme-wt");
+        let file = |name: &str| {
+            let path = dir.path().join("files").join(name);
+            touch(&path, "x");
+            path
+        };
+        let gone = dir.path().join("sessions/gone/0.png");
+        let rows = [
+            (
+                "page",
+                ArtifactKind::Page,
+                file("site.html"),
+                5_000,
+                Origin {
+                    project: Some(project.join("sub")),
+                    agent: Some("claude".into()),
+                    ..Origin::default()
+                },
+            ),
+            (
+                "doc",
+                ArtifactKind::Document,
+                file("plan.md"),
+                1_000,
+                Origin {
+                    worktree: Some(worktree.clone()),
+                    ..Origin::default()
+                },
+            ),
+            (
+                "web",
+                ArtifactKind::Web,
+                PathBuf::new(),
+                4_000,
+                Origin {
+                    agent: Some("claude".into()),
+                    ..Origin::default()
+                },
+            ),
+            (
+                "report",
+                ArtifactKind::Report,
+                file("report.md"),
+                3_000,
+                Origin {
+                    worktree: Some(dir.path().join("elsewhere")),
+                    agent: Some("codex".into()),
+                    ..Origin::default()
+                },
+            ),
+            (
+                "shot-a",
+                ArtifactKind::Screenshot,
+                gone.clone(),
+                6_000,
+                Origin::default(),
+            ),
+            (
+                "shot-b",
+                ArtifactKind::Screenshot,
+                gone.with_file_name("1.png"),
+                2_000,
+                Origin::default(),
+            ),
+            (
+                "steps",
+                ArtifactKind::Evidence,
+                file("steps.jsonl"),
+                7_000,
+                Origin::default(),
+            ),
+        ];
+        {
+            let mut index = store.index.lock().unwrap();
+            for (id, kind, path, modified_ms, origin) in rows {
+                let artifact = Artifact {
+                    id: id.into(),
+                    kind,
+                    title: id.into(),
+                    path,
+                    bytes: 1,
+                    created_ms: modified_ms,
+                    modified_ms,
+                    url: (kind == ArtifactKind::Web).then(|| "https://example.com/a".into()),
+                    favicon: None,
+                    description: None,
+                    version: None,
+                    source_path: None,
+                    origin,
+                    tags: Vec::new(),
+                    preview: Preview::default(),
+                    source: Source::default(),
+                };
+                let row = Row {
+                    artifact,
+                    tokens: Vec::new(),
+                    stamp: None,
+                };
+                store.insert_row(&mut index, row, &limits).unwrap();
+            }
+        }
+        let words = |kinds: &[&str]| kinds.iter().map(|kind| (*kind).to_string()).collect();
+        let ids = |listing: &Listing| {
+            listing
+                .rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let pages = store.list(&Filter {
+            kinds: words(&["page", "document", "web"]),
+            present: Some(true),
+            ..Filter::default()
+        });
+        assert_eq!((pages.total, pages.truncated), (3, true));
+        assert_eq!(ids(&pages), ["page", "web"]);
+        assert_eq!(pages.missing_total, 0);
+        assert_eq!(
+            pages.by_kind,
+            BTreeMap::from(
+                [
+                    ("document", 1),
+                    ("evidence", 1),
+                    ("page", 1),
+                    ("report", 1),
+                    ("web", 1)
+                ]
+                .map(|(kind, n)| (kind.to_string(), n))
+            ),
+            "the tabs' counts are whole past the cap and leave the dead screenshots out"
+        );
+
+        let evidence = store.list(&Filter {
+            kinds: words(&["screenshot", "evidence"]),
+            present: Some(true),
+            ..Filter::default()
+        });
+        assert_eq!(ids(&evidence), ["steps"]);
+        assert_eq!(evidence.missing_total, 2);
+        assert!(evidence.missing.is_empty());
+
+        let shown = store.list(&Filter {
+            kinds: words(&["screenshot", "evidence"]),
+            ..Filter::default()
+        });
+        assert_eq!(
+            (shown.total, ids(&shown)),
+            (3, vec!["steps".into(), "shot-a".into()])
+        );
+        assert_eq!(shown.missing, ["shot-a"]);
+        assert_eq!(shown.missing_total, 2);
+        assert_eq!(
+            store
+                .list(&Filter {
+                    present: Some(false),
+                    ..Filter::default()
+                })
+                .total,
+            2
+        );
+
+        let mine = store.list(&Filter {
+            roots: vec![project.clone(), worktree.clone()],
+            ..Filter::default()
+        });
+        assert_eq!(
+            (mine.total, ids(&mine)),
+            (2, vec!["page".into(), "doc".into()])
+        );
+        assert_eq!(
+            store
+                .list(&Filter {
+                    roots: vec![dir.path().join("acme-w")],
+                    ..Filter::default()
+                })
+                .total,
+            0,
+            "a root is a path, not a prefix of a name"
+        );
+
+        let recent = store.list(&Filter {
+            kinds: words(&["page", "document", "web"]),
+            since_ms: Some(4_000),
+            ..Filter::default()
+        });
+        assert_eq!(ids(&recent), ["page", "web"]);
+        let codex = store.list(&Filter {
+            agent: Some("codex".into()),
+            ..Filter::default()
+        });
+        assert_eq!(ids(&codex), ["report"]);
+        assert_eq!(
+            store
+                .list(&Filter {
+                    kinds: words(&["picture"]),
+                    ..Filter::default()
+                })
+                .total,
+            7,
+            "an unknown kind word filtered rather than being ignored"
+        );
+    }
+
+    /// 페이지 서랍은 현재 행 키의 썸네일을 읽는다. 아직 없다는 답은
+    /// 기억하지 않으므로 카드가 그린 뒤 다시 물으면 그림을 찾는다.
+    #[test]
+    fn a_pages_preview_is_its_rendered_thumbnail_once_there_is_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let project = dir.path().join("project");
+        touch(&project.join("site.html"), "<title>Site</title>");
+        let page = store
+            .register_page(
+                &PageFact {
+                    path: project.join("site.html"),
+                    at_ms: Some(1),
+                    session: Some("s-1".into()),
+                    project: Some(project.clone()),
+                },
+                "claude",
+                1,
+            )
+            .unwrap()
+            .expect("the created page is a row");
+        let before = store.preview(&page.id).unwrap();
+        assert_eq!((before.kind, before.data_url.is_none()), ("none", true));
+        assert_eq!(store.preview_cache_bytes(), 0);
+        let key = crate::artifact_thumbs::key_of(&page).expect("a page renders a thumbnail");
+        crate::artifact_thumbs::remember(store.root(), &page.id, &key, b"\x89PNG").unwrap();
+        let after = store.preview(&page.id).unwrap();
+        assert_eq!(after.kind, "image");
+        assert_eq!(
+            after.data_url.as_deref(),
+            Some(crate::artifact_thumbs::data_url_of(b"\x89PNG").as_str())
+        );
+        crate::artifact_thumbs::remember(store.root(), &page.id, "an older key", b"old").unwrap();
+        assert_eq!(
+            store.preview(&page.id).unwrap().kind,
+            "none",
+            "a picture under another key is not this page's"
+        );
     }
 
     /// A claude.ai artifact is one row per url (t-3233 §2a): the same url

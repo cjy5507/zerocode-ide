@@ -1728,6 +1728,11 @@
   --artifact-thumb-cache: 120;
   --artifact-search-debounce: 120;
   --artifact-search-width: 220px;
+  /* 날의 무리 머리 한 줄의 높이 — 가상화가 카드 자리를 셀 때 읽는다. */
+  --artifact-group-head: 28;
+  --artifact-pick-max-width: 160px;
+  --artifact-new-menu-width: 288px;
+  --artifact-new-glyph-side: 26px;
   /* 카드 폭이 변해도 얼굴은 4:3, 가상화 행 높이도 같은 비율로 변한다. */
   --artifact-face-ratio: 0.75;
   --artifact-doc-lines: 7;
@@ -1736,7 +1741,6 @@
   --artifact-strip-ink: var(--ink-chalk);
   --artifact-strip-ink-soft: var(--ink-mist);
   --artifact-strip-version-inset: calc(var(--space-1) / 2);
-  --artifact-origin-scrim: color-mix(in srgb, var(--surface-abyss) 72%, transparent);
   --artifact-card-bg: var(--surface-raised);
   --artifact-card-edge: var(--edge-rule);
   --artifact-card-ink: var(--ink-chalk);
@@ -1762,22 +1766,12 @@
   --artifact-studio-radius: 12px;
   --artifact-studio-focus-width: calc(var(--rule-width) * 2);
   --artifact-studio-weight: 650;
-  /* A display title for the requested expressive creation surface. */
-  --artifact-studio-title-size: 28px;
-  --artifact-studio-title-leading: 1.2;
-  --artifact-studio-title-tracking: -0.035em;
-  --artifact-studio-tracking: 0.14em;
   --artifact-studio-copy-leading: 1.55;
-  --artifact-studio-orbit-side: 42px;
-  --artifact-studio-orbit-glyph: 20px;
-  --artifact-studio-orbit-angle: -12deg;
   --artifact-studio-glyph-side: 30px;
-  --artifact-studio-choice-min: 120px;
   --artifact-studio-brief-min: 72px;
   --artifact-studio-edge: color-mix(in srgb, var(--knowledge-hue-0) 24%, var(--edge-mark));
   --artifact-studio-background: radial-gradient(ellipse at 100% 0%, color-mix(in srgb, var(--knowledge-hue-1) 18%, transparent), transparent 65%), radial-gradient(ellipse at 0% 100%, color-mix(in srgb, var(--knowledge-hue-3) 12%, transparent), transparent 60%), var(--surface-deck);
   --artifact-studio-shadow: 0 8px 24px color-mix(in srgb, var(--surface-abyss) 24%, transparent);
-  --artifact-studio-choice-background: color-mix(in srgb, var(--surface-raised) 76%, transparent);
   --artifact-studio-face-background: radial-gradient(ellipse at 100% 0%, color-mix(in srgb, var(--knowledge-hue-0) 13%, transparent), transparent 75%), var(--artifact-face-bg);
   /* ---- the connected workbench (t-3818) ----
    *
@@ -2798,11 +2792,8 @@
 }
 
 /* Resolve material colors where the purpose accent is bound, not on :root. */
-.artifacts-studio-choice,
-.artifacts-studio-orbit-tile {
-  --artifact-studio-tile-background: linear-gradient(145deg, color-mix(in srgb, var(--artifact-studio-accent) 28%, var(--surface-raised)), var(--surface-well));
-  --artifact-studio-choice-selected: color-mix(in srgb, var(--artifact-studio-accent) 13%, var(--surface-raised));
-  --artifact-studio-choice-shadow: inset 0 0 0 1px color-mix(in srgb, var(--artifact-studio-accent) 12%, transparent);
+.artifacts-studio,
+.artifacts-studio-choice {
   --artifact-studio-glyph-background: color-mix(in srgb, var(--artifact-studio-accent) 10%, transparent);
 }
 
