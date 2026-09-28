@@ -37934,6 +37934,326 @@ details.task-board-section > summary {
   opacity: 1;
 }
 
+/* 우주의 이름표(시안 CSS 57–78) — 모두 DOM 글자라 빛 번짐 뒤에서 번지지 않는다. 자리는 `transform` 하나이고
+   (카메라나 초점이 바뀐 프레임에만 다시 놓는다), 서고 숨는 것은 불투명도의 전이다. 색 칸의 잉크는 줄마다
+   `--knowledge-universe-ink`(평면 원반과 같은 색, 색 없는 군집은 안개색)이고, 글자의 둘레는 무대의 바탕색이다. */
+.knowledge-universe-plate {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: var(--knowledge-3d-plate-pad);
+  border: var(--rule-width) solid transparent;
+  border-radius: var(--knowledge-3d-plate-radius);
+  background: color-mix(in srgb, var(--knowledge-3d-stage) var(--knowledge-3d-plate-veil), transparent);
+  color: var(--ink-chalk);
+  font: inherit;
+  line-height: var(--knowledge-3d-plate-leading);
+  text-align: left;
+  white-space: nowrap;
+  text-shadow: 0 1px 8px var(--knowledge-3d-stage), 0 0 2px var(--knowledge-3d-stage);
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  will-change: transform;
+  transition:
+    opacity var(--knowledge-3d-plate-fade) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.knowledge-universe-plate.is-on {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.knowledge-universe-plate.is-on.is-dim {
+  opacity: var(--knowledge-3d-plate-dim);
+}
+
+.knowledge-universe-plate.is-full {
+  padding: var(--knowledge-3d-plate-full-pad);
+  border-color: var(--glass-edge);
+  border-left: var(--accent-rule) solid var(--knowledge-universe-ink);
+  background: var(--glass-veil);
+  box-shadow: var(--shadow-soft);
+  text-shadow: none;
+  backdrop-filter: var(--knowledge-inspector-blur);
+}
+
+.knowledge-universe-plate.is-full:hover {
+  border-color: var(--knowledge-universe-ink);
+}
+
+.knowledge-universe-plate.is-full[aria-pressed="true"] {
+  border-color: var(--knowledge-universe-ink);
+  box-shadow:
+    0 0 0 var(--rule-width) var(--knowledge-universe-ink) inset,
+    0 0 24px color-mix(in srgb, var(--knowledge-universe-ink) 22%, transparent),
+    var(--shadow-soft);
+}
+
+.knowledge-universe-plate-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.knowledge-universe-plate-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.knowledge-universe-plate-name::before {
+  content: "";
+  flex: none;
+  width: var(--knowledge-3d-plate-dot);
+  height: var(--knowledge-3d-plate-dot);
+  border-radius: var(--radius-pill);
+  background: var(--knowledge-universe-ink);
+  box-shadow: 0 0 6px var(--knowledge-universe-ink);
+}
+
+.knowledge-universe-plate.is-full .knowledge-universe-plate-name::before {
+  display: none;
+}
+
+.knowledge-universe-plate-count {
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+}
+
+.knowledge-universe-plate.is-on:not(.is-full):hover .knowledge-universe-plate-name {
+  text-decoration: underline;
+  text-decoration-color: var(--knowledge-universe-ink);
+  text-underline-offset: 3px;
+}
+
+/* 둘째 줄(가장 굵은 필라멘트 — → 보냄 · ← 받음)은 크게 선 명판에만. */
+.knowledge-universe-plate-flow {
+  display: none;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: 2px;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.knowledge-universe-plate.is-full .knowledge-universe-plate-flow {
+  display: flex;
+}
+
+.knowledge-universe-plate-mark {
+  flex: none;
+  width: var(--knowledge-3d-plate-mark);
+  height: var(--knowledge-3d-plate-mark);
+  border-radius: var(--radius-pill);
+  background: var(--knowledge-universe-ink);
+}
+
+.knowledge-universe-plate-flow em {
+  color: var(--ink-chalk);
+  font-style: normal;
+}
+
+/* 순위 뒤의 은하는 작은 명판 — 이름만, 안개색으로. */
+.knowledge-universe-plate.is-minor:not(.is-full) .knowledge-universe-plate-name {
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+  font-weight: 560;
+}
+
+.knowledge-universe-plate.is-minor:not(.is-full) .knowledge-universe-plate-count {
+  display: none;
+}
+
+.knowledge-universe-plate:focus-visible {
+  outline: var(--accent-rule) solid var(--ink-chalk);
+  outline-offset: var(--knowledge-focus-offset);
+}
+
+.knowledge-universe-name {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: var(--knowledge-3d-name-pad);
+  border-radius: var(--knowledge-3d-name-radius);
+  background: color-mix(in srgb, var(--knowledge-3d-stage) var(--knowledge-3d-name-veil), transparent);
+  color: var(--ink-chalk);
+  font-size: var(--text-2xs);
+  font-weight: 560;
+  white-space: nowrap;
+  text-shadow: 0 1px 6px var(--knowledge-3d-stage);
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+  transition: opacity var(--knowledge-3d-name-fade) var(--ease-standard);
+}
+
+.knowledge-universe-name.is-on {
+  opacity: var(--knowledge-3d-name-on);
+}
+
+.knowledge-universe-name.is-hot {
+  border: var(--rule-width) solid var(--glass-edge);
+  background: var(--glass-veil);
+}
+
+.knowledge-universe-name.is-on.is-hot {
+  opacity: 1;
+}
+
+.knowledge-universe-flow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--knowledge-3d-flow-pad);
+  border-radius: var(--knowledge-3d-plate-radius);
+  background: color-mix(in srgb, var(--knowledge-3d-stage) var(--knowledge-3d-name-veil), transparent);
+  color: var(--ink-chalk);
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+  transition: opacity var(--knowledge-3d-plate-fade) var(--ease-standard);
+}
+
+.knowledge-universe-flow.is-on {
+  opacity: var(--knowledge-3d-name-on);
+}
+
+.knowledge-universe-flow-arrow {
+  flex: none;
+  width: 14px;
+  height: 8px;
+  fill: none;
+  stroke: var(--knowledge-3d-flow-arrow);
+  stroke-width: 1.3;
+}
+
+/* 올린 별의 팁 — 이름표 층의 맨 위. */
+.knowledge-universe-tip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--knowledge-3d-tip-pad);
+  border: var(--rule-width) solid var(--glass-edge);
+  border-left: var(--accent-rule) solid var(--knowledge-universe-ink);
+  border-radius: var(--knowledge-3d-tip-radius);
+  background: var(--glass-veil);
+  box-shadow: var(--shadow-soft);
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  backdrop-filter: var(--knowledge-inspector-blur);
+  transition: opacity var(--knowledge-3d-tip-fade) var(--ease-standard);
+}
+
+.knowledge-universe-tip.is-on {
+  opacity: 1;
+}
+
+.knowledge-universe-tip-note {
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+/* 범례의 우주 네 줄(시안 CSS 41–54) — 우주가 서 있는 동안만, 그리고 그동안 평면의 줄은 가린다. */
+.knowledge-view:not(.is-universe) .knowledge-legend-list > [data-legend-universe],
+.knowledge-view.is-universe .knowledge-legend-list > li:not([data-legend-universe]) {
+  display: none;
+}
+
+.knowledge-legend-universe {
+  position: relative;
+  display: inline-block;
+  flex: none;
+}
+
+.knowledge-legend-universe.kind-star {
+  width: 11px;
+  height: 11px;
+  border-radius: var(--radius-pill);
+  background: radial-gradient(circle, var(--knowledge-3d-legend-star-core) 0 18%, var(--knowledge-3d-legend-star-glow) 30%,
+    transparent 70%);
+}
+
+.knowledge-legend-universe.kind-star::before,
+.knowledge-legend-universe.kind-star::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  background: var(--knowledge-3d-legend-star-ray);
+  opacity: 0.8;
+  transform: translate(-50%, -50%);
+}
+
+.knowledge-legend-universe.kind-star::before {
+  width: 13px;
+  height: 1px;
+}
+
+.knowledge-legend-universe.kind-star::after {
+  width: 1px;
+  height: 13px;
+}
+
+.knowledge-legend-universe.kind-temp {
+  width: 34px;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--knowledge-3d-legend-old), var(--knowledge-3d-legend-mid) 45%,
+    var(--knowledge-3d-legend-new));
+}
+
+.knowledge-legend-universe.kind-filament {
+  width: 30px;
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, transparent, var(--knowledge-3d-legend-flow) 25%, var(--knowledge-3d-legend-flow-mid) 50%,
+    var(--knowledge-3d-legend-flow) 75%, transparent);
+}
+
+.knowledge-legend-universe.kind-filament::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--knowledge-3d-legend-flow-head);
+  box-shadow: var(--knowledge-3d-legend-flow-glow);
+}
+
+.knowledge-legend-universe.kind-solid,
+.knowledge-legend-universe.kind-dots {
+  width: 22px;
+  height: 1.5px;
+}
+
+.knowledge-legend-universe.kind-solid {
+  background: var(--ink-mist);
+}
+
+.knowledge-legend-universe.kind-dots {
+  background: repeating-linear-gradient(90deg, var(--ink-mist) 0 2px, transparent 2px 5px);
+}
+
 /* 색을 묻는 견본. 그려지지는 않지만 계산은 된다 — `display: none`이면 브라우저가
    값을 풀어 주지 않는 판이 있어 크기를 0으로 두고 숨긴다. */
 .knowledge-gl-swatch {
@@ -39704,6 +40024,10 @@ h4.knowledge-inspector-head::after {
   .knowledge-dimension-step,
   .knowledge-universe,
   .knowledge-universe-notice,
+  .knowledge-universe-plate,
+  .knowledge-universe-name,
+  .knowledge-universe-flow,
+  .knowledge-universe-tip,
   .knowledge-candidate,
   .knowledge-search-results li,
   .knowledge-crumb,

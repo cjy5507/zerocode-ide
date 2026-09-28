@@ -1520,6 +1520,8 @@ function buildKnowledgeView() {
     item.append(mark, word, why);
     legendList.appendChild(item);
   }
+  /* 우주의 네 줄(t-12443) — 우주가 서 있는 동안만 보이고, 그동안 평면의 줄은 가려진다. */
+  appendKnowledgeUniverseLegend(legendList);
   legend.append(legendHead, legendList);
 
   const inspector = document.createElement("aside");

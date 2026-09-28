@@ -182,6 +182,49 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   /* 빛 번짐 사다리의 단 수와 세기(문턱 없음), 합성의 노출(테마마다). */
   bloomLevels: "--knowledge-3d-bloom-levels",
   bloomStrength: "--knowledge-3d-bloom-strength",
+  /* 이름표(시안 `updateLabels`·`galaxyAnchor`·`showTip`, PORTING §2.7) — 들림이 이 값을 넘은 판에서만 선다. 명판:
+   * 은하 가장자리 고리(반지름의 몫·점 수·보여야 할 점 수)의 화면에서 가장 낮은 곳 아래 틈만큼, 판 가장자리
+   * 여백과 위·아래 띠, 둘레의 틈, 큰 명판을 입는 순위의 수, 가까이(처음 거리의 몫 밑) 가면 고른 것만. */
+  labelLift: "--knowledge-3d-label-lift",
+  plateRing: "--knowledge-3d-plate-ring",
+  platePoints: "--knowledge-3d-plate-points",
+  plateSeen: "--knowledge-3d-plate-seen",
+  plateGap: "--knowledge-3d-plate-gap",
+  plateEdge: "--knowledge-3d-plate-edge",
+  plateTop: "--knowledge-3d-plate-top",
+  plateBottom: "--knowledge-3d-plate-bottom",
+  plateRoom: "--knowledge-3d-plate-room",
+  plateLarge: "--knowledge-3d-plate-large",
+  closeIn: "--knowledge-3d-close-in",
+  /* 쪽 이름: 풀, 쉴 때 이름을 다는 가장 밝은 별의 수, 후보 수와 화면 반지름 문턱, 초점의 이웃·찾은 것의 덤, 후보를
+   * 고르는 위·아래 띠, 별에서 비킨 거리(반지름의 몫·최소·여백), 판 가장자리 여백, 놓는 위·아래 띠, 한 줄의 높이. */
+  labels: "--knowledge-3d-labels",
+  labelsRest: "--knowledge-3d-labels-rest",
+  labelsCandidates: "--knowledge-3d-labels-candidates",
+  labelLeast: "--knowledge-3d-label-least",
+  labelNeighbour: "--knowledge-3d-label-neighbour",
+  labelHit: "--knowledge-3d-label-hit",
+  labelScan: "--knowledge-3d-label-scan",
+  labelOff: "--knowledge-3d-label-off",
+  labelOffLeast: "--knowledge-3d-label-off-least",
+  labelOffPad: "--knowledge-3d-label-off-pad",
+  labelEdge: "--knowledge-3d-label-edge",
+  labelTop: "--knowledge-3d-label-top",
+  labelBottom: "--knowledge-3d-label-bottom",
+  labelTall: "--knowledge-3d-label-tall",
+  /* 필라멘트 수: 굵은 몇 쌍, 가운데 자리(t)와 화살이 가리키는 t, 한 줄의 높이·둘레의 틈, 화살 각의 걸음(1/rad). */
+  flowTags: "--knowledge-3d-flow-tags",
+  flowTagAt: "--knowledge-3d-flow-tag-at",
+  flowTagAhead: "--knowledge-3d-flow-tag-ahead",
+  flowTagTall: "--knowledge-3d-flow-tag-tall",
+  flowTagRoom: "--knowledge-3d-flow-tag-room",
+  flowTagTurn: "--knowledge-3d-flow-tag-turn",
+  /* 팁: 포인터에서 오른쪽·위로 비킨 자리, 판 오른쪽 끝에서 비울 넓이, 위의 최소, 둘레의 틈. */
+  tipRight: "--knowledge-3d-tip-right",
+  tipUp: "--knowledge-3d-tip-up",
+  tipRoom: "--knowledge-3d-tip-room",
+  tipTop: "--knowledge-3d-tip-top",
+  tipGap: "--knowledge-3d-tip-gap",
 });
 
 /* 테마마다 다른 수 — 테마가 바뀌면 다시 읽는다(`knowledgeUniverseInks`). */
@@ -210,6 +253,8 @@ const KNOWLEDGE_UNIVERSE_SHAPE = Object.freeze({
   lineModulus: 2147483647,
   /* 쪽 자리 텍스처 한 줄의 폭(시안 `TW`). */
   nodeWide: 1024,
+  /* 이 깊이(w) 밑은 카메라 뒤다 — 투영하지 않는다(시안 `projectAll`). */
+  behind: 0.1,
 });
 
 /* 별의 크기 — 셰이더(`materials.stars`)와 고르기(`starSizeCss`)가 같은 수를 읽는다: 흐름 = 광도 ×
@@ -226,6 +271,26 @@ const KNOWLEDGE_UNIVERSE_STAR = Object.freeze({
   pickLeast: 6,
   pickDepth: 0.0004,
 });
+
+/* 필라멘트의 곡선 — 장식 셰이더의 필라멘트 가지와 이름표 자리(`knowledgeUniverseFilamentPoint`, 시안
+ * `filamentPoint`)가 같은 수를 이 표에서 읽는다: 두 은하의 반지름 × `reachShare`만큼 안에서 시작하고 끝나되 시작은
+ * `startMost`, 끝은 `endLeast`를 넘지 않고, 옆으로 길이 × `side`(bend 다섯 단계), 위로 길이 × `up`만큼 휜다. 거의
+ * 수직인 쌍(옆 방향의 길이 < `upright`)의 옆은 x축이다. */
+const KNOWLEDGE_UNIVERSE_CURVE = Object.freeze({
+  reachShare: 0.55,
+  startMost: 0.42,
+  endLeast: 0.58,
+  side: 0.1,
+  up: 0.04,
+  upright: 0.001,
+});
+
+/* 쪽 이름 후보의 차례 — 초점의 별은 언제나 먼저, 쉴 때의 밝은 별은 제 차례대로(시안 `updateLabels`의 1e6·1e5). */
+const KNOWLEDGE_UNIVERSE_LABEL_FIRST = Object.freeze({ focus: 1e6, bright: 1e5 });
+
+/* 무대 위에 늘 서 있는 상자 — 이름표는 이 밑에 서지 않는다(시안의 고정 UI 상자 자리). 앱에서는 배율 상자와 열린
+ * 범례이고, 놓는 프레임마다 잰다. */
+const KNOWLEDGE_UNIVERSE_COVERS = Object.freeze([".knowledge-zoom", ".knowledge-legend"]);
 
 /* 셰이더에 싣는 수 — GLSL은 정수 글자를 실수로 읽지 않으므로 소수점을 붙인다. */
 function knowledgeUniverseFloat(value) {
@@ -494,9 +559,11 @@ function paintKnowledgeUniverseInspector(view, layout) {
     head.className = "knowledge-inspector-head";
     const about = document.createElement("p");
     about.className = "knowledge-overview-galaxy-about";
-    const list = document.createElement("ul");
-    list.className = "knowledge-inspector-list";
-    galaxy.append(head, about, list);
+    /* 은하의 두 목록(시안 은하 카드): 그 은하의 굵은 필라멘트, 그리고 밝은 별 — 「어느 쪽이 중심인가」를 글자로
+     * 답하는 줄(디자이너 m-12627). 별 줄을 누르면 그 쪽이 골라진다(인스펙터의 `[data-knowledge-key]` 손). */
+    galaxy.append(head, about,
+      knowledgeListSection("knowledge-overview-galaxy-flows", "knowledge.galaxyFilaments", t("knowledge.galaxyFilaments", "굵은 필라멘트")),
+      knowledgeListSection("knowledge-overview-galaxy-stars", "knowledge.brightStars", t("knowledge.brightStars", "밝은 별")));
     overview.querySelector(".knowledge-overview-counts")?.after(galaxy, flows);
   }
   const rank = knowledgeClusterPicked;
@@ -522,7 +589,15 @@ function paintKnowledgeUniverseInspector(view, layout) {
   writeTextContent(galaxy.querySelector(".knowledge-overview-galaxy-about"), t("knowledge.galaxyRecent",
     "최근 2주에 고친 쪽 {{percent}}", { percent: `${Math.round(picked.activity * 100)}%` }));
   const own = map.filaments.filter((one) => one.from === rank || one.to === rank).slice(0, KNOWLEDGE_UNIVERSE_LISTED);
-  reconcileElementOrder(galaxy.querySelector(".knowledge-inspector-list"), own.map(row));
+  const ownFlows = galaxy.querySelector(".knowledge-overview-galaxy-flows");
+  ownFlows.hidden = own.length === 0;
+  reconcileElementOrder(ownFlows.querySelector(".knowledge-inspector-list"), own.map(row));
+  const model = layout.model;
+  const brightest = map.members[rank].slice(0, KNOWLEDGE_UNIVERSE_LISTED);
+  const brightMost = model.degree[brightest[0]] || 1;
+  reconcileElementOrder(galaxy.querySelector(".knowledge-overview-galaxy-stars .knowledge-inspector-list"),
+    brightest.map((at) => knowledgeListRow(model.keys[at], model.titles[at], String(model.degree[at]),
+      model.degree[at] / brightMost)));
 }
 
 /* 필라멘트 줄을 눌렀다(시안 `showFlow`): 보낸 은하를 고르고 그 흐름을 옆에서 보는 자리로 난다. */
@@ -533,12 +608,87 @@ function knowledgeUniverseFlow(view, from, to) {
   universe.flyToFlow(from, to);
 }
 
+/* 필라멘트 위의 한 점(시안 `filamentPoint`) — 장식 셰이더가 그리는 곡선과 같은 식이라 필라멘트 수가 그 빛 위에
+ * 선다. `share`는 0(보낸 은하) → 1(받는 은하). */
+function knowledgeUniverseFilamentPoint(one, two, bend, share) {
+  const C = KNOWLEDGE_UNIVERSE_CURVE;
+  const dx = two.x - one.x;
+  const dy = two.y - one.y;
+  const dz = two.z - one.z;
+  const length = Math.max(Math.hypot(dx, dy, dz), 1);
+  const ux = dx / length;
+  const uy = dy / length;
+  const uz = dz / length;
+  let sx = -uz;
+  let sz = ux;
+  const across = Math.hypot(sx, sz);
+  if (across < C.upright) {
+    sx = 1;
+    sz = 0;
+  } else {
+    sx /= across;
+    sz /= across;
+  }
+  const qx = -sz * uy;
+  const qy = sz * ux - sx * uz;
+  const qz = sx * uy;
+  const start = Math.min(C.startMost, (one.radius * C.reachShare) / length);
+  const end = Math.max(C.endLeast, 1 - (two.radius * C.reachShare) / length);
+  const along = start + (end - start) * share;
+  const arc = Math.sin(Math.PI * along);
+  const side = bend * length * C.side * arc;
+  const up = length * C.up * arc;
+  return [one.x + dx * along + sx * side + qx * up, one.y + dy * along + qy * up, one.z + dz * along + sz * side + qz * up];
+}
+
+/* 은하의 가장 굵은 필라멘트(시안 `strongestFlow`) — 명판의 둘째 줄: 이 은하가 더 많이 보냈으면 →, 받았으면 ←. */
+function knowledgeUniverseStrongest(map, row) {
+  let best = null;
+  for (const one of map.filaments) {
+    if (one.a !== row && one.b !== row) continue;
+    const sent = one.a === row ? one.ab : one.ba;
+    const taken = one.a === row ? one.ba : one.ab;
+    if (best === null || one.n > best.n) best = { other: one.a === row ? one.b : one.a, n: one.n, out: sent >= taken };
+  }
+  return best;
+}
+
+/* 범례의 우주 네 줄(시안 index.html 157–160, 디자이너 m-12627) — 우주가 서 있는 동안만 보이고 평면의 줄은 가려진다
+ * (CSS `.knowledge-view.is-universe`). 표본은 시안의 기호: 별빛, 고친 때의 빛깔, 필라멘트, 올린 쪽의 선. */
+const KNOWLEDGE_UNIVERSE_LEGEND = Object.freeze([
+  Object.freeze({ marks: ["star"], words: [{ key: "knowledge.legendBrightness", word: "밝기 = 연결 수" }] }),
+  Object.freeze({ marks: ["temp"], words: [{ key: "knowledge.legendRecent", word: "푸를수록 최근에 고친 쪽" }] }),
+  Object.freeze({ marks: ["filament"],
+    words: [{ key: "knowledge.legendFilament", word: "필라멘트 = 주제 사이 연결 · 빛은 보낸 쪽 → 받는 쪽" }] }),
+  Object.freeze({ marks: ["solid", "dots"], words: [{ key: "knowledge.legendPointed", word: "올린 쪽의 연결" },
+    { key: "knowledge.legendInferred", word: "추론" }] }),
+]);
+
+function appendKnowledgeUniverseLegend(list) {
+  for (const row of KNOWLEDGE_UNIVERSE_LEGEND) {
+    const item = document.createElement("li");
+    item.dataset.legendUniverse = "true";
+    row.marks.forEach((kind, at) => {
+      const mark = document.createElement("span");
+      mark.className = `knowledge-legend-universe kind-${kind}`;
+      mark.setAttribute("aria-hidden", "true");
+      const said = document.createElement("span");
+      said.dataset.i18n = row.words[at].key;
+      said.textContent = t(row.words[at].key, row.words[at].word);
+      item.append(mark, said);
+    });
+    list.appendChild(item);
+  }
+}
+
 /* ---- 셰이더 — 시안의 글자 그대로 -----------------------------------------------------
  *
  * 글은 index.html(09-28 18:38)의 것을 한 자도 바꾸지 않고 옮겼다. 재질은 시안처럼 `ShaderMaterial`이다 —
  * three.js가 WebGL2에서 GLSL 300 es로 옮겨 싣는다(`attribute`·`varying`·`gl_FragColor`를 제 머리의 정의로).
  * 바뀐 것은 디자이너가 정한 자리뿐이다(PORTING.md §4, 우편 m-12467): 은하 줄 128, 장식 무리의 문턱(배경 별
- * 128·필라멘트 130부터), 초점 센티널 999 — 그 수는 `KNOWLEDGE_UNIVERSE_SHAPE` 한 곳에서 글자에 들어간다. */
+ * 128·필라멘트 130부터), 초점 센티널 999 — 그 수는 `KNOWLEDGE_UNIVERSE_SHAPE` 한 곳에서 글자에 들어간다.
+ * 필라멘트 곡선의 수(`KNOWLEDGE_UNIVERSE_CURVE`)와 별 크기의 수(`KNOWLEDGE_UNIVERSE_STAR`)도 같은 값을 표에서
+ * 읽는다 — 이름표 자리와 고르기가 같은 표를 읽기 때문이다. */
 
 /* 은하 텍셀 읽기·정수 해시·별 색(Wikipedia 분광형 표의 D65 색을 선형으로)·나선 팔 밭 — 시안 `GAL`. */
 const KNOWLEDGE_UNIVERSE_GAL = `
@@ -659,13 +809,13 @@ const KNOWLEDGE_UNIVERSE_DECOR_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
           int ga = int(B0.x + 0.5), gb = int(B0.y + 0.5);
           vec4 CA = gal(ga, 0), CB = gal(gb, 0);
           vec3 d = CB.xyz - CA.xyz; float L = max(length(d), 1.0); vec3 dir = d / L;
-          vec3 side = cross(dir, vec3(0.0, 1.0, 0.0)); side = length(side) < 1e-3 ? vec3(1.0, 0.0, 0.0) : normalize(side);
+          vec3 side = cross(dir, vec3(0.0, 1.0, 0.0)); side = length(side) < ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.upright)} ? vec3(1.0, 0.0, 0.0) : normalize(side);
           vec3 up2 = cross(side, dir);
           float t = fract(r0 + uTime * (4.0 + 4.0 * r1) / L);
-          float ta = min(0.42, CA.w * 0.55 / L), tb = max(0.58, 1.0 - CB.w * 0.55 / L);
+          float ta = min(${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.startMost)}, CA.w * ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.reachShare)} / L), tb = max(${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.endLeast)}, 1.0 - CB.w * ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.reachShare)} / L);
           float tt = mix(ta, tb, t);
           float arc = sin(3.14159265 * tt);
-          vec3 P = CA.xyz + d * tt + side * (B1.x * L * 0.1 * arc) + up2 * (L * 0.04 * arc);
+          vec3 P = CA.xyz + d * tt + side * (B1.x * L * ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.side)} * arc) + up2 * (L * ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.up)} * arc);
           float strong = B0.z * B0.z;
           float w = (0.6 + 6.0 * pow(B0.z, 1.5)) * (0.45 + 0.55 * arc) * (0.65 + 0.35 * sin(tt * (9.0 + 5.0 * B1.y) + B1.y * 6.0));
           float gr = sqrt(-2.0 * log(max(r2, 1e-4))) * 0.5, ang = 6.2831853 * r3;
@@ -1285,6 +1435,36 @@ function makeKnowledgeUniverse(view) {
     seenSelected: null,
     seenTopic: -1,
     pickQueued: false,
+    /* 고른 쪽의 자리 — `refreshStates`가 적고 이름표가 읽는다. */
+    selectedSeat: -1,
+    /* 이름표(시안 `buildTopicCards`·`updateLabels`): 은하마다 명판, 쪽 이름의 풀, 굵은 필라멘트의 수, 올린 별의 팁.
+     * 자리는 camVersion이 바뀐 프레임에만 다시 놓고(`labelVersion`), 겹침은 이미 놓인 상자들(`boxes`)로 막는다.
+     * 명판의 크기는 한 번 재고(`measured`), 쪽 이름의 넓이는 쪽마다 한 번 잰다(`nameWidths`). */
+    plates: [],
+    names: [],
+    flowTags: [],
+    tip: null,
+    tipBox: null,
+    labelVersion: -1,
+    measured: false,
+    boxes: null,
+    boxCount: 0,
+    anchorX: null,
+    anchorLow: null,
+    anchorHigh: null,
+    anchorSeen: null,
+    order: null,
+    candidates: null,
+    candidateScores: null,
+    bright: [],
+    declared: null,
+    inferred: null,
+    nameWidths: null,
+    nameFont: "",
+    namePad: 0,
+    nameHotPad: 0,
+    nameContext: null,
+    spot: new Float64Array(3),
     inks: null,
     probe: null,
     post: null,
@@ -1762,6 +1942,9 @@ function makeKnowledgeUniverse(view) {
       const edgeCount = model.edgeCount;
       const inferred = KNOWLEDGE_EDGE_PROVENANCE_CODE.inferred;
       this.edgeData = new Float32Array(edgeCount * 4);
+      /* 팁의 「선언 · 추론」 — 쪽마다 제 선을 두 갈래로 센다(합이 연결 수다). */
+      this.declared = new Int32Array(count);
+      this.inferred = new Int32Array(count);
       let seed = SHAPE.lineSeed;
       const rowFor = (seat) => (map.rowOf[seat] >= 0 ? map.rowOf[seat] : SHAPE.rows);
       for (let at = 0; at < edgeCount; at += 1) {
@@ -1769,6 +1952,9 @@ function makeKnowledgeUniverse(view) {
         const to = model.to[at];
         const guessed = model.provenance[at] === inferred
           || (model.provenance[at] === KNOWLEDGE_PROVENANCE_UNKNOWN && model.kind[at] === KNOWLEDGE_EDGE_CODE.mentions);
+        const tally = guessed ? this.inferred : this.declared;
+        tally[from] += 1;
+        tally[to] += 1;
         this.edgeData[at * 4] = from;
         this.edgeData[at * 4 + 1] = to;
         this.edgeData[at * 4 + 2] = (guessed ? 1 : 0) + 2 * (rowFor(from) + SHAPE.linePack * rowFor(to));
@@ -1799,8 +1985,12 @@ function makeKnowledgeUniverse(view) {
       this.projVersion = -1;
       this.viewProjection = new THREE.Matrix4();
       this.hover = -1;
+      /* 쉬는 먼 자리에서 이름을 다는 별 — 연결이 가장 많은 쪽들(같으면 자리 순, 시안 `G.bright`). */
+      this.bright = Array.from({ length: count }, (unused, at) => at)
+        .sort((one, two) => model.degree[two] - model.degree[one] || one - two).slice(0, U.labelsRest);
       this.applyInks();
       this.computeHome();
+      this.buildLabels();
       writeAttribute(this.canvas, "aria-label", t("knowledge.universeSummary", "지식 그래프 우주 · 주제 {{topics}} · 쪽 {{pages}}",
         { topics: layout.namedCount, pages: count }));
       try {
@@ -2042,7 +2232,7 @@ function makeKnowledgeUniverse(view) {
           const y = pos2[at * 3 + 1] + (pos3[at * 3 + 1] - pos2[at * 3 + 1]) * lift;
           const z = pos2[at * 3 + 2] + (pos3[at * 3 + 2] - pos2[at * 3 + 2]) * lift;
           const depth = matrix[3] * x + matrix[7] * y + matrix[11] * z + matrix[15];
-          if (depth <= 0.1) {
+          if (depth <= KNOWLEDGE_UNIVERSE_SHAPE.behind) {
             proj[at * 4 + 3] = -1;
             continue;
           }
@@ -2097,6 +2287,463 @@ function makeKnowledgeUniverse(view) {
       this.hover = seat;
       this.host?.classList.toggle("is-pointing", seat >= 0);
       this.refreshStates();
+      this.showTip(seat);
+    },
+
+    /* 올린 별의 팁(시안 `showTip`): 제목, 은하, 연결(선언·추론), 고친 때. 포인터의 오른쪽 위에 서고 판 끝에서는 안으로
+     * 든다. 쪽 이름은 그 상자를 비켜 선다(`placeLabels`). */
+    showTip(seat) {
+      const tip = this.tip;
+      if (tip === null) return;
+      if (seat < 0 || this.dragging || this.map === null) {
+        tip.classList.remove("is-on");
+        this.tipBox = null;
+        return;
+      }
+      const layout = this.layout;
+      const model = layout.model;
+      const row = this.map.rowOf[seat];
+      const hue = row >= 0 ? this.map.galaxy[row].hue : -1;
+      tip.style.setProperty("--knowledge-universe-ink", hue >= 0 ? `var(--knowledge-hue-${hue})` : "var(--ink-mist)");
+      const words = { galaxy: row >= 0 ? knowledgeClusterWord(layout, row) : t("knowledge.rogueStar", "떠돌이 별"),
+        links: model.degree[seat], declared: this.declared[seat], inferred: this.inferred[seat] };
+      const modified = model.modified[seat];
+      writeTextContent(tip.firstChild, model.titles[seat]);
+      writeTextContent(tip.lastChild, modified > 0
+        ? t("knowledge.starTipAgo", "{{galaxy}} · 연결 {{links}} (선언 {{declared}} · 추론 {{inferred}}) · 고친 때 {{ago}}",
+          { ...words, ago: knowledgeUniverseAgo(modified, model.nowMs) })
+        : t("knowledge.starTip", "{{galaxy}} · 연결 {{links}} (선언 {{declared}} · 추론 {{inferred}})", words));
+      const x = Math.min(this.width - U.tipRoom, this.pointer.x + U.tipRight);
+      const y = Math.max(U.tipTop, this.pointer.y - U.tipUp);
+      tip.style.transform = `translate3d(${Math.round(x)}px,${Math.round(y)}px,0)`;
+      tip.classList.add("is-on");
+      this.tipBox = [x, y, tip.offsetWidth, tip.offsetHeight];
+    },
+
+    /* 이름표를 짓는다(시안 `buildTopicCards`) — 은하마다 명판(누르면 그 은하를 고른다), 쪽 이름의 풀, 굵은
+     * 필라멘트의 수, 팁. 우주의 그림을 새로 지을 때마다. */
+    buildLabels() {
+      const layer = this.labels;
+      const layout = this.layout;
+      const map = this.map;
+      layer.textContent = "";
+      this.plates = [];
+      for (let row = 0; row < map.galaxies; row += 1) {
+        const plate = document.createElement("button");
+        plate.type = "button";
+        plate.className = row < U.plateLarge ? "knowledge-universe-plate" : "knowledge-universe-plate is-minor";
+        plate.dataset.knowledgeCluster = String(row);
+        plate.tabIndex = -1;
+        plate.setAttribute("aria-pressed", "false");
+        const hue = map.galaxy[row].hue;
+        plate.style.setProperty("--knowledge-universe-ink", hue >= 0 ? `var(--knowledge-hue-${hue})` : "var(--ink-mist)");
+        const top = document.createElement("span");
+        top.className = "knowledge-universe-plate-top";
+        const name = document.createElement("span");
+        name.className = "knowledge-universe-plate-name";
+        name.textContent = knowledgeClusterWord(layout, row);
+        const count = document.createElement("span");
+        count.className = "knowledge-universe-plate-count";
+        count.textContent = String(layout.communitySize[row]);
+        top.append(name, count);
+        const flow = document.createElement("span");
+        flow.className = "knowledge-universe-plate-flow";
+        const mark = document.createElement("i");
+        mark.className = "knowledge-universe-plate-mark";
+        const said = document.createElement("span");
+        const best = knowledgeUniverseStrongest(map, row);
+        if (best === null) {
+          said.textContent = t("knowledge.flowInside", "안에서 이어짐");
+        } else {
+          const other = document.createElement("em");
+          other.textContent = knowledgeClusterWord(layout, best.other);
+          said.append(`${best.out ? "→" : "←"} `, other, ` ${best.n}`);
+        }
+        flow.append(mark, said);
+        plate.append(top, flow);
+        plate.addEventListener("click", (event) => {
+          event.stopPropagation();
+          toggleKnowledgeCluster(this.view, row);
+        });
+        layer.appendChild(plate);
+        this.plates.push({ element: plate, row, wide: 0, tall: 0, fullWide: 0, fullTall: 0, full: false, on: false,
+          dim: false, pressed: false, x: -1, y: -1 });
+      }
+      this.names = [];
+      for (let slot = 0; slot < U.labels; slot += 1) {
+        const name = document.createElement("div");
+        name.className = "knowledge-universe-name";
+        name.setAttribute("aria-hidden", "true");
+        layer.appendChild(name);
+        this.names.push({ element: name, seat: -1, on: false, hot: false, x: -1, y: -1 });
+      }
+      this.flowTags = map.filaments.slice(0, U.flowTags).map((one) => {
+        const tag = document.createElement("div");
+        tag.className = "knowledge-universe-flow";
+        tag.setAttribute("aria-hidden", "true");
+        const arrow = document.createElementNS(SVG_NS, "svg");
+        arrow.setAttribute("viewBox", "0 0 14 8");
+        arrow.setAttribute("class", "knowledge-universe-flow-arrow");
+        const path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", "M1 4h11M9 1l3 3-3 3");
+        arrow.appendChild(path);
+        const count = document.createElement("span");
+        count.textContent = String(one.n);
+        tag.append(arrow, count);
+        layer.appendChild(tag);
+        const from = map.galaxy[one.from];
+        const to = map.galaxy[one.to];
+        return { element: tag, arrow, wide: 0, on: false, x: -1, y: -1, turn: Number.NaN,
+          mid: knowledgeUniverseFilamentPoint(from, to, one.bend, U.flowTagAt),
+          ahead: knowledgeUniverseFilamentPoint(from, to, one.bend, U.flowTagAhead) };
+      });
+      const tip = document.createElement("div");
+      tip.className = "knowledge-universe-tip";
+      tip.setAttribute("aria-hidden", "true");
+      const title = document.createElement("span");
+      title.className = "knowledge-universe-tip-title";
+      const note = document.createElement("span");
+      note.className = "knowledge-universe-tip-note";
+      tip.append(title, note);
+      layer.appendChild(tip);
+      this.tip = tip;
+      this.tipBox = null;
+      const galaxies = map.galaxies;
+      this.anchorX = new Float64Array(galaxies);
+      this.anchorLow = new Float64Array(galaxies);
+      this.anchorHigh = new Float64Array(galaxies);
+      this.anchorSeen = new Uint8Array(galaxies);
+      this.order = new Int32Array(galaxies);
+      this.candidates = new Int32Array(U.labelsCandidates);
+      this.candidateScores = new Float64Array(U.labelsCandidates);
+      this.boxes = new Float64Array((KNOWLEDGE_UNIVERSE_COVERS.length + galaxies + this.flowTags.length + this.names.length + 1)
+        * 4);
+      this.nameWidths = new Float32Array(layout.count);
+      this.labelVersion = -1;
+      this.measured = false;
+      this.measureLabels();
+    },
+
+    /* 명판의 두 크기(보통·크게)와 필라멘트 수의 넓이, 쪽 이름의 글꼴과 여백 — 판이 보일 때 한 번. 쪽 이름의 넓이는
+     * 시안의 어림(글자 수 × 10.6 + 14) 대신 글꼴로 잰다: 한글은 어림보다 넓고 로마자는 좁아, 어림이면 겹치거나 빈다. */
+    measureLabels() {
+      if (this.host === null || this.host.clientWidth === 0) return false;
+      for (const plate of this.plates) {
+        const element = plate.element;
+        element.classList.remove("is-full");
+        let box = element.getBoundingClientRect();
+        plate.wide = box.width;
+        plate.tall = box.height;
+        element.classList.add("is-full");
+        box = element.getBoundingClientRect();
+        plate.fullWide = box.width;
+        plate.fullTall = box.height;
+        element.classList.toggle("is-full", plate.full);
+      }
+      for (const tag of this.flowTags) tag.wide = tag.element.getBoundingClientRect().width;
+      const probe = this.names[0]?.element ?? null;
+      if (probe !== null) {
+        const style = getComputedStyle(probe);
+        const pad = (one) => Number.parseFloat(one.paddingLeft) + Number.parseFloat(one.paddingRight)
+          + Number.parseFloat(one.borderLeftWidth) + Number.parseFloat(one.borderRightWidth);
+        this.nameFont = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+        this.namePad = pad(style);
+        probe.classList.add("is-hot");
+        this.nameHotPad = pad(getComputedStyle(probe));
+        probe.classList.remove("is-hot");
+      }
+      this.measured = true;
+      return true;
+    },
+
+    /* 쪽 이름 하나의 넓이(CSS px) — 쪽마다 한 번 잰다. 초점의 이름은 테두리만큼 넓다. */
+    nameWide(seat, hot) {
+      let wide = this.nameWidths[seat];
+      if (wide === 0) {
+        this.nameContext ??= document.createElement("canvas").getContext("2d");
+        this.nameContext.font = this.nameFont;
+        wide = Math.ceil(this.nameContext.measureText(this.layout.model.titles[seat]).width);
+        this.nameWidths[seat] = wide;
+      }
+      return wide + (hot ? this.nameHotPad : this.namePad);
+    },
+
+    pushBox(x, y, wide, tall) {
+      if ((this.boxCount + 1) * 4 > this.boxes.length) return;
+      const at = this.boxCount * 4;
+      this.boxes[at] = x;
+      this.boxes[at + 1] = y;
+      this.boxes[at + 2] = wide;
+      this.boxes[at + 3] = tall;
+      this.boxCount += 1;
+    },
+
+    hit(x, y, wide, tall) {
+      const boxes = this.boxes;
+      for (let at = 0; at < this.boxCount * 4; at += 4) {
+        if (x < boxes[at] + boxes[at + 2] && x + wide > boxes[at] && y < boxes[at + 1] + boxes[at + 3]
+          && y + tall > boxes[at + 1]) return true;
+      }
+      return false;
+    },
+
+    /* 무대 위에 늘 서 있는 상자(배율 상자·열린 범례)를 먼저 놓는다 — 프레임의 처음이라 레이아웃은 깨끗하다. */
+    readCovers() {
+      this.boxCount = 0;
+      const host = this.host.getBoundingClientRect();
+      for (const selector of KNOWLEDGE_UNIVERSE_COVERS) {
+        const element = this.view.querySelector(selector);
+        if (element === null || element.hidden) continue;
+        const box = element.getBoundingClientRect();
+        if (box.width === 0 || box.height === 0) continue;
+        this.pushBox(box.left - host.left, box.top - host.top, box.width, box.height);
+      }
+    },
+
+    /* 세계의 한 점을 화면으로(`project`가 세운 행렬) — 카메라 뒤면 거짓. 답은 `spot`(x, y, 깊이). */
+    screenAt(x, y, z) {
+      const m = this.viewProjection.elements;
+      const depth = m[3] * x + m[7] * y + m[11] * z + m[15];
+      if (depth <= KNOWLEDGE_UNIVERSE_SHAPE.behind) return false;
+      this.spot[0] = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / depth * 0.5 + 0.5) * this.width;
+      this.spot[1] = (1 - ((m[1] * x + m[5] * y + m[9] * z + m[13]) / depth * 0.5 + 0.5)) * this.height;
+      this.spot[2] = depth;
+      return true;
+    },
+
+    /* 은하 가장자리 고리의 점들을 투영해 화면에서 가장 낮은 곳(명판 자리)과 가장 높은 곳(비켜 설 자리)을 찾는다
+     * (시안 `galaxyAnchor`). 고리의 점이 충분히 보이고 가운데가 앞에 있어야 명판이 선다. */
+    anchor(row) {
+      const k = this.map.galaxy[row];
+      const ring = k.radius * U.plateRing;
+      let low = Number.NEGATIVE_INFINITY;
+      let high = Number.POSITIVE_INFINITY;
+      let seen = 0;
+      for (let step = 0; step < U.platePoints; step += 1) {
+        const angle = (step / U.platePoints) * Math.PI * 2;
+        const c = Math.cos(angle) * ring;
+        const s = Math.sin(angle) * ring;
+        if (!this.screenAt(k.x + k.across[0] * c + k.along[0] * s, k.y + k.across[1] * c + k.along[1] * s,
+          k.z + k.across[2] * c + k.along[2] * s)) continue;
+        seen += 1;
+        low = Math.max(low, this.spot[1]);
+        high = Math.min(high, this.spot[1]);
+      }
+      const front = this.screenAt(k.x, k.y, k.z);
+      this.anchorX[row] = this.spot[0];
+      this.anchorLow[row] = low;
+      this.anchorHigh[row] = high;
+      this.anchorSeen[row] = front && seen >= U.plateSeen ? 1 : 0;
+    },
+
+    /* 자리는 `transform` 하나 — 온 픽셀이 바뀐 때만 쓴다. */
+    moveLabel(label, x, y) {
+      const qx = Math.round(x);
+      const qy = Math.round(y);
+      if (qx === label.x && qy === label.y) return;
+      label.element.style.transform = `translate3d(${qx}px,${qy}px,0)`;
+      label.x = qx;
+      label.y = qy;
+    },
+
+    showLabel(label, on) {
+      if (on === label.on) return;
+      label.on = on;
+      label.element.classList.toggle("is-on", on);
+    },
+
+    hideLabels() {
+      if (this.labelVersion === -1) return;
+      this.tip?.classList.remove("is-on");
+      this.tipBox = null;
+      for (const plate of this.plates) this.showLabel(plate, false);
+      for (const name of this.names) this.showLabel(name, false);
+      for (const tag of this.flowTags) this.showLabel(tag, false);
+      this.labelVersion = -1;
+    },
+
+    /* 이름표를 놓는다(시안 `updateLabels`) — 카메라나 초점이 바뀐 프레임에만. 차례: 무대의 상자 → 은하 명판(고른 것
+     * 먼저, 그다음 순위) → 필라멘트 수(멀리서 쉴 때만) → 팁의 상자 → 쪽 이름(쉴 때는 연결이 가장 많은 별들,
+     * 가까이 가거나 초점이 있으면 화면에서 크게 보이는 별부터). 먼저 놓인 것을 뒤의 것이 비켜 선다. */
+    placeLabels() {
+      if (this.labelVersion === this.camVersion || this.map === null) return;
+      if (!this.measured && !this.measureLabels()) return;
+      this.labelVersion = this.camVersion;
+      const layout = this.layout;
+      const model = layout.model;
+      const map = this.map;
+      const wide = this.width;
+      const tall = this.height;
+      this.readCovers();
+      this.project();
+      const picked = knowledgeClusterPicked >= 0 && knowledgeClusterPicked < map.rows ? knowledgeClusterPicked : -1;
+      const selected = this.selectedSeat;
+      const focusSeat = this.hover >= 0 ? this.hover : selected;
+      const closeIn = this.dist < this.home.dist * U.closeIn;
+      /* 은하 명판 — 고른 은하가 먼저, 그다음 순위. 고른(또는 고른 쪽의) 은하는 크게 선다. */
+      const galaxies = map.galaxies;
+      const order = this.order;
+      for (let row = 0; row < galaxies; row += 1) {
+        this.anchor(row);
+        order[row] = row;
+      }
+      if (picked >= 0 && picked < galaxies) {
+        order.copyWithin(1, 0, picked);
+        order[0] = picked;
+      }
+      const keep = picked >= 0 ? picked : selected >= 0 ? map.rowOf[selected] : -1;
+      for (let at = 0; at < galaxies; at += 1) {
+        const row = order[at];
+        const plate = this.plates[row];
+        const full = row === keep;
+        if (full !== plate.full) {
+          plate.full = full;
+          plate.element.classList.toggle("is-full", full);
+        }
+        const plateWide = full ? plate.fullWide : plate.wide;
+        const plateTall = full ? plate.fullTall : plate.tall;
+        const x = this.anchorX[row] - plateWide / 2;
+        let y = this.anchorLow[row] + U.plateGap;
+        let on = this.anchorSeen[row] === 1 && x > U.plateEdge && x < wide - plateWide - U.plateEdge && y > U.plateTop
+          && y < tall - plateTall - U.plateBottom && (!closeIn || row === keep);
+        if (on && this.hit(x, y, plateWide, plateTall)) {
+          const above = this.anchorHigh[row] - plateTall - U.plateGap;
+          if (!this.hit(x, above, plateWide, plateTall) && above > U.plateTop) y = above;
+          else on = false;
+        }
+        if (on) {
+          this.pushBox(x - U.plateRoom, y - U.plateRoom, plateWide + U.plateRoom * 2, plateTall + U.plateRoom * 2);
+          this.moveLabel(plate, x, y);
+        }
+        this.showLabel(plate, on);
+        const dim = (picked >= 0 && row !== picked) || (selected >= 0 && map.rowOf[selected] !== row);
+        if (dim !== plate.dim) {
+          plate.dim = dim;
+          plate.element.classList.toggle("is-dim", dim);
+        }
+        const pressed = row === picked;
+        if (pressed !== plate.pressed) {
+          plate.pressed = pressed;
+          plate.element.setAttribute("aria-pressed", String(pressed));
+        }
+      }
+      /* 굵은 필라멘트의 선 수와 흐름 방향(보낸 은하 → 받는 은하) — 멀리서, 아무 초점도 없이 쉴 때만. */
+      const flowsShown = !closeIn && this.hover < 0 && selected < 0 && picked < 0 && this.hits === 0;
+      for (const tag of this.flowTags) {
+        let on = false;
+        if (flowsShown && this.screenAt(tag.mid[0], tag.mid[1], tag.mid[2])) {
+          const mx = this.spot[0];
+          const my = this.spot[1];
+          const turn = this.screenAt(tag.ahead[0], tag.ahead[1], tag.ahead[2])
+            ? Math.atan2(this.spot[1] - my, this.spot[0] - mx) : 0;
+          const x = mx - tag.wide / 2;
+          const y = my - U.flowTagTall / 2;
+          if (x > U.plateEdge && x < wide - tag.wide - U.plateEdge && y > U.labelTop && y < tall - U.labelBottom
+            && !this.hit(x, y, tag.wide, U.flowTagTall)) {
+            on = true;
+            this.pushBox(x - U.flowTagRoom, y - U.flowTagRoom, tag.wide + U.flowTagRoom * 2, U.flowTagTall + U.flowTagRoom * 2);
+            this.moveLabel(tag, x, y);
+            const step = Math.round(turn * U.flowTagTurn) / U.flowTagTurn;
+            if (step !== tag.turn) {
+              tag.arrow.style.transform = `rotate(${step}rad)`;
+              tag.turn = step;
+            }
+          }
+        }
+        this.showLabel(tag, on);
+      }
+      /* 쪽 이름 — 가까이 왔거나 초점이 있으면 화면에서 밝게(크게) 보이는 별부터, 쉬는 먼 자리에서는 가장 밝은 별들. */
+      const proj = this.proj;
+      const state = this.starState;
+      const candidates = this.candidates;
+      const scores = this.candidateScores;
+      const room = candidates.length;
+      let found = 0;
+      if (closeIn || focusSeat >= 0 || this.hits > 0) {
+        for (let seat = 0; seat < layout.count; seat += 1) {
+          if (proj[seat * 4 + 3] < 0) continue;
+          const sx = proj[seat * 4];
+          const sy = proj[seat * 4 + 1];
+          if (sx < 0 || sx > wide || sy < U.labelScan || sy > tall - U.labelScan) continue;
+          let score = proj[seat * 4 + 2];
+          if (seat === focusSeat) {
+            if (seat === this.hover) continue;
+            score = KNOWLEDGE_UNIVERSE_LABEL_FIRST.focus;
+          } else if (state[seat] >= 1 && focusSeat >= 0) {
+            score += U.labelNeighbour;
+          } else if (state[seat] === 3) {
+            score += U.labelHit;
+          } else if (!closeIn) {
+            continue;
+          } else if (picked >= 0 && map.rowOf[seat] !== picked) {
+            continue;
+          }
+          if (score < U.labelLeast) continue;
+          if (found < room) {
+            candidates[found] = seat;
+            scores[found] = score;
+            found += 1;
+          } else {
+            let least = 0;
+            for (let at = 1; at < room; at += 1) if (scores[at] < scores[least]) least = at;
+            if (score > scores[least]) {
+              candidates[least] = seat;
+              scores[least] = score;
+            }
+          }
+        }
+        for (let at = 1; at < found; at += 1) {
+          const seat = candidates[at];
+          const score = scores[at];
+          let back = at - 1;
+          while (back >= 0 && scores[back] < score) {
+            candidates[back + 1] = candidates[back];
+            scores[back + 1] = scores[back];
+            back -= 1;
+          }
+          candidates[back + 1] = seat;
+          scores[back + 1] = score;
+        }
+      } else if (picked < 0) {
+        for (const seat of this.bright) {
+          if (found >= room) break;
+          candidates[found] = seat;
+          scores[found] = KNOWLEDGE_UNIVERSE_LABEL_FIRST.bright - found;
+          found += 1;
+        }
+      }
+      if (this.hover >= 0 && this.tipBox !== null) {
+        const [x, y, tipWide, tipTall] = this.tipBox;
+        this.pushBox(x - U.tipGap, y - U.tipGap, tipWide + U.tipGap * 2, tipTall + U.tipGap * 2);
+      }
+      let used = 0;
+      for (let at = 0; at < found && used < this.names.length; at += 1) {
+        const seat = candidates[at];
+        if (proj[seat * 4 + 3] < 0) continue;
+        const hot = seat === focusSeat;
+        const nameWide = this.nameWide(seat, hot);
+        const off = Math.max(U.labelOffLeast, proj[seat * 4 + 2] * U.labelOff) + U.labelOffPad;
+        let x = proj[seat * 4] + off;
+        const y = proj[seat * 4 + 1] - U.labelTall / 2;
+        if (y < U.labelTop || y > tall - U.labelBottom) continue;
+        if (x + nameWide > wide - U.labelEdge) x = proj[seat * 4] - off - nameWide;
+        if (x < U.labelEdge) continue;
+        if (!hot && this.hit(x, y, nameWide, U.labelTall)) continue;
+        this.pushBox(x, y, nameWide, U.labelTall);
+        const name = this.names[used];
+        used += 1;
+        if (name.seat !== seat) {
+          name.element.textContent = model.titles[seat];
+          name.seat = seat;
+        }
+        this.moveLabel(name, x, y);
+        this.showLabel(name, true);
+        if (hot !== name.hot) {
+          name.hot = hot;
+          name.element.classList.toggle("is-hot", hot);
+        }
+      }
+      for (let at = used; at < this.names.length; at += 1) this.showLabel(this.names[at], false);
     },
 
     /* 초점(시안 `refreshStates`): 별마다 상태(0 보통 · 1 이웃/고른 주제/시간 창 안 · 2 올림/고름/경로 · 3 찾은 것),
@@ -2133,6 +2780,7 @@ function makeKnowledgeUniverse(view) {
         focus = 1;
       }
       const selected = knowledgeSelectedKey === null ? -1 : model.keys.indexOf(knowledgeSelectedKey);
+      this.selectedSeat = selected;
       const focusSeat = this.hover >= 0 ? this.hover : selected;
       if (focusSeat >= 0) {
         if (topic >= 0) for (const at of map.members[topic]) if (state[at] === 1) state[at] = 0;
@@ -2287,6 +2935,9 @@ function makeKnowledgeUniverse(view) {
       this.uniforms.uLift.value = this.lift;
       this.placeCamera();
       this.render();
+      /* 이름표는 우주가 다 떠오른 판에서만(시안 `frame`: 들림 > 0.98) — 떠오르고 내려앉는 동안은 숨는다. */
+      if (this.lift > U.labelLift) this.placeLabels();
+      else this.hideLabels();
       this.paintZoom();
       this.frames += 1;
       if (busy) this.invalidate();
@@ -2404,6 +3055,14 @@ function makeKnowledgeUniverse(view) {
       this.node2 = null;
       this.lineGeometry = null;
       this.lineObject = null;
+      if (this.labels !== null) this.labels.textContent = "";
+      this.plates = [];
+      this.names = [];
+      this.flowTags = [];
+      this.tip = null;
+      this.tipBox = null;
+      this.labelVersion = -1;
+      this.selectedSeat = -1;
       if (this.uniforms !== null) {
         this.uniforms.tGal.value = null;
         this.uniforms.tNode3.value = null;

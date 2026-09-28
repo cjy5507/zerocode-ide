@@ -1646,6 +1646,83 @@
   --knowledge-3d-bloom-strength: 0.16;
   --knowledge-3d-exposure: 1;
   --knowledge-3d-paper: rgb(231 227 218);
+  /* 이름표(시안 `updateLabels`·`galaxyAnchor`·`showTip`, PORTING §2.7) — 들림이 이 값을 넘은 판에서만 선다.
+   * 명판: 은하 가장자리 고리(반지름의 몫 · 점 수 · 보여야 할 점 수)의 화면에서 가장 낮은 곳 아래 틈만큼, 판
+   * 가장자리 여백과 위 · 아래 띠, 둘레의 틈, 큰 명판을 입는 순위의 수, 가까이(처음 거리의 몫 밑) 가면 고른 것만. */
+  --knowledge-3d-label-lift: 0.98;
+  --knowledge-3d-plate-ring: 0.8;
+  --knowledge-3d-plate-points: 12;
+  --knowledge-3d-plate-seen: 7;
+  --knowledge-3d-plate-gap: 6;
+  --knowledge-3d-plate-edge: 4;
+  --knowledge-3d-plate-top: 40;
+  --knowledge-3d-plate-bottom: 8;
+  --knowledge-3d-plate-room: 4;
+  --knowledge-3d-plate-large: 8;
+  --knowledge-3d-close-in: 0.42;
+  /* 쪽 이름: 풀, 쉴 때 이름을 다는 가장 밝은 별의 수, 후보 수와 화면 반지름 문턱, 초점의 이웃 · 찾은 것의 덤,
+   * 후보를 고르는 위 · 아래 띠, 별에서 비킨 거리(반지름의 몫 · 최소 · 여백), 판 가장자리 여백, 놓는 위 · 아래 띠,
+   * 한 줄의 높이. */
+  --knowledge-3d-labels: 30;
+  --knowledge-3d-labels-rest: 5;
+  --knowledge-3d-labels-candidates: 40;
+  --knowledge-3d-label-least: 2.2;
+  --knowledge-3d-label-neighbour: 30;
+  --knowledge-3d-label-hit: 40;
+  --knowledge-3d-label-scan: 50;
+  --knowledge-3d-label-off: 0.45;
+  --knowledge-3d-label-off-least: 5;
+  --knowledge-3d-label-off-pad: 4;
+  --knowledge-3d-label-edge: 6;
+  --knowledge-3d-label-top: 44;
+  --knowledge-3d-label-bottom: 70;
+  --knowledge-3d-label-tall: 19;
+  /* 필라멘트 수: 굵은 몇 쌍, 가운데 자리(t)와 화살이 가리키는 t, 한 줄의 높이 · 둘레의 틈, 화살 각의 걸음(1/rad). */
+  --knowledge-3d-flow-tags: 6;
+  --knowledge-3d-flow-tag-at: 0.5;
+  --knowledge-3d-flow-tag-ahead: 0.56;
+  --knowledge-3d-flow-tag-tall: 18;
+  --knowledge-3d-flow-tag-room: 3;
+  --knowledge-3d-flow-tag-turn: 20;
+  /* 팁: 포인터에서 오른쪽 · 위로 비킨 자리, 판 오른쪽 끝에서 비울 넓이, 위의 최소, 둘레의 틈. */
+  --knowledge-3d-tip-right: 14;
+  --knowledge-3d-tip-up: 46;
+  --knowledge-3d-tip-room: 300;
+  --knowledge-3d-tip-top: 8;
+  --knowledge-3d-tip-gap: 4;
+  /* 이름표의 옷(시안 CSS 57–78) — 둥글기 · 칸 여백 · 무대 바탕을 섞는 몫 · 흐린 명판과 쪽 이름의 불투명도 · 줄 간격,
+   * 서고 숨는 전이. 글자 크기는 앱의 글자 단(10 · 11 · 12 px)이다. 필라멘트 수의 화살은 시안의 강조색이다. */
+  --knowledge-3d-plate-radius: 9px;
+  --knowledge-3d-plate-pad: 2px 6px;
+  --knowledge-3d-plate-full-pad: 6px 11px 6px 10px;
+  --knowledge-3d-plate-dot: 5px;
+  --knowledge-3d-plate-mark: 6px;
+  --knowledge-3d-plate-leading: 1.45;
+  --knowledge-3d-plate-veil: 48%;
+  --knowledge-3d-plate-dim: 0.34;
+  --knowledge-3d-name-radius: 6px;
+  --knowledge-3d-name-pad: 1px 6px;
+  --knowledge-3d-name-veil: 55%;
+  --knowledge-3d-name-on: 0.92;
+  --knowledge-3d-flow-pad: 1px 7px 1px 6px;
+  --knowledge-3d-flow-arrow: rgb(156 196 255);
+  --knowledge-3d-tip-radius: 10px;
+  --knowledge-3d-tip-pad: 7px 10px;
+  --knowledge-3d-plate-fade: 300ms;
+  --knowledge-3d-name-fade: 250ms;
+  --knowledge-3d-tip-fade: 150ms;
+  /* 범례의 우주 기호(시안 CSS 41–54): 별빛(속 · 번짐 · 빛살), 고친 때의 빛깔(오래됨 → 가운데 → 최근), 필라멘트(흐름 ·
+   * 가운데 · 빛 머리), 올린 쪽의 선. */
+  --knowledge-3d-legend-star-core: rgb(255 255 255);
+  --knowledge-3d-legend-star-glow: rgb(207 224 255 / 40%);
+  --knowledge-3d-legend-star-ray: rgb(223 233 255);
+  --knowledge-3d-legend-old: rgb(255 185 113);
+  --knowledge-3d-legend-mid: rgb(255 239 228);
+  --knowledge-3d-legend-new: rgb(171 193 255);
+  --knowledge-3d-legend-flow: rgb(157 182 255 / 53%);
+  --knowledge-3d-legend-flow-mid: rgb(201 214 255);
+  --knowledge-3d-legend-flow-head: rgb(255 255 255);
+  --knowledge-3d-legend-flow-glow: 0 0 6px var(--knowledge-3d-legend-flow-head);
   --knowledge-glass-blur: blur(16px);
   --knowledge-inspector-blur: blur(12px);
   --knowledge-inspector-veil-weight: 94%;
@@ -2764,6 +2841,18 @@
   --knowledge-3d-tint-5: rgb(131 230 183);
   --knowledge-3d-tint-6: rgb(255 116 111);
   --knowledge-3d-tint-7: color-mix(in srgb, var(--knowledge-3d-tint-3) 50%, var(--knowledge-3d-tint-4));
+  /* 종이 위의 범례 기호와 필라멘트 수의 화살(시안 밝은 테마 CSS 23 · 50–54) — 먹빛. */
+  --knowledge-3d-flow-arrow: rgb(45 95 168);
+  --knowledge-3d-legend-star-core: rgb(28 33 48);
+  --knowledge-3d-legend-star-glow: rgb(28 33 48 / 27%);
+  --knowledge-3d-legend-star-ray: rgb(28 33 48);
+  --knowledge-3d-legend-old: rgb(138 75 29);
+  --knowledge-3d-legend-mid: rgb(76 74 72);
+  --knowledge-3d-legend-new: rgb(35 66 125);
+  --knowledge-3d-legend-flow: rgb(28 33 48 / 33%);
+  --knowledge-3d-legend-flow-mid: rgb(28 33 48 / 67%);
+  --knowledge-3d-legend-flow-head: rgb(28 33 48);
+  --knowledge-3d-legend-flow-glow: none;
   /* 라이트 판의 다섯 색은 어두운 잉크를 섞어 바닥(#f5f5f5)에서 3:1을 넘긴다.
    * 비율이 색마다 다른 것은 램프의 다섯이 밝기가 다르기 때문이고, 그 다섯 수는
    * 재서 얻은 것이다(하네스가 두 테마에서 픽셀로 잰다): 62%의 앰버는 3.19로

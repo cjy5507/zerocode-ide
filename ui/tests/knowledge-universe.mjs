@@ -999,6 +999,18 @@ export async function testKnowledgeUniverseInspector(page, ok) {
       const card = { shown: galaxy !== null && !galaxy.hidden, words: galaxyWords, rows: galaxyRows.length,
         typeWord: KNOWLEDGE_UNIVERSE_TYPE_WORDS[map.galaxy[knowledgeClusterPicked]?.type]?.key ?? "",
         percent: `${Math.round(recent * 100)}%` };
+      /* 은하 칸의 밝은 별: 연결이 많은 차례로 여섯(디자이너 m-12627, 시안 은하 카드) — 줄을 누르면 그 쪽이 골라진다. */
+      const stars = [...(galaxy?.querySelectorAll(".knowledge-overview-galaxy-stars [data-knowledge-key]") ?? [])];
+      const members = map.members[knowledgeClusterPicked] ?? [];
+      const brightest = { rows: stars.length, want: Math.min(6, members.length),
+        keys: stars.map((one) => one.dataset.knowledgeKey), wantKeys: members.slice(0, 6).map((at) => layout.model.keys[at]),
+        notes: stars.map((one) => one.parentElement.querySelector(".knowledge-inspector-note")?.textContent ?? ""),
+        wantNotes: members.slice(0, 6).map((at) => String(layout.model.degree[at])), selected: null };
+      stars[0]?.click();
+      await frames(2);
+      brightest.selected = knowledgeSelectedKey;
+      selectKnowledgeNode(view, null);
+      await frames(2);
       toggleKnowledgeCluster(view, knowledgeClusterPicked);
       await frames(2);
       /* 쪽 카드의 고친 때: 날짜와 「얼마 전」. */
@@ -1020,7 +1032,7 @@ export async function testKnowledgeUniverseInspector(page, ok) {
       knowledgeDimension = heldDimension;
       secondBrainVault = heldVault;
       await paintKnowledgeView();
-      return { overview, flown, card, modified, ago, editing, flat };
+      return { overview, flown, card, brightest, modified, ago, editing, flat };
     } catch (error) {
       return { thrown: String(error?.stack ?? error) };
     }
@@ -1037,10 +1049,207 @@ export async function testKnowledgeUniverseInspector(page, ok) {
     !seen.thrown && seen.card.shown && seen.card.typeWord !== "" && seen.card.words.includes(seen.card.percent)
       && seen.card.rows >= 1,
     detail);
+  ok("t-12443 ⑥: a picked galaxy names its six brightest stars by links, and a row picks that page",
+    !seen.thrown && seen.brightest.rows === seen.brightest.want && seen.brightest.rows > 0
+      && seen.brightest.keys.every((key, at) => key === seen.brightest.wantKeys[at])
+      && seen.brightest.notes.every((note, at) => note === seen.brightest.wantNotes[at])
+      && seen.brightest.selected === seen.brightest.wantKeys[0],
+    detail);
   ok("t-12443 ⑤: a page's card says when it was changed as a date and as how long ago",
     !seen.thrown && seen.modified.includes(seen.ago), detail);
   ok("t-12443 ⑤: editing a relation is flat work — from the universe it lands on the flat map with the same page picked and the form open",
     !seen.thrown && !seen.editing.mounted && !seen.editing.universe && seen.editing.selected && seen.editing.form
       && seen.flat.hidden,
+    detail);
+}
+
+/* ⑥ 이름표(시안 `updateLabels`·`galaxyAnchor`·`showTip`) — 시안과 같은 모양의 합성 볼트(850쪽) 위에서.
+ * 자리 잡는 차례는 고정 UI 상자 → 은하 명판(고른 것 먼저, 그다음 순위) → 필라멘트 수(멀리서 쉴 때만) → 쪽 이름
+ * (쉴 때는 연결이 가장 많은 다섯, 가까이 가거나 초점이 있으면 풀 30)이고, 쉬는 화면의 글자는 서로 겹치지 않는다. */
+export async function testKnowledgeUniverseLabels(page, ok) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const seen = await page.evaluate(async () => {
+    try {
+      const view = document.querySelector(".knowledge-view:not([hidden])");
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const frames = async (count) => {
+        for (let at = 0; at < count; at += 1) await frame();
+      };
+      const until = async (wanted, rounds = 900) => {
+        for (let round = 0; round < rounds; round += 1) {
+          if (wanted()) return true;
+          await frame();
+        }
+        return false;
+      };
+      const heldDimension = knowledgeDimension;
+      const heldVault = secondBrainVault;
+      const answer = window.__buildVaultGraph__({ path: "/labels", sources: false },
+        window.__universeVaultSpec__(850, Date.now()));
+      window.__GRAPH_BUILT__ = answer;
+      noteKnowledgeExploreLines({});
+      secondBrainVault = answer.vault;
+      knowledgeDimension = "3d";
+      knowledgeQuery = "";
+      knowledgeSelectedKey = null;
+      knowledgeClusterPicked = -1;
+      knowledgeSlicerCutoff = 0;
+      knowledgePath = null;
+      setKnowledgeMode(view, "global", { paint: false });
+      knowledgeReport = answer;
+      await paintKnowledgeView();
+      await until(() => (knowledgeLayouts.get(view)?.left ?? 1) === 0, 3000);
+      await paintKnowledgeView();
+      await frames(3);
+      const layout = knowledgeLayouts.get(view);
+      const model = layout.model;
+      const universe = knowledgeUniverses.get(view);
+      const map = universe.map;
+      const host = universe.host.getBoundingClientRect();
+      const box = (element) => {
+        const rect = element.getBoundingClientRect();
+        return { x: rect.left - host.left, y: rect.top - host.top, w: rect.width, h: rect.height };
+      };
+      const shown = (selector) => [...universe.host.querySelectorAll(selector)].filter((one) => one.classList.contains("is-on"));
+      const overlap = (one, two) => one.x < two.x + two.w - 0.5 && one.x + one.w > two.x + 0.5
+        && one.y < two.y + two.h - 0.5 && one.y + one.h > two.y + 0.5;
+      const clashes = (boxes) => {
+        let count = 0;
+        for (let one = 0; one < boxes.length; one += 1) {
+          for (let two = one + 1; two < boxes.length; two += 1) if (overlap(boxes[one], boxes[two])) count += 1;
+        }
+        return count;
+      };
+      const zoom = box(view.querySelector(".knowledge-zoom"));
+      /* 쉬는 처음 자리. */
+      const restPlates = shown(".knowledge-universe-plate");
+      const restFlows = shown(".knowledge-universe-flow");
+      const restNames = shown(".knowledge-universe-name");
+      const restBoxes = [...restPlates, ...restFlows, ...restNames].map(box);
+      const bright = Array.from({ length: layout.count }, (unused, at) => at)
+        .sort((one, two) => model.degree[two] - model.degree[one] || one - two).slice(0, 5).map((at) => model.titles[at]);
+      const rest = { plates: restPlates.length, galaxies: map.galaxies, flows: restFlows.length,
+        filaments: map.filaments.length, names: restNames.map((one) => one.textContent), bright,
+        clashes: clashes(restBoxes), onZoom: restBoxes.filter((one) => overlap(one, zoom)).length,
+        plateNames: restPlates.map((one) => one.querySelector(".knowledge-universe-plate-name")?.textContent ?? ""),
+        wantNames: restPlates.map((one) => knowledgeClusterWord(layout, Number(one.dataset.knowledgeCluster))),
+        plateCounts: restPlates.map((one) => one.querySelector(".knowledge-universe-plate-count")?.textContent ?? ""),
+        wantCounts: restPlates.map((one) => String(layout.communitySize[Number(one.dataset.knowledgeCluster)])),
+        flowCounts: restFlows.map((one) => one.textContent.trim()),
+        wantFlows: map.filaments.slice(0, 6).map((one) => String(one.n)),
+        pressed: restPlates.filter((one) => one.getAttribute("aria-pressed") === "true").length,
+        full: restPlates.filter((one) => one.classList.contains("is-full")).length };
+      /* 올리기 — 순위 1 은하의 허브에 포인터를 둔다(시안 06-hover). */
+      const hub = map.members[1][0];
+      const spot = universe.project(hub);
+      universe.host.dispatchEvent(new PointerEvent("pointermove",
+        { bubbles: true, clientX: host.left + spot.x, clientY: host.top + spot.y, pointerId: 1 }));
+      await until(() => universe.hover === hub, 60);
+      await frames(2);
+      const neighbours = new Set();
+      for (let slot = model.start[hub]; slot < model.start[hub + 1]; slot += 1) neighbours.add(model.titles[model.neighbour[slot]]);
+      const tip = universe.host.querySelector(".knowledge-universe-tip");
+      const hoverNames = shown(".knowledge-universe-name").map((one) => one.textContent);
+      const hoverBoxes = [...shown(".knowledge-universe-plate"), ...shown(".knowledge-universe-name")].map(box);
+      /* 팁은 명판 위에 설 수 있다(시안 06-hover: 팁 뒤에 명판) — 쪽 이름만 팁을 비킨다. */
+      const tipBox = tip === null ? null : box(tip);
+      const underTip = tipBox === null ? 0
+        : shown(".knowledge-universe-name").map(box).filter((one) => overlap(one, tipBox)).length;
+      const hovered = { hover: universe.hover, tipOn: tip?.classList.contains("is-on") ?? false,
+        tipWords: tip?.textContent ?? "", title: model.titles[hub], degree: String(model.degree[hub]),
+        cluster: knowledgeClusterWord(layout, map.rowOf[hub]), flows: shown(".knowledge-universe-flow").length,
+        names: hoverNames.length, neighbourNames: hoverNames.filter((word) => neighbours.has(word)).length,
+        ownName: hoverNames.includes(model.titles[hub]),
+        clashes: clashes(hoverBoxes), underTip };
+      universe.host.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false, pointerId: 1 }));
+      await frames(2);
+      const left = { tipOn: tip?.classList.contains("is-on") ?? false, flows: shown(".knowledge-universe-flow").length };
+      /* 은하 고르기 — 가장 작은 은하로 날아가 가까이 서면(처음 거리 × close-in 밑) 그 명판만 크게, 쪽 이름은 그
+       * 은하의 별만(시안 05-close). 합성 볼트에서 순위 0은 두 주제가 합쳐진 큰 은하라 그 거리가 문턱 밖이다. */
+      const small = map.galaxies - 1;
+      toggleKnowledgeCluster(view, small);
+      await until(() => !universe.tween.on, 400);
+      await frames(2);
+      const closePlates = shown(".knowledge-universe-plate");
+      const closeNames = shown(".knowledge-universe-name").map((one) => one.textContent);
+      const members = new Set(map.members[small].map((at) => model.titles[at]));
+      const close = { closeIn: universe.dist < universe.home.dist * knowledgeUniverseTuning(view).closeIn,
+        plates: closePlates.map((one) => Number(one.dataset.knowledgeCluster)),
+        full: closePlates.map((one) => one.classList.contains("is-full")),
+        pressed: closePlates.map((one) => one.getAttribute("aria-pressed")),
+        names: closeNames.length, strangers: closeNames.filter((word) => !members.has(word)).length,
+        flows: shown(".knowledge-universe-flow").length,
+        small, clashes: clashes([...closePlates, ...shown(".knowledge-universe-name")].map(box)) };
+      toggleKnowledgeCluster(view, small);
+      universe.goHome();
+      await until(() => !universe.tween.on, 400);
+      await frames(2);
+      /* 명판을 누르면 그 은하가 골라진다(시안 `focusTopic`). */
+      const plate = shown(".knowledge-universe-plate").find((one) => Number(one.dataset.knowledgeCluster) === 1)
+        ?? shown(".knowledge-universe-plate")[0];
+      const plateRank = Number(plate?.dataset.knowledgeCluster ?? -1);
+      plate?.click();
+      await frames(2);
+      const pressed = { rank: plateRank, picked: knowledgeClusterPicked };
+      toggleKnowledgeCluster(view, knowledgeClusterPicked);
+      universe.goHome();
+      await until(() => !universe.tween.on, 400);
+      /* 떠오르거나 내려앉는 동안(들림 0.98 밑)에는 이름표가 서지 않는다. */
+      universe.tween.on = false;
+      universe.lift = 0.5;
+      universe.camVersion += 1;
+      universe.invalidate();
+      await frames(2);
+      const rising = { on: universe.host.querySelectorAll(".knowledge-universe-labels .is-on").length };
+      universe.lift = 1;
+      universe.camVersion += 1;
+      universe.invalidate();
+      await frames(2);
+      /* 범례: 우주가 서 있는 동안 우주의 네 줄만, 평면에서는 평면의 줄만(디자이너 m-12627). */
+      const legendRows = [...view.querySelectorAll(".knowledge-legend-list > li")];
+      const legendShown = () => legendRows.filter((one) => getComputedStyle(one).display !== "none")
+        .map((one) => one.dataset.legendUniverse === "true");
+      const legend = { universe: legendRows.filter((one) => one.dataset.legendUniverse === "true").length,
+        up: legendShown(), flat: [] };
+      setKnowledgeDimension(view, "2d");
+      await until(() => !knowledgeUniverses.has(view), 200);
+      await frames(2);
+      legend.flat = legendShown();
+      knowledgeDimension = heldDimension;
+      secondBrainVault = heldVault;
+      await paintKnowledgeView();
+      return { rest, hovered, left, close, pressed, rising, legend };
+    } catch (error) {
+      return { thrown: String(error?.stack ?? error) };
+    }
+  });
+  const detail = JSON.stringify(seen).slice(0, 4000);
+  ok("t-12443 ⑥: at rest every galaxy that fits wears its plate (name and pages), the thickest filaments their line counts, and the five most linked pages their names — nothing overlaps, nothing sits on the zoom box",
+    !seen.thrown && seen.rest.plates >= Math.min(4, seen.rest.galaxies) && seen.rest.plates <= seen.rest.galaxies
+      && seen.rest.plateNames.every((word, at) => word === seen.rest.wantNames[at])
+      && seen.rest.plateCounts.every((word, at) => word === seen.rest.wantCounts[at])
+      && seen.rest.flows >= 1 && seen.rest.flows <= Math.min(6, seen.rest.filaments)
+      && seen.rest.flowCounts.every((word) => seen.rest.wantFlows.includes(word))
+      && seen.rest.names.length >= 1 && seen.rest.names.length <= 5
+      && seen.rest.names.every((word) => seen.rest.bright.includes(word))
+      && seen.rest.clashes === 0 && seen.rest.onZoom === 0 && seen.rest.pressed === 0 && seen.rest.full === 0,
+    detail);
+  ok("t-12443 ⑥: pointing at a star shows its tip (title, galaxy, links) beside it, names its neighbours but not itself, and lets the filament counts go; leaving takes the tip away",
+    !seen.thrown && seen.hovered.tipOn && seen.hovered.tipWords.includes(seen.hovered.title)
+      && seen.hovered.tipWords.includes(seen.hovered.cluster) && seen.hovered.tipWords.includes(seen.hovered.degree)
+      && seen.hovered.flows === 0 && seen.hovered.neighbourNames >= 1 && !seen.hovered.ownName
+      && seen.hovered.clashes === 0 && seen.hovered.underTip === 0 && !seen.left.tipOn && seen.left.flows >= 1,
+    detail);
+  ok("t-12443 ⑥: close to a picked galaxy only its plate stays, full and pressed, and the names are its own stars",
+    !seen.thrown && seen.close.closeIn && seen.close.plates.length === 1 && seen.close.plates[0] === seen.close.small
+      && seen.close.full[0] === true && seen.close.pressed[0] === "true" && seen.close.names >= 1
+      && seen.close.strangers === 0 && seen.close.flows === 0 && seen.close.clashes === 0,
+    detail);
+  ok("t-12443 ⑥: while the universe stands the legend shows its four rows (brightness, recency, filaments, pointed lines) and hides the flat rows; flat shows the flat rows only",
+    !seen.thrown && seen.legend.universe === 4 && seen.legend.up.length === 4 && seen.legend.up.every((one) => one)
+      && seen.legend.flat.length >= 1 && seen.legend.flat.every((one) => !one),
+    detail);
+  ok("t-12443 ⑥: pressing a plate picks its galaxy, and no label stands while the universe rises or folds",
+    !seen.thrown && seen.pressed.rank >= 0 && seen.pressed.picked === seen.pressed.rank && seen.rising.on === 0,
     detail);
 }

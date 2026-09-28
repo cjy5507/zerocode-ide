@@ -11,7 +11,9 @@ import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.m
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { measureKnowledgeSupplyParity, measureKnowledgeSupplyScene, testKnowledgeSupply } from "./knowledge-supply.mjs";
 import { testKnowledgeUniverse, testKnowledgeUniverseBodies, testKnowledgeUniverseFilaments, testKnowledgeUniverseFocus,
-  testKnowledgeUniverseGalaxies, testKnowledgeUniverseInspector, testKnowledgeUniverseUnable } from "./knowledge-universe.mjs";
+  testKnowledgeUniverseGalaxies, testKnowledgeUniverseInspector, testKnowledgeUniverseLabels, testKnowledgeUniverseUnable }
+  from "./knowledge-universe.mjs";
+import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -4251,6 +4253,7 @@ const glBrowser = await chromium.launch({ args: GL_ARGS });
 const glPage = await glBrowser.newPage({ viewport: { width: 1280, height: 860 } });
 glPage.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
 await seedKnowledgeWindow(glPage);
+await seedUniverseVault(glPage);
 await glPage.goto(`${origin}/index.html`);
 await glPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
 await glPage.evaluate(() => {
@@ -6076,6 +6079,7 @@ await testKnowledgeUniverseBodies(glPage, ok);
 await testKnowledgeUniverseFilaments(glPage, ok);
 await testKnowledgeUniverseFocus(glPage, ok);
 await testKnowledgeUniverseInspector(glPage, ok);
+await testKnowledgeUniverseLabels(glPage, ok);
 await glBrowser.close();
 
 console.log(`METRIC knowledge graph 1020 nodes: first paint ${brainScale.firstPaint}ms; `
