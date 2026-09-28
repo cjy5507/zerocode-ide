@@ -267,23 +267,32 @@ pub(crate) fn uncover(
     Ok(ended)
 }
 
-/// One move of the target's own window.
+/// One move of the target's own window. A window its app does not publish
+/// to accessibility (a non-activating panel) cannot be raised or moved by
+/// the helper: it is brought forward with its whole app instead, and a move
+/// the helper refuses is a move not made — the look after it says what
+/// stands, and the next move, or the person, follows. Anything else the
+/// helper says is an error.
 fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<(), ComputerUseError> {
     match next {
-        Move::RaiseTarget => (hand.call)(
+        Move::RaiseTarget => match (hand.call)(
             "windowAction",
             json!({ "action": "focus", "windowId": cover.target }),
-        )
-        .map(drop),
+        ) {
+            Err(refusal) if not_its_to_move(&refusal) => not_made((hand.call)(
+                "activateApp",
+                json!({ "app": format!("pid:{}", cover.pid) }),
+            )),
+            raised => raised.map(drop),
+        },
         Move::MoveTarget => {
             let displays = (hand.call)("displays", json!({}))?;
             let screens = screens_of(&displays);
             match clear_place(cover, &screens) {
-                Some([x, y]) => (hand.call)(
+                Some([x, y]) => not_made((hand.call)(
                     "windowAction",
                     json!({ "action": "move", "windowId": cover.target, "x": x, "y": y }),
-                )
-                .map(drop),
+                )),
                 // No place on any screen clears it: the move is made of
                 // nothing, and the look after it says so.
                 None => Ok(()),
@@ -294,6 +303,20 @@ fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<(), ComputerUs
             Ok(())
         }
         Move::AskPerson => Ok(()),
+    }
+}
+
+/// Whether the helper refused a window move because the window is not one it
+/// can move: gone from its app's accessibility windows, or refused by them.
+fn not_its_to_move(refusal: &ComputerUseError) -> bool {
+    refusal.code == error_code::WINDOW_NOT_FOUND || refusal.code == error_code::ACCESSIBILITY_ERROR
+}
+
+/// A move's answer, where the helper refusing to make it is a move not made.
+fn not_made(answer: Result<Value, ComputerUseError>) -> Result<(), ComputerUseError> {
+    match answer {
+        Err(refusal) if not_its_to_move(&refusal) => Ok(()),
+        answer => answer.map(drop),
     }
 }
 
