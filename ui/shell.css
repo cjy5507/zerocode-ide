@@ -19323,8 +19323,71 @@ button.worker-composer-pill:hover {
   gap: var(--space-2) var(--space-3);
 }
 
-/* Where each feature stands is the dashboard's: one quiet line, and the way
- * there is a link in it rather than a second button above the card's own. */
+/* Where each feature stands while Jev is on (t-11989): one row a feature,
+ * its name and then its state in words, two columns while there is room.
+ * The state's dot repeats the words and never stands in for them. */
+.settings-jev-standings {
+  margin: var(--space-3) var(--space-4) 0;
+}
+
+.settings-jev-standings-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--jev-weight-strong);
+}
+
+.settings-jev-standings-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--jev-standing-min)), 1fr));
+  gap: var(--space-1) var(--space-4);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+}
+
+.settings-jev-standing-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.settings-jev-standing-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-jev-standing {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--ink-mist);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-jev-standing::before {
+  content: "";
+  flex: none;
+  width: var(--jev-tone-dot);
+  height: var(--jev-tone-dot);
+  border-radius: 50%;
+  background: var(--jev-tone);
+}
+
+.settings-jev-standing[data-status="applying"] {
+  color: var(--ink-chalk);
+  font-weight: var(--jev-weight-strong);
+}
+
+/* Where each feature's numbers are is the dashboard's: one quiet line, and
+ * the way there is a link in it rather than a second button above the card's
+ * own. */
 .settings-jev-dashboard {
   margin: var(--space-3) var(--space-4) 0;
 }
@@ -40383,10 +40446,13 @@ h4.knowledge-inspector-head::after {
   background: var(--jev-tone);
 }
 
-.jev-view [data-status="applying"] { --jev-tone: var(--jev-tone-applying); }
-.jev-view [data-status="recording"] { --jev-tone: var(--jev-tone-recording); }
+.jev-view [data-status="applying"],
+.settings-jev-standings [data-status="applying"] { --jev-tone: var(--jev-tone-applying); }
+.jev-view [data-status="recording"],
+.settings-jev-standings [data-status="recording"] { --jev-tone: var(--jev-tone-recording); }
 .jev-view [data-status="under"] { --jev-tone: var(--jev-tone-under); }
-.jev-view [data-status="blocked"] { --jev-tone: var(--jev-tone-blocked); }
+.jev-view [data-status="blocked"],
+.settings-jev-standings [data-status="blocked"] { --jev-tone: var(--jev-tone-blocked); }
 .jev-view [data-status="dormant"] { --jev-tone: var(--jev-tone-dormant); }
 
 /* What the table says when no feature was asked all week (t-6277 D10):

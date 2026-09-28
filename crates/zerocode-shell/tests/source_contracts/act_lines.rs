@@ -97,7 +97,7 @@ const READS: &[(&str, &[(&str, &str)])] = &[
     (
         "summon",
         &[
-            (SUMMON, "crate::systemone::act_line(&wire, &SUMMON)"),
+            (SUMMON, "crate::systemone::act_line(wire, &SUMMON)"),
             (SUMMON, "SUMMON.acts_on(pick.confidence, line)"),
         ],
     ),

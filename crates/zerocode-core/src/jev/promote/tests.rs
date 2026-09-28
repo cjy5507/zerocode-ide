@@ -79,6 +79,20 @@ fn rose(seat: &JevUse) -> Value {
     serde_json::json!({(TRANSITION.canonical): ROSE, "rubricVersions": [seat.rubric_version]})
 }
 
+/// The rows that put `seat` at recording before a test of its rise path:
+/// none for a seat that starts there, and a fall of the words it asks now for
+/// one that starts acting ([`JevUse::auto_starts`], t-11989) — the one road
+/// back to recording such a seat has.
+fn recording(seat: &JevUse) -> Vec<Value> {
+    match seat.auto_starts {
+        Stand::Recording => Vec::new(),
+        Stand::Applying => vec![serde_json::json!({
+            (TRANSITION.canonical): FELL,
+            "rubricVersions": [seat.rubric_version],
+        })],
+    }
+}
+
 #[test]
 fn a_no_reader_seat_keeps_its_standing_when_its_first_positive_label_arrives() {
     for seat in [&crate::jev::RECALL, &crate::jev::PLACEMENT] {
@@ -132,7 +146,8 @@ fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
     for seat in crate::jev::JEV_USES.iter().filter(|row| row.promotes) {
         let floor = seat.agreement_rows_wanted.expect("a label sample floor");
         let asked = asked_count(seat);
-        let rows: Vec<Value> = (0..asked).map(|at| asked_by(seat, at)).collect();
+        let mut rows = recording(seat);
+        rows.extend((0..asked).map(|at| asked_by(seat, at)));
         assert_eq!(
             judge_seat(seat, &rows).expect("judged").verdict,
             Verdict::Hold(Line::TooFewCompared {
@@ -1235,8 +1250,12 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
         )
     );
     let row = |at: i64, agreed: bool| json!({"at": at, "outcome": "answered", "elapsedMs": 600, "requests": 1, "agreed": agreed, "rubricVersion": seat.rubric_version});
+    // The agent choice starts acting (t-11989); its rise path is the one it
+    // walks after a fall, so these rows start with one.
+    let fell = || recording(seat);
     // Thin: held short of rows, and not yet due.
-    let thin: Vec<serde_json::Value> = (0..3).map(|at| row(at, true)).collect();
+    let mut thin = fell();
+    thin.extend((0..3).map(|at| row(at, true)));
     let judged = judge_seat(seat, &thin).expect("a promoting seat is judged");
     assert_eq!(judged.window_wanted, wanted);
     assert!(matches!(
@@ -1266,23 +1285,35 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
     ));
     // Full, agreeing but for the three the label said no to, and beating the
     // seat's baseline beside it: rises (t-6342).
-    let full: Vec<serde_json::Value> = (0..wanted as i64)
-        .map(|at| {
-            let mut marked = row(at, at >= crate::jev::NEGATIVES_WANTED as i64);
-            marked["baselineAgreed"] = json!(at % 2 == 0);
-            marked
-        })
-        .collect();
+    let mut full = fell();
+    full.extend((0..wanted as i64).map(|at| {
+        let mut marked = row(at, at >= crate::jev::NEGATIVES_WANTED as i64);
+        marked["baselineAgreed"] = json!(at % 2 == 0);
+        marked
+    }));
     let judged = judge_seat(seat, &full).expect("judged");
     assert_eq!(judged.verdict, Verdict::Rise, "{judged:?}");
     assert_eq!(judged.agreement.compared, wanted);
     // Full but disagreeing with the coordinator every other time (this
     // machine's summon seat: 0 of 13): holds on the agreement line.
-    let half: Vec<serde_json::Value> = (0..wanted as i64).map(|at| row(at, at % 2 == 0)).collect();
+    let acting: Vec<serde_json::Value> =
+        (0..wanted as i64).map(|at| row(at, at % 2 == 0)).collect();
+    let mut half = fell();
+    half.extend(acting.iter().cloned());
     assert!(matches!(
         judge_seat(seat, &half).expect("judged").verdict,
         Verdict::Hold(Line::Agreement { .. })
     ));
+    // And where it starts, acting: the same rows take it back on the same
+    // line, while a thin window takes nothing back (t-11989).
+    assert!(matches!(
+        judge_seat(seat, &acting).expect("judged").verdict,
+        Verdict::Fall(Line::Agreement { .. })
+    ));
+    assert_eq!(
+        judge_seat(seat, &thin[1..]).expect("judged").verdict,
+        Verdict::Keep
+    );
     // A label row's mark counts too, and only from the window's first row on
     // — on the orchestration seat whose labels are rows of their own, each
     // naming the stall it grades (t-6877); the summons' marks sit on its
@@ -1359,7 +1390,8 @@ fn window_then(seat: &JevUse, marks: impl FnOnce(&JevUse, usize) -> Vec<Value>) 
 #[test]
 fn a_seat_whose_labels_never_say_no_cannot_rise() {
     for seat in crate::jev::JEV_USES.iter().filter(|row| row.promotes) {
-        let all_yes = window_then(seat, |seat, at| {
+        let mut all_yes = recording(seat);
+        all_yes.extend(window_then(seat, |seat, at| {
             marks_that_rise(seat, at)
                 .into_iter()
                 .map(|mut mark| {
@@ -1367,7 +1399,7 @@ fn a_seat_whose_labels_never_say_no_cannot_rise() {
                     mark
                 })
                 .collect()
-        });
+        }));
         if seat.id == crate::summon_difficulty::QUESTION {
             assert_eq!(
                 judge_seat(seat, &all_yes).unwrap().verdict,
@@ -1387,7 +1419,8 @@ fn a_seat_whose_labels_never_say_no_cannot_rise() {
             "{}",
             seat.id
         );
-        let said_no = window_then(seat, marks_that_rise);
+        let mut said_no = recording(seat);
+        said_no.extend(window_then(seat, marks_that_rise));
         assert_eq!(
             judge_seat(seat, &said_no).expect("judged").verdict,
             Verdict::Rise,
@@ -2859,12 +2892,18 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
             "{}: today's marks alone",
             seat.id
         );
-        assert!(
-            matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { .. })),
-            "{}: {judged:?}",
-            seat.id
-        );
-        assert_eq!(standing(seat, &rows), Stand::Recording, "{}", seat.id);
+        // The older words' rise is no standing under today's: the seat
+        // stands where it starts (t-11989) — recording, held on the thin
+        // window, or acting, which a thin window takes nothing from.
+        assert_eq!(standing(seat, &rows), seat.auto_starts, "{}", seat.id);
+        match seat.auto_starts {
+            Stand::Recording => assert!(
+                matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { .. })),
+                "{}: {judged:?}",
+                seat.id
+            ),
+            Stand::Applying => assert_eq!(judged.verdict, Verdict::Keep, "{}", seat.id),
+        }
 
         // Today's words marked before their window, then the window and its
         // few marks: the reach back reads today's newest marks to the width
@@ -2911,9 +2950,20 @@ fn a_moved_rubrics_window_reaches_back_through_its_own_series_alone() {
         );
 
         // Today's words answered by an older version, then by the version
-        // answering now: the reach back stops where the version changed.
-        let mut rows =
-            asked_then_marked_as(seat, today, Some(OLDER_VERSION), 0, thick, thick, rising);
+        // answering now: the reach back stops where the version changed —
+        // read at recording, where a seat that starts acting stands after a
+        // fall (t-11989).
+        let mut rows = recording(seat);
+        let start = rows.len();
+        rows.extend(asked_then_marked_as(
+            seat,
+            today,
+            Some(OLDER_VERSION),
+            start,
+            thick,
+            thick,
+            rising,
+        ));
         let start = rows.len();
         rows.extend(asked_then_marked_as(
             seat,
@@ -3121,4 +3171,137 @@ fn a_recall_label_whose_key_columns_disagree_with_its_name_grades_nothing() {
         series.marks.iter().all(|row| LABEL.read(row).is_none()),
         "a mismatched tuple joined: {series:?}"
     );
+}
+
+/* ---- where `auto` starts (t-11989) ---- */
+
+/// A seat whose act only fills a choice its caller left open starts acting
+/// under `auto` (t-11989): with no transition of the words it asks now, the
+/// summons' difficulty and the agent choice stand at applying, and every
+/// other seat at recording, as before — read off the rows and off the
+/// ledger's text alike. A request row says nothing of where a seat stands;
+/// a fall decided on the words it asks now stands it at recording; and a
+/// transition decided on other words is no standing under these, so the
+/// seat stands where it starts.
+#[test]
+fn a_seat_that_fills_what_its_caller_left_open_starts_acting() {
+    let acting_from_the_start = [crate::jev::SUMMON.id, crate::jev::SUMMON_DIFFICULTY.id];
+    for seat in &crate::jev::JEV_USES {
+        let starts = if acting_from_the_start.contains(&seat.id) {
+            Stand::Applying
+        } else {
+            Stand::Recording
+        };
+        let asked = vec![asked_by(seat, 1)];
+        assert_eq!(standing(seat, &[]), starts, "{}", seat.id);
+        assert_eq!(standing(seat, &asked), starts, "{}", seat.id);
+        assert_eq!(standing_in(seat, &text_of(&asked)), starts, "{}", seat.id);
+        let fell = json!({
+            (TRANSITION.canonical): FELL,
+            (RUBRIC_VERSIONS.canonical): [seat.rubric_version],
+            ON_LINE: Line::ExecutionQuality.token(),
+        });
+        let after_a_fall = [asked[0].clone(), fell];
+        assert_eq!(
+            standing(seat, &after_a_fall),
+            Stand::Recording,
+            "{}",
+            seat.id
+        );
+        assert_eq!(
+            standing_in(seat, &text_of(&after_a_fall)),
+            Stand::Recording,
+            "{}",
+            seat.id
+        );
+        let other_words = json!({
+            (TRANSITION.canonical): FELL,
+            (RUBRIC_VERSIONS.canonical): [seat.rubric_version + 1],
+        });
+        assert_eq!(
+            standing(seat, std::slice::from_ref(&other_words)),
+            starts,
+            "{}",
+            seat.id
+        );
+        assert_eq!(
+            standing_in(seat, &text_of(&[other_words])),
+            starts,
+            "{}",
+            seat.id
+        );
+    }
+}
+
+/// A record whose label has said no fewer times than the seat asks holds a
+/// recording seat — agreement from a label that cannot say no is no evidence
+/// to rise on (t-6342) — and takes nothing back from an acting one: it says
+/// the evidence is not in, not that the seat was wrong. The agent choice
+/// starts acting (t-11989), and a seat that named every coordinator's own
+/// agent must not fall for having been right.
+#[test]
+fn a_one_sided_record_holds_a_rise_and_takes_back_nothing() {
+    let evidence = Evidence {
+        labels: None,
+        agreement: Agreement {
+            compared: 60,
+            agreed: 60,
+            ..Agreement::default()
+        },
+        disagreed_on_record: 0,
+        ..clean()
+    };
+    assert_eq!(
+        judge(Stand::Recording, &evidence),
+        Verdict::Hold(Line::OneSided {
+            disagreed: 0,
+            wanted: crate::jev::NEGATIVES_WANTED
+        })
+    );
+    assert_eq!(judge(Stand::Applying, &evidence), Verdict::Keep);
+}
+
+/// A seat that starts acting is taken back on its marks alone (t-11989): a
+/// summons seat whose answers came slower than its wall, or not at all
+/// three times running, keeps acting — each late answer already fell back to
+/// the placeholder, and a fall would be for good — while the same window with
+/// marks that disagree with the coordinators takes it back on the agreement
+/// line. Recording again after a fall, it rises on a healthy window only.
+#[test]
+fn a_seat_that_starts_acting_is_taken_back_on_its_marks_alone() {
+    use serde_json::json;
+    let seat = &crate::jev::SUMMON;
+    assert_eq!(seat.auto_starts, Stand::Applying);
+    let wanted = window_wanted_for(seat).expect("summon rises");
+    let wall = seat.apply_deadline_ms.expect("a wall");
+    let slow = |at: usize, agreed: bool| {
+        json!({"at": at, "outcome": "answered", "elapsedMs": wall * 2, "requests": 1,
+            "agreed": agreed, "rubricVersion": seat.rubric_version})
+    };
+    let mut rows: Vec<Value> = (0..wanted)
+        .map(|at| slow(at, at >= crate::jev::NEGATIVES_WANTED))
+        .collect();
+    rows.extend((0..3).map(|n| {
+        json!({"at": wanted + n, "outcome": "timeout", "requests": 1,
+            "rubricVersion": seat.rubric_version})
+    }));
+    assert!(
+        !judgment_due(seat, &rows),
+        "fallbacks running call no judgment for a seat they cannot end"
+    );
+    assert_eq!(
+        judge_seat(seat, &rows).expect("judged").verdict,
+        Verdict::Keep
+    );
+    let mut fell = recording(seat);
+    fell.extend(rows.iter().cloned());
+    assert!(matches!(
+        judge_seat(seat, &fell).expect("judged").verdict,
+        Verdict::Hold(Line::Answered { .. } | Line::Latency { .. })
+    ));
+    let disagreeing: Vec<Value> = (0..wanted).map(|at| slow(at, at % 2 == 0)).collect();
+    assert!(matches!(
+        judge_seat(seat, &disagreeing).expect("judged").verdict,
+        Verdict::Fall(Line::Agreement { .. })
+    ));
 }

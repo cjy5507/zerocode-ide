@@ -99,25 +99,43 @@ settings before saying it started; if that exact launch is unsupported or
 unavailable, report the blocker and do not fall back. A name mentioned only
 for discussion or comparison is not a launch request.
 
-**When the user did not name one, choose by difficulty — and always name
-it.** A slice that is real surgery on a large, well-tested file wants the
-strongest model you have and a high effort; a mechanical slice does not, and
-paying frontier prices for it wastes quota someone else needs. Say the choice
-out loud in `--model`, because an omitted flag does not mean "cheap": it means
-the agent's own CLI default, which on a configured machine can be the most
-expensive model at its highest effort.
+**When the person did not name a model or an effort, leave `--model` and
+`--effort` out — the ledger asks Jev.** An omitted dial is not the CLI's
+default: `worker-start` puts the work's title and the head of its spec to
+Jev's difficulty question (`low`, `mid`, `high`), waits up to two seconds, and
+launches on that difficulty's row of the person's table
+(`smart.summonProfiles`, the settings card's 난이도별 워커 모델·사고 깊이 — rows for
+Claude and Codex; another agent's omitted model is its own CLI default, and
+its effort follows the difficulty where its CLI takes one). With Jev switched
+on the question is carried out from the first summons; when it does not answer
+in time or refuses, or a person set it to `shadow` or `off`, an omitted model
+launches on the middle row. A dial you do pin always wins, and one pinned
+alone keeps the answer for the other (`--model` without `--effort` takes the
+answer's effort). Pin a dial only when the person named it, or when a quota
+handover names it (`--on-quota-wall <agent:model:effort>` carries exactly what
+it says).
 
-Classify before you summon, in one line each, and let the answer pick the
-effort. What raises difficulty is not the size of the diff: it is how much of
-the work is JUDGEMENT. Surgery on a large well-tested file, a race whose order
-decides the answer, a design trade-off with a real cost on both sides — those
-want your strongest and highest. An audit that is mostly `grep` and reading, a
-survey comparing two roads, a mechanical follow-through — those do not, and
-paying top effort for them takes quota from the slice that needed it. An
-analysis is not automatically cheap and an implementation is not automatically
-dear; a read-only slice can be the hardest thing in a round. Write the
-classification where the person can see it, so a wrong call is theirs to
-correct rather than something they have to infer from a bill.
+Pinning out of habit costs more than the dial: every answer is written down
+with whether it was carried out (`~/.zo/jev/summon-difficulty.jsonl`,
+`applied`), and what became of the work — whether its first attempt landed,
+what it cost in tokens and time — is the only evidence that keeps the
+question acting or takes it back. A pinned summons grades nothing. Read what
+a summons came to from the reply's `model` and `effort` and from
+`worker-show`; the settings card and the Jev tab say whether the question is
+acting or still recording.
+
+Still say the classification out loud, in one line each, where the person
+reads the round's plan — which agent, which slice, and how hard you judge it.
+What raises difficulty is not the size of the diff: it is how much of the
+work is JUDGEMENT. Surgery on a large well-tested file, a race whose order
+decides the answer, a design trade-off with a real cost on both sides are
+hard; an audit that is mostly `grep` and reading, a survey comparing two
+roads, a mechanical follow-through are not. An analysis is not automatically
+cheap and an implementation is not automatically dear; a read-only slice can
+be the hardest thing in a round. When the launch you read back disagrees
+with your line — a slice you called light launched on the high row, or the
+reverse — say so to the person rather than re-summoning with a pin: that is
+how a wrong answer is caught while it can still be weighed.
 
 **And spread the work across the agents that are actually installed.** A round
 that sends every slice to one vendor burns that quota alone while the others
@@ -149,10 +167,21 @@ Do it without being asked, and do it the same way every time:
 3. **Never let one vendor take a whole round while another is installed and
    idle.** A round of four with two vendors present is at worst three and one.
 4. **Say the assignment out loud** — which agent, which slice, why — for the
-   same reason you say the effort: so a bad split is visible while it can
-   still be changed, instead of being inferred later from a bill.
+   same reason you say the classification: so a bad split is visible while it
+   can still be changed, instead of being inferred later from a bill.
 
 A person naming an agent overrides all four, and their choice is binding.
+
+**`--agent auto` leaves the agent to Jev.** With Jev switched on, the
+summon question picks one of the agents this machine could start right now
+— the set the quota gate offers, each with its headroom and this ledger's
+record of it — for the summons' brief, waits up to ten seconds, and the
+summons lands on its pick: the reply's `agent` is the agent chosen, never
+the word `auto`, and the rest of the summons (the dials above, the quota
+gate) is read for that agent. When the question is not acting — Jev off, a
+person's `shadow` or `off` for it, or its judge took it back — or it does not
+answer, the summons is refused by name and nothing is written: name the agent
+then. An agent the person named is never replaced by `auto`.
 
 **잔량으로 고르기 — choose by headroom, and let the ledger refuse a wall.**
 `agent-list` answers `headroom` per installed agent — `usedPercent`,
@@ -610,13 +639,15 @@ These are the ones that cost you a run when you get them wrong.
   category: `cyber`, `bio`, `frontier_llm`, `reasoning_extraction`, …) —
   Claude Code says "<Model>'s safeguards flagged this message". Fable 5.x
   and Opus 5/5.5 carry these classifiers; Opus 4.8 does not. A summoned
-  Claude worker that you did NOT pin a model on is launched so its own CLI
+  Claude worker launched with no model at all — no `--model`, and no row of
+  the summon profiles to fill one — is launched so its own CLI
   continues the declined turn on the model the provider routes the category
   to (`cyber` → Opus 4.8) instead of pausing — the flag rides that worker's
   launch only; the person's settings, their panes and yours are untouched.
-  A worker you summoned with `--model` is pinned: its CLI is launched with
+  A worker summoned with `--model` is pinned, and so is one launched on its
+  profile row's model when you left the dial to Jev: its CLI is launched with
   that switch OFF (zo: `--classifier-fallback off`), whatever the person's
-  file says, because the model you named is binding and the CLI's own route
+  file says, because the model it launched on is binding and the CLI's own route
   is neither that model nor a rung you declared; where its task goes is
   `handover-policy --on-classifier-decline`, exactly as declared, or your
   own hand. A worker that still stops is `classifier_declined` news —

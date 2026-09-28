@@ -245,13 +245,21 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
         zerocode_core::jev::promote::Agreement {
             compared: 1,
             agreed: 1,
-            // The pinned model's own vendor CLI named the same agent: the
-            // seat's baseline on the same summons (t-6342).
-            baseline_compared: 1,
-            baseline_agreed: 1,
+            // No baseline mark (t-11989): a summons that named no model of
+            // its own launched on a model its difficulty profile picked from
+            // the named agent's own rows, so "the model's own vendor CLI" is
+            // the named agent by construction — a baseline that read the
+            // coordinator's word would agree with it every time, and stood
+            // at 1,000‰ on the one such row this machine held (2026-09-28).
+            baseline_compared: 0,
+            baseline_agreed: 0,
             not_compared: 0,
         },
         "a marked row is the one comparison the seat rises on"
+    );
+    assert!(
+        agreed[zerocode_core::jev::summary::BASELINE_AGREED.canonical].is_null(),
+        "{agreed}"
     );
 }
 
@@ -445,6 +453,103 @@ fn the_rows_sit_beside_the_days_count() {
         )
     );
     assert_eq!(SUMMON.ledger, "summon-choice.jsonl");
+}
+
+/* ---- `--agent auto` under the one switch (t-11989) --------------------- */
+
+/// Settings as a person who turned Jev on from the settings card holds them
+/// (§6.1) — the switch on, every folder consented — with `word` as the agent
+/// choice seat's own word, or none.
+fn switched_on(home: &tempfile::TempDir, word: Option<&str>) -> std::path::PathBuf {
+    use zerocode_core::jev::SMART_SETTINGS_KEY;
+    use zerocode_core::jev::door::{ENABLED_SETTING, EVERY_WORKSPACE, JEV_SETTINGS_KEY};
+    let settings = home.path().join("settings.json");
+    let mut smart =
+        json!({JEV_SETTINGS_KEY: {ENABLED_SETTING: true, "workspaces": [EVERY_WORKSPACE]}});
+    if let Some(word) = word {
+        smart[SUMMON.setting] = json!(word);
+    }
+    std::fs::write(&settings, json!({SMART_SETTINGS_KEY: smart}).to_string()).expect("settings");
+    settings
+}
+
+/// With the one switch on and no word for the seat, `--agent auto` is a
+/// summons the seat chooses for instead of refusing: asked on the beat,
+/// under the consent the window observed for the summoning pane's own
+/// checkout — the request carries that workspace, and the agent it names
+/// comes back. A person's own `shadow` for the seat still records only, and
+/// the summons is refused by name as before.
+#[test]
+fn under_the_switch_an_auto_summons_is_chosen_for_under_the_summoners_consent() {
+    let work = tempfile::tempdir().expect("a checkout");
+    let home = tempfile::tempdir().expect("a zo home");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", an_agent_answer("kimi", "claude"), 0);
+    let wire = Wire::at(&endpoint.base(), "test-key", Some(switched_on(&home, None)));
+    let key = ["team-auto", "%1", "auto-summons"];
+    let _origin = super::super::summon_difficulty::origin_with_for_tests(
+        key,
+        Some(work.path().to_path_buf()),
+        true,
+        wire.settings_root(),
+    );
+    let shadow = SummonShadow {
+        auto: true,
+        ..shadow()
+    };
+    assert_eq!(
+        choose_with(&wire, &shadow.look(), &shadow.options, key).as_deref(),
+        Some("kimi"),
+        "the seat chose, and the summons lands on its choice"
+    );
+    assert_eq!(endpoint.asked().len(), 1);
+
+    let home = tempfile::tempdir().expect("a zo home");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", an_agent_answer("kimi", "claude"), 0);
+    let wire = Wire::at(
+        &endpoint.base(),
+        "test-key",
+        Some(switched_on(&home, Some(JevMode::Shadow.key()))),
+    );
+    assert_eq!(
+        choose_with(&wire, &shadow.look(), &shadow.options, key),
+        None
+    );
+    assert!(
+        endpoint.asked().is_empty(),
+        "a recording seat waits on no question"
+    );
+}
+
+/// A summons nobody observed — no origin under its key, or one sealed by a
+/// handover — is one the seat has no consent for: it sends nothing and
+/// chooses nothing, and the summons is refused by name.
+#[test]
+fn an_auto_summons_with_no_observed_origin_sends_nothing() {
+    let work = tempfile::tempdir().expect("a checkout");
+    let home = tempfile::tempdir().expect("a zo home");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", an_agent_answer("kimi", "claude"), 0);
+    let wire = Wire::at(&endpoint.base(), "test-key", Some(switched_on(&home, None)));
+    let shadow = SummonShadow {
+        auto: true,
+        ..shadow()
+    };
+    let key = ["team-auto", "%1", "nobody-looked"];
+    assert_eq!(
+        choose_with(&wire, &shadow.look(), &shadow.options, key),
+        None
+    );
+    let sealed = super::super::summon_difficulty::origin_with_for_tests(
+        key,
+        Some(work.path().to_path_buf()),
+        false,
+        wire.settings_root(),
+    );
+    assert_eq!(
+        choose_with(&wire, &shadow.look(), &shadow.options, key),
+        None
+    );
+    drop(sealed);
+    assert!(endpoint.asked().is_empty(), "no consent was observed");
 }
 
 /* ---- the seat's accuracy, replayed (t-5873) ---------------------------- */

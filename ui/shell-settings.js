@@ -6533,8 +6533,10 @@ async function refreshTypeSafe() {
   } catch (error) {
     paintTypeSafeStatus(typesafeRefusal(error), typesafeRefusalEvidence(error));
   }
-  // The card draws no numbers; a dashboard on stage refreshes its own.
-  if (jevViewsShowing()) void loadJevNumbers();
+  // A dashboard on stage refreshes its numbers with its recent rows; the
+  // card's standing lines, while Jev is on, read the same numbers without
+  // them (t-11989).
+  if (jevViewsShowing() || typesafeState?.jev?.on) void loadJevNumbers();
 }
 
 /* Where the card stands: what the last check answered if anything has been
