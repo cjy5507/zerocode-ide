@@ -844,9 +844,13 @@ def the_round(owner, seed, values, table_limits):
 
 def prepare(folder):
     """Compile the fixture into an app bundle of its own (a fresh owner, so a
-    fresh bundle id the run's scope names); nothing is launched."""
+    fresh bundle id the run's scope names), and beside it the other app a
+    covered round's window or dialog comes from (t-12979); nothing is launched."""
+    import cover_scenes
     import fixture_support
-    return fixture_support.prepare(folder, EXECUTABLE, SOURCE, BUNDLE_PREFIX)
+    built = fixture_support.prepare(folder, EXECUTABLE, SOURCE, BUNDLE_PREFIX)
+    return built or fixture_support.prepare(folder / cover_scenes.FOLDER, cover_scenes.EXECUTABLE,
+                                            cover_scenes.SOURCE, cover_scenes.BUNDLE_PREFIX)
 
 
 class Desk:
@@ -865,8 +869,13 @@ class Desk:
         path.mkdir(mode=0o700, exist_ok=False)
         return path
 
-    def round(self, seed):
-        return the_round(self.session["owner"], seed, self.values, self.limits)
+    def round(self, seed, scene=None):
+        import cover_scenes
+        played = the_round(self.session["owner"], seed, self.values, self.limits)
+        sheet = cover_scenes.in_round(scene)
+        if sheet is not None:
+            played["cover"] = sheet
+        return played
 
     def plan(self, geometry, rules):
         return plan(geometry, self.values, self.session["bundle"], contract(), rules=rules,
@@ -875,8 +884,8 @@ class Desk:
     def result(self, record):
         return judged(record, self.values, self.limits)
 
-    def launch(self, run, seed):
-        write_atomic(run / "round.json", self.round(seed))
+    def launch(self, run, seed, scene=None):
+        write_atomic(run / "round.json", self.round(seed, scene))
         with (run / "fixture.log").open("w") as log:
             self.fixture = subprocess.Popen([self.session["executable"], str(run / "round.json"), str(run)],
                                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -941,10 +950,12 @@ class Desk:
         return {"folder": str(run), "frames": fixture.get("frames"), "events": fixture.get("events"),
                 "frame_ms": spread(spans), "shown": sorted({name for frame in frames for name in frame["shown"]})[:12]}
 
-    def run(self, seed, driver, helper_app, rules=None, autopilot=None):
+    def run(self, seed, driver, helper_app, rules=None, autopilot=None, cover=None):
         """One run: announce, re-check, the goal, the driver, the supervision,
         the verdict. `autopilot` ({"generator", "words"}) gives the driver
-        bench.json's goal in place of a plan."""
+        bench.json's goal in place of a plan; `cover` (a cover_scenes scene)
+        puts a window over the fixture at its moment (t-12979)."""
+        import cover_scenes
         safety = self.values["reflex_safety"]
         goal = self.values["reflex_goal"]
         keys = {}
@@ -960,8 +971,8 @@ class Desk:
         print(f"reflex bench: the pointer will move on the fixture in {safety['announce_s']} s for "
               f"{self.values['reflex_round']['run_s']} s — any keyboard or mouse input stops it", flush=True)
         time.sleep(safety["announce_s"])
-        run = self.run_folder(seed)
-        ready = self.launch(run, seed)
+        run = self.run_folder(seed if cover is None else f"{seed}-cover-{cover['seed']}")
+        ready = self.launch(run, seed, cover)
         many = rules or self.values["reflex_plan"]["rules_per_colour"]
         config = CONFIG if many == self.values["reflex_plan"]["rules_per_colour"] else f"{CONFIG}+rules{many}"
         if autopilot is not None:
@@ -972,7 +983,7 @@ class Desk:
                   "config": config, "readyNs": ready["readyNs"], "stoppedBy": None}
         if autopilot is not None:
             record["autopilot"] = {"generator": autopilot["generator"], "l1": autopilot["l1"]}
-        driver_process = None
+        driver_process = cover_process = None
         try:
             why = self.refused(ready) or self.another_operator() or self.another_bench()
             if why:
@@ -981,6 +992,7 @@ class Desk:
             record["t0Ns"] = uptime_ns()
             record["load"] = {"goal": list(os.getloadavg())}
             write_atomic(run / "start.json", {"t0Ns": record["t0Ns"]})
+            cover_process = cover_scenes.put_up(cover, self.folder, run, ready, record["t0Ns"])
             request = {"bundle": self.session["bundle"], "pollMs": safety["poll_ms"],
                        "seconds": self.values["reflex_round"]["run_s"], "renew": True, "restore": ready["pointer"]}
             env = {name: value for name, value in os.environ.items()
@@ -1002,8 +1014,11 @@ class Desk:
         finally:
             if driver_process:
                 self.end_driver(driver_process)
+            cover_scenes.take_down(cover_process, safety["grace_s"])
             self.quit()
             write_atomic(run / "run.json", record)
+            if cover is not None:
+                write_atomic(run / "cover.json", cover_scenes.account(cover, run))
         # The wall ends at the verdict: every file read, the oracle's to judge.
         loaded = load(run)
         record["verdictNs"] = loaded["run"]["verdictNs"] = uptime_ns()
@@ -1125,6 +1140,8 @@ def main(argv=None):
                         help="run --autopilot: who writes the plans (default: bench.json's reflex_goal)")
     parser.add_argument("--l1", choices=["auto", "shadow", "off"],
                         help="run --autopilot: the reflex decision's forced word (default: bench.json's reflex_goal)")
+    parser.add_argument("--cover-seed", type=int,
+                        help="run: put the scene this seed draws over the fixture (cover_scenes.py, t-12979)")
     args = parser.parse_args(argv)
     values, table_limits = tally.table(), limits()
     signals = Signals().install()
@@ -1146,7 +1163,10 @@ def main(argv=None):
                     parser.error("run needs --driver and a helper app")
                 autopilot = None if args.autopilot is None else {"words": args.autopilot, "generator": args.generator,
                                                                  "l1": args.l1}
-                result = desk.run(args.seed, args.driver, helper_app, rules=args.rules, autopilot=autopilot)
+                import cover_scenes
+                scene = None if args.cover_seed is None else cover_scenes.draw(args.cover_seed, values)
+                result = desk.run(args.seed, args.driver, helper_app, rules=args.rules, autopilot=autopilot,
+                                  cover=scene)
         print(json.dumps(result, indent=2))
         return 0
     except Refused as why:

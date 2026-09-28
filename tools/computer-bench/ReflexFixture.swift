@@ -67,6 +67,18 @@ struct Schedule: Decodable {
     let curtains: [Mover]
 }
 
+/// What a covered round (t-12979) puts over the field from the fixture's own
+/// app: a second sheet at a place in the window's content points (top-left
+/// origin), from a moment of the round.
+struct CoverSpec: Decodable {
+    let kind: String
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+    let appearMs: Double
+}
+
 struct Round: Decodable {
     let owner: String
     let seed: Int
@@ -76,6 +88,7 @@ struct Round: Decodable {
     let framesPerSecond: Int
     let frameAgeNs: UInt64
     let schedule: Schedule
+    let cover: CoverSpec?
 }
 
 /// One shape as a frame drew it, in the window's content points (top-left origin).
@@ -123,6 +136,9 @@ final class Arena: SKScene {
     var misses: [String: Int] = [:]
     var held: Set<Int> = []
     var received = 0
+    /// Called once, when the round's cover is due (t-12979).
+    var onCover: (@MainActor (CoverSpec) -> Void)?
+    private var covered = false
 
     init(round: Round, recorder: Recorder) {
         self.round = round
@@ -157,6 +173,10 @@ final class Arena: SKScene {
         }
         guard let t0 = t0Ns, now >= t0 else { return }
         let ms = Double(now - t0) / 1_000_000
+        if !covered, let cover = round.cover, ms >= cover.appearMs {
+            covered = true
+            onCover?(cover)
+        }
         guard ms < round.schedule.lengthMs,
               let phase = round.schedule.phases.first(where: { $0.startMs <= ms && ms < $0.endMs })
         else {
@@ -342,6 +362,7 @@ final class Fixture: NSObject, NSApplicationDelegate {
     var arena: Arena?
     var lifetime: FixtureLifetime?
     var becameActive = false
+    var cover: CoverSheet?
 
     init(round: Round, recorder: Recorder) {
         self.round = round
@@ -359,14 +380,28 @@ final class Fixture: NSObject, NSApplicationDelegate {
         let window = FixtureWindow(view: view, owner: round.owner, seed: round.seed)
         self.panel = window.panel
         self.arena = arena
+        arena.onCover = { [weak self] spec in self?.showCover(spec) }
         recorder.write("ready.json", window.ready)
         lifetime = FixtureLifetime(flush: { [weak self] wait in self?.flush(wait: wait) },
                                    becameActive: { [weak self] in self?.becameActive = true })
     }
 
+    /// The round's cover from this app: a sheet over the fixture's window, at
+    /// the place the scene names in its content points.
+    func showCover(_ spec: CoverSpec) {
+        guard let panel else { return }
+        let mainHeight = NSScreen.screens.first?.frame.height ?? panel.frame.maxY
+        let quartz = CGRect(x: panel.frame.minX + spec.x, y: mainHeight - panel.frame.maxY + spec.y,
+                            width: spec.width, height: spec.height)
+        let sheet = CoverSheet(kind: spec.kind, quartz: quartz)
+        sheet.show()
+        cover = sheet
+    }
+
     func flush(wait: Bool = false) {
         guard let arena else { return }
         var state = arena.state
+        if let cover { state["cover"] = cover.state }
         state["becameActive"] = becameActive || NSApp.isActive
         state["endedNs"] = uptimeNs()
         recorder.flush(state: state, wait: wait)

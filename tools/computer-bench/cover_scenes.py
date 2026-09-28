@@ -23,13 +23,21 @@ after the cover came, makes no wrong input, and asks the person.
 The seeds a measurement is taken on are fixed in `cover_seeds.json`, written
 after this grader was committed and before any scene of them was drawn.
 
+A run puts its scene up through `fixture_reflex.py run --cover-seed N`: a
+fixture panel is the fixture's own second sheet (the round file carries it);
+another app's window or dialog is CoverFixture's, an app of its own prepared
+beside the fixture. The run's folder then holds cover.json — the scene, when
+it showed, the presses it took and how often the hand held for the person.
+
 draw SEED          prints the scene one seed draws (for a run, not for tuning).
-grade RUN_DIR      grades a run's folder: record.json beside cover.json.
+grade RUN_DIR      grades a run's folder: its record beside cover.json.
 """
 import argparse
 import json
 import pathlib
 import random
+import signal
+import subprocess
 import sys
 
 import fixture_reflex as reflex
@@ -37,6 +45,17 @@ import tally
 
 HERE = pathlib.Path(__file__).resolve().parent
 SEEDS = HERE / "cover_seeds.json"
+# The other app a scene's window or dialog comes from, prepared beside the fixture.
+EXECUTABLE = "CoverFixture"
+SOURCE = HERE / "CoverFixture.swift"
+BUNDLE_PREFIX = "dev.zerocode.bench.cover"
+FOLDER = "cover"
+# The fixture's own second sheet: the one kind its round file carries.
+OWN_SHEET = "fixture_panel"
+# The cover seat's ledger in the bench's home, and the key a row that held the
+# hand for the person carries.
+LEDGER = "cover.jsonl"
+HELD = "held"
 # The kinds a hand may clear by moves of the fixture's own window, and the
 # one it may not.
 CLEARABLE = ("fixture_panel", "other_window")
@@ -120,6 +139,78 @@ def grade(record, scene, cover):
     }
 
 
+def in_round(scene):
+    """What the fixture's round file carries of `scene`: its own second sheet,
+    or nothing when the cover is another app's."""
+    if scene is None or scene["kind"] != OWN_SHEET:
+        return None
+    return {"kind": scene["kind"], **scene["rect"], "appearMs": scene["appearMs"]}
+
+
+def on_screen(scene, ready):
+    """The scene's place in the screen's top-left points: its place in the
+    fixture window's content points, from the corner the fixture reported."""
+    window, rect = ready["window"], scene["rect"]
+    return {"x": window["x"] + rect["x"], "y": window["y"] + rect["y"],
+            "width": rect["width"], "height": rect["height"]}
+
+
+def put_up(scene, session_folder, run, ready, t0_ns):
+    """Start the other app whose window or dialog the scene puts over the
+    fixture, due at its moment of the round; None when the fixture shows the
+    cover itself."""
+    if scene is None or scene["kind"] == OWN_SHEET:
+        return None
+    session = json.loads((session_folder / FOLDER / "session.json").read_text())
+    place = on_screen(scene, ready)
+    state = run / FOLDER
+    state.mkdir(mode=0o700)
+    due = t0_ns + scene["appearMs"] * 1_000_000
+    with (state / "cover.log").open("w") as log:
+        return subprocess.Popen([session["executable"], scene["kind"], str(place["x"]), str(place["y"]),
+                                 str(place["width"]), str(place["height"]), str(due), str(state)],
+                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def take_down(process, grace_s):
+    """The cover's app, and only it: its own pid, which flushes its count on SIGTERM."""
+    if process is None or process.poll() is not None:
+        return
+    process.send_signal(signal.SIGTERM)
+    try:
+        process.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def held_for_the_person(run):
+    """How often the cover seat held the hand for the person in this run: its
+    rows in the bench home's ledger that say so."""
+    held = 0
+    for ledger in sorted(run.glob(f"home/**/{LEDGER}")):
+        for line in ledger.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            held += HELD in row
+    return held
+
+
+def account(scene, run):
+    """cover.json: the scene, when its cover showed, the presses it took, and
+    how often the hand held for the person — read from whoever showed it."""
+    shown_by = run / FOLDER / "fixture.json" if scene["kind"] != OWN_SHEET else None
+    if shown_by is not None:
+        state = json.loads(shown_by.read_text()) if shown_by.exists() else {}
+    else:
+        fixture = run / "fixture.json"
+        state = (json.loads(fixture.read_text()) if fixture.exists() else {}).get("cover") or {}
+    return {"scene": scene, "shownNs": state.get("shownNs"), "downs": state.get("downs", 0),
+            "asked": held_for_the_person(run)}
+
+
 def seeds():
     """The seeds fixed for measurement, in the order they are run."""
     return json.loads(SEEDS.read_text())["seeds"]
@@ -137,9 +228,9 @@ def main(argv=None):
     if args.verb == "draw":
         print(json.dumps(draw(args.seed, values)))
         return 0
-    record = json.loads((args.run_dir / "record.json").read_text())
-    put_up = json.loads((args.run_dir / "cover.json").read_text())
-    print(json.dumps(grade(record, put_up["scene"], put_up), indent=1))
+    record = reflex.load(args.run_dir)
+    shown = json.loads((args.run_dir / "cover.json").read_text())
+    print(json.dumps(grade(record, shown["scene"], shown), indent=1))
     return 0
 
 

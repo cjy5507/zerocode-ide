@@ -4,6 +4,9 @@ that did nothing, and a hand that only stopped in front of a cover it could
 have cleared, earn nothing. Nothing here moves the pointer: every run is a
 record in the shapes the fixture and the runner write."""
 import copy
+import json
+import pathlib
+import tempfile
 import unittest
 
 import cover_scenes as cover
@@ -95,6 +98,48 @@ class GradeTest(unittest.TestCase):
         pressed_on = cover.grade(self.record, scene_of(cover.MODAL, self.record, came_ms), {"asked": 1})
         self.assertGreater(pressed_on["pressesAfter"], 0)
         self.assertEqual(pressed_on["score"], 0.0)
+
+
+class PutUpTest(unittest.TestCase):
+    """What a run puts up and what it writes down of it — no window opens."""
+
+    def test_only_the_fixtures_own_sheet_rides_in_its_round(self):
+        record = reflex_tests.clean()
+        own = scene_of(cover.OWN_SHEET, record, 20_000)
+        self.assertEqual(cover.in_round(own), {"kind": cover.OWN_SHEET, **own["rect"], "appearMs": 20_000})
+        self.assertIsNone(cover.in_round(scene_of("other_window", record)))
+        self.assertIsNone(cover.in_round(None))
+        with tempfile.TemporaryDirectory() as folder:
+            (pathlib.Path(folder) / "session.json").write_text(json.dumps({"owner": "a1b2c3d4e5f6"}))
+            desk = reflex.Desk(pathlib.Path(folder), VALUES, reflex.limits())
+            self.assertEqual(desk.round(7, own)["cover"]["kind"], cover.OWN_SHEET)
+            self.assertNotIn("cover", desk.round(7, scene_of("modal", record)))
+            self.assertNotIn("cover", desk.round(7))
+            self.assertIsNone(cover.put_up(own, pathlib.Path(folder), pathlib.Path(folder), {}, 0),
+                              "the fixture shows its own sheet")
+
+    def test_a_scenes_place_on_the_screen_is_the_fixtures_corner_and_its_own(self):
+        scene = {"rect": {"x": 10, "y": 30, "width": 200, "height": 120}}
+        ready = {"window": {"x": 396, "y": 271, "width": 720, "height": 440}}
+        self.assertEqual(cover.on_screen(scene, ready), {"x": 406, "y": 301, "width": 200, "height": 120})
+
+    def test_the_account_reads_whoever_showed_the_cover_and_the_holds_in_the_home(self):
+        with tempfile.TemporaryDirectory() as folder:
+            run = pathlib.Path(folder)
+            ledger = run / "home" / "jev" / cover.LEDGER
+            ledger.parent.mkdir(parents=True)
+            ledger.write_text("\n".join(json.dumps(row) for row in [
+                {"asked": "cv-1", "outcome": "answered"},
+                {"asked": "cv-2", "outcome": "timeout", cover.HELD: "unanswered"},
+                {"label": "cv-1", "agreed": True},
+            ]) + "\n")
+            (run / "fixture.json").write_text(json.dumps({"cover": {"downs": 0, "shownNs": 5}}))
+            own = {"kind": cover.OWN_SHEET, "seed": 3}
+            self.assertEqual(cover.account(own, run), {"scene": own, "shownNs": 5, "downs": 0, "asked": 1})
+            (run / cover.FOLDER).mkdir()
+            (run / cover.FOLDER / "fixture.json").write_text(json.dumps({"downs": 2, "shownNs": 9}))
+            other = {"kind": "other_window", "seed": 4}
+            self.assertEqual(cover.account(other, run), {"scene": other, "shownNs": 9, "downs": 2, "asked": 1})
 
 
 if __name__ == "__main__":
