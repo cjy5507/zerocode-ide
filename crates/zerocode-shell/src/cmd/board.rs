@@ -1000,9 +1000,10 @@ pub(crate) fn definitely_absent(path: &Path) -> bool {
     std::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Five wire arguments: a `#[tauri::command]`'s payload parameters ARE its
-/// wire shape (`launch_agent_tab` says the same), so folding `restore` into a
-/// struct would rename what every door sends. `AppHandle` and `State` are
+/// Six wire arguments: a `#[tauri::command]`'s payload parameters ARE its
+/// wire shape (`launch_agent_tab` says the same), so folding `restore` and
+/// `worktree` into a struct would rename what every door sends — a payload
+/// change to quiet a lint about a payload. `AppHandle` and `State` are
 /// injected by Tauri and are not wire fields. A door still sending the old
 /// `interrupted` mark sends a field nothing reads: whether a wake is told to
 /// go on is the goodbye's word about a worker (t-7812 E), never a tab's.
@@ -1010,6 +1011,7 @@ pub(crate) fn definitely_absent(path: &Path) -> bool {
 /// The road itself is [`wake_conversation`], over this window's own app and
 /// state ([`ResumeDoor`]): every decision of the wake is made there, and
 /// every effect that needs a real terminal here.
+#[allow(clippy::too_many_arguments)] // Tauri command arguments are the public IPC wire.
 #[tauri::command(async)]
 pub(crate) fn resume_session(
     app: AppHandle,
