@@ -33422,6 +33422,31 @@ mod tests {
         );
     }
 
+    /// t-11958: a page the door publishes reaches the window as the row the
+    /// catalog now holds, beside the catalog's own `artifacts:changed`, and
+    /// the window decides from that row alone — open beside its maker,
+    /// update in place, or raise 「새 N」. A publish that told the window
+    /// only that the catalog moved could do none of the three.
+    #[test]
+    fn a_door_publish_hands_the_window_its_row() {
+        let backend = shipped_backend();
+        let door = block_after(backend, "fn artifact_request(");
+        assert!(
+            door.contains("app.emit(CHANGED_EVENT, ())")
+                && door.contains("app.emit(PUBLISHED_EVENT, meta.artifact(origin))"),
+            "the publish arm no longer hands the window the row it published:\n{door}"
+        );
+        assert!(
+            backend.contains("pub(crate) const PUBLISHED_EVENT: &str = \"artifacts:published\";"),
+            "the published event lost its name"
+        );
+        let window = crate::ui_source::window_source();
+        assert!(
+            window.contains("listen(\"artifacts:published\", (event) => noteArtifactPublished("),
+            "the window no longer hears a publication"
+        );
+    }
+
     /// t-4140 S2: which mode the knowledge graph opens in is a rule about
     /// where the person came from and what this vault remembers — never a
     /// rule about how big the graph is. The design (docs/design/
