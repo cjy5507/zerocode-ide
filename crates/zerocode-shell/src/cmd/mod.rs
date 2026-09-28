@@ -120,9 +120,10 @@ pub(crate) use board::{
     create_untitled_markdown, delete_untitled_markdown, desk_ack, desk_checkouts, desk_reply,
     hooks_report, install_hooks, ledger_agents, machine_load, open_board_popout,
     orchestration_accuracy, pane_activities, pane_agents, pane_sessions, pane_subagents,
-    release_untitled_markdown, resume_session, reveal_board_agent, save_clipboard_image,
-    save_pasted_image, set_coordinator_handover, set_dock_badge, set_hooks_enabled,
-    set_previewed_terms, set_watched_terms, term_pull, term_snapshot, worker_screen,
+    release_untitled_markdown, resume_line, resume_session, reveal_board_agent,
+    save_clipboard_image, save_pasted_image, set_coordinator_handover, set_dock_badge,
+    set_hooks_enabled, set_previewed_terms, set_watched_terms, term_pull, term_snapshot,
+    worker_screen,
 };
 
 pub(crate) use review::{

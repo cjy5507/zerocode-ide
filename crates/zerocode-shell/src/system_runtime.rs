@@ -566,6 +566,69 @@ pub(super) fn stage_layouts_file(config_root: &Path) -> PathBuf {
     config_root.join(artifact_file::STAGE_LAYOUTS)
 }
 
+/// The zo panes still running as the window goes, each with the workspace
+/// its agent last reported from (t-12063) — what the exit writes down when
+/// no saved tab holds one ([`pane_layout::file_unheld`]).
+///
+/// A zo pane only: the one agent whose conversation the window learns from
+/// the pane's own channel rather than from a tab's report, and the one a
+/// restart lost. Never a pane seated under another pane's team — a ledger
+/// worker comes back on the ledger's road and a teammate is its leader's —
+/// and never a conversation the window cannot place: the workspace is the
+/// one the pane's own hooks named for that conversation, or nothing.
+fn live_zo_panes(state: &AppState) -> Vec<pane_layout::LivePane> {
+    let agents = state.agent_terms().clone();
+    let sessions = state.pane_sessions().clone();
+    let statuses = state.last_statuses().clone();
+    let seated: std::collections::HashSet<u32> = agent_teams::teams()
+        .values()
+        .flat_map(|team| {
+            team.panes()
+                .filter(|pane| pane.term != team.leader_term)
+                .map(|pane| pane.term)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let terminals = state.terminals();
+    agents
+        .into_iter()
+        .filter(|(term, agent)| {
+            *agent == AgentKind::Zo.slug()
+                && !seated.contains(term)
+                && terminals.handle(*term).is_some()
+        })
+        .filter_map(|(term, agent)| {
+            let session = sessions.get(&term)?;
+            if session.key != zerocode_core::SessionKey::SessionId {
+                return None;
+            }
+            let seat = format!("\u{0}{term}");
+            let worktree = statuses
+                .iter()
+                .filter(|(key, row)| {
+                    key.ends_with(&seat)
+                        && row
+                            .session
+                            .as_ref()
+                            .is_some_and(|held| held.id == session.id)
+                })
+                .max_by_key(|(_, row)| row.at)
+                .map(|(_, row)| row.worktree.clone())?;
+            Some(pane_layout::LivePane {
+                term,
+                worktree,
+                wake: pane_layout::WakeAgent {
+                    agent: agent.to_string(),
+                    key: "session_id".to_string(),
+                    id: session.id.clone(),
+                    transcript_path: session.transcript_path.clone(),
+                    interrupted: false,
+                },
+            })
+        })
+        .collect()
+}
+
 /// Write what every remembered leaf's screen holds, on the way out.
 ///
 /// Orca's shutdown capture (`captureTerminalShutdownLayout`,
@@ -579,10 +642,14 @@ pub(super) fn stage_layouts_file(config_root: &Path) -> PathBuf {
 pub(super) fn capture_scrollback_at_exit(app: &AppHandle) {
     let state = app.state::<AppState>();
     let file = pane_layouts_file(state.config_root());
+    let live = live_zo_panes(&state);
     let terminals = state.terminals();
     // Through the file's one writer (t-7812 D) — the exit's own snapshot, so
     // it is the one write a leaving window still makes.
     let _ = pane_layout::rewrite(&file, |layouts| {
+        // First the zo panes no saved tab holds (t-12063), so their screens
+        // are captured below with everyone else's.
+        pane_layout::file_unheld(layouts, live);
         for tabs in layouts.values_mut() {
             for layout in tabs.iter_mut() {
                 for (ordinal, term) in std::mem::take(&mut layout.terms) {
