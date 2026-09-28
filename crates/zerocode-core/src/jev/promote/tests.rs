@@ -3219,7 +3219,7 @@ fn a_seat_that_fills_what_its_caller_left_open_starts_acting() {
             (RUBRIC_VERSIONS.canonical): [seat.rubric_version + 1],
         });
         assert_eq!(
-            standing(seat, &[other_words.clone()]),
+            standing(seat, std::slice::from_ref(&other_words)),
             starts,
             "{}",
             seat.id
