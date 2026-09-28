@@ -20,6 +20,7 @@
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
+import { loadavg } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
@@ -240,11 +241,12 @@ async function measureSize(page, pages) {
       const until = performance.now() + spinMs;
       while (performance.now() < until) stamps.push(await frame());
       universe.frame = plain;
+      const same = knowledgeUniverses.get(view) === universe;
       const gaps = [];
       for (let at = 1; at < stamps.length; at += 1) gaps.push(stamps[at] - stamps[at - 1]);
       const sorted = gaps.slice().sort((one, two) => one - two);
       const js = work.slice().sort((one, two) => one - two);
-      result.spin = { frames: work.length, gapMedianMs: sorted[Math.floor(sorted.length / 2)],
+      result.spin = { frames: work.length, sameUniverse: same, drawn: universe.frames, gapMedianMs: sorted[Math.floor(sorted.length / 2)],
         gapP95Ms: sorted[Math.floor(sorted.length * 0.95)], late: gaps.filter((gap) => gap > lateMs).length,
         jsMedianMs: js[Math.floor(js.length / 2)], jsP95Ms: js[Math.floor(js.length * 0.95)] };
     }
@@ -340,7 +342,12 @@ try {
   if (wantHeap) {
     measured.heap = await measureHeap(page);
   } else {
-    for (const pages of sizes) measured.rows.push(await measureSize(page, pages));
+    /* 기계의 1분 부하를 앞뒤로 적는다 — 늦은 장이 부하의 탓인지 가르려고(시안의 표도 부하를 곁에 적었다). */
+    for (const pages of sizes) {
+      const loadBefore = round(loadavg()[0], 1);
+      const row = await measureSize(page, pages);
+      measured.rows.push({ ...row, load: [loadBefore, round(loadavg()[0], 1)] });
+    }
   }
   measured.faults = faults;
 } finally {
@@ -348,7 +355,7 @@ try {
   files.close();
 }
 const table = measured.rows.map((row) => ({
-  pages: row.pages, edges: row.edges, galaxies: row.galaxies, filaments: row.filaments,
+  pages: row.pages, load: row.load, edges: row.edges, galaxies: row.galaxies, filaments: row.filaments,
   firstFrameMs: row.firstFrameMs, buildMs: row.buildMs,
   frameWork: row.cost === undefined ? null : `${round(row.cost.medianMs, 1)} · ${round(row.cost.p95Ms, 1)} ms`,
   burstMs: row.cost === undefined ? null : round(row.cost.burstMs),
