@@ -23,8 +23,9 @@ use runtime::permission::{
 use runtime::session::{MessageRole, Session};
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, ConcurrentDispatchFn, ContentBlock, ConversationRuntime,
-    PermissionMode, PermissionPolicy, RuntimeError, StaticToolExecutor, ToolCancelSignal,
-    CANCELLED_TOOL_RESULT, DEFAULT_STREAMING_CHANNEL_CAPACITY,
+    HookAbortSignal, PermissionMode, PermissionPolicy, RuntimeError, StaticToolExecutor,
+    StreamingTurnError, ToolCancelSignal, CANCELLED_TOOL_RESULT,
+    DEFAULT_STREAMING_CHANNEL_CAPACITY, STEERING_ECHO_PREFIX,
 };
 use tokio::sync::mpsc;
 
@@ -366,5 +367,114 @@ async fn a_signal_installed_by_the_host_cancels_a_running_tool() {
         summary.iterations >= 2,
         "the turn must survive the cancel, got {} iterations",
         summary.iterations
+    );
+}
+
+/// The person's Esc raises the turn's stop and cancels the running tool in one
+/// act (zo's `TurnScaffold::cancel_turn`, flags first): the tool cancel wakes
+/// the turn at once, while the stop is a flag its host looks at every 25 ms.
+/// The woken turn must end at that cancelled tool — before a steer typed during
+/// the tool is folded into its result, and before another request goes out.
+/// When it ran on instead, a quick machine let the turn outrun the host's look:
+/// the steer rode the continuation, not the fresh turn Esc asked for
+/// (`e2e_esc_with_pending_steer_resubmits_it_as_a_fresh_turn`, 5 of 15 once
+/// zo's input loop stopped spinning, 0 of 15 before it did).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_cancelled_by_the_turns_stop_ends_the_turn_with_its_steer_unfolded() {
+    let _serial = ATTEST_SERIAL.lock().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dispatch_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::clone(&dispatch_entered);
+    let dispatch: ConcurrentDispatchFn = Arc::new(move |_name, _input| {
+        entered.store(true, Ordering::SeqCst);
+        std::thread::sleep(WEDGED_TOOL_RUNTIME);
+        Ok("never observed".to_string())
+    });
+
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        OneToolThenText {
+            calls: Arc::clone(&calls),
+            tool_name: "Bash",
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.set_concurrent_dispatch(dispatch);
+    let stop = HookAbortSignal::new();
+    runtime.set_hook_abort_signal(stop.clone());
+    let cancel = runtime.tool_cancel_signal();
+    let steering = runtime.steering_handle();
+
+    let (tx, mut rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+    let blocks = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&blocks);
+    let drain = tokio::spawn(async move {
+        while let Some(block) = rx.recv().await {
+            sink.lock().expect("block sink").push(block);
+        }
+    });
+
+    // A steer typed while the tool runs, then Esc: the stop first, the tool
+    // cancel second, as the host raises them.
+    let typed = Arc::clone(&steering);
+    let canceller = tokio::spawn(async move {
+        while !dispatch_entered.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        typed
+            .lock()
+            .expect("steering queue")
+            .push("typed during the tool".to_string());
+        stop.abort();
+        cancel.cancel_running_tools();
+    });
+
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.run_turn_streaming("go", tx, prompter),
+    )
+    .await
+    .expect("a stopped turn must not wait on the cancelled tool");
+    canceller.await.expect("canceller");
+    drain.await.expect("drain");
+
+    assert!(
+        matches!(outcome, Err(StreamingTurnError::Cancelled)),
+        "the stopped turn must end cancelled at the tool, not run another leg"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "no request may go out after the stop"
+    );
+    assert_eq!(
+        steering.lock().expect("steering queue").as_slice(),
+        ["typed during the tool".to_string()],
+        "the steer stays queued for the host to send as a fresh turn"
+    );
+    let blocks = blocks.lock().expect("block sink");
+    assert!(
+        !blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::System { text, .. } if text.starts_with(STEERING_ECHO_PREFIX)
+        )),
+        "the steer must not be folded into the stopped turn"
+    );
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::ToolCall {
+                status: ToolCallStatus::Cancelled,
+                ..
+            }
+        )),
+        "the card still says the tool was stopped"
+    );
+    assert!(
+        cancelled_tool_results(runtime.session()).is_empty(),
+        "a stopped turn stores no \"the turn continues\" result; its tool_use is sealed as interrupted"
     );
 }

@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use core_types::usage::TokenUsage;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers,
+    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -50,6 +50,7 @@ use super::composer::{Composer, Submission};
 use super::effort_effect::{EffortEffect, EffortTier};
 use super::fast;
 use super::folds::{FoldIds, FoldMode};
+use super::input::TerminalEvents;
 use super::footer_hints::{FooterHints, HintMode, SHORTCUTS_CHAR, WARNINGS_FUNCTION_KEY};
 use super::models::{self, ModelChoice};
 use super::painter::{Painter, MIN_ROWS};
@@ -767,7 +768,7 @@ async fn recv_agent_followup(pump: &mut Option<AgentCompletionPump>) -> AgentFol
 /// screen, reporter) and the event stream a turn reads.
 struct TuiFrontend<'a> {
     app: &'a mut App,
-    events: &'a mut EventStream,
+    events: &'a mut TerminalEvents,
 }
 
 impl driver::AutonomyFrontend for TuiFrontend<'_> {
@@ -1206,9 +1207,11 @@ impl Ui {
             Instant::now,
         );
         self.reconcile_size();
+        let sized = sample.is_some().then(Instant::now);
         self.commit_stream(Instant::now());
+        let committed = sample.is_some().then(Instant::now);
         self.paint();
-        super::paint_probe::frame(self.paint_probe.as_mut(), sample);
+        super::paint_probe::frame(self.paint_probe.as_mut(), sample, sized, committed);
     }
 
     /// The once-a-second look at the terminal ([`SIZE_POLL`]): its size, and
@@ -1239,7 +1242,7 @@ impl Ui {
     /// screen waits for the next event to notice. `true` when the screen was
     /// resized; the caller draws.
     fn reconcile_size(&mut self) -> bool {
-        let Ok((cols, rows)) = crossterm::terminal::size() else {
+        let Ok((cols, rows)) = tty::size() else {
             return false;
         };
         // `Painter::resize` clamps; compare against what it would keep, or a
@@ -1965,7 +1968,12 @@ impl Ui {
         {
             return None;
         }
-        let hits = slash::matches_for_model(self.composer.text(), fast::supported(&self.model));
+        let text = self.composer.text();
+        // `fast::supported` resolves the model through the published catalog,
+        // which reads the settings and the catalog from disk: asked while the
+        // composer could list /fast, never by a spinner frame.
+        let fast = slash::could_list_fast(text) && fast::supported(&self.model);
+        let hits = slash::matches_for_model(text, fast);
         if hits.is_empty() {
             return None;
         }
@@ -4509,7 +4517,7 @@ impl App {
         mut self,
     ) -> Result<(ExitReason, Option<SessionSummary>, String), Box<dyn std::error::Error>> {
         self.boot();
-        let mut events = EventStream::new();
+        let mut events = TerminalEvents::new();
         let mut ticker = tokio::time::interval(FRAME_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut size_poll = tokio::time::interval(SIZE_POLL);
@@ -4628,7 +4636,7 @@ impl App {
         // this pane by hand has to be able to tell it from a session they
         // started themselves.
         self.ui.note(SystemLevel::Info, &banner);
-        let mut events = EventStream::new();
+        let mut events = TerminalEvents::new();
         let transcript = self.session().handle.path.clone();
         // Without it the parent reads this pane as "0 tool uses · no new
         // output" for as long as it works (t-11354); it says less, never
@@ -4701,7 +4709,7 @@ impl App {
     async fn teammate_turn(
         &mut self,
         prompt: String,
-        events: &mut EventStream,
+        events: &mut TerminalEvents,
         prior_output_tokens: &mut u64,
     ) -> crate::teammate::TurnReport {
         let submission = Submission {
@@ -4746,7 +4754,7 @@ impl App {
     async fn await_parent(
         &mut self,
         lifecycle: &crate::teammate::Lifecycle,
-        events: &mut EventStream,
+        events: &mut TerminalEvents,
     ) -> IdleOutcome {
         use crate::teammate::{IdleClock, ParentWatch};
         use runtime::subagent_panes::CloseReason;
@@ -5505,7 +5513,7 @@ impl App {
     async fn run_turn_chain(
         &mut self,
         initial: Work,
-        events: &mut EventStream,
+        events: &mut TerminalEvents,
         initial_followup: Option<AgentFollowup>,
     ) {
         let mut next_turn = Some((initial, initial_followup));
@@ -5593,7 +5601,7 @@ impl App {
     /// Every due `/goal` and `/loop` turn, through the driver both frontends
     /// share (`autonomy::driver`). There is no idle timer: when nothing is
     /// armed this returns at once and the 10-second idle draw contract stays.
-    async fn drive_autonomy(&mut self, events: &mut EventStream) {
+    async fn drive_autonomy(&mut self, events: &mut TerminalEvents) {
         let mut front = TuiFrontend { app: self, events };
         driver::drive(&mut front).await;
     }
@@ -5604,7 +5612,7 @@ impl App {
     async fn turn(
         &mut self,
         input: &Submission,
-        events: &mut EventStream,
+        events: &mut TerminalEvents,
         autonomous_allow_writes: Option<bool>,
         agent_followup: Option<&AgentFollowup>,
     ) -> TurnOutcome {
@@ -5953,7 +5961,7 @@ impl App {
     /// and the summary's characters, Esc (or the IDE's Stop) stops it and
     /// leaves the conversation as it was, and a line typed meanwhile waits to
     /// be taken up after it like one typed behind a turn.
-    async fn compaction(&mut self, focus: Option<String>, events: &mut EventStream) -> TurnOutcome {
+    async fn compaction(&mut self, focus: Option<String>, events: &mut TerminalEvents) -> TurnOutcome {
         let mut session = self
             .session
             .take()
@@ -6307,6 +6315,35 @@ mod tests {
         DROPPED_BODY,
     };
     use serde_json::{Value, json};
+
+    /// 유휴 화면은 프레임을 청하지 않는다 — 움직이는 것이 없으면 틱 팔이
+    /// 꺼지고 루프는 다음 키·리사이즈까지 잠든다([`super::Ui::animating`]).
+    #[test]
+    fn an_idle_screen_asks_for_no_frames() {
+        let ui = test_ui();
+        assert!(!ui.animating(), "an idle screen asked the frame ticker to run");
+    }
+
+    /// 턴 내내 프레임마다 도는 팝업 판정은 컴포저가 `/fast` 를 띄울 수 있을
+    /// 때만 모델 카탈로그를 묻는다. 한 번 묻는 일이 설정과 카탈로그 파일을
+    /// 디스크에서 읽는 일이라, 스피너 프레임마다 메인 스레드가 파일을 열고
+    /// 있었다(2026-09-28 `sample`: 대기 중 메인 스레드 `__open` 의 13/20).
+    #[test]
+    fn a_frame_asks_the_model_catalog_only_while_fast_could_be_listed() {
+        let asked = super::super::fast::state_asks;
+        let mut ui = test_ui();
+        let before = asked();
+        for text in ["", "hello", "/mo", "/fast now"] {
+            ui.composer.clear();
+            ui.composer.insert_str(text);
+            let _ = ui.popup();
+        }
+        assert_eq!(asked(), before, "a frame read the model catalog");
+        ui.composer.clear();
+        ui.composer.insert_str("/f");
+        let _ = ui.popup();
+        assert!(asked() > before, "a composer that could list /fast must ask whether it may");
+    }
 
     fn running_helper(
         id: &str,

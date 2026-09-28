@@ -5,7 +5,14 @@ use std::path::Path;
 use std::time::Instant;
 
 /// Open once at turn entry; no environment lookup belongs in the draw loop.
+///
+/// `ZO_PROBE_FRAMES` names the file and records frames alone. `ZO_PROBE_PAINT`
+/// writes them beside the painter's per-row log, whose writes happen inside
+/// the frame and are then part of what a frame measures.
 pub(super) fn begin() -> Option<File> {
+    if let Some(path) = std::env::var_os("ZO_PROBE_FRAMES").filter(|path| !path.is_empty()) {
+        return open(Path::new(&path));
+    }
     let mut path = std::env::var_os("ZO_PROBE_PAINT").filter(|path| !path.is_empty())?;
     path.push(".frames.jsonl");
     open(Path::new(&path))
@@ -23,10 +30,29 @@ pub(super) fn start<T>(enabled: bool, queue: impl FnOnce() -> usize, clock: impl
     enabled.then(|| (queue(), clock()))
 }
 
-pub(super) fn frame(file: Option<&mut File>, sample: Option<(usize, Instant)>) {
+/// One frame's mark. `paint_ms` is the whole draw; the phases split it —
+/// the pty's size, the commit animation's lines, and the viewport built and
+/// written (`frame_ms`). `sized` and `committed` are read only while a probe
+/// is open, like the clock `start` reads.
+pub(super) fn frame(
+    file: Option<&mut File>,
+    sample: Option<(usize, Instant)>,
+    sized: Option<Instant>,
+    committed: Option<Instant>,
+) {
     if let (Some(file), Some((queue, started))) = (file, sample) {
-        let ms = started.elapsed().as_secs_f64() * 1000.0;
-        let _ = writeln!(file, "{{\"mark\":\"frame\",\"queue\":{queue},\"paint_ms\":{ms}}}");
+        let ended = Instant::now();
+        let ms = |from: Instant, to: Instant| to.saturating_duration_since(from).as_secs_f64() * 1000.0;
+        let sized = sized.unwrap_or(started);
+        let committed = committed.unwrap_or(sized);
+        let _ = writeln!(
+            file,
+            "{{\"mark\":\"frame\",\"queue\":{queue},\"paint_ms\":{},\"size_ms\":{},\"commit_ms\":{},\"frame_ms\":{}}}",
+            ms(started, ended),
+            ms(started, sized),
+            ms(sized, committed),
+            ms(committed, ended),
+        );
     }
 }
 
@@ -51,13 +77,16 @@ mod tests {
         let path = root.path().join("marks");
         let mut file = open(&path);
         let sample = start(file.is_some(), || 7, Instant::now);
-        frame(file.as_mut(), sample);
+        frame(file.as_mut(), sample, Some(Instant::now()), Some(Instant::now()));
         end(file);
         let marks: Vec<serde_json::Value> = std::fs::read_to_string(path).unwrap().lines()
             .map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(marks[0]["mark"], "turn_start");
         assert_eq!(marks[1]["queue"], 7);
         assert!(marks[1]["paint_ms"].as_f64().unwrap() >= 0.0);
+        for phase in ["size_ms", "commit_ms", "frame_ms"] {
+            assert!(marks[1][phase].as_f64().unwrap() >= 0.0, "{phase} missing");
+        }
         assert_eq!(marks[2]["mark"], "turn_end");
     }
 }

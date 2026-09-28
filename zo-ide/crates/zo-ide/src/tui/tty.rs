@@ -17,6 +17,27 @@
 //! is still the foreground one and takes the terminal back when it is not —
 //! exactly what a job-control shell does after every job.
 
+/// The terminal's size, `(columns, rows)`, asked of the terminal zo draws on.
+///
+/// The frame loop asks on every draw (codex's rule — see the app's
+/// `reconcile_size`), and crossterm's `terminal::size` opens `/dev/tty` for
+/// every call: an `open`, an `ioctl` and a `close` per frame on the thread
+/// that reads keys — 11 of its 14 `__open` samples while a reply streamed
+/// (2026-09-28). Standard output is that terminal whenever the TUI runs; a
+/// size it cannot give falls back to crossterm's own question.
+#[cfg(unix)]
+pub(super) fn size() -> std::io::Result<(u16, u16)> {
+    match rustix::termios::tcgetwinsize(std::io::stdout()) {
+        Ok(size) if size.ws_col > 0 && size.ws_row > 0 => Ok((size.ws_col, size.ws_row)),
+        _ => crossterm::terminal::size(),
+    }
+}
+
+#[cfg(not(unix))]
+pub(super) fn size() -> std::io::Result<(u16, u16)> {
+    crossterm::terminal::size()
+}
+
 /// What `reclaim_foreground` found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Foreground {

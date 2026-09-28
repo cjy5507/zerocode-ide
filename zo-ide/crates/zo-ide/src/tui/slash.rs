@@ -63,6 +63,13 @@ pub fn matches(text: &str) -> Vec<Slash> {
     matches_for_model(text, true)
 }
 
+/// Whether `text` could list `/fast` — the one keep-list row whose presence
+/// asks the model catalog. Every other row is known without it.
+#[must_use]
+pub fn could_list_fast(text: &str) -> bool {
+    !text.is_empty() && Slash::Fast.name().starts_with(text)
+}
+
 /// Keep-list matches gated by the current model capability. Codex's fast
 /// command is dynamic: unsupported models do not get a `/fast` suggestion and
 /// a manually submitted command follows the same unrecognized-command path.
@@ -86,8 +93,18 @@ pub fn matches_for_model(text: &str, fast_supported: bool) -> Vec<Slash> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Line, classify, matches, matches_for_model};
+    use super::{Line, classify, could_list_fast, matches, matches_for_model};
     use crate::slash::Slash;
+
+    /// The gate a frame asks before the model catalog never hides a /fast
+    /// row the list would have shown.
+    #[test]
+    fn the_fast_gate_covers_every_text_that_lists_fast() {
+        for text in ["", "/", "/f", "/fa", "/fas", "/fast", "/fast ", "/fx", "/model", "f", "/fast now"] {
+            let listed = matches_for_model(text, true).contains(&Slash::Fast);
+            assert!(!listed || could_list_fast(text), "{text:?} lists /fast behind the gate");
+        }
+    }
     /// 순서는 codex built-in 목록과 동적 `/fast` 항목의 상대 순서다.
     /// 캡처(`codex-tui-v0.149.1-resume-picker.bin`, 26.07s)의 팝업 줄:
     /// `ESC[1mESC[38;5;6;49m/resume  resume a saved chat`.

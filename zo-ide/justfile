@@ -37,6 +37,14 @@ e2e:
 test-twice:
     cargo test -p runtime --lib && cargo test -p runtime --lib
 
+# 판 벤치 — 같은 대화를 zo 와 설치된 다른 에이전트 CLI(claude·codex·gemini)에
+# 흘려 상태마다 CPU 시간·깨움·pty 바이트·키 입력 에코·메모리를 잰다
+# (`tools/tui-bench/tui_bench.py --help`). release 빌드를 잰다 — 사람이 쓰는 그
+# 프로파일이다. 기계가 한가할 때 돌린다: 부하가 시간 칸을 흔든다.
+tui-bench *ARGS:
+    cargo build --release -p zo-ide
+    python3 tools/tui-bench/tui_bench.py --zo target/release/zo {{ARGS}}
+
 # rustdoc 게이트 — 공개 문서가 비공개 항목을 [`이렇게`] 가리키면 링크가 풀리지
 # 않고 rustdoc 이 `private_intra_doc_links` 를 낸다. 루트 크레이트들은 그 자리를
 # 코드 스팬으로 적는 규칙을 이미 따르는데(3691cae8, d948d638) zo-ide 에는 이
