@@ -368,6 +368,19 @@ mod tests {
         assert_eq!(scanner.state(), State::None);
     }
 
+    /// 빈 줄이 표를 닫는다(GFM) — 그 뒤로는 어떤 줄도 표의 열 폭을 바꿀 수
+    /// 없으므로 더 붙잡지 않는다. 담장 밖의 빈 줄만 센다.
+    #[test]
+    fn a_blank_line_after_the_table_releases_it() {
+        let mut scanner = Scanner::new();
+        scanner.push_source_chunk("| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+        assert!(matches!(scanner.state(), State::Confirmed { .. }));
+        scanner.push_source_chunk("\n");
+        assert_eq!(scanner.state(), State::None, "a closed table was still held");
+        scanner.push_source_chunk("| C | D |\n| --- | --- |\n");
+        assert!(matches!(scanner.state(), State::Confirmed { .. }), "the next table holds again");
+    }
+
     /// 담장 안의 파이프는 코드다 — codex 는 `Other` 담장을 건너뛴다.
     #[test]
     fn pipes_inside_a_shell_fence_are_not_a_table() {

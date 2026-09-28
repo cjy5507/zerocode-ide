@@ -1667,6 +1667,27 @@ mod tests {
         assert!(stream.tail().is_empty());
     }
 
+    /// 닫힌 표는 붙잡지 않는다: 빈 줄이 표를 닫으면(GFM) 표와 그 뒤 산문이
+    /// 오는 대로 커밋된다. 붙잡힌 채면 표 뒤의 답 전체가 끝까지 꼬리에 쌓여
+    /// 「… N more lines」 로 접히고, 줄마다 표부터 끝까지 다시 렌더된다.
+    #[test]
+    fn a_closed_table_commits_and_the_prose_after_it_flows() {
+        let mut stream = MarkdownStream::answer(40);
+        stream.push("| A | B |\n| --- | --- |\n| alpha | beta |\n");
+        assert!(drain(&mut stream, 8).is_empty(), "an open table is held");
+        stream.push("\nafter the table\n");
+        let committed = drain(&mut stream, 16);
+        assert!(
+            committed.iter().any(|row| row.contains("alpha")),
+            "the closed table stayed in the tail: {committed:?}"
+        );
+        assert!(
+            committed.iter().any(|row| row.contains("after the table")),
+            "the prose after the table stayed in the tail: {committed:?}"
+        );
+        assert!(stream.tail().is_empty());
+    }
+
     /// `finish` 뒤에 같은 스트림으로 계속 흘려도 경계는 **누적 원문의 절대
     /// 좌표**여야 한다. 스캐너 오프셋을 0 으로 되감던 시절에는 두 번째 표의
     /// `table_start` 가 새 조각 안의 좌표라 누적 원문에서는 첫 셀 한가운데를
