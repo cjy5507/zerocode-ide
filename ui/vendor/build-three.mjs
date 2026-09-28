@@ -85,6 +85,11 @@ import {
   InstancedBufferGeometry, RawShaderMaterial, DataTexture, FloatType, RGBAFormat, NearestFilter,
   ClampToEdgeWrapping, GLSL3, NormalBlending,
 } from "three"
+/* The knowledge graph's universe view (ui/shell-knowledge-universe.js, t-12443):
+ * the approved prototype v4 drew through an orthographic camera whose
+ * projection it overwrote with a perspective one, because this bundle had no
+ * perspective camera. The product takes the real one instead of the detour. */
+import { PerspectiveCamera } from "three"
 import {mergeGeometries} from "three/addons/utils/BufferGeometryUtils.js"
 
 window.THREE = {
@@ -102,6 +107,7 @@ window.THREE = {
   mergeGeometries,
   InstancedBufferGeometry, RawShaderMaterial, DataTexture, FloatType, RGBAFormat, NearestFilter,
   ClampToEdgeWrapping, GLSL3, NormalBlending,
+  PerspectiveCamera,
 }
 `;
 

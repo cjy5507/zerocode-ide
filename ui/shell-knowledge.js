@@ -1014,6 +1014,26 @@ function buildKnowledgeView() {
     modes.appendChild(one);
   }
 
+  /* 「2D | 3D」(t-12443): 전체 지도를 평면 지도로 볼지 우주로 볼지. 표(`KNOWLEDGE_DIMENSIONS`)의 순서가
+   * 머리의 순서이고, 눌린 쪽이 지금 서 있는 얼굴이다(`paintKnowledgeDimension`). 주변 탐색에서 3D를 누르면
+   * 전체 지도의 우주로 나온다 — 죽은 단추가 서지 않는다. */
+  const dimensions = document.createElement("div");
+  dimensions.className = "knowledge-dimension";
+  dimensions.setAttribute("role", "group");
+  dimensions.dataset.i18nAria = "knowledge.dimensions";
+  dimensions.setAttribute("aria-label", t("knowledge.dimensions", "평면 지도와 우주"));
+  for (const row of KNOWLEDGE_DIMENSIONS) {
+    const one = document.createElement("button");
+    one.type = "button";
+    one.className = "btn knowledge-dimension-step";
+    one.dataset.knowledgeDimension = row.id;
+    one.setAttribute("aria-pressed", "false");
+    one.setAttribute("aria-label", t(row.key, row.word));
+    one.dataset.tip = t(row.key, row.word);
+    one.textContent = row.short;
+    dimensions.appendChild(one);
+  }
+
   const searchBox = document.createElement("div");
   searchBox.className = "knowledge-search";
   const find = document.createElement("input");
@@ -1315,7 +1335,7 @@ function buildKnowledgeView() {
   tools.className = "knowledge-view-tools";
   tools.append(slicer, scene, exportHtml, again);
   lenses.appendChild(tools);
-  head.append(name, modes, searchBox, navToggle, gap, stat, lensToggle, lenses);
+  head.append(name, modes, dimensions, searchBox, navToggle, gap, stat, lensToggle, lenses);
 
   const body = document.createElement("div");
   body.className = "knowledge-body";
@@ -5239,6 +5259,8 @@ function paintKnowledgeFrame(view, layout, { cameraOnly = false } = {}) {
   const fade = Math.min(1, Math.max(tuning.clusterFadeFloor,
     1 - (layout.zoom - tuning.clusterFadeFrom) / tuning.clusterFadeSpan));
   writeCustomProperty(view.querySelector(".knowledge-picture"), "--knowledge-cluster-fade", fade.toFixed(3));
+  /* 서 있는 우주는 같은 옷(고름·밝힘·찾기·군집)을 다음 한 장으로 따른다(t-12443). */
+  dressKnowledgeUniverse(view);
 }
 
 /* 묶음의 줄들(t-12029) — 밑층 <svg>에, 두 손에 한 벌. 줄은 두 원반의 가장자리(눌린 판에서는 타원)에서
@@ -6725,8 +6747,10 @@ function noteKnowledgeExplore(vault) {
   if (knowledgeExploreTimer !== 0) clearTimeout(knowledgeExploreTimer);
   knowledgeExploreTimer = setTimeout(() => {
     knowledgeExploreTimer = 0;
+    /* 전체 지도의 얼굴(t-12443)은 사람이 고른 적이 있을 때만 적는다 — 고르지 않은 볼트는 표의 기본을 따른다. */
     void saveKnowledgeExplore(vault, {
       mode: knowledgeMode, centre: knowledgeSelectedKey, depth: knowledgeFocusDepth,
+      dimension: knowledgeDimension ?? undefined,
     });
   }, KNOWLEDGE_EXPLORE.persistMs);
 }
@@ -6753,6 +6777,8 @@ function applyKnowledgeEntry(view, layout) {
     && model.keys.includes(knowledgeRevealKey) ? knowledgeRevealKey : null;
   const stored = knowledgeExploreFor(model.vault);
   const mode = knowledgeStartMode(stored, reveal);
+  /* 이 볼트가 기억하는 전체 지도의 얼굴(t-12443) — 없으면 표의 기본(`knowledgeDimensionNow`). */
+  knowledgeDimension = KNOWLEDGE_DIMENSIONS.some((row) => row.id === stored?.dimension) ? stored.dimension : null;
   if (mode === "local") {
     const remembered = typeof stored?.centre === "string" && model.keys.includes(stored.centre)
       ? stored.centre : null;
@@ -7951,25 +7977,34 @@ function wireKnowledgeView(view) {
     if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       return;
     }
+    /* 서 있는 우주에서 화살표는 궤도다(t-12443, 6차 설계 §4-e). */
+    if (knowledgeUniverseKey(view, event)) return;
     event.preventDefault();
     knowledgeWalk(view, layout, event.key);
   };
 
+  /* 배율 단추 셋은 서 있는 우주가 먼저 받는다(t-12443) — 우주의 카메라가 다가가고 물러서며 처음 자리로 난다. */
   view.querySelector(".knowledge-zoom-out").onclick = () => {
     const layout = knowledgeLayouts.get(view);
+    if (knowledgeUniverseZoom(view, "out")) return;
     if (layout) takeKnowledgeZoom(view, layout, layout.zoom - layout.tuning.zoomStep);
   };
   view.querySelector(".knowledge-zoom-in").onclick = () => {
     const layout = knowledgeLayouts.get(view);
+    if (knowledgeUniverseZoom(view, "in")) return;
     if (layout) takeKnowledgeZoom(view, layout, layout.zoom + layout.tuning.zoomStep);
   };
   view.querySelector(".knowledge-zoom-fit").onclick = () => {
     const layout = knowledgeLayouts.get(view);
+    if (knowledgeUniverseZoom(view, "fit")) return;
     if (layout) fitKnowledgeGraph(view, layout, { fly: true });
   };
   /* 모드 토글과 빵부스러기(t-4140). */
   for (const step of view.querySelectorAll(".knowledge-mode-step")) {
     step.onclick = () => setKnowledgeMode(view, step.dataset.knowledgeMode);
+  }
+  for (const step of view.querySelectorAll("[data-knowledge-dimension]")) {
+    step.onclick = () => setKnowledgeDimension(view, step.dataset.knowledgeDimension);
   }
   view.querySelector(".knowledge-crumb-back").onclick = () => knowledgeBack(view);
   view.querySelector(".knowledge-crumb-root").onclick = () => setKnowledgeMode(view, KNOWLEDGE_MODES[0].id);
@@ -8866,6 +8901,8 @@ async function paintKnowledgeView(tab = knowledgeTab()) {
   layout.viewport.fresh = false;
   pulseKnowledgeFresh(view, layout);
   if (layout.left > 0) knowledgeSettle(view);
+  /* 우주 보기(t-12443) — 평면의 프레임이 카메라(`viewBoxRect`)를 적은 뒤에 선다: 떠오르는 우주는 그 자리에서 뜬다. */
+  paintKnowledgeUniverse(view, layout);
   /* 다른 표면이 고른 페이지: 답이 있는 그림에서 한 번, 고르고 가운데로. */
   if (knowledgeRevealKey !== null && knowledgeReport !== null) {
     const seat = model.keys.indexOf(knowledgeRevealKey);

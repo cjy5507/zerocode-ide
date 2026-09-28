@@ -10,6 +10,7 @@ import { KNOWLEDGE_SCENES, knowledgeSweepFor, measureKnowledgeGlParity, measureK
 import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { measureKnowledgeSupplyParity, measureKnowledgeSupplyScene, testKnowledgeSupply } from "./knowledge-supply.mjs";
+import { testKnowledgeUniverse, testKnowledgeUniverseUnable } from "./knowledge-universe.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -4239,6 +4240,9 @@ await measureKnowledgeSupplyScene(page, ok, { painter: "svg" });
 await testKnowledgeCode(page, ok);
 await measureKnowledgeCodeScene(page, ok);
 
+/* 우주 보기(t-12443) — WebGL2가 없는 이 판에서는 3D 단추가 까닭을 말하고 지도는 평면이다. */
+await testKnowledgeUniverseUnable(page, ok);
+
 /* GL의 계약은 제 판에서 묻는다(위의 `GL_ARGS` 주석). 그 판의 시간은 소프트웨어의
  * 것이므로 훑는 프레임을 짧게 잡는다 — 여기서 세는 것은 드로우와 자리이지 ms가
  * 아니다. */
@@ -4254,6 +4258,11 @@ await glPage.evaluate(() => {
 });
 await glPage.waitForFunction(() => document.querySelector(".knowledge-view:not([hidden])") !== null,
   null, { timeout: 8000 });
+/* 이 판의 뒤따르는 계약은 평면 지도의 것이다 — WebGL2가 서는 판의 전체 지도는 우주로 열리므로(t-12443)
+ * 평면을 고른 사람의 판으로 둔다. 우주의 계약은 끝에서 제 시험(`knowledge-universe.mjs`)이 묻는다. */
+await glPage.evaluate(() => {
+  knowledgeDimension = "2d";
+});
 await measureKnowledgeGlParity(glPage, ok);
 await measureKnowledgeScenes(glPage, ok, { painter: "gl", frames: sweep.frames,
   scenes: KNOWLEDGE_SCENES.filter((scene) => sweep.glScenes.includes(scene.name)) });
@@ -6013,6 +6022,10 @@ await retinaPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.siz
 await retinaPage.evaluate(() => document.getElementById("nav-knowledge").click());
 await retinaPage.waitForFunction(() => document.querySelector(".knowledge-view:not([hidden])") !== null,
   null, { timeout: 8000 });
+/* 이 판도 평면 지도의 모양을 잰다 — 우주(t-12443)가 아니라 평면을 고른 판으로 둔다. */
+await retinaPage.evaluate(() => {
+  knowledgeDimension = "2d";
+});
 const pixelRuns = [await shapePixelsOn(glPage), await shapePixelsOn(retinaPage)];
 await retinaContext.close();
 const skipped = pixelRuns.find((run) => run.skip);
@@ -6055,6 +6068,9 @@ if (skipped) {
       ? { pieces: row.pieces, svg: row.around.svg, gl: row.around.gl, peak: row.peak }
       : { own: [row.fit.svg[row.shape], row.fit.gl[row.shape]], hands: row.hands, centre: row.centre }])) })))}`);
 }
+/* 우주 보기(t-12443) — WebGL2가 서는 판의 계약: 기본으로 서는가, 오가도 평면의 자리가 그대로인가, 기억·쉼·가림·
+ * 문맥 잃음·해제. 평면 지도의 계약이 다 끝난 뒤에 묻는다(그 계약들은 평면을 고른 판에서 돈다). */
+await testKnowledgeUniverse(glPage, ok);
 await glBrowser.close();
 
 console.log(`METRIC knowledge graph 1020 nodes: first paint ${brainScale.firstPaint}ms; `

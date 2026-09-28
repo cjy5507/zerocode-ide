@@ -1498,6 +1498,68 @@
   /* 기기 픽셀의 상한. 레티나에서 2배까지만 그린다 — 3배 판에서 만 쪽의 채우는
      픽셀은 두 배 반이 되고 눈이 얻는 것은 없다. */
   --knowledge-3d-pixel-cap: 2;
+  /* ---- 우주 보기의 수 (t-12443, 승인된 시안 v4 「실제 우주」 — PORTING.md §3) ----
+   * 값은 시안의 것 그대로다(index.html의 `computeHome`·`flyTo`·`frame`·손, kg-data.js의 `layout`·`universe`).
+   * 각은 rad, 시간은 ms(프레임의 시간만 s), 거리는 세계 단위(96쪽 주제의 원반 반지름 ≈ 26), 손은 px당 몫. */
+  --knowledge-3d-fov: 34;
+  --knowledge-3d-near: 2;
+  --knowledge-3d-far: 8000;
+  --knowledge-3d-far-reach: 20;
+  --knowledge-3d-dpr-cap: 1.5;
+  --knowledge-3d-home-yaw: 0.62;
+  --knowledge-3d-home-pitch: 0.5;
+  --knowledge-3d-home-fit: 1.08;
+  --knowledge-3d-home-pad: 10;
+  --knowledge-3d-home-least: 110;
+  --knowledge-3d-home-aspect: 0.6;
+  --knowledge-3d-home-tall: 0.78;
+  --knowledge-3d-home-lift: 0.06;
+  --knowledge-3d-flat-pitch: 1.5695;
+  --knowledge-3d-flat-height: 0.5;
+  --knowledge-3d-pitch-low: -1.2;
+  --knowledge-3d-pitch-high: 1.5;
+  --knowledge-3d-zoom-min: 14;
+  --knowledge-3d-zoom-max: 2.2;
+  --knowledge-3d-zoom-wheel: 0.0014;
+  --knowledge-3d-zoom-step: 1.35;
+  --knowledge-3d-zoom-step-ms: 380;
+  --knowledge-3d-drag-slop: 4;
+  --knowledge-3d-drag-yaw: 0.0055;
+  --knowledge-3d-drag-pitch: 0.004;
+  --knowledge-3d-drag-pan: 0.0016;
+  --knowledge-3d-glide-decay: 4;
+  --knowledge-3d-glide-stop: 0.002;
+  --knowledge-3d-glide-yaw: 2.5;
+  --knowledge-3d-glide-pitch: 1.5;
+  --knowledge-3d-glide-pitch-share: 0.5;
+  --knowledge-3d-glide-window: 80;
+  /* 화살표 한 번의 궤도 — 시안에는 키보드 궤도가 없어 앱이 더한 것(6차 설계 §4-e). */
+  --knowledge-3d-key-turn: 0.12;
+  --knowledge-3d-idle-delay: 9000;
+  --knowledge-3d-idle-spin: 0.03;
+  --knowledge-3d-idle-ramp: 0.5;
+  --knowledge-3d-frame-most: 0.05;
+  --knowledge-3d-frame-first: 0.016667;
+  --knowledge-3d-open-rest: 7000;
+  --knowledge-3d-home-rest: 6000;
+  --knowledge-3d-wake-rest: 8000;
+  --knowledge-3d-rise: 1500;
+  --knowledge-3d-fold: 1300;
+  --knowledge-3d-crossfade: 220ms;
+  --knowledge-3d-fly: 1100;
+  --knowledge-3d-home-ms: 1000;
+  --knowledge-3d-notice-ms: 2600;
+  --knowledge-3d-world-root: 2.7;
+  --knowledge-3d-world-pages: 850;
+  --knowledge-3d-world-spread: -0.08;
+  --knowledge-3d-lift-galaxy: 0.17;
+  --knowledge-3d-lift-cluster: 0.21;
+  --knowledge-3d-lift-orphan: 0.25;
+  --knowledge-3d-star-lum-exp: 1.6;
+  --knowledge-3d-star-age-scale: 3;
+  --knowledge-3d-star-age-span: 365;
+  /* 우주의 무대 — 시안의 `.stage` 바탕. 밝은 테마는 아래 블록이 종이색으로. */
+  --knowledge-3d-stage: rgb(2 3 6);
   --knowledge-glass-blur: blur(16px);
   --knowledge-inspector-blur: blur(12px);
   --knowledge-inspector-veil-weight: 94%;
@@ -2603,6 +2665,8 @@
   /* 종이 위에서는 테두리 한 올이 더 일해야 원반의 경계가 읽힌다. */
   --knowledge-nebula-edge-weight: 42%;
   --knowledge-highlight: var(--ink-figure);
+  /* 우주 보기의 무대(t-12443) — 시안의 밝은 테마 바탕(음화 인쇄의 종이 곁). */
+  --knowledge-3d-stage: rgb(233 228 216);
   /* 라이트 판의 다섯 색은 어두운 잉크를 섞어 바닥(#f5f5f5)에서 3:1을 넘긴다.
    * 비율이 색마다 다른 것은 램프의 다섯이 밝기가 다르기 때문이고, 그 다섯 수는
    * 재서 얻은 것이다(하네스가 두 테마에서 픽셀로 잰다): 62%의 앰버는 3.19로

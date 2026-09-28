@@ -37854,6 +37854,74 @@ details.task-board-section > summary {
   font-weight: 500;
 }
 
+/* 우주 보기(t-12443, 승인된 시안 v4) — 평면 지도의 캔버스 위에 한 판으로 선다. 캔버스가 별·은하를 지고 그
+   위의 층이 이름표를 진다. 우주가 서 있는 동안(`is-universe`) 평면 지도의 층과 군집 범례는 가려진다 — 아래에서
+   그대로 살아 있다가 평면으로 돌아오면 다시 선다(자리는 한 번도 바뀌지 않는다). 문맥을 잃은 판은 이 클래스를
+   내려놓아 평면이 보이고 우주는 숨는다. */
+.knowledge-universe {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--knowledge-3d-stage);
+  cursor: grab;
+  touch-action: none;
+  transition: opacity var(--knowledge-3d-crossfade) var(--ease-standard);
+}
+
+.knowledge-universe.is-dragging {
+  cursor: grabbing;
+}
+
+.knowledge-view:not(.is-universe) .knowledge-universe {
+  display: none;
+}
+
+.knowledge-view.is-universe .knowledge-underlay,
+.knowledge-view.is-universe .knowledge-picture,
+.knowledge-view.is-universe .knowledge-gl,
+.knowledge-view.is-universe .knowledge-gl-labels,
+.knowledge-view.is-universe .knowledge-cluster-legend {
+  visibility: hidden;
+}
+
+.knowledge-universe-gl {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.knowledge-universe-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* 한 줄 알림(문맥 잃음·되찾음) — 무대의 위 가운데, 평면으로 돌아온 뒤에도 읽히는 자리. */
+.knowledge-universe-notice {
+  position: absolute;
+  top: var(--space-6);
+  left: 50%;
+  z-index: 3;
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  background: var(--glass-veil);
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%);
+  transition: opacity var(--knowledge-3d-crossfade) var(--ease-standard);
+}
+
+.knowledge-universe-notice.is-on {
+  opacity: 1;
+}
+
 /* 색을 묻는 견본. 그려지지는 않지만 계산은 된다 — `display: none`이면 브라우저가
    값을 풀어 주지 않는 판이 있어 크기를 0으로 두고 숨긴다. */
 .knowledge-gl-swatch {
@@ -39124,7 +39192,8 @@ h4.knowledge-inspector-head::after {
 }
 
 .knowledge-depth-step.is-active,
-.knowledge-mode-step.is-active {
+.knowledge-mode-step.is-active,
+.knowledge-dimension-step.is-active {
   border-color: var(--edge-glint);
   background: var(--row-active);
   color: var(--ink-chalk);
@@ -39133,8 +39202,10 @@ h4.knowledge-inspector-head::after {
 /* ---- 「전체 지도 | 주변 탐색」 (t-4140) ----
  *
  * 토글은 머리의 세그먼트이고 눌린 쪽이 지금의 모드다(`aria-pressed`). 좁은 판은
- * 낱말을 접고 그림만 남긴다 — 이름은 `aria-label`이 든다. */
-.knowledge-mode {
+ * 낱말을 접고 그림만 남긴다 — 이름은 `aria-label`이 든다. 「2D | 3D」(t-12443)도 같은 세그먼트다 —
+ * 낱말이 둘 다 짧아 접지 않는다. */
+.knowledge-mode,
+.knowledge-dimension {
   display: flex;
   flex: none;
   gap: var(--space-1);
@@ -39145,9 +39216,16 @@ h4.knowledge-inspector-head::after {
   background: var(--surface-well);
 }
 
-.knowledge-mode-step {
+.knowledge-mode-step,
+.knowledge-dimension-step {
   border-color: transparent;
   background: transparent;
+}
+
+/* 우주를 그릴 수 없는 판의 3D — 누를 수 없지만 초점과 손은 받아 팁이 까닭을 말한다. */
+.knowledge-dimension-step[aria-disabled="true"] {
+  color: var(--ink-mist);
+  cursor: not-allowed;
 }
 
 .knowledge-view.is-toolbar-compact .knowledge-mode-step span,
@@ -39159,7 +39237,8 @@ h4.knowledge-inspector-head::after {
 /* 가장 좁은 판(이름도 접히는 폭)에서는 토글이 서지 않는다 — 실측: 단추 하나(26px)가
  * 280px의 머리를 넘쳤다. 주변 탐색은 검색 후보의 「주변 탐색으로」·워크벤치의
  * 「연결 보기」·Esc로 여전히 닿고, 빵부스러기의 「전체 지도」가 돌아오는 문이다. */
-.knowledge-view.is-tier-tiny .knowledge-mode {
+.knowledge-view.is-tier-tiny .knowledge-mode,
+.knowledge-view.is-tier-tiny .knowledge-dimension {
   display: none;
 }
 
@@ -39525,6 +39604,7 @@ h4.knowledge-inspector-head::after {
 /* 새 손잡이의 포커스 링(t-4140 S7) — 캔버스·검색 상자·목록 줄과 같은 링. 색만이
  * 포커스를 말하지 않는다: 바깥선 하나가 어느 판에서도 선다. */
 .knowledge-mode-step:focus-visible,
+.knowledge-dimension-step:focus-visible,
 .knowledge-crumb-back:focus-visible,
 .knowledge-crumb-root:focus-visible,
 .knowledge-candidate:focus-visible,
@@ -39609,6 +39689,9 @@ h4.knowledge-inspector-head::after {
   .knowledge-edge,
   .knowledge-chip,
   .knowledge-mode-step,
+  .knowledge-dimension-step,
+  .knowledge-universe,
+  .knowledge-universe-notice,
   .knowledge-candidate,
   .knowledge-search-results li,
   .knowledge-crumb,

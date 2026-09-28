@@ -77,6 +77,10 @@ await page.waitForFunction(
   () => document.querySelector(".knowledge-view:not([hidden])") !== null,
   null, { timeout: 15000 },
 );
+/* 이 자는 평면 지도의 두 손을 잰다 — 우주(t-12443)가 서지 않는 평면을 고른 판으로 둔다. */
+await page.evaluate(() => {
+  knowledgeDimension = "2d";
+});
 
 const able = await page.evaluate(() => ({
   webgl2: knowledgeGlSupported(),

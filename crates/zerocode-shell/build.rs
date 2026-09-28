@@ -142,6 +142,7 @@ const UI_FILES: &[&str] = &[
     "shell-knowledge.js",
     "shell-knowledge-3d.js",
     "shell-knowledge-supply.js",
+    "shell-knowledge-universe.js",
     "shell-explorer-search.js",
     "shell-explorer-tree.js",
     "shell-attach.js",
