@@ -26,9 +26,9 @@ const KNOWLEDGE_REFRESH_FLOOR_MS = 1500;
  * 레인 램프 다섯(`--git-graph-lane-1..5`, IBM의 색약 안전 다섯)에 두 테마 모두
  * 값을 가진 신호색 둘과 그 둘의 중간 하나. 3차부터 색은 태그가 아니라 **군집**의
  * 것이다(`knowledgeCommunities`) — 볼트 27쪽 중 15쪽이 같은 첫 태그였고, 그
- * 그림에서 색은 아무것도 가르지 못했다. 여덟 뒤의 군집은 여덟로 나눈 나머지를
- * 입는다. 아이덴티티 레인(`--lane-*`)은 라이트 판에서 한 색으로 접히므로
- * 여전히 빌릴 수 없다. */
+ * 그림에서 색은 아무것도 가르지 못했다. 여덟 뒤의 군집은 색이 없다(t-12029,
+ * `knowledgeClusterHues`). 아이덴티티 레인(`--lane-*`)은 라이트 판에서 한 색으로
+ * 접히므로 여전히 빌릴 수 없다. */
 const KNOWLEDGE_HUES = 8;
 /* 칩으로 세우는 태그의 상한. 백 개의 칩은 필터가 아니라 두 번째 목록이다. */
 const KNOWLEDGE_TAG_CHIPS = 12;
@@ -125,6 +125,10 @@ const KNOWLEDGE_TOKENS = Object.freeze({
   edgeLabelPx: "--knowledge-label-edge-px",
   markerPx: "--knowledge-marker-px",
   fitRatio: "--knowledge-fit-ratio",
+  /* 전체 지도의 맞춤(t-12029) — 지도의 몫과 아래 범례 띠, 부스러기 띠의 틈. */
+  mapFit: "--knowledge-map-fit",
+  mapFoot: "--knowledge-map-foot",
+  strayGap: "--knowledge-stray-gap",
   margin: "--knowledge-margin",
   /* 주변 탐색의 고리(시안 이식): 이웃 사이 호의 길이, 첫 고리의 최소 반지름, 고리 사이
    * 간격, 세로 눌림. */
@@ -143,13 +147,50 @@ const KNOWLEDGE_TOKENS = Object.freeze({
   clusterHold: "--knowledge-cluster-hold",
   coreRing: "--knowledge-core-ring",
   coreRingGap: "--knowledge-core-ring-gap",
+  /* 가지가 보이는 군집(t-12029) — 원반의 넓힘과 최소 틈, 전체 지도의 점 크기, 단마다의 인력. */
+  clusterSpread: "--knowledge-cluster-spread",
+  clusterGapLeast: "--knowledge-cluster-gap-least",
+  mapLeaf: "--knowledge-map-leaf",
+  mapMajor: "--knowledge-map-major",
+  mapCore: "--knowledge-map-core",
+  mapGhost: "--knowledge-map-ghost",
+  mapStray: "--knowledge-map-stray",
+  clusterPullMajor: "--knowledge-cluster-pull-major",
+  clusterPullLeaf: "--knowledge-cluster-pull-leaf",
+  /* 군집 사이 묶음선(t-12029) — 몇 가닥부터 묶는가, 굵기·옅기·휨·틈, 물러섬, 목록의 줄 수. */
+  tieLeast: "--knowledge-tie-least",
+  tieWidth: "--knowledge-tie-width",
+  tieGrow: "--knowledge-tie-grow",
+  tieAlpha: "--knowledge-tie-alpha",
+  tieLift: "--knowledge-tie-lift",
+  tieInset: "--knowledge-tie-inset",
+  tieBend: "--knowledge-tie-bend",
+  tieBendMax: "--knowledge-tie-bend-max",
+  tieRoom: "--knowledge-tie-room",
+  tieFadeFrom: "--knowledge-tie-fade-from",
+  tieFadePer: "--knowledge-tie-fade-per",
+  tieFadeFloor: "--knowledge-tie-fade-floor",
+  tieQuiet: "--knowledge-tie-quiet",
+  tieMine: "--knowledge-tie-mine",
+  tieHot: "--knowledge-tie-hot",
+  tieHotWidth: "--knowledge-tie-hot-width",
+  tiesListed: "--knowledge-ties-listed",
+  /* 놀라운 연결(t-12029) — 몇 쪽부터 큰 주제인가, 몇 쌍까지, 휨·굵기·번호 원, 물러섬. */
+  bridgeLeast: "--knowledge-bridge-least",
+  bridgesListed: "--knowledge-bridges-listed",
+  bridgeBend: "--knowledge-bridge-bend",
+  bridgeBendMax: "--knowledge-bridge-bend-max",
+  bridgeWidth: "--knowledge-bridge-width",
+  bridgeHotWidth: "--knowledge-bridge-hot-width",
+  bridgeBadge: "--knowledge-bridge-badge",
+  bridgeBadgeStroke: "--knowledge-bridge-badge-stroke",
+  bridgeQuiet: "--knowledge-bridge-quiet",
   /* 위계의 세 크기와 대표 지식의 몫. */
   coreRadius: "--knowledge-core-radius",
   majorRadius: "--knowledge-major-radius",
   majorShare: "--knowledge-major-share",
   majorMax: "--knowledge-major-max",
   /* 이름표 격자. */
-  plateWide: "--knowledge-plate-wide",
   labelCell: "--knowledge-label-cell",
   labelPadX: "--knowledge-label-pad-x",
   labelPadY: "--knowledge-label-pad-y",
@@ -157,10 +198,6 @@ const KNOWLEDGE_TOKENS = Object.freeze({
   labelEmNarrow: "--knowledge-label-em-narrow",
   labelCoverZoom: "--knowledge-label-cover-zoom",
   clusterLabelLift: "--knowledge-cluster-label-lift",
-  clusterCountPx: "--knowledge-cluster-count-px",
-  clusterLeadMax: "--knowledge-cluster-lead-max",
-  clusterLeadGap: "--knowledge-cluster-lead-gap",
-  clusterCountGap: "--knowledge-cluster-count-gap",
   zoomMin: "--knowledge-zoom-min",
   zoomMax: "--knowledge-zoom-max",
   zoomStep: "--knowledge-zoom-step",
@@ -174,6 +211,11 @@ const KNOWLEDGE_TOKENS = Object.freeze({
   nebulaScale: "--knowledge-nebula-scale",
   nebulaPad: "--knowledge-nebula-pad",
   clusterLabelPx: "--knowledge-cluster-label-px",
+  /* 색 없는 군집의 이름 크기와 확대할수록 이름이 물러서는 곡선(t-12029). */
+  clusterQuietPx: "--knowledge-cluster-quiet-px",
+  clusterFadeFrom: "--knowledge-cluster-fade-from",
+  clusterFadeSpan: "--knowledge-cluster-fade-span",
+  clusterFadeFloor: "--knowledge-cluster-fade-floor",
   clusterLabelUntil: "--knowledge-cluster-label-until",
   labelMax: "--knowledge-label-max",
   settleFrames: "--knowledge-settle-frames",
@@ -301,8 +343,11 @@ const KNOWLEDGE_FORCE = Object.freeze({
   frameMs: 4,
   repulsion: 500,
   spring: 0.05,
-  /* 군집 사이를 건너는 선의 몫(09-16) — 같은 주제 안의 선에 대한 비율. */
-  interSpring: 0.2,
+  /* 군집 사이를 건너는 선의 몫(09-16) — 같은 주제 안의 선에 대한 비율. 0.2에서 0.05로(t-12029): 잎이 제 홈으로
+   * 약하게 끌리게 된 뒤로(`--knowledge-cluster-pull-leaf`) 0.2의 실은 원반의 점을 이웃 군집 쪽 벽으로 몰았다(실제
+   * 볼트에서 몇 원반의 점이 한쪽 가장자리에 섰다). 원반의 자리는 군집 사이 실이 이미 정하고(`knowledgeClusterHomes`),
+   * 쉬는 지도는 그 선을 묶음으로 그리므로 점이 이웃 쪽으로 기울 까닭이 없다. */
+  interSpring: 0.05,
   springLength: 46,
   damping: 0.8,
   /* 한 훑기에 점이 움직일 수 있는 최대 거리.
@@ -359,6 +404,15 @@ const KNOWLEDGE_FORCE = Object.freeze({
 
 const KNOWLEDGE_GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
+/* 주제 이름판의 가까운 자리(t-12029, 승인된 시안 v2 「oneLine」) — 원반 가장자리에서 이만큼(화면 px) 떨어진
+ * 세 겹과, 겹마다 먼저 볼 방향 여덟(위·아래·오른쪽·왼쪽·오른위·왼위·오른아래·왼아래; 대각선은 가장자리의
+ * 0.72 — 시안의 값). 순서가 곧 선호다: 이름은 제 원반의 위에 서는 것이 가장 자연스럽다. */
+const KNOWLEDGE_PLATE_SEATS = Object.freeze({
+  gaps: Object.freeze([5, 16, 30]),
+  ways: Object.freeze([[0, -1], [0, 1], [1, 0], [-1, 0], [0.72, -0.72], [-0.72, -0.72], [0.72, 0.72], [-0.72, 0.72]]
+    .map((way) => Object.freeze(way))),
+});
+
 /* 사람의 것들 — 다시 그려도 남고, 판이 아니라 사람에게 속한다. */
 let knowledgeQuery = "";
 let knowledgeOrphansOnly = false;
@@ -395,6 +449,13 @@ let knowledgeSlicerCutoff = 0;
 let knowledgePath = null;
 /* 밝힌 군집의 순위, 없으면 -1. 순위는 그림(위상)의 것이라 위상이 바뀌면 놓는다. */
 let knowledgeClusterPicked = -1;
+/* 포인터나 키보드가 지금 올라 선 군집 이름판의 순위, 없으면 -1(t-12029). 고르기처럼 그 군집과 그 군집을
+ * 건너는 선을 밝히되 카메라는 날지 않고, 떠나면 놓는다. 이것도 위상의 것이다. */
+let knowledgeClusterHover = -1;
+/* 「강한 묶음」 목록에서 짚은 묶음의 자리(`layout.ties`의 번호), 없으면 -1. */
+let knowledgeTieHot = -1;
+/* 「놀라운 연결」 목록에서 짚은 다리의 자리(`layout.bridges`의 번호), 없으면 -1(t-12029). */
+let knowledgeBridgeHot = -1;
 /* 탐색 모드(t-4140)와 그 살림. 주변 탐색의 중심은 고른 점(`knowledgeSelectedKey`)이다 —
  * 중심 없는 주변은 없으므로 그 모드에서 고르기를 놓는 것은 전체 지도로 돌아가는
  * 일이다. 방문 이력은 중심·깊이·배율의 스택이고 ← 이전이 되짚는다. 펼친 허브는
@@ -702,6 +763,19 @@ function knowledgeNodeRadius(degree, tuning, tier = KNOWLEDGE_TIER_LEAF) {
   );
 }
 
+/* 전체 지도의 점 크기 (t-12029, 승인된 시안 v2 「spread」) — 잎 2.4 · 대표 지식 5.5 · 중심 10 px, 유령 2.2,
+ * 이름 없는 군집의 쪽(부스러기) 2. 반지름 4.4 px의 점이 원반을 꽉 채운 공에서는 군집 안의 모양이 보이지 않았다
+ * (시안의 비포) — 작은 점이라야 넓어진 원반 안에 가지가 선다. 쪽과 유령만 이 크기를 입는다: 렌즈가 더한 점
+ * (원본·공급망·코드)은 모양이 뜻이라 제 √차수 램프(`ramp`) 그대로다. 주변 탐색은 이 크기를 쓰지 않는다. */
+function knowledgeMapRadius(kind, tier, stray, tuning, ramp) {
+  if (kind === "ghost") return tuning.mapGhost;
+  if (kind !== "page") return ramp;
+  if (stray) return tuning.mapStray;
+  if (tier === KNOWLEDGE_TIER_CORE) return tuning.mapCore;
+  if (tier === KNOWLEDGE_TIER_MAJOR) return tuning.mapMajor;
+  return tuning.mapLeaf;
+}
+
 /* 군집마다 한 중심과 몇 개의 대표 지식 (09-16).
  *
  * 중심은 군집 안에서 연결이 가장 많은 페이지(`communities.core`)이고, 대표 지식은
@@ -861,11 +935,10 @@ function paintKnowledgeEntry() {
   if (row) row.hidden = secondBrainVault === "";
 }
 
-/* 색 칸마다 그라데이션 셋 — 점의 채움(가운데 밝게), 허브의 halo(가운데에서
- * 가장자리로 사라지는 원), 군집의 성운(같은 모양, 더 옅게) — 과 지향성 관계의
- * 화살표. `related`와 `mentions`는 방향을 그리지 않는다. 그라데이션의 불투명도는
- * 숫자가 아니라 `<stop>`의 클래스다: 그 수는 토큰에 산다(`--knowledge-halo-core`,
- * `--knowledge-nebula-core`). 색 칸이 없는 허브(군집이 아닌 점)는 중립 halo를 쓴다. */
+/* 색 칸마다 그라데이션 둘 — 점의 채움(가운데 밝게)과 허브의 halo(가운데에서 가장자리로 사라지는 원) — 과
+ * 지향성 관계의 화살표. `related`와 `mentions`는 방향을 그리지 않는다. 그라데이션의 불투명도는 숫자가 아니라
+ * `<stop>`의 클래스다: 그 수는 토큰에 산다(`--knowledge-halo-core`). 색 칸이 없는 허브(군집이 아닌 점)는 중립
+ * halo를 쓴다. 군집의 성운은 그라데이션이 아니라 평평한 한 겹이다(t-12029, CSS의 `.knowledge-nebula`). */
 function knowledgeDefsHtml() {
   const stop = (offset, color, className) =>
     `<stop offset="${offset}" stop-color="${color}" class="${className}"></stop>`;
@@ -876,8 +949,7 @@ function knowledgeDefsHtml() {
       + `<stop offset="0" stop-color="var(--knowledge-hue-${hue}-center)"></stop>`
       + `<stop offset="1" stop-color="var(--knowledge-hue-${hue})"></stop>`
       + `</radialGradient>`
-    + disc(`knowledge-halo-gradient-${hue}`, `var(--knowledge-hue-${hue})`, "knowledge-stop-halo-core")
-    + disc(`knowledge-nebula-gradient-${hue}`, `var(--knowledge-hue-${hue})`, "knowledge-stop-nebula-core"))
+    + disc(`knowledge-halo-gradient-${hue}`, `var(--knowledge-hue-${hue})`, "knowledge-stop-halo-core"))
     .join("");
   const neutral = disc("knowledge-halo-gradient-neutral", "var(--ink-figure)", "knowledge-stop-halo-core");
   const arrows = KNOWLEDGE_EDGE_DIRECTED.map((kind) =>
@@ -940,6 +1012,26 @@ function buildKnowledgeView() {
     word.textContent = t(row.key, row.word);
     one.appendChild(word);
     modes.appendChild(one);
+  }
+
+  /* 「2D | 3D」(t-12443): 전체 지도를 평면 지도로 볼지 우주로 볼지. 표(`KNOWLEDGE_DIMENSIONS`)의 순서가
+   * 머리의 순서이고, 눌린 쪽이 지금 서 있는 얼굴이다(`paintKnowledgeDimension`). 주변 탐색에서 3D를 누르면
+   * 전체 지도의 우주로 나온다 — 죽은 단추가 서지 않는다. */
+  const dimensions = document.createElement("div");
+  dimensions.className = "knowledge-dimension";
+  dimensions.setAttribute("role", "group");
+  dimensions.dataset.i18nAria = "knowledge.dimensions";
+  dimensions.setAttribute("aria-label", t("knowledge.dimensions", "평면 지도와 우주"));
+  for (const row of KNOWLEDGE_DIMENSIONS) {
+    const one = document.createElement("button");
+    one.type = "button";
+    one.className = "btn knowledge-dimension-step";
+    one.dataset.knowledgeDimension = row.id;
+    one.setAttribute("aria-pressed", "false");
+    one.setAttribute("aria-label", t(row.key, row.word));
+    one.dataset.tip = t(row.key, row.word);
+    one.textContent = row.short;
+    dimensions.appendChild(one);
   }
 
   const searchBox = document.createElement("div");
@@ -1121,7 +1213,8 @@ function buildKnowledgeView() {
   lensToggle.setAttribute("aria-expanded", "false");
   const lenses = document.createElement("div");
   lenses.className = "knowledge-lens-popover";
-  lenses.append(sift, provenance, tags);
+  /* 우주의 줄(t-12443) — 「움직임」. 우주가 서 있는 동안만 보인다. */
+  lenses.append(sift, provenance, tags, buildKnowledgeUniverseControls());
 
   const gap = document.createElement("span");
   gap.className = "knowledge-gap";
@@ -1243,7 +1336,7 @@ function buildKnowledgeView() {
   tools.className = "knowledge-view-tools";
   tools.append(slicer, scene, exportHtml, again);
   lenses.appendChild(tools);
-  head.append(name, modes, searchBox, navToggle, gap, stat, lensToggle, lenses);
+  head.append(name, modes, dimensions, searchBox, navToggle, gap, stat, lensToggle, lenses);
 
   const body = document.createElement("div");
   body.className = "knowledge-body";
@@ -1264,8 +1357,8 @@ function buildKnowledgeView() {
   picture.setAttribute("preserveAspectRatio", "xMidYMid meet");
   const defs = document.createElementNS(SVG_NS, "defs");
   defs.innerHTML = knowledgeDefsHtml();
-  // 군집의 층이 맨 뒤에 선다: 성운과 이름표는 점과 선 **뒤**의 바탕이지 그 위의
-  // 장식이 아니다 — 선이 성운을 가로지르고 점이 성운 위에 앉는다.
+  // 군집의 층이 맨 뒤에 선다: 성운은 점과 선 **뒤**의 바탕이지 그 위의 장식이
+  // 아니다 — 선이 성운을 가로지르고 점이 성운 위에 앉는다.
   const clusters = document.createElementNS(SVG_NS, "g");
   clusters.setAttribute("class", "knowledge-clusters");
   const edges = document.createElementNS(SVG_NS, "g");
@@ -1274,8 +1367,28 @@ function buildKnowledgeView() {
   edgeLabels.setAttribute("class", "knowledge-edge-labels");
   const nodes = document.createElementNS(SVG_NS, "g");
   nodes.setAttribute("class", "knowledge-nodes");
-  picture.append(defs, clusters, edges, edgeLabels, nodes);
-  canvas.append(picture);
+  /* 주제의 이름판은 점 **위**의 층이다(t-12443) — GL 손에서 이름판이 캔버스 위에 서는 것과 같은 그림이라야 두
+   * 손이 한 격자에서 같은 자리를 고른다(`placeKnowledgeLabels`의 (1): 이름판은 부스러기 점 위에 설 수 있다).
+   * 판의 글자는 바탕색 테두리를 둘러 점 위에서도 읽힌다. */
+  const clusterNames = document.createElementNS(SVG_NS, "g");
+  clusterNames.setAttribute("class", "knowledge-cluster-names");
+  picture.append(defs, clusters, edges, edgeLabels, nodes, clusterNames);
+  /* 밑층(t-12029) — 군집 사이 묶음선. 그림보다 앞에 서서 그림의 **아래**에 그려지고(GL 판에서는 캔버스보다도
+   * 아래 — 손이 캔버스를 그림 바로 앞에 세운다), 두 손이 이 한 벌을 쓴다. 카메라는 그림과 같은 viewBox다
+   * (`paintKnowledgeTies`). 뜻은 「강한 묶음」 목록이 글로 말하므로 읽는 이에게는 숨긴다. */
+  const underlay = document.createElementNS(SVG_NS, "svg");
+  underlay.setAttribute("class", "knowledge-underlay");
+  underlay.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  underlay.setAttribute("aria-hidden", "true");
+  const ties = document.createElementNS(SVG_NS, "g");
+  ties.setAttribute("class", "knowledge-ties");
+  /* 놀라운 연결(t-12029)의 곡선과 번호, 그리고 곡선마다의 그라데이션. */
+  const bridgeInks = document.createElementNS(SVG_NS, "defs");
+  bridgeInks.setAttribute("class", "knowledge-bridge-inks");
+  const bridges = document.createElementNS(SVG_NS, "g");
+  bridges.setAttribute("class", "knowledge-bridges");
+  underlay.append(bridgeInks, ties, bridges);
+  canvas.append(underlay, picture);
 
   /* 배율의 세 단추. 낱말은 에이전트 그래프의 것을 그대로 쓴다 — 같은 동작에
    * 두 벌의 번역을 두면 한쪽만 고쳐지는 날이 온다. */
@@ -1413,6 +1526,8 @@ function buildKnowledgeView() {
     item.append(mark, word, why);
     legendList.appendChild(item);
   }
+  /* 우주의 네 줄(t-12443) — 우주가 서 있는 동안만 보이고, 그동안 평면의 줄은 가려진다. */
+  appendKnowledgeUniverseLegend(legendList);
   legend.append(legendHead, legendList);
 
   const inspector = document.createElement("aside");
@@ -1674,6 +1789,10 @@ function buildKnowledgeOverview() {
     buildKnowledgeSupplyOverview(),
     health,
     knowledgeListSection("knowledge-overview-clusters", "knowledge.clusters", t("knowledge.clusters", "군집")),
+    /* 그림 옆의 「강한 묶음」(t-12029) — 지도가 굵은 줄 하나로 묶은 군집 쌍을 글로. */
+    knowledgeListSection("knowledge-overview-ties", "knowledge.ties", t("knowledge.ties", "강한 묶음")),
+    /* 그림 옆의 「놀라운 연결」(t-12029) — 지도가 번호로 밝힌 다리를 글로. */
+    knowledgeListSection("knowledge-overview-bridges", "knowledge.bridges", t("knowledge.bridges", "놀라운 연결")),
     knowledgeListSection("knowledge-overview-hubs", "knowledge.hubs", t("knowledge.hubs", "허브")),
     knowledgeListSection("knowledge-overview-tags", "knowledge.tagShare", t("knowledge.tagShare", "태그 분포")),
     knowledgeListSection("knowledge-overview-kinds", "knowledge.relationKinds", t("knowledge.relationKinds", "관계 종류")),
@@ -2416,6 +2535,11 @@ function openKnowledgeLinkForm(view, { target = null } = {}) {
   const layout = knowledgeLayouts.get(view);
   const seat = knowledgeSelectedKey === null ? -1 : layout?.model.keys.indexOf(knowledgeSelectedKey) ?? -1;
   if (!layout || seat < 0 || layout.model.kinds[seat] !== "page") return;
+  /* 관계 편집은 평면의 일이다(t-12443, 6차 설계 §4-f) — 우주에서 누르면 평면으로 내려앉아 같은 점을 가운데에 둔다. */
+  if (knowledgeUniverses.has(view)) {
+    setKnowledgeDimension(view, "2d");
+    knowledgeCenterOn(view, layout, seat);
+  }
   const form = view.querySelector(".knowledge-link-form");
   knowledgeLinkTarget = target !== null && layout.model.keys.includes(target) ? target : null;
   knowledgeLinkCandidateAt = -1;
@@ -3125,37 +3249,21 @@ function knowledgeCommunities(model, tuning) {
     if (size[rank] >= KNOWLEDGE_COMMUNITY.minSize) named += 1;
   }
   const { homeX, homeY, homed, homeR } = knowledgeClusterHomes(model, of, ids, named, tuning);
-  const hue = knowledgeClusterHues(ids, named, homeX, homeY, homeR);
+  const hue = knowledgeClusterHues(ids, named);
   const { names, tagHue, core } = knowledgeClusterNames(model, of, size, named, hue);
   return { count: ids, of, size, hue, names, homeX, homeY, homed, homeR, named, tagHue, core };
 }
 
-/* 군집의 색 칸(t-11500). 색 칸은 여덟뿐이고(`KNOWLEDGE_HUES`, 토큰이 두 테마에서 대비를 지키는 칸)
- * 볼트의 주제는 그보다 많다 — 순위로 돌려 쓰면(`순위 % 8`) 1·9·17위가 같은 색이고, 그 셋이 이웃에
- * 서면 지도가 세 주제를 한 주제로 말한다(실측 200% 범례: 세 군집이 모두 금색). 그래서 순위대로,
- * 이미 그 색을 입은 원반들과의 가장 가까운 간격(가장자리 사이)이 가장 먼 칸을 고른다. 여덟까지는
- * 모든 칸이 비어 있어 순위의 칸 그대로이고(오늘의 색), 동률은 순위의 칸부터 차례로 — 난수 없이
- * 같은 볼트는 같은 색이다. 되풀이되는 색은 지도에서 가장 먼 원반끼리 나눈다. */
-function knowledgeClusterHues(ids, named, homeX, homeY, homeR) {
+/* 군집의 색 칸 (t-12029, 승인된 시안 v2 「colour」 — t-11500의 「이웃한 군집은 다른 색」과 한 함수).
+ *
+ * 색 칸은 여덟이고(`KNOWLEDGE_HUES`, 두 테마에서 대비를 지키는 토큰) 볼트의 주제는 그보다 많다. 순위(쪽 수)의
+ * 앞 여덟이 여덟 칸을 순위대로 하나씩 입고, 나머지는 색이 없다 — 차분한 회색에 이름만. 한 칸을 두 군집이
+ * 나누지 않으므로 이웃한 두 원반이 같은 색일 수 없다: t-11500이 원반 사이의 거리로 풀던 물음(돌려 쓰는 색을
+ * 가장 먼 원반끼리)이 물음째 사라지고, 두 규칙이 다툴 자리가 없다. 여덟 색이 곧 「가장 큰 주제 여덟」을
+ * 말한다(시안의 비포: 실제 볼트 17주제 중 9주제가 남의 색을 입었다). 순위가 정하므로 같은 볼트는 같은 색이다. */
+function knowledgeClusterHues(ids, named) {
   const hue = new Int8Array(ids).fill(-1);
-  for (let rank = 0; rank < named; rank += 1) {
-    let best = rank % KNOWLEDGE_HUES;
-    let bestRoom = Number.NEGATIVE_INFINITY;
-    for (let step = 0; step < KNOWLEDGE_HUES; step += 1) {
-      const cell = (rank + step) % KNOWLEDGE_HUES;
-      let room = Number.POSITIVE_INFINITY;
-      for (let other = 0; other < rank; other += 1) {
-        if (hue[other] !== cell) continue;
-        room = Math.min(room, Math.hypot(homeX[rank] - homeX[other], homeY[rank] - homeY[other])
-          - homeR[rank] - homeR[other]);
-      }
-      if (room > bestRoom) {
-        bestRoom = room;
-        best = cell;
-      }
-    }
-    hue[rank] = best;
-  }
+  for (let rank = 0; rank < Math.min(named, KNOWLEDGE_HUES); rank += 1) hue[rank] = rank;
   return hue;
 }
 
@@ -3239,30 +3347,15 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
       homeX[right] -= gapX * step;
       homeY[right] -= gapY * step;
     }
-    /* 겹침 풀기. 두 원반이 `gap`보다 가까우면 모자란 만큼을 반씩 나눠 물러선다 —
-     * 이 한 줄이 「군집 사이 여백」을 그림의 성질로 만든다. */
-    for (let left = 0; left < named; left += 1) {
-      for (let right = left + 1; right < named; right += 1) {
-        let gapX = homeX[right] - homeX[left];
-        let gapY = homeY[right] - homeY[left];
-        let reach = Math.hypot(gapX, gapY);
-        const rest = homeR[left] + homeR[right] + gap;
-        if (reach >= rest) continue;
-        if (reach < KNOWLEDGE_COMMUNITY.epsilon) {
-          /* 완전히 포갠 둘은 인덱스가 방향을 준다 — 난수 없이, 같은 볼트에서
-           * 언제나 같은 쪽으로. */
-          const angle = (left * KNOWLEDGE_GOLDEN_ANGLE) % (Math.PI * 2);
-          gapX = Math.cos(angle);
-          gapY = Math.sin(angle);
-          reach = 1;
-        }
-        const push = (rest - reach) / (2 * reach);
-        homeX[left] -= gapX * push;
-        homeY[left] -= gapY * push;
-        homeX[right] += gapX * push;
-        homeY[right] += gapY * push;
-      }
-    }
+    knowledgeDiscsApart(homeX, homeY, homeR, named, gap);
+  }
+  /* 가지가 보이는 군집(t-12029, 시안 v2 「spread」): 이완이 정한 자리 그대로 원반을 `clusterSpread`배로
+   * 넓힌다 — 원반 사이의 틈이 줄고(시안: 실제 볼트의 가장 좁은 틈 40 → 10), 작아진 점이 넓어진 원반 안에서
+   * 가지를 편다. 두 원반이 `clusterGapLeast`보다 가까워지는 곳만 모자란 만큼 물러선다 — 쪽이 많은 볼트의 큰
+   * 원반은 넓힌 몫이 이완의 틈보다 크다. 부스러기 띠는 넓힌 뒤의 윤곽에 붙는다(아래). */
+  for (let rank = 0; rank < named; rank += 1) homeR[rank] *= tuning.clusterSpread;
+  for (let sweep = 0; sweep < sweeps; sweep += 1) {
+    if (knowledgeDiscsApart(homeX, homeY, homeR, named, tuning.clusterGapLeast) === 0) break;
   }
   const strays = ids - named;
   if (strays > 0) {
@@ -3276,11 +3369,14 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
      * 한 원 밖에서 시작하면, 원반들이 길쭉하게 선 볼트에서 그 원과 원반 사이의 빈 땅만큼 그림이
      * 커지고 주제는 판의 가운데 작게 선다. 방향마다 원반들이 닿는 가장 먼 거리(지지 함수
      * h(θ) = max(c·u + r))에서 시작하면 그 빈 땅이 없고, 그 자리에서 원반 중심까지의 거리는
-     * 언제나 h(θ) − c·u + (gap + widest) ≥ r + gap + widest다 — 모든 원반과 여전히 gap
-     * 이상 떨어진다. */
+     * 언제나 h(θ) − c·u + (strayGap + widest) ≥ r + strayGap + widest다 — 모든 원반과 여전히
+     * strayGap 이상 떨어진다. */
     let widest = 0;
     for (let rank = named; rank < ids; rank += 1) widest = Math.max(widest, homeR[rank]);
     const pitch = 2 * widest + tuning.clusterPitch;
+    /* 띠의 틈은 원반 사이의 틈이 아니라 제 토큰이다(t-12029) — 원반 사이의 틈만큼 떨어뜨린 띠는 맞춤을 넓혀 지도를
+     * 판의 가운데 작게 세웠다. */
+    const strayGap = tuning.strayGap;
     for (let rank = named; rank < ids; rank += 1) {
       const seat = rank - named;
       const angle = seat * KNOWLEDGE_GOLDEN_ANGLE;
@@ -3290,7 +3386,7 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
       for (let disc = 0; disc < named; disc += 1) {
         outline = Math.max(outline, homeX[disc] * alongX + homeY[disc] * alongY + homeR[disc]);
       }
-      const inner = outline + gap + widest;
+      const inner = outline + strayGap + widest;
       const reach = Math.sqrt(inner * inner + (seat * pitch * pitch) / Math.PI);
       homeX[rank] = alongX * reach;
       homeY[rank] = alongY * reach;
@@ -3299,10 +3395,40 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
   return { homeX, homeY, homed, homeR };
 }
 
+/* 겹침 풀기 한 번. 두 원반이 `gap`보다 가까우면 모자란 만큼을 반씩 나눠 물러선다 — 이 한 걸음이 「군집
+ * 사이 여백」을 그림의 성질로 만든다. 물러선 쌍의 수를 돌려준다(0이면 다 떨어져 있다). 완전히 포갠 둘은
+ * 인덱스가 방향을 준다 — 난수 없이, 같은 볼트에서 언제나 같은 쪽으로. */
+function knowledgeDiscsApart(homeX, homeY, homeR, named, gap) {
+  let moved = 0;
+  for (let left = 0; left < named; left += 1) {
+    for (let right = left + 1; right < named; right += 1) {
+      let gapX = homeX[right] - homeX[left];
+      let gapY = homeY[right] - homeY[left];
+      let reach = Math.hypot(gapX, gapY);
+      const rest = homeR[left] + homeR[right] + gap;
+      if (reach >= rest) continue;
+      if (reach < KNOWLEDGE_COMMUNITY.epsilon) {
+        const angle = (left * KNOWLEDGE_GOLDEN_ANGLE) % (Math.PI * 2);
+        gapX = Math.cos(angle);
+        gapY = Math.sin(angle);
+        reach = 1;
+      }
+      const push = (rest - reach) / (2 * reach);
+      homeX[left] -= gapX * push;
+      homeY[left] -= gapY * push;
+      homeX[right] += gapX * push;
+      homeY[right] += gapY * push;
+      moved += 1;
+    }
+  }
+  return moved;
+}
+
 /* 그림 위의 낱말은 짧다 — 제목은 문장이고 문장 서른다섯 개는 안개다. 온전한
  * 제목은 카드의 것이다. */
 function knowledgeShortWord(word, max) {
-  return word.length > max ? `${word.slice(0, Math.max(1, max - 1))}…` : word;
+  /* 자른 자리가 빈칸이면 빈칸을 떼고 말줄임표를 붙인다 — 「… 완료가 …」가 아니라 「… 완료가…」. */
+  return word.length > max ? `${word.slice(0, Math.max(1, max - 1)).trimEnd()}…` : word;
 }
 
 /* 군집의 낱말 — 이름이 없으면 순위로 부른다. */
@@ -3347,6 +3473,13 @@ function knowledgeLayout(view, model) {
   const communities = knowledgeCommunities(model, tuning);
   const tier = knowledgeTiers(model, communities.of, communities.core, communities.named, tuning);
   knowledgeSupplyTiers(model, tier);
+  const radiusRing = Float32Array.from(model.degree, (degree, at) => knowledgeNodeRadius(
+    degree,
+    tuning,
+    tier[at],
+  ) * KNOWLEDGE_SHAPES[knowledgeShapeOf(model.kinds[at])].reach);
+  const radiusMap = Float32Array.from(radiusRing, (ramp, at) => knowledgeMapRadius(model.kinds[at], tier[at],
+    communities.of[at] >= communities.named, tuning, ramp));
   const layout = {
     signature: model.signature,
     model,
@@ -3388,8 +3521,6 @@ function knowledgeLayout(view, model) {
     labelAtY: new Float32Array(count),
     /* 이름표의 어림 폭(em). 점의 층이 이름을 쓸 때 함께 센다. */
     labelEm: new Float32Array(count),
-    /* 군집마다 이름을 접은 쪽의 수 — 「+n」의 n. */
-    clusterFolded: new Int32Array(communities.count),
     labelStamp: "",
     /* 성운의 살림 — 프레임마다 다시 채우는 합계와 답. 판을 지을 때 한 번. */
     clusterTally: new Int32Array(communities.count),
@@ -3414,12 +3545,13 @@ function knowledgeLayout(view, model) {
     vx: new Float32Array(count),
     vy: new Float32Array(count),
     /* 점이 차지하는 원 — 모양은 이 원에 내접하고, 넓이는 크기가 말한 원과 같다
-     * (`KNOWLEDGE_SHAPES`의 `reach`). */
-    radius: Float32Array.from(model.degree, (degree, at) => knowledgeNodeRadius(
-      degree,
-      tuning,
-      tier[at],
-    ) * KNOWLEDGE_SHAPES[knowledgeShapeOf(model.kinds[at])].reach),
+     * (`KNOWLEDGE_SHAPES`의 `reach`). 두 벌이다(t-12029): 주변 탐색의 √차수 램프(`radiusRing`)와 전체 지도의
+     * 작은 점(`radiusMap`, `knowledgeMapRadius`). `radius`는 지금 서 있는 쪽을 가리킨다 — 고리가 서면 고리의
+     * 것으로, 놓이면 지도의 것으로(`knowledgeRingArrange`·`knowledgeRingRelease`). 모든 손(배치의 충돌, 두
+     * 페인터, 이름표 격자, 고르기)은 `radius`만 읽는다. */
+    radiusRing,
+    radiusMap,
+    radius: radiusMap,
     /* 반발 격자의 살림. 한 번 지어 두고 매 훑기마다 다시 채운다 — 프레임마다
      * 배열 넷을 새로 짓는 것이 배치보다 비싸지는 판이 있다. */
     cellOf: new Int32Array(count),
@@ -3472,6 +3604,8 @@ function knowledgeLayout(view, model) {
     labelOwner: null,
     /* 이름판이 덮어도 되는 점(부스러기)의 표 — 격자가 프레임마다 다시 채운다(`placeKnowledgeLabels`). */
     plateRim: null,
+    /* 가까운 자리가 다 막힌 이름판이 덮어도 되는 점(그려진 점 전부, GL만 — t-12029). */
+    plateCover: null,
     labelCols: 0,
     labelRows: 0,
     labelGeneration: 0,
@@ -3533,6 +3667,23 @@ function knowledgeLayout(view, model) {
     /* 밝은 선의 낱말들. 위상이 바뀌면 이 판과 함께 버려진다 — 인덱스가 다른
      * 선을 가리키게 된 낱말은 틀린 낱말이다. */
     edgeLabels: new Map(),
+    /* 군집 사이의 묶음(t-12029, `knowledgeTies`): 이름 있는 군집 쌍마다 그려지는 선의 수(`tiePairs`),
+     * 그중 묶음이 되는 쌍(`ties`, 굵은 순), 선마다 두 끝이 다른 군집인가(`edgeBetween`), 그리고 그 셈이
+     * 어느 부분집합의 것인가의 도장. 이번 프레임에 그어진 줄의 수는 `tiesDrawn`. */
+    tiePairs: [],
+    ties: [],
+    tieStamp: "",
+    tieModel: null,
+    edgeBetween: null,
+    tiesDrawn: 0,
+    /* 「강한 묶음」 목록이 마지막으로 쓴 모델 — 이름만 바뀐 답도 목록을 다시 쓰게. */
+    tieListModel: null,
+    /* 놀라운 연결(t-12029, `knowledgeTies`가 함께 센다): 큰 두 주제 사이의 단 한 가닥들, 순서대로. 이번 프레임에
+     * 그어진 다리의 수와 「놀라운 연결」 목록이 마지막으로 쓴 모델. */
+    bridges: [],
+    bridgeLines: new Set(),
+    bridgesDrawn: 0,
+    bridgeListModel: null,
   };
   layout.labelOrder = knowledgeLabelOrder(model, tier);
   layout.project = knowledgeProjector(layout);
@@ -3552,6 +3703,9 @@ function knowledgeLayout(view, model) {
    * 걷히지 않은 판이 남는다. 밝힌 군집도 같다 — 순위는 이 위상의 것이다. */
   knowledgeHoverKey = null;
   knowledgeClusterPicked = -1;
+  knowledgeClusterHover = -1;
+  knowledgeTieHot = -1;
+  knowledgeBridgeHot = -1;
   knowledgeLayouts.set(view, layout);
   return layout;
 }
@@ -3825,7 +3979,7 @@ function knowledgeForceStep(layout, x = layout.x, y = layout.y, drawn = layout.d
   }
   const { community, communityHomed, communityHomeX, communityHomeY, communityHomeR,
     communityCore, pinned } = layout;
-  const { clusterPull, clusterHold } = layout.tuning;
+  const { clusterPull, clusterHold, clusterPullMajor, clusterPullLeaf } = layout.tuning;
   for (let at = 0; at < count; at += 1) {
     if (drawn !== null && drawn[at] === 0) continue;
     /* 제 군집의 홈으로 끌리고, 제 원반 안에 머문다 (성좌 배치, 09-16).
@@ -3849,8 +4003,14 @@ function knowledgeForceStep(layout, x = layout.x, y = layout.y, drawn = layout.d
        * 인력이 필요한 것은, 그것이 없으면 이웃 주제로 뻗은 스프링이 점들을 원반의
        * 한쪽 벽에 몰아붙이기 때문이다(실측 09-16: 중심만 끄는 판에서 군집의 공이
        * 원반의 가장자리로 밀려 빈 원이 남았다). */
-      vx[at] += towardX * clusterPull;
-      vy[at] += towardY * clusterPull;
+      /* 단마다 다른 인력(t-12029, 시안 v2 「spread」): 이름 있는 군집의 잎은 약하게(`clusterPullLeaf`), 대표
+       * 지식은 `clusterPullMajor`만큼 끌린다 — 잎이 제 이웃을 따라 원반 안으로 뻗어 가지가 보인다(모두가 같은 힘으로
+       * 끌리던 판은 넓힌 원반 안에서도 가운데의 공이었다). 부스러기는 제 띠의 자리에 그대로 선다. */
+      const grip = rank >= layout.namedCount ? 1
+        : layout.tier[at] === KNOWLEDGE_TIER_MAJOR ? clusterPullMajor
+          : layout.tier[at] === KNOWLEDGE_TIER_LEAF ? clusterPullLeaf : 1;
+      vx[at] += towardX * clusterPull * grip;
+      vy[at] += towardY * clusterPull * grip;
       if (at === communityCore[rank]) {
         vx[at] += towardX * clusterPull * KNOWLEDGE_FORCE.coreGrip;
         vy[at] += towardY * clusterPull * KNOWLEDGE_FORCE.coreGrip;
@@ -3963,8 +4123,17 @@ function knowledgeViewBox(view, layout) {
         * knowledgeYScale(view, layout),
       1,
     );
-    scale = Math.min((wide * layout.tuning.fitRatio) / spanX,
-      (tall * layout.tuning.fitRatio) / spanY) * layout.zoom;
+    /* 지도가 판을 채운다(t-12029, 시안 v2 「fit」): 경계가 판의 `mapFit` 몫을 차지하고, 아래 `mapFoot` px(군집
+     * 범례와 배율 단추의 띠)는 비워 그 위의 가운데에 선다 — 72%의 몫에 띠 없이 가운데 서던 판은 실제 볼트의
+     * 원반을 판의 52%×57%에 세웠다. 띠는 판이 낮으면 그 몫까지만. 몫의 여백은 `margin` px보다 좁지 않다: 작은
+     * 판(649×435)에서 몫의 여백은 위아래 20 px라 가장자리의 점이 제 이름 한 줄을 세울 자리가 없었다(공급망의 접힌
+     * 멤버 셋 중 하나가 맨 위의 이웃에게 자리를 빼앗겨 「+9」를 잃었다). 큰 판에서는 몫의 여백이 더 넓어 그대로다. */
+    const { mapFit, mapFoot, margin } = layout.tuning;
+    const foot = Math.min(mapFoot, tall * (1 - mapFit));
+    const roomX = Math.max(1, Math.min(wide * mapFit, wide - 2 * margin));
+    const roomY = Math.max(1, Math.min((tall - foot) * mapFit, tall - foot - 2 * margin));
+    scale = Math.min(roomX / spanX, roomY / spanY) * layout.zoom;
+    centreOffsetY = foot / (2 * scale);
   }
   const boxWide = wide / scale;
   const boxTall = tall / scale;
@@ -4077,6 +4246,103 @@ function placeKnowledgeClusterLabels(layout, inverse, yScale, middleY) {
   }
 }
 
+/* 지금 밝힌 군집 — 이름판에 올라 선 군집이 먼저이고, 없으면 고른 군집(t-12029). 흐림과 밝힘의 옷은 이것을
+ * 입고, 「눌렸는가」(`aria-pressed`)는 고른 것만 말한다. */
+function knowledgeSpotRank() {
+  return knowledgeClusterHover >= 0 ? knowledgeClusterHover : knowledgeClusterPicked;
+}
+
+/* 군집 사이의 묶음 (t-12029, 승인된 시안 v2 「bundle」).
+ *
+ * 쉬는 전체 지도에서 두 군집을 건너는 선은 낱낱이 서지 않는다 — 실제 볼트(점 874·선 2,584)에서 그 480가닥이
+ * 군집 안의 선과 같은 잉크로 지도의 가운데를 덮었다. 이름 있는 군집 쌍마다 한 줄이 그 수를 굵기로 말하되
+ * `tieLeast` 가닥 이상인 쌍만이다(같은 볼트에서 19쌍 = 306가닥). 그보다 적은 쌍은 줄을 얻지 않는다: 한두
+ * 가닥은 「이 둘이 통한다」가 아니라 스쳐 간 대괄호다. 낱낱의 선은 사람이 묻는 순간 돌아오고, 묶음이 하나도
+ * 없는 지도(작은 볼트)에서는 처음부터 선다(`knowledgeEdgeBundled`).
+ *
+ * 세는 것은 **그려지는** 선이다 — 목차·일지의 가면을 지난 선이고, 렌즈가 모델을 줄이면 그 모델의 선이다.
+ * 쌍의 표(`tiePairs`)는 이름 있는 군집 쌍마다 한 줄(수와 첫 선의 번호)이고, 묶음은 그중 문턱을 넘는 것을
+ * 굵은 순으로 — 동률은 순위순이라 같은 볼트는 같은 목록이다. 부분집합과 모델이 그대로면 셈도 그대로다. */
+function knowledgeTies(layout) {
+  if (layout.tieStamp === layout.drawnStamp && layout.tieModel === layout.model) return layout.ties;
+  const { from, to, edgeCount } = layout.model;
+  const { community, namedCount: named, drawnEdge } = layout;
+  if (layout.edgeBetween === null || layout.edgeBetween.length !== edgeCount) {
+    layout.edgeBetween = new Uint8Array(edgeCount);
+  }
+  const between = layout.edgeBetween;
+  const tally = new Map();
+  for (let at = 0; at < edgeCount; at += 1) {
+    const left = community[from[at]];
+    const right = community[to[at]];
+    between[at] = left === right ? 0 : 1;
+    if (left === right || left >= named || right >= named) continue;
+    if (drawnEdge !== null && drawnEdge[at] === 0) continue;
+    const low = Math.min(left, right);
+    const high = Math.max(left, right);
+    const held = tally.get(low * named + high);
+    if (held === undefined) tally.set(low * named + high, { left: low, right: high, count: 1, first: at });
+    else held.count += 1;
+  }
+  layout.tiePairs = [...tally.values()].sort((one, two) => two.count - one.count
+    || one.left - two.left || one.right - two.right);
+  layout.ties = layout.tiePairs.filter((pair) => pair.count >= layout.tuning.tieLeast);
+  /* 놀라운 연결(t-12029, 시안 v2 「bridges」) — 이름 있는 두 군집 사이에 그려지는 선이 **단 한 가닥**이고 작은 쪽도
+   * `bridgeLeast` 쪽 이상인 쌍. 큰 두 주제가 한 쪽의 한 링크로만 이어져 있다는 것은 수백 가닥에 묻혀서는 보이지
+   * 않는 사실이다. 작은 쪽이 큰 순서, 그다음 큰 쪽이 큰 순서, 그다음 선의 앞 점 — 같은 볼트는 같은 목록. */
+  const size = layout.communitySize;
+  layout.bridges = layout.tiePairs
+    .filter((pair) => pair.count === 1 && Math.min(size[pair.left], size[pair.right]) >= layout.tuning.bridgeLeast)
+    .map((pair) => ({ ...pair, small: Math.min(size[pair.left], size[pair.right]),
+      big: Math.max(size[pair.left], size[pair.right]) }))
+    .sort((one, two) => two.small - one.small || two.big - one.big || from[one.first] - from[two.first])
+    .slice(0, Math.max(0, layout.tuning.bridgesListed));
+  /* 다리마다 그 한 가닥 — 선 층에서 비키는 선이다(곡선이 그 선이다). */
+  layout.bridgeLines = new Set(layout.bridges.map((bridge) => bridge.first));
+  layout.tieStamp = layout.drawnStamp;
+  layout.tieModel = layout.model;
+  return layout.ties;
+}
+
+/* 이 선이 지금 묶음 안에 있는가(t-12029) — 전체 지도의 군집 사이 선이고, 사람이 그 선을 묻고 있지 않다: 짚은
+ * 점의 선(`lit`)도, 고른 점의 포커스도, 경로도, 고르거나 이름판에 올라 선 군집에 닿는 선도 아니다. 그리고 그
+ * 선을 대신 말하는 것이 지도에 있다: 묶음이 하나라도 있거나(시안의 규칙 — 문턱 아래 쌍의 선도 함께 비킨다), 그
+ * 선이 다리의 한 가닥이다. 묶음이 하나도 없는 지도(8가닥에 닿는 쌍이 없는 작은 볼트 — 창 하네스의 12쪽 볼트에서
+ * 선 25개 중 11개)에서 그 선을 빼면 주제들이 끊긴 섬으로 보인다. 두 손이 이 한 물음을 읽는다 — SVG는
+ * `is-bundled` 옷으로(짚기는 프레임 없이 `is-lit`만 붙이므로 그 옷이 이긴다), GL은 선 패스에서 빼는 것으로.
+ * 주변 탐색에는 묶음이 없다. */
+function knowledgeEdgeBundled(layout, at) {
+  if (layout.ring !== null || layout.edgeBetween === null || layout.edgeBetween[at] === 0) return false;
+  if (layout.lit.has(at) || layout.pathEdge[at] === 1 || layout.focusEdgeVisited[at] === 1) return false;
+  const left = layout.community[layout.model.from[at]];
+  const right = layout.community[layout.model.to[at]];
+  const picked = knowledgeClusterPicked;
+  const hovered = knowledgeClusterHover;
+  if (picked >= 0 && (left === picked || right === picked)) return false;
+  if (hovered >= 0 && (left === hovered || right === hovered)) return false;
+  return layout.ties.length > 0 || layout.bridgeLines.has(at);
+}
+
+/* 이름판에 올라선다(포인터든 키보드 포커스든, t-12029) — 그 군집을 밝히고 그 군집을 건너는 낱낱의 선을 묶음에서
+ * 풀어 세운다. 고르기와 같은 옷이되 카메라는 날지 않고 목록의 「눌림」도 바뀌지 않는다. -1이면 놓는다. */
+function hoverKnowledgeCluster(view, rank) {
+  const layout = knowledgeLayouts.get(view);
+  if (!layout || rank === knowledgeClusterHover) return;
+  knowledgeClusterHover = rank;
+  paintKnowledgeSpotlight(view, layout);
+  paintKnowledgeFrame(view, layout);
+}
+
+/* 「강한 묶음」 목록의 줄을 짚는다(t-12029) — 그림에서 그 줄이 밝아지고 나머지는 물러선다. -1이면 놓는다. */
+function hotKnowledgeTie(view, at) {
+  const layout = knowledgeLayouts.get(view);
+  if (!layout || at === knowledgeTieHot) return;
+  knowledgeTieHot = at;
+  const camera = knowledgeCamera(view, layout);
+  paintKnowledgeTies(view, layout, camera);
+  paintKnowledgeBridges(view, layout, camera);
+}
+
 /* ---- 이름표 격자 (09-16) --------------------------------------------------
  *
  * 「노드와 라벨이 서로 겹치지 않게 한다. 공간이 부족하면 세부 내용을 접고,
@@ -4181,7 +4447,6 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
   const count = layout.count;
   const tuning = layout.tuning;
   const shown = layout.labelShown;
-  const folded = layout.clusterFolded;
   if (count === 0) return;
   const onRing = layout.ring !== null;
   /* 격자의 크기는 판의 픽셀에서 나온다 — 그림 좌표가 아니라. 배율이 바뀌면 같은
@@ -4201,7 +4466,6 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
   if (layout.labelGeneration === 1) layout.labelCells.fill(0);
   shown.fill(0);
   layout.labelWhere.fill(-1);
-  folded.fill(0);
   const drawn = layout.drawn;
   const { radius, labelEm, community, tier } = layout;
   const cellOf = (value) => Math.floor(value / cell);
@@ -4314,6 +4578,19 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
         cellOf(seat.right - canvasBox.left), cellOf(seat.bottom - canvasBox.top));
     }
   }
+  /* 놀라운 연결의 번호 원(t-12029)도 찬 자리다 — 번호는 목록과 그림을 잇는 유일한 표시라 이름이 그 위에 서지 않는다.
+   * 곡선은 그리는 손과 같은 셈(`knowledgeBridgeCurve`)으로 잰다. */
+  if (!onRing && layout.bridges.length > 0) {
+    const centre = knowledgeMapCentre(layout, box);
+    const badge = tuning.bridgeBadge + tuning.bridgeBadgeStroke;
+    for (const bridge of layout.bridges) {
+      const curve = knowledgeBridgeCurve(layout, bridge, box, centre);
+      const badgeX = (curve.badgeX - box.x) * box.scale;
+      const badgeY = (curve.badgeY - box.y) * box.scale;
+      markKnowledgeLabelBox(layout, cellOf(badgeX - badge), cellOf(badgeY - badge),
+        cellOf(badgeX + badge), cellOf(badgeY + badge));
+    }
+  }
   /* (0-c) 사람이 **지금 고른** 쪽의 이름은 주제의 이름판보다 먼저 자리를 쥔다.
    * 지도의 첫 낱말은 주제이지만, 고르는 손이 묻고 있는 것은 그 한 쪽이다. */
   /* 네 자리가 다 막혔어도 서는 이름 — 그리고 그 자리를 **쥔다**. 쥐지 않으면 뒤에 오는 이름표가 그
@@ -4348,113 +4625,85 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
       if (where >= 0) wear(at, where);
     }
   }
-  /* (1) 군집의 이름과 그 아래 두 줄. */
+  /* (1) 주제의 이름 — 한 줄(t-12029, 승인된 시안 v2 「oneLine」).
+   *
+   * 이름판은 주제의 이름 한 줄이다. 대표 지식의 제목과 「쪽 n · 이름 +m」을 이름 아래 두 줄로 세우던 판은 실제
+   * 볼트의 열일곱 주제에 쉰한 줄을 세웠고, 그 두 줄이 자리를 잡느라 이름이 접히거나 원반에서 멀리 밀려났다. 쪽
+   * 수와 대표 지식은 이름에 올리면(포인터든 키보드 포커스든) 팁으로 나오고 읽는 이의 이름에도 든다
+   * (`paintKnowledgeClusterLayer`). 색 있는 군집의 이름은 제 색으로 크게(`clusterLabelPx`), 색 없는 군집의
+   * 이름은 안개색으로 작게(`clusterQuietPx`) 선다 — 두 크기가 곧 두 몫이라 상자도 제 크기로 잰다. */
   const spot = knowledgeClusterPicked;
   const tierWord = view.dataset.knowledgeTier ?? "wide";
   if (!onRing) {
     const digits = KNOWLEDGE_FORCE.coordinateDigits;
-    /* 세 줄짜리 이름판을 감당할 만큼 판이 넓은가 — 묻는 것은 **캔버스**의 폭이다.
-     * 티어는 판(인스펙터를 포함한 뷰) 전체의 폭이라, 인스펙터가 아래로 쌓이는
-     * 폭에서는 캔버스가 좁은데도 티어는 넓다고 답한다. */
-    const canvasWide = box.wide * box.scale;
-    const short = canvasWide < tuning.plateWide;
-    view.querySelector(".knowledge-picture").classList.toggle("is-short-plate", short);
-    const growing = [];
     /* 이름판은 부스러기 점(이름 없는 군집의 쪽과 유령 — 바깥 띠) 위에 설 수 있다. 띠가 원반들의
      * 윤곽에 붙은 뒤로(`knowledgeClusterHomes`) 판이 서던 빈 땅이 줄었고, 작은 판에서는 판의
      * 절반이 접혔다(900×700 합성: 여섯 → 셋). 판의 글자는 바탕색 테두리를 둘러 점 위에서도
      * 읽힌다. 덮지 않는 것: 쪽의 이름표·남의 이름·다른 판·조작부(이것들은 몸이 아니라 임자 0의
      * 칸이다), 그리고 사람이 지금 보는 점 — 고른 점, 찾기에 걸린 점, 짚어 밝힌 점, 경로의 점
-     * (그때는 판이 비키거나 한 줄이 되거나 접힌다). 이름표가 점 위에 서는 손(GL, `labelsOverPoints`)
-     * 에서만이다: SVG는 판이 점 **뒤**의 층이라 점이 판의 글자를 가린다. 가리키기는 판 아래에서도
+     * (그때는 판이 비키거나 접힌다). 두 손 모두의 규칙이다(t-12443): 이름판은 두 손에서 점 위의
+     * 층에 서므로(SVG `.knowledge-cluster-names`, GL은 캔버스 위의 그림) 손이 자리를 달리 고를
+     * 까닭이 없다 — 손마다 다르게 고르던 판에서는 판의 기하에 따라 쪽의 이름표까지 갈렸다(코디
+     * m-12652: 작은 판 여백 36 px부터 GL만 이름표 하나를 더 세웠다). 가리키기는 판 아래에서도
      * 점에 닿는다(GL은 좌표로 고른다, `knowledgeUnder`). */
-    const overRim = knowledgePainters.get(view)?.labelsOverPoints === true;
-    if (overRim && layout.plateRim?.length !== count) layout.plateRim = new Uint8Array(count);
-    const rim = overRim ? layout.plateRim : null;
-    if (rim !== null) {
-      const kinds = layout.model.kinds;
-      const searching = knowledgeQuery.trim() !== "";
-      for (let at = 0; at < count; at += 1) {
-        rim[at] = community[at] >= layout.namedCount && (kinds[at] === "page" || kinds[at] === "ghost")
-          && at !== selectedSeat && !(searching && layout.searchMatch[at] === 1)
-          && !layout.litNodes.has(at) && layout.pathNode[at] !== 1 ? 1 : 0;
-      }
+    if (layout.plateRim?.length !== count) layout.plateRim = new Uint8Array(count);
+    const rim = layout.plateRim;
+    /* 모든 그려진 점을 덮어도 되는 표(t-12029) — 가까운 자리가 다 막힌 판의 두 번째 물음(아래). */
+    if (layout.plateCover?.length !== count) layout.plateCover = new Uint8Array(count);
+    const anyPoint = layout.plateCover;
+    for (let at = 0; at < count; at += 1) anyPoint[at] = drawn === null || drawn[at] === 1 ? 1 : 0;
+    const kinds = layout.model.kinds;
+    const searching = knowledgeQuery.trim() !== "";
+    for (let at = 0; at < count; at += 1) {
+      rim[at] = community[at] >= layout.namedCount && (kinds[at] === "page" || kinds[at] === "ghost")
+        && at !== selectedSeat && !(searching && layout.searchMatch[at] === 1)
+        && !layout.litNodes.has(at) && layout.pathNode[at] !== 1 ? 1 : 0;
     }
     for (let rank = 0; rank < layout.namedCount; rank += 1) {
       const held = layout.clusterEls[rank];
       if (!held || layout.clusterTally[rank] === 0) continue;
-      const name = knowledgeClusterWord(layout, rank);
+      const px = layout.communityHue[rank] >= 0 ? tuning.clusterLabelPx : tuning.clusterQuietPx;
+      const wide = knowledgeLabelEm(knowledgeClusterWord(layout, rank), tuning) * px;
       const homeX = (layout.clusterX[rank] - box.x) * box.scale;
-      const anchorX = (layout.clusterAt[rank * 2] - box.x) * box.scale;
       const anchorY = (layout.clusterAt[rank * 2 + 1] - box.y) * box.scale;
-      const wideEm = knowledgeLabelEm(name, tuning);
-      /* 아래 두 줄은 제 글자로 잰다 — 대표 지식의 제목도, 「15쪽 · 이름 +13」도
-       * 주제의 이름보다 길다. 쪽 수 줄은 이 판이 **입을 수 있는 가장 넓은** 글자로 잰다: 접은
-       * 이름의 수는 쪽의 이름표가 판 다음에 앉은 뒤에야 정해지고((3)~(6)), 그 수는 쪽 수를 넘지
-       * 못한다. 접은 것이 없을 때의 「48쪽」으로 재면 판은 프레임 끝에 「48쪽 · 이름 +48」을 입고
-       * 예약한 폭의 세 배를 그린다(실측 WebKit: 23 px 예약에 73~77 px). */
-      const leadEm = knowledgeLabelEm(knowledgeClusterLeadWord(layout, rank), tuning);
-      const tallyEm = knowledgeLabelEm(
-        knowledgeClusterCountWord(layout, rank, layout.communitySize[rank]), tuning);
-      /* 원반의 위가 막혔으면 둘레를 돌며 빈 자리를 찾는다 — 위, 한 줄 더 위,
-       * 두 줄 더 위, 그리고 아래. 이웃한 두 원반의 이름이 같은 자리를 원하는 일은
-       * 흔하고(순위가 높은 군집이 먼저 쥔다), 빈 자리를 못 찾은 이름은 그래도
-       * 선다: 주제의 이름은 지도의 첫 낱말이라 접지 않는다. 대신 그 자리를
-       * 쥐어 두어 뒤에 오는 이름표들이 피해 간다. */
       const reach = layout.clusterReach[rank] * box.scale * knowledgeYScale(view, layout);
       const homeY = (layout.clusterY[rank] - box.y) * box.scale;
-      /* 판은 **한 상자**다 — 가장 넓은 줄의 폭 × 이름에서 쪽 수 줄까지의 높이. 줄마다 따로 쥐면
-       * 이웃 판의 넓은 줄이 이 판의 좁은 줄 옆 빈틈으로 맞물린다. 한 줄 판(좁은 판, 그리고 세
-       * 줄이 설 곳 없는 판)은 이름의 상자다. */
-      const plateWide = (full) => (full ? Math.max(wideEm * tuning.clusterLabelPx,
-        leadEm * tuning.clusterCountPx, tallyEm * tuning.clusterCountPx)
-        : wideEm * tuning.clusterLabelPx);
-      const plateCells = (seatX, seatY, full) => {
-        const half = plateWide(full) / 2 + tuning.labelPadX;
-        const top = seatY - tuning.clusterLabelPx / 2 - tuning.labelPadY;
-        const bottom = (full ? seatY + tuning.clusterCountGap + tuning.clusterCountPx / 2
-          : seatY + tuning.clusterLabelPx / 2) + tuning.labelPadY;
-        return [cellOf(seatX - half), cellOf(top), cellOf(seatX + half), cellOf(bottom)];
+      const plateCells = (seatX, seatY) => {
+        const half = wide / 2 + tuning.labelPadX;
+        const halfHigh = px / 2 + tuning.labelPadY;
+        return [cellOf(seatX - half), cellOf(seatY - halfHigh), cellOf(seatX + half), cellOf(seatY + halfHigh)];
       };
-      const below = homeY + reach + tuning.clusterLabelLift + tuning.clusterLabelPx;
-      /* 원반의 위·아래·양옆 여섯 자리 중 **가장 한산한** 곳. 빈 자리를 찾을 때까지
-       * 훑고 첫 빈 자리에 서는 방식은, 여섯이 다 조금씩 차 있을 때 마지막 자리에
-       * 그냥 서게 만든다(실측 09-16: 주제 이름판 일곱이 남의 공 위에 얹혔다). */
-      /* 위로 셋, 아래로 둘, 양옆으로 하나씩 — 그리고 각각을 좌우로 한 칸씩 밀어
-       * 본 자리까지 — 원반 하나에 서른다섯 자리. 재는 값은 칸 몇 개를 세는 일이고,
-       * 그 값으로 열세 개의 이름판이 서로를 피한다. 걸음(위아래 한 판, 좌우 반 판)은 그 판의
-       * 줄 수대로의 크기다. */
-      const seatsFor = (full) => {
-        const lift = full ? tuning.clusterLabelPx + tuning.clusterCountGap + tuning.clusterCountPx
-          : tuning.clusterLabelPx * 2;
-        const sideways = plateWide(full) / 2 + tuning.clusterLabelLift;
-        const seats = [];
-        for (const [seatX, seatY] of [
-          [homeX, anchorY], [homeX, anchorY - lift], [homeX, anchorY - lift * 2],
-          [homeX, below], [homeX, below + lift],
-          [homeX - reach - sideways, homeY], [homeX + reach + sideways, homeY],
-        ]) {
-          seats.push([seatX, seatY],
-            [seatX - sideways, seatY], [seatX + sideways, seatY],
-            [seatX - sideways * 2, seatY], [seatX + sideways * 2, seatY]);
+      const below = homeY + reach + tuning.clusterLabelLift + px;
+      /* 자리의 후보(t-12029, 시안 v2): 먼저 원반 가장자리 바로 바깥 — 가까운 틈부터 세 겹, 겹마다 위·아래·
+       * 오른쪽·왼쪽·네 대각선(`KNOWLEDGE_PLATE_SEATS`) — 이름이 제 원반에 붙어 서게. 붐비는 판에서 그
+       * 스물넷이 다 차 있으면 옛 자리(원반의 위 세 줄·아래 둘·양옆, 각각을 좌우로 반 판·한 판 밀어 본
+       * 자리)로 물러선다. 그중 **가장 한산한** 곳이고 빈 곳을 찾으면 멈춘다. 빈 자리를 찾을 때까지 훑고 첫
+       * 빈 자리에 서는 방식은 여섯이 다 조금씩 차 있을 때 마지막 자리에 그냥 서게 만든다(실측 09-16: 주제
+       * 이름판 일곱이 남의 공 위에 얹혔다). 순위가 큰 주제부터 고르므로 남는 것은 언제나 큰 주제들이다. */
+      const reachX = layout.clusterReach[rank] * box.scale;
+      const near = [];
+      for (const gap of KNOWLEDGE_PLATE_SEATS.gaps) {
+        for (const [alongX, alongY] of KNOWLEDGE_PLATE_SEATS.ways) {
+          /* 방향의 가장자리에서 틈만큼 떨어진 곳에 상자의 가까운 모서리가 닿게 — 상자의 반폭·반높이만큼 더. */
+          near.push([homeX + alongX * (reachX + gap) + Math.sign(alongX) * (wide / 2),
+            homeY + alongY * (reach + gap) + Math.sign(alongY) * (px / 2)]);
         }
-        return seats;
-      };
-      /* 좁은 판의 이름판은 **한 줄**이다 — 주제의 이름만. 대표 지식과 쪽 수는
-       * 인스펙터와 군집 범례에 그대로 있고, 좁은 화면에서 줄어드는 것은 글자
-       * 크기가 아니라 표시량이다(사용자 조건). 세 줄짜리 판 열셋은 560px 판에서
-       * 둘만 남겼다; 한 줄짜리는 열셋이 다 선다. */
-      /* 서른다섯 자리 중 가장 한산한 곳. 판은 두 걸음으로 선다: 이 고리에서는 모든 판이 **이름 한
-       * 줄**의 자리만 쥐고(세 줄이 설 수 있는 자리가 있으면 그 자리를 고른다), 고리가 끝난 뒤
-       * 순위대로 아래 두 줄의 칸이 아직 비어 있는 판만 세 줄로 넓힌다. 순위가 큰 판이 세 줄을
-       * 먼저 쥐면 뒤 순위의 이름이 한 줄로도 설 곳을 잃는다(조용한 그래프 장면: 원반 여섯에
-       * 이름 다섯) — 주제의 이름은 지도의 첫 낱말이고, 대표 지식과 쪽 수는 인스펙터와 범례에도
-       * 있다. */
-      const lightestOf = (seats, full) => {
+      }
+      const lift = px * 2;
+      const sideways = wide / 2 + tuning.clusterLabelLift;
+      const far = [];
+      for (const [baseX, baseY] of [
+        [homeX, anchorY], [homeX, anchorY - lift], [homeX, anchorY - lift * 2],
+        [homeX, below], [homeX, below + lift],
+        [homeX - reach - sideways, homeY], [homeX + reach + sideways, homeY],
+      ]) {
+        for (const shift of [0, -sideways, sideways, -sideways * 2, sideways * 2]) far.push([baseX + shift, baseY]);
+      }
+      const lightest = (seats, through) => {
         let best = null;
         let weight = Number.POSITIVE_INFINITY;
         for (const [seatX, seatY] of seats) {
-          const load = knowledgeLabelBoxLoad(layout, ...plateCells(seatX, seatY, full), rim);
+          const load = knowledgeLabelBoxLoad(layout, ...plateCells(seatX, seatY), through);
           if (load >= weight) continue;
           weight = load;
           best = [seatX, seatY];
@@ -4462,40 +4711,42 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
         }
         return { best, weight };
       };
-      const roomy = short ? null : lightestOf(seatsFor(true), true);
-      const wants = roomy !== null && roomy.weight <= KNOWLEDGE_FORCE.plateSlack;
-      const chosen = wants ? roomy
-        : lightestOf(short ? seatsFor(false) : [...seatsFor(true), ...seatsFor(false)], false);
-      /* 모든 자리를 다 봐도 빈 곳이 없으면 그 이름판은 **접는다** — 폭을
-       * 묻지 않는다. 겹쳐 선 이름은 서 있어도 읽히지 않으므로, 그것이 「표시량을
-       * 줄인다」의 뜻이다(글자를 줄이지 않는다 — 사용자 조건). 순위가 큰 주제부터
-       * 자리를 고르므로 남는 것은 언제나 큰 주제들이고, 접힌 주제는 아래 왼쪽의
-       * 군집 범례가 여전히 이름으로 부른다. */
-      const folds = chosen.weight > KNOWLEDGE_FORCE.plateSlack;
-      held.label.classList.toggle("is-folded", folds);
-      if (folds) {
-        held.label.classList.remove("is-one-line");
-        continue;
+      /* 가까운 자리가 다 이웃 원반의 점에 걸리면(원반이 촘촘한 판의 가운데 원반) — 이름판은 제 원반 곁에서 점을
+       * 덮고 선다: 먼 자리에 선 이름은 옆 원반의 이름으로 읽힌다(실측: 실제 볼트의 셋째 주제 이름이 124 px 밖,
+       * 회색 원반 곁에 섰다). 덮는 것은 점뿐이고 이름·판·조작부는 여전히 덮지 않는다(`plateCover` — 그려진
+       * 점마다 1). 이름판이 두 손 모두 점 위의 층이라 두 손의 규칙이다. */
+      let { best, weight } = lightest(near, rim);
+      if (weight > KNOWLEDGE_FORCE.plateSlack) {
+        /* 이름·판·조작부를 덮지 않는 가까운 자리 중 **점을 가장 적게** 덮는 곳. */
+        let fewest = Number.POSITIVE_INFINITY;
+        for (const [seatX, seatY] of near) {
+          const cells = plateCells(seatX, seatY);
+          if (knowledgeLabelBoxLoad(layout, ...cells, anyPoint) > KNOWLEDGE_FORCE.plateSlack) continue;
+          const points = knowledgeLabelBoxLoad(layout, ...cells, rim);
+          if (points >= fewest) continue;
+          fewest = points;
+          best = [seatX, seatY];
+          weight = 0;
+        }
       }
-      const [centreX, centreY] = chosen.best;
-      markKnowledgeLabelBox(layout, ...plateCells(centreX, centreY, false));
-      if (!short) growing.push({ held, wants, name: plateCells(centreX, centreY, false),
-        whole: plateCells(centreX, centreY, true) });
+      if (weight > KNOWLEDGE_FORCE.plateSlack) {
+        const fallback = lightest(far, rim);
+        if (fallback.weight < weight) ({ best, weight } = fallback);
+      }
+      /* 모든 자리를 다 봐도 빈 곳이 없으면 그 이름판은 **접는다** — 겹쳐 선 이름은 서 있어도 읽히지 않으므로,
+       * 그것이 「표시량을 줄인다」의 뜻이다(글자를 줄이지 않는다 — 사용자 조건). 접힌 주제는 아래 왼쪽의 군집
+       * 범례와 인스펙터가 여전히 이름으로 부른다. */
+      const folds = weight > KNOWLEDGE_FORCE.plateSlack;
+      held.label.classList.toggle("is-folded", folds);
+      if (folds) continue;
+      const [centreX, centreY] = best;
+      markKnowledgeLabelBox(layout, ...plateCells(centreX, centreY));
       const graphX = box.x + centreX / box.scale;
       const graphY = box.y + centreY / box.scale;
       layout.clusterAt[rank * 2] = graphX;
       layout.clusterAt[rank * 2 + 1] = graphY;
       writeAttribute(held.label, "transform",
         `translate(${graphX.toFixed(digits)} ${graphY.toFixed(digits)}) scale(${inverse})`);
-    }
-    /* 둘째 걸음: 순위대로 세 줄로 넓힌다 — 이름 줄은 이미 제 것이므로, 판 전체의 상자에서 그
-     * 이름 상자를 뺀 칸(대표 지식과 쪽 수 줄)이 비어 있어야 한다. 못 넓힌 판은 한 줄이다(좁은
-     * 판과 같은 옷). */
-    for (const plate of growing) {
-      const full = plate.wants && knowledgeLabelBoxLoad(layout, ...plate.whole, rim)
-        - knowledgeLabelBoxLoad(layout, ...plate.name, rim) <= KNOWLEDGE_FORCE.plateSlack;
-      if (full) markKnowledgeLabelBox(layout, ...plate.whole);
-      plate.held.label.classList.toggle("is-one-line", !full);
     }
   }
   /* (2) 사람이 지금 묻고 있는 것. 예산 밖이고 서로 겹치지도 않는다 — 고른 점의
@@ -4549,10 +4800,7 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
   const cover = zoomedIn && knowledgePainters.get(view)?.labelsOverPoints === true;
   let budget = Math.round((tuning.labelBudget[tierWord] ?? tuning.labelBudget.wide)
     * (onRing ? 1 : Math.max(1, layout.zoom)));
-  /* 「+n」이 세는 것은 **쪽**이다 — 유령(아직 없는 페이지)은 이 주제의 쪽이 아니고,
-   * 군집 줄의 「42쪽」과 다른 것을 세면 두 수가 서로를 반박한다. */
   const kinds = layout.model.kinds;
-  const countsAsFolded = (at) => kinds[at] === "page";
   const order = layout.labelOrder;
   const rounds = spot >= 0 ? 2 : 1;
   for (let round = 0; round < rounds; round += 1) {
@@ -4564,10 +4812,7 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
         && (kinds[at] === "page" || kinds[at] === "ghost")) continue;
       const inSpot = spot >= 0 && community[at] === spot;
       if (rounds === 2 && (round === 0) !== inSpot) continue;
-      if (budget <= 0) {
-        if (countsAsFolded(at)) folded[community[at]] += 1;
-        continue;
-      }
+      if (budget <= 0) continue;
       const centreX = screenX(at);
       const centreY = screenY(at);
       if (centreX < 0 || centreY < 0 || centreX > box.wide * box.scale
@@ -4576,8 +4821,6 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
       if (where >= 0) {
         wear(at, where);
         budget -= 1;
-      } else if (countsAsFolded(at)) {
-        folded[community[at]] += 1;
       }
     }
   }
@@ -4598,27 +4841,15 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
     writeAttribute(word, "y", String(radius[at] + tuning.labelPx + tuning.labelGap));
     writeAttribute(word, "text-anchor", "middle");
   }
-  for (let rank = 0; rank < layout.namedCount; rank += 1) {
-    const held = layout.clusterEls[rank];
-    if (!held?.count) continue;
-    writeTextContent(held.count, knowledgeClusterCountWord(layout, rank));
-  }
 }
 
-/* 주제의 대표 지식 — 그 군집에서 연결이 가장 많은 페이지의 제목(짧게). */
-function knowledgeClusterLeadWord(layout, rank) {
-  const seat = layout.communityCore[rank];
-  if (seat === undefined || seat < 0) return "";
-  return knowledgeShortWord(layout.model.titles[seat], layout.tuning.clusterLeadMax);
-}
-
-/* 군집 이름 아래 한 줄: 「쪽 n」, 접은 이름이 있으면 「쪽 n · 이름 +m」. `hidden`을 주면 그 수로 —
- * 격자가 판의 자리를 잡을 때 가장 넓은 글자를 잰다. */
-function knowledgeClusterCountWord(layout, rank, hidden = layout.clusterFolded[rank]) {
+/* 주제의 쪽 수와 대표 지식 한 줄(t-12029) — 이름판에 올리면 나오는 팁이고, 읽는 이의 이름에도 든다. 대표
+ * 지식은 그 군집에서 연결이 가장 많은 페이지의 제목, 온전히(이름판 위에서 자르던 것은 줄이 좁았기 때문이다). */
+function knowledgeClusterAbout(layout, rank) {
   const pages = layout.communitySize[rank];
-  if (hidden <= 0) return t("knowledge.clusterPages", "{{count}}쪽", { count: pages });
-  return t("knowledge.clusterPagesFolded", "{{count}}쪽 · 이름 +{{folded}}",
-    { count: pages, folded: hidden });
+  const seat = layout.communityCore[rank];
+  if (seat === undefined || seat < 0) return t("knowledge.clusterPages", "{{count}}쪽", { count: pages });
+  return t("knowledge.clusterAbout", "{{count}}쪽 · 대표: {{lead}}", { count: pages, lead: layout.model.titles[seat] });
 }
 
 /* ---- 페인터 하나의 자리 (6차 P1) -------------------------------------------
@@ -4855,7 +5086,8 @@ function makeKnowledgeSvgPainter() {
     paintKnowledgeClusters(layout, inverse, camera.yScale, camera.middleY);
     const measured = layout.measured;
     const { from, to, ghost, kind, edgeCount } = model;
-    const spot = knowledgeClusterPicked;
+    /* 밝힌 군집은 고른 것 또는 이름판에 올라 선 것이다(t-12029). */
+    const spot = knowledgeSpotRank();
     const community = layout.community;
     const { sliceMatch, pathEdge, drawnEdge } = layout;
     for (let at = 0; at < edgeCount; at += 1) {
@@ -4901,8 +5133,11 @@ function makeKnowledgeSvgPainter() {
       held.spoke = layout.ring !== null && (from[at] === layout.ring.seat || to[at] === layout.ring.seat);
       held.searchMatch = layout.searchMatch[from[at]] === 1 && layout.searchMatch[to[at]] === 1;
       held.searchDim = knowledgeQuery.trim() !== "" && !held.searchMatch;
-      /* 밝힌 군집의 선은 양 끝이 다 그 군집일 때 밝다 — 포커스의 규칙과 같다. */
-      held.spotlit = spot >= 0 && community[from[at]] === spot && community[to[at]] === spot;
+      /* 밝힌 군집의 선은 그 군집에 닿을 때 밝다(t-12029) — 군집 안의 선, 그리고 그 군집을 건너 나가는 낱낱의
+       * 선. 군집을 고르거나 그 이름판에 올라서는 것은 「이 주제는 무엇과 통하는가」를 묻는 일이고, 그 답인
+       * 건너는 선이 흐려서는 답이 아니다(묶음에서 풀려 서는 것이 그 선이다, `knowledgeEdgeBundled`). */
+      held.spotlit = spot >= 0 && (community[from[at]] === spot || community[to[at]] === spot);
+      held.bundled = knowledgeEdgeBundled(layout, at);
       /* 슬라이서 창 밖의 선은 양 끝이 다 창 안이 아닐 때 흐리다 — 점의 규칙 그대로. */
       held.sliceDim = sliceMatch[from[at]] === 0 || sliceMatch[to[at]] === 0;
       held.pathLit = pathEdge[at] === 1;
@@ -4951,6 +5186,7 @@ function makeKnowledgeSvgPainter() {
           edge.spotlit ? "is-spotlit" : "",
           edge.sliceDim ? "is-slice-dim" : "",
           edge.pathLit ? "is-path-lit" : "",
+          edge.bundled ? "is-bundled" : "",
           edge.inter ? "is-inter" : "is-intra",
         ].filter(Boolean).join(" "));
         if (edge.hue >= 0) writeAttribute(group, "data-hue", String(edge.hue));
@@ -5021,7 +5257,219 @@ function makeKnowledgeSvgPainter() {
 /* 한 프레임 — 카메라를 재고 이 판의 손에게 넘긴다. 창의 모든 길(팬·배율·비행·
  * 선택·훑기)이 여전히 이 한 문으로 그린다. */
 function paintKnowledgeFrame(view, layout, { cameraOnly = false } = {}) {
-  knowledgePainterFor(view).paintFrame(layout, knowledgeCamera(view, layout), { cameraOnly });
+  /* 묶음의 셈이 먼저다(t-12029) — 두 손이 선마다 「묶였는가」를 이 셈의 `edgeBetween`에서 읽는다. 줄은 손이
+   * 원반을 잰 뒤에 긋는다(`clusterReach`는 그 손의 프레임이 채운다). */
+  knowledgeTies(layout);
+  const camera = knowledgeCamera(view, layout);
+  knowledgePainterFor(view).paintFrame(layout, camera, { cameraOnly });
+  paintKnowledgeTies(view, layout, camera);
+  paintKnowledgeBridges(view, layout, camera);
+  /* 확대할수록 주제의 이름은 물러선다(t-12029, 시안 v2) — 배율 `clusterFadeFrom`부터 `clusterFadeSpan`에 걸쳐
+   * `clusterFadeFloor`까지. 두 손의 이름판이 같은 <svg>에 있으므로 판 하나에 수 하나다. */
+  const tuning = layout.tuning;
+  const fade = Math.min(1, Math.max(tuning.clusterFadeFloor,
+    1 - (layout.zoom - tuning.clusterFadeFrom) / tuning.clusterFadeSpan));
+  writeCustomProperty(view.querySelector(".knowledge-picture"), "--knowledge-cluster-fade", fade.toFixed(3));
+  /* 서 있는 우주는 같은 옷(고름·밝힘·찾기·군집)을 다음 한 장으로 따른다(t-12443). */
+  dressKnowledgeUniverse(view);
+}
+
+/* 묶음의 줄들(t-12029) — 밑층 <svg>에, 두 손에 한 벌. 줄은 두 원반의 가장자리(눌린 판에서는 타원)에서
+ * `tieInset` px 떨어져 시작하고 끝나며, 지도의 가운데(원반을 쪽 수로 무게 지은 곳)에서 바깥으로 휜다 — 이차
+ * 곡선 하나이고 휨은 틈의 `tieBend`, 배율 1에서 `tieBendMax` px까지라 확대해도 모양이 같다. 두 원반이 화면에서
+ * `tieRoom` px보다 가까우면 긋지 않는다(그 틈에 선 줄은 원반의 테두리와 구별되지 않는다). 굵기는 쌍의 수에서
+ * (`tieWidth` + √n × `tieGrow`), 옅기는 가장 굵은 쌍에 대한 몫에서 나오고 확대할수록 물러선다. 이름판에 올라
+ * 섰거나 고른 군집에 닿는 줄은 그 군집의 잉크(`is-mine`), 목록에서 짚은 줄은 밝은 잉크(`is-hot`)이고, 그 밖에
+ * 사람이 무엇을 묻고 있으면(짚기·고르기·찾기·경로) 모든 줄이 물러선다 — 묶음은 지도의 바탕이지 답이 아니다.
+ * 주변 탐색에는 줄이 없다. 줄은 수십이라 프레임마다 쓰고, 값이 같은 속성은 다시 쓰지 않는다. */
+function paintKnowledgeTies(view, layout, camera) {
+  const host = view.querySelector(".knowledge-ties");
+  if (host === null) return;
+  writeAttribute(host.ownerSVGElement, "viewBox", `${camera.x} ${camera.y} ${camera.wide} ${camera.tall}`);
+  const ties = layout.ring === null ? layout.ties : [];
+  const tuning = layout.tuning;
+  const { yScale, middleY, scale } = camera;
+  const drawY = (rank) => middleY + (layout.clusterY[rank] - middleY) * yScale;
+  const { x: centreX, y: centreY } = knowledgeMapCentre(layout, camera);
+  const widest = ties.length > 0 ? ties[0].count : 1;
+  const fade = Math.min(1, Math.max(tuning.tieFadeFloor, tuning.tieFadeFrom - tuning.tieFadePer * layout.zoom));
+  const spot = knowledgeSpotRank();
+  const asking = spot >= 0 || knowledgeTieHot >= 0 || knowledgeBridgeHot >= 0 || layout.litNodes.size > 0
+    || knowledgeSelectedKey !== null || knowledgeQuery.trim() !== "" || layout.pathShown;
+  /* 배율 1의 배율 — 휨의 상한을 px로 약속했으므로 그림 좌표로는 이만큼이다. */
+  const fitScale = scale / Math.max(layout.zoom, KNOWLEDGE_COMMUNITY.epsilon);
+  const digits = KNOWLEDGE_FORCE.coordinateDigits;
+  let drawn = 0;
+  for (let at = 0; at < ties.length; at += 1) {
+    const tie = ties[at];
+    if (layout.clusterTally[tie.left] === 0 || layout.clusterTally[tie.right] === 0) continue;
+    const fromX = layout.clusterX[tie.left];
+    const fromY = drawY(tie.left);
+    const toX = layout.clusterX[tie.right];
+    const toY = drawY(tie.right);
+    const reach = Math.hypot(toX - fromX, toY - fromY);
+    if (reach <= KNOWLEDGE_COMMUNITY.epsilon) continue;
+    const alongX = (toX - fromX) / reach;
+    const alongY = (toY - fromY) / reach;
+    /* 원반은 그림과 같은 비율로 눌린 타원이다 — 이 방향으로 가장자리까지의 거리. */
+    const rim = Math.hypot(alongX, alongY / Math.max(yScale, KNOWLEDGE_COMMUNITY.epsilon));
+    const startGap = layout.clusterReach[tie.left] / rim + tuning.tieInset / scale;
+    const endGap = layout.clusterReach[tie.right] / rim + tuning.tieInset / scale;
+    const room = reach - startGap - endGap;
+    if (room * scale < tuning.tieRoom) continue;
+    const startX = fromX + alongX * startGap;
+    const startY = fromY + alongY * startGap;
+    const endX = toX - alongX * endGap;
+    const endY = toY - alongY * endGap;
+    const midX = (startX + endX) / 2;
+    const midY = (startY + endY) / 2;
+    const side = (midX - centreX) * -alongY + (midY - centreY) * alongX >= 0 ? 1 : -1;
+    const bend = Math.min(tuning.tieBendMax / fitScale, room * tuning.tieBend) * side;
+    const mine = spot >= 0 && (tie.left === spot || tie.right === spot);
+    const hot = !mine && at === knowledgeTieHot;
+    let alpha = tuning.tieAlpha + tuning.tieLift * (tie.count / widest);
+    if (mine) alpha = tuning.tieMine;
+    else if (hot) alpha = tuning.tieHot;
+    else alpha *= (asking ? tuning.tieQuiet : 1) * fade;
+    const width = tuning.tieWidth + Math.sqrt(tie.count) * tuning.tieGrow + (hot ? tuning.tieHotWidth : 0);
+    const line = host.children[drawn] ?? host.appendChild(document.createElementNS(SVG_NS, "path"));
+    writeAttribute(line, "class", `knowledge-tie${mine ? " is-mine" : ""}${hot ? " is-hot" : ""}`);
+    writeAttribute(line, "d", `M ${startX.toFixed(digits)} ${startY.toFixed(digits)} `
+      + `Q ${(midX - alongY * bend).toFixed(digits)} ${(midY + alongX * bend).toFixed(digits)} `
+      + `${endX.toFixed(digits)} ${endY.toFixed(digits)}`);
+    writeAttribute(line, "stroke-width", width.toFixed(2));
+    writeAttribute(line, "stroke-opacity", alpha.toFixed(3));
+    writeAttribute(line, "data-tie", String(at));
+    const hue = mine ? layout.communityHue[spot] : -1;
+    if (hue >= 0) writeAttribute(line, "data-hue", String(hue));
+    else if (line.hasAttribute("data-hue")) line.removeAttribute("data-hue");
+    drawn += 1;
+  }
+  while (host.children.length > drawn) host.lastElementChild.remove();
+  layout.tiesDrawn = drawn;
+}
+
+/* 지도의 가운데 — 원반의 가운데를 쪽 수로 무게 지은 곳(그린 좌표, 눌린 판에서는 눌린 y). 묶음과 다리가 이
+ * 가운데에서 바깥으로 휜다(t-12029). */
+function knowledgeMapCentre(layout, camera) {
+  let centreX = 0;
+  let centreY = 0;
+  let weight = 0;
+  for (let rank = 0; rank < layout.namedCount; rank += 1) {
+    if (layout.clusterTally[rank] === 0) continue;
+    const pages = Math.max(1, layout.communitySize[rank]);
+    centreX += layout.clusterX[rank] * pages;
+    centreY += (camera.middleY + (layout.clusterY[rank] - camera.middleY) * camera.yScale) * pages;
+    weight += pages;
+  }
+  return { x: centreX / Math.max(1, weight), y: centreY / Math.max(1, weight) };
+}
+
+/* 다리 하나의 곡선(t-12029) — 그 한 가닥의 두 끝 점을 잇는 이차 곡선이고, 지도의 가운데에서 바깥으로 길이의
+ * `bridgeBend`만큼(배율 1에서 `bridgeBendMax` px까지 — 확대해도 모양이 같다) 휜다. 가운데(t = ½)가 번호 원의
+ * 자리다. 그림 좌표로 돌려준다 — 그리는 손(`paintKnowledgeBridges`)과 이름표 격자(번호 원을 비워 두는 곳)가 이
+ * 한 셈을 읽는다. */
+function knowledgeBridgeCurve(layout, bridge, camera, centre) {
+  const { from, to } = layout.model;
+  const head = from[bridge.first];
+  const tail = to[bridge.first];
+  const drawY = (at) => camera.middleY + (layout.y[at] - camera.middleY) * camera.yScale;
+  const fromX = layout.x[head];
+  const fromY = drawY(head);
+  const toX = layout.x[tail];
+  const toY = drawY(tail);
+  const midX = (fromX + toX) / 2;
+  const midY = (fromY + toY) / 2;
+  const reach = Math.hypot(toX - fromX, toY - fromY) || KNOWLEDGE_COMMUNITY.epsilon;
+  const normalX = -(toY - fromY) / reach;
+  const normalY = (toX - fromX) / reach;
+  const side = (midX - centre.x) * normalX + (midY - centre.y) * normalY >= 0 ? 1 : -1;
+  const fitScale = camera.scale / Math.max(layout.zoom, KNOWLEDGE_COMMUNITY.epsilon);
+  const bend = Math.min(layout.tuning.bridgeBendMax / fitScale, reach * layout.tuning.bridgeBend) * side;
+  const controlX = midX + normalX * bend;
+  const controlY = midY + normalY * bend;
+  return { head, tail, fromX, fromY, controlX, controlY, toX, toY,
+    badgeX: 0.25 * fromX + 0.5 * controlX + 0.25 * toX, badgeY: 0.25 * fromY + 0.5 * controlY + 0.25 * toY };
+}
+
+/* 놀라운 연결(t-12029, 시안 v2 「bridges」) — 밑층에, 두 손에 한 벌. 다리마다 두 군집의 색으로 이은 곡선(선형
+ * 그라데이션, 앞 끝의 군집 → 뒤 끝의 군집; 색 없는 군집은 안개색)과 가운데의 번호 원(목록의 번호와 같은 수). 목록에서
+ * 짚은 다리는 굵게, 사람이 다른 것을 묻는 동안(짚기·고르기·찾기·다른 다리·묶음)은 모두 `bridgeQuiet`까지 물러선다.
+ * 그 한 가닥은 묶음 안의 선이라 쉬는 지도의 선 층에는 없다 — 다리가 그 선이다. 주변 탐색에는 다리가 없다. */
+function paintKnowledgeBridges(view, layout, camera) {
+  const host = view.querySelector(".knowledge-bridges");
+  if (host === null) return;
+  const inks = view.querySelector(".knowledge-bridge-inks");
+  const bridges = layout.ring === null ? layout.bridges : [];
+  const tuning = layout.tuning;
+  const centre = knowledgeMapCentre(layout, camera);
+  const digits = KNOWLEDGE_FORCE.coordinateDigits;
+  const inverse = camera.inverse;
+  const asking = knowledgeSpotRank() >= 0 || knowledgeTieHot >= 0 || knowledgeBridgeHot >= 0
+    || layout.litNodes.size > 0 || knowledgeSelectedKey !== null || knowledgeQuery.trim() !== "" || layout.pathShown;
+  const hueInk = (at) => {
+    const hue = layout.communityHue[layout.community[at]];
+    return hue >= 0 ? `var(--knowledge-hue-${hue})` : "var(--ink-mist)";
+  };
+  let drawn = 0;
+  for (let at = 0; at < bridges.length; at += 1) {
+    const curve = knowledgeBridgeCurve(layout, bridges[at], camera, centre);
+    const hot = at === knowledgeBridgeHot;
+    const quiet = asking && !hot;
+    let group = host.children[drawn];
+    if (!group) {
+      group = document.createElementNS(SVG_NS, "g");
+      const line = document.createElementNS(SVG_NS, "path");
+      line.setAttribute("class", "knowledge-bridge");
+      const badge = document.createElementNS(SVG_NS, "g");
+      badge.setAttribute("class", "knowledge-bridge-badge");
+      badge.append(document.createElementNS(SVG_NS, "circle"), document.createElementNS(SVG_NS, "text"));
+      group.append(line, badge);
+      host.appendChild(group);
+    }
+    let ink = inks.children[drawn];
+    if (!ink) {
+      ink = document.createElementNS(SVG_NS, "linearGradient");
+      ink.setAttribute("gradientUnits", "userSpaceOnUse");
+      ink.id = `knowledge-bridge-ink-${drawn}`;
+      ink.append(document.createElementNS(SVG_NS, "stop"), document.createElementNS(SVG_NS, "stop"));
+      writeAttribute(ink.lastElementChild, "offset", "1");
+      inks.appendChild(ink);
+    }
+    writeAttribute(ink, "x1", curve.fromX.toFixed(digits));
+    writeAttribute(ink, "y1", curve.fromY.toFixed(digits));
+    writeAttribute(ink, "x2", curve.toX.toFixed(digits));
+    writeAttribute(ink, "y2", curve.toY.toFixed(digits));
+    writeAttribute(ink.firstElementChild, "style", `stop-color: ${hueInk(curve.head)}`);
+    writeAttribute(ink.lastElementChild, "style", `stop-color: ${hueInk(curve.tail)}`);
+    const [line, badge] = group.children;
+    writeAttribute(group, "data-bridge", String(at));
+    writeAttribute(group, "opacity", quiet ? String(tuning.bridgeQuiet) : "1");
+    writeAttribute(line, "d", `M ${curve.fromX.toFixed(digits)} ${curve.fromY.toFixed(digits)} `
+      + `Q ${curve.controlX.toFixed(digits)} ${curve.controlY.toFixed(digits)} `
+      + `${curve.toX.toFixed(digits)} ${curve.toY.toFixed(digits)}`);
+    writeAttribute(line, "stroke", `url(#${ink.id})`);
+    writeAttribute(line, "stroke-width", String(hot ? tuning.bridgeHotWidth : tuning.bridgeWidth));
+    writeAttribute(badge, "transform",
+      `translate(${curve.badgeX.toFixed(digits)} ${curve.badgeY.toFixed(digits)}) scale(${inverse})`);
+    writeAttribute(badge.firstElementChild, "r", String(tuning.bridgeBadge));
+    writeAttribute(badge.firstElementChild, "stroke-width", String(tuning.bridgeBadgeStroke));
+    writeTextContent(badge.lastElementChild, String(at + 1));
+    drawn += 1;
+  }
+  while (host.children.length > drawn) host.lastElementChild.remove();
+  while (inks.children.length > drawn) inks.lastElementChild.remove();
+  layout.bridgesDrawn = drawn;
+}
+
+/* 「놀라운 연결」 목록의 줄을 짚는다(t-12029) — 그림에서 그 다리가 굵어지고 나머지는 물러선다. -1이면 놓는다. */
+function hotKnowledgeBridge(view, at) {
+  const layout = knowledgeLayouts.get(view);
+  if (!layout || at === knowledgeBridgeHot) return;
+  knowledgeBridgeHot = at;
+  const camera = knowledgeCamera(view, layout);
+  paintKnowledgeTies(view, layout, camera);
+  paintKnowledgeBridges(view, layout, camera);
 }
 
 /* Labels face away from the ring, leaving the connections in its centre clear.
@@ -5242,6 +5690,7 @@ function paintKnowledgeNodes(view, layout) {
     inter: false,
     hue: -1,
     spotlit: false,
+    bundled: false,
     sliceDim: false,
     pathLit: false,
     pathDim: false,
@@ -5287,7 +5736,9 @@ function knowledgeEdgeLine(layout, at) {
  * 애니메이션 하나이고 점마다는 아니다. 움직임을 줄이라는 판에서는 스며들지 않는다. */
 function arriveKnowledgeLayers(view, layout) {
   if (knowledgeMotionReduced() || !(layout.tuning.arriveMs > 0)) return;
-  for (const layer of view.querySelectorAll(".knowledge-clusters, .knowledge-edges, .knowledge-nodes")) {
+  for (const layer of view.querySelectorAll(
+    ".knowledge-underlay, .knowledge-clusters, .knowledge-edges, .knowledge-nodes, .knowledge-cluster-names",
+  )) {
     if (typeof layer.animate !== "function") return;
     layer.animate(
       [{ opacity: 0 }, { opacity: 1 }],
@@ -5378,31 +5829,30 @@ function noteKnowledgeFresh(before, after) {
 
 /* 군집의 층 — 위상이 바뀔 때만 (3차).
  *
- * 이름 있는 군집마다 성운 원 하나와 이름표 하나. 성운이 전부 앞에, 이름표가
- * 전부 뒤에 서는 것은 한 군집의 성운이 이웃 군집의 이름을 덮지 않게 하기
- * 위해서다. 이름표는 진짜 단추처럼 읽힌다(`role="button"`): 누르면 그 군집만
- * 밝히고 카메라가 그리로 난다. */
+ * 이름 있는 군집마다 성운 원 하나와 이름표 하나. 성운은 점 뒤의 층(`.knowledge-clusters`)에, 이름표는 점 위의
+ * 층(`.knowledge-cluster-names`, t-12443)에 선다 — 한 군집의 성운이 이웃 군집의 이름을 덮지 않고, 이름판이
+ * 두 손에서 같은 그림이 되게. 이름표는 진짜 단추처럼 읽힌다(`role="button"`): 누르면 그 군집만 밝히고
+ * 카메라가 그리로 난다. */
 function paintKnowledgeClusterLayer(view, layout) {
   const host = view.querySelector(".knowledge-clusters");
+  const names = view.querySelector(".knowledge-cluster-names");
+  /* 이름판의 말(t-12029, 시안 v2 「oneLine」): 보이는 글자는 이름 한 줄이고, 쪽 수와 대표 지식은 올리면 나오는
+   * 팁(`data-tip` — 창의 팁은 포인터에도 키보드 포커스에도 선다)과 읽는 이의 이름에 든다. 색 없는 군집의 판은
+   * `is-quiet` — 안개색의 작은 글자. */
   const dressLabel = (label, rank) => {
     const name = knowledgeClusterWord(layout, rank);
+    const about = knowledgeClusterAbout(layout, rank);
     writeTextContent(label.firstElementChild, name);
+    writeAttribute(label, "data-tip", about);
     writeAttribute(label, "aria-label",
-      t("knowledge.spotlightCluster", "«{{name}}» 군집만 밝히기", { name }));
-    const lead = label.querySelector(".knowledge-cluster-lead");
-    if (lead) writeTextContent(lead, knowledgeClusterLeadWord(layout, rank));
+      t("knowledge.spotlightClusterAbout", "«{{name}}» 군집만 밝히기 — {{about}}", { name, about }));
+    label.classList.toggle("is-quiet", layout.communityHue[rank] < 0);
   };
   if (host.dataset.knowledgeSignature === layout.signature) {
     /* 같은 위상의 새 판(점의 층이 제 DOM을 다시 입양하는 것과 같은 경우)은 서
-     * 있는 것을 그대로 든다 — 앞의 절반이 성운, 뒤의 절반이 이름표 묶음이다. */
+     * 있는 것을 그대로 든다 — 성운의 층과 이름판의 층이 같은 순위의 차례다. */
     if (layout.clusterEls.length === 0 && host.children.length > 0) {
-      const half = host.children.length / 2;
-      layout.clusterEls = Array.from({ length: half }, (unused, rank) => ({
-        nebula: host.children[rank],
-        label: host.children[half + rank],
-        lead: host.children[half + rank].querySelector(".knowledge-cluster-lead"),
-        count: host.children[half + rank].lastElementChild,
-      }));
+      layout.clusterEls = Array.from(host.children, (nebula, rank) => ({ nebula, label: names.children[rank] }));
     }
     for (let rank = 0; rank < layout.clusterEls.length; rank += 1) {
       dressLabel(layout.clusterEls[rank].label, rank);
@@ -5422,8 +5872,7 @@ function paintKnowledgeClusterLayer(view, layout) {
     nebula.setAttribute("class", "knowledge-nebula");
     nebula.dataset.hue = hue;
     nebula.dataset.community = String(rank);
-    /* 이름표는 묶음이다(09-16): 주제의 이름 한 줄과, 그 아래 「쪽 n · 이름 +m」
-     * 한 줄. 둘이 한 몸이라 한 번의 transform으로 함께 선다. */
+    /* 이름판은 누르는 몸이다(09-16) — 주제의 이름 한 줄(t-12029)이 한 번의 transform으로 선다. */
     const label = document.createElementNS(SVG_NS, "g");
     label.setAttribute("class", "knowledge-cluster-label");
     label.setAttribute("role", "button");
@@ -5433,27 +5882,14 @@ function paintKnowledgeClusterLayer(view, layout) {
     const name = document.createElementNS(SVG_NS, "text");
     name.setAttribute("class", "knowledge-cluster-name");
     name.setAttribute("text-anchor", "middle");
-    /* 주제의 이름 아래 그 주제의 **대표 지식** 한 줄(09-16).
-     *
-     * 전체 지도의 약속은 「주제와 대표 지식」인데, 군집의 공이 촘촘해질수록 그
-     * 가운데 점의 이름표가 격자에서 자리를 얻기 어렵다 — 그래서 대표 페이지의
-     * 제목은 이름표 경쟁에 맡기지 않고 주제의 이름 바로 아래에 붙인다. 이 판은
-     * 통째로 한 번 자리를 예약하므로 어느 배율에서도 읽히고 겹치지 않는다. */
-    const lead = document.createElementNS(SVG_NS, "text");
-    lead.setAttribute("class", "knowledge-cluster-lead");
-    lead.setAttribute("text-anchor", "middle");
-    lead.setAttribute("y", String(layout.tuning.clusterLeadGap));
-    const tally = document.createElementNS(SVG_NS, "text");
-    tally.setAttribute("class", "knowledge-cluster-count");
-    tally.setAttribute("text-anchor", "middle");
-    tally.setAttribute("y", String(layout.tuning.clusterCountGap));
-    label.append(name, lead, tally);
-    built.push({ nebula, label, lead, count: tally });
+    label.append(name);
+    built.push({ nebula, label });
     dressLabel(label, rank);
     nebulas.push(nebula);
     labels.push(label);
   }
-  reconcileElementOrder(host, [...nebulas, ...labels]);
+  reconcileElementOrder(host, nebulas);
+  reconcileElementOrder(names, labels);
   host.dataset.knowledgeSignature = layout.signature;
   layout.clusterEls = built;
 }
@@ -5466,7 +5902,9 @@ function paintKnowledgeClusterLayer(view, layout) {
 function paintKnowledgeSpotlight(view, layout) {
   const picture = view.querySelector(".knowledge-picture");
   if (knowledgeClusterPicked >= layout.namedCount) knowledgeClusterPicked = -1;
-  const spot = knowledgeClusterPicked;
+  if (knowledgeClusterHover >= layout.namedCount) knowledgeClusterHover = -1;
+  /* 옷은 밝힌 군집(이름판에 올라 선 것이 먼저, t-12029)의 것이고, 「눌림」은 고른 것만의 것이다. */
+  const spot = knowledgeSpotRank();
   picture.classList.toggle("is-spotlight", spot >= 0);
   for (let at = 0; at < layout.count; at += 1) {
     layout.nodeEls[at]?.classList.toggle("is-spotlit", spot >= 0 && layout.community[at] === spot);
@@ -5476,7 +5914,7 @@ function paintKnowledgeSpotlight(view, layout) {
     held.label.classList.toggle("is-spotlit", rank === spot);
   });
   for (const press of view.querySelectorAll("[data-knowledge-cluster]")) {
-    const on = spot >= 0 && Number(press.dataset.knowledgeCluster) === spot;
+    const on = knowledgeClusterPicked >= 0 && Number(press.dataset.knowledgeCluster) === knowledgeClusterPicked;
     press.classList.toggle("is-active", on);
     writeAttribute(press, "aria-pressed", String(on));
   }
@@ -5488,8 +5926,9 @@ function toggleKnowledgeCluster(view, rank) {
   knowledgeClusterPicked = knowledgeClusterPicked === rank ? -1 : rank;
   paintKnowledgeSpotlight(view, layout);
   paintKnowledgeFrame(view, layout);
-  /* 고리 위에서는 날지 않는다 — 고리는 이미 다 보인다. */
-  if (layout.ring !== null) return;
+  /* 고리 위에서는 날지 않는다 — 고리는 이미 다 보인다. 서 있는 우주(t-12443)에서는 우주의 카메라가 그 은하로
+   * 날고(`dressKnowledgeUniverse`), 평면 지도의 카메라는 사람이 두고 간 자리에 그대로 둔다. */
+  if (layout.ring !== null || knowledgeUniverses.has(view)) return;
   const { minX, maxX, minY, maxY } = layout.bounds;
   /* 주제를 고르는 것은 「그 주제를 펼쳐 달라」는 뜻이다(09-16): 카메라가 그 원반을
    * 판에 맞게 채우도록 날아가고, 그 배율에서 점들이 벌어지므로 세부 지식의 제목이
@@ -5784,6 +6223,8 @@ function knowledgeRingArrange(layout, seat) {
     layout.mapY = Float32Array.from(y);
     knowledgeExtent(count, layout.mapX, layout.mapY, null, layout.mapBounds);
   }
+  /* 고리의 점은 √차수 램프의 크기다(t-12029) — 지도의 작은 점은 지도의 것이다. */
+  layout.radius = layout.radiusRing;
   const centreX = layout.mapX[seat];
   const centreY = layout.mapY[seat];
   x[seat] = centreX;
@@ -5845,6 +6286,7 @@ function knowledgeRingRelease(layout) {
   layout.mapX = null;
   layout.mapY = null;
   layout.ring = null;
+  layout.radius = layout.radiusMap;
   layout.geometryRevision += 1;
 }
 
@@ -6317,8 +6759,10 @@ function noteKnowledgeExplore(vault) {
   if (knowledgeExploreTimer !== 0) clearTimeout(knowledgeExploreTimer);
   knowledgeExploreTimer = setTimeout(() => {
     knowledgeExploreTimer = 0;
+    /* 전체 지도의 얼굴(t-12443)은 사람이 고른 적이 있을 때만 적는다 — 고르지 않은 볼트는 표의 기본을 따른다. */
     void saveKnowledgeExplore(vault, {
       mode: knowledgeMode, centre: knowledgeSelectedKey, depth: knowledgeFocusDepth,
+      dimension: knowledgeDimension ?? undefined,
     });
   }, KNOWLEDGE_EXPLORE.persistMs);
 }
@@ -6345,6 +6789,8 @@ function applyKnowledgeEntry(view, layout) {
     && model.keys.includes(knowledgeRevealKey) ? knowledgeRevealKey : null;
   const stored = knowledgeExploreFor(model.vault);
   const mode = knowledgeStartMode(stored, reveal);
+  /* 이 볼트가 기억하는 전체 지도의 얼굴(t-12443) — 없으면 표의 기본(`knowledgeDimensionNow`). */
+  knowledgeDimension = KNOWLEDGE_DIMENSIONS.some((row) => row.id === stored?.dimension) ? stored.dimension : null;
   if (mode === "local") {
     const remembered = typeof stored?.centre === "string" && model.keys.includes(stored.centre)
       ? stored.centre : null;
@@ -6413,8 +6859,16 @@ function paintKnowledgeClusterLegend(view, layout) {
     if (rank < named) tally[rank] += 1;
   }
   const rows = [];
+  /* 색이 있는 군집만 한 줄씩(t-12029, 시안 v2 「colour」) — 나머지는 색이 없고, 범례의 일은 색이 무엇을
+   * 가르는지 말하는 것이다. 그 군집들은 「작은 주제 n」 한 줄로 센다(단추가 아니다: 밝히는 문은 지도의 제 이름판과
+   * 인스펙터의 군집 목록에 그대로 있다). */
+  let quiet = 0;
   for (let rank = 0; rank < named; rank += 1) {
     if (tally[rank] === 0) continue;
+    if (layout.communityHue[rank] < 0) {
+      quiet += 1;
+      continue;
+    }
     let key = host.querySelector(`[data-knowledge-cluster="${rank}"]`);
     if (!key) {
       key = document.createElement("button");
@@ -6430,6 +6884,19 @@ function paintKnowledgeClusterLegend(view, layout) {
     writeAttribute(key, "data-hue", String(layout.communityHue[rank]));
     writeTextContent(key.lastChild, knowledgeClusterWord(layout, rank));
     rows.push(key);
+  }
+  if (quiet > 0) {
+    let rest = host.querySelector(".knowledge-cluster-key.is-quiet");
+    if (!rest) {
+      rest = document.createElement("span");
+      rest.className = "knowledge-cluster-key is-quiet";
+      const dot = document.createElement("i");
+      dot.className = "knowledge-cluster-dot";
+      dot.setAttribute("aria-hidden", "true");
+      rest.append(dot, document.createElement("span"));
+    }
+    writeTextContent(rest.lastChild, t("knowledge.clustersQuiet", "작은 주제 {{count}}", { count: quiet }));
+    rows.push(rest);
   }
   reconcileElementOrder(host, rows);
   host.hidden = rows.length === 0;
@@ -6664,6 +7131,9 @@ function paintKnowledgeOverview(layout, box) {
   paintKnowledgeHealth(layout, box);
   /* 공급망의 절(P4)도 위상과 따로 바뀐다 — 조회 상태의 한 줄은 답이 오기 전에도 말한다. */
   paintKnowledgeSupplyOverview(layout, box);
+  /* 묶음과 다리는 그려지는 부분집합의 것이다(목차·일지를 펴면 달라진다) — 위상의 서명 앞에서 제 도장으로. */
+  paintKnowledgeTieList(layout, box);
+  paintKnowledgeBridgeList(layout, box);
   if (box.dataset.knowledgeStamp === model.signature && layout.overviewModel === model) return;
   box.dataset.knowledgeStamp = model.signature;
   layout.overviewModel = model;
@@ -6783,6 +7253,72 @@ function paintKnowledgeOverview(layout, box) {
     clusters,
   );
   box.querySelector(".knowledge-overview-clusters").hidden = clusters.length === 0;
+}
+
+/* 「강한 묶음」(t-12029, 시안 v2의 그림 옆 목록) — 지도가 굵은 줄 하나로 묶은 군집 쌍을 굵은 순으로
+ * `tiesListed`줄. 줄은 단추다: 누르면 그 쌍의 앞 군집을 고르고(그 군집을 건너는 낱낱의 선이 선다), 올리거나
+ * 키보드로 서면 그림에서 그 줄이 밝아진다(`hotKnowledgeTie`). 막대는 가장 굵은 쌍에 대한 몫이다. 묶음이 없는
+ * 볼트(작거나 주제끼리 드물게 통하는)에는 절이 서지 않는다. 셈과 이름이 그대로면 쓰지 않는다. */
+function paintKnowledgeTieList(layout, box) {
+  const section = box.querySelector(".knowledge-overview-ties");
+  if (section === null) return;
+  const ties = knowledgeTies(layout);
+  const stamp = `${layout.model.signature}|${layout.tieStamp}`;
+  if (section.dataset.knowledgeStamp === stamp && layout.tieListModel === layout.model) return;
+  section.dataset.knowledgeStamp = stamp;
+  layout.tieListModel = layout.model;
+  const listed = ties.slice(0, Math.max(0, layout.tuning.tiesListed));
+  const widest = listed.length > 0 ? listed[0].count : 1;
+  reconcileElementOrder(section.querySelector(".knowledge-inspector-list"), listed.map((tie, at) => {
+    const row = knowledgeListRow(
+      `tie:${at}`,
+      t("knowledge.tiePair", "{{left}} ↔ {{right}}", {
+        left: knowledgeClusterWord(layout, tie.left),
+        right: knowledgeClusterWord(layout, tie.right),
+      }),
+      t("knowledge.tieLines", "선 {{count}}개", { count: tie.count }),
+      tie.count / widest,
+    );
+    const press = row.querySelector("button");
+    press.dataset.knowledgeCluster = String(tie.left);
+    press.dataset.knowledgeTie = String(at);
+    return row;
+  }));
+  section.hidden = listed.length === 0;
+}
+
+/* 「놀라운 연결」(t-12029, 시안 v2의 그림 옆 목록) — 지도가 번호로 밝힌 다리, 같은 순서·같은 번호. 줄은 단추다:
+ * 누르면 그 한 가닥의 앞 쪽을 고르고(고른 쪽의 이웃이 밝아지니 다리 건너편 쪽이 함께 선다), 올리거나 키보드로 서면
+ * 그림에서 그 다리가 굵어진다(`hotKnowledgeBridge`). 두 끝 쪽의 제목은 팁과 읽는 이의 이름이 말한다. 다리가 없는
+ * 볼트에는 절이 서지 않는다. */
+function paintKnowledgeBridgeList(layout, box) {
+  const section = box.querySelector(".knowledge-overview-bridges");
+  if (section === null) return;
+  knowledgeTies(layout);
+  const stamp = `${layout.model.signature}|${layout.tieStamp}`;
+  if (section.dataset.knowledgeStamp === stamp && layout.bridgeListModel === layout.model) return;
+  section.dataset.knowledgeStamp = stamp;
+  layout.bridgeListModel = layout.model;
+  const { from, to, keys, titles } = layout.model;
+  reconcileElementOrder(section.querySelector(".knowledge-inspector-list"), layout.bridges.map((bridge, at) => {
+    const head = from[bridge.first];
+    const tail = to[bridge.first];
+    const row = knowledgeListRow(
+      keys[head],
+      t("knowledge.tiePair", "{{left}} ↔ {{right}}", {
+        left: knowledgeClusterWord(layout, layout.community[head]),
+        right: knowledgeClusterWord(layout, layout.community[tail]),
+      }),
+      String(at + 1),
+    );
+    const press = row.querySelector("button");
+    const ends = t("knowledge.bridgeEnds", "{{from}} → {{to}}", { from: titles[head], to: titles[tail] });
+    press.dataset.knowledgeBridge = String(at);
+    press.dataset.tip = ends;
+    press.setAttribute("aria-label", t("knowledge.bridgeLabel", "{{pair}} — {{ends}}", { pair: press.textContent, ends }));
+    return row;
+  }));
+  section.hidden = layout.bridges.length === 0;
 }
 
 /* 볼트 건강(3차): 카파시의 lint 넷, 그리고 라이브 층의 셋(t-2931). 줄은 서 있고
@@ -7043,7 +7579,12 @@ function paintKnowledgeCard(layout, box, seat) {
   }
   const when = box.querySelector(".knowledge-modified");
   when.hidden = ghost || !model.modified[seat];
-  if (!when.hidden) {
+  /* 우주(t-12443)에서는 별의 빛깔이 곧 최근 고침이라 「얼마 전」을 함께 말한다 — 확인할 자리(디자이너 m-12467의 6). */
+  if (!when.hidden && knowledgeUniverses.has(layout.view)) {
+    say(when, () => t("knowledge.modifiedAgo", "수정 {{when}} · {{ago}}", {
+      when: knowledgeWhen(model.modified[seat]), ago: knowledgeUniverseAgo(model.modified[seat], model.nowMs),
+    }));
+  } else if (!when.hidden) {
     say(when, () => t("knowledge.modified", "수정 {{when}}", {
       when: knowledgeWhen(model.modified[seat]),
     }));
@@ -7326,17 +7867,29 @@ function wireKnowledgeView(view) {
     const layout = knowledgeLayouts.get(view);
     // 점을 끌고 있는 동안 지나치는 점들은 짚은 것이 아니다.
     if (!layout || layout.pinned >= 0) return;
+    /* 주제의 이름판 위의 포인터는 그 군집을 밝힌다(t-12029) — 그 군집을 건너는 선이 묶음에서 풀려 선다. */
+    const plate = event.target.closest?.(".knowledge-cluster-label");
+    hoverKnowledgeCluster(view, plate ? Number(plate.dataset.community) : -1);
     const key = knowledgeUnder(event);
     if (key === knowledgeHoverKey) return;
     knowledgeHoverKey = key;
     litKnowledge(view, layout, key);
   };
   canvas.onpointerleave = () => {
+    hoverKnowledgeCluster(view, -1);
     const layout = knowledgeLayouts.get(view);
     if (!layout || knowledgeHoverKey === null) return;
     knowledgeHoverKey = null;
     litKnowledge(view, layout, null);
   };
+  /* 키보드로 이름판에 선 것도 올라선 것이다(t-12029) — 마우스에만 달린 밝힘은 밝힘이 아니다. */
+  canvas.addEventListener("focusin", (event) => {
+    const plate = event.target.closest?.(".knowledge-cluster-label");
+    if (plate) hoverKnowledgeCluster(view, Number(plate.dataset.community));
+  });
+  canvas.addEventListener("focusout", (event) => {
+    if (event.target.closest?.(".knowledge-cluster-label")) hoverKnowledgeCluster(view, -1);
+  });
   /* 누르는 것은 **고르는** 일이다. 문을 여는 것은 인스펙터의 단추이거나 Enter다 —
    * 지도 위의 한 점을 짚었다는 이유로 편집기 탭이 열리면, 그림을 읽는 동안 사람은
    * 제가 열지 않은 파일 열두 개를 얻는다. 빈 곳을 누르는 것은 고르기를 놓는 일이다. */
@@ -7393,6 +7946,8 @@ function wireKnowledgeView(view) {
       return;
     }
     if (!layout || event.metaKey || event.ctrlKey || event.altKey) return;
+    /* 우주의 명판(t-12443)은 제 단추가 Enter·Space를 받는다 — 판의 Enter(고른 쪽 열기)가 가로채지 않는다. */
+    if (event.target.closest?.(".knowledge-universe-plate") && (event.key === "Enter" || event.key === " ")) return;
     /* 주제의 이름판은 키보드로도 눌린다(09-16) — 그것이 「이 주제를 펼쳐라」의
      * 단추이므로, 마우스에만 달린 문은 문이 아니다. */
     const plate = event.target.closest?.(".knowledge-cluster-label");
@@ -7441,25 +7996,34 @@ function wireKnowledgeView(view) {
     if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       return;
     }
+    /* 서 있는 우주에서 화살표는 궤도다(t-12443, 6차 설계 §4-e). */
+    if (knowledgeUniverseKey(view, event)) return;
     event.preventDefault();
     knowledgeWalk(view, layout, event.key);
   };
 
+  /* 배율 단추 셋은 서 있는 우주가 먼저 받는다(t-12443) — 우주의 카메라가 다가가고 물러서며 처음 자리로 난다. */
   view.querySelector(".knowledge-zoom-out").onclick = () => {
     const layout = knowledgeLayouts.get(view);
+    if (knowledgeUniverseZoom(view, "out")) return;
     if (layout) takeKnowledgeZoom(view, layout, layout.zoom - layout.tuning.zoomStep);
   };
   view.querySelector(".knowledge-zoom-in").onclick = () => {
     const layout = knowledgeLayouts.get(view);
+    if (knowledgeUniverseZoom(view, "in")) return;
     if (layout) takeKnowledgeZoom(view, layout, layout.zoom + layout.tuning.zoomStep);
   };
   view.querySelector(".knowledge-zoom-fit").onclick = () => {
     const layout = knowledgeLayouts.get(view);
+    if (knowledgeUniverseZoom(view, "fit")) return;
     if (layout) fitKnowledgeGraph(view, layout, { fly: true });
   };
   /* 모드 토글과 빵부스러기(t-4140). */
   for (const step of view.querySelectorAll(".knowledge-mode-step")) {
     step.onclick = () => setKnowledgeMode(view, step.dataset.knowledgeMode);
+  }
+  for (const step of view.querySelectorAll("[data-knowledge-dimension]")) {
+    step.onclick = () => setKnowledgeDimension(view, step.dataset.knowledgeDimension);
   }
   view.querySelector(".knowledge-crumb-back").onclick = () => knowledgeBack(view);
   view.querySelector(".knowledge-crumb-root").onclick = () => setKnowledgeMode(view, KNOWLEDGE_MODES[0].id);
@@ -7762,6 +8326,13 @@ function wireKnowledgeView(view) {
       void paintKnowledgeView();
       return;
     }
+    /* 우주의 필라멘트 줄(t-12443) — 보낸 은하를 고르고 그 흐름으로 난다. */
+    const flow = event.target.closest("[data-knowledge-flow]");
+    if (flow) {
+      const [from, to] = flow.dataset.knowledgeFlow.split(",").map(Number);
+      knowledgeUniverseFlow(view, from, to);
+      return;
+    }
     const cluster = event.target.closest("[data-knowledge-cluster]");
     if (cluster) {
       toggleKnowledgeCluster(view, Number(cluster.dataset.knowledgeCluster));
@@ -7915,6 +8486,11 @@ function wireKnowledgeView(view) {
   panel.onpointerover = (event) => {
     const layout = knowledgeLayouts.get(view);
     if (!layout) return;
+    /* 「강한 묶음」·「놀라운 연결」의 줄은 그림의 그 줄·그 다리를 밝힌다(t-12029). */
+    const tie = event.target.closest("[data-knowledge-tie]");
+    hotKnowledgeTie(view, tie ? Number(tie.dataset.knowledgeTie) : -1);
+    const bridge = event.target.closest("[data-knowledge-bridge]");
+    hotKnowledgeBridge(view, bridge ? Number(bridge.dataset.knowledgeBridge) : -1);
     const key = event.target.closest("[data-knowledge-key]")?.dataset.knowledgeKey ?? null;
     const next = key !== null && layout.model.keys.includes(key) ? key : null;
     if (next === knowledgeHoverKey) return;
@@ -7922,11 +8498,24 @@ function wireKnowledgeView(view) {
     litKnowledge(view, layout, next);
   };
   panel.onpointerleave = () => {
+    hotKnowledgeTie(view, -1);
+    hotKnowledgeBridge(view, -1);
     const layout = knowledgeLayouts.get(view);
     if (!layout || knowledgeHoverKey === null) return;
     knowledgeHoverKey = null;
     litKnowledge(view, layout, null);
   };
+  /* 키보드로 그 줄에 선 것도 짚은 것이다(t-12029). */
+  panel.addEventListener("focusin", (event) => {
+    const tie = event.target.closest?.("[data-knowledge-tie]");
+    if (tie) hotKnowledgeTie(view, Number(tie.dataset.knowledgeTie));
+    const bridge = event.target.closest?.("[data-knowledge-bridge]");
+    if (bridge) hotKnowledgeBridge(view, Number(bridge.dataset.knowledgeBridge));
+  });
+  panel.addEventListener("focusout", (event) => {
+    if (event.target.closest?.("[data-knowledge-tie]")) hotKnowledgeTie(view, -1);
+    if (event.target.closest?.("[data-knowledge-bridge]")) hotKnowledgeBridge(view, -1);
+  });
   wireKnowledgeNodeDrag(view, canvas);
   for (const button of view.querySelectorAll("[data-knowledge-flag]")) {
     button.onclick = () => {
@@ -8338,6 +8927,8 @@ async function paintKnowledgeView(tab = knowledgeTab()) {
   layout.viewport.fresh = false;
   pulseKnowledgeFresh(view, layout);
   if (layout.left > 0) knowledgeSettle(view);
+  /* 우주 보기(t-12443) — 평면의 프레임이 카메라(`viewBoxRect`)를 적은 뒤에 선다: 떠오르는 우주는 그 자리에서 뜬다. */
+  paintKnowledgeUniverse(view, layout);
   /* 다른 표면이 고른 페이지: 답이 있는 그림에서 한 번, 고르고 가운데로. */
   if (knowledgeRevealKey !== null && knowledgeReport !== null) {
     const seat = model.keys.indexOf(knowledgeRevealKey);

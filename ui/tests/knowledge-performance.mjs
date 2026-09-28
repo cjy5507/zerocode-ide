@@ -356,7 +356,8 @@ export async function measureKnowledgeScenes(page, ok,
      * SVG에서는 세 층이 든 요소(브라우저가 래스터화하는 단위)이고, GL에서는
      * 인스턴스 드로우 호출이다. */
     const drawCount = (layout) => (knowledgePainterFor(view).id === "svg"
-      ? view.querySelectorAll(".knowledge-clusters *, .knowledge-edges *, .knowledge-nodes *").length
+      ? view.querySelectorAll(".knowledge-clusters *, .knowledge-cluster-names *, .knowledge-edges *, .knowledge-nodes *")
+        .length
       : layout.paintStats.draws);
     const heapMb = () => (performance.memory
       ? Math.round((performance.memory.usedJSHeapSize / (1024 * 1024)) * 10) / 10
@@ -554,7 +555,7 @@ export async function measureKnowledgePainterSwap(page, ok) {
       await frame();
       return {
         elements: view.querySelectorAll(
-          ".knowledge-clusters *, .knowledge-edges *, .knowledge-nodes *").length,
+          ".knowledge-clusters *, .knowledge-cluster-names *, .knowledge-edges *, .knowledge-nodes *").length,
         nodeEls: knowledgeLayouts.get(view).nodeEls.length,
         cached: knowledgeLayouts.get(view).nodeCache.size,
       };
@@ -762,12 +763,16 @@ export async function measureKnowledgeGlParity(page, ok) {
     const plateHit = plate === null ? null : hitAt(plate);
     const wordHit = word === null ? null : hitAt(word);
     let picked = null;
+    /* 이름의 열쇠는 누르기 **전에** 읽는다 — 오버레이의 이름 칸은 판이 다시 설 때 다른 쪽의 이름을 입는다: 고른
+     * 쪽의 이웃이 이름을 얻으면 첫 칸이 그 이웃의 것이 된다(t-12029: 맞춤의 이름이 한 개에서 넷이 되자 누른 뒤의
+     * 첫 칸은 Page-0000, 누른 이름과 골라진 쪽은 둘 다 Page-0002였다). */
+    const wanted = word?.dataset.graphKey ?? null;
     if (wordHit?.hit) {
       wordHit.target.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: wordHit.x, clientY: wordHit.y }));
       picked = knowledgeSelectedKey;
     }
     const pressable = { plate: plateHit?.hit === true, label: wordHit?.hit === true,
-      picked: picked !== null && picked === word?.dataset.graphKey };
+      picked: picked !== null && picked === wanted };
     selectKnowledgeNode(view, null);
     fitKnowledgeGraph(view, held);
     /* 주변 탐색(첫 방문의 기본)도 같은 손으로 — 고리의 이름표는 격자가 쥔 상자에 서고
@@ -926,4 +931,100 @@ export async function measureKnowledgeGlParity(page, ok) {
     draws: seen.gl.draws, svgElements: seen.svgElements, glElements: seen.glElements,
     glLabels: seen.glLabels })}`);
   return seen;
+}
+
+/* ---- 두 손이 판의 크기와 상관없이 같은 그림을 그리는가 (t-12443, 코디 m-12652) ----------------
+ *
+ * 위의 대조는 판 하나(1280×860)에서 묻는다 — 그 판의 기하가 우연히 맞으면 두 손이 이름표 자리를
+ * 다르게 고르는 규칙이 숨는다(실측: 작은 판 여백 36 px(t-12029)부터 GL만 점 463에 이름표를 하나 더
+ * 세웠고, 머리에 「2D | 3D」가 들자 판의 기하가 바뀌어 다시 맞았다). 그래서 판의 크기를 여럿으로
+ * 바꾸고, 머리 단추가 없던 판의 기하도 되살려 묻는다: 같은 볼트·같은 고름에서 두 손의 이름판 자리
+ * (접힘 포함), 쪽 이름의 자리와 방향, 밝힌 집합이 같아야 한다. 격자·후보 순서·여백은 한 함수
+ * (`placeKnowledgeLabels`)의 것이고 손은 그 답을 그릴 뿐이다. */
+export const KNOWLEDGE_PARITY_STAGES = Object.freeze([
+  Object.freeze({ width: 1280, height: 860 }),
+  Object.freeze({ width: 1280, height: 860, bareHead: true }),
+  Object.freeze({ width: 1600, height: 900 }),
+  Object.freeze({ width: 1100, height: 800 }),
+  Object.freeze({ width: 960, height: 700 }),
+  Object.freeze({ width: 820, height: 640 }),
+  Object.freeze({ width: 649, height: 435 }),
+]);
+
+export async function measureKnowledgeGlParityStages(page, ok) {
+  const held = page.viewportSize();
+  const rows = [];
+  for (const stage of KNOWLEDGE_PARITY_STAGES) {
+    await page.setViewportSize({ width: stage.width, height: stage.height });
+    rows.push(await page.evaluate(async ({ bareHead }) => {
+      const view = document.querySelector(".knowledge-view:not([hidden])");
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      /* 머리 단추가 없던 판(t-12029의 머리) — 차원 단추 무리를 뺀 기하. */
+      const dimensions = view.querySelector(".knowledge-dimension");
+      const shown = dimensions?.style.display ?? "";
+      if (bareHead && dimensions) dimensions.style.display = "none";
+      knowledgeQuery = "";
+      knowledgeSelectedKey = null;
+      knowledgeClusterPicked = -1;
+      window.__VAULT__ = { pages: 600, linksPer: 3, ghosts: 40, tags: ["core", "reading", "tools"] };
+      knowledgeReport = window.__buildVaultGraph__({ path: "/parity", sources: false }, window.__VAULT__);
+      knowledgeEntryPending = false;
+      knowledgeRevealKey = null;
+      knowledgeMode = "global";
+      const pinned = knowledgePainterKind;
+      knowledgePainterKind = "svg";
+      knowledgeLayouts.delete(view);
+      await paintKnowledgeView();
+      for (let round = 0; round < 400; round += 1) {
+        await frame();
+        const now = knowledgeLayouts.get(view);
+        if (now !== undefined && now.count > 600 && now.left === 0) break;
+      }
+      const layout = knowledgeLayouts.get(view);
+      const centre = layout.model.keys[0];
+      selectKnowledgeNode(view, centre);
+      litKnowledge(view, layout, centre);
+      await paintKnowledgeView();
+      await frame();
+      const snapshot = () => {
+        const now = knowledgeLayouts.get(view);
+        const labels = [];
+        for (let at = 0; at < now.count; at += 1) {
+          if (now.labelShown[at] !== 1) continue;
+          labels.push(`${at}:${now.labelWhere[at]}@${Math.round(now.labelAtX[at])},${Math.round(now.labelAtY[at])}`);
+        }
+        const plates = [];
+        for (let rank = 0; rank < now.namedCount; rank += 1) {
+          const plate = now.clusterEls[rank]?.label;
+          plates.push(plate?.classList.contains("is-folded") ? "folded"
+            : `${Math.round(now.clusterAt[rank * 2])},${Math.round(now.clusterAt[rank * 2 + 1])}`);
+        }
+        return { painter: knowledgePainterFor(view).id, labels: labels.join(" "), plates: plates.join(" "),
+          lit: [...now.litNodes].sort((one, two) => one - two).join(","), tier: view.dataset.knowledgeTier ?? "" };
+      };
+      const svg = snapshot();
+      knowledgePainterKind = "gl";
+      await paintKnowledgeView();
+      await frame();
+      const gl = snapshot();
+      knowledgePainterKind = pinned;
+      selectKnowledgeNode(view, null);
+      if (dimensions) dimensions.style.display = shown;
+      await paintKnowledgeView();
+      const canvas = view.querySelector(".knowledge-canvas");
+      return { stage: `${window.innerWidth}x${window.innerHeight}${bareHead ? " (bare head)" : ""}`,
+        canvas: `${canvas.clientWidth}x${canvas.clientHeight}`, svg, gl };
+    }, { bareHead: stage.bareHead === true }));
+  }
+  await page.setViewportSize(held);
+  const differing = rows.filter((row) => row.gl.painter !== "gl" || row.svg.labels !== row.gl.labels
+    || row.svg.plates !== row.gl.plates || row.svg.lit !== row.gl.lit);
+  ok("at every stage size — and on the head without the 2D | 3D group — both hands stand the same topic plates, the same page labels in the same seats and the same lit set",
+    rows.length === KNOWLEDGE_PARITY_STAGES.length && differing.length === 0,
+    JSON.stringify(differing.map((row) => ({ stage: row.stage, canvas: row.canvas, tier: row.svg.tier,
+      painter: row.gl.painter, svg: { labels: row.svg.labels.slice(0, 300), plates: row.svg.plates },
+      gl: { labels: row.gl.labels.slice(0, 300), plates: row.gl.plates } }))).slice(0, 4000));
+  console.log(`METRIC knowledge gl parity stages: ${JSON.stringify(rows.map((row) => ({ stage: row.stage,
+    canvas: row.canvas, same: row.svg.labels === row.gl.labels && row.svg.plates === row.gl.plates })))}`);
+  return rows;
 }

@@ -38255,10 +38255,68 @@ details.task-board-section > summary {
   background-image: none;
 }
 
+/* 그림은 위치를 가진 층이다 — 그래야 그 앞에 선 밑층(`.knowledge-underlay`, 절대 위치)이 두 손 모두에서
+   그림의 **아래**에 선다(위치 있는 층은 문서 순서로 겹친다). */
 .knowledge-picture {
   display: block;
+  position: relative;
   width: 100%;
   height: 100%;
+}
+
+/* 밑층(t-12029): 군집 사이 묶음선. 점·선·성운보다 아래에 서고, 두 손(SVG·GL)이 이 한 <svg>를 쓴다 — 줄은
+   군집 쌍의 수(수십)만큼이라 DOM이 값을 치르지 않고, 곡선과 굵기가 두 그림에서 한 글자다. 포인터는
+   받지 않는다(캔버스의 것이다). */
+.knowledge-underlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* 묶음 한 줄. 굵기와 옅기는 쌍의 수에서 나오므로 줄마다 속성으로 적히고(`paintKnowledgeTies`), 여기
+   서는 잉크만 — 올리거나 고른 군집에 닿는 줄은 그 군집의 색, 목록에서 짚은 줄은 밝은 잉크. */
+.knowledge-tie {
+  fill: none;
+  stroke: var(--knowledge-tie-ink);
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.knowledge-tie.is-mine {
+  stroke: var(--knowledge-tint, var(--knowledge-tie-ink));
+}
+
+.knowledge-tie.is-hot {
+  stroke: var(--knowledge-tie-hot-ink);
+}
+
+/* 놀라운 연결(t-12029) — 두 군집의 색으로 이은 곡선(잉크는 줄마다의 그라데이션, `paintKnowledgeBridges`)과 가운데의
+   번호 원. 번호 원은 화면 픽셀로 서므로 배율의 역수를 transform으로 입는다(이름판과 같은 손). */
+.knowledge-bridge {
+  fill: none;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.knowledge-bridge-badge circle {
+  fill: var(--knowledge-ground);
+  stroke: var(--ink-chalk);
+}
+
+.knowledge-bridge-badge text {
+  fill: var(--ink-chalk);
+  font-size: calc(var(--knowledge-bridge-number-px) * 1px);
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+/* 묶음 안의 선(t-12029) — 쉬는 전체 지도의 군집 사이 낱선. 사람이 그 선을 묻는 순간(짚기·포커스·경로·
+   고르거나 올린 군집) 클래스가 떨어지고, 짚기는 프레임 없이 `is-lit`만 붙으므로 그 옷이 이긴다. */
+.knowledge-picture:not(.is-local) .knowledge-edge.is-bundled:not(.is-lit) {
+  display: none;
 }
 
 /* GL 페인터의 세 층 (6차 P2).
@@ -38331,6 +38389,423 @@ details.task-board-section > summary {
   font-weight: 500;
 }
 
+/* 우주 보기(t-12443, 승인된 시안 v4) — 평면 지도의 캔버스 위에 한 판으로 선다. 캔버스가 별·은하를 지고 그
+   위의 층이 이름표를 진다. 우주가 서 있는 동안(`is-universe`) 평면 지도의 층과 군집 범례는 가려진다 — 아래에서
+   그대로 살아 있다가 평면으로 돌아오면 다시 선다(자리는 한 번도 바뀌지 않는다). 문맥을 잃은 판은 이 클래스를
+   내려놓아 평면이 보이고 우주는 숨는다. */
+.knowledge-universe {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--knowledge-3d-stage);
+  cursor: grab;
+  touch-action: none;
+  transition: opacity var(--knowledge-3d-crossfade) var(--ease-standard);
+}
+
+.knowledge-universe.is-dragging {
+  cursor: grabbing;
+}
+
+.knowledge-view:not(.is-universe) .knowledge-universe {
+  display: none;
+}
+
+.knowledge-view.is-universe .knowledge-underlay,
+.knowledge-view.is-universe .knowledge-picture,
+.knowledge-view.is-universe .knowledge-gl,
+.knowledge-view.is-universe .knowledge-gl-labels,
+.knowledge-view.is-universe .knowledge-cluster-legend {
+  visibility: hidden;
+}
+
+.knowledge-universe-gl {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.knowledge-universe-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* 색을 묻는 견본 — 계산은 되되 그려지지 않는다. 전이하지 않는다: 테마가 바뀐 순간 우주가 묻는데, 전이 중인
+   견본은 앞 테마의 색을 답한다(평면 GL 손의 견본과 같은 까닭). */
+.knowledge-universe-probe {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: none;
+}
+
+/* 한 줄 알림(문맥 잃음·되찾음) — 무대의 위 가운데, 평면으로 돌아온 뒤에도 읽히는 자리. */
+.knowledge-universe-notice {
+  position: absolute;
+  top: var(--space-6);
+  left: 50%;
+  z-index: 3;
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  background: var(--glass-veil);
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%);
+  transition: opacity var(--knowledge-3d-crossfade) var(--ease-standard);
+}
+
+.knowledge-universe-notice.is-on {
+  opacity: 1;
+}
+
+/* 우주의 이름표(시안 CSS 57–78) — 모두 DOM 글자라 빛 번짐 뒤에서 번지지 않는다. 자리는 `transform` 하나이고
+   (카메라나 초점이 바뀐 프레임에만 다시 놓는다), 서고 숨는 것은 불투명도의 전이다. 색 칸의 잉크는 줄마다
+   `--knowledge-universe-ink`(평면 원반과 같은 색, 색 없는 군집은 안개색)이고, 글자의 둘레는 무대의 바탕색이다. */
+.knowledge-universe-plate {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: var(--knowledge-3d-plate-pad);
+  border: var(--rule-width) solid transparent;
+  border-radius: var(--knowledge-3d-plate-radius);
+  background: color-mix(in srgb, var(--knowledge-3d-stage) var(--knowledge-3d-plate-veil), transparent);
+  color: var(--ink-chalk);
+  font: inherit;
+  line-height: var(--knowledge-3d-plate-leading);
+  text-align: left;
+  white-space: nowrap;
+  text-shadow: 0 1px 8px var(--knowledge-3d-stage), 0 0 2px var(--knowledge-3d-stage);
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  will-change: transform;
+  transition:
+    opacity var(--knowledge-3d-plate-fade) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.knowledge-universe-plate.is-on {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.knowledge-universe-plate.is-on.is-dim {
+  opacity: var(--knowledge-3d-plate-dim);
+}
+
+.knowledge-universe-plate.is-full {
+  padding: var(--knowledge-3d-plate-full-pad);
+  border-color: var(--glass-edge);
+  border-left: var(--accent-rule) solid var(--knowledge-universe-ink);
+  background: var(--glass-veil);
+  box-shadow: var(--shadow-soft);
+  text-shadow: none;
+  backdrop-filter: var(--knowledge-inspector-blur);
+}
+
+.knowledge-universe-plate.is-full:hover {
+  border-color: var(--knowledge-universe-ink);
+}
+
+.knowledge-universe-plate.is-full[aria-pressed="true"] {
+  border-color: var(--knowledge-universe-ink);
+  box-shadow:
+    0 0 0 var(--rule-width) var(--knowledge-universe-ink) inset,
+    0 0 24px color-mix(in srgb, var(--knowledge-universe-ink) 22%, transparent),
+    var(--shadow-soft);
+}
+
+.knowledge-universe-plate-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.knowledge-universe-plate-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.knowledge-universe-plate-name::before {
+  content: "";
+  flex: none;
+  width: var(--knowledge-3d-plate-dot);
+  height: var(--knowledge-3d-plate-dot);
+  border-radius: var(--radius-pill);
+  background: var(--knowledge-universe-ink);
+  box-shadow: 0 0 6px var(--knowledge-universe-ink);
+}
+
+.knowledge-universe-plate.is-full .knowledge-universe-plate-name::before {
+  display: none;
+}
+
+.knowledge-universe-plate-count {
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+}
+
+.knowledge-universe-plate.is-on:not(.is-full):hover .knowledge-universe-plate-name {
+  text-decoration: underline;
+  text-decoration-color: var(--knowledge-universe-ink);
+  text-underline-offset: 3px;
+}
+
+/* 둘째 줄(가장 굵은 필라멘트 — → 보냄 · ← 받음)은 크게 선 명판에만. */
+.knowledge-universe-plate-flow {
+  display: none;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: 2px;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.knowledge-universe-plate.is-full .knowledge-universe-plate-flow {
+  display: flex;
+}
+
+.knowledge-universe-plate-mark {
+  flex: none;
+  width: var(--knowledge-3d-plate-mark);
+  height: var(--knowledge-3d-plate-mark);
+  border-radius: var(--radius-pill);
+  background: var(--knowledge-universe-ink);
+}
+
+.knowledge-universe-plate-flow em {
+  color: var(--ink-chalk);
+  font-style: normal;
+}
+
+/* 순위 뒤의 은하는 작은 명판 — 이름만, 안개색으로. */
+.knowledge-universe-plate.is-minor:not(.is-full) .knowledge-universe-plate-name {
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+  font-weight: 560;
+}
+
+.knowledge-universe-plate.is-minor:not(.is-full) .knowledge-universe-plate-count {
+  display: none;
+}
+
+.knowledge-universe-plate:focus-visible {
+  outline: var(--accent-rule) solid var(--ink-chalk);
+  outline-offset: var(--knowledge-focus-offset);
+}
+
+.knowledge-universe-name {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: var(--knowledge-3d-name-pad);
+  border-radius: var(--knowledge-3d-name-radius);
+  background: color-mix(in srgb, var(--knowledge-3d-stage) var(--knowledge-3d-name-veil), transparent);
+  color: var(--ink-chalk);
+  font-size: var(--text-2xs);
+  font-weight: 560;
+  white-space: nowrap;
+  text-shadow: 0 1px 6px var(--knowledge-3d-stage);
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+  transition: opacity var(--knowledge-3d-name-fade) var(--ease-standard);
+}
+
+.knowledge-universe-name.is-on {
+  opacity: var(--knowledge-3d-name-on);
+}
+
+.knowledge-universe-name.is-hot {
+  border: var(--rule-width) solid var(--glass-edge);
+  background: var(--glass-veil);
+}
+
+.knowledge-universe-name.is-on.is-hot {
+  opacity: 1;
+}
+
+.knowledge-universe-flow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--knowledge-3d-flow-pad);
+  border-radius: var(--knowledge-3d-plate-radius);
+  background: color-mix(in srgb, var(--knowledge-3d-stage) var(--knowledge-3d-name-veil), transparent);
+  color: var(--ink-chalk);
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+  transition: opacity var(--knowledge-3d-plate-fade) var(--ease-standard);
+}
+
+.knowledge-universe-flow.is-on {
+  opacity: var(--knowledge-3d-name-on);
+}
+
+.knowledge-universe-flow-arrow {
+  flex: none;
+  width: 14px;
+  height: 8px;
+  fill: none;
+  stroke: var(--knowledge-3d-flow-arrow);
+  stroke-width: 1.3;
+}
+
+/* 올린 별의 팁 — 이름표 층의 맨 위. */
+.knowledge-universe-tip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--knowledge-3d-tip-pad);
+  border: var(--rule-width) solid var(--glass-edge);
+  border-left: var(--accent-rule) solid var(--knowledge-universe-ink);
+  border-radius: var(--knowledge-3d-tip-radius);
+  background: var(--glass-veil);
+  box-shadow: var(--shadow-soft);
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+  /* 문장 제목도 판 안에서 줄을 바꾼다 — 팁이 비워 둔 넓이(`tip-room`)가 곧 폭이다(디자이너 m-12642). */
+  max-width: calc(var(--knowledge-3d-tip-room) * 1px);
+  overflow-wrap: anywhere;
+  opacity: 0;
+  pointer-events: none;
+  backdrop-filter: var(--knowledge-inspector-blur);
+  transition: opacity var(--knowledge-3d-tip-fade) var(--ease-standard);
+}
+
+.knowledge-universe-tip.is-on {
+  opacity: 1;
+}
+
+.knowledge-universe-tip-note {
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+/* 「보기」의 우주 줄 — 우주가 서 있는 동안만. */
+.knowledge-view:not(.is-universe) .knowledge-universe-controls {
+  display: none;
+}
+
+/* 다른 렌즈와 같은 세그먼트 컨트롤의 옷 — 켠 단추는 `is-active`를 입는다. */
+.knowledge-universe-controls {
+  display: flex;
+  flex: none;
+  gap: 0;
+  overflow: hidden;
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+}
+
+/* 범례의 우주 네 줄(시안 CSS 41–54) — 우주가 서 있는 동안만, 그리고 그동안 평면의 줄은 가린다. */
+.knowledge-view:not(.is-universe) .knowledge-legend-list > [data-legend-universe],
+.knowledge-view.is-universe .knowledge-legend-list > li:not([data-legend-universe]) {
+  display: none;
+}
+
+.knowledge-legend-universe {
+  position: relative;
+  display: inline-block;
+  flex: none;
+}
+
+.knowledge-legend-universe.kind-star {
+  width: 11px;
+  height: 11px;
+  border-radius: var(--radius-pill);
+  background: radial-gradient(circle, var(--knowledge-3d-legend-star-core) 0 18%, var(--knowledge-3d-legend-star-glow) 30%,
+    transparent 70%);
+}
+
+.knowledge-legend-universe.kind-star::before,
+.knowledge-legend-universe.kind-star::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  background: var(--knowledge-3d-legend-star-ray);
+  opacity: 0.8;
+  transform: translate(-50%, -50%);
+}
+
+.knowledge-legend-universe.kind-star::before {
+  width: 13px;
+  height: 1px;
+}
+
+.knowledge-legend-universe.kind-star::after {
+  width: 1px;
+  height: 13px;
+}
+
+.knowledge-legend-universe.kind-temp {
+  width: 34px;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--knowledge-3d-legend-old), var(--knowledge-3d-legend-mid) 45%,
+    var(--knowledge-3d-legend-new));
+}
+
+.knowledge-legend-universe.kind-filament {
+  width: 30px;
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, transparent, var(--knowledge-3d-legend-flow) 25%, var(--knowledge-3d-legend-flow-mid) 50%,
+    var(--knowledge-3d-legend-flow) 75%, transparent);
+}
+
+.knowledge-legend-universe.kind-filament::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--knowledge-3d-legend-flow-head);
+  box-shadow: var(--knowledge-3d-legend-flow-glow);
+}
+
+.knowledge-legend-universe.kind-solid,
+.knowledge-legend-universe.kind-dots {
+  width: 22px;
+  height: 1.5px;
+}
+
+.knowledge-legend-universe.kind-solid {
+  background: var(--ink-mist);
+}
+
+.knowledge-legend-universe.kind-dots {
+  background: repeating-linear-gradient(90deg, var(--ink-mist) 0 2px, transparent 2px 5px);
+}
+
 /* 색을 묻는 견본. 그려지지는 않지만 계산은 된다 — `display: none`이면 브라우저가
    값을 풀어 주지 않는 판이 있어 크기를 0으로 두고 숨긴다. */
 .knowledge-gl-swatch {
@@ -38355,32 +38830,34 @@ details.task-board-section > summary {
  * 있으면 아홉째 색이 생기는 날 다섯 곳 중 넷만 고쳐진다. 물드는 쪽은
  * `--knowledge-tint`와 세 채움만 읽는다. 군집이 없는 점은 물들지 않는다 — 색은
  * 구분이지 장식이 아니다. */
-.knowledge-view [data-hue="0"] { --knowledge-tint: var(--knowledge-hue-0); --knowledge-node-fill: url(#knowledge-node-gradient-0); --knowledge-halo-fill: url(#knowledge-halo-gradient-0); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-0); }
-.knowledge-view [data-hue="1"] { --knowledge-tint: var(--knowledge-hue-1); --knowledge-node-fill: url(#knowledge-node-gradient-1); --knowledge-halo-fill: url(#knowledge-halo-gradient-1); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-1); }
-.knowledge-view [data-hue="2"] { --knowledge-tint: var(--knowledge-hue-2); --knowledge-node-fill: url(#knowledge-node-gradient-2); --knowledge-halo-fill: url(#knowledge-halo-gradient-2); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-2); }
-.knowledge-view [data-hue="3"] { --knowledge-tint: var(--knowledge-hue-3); --knowledge-node-fill: url(#knowledge-node-gradient-3); --knowledge-halo-fill: url(#knowledge-halo-gradient-3); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-3); }
-.knowledge-view [data-hue="4"] { --knowledge-tint: var(--knowledge-hue-4); --knowledge-node-fill: url(#knowledge-node-gradient-4); --knowledge-halo-fill: url(#knowledge-halo-gradient-4); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-4); }
-.knowledge-view [data-hue="5"] { --knowledge-tint: var(--knowledge-hue-5); --knowledge-node-fill: url(#knowledge-node-gradient-5); --knowledge-halo-fill: url(#knowledge-halo-gradient-5); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-5); }
-.knowledge-view [data-hue="6"] { --knowledge-tint: var(--knowledge-hue-6); --knowledge-node-fill: url(#knowledge-node-gradient-6); --knowledge-halo-fill: url(#knowledge-halo-gradient-6); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-6); }
-.knowledge-view [data-hue="7"] { --knowledge-tint: var(--knowledge-hue-7); --knowledge-node-fill: url(#knowledge-node-gradient-7); --knowledge-halo-fill: url(#knowledge-halo-gradient-7); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-7); }
+.knowledge-view [data-hue="0"] { --knowledge-tint: var(--knowledge-hue-0); --knowledge-node-fill: url(#knowledge-node-gradient-0); --knowledge-halo-fill: url(#knowledge-halo-gradient-0); }
+.knowledge-view [data-hue="1"] { --knowledge-tint: var(--knowledge-hue-1); --knowledge-node-fill: url(#knowledge-node-gradient-1); --knowledge-halo-fill: url(#knowledge-halo-gradient-1); }
+.knowledge-view [data-hue="2"] { --knowledge-tint: var(--knowledge-hue-2); --knowledge-node-fill: url(#knowledge-node-gradient-2); --knowledge-halo-fill: url(#knowledge-halo-gradient-2); }
+.knowledge-view [data-hue="3"] { --knowledge-tint: var(--knowledge-hue-3); --knowledge-node-fill: url(#knowledge-node-gradient-3); --knowledge-halo-fill: url(#knowledge-halo-gradient-3); }
+.knowledge-view [data-hue="4"] { --knowledge-tint: var(--knowledge-hue-4); --knowledge-node-fill: url(#knowledge-node-gradient-4); --knowledge-halo-fill: url(#knowledge-halo-gradient-4); }
+.knowledge-view [data-hue="5"] { --knowledge-tint: var(--knowledge-hue-5); --knowledge-node-fill: url(#knowledge-node-gradient-5); --knowledge-halo-fill: url(#knowledge-halo-gradient-5); }
+.knowledge-view [data-hue="6"] { --knowledge-tint: var(--knowledge-hue-6); --knowledge-node-fill: url(#knowledge-node-gradient-6); --knowledge-halo-fill: url(#knowledge-halo-gradient-6); }
+.knowledge-view [data-hue="7"] { --knowledge-tint: var(--knowledge-hue-7); --knowledge-node-fill: url(#knowledge-node-gradient-7); --knowledge-halo-fill: url(#knowledge-halo-gradient-7); }
 
 /* 그라데이션의 불투명도. 수는 토큰의 것이고 `<stop>`은 클래스로 그것을 읽는다. */
 .knowledge-stop-halo-core { stop-opacity: var(--knowledge-halo-core); }
-.knowledge-stop-nebula-core { stop-opacity: var(--knowledge-nebula-core); }
 .knowledge-stop-fade { stop-opacity: 0; }
 
 /* 주제의 원반과 그 이름 (성좌 배치, 09-16).
  *
  * 전체 지도의 첫 물음은 「어떤 주제들이 있는가」이므로, 그 답인 군집의 이름이
  * 그림 위에 선다 — 예전에는 `display: none`이라 범례에만 있었고, 범례는 점을
- * 보면서 읽을 수 없는 자리다. 원반은 평평한 색 한 겹과 테두리 한 올이다:
- * 빛 번짐은 글자와 선의 경계를 먹는다(사용자 조건).
+ * 보면서 읽을 수 없는 자리다. 원반은 평평하고 옅은 색 한 겹이다(t-12029, 시안 v2
+ * 「colour」): 가운데가 밝은 번짐도, 쉬는 테두리도 없다 — 빛 번짐은 글자와 선의 경계를
+ * 먹고(사용자 조건), 열일곱 개의 테두리는 원반보다 테두리를 먼저 읽게 한다. 테두리는
+ * 사람이 그 군집을 밝힐 때(고르거나 이름판에 올라설 때) 한 올 선다. 색이 없는 군집의
+ * 원반은 같은 몫의 안개색이다.
  *
  * 주변 탐색(`is-local`)에서는 서지 않는다 — 그 화면의 주제는 중심 하나다. */
 .knowledge-nebula {
   display: none;
-  fill: var(--knowledge-nebula-fill, none);
-  stroke: color-mix(in srgb, var(--knowledge-tint, var(--ink-mist)) var(--knowledge-nebula-edge-weight), transparent);
+  fill: color-mix(in srgb, var(--knowledge-tint, var(--ink-mist)) calc(var(--knowledge-nebula-core) * 100%), transparent);
+  stroke: none;
   stroke-width: var(--knowledge-nebula-edge-width);
   pointer-events: none;
   vector-effect: non-scaling-stroke;
@@ -38392,58 +38869,35 @@ details.task-board-section > summary {
   display: block;
 }
 
+.knowledge-nebula.is-spotlit {
+  stroke: color-mix(in srgb, var(--knowledge-tint, var(--ink-mist)) var(--knowledge-nebula-edge-weight), transparent);
+}
+
 .knowledge-cluster-label {
   display: none;
   cursor: pointer;
   transition: opacity var(--motion-fast) var(--ease-standard);
 }
 
+/* 주제의 이름 한 줄(t-12029, 시안 v2 「oneLine」) — 색 있는 군집은 제 색으로, 확대할수록 물러선다
+   (`--knowledge-cluster-fade`, 프레임이 배율에서 쓴다). */
 .knowledge-cluster-name {
   fill: var(--knowledge-tint, var(--ink-label));
   font-size: calc(var(--knowledge-cluster-label-px) * 1px);
-  font-weight: 650;
-  letter-spacing: var(--knowledge-cluster-label-tracking);
+  font-weight: 600;
   dominant-baseline: middle;
-  opacity: var(--knowledge-cluster-label-opacity);
+  opacity: calc(var(--knowledge-cluster-label-opacity) * var(--knowledge-cluster-fade, 1));
   paint-order: stroke;
   stroke: var(--knowledge-ground);
   stroke-width: calc(var(--knowledge-label-outline-px) * 3px);
   stroke-linejoin: round;
 }
 
-/* 주제의 대표 지식 — 그 군집에서 연결이 가장 많은 쪽의 제목. 이름표 경쟁에
- * 맡기지 않고 주제의 이름 바로 아래 붙인다: 전체 지도의 약속이 「주제와 대표
- * 지식」이므로 그 둘은 함께 서야 한다. */
-.knowledge-cluster-lead {
-  fill: var(--ink-chalk);
-  font-size: calc(var(--knowledge-cluster-count-px) * 1px);
-  dominant-baseline: middle;
-  paint-order: stroke;
-  stroke: var(--knowledge-ground);
-  stroke-width: calc(var(--knowledge-label-outline-px) * 3px);
-  stroke-linejoin: round;
-}
-
-/* 좁은 판에서 이름판은 주제의 이름 한 줄이다 — 대표 지식과 쪽 수는 인스펙터와
- * 군집 범례가 계속 말한다(`placeKnowledgeLabels`가 같은 답으로 자리를 잡는다). 넓은 판에서도
- * 세 줄이 설 곳이 없는 판 하나는 같은 옷의 한 줄로 선다(`is-one-line`) — 접히는 대신. */
-.knowledge-picture.is-short-plate .knowledge-cluster-lead,
-.knowledge-picture.is-short-plate .knowledge-cluster-count,
-.knowledge-cluster-label.is-one-line .knowledge-cluster-lead,
-.knowledge-cluster-label.is-one-line .knowledge-cluster-count {
-  display: none;
-}
-
-/* 「쪽 n · 이름 +m」 — 이 주제에 몇 쪽이 있고 그중 몇 개의 이름을 접었는가.
- * 접었다는 사실을 그림이 스스로 말한다(사용자 조건). */
-.knowledge-cluster-count {
-  fill: var(--ink-label);
-  font-size: calc(var(--knowledge-cluster-count-px) * 1px);
-  dominant-baseline: middle;
-  paint-order: stroke;
-  stroke: var(--knowledge-ground);
-  stroke-width: calc(var(--knowledge-label-outline-px) * 2px);
-  stroke-linejoin: round;
+/* 색 없는 군집의 이름 — 안개색의 작은 한 줄(쪽 수와 대표 지식은 팁이 말한다). */
+.knowledge-cluster-label.is-quiet .knowledge-cluster-name {
+  fill: var(--ink-mist);
+  font-size: calc(var(--knowledge-cluster-quiet-px) * 1px);
+  font-weight: 500;
 }
 
 .knowledge-cluster-label:focus-visible {
@@ -38489,8 +38943,10 @@ details.task-board-section > summary {
 /* 모서리가 있는 모양(`KNOWLEDGE_SHAPES`)의 테두리는 둥글게 잇는다 — GL 손은 모양의 참
  * 거리로 테두리를 긋고, 그 바깥 모서리는 둥근 이음과 같은 곡선이다. 기본값(miter)이면
  * 삼각형의 꼭짓점에서 두 손의 테두리가 선 굵기만큼 갈린다. */
+/* 잎도 제 군집의 색 그대로다(t-12029, 시안 v2 「colour」) — 색을 입는 군집은 가장 큰 여덟뿐이라 색이 곧 주제를
+   가르고, 안개색을 72% 섞어 흐리던 잎은 색이 무엇을 가르는지 흐렸다. 색이 없는 군집의 쪽은 안개색이다. */
 .knowledge-dot {
-  fill: color-mix(in srgb, var(--ink-mist) var(--knowledge-node-muted-weight), var(--knowledge-tint, var(--ink-mist)));
+  fill: var(--knowledge-tint, var(--ink-mist));
   stroke: var(--knowledge-ground);
   stroke-width: var(--knowledge-node-stroke);
   stroke-linejoin: round;
@@ -38517,12 +38973,15 @@ details.task-board-section > summary {
 }
 
 /* 아직 쓰지 않은 페이지: 채우지 않은 점선 테두리. 형태로도 구분되므로 색을
- * 못 보는 눈에도 「없는 페이지」가 보인다(§8). */
+ * 못 보는 눈에도 「없는 페이지」가 보인다(§8). 가리키기는 원 안 전체가 받는다(t-12029) — 채우지 않은 원은
+ * 칠한 점선 조각만 포인터에 닿고, 전체 지도의 유령이 반지름 2.2 px가 된 뒤로 그 가운데는 짚히지 않았다(GL은
+ * 가장 가까운 중심으로 고르므로 두 손이 같게). */
 .knowledge-node.is-ghost .knowledge-dot {
   fill: none;
   stroke: var(--signal-wait);
   stroke-dasharray: var(--knowledge-node-ghost-dash);
   stroke-width: var(--knowledge-node-ghost-stroke);
+  pointer-events: visible;
 }
 
 /* 활동 고리(t-2931): 창 안에서 회상된 점은 halo를 고리로 두른다 — 채움 없이
@@ -39601,6 +40060,13 @@ h4.knowledge-inspector-head::after {
   outline-offset: var(--knowledge-focus-offset);
 }
 
+/* 색이 없는 군집들의 한 줄(t-12029) — 단추가 아니므로 짚어도 밝아지지 않는다. */
+.knowledge-cluster-key.is-quiet,
+.knowledge-cluster-key.is-quiet:hover {
+  color: var(--ink-mist);
+  cursor: default;
+}
+
 .knowledge-cluster-dot {
   flex: none;
   width: var(--knowledge-chip-dot);
@@ -39610,7 +40076,8 @@ h4.knowledge-inspector-head::after {
 }
 
 .knowledge-depth-step.is-active,
-.knowledge-mode-step.is-active {
+.knowledge-mode-step.is-active,
+.knowledge-dimension-step.is-active {
   border-color: var(--edge-glint);
   background: var(--row-active);
   color: var(--ink-chalk);
@@ -39619,8 +40086,10 @@ h4.knowledge-inspector-head::after {
 /* ---- 「전체 지도 | 주변 탐색」 (t-4140) ----
  *
  * 토글은 머리의 세그먼트이고 눌린 쪽이 지금의 모드다(`aria-pressed`). 좁은 판은
- * 낱말을 접고 그림만 남긴다 — 이름은 `aria-label`이 든다. */
-.knowledge-mode {
+ * 낱말을 접고 그림만 남긴다 — 이름은 `aria-label`이 든다. 「2D | 3D」(t-12443)도 같은 세그먼트다 —
+ * 낱말이 둘 다 짧아 접지 않는다. */
+.knowledge-mode,
+.knowledge-dimension {
   display: flex;
   flex: none;
   gap: var(--space-1);
@@ -39631,9 +40100,16 @@ h4.knowledge-inspector-head::after {
   background: var(--surface-well);
 }
 
-.knowledge-mode-step {
+.knowledge-mode-step,
+.knowledge-dimension-step {
   border-color: transparent;
   background: transparent;
+}
+
+/* 우주를 그릴 수 없는 판의 3D — 누를 수 없지만 초점과 손은 받아 팁이 까닭을 말한다. */
+.knowledge-dimension-step[aria-disabled="true"] {
+  color: var(--ink-mist);
+  cursor: not-allowed;
 }
 
 .knowledge-view.is-toolbar-compact .knowledge-mode-step span,
@@ -39645,7 +40121,8 @@ h4.knowledge-inspector-head::after {
 /* 가장 좁은 판(이름도 접히는 폭)에서는 토글이 서지 않는다 — 실측: 단추 하나(26px)가
  * 280px의 머리를 넘쳤다. 주변 탐색은 검색 후보의 「주변 탐색으로」·워크벤치의
  * 「연결 보기」·Esc로 여전히 닿고, 빵부스러기의 「전체 지도」가 돌아오는 문이다. */
-.knowledge-view.is-tier-tiny .knowledge-mode {
+.knowledge-view.is-tier-tiny .knowledge-mode,
+.knowledge-view.is-tier-tiny .knowledge-dimension {
   display: none;
 }
 
@@ -40011,6 +40488,7 @@ h4.knowledge-inspector-head::after {
 /* 새 손잡이의 포커스 링(t-4140 S7) — 캔버스·검색 상자·목록 줄과 같은 링. 색만이
  * 포커스를 말하지 않는다: 바깥선 하나가 어느 판에서도 선다. */
 .knowledge-mode-step:focus-visible,
+.knowledge-dimension-step:focus-visible,
 .knowledge-crumb-back:focus-visible,
 .knowledge-crumb-root:focus-visible,
 .knowledge-candidate:focus-visible,
@@ -40095,6 +40573,13 @@ h4.knowledge-inspector-head::after {
   .knowledge-edge,
   .knowledge-chip,
   .knowledge-mode-step,
+  .knowledge-dimension-step,
+  .knowledge-universe,
+  .knowledge-universe-notice,
+  .knowledge-universe-plate,
+  .knowledge-universe-name,
+  .knowledge-universe-flow,
+  .knowledge-universe-tip,
   .knowledge-candidate,
   .knowledge-search-results li,
   .knowledge-crumb,

@@ -908,7 +908,8 @@ export async function measureKnowledgeSupplyScene(page, ok, { painter = "svg", r
         labelsShown: boxes.length,
         labelOverlaps: window.__knowledgeOverlapPairs__(boxes, 0.5),
         draws: knowledgePainterFor(view).id === "svg"
-          ? view.querySelectorAll(".knowledge-clusters *, .knowledge-edges *, .knowledge-nodes *").length
+          ? view.querySelectorAll(".knowledge-clusters *, .knowledge-cluster-names *, .knowledge-edges *, .knowledge-nodes *")
+            .length
           : layout.paintStats.draws,
       };
       knowledgeSupplyShown = false;
@@ -1069,7 +1070,7 @@ export async function measureKnowledgeSupplyParity(glPage, ok) {
     const style = document.createElement("style");
     style.id = "knowledge-supply-pixels";
     style.textContent = ".knowledge-view .knowledge-label, .knowledge-view .knowledge-gl-label, .knowledge-view .knowledge-edges,"
-      + " .knowledge-view .knowledge-clusters { visibility: hidden !important; }";
+      + " .knowledge-view .knowledge-clusters, .knowledge-view .knowledge-cluster-names { visibility: hidden !important; }";
     document.head.appendChild(style);
     return true;
   }, { tune: SUPPLY_PIXELS });
