@@ -158,6 +158,13 @@ class MeasuredRunTest(unittest.TestCase):
             smart = json.loads((reflex.bench_home(plain) / "settings.json").read_text())["smart"]
             self.assertNotIn(reflex.COVER_SETTING, smart)
 
+    def test_a_scene_run_under_each_word_has_a_folder_of_its_own(self):
+        scene = {"seed": 9}
+        self.assertEqual(reflex.run_name(11), 11)
+        self.assertEqual(reflex.run_name(11, scene), "11-cover-9")
+        self.assertEqual({reflex.run_name(11, scene, mode) for mode in ("auto", "off")},
+                         {"11-cover-9-auto", "11-cover-9-off"})
+
     def test_an_autopilot_that_ended_covered_asked_the_person_once(self):
         with tempfile.TemporaryDirectory() as folder:
             run = pathlib.Path(folder)

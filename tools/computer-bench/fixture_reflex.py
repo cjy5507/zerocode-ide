@@ -720,6 +720,14 @@ def keys_for(values, generator, read):
     return {name: key for name, key in env.items() if key}, None
 
 
+def run_name(seed, cover=None, cover_mode=None):
+    """A run's folder name: its round's seed, and the covered scene and the
+    cover seat's word it ran under — one folder a run, never reused."""
+    if cover is None:
+        return seed
+    return f"{seed}-cover-{cover['seed']}" + (f"-{cover_mode}" if cover_mode else "")
+
+
 def bench_home(run, cover_mode=None):
     """The run's own zo home: its settings consent the run's folder (the
     evidence folder the autopilot's questions come from) and nothing else,
@@ -977,7 +985,7 @@ class Desk:
         print(f"reflex bench: the pointer will move on the fixture in {safety['announce_s']} s for "
               f"{self.values['reflex_round']['run_s']} s — any keyboard or mouse input stops it", flush=True)
         time.sleep(safety["announce_s"])
-        run = self.run_folder(seed if cover is None else f"{seed}-cover-{cover['seed']}")
+        run = self.run_folder(run_name(seed, cover, cover_mode))
         ready = self.launch(run, seed, cover)
         many = rules or self.values["reflex_plan"]["rules_per_colour"]
         config = CONFIG if many == self.values["reflex_plan"]["rules_per_colour"] else f"{CONFIG}+rules{many}"
