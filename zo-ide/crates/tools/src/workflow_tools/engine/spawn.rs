@@ -709,6 +709,7 @@ fn run_focused_reverify(
         schema,
     );
     let step = RepairStep {
+        launch: validator.map_or_else(|| phase.launch.clone(), |step| step.launch.clone()),
         prompt: template.to_string(),
         subagent_type: validator
             .and_then(|step| step.subagent_type.clone())
@@ -752,6 +753,7 @@ fn repair_agent_input(
     let model = step.model.clone().or_else(|| phase.model.clone());
     AgentInput {
         route_probe_confidence: None,
+        launch: step.launch.inherit(&phase.launch),
         fork_source: None,
         allow_cross_provider: model.is_some(),
         description: format!("workflow phase `{}` finding `{}`", phase.id, finding.id),

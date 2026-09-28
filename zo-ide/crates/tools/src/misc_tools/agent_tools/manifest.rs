@@ -1258,6 +1258,8 @@ fn loaded_skill_name(input_json: &str) -> Option<String> {
 fn read_activity_snapshot(manifest_path: &std::path::Path) -> Option<AgentActivitySnapshot> {
     let text = std::fs::read_to_string(manifest_path).ok()?;
     let manifest = serde_json::from_str::<AgentOutput>(&text).ok()?;
+    // 원장 CLI는 네이티브 API 표식을 쓰지 않는다. 그 빈칸을 무진척으로 읽으면 정상 작업도 4분에 닫힌다.
+    if manifest.lifecycle.execution.as_deref() == Some("ledger") { return None; }
     Some(AgentActivitySnapshot {
         started_at: manifest.started_at.as_deref().and_then(|value| value.parse().ok()),
         stream_open_at: manifest.activity.stream_open_at,
@@ -1308,6 +1310,21 @@ mod activity_tests {
         }))
         .expect("minimal legacy manifest should deserialize");
         (dir, manifest)
+    }
+
+    #[test]
+    fn ledger_workers_have_no_native_api_activity_for_a_watchdog_to_judge() {
+        let (directory, mut manifest) = test_manifest("ledger-activity");
+        write_agent_manifest(&manifest).unwrap();
+        let path = Path::new(&manifest.manifest_file);
+        assert!(read_activity_snapshot(path).is_some());
+        manifest.lifecycle.execution = Some("ledger".to_string());
+        write_agent_manifest(&manifest).unwrap();
+        assert!(read_activity_snapshot(path).is_none(), "an external CLI has no native API telemetry; absence is not inactivity");
+        manifest.lifecycle.execution = Some("pane".to_string());
+        write_agent_manifest(&manifest).unwrap();
+        assert!(read_activity_snapshot(path).is_some());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

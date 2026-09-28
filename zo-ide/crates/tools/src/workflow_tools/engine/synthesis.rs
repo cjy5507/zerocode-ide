@@ -25,6 +25,7 @@ pub(super) fn run_synthesize(
     let prompt = synth.prompt.replace("{all}", &all);
     let agent_input = AgentInput {
         route_probe_confidence: None,
+        launch: synth.launch.clone(),
         fork_source: None,
         allow_cross_provider: synth.model.is_some(),
         description: "workflow synthesize".to_string(),
@@ -186,6 +187,7 @@ pub(super) fn run_judge(
     );
     let agent_input = AgentInput {
         route_probe_confidence: None,
+        launch: judge.launch.clone(),
         fork_source: None,
         allow_cross_provider: judge.model.is_some(),
         description: "workflow judge".to_string(),

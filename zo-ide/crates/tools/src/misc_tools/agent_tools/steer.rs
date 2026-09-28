@@ -57,6 +57,19 @@ impl SteerRoute {
 /// returned, so the roster frame and the hook reporter say the same thing the
 /// tool result did.
 pub(crate) fn steer_agent_with_receipt(manifest: &AgentOutput, text: String) -> SteerOutcome {
+    if let Some(seat) = &manifest.lifecycle.ledger {
+        let outcome = match super::ledger::steer(seat, &text) {
+            Ok(()) => SteerOutcome::queued(),
+            Err(error) => SteerOutcome::rejected(error.to_string()),
+        };
+        super::manifest::stamp_agent_receipt(manifest, SteerReceiptRecord::now(&outcome));
+        return outcome;
+    }
+    if manifest.lifecycle.execution.as_deref() == Some("ledger") {
+        let outcome = SteerOutcome::rejected("the ledger worker has not finished starting; retry after Agent returns its worker binding");
+        super::manifest::stamp_agent_receipt(manifest, SteerReceiptRecord::now(&outcome));
+        return outcome;
+    }
     let outcome = match SteerRoute::for_manifest(manifest) {
         SteerRoute::InProcess => steer_in_process(manifest, text),
         SteerRoute::PaneChannel { channel } => {
@@ -141,6 +154,20 @@ impl PaneChildChannel {
 mod tests {
     use super::*;
     use runtime::subagent_panes::SteerReceipt;
+
+    #[test]
+    fn a_starting_ledger_worker_cannot_claim_delivery_to_the_unused_native_queue() {
+        let isolated = crate::misc_tools::agent_tools::tests::IsolatedStore::new("steer-ledger-starting");
+        let mut manifest = isolated.running_manifest("agent-ledger-starting");
+        manifest.lifecycle.execution = Some("ledger".to_string());
+        super::super::manifest::write_agent_manifest(&manifest).unwrap();
+        let queue = runtime::SteeringQueue::default();
+        super::super::register_agent_steering(manifest.agent_id.clone(), manifest.run_generation, queue.clone());
+        let receipt = steer_agent_with_receipt(&manifest, "follow up".into());
+        super::super::unregister_agent_steering(&manifest.agent_id, manifest.run_generation);
+        assert_eq!(receipt.receipt, SteerReceipt::Rejected);
+        assert!(queue.lock().unwrap().is_empty());
+    }
 
     /// An in-process child with no live queue is a rejection that says so;
     /// with one, the push is `queued` — never `consumed`, which only a

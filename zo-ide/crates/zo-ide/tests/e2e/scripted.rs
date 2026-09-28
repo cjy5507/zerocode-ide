@@ -21,6 +21,8 @@ enum Script {
     /// One `Agent` spawn, then a final answer. Drives the delegation cell and
     /// the mid-turn steering path.
     Spawn { final_text: String },
+    #[allow(dead_code)]
+    LedgerSpawn { tool: String, input: String, final_text: String },
     /// Anthropic thinking on EVERY request — one `thinking_delta` per
     /// sentence, each event written `gap` apart and its write instant kept
     /// ([`ScriptedAnthropicService::event_marks`]) — then `final_text`. The
@@ -156,6 +158,10 @@ impl Script {
                 })
             }
             Self::McpTool { final_text, .. } => text_sse("msg_mcp_final", final_text),
+            Self::LedgerSpawn { tool, input, .. } if request_index == 0 => {
+                tool_message_sse("msg_ledger_spawn", |body| append_tool_use(body, 0, "toolu_ledger_spawn", tool, input))
+            }
+            Self::LedgerSpawn { final_text, .. } => text_sse("msg_ledger_final", final_text),
             Self::Spawn { .. } if request_index == 0 => spawn_sse(),
             Self::Spawn { final_text } => text_sse("msg_spawn_final", final_text),
             Self::Thinking { sentences, final_text, .. } => {
@@ -418,6 +424,11 @@ impl ScriptedAnthropicService {
     }
 
     /// Respond first with one `Agent` spawn, then with `final_text`.
+    #[allow(dead_code)]
+    pub async fn ledger_spawn(tool: &str, input: Value) -> io::Result<Self> {
+        Self::spawn(Script::LedgerSpawn { tool: tool.into(), input: input.to_string(), final_text: "ledger delegation complete".into() }).await
+    }
+
     pub async fn spawn_agent(final_text: impl Into<String>) -> io::Result<Self> {
         Self::spawn(Script::Spawn {
             final_text: final_text.into(),

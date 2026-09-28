@@ -8,6 +8,8 @@
 #![cfg(unix)]
 
 mod e2e;
+#[path = "e2e/ledger.rs"]
+mod ledger_e2e;
 
 use std::fs;
 use std::path::PathBuf;

@@ -113,6 +113,7 @@ fn row_of(manifest: AgentOutput) -> AgentRosterRow {
 /// child always has one and an inline helper never does.
 fn execution_of(stamped: Option<&str>, pane: Option<&str>) -> &'static str {
     match stamped {
+        Some("ledger") => "ledger",
         Some(EXECUTION_PANE) => EXECUTION_PANE,
         Some(EXECUTION_INLINE) => EXECUTION_INLINE,
         _ if pane.is_some() => EXECUTION_PANE,
