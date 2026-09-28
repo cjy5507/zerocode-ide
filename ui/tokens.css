@@ -1664,6 +1664,33 @@
      반지름과 고리 사이 간격(그림 단위) — 뉴런의 가지가 여기서 나온다. */
   --knowledge-core-ring: 52;
   --knowledge-core-ring-gap: 42;
+  /* ---- 군집 사이 묶음선 (t-12029, 승인된 시안 v2 「bundle」) ----
+     쉬는 전체 지도에서 두 군집을 건너는 낱낱의 선은 서지 않고, 이름 있는 군집 쌍마다 한 줄이 그 수를
+     굵기로 말한다 — least 가닥 이상인 쌍만. 굵기 = width + √n × grow(px), 옅기 = alpha + lift × n ÷ 가장
+     굵은 쌍의 n. 한 줄은 두 원반의 가장자리에서 inset px 떨어져 시작하고 끝나며, 지도의 가운데에서
+     바깥으로 틈의 bend만큼(배율 1에서 bend-max px까지) 휜다. 두 원반의 화면 틈이 room px보다 좁으면
+     긋지 않는다. 확대할수록 물러선다: fade-from − fade-per × 배율(fade-floor 아래로는 가지 않는다). 사람이
+     다른 것을 묻는 동안(짚기·고르기·찾기)은 quiet를 곱하고, 올리거나 고른 군집에 닿는 줄은 그 군집의
+     잉크로 mine, 목록에서 짚은 줄은 hot(굵기 + hot-width). listed는 「강한 묶음」 목록의 줄 수. */
+  --knowledge-tie-least: 8;
+  --knowledge-tie-width: 0.9;
+  --knowledge-tie-grow: 0.55;
+  --knowledge-tie-alpha: 0.16;
+  --knowledge-tie-lift: 0.3;
+  --knowledge-tie-inset: 3;
+  --knowledge-tie-bend: 0.35;
+  --knowledge-tie-bend-max: 72;
+  --knowledge-tie-room: 28;
+  --knowledge-tie-fade-from: 1.45;
+  --knowledge-tie-fade-per: 0.35;
+  --knowledge-tie-fade-floor: 0.3;
+  --knowledge-tie-quiet: 0.3;
+  --knowledge-tie-mine: 0.8;
+  --knowledge-tie-hot: 0.85;
+  --knowledge-tie-hot-width: 0.8;
+  --knowledge-ties-listed: 5;
+  --knowledge-tie-ink: var(--ink-mist);
+  --knowledge-tie-hot-ink: var(--knowledge-highlight);
   /* ---- 이름표 격자 (09-16) ----
      이름표는 화면 좌표의 격자에 자리를 예약하고, 자리를 못 얻은 이름은 서지
      않는다(글자를 줄이지 않는다 — 접는다). cell은 격자 한 칸의 픽셀, pad는

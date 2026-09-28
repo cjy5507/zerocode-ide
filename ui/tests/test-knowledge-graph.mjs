@@ -4854,6 +4854,232 @@ ok("neighbouring clusters wear different hues: no disc shares its hue with its n
     && clusterInks.firstEightMoved === 0 && clusterInks.cells.length === 8,
   JSON.stringify(clusterInks));
 
+/* 승인된 시안 v2의 전체 지도(t-12029)를 묻는 장면 — 주제마다 가지(삼진 나무 + 중심으로 가는 선 + 드문 고리)를
+ * 두고, 주제 사이에는 `between`의 [왼쪽, 오른쪽, 가닥]만큼 선을 긋는다. 쪽의 태그가 주제의 낱말이라 군집의
+ * 이름이 그 낱말이 되고, 뒤에 `lonely`개의 고아가 선다. 난수 없음. */
+const topicVault = ({ sizes, between, lonely = 0, ghosts = 0 }) => {
+  const words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+    "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon"];
+  const starts = [];
+  let pages = 0;
+  for (const size of sizes) {
+    starts.push(pages);
+    pages += size;
+  }
+  const tags = [];
+  const titles = [];
+  sizes.forEach((size, topic) => {
+    for (let at = 0; at < size; at += 1) {
+      tags.push(words[topic]);
+      titles.push(`${words[topic]} ${at}`);
+    }
+  });
+  for (let at = 0; at < lonely; at += 1) {
+    tags.push("loose");
+    titles.push(`loose ${at}`);
+  }
+  const customEdges = [];
+  sizes.forEach((size, topic) => {
+    const base = starts[topic];
+    for (let at = 1; at < size; at += 1) {
+      customEdges.push({ from: base + at, to: base + Math.floor((at - 1) / 3) });
+      if (at % 2 === 0) customEdges.push({ from: base + at, to: base });
+      if (at % 4 === 0 && at >= 5) customEdges.push({ from: base + at, to: base + at - 5 });
+    }
+  });
+  for (const [left, right, count] of between) {
+    for (let k = 0; k < count; k += 1) {
+      customEdges.push({ from: starts[left] + ((k * 7 + 3) % sizes[left]),
+        to: starts[right] + ((k * 11 + 5) % sizes[right]) });
+    }
+  }
+  const total = pages + lonely;
+  for (let ghost = 0; ghost < ghosts; ghost += 1) {
+    customEdges.push({ from: starts[ghost % sizes.length] + 1, to: total + ghost });
+  }
+  return { spec: { pages: total, ghosts, tags, titles, customEdges }, starts, words: words.slice(0, sizes.length) };
+};
+/* 한 볼트를 한 손으로 세운다 — 전체 지도, 아무것도 고르지 않은 판, 다 앉고 맞춘 뒤. */
+await glPage.evaluate(() => {
+  window.__standKnowledgeScene__ = async (path, spec, hand) => {
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    knowledgePainterKind = hand;
+    knowledgeQuery = "";
+    knowledgeSelectedKey = null;
+    knowledgeClusterPicked = -1;
+    knowledgePath = null;
+    const answer = window.__buildVaultGraph__({ path, sources: false }, spec);
+    knowledgeLayouts.delete(view);
+    const host = view.querySelector(".knowledge-nodes");
+    host.dataset.knowledgeSignature = "";
+    host.dataset.knowledgeVault = "";
+    host.replaceChildren();
+    view.querySelector(".knowledge-edges").replaceChildren();
+    noteKnowledgeExploreLines({ [answer.vault]: JSON.stringify({ mode: "global" }) });
+    setKnowledgeMode(view, "global", { paint: false });
+    knowledgeReport = answer;
+    knowledgeAskedAt = Date.now();
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 1500 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
+    const layout = knowledgeLayouts.get(view);
+    fitKnowledgeGraph(view, layout);
+    await paintKnowledgeView();
+    for (let wait = 0; wait < 3; wait += 1) await frame();
+    return { view, layout };
+  };
+});
+
+/* 군집 사이 선은 묶어서(t-12029, 승인된 시안 v2 「bundle」). 다섯 주제(30·24·20·16·12쪽)에 주제 사이 선
+ * 12·9·3·2·1·1가닥과 고아 넷. 쉬는 전체 지도에서 두 손 모두: 그려진 선은 한 군집 안의 선뿐이고(군집을 건너는
+ * 낱낱의 선은 가운데를 덮지 않는다), 묶음은 선이 8가닥 이상인 쌍에만 한 줄씩이며 굵기가 그 수를 말한다
+ * (0.9 + √n × 0.55 px). 「강한 묶음」 목록은 선이 많은 순. 한 군집을 고르거나 그 이름판에 포인터를 올리면 그
+ * 군집을 건너는 낱낱의 선이 돌아오고 그 군집에 닿는 묶음은 제 잉크를 입는다. 짚은 점의 선은 군집을 건너도
+ * 선다. 주변 탐색에는 묶음이 없고 선은 그대로다. */
+const bundleVault = topicVault({ sizes: [30, 24, 20, 16, 12],
+  between: [[0, 1, 12], [0, 2, 9], [1, 2, 3], [2, 3, 2], [0, 3, 1], [3, 4, 1]], lonely: 4 });
+const bundles = await glPage.evaluate(async ({ spec, starts }) => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  const rows = [];
+  try {
+    for (const hand of ["svg", "gl"]) {
+      const { view, layout } = await window.__standKnowledgeScene__("/scene/bundles", spec, hand);
+      const { from, to, edgeCount } = layout.model;
+      const community = layout.community;
+      const topicRank = starts.map((first) => community[first]);
+      /* 그려진 선 — SVG는 보이는 <path>, GL은 선 패스에 올린 끝점 쌍. 선 번호로 돌려 센다. */
+      const drawnLines = () => {
+        const painter = knowledgePainterFor(view);
+        const seen = [];
+        if (painter.id === "gl") {
+          const ends = new Map();
+          for (let at = 0; at < edgeCount; at += 1) ends.set(`${from[at]}>${to[at]}`, at);
+          for (let seat = 0; seat < painter.counts.edges; seat += 1) {
+            const at = ends.get(`${painter.edgeEnds[seat * 2]}>${painter.edgeEnds[seat * 2 + 1]}`);
+            if (at !== undefined) seen.push(at);
+          }
+        } else {
+          for (let at = 0; at < edgeCount; at += 1) {
+            const line = layout.edgeEls[at];
+            if (line && getComputedStyle(line).display !== "none") seen.push(at);
+          }
+        }
+        return seen;
+      };
+      const inside = (at) => community[from[at]] === community[to[at]];
+      const touches = (at, rank) => community[from[at]] === rank || community[to[at]] === rank;
+      const intra = [];
+      const pairs = new Map();
+      for (let at = 0; at < edgeCount; at += 1) {
+        if (layout.drawnEdge !== null && layout.drawnEdge[at] === 0) continue;
+        if (inside(at)) {
+          intra.push(at);
+          continue;
+        }
+        const left = Math.min(community[from[at]], community[to[at]]);
+        const right = Math.max(community[from[at]], community[to[at]]);
+        if (right >= layout.namedCount) continue;
+        pairs.set(`${left}|${right}`, (pairs.get(`${left}|${right}`) ?? 0) + 1);
+      }
+      const wanted = [...pairs].filter(([, count]) => count >= 8).map(([pair, count]) => `${pair}:${count}`).sort();
+      const readTies = () => [...view.querySelectorAll(".knowledge-underlay .knowledge-tie")]
+        .filter((line) => getComputedStyle(line).display !== "none")
+        .map((line) => ({ at: Number(line.dataset.tie), width: Number(line.getAttribute("stroke-width")),
+          mine: line.classList.contains("is-mine"), curved: /Q/u.test(line.getAttribute("d") ?? "") }));
+      const rest = drawnLines();
+      const tiesAtRest = readTies();
+      const listed = [...view.querySelectorAll(".knowledge-overview-ties .knowledge-inspector-row")]
+        .map((row) => ({ tie: Number(row.dataset.knowledgeTie), words: row.textContent }));
+      /* 한 군집을 고른다 — 그 군집을 건너는 선이 돌아온다. */
+      const picked = topicRank[0];
+      toggleKnowledgeCluster(view, picked);
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const pickedLines = drawnLines();
+      const tiesPicked = readTies();
+      toggleKnowledgeCluster(view, picked);
+      await paintKnowledgeView();
+      /* 다른 군집의 이름판에 포인터를 올린다(포인터의 길 그대로) — 그 군집의 선이 돌아오고, 떠나면 물러선다. */
+      const hovered = topicRank[1];
+      const plate = layout.clusterEls[hovered].label;
+      plate.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: 1, clientY: 1 }));
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const hoverLines = drawnLines();
+      view.querySelector(".knowledge-canvas").dispatchEvent(new PointerEvent("pointerleave"));
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const leftLines = drawnLines();
+      /* 한 점을 짚는다 — 그 점의 선은 군집을 건너도 선다. */
+      const bridgeEnd = starts[0] + 3;
+      litKnowledge(view, layout, layout.model.keys[bridgeEnd]);
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const litLines = drawnLines();
+      const litWanted = [...layout.lit];
+      litKnowledge(view, layout, null);
+      /* 주변 탐색 — 묶음이 없고 선은 제 옷 그대로 선다(중심은 두 주제로 건너는 선을 든 쪽). */
+      setKnowledgeMode(view, "local", { centre: layout.model.keys[bridgeEnd], paint: false });
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const localTies = readTies().length;
+      const localBetween = drawnLines().filter((at) => !inside(at)).length;
+      setKnowledgeMode(view, "global");
+      knowledgeSelectedKey = null;
+      await paintKnowledgeView();
+      rows.push({
+        hand: knowledgePainterFor(view).id,
+        topics: new Set(topicRank).size, named: layout.namedCount,
+        restDrawn: rest.length, restBetween: rest.filter((at) => !inside(at)).length, intra: intra.length,
+        wanted, drawnTies: tiesAtRest.map((one) => {
+          const tie = layout.ties[one.at];
+          return `${tie.left}|${tie.right}:${tie.count}`;
+        }).sort(),
+        widthsOk: tiesAtRest.every((one) => Math.abs(one.width
+          - (layout.tuning.tieWidth + Math.sqrt(layout.ties[one.at].count) * layout.tuning.tieGrow)) < 0.01),
+        curved: tiesAtRest.every((one) => one.curved),
+        least: layout.tuning.tieLeast, widthBase: layout.tuning.tieWidth, grow: layout.tuning.tieGrow,
+        listed: listed.map((row) => layout.ties[row.tie]?.count ?? -1),
+        listedWords: listed.every((row) => row.words.includes("↔")),
+        pickedDrawn: pickedLines.length,
+        pickedWanted: intra.length + (() => {
+          let count = 0;
+          for (let at = 0; at < edgeCount; at += 1) if (!inside(at) && touches(at, picked)) count += 1;
+          return count;
+        })(),
+        pickedMine: tiesPicked.filter((one) => one.mine).map((one) => {
+          const tie = layout.ties[one.at];
+          return tie.left === picked || tie.right === picked;
+        }),
+        hoverDrawn: hoverLines.length,
+        hoverWanted: intra.length + (() => {
+          let count = 0;
+          for (let at = 0; at < edgeCount; at += 1) if (!inside(at) && touches(at, hovered)) count += 1;
+          return count;
+        })(),
+        leftDrawn: leftLines.length,
+        litHasBetween: litWanted.filter((at) => !inside(at)).every((at) => litLines.includes(at))
+          && litWanted.some((at) => !inside(at)),
+        localTies, localBetween,
+      });
+    }
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error), rows };
+  } finally {
+    knowledgePainterKind = null;
+  }
+}, { spec: bundleVault.spec, starts: bundleVault.starts });
+ok("the overview bundles the lines between clusters: at rest only a cluster's own lines stand, one tie per pair of eight lines or more speaks the count in its width, the strong ties list them, and picking or pointing at a cluster brings its lines back — on both hands",
+  !bundles.thrown && bundles.rows.length === 2 && bundles.rows.every((row) => row.topics === 5 && row.named >= 5
+    && row.least === 8 && row.widthBase === 0.9 && row.grow === 0.55
+    && row.restBetween === 0 && row.restDrawn === row.intra
+    && row.wanted.length === 2 && JSON.stringify(row.drawnTies) === JSON.stringify(row.wanted)
+    && row.widthsOk && row.curved
+    && row.listed.length === row.wanted.length && row.listed.every((count, at, all) => at === 0 || all[at - 1] >= count)
+    && row.listedWords
+    && row.pickedDrawn === row.pickedWanted && row.pickedMine.length >= 1 && row.pickedMine.every(Boolean)
+    && row.hoverDrawn === row.hoverWanted && row.leftDrawn === row.intra
+    && row.litHasBetween && row.localTies === 0 && row.localBetween > 0),
+  JSON.stringify(bundles));
+
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *
  * 다섯 종류의 점 하나씩을 선 없이 한 줄로 세우고, 같은 자리·같은 크기를 SVG 손과 GL 손으로

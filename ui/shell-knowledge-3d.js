@@ -950,7 +950,8 @@ function makeKnowledgeGlPainter() {
       const canvas = document.createElement("canvas");
       canvas.className = "knowledge-gl";
       canvas.setAttribute("aria-hidden", "true");
-      host.insertBefore(canvas, host.firstChild);
+      /* 그림(<svg>) 바로 앞에 선다 — 이름판과 낱말은 캔버스 위에, 묶음선의 밑층(t-12029)은 캔버스 아래에. */
+      host.insertBefore(canvas, host.querySelector(".knowledge-picture"));
       const labels = document.createElement("div");
       labels.className = "knowledge-gl-labels";
       labels.setAttribute("aria-hidden", "true");
@@ -1309,7 +1310,8 @@ function makeKnowledgeGlPainter() {
       const dim = tuning.dimOpacity;
       const far = tuning.farNodeOpacity;
       const searchOn = knowledgeQuery.trim() !== "";
-      const spot = knowledgeClusterPicked;
+      /* 밝힌 군집 — 고른 것 또는 이름판에 올라 선 것(t-12029). */
+      const spot = knowledgeSpotRank();
       const selectedSeat = knowledgeSelectedKey === null ? -1
         : model.keys.indexOf(knowledgeSelectedKey);
       /* 주변 탐색: 중심은 제 줄의 옷(고름의 테두리를 덧입지 않는다)과 후광, 포커스가 물린 점은
@@ -1428,7 +1430,7 @@ function makeKnowledgeGlPainter() {
       const pathed = on.contains("is-path");
       const dim = tuning.dimEdgeOpacity;
       const far = tuning.farEdgeOpacity;
-      const spot = knowledgeClusterPicked;
+      const spot = knowledgeSpotRank();
       const searchOn = knowledgeQuery.trim() !== "";
       const { from, to, edgeCount } = model;
       const drawnEdge = layout.drawnEdge;
@@ -1438,13 +1440,15 @@ function makeKnowledgeGlPainter() {
       let edges = 0;
       for (let at = 0; at < edgeCount; at += 1) {
         if (drawnEdge !== null && drawnEdge[at] === 0) continue;
+        /* 묶음 안의 선은 긋지 않는다(t-12029) — 쉬는 전체 지도의 군집 사이 선은 밑층의 줄이 말한다. */
+        if (knowledgeEdgeBundled(layout, at)) continue;
         const head = from[at];
         const tail = to[at];
         const lit = layout.lit.has(at);
         const focusLit = layout.focusEdgeVisited[at] === 1;
         const match = layout.searchMatch[head] === 1 && layout.searchMatch[tail] === 1;
-        const spotlit = spot >= 0 && layout.community[head] === spot
-          && layout.community[tail] === spot;
+        /* SVG의 옷과 같은 규칙 — 밝힌 군집에 닿는 선이 밝다(t-12029). */
+        const spotlit = spot >= 0 && (layout.community[head] === spot || layout.community[tail] === spot);
         const pathLit = layout.pathEdge[at] === 1;
         /* 쉬는 옷은 한 함수(`knowledgeRestingEdgeInk`)가 고른다 — 내보내기가 같은 손으로 읽는다. */
         const resting = knowledgeRestingEdgeInk(palette, tuning, layout, model, at, focused);

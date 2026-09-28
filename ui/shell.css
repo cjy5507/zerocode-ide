@@ -37720,10 +37720,47 @@ details.task-board-section > summary {
   background-image: none;
 }
 
+/* 그림은 위치를 가진 층이다 — 그래야 그 앞에 선 밑층(`.knowledge-underlay`, 절대 위치)이 두 손 모두에서
+   그림의 **아래**에 선다(위치 있는 층은 문서 순서로 겹친다). */
 .knowledge-picture {
   display: block;
+  position: relative;
   width: 100%;
   height: 100%;
+}
+
+/* 밑층(t-12029): 군집 사이 묶음선. 점·선·성운보다 아래에 서고, 두 손(SVG·GL)이 이 한 <svg>를 쓴다 — 줄은
+   군집 쌍의 수(수십)만큼이라 DOM이 값을 치르지 않고, 곡선과 굵기가 두 그림에서 한 글자다. 포인터는
+   받지 않는다(캔버스의 것이다). */
+.knowledge-underlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* 묶음 한 줄. 굵기와 옅기는 쌍의 수에서 나오므로 줄마다 속성으로 적히고(`paintKnowledgeTies`), 여기
+   서는 잉크만 — 올리거나 고른 군집에 닿는 줄은 그 군집의 색, 목록에서 짚은 줄은 밝은 잉크. */
+.knowledge-tie {
+  fill: none;
+  stroke: var(--knowledge-tie-ink);
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.knowledge-tie.is-mine {
+  stroke: var(--knowledge-tint, var(--knowledge-tie-ink));
+}
+
+.knowledge-tie.is-hot {
+  stroke: var(--knowledge-tie-hot-ink);
+}
+
+/* 묶음 안의 선(t-12029) — 쉬는 전체 지도의 군집 사이 낱선. 사람이 그 선을 묻는 순간(짚기·포커스·경로·
+   고르거나 올린 군집) 클래스가 떨어지고, 짚기는 프레임 없이 `is-lit`만 붙으므로 그 옷이 이긴다. */
+.knowledge-picture:not(.is-local) .knowledge-edge.is-bundled:not(.is-lit) {
+  display: none;
 }
 
 /* GL 페인터의 세 층 (6차 P2).
