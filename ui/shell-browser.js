@@ -1494,6 +1494,12 @@ function emulatorNoteMessage(code, fallback = "") {
   return fallback;
 }
 
+/* 사람이 친 글을 실은 요청이 실패하면 로그에는 실패했다는 사실만 적는다
+ * (t-11740). Android는 그 글을 기기의 셸(`adb shell input text`)에 넘기고,
+ * 셸의 오류는 친 글의 조각을 그대로 되돌려 준다 — 그 오류를 통째로 적던
+ * 창 로그는 사람의 글을 남겼다. 토스트는 원래 고정 문장이다. */
+const EMULATOR_TYPED_FAILURE = "typed text was not delivered; the device's answer is withheld because it quotes the text";
+
 function reportEmulatorError(tab, error, key, throttle = false) {
   const detail = String(error);
   const message = emulatorErrorMessage(key);
@@ -1528,7 +1534,9 @@ function sendEmulatorInput(tab, verb, extra = {}, { throttle = false } = {}) {
       sayInEmulatorNote(tab, emulatorNoteMessage(EMULATOR_DEVICE_OFFLINE));
       return undefined;
     }
-    return reportEmulatorError(tab, error, "emulator.inputFailed", throttle);
+    return reportEmulatorError(
+      tab, verb === "text" ? EMULATOR_TYPED_FAILURE : error, "emulator.inputFailed", throttle,
+    );
   });
 }
 

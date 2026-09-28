@@ -13628,6 +13628,100 @@ mod tests {
         }
     }
 
+    /// What the Korean-input husk writes to disk is the typing's shape, never
+    /// its letters (t-11740).
+    ///
+    /// The husk used to keep every hangul syllable of its trace ring when a
+    /// bare jamo leaked, and `window-errors.log` read as the person's own
+    /// sentences — a file agents read, whose words go on to a model provider.
+    /// So the one function that builds the log's sentence takes nothing but
+    /// the road's name and what `imeShape` has already made of the text, the
+    /// trace reaches it only through the shaping copy of the ring, and it is
+    /// the one door in the input file that writes the log. What earlier
+    /// builds wrote is withdrawn at boot, before anything else writes the
+    /// log, by a pass that recognises the header the window sends.
+    #[test]
+    fn the_ime_husk_writes_shapes_and_never_letters() {
+        let window = window_source();
+        let dump = block_after(window, "function imeDump(road, text) {");
+        let spliced: Vec<&str> = dump
+            .split("${")
+            .skip(1)
+            .map(|rest| rest.split_once('}').map_or(rest, |(inside, _)| inside))
+            .collect();
+        assert!(
+            !spliced.is_empty()
+                && spliced.iter().all(|inside| {
+                    ["road", "imeShape(text)", "IME_SHAPE_LEGEND"].contains(inside)
+                        || inside.starts_with("shapedImeTrace()")
+                }),
+            "the husk's sentence takes something other than shapes:\n{dump}"
+        );
+        assert!(
+            !dump.contains("imeTrace.") && !dump.contains("imeTrace["),
+            "the husk's sentence reads the raw ring:\n{dump}"
+        );
+        let trail = block_after(window, "function shapedImeTrace() {");
+        assert!(
+            trail.contains("imeShape("),
+            "the ring reaches the husk without being shaped:\n{trail}"
+        );
+        let report = block_after(window, "function reportStrayJamo(road, text) {");
+        assert!(
+            report.contains("message: imeDump(road, text)"),
+            "the husk writes a sentence the shaping function did not build:\n{report}"
+        );
+        let input = include_str!("../../../../ui/shell-input.js");
+        assert_eq!(
+            input.matches("log_window_error").count(),
+            1,
+            "a second door from the input file into the window log"
+        );
+        // The boot pass knows the header by the words the window sends.
+        let withdrawal = include_str!("../../src/ime_trace_withdrawal.rs");
+        assert!(
+            dump.contains("`ime: bare jamo left through ${road}: ")
+                && withdrawal.contains("\"window: ime: bare jamo left through \""),
+            "the boot pass and the husk disagree on the dump's header"
+        );
+        let main = strip_rust_comments(include_str!("../../src/main.rs"));
+        let withdraws = main.find("ime_trace_withdrawal::withdraw_once(");
+        let first_note = main.find("codex_queue::reap_stale()");
+        assert!(
+            withdraws.is_some_and(|at| first_note.is_some_and(|note| at < note)),
+            "the old dumps are not withdrawn before the boot's first log line"
+        );
+    }
+
+    /// A failed request that carried the person's typing leaves the device's
+    /// words out of the window log (t-11740).
+    ///
+    /// Android hands typed text to the device's shell (`adb shell input
+    /// text`), and the shell's error quotes pieces of it back; the window
+    /// logged that error whole. The toast was always a fixed sentence, so
+    /// only the log changes: the two doors that send typing report the one
+    /// sentence that says it failed.
+    #[test]
+    fn a_typed_text_failure_leaves_the_devices_words_out_of_the_log() {
+        let window = window_source();
+        let sending = block_after(window, "function sendEmulatorInput(");
+        assert!(
+            sending.contains(r#"verb === "text" ? EMULATOR_TYPED_FAILURE : error"#),
+            "a failed typing request logs the device's words again:\n{sending}"
+        );
+        let routing = block_after(window, "function routeText(text) {");
+        let emulator = routing
+            .split("const target = keyboardTarget();")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            emulator.contains("reportEmulatorError(")
+                && emulator.contains("EMULATOR_TYPED_FAILURE")
+                && !emulator.contains("error,"),
+            "the terminal's typing into a device logs the device's words again:\n{emulator}"
+        );
+    }
+
     /// Typing in a diff is saved by the save that already exists.
     ///
     /// Orca's `readOnly: !editable` / `originalEditable: false` pair, and the

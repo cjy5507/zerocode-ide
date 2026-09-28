@@ -115,6 +115,7 @@ mod hang_watchdog;
 mod hooks;
 mod human_input;
 mod icon;
+mod ime_trace_withdrawal;
 mod jev_scope;
 mod jira_attachments;
 mod jira_store;
@@ -3240,6 +3241,10 @@ fn main() -> ExitCode {
                 chromium_browser::initialize(&handle, &chromium_root)
                     .map_err(std::io::Error::other)?;
             }
+            // What earlier builds' Korean-input husk wrote spelled out the
+            // person's typing; it is withdrawn before anything else writes the
+            // log, so the rewrite cannot race an append (t-11740).
+            ime_trace_withdrawal::withdraw_once(managed.local_data_root());
             let stale_codex_routes = codex_queue::reap_stale();
             if stale_codex_routes > 0 {
                 note_window_event(

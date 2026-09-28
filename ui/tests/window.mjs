@@ -5646,7 +5646,8 @@ ok(
 // refocus the sink within a frame, and flushing on that blink split 계속
 // into "ㄱ ㅖ 속" (reported). A blur now waits BLUR_FLUSH_GRACE_MS: focus
 // back home in time keeps the half word; a real departure still flushes —
-// and a flush that lets bare jamo out writes the scrubbed ring to the husk.
+// and a flush that lets bare jamo out writes the ring's SHAPE to the husk:
+// what kind of letter, never which (t-11740).
 const blurBlink = await page.evaluate(async () => {
   const wait = (ms) => new Promise((done) => setTimeout(done, ms));
   const seen = {};
@@ -5694,15 +5695,17 @@ const blurBlink = await page.evaluate(async () => {
   seen.bodyJoins = order.at(-2) === "text:나" && order.at(-1) === "key:Enter";
 
   // 진짜 이탈: 유예가 지나면 방류하고, 자모가 섞였으니 링이 husk로 간다 —
-  // 한글만 살아남고 나머지는 점이 된 채로.
+  // 글자는 하나도 없이 모양만: 홑자음 c, 홑모음 v, 받침 없는 음절 s, 받침
+  // 있는 음절 S, 공백은 공백, 나머지는 점. 글자 수는 그대로다.
   strayJamoReportedAt = 0;
   strike("ㅋ");
   sink.blur();
   await wait(250);
   seen.departureFlushes = order.at(-1) === "text:ㅋ";
-  seen.huskHears = husk.length === 1 && husk[0].startsWith("ime: bare jamo left through rescue.flush") &&
-    husk[0].includes("ㅋ");
-  seen.huskScrubs = scrubImePayload("sink=hunter2! ㅗ") === "············· ㅗ";
+  seen.huskHears = husk.length === 1 &&
+    husk[0].startsWith("ime: bare jamo left through rescue.flush: c ");
+  seen.huskSpellsNothing = husk.length === 1 && !/[\u3130-\u318f\uac00-\ud7a3]/.test(husk[0]);
+  seen.huskShapes = imeShape("sink=hunter2! ㅗ각가") === "············· vSs";
 
   // 분당 한 번: 같은 분에 또 새어도 husk는 조용하다.
   sink.focus();
@@ -5721,10 +5724,10 @@ const blurBlink = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a blink of blur keeps the half word, a stray jamo goes home from the body, and a real flush leaves scrubbed footprints",
+  "a blink of blur keeps the half word, a stray jamo goes home from the body, and a real flush leaves footprints shaped, not spelled",
   blurBlink.blinkHolds && blurBlink.blinkKeeps && blurBlink.bodyComesHome && blurBlink.bodyRescued &&
     blurBlink.bodyJoins && blurBlink.departureFlushes && blurBlink.huskHears &&
-    blurBlink.huskScrubs && blurBlink.huskRateLimited,
+    blurBlink.huskSpellsNothing && blurBlink.huskShapes && blurBlink.huskRateLimited,
   JSON.stringify(blurBlink),
 );
 
