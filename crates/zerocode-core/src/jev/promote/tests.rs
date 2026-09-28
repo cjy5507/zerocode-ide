@@ -3260,3 +3260,45 @@ fn a_one_sided_record_holds_a_rise_and_takes_back_nothing() {
     );
     assert_eq!(judge(Stand::Applying, &evidence), Verdict::Keep);
 }
+
+/// A seat that starts acting is taken back on its marks alone (t-11989): a
+/// summons seat whose answers came slower than its wall, or not at all
+/// three times running, keeps acting — each late answer already fell back to
+/// the placeholder, and a fall would be for good — while the same window with
+/// marks that disagree with the coordinators takes it back on the agreement
+/// line. Recording again after a fall, it rises on a healthy window only.
+#[test]
+fn a_seat_that_starts_acting_is_taken_back_on_its_marks_alone() {
+    use serde_json::json;
+    let seat = &crate::jev::SUMMON;
+    assert_eq!(seat.auto_starts, Stand::Applying);
+    let wanted = window_wanted_for(seat).expect("summon rises");
+    let wall = seat.apply_deadline_ms.expect("a wall");
+    let slow = |at: usize, agreed: bool| {
+        json!({"at": at, "outcome": "answered", "elapsedMs": wall * 2, "requests": 1,
+            "agreed": agreed, "rubricVersion": seat.rubric_version})
+    };
+    let mut rows: Vec<Value> = (0..wanted)
+        .map(|at| slow(at, at >= crate::jev::NEGATIVES_WANTED))
+        .collect();
+    rows.extend((0..3).map(|n| {
+        json!({"at": wanted + n, "outcome": "timeout", "requests": 1,
+            "rubricVersion": seat.rubric_version})
+    }));
+    assert!(
+        !judgment_due(seat, &rows),
+        "fallbacks running call no judgment for a seat they cannot end"
+    );
+    assert_eq!(judge_seat(seat, &rows).expect("judged").verdict, Verdict::Keep);
+    let mut fell = recording(seat);
+    fell.extend(rows.iter().cloned());
+    assert!(matches!(
+        judge_seat(seat, &fell).expect("judged").verdict,
+        Verdict::Hold(Line::Answered { .. } | Line::Latency { .. })
+    ));
+    let disagreeing: Vec<Value> = (0..wanted).map(|at| slow(at, at % 2 == 0)).collect();
+    assert!(matches!(
+        judge_seat(seat, &disagreeing).expect("judged").verdict,
+        Verdict::Fall(Line::Agreement { .. })
+    ));
+}

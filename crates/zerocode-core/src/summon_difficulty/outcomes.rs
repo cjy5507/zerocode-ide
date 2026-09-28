@@ -466,4 +466,33 @@ mod integration_tests {
         let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &unmeasured).unwrap();
         assert_eq!(judged.verdict, promote::Verdict::Keep, "{judged:?}");
     }
+
+    /// Taken back on its marks alone (t-11989): a window whose answers timed
+    /// out often enough to hold a recording seat under its answer floor —
+    /// and three times running at its end — keeps the acting difficulty seat
+    /// acting, since each of those summonses already launched on the middle
+    /// row; recording again after a fall, the same window holds it there.
+    #[test]
+    fn an_acting_difficulty_seat_is_not_taken_back_by_a_bad_wire() {
+        let mut asked: Vec<Value> = executions(true, true)
+            .into_iter()
+            .filter(|row| row.get(KEY).is_none())
+            .collect();
+        let n = asked.len();
+        for row in asked.iter_mut().skip(n - 8) {
+            row["outcome"] = serde_json::json!("timeout");
+            row.as_object_mut().unwrap().remove("chosen");
+        }
+        let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &asked).unwrap();
+        assert_eq!(judged.verdict, promote::Verdict::Keep, "{judged:?}");
+        assert!(!promote::judgment_due(&SUMMON_DIFFICULTY, &asked));
+        let mut fallen = vec![fell()];
+        fallen.extend(asked);
+        assert!(matches!(
+            promote::judge_seat(&SUMMON_DIFFICULTY, &fallen)
+                .unwrap()
+                .verdict,
+            promote::Verdict::Hold(promote::Line::Answered { .. })
+        ));
+    }
 }
