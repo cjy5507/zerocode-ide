@@ -36,17 +36,19 @@ use super::confirm::{Asking, Decision};
 use super::marks::{PinnedClick, desktop_windows};
 use crate::systemone::{self, Wire};
 
-/// What a place must be to press: its centre showing — a press lands on one
-/// point.
+/// What a place must be to press: its centre showing (a press lands on one
+/// point), or all of it (a hand that watches a region).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Needs {
     Centre,
+    Whole,
 }
 
 impl Needs {
     fn met(self, cover: &Cover) -> bool {
         match self {
             Self::Centre => !cover.blocks_a_press(),
+            Self::Whole => !cover.hides_any(),
         }
     }
 }
@@ -528,6 +530,29 @@ pub(crate) fn press_mark_here(
         },
         &mut LiveJudge::here(workspace),
     )
+}
+
+/// A cover seat that is never asked — `off` — for a hand that makes today's
+/// rule's moves alone: a test's.
+#[cfg(test)]
+pub(crate) struct Unasked;
+
+#[cfg(test)]
+impl Judge for Unasked {
+    fn standing(&mut self) -> (JevMode, bool, Option<u16>) {
+        (JevMode::Off, false, None)
+    }
+
+    fn ask(&mut self, _asked: &CoverAsk) -> Wired {
+        Wired {
+            answer: Err(JevMode::Off.key().to_string()),
+            attempts: 0,
+            request_bytes: 0,
+            rtt_ms: 0,
+        }
+    }
+
+    fn record(&mut self, _rows: Vec<Value>) {}
 }
 
 #[cfg(test)]

@@ -40,6 +40,9 @@ struct Helper {
     age_ns: u64,
     plan_hash: Option<&'static str>,
     moment: u64,
+    /// Every window on the screen at every layer, front to back, when the
+    /// test lays one out (t-12979); none answers the list as an old helper.
+    desk: Vec<Value>,
 }
 
 impl Helper {
@@ -53,6 +56,7 @@ impl Helper {
             age_ns: 3_000_000,
             plan_hash: None,
             moment: 0,
+            desk: Vec::new(),
         }
     }
 
@@ -137,6 +141,24 @@ impl Helper {
                     held.reason = Some("request".into());
                 }
                 json!({ "runId": run, "state": "stopped" })
+            }
+            "listAllWindows" if !self.desk.is_empty() => json!({ "windows": self.desk }),
+            "windowAction" => {
+                let id = params["windowId"].as_u64().unwrap_or_default();
+                let at = self
+                    .desk
+                    .iter()
+                    .position(|window| window["id"] == id)
+                    .expect("a window on the desk");
+                assert_eq!(params["action"], "focus", "only the front here");
+                let window = self.desk.remove(at);
+                let under = self
+                    .desk
+                    .iter()
+                    .position(|other| other["layer"].as_i64() <= window["layer"].as_i64())
+                    .unwrap_or(self.desk.len());
+                self.desk.insert(under, window);
+                json!({})
             }
             other => json!({ "unexpected": other }),
         })
@@ -345,6 +367,11 @@ impl Fake {
             Some(generator) => generator,
             None => scripted,
         };
+        let mut unasked = crate::computer_use::cover::Unasked;
+        let mut pause = |_wait: Duration| {};
+        let mut person = |_line: &crate::computer_use::cover::Said| {
+            crate::computer_use::confirm::Decision::Refused
+        };
         let mut world = World {
             call: &mut call,
             ask: &*ask,
@@ -357,6 +384,9 @@ impl Fake {
             now_ms: *now,
             wall_ms: WALL + i64::try_from(*now).unwrap_or(0),
             stopped: stopped.clone(),
+            cover: &mut unasked,
+            pause: &mut pause,
+            person: &mut person,
         };
         act(&mut world)
     }
@@ -1029,4 +1059,72 @@ fn a_pause_about_a_hand_with_nothing_to_stop_leaves_the_run_standing() {
         autopilot.ended().map(|ended| ended["reason"].clone()),
         Some(json!(PAUSED))
     );
+}
+
+/// The fixture's window, as the desk lists it, and another app's window at
+/// `layer` over its middle.
+fn covered_desk(layer: i64) -> Vec<Value> {
+    let window = |id: u64, pid: i64, layer: i64, x: i64, y: i64, width: i64, height: i64| {
+        json!({ "id": id, "app": { "name": format!("app-{pid}"), "pid": pid },
+                "x": x, "y": y, "width": width, "height": height,
+                "own": false, "layer": layer, "alpha": 1.0, "overlay": false })
+    };
+    vec![
+        window(30, 40, layer, 30, 20, 40, 20),
+        window(7, 9, 0, 10, 10, 80, 40),
+    ]
+}
+
+/// Another app's window comes over the fixture while a run stands: the hand
+/// is stopped before it presses again, the fixture's window is brought to
+/// the front, and a plan is written for where it stands — the covering
+/// window never moved.
+#[test]
+fn a_run_whose_window_is_covered_stops_is_uncovered_and_plans_again() {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good(), good()]);
+    let (mut autopilot, answer) = fake.start(asked(None)).expect("started");
+    let first = answer["runId"].as_str().expect("a run").to_string();
+    fake.helper.desk = covered_desk(0);
+    fake.tick(&mut autopilot);
+    assert_eq!(fake.helper.stops(), std::slice::from_ref(&first));
+    let moved: Vec<Value> = fake
+        .helper
+        .calls
+        .iter()
+        .filter(|(method, _)| method == "windowAction")
+        .map(|(_, params)| params.clone())
+        .collect();
+    assert_eq!(moved, [json!({ "action": "focus", "windowId": 7 })]);
+    assert_eq!(fake.helper.desk[0]["id"], json!(7));
+    assert_eq!(autopilot.ended(), None, "a new plan, not the end");
+    assert_eq!(fake.helper.runs.len(), 2);
+    assert_eq!(fake.generator.asked.len(), 2);
+}
+
+/// Another app's window above ordinary ones — it may be the system's — with
+/// no seat to say otherwise: nothing moves, the hand stays stopped, and the
+/// autopilot ends for the person, saying whose window it was.
+#[test]
+fn a_run_covered_by_what_it_may_not_touch_ends_for_the_person() {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good(), good()]);
+    let (mut autopilot, answer) = fake.start(asked(None)).expect("started");
+    let first = answer["runId"].as_str().expect("a run").to_string();
+    fake.helper.desk = covered_desk(3);
+    fake.tick(&mut autopilot);
+    assert_eq!(fake.helper.stops(), std::slice::from_ref(&first));
+    assert!(
+        fake.helper
+            .calls
+            .iter()
+            .all(|(method, _)| method != "windowAction")
+    );
+    let ended = autopilot.ended().expect("ended").clone();
+    assert_eq!(ended["reason"], json!(COVERED));
+    assert!(
+        ended["said"]
+            .as_str()
+            .is_some_and(|said| said.contains("app-40")),
+        "{ended}"
+    );
+    assert_eq!(fake.helper.runs.len(), 1, "no new plan");
 }

@@ -52,8 +52,15 @@ use super::{
     Admitted, Asker, Call, Carrier, DoorFacts, FileSink, ReceiptSink, Watch, admit_plan, launch,
 };
 use crate::computer_use::ComputerUseError;
+use crate::computer_use::confirm::Decision;
+use crate::computer_use::cover::{
+    self, Hand, Judge as CoverJudge, LiveJudge as LiveCoverJudge, Needs, Place, Said, Uncovered,
+};
 use crate::computer_use::errand::value::{LiveWriter, Setup};
 use crate::systemone::{self, Wire};
+use zerocode_core::computer_use_protocol::cover::cover_of;
+use zerocode_core::computer_use_protocol::reflex::CoordinateSpace;
+use zerocode_core::computer_use_protocol::render::Rect as ScreenRect;
 
 /// The key a status carries an autopilot's own account under.
 pub(crate) const AUTOPILOT: &str = "autopilot";
@@ -69,6 +76,9 @@ pub(crate) const ESCALATED: &str = "escalated";
 pub(crate) const STOPPED: &str = "request";
 pub(crate) const SESSION: &str = "session";
 pub(crate) const NO_TIME: &str = "deadline";
+/// The app's window was covered while a run stood, and no move of its own
+/// uncovered it (t-12979): the person's.
+pub(crate) const COVERED: &str = zerocode_core::computer_use_protocol::error_code::COVERED;
 
 /// Where one autopilot stands, for a status and for its end (§2.4).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -337,6 +347,11 @@ pub(crate) struct World<'a> {
     pub now_ms: u64,
     pub wall_ms: i64,
     pub stopped: Option<String>,
+    /// The cover seat, the pause before a second look and the person's card
+    /// — what a run whose window is covered is uncovered with (t-12979).
+    pub cover: &'a mut dyn CoverJudge,
+    pub pause: &'a mut dyn FnMut(Duration),
+    pub person: &'a mut dyn FnMut(&Said) -> Decision,
 }
 
 /// What the person asked for: the goal, the app, the display, the seconds
@@ -500,6 +515,9 @@ pub(crate) struct Autopilot {
     scope: Scope,
     stage: Stage,
     palette: Palette,
+    /// The app's window the stage was read from, by the number the window
+    /// list gives it — what the hand's place is uncovered in (t-12979).
+    window: Option<u64>,
     workspace: Option<PathBuf>,
     facts: DoorFacts,
     /// The steady moment the whole autopilot's wall comes.
@@ -564,6 +582,50 @@ fn new_autopilot_id() -> String {
     )
 }
 
+/// The number the window list gives the app's first window — the one its
+/// stage was read from ([`plan::stage_of`]).
+fn window_of(windows: &Value) -> Option<u64> {
+    windows
+        .get("windows")
+        .and_then(Value::as_array)
+        .and_then(|windows| windows.first())
+        .and_then(|window| window.get("id"))
+        .and_then(Value::as_u64)
+}
+
+/// Where a plan's detectors read, in points from the app window's corner:
+/// the one rectangle around every ROI — which lies inside the window, in the
+/// display's extent — or `None`, the whole window, when a detector reads in
+/// other units.
+fn acting_place(plan: &ReflexPlan, stage: &Stage) -> Option<ScreenRect> {
+    let mut around: Option<(i64, i64, i64, i64)> = None;
+    for detector in &plan.detectors {
+        let roi = &detector.roi;
+        if roi.space != CoordinateSpace::Point {
+            return None;
+        }
+        let edges = (roi.x, roi.y, roi.x + roi.width, roi.y + roi.height);
+        around = Some(around.map_or(edges, |(left, top, right, bottom)| {
+            (
+                left.min(edges.0),
+                top.min(edges.1),
+                right.max(edges.2),
+                bottom.max(edges.3),
+            )
+        }));
+    }
+    let (left, top, right, bottom) = around?;
+    // Points on a display are well inside f64's whole numbers.
+    #[allow(clippy::cast_precision_loss)]
+    let place = ScreenRect::new(
+        (left - stage.window.x) as f64,
+        (top - stage.window.y) as f64,
+        (right - left) as f64,
+        (bottom - top) as f64,
+    );
+    Some(place)
+}
+
 impl Autopilot {
     /// The autopilot's first plan, run: a generator a person set up, the
     /// door's own questions, the app's window and its palette, the plan the
@@ -622,6 +684,7 @@ impl Autopilot {
             asked,
             stage,
             palette,
+            window: window_of(&windows),
             workspace,
             facts,
             epoch: 0,
@@ -848,6 +911,7 @@ impl Autopilot {
             }
         }
         self.pass_every_run(world);
+        self.mind_the_cover(world);
         if self.judge.tally.ended.is_none()
             && let Some(reason) = self
                 .current
@@ -968,6 +1032,17 @@ impl Autopilot {
         if let Err(refusal) = self.plan_and_start(world, Some(previous)) {
             self.end(world, &refusal.code, &refusal.message);
         }
+    }
+
+    /// The run standing now, whose place in the app's window another window
+    /// hides (t-12979): the hand is stopped before it presses again, the
+    /// window is uncovered — to the front, moved clear, or by the person —
+    /// and a plan is written for where it stands now; or the autopilot ends
+    /// for the person, the hand still. A window list that does not read, or
+    /// a window not on it, is the helper's own boundary to answer, as before.
+    fn mind_the_cover(&mut self, world: &mut World<'_>) {
+        // Today (the red before t-12979): the hand goes on under its plan.
+        let _ = (world, self.window);
     }
 
     /// The run named `id`, standing or finished.
@@ -1210,6 +1285,9 @@ struct Roads {
     decisions: Box<dyn FnMut(Vec<Value>) + Send>,
     plans: Box<dyn FnMut(Vec<Value>) + Send>,
     keeper: Box<dyn FnMut(&str) -> Keeping + Send>,
+    cover: LiveCoverJudge,
+    pause: fn(Duration),
+    person: fn(&Said) -> Decision,
 }
 
 impl Roads {
@@ -1220,7 +1298,11 @@ impl Roads {
             .and_then(std::path::Path::parent)
             .map(|dir| dir.join(REFLEX_PLAN_LEDGER));
         let (for_mode, for_standing) = (wire.clone(), wire.clone());
+        let cover = LiveCoverJudge::here(workspace.as_deref());
         Self {
+            cover,
+            pause: std::thread::sleep,
+            person: cover::ask_the_person,
             mode: Box::new(move || {
                 REFLEX_DECIDE.mode_in_run(&for_mode.settings_root(), Asking::Fresh)
             }),
@@ -1263,6 +1345,9 @@ impl Roads {
             now_ms: super::steady_ms(),
             wall_ms: crate::project_runtime::now_epoch_ms(),
             stopped: super::super::guard::stopped_reason(),
+            cover: &mut self.cover,
+            pause: &mut self.pause,
+            person: &mut self.person,
         }
     }
 }
