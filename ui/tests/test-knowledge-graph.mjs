@@ -209,11 +209,30 @@ const brain = await page.evaluate(async () => {
       > Number(nodes[0]?.querySelector(".knowledge-dot")?.getAttribute("r") ?? 0),
     labelPaintOrder: labelStyle?.paintOrder ?? "",
     labelStrokeWidth: labelStyle?.strokeWidth ?? "",
-    /* 전체 지도의 맞춤(t-12029): 묶는 축이 `mapFit`의 몫을 차지한다 — 세로는 아래 범례 띠(`mapFoot`)를 뺀 높이의 몫. */
-    initialFitRatio: Math.max(((layout.bounds.maxX - layout.bounds.minX) * layout.scale) / canvas.clientWidth,
-      ((layout.bounds.maxY - layout.bounds.minY) * layout.viewBoxRect.yScale * layout.scale)
-        / (canvas.clientHeight - Math.min(layout.tuning.mapFoot, canvas.clientHeight * (1 - layout.tuning.mapFit)))),
-    initialFitWanted: layout.tuning.mapFit,
+    /* 전체 지도의 맞춤(t-12029): 묶는 축이 제 방을 채운다 — 방은 판의 `mapFit` 몫(세로는 아래 범례 띠 `mapFoot`을
+     * 뺀 높이의 몫)이되, 작은 판에서는 가장자리에 `margin` px를 남긴 만큼이다. 그리고 그림의 경계는 판의 네 가장자리
+     * (아래는 띠의 위)에서 적어도 `margin` px 떨어진다 — 가장자리의 점이 제 이름 한 줄을 세울 자리다. */
+    ...(() => {
+      const { mapFit, mapFoot, margin } = layout.tuning;
+      const wide = canvas.clientWidth;
+      const tall = canvas.clientHeight;
+      const foot = Math.min(mapFoot, tall * (1 - mapFit));
+      const roomX = Math.min(wide * mapFit, wide - 2 * margin);
+      const roomY = Math.min((tall - foot) * mapFit, tall - foot - 2 * margin);
+      const camera = layout.viewBoxRect;
+      const screenY = (y) => (camera.middleY + (y - camera.middleY) * camera.yScale - camera.y) * layout.scale;
+      return {
+        initialFitRatio: Math.max(((layout.bounds.maxX - layout.bounds.minX) * layout.scale) / roomX,
+          ((layout.bounds.maxY - layout.bounds.minY) * camera.yScale * layout.scale) / roomY),
+        initialFitWanted: layout.zoom,
+        initialEdgeRoom: Math.round(Math.min((layout.bounds.minX - camera.x) * layout.scale,
+          wide - (layout.bounds.maxX - camera.x) * layout.scale, screenY(layout.bounds.minY),
+          tall - foot - screenY(layout.bounds.maxY))),
+        initialEdgeWanted: margin,
+        canvasWide: wide,
+        canvasTall: tall,
+      };
+    })(),
     overlappingDots,
     gradients: view.querySelectorAll("defs radialGradient[id^='knowledge-node-gradient-']").length,
     halos: view.querySelectorAll(".knowledge-halo").length,
@@ -280,6 +299,7 @@ ok(
     brain.labelPaintOrder.includes("stroke") &&
     parseFloat(brain.labelStrokeWidth) === 2 &&
     Math.abs(brain.initialFitRatio - brain.initialFitWanted) < 0.02 &&
+    brain.initialEdgeRoom >= brain.initialEdgeWanted - 1 &&
     brain.overlappingDots === 0 &&
     brain.gradients === 8 &&
     brain.halos === brain.nodeCount &&
@@ -1396,7 +1416,6 @@ const brainScale = await page.evaluate(async () => {
    * 확대된다 — 실측으로 프레임 50→265ms의 원인이었다. 새 점이 있는 판은 제 폭으로
    * 선다. */
   const canvasBox = view.querySelector(".knowledge-canvas");
-  const fitRatio = (spread * layout.scale) / canvasBox.clientWidth;
   /* 09-16: 카메라는 두 축을 다 판 안에 넣는다(contain) — 폭만 맞추던 옛 셈은 판이
      짧아지면 그림의 위아래를 잘랐다. 그래서 「토큰의 몫을 차지한다」는 **묶는 축**의
      이야기이고, 다른 축은 그보다 작다. 앞 케이스의 배율(zoom)은 여전히 물려받는다 —
@@ -1405,10 +1424,15 @@ const brainScale = await page.evaluate(async () => {
     * (view.classList.contains("is-tier-compact") || view.classList.contains("is-tier-tiny")
       ? layout.tuning.yScaleCompact
       : view.classList.contains("is-tier-middle") ? layout.tuning.yScaleMiddle : 1);
-  /* 세로의 몫은 아래 범례 띠(`mapFoot`, t-12029)를 뺀 높이에서 잰다 — 전체 지도의 맞춤은 `mapFit`이다. */
-  const footRoom = Math.min(layout.tuning.mapFoot, canvasBox.clientHeight * (1 - layout.tuning.mapFit));
-  const fitTallRatio = (tallSpread * layout.scale) / (canvasBox.clientHeight - footRoom);
-  const fitExpected = layout.tuning.mapFit * layout.zoom;
+  /* 두 축을 제 방에 대어 잰다(t-12029): 방은 판의 `mapFit` 몫이고 세로는 아래 범례 띠(`mapFoot`)를 뺀 높이의
+   * 몫이되, 작은 판에서는 가장자리에 `margin` px를 남긴 만큼이다. 묶는 축이 제 방을 채운다(배율을 곱한 만큼). */
+  const { mapFit, mapFoot, margin } = layout.tuning;
+  const footRoom = Math.min(mapFoot, canvasBox.clientHeight * (1 - mapFit));
+  const roomX = Math.min(canvasBox.clientWidth * mapFit, canvasBox.clientWidth - 2 * margin);
+  const roomY = Math.min((canvasBox.clientHeight - footRoom) * mapFit, canvasBox.clientHeight - footRoom - 2 * margin);
+  const fitRatio = (spread * layout.scale) / roomX;
+  const fitTallRatio = (tallSpread * layout.scale) / roomY;
+  const fitExpected = layout.zoom;
   const settle = async () => {
     knowledgeLayouts.delete(view);
     view.querySelector(".knowledge-nodes").dataset.knowledgeSignature = "";
@@ -1536,7 +1560,7 @@ ok(
     brainScale.firstPaint < 300 &&
     frameBudgetHolds(brainScale.worstGap) &&
     brainScale.spread > 400 && brainScale.spread < 6000 &&
-    // 묶는 축이 토큰의 몫을 차지하고, 두 축 다 그 몫을 넘지 않는다(contain).
+    // 묶는 축이 제 방을 채우고, 두 축 다 제 방을 넘지 않는다(contain).
     Math.abs(Math.max(brainScale.fitRatio, brainScale.fitTallRatio) - brainScale.fitExpected) < 0.02 &&
     brainScale.fitRatio <= brainScale.fitExpected + 0.02 &&
     brainScale.fitTallRatio <= brainScale.fitExpected + 0.02 &&
@@ -4118,9 +4142,14 @@ const shapeGrammar = await grammarAsk(async () => {
         && (layout.drawn === null || layout.drawn[at] === 1));
       const dot = seat < 0 ? null : layout.nodeEls[seat]?.querySelector(".knowledge-dot") ?? null;
       /* 크기가 약속한 원 — 모양과 무관한 반지름이다. 그린 넓이를 **이 원**의 넓이로 나눈다: 모양의
-       * 비율로 곱한 반지름을 같은 비율로 다시 나누는 셈은 무엇도 묻지 않는다. */
-      const promised = seat < 0 ? 0
+       * 비율로 곱한 반지름을 같은 비율로 다시 나누는 셈은 무엇도 묻지 않는다. 전체 지도의 쪽과 유령이 약속하는
+       * 것은 지도의 작은 점이고(`knowledgeMapRadius`, t-12029 「spread」), 렌즈가 더한 점과 주변 탐색은 √차수 램프다. */
+      const ramp = seat < 0 ? 0
         : knowledgeNodeRadius(layout.model.degree[seat], layout.tuning, layout.tier[seat]);
+      const promised = seat < 0 ? 0
+        : layout.ring === null && (kind === "page" || kind === "ghost")
+          ? knowledgeMapRadius(kind, layout.tier[seat], layout.community[seat] >= layout.namedCount, layout.tuning, ramp)
+          : ramp;
       const reach = seat < 0 ? 0 : layout.radius[seat];
       const area = dot === null ? 0
         : dot.localName === "circle" ? Math.PI * Number(dot.getAttribute("r")) ** 2

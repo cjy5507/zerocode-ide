@@ -762,12 +762,16 @@ export async function measureKnowledgeGlParity(page, ok) {
     const plateHit = plate === null ? null : hitAt(plate);
     const wordHit = word === null ? null : hitAt(word);
     let picked = null;
+    /* 이름의 열쇠는 누르기 **전에** 읽는다 — 오버레이의 이름 칸은 판이 다시 설 때 다른 쪽의 이름을 입는다: 고른
+     * 쪽의 이웃이 이름을 얻으면 첫 칸이 그 이웃의 것이 된다(t-12029: 맞춤의 이름이 한 개에서 넷이 되자 누른 뒤의
+     * 첫 칸은 Page-0000, 누른 이름과 골라진 쪽은 둘 다 Page-0002였다). */
+    const wanted = word?.dataset.graphKey ?? null;
     if (wordHit?.hit) {
       wordHit.target.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: wordHit.x, clientY: wordHit.y }));
       picked = knowledgeSelectedKey;
     }
     const pressable = { plate: plateHit?.hit === true, label: wordHit?.hit === true,
-      picked: picked !== null && picked === word?.dataset.graphKey };
+      picked: picked !== null && picked === wanted };
     selectKnowledgeNode(view, null);
     fitKnowledgeGraph(view, held);
     /* 주변 탐색(첫 방문의 기본)도 같은 손으로 — 고리의 이름표는 격자가 쥔 상자에 서고
