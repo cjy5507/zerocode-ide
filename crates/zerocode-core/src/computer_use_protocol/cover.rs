@@ -64,10 +64,11 @@ pub struct Coverer {
 /// The place a hand is to press and what stands over it now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cover {
-    /// The target's window: its id, app and layer, and where it is on the
-    /// screen.
+    /// The target's window: its id, its app and that app's process, its
+    /// layer, and where it is on the screen.
     pub target: u64,
     pub app: String,
+    pub pid: i64,
     pub layer: i64,
     pub window: Rect,
     /// The place on the screen, where the target's window stands now.
@@ -143,6 +144,7 @@ pub fn cover_of(windows: &[DesktopWindow], target: u64, local: Option<Rect>) -> 
     Some(Cover {
         target,
         app: own.app.clone(),
+        pid: own.pid,
         layer: own.layer,
         window: own.rect,
         spot,
