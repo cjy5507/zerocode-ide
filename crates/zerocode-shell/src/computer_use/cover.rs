@@ -221,6 +221,11 @@ pub(crate) fn uncover(
                 };
                 outcome.tried.push(next);
                 let looked = make(next, standing, hand)
+                    .map(|made| {
+                        if !made {
+                            outcome.not_made.push(next);
+                        }
+                    })
                     .and_then(|()| desktop_windows(hand.call))
                     .map(|listed| cover_of(&listed, place.window, place.local));
                 match looked {
@@ -272,8 +277,9 @@ pub(crate) fn uncover(
 /// the helper: it is brought forward with its whole app instead, and a move
 /// the helper refuses is a move not made — the look after it says what
 /// stands, and the next move, or the person, follows. Anything else the
-/// helper says is an error.
-fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<(), ComputerUseError> {
+/// helper says is an error. True when the move was made (or had nothing to
+/// make), false when the helper would not make it.
+fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<bool, ComputerUseError> {
     match next {
         Move::RaiseTarget => match (hand.call)(
             "windowAction",
@@ -283,7 +289,7 @@ fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<(), ComputerUs
                 "activateApp",
                 json!({ "app": format!("pid:{}", cover.pid) }),
             )),
-            raised => raised.map(drop),
+            raised => raised.map(|_| true),
         },
         Move::MoveTarget => {
             let displays = (hand.call)("displays", json!({}))?;
@@ -295,14 +301,14 @@ fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<(), ComputerUs
                 )),
                 // No place on any screen clears it: the move is made of
                 // nothing, and the look after it says so.
-                None => Ok(()),
+                None => Ok(true),
             }
         }
         Move::LookAgain => {
             (hand.pause)(Duration::from_millis(COVER_LOOK_AGAIN_MS));
-            Ok(())
+            Ok(true)
         }
-        Move::AskPerson => Ok(()),
+        Move::AskPerson => Ok(true),
     }
 }
 
@@ -312,11 +318,11 @@ fn not_its_to_move(refusal: &ComputerUseError) -> bool {
     refusal.code == error_code::WINDOW_NOT_FOUND || refusal.code == error_code::ACCESSIBILITY_ERROR
 }
 
-/// A move's answer, where the helper refusing to make it is a move not made.
-fn not_made(answer: Result<Value, ComputerUseError>) -> Result<(), ComputerUseError> {
+/// A move's answer: made, or — the helper refusing to make it — not made.
+fn not_made(answer: Result<Value, ComputerUseError>) -> Result<bool, ComputerUseError> {
     match answer {
-        Err(refusal) if not_its_to_move(&refusal) => Ok(()),
-        answer => answer.map(drop),
+        Err(refusal) if not_its_to_move(&refusal) => Ok(false),
+        answer => answer.map(|_| true),
     }
 }
 

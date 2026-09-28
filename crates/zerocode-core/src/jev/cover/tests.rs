@@ -205,6 +205,7 @@ fn the_marks_say_no_when_the_first_move_left_it_covered() {
     let cleared_by = |tried: &[Move], by: Option<Move>| Outcome {
         tried: tried.to_vec(),
         cleared_by: by,
+        not_made: Vec::new(),
     };
     assert_eq!(
         marks(
