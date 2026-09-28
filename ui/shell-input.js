@@ -1730,10 +1730,10 @@ let strayJamoReportedAt = 0;
  * still reads: 계속 is `sS`, the split "ㄱ ㅖ 속" is `c v S`. The stamp and
  * the kind are the ring's own words and stay. */
 const IME_SHAPE = {
-  consonant: "c", // a bare consonant jamo: 초 alone
-  vowel: "v", // a bare vowel jamo: 중 alone
-  open: "s", // a syllable without a final: 초+중
-  closed: "S", // a syllable with one: 초+중+종
+  consonant: "c", // a bare consonant jamo: an initial alone
+  vowel: "v", // a bare vowel jamo: a medial alone
+  open: "s", // a syllable without a final: initial and medial
+  closed: "S", // a syllable with one: initial, medial and final
   other: "\u00b7", // anything not hangul — a password must not ride a ㅋㅋ report
 };
 const IME_SHAPE_LEGEND = `(${Object.entries(IME_SHAPE).map(([name, mark]) => `${mark}=${name}`).join(" ")})`;
