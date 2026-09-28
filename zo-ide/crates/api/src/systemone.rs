@@ -1376,11 +1376,11 @@ mod tests {
                         heard.push(ordinal);
                     }
                     let Some((status, answer)) = &spoken else { continue };
-                    let head = format!(
+                    let opening = format!(
                         "HTTP/1.1 {status} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
                         answer.len()
                     );
-                    if stream.write_all(head.as_bytes()).await.is_err() || stream.write_all(answer).await.is_err() {
+                    if stream.write_all(opening.as_bytes()).await.is_err() || stream.write_all(answer).await.is_err() {
                         return;
                     }
                 }
