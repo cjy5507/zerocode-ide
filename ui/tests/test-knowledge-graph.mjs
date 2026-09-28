@@ -265,7 +265,7 @@ ok(
     brain.edgeCount > 12 &&
     brain.placed &&
     // 색은 군집이다(3차): 같은 군집의 점은 같은 색이고, 이름 있는 군집마다 성운
-    // 하나와 이름표 하나가 점 뒤의 층에 선다. 앉는 과정은 여러 프레임에 걸친다.
+    // 하나(점 뒤의 층)와 이름표 하나(점 위의 층, t-12443)가 선다. 앉는 과정은 여러 프레임에 걸친다.
     brain.hues >= 1 &&
     brain.hues === brain.namedClusters &&
     brain.hueAgree &&
@@ -4613,9 +4613,9 @@ ok("GL local exploration wears the SVG's grammar: no nebula, spokes apart from c
 
 /* 주제의 이름판은 그리는 글자만큼 자리를 쥔다(t-11500). 판이 그린 줄마다 그 가운데 줄의 칸이 모두
  * 이번 격자에 쥐어졌는지, 판의 줄끼리·판과 이름이 겹치지 않는지를 두 손에서 묻는다 — 판 여섯·스물(넓은
- * 판)과 빽빽한 좁은 판. 판은 이름 한 줄이다(t-12029, 시안 v2 「oneLine」): 선 판마다 보이는 줄이 꼭 하나. SVG의
- * 판은 점을 덮지 않는다(점이 판의 글자 위에 그려지므로). GL의 판은 점 위의 층이라 제 원반 곁에 선다 — 가까운
- * 자리가 다 막힌 판은 점을 덮고서라도(t-12029): 모든 GL 판이 원반 가장자리의 가까운 세 겹 안이다. */
+ * 판)과 빽빽한 좁은 판. 판은 이름 한 줄이다(t-12029, 시안 v2 「oneLine」): 선 판마다 보이는 줄이 꼭 하나. 판은 두
+ * 손 모두 점 위의 층이라(SVG `.knowledge-cluster-names`, t-12443) 제 원반 곁에 선다 — 가까운 자리가 다 막힌 판은
+ * 점을 덮고서라도(t-12029): 모든 판이 원반 가장자리의 가까운 세 겹 안이다. */
 const plateScene = (tags, pages) => glPage.evaluate(async ({ tags, pages }) => {
   const frame = () => new Promise((done) => requestAnimationFrame(done));
   const view = document.querySelector(".knowledge-view:not([hidden])");
@@ -4745,12 +4745,11 @@ for (const [tags, pages, wide, tall] of [[6, 359, 1280, 860], [20, 600, 1280, 86
   plateSeats.rows.push(...scene.rows.map((row) => ({ ...row, wide })));
 }
 await glPage.setViewportSize(plateSeat);
-ok("cluster plates reserve the words they wear: every plate is one drawn line on its own cells, no plate meets another plate, a name or a control, SVG plates cover no point, and every GL plate stands at its own disc's edge",
+ok("cluster plates reserve the words they wear: every plate is one drawn line on its own cells, no plate meets another plate, a name or a control, and every plate — on both hands — stands at its own disc's edge",
   !plateSeats.thrown && plateSeats.rows.length === 6
     && plateSeats.rows.every((row) => row.unreserved === 0 && row.overlaps === 0 && row.standing > 0)
     && plateSeats.rows.every((row) => row.drawnLines === row.standing)
-    && plateSeats.rows.every((row) => (row.hand === "gl"
-      ? row.farthest < 2 * Math.max(...KNOWLEDGE_PLATE_GAPS) : row.underOther === 0 && row.underRim === 0)),
+    && plateSeats.rows.every((row) => row.farthest < 2 * Math.max(...KNOWLEDGE_PLATE_GAPS)),
   JSON.stringify(plateSeats));
 
 /* 이름판의 글자는 두 테마에서 바탕과 대비를 지킨다(t-11500 E) — GL의 판은 부스러기 점 위에도 서므로, 글자는
