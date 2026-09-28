@@ -96,7 +96,7 @@ path(s) changed, none its own`.
   more than version lines; `docs/` and `*.md` never count.
 - The crates zo reads from outside its tree belong to both trees; they are read
   off `cargo metadata` in the scratch (today `crates/zerocode-core/`,
-  `crates/model-prices/`), not from a list kept by hand.
+  `crates/model-prices/`, `crates/jev-socket/`), not from a list kept by hand.
 - Anything the lane cannot tell — no install yet, git or cargo not answering —
   runs the gate.
 
