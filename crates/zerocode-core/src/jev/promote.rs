@@ -105,7 +105,13 @@
 //! ([`Line::only_holds`]) — one rule for every seat, which the difficulty
 //! seat's own lines now go through as well. And one that started acting
 //! falls on its marks alone: for it a fall is for good, and a slow wire is
-//! already paid for request by request.
+//! already paid for request by request. The three screen seats start acting
+//! too (t-13091): a goal walk fills what its caller left open — without it
+//! the caller is handed `needs_fallback` — and its marks come only from
+//! presses, so recording, it earned none (seven days of this machine's
+//! Computer Use, 26,124 steps, asked the screen seats nothing). A stopped
+//! recorded walk's clearing shares those seats and still presses under
+//! `auto` only on a rise ([`risen`]).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -1421,15 +1427,17 @@ fn judge_as(seat: &JevUse, stand: Stand, evidence: &Evidence) -> Verdict {
 /// acts. The window's health — answered share, latency, shape, fallbacks
 /// running — does not take it back, because for such a seat a fall is for
 /// good: recording, it carries out none of its answers, so the difficulty
-/// seat earns no mark to rise on again, and the agent choice has no
-/// baseline mark to clear. What a bad wire costs it is already paid request
-/// by request — an answer that is late, malformed or missing is not carried
-/// out and the placeholder stands in (the middle profile row, a refusal) —
-/// and a slow afternoon must not turn the person's switch off for these two
-/// seats for good. Its marks still take it back: answers carried out that
-/// did worse than the pins, or that the coordinators' own choices disagree
-/// with. Recording, it is judged on everything, as every seat is: it rises
-/// on a healthy window only.
+/// seat earns no mark to rise on again, the agent choice has no baseline
+/// mark to clear, and a screen seat's goal walk presses nothing a walk could
+/// mark. What a bad wire costs it is already paid request by request — an
+/// answer that is late, malformed or missing is not carried out and the
+/// placeholder stands in (the middle profile row, a refusal, the walk's
+/// `needs_fallback`) — and a slow afternoon must not turn the person's
+/// switch off for these seats for good. Its marks still take it back:
+/// answers carried out that did worse than the pins, that the coordinators'
+/// own choices disagree with, or presses the walk was still stuck after.
+/// Recording, it is judged on everything, as every seat is: it rises on a
+/// healthy window only.
 const fn on_its_marks_alone(seat: &JevUse, stand: Stand) -> bool {
     matches!(
         (seat.auto_starts, stand),
@@ -1605,10 +1613,32 @@ pub fn labels_path_in(root: &Value) -> Option<&str> {
 /// rubric wrote it — what this reads, before it asks the rubric.
 #[must_use]
 pub fn standing(seat: &JevUse, rows: &[Value]) -> Stand {
+    standing_from(seat, rows, seat.auto_starts)
+}
+
+/// Whether the judge raised `seat` itself: [`standing`] read as though the
+/// seat started recording, so only a rise its ledger recorded under the
+/// words it asks now makes it act, and where its row says `auto` starts
+/// does not (t-13091).
+///
+/// For an errand that shares a seat with one that starts acting and was
+/// never made to: the screen seats start acting for a goal walk, which fills
+/// what its caller left open, and a stopped recorded walk's clearing — a
+/// press in the middle of a document someone wrote down — still presses
+/// under `auto` only on a rise, as it did before the goal walk started
+/// acting.
+#[must_use]
+pub fn risen(seat: &JevUse, rows: &[Value]) -> bool {
+    standing_from(seat, rows, Stand::Recording) == Stand::Applying
+}
+
+/// [`standing`], with where the seat stands when the judge has decided
+/// nothing under its words given (`start`).
+fn standing_from(seat: &JevUse, rows: &[Value], start: Stand) -> Stand {
     rows.iter()
         .rev()
-        .find_map(|row| stands_on(seat, row))
-        .unwrap_or(seat.auto_starts)
+        .find_map(|row| stands_on(seat, row, start))
+        .unwrap_or(start)
 }
 
 /// What one row, read newest first, says of where `seat` stands — the one
@@ -1616,11 +1646,11 @@ pub fn standing(seat: &JevUse, rows: &[Value]) -> Stand {
 /// round 3). A request of words newer than the seat's ([`fences`]) puts it
 /// behind its series, and so recording, whatever else the row carries; a
 /// transition stands it where the transition says while it was decided on
-/// the words the seat asks now, and where the seat starts otherwise
-/// ([`JevUse::auto_starts`]) — a rise or a fall of other words is no
-/// standing under these; any other row says nothing, and the reader goes on
-/// to the row before it.
-fn stands_on(seat: &JevUse, row: &Value) -> Option<Stand> {
+/// the words the seat asks now, and at `start` otherwise — where the seat
+/// starts ([`JevUse::auto_starts`]) for every reader but [`risen`] — a rise
+/// or a fall of other words is no standing under these; any other row says
+/// nothing, and the reader goes on to the row before it.
+fn stands_on(seat: &JevUse, row: &Value, start: Stand) -> Option<Stand> {
     if fences(seat, row) {
         return Some(Stand::Recording);
     }
@@ -1628,7 +1658,7 @@ fn stands_on(seat: &JevUse, row: &Value) -> Option<Stand> {
     Some(if decided_on_these_words(seat, row) {
         stand
     } else {
-        seat.auto_starts
+        start
     })
 }
 
@@ -1652,7 +1682,7 @@ pub fn standing_in(seat: &JevUse, text: &str) -> Stand {
         .rev()
         .filter(|line| may_speak(seat, line, &keys))
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find_map(|row| stands_on(seat, &row))
+        .find_map(|row| stands_on(seat, &row, seat.auto_starts))
         .unwrap_or(seat.auto_starts)
 }
 

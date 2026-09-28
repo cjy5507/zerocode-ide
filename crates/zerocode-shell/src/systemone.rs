@@ -231,6 +231,19 @@ pub fn applies(wire: &Wire, seat: &JevUse) -> bool {
     applies_in(wire, seat, zerocode_core::jev::Run::Fresh)
 }
 
+/// [`applies`], for an errand that acts under `auto` only once the judge
+/// raised the seat ([`zerocode_core::jev::promote::risen`], t-13091): a
+/// person's `on`, or a rise its own ledger recorded under the words the
+/// seat asks now — never where the seat's row says `auto` starts. A stopped
+/// recorded walk's clearing reads this: it shares the screen seats with the
+/// goal walk, which starts pressing, and it did not.
+#[must_use]
+pub fn applies_once_risen(wire: &Wire, seat: &JevUse) -> bool {
+    let raised = ledger_of(wire, seat)
+        .is_some_and(|ledger| zerocode_core::jev::promote::risen(seat, &read_rows(&ledger)));
+    seat.mode_in(&wire.settings_root()).applies_with(raised)
+}
+
 /// [`applies`], in a run that may repeat one before it (t-6385): a use its
 /// person left `auto` stands at its row's repeat mode in a repeated run
 /// ([`JevUse::mode_in_run`]).

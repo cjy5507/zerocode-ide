@@ -3177,15 +3177,22 @@ fn a_recall_label_whose_key_columns_disagree_with_its_name_grades_nothing() {
 
 /// A seat whose act only fills a choice its caller left open starts acting
 /// under `auto` (t-11989): with no transition of the words it asks now, the
-/// summons' difficulty and the agent choice stand at applying, and every
-/// other seat at recording, as before — read off the rows and off the
+/// summons' difficulty, the agent choice and the three screen seats
+/// (t-13091) stand at applying, and every other seat at recording, as
+/// before — read off the rows and off the
 /// ledger's text alike. A request row says nothing of where a seat stands;
 /// a fall decided on the words it asks now stands it at recording; and a
 /// transition decided on other words is no standing under these, so the
 /// seat stands where it starts.
 #[test]
 fn a_seat_that_fills_what_its_caller_left_open_starts_acting() {
-    let acting_from_the_start = [crate::jev::SUMMON.id, crate::jev::SUMMON_DIFFICULTY.id];
+    let acting_from_the_start = [
+        crate::jev::SUMMON.id,
+        crate::jev::SUMMON_DIFFICULTY.id,
+        crate::jev::BROWSER.id,
+        crate::jev::DESKTOP.id,
+        crate::jev::EMULATOR.id,
+    ];
     for seat in &crate::jev::JEV_USES {
         let starts = if acting_from_the_start.contains(&seat.id) {
             Stand::Applying
@@ -3304,4 +3311,35 @@ fn a_seat_that_starts_acting_is_taken_back_on_its_marks_alone() {
         judge_seat(seat, &disagreeing).expect("judged").verdict,
         Verdict::Fall(Line::Agreement { .. })
     ));
+}
+
+/// Whether the judge raised a seat itself (t-13091): a screen seat starts
+/// acting, and `risen` still reads it recording until a rise of the words it
+/// asks now — the reading a stopped walk's clearing presses on. A fall, a
+/// rise of other words and a newer rubric's request all read as not risen;
+/// for a seat that starts recording, `risen` is its standing.
+#[test]
+fn risen_reads_only_a_rise_the_judge_recorded_under_the_words_asked_now() {
+    use serde_json::json;
+    let seat = &crate::jev::BROWSER;
+    assert_eq!(seat.auto_starts, Stand::Applying);
+    assert_eq!(standing(seat, &[]), Stand::Applying);
+    assert!(!risen(seat, &[]), "where the seat starts is not a rise");
+    assert!(risen(seat, &[rose(seat)]));
+    assert!(!risen(seat, &[rose(seat), recording(seat)[0].clone()]));
+    let other_words =
+        json!({(TRANSITION.canonical): ROSE, "rubricVersions": [seat.rubric_version + 1]});
+    assert!(!risen(seat, &[other_words]), "a rise of other words");
+    let newer = json!({"at": 2, "outcome": "answered",
+        "rubricVersion": seat.rubric_version + 1});
+    assert!(!risen(seat, &[rose(seat), newer]), "behind a newer series");
+
+    let recording_seat = &crate::jev::ROUTING;
+    assert_eq!(recording_seat.auto_starts, Stand::Recording);
+    for rows in [Vec::new(), vec![rose(recording_seat)]] {
+        assert_eq!(
+            risen(recording_seat, &rows),
+            standing(recording_seat, &rows) == Stand::Applying
+        );
+    }
 }
