@@ -334,8 +334,10 @@ struct ManifestFiles {
     files: HashMap<PathBuf, CachedManifest>,
 }
 
-/// One manifest file as last read: what identifies its bytes, and what they
-/// said (`None` — not a manifest a watcher can use).
+/// One manifest file as last read: what identifies its bytes, and — for a
+/// running helper — what they said. `None` is a file that is no row: not a
+/// manifest, or one whose helper has settled, which only a rewrite (a new
+/// stamp) could change. Only running manifests are kept whole.
 struct CachedManifest {
     stamp: FileStamp,
     manifest: Option<Arc<AgentManifest>>,
@@ -375,7 +377,9 @@ impl ManifestFiles {
                 return (cached.manifest.clone(), false);
             }
         }
-        let manifest = read_manifest(path, metadata).map(Arc::new);
+        let manifest = read_manifest(path, metadata)
+            .filter(|manifest| manifest.status == "running")
+            .map(Arc::new);
         self.files.insert(
             path.to_path_buf(),
             CachedManifest {
