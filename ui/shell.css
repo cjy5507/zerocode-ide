@@ -38021,12 +38021,15 @@ details.task-board-section > summary {
 }
 
 /* 아직 쓰지 않은 페이지: 채우지 않은 점선 테두리. 형태로도 구분되므로 색을
- * 못 보는 눈에도 「없는 페이지」가 보인다(§8). */
+ * 못 보는 눈에도 「없는 페이지」가 보인다(§8). 가리키기는 원 안 전체가 받는다(t-12029) — 채우지 않은 원은
+ * 칠한 점선 조각만 포인터에 닿고, 전체 지도의 유령이 반지름 2.2 px가 된 뒤로 그 가운데는 짚히지 않았다(GL은
+ * 가장 가까운 중심으로 고르므로 두 손이 같게). */
 .knowledge-node.is-ghost .knowledge-dot {
   fill: none;
   stroke: var(--signal-wait);
   stroke-dasharray: var(--knowledge-node-ghost-dash);
   stroke-width: var(--knowledge-node-ghost-stroke);
+  pointer-events: visible;
 }
 
 /* 활동 고리(t-2931): 창 안에서 회상된 점은 halo를 고리로 두른다 — 채움 없이

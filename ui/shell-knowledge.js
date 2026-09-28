@@ -4091,10 +4091,14 @@ function knowledgeViewBox(view, layout) {
     );
     /* 지도가 판을 채운다(t-12029, 시안 v2 「fit」): 경계가 판의 `mapFit` 몫을 차지하고, 아래 `mapFoot` px(군집
      * 범례와 배율 단추의 띠)는 비워 그 위의 가운데에 선다 — 72%의 몫에 띠 없이 가운데 서던 판은 실제 볼트의
-     * 원반을 판의 52%×57%에 세웠다. 띠는 판이 낮으면 그 몫까지만. */
-    const { mapFit, mapFoot } = layout.tuning;
+     * 원반을 판의 52%×57%에 세웠다. 띠는 판이 낮으면 그 몫까지만. 몫의 여백은 `margin` px보다 좁지 않다: 작은
+     * 판(649×435)에서 몫의 여백은 위아래 20 px라 가장자리의 점이 제 이름 한 줄을 세울 자리가 없었다(공급망의 접힌
+     * 멤버 셋 중 하나가 맨 위의 이웃에게 자리를 빼앗겨 「+9」를 잃었다). 큰 판에서는 몫의 여백이 더 넓어 그대로다. */
+    const { mapFit, mapFoot, margin } = layout.tuning;
     const foot = Math.min(mapFoot, tall * (1 - mapFit));
-    scale = Math.min((wide * mapFit) / spanX, ((tall - foot) * mapFit) / spanY) * layout.zoom;
+    const roomX = Math.max(1, Math.min(wide * mapFit, wide - 2 * margin));
+    const roomY = Math.max(1, Math.min((tall - foot) * mapFit, tall - foot - 2 * margin));
+    scale = Math.min(roomX / spanX, roomY / spanY) * layout.zoom;
     centreOffsetY = foot / (2 * scale);
   }
   const boxWide = wide / scale;
