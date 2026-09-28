@@ -36059,6 +36059,7 @@ mod tests {
             "pub(crate) fn artifact_delete(",
             "pub(crate) fn artifact_register(",
             "pub(crate) fn artifact_versions(",
+            "pub(crate) fn artifact_page_at(",
             "pub(crate) fn artifact_import_transcripts(",
             "pub(crate) async fn artifact_thumbnail(",
         ] {

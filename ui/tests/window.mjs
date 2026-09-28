@@ -23,7 +23,7 @@ import { createRunner } from "./window-runner.mjs";
 
 import { testVaultSubagents } from "./vault-subagents.mjs";
 import { testKnowledgeLive } from "./knowledge-live.mjs";
-import { testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
+import { testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
@@ -160,6 +160,7 @@ const artifactGallery = async (page, ok) => {
   await testArtifactPages(page, ok);
   await testArtifactFirstScreen(page, ok);
   await testArtifactRecall(page, ok);
+  await testArtifactProvenance(page, ok);
   await testArtifactStudio(page, ok);
   await testArtifactNewMenu(page, ok);
   await testArtifactStudioLayout(page, ok);
@@ -8052,6 +8053,147 @@ ok(
     absentPathsDrawNothing: linkStands.absentPathsDrawNothing,
     aPresentPathStillDraws: linkStands.aPresentPathStillDraws,
   }),
+);
+
+/* 에이전트가 찍는 `file://` 주소도 링크다 (아티팩트 재연결 R1).
+ *
+ * 발행 도구가 돌려주는 주소는 인코딩된 채다(`…/Application%20Support/…`). 패턴은
+ * `file:` 뒤의 첫 `/` 부터 잡았고 존재는 `%20` 을 풀지 않은 채 물어서, 있는 파일이
+ * 링크가 되지 않았다. 이제 주소 전체가 링크이고 존재는 풀린 경로로 묻는다 —
+ * 인코딩된 철자를 「없다」로 답하게 해 두면 그것이 드러난다. 깨진 이스케이프는
+ * 링크가 되지 않되 그 줄의 다른 링크를 막지 않고, 맨 경로와 http 는 전과 같다.
+ * 스토어의 `pages/<id>/` 를 가리키는 주소는 그 아티팩트로(머리띠를 얹어) 열리고
+ * 보관된 판은 그 번호로 열린다; 스토어 밖의 주소는 경로 링크의 문 그대로다. */
+const fileUrls = await page.evaluate(async () => {
+  const seen = {};
+  const { view, feed, row, show } = window.__B__;
+  const held = {};
+  for (const command of ["paths_exist", "artifact_page_at", "open_browser_pane", "browser_place",
+    "browser_navigate", "read_text_file"]) held[command] = window.__ANSWER__[command];
+  const asked = [];
+  window.__ANSWER__.paths_exist = (args) => {
+    const paths = args?.paths ?? [];
+    asked.push(...paths);
+    return paths.map((path) => !(window.__GONE__ ?? []).some((gone) => path.endsWith(gone)));
+  };
+  const store = "/tmp/zerocode-window-test/artifacts/pages/p-deck";
+  const page = {
+    id: "p-deck", kind: "page", title: "Deck", path: `${store}/index.html`, bytes: 10,
+    created_ms: Date.now(), modified_ms: Date.now(), version: 2, source_path: "/tmp/zerocode-window-test/deck.html",
+    url: `file://${store}/index.html`, origin: { pane: "term-3", agent: "claude" }, tags: [],
+    preview: { kind: "text", text: "" }, source: "manual",
+  };
+  const pageAsks = [];
+  window.__ANSWER__.artifact_page_at = (args) => {
+    pageAsks.push(args.path);
+    if (args.path === `${store}/index.html`) return { artifact: page, version: null };
+    if (args.path === `${store}/v1/index.html`) return { artifact: page, version: 1 };
+    return null;
+  };
+  const browsed = [];
+  window.__ANSWER__.open_browser_pane = (args) => (browsed.push(args.url), `browser-file-url${browsed.length}`);
+  window.__ANSWER__.browser_place = () => null;
+  window.__ANSWER__.browser_navigate = () => null;
+  const opened = [];
+  window.__ANSWER__.read_text_file = (args) => (opened.push(args.path), { text: "x", version: "1" });
+  const settle = () => new Promise((done) => setTimeout(done, 80));
+  const shown = async (rows) => {
+    show();
+    await new Promise((done) => setTimeout(done, 40));
+    window.getSelection()?.removeAllRanges();
+    view.clearSelection();
+    await feed({ full: true, rows });
+    await settle();
+  };
+  const press = async (selector, extra = {}) => {
+    await new Promise((done) => setTimeout(done, TERM_SELECT_MULTI_CLICK.windowMs + 20));
+    view.clearSelection();
+    const link = view.pre.querySelector(selector);
+    if (!link) return false;
+    const box = link.getBoundingClientRect();
+    const init = { clientX: box.left + 2, clientY: box.top + box.height / 2, bubbles: true, cancelable: true, ...extra };
+    link.dispatchEvent(new MouseEvent("mousedown", init));
+    link.dispatchEvent(new MouseEvent("mouseup", init));
+    link.dispatchEvent(new MouseEvent("click", init));
+    await new Promise((done) => setTimeout(done, 120));
+    return true;
+  };
+  const primary = window.__TEST_PRIMARY_EVENT__;
+  const linkMenu = document.getElementById("link-menu");
+  // `%20` 은 빈칸으로 물어진다: 인코딩된 철자는 「없다」로 답하게 해 둔다.
+  window.__GONE__ = ["My%20Page/index.html", "a%20b.txt"];
+  await shown([
+    row(0, "see file:///tmp/known-root/My%20Page/index.html."),
+    row(1, "bad file:///tmp/known-root/bad%E0%A4%A.html and src/foo.rs:42"),
+    row(2, "and /tmp/known-root/a%20b.txt plus http://localhost:5173/x"),
+  ]);
+  seen.encodedUrlIsALink =
+    view.pre.querySelector('[data-href="file:///tmp/known-root/My%20Page/index.html"]') !== null;
+  seen.askedDecoded = asked.includes("/tmp/known-root/My Page/index.html") &&
+    !asked.some((path) => path.includes("My%20Page"));
+  seen.malformedIsNotALink = view.pre.querySelector('[data-href^="file:///tmp/known-root/bad"]') === null &&
+    !asked.some((path) => path.includes("bad"));
+  seen.malformedLeavesTheLineAlone = view.pre.querySelector('[data-href="src/foo.rs:42"]') !== null;
+  seen.plainPathIsAskedAsWritten = asked.includes("/tmp/known-root/a%20b.txt") &&
+    view.pre.querySelector('[data-href="/tmp/known-root/a%20b.txt"]') === null;
+  seen.httpStillStands = view.pre.querySelector('[data-href="http://localhost:5173/x"]') !== null;
+  window.__GONE__ = [];
+  // 스토어의 발행물: 현재 파일은 그 판 번호(현재 = 2)로, 보관된 판은 1 로 —
+  // 둘 다 머리띠(`tab.artifact`)를 얹은 브라우저 탭이다. 일반 클릭도 같은 문이다
+  // (목적지가 하나라 고를 것이 없다).
+  await shown([
+    row(0, `url file://${store}/index.html`),
+    row(1, `kept file://${store}/v1/index.html`),
+  ]);
+  const artifactTabs = () => tabs.filter((one) => one.kind === "browser" && one.artifact?.id === "p-deck");
+  seen.storeUrlIsALink = view.pre.querySelector(`[data-href="file://${store}/index.html"]`) !== null;
+  await press(`[data-href="file://${store}/index.html"]`, primary);
+  seen.currentOpensAsTheArtifact = artifactTabs().at(-1)?.artifact?.version === 2 &&
+    browsed.at(-1) === pathAsFileUrl("/data/artifacts/versions/p-deck/2/page.html");
+  await shown([
+    row(0, `url file://${store}/index.html`),
+    row(1, `kept file://${store}/v1/index.html`),
+  ]);
+  await press(`[data-href="file://${store}/v1/index.html"]`);
+  seen.keptVersionOpensAtItsNumber = artifactTabs().at(-1)?.artifact?.version === 1 &&
+    browsed.at(-1) === pathAsFileUrl("/data/artifacts/versions/p-deck/1/page.html") &&
+    linkMenu.hidden === true;
+  seen.storeAskedWithPaths = pageAsks.includes(`${store}/index.html`) && pageAsks.includes(`${store}/v1/index.html`);
+  // 스토어 밖의 `file://` 은 경로다: 일반 클릭은 파일 메뉴(머리에 풀린 경로), ⌘ 는
+  // 편집기, 브라우저 탭은 서지 않는다.
+  await shown([row(0, "note file:///tmp/known-root/notes%20one.txt"), row(1, "tail")]);
+  const outside = '[data-href="file:///tmp/known-root/notes%20one.txt"]';
+  const browsedBefore = browsed.length;
+  await press(outside);
+  seen.outsideBareOffersFileDoors = linkMenu.hidden === false &&
+    document.getElementById("link-menu-url").textContent === "/tmp/known-root/notes one.txt";
+  closeLinkMenu();
+  await new Promise((done) => setTimeout(done, 420));
+  await shown([row(0, "note file:///tmp/known-root/notes%20one.txt"), row(1, "tail")]);
+  await press(outside, primary);
+  seen.outsidePrimaryOpensThePath = opened.some((path) => path.endsWith("notes one.txt")) &&
+    browsed.length === browsedBefore;
+  for (const tab of artifactTabs()) dropTab(tab.id);
+  for (const [command, answer] of Object.entries(held)) {
+    if (answer === undefined) delete window.__ANSWER__[command];
+    else window.__ANSWER__[command] = answer;
+  }
+  delete window.__GONE__;
+  show();
+  await new Promise((done) => setTimeout(done, 40));
+  return seen;
+});
+ok(
+  "a printed file:// URL is a link checked by its decoded path; a malformed escape is no link and blocks nothing; plain paths and http read as before",
+  fileUrls.encodedUrlIsALink && fileUrls.askedDecoded && fileUrls.malformedIsNotALink &&
+    fileUrls.malformedLeavesTheLineAlone && fileUrls.plainPathIsAskedAsWritten && fileUrls.httpStillStands,
+  JSON.stringify(fileUrls),
+);
+ok(
+  "a file:// URL into the artifact store opens that page with its header band at the version it names; any other opens as a path",
+  fileUrls.storeUrlIsALink && fileUrls.currentOpensAsTheArtifact && fileUrls.keptVersionOpensAtItsNumber &&
+    fileUrls.storeAskedWithPaths && fileUrls.outsideBareOffersFileDoors && fileUrls.outsidePrimaryOpensThePath,
+  JSON.stringify(fileUrls),
 );
 
 /* 진짜 입력으로만 보이는 문 하나.

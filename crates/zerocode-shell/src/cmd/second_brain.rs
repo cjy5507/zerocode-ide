@@ -940,23 +940,26 @@ pub(crate) async fn second_brain_export_html(
             &artifact_runtime::sha256_hex(input.vault.as_bytes())[..16]
         ));
         std::fs::write(&file_path, page.html.as_bytes()).map_err(|error| error.to_string())?;
-        let meta = store.publish_page(&zerocode_core::artifact_publish::PublishInput {
-            file_path,
-            title: Some(input.title.clone()),
-            description: Some(format!(
-                "{} · {} nodes · {} edges{}",
-                input.vault,
-                page.nodes,
-                page.edges,
-                if input.lenses.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {}", input.lenses.join(" · "))
-                }
-            )),
-            favicon: None,
-            label: Some(KNOWLEDGE_EXPORT_LABEL.to_string()),
-        })?;
+        let meta = store.publish_page(
+            &zerocode_core::artifact_publish::PublishInput {
+                file_path,
+                title: Some(input.title.clone()),
+                description: Some(format!(
+                    "{} · {} nodes · {} edges{}",
+                    input.vault,
+                    page.nodes,
+                    page.edges,
+                    if input.lenses.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", input.lenses.join(" · "))
+                    }
+                )),
+                favicon: None,
+                label: Some(KNOWLEDGE_EXPORT_LABEL.to_string()),
+            },
+            zerocode_core::artifact::Origin::default(),
+        )?;
         if let Some(app) = artifact_runtime::window_handle() {
             use tauri::Emitter as _;
             let _ = app.emit(artifact_runtime::CHANGED_EVENT, ());

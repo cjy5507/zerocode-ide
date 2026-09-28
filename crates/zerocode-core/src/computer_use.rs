@@ -4641,6 +4641,7 @@ fn computer_route_shim<'a>(
         pane_header: None,
         cwd_verbs: &[],
         cwd_flag: None,
+        pane_flag: None,
     }
 }
 
@@ -4683,6 +4684,10 @@ pub(crate) struct PowerShellBridgeShim<'a> {
     pub cwd_verbs: &'a [&'a str],
     /// Optional argv flag carrying the shell's working directory.
     pub cwd_flag: Option<&'a str>,
+    /// Optional argv flag carrying the pane key, appended only when the
+    /// shell has one — for a window that records which pane asked (the
+    /// artifact door's publication origin), never to authorize anything.
+    pub pane_flag: Option<&'a str>,
 }
 
 impl PowerShellBridgeShim<'_> {
@@ -4702,6 +4707,12 @@ impl PowerShellBridgeShim<'_> {
         } = self;
         let cwd_args = self.cwd_flag.map_or(String::new(), |flag| {
             format!("set -- \"$@\" '{flag}' \"$PWD\"\n")
+        });
+        let pane_args = self.pane_flag.map_or(String::new(), |flag| {
+            format!(
+                "if [ -n \"${{{pane}:-}}\" ]; then\n  set -- \"$@\" '{flag}' \"${pane}\"\nfi\n",
+                pane = crate::hook::PANE_KEY_ENV
+            )
         });
         // The pane key rides as a header where the door seats a pane (the
         // browser's), through the same guarded file as the tokens.
@@ -4753,7 +4764,7 @@ fi
 sep=$(printf '\037')
 body="{prefix}"
 stdin_name=""
-{cwd_args}for arg in "$@"; do
+{cwd_args}{pane_args}for arg in "$@"; do
   case "$arg" in
     --text-stdin) stdin_name="text"; continue ;;
     --value-stdin) stdin_name="value"; continue ;;
@@ -4818,9 +4829,16 @@ printf '%s' "$said"
             pane_header,
             cwd_verbs,
             cwd_flag,
+            pane_flag,
         } = self;
         let cwd_args = cwd_flag.map_or(String::new(), |flag| {
             format!("$args = @($args) + @('{flag}', (Get-Location).Path)\n")
+        });
+        let pane_args = pane_flag.map_or(String::new(), |flag| {
+            format!(
+                "if ($env:{PANE_KEY_ENV}) {{ $args = @($args) + @('{flag}', $env:{PANE_KEY_ENV}) }}\n",
+                PANE_KEY_ENV = crate::hook::PANE_KEY_ENV
+            )
         });
         let deadline_ms = deadline_seconds * 1000;
         let stdin_arms = if *stdin_flags {
@@ -4877,7 +4895,7 @@ if (-not $capability) {{
 $sep = [string][char]0x1f
 $body = '{prefix}'
 $stdinName = ''
-{cwd_args}foreach ($arg in $args) {{
+{cwd_args}{pane_args}foreach ($arg in $args) {{
   $word = [string]$arg
 {stdin_arms}  if ($word.Contains($sep)) {{
     [Console]::Error.WriteLine('{command}: an argument may not contain the separator byte')

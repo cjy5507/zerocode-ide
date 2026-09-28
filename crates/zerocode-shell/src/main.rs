@@ -357,9 +357,9 @@ use cmd::{
 };
 use cmd::{
     artifact_copy_path, artifact_counts, artifact_delete, artifact_import_transcripts,
-    artifact_open, artifact_preview, artifact_register, artifact_reveal, artifact_search,
-    artifact_thumbnail, artifact_versions, artifacts_list, set_artifacts_retention_days,
-    set_vault_session_limit,
+    artifact_open, artifact_page_at, artifact_preview, artifact_register, artifact_reveal,
+    artifact_search, artifact_thumbnail, artifact_versions, artifacts_list,
+    set_artifacts_retention_days, set_vault_session_limit,
 };
 use cmd::{
     claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs,
@@ -3008,6 +3008,7 @@ fn main() -> ExitCode {
             artifact_delete,
             artifact_register,
             artifact_versions,
+            artifact_page_at,
             artifact_thumbnail,
             artifact_import_transcripts,
             set_artifacts_retention_days, set_vault_session_limit,

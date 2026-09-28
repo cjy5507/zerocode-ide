@@ -102,6 +102,51 @@ fn the_parsed_team_body_is_released_before_queue_or_answer_wait() {
     );
 }
 
+/// The artifact door's argv reaches the window whole: a publish carries the
+/// asking pane and its folder beside the input, for the window to resolve
+/// into the row's origin. The bridge only authenticates and forwards.
+#[tokio::test]
+async fn an_artifact_publish_reaches_the_window_with_its_pane_and_folder() {
+    struct Recorded(std::sync::Mutex<Vec<serde_json::Value>>);
+    impl zerocode_hookd::ArtifactCommands for Recorded {
+        fn execute(&self, request: serde_json::Value) -> Result<serde_json::Value, String> {
+            self.0.lock().expect("recorded").push(request);
+            Ok(serde_json::json!({"id": "p-1"}))
+        }
+    }
+    let recorded = Arc::new(Recorded(std::sync::Mutex::new(Vec::new())));
+    let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let state = state.with_artifacts(recorded.clone());
+    let argv = [
+        "publish",
+        "--file-path",
+        "/work/deck.html",
+        "--cwd",
+        "/work/sub",
+        "--pane",
+        "term-4",
+    ];
+    let body: String = argv
+        .iter()
+        .map(|word| format!("{word}{}", zerocode_core::agent_teams::ARGV_SEPARATOR))
+        .collect();
+    let request = Request::post(zerocode_core::artifact_publish::ROUTE)
+        .header(HOOK_TOKEN_HEADER, TOKEN)
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .body(Body::from(body))
+        .expect("request");
+    let response = router(state).oneshot(request).await.expect("service");
+    assert_eq!(response.status(), StatusCode::OK);
+    let seen = recorded.0.lock().expect("recorded").clone();
+    assert_eq!(
+        seen,
+        vec![
+            serde_json::json!({"action":"publish", "file_path":"/work/deck.html",
+            "cwd":"/work/sub", "pane":"term-4"})
+        ]
+    );
+}
+
 /// The plugin road. Agents that load code rather than run a script post JSON
 /// from inside their host's Node process, with `payload` as an OBJECT and the
 /// metadata in camelCase — because those plugins are JavaScript, and asking a JS

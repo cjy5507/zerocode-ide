@@ -1855,10 +1855,13 @@ mod tests {
         let source = store.get(&id).unwrap().path;
         let source_bytes = std::fs::read(&source).unwrap();
         let publication = store
-            .publish_page(&zerocode_core::artifact_publish::PublishInput {
-                file_path: source.clone(),
-                ..Default::default()
-            })
+            .publish_page(
+                &zerocode_core::artifact_publish::PublishInput {
+                    file_path: source.clone(),
+                    ..Default::default()
+                },
+                zerocode_core::artifact::Origin::default(),
+            )
             .unwrap();
         let versions = store.versions(&publication.id);
         let published_bytes = std::fs::read(&versions[0].path).unwrap();

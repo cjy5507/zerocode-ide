@@ -1745,3 +1745,120 @@ export async function testArtifactRecall(page, ok) {
     ]) && seen.landingTab === "reports" && seen.landingSelected === "rep-today" && seen.landingShown === "rep-today",
     JSON.stringify(seen));
 }
+
+/* 발행물의 출처 (아티팩트 재연결 R1). 판에서 발행한 페이지는 그 판의 열쇠
+ * (`term-<n>`)와 워크트리를 싣고, 서랍의 카드·워크트리 단추가 그 출처로 선다 —
+ * 카드는 보드에서 그 판의 카드를 고르고, 워크트리는 그 워크트리로 옮긴다. 판
+ * 번호는 창을 띄울 때마다 새로 나오므로 발행보다 늦게 태어난 판은 같은 번호여도
+ * 그 판이 아니다(카드 단추가 서지 않는다). 워커의 판에서 발행한 페이지는 원장
+ * 좌석의 과업도 실어서 「과업」 단추가 그 워커의 카드로 간다. 출처가 없는
+ * 페이지는 세 단추 모두 서지 않는다. */
+export async function testArtifactProvenance(page, ok) {
+  const seen = await page.evaluate(async () => {
+    const out = {};
+    const now = Date.now();
+    const pageRow = (id, origin, modified) => ({
+      id, kind: "page", title: `${id}.html`, bytes: 10, created_ms: modified, modified_ms: modified, version: 1,
+      path: `/tmp/zerocode-window-test/artifacts/pages/${id}/index.html`,
+      url: `file:///tmp/zerocode-window-test/artifacts/pages/${id}/index.html`,
+      source_path: `/tmp/zerocode-window-test/${id}.html`, origin, tags: [],
+      preview: { kind: "text", text: "" }, source: "manual",
+    });
+    const rows = [
+      pageRow("p-live", { pane: "term-91", agent: "claude", model: "claude-opus-5",
+        worktree: "/tmp/zerocode-window-test/wt-b", project: "/tmp/zerocode-window-test" }, now - 1_000),
+      pageRow("p-stale", { pane: "term-92", agent: "codex" }, now - 60_000),
+      pageRow("p-bare", {}, now - 2_000),
+      pageRow("p-worker", { pane: "term-93", agent: "codex", run: "run-9", worker: "w-9", task: "t-9",
+        worktree: "/tmp/zerocode-window-test/wt-c" }, now - 3_000),
+    ];
+    const held = {
+      list: window.__ANSWER__.artifacts_list, panes: window.__PANES__, columns: window.__COLUMNS__,
+      activate: window.activateWorktree, ledger: window.__LEDGER__,
+    };
+    await window.__UNTIL__(() => !artifactAsking, "previous gallery listing");
+    window.__ANSWER__.artifacts_list = () =>
+      ({ rows, total: rows.length, truncated: false, thumb: { width: 320, height: 240, queue_max: 24 } });
+    // 91 은 발행보다 먼저 태어났고, 92 는 제 발행보다 늦게 — 다른 기동의 같은 번호다.
+    paneBorn.set(91, now - 30_000); paneAgents.set(91, "claude");
+    paneBorn.set(92, now - 5_000); paneAgents.set(92, "codex");
+    dropTab("artifacts");
+    // 탭은 이미 물은 목록을 다시 묻지 않는다: 이 표를 먼저 읽힌다.
+    await refreshArtifacts();
+    openArtifacts();
+    await window.__PAINTED__();
+    await new Promise((done) => setTimeout(done, 120));
+    let view = artifactsView();
+    const jumps = (id) => {
+      selectArtifact(view, id, { reveal: true });
+      paintArtifactDrawer(view);
+      const disabled = (jump) => view.querySelector(`[data-artifact-jump="${jump}"]`).disabled;
+      return { card: disabled("card"), task: disabled("task"), worktree: disabled("worktree") };
+    };
+    out.live = jumps("p-live");
+    out.stale = jumps("p-stale");
+    out.bare = jumps("p-bare");
+    const activated = [];
+    window.activateWorktree = async (path) => { activated.push(path); };
+    jumps("p-live");
+    view.querySelector('[data-artifact-jump="worktree"]').click();
+    await new Promise((done) => setTimeout(done, 40));
+    out.worktreeGoesThere = activated.join() === "/tmp/zerocode-window-test/wt-b";
+    window.__PANES__ = [{ term: 91, agent: "claude", state: "working", at: now, resumable: false }];
+    window.__COLUMNS__ = [{ bucket: "working", cards: [
+      { pane: "term:91", agent: "claude", state: "working", heading: "Claude", worktree: "wt-b",
+        project: "", task: "", unseen: false, changed_at: 1000, at: 1000 },
+    ] }];
+    jumps("p-live");
+    view.querySelector('[data-artifact-jump="card"]').click();
+    await new Promise((done) => setTimeout(done, 120));
+    out.cardLandsOnThePane = activeTabId === "board" && agentGraphSelectedKey === "agent:term:91";
+    // 워커의 발행물: 원장이 그 좌석(93)에 과업 t-9 를 둔다.
+    window.__LEDGER__ = [
+      { run: "run-9", worker: "w-9", agent: "codex", state: "working", ledger: "working", hearing: "hook",
+        hearing_at: 0, checkout: "/tmp/zerocode-window-test/wt-c", task: "deck", task_id: "t-9",
+        reported: false, review: null, term: 93, at: now },
+    ];
+    await refreshPaneLedger();
+    out.worker = jumps("p-worker");
+    window.__PANES__ = [{ term: 93, agent: "codex", state: "working", at: now, resumable: false }];
+    window.__COLUMNS__ = [{ bucket: "working", cards: [
+      { pane: "term:93", agent: "codex", state: "working", heading: "Codex", worktree: "wt-c",
+        project: "", task: "deck", unseen: false, changed_at: 1000, at: 1000 },
+    ] }];
+    leavePagesForStage();
+    openArtifacts();
+    await window.__PAINTED__();
+    view = artifactsView();
+    jumps("p-worker");
+    view.querySelector('[data-artifact-jump="task"]').click();
+    await new Promise((done) => setTimeout(done, 120));
+    out.taskLandsOnTheWorker = activeTabId === "board" && agentGraphSelectedKey === "agent:term:93";
+    window.__LEDGER__ = held.ledger;
+    await refreshPaneLedger();
+    window.activateWorktree = held.activate;
+    window.__PANES__ = held.panes;
+    window.__COLUMNS__ = held.columns;
+    if (held.list === undefined) delete window.__ANSWER__.artifacts_list;
+    else window.__ANSWER__.artifacts_list = held.list;
+    for (const term of [91, 92]) { paneBorn.delete(term); paneAgents.delete(term); }
+    artifactSelectedId = null;
+    dropTab("artifacts");
+    leavePagesForStage();
+    await refreshArtifacts();
+    return out;
+  });
+  ok(
+    "a publication's drawer offers its maker's card and worktree when its origin names them, and never a same-numbered pane born after it",
+    seen.live.card === false && seen.live.worktree === false && seen.live.task === true &&
+      seen.stale.card === true && seen.stale.worktree === true &&
+      seen.bare.card === true && seen.bare.task === true && seen.bare.worktree === true &&
+      seen.worker.card === false && seen.worker.task === false && seen.worker.worktree === false,
+    JSON.stringify(seen),
+  );
+  ok(
+    "the drawer's worktree, card and task jumps land on the publication's worktree, its maker pane's board card and its worker's card",
+    seen.worktreeGoesThere && seen.cardLandsOnThePane && seen.taskLandsOnTheWorker,
+    JSON.stringify(seen),
+  );
+}

@@ -7902,7 +7902,7 @@ function artifactSeatFor(row) {
   for (const [term, facts] of paneLedger) {
     if ((worker && facts.worker === worker) || (!worker && task && facts.taskId === task)) return term;
   }
-  return null;
+  return artifactMakerTerm(row);
 }
 
 /* 보드는 열리면서 제 기본 선택을 고르므로(`openBoard`), 고르는 손은 그 첫 그림
@@ -7978,7 +7978,7 @@ async function artifactAction(view, action, id) {
  * 도 같은 문으로 `file://`을 열되 창의 머리띠 한 줄을 얹고, 문서(md)는 기존
  * 마크다운 뷰어에 같은 머리띠를 얹는다. 열었으면 true, 이 길이 아닌 종류면
  * false — 그러면 부르는 쪽이 시스템 기본 앱으로 간다. */
-async function openArtifactPage(row) {
+async function openArtifactPage(row, { version = null } = {}) {
   if (row.kind === "web") {
     if (!row.url) return false;
     await openBrowserTab(row.url);
@@ -7986,6 +7986,7 @@ async function openArtifactPage(row) {
   }
   if (row.kind === "page") {
     const facts = artifactStripFacts(row);
+    if (version != null) facts.version = version;
     let path = row.path;
     if (facts.current != null) {
       const origin = activeTabId;
@@ -8015,6 +8016,39 @@ async function openArtifactPage(row) {
     return true;
   }
   return false;
+}
+
+/* 터미널이 찍은 `file://` 주소가 스토어의 발행물 — 현재 파일이나 보관된 판 —
+ * 이면 그 아티팩트로, 머리띠를 얹어 연다. 판정은 스토어의 것이다
+ * (`artifact_page_at`): 창은 스토어가 어디 있는지 추측하지 않는다. 스토어의
+ * 것이 아니거나 물을 수 없으면 false — 부르는 쪽이 경로로 연다. */
+async function openArtifactPageAt(path) {
+  let found = null;
+  try {
+    found = await invoke("artifact_page_at", { path });
+  } catch {
+    return false;
+  }
+  if (!found?.artifact) return false;
+  try {
+    return await openArtifactPage(found.artifact, { version: found.version ?? null });
+  } catch (error) {
+    showError(String(error));
+    return true;
+  }
+}
+
+/* 발행한 판이 지금 이 창에 서 있으면 그 판 — `origin.pane` 은 창의 판 열쇠
+ * (`term-<n>`)다. 판 번호는 창을 띄울 때마다 새로 나오므로 같은 번호가 같은
+ * 판인 것은 그 판이 발행보다 먼저 태어났을 때뿐이다(`paneBorn`). 보드가 카드로
+ * 보여 줄 수 있는 판(에이전트가 앉은 판)만 답하고, 아니면 `null`. */
+function artifactMakerTerm(row) {
+  const key = /^term-(\d+)$/.exec(row?.origin?.pane ?? "");
+  if (key === null) return null;
+  const term = Number(key[1]);
+  const born = paneBorn.get(term);
+  if (born === undefined || born > (row.modified_ms ?? 0)) return null;
+  return paneAgents.has(term) ? term : null;
 }
 
 // Catalog changes invalidate version lists, including an in-flight answer.
