@@ -623,3 +623,119 @@ export async function testKnowledgeUniverseBodies(page, ok) {
       && seen.orders === "glows:0 decor:1 stars:2",
     detail);
 }
+
+/* ---- ④ 필라멘트 — 주제 사이의 흐름 --------------------------------------------------------------
+ *
+ * 두 은하 사이의 선(선언·추론 모두)을 보낸 쪽 → 받는 쪽으로 세고, 합이 문턱(8) 이상인 쌍을 굵은 차례로 48까지
+ * 필라멘트로 세운다. 빛은 많이 보낸 쪽에서 흐르고, 입자 수는 60 + 900·√(n/가장 굵은 n)이다. 볼트: 촘촘한 무리
+ * 넷(80·64·52·40쪽), A→B 18·B→A 6, B→C 9(C→B 0), A→D 12(모두 D→A), C→D 5(문턱 밑). */
+export async function testKnowledgeUniverseFilaments(page, ok) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const seen = await page.evaluate(async () => {
+    try {
+      const view = document.querySelector(".knowledge-view:not([hidden])");
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const until = async (wanted, rounds = 900) => {
+        for (let round = 0; round < rounds; round += 1) {
+          if (wanted()) return true;
+          await frame();
+        }
+        return false;
+      };
+      const heldDimension = knowledgeDimension;
+      const heldVault = secondBrainVault;
+      const sizes = [80, 64, 52, 40];
+      const starts = [0, 80, 144, 196];
+      const edges = [];
+      sizes.forEach((size, group) => {
+        const first = starts[group];
+        for (let step = 1; step < size; step += 1) {
+          for (let back = Math.max(0, step - 6); back < step; back += 1) {
+            edges.push({ from: first + step, to: first + back, kind: "mentions" });
+          }
+        }
+      });
+      const cross = (from, to, count) => {
+        for (let one = 0; one < count; one += 1) {
+          edges.push({ from: starts[from] + 10 + one, to: starts[to] + 20 + one, kind: one % 3 === 0 ? "related" : "mentions" });
+        }
+      };
+      cross(0, 1, 18);
+      cross(1, 0, 6);
+      cross(1, 2, 9);
+      cross(3, 0, 12);
+      cross(2, 3, 5);
+      const answer = window.__buildVaultGraph__({ path: "/filaments", sources: false },
+        { pages: 236, ghosts: 0, tags: [], customEdges: edges });
+      noteKnowledgeExploreLines({});
+      secondBrainVault = answer.vault;
+      knowledgeDimension = "3d";
+      setKnowledgeMode(view, "global", { paint: false });
+      knowledgeReport = answer;
+      await paintKnowledgeView();
+      await until(() => (knowledgeLayouts.get(view)?.left ?? 1) === 0);
+      await paintKnowledgeView();
+      await frame();
+      const layout = knowledgeLayouts.get(view);
+      const universe = knowledgeUniverses.get(view);
+      const map = universe.map;
+      const tune = knowledgeUniverseTuning(view);
+      const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
+      /* 표 밖에서 다시 센다: 은하 줄 사이의 선을 보낸 쪽 → 받는 쪽으로. */
+      const pairs = new Map();
+      for (let at = 0; at < layout.model.edgeCount; at += 1) {
+        const a = map.rowOf[layout.model.from[at]];
+        const b = map.rowOf[layout.model.to[at]];
+        if (a < 0 || b < 0 || a === b || a >= map.galaxies || b >= map.galaxies) continue;
+        const key = Math.min(a, b) * 1000 + Math.max(a, b);
+        const held = pairs.get(key) ?? { a: Math.min(a, b), b: Math.max(a, b), ab: 0, ba: 0, n: 0 };
+        if (a < b) held.ab += 1; else held.ba += 1;
+        held.n += 1;
+        pairs.set(key, held);
+      }
+      const want = [...pairs.values()].filter((pair) => pair.n >= tune.filamentLeast).sort((x, y) => y.n - x.n)
+        .slice(0, Math.min(tune.filamentMost, SHAPE.bundles));
+      const most = want[0]?.n ?? 1;
+      const said = (universe.filaments ?? []).map((one) => ({ from: one.from, to: one.to, n: one.n, sent: one.sent,
+        strength: Math.round(one.strength * 1e4) / 1e4, points: one.points }));
+      const wanted = want.map((pair) => {
+        const forward = pair.ab >= pair.ba;
+        return { from: forward ? pair.a : pair.b, to: forward ? pair.b : pair.a, n: pair.n, sent: Math.max(pair.ab, pair.ba),
+          strength: Math.round(Math.sqrt(pair.n / most) * 1e4) / 1e4,
+          points: Math.round(tune.filamentLeastPoints + tune.filamentGrowPoints * Math.sqrt(pair.n / most)) };
+      });
+      /* 셰이더가 읽는 두 배열과 입자 번호. */
+      const bundle = universe.uniforms.uBundle.value;
+      const uniformsAgree = want.every((pair, index) => {
+        const one = wanted[index];
+        return bundle[index].x === one.from && bundle[index].y === one.to
+          && Math.abs(bundle[index].z - Math.sqrt(pair.n / most)) < 1e-6
+          && Math.abs(bundle[index].w - one.sent / pair.n) < 1e-6;
+      });
+      const codes = universe.scene.children.find((object) => object.userData.key === "decor").geometry.attributes.position.array;
+      const perBundle = new Map();
+      for (const code of codes) {
+        const group = Math.floor(code / SHAPE.groupSpan + 1e-4);
+        if (group >= SHAPE.bundleGroup) perBundle.set(group - SHAPE.bundleGroup, (perBundle.get(group - SHAPE.bundleGroup) ?? 0) + 1);
+      }
+      const codesAgree = wanted.every((one, index) => perBundle.get(index) === one.points) && perBundle.size === wanted.length;
+      universe.invalidate();
+      await frame();
+      await frame();
+      const draws = universe.renderer.info.render.calls;
+      knowledgeDimension = heldDimension;
+      secondBrainVault = heldVault;
+      await paintKnowledgeView();
+      return { galaxies: map.galaxies, sizes: Array.from(layout.communitySize), said, wanted, uniformsAgree, codesAgree, draws };
+    } catch (error) {
+      return { thrown: String(error?.stack ?? error) };
+    }
+  });
+  const detail = JSON.stringify(seen);
+  ok("t-12443 ④: galaxy pairs of eight lines or more become filaments, thickest first, flowing from the side that sent more",
+    !seen.thrown && seen.galaxies === 4 && seen.wanted.length === 3
+      && JSON.stringify(seen.said) === JSON.stringify(seen.wanted),
+    detail);
+  ok("t-12443 ④: the shader's filament arrays and the filament particles (60 + 900·√(n/most) each, groups from 130) carry exactly those pairs, inside the thirteen draws",
+    !seen.thrown && seen.wanted.length === 3 && seen.uniformsAgree && seen.codesAgree && seen.draws === 13, detail);
+}

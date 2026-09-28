@@ -157,6 +157,12 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   nebulaInner: "--knowledge-3d-nebula-inner",
   /* 은하 빛깔 = `galaxy-tint-base` + (1 − base) × 선형(색 칸의 어두운 테마 값). */
   galaxyTintBase: "--knowledge-3d-galaxy-tint-base",
+  /* 필라멘트(시안 `buildScene`): 두 은하 사이 선이 몇 개부터인가, 몇 쌍까지인가(셰이더 배열의 크기까지), 입자 수
+   * = `filament-least-points` + `filament-grow-points` × √(n / 가장 굵은 n). */
+  filamentLeast: "--knowledge-3d-filament-least",
+  filamentMost: "--knowledge-3d-filament-most",
+  filamentLeastPoints: "--knowledge-3d-filament-least-points",
+  filamentGrowPoints: "--knowledge-3d-filament-grow-points",
   /* 빛 번짐 사다리의 단 수와 세기(문턱 없음), 합성의 노출(테마마다). */
   bloomLevels: "--knowledge-3d-bloom-levels",
   bloomStrength: "--knowledge-3d-bloom-strength",
@@ -212,6 +218,12 @@ const KNOWLEDGE_UNIVERSE_SEATS = Object.freeze({
   clumpLift: 0.14,
   clusterRadius: 0.75,
   clusterPower: 0.65,
+  /* 필라멘트 쌍마다의 휨(옆으로 다섯 단계)과 흐름의 위상 — 쌍의 두 줄 번호에서(시안 `uBundle2`). */
+  bendLow: 7,
+  bendHigh: 3,
+  bendSteps: 5,
+  phaseLow: 13,
+  phaseSteps: 7,
 });
 
 /* 판마다 한 번 읽는 수 — 테마와 무관하다(색은 따로 읽는다). */
@@ -1011,7 +1023,36 @@ function knowledgeUniverseMap(layout, inks) {
       pos3[at * 3 + 2] = cz + uz * x + vz * y + nz * h;
     }
   }
-  return { scale, reach, rows, galaxies, pages, gal, pos3, rowOf, galaxy, members };
+  /* 필라멘트(시안 `buildScene`과 `kg-data.js`의 flows): 두 은하 사이의 선(선언·추론 모두)을 보낸 쪽 → 받는 쪽으로
+   * 세고, 합이 `filament-least` 이상인 쌍을 굵은 차례로 셰이더 배열이 담는 데까지. 빛은 많이 보낸 쪽에서 흐른다. */
+  const flows = new Map();
+  for (let at = 0; at < model.edgeCount; at += 1) {
+    const a = rowOf[model.from[at]];
+    const b = rowOf[model.to[at]];
+    if (a < 0 || b < 0 || a === b || a >= galaxies || b >= galaxies) continue;
+    const low = Math.min(a, b);
+    const high = Math.max(a, b);
+    const key = low * SHAPE.rows + high;
+    const held = flows.get(key) ?? { a: low, b: high, ab: 0, ba: 0, n: 0 };
+    if (a < b) held.ab += 1;
+    else held.ba += 1;
+    held.n += 1;
+    flows.set(key, held);
+  }
+  const chosen = [...flows.values()].filter((flow) => flow.n >= U.filamentLeast)
+    .sort((left, right) => right.n - left.n || left.a - right.a || left.b - right.b)
+    .slice(0, Math.min(U.filamentMost, SHAPE.bundles));
+  const most = chosen[0]?.n ?? 1;
+  const filaments = chosen.map((flow) => {
+    const forward = flow.ab >= flow.ba;
+    const strength = Math.sqrt(flow.n / most);
+    return { a: flow.a, b: flow.b, n: flow.n, ab: flow.ab, ba: flow.ba,
+      from: forward ? flow.a : flow.b, to: forward ? flow.b : flow.a, sent: Math.max(flow.ab, flow.ba), strength,
+      points: Math.round(U.filamentLeastPoints + U.filamentGrowPoints * strength),
+      bend: ((flow.a * SEAT.bendLow + flow.b * SEAT.bendHigh) % SEAT.bendSteps) / 2 - 1,
+      phase: ((flow.a * SEAT.phaseLow + flow.b) % SEAT.phaseSteps) / SEAT.phaseSteps };
+  });
+  return { scale, reach, rows, galaxies, pages, gal, pos3, rowOf, galaxy, members, filaments };
 }
 
 /* ---- 한 판의 우주 ---------------------------------------------------------------------- */
@@ -1047,6 +1088,7 @@ function makeKnowledgeUniverse(view) {
     map: null,
     galTexture: null,
     decorCount: 0,
+    filaments: [],
     inks: null,
     probe: null,
     post: null,
@@ -1457,12 +1499,29 @@ function makeKnowledgeUniverse(view) {
        * 그 뒤 배경 별. 필라멘트의 번호는 그 뒤에 선다(④). */
       let total = U.decorSky;
       for (const row of map.galaxy) total += row.decor;
+      for (const filament of map.filaments) total += filament.points;
       const codes = new Float32Array(total);
       let code = 0;
       for (const row of map.galaxy) {
         for (let step = 0; step < row.decor; step += 1) codes[code++] = row.rank * SHAPE.groupSpan + step;
       }
       for (let step = 0; step < U.decorSky; step += 1) codes[code++] = SHAPE.skyGroup * SHAPE.groupSpan + step;
+      /* 필라멘트의 입자와 셰이더의 두 배열(시안 `uBundle`·`uBundle2`): 보낸 은하, 받는 은하, 굵기 √(n/가장 굵은 n),
+       * 보낸 쪽의 몫 / 휨, 흐름의 위상. 빈 칸은 0이다. */
+      this.filaments = map.filaments;
+      map.filaments.forEach((filament, index) => {
+        for (let step = 0; step < filament.points; step += 1) codes[code++] = (SHAPE.bundleGroup + index) * SHAPE.groupSpan + step;
+      });
+      this.uniforms.uBundle.value.forEach((slot, index) => {
+        const filament = map.filaments[index];
+        if (filament === undefined) slot.set(0, 0, 0, 0);
+        else slot.set(filament.from, filament.to, filament.strength, filament.sent / filament.n);
+      });
+      this.uniforms.uBundle2.value.forEach((slot, index) => {
+        const filament = map.filaments[index];
+        if (filament === undefined) slot.set(0, 0, 0, 0);
+        else slot.set(filament.bend, filament.phase, 0, 0);
+      });
       const decorGeometry = new THREE.BufferGeometry();
       decorGeometry.setAttribute("position", new THREE.BufferAttribute(codes, 1));
       this.built.geometries.push(decorGeometry);

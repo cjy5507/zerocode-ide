@@ -1608,6 +1608,11 @@
   --knowledge-3d-nebula-outer: 1.7;
   --knowledge-3d-nebula-mid: 1.3;
   --knowledge-3d-nebula-inner: 0.95;
+  /* 필라멘트(시안 `buildScene`) — 두 은하 사이 선이 몇 개부터, 몇 쌍까지, 입자 수 = least + grow × √(n / 가장 굵은 n). */
+  --knowledge-3d-filament-least: 8;
+  --knowledge-3d-filament-most: 48;
+  --knowledge-3d-filament-least-points: 60;
+  --knowledge-3d-filament-grow-points: 900;
   /* 은하 빛깔 = base + (1 − base) × 선형(원천). 원천은 색 칸의 어두운 테마 값이다 — 밝은 테마는 합성에서 음화로
    * 뒤집으므로 두 테마에서 같은 빛깔을 쓴다(PORTING.md §4). 색 없는 군집은 회색 대신 고정값(선형, m-12493). */
   --knowledge-3d-galaxy-tint-base: 0.7;
