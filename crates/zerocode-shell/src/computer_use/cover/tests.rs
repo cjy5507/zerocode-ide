@@ -877,3 +877,33 @@ fn a_move_the_helper_refuses_is_not_made_and_the_rest_goes_on() {
     assert_eq!(shown.len(), 1);
     assert_eq!(shown[0].key, "computer.cover.stuck");
 }
+
+/// A move the helper refused is written down as not made — the label keeps
+/// which moves were tried and which of them the helper would not make.
+#[test]
+fn a_refused_move_is_written_down_as_not_made() {
+    let mut desk = Desk::owned_over(10, "Target", 3);
+    desk.unpublished = true;
+    let mut seat = Seat::at(
+        JevMode::Shadow,
+        false,
+        body(
+            "panel",
+            &[
+                ("move_target", 0.6),
+                ("raise_target", 0.3),
+                ("look_again", 0.05),
+                ("ask_person", 0.05),
+            ],
+        ),
+    );
+    let (ended, _) = run(&mut desk, &mut seat, Decision::Refused, None);
+    assert!(ended.is_ok(), "{ended:?}");
+    let label = seat.rows.last().expect("a label");
+    assert_eq!(
+        label["tried"],
+        json!(["raise_target", "move_target"]),
+        "{label}"
+    );
+    assert_eq!(label["notMade"], json!(["move_target"]), "{label}");
+}
