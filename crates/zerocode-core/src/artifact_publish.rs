@@ -53,12 +53,17 @@ pub struct Caller {
 /// A publish request split into its strict input and the caller beside it
 /// ([`request_from_argv`] puts `pane` and `cwd` next to the input's fields).
 pub fn publish_parts(mut request: serde_json::Value) -> Result<(PublishInput, Caller), String> {
-    request
-        .as_object_mut()
-        .ok_or("expected object")?
-        .remove("action");
+    let fields = request.as_object_mut().ok_or("expected object")?;
+    fields.remove("action");
+    let text = |value: Option<serde_json::Value>| {
+        value.and_then(|value| value.as_str().map(str::to_string))
+    };
+    let caller = Caller {
+        pane: text(fields.remove("pane")),
+        cwd: text(fields.remove("cwd")).map(PathBuf::from),
+    };
     let input = serde_json::from_value(request).map_err(|e| e.to_string())?;
-    Ok((input, Caller::default()))
+    Ok((input, caller))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -512,10 +517,17 @@ pub fn publish_headless(root: &Path, input: &PublishInput) -> Result<PageMeta, S
 }
 
 /// The CLI and model tool meet at the same validated JSON request.
+///
+/// The door appends `--cwd` to every verb and `--pane` when its shell has a
+/// pane key, after the caller's own words, so the door's values are the ones
+/// that stand. Export joins a relative `--out` onto the folder; publish
+/// carries both as `cwd` and `pane` beside its input ([`publish_parts`]);
+/// list and read have no use for either.
 pub fn request_from_argv(argv: &[String]) -> Result<serde_json::Value, String> {
     let mut value = serde_json::json!({ "action": argv.first().ok_or(USAGE)? });
     let mut words = argv.iter().skip(1);
     let mut cwd = None;
+    let mut pane = None;
     while let Some(flag) = words.next() {
         if flag == "--json" {
             continue;
@@ -526,6 +538,10 @@ pub fn request_from_argv(argv: &[String]) -> Result<serde_json::Value, String> {
         }
         if flag == "--cwd" {
             cwd = Some(PathBuf::from(words.next().ok_or("--cwd needs a value")?));
+            continue;
+        }
+        if flag == "--pane" {
+            pane = Some(words.next().ok_or("--pane needs a value")?.clone());
             continue;
         }
         let key = match flag.as_str() {
@@ -550,6 +566,14 @@ pub fn request_from_argv(argv: &[String]) -> Result<serde_json::Value, String> {
         } else {
             serde_json::json!(word)
         };
+    }
+    if value["action"] == "publish" {
+        if let Some(pane) = pane {
+            value["pane"] = serde_json::json!(pane);
+        }
+        if let Some(cwd) = &cwd {
+            value["cwd"] = serde_json::json!(cwd);
+        }
     }
     if value["action"] == "export" {
         if let (Some(cwd), Some(out)) = (cwd, value["out"].as_str()) {
@@ -584,6 +608,7 @@ pub fn shim_script(port_var: &str, hook_token_var: &str, powershell: bool) -> St
         pane_header: None,
         cwd_verbs: &[],
         cwd_flag: Some("--cwd"),
+        pane_flag: Some("--pane"),
     };
     if powershell {
         shim.render()

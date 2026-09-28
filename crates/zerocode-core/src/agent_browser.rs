@@ -1293,6 +1293,7 @@ fn bridge_shim<'a>(
         pane_header: Some(PANE_HEADER),
         cwd_verbs: &[],
         cwd_flag: None,
+        pane_flag: None,
     }
 }
 

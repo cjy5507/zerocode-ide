@@ -423,8 +423,7 @@ impl Store {
         let mut index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
         let _lock = zerocode_core::artifact_publish::lock_store(&self.root)?;
         let meta = zerocode_core::artifact_publish::publish(&self.root, input, &limits)?;
-        let _ = origin;
-        let artifact = meta.artifact(Origin::default());
+        let artifact = meta.artifact(origin);
         let row = Row {
             tokens: Self::tokens_of_words(
                 &[&meta.title, meta.description.as_deref().unwrap_or_default()],
@@ -848,8 +847,39 @@ impl Store {
     /// is and nothing outside it is taken for one; any other file — outside
     /// the store, a page's metadata, a row since deleted — is `None`.
     pub(crate) fn page_at(&self, path: &Path) -> Option<PageAt> {
-        let _ = path;
-        None
+        let pages = self
+            .root
+            .join(zerocode_core::artifact_publish::PAGES_DIR)
+            .canonicalize()
+            .ok()?;
+        let asked = path.canonicalize().ok()?;
+        let id = asked
+            .strip_prefix(&pages)
+            .ok()?
+            .components()
+            .next()?
+            .as_os_str()
+            .to_str()?
+            .to_string();
+        let artifact = self.get(&id).filter(is_publication)?;
+        if artifact
+            .path
+            .canonicalize()
+            .is_ok_and(|current| current == asked)
+        {
+            return Some(PageAt {
+                artifact,
+                version: None,
+            });
+        }
+        let version = zerocode_core::artifact_publish::versions(&self.root, &id)
+            .into_iter()
+            .find(|kept| kept.path.canonicalize().is_ok_and(|kept| kept == asked))?
+            .n;
+        Some(PageAt {
+            artifact,
+            version: Some(version),
+        })
     }
 
     /// The scan's snapshots of one page or document, oldest first, without
@@ -2033,7 +2063,15 @@ pub(crate) struct ArtifactDoor;
 impl zerocode_hookd::ArtifactCommands for ArtifactDoor {
     fn execute(&self, request: serde_json::Value) -> Result<serde_json::Value, String> {
         let store = store().ok_or("artifact store is not ready")?;
-        artifact_request(&store, request, &|_| Origin::default())
+        let app = store
+            .window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        artifact_request(&store, request, &|caller| {
+            app.as_ref()
+                .map_or_else(Origin::default, |app| window_origin(app, caller))
+        })
     }
 }
 
@@ -2054,6 +2092,104 @@ struct KnownProject {
     workspaces: Vec<PathBuf>,
 }
 
+/// The origin a publication's pane vouches for: the pane under the window's
+/// own spelling of its key, the project and workspace this window keeps that
+/// hold the folder the publish was asked from, and the agent, model and ledger
+/// seat the window already knows for that pane. A publish from no pane this window
+/// holds — a shell outside it, a key of another spelling, a pane since
+/// closed — records nothing at all; a folder no known workspace holds names
+/// no project rather than being promoted to one. A label, like every origin:
+/// nothing is authorized by it.
+fn publication_origin(
+    caller: &zerocode_core::artifact_publish::Caller,
+    pane: impl FnOnce(crate::TermId) -> Option<PaneFacts>,
+    known: impl FnOnce(&Path) -> Vec<KnownProject>,
+) -> Origin {
+    let Some(term) = caller
+        .pane
+        .as_deref()
+        .and_then(crate::hooks::term_of_pane_key)
+    else {
+        return Origin::default();
+    };
+    let Some(facts) = pane(term) else {
+        return Origin::default();
+    };
+    let (project, worktree) = caller
+        .cwd
+        .as_deref()
+        .filter(|cwd| cwd.is_absolute())
+        .map_or((None, None), |cwd| place_of(cwd, &known(cwd)));
+    Origin {
+        pane: Some(crate::hooks::pane_key_of(term)),
+        agent: facts.agent,
+        model: facts.model,
+        run: facts.run,
+        worker: facts.worker,
+        task: facts.task,
+        worktree,
+        project,
+        ..Origin::default()
+    }
+}
+
+/// The known project and workspace that hold `cwd` — the deepest workspace
+/// wins, so a checkout nested inside another names itself. The spellings are
+/// the catalog's and git's own, which is what the worktree chip keys on; only
+/// the comparison is made on resolved paths.
+fn place_of(cwd: &Path, known: &[KnownProject]) -> (Option<PathBuf>, Option<PathBuf>) {
+    let Ok(cwd) = cwd.canonicalize() else {
+        return (None, None);
+    };
+    let mut best: Option<(usize, &KnownProject, &PathBuf)> = None;
+    for project in known {
+        for workspace in &project.workspaces {
+            let Ok(held) = workspace.canonicalize() else {
+                continue;
+            };
+            let depth = held.components().count();
+            if cwd.starts_with(&held) && best.is_none_or(|(deepest, ..)| depth > deepest) {
+                best = Some((depth, project, workspace));
+            }
+        }
+    }
+    best.map_or((None, None), |(_, project, workspace)| {
+        (Some(project.root.clone()), Some(workspace.clone()))
+    })
+}
+
+/// The projects this window keeps, each with the workspaces it knows for it.
+/// Only the repository `cwd` stands in is asked for its worktree list — one
+/// `rev-parse` and one `worktree list`, however many projects the catalog
+/// holds; every other project is its own folder (its main checkout, or a
+/// folder workspace). A repository no stored project belongs to lends its
+/// list to nobody.
+fn known_projects(config_root: &Path, cwd: &Path) -> Vec<KnownProject> {
+    let listed: Vec<PathBuf> = zerocode_orchestrator::Orchestrator::open(cwd)
+        .and_then(|repository| repository.list())
+        .map(|worktrees| {
+            worktrees
+                .into_iter()
+                .map(|worktree| worktree.path)
+                .collect()
+        })
+        .unwrap_or_default();
+    let resolved = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let listed_resolved: Vec<PathBuf> = listed.iter().map(|path| resolved(path)).collect();
+    crate::shell_runtime::stored_projects(config_root)
+        .into_iter()
+        .map(PathBuf::from)
+        .map(|root| {
+            let workspaces = if listed_resolved.contains(&resolved(&root)) {
+                listed.clone()
+            } else {
+                vec![root.clone()]
+            };
+            KnownProject { root, workspaces }
+        })
+        .collect()
+}
+
 /// The ledger's seat in a pane, as [`pane_facts`] reads it.
 struct Seat<'a> {
     agent: &'a str,
@@ -2063,20 +2199,60 @@ struct Seat<'a> {
     task: &'a str,
 }
 
-fn pane_facts(_heard: Option<&str>, _seat: Option<Seat<'_>>) -> PaneFacts {
-    PaneFacts::default()
+/// A pane's facts: the agent the window seated or heard there, else the
+/// seat's; the seat's model, run, worker and task only while the seat's agent
+/// is the one the pane runs — a seat another agent now sits over vouches for
+/// nothing. The ledger's empty word is absence (`LedgerAgent::task_id`).
+fn pane_facts(heard: Option<&str>, seat: Option<Seat<'_>>) -> PaneFacts {
+    let agent = heard.or(seat.as_ref().map(|seat| seat.agent));
+    let Some(seat) = seat.filter(|seat| agent == Some(seat.agent)) else {
+        return PaneFacts {
+            agent: agent.map(str::to_string),
+            ..PaneFacts::default()
+        };
+    };
+    let named = |value: &str| (!value.is_empty()).then(|| value.to_string());
+    PaneFacts {
+        agent: Some(seat.agent.to_string()),
+        model: seat.model.map(str::to_string),
+        run: named(seat.run),
+        worker: named(seat.worker),
+        task: named(seat.task),
+    }
 }
 
-fn publication_origin(
-    _caller: &zerocode_core::artifact_publish::Caller,
-    _pane: impl FnOnce(crate::TermId) -> Option<PaneFacts>,
-    _known: impl FnOnce(&Path) -> Vec<KnownProject>,
+/// This window's answer for [`publication_origin`]: a pane it holds, what
+/// [`pane_facts`] makes of the agent it seated or heard there and of the
+/// ledger's seat in it.
+fn window_origin(
+    app: &tauri::AppHandle,
+    caller: &zerocode_core::artifact_publish::Caller,
 ) -> Origin {
-    Origin::default()
-}
-
-fn known_projects(_config_root: &Path, _cwd: &Path) -> Vec<KnownProject> {
-    Vec::new()
+    use tauri::Manager as _;
+    let state = app.state::<AppState>();
+    publication_origin(
+        caller,
+        |term| {
+            if !state.terminals().contains_key(&term) {
+                return None;
+            }
+            let heard = state.agent_terms().get(&term).copied();
+            let ledger = crate::orchestration::board_ledger_snapshot();
+            let seat = ledger
+                .agents
+                .iter()
+                .find(|row| row.term == Some(term))
+                .map(|row| Seat {
+                    agent: &row.agent,
+                    model: row.model.as_deref(),
+                    run: &row.run,
+                    worker: &row.worker,
+                    task: &row.task_id,
+                });
+            Some(pane_facts(heard, seat))
+        },
+        |cwd| known_projects(state.config_root(), cwd),
+    )
 }
 
 fn artifact_request(

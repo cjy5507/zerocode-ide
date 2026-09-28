@@ -1546,10 +1546,39 @@ function askTermPathStands(absolute) {
   });
 }
 
+/* `file://` 주소가 가리키는 이 기계의 경로. 에이전트가 찍는 주소는 인코딩된
+ * 채다(`Application%20Support`) — 풀지 않고 물으면 있는 파일이 링크를 잃는다.
+ * 호스트는 비었거나 `localhost` 일 때만 이 기계이고, 질의·조각은 파일이 아니며,
+ * `file:///C:/…` 의 드라이브 앞 `/` 는 주소의 것이다. 깨진 이스케이프(`%E0%A4%A`,
+ * `%zz`)나 제어 문자로 풀리는 주소는 `null` — 어디를 여는지 모르는 링크는
+ * 링크가 없는 것보다 나쁘다. */
+function fileUrlPath(href) {
+  const address = /^file:\/\/(?:localhost)?(\/[^?#]*)/.exec(href);
+  if (address === null) return null;
+  let path;
+  try {
+    path = decodeURIComponent(address[1]);
+  } catch {
+    return null;
+  }
+  if (/\p{Cc}/u.test(path)) return null;
+  return /^\/[A-Za-z]:\//.test(path) ? path.slice(1) : path;
+}
+
 /* 이 주소가 링크로 설 수 있는가. `marksOf` 가 동기로 읽는 답. */
 function termLinkStands(href) {
   // URL 은 파일 시스템의 것이 아니다.
   if (/^https?:\/\//.test(href)) return true;
+  // `file://` 은 URL 의 모양을 한 경로다: 풀어서 경로처럼 묻는다. 줄 번호는
+  // 주소에 없고, 뿌리 예외도 없다(끝의 구분자는 경로 규칙대로 거절).
+  if (/^file:/.test(href)) {
+    const path = fileUrlPath(href);
+    if (path === null || /[/\\]$/.test(path)) return false;
+    const held = termPathHeld(path);
+    if (held !== undefined) return held;
+    askTermPathStands(path);
+    return false;
+  }
   const named = href.match(/^(.*?)(?::(\d+))?(?::(\d+))?$/);
   const path = named ? named[1] : href;
   const absolute = path.startsWith("/") ? path : `${activeWorktreePath}/${path}`;
@@ -1595,7 +1624,7 @@ function trimUrlTail(url) {
 }
 
 const TERM_LINK_PATTERN = new RegExp(
-  `(https?://[A-Za-z0-9\\-._~:/?#\\[\\]@!$&*+,;=%()]+)` +
+  `((?:https?|file)://[A-Za-z0-9\\-._~:/?#\\[\\]@!$&*+,;=%()]+)` +
     `|((?:\\.{1,2}/|/|~/)[^\\s:<>"'\\x60|${PATH_DRAWING_BLOCKS}]+` +
     `|[\\w.-]+(?:/[\\w.-]+)+\\.\\w+)(?::(\\d+))?(?::(\\d+))?`,
   "g",
@@ -2290,7 +2319,8 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
         head: found.index,
         tail: found.index + href.length - 1,
         href,
-        dev: found[1] !== undefined,
+        // A dev server speaks http; a `file://` page is not one.
+        dev: found[1] !== undefined && !href.startsWith("file:"),
       });
       found = TERM_LINK_PATTERN.exec(text);
     }
@@ -3900,6 +3930,8 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // 이 링크가 말해진 기계 — SSH 판의 링크는 목적지 표가 시스템 문
     // 하나로 준다(발주서 link-source-owner.md).
     const sshSource = termLinkSpokenOverSsh(owner.address()?.term);
+    // `file://` 주소는 풀린 경로로 경로의 문을 탄다(`openTermFileLink`).
+    const filePath = fileUrlPath(href);
     if (!terminalLinkDirectActivation(event)) {
       // 수식키 없는 일반 클릭도 URL 위에서는 제스처다 — 두 목적지가 행으로
       // 서는 액션 팝오버. 단 문지기가 먼저다: 4px 넘게 긁었거나 눌렀을 때
@@ -3913,6 +3945,10 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
         if (browserPrefs.terminal_link_action_popover === false) return;
         event.preventDefault();
         linkPressClaimed = true;
+        if (filePath !== null) {
+          void openTermFileLink(filePath, { x: event.clientX ?? 0, y: event.clientY ?? 0 });
+          return;
+        }
         openFileLinkMenu(href, event.clientX ?? 0, event.clientY ?? 0);
         return;
       }
@@ -3925,6 +3961,14 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     linkPressClaimed = true;
     // ⌘클릭은 표의 primary로 직행한다 — 설정이 정한 그 목적지.
     if (routeHttpLink(href, event, { table: true, sshSource })) return;
+    if (filePath !== null) {
+      if (event.shiftKey) {
+        void invoke("fs_open_default", { path: filePath }).catch((error) => showError(String(error)));
+        return;
+      }
+      void openTermFileLink(filePath);
+      return;
+    }
     const named = href.match(/^(.*?)(?::(\d+))?(?::(\d+))?$/);
     const path = named ? named[1] : href;
     const line = named?.[2] ? Number(named[2]) : undefined;
@@ -4029,6 +4073,18 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
  * clicks it rather than reading it. */
 async function openTermLink(path, line) {
   await openPath(path.replace(/^\.\//, ""), { preview: true, line });
+}
+
+/* A `file://` address a terminal printed, already a path (`fileUrlPath`).
+ *
+ * A page the artifact store published — its current file or a kept version —
+ * opens as that artifact, with its header band (`openArtifactPageAt`), not as
+ * a bare browser tab. Anything else is a path and opens the way a printed path
+ * does: the menu for a bare click (`menuAt`), the editor for ⌘. */
+async function openTermFileLink(path, menuAt = null) {
+  if (await openArtifactPageAt(path)) return;
+  if (menuAt) openFileLinkMenu(path, menuAt.x, menuAt.y);
+  else await openTermLink(path);
 }
 
 /* Whether the modifier that opens a link is down, as a class on the body.
