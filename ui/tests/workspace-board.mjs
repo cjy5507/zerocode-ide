@@ -143,6 +143,69 @@ export async function testWorkspaceBoard(browser, origin, ok) {
     await page.click("#workspace-board-empty-toggle");
     ok("empty stages can be restored as destinations", await page.locator(".workspace-board-lane").count() === 4);
 
+    // A card shows its first three agents; the rest stand behind 「+N」, which
+    // is a button that opens them inside the card and folds them again — the
+    // same open state as the sidebar's fold, by mouse, Tab, Enter and Space,
+    // with a name a screen reader speaks (t-12077: it was a dead word).
+    const sixAgents = "/projects/zerocode/2";
+    const sixCard = `.workspace-board-card[data-worktree-path="${sixAgents}"]`;
+    await page.evaluate(async (path) => {
+      for (let seat = 0; seat < 6; seat += 1) {
+        const term = await openTermTab({ placement: "tab" });
+        tabOfTerm(term).worktree = path;
+        paneAgents.set(term, "claude");
+        hookStates.set(term, "working");
+      }
+      setWorkspaceBoardOpen(true);
+      paintWorkspaceBoard();
+    }, sixAgents);
+    const agentFold = (selector) => page.evaluate(({ selector, path }) => {
+      const card = document.querySelector(selector);
+      const more = card?.querySelector(".workspace-board-card-more");
+      return {
+        rows: card?.querySelectorAll(".workspace-board-card-agents .wt-agent").length ?? 0,
+        tag: more?.tagName ?? null,
+        text: more?.textContent ?? null,
+        expanded: more?.getAttribute("aria-expanded") ?? null,
+        label: more?.getAttribute("aria-label") ?? null,
+        focused: document.activeElement === more,
+        open: expandedWorktrees.has(path),
+        board: workspaceBoardOpen,
+      };
+    }, { selector, path: sixAgents });
+    const shut = await agentFold(sixCard);
+    const more = page.locator(`${sixCard} .workspace-board-card-more`);
+    await more.click();
+    const clicked = await agentFold(sixCard);
+    await more.focus();
+    await page.keyboard.press("Enter");
+    const entered = await agentFold(sixCard);
+    await page.keyboard.press("Space");
+    const spaced = await agentFold(sixCard);
+    await page.keyboard.press("Space");
+    await page.locator(`${sixCard} .workspace-board-card-agents .wt-agent`).nth(2).focus();
+    await page.keyboard.press("Tab");
+    const tabbed = await agentFold(sixCard);
+    const english = await page.evaluate(({ selector }) => {
+      const was = locale;
+      setLocale("en");
+      paintWorkspaceBoard();
+      const label = document.querySelector(`${selector} .workspace-board-card-more`)?.getAttribute("aria-label");
+      const words = t("workspaceBoard.showMoreAgents", "", { count: 3, s: "s" });
+      setLocale(was);
+      paintWorkspaceBoard();
+      return { label, words };
+    }, { selector: sixCard });
+    ok("a board card's +N is a button that opens the other agents in the card and folds them again",
+      shut.rows === 3 && shut.tag === "BUTTON" && shut.text === "+3" && shut.expanded === "false" &&
+      shut.label?.includes("3") && !shut.open &&
+      clicked.rows === 6 && clicked.expanded === "true" && clicked.open && clicked.board &&
+      entered.rows === 3 && entered.expanded === "false" && entered.focused && !entered.open &&
+      spaced.rows === 6 && spaced.expanded === "true" && spaced.focused &&
+      tabbed.rows === 3 && tabbed.focused && tabbed.expanded === "false" &&
+      Boolean(english.words) && english.label === english.words,
+      JSON.stringify({ shut, clicked, entered, spaced, tabbed, english }));
+
     // The strip belongs to the overview above BOTH views, so a kanban paint asks
     // zo again (2026-09-10: it asked only in list mode — a board opened in kanban
     // never showed it). A different answer proves the paint asked, not that a

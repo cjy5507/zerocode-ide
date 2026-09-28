@@ -10528,13 +10528,19 @@ function dressWorktreeTwist(row, path, hidden) {
     twist.innerHTML = chevron;
     twistDrawn.set(twist, chevron);
   }
-  const label = open
+  dressFoldHandle(twist, open, open
     ? t("sidebar.showLastSession", "마지막 세션만 보기")
-    : t("sidebar.showMoreSessions", "세션 {{count}}개 더 보기", { count: hidden });
-  if (twist.getAttribute("aria-label") !== label) twist.setAttribute("aria-label", label);
+    : t("sidebar.showMoreSessions", "세션 {{count}}개 더 보기", { count: hidden }));
+}
+
+/* What a fold handle says: its name, whether it is open, and the same words
+ * as its tooltip. The sidebar's twist and the board card's 「+N」 both speak
+ * through this, so a screen reader hears one grammar for one fold. */
+function dressFoldHandle(handle, open, label) {
+  if (handle.getAttribute("aria-label") !== label) handle.setAttribute("aria-label", label);
   const expanded = String(open);
-  if (twist.getAttribute("aria-expanded") !== expanded) twist.setAttribute("aria-expanded", expanded);
-  if (twist.dataset.tip !== label) twist.dataset.tip = label;
+  if (handle.getAttribute("aria-expanded") !== expanded) handle.setAttribute("aria-expanded", expanded);
+  if (handle.dataset.tip !== label) handle.dataset.tip = label;
 }
 
 /* The chevron markup each handle last received — the serialized `innerHTML`
