@@ -1207,9 +1207,11 @@ impl Ui {
             Instant::now,
         );
         self.reconcile_size();
+        let sized = sample.is_some().then(Instant::now);
         self.commit_stream(Instant::now());
+        let committed = sample.is_some().then(Instant::now);
         self.paint();
-        super::paint_probe::frame(self.paint_probe.as_mut(), sample);
+        super::paint_probe::frame(self.paint_probe.as_mut(), sample, sized, committed);
     }
 
     /// The once-a-second look at the terminal ([`SIZE_POLL`]): its size, and
