@@ -209,8 +209,11 @@ const brain = await page.evaluate(async () => {
       > Number(nodes[0]?.querySelector(".knowledge-dot")?.getAttribute("r") ?? 0),
     labelPaintOrder: labelStyle?.paintOrder ?? "",
     labelStrokeWidth: labelStyle?.strokeWidth ?? "",
-    initialFitRatio: ((layout.bounds.maxX - layout.bounds.minX) * layout.scale)
-      / canvas.clientWidth,
+    /* 전체 지도의 맞춤(t-12029): 묶는 축이 `mapFit`의 몫을 차지한다 — 세로는 아래 범례 띠(`mapFoot`)를 뺀 높이의 몫. */
+    initialFitRatio: Math.max(((layout.bounds.maxX - layout.bounds.minX) * layout.scale) / canvas.clientWidth,
+      ((layout.bounds.maxY - layout.bounds.minY) * layout.viewBoxRect.yScale * layout.scale)
+        / (canvas.clientHeight - Math.min(layout.tuning.mapFoot, canvas.clientHeight * (1 - layout.tuning.mapFit)))),
+    initialFitWanted: layout.tuning.mapFit,
     overlappingDots,
     gradients: view.querySelectorAll("defs radialGradient[id^='knowledge-node-gradient-']").length,
     halos: view.querySelectorAll(".knowledge-halo").length,
@@ -276,8 +279,7 @@ ok(
     brain.labelBelow &&
     brain.labelPaintOrder.includes("stroke") &&
     parseFloat(brain.labelStrokeWidth) === 2 &&
-    brain.initialFitRatio >= 0.68 &&
-    brain.initialFitRatio <= 0.74 &&
+    Math.abs(brain.initialFitRatio - brain.initialFitWanted) < 0.02 &&
     brain.overlappingDots === 0 &&
     brain.gradients === 8 &&
     brain.halos === brain.nodeCount &&
@@ -1403,8 +1405,10 @@ const brainScale = await page.evaluate(async () => {
     * (view.classList.contains("is-tier-compact") || view.classList.contains("is-tier-tiny")
       ? layout.tuning.yScaleCompact
       : view.classList.contains("is-tier-middle") ? layout.tuning.yScaleMiddle : 1);
-  const fitTallRatio = (tallSpread * layout.scale) / canvasBox.clientHeight;
-  const fitExpected = layout.tuning.fitRatio * layout.zoom;
+  /* 세로의 몫은 아래 범례 띠(`mapFoot`, t-12029)를 뺀 높이에서 잰다 — 전체 지도의 맞춤은 `mapFit`이다. */
+  const footRoom = Math.min(layout.tuning.mapFoot, canvasBox.clientHeight * (1 - layout.tuning.mapFit));
+  const fitTallRatio = (tallSpread * layout.scale) / (canvasBox.clientHeight - footRoom);
+  const fitExpected = layout.tuning.mapFit * layout.zoom;
   const settle = async () => {
     knowledgeLayouts.delete(view);
     view.querySelector(".knowledge-nodes").dataset.knowledgeSignature = "";
@@ -4764,7 +4768,7 @@ ok("cluster plate words keep their contrast on the graph ground in both themes, 
  * 한 가닥으로 이어짐)에 고아 40쪽을 두면, 가장 먼 원반 끝을 반지름으로 한 원 밖에서 띠를 시작하는
  * 옛 배치는 아령의 옆구리에서 원반 반지름만큼의 빈 땅을 남긴다. 윤곽(원반들의 볼록 껍질 — 지지 함수
  * h(u) = max(c·u + r))에서 첫 부스러기들까지의 거리가 나선 한 걸음 안이고, 모든 부스러기가 모든
- * 원반과 여전히 gap 이상 떨어지는지 묻는다. */
+ * 원반과 여전히 띠의 틈(`--knowledge-stray-gap`, t-12029) 이상 떨어지는지 묻는다. */
 const rimHug = await glPage.evaluate(async () => {
   const frame = () => new Promise((done) => requestAnimationFrame(done));
   try {
@@ -4812,9 +4816,9 @@ const rimHug = await glPage.evaluate(async () => {
       }
       /* 첫 여덟 자리(황금각이 판을 한 바퀴 두른다) — 윤곽 밖으로 gap + 가장 큰 부스러기만큼 떨어진 곳이
        * 첫 줄이고, 나선은 거기서 한 걸음 안에서 자란다. */
-      if (rank - named < 8) firstExcess = Math.max(firstExcess, reach - outline - tuning.clusterGap - widest);
+      if (rank - named < 8) firstExcess = Math.max(firstExcess, reach - outline - tuning.strayGap - widest);
     }
-    return { named, strays: ids - named, pitch: Math.round(pitch), gap: tuning.clusterGap,
+    return { named, strays: ids - named, pitch: Math.round(pitch), gap: tuning.strayGap,
       firstExcess: Math.round(firstExcess), closest: Math.round(closest) };
   } catch (error) {
     return { thrown: String(error?.stack ?? error) };
@@ -5496,6 +5500,82 @@ ok("surprising links stand out: the single lines between two large topics are cu
     && row.hot[0].opacity === 0.3 && row.hot[2].opacity === 0.3
     && row.picked && row.localBridges === 0),
   JSON.stringify(bridgeScene));
+
+/* 지도가 판을 채운다(t-12029, 승인된 시안 v2 「fit」 마무리). 열넷의 주제에 고아 스물을 더한 볼트를 넓은 판에
+ * 세우고 두 손 모두: 그림의 경계는 묶는 축에서 판의 `mapFit`(0.9) 몫을 차지하고(세로는 아래 범례 띠 `mapFoot`을
+ * 뺀 높이의 몫, 다른 축은 그 몫을 넘지 않는다), 원반들이 판의 60% 넘게 걸친다(기반: 72%의 몫과 원반 사이 틈만큼
+ * 떨어진 부스러기 띠 때문에 원반이 판의 가운데 작게 섰다). 어떤 원반도 아래의 범례·배율 단추와 겹치지 않고, 부스러기
+ * 띠는 모든 원반과 띠의 틈 이상 떨어진다. */
+const fitVault = topicVault({ sizes: [40, 36, 32, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10],
+  between: [[0, 1, 3], [2, 3, 2], [4, 5, 2], [6, 7, 2], [8, 9, 1], [10, 11, 1], [12, 13, 1]], lonely: 20 });
+const fitSeat = glPage.viewportSize();
+await glPage.setViewportSize({ width: 1998, height: 1069 });
+const fits = await glPage.evaluate(async ({ spec }) => {
+  const rows = [];
+  try {
+    for (const hand of ["svg", "gl"]) {
+      const { view, layout } = await window.__standKnowledgeScene__("/scene/fit", spec, hand);
+      const { tuning, bounds, scale } = layout;
+      const canvas = view.querySelector(".knowledge-canvas").getBoundingClientRect();
+      const foot = Math.min(tuning.mapFoot, canvas.height * (1 - tuning.mapFit));
+      const camera = layout.viewBoxRect;
+      const shareX = ((bounds.maxX - bounds.minX) * scale) / canvas.width;
+      const shareY = ((bounds.maxY - bounds.minY) * camera.yScale * scale) / (canvas.height - foot);
+      /* 원반들이 판에 걸친 몫 — 화면의 원(눌린 판에서는 타원)의 합집합 상자. */
+      const discs = { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity };
+      const circles = [];
+      for (let rank = 0; rank < layout.namedCount; rank += 1) {
+        if (layout.clusterTally[rank] === 0) continue;
+        const reach = layout.clusterReach[rank] * scale;
+        const x = canvas.left + (layout.clusterX[rank] - camera.x) * scale;
+        const y = canvas.top + (camera.middleY + (layout.clusterY[rank] - camera.middleY) * camera.yScale - camera.y) * scale;
+        circles.push({ x, y, rx: reach, ry: reach * camera.yScale });
+        discs.left = Math.min(discs.left, x - reach);
+        discs.right = Math.max(discs.right, x + reach);
+        discs.top = Math.min(discs.top, y - reach * camera.yScale);
+        discs.bottom = Math.max(discs.bottom, y + reach * camera.yScale);
+      }
+      const spanX = (discs.right - discs.left) / canvas.width;
+      const spanY = (discs.bottom - discs.top) / canvas.height;
+      /* 아래의 조작부와 원반 — 상자 대 타원의 가장 가까운 점. */
+      let underControls = 0;
+      for (const control of view.querySelectorAll(".knowledge-cluster-legend, .knowledge-zoom")) {
+        const box = control.getBoundingClientRect();
+        if (box.width === 0 || control.hidden) continue;
+        for (const disc of circles) {
+          const nearX = Math.min(Math.max(disc.x, box.left), box.right);
+          const nearY = Math.min(Math.max(disc.y, box.top), box.bottom);
+          if (((nearX - disc.x) / disc.rx) ** 2 + ((nearY - disc.y) / disc.ry) ** 2 < 1) underControls += 1;
+        }
+      }
+      /* 부스러기 띠와 원반의 틈(그림 단위). */
+      const { communityHomeX: homeX, communityHomeY: homeY, communityHomeR: homeR, namedCount: named } = layout;
+      let strayClosest = Infinity;
+      for (let rank = named; rank < homeR.length; rank += 1) {
+        for (let disc = 0; disc < named; disc += 1) {
+          strayClosest = Math.min(strayClosest, Math.hypot(homeX[rank] - homeX[disc], homeY[rank] - homeY[disc])
+            - homeR[rank] - homeR[disc]);
+        }
+      }
+      rows.push({ hand: knowledgePainterFor(view).id, mapFit: tuning.mapFit, foot,
+        shareX: Math.round(shareX * 1000) / 1000, shareY: Math.round(shareY * 1000) / 1000,
+        spanX: Math.round(spanX * 100), spanY: Math.round(spanY * 100), underControls,
+        strayClosest: Math.round(strayClosest), strayGap: tuning.strayGap });
+    }
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error), rows };
+  } finally {
+    knowledgePainterKind = null;
+  }
+}, { spec: fitVault.spec });
+await glPage.setViewportSize(fitSeat);
+ok("the map fills the canvas: its bounds take 0.9 of the binding axis above the legend's band, the discs span over 60% of the canvas, no disc lies under the legend or the zoom buttons, and the stray band keeps its gap — on both hands",
+  !fits.thrown && fits.rows.length === 2 && fits.rows.every((row) => row.mapFit === 0.9
+    && Math.abs(Math.max(row.shareX, row.shareY) - row.mapFit) < 0.02 && row.shareX <= row.mapFit + 0.02
+    && row.shareY <= row.mapFit + 0.02 && Math.max(row.spanX, row.spanY) > 60 && row.underControls === 0
+    && row.strayClosest >= row.strayGap),
+  JSON.stringify(fits));
 
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *

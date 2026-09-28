@@ -125,6 +125,10 @@ const KNOWLEDGE_TOKENS = Object.freeze({
   edgeLabelPx: "--knowledge-label-edge-px",
   markerPx: "--knowledge-marker-px",
   fitRatio: "--knowledge-fit-ratio",
+  /* 전체 지도의 맞춤(t-12029) — 지도의 몫과 아래 범례 띠, 부스러기 띠의 틈. */
+  mapFit: "--knowledge-map-fit",
+  mapFoot: "--knowledge-map-foot",
+  strayGap: "--knowledge-stray-gap",
   margin: "--knowledge-margin",
   /* 주변 탐색의 고리(시안 이식): 이웃 사이 호의 길이, 첫 고리의 최소 반지름, 고리 사이
    * 간격, 세로 눌림. */
@@ -3332,11 +3336,14 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
      * 한 원 밖에서 시작하면, 원반들이 길쭉하게 선 볼트에서 그 원과 원반 사이의 빈 땅만큼 그림이
      * 커지고 주제는 판의 가운데 작게 선다. 방향마다 원반들이 닿는 가장 먼 거리(지지 함수
      * h(θ) = max(c·u + r))에서 시작하면 그 빈 땅이 없고, 그 자리에서 원반 중심까지의 거리는
-     * 언제나 h(θ) − c·u + (gap + widest) ≥ r + gap + widest다 — 모든 원반과 여전히 gap
-     * 이상 떨어진다. */
+     * 언제나 h(θ) − c·u + (strayGap + widest) ≥ r + strayGap + widest다 — 모든 원반과 여전히
+     * strayGap 이상 떨어진다. */
     let widest = 0;
     for (let rank = named; rank < ids; rank += 1) widest = Math.max(widest, homeR[rank]);
     const pitch = 2 * widest + tuning.clusterPitch;
+    /* 띠의 틈은 원반 사이의 틈이 아니라 제 토큰이다(t-12029) — 원반 사이의 틈만큼 떨어뜨린 띠는 맞춤을 넓혀 지도를
+     * 판의 가운데 작게 세웠다. */
+    const strayGap = tuning.strayGap;
     for (let rank = named; rank < ids; rank += 1) {
       const seat = rank - named;
       const angle = seat * KNOWLEDGE_GOLDEN_ANGLE;
@@ -3346,7 +3353,7 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
       for (let disc = 0; disc < named; disc += 1) {
         outline = Math.max(outline, homeX[disc] * alongX + homeY[disc] * alongY + homeR[disc]);
       }
-      const inner = outline + gap + widest;
+      const inner = outline + strayGap + widest;
       const reach = Math.sqrt(inner * inner + (seat * pitch * pitch) / Math.PI);
       homeX[rank] = alongX * reach;
       homeY[rank] = alongY * reach;
@@ -4081,8 +4088,13 @@ function knowledgeViewBox(view, layout) {
         * knowledgeYScale(view, layout),
       1,
     );
-    scale = Math.min((wide * layout.tuning.fitRatio) / spanX,
-      (tall * layout.tuning.fitRatio) / spanY) * layout.zoom;
+    /* 지도가 판을 채운다(t-12029, 시안 v2 「fit」): 경계가 판의 `mapFit` 몫을 차지하고, 아래 `mapFoot` px(군집
+     * 범례와 배율 단추의 띠)는 비워 그 위의 가운데에 선다 — 72%의 몫에 띠 없이 가운데 서던 판은 실제 볼트의
+     * 원반을 판의 52%×57%에 세웠다. 띠는 판이 낮으면 그 몫까지만. */
+    const { mapFit, mapFoot } = layout.tuning;
+    const foot = Math.min(mapFoot, tall * (1 - mapFit));
+    scale = Math.min((wide * mapFit) / spanX, ((tall - foot) * mapFit) / spanY) * layout.zoom;
+    centreOffsetY = foot / (2 * scale);
   }
   const boxWide = wide / scale;
   const boxTall = tall / scale;
