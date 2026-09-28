@@ -5915,8 +5915,9 @@ function toggleKnowledgeCluster(view, rank) {
   knowledgeClusterPicked = knowledgeClusterPicked === rank ? -1 : rank;
   paintKnowledgeSpotlight(view, layout);
   paintKnowledgeFrame(view, layout);
-  /* 고리 위에서는 날지 않는다 — 고리는 이미 다 보인다. */
-  if (layout.ring !== null) return;
+  /* 고리 위에서는 날지 않는다 — 고리는 이미 다 보인다. 서 있는 우주(t-12443)에서는 우주의 카메라가 그 은하로
+   * 날고(`dressKnowledgeUniverse`), 평면 지도의 카메라는 사람이 두고 간 자리에 그대로 둔다. */
+  if (layout.ring !== null || knowledgeUniverses.has(view)) return;
   const { minX, maxX, minY, maxY } = layout.bounds;
   /* 주제를 고르는 것은 「그 주제를 펼쳐 달라」는 뜻이다(09-16): 카메라가 그 원반을
    * 판에 맞게 채우도록 날아가고, 그 배율에서 점들이 벌어지므로 세부 지식의 제목이

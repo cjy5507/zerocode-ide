@@ -391,11 +391,15 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
           && activityOf(rank) < quietBelow) return T.elliptical;
         return T.spiral;
       };
+      /* 반지름은 v4의 식 그대로 쪽 수에서(평면 원반의 반지름이 아니라 — m-12586): 은하 0.98 × 2.7√m × spread,
+       * 성단 2.1√m × spread × 1.25 + 2. 자리 축척은 2.7 × spread / cluster-pitch. */
+      const spread = (pages / tune.worldPages) ** tune.worldSpread;
+      const scaleWant = (tune.worldRoot * spread) / layout.tuning.clusterPitch;
       const rows = map.galaxy.map((row) => ({ rank: row.rank, type: row.type, want: wantType(row.rank),
         radius: Math.round(row.radius * 1000) / 1000,
         wantRadius: Math.round((row.rank < wantGalaxies
-          ? layout.communityHomeR[row.rank] * map.scale * tune.galaxyRadius
-          : layout.communityHomeR[row.rank] * map.scale * (tune.clusterSphere / tune.worldRoot) * tune.clusterGrow
+          ? tune.galaxyRadius * tune.worldRoot * Math.sqrt(layout.communitySize[row.rank]) * spread
+          : tune.clusterSphere * Math.sqrt(layout.communitySize[row.rank]) * spread * tune.clusterGrow
             + tune.clusterPad) * 1000) / 1000 }));
       /* 떠돌이: 이름 없는 군집의 쪽은 줄이 없다. */
       let strays = 0;
@@ -464,6 +468,7 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       await paintKnowledgeView();
       return { named: layout.namedCount, communities: layout.communityCount, sizes: Array.from(layout.communitySize),
         galaxies: map.galaxies, wantGalaxies, least, rowsCount: map.rows, rows, strays, strayRows,
+        scale: map.scale, scaleWant,
         lumWorst, capped, tempRange, unknownTemp, rebuilt, quietBelow, tintSpread, darkTints, lightTints, darkComp, lightComp,
         neutral: knowledgeUniverseInks(view, universe.probe ?? document.body).neutral, draws, sceneDraws, targets,
         bloomLevels: tune.bloomLevels };
@@ -473,9 +478,10 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
   }, { sizes: GALAXY_SIZES, alone: GALAXY_ALONE, quiet: GALAXY_QUIET, half: GALAXY_HALF });
   const detail = JSON.stringify(seen);
   const T = { spiral: 0, barred: 1, elliptical: 2, irregular: 3, cluster: 4 };
-  ok("t-12443 ②: the named clusters become galaxies from the front (at most the token's count, at least the page floor) and the rest clusters, each with the prototype's radius",
+  ok("t-12443 ②: the named clusters become galaxies from the front (at most the token's count, at least the page floor) and the rest clusters, each with the prototype's radius from its pages, spaced by the prototype's scale",
     !seen.thrown && seen.galaxies === seen.wantGalaxies && seen.galaxies === 18
-      && seen.rowsCount === seen.named && seen.rows.every((row) => row.radius === row.wantRadius),
+      && seen.rowsCount === seen.named && seen.rows.every((row) => row.radius === row.wantRadius)
+      && Math.abs(seen.scale - seen.scaleWant) < 1e-9,
     detail);
   ok("t-12443 ②: the shape rule — ranks 0 and 1 barred, the last two galaxies irregular, ranks 9, 12 and 15 elliptical when quieter than the galaxies' median (and the token's floor), the rest spiral, clusters beyond",
     !seen.thrown && seen.rows.every((row) => row.type === row.want)
@@ -625,9 +631,9 @@ export async function testKnowledgeUniverseBodies(page, ok) {
     detail);
   ok("t-12443 ③: discs and cores stand for the galaxies (one core for an elliptical) and nebulae only around the first twelve clusters",
     !seen.thrown && seen.clusters > 12 && seen.glowsAgree, detail);
-  ok("t-12443 ③: one frame is the prototype's thirteen draws — discs, bodies and stars in that order, the bloom ladder and the composite",
+  ok("t-12443 ③: one frame is the prototype's thirteen draws — discs, bodies and stars in that order (the constellation lines wait hidden last), the bloom ladder and the composite",
     !seen.thrown && seen.draws === 3 + seen.bloomLevels + (seen.bloomLevels - 1) + 1
-      && seen.orders === "glows:0 decor:1 stars:2",
+      && seen.orders === "glows:0 decor:1 stars:2 lines:3",
     detail);
 }
 
@@ -745,4 +751,170 @@ export async function testKnowledgeUniverseFilaments(page, ok) {
     detail);
   ok("t-12443 ④: the shader's filament arrays and the filament particles (60 + 900·√(n/most) each, groups from 130) carry exactly those pairs, inside the thirteen draws",
     !seen.thrown && seen.wanted.length === 3 && seen.uniformsAgree && seen.codesAgree && seen.draws === 13, detail);
+}
+
+/* ---- ⑤ 고르기·초점·별자리 선·찾기·경로 -------------------------------------------------------------
+ *
+ * 우주의 초점은 평면 지도와 같은 상태(고른 쪽·고른 군집·찾기·시간 창·경로)에서 나오고, 올림은 우주만의 것이다.
+ * 별의 상태(0 보통 · 1 이웃/고른 주제/창 안 · 2 올림/고름/경로 · 3 찾은 것)와 초점 은하, 초점 쪽의 선만 담는
+ * 별자리 선, 그리고 카메라가 그 별·은하로 나는지를 묻는다(움직임을 줄인 판이라 비행은 곧바로 끝난다). */
+export async function testKnowledgeUniverseFocus(page, ok) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const seen = await page.evaluate(async () => {
+    try {
+      const view = document.querySelector(".knowledge-view:not([hidden])");
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const frames = async (count) => {
+        for (let at = 0; at < count; at += 1) await frame();
+      };
+      const until = async (wanted, rounds = 900) => {
+        for (let round = 0; round < rounds; round += 1) {
+          if (wanted()) return true;
+          await frame();
+        }
+        return false;
+      };
+      const heldDimension = knowledgeDimension;
+      const heldVault = secondBrainVault;
+      const sizes = [60, 48, 36, 24];
+      const starts = [0, 60, 108, 144];
+      const edges = [];
+      const titles = [];
+      sizes.forEach((size, group) => {
+        const first = starts[group];
+        for (let step = 0; step < size; step += 1) titles.push(`별 ${group}-${step}`);
+        for (let step = 1; step < size; step += 1) {
+          edges.push({ from: first + step, to: first, kind: step % 4 === 0 ? "related" : "mentions" });
+          if (step > 1) edges.push({ from: first + step, to: first + step - 1, kind: "mentions" });
+        }
+      });
+      for (let one = 0; one < 10; one += 1) edges.push({ from: 10 + one, to: 70 + one, kind: "mentions" });
+      titles[150] = "찾을 별 하나";
+      const answer = window.__buildVaultGraph__({ path: "/focus", sources: false },
+        { pages: 168, ghosts: 0, tags: [], customEdges: edges, titles });
+      /* 경로의 대역(`second_brain_paths`)은 마지막으로 지은 답 위를 걷는다. */
+      window.__GRAPH_BUILT__ = answer;
+      noteKnowledgeExploreLines({});
+      secondBrainVault = answer.vault;
+      knowledgeDimension = "3d";
+      knowledgeQuery = "";
+      knowledgeSelectedKey = null;
+      knowledgeClusterPicked = -1;
+      knowledgeSlicerCutoff = 0;
+      knowledgePath = null;
+      setKnowledgeMode(view, "global", { paint: false });
+      knowledgeReport = answer;
+      await paintKnowledgeView();
+      await until(() => (knowledgeLayouts.get(view)?.left ?? 1) === 0);
+      await paintKnowledgeView();
+      await frames(2);
+      const layout = knowledgeLayouts.get(view);
+      const model = layout.model;
+      const universe = knowledgeUniverses.get(view);
+      const map = universe.map;
+      const tune = knowledgeUniverseTuning(view);
+      const state = () => universe.starGeometry.attributes.aState.array;
+      const lines = () => universe.scene.children.find((object) => object.userData.key === "lines");
+      const hub = model.keys.indexOf(answer.graph.nodes[starts[1]].id);
+      const neighbours = new Set();
+      for (let slot = model.start[hub]; slot < model.start[hub + 1]; slot += 1) neighbours.add(model.neighbour[slot]);
+      const stranger = model.keys.indexOf(answer.graph.nodes[starts[3] + 5].id);
+      /* 고르기: 투영한 자리에서 그 별이 잡히고, 빈 구석은 아무것도 아니다. */
+      const spot = universe.project(hub);
+      const picked = universe.pickAt(spot.x, spot.y);
+      const nothing = universe.pickAt(1, 1);
+      /* 올림: 그 별 2, 이웃 1, 남 0, 초점과 초점 은하, 그 별의 선만. */
+      universe.setHover(hub);
+      await frame();
+      const hovered = { hub: state()[hub], neighboursLit: [...neighbours].every((seat) => state()[seat] === 1),
+        stranger: state()[stranger], focus: universe.uniforms.uFocus.value, galaxy: universe.uniforms.uFocusGal.value,
+        row: map.rowOf[hub], lines: lines()?.geometry.instanceCount ?? -1, linesOn: lines()?.visible ?? false,
+        degree: model.degree[hub] };
+      universe.setHover(-1);
+      await frame();
+      const rested = { hub: state()[hub], focus: universe.uniforms.uFocus.value, linesOn: lines()?.visible ?? false };
+      /* 누르기: 그 별이 골라지고(평면과 같은 상태) 카메라가 그 별로 난다. */
+      const box = universe.host.getBoundingClientRect();
+      const press = (x, y) => {
+        const at = { bubbles: true, clientX: box.left + x, clientY: box.top + y, button: 0, pointerId: 1 };
+        universe.host.dispatchEvent(new PointerEvent("pointermove", at));
+        universe.host.dispatchEvent(new PointerEvent("pointerdown", at));
+        universe.host.dispatchEvent(new PointerEvent("pointerup", at));
+      };
+      const flat = { zoom: layout.zoom, panX: layout.panX, panY: layout.panY };
+      press(spot.x, spot.y);
+      await frames(3);
+      const row = map.galaxy[map.rowOf[hub]];
+      const star = [universe.pos3[hub * 3], universe.pos3[hub * 3 + 1], universe.pos3[hub * 3 + 2]];
+      const selected = { key: knowledgeSelectedKey, want: model.keys[hub], card: !view.querySelector(".knowledge-card")?.hidden,
+        target: [universe.tx, universe.ty, universe.tz], star, dist: universe.dist,
+        wantDist: Math.max(tune.flyPageDist, row.radius * tune.flyPageReach), hub: state()[hub] };
+      /* 빈 곳을 누르면 풀린다. */
+      const corner = universe.project(hub);
+      press(2, box.height - 2);
+      await frames(2);
+      const cleared = { key: knowledgeSelectedKey, focus: universe.uniforms.uFocus.value, linesOn: lines()?.visible ?? false,
+        corner: corner.x > 0 };
+      /* 군집 고르기: 그 은하의 별 1, 초점 은하, 카메라가 그 은하로 — 평면 지도의 카메라는 그대로다. */
+      toggleKnowledgeCluster(view, 1);
+      await frames(3);
+      const members = map.members[1];
+      const topic = { picked: knowledgeClusterPicked, membersLit: members.every((seat) => state()[seat] === 1),
+        galaxy: universe.uniforms.uFocusGal.value, target: [universe.tx, universe.ty, universe.tz],
+        centre: [map.galaxy[1].x, map.galaxy[1].y, map.galaxy[1].z],
+        wantDist: map.galaxy[1].radius * tune.flyGalaxyReach + tune.flyGalaxyPad, dist: universe.dist,
+        flatKept: flat.zoom === layout.zoom && flat.panX === layout.panX && flat.panY === layout.panY };
+      toggleKnowledgeCluster(view, 1);
+      await frames(2);
+      /* 찾기: 맞은 별 3. */
+      const found = model.keys.indexOf(answer.graph.nodes[150].id);
+      knowledgeQuery = "찾을 별";
+      await paintKnowledgeView();
+      await frames(2);
+      const search = { found: state()[found], focus: universe.uniforms.uFocus.value, other: state()[hub] };
+      knowledgeQuery = "";
+      await paintKnowledgeView();
+      await frames(2);
+      /* 경로: 경로의 별 2, 경로의 선이 별자리 선에. */
+      await runKnowledgeShortestPath(view, layout, model.keys[starts[0] + 5], model.keys[starts[1] + 7]);
+      await frames(2);
+      const route = knowledgeRoute(model, knowledgePath);
+      const path = { nodes: route?.nodes.length ?? 0, lit: (route?.nodes ?? []).every((seat) => state()[seat] === 2),
+        lines: lines()?.geometry.instanceCount ?? -1, edges: route?.edges.length ?? 0, focus: universe.uniforms.uFocus.value };
+      clearKnowledgePath(view, layout);
+      await paintKnowledgeView();
+      knowledgeDimension = heldDimension;
+      secondBrainVault = heldVault;
+      await paintKnowledgeView();
+      return { picked, want: hub, nothing, hovered, rested, selected, cleared, topic, search, path };
+    } catch (error) {
+      return { thrown: String(error?.stack ?? error) };
+    }
+  });
+  const detail = JSON.stringify(seen);
+  const near = (one, two) => one.every((value, at) => Math.abs(value - two[at]) < 1e-3);
+  ok("t-12443 ⑤: a star is picked where it is projected, and an empty corner picks nothing",
+    !seen.thrown && seen.picked === seen.want && seen.nothing === -1, detail);
+  ok("t-12443 ⑤: pointing at a star lights it (2), its neighbours (1), dims the rest, focuses its galaxy and draws only its lines; letting go rests",
+    !seen.thrown && seen.hovered.hub === 2 && seen.hovered.neighboursLit && seen.hovered.stranger === 0
+      && seen.hovered.focus === 1 && seen.hovered.galaxy === seen.hovered.row
+      && seen.hovered.linesOn && seen.hovered.lines === seen.hovered.degree
+      && seen.rested.hub === 0 && seen.rested.focus === 0 && !seen.rested.linesOn,
+    detail);
+  ok("t-12443 ⑤: pressing a star picks its page (the same selection as the flat map, the card opens) and flies to it",
+    !seen.thrown && seen.selected.key === seen.selected.want && seen.selected.card && seen.selected.hub === 2
+      && near(seen.selected.target, seen.selected.star) && Math.abs(seen.selected.dist - seen.selected.wantDist) < 1e-3,
+    detail);
+  ok("t-12443 ⑤: pressing empty space lets the pick go",
+    !seen.thrown && seen.cleared.key === null && seen.cleared.focus === 0 && !seen.cleared.linesOn, detail);
+  ok("t-12443 ⑤: picking a cluster lights its galaxy's stars, focuses it and flies there, leaving the flat camera alone",
+    !seen.thrown && seen.topic.picked === 1 && seen.topic.membersLit && seen.topic.galaxy === 1
+      && near(seen.topic.target, seen.topic.centre) && Math.abs(seen.topic.dist - seen.topic.wantDist) < 1e-3
+      && seen.topic.flatKept,
+    detail);
+  ok("t-12443 ⑤: a search's hits wear the aiming ring (3) under a focus",
+    !seen.thrown && seen.search.found === 3 && seen.search.focus === 1 && seen.search.other === 0, detail);
+  ok("t-12443 ⑤: a shortest path lights its stars (2) and draws its lines",
+    !seen.thrown && seen.path.nodes > 1 && seen.path.lit && seen.path.lines === seen.path.edges && seen.path.focus === 1,
+    detail);
 }
