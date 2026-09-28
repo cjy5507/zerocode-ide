@@ -375,19 +375,28 @@ pub(crate) fn scan_in(home: Option<PathBuf>, now_ms: i64) -> ProviderUsage {
         }
         Auth::Held(session) => session,
     };
+    // Whose session this is, expired or not: the gauge keeps a reading only
+    // under the account `signed_in_as` reads off this same file, and a
+    // reading it drops is no reading — the next ask goes out at once, past
+    // the refetch floor and the failure backoff (t-11645: an expired session
+    // answered as nobody's and was read on every two-second ask).
+    let account = whose(&held);
     if !is_fresh(&held, now_ms) {
         // Reaching here always means a stored, refreshable session — a real
         // sign-out answered `Absent` above. So the repair is running `grok`,
         // not `grok login` (`grok-fetcher.ts:253-258`, issue #8497).
-        return answer(
-            "error",
-            Some(
-                "Grok 로그인이 만료되었습니다 — 이 컴퓨터에서 grok을 한 번 실행하세요".to_string(),
-            ),
-            Some(FailureKind::DelegatedRefreshRequired),
-        );
+        return ProviderUsage {
+            account,
+            ..answer(
+                "error",
+                Some(
+                    "Grok 로그인이 만료되었습니다 — 이 컴퓨터에서 grok을 한 번 실행하세요"
+                        .to_string(),
+                ),
+                Some(FailureKind::DelegatedRefreshRequired),
+            )
+        };
     }
-    let account = whose(&held);
     let bearer = format!("Bearer {}", held.access_token);
     let mut headers: Vec<(&str, &str)> = vec![
         ("Authorization", &bearer),
