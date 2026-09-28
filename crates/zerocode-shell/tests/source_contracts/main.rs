@@ -18837,22 +18837,33 @@ mod tests {
             "the sweep spends git on a checkout it is holding a pane in:\n{sweeping}"
         );
         // And again at the last moment, because every question in between
-        // costs a git process and a pane can open inside one.
+        // costs a git process and a pane can open inside one. The window
+        // hands the question in (`judge_and_act`), and the one judgment both
+        // roads take asks it once git has answered (`settle`, t-12773).
         let acting = block_after(sweep, "fn judge_and_act(");
-        let rechecked_at = acting
-            .find("crate::checkout_occupancy(")
+        assert!(
+            acting.contains("crate::checkout_occupancy("),
+            "the reclaim no longer asks this window's panes at all:\n{acting}"
+        );
+        let settling = block_after(sweep, "fn settle(");
+        let looked_at = settling
+            .find("look(&orchestrator,")
+            .expect("the one judgment no longer looks at the checkout");
+        let rechecked_at = settling
+            .find("(recheck.terminals)(")
             .expect("the reclaim removes on an occupancy answer that is several git processes old");
-        let reclaimed_at = acting
+        let reclaimed_at = settling
             .find("reclaim(&orchestrator,")
             .expect("the reclaim is gone");
         assert!(
-            rechecked_at < reclaimed_at,
-            "the pane question is asked after the directory is gone:\n{acting}"
+            looked_at < rechecked_at && rechecked_at < reclaimed_at,
+            "the pane question is asked before git has answered, or after the \
+             directory is gone:\n{settling}"
         );
         // That last-minute refusal must NOT be remembered. `remember` starts
         // the fifteen-minute clock, and the pane it is about may close a
         // second later.
-        let late = &acting[rechecked_at..reclaimed_at];
+        let late = &settling[rechecked_at..reclaimed_at];
         assert!(
             !late.contains("remember("),
             "a pane that opened mid-judgment now stalls the reclaim for \
@@ -18861,16 +18872,17 @@ mod tests {
 
         // Door three: the completed-worker road. It retires its own terminal
         // first, so the usual answer is zero — but a checkout can hold more
-        // than one pane.
+        // than one pane. It asks before it hands the checkout to the one
+        // judgment, which asks again at the last moment (door two).
         let cleanup = block_after(backend, "fn schedule_completed_worker_cleanup(");
         let asked_at = cleanup
             .find("checkout_occupancy(&state, &isolated.path)")
             .expect("automatic cleanup after a report no longer asks about panes");
-        let removes_at = cleanup
-            .find("remove_automatic_worktree(")
-            .expect("the automatic removal is gone");
+        let handed_at = cleanup
+            .find("worktree_reclaim::judge_reported(")
+            .expect("the completed-worker road no longer hands its checkout to the reclaim");
         assert!(
-            asked_at < removes_at,
+            asked_at < handed_at,
             "a teammate's pane can lose its checkout to its leader's \
              report:\n{cleanup}"
         );
@@ -18950,11 +18962,6 @@ mod tests {
                 "\"window-remove\"",
             ),
             (
-                "the completed-worker cleanup",
-                "fn schedule_completed_worker_cleanup(",
-                "\"completed-worker\"",
-            ),
-            (
                 "the failed worker launch",
                 "fn cleanup_failed_worker_checkout(",
                 "\"failed-worker-launch\"",
@@ -18972,12 +18979,20 @@ mod tests {
                  naming itself:\n{body}"
             );
         }
-        let reclaiming = block_after(sweep, "fn judge_and_act(");
+        // Two roads come through the reclaim's one judgment — the beat's
+        // sweep and a worker's `ok:true` report (t-12773) — and the judgment
+        // writes the line under the name of the road that brought it.
+        let naming = block_after(sweep, "fn source(");
+        assert!(
+            naming.contains("=> \"reclaim\"") && naming.contains("=> \"completed-worker\""),
+            "a road through the reclaim's judgment lost its name:\n{naming}"
+        );
+        let reclaiming = block_after(sweep, "fn settle(");
         assert!(
             reclaiming.contains("crate::note_worktree_removal(")
-                && reclaiming.contains("\"reclaim\""),
-            "the reclaim sweep stopped naming itself in its own audit \
-             line:\n{reclaiming}"
+                && reclaiming.contains("road.source()"),
+            "the reclaim's judgment stopped naming the road that took the \
+             directory:\n{reclaiming}"
         );
 
         // Five roads, five different names — a duplicate would put two doors
@@ -18993,7 +19008,7 @@ mod tests {
                 Some(&backend[opened..closed])
             })
             .collect();
-        named.push("reclaim");
+        named.extend(["reclaim", "completed-worker"]);
         named.sort_unstable();
         assert_eq!(
             named,
@@ -19008,6 +19023,78 @@ mod tests {
              a name shared by two doors gives back the ambiguity this closes, \
              and a road with none is a deletion nothing accounts for"
         );
+    }
+
+    /// Every road that judges or removes a checkout holds it first, alone
+    /// (t-12773).
+    ///
+    /// On 2026-09-28 the completed-worker road was taking a checkout apart
+    /// when the beat's sweep read `git status` off the half-deleted tree and
+    /// wrote "was kept: 1334 uncommitted change(s)" about a leftover that
+    /// never existed — the same reading a dead worker's hold is told. The
+    /// automatic roads are held by the type: `remove_automatic_worktree`
+    /// takes the claim, not a path. The judgment and the person's own
+    /// removal are held by the order checked here.
+    #[test]
+    fn every_road_that_judges_or_removes_a_checkout_holds_it_alone() {
+        let backend = shipped_backend();
+        let sweep = include_str!("../../src/worktree_reclaim.rs");
+
+        // The gate removes the claim's own path and no other.
+        let removing = block_after(backend, "fn remove_automatic_worktree(");
+        assert!(
+            removing.contains("held: &CheckoutHeld") && removing.contains("held.path()"),
+            "an automatic removal takes a path its caller does not hold:\n{removing}"
+        );
+        // A second road is refused while the first holds it, and the claim
+        // goes on every way out — one that outlived its road would keep the
+        // directory from every road for good.
+        let claim = block_after(backend, "fn take(path: &Path) -> Option<Self>");
+        assert!(
+            claim.contains("same_worktree_path(one, path)") && claim.contains("return None;"),
+            "the claim hands one checkout to two roads:\n{claim}"
+        );
+        assert!(
+            block_after(backend, "impl Drop for CheckoutHeld").contains("swap_remove("),
+            "a claim outlives the road that took it"
+        );
+
+        // The one judgment takes it before git is asked anything.
+        let settling = block_after(sweep, "fn settle(");
+        let held_at = settling
+            .find("CheckoutHeld::take(&path)")
+            .expect("the reclaim's judgment reads a checkout without holding it");
+        for later in [
+            "owning_repository(",
+            "look(&orchestrator,",
+            "reclaim(&orchestrator,",
+        ] {
+            let at = settling
+                .find(later)
+                .unwrap_or_else(|| panic!("`{later}` left the reclaim's judgment"));
+            assert!(
+                held_at < at,
+                "the reclaim's judgment reaches `{later}` before it holds the \
+                 checkout:\n{settling}"
+            );
+        }
+
+        // And the person's own removal, before the archive script that works
+        // inside the directory and before git takes it apart.
+        let by_hand = block_after(backend, "async fn remove_worktree(");
+        let held_at = by_hand
+            .find("CheckoutHeld::take(&chosen.path)")
+            .expect("the hand removal takes a checkout apart without holding it");
+        for later in ["archive_worktree(", ".remove(&chosen.path, removal)"] {
+            let at = by_hand
+                .find(later)
+                .unwrap_or_else(|| panic!("`{later}` left the hand removal"));
+            assert!(
+                held_at < at,
+                "the hand removal reaches `{later}` before it holds the \
+                 checkout:\n{by_hand}"
+            );
+        }
     }
 
     /// The machine is held awake through one door and released through the
@@ -31510,26 +31597,33 @@ mod tests {
                 && reported.contains("schedule_completed_worker_cleanup("),
             "cleanup does not wait for the reporting command's final Done hook:\n{reported}"
         );
+        // The checkout goes to the reclaim's one judgment and never straight
+        // to the gate (t-12773): git's "clean" counts neither an ignored path
+        // nor a branch nothing has merged, and this road once took a report,
+        // its screenshots and a moved-in build tree on that word alone.
         let cleanup = block_after(backend, "fn schedule_completed_worker_cleanup(");
         let retirement = cleanup
             .find("retire_terminal(")
             .expect("no terminal retirement");
         let removal = cleanup
-            .find("remove_automatic_worktree(")
-            .expect("worker checkout removal is not routed through the automatic gate");
+            .find("worktree_reclaim::judge_reported(")
+            .expect("worker checkout removal is not routed through the reclaim's judgment");
         assert!(
             retirement < removal
                 && cleanup.contains("let Some(isolated) = cleanup.isolated else")
                 && cleanup.contains("same_worktree_path(")
-                && cleanup.contains("remove_automatic_worktree(")
+                && !cleanup.contains("remove_automatic_worktree(")
                 && !cleanup.contains("ConfirmedDiscardingChanges"),
-            "cleanup removes a shared or dirty checkout, or removes before the terminal ends:\n{cleanup}"
+            "cleanup removes a shared or dirty checkout, removes on git's word \
+             alone, or removes before the terminal ends:\n{cleanup}"
         );
         let removing = block_after(backend, "fn remove_automatic_worktree(");
         assert!(
             removing.contains("Removal::ConfirmedIfClean")
+                && removing.contains("held: &CheckoutHeld")
                 && !removing.contains("ConfirmedDiscardingChanges"),
-            "automatic cleanup gained a force-removal path:\n{removing}"
+            "automatic cleanup gained a force-removal path, or removes a \
+             checkout it does not hold:\n{removing}"
         );
         let gate = block_after(backend, "fn automatic_cleanup_allowed(");
         assert!(
@@ -31633,20 +31727,29 @@ mod tests {
             "the sweep resolves a checkout's repository without the catalog or \
              without this person's workspace root:\n{owning}"
         );
-        let acting = block_after(sweep, "fn judge_and_act(");
+        // The report road's owner is the repository that cut the checkout,
+        // and it is asked for its own worktree list too — a reported path is
+        // never authority by itself (t-12773).
+        let settling = block_after(sweep, "fn settle(");
         assert!(
-            acting.contains("owning_repository("),
+            settling.contains("owning_repository(") && settling.contains("listed_by(cutter,"),
             "the judgment opens git at the checkout instead of at its \
-             owner:\n{acting}"
+             owner:\n{settling}"
+        );
+        assert!(
+            block_after(sweep, "fn listed_by(").contains("cutter.list()"),
+            "the report road trusts a path its repository no longer lists"
         );
 
         // And the ledger is asked a second time on the road to the removal:
         // every question above costs a git process, and a coordinator coming
         // back in that time seats its sleeper straight into this directory.
+        let acting = block_after(sweep, "fn judge_and_act(");
         assert!(
-            acting.contains("orchestration::checkout_is_settled("),
+            acting.contains("orchestration::checkout_is_settled")
+                && settling.contains("(recheck.settled)("),
             "the removal acts on a listing that is several git processes \
-             old:\n{acting}"
+             old:\n{settling}"
         );
 
         // Silent deletion is not acceptable even when correct: the window

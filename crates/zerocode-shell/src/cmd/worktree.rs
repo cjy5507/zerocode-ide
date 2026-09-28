@@ -1404,6 +1404,23 @@ pub(crate) async fn remove_worktree(
     let trust_root = state.config_root().to_path_buf();
     let history_root = state.local_data_root().to_path_buf();
     let removed = tauri::async_runtime::spawn_blocking(move || {
+        // One road at a time inside the directory, the claim every automatic
+        // road takes too (`CheckoutHeld`): the beat's sweep reading `git
+        // status` off a tree this removal is halfway through writes down a
+        // leftover that is not there, and a removal started under the sweep's
+        // own finds the tree half gone. Taken before the archive script,
+        // which works inside the directory as well. Refused rather than
+        // waited for: the holder may be taking gigabytes apart, and the
+        // person is owed an answer now rather than a click that hangs.
+        let Some(_held) = CheckoutHeld::take(&chosen.path) else {
+            let reason = format!(
+                "worktree removal refused for {}: another road is judging or removing \
+                 it right now — try again in a moment",
+                chosen.path.display()
+            );
+            note_window_event(&history_root, &reason);
+            return Err(reason);
+        };
         // BEFORE the removal, not after: the archive script exists to take
         // down what this checkout brought up — a compose stack, a tunnel, a
         // database — and it needs the directory it is talking about to still

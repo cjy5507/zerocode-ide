@@ -103,6 +103,36 @@
 //! that nothing has merged is work somebody still has to go and look at, and
 //! the directory is where they would look. `Removal::ConfirmedIfClean` is the
 //! only removal spelled here; there is no path through this file that forces.
+//!
+//! # One judgment, and one road at a time
+//!
+//! The report road used to remove on git's word alone, and git's "clean"
+//! counts neither an ignored path nor a branch nothing has merged. On
+//! 2026-09-28 a worker reported `ok:true` with commits its base had not
+//! taken, and eighteen seconds later its checkout was gone: the report and
+//! the dark and light screenshots under `output/`, and ten gigabytes of
+//! `target/` its coordinator had moved in to build with. That road now hands
+//! its checkout here ([`judge_reported`]) and gets the judgment the beat
+//! gives every other finished worker's — with the repository that cut the
+//! checkout standing in for the catalog, because this process made the cut
+//! and the catalog need not list a leader's repository at all.
+//!
+//! And no two roads read one directory at once. The sweep reached that same
+//! checkout while the report road was taking it apart, read `git status` off
+//! a tree that was half gone, and wrote "was kept: 1334 uncommitted change(s)
+//! … D CHANGELOG.md" — a leftover that never existed, and the reading a dead
+//! worker's hold is told. Every road that judges or removes a checkout takes
+//! [`crate::CheckoutHeld`] first, and a road that finds it held stands aside:
+//! the holder is asking the same questions, and its answer stands.
+//!
+//! What the judgment still takes, knowingly: a directory is a build tree. Git
+//! folds an ignored `output/` into one line exactly as it folds `target/`, so
+//! a checkout with no commit of its own — a worker that only measured or
+//! reported — goes with its `output/` once it is judged, as it always did on
+//! the beat. Keeping every ignored directory that no build tool marked as a
+//! cache would keep a JavaScript repository's `dist/`, `.next/` and
+//! `node_modules/` for good, which is the full disk this file exists to
+//! prevent; evidence a person still needs belongs outside the checkout.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -114,7 +144,7 @@ use zerocode_core::orchestration::Examined;
 use zerocode_orchestrator::{Orchestrator, Worktree, same_worktree_path};
 
 use crate::orchestration;
-use crate::{AppState, ShellStateExt, WorkspaceCreationPrefs};
+use crate::{AppState, CheckoutHeld, ShellStateExt, WorkspaceCreationPrefs};
 
 /// How long a checkout that was kept waits before the question is put to git
 /// again. A person commits and merges what a worker left, and the reclaim
@@ -277,42 +307,202 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
     }
 
     let state = app.state::<AppState>();
-    let here = Where {
+    let road = Road::Sweep {
         projects: crate::stored_projects(state.config_root()),
         prefs: crate::load_settings_for_boot(state.settings())
             .document
             .workspace_creation_prefs,
+    };
+    let here = Where {
         active: state.active_root(),
         data_root: state.local_data_root().to_path_buf(),
     };
     for candidate in due {
-        judge_and_act(app, &candidate, &here, now_ms);
+        judge_and_act(app, &candidate, &road, &here, now_ms);
     }
 }
 
-/// The window's own facts one judgment reads, gathered once for the pass.
+/// A worker said `ok:true` on an auto-release seat and its terminal is gone:
+/// the report road hands its checkout to the judgment the beat gives every
+/// other finished worker's (see *One judgment, and one road at a time*).
+///
+/// Judged under the row the ledger settled it as, found by path, because the
+/// key a refusal is remembered under is that row's: a checkout kept here is
+/// then not judged again a second later by the beat. One the ledger does not
+/// count finished with — a retry seated in it with `--inherit-checkout`, a
+/// ledger that did not answer — is left to the beat, which judges it once it
+/// is; nothing is remembered for it, so no clock holds it back.
+pub(crate) fn judge_reported(
+    app: &AppHandle,
+    worker: &str,
+    cutter: &Orchestrator,
+    path: &Path,
+    now_ms: i64,
+) {
+    let state = app.state::<AppState>();
+    let here = Where {
+        active: state.active_root(),
+        data_root: state.local_data_root().to_path_buf(),
+    };
+    let Some(candidate) = orchestration::settled_checkouts()
+        .into_iter()
+        .find(|one| same_worktree_path(Path::new(&one.path), path))
+    else {
+        crate::note_window_event(
+            &here.data_root,
+            &format!(
+                "orchestration: the checkout worker {worker} left at {} was kept: the ledger \
+                 does not count it finished with yet, so the beat judges it once it does",
+                path.display()
+            ),
+        );
+        return;
+    };
+    judge_and_act(
+        app,
+        &candidate,
+        &Road::Report(cutter.clone()),
+        &here,
+        now_ms,
+    );
+}
+
+/// The road a judgment came in by, and the one thing each road holds that the
+/// other does not: how the repository that owns the checkout is found.
+enum Road {
+    /// The beat, for every checkout the ledger has settled. The owner is found
+    /// through the sidebar's catalog, the only set of repositories this window
+    /// may resolve a reported path against, with this person's workspace root
+    /// on top: `worker_worktree` cuts under exactly that orchestrator, and one
+    /// built without the preferences would judge the checkouts it made to be
+    /// somebody else's.
+    Sweep {
+        projects: Vec<String>,
+        prefs: WorkspaceCreationPrefs,
+    },
+    /// A worker's `ok:true` report: the repository that cut its checkout,
+    /// which this process still holds.
+    Report(Orchestrator),
+}
+
+impl Road {
+    /// The name the window log's removal line carries, so the line says which
+    /// door took the directory (`note_worktree_removal`).
+    fn source(&self) -> &'static str {
+        match self {
+            Self::Sweep { .. } => "reclaim",
+            Self::Report(_) => "completed-worker",
+        }
+    }
+}
+
+/// The window's own facts one judgment reads, gathered once per road.
 struct Where {
-    /// The sidebar's project catalog, which is the only set of repositories
-    /// this window may resolve a checkout against.
-    projects: Vec<String>,
-    /// Where this person's workspaces are cut — the root the ownership rule
-    /// compares a path with, so it has to be the same one `worker_worktree`
-    /// cut under.
-    prefs: WorkspaceCreationPrefs,
+    /// The checkout the file surfaces are standing in, which is never a
+    /// candidate whatever the ledger says.
     active: PathBuf,
     data_root: PathBuf,
 }
 
-/// Put the questions to git for one checkout, and carry out what they answer.
+/// The two questions asked again once git has answered, because every git
+/// process is time for the world to move: a coordinator coming back seats its
+/// sleeper in the directory, a pane opens in it. Handed in rather than read
+/// here, so the one judgment runs where no window is — its tests.
+struct Recheck<'a> {
+    /// Does the ledger still count the checkout finished with?
+    settled: &'a dyn Fn(&str) -> bool,
+    /// How many terminals does this window hold inside it?
+    terminals: &'a dyn Fn(&Path) -> usize,
+}
+
+/// What one judgment came to, for the road that asked.
+enum Settled {
+    /// It went, and these are the two names that made it safe.
+    Reclaimed { branch: String, base: String },
+    /// It stays, and the window log says why.
+    Kept,
+    /// Another road holds it, or has already taken it, and that road's answer
+    /// stands.
+    Elsewhere,
+}
+
+/// Judge one checkout and carry out the answer, then tell the window.
 fn judge_and_act(
     app: &AppHandle,
     candidate: &orchestration::SettledCheckout,
+    road: &Road,
     here: &Where,
     now_ms: i64,
 ) {
+    let state = app.state::<AppState>();
+    let terminals = |path: &Path| crate::checkout_occupancy(&state, path);
+    let recheck = Recheck {
+        settled: &orchestration::checkout_is_settled,
+        terminals: &terminals,
+    };
+    match settle(candidate, road, here, &recheck, now_ms) {
+        Settled::Reclaimed { branch, base } => {
+            // The sidebar's existing refresh, and the sentence for the
+            // person. Two events because they answer different questions:
+            // one is "the list changed", the other is "something was deleted
+            // and here is why".
+            let _ = app.emit("worktree:removed", candidate.path.clone());
+            let _ = app.emit(
+                "worktree:reclaimed",
+                Reclaimed {
+                    path: candidate.path.clone(),
+                    name: Path::new(&candidate.path).file_name().map_or_else(
+                        || candidate.path.clone(),
+                        |name| name.to_string_lossy().into_owned(),
+                    ),
+                    worker: candidate.worker.clone(),
+                    agent: candidate.agent.clone(),
+                    branch,
+                    base,
+                },
+            );
+        }
+        // Said by the report road alone: it watched this worker finish, and
+        // its silence would read as a removal that never came. The beat
+        // simply meets the checkout again on a later pass.
+        Settled::Elsewhere if matches!(road, Road::Report(_)) => crate::note_window_event(
+            &here.data_root,
+            &format!(
+                "orchestration: the checkout worker {} left at {} is being judged or removed \
+                 on another road; that road's answer stands",
+                candidate.worker, candidate.path
+            ),
+        ),
+        Settled::Elsewhere | Settled::Kept => {}
+    }
+}
+
+/// Every question, then the act: the one judgment both roads take, under the
+/// claim that keeps every other road out of the directory until it is done.
+fn settle(
+    candidate: &orchestration::SettledCheckout,
+    road: &Road,
+    here: &Where,
+    recheck: &Recheck<'_>,
+    now_ms: i64,
+) -> Settled {
     let path = PathBuf::from(&candidate.path);
     let data_root = here.data_root.as_path();
-    let (orchestrator, known) = match owning_repository(&here.projects, &here.prefs, &path) {
+    // Before git is asked anything: a road taking this directory apart turns
+    // every answer below into a reading of a half-deleted tree.
+    let Some(held) = CheckoutHeld::take(&path) else {
+        return Settled::Elsewhere;
+    };
+    // Asked again under the claim — the road that held it a moment ago may
+    // have been the one removing it.
+    if !path.is_dir() {
+        return Settled::Elsewhere;
+    }
+    let owner = match road {
+        Road::Sweep { projects, prefs } => owning_repository(projects, prefs, &path),
+        Road::Report(cutter) => listed_by(cutter, &path),
+    };
+    let (orchestrator, known) = match owner {
         Ok(found) => found,
         Err(refusal) => {
             orchestration::checkout_examined(
@@ -323,7 +513,7 @@ fn judge_and_act(
                 now_ms,
             );
             remember(candidate, Standing::NotOurs, &refusal, data_root, now_ms);
-            return;
+            return Settled::Kept;
         }
     };
     let (verdict, examined) = look(&orchestrator, &known, &here.active);
@@ -336,85 +526,72 @@ fn judge_and_act(
     // death, whatever the verdict below does with the directory: the same
     // reading answers both, so the two can never disagree.
     orchestration::checkout_examined(&candidate.worker, examined, now_ms);
-    match verdict {
-        Verdict::Keep(because) => remember(candidate, standing, &because, data_root, now_ms),
+    let (branch, base, takes) = match verdict {
+        Verdict::Keep(because) => {
+            remember(candidate, standing, &because, data_root, now_ms);
+            return Settled::Kept;
+        }
         Verdict::Reclaim {
             branch,
             base,
             takes,
-        } => {
-            // Asked again, against the ledger as it stands. Everything above
-            // took git processes to answer, and a coordinator coming back in
-            // that time seats its sleeper straight into this directory.
-            if !orchestration::checkout_is_settled(&candidate.path) {
-                remember(
-                    candidate,
-                    Standing::Kept,
-                    "the ledger seated somebody in it again",
-                    data_root,
-                    now_ms,
-                );
-                return;
-            }
-            // And the panes, asked again for the same reason the ledger is:
-            // everything above took git processes, and a terminal opened in
-            // that time is somebody working in this directory.
-            //
-            // Written straight to the log rather than through `remember`. A
-            // mark here would hold the checkout for `RE_JUDGE_AFTER` past the
-            // moment the pane closed, and the cheap filter in `sweep` already
-            // makes this line rare enough that it will not repeat on a beat.
-            let held = crate::checkout_occupancy(&app.state::<AppState>(), &path);
-            if held > 0 {
-                crate::note_window_event(
-                    data_root,
-                    &format!(
-                        "orchestration: the checkout worker {} left at {} was kept: this \
-                         window opened {held} terminal(s) in it while it was being judged",
-                        candidate.worker,
-                        path.display()
-                    ),
-                );
-                return;
-            }
-            match reclaim(&orchestrator, &path, data_root) {
-                Ok(()) => {
-                    crate::note_worktree_removal(
-                        data_root,
-                        "reclaim",
-                        &path,
-                        &format!(
-                            "worker {} left it; {branch} is clean and fully in {base}; it took {}",
-                            candidate.worker,
-                            if takes.is_empty() {
-                                "no ignored path with it".to_string()
-                            } else {
-                                takes.join(", ")
-                            }
-                        ),
-                    );
-                    // The sidebar's existing refresh, and the sentence for
-                    // the person. Two events because they answer different
-                    // questions: one is "the list changed", the other is
-                    // "something was deleted and here is why".
-                    let _ = app.emit("worktree:removed", candidate.path.clone());
-                    let _ = app.emit(
-                        "worktree:reclaimed",
-                        Reclaimed {
-                            path: candidate.path.clone(),
-                            name: path.file_name().map_or_else(
-                                || candidate.path.clone(),
-                                |name| name.to_string_lossy().into_owned(),
-                            ),
-                            worker: candidate.worker.clone(),
-                            agent: candidate.agent.clone(),
-                            branch,
-                            base,
-                        },
-                    );
-                }
-                Err(refusal) => remember(candidate, Standing::Kept, &refusal, data_root, now_ms),
-            }
+        } => (branch, base, takes),
+    };
+    // Asked again, against the ledger as it stands. Everything above took git
+    // processes to answer, and a coordinator coming back in that time seats
+    // its sleeper straight into this directory.
+    if !(recheck.settled)(&candidate.path) {
+        remember(
+            candidate,
+            Standing::Kept,
+            "the ledger seated somebody in it again",
+            data_root,
+            now_ms,
+        );
+        return Settled::Kept;
+    }
+    // And the panes, asked again for the same reason the ledger is: a
+    // terminal opened while git was answering is somebody working in this
+    // directory.
+    //
+    // Written straight to the log rather than through `remember`. A mark here
+    // would hold the checkout for `RE_JUDGE_AFTER` past the moment the pane
+    // closed, and the cheap filter in `sweep` already makes this line rare
+    // enough that it will not repeat on a beat.
+    let terminals = (recheck.terminals)(&path);
+    if terminals > 0 {
+        crate::note_window_event(
+            data_root,
+            &format!(
+                "orchestration: the checkout worker {} left at {} was kept: this window \
+                 opened {terminals} terminal(s) in it while it was being judged",
+                candidate.worker,
+                path.display()
+            ),
+        );
+        return Settled::Kept;
+    }
+    match reclaim(&orchestrator, &held, data_root) {
+        Ok(()) => {
+            crate::note_worktree_removal(
+                data_root,
+                road.source(),
+                &path,
+                &format!(
+                    "worker {} left it; {branch} is clean and fully in {base}; it took {}",
+                    candidate.worker,
+                    if takes.is_empty() {
+                        "no ignored path with it".to_string()
+                    } else {
+                        takes.join(", ")
+                    }
+                ),
+            );
+            Settled::Reclaimed { branch, base }
+        }
+        Err(refusal) => {
+            remember(candidate, Standing::Kept, &refusal, data_root, now_ms);
+            Settled::Kept
         }
     }
 }
@@ -507,6 +684,21 @@ fn owning_repository(
         return Ok((orchestrator, known));
     }
     Err("no project in this window's catalog lists it as a worktree".to_string())
+}
+
+/// The report road's owner: the repository that cut the checkout, asked for
+/// its own entry. No catalog walk — this process made the cut, with the
+/// person's workspace root already on it — but the same worktree list the
+/// catalog road reads, so a path git no longer lists is refused, not trusted.
+fn listed_by(cutter: &Orchestrator, path: &Path) -> Result<(Orchestrator, Worktree), String> {
+    let listed = cutter.list().map_err(|error| {
+        format!("the repository that cut it could not list its worktrees: {error}")
+    })?;
+    let known = listed
+        .into_iter()
+        .find(|candidate| same_worktree_path(&candidate.path, path))
+        .ok_or_else(|| "the repository that cut it no longer lists it as a worktree".to_string())?;
+    Ok((cutter.clone(), known))
 }
 
 /// Every question, cheapest first, each one answered so that its uncertain
@@ -669,9 +861,14 @@ fn look(orchestrator: &Orchestrator, known: &Worktree, active: &Path) -> (Verdic
 /// The project's archive script is NOT run, matching the existing automatic
 /// road: a teardown somebody wrote is a program, and running one unattended
 /// on a beat is a decision of its own rather than a detail of this one.
-fn reclaim(orchestrator: &Orchestrator, path: &Path, data_root: &Path) -> Result<(), String> {
+fn reclaim(
+    orchestrator: &Orchestrator,
+    held: &CheckoutHeld,
+    data_root: &Path,
+) -> Result<(), String> {
+    let path = held.path();
     crate::unshare_project_directories(orchestrator.repo_root(), path);
-    crate::remove_automatic_worktree(orchestrator, path)?;
+    crate::remove_automatic_worktree(orchestrator, held)?;
     // After the removal and not before, exactly as the hand road orders it:
     // history is the one thing somebody who lands back on a refused removal
     // still wants.
@@ -782,6 +979,64 @@ mod tests {
                 ],
             );
             path
+        }
+
+        /// Ignore rules committed on `main`, so every checkout cut afterwards
+        /// carries them the way a real repository's `.gitignore` does.
+        fn ignore_on_main(&self, rules: &str) {
+            std::fs::write(self.repo.join(".gitignore"), rules).expect("ignore rules");
+            git(&self.repo, &["add", ".gitignore"]);
+            git(&self.repo, &["commit", "-q", "-m", "ignore rules"]);
+        }
+
+        /// A cargo build tree at `at`: the cache tag cargo writes into every
+        /// target directory, and something of size under it.
+        fn build_tree(at: &Path) {
+            std::fs::create_dir_all(at.join("debug")).expect("build tree");
+            std::fs::write(at.join("CACHEDIR.TAG"), CACHE_TAG).expect("cache tag");
+            std::fs::write(at.join("debug/big"), vec![0u8; 4096]).expect("build output");
+        }
+
+        /// A warmed build tree made elsewhere and moved into `checkout` — a
+        /// rename on one filesystem, which is what a coordinator's `mv` is.
+        fn move_in_warm_target(&self, checkout: &Path) {
+            let warm = self.repo.with_file_name("warm-target");
+            Self::build_tree(&warm);
+            std::fs::rename(&warm, checkout.join("target")).expect("move the warm build in");
+        }
+    }
+
+    /// The first line of the tag cargo writes into every target directory (the
+    /// Cache Directory Tagging Specification) — what makes a fixture's
+    /// `target/` the shape a real build leaves.
+    const CACHE_TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
+
+    /// A PNG's eight signature bytes: a screenshot as far as anything here
+    /// looks.
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+    /// The ledger's row for a finished worker's checkout, the shape
+    /// `settled_checkouts` hands either road.
+    fn finished(path: &Path, worker: &str) -> orchestration::SettledCheckout {
+        orchestration::SettledCheckout {
+            path: path.to_string_lossy().into_owned(),
+            worker: worker.to_string(),
+            agent: "claude".to_string(),
+        }
+    }
+
+    /// The window's two last questions, answered the way a finished worker's
+    /// checkout answers them: the ledger is done with it and no pane is in it.
+    fn nobody_left() -> Recheck<'static> {
+        fn settled(_: &str) -> bool {
+            true
+        }
+        fn terminals(_: &Path) -> usize {
+            0
+        }
+        Recheck {
+            settled: &settled,
+            terminals: &terminals,
         }
     }
 
@@ -952,7 +1207,8 @@ mod tests {
             Verdict::Reclaim { .. }
         ));
         let data_root = tempfile::tempdir().expect("data root");
-        reclaim(&orchestrator, &path, data_root.path()).expect("reclaim");
+        let held = CheckoutHeld::take(&path).expect("no other road holds it");
+        reclaim(&orchestrator, &held, data_root.path()).expect("reclaim");
         assert!(!path.exists(), "the checkout survived its own reclaim");
     }
 
@@ -1207,5 +1463,184 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&candidate.path);
+    }
+
+    /// The accident of 2026-09-28 on a bench (t-12773): a worker reported
+    /// `ok:true` holding a commit its base had not taken, screenshots under an
+    /// ignored `output/`, and a warmed `target/` its coordinator had moved in.
+    /// The report road removed on git's word alone and took all of it. It
+    /// takes the one judgment now: the checkout stays with every one of those
+    /// in it, and the window log names the question that kept it.
+    #[test]
+    fn a_reported_checkout_holding_unlanded_work_keeps_its_evidence_and_its_build() {
+        let bench = Bench::open();
+        bench.ignore_on_main("output/\ntarget/\n");
+        let path = bench.cut("t-12563");
+        std::fs::write(path.join("work.rs"), "fn unseen_badges() {}\n").expect("work");
+        git(&path, &["add", "work.rs"]);
+        git(&path, &["commit", "-q", "-m", "the worker's own commit"]);
+        std::fs::create_dir_all(path.join("output/t-12563")).expect("evidence folder");
+        for shot in ["dark.png", "light.png"] {
+            std::fs::write(path.join("output/t-12563").join(shot), PNG).expect("screenshot");
+        }
+        bench.move_in_warm_target(&path);
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-12563");
+
+        let settled = settle(
+            &candidate,
+            &Road::Report(bench.orchestrator()),
+            &Where {
+                active: bench.repo.clone(),
+                data_root: data_root.path().to_path_buf(),
+            },
+            &nobody_left(),
+            1_000,
+        );
+
+        assert!(
+            matches!(settled, Settled::Kept),
+            "the report road took a checkout holding a commit main has not taken"
+        );
+        for survivor in [
+            "work.rs",
+            "output/t-12563/dark.png",
+            "output/t-12563/light.png",
+            "target/CACHEDIR.TAG",
+            "target/debug/big",
+        ] {
+            assert!(
+                path.join(survivor).is_file(),
+                "{survivor} went with the checkout"
+            );
+        }
+        let said = std::fs::read_to_string(data_root.path().join("window-errors.log"))
+            .expect("the window log");
+        assert!(
+            said.contains("was kept: 1 commit(s) on wt/t-12563 are not in main yet")
+                && !said.contains("worktree removed"),
+            "the log does not name the question that kept it:\n{said}"
+        );
+
+        judged()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&candidate.path);
+    }
+
+    /// And the reclaim goes on (t-12773). A checkout whose base has taken
+    /// every commit, with nothing ignored in it but a cargo build tree, is
+    /// still taken by both roads: the gigabytes are what the reclaim exists
+    /// to get back, and one judgment for two roads must not turn into two
+    /// roads that keep everything.
+    #[test]
+    fn a_landed_checkout_holding_only_its_build_is_still_reclaimed_by_both_roads() {
+        let bench = Bench::open();
+        bench.ignore_on_main("target/\n");
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let (projects, prefs) = bench.window();
+        for (name, road) in [
+            ("t-12600", Road::Report(bench.orchestrator())),
+            ("t-12601", Road::Sweep { projects, prefs }),
+        ] {
+            let path = bench.cut(name);
+            let branch = format!("wt/{name}");
+            let work = format!("{name}.rs");
+            std::fs::write(path.join(&work), "fn landed() {}\n").expect("work");
+            git(&path, &["add", &work]);
+            git(&path, &["commit", "-q", "-m", "landed work"]);
+            git(&bench.repo, &["merge", "-q", "--ff-only", &branch]);
+            Bench::build_tree(&path.join("target"));
+
+            let settled = settle(
+                &finished(&path, "w-12600"),
+                &road,
+                &here,
+                &nobody_left(),
+                1_000,
+            );
+            let Settled::Reclaimed { branch: took, base } = settled else {
+                panic!("{name}: a clean, landed checkout holding only its build was kept");
+            };
+            assert_eq!(
+                (took.as_str(), base.as_str()),
+                (branch.as_str(), "main"),
+                "{name}: the reclaim does not carry the two names its sentence is made of"
+            );
+            assert!(!path.exists(), "{name}: the checkout survived its reclaim");
+            let said = std::fs::read_to_string(data_root.path().join("window-errors.log"))
+                .expect("the window log");
+            let removal = format!("worktree removed [{}] {}", road.source(), path.display());
+            assert!(
+                said.lines()
+                    .any(|line| line.contains(&removal) && line.contains("it took target")),
+                "{name}: no removal line names its road and what it took:\n{said}"
+            );
+        }
+    }
+
+    /// One road at a time (t-12773). While another road holds a checkout —
+    /// here the report road, as if halfway through taking it apart — the
+    /// sweep neither reads it nor writes a word about it, and remembers
+    /// nothing, so the judgment after the claim is let go is an ordinary one.
+    /// On 2026-09-28 the sweep read such a half-deleted tree and wrote "was
+    /// kept: 1334 uncommitted change(s)" about a leftover that never existed.
+    #[test]
+    fn a_checkout_another_road_holds_is_neither_read_nor_taken() {
+        let bench = Bench::open();
+        let path = bench.cut("t-12773");
+        let (projects, prefs) = bench.window();
+        let road = Road::Sweep { projects, prefs };
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let candidate = finished(&path, "w-12773");
+        let log = data_root.path().join("window-errors.log");
+
+        let report = CheckoutHeld::take(&path).expect("the report road takes it first");
+        assert!(
+            CheckoutHeld::take(&path).is_none(),
+            "a second road took a checkout another road was holding"
+        );
+        assert!(
+            matches!(
+                settle(&candidate, &road, &here, &nobody_left(), 1_000),
+                Settled::Elsewhere
+            ),
+            "the sweep judged a checkout another road was holding"
+        );
+        assert!(
+            path.is_dir(),
+            "the sweep took a checkout another road was holding"
+        );
+        assert!(
+            !log.exists(),
+            "the sweep wrote about a checkout it was not holding:\n{}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
+        assert!(
+            judged()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&candidate.path)
+                .is_none(),
+            "a checkout the sweep never read is remembered as judged"
+        );
+
+        drop(report);
+        assert!(
+            matches!(
+                settle(&candidate, &road, &here, &nobody_left(), 2_000),
+                Settled::Reclaimed { .. }
+            ),
+            "the claim outlived the road that held it"
+        );
+        assert!(!path.exists(), "the checkout survived its reclaim");
     }
 }
