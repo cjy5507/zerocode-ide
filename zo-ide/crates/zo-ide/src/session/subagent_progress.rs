@@ -423,12 +423,23 @@ const QUIET_RELIST_EVERY: u32 = 30;
 impl ManifestCache {
     /// A watcher's cache over what every watcher of this process has read.
     pub(crate) fn shared() -> Self {
-        Self::default()
+        static FILES: OnceLock<Arc<Mutex<ManifestFiles>>> = OnceLock::new();
+        Self {
+            files: Arc::clone(FILES.get_or_init(Arc::default)),
+            ..Self::default()
+        }
     }
 
-    /// Whether the stores can be left unlisted this time.
-    fn still_quiet(&mut self, _stores: &[(PathBuf, Option<SystemTime>)]) -> bool {
-        false
+    /// Whether the stores can be left unlisted this time: nothing of this
+    /// session ran at the last listing and no store directory has moved
+    /// since. The tools crate publishes every manifest by a rename, which
+    /// moves its directory's time, so there is nothing new to read.
+    fn still_quiet(&mut self, stores: &[(PathBuf, Option<SystemTime>)]) -> bool {
+        let quiet = self.quiet.as_deref() == Some(stores) && self.skipped < QUIET_RELIST_EVERY;
+        if quiet {
+            self.skipped += 1;
+        }
+        quiet
     }
 
     /// What a listing found: the stores' times, kept only when nothing of
