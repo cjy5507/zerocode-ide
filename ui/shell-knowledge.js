@@ -26,9 +26,9 @@ const KNOWLEDGE_REFRESH_FLOOR_MS = 1500;
  * 레인 램프 다섯(`--git-graph-lane-1..5`, IBM의 색약 안전 다섯)에 두 테마 모두
  * 값을 가진 신호색 둘과 그 둘의 중간 하나. 3차부터 색은 태그가 아니라 **군집**의
  * 것이다(`knowledgeCommunities`) — 볼트 27쪽 중 15쪽이 같은 첫 태그였고, 그
- * 그림에서 색은 아무것도 가르지 못했다. 여덟 뒤의 군집은 여덟로 나눈 나머지를
- * 입는다. 아이덴티티 레인(`--lane-*`)은 라이트 판에서 한 색으로 접히므로
- * 여전히 빌릴 수 없다. */
+ * 그림에서 색은 아무것도 가르지 못했다. 여덟 뒤의 군집은 색이 없다(t-12029,
+ * `knowledgeClusterHues`). 아이덴티티 레인(`--lane-*`)은 라이트 판에서 한 색으로
+ * 접히므로 여전히 빌릴 수 없다. */
 const KNOWLEDGE_HUES = 8;
 /* 칩으로 세우는 태그의 상한. 백 개의 칩은 필터가 아니라 두 번째 목록이다. */
 const KNOWLEDGE_TAG_CHIPS = 12;
@@ -910,11 +910,10 @@ function paintKnowledgeEntry() {
   if (row) row.hidden = secondBrainVault === "";
 }
 
-/* 색 칸마다 그라데이션 셋 — 점의 채움(가운데 밝게), 허브의 halo(가운데에서
- * 가장자리로 사라지는 원), 군집의 성운(같은 모양, 더 옅게) — 과 지향성 관계의
- * 화살표. `related`와 `mentions`는 방향을 그리지 않는다. 그라데이션의 불투명도는
- * 숫자가 아니라 `<stop>`의 클래스다: 그 수는 토큰에 산다(`--knowledge-halo-core`,
- * `--knowledge-nebula-core`). 색 칸이 없는 허브(군집이 아닌 점)는 중립 halo를 쓴다. */
+/* 색 칸마다 그라데이션 둘 — 점의 채움(가운데 밝게)과 허브의 halo(가운데에서 가장자리로 사라지는 원) — 과
+ * 지향성 관계의 화살표. `related`와 `mentions`는 방향을 그리지 않는다. 그라데이션의 불투명도는 숫자가 아니라
+ * `<stop>`의 클래스다: 그 수는 토큰에 산다(`--knowledge-halo-core`). 색 칸이 없는 허브(군집이 아닌 점)는 중립
+ * halo를 쓴다. 군집의 성운은 그라데이션이 아니라 평평한 한 겹이다(t-12029, CSS의 `.knowledge-nebula`). */
 function knowledgeDefsHtml() {
   const stop = (offset, color, className) =>
     `<stop offset="${offset}" stop-color="${color}" class="${className}"></stop>`;
@@ -925,8 +924,7 @@ function knowledgeDefsHtml() {
       + `<stop offset="0" stop-color="var(--knowledge-hue-${hue}-center)"></stop>`
       + `<stop offset="1" stop-color="var(--knowledge-hue-${hue})"></stop>`
       + `</radialGradient>`
-    + disc(`knowledge-halo-gradient-${hue}`, `var(--knowledge-hue-${hue})`, "knowledge-stop-halo-core")
-    + disc(`knowledge-nebula-gradient-${hue}`, `var(--knowledge-hue-${hue})`, "knowledge-stop-nebula-core"))
+    + disc(`knowledge-halo-gradient-${hue}`, `var(--knowledge-hue-${hue})`, "knowledge-stop-halo-core"))
     .join("");
   const neutral = disc("knowledge-halo-gradient-neutral", "var(--ink-figure)", "knowledge-stop-halo-core");
   const arrows = KNOWLEDGE_EDGE_DIRECTED.map((kind) =>
@@ -3186,37 +3184,21 @@ function knowledgeCommunities(model, tuning) {
     if (size[rank] >= KNOWLEDGE_COMMUNITY.minSize) named += 1;
   }
   const { homeX, homeY, homed, homeR } = knowledgeClusterHomes(model, of, ids, named, tuning);
-  const hue = knowledgeClusterHues(ids, named, homeX, homeY, homeR);
+  const hue = knowledgeClusterHues(ids, named);
   const { names, tagHue, core } = knowledgeClusterNames(model, of, size, named, hue);
   return { count: ids, of, size, hue, names, homeX, homeY, homed, homeR, named, tagHue, core };
 }
 
-/* 군집의 색 칸(t-11500). 색 칸은 여덟뿐이고(`KNOWLEDGE_HUES`, 토큰이 두 테마에서 대비를 지키는 칸)
- * 볼트의 주제는 그보다 많다 — 순위로 돌려 쓰면(`순위 % 8`) 1·9·17위가 같은 색이고, 그 셋이 이웃에
- * 서면 지도가 세 주제를 한 주제로 말한다(실측 200% 범례: 세 군집이 모두 금색). 그래서 순위대로,
- * 이미 그 색을 입은 원반들과의 가장 가까운 간격(가장자리 사이)이 가장 먼 칸을 고른다. 여덟까지는
- * 모든 칸이 비어 있어 순위의 칸 그대로이고(오늘의 색), 동률은 순위의 칸부터 차례로 — 난수 없이
- * 같은 볼트는 같은 색이다. 되풀이되는 색은 지도에서 가장 먼 원반끼리 나눈다. */
-function knowledgeClusterHues(ids, named, homeX, homeY, homeR) {
+/* 군집의 색 칸 (t-12029, 승인된 시안 v2 「colour」 — t-11500의 「이웃한 군집은 다른 색」과 한 함수).
+ *
+ * 색 칸은 여덟이고(`KNOWLEDGE_HUES`, 두 테마에서 대비를 지키는 토큰) 볼트의 주제는 그보다 많다. 순위(쪽 수)의
+ * 앞 여덟이 여덟 칸을 순위대로 하나씩 입고, 나머지는 색이 없다 — 차분한 회색에 이름만. 한 칸을 두 군집이
+ * 나누지 않으므로 이웃한 두 원반이 같은 색일 수 없다: t-11500이 원반 사이의 거리로 풀던 물음(돌려 쓰는 색을
+ * 가장 먼 원반끼리)이 물음째 사라지고, 두 규칙이 다툴 자리가 없다. 여덟 색이 곧 「가장 큰 주제 여덟」을
+ * 말한다(시안의 비포: 실제 볼트 17주제 중 9주제가 남의 색을 입었다). 순위가 정하므로 같은 볼트는 같은 색이다. */
+function knowledgeClusterHues(ids, named) {
   const hue = new Int8Array(ids).fill(-1);
-  for (let rank = 0; rank < named; rank += 1) {
-    let best = rank % KNOWLEDGE_HUES;
-    let bestRoom = Number.NEGATIVE_INFINITY;
-    for (let step = 0; step < KNOWLEDGE_HUES; step += 1) {
-      const cell = (rank + step) % KNOWLEDGE_HUES;
-      let room = Number.POSITIVE_INFINITY;
-      for (let other = 0; other < rank; other += 1) {
-        if (hue[other] !== cell) continue;
-        room = Math.min(room, Math.hypot(homeX[rank] - homeX[other], homeY[rank] - homeY[other])
-          - homeR[rank] - homeR[other]);
-      }
-      if (room > bestRoom) {
-        bestRoom = room;
-        best = cell;
-      }
-    }
-    hue[rank] = best;
-  }
+  for (let rank = 0; rank < Math.min(named, KNOWLEDGE_HUES); rank += 1) hue[rank] = rank;
   return hue;
 }
 
@@ -6696,8 +6678,16 @@ function paintKnowledgeClusterLegend(view, layout) {
     if (rank < named) tally[rank] += 1;
   }
   const rows = [];
+  /* 색이 있는 군집만 한 줄씩(t-12029, 시안 v2 「colour」) — 나머지는 색이 없고, 범례의 일은 색이 무엇을
+   * 가르는지 말하는 것이다. 그 군집들은 「작은 주제 n」 한 줄로 센다(단추가 아니다: 밝히는 문은 지도의 제 이름판과
+   * 인스펙터의 군집 목록에 그대로 있다). */
+  let quiet = 0;
   for (let rank = 0; rank < named; rank += 1) {
     if (tally[rank] === 0) continue;
+    if (layout.communityHue[rank] < 0) {
+      quiet += 1;
+      continue;
+    }
     let key = host.querySelector(`[data-knowledge-cluster="${rank}"]`);
     if (!key) {
       key = document.createElement("button");
@@ -6713,6 +6703,19 @@ function paintKnowledgeClusterLegend(view, layout) {
     writeAttribute(key, "data-hue", String(layout.communityHue[rank]));
     writeTextContent(key.lastChild, knowledgeClusterWord(layout, rank));
     rows.push(key);
+  }
+  if (quiet > 0) {
+    let rest = host.querySelector(".knowledge-cluster-key.is-quiet");
+    if (!rest) {
+      rest = document.createElement("span");
+      rest.className = "knowledge-cluster-key is-quiet";
+      const dot = document.createElement("i");
+      dot.className = "knowledge-cluster-dot";
+      dot.setAttribute("aria-hidden", "true");
+      rest.append(dot, document.createElement("span"));
+    }
+    writeTextContent(rest.lastChild, t("knowledge.clustersQuiet", "작은 주제 {{count}}", { count: quiet }));
+    rows.push(rest);
   }
   reconcileElementOrder(host, rows);
   host.hidden = rows.length === 0;

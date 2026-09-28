@@ -325,8 +325,9 @@ in vec3 vRim;
 out vec4 outColor;
 void main() {
   float reach = length(vLocal);
-  /* SVG의 방사 그라데이션 그대로: 가운데가 토큰의 불투명도, 가장자리가 0. */
-  float core = vInk.a * max(0.0, 1.0 - reach);
+  /* SVG의 원반 그대로(t-12029): 토큰의 불투명도로 평평한 한 겹, 가장자리만 부드러움 한 폭. */
+  float soft = uFeather / max(vRim.z, 1.0);
+  float core = vInk.a * (1.0 - smoothstep(1.0 - soft, 1.0, reach));
   float rimWidth = vRim.y / max(vRim.z, 1.0);
   float rim = vRim.x * (1.0 - smoothstep(0.0, rimWidth, abs(reach - 1.0)));
   float alpha = max(core, rim);
@@ -540,6 +541,8 @@ function knowledgeGlPalette(view, held) {
     ground: new Float32Array(4),
     ring: new Float32Array(4),
     nebula: null,
+    /* 색이 없는 군집의 원반(t-12029) — 안개색 한 칸. */
+    nebulaQuiet: new Float32Array(4),
     /* 관계 종류마다 굵기 하나와 점선 하나 — 종류의 수가 자리를 정한다. */
     widths: new Float32Array(KNOWLEDGE_EDGE_KINDS.length * 2),
     /* 주변 탐색의 옷(`.knowledge-picture.is-local` 절) — 제 견본 판에서 읽는다(`knowledgeGlLocalPalette`). */
@@ -589,9 +592,10 @@ function knowledgeGlPalette(view, held) {
       intra.push(line("knowledge-edge is-intra", hue));
     }
     const nebulae = [];
-    for (let hue = 0; hue < hues; hue += 1) {
+    /* 색 칸 여덟, 그리고 색이 없는 군집의 원반 하나(t-12029) — 칸 없는 판은 안개색을 입는다. */
+    for (let hue = -1; hue < hues; hue += 1) {
       const group = document.createElementNS(SVG_NS, "g");
-      group.dataset.hue = String(hue);
+      if (hue >= 0) group.dataset.hue = String(hue);
       const disc = document.createElementNS(SVG_NS, "ellipse");
       disc.setAttribute("class", "knowledge-nebula");
       group.appendChild(disc);
@@ -732,11 +736,10 @@ function knowledgeGlPalette(view, held) {
   knowledgeGlColor(read(swatches.match).stroke, palette.highlight, 0);
   for (let hue = 0; hue < hues; hue += 1) {
     knowledgeGlColor(read(swatches.intra[hue]).stroke, palette.intra, hue * 4);
-    const disc = read(swatches.nebulae[hue]);
-    knowledgeGlColor(disc.fill === "none" || disc.fill.startsWith("url")
-      ? getComputedStyle(swatches.nebulae[hue].parentNode).getPropertyValue("--knowledge-tint")
-      : disc.fill, palette.nebula, hue * 4);
+    /* 견본 0번은 색이 없는 원반이다 — 칸은 한 자리씩 뒤에 선다. 알파는 토큰이 따로 준다(`fillDiscs`). */
+    knowledgeGlColor(read(swatches.nebulae[hue + 1]).fill, palette.nebula, hue * 4);
   }
+  knowledgeGlColor(read(swatches.nebulae[0]).fill, palette.nebulaQuiet, 0);
   knowledgeGlColor(read(swatches.inter).stroke, palette.inter, 0);
   knowledgeGlColor(read(swatches.ghostEdge).stroke, palette.ghostEdge, 0);
   knowledgeGlColor(read(swatches.lit).stroke, palette.litEdge, 0);
@@ -1486,7 +1489,9 @@ function makeKnowledgeGlPainter() {
     },
 
     /* 성운 — 군집마다 원판 하나. 자리와 반지름은 `paintKnowledgeClusters`가 방금
-     * 쓴 것을 읽는다(두 손이 같은 원반을 그린다). */
+     * 쓴 것을 읽는다(두 손이 같은 원반을 그린다). 평평한 한 겹이고(t-12029), 색이 없는
+     * 군집(가장 큰 여덟 밖)의 원반은 안개색 견본의 것이다. 테두리는 밝힌 군집의
+     * 원반에만 선다(SVG의 `.knowledge-nebula.is-spotlit`). */
     fillDiscs(layout) {
       const palette = this.palette;
       const tuning = layout.tuning;
@@ -1496,20 +1501,22 @@ function makeKnowledgeGlPainter() {
         this.counts.discs = 0;
         return;
       }
+      const spot = knowledgeSpotRank();
       for (let rank = 0; rank < layout.namedCount; rank += 1) {
         if (layout.clusterTally[rank] === 0) continue;
         const hue = layout.communityHue[rank];
-        if (hue < 0) continue;
+        const ink = hue < 0 ? palette.nebulaQuiet : palette.nebula;
+        const inkAt = hue < 0 ? 0 : hue * 4;
         const reach = layout.clusterReach[rank];
         this.discData[discs * 4] = layout.clusterX[rank];
         this.discData[discs * 4 + 1] = layout.clusterY[rank];
         this.discData[discs * 4 + 2] = reach;
         this.discData[discs * 4 + 3] = reach;
-        this.discInk[discs * 4] = palette.nebula[hue * 4];
-        this.discInk[discs * 4 + 1] = palette.nebula[hue * 4 + 1];
-        this.discInk[discs * 4 + 2] = palette.nebula[hue * 4 + 2];
+        this.discInk[discs * 4] = ink[inkAt];
+        this.discInk[discs * 4 + 1] = ink[inkAt + 1];
+        this.discInk[discs * 4 + 2] = ink[inkAt + 2];
         this.discInk[discs * 4 + 3] = tuning.nebulaCore;
-        this.discRim[discs * 2] = tuning.nebulaEdgeWeight / 100;
+        this.discRim[discs * 2] = rank === spot ? tuning.nebulaEdgeWeight / 100 : 0;
         this.discRim[discs * 2 + 1] = tuning.nebulaEdgeWidth;
         discs += 1;
       }

@@ -1316,6 +1316,10 @@ const brainContrast = await page.evaluate(async () => {
       const ink = getComputedStyle(dot).fill;
       return { name: `hue-${hue}`, ink, ratio: ratio(ink, ground) };
     });
+    /* 색이 없는 군집의 쪽(t-12029) — 안개색도 같은 선을 넘는다. */
+    delete probe.dataset.hue;
+    const quietInk = getComputedStyle(dot).fill;
+    hues.push({ name: "quiet", ink: quietInk, ratio: ratio(quietInk, ground) });
     probe.remove();
     const relations = ["related", "implements", "depends_on", "supersedes", "contradicts"]
       .map((kind) => {
@@ -1337,8 +1341,8 @@ const brainContrast = await page.evaluate(async () => {
 });
 await page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph-light.png") });
 ok(
-  "eight cluster hues and five relation colors keep three-to-one contrast in both themes",
-  [brainContrast.dark, brainContrast.light].every((theme) => theme.colors.length === 13
+  "eight cluster hues, the quiet grey and five relation colors keep three-to-one contrast in both themes",
+  [brainContrast.dark, brainContrast.light].every((theme) => theme.colors.length === 14
     && theme.colors.every((color) => color.ratio >= 3)),
   JSON.stringify(brainContrast),
 );
@@ -4804,10 +4808,11 @@ ok("the rim of stray pages hugs the named discs' outline, a spiral step at most,
     && rimHug.firstExcess <= rimHug.pitch && rimHug.closest >= rimHug.gap,
   JSON.stringify(rimHug));
 
-/* 이웃한 군집은 같은 색을 입지 않는다(t-11500). 색 칸은 여덟이고 주제는 스물 — 순위로 돌려 쓰던
- * 색은 1·9·17위에게 같은 금색을 입혀 이웃에 세웠다. 원반마다 가장 가까운 이름 있는 원반과 색이
- * 다른지, 앞의 여덟은 오늘의 색(순위의 칸) 그대로인지 묻는다. 색은 여덟 칸의 토큰에서만 온다 —
- * 두 테마의 대비는 그 토큰의 시험(Test 8)이 이미 지킨다. */
+/* 이웃한 군집은 같은 색을 입지 않는다(t-11500) — 그리고 색은 가장 큰 여덟의 것이다(t-12029, 시안 v2
+ * 「colour」, 한 함수). 색 칸은 여덟이고 주제는 스물 — 순위로 돌려 쓰던 색은 1·9·17위에게 같은 금색을
+ * 입혀 이웃에 세웠다. 앞의 여덟은 순위의 칸을 하나씩 입고(그래서 어느 두 원반도, 이웃이든 아니든, 같은
+ * 색이 아니다) 나머지는 색이 없는지 묻는다. 색은 여덟 칸의 토큰에서만 온다 — 두 테마의 대비는 그 토큰의
+ * 시험(Test 8)이 이미 지킨다. */
 const clusterInks = await glPage.evaluate(async () => {
   const frame = () => new Promise((done) => requestAnimationFrame(done));
   try {
@@ -4830,6 +4835,7 @@ const clusterInks = await glPage.evaluate(async () => {
       namedCount: named } = layout;
     let sameAsNearest = 0;
     let firstEightMoved = 0;
+    let restColoured = 0;
     for (let rank = 0; rank < named; rank += 1) {
       let nearest = -1;
       let room = Number.POSITIVE_INFINITY;
@@ -4841,18 +4847,21 @@ const clusterInks = await glPage.evaluate(async () => {
           nearest = other;
         }
       }
-      if (nearest >= 0 && hue[nearest] === hue[rank]) sameAsNearest += 1;
+      if (nearest >= 0 && hue[rank] >= 0 && hue[nearest] === hue[rank]) sameAsNearest += 1;
       if (rank < 8 && hue[rank] !== rank) firstEightMoved += 1;
+      if (rank >= 8 && hue[rank] !== -1) restColoured += 1;
     }
-    const cells = new Set([...hue.slice(0, named)]);
-    return { named, sameAsNearest, firstEightMoved, cells: [...cells].sort() };
+    const cells = new Set([...hue.slice(0, named)].filter((one) => one >= 0));
+    const shared = [...hue.slice(0, named)].filter((one, at, all) => one >= 0 && all.indexOf(one) !== at).length;
+    return { named, sameAsNearest, firstEightMoved, restColoured, shared, cells: [...cells].sort() };
   } catch (error) {
     return { thrown: String(error?.stack ?? error) };
   }
 });
-ok("neighbouring clusters wear different hues: no disc shares its hue with its nearest named disc, and the first eight keep their colour",
+ok("the eight largest clusters wear the eight hues, one each — so no disc shares its hue with its nearest named disc — and the rest wear none",
   !clusterInks.thrown && clusterInks.named > 8 && clusterInks.sameAsNearest === 0
-    && clusterInks.firstEightMoved === 0 && clusterInks.cells.length === 8,
+    && clusterInks.firstEightMoved === 0 && clusterInks.cells.length === 8 && clusterInks.shared === 0
+    && clusterInks.restColoured === 0,
   JSON.stringify(clusterInks));
 
 /* 승인된 시안 v2의 전체 지도(t-12029)를 묻는 장면 — 주제마다 가지(삼진 나무 + 중심으로 가는 선 + 드문 고리)를
@@ -5185,6 +5194,89 @@ await glPage.setViewportSize(spreadSeat);
       && row.ringDrawn > 1 && row.ringMiss === 0 && row.backLeaf === 2.4),
     JSON.stringify(spreads));
 }
+
+/* 색이 다시 주제를 가른다(t-12029, 승인된 시안 v2 「colour」). 열넷의 주제에서 두 손 모두: 가장 큰 여덟만 여덟 칸을
+ * 하나씩 입고 나머지는 색이 없다. 잎은 제 군집의 색 그대로(안개색을 섞지 않는다), 색 없는 군집의 쪽은 안개색이다
+ * (SVG의 칠을 픽셀로). 모든 이름 있는 군집이 원반을 갖고(색 없는 군집은 안개색 원반 — GL은 예전에 그 원반을 아예
+ * 그리지 않았다), 쉬는 원반에는 테두리가 없으며 밝힌 군집의 원반에만 선다(두 손). 범례는 색 여덟과 「작은 주제
+ * n」 한 줄. */
+const colourVault = topicVault({ sizes: [40, 36, 32, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10],
+  between: [[0, 1, 3], [2, 3, 2], [4, 5, 2], [6, 7, 2], [8, 9, 1], [10, 11, 1], [12, 13, 1]] });
+const colours = await glPage.evaluate(async ({ spec }) => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  const paint = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  const rgb = (color) => {
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillStyle = "#000";
+    paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1);
+    return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+  };
+  const near = (one, two) => one.every((value, at) => Math.abs(value - two[at]) <= 2);
+  const rows = [];
+  try {
+    for (const hand of ["svg", "gl"]) {
+      const { view, layout } = await window.__standKnowledgeScene__("/scene/colours", spec, hand);
+      const painter = knowledgePainterFor(view);
+      const { namedCount: named, communityHue: hue } = layout;
+      const huesOk = [...hue.slice(0, named)].every((one, rank) => one === (rank < 8 ? rank : -1));
+      /* 잎의 칠 — SVG의 계산된 칠을 토큰의 색과 픽셀로 견준다. */
+      const root = getComputedStyle(view);
+      let leafChecked = 0;
+      let leafMiss = 0;
+      if (hand === "svg") {
+        for (let at = 0; at < layout.count; at += 1) {
+          if (layout.model.kinds[at] !== "page" || layout.tier[at] !== 0 || layout.community[at] >= named) continue;
+          const dot = layout.nodeEls[at]?.querySelector(".knowledge-dot");
+          if (!dot) continue;
+          const own = hue[layout.community[at]];
+          const want = own >= 0 ? root.getPropertyValue(`--knowledge-hue-${own}`) : root.getPropertyValue("--ink-mist");
+          leafChecked += 1;
+          if (!near(rgb(getComputedStyle(dot).fill), rgb(want.trim()))) leafMiss += 1;
+        }
+      }
+      /* 원반: 이름 있는 군집마다 하나, 쉬는 테두리 없음, 밝힌 군집에만 테두리. */
+      const discsAt = () => {
+        if (painter.id === "gl") {
+          return { count: painter.counts.discs,
+            rims: Array.from({ length: painter.counts.discs }, (unused, at) => painter.discRim[at * 2]) };
+        }
+        const discs = layout.clusterEls.map((held) => getComputedStyle(held.nebula));
+        return { count: discs.filter((style) => style.display !== "none" && rgb(style.fill).some((one) => one > 0)
+          && style.fill !== "none").length,
+        rims: discs.map((style) => (style.stroke === "none" ? 0 : 1)) };
+      };
+      const rest = discsAt();
+      const lit = named - 1;
+      toggleKnowledgeCluster(view, lit);
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const picked = discsAt();
+      toggleKnowledgeCluster(view, lit);
+      await paintKnowledgeView();
+      /* 범례. */
+      const legend = view.querySelector(".knowledge-cluster-legend");
+      const keys = [...legend.querySelectorAll("button.knowledge-cluster-key")].map((key) => Number(key.dataset.hue));
+      const quiet = legend.querySelector(".knowledge-cluster-key.is-quiet")?.textContent ?? "";
+      rows.push({ hand: painter.id, named, huesOk, leafChecked, leafMiss,
+        discs: rest.count, restRims: rest.rims.filter((one) => one > 0).length,
+        pickedRims: picked.rims.filter((one) => one > 0).length,
+        keys, quiet, quietCount: named - 8 });
+    }
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error), rows };
+  } finally {
+    knowledgePainterKind = null;
+  }
+}, { spec: colourVault.spec });
+ok("colour sorts the topics again: the eight largest clusters wear the eight hues and the rest are quiet grey, leaves wear their cluster's full ink, every cluster has a flat disc whose edge stands only when lit, and the legend says eight colours and the smaller topics — on both hands",
+  !colours.thrown && colours.rows.length === 2 && colours.rows.every((row) => row.named > 8 && row.huesOk
+    && row.discs === row.named && row.restRims === 0 && row.pickedRims === 1
+    && JSON.stringify(row.keys) === JSON.stringify([0, 1, 2, 3, 4, 5, 6, 7])
+    && row.quiet.includes(String(row.quietCount)))
+    && colours.rows[0].leafChecked > 100 && colours.rows[0].leafMiss === 0,
+  JSON.stringify(colours));
 
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *

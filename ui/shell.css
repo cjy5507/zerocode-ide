@@ -37857,32 +37857,34 @@ details.task-board-section > summary {
  * 있으면 아홉째 색이 생기는 날 다섯 곳 중 넷만 고쳐진다. 물드는 쪽은
  * `--knowledge-tint`와 세 채움만 읽는다. 군집이 없는 점은 물들지 않는다 — 색은
  * 구분이지 장식이 아니다. */
-.knowledge-view [data-hue="0"] { --knowledge-tint: var(--knowledge-hue-0); --knowledge-node-fill: url(#knowledge-node-gradient-0); --knowledge-halo-fill: url(#knowledge-halo-gradient-0); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-0); }
-.knowledge-view [data-hue="1"] { --knowledge-tint: var(--knowledge-hue-1); --knowledge-node-fill: url(#knowledge-node-gradient-1); --knowledge-halo-fill: url(#knowledge-halo-gradient-1); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-1); }
-.knowledge-view [data-hue="2"] { --knowledge-tint: var(--knowledge-hue-2); --knowledge-node-fill: url(#knowledge-node-gradient-2); --knowledge-halo-fill: url(#knowledge-halo-gradient-2); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-2); }
-.knowledge-view [data-hue="3"] { --knowledge-tint: var(--knowledge-hue-3); --knowledge-node-fill: url(#knowledge-node-gradient-3); --knowledge-halo-fill: url(#knowledge-halo-gradient-3); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-3); }
-.knowledge-view [data-hue="4"] { --knowledge-tint: var(--knowledge-hue-4); --knowledge-node-fill: url(#knowledge-node-gradient-4); --knowledge-halo-fill: url(#knowledge-halo-gradient-4); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-4); }
-.knowledge-view [data-hue="5"] { --knowledge-tint: var(--knowledge-hue-5); --knowledge-node-fill: url(#knowledge-node-gradient-5); --knowledge-halo-fill: url(#knowledge-halo-gradient-5); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-5); }
-.knowledge-view [data-hue="6"] { --knowledge-tint: var(--knowledge-hue-6); --knowledge-node-fill: url(#knowledge-node-gradient-6); --knowledge-halo-fill: url(#knowledge-halo-gradient-6); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-6); }
-.knowledge-view [data-hue="7"] { --knowledge-tint: var(--knowledge-hue-7); --knowledge-node-fill: url(#knowledge-node-gradient-7); --knowledge-halo-fill: url(#knowledge-halo-gradient-7); --knowledge-nebula-fill: url(#knowledge-nebula-gradient-7); }
+.knowledge-view [data-hue="0"] { --knowledge-tint: var(--knowledge-hue-0); --knowledge-node-fill: url(#knowledge-node-gradient-0); --knowledge-halo-fill: url(#knowledge-halo-gradient-0); }
+.knowledge-view [data-hue="1"] { --knowledge-tint: var(--knowledge-hue-1); --knowledge-node-fill: url(#knowledge-node-gradient-1); --knowledge-halo-fill: url(#knowledge-halo-gradient-1); }
+.knowledge-view [data-hue="2"] { --knowledge-tint: var(--knowledge-hue-2); --knowledge-node-fill: url(#knowledge-node-gradient-2); --knowledge-halo-fill: url(#knowledge-halo-gradient-2); }
+.knowledge-view [data-hue="3"] { --knowledge-tint: var(--knowledge-hue-3); --knowledge-node-fill: url(#knowledge-node-gradient-3); --knowledge-halo-fill: url(#knowledge-halo-gradient-3); }
+.knowledge-view [data-hue="4"] { --knowledge-tint: var(--knowledge-hue-4); --knowledge-node-fill: url(#knowledge-node-gradient-4); --knowledge-halo-fill: url(#knowledge-halo-gradient-4); }
+.knowledge-view [data-hue="5"] { --knowledge-tint: var(--knowledge-hue-5); --knowledge-node-fill: url(#knowledge-node-gradient-5); --knowledge-halo-fill: url(#knowledge-halo-gradient-5); }
+.knowledge-view [data-hue="6"] { --knowledge-tint: var(--knowledge-hue-6); --knowledge-node-fill: url(#knowledge-node-gradient-6); --knowledge-halo-fill: url(#knowledge-halo-gradient-6); }
+.knowledge-view [data-hue="7"] { --knowledge-tint: var(--knowledge-hue-7); --knowledge-node-fill: url(#knowledge-node-gradient-7); --knowledge-halo-fill: url(#knowledge-halo-gradient-7); }
 
 /* 그라데이션의 불투명도. 수는 토큰의 것이고 `<stop>`은 클래스로 그것을 읽는다. */
 .knowledge-stop-halo-core { stop-opacity: var(--knowledge-halo-core); }
-.knowledge-stop-nebula-core { stop-opacity: var(--knowledge-nebula-core); }
 .knowledge-stop-fade { stop-opacity: 0; }
 
 /* 주제의 원반과 그 이름 (성좌 배치, 09-16).
  *
  * 전체 지도의 첫 물음은 「어떤 주제들이 있는가」이므로, 그 답인 군집의 이름이
  * 그림 위에 선다 — 예전에는 `display: none`이라 범례에만 있었고, 범례는 점을
- * 보면서 읽을 수 없는 자리다. 원반은 평평한 색 한 겹과 테두리 한 올이다:
- * 빛 번짐은 글자와 선의 경계를 먹는다(사용자 조건).
+ * 보면서 읽을 수 없는 자리다. 원반은 평평하고 옅은 색 한 겹이다(t-12029, 시안 v2
+ * 「colour」): 가운데가 밝은 번짐도, 쉬는 테두리도 없다 — 빛 번짐은 글자와 선의 경계를
+ * 먹고(사용자 조건), 열일곱 개의 테두리는 원반보다 테두리를 먼저 읽게 한다. 테두리는
+ * 사람이 그 군집을 밝힐 때(고르거나 이름판에 올라설 때) 한 올 선다. 색이 없는 군집의
+ * 원반은 같은 몫의 안개색이다.
  *
  * 주변 탐색(`is-local`)에서는 서지 않는다 — 그 화면의 주제는 중심 하나다. */
 .knowledge-nebula {
   display: none;
-  fill: var(--knowledge-nebula-fill, none);
-  stroke: color-mix(in srgb, var(--knowledge-tint, var(--ink-mist)) var(--knowledge-nebula-edge-weight), transparent);
+  fill: color-mix(in srgb, var(--knowledge-tint, var(--ink-mist)) calc(var(--knowledge-nebula-core) * 100%), transparent);
+  stroke: none;
   stroke-width: var(--knowledge-nebula-edge-width);
   pointer-events: none;
   vector-effect: non-scaling-stroke;
@@ -37892,6 +37894,10 @@ details.task-board-section > summary {
 .knowledge-picture:not(.is-local) .knowledge-nebula,
 .knowledge-picture:not(.is-local) .knowledge-cluster-label {
   display: block;
+}
+
+.knowledge-nebula.is-spotlit {
+  stroke: color-mix(in srgb, var(--knowledge-tint, var(--ink-mist)) var(--knowledge-nebula-edge-weight), transparent);
 }
 
 .knowledge-cluster-label {
@@ -37991,8 +37997,10 @@ details.task-board-section > summary {
 /* 모서리가 있는 모양(`KNOWLEDGE_SHAPES`)의 테두리는 둥글게 잇는다 — GL 손은 모양의 참
  * 거리로 테두리를 긋고, 그 바깥 모서리는 둥근 이음과 같은 곡선이다. 기본값(miter)이면
  * 삼각형의 꼭짓점에서 두 손의 테두리가 선 굵기만큼 갈린다. */
+/* 잎도 제 군집의 색 그대로다(t-12029, 시안 v2 「colour」) — 색을 입는 군집은 가장 큰 여덟뿐이라 색이 곧 주제를
+   가르고, 안개색을 72% 섞어 흐리던 잎은 색이 무엇을 가르는지 흐렸다. 색이 없는 군집의 쪽은 안개색이다. */
 .knowledge-dot {
-  fill: color-mix(in srgb, var(--ink-mist) var(--knowledge-node-muted-weight), var(--knowledge-tint, var(--ink-mist)));
+  fill: var(--knowledge-tint, var(--ink-mist));
   stroke: var(--knowledge-ground);
   stroke-width: var(--knowledge-node-stroke);
   stroke-linejoin: round;
@@ -39101,6 +39109,13 @@ h4.knowledge-inspector-head::after {
 .knowledge-cluster-key:focus-visible {
   outline: var(--accent-rule) solid var(--ink-chalk);
   outline-offset: var(--knowledge-focus-offset);
+}
+
+/* 색이 없는 군집들의 한 줄(t-12029) — 단추가 아니므로 짚어도 밝아지지 않는다. */
+.knowledge-cluster-key.is-quiet,
+.knowledge-cluster-key.is-quiet:hover {
+  color: var(--ink-mist);
+  cursor: default;
 }
 
 .knowledge-cluster-dot {

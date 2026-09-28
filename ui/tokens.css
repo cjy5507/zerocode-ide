@@ -1428,7 +1428,6 @@
   /* ---- 지식 그래프 비주얼 토큰 (Knowledge Graph Visual Tokens) ----
    * 색상은 임의의 하드코딩이 아닌 의미론적 레인 램프와 표면 토큰에서 파생된다. */
   --knowledge-ground: var(--surface-deck);
-  --knowledge-node-muted-weight: 72%;
   --knowledge-edge-muted-weight: 82%;
   --knowledge-node-stroke: 1;
   --knowledge-node-selected-stroke: 2;
@@ -1438,14 +1437,16 @@
    * an SVG filter. `lift` is how much it grows under the pointer. */
   --knowledge-halo-core: 0.85;
   --knowledge-halo-lift: 1.12;
-  /* One nebula per cluster (3차): a gradient disc behind the members, sized
-   * from their spread. Core opacity in graph paint, scale and pad in graph
-   * units — the nebula belongs to the picture, so it zooms with it. */
-  --knowledge-nebula-core: 0.14;
+  /* One nebula per cluster (3차): a disc behind the members, sized from their
+   * spread. Its paint is one flat, faint layer of the cluster's ink (t-12029,
+   * the approved design v2 "colour": 4.5% on the dark ground, no glow at the
+   * centre); scale and pad in graph units — the nebula belongs to the
+   * picture, so it zooms with it. */
+  --knowledge-nebula-core: 0.045;
   --knowledge-nebula-scale: 1;
   --knowledge-nebula-pad: 18;
-  /* 원반의 테두리 한 올. 빛 번짐 대신 선 하나로 경계를 말한다 — 흐릿한
-     그라데이션만으로는 「여기까지가 이 주제」가 읽히지 않았다. */
+  /* 원반의 테두리 한 올 — 사람이 그 군집을 밝힐 때만 선다(t-12029): 쉬는 지도의 경계는 원반의 옅은 한 겹과
+     원반 사이의 여백이 말하고, 테두리 열일곱은 원반보다 테두리를 먼저 읽게 했다. */
   --knowledge-nebula-edge-weight: 30%;
   --knowledge-nebula-edge-width: 1;
   /* The cluster's name over its nebula: screen pixels, like every label. It
@@ -2576,8 +2577,8 @@
    * other six hold their value in both themes (I18nProvider-DPbv01TU.css). */
   --git-graph-ref: #007acc;
   --git-graph-lane-3: #994f00;
-  /* A nebula on a white ground needs less paint to be seen. */
-  --knowledge-nebula-core: 0.1;
+  /* A nebula on a white ground needs a little more of the flat layer to be seen. */
+  --knowledge-nebula-core: 0.05;
   /* 종이 위에서는 테두리 한 올이 더 일해야 원반의 경계가 읽힌다. */
   --knowledge-nebula-edge-weight: 42%;
   --knowledge-highlight: var(--ink-figure);
