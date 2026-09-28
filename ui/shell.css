@@ -38178,10 +38178,14 @@ details.task-board-section > summary {
   display: none;
 }
 
+/* 다른 렌즈와 같은 세그먼트 컨트롤의 옷 — 켠 단추는 `is-active`를 입는다. */
 .knowledge-universe-controls {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
+  flex: none;
+  gap: 0;
+  overflow: hidden;
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
 }
 
 /* 범례의 우주 네 줄(시안 CSS 41–54) — 우주가 서 있는 동안만, 그리고 그동안 평면의 줄은 가린다. */

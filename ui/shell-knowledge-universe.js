@@ -629,6 +629,7 @@ function buildKnowledgeUniverseControls() {
   const motion = document.createElement("button");
   motion.type = "button";
   motion.className = "btn knowledge-flag knowledge-universe-motion";
+  motion.classList.toggle("is-active", knowledgeUniverseMotion);
   motion.setAttribute("aria-pressed", String(knowledgeUniverseMotion));
   motion.dataset.i18n = "knowledge.universeMotion";
   motion.textContent = t("knowledge.universeMotion", "움직임");
@@ -645,7 +646,10 @@ function buildKnowledgeUniverseControls() {
 function setKnowledgeUniverseMotion(view, on) {
   knowledgeUniverseMotion = on;
   const button = view.querySelector(".knowledge-universe-motion");
-  if (button !== null) writeAttribute(button, "aria-pressed", String(on));
+  if (button !== null) {
+    writeAttribute(button, "aria-pressed", String(on));
+    button.classList.toggle("is-active", on);
+  }
   knowledgeUniverses.get(view)?.setMotion(on);
 }
 
