@@ -317,7 +317,7 @@ fn a_seat_starts_recording_and_a_rise_row_in_its_own_ledger_makes_it_act() {
 
 #[test]
 fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
-    use zerocode_core::jev::promote::{Line, Verdict};
+    use zerocode_core::jev::promote::{Line, Stand, Verdict};
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf()];
     let seat = &zerocode_core::jev::ROUTING;
@@ -330,13 +330,16 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
     let quiet = one(&zerocode_core::jev::RECALL, &roots, None, None, 1_000, 0);
     assert!(matches!(quiet.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 0, .. }))), "{:?}", quiet.verdict());
     // An orchestration seat is judged by the table on its own rows: thin here.
+    // The agent choice starts acting (t-11989), and a thin window is a line
+    // that only holds, so the acting seat keeps rather than holding.
     write(
         home.path(),
         zerocode_core::jev::SUMMON.ledger,
         &[asked_by(&zerocode_core::jev::SUMMON, json!({"at": 1, "outcome": "answered", "elapsedMs": 5, "agreed": true}))],
     );
     let summon = one(&zerocode_core::jev::SUMMON, &roots, None, None, 1_000, 0);
-    assert!(matches!(summon.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))), "{:?}", summon.verdict());
+    assert_eq!(summon.stand, Stand::Applying);
+    assert_eq!(summon.verdict(), Some(Verdict::Keep));
     assert_eq!(summon.judged.as_ref().map(|judged| judged.agreement.compared), Some(1));
 }
 
