@@ -1041,8 +1041,81 @@ impl Autopilot {
     /// for the person, the hand still. A window list that does not read, or
     /// a window not on it, is the helper's own boundary to answer, as before.
     fn mind_the_cover(&mut self, world: &mut World<'_>) {
-        // Today (the red before t-12979): the hand goes on under its plan.
-        let _ = (world, self.window);
+        let Some(window) = self.window else {
+            return;
+        };
+        let Some(run) = self.current.as_ref().filter(|run| run.standing()) else {
+            return;
+        };
+        if self.judge.tally.ended.is_some() {
+            return;
+        }
+        let local = acting_place(&run.plan, &self.stage);
+        let covered = crate::computer_use::marks::desktop_windows(world.call)
+            .ok()
+            .and_then(|listed| cover_of(&listed, window, local))
+            .is_some_and(|cover| cover.hides_any());
+        if !covered {
+            return;
+        }
+        let Some(mut run) = self.current.take() else {
+            return;
+        };
+        let _ = (world.call)("reflexStop", json!({ "run": run.id }));
+        run.stopped = true;
+        let (plan, outcomes) = (run.plan.clone(), run.outcomes.clone());
+        self.finishing.push(run);
+        let wall = world.wall_ms;
+        let at = move || wall;
+        let uncovered = cover::uncover(
+            Place {
+                window,
+                local,
+                needs: Needs::Whole,
+            },
+            &mut Hand {
+                call: &mut *world.call,
+                pause: &mut *world.pause,
+                person: &mut *world.person,
+                wall_ms: &at,
+            },
+            &mut *world.cover,
+        );
+        match uncovered {
+            Ok(Uncovered::Clear { .. }) => {
+                // The window may stand elsewhere now: the next plan is
+                // written for where it is.
+                let displays = (world.call)("displays", json!({}));
+                let windows = (world.call)("listWindows", json!({ "app": self.asked.app }));
+                if let (Ok(displays), Ok(windows)) = (displays, windows)
+                    && let Ok((stage, _)) =
+                        plan::stage_of(&displays, &windows, self.asked.display)
+                {
+                    self.stage = stage;
+                }
+                let previous = Previous {
+                    plan: &plan,
+                    outcomes: &outcomes,
+                };
+                if let Err(refusal) = self.plan_and_start(world, Some(previous)) {
+                    self.end(world, &refusal.code, &refusal.message);
+                }
+            }
+            Ok(Uncovered::Held { held, over }) => self.end(
+                world,
+                COVERED,
+                &format!(
+                    "the app's window was covered{} and no move of its own uncovered it ({}): the hand stopped for a person",
+                    if over.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" by a window of {over}")
+                    },
+                    held.word()
+                ),
+            ),
+            Err(refusal) => self.end(world, &refusal.code, &refusal.message),
+        }
     }
 
     /// The run named `id`, standing or finished.
