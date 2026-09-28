@@ -1614,8 +1614,10 @@
   --knowledge-3d-filament-least-points: 60;
   --knowledge-3d-filament-grow-points: 900;
   /* 은하 빛깔 = base + (1 − base) × 선형(원천). 원천은 색 칸의 어두운 테마 값이다 — 밝은 테마는 합성에서 음화로
-   * 뒤집으므로 두 테마에서 같은 빛깔을 쓴다(PORTING.md §4). 색 없는 군집은 회색 대신 고정값(선형, m-12493). */
-  --knowledge-3d-galaxy-tint-base: 0.7;
+   * 뒤집으므로 두 테마에서 같은 빛깔을 쓴다(PORTING.md §4). v4는 옅은 아홉 색에 0.7을 썼고, 앱의 색 칸은 UI 색이라
+   * 채도가 높아 0.8이다 — 가장 센 치우침이 v4의 가장 센 것(0.2)과 같아진다(m-12570). 색 없는 군집은 회색 대신
+   * 고정값(선형, m-12493). */
+  --knowledge-3d-galaxy-tint-base: 0.8;
   --knowledge-3d-galaxy-tint-neutral: 0.87 0.88 0.9;
   --knowledge-3d-tint-0: var(--knowledge-hue-0);
   --knowledge-3d-tint-1: var(--knowledge-hue-1);

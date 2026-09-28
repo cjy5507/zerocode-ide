@@ -431,6 +431,13 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       const tintAt = (rank) => Array.from(universe.map.gal.slice((rank * KNOWLEDGE_UNIVERSE_SHAPE.texels + 5) * 4,
         (rank * KNOWLEDGE_UNIVERSE_SHAPE.texels + 5) * 4 + 3)).map((value) => Math.round(value * 1000) / 1000);
       const quietRank = layout.communityHue.findIndex((hue, rank) => hue < 0 && rank < universe.map.rows);
+      /* 빛깔의 치우침(가장 큰 채널 − 가장 작은 채널) — v4의 옅은 아홉 색이 낸 가장 센 치우침 0.2를 넘지 않는다(m-12570). */
+      let tintSpread = 0;
+      for (const row of universe.map.galaxy) {
+        if (row.hue < 0) continue;
+        const tint = tintAt(row.rank);
+        tintSpread = Math.max(tintSpread, Math.max(...tint) - Math.min(...tint));
+      }
       const darkTints = { lit: tintAt(0), quiet: quietRank >= 0 ? tintAt(quietRank) : null };
       const darkComp = { dark: universe.post.comp.uniforms.uDark.value,
         exposure: universe.post.comp.uniforms.uExposure.value };
@@ -457,7 +464,7 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       await paintKnowledgeView();
       return { named: layout.namedCount, communities: layout.communityCount, sizes: Array.from(layout.communitySize),
         galaxies: map.galaxies, wantGalaxies, least, rowsCount: map.rows, rows, strays, strayRows,
-        lumWorst, capped, tempRange, unknownTemp, rebuilt, quietBelow, darkTints, lightTints, darkComp, lightComp,
+        lumWorst, capped, tempRange, unknownTemp, rebuilt, quietBelow, tintSpread, darkTints, lightTints, darkComp, lightComp,
         neutral: knowledgeUniverseInks(view, universe.probe ?? document.body).neutral, draws, sceneDraws, targets,
         bloomLevels: tune.bloomLevels };
     } catch (error) {
@@ -485,9 +492,9 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
     detail);
   ok("t-12443 ②: the same vault builds the same universe — every galaxy texel and every star seat",
     !seen.thrown && seen.rebuilt, detail);
-  ok("t-12443 ②: a galaxy's tint is the same in both themes — its hue's dark value, or the neutral tint for a cluster without a hue — while the composite turns to the light theme's exposure and paper",
+  ok("t-12443 ②: a galaxy's tint is the same in both themes — its hue's dark value, leaning no more than v4's palette (0.2), or the neutral tint for a cluster without a hue — while the composite turns to the light theme's exposure and paper",
     !seen.thrown && JSON.stringify(seen.darkTints) === JSON.stringify(seen.lightTints)
-      && seen.darkTints.lit.every((value) => value >= 0.7 && value <= 1)
+      && seen.darkTints.lit.every((value) => value >= 0.7 && value <= 1) && seen.tintSpread <= 0.2 + 1e-3
       && (seen.darkTints.quiet === null || seen.darkTints.quiet.join(",") === seen.neutral.join(","))
       && seen.darkComp.dark === 1 && seen.darkComp.exposure === 1
       && seen.lightComp.dark === 0 && seen.lightComp.exposure === 1.25
