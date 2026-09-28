@@ -37899,6 +37899,18 @@ details.task-board-section > summary {
   pointer-events: none;
 }
 
+/* 색을 묻는 견본 — 계산은 되되 그려지지 않는다. 전이하지 않는다: 테마가 바뀐 순간 우주가 묻는데, 전이 중인
+   견본은 앞 테마의 색을 답한다(평면 GL 손의 견본과 같은 까닭). */
+.knowledge-universe-probe {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: none;
+}
+
 /* 한 줄 알림(문맥 잃음·되찾음) — 무대의 위 가운데, 평면으로 돌아온 뒤에도 읽히는 자리. */
 .knowledge-universe-notice {
   position: absolute;

@@ -1560,6 +1560,62 @@
   --knowledge-3d-star-age-span: 365;
   /* 우주의 무대 — 시안의 `.stage` 바탕. 밝은 테마는 아래 블록이 종이색으로. */
   --knowledge-3d-stage: rgb(2 3 6);
+  /* 은하 짓기(시안 `universe`·`buildScene`, 디자이너 답 m-12467의 1·3). 은하 = 이름 있는 군집 중 앞에서부터
+   * 최대 `galaxy-max`개이면서 쪽 수 ≥ max(`galaxy-least`, `galaxy-share` × 쪽/850), 성운은 앞 `nebula-max` 성단에만. */
+  --knowledge-3d-galaxy-max: 18;
+  --knowledge-3d-galaxy-least: 8;
+  --knowledge-3d-galaxy-share: 12;
+  --knowledge-3d-nebula-max: 12;
+  --knowledge-3d-galaxy-radius: 0.98;
+  --knowledge-3d-cluster-sphere: 2.1;
+  --knowledge-3d-cluster-grow: 1.25;
+  --knowledge-3d-cluster-pad: 2;
+  --knowledge-3d-normal-lean: 0.75;
+  --knowledge-3d-tilt-least: 0.25;
+  --knowledge-3d-tilt-span: 0.55;
+  --knowledge-3d-arms: 2;
+  --knowledge-3d-arms-wide: 3;
+  --knowledge-3d-arms-every: 4;
+  --knowledge-3d-winding: 2;
+  --knowledge-3d-winding-bar: 2.4;
+  --knowledge-3d-winding-least: 1.5;
+  --knowledge-3d-winding-span: 1.3;
+  --knowledge-3d-bar: 0.3;
+  --knowledge-3d-bulge: 0.14;
+  --knowledge-3d-bulge-bar: 0.16;
+  --knowledge-3d-bulge-least: 0.09;
+  --knowledge-3d-bulge-span: 0.07;
+  --knowledge-3d-bulge-elliptical: 1;
+  --knowledge-3d-dust: 0.6;
+  --knowledge-3d-dust-irregular: 0.15;
+  --knowledge-3d-barred-ranks: 2;
+  --knowledge-3d-irregular-last: 2;
+  --knowledge-3d-irregular-least: 6;
+  --knowledge-3d-elliptical-from: 9;
+  --knowledge-3d-elliptical-every: 3;
+  --knowledge-3d-elliptical-activity: 0.12;
+  --knowledge-3d-activity-days: 14;
+  --knowledge-3d-decor-least: 800;
+  --knowledge-3d-decor-grow: 2600;
+  --knowledge-3d-decor-cluster: 150;
+  --knowledge-3d-decor-sky: 6000;
+  /* 은하 빛깔 = base + (1 − base) × 선형(원천). 원천은 색 칸의 어두운 테마 값이다 — 밝은 테마는 합성에서 음화로
+   * 뒤집으므로 두 테마에서 같은 빛깔을 쓴다(PORTING.md §4). 색 없는 군집은 회색 대신 고정값(선형, m-12493). */
+  --knowledge-3d-galaxy-tint-base: 0.7;
+  --knowledge-3d-galaxy-tint-neutral: 0.87 0.88 0.9;
+  --knowledge-3d-tint-0: var(--knowledge-hue-0);
+  --knowledge-3d-tint-1: var(--knowledge-hue-1);
+  --knowledge-3d-tint-2: var(--knowledge-hue-2);
+  --knowledge-3d-tint-3: var(--knowledge-hue-3);
+  --knowledge-3d-tint-4: var(--knowledge-hue-4);
+  --knowledge-3d-tint-5: var(--knowledge-hue-5);
+  --knowledge-3d-tint-6: var(--knowledge-hue-6);
+  --knowledge-3d-tint-7: var(--knowledge-hue-7);
+  /* 빛 번짐 사다리(단 수·세기, 문턱 없음)와 합성의 노출. 밝은 테마의 종이(시안 uPaper — 선형 0.8·0.77·0.7). */
+  --knowledge-3d-bloom-levels: 5;
+  --knowledge-3d-bloom-strength: 0.16;
+  --knowledge-3d-exposure: 1;
+  --knowledge-3d-paper: rgb(231 227 218);
   --knowledge-glass-blur: blur(16px);
   --knowledge-inspector-blur: blur(12px);
   --knowledge-inspector-veil-weight: 94%;
@@ -2667,6 +2723,17 @@
   --knowledge-highlight: var(--ink-figure);
   /* 우주 보기의 무대(t-12443) — 시안의 밝은 테마 바탕(음화 인쇄의 종이 곁). */
   --knowledge-3d-stage: rgb(233 228 216);
+  /* 밝은 테마의 노출(시안 `applyLight`), 그리고 은하 빛깔의 원천을 어두운 테마 값으로 — 이 블록이 원천을 덮는
+   * 셋(레인 3·준비·멈춤 신호)만 그 어두운 값을 적고, 나머지는 덮지 않은 레인을 그대로 가리킨다. */
+  --knowledge-3d-exposure: 1.25;
+  --knowledge-3d-tint-0: var(--git-graph-lane-1);
+  --knowledge-3d-tint-1: var(--git-graph-lane-2);
+  --knowledge-3d-tint-2: rgb(206 145 120);
+  --knowledge-3d-tint-3: var(--git-graph-lane-4);
+  --knowledge-3d-tint-4: var(--git-graph-lane-5);
+  --knowledge-3d-tint-5: rgb(131 230 183);
+  --knowledge-3d-tint-6: rgb(255 116 111);
+  --knowledge-3d-tint-7: color-mix(in srgb, var(--knowledge-3d-tint-3) 50%, var(--knowledge-3d-tint-4));
   /* 라이트 판의 다섯 색은 어두운 잉크를 섞어 바닥(#f5f5f5)에서 3:1을 넘긴다.
    * 비율이 색마다 다른 것은 램프의 다섯이 밝기가 다르기 때문이고, 그 다섯 수는
    * 재서 얻은 것이다(하네스가 두 테마에서 픽셀로 잰다): 62%의 앰버는 3.19로

@@ -10,7 +10,7 @@ import { KNOWLEDGE_SCENES, knowledgeSweepFor, measureKnowledgeGlParity, measureK
 import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { measureKnowledgeSupplyParity, measureKnowledgeSupplyScene, testKnowledgeSupply } from "./knowledge-supply.mjs";
-import { testKnowledgeUniverse, testKnowledgeUniverseUnable } from "./knowledge-universe.mjs";
+import { testKnowledgeUniverse, testKnowledgeUniverseGalaxies, testKnowledgeUniverseUnable } from "./knowledge-universe.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -6070,6 +6070,7 @@ if (skipped) {
 /* 우주 보기(t-12443) — WebGL2가 서는 판의 계약: 기본으로 서는가, 오가도 평면의 자리가 그대로인가, 기억·쉼·가림·
  * 문맥 잃음·해제. 평면 지도의 계약이 다 끝난 뒤에 묻는다(그 계약들은 평면을 고른 판에서 돈다). */
 await testKnowledgeUniverse(glPage, ok);
+await testKnowledgeUniverseGalaxies(glPage, ok);
 await glBrowser.close();
 
 console.log(`METRIC knowledge graph 1020 nodes: first paint ${brainScale.firstPaint}ms; `

@@ -98,6 +98,110 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   starLumExp: "--knowledge-3d-star-lum-exp",
   starAgeScale: "--knowledge-3d-star-age-scale",
   starAgeSpan: "--knowledge-3d-star-age-span",
+  /* 은하 짓기(시안 `universe`, 디자이너 답 m-12467의 1): 이름 있는 군집 중 순위 앞에서부터 은하가 되는 수의
+   * 상한과 그 문턱(쪽 수 ≥ max(`galaxy-least`, `galaxy-share` × 쪽 / `world-pages`)), 성운을 두르는 성단의 수. */
+  galaxyMax: "--knowledge-3d-galaxy-max",
+  galaxyLeast: "--knowledge-3d-galaxy-least",
+  galaxyShare: "--knowledge-3d-galaxy-share",
+  nebulaMax: "--knowledge-3d-nebula-max",
+  /* 반지름: 은하 = 평면 원반 × `galaxy-radius`, 성단 = 원반 × (`cluster-sphere` / `world-root`) × `cluster-grow`
+   * + `cluster-pad`. */
+  galaxyRadius: "--knowledge-3d-galaxy-radius",
+  clusterSphere: "--knowledge-3d-cluster-sphere",
+  clusterGrow: "--knowledge-3d-cluster-grow",
+  clusterPad: "--knowledge-3d-cluster-pad",
+  /* 기울기: 처음 시점 쪽으로 기울인 축(몫 `normal-lean`)에서 `tilt-least` + 씨앗 × `tilt-span` rad. */
+  normalLean: "--knowledge-3d-normal-lean",
+  tiltLeast: "--knowledge-3d-tilt-least",
+  tiltSpan: "--knowledge-3d-tilt-span",
+  /* 형태: 팔 수(넓은 판은 `arms-every`의 나머지 셋째), 감김(기본·막대·나선의 바닥과 폭), 막대, 팽대부(기본·막대·
+   * 나선의 바닥과 폭·타원), 먼지(기본·불규칙). */
+  arms: "--knowledge-3d-arms",
+  armsWide: "--knowledge-3d-arms-wide",
+  armsEvery: "--knowledge-3d-arms-every",
+  winding: "--knowledge-3d-winding",
+  windingBar: "--knowledge-3d-winding-bar",
+  windingLeast: "--knowledge-3d-winding-least",
+  windingSpan: "--knowledge-3d-winding-span",
+  bar: "--knowledge-3d-bar",
+  bulge: "--knowledge-3d-bulge",
+  bulgeBar: "--knowledge-3d-bulge-bar",
+  bulgeLeast: "--knowledge-3d-bulge-least",
+  bulgeSpan: "--knowledge-3d-bulge-span",
+  bulgeElliptical: "--knowledge-3d-bulge-elliptical",
+  dust: "--knowledge-3d-dust",
+  dustIrregular: "--knowledge-3d-dust-irregular",
+  /* 형태 규칙의 수: 막대 나선 순위의 상한, 불규칙(끝에서 몇, 은하가 몇 이상일 때), 타원(순위 몇부터, 몇마다,
+   * 활동이 몇 밑일 때), 활동의 창(날). */
+  barredRanks: "--knowledge-3d-barred-ranks",
+  irregularLast: "--knowledge-3d-irregular-last",
+  irregularLeast: "--knowledge-3d-irregular-least",
+  ellipticalFrom: "--knowledge-3d-elliptical-from",
+  ellipticalEvery: "--knowledge-3d-elliptical-every",
+  ellipticalActivity: "--knowledge-3d-elliptical-activity",
+  activityDays: "--knowledge-3d-activity-days",
+  /* 몸의 이름 없는 별 수: 은하 = `decor-least` + `decor-grow` × √(쪽 / 가장 큰 군집의 쪽), 성단, 배경. */
+  decorLeast: "--knowledge-3d-decor-least",
+  decorGrow: "--knowledge-3d-decor-grow",
+  decorCluster: "--knowledge-3d-decor-cluster",
+  decorSky: "--knowledge-3d-decor-sky",
+  /* 은하 빛깔 = `galaxy-tint-base` + (1 − base) × 선형(색 칸의 어두운 테마 값). */
+  galaxyTintBase: "--knowledge-3d-galaxy-tint-base",
+  /* 빛 번짐 사다리의 단 수와 세기(문턱 없음), 합성의 노출(테마마다). */
+  bloomLevels: "--knowledge-3d-bloom-levels",
+  bloomStrength: "--knowledge-3d-bloom-strength",
+});
+
+/* 테마마다 다른 수 — 테마가 바뀌면 다시 읽는다(`knowledgeUniverseInks`). */
+const KNOWLEDGE_UNIVERSE_THEMED = Object.freeze({
+  exposure: "--knowledge-3d-exposure",
+});
+
+/* 셰이더와 묶인 수 — 한 표(시안 `buildScene`·`materials.decor`, 디자이너 답 m-12467의 1). 은하·성단은 텍스처
+ * 한 장의 줄이고(`texels` × `rows`, RGBA32F), 장식 입자의 번호 = 무리 × `groupSpan` + 차례가 float에서
+ * 정확하려면 2^24 밑이어야 한다: 무리 0–127 은하·성단, 128 배경 별, 130부터 필라멘트. 떠돌이 별의 초점은
+ * 어느 줄도 아닌 번호다. */
+const KNOWLEDGE_UNIVERSE_SHAPE = Object.freeze({
+  texels: 8,
+  rows: 128,
+  groupSpan: 65536,
+  skyGroup: 128,
+  bundleGroup: 130,
+  bundles: 48,
+  noGalaxy: 999,
+});
+
+/* 은하의 형태 번호 — 셰이더가 텍셀 1의 w로 읽는다(시안 `kg-data.js`의 `TYPE`). */
+const KNOWLEDGE_UNIVERSE_TYPES = Object.freeze({ spiral: 0, barred: 1, elliptical: 2, irregular: 3, cluster: 4 });
+
+/* 이름 있는 별의 자리 — 시안 `universe` 3의 모양 수. 셰이더의 몸 입자와 같은 식이라 모양을 정하는 수이고,
+ * 셰이더 안의 수처럼 이 표 한 곳에 산다: 핵(쪽의 몫·반지름·두께), 팔(안쪽·폭·거듭제곱·흔들림·각의 흔들림·
+ * 두께·로그의 바닥), 막대의 흔들림, 타원(반지름·거듭제곱·눌림·두께), 불규칙(덩어리 수·돌림·안쪽·걸음·퍼짐·두께),
+ * 성단(반지름·거듭제곱). */
+const KNOWLEDGE_UNIVERSE_SEATS = Object.freeze({
+  coreShare: 0.05,
+  coreRadius: 0.07,
+  coreLift: 0.05,
+  armInner: 0.13,
+  armSpan: 0.8,
+  armPower: 0.85,
+  armJitter: 0.14,
+  armAngle: 0.34,
+  armLift: 0.05,
+  armFloor: 0.1,
+  barJitter: 0.12,
+  ellipticalRadius: 0.72,
+  ellipticalPower: 0.75,
+  ellipticalFlat: 0.8,
+  ellipticalLift: 0.6,
+  clumps: 4,
+  clumpTurn: 1.9,
+  clumpInner: 0.12,
+  clumpStep: 0.2,
+  clumpSpread: 0.26,
+  clumpLift: 0.14,
+  clusterRadius: 0.75,
+  clusterPower: 0.65,
 });
 
 /* 판마다 한 번 읽는 수 — 테마와 무관하다(색은 따로 읽는다). */
@@ -271,10 +375,20 @@ function knowledgeUniverseKey(view, event) {
   return true;
 }
 
-/* ---- 셰이더 — 시안의 글자 그대로 ----------------------------------------------------- */
+/* ---- 셰이더 — 시안의 글자 그대로 -----------------------------------------------------
+ *
+ * 글은 index.html(09-28 18:38)의 것을 한 자도 바꾸지 않고 옮겼다. 재질은 시안처럼 `ShaderMaterial`이다 —
+ * three.js가 WebGL2에서 GLSL 300 es로 옮겨 싣는다(`attribute`·`varying`·`gl_FragColor`를 제 머리의 정의로).
+ * 바뀐 것은 디자이너가 정한 자리뿐이다(PORTING.md §4, 우편 m-12467): 은하 줄 128, 장식 무리의 문턱(배경 별
+ * 128·필라멘트 130부터), 초점 센티널 999 — 그 수는 `KNOWLEDGE_UNIVERSE_SHAPE` 한 곳에서 글자에 들어간다. */
 
-/* 별 색(Wikipedia 분광형 표의 D65 색을 선형으로) — 시안 `GAL`의 한 토막. */
-const KNOWLEDGE_UNIVERSE_STAR_COLOR = `
+/* 은하 텍셀 읽기·정수 해시·별 색(Wikipedia 분광형 표의 D65 색을 선형으로)·나선 팔 밭 — 시안 `GAL`. */
+const KNOWLEDGE_UNIVERSE_GAL = `
+uniform highp sampler2D tGal;
+vec4 gal(int c, int t){ return texelFetch(tGal, ivec2(t, c), 0); }
+uint hu(uint x){ x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }
+float hf(uint s){ return float(hu(s) >> 8u) * (1.0 / 16777216.0); }
+float gauss(float a, float b){ return sqrt(-2.0 * log(max(a, 1e-6))) * cos(6.2831853 * b); }
 vec3 starColor(float t){
   t = clamp(t, 0.0, 1.0) * 6.0;
   vec3 M = vec3(1.0, 0.493, 0.167), K = vec3(1.0, 0.731, 0.499), G = vec3(1.0, 0.867, 0.782), F = vec3(0.974, 0.933, 1.0);
@@ -285,11 +399,15 @@ vec3 starColor(float t){
   if (t < 4.0) return mix(F, A, t - 3.0);
   if (t < 5.0) return mix(A, B, t - 4.0);
   return mix(B, O, t - 5.0);
+}
+float armField(float r, float th, float arms, float K, float th0){
+  float lg = log(max(r, 0.1) / 0.1);
+  return pow(0.5 + 0.5 * cos(arms * (th - th0 - K * lg)), 4.0) * smoothstep(0.08, 0.26, r);
 }`;
 
 /* 이름 있는 별(쪽): 밝기 = 연결 수(등급 척도), 색 = 최근 고침(흑체 색), 밝은 별은 빛살, 찾은 별은
- * 조준 고리 — 시안 `materials.stars` 그대로. */
-const KNOWLEDGE_UNIVERSE_STARS_VERT = `${KNOWLEDGE_UNIVERSE_STAR_COLOR}
+ * 조준 고리 — 시안 `materials.stars`. */
+const KNOWLEDGE_UNIVERSE_STARS_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
       attribute vec3 aPos2; attribute vec4 aStar; attribute float aState;
       uniform float uLift; uniform float uDpr; uniform float uRef; uniform float uFocus;
       varying vec3 vCol; varying float vI; varying float vS; varying float vState; varying float vSpike;
@@ -328,28 +446,329 @@ const KNOWLEDGE_UNIVERSE_STARS_FRAG = `uniform float uTime; uniform float uDpr;
         gl_FragColor = vec4(o, 0.0);
       }`;
 
+/* 후처리: 빛 번짐 사다리(Jimenez 2014 — 13탭 내리기 + 3×3 텐트 올리기, 첫 단은 Karis 평균) → 톤 매핑 —
+ * 시안 `FS_VERT`·`down`·`up`·`comp`. */
+const KNOWLEDGE_UNIVERSE_POST_VERT = `varying vec2 vUv; void main(){ vUv = position.xy * 0.5 + 0.5; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+
+const KNOWLEDGE_UNIVERSE_DOWN_FRAG = `uniform sampler2D tSrc; uniform vec2 uTexel; uniform float uKaris; varying vec2 vUv;
+    vec3 s(float x, float y){ return texture2D(tSrc, vUv + vec2(x, y) * uTexel).rgb; }
+    float w(vec3 c){ return 1.0 / (1.0 + max(max(c.r, c.g), c.b)); }
+    void main(){
+      vec3 a = s(-2.0, 2.0), b = s(0.0, 2.0), c = s(2.0, 2.0), d = s(-2.0, 0.0), e = s(0.0, 0.0), f = s(2.0, 0.0), g = s(-2.0, -2.0), h = s(0.0, -2.0), i = s(2.0, -2.0);
+      vec3 j = s(-1.0, 1.0), k = s(1.0, 1.0), l = s(-1.0, -1.0), m = s(1.0, -1.0);
+      vec3 o;
+      if (uKaris > 0.5) {
+        vec3 g0 = (j + k + l + m) * 0.25, g1 = (a + b + d + e) * 0.25, g2 = (b + c + e + f) * 0.25, g3 = (d + e + g + h) * 0.25, g4 = (e + f + h + i) * 0.25;
+        float w0 = w(g0) * 0.5, w1 = w(g1) * 0.125, w2 = w(g2) * 0.125, w3 = w(g3) * 0.125, w4 = w(g4) * 0.125;
+        o = (g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3 + g4 * w4) / (w0 + w1 + w2 + w3 + w4);
+      } else o = e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125;
+      gl_FragColor = vec4(o, 1.0);
+    }`;
+
+const KNOWLEDGE_UNIVERSE_UP_FRAG = `uniform sampler2D tSrc; uniform vec2 uTexel; varying vec2 vUv;
+    vec3 s(float x, float y){ return texture2D(tSrc, vUv + vec2(x, y) * uTexel).rgb; }
+    void main(){
+      vec3 o = s(0.0, 0.0) * 4.0 + (s(0.0, 1.0) + s(-1.0, 0.0) + s(1.0, 0.0) + s(0.0, -1.0)) * 2.0 + (s(-1.0, 1.0) + s(1.0, 1.0) + s(-1.0, -1.0) + s(1.0, -1.0));
+      gl_FragColor = vec4(o / 16.0, 0.0);
+    }`;
+
+const KNOWLEDGE_UNIVERSE_COMP_FRAG = `uniform sampler2D tScene; uniform sampler2D tBloom; uniform float uBloom; uniform float uExposure; uniform float uDark; uniform vec3 uPaper; uniform float uTime; varying vec2 vUv;
+    vec3 aces(vec3 x){ return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
+    vec3 srgb(vec3 c){ c = clamp(c, 0.0, 1.0); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c)); }
+    float ign(vec2 p){ return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+    void main(){
+      vec3 c = (texture2D(tScene, vUv).rgb + texture2D(tBloom, vUv).rgb * uBloom) * uExposure;
+      vec2 d = vUv - 0.5;
+      vec3 m = aces(c) * (1.0 - 0.45 * dot(d, d));
+      vec3 o;
+      if (uDark > 0.5) o = srgb(m);
+      else {
+        float L = max(max(m.r, m.g), m.b);
+        vec3 ink = vec3(0.07, 0.08, 0.11) + (m / max(L, 1e-4)) * 0.08;
+        o = srgb(mix(uPaper, ink, clamp(L * 1.3, 0.0, 1.0)));
+      }
+      o += (ign(gl_FragCoord.xy + fract(uTime * 7.0) * 64.0) - 0.5) / 255.0;
+      gl_FragColor = vec4(o, 1.0);
+    }`;
+
 /* ---- 우주의 자료 — 평면 지도에서 짓는다 ------------------------------------------------ */
 
-/* 해시 하나(시안 `kg-data.js`의 `prng`의 둘째 값) — 난수는 없다: 같은 볼트는 같은 우주다. */
-function knowledgeUniverseHash(seed) {
+/* 씨앗 하나에서 이어지는 수(시안 `kg-data.js`의 `prng`) — 난수는 없다: 같은 볼트는 같은 우주다. */
+function knowledgeUniverseRandom(seed) {
   let state = seed >>> 0;
-  let value = 0;
-  for (let round = 0; round < 2; round += 1) {
+  return () => {
     state = (state + 0x6d2b79f5) | 0;
     let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
     mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
-    value = ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296;
-  }
-  return value;
+    return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-/* 평면 자리를 세계로 옮기는 수와 우주가 닿는 거리. 은하의 반지름이 시안의 r2(√쪽 × `worldRoot` ×
- * 볼트 크기의 몫)가 되도록 평면의 원반 반지름(√쪽 × `cluster-pitch` × `cluster-spread`)에 곱하는 수다. */
-function knowledgeUniverseScale(layout) {
+/* 수 하나의 해시(시안 `universe`의 `hash`: 씨앗 x × 7919 + 17의 둘째 값). */
+function knowledgeUniverseHash(seed) {
+  const next = knowledgeUniverseRandom(seed * 7919 + 17);
+  next();
+  return next();
+}
+
+/* 평면 자리를 세계로 옮기는 수. 은하의 반지름이 시안의 r2(√쪽 × `world-root` × (쪽/850)^`world-spread`)가
+ * 되도록 평면의 원반 반지름(√쪽 × `cluster-pitch` × `cluster-spread`)에 곱하는 수다(디자이너 답 m-12493). */
+function knowledgeUniverseScale(layout, pages) {
   const U = knowledgeUniverseTuning(layout.view);
   const { clusterPitch, clusterSpread } = layout.tuning;
-  const spread = (Math.max(1, layout.count) / U.worldPages) ** U.worldSpread;
+  const spread = (Math.max(1, pages) / U.worldPages) ** U.worldSpread;
   return (U.worldRoot * spread) / Math.max(1e-6, clusterPitch * clusterSpread);
+}
+
+function knowledgeUniverseLinear(value) {
+  return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+/* 색과 테마마다의 수 — CSS에게 묻는다(평면의 GL 손과 같은 문). 은하 빛깔의 원천 여덟은 계산된 색으로 읽고
+ * (`color-mix`까지 풀리게 견본의 `color`로), 선형으로 옮긴다. 테마가 바뀌면 다시 묻는다. */
+function knowledgeUniverseInks(view, probe) {
+  const style = getComputedStyle(view);
+  const tints = new Float32Array(KNOWLEDGE_HUES * 3);
+  const read = new Float32Array(4);
+  for (let hue = 0; hue < KNOWLEDGE_HUES; hue += 1) {
+    probe.style.color = `var(--knowledge-3d-tint-${hue})`;
+    knowledgeGlColor(getComputedStyle(probe).color, read, 0);
+    for (let channel = 0; channel < 3; channel += 1) tints[hue * 3 + channel] = knowledgeUniverseLinear(read[channel]);
+  }
+  probe.style.color = "var(--knowledge-3d-paper)";
+  knowledgeGlColor(getComputedStyle(probe).color, read, 0);
+  const paper = [0, 1, 2].map((channel) => knowledgeUniverseLinear(read[channel]));
+  const neutral = style.getPropertyValue("--knowledge-3d-galaxy-tint-neutral").trim().split(/\s+/u).map(Number);
+  const themed = Object.fromEntries(Object.entries(KNOWLEDGE_UNIVERSE_THEMED)
+    .map(([key, name]) => [key, Number.parseFloat(style.getPropertyValue(name))]));
+  const theme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  return { theme, dark: theme === "dark", tints, paper, neutral, ...themed };
+}
+
+/* 우주의 자료 — 평면 지도의 군집과 원반에서(시안 `universe`, PORTING.md §2.2·§4).
+ *
+ * 군집은 평면 지도가 이미 가른 것(Louvain 순위)이다. 이름 있는 군집 중 앞에서부터 은하, 그 뒤는 성단(텍스처
+ * 줄이 닿는 데까지), 이름 없는 군집과 줄 밖은 떠돌이 별이다. 은하의 자리는 평면 원반의 자리(x·z)에 높이만
+ * 더한 것이고, 씨앗(높이·기울기·팔 위상)은 순위가 아니라 군집의 대표 쪽 열쇠에서 뽑는다 — 쪽 하나가 늘어
+ * 순위가 바뀌어도 은하가 뒤집히지 않는다. 이름 있는 별은 움직이지 않는다: 차례 0(연결이 가장 많은 쪽)이
+ * 핵에 가장 가깝고, 나머지는 셰이더의 팔 식과 같은 식으로 팔 위에 앉는다. */
+function knowledgeUniverseMap(layout, inks) {
+  const U = knowledgeUniverseTuning(layout.view);
+  const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
+  const TYPE = KNOWLEDGE_UNIVERSE_TYPES;
+  const SEAT = KNOWLEDGE_UNIVERSE_SEATS;
+  const { model, count, community, communitySize, namedCount, communityHomeX, communityHomeY, communityHomeR,
+    communityCore, communityHue } = layout;
+  let pages = 0;
+  for (let at = 0; at < count; at += 1) if (model.kinds[at] === "page") pages += 1;
+  const scale = knowledgeUniverseScale(layout, pages);
+  const rows = Math.min(namedCount, SHAPE.rows);
+  const least = Math.max(U.galaxyLeast, Math.round((U.galaxyShare * pages) / U.worldPages));
+  let galaxies = 0;
+  while (galaxies < Math.min(rows, U.galaxyMax) && communitySize[galaxies] >= least) galaxies += 1;
+  /* 닿는 거리 — 은하 원반의 가장 먼 끝(시안 `layout`의 reach는 주제만 센다). 은하가 없는 볼트는 줄 전부. */
+  let reach = 0;
+  const reachRows = galaxies > 0 ? galaxies : rows;
+  for (let rank = 0; rank < reachRows; rank += 1) {
+    reach = Math.max(reach, Math.hypot(communityHomeX[rank], communityHomeY[rank]) + communityHomeR[rank]);
+  }
+  reach = Math.max(1, reach * scale);
+  /* 줄마다 쪽을 모은다 — 연결이 많은 차례로(같으면 열쇠 순), 차례 0이 허브다. */
+  const members = Array.from({ length: rows }, () => []);
+  for (let at = 0; at < count; at += 1) if (community[at] < rows) members[community[at]].push(at);
+  for (const list of members) {
+    list.sort((left, right) => model.degree[right] - model.degree[left]
+      || (model.keys[left] < model.keys[right] ? -1 : 1));
+  }
+  /* 활동 — 최근 `activity-days`일 안에 고친 쪽의 몫. 고친 때를 모르는 쪽은 오래된 것이다. */
+  const windowMs = U.activityDays * 86_400_000;
+  const activity = new Float32Array(rows);
+  for (let row = 0; row < rows; row += 1) {
+    let recent = 0;
+    for (const at of members[row]) {
+      if (model.modified[at] > 0 && model.nowMs - model.modified[at] < windowMs) recent += 1;
+    }
+    activity[row] = members[row].length > 0 ? recent / members[row].length : 0;
+  }
+  /* 법선의 바탕: 처음 시점 쪽으로 `normal-lean`만큼 기울인 위쪽 — 처음 화면에서 모든 은하의 안이 보이고, 돌면
+   * 옆모습이 된다. */
+  const camera = [Math.cos(U.homePitch) * Math.sin(U.homeYaw), Math.sin(U.homePitch),
+    Math.cos(U.homePitch) * Math.cos(U.homeYaw)];
+  let bx = camera[0] * U.normalLean;
+  let by = 1 + camera[1] * U.normalLean;
+  let bz = camera[2] * U.normalLean;
+  const bl = Math.hypot(bx, by, bz);
+  bx /= bl;
+  by /= bl;
+  bz /= bl;
+  let ax = by;
+  let ay = -bx;
+  const al = Math.hypot(ax, ay) || 1;
+  ax /= al;
+  ay /= al;
+  const qx = -bz * ay;
+  const qy = bz * ax;
+  const qz = bx * ay - by * ax;
+  const gal = new Float32Array(SHAPE.texels * SHAPE.rows * 4);
+  const put = (row, texel, a, b, c, d) => {
+    const at = (row * SHAPE.texels + texel) * 4;
+    gal[at] = a;
+    gal[at + 1] = b;
+    gal[at + 2] = c;
+    gal[at + 3] = d;
+  };
+  const pos3 = new Float32Array(count * 3);
+  const rowOf = new Int32Array(count).fill(-1);
+  const galaxy = [];
+  const biggest = Math.max(1, communitySize[0] ?? 1);
+  for (let row = 0; row < rows; row += 1) {
+    const rank = row;
+    const core = communityCore[rank];
+    const seed = knowledgeHash(model.keys[core >= 0 ? core : members[row][0]]);
+    const h1 = knowledgeUniverseHash(seed + 1);
+    const h2 = knowledgeUniverseHash(seed + 101);
+    const h3 = knowledgeUniverseHash(seed + 211);
+    const h4 = knowledgeUniverseHash(seed + 307);
+    const isGalaxy = row < galaxies;
+    let type = TYPE.cluster;
+    let arms = U.arms;
+    let winding = U.winding;
+    let bar = 0;
+    let bulge = U.bulge;
+    let dust = U.dust;
+    let radius;
+    let height;
+    if (isGalaxy) {
+      if (rank < U.barredRanks) {
+        type = TYPE.barred;
+        bar = U.bar;
+        winding = U.windingBar;
+        bulge = U.bulgeBar;
+      } else if (galaxies >= U.irregularLeast && rank >= galaxies - U.irregularLast) {
+        type = TYPE.irregular;
+        dust = U.dustIrregular;
+      } else if (rank >= U.ellipticalFrom && rank % U.ellipticalEvery === 0 && activity[row] < U.ellipticalActivity) {
+        type = TYPE.elliptical;
+        bulge = U.bulgeElliptical;
+        dust = 0;
+      } else {
+        type = TYPE.spiral;
+        arms = rank % U.armsEvery === U.armsEvery - 1 ? U.armsWide : U.arms;
+        winding = U.windingLeast + h3 * U.windingSpan;
+        bulge = U.bulgeLeast + h4 * U.bulgeSpan;
+      }
+      radius = communityHomeR[rank] * scale * U.galaxyRadius;
+      height = (h1 - 0.5) * 2 * U.liftGalaxy * reach;
+    } else {
+      radius = communityHomeR[rank] * scale * (U.clusterSphere / U.worldRoot) * U.clusterGrow + U.clusterPad;
+      dust = 0;
+      height = (h1 - 0.5) * 2 * U.liftCluster * reach;
+    }
+    /* 기울기: 바탕에서 씨앗 방향으로 `tilt-least` + 씨앗 × `tilt-span` rad. */
+    const tilt = U.tiltLeast + h2 * U.tiltSpan;
+    const phi = h3 * Math.PI * 2;
+    const st = Math.sin(tilt);
+    const ct = Math.cos(tilt);
+    const cp = Math.cos(phi);
+    const sp = Math.sin(phi);
+    let nx = bx * ct + (ax * cp + qx * sp) * st;
+    let ny = by * ct + (ay * cp + qy * sp) * st;
+    let nz = bz * ct + qz * sp * st;
+    const nl = Math.hypot(nx, ny, nz);
+    nx /= nl;
+    ny /= nl;
+    nz /= nl;
+    let ux = ny;
+    let uy = -nx;
+    const ul = Math.hypot(ux, uy) || 1;
+    ux /= ul;
+    uy /= ul;
+    const uz = 0;
+    const vx = ny * uz - nz * uy;
+    const vy = nz * ux - nx * uz;
+    const vz = nx * uy - ny * ux;
+    const theta0 = h4 * Math.PI * 2;
+    const size = members[row].length;
+    const decor = type === TYPE.cluster ? U.decorCluster
+      : Math.round(U.decorLeast + U.decorGrow * Math.sqrt(communitySize[rank] / biggest));
+    const cx = communityHomeX[rank] * scale;
+    const cz = communityHomeY[rank] * scale;
+    const hue = communityHue[rank];
+    const tint = hue >= 0 ? [0, 1, 2].map((channel) => U.galaxyTintBase
+      + (1 - U.galaxyTintBase) * inks.tints[hue * 3 + channel]) : inks.neutral;
+    put(row, 0, cx, height, cz, radius);
+    put(row, 1, nx, ny, nz, type);
+    put(row, 2, ux, uy, uz, arms);
+    put(row, 3, winding, bar, bulge, activity[row]);
+    /* 텍셀 4(평면 자리)는 평면 카메라의 눌림을 따라 `knowledgeUniverseFlat`이 채운다. */
+    put(row, 5, tint[0], tint[1], tint[2], dust);
+    put(row, 6, decor, theta0, knowledgeUniverseHash(seed + 401), 0);
+    galaxy.push({ rank, type, radius, x: cx, y: height, z: cz, normal: [nx, ny, nz], across: [ux, uy, uz],
+      along: [vx, vy, vz], arms, winding, bar, bulge, activity: activity[row], decor, theta0, hue, size });
+    /* 이름 있는 별의 자리(시안 `universe` 3). 흔들림은 쪽마다 제 열쇠의 씨앗에서 — 쪽 하나가 늘어도 남의 별이
+     * 옮지 않는다. */
+    const nCore = Math.max(1, Math.round(size * SEAT.coreShare));
+    for (let order = 0; order < size; order += 1) {
+      const at = members[row][order];
+      rowOf[at] = row;
+      const jitter = knowledgeUniverseRandom(knowledgeHash(model.keys[at]));
+      const t = (order + 0.5) / size;
+      let x = 0;
+      let y = 0;
+      let h = 0;
+      if (type === TYPE.spiral || type === TYPE.barred) {
+        if (order < nCore) {
+          const r = radius * SEAT.coreRadius * Math.sqrt((order + 0.5) / nCore);
+          const a = order * KNOWLEDGE_GOLDEN_ANGLE;
+          x = Math.cos(a) * r;
+          y = Math.sin(a) * r;
+          h = (jitter() - 0.5) * radius * SEAT.coreLift;
+        } else {
+          const u = (order - nCore + 0.5) / Math.max(1, size - nCore);
+          const r = radius * (SEAT.armInner + SEAT.armSpan * u ** SEAT.armPower) * (1 + (jitter() - 0.5) * SEAT.armJitter);
+          const arm = (order - nCore) % arms;
+          let a;
+          if (type === TYPE.barred && r < radius * bar) {
+            a = theta0 + (arm % 2) * Math.PI + (jitter() - 0.5) * SEAT.barJitter;
+          } else {
+            a = theta0 + (arm * Math.PI * 2) / arms
+              + winding * Math.log(Math.max(r, radius * SEAT.armFloor) / (radius * SEAT.armFloor))
+              + (jitter() + jitter() - 1) * SEAT.armAngle;
+          }
+          x = Math.cos(a) * r;
+          y = Math.sin(a) * r;
+          h = (jitter() - 0.5) * radius * SEAT.armLift;
+        }
+      } else if (type === TYPE.elliptical) {
+        const r = radius * SEAT.ellipticalRadius * t ** SEAT.ellipticalPower;
+        const a = order * KNOWLEDGE_GOLDEN_ANGLE;
+        const yy = 1 - 2 * t;
+        const ring = Math.sqrt(Math.max(0, 1 - yy * yy));
+        x = Math.cos(a) * ring * r;
+        y = Math.sin(a) * ring * r * SEAT.ellipticalFlat;
+        h = yy * r * SEAT.ellipticalLift;
+      } else if (type === TYPE.irregular) {
+        const clump = order % SEAT.clumps;
+        const ca = theta0 + clump * SEAT.clumpTurn;
+        const cr = radius * (SEAT.clumpInner + SEAT.clumpStep * clump);
+        x = Math.cos(ca) * cr + (jitter() + jitter() - 1) * radius * SEAT.clumpSpread;
+        y = Math.sin(ca) * cr + (jitter() + jitter() - 1) * radius * SEAT.clumpSpread;
+        h = (jitter() - 0.5) * radius * SEAT.clumpLift;
+      } else {
+        const r = radius * SEAT.clusterRadius * t ** SEAT.clusterPower;
+        const a = order * KNOWLEDGE_GOLDEN_ANGLE;
+        const yy = 1 - 2 * t;
+        const ring = Math.sqrt(Math.max(0, 1 - yy * yy));
+        x = Math.cos(a) * ring * r;
+        y = Math.sin(a) * ring * r;
+        h = yy * r;
+      }
+      pos3[at * 3] = cx + ux * x + vx * y + nx * h;
+      pos3[at * 3 + 1] = height + uy * x + vy * y + ny * h;
+      pos3[at * 3 + 2] = cz + uz * x + vz * y + nz * h;
+    }
+  }
+  return { scale, reach, rows, galaxies, pages, gal, pos3, rowOf, galaxy, members };
 }
 
 /* ---- 한 판의 우주 ---------------------------------------------------------------------- */
@@ -381,6 +800,14 @@ function makeKnowledgeUniverse(view) {
     starGeometry: null,
     starState: null,
     starStateAttr: null,
+    /* 우주의 자료(`knowledgeUniverseMap`)와 그 텍스처, 색(`knowledgeUniverseInks`)과 견본, 후처리의 살림. */
+    map: null,
+    galTexture: null,
+    inks: null,
+    probe: null,
+    post: null,
+    floatTargets: false,
+    themeWatch: null,
     /* 카메라(시안 `S`): 궤도의 두 각, 거리, 목표점, 평면에서 떠오른 몫. */
     yaw: U.homeYaw,
     pitch: U.homePitch,
@@ -424,7 +851,12 @@ function makeKnowledgeUniverse(view) {
       canvas.setAttribute("role", "img");
       const labels = document.createElement("div");
       labels.className = "knowledge-universe-labels";
-      host.append(canvas, labels);
+      /* 색을 묻는 견본 하나 — 은하 빛깔의 원천과 종이를 계산된 색으로 읽는다(`knowledgeUniverseInks`). */
+      const probe = document.createElement("span");
+      probe.className = "knowledge-universe-probe";
+      probe.setAttribute("aria-hidden", "true");
+      host.append(canvas, labels, probe);
+      this.probe = probe;
       stage.appendChild(host);
       this.host = host;
       this.canvas = canvas;
@@ -456,17 +888,117 @@ function makeKnowledgeUniverse(view) {
        * 싣는다, ui/vendor/build-three.mjs). 비는 판 크기가 정한다(`resize`). */
       const camera = new THREE.PerspectiveCamera(U.fov, 1, U.near, U.far);
       this.camera = camera;
-      /* 모든 재질이 함께 보는 값(시안 `U`). 이 조각이 쓰는 것만 서고, 뒤의 조각이 더한다. */
+      /* 모든 재질이 함께 보는 값(시안 `U`): 평면↔우주의 몫, 시간, 초점과 초점 은하, 흐름, 세로 픽셀/초점 거리,
+       * 기기 픽셀, 밝기 기준 거리(처음 자리 거리), 테마, 은하 텍셀, 쪽 자리 둘과 그 폭, 필라멘트 둘. */
+      const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
       this.uniforms = {
-        uLift: { value: 1 }, uTime: { value: 0 }, uFocus: { value: 0 }, uDpr: { value: 1 }, uRef: { value: 360 },
+        uLift: { value: 1 }, uTime: { value: 0 }, uFocus: { value: 0 }, uFlow: { value: 1 }, uFocusGal: { value: -1 },
+        uPx: { value: 800 }, uDpr: { value: 1 }, uRef: { value: 360 }, uDark: { value: 1 },
+        tGal: { value: null }, tNode3: { value: null }, tNode2: { value: null }, uTexW: { value: 1 },
+        uBundle: { value: Array.from({ length: SHAPE.bundles }, () => new THREE.Vector4()) },
+        uBundle2: { value: Array.from({ length: SHAPE.bundles }, () => new THREE.Vector4()) },
       };
+      /* 섞기: 미리 곱한 알파(ONE, ONE_MINUS_SRC_ALPHA) — 빛(α=0)은 더하고, 먼지(rgb=0, α>0)는 뒤를 가린다
+       * (시안 `mat`). */
       const material = (vertexShader, fragmentShader) => new THREE.ShaderMaterial({
         uniforms: this.uniforms, vertexShader, fragmentShader, transparent: true, depthTest: false, depthWrite: false,
         blending: THREE.NormalBlending, premultipliedAlpha: true,
       });
       this.materials = { stars: material(KNOWLEDGE_UNIVERSE_STARS_VERT, KNOWLEDGE_UNIVERSE_STARS_FRAG) };
+      this.floatTargets = renderer.extensions.has("EXT_color_buffer_float")
+        || renderer.extensions.has("EXT_color_buffer_half_float");
+      this.makePost();
+      this.inks = knowledgeUniverseInks(this.view, this.probe);
+      this.applyInks();
+      /* 테마가 바뀌면 색을 다시 묻고 한 장을 그린다(평면의 GL 손과 같은 귀). */
+      this.themeWatch = new MutationObserver(() => {
+        if (this.renderer === null) return;
+        this.inks = knowledgeUniverseInks(this.view, this.probe);
+        this.applyInks();
+        this.invalidate();
+      });
+      this.themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
       this.wire();
       return true;
+    },
+
+    /* 후처리의 살림(시안 `down`·`up`·`comp`·`post`): 전면 삼각형 하나와 재질 셋. 목표는 판 크기를 따라
+     * `makeTargets`가 짓는다. */
+    makePost() {
+      const U = this.tune;
+      const pass = (options) => new THREE.ShaderMaterial({ vertexShader: KNOWLEDGE_UNIVERSE_POST_VERT,
+        depthTest: false, depthWrite: false, transparent: false, ...options });
+      const down = pass({
+        uniforms: { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() }, uKaris: { value: 0 } },
+        fragmentShader: KNOWLEDGE_UNIVERSE_DOWN_FRAG,
+      });
+      const up = pass({
+        transparent: true, blending: THREE.AdditiveBlending, premultipliedAlpha: true,
+        uniforms: { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() } },
+        fragmentShader: KNOWLEDGE_UNIVERSE_UP_FRAG,
+      });
+      const comp = pass({
+        uniforms: { tScene: { value: null }, tBloom: { value: null }, uBloom: { value: U.bloomStrength },
+          uExposure: { value: 1 }, uDark: { value: 1 }, uPaper: { value: new THREE.Vector3() }, uTime: { value: 0 } },
+        fragmentShader: KNOWLEDGE_UNIVERSE_COMP_FRAG,
+      });
+      const triangle = new THREE.BufferGeometry();
+      triangle.setAttribute("position", new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3));
+      const quad = new THREE.Mesh(triangle, comp);
+      quad.frustumCulled = false;
+      const scene = new THREE.Scene();
+      scene.add(quad);
+      this.post = { scene, lens: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), quad, triangle, down, up, comp,
+        target: null, mips: [] };
+    },
+
+    /* 장면의 HDR 목표 한 장과 빛 번짐 사다리(한 단마다 절반). 깊이·스텐실은 없다. 반정밀 부동소수를 쓸 수 없는
+     * 판은 RGBA8로 내려앉는다(번짐이 약해진다). */
+    makeTargets() {
+      this.dropTargets();
+      const post = this.post;
+      const wide = Math.max(1, this.canvas.width);
+      const tall = Math.max(1, this.canvas.height);
+      const options = { depthBuffer: false, stencilBuffer: false };
+      if (this.floatTargets) options.type = THREE.HalfFloatType;
+      post.target = new THREE.WebGLRenderTarget(wide, tall, options);
+      let mipWide = wide;
+      let mipTall = tall;
+      for (let level = 0; level < this.tune.bloomLevels; level += 1) {
+        mipWide = Math.max(1, mipWide >> 1);
+        mipTall = Math.max(1, mipTall >> 1);
+        post.mips.push(new THREE.WebGLRenderTarget(mipWide, mipTall, options));
+      }
+    },
+
+    dropTargets() {
+      const post = this.post;
+      if (post === null) return;
+      post.target?.dispose();
+      for (const mip of post.mips) mip.dispose();
+      post.target = null;
+      post.mips.length = 0;
+    },
+
+    /* 색이 바뀌었다(처음·테마): 합성의 테마·노출·종이, 그리고 은하 빛깔(텍셀 5). */
+    applyInks() {
+      const inks = this.inks;
+      const comp = this.post.comp.uniforms;
+      comp.uDark.value = inks.dark ? 1 : 0;
+      comp.uExposure.value = inks.exposure;
+      comp.uPaper.value.set(inks.paper[0], inks.paper[1], inks.paper[2]);
+      this.uniforms.uDark.value = inks.dark ? 1 : 0;
+      if (this.map === null) return;
+      const U = this.tune;
+      const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
+      for (const row of this.map.galaxy) {
+        const at = (row.rank * SHAPE.texels + 5) * 4;
+        for (let channel = 0; channel < 3; channel += 1) {
+          this.map.gal[at + channel] = row.hue >= 0
+            ? U.galaxyTintBase + (1 - U.galaxyTintBase) * inks.tints[row.hue * 3 + channel] : inks.neutral[channel];
+        }
+      }
+      if (this.galTexture !== null) this.galTexture.needsUpdate = true;
     },
 
     /* 손과 귀. 우주 위의 몸짓은 우주의 것이다 — 평면 캔버스의 손(끌기·고르기·바퀴)에 닿지 않게
@@ -597,6 +1129,7 @@ function makeKnowledgeUniverse(view) {
       this.renderer.setSize(this.width, this.height, false);
       this.camera.aspect = this.width / this.height;
       this.camera.updateProjectionMatrix();
+      this.makeTargets();
       if (this.layout !== null) this.computeHome();
       this.camVersion += 1;
       this.invalidate();
@@ -609,21 +1142,25 @@ function makeKnowledgeUniverse(view) {
       this.seatsRevision = -1;
       const model = layout.model;
       const count = layout.count;
-      this.scale = knowledgeUniverseScale(layout);
-      /* 닿는 거리 — 이름 있는 원반의 가장 먼 끝(시안 `layout`의 reach). */
-      let reach = 0;
-      for (let rank = 0; rank < layout.namedCount; rank += 1) {
-        reach = Math.max(reach, Math.hypot(layout.communityHomeX[rank], layout.communityHomeY[rank])
-          + layout.communityHomeR[rank]);
-      }
-      this.reach = Math.max(1, reach * this.scale);
-      /* 이름 있는 별: 밝기 = ((1 + 연결) / (1 + 가운데값))^1.6, 빛깔 = 최근 고침(오늘 1 → 1년 0). 고친 때를
-       * 모르는 쪽은 오래된 것으로 친다(디자이너 답 m-12467). */
+      const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
+      const map = knowledgeUniverseMap(layout, this.inks);
+      this.map = map;
+      this.scale = map.scale;
+      this.reach = map.reach;
+      this.pos3 = map.pos3;
+      this.pos2 = new Float32Array(count * 3);
+      /* 은하 매개변수 텍스처 — 은하마다 텍셀 8개, 줄 128(RGBA32F, NEAREST). 셰이더가 번호로 읽는다. */
+      const galTexture = new THREE.DataTexture(map.gal, SHAPE.texels, SHAPE.rows, THREE.RGBAFormat, THREE.FloatType);
+      galTexture.minFilter = THREE.NearestFilter;
+      galTexture.magFilter = THREE.NearestFilter;
+      galTexture.needsUpdate = true;
+      this.galTexture = galTexture;
+      this.uniforms.tGal.value = galTexture;
+      /* 이름 있는 별: 밝기 = ((1 + 연결) / (1 + 가운데값))^지수, 빛깔 = 최근 고침(오늘 1 → 1년 0, 로그). 고친 때를
+       * 모르는 쪽은 오래된 것으로 친다(디자이너 답 m-12467). 가운데값은 볼트 전체의 것이다. */
       const sorted = Int32Array.from(model.degree).sort();
       const middle = count > 0 ? sorted[count >> 1] : 0;
       const nowMs = model.nowMs;
-      this.pos2 = new Float32Array(count * 3);
-      this.pos3 = new Float32Array(count * 3);
       const star = new Float32Array(count * 4);
       for (let at = 0; at < count; at += 1) {
         const days = model.modified[at] > 0 ? Math.max(0, (nowMs - model.modified[at]) / 86_400_000)
@@ -631,7 +1168,7 @@ function makeKnowledgeUniverse(view) {
         star[at * 4] = ((1 + model.degree[at]) / (1 + middle)) ** U.starLumExp;
         star[at * 4 + 1] = Math.max(0, Math.min(1,
           1 - Math.log1p(days / U.starAgeScale) / Math.log1p(U.starAgeSpan / U.starAgeScale)));
-        star[at * 4 + 2] = layout.community[at];
+        star[at * 4 + 2] = map.rowOf[at];
       }
       this.placeSeats();
       const geometry = new THREE.BufferGeometry();
@@ -646,14 +1183,18 @@ function makeKnowledgeUniverse(view) {
       this.starGeometry = geometry;
       const stars = new THREE.Points(geometry, this.materials.stars);
       stars.frustumCulled = false;
+      /* 그리는 차례(시안 `renderOrder`): 원반·성운 0 → 장식 입자 1 → 이름 있는 별 2 → 별자리 선 3. */
+      stars.renderOrder = 2;
       this.scene.add(stars);
       this.built.objects.push(stars);
+      this.applyInks();
       this.computeHome();
       writeAttribute(this.canvas, "aria-label", t("knowledge.universeSummary", "지식 그래프 우주 · 주제 {{topics}} · 쪽 {{pages}}",
         { topics: layout.namedCount, pages: count }));
       try {
         this.placeCamera();
         this.renderer.compile(this.scene, this.camera);
+        this.renderer.compile(this.post.scene, this.post.lens);
       } catch (trouble) {
         invoke("note_webview_error", { text: `knowledge universe: ${trouble}` }).catch(() => {});
         return false;
@@ -661,27 +1202,38 @@ function makeKnowledgeUniverse(view) {
       return true;
     },
 
-    /* 평면 자리(떠오르기 전)와 세계 자리. 평면 자리는 평면 지도의 그린 자리(눌림까지)이고, 세계 자리는
-     * 은하의 높이 위에 선다 — 앉기가 끝난 판에서 한 번 더 옮긴다(`dress`). */
+    /* 평면 자리(떠오르기 전)와 떠돌이 별의 자리. 평면 자리는 평면 지도가 그린 자리(좁은 판의 세로 눌림까지)이고,
+     * 은하 몸은 평면에서 제 원반의 가운데로 모인다(텍셀 4). 떠돌이 별은 평면 자리 그대로에 높이만 — 앉기가 끝난
+     * 판에서 한 번 더 옮긴다(`dress`). */
     placeSeats() {
       const layout = this.layout;
-      const { count, x, y, drawY, community, namedCount, model } = layout;
+      const map = this.map;
+      const { count, x, y, drawY, model } = layout;
+      const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
       const s = this.scale;
       const flat = U.flatHeight;
+      const box = layout.viewBoxRect;
+      const middleY = box?.middleY ?? 0;
+      const yScale = box?.yScale ?? 1;
       for (let at = 0; at < count; at += 1) {
-        const rank = community[at];
         this.pos2[at * 3] = x[at] * s;
         this.pos2[at * 3 + 1] = flat;
         this.pos2[at * 3 + 2] = drawY[at] * s;
-        const named = rank < namedCount;
-        const core = named ? layout.communityCore[rank] : -1;
-        const seed = knowledgeHash(model.keys[core >= 0 ? core : at]);
-        const share = 2 * (named ? U.liftGalaxy : U.liftOrphan);
+        if (map.rowOf[at] >= 0) continue;
+        const seed = knowledgeHash(model.keys[at]);
         this.pos3[at * 3] = x[at] * s;
-        this.pos3[at * 3 + 1] = (knowledgeUniverseHash(seed) - 0.5) * share * this.reach;
+        this.pos3[at * 3 + 1] = (knowledgeUniverseHash(seed + 5) - 0.5) * 2 * U.liftOrphan * this.reach;
         this.pos3[at * 3 + 2] = y[at] * s;
       }
+      for (const row of map.galaxy) {
+        const at = (row.rank * SHAPE.texels + 4) * 4;
+        map.gal[at] = layout.communityHomeX[row.rank] * s;
+        map.gal[at + 1] = flat;
+        map.gal[at + 2] = (middleY + (layout.communityHomeY[row.rank] - middleY) * yScale) * s;
+        map.gal[at + 3] = layout.communityHomeR[row.rank] * s;
+      }
       this.seatsRevision = layout.geometryRevision;
+      if (this.galTexture !== null) this.galTexture.needsUpdate = true;
       if (this.starGeometry !== null) {
         this.starGeometry.attributes.position.needsUpdate = true;
         this.starGeometry.attributes.aPos2.needsUpdate = true;
@@ -893,16 +1445,49 @@ function makeKnowledgeUniverse(view) {
         this.tz + this.dist * cos * Math.cos(this.yaw));
       this.camera.lookAt(this.tx, this.ty, this.tz);
       this.camera.updateMatrixWorld();
+      this.uniforms.uPx.value = (this.height * this.renderer.getPixelRatio())
+        / (2 * Math.tan((THREE.MathUtils.DEG2RAD * this.camera.fov) / 2));
       this.uniforms.uDpr.value = this.renderer.getPixelRatio();
     },
 
+    /* 한 장(시안 `renderFrame`): 장면을 HDR 목표에 그리고, 빛 번짐 사다리를 내렸다가 올리고, 합성이 톤 매핑과
+     * 테마(밝은 테마는 음화 인쇄)를 거쳐 캔버스에 쓴다. */
     render() {
       const renderer = this.renderer;
+      const post = this.post;
+      if (post.target === null) return;
       renderer.info.reset();
-      renderer.setRenderTarget(null);
+      renderer.setRenderTarget(post.target);
       renderer.setClearColor(0x000000, 1);
       renderer.clear(true, false, false);
       renderer.render(this.scene, this.camera);
+      let source = post.target;
+      post.quad.material = post.down;
+      for (let level = 0; level < post.mips.length; level += 1) {
+        const into = post.mips[level];
+        post.down.uniforms.tSrc.value = source.texture;
+        post.down.uniforms.uTexel.value.set(1 / source.width, 1 / source.height);
+        post.down.uniforms.uKaris.value = level === 0 ? 1 : 0;
+        renderer.setRenderTarget(into);
+        renderer.render(post.scene, post.lens);
+        source = into;
+      }
+      post.quad.material = post.up;
+      for (let level = post.mips.length - 1; level > 0; level -= 1) {
+        const from = post.mips[level];
+        post.up.uniforms.tSrc.value = from.texture;
+        post.up.uniforms.uTexel.value.set(1 / from.width, 1 / from.height);
+        renderer.setRenderTarget(post.mips[level - 1]);
+        renderer.render(post.scene, post.lens);
+      }
+      const comp = post.comp.uniforms;
+      comp.tScene.value = post.target.texture;
+      comp.tBloom.value = post.mips[0]?.texture ?? post.target.texture;
+      comp.uBloom.value = post.mips.length > 0 ? this.tune.bloomStrength : 0;
+      comp.uTime.value = this.uniforms.uTime.value;
+      post.quad.material = post.comp;
+      renderer.setRenderTarget(null);
+      renderer.render(post.scene, post.lens);
     },
 
     /* 배율의 수 — 처음 자리에 대한 거리의 몫. */
@@ -952,10 +1537,14 @@ function makeKnowledgeUniverse(view) {
     clearScene() {
       for (const object of this.built.objects) this.scene?.remove(object);
       for (const geometry of this.built.geometries) geometry.dispose();
+      this.galTexture?.dispose();
       this.built.objects.length = 0;
       this.built.geometries.length = 0;
       this.starGeometry = null;
       this.starStateAttr = null;
+      this.galTexture = null;
+      this.map = null;
+      if (this.uniforms !== null) this.uniforms.tGal.value = null;
     },
 
     /* 떠난다 — 기하·재질(프로그램)·렌더러·문맥·손·캔버스 전부. 순서가 약속이다: 기하와 재질의
@@ -965,7 +1554,14 @@ function makeKnowledgeUniverse(view) {
       clearTimeout(this.noticeTimer);
       this.clearScene();
       for (const material of Object.values(this.materials ?? {})) material.dispose();
+      this.dropTargets();
+      if (this.post !== null) {
+        for (const material of [this.post.down, this.post.up, this.post.comp]) material.dispose();
+        this.post.triangle.dispose();
+      }
       this.renderer?.renderLists.dispose();
+      this.themeWatch?.disconnect();
+      this.themeWatch = null;
       for (const stop of this.unlisten) stop();
       this.unlisten.length = 0;
       const context = this.renderer?.getContext() ?? null;
@@ -983,6 +1579,9 @@ function makeKnowledgeUniverse(view) {
       this.pos3 = null;
       this.starState = null;
       this.notice = null;
+      this.post = null;
+      this.probe = null;
+      this.inks = null;
       this.folding = false;
     },
   };
