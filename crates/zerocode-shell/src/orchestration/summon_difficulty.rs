@@ -106,6 +106,18 @@ fn origin_with(
     Origin(key)
 }
 
+/// [`origin`] with the observation handed in — how a test of another seat
+/// that reads the same origin registers one.
+#[cfg(test)]
+pub(super) fn origin_with_for_tests(
+    key: [&str; 3],
+    checkout: Option<std::path::PathBuf>,
+    fresh: bool,
+    settings: Value,
+) -> Origin {
+    origin_with(key, checkout, fresh, settings)
+}
+
 pub(super) fn profile(
     agent: &str,
     level: &str,
@@ -210,6 +222,15 @@ pub(super) fn observations(
 ) -> Option<(std::path::PathBuf, Vec<Value>)> {
     let wire = Wire::of_this_machine();
     let path = crate::systemone::ledger_of(&wire, &SUMMON_DIFFICULTY)?;
+    observations_at(path, ledger, costs)
+}
+
+/// [`observations`] of the seat's ledger at `path`.
+fn observations_at(
+    path: std::path::PathBuf,
+    ledger: &zerocode_core::orchestration::Ledger,
+    costs: &mut super::cost_book::CostBook,
+) -> Option<(std::path::PathBuf, Vec<Value>)> {
     let rows = crate::systemone::read_rows(&path);
     let latest = difficulty::outcomes::latest(rows.iter());
     let mut changed = Vec::new();

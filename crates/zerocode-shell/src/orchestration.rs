@@ -7984,8 +7984,9 @@ impl Launcher for Catalog {
         &self,
         look: &zerocode_core::summon_choice::SummonLook<'_>,
         options: &[zerocode_core::summon_choice::Summonable],
+        origin: [&str; 3],
     ) -> Option<String> {
-        summon_choice::choose(look, options)
+        summon_choice::choose(look, options, origin)
     }
 
     fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {

@@ -269,9 +269,20 @@ mod tests;
 pub(crate) fn choose(
     look: &zerocode_core::summon_choice::SummonLook<'_>,
     options: &[zerocode_core::summon_choice::Summonable],
+    origin: [&str; 3],
 ) -> Option<String> {
-    let wire = Wire::of_this_machine();
-    if !crate::systemone::applies(&wire, &SUMMON) {
+    choose_with(&Wire::of_this_machine(), look, options, origin)
+}
+
+/// [`choose`] on a wire handed in — the one road, which a test crosses with a
+/// socket of its own.
+fn choose_with(
+    wire: &Wire,
+    look: &zerocode_core::summon_choice::SummonLook<'_>,
+    options: &[zerocode_core::summon_choice::Summonable],
+    _origin: [&str; 3],
+) -> Option<String> {
+    if !crate::systemone::applies(wire, &SUMMON) {
         return None;
     }
     let ask = summon_choice::ask(look, options)?;
@@ -281,7 +292,7 @@ pub(crate) fn choose(
     // Only an answer its act line lets act — the line its labels drew
     // (t-9468), every answer while they drew none; under it the summons
     // is refused as a failed one is.
-    let line = crate::systemone::act_line(&wire, &SUMMON);
+    let line = crate::systemone::act_line(wire, &SUMMON);
     ask.read(parsed.get("answers")?)
         .ok()
         .filter(|pick| SUMMON.acts_on(pick.confidence, line))

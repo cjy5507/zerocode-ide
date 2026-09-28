@@ -3122,3 +3122,91 @@ fn a_recall_label_whose_key_columns_disagree_with_its_name_grades_nothing() {
         "a mismatched tuple joined: {series:?}"
     );
 }
+
+/* ---- where `auto` starts (t-11989) ---- */
+
+/// A seat whose act only fills a choice its caller left open starts acting
+/// under `auto` (t-11989): with no transition of the words it asks now, the
+/// summons' difficulty and the agent choice stand at applying, and every
+/// other seat at recording, as before — read off the rows and off the
+/// ledger's text alike. A request row says nothing of where a seat stands;
+/// a fall decided on the words it asks now stands it at recording; and a
+/// transition decided on other words is no standing under these, so the
+/// seat stands where it starts.
+#[test]
+fn a_seat_that_fills_what_its_caller_left_open_starts_acting() {
+    let acting_from_the_start = [crate::jev::SUMMON.id, crate::jev::SUMMON_DIFFICULTY.id];
+    for seat in &crate::jev::JEV_USES {
+        let starts = if acting_from_the_start.contains(&seat.id) {
+            Stand::Applying
+        } else {
+            Stand::Recording
+        };
+        let asked = vec![asked_by(seat, 1)];
+        assert_eq!(standing(seat, &[]), starts, "{}", seat.id);
+        assert_eq!(standing(seat, &asked), starts, "{}", seat.id);
+        assert_eq!(standing_in(seat, &text_of(&asked)), starts, "{}", seat.id);
+        let fell = json!({
+            (TRANSITION.canonical): FELL,
+            (RUBRIC_VERSIONS.canonical): [seat.rubric_version],
+            ON_LINE: Line::ExecutionQuality.token(),
+        });
+        let after_a_fall = [asked[0].clone(), fell];
+        assert_eq!(
+            standing(seat, &after_a_fall),
+            Stand::Recording,
+            "{}",
+            seat.id
+        );
+        assert_eq!(
+            standing_in(seat, &text_of(&after_a_fall)),
+            Stand::Recording,
+            "{}",
+            seat.id
+        );
+        let other_words = json!({
+            (TRANSITION.canonical): FELL,
+            (RUBRIC_VERSIONS.canonical): [seat.rubric_version + 1],
+        });
+        assert_eq!(
+            standing(seat, &[other_words.clone()]),
+            starts,
+            "{}",
+            seat.id
+        );
+        assert_eq!(
+            standing_in(seat, &text_of(&[other_words])),
+            starts,
+            "{}",
+            seat.id
+        );
+    }
+}
+
+/// A record whose label has said no fewer times than the seat asks holds a
+/// recording seat — agreement from a label that cannot say no is no evidence
+/// to rise on (t-6342) — and takes nothing back from an acting one: it says
+/// the evidence is not in, not that the seat was wrong. The agent choice
+/// starts acting (t-11989), and a seat that named every coordinator's own
+/// agent must not fall for having been right.
+#[test]
+fn a_one_sided_record_holds_a_rise_and_takes_back_nothing() {
+    let evidence = Evidence {
+        labels: None,
+        agreement: Agreement {
+            compared: 60,
+            agreed: 60,
+            ..Agreement::default()
+        },
+        disagreed_on_record: 0,
+        ..clean()
+    };
+    assert_eq!(
+        judge(Stand::Recording, &evidence),
+        Verdict::Hold(Line::OneSided {
+            disagreed: 0,
+            wanted: crate::jev::NEGATIVES_WANTED
+        })
+    );
+    assert_eq!(judge(Stand::Applying, &evidence), Verdict::Keep);
+}

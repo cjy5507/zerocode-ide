@@ -330,8 +330,12 @@ mod integration_tests {
     use crate::jev::{SUMMON_DIFFICULTY, promote};
     use serde_json::json;
 
-    #[test]
-    fn the_real_judge_joins_outcomes_and_never_promotes_old_pin_marks() {
+    /// A window's worth of first attempts on each side, as the window writes
+    /// them: each summons' request row, then the row its outcome was
+    /// observed in. The carried-out answers' attempts succeed as
+    /// `applied_success` says and cost 100; the coordinators' own pins at the
+    /// same difficulty succeed as `pinned_success` says and cost 200.
+    fn executions(applied_success: bool, pinned_success: bool) -> Vec<Value> {
         let n = promote::window_wanted_for(&SUMMON_DIFFICULTY)
             .unwrap()
             .max(MIN_EXECUTIONS);
@@ -348,22 +352,49 @@ mod integration_tests {
                 rows.push(row.clone());
                 row.as_object_mut().unwrap().remove("outcome");
                 row["label"] = json!(id);
+                let cost = if applied { 100 } else { 200 };
                 row[KEY] = serde_json::to_value(Outcome {
-                    first_attempt_success: Some(applied),
+                    first_attempt_success: Some(if applied {
+                        applied_success
+                    } else {
+                        pinned_success
+                    }),
                     done_with_receipts: true,
                     landed: true,
                     rework_rounds: 0,
                     retry_count: 0,
-                    wall_ms: Some(if applied { 100 } else { 200 }),
-                    tokens: Some(if applied { 100 } else { 200 }),
+                    wall_ms: Some(cost),
+                    tokens: Some(cost),
                     tokens_reason: None,
-                    task_tokens: Some(if applied { 100 } else { 200 }),
-                    task_wall_ms: Some(if applied { 100 } else { 200 }),
+                    task_tokens: Some(cost),
+                    task_wall_ms: Some(cost),
                 })
                 .unwrap();
                 rows.push(row);
             }
         }
+        rows
+    }
+
+    /// A fall of the words the seat asks now, as the judge writes one.
+    fn fell() -> Value {
+        promote::transition_row(
+            &SUMMON_DIFFICULTY,
+            0,
+            promote::Verdict::Fall(promote::Line::ExecutionQuality),
+            &crate::jev::summary::Tally::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_real_judge_joins_outcomes_and_never_promotes_old_pin_marks() {
+        let n = promote::window_wanted_for(&SUMMON_DIFFICULTY)
+            .unwrap()
+            .max(MIN_EXECUTIONS);
+        // Recording: the seat fell once, so the rows are what it rises on.
+        let mut rows = vec![fell()];
+        rows.extend(executions(true, false));
         let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &rows).unwrap();
         assert_eq!(judged.agreement.compared, n);
         assert_eq!(judged.verdict, promote::Verdict::Rise);
@@ -378,5 +409,61 @@ mod integration_tests {
                 .verdict,
             promote::Verdict::Rise
         );
+    }
+
+    // The difficulty seat acts from its first summons under `auto`
+    // (t-11989): its marks come only from answers that were carried out, so
+    // a seat that recorded first could never earn one. Its judge still reads
+    // those marks and stops it.
+
+    /// With no transition, a record whose carried-out answers failed their
+    /// first attempt where the coordinators' own pins at the same difficulty
+    /// succeeded falls on the execution line — and the fall row stands the
+    /// seat at recording, so its next answer is not carried out.
+    #[test]
+    fn an_acting_difficulty_seat_falls_on_its_own_bad_marks() {
+        let rows = executions(false, true);
+        assert_eq!(
+            promote::standing(&SUMMON_DIFFICULTY, &rows),
+            promote::Stand::Applying,
+            "the difficulty seat acts until its judge says otherwise"
+        );
+        let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &rows).unwrap();
+        assert_eq!(
+            judged.verdict,
+            promote::Verdict::Fall(promote::Line::ExecutionQuality)
+        );
+        let mut after = rows;
+        after.push(
+            promote::transition_row(&SUMMON_DIFFICULTY, 1, judged.verdict, &judged.window)
+                .expect("a fall is written down"),
+        );
+        assert_eq!(
+            promote::standing(&SUMMON_DIFFICULTY, &after),
+            promote::Stand::Recording
+        );
+    }
+
+    /// Evidence that is not in yet takes nothing back from an acting seat: a
+    /// full window of summonses none of whose work has ended, and executions
+    /// whose first attempts held up but whose costs nobody could measure — a
+    /// gap in the bookkeeping, not a mark against the seat.
+    #[test]
+    fn an_acting_difficulty_seat_keeps_acting_while_its_evidence_is_thin() {
+        let asked: Vec<serde_json::Value> = executions(true, true)
+            .into_iter()
+            .filter(|row| row.get(KEY).is_none())
+            .collect();
+        let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &asked).unwrap();
+        assert_eq!(judged.verdict, promote::Verdict::Keep, "{judged:?}");
+        let mut unmeasured = executions(true, true);
+        for row in unmeasured
+            .iter_mut()
+            .filter(|row| row.get(KEY).is_some() && row["applied"] == true)
+        {
+            row[KEY]["taskTokens"] = serde_json::Value::Null;
+        }
+        let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &unmeasured).unwrap();
+        assert_eq!(judged.verdict, promote::Verdict::Keep, "{judged:?}");
     }
 }

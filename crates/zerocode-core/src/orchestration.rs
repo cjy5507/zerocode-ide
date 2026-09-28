@@ -13549,10 +13549,15 @@ pub trait Launcher {
     /// docs/design/jev-settings-20260917.md §4), when the door refuses, or
     /// when nothing came back whole; the summons is then refused by name
     /// rather than landed on a guess. The default is a launcher with no seat.
+    ///
+    /// `origin` names the summons the way [`Self::choose_difficulty`]'s does
+    /// — the team, the summoning pane and its retry name — so the host asks
+    /// under the workspace consent it observed for this very call.
     fn choose_agent(
         &self,
         _look: &crate::summon_choice::SummonLook<'_>,
         _options: &[crate::summon_choice::Summonable],
+        _origin: [&str; 3],
     ) -> Option<String> {
         None
     }
@@ -19363,6 +19368,16 @@ fn plan_inner(
             // task's title as its newest brief — the work being judged,
             // which the state must never show (w-5540's finding, t-4839).
             let summon_options = summonable(launcher, ledger, now_ms, model.as_deref());
+            // Who is summoning, as the window observed it before this verb
+            // reached the ledger: the key both seats find the host's own
+            // observation under — the checkout a question's words come from
+            // and the person's table — so neither seat reads an argv path.
+            let summons_team = team.id.clone();
+            let summons_origin = [
+                summons_team.as_str(),
+                pane,
+                words.value("--retry-request").unwrap_or_default(),
+            ];
             let (agent, agent_by_seat) = if agent == SUMMON_AUTO_AGENT {
                 let (brief, brief_chars) =
                     crate::summon_choice::brief_shape(summon_brief(written.as_ref(), asked));
@@ -19377,7 +19392,7 @@ fn plan_inner(
                     pinned_model: model.as_deref(),
                 };
                 let chosen = launcher
-                    .choose_agent(&look, &summon_options)
+                    .choose_agent(&look, &summon_options, summons_origin)
                     .ok_or_else(|| {
                         format!(
                             "--agent {SUMMON_AUTO_AGENT}: the summon seat chose nothing — it \
@@ -19425,12 +19440,6 @@ fn plan_inner(
                 failures: written.as_ref().map_or(0, |written| written.failures),
                 retry_of: words.value("--retry-of").is_some(),
             };
-            let difficulty_team = team.id.clone();
-            let difficulty_origin = [
-                difficulty_team.as_str(),
-                pane,
-                words.value("--retry-request").unwrap_or_default(),
-            ];
             // Explicit choices survive; omitted dials may use the table.
             // The server window owns remote summonses.
             let difficulty_receipt = if (effort.is_none() || model.is_none())
@@ -19438,7 +19447,7 @@ fn plan_inner(
                 && !difficulty_look.spec.is_empty()
                 && difficulty_effort(&agent, crate::summon_difficulty::LADDER[0].0).is_some()
             {
-                launcher.choose_difficulty(&difficulty_look, difficulty_origin)
+                launcher.choose_difficulty(&difficulty_look, summons_origin)
             } else {
                 None
             };
@@ -19453,7 +19462,7 @@ fn plan_inner(
                 launcher.difficulty_profile(
                     &agent,
                     chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
-                    difficulty_origin,
+                    summons_origin,
                 )?
             } else {
                 None
@@ -19725,7 +19734,7 @@ fn plan_inner(
                 .difficulty_profile(
                     &agent,
                     crate::summon_difficulty::LADDER[2].0,
-                    difficulty_origin,
+                    summons_origin,
                 )
                 .ok()
                 .flatten()
