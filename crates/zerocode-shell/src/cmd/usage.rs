@@ -526,10 +526,7 @@ pub(crate) fn grok_usage(state: State<'_, AppState>, force: bool) -> UsageReport
     let local_data_root = state.local_data_root().to_path_buf();
     // The same reading of `auth.json` the snapshot's own `account` was
     // written with, so the comparison below is exact.
-    let whose = usage_grok::grok_home()
-        .map(|home| usage_grok::auth_file(&home))
-        .and_then(|file| std::fs::read_to_string(file).ok())
-        .and_then(|text| usage_grok::signed_in_as(&text, epoch_ms_now()));
+    let whose = usage_grok::signed_in_at(usage_grok::grok_home().as_deref(), epoch_ms_now());
     usage_report(
         UsageGauge {
             provider: "grok",

@@ -1833,8 +1833,8 @@ pub(super) fn land_usage_scan(
     cache: &'static Mutex<Option<usage::ProviderUsage>>,
     file: &Path,
     fresh: usage::ProviderUsage,
+    now: i64,
 ) {
-    let now = epoch_ms_now();
     let mut held = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2012,6 +2012,20 @@ pub(super) fn usage_report(
     force: bool,
     scan: impl FnOnce() -> Scanned + Send + 'static,
 ) -> UsageReport {
+    usage_report_at(gauge, keep, force, epoch_ms_now, scan)
+}
+
+/// [`usage_report`] on a named clock — the wall's in the window, a stopped
+/// one in a test that walks an hour of asks in a moment (t-11645). The clock
+/// is read when the ask is weighed and again when the read lands, as the
+/// wall's was.
+pub(super) fn usage_report_at(
+    gauge: UsageGauge,
+    keep: impl Fn(&usage::ProviderUsage) -> bool,
+    force: bool,
+    clock: fn() -> i64,
+    scan: impl FnOnce() -> Scanned + Send + 'static,
+) -> UsageReport {
     use std::sync::atomic::Ordering;
     let held = gauge
         .cache
@@ -2034,7 +2048,7 @@ pub(super) fn usage_report(
             fetching: true,
         };
     }
-    if usage_scan_holds(held.as_ref(), force, epoch_ms_now())
+    if usage_scan_holds(held.as_ref(), force, clock())
         || gauge
             .scanning
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -2067,7 +2081,7 @@ pub(super) fn usage_report(
             Some(&result.usage),
             force,
         );
-        land_usage_scan(cache, &file, result.usage);
+        land_usage_scan(cache, &file, result.usage, clock());
         note_window_event(&log_root, &line);
     });
     UsageReport {
