@@ -503,6 +503,9 @@ function paintKnowledgeUniverse(view, layout) {
     paintKnowledgeDimension(view);
     return;
   }
+  /* 내려앉던 우주를 다시 불렀다(2D를 누르고 곧바로 3D) — 떠나보내지 않고 그 자리에서 다시 선다. */
+  universe.unfold();
+  knowledgeUniverseRising = false;
   universe.dress();
   paintKnowledgeUniverseInspector(view, layout);
 }
@@ -2164,6 +2167,15 @@ function makeKnowledgeUniverse(view) {
         return;
       }
       this.flyTo(this.flatPose(), U.fold, done);
+    },
+
+    /* 내려앉는 중에 다시 3D를 눌렀다 — 접힘을 거두고 그 자리에서 다시 떠오른다. 새 비행이 접힘 끝의 약속(놓기)을
+     * 갈아 치운다. */
+    unfold() {
+      if (!this.folding) return;
+      this.folding = false;
+      this.flyTo({ ...(this.saved ?? this.home), lift: 1 }, U.rise);
+      this.invalidate();
     },
 
     /* 비행(시안 `flyTo`). 움직임을 줄인 판은 곧바로 도착한다. */

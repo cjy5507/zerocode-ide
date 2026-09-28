@@ -98,6 +98,15 @@ async function openWindow(engine, { heap = false } = {}) {
 
 /* 볼트를 열고 평면 지도가 앉을 때까지 — 우주는 그 자리에서 떠오른다. */
 async function openVault(page, pages) {
+  /* 앞 크기의 우주가 다 내려앉아 떠난 뒤에 — 그래야 크기마다 첫 3D 프레임이 새 우주의 것이다. */
+  await page.evaluate(() => {
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    if (view !== null && knowledgeUniverses.has(view)) setKnowledgeDimension(view, "2d");
+  });
+  await page.waitForFunction(() => {
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    return view === null || !knowledgeUniverses.has(view);
+  }, null, { timeout: 30000 });
   await page.evaluate((pages) => {
     secondBrainVault = "/universe";
     window.__VAULT__ = window.__universeVaultSpec__(pages);
@@ -107,8 +116,6 @@ async function openVault(page, pages) {
       document.getElementById("nav-knowledge").click();
       return;
     }
-    const held = knowledgeUniverses.get(view);
-    if (held !== undefined) setKnowledgeDimension(view, "2d");
     knowledgeDimension = "2d";
     knowledgeAskedAt = 0;
     void refreshKnowledgeGraph({ force: true });

@@ -1349,6 +1349,22 @@ export async function testKnowledgeUniverseMotion(page, ok) {
       const next = knowledgeUniverses.get(view);
       const again = { motion: next?.motion ?? null, pressed: button?.getAttribute("aria-pressed") ?? "" };
       button?.click();
+      /* 내려앉는 도중에 다시 3D — 접힘을 거두고 같은 우주가 그 자리에서 다시 선다. 끝난 접힘이 새로 누른 우주를
+       * 떠나보내면 3D 단추는 눌린 채 판은 평면이다. */
+      const standing = knowledgeUniverses.get(view);
+      setKnowledgeDimension(view, "2d");
+      await frames(5);
+      const midFold = standing?.folding ?? false;
+      setKnowledgeDimension(view, "3d");
+      await frames(2);
+      await until(() => {
+        const now = knowledgeUniverses.get(view);
+        return now === undefined || !now.tween.on;
+      }, 400);
+      await frames(3);
+      const risen = knowledgeUniverses.get(view);
+      const refold = { midFold, same: risen === standing, folding: risen?.folding ?? null,
+        universe: view.classList.contains("is-universe"), lift: risen?.lift ?? 0 };
       /* 밝은 테마 — 이름표의 글자는 종이 위의 먹빛이다. */
       const plate = next?.host.querySelector(".knowledge-universe-plate") ?? null;
       const shade = (element) => {
@@ -1364,7 +1380,7 @@ export async function testKnowledgeUniverseMotion(page, ok) {
       knowledgeDimension = heldDimension;
       secondBrainVault = heldVault;
       await paintKnowledgeView();
-      return { up, off, on, flatShown, again, dark, light };
+      return { up, off, on, flatShown, again, refold, dark, light };
     } catch (error) {
       return { thrown: String(error?.stack ?? error) };
     }
@@ -1378,6 +1394,10 @@ export async function testKnowledgeUniverseMotion(page, ok) {
   ok("t-12443 ⑦: switched back on it counts as already rested (v4's 8000 ms) and keeps drawing; the choice holds for the next universe; the flat map has no such switch",
     !seen.thrown && seen.on.pressed === "true" && seen.on.motion && seen.on.rested >= seen.on.wake - 50
       && seen.on.drawn >= 5 && seen.again.motion === false && seen.again.pressed === "false" && !seen.flatShown,
+    detail);
+  ok("t-12443 ⑦: pressing 3D while the universe folds takes the fold back — the same universe rises again and stays",
+    !seen.thrown && seen.refold.midFold && seen.refold.same && seen.refold.folding === false && seen.refold.universe
+      && seen.refold.lift === 1,
     detail);
   ok("t-12443 ⑦: in the light theme the labels are ink on paper — darker than in the dark theme",
     !seen.thrown && seen.dark > 0.6 && seen.light >= 0 && seen.light < 0.4, detail);
