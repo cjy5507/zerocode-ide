@@ -3060,6 +3060,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jev-socket"
+version = "1.1.38"
+
+[[package]]
 name = "jni"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8156,12 +8160,16 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "block2",
+ "bytes",
  "cbc",
  "cef",
  "core-foundation 0.10.1",
  "dirs",
  "flate2",
+ "h2",
+ "http",
  "ignore",
+ "jev-socket",
  "keyring-core",
  "libc",
  "model-prices",

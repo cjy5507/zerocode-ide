@@ -26,9 +26,10 @@
 //! the day's count.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use jev_socket::Socket;
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
@@ -376,8 +377,8 @@ enum KeySource {
     Keychain,
 }
 
-/// The wire: where the key comes from, the origin, and the person's settings
-/// file the door reads.
+/// The wire: where the key comes from, the origin, the person's settings
+/// file the door reads, and the socket its questions ride.
 #[derive(Clone)]
 pub struct Wire {
     keys: KeySource,
@@ -386,6 +387,9 @@ pub struct Wire {
     /// Its folder keeps the day's count. `None` when no home resolves, which
     /// consents to nothing.
     settings: Option<PathBuf>,
+    /// The window's one socket ([`SOCKET`]); a test points a wire at a socket
+    /// of its own (`Wire::on`).
+    socket: &'static Socket<reqwest::Client>,
 }
 
 /// A key as the wire keeps it: trimmed, and empty is none.
@@ -407,6 +411,7 @@ impl Wire {
             )),
             base: base_url(),
             settings: crate::api_routers::zo_settings_path(),
+            socket: &SOCKET,
         }
     }
 
@@ -418,6 +423,7 @@ impl Wire {
             keys: KeySource::Keychain,
             base: base_url(),
             settings: crate::api_routers::zo_settings_path(),
+            socket: &SOCKET,
         }
     }
 
@@ -431,7 +437,18 @@ impl Wire {
             keys: KeySource::Read(trimmed(Some(key.to_string()))),
             base: base.trim().to_string(),
             settings,
+            socket: &SOCKET,
         }
+    }
+
+    /// This wire, riding `socket` rather than the window's: how a test
+    /// watches which connection its own questions ride without another
+    /// test's questions moving the socket under it.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn on(mut self, socket: &'static Socket<reqwest::Client>) -> Self {
+        self.socket = socket;
+        self
     }
 
     /// The key, read now.
@@ -518,7 +535,7 @@ impl Wire {
         if self.key().is_none() {
             return;
         }
-        let Some(client) = client() else {
+        let Some(lent) = self.socket.lend() else {
             return;
         };
         let base = self.base.trim_end_matches('/').to_string();
@@ -526,7 +543,12 @@ impl Wire {
             return;
         }
         tauri::async_runtime::spawn(async move {
-            let _ = client.get(&base).timeout(ACTION_WARM_TIMEOUT).send().await;
+            let _ = lent
+                .client
+                .get(&base)
+                .timeout(ACTION_WARM_TIMEOUT)
+                .send()
+                .await;
         });
     }
 
@@ -624,14 +646,15 @@ impl Wire {
         if Instant::now() >= deadline {
             return Err(TIMEOUT.to_string());
         }
-        let client = client().ok_or_else(|| TRANSPORT.to_string())?;
+        let lent = self.socket.lend().ok_or_else(|| TRANSPORT.to_string())?;
         let url = format!("{}{SYSTEMONE_PATH}", self.base.trim_end_matches('/'));
         // Key/consent checks, runtime startup and client construction spend
         // this call's budget too; the socket never starts a fresh deadline.
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or_else(|| TIMEOUT.to_string())?;
-        let answer = client
+        let answer = lent
+            .client
             .post(&url)
             .timeout(remaining)
             .header("Authorization", format!("Bearer {key}"))
@@ -698,25 +721,24 @@ fn warm_due(origin: &str) -> bool {
     true
 }
 
-/// The one HTTP client every question the window asks goes through: its
-/// connection pool keeps the endpoint's TLS session alive between asks, so
-/// a walk's second question rides the first's socket instead of opening its
+/// The one socket every question the window asks goes through: its client's
+/// connection pool keeps the endpoint's TLS session alive between asks, so a
+/// walk's second question rides the first's socket instead of opening its
 /// own. A client per ask was a handshake per ask — see §2 of
 /// docs/design/jev-seats-accuracy-wave-20260921.md for the bench that timed
-/// both on the same look. Its idle window is [`POOL_IDLE`], named rather
-/// than inherited so a warm-up can be skipped on the same number the socket
-/// lives by. `None` only when the client cannot be built at all, which the
-/// ask refuses as `transport`.
-fn client() -> Option<&'static reqwest::Client> {
-    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .pool_idle_timeout(POOL_IDLE)
-                .build()
-                .ok()
-        })
-        .as_ref()
+/// both on the same look. No client at all, one that cannot be built, is
+/// refused as `transport`.
+static SOCKET: Socket<reqwest::Client> = Socket::new(built);
+
+/// A client as the wire's socket builds one. Its idle window is
+/// [`POOL_IDLE`], named rather than inherited so a warm-up can be skipped on
+/// the same number the socket lives by.
+fn builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().pool_idle_timeout(POOL_IDLE)
+}
+
+fn built() -> Option<reqwest::Client> {
+    builder().build().ok()
 }
 
 /// The word a request that never answered is refused with.

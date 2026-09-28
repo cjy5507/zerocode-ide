@@ -120,25 +120,29 @@ fn read_request(socket: &mut std::net::TcpStream) -> String {
             break;
         }
         raw.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&raw);
-        let Some(head_end) = text.find("\r\n\r\n") else {
-            continue;
-        };
-        let length = text[..head_end]
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.trim()
-                    .eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().ok())
-                    .flatten()
-            })
-            .unwrap_or(0);
-        if raw.len() >= head_end + 4 + length {
+        if request_end(&raw).is_some() {
             break;
         }
     }
     String::from_utf8_lossy(&raw).into_owned()
+}
+
+/// Where the first whole request in `raw` ends — its head, then as many body
+/// bytes as its `Content-Length` names — or `None` while it has not all
+/// arrived.
+fn request_end(raw: &[u8]) -> Option<usize> {
+    let head_end = raw.windows(4).position(|four| four == b"\r\n\r\n")? + 4;
+    let length = String::from_utf8_lossy(&raw[..head_end])
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    (raw.len() >= head_end + length).then_some(head_end + length)
 }
 
 #[test]
@@ -477,3 +481,6 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
     assert_eq!(fell["line"], json!("fallbacks"));
     assert_eq!(stand_from(&rows), Stand::Recording);
 }
+
+/// Which connection a question rides (t-13199).
+mod socket;
