@@ -4086,7 +4086,18 @@
             <button class="btn" type="button" data-jev-everywhere data-i18n="settings.typesafe.everyFolder">모든 폴더에서 사용</button>
           </div>
 
-          <!-- Each feature's numbers, state and last judgments live on the
+          <!-- Where each feature stands while Jev is on (t-11989): acting,
+               or still recording with the samples its next judgment waits
+               on — the numbers `zo jev summary` answers, the dashboard's own
+               reading (`paintJevStandings`). Hidden while the switch is off. -->
+          <section class="settings-jev-standings" data-jev-standings aria-labelledby="jev-standings-title" hidden>
+            <h4 class="settings-jev-standings-title" id="jev-standings-title" data-i18n="settings.typesafe.standings">기능별 상태</h4>
+            <p class="settings-row-desc" data-i18n="settings.typesafe.standingsAbout">켠 동안 기능마다 판단을 실제로 적용하는지, 아직 기록만 하는지 보여 줍니다. 기록 중인 기능 옆의 숫자는 다음 판정에 필요한 표본 중 모인 수입니다.</p>
+            <p class="settings-row-desc settings-jev-standings-note" data-jev-standings-note role="status"></p>
+            <ul class="settings-jev-standings-list" data-jev-standings-list></ul>
+          </section>
+
+          <!-- Each feature's numbers, accuracy and last judgments live on the
                dashboard; the card says where, in one line. -->
           <p class="settings-jev-dashboard settings-row-desc">
             <span data-i18n="settings.typesafe.dashboardLine">기능별 사용 현황과 정확도는 Jev 대시보드에서 봅니다.</span>

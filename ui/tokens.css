@@ -2778,6 +2778,9 @@
      much it thickens under a pointer. */
   --jev-link-offset: 2px;
   --jev-link-hover-thickness: 2px;
+  /* The narrowest column of the card's standing lines (t-11989): a
+     feature's name and 「기록 중 · 13/53」 side by side. */
+  --jev-standing-min: 240px;
 }
 
 /* Skill library geometry; colours inherit the semantic palette in both themes. */
