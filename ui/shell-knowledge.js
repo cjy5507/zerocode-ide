@@ -1357,8 +1357,8 @@ function buildKnowledgeView() {
   picture.setAttribute("preserveAspectRatio", "xMidYMid meet");
   const defs = document.createElementNS(SVG_NS, "defs");
   defs.innerHTML = knowledgeDefsHtml();
-  // 군집의 층이 맨 뒤에 선다: 성운과 이름표는 점과 선 **뒤**의 바탕이지 그 위의
-  // 장식이 아니다 — 선이 성운을 가로지르고 점이 성운 위에 앉는다.
+  // 군집의 층이 맨 뒤에 선다: 성운은 점과 선 **뒤**의 바탕이지 그 위의 장식이
+  // 아니다 — 선이 성운을 가로지르고 점이 성운 위에 앉는다.
   const clusters = document.createElementNS(SVG_NS, "g");
   clusters.setAttribute("class", "knowledge-clusters");
   const edges = document.createElementNS(SVG_NS, "g");
@@ -1367,7 +1367,12 @@ function buildKnowledgeView() {
   edgeLabels.setAttribute("class", "knowledge-edge-labels");
   const nodes = document.createElementNS(SVG_NS, "g");
   nodes.setAttribute("class", "knowledge-nodes");
-  picture.append(defs, clusters, edges, edgeLabels, nodes);
+  /* 주제의 이름판은 점 **위**의 층이다(t-12443) — GL 손에서 이름판이 캔버스 위에 서는 것과 같은 그림이라야 두
+   * 손이 한 격자에서 같은 자리를 고른다(`placeKnowledgeLabels`의 (1): 이름판은 부스러기 점 위에 설 수 있다).
+   * 판의 글자는 바탕색 테두리를 둘러 점 위에서도 읽힌다. */
+  const clusterNames = document.createElementNS(SVG_NS, "g");
+  clusterNames.setAttribute("class", "knowledge-cluster-names");
+  picture.append(defs, clusters, edges, edgeLabels, nodes, clusterNames);
   /* 밑층(t-12029) — 군집 사이 묶음선. 그림보다 앞에 서서 그림의 **아래**에 그려지고(GL 판에서는 캔버스보다도
    * 아래 — 손이 캔버스를 그림 바로 앞에 세운다), 두 손이 이 한 벌을 쓴다. 카메라는 그림과 같은 viewBox다
    * (`paintKnowledgeTies`). 뜻은 「강한 묶음」 목록이 글로 말하므로 읽는 이에게는 숨긴다. */
@@ -4635,26 +4640,23 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
      * 절반이 접혔다(900×700 합성: 여섯 → 셋). 판의 글자는 바탕색 테두리를 둘러 점 위에서도
      * 읽힌다. 덮지 않는 것: 쪽의 이름표·남의 이름·다른 판·조작부(이것들은 몸이 아니라 임자 0의
      * 칸이다), 그리고 사람이 지금 보는 점 — 고른 점, 찾기에 걸린 점, 짚어 밝힌 점, 경로의 점
-     * (그때는 판이 비키거나 접힌다). 이름표가 점 위에 서는 손(GL, `labelsOverPoints`)
-     * 에서만이다: SVG는 판이 점 **뒤**의 층이라 점이 판의 글자를 가린다. 가리키기는 판 아래에서도
+     * (그때는 판이 비키거나 접힌다). 두 손 모두의 규칙이다(t-12443): 이름판은 두 손에서 점 위의
+     * 층에 서므로(SVG `.knowledge-cluster-names`, GL은 캔버스 위의 그림) 손이 자리를 달리 고를
+     * 까닭이 없다 — 손마다 다르게 고르던 판에서는 판의 기하에 따라 쪽의 이름표까지 갈렸다(코디
+     * m-12652: 작은 판 여백 36 px부터 GL만 이름표 하나를 더 세웠다). 가리키기는 판 아래에서도
      * 점에 닿는다(GL은 좌표로 고른다, `knowledgeUnder`). */
-    const overRim = knowledgePainters.get(view)?.labelsOverPoints === true;
-    if (overRim && layout.plateRim?.length !== count) layout.plateRim = new Uint8Array(count);
-    const rim = overRim ? layout.plateRim : null;
+    if (layout.plateRim?.length !== count) layout.plateRim = new Uint8Array(count);
+    const rim = layout.plateRim;
     /* 모든 그려진 점을 덮어도 되는 표(t-12029) — 가까운 자리가 다 막힌 판의 두 번째 물음(아래). */
-    if (overRim && layout.plateCover?.length !== count) layout.plateCover = new Uint8Array(count);
-    const anyPoint = overRim ? layout.plateCover : null;
-    if (anyPoint !== null) {
-      for (let at = 0; at < count; at += 1) anyPoint[at] = drawn === null || drawn[at] === 1 ? 1 : 0;
-    }
-    if (rim !== null) {
-      const kinds = layout.model.kinds;
-      const searching = knowledgeQuery.trim() !== "";
-      for (let at = 0; at < count; at += 1) {
-        rim[at] = community[at] >= layout.namedCount && (kinds[at] === "page" || kinds[at] === "ghost")
-          && at !== selectedSeat && !(searching && layout.searchMatch[at] === 1)
-          && !layout.litNodes.has(at) && layout.pathNode[at] !== 1 ? 1 : 0;
-      }
+    if (layout.plateCover?.length !== count) layout.plateCover = new Uint8Array(count);
+    const anyPoint = layout.plateCover;
+    for (let at = 0; at < count; at += 1) anyPoint[at] = drawn === null || drawn[at] === 1 ? 1 : 0;
+    const kinds = layout.model.kinds;
+    const searching = knowledgeQuery.trim() !== "";
+    for (let at = 0; at < count; at += 1) {
+      rim[at] = community[at] >= layout.namedCount && (kinds[at] === "page" || kinds[at] === "ghost")
+        && at !== selectedSeat && !(searching && layout.searchMatch[at] === 1)
+        && !layout.litNodes.has(at) && layout.pathNode[at] !== 1 ? 1 : 0;
     }
     for (let rank = 0; rank < layout.namedCount; rank += 1) {
       const held = layout.clusterEls[rank];
@@ -4708,12 +4710,12 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
         }
         return { best, weight };
       };
-      /* 가까운 자리가 다 이웃 원반의 점에 걸리면(원반이 촘촘한 판의 가운데 원반) — 이름이 점 위에 서는 손(GL)은
-       * 제 원반 곁에서 점을 덮고 선다: 먼 자리에 선 이름은 옆 원반의 이름으로 읽힌다(실측: 실제 볼트의 셋째 주제
-       * 이름이 124 px 밖, 회색 원반 곁에 섰다). 덮는 것은 점뿐이고 이름·판·조작부는 여전히 덮지 않는다
-       * (`plateCover` — 그려진 점마다 1). SVG는 판이 점 뒤의 층이라 먼 자리로 물러선다. */
+      /* 가까운 자리가 다 이웃 원반의 점에 걸리면(원반이 촘촘한 판의 가운데 원반) — 이름판은 제 원반 곁에서 점을
+       * 덮고 선다: 먼 자리에 선 이름은 옆 원반의 이름으로 읽힌다(실측: 실제 볼트의 셋째 주제 이름이 124 px 밖,
+       * 회색 원반 곁에 섰다). 덮는 것은 점뿐이고 이름·판·조작부는 여전히 덮지 않는다(`plateCover` — 그려진
+       * 점마다 1). 이름판이 두 손 모두 점 위의 층이라 두 손의 규칙이다. */
       let { best, weight } = lightest(near, rim);
-      if (weight > KNOWLEDGE_FORCE.plateSlack && anyPoint !== null) {
+      if (weight > KNOWLEDGE_FORCE.plateSlack) {
         /* 이름·판·조작부를 덮지 않는 가까운 자리 중 **점을 가장 적게** 덮는 곳. */
         let fewest = Number.POSITIVE_INFINITY;
         for (const [seatX, seatY] of near) {
@@ -5733,7 +5735,9 @@ function knowledgeEdgeLine(layout, at) {
  * 애니메이션 하나이고 점마다는 아니다. 움직임을 줄이라는 판에서는 스며들지 않는다. */
 function arriveKnowledgeLayers(view, layout) {
   if (knowledgeMotionReduced() || !(layout.tuning.arriveMs > 0)) return;
-  for (const layer of view.querySelectorAll(".knowledge-underlay, .knowledge-clusters, .knowledge-edges, .knowledge-nodes")) {
+  for (const layer of view.querySelectorAll(
+    ".knowledge-underlay, .knowledge-clusters, .knowledge-edges, .knowledge-nodes, .knowledge-cluster-names",
+  )) {
     if (typeof layer.animate !== "function") return;
     layer.animate(
       [{ opacity: 0 }, { opacity: 1 }],
@@ -5824,12 +5828,13 @@ function noteKnowledgeFresh(before, after) {
 
 /* 군집의 층 — 위상이 바뀔 때만 (3차).
  *
- * 이름 있는 군집마다 성운 원 하나와 이름표 하나. 성운이 전부 앞에, 이름표가
- * 전부 뒤에 서는 것은 한 군집의 성운이 이웃 군집의 이름을 덮지 않게 하기
- * 위해서다. 이름표는 진짜 단추처럼 읽힌다(`role="button"`): 누르면 그 군집만
- * 밝히고 카메라가 그리로 난다. */
+ * 이름 있는 군집마다 성운 원 하나와 이름표 하나. 성운은 점 뒤의 층(`.knowledge-clusters`)에, 이름표는 점 위의
+ * 층(`.knowledge-cluster-names`, t-12443)에 선다 — 한 군집의 성운이 이웃 군집의 이름을 덮지 않고, 이름판이
+ * 두 손에서 같은 그림이 되게. 이름표는 진짜 단추처럼 읽힌다(`role="button"`): 누르면 그 군집만 밝히고
+ * 카메라가 그리로 난다. */
 function paintKnowledgeClusterLayer(view, layout) {
   const host = view.querySelector(".knowledge-clusters");
+  const names = view.querySelector(".knowledge-cluster-names");
   /* 이름판의 말(t-12029, 시안 v2 「oneLine」): 보이는 글자는 이름 한 줄이고, 쪽 수와 대표 지식은 올리면 나오는
    * 팁(`data-tip` — 창의 팁은 포인터에도 키보드 포커스에도 선다)과 읽는 이의 이름에 든다. 색 없는 군집의 판은
    * `is-quiet` — 안개색의 작은 글자. */
@@ -5844,13 +5849,9 @@ function paintKnowledgeClusterLayer(view, layout) {
   };
   if (host.dataset.knowledgeSignature === layout.signature) {
     /* 같은 위상의 새 판(점의 층이 제 DOM을 다시 입양하는 것과 같은 경우)은 서
-     * 있는 것을 그대로 든다 — 앞의 절반이 성운, 뒤의 절반이 이름판이다. */
+     * 있는 것을 그대로 든다 — 성운의 층과 이름판의 층이 같은 순위의 차례다. */
     if (layout.clusterEls.length === 0 && host.children.length > 0) {
-      const half = host.children.length / 2;
-      layout.clusterEls = Array.from({ length: half }, (unused, rank) => ({
-        nebula: host.children[rank],
-        label: host.children[half + rank],
-      }));
+      layout.clusterEls = Array.from(host.children, (nebula, rank) => ({ nebula, label: names.children[rank] }));
     }
     for (let rank = 0; rank < layout.clusterEls.length; rank += 1) {
       dressLabel(layout.clusterEls[rank].label, rank);
@@ -5886,7 +5887,8 @@ function paintKnowledgeClusterLayer(view, layout) {
     nebulas.push(nebula);
     labels.push(label);
   }
-  reconcileElementOrder(host, [...nebulas, ...labels]);
+  reconcileElementOrder(host, nebulas);
+  reconcileElementOrder(names, labels);
   host.dataset.knowledgeSignature = layout.signature;
   layout.clusterEls = built;
 }

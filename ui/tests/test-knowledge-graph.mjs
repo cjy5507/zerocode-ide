@@ -4,8 +4,8 @@ import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { KNOWLEDGE_SCENES, knowledgeSweepFor, measureKnowledgeGlParity, measureKnowledgePainterSwap,
-  measureKnowledgeScenes,
+import { KNOWLEDGE_SCENES, knowledgeSweepFor, measureKnowledgeGlParity, measureKnowledgeGlParityStages,
+  measureKnowledgePainterSwap, measureKnowledgeScenes,
   testKnowledgePerformance } from "./knowledge-performance.mjs";
 import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
@@ -4268,6 +4268,7 @@ await glPage.evaluate(() => {
   knowledgeDimension = "2d";
 });
 await measureKnowledgeGlParity(glPage, ok);
+await measureKnowledgeGlParityStages(glPage, ok);
 await measureKnowledgeScenes(glPage, ok, { painter: "gl", frames: sweep.frames,
   scenes: KNOWLEDGE_SCENES.filter((scene) => sweep.glScenes.includes(scene.name)) });
 
