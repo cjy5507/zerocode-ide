@@ -534,10 +534,14 @@ pub struct JevUse {
     /// ([`crate::summon_difficulty::outcomes::evidence`]) — earned nothing
     /// to rise on: every row of this machine's difficulty ledger said
     /// `applied: false` and its judge `too_few_compared` 0 of 30
-    /// (2026-09-28). Such a use is still judged on its own marks and falls
-    /// on a line it breaks ([`promote::judge`]); a contract holds it to a
-    /// row the judge reads, because a use that acts from the start with no
-    /// judge to stop it would be `on` under another name.
+    /// (2026-09-28). Such a use is still judged, and falls on a line its
+    /// own marks break — answers carried out that did worse than the pins,
+    /// or that coordinators' own choices disagree with — though not on the
+    /// wire's health, since for it a fall is for good and a late or missing
+    /// answer already falls back request by request ([`promote::judge`]); a
+    /// contract holds it to a row the judge reads, because a use that acts
+    /// from the start with no judge to stop it would be `on` under another
+    /// name.
     pub auto_starts: promote::Stand,
 }
 

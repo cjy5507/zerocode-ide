@@ -103,7 +103,9 @@
 //! judge reads their marks and makes them fall. An acting seat falls on a
 //! line it breaks and never on one that says its evidence is not in yet
 //! ([`Line::only_holds`]) — one rule for every seat, which the difficulty
-//! seat's own lines now go through as well.
+//! seat's own lines now go through as well. And one that started acting
+//! falls on its marks alone: for it a fall is for good, and a slow wire is
+//! already paid for request by request.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -830,12 +832,16 @@ pub fn judge_seat_at(
         let current = crate::summon_difficulty::outcomes::latest(version.marks.iter().copied());
         let (outcome_agreement, broken) = crate::summon_difficulty::outcomes::evidence(&current);
         agreement = outcome_agreement;
-        let broken = fallback_line(stand, &evidence)
-            .or_else(|| execution_health(&evidence))
-            .or(broken);
+        let broken = if on_its_marks_alone(seat, stand) {
+            broken
+        } else {
+            fallback_line(stand, &evidence)
+                .or_else(|| execution_health(&evidence))
+                .or(broken)
+        };
         verdict_on(stand, broken)
     } else {
-        judge(stand, &evidence)
+        judge_as(seat, stand, &evidence)
     };
     Some(Judged {
         verdict,
@@ -959,7 +965,11 @@ pub fn judgment_due_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -
     let asked = version.asked();
     let wanted = window_wanted_for(seat).unwrap_or(JUDGED_EVERY_ROWS);
     let at_boundary = asked >= wanted && (asked - wanted).is_multiple_of(JUDGED_EVERY_ROWS);
-    let ending_it = standing(seat, rows) == Stand::Applying
+    // A seat judged on its marks alone is not ended by its fallbacks
+    // ([`on_its_marks_alone`]), so they call no judgment for it either.
+    let stand = standing(seat, rows);
+    let ending_it = stand == Stand::Applying
+        && !on_its_marks_alone(seat, stand)
         && failures_in_a_row_of(version.requests.iter().copied()) >= FALLBACKS_THAT_END_IT;
     at_boundary || ending_it
 }
@@ -1278,9 +1288,15 @@ fn execution_health(evidence: &Evidence) -> Option<Line> {
 /// it clears them all.
 #[must_use]
 pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
-    if let Some(line) = execution_health(evidence) {
-        return Some(line);
-    }
+    execution_health(evidence).or_else(|| marks_line(evidence))
+}
+
+/// The first line the seat's marks do not clear, in §4's order — every line
+/// after the window's health ([`execution_health`]): a person's labels, the
+/// sample the agreement may speak on, the negatives, the route-change
+/// budget, the baseline, the apply share. What a seat that starts acting is
+/// taken back on alone (t-11989, [`on_its_marks_alone`]).
+fn marks_line(evidence: &Evidence) -> Option<Line> {
     // A person's labels, when there are a window's worth, are the last word;
     // otherwise the seat is held to its route-change budget.
     if let Some(labels) = evidence
@@ -1387,6 +1403,38 @@ fn verdict_on(stand: Stand, broken: Option<Line>) -> Verdict {
         (Stand::Applying, Some(line)) if line.only_holds() => Verdict::Keep,
         (Stand::Applying, Some(line)) => Verdict::Fall(line),
     }
+}
+
+/// [`judge`] for `seat`: an acting seat that starts acting is judged on its
+/// marks alone ([`on_its_marks_alone`]); every other seat and stand as
+/// [`judge`] says.
+fn judge_as(seat: &JevUse, stand: Stand, evidence: &Evidence) -> Verdict {
+    if on_its_marks_alone(seat, stand) {
+        verdict_on(stand, marks_line(evidence))
+    } else {
+        judge(stand, evidence)
+    }
+}
+
+/// Whether `seat`, standing at `stand`, is taken back on its marks alone
+/// (t-11989): a seat that starts acting ([`JevUse::auto_starts`]) while it
+/// acts. The window's health — answered share, latency, shape, fallbacks
+/// running — does not take it back, because for such a seat a fall is for
+/// good: recording, it carries out none of its answers, so the difficulty
+/// seat earns no mark to rise on again, and the agent choice has no
+/// baseline mark to clear. What a bad wire costs it is already paid request
+/// by request — an answer that is late, malformed or missing is not carried
+/// out and the placeholder stands in (the middle profile row, a refusal) —
+/// and a slow afternoon must not turn the person's switch off for these two
+/// seats for good. Its marks still take it back: answers carried out that
+/// did worse than the pins, or that the coordinators' own choices disagree
+/// with. Recording, it is judged on everything, as every seat is: it rises
+/// on a healthy window only.
+const fn on_its_marks_alone(seat: &JevUse, stand: Stand) -> bool {
+    matches!(
+        (seat.auto_starts, stand),
+        (Stand::Applying, Stand::Applying)
+    )
 }
 
 #[cfg(test)]
