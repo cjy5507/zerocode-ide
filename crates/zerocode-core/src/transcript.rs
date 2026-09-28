@@ -149,15 +149,21 @@ struct Tail {
 
 impl Tail {
     fn read(path: &Path) -> Option<Self> {
+        Self::read_within(path, MAX_TAIL_BYTES)
+    }
+
+    /// The last `window` bytes, for a question that has to look further
+    /// back than a card's line does ([`last_naming_prompt`]).
+    fn read_within(path: &Path, window: u64) -> Option<Self> {
         let mut file = std::fs::File::open(path).ok()?;
         let size = file.metadata().ok()?.len();
         if size == 0 {
             return None;
         }
-        let start = size.saturating_sub(MAX_TAIL_BYTES);
+        let start = size.saturating_sub(window);
         file.seek(SeekFrom::Start(start)).ok()?;
         let mut bytes = Vec::new();
-        file.take(MAX_TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+        file.take(window).read_to_end(&mut bytes).ok()?;
         Some(Self {
             text: String::from_utf8_lossy(&bytes).into_owned(),
             cut: start > 0,
@@ -382,6 +388,245 @@ pub fn prompt_words_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Opti
     let unframed = without_pasted_frames(value.get("prompt")?.as_str()?);
     let prompt = past_the_envelopes(&unframed).trim();
     (!prompt.is_empty()).then(|| prompt.to_string())
+}
+
+/// The words that only tell an agent to go on — in the five languages the
+/// window speaks — and so say nothing about what the turn is for (t-11540).
+///
+/// The one list. A person's `계속` or `ㄱㄱ` is the most common prompt a long
+/// conversation gets, and a pane named after it read 「계속」 on the board,
+/// the sidebar and the relation map while it ran a release. Written as the
+/// words compare ([`names_the_turn`]): lowercase, with no spaces or marks —
+/// `go on`, `Go on!` and `go-on` are all `goon` there. `r` is `ㄱ` typed with
+/// the keyboard left in English, which is how it arrives.
+const GO_ON_WORDS: &[&str] = &[
+    // 한국어
+    "계속",
+    "계속해",
+    "계속해줘",
+    "계속해요",
+    "계속해주세요",
+    "계속하자",
+    "계속진행",
+    "진행",
+    "진행해",
+    "진행해줘",
+    "진행해주세요",
+    "이어서",
+    "이어서해줘",
+    "ㄱ",
+    "r",
+    "고",
+    "가자",
+    "응",
+    "어",
+    "네",
+    "넵",
+    "예",
+    "ㅇ",
+    "ㅇㅋ",
+    "오케이",
+    "좋아",
+    "그래",
+    // English
+    "continue",
+    "goon",
+    "go",
+    "keepgoing",
+    "proceed",
+    "carryon",
+    "resume",
+    "next",
+    "yes",
+    "yeah",
+    "yep",
+    "y",
+    "ok",
+    "okay",
+    "k",
+    "sure",
+    // 日本語
+    "続けて",
+    "続けてください",
+    "続き",
+    "続行",
+    "進めて",
+    "はい",
+    "うん",
+    // 中文
+    "继续",
+    "繼續",
+    "好",
+    "好的",
+    "嗯",
+    "是",
+    "对",
+    "對",
+    "可以",
+    "行",
+    // Español
+    "sigue",
+    "seguir",
+    "continúa",
+    "continua",
+    "continuar",
+    "adelante",
+    "sí",
+    "si",
+    "vale",
+    "dale",
+];
+
+/// Whether `prompt` says what the turn is about — the test a prompt passes
+/// before it may name a conversation (t-11540).
+///
+/// Two kinds of prompt name nothing: one that is only a word telling the
+/// agent to go on (`GO_ON_WORDS`, or one of them said again — `ㄱㄱㄱ`),
+/// and the one line this window types at an idle pane when mail is waiting
+/// ([`crate::orchestration::is_pointer_text`]), which a coordinator's pane
+/// receives more often than anything a person types. The whole prompt is
+/// judged: `계속 진행하되 시험부터` asks for something and names the turn.
+/// Case, spaces and marks do not count, and a prompt of marks alone names
+/// nothing either.
+#[must_use]
+pub fn names_the_turn(prompt: &str) -> bool {
+    if crate::orchestration::is_pointer_text(prompt) {
+        return false;
+    }
+    let word: String = prompt
+        .chars()
+        .filter(|one| one.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if word.is_empty() {
+        return false;
+    }
+    !GO_ON_WORDS.iter().any(|go_on| {
+        let times = word.len() / go_on.len();
+        word.len().is_multiple_of(go_on.len()) && times > 0 && word == go_on.repeat(times)
+    })
+}
+
+/// How far back in a transcript [`last_naming_prompt`] looks: Orca's own
+/// bound for a backwards scan (4 MiB, out/main/index.js:9092). A coordinator's
+/// conversation puts a quarter megabyte of tool traffic and pointers between
+/// two things a person asked, so the card's tail window ([`MAX_TAIL_BYTES`])
+/// would find none; past this, the honest answer is none.
+pub const NAMING_PROMPT_SEARCH_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The newest prompt in the transcript at `path` that names its turn
+/// ([`names_the_turn`]), clamped for a card — what a conversation stored
+/// under a go-on word is called instead (t-11540).
+///
+/// A prompt is what a person typed: a Claude `user` record's own words (not a
+/// tool's result, not a record the CLI marks as its own), Codex's
+/// `user_message` event, or a flatter vendor's `role: user` line — past the
+/// frames around what was pasted and the machine envelopes, the same reading
+/// the hook's prompt gets ([`prompt_words_in_parsed`]).
+#[must_use]
+pub fn last_naming_prompt(path: &Path) -> Option<String> {
+    let tail = Tail::read_within(path, NAMING_PROMPT_SEARCH_BYTES)?;
+    tail.lines().rev().find_map(|line| {
+        let typed = typed_prompt(line.trim())?;
+        let unframed = without_pasted_frames(&typed);
+        let prompt = past_the_envelopes(&unframed).trim();
+        names_the_turn(prompt).then(|| clamp(prompt))
+    })
+}
+
+/// Whether a person typed the prompt the CLI numbered `prompt_id`, from that
+/// prompt's own record in the transcript at `path` (t-11540).
+///
+/// Claude Code fires `UserPromptSubmit` for every prompt that opens a turn —
+/// what a person typed or queued, and also a check the agent scheduled on
+/// itself and a background task's notice — and the hook's payload does not
+/// say which (2.1.283: `session_id`, `transcript_path`, `prompt_id`, …, no
+/// source). The record it writes AFTER the hook does: the same `promptId`,
+/// with the CLI's own voice marked (`spoken_by_the_cli`). `None` is not
+/// known: not written yet (the hook fires first), or not in the card's
+/// tail window ([`MAX_TAIL_BYTES`]) — the record lands just before the turn's
+/// first answer, so the pane's next event finds it there.
+#[must_use]
+pub fn prompt_typed_by_a_person(path: &Path, prompt_id: &str) -> Option<bool> {
+    let tail = Tail::read(path)?;
+    tail.lines().rev().find_map(|line| {
+        // Most lines are the turn's traffic; only one that mentions the
+        // number is worth parsing.
+        if !line.contains(prompt_id) {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        let record = value.as_object()?;
+        if record.get("promptId").and_then(serde_json::Value::as_str) != Some(prompt_id) {
+            return None;
+        }
+        // A tool's result rides the same number; the prompt is the record
+        // that carries words.
+        let words = record.get("message")?.get("content")?;
+        let carries_words = words.is_string()
+            || words.as_array().is_some_and(|parts| {
+                parts.iter().any(|part| {
+                    part.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                })
+            });
+        carries_words.then(|| !spoken_by_the_cli(record))
+    })
+}
+
+/// A Claude record the CLI wrote in its own voice rather than the person's:
+/// a meta line, a compaction summary, a helper's sidechain, or a prompt whose
+/// source is the CLI itself (`promptSource: "system"` — a scheduled check, a
+/// background task's notice; a person's is `typed` or `queued`) (t-11540).
+fn spoken_by_the_cli(record: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let flag = |key: &str| record.get(key).and_then(serde_json::Value::as_bool) == Some(true);
+    flag("isMeta")
+        || flag("isCompactSummary")
+        || flag("isSidechain")
+        || record
+            .get("promptSource")
+            .and_then(serde_json::Value::as_str)
+            == Some("system")
+}
+
+/// What a person typed, out of one transcript line, or nothing.
+fn typed_prompt(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let record = value.as_object()?;
+    // Codex: the event its rollout writes for what was typed.
+    if let Some(payload) = record
+        .get("payload")
+        .filter(|_| record.get("type").and_then(serde_json::Value::as_str) == Some("event_msg"))
+    {
+        return (payload.get("type").and_then(serde_json::Value::as_str) == Some("user_message"))
+            .then(|| payload.get("message")?.as_str().map(str::to_string))
+            .flatten();
+    }
+    // Claude's own records: the CLI talking, not the person.
+    if spoken_by_the_cli(record) {
+        return None;
+    }
+    let message = record.get("message").and_then(serde_json::Value::as_object);
+    let role = record
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| message?.get("role")?.as_str());
+    if role != Some("user") {
+        return None;
+    }
+    let content = message
+        .and_then(|held| held.get("content"))
+        .or_else(|| record.get("content"))?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    // Typed words are `text` parts; a tool's result rides the same role.
+    let words: Vec<&str> = content
+        .as_array()?
+        .iter()
+        .filter(|part| part.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text")?.as_str())
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 /// What the agent said as its turn ended, from a `Stop`-family payload.
@@ -2342,6 +2587,223 @@ mod tests {
         assert_eq!(
             prompt_in_payload(&payload("<div>keep me</div>")).as_deref(),
             Some("<div>keep me</div>")
+        );
+    }
+
+    /// A prompt that only says go on names nothing, in any of the five
+    /// languages, however it is spelled — and neither does the window's own
+    /// mail pointer (t-11540). A sentence that asks for something does.
+    #[test]
+    fn a_prompt_that_only_says_go_on_names_nothing() {
+        for bare in [
+            "계속",
+            " 계속. ",
+            "계속해줘!",
+            "ㄱㄱ",
+            "ㄱㄱㄱ",
+            "r",
+            "응",
+            "ㅇㅇ",
+            "네",
+            "continue",
+            "Go on!",
+            "go-on",
+            "CONTINUE",
+            "yes",
+            "ok",
+            "OK.",
+            "Keep going",
+            "続けて。",
+            "はい",
+            "继续",
+            "好的",
+            "sigue",
+            "Sí",
+            "vale",
+            "...",
+            "",
+            "  ",
+        ] {
+            assert!(!names_the_turn(bare), "{bare:?} names nothing");
+        }
+        assert!(!names_the_turn(&crate::orchestration::pointer_text(1)));
+        assert!(!names_the_turn(&crate::orchestration::pointer_text(12)));
+        for asked in [
+            "계속 진행하되 시험부터",
+            "사이드바 이름 고치기",
+            "fix the sidebar",
+            "continue the release notes",
+            "ok so why does the board say that",
+            "You have 3 orchestration messages. Run it later",
+        ] {
+            assert!(names_the_turn(asked), "{asked:?} names its turn");
+        }
+    }
+
+    /// A conversation stored under a go-on word is named by the newest
+    /// prompt in its transcript that names a turn — past go-on words, the
+    /// mail pointer, a tool's result and the CLI's own records, for the three
+    /// shapes a prompt is written in; none, when there is none (t-11540).
+    #[test]
+    fn the_newest_naming_prompt_is_read_past_go_on_words_and_the_window_s_own_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let write = |name: &str, lines: &[serde_json::Value]| {
+            let path = dir.path().join(name);
+            let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            std::fs::write(&path, text).expect("write");
+            path
+        };
+        let user = |content: serde_json::Value| serde_json::json!({ "type": "user", "message": { "role": "user", "content": content } });
+        let claude = write(
+            "claude.jsonl",
+            &[
+                user("release the board fix".into()),
+                user("rename the stale panes, then land it".into()),
+                serde_json::json!({ "type": "assistant", "message": { "role": "assistant", "content": [{ "type": "text", "text": "on it" }] } }),
+                user(serde_json::json!([{ "type": "tool_result", "content": "cargo test: ok" }])),
+                user("계속".into()),
+                user(crate::orchestration::pointer_text(1).into()),
+                serde_json::json!({ "type": "user", "isMeta": true, "message": { "role": "user", "content": "Caveat: the CLI's own words" } }),
+                serde_json::json!({ "type": "user", "isCompactSummary": true, "message": { "role": "user", "content": "This session is being continued" } }),
+                user("<command-name>/effort</command-name>".into()),
+                user(serde_json::json!([{ "type": "text", "text": "ㄱㄱ" }])),
+            ],
+        );
+        assert_eq!(
+            last_naming_prompt(&claude).as_deref(),
+            Some("rename the stale panes, then land it")
+        );
+        let codex = write(
+            "codex.jsonl",
+            &[
+                serde_json::json!({ "type": "event_msg", "payload": { "type": "user_message", "message": "split the parser" } }),
+                serde_json::json!({ "type": "response_item", "payload": { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "<environment_context>" }] } }),
+                serde_json::json!({ "type": "event_msg", "payload": { "type": "user_message", "message": "continue" } }),
+            ],
+        );
+        assert_eq!(
+            last_naming_prompt(&codex).as_deref(),
+            Some("split the parser")
+        );
+        let flat = write(
+            "flat.jsonl",
+            &[
+                serde_json::json!({ "role": "user", "content": "draw the map" }),
+                serde_json::json!({ "role": "user", "content": "응" }),
+            ],
+        );
+        assert_eq!(last_naming_prompt(&flat).as_deref(), Some("draw the map"));
+        let bare = write("bare.jsonl", &[user("계속".into()), user("r".into())]);
+        assert_eq!(last_naming_prompt(&bare), None);
+        assert_eq!(last_naming_prompt(&dir.path().join("absent.jsonl")), None);
+    }
+
+    /// Further back than a card's tail window, still inside the search's:
+    /// a coordinator's last request sits under a quarter megabyte of tool
+    /// traffic, and is found there (t-11540).
+    #[test]
+    fn a_naming_prompt_under_more_than_a_cards_tail_is_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("long.jsonl");
+        let user = |content: &str| {
+            serde_json::json!({ "type": "user", "message": { "role": "user", "content": content } })
+                .to_string()
+        };
+        let traffic = serde_json::json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "tool_result", "content": "x".repeat(1024) }] } }).to_string();
+        let mut text = format!("{}\n", user("cut the release"));
+        while (text.len() as u64) < MAX_TAIL_BYTES * 2 {
+            text.push_str(&traffic);
+            text.push('\n');
+        }
+        text.push_str(&format!("{}\n", user("계속")));
+        std::fs::write(&path, text).expect("write");
+        assert_eq!(
+            last_naming_prompt(&path).as_deref(),
+            Some("cut the release")
+        );
+    }
+
+    /// A prompt is a person's only when its own record says so: the record
+    /// the CLI numbered with the hook's `prompt_id`, written after the hook
+    /// fired — a check the agent scheduled on itself and a background task's
+    /// notice are the CLI's own words, what was typed or queued is the
+    /// person's; not yet written is not known (t-11540).
+    #[test]
+    fn a_prompt_is_a_persons_only_when_its_own_record_says_so() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let said = |id: &str, source: &str, origin: &str, meta: bool, content: &str| {
+            let mut record = serde_json::json!({
+                "type": "user", "promptId": id, "promptSource": source, "turnOrigin": origin,
+                "message": { "role": "user", "content": content },
+            });
+            if meta {
+                record["isMeta"] = true.into();
+            }
+            format!("{record}\n")
+        };
+        let result = |id: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({ "type": "user", "promptId": id, "message": { "role": "user", "content": [{ "type": "tool_result", "content": "ok" }] } })
+            )
+        };
+        let mut text = said("p-1", "typed", "human", false, "draw the map");
+        text.push_str(&result("p-1"));
+        text.push_str(&format!("{}\n", serde_json::json!({ "type": "queue-operation", "operation": "enqueue", "content": "read the mail every ten minutes" })));
+        text.push_str(&said(
+            "p-2",
+            "system",
+            "scheduled",
+            true,
+            "read the mail every ten minutes",
+        ));
+        text.push_str(&result("p-2"));
+        text.push_str(&said("p-3", "typed", "human", false, "fix the board name"));
+        text.push_str(&result("p-3"));
+        text.push_str(&said(
+            "p-4",
+            "system",
+            "task_notification",
+            false,
+            "the background build finished",
+        ));
+        text.push_str(&said("p-5", "queued", "human", false, "then land it"));
+        text.push_str(r#"{"type":"user","promptId":"p-6","promptSource":"typed""#);
+        std::fs::write(&path, text).expect("write");
+
+        assert_eq!(prompt_typed_by_a_person(&path, "p-1"), Some(true));
+        assert_eq!(prompt_typed_by_a_person(&path, "p-2"), Some(false));
+        assert_eq!(prompt_typed_by_a_person(&path, "p-3"), Some(true));
+        assert_eq!(prompt_typed_by_a_person(&path, "p-4"), Some(false));
+        assert_eq!(prompt_typed_by_a_person(&path, "p-5"), Some(true));
+        // Half written, never written, no file: not known yet.
+        assert_eq!(prompt_typed_by_a_person(&path, "p-6"), None);
+        assert_eq!(prompt_typed_by_a_person(&path, "p-9"), None);
+        assert_eq!(
+            prompt_typed_by_a_person(&dir.path().join("absent.jsonl"), "p-3"),
+            None
+        );
+    }
+
+    /// The CLI's own prompt names nothing, even when it is not marked meta:
+    /// a background task's notice rides a plain `user` record whose source
+    /// is the CLI (t-11540).
+    #[test]
+    fn a_prompt_the_cli_sent_itself_is_not_a_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let text = [
+            serde_json::json!({ "type": "user", "promptSource": "typed", "turnOrigin": "human", "message": { "role": "user", "content": "fix the board name" } }),
+            serde_json::json!({ "type": "user", "promptSource": "system", "turnOrigin": "task_notification", "message": { "role": "user", "content": "the background build finished" } }),
+        ]
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+        std::fs::write(&path, text).expect("write");
+        assert_eq!(
+            last_naming_prompt(&path).as_deref(),
+            Some("fix the board name")
         );
     }
 

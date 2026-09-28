@@ -46,6 +46,8 @@
  *   node ui/tests/board-orbit.mjs --perf --engine webkit --json out.json
  *   node ui/tests/board-orbit.mjs --perf --dpr 2       2배 밀도(Chromium, CDP)
  *   node ui/tests/board-orbit.mjs --shots <dir>        6·20·60 × 다크·라이트 사진 여섯 장 + 좁은 판 한 장
+ *   node ui/tests/board-orbit.mjs --main-shots <dir>   마지막 입력이 「계속」인 메인 판: 입체·카드·사이드바 한 장씩
+ *   node ui/tests/board-orbit.mjs --main-shots <dir> --scheduled before|after   예약 점검 글이 들어온 뒤(고치기 전/뒤)
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -273,6 +275,8 @@ export async function testBoardOrbit(given, origin, ok) {
     ["memory", () => testOrbitRemembered(browser, origin, ok)],
     ["cards", () => testOrbitLeavesTheCardsAlone(browser, origin, ok)],
     ["live", () => testOrbitLiveMap(browser, origin, ok)],
+    ["main name", () => testOrbitMainName(browser, origin, ok)],
+    ["main name held", () => testOrbitMainName(browser, origin, ok, { held: true })],
   ];
   try {
     for (const [name, part] of parts) {
@@ -1713,6 +1717,148 @@ export async function measureBoardOrbit(page, { seconds = 3, fixture = {} } = {}
   };
 }
 
+/* t-11540 · 마지막 입력이 「계속」인 메인 판. 조율자 하나가 메인 워크스페이스에서 워커 둘을
+ * 부렸고, 사람은 그 판에 뜻 있는 요청을 한 번 쳤고, 창은 우편 안내를 한 번 쳤고, 사람은 마지막에
+ * 「계속」을 쳤다 — 셋 다 프로덕션의 한 문(`hook:agent`)으로 들어간다. 이어 가라는 말과 안내는 보고가
+ * 「이름 아님」이라 싣는다(판정은 core의 한 표). 조율자의 이름은 앞의 요청이어야 한다.
+ *
+ * `held`(2회차): Claude Code는 에이전트가 제 세션에 걸어 둔 주기 점검 글에도 같은 훅을 울리고,
+ * 누가 쳤는지는 훅 뒤에 쓰는 기록에만 적는다 — 그래서 창은 번호 붙은 프롬프트를 이름 아님으로
+ * 붙잡았다가, 그 판의 다음 이벤트에서 기록이 사람 줄이라고 말하면 `named`로 싣는다. 요청은 그
+ * 길로 이름이 되고, 뒤에 온 점검 글은 붙잡힌 채 끝내 이름이 되지 않는다. `scheduledNamed`는 고치기
+ * 전의 훅 길 — 점검 글이 그대로 이름감으로 온다(전 사진만). */
+export function mainNameFixture({ held = false, scheduledNamed = false } = {}) {
+  const CHECK = "[점검 — 10분마다] 우편을 읽고 도는 워커를 본다";
+  const LEAD = 7101;
+  const WORKERS = [7102, 7103];
+  const ASKED = "보드 이름 고치고 릴리즈까지";
+  const path = projects[0].worktrees[0].path;
+  const now = Date.now();
+  for (const term of [LEAD, ...WORKERS]) mountTermTab(term, { agent: "claude", worktree: path }, { focus: false, placement: "tab" });
+  window.__PANES__ = [LEAD, ...WORKERS].map((term) => ({
+    term, agent: "claude", state: "working", at: now, state_started_at: now, resumable: false,
+    ...(term === LEAD ? {} : { parent: LEAD }),
+  }));
+  window.__LEDGER__ = [];
+  window.__OVERLAYS__ = { latest: null, mail: [], dependencies: [], task_dependencies: [], merge: [] };
+  window.__ANSWER__.board_columns = ({ cards }) => ["attention", "working", "done", "idle"].map((bucket) => ({
+    bucket,
+    cards: cards.filter((card) => card.state === bucket).map((card) => ({
+      lineage: { depth: 0, is_first_sibling: true, is_last_sibling: true, child_count: 0 }, ...card,
+    })),
+  }));
+  const said = (term, prompt, nothing) => {
+    for (const listener of window.__LISTENERS__["hook:agent"] ?? []) {
+      listener({ payload: { term, agent: "claude", state: "working", event: "UserPromptSubmit", resumable: false,
+        prompt, ...(nothing ? { prompt_names_nothing: true } : {}) } });
+    }
+  };
+  said(WORKERS[0], "사이드바 이름 한 함수로", false);
+  said(WORKERS[1], "입체 보기 이름표 시험", false);
+  const next = (term, named) => {
+    for (const listener of window.__LISTENERS__["hook:agent"] ?? []) {
+      listener({ payload: { term, agent: "claude", state: "working", event: "PreToolUse", resumable: false,
+        ...(named ? { named } : {}) } });
+    }
+  };
+  said(LEAD, ASKED, held);
+  if (held) next(LEAD, ASKED);
+  said(LEAD, "You have 1 orchestration message. Run `zerocode-orc check`.", true);
+  said(LEAD, "계속", true);
+  if (held) {
+    said(LEAD, CHECK, true);
+    next(LEAD, null);
+  }
+  if (scheduledNamed) said(LEAD, CHECK, false);
+  agentBoardMode = "graph";
+  agentGraphSelectedKey = null;
+  agentGraphScopeKey = "";
+  boardQuery = "";
+  if (typeof activeTabId !== "undefined" && activeTabId === "board") dropTab("board");
+  openBoard();
+  return { lead: LEAD, asked: ASKED, path };
+}
+
+/* 조율자 판의 이름은 어디서나 하나다: 사이드바의 행, 상황판의 카드와 상세 패널, 입체 보기의
+ * 이름표, 한 줄 요약의 주어 — 모두 앞의 뜻 있는 요청이고 「계속」은 어디에도 없다. 요약은
+ * 이미 있는 문장 그대로 지시한 작업의 수를 말한다(새 문구 0). */
+export async function testOrbitMainName(browser, origin, ok, { held = false } = {}) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await installBoardWaits(page);
+    await installOrbitCounters(page);
+    const { lead, asked } = await page.evaluate(mainNameFixture, { held });
+    await page.evaluate(() => window.__BOARD_SETTLED__());
+    await page.waitForFunction((key) => document.querySelector(`#board-view [data-orbit-key="${key}"]`),
+      `agent:term:${lead}`, { timeout: ORBIT_ACTION_MS });
+    const named = await page.evaluate(({ term, key }) => {
+      const view = docHost(boardTab().pane, "board");
+      const model = agentGraphModels.get(view);
+      const entry = model.agents.find((one) => one.card.pane === `term:${term}`);
+      const row = worktreeAgentRows(tabOfTerm(term).worktree).find((one) => one.term === term);
+      const glance = [...document.querySelector("#board-view .agent-orbit-glance-line").children]
+        .map((part) => part.textContent);
+      return {
+        prompt: panePrompts.get(term),
+        sidebar: agentRowPrimary(row, agentRowState(row)),
+        sidebarDrawn: document.querySelector(`.wt-agent[data-term="${term}"] .wt-agent-name`)?.textContent ?? "",
+        heading: entry.card.heading,
+        identity: agentGraphIdentity(entry.card),
+        entity: model.entities.get(entry.key)?.label ?? "",
+        label: document.querySelector(`#board-view [data-orbit-key="${key}"]`)?.textContent ?? "",
+        glance,
+        tab: tabLabel(tabOfTerm(term)),
+      };
+    }, { term: lead, key: `agent:term:${lead}` });
+    const everywhere = [named.prompt, named.sidebar, named.sidebarDrawn, named.heading, named.identity,
+      named.entity, named.glance[1], named.tab];
+    ok(held
+      ? "a held request names the main pane once its record says a person typed it, and a scheduled check never does"
+      : "a go-on word and the window's pointer never name the main pane: every surface says the request",
+      everywhere.every((word) => word === asked) && named.label.includes(asked), JSON.stringify(named));
+    ok("the one-line story counts the coordinator's work in the words it already had, under the request's name",
+      named.glance.join("") === `${asked}가 작업 2개에 지시를 보냈고, 모두 작업 중입니다.`, JSON.stringify(named.glance));
+    ok("the main-name page raised no error", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
+/* 전/후 사진(t-11540): 같은 픽스처를 입체 보기·카드 보기·사이드바에서 한 장씩. `fixture`는
+ * 2회차의 두 장면(예약 점검 글이 들어온 뒤 — 고치기 전 `scheduledNamed`, 뒤 `held`). */
+async function shootMainName(browser, origin, dir, fixture = {}) {
+  mkdirSync(dir, { recursive: true });
+  const { page } = await openWindowTestPage(browser, origin);
+  const shots = [];
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installBoardWaits(page);
+    await installOrbitCounters(page);
+    const { lead } = await page.evaluate(mainNameFixture, fixture);
+    await page.evaluate(() => window.__BOARD_SETTLED__());
+    await page.waitForFunction((key) => document.querySelector(`#board-view [data-orbit-key="${key}"]`),
+      `agent:term:${lead}`, { timeout: ORBIT_ACTION_MS });
+    await page.evaluate(() => window.__ORBIT_FRAMES__(4));
+    const shoot = async (name) => {
+      const file = join(dir, `${name}.png`);
+      await page.screenshot({ path: file, animations: "disabled" });
+      shots.push(file);
+    };
+    await shoot("main-name-3d");
+    await page.evaluate(() => document.querySelector('#board-view [data-relations-view="cards"]').click());
+    await page.evaluate(() => window.__BOARD_SETTLED__());
+    await shoot("main-name-cards");
+    const row = page.locator(`.wt-agent[data-term="${lead}"]`);
+    const box = await row.boundingBox();
+    await page.screenshot({ path: join(dir, "main-name-sidebar.png"), animations: "disabled",
+      clip: { x: 0, y: Math.max(0, box.y - 120), width: Math.max(box.x + box.width + 40, 320), height: 280 } });
+    shots.push(join(dir, "main-name-sidebar.png"));
+  } finally {
+    await page.close();
+  }
+  return shots;
+}
+
 const ORBIT_FRAME_BUDGET_MS = 8;
 /* 요소 예산은 브리핑의 판(워크스페이스 4·에이전트 12)의 것이다. 다른 판에서는 몸 하나가
  * 얹는 요소 수(버튼 + 이름 = 2)를 잰다 — 판이 커지면 늘어나는 것이 옳은 수다. */
@@ -1812,6 +1958,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const engine = option("--engine", "chromium");
   const perfOnly = process.argv.includes("--perf");
   const shotDir = option("--shots", null);
+  const mainShotDir = option("--main-shots", null);
+  const scheduled = option("--scheduled", "");
   const dpr = Number(option("--dpr", 1));
   const { files, origin } = await createWindowServer();
   const browserType = engine === "webkit" ? webkitType() : chromium;
@@ -1822,7 +1970,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const tables = [];
   const measures = [];
   try {
-    if (shotDir) {
+    if (mainShotDir) {
+      const { browser: drawing, own } = await orbitGlBrowser(browser);
+      const fixture = { before: { scheduledNamed: true }, after: { held: true } }[scheduled] ?? {};
+      console.log((await shootMainName(drawing, origin, resolve(mainShotDir), fixture)).join("\n"));
+      if (own) await drawing.close();
+    } else if (shotDir) {
       const shots = await shootBoardOrbit(browser, origin, resolve(shotDir), dpr);
       console.log(shots.join("\n"));
     } else {
@@ -1857,7 +2010,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   }
   const out = option("--json", null);
   if (out) writeFileSync(out, `${JSON.stringify({ engine, measures }, null, 2)}\n`);
-  if (!shotDir) {
+  if (!shotDir && !mainShotDir) {
     console.log(lines.join("\n"));
     for (const table of tables) console.log(`\n${table}`);
     console.log(`\n${lines.filter((line) => line.startsWith("PASS")).length}/${lines.length} passed`);

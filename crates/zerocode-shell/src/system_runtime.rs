@@ -551,7 +551,9 @@ pub(super) fn pane_layouts_read(file: &Path, worktree: &str) -> Vec<pane_layout:
             // half a megabyte per leaf across the bridge to be ignored.
             layout.buffers = HashMap::new();
             layout.terms = HashMap::new();
-            layout
+            // And a pane stored under a word that only says go on comes back
+            // under what its conversation was asked (t-11540).
+            layout.named_by_their_turns()
         })
         .collect()
 }

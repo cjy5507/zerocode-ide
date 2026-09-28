@@ -634,6 +634,11 @@ pub(super) async fn hook_loop(
         if !report_speaks_for_its_pane(&app, &report) {
             continue;
         }
+        // Whether this event names the pane: a prompt that numbers itself
+        // waits for its own record, which says whether a person typed it
+        // (t-11540) — a check the agent scheduled on itself fires the same
+        // hook. Asked of the pane's own reports only, before anyone hears it.
+        hooks::settle_prompt_name(&mut report);
         // Whether a PERSON ended this turn. Asked BEFORE the done gate below,
         // because that gate reads it: Orca computes `interrupted` first and
         // hands it to `resolveClaudePaneState` (`agent-hook-listener.ts:2962`
@@ -2194,6 +2199,9 @@ pub(super) fn clear_answered_wait(app: &AppHandle, term: TermId, road: &AnswerRo
         session: None,
         resumable: false,
         prompt: None,
+        prompt_names_nothing: false,
+        prompt_id: None,
+        named: None,
         said: None,
         ask: None,
         ask_prompt: None,
@@ -2399,6 +2407,9 @@ pub(super) fn apply_inferred_interrupt(
         session: None,
         resumable: false,
         prompt: None,
+        prompt_names_nothing: false,
+        prompt_id: None,
+        named: None,
         said: None,
         ask: None,
         ask_prompt: None,
@@ -2475,6 +2486,9 @@ pub(super) fn clear_departed_agent(app: &AppHandle, term: TermId) {
             session: None,
             resumable: false,
             prompt: None,
+            prompt_names_nothing: false,
+            prompt_id: None,
+            named: None,
             said: None,
             ask: None,
             ask_prompt: None,

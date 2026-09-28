@@ -9,7 +9,7 @@
 //! bind on loopback port 0 costs nothing, and doing it late would give the
 //! first agent launch a coin-flip on whether its environment carries a port.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
@@ -1717,6 +1717,27 @@ pub struct PaneHookReport {
     /// `UserPromptSubmit` payload's own field, clamped for a card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// That prompt says nothing about what the turn is for — a word telling
+    /// the agent to go on, or the window's own mail pointer
+    /// ([`zerocode_core::transcript::names_the_turn`]). It is still what was
+    /// asked, and still the evidence a prompt went in; it is only not a name,
+    /// so the window keeps the conversation's name it had (t-11540). Decided
+    /// here because the list of such words is the core's. Also set on a
+    /// prompt held until its own record says who wrote it
+    /// ([`settle_prompt_name`]) — not a name YET.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub prompt_names_nothing: bool,
+    /// The number the CLI gave the prompt that opened this turn — Claude
+    /// Code's `prompt_id`, on every event of the turn, and the `promptId` of
+    /// that prompt's record in its transcript. The window's own: what a held
+    /// prompt is looked up by ([`settle_prompt_name`]).
+    #[serde(skip)]
+    pub prompt_id: Option<String>,
+    /// A prompt an earlier event of this pane held back, now that its own
+    /// record says a person typed it — the pane's name from here on
+    /// (t-11540). Rides one event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub named: Option<String>,
     /// What the agent answered, when this event ends a turn — the payload's
     /// explicit field, or the tail of the transcript it names.
     ///
@@ -2399,6 +2420,15 @@ pub fn report_of(
             .is_some_and(|one| zerocode_core::resume_argv(envelope.agent, one).is_some()),
         session,
         event,
+        prompt_names_nothing: prompt
+            .as_deref()
+            .is_some_and(|said| !zerocode_core::transcript::names_the_turn(said)),
+        prompt_id: payload
+            .tree()
+            .and_then(|tree| tree.get("prompt_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        named: None,
         prompt,
         said,
         ask,
@@ -2406,6 +2436,82 @@ pub fn report_of(
         approval,
         model: zerocode_core::hook::model_in_parsed(&payload),
     })
+}
+
+/// A prompt that would name its pane, held until its own transcript record
+/// says who wrote it (t-11540).
+struct HeldPrompt {
+    /// The number the CLI gave it — its record's `promptId`.
+    id: String,
+    transcript: PathBuf,
+    prompt: String,
+}
+
+/// The held prompts, one per pane: the next prompt replaces the last.
+static HELD_PROMPTS: LazyLock<Mutex<HashMap<u32, HeldPrompt>>> = LazyLock::new(Mutex::default);
+
+/// Settle whether this event names its pane — the hook loop's one call, on
+/// every report the pane's own gate let through (`settle_prompt_name_in`).
+pub fn settle_prompt_name(report: &mut PaneHookReport) {
+    let mut held = HELD_PROMPTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    settle_prompt_name_in(&mut held, report);
+}
+
+/// Hold a prompt that numbers itself, and settle it on the pane's next event
+/// (t-11540).
+///
+/// Claude Code fires `UserPromptSubmit` for a check the agent scheduled on
+/// itself exactly as for a person's words — a coordinator's pane gets a long
+/// one every ten minutes — and its payload has no field that says which. The
+/// record it writes after the hook returns does, under the same number
+/// ([`zerocode_core::transcript::prompt_typed_by_a_person`]). So a naming
+/// prompt that carries a number and a transcript is held — reported as naming
+/// nothing yet — and every later event of the pane asks that record: a
+/// person's prompt rides out once as `named`, the CLI's own is let go, and so
+/// is one whose turn ended with its record still not found. A prompt that
+/// numbers nothing (every other agent) names at once, as before.
+fn settle_prompt_name_in(held: &mut HashMap<u32, HeldPrompt>, report: &mut PaneHookReport) {
+    if report.session_boundary {
+        held.remove(&report.term);
+    }
+    let transcript = report
+        .session
+        .as_ref()
+        .and_then(|session| session.transcript_path.as_deref());
+    if let (Some(prompt), false, Some(id), Some(transcript)) = (
+        report.prompt.as_deref(),
+        report.prompt_names_nothing,
+        report.prompt_id.as_deref(),
+        transcript,
+    ) {
+        held.insert(
+            report.term,
+            HeldPrompt {
+                id: id.to_string(),
+                transcript: PathBuf::from(transcript),
+                prompt: prompt.to_string(),
+            },
+        );
+        report.prompt_names_nothing = true;
+        return;
+    }
+    let Some(waiting) = held.get(&report.term) else {
+        return;
+    };
+    match zerocode_core::transcript::prompt_typed_by_a_person(&waiting.transcript, &waiting.id) {
+        Some(person) => {
+            let settled = held.remove(&report.term);
+            if person {
+                report.named = settled.map(|one| one.prompt);
+            }
+        }
+        None if report.state == zerocode_core::hook::HookState::Done => {
+            held.remove(&report.term);
+        }
+        None => {}
+    }
 }
 
 #[cfg(test)]
@@ -3260,6 +3366,138 @@ mod tests {
         let silent = r#"{"hook_event_name":"Stop"}"#;
         let report = report_of(&envelope("term-3", "", silent), None).expect("a report");
         assert_eq!(report.model, None);
+    }
+
+    /// A prompt that only says go on, or the window's own mail pointer, is
+    /// still the prompt — the evidence one went in — and the report says it
+    /// names nothing, so the window keeps the name it had (t-11540). Only a
+    /// prompt event carries the flag.
+    #[test]
+    fn a_go_on_prompt_is_reported_as_naming_nothing() {
+        let asking = |prompt: &str| {
+            let payload =
+                serde_json::json!({ "hook_event_name": "UserPromptSubmit", "prompt": prompt });
+            report_of(&envelope("term-3", "", &payload.to_string()), None).expect("a report")
+        };
+        let go_on = asking("계속");
+        assert_eq!(go_on.prompt.as_deref(), Some("계속"));
+        assert!(go_on.prompt_names_nothing);
+        assert!(asking(&zerocode_core::orchestration::pointer_text(1)).prompt_names_nothing);
+        let asked = asking("계속 진행하되 시험부터");
+        assert!(!asked.prompt_names_nothing);
+        let json = serde_json::to_value(&asked).expect("serializes");
+        assert!(
+            json.get("prompt_names_nothing").is_none(),
+            "a naming prompt adds nothing to the wire"
+        );
+        let ended = report_of(
+            &envelope("term-3", "", r#"{"hook_event_name":"Stop"}"#),
+            None,
+        )
+        .expect("a report");
+        assert!(!ended.prompt_names_nothing);
+    }
+
+    /// A prompt names its pane only once its own transcript record says a
+    /// person typed it (t-11540). Claude Code fires `UserPromptSubmit` for a
+    /// check the agent scheduled on itself exactly as for a person's words,
+    /// and says which only in the record it writes after the hook returns —
+    /// so the prompt is held, and the pane's next event reads that record by
+    /// the number the CLI gave the prompt. A person's prompt then names the
+    /// pane, once; the CLI's own names nothing; a turn that ends with no
+    /// record lets it go. A payload that numbers no prompt names at once.
+    #[test]
+    fn a_prompt_names_its_pane_only_once_its_record_says_a_person_typed_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transcript = dir.path().join("session.jsonl");
+        let path = transcript.display().to_string();
+        let event = |payload: serde_json::Value| {
+            report_of(&envelope("term-3", "", &payload.to_string()), None).expect("a report")
+        };
+        let asking = |id: &str, prompt: &str| {
+            serde_json::json!({ "hook_event_name": "UserPromptSubmit", "session_id": "s-1",
+                "transcript_path": path, "prompt_id": id, "prompt": prompt })
+        };
+        let using = |id: &str| {
+            serde_json::json!({ "hook_event_name": "PreToolUse", "session_id": "s-1",
+                "transcript_path": path, "prompt_id": id, "tool_name": "Bash" })
+        };
+        let written = |id: &str, source: &str, origin: &str, meta: bool, prompt: &str| {
+            let mut record = serde_json::json!({ "type": "user", "promptId": id,
+                "promptSource": source, "turnOrigin": origin,
+                "message": { "role": "user", "content": prompt } });
+            if meta {
+                record["isMeta"] = true.into();
+            }
+            let mut text = std::fs::read_to_string(&transcript).unwrap_or_default();
+            text.push_str(&format!("{record}\n"));
+            std::fs::write(&transcript, text).expect("write");
+        };
+        let mut held = std::collections::HashMap::new();
+        let mut settled = |payload: serde_json::Value| {
+            let mut report = event(payload);
+            settle_prompt_name_in(&mut held, &mut report);
+            report
+        };
+
+        let asked = settled(asking("p-1", "fix the board name"));
+        assert_eq!(
+            asked.prompt.as_deref(),
+            Some("fix the board name"),
+            "still the evidence"
+        );
+        assert!(
+            asked.prompt_names_nothing,
+            "held until its record is written"
+        );
+        assert_eq!(settled(using("p-1")).named, None, "not written yet");
+        written("p-1", "typed", "human", false, "fix the board name");
+        let named = settled(using("p-1"));
+        assert_eq!(named.named.as_deref(), Some("fix the board name"));
+        let json = serde_json::to_value(&named).expect("serializes");
+        assert_eq!(json["named"], "fix the board name");
+        assert!(
+            serde_json::to_value(&asked)
+                .expect("serializes")
+                .get("prompt_id")
+                .is_none()
+        );
+        assert_eq!(settled(using("p-1")).named, None, "named once");
+
+        let checked = settled(asking("p-2", "[check every ten minutes] read the mail"));
+        assert!(checked.prompt_names_nothing);
+        written(
+            "p-2",
+            "system",
+            "scheduled",
+            true,
+            "[check every ten minutes] read the mail",
+        );
+        assert_eq!(
+            settled(using("p-2")).named,
+            None,
+            "the CLI's own prompt names nothing"
+        );
+
+        settled(asking("p-3", "draw the map"));
+        let ended = settled(
+            serde_json::json!({ "hook_event_name": "Stop", "session_id": "s-1",
+            "transcript_path": path, "prompt_id": "p-3" }),
+        );
+        assert_eq!(ended.named, None);
+        written("p-3", "typed", "human", false, "draw the map");
+        assert_eq!(
+            settled(using("p-3")).named,
+            None,
+            "let go when its turn ended unwritten"
+        );
+
+        let plain = settled(serde_json::json!({ "hook_event_name": "UserPromptSubmit",
+            "prompt": "split the parser" }));
+        assert!(
+            !plain.prompt_names_nothing,
+            "no number, no record to wait for"
+        );
     }
 
     /// Hook text is display data. C0 editing bytes may be present in vendor
