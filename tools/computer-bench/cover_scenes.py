@@ -110,6 +110,10 @@ def grade(record, scene, cover):
     from the cover's arrival to the first hit under it, how often the person
     was asked (`cover`, the bench's account of the cover it put up: when it
     stood and what it heard), and the score."""
+    if not record.get("started"):
+        # The hand never began (its plan was refused, or the driver was):
+        # nothing to grade, and it says why.
+        return {"kind": scene["kind"], "aborted": reflex.aborted(record), "score": None}
     start, deadline = reflex.acting(record)
     came = max(reflex.at_ns(record, scene["appearMs"]), start)
     under = [target for target in record["schedule"]["targets"]

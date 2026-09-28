@@ -986,7 +986,9 @@ class Desk:
               f"{self.values['reflex_round']['run_s']} s — any keyboard or mouse input stops it", flush=True)
         time.sleep(safety["announce_s"])
         run = self.run_folder(run_name(seed, cover, cover_mode))
-        ready = self.launch(run, seed, cover)
+        # A run with no cover calls launch as it always has, so a harness
+        # that overrides launch(run, seed) keeps working (t-12979).
+        ready = self.launch(run, seed) if cover is None else self.launch(run, seed, cover)
         many = rules or self.values["reflex_plan"]["rules_per_colour"]
         config = CONFIG if many == self.values["reflex_plan"]["rules_per_colour"] else f"{CONFIG}+rules{many}"
         if autopilot is not None:
