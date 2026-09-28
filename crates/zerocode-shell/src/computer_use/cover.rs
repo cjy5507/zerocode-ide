@@ -37,18 +37,19 @@ use super::marks::{PinnedClick, desktop_windows};
 use crate::systemone::{self, Wire};
 
 /// What a place must be to press: its centre showing (a press lands on one
-/// point), or all of it (a hand that watches a region).
+/// point), or less than a share of it hidden, per thousand (a hand that
+/// watches a region and refuses what is hidden in it cell by cell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Needs {
     Centre,
-    Whole,
+    Under(u16),
 }
 
 impl Needs {
-    fn met(self, cover: &Cover) -> bool {
+    pub(crate) fn met(self, cover: &Cover) -> bool {
         match self {
             Self::Centre => !cover.blocks_a_press(),
-            Self::Whole => !cover.hides_any(),
+            Self::Under(share) => cover.hidden_permille < share,
         }
     }
 }
