@@ -284,16 +284,18 @@ export async function testKnowledgeUniverse(page, ok) {
 
 /* ---- ② 은하 짓기·별·빛 번짐과 합성 ---------------------------------------------------------------
  *
- * 규칙이 맞게 섰는지를 셈으로 묻는다(그림의 결은 사진이 말한다). 볼트는 여기서 짓는다: 쪽 수가 다른 스무 무리
- * (무리 안은 촘촘하고 무리 사이는 한 가닥)와 홀로 선 쪽 여섯 — 평면 지도의 군집이 그대로 무리가 되도록. 무리
- * 9와 12는 오래전에 고쳤고(활동 0), 나머지는 오늘 고쳤다. */
-const GALAXY_SIZES = Object.freeze([60, 56, 52, 48, 45, 42, 39, 36, 33, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 5, 4]);
+ * 규칙이 맞게 섰는지를 셈으로 묻는다(그림의 결은 사진이 말한다). 볼트는 여기서 짓는다: 쪽 수가 다른 스물두
+ * 무리(무리 안은 촘촘하고 무리 사이는 잇지 않는다)와 홀로 선 쪽 여섯 — 평면 지도의 군집이 그대로 무리가 되도록. 무리
+ * 9와 12는 오래전에 고쳤고(활동 0), 무리 15는 절반만 요즘 고쳤으며(활동 0.5 — 고정 문턱 0.12보다 바쁘지만 은하
+ * 활동의 가운데값보다 조용하다), 나머지는 오늘 고쳤다. */
+const GALAXY_SIZES = Object.freeze([80, 56, 52, 48, 45, 42, 39, 36, 33, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 5, 4]);
 const GALAXY_ALONE = 6;
 const GALAXY_QUIET = Object.freeze([9, 12]);
+const GALAXY_HALF = 15;
 
 export async function testKnowledgeUniverseGalaxies(page, ok) {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  const seen = await page.evaluate(async ({ sizes, alone, quiet }) => {
+  const seen = await page.evaluate(async ({ sizes, alone, quiet, half }) => {
     try {
       const view = document.querySelector(".knowledge-view:not([hidden])");
       const frame = () => new Promise((done) => requestAnimationFrame(done));
@@ -329,13 +331,16 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
           if (step > 2) edges.push({ from: first + step, to: first + ((step * 7) % (step - 1)), kind: "mentions" });
           if (step > 4) edges.push({ from: first + step, to: first + ((step * 13) % (step - 3)), kind: "related" });
         }
-        if (group > 0) edges.push({ from: first, to: starts[group - 1], kind: "mentions" });
+        /* 무리 사이는 잇지 않는다 — 한 가닥이라도 이으면 평면 지도(Louvain)가 작은 이웃 무리를 합쳐 순위가 밀린다. */
       });
+      /* 무리 0의 첫 쪽은 제 무리 전부를 가리키는 허브다 — 연결 비가 광도의 천장(`star-ratio-cap`)을 넘는다. */
+      for (let step = 2; step < sizes[0]; step += 1) edges.push({ from: 0, to: step, kind: "mentions" });
       const nowMs = Date.now();
       const modifiedMs = [];
       sizes.forEach((size, group) => {
         for (let step = 0; step < size; step += 1) {
-          modifiedMs.push(quiet.includes(group) ? nowMs - 400 * 86_400_000 : nowMs - (step % 5) * 3_600_000);
+          const old = quiet.includes(group) || (group === half && step % 2 === 1);
+          modifiedMs.push(old ? nowMs - 400 * 86_400_000 : nowMs - (step % 5) * 3_600_000);
         }
       });
       for (let one = 0; one < alone; one += 1) modifiedMs.push(0);
@@ -373,12 +378,17 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
         return all > 0 ? recent / all : 0;
       };
       const T = KNOWLEDGE_UNIVERSE_TYPES;
+      /* 타원의 문턱 = max(토큰, 은하 활동의 가운데값 — 짝수면 가운데 둘의 평균)(디자이너 m-12546의 3). */
+      const busy = Array.from({ length: wantGalaxies }, (unused, rank) => activityOf(rank)).sort((a, b) => a - b);
+      const middleBusy = busy.length === 0 ? 0 : busy.length % 2 === 1 ? busy[busy.length >> 1]
+        : (busy[busy.length / 2 - 1] + busy[busy.length / 2]) / 2;
+      const quietBelow = Math.max(tune.ellipticalActivity, middleBusy);
       const wantType = (rank) => {
         if (rank >= wantGalaxies) return T.cluster;
         if (rank < tune.barredRanks) return T.barred;
         if (wantGalaxies >= tune.irregularLeast && rank >= wantGalaxies - tune.irregularLast) return T.irregular;
         if (rank >= tune.ellipticalFrom && rank % tune.ellipticalEvery === 0
-          && activityOf(rank) < tune.ellipticalActivity) return T.elliptical;
+          && activityOf(rank) < quietBelow) return T.elliptical;
         return T.spiral;
       };
       const rows = map.galaxy.map((row) => ({ rank: row.rank, type: row.type, want: wantType(row.rank),
@@ -402,8 +412,11 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       let lumWorst = 0;
       let tempRange = [1, 0];
       let unknownTemp = -1;
+      let capped = 0;
       for (let seat = 0; seat < layout.count; seat += 1) {
-        const want = ((1 + layout.model.degree[seat]) / (1 + middle)) ** tune.starLumExp;
+        const ratio = (1 + layout.model.degree[seat]) / (1 + middle);
+        if (ratio > tune.starRatioCap) capped += 1;
+        const want = Math.min(ratio, tune.starRatioCap) ** tune.starLumExp;
         lumWorst = Math.max(lumWorst, Math.abs(star[seat * 4] - want) / want);
         tempRange = [Math.min(tempRange[0], star[seat * 4 + 1]), Math.max(tempRange[1], star[seat * 4 + 1])];
         if (layout.model.modified[seat] <= 0) unknownTemp = star[seat * 4 + 1];
@@ -444,30 +457,30 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       await paintKnowledgeView();
       return { named: layout.namedCount, communities: layout.communityCount, sizes: Array.from(layout.communitySize),
         galaxies: map.galaxies, wantGalaxies, least, rowsCount: map.rows, rows, strays, strayRows,
-        lumWorst, tempRange, unknownTemp, rebuilt, darkTints, lightTints, darkComp, lightComp,
+        lumWorst, capped, tempRange, unknownTemp, rebuilt, quietBelow, darkTints, lightTints, darkComp, lightComp,
         neutral: knowledgeUniverseInks(view, universe.probe ?? document.body).neutral, draws, sceneDraws, targets,
         bloomLevels: tune.bloomLevels };
     } catch (error) {
       return { thrown: String(error?.stack ?? error) };
     }
-  }, { sizes: GALAXY_SIZES, alone: GALAXY_ALONE, quiet: GALAXY_QUIET });
+  }, { sizes: GALAXY_SIZES, alone: GALAXY_ALONE, quiet: GALAXY_QUIET, half: GALAXY_HALF });
   const detail = JSON.stringify(seen);
   const T = { spiral: 0, barred: 1, elliptical: 2, irregular: 3, cluster: 4 };
   ok("t-12443 ②: the named clusters become galaxies from the front (at most the token's count, at least the page floor) and the rest clusters, each with the prototype's radius",
     !seen.thrown && seen.galaxies === seen.wantGalaxies && seen.galaxies === 18
       && seen.rowsCount === seen.named && seen.rows.every((row) => row.radius === row.wantRadius),
     detail);
-  ok("t-12443 ②: the shape rule — ranks 0 and 1 barred, the last two galaxies irregular, a quiet rank 9 or 12 elliptical, the rest spiral, clusters beyond",
+  ok("t-12443 ②: the shape rule — ranks 0 and 1 barred, the last two galaxies irregular, ranks 9, 12 and 15 elliptical when quieter than the galaxies' median (and the token's floor), the rest spiral, clusters beyond",
     !seen.thrown && seen.rows.every((row) => row.type === row.want)
       && seen.rows[0]?.type === T.barred && seen.rows[1]?.type === T.barred
       && seen.rows[16]?.type === T.irregular && seen.rows[17]?.type === T.irregular
       && seen.rows[9]?.type === T.elliptical && seen.rows[12]?.type === T.elliptical
-      && seen.rows[15]?.type === T.spiral && seen.rows[18]?.type === T.cluster,
+      && seen.rows[15]?.type === T.elliptical && seen.rows[3]?.type === T.spiral && seen.rows[18]?.type === T.cluster,
     detail);
   ok("t-12443 ②: a page of an unnamed cluster is a stray star with no galaxy row",
     !seen.thrown && seen.strays > 0 && seen.strayRows === 0, detail);
-  ok("t-12443 ②: a star's light is its links over the median to the token's power, its colour its last edit, and an unknown edit reads as the oldest",
-    !seen.thrown && seen.lumWorst < 1e-5 && seen.tempRange[0] >= 0 && seen.tempRange[1] <= 1
+  ok("t-12443 ②: a star's light is its links over the median, capped at the token's ratio, to the token's power, its colour its last edit, and an unknown edit reads as the oldest",
+    !seen.thrown && seen.capped >= 1 && seen.lumWorst < 1e-5 && seen.tempRange[0] >= 0 && seen.tempRange[1] <= 1
       && seen.tempRange[1] > 0.9 && seen.unknownTemp === 0,
     detail);
   ok("t-12443 ②: the same vault builds the same universe — every galaxy texel and every star seat",

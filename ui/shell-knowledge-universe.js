@@ -96,6 +96,9 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   /* 이름 있는 별: 밝기 = ((1 + 연결) / (1 + 가운데값))^지수, 빛깔 = 오늘 1 → `age-span`일 0(로그, 무릎
    * `age-scale`일). */
   starLumExp: "--knowledge-3d-star-lum-exp",
+  /* 연결 비의 천장 — 허브의 비가 시안(850쪽 최대 13.5)보다 크게 나는 볼트에서 가까이 가기 전부터 빛살이 크기
+   * 천장에 닿지 않게(디자이너 m-12546의 2). */
+  starRatioCap: "--knowledge-3d-star-ratio-cap",
   starAgeScale: "--knowledge-3d-star-age-scale",
   starAgeSpan: "--knowledge-3d-star-age-span",
   /* 은하 짓기(시안 `universe`, 디자이너 답 m-12467의 1): 이름 있는 군집 중 순위 앞에서부터 은하가 되는 수의
@@ -824,6 +827,12 @@ function knowledgeUniverseMap(layout, inks) {
     }
     activity[row] = members[row].length > 0 ? recent / members[row].length : 0;
   }
+  /* 타원의 문턱 — 고정 토큰과 은하 활동의 가운데값(짝수면 가운데 둘의 평균) 중 큰 쪽: 바쁜 볼트에서도 그 안에서
+   * 조용한 주제가 타원이 된다(디자이너 m-12546의 3). */
+  const busy = Array.from(activity.subarray(0, galaxies)).sort((left, right) => left - right);
+  const middleBusy = busy.length === 0 ? 0 : busy.length % 2 === 1 ? busy[busy.length >> 1]
+    : (busy[busy.length / 2 - 1] + busy[busy.length / 2]) / 2;
+  const quietBelow = Math.max(U.ellipticalActivity, middleBusy);
   /* 법선의 바탕: 처음 시점 쪽으로 `normal-lean`만큼 기울인 위쪽 — 처음 화면에서 모든 은하의 안이 보이고, 돌면
    * 옆모습이 된다. */
   const camera = [Math.cos(U.homePitch) * Math.sin(U.homeYaw), Math.sin(U.homePitch),
@@ -881,7 +890,7 @@ function knowledgeUniverseMap(layout, inks) {
       } else if (galaxies >= U.irregularLeast && rank >= galaxies - U.irregularLast) {
         type = TYPE.irregular;
         dust = U.dustIrregular;
-      } else if (rank >= U.ellipticalFrom && rank % U.ellipticalEvery === 0 && activity[row] < U.ellipticalActivity) {
+      } else if (rank >= U.ellipticalFrom && rank % U.ellipticalEvery === 0 && activity[row] < quietBelow) {
         type = TYPE.elliptical;
         bulge = U.bulgeElliptical;
         dust = 0;
@@ -1404,7 +1413,7 @@ function makeKnowledgeUniverse(view) {
       for (let at = 0; at < count; at += 1) {
         const days = model.modified[at] > 0 ? Math.max(0, (nowMs - model.modified[at]) / 86_400_000)
           : U.starAgeSpan;
-        star[at * 4] = ((1 + model.degree[at]) / (1 + middle)) ** U.starLumExp;
+        star[at * 4] = Math.min((1 + model.degree[at]) / (1 + middle), U.starRatioCap) ** U.starLumExp;
         star[at * 4 + 1] = Math.max(0, Math.min(1,
           1 - Math.log1p(days / U.starAgeScale) / Math.log1p(U.starAgeSpan / U.starAgeScale)));
         star[at * 4 + 2] = map.rowOf[at];

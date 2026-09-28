@@ -1556,6 +1556,8 @@
   --knowledge-3d-lift-cluster: 0.21;
   --knowledge-3d-lift-orphan: 0.25;
   --knowledge-3d-star-lum-exp: 1.6;
+  /* 연결 비의 천장(시안 850쪽의 최대) — 허브가 큰 볼트에서 처음 자리의 빛살이 크기 천장에 닿지 않게(m-12546). */
+  --knowledge-3d-star-ratio-cap: 13.5;
   --knowledge-3d-star-age-scale: 3;
   --knowledge-3d-star-age-span: 365;
   /* 우주의 무대 — 시안의 `.stage` 바탕. 밝은 테마는 아래 블록이 종이색으로. */
