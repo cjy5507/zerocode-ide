@@ -52421,6 +52421,7 @@ const brain = await page.evaluate(async () => {
     labelStrokeWidth: labelStyle?.strokeWidth ?? "",
     initialFitRatio: ((graphLayout.bounds.maxX - graphLayout.bounds.minX) * graphLayout.scale)
       / view.querySelector(".knowledge-canvas").clientWidth,
+    initialFitWanted: graphLayout.tuning.mapFit,
     gradients: view.querySelectorAll("defs radialGradient[id^='knowledge-node-gradient-']").length,
     halos: view.querySelectorAll(".knowledge-halo").length,
     /* 서 있는 줄만 센다 — 공급망 렌즈(P4)의 줄은 그 렌즈가 켜졌을 때만 선다. */
@@ -52459,10 +52460,10 @@ ok(
     brain.edgeLayers === 1 &&
     brain.labelPaintOrder.includes("stroke") &&
     parseFloat(brain.labelStrokeWidth) === 2 &&
-    // 카메라는 두 축을 다 판 안에 넣으므로(contain, 09-16) 폭의 몫은 토큰의 몫
-    // **이하**다 — 묶는 축이 높이일 때 그보다 작다.
+    // 카메라는 두 축을 다 판 안에 넣으므로(contain, 09-16) 폭의 몫은 전체 지도 맞춤
+    // 토큰(`--knowledge-map-fit`, t-12029)의 몫 **이하**다 — 묶는 축이 높이일 때 그보다 작다.
     brain.initialFitRatio > 0.3 &&
-    brain.initialFitRatio <= 0.74 &&
+    brain.initialFitRatio <= brain.initialFitWanted + 0.02 &&
     brain.gradients === 8 &&
     brain.halos === brain.nodeCount &&
     // 범례는 점 넷(페이지·유령·원본·회상됨)과 선 일곱(여섯 관계 + merge?) — t-2931.
