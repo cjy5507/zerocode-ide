@@ -301,7 +301,11 @@ pub(super) fn cleanup_failed_automation_worktree(
     orchestrator: &Orchestrator,
     path: &Path,
 ) -> (Option<String>, Option<String>) {
-    match remove_automatic_worktree(orchestrator, path) {
+    let removed = match CheckoutHeld::take(path) {
+        Some(held) => remove_automatic_worktree(orchestrator, &held),
+        None => Err("another road is judging or removing it right now".to_string()),
+    };
+    match removed {
         Ok(()) => {
             note_worktree_removal(
                 local_data_root,

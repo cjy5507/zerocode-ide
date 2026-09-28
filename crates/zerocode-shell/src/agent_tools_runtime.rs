@@ -456,11 +456,15 @@ pub(super) fn automatic_cleanup_allowed(
     Ok(())
 }
 
-/// Remove only a clean checkout that this window can prove it owns.
+/// Remove only a clean checkout that this window can prove it owns, and only
+/// under the claim that keeps every other road out of it while git takes it
+/// apart ([`CheckoutHeld`]). The path is the claim's own, so a removal can
+/// take no directory but the one its caller holds.
 pub(super) fn remove_automatic_worktree(
     orchestrator: &Orchestrator,
-    path: &Path,
+    held: &CheckoutHeld,
 ) -> Result<(), String> {
+    let path = held.path();
     automatic_cleanup_allowed(orchestrator, path)?;
     orchestrator
         .remove(path, Removal::ConfirmedIfClean)
@@ -506,7 +510,18 @@ pub(super) fn cleanup_failed_worker_checkout(
     let Some(isolated) = isolated else {
         return;
     };
-    match remove_automatic_worktree(&isolated.orchestrator, &isolated.path) {
+    let Some(held) = CheckoutHeld::take(&isolated.path) else {
+        note_window_event(
+            local_data_root,
+            &format!(
+                "a worker checkout survived its failed launch at {}: another road is \
+                 judging or removing it right now",
+                isolated.path.display()
+            ),
+        );
+        return;
+    };
+    match remove_automatic_worktree(&isolated.orchestrator, &held) {
         Ok(()) => note_worktree_removal(
             local_data_root,
             "failed-worker-launch",
@@ -587,31 +602,21 @@ pub(super) fn schedule_completed_worker_cleanup(
             );
             return;
         }
-        match remove_automatic_worktree(&isolated.orchestrator, &isolated.path) {
-            Ok(()) => {
-                note_worktree_removal(
-                    state.local_data_root(),
-                    "completed-worker",
-                    &isolated.path,
-                    &format!(
-                        "worker {} reported ok on an auto-release seat",
-                        cleanup.worker
-                    ),
-                );
-                let _ = app.emit("worktree:removed", checkout.to_string_lossy().into_owned());
-            }
-            Err(error) => {
-                // Dirty or otherwise unsafe means retained, never forced.
-                note_window_event(
-                    state.local_data_root(),
-                    &format!(
-                        "worker {} checkout retained at {}: {error}",
-                        cleanup.worker,
-                        checkout.display()
-                    ),
-                );
-            }
-        }
+        // The rest is the reclaimer's: the judgment the beat gives every other
+        // finished worker's checkout, under the same claim (t-12773). This
+        // road used to remove on git's word alone, and git's "clean" counts
+        // neither an ignored path nor a branch nothing has merged — on
+        // 2026-09-28 a worker reported ok with commits its base had not taken,
+        // its screenshots under `output/` and a warmed `target/` its
+        // coordinator had moved in, and all of it was gone eighteen seconds
+        // later.
+        worktree_reclaim::judge_reported(
+            &app,
+            &cleanup.worker,
+            &isolated.orchestrator,
+            &isolated.path,
+            now_epoch_ms(),
+        );
     });
 }
 
