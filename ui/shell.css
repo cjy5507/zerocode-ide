@@ -26519,10 +26519,19 @@ input[type="search"]::-webkit-search-cancel-button {
   width: 100%;
 }
 
+/* 「+N」 is the card's fold: a button dressed as the word it replaced. */
 .workspace-board-card-more {
+  align-self: flex-start;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
   color: var(--ink-mist);
+  font: inherit;
   font-size: 10px;
+  cursor: pointer;
 }
+.workspace-board-card-more:hover { color: var(--ink-chalk); background: var(--row-hover); }
 
 .workspace-board-card-menu {
   display: grid;

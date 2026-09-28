@@ -2143,6 +2143,15 @@ let guideCountsAsked = "";
  * paths rather than indices, so the choice survives the list being rebuilt
  * around it. */
 const expandedWorktrees = new Set();
+/* Open a workspace out, or fold it back to its summary. The sidebar's twist
+ * and the board card's 「+N」 flip this one set through this one function, so
+ * the two surfaces never disagree about whether a workspace is opened out. */
+function toggleWorktreeExpanded(path) {
+  if (expandedWorktrees.has(path)) expandedWorktrees.delete(path);
+  else expandedWorktrees.add(path);
+  refreshWorktrees();
+  paintWorkspaceBoard();
+}
 /* 접어 둔 상태 그룹들, id로. 접기는 잃는 것이 아니라 보지 않는 것이므로 위의
  * 두 접힘 집합과 같은 자리에 산다 — 세션 안에서만. */
 const closedStateGroups = new Set();
@@ -4295,9 +4304,7 @@ function makeWorktreeNode(worktree, held) {
   });
   twist.addEventListener("click", (event) => {
     event.stopPropagation();
-    if (expandedWorktrees.has(worktree.path)) expandedWorktrees.delete(worktree.path);
-    else expandedWorktrees.add(worktree.path);
-    refreshWorktrees();
+    toggleWorktreeExpanded(worktree.path);
   });
 
   // What this card hangs under itself right now — the whole list when someone
@@ -5109,6 +5116,8 @@ function workspaceBoardSelectionGesture(path, event) {
 let workspaceBoardDrawOrder = [];
 let workspaceBoardLaneStates = new Map();
 let workspaceBoardAgentRows = new Map();
+/* How many agents a board card shows before 「+N」 holds the rest. */
+const WORKSPACE_BOARD_CARD_AGENTS = 3;
 let workspaceBoardFilterPrState = null;
 
 function paintWorkspaceBoardSelection() {
@@ -5262,6 +5271,7 @@ function workspaceBoardCardPaintSignature(worktree) {
     project?.path ?? "",
     workspaceBoardHostOf(worktree),
     agentRowsSaid(rows),
+    expandedWorktrees.has(worktree.path) ? "open" : "",
   ].join("\u001f");
 }
 
@@ -5423,14 +5433,36 @@ function workspaceBoardCardNode(worktree, index, animate) {
   if (agentRowsAt.length > 0) {
     const agents = document.createElement("div");
     agents.className = "workspace-board-card-agents";
-    agents.addEventListener("click", () => setWorkspaceBoardOpen(false), true);
-    const shown = agentRowsAt.slice(0, 3);
+    // Pressing an agent opens it, so the board steps aside; the fold below
+    // only opens the card, so the board stays.
+    agents.addEventListener("click", (event) => {
+      if (!event.target.closest(".workspace-board-card-more")) setWorkspaceBoardOpen(false);
+    }, true);
+    const open = expandedWorktrees.has(worktree.path);
+    const summary = agentRowsAt.slice(0, WORKSPACE_BOARD_CARD_AGENTS);
+    const shown = open ? agentRowsAt : summary;
     const gutter = shown.some((row) => row.kids > 0);
     for (const row of shown) agents.appendChild(makeAgentRow(row, gutter));
-    if (agentRowsAt.length > shown.length) {
-      const moreAgents = document.createElement("span");
+    const hidden = agentRowsAt.length - summary.length;
+    if (hidden > 0) {
+      const moreAgents = document.createElement("button");
+      moreAgents.type = "button";
       moreAgents.className = "workspace-board-card-more";
-      moreAgents.textContent = `+${agentRowsAt.length - shown.length}`;
+      moreAgents.textContent = open ? t("worker.showLess", "접기") : `+${hidden}`;
+      dressFoldHandle(moreAgents, open, open
+        ? t("workspaceBoard.showFirstAgents", "처음 에이전트 {{count}}개만 보기", { count: summary.length, s: summary.length === 1 ? "" : "s" })
+        : t("workspaceBoard.showMoreAgents", "나머지 에이전트 {{count}}개 보기", { count: hidden, s: hidden === 1 ? "" : "s" }));
+      moreAgents.onclick = (event) => {
+        event.stopPropagation();
+        const keep = document.activeElement === moreAgents;
+        toggleWorktreeExpanded(worktree.path);
+        // The card is drawn again for its new fold; the hand stays on the fold.
+        if (keep) {
+          el("workspace-board").querySelector(
+            `.workspace-board-card[data-worktree-path="${CSS.escape(worktree.path)}"] .workspace-board-card-more`,
+          )?.focus();
+        }
+      };
       agents.appendChild(moreAgents);
     }
     node.appendChild(agents);
