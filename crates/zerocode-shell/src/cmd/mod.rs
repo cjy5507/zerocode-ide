@@ -233,7 +233,8 @@ pub(crate) use settings::{
     set_skip_delete_worktree_confirm, set_source_control_view_mode, set_status_bar_usage_mode,
     set_task_source_visibility, set_terminal_command, set_usage_analytics_enabled,
     set_usage_percentage_display, set_vault_session_limit, set_workspace_board_column_width,
-    set_worktree_card_property, stage_layouts, terminal_command, write_primary_selection,
+    set_worktree_card_property, stage_layouts, standing_pane_worktrees, terminal_command,
+    write_primary_selection,
 };
 
 pub(crate) use session::{

@@ -13336,6 +13336,7 @@ fn a_restored_zo_pane_reopens_its_private_channel() {
         terms: HashMap::from([(0, term)]),
         buffers: HashMap::new(),
         owed: Vec::new(),
+        awake: false,
     }];
     let sessions = HashMap::from([(
         term,

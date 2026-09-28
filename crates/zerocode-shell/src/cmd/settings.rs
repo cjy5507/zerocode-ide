@@ -1097,7 +1097,7 @@ pub(crate) fn save_pane_layouts(
     state: State<'_, AppState>,
     worktree: String,
     mut layouts: Vec<pane_layout::TabLayout>,
-) -> Result<(), String> {
+) -> Result<Vec<Option<u64>>, String> {
     let file = pane_layouts_file(state.config_root());
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -1108,9 +1108,20 @@ pub(crate) fn save_pane_layouts(
     // The one writer, and not once the window is leaving (t-7812 D): the
     // file is then the next window's list, and a save of the window dying
     // would take its tabs off it.
+    // The names the tabs were stored under go back to the window (t-14036):
+    // a tab born in this session is nameless until the file names it, and the
+    // stage can only say where a named tab stands.
     pane_layout::save_window_set(&file, worktree, layouts, &crate::exit_runtime::leaving)
-        .map(|_| ())
+        .map(Option::unwrap_or_default)
         .map_err(|error| error.to_string())
+}
+
+/// The workspaces whose conversations were running when the window last went,
+/// for the boot to put back behind the one in front (t-14036).
+#[tauri::command(async)]
+pub(crate) fn standing_pane_worktrees(state: State<'_, AppState>) -> Vec<String> {
+    let file = pane_layouts_file(state.config_root());
+    pane_layout::standing_worktrees(&pane_layout::read(&file))
 }
 
 /// One worktree's stored stage — the document tabs, their groups, the split

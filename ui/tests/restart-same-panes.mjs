@@ -170,7 +170,17 @@ export async function testRestartSamePanes(browser, origin, ok) {
             { id: 2, root: { type: "leaf" }, awake: true },
           ],
         };
-        eval(`(${standBackendSource})`)({ panes, stage: saved.stage, resumeMs });
+        // A's stage: a board, and its two terminals after it in the same
+        // group — the eye on the zo conversation, which the record marks.
+        const stage = {
+          ...saved.stage,
+          [A]: {
+            root: { type: "leaf" },
+            groups: [{ tabs: [{ kind: "board" }], active: 0, terms: [{ id: 1, at: 1 }, { id: 2, at: 2 }] }],
+            focused: 0,
+          },
+        };
+        eval(`(${standBackendSource})`)({ panes, stage, resumeMs });
         const look = eval(`(${lookOfSource})`);
         const heapBefore = performance.memory?.usedJSHeapSize ?? 0;
         const started = performance.now();
@@ -200,7 +210,8 @@ export async function testRestartSamePanes(browser, origin, ok) {
         activeWorktreePath = A;
         await restoreActiveWorktreeTab();
         await storedWakesSettled(A);
-        const aTabs = tabs.filter((tab) => tab.worktree === A).length;
+        const aTabs = tabs.filter((tab) => tab.worktree === A && tab.kind === "term").length;
+        const aStrips = look(A).strips;
         const aEye = tabs.find((tab) => tab.id === activeTabId);
         const onceMore = window.__RESTART__.resumes.filter((one) => one.id === session(11)).length;
         return {
@@ -212,6 +223,7 @@ export async function testRestartSamePanes(browser, origin, ok) {
           cTabs,
           aTabs,
           aEye: aEye?.storedId ?? null,
+          aStrips,
           onceMore,
           heapKb: Math.round((heapAfter - heapBefore) / 1024),
         };
@@ -243,8 +255,13 @@ export async function testRestartSamePanes(browser, origin, ok) {
     );
     ok(
       "a workspace the person opened first keeps what they opened, and a workspace put back behind the front is not put back twice",
-      seen.cTabs === 3 && seen.aTabs === 2 && seen.aEye === 1 && seen.onceMore === 1,
-      JSON.stringify({ cTabs: seen.cTabs, aTabs: seen.aTabs, aEye: seen.aEye, onceMore: seen.onceMore }),
+      seen.cTabs === 3 && seen.aTabs === 2 && seen.onceMore === 1,
+      JSON.stringify({ cTabs: seen.cTabs, aTabs: seen.aTabs, onceMore: seen.onceMore }),
+    );
+    ok(
+      "stepping into a workspace put back behind the front seats its terminals beside its documents and keeps the eye its record marks",
+      JSON.stringify(seen.aStrips) === JSON.stringify([["board", "#1", "#2"]]) && seen.aEye === 1,
+      JSON.stringify({ strips: seen.aStrips, eye: seen.aEye }),
     );
     ok("restoring the panes raised no renderer errors", after.faults.length === 0 && before.faults.length === 0, [...before.faults, ...after.faults].join("\n"));
   } finally {

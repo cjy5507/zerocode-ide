@@ -16734,8 +16734,7 @@ async function boot() {
   // because a window that has been open before is not opening for the first
   // time: this workspace has a set of tabs it was last looked at with, and
   // Orca's boot puts that set back (§11 — the tab set is persisted per
-  // worktree and restored on activation; nothing is spawned for the
-  // workspaces you are not standing in). The road ends in exactly the plain
+  // worktree and restored on activation). The road ends in exactly the plain
   // terminal this used to open when there is nothing stored, which is every
   // first run and every workspace nobody has opened a tab in.
   //
@@ -16743,6 +16742,10 @@ async function boot() {
   // rather than something it hides behind the copy that invites you to open
   // one yourself.
   await restoreActiveWorktreeTab();
+  // And behind it, the workspaces whose conversations were running when the
+  // window went — one at a time, after the front's own wakes, with nobody
+  // having to click them (t-14036). Not awaited: the window is usable now.
+  restoreStandingWorkspaces().catch(showError);
   // Browser addresses are settings-backed and restored only when explicitly
   // enabled. They open after the workspace owns its first leaf, so no native
   // page can attach to the checkout that happened to be active before boot.
