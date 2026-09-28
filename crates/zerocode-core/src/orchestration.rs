@@ -16567,7 +16567,7 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "worker-stop",
-        "--worker <id> [--reason <text>] · end it; the terminal is gone, the work unknown",
+        "--worker <id> [--dispatch <attempt>] [--reason <text>] · end it; --dispatch refuses a changed attempt",
         Doing::Mutation,
     ),
     (
@@ -19918,6 +19918,14 @@ fn plan_inner(
             let worker = run
                 .worker(&id)
                 .ok_or_else(|| format!("unknown worker: {id}"))?;
+            if ending == Ending::Stopped
+                && let Some(expected) = words.value("--dispatch")
+                && worker.dispatch.as_deref() != Some(expected)
+            {
+                return Err(format!(
+                    "worker {id} no longer carries dispatch {expected}; it was not stopped"
+                ));
+            }
             // A taken pane is the person's: a stop would close a terminal a
             // hand is typing in. Abandon still applies — it touches nothing.
             if ending == Ending::Stopped && worker.taken_over {
@@ -20106,6 +20114,7 @@ fn plan_inner(
                     "taskTitle": task.display_name(),
                     "taskId": task_id,
                     "dispatchId": serde_json::Value::Null,
+                    "lifecycle": [],
                 }),
                 Some(dispatch) => serde_json::json!({
                     "taskTitle": task.display_name(),
@@ -20118,6 +20127,7 @@ fn plan_inner(
                     "endedMs": dispatch.ended_ms,
                     "succeeded": dispatch.succeeded,
                     "retryOf": dispatch.retry_of,
+                    "lifecycle": dispatch_lifecycle(run, &dispatch.id),
                 }),
             };
             if words.has("--preamble") {
@@ -21323,6 +21333,24 @@ fn worker_json(run: &Run, worker: &Worker, team: &Team) -> serde_json::Value {
         // leader left; `null` for a worker still under its summoner.
         "adoptedBy": worker.adopted_by,
     })
+}
+
+// 사망·쿼터 통지는 실행의 코디네이터가 받는다. 자식을 기다리는 워커도 배달을 빼앗지 않고 자기 시도의 사실을 읽어야 한다.
+fn dispatch_lifecycle(run: &Run, dispatch: &str) -> Vec<serde_json::Value> {
+    [
+        MessageKind::WorkerDone,
+        MessageKind::WorkerDied,
+        MessageKind::QuotaWalled,
+    ]
+    .into_iter()
+    .filter_map(|kind| {
+        run.messages
+            .iter()
+            .rev()
+            .find(|message| message.dispatch.as_deref() == Some(dispatch) && message.kind == kind)
+    })
+    .map(message_json)
+    .collect()
 }
 
 fn message_json(message: &Message) -> serde_json::Value {

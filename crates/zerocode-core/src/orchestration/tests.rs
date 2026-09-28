@@ -25111,3 +25111,110 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
         assert_eq!(reply["effort"], effort);
     }
 }
+
+#[test]
+fn dispatch_show_exposes_lifecycle_without_delivering_coordinator_mail() {
+    let mut bench = Bench::new();
+    let run = bench.json("run-create --name lifecycle")["runId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let parent_task = bench.json("task-create --spec supervise")["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, parent_pane) = bench.seat(&format!(
+        "worker-start --agent claude --task {parent_task} --prompt supervise"
+    ));
+    let task = bench.json_at(&parent_pane, "task-create --spec child")["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fresh = bench.json_at(&parent_pane, &format!("dispatch-show --task {task}"));
+    assert_eq!(fresh["lifecycle"], serde_json::json!([]));
+    let (worker, child_pane) = bench.seat_at(
+        &parent_pane,
+        &format!("worker-start --agent codex --task {task} --prompt child"),
+    );
+    let dispatch =
+        bench.json_at(&parent_pane, &format!("dispatch-show --task {task}"))["dispatchId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    bench.clock += 1;
+    bench.ledger.post(&run, Draft {
+        from: LEDGER_ITSELF.to_string(),
+        to: format!("run:{run}"),
+        kind: MessageKind::QuotaWalled,
+        body: serde_json::json!({"workerId":worker,"dispatchId":dispatch,"observedAtMs":bench.clock}).to_string().into(),
+        subject: Text::default(),
+        priority: Priority::Normal,
+        payload: Text::default(),
+        thread: None,
+        task: Some(task.clone()),
+        dispatch: Some(dispatch.clone()),
+    }, bench.clock).unwrap();
+    assert_eq!(
+        bench.json_at(&parent_pane, "check --peek --types quota_walled")["count"],
+        0
+    );
+    let seen = bench.json_at(&parent_pane, &format!("dispatch-show --task {task}"));
+    assert_eq!(seen["lifecycle"][0]["type"], "quota_walled");
+    assert_eq!(seen["lifecycle"][0]["source"], "ledger");
+    assert_eq!(seen["lifecycle"][0]["dispatchId"], dispatch);
+    assert_eq!(bench.json("check --peek --types quota_walled")["count"], 1);
+    let done = bench.json_at(
+        &child_pane,
+        "send --type worker_done --body {\"ok\":true,\"summary\":\"done\",\"head\":\"abc1234\"}",
+    );
+    let ended = bench.json_at(&parent_pane, &format!("dispatch-show --task {task}"));
+    assert_eq!(ended["open"], false);
+    assert_eq!(ended["lifecycle"][0]["type"], "worker_done");
+    assert_eq!(ended["lifecycle"][0]["messageId"], done["messageId"]);
+    assert_eq!(ended["lifecycle"][0]["from"], worker_address(&worker));
+}
+
+#[test]
+fn conditional_worker_stop_does_not_end_a_reassigned_attempt() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name conditional-stop");
+    let first = bench.json("task-create --spec first")["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent codex --task {first}"));
+    let original = bench.json(&format!("dispatch-show --task {first}"))["dispatchId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+    let second = bench.json("task-create --spec second")["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    bench.json(&format!("dispatch --task {second} --to {pane} --inject"));
+    let replacement = bench.json(&format!("dispatch-show --task {second}"))["dispatchId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let stale = bench.run(&format!(
+        "worker-stop --worker {worker} --dispatch {original}"
+    ));
+    assert_ne!(
+        stale.reply.exit_code, 0,
+        "a stale cancellation stopped a different task"
+    );
+    assert!(matches!(stale.effect, Effect::None));
+    assert_eq!(
+        bench.json(&format!("dispatch-show --task {second}"))["open"],
+        true
+    );
+    let stopped = bench.run(&format!(
+        "worker-stop --worker {worker} --dispatch {replacement}"
+    ));
+    assert_eq!(stopped.reply.exit_code, 0, "{}", stopped.reply.stderr);
+    assert_eq!(
+        bench.json(&format!("dispatch-show --task {second}"))["open"],
+        false
+    );
+}

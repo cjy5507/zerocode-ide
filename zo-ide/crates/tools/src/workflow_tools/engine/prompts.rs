@@ -182,6 +182,7 @@ pub(super) fn phase_agent_input(
     }
     AgentInput {
         route_probe_confidence: None,
+        launch: phase.launch.clone(),
         fork_source: None,
         allow_cross_provider: phase.model.is_some(),
         description: format!("workflow phase `{}` item {index}{suffix}", phase.id),

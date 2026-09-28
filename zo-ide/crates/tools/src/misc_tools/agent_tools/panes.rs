@@ -1262,6 +1262,7 @@ mod tests {
     fn an_agent(prompt: &str) -> AgentInput {
         AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             description: "read the graph".to_string(),
             prompt: prompt.to_string(),

@@ -270,6 +270,8 @@ impl Drop for SubagentProgressWatcher {
 
 #[derive(Deserialize)]
 struct AgentManifest {
+    #[serde(default)]
+    execution: Option<String>,
     #[serde(rename = "subagentType")]
     subagent_type: Option<String>,
     #[serde(rename = "agentId")]
@@ -335,6 +337,7 @@ fn scan_registry(
             continue;
         };
         if manifest.status != "running"
+            || manifest.execution.as_deref() == Some("ledger")
             || manifest.subagent_type.as_deref() == Some("classifier")
             || manifest.parent_session_id.as_deref() != Some(parent_session_id)
         {
@@ -619,6 +622,20 @@ mod tests {
             "{}\n",
             json!({"message": {"blocks": blocks, "role": role}, "type": "message"})
         )
+    }
+
+    #[test]
+    fn ledger_workers_are_not_announced_as_helpers_inside_the_parent_tab() {
+        let root = tempfile::tempdir().unwrap();
+        for (id, execution) in [("agent-native", "pane"), ("agent-ledger", "ledger")] {
+            fs::write(root.path().join(format!("{id}.json")), serde_json::json!({
+                "agentId":id, "name":id, "parentSessionId":"session-ledger",
+                "status":"running", "execution":execution, "startedAt":"100"
+            }).to_string()).unwrap();
+        }
+        let rows = scan_store(root.path(), "session-ledger", 200, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agent_id, "agent-native");
     }
 
     /// A helper running in a pane of its own writes no progress into its

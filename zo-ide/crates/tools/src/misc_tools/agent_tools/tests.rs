@@ -61,6 +61,7 @@ impl Drop for TempAgentStore {
 fn sample_agent_input() -> AgentInput {
     AgentInput {
         route_probe_confidence: None,
+        launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
         fork_source: None,
         allow_cross_provider: false,
         description: "Inspect the UI".to_string(),

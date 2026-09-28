@@ -1,4 +1,4 @@
-mod agent_tools;
+pub(crate) mod agent_tools;
 mod audit;
 mod config_tools;
 pub(crate) mod council;
@@ -1535,10 +1535,18 @@ pub(crate) fn run_spawn_multi_agent_with_timeout_and_hooks(
                 continue;
             }
 
+            let launch = match serde::Deserialize::deserialize(agent_val) {
+                Ok(launch) => launch,
+                Err(error) => {
+                    errors.push(json!({"index": idx, "error": format!("invalid ledger launch: {error}")}));
+                    continue;
+                }
+            };
+
             // Per-agent isolated worktree, when auto-isolation engaged. A failed
             // `create` degrades just this agent to the shared cwd (counted for an
             // honest note), never aborting the fan-out.
-            let cwd = worktree_provider.as_ref().and_then(|provider| {
+            let cwd = worktree_provider.as_ref().filter(|_| !agent_tools::ledger::available()).and_then(|provider| {
                 use crate::workflow_tools::worktree::WorktreeProvider as _;
                 provider
                     .create(name.as_deref().unwrap_or("agent"))
@@ -1560,6 +1568,7 @@ pub(crate) fn run_spawn_multi_agent_with_timeout_and_hooks(
 
             let agent_input = agent_tools::AgentInput {
                 route_probe_confidence: None,
+                launch,
                 fork_source: None,
                 allow_cross_provider,
                 description,

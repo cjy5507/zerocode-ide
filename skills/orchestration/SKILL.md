@@ -80,6 +80,32 @@ nothing in the product is advice for some other product.
   file to hand a result back, and you do not need a person to carry a message
   between two agents.
 
+## zo delegation tools in this window
+
+With a team grant and `zerocode-orc` on `PATH`, zo's `Agent`, members of
+`SpawnMultiAgent`, and `Workflow` phases use the same ledger door as a
+Claude Code or Codex coordinator. Set `agent` to an exact catalog id and
+carry any requested `model` and `effort` unchanged. The tools validate the
+catalog and the launch receipt; a refusal is returned without a provider
+substitution. Each ledger worker defaults to `worktree: true`. Set it false
+only for a reader that neither builds nor changes git state.
+
+The tool reuses the pane's current run, including when this pane is a
+worker, and creates a run on first summon only when none is bound. The
+ledger's `startedBy` edge routes each child's `worker_done` to its direct
+parent; all commands for that child keep the captured run id. Ledger reports return through zo's
+ordinary completion channel, including detached notifications. Cancellation
+and an explicit time budget stop the ledger worker; no implicit one-hour
+budget is added. A quota wall is an error, never an agent switch.
+
+Native conversation forks, restricted permission harnesses, and native
+workflow isolation directories cannot be transferred to another CLI; those
+requests return a blocker. Use an explicit task brief and the ledger's
+`worktree` field. With `worktree: true`, each Workflow phase gets a fresh
+checkout: inspect the prior phase's reported commit and give dependent phases
+that source explicitly. The coordinator integrates the returned commits.
+Outside this window, zo retains its native helpers.
+
 ## Reaching it
 
 Every verb is `zerocode-orc <verb>`, and the list of verbs is:

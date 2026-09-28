@@ -133,7 +133,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             // deep-research 17 · debugger 12 · Plan 12 · data-analyst 6 ·
             // custom 12); `Verification` and `refactor` (1 call each) stay
             // callable by name and are not advertised on every request.
-            description: "Launch one sub-agent for one bounded task. Detached by default in the interactive main session; blocking in sub-agent and headless runs. Relay its result; the user never sees it.",
+            description: "Launch a helper. Detached in interactive main sessions; blocking otherwise. Relay its result.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -141,7 +141,10 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "prompt": { "type": "string" },
                     "subagent_type": { "type": "string", "description": "general-purpose, Explore, Plan, deep-research, code-reviewer, debugger, data-analyst, fork (inherits chat), .zo/agents/<name>" },
                     "name": { "type": "string", "description": "SendMessage address." },
-                    "model": { "type": "string", "description": "Omit to inherit the session model; else same provider family." },
+                    "agent": { "type": "string" },
+                    "effort": { "type": "string" },
+                    "worktree": { "type": "boolean" },
+                    "model": { "type": "string", "description": "Inside ZeroCode: exact CLI model. Outside: inherit the session model, or choose the same provider family." },
                     "allow_cross_provider": { "type": "boolean", "description": "For user-requested read-only delegation only." },
                     "background": { "type": "boolean" },
                     "sees": {
@@ -373,6 +376,9 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                                 "prompt": { "type": "string" },
                                 "description": { "type": "string" },
                                 "name": { "type": "string" },
+                                "agent": { "type": "string", "description": "Exact ZeroCode catalog id; defaults to zo inside ZeroCode." },
+                                "effort": { "type": "string", "description": "Exact ledger launch effort; never substituted." },
+                                "worktree": { "type": "boolean", "description": "Ledger checkout isolation; defaults to true. False only for readers that neither build nor change git state." },
                                 "model": { "type": "string", "description": "Semantic model alias or explicit provider/model pin. Prefer versionless aliases and never infer a concrete release id from stale knowledge." },
                                 "allow_cross_provider": { "type": "boolean", "description": "Read-only delegation only, when the user named a cross-family model. Implementation exceptions require a launch/settings pin." },
                                 "sees": {

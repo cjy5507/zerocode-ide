@@ -217,6 +217,7 @@ pub fn decompose_for_fanout_with_width(
     let effective_model = non_empty_env(AGENT_MODEL_ENV).unwrap_or_else(|| model.clone());
     let structured = is_anthropic_model(&effective_model);
     let input = AgentInput {
+        launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
         fork_source: None,
         allow_cross_provider: false,
         description: "fan-out decomposition".to_string(),
@@ -654,6 +655,7 @@ pub fn clarify_intent(
     let effective_model = non_empty_env(AGENT_MODEL_ENV).unwrap_or_else(|| model.clone());
     let structured = is_anthropic_model(&effective_model);
     let input = AgentInput {
+        launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
         fork_source: None,
         allow_cross_provider: false,
         description: "fan-out intent triage".to_string(),

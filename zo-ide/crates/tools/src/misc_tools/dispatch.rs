@@ -181,6 +181,7 @@ fn single_spawn_member_inline_fold_model(
     let [member] = input.agents.as_slice() else {
         return None;
     };
+    if member.get("agent").is_some() { return None; }
     let prompt = member
         .get("prompt")
         .and_then(Value::as_str)
@@ -338,7 +339,7 @@ pub(crate) fn dispatch(
                     // deliberate specialization.
                     let forking =
                         super::agent_tools::is_fork_type(inp.subagent_type.as_deref());
-                    let route = !ctx.active_model_pinned() && !forking;
+                    let route = !ctx.active_model_pinned() && !forking && inp.launch.agent.is_none();
                     if let Some(choice) =
                         route
                             .then(|| {
@@ -369,7 +370,7 @@ pub(crate) fn dispatch(
                     // gate does not re-judge what the person chose; the call's
                     // own ask stays on the manifest as `requestedModel`. A fork
                     // keeps its contract: it runs on the parent, unrouted.
-                    if !forking {
+                    if !forking && inp.launch.agent.is_none() {
                         if let Some(pin) = super::agent_tools::person_named_model(
                             ctx.turn_agent_policy().and_then(|policy| policy.user_named_model),
                             inp.model.as_deref(),
@@ -435,6 +436,7 @@ pub(crate) fn dispatch(
                         &inp.prompt,
                     );
                     if !forking
+                        && inp.launch.agent.is_none()
                         && same_model_impl_spawn_is_wasteful(
                             &resolved_model,
                             parent.as_deref(),

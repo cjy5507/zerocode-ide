@@ -138,6 +138,7 @@
     fn agent_input(subagent_type: Option<&str>) -> AgentInput {
         AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "verify the code".to_string(),
@@ -2811,6 +2812,7 @@
         with_config_home(&config_home, || {
             let input = AgentInput {
                 route_probe_confidence: None,
+                launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
                 fork_source: None,
                 allow_cross_provider: false,
                 description: "small typo".to_string(),
@@ -3166,6 +3168,7 @@
 
             let reviewer = AgentInput {
                 route_probe_confidence: None,
+                launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
                 fork_source: None,
                 allow_cross_provider: false,
                 description: "review the diff".to_string(),

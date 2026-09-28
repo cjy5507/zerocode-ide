@@ -181,8 +181,11 @@ fn workflow_phase_schema() -> Value {
             "over": { "type": "string",
                 "description": "Earlier phase id: one agent per its completed result. Mutually exclusive with `fanout`." },
             "subagent_type": { "type": "string" },
+            "agent": { "type": "string", "description": "Exact ZeroCode catalog id for this phase." },
+            "effort": { "type": "string", "description": "Exact worker CLI effort inside ZeroCode." },
+            "worktree": { "type": "boolean", "description": "Use the ledger checkout; defaults to true inside ZeroCode." },
             "model": { "type": "string",
-                "description": "Optional semantic model alias or explicit provider/model pin for this phase; prefer versionless aliases and never infer a concrete release id from stale knowledge. Keeps `subagent_type` as the harness/role selector. In direct specs, `ZO_AGENT_MODEL` still forces all sub-agents if set." },
+                "description": "Optional semantic model alias or explicit provider/model pin for this phase; prefer versionless aliases and never infer a concrete release id from stale knowledge. Keeps `subagent_type` as the harness/role selector. Outside ZeroCode, `ZO_AGENT_MODEL` forces native sub-agents if set; ledger launch pins stay exact." },
             "schema": { "type": "object",
                 "description": "JSON schema → each agent replies JSON, extracted into `structured`." },
             "repeat": { "type": "object",
@@ -551,6 +554,9 @@ pub(super) fn workflow_preview(workflow: &NormalizedWorkflow) -> Value {
                     "source": phase_source_label(&phase.source),
                     "subagent_type": &phase.subagent_type,
                     "model": &phase.model,
+                    "agent": &phase.launch.agent,
+                    "effort": &phase.launch.effort,
+                    "worktree": &phase.launch.worktree,
                     "has_schema": phase.schema.is_some(),
                     "has_repeat": phase.repeat.is_some(),
                     "has_repair_loop": phase.repair_loop.is_some(),
@@ -1016,6 +1022,7 @@ fn apply_smart_model_to_workflow_agent(
     {
         return;
     }
+    if input.launch.agent.is_some() { return; }
     if input.model.as_deref().is_some_and(|model| !model.trim().is_empty()) {
         return;
     }
@@ -1455,6 +1462,7 @@ mod tests {
     fn workflow_smart_resolver_does_not_override_explicit_model() {
         let mut input = AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "verify".to_string(),
@@ -1557,6 +1565,7 @@ mod tests {
 
         let mut input = AgentInput {
             route_probe_confidence: None,
+            launch: crate::misc_tools::agent_tools::ledger::Launch::default(),
             fork_source: None,
             allow_cross_provider: false,
             description: "verify the code".to_string(),
