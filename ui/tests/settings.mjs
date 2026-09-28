@@ -339,6 +339,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "skip_delete_automation_confirm": false,
   "vault.sessionLimit": 200,
   "artifacts_retention_days": 0,
+  "artifacts_auto_open_beside": true,
   "diff_side_by_side": true,
   "conversation_focus_view": false,
   "window_material": { "terminal_opacity": 1.0, "blur": false },
@@ -765,6 +766,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_skip_delete_worktree_confirm", "set_skip_delete_automation_confirm",
   "set_vault_session_limit",
   "set_artifacts_retention_days",
+  "set_artifacts_auto_open_beside",
   "set_second_brain_weekly_review",
   "set_second_brain_explore",
   "save_worktree_prefs",
@@ -1355,6 +1357,10 @@ class StatefulBackend {
       case "set_diff_side_by_side":
         this.settings.diff_side_by_side = args.on === true;
         keys = ["diff_side_by_side"];
+        break;
+      case "set_artifacts_auto_open_beside":
+        this.settings.artifacts_auto_open_beside = args.on === true;
+        keys = ["artifacts_auto_open_beside"];
         break;
       case "set_conversation_focus_view":
         this.settings.conversation_focus_view = args.on === true;

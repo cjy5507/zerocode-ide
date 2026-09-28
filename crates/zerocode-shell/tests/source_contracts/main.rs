@@ -8894,12 +8894,16 @@ mod tests {
         // The occlusion answer is one function, and it reads EVERY scrim from
         // the markup rather than four by name (review finding 5), plus the
         // full-page views that cover the stage without one.
+        // The full-page views are one list since t-11958, because an
+        // artifact's maker pane asks the same question of them.
         let ducking = block_after(window, "function browserCovered() {");
+        let pages = block_after(window, "function stagePagesCover() {");
         assert!(
             ducking.contains("termFloat.hidden")
                 && ducking.contains("browserShades.some")
-                && ducking.contains("settings-view"),
-            "the native pane no longer ducks under the window's overlays:\n{ducking}"
+                && ducking.contains("stagePagesCover()")
+                && pages.contains("settings-view"),
+            "the native pane no longer ducks under the window's overlays:\n{ducking}\n{pages}"
         );
         assert!(
             window.contains(r#"document.querySelectorAll('[id$="-scrim"]')"#),

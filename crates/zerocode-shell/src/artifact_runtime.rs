@@ -47,6 +47,11 @@ pub(crate) const INDEX_FILE: &str = "index.jsonl";
 pub(crate) const WATCH_LANE: &str = "artifacts";
 /// The window event that says the catalog moved.
 pub(crate) const CHANGED_EVENT: &str = "artifacts:changed";
+/// The window event that carries one page the door just published, as the
+/// row the catalog now holds (t-11958). The window decides from it alone
+/// whether the page opens beside its maker, updates in place or waits
+/// behind a 「새 N」 badge; `artifacts:changed` still says the catalog moved.
+pub(crate) const PUBLISHED_EVENT: &str = "artifacts:published";
 /// Where a page's snapshots live: `<root>/versions/<id>/<n>/<name>` (t-3233 §5).
 pub(crate) const VERSIONS_DIR_NAME: &str = "versions";
 /// Where a card's rendered thumbnail lives: `<root>/thumbs/<id>.png` (t-3233 §3).
@@ -2356,7 +2361,8 @@ fn artifact_request(
     match action.as_str() {
         "publish" => {
             let (input, caller) = zerocode_core::artifact_publish::publish_parts(request)?;
-            let meta = store.publish_page(&input, origin_of(&caller))?;
+            let origin = origin_of(&caller);
+            let meta = store.publish_page(&input, origin.clone())?;
             if let Some(app) = store
                 .window
                 .lock()
@@ -2365,6 +2371,7 @@ fn artifact_request(
             {
                 use tauri::Emitter as _;
                 let _ = app.emit(CHANGED_EVENT, ());
+                let _ = app.emit(PUBLISHED_EVENT, meta.artifact(origin));
             }
             serde_json::to_value(meta).map_err(|e| e.to_string())
         }

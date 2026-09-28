@@ -4585,6 +4585,8 @@ function paintTabNode(node, tab) {
   const label = node.querySelector(".tab-label");
   const wording = tabLabel(tab);
   if (label.textContent !== wording) label.textContent = wording;
+  // 이 탭의 판이 발행하고 아직 아무도 열지 않은 페이지(t-11958).
+  paintTabUnseen(node, tab);
   // A tab holding an agent leads with the agent's identity, not the shell
   // glyph — Orca's `TerminalTabLeadingIcon` (rename-file-BAQu9znK.js): bell,
   // then state, then `TerminalTabAgentIdentityIcon` stamping

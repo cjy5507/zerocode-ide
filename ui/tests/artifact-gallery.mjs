@@ -2071,7 +2071,7 @@ export async function testArtifactBeside(browser, origin, ok, outputDir) {
         && away.tabPill === "새 3" && away.navPill === "새 3" && !away.makerActive && other !== maker,
       JSON.stringify(away),
     );
-    await inBothThemes("notice", "#sb-artifact-notice");
+    await inBothThemes("notice", "#sb-artifact-notice, .tab-new, .nav-new");
     await page.evaluate(() => document.querySelector("#sb-artifact-notice .sb-artifact-notice-open")?.click());
     await settle();
     const opened = await look(maker);
@@ -2120,7 +2120,7 @@ export async function testArtifactBeside(browser, origin, ok, outputDir) {
     const narrow = await look(narrowMaker);
     ok(
       "a maker pane narrower than 720px gets the page as a tab in its own group instead of a split",
-      narrowBefore.makerWidth > 0 && narrowBefore.makerWidth < 720 && narrow.opens === 1
+      narrowBefore.makerWidth > 0 && narrowBefore.makerWidth < 720 && narrow.opens === narrowBefore.opens + 1
         && narrow.groups === narrowBefore.groups
         && narrow.browsers.some((one) => one.id === "p-narrow" && one.pane === narrow.makerGroup),
       JSON.stringify({ narrowBefore, narrow }),

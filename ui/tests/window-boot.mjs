@@ -282,6 +282,7 @@ const BOOT = {
   vault_limits: { choices: [50, 100, 200], absolute_max: 1000, default: 200, children_per_parent: 50 },
   artifacts_retention_days: 0,
   artifacts_retention_spec: { min: 0, max: 365, step: 1 },
+  artifacts_auto_open_beside: true,
 };
 
 const POLLER_DEFINITION =

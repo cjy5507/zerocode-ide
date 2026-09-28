@@ -125,6 +125,7 @@ pub(super) mod setting_key {
     pub const SKIP_DELETE_AUTOMATION_CONFIRM: &str = "skip_delete_automation_confirm";
     pub const VAULT_SESSION_LIMIT: &str = "vault.sessionLimit";
     pub const ARTIFACTS_RETENTION_DAYS: &str = "artifacts_retention_days";
+    pub const ARTIFACTS_AUTO_OPEN_BESIDE: &str = "artifacts_auto_open_beside";
     pub const DIFF_SIDE_BY_SIDE: &str = "diff_side_by_side";
     pub const CONVERSATION_FOCUS_VIEW: &str = "conversation_focus_view";
     pub const PANEL_WIDTHS: &str = "panel_widths";
@@ -2228,6 +2229,12 @@ pub(super) struct SettingsDocument {
     /// Bounds are `zerocode_core::artifact::Limits`'; this is the overlay.
     #[serde(default)]
     pub(super) artifacts_retention_days: u32,
+    /// Whether a page's first publish from the pane a person is looking at
+    /// opens beside that pane (t-11958). On unless the person turned it off:
+    /// the opening is the notice, and every other publish only raises
+    /// 「새 N」 whatever this says.
+    #[serde(default = "enabled_by_default")]
+    pub(super) artifacts_auto_open_beside: bool,
     #[serde(default = "default_vault_session_limit", rename = "vault.sessionLimit")]
     pub(super) vault_session_limit: usize,
     #[serde(default = "enabled_by_default")]
@@ -2432,6 +2439,7 @@ impl Default for SettingsDocument {
             skip_delete_worktree_confirm: false,
             skip_delete_automation_confirm: false,
             artifacts_retention_days: 0,
+            artifacts_auto_open_beside: true,
             vault_session_limit: default_vault_session_limit(),
             diff_side_by_side: true,
             conversation_focus_view: false,

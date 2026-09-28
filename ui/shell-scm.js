@@ -7856,7 +7856,7 @@ async function openNoteSend(button, path) {
  * bottom. Rebuilt each open — what is running changes between openings. The
  * caller owns what happens after a delivered send (`onDelivered`): the review
  * notes reconcile themselves, a grab simply closes. */
-async function openSendToAgent(button, prompt, onDelivered, { submit = true, agent = null } = {}) {
+async function openSendToAgent(button, prompt, onDelivered, { submit = true, agent = null, maker = null, append = false } = {}) {
   closeNoteSend();
   const generation = ++noteSendGeneration;
   const originTab = activeTabId;
@@ -7912,6 +7912,10 @@ async function openSendToAgent(button, prompt, onDelivered, { submit = true, age
       ),
     }))
     .filter((one) => one.spec && one.tab && (agent === null || one.spec.id === agent));
+  // 아티팩트를 만든 판은 받을 곳의 기본이다(t-11958): 첫 줄에 서고 초점을 받아
+  // Enter 한 번이면 그 판으로 간다. 다른 판을 고를 길은 그대로 아래에 있다.
+  if (maker !== null) targets.sort((a, b) => Number(b.term === maker) - Number(a.term === maker));
+  let makerPick = null;
   if (targets.length === 0) {
     const none = document.createElement("div");
     none.className = "note-pop-none";
@@ -7939,15 +7943,29 @@ async function openSendToAgent(button, prompt, onDelivered, { submit = true, age
         ? seat
         : t("review.splitSeat", "{{tab}} · 분할", { tab: seat });
     words.append(name, where);
+    if (target.term === maker) {
+      const made = document.createElement("span");
+      made.className = "note-pop-maker";
+      made.textContent = t("artifacts.maker", "만든 에이전트");
+      words.appendChild(made);
+      pick.classList.add("is-maker");
+      makerPick = pick;
+    }
     pick.appendChild(words);
     pick.addEventListener("click", () =>
       deliver(async () => {
-        await invoke("send_prompt", {
-          term: target.term,
-          text: prompt,
-          submit,
-          agent: target.spec.id,
-        });
+        // 덧붙이기는 사람의 붙여넣기와 같은 문이다: 도는 컴포저를 비우는 키가
+        // 앞서지 않으니 쓰던 글 뒤에 붙고, Enter는 끝까지 사람의 몫이다.
+        if (append && !submit) {
+          await invoke("term_paste", { term: target.term, text: prompt });
+        } else {
+          await invoke("send_prompt", {
+            term: target.term,
+            text: prompt,
+            submit,
+            agent: target.spec.id,
+          });
+        }
         // 전달은 보이지 않는 pty로 들어간다 — 받은 터미널을 앞으로 데려와야
         // 사용자가 스테이징된 입력을 본다 (라이브 보고 2026-08-14: 브라우저
         // 탭에서 보내면 아무 일도 안 일어난 것처럼 보였다).
@@ -8025,6 +8043,7 @@ async function openSendToAgent(button, prompt, onDelivered, { submit = true, age
   const left = Math.min(Math.max(8, at.right - width), window.innerWidth - width - 8);
   notePop.style.left = `${left}px`;
   notePop.style.top = `${Math.min(at.bottom + 6, window.innerHeight - 80)}px`;
+  makerPick?.focus();
 }
 
 document.addEventListener("click", (event) => {

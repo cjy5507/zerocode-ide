@@ -593,6 +593,10 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
     artifactsRetentionDays = Number(snapshot.artifacts_retention_days) || 0;
     paintArtifactsRetention();
   }
+  if (hasSetting(snapshot, "artifacts_auto_open_beside")) {
+    artifactsAutoOpenBeside = snapshot.artifacts_auto_open_beside !== false;
+    paintArtifactsAutoOpen();
+  }
   if (hasSetting(snapshot, "computer_awake_mode")) {
     computerAwakeMode = normalizeComputerAwakeMode(snapshot.computer_awake_mode);
     paintComputerAwakeMode();
@@ -11616,6 +11620,23 @@ el("artifacts-retention-days").addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;
   event.preventDefault();
   commitArtifactsRetention();
+});
+/* 첫 발행을 만든 판 옆에 열기(t-11958). 끄면 모든 발행이 「새 N」으로만
+ * 알린다. 설정 화면의 칸과 머리띠 아래 안내 줄이 같은 문으로 쓴다. */
+let artifactsAutoOpenBeside = true;
+
+function paintArtifactsAutoOpen() {
+  el("artifacts-auto-open-beside").checked = artifactsAutoOpenBeside;
+}
+
+function commitArtifactsAutoOpen(on) {
+  artifactsAutoOpenBeside = on;
+  paintArtifactsAutoOpen();
+  void commitSetting("artifacts_auto_open_beside", "set_artifacts_auto_open_beside", { on });
+}
+
+el("artifacts-auto-open-beside").addEventListener("change", () => {
+  commitArtifactsAutoOpen(el("artifacts-auto-open-beside").checked);
 });
 el("settings-open-artifacts").addEventListener("click", () => {
   setSettingsOpen(false);
