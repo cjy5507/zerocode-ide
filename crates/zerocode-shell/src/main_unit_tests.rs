@@ -13855,7 +13855,8 @@ fn automatic_cleanup_keeps_a_foreign_worktree() {
         .expect("open repository")
         .with_worktree_root(temp.path().join("zerocode-managed"));
 
-    let error = remove_automatic_worktree(&orchestrator, &foreign)
+    let held = CheckoutHeld::take(&foreign).expect("no other road holds it");
+    let error = remove_automatic_worktree(&orchestrator, &held)
         .expect_err("a hand-created checkout must not be auto-removed");
     assert!(error.contains("ownership is `external`"), "{error}");
     assert!(foreign.is_dir(), "foreign checkout disappeared");

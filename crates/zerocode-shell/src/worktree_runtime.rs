@@ -2219,6 +2219,74 @@ pub(super) fn occupancy_of(counted: &HashMap<PathBuf, usize>, path: &Path) -> us
         .sum()
 }
 
+/// The claim every road that judges or removes a checkout takes first: one
+/// road at a time inside one directory.
+///
+/// Five roads remove a worktree and one of them also judges it on a beat, and
+/// none of them used to know about the others. On 2026-09-28 the
+/// completed-worker road was taking a checkout apart — ten gigabytes of build
+/// tree, so `git worktree remove` ran for seconds — when the beat's sweep
+/// reached the same directory, read `git status` off a tree that was half
+/// gone, and wrote "was kept: 1334 uncommitted change(s) … D CHANGELOG.md"
+/// five seconds before the other road wrote that it had removed it. What the
+/// sweep reads there is also what it tells the hold the ledger opens for a
+/// dead worker (`checkout_examined`), so the same race puts invented facts in
+/// front of a coordinator.
+///
+/// Held across the whole judgment and the removal, and never while waiting
+/// for anything else. A road that finds the checkout held does not wait
+/// either: it stands aside, because the holder is asking the same questions
+/// of the same directory and its answer is the one that stands. The holders
+/// are a beat that must not stall, a worker's report, and a person's click —
+/// none of them should sit behind a removal of gigabytes.
+pub(super) struct CheckoutHeld {
+    path: PathBuf,
+}
+
+/// The checkouts some road holds right now. A handful at most, so a list
+/// compared with [`same_worktree_path`] — two spellings of one directory are
+/// one claim — rather than a set keyed by the spelling.
+fn checkouts_held() -> &'static Mutex<Vec<PathBuf>> {
+    static HELD: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+impl CheckoutHeld {
+    /// Take one checkout for one road, or `None` while another road holds it.
+    pub(super) fn take(path: &Path) -> Option<Self> {
+        let mut held = checkouts_held()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.iter().any(|one| same_worktree_path(one, path)) {
+            return None;
+        }
+        held.push(path.to_path_buf());
+        Some(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// The directory this claim covers — the only one a removal holding it
+    /// can take ([`remove_automatic_worktree`]).
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CheckoutHeld {
+    /// On every way out, unwinding included: a claim that outlived its road
+    /// would keep every later road out of the directory for good, and a
+    /// checkout nobody can reclaim is how the disk fills.
+    fn drop(&mut self) {
+        let mut held = checkouts_held()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = held.iter().position(|one| *one == self.path) {
+            held.swap_remove(at);
+        }
+    }
+}
+
 /// 창이 실어 보낸 "저장되지 않은 편집을 들고 있는 체크아웃"들.
 ///
 /// 창만이 아는 사실이라 창이 보낸다. 판정은 그래도 분류기가 한다 — 이 집합은
