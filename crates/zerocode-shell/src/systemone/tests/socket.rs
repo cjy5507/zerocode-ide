@@ -46,6 +46,18 @@ struct Stage {
     rode: Arc<Mutex<Vec<usize>>>,
     /// Connections accepted so far.
     opened: Arc<AtomicUsize>,
+    /// Told when the stage is dropped: its accept loop leaves and the
+    /// runtime, its connections and the loopback seat go with it.
+    leave: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for Stage {
+    /// The seat is given back when its test is done (see `Endpoint`'s drop in
+    /// `tests.rs`): a stage kept a listener, a runtime and every connection
+    /// it had accepted until the process ended.
+    fn drop(&mut self) {
+        self.leave.notify_one();
+    }
 }
 
 impl Stage {
@@ -61,6 +73,8 @@ impl Stage {
         let rode = Arc::new(Mutex::new(Vec::new()));
         let opened = Arc::new(AtomicUsize::new(0));
         let (heard, counted) = (Arc::clone(&rode), Arc::clone(&opened));
+        let leave = Arc::new(tokio::sync::Notify::new());
+        let left = Arc::clone(&leave);
         let answer = Bytes::from(
             json!({"model": ANSWERING_VERSION, "answers": {},
                    "usage": {"input_tokens": 1, "output_tokens": 0}})
@@ -73,18 +87,29 @@ impl Stage {
                 .expect("the stage's runtime");
             runtime.block_on(async move {
                 let listener = TcpListener::from_std(listener).expect("the loopback seat");
-                while let Ok((stream, _)) = listener.accept().await {
-                    let ordinal = counted.fetch_add(1, Ordering::SeqCst);
-                    let spoken = (!silent(ordinal)).then(|| (status, answer.clone()));
-                    let heard = Arc::clone(&heard);
-                    match speaks {
-                        Speaks::Http1 => tokio::spawn(http1(stream, ordinal, spoken, heard)),
-                        Speaks::Http2 => tokio::spawn(http2(stream, ordinal, spoken, heard)),
-                    };
+                let accepting = async {
+                    while let Ok((stream, _)) = listener.accept().await {
+                        let ordinal = counted.fetch_add(1, Ordering::SeqCst);
+                        let spoken = (!silent(ordinal)).then(|| (status, answer.clone()));
+                        let heard = Arc::clone(&heard);
+                        match speaks {
+                            Speaks::Http1 => tokio::spawn(http1(stream, ordinal, spoken, heard)),
+                            Speaks::Http2 => tokio::spawn(http2(stream, ordinal, spoken, heard)),
+                        };
+                    }
+                };
+                tokio::select! {
+                    () = accepting => {}
+                    () = left.notified() => {}
                 }
             });
         });
-        Self { addr, rode, opened }
+        Self {
+            addr,
+            rode,
+            opened,
+            leave,
+        }
     }
 
     fn base(&self) -> String {

@@ -5,6 +5,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -22,6 +23,25 @@ pub(crate) const ANSWERING_VERSION: &str = "jev-1.13.0";
 pub(crate) struct Endpoint {
     addr: SocketAddr,
     seen: Arc<Mutex<Vec<String>>>,
+    /// Raised when the endpoint is dropped: its accept loop leaves, and the
+    /// loopback seat closes with it.
+    closed: Arc<AtomicBool>,
+}
+
+/// How long a dropped endpoint waits on the one connection that wakes its
+/// accept loop — a loopback connect, so far past what it takes.
+const LEAVING: Duration = Duration::from_millis(200);
+
+impl Drop for Endpoint {
+    /// The seat is given back when its test is done. Every endpoint used to
+    /// keep listening until the process ended, one open descriptor each and
+    /// a thread beside it: a suite of them held 173 at once (2026-09-29), and
+    /// the release lane's process may hold 256, so tests that opened a file
+    /// or ran `git` failed with "Too many open files".
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect_timeout(&self.addr, LEAVING);
+    }
 }
 
 impl Endpoint {
@@ -66,8 +86,13 @@ impl Endpoint {
         let addr = listener.local_addr().expect("its address");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let heard = Arc::clone(&seen);
+        let closed = Arc::new(AtomicBool::new(false));
+        let leaving = Arc::clone(&closed);
         thread::spawn(move || {
             for socket in listener.incoming() {
+                if leaving.load(Ordering::SeqCst) {
+                    return;
+                }
                 let Ok(mut socket) = socket else {
                     return;
                 };
@@ -94,7 +119,7 @@ impl Endpoint {
                 }
             }
         });
-        Self { addr, seen }
+        Self { addr, seen, closed }
     }
 
     pub(crate) fn base(&self) -> String {
