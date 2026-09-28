@@ -36,8 +36,30 @@ pub(super) fn line_facts(state: &AppState, term: TermId) -> Line {
     Line {
         parked: pane_is_parked(state, term),
         launch: crate::cmd::terminal::launch_of(state, term),
+        taken: reports_what_it_takes(state, term).then(|| crate::human_input::taken(term)),
+        busy: pane_is_busy(state, term),
         ..Line::default()
     }
+}
+
+/// Whether the pane's program says which prompts it takes (t-14037) — its
+/// agent row's `submit_ack`, the one table every delivery reads — so that a
+/// delivery's Enter there waits for that word before it is called a send.
+fn reports_what_it_takes(state: &AppState, term: TermId) -> bool {
+    state
+        .agent_terms()
+        .get(&term)
+        .and_then(|agent| zerocode_core::AgentKind::from_slug(agent))
+        .is_some_and(zerocode_core::AgentKind::reports_prompt_submit)
+}
+
+/// Whether the pane's program says it is mid-turn — the hook road's word,
+/// the same one the board's 「작업 중」 reads.
+fn pane_is_busy(state: &AppState, term: TermId) -> bool {
+    state
+        .pane_states()
+        .get(&term)
+        .is_some_and(|held| held.state == zerocode_core::hook::HookState::Working)
 }
 
 /// Read the hand while holding the same terminal lock as `human_write`.

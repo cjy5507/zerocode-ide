@@ -72,6 +72,15 @@ pub const SUBMIT_GAP: Duration = Duration::from_millis(50);
 /// and one Enter retry on a busy TUI.
 pub const SUBMIT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The most a delivery waits past its Enter for its pane's receipt
+/// (t-14037): the window before the Enter is pressed again, then the
+/// patience a silent program is given. A program still booting takes its
+/// Enter late — Claude Code 2.1.284, three booting side by side, answered
+/// up to 9.2 s after the first Enter — so its silence is waited out, not
+/// read as a loss. Every caller that waits on a delivery's outcome adds
+/// this to its own budget.
+pub const SUBMIT_RECEIPT_PATIENCE: Duration = SUBMIT_ACK_TIMEOUT.saturating_add(TIMEOUT);
+
 /// Ctrl+U — an agent TUI clears toward the start of its input buffer.
 pub const CLEAR_INPUT_LINE: u8 = 0x15;
 
@@ -478,6 +487,14 @@ impl Outcome {
     pub const fn pasted(self) -> bool {
         matches!(self, Self::Delivered | Self::Unsubmitted(_))
     }
+
+    /// Whether the words went in AND their Enter did — delivered, or pressed
+    /// twice at a pane that never said it took them (t-14037), whose word a
+    /// caller with a longer wait may still hear.
+    #[must_use]
+    pub const fn entered(self) -> bool {
+        matches!(self, Self::Delivered | Self::Unsubmitted(Refusal::NotTaken))
+    }
 }
 
 /// What the driver wants done this round.
@@ -621,17 +638,23 @@ pub enum Refusal {
     /// The pane's zo refused its exact launch contract (t-2773): the program
     /// there will not run these words, so they were withheld rather than typed.
     LaunchRefused,
+    /// The pane's program never reported taking the words — not after their
+    /// Enter, not after the one pressed again, not in the patience after
+    /// (t-14037). They were left on its line for a person rather than typed
+    /// again.
+    NotTaken,
 }
 
 impl Refusal {
     /// Every refusal, for a table that must word each one.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::HoldsADraft,
         Self::HandReached,
         Self::Parked,
         Self::LaunchChanged,
         Self::InputRejected,
         Self::LaunchRefused,
+        Self::NotTaken,
     ];
 
     /// The token the window's notice names this refusal by (t-10159). What
@@ -647,6 +670,7 @@ impl Refusal {
             Self::LaunchChanged => "launch_changed",
             Self::InputRejected => "input_rejected",
             Self::LaunchRefused => "launch_refused",
+            Self::NotTaken => "not_taken",
         }
     }
 
@@ -676,6 +700,11 @@ impl Refusal {
             Self::LaunchRefused => {
                 "the pane's zo refused its exact launch contract; the briefing was \
                  withheld rather than typed at a program that will not run it"
+            }
+            Self::NotTaken => {
+                "the pane's program never reported taking the words, after their \
+                 Enter or the one pressed again; they were left on its line rather \
+                 than typed a second time"
             }
         }
     }
@@ -728,6 +757,16 @@ enum Phase {
     /// The paste has gone; the Enter goes once the gap has passed.
     Submitting {
         pasted_at: Instant,
+    },
+    /// The Enter has gone to a pane whose program reports the prompts it
+    /// takes; the delivery is done when that report comes (t-14037).
+    Confirming {
+        /// When the first Enter went.
+        entered_at: Instant,
+        /// The pane's count of prompts taken, read as the Enter went.
+        taken: u64,
+        /// Whether the one Enter pressed again has gone.
+        again: bool,
     },
     Done(Outcome),
 }
@@ -911,13 +950,83 @@ impl PromptDelivery {
                         self.phase = Phase::Done(Outcome::Unsubmitted(why));
                         return Step::Done(Outcome::Unsubmitted(why));
                     }
-                    self.phase = Phase::Done(Outcome::Delivered);
+                    // A program that reports what it takes is done when it
+                    // says so; one that reports nothing, at its Enter.
+                    self.phase = match line.taken {
+                        Some(taken) => Phase::Confirming {
+                            entered_at: now,
+                            taken,
+                            again: false,
+                        },
+                        None => Phase::Done(Outcome::Delivered),
+                    };
                     Step::Submit(b"\r".to_vec())
                 } else {
                     Step::Waiting
                 }
             }
+            Phase::Confirming {
+                entered_at,
+                taken,
+                again,
+            } => self.confirm(line, now, entered_at, taken, again),
             Phase::Done(outcome) => Step::Done(outcome),
+        }
+    }
+
+    /// One round of waiting for the pane's receipt (t-14037).
+    ///
+    /// The receipt — the pane's count of prompts taken moving past the one
+    /// read at the Enter — is the only witness that the Enter was a send.
+    /// A pane mid-turn has queued what it was given and reports it when it
+    /// takes it from that queue, so its silence is not a lost Enter. Past
+    /// the window with no receipt, Enter is pressed once more — never the
+    /// words, which are on the line already — and only on a line nobody
+    /// else has reached since the paste, with no question parked there,
+    /// under the program the words were for: whoever the delivery is for,
+    /// an Enter is never pressed over a person's hand or into their
+    /// question. Then the patience: a program still booting answers late,
+    /// and one that never answers leaves the words for a person.
+    fn confirm(
+        &mut self,
+        line: Line,
+        now: Instant,
+        entered_at: Instant,
+        taken: u64,
+        again: bool,
+    ) -> Step {
+        let waited = now.saturating_duration_since(entered_at);
+        let settled = if line.taken.is_none_or(|count| count != taken) {
+            Some(Outcome::Delivered)
+        } else if waited < self.receipt.window {
+            None
+        } else if line.busy {
+            Some(Outcome::Delivered)
+        } else if !again {
+            match Guard::for_somebody_elses_line(self.guard.launch)
+                .against_submit(line, self.hand_at_paste)
+            {
+                Some(why) => Some(Outcome::Unsubmitted(why)),
+                None => {
+                    self.phase = Phase::Confirming {
+                        entered_at,
+                        taken,
+                        again: true,
+                    };
+                    return Step::Submit(b"\r".to_vec());
+                }
+            }
+        } else if waited >= self.receipt.window.saturating_add(self.receipt.patience) {
+            Some(Outcome::Unsubmitted(Refusal::NotTaken))
+        } else {
+            None
+        };
+        match settled {
+            Some(outcome) => {
+                self.phase = Phase::Done(outcome);
+                Step::Done(outcome)
+            }
+            None => Step::Waiting,
         }
     }
 
@@ -938,7 +1047,7 @@ impl PromptDelivery {
     pub fn unmet(&self, now: Instant) -> Option<Unmet> {
         match self.phase {
             Phase::Waiting => self.wait.unmet(now),
-            Phase::Submitting { .. } | Phase::Done(_) => None,
+            Phase::Submitting { .. } | Phase::Confirming { .. } | Phase::Done(_) => None,
         }
     }
 
@@ -948,7 +1057,9 @@ impl PromptDelivery {
     pub const fn pasted(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Submitting { .. } | Phase::Done(Outcome::Delivered | Outcome::Unsubmitted(_))
+            Phase::Submitting { .. }
+                | Phase::Confirming { .. }
+                | Phase::Done(Outcome::Delivered | Outcome::Unsubmitted(_))
         )
     }
 }

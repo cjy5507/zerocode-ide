@@ -10289,49 +10289,25 @@ fn a_launch_deadline_is_the_agents_own_on_every_launch_road() {
     );
 }
 
+/// A launch listens for the provider's word that its briefing went in, by
+/// the deadline. The Enter pressed again when that word is late is the
+/// delivery's own, guarded step (t-14037): this door writes nothing.
 #[test]
-fn a_worker_start_waits_for_submission_and_retries_enter_once() {
-    let deadline = Instant::now() + Duration::from_secs(1);
-
+fn a_worker_start_listens_for_the_submission_its_delivery_entered() {
     let (already, heard) = std::sync::mpsc::sync_channel(1);
     already.send(()).expect("pre-acknowledge");
-    let retried = std::sync::atomic::AtomicBool::new(false);
     assert!(await_prompt_submission(
         Some(&heard),
-        deadline,
-        Duration::ZERO,
-        || {
-            retried.store(true, std::sync::atomic::Ordering::SeqCst);
-            false
-        },
+        Instant::now() + Duration::from_secs(1)
     ));
+
+    let (_silent, unheard) = std::sync::mpsc::sync_channel::<()>(1);
     assert!(
-        !retried.load(std::sync::atomic::Ordering::SeqCst),
-        "an acknowledged prompt received a second Enter"
+        !await_prompt_submission(Some(&unheard), Instant::now()),
+        "an unacknowledged briefing was accepted"
     );
 
-    let (acknowledge, heard) = std::sync::mpsc::sync_channel(1);
-    let retried = std::sync::atomic::AtomicBool::new(false);
-    assert!(await_prompt_submission(
-        Some(&heard),
-        deadline,
-        Duration::ZERO,
-        || {
-            retried.store(true, std::sync::atomic::Ordering::SeqCst);
-            acknowledge.send(()).is_ok()
-        },
-    ));
-    assert!(
-        retried.load(std::sync::atomic::Ordering::SeqCst),
-        "a pasted-but-unsubmitted briefing was never retried"
-    );
-
-    assert!(await_prompt_submission(
-        None,
-        deadline,
-        Duration::ZERO,
-        || false,
-    ));
+    assert!(await_prompt_submission(None, Instant::now()));
 }
 
 /// The agent picker is honest about what this machine has.

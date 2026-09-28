@@ -755,30 +755,23 @@ struct ForegroundAgentLook {
     process: Option<u32>,
 }
 
-/// Confirm that a submitting Enter was consumed, retrying that Enter once
-/// when a capable provider stays silent for one normal TUI quiet window.
-/// Providers without a prompt-submit hook pass `None` and keep the terminal
-/// delivery contract they can actually prove.
+/// Confirm that a launch briefing's submitting Enter was consumed: the
+/// provider's own prompt-submit report, heard by the deadline.
+///
+/// The Enter pressed again when that report is late is the delivery's own
+/// step now (t-14037, [`zerocode_pty::ready::PromptDelivery`]) — guarded at
+/// the write like every other, and the same for every door — so this only
+/// listens. Providers without a prompt-submit hook pass `None` and keep the
+/// terminal delivery contract they can actually prove.
 fn await_prompt_submission(
     submitted: Option<&std::sync::mpsc::Receiver<()>>,
     deadline: Instant,
-    acknowledgement_window: Duration,
-    retry_enter: impl FnOnce() -> bool,
 ) -> bool {
-    let Some(submitted) = submitted else {
-        return true;
-    };
-    let first_wait = acknowledgement_window.min(deadline.saturating_duration_since(Instant::now()));
-    match submitted.recv_timeout(first_wait) {
-        Ok(()) => true,
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => false,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            retry_enter()
-                && submitted
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .is_ok()
-        }
-    }
+    submitted.is_none_or(|submitted| {
+        submitted
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .is_ok()
+    })
 }
 
 /// The reason a worker launch gives when its briefing never went in, naming
