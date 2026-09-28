@@ -38,8 +38,24 @@ pub struct State {
     pub enabled: bool,
 }
 
+// 한 번 묻는 일은 모델을 게시된 카탈로그로 풀고, 그 게시가 설정과 카탈로그
+// 파일을 디스크에서 읽는다. 시험이 "프레임이 그것을 했는가" 를 셀 수 있게,
+// 같은 스레드의 물음만 센다.
+#[cfg(test)]
+thread_local! {
+    static STATE_ASKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This thread's fast-capability asks so far.
+#[cfg(test)]
+pub(crate) fn state_asks() -> u64 {
+    STATE_ASKS.with(std::cell::Cell::get)
+}
+
 #[must_use]
 fn state(model: &str) -> Option<State> {
+    #[cfg(test)]
+    STATE_ASKS.with(|count| count.set(count.get() + 1));
     let resolved = crate::cli_args::resolve_model_alias(model);
     let (base_model, fast_model) = variant_pair(&resolved)?;
     Some(State {

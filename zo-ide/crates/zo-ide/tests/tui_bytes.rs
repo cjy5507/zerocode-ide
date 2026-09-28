@@ -3096,9 +3096,11 @@ fn composer_border_is_confined_to_its_own_block() {
 /// section, so the first and the last fifth carry the same kinds of lines.
 #[test]
 fn bytes_per_delta_stay_flat_as_an_answer_grows() {
+    use std::fmt::Write as _;
+
     let mut source = String::new();
     for section in 0..24 {
-        source.push_str(&format!("## Section {section}\n\n"));
+        let _ = write!(source, "## Section {section}\n\n");
         source.push_str("A paragraph that says one thing, in plain words, and wraps once the pane is narrow enough to need it.\n\n");
         source.push_str("- the first point of the list\n- the second point, with `code` in it\n\n");
         source.push_str("```rust\nfn step(input: &str) -> usize {\n    input.len()\n}\n```\n\n");

@@ -1557,19 +1557,6 @@ pub(crate) fn alias_move_words(update: &runtime::model_discovery::AliasUpdate) -
     }
 }
 
-// 게시 한 번은 설정·카탈로그 파일을 디스크에서 읽는다. 시험이 "이 호출이
-// 그것을 했는가" 를 셀 수 있게, 같은 스레드의 게시만 센다.
-#[cfg(test)]
-thread_local! {
-    static CATALOG_PUBLISHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// This thread's catalog publishes so far.
-#[cfg(test)]
-pub(crate) fn catalog_publishes() -> u64 {
-    CATALOG_PUBLISHES.with(std::cell::Cell::get)
-}
-
 /// Mirror the settings-declared and discovered model rows into the env vars
 /// the `api` crate reads for its model catalog. `api` cannot depend on
 /// runtime config, and this must run before any provider client is built —
@@ -1582,8 +1569,6 @@ pub(crate) fn catalog_publishes() -> u64 {
 /// picks up a background discovery refresh that completed since the last call.
 #[allow(clippy::must_use_candidate)] // every runtime rebuild calls this for the effect; the answer is for `zo models`
 pub fn publish_model_catalog() -> Option<crate::model_wire_env::Published> {
-    #[cfg(test)]
-    CATALOG_PUBLISHES.with(|count| count.set(count.get() + 1));
     let declared = runtime::model_catalog::ModelCatalog::load()
         .ok()
         .and_then(|catalog| catalog.catalog_overlay_json());

@@ -142,12 +142,11 @@ mod tests {
         fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             let mut terminal = self.0.lock().unwrap();
             terminal.polls += 1;
-            match terminal.keys.pop_front() {
-                Some(event) => Poll::Ready(Some(Ok(event))),
-                None => {
-                    terminal.waker = Some(cx.waker().clone());
-                    Poll::Pending
-                }
+            if let Some(event) = terminal.keys.pop_front() {
+                Poll::Ready(Some(Ok(event)))
+            } else {
+                terminal.waker = Some(cx.waker().clone());
+                Poll::Pending
             }
         }
     }

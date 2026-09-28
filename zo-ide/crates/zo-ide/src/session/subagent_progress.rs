@@ -368,15 +368,16 @@ impl FileStamp {
 }
 
 impl ManifestFiles {
-    /// The manifest at `path`, and whether its file had to be read — only
+    /// The manifest at `path`, its file read (and counted in `reads`) only
     /// when it changed since anybody last read it.
-    fn manifest(&mut self, path: &Path, metadata: &std::fs::Metadata) -> (Option<Arc<AgentManifest>>, bool) {
+    fn manifest(&mut self, path: &Path, metadata: &std::fs::Metadata, reads: &mut usize) -> Option<Arc<AgentManifest>> {
         let stamp = FileStamp::of(metadata);
         if let Some(cached) = self.files.get(path) {
             if cached.stamp == stamp {
-                return (cached.manifest.clone(), false);
+                return cached.manifest.clone();
             }
         }
+        *reads += 1;
         let manifest = read_manifest(path, metadata)
             .filter(|manifest| manifest.status == "running")
             .map(Arc::new);
@@ -387,14 +388,19 @@ impl ManifestFiles {
                 manifest: manifest.clone(),
             },
         );
-        (manifest, true)
+        manifest
     }
 
     /// Forget files of the listed stores that the listing did not see — a
     /// swept manifest must not be remembered forever. Another store's files
-    /// are another watcher's to keep.
-    fn keep_only(&mut self, seen: &HashSet<PathBuf>, stores: &[(PathBuf, Option<SystemTime>)]) {
-        self.files.retain(|path, _| {
+    /// are another watcher's to keep. The guard goes with it: the listing is
+    /// over.
+    fn keep_only(
+        mut table: std::sync::MutexGuard<'_, Self>,
+        seen: &HashSet<PathBuf>,
+        stores: &[(PathBuf, Option<SystemTime>)],
+    ) {
+        table.files.retain(|path, _| {
             seen.contains(path)
                 || !path
                     .parent()
@@ -434,16 +440,18 @@ impl ManifestCache {
         }
     }
 
-    /// Whether the stores can be left unlisted this time: nothing of this
-    /// session ran at the last listing and no store directory has moved
-    /// since. The tools crate publishes every manifest by a rename, which
-    /// moves its directory's time, so there is nothing new to read.
-    fn still_quiet(&mut self, stores: &[(PathBuf, Option<SystemTime>)]) -> bool {
-        let quiet = self.quiet.as_deref() == Some(stores) && self.skipped < QUIET_RELIST_EVERY;
-        if quiet {
+    /// The stores and their times when this scan must list them; `None` when
+    /// nothing of this session ran at the last listing and no store directory
+    /// has moved since. The tools crate publishes every manifest by a rename,
+    /// which moves its directory's time, so there is nothing new to read.
+    fn listing_due(&mut self, registry: &AgentRegistry) -> Option<Vec<(PathBuf, Option<SystemTime>)>> {
+        let stores = store_times(registry);
+        if self.quiet.as_ref() == Some(&stores) && self.skipped < QUIET_RELIST_EVERY {
             self.skipped += 1;
+            return None;
         }
-        quiet
+        self.listings += 1;
+        Some(stores)
     }
 
     /// What a listing found: the stores' times, kept only when nothing of
@@ -506,21 +514,17 @@ fn scan_registry(
     started_at_floor: Option<u64>,
     cache: &mut ManifestCache,
 ) -> Vec<SubagentProgress> {
-    let stores = store_times(registry);
-    if cache.still_quiet(&stores) {
+    let Some(stores) = cache.listing_due(registry) else {
         return Vec::new();
-    }
-    cache.listings += 1;
+    };
     let mut progress = Vec::new();
     let mut seen = HashSet::new();
-    let files = Arc::clone(&cache.files);
-    let mut files = files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut files = cache.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for path in registry.manifest_paths() {
         let Ok(metadata) = std::fs::metadata(&path) else {
             continue;
         };
-        let (manifest, read) = files.manifest(&path, &metadata);
-        cache.reads += usize::from(read);
+        let manifest = files.manifest(&path, &metadata, &mut cache.reads);
         seen.insert(path.clone());
         let Some(manifest) = manifest else {
             continue;
@@ -614,8 +618,7 @@ fn scan_registry(
             },
         });
     }
-    files.keep_only(&seen, &stores);
-    drop(files);
+    ManifestFiles::keep_only(files, &seen, &stores);
     cache.settle(stores, progress.is_empty());
     progress.sort_by(|left, right| {
         left.started_epoch

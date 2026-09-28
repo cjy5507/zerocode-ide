@@ -6330,7 +6330,7 @@ mod tests {
     /// 있었다(2026-09-28 `sample`: 대기 중 메인 스레드 `__open` 의 13/20).
     #[test]
     fn a_frame_asks_the_model_catalog_only_while_fast_could_be_listed() {
-        let asked = crate::runtime_support::catalog_publishes;
+        let asked = super::super::fast::state_asks;
         let mut ui = test_ui();
         let before = asked();
         for text in ["", "hello", "/mo", "/fast now"] {
