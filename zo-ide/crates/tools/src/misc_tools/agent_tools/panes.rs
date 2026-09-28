@@ -187,9 +187,10 @@ fn record_receipt(manifest: &super::AgentOutput, outcome: &SteerOutcome) {
     );
 }
 
-/// Ask a pane child to leave the polite way: stop its turn, then close it.
+/// Ask a pane child to leave the polite way: stop its turn, then close it —
+/// or, for a release (`CloseReason::is_release`), the door alone.
 ///
-/// Both over its channel; `kill-pane` is the caller's last resort after
+/// Over its channel; `kill-pane` is the caller's last resort after
 /// this, never the first move (design §2.2). A child with no channel file
 /// yet — it has not booted — has nothing to be asked, and the caller's kill
 /// is the only road. Answers whether the child took the door: `false` for a
@@ -203,11 +204,15 @@ pub(super) fn close_pane_child(
     let Ok(coordinates) = ChannelCoordinates::read(&directory.join(CHANNEL_FILE)) else {
         return false;
     };
-    let _ = coordinates.call(
-        channel_method::CANCEL_TURN,
-        serde_json::json!({}),
-        limits.channel_timeout,
-    );
+    // A release follows an answer already read: nothing of it is running, and
+    // the turn that may be is the NEXT one the parent just steered in.
+    if !reason.is_release() {
+        let _ = coordinates.call(
+            channel_method::CANCEL_TURN,
+            serde_json::json!({}),
+            limits.channel_timeout,
+        );
+    }
     let closed = coordinates.call(
         channel_method::TEAMMATE_CLOSE,
         serde_json::json!({ "reason": reason.as_str() }),
@@ -418,10 +423,16 @@ fn watch_pane(
     };
     let outcome = wait_for_turn_result(tmux, directory, pane, turn, budget, &cancelled, &close);
     let seen_source = source_watch.and_then(crate::misc_tools::smart_router::ChallengerSourceWatch::seen);
-    // A lane's answer is the last thing asked of it: once it is read, the
-    // pane is released — after the completion is published, so the parent's
-    // collection never waits on the door (`close_grace`).
-    let lane_done = job.one_shot && matches!(outcome, PaneOutcome::Finished(_));
+    // An answered pane is released once its answer is published — after, so
+    // the parent's collection never waits on the door (`close_grace`). A
+    // lane's answer is the last thing asked of it; a teammate's next word, if
+    // one ever comes, re-cuts a pane on the same transcript (t-11753). The
+    // child keeps standing for a person who touched it (`keeps_standing`).
+    let release = matches!(outcome, PaneOutcome::Finished(_)).then_some(if job.one_shot {
+        runtime::subagent_panes::CloseReason::LaneDone
+    } else {
+        runtime::subagent_panes::CloseReason::Delivered
+    });
     let transcript = directory.join(runtime::subagent_panes::result_file_for_turn(turn));
     let completion = match outcome {
         PaneOutcome::Finished(result) => finished(job, &result),
@@ -460,12 +471,8 @@ fn watch_pane(
         ),
     };
     super::spawn::publish_pane_completion(job, completion, seen_source);
-    if lane_done {
-        close_pane_child(
-            directory,
-            &limits,
-            runtime::subagent_panes::CloseReason::LaneDone,
-        );
+    if let Some(reason) = release {
+        close_pane_child(directory, &limits, reason);
     }
 }
 
@@ -611,12 +618,17 @@ mod tests {
 
         /// Poll until the watcher has settled `agent_id` on generation
         /// `generation`, and answer the settled manifest.
+        /// The manifest once generation `generation` settled AND its watcher
+        /// is gone — the watcher releases a finished pane after publishing
+        /// (t-11753), so a test that stands a channel up after the answer
+        /// must not race that release for the channel's one accept.
         fn wait_settled(&self, agent_id: &str, generation: u64) -> super::super::AgentOutput {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             loop {
                 let stored = self.manifest(agent_id);
                 if stored.run_generation == generation
                     && super::super::agent_output_status_is_terminal(&stored.status)
+                    && !super::super::agent_worker_is_live(agent_id)
                 {
                     return stored;
                 }
@@ -655,13 +667,15 @@ mod tests {
         }
     }
 
-    /// Two accepts — the parent's `session.cancel_turn`, then
-    /// `teammate.close` — answered the way an idle child answers them, and
-    /// the child's `result-final.json` written as it leaves.
+    /// `calls` accepts — the parent's `session.cancel_turn` then
+    /// `teammate.close` for a stop, the door alone for a release — answered
+    /// the way an idle child answers them, and the child's
+    /// `result-final.json` written as it leaves.
     fn closing_child_channel(
         channel_file: &Path,
         directory: PathBuf,
         agent_id: String,
+        calls: usize,
     ) -> std::thread::JoinHandle<Vec<String>> {
         use std::io::{BufRead as _, Write as _};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -679,7 +693,7 @@ mod tests {
         std::thread::spawn(move || {
             let mut methods = Vec::new();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            for _ in 0..2 {
+            for _ in 0..calls {
                 let stream = loop {
                     match listener.accept() {
                         Ok((stream, _)) => break Some(stream),
@@ -750,6 +764,7 @@ mod tests {
             &directory.join(CHANNEL_FILE),
             directory.clone(),
             manifest.agent_id.clone(),
+            2,
         );
         let outcome = super::super::stop_agent_for_session_in(
             &isolated.store,
@@ -792,42 +807,16 @@ mod tests {
         super::super::clear_background_agent(&manifest.agent_id);
     }
 
-    /// A channel nobody should call: answers whether anyone connected within
-    /// `quiet`. The teammate's control — a pane that must be left standing.
-    fn silent_child_channel(
-        channel_file: &Path,
-        quiet: std::time::Duration,
-    ) -> std::thread::JoinHandle<bool> {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.set_nonblocking(true).expect("nonblocking");
-        let addr = listener.local_addr().expect("addr").to_string();
-        ChannelCoordinates {
-            addr,
-            token: Some("child-token".to_string()),
-            session_id: "child-session".to_string(),
-        }
-        .write(channel_file)
-        .expect("write channel file");
-        std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + quiet;
-            while std::time::Instant::now() < deadline {
-                if listener.accept().is_ok() {
-                    return true;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            false
-        })
-    }
-
-    /// A fan-out lane leaves the moment its answer is read (2026-09-07,
-    /// "조사가 끝나면 자동으로 닫혔으면"): the parent asks it over its channel —
-    /// cancel, then the door, with `lane_done` as the word — without any
-    /// `StopAgent`, and the closing document keeps that word. A teammate
-    /// (a lone `Agent`) spawned the same way is not asked anything: its
-    /// pane stands idle for the parent's next word, as t-2513 promised.
+    /// A finished pane leaves the moment its answer is read. A fan-out lane
+    /// (2026-09-07, "조사가 끝나면 자동으로 닫혔으면") is asked with
+    /// `lane_done`; a teammate — a lone `Agent` — used to stand idle for the
+    /// parent's next word for the whole idle budget, and the window kept it
+    /// beside the working ones (t-11753), so it is now asked too, once its
+    /// answer is on the manifest, with `delivered`. Both over the channel,
+    /// the door alone. Whether a person at the pane keeps it standing is the
+    /// child's to say (`CloseReason::keeps_standing`).
     #[test]
-    fn a_fanout_lane_leaves_when_its_answer_is_read_and_a_teammate_stays() {
+    fn a_finished_pane_leaves_when_its_answer_is_read_lane_and_teammate_alike() {
         let isolated = Isolated::new("lane");
         let tmux = fake_tmux(&isolated.store, "'%1' '%4'");
         let mut lane = an_agent("lane one");
@@ -851,38 +840,36 @@ mod tests {
         // Both children's channels are up before they answer, as a real
         // child's is from boot.
         let lane_channel =
-            closing_child_channel(&lane_dir.join(CHANNEL_FILE), lane_dir.clone(), lane.agent_id.clone());
-        let teammate_channel = silent_child_channel(
+            closing_child_channel(&lane_dir.join(CHANNEL_FILE), lane_dir.clone(), lane.agent_id.clone(), 1);
+        let teammate_channel = closing_child_channel(
             &teammate_dir.join(CHANNEL_FILE),
-            std::time::Duration::from_millis(600),
+            teammate_dir.clone(),
+            teammate.agent_id.clone(),
+            1,
         );
         for (agent, directory) in [(&lane, &lane_dir), (&teammate, &teammate_dir)] {
             let mut said = TeammateResult::new(&agent.agent_id, Exit::Ok);
             said.final_message = "my answer".to_string();
             said.write_turn(directory, 1).expect("write turn 1");
         }
-        let lane_settled = isolated.wait_settled(&lane.agent_id, 1);
-        assert_eq!(lane_settled.status, "completed", "the lane's answer settled first: {lane_settled:?}");
-
-        let asked = lane_channel.join().expect("lane channel");
-        assert_eq!(
-            asked,
-            vec![
-                runtime::subagent_panes::channel_method::CANCEL_TURN.to_string(),
-                runtime::subagent_panes::channel_method::TEAMMATE_CLOSE.to_string(),
-            ],
-            "the lane is asked to leave on the read of its answer: cancel, then the door"
-        );
-        let closing = TeammateResult::read_final(&lane_dir).expect("the lane wrote its closing document");
-        assert_eq!(closing.reason, Some(runtime::subagent_panes::CloseReason::LaneDone));
-
-        let teammate_settled = isolated.wait_settled(&teammate.agent_id, 1);
-        assert_eq!(teammate_settled.status, "completed");
-        assert!(
-            !teammate_channel.join().expect("teammate channel"),
-            "a teammate's pane is left standing for the parent's next word"
-        );
-        assert!(TeammateResult::read_final(&teammate_dir).is_none(), "the teammate wrote no closing document");
+        // The door alone: a release never cancels a turn, since the parent
+        // may already have steered the pane's next one.
+        let the_door = vec![runtime::subagent_panes::channel_method::TEAMMATE_CLOSE.to_string()];
+        for (agent, directory, channel, word) in [
+            (&lane, &lane_dir, lane_channel, runtime::subagent_panes::CloseReason::LaneDone),
+            (&teammate, &teammate_dir, teammate_channel, runtime::subagent_panes::CloseReason::Delivered),
+        ] {
+            let settled = isolated.wait_settled(&agent.agent_id, 1);
+            assert_eq!(settled.status, "completed", "the answer settled first: {settled:?}");
+            assert!(
+                std::fs::read_to_string(&settled.output_file).unwrap().contains("my answer"),
+                "the answer is on the manifest before the pane is asked to leave"
+            );
+            let asked = channel.join().expect("child channel");
+            assert_eq!(asked, the_door, "{word:?}: asked to leave on the read of its answer");
+            let closing = TeammateResult::read_final(directory).expect("the child wrote its closing document");
+            assert_eq!(closing.reason, Some(word));
+        }
         super::super::clear_background_agent(&lane.agent_id);
         super::super::clear_background_agent(&teammate.agent_id);
     }

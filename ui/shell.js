@@ -9137,25 +9137,41 @@ function worktreeAgentRows(path) {
     for (const sub of running) {
       ordered.push({ ...row, depth: depth + 1, sub, kids: 0, kidsShown: false });
     }
-    if (!hideBelow && done.length > 0) {
-      const historyShown = agentHistoryShown.has(row.term);
-      if (historyShown) {
-        for (const sub of done) {
-          ordered.push({ ...row, depth: depth + 1, sub, kids: 0, kidsShown: false });
-        }
-      }
-      ordered.push({
-        ...row, depth: depth + 1, sub: null, kids: 0, kidsShown: false,
-        history: done.length, historyShown,
-      });
-    }
-    for (let child of children) {
+    // 판으로 뜬 자식도 같은 규칙이다(t-11753): 끝난 자식 판 — zo의 판 헬퍼,
+    // Claude Code의 팀원 — 은 작업 중인 줄 사이에 같은 무게로 서지 않고 같은
+    // 「완료 N개」로 간다. 판이 닫히기 전에도(사람이 손댄 판은 남는다). 남는
+    // 것은 셋: 일하거나 묻는 자식(밑에 산 것이 있는 자식 포함), 사람이 보고
+    // 있는 판(무대 위), 그리고 원장이 검증을 기다리는 워커 — 코디가 아직 할
+    // 일이 있는 줄이다.
+    const dressed = children.map((child) => {
       const wearing = (paneSubagents.get(row.term) ?? []).find(
         (sub) => sub.id === paneHelpers.get(child.term),
       );
       // 접어 입은 판은 헬퍼의 이름과 손을 달고 내려간다(t-3024).
-      if (wearing) child = { ...child, sub: wearing, subHost: row.term };
-      walk(child, depth + 1, hideBelow);
+      return wearing ? { ...child, sub: wearing, subHost: row.term } : child;
+    });
+    const settled = (child) =>
+      !LIVE_HOOK_STATES.has(agentRowState(child)) &&
+      !liveBelow(child) &&
+      !agentRowHere(child) &&
+      !(paneLedger.get(child.term)?.task && !ledgerVouched(paneLedger.get(child.term)?.review));
+    const standing = dressed.filter((child) => !settled(child));
+    const finished = dressed.filter(settled);
+    for (const child of standing) walk(child, depth + 1, hideBelow);
+    const history = done.length + finished.length;
+    const historyShown = agentHistoryShown.has(row.term);
+    if (!hideBelow && historyShown) {
+      for (const sub of done) {
+        ordered.push({ ...row, depth: depth + 1, sub, kids: 0, kidsShown: false });
+      }
+    }
+    // 접힌 자식 판도 소비는 된다(seen) — 고아 패스가 되살려 루트로 세우지 않게.
+    for (const child of finished) walk(child, depth + 1, hideBelow || !historyShown);
+    if (!hideBelow && history > 0) {
+      ordered.push({
+        ...row, depth: depth + 1, sub: null, kids: 0, kidsShown: false,
+        history, historyShown,
+      });
     }
   };
   for (const row of here) {
@@ -9231,6 +9247,34 @@ function agentRowPane(row) {
  * 다른 말을 하게 된다. */
 function agentRowTip(primary, secondary, uses) {
   return `${primary}${secondary ? ` - ${secondary}` : ""}${uses ? ` · ${uses}` : ""}`;
+}
+
+/* And what the row says to a screen reader — the tooltip's words, then the
+ * status and the clock the row shows at its right edge, as one sentence
+ * (t-11827). Without it the row's name was its text run together with the
+ * reading hand's label. Spelled once for the same two roads as the tip. */
+function agentRowSpoken(tip, status, ago) {
+  return [tip, status, ago].filter(Boolean).join(" · ");
+}
+
+/* The keyboard's road through one card's agent rows (t-11827). Up and down
+ * step between the rows, Home and End go to the ends; the row itself is a
+ * button, so Enter and Space press it. Stopped here: the workspace list
+ * below reads the same arrows to move the WINDOW to another workspace, and
+ * a person walking a card's agents did not ask to leave it. */
+function stepAgentRows(event) {
+  const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+  if (step === 0 && event.key !== "Home" && event.key !== "End") return;
+  const row = event.target.closest?.(".wt-agent");
+  if (!row || row.parentElement !== event.currentTarget) return;
+  const rows = [...event.currentTarget.querySelectorAll(":scope > .wt-agent")];
+  const at = rows.indexOf(row);
+  const next = event.key === "Home" ? rows[0]
+    : event.key === "End" ? rows.at(-1)
+      : rows[Math.min(rows.length - 1, Math.max(0, at + step))];
+  event.preventDefault();
+  event.stopPropagation();
+  next?.focus();
 }
 
 /* What a row READS AS — which is not always what its state says.
@@ -9649,6 +9693,7 @@ function redressAgentRows(host, rows) {
     writeTextContent(node.querySelector(".wt-agent-when"), agentRowAgo(row));
     const tip = agentRowTip(fit.primary, fit.secondary, fit.uses);
     if (node.dataset.tip !== tip) node.dataset.tip = tip;
+    writeAttribute(node, "aria-label", agentRowSpoken(tip, fit.status, agentRowAgo(row)));
   }
   return true;
 }
@@ -9698,6 +9743,9 @@ function makeAgentRow(row, gutter = false) {
   const live = LIVE_HOOK_STATES.has(state);
   node.className = agentRowClasses(state, here, foldedSummary, row);
   node.dataset.term = String(row.term);
+  // The tooltip stands BESIDE the row, off the list: below it, it stood over
+  // the next agent's row (t-11827, "한 줄은 떠 있는 풍선말에 가려 있다").
+  node.dataset.tipSide = "end";
   // 「완료 N개」 — 정착한 헬퍼 이력의 한 줄. 누르면 그 N개가 각각의 전사 손을
   // 달고 서고, 다시 누르면 접힌다. 지우는 것이 아니다: 명부도 페이지도 그대로.
   if (row.history) {
@@ -9818,11 +9866,16 @@ function makeAgentRow(row, gutter = false) {
       void focusAgentPane(seat?.worktree ?? row.worktree, seat?.id ?? null, own, paneAgents.get(own) ?? row.agent);
       return;
     }
-    // A helper without one has no pane of its own. Its navigator row therefore
-    // opens the parent terminal whose process is running it, just like the
-    // walk model says below. A vendor transcript is a separate reading
-    // surface; choosing it here made the navigator row fail its one spatial
-    // promise.
+    // A helper without one runs inside its lead, whose pane is usually the
+    // one already in front of the person — going there was the press that
+    // "did nothing" (t-11827, "눌러도 열리지 않는다"). The row opens what the
+    // helper is doing instead: its own conversation, the page its reading
+    // hand opens, and the lead's pane with a word why when the vendor left
+    // nothing to read (`openHelperPage`).
+    if (row.sub && row.subHost === undefined) {
+      void openHelperPage(row, row.sub);
+      return;
+    }
     void focusAgentPane(row.worktree, row.tab?.id ?? null, row.term, row.agent);
   });
   const activityBorder = document.createElement("span");
@@ -9929,6 +9982,7 @@ function makeAgentRow(row, gutter = false) {
   ).filter(Boolean);
   node.append(...parts, activityBorder);
   node.dataset.tip = agentRowTip(primary, secondary, usesWords);
+  node.setAttribute("aria-label", agentRowSpoken(node.dataset.tip, status.textContent, when.textContent));
   return node;
 }
 
@@ -11172,9 +11226,10 @@ function holdHelperTurns(held, turns) {
 
 /* 이 헬퍼의 페이지를 연다 — 벤더가 전사를 남겼을 때에만.
  *
- * 남기지 않았으면 행은 늘 하던 일을 한다(부모 판으로). 물어보고 나서 여는
- * 이유가 그것이다: 열리지 않을 문을 그려 두는 것보다 눌러 보고 아무 일도
- * 일어나지 않는 편이 낫다는 규칙은 이 창에 이미 있다(죽은 컨트롤 금지). */
+ * 남기지 않았으면 부모 판으로 가고, 왜 그것뿐인지 한 줄로 말한다(t-11827):
+ * 부모 판은 대개 이미 앞에 서 있어서, 말 없이 가면 누름이 아무 일도 하지
+ * 않은 것으로 읽힌다. 물어보고 나서 여는 이유는 그대로다 — 열리지 않을 문을
+ * 그려 두지 않는다(죽은 컨트롤 금지). */
 async function openHelperPage(row, sub) {
   const tabId = `helper:${row.term}:${sub.id}`;
   const held = tabs.find((tab) => tab.id === tabId);
@@ -11189,6 +11244,7 @@ async function openHelperPage(row, sub) {
     first = null;
   }
   if (!first?.found) {
+    toast(t("session.subagentNoTranscript", "이 에이전트는 따로 볼 기록을 남기지 않아 부모 에이전트의 화면을 엽니다"));
     void focusAgentPane(row.worktree, row.tab?.id ?? null, row.term, row.agent);
     return;
   }

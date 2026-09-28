@@ -130,9 +130,11 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       JSON.stringify(subRows),
     );
 
-    /* A helper has no pane of its own. Its navigator row is therefore a door to
-     * the parent terminal where its work is running, even when the vendor also
-     * left a transcript that can be opened through another surface. */
+    /* A helper has no pane of its own. Its navigator row used to be a door to
+     * the parent terminal where its work is running — the pane already in
+     * front of the person, so the press seemed to do nothing ("눌러도 열리지
+     * 않는다", t-11827). The row now opens the helper's own conversation when
+     * the vendor left one; `sidebar-agents` holds the road without one. */
     const helperRowFocus = await page.evaluate(async () => {
       const seen = {};
       const term = await openTermTab({ placement: "tab" });
@@ -162,9 +164,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       openTab({ id: `t2163-pane-decoy:${term}`, kind: "board" });
       row?.click();
       await new Promise((done) => setTimeout(done, 120));
-      seen.parentTab = activeTabId === owner.id;
-      seen.parentPane = owner.activePane === term;
-      seen.noHelperPage = !tabs.some((tab) => tab.id === `helper:${term}:kept`);
+      seen.helperPage = activeTabId === `helper:${term}:kept`;
       seen.logAsked = logAsked;
 
       delete window.__ANSWER__.subagent_log;
@@ -175,11 +175,8 @@ export async function testWorkers({ browser, origin, ok, faults }) {
     });
 
     ok(
-      "a pane helper row focuses the parent terminal instead of opening a helper page",
-      helperRowFocus.parentTab &&
-        helperRowFocus.parentPane &&
-        helperRowFocus.noHelperPage &&
-        helperRowFocus.logAsked === 0,
+      "a helper row opens that helper's own conversation page",
+      helperRowFocus.helperPage && helperRowFocus.logAsked === 1,
       JSON.stringify(helperRowFocus),
     );
 

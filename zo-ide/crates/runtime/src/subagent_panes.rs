@@ -1167,9 +1167,15 @@ pub enum CloseReason {
     /// A fan-out lane whose answer the parent read. The lanes of one
     /// `SpawnMultiAgent` are consumed together in one summary and nothing
     /// more is asked of any of them, so the parent releases the pane the
-    /// moment the answer is in its hands (2026-09-07) — a lone `Agent` is a
-    /// teammate and keeps its pane idle for `idle_budget` instead.
+    /// moment the answer is in its hands (2026-09-07).
     LaneDone,
+    /// A teammate (a lone `Agent`) whose answer is on the parent's manifest.
+    /// Its pane used to stand idle for `idle_budget` waiting for a next word
+    /// that mostly never came, and the window kept every finished one beside
+    /// the working ones ("agent가 done 상태여도 창을 걷어 내지 않고 화면에
+    /// 계속 표시됨", t-11753). A later `SendMessage` re-cuts a pane on the
+    /// same transcript (`resume_pane_job`), so releasing it loses nothing.
+    Delivered,
 }
 
 impl CloseReason {
@@ -1181,7 +1187,26 @@ impl CloseReason {
             Self::ClosedByParent => "closed_by_parent",
             Self::UserExit => "user_exit",
             Self::LaneDone => "lane_done",
+            Self::Delivered => "delivered",
         }
+    }
+
+    /// Whether this word only RELEASES a pane whose answer the parent already
+    /// holds — the two it says after reading a result — rather than ending
+    /// work. A release never cancels a turn: the parent may already have
+    /// steered the pane's next one.
+    #[must_use]
+    pub const fn is_release(self) -> bool {
+        matches!(self, Self::LaneDone | Self::Delivered)
+    }
+
+    /// Whether a pane asked to close for this reason stays: a release, to a
+    /// pane a person has pressed a key in. The person is reading or writing
+    /// there; the answer is already the parent's, and the idle budget and the
+    /// person's own exit still end the pane.
+    #[must_use]
+    pub const fn keeps_standing(self, attended: bool) -> bool {
+        attended && self.is_release()
     }
 }
 
@@ -2305,9 +2330,32 @@ mod tests {
             CloseReason::ClosedByParent,
             CloseReason::UserExit,
             CloseReason::LaneDone,
+            CloseReason::Delivered,
         ] {
             assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
         }
+    }
+
+    /// The two words the parent says after reading an answer only release a
+    /// pane (t-11753): a pane a person pressed a key in declines them, and
+    /// every other word still ends it, attended or not.
+    #[test]
+    fn a_release_is_declined_only_by_a_pane_a_person_touched() {
+        for release in [CloseReason::LaneDone, CloseReason::Delivered] {
+            assert!(release.is_release(), "{release:?}");
+            assert!(release.keeps_standing(true), "{release:?} to a touched pane");
+            assert!(!release.keeps_standing(false), "{release:?} to an untouched pane");
+        }
+        for order in [
+            CloseReason::ParentLost,
+            CloseReason::IdleBudget,
+            CloseReason::ClosedByParent,
+            CloseReason::UserExit,
+        ] {
+            assert!(!order.is_release(), "{order:?}");
+            assert!(!order.keeps_standing(true), "{order:?} ends even a touched pane");
+        }
+        assert_eq!(CloseReason::Delivered.as_str(), "delivered");
     }
 
     /// The parent's own channel is a process fact, declared once.
