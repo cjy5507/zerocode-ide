@@ -1428,7 +1428,6 @@
   /* ---- 지식 그래프 비주얼 토큰 (Knowledge Graph Visual Tokens) ----
    * 색상은 임의의 하드코딩이 아닌 의미론적 레인 램프와 표면 토큰에서 파생된다. */
   --knowledge-ground: var(--surface-deck);
-  --knowledge-node-muted-weight: 72%;
   --knowledge-edge-muted-weight: 82%;
   --knowledge-node-stroke: 1;
   --knowledge-node-selected-stroke: 2;
@@ -1438,34 +1437,35 @@
    * an SVG filter. `lift` is how much it grows under the pointer. */
   --knowledge-halo-core: 0.85;
   --knowledge-halo-lift: 1.12;
-  /* One nebula per cluster (3차): a gradient disc behind the members, sized
-   * from their spread. Core opacity in graph paint, scale and pad in graph
-   * units — the nebula belongs to the picture, so it zooms with it. */
-  --knowledge-nebula-core: 0.14;
+  /* One nebula per cluster (3차): a disc behind the members, sized from their
+   * spread. Its paint is one flat, faint layer of the cluster's ink (t-12029,
+   * the approved design v2 "colour": 4.5% on the dark ground, no glow at the
+   * centre); scale and pad in graph units — the nebula belongs to the
+   * picture, so it zooms with it. */
+  --knowledge-nebula-core: 0.045;
   --knowledge-nebula-scale: 1;
   --knowledge-nebula-pad: 18;
-  /* 원반의 테두리 한 올. 빛 번짐 대신 선 하나로 경계를 말한다 — 흐릿한
-     그라데이션만으로는 「여기까지가 이 주제」가 읽히지 않았다. */
+  /* 원반의 테두리 한 올 — 사람이 그 군집을 밝힐 때만 선다(t-12029): 쉬는 지도의 경계는 원반의 옅은 한 겹과
+     원반 사이의 여백이 말하고, 테두리 열일곱은 원반보다 테두리를 먼저 읽게 했다. */
   --knowledge-nebula-edge-weight: 30%;
   --knowledge-nebula-edge-width: 1;
-  /* The cluster's name over its nebula: screen pixels, like every label. It
-   * steps back once the person has zoomed this far past the fit — by then the
-   * page names are what is being read. A zoom factor, not an absolute scale:
-   * a 35-page vault already fits above the label LOD's absolute thresholds. */
-  --knowledge-cluster-label-px: 15;
+  /* The cluster's name over its nebula, one line (t-12029, the approved
+   * design v2 "oneLine"): screen pixels, like every label — a coloured
+   * cluster's name at label-px in its ink, a quiet cluster's at quiet-px in
+   * mist. It fades as the person zooms in (fade-from, gone to fade-floor over
+   * fade-span of zoom — by then the page names are what is being read) and
+   * steps back entirely at label-until. Zoom factors, not absolute scales: a
+   * 35-page vault already fits above the label LOD's absolute thresholds. */
+  --knowledge-cluster-label-px: 13;
+  --knowledge-cluster-quiet-px: 11.5;
   --knowledge-cluster-label-opacity: 0.96;
-  --knowledge-cluster-label-tracking: 0.04em;
+  --knowledge-cluster-fade-from: 1.7;
+  --knowledge-cluster-fade-span: 1.1;
+  --knowledge-cluster-fade-floor: 0.3;
   --knowledge-cluster-label-until: 4;
   /* 군집 이름은 원반의 **위**에 선다 — 가운데에 세우면 대표 페이지의 점과 그
-     이름표를 덮는다. 원반 반지름에 이만큼(그림 단위) 더 올린 자리. 그 아래의
-     작은 줄이 「쪽 n · 이름 접힘 +m」이다. */
+     이름표를 덮는다. 원반 반지름에 이만큼(그림 단위) 더 올린 자리. */
   --knowledge-cluster-label-lift: 22;
-  --knowledge-cluster-count-px: 11;
-  /* 이름판 안의 대표 지식은 점 곁의 이름표보다 짧게 끊는다 — 이름판의 폭은 이
-     한 줄이 정하고, 그 폭이 넓을수록 자리를 못 찾는 주제가 는다. */
-  --knowledge-cluster-lead-max: 13;
-  --knowledge-cluster-lead-gap: 19;
-  --knowledge-cluster-count-gap: 34;
   /* A page's name under its point is cut here (with an ellipsis); the whole
    * title lives in the card. Real titles are sentences — 35 of them at once
    * were a fog over the picture. */
@@ -1636,6 +1636,11 @@
   --knowledge-label-edge-px: 10;
   --knowledge-marker-px: 7;
   --knowledge-fit-ratio: 0.72;
+  /* 전체 지도의 맞춤(t-12029, 승인된 시안 v2 「fit」) — 지도가 판을 채운다: 그림의 경계가 판의 map-fit 몫을
+     차지하고, 아래 map-foot px는 군집 범례와 배율 단추의 띠라 그 위의 가운데에 선다. 위의 fit-ratio는 주변
+     탐색의 고리가 쓰는 몫이다(이름표의 여백이 그 몫에서 나온다). */
+  --knowledge-map-fit: 0.9;
+  --knowledge-map-foot: 44;
   --knowledge-margin: 36;
   /* 주변 탐색의 고리(시안 이식, 09-14). 이웃 사이 호의 길이(그림 단위) — 고리의
      반지름은 점의 수 × 이것 ÷ 2π 아래로 내려가지 않는다; 첫 고리의 최소 반지름;
@@ -1664,15 +1669,74 @@
      반지름과 고리 사이 간격(그림 단위) — 뉴런의 가지가 여기서 나온다. */
   --knowledge-core-ring: 52;
   --knowledge-core-ring-gap: 42;
+  /* ---- 가지가 보이는 군집 (t-12029, 승인된 시안 v2 「spread」) ----
+     원반은 이완이 정한 자리 그대로 spread배로 넓어진다 — 원반 사이의 틈이 그만큼 줄고, 두 원반이
+     gap-least보다 가까워지는 곳만 그만큼 물러선다. 전체 지도의 점은 작다: 이름 있는 군집의 잎
+     map-leaf, 대표 지식 map-major, 중심 map-core, 유령 map-ghost, 이름 없는 군집의 쪽(부스러기)
+     map-stray(px). 주변 탐색은 위의 √차수 램프와 세 크기 그대로다 — 고리의 이웃은 수십이라 크게 서도
+     공이 되지 않는다. 점이 제 홈으로 끌리는 힘은 단마다 다르다: 대표 지식은 pull × pull-major, 잎은
+     pull × pull-leaf — 잎이 약하게 끌려 제 이웃을 따라 뻗고, 그래서 가지가 보인다. */
+  --knowledge-cluster-spread: 1.3;
+  --knowledge-cluster-gap-least: 24;
+  /* 부스러기 띠(이름 없는 군집 — 고아와 두 쪽짜리)는 원반들의 윤곽에서 이만큼(그림 단위) 떨어져 한 겹으로 선다 —
+     원반 사이의 틈(cluster-gap)만큼 떨어뜨리면 띠가 지도의 맞춤을 넓혀 원반이 판의 가운데 작게 섰다(t-12029). */
+  --knowledge-stray-gap: 40;
+  --knowledge-map-leaf: 2.4;
+  --knowledge-map-major: 5.5;
+  --knowledge-map-core: 10;
+  --knowledge-map-ghost: 2.2;
+  --knowledge-map-stray: 2;
+  --knowledge-cluster-pull-major: 1;
+  --knowledge-cluster-pull-leaf: 0.5;
+  /* ---- 군집 사이 묶음선 (t-12029, 승인된 시안 v2 「bundle」) ----
+     쉬는 전체 지도에서 두 군집을 건너는 낱낱의 선은 서지 않고, 이름 있는 군집 쌍마다 한 줄이 그 수를
+     굵기로 말한다 — least 가닥 이상인 쌍만. 굵기 = width + √n × grow(px), 옅기 = alpha + lift × n ÷ 가장
+     굵은 쌍의 n. 한 줄은 두 원반의 가장자리에서 inset px 떨어져 시작하고 끝나며, 지도의 가운데에서
+     바깥으로 틈의 bend만큼(배율 1에서 bend-max px까지) 휜다. 두 원반의 화면 틈이 room px보다 좁으면
+     긋지 않는다. 확대할수록 물러선다: fade-from − fade-per × 배율(fade-floor 아래로는 가지 않는다). 사람이
+     다른 것을 묻는 동안(짚기·고르기·찾기)은 quiet를 곱하고, 올리거나 고른 군집에 닿는 줄은 그 군집의
+     잉크로 mine, 목록에서 짚은 줄은 hot(굵기 + hot-width). listed는 「강한 묶음」 목록의 줄 수. */
+  --knowledge-tie-least: 8;
+  --knowledge-tie-width: 0.9;
+  --knowledge-tie-grow: 0.55;
+  --knowledge-tie-alpha: 0.16;
+  --knowledge-tie-lift: 0.3;
+  --knowledge-tie-inset: 3;
+  --knowledge-tie-bend: 0.35;
+  --knowledge-tie-bend-max: 72;
+  --knowledge-tie-room: 28;
+  --knowledge-tie-fade-from: 1.45;
+  --knowledge-tie-fade-per: 0.35;
+  --knowledge-tie-fade-floor: 0.3;
+  --knowledge-tie-quiet: 0.3;
+  --knowledge-tie-mine: 0.8;
+  --knowledge-tie-hot: 0.85;
+  --knowledge-tie-hot-width: 0.8;
+  --knowledge-ties-listed: 5;
+  --knowledge-tie-ink: var(--ink-mist);
+  --knowledge-tie-hot-ink: var(--knowledge-highlight);
+  /* ---- 놀라운 연결 (t-12029, 승인된 시안 v2 「bridges」) ----
+     큰 두 주제(작은 쪽도 least 쪽 이상) 사이에 선이 단 한 가닥인 쌍 — 그 한 가닥을 두 군집의 색으로 이은 곡선과
+     번호로 밝힌다(listed 쌍까지, 목록과 그림이 같은 수). 곡선은 두 끝 점을 잇고 지도의 가운데에서 바깥으로 길이의
+     bend만큼(배율 1에서 bend-max px까지) 휜다. 굵기 width(목록에서 짚으면 hot-width), 가운데의 번호 원은 반지름
+     badge px·테두리 badge-stroke px·숫자 number-px. 사람이 다른 것을 묻는 동안(짚기·고르기·찾기·다른 다리)은
+     quiet까지 물러선다. */
+  --knowledge-bridge-least: 15;
+  --knowledge-bridges-listed: 6;
+  --knowledge-bridge-bend: 0.22;
+  --knowledge-bridge-bend-max: 140;
+  --knowledge-bridge-width: 1.7;
+  --knowledge-bridge-hot-width: 2.6;
+  --knowledge-bridge-badge: 8.5;
+  --knowledge-bridge-badge-stroke: 1.4;
+  --knowledge-bridge-number-px: 10;
+  --knowledge-bridge-quiet: 0.3;
   /* ---- 이름표 격자 (09-16) ----
      이름표는 화면 좌표의 격자에 자리를 예약하고, 자리를 못 얻은 이름은 서지
      않는다(글자를 줄이지 않는다 — 접는다). cell은 격자 한 칸의 픽셀, pad는
      이름표 상자에 더하는 여백, budget은 한 판에 설 수 있는 이름표의 수다.
      좁은 판일수록 budget이 작다: 작은 화면은 「같은 것을 작게」가 아니라
      「더 적게」 본다. */
-  /* 세 줄짜리 주제 이름판(이름 · 대표 지식 · 쪽 수)을 감당하는 캔버스의 폭.
-     그 아래에서는 이름 한 줄만 서고 나머지 둘은 인스펙터와 군집 범례가 말한다. */
-  --knowledge-plate-wide: 520;
   --knowledge-label-cell: 14;
   --knowledge-label-pad-x: 6;
   --knowledge-label-pad-y: 4;
@@ -2533,8 +2597,8 @@
    * other six hold their value in both themes (I18nProvider-DPbv01TU.css). */
   --git-graph-ref: #007acc;
   --git-graph-lane-3: #994f00;
-  /* A nebula on a white ground needs less paint to be seen. */
-  --knowledge-nebula-core: 0.1;
+  /* A nebula on a white ground needs a little more of the flat layer to be seen. */
+  --knowledge-nebula-core: 0.05;
   /* 종이 위에서는 테두리 한 올이 더 일해야 원반의 경계가 읽힌다. */
   --knowledge-nebula-edge-weight: 42%;
   --knowledge-highlight: var(--ink-figure);
