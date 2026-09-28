@@ -41258,6 +41258,21 @@ button.jev-token:hover {
     grid-area: auto;
   }
 
+  /* A card's column is narrower than the table's line: a figure that
+     outgrows it takes a second line between its facts rather than run
+     under the one beside it, and each fact keeps its words together. */
+  .jev-table [data-jev-cell="rows"], .jev-table [data-jev-cell="answered"],
+  .jev-table [data-jev-cell="acted"], .jev-table [data-jev-cell="cost"] {
+    white-space: normal;
+    min-width: 0;
+  }
+
+  .jev-table [data-jev-cell="rows"] [data-jev-fact],
+  .jev-table [data-jev-cell="answered"] [data-jev-fact],
+  .jev-table [data-jev-cell="acted"] [data-jev-fact] {
+    white-space: nowrap;
+  }
+
   .jev-table td[data-jev-cell="seat"],
   .jev-table td[data-jev-cell="status"],
   .jev-table td[data-jev-cell="trend"] {
