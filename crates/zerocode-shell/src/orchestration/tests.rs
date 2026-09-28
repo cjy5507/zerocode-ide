@@ -14489,11 +14489,15 @@ fn the_goodbye_names_its_road_and_what_it_cuts_under_each_worker() {
          501 64282 64281 64282 0 1 Thu Sep 24 01:00:00 2026 /bin/zsh -lc just shell-test\n"
     );
     let census = || {
-        super::restart_census::take(&|term| (term == WORKER).then_some(ROOT), &|| {
-            Ok(crate::resource_usage::ProcessSample::from_ps_listing(
-                &listing,
-            ))
-        })
+        super::restart_census::take(
+            &|term| (term == WORKER).then_some(ROOT),
+            &|| {
+                Ok(crate::resource_usage::ProcessSample::from_ps_listing(
+                    &listing,
+                ))
+            },
+            &Vec::new,
+        )
     };
 
     super::window_exiting(clock(), crate::exit_runtime::ExitRoad::Close, &census);
@@ -20581,6 +20585,10 @@ mod restore_door;
 mod restore_goodbye;
 /// t-7812: the host seams those roads added (`tests/restore_seams.rs`).
 mod restore_seams;
+/// t-11548 and t-11537: after a restart, a worker at rest hears of its mail
+/// and a working coordinator goes on without being spoken to
+/// (`tests/restore_wake.rs`).
+mod restore_wake;
 
 /* ---- account switch: the same seat, another login (t-7538) --------------- */
 

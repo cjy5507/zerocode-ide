@@ -722,17 +722,129 @@ pub(crate) fn reseat_nudge(worker: &str, checkout: Option<&str>) -> String {
 }
 
 /// Deliver a restored worker's continuation, or nothing when it has none
-/// (t-7812 E): an idle worker is not typed at, not even an empty line.
+/// (t-7812 E): an idle worker is not typed at, not even an empty line —
+/// and one the goodbye saw at rest is written down at rest again
+/// ([`resumed_at_rest`]), so its mail is pointed at like any pane's.
 ///
 /// The goodbye's note these words came from is spent here, whatever the
 /// paste answered (t-7812 R2): handed to a seated pane, the words may have
 /// landed, and words that may have landed are never said a second time.
 pub(crate) fn deliver_continuation(host: &dyn Host, term: u32, words: &str, worker: &str) -> bool {
-    let delivered = words.trim().is_empty() || host.paste(term, words);
+    let idle = words.trim().is_empty();
+    let delivered = idle || host.paste(term, words);
     if let Some(root) = BLACKBOX.get() {
+        if idle {
+            resumed_at_rest(root, term, worker);
+        }
         crate::restart_nudge_runtime::nudge_spent(root, worker);
     }
     delivered
+}
+
+/// A resumed pane the last goodbye saw at rest is at rest again (t-11548).
+///
+/// The turn map ([`pane_turns`]) is process memory, so a window that
+/// restarts has heard nothing from any pane — and a vendor whose resume says
+/// nothing before its next turn stayed unheard for as long as nobody gave it
+/// one. Codex's `SessionStart` is no report at all (only Claude's and zo's
+/// land, as the idle boundary they are — `session_boundary`), so mail for a
+/// resumed Codex worker waited behind "the window has heard nothing from
+/// this pane" until its coordinator replaced it: w-11242, 2026-09-28, five
+/// minutes. The goodbye heard that pane's last turn end; the same
+/// conversation resumed without words is at that same rest. So the wake
+/// that seats it writes the goodbye's own reading back down — the one value
+/// the turn map already has for it — and spends it.
+///
+/// Only a silence is filled: a pane already heard in THIS window keeps what
+/// it said. Only rest: words owed start a turn, and that turn is theirs to
+/// speak for ([`restart_census::Cut::rest`]); a rest a person's hand made is
+/// kept as theirs. Nothing is typed here, and readiness is not decided here:
+/// the pointer's own door waits for the composer to stand ([`Host::point`]).
+pub(crate) fn resumed_at_rest(root: &Path, term: u32, key: &str) {
+    let Some(rest) = restart_census::peek_cut(root, key).rest() else {
+        return;
+    };
+    pane_turns()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .entry(term)
+        .or_insert(rest);
+    restart_census::spend_cut(root, key);
+}
+
+/// What a resumed coordinator's run stood at, as its wake is told it
+/// (t-11537): the goodbye's word about the coordinator's own pane, and three
+/// counts off the ledger — never a body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoordinatorStanding {
+    /// The run's address — the key the goodbye filed the coordinator under.
+    pub(crate) address: String,
+    /// What the goodbye read of the coordinator's pane.
+    pub(crate) cut: restart_census::Cut,
+    /// Workers still carrying a dispatch.
+    pub(crate) workers: usize,
+    /// Tasks dispatched and not yet reported.
+    pub(crate) dispatched: usize,
+    /// Mail waiting for the run that its seat did not write.
+    pub(crate) unread: usize,
+}
+
+/// The run whose coordinator this conversation was when the window went,
+/// if the goodbye wrote it down (t-11537).
+///
+/// A coordinator's tab is the person's conversation, so no worker row names
+/// it; the run's seat does — its actor is the conversation's own identity
+/// ([`zerocode_core::orchestration::receipt_actor`]), kept on the seat a
+/// restart vacated. The goodbye's entry under the run's address is what says
+/// this pane held that seat in the window before, and how its turn stood;
+/// a run it wrote nothing for — no seat here, a pane asking the person, a
+/// pane never heard — is not this wake's to speak for.
+pub(crate) fn coordinator_awaiting(
+    root: &Path,
+    agent: &str,
+    session: &zerocode_core::ProviderSession,
+) -> Option<CoordinatorStanding> {
+    let actor = zerocode_core::orchestration::receipt_actor(agent, session.key, &session.id);
+    let held = runtime()?;
+    let image = held.actor.view().ok()?;
+    let ledger = cached_ledger(&held, &image).ok()?;
+    ledger
+        .runs()
+        .iter()
+        .filter_map(|run| {
+            let seat = run
+                .coordinator
+                .as_ref()
+                .filter(|seat| seat.actor.as_deref() == Some(actor.as_str()))?;
+            let address = run.address();
+            let cut = restart_census::peek_cut(root, &address);
+            cut.kept().then(|| {
+                (
+                    seat.since_ms,
+                    CoordinatorStanding {
+                        workers: run
+                            .workers
+                            .iter()
+                            .filter(|worker| worker.state.reads_mail() && worker.dispatch.is_some())
+                            .count(),
+                        dispatched: run
+                            .tasks
+                            .iter()
+                            .filter(|task| {
+                                task.status == zerocode_core::orchestration::TaskStatus::Dispatched
+                            })
+                            .count(),
+                        unread: run
+                            .pointer_wanted(&address, Some(seat.seat.as_str()))
+                            .unwrap_or(0),
+                        address,
+                        cut,
+                    },
+                )
+            })
+        })
+        .max_by_key(|(since, _)| *since)
+        .map(|(_, standing)| standing)
 }
 
 /// Write the conversation a reseated pane IS into the window's own pane
@@ -4387,7 +4499,10 @@ pub(crate) fn window_exiting(
     // Once per exit for the road, and whenever there are workers to name:
     // the first call is the one that finds them, before they sleep.
     let first = !GOODBYE_SAID.swap(true, std::sync::atomic::Ordering::SeqCst);
-    if (first || !taken.workers.is_empty())
+    if (first
+        || !taken.workers.is_empty()
+        || !taken.coordinators.is_empty()
+        || !taken.tabs.is_empty())
         && let Some(root) = BLACKBOX.get()
     {
         // What each worker's wake will be told was cut (t-6428 ⑤) — left
@@ -4713,6 +4828,28 @@ pub(crate) fn seated_live_workers() -> Vec<restart_census::Seated> {
                 Some(restart_census::Seated {
                     worker: worker.id.clone(),
                     agent: worker.agent.clone(),
+                    term: *term,
+                })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Every run's coordinator seated in THIS window's panes, with the terminal
+/// that holds it (t-11537): the run's live seat, where this window's team
+/// table maps it. What the goodbye writes down beside the workers, so the
+/// wake that brings the coordinator's conversation back knows it was here.
+pub(crate) fn seated_coordinators() -> Vec<restart_census::KeyedPane> {
+    with_ledger_seats(|ledger, seats| {
+        ledger
+            .runs()
+            .iter()
+            .filter_map(|run| {
+                let (team, pane) = run.coordinator_live()?.seat.split_once('/')?;
+                let term = seats.get(team).and_then(|panes| panes.get(pane))?;
+                Some(restart_census::KeyedPane {
+                    key: run.address(),
                     term: *term,
                 })
             })
@@ -6514,6 +6651,13 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
             }
             for (address, term, seat) in seats {
                 let key = (run.id.clone(), address.clone());
+                /* A wake's words own this composer until the pane takes them
+                 * (t-11537): the continuation says what is waiting, and a
+                 * pointer beside it is the same news twice. Nothing is marked
+                 * — the next beat after the receipt reads the pane afresh. */
+                if host.wake_words_pending(term) {
+                    continue;
+                }
                 /* The first two conditions, and the line between them: a door
                  * that a turn's own ending will open needs no report, and a
                  * door that only a person can open is news.

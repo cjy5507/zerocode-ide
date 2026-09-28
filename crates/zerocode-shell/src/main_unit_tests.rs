@@ -12886,6 +12886,8 @@ fn a_resume_is_judged_before_anything_of_the_wake_happens() {
         .expect("a held conversation is no longer answered with the pane that holds it");
     for effect in [
         "restart_nudge_runtime::worker_nudge(",
+        "crate::orchestration::coordinator_awaiting(",
+        "restart_nudge_runtime::tab_nudge(",
         "resume_command(",
         "window.prepare(",
         "window.start(",
@@ -12927,15 +12929,17 @@ fn a_resume_is_judged_before_anything_of_the_wake_happens() {
     }
 }
 
-/// t-7812 E: a wake is told to go on by the goodbye's word about a WORKER
-/// and nothing else — the turn the goodbye read as under way, or the
-/// commands it cut under the pane (t-6428 ⑤). The door's `interrupted` mark
-/// no longer reaches the resume road at all, so a person's own tab comes
-/// back as it stood (2026-09-25: the coordinator's policy, m-7917), and a
-/// crash, which leaves no goodbye, is told nothing rather than guessed at.
-/// Both roads ask the one policy: this one and the ledger's reseat.
+/// t-7812 E: a wake is told to go on by the goodbye's word and nothing else
+/// — about a WORKER, the turn the goodbye read as under way or the commands
+/// it cut under the pane (t-6428 ⑤); about a run's COORDINATOR, its pane
+/// written down under the run and a run the ledger says was working
+/// (t-11537). The door's `interrupted` mark no longer reaches the resume
+/// road at all, so any other tab of a person's comes back as it stood
+/// (2026-09-25: the coordinator's policy, m-7917), and a crash, which leaves
+/// no goodbye, is told nothing rather than guessed at. Both roads ask the
+/// one policy for a worker: this one and the ledger's reseat.
 #[test]
-fn a_wake_is_told_to_go_on_only_by_the_goodbyes_word_about_a_worker() {
+fn a_wake_is_told_to_go_on_only_by_the_goodbyes_word() {
     let board = include_str!("cmd/board.rs");
     let door = block_after(board, "pub(crate) fn resume_session(");
     let (signature, _) = door
@@ -12962,6 +12966,45 @@ fn a_wake_is_told_to_go_on_only_by_the_goodbyes_word_about_a_worker() {
     assert!(
         resuming.contains("(Some(worker), Some(words)) => {"),
         "words are placed for something other than a sleeper's goodbye:\n{resuming}"
+    );
+    // A coordinator's words: asked only of a conversation that is nobody's
+    // sleeper and was written down before, worded apart from a worker's, and
+    // owed under its run's address in the same note (t-11537).
+    let coordinating = resuming
+        .find("let coordinating = (reseating.is_none() && !fresh)\n        .then(|| crate::orchestration::coordinator_awaiting(&data_root, agent, &session))")
+        .expect("the coordinator is asked some other way");
+    let worded = resuming
+        .find(".and_then(restart_nudge_runtime::coordinator_nudge)")
+        .expect("the coordinator's words come from somewhere else");
+    // A person's tab: only a conversation that is neither, told only of a
+    // turn the goodbye read as cut, under the conversation's digest in the
+    // same note (t-11537 C).
+    let tab = resuming
+        .find("let tab = (reseating.is_none() && coordinating.is_none() && !fresh)\n        .then(|| crate::orchestration::restart_census::tab_key(agent, &session));")
+        .expect("a person's tab is asked some other way");
+    let tab_worded = resuming
+        .find("restart_nudge_runtime::tab_nudge(&data_root, key, Some(root.as_path()))")
+        .expect("a tab's words come from somewhere else");
+    let owed = resuming
+        .find("let owed = reseating\n        .or_else(|| coordinating.map(|standing| standing.address))\n        .or(tab);")
+        .expect("the words are owed under something else");
+    assert!(
+        nudge < coordinating
+            && coordinating < worded
+            && worded < tab
+            && tab < tab_worded
+            && tab_worded < owed
+            && owed < placed,
+        "the coordinator's and the tab's words are decided out of order:\n{resuming}"
+    );
+    let policy_of_tabs = block_after(
+        include_str!("restart_nudge_runtime.rs"),
+        "pub(super) fn tab_nudge(",
+    );
+    assert!(
+        policy_of_tabs.contains("if !cut.turn {\n        return None;")
+            && policy_of_tabs.contains("resume_nudge(true, false,"),
+        "a tab is told for something other than a cut turn, or told of a seat:\n{policy_of_tabs}"
     );
     let orchestration = include_str!("orchestration.rs");
     // The walk lives in the restore line since an account switch holds that
