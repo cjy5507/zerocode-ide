@@ -266,11 +266,12 @@ ok(
     brain.edgeLayers === 1 &&
     brain.pageShape === "circle" &&
     brain.ghostShape === "circle" &&
-    // 잎은 작고, 대표 지식은 그보다 크고, 군집의 중심이 가장 크다.
-    brain.tierRadii.leaf >= 3 &&
+    // 잎은 작고, 대표 지식은 그보다 크고, 군집의 중심이 가장 크다. 전체 지도의 점은 작다(t-12029 시안 v2
+    // 「spread」: 잎 2.4, 가장 작은 부스러기 2 — 그보다 작으면 점이 아니라 먼지다).
+    brain.tierRadii.leaf >= 2.4 &&
     brain.tierRadii.major > brain.tierRadii.leaf &&
     brain.tierRadii.core > brain.tierRadii.major &&
-    brain.radiusMin >= 3 &&
+    brain.radiusMin >= 2 &&
     brain.radiusMax === brain.tierRadii.core &&
     brain.labelBelow &&
     brain.labelPaintOrder.includes("stroke") &&
@@ -5079,6 +5080,111 @@ ok("the overview bundles the lines between clusters: at rest only a cluster's ow
     && row.hoverDrawn === row.hoverWanted && row.leftDrawn === row.intra
     && row.litHasBetween && row.localTies === 0 && row.localBetween > 0),
   JSON.stringify(bundles));
+
+/* 가지가 보이는 군집(t-12029, 승인된 시안 v2 「spread」). 다섯 주제(64·52·44·34·26쪽)에 유령 셋을 더한 볼트에서 두 손 모두: 전체
+ * 지도의 쪽은 작은 점이다 — 잎 2.4 · 대표 지식 5.5 · 중심 10 px, 유령 2.2, 부스러기 2(두 손이 그린 크기로 잰다, SVG는
+ * 점의 `r`, GL은 위치 텍스처의 반지름). 원반은 이완이 정한 반지름(√멤버 × pitch, 최소 반지름)의 1.3배이고 서로
+ * 24 이상 떨어진다. 한 군집 안에서 화면의 몸이 서로 겹치는 점은 드물다(공이 풀렸다 — 기반은 점의 23%가 겹쳤다).
+ * 주변 탐색의 점은 √차수 램프 그대로다. 겹침은 화면의 일이라 실측과 같은 넓은 판에서 잰다(캔버스 약 1065 × 937). */
+const spreadVault = topicVault({ sizes: [64, 52, 44, 34, 26],
+  between: [[0, 1, 12], [0, 2, 9], [1, 2, 3], [2, 3, 2], [0, 3, 1], [3, 4, 1]], lonely: 4, ghosts: 3 });
+const spreadSeat = glPage.viewportSize();
+await glPage.setViewportSize({ width: 1998, height: 1069 });
+const spreads = await glPage.evaluate(async ({ spec, starts }) => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  const rows = [];
+  try {
+    for (const hand of ["svg", "gl"]) {
+      const { view, layout } = await window.__standKnowledgeScene__("/scene/spread", spec, hand);
+      const painter = knowledgePainterFor(view);
+      const { kinds } = layout.model;
+      /* 그린 크기 — 두 손의 것을 따로 읽는다. */
+      const drawnRadius = (at) => {
+        if (painter.id === "gl") return painter.seatData[at * 4 + 3];
+        const dot = layout.nodeEls[at]?.querySelector(".knowledge-dot");
+        return dot ? Number(dot.getAttribute("r")) : -1;
+      };
+      const sizes = { leaf: new Set(), major: new Set(), core: new Set(), ghost: new Set(), stray: new Set() };
+      for (let at = 0; at < layout.count; at += 1) {
+        const size = Math.round(drawnRadius(at) * 100) / 100;
+        const named = layout.community[at] < layout.namedCount;
+        if (kinds[at] === "ghost") sizes.ghost.add(size);
+        else if (!named) sizes.stray.add(size);
+        else sizes[["leaf", "major", "core"][layout.tier[at]]].add(size);
+      }
+      /* 원반: 이완의 반지름 × 1.3, 그리고 서로의 틈. */
+      const members = new Int32Array(layout.communityHomeR.length);
+      for (let at = 0; at < layout.count; at += 1) members[layout.community[at]] += 1;
+      const { tuning, communityHomeX: homeX, communityHomeY: homeY, communityHomeR: homeR, namedCount: named } = layout;
+      let radiusMiss = 0;
+      let closest = Number.POSITIVE_INFINITY;
+      for (let rank = 0; rank < named; rank += 1) {
+        const base = Math.max(tuning.clusterMinRadius, tuning.clusterPitch * Math.sqrt(Math.max(1, members[rank])));
+        if (Math.abs(homeR[rank] - base * 1.3) > 0.01) radiusMiss += 1;
+        for (let other = rank + 1; other < named; other += 1) {
+          closest = Math.min(closest, Math.hypot(homeX[rank] - homeX[other], homeY[rank] - homeY[other])
+            - homeR[rank] - homeR[other]);
+        }
+      }
+      /* 한 군집 안에서 화면의 몸이 겹치는 점 — 그린 크기와 화면 좌표로. */
+      let crowded = 0;
+      let clustered = 0;
+      const screen = (at) => [layout.project.screenX(at), layout.project.screenY(at)];
+      for (let one = 0; one < layout.count; one += 1) {
+        if (layout.community[one] >= named) continue;
+        clustered += 1;
+        const [ax, ay] = screen(one);
+        for (let two = one + 1; two < layout.count; two += 1) {
+          if (layout.community[two] !== layout.community[one]) continue;
+          const [bx, by] = screen(two);
+          if (Math.hypot(ax - bx, ay - by) < drawnRadius(one) + drawnRadius(two)) crowded += 1;
+        }
+      }
+      /* 주변 탐색 — 고리의 점은 √차수 램프(`radiusRing`)의 크기다. */
+      setKnowledgeMode(view, "local", { centre: layout.model.keys[starts[0]], paint: false });
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      let ringMiss = 0;
+      let ringDrawn = 0;
+      for (let at = 0; at < layout.count; at += 1) {
+        if (layout.drawn !== null && layout.drawn[at] === 0) continue;
+        ringDrawn += 1;
+        const want = knowledgeNodeRadius(layout.model.degree[at], tuning, layout.tier[at])
+          * KNOWLEDGE_SHAPES[knowledgeShapeOf(kinds[at])].reach;
+        const got = drawnRadius(at);
+        /* 주변 탐색의 중심은 GL에서 제 배율만큼 크게 선다(SVG의 `transform: scale`). */
+        if (at !== layout.ring?.seat && Math.abs(got - want) > 0.01) ringMiss += 1;
+      }
+      setKnowledgeMode(view, "global");
+      await paintKnowledgeView();
+      for (let wait = 0; wait < 3; wait += 1) await frame();
+      const leafSeat = [...layout.model.keys.keys()].find((at) => kinds[at] === "page"
+        && layout.community[at] < named && layout.tier[at] === 0);
+      const backLeaf = Math.round(drawnRadius(leafSeat) * 100) / 100;
+      rows.push({ hand: painter.id, named,
+        sizes: Object.fromEntries(Object.entries(sizes).map(([key, held]) => [key, [...held].sort()])),
+        radiusMiss, closest: Math.round(closest), gapLeast: tuning.clusterGapLeast,
+        crowded, clustered, ringDrawn, ringMiss, backLeaf });
+    }
+    return { rows };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error), rows };
+  } finally {
+    knowledgePainterKind = null;
+  }
+}, { spec: spreadVault.spec, starts: spreadVault.starts });
+await glPage.setViewportSize(spreadSeat);
+{
+  const one = (held, value) => held.length === 1 && held[0] === value;
+  ok("the overview's clusters show their branches: small points (leaf 2.4, major 5.5, core 10, ghost 2.2, stray 2) in discs 1.3 times wider that keep their gap, few points covering each other, and the local exploration keeps its sizes — on both hands",
+    !spreads.thrown && spreads.rows.length === 2 && spreads.rows.every((row) => row.named >= 5
+      && one(row.sizes.leaf, 2.4) && one(row.sizes.major, 5.5) && one(row.sizes.core, 10)
+      && one(row.sizes.ghost, 2.2) && one(row.sizes.stray, 2)
+      && row.radiusMiss === 0 && row.closest >= row.gapLeast
+      && row.crowded <= row.clustered * 0.05
+      && row.ringDrawn > 1 && row.ringMiss === 0 && row.backLeaf === 2.4),
+    JSON.stringify(spreads));
+}
 
 /* P1 G3 — 두 손이 같은 모양을 그리는가, 픽셀로.
  *

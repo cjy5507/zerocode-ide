@@ -1664,6 +1664,22 @@
      반지름과 고리 사이 간격(그림 단위) — 뉴런의 가지가 여기서 나온다. */
   --knowledge-core-ring: 52;
   --knowledge-core-ring-gap: 42;
+  /* ---- 가지가 보이는 군집 (t-12029, 승인된 시안 v2 「spread」) ----
+     원반은 이완이 정한 자리 그대로 spread배로 넓어진다 — 원반 사이의 틈이 그만큼 줄고, 두 원반이
+     gap-least보다 가까워지는 곳만 그만큼 물러선다. 전체 지도의 점은 작다: 이름 있는 군집의 잎
+     map-leaf, 대표 지식 map-major, 중심 map-core, 유령 map-ghost, 이름 없는 군집의 쪽(부스러기)
+     map-stray(px). 주변 탐색은 위의 √차수 램프와 세 크기 그대로다 — 고리의 이웃은 수십이라 크게 서도
+     공이 되지 않는다. 점이 제 홈으로 끌리는 힘은 단마다 다르다: 대표 지식은 pull × pull-major, 잎은
+     pull × pull-leaf — 잎이 약하게 끌려 제 이웃을 따라 뻗고, 그래서 가지가 보인다. */
+  --knowledge-cluster-spread: 1.3;
+  --knowledge-cluster-gap-least: 24;
+  --knowledge-map-leaf: 2.4;
+  --knowledge-map-major: 5.5;
+  --knowledge-map-core: 10;
+  --knowledge-map-ghost: 2.2;
+  --knowledge-map-stray: 2;
+  --knowledge-cluster-pull-major: 1;
+  --knowledge-cluster-pull-leaf: 0.5;
   /* ---- 군집 사이 묶음선 (t-12029, 승인된 시안 v2 「bundle」) ----
      쉬는 전체 지도에서 두 군집을 건너는 낱낱의 선은 서지 않고, 이름 있는 군집 쌍마다 한 줄이 그 수를
      굵기로 말한다 — least 가닥 이상인 쌍만. 굵기 = width + √n × grow(px), 옅기 = alpha + lift × n ÷ 가장

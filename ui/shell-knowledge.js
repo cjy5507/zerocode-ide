@@ -143,6 +143,16 @@ const KNOWLEDGE_TOKENS = Object.freeze({
   clusterHold: "--knowledge-cluster-hold",
   coreRing: "--knowledge-core-ring",
   coreRingGap: "--knowledge-core-ring-gap",
+  /* 가지가 보이는 군집(t-12029) — 원반의 넓힘과 최소 틈, 전체 지도의 점 크기, 단마다의 인력. */
+  clusterSpread: "--knowledge-cluster-spread",
+  clusterGapLeast: "--knowledge-cluster-gap-least",
+  mapLeaf: "--knowledge-map-leaf",
+  mapMajor: "--knowledge-map-major",
+  mapCore: "--knowledge-map-core",
+  mapGhost: "--knowledge-map-ghost",
+  mapStray: "--knowledge-map-stray",
+  clusterPullMajor: "--knowledge-cluster-pull-major",
+  clusterPullLeaf: "--knowledge-cluster-pull-leaf",
   /* 군집 사이 묶음선(t-12029) — 몇 가닥부터 묶는가, 굵기·옅기·휨·틈, 물러섬, 목록의 줄 수. */
   tieLeast: "--knowledge-tie-least",
   tieWidth: "--knowledge-tie-width",
@@ -319,8 +329,11 @@ const KNOWLEDGE_FORCE = Object.freeze({
   frameMs: 4,
   repulsion: 500,
   spring: 0.05,
-  /* 군집 사이를 건너는 선의 몫(09-16) — 같은 주제 안의 선에 대한 비율. */
-  interSpring: 0.2,
+  /* 군집 사이를 건너는 선의 몫(09-16) — 같은 주제 안의 선에 대한 비율. 0.2에서 0.05로(t-12029): 잎이 제 홈으로
+   * 약하게 끌리게 된 뒤로(`--knowledge-cluster-pull-leaf`) 0.2의 실은 원반의 점을 이웃 군집 쪽 벽으로 몰았다(실제
+   * 볼트에서 몇 원반의 점이 한쪽 가장자리에 섰다). 원반의 자리는 군집 사이 실이 이미 정하고(`knowledgeClusterHomes`),
+   * 쉬는 지도는 그 선을 묶음으로 그리므로 점이 이웃 쪽으로 기울 까닭이 없다. */
+  interSpring: 0.05,
   springLength: 46,
   damping: 0.8,
   /* 한 훑기에 점이 움직일 수 있는 최대 거리.
@@ -723,6 +736,19 @@ function knowledgeNodeRadius(degree, tuning, tier = KNOWLEDGE_TIER_LEAF) {
     tuning.radiusMax,
     tuning.radiusMin + Math.sqrt(degree) * tuning.radiusDegree,
   );
+}
+
+/* 전체 지도의 점 크기 (t-12029, 승인된 시안 v2 「spread」) — 잎 2.4 · 대표 지식 5.5 · 중심 10 px, 유령 2.2,
+ * 이름 없는 군집의 쪽(부스러기) 2. 반지름 4.4 px의 점이 원반을 꽉 채운 공에서는 군집 안의 모양이 보이지 않았다
+ * (시안의 비포) — 작은 점이라야 넓어진 원반 안에 가지가 선다. 쪽과 유령만 이 크기를 입는다: 렌즈가 더한 점
+ * (원본·공급망·코드)은 모양이 뜻이라 제 √차수 램프(`ramp`) 그대로다. 주변 탐색은 이 크기를 쓰지 않는다. */
+function knowledgeMapRadius(kind, tier, stray, tuning, ramp) {
+  if (kind === "ghost") return tuning.mapGhost;
+  if (kind !== "page") return ramp;
+  if (stray) return tuning.mapStray;
+  if (tier === KNOWLEDGE_TIER_CORE) return tuning.mapCore;
+  if (tier === KNOWLEDGE_TIER_MAJOR) return tuning.mapMajor;
+  return tuning.mapLeaf;
 }
 
 /* 군집마다 한 중심과 몇 개의 대표 지식 (09-16).
@@ -3274,30 +3300,15 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
       homeX[right] -= gapX * step;
       homeY[right] -= gapY * step;
     }
-    /* 겹침 풀기. 두 원반이 `gap`보다 가까우면 모자란 만큼을 반씩 나눠 물러선다 —
-     * 이 한 줄이 「군집 사이 여백」을 그림의 성질로 만든다. */
-    for (let left = 0; left < named; left += 1) {
-      for (let right = left + 1; right < named; right += 1) {
-        let gapX = homeX[right] - homeX[left];
-        let gapY = homeY[right] - homeY[left];
-        let reach = Math.hypot(gapX, gapY);
-        const rest = homeR[left] + homeR[right] + gap;
-        if (reach >= rest) continue;
-        if (reach < KNOWLEDGE_COMMUNITY.epsilon) {
-          /* 완전히 포갠 둘은 인덱스가 방향을 준다 — 난수 없이, 같은 볼트에서
-           * 언제나 같은 쪽으로. */
-          const angle = (left * KNOWLEDGE_GOLDEN_ANGLE) % (Math.PI * 2);
-          gapX = Math.cos(angle);
-          gapY = Math.sin(angle);
-          reach = 1;
-        }
-        const push = (rest - reach) / (2 * reach);
-        homeX[left] -= gapX * push;
-        homeY[left] -= gapY * push;
-        homeX[right] += gapX * push;
-        homeY[right] += gapY * push;
-      }
-    }
+    knowledgeDiscsApart(homeX, homeY, homeR, named, gap);
+  }
+  /* 가지가 보이는 군집(t-12029, 시안 v2 「spread」): 이완이 정한 자리 그대로 원반을 `clusterSpread`배로
+   * 넓힌다 — 원반 사이의 틈이 줄고(시안: 실제 볼트의 가장 좁은 틈 40 → 10), 작아진 점이 넓어진 원반 안에서
+   * 가지를 편다. 두 원반이 `clusterGapLeast`보다 가까워지는 곳만 모자란 만큼 물러선다 — 쪽이 많은 볼트의 큰
+   * 원반은 넓힌 몫이 이완의 틈보다 크다. 부스러기 띠는 넓힌 뒤의 윤곽에 붙는다(아래). */
+  for (let rank = 0; rank < named; rank += 1) homeR[rank] *= tuning.clusterSpread;
+  for (let sweep = 0; sweep < sweeps; sweep += 1) {
+    if (knowledgeDiscsApart(homeX, homeY, homeR, named, tuning.clusterGapLeast) === 0) break;
   }
   const strays = ids - named;
   if (strays > 0) {
@@ -3332,6 +3343,35 @@ function knowledgeClusterHomes(model, of, ids, named, tuning) {
     }
   }
   return { homeX, homeY, homed, homeR };
+}
+
+/* 겹침 풀기 한 번. 두 원반이 `gap`보다 가까우면 모자란 만큼을 반씩 나눠 물러선다 — 이 한 걸음이 「군집
+ * 사이 여백」을 그림의 성질로 만든다. 물러선 쌍의 수를 돌려준다(0이면 다 떨어져 있다). 완전히 포갠 둘은
+ * 인덱스가 방향을 준다 — 난수 없이, 같은 볼트에서 언제나 같은 쪽으로. */
+function knowledgeDiscsApart(homeX, homeY, homeR, named, gap) {
+  let moved = 0;
+  for (let left = 0; left < named; left += 1) {
+    for (let right = left + 1; right < named; right += 1) {
+      let gapX = homeX[right] - homeX[left];
+      let gapY = homeY[right] - homeY[left];
+      let reach = Math.hypot(gapX, gapY);
+      const rest = homeR[left] + homeR[right] + gap;
+      if (reach >= rest) continue;
+      if (reach < KNOWLEDGE_COMMUNITY.epsilon) {
+        const angle = (left * KNOWLEDGE_GOLDEN_ANGLE) % (Math.PI * 2);
+        gapX = Math.cos(angle);
+        gapY = Math.sin(angle);
+        reach = 1;
+      }
+      const push = (rest - reach) / (2 * reach);
+      homeX[left] -= gapX * push;
+      homeY[left] -= gapY * push;
+      homeX[right] += gapX * push;
+      homeY[right] += gapY * push;
+      moved += 1;
+    }
+  }
+  return moved;
 }
 
 /* 그림 위의 낱말은 짧다 — 제목은 문장이고 문장 서른다섯 개는 안개다. 온전한
@@ -3382,6 +3422,13 @@ function knowledgeLayout(view, model) {
   const communities = knowledgeCommunities(model, tuning);
   const tier = knowledgeTiers(model, communities.of, communities.core, communities.named, tuning);
   knowledgeSupplyTiers(model, tier);
+  const radiusRing = Float32Array.from(model.degree, (degree, at) => knowledgeNodeRadius(
+    degree,
+    tuning,
+    tier[at],
+  ) * KNOWLEDGE_SHAPES[knowledgeShapeOf(model.kinds[at])].reach);
+  const radiusMap = Float32Array.from(radiusRing, (ramp, at) => knowledgeMapRadius(model.kinds[at], tier[at],
+    communities.of[at] >= communities.named, tuning, ramp));
   const layout = {
     signature: model.signature,
     model,
@@ -3449,12 +3496,13 @@ function knowledgeLayout(view, model) {
     vx: new Float32Array(count),
     vy: new Float32Array(count),
     /* 점이 차지하는 원 — 모양은 이 원에 내접하고, 넓이는 크기가 말한 원과 같다
-     * (`KNOWLEDGE_SHAPES`의 `reach`). */
-    radius: Float32Array.from(model.degree, (degree, at) => knowledgeNodeRadius(
-      degree,
-      tuning,
-      tier[at],
-    ) * KNOWLEDGE_SHAPES[knowledgeShapeOf(model.kinds[at])].reach),
+     * (`KNOWLEDGE_SHAPES`의 `reach`). 두 벌이다(t-12029): 주변 탐색의 √차수 램프(`radiusRing`)와 전체 지도의
+     * 작은 점(`radiusMap`, `knowledgeMapRadius`). `radius`는 지금 서 있는 쪽을 가리킨다 — 고리가 서면 고리의
+     * 것으로, 놓이면 지도의 것으로(`knowledgeRingArrange`·`knowledgeRingRelease`). 모든 손(배치의 충돌, 두
+     * 페인터, 이름표 격자, 고르기)은 `radius`만 읽는다. */
+    radiusRing,
+    radiusMap,
+    radius: radiusMap,
     /* 반발 격자의 살림. 한 번 지어 두고 매 훑기마다 다시 채운다 — 프레임마다
      * 배열 넷을 새로 짓는 것이 배치보다 비싸지는 판이 있다. */
     cellOf: new Int32Array(count),
@@ -3873,7 +3921,7 @@ function knowledgeForceStep(layout, x = layout.x, y = layout.y, drawn = layout.d
   }
   const { community, communityHomed, communityHomeX, communityHomeY, communityHomeR,
     communityCore, pinned } = layout;
-  const { clusterPull, clusterHold } = layout.tuning;
+  const { clusterPull, clusterHold, clusterPullMajor, clusterPullLeaf } = layout.tuning;
   for (let at = 0; at < count; at += 1) {
     if (drawn !== null && drawn[at] === 0) continue;
     /* 제 군집의 홈으로 끌리고, 제 원반 안에 머문다 (성좌 배치, 09-16).
@@ -3897,8 +3945,14 @@ function knowledgeForceStep(layout, x = layout.x, y = layout.y, drawn = layout.d
        * 인력이 필요한 것은, 그것이 없으면 이웃 주제로 뻗은 스프링이 점들을 원반의
        * 한쪽 벽에 몰아붙이기 때문이다(실측 09-16: 중심만 끄는 판에서 군집의 공이
        * 원반의 가장자리로 밀려 빈 원이 남았다). */
-      vx[at] += towardX * clusterPull;
-      vy[at] += towardY * clusterPull;
+      /* 단마다 다른 인력(t-12029, 시안 v2 「spread」): 이름 있는 군집의 잎은 약하게(`clusterPullLeaf`), 대표
+       * 지식은 `clusterPullMajor`만큼 끌린다 — 잎이 제 이웃을 따라 원반 안으로 뻗어 가지가 보인다(모두가 같은 힘으로
+       * 끌리던 판은 넓힌 원반 안에서도 가운데의 공이었다). 부스러기는 제 띠의 자리에 그대로 선다. */
+      const grip = rank >= layout.namedCount ? 1
+        : layout.tier[at] === KNOWLEDGE_TIER_MAJOR ? clusterPullMajor
+          : layout.tier[at] === KNOWLEDGE_TIER_LEAF ? clusterPullLeaf : 1;
+      vx[at] += towardX * clusterPull * grip;
+      vy[at] += towardY * clusterPull * grip;
       if (at === communityCore[rank]) {
         vx[at] += towardX * clusterPull * KNOWLEDGE_FORCE.coreGrip;
         vy[at] += towardY * clusterPull * KNOWLEDGE_FORCE.coreGrip;
@@ -6010,6 +6064,8 @@ function knowledgeRingArrange(layout, seat) {
     layout.mapY = Float32Array.from(y);
     knowledgeExtent(count, layout.mapX, layout.mapY, null, layout.mapBounds);
   }
+  /* 고리의 점은 √차수 램프의 크기다(t-12029) — 지도의 작은 점은 지도의 것이다. */
+  layout.radius = layout.radiusRing;
   const centreX = layout.mapX[seat];
   const centreY = layout.mapY[seat];
   x[seat] = centreX;
@@ -6071,6 +6127,7 @@ function knowledgeRingRelease(layout) {
   layout.mapX = null;
   layout.mapY = null;
   layout.ring = null;
+  layout.radius = layout.radiusMap;
   layout.geometryRevision += 1;
 }
 
