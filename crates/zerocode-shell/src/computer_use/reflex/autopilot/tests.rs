@@ -1129,3 +1129,31 @@ fn a_run_covered_by_what_it_may_not_touch_ends_for_the_person() {
     );
     assert_eq!(fake.helper.runs.len(), 1, "no new plan");
 }
+
+/// A sliver over the window's edge — the Dock bar's frame three points over
+/// the fixture's bottom, as the q8 bench measured it — is not a cover to
+/// stop a run for: the hand's own perception already refuses a cell a
+/// window hides, and stopping here would end every run that stood by the
+/// Dock for the person.
+#[test]
+fn a_sliver_over_the_windows_edge_leaves_the_run_standing() {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good(), good()]);
+    let (mut autopilot, _) = fake.start(asked(None)).expect("started");
+    fake.helper.desk = vec![
+        json!({ "id": 31, "app": { "name": "app-50", "pid": 50 },
+                "x": 0, "y": 47, "width": 100, "height": 13,
+                "own": false, "layer": 20, "alpha": 1.0, "overlay": false }),
+        json!({ "id": 7, "app": { "name": "app-9", "pid": 9 },
+                "x": 10, "y": 10, "width": 80, "height": 40,
+                "own": false, "layer": 0, "alpha": 1.0, "overlay": false }),
+    ];
+    fake.tick(&mut autopilot);
+    assert_eq!(fake.helper.stops(), Vec::<String>::new());
+    assert_eq!(autopilot.ended(), None);
+    assert!(
+        fake.helper
+            .calls
+            .iter()
+            .all(|(method, _)| method != "windowAction")
+    );
+}
