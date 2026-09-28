@@ -118,6 +118,19 @@ pub(super) fn origin_with_for_tests(
     origin_with(key, checkout, fresh, settings)
 }
 
+/// The checkout the window observed for a fresh summons under `origin` —
+/// the workspace a seat asked while that summons waits asks consent for.
+/// `None` for a summons nobody observed and for a handover whose launch was
+/// sealed: no seat asks on the beat for either.
+pub(super) fn fresh_checkout(origin: [&str; 3]) -> Option<Option<std::path::PathBuf>> {
+    origins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&origin.map(str::to_string))
+        .filter(|origin| origin.fresh)
+        .map(|origin| origin.checkout.clone())
+}
+
 pub(super) fn profile(
     agent: &str,
     level: &str,

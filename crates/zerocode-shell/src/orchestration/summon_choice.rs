@@ -2,10 +2,11 @@
 //! words the coordinator typed (t-4711, docs/design/jev-settings-20260917.md
 //! §2).
 //!
-//! `worker-start` lands on exactly the `--agent`, `--model` and `--effort` it
-//! was given; nothing here changes that, and the Jev use table's summon row
-//! (`zerocode_core::jev::SUMMON`, `smart.summonChoice`) offers no mode that
-//! applies. Under a person's `shadow` or `auto` this module puts the summons'
+//! `worker-start` lands on exactly the `--agent` it was given; the seat acts
+//! only where the coordinator wrote `--agent auto` and left the choice to it
+//! ([`choose`] — under `on`, or `auto` while its judge has not taken it
+//! back; `auto` starts acting, t-11989). For every summons, whatever its
+//! agent, this module also puts the summons'
 //! SHAPE to Jev once, after the pane really opened: the head of the brief and
 //! six facts about the ask, closed over the agents the quota gate says could
 //! have carried it this minute and what this ledger's own record of each of
@@ -230,6 +231,15 @@ fn settle(
             // Nor on one whose model was pinned (t-9087): the pin is the
             // person's word, an apply stage leaves the summons alone, and a
             // mark there grades the pin's own CLI rather than the seat.
+            //
+            // And no baseline mark on the rows that are compared (t-11989).
+            // Today's rule is the launched model's own vendor CLI (t-6342),
+            // and a summons that named no model launched on one its
+            // difficulty profile took from the named agent's own rows — a
+            // table that refuses a model of another agent — so the rule's
+            // answer was the coordinator's word by construction, agreed
+            // every time, and held the seat under a line no bound clears
+            // (1,000‰ on the one such row this machine held, 2026-09-28).
             if !shadow.auto {
                 if !ask.offered(&shadow.pinned.agent) {
                     row[summon_choice::NOT_COMPARED_KEY] = json!(summon_choice::NOT_OFFERED);
@@ -237,17 +247,6 @@ fn settle(
                     row[summon_choice::NOT_COMPARED_KEY] = json!(summon_choice::PINNED);
                 } else {
                     row["agreed"] = json!(pick.chosen == shadow.pinned.agent);
-                    // The seat's baseline on the same summons, today's rule:
-                    // the launched model's own vendor CLI (t-6342).
-                    if let Some(native) = shadow
-                        .pinned
-                        .model
-                        .as_deref()
-                        .and_then(zerocode_core::orchestration::native_agent)
-                    {
-                        row[zerocode_core::jev::summary::BASELINE_AGREED.canonical] =
-                            json!(native == shadow.pinned.agent);
-                    }
                 }
             }
             row["probabilities"] = json!(pick.probabilities);
@@ -276,18 +275,26 @@ pub(crate) fn choose(
 
 /// [`choose`] on a wire handed in — the one road, which a test crosses with a
 /// socket of its own.
+///
+/// Asked under the consent the window observed for the summoning pane's own
+/// checkout ([`super::summon_difficulty::fresh_checkout`]) — the words are the
+/// coordinator's, from where it works — and never for a summons nobody
+/// observed or a handover whose launch was sealed. Asked with no workspace,
+/// the door refuses every request as not consented: until t-11989 that was
+/// this road's only answer, so a seat that acted still refused.
 fn choose_with(
     wire: &Wire,
     look: &zerocode_core::summon_choice::SummonLook<'_>,
     options: &[zerocode_core::summon_choice::Summonable],
-    _origin: [&str; 3],
+    origin: [&str; 3],
 ) -> Option<String> {
     if !crate::systemone::applies(wire, &SUMMON) {
         return None;
     }
+    let checkout = super::summon_difficulty::fresh_checkout(origin)?;
     let ask = summon_choice::ask(look, options)?;
     let body = crate::systemone::request_body(&ask.state, &ask.questions);
-    let answer = wire.ask(&SUMMON, None, body, SUMMON_CHOICE_DEADLINE);
+    let answer = wire.ask(&SUMMON, checkout.as_deref(), body, SUMMON_CHOICE_DEADLINE);
     let parsed: Value = serde_json::from_str(&answer.answer.ok()?).ok()?;
     // Only an answer its act line lets act — the line its labels drew
     // (t-9468), every answer while they drew none; under it the summons

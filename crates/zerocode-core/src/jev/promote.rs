@@ -90,6 +90,20 @@
 //! skills seat, which asked two into one ledger, is two seats now
 //! ([`crate::jev::SKILLS`], [`crate::jev::SKILL_SUGGESTION`]), each judged
 //! on its own rows and standing on its own rise.
+//!
+//! Where a seat stands before its judge has said anything is the seat's own
+//! (2026-09-28, t-11989, [`JevUse::auto_starts`]). Recording first is right
+//! for a seat whose act replaces a reader that works without it, and wrong
+//! for one whose act only fills a choice its caller left open: the summons'
+//! difficulty and the agent choice recorded under the one switch for as
+//! long as it was on, the first carrying out the middle profile row in its
+//! answer's place and the second refusing every `--agent auto`, and the
+//! difficulty seat — whose marks come only from answers that were carried
+//! out — never earned one to rise on. Those two start acting, and the same
+//! judge reads their marks and makes them fall. An acting seat falls on a
+//! line it breaks and never on one that says its evidence is not in yet
+//! ([`Line::only_holds`]) — one rule for every seat, which the difficulty
+//! seat's own lines now go through as well.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -819,12 +833,7 @@ pub fn judge_seat_at(
         let broken = fallback_line(stand, &evidence)
             .or_else(|| execution_health(&evidence))
             .or(broken);
-        match (stand, broken) {
-            (Stand::Recording, None) => Verdict::Rise,
-            (Stand::Applying, None) => Verdict::Keep,
-            (Stand::Recording, Some(line)) => Verdict::Hold(line),
-            (Stand::Applying, Some(line)) => Verdict::Fall(line),
-        }
+        verdict_on(stand, broken)
     } else {
         judge(stand, &evidence)
     };
@@ -994,9 +1003,11 @@ pub fn names_a_schema_failure(token: &str) -> bool {
 /// Where a seat stands when it is judged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stand {
-    /// Recording only — what `auto` starts as.
+    /// Recording only — where `auto` starts for most seats.
     Recording,
-    /// Acting on answers that pass their checks.
+    /// Acting on answers that pass their checks — where `auto` starts for a
+    /// seat that only fills what its caller left open
+    /// ([`JevUse::auto_starts`]).
     Applying,
 }
 
@@ -1359,25 +1370,21 @@ pub fn judge(stand: Stand, evidence: &Evidence) -> Verdict {
     if let Some(line) = fallback_line(stand, evidence) {
         return Verdict::Fall(line);
     }
-    match (stand, first_broken_line(evidence)) {
+    verdict_on(stand, first_broken_line(evidence))
+}
+
+/// What a seat standing at `stand` is told when `broken` is the first line
+/// its evidence does not clear — the one rule every seat's verdict comes
+/// out of, the difficulty seat's own lines included (t-11989): a recording
+/// seat rises with nothing broken and holds on any line; an acting seat
+/// keeps with nothing broken, keeps on a line that only holds
+/// ([`Line::only_holds`]), and falls on any other.
+fn verdict_on(stand: Stand, broken: Option<Line>) -> Verdict {
+    match (stand, broken) {
         (Stand::Recording, None) => Verdict::Rise,
         (Stand::Recording, Some(line)) => Verdict::Hold(line),
         (Stand::Applying, None) => Verdict::Keep,
-        // A seat already acting is not held to the window's width: it earned
-        // its place on a full one, and a fresh window is not evidence against
-        // it. Only a line it actually breaks takes it back — and a line
-        // acting on little of the window still acts well on what it acts on:
-        // the apply share is a floor to rise on (t-9468).
-        (
-            Stand::Applying,
-            Some(
-                Line::TooFewRows { .. }
-                | Line::TooFewCompared { .. }
-                | Line::Unlabeled { .. }
-                | Line::TooFewBaseline { .. }
-                | Line::ApplyShare { .. },
-            ),
-        ) => Verdict::Keep,
+        (Stand::Applying, Some(line)) if line.only_holds() => Verdict::Keep,
         (Stand::Applying, Some(line)) => Verdict::Fall(line),
     }
 }
@@ -1393,6 +1400,35 @@ pub const FELL: &str = "fall";
 pub const ON_LINE: &str = "line";
 
 impl Line {
+    /// Whether this line only holds: it keeps a recording seat from rising
+    /// and takes nothing back from an acting one, because it says the
+    /// evidence is not in yet rather than that it went against the seat.
+    ///
+    /// A seat already acting is not held to the window's width — a fresh
+    /// window is not evidence against it — nor to a sample still being
+    /// counted: too few compared, too few of the baseline's, marks that
+    /// compared nothing. A line acting on little of its window still acts
+    /// well on what it acts on: the apply share is a floor to rise on
+    /// (t-9468). A record whose label has not said no enough times cannot
+    /// show the seat right, and does not show it wrong either — and the agent
+    /// choice, which acts from the start (t-11989), would otherwise fall for
+    /// naming every coordinator's own agent. And executions whose costs
+    /// nobody could measure are a gap in the bookkeeping, not a mark: the
+    /// difficulty seat's first attempts are read before its costs.
+    #[must_use]
+    pub const fn only_holds(self) -> bool {
+        matches!(
+            self,
+            Self::TooFewRows { .. }
+                | Self::TooFewCompared { .. }
+                | Self::Unlabeled { .. }
+                | Self::TooFewBaseline { .. }
+                | Self::ApplyShare { .. }
+                | Self::OneSided { .. }
+                | Self::ExecutionCostsMissing
+        )
+    }
+
     /// The word this line writes in a transition row. Closed, and carrying
     /// none of the request — a ledger says which rule, never what was asked.
     #[must_use]
@@ -1501,14 +1537,16 @@ pub fn labels_path_in(root: &Value) -> Option<&str> {
 /// recorded, and only while that transition was decided on the words the
 /// seat asks now (t-6877).
 ///
-/// No transition means it has never risen, which is what `auto` starts as.
+/// No transition of those words means the judge has decided nothing under
+/// them, and the seat stands where its row says `auto` starts
+/// ([`JevUse::auto_starts`], t-11989) — recording for most seats.
 /// A transition names the rubrics it was decided on
 /// ([`transition_row`], [`RUBRIC_VERSIONS`]); one that names none was
 /// decided under the first rubric ([`UNVERSIONED_RUBRIC`]) — every rise
 /// written before transitions named one. A seat stands on it only while its
 /// row asks exactly those words: a rise earned under version 1 is not a
 /// rise under version 2, and a seat whose words went back to version 1
-/// starts recording too — the newest transition is version 2's, and a
+/// starts over too — the newest transition is version 2's, and a
 /// version 1 rise behind version 2's requests is behind the series
 /// ([`on_the_newest_version`]) and revives nothing. A transition that names
 /// something that is not a version stands for nothing.
@@ -1522,7 +1560,7 @@ pub fn standing(seat: &JevUse, rows: &[Value]) -> Stand {
     rows.iter()
         .rev()
         .find_map(|row| stands_on(seat, row))
-        .unwrap_or(Stand::Recording)
+        .unwrap_or(seat.auto_starts)
 }
 
 /// What one row, read newest first, says of where `seat` stands — the one
@@ -1530,8 +1568,10 @@ pub fn standing(seat: &JevUse, rows: &[Value]) -> Stand {
 /// round 3). A request of words newer than the seat's ([`fences`]) puts it
 /// behind its series, and so recording, whatever else the row carries; a
 /// transition stands it where the transition says while it was decided on
-/// the words the seat asks now, and at recording otherwise; any other row
-/// says nothing, and the reader goes on to the row before it.
+/// the words the seat asks now, and where the seat starts otherwise
+/// ([`JevUse::auto_starts`]) — a rise or a fall of other words is no
+/// standing under these; any other row says nothing, and the reader goes on
+/// to the row before it.
 fn stands_on(seat: &JevUse, row: &Value) -> Option<Stand> {
     if fences(seat, row) {
         return Some(Stand::Recording);
@@ -1540,7 +1580,7 @@ fn stands_on(seat: &JevUse, row: &Value) -> Option<Stand> {
     Some(if decided_on_these_words(seat, row) {
         stand
     } else {
-        Stand::Recording
+        seat.auto_starts
     })
 }
 
@@ -1565,7 +1605,7 @@ pub fn standing_in(seat: &JevUse, text: &str) -> Stand {
         .filter(|line| may_speak(seat, line, &keys))
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find_map(|row| stands_on(seat, &row))
-        .unwrap_or(Stand::Recording)
+        .unwrap_or(seat.auto_starts)
 }
 
 /// The keys a ledger line is searched for, each spelling in its quotes as a
@@ -1694,7 +1734,8 @@ fn rubrics_of_transition(row: &Value) -> Option<Vec<u32>> {
 /// A seat's standing is [`standing`]; this is what a reader that compares
 /// the two standing reads of one ledger takes as "every row parsed".
 ///
-/// No transition means it has never risen, which is what `auto` starts as.
+/// No transition means it has never risen — where most seats start; a
+/// seat's own start is [`JevUse::auto_starts`], which [`standing`] reads.
 #[must_use]
 pub fn stand_from(rows: &[Value]) -> Stand {
     rows.iter()

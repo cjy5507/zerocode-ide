@@ -2966,6 +2966,19 @@ enum HeadroomSource {
 }
 
 impl Launcher for LiveCatalog {
+    /// The summon seat's own pick for `--agent auto` — the live road to it.
+    /// Until t-11989 only [`Catalog`] answered this, and the actor holds a
+    /// `LiveCatalog`: every `--agent auto` in the window was refused by the
+    /// trait's default, whatever the seat's mode said.
+    fn choose_agent(
+        &self,
+        look: &zerocode_core::summon_choice::SummonLook<'_>,
+        options: &[zerocode_core::summon_choice::Summonable],
+        origin: [&str; 3],
+    ) -> Option<String> {
+        summon_choice::choose(look, options, origin)
+    }
+
     fn difficulty_profile(
         &self,
         agent: &str,
