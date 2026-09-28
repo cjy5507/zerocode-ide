@@ -762,6 +762,9 @@
   --agent-graph-lod: 0.6;
   --agent-graph-fit-floor: 0.65;
   --agent-graph-edge-stub: 12px;
+  /* 레일 끝 구슬의 반지름 — 스크립트가 원의 `r`로 쓰고(`agentGraphTuning`), 구슬은 자식 카드의
+   * 왼쪽 모서리 바로 밖에 앉는다. */
+  --agent-graph-rail-bead: 4px;
   --agent-graph-tier-side: 1100px;
   --agent-graph-tier-list: 700px;
   --agent-graph-tier-tight: 400px;

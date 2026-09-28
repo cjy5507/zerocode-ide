@@ -27670,16 +27670,66 @@ input[type="search"]::-webkit-search-cancel-button {
   vector-effect: non-scaling-stroke;
 }
 
-/* 계보는 점선이고 유채색이 아니다 (round three). 호박색은 이 판에서 「사람이
- * 필요하다」의 색이고, 그 색으로 그은 선은 모든 하위 에이전트를 확인 필요로
- * 읽히게 했다. 관계는 잉크로, 상태만 색으로. */
+/* 계보는 레일이다 (방향 D, 오르빗의 빛의 관). 부모에서 자식으로 휘는 곡선이고 유채색이
+ * 아니다 — 호박색은 이 판에서 「사람이 필요하다」의 색이라, 그 색으로 그은 선은 모든 하위
+ * 에이전트를 확인 필요로 읽히게 했다. 관계는 잉크로, 상태만 색으로: 자식이 일하거나 사람을
+ * 기다리면 레일이 밝고(잉크 55%), 나머지는 물러나며, 끝의 구슬이 자식의 상태 색을 든다.
+ * 화살표 대신 구슬이 방향을 말한다 — 구슬은 언제나 자식 쪽 끝에 선다. 거꾸로 가는 관계
+ * (다른 프로젝트로 건너간 계보)만 직각 길을 탄다(`agentGraphRailPath`). */
 .agent-graph-edge.is-spawned,
 .agent-graph-legend-edge.is-spawned {
-  stroke: var(--ink-mist);
-  stroke-dasharray: 4 3;
-  stroke-opacity: 0.75;
-  color: var(--ink-mist);
-  marker-end: url(#agent-graph-arrow);
+  stroke: color-mix(in srgb, var(--ink-mist) 40%, transparent);
+  stroke-linecap: round;
+  stroke-opacity: 1;
+  transition: stroke var(--motion-fast) var(--ease-standard);
+}
+
+.agent-graph-edge.is-spawned.is-lit,
+.agent-graph-legend-edge.is-spawned {
+  stroke: color-mix(in srgb, var(--ink-chalk) 55%, transparent);
+}
+
+.agent-graph-edge.is-spawned.is-selected {
+  stroke: var(--ink-chalk);
+  stroke-opacity: 0.95;
+}
+
+.agent-graph-rail-bead,
+.agent-graph-legend-bead {
+  fill: var(--ink-mist);
+  stroke: var(--surface-well);
+  stroke-width: 2px;
+  paint-order: stroke;
+  vector-effect: non-scaling-stroke;
+  transition: fill var(--motion-fast) var(--ease-standard);
+}
+
+.agent-graph-rail-bead.is-working {
+  fill: var(--signal-ready);
+}
+
+.agent-graph-rail-bead.is-needs-attention {
+  fill: var(--signal-wait);
+}
+
+.agent-graph-rail-bead.is-done {
+  fill: var(--signal-done);
+}
+
+.agent-graph-rail-bead.is-failed {
+  fill: var(--signal-halt);
+}
+
+.agent-graph-rail-bead.is-search-dimmed {
+  opacity: 0.14;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-graph-edge.is-spawned,
+  .agent-graph-rail-bead,
+  .agent-graph-reply-word {
+    transition: none;
+  }
 }
 
 /* 계보가 이미 말한 담김 (round three) — DOM에 남고 그림에서 물러난다. */
@@ -29122,12 +29172,24 @@ input[type="search"]::-webkit-search-cancel-button {
   gap: var(--space-1);
 }
 
+/* 이름만 남은 카드에서 상태를 드는 것은 왼쪽 테 하나다 — 넓은 판의 레일 두께로 선다. 첫 줄은
+ * 타일과 모델이 물러난 두 칸이다: 방향 D의 세 칸(타일 · 제목 · 모델)이 남으면 제목이 타일의
+ * 칸에 들어가 20px로 잘린다. */
+.agent-graph-surface.is-lod .agent-graph-node.is-agent {
+  border-left-width: var(--rail-width);
+}
+
+.agent-graph-surface.is-lod .agent-graph-node.is-agent .agent-graph-node-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .agent-graph-surface.is-lod .agent-graph-node-icon,
 .agent-graph-surface.is-lod .agent-graph-node-kind,
 .agent-graph-surface.is-lod .agent-graph-node-line,
 .agent-graph-surface.is-lod .agent-graph-node-message,
 .agent-graph-surface.is-lod .agent-graph-node-status,
-.agent-graph-surface.is-lod .agent-card-meta,
+.agent-graph-surface.is-lod .agent-graph-node-model,
+.agent-graph-surface.is-lod .agent-graph-bubble,
 .agent-graph-surface.is-lod .agent-graph-node-meta,
 .agent-graph-surface.is-lod .agent-graph-wire,
 .agent-graph-surface.is-lod .agent-graph-pips {
@@ -29283,8 +29345,7 @@ input[type="search"]::-webkit-search-cancel-button {
   font-weight: 500;
 }
 
-/* 시계는 줄지 않는다 — 줄어들 자리가 있으면 그 자리는 낱말이 가져간다. */
-.agent-graph-node-clock,
+/* 모델과 단계는 줄지 않는다 — 줄어들 자리가 있으면 그 자리는 낱말이 가져간다. */
 .agent-card-model,
 .agent-card-phase {
   flex: none;
@@ -29306,27 +29367,10 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-graph-node-status > .agent-card-phase::before,
-.board-card-status > .agent-card-phase::before,
-.agent-card-meta > :not(:first-child)::before {
+.board-card-status > .agent-card-phase::before {
   content: "·";
   margin-right: var(--space-1);
   color: var(--edge-mark);
-}
-
-/* Model and both clocks are the card's foot, never a fifth and sixth word
- * competing with the state. Empty prebuilt clock slots fold without churn. */
-.agent-card-meta {
-  display: flex;
-  gap: var(--space-1);
-  align-items: center;
-  min-width: 0;
-  color: var(--ink-mist);
-  font-size: var(--agent-graph-text-line);
-  font-weight: 500;
-}
-
-.agent-card-meta > :empty {
-  display: none;
 }
 
 /* 상태 낱말은 제 상태의 잉크를 입는다 (round three). 다섯 상태만 색을 갖는다는
@@ -29389,7 +29433,8 @@ input[type="search"]::-webkit-search-cancel-button {
   white-space: nowrap;
 }
 
-.agent-card-phase.is-quiet {
+.agent-card-phase.is-quiet,
+.agent-card-activity-when.is-quiet {
   padding: 1px 5px;
   border: var(--rule-width) solid color-mix(in srgb, var(--signal-wait) 46%, transparent);
   border-radius: var(--radius-pill);
@@ -29406,18 +29451,6 @@ input[type="search"]::-webkit-search-cancel-button {
 .agent-graph-node-status > :empty,
 .board-card-status > :empty {
   display: none;
-}
-
-.agent-graph-node-clock {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-2xs);
-  font-weight: 500;
-}
-
-.agent-graph-node-clock.is-running {
-  color: var(--ink-label);
 }
 
 .agent-graph-node-meta {
@@ -29768,17 +29801,455 @@ input[type="search"]::-webkit-search-cancel-button {
   opacity: 0.62;
 }
 
-/* A card with an open tool call is the one card on the surface that is moving
- * right now, and it says so on its own edge rather than by growing.
+/* ---- 오르빗 문법의 카드 (방향 D, 2026-09-28) ----------------------------------
  *
- * 후광은 돌지 않는다 (round three). 카드마다 2초짜리 상시 애니메이션은 판이
- * 바쁠수록 — 여덟 카드가 돌 때 — 여덟 겹의 다시 그리기였다. 도는 것은 상태
- * 마크 하나면 충분하고, 살아 있는 테두리는 서 있는 색으로 말한다. */
-.agent-graph-node.is-live {
-  border-color: color-mix(in srgb, var(--signal-ready) 42%, transparent);
+ * 그래프의 에이전트 카드는 입체 보기의 이름표(`.agent-orbit-label`)와 같은 말투로 말한다:
+ * 상태의 색을 입는 왼쪽 2px 테, 첫 줄 오른쪽의 모델(고정폭), 둘째 줄의 점과 낱말 · 가지 ·
+ * 하위 · 컨텍스트 고리, 상태 말풍선, 모델 계열의 몸색 타일. 이름표에서 옮기지 않은 것은
+ * 유리와 빛번짐과 상시 모션이다 — 카드는 불투명한 판이고, 말풍선은 떠돌지 않으며, 작업 중의
+ * 점도 돌지 않는다. 초록은 이제 작업 중에만 선다(도구 호출이 열린 카드의 초록 테도 없다). */
+.agent-graph-node.is-agent {
+  --agent-card-light: color-mix(in srgb, var(--ink-mist) 70%, transparent);
+  /* 왼쪽 테가 입는 색. 넓은 판에서는 상태의 색이고, 목록 티어에서는 혈통의 레인 색이다. */
+  --agent-card-edge: var(--agent-card-light);
+  --agent-card-tile: 20px;
+  padding: var(--space-3);
+  border-left: calc(var(--rule-width) * 2) solid var(--agent-card-edge);
+  background: var(--surface-deck);
+}
+
+.agent-graph-node.is-agent.is-working { --agent-card-light: var(--signal-ready); }
+.agent-graph-node.is-agent.is-attention { --agent-card-light: var(--signal-wait); }
+.agent-graph-node.is-agent.is-done { --agent-card-light: var(--signal-done); }
+.agent-graph-node.is-agent.is-failed { --agent-card-light: var(--signal-halt); }
+
+/* 테가 상태를 말하므로 안쪽 레일은 물러난다 — 워크스페이스 이름표의 레인 레일은 그대로. */
+.agent-graph-node.is-agent::before {
+  content: none;
+}
+
+.agent-graph-node.is-agent:hover {
+  border-color: color-mix(in srgb, var(--ink-chalk) 24%, transparent);
+  border-left-color: var(--agent-card-edge);
+  background: var(--surface-deck);
+}
+
+.agent-graph-node.is-agent:focus-visible {
+  border-color: color-mix(in srgb, var(--ink-chalk) 24%, transparent);
+  border-left-color: var(--agent-card-edge);
+}
+
+/* 고름은 30% 잉크의 안쪽 고리로 낮춘다 — 판에서 가장 큰 신호는 확인 필요의 것이다. */
+.agent-graph-node.is-agent.is-selected {
+  border-color: var(--edge-rule);
+  border-left-color: var(--agent-card-edge);
+  background: var(--surface-deck);
+  outline: none;
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--signal-ready) 14%, transparent),
+    inset 0 0 0 var(--rule-width) color-mix(in srgb, var(--ink-chalk) 30%, transparent),
     var(--shadow-node);
+}
+
+/* 확인 필요: 호박 워시와 3px 12%의 단단한 고리(번짐 없음). 고른 확인 필요 카드는 호박 테를
+ * 지키고, 고름은 그 바깥의 한 줄로 물러난다. */
+.agent-graph-node.is-agent.is-attention,
+.agent-graph-node.is-agent.is-attention:hover,
+.agent-graph-node.is-agent.is-attention.is-selected {
+  border-color: color-mix(in srgb, var(--signal-wait) 55%, transparent);
+  border-left-color: var(--agent-card-edge);
+  background-color: color-mix(in srgb, var(--signal-wait) 12%, var(--surface-deck));
+  box-shadow:
+    inset 0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-wait) 24%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--signal-wait) 12%, transparent);
+}
+
+.agent-graph-node.is-agent.is-attention.is-selected {
+  outline: var(--rule-width) solid color-mix(in srgb, var(--ink-chalk) 30%, transparent);
+  outline-offset: var(--space-1);
+}
+
+.agent-graph-node.is-agent.is-failed {
+  border-color: color-mix(in srgb, var(--signal-halt) 40%, transparent);
+  border-left-color: var(--agent-card-edge);
+}
+
+/* 제목은 흰 잉크, 쉬는 카드와 끝난 카드만 한 단 물러난다 — 아무도 보지 않은 소식이 있는
+ * 카드(`is-unseen`)와 고른 카드는 물러나지 않는다. */
+.agent-graph-node.is-agent .agent-graph-node-title,
+.agent-graph-node.is-agent:not(.is-unseen) .agent-graph-node-title {
+  color: var(--ink-chalk);
+}
+
+.agent-graph-node.is-agent:is(.is-idle, .is-done):not(.is-failed):not(.is-selected):not(.is-unseen) .agent-graph-node-title {
+  color: var(--ink-figure);
+}
+
+/* 첫 줄: 타일 · 제목 · 모델. */
+.agent-graph-node.is-agent .agent-graph-node-head {
+  grid-template-columns: var(--agent-card-tile) minmax(0, 1fr) auto;
+  min-height: var(--agent-card-tile);
+}
+
+/* 벤더의 마크는 판에서 가장 센 색이 아니다: 모델 계열의 톤(오르빗 로봇의 몸색)을 바탕에
+ * 섞은 작은 타일 위에 무채로 선다. 벤더는 모양으로 갈리고, 브랜드 원색은 인스펙터와
+ * 사이드바가 든다. */
+.agent-graph-node.is-agent .agent-graph-node-icon {
+  --family-a: var(--agent-model-other-main-a);
+  --family-b: var(--agent-model-other-main-b);
+  --family-l: var(--agent-model-other-light-b);
+  width: var(--agent-card-tile);
+  height: var(--agent-card-tile);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(150deg,
+    color-mix(in srgb, var(--family-b) 30%, var(--surface-raised)),
+    color-mix(in srgb, var(--family-a) 40%, var(--surface-deck)));
+  box-shadow: inset 0 0 0 var(--rule-width) color-mix(in srgb, var(--family-a) 40%, transparent);
+  color: var(--family-l);
+}
+
+.agent-graph-node.is-agent .agent-graph-node-icon.is-family-claude {
+  --family-a: var(--agent-model-claude-main-a);
+  --family-b: var(--agent-model-claude-main-b);
+  --family-l: var(--agent-model-claude-light-b);
+}
+
+.agent-graph-node.is-agent .agent-graph-node-icon.is-family-codex {
+  --family-a: var(--agent-model-codex-main-a);
+  --family-b: var(--agent-model-codex-main-b);
+  --family-l: var(--agent-model-codex-light-b);
+}
+
+:root[data-theme="light"] .agent-graph-node.is-agent .agent-graph-node-icon {
+  color: var(--family-a);
+}
+
+.agent-graph-node.is-agent .agent-graph-node-icon > .agent-ico {
+  width: 12px;
+  height: 12px;
+}
+
+.agent-graph-node.is-agent .agent-graph-node-icon img {
+  filter: grayscale(1);
+  mix-blend-mode: luminosity;
+}
+
+.agent-graph-node-model {
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--agent-graph-text-fine);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.agent-graph-node-model:empty {
+  display: none;
+}
+
+/* 둘째 줄: 점 · 낱말 · 단계 · 가지 · 하위 · 컨텍스트. 제목의 글자 선에 맞춰 들여 선다. */
+.agent-graph-node.is-agent .agent-graph-node-status {
+  gap: var(--agent-graph-gap);
+  padding-left: calc(var(--agent-card-tile) + var(--space-2));
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* 점은 모양으로도 말한다: 채운 점(작업 중·확인 필요·완료·실패, 곁의 낱말이 가른다),
+ * 빈 고리(대기), 점선 고리(조용해짐), 두 막대(일시 정지). 도는 것은 없다. */
+.agent-graph-node.is-agent .agent-graph-node-state > .icon {
+  display: none;
+}
+
+.agent-graph-node.is-agent .agent-graph-node-state::before {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--agent-card-light);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--agent-card-light) 18%, transparent);
+  animation: none;
+}
+
+.agent-graph-node.is-agent .agent-graph-node-state.is-idle::before {
+  border: calc(var(--rule-width) * 1.5) solid var(--ink-mist);
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-graph-node.is-agent .agent-graph-node-state.is-paused::before {
+  width: 8px;
+  height: 10px;
+  border: 0;
+  border-inline: 2px solid var(--ink-label);
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.agent-graph-node.is-agent.is-went-quiet .agent-graph-node-state::before {
+  border: calc(var(--rule-width) * 1.5) dashed var(--signal-ready);
+  background: transparent;
+  box-shadow: none;
+}
+
+/* 조용해짐은 「지금」 줄의 나이 자리가 칩으로 든다 — 상태 줄에 두 번 서지 않는다. */
+.agent-graph-node.is-agent .agent-graph-node-status > .agent-card-phase.is-quiet {
+  display: none;
+}
+
+.agent-graph-node-branch {
+  display: flex;
+  flex: 0 1 auto;
+  gap: var(--space-1);
+  align-items: center;
+  min-width: 0;
+  font-family: var(--font-mono);
+}
+
+.agent-graph-node-branch::before {
+  content: "·";
+  color: var(--edge-mark);
+}
+
+.agent-graph-node-branch[hidden] {
+  display: none;
+}
+
+.agent-graph-node-branch > i {
+  flex: none;
+  width: 3px;
+  height: 0.8em;
+  border-radius: var(--radius-pill);
+  background: var(--lane, var(--edge-mark));
+}
+
+.agent-graph-node-branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-graph-node-kids {
+  flex: none;
+  margin-left: auto;
+  padding: 0 var(--agent-graph-gap);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  color: var(--ink-mist);
+  font-size: var(--agent-graph-text-fine);
+  line-height: 1.6;
+}
+
+.agent-graph-node-kids:empty {
+  display: none;
+}
+
+/* 컨텍스트 고리: 12px, 값이 없으면 서지 않고(분모를 지어내지 않는다), 창이 차 오르면
+ * 이 창이 이미 「사람이 필요하다」에 쓰는 호박색으로. */
+.agent-graph-node-context {
+  --ring: var(--ink-mist);
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-1);
+  align-items: center;
+  margin-left: auto;
+  color: var(--ink-glyph);
+  font-size: var(--agent-graph-text-fine);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-graph-node-kids:not(:empty) ~ .agent-graph-node-context {
+  margin-left: 0;
+}
+
+.agent-graph-node-context[hidden] {
+  display: none;
+}
+
+.agent-graph-node-context.is-full {
+  --ring: var(--signal-wait);
+  color: var(--signal-wait-ink);
+}
+
+.agent-graph-node-context-ring {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: conic-gradient(var(--ring) calc(var(--context-ratio, 0) * 1turn), var(--meter-track) 0);
+  mask: radial-gradient(circle, transparent 3.5px, var(--ink-chalk) 4px);
+}
+
+/* 「지금」: 헤어라인 아래 동사 · 대상(고정폭) · 나이 하나, 그 아래 흔적과 마지막 말과 답하기. */
+.agent-graph-node.is-agent .agent-graph-wire {
+  gap: var(--agent-graph-gap-tight);
+  border-top-color: color-mix(in srgb, var(--ink-chalk) 8%, transparent);
+}
+
+.agent-graph-wire .agent-card-activity {
+  gap: var(--space-2);
+  font-size: var(--agent-graph-text-line);
+  line-height: 1.6;
+}
+
+.agent-graph-wire .agent-card-activity-mark {
+  display: none;
+}
+
+.agent-graph-wire .agent-card-activity-target {
+  color: var(--ink-label);
+  font-family: var(--font-mono);
+}
+
+.agent-graph-node.is-agent.is-working .agent-graph-wire .agent-card-activity-target {
+  color: var(--ink-chalk);
+}
+
+.agent-graph-node.is-agent.is-failed .agent-graph-wire .agent-card-activity-target {
+  color: var(--signal-halt-ink);
+}
+
+/* 질문은 두 줄까지, 낱말 단위로 끊긴다. */
+.agent-graph-wire .agent-card-activity.is-asking {
+  align-items: start;
+}
+
+.agent-graph-wire .agent-card-activity.is-asking .agent-card-activity-target {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--signal-wait-ink);
+  font-family: var(--font-ui);
+  font-size: var(--agent-graph-text-now);
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.agent-graph-wire .agent-card-activity-when:empty {
+  display: none;
+}
+
+/* 흔적: 줄 앞의 도구들, 새것부터. 가장 새것은 줄지 않고, 넘친 수(`+N`)는 끝에 선다. */
+.agent-graph-wire .agent-card-ticker {
+  color: var(--ink-glyph);
+  line-height: 1.5;
+}
+
+.agent-graph-wire .agent-card-ticker-more {
+  order: 1;
+}
+
+.agent-graph-wire .agent-card-ticker-more:not(:empty)::before {
+  content: "·";
+  margin-right: var(--space-1);
+  color: var(--edge-mark);
+}
+
+.agent-graph-wire .agent-card-ticker-more:not(:empty) + .agent-card-tool::before {
+  content: none;
+}
+
+.agent-graph-wire .agent-card-tool:not(.is-empty):first-of-type {
+  flex: none;
+  max-width: 100%;
+}
+
+.agent-graph-wire .agent-card-tool-target {
+  color: var(--ink-glyph);
+  font-family: var(--font-mono);
+}
+
+.agent-graph-wire .agent-graph-node-message {
+  font-size: var(--agent-graph-text-now);
+  line-height: 1.5;
+}
+
+/* 답하기 — 인스펙터의 「터미널 열기」와 같은 곳을 연다. 열 판이 없으면 글로만 선다. */
+.agent-graph-reply {
+  display: flex;
+  gap: var(--agent-graph-gap);
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: var(--space-1);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--signal-wait-ink);
+  font: inherit;
+  font-size: var(--agent-graph-text-line);
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-graph-reply[hidden] {
+  display: none;
+}
+
+.agent-graph-reply-word {
+  text-decoration: underline transparent;
+  text-underline-offset: 0.2em;
+  transition: text-decoration-color var(--motion-fast) var(--ease-standard);
+}
+
+.agent-graph-reply:hover:not(:disabled) .agent-graph-reply-word,
+.agent-graph-reply:focus-visible .agent-graph-reply-word {
+  text-decoration-color: currentColor;
+}
+
+.agent-graph-reply:focus-visible {
+  outline: var(--rule-width) solid var(--ring);
+  outline-offset: 2px;
+}
+
+.agent-graph-reply:disabled {
+  cursor: default;
+}
+
+.agent-graph-reply-pane {
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--agent-graph-text-fine);
+  font-weight: 400;
+}
+
+/* 말풍선 — 오르빗 이름표의 그 말(`ORBIT.bubbles`). 카드의 왼쪽 위 모서리에 걸친 제 상태
+ * 색의 알약이고, 떠돌지 않는다. 대기는 오른쪽 위의 작은 「z z」, 작업 중과 조용함은 없다. */
+.agent-graph-bubble {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  left: var(--space-3);
+  padding: var(--rule-width) var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--agent-card-light);
+  box-shadow: 0 0 0 2px var(--surface-well);
+  color: var(--surface-abyss);
+  font: 700 var(--agent-graph-text-fine) / 1.6 var(--font-ui);
+  white-space: nowrap;
+  translate: 0 -55%;
+  pointer-events: none;
+}
+
+.agent-graph-bubble:empty {
+  display: none;
+}
+
+.agent-graph-bubble[data-bubble="idle"] {
+  right: var(--space-3);
+  left: auto;
+  padding: 0 var(--space-1);
+  background: var(--surface-deck);
+  box-shadow: none;
+  color: var(--ink-glyph);
+  font: 600 var(--agent-graph-text-fine) / 1 var(--font-mono);
+  letter-spacing: 0.2em;
+  translate: 0 -50%;
 }
 
 /* ---- the workspace pips ------------------------------------------------- */
@@ -31217,20 +31688,9 @@ details.task-board-section > summary {
   gap: var(--space-2);
   background-image: none;
 }
+/* 접힌 카드(기본)는 흔적과 마지막 말을 접는다. 「지금」 줄과 그 헤어라인, 답하기는 남는다. */
 .file-view:not(.is-detailed-relations) .agent-graph-node.is-agent .agent-card-ticker,
-.file-view:not(.is-detailed-relations) .agent-graph-node.is-agent .agent-card-meter,
-.file-view:not(.is-detailed-relations) .agent-graph-node.is-agent .agent-card-model,
 .file-view:not(.is-detailed-relations) .agent-graph-node.is-agent .agent-graph-node-message { display: none; }
-.file-view:not(.is-detailed-relations) .agent-graph-node.is-agent .agent-card-doing {
-  padding-block: var(--space-1);
-  border: 0;
-  background: none;
-}
-.file-view:not(.is-detailed-relations) .agent-graph-node.is-agent .agent-card-meta {
-  margin-top: 0;
-  border: 0;
-  padding: 0;
-}
 .agent-inspector-tabs {
   display: flex;
   flex: none;
@@ -31963,12 +32423,19 @@ details.task-board-section > summary {
     border-inline-start: var(--rail-width) solid var(--edge-mark);
   }
 
+  /* 방향 D의 카드도 여기서는 바깥 테가 혈통이고, 상태는 안쪽 레일로 물러난다. */
   .agent-graph-node.is-agent {
-    border-inline-start-color: color-mix(
+    --agent-card-edge: color-mix(
       in srgb,
       var(--lane, var(--lane-1)) 55%,
       transparent
     );
+    border-inline-start-width: var(--rail-width);
+  }
+
+  .agent-graph-node.is-agent::before {
+    content: "";
+    background: var(--agent-card-light);
   }
 
   /* 이름표는 목록에서 절의 소제목이 된다. 레인 색 레일은 넓은 판에서처럼
@@ -32073,7 +32540,6 @@ details.task-board-section > summary {
    * 한 줄에 들어가지 못하고, 들어가지 못한 줄은 정보가 아니라 말줄임표다. */
   .agent-card-ticker,
   .agent-card-meter,
-  .agent-card-meta,
   .agent-graph-node-message {
     display: none;
   }

@@ -1748,6 +1748,17 @@ function agentOrbitPlace(state, yaw, pitch) {
 
 /* ---- 라벨 -------------------------------------------------------------------- */
 
+/* 한 상태의 말풍선 글 — 이 보기의 이름표와 관계 그림의 카드가 함께 읽는 한 곳. 작업 중은 말풍선이
+ * 없으므로 빈 글이다. 낱말은 관계 그림의 한 손(`agentGraphStateWord`)이 짓는다. */
+function agentOrbitBubbleKind(state) {
+  return (ORBIT.states[state] ?? ORBIT.states.idle).bubble;
+}
+
+function agentOrbitBubbleWord(state, ledger = "") {
+  const bubble = agentOrbitBubbleKind(state);
+  return bubble ? ORBIT.bubbles[bubble].replace("{{word}}", agentGraphStateWord(state, ledger)) : "";
+}
+
 /* 라벨 하나: 버튼과 이름표(`span`) — 둘째 줄(모델 · 상태)은 이름표의 `::after`, 말풍선은 버튼의
  * `::before`가 든다. 요소가 둘뿐인 것은 이 그림의 DOM 예산 때문이다(카드 그림 대비 +50 이하). */
 function agentOrbitLabelNode() {
@@ -1784,7 +1795,7 @@ function agentOrbitLabels(state) {
       const word = agentGraphStateWord(body.state, body.entry.card.ledger ?? "");
       const who = agentName(body.entry.card.agent) || "";
       const where = body.entry.workspace.branch || body.plate.name;
-      const bubble = body.known.bubble ? ORBIT.bubbles[body.known.bubble].replace("{{word}}", word) : "";
+      const bubble = agentOrbitBubbleWord(body.state, body.entry.card.ledger ?? "");
       writeClassName(label, ["agent-orbit-label", `is-${body.kind}`, body.lead ? "is-lead" : "",
         `is-${body.state}`, body.searchDim ? "is-search-dimmed" : ""].filter(Boolean).join(" "));
       writeAttribute(label, "data-chip", [word, where].filter(Boolean).join(" · "));
