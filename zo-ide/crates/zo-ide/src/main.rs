@@ -55,8 +55,34 @@ fn main() -> ExitCode {
         }
         Err(error) => {
             process_exit.finish("error", Some(&error.to_string()));
+            say_on_the_terminal(&error.to_string());
             ExitCode::FAILURE
         }
+    }
+}
+
+/// A refusal said where the person is looking, too (t-12063).
+///
+/// Once the session starts opening, stderr belongs to zo's own log
+/// (`run_loop::install_stderr_redirect`), so a zo that could not open its
+/// session ended with nothing on its terminal: the window's restore read a
+/// blank pane and could say only "exited (code 1)", and a person who typed a
+/// resume of a conversation from another folder got silence. When stdout is a
+/// terminal and stderr is not, the reason goes to the terminal as one line.
+fn say_on_the_terminal(error: &str) {
+    if std::io::stdout().is_terminal() && !std::io::stderr().is_terminal() {
+        let cwd = std::env::current_dir().ok();
+        println!("{}", terminal_exit_line(error, cwd.as_deref()));
+    }
+}
+
+/// That line: the folder zo was started in — a conversation is looked up in
+/// that folder's store — and zo's own reason, on one line.
+fn terminal_exit_line(error: &str, cwd: Option<&std::path::Path>) -> String {
+    let said = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    match cwd {
+        Some(cwd) => format!("zo could not start in {}: {said}", cwd.display()),
+        None => format!("zo could not start: {said}"),
     }
 }
 
