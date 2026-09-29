@@ -234,6 +234,16 @@ pub fn router_priors() -> &'static RouterPriors {
     {
         return priors;
     }
+    shipped_router_priors()
+}
+
+/// The priors the build shipped: what [`router_priors`] answers until a
+/// publish declares some. For a reader whose answer must not move with a
+/// publish elsewhere in the process — the golden table of the shipped catalog
+/// classifies by these, because a test that publishes other size words for a
+/// moment could swap the store under it mid-table.
+#[must_use]
+pub fn shipped_router_priors() -> &'static RouterPriors {
     &builtin_model_context_catalog().priors
 }
 

@@ -158,6 +158,10 @@ fn small_custom_frontier_models_do_not_satisfy_specialist_fallbacks() {
 
 #[test]
 fn builtin_codex_spark_and_sonnet_are_classified_by_role_fit() {
+    // Spark's Fast comes from the `spark` size word in the process store,
+    // which `prior_tables_come_from_the_catalog` swaps for a moment under this
+    // lock (t-15568).
+    let _lock = crate::test_env_lock();
     let inventory = model_inventory_from_authorized_providers(
         "main",
         &[ProviderKind::OpenAi, ProviderKind::Anthropic],

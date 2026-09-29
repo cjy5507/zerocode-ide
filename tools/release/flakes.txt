@@ -68,10 +68,6 @@ zo:lsp_client::tests::sync_and_collect_diagnostics_returns_did_change_diagnostic
 # port the test frees and rebinds was taken by a neighbour between the two binds (`EADDRINUSE` from bind_seat(port)),
 # not by our own lingering connection — SO_REUSEADDR covers only the latter. Green solo ×3 in 0.00 s.
 root:google_login::tests::the_callback_seat_can_be_retaken_while_the_last_one_lingers
-# 2026-09-23 coordinator gate for t-6203 (zo-test, 49 binaries side by side, load 4-13):
-# Same gate: the growing PTY could not be spawned ("the pty slave has no name") while the other binaries ran beside it —
-# pty allocation under load; green solo x3.
-zo:e2e_grow_during_a_live_spinner_pins_the_footer_to_the_last_row
 # 2026-09-23 coordinator gate for t-6269 (zo-test, 49 binaries side by side, load 46-120 with three worker builds and a
 # container beside them): the 2,000-session search overran its time bound (`bounds.session_recall_search`) with
 # session_recall untouched by the branch; green solo x3 (1.5-1.8 s each).
