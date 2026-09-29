@@ -13279,6 +13279,9 @@ function syncHelperTurns(list, run) {
     const row = helperTurnRowNode(run, turn, spoken, cold > 0);
     cold -= 1;
     list.insertBefore(row, streaming ?? helperListTail(list));
+    // The words a thought was streaming are this turn: what a reader had of
+    // the streaming row passes to this one when that row goes.
+    if (turn.role === "thinking" && streaming) noteThoughtSettled(streaming, turn, row);
     // Its pictures are watched once it stands in the list (A8), and so is
     // the row itself, whose body goes when it is far from view (B1).
     if (row.querySelector(":scope > .helper-images")) watchImagePills(list, row);
@@ -13354,7 +13357,7 @@ function syncStreamingTurns(list, run) {
   live.forEach((piece, index) => {
     let row = rows[index];
     if (row && row.dataset.role !== piece.role) {
-      for (const stale of rows.splice(index)) stale.remove();
+      for (const stale of rows.splice(index)) removeStreamingRow(stale, run);
       row = null;
     }
     if (!row) {
@@ -13364,6 +13367,8 @@ function syncStreamingTurns(list, run) {
     }
     if (row.__text === piece.text) return;
     row.__text = piece.text;
+    // A row that goes on with newer words is not the one a turn replaced.
+    row.__settled = undefined;
     if (piece.role === "thinking") {
       // Nothing to say until a sentence has closed: the row keeps its word.
       const heading = thoughtHeading(piece.text);
@@ -13375,7 +13380,7 @@ function syncStreamingTurns(list, run) {
   });
   // Rows the live list no longer names: the words closed into a turn, which
   // the same paint stood above them.
-  for (const stale of rows.slice(live.length)) stale.remove();
+  for (const stale of rows.slice(live.length)) removeStreamingRow(stale, run);
 }
 
 /* Where the settled part of a streaming answer ends: after the last blank

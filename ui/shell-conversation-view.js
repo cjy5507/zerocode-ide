@@ -1688,6 +1688,31 @@ function paintThoughtBody(row, run) {
   else if (!body.hasChildNodes()) paintHelperProse(body, row.__turn.text, helperBase(run));
 }
 
+/* The words a streaming thought was saying are this turn: the row that will
+ * stand for the turn is noted on the streaming row it replaces, so that what a
+ * reader had of the streaming row can pass to it when that row goes. */
+function noteThoughtSettled(streaming, turn, row) {
+  if (streaming.dataset.role !== "thinking") return;
+  const said = (streaming.__text ?? "").trim();
+  if (said !== "" && turn.text.trim().startsWith(said)) streaming.__settled = row;
+}
+
+/* A streaming row goes. A thought that was being read — its line open, or the
+ * keyboard on it — hands both to the row of the turn that stands in its place,
+ * so it does not close under the reader; a thought nobody opened is just gone. */
+function removeStreamingRow(stale, run) {
+  const row = stale.__settled;
+  if (row?.isConnected) {
+    const held = stale.firstElementChild === document.activeElement;
+    if (stale.open && !row.open) {
+      row.open = true;
+      paintThoughtBody(row, run);
+    }
+    if (held) landFocus(row);
+  }
+  stale.remove();
+}
+
 /* ---- the foot line says what is going on (t-15682) ---------------------------
  *
  * While the turn is out the line at the foot names what the agent is doing
