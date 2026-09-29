@@ -15225,14 +15225,16 @@ details[open] > .helper-cap::after {
   color: var(--ink-chalk);
 }
 
-/* A helper's page wears the pill read-only (t-15625): it names the model the
- * helper runs on and there is nothing to press, so no hand and no hover
- * tint — the pill's tint on hover is the promise of a press. */
-.worker-composer-agent.is-static {
+/* A pill worn read-only (t-15625) — a helper's page names the model the helper
+ * runs on and there is nothing to press: no hand and no hover tint, because
+ * the tint on hover is the promise of a press. It stays a `.worker-composer-
+ * pill` in the selector so the pill's own ease (its background and ink
+ * transition) still answers for it. */
+.worker-composer-pill.is-static {
   cursor: default;
 }
 
-.worker-composer-agent.is-static:hover {
+.worker-composer-pill.is-static:hover {
   background: var(--chat-pill-bg);
 }
 
