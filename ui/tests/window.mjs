@@ -37036,6 +37036,127 @@ ok(
   JSON.stringify(chatFace),
 );
 
+/* What a helper page's composer stood on its own page — the dock's measure, the
+ * frame that holds still, the draft that survives a poll — the pane's own
+ * conversation stands and holds now that a helper's page has a footer
+ * (t-15683). The measures are the ones the helper's page was held to. */
+const paneDock = await page.evaluate(async () => {
+  const seen = {};
+  const term = await openTermTab({ placement: "tab" });
+  const tell = (name, payload) => {
+    for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+  };
+  const leave = async () => {
+    delete window.__ANSWER__.pane_log;
+    tell("term:exited", { term });
+    await new Promise((done) => setTimeout(done, 40));
+    window.__PANES__ = [];
+    for (const tab of [...tabs]) dropTab(tab.id);
+    for (const at of [...termViews.keys()]) dropTermView(at);
+    return seen;
+  };
+  tell("hook:agent", { term, state: "idle", agent: "zo", session: "s-pane-dock" });
+  await window.__PAINTED__();
+  const turns = [
+    { role: "user", text: "열 폭을 재라" },
+    { role: "assistant", text: "읽는 폭은 눈보다 짧아야 합니다." },
+    ...Array.from({ length: 30 }, (_, i) => ({ role: "assistant", text: `문단 ${i}` })),
+  ];
+  window.__ANSWER__.pane_log = ({ after }) => ({
+    found: true, next: turns.length, turns: turns.slice(after ?? 0), skipped: false, more: false, folded: false,
+  });
+  el("view-toggle-chat").click();
+  await new Promise((done) => setTimeout(done, 200));
+  const face = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
+  seen.stands = face !== null;
+  if (!face) return leave();
+  // 넓은 판 하나를 직접 세운다 — 앞선 검사가 남긴 쪽 나눔에 기대지 않는다.
+  face.style.flex = "none";
+  face.style.width = "1200px";
+  await new Promise(requestAnimationFrame);
+  const list = face.querySelector(".helper-turns");
+  const prose = face.querySelector(".helper-turn.is-assistant");
+  if (!list || !prose) {
+    seen.noList = true;
+    return leave();
+  }
+  const listBox = list.getBoundingClientRect();
+  const proseBox = prose.getBoundingClientRect();
+  seen.paneWidth = Math.round(listBox.width);
+  seen.columnWidth = Math.round(proseBox.width);
+  // The composer floats in the extension's dock: inset from the pane's edges,
+  // no wider than the token, centered on the pane's axis, and the composer
+  // as wide as the dock.
+  const rootTokens = getComputedStyle(document.documentElement);
+  const dockInset = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-inset"));
+  const dockMax = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-max"));
+  const faceBox = face.getBoundingClientRect();
+  const dockBox = face.querySelector(".chat-dock")?.getBoundingClientRect() ?? null;
+  seen.dockWidth = dockBox ? Math.round(dockBox.width) : 0;
+  seen.wantDockWidth = Math.round(Math.min(faceBox.width - 2 * dockInset, dockMax));
+  seen.dockCentered = dockBox
+    ? Math.abs((dockBox.left - faceBox.left) - (faceBox.right - dockBox.right)) <= 2
+    : false;
+  const composerBox = face.querySelector(".worker-composer")?.getBoundingClientRect() ?? null;
+  seen.composerOnAxis = composerBox && dockBox
+    ? Math.abs(composerBox.left - dockBox.left) <= 2 && Math.abs(composerBox.right - dockBox.right) <= 2
+    : false;
+  // 고정 뼈대: 스크롤은 전사만 한다. 머리와 입력줄은 전사를 굴려도 그대로.
+  seen.frame = getComputedStyle(face).overflowY === "hidden" && getComputedStyle(list).overflowY === "auto";
+  const head = face.querySelector(".worker-head");
+  const composerForm = face.querySelector(".worker-composer");
+  list.scrollTop = list.scrollHeight;
+  await new Promise(requestAnimationFrame);
+  const headTop = head?.getBoundingClientRect().top ?? null;
+  const composerBottom = composerForm?.getBoundingClientRect().bottom ?? null;
+  list.scrollTop = 0;
+  await new Promise(requestAnimationFrame);
+  seen.scrolls = list.scrollHeight > list.clientHeight;
+  seen.frameStays = head !== null && composerForm !== null &&
+    Math.abs(head.getBoundingClientRect().top - headTop) <= 1 &&
+    Math.abs(composerForm.getBoundingClientRect().bottom - composerBottom) <= 1;
+  // A poll appends only what arrived and leaves the composer its focus and
+  // its half-typed sentence.
+  const box = face.querySelector(".worker-composer-box");
+  box?.focus();
+  if (box) {
+    box.value = "쓰다 만 문장";
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  const rowsBefore = list.querySelectorAll(":scope > [data-turn]").length;
+  turns.push({ role: "assistant", text: "새로 온 말" }, { role: "assistant", text: "또 새 말" });
+  await pollHelperPages();
+  await new Promise((done) => setTimeout(done, 60));
+  seen.appended = list.querySelectorAll(":scope > [data-turn]").length === rowsBefore + 2;
+  seen.composerHeld = box !== null && document.activeElement === box && box.value === "쓰다 만 문장";
+  if (box) box.value = "";
+  // 좁아지면 입력 상자도 판 안에 남는다.
+  face.style.width = "420px";
+  await new Promise(requestAnimationFrame);
+  const narrowList = list.getBoundingClientRect();
+  seen.narrowWidth = Math.round(narrowList.width);
+  seen.composerInside = box ? box.getBoundingClientRect().right <= narrowList.right + 1 : false;
+  face.style.flex = "";
+  face.style.width = "";
+  return leave();
+});
+ok(
+  "the pane's own conversation floats its composer in the extension's centered dock — inset from the pane's edges, no wider than the token, the composer as wide as the dock, and inside the pane when it narrows — the measure a helper's page stood before it got a footer",
+  paneDock.stands && paneDock.paneWidth === 1200 &&
+    paneDock.dockWidth === paneDock.wantDockWidth && paneDock.dockWidth > 0 &&
+    paneDock.dockWidth < paneDock.columnWidth &&
+    paneDock.dockCentered && paneDock.composerOnAxis &&
+    paneDock.narrowWidth === 420 && paneDock.composerInside,
+  JSON.stringify(paneDock),
+);
+ok(
+  "the pane's own conversation holds its frame and its draft: only the transcript scrolls while the head and the composer keep their places, and a poll that appends turns leaves the composer its focus and its half-typed sentence",
+  paneDock.frame && paneDock.scrolls && paneDock.frameStays &&
+    paneDock.appended && paneDock.composerHeld,
+  JSON.stringify(paneDock),
+);
+
+
 /* 입력줄 옆 「+」 — 파일·폴더·이미지 첨부 (t-2993). 헬퍼 입력줄의 핀 바로 뒤에:
  * 같은 입력줄, 같은 보내기 길 위에 칩이 얹힌다. */
 await testComposerAttach(page, ok, ATTACH_LIMITS);
