@@ -89,6 +89,7 @@ pub(super) fn origin(key: [&str; 3], checkout: Option<std::path::PathBuf>, fresh
         crate::summon_lineup::snapshot(),
     )
 }
+#[cfg(test)]
 fn origin_with(
     key: [&str; 3],
     checkout: Option<std::path::PathBuf>,
