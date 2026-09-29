@@ -1200,7 +1200,8 @@ pub struct ConversationRuntime<C, T> {
     /// looping the wait forever. Reset at turn start.
     quota_waited_this_turn: bool,
     /// Lighter same-provider model this turn was demoted onto after the provider
-    /// shed the heavier one (HTTP 529 / `overloaded_error`). Highest-precedence
+    /// shed the heavier one (HTTP 529 / `overloaded_error`) or its server dropped
+    /// the request and a 5xx outlived its retry ladder. Highest-precedence
     /// wire-model override for the rest of the turn — see
     /// [`Self::assemble_request`]'s `model_override`.
     ///
