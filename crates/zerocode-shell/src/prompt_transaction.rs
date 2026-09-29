@@ -920,7 +920,7 @@ done
     /// the hook road feeds it ([`crate::human_input::submitted`]), and what
     /// the program sent, in order.
     #[cfg(unix)]
-    fn restart_at(term: TermId, takes: Takes, words: &[&str]) -> Vec<String> {
+    fn restart_at(term: TermId, takes: Takes, words: &[&str]) -> Restart {
         use std::os::unix::fs::PermissionsExt;
         const WINDOW: Duration = Duration::from_millis(300);
         const PATIENCE: Duration = Duration::from_millis(1_500);
@@ -974,11 +974,26 @@ done
             delivery(first.next().expect("one word at least"), start),
         );
         bench.waiters.insert(term, settled);
+        // Parked behind the first the way the window parks a second door's
+        // words (`type_prompt_at_term`): the same resting signal and guard.
         for rest in first {
-            let (next, _receipt) = parked(rest, Guard::for_somebody_elses_line(None));
-            bench.queue.entry(term).or_default().push_back(next);
+            let (completion, _receipt) = std::sync::mpsc::sync_channel(1);
+            bench
+                .queue
+                .entry(term)
+                .or_default()
+                .push_back(QueuedPrompt {
+                    text: (*rest).to_string(),
+                    submit: true,
+                    signal: ReadySignal::Rest(ready_signal_for(Some("claude")).marker()),
+                    clearing: false,
+                    guard: Guard::for_somebody_elses_line(None),
+                    completion,
+                });
         }
         let mut heard = 0;
+        let mut enters = 0;
+        let mut settled_as = Vec::new();
         loop {
             let pumped = pty.pump();
             let marker = bench.deliveries.get(&term).and_then(PromptDelivery::marker);
@@ -1009,7 +1024,9 @@ done
                 let wrote = turn(term, delivery, seen, line, Instant::now(), |bytes| {
                     pty.write_input(bytes).is_ok()
                 });
+                enters += usize::from(wrote == Turned::Entered);
                 if let Turned::Settled(outcome) = wrote {
+                    settled_as.push(outcome);
                     settle(
                         term,
                         outcome,
@@ -1033,11 +1050,26 @@ done
         std::thread::sleep(later * 2);
         pty.kill().expect("stop the fake agent");
         crate::human_input::forget_term(term);
-        std::fs::read_to_string(&sent)
+        let sent = std::fs::read_to_string(&sent)
             .unwrap_or_default()
             .lines()
             .map(|line| line.replace("\u{1b}[200~", "").replace("\u{1b}[201~", ""))
-            .collect()
+            .collect();
+        Restart {
+            sent,
+            enters,
+            settled_as,
+        }
+    }
+
+    /// What one restart at a fake program came to: what it sent, how many
+    /// Enters the pump wrote, and how each delivery settled.
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct Restart {
+        sent: Vec<String>,
+        enters: usize,
+        settled_as: Vec<DeliveryOutcome>,
     }
 
     /// t-14037, the acceptance count: each shape a restart meets, brought
@@ -1057,21 +1089,24 @@ done
             (8_420, Takes::Late),
             (8_430, Takes::Busy),
         ] {
-            let once = (0..RUNS)
-                .filter(|run| restart_at(base + *run as TermId, takes, &[words]) == [words])
-                .count();
+            let runs: Vec<Restart> = (0..RUNS)
+                .map(|run| restart_at(base + run as TermId, takes, &[words]))
+                .collect();
+            let once = runs.iter().filter(|run| run.sent == [words]).count();
             assert_eq!(
                 once, RUNS,
-                "{takes:?}: the words were sent exactly once in {once}/{RUNS} restarts"
+                "{takes:?}: the words were sent exactly once in {once}/{RUNS} restarts: {runs:?}"
             );
         }
         let queued = ["the continuation", "You have 1 orchestration message."];
-        let both = (0..RUNS)
-            .filter(|run| restart_at(8_440 + *run as TermId, Takes::Booting, &queued) == queued)
-            .count();
+        let runs: Vec<Restart> = (0..RUNS)
+            .map(|run| restart_at(8_440 + run as TermId, Takes::Booting, &queued))
+            .collect();
+        let both = runs.iter().filter(|run| run.sent == queued).count();
         assert_eq!(
             both, RUNS,
-            "two deliveries on one booting pane went each once, in order, in {both}/{RUNS}"
+            "two deliveries on one booting pane went each once, in order, in {both}/{RUNS}: \
+             {runs:?}"
         );
     }
 }
