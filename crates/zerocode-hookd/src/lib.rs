@@ -480,6 +480,9 @@ pub struct BridgeState {
     /// Where the window keeps the second brain's answer to a prompt — see
     /// [`PromptKnowledge`]. `None` until the window installs one.
     knowledge: Option<Arc<dyn PromptKnowledge>>,
+    /// Where the window keeps what the seats say at a turn's start — see
+    /// [`TurnBrief`]. `None` until the window installs one.
+    brief: Option<Arc<dyn TurnBrief>>,
     artifacts: Option<Arc<dyn ArtifactCommands>>,
     /// Where a fixed ledger pointer waits for a provider's own hook — see
     /// [`pointer_mailbox::PointerMailbox`]. `None` until the window installs
@@ -500,6 +503,62 @@ pub trait PromptKnowledge: Send + Sync {
     /// when the bridge did not know one — the recall trace names it so the
     /// graph can say which pane a page was shown to.
     fn related_block(&self, session_key: &str, pane_key: &str, prompt: &str) -> Option<String>;
+}
+
+/// The most a hook script waits for this bridge's reply: its `curl
+/// --max-time`, the connect counted in. A reply later than this is thrown
+/// away whole — the contract, the vault's block and the pointer with it.
+pub const HOOK_REPLY_BUDGET: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// The most of [`HOOK_REPLY_BUDGET`] a hook script spends reaching the
+/// bridge: its `curl --connect-timeout`.
+pub const HOOK_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// What a reply keeps back for writing itself once every part is in.
+pub const HOOK_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a turn's brief may take (t-14869): the reply's budget less the
+/// connect's and the reply's own margin, so a late brief is only a brief
+/// left out and never a reply thrown away. A seat whose own wall is shorter
+/// waits its own.
+pub const TURN_BRIEF_WALL: std::time::Duration = HOOK_REPLY_BUDGET
+    .saturating_sub(HOOK_CONNECT_BUDGET)
+    .saturating_sub(HOOK_REPLY_MARGIN);
+
+/// The most characters a turn's brief may carry: under the smallest context
+/// any measured provider takes from a hook — Codex's `additionalContextLimit`,
+/// about 2,500 tokens by default, which no tokenizer makes fewer than as
+/// many characters; Claude's is 10,000 characters. A longer brief is left
+/// out whole, never cut.
+pub const TURN_BRIEF_CHAR_CAP: usize = 2_000;
+
+/// What the seats say at a turn's start, for the providers whose prompt hook
+/// takes `hookSpecificOutput.additionalContext` (t-14869) — the file pick
+/// seat's likely files, while it acts for the pane.
+///
+/// The bridge does not know the seats, the ledger or which pane is a worker;
+/// the window does, and answers within [`TurnBriefAsk::wall`]. `None` says
+/// nothing — no seat acts, the answer abstained, came late or was refused —
+/// and the reply is what it was before this trait existed. The words are a
+/// fact the model may use or ignore, never an order, and the reply carries
+/// them as context only: no decision, no permission, no changed input.
+pub trait TurnBrief: Send + Sync {
+    fn brief(&self, ask: TurnBriefAsk) -> Option<String>;
+}
+
+/// One turn's start, as a brief is asked about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnBriefAsk {
+    pub agent: AgentKind,
+    /// The pane the prompt was typed in (`term-<n>`).
+    pub pane_key: String,
+    /// The launch the knock says it belongs to; empty from an older script.
+    pub launch_token: String,
+    /// The folder the pane works in.
+    pub worktree: String,
+    pub prompt: String,
+    /// How long the answer may take.
+    pub wall: std::time::Duration,
 }
 
 /// The window owns the catalog; the HTTP bridge only authenticates and forwards.
@@ -542,6 +601,13 @@ impl BridgeState {
     #[must_use]
     pub fn with_prompt_knowledge(mut self, source: Arc<dyn PromptKnowledge>) -> Self {
         self.knowledge = Some(source);
+        self
+    }
+
+    /// Install the window's turn brief as a further answer to prompt hooks.
+    #[must_use]
+    pub fn with_turn_brief(mut self, source: Arc<dyn TurnBrief>) -> Self {
+        self.brief = Some(source);
         self
     }
 
@@ -595,6 +661,7 @@ impl BridgeState {
                 computer,
                 federation,
                 knowledge: None,
+                brief: None,
                 artifacts: None,
                 pointers: None,
                 selection_context: Arc::new(std::sync::Mutex::new(
