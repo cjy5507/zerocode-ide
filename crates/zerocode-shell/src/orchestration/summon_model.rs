@@ -13,8 +13,13 @@ use zerocode_core::orchestration::PreparedWorkerStart;
 use zerocode_core::summon_model::{self as model, ModelAsk};
 
 fn ask(wire: &Wire, asked: &ModelAsk, checkout: Option<&Path>) -> Value {
+    // The task's own attempt history, as the difficulty seat's rows carry
+    // it: what the judge reads to count one sample per task.
     let mut row = json!({
         "rubricVersion": model::RUBRIC_VERSION,
+        "attempt": asked.state["attempt"],
+        "failures": asked.state["failures"],
+        "retryOf": asked.state["retryOf"],
         "options": asked.offered().iter().map(|(offered, _)| offered).collect::<Vec<_>>(),
         "applied": false,
     });
