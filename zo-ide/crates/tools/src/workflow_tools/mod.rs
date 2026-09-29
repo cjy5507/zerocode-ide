@@ -1191,6 +1191,12 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, previous }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -1316,12 +1322,52 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_secs(2));
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0].status, engine::STATUS_STOPPED);
+        let limit = Duration::from_secs(2);
         assert_eq!(
             completions[0].error.as_deref(),
-            Some(engine::PHASE_HARD_TIMEOUT_STOP_ERROR),
+            Some(engine::phase_wall_stop_error(limit).as_str()),
             "an active tool must never be stopped as task inactivity"
         );
+        let error = completions[0].error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("2s") && error.contains("ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS"),
+            "a phase ended by a wall clock says which limit ended it: {error}"
+        );
         std::fs::remove_dir_all(store).ok();
+    }
+
+    /// Nobody named a limit for the phase, so no wall clock runs on it: agents
+    /// that keep working are not ended for the phase's age. The two hours that
+    /// used to end them were a limit nobody had asked for (t-12076). A limit
+    /// somebody names — the environment knob — is the only wall, and is never
+    /// shorter than the inactivity window it sits beside.
+    #[test]
+    fn a_phase_nobody_named_a_limit_for_has_no_wall_clock() {
+        let _env_lock = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = Duration::from_secs(20 * 60);
+        {
+            let _unnamed = EnvVarGuard::unset("ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS");
+            assert_eq!(
+                engine::phase_wall_limit_from_env(window),
+                None,
+                "an unnamed phase limit is not a wall clock"
+            );
+        }
+        let _named = EnvVarGuard::set("ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS", "7200");
+        assert_eq!(
+            engine::phase_wall_limit_from_env(window),
+            Some(Duration::from_secs(7200)),
+            "a named limit is a wall clock"
+        );
+        let shorter = EnvVarGuard::set("ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS", "30");
+        assert_eq!(
+            engine::phase_wall_limit_from_env(window),
+            Some(window),
+            "a named wall never ends a phase before its inactivity window would"
+        );
+        drop(shorter);
     }
 
     #[test]

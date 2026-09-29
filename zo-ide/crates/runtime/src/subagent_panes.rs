@@ -780,6 +780,12 @@ pub mod channel_method {
 /// child waiting on a person from one that stopped (t-11458).
 pub const LIST_ASKING: &str = "asking";
 
+/// The field of a child's `session.list` entry that counts the tool calls it
+/// is running now. A call in flight writes nothing to the transcript until it
+/// returns, so a compile on a loaded machine reads as a child that stopped;
+/// the parent reads this field to tell it from one that did (t-12076).
+pub const LIST_RUNNING: &str = "running";
+
 /// The child's channel file inside its directory — the discovery record
 /// (address, token, session id) copied where the parent can find it without
 /// knowing the child's pid.
@@ -2680,9 +2686,11 @@ mod tests {
 
     /// A child's channel that answers every `session.list` the way a child
     /// does, carrying how many questions to a person stand open now
-    /// (`asking`). Serves until the handle is dropped.
+    /// (`asking`) and how many tool calls it is running (`running`). Serves
+    /// until the handle is dropped.
     struct ListingChild {
         asking: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        running: std::sync::Arc<std::sync::atomic::AtomicU64>,
         done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
@@ -2700,8 +2708,9 @@ mod tests {
             .write(&child.join(CHANNEL_FILE))
             .expect("write channel file");
             let asking = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (serving, stop) = (asking.clone(), done.clone());
+            let (serving, calls, stop) = (asking.clone(), running.clone(), done.clone());
             std::thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
                     let Ok((stream, _)) = listener.accept() else {
@@ -2721,17 +2730,22 @@ mod tests {
                             "id": "child-session",
                             "messages": 3,
                             LIST_ASKING: serving.load(Ordering::SeqCst),
+                            LIST_RUNNING: calls.load(Ordering::SeqCst),
                         }],
                     });
                     let mut writer = stream;
                     let _ = writeln!(writer, "{response}");
                 }
             });
-            Self { asking, done }
+            Self { asking, running, done }
         }
 
         fn set_asking(&self, open: u64) {
             self.asking.store(open, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn set_running(&self, calls: u64) {
+            self.running.store(calls, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -2769,6 +2783,38 @@ mod tests {
             clock.elapsed(),
             asked_for + quiet,
             "the quiet budget counts from the last look that saw the question open"
+        );
+    }
+
+    /// A child running a tool call is working, however long the call takes.
+    /// The call writes nothing to the transcript until it returns — one
+    /// compile took seventeen minutes at load 150 — so a quiet clock that
+    /// reads only the transcript ends the child at the hour in the middle of
+    /// the build. The clock stands still while the call runs and counts again
+    /// from the moment it returns (t-12076).
+    #[test]
+    fn a_child_running_a_tool_call_is_not_quiet_however_long_the_call_runs() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-13");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        work_on_transcript(&child, r#"{"type":"tool_use","name":"bash"}"#);
+        let listing = ListingChild::stand(&child);
+        listing.set_running(1);
+        let quiet = Duration::from_secs(60 * 60);
+        let call_takes = Duration::from_secs(150 * 60);
+        let build = |elapsed: Duration| {
+            if elapsed > call_takes {
+                listing.set_running(0);
+            }
+        };
+        let clock = SteppedClock::new(Duration::from_secs(60), &build);
+        let outcome = wait_for_turn_result_on(&clock, &tmux, &child, "%9", 1, quiet_budget(quiet), &|| false, &|| {});
+        assert_eq!(outcome, PaneOutcome::TimedOut, "a child that never goes on is still ended");
+        assert_eq!(
+            clock.elapsed(),
+            call_takes + quiet,
+            "the quiet budget counts from the last look that saw the call running"
         );
     }
 

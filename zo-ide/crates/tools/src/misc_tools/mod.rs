@@ -1333,13 +1333,12 @@ pub(crate) fn run_spawn_multi_agent_with_timeout_and_hooks(
     // `SPAWN_DEADLINE_MAX_EXTENSIONS` progress-gated extensions — granted only
     // while a cancellation candidate is demonstrably still working — regardless
     // of fan-out width.
-    let mut overall_deadline = std::time::Instant::now() + wait_timeout;
+    let mut collect = CollectWindow::new(wait_timeout);
     // An extension buys a *working agent* time to finish; it is not more room to
     // start work. Gating spawns on the extendable deadline handed that borrowed
     // time to fresh workers, which then get cancelled at the drain — so the
     // spawn gate keeps the deadline the caller asked for.
-    let spawn_deadline = overall_deadline;
-    let mut deadline_extensions: u32 = 0;
+    let spawn_deadline = collect.deadline;
     {
         for (idx, agent_val) in input.agents.iter().enumerate() {
             // Never spawn a fresh worker once the overall deadline has elapsed:
@@ -1366,13 +1365,7 @@ pub(crate) fn run_spawn_multi_agent_with_timeout_and_hooks(
             // agents are already live, so the first `window` agents all spawn
             // back-to-back with no wait between them.
             if in_flight.len() >= window {
-                reclaim_spawn_slots(
-                    &registry,
-                    &mut in_flight,
-                    &mut completions,
-                    &mut overall_deadline,
-                    &mut deadline_extensions,
-                );
+                reclaim_spawn_slots(&registry, &mut in_flight, &mut completions, &mut collect);
 
                 // `reclaim_spawn_slots` may have blocked all the way to the
                 // overall deadline before cancelling the oldest agent. Two hazards
@@ -1661,13 +1654,7 @@ pub(crate) fn run_spawn_multi_agent_with_timeout_and_hooks(
         // grows with the agent count; any agent still live at the deadline is
         // cancelled+salvaged here (not merely observed as `still_running`), so no
         // worktree merge-back/drop can race a live editor and tear a patch.
-        drain_or_cancel_remaining_agents(
-            &registry,
-            &mut in_flight,
-            &mut completions,
-            &mut overall_deadline,
-            &mut deadline_extensions,
-        );
+        drain_or_cancel_remaining_agents(&registry, &mut in_flight, &mut completions, &mut collect);
         // Merge each isolated agent's change-set back into the main tree in spawn
         // order (same 3-way apply the workflow engine uses), then drop the guards
         // to tear down every worktree at once — but ONLY for workers that have
@@ -1841,14 +1828,14 @@ fn drain_or_cancel_remaining_agents(
     registry: &agent_tools::AgentRegistry,
     in_flight: &mut Vec<String>,
     completions: &mut Vec<AgentCompletion>,
-    deadline: &mut std::time::Instant,
-    extensions_used: &mut u32,
+    window: &mut CollectWindow,
 ) {
     loop {
         if in_flight.is_empty() {
             return;
         }
-        let remaining = deadline
+        let remaining = window
+            .deadline
             .saturating_duration_since(std::time::Instant::now())
             .max(Duration::ZERO);
         let observed = wait_for_spawned_agent_completions(in_flight, remaining);
@@ -1870,9 +1857,8 @@ fn drain_or_cancel_remaining_agents(
         }
         // The deadline elapsed with live stragglers. A straggler that is still
         // demonstrably working keeps the set alive for one more bounded step.
-        if reclaim_should_extend_deadline(any_agent_shows_progress(registry, in_flight), *extensions_used) {
-            *extensions_used += 1;
-            *deadline = std::time::Instant::now() + SPAWN_DEADLINE_EXTENSION_STEP;
+        if reclaim_should_extend_deadline(any_agent_shows_progress(registry, in_flight), window.extended) {
+            window.extend();
             continue;
         }
         // Anything still live is driven terminal here so its worktree is safe
@@ -1908,6 +1894,53 @@ const SPAWN_DEADLINE_MAX_EXTENSIONS: u32 = 2;
 /// Collection budget each progress extension grants, measured from the moment
 /// the extension is decided (not stacked onto the stale deadline).
 const SPAWN_DEADLINE_EXTENSION_STEP: Duration = Duration::from_secs(10 * 60);
+
+/// The clock of one fan-out's collection — the parent's wait for its members.
+///
+/// `quiet` is the window the collection was given. Each time `deadline`
+/// passes, the members are looked at: one that is working pushes the clock on
+/// by `step`, and only the ones that are not are cut (t-12076).
+#[derive(Debug, Clone, Copy)]
+struct CollectWindow {
+    /// When the members are next looked at.
+    deadline: std::time::Instant,
+    /// The window this collection was given, which a cut names.
+    quiet: Duration,
+    /// How far a look that finds a member working pushes the next look.
+    step: Duration,
+    /// How many looks found a member working.
+    extended: u32,
+}
+
+impl CollectWindow {
+    /// A collection that starts now with `quiet` before its first look.
+    fn new(quiet: Duration) -> Self {
+        Self::starting(std::time::Instant::now(), quiet, SPAWN_DEADLINE_EXTENSION_STEP)
+    }
+
+    /// A collection that started at `from`, with the clock's own step.
+    fn starting(from: std::time::Instant, quiet: Duration, step: Duration) -> Self {
+        Self { deadline: from + quiet, quiet, step, extended: 0 }
+    }
+
+    /// A collection whose first look is at `deadline` — the seam a test uses
+    /// to start with a look already due.
+    #[cfg(test)]
+    fn due_at(deadline: std::time::Instant) -> Self {
+        Self {
+            deadline,
+            quiet: SPAWN_MULTI_AGENT_WAIT_TIMEOUT,
+            step: SPAWN_DEADLINE_EXTENSION_STEP,
+            extended: 0,
+        }
+    }
+
+    /// A look found a member working: the next look is a step from now.
+    fn extend(&mut self) {
+        self.extended += 1;
+        self.deadline = std::time::Instant::now() + self.step;
+    }
+}
 
 /// Whether a manifest snapshot is evidence of an agent still working. Pure so
 /// both progress signals are testable without a real agent: a heartbeat inside
@@ -2039,15 +2072,15 @@ fn reclaim_spawn_slots(
     registry: &agent_tools::AgentRegistry,
     in_flight: &mut Vec<String>,
     completions: &mut Vec<AgentCompletion>,
-    deadline: &mut std::time::Instant,
-    extensions_used: &mut u32,
+    window: &mut CollectWindow,
 ) {
     if in_flight.is_empty() {
         return;
     }
     loop {
         let slice = SPAWN_SLOT_RECLAIM_POLL.min(
-            deadline
+            window
+                .deadline
                 .saturating_duration_since(std::time::Instant::now())
                 .max(Duration::ZERO),
         );
@@ -2066,18 +2099,17 @@ fn reclaim_spawn_slots(
             in_flight.retain(|id| !terminal.contains(id));
             return;
         }
-        if std::time::Instant::now() >= *deadline {
+        if std::time::Instant::now() >= window.deadline {
             // Nothing finished within the shared budget. Before cancelling,
             // check whether the candidate (the oldest in-flight agent) is
             // still demonstrably working — if so, grant a bounded extension
             // instead of destroying in-progress work on a fixed wall clock.
             let candidate_progressing =
                 in_flight.first().is_some_and(|id| agent_shows_progress(registry, id));
-            if reclaim_should_extend_deadline(candidate_progressing, *extensions_used) {
-                *extensions_used += 1;
+            if reclaim_should_extend_deadline(candidate_progressing, window.extended) {
+                window.extend();
                 #[cfg(test)]
                 RECLAIM_EXTENSIONS_GRANTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                *deadline = std::time::Instant::now() + SPAWN_DEADLINE_EXTENSION_STEP;
                 continue;
             }
             // Reclaim the oldest slot by driving its agent to a terminal

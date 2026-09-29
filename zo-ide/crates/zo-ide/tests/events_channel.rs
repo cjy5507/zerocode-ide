@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use runtime::message_stream::{
     BlockId, PermissionChoice, PermissionDecision, PermissionPrompt, RenderBlock, ToolCallId,
+    ToolCallStatus, ToolPreview, ToolResultBody,
 };
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
@@ -242,6 +243,72 @@ async fn the_pane_answering_first_retires_the_prompt() {
     assert_eq!(channel.live_prompts(), 0);
     let listed = connect(&channel, None).await.call(method::LIST, json!({})).await.expect("list");
     assert_eq!(asking(listed), Some(0), "an answered prompt is not waited on");
+}
+
+fn tool_call(call: &str, status: ToolCallStatus) -> RenderBlock {
+    RenderBlock::ToolCall {
+        id: BlockId(1),
+        tool_call_id: ToolCallId(call.to_string()),
+        name: "bash".to_string(),
+        summary: "cargo build".to_string(),
+        preview: ToolPreview::Bash {
+            command: "cargo build".to_string(),
+        },
+        status,
+    }
+}
+
+fn tool_result(call: &str) -> RenderBlock {
+    RenderBlock::ToolResult {
+        id: BlockId(2),
+        tool_call_id: ToolCallId(call.to_string()),
+        is_error: false,
+        body: ToolResultBody::Text {
+            content: "Finished".to_string(),
+            truncated: false,
+        },
+    }
+}
+
+/// 도는 도구 호출도 정체 확인 답에 실린다 — 컴파일 하나가 대화 기록에 한 줄도
+/// 안 쓰고 한 시간을 돌아도, 부모 zo 는 이 숫자로 그 판을 멈춘 판이 아니라
+/// 일하는 판으로 읽는다(t-12076). 호출은 시작 블록으로 세어지고 결과 블록이나
+/// 끝 상태로 지워지며, 턴이 끝나면 남은 것도 함께 지워진다: 결과가 안 온 호출이
+/// 다음 턴까지 「일하는 중」으로 서 있으면 멈춘 판이 영영 안 끊긴다.
+#[tokio::test]
+async fn a_pane_running_a_tool_call_says_so_on_the_liveness_probe() {
+    let channel = open(None).await;
+    let running = |listed: Value| listed[0][runtime::subagent_panes::LIST_RUNNING].as_u64();
+    let listed = || async {
+        connect(&channel, None)
+            .await
+            .call(method::LIST, json!({}))
+            .await
+            .expect("list")
+    };
+    assert_eq!(running(listed().await), Some(0), "nothing runs before a call starts");
+
+    // 인자가 아직 스트리밍 중인 호출은 도는 호출이 아니다.
+    let _ = channel.publish(&tool_call("call-1", ToolCallStatus::Pending));
+    assert_eq!(running(listed().await), Some(0), "a call still being written is not running");
+
+    let _ = channel.publish(&tool_call("call-1", ToolCallStatus::Running));
+    let _ = channel.publish(&tool_call("call-2", ToolCallStatus::Running));
+    // 같은 호출을 두 번 알려도 한 번으로 센다.
+    let _ = channel.publish(&tool_call("call-2", ToolCallStatus::Running));
+    assert_eq!(running(listed().await), Some(2), "each running call is counted once");
+
+    let _ = channel.publish(&tool_result("call-1"));
+    assert_eq!(running(listed().await), Some(1), "a returned call is no longer running");
+    let _ = channel.publish(&tool_call("call-2", ToolCallStatus::Cancelled));
+    assert_eq!(running(listed().await), Some(0), "a cancelled call is no longer running");
+
+    // 결과가 끝내 안 온 호출은 턴과 함께 내려간다.
+    let turn = channel.begin_turn();
+    let _ = channel.publish(&tool_call("call-3", ToolCallStatus::Running));
+    assert_eq!(running(listed().await), Some(1));
+    channel.end_turn(turn, TurnOutcome::Cancelled, None);
+    assert_eq!(running(listed().await), Some(0), "a turn that ends takes its running calls with it");
 }
 
 /// 도는 턴이 없으면 스티어는 거절된다(`-32003`), 있으면 명령으로 도착한다.

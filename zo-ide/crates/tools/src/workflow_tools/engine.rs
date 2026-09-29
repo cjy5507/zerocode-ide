@@ -694,6 +694,18 @@ pub(crate) fn phase_hard_timeout_from_env(inactivity_timeout: Duration) -> Durat
     .max(inactivity_timeout)
 }
 
+/// The wall clock on a phase, as the behavior stands before the fix (t-12076):
+/// the two hours are still there, as if somebody had named them.
+pub(crate) fn phase_wall_limit_from_env(inactivity_timeout: Duration) -> Option<Duration> {
+    Some(phase_hard_timeout_from_env(inactivity_timeout))
+}
+
+/// What an agent stopped by the phase's wall clock is told, as the behavior
+/// stands before the fix (t-12076): it does not say which limit.
+pub(crate) fn phase_wall_stop_error(_limit: Duration) -> String {
+    PHASE_HARD_TIMEOUT_STOP_ERROR.to_string()
+}
+
 /// `"$input"` fan-out sentinel: expand the workflow input (when an array) into
 /// one item per element.
 const INPUT_SENTINEL: &str = "$input";
