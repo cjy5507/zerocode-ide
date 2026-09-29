@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use runtime::model_catalog::{CatalogProvider, CatalogRow, ModelCatalog, OverlaySource};
 use runtime::model_discovery::{self, DiscoveredCatalog, Overlay, UpdatePolicy};
+use runtime::ModelTierAssignment;
 use serde_json::json;
 
 use crate::model_wire_env;
@@ -66,6 +67,9 @@ pub fn render(refresh: bool, json: bool) -> Result<String, String> {
     let overlay = model_discovery::overlay(&catalog, policy);
     let user = ModelCatalog::load().map_err(|error| format!("model catalog: {error}"))?;
     let rows = user.rows(&ALL_PROVIDERS, false);
+    // Classified after the publish above, so discovered ids are ranked
+    // beside the shipped ones.
+    let tiers = runtime::catalog_tier_assignments();
     let report = Report {
         policy,
         catalog: &catalog,
@@ -73,6 +77,7 @@ pub fn render(refresh: bool, json: bool) -> Result<String, String> {
         rows: &rows,
         overlay: &overlay,
         merged: merged.as_deref(),
+        tiers: &tiers,
         now,
     };
     if json {
@@ -91,6 +96,8 @@ struct Report<'a> {
     overlay: &'a Overlay,
     /// Where `--refresh` left the merged copy.
     merged: Option<&'a Path>,
+    /// The tier classifier's answer over the published catalog.
+    tiers: &'a [ModelTierAssignment],
     now: u64,
 }
 
@@ -125,6 +132,10 @@ impl Report<'_> {
                 "from": self.row_source(row),
                 "authRoute": row.auth_route,
                 "unlistedSince": self.unlisted_since(row),
+                "band": self.tier(row).map(|tier| tier.band.key()),
+                "rungs": self.tier(row).map(|tier| tier.rungs.iter().map(|rung| rung.key()).collect::<Vec<_>>()),
+                "efforts": api::accepted_efforts(&row.id)
+                    .map(|levels| levels.iter().map(|level| level.key()).collect::<Vec<_>>()),
             })).collect::<Vec<_>>(),
             "otherLogins": self.other_logins().iter().map(|model| json!({
                 "provider": model.provider,
@@ -299,6 +310,10 @@ impl Report<'_> {
     }
 
     /// Which layer put the row on the screen.
+    fn tier(&self, row: &CatalogRow) -> Option<&ModelTierAssignment> {
+        self.tiers.iter().find(|tier| tier.id.eq_ignore_ascii_case(&row.id))
+    }
+
     fn row_source(&self, row: &CatalogRow) -> &'static str {
         if row.discovered {
             "discovered"
@@ -477,6 +492,7 @@ mod tests {
             rows: &rows,
             overlay: &overlay,
             merged: None,
+            tiers: &[],
             now: since + 60,
         };
         let text = report.text();
@@ -536,6 +552,7 @@ mod tests {
             rows: &rows,
             overlay: &overlay,
             merged: None,
+            tiers: &[],
             now: 1_790_121_060,
         };
         let text = report.text();
@@ -561,6 +578,7 @@ mod tests {
         let rows = user.rows(&super::ALL_PROVIDERS, false);
         let catalog = DiscoveredCatalog::default();
         let overlay = Overlay::default();
+        let tiers = runtime::catalog_tier_assignments();
         let report = super::Report {
             policy: UpdatePolicy::Auto,
             catalog: &catalog,
@@ -568,10 +586,10 @@ mod tests {
             rows: &rows,
             overlay: &overlay,
             merged: None,
+            tiers: &tiers,
             now: 1_790_121_060,
         };
         let json: serde_json::Value = serde_json::from_str(&report.json().expect("json")).unwrap();
-        let tiers = runtime::catalog_tier_assignments();
         let words = ["top", "second", "rest", "superseded"];
         let mut banded = 0;
         for row in json["models"].as_array().unwrap() {
