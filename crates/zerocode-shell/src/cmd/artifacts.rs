@@ -72,6 +72,44 @@ pub(crate) fn artifact_preview(
     store_or_refuse()?.preview(&id)
 }
 
+/// One gallery document for the window to open (t-16006): its text, bounded
+/// like the drawer's preview, and whether the project's own file door would
+/// read it — which decides whether the tab is an editable file tab or a tab
+/// nobody can write.
+#[derive(Serialize)]
+pub(crate) struct ArtifactDocument {
+    #[serde(flatten)]
+    pub(crate) text: artifact_runtime::DocumentText,
+    pub(crate) in_project: bool,
+}
+
+/// A document artifact's text, by id and — for a kept snapshot — version
+/// number (t-16006). The gallery lists every project's documents and the
+/// project's file door (`read_text_file`) refuses a path outside its root, as
+/// it must; so a document outside the open project is read here, out of the
+/// catalog's own row. No path comes from the window: the row supplies the
+/// file, the store's own version list supplies a snapshot, and the store
+/// refuses anything that is not a text document, a regular file and within
+/// the preview's byte cap.
+#[tauri::command(async)]
+pub(crate) fn artifact_document(
+    state: State<'_, AppState>,
+    id: String,
+    version: Option<u32>,
+) -> Result<ArtifactDocument, String> {
+    let store = store_or_refuse()?;
+    let text = store.document_text(&id, version)?;
+    let row = store
+        .get(&id)
+        .ok_or_else(|| "그 아티팩트가 없습니다".to_string())?;
+    let in_project = crate::cmd::fs::opens_in_project(
+        state.active_root(),
+        crate::hooks::second_brain_vault().as_deref(),
+        &row.path.to_string_lossy(),
+    );
+    Ok(ArtifactDocument { text, in_project })
+}
+
 /// Counts by origin, for the chips on cards, tasks and worktree rows.
 #[tauri::command(async)]
 pub(crate) fn artifact_counts() -> Result<artifact_runtime::Counts, String> {

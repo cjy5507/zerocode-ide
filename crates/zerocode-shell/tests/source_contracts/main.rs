@@ -36198,6 +36198,7 @@ mod tests {
             "pub(crate) fn artifacts_list(",
             "pub(crate) fn artifact_search(",
             "pub(crate) fn artifact_preview(",
+            "pub(crate) fn artifact_document(",
             "pub(crate) fn artifact_counts(",
             "pub(crate) fn artifact_open(",
             "pub(crate) fn artifact_reveal(",

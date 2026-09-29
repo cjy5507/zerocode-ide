@@ -234,6 +234,16 @@ pub fn router_priors() -> &'static RouterPriors {
     {
         return priors;
     }
+    shipped_router_priors()
+}
+
+/// The priors the build shipped: what [`router_priors`] answers until a
+/// publish declares some. For a reader whose answer must not move with a
+/// publish elsewhere in the process — the golden table of the shipped catalog
+/// classifies by these, because a test that publishes other size words for a
+/// moment could swap the store under it mid-table.
+#[must_use]
+pub fn shipped_router_priors() -> &'static RouterPriors {
     &builtin_model_context_catalog().priors
 }
 
@@ -305,6 +315,40 @@ struct AliasRow {
     /// category — see [`refusal_route_candidates`] (t-6747).
     #[serde(default)]
     refusal_routes: BTreeMap<String, AliasList>,
+}
+
+impl AliasRow {
+    /// Take `later`'s value for every duty this row leaves empty. `later` is a
+    /// row of the same `(provider, alias)` further down the document, the
+    /// shipped row last, so the first row to state a duty keeps it. Alias,
+    /// canonical and provider stay this row's — that is how a published row
+    /// moves an alias — while the duties belong to the lineup the name heads,
+    /// which a new release does not change: a discovered row that says only
+    /// where `opus` points now keeps the shipped `opus` row's lighter tier and
+    /// refusal routes (t-16493).
+    fn fill_from(&mut self, later: Self) {
+        if self.orchestration_rank.is_none() {
+            self.orchestration_rank = later.orchestration_rank;
+        }
+        if self.demotes_to.as_deref().is_none_or(|to| to.trim().is_empty()) {
+            self.demotes_to = later.demotes_to;
+        }
+        if clone_alias_list(self.refusal_fallback.as_ref()).is_empty() {
+            self.refusal_fallback = later.refusal_fallback;
+        }
+        if !self.states_routes() {
+            self.refusal_routes = later.refusal_routes;
+        }
+    }
+
+    /// Whether a route survives [`leak_refusal_routes`]: a named category with
+    /// at least one candidate. Routes that all read as empty are routes left
+    /// unstated.
+    fn states_routes(&self) -> bool {
+        self.refusal_routes
+            .iter()
+            .any(|(category, list)| !category.trim().is_empty() && !clone_alias_list(Some(list)).is_empty())
+    }
 }
 
 fn provider_kind_from_key(key: &str) -> Option<ProviderKind> {
@@ -1877,15 +1921,6 @@ fn alias_rows_of(raw: &str) -> Vec<AliasRow> {
         .unwrap_or_default()
 }
 
-/// Turn on-disk rows into the `&'static` entries the codebase consumes.
-///
-/// Rows are deduplicated by `(provider, alias)` keeping the FIRST occurrence,
-/// which is what makes an override authoritative: it is concatenated ahead of
-/// the built-ins, so an alias it names shadows the shipped row instead of
-/// colliding with it.
-/// Leak an owned alias list into the `&'static [&'static str]` the catalog
-/// entries hold. Empty in, empty (`&[]`) out — no allocation for the common
-/// row that declares no refusal fallback.
 /// A row's per-category routes as the static pairs an entry carries: the
 /// category word lowercased, each list trimmed, an empty list dropped.
 fn leak_refusal_routes(
@@ -1908,6 +1943,9 @@ fn leak_refusal_routes(
     )
 }
 
+/// Leak an owned alias list into the `&'static [&'static str]` the catalog
+/// entries hold. Empty in, empty (`&[]`) out — no allocation for the common
+/// row that declares no refusal fallback.
 fn leak_alias_list(aliases: &[String]) -> &'static [&'static str] {
     if aliases.is_empty() {
         return &[];
@@ -1919,34 +1957,46 @@ fn leak_alias_list(aliases: &[String]) -> &'static [&'static str] {
     Vec::leak(leaked)
 }
 
+/// Turn on-disk rows into the `&'static` entries the codebase consumes.
+///
+/// Rows are keyed by `(provider, alias)`, and the rows of one key MERGE
+/// ([`AliasRow::fill_from`]) instead of the first shadowing the rest. The
+/// first row keeps its canonical, which is what makes an override
+/// authoritative: it is concatenated ahead of the built-ins, so an alias it
+/// moves resolves where it says. Every duty it leaves empty comes from the
+/// rows of the same key after it, the shipped row last — the key is the name,
+/// never the canonical, because the shipped duties of a moved alias sit on a
+/// row whose canonical is the release it moved away from.
 fn leak_registry(rows: Vec<AliasRow>) -> &'static [ProviderCatalogEntry] {
-    let mut seen: Vec<(ProviderKind, String)> = Vec::new();
-    let mut entries = Vec::with_capacity(rows.len());
+    let mut merged: Vec<(ProviderKind, AliasRow)> = Vec::with_capacity(rows.len());
     for row in rows {
         let Some(provider) = provider_kind_from_key(&row.provider) else {
             continue;
         };
-        let alias = row.alias.trim();
-        let canonical = row.canonical.trim();
-        if alias.is_empty() || canonical.is_empty() {
+        if row.alias.trim().is_empty() || row.canonical.trim().is_empty() {
             continue;
         }
-        let key = (provider, alias.to_ascii_lowercase());
-        if seen.contains(&key) {
-            continue;
+        let same_key = merged.iter().position(|(kept_provider, kept)| {
+            *kept_provider == provider && kept.alias.trim().eq_ignore_ascii_case(row.alias.trim())
+        });
+        match same_key {
+            Some(index) => merged[index].1.fill_from(row),
+            None => merged.push((provider, row)),
         }
-        seen.push(key);
-        entries.push(ProviderCatalogEntry {
-            alias: String::leak(alias.to_string()),
-            canonical_model_id: String::leak(canonical.to_string()),
+    }
+    let entries: Vec<ProviderCatalogEntry> = merged
+        .into_iter()
+        .map(|(provider, row)| ProviderCatalogEntry {
+            alias: String::leak(row.alias.trim().to_string()),
+            canonical_model_id: String::leak(row.canonical.trim().to_string()),
             provider,
             fit_hint: None,
             orchestration_rank: row.orchestration_rank,
             demotes_to: row.demotes_to.map(|to| &*String::leak(to.trim().to_string())),
             refusal_fallback: leak_alias_list(&clone_alias_list(row.refusal_fallback.as_ref())),
             refusal_routes: leak_refusal_routes(&row.refusal_routes),
-        });
-    }
+        })
+        .collect();
     Vec::leak(entries)
 }
 
@@ -1966,7 +2016,10 @@ fn model_registry() -> &'static [ProviderCatalogEntry] {
     registry
 }
 
-/// Layer an override catalog's alias rows ahead of the built-in ones.
+/// Layer an override catalog's alias rows ahead of the built-in ones. A row
+/// naming a shipped alias decides where the alias resolves, and takes every
+/// shipped duty it leaves empty (the lighter tier, the rank, the refusal
+/// fallback and routes) instead of dropping it.
 ///
 /// The live companion to the startup env bridge, mirroring
 /// [`refresh_custom_providers_from_json`]: settings are written, then this is
@@ -4698,6 +4751,7 @@ mod tests {
             refusal_fallback_candidates, refusal_fallback_model, resolve_catalog_alias,
             resolve_model_alias, ANTHROPIC_OPUS_MODEL_ALIAS,
         };
+        let _lock = crate::test_env_lock();
         super::reset_model_registry_for_tests();
         let opus_head = resolve_model_alias(ANTHROPIC_OPUS_MODEL_ALIAS);
         let openai = resolve_catalog_alias("openai-latest");
@@ -4740,6 +4794,7 @@ mod tests {
             refusal_fallback_candidates, refusal_route_candidates, resolve_catalog_alias,
             resolve_model_alias, ANTHROPIC_OPUS_MODEL_ALIAS,
         };
+        let _lock = crate::test_env_lock();
         super::reset_model_registry_for_tests();
         let opus_head = resolve_model_alias(ANTHROPIC_OPUS_MODEL_ALIAS);
         let openai = resolve_catalog_alias("openai-latest");
@@ -4810,6 +4865,7 @@ mod tests {
     /// with the catalog instead of with a policy edit.
     #[test]
     fn the_starvation_ladder_comes_from_the_catalog() {
+        let _lock = crate::test_env_lock();
         super::reset_model_registry_for_tests();
         assert_eq!(starvation_demotion_model("claude-opus-5").as_deref(), Some("claude-sonnet-5"));
         assert_eq!(
@@ -4823,6 +4879,255 @@ mod tests {
         assert_eq!(
             starvation_demotion_model("gemini-3.1-pro-preview").as_deref(),
             Some("gemini-3.6-flash")
+        );
+    }
+
+    /// Puts the shipped registry back when a case ends, a failing one too, so
+    /// no override outlives the case that installed it.
+    struct ShippedRegistryOnDrop;
+
+    impl Drop for ShippedRegistryOnDrop {
+        fn drop(&mut self) {
+            super::reset_model_registry_for_tests();
+        }
+    }
+
+    /// The Anthropic rows of the discovered layer the installed 1.1.42
+    /// publishes (its `models --refresh` audit's shape, over the 2026-09-30
+    /// discovery cache): the two releases the binary predates, and the shipped
+    /// aliases discovery moves onto them, carrying the one duty it copies
+    /// (`demotes_to`) and nothing else. The pointer and `[1m]` rows it also
+    /// moves are left out: no reader below consults them.
+    const INSTALLED_ANTHROPIC_LAYER: &str = r#"{
+        "models":[
+            {"provider":"anthropic","ids":["claude-sonnet-5-5"],"context_window":1000000,"class":"balanced","family":"sonnet","display_name":"Sonnet 5.5","effort_levels":["low","medium","high","xhigh","max"]},
+            {"provider":"anthropic","ids":["claude-opus-5-5"],"context_window":1000000,"class":"balanced","family":"opus","display_name":"Opus 5.5","effort_levels":["low","medium","high","xhigh","max"]}
+        ],
+        "aliases":[
+            {"alias":"claude-sonnet-5-5","canonical":"claude-sonnet-5-5","provider":"anthropic"},
+            {"alias":"claude-opus-5-5","canonical":"claude-opus-5-5","provider":"anthropic"},
+            {"alias":"opus","canonical":"claude-opus-5-5","provider":"anthropic","demotes_to":"sonnet"},
+            {"alias":"sonnet","canonical":"claude-sonnet-5-5","provider":"anthropic","demotes_to":"haiku"},
+            {"alias":"claude-opus","canonical":"claude-opus-5-5","provider":"anthropic"},
+            {"alias":"claude-sonnet","canonical":"claude-sonnet-5-5","provider":"anthropic"}
+        ]
+    }"#;
+
+    /// (a) t-16493, the person's build: discovery's `opus` row stood in front of
+    /// the shipped one and was kept whole, so the shipped row's refusal routes
+    /// were dropped and a `cyber` decline on Opus 5.5 went to no other model
+    /// instead of to Opus 4.8. Every duty a discovered row leaves empty is the
+    /// shipped row's: Opus 5.5 answers what the shipped catalog alone answers
+    /// for it, and Sonnet 5.5 keeps the shipped Sonnet row's fallback.
+    #[test]
+    fn a_discovered_alias_row_keeps_the_shipped_duties_it_leaves_empty() {
+        use super::{
+            builtin_provider_catalog, declared_capabilities, refusal_fallback_candidates,
+            refusal_route_candidates, resolve_catalog_alias, ANTHROPIC_OPUS_MODEL_ALIAS,
+        };
+        let _lock = crate::test_env_lock();
+        let _shipped = ShippedRegistryOnDrop;
+        let _unset = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+        super::reset_model_registry_for_tests();
+        let categories: Vec<&str> = builtin_provider_catalog()
+            .iter()
+            .find(|entry| entry.alias == ANTHROPIC_OPUS_MODEL_ALIAS)
+            .expect("the shipped opus row")
+            .refusal_routes
+            .iter()
+            .map(|(category, _)| *category)
+            .collect();
+        let routes = |model: &str| -> Vec<Vec<String>> {
+            categories
+                .iter()
+                .map(|&category| refusal_route_candidates(model, Some(category)))
+                .collect()
+        };
+        // The shipped catalog alone reaches Opus 5.5 through its `opus` row.
+        let shipped_routes = routes("claude-opus-5-5");
+        let shipped_fallback = refusal_fallback_candidates("claude-opus-5-5");
+        let shipped_capabilities = declared_capabilities("claude-opus-5-5");
+        assert!(
+            !categories.is_empty() && shipped_routes.iter().all(|list| !list.is_empty()),
+            "premise: the shipped opus row routes every category it names: {shipped_routes:?}"
+        );
+
+        let _installed = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, Some(INSTALLED_ANTHROPIC_LAYER));
+        super::refresh_model_registry_from_json(INSTALLED_ANTHROPIC_LAYER);
+        let lighter = resolve_catalog_alias("sonnet");
+        assert_eq!(lighter, "claude-sonnet-5-5", "premise: discovery moved sonnet too");
+        // Asked with the id the session runs on, and read together so a red
+        // run prints every measure t-16493 names: where a `cyber` decline goes
+        // first, the categories a decline is routed in, the lighter tier, the
+        // capability count.
+        let cyber = refusal_route_candidates("claude-opus-5-5", Some("cyber"));
+        let routed_categories = routes("claude-opus-5-5").iter().filter(|list| !list.is_empty()).count();
+        assert_eq!(
+            (
+                cyber.first().map(String::as_str),
+                routed_categories,
+                starvation_demotion_model("claude-opus-5-5"),
+                declared_capabilities("claude-opus-5-5").len(),
+            ),
+            (
+                Some("claude-opus-4-8"),
+                categories.len(),
+                Some(lighter),
+                shipped_capabilities.len(),
+            ),
+            "Opus 5.5 on the installed shape"
+        );
+        assert_eq!(routes("claude-opus-5-5"), shipped_routes, "every category routes as shipped");
+        assert_eq!(refusal_fallback_candidates("claude-opus-5-5"), shipped_fallback);
+        assert_eq!(
+            refusal_fallback_candidates("claude-sonnet-5-5"),
+            vec![
+                resolve_catalog_alias(ANTHROPIC_OPUS_MODEL_ALIAS),
+                resolve_catalog_alias("openai-latest"),
+            ],
+            "the shipped Sonnet row's fallback, its opus now Opus 5.5"
+        );
+    }
+
+    /// The OpenAI rows of the same layer for the one family the binary has
+    /// never seen: GPT-6 Astra, the names discovery mints for it, and the
+    /// provider pointer it moves onto it, keeping the pointer's rank.
+    const INSTALLED_NEW_FAMILY_LAYER: &str = r#"{
+        "models":[
+            {"provider":"openai","ids":["gpt-6-astra"],"context_window":272000,"class":"frontier","family":"astra","display_name":"GPT-6-Astra","effort_levels":["low","medium","high","xhigh","max","ultra"],"speed_tiers":["fast"],"capabilities":["imagegen"]}
+        ],
+        "aliases":[
+            {"alias":"gpt-6-astra","canonical":"gpt-6-astra","provider":"openai"},
+            {"alias":"openai-latest","canonical":"gpt-6-astra","provider":"openai","orchestration_rank":1},
+            {"alias":"astra","canonical":"gpt-6-astra","provider":"openai"},
+            {"alias":"gpt-6","canonical":"gpt-6-astra","provider":"openai"}
+        ]
+    }"#;
+
+    /// (b) A model only discovery knows has no shipped row to take anything
+    /// from, and its readers say so as they always have: no refusal route, no
+    /// fallback, no lighter tier, no rank. Rows merge by the name they share,
+    /// never by the release they resolve to, so the rank the moved
+    /// `openai-latest` keeps stays on that pointer: `astra` and `gpt-6` name the
+    /// same release and take nothing from it.
+    #[test]
+    fn a_model_only_discovery_knows_keeps_its_duties_empty() {
+        use super::{declared_capabilities, refusal_fallback_candidates, refusal_route_candidates};
+        let _lock = crate::test_env_lock();
+        let _shipped = ShippedRegistryOnDrop;
+        let _installed = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, Some(INSTALLED_NEW_FAMILY_LAYER));
+        super::refresh_model_registry_from_json(INSTALLED_NEW_FAMILY_LAYER);
+        let rank = |alias: &str| {
+            provider_catalog()
+                .iter()
+                .find(|entry| entry.provider == ProviderKind::OpenAi && entry.alias == alias)
+                .unwrap_or_else(|| panic!("{alias} is a registry row"))
+                .orchestration_rank
+        };
+
+        for name in ["gpt-6-astra", "astra", "gpt-6"] {
+            assert!(refusal_route_candidates(name, Some("cyber")).is_empty(), "{name}");
+            assert!(refusal_fallback_candidates(name).is_empty(), "{name}");
+            assert_eq!(starvation_demotion_model(name), None, "{name}");
+            assert_eq!(rank(name), None, "{name} takes no rank from the pointer beside it");
+        }
+        assert_eq!(rank("openai-latest"), Some(1), "the pointer keeps its own duty");
+        // What its own row states is all it declares.
+        assert_eq!(declared_capabilities("gpt-6-astra"), ["imagegen"]);
+    }
+
+    /// (c) An alias moved onto a release the binary predates, stating nothing
+    /// but its name, its release and its provider, resolves to the new
+    /// release: a merge never hands the shipped canonical back, which is why
+    /// `an_override_can_add_and_repoint_aliases` holds. What it inherits is
+    /// every duty the shipped row of its name states (the lighter tier, the
+    /// refusal fallback and routes), because those belong to the lineup the
+    /// name heads, not to one release of it. A duty the moved row does state
+    /// stays its own.
+    #[test]
+    fn a_moved_alias_resolves_to_the_new_release_and_keeps_its_names_duties() {
+        use super::{builtin_provider_catalog, resolve_catalog_alias, ANTHROPIC_OPUS_MODEL_ALIAS};
+        let _lock = crate::test_env_lock();
+        let _shipped = ShippedRegistryOnDrop;
+        super::reset_model_registry_for_tests();
+        super::refresh_model_registry_from_json(
+            r#"{"aliases":[
+                {"alias":"claude-opus-5-5","canonical":"claude-opus-5-5","provider":"anthropic"},
+                {"alias":"opus","canonical":"claude-opus-5-5","provider":"anthropic"},
+                {"alias":"sonnet","canonical":"claude-sonnet-5-5","provider":"anthropic","refusal_fallback":["openai-latest"]}
+            ]}"#,
+        );
+        let find = |catalog: &'static [ProviderCatalogEntry], alias: &str| -> Vec<ProviderCatalogEntry> {
+            catalog
+                .iter()
+                .filter(|entry| entry.provider == ProviderKind::Anthropic && entry.alias == alias)
+                .copied()
+                .collect()
+        };
+        let shipped_opus = find(builtin_provider_catalog(), ANTHROPIC_OPUS_MODEL_ALIAS)[0];
+        let shipped_sonnet = find(builtin_provider_catalog(), "sonnet")[0];
+        let moved_opus = find(provider_catalog(), ANTHROPIC_OPUS_MODEL_ALIAS);
+        assert_eq!(moved_opus.len(), 1, "one opus row, merged: {moved_opus:?}");
+        let moved_opus = moved_opus[0];
+
+        assert_eq!(moved_opus.canonical_model_id, "claude-opus-5-5");
+        assert_eq!(resolve_catalog_alias(ANTHROPIC_OPUS_MODEL_ALIAS), "claude-opus-5-5");
+        assert_eq!(
+            (
+                moved_opus.orchestration_rank,
+                moved_opus.demotes_to,
+                moved_opus.refusal_fallback,
+                moved_opus.refusal_routes,
+            ),
+            (
+                shipped_opus.orchestration_rank,
+                shipped_opus.demotes_to,
+                shipped_opus.refusal_fallback,
+                shipped_opus.refusal_routes,
+            ),
+            "the moved opus row takes every duty the shipped one states"
+        );
+        assert_eq!(
+            starvation_demotion_model("claude-opus-5-5"),
+            Some(resolve_catalog_alias("sonnet")),
+            "an overloaded Opus 5.5 turn has the shipped lighter tier"
+        );
+        let moved_sonnet = find(provider_catalog(), "sonnet")[0];
+        assert_eq!(moved_sonnet.refusal_fallback, ["openai-latest"], "a duty it states is its own");
+        assert_eq!(moved_sonnet.demotes_to, shipped_sonnet.demotes_to, "one it leaves empty is shipped");
+    }
+
+    /// A duty a published row states is its own whole: a route map it names
+    /// is THE map, and a category it leaves out is routed nowhere — the
+    /// shipped map is never mixed in category by category. Only a duty the
+    /// row leaves empty is the shipped row's. t-15890's decline tests keep a
+    /// `cyber` decline on Opus 5.5 routed nowhere by publishing its row so.
+    #[test]
+    fn a_route_map_a_published_row_states_is_its_own_whole() {
+        use super::{refusal_route_candidates, resolve_catalog_alias};
+        let _lock = crate::test_env_lock();
+        let _shipped = ShippedRegistryOnDrop;
+        super::reset_model_registry_for_tests();
+        super::refresh_model_registry_from_json(
+            r#"{"aliases":[
+                {"alias":"claude-opus-5-5","canonical":"claude-opus-5-5","provider":"anthropic"},
+                {"alias":"opus","canonical":"claude-opus-5-5","provider":"anthropic","refusal_routes":{"bio":["claude-opus-5"]}}
+            ]}"#,
+        );
+
+        assert!(
+            refusal_route_candidates("claude-opus-5-5", Some("cyber")).is_empty(),
+            "a category the stated map leaves out stands, though the shipped map routes it"
+        );
+        assert_eq!(
+            refusal_route_candidates("claude-opus-5-5", Some("bio")),
+            ["claude-opus-5"],
+            "the stated route, not the shipped list"
+        );
+        assert_eq!(
+            starvation_demotion_model("claude-opus-5-5"),
+            Some(resolve_catalog_alias("sonnet")),
+            "a duty the row leaves empty is still the shipped row's"
         );
     }
 
@@ -4963,6 +5268,7 @@ mod tests {
 
     #[test]
     fn starvation_demotion_uses_current_catalog_targets() {
+        let _lock = crate::test_env_lock();
         assert_eq!(starvation_demotion_model("opus").as_deref(), Some("claude-sonnet-5"));
         assert_eq!(
             starvation_demotion_model("gpt-5.5-fast").as_deref(),
@@ -6350,6 +6656,7 @@ mod tests {
 
     #[test]
     fn resolves_claude_aliases_and_normalizes_dotted_versions() {
+        let _lock = crate::test_env_lock();
         // Anthropic is always enabled, so these hold regardless of the gate.
         assert_eq!(resolve_model_alias("fable"), "claude-fable-5-1");
         assert_eq!(resolve_model_alias("claude-fable"), "claude-fable-5-1");
@@ -6550,6 +6857,7 @@ mod tests {
 
     #[test]
     fn catalog_entries_derive_metadata_from_their_provider() {
+        let _lock = crate::test_env_lock();
         for entry in provider_catalog() {
             assert_eq!(entry.metadata(), entry.provider.metadata());
             assert_eq!(entry.metadata().provider, entry.provider);
@@ -6680,6 +6988,7 @@ mod tests {
 
     #[test]
     fn resolve_model_alias_static_registry_wins_over_custom_collision() {
+        let _lock = crate::test_env_lock();
         // Built-in aliases are matched before the custom catalog, so a custom
         // provider can never shadow them. `opus` (Anthropic, always enabled)
         // demonstrates this without any adapter-gate setup.

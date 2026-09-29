@@ -114,6 +114,36 @@ pub fn trust_mcp_server(path: &Path, name: &str) -> Result<McpEdit, ConfigError>
         return Ok(McpEdit::Unchanged);
     }
     names.push(name.to_string());
+    write_trusted_names(path, &names)?;
+    Ok(McpEdit::Added)
+}
+
+/// Take `name` out of the trusted-MCP-servers file at `path`, keeping every
+/// other name in the order the person wrote them.
+///
+/// Consent is given to one server. When `zo mcp remove --project` takes that
+/// server away, a name left here would run whatever is added under it next
+/// without asking. A record that never held the name is not rewritten, and
+/// where no record stands none is created.
+///
+/// # Errors
+///
+/// As [`trust_mcp_server`].
+pub fn untrust_mcp_server(path: &Path, name: &str) -> Result<McpEdit, ConfigError> {
+    let mut names = parse_trusted_mcp_server_names(path, &read_file_or_empty(path)?)?;
+    let before = names.len();
+    // A hand-edited record may hold the name twice; consent goes with every copy.
+    names.retain(|trusted| trusted != name);
+    if names.len() == before {
+        return Ok(McpEdit::Absent);
+    }
+    write_trusted_names(path, &names)?;
+    Ok(McpEdit::Removed)
+}
+
+/// Render the record, read it back through the parser a future session uses,
+/// and only then write it.
+fn write_trusted_names(path: &Path, names: &[String]) -> Result<(), ConfigError> {
     let rendered =
         JsonValue::Array(names.iter().cloned().map(JsonValue::String).collect()).render_pretty();
     // The read-back `commit` does for a settings document: a record our
@@ -128,8 +158,7 @@ pub fn trust_mcp_server(path: &Path, name: &str) -> Result<McpEdit, ConfigError>
     // Owner-only like every document this module writes: a name another local
     // account could append is a server this one would run.
     write_private_file(path, rendered.as_bytes(), &ParentDirPolicy::LeaveParent)
-        .map_err(ConfigError::Io)?;
-    Ok(McpEdit::Added)
+        .map_err(ConfigError::Io)
 }
 
 /// Read the document through the loader's own parser. A file that is not there

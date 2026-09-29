@@ -1306,13 +1306,22 @@ function paintFileView(tab) {
   body.hidden = showing === "source";
   editor.hidden = !body.hidden;
   body.className = `file-body file-body--${showing}`;
-  const snapshot = tab.artifact?.snapshot;
+  // 읽기 전용 탭(t-16006)은 늘 이 길이다: 고칠 편집기를 짓지 않고, 고른 옛 판이 없으면 탭이
+  // 든 글 자체가 본문이다.
+  const snapshot = tab.artifact?.snapshot ?? (tab.readOnly ? { text: tab.text } : null);
   paintMdToolbar(view, tab, snapshot ? "snapshot" : showing);
   if (snapshot) {
     body.hidden = false;
     editor.hidden = true;
-    if (showing === "markdown") paintMarkdown(body, snapshot.text);
-    else {
+    if (showing === "markdown") {
+      const inert = mdInertLinks;
+      mdInertLinks = tab.readOnly === true;
+      try {
+        paintMarkdown(body, snapshot.text);
+      } finally {
+        mdInertLinks = inert;
+      }
+    } else {
       const source = document.createElement("pre");
       source.textContent = snapshot.text;
       body.appendChild(source);
@@ -1342,6 +1351,8 @@ function paintFileView(tab) {
   const reload = view.querySelector(".file-view-reload");
   reload.dataset.tip = t("file.reload", "디스크에서 다시 읽기");
   reload.onclick = () => {
+    // 읽기 전용 탭은 디스크의 파일이 아니라 저장소가 읽어 준 글이라 다시 읽을 것이 없다.
+    if (tab.readOnly) return;
     if (tab.artifact) {
       tab.artifact.snapshot = null;
       tab.artifact.version = null;
@@ -1370,7 +1381,9 @@ function paintFileView(tab) {
         if (stillShowing(tab)) paintFileView(tab);
         return;
       }
-      invoke("read_text_file", { path: version.path })
+      // 보관 스냅샷은 이 앱의 데이터 폴더에 있어 어느 프로젝트의 문으로도 읽히지 않는다
+      // (t-16006). 저장소에 번호로 묻는다 — 경로는 창이 보내지 않는다.
+      invoke("artifact_document", { id: tab.artifact.id, version: version.n })
         .then((opened) => {
           if (tab.artifact?.version !== version.n) return;
           tab.artifact.snapshot = { text: opened.text, path: version.path };
@@ -2402,6 +2415,20 @@ function paintSaveNote(tab) {
     note.classList.remove("is-unsaved");
     return;
   }
+  // 갤러리에서 연 다른 프로젝트의 문서(t-16006): 저장소가 읽어 준 글이다. 디스크에서 바뀌었는지
+  // 묻지도, 저장하지도 않으니 아래의 표식은 하나도 서지 않는다. 표의 상한에서 잘렸으면 그 말도 한다.
+  if (tab.readOnly) {
+    let said = t("artifacts.readOnlyNote", "읽기 전용 — 열린 프로젝트 밖의 문서입니다.");
+    if (tab.cut != null) {
+      said += " " + t("artifacts.readOnlyCut", "앞 {{shown}}만 보입니다 (전체 {{total}}) — 전체는 「Finder에서 보기」로.", {
+        shown: artifactBytesWord(new TextEncoder().encode(tab.text).length),
+        total: artifactBytesWord(tab.cut),
+      });
+    }
+    note.textContent = said;
+    note.classList.remove("is-unsaved");
+    return;
+  }
   if (tab.gone) {
     note.textContent = t("file.deletedOnDisk", "디스크에서 삭제되었습니다 — 이 창의 내용이 마지막 사본입니다. 저장하면 파일을 다시 만듭니다.");
     note.classList.add("is-unsaved");
@@ -3135,6 +3162,8 @@ const STALE_SAVE = "zerocode:stale-save";
 async function saveFile(tab) {
   if (tab?.kind !== "file" && tab?.kind !== "diff") return false;
   if (tab.artifact?.snapshot) return false;
+  // 읽기 전용 탭(t-16006): 저장소가 읽어 준 글이지 이 프로젝트의 파일이 아니다 — 쓸 곳이 없다.
+  if (tab.readOnly) return false;
   if (tab.draft === undefined) return false;
   // Read-only, and only a diff can be. A file tab always came back from
   // `read_text_file` with a stamp; a diff's is absent exactly when there is no
@@ -3284,6 +3313,12 @@ const MD_INLINE = [
  * 비어 있다. */
 let mdWhere = null;
 
+/* 읽기 전용 문서를 그리는 동안(t-16006) 켜 두는 자리: 그 문서의 상대 링크는 갈 곳이 없다.
+ * 문서는 열린 프로젝트 밖에 서 있고, 상대 경로를 프로젝트의 파일 문으로 풀면 다른 파일이
+ * 열리거나 「path escapes the project」가 뜬다. `mdWhere`와 같은 이유로 인자가 아니라
+ * 이 자리에 둔다. */
+let mdInertLinks = false;
+
 /* 제목의 이름표: 소문자, 공백은 -, 글자와 숫자가 아닌 것은 버린다. 한글도
  * 글자이므로 남는다(유니코드 letter). */
 function mdSlug(said) {
@@ -3386,6 +3421,10 @@ function mdLink(label, href, line = undefined) {
   if (href.startsWith("#")) {
     node.classList.add("md-link--anchor");
     actsAsButton(node, () => scrollToDocHeading(where?.page ?? null, href.slice(1)));
+    return node;
+  }
+  if (mdInertLinks) {
+    node.classList.add("md-link--external");
     return node;
   }
   const place = docHrefPlace(href);
@@ -7203,7 +7242,8 @@ function wireArtifactsView(view) {
     }
     if (event.key === "Enter" && artifactSelectedId) {
       event.preventDefault();
-      void artifactAction(view, "open", artifactSelectedId);
+      // 누른 채 반복되는 Enter는 새 몸짓이 아니다.
+      if (!event.repeat) void artifactAction(view, "open", artifactSelectedId);
     } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "c" && artifactSelectedId) {
       event.preventDefault();
       void artifactAction(view, "copy", artifactSelectedId);
@@ -7932,14 +7972,25 @@ async function jumpFromArtifact(jump, id) {
 
 /* ---- 액션 넷 ---------------------------------------------------------- */
 
+/* 열고 있는 행들(t-16006). 한 번의 몸짓은 한 번만 연다: 열리는 사이 같은 행에 오는 또 다른
+ * 「열기」는 같은 몸짓이다 — 더블클릭 끝에 이어 오는 Enter나 서랍의 「열기」를 연달아 누름.
+ * 열렸든 실패했든 끝나면 풀리므로, 사람이 다시 누르는 것은 막지 않는다. */
+const artifactOpening = new Set();
+
 async function artifactAction(view, action, id) {
   const row = artifactRows.get(id);
   if (!row) return;
   try {
     if (action === "open") {
-      // 페이지·문서·claude.ai 아티팩트는 창 안에서 연다(t-3233 §5); 나머지는
-      // 기존대로 시스템 기본 앱이다.
-      if (!(await openArtifactPage(row))) await invoke("artifact_open", { id });
+      if (artifactOpening.has(id)) return;
+      artifactOpening.add(id);
+      try {
+        // 페이지·문서·claude.ai 아티팩트는 창 안에서 연다(t-3233 §5); 나머지는
+        // 기존대로 시스템 기본 앱이다.
+        if (!(await openArtifactPage(row))) await invoke("artifact_open", { id });
+      } finally {
+        artifactOpening.delete(id);
+      }
     } else if (action === "reveal") {
       await invoke("artifact_reveal", { id });
     } else if (action === "copy") {
@@ -8017,6 +8068,15 @@ async function openArtifactPage(row, { version = null, seat = null, hint = null 
     return true;
   }
   if (row.kind === "document" && extensionOf(row.path) === "md") {
+    // 갤러리는 모든 프로젝트의 문서를 늘어놓는데 프로젝트의 파일 문(`read_text_file`)은 제 뿌리
+    // 밖의 경로를 막는다 — 막아야 하는 문이다(t-16006). 그래서 어느 문으로 열지는 저장소에 묻는다:
+    // 창은 행의 id만 보내고, 열린 프로젝트의 문이 읽을 파일이면 `in_project`가 참이다. 실패는
+    // 던진다 — 알림은 부른 쪽이 한 번만 띄운다.
+    const held = await invoke("artifact_document", { id: row.id });
+    if (!held.in_project) {
+      openArtifactReadOnly(row, held);
+      return true;
+    }
     await openFile(row.path, { preview: true });
     const tab = tabs.find((one) => one.id === `file:${row.path}`);
     if (tab) {
@@ -8026,6 +8086,36 @@ async function openArtifactPage(row, { version = null, seat = null, hint = null 
     return true;
   }
   return false;
+}
+
+/* 열린 프로젝트 밖의 문서를 아무도 쓸 수 없는 탭으로 연다(t-16006): 저장소가 그 행에서 읽어 준
+ * 글이 탭의 본문이다. 이 탭은 재시작 기록과 다시 열기 줄에 서지 않는다 — 두 길 모두 경로로
+ * 프로젝트의 문을 다시 두드리기 때문이다. */
+function openArtifactReadOnly(row, held) {
+  const facts = artifactStripFacts(row);
+  // 머리띠의 프로젝트 자리는 만든 곳이 아니라 이 파일이 사는 곳을 말한다.
+  facts.project = artifactHomeOf(row.path);
+  openTab({
+    id: `artifact-doc:${row.id}`,
+    kind: "file",
+    path: row.path,
+    text: held.text,
+    draft: held.text,
+    mode: renderedAs(row.path),
+    readOnly: true,
+    // 표의 상한에서 잘렸으면 파일의 크기 — 머리의 글이 앞부분만 보인다고 말한다.
+    cut: held.truncated === true ? held.bytes : null,
+    artifact: facts,
+    preview: true,
+  });
+  markFirstRun("opened_file");
+}
+
+/* 이 파일이 사는 곳: 창이 그 폴더를 프로젝트로 알면 그 이름, 아니면 폴더 자체. */
+function artifactHomeOf(path) {
+  const holder = worktreeContaining(path);
+  const project = holder ? projectOfWorktree(holder.path) : null;
+  return project?.name ?? dirname(path);
 }
 
 /* 터미널이 찍은 `file://` 주소가 스토어의 발행물 — 현재 파일이나 보관된 판 —

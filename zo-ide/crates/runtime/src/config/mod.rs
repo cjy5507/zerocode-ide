@@ -12,7 +12,9 @@ use core_types::paths::{write_private_file, ParentDirPolicy};
 use crate::json::JsonValue;
 use crate::sandbox::SandboxConfig;
 
-pub use self::mcp_edit::{remove_mcp_server, trust_mcp_server, write_mcp_server, McpEdit};
+pub use self::mcp_edit::{
+    remove_mcp_server, trust_mcp_server, untrust_mcp_server, write_mcp_server, McpEdit,
+};
 
 use self::parsers::mcp_keys;
 use self::parsers::{
