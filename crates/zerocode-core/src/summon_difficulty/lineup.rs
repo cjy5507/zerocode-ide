@@ -234,6 +234,27 @@ impl Lineup {
     pub fn live(&self, model: &str) -> bool {
         self.find(model).is_some_and(|held| !held.folded())
     }
+
+    /// Every live model, the newly arrived marked — what a person picks a
+    /// written row's model from.
+    #[must_use]
+    pub fn picks(&self, agent: &str, seen: Option<&Seen>, now_ms: i64) -> Vec<Pick> {
+        self.models
+            .iter()
+            .filter(|model| !model.folded())
+            .map(|model| Pick {
+                id: model.id.clone(),
+                fresh: seen.is_some_and(|seen| seen.fresh(agent, &model.id, now_ms)),
+            })
+            .collect()
+    }
+}
+
+/// One model a person can pick for a written row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Pick {
+    pub id: String,
+    pub fresh: bool,
 }
 
 /// Every model this window has seen in an agent's lineup, and when first.

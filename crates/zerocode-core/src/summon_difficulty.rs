@@ -27,6 +27,17 @@ pub fn profiles(root: &Value) -> Value {
         .unwrap_or_else(|| serde_json::from_str(DEFAULT_PROFILES).unwrap_or_default())
 }
 
+/// Only the rows a person wrote (`{}` when none) — what a settings screen
+/// fills its fields with, leaving every other row to follow the lineup.
+#[must_use]
+pub fn written_profiles(root: &Value) -> Value {
+    root.get(crate::jev::SMART_SETTINGS_KEY)
+        .and_then(|s| s.get(PROFILES_SETTING))
+        .filter(|table| table.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
 /// A settings table holds only the rows a person wrote: any difficulty may be
 /// left out (it follows the lineup), and every row that is there must launch.
 pub fn validate_profiles(table: &Value) -> Result<(), String> {

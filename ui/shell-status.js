@@ -4255,6 +4255,22 @@ function paintScmNotices(rows) {
 
 listen("scm:notices", (event) => paintScmNotices(event.payload));
 
+/* Today's model lineup moved (t-14437): one line per agent, said once — a
+ * model that arrived is chosen without anybody typing it, and one that
+ * folded is not chosen any more. */
+listen("summon-lineup:changed", (event) => {
+  for (const change of Array.isArray(event.payload) ? event.payload : []) {
+    if (change.entered?.length) {
+      toast(t("summon.lineup.entered", "새 모델 {{models}}을(를) 이제 쓸 수 있습니다 — {{agent}}의 쉬운 일부터 써 봅니다.",
+        { models: change.entered.join(", "), agent: change.agent }));
+    }
+    if (change.folded?.length) {
+      toast(t("summon.lineup.folded", "{{models}}은(는) 이제 고르지 않습니다 — 새 판이 나왔거나 목록에서 빠졌습니다.",
+        { models: change.folded.join(", ") }));
+    }
+  }
+});
+
 /* Codex's PTY route is the safety net, not a state to hide. The first event
  * is said immediately and this term-keyed mark remains reviewable until every
  * worker using the fallback has ended. */
