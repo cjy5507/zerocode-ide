@@ -653,23 +653,23 @@ fn a_covered_mark_is_refused_as_covered_in_words_of_whose_window_alone() {
     assert!(!everything.contains("Secret Title"), "{everything}");
 }
 
-/// A refusal with nothing over the mark's centre was the pin's own: it
-/// stands as the helper said it, nothing is asked and nothing moves.
-#[test]
-fn a_refusal_with_nothing_over_the_mark_stands() {
-    let mut desk = Desk::with_over(0);
-    let mut seat = Seat::at(JevMode::Auto, true, Err("unused".into()));
+/// Press `mark()` on `desk` with a helper that refuses it for `words`, a
+/// reason of its own: the answer and how many presses went.
+fn press_refused(
+    desk: &mut Desk,
+    seat: &mut Seat,
+    words: &str,
+) -> (Result<Value, ComputerUseError>, usize) {
     let mut presses = 0;
     let answered = {
         let mut press = || {
             presses += 1;
             Err(ComputerUseError::new(
                 zerocode_core::computer_use_protocol::error_code::ELEMENT_NOT_FOUND,
-                "element 3 moved",
+                words,
             ))
         };
-        desk.windows.remove(0);
-        let desk_cell = std::cell::RefCell::new(&mut desk);
+        let desk_cell = std::cell::RefCell::new(desk);
         let mut call = |method: &str, params: Value| desk_cell.borrow_mut().call(method, params);
         let mut pause = |_wait: Duration| {};
         let mut ask_person = |_line: &Said| Decision::Refused;
@@ -683,14 +683,48 @@ fn a_refusal_with_nothing_over_the_mark_stands() {
                 person: &mut ask_person,
                 wall_ms: &wall,
             },
-            &mut seat,
+            seat,
         )
     };
+    (answered, presses)
+}
+
+/// A refusal with nothing over the mark's centre was the pin's own: it
+/// stands as the helper said it, nothing is asked and nothing moves.
+#[test]
+fn a_refusal_with_nothing_over_the_mark_stands() {
+    let mut desk = Desk::with_over(0);
+    desk.windows.remove(0);
+    let mut seat = Seat::at(JevMode::Auto, true, Err("unused".into()));
+    let (answered, presses) = press_refused(&mut desk, &mut seat, "element 3 moved");
     let refused = answered.expect_err("stands");
     assert_eq!(refused.message, "element 3 moved");
     assert_eq!(presses, 1);
     assert_eq!(seat.asked, 0);
     assert!(desk.acted.is_empty());
+}
+
+/// The pointer resting on the mark's centre — the window server lists it as
+/// a 23×22 window at the cursor's level on some displays (measured 09-30,
+/// a 1080×1920 display beside a 1920×1080 one) — is not over the mark: the
+/// helper's refusal stands as it said it, nothing is asked, nothing moves.
+#[test]
+fn the_pointer_on_the_marks_centre_does_not_make_a_refusal_a_cover() {
+    let mut desk = Desk::with_over(0);
+    desk.windows[0] = row(
+        99,
+        399,
+        "Window Server",
+        2_147_483_630,
+        (295.0, 245.0, 23.0, 22.0),
+    );
+    let mut seat = Seat::at(JevMode::Auto, true, Err("unused".into()));
+    let (answered, presses) = press_refused(&mut desk, &mut seat, "element 3 moved");
+    let refused = answered.expect_err("stands");
+    assert_eq!(refused.message, "element 3 moved");
+    assert_eq!(presses, 1);
+    assert_eq!(seat.asked, 0, "the pointer is not a window to ask about");
+    assert!(desk.acted.is_empty(), "nothing moves for the pointer");
 }
 
 // ---- scenes nobody wrote the code for ------------------------------------

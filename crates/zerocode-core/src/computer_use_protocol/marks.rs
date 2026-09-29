@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::frame::{SPACE_KEY, ShotFrame};
+use super::pointer::is_pointer_picture;
 use super::render::{self, Rect, RenderNode, RenderedRecord, fully_covered};
 use super::{ProviderError, error_code};
 use crate::computer_use::{
@@ -351,11 +352,19 @@ impl DesktopWindow {
         })
     }
 
-    /// Whether the window hides what is under it: seen at all, and not an
-    /// overlay.
+    /// Whether the window hides what is under it: seen at all, not an
+    /// overlay, and not the pointer's own picture ([`Self::is_pointer`]) —
+    /// a press lands through the pointer where it points.
     #[must_use]
     pub fn covers(&self) -> bool {
-        self.alpha > 0.0 && !self.overlay
+        self.alpha > 0.0 && !self.overlay && !self.is_pointer()
+    }
+
+    /// Whether the window is the pointer's own picture, as the window server
+    /// lists it on some displays ([`is_pointer_picture`]).
+    #[must_use]
+    pub fn is_pointer(&self) -> bool {
+        is_pointer_picture(self.layer, &self.app, self.rect.width, self.rect.height)
     }
 }
 
@@ -375,10 +384,11 @@ pub fn desktop_target(windows: &[DesktopWindow], picture: Rect) -> Option<usize>
 }
 
 /// What covers the target: every window in front of it that hides what is
-/// under it — a menu, a panel, ZeroCode's own; not an overlay. The one
-/// answer to "what stands over this window", window by window: the marks
-/// leave out what it hides ([`occluders`]) and a press that finds its place
-/// hidden reads who hides it (`super::cover`, t-12979).
+/// under it — a menu, a panel, ZeroCode's own; not an overlay, nor the
+/// pointer's own picture. The one answer to "what stands over this window",
+/// window by window: the marks leave out what it hides ([`occluders`]) and a
+/// press that finds its place hidden reads who hides it (`super::cover`,
+/// t-12979).
 pub fn in_front(windows: &[DesktopWindow], target: usize) -> impl Iterator<Item = &DesktopWindow> {
     windows[..target.min(windows.len())]
         .iter()
@@ -393,9 +403,45 @@ pub fn occluders(windows: &[DesktopWindow], target: usize) -> Vec<Rect> {
         .collect()
 }
 
+/// The helper's verbs that press at a point, each with the parameters that
+/// name its points: the ones its own-window refusal reads (`pointedMethods`
+/// in the helper's dispatch).
+pub const POINTED_METHODS: [(&str, &[(&str, &str)]); 3] = [
+    ("mouseClick", &[("x", "y")]),
+    ("mouseScroll", &[("x", "y")]),
+    ("mouseDrag", &[("fromX", "fromY"), ("toX", "toY")]),
+];
+
+/// The points `params` presses at for `method`, as [`POINTED_METHODS`] names
+/// them: none for a verb that presses at no point; a point missing a number
+/// is left out (the helper refuses it).
+#[must_use]
+pub fn pointed_points(method: &str, params: &Value) -> Vec<(f64, f64)> {
+    POINTED_METHODS
+        .iter()
+        .filter(|(pointed, _)| *pointed == method)
+        .flat_map(|(_, keys)| keys.iter())
+        .filter_map(|(x, y)| Some((params.get(*x)?.as_f64()?, params.get(*y)?.as_f64()?)))
+        .collect()
+}
+
+/// The window a press at `(x, y)` lands on, `windows` front to back as
+/// `listAllWindows` answers with every layer: the frontmost at or above the
+/// document layer that hides what is under it ([`DesktopWindow::covers`] —
+/// neither an overlay, whose surfaces that take input are rows of their own,
+/// nor the pointer's own picture) and holds the point.
+#[must_use]
+pub fn window_under(windows: &[DesktopWindow], x: f64, y: f64) -> Option<&DesktopWindow> {
+    windows
+        .iter()
+        .find(|window| window.layer >= 0 && window.covers() && window.rect.contains_point(x, y))
+}
+
 /// Whether the windows from the front down to the target stood still
 /// between two lists — one before the picture, one after the walk: the same
-/// windows, in the same order, each where it was within the tolerance.
+/// windows, in the same order, each where it was within the tolerance. The
+/// pointer's own picture is not one of them ([`DesktopWindow::is_pointer`]):
+/// a pointer that moved, came or went moved no window (t-12979).
 #[must_use]
 pub fn stood_still(
     before: &[DesktopWindow],
@@ -406,7 +452,13 @@ pub fn stood_still(
     let front = |list: &[DesktopWindow]| {
         list.iter()
             .position(|window| window.id == target)
-            .map(|at| list[..=at].to_vec())
+            .map(|at| {
+                list[..=at]
+                    .iter()
+                    .filter(|window| !window.is_pointer())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
     };
     match (front(before), front(after)) {
         (Some(before), Some(after)) => {
