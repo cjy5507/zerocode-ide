@@ -889,6 +889,13 @@ fn images_in(parts: Option<&serde_json::Value>) -> Vec<TranscriptImage> {
 pub struct TranscriptTool {
     pub call_id: String,
     pub name: String,
+    /// What kind of call it is, reduced from its name by the one table the
+    /// window keeps ([`crate::hook::Tool::named`] — `read`, `edit`, `write`,
+    /// `bash`, `grep`, `task`, `web`, `websearch`; a tool that table does not
+    /// know keeps its own name): the word the page draws a step's mark and
+    /// words by, so the page holds no list of vendor names to disagree with
+    /// this one. Empty when the call names nothing.
+    pub kind: String,
     pub input: String,
     pub is_error: bool,
     /// The edits the call describes, as rows to draw under it — the
@@ -1545,6 +1552,7 @@ fn transcript_tool(part: &serde_json::Value, result: bool, detail: Detail) -> Tr
             .unwrap_or_default()
             .to_string(),
         name: name.to_string(),
+        kind: String::new(),
         input: detail.kept(&input),
         edits: if result {
             Vec::new()
@@ -2336,6 +2344,55 @@ mod tests {
             json["tool"]["edits"][0].get("truncated").is_none(),
             "zero is left off the wire"
         );
+    }
+
+    /// The word a step is drawn by comes with the call, from the one table
+    /// (t-15682): the page reads `tool.kind` and holds no list of vendor names,
+    /// so a name only this side knows (`ViewFile`) is a read there too, a search
+    /// of the web is not a fetch, and zo's deferred tools — handed through one
+    /// wrapper — are the tool the wrapper names.
+    #[test]
+    fn a_call_carries_the_kind_its_tool_reduces_to() {
+        use serde_json::json;
+        let turn_of = |name: &str, input: serde_json::Value| {
+            let call = json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "k1", "name": name, "input": input}
+            ]}});
+            turns_in(&format!("{call}\n")).remove(0)
+        };
+        let kind_of = |name: &str, input: serde_json::Value| {
+            turn_of(name, input).tool.expect("a tool turn").kind
+        };
+        assert_eq!(kind_of("Read", json!({"file_path": "/w/a.rs"})), "read");
+        assert_eq!(kind_of("read_file", json!({"path": "src/e.rs"})), "read");
+        assert_eq!(kind_of("ViewFile", json!({"path": "src/e.rs"})), "read");
+        assert_eq!(kind_of("Bash", json!({"command": "ls"})), "bash");
+        assert_eq!(
+            kind_of("WebSearch", json!({"query": "list keys"})),
+            "websearch"
+        );
+        assert_eq!(
+            kind_of("WebFetch", json!({"url": "https://example.com"})),
+            "web"
+        );
+        // A tool the table has no word for travels as its own.
+        assert_eq!(
+            kind_of("mcp__linear__create_issue", json!({})),
+            "mcp__linear__create_issue"
+        );
+        // zo hands its deferred tools through one wrapper; the call is the
+        // tool it names, as the page already read it.
+        assert_eq!(
+            kind_of(
+                "CapabilityInvoke",
+                json!({"name": "WebSearch", "input": {"query": "x"}})
+            ),
+            "websearch"
+        );
+        // And it rides the wire, where the page reads it.
+        let wire = serde_json::to_value(turn_of("Read", json!({"file_path": "/w/a.rs"})))
+            .expect("serializes");
+        assert_eq!(wire["tool"]["kind"], "read");
     }
 
     #[test]

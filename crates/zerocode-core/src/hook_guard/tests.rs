@@ -165,6 +165,19 @@ fn a_claude_turn_reads_as_the_guards_moments() {
         Some(Moment::Text { source: TextSource::Web, text, .. }) if text == "the page's words"
     ));
 
+    // A search of the web hands back the web's words as much as a fetch does:
+    // the kind that tells the two apart (t-15682) must not stop it counting.
+    let search = claude(
+        "PostToolUse",
+        "WebSearch",
+        &serde_json::json!({"query": "shop app list keys"}),
+        &serde_json::json!({"tool_response": {"code": 200, "result": "the search's words", "url": "https://example.invalid/"}}),
+    );
+    assert!(matches!(
+        moments(AgentKind::Claude, "PostToolUse", &search).first(),
+        Some(Moment::Text { source: TextSource::Web, text, .. }) if text == "the search's words"
+    ));
+
     let mcp = claude(
         "PostToolUse",
         "mcp__tracker__get_issue",

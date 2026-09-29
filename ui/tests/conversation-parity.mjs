@@ -1674,22 +1674,22 @@ function stepsFixture() {
   const turns = [];
   let clock = CLOCK;
   const say = (role, text, gap) => turns.push({ role, text, at_ms: (clock += gap) });
-  const step = (id, name, target, answer, { gap = 400, took = 300, failed = false, edits = null } = {}) => {
+  const step = (id, name, kind, target, answer, { gap = 400, took = 300, failed = false, edits = null } = {}) => {
     turns.push({
       role: "tool", text: `${name} · ${target}`, at_ms: (clock += gap),
-      tool: { call_id: id, name, input: target, is_error: false, ...(edits && { edits }) },
+      tool: { call_id: id, name, kind, input: target, is_error: false, ...(edits && { edits }) },
     });
     turns.push({ role: "tool_result", text: answer, at_ms: (clock += took), tool: { call_id: id, is_error: failed } });
   };
   turns.push({ role: "user", text: "프로필 화면이 느린 이유를 찾아서 고쳐 줘.", at_ms: clock });
   say("thinking", "**Where the profile screen spends its time**\n\nThe gallery grid re-renders on every scroll tick. I should read the grid before I touch anything.", 500);
-  READ_FIRST.forEach((name, at) => step(`r${at + 1}`, "Read", `${PROFILE}/${name}`, fileBody(name), { gap: at === 0 ? 12000 : 400 }));
-  step("r7", "Read", `${PROFILE}/Missing.tsx`, `ENOENT: no such file or directory, open '${PROFILE}/Missing.tsx'`, { took: 200, failed: true });
-  READ_LATER.forEach((name, at) => step(`r${at + 8}`, "Read", `${PROFILE}/${name}`, fileBody(name)));
+  READ_FIRST.forEach((name, at) => step(`r${at + 1}`, "Read", "read", `${PROFILE}/${name}`, fileBody(name), { gap: at === 0 ? 12000 : 400 }));
+  step("r7", "Read", "read", `${PROFILE}/Missing.tsx`, `ENOENT: no such file or directory, open '${PROFILE}/Missing.tsx'`, { took: 200, failed: true });
+  READ_LATER.forEach((name, at) => step(`r${at + 8}`, "Read", "read", `${PROFILE}/${name}`, fileBody(name)));
   say("thinking", "The list keys are indexes. That makes every cell remount. Memoizing the cells and keying by id should fix it.", 500);
-  step("b1", "Bash", BASH_COMMAND, BASH_OUTPUT, { gap: 4000, took: 900 });
-  step("w1", "WebFetch", WEB_URL, WEB_OUTPUT, { took: 3900 });
-  step("e1", "Edit", `${PROFILE}/Gallery.tsx`, `The file ${PROFILE}/Gallery.tsx has been updated.`, {
+  step("b1", "Bash", "bash", BASH_COMMAND, BASH_OUTPUT, { gap: 4000, took: 900 });
+  step("w1", "WebFetch", "web", WEB_URL, WEB_OUTPUT, { took: 3900 });
+  step("e1", "Edit", "edit", `${PROFILE}/Gallery.tsx`, `The file ${PROFILE}/Gallery.tsx has been updated.`, {
     edits: [{ path: `${PROFILE}/Gallery.tsx`, lines: [
       { kind: "del", text: "  key={index}", old: null, new: null },
       { kind: "add", text: "  key={item.id}", old: null, new: null },
@@ -1783,6 +1783,8 @@ export async function testConversationSteps(browser, origin, ok) {
   await stepsReport(browser, origin, ok);
   await stepsByKeyboard(browser, origin, ok);
   await stepsAcrossPages(browser, origin, ok);
+  await stepsByKind(browser, origin, ok);
+  await stepsThoughtLine(browser, origin, ok);
 }
 
 /* C1–C4, C9 — the rows the fixture comes to, closed, then pressed. */
@@ -2071,7 +2073,7 @@ async function stepsLive(browser, origin, ok) {
       };
       const FOOTER = "/Users/dev/shop-app/src/screens/profile/Footer.tsx";
       const AT = 1_790_000_100_000;
-      await feed({ role: "tool", text: `Read · ${FOOTER}`, at_ms: AT, tool: { call_id: "live1", name: "Read", input: FOOTER, is_error: false } });
+      await feed({ role: "tool", text: `Read · ${FOOTER}`, at_ms: AT, tool: { call_id: "live1", name: "Read", kind: "read", input: FOOTER, is_error: false } });
       seen.shown = status()?.hidden === false && status().checkVisibility();
       seen.nowWords = wordsOf(status());
       seen.namesTheCall = seen.nowWords.includes("Footer.tsx");
@@ -2149,7 +2151,7 @@ async function stepsStill(browser, origin, ok) {
       const running = () => status()?.getAnimations({ subtree: true }).filter((one) => one.playState === "running").length ?? -1;
       const FOOTER = "/Users/dev/shop-app/src/screens/profile/Footer.tsx";
       window.__CONVERSATION__.turns.push({
-        role: "tool", text: `Read · ${FOOTER}`, at_ms: 1_790_000_100_000, tool: { call_id: "live1", name: "Read", input: FOOTER, is_error: false },
+        role: "tool", text: `Read · ${FOOTER}`, at_ms: 1_790_000_100_000, tool: { call_id: "live1", name: "Read", kind: "read", input: FOOTER, is_error: false },
       });
       await pollHelperPages();
       await settle();
@@ -2329,6 +2331,201 @@ async function stepsAcrossPages(browser, origin, ok) {
     JSON.stringify(seen),
   );
   ok("C10: the three pages raised no page errors", faulted.length === 0, faulted.join("\n"));
+}
+
+/* C11 — one table of tool names. The core reduces every vendor's name for a
+ * tool to one word (`hook::Tool::named`) and a turn carries it as `tool.kind`;
+ * the page draws by that word and keeps no list of names of its own, so a name
+ * only the core knows wears the look its kind wears. Each call stands alone (a
+ * sentence between them, so none folds). */
+const KIND_CALLS = [
+  // The name the CLI wrote, the kind the core reduced it to, its target, and
+  // the look the row must wear (null: a kind the page has no word for, drawn
+  // as the tool's own spelling).
+  { name: "OpenDocument", kind: "read", target: `${SHOP}/README.md`, look: "read" },
+  { name: "ripgrep", kind: "grep", target: "SCREEN_WIDTH in src", look: "grep" },
+  { name: "LocalShell", kind: "bash", target: "yarn test", look: "bash" },
+  { name: "GoogleWebSearch", kind: "websearch", target: "react native flatlist keys", look: "websearch" },
+  { name: "UrlFetch", kind: "web", target: "https://example.com/docs", look: "web" },
+  { name: "SubAgent", kind: "task", target: "check the list keys", look: "task" },
+  // The page does not read the name: a call whose name says one thing and whose
+  // kind another wears the kind's look.
+  { name: "Read", kind: "grep", target: "the name is only the CLI's spelling", look: "grep" },
+  // A tool the core has no word for keeps its own spelling as its kind.
+  { name: "Lookup", kind: "Lookup", target: "ui/shell.js", look: null },
+  // A call written before turns carried a kind has none to read: it says its own
+  // name, and the page does not guess a look from it.
+  { name: "Read", kind: undefined, target: `${SHOP}/a.rs`, look: null },
+];
+
+async function stepsByKind(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const turns = [{ role: "user", text: "이 도구들이 무엇을 하는지 보여 줘.", at_ms: CLOCK }];
+    KIND_CALLS.forEach((call, at) => {
+      const id = `k${at}`;
+      turns.push({
+        role: "tool", text: `${call.name} · ${call.target}`, at_ms: CLOCK + 2000 * (at + 1),
+        tool: { call_id: id, name: call.name, ...(call.kind !== undefined && { kind: call.kind }), input: call.target, is_error: false },
+      });
+      turns.push({ role: "tool_result", text: "ok", at_ms: CLOCK + 2000 * (at + 1) + 300, tool: { call_id: id, is_error: false } });
+      turns.push({ role: "assistant", text: `다음 ${at + 1}`, at_ms: CLOCK + 2000 * (at + 1) + 600 });
+    });
+    await openConversation(page, turns);
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async () => {
+      const { steps, lineOf, settle } = window.__STEPS__;
+      await settle();
+      return {
+        rows: steps().map((row) => ({
+          mark: lineOf(row).querySelector(".helper-step-icon use")?.getAttribute("href") ?? null,
+          word: lineOf(row).querySelector(".helper-step-kind")?.textContent ?? null,
+          folded: row.classList.contains("is-run"),
+        })),
+        looks: {
+          read: ["#i-file", t("worker.stepRead", "파일 읽기")],
+          grep: ["#i-search", t("worker.stepSearch", "검색")],
+          bash: ["#i-terminal", t("worker.stepShell", "셸 실행")],
+          web: ["#i-globe", t("worker.stepWeb", "웹 읽기")],
+          websearch: ["#i-globe", t("worker.stepWebSearch", "웹 검색")],
+          task: ["#i-bot", t("worker.stepTask", "헬퍼 호출")],
+        },
+        table: typeof STEP_NAMES,
+      };
+    });
+    const wanted = KIND_CALLS.map((call) => {
+      const [mark, word] = call.look ? seen.looks[call.look] : ["#i-wrench", call.kind ?? call.name];
+      return { mark, word, folded: false };
+    });
+    const wrong = KIND_CALLS.filter((call, at) => JSON.stringify(seen.rows[at]) !== JSON.stringify(wanted[at]))
+      .map((call) => `${call.name}/${call.kind}`);
+    ok(
+      "C11: the page draws a call by the kind the core reduced its tool to, not by a name it knows — a name only the core knows (OpenDocument, ripgrep, LocalShell, GoogleWebSearch, UrlFetch, SubAgent) wears its kind's mark and words, a call whose kind contradicts its name wears the kind's look, a tool with no word keeps its own spelling with the wrench, and a call that carries no kind says its own name",
+      seen.rows.length === KIND_CALLS.length && wrong.length === 0,
+      JSON.stringify({ wrong, rows: seen.rows, wanted }),
+    );
+    ok(
+      "C11: the page holds no table of vendor tool names — the one it had is gone",
+      seen.table === "undefined",
+      `typeof STEP_NAMES is ${seen.table}`,
+    );
+    ok("C11: the kinds raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C12 — a thought's line is the terminal's, held to its examples. The
+ * terminal's `live_heading` (zo-ide `tui/thinking.rs`, t-5872) and the page's
+ * `thoughtHeading` each say what a reasoning block is about in one line. The
+ * cases are the terminal's own — each row names the Rust test it is read from,
+ * its text and what `live_heading` answers (null: it keeps the row's current
+ * word) — so the two are held to the same examples, and a change to one that
+ * leaves the other behind fails here. Two differences are on purpose:
+ *   1. Width. The terminal budgets 48 display columns and cuts at a word; the
+ *      page's line is cut only at THOUGHT_LINE_MAX characters (the row's own
+ *      ellipsis is what a reader sees).
+ *   2. A thought that is over has no "current word" to keep: where the
+ *      terminal answers nothing, the row says the thought's unfinished tail
+ *      (`thoughtHeading(text, true)`). A thought still going says nothing, like
+ *      the terminal, until a sentence closes. */
+const LIVE_HEADING_TESTS = {
+  bold: "a_bold_heading_outranks_the_sentences_only_where_codex_puts_it",
+  newest: "headerless_thinking_says_its_newest_complete_sentence",
+  korean: "korean_sentences_close_and_wide_text_is_cut_by_columns",
+  open: "a_long_open_sentence_is_cut_rather_than_withheld",
+};
+const LIVE_HEADING_CASES = [
+  [LIVE_HEADING_TESTS.bold, "Hmm.\n**Polishing tool display**\nThen more.", "Polishing tool display"],
+  [LIVE_HEADING_TESTS.bold, "The **key** point is the cache. Next", "The key point is the cache"],
+  [LIVE_HEADING_TESTS.newest, "The user wants me to", null],
+  [LIVE_HEADING_TESTS.newest, "The user wants me to read the test. Let me", "The user wants me to read the test"],
+  [LIVE_HEADING_TESTS.newest, "The user wants me to read the test. Let me open src/app.rs first.\nNow", "Let me open src/app.rs first"],
+  [LIVE_HEADING_TESTS.newest, "- **Plan**: read the failing test\n", "Plan: read the failing test"],
+  [LIVE_HEADING_TESTS.newest, "1. Inspect the wiring\n2. Fix", "Inspect the wiring"],
+  [LIVE_HEADING_TESTS.newest, "Reading src/app.rs and v1.2 now", null],
+  [LIVE_HEADING_TESTS.korean, "먼저 실패하는 시험을 읽어야 한다. 그다음", "먼저 실패하는 시험을 읽어야 한다"],
+  [LIVE_HEADING_TESTS.korean, "파일을 읽고 있다。다음은", "파일을 읽고 있다"],
+  [LIVE_HEADING_TESTS.open, "short and still open", null],
+];
+// `leading_bold_heading`'s own lines in the first of those tests: a bold run
+// counts only where it opens a line, and only once it is closed.
+const LEADING_BOLD_CASES = [
+  ["**Title**\nbody", "Title"],
+  ["  **Title** body", "Title"],
+  ["the **key** point", null],
+  ["**still open", null],
+];
+// The two Rust cases that are cut by columns (`korean_…`, `a_long_open_…`) — the
+// page keeps both whole, under its own cap.
+const KOREAN_LONG = "이 문장은 아주 길어서 상태 줄의 인터럽트 힌트를 밀어낼 만큼 넓은 폭을 차지하므로 잘려야 한다.";
+const OPEN_LONG = "this opening sentence goes on well past the cap without a stop";
+
+async function stepsThoughtLine(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const turns = [{ role: "user", text: "무슨 생각을 하고 있어?", at_ms: CLOCK }];
+    LIVE_HEADING_CASES.forEach(([, text], at) => turns.push({ role: "thinking", text, at_ms: CLOCK + 1000 * (at + 1) }));
+    await openConversation(page, turns, { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ cases, bold, korean, open }) => {
+      const { thoughts, list, settle } = window.__STEPS__;
+      await settle();
+      const seen = {};
+      seen.going = cases.map(([, text]) => thoughtHeading(text));
+      seen.over = cases.map(([, text]) => thoughtHeading(text, true));
+      seen.bold = bold.map(([text]) => thoughtLeadingBold(text));
+      seen.drawn = thoughts().map((row) => row.querySelector(".helper-step-target")?.textContent ?? null);
+      seen.cap = THOUGHT_LINE_MAX;
+      seen.wide = [thoughtHeading(korean), thoughtHeading(open), thoughtHeading(open, true)];
+      const run = "word ".repeat(120).trim();
+      seen.capped = [thoughtHeading(run), thoughtHeading(`${run}. Next`), thoughtHeading(run, true)];
+      const going = async (text) => {
+        window.__CONVERSATION__.live = [{ role: "thinking", text }];
+        await pollHelperPages();
+        await settle();
+        return list().querySelector(":scope > .is-streaming.is-thinking .helper-step-target")?.textContent ?? null;
+      };
+      seen.live = [
+        await going(cases[2][1]),
+        await going(cases[3][1]),
+        await going(cases[4][1]),
+      ];
+      return seen;
+    }, { cases: LIVE_HEADING_CASES, bold: LEADING_BOLD_CASES, korean: KOREAN_LONG, open: OPEN_LONG });
+    const differ = (got, wanted) => LIVE_HEADING_CASES.filter((one, at) => got[at] !== wanted[at]).map((one) => `${one[0]}: ${JSON.stringify(one[1])}`);
+    const said = LIVE_HEADING_CASES.map((one) => one[2]);
+    const over = LIVE_HEADING_CASES.map((one) => one[2] ?? one[1]);
+    ok(
+      "C12: a thought that is going says what the terminal's live_heading says for the same text — the eleven cases of its four tests (a bold heading that opens a line; else the newest complete sentence, a list marker and emphasis stars left off, a dot in a path or a version not a full stop, a full-width stop closing one) — and nothing at all until a sentence has closed",
+      differ(seen.going, said).length === 0,
+      JSON.stringify({ differ: differ(seen.going, said), going: seen.going }),
+    );
+    ok(
+      "C12: a bold run counts only where it opens a line and only once it is closed — leading_bold_heading's own four cases",
+      JSON.stringify(seen.bold) === JSON.stringify(LEADING_BOLD_CASES.map((one) => one[1])),
+      JSON.stringify(seen.bold),
+    );
+    ok(
+      "C12: a thought that is over has a line where the terminal says nothing — its unfinished tail — and the row drawn for each of the eleven says it",
+      differ(seen.over, over).length === 0 && JSON.stringify(seen.drawn) === JSON.stringify(over),
+      JSON.stringify({ differ: differ(seen.over, over), over: seen.over, drawn: seen.drawn }),
+    );
+    ok(
+      "C12: the row of a thought still going does not flash a half-written sentence — it says nothing until the first sentence closes, then that sentence, then the newest",
+      JSON.stringify(seen.live) === JSON.stringify(["", "The user wants me to read the test", "Let me open src/app.rs first"]),
+      JSON.stringify(seen.live),
+    );
+    ok(
+      "C12: width is the one difference on purpose — the terminal cuts at 48 columns and a word, the page keeps a sentence whole up to its own cap and cuts a longer run with an ellipsis at that cap, closed or open",
+      seen.wide[0] === KOREAN_LONG.slice(0, -1) && seen.wide[1] === null && seen.wide[2] === OPEN_LONG &&
+        seen.capped.every((line) => line?.length === seen.cap && line.endsWith("…")),
+      JSON.stringify({ wide: seen.wide, capped: seen.capped.map((line) => line?.length), cap: seen.cap }),
+    );
+    ok("C12: the thought lines raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
 }
 
 /* Run by itself (`node ui/tests/conversation-parity.mjs [--engine webkit]

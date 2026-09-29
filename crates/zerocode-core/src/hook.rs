@@ -2693,6 +2693,59 @@ mod tests {
         assert_eq!(envelope_event_name(&envelope), None);
     }
 
+    /// One table names the kind of every tool call: the window's step lines,
+    /// its file doors and its sidebar all read this word, so a name only a
+    /// second list knew was a call two parts of the window drew two ways
+    /// (t-15682). These are the names the page's own list used to know and this
+    /// one did not, the names only this one knew, and the one split a step's
+    /// line needs — a search of the web is not a fetch of a page.
+    #[test]
+    fn one_table_reduces_every_vendors_tool_name_to_the_kind_a_row_is_drawn_by() {
+        let kind = |name: &str| Tool::named(name).map(|tool| tool.as_str().to_string());
+        for (names, word) in [
+            (
+                &[
+                    "cat",
+                    "notebook_read",
+                    "NotebookRead",
+                    "view_file",
+                    "open_document",
+                ][..],
+                "read",
+            ),
+            (&["exec_command", "BashOutput", "local_shell"][..], "bash"),
+            (
+                &[
+                    "ls",
+                    "list_dir",
+                    "list_files",
+                    "find",
+                    "CodeSearch",
+                    "search_file_content",
+                    "ripgrep",
+                ][..],
+                "grep",
+            ),
+            (
+                &["WebSearch", "web_search", "google_web_search"][..],
+                "websearch",
+            ),
+            (&["WebFetch", "web_fetch", "fetch", "browse"][..], "web"),
+            (&["subagent", "spawn_agent"][..], "task"),
+        ] {
+            for &name in names {
+                assert_eq!(kind(name).as_deref(), Some(word), "`{name}` is a {word}");
+            }
+        }
+        // A name the table does not know keeps its own spelling, and a blank
+        // one is the vendor saying nothing.
+        assert_eq!(
+            kind("mcp__linear__create_issue").as_deref(),
+            Some("mcp__linear__create_issue")
+        );
+        assert_eq!(kind("  "), None);
+    }
+
     /// The detail the bridge used to drop, out of the shapes the vendors this
     /// window installs for actually write.
     ///

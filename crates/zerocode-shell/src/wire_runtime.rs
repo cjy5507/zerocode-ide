@@ -403,6 +403,7 @@ impl WireState {
             tool: Some(TranscriptTool {
                 call_id: call_id.to_string(),
                 name: name.to_string(),
+                kind: String::new(),
                 input,
                 is_error: false,
                 edits,
@@ -427,6 +428,7 @@ impl WireState {
             tool: Some(TranscriptTool {
                 call_id: call_id.to_string(),
                 name: name.to_string(),
+                kind: String::new(),
                 input: String::new(),
                 is_error,
                 edits,
