@@ -331,27 +331,15 @@ function settleComposerQueuesFor(term) {
 
 /* `✻ Claude · Fable 5.1 ▾` — the catalog's mark and name, the pane's model
  * (the hook's word, shown as the model catalog names it when it can), and the
- * chevron that says it opens.
- *
- * A HELPER's page wears the same pill and none of the hand (t-15625). The
- * helper has no pane a `/model` could be typed into, so a pill that opened
- * would only ever switch its PARENT's model, on a page that says it is the
- * helper's. It names the model the helper itself runs on
- * (`paintHelperAgentChip`) and is read-only: no chevron, no menu, and a tip
- * that says why. */
+ * chevron that says it opens. A helper's page has no composer, so no chip here
+ * ever speaks for a helper: its model is in the page's head (`updateHelperPageModel`). */
 function composerAgentChip(run, spec) {
-  const helper = isHelperPage(run);
-  const chip = document.createElement(helper ? "span" : "button");
+  const chip = document.createElement("button");
   chip.className = "worker-composer-pill worker-composer-agent";
   const mark = agentMarkNode("worker-composer-mark", agentVoice(spec.id).glyph);
   const words = pillWordsNode(spec.name);
   const model = document.createElement("span");
   model.className = "worker-composer-model-words";
-  if (helper) {
-    chip.classList.add("is-static");
-    chip.append(mark, words, model);
-    return chip;
-  }
   chip.type = "button";
   chip.setAttribute("aria-haspopup", "menu");
   chip.setAttribute("aria-expanded", "false");
@@ -379,34 +367,10 @@ function catalogModelWords(said, models = null) {
 }
 
 /* The words the chip shows for the pane's model: the catalog's display name
- * when the model list knows the id, else the id as the hook said it. A
- * helper's page reads its own helper instead — never the pane's. */
+ * when the model list knows the id, else the id as the hook said it. */
 function paintComposerAgentChip(chip, run, models = null) {
-  if (isHelperPage(run)) {
-    paintHelperAgentChip(chip, run);
-    return;
-  }
   const words = catalogModelWords(composerRoad(run).model(), models);
   writeTextContent(chip.querySelector(".worker-composer-model-words"), words ? ` · ${words}` : "");
-}
-
-/* A helper's pill: the model it runs on, or the agent's name alone when its
- * vendor named none — a guess borrowed from the pane would be a claim about a
- * helper that nobody made. The tip carries the facts (`helperModelTip`) and
- * why the pill does not open; a helper whose vendor said nothing gets the
- * reason for the silence instead. */
-function paintHelperAgentChip(chip, run) {
-  const sub = composerHelperRow(run);
-  const words = helperModelWords(sub, run.agent);
-  writeTextContent(chip.querySelector(".worker-composer-model-words"), words ? ` · ${words}` : "");
-  const facts = helperModelTip(sub);
-  writeAttribute(
-    chip,
-    "data-tip",
-    facts
-      ? `${facts} — ${t("composer.helperModel.fixed", "하위 에이전트의 모델은 여기서 바꿀 수 없습니다")}`
-      : t("composer.helperModel.unknown", "이 에이전트는 하위 에이전트의 모델을 알려 주지 않았습니다"),
-  );
 }
 
 const agentModelLists = new Map();
@@ -1291,7 +1255,10 @@ function interruptOnEscape(host) {
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     if (event.isComposing || event.keyCode === 229) return;
     const run = host.__helperPage?.run;
-    if (!run || !composerWorking(run)) return;
+    // A helper's page has no input, and its `composerWorking` is its PARENT's
+    // turn: Esc there would end the parent's whole turn from a page that never
+    // said it could (t-15683). The parent's own page is where Esc interrupts.
+    if (!run || isHelperPage(run) || !composerWorking(run)) return;
     const typing = event.target?.closest?.(".worker-composer-box") !== null && event.target?.closest?.(".worker-composer-box") !== undefined;
     if (host.querySelector(".pane-chat-ask") && !typing) return;
     event.preventDefault();

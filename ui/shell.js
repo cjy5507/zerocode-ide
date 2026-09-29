@@ -11838,7 +11838,16 @@ function syncHelperPagesWith(term, rows) {
     // 더 이상 이 헬퍼를 나르지 않으면(세션이 넘어갔다) 마지막으로 안 수를
     // 지킨다 — 끝난 헬퍼가 0으로 되돌아가지 않게.
     const uses = row?.tool_calls ?? tab.worker.toolCalls ?? 0;
-    if (tab.worker.status === status && tab.worker.toolCalls === uses) continue;
+    // The head's model pill and the strip of this parent's other helpers read
+    // the roster too: a helper moved to another model, a sibling that finished
+    // or arrived, changes the page though this helper's own state did not.
+    const seen = JSON.stringify([
+      row?.model, row?.requestedModel, row?.effort,
+      (rows ?? []).map((one) => [one.id, one.name, one.state]),
+    ]);
+    const moved = tab.worker.rosterSeen !== seen;
+    tab.worker.rosterSeen = seen;
+    if (tab.worker.status === status && tab.worker.toolCalls === uses && !moved) continue;
     if (tab.worker.status !== status) tab.worker.endedAt = status === "done" ? Date.now() : null;
     tab.worker.status = status;
     tab.worker.toolCalls = uses;
@@ -13642,9 +13651,9 @@ function workerBodyNode(tab) {
  * a line; an Enter inside a Korean composition belongs to the composition),
  * the tool row below. Left: `+` (attachments), the agent chip — the CLI's
  * mark, name and model, opening the model menu — and the permission-mode
- * chip; a helper's page also wears the door to its parent tab. Right: `/`
- * (the palette) and the round send. A command run's page has its own context
- * line, so it calls without `owner`. */
+ * chip. Right: `/` (the palette) and the round send. A helper's page has no
+ * composer (t-15683): it speaks to its parent through the footer. A command
+ * run's page has its own context line, so it calls without `owner`. */
 function workerComposerNode(run, owner = null) {
   const form = document.createElement("form");
   form.className = "worker-composer";
@@ -13688,8 +13697,7 @@ function workerComposerNode(run, owner = null) {
   form.prepend(composerQueueNode());
   // The extension's row: after `+`, the agent chip (mark · name · model, opening
   // the model menu) and the permission-mode chip; on the right the `/` and the
-  // send. The door to the parent stands only on a helper's page — a pane's own
-  // conversation is already inside its tab.
+  // send.
   const spec = installedAgents().find((row) => row.id === run.agent) ?? null;
   const cwd = owner?.worktree ?? helperBase(run);
   if (spec) {
@@ -13700,17 +13708,6 @@ function workerComposerNode(run, owner = null) {
   // The helpers running inside this pane (the extension's footer pill) —
   // hidden while there are none, which is most of the time.
   tools.appendChild(composerAgentsChip(run));
-  if (owner && !ownPane) {
-    const door = document.createElement("button");
-    door.type = "button";
-    door.className = "worker-composer-pill worker-composer-door";
-    door.append(
-      iconNode("folder"),
-      pillWordsNode(t("worker.inside", "{{title}} 안에서", { title: tabLabel(owner) })),
-    );
-    door.addEventListener("click", () => setActiveTab(owner.id));
-    tools.appendChild(door);
-  }
   const right = document.createElement("div");
   right.className = "worker-composer-right";
   const palette = composerSlash(form, box, run, spec ?? { id: run.agent, name: agentName(run.agent) }, cwd);
@@ -13951,6 +13948,528 @@ function workerWhereNode(run, owner) {
   return where;
 }
 
+/* ---- a helper's own page: whose it is, what it was asked, what a person can do here (t-15683) ----
+ *
+ * A helper has no pane of its own, so its page has to say three things a
+ * pane's page never did. WHOSE it is: the crumb names the conversation that
+ * directs it and goes back to it in one press, and one strip holds that
+ * conversation's other helpers, each with its state. WHAT it was asked: a card
+ * with the first sentences of the instruction, the conditions the instruction
+ * states in words that can be quoted, and the whole text one press away. WHAT a
+ * person can do here: the footer says who directs the helper and offers the
+ * one road that exists, speaking to that parent. Stopping one helper is not
+ * offered: no agent the catalog voices has a road that ends ONE helper (Esc and
+ * the session's cancel end the parent's whole turn), and a button that
+ * promised it would stop something else. If an agent ever gets such a road, it
+ * belongs in that agent's voice (`AgentVoice` in `zerocode-core`), read from the
+ * catalog like the mark is; the footer would gain its button from there, and
+ * still no name would be written here.
+ *
+ * The head is the same whatever agent ran the helper: the mark and its name
+ * come from the catalog, and nothing below tells one agent from another. */
+const HELPER_BRIEF_LIMIT = 200;
+const HELPER_TAG_LIMIT = 40;
+const HELPER_TAG_MAX = 4;
+/* The words a clause of the instruction must carry to be quoted as a
+ * condition. English opens with the limit ("Do not…", "Only read…"): a clause
+ * that merely CONTAINS "do not" ("The tests do not pass") is news, not a
+ * condition. Korean, Japanese and Chinese end a clause with the command, so
+ * they are read anywhere in it; Spanish opens like English. Whatever these do
+ * not name makes no tag — a miss shows less, a guess would show something
+ * the instruction never said. */
+const HELPER_CONDITION_MARKERS = [
+  /^(?:please\s+)?(?:you\s+(?:must|should|may|can)\s+)?(?:do\s+not|don['’]t|never|must\s+not|mustn['’]t|should\s+not|shouldn['’]t|avoid)\b/i,
+  /^(?:please\s+)?(?:only|just)\s+(?:read|look|report|list|inspect|investigate|search|use|touch|edit|modify|change|write|check|review|summari[sz]e)\b/i,
+  /^(?:this\s+is\s+)?(?:a\s+)?(?:strictly\s+)?read[- ]only\b/i,
+  /\b(?:under|below|within|at\s+most|no\s+more\s+than|max(?:imum)?(?:\s+of)?)\s+\d+\s+(?:words?|lines?|sentences?|characters?|paragraphs?|bullets?|items?)\b/i,
+  /지\s?마(?:세요|십시오|라|요)?|지\s?말(?:고|라|것|아)|말\s?것|금지|읽기\s?전용|안\s?됩니다|하면\s?안|않도록/,
+  /ないでください|ないこと|てはいけ|禁止|読み取り専用/,
+  /不要|不得|禁止|切勿|请勿|只读/,
+  /^(?:por\s+favor,?\s+)?(?:no\s+\p{L}+(?:es|as)\b|nunca\b|evita\b|solo\s+(?:lectura|lee|revisa|consulta|mira)\b)/iu,
+];
+
+/* What the helper was asked: its first turn, said by a person (the parent's
+ * prompt). The card keeps its own copy — the turn list holds four hundred
+ * turns and lets the oldest go, and a long helper's first turn is the first
+ * to leave. */
+function helperBriefOf(run) {
+  if (run.brief === undefined) {
+    const opening = run.helper.turns.find((turn) => turn.seq === 0);
+    if (opening) run.brief = opening.role === "user" ? (opening.text ?? "") : "";
+  }
+  return run.brief ?? "";
+}
+
+/* The instruction as the card shows it: the first whole sentences that fit
+ * `HELPER_BRIEF_LIMIT`, or — when the first sentence alone is longer — a cut at
+ * a word that says it cut; and the conditions it states, each one a clause
+ * copied out of it, at most `HELPER_TAG_MAX`, each at most `HELPER_TAG_LIMIT`
+ * letters (a longer clause is cut with a mark and keeps the whole one for its
+ * tip). Nothing is written that is not in the text. */
+function helperBriefParts(text) {
+  const body = text.trim();
+  const ends = [];
+  for (const one of body.matchAll(/[.!?]+(?=\s|$)|[。！？]+|\n+/g)) ends.push(one.index + one[0].length);
+  let said = body;
+  let cut = false;
+  if (body.length > HELPER_BRIEF_LIMIT) {
+    const fits = ends.filter((end) => end <= HELPER_BRIEF_LIMIT);
+    if (fits.length > 0) {
+      said = body.slice(0, fits.at(-1)).trimEnd();
+    } else {
+      let end = HELPER_BRIEF_LIMIT;
+      if (!/\s/.test(body[end] ?? "")) {
+        const space = body.slice(0, end).search(/\s\S*$/);
+        if (space > 0) end = space;
+      }
+      said = body.slice(0, end).trimEnd().replace(/[\uD800-\uDBFF]$/, "");
+      cut = true;
+    }
+  }
+  const tags = [];
+  let from = 0;
+  for (const end of [...ends, body.length]) {
+    const clause = body.slice(from, end).trim()
+      .replace(/^(?:[-*•·]\s+|\d+[.)]\s+)/, "")
+      .replace(/[\s.!?。！？;；:：]+$/u, "");
+    from = Math.max(from, end);
+    if (!clause || tags.some((one) => one.whole === clause)) continue;
+    if (!HELPER_CONDITION_MARKERS.some((marker) => marker.test(clause))) continue;
+    const letters = [...clause];
+    tags.push({
+      whole: clause,
+      words: letters.length > HELPER_TAG_LIMIT
+        ? `${letters.slice(0, HELPER_TAG_LIMIT).join("").trimEnd()}…`
+        : clause,
+    });
+    if (tags.length === HELPER_TAG_MAX) break;
+  }
+  return { body, size: [...body].length, said, cut, more: body.length > said.length, tags };
+}
+
+/* The crumb: the conversation this helper belongs to (one press back) and
+ * where the person is. With no conversation left there is nothing to go back
+ * to, so no control stands — the word for the page alone. */
+function helperPageCrumbNode(run, owner) {
+  const nav = document.createElement("nav");
+  nav.className = "helper-crumb";
+  nav.setAttribute("aria-label", t("helper.crumb.label", "현재 위치"));
+  if (owner) {
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "helper-crumb-back";
+    const parent = document.createElement("span");
+    parent.className = "helper-crumb-parent";
+    back.append(iconNode("arrow-left"), parent);
+    back.addEventListener("click", () => {
+      const current = tabOfTerm(run.term);
+      if (current) setActiveTab(current.id);
+    });
+    const sep = document.createElement("span");
+    sep.className = "helper-crumb-sep";
+    sep.setAttribute("aria-hidden", "true");
+    sep.textContent = "/";
+    nav.append(back, sep);
+  }
+  const here = document.createElement("span");
+  here.className = "helper-crumb-here";
+  here.setAttribute("aria-current", "page");
+  here.textContent = t("helper.crumb.here", "도우미");
+  nav.appendChild(here);
+  return nav;
+}
+
+function helperPageHeadNode(run, owner) {
+  const head = document.createElement("header");
+  head.className = "worker-head helper-head";
+  const row = document.createElement("div");
+  row.className = "helper-head-row";
+  // The catalog's mark for whichever agent ran the helper; its name rides the
+  // mark for a screen reader, which cannot see the glyph.
+  const mark = agentMarkNode("worker-mark", "");
+  mark.setAttribute("role", "img");
+  const name = document.createElement("span");
+  name.className = "worker-name";
+  const meta = document.createElement("span");
+  meta.className = "worker-meta";
+  const model = document.createElement("span");
+  model.className = "helper-model";
+  const state = document.createElement("span");
+  state.className = "helper-state";
+  // The state is announced politely when it changes; the clock beside it is
+  // outside the live region, or it would be read out every second.
+  const said = document.createElement("span");
+  said.className = "worker-state";
+  said.setAttribute("role", "status");
+  const clock = document.createElement("span");
+  clock.className = "worker-elapsed";
+  state.append(said, clock);
+  const uses = document.createElement("span");
+  uses.className = "worker-uses";
+  meta.append(focusViewButtonNode(), model, state, uses);
+  row.append(mark, name, meta);
+  head.append(helperPageCrumbNode(run, owner), row);
+  updateHelperPageHead(head, run, owner);
+  return head;
+}
+
+function updateHelperPageHead(head, run, owner) {
+  const mark = head.querySelector(".worker-mark");
+  writeTextContent(mark, agentVoice(run.agent).glyph);
+  writeAttribute(mark, "aria-label", agentName(run.agent));
+  const focus = head.querySelector(".worker-focus");
+  if (focus) writeAttribute(focus, "aria-pressed", focusViewOn() ? "true" : "false");
+  writeTextContent(head.querySelector(".worker-name"), run.name);
+  updateHelperPageModel(head.querySelector(".helper-model"), run);
+  const state = head.querySelector(".helper-state");
+  const running = run.status === "running";
+  writeAttribute(state, "class", `helper-state is-${run.status}`);
+  const dot = state.querySelector(".helper-state-dot");
+  if (running && !dot) {
+    const pulse = document.createElement("span");
+    pulse.className = "helper-state-dot";
+    pulse.setAttribute("aria-hidden", "true");
+    state.prepend(pulse);
+  } else if (!running && dot) {
+    dot.remove();
+  }
+  const said = state.querySelector(".worker-state");
+  writeAttribute(said, "class", `worker-state is-${run.status}`);
+  writeTextContent(said, workerStatusWords(run));
+  writeTextContent(state.querySelector(".worker-elapsed"), workerElapsedWords(run));
+  writeTextContent(head.querySelector(".worker-uses"), toolUsesWords(run.toolCalls ?? 0));
+  const back = head.querySelector(".helper-crumb-back");
+  if (back && owner) {
+    writeTextContent(back.querySelector(".helper-crumb-parent"), tabLabel(owner));
+    writeAttribute(back, "aria-label", t("helper.crumb.back", "{{parent}} 대화로 돌아가기", { parent: tabLabel(owner) }));
+  }
+}
+
+/* The model THIS helper ran on (never its parent's: the parent's is not on the
+ * helper's row), and — small, and only when it differs — the model it was
+ * asked for. A helper whose vendor named no model shows the agent's own name
+ * in a muted pill, and its tip says the vendor did not tell. Not a control:
+ * a helper is not a pane where `/model` could be typed. */
+function updateHelperPageModel(pill, run) {
+  const sub = composerHelperRow(run);
+  const model = helperModelWords(sub, run.agent);
+  const asked = model && sub.requestedModel && sub.requestedModel !== sub.model
+    ? helperModelWords({ model: sub.requestedModel }, run.agent)
+    : "";
+  const alone = model ? "" : agentName(run.agent);
+  const sig = `${model}|${asked}|${alone}`;
+  if (pill.__sig !== sig) {
+    pill.__sig = sig;
+    pill.classList.toggle("is-unknown", model === "");
+    if (model === "") {
+      pill.replaceChildren(alone);
+    } else {
+      const words = document.createElement("span");
+      words.className = "helper-model-words";
+      words.textContent = model;
+      pill.replaceChildren(words);
+      if (asked) {
+        const request = document.createElement("small");
+        request.className = "helper-model-asked";
+        request.textContent = t("helper.model.asked", "요청 {{asked}}", { asked });
+        pill.appendChild(request);
+      }
+    }
+  }
+  writeAttribute(
+    pill,
+    "data-tip",
+    helperModelTip(sub) || t("composer.helperModel.unknown", "이 에이전트는 하위 에이전트의 모델을 알려 주지 않았습니다"),
+  );
+}
+
+/* The strip: this parent's other helpers, one press to move between them. The
+ * ones still at work stand as buttons with their state; the finished ones
+ * fold into one count that opens in place. Hidden while this helper is alone. */
+function helperPageSibsNode() {
+  const nav = document.createElement("nav");
+  nav.className = "helper-sibs";
+  nav.setAttribute("aria-label", t("helper.sibs.label", "같은 대화의 도우미"));
+  nav.hidden = true;
+  return nav;
+}
+
+function helperPageSibChip(run, row, here) {
+  const chip = document.createElement(here ? "span" : "button");
+  chip.className = `helper-sib${here ? " is-here" : ""}${row.state === "done" ? " is-done" : ""}`;
+  chip.dataset.sib = `h:${row.id}`;
+  if (here) {
+    chip.setAttribute("aria-current", "true");
+  } else {
+    chip.type = "button";
+    chip.addEventListener("click", () => {
+      const owner = tabOfTerm(run.term);
+      void openHelperPage({ term: run.term, agent: run.agent, worktree: owner?.worktree, tab: owner }, row);
+    });
+  }
+  const mark = document.createElement("span");
+  mark.className = "helper-sib-mark";
+  mark.setAttribute("aria-hidden", "true");
+  const name = document.createElement("span");
+  name.className = "helper-sib-name";
+  name.textContent = row.name;
+  const state = document.createElement("span");
+  state.className = "helper-sr sr";
+  state.textContent = ` · ${subagentStateWords(row.state)}`;
+  chip.append(mark, name, state);
+  return chip;
+}
+
+function paintHelperPageSibs(nav, run) {
+  const roster = paneSubagents.get(run.term) ?? [];
+  const others = roster.filter((row) => row.id !== run.helper.id);
+  writeHidden(nav, others.length === 0);
+  if (others.length === 0) {
+    nav.__sig = "";
+    return;
+  }
+  const running = others.filter((row) => row.state !== "done");
+  const finished = others.filter((row) => row.state === "done");
+  const open = run.sibsOpen === true && finished.length > 0;
+  const here = { id: run.helper.id, name: run.name, state: run.status === "done" ? "done" : "running" };
+  const sig = JSON.stringify([here, running.map((row) => [row.id, row.name]), finished.map((row) => [row.id, row.name]), open]);
+  if (nav.__sig === sig) return;
+  nav.__sig = sig;
+  const kept = nav.contains(document.activeElement) ? (document.activeElement.dataset.sib ?? null) : null;
+  const chips = [helperPageSibChip(run, here, true), ...running.map((row) => helperPageSibChip(run, row, false))];
+  if (finished.length > 0) {
+    const fold = document.createElement("button");
+    fold.type = "button";
+    fold.className = "helper-sib helper-sib-fold";
+    fold.dataset.sib = "fold";
+    fold.setAttribute("aria-expanded", open ? "true" : "false");
+    fold.textContent = t("helper.sibs.finished", "완료 {{n}}", { n: finished.length });
+    fold.addEventListener("click", () => {
+      run.sibsOpen = run.sibsOpen !== true;
+      paintHelperPageSibs(nav, run);
+    });
+    chips.push(fold);
+    if (open) chips.push(...finished.map((row) => helperPageSibChip(run, row, false)));
+  }
+  nav.replaceChildren(...chips);
+  if (kept) nav.querySelector(`[data-sib="${CSS.escape(kept)}"]`)?.focus();
+}
+
+/* The card: what the helper was asked, drawn once from the instruction and
+ * left alone by the repaints that follow (an open card stays open, its focus
+ * stays). Never a box to type in: a label, the words, tags, one control. */
+let helperBriefSeq = 0;
+function helperPageBriefNode() {
+  const card = document.createElement("section");
+  card.className = "helper-brief";
+  card.hidden = true;
+  helperBriefSeq += 1;
+  card.dataset.seq = String(helperBriefSeq);
+  return card;
+}
+
+function helperPageBriefBuild(card, run, parts) {
+  const words = t("helper.brief.label", "맡은 일");
+  card.setAttribute("aria-label", words);
+  const label = document.createElement("span");
+  label.className = "helper-brief-label";
+  label.setAttribute("aria-hidden", "true");
+  label.textContent = words;
+  const text = document.createElement("p");
+  text.className = "helper-brief-text";
+  const said = document.createElement("span");
+  said.className = "helper-brief-said";
+  said.textContent = parts.said;
+  text.appendChild(said);
+  if (parts.cut) {
+    // A cut inside a sentence is said twice: the mark for the eye, the words
+    // for a reader that skips marks.
+    const mark = document.createElement("span");
+    mark.className = "helper-brief-cut";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = "…";
+    const gone = document.createElement("span");
+    gone.className = "helper-sr sr";
+    gone.textContent = ` ${t("helper.brief.cut", "(이하 생략)")}`;
+    text.append(mark, gone);
+  }
+  const rows = [label, text];
+  if (parts.tags.length > 0) {
+    const list = document.createElement("ul");
+    list.className = "helper-brief-tags";
+    list.setAttribute("aria-label", t("helper.brief.tags", "지시에 적힌 조건"));
+    for (const tag of parts.tags) {
+      const item = document.createElement("li");
+      item.className = "helper-brief-tag";
+      item.textContent = tag.words;
+      if (tag.words !== tag.whole) item.dataset.tip = tag.whole;
+      list.appendChild(item);
+    }
+    rows.push(list);
+  }
+  if (parts.more) {
+    const full = document.createElement("div");
+    full.className = "helper-brief-full";
+    full.id = `helper-brief-full-${card.dataset.seq}`;
+    full.setAttribute("role", "region");
+    full.setAttribute("aria-label", words);
+    full.tabIndex = 0;
+    full.hidden = true;
+    full.textContent = parts.body;
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "helper-brief-more";
+    more.setAttribute("aria-controls", full.id);
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", () => {
+      run.briefOpen = run.briefOpen !== true;
+      syncHelperPageBrief(card, run);
+    });
+    rows.push(more, full);
+  }
+  card.replaceChildren(...rows);
+  card.__parts = parts;
+}
+
+function syncHelperPageBrief(card, run) {
+  const more = card.querySelector(".helper-brief-more");
+  if (!more) return;
+  const open = run.briefOpen === true;
+  writeAttribute(more, "aria-expanded", open ? "true" : "false");
+  writeTextContent(
+    more,
+    open
+      ? t("helper.brief.less", "지시 접기")
+      : t("helper.brief.more", "지시 전체 보기 · {{n}}자", { n: card.__parts.size }),
+  );
+  writeHidden(card.querySelector(".helper-brief-full"), !open);
+  writeHidden(card.querySelector(".helper-brief-text"), open);
+}
+
+function paintHelperPageBrief(card, run) {
+  const text = helperBriefOf(run);
+  writeHidden(card, text.trim() === "");
+  if (text.trim() === "") return;
+  if (card.__text !== text) {
+    card.__text = text;
+    helperPageBriefBuild(card, run, helperBriefParts(text));
+  }
+  syncHelperPageBrief(card, run);
+}
+
+/* The footer, where the composer stood: who directs this helper, and the one
+ * thing a person can do from here. The press goes to the parent's page with
+ * ITS input focused — the conversation's box when the parent is showing its
+ * conversation, else the terminal's input. No stop: see the note above. */
+function helperPageFootNode(run, owner) {
+  const foot = document.createElement("footer");
+  foot.className = "helper-foot";
+  const says = document.createElement("p");
+  says.className = "helper-foot-says";
+  foot.appendChild(says);
+  if (owner) {
+    const speak = document.createElement("button");
+    speak.type = "button";
+    speak.className = "helper-foot-speak";
+    speak.textContent = t("helper.foot.speak", "부모 대화에 말하기");
+    speak.addEventListener("click", () => speakToHelperParent(run));
+    foot.appendChild(speak);
+  }
+  updateHelperPageFoot(foot, run, owner);
+  return foot;
+}
+
+function updateHelperPageFoot(foot, run, owner) {
+  writeTextContent(
+    foot.querySelector(".helper-foot-says"),
+    owner
+      ? t("helper.foot.says", "이 도우미는 “{{parent}}” 대화가 지시합니다.", { parent: tabLabel(owner) })
+      : t("helper.foot.orphan", "이 도우미를 지시하던 대화가 닫혔습니다."),
+  );
+}
+
+function speakToHelperParent(run) {
+  const owner = tabOfTerm(run.term);
+  if (!owner) return;
+  if (!paneChatOn(run.term)) {
+    void focusAgentPane(owner.worktree, owner.id, run.term, run.agent);
+    return;
+  }
+  setActiveTab(owner.id);
+  focusParentChatBox(run.term, 12);
+}
+
+/* The conversation page is painted a beat after its tab comes forward, so the
+ * box is looked for over the next few frames rather than once. */
+function focusParentChatBox(term, frames) {
+  const box = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat .worker-composer-box`);
+  if (box && box.getClientRects().length > 0) {
+    box.focus();
+    return;
+  }
+  if (frames > 0) requestAnimationFrame(() => focusParentChatBox(term, frames - 1));
+}
+
+function updateHelperPageChrome(page, run, owner) {
+  updateHelperPageHead(page.head, run, owner);
+  paintHelperPageSibs(page.sibs, run);
+  paintHelperPageBrief(page.brief, run);
+  updateHelperPageFoot(page.foot, run, owner);
+}
+
+/* A helper's page, on its own skeleton: head, strip, card, the list of turns
+ * (with the way back to its foot) and the footer. The same rule as every page
+ * here — the skeleton stands once and the next paint changes words and turns
+ * — so an open card, a focused chip and the reader's place survive the poll. */
+function paintHelperPageOwn(host, tab, run, owner) {
+  const held = host.__helperPage;
+  if (held && held.id === tab.id && held.own === true && held.owned === Boolean(owner) && held.locale === locale) {
+    updateHelperPageChrome(held, run, owner);
+    syncHelperTurns(held.turns, run);
+    updateHelperStatus(held.status, run);
+    return;
+  }
+  keepChatPlace(held?.turns);
+  dropWorkerScreen(tab.pane);
+  host.__dockWatch?.disconnect();
+  host.__dockWatch = null;
+  host.classList.add("is-chat-page", "is-helper-page");
+  // No terminal is on screen behind a helper's page, so the key sink has no
+  // one to give a key to: without this a Tab or an Enter pressed on any
+  // control here (or on the list, which takes focus) is pulled away to the sink
+  // (`rearmKeySink`) and never reaches the page.
+  host.dataset.keyboardOwner = "true";
+  host.style.removeProperty("--chat-dock-h");
+  host.replaceChildren();
+  const turns = helperTurnsNode(run);
+  const status = helperStatusNode(run);
+  turns.appendChild(status);
+  updateHelperStatus(status, run);
+  // The way back to the list's foot stands over the list and under nothing
+  // else: its own box, so the footer below never covers it.
+  const body = document.createElement("div");
+  body.className = "helper-body";
+  body.append(turns, chatFootDoorNode(turns));
+  const page = {
+    id: tab.id,
+    own: true,
+    owned: Boolean(owner),
+    locale,
+    head: helperPageHeadNode(run, owner),
+    sibs: helperPageSibsNode(),
+    brief: helperPageBriefNode(),
+    foot: helperPageFootNode(run, owner),
+    turns,
+    status,
+    run,
+  };
+  host.append(page.head, page.sibs, page.brief, body, page.foot);
+  updateHelperPageChrome(page, run, owner);
+  standChatPlace(turns);
+  host.__helperPage = page;
+  interruptOnEscape(host);
+}
+
 /* 헬퍼 페이지는 뼈대를 한 번 세우고 그 위에 산다.
  *
  * 머리·문맥 줄·입력줄은 고정이고 전사만 스크롤한다. 같은 페이지의 다음
@@ -13964,6 +14483,10 @@ function paintHelperPage(host, tab) {
   const held = host.__helperPage;
   // The accent the page wears is the agent's (`--chat-accent` reads it).
   writeAttribute(host, "data-agent", run.agent ?? "");
+  if (isHelperPage(run)) {
+    paintHelperPageOwn(host, tab, run, owner);
+    return;
+  }
   if (held && held.id === tab.id && held.owned === Boolean(owner) && held.locale === locale) {
     updateWorkerHead(held.head, run);
     syncHelperTurns(held.turns, run);
@@ -13977,6 +14500,8 @@ function paintHelperPage(host, tab) {
   dropWorkerScreen(tab.pane);
   host.__dockWatch?.disconnect();
   host.classList.add("is-chat-page");
+  host.classList.remove("is-helper-page");
+  delete host.dataset.keyboardOwner;
   host.replaceChildren();
   const head = workerHeadNode(run);
   const turns = helperTurnsNode(run);
@@ -14023,7 +14548,8 @@ function releaseWorkerPage(tab) {
   host.__dockWatch?.disconnect();
   host.__dockWatch = null;
   host.__helperPage = null;
-  host.classList.remove("is-chat-page");
+  host.classList.remove("is-chat-page", "is-helper-page");
+  delete host.dataset.keyboardOwner;
   host.replaceChildren();
 }
 
@@ -14070,7 +14596,8 @@ function paintWorkerView(tab) {
   keepChatPlace(host.__helperPage?.turns);
   dropWorkerScreen(tab.pane);
   host.__helperPage = null;
-  host.classList.remove("is-chat-page");
+  host.classList.remove("is-chat-page", "is-helper-page");
+  delete host.dataset.keyboardOwner;
   writeAttribute(host, "data-agent", run.agent ?? "");
   host.replaceChildren();
   host.appendChild(workerHeadNode(run));

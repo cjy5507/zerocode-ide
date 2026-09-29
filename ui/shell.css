@@ -15225,19 +15225,6 @@ details[open] > .helper-cap::after {
   color: var(--ink-chalk);
 }
 
-/* A pill worn read-only (t-15625) — a helper's page names the model the helper
- * runs on and there is nothing to press: no hand and no hover tint, because
- * the tint on hover is the promise of a press. It stays a `.worker-composer-
- * pill` in the selector so the pill's own ease (its background and ink
- * transition) still answers for it. */
-.worker-composer-pill.is-static {
-  cursor: default;
-}
-
-.worker-composer-pill.is-static:hover {
-  background: var(--chat-pill-bg);
-}
-
 .worker-composer-model-words,
 .worker-composer-chevron {
   color: var(--ink-mist);
@@ -15573,10 +15560,369 @@ button.worker-composer-pill:hover {
   color: var(--ink-label);
 }
 
+/* ---- a helper's own page: crumb, head, strip, card, footer (t-15683) ----
+ *
+ * Every colour is a token, and every word stands at 4.5:1 or better on what it
+ * sits on in both treatments: `--ink-chalk` and `--ink-mist` on the page's
+ * ground and on the 5% and 10% chalk veils below. `--ink-label` is not used
+ * here — it falls short on the light ground. The one thing that moves is the
+ * state dot; it and the controls' easing stop under reduced motion (the block
+ * after these rules). */
+.worker-head.helper-head {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--space-1);
+}
+
+.helper-crumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-mist);
+}
+
+.helper-crumb-back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 70%;
+  margin-left: calc(var(--space-1) * -1);
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--chat-radius-small);
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+
+.helper-crumb-back:hover {
+  background: var(--chat-pill-bg);
+}
+
+.helper-crumb-back .icon {
+  flex: none;
+  width: var(--icon-size);
+  height: var(--icon-size);
+}
+
+.helper-crumb-parent {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.helper-crumb-sep,
+.helper-crumb-here {
+  flex: none;
+  color: var(--ink-mist);
+}
+
+.helper-head-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.helper-head-row .worker-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.helper-head .worker-meta {
+  align-items: center;
+}
+
+.helper-model,
+.helper-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--chat-pill-bg);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.helper-model {
+  color: var(--ink-chalk);
+  font-family: var(--font-mono);
+}
+
+.helper-model.is-unknown {
+  color: var(--ink-mist);
+  font-family: inherit;
+}
+
+.helper-model-asked {
+  color: var(--ink-mist);
+  font-family: inherit;
+  font-size: var(--text-2xs);
+}
+
+.helper-state {
+  color: var(--ink-chalk);
+}
+
+.helper-head .worker-state {
+  color: var(--ink-chalk);
+}
+
+.helper-head .worker-elapsed,
+.helper-head .worker-uses {
+  color: var(--ink-mist);
+}
+
+.helper-state-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chat-accent);
+  animation: helper-live-pulse 1.6s var(--ease-standard) infinite;
+}
+
+.helper-sibs {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--helper-gutter) 0;
+}
+
+.helper-sib {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  cursor: default;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+
+button.helper-sib {
+  cursor: pointer;
+}
+
+button.helper-sib:hover {
+  background: var(--chat-pill-bg);
+}
+
+.helper-sib.is-here {
+  border-color: var(--chat-accent);
+}
+
+.helper-sib.is-done,
+.helper-sib-fold {
+  color: var(--ink-mist);
+}
+
+.helper-sib-fold[aria-expanded="true"] {
+  background: var(--chat-pill-bg);
+}
+
+.helper-sib-mark {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chat-accent);
+}
+
+.helper-sib.is-done .helper-sib-mark {
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--ink-mist);
+}
+
+.helper-sib-name {
+  overflow: hidden;
+  max-width: 24ch;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The card: a side rule in the agent's accent on a faint veil — never a box
+ * with an edge all round, which is what an input looks like. */
+.helper-brief {
+  flex: none;
+  margin: var(--space-2) var(--helper-gutter) 0;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-left: 3px solid var(--chat-accent);
+  border-radius: 0 var(--chat-radius-small) var(--chat-radius-small) 0;
+  background: color-mix(in srgb, var(--ink-chalk) 5%, transparent);
+}
+
+.helper-brief-label {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-mist);
+}
+
+.helper-brief-text {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--ink-chalk);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.helper-brief-cut {
+  color: var(--ink-mist);
+}
+
+.helper-brief-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.helper-brief-tag {
+  padding: 0 var(--space-2);
+  border: 1px solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--ink-chalk);
+}
+
+.helper-brief-more {
+  display: inline-flex;
+  margin-top: var(--space-2);
+  padding: 0 var(--space-1);
+  margin-left: calc(var(--space-1) * -1);
+  border: 0;
+  border-radius: var(--chat-radius-small);
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+
+.helper-brief-more:hover {
+  background: var(--chat-pill-bg);
+}
+
+.helper-brief-full {
+  max-height: min(40vh, 22rem);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--edge-rule);
+  overflow-y: auto;
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--ink-chalk);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The instruction stands in the card above the list, so its bubble in the
+ * list — the person's row, drawn like an input's text — is not drawn a second
+ * time. Only here: a pane's own conversation shows its first message as it
+ * always did. */
+.worker-view.is-helper-page .helper-turn.is-briefing {
+  display: none;
+}
+
+/* The list and the way back to its foot share one box, so the foot's door
+ * stands over the list and never under the footer. */
+.helper-body {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.helper-foot {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--helper-gutter);
+  border-top: 1px solid var(--edge-rule);
+}
+
+.helper-foot-says {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-mist);
+  overflow-wrap: anywhere;
+}
+
+.helper-foot-speak {
+  flex: none;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--ink-mist);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+
+.helper-foot-speak:hover {
+  border-color: var(--ink-chalk);
+  background: var(--chat-pill-bg);
+}
+
+.worker-view :is(.helper-crumb-back, .helper-sib, .helper-brief-more, .helper-foot-speak):focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: 2px;
+}
+
+.helper-brief-full:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: -2px;
+}
+
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
 .worker-view
-  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
+  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -15597,14 +15943,19 @@ button.worker-composer-pill:hover {
   .helper-expand,
   .composer-menu-item,
   .composer-slash-row,
-  .worker-composer-slash {
+  .worker-composer-slash,
+  .helper-crumb-back,
+  .helper-sib,
+  .helper-brief-more,
+  .helper-foot-speak {
     transition: none;
   }
 
   .helper-turn.is-tool.is-live::before,
   .helper-group.is-live::before,
   .helper-agent-dot,
-  .helper-status-mark {
+  .helper-status-mark,
+  .helper-state-dot {
     animation: none;
   }
 }

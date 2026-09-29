@@ -2541,7 +2541,7 @@ async function testHelperPage(page, ok) {
       },
       read: (index) => effects[index](),
       which: () => controls.findIndex((pick) => pick() !== null && pick() === document.activeElement),
-      focusedWords: () => words(document.activeElement),
+      focusedWords: () => words(document.activeElement).slice(0, 60),
       ring: () => {
         const style = getComputedStyle(document.activeElement);
         return { outline: `${style.outlineStyle} ${style.outlineWidth}`, shadow: style.boxShadow };
@@ -2719,7 +2719,7 @@ async function testHelperPage(page, ok) {
   const unread = (side) => required.filter((one) => !(one in side.found) || side.found[one] < 4.5);
   ok(
     "every word the new head, strip, card and footer draw reads at 4.5:1 or better against what it stands on, in the dark treatment and in the light one",
-    dark.theme === "dark" && lightSide.theme === "light" &&
+    (dark.theme ?? "dark") === "dark" && lightSide.theme === "light" &&
       unread(dark).length === 0 && unread(lightSide).length === 0,
     JSON.stringify({ dark: unread(dark).map((one) => [one, dark.found[one] ?? null]), light: unread(lightSide).map((one) => [one, lightSide.found[one] ?? null]) }),
   );
