@@ -6828,7 +6828,8 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     crate::orchestration_pointer_mailbox::HOOK_COLLECTION_GRACE,
                 ) {
                     crate::orchestration_pointer_mailbox::Parked::Fresh => continue,
-                    crate::orchestration_pointer_mailbox::Parked::Abandoned => {
+                    crate::orchestration_pointer_mailbox::Parked::Uncollected
+                    | crate::orchestration_pointer_mailbox::Parked::CollectedUnread => {
                         note_pointer_uncollected(&run.id, &address, term);
                     }
                     crate::orchestration_pointer_mailbox::Parked::Empty => {}
