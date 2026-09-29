@@ -353,13 +353,18 @@ impl DesktopWindow {
     }
 
     /// Whether the window hides what is under it: seen at all, not an
-    /// overlay, and not the pointer's own picture ([`is_pointer_picture`]) —
+    /// overlay, and not the pointer's own picture ([`Self::is_pointer`]) —
     /// a press lands through the pointer where it points.
     #[must_use]
     pub fn covers(&self) -> bool {
-        self.alpha > 0.0
-            && !self.overlay
-            && !is_pointer_picture(self.layer, &self.app, self.rect.width, self.rect.height)
+        self.alpha > 0.0 && !self.overlay && !self.is_pointer()
+    }
+
+    /// Whether the window is the pointer's own picture, as the window server
+    /// lists it on some displays ([`is_pointer_picture`]).
+    #[must_use]
+    pub fn is_pointer(&self) -> bool {
+        is_pointer_picture(self.layer, &self.app, self.rect.width, self.rect.height)
     }
 }
 
@@ -400,7 +405,9 @@ pub fn occluders(windows: &[DesktopWindow], target: usize) -> Vec<Rect> {
 
 /// Whether the windows from the front down to the target stood still
 /// between two lists — one before the picture, one after the walk: the same
-/// windows, in the same order, each where it was within the tolerance.
+/// windows, in the same order, each where it was within the tolerance. The
+/// pointer's own picture is not one of them ([`DesktopWindow::is_pointer`]):
+/// a pointer that moved, came or went moved no window (t-12979).
 #[must_use]
 pub fn stood_still(
     before: &[DesktopWindow],
@@ -411,7 +418,13 @@ pub fn stood_still(
     let front = |list: &[DesktopWindow]| {
         list.iter()
             .position(|window| window.id == target)
-            .map(|at| list[..=at].to_vec())
+            .map(|at| {
+                list[..=at]
+                    .iter()
+                    .filter(|window| !window.is_pointer())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
     };
     match (front(before), front(after)) {
         (Some(before), Some(after)) => {
