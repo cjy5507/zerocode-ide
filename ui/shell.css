@@ -15658,8 +15658,13 @@ button.worker-composer-pill:hover {
 }
 
 .helper-model {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
   color: var(--ink-chalk);
   font-family: var(--font-mono);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .helper-model.is-unknown {
@@ -15809,7 +15814,10 @@ button.helper-sib:hover {
 }
 
 .helper-brief-tag {
+  min-width: 0;
+  max-width: 100%;
   padding: 0 var(--space-2);
+  overflow-wrap: anywhere;
   border: 1px solid var(--edge-rule);
   border-radius: var(--radius-pill);
   font-size: var(--text-xs);
