@@ -938,6 +938,7 @@ fn all_ledger_image_readers_use_the_revision_cache() {
         "beat(",
         "reconcile_pane_liveness(",
         "notify_stalled_workers(",
+        "notify_idle_workers(",
         "resume_stalled_workers(",
         "file_crash_task(",
         "current_handover_wall(",
@@ -12926,6 +12927,285 @@ fn a_lead_at_rest_beside_its_own_background_work_is_pointed_at_through_its_compo
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
     crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
+/// The window's half of the 2026-09-29 incident (t-15313): a worker whose
+/// lead came to rest beside its own `check --wait`, with its go-ahead leased
+/// into an output it never read, is told to its coordinator once — after
+/// the grace, never twice — and nothing ends, moves or releases it.
+///
+/// run-11955's w-15216 acknowledged its first note with `>/dev/null`, which
+/// leased 「빌드 가능」 behind it; then it ended its turn with its own wait
+/// loop still running, so the hook loop held its `Stop` back and handed the
+/// window only the lead's rest ([`super::pane_lead_rested`]). The stall
+/// sweep trusts that `working`, and its coordinator heard nothing for seven
+/// minutes. Here the same rest, the same sleeper and the same lease reach
+/// the beat's idle sweep; `worker-show` shows its two facts before any
+/// notice is due. A private window, because the grace is a minute and a
+/// half of a clock the shared store must never see run ahead.
+#[test]
+fn a_worker_at_rest_beside_its_own_wait_with_an_unread_go_ahead_is_told_once_and_ended_by_nothing()
+{
+    const LEADER: u32 = 15_313;
+    const WORKER: u32 = 15_314;
+    let (_window, _store) = PrivateWindow::boot();
+    let _turn = one_beat_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
+    let team = format!("team-idle-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = Pointing::default();
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let said = |answer: zerocode_hookd::TeamAnswer| -> serde_json::Value {
+        assert_eq!(answer.exit_code, 0, "{}", answer.stderr);
+        serde_json::from_str(&answer.stdout).expect("JSON")
+    };
+    let as_worker = |line: String| {
+        run(
+            &host,
+            Vec::new(),
+            &team,
+            &pane,
+            &held,
+            &words(&line),
+            clock(),
+        )
+    };
+    let as_leader = |line: String| {
+        run(
+            &host,
+            Vec::new(),
+            &team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&line),
+            clock(),
+        )
+    };
+    let inbox = zerocode_core::orchestration::worker_address(&worker);
+    super::pane_turn_began(LEADER, clock());
+    super::pane_turn_began(WORKER, clock());
+
+    // The first note, read; the go-ahead lands; the worker says it waits
+    // and acknowledges the first note into /dev/null.
+    said(as_leader(format!(
+        "send --to {inbox} --type status --body build-after-the-release --retry-request idle-note-{worker}"
+    )));
+    let first = said(as_worker("check".to_string()));
+    let batch = first["deliveryId"].as_str().expect("a batch").to_string();
+    let go = said(as_leader(format!(
+        "send --to {inbox} --type status --body 빌드-가능 --retry-request idle-go-{worker}"
+    )))["messageId"]
+        .as_str()
+        .expect("the go-ahead")
+        .to_string();
+    said(as_worker(format!(
+        "send --type status --body waiting --retry-request idle-waiting-{worker}"
+    )));
+    said(as_worker(format!(
+        "check --ack {batch} --retry-request idle-ack-{worker}"
+    )));
+
+    // The lead ends its turn beside its own wait loop: the Stop is held back
+    // and the window is handed the rest; the sleeper stands on its inbox.
+    let rested = clock();
+    super::pane_lead_rested(WORKER, rested, false);
+    let _its_wait = super::WaiterCard::hold(&run_id, &inbox, &format!("{team}/{pane}"));
+    let shown = said(as_leader(format!("worker-show --worker {worker}")));
+    assert_eq!(
+        shown["unreadMail"],
+        serde_json::json!([go]),
+        "worker-show hid the go-ahead behind its lease: {shown}"
+    );
+    assert_eq!(shown["idleSinceMs"], rested, "{shown}");
+
+    let quiet = |host: &Pointing| -> Vec<serde_json::Value> {
+        let peeked = run(
+            host,
+            Vec::new(),
+            &team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words("check --peek --types went_quiet"),
+            clock(),
+        );
+        assert_eq!(peeked.exit_code, 0, "{}", peeked.stderr);
+        serde_json::from_str::<serde_json::Value>(&peeked.stdout).expect("JSON")["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let grace = zerocode_core::orchestration::IDLE_NOTICE_GRACE_MS;
+    super::notify_idle_workers(rested + grace - 1);
+    assert!(
+        quiet(&host).is_empty(),
+        "the coordinator was told before the pointer had its chance"
+    );
+    super::notify_idle_workers(rested + grace);
+    super::notify_idle_workers(rested + 10 * grace);
+    let told = quiet(&host);
+    assert_eq!(told.len(), 1, "one rest was not one notice: {told:?}");
+    let headline = told[0]["subject"].as_str().unwrap_or_default();
+    assert!(
+        headline.starts_with("unread mail waiting: ") && headline.contains(&go),
+        "the notice's first words did not name the unread go-ahead: {headline}"
+    );
+
+    // Idle is not done: whole beats over the rest end, move and release
+    // nothing.
+    for beat in 1..=3 {
+        super::tick(&host, &[], rested + (10 + beat) * grace);
+    }
+    let shown = said(as_leader(format!("worker-show --worker {worker}")));
+    assert_eq!(shown["state"], "active", "{shown}");
+    assert!(shown["dispatchId"].is_string(), "{shown}");
+    assert_eq!(
+        said(as_leader("task-list".to_string()))["tasks"][0]["status"],
+        "dispatched"
+    );
+    assert_eq!(quiet(&host).len(), 1, "a beat told the same rest again");
+
+    super::pane_turn_began(WORKER, clock());
+    super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(WORKER);
+}
+
+/// A worker at rest with a go-ahead it was handed and never acknowledged is
+/// pointed at through its composer, once (t-15313) — the road that puts the
+/// mail before its model at its next turn. Mid-turn the same batch is left
+/// alone: the holder may be reading it right now.
+#[test]
+fn a_worker_at_rest_is_pointed_at_a_batch_it_was_handed_and_never_acknowledged() {
+    const LEADER: u32 = 15_315;
+    const WORKER: u32 = 15_316;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
+    let team = format!("team-unacked-{LEADER}");
+    let (_run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = Pointing::default();
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let said = |answer: zerocode_hookd::TeamAnswer| -> serde_json::Value {
+        assert_eq!(answer.exit_code, 0, "{}", answer.stderr);
+        serde_json::from_str(&answer.stdout).expect("JSON")
+    };
+    let as_worker = |line: String| {
+        run(
+            &host,
+            Vec::new(),
+            &team,
+            &pane,
+            &held,
+            &words(&line),
+            clock(),
+        )
+    };
+    let as_leader = |line: String| {
+        run(
+            &host,
+            Vec::new(),
+            &team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&line),
+            clock(),
+        )
+    };
+    let inbox = zerocode_core::orchestration::worker_address(&worker);
+    super::pane_turn_began(LEADER, clock());
+    super::pane_turn_began(WORKER, clock());
+
+    said(as_leader(format!(
+        "send --to {inbox} --type status --body first --retry-request unacked-first-{worker}"
+    )));
+    let first = said(as_worker("check".to_string()));
+    let batch = first["deliveryId"].as_str().expect("a batch").to_string();
+    said(as_leader(format!(
+        "send --to {inbox} --type status --body go --retry-request unacked-go-{worker}"
+    )));
+    said(as_worker(format!(
+        "check --ack {batch} --retry-request unacked-ack-{worker}"
+    )));
+    let at_worker = |host: &Pointing| -> Vec<(u32, String)> {
+        host.typed()
+            .into_iter()
+            .filter(|(term, _)| *term == WORKER)
+            .collect()
+    };
+    super::tick(&host, &[], clock());
+    assert!(
+        at_worker(&host).is_empty(),
+        "a worker mid-turn was pointed at the batch it holds: {:?}",
+        host.typed()
+    );
+
+    super::pane_turn_ended(WORKER, clock(), false, clock());
+    super::tick(&host, &[], clock());
+    super::tick(&host, &[], clock());
+    assert_eq!(
+        at_worker(&host),
+        vec![
+            (WORKER, zerocode_core::orchestration::pointer_text(1)),
+            (WORKER, "\r".to_string())
+        ],
+        "a worker at rest was not told about the go-ahead it never read"
+    );
+
+    super::pane_turn_began(WORKER, clock());
+    super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(WORKER);
+}
+
+/// Idle is not done (t-15313), pinned where it can drift: the lead's rest
+/// ([`super::pane_rests`]) is written by the rest and struck by the next
+/// turn, the person's interrupt and the terminal going, and READ only by the
+/// idle sweep and by `worker-show`'s garnish. The t-11233 gate holds a
+/// `Stop` back so a lead at rest beside a running build is never taken for
+/// a finished turn; a completion, a release, a cleanup or a sweep that read
+/// this map would undo that gate by the side door.
+#[test]
+fn a_leads_rest_is_read_only_by_the_idle_sweep_and_worker_show() {
+    let shipped = include_str!("../orchestration.rs");
+    let mut sites = Vec::new();
+    let mut within = "";
+    for line in shipped.lines() {
+        if let Some(name) = line
+            .strip_prefix("pub(crate) fn ")
+            .or_else(|| line.strip_prefix("pub fn "))
+            .or_else(|| line.strip_prefix("fn "))
+            .and_then(|rest| rest.split(['(', '<']).next())
+        {
+            within = name;
+            if name == "pane_rests" {
+                continue;
+            }
+        }
+        if line.contains("pane_rests()") && !line.trim_start().starts_with("//") {
+            sites.push(within);
+        }
+    }
+    sites.dedup();
+    assert_eq!(
+        sites,
+        vec![
+            "garnish_idle_since",
+            "pane_turn_began",
+            "pane_lead_rested",
+            "terminal_gone_with_archive",
+            "notify_idle_workers",
+        ],
+        "a road other than the idle sweep, worker-show and the rest's own writers reads a lead's rest"
+    );
+    assert_eq!(
+        shipped.matches(".idle_sweep(").count(),
+        1,
+        "the ledger's idle facts are handed over from more than the one beat"
+    );
 }
 
 /// A turn whose ending never reached the window stops holding its mail once

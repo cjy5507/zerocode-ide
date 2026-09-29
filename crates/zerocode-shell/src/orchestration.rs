@@ -5436,6 +5436,11 @@ struct Stalled {
 /// the quota wall? Two witnesses (the agent's words, the provider's number)
 /// make it `quota_walled` news instead of a `went_quiet` one; anything less
 /// is the silence it always was.
+/// Red skeleton (t-15313): the idle sweep hands over nothing yet.
+fn notify_idle_workers(now_ms: i64) {
+    let _ = now_ms;
+}
+
 fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
     let Some(held) = runtime() else {
         return;

@@ -3738,6 +3738,25 @@ impl Run {
             .and_then(|(_, inbox)| inbox.open.as_ref())
     }
 
+    /// Red skeleton (t-15313): the queue alone, as every road reads it today.
+    pub fn unread(&self, address: &str) -> Vec<&str> {
+        self.inboxes
+            .iter()
+            .find(|(held, _)| held == address)
+            .map(|(_, inbox)| inbox.pending.iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    /// Red skeleton (t-15313): [`Self::pointer_wanted`] as it stands.
+    pub fn unread_wanted(&self, address: &str, asking_seat: Option<&str>) -> Option<usize> {
+        self.pointer_wanted(address, asking_seat)
+    }
+
+    /// Red skeleton (t-15313): [`Self::newest_pending`] as it stands.
+    pub fn newest_unread(&self, address: &str) -> Option<&str> {
+        self.newest_pending(address)
+    }
+
     /// Take back the mail of every worker in this run that can never read
     /// again, onto the run's own queue. Answers how many rows moved.
     ///
@@ -4075,6 +4094,9 @@ pub const QUIET_GRACE_MS: i64 = 180_000;
 /// hand a few minutes after boot is the ordinary case, and a sleeper ended
 /// under it would be a second death for one restart.
 pub const RESEAT_GRACE_MS: i64 = 600_000;
+
+/// Red skeleton (t-15313): the idle notice's grace.
+pub const IDLE_NOTICE_GRACE_MS: i64 = 90_000;
 
 /// A stalled episode's reminder cadence.
 ///
@@ -10541,6 +10563,12 @@ impl Ledger {
         notified
     }
 
+    /// Red skeleton (t-15313): no rest is news yet.
+    pub fn workers_idle(&mut self, idle: &[IdleWorker], now_ms: i64) -> usize {
+        let _ = (idle, now_ms);
+        0
+    }
+
     /// Two witnesses to a worker's quota wall become news — once per wall,
     /// and settling nothing.
     ///
@@ -13974,6 +14002,20 @@ pub struct StallJudged {
     pub stalled_since_ms: i64,
     pub cause: String,
     pub confidence: f64,
+}
+
+/// Red skeleton (t-15313): an idle notice's reason when mail waits unread.
+pub const IDLE_UNREAD_REASON: &str = "unread_mail";
+
+/// Red skeleton (t-15313): an idle notice's reason when nothing is unread.
+pub const IDLE_WAITING_REASON: &str = "waiting_on_mail";
+
+/// Red skeleton (t-15313): a lead the window found at rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleWorker {
+    pub worker: String,
+    pub rested_ms: i64,
+    pub waiting_on_mail: bool,
 }
 
 /// Both witnesses to one worker's quota wall, and the worker they are about.

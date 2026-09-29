@@ -9283,7 +9283,8 @@ fn no_notice_is_written_about_an_attempt_that_has_ended() {
 }
 
 /// One hundred turns are activity, not one hundred stalls. The first real
-/// stall notifies once and a continuing stall waits five minutes.
+/// stall notifies once, and a stall that goes on is not told again: one
+/// silence is one notice (t-15313).
 #[test]
 fn one_hundred_quiet_turns_over_242_seconds_are_bounded_reminders_not_failures() {
     let mut bench = Bench::new();
@@ -9325,9 +9326,10 @@ fn one_hundred_quiet_turns_over_242_seconds_are_bounded_reminders_not_failures()
     );
     assert_eq!(
         bench.ledger.workers_stalled(&[(worker, 262_000)], 742_000),
-        1
+        0,
+        "the same silence was told again five minutes on"
     );
-    assert_eq!(bench.json("check --peek --types went_quiet")["count"], 2);
+    assert_eq!(bench.json("check --peek --types went_quiet")["count"], 1);
     let exact_turns = bench.ledger.runs()[0]
         .messages
         .iter()
@@ -9435,24 +9437,20 @@ fn worker_death_carries_the_final_quiet_rollup_without_an_extra_quiet_notice() {
     assert_eq!(body["quietEpisode"]["suppressedTurns"], 3);
 }
 
-/// The reminder cadence is wall time, so what it does when the wall clock
-/// moves BACKWARDS is the whole question about it.
+/// What a clock that moves BACKWARDS does to an episode's notice.
 ///
 /// The only monotonic quantity in this ledger is `revision`. `now_ms` is
 /// whatever the host hands over, and an NTP correction, a person setting
 /// the clock, or a restart after the runtime died all hand over a number
 /// smaller than the one already written down.
 ///
-/// Subtraction alone fails toward SILENCE there: `now - last` never
-/// reaches the reminder, so the episode is muted for as long as the clock
-/// takes to climb back — while the pane keeps turning over and nothing in
-/// the mail says why it stopped. That is the flood's own defect wearing
-/// the opposite sign, and worse, because it is invisible.
-///
-/// So a clock that went backwards fails toward a NOTICE — and toward
-/// exactly one. The notice it posts becomes the new baseline, so the fold
-/// closes again on the very next turn rather than the flood coming back
-/// with the clock.
+/// This used to be a question about the five-minute reminder, whose
+/// subtraction failed toward silence under a backwards clock. The reminder
+/// is gone — an episode is told once (t-15313) — so the clock decides
+/// nothing about it any more: the one notice the episode earned stands,
+/// the jump neither mutes nor repeats it, and the turns the pane went on
+/// ending are all still facts, carried by the summary the worker's own
+/// next word closes the episode with.
 #[test]
 fn a_clock_that_steps_backwards_speaks_once_instead_of_muting_the_episode() {
     let mut bench = Bench::new();
@@ -9492,23 +9490,29 @@ fn a_clock_that_steps_backwards_speaks_once_instead_of_muting_the_episode() {
     }
     assert_eq!(
         bench.ledger.workers_stalled(&[(worker, 20_000)], 100_000),
-        1
+        0,
+        "a backwards clock told the episode twice"
     );
-
     let mail = bench.json("check --peek --types went_quiet");
     assert_eq!(
-        mail["count"], 2,
+        mail["count"], 1,
         "a backwards clock either muted the episode or unfolded it: {mail}"
     );
+
+    // The worker's word closes the episode, and its summary carries every
+    // turn observed across the jump.
+    bench.json_at(&pane, "send --type status --body 다시-시작");
+    let mail = bench.json("check --peek --types went_quiet");
+    assert_eq!(mail["count"], 2, "{mail}");
     let spoken: serde_json::Value = serde_json::from_str(
         mail["messages"][1]["body"]
             .as_str()
-            .expect("the notice the jump forced"),
+            .expect("the closing summary"),
     )
     .expect("quiet JSON");
     assert_eq!(
         spoken["quietTurns"], 6,
-        "the notice past the jump did not carry the turns observed so far"
+        "the summary past the jump did not carry the turns observed so far"
     );
 
     // And the exact turns are all still there to count afterwards.
@@ -10016,26 +10020,29 @@ fn a_delivered_quiet_notice_is_never_rewritten_by_the_turns_that_follow_it() {
         "a suppressed turn did not move the retention clock"
     );
 
-    // The accumulation is owed to the next notice, not to that one.
+    // The accumulation is owed to the next notice, not to that one. The
+    // episode is told once (t-15313), so the next notice is the summary
+    // the worker's own word closes it with — not a second stall notice.
     assert!(
         bench
             .ledger
             .worker_fell_silent(seat, 9_000, false, 200_000)
             .is_some()
     );
-    assert_eq!(bench.ledger.workers_stalled(&[(worker, 9_000)], 480_102), 1);
+    assert_eq!(bench.ledger.workers_stalled(&[(worker, 9_000)], 480_102), 0);
+    bench.json_at(&pane, "send --type status --body 아직-작업중");
     let mail = bench.json("check --peek --types went_quiet");
     let last = mail["messages"]
         .as_array()
         .expect("the notices")
         .last()
-        .expect("the reminder");
+        .expect("the summary");
     let body: serde_json::Value =
         serde_json::from_str(last["body"].as_str().expect("a body")).expect("quiet JSON");
     assert_eq!(body["quietTurns"], 24);
     assert_eq!(
         body["suppressedTurns"], 21,
-        "the reminder did not say how much it had been holding"
+        "the summary did not say how much it had been holding"
     );
     assert_eq!(body["episodeStartedMs"], 1_100);
 }
@@ -10218,6 +10225,447 @@ fn one_turns_end_is_one_fact_even_when_a_report_lands_between_its_events() {
         .filter(|message| message.body.contains("\"turnEndedMs\":1200"))
         .count();
     assert_eq!(turns, 1, "the same turn is in the ledger twice");
+}
+
+/// The 2026-09-29 incident, through the ledger's own doors (t-15313).
+///
+/// run-11955's w-15216 read its coordinator's first note, reported that it
+/// was waiting for 「빌드 가능」 — which had landed a moment earlier, while
+/// its model was busy — and acknowledged the first note with its output
+/// thrown away. `check` acknowledges and THEN looks, so that same call
+/// leased the go-ahead into /dev/null. Every `check --wait --peek` after it
+/// read only the queue behind the batch, the worker's lead came to rest
+/// beside its own wait loop, and its coordinator heard nothing for seven
+/// minutes. Each part here is one of the fixes: the go-ahead stays unread
+/// until it is acknowledged — the peek shows it, a wait wakes on it,
+/// `worker-show` names it — and the rest beside it is told to the
+/// coordinator once, after the grace, with the unread mail in its first
+/// words, the status from before the rest, and nothing ended.
+#[test]
+fn a_go_ahead_leased_into_an_unread_output_stays_unread_and_its_coordinator_hears_of_it() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name lost-go-ahead");
+    let task = bench.json("task-create --spec zo-defect")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let inbox = worker_address(&worker);
+    let id_of = |said: serde_json::Value| {
+        said["messageId"]
+            .as_str()
+            .expect("a message id")
+            .to_string()
+    };
+
+    // The coordinator's first note, read and handed over.
+    bench.json(&format!(
+        "send --to {inbox} --type status --body build-after-the-release"
+    ));
+    let first = bench.json_at(&pane, "check");
+    let first_batch = first["deliveryId"]
+        .as_str()
+        .expect("the first note's batch")
+        .to_string();
+
+    // The go-ahead lands while the worker's model is busy.
+    let go = id_of(bench.json(&format!("send --to {inbox} --type status --body 빌드-가능")));
+
+    // The worker says it waits, then acknowledges the first note into
+    // /dev/null — and that same call leases the go-ahead.
+    let waiting = id_of(bench.json_at(&pane, "send --type status --body waiting-for-빌드-가능"));
+    let spent = bench.at(&pane, &format!("check --ack {first_batch}"));
+    assert_eq!(spent.reply.exit_code, 0, "{}", spent.reply.stderr);
+    let leased = bench.ledger.runs()[0]
+        .open_delivery(&inbox)
+        .expect("the acknowledgement leased the go-ahead")
+        .id
+        .clone();
+
+    // 1. The go-ahead is unread until it is acknowledged.
+    let peeked = bench.json_at(&pane, "check --peek");
+    assert_eq!(
+        peeked["count"], 1,
+        "the peek hid the go-ahead behind its lease: {peeked}"
+    );
+    assert_eq!(peeked["messages"][0]["messageId"], go.as_str());
+    assert_eq!(peeked["unacked"]["deliveryId"], leased.as_str());
+    let wait = bench.at(&pane, "check --wait --peek");
+    assert_eq!(wait.reply.exit_code, 0, "{}", wait.reply.stderr);
+    assert!(
+        wait.waiting.is_none(),
+        "a wait slept beside the go-ahead it was waiting for"
+    );
+    assert_eq!(
+        bench.json(&format!("worker-show --worker {worker}"))["unreadMail"],
+        serde_json::json!([go])
+    );
+
+    // 2. Its lead comes to rest beside its own wait loop. Inside the grace
+    //    the pointer still has its chance, and nothing is said.
+    let rested = bench.clock + 10;
+    let at_rest = |rested_ms: i64, waiting_on_mail: bool| {
+        [IdleWorker {
+            worker: worker.clone(),
+            rested_ms,
+            waiting_on_mail,
+        }]
+    };
+    assert_eq!(
+        bench
+            .ledger
+            .workers_idle(&at_rest(rested, true), rested + IDLE_NOTICE_GRACE_MS - 1),
+        0,
+        "the coordinator was told before the pointer had its chance"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_idle(&at_rest(rested, true), rested + IDLE_NOTICE_GRACE_MS),
+        1,
+        "a worker at rest beside an unread go-ahead was never told of"
+    );
+
+    // 3. Once per episode, on either road.
+    assert_eq!(
+        bench
+            .ledger
+            .workers_idle(&at_rest(rested, true), rested + 20 * IDLE_NOTICE_GRACE_MS),
+        0,
+        "the same rest was told twice"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_stalled(&[(worker.clone(), rested)], rested + 3_600_000),
+        0,
+        "the stall sweep told a silence the idle notice had told"
+    );
+    let mail = bench.json("check --peek --types went_quiet");
+    let notices = mail["messages"].as_array().expect("the notices");
+    assert_eq!(notices.len(), 1, "{mail}");
+    let headline = notices[0]["subject"].as_str().expect("a headline");
+    assert!(
+        headline.starts_with("unread mail waiting: ") && headline.contains(&go),
+        "the notice's first words did not name the unread go-ahead: {headline}"
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(notices[0]["body"].as_str().expect("a body")).expect("quiet JSON");
+    assert_eq!(body["reason"], IDLE_UNREAD_REASON);
+    assert_eq!(body["unreadMail"], serde_json::json!([go]));
+    assert_eq!(body["workerId"], worker.as_str());
+    assert_eq!(body["taskId"], task.as_str());
+    assert_eq!(body["idleSinceMs"], rested);
+    assert_eq!(body["waitingOnMail"], true);
+    assert_eq!(
+        body["lastStatus"]["messageId"],
+        waiting.as_str(),
+        "the status sent before the rest was not carried: {body}"
+    );
+
+    // 4. Idle is not done: nothing ended, moved or was released.
+    let shown = bench.json(&format!("worker-show --worker {worker}"));
+    assert_eq!(shown["state"], "active");
+    assert!(shown["dispatchId"].is_string(), "{shown}");
+    assert_eq!(bench.json("task-list")["tasks"][0]["status"], "dispatched");
+
+    // 5. The worker reads it, acknowledges it and speaks: the episode is
+    //    over. A later rest with nothing unread and no wait is no news; a
+    //    rest inside its own wait is — once, and it says so first.
+    let replayed = bench.json_at(&pane, "check");
+    assert_eq!(replayed["deliveryId"], leased.as_str());
+    assert_eq!(replayed["messages"][0]["messageId"], go.as_str());
+    bench.json_at(&pane, &format!("check --ack {leased}"));
+    assert_eq!(
+        bench.json(&format!("worker-show --worker {worker}"))["unreadMail"],
+        serde_json::json!([])
+    );
+    bench.json_at(&pane, "send --type status --body building");
+    let again = bench.clock + 10;
+    assert_eq!(
+        bench
+            .ledger
+            .workers_idle(&at_rest(again, false), again + 10 * IDLE_NOTICE_GRACE_MS),
+        0,
+        "a rest with nothing unread and no wait of its own was told"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_idle(&at_rest(again, true), again + IDLE_NOTICE_GRACE_MS),
+        1,
+        "a worker waiting in its own check --wait was never told of"
+    );
+    let mail = bench.json("check --peek --types went_quiet");
+    let newest = mail["messages"]
+        .as_array()
+        .and_then(|all| all.last())
+        .expect("the second notice");
+    assert!(
+        newest["subject"]
+            .as_str()
+            .is_some_and(|headline| headline.starts_with("waiting on mail: ")),
+        "{newest}"
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(newest["body"].as_str().expect("a body")).expect("quiet JSON");
+    assert_eq!(body["reason"], IDLE_WAITING_REASON);
+    assert_eq!(body["unreadMail"], serde_json::json!([]));
+}
+
+/// A worker waiting on purpose — its question unanswered, nothing unread —
+/// is not idle news: the question is already in the coordinator's inbox
+/// (t-15313). Mail it has not read is news again, question or not: an
+/// answer sent with `send` rather than `reply` leaves the question standing
+/// while the answer waits unread.
+#[test]
+fn a_question_is_its_own_notice_until_mail_waits_unread_beside_it() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name asking");
+    let task = bench.json("task-create --spec zo-defect")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    bench.json_at(&pane, "send --type question --body may-i-build");
+    let rested = bench.clock + 10;
+    let at_rest = [IdleWorker {
+        worker: worker.clone(),
+        rested_ms: rested,
+        waiting_on_mail: true,
+    }];
+    assert_eq!(
+        bench
+            .ledger
+            .workers_idle(&at_rest, rested + 10 * IDLE_NOTICE_GRACE_MS),
+        0,
+        "a worker waiting on its own open question was told as idle"
+    );
+    let answer = bench.json(&format!(
+        "send --to {} --type status --body yes-build",
+        worker_address(&worker)
+    ))["messageId"]
+        .as_str()
+        .expect("an id")
+        .to_string();
+    let now_ms = rested.max(bench.clock) + IDLE_NOTICE_GRACE_MS;
+    assert_eq!(bench.ledger.workers_idle(&at_rest, now_ms), 1);
+    let mail = bench.json("check --peek --types went_quiet");
+    let body: serde_json::Value =
+        serde_json::from_str(mail["messages"][0]["body"].as_str().expect("the notice"))
+            .expect("quiet JSON");
+    assert_eq!(body["unreadMail"], serde_json::json!([answer]));
+}
+
+/// A wait the coordinator ordered is told once, not every five minutes
+/// (t-15313). run-4275's w-12356 was told to wait for the release; it said
+/// so and went quiet at 14:10 on 2026-09-29, and the stall sweep then told
+/// its coordinator again every five minutes — eight notices by 14:48, with a
+/// real silence elsewhere buried among them. One silence is one notice; the
+/// worker's own next word closes it, and the silence after that is news
+/// again.
+#[test]
+fn an_ordered_wait_is_told_once_per_episode_and_not_every_five_minutes() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name ordered-wait");
+    let task = bench.json("task-create --spec measure")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let seat = ("team-1", pane.as_str());
+    bench.json(&format!(
+        "send --to {} --type status --body wait-until-the-release",
+        worker_address(&worker)
+    ));
+    let order = bench.json_at(&pane, "check");
+    let batch = order["deliveryId"].as_str().expect("a batch").to_string();
+    bench.json_at(&pane, &format!("check --ack {batch} --peek"));
+    bench.json_at(&pane, "send --type status --body waiting-for-the-release");
+    bench
+        .ledger
+        .worker_fell_silent(seat, 10_000, false, 10_000)
+        .expect("a quiet turn");
+
+    assert_eq!(
+        bench
+            .ledger
+            .workers_stalled(&[(worker.clone(), 10_000)], 190_000),
+        1
+    );
+    for beat in 1..=10_i64 {
+        assert_eq!(
+            bench
+                .ledger
+                .workers_stalled(&[(worker.clone(), 10_000)], 190_000 + beat * 300_000),
+            0,
+            "beat {beat} told the same ordered wait again"
+        );
+    }
+    assert_eq!(bench.json("check --peek --types went_quiet")["count"], 1);
+
+    bench.json_at(&pane, "send --type status --body still-waiting");
+    bench
+        .ledger
+        .worker_fell_silent(seat, 4_000_000, false, 4_000_000)
+        .expect("a quiet turn");
+    assert_eq!(
+        bench
+            .ledger
+            .workers_stalled(&[(worker, 4_000_000)], 4_180_000),
+        1,
+        "the silence after the worker's next word was not news"
+    );
+    assert_eq!(bench.json("check --peek --types went_quiet")["count"], 2);
+}
+
+/// The coordinator's own pattern reads exactly as it did (t-15313): a plain
+/// `check`, then `check --ack <d> --peek`, and a `check --wait --peek` loop
+/// that never shows a batch it acknowledged. What changed is only the
+/// batch handed over and NOT acknowledged: the peek shows it, because the
+/// next `check` would replay it.
+#[test]
+fn a_coordinators_check_then_ack_and_peek_never_sees_an_acknowledged_batch_again() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name coordinator-loop");
+    let first = bench.peer_status("first");
+    let woke = bench.run("check --wait --peek");
+    assert!(woke.waiting.is_none(), "a wait slept beside waiting mail");
+    let woke: serde_json::Value = serde_json::from_str(&woke.reply.stdout).expect("JSON");
+    assert_eq!(woke["count"], 1);
+    assert_eq!(woke["messages"][0]["messageId"], first.as_str());
+    assert!(woke.get("unacked").is_none(), "{woke}");
+
+    let batch = bench.json("check");
+    let delivery = batch["deliveryId"].as_str().expect("a batch").to_string();
+    let before = bench.json("check --peek");
+    assert_eq!(before["count"], 1);
+    assert_eq!(before["unacked"]["deliveryId"], delivery.as_str());
+
+    let after = bench.json(&format!("check --ack {delivery} --peek"));
+    assert_eq!(
+        after["count"], 0,
+        "an acknowledged batch was shown again: {after}"
+    );
+    assert!(after.get("unacked").is_none(), "{after}");
+    let asleep = bench.run("check --wait --peek");
+    assert!(
+        asleep.waiting.is_some(),
+        "a wait woke on a batch already acknowledged: {}",
+        asleep.reply.stdout
+    );
+
+    let second = bench.peer_status("second");
+    let woke = bench.json("check --wait --peek");
+    assert_eq!(woke["count"], 1, "{woke}");
+    assert_eq!(woke["messages"][0]["messageId"], second.as_str());
+}
+
+/// A pane at rest is pointed at a batch it was handed and never
+/// acknowledged, and a pane mid-turn is not (t-15313). Mid-turn the holder
+/// may be reading that batch right now, and a pointer on top would nag a
+/// recovery in progress ([`Run::pointer_wanted`], unchanged). At rest there
+/// is no recovery in progress: the batch was read and left, or never
+/// reached the model at all.
+#[test]
+fn a_pane_at_rest_is_pointed_at_a_batch_it_never_acknowledged() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name pointed-at-rest");
+    let go = bench.peer_status("go");
+    let batch = bench.json("check");
+    let delivery = batch["deliveryId"].as_str().expect("a batch").to_string();
+    let address = bench.ledger.runs()[0].address();
+    {
+        let run = &bench.ledger.runs()[0];
+        assert_eq!(run.pointer_wanted(&address, None), None);
+        assert_eq!(run.unread_wanted(&address, None), Some(1));
+        assert_eq!(run.newest_unread(&address), Some(go.as_str()));
+        assert_eq!(run.unread(&address), vec![go.as_str()]);
+    }
+    let behind = bench.peer_status("behind");
+    {
+        let run = &bench.ledger.runs()[0];
+        assert_eq!(run.unread_wanted(&address, None), Some(2));
+        assert_eq!(run.newest_unread(&address), Some(behind.as_str()));
+        assert_eq!(run.unread(&address), vec![go.as_str(), behind.as_str()]);
+    }
+    // The ack leases the queued one: still unread, still pointed at.
+    let next = bench.json(&format!("check --ack {delivery}"));
+    let leased = next["deliveryId"]
+        .as_str()
+        .expect("the next batch")
+        .to_string();
+    {
+        let run = &bench.ledger.runs()[0];
+        assert_eq!(run.unread_wanted(&address, None), Some(1));
+        assert_eq!(run.newest_unread(&address), Some(behind.as_str()));
+    }
+    bench.json(&format!("check --ack {leased} --peek"));
+    let run = &bench.ledger.runs()[0];
+    assert_eq!(run.unread_wanted(&address, None), None);
+    assert_eq!(run.newest_unread(&address), None);
+    assert!(run.unread(&address).is_empty());
+}
+
+/// A wait asked for longer than the ceiling waits the ceiling and says so,
+/// rather than failing in the same second (t-15313). On 2026-09-29 a worker
+/// asked for fifty minutes, piped the answer through `head`, read exit code
+/// zero and an empty page, and sat idle beside a go-ahead that was already
+/// in its inbox. Below the floor is still a refusal: a few milliseconds is a
+/// mistyped unit, not a patience.
+#[test]
+fn a_wait_asked_past_the_ceiling_holds_the_ceiling_and_says_so() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name long-wait");
+    let asked = bench.run("check --wait --timeout-ms 3000000");
+    assert_eq!(asked.reply.exit_code, 0, "{}", asked.reply.stderr);
+    assert_eq!(
+        asked.waiting.as_ref().and_then(|held| held.deadline_ms),
+        Some(WAIT_BUDGET_MAX_MS),
+        "the wait did not hold the ceiling"
+    );
+    assert!(
+        asked
+            .reply
+            .stderr
+            .contains("--timeout-ms 3000000 is above the 600000 ceiling"),
+        "{}",
+        asked.reply.stderr
+    );
+    let said: serde_json::Value = serde_json::from_str(&asked.reply.stdout).expect("JSON");
+    assert_eq!(said["count"], 0);
+    assert_eq!(said["timeoutMs"]["asked"], 3_000_000);
+    assert_eq!(said["timeoutMs"]["held"], 600_000);
+
+    let huge = bench.run("check --wait --peek --timeout-ms 99999999999");
+    assert_eq!(huge.reply.exit_code, 0, "{}", huge.reply.stderr);
+    assert_eq!(
+        huge.waiting.as_ref().and_then(|held| held.deadline_ms),
+        Some(WAIT_BUDGET_MAX_MS)
+    );
+
+    bench.peer_status("here-already");
+    let answered = bench.run("check --wait --timeout-ms 3000000");
+    assert!(answered.waiting.is_none(), "mail was waiting and it slept");
+    let said: serde_json::Value = serde_json::from_str(&answered.reply.stdout).expect("JSON");
+    assert_eq!(said["count"], 1);
+    assert_eq!(said["timeoutMs"]["held"], 600_000);
+
+    let exact = bench.run("check --wait --timeout-ms 600000");
+    assert_eq!(exact.reply.exit_code, 0, "{}", exact.reply.stderr);
+    assert!(exact.reply.stderr.is_empty(), "{}", exact.reply.stderr);
+    assert!(
+        !exact.reply.stdout.contains("timeoutMs"),
+        "{}",
+        exact.reply.stdout
+    );
+
+    let tiny = bench.run("check --wait --timeout-ms 50");
+    assert!(
+        tiny.reply.stderr.contains("holds 1000 to 600000"),
+        "{}",
+        tiny.reply.stderr
+    );
 }
 
 /// Ending an attempt has two shapes, and the difference is the whole point.

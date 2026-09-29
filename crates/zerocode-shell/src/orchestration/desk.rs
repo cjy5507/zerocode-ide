@@ -802,8 +802,9 @@ mod tests {
     };
 
     const HOUR_MS: i64 = 60 * 60 * 1000;
-    /// The ledger's stall reminder cadence (`QUIET_REMINDER_MS`), so each
-    /// beat below tells the coordinator once more.
+    /// The spacing of the repeats below: the five-minute cadence a ledger
+    /// written before t-15313 told one silence again at. The ledger tells
+    /// an episode once now ([`told_again`] says why the desk still folds).
     const REMINDED_MS: i64 = 300_000;
 
     /// A cost nobody asked about — for the tests that read the rest.
@@ -850,6 +851,60 @@ mod tests {
         (run_id, worker)
     }
 
+    /// The silence of `worker`'s open attempt, told for the `beat`-th time
+    /// at `at`: the stall sweep's own notice first, then repeats in the
+    /// ledger's voice.
+    ///
+    /// The ledger tells one episode once since t-15313, but the desk still
+    /// meets repeats: a store written before then carries a notice every
+    /// five minutes of every silence it saw, and the stall seat's reading
+    /// is a second notice about the same silence. So the folding is fed its
+    /// repeats by hand, in the shape those rows have.
+    fn told_again(ledger: &mut Ledger, run_id: &str, worker: &str, beat: i64, at: i64) {
+        if beat == 0 {
+            assert_eq!(
+                ledger.workers_stalled(&[(worker.to_string(), at - 200_000)], at),
+                1,
+                "the stall told nobody"
+            );
+            return;
+        }
+        let run = ledger.run(run_id).expect("the run");
+        let dispatch = run
+            .worker(worker)
+            .and_then(|held| held.dispatch.clone())
+            .expect("an open attempt");
+        let task = run
+            .dispatch(&dispatch)
+            .map(|held| held.task.clone())
+            .expect("the attempt's task");
+        let body = serde_json::json!({
+            "workerId": worker,
+            "reason": "stalled",
+            "stalledSinceMs": at - 200_000,
+            "observedAtMs": at,
+            "notification": true,
+        });
+        ledger
+            .post(
+                run_id,
+                Draft {
+                    from: zerocode_core::orchestration::LEDGER_ITSELF.to_string(),
+                    to: format!("run:{run_id}"),
+                    kind: MessageKind::WentQuiet,
+                    body: Text::from(body.to_string()),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(task),
+                    dispatch: Some(dispatch),
+                },
+                at,
+            )
+            .expect("a repeat in the ledger's voice");
+    }
+
     fn a_notice(run_id: &str, kind: MessageKind, body: &str) -> Draft {
         Draft {
             from: zerocode_core::orchestration::LEDGER_ITSELF.to_string(),
@@ -866,8 +921,9 @@ mod tests {
     }
 
     /// t-9456, the night the desk said 「답할 우편 46」 and no question stood:
-    /// a worker's silence is told again every five minutes while its attempt
-    /// is open, and every one of those notices stood as a letter to answer
+    /// a worker's silence was told again every five minutes while its attempt
+    /// was open (once per episode since t-15313; the rows stay in old
+    /// stores), and every one of those notices stood as a letter to answer
     /// long after the worker had died. Once the attempt ends the silence is
     /// over — the ledger writes nothing more about it, and the desk draws
     /// none of it; the death itself is the news, once.
@@ -877,13 +933,12 @@ mod tests {
         let mut ledger = Ledger::new();
         let (run_id, worker) = a_worker_carrying_a_task(&mut ledger, start);
         for beat in 0..3 {
-            assert_eq!(
-                ledger.workers_stalled(
-                    &[(worker.clone(), start + 10)],
-                    start + 200_000 + beat * REMINDED_MS
-                ),
-                1,
-                "stall {beat} told nobody"
+            told_again(
+                &mut ledger,
+                &run_id,
+                &worker,
+                beat,
+                start + 200_000 + beat * REMINDED_MS,
             );
         }
         assert_eq!(
@@ -961,12 +1016,12 @@ mod tests {
         let mut ledger = Ledger::new();
         let (run_id, worker) = a_worker_carrying_a_task(&mut ledger, start);
         for beat in 0..10 {
-            assert_eq!(
-                ledger.workers_stalled(
-                    &[(worker.clone(), start + 10)],
-                    start + 200_000 + beat * REMINDED_MS
-                ),
-                1
+            told_again(
+                &mut ledger,
+                &run_id,
+                &worker,
+                beat,
+                start + 200_000 + beat * REMINDED_MS,
             );
         }
         let desk = desk_json(&ledger);
@@ -1147,10 +1202,10 @@ mod tests {
         );
     }
 
-    /// One quiet episode is one line with one name (t-9548): the ledger tells
-    /// the silence again every five minutes, and the line keeps the name its
-    /// silence began with — never the newest notice's id, which moved every
-    /// reminder and made the screen draw a new line each time.
+    /// One quiet episode is one line with one name (t-9548): a silence told
+    /// again — every five minutes by a ledger written before t-15313 — keeps
+    /// the name it began with, never the newest notice's id, which moved
+    /// every reminder and made the screen draw a new line each time.
     #[test]
     fn an_episode_line_keeps_its_name_while_the_silence_is_told_again() {
         let start = crate::now_epoch_ms() - 3 * HOUR_MS;
@@ -1158,12 +1213,12 @@ mod tests {
         let (run_id, worker) = a_worker_carrying_a_task(&mut ledger, start);
         let mut names = Vec::new();
         for beat in 0..3 {
-            assert_eq!(
-                ledger.workers_stalled(
-                    &[(worker.clone(), start + 10)],
-                    start + 200_000 + beat * REMINDED_MS
-                ),
-                1
+            told_again(
+                &mut ledger,
+                &run_id,
+                &worker,
+                beat,
+                start + 200_000 + beat * REMINDED_MS,
             );
             let desk = desk_json(&ledger);
             let quiet: Vec<serde_json::Value> = drawn(&desk)
