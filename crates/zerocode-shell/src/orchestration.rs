@@ -2626,6 +2626,26 @@ fn note_pointer_uncollected(run: &str, address: &str, term: u32) {
     );
 }
 
+/// A hook DID collect the pointer — the agent was shown it — and the mail is
+/// still unread once the offer's minute ran out (t-14585).
+///
+/// Not [`note_pointer_uncollected`]'s fact, and until this line existed it
+/// wore that one's words: the log said the hook never collected a pointer
+/// the hook had shown every turn, and a reader went looking for a broken
+/// hook road that was working. Collecting is the window's to observe; reading
+/// the mail is only the ledger's `check` to prove.
+fn note_pointer_collected_unread(run: &str, address: &str, term: u32) {
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: terminal {term}'s hook collected the pointer for \
+             {address} in {run}, and the mail is still unread a minute on; the \
+             composer road has it back"
+        ),
+    );
+}
+
 /// Mail is waiting for a pane whose own last answer was a wall, and the
 /// pointer holds its line back (t-6560).
 ///
@@ -3965,12 +3985,24 @@ enum Standing {
     /// marker to avoid stacking text; unread mail still needs notification
     /// through a later native hook or after recovery.
     Unsubmitted,
-    /// The guard refused the advice at the write: a person's draft, a parked
-    /// question, a relaunched pane. Written down once; the next beat offers
-    /// the same line again, because every one of those clears on its own —
-    /// the draft is sent, the question answered — and the guard is the door
-    /// that will know.
+    /// The guard refused the advice at the write for anything but a draft: a
+    /// parked question, a relaunched pane. Written down once; the next beat
+    /// offers the same line again, because each of those clears on its own —
+    /// the question answered, the launch settled — and the guard is the door
+    /// that will know. A draft is [`Standing::HeldByADraft`].
     Withheld,
+    /// The guard refused the advice because the line holds a person's
+    /// unsent words (t-14585), and the window has said so once. Held against
+    /// the watermark like `Unattended`, and looked at again only when that
+    /// draft is gone — the same fact the guard reads
+    /// ([`crate::human_input::line_of`]), read here without typing — or new
+    /// mail moves the watermark.
+    ///
+    /// Not `Withheld`, whose every beat offers the line again: while the
+    /// draft stands the guard refuses the same line the same way, so each
+    /// offer was one more refusal, one more `term:prompt` and one more toast
+    /// — nine in thirty seconds while a person typed at terminal 1.
+    HeldByADraft,
     /// No road would carry the advice, and the window has said so once. The
     /// next beat tries the same line again; the black box is not told twice.
     Unreachable,
@@ -4079,7 +4111,9 @@ fn read_pointer_receipt(key: &(String, String)) -> Receipt {
 /// withheld its Enter — the line is on the person's screen, the Enter is
 /// theirs, and retyping would stack a second copy under it. One the guard
 /// refused, or that no road carried, is written down once and offered again
-/// on the next beat. `Lost` clears the mark so the next beat looks afresh.
+/// on the next beat — except a refusal for a person's draft, which is held
+/// until the draft goes or the watermark moves ([`Standing::HeldByADraft`]).
+/// `Lost` clears the mark so the next beat looks afresh.
 fn advice_standing(
     run: &str,
     address: &str,
@@ -4101,11 +4135,15 @@ fn advice_standing(
             note_pointer_withheld(run, address, term, stood);
             Standing::Unsubmitted
         }
-        zerocode_pty::DeliveryOutcome::Refused(_) => {
+        zerocode_pty::DeliveryOutcome::Refused(why) => {
             if !noted {
                 note_pointer_withheld(run, address, term, stood);
             }
-            Standing::Withheld
+            if why == zerocode_pty::ready::Refusal::HoldsADraft {
+                Standing::HeldByADraft
+            } else {
+                Standing::Withheld
+            }
         }
         zerocode_pty::DeliveryOutcome::TimedOut => {
             if !noted {
@@ -6828,8 +6866,11 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     crate::orchestration_pointer_mailbox::HOOK_COLLECTION_GRACE,
                 ) {
                     crate::orchestration_pointer_mailbox::Parked::Fresh => continue,
-                    crate::orchestration_pointer_mailbox::Parked::Abandoned => {
+                    crate::orchestration_pointer_mailbox::Parked::Uncollected => {
                         note_pointer_uncollected(&run.id, &address, term);
+                    }
+                    crate::orchestration_pointer_mailbox::Parked::CollectedUnread => {
+                        note_pointer_collected_unread(&run.id, &address, term);
                     }
                     crate::orchestration_pointer_mailbox::Parked::Empty => {}
                 }
@@ -6918,6 +6959,13 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     }
                     // Held at a wall whose own window has not run out.
                     Some(Standing::Walled { until_ms, .. }) if now_ms < until_ms => continue,
+                    /* Held behind a person's draft while it stands (t-14585):
+                     * the guard would refuse the same line on the same fact,
+                     * and every refusal is a toast. Once the draft is sent or
+                     * gone, the arm below offers the line again, once. */
+                    Some(Standing::HeldByADraft) if crate::human_input::line_of(term).0 => {
+                        continue;
+                    }
                     /* New mail, a new pane, nothing yet — or an advice line
                      * that no road would carry, which is the same beat over
                      * again minus the black-box line it has already earned.
@@ -6935,6 +6983,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     Some(
                         Standing::Unreachable
                         | Standing::Withheld
+                        | Standing::HeldByADraft
                         | Standing::Unattended
                         | Standing::Seatless
                         | Standing::Walled { .. }
@@ -7007,7 +7056,11 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                             notice,
                             unreachable_noted: matches!(
                                 standing,
-                                Some(Standing::Unreachable | Standing::Withheld)
+                                Some(
+                                    Standing::Unreachable
+                                        | Standing::Withheld
+                                        | Standing::HeldByADraft
+                                )
                             ),
                         });
                     }

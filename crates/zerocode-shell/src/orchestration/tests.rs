@@ -12755,6 +12755,119 @@ fn a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_compos
     crate::orchestration_pointer_mailbox::forget_term(LEADER);
 }
 
+/// A pointer the agent's hook COLLECTED, whose mail is still unread when
+/// the offer's minute runs out, is said to be exactly that (t-14585).
+///
+/// The report: the window's log said terminal 1's turn-end hook "never
+/// collected" the pointer, while the hook had shown it every turn. Both
+/// facts ended in one `Abandoned` and wore the first one's words. They are
+/// two now — a hook that never came, and an agent that was shown the pointer
+/// and did not run `check` — and either way the composer road takes the
+/// mail back, once.
+#[test]
+fn a_collected_pointer_whose_mail_stays_unread_is_not_called_uncollected() {
+    const LEADER: u32 = 14_587;
+    const WORKER: u32 = 14_588;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
+    let team = format!("team-unread-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = Pointing::default();
+    let at_leader = |host: &Pointing| {
+        host.typed()
+            .into_iter()
+            .filter(|(term, _)| *term == LEADER)
+            .count()
+    };
+    let blackbox = super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    let counted = |needle: String| -> usize {
+        std::fs::read_to_string(&blackbox)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(&needle))
+            .count()
+    };
+    let uncollected = || {
+        counted(format!(
+            "terminal {LEADER}'s turn-end hook never collected the pointer for \
+                 run:{run_id} in {run_id}"
+        ))
+    };
+    let unread = || {
+        counted(format!(
+            "terminal {LEADER}'s hook collected the pointer for run:{run_id} in \
+                 {run_id}, and the mail is still unread"
+        ))
+    };
+
+    // Mail lands while the coordinator is at work: parked for its hook.
+    super::pane_turn_began(LEADER, clock());
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let posted = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words(&format!(
+            "send --type status --body unread --retry-request unread-{worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(posted.exit_code, 0, "{}", posted.stderr);
+    super::tick(&host, &[], clock());
+
+    // The hook collects it at the turn's end, and the turn ends.
+    use zerocode_hookd::pointer_mailbox::PointerMoment;
+    assert!(
+        crate::orchestration_pointer_mailbox::mailbox()
+            .take(
+                &crate::hooks::pane_key_of(LEADER),
+                "",
+                PointerMoment::TurnEnding,
+            )
+            .is_some(),
+        "the hook was handed nothing"
+    );
+    super::pane_turn_ended(LEADER, clock(), false, clock());
+    super::tick(&host, &[], clock());
+    assert_eq!(at_leader(&host), 0, "a young offer was typed over");
+
+    // The agent never runs `check`, and the offer's minute passes.
+    crate::orchestration_pointer_mailbox::age_offered(
+        LEADER,
+        crate::orchestration_pointer_mailbox::RENOTIFY_AFTER,
+    );
+    for _ in 0..3 {
+        super::tick(&host, &[], clock());
+    }
+    assert_eq!(
+        uncollected(),
+        0,
+        "a pointer the hook collected was written down as never collected"
+    );
+    assert_eq!(
+        unread(),
+        1,
+        "the collected-and-unread fact was not said once"
+    );
+    assert_eq!(
+        at_leader(&host),
+        2,
+        "the composer road did not take the mail back with one line and its Enter"
+    );
+
+    super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
 /// The bound past which a turn nothing has spoken for is not a turn, as a
 /// duration on the clock the turn facts are stamped on.
 fn stale_turn() -> std::time::Duration {
@@ -13208,6 +13321,188 @@ fn a_pane_at_its_wall_is_told_once_while_it_stands_and_once_when_it_lifts() {
     );
 
     super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
+/// A pane whose line holds a person's draft, as the guarded door meets it:
+/// the pump's answer to each advice line is the guard's own reading of the
+/// same fact (`human_input::line_of`) — refused while the draft stands,
+/// landed once it is gone — answered on the spot.
+struct BesideADraft {
+    term: u32,
+    /// Every line offered, by terminal, with what the guard made of it. One
+    /// offer is one settled delivery, which is one `term:prompt` the window
+    /// hears and, refused, one notice it may raise.
+    offered: Mutex<Vec<(u32, zerocode_pty::DeliveryOutcome)>>,
+}
+
+impl BesideADraft {
+    fn offers(&self) -> (usize, usize) {
+        let offered = self.offered.lock().unwrap_or_else(|held| held.into_inner());
+        let here: Vec<_> = offered.iter().filter(|(at, _)| *at == self.term).collect();
+        let refused = here
+            .iter()
+            .filter(|(_, outcome)| {
+                *outcome
+                    == zerocode_pty::DeliveryOutcome::Refused(
+                        zerocode_pty::ready::Refusal::HoldsADraft,
+                    )
+            })
+            .count();
+        (here.len(), refused)
+    }
+}
+
+impl Host for BesideADraft {
+    fn split(
+        &self,
+        _team: &str,
+        _leader_term: u32,
+        _from_term: u32,
+        _pane: &str,
+        _direction: zerocode_core::agent_teams::Direction,
+        _command: &str,
+        _token: &str,
+    ) -> Option<u32> {
+        None
+    }
+    fn send(&self, _term: u32, _text: &str) -> bool {
+        true
+    }
+    fn point(
+        &self,
+        term: u32,
+        _line: &str,
+        _submit: bool,
+    ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
+        let outcome = if crate::human_input::line_of(term).0 {
+            zerocode_pty::DeliveryOutcome::Refused(zerocode_pty::ready::Refusal::HoldsADraft)
+        } else {
+            zerocode_pty::DeliveryOutcome::Delivered
+        };
+        self.offered
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push((term, outcome));
+        let (settle, receipt) = std::sync::mpsc::sync_channel(1);
+        let _ = settle.send(outcome);
+        Some(receipt)
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        None
+    }
+    fn focus(&self, _term: u32) -> bool {
+        false
+    }
+    fn close(&self, _term: u32) {}
+    fn actor_for(&self, term: u32) -> Option<String> {
+        Some(test_actor(term))
+    }
+    fn agent_of(&self, _term: u32) -> Option<String> {
+        Some(zerocode_core::AgentKind::Claude.slug().to_string())
+    }
+}
+
+/// Mail waiting behind a person's draft is offered once per watermark, and
+/// again only when the draft is gone (t-14585).
+///
+/// The report: two toasts stacked and coming back while the person typed at
+/// terminal 1, and the window's log saying `a queued line was not pasted`
+/// nine times, two to four seconds apart. The guard was right every time —
+/// the draft is never written over — and the beat offered the same line
+/// again on the next tick, so every beat was one more refusal, one more
+/// `term:prompt` and one more toast. Sixty beats of a standing draft are one
+/// offer now; new mail is one more; the draft going is the one that lands.
+#[test]
+fn mail_behind_a_persons_draft_is_offered_once_per_watermark_until_the_draft_goes() {
+    const LEADER: u32 = 14_585;
+    const WORKER: u32 = 14_586;
+    const BEATS: usize = 60;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let team = format!("team-draft-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    super::pane_turn_began(WORKER, clock());
+    crate::human_input::forget_term(LEADER);
+    let host = BesideADraft {
+        term: LEADER,
+        offered: Mutex::new(Vec::new()),
+    };
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let post = |n: usize| {
+        let posted = run(
+            &host,
+            Vec::new(),
+            &team,
+            &pane,
+            &held,
+            &words(&format!(
+                "send --type status --body draft-{n} --retry-request draft-{worker}-{n}"
+            )),
+            clock(),
+        );
+        assert_eq!(posted.exit_code, 0, "{}", posted.stderr);
+    };
+    let beats = |count: usize| {
+        for _ in 0..count {
+            super::tick(&host, &[], clock());
+        }
+    };
+    let blackbox = super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    let withheld_lines = || {
+        std::fs::read_to_string(&blackbox)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| {
+                line.contains(&format!(
+                    "the pointer for run:{run_id} in {run_id} was not typed at terminal {LEADER}"
+                ))
+            })
+            .count()
+    };
+
+    // The coordinator's turn ended at rest, and the person is typing there.
+    super::pane_turn_began(LEADER, clock());
+    super::pane_turn_ended(LEADER, clock(), false, clock());
+    crate::human_input::typed(LEADER);
+
+    post(1);
+    beats(BEATS);
+    assert_eq!(
+        host.offers(),
+        (1, 1),
+        "{BEATS} beats of a standing draft offered the line more than once"
+    );
+    assert_eq!(withheld_lines(), 1, "the refusal was not written down once");
+
+    // New mail moves the watermark: one more offer, refused like the first.
+    post(2);
+    beats(BEATS);
+    assert_eq!(
+        host.offers(),
+        (2, 2),
+        "new mail behind the same draft was not offered exactly once more"
+    );
+
+    // The person sends their words and the provider reports taking them:
+    // the line is theirs no longer, and the pointer speaks — once.
+    crate::human_input::entered(LEADER);
+    crate::human_input::submitted(LEADER);
+    beats(BEATS);
+    assert_eq!(
+        host.offers(),
+        (3, 2),
+        "the draft went and the line was not offered, or offered more than once"
+    );
+
+    super::pane_turn_began(LEADER, clock());
+    crate::human_input::forget_term(LEADER);
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
     crate::orchestration_pointer_mailbox::forget_term(LEADER);

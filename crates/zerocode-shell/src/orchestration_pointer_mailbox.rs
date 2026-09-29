@@ -112,9 +112,16 @@ pub(crate) enum Parked {
     Empty,
     /// A pointer is waiting and its hook may still be on the way.
     Fresh,
-    /// A pointer has been waiting longer than any knock should take. It is
-    /// gone now, and the ordinary road owns this mail again.
-    Abandoned,
+    /// A pointer has been waiting on the shelf longer than any knock should
+    /// take: no hook ever COLLECTED it. It is gone now, and the ordinary road
+    /// owns this mail again.
+    Uncollected,
+    /// A hook collected the pointer — the agent was shown it — and the mail
+    /// it names is still unread a whole [`RENOTIFY_AFTER`] later. A different
+    /// fact from [`Parked::Uncollected`] (t-14585): the hook road worked, the
+    /// agent did not run `check`. Either way the offer is gone now and the
+    /// ordinary road owns this mail again; only the words about it differ.
+    CollectedUnread,
 }
 
 impl std::fmt::Debug for Shelf {
@@ -341,8 +348,10 @@ pub(crate) const CONTINUATION_RECOGNITION: Duration = Duration::from_secs(1);
 ///
 /// Asked by the pass the moment a turn ENDS, which is the moment the hook
 /// either knocks or never will. A pointer still standing after the grace is a
-/// hook road that did not carry this one, so it is dropped here and the
-/// composer road below owns the mail again. Dropping is the whole reason this
+/// hook road that did not carry this one ([`Parked::Uncollected`]); one a hook
+/// took whose mail is still unread after [`RENOTIFY_AFTER`] is an agent that
+/// was shown it and did not act ([`Parked::CollectedUnread`]). Either is
+/// dropped here and the composer road below owns the mail again. Dropping is the whole reason this
 /// is not a plain read: two roads must never both be holding the same
 /// pointer, or the person gets the advice twice.
 pub(crate) fn collect_stale(
@@ -369,7 +378,7 @@ pub(crate) fn collect_stale(
             Some(standing) if age(standing.since) < grace => return Parked::Fresh,
             Some(_) => {
                 held.remove(&term);
-                return Parked::Abandoned;
+                return Parked::Uncollected;
             }
             None => {}
         }
@@ -389,7 +398,7 @@ pub(crate) fn collect_stale(
         Some((_, at)) if age(*at) < RENOTIFY_AFTER => Parked::Fresh,
         Some(_) => {
             offered.remove(&term);
-            Parked::Abandoned
+            Parked::CollectedUnread
         }
         None => Parked::Empty,
     }
@@ -418,6 +427,21 @@ pub(crate) fn age_parked(term: u32, by: Duration) {
         && let Some(earlier) = standing.since.checked_sub(by)
     {
         standing.since = earlier;
+    }
+}
+
+/// Age what a knock took from this pane by `by`, as though it had been
+/// offered that much earlier — [`age_parked`]'s twin for the offer's minute.
+#[cfg(test)]
+pub(crate) fn age_offered(term: u32, by: Duration) {
+    if let Some((_, at)) = shelf()
+        .offered
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_mut(&term)
+        && let Some(earlier) = at.checked_sub(by)
+    {
+        *at = earlier;
     }
 }
 
@@ -560,7 +584,7 @@ mod tests {
         assert_eq!(waiting(4_401, "m-1", HOOK_COLLECTION_GRACE), Parked::Fresh);
         // An entry about other mail says nothing about this mail.
         assert_eq!(waiting(4_401, "m-9", HOOK_COLLECTION_GRACE), Parked::Empty);
-        assert_eq!(waiting(4_401, "m-1", Duration::ZERO), Parked::Abandoned);
+        assert_eq!(waiting(4_401, "m-1", Duration::ZERO), Parked::Uncollected);
         assert_eq!(waiting(4_401, "m-1", HOOK_COLLECTION_GRACE), Parked::Empty);
 
         // The same watermark twice is one park; a newer one replaces it.
@@ -670,7 +694,9 @@ mod tests {
             let (standing, _) = offered.remove(&4_403).expect("the offer");
             offered.insert(4_403, (standing, Instant::now() - RENOTIFY_AFTER));
         }
-        assert_eq!(about("m-4", HOOK_COLLECTION_GRACE), Parked::Abandoned);
+        /* Collected, and still unread: not the hook road failing, and not
+         * to be reported as one (t-14585). */
+        assert_eq!(about("m-4", HOOK_COLLECTION_GRACE), Parked::CollectedUnread);
         assert_eq!(about("m-4", HOOK_COLLECTION_GRACE), Parked::Empty);
         forget_term(4_403);
     }
