@@ -1602,28 +1602,39 @@ fn progress_snapshot_covers_heartbeat_and_in_tool_work() {
     );
 }
 
-/// The progress gate that decides between extending the fan-out deadline and
+/// The progress gate that decides between extending the collection window and
 /// cancelling: pure, so every branch is exercised without waiting out a real
-/// deadline. A candidate is spared only while it is progressing AND extensions
-/// remain, so the total collection budget stays bounded.
+/// deadline. A candidate is spared while it is progressing — and only then; how
+/// many looks it has already had is not a reason (t-12076).
 #[test]
-fn deadline_extension_gate_is_progress_and_cap_bounded() {
+fn deadline_extension_gate_is_progress_only() {
     assert!(
-        super::reclaim_should_extend_deadline(true, 0),
-        "a progressing candidate with extensions remaining earns an extension"
+        super::reclaim_should_extend_deadline(true),
+        "a progressing candidate earns an extension, however many it has had"
     );
     assert!(
-        super::reclaim_should_extend_deadline(true, super::SPAWN_DEADLINE_MAX_EXTENSIONS - 1),
-        "the last extension is grantable"
+        !super::reclaim_should_extend_deadline(false),
+        "a stalled candidate is reclaimed"
     );
+}
+
+/// A member finishing on its own is progress: the collection's window starts
+/// again from that moment — never before it was already due, and never when
+/// the collection itself cut a member, which is not a member finishing.
+#[test]
+fn a_member_finishing_starts_the_collection_window_again() {
+    let quiet = std::time::Duration::from_secs(20 * 60);
+    let start = std::time::Instant::now();
+    let mut window = super::CollectWindow::starting(start, quiet, std::time::Duration::from_secs(600));
+    let first = window.deadline;
+    window.progressed();
+    assert!(window.deadline >= first, "the window never moves back");
     assert!(
-        !super::reclaim_should_extend_deadline(false, 0),
-        "a stalled candidate is reclaimed even with extensions to spare"
+        window.deadline >= std::time::Instant::now() + quiet - std::time::Duration::from_secs(5),
+        "a completion restarts the window from now"
     );
-    assert!(
-        !super::reclaim_should_extend_deadline(true, super::SPAWN_DEADLINE_MAX_EXTENSIONS),
-        "once the cap is spent even a busy agent is reclaimed — the budget stays bounded"
-    );
+    assert_eq!(window.extended, 0, "a completion is not a look that found a member working");
+    assert_eq!(window.limit_words(), "no progress for 20m");
 }
 
 /// Patch a persisted manifest's `lastActivityAt` heartbeat, mirroring what the
@@ -1923,20 +1934,21 @@ fn final_drain_keeps_waiting_for_a_busy_agent_however_many_looks_it_has_had() {
     std::fs::write(dir.join(format!("{busy}.md")), "").expect("busy output file");
     stamp_manifest_activity(&dir, &busy, epoch_secs_now());
 
+    // The agent finishes on its own shortly after: a completion the store
+    // refuses (the scheduler already drove it terminal) says so at the end,
+    // after the assertions that name what went wrong.
     let publish_id = busy.clone();
     let publisher = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(150));
-        assert!(super::agent_tools::publish_agent_completion_for_tests(
-            super::AgentCompletion {
-                agent_id: publish_id.clone(),
-                name: "busy".to_string(),
-                status: "completed".to_string(),
-                result: Some("real deliverable".to_string()),
-                structured: None,
-                error: None,
-                run: HelperRun { output_tokens: 1, ..HelperRun::default() },
-            }
-        ));
+        super::agent_tools::publish_agent_completion_for_tests(super::AgentCompletion {
+            agent_id: publish_id.clone(),
+            name: "busy".to_string(),
+            status: "completed".to_string(),
+            result: Some("real deliverable".to_string()),
+            structured: None,
+            error: None,
+            run: HelperRun { output_tokens: 1, ..HelperRun::default() },
+        })
     });
 
     let mut in_flight = vec![busy.clone()];
@@ -1952,8 +1964,13 @@ fn final_drain_keeps_waiting_for_a_busy_agent_however_many_looks_it_has_had() {
         &mut window,
     );
     let elapsed = start.elapsed();
-    publisher.join().expect("publisher thread");
+    let published = publisher.join().expect("publisher thread");
 
+    assert_eq!(
+        manifest_status_on_disk(&dir, &busy),
+        "running",
+        "the scheduler drove a busy agent terminal at the third look"
+    );
     assert!(in_flight.is_empty());
     assert_eq!(window.extended, 3, "a third look found it working and was granted");
     assert_eq!(completions.len(), 1);
@@ -1961,11 +1978,7 @@ fn final_drain_keeps_waiting_for_a_busy_agent_however_many_looks_it_has_had() {
         completions[0].status, "completed",
         "the agent's own answer is collected, not a synthetic stop"
     );
-    assert_eq!(
-        manifest_status_on_disk(&dir, &busy),
-        "running",
-        "the scheduler never drove the busy agent terminal"
-    );
+    assert!(published, "the agent's own completion reached the store");
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "the wait returns on the completion, not after the whole step: {elapsed:?}"
