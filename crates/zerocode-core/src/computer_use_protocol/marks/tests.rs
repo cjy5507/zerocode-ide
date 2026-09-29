@@ -1015,11 +1015,9 @@ fn a_window_hidden_whole_is_not_walked() {
     assert!(!fully_covered(Rect::new(10.0, 10.0, 5.0, 5.0), &[]));
 }
 
-/// The windows from the front to the target must be the same, in the same
-/// order and places, before the picture and after the walk.
-#[test]
-fn a_desktop_look_is_marked_only_when_its_windows_stood_still() {
-    let row = |id: u64, x: f64| DesktopWindow {
+/// An ordinary 400×300 window of one app, `id`, at `x`.
+fn listed_at(id: u64, x: f64) -> DesktopWindow {
+    DesktopWindow {
         id,
         pid: 1,
         app: "App".into(),
@@ -1028,34 +1026,111 @@ fn a_desktop_look_is_marked_only_when_its_windows_stood_still() {
         layer: 0,
         alpha: 1.0,
         overlay: false,
-    };
-    let before = [row(1, 0.0), row(2, 100.0), row(3, 500.0)];
+    }
+}
+
+/// The windows from the front to the target must be the same, in the same
+/// order and places, before the picture and after the walk.
+#[test]
+fn a_desktop_look_is_marked_only_when_its_windows_stood_still() {
+    let before = [listed_at(1, 0.0), listed_at(2, 100.0), listed_at(3, 500.0)];
     assert!(stood_still(&before, &before, 2, 2.0));
     assert!(
         stood_still(
             &before,
-            &[row(1, 0.0), row(2, 101.5), row(4, 900.0)],
+            &[listed_at(1, 0.0), listed_at(2, 101.5), listed_at(4, 900.0)],
             2,
             2.0
         ),
         "behind it does not matter"
     );
     assert!(
-        !stood_still(&before, &[row(1, 0.0), row(2, 300.0)], 2, 2.0),
+        !stood_still(&before, &[listed_at(1, 0.0), listed_at(2, 300.0)], 2, 2.0),
         "the target moved"
     );
     assert!(
-        !stood_still(&before, &[row(2, 100.0), row(1, 0.0)], 2, 2.0),
+        !stood_still(&before, &[listed_at(2, 100.0), listed_at(1, 0.0)], 2, 2.0),
         "the order changed in front of it"
     );
     assert!(
-        !stood_still(&before, &[row(1, 0.0), row(5, 0.0), row(2, 100.0)], 2, 2.0),
+        !stood_still(
+            &before,
+            &[listed_at(1, 0.0), listed_at(5, 0.0), listed_at(2, 100.0)],
+            2,
+            2.0
+        ),
         "a window came in front"
     );
     assert!(
-        !stood_still(&before, &[row(1, 0.0)], 2, 2.0),
+        !stood_still(&before, &[listed_at(1, 0.0)], 2, 2.0),
         "the target is gone"
     );
+}
+
+/// The pointer's own picture, as the window server lists it on some displays
+/// (09-30): its 23×22 window at the cursor's level, where the pointer rests.
+fn pointer_at(x: f64, y: f64) -> DesktopWindow {
+    DesktopWindow {
+        id: 99,
+        pid: 399,
+        app: crate::computer_use_protocol::pointer::WINDOW_SERVER_OWNER.into(),
+        rect: Rect::new(x, y, 23.0, 22.0),
+        own: false,
+        layer: crate::computer_use_protocol::pointer::CURSOR_WINDOW_LAYER,
+        alpha: 1.0,
+        overlay: false,
+    }
+}
+
+/// When all that changed between the two lists is the pointer's picture —
+/// moved, come or gone — the windows stood still: the pointer is not a
+/// window over the target (t-12979). A window that is not the pointer's
+/// picture changing is a move all the same.
+#[test]
+fn a_look_whose_only_change_is_the_pointer_stood_still() {
+    let before = [
+        pointer_at(50.0, 120.0),
+        listed_at(1, 0.0),
+        listed_at(2, 100.0),
+    ];
+    for (after, why) in [
+        (
+            vec![
+                pointer_at(300.0, 400.0),
+                listed_at(1, 0.0),
+                listed_at(2, 100.0),
+            ],
+            "the pointer moved",
+        ),
+        (
+            vec![listed_at(1, 0.0), listed_at(2, 100.0)],
+            "the pointer left",
+        ),
+    ] {
+        assert!(stood_still(&before, &after, 2, 2.0), "{why}");
+    }
+    assert!(
+        stood_still(&[listed_at(1, 0.0), listed_at(2, 100.0)], &before, 2, 2.0),
+        "the pointer came"
+    );
+    let mut big = pointer_at(300.0, 400.0);
+    big.rect = Rect::new(300.0, 400.0, 400.0, 300.0);
+    for (after, why) in [
+        (
+            vec![
+                pointer_at(300.0, 400.0),
+                listed_at(1, 50.0),
+                listed_at(2, 100.0),
+            ],
+            "a window moved beside the pointer",
+        ),
+        (
+            vec![big, listed_at(1, 0.0), listed_at(2, 100.0)],
+            "a window bigger than a pointer at its level is not the pointer",
+        ),
+    ] {
+        assert!(!stood_still(&before, &after, 2, 2.0), "{why}");
+    }
 }
 
 #[test]
