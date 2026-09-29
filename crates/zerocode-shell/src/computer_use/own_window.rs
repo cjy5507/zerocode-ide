@@ -11,15 +11,18 @@
 //! helper's own check stands behind it, unchanged.
 
 use serde_json::Value;
-use zerocode_core::computer_use_protocol::identity::{ALLOW_SELF_KEY, own_window};
+use zerocode_core::computer_use_protocol::identity::{
+    ALLOW_SELF_KEY, own_window, own_window_unread,
+};
 use zerocode_core::computer_use_protocol::marks::{DesktopWindow, pointed_points, window_under};
 
 use super::ComputerUseError;
 
 /// The refusal a request gets before the helper is asked, when a point it
-/// presses at lands on ZeroCode's own window; `None` leaves it to the
-/// helper. `list` reads the window list (every layer), only when the
-/// request presses at a point and did not say `allowSelf`.
+/// presses at lands on ZeroCode's own window or whose window it is cannot be
+/// read; `None` leaves it to the helper. `list` reads the window list (every
+/// layer), only when the request presses at a point and did not say
+/// `allowSelf`.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn own_window_first(
     method: &str,
@@ -33,7 +36,12 @@ pub(super) fn own_window_first(
     if points.is_empty() {
         return None;
     }
-    let windows = list()?;
+    // A list that does not come, or comes empty, says nothing of whose
+    // window a point is: refused closed, as the helper's own check is not.
+    let Some(windows) = list().filter(|windows| !windows.is_empty()) else {
+        let (x, y) = points[0];
+        return Some(own_window_unread(x, y));
+    };
     points
         .into_iter()
         .find(|&(x, y)| window_under(&windows, x, y).is_some_and(|window| window.own))

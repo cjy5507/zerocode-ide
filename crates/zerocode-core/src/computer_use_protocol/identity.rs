@@ -143,6 +143,23 @@ pub fn own_window(x: f64, y: f64) -> ProviderError {
     )
 }
 
+/// The refusal of a press at `(x, y)` whose window could not be read: the
+/// window list did not come, or came empty, so the press may land on
+/// ZeroCode's own window, and it is not made (t-12979). `window_not_found`:
+/// list the windows and look again.
+#[must_use]
+pub fn own_window_unread(x: f64, y: f64) -> ProviderError {
+    // Screen points are well inside i64, whole points toward zero as above.
+    #[allow(clippy::cast_possible_truncation)]
+    let (x, y) = (x.trunc() as i64, y.trunc() as i64);
+    ProviderError::new(
+        error_code::WINDOW_NOT_FOUND,
+        format!(
+            "whose window ({x}, {y}) lands on could not be read, so it may be ZeroCode's own and is not pressed; list the windows and look again"
+        ),
+    )
+}
+
 /// The `app_blocked` refusal, worded as the helper words it.
 #[must_use]
 pub fn blocked(identity: &str) -> ProviderError {

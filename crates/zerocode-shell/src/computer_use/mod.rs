@@ -121,32 +121,49 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
         *held = Some(session);
     }
     let session = held.as_mut().expect("session stood");
-    // ZeroCode's own window under a point the request presses at is refused
-    // here first: the helper reads the pointer's own picture, where the
-    // window server lists one, as the window there (t-12979).
+    // ZeroCode's own window under a point the request presses at — or a
+    // point whose window cannot be read — is refused here first: the helper
+    // reads the pointer's own picture, where the window server lists one, as
+    // the window there (t-12979). A road that broke while listing is the
+    // request's own break: the session goes as it would below.
     #[cfg(target_os = "macos")]
-    if let Some(refused) = own_window::own_window_first(method, &params, &mut || {
-        marks::desktop_windows(&mut |asked, with| {
-            session
-                .request(asked, with)
-                .map_err(|failure| match failure {
-                    SessionFailure::Provider(error) | SessionFailure::Transport(error) => error,
-                })
-        })
-        .ok()
-    }) {
-        return Err(refused);
+    {
+        let mut broke = None;
+        let refused = own_window::own_window_first(method, &params, &mut || {
+            marks::desktop_windows(&mut |asked, with| {
+                session
+                    .request(asked, with)
+                    .map_err(|failure| match failure {
+                        SessionFailure::Provider(error) => error,
+                        SessionFailure::Transport(error) => {
+                            broke = Some(error.clone());
+                            error
+                        }
+                    })
+            })
+            .ok()
+        });
+        if let Some(error) = broke {
+            return Err(discard(&mut held, error));
+        }
+        if let Some(refused) = refused {
+            return Err(refused);
+        }
     }
     match session.request(method, params) {
         Ok(answer) => Ok(answer),
         Err(SessionFailure::Provider(error)) => Err(error),
-        Err(SessionFailure::Transport(error)) => {
-            *held = None;
-            guard::remember_helper(None);
-            evidence::end_session();
-            Err(error)
-        }
+        Err(SessionFailure::Transport(error)) => Err(discard(&mut held, error)),
     }
+}
+
+/// A broken road's end: the session is discarded so the next call starts a
+/// clean one, and the break is the answer.
+fn discard(held: &mut Option<platform::Session>, error: ComputerUseError) -> ComputerUseError {
+    *held = None;
+    guard::remember_helper(None);
+    evidence::end_session();
+    error
 }
 
 /// Whether a provider session stands right now — without starting one.
