@@ -15225,6 +15225,17 @@ details[open] > .helper-cap::after {
   color: var(--ink-chalk);
 }
 
+/* A helper's page wears the pill read-only (t-15625): it names the model the
+ * helper runs on and there is nothing to press, so no hand and no hover
+ * tint — the pill's tint on hover is the promise of a press. */
+.worker-composer-agent.is-static {
+  cursor: default;
+}
+
+.worker-composer-agent.is-static:hover {
+  background: var(--chat-pill-bg);
+}
+
 .worker-composer-model-words,
 .worker-composer-chevron {
   color: var(--ink-mist);
