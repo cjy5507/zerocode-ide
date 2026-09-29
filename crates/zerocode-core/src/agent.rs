@@ -2337,6 +2337,58 @@ mod tests {
         assert!(super::SILENT_CONSOLE.todo_tool.is_none());
     }
 
+    /// The channel method a CLI stops ONE helper by id with (t-16031): zo's IDE
+    /// channel answers `helper.stop`, and every other row stays empty until its
+    /// CLI has such a road — the window draws the stop button only where a
+    /// method is named, and never spells one a CLI did not. Read as the window
+    /// reads it: off the serialized row, in both places a row is served from
+    /// (the voice, and the `list_agents` presence that carries the voice's
+    /// fields to the page).
+    #[test]
+    fn only_zos_row_names_the_road_that_stops_one_helper_by_id() {
+        let road = |row: &serde_json::Value| row["helper_stop"].clone();
+        for spec in super::AGENT_SPECS.iter() {
+            let voice =
+                serde_json::to_value(super::agent_voice(spec.id)).expect("a voice serializes");
+            if spec.id == "zo" {
+                assert_eq!(road(&voice), serde_json::json!("helper.stop"), "zo's voice");
+            } else {
+                assert!(
+                    road(&voice).is_null(),
+                    "{} has no such road yet: {voice}",
+                    spec.id
+                );
+            }
+        }
+        let silent =
+            serde_json::to_value(super::SILENT_CONSOLE).expect("the silent voice serializes");
+        assert!(
+            road(&silent).is_null(),
+            "the silent console names no road: {silent}"
+        );
+        let unvoiced = serde_json::to_value(super::agent_voice("nobody")).expect("serializes");
+        assert!(
+            road(&unvoiced).is_null(),
+            "an agent the table does not name: {unvoiced}"
+        );
+        for presence in super::agent_presence(None, "macos") {
+            let row = serde_json::to_value(&presence).expect("a presence row serializes");
+            if presence.id == "zo" {
+                assert_eq!(
+                    road(&row),
+                    serde_json::json!("helper.stop"),
+                    "zo's list_agents row"
+                );
+            } else {
+                assert!(
+                    road(&row).is_null(),
+                    "{}'s list_agents row: {row}",
+                    presence.id
+                );
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
