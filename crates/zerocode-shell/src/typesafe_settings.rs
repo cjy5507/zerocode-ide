@@ -232,13 +232,48 @@ pub struct TypeSafeSettings {
     pub jev: JevSwitch,
     /// The model every seat's request names — the pin, or the alias.
     pub model: ModelRow,
+    /// The launch rows a person wrote, and nothing else (t-14437): a field
+    /// left empty follows today's lineup.
     pub summon_profiles: Value,
+    /// What each agent's summons runs at each difficulty today — the
+    /// person's row, else the lineup's, else the shipped table's — and what
+    /// else the lineup offers there.
+    pub summon_rows:
+        std::collections::BTreeMap<String, Vec<zerocode_core::summon_difficulty::lineup::Row>>,
+    /// Every model each agent's lineup offers today, the newly arrived
+    /// marked: what a written row's model is picked from.
+    pub summon_lineup:
+        std::collections::BTreeMap<String, Vec<zerocode_core::summon_difficulty::lineup::Pick>>,
     /// Every row of the use table, in the table's order — what the dashboard
     /// reads each feature's standing off.
     pub switches: Vec<SwitchRow>,
     /// The routing classifier, which decides whether the routing seat is asked
     /// anything at all.
     pub classifier: ClassifierRow,
+}
+
+/// Every agent's launch rows against `lineup`; an agent with none is left
+/// out, and a written row that cannot launch leaves its agent out too — the
+/// summons refuses it by name, and the screen shows the field as written.
+fn summon_rows(
+    document: &Value,
+    lineup: &crate::summon_lineup::Snapshot,
+    now_ms: i64,
+) -> std::collections::BTreeMap<String, Vec<zerocode_core::summon_difficulty::lineup::Row>> {
+    zerocode_core::agent::AGENT_SPECS
+        .iter()
+        .filter_map(|spec| {
+            let rows = zerocode_core::summon_difficulty::lineup::rows(
+                document,
+                spec.id,
+                lineup.lineups.get(spec.id),
+                Some(&lineup.seen),
+                now_ms,
+            )
+            .ok()?;
+            (!rows.is_empty()).then(|| (spec.id.to_string(), rows))
+        })
+        .collect()
 }
 
 /// The pane's state, read from the keychain and zo's settings file.
@@ -256,12 +291,20 @@ pub fn read_settings(
     // Read by the core's own readers, as zo and the door read it: a seat
     // with no word of its own follows the switch (§6.1).
     let document = Value::Object(root.clone());
+    let lineup = crate::summon_lineup::snapshot();
+    let now_ms = crate::usage_runtime::epoch_ms_now();
     Ok(TypeSafeSettings {
         keys_kept_here,
         key_saved,
         jev: JevSwitch::of(&document),
         model: ModelRow::of(&root),
-        summon_profiles: zerocode_core::summon_difficulty::profiles(&document),
+        summon_profiles: zerocode_core::summon_difficulty::written_profiles(&document),
+        summon_rows: summon_rows(&document, &lineup, now_ms),
+        summon_lineup: lineup
+            .lineups
+            .iter()
+            .map(|(agent, held)| (agent.clone(), held.picks(agent, Some(&lineup.seen), now_ms)))
+            .collect(),
         switches: JEV_USES
             .iter()
             .map(|row| SwitchRow {

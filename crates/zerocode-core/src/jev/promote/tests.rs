@@ -159,7 +159,7 @@ fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
         );
         let mut marked = rows.clone();
         marked.extend(marks_that_rise(seat, asked));
-        if seat.id == crate::summon_difficulty::QUESTION {
+        if super::graded_by_executions(seat) {
             assert_eq!(
                 judge_seat(seat, &marked).unwrap().verdict,
                 Verdict::Hold(Line::TooFewCompared {
@@ -1400,7 +1400,7 @@ fn a_seat_whose_labels_never_say_no_cannot_rise() {
                 })
                 .collect()
         }));
-        if seat.id == crate::summon_difficulty::QUESTION {
+        if super::graded_by_executions(seat) {
             assert_eq!(
                 judge_seat(seat, &all_yes).unwrap().verdict,
                 Verdict::Hold(Line::TooFewCompared {
@@ -3189,6 +3189,7 @@ fn a_seat_that_fills_what_its_caller_left_open_starts_acting() {
     let acting_from_the_start = [
         crate::jev::SUMMON.id,
         crate::jev::SUMMON_DIFFICULTY.id,
+        crate::jev::SUMMON_MODEL.id,
         crate::jev::BROWSER.id,
         crate::jev::DESKTOP.id,
         crate::jev::EMULATOR.id,

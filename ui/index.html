@@ -4127,7 +4127,7 @@
             </label>
             <section aria-labelledby="summon-profiles-title">
               <h4 id="summon-profiles-title" data-i18n="settings.typesafe.profiles">난이도별 워커 모델·사고 깊이</h4>
-              <p class="settings-row-desc" data-i18n="settings.typesafe.profilesHint">모델을 생략하면 이 표를 씁니다. 판단을 기록 중이거나 답이 없으면 보통 난이도를 씁니다. 직접 지정한 값은 보존합니다.</p>
+              <p class="settings-row-desc" data-i18n="settings.typesafe.profilesHint">비워 둔 칸은 오늘 쓸 수 있는 모델 가운데서 자동으로 고릅니다(흐린 글씨가 지금 뜨는 모델입니다). 적은 칸만 그대로 쓰고, 소환에서 직접 지정한 값은 언제나 먼저입니다.</p>
               <div id="summon-profiles-table"></div>
               <button type="button" id="summon-profiles-save" data-i18n="settings.typesafe.profilesSave">선택 표 저장</button>
             </section>
@@ -4257,6 +4257,11 @@
             <span data-jev-name data-i18n="settings.typesafe.summon_difficulty">워커 모델·사고 깊이</span>
             <span data-jev-summary data-i18n="settings.typesafe.summon_difficultySummary">과업 난이도로 워커의 모델과 사고 깊이를 고릅니다. 자동 적용 전에는 판단을 기록합니다.</span>
             <p data-jev-hint data-i18n="settings.typesafe.summon_difficultyHint">같은 난이도에서 실제 실행한 선택의 첫 시도 성공률과 재작업, 토큰, 시간을 비교합니다. 영수증과 코디 착지를 확인하며, 측정하지 못한 값은 비워 둡니다. 명시한 모델과 사고 깊이는 보존합니다.</p>
+          </div>
+          <div data-jev-feature="summon_model">
+            <span data-jev-name data-i18n="settings.typesafe.summon_model">워커 모델 고르기</span>
+            <span data-jev-summary data-i18n="settings.typesafe.summon_modelSummary">모델을 정하지 않고 부른 워커가 그 일에 맞는 모델로 뜨게, 오늘 쓸 수 있는 모델 가운데서 고릅니다. 새 모델도 알아서 후보에 들어갑니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.summon_modelHint">워커를 모델 없이 부를 때, 그 에이전트가 오늘 받는 모델 목록(zo가 공급자에게서 받아 온 목록)에서 이 일에 맞는 모델을 고릅니다. 사고 깊이는 난이도 판단이 정하고, 고른 모델이 받는 범위 안으로 맞춥니다. 보내는 것은 과업 제목과 사양 앞 400자, 모델마다 등급·사고 깊이·새로 나왔는지·사용 한도·이 기계에서 끝낸 일의 성적입니다. 판단할 근거가 없으면 기권하고 난이도별 기본 모델이 뜹니다. 기록이 적은 새 모델은 쉬운 일과 보통 일의 네 번에 한 번 먼저 써 보고, 그 결과가 다음 판단의 근거가 됩니다. 명시한 모델과 설정에 직접 적은 모델은 바꾸지 않습니다. 정확도는 고른 모델로 실제 실행한 일이 첫 시도에 끝났는지로 잽니다.</p>
           </div>
           <div data-jev-feature="effort">
             <span data-jev-name data-i18n="settings.typesafe.effort">워커 사고 깊이 조절</span>

@@ -3684,6 +3684,18 @@ fn provider_effort_scale(provider: ProviderKind) -> Option<&'static [crate::type
     }
 }
 
+/// The effort levels `model` accepts, lowest first: its catalog row's
+/// declaration, else its provider's documented scale; `None` when zo cannot
+/// vouch for a scale. What `zo models --json` prints beside each row, so a
+/// launcher outside zo keeps an effort inside it (t-14437).
+#[must_use]
+pub fn accepted_efforts(model: &str) -> Option<Vec<crate::types::EffortLevel>> {
+    let lower = resolve_catalog_alias(model).to_ascii_lowercase();
+    let mut levels = accepted_effort_levels(model, &lower, effort_scale_provider(&lower))?;
+    levels.sort_by_key(|level| effort_rank(*level));
+    Some(levels)
+}
+
 /// Whether `model` accepts `level`: a provider-declared capability fact from
 /// its catalog row, else its provider's documented scale, else `true` for a
 /// model whose scale zo does not know (never silently downgrade it).

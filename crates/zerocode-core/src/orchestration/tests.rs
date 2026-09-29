@@ -12593,6 +12593,16 @@ fn agent_list_ranks_nothing_and_recommends_nothing() {
             // with its age — a measurement of the machine, like
             // `installed`, and `unknown` where nobody observed (t-3996).
             "readiness",
+            // What a summons that leaves the model open launches with at
+            // each difficulty and where that came from — the window's own
+            // launch path read against the lineup zo's live catalog gave
+            // today, typed by nobody, so it cannot go stale the day a
+            // vendor ships (t-14437). The launch itself, not advice about
+            // which is better: `null` where nobody read a lineup.
+            "summon",
+            // And, where there are no launch rows, why — so a coordinator
+            // is told rather than left to a CLI's default (t-14437).
+            "summonUnavailable",
             "takesEffort",
             "takesModel",
             "unsupportedHere",
@@ -25633,8 +25643,15 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
             agent: &str,
             difficulty: &str,
             _: [&str; 3],
-        ) -> Result<Option<crate::summon_difficulty::Profile>, String> {
-            crate::summon_difficulty::profile(&serde_json::Value::Null, agent, difficulty)
+        ) -> Result<Option<crate::summon_difficulty::lineup::Row>, String> {
+            crate::summon_difficulty::lineup::row_at(
+                &serde_json::Value::Null,
+                agent,
+                difficulty,
+                None,
+                None,
+                0,
+            )
         }
         fn choose_difficulty(
             &self,
@@ -25666,6 +25683,145 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
         assert_eq!(reply["model"], model);
         assert_eq!(reply["effort"], effort);
     }
+}
+
+/// t-14437: a model nobody typed reaches the coordinator — agent-list names
+/// every difficulty's launch row with today's other offers (a new arrival
+/// marked `fresh`), and a summons that leaves the model open says where its
+/// model came from and what else it could have named.
+#[test]
+fn an_open_model_dial_says_where_its_model_came_from_and_what_else_is_offered() {
+    use crate::summon_difficulty::lineup::{Lineup, Seen, row_at, rows};
+    const NOW: i64 = 1_790_000_000_000;
+    fn lineup() -> Lineup {
+        Lineup::from_catalog(
+            &serde_json::json!({"models": [
+                {"provider": "claude", "id": "model-a", "builtin": true,
+                 "band": "second", "rungs": ["hard"]},
+                {"provider": "claude", "id": "model-b", "builtin": false,
+                 "band": "rest", "rungs": ["easy", "medium"]},
+                {"provider": "claude", "id": "model-c", "builtin": false,
+                 "band": "rest", "rungs": []},
+            ]}),
+            "claude",
+        )
+        .unwrap()
+    }
+    fn seen() -> Seen {
+        let mut seen = Seen::default();
+        seen.observe("claude", &lineup(), NOW);
+        seen
+    }
+    struct Lined;
+    impl Launcher for Lined {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            Catalog(&["codex", "claude"]).command_for(agent, prompt, tuning)
+        }
+        fn difficulty_profile(
+            &self,
+            agent: &str,
+            difficulty: &str,
+            _: [&str; 3],
+        ) -> Result<Option<crate::summon_difficulty::lineup::Row>, String> {
+            let lineup = (agent == "claude").then(lineup);
+            row_at(
+                &serde_json::Value::Null,
+                agent,
+                difficulty,
+                lineup.as_ref(),
+                Some(&seen()),
+                NOW,
+            )
+        }
+        fn summon_rows(&self, agent: &str) -> Option<Vec<crate::summon_difficulty::lineup::Row>> {
+            (agent == "claude").then(|| {
+                rows(
+                    &serde_json::Value::Null,
+                    agent,
+                    Some(&lineup()),
+                    Some(&seen()),
+                    NOW,
+                )
+                .unwrap()
+            })
+        }
+        fn choose_difficulty(
+            &self,
+            _: &crate::summon_difficulty::Look,
+            _: [&str; 3],
+        ) -> Option<serde_json::Value> {
+            Some(
+                serde_json::json!({"chosen": crate::summon_difficulty::LADDER[0].0, "applied": true}),
+            )
+        }
+    }
+    let said = answered(&Lined, "agent-list --agent claude");
+    let summon = &row_for(&said, "claude")["summon"];
+    let low = summon
+        .as_array()
+        .expect("claude's launch rows")
+        .iter()
+        .find(|row| row["difficulty"] == crate::summon_difficulty::LADDER[0].0)
+        .expect("a low row");
+    assert_eq!(
+        low["model"], "model-b",
+        "the lineup's easy rung, nobody typed it"
+    );
+    assert_eq!(low["from"], "lineup");
+    assert!(
+        low["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["model"] == "model-c" && c["fresh"] == true),
+        "the other new arrival is offered and marked: {low}"
+    );
+    assert!(row_for(&said, "claude")["summonUnavailable"].is_null());
+    let codex = answered(&Lined, "agent-list --agent codex");
+    assert!(codex["agents"][0]["summon"].is_null());
+    assert_eq!(
+        codex["agents"][0]["summonUnavailable"], SUMMON_NO_LINEUP,
+        "said, not left to a default"
+    );
+    assert_eq!(
+        answered(&Lined, "agent-list --agent copilot")["agents"][0]["summonUnavailable"],
+        SUMMON_NO_MODEL_FLAG
+    );
+
+    let mut bench = Bench::new();
+    bench.json("run-create --name lineup");
+    let planned = planned_on(
+        &mut bench.ledger,
+        &mut bench.team,
+        &Lined,
+        "worker-start --agent claude --prompt translate",
+        bench.clock + 1,
+    );
+    assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+    let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+    assert_eq!(reply["model"], "model-b");
+    assert_eq!(
+        reply["dials"]["difficulty"],
+        crate::summon_difficulty::LADDER[0].0
+    );
+    assert_eq!(reply["dials"]["difficultyFrom"], "jev");
+    assert_eq!(reply["dials"]["modelFrom"], "lineup");
+    assert_eq!(reply["dials"]["candidates"][0]["model"], "model-c");
+    let pinned = planned_on(
+        &mut bench.ledger,
+        &mut bench.team,
+        &Lined,
+        "worker-start --agent claude --prompt translate --model model-c",
+        bench.clock + 2,
+    );
+    let reply: serde_json::Value = serde_json::from_str(&pinned.reply.stdout).unwrap();
+    assert_eq!(reply["model"], "model-c", "a named model is the launch");
+    assert_eq!(reply["dials"]["modelFrom"], "request");
 }
 
 #[test]

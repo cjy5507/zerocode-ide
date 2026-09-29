@@ -6,6 +6,7 @@ use crate::jev::{Cap, choice};
 use serde_json::{Value, json};
 
 pub const RUBRIC_VERSION: u32 = 2;
+pub mod lineup;
 pub mod outcomes;
 pub const PROFILES_SETTING: &str = "summonProfiles";
 pub const DEFAULT_PROFILES: &str = include_str!("summon-profiles.json");
@@ -26,41 +27,45 @@ pub fn profiles(root: &Value) -> Value {
         .unwrap_or_else(|| serde_json::from_str(DEFAULT_PROFILES).unwrap_or_default())
 }
 
+/// Only the rows a person wrote (`{}` when none) — what a settings screen
+/// fills its fields with, leaving every other row to follow the lineup.
+#[must_use]
+pub fn written_profiles(root: &Value) -> Value {
+    root.get(crate::jev::SMART_SETTINGS_KEY)
+        .and_then(|s| s.get(PROFILES_SETTING))
+        .filter(|table| table.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
+/// A settings table holds only the rows a person wrote: any difficulty may be
+/// left out (it follows the lineup), and every row that is there must launch.
 pub fn validate_profiles(table: &Value) -> Result<(), String> {
     let agents = table
         .as_object()
         .ok_or_else(|| format!("{PROFILES_SETTING}: expected an object"))?;
-    let root = json!({crate::jev::SMART_SETTINGS_KEY: {PROFILES_SETTING: table}});
     for (agent, rows) in agents {
         if !crate::agent::AGENT_SPECS.iter().any(|s| s.id == agent) {
             return Err(format!("unknown agent: {agent}"));
         }
-        if rows
+        let rows = rows
             .as_object()
-            .is_none_or(|rows| rows.len() != LADDER.len())
-        {
-            return Err(format!("{agent}: expected every difficulty"));
-        }
-        for (difficulty, _, _) in LADDER {
-            profile(&root, agent, difficulty)?
-                .ok_or_else(|| format!("{agent}: missing {difficulty}"))?;
+            .ok_or_else(|| format!("{agent}: expected an object of difficulties"))?;
+        for (difficulty, row) in rows {
+            if effort(difficulty).is_none() {
+                return Err(format!("{agent}: unknown difficulty {difficulty}"));
+            }
+            let profile: Profile =
+                serde_json::from_value(row.clone()).map_err(|e| format!("{agent}: {e}"))?;
+            launchable(agent, &profile)?;
         }
     }
     Ok(())
 }
 
-/// An explicit settings entry replaces its default row, including invalid
-/// entries: a typo must not silently launch an unintended model.
-pub fn profile(root: &Value, agent: &str, difficulty: &str) -> Result<Option<Profile>, String> {
-    let defaults: Value = serde_json::from_str(DEFAULT_PROFILES).map_err(|e| e.to_string())?;
-    let configured = root
-        .get(crate::jev::SMART_SETTINGS_KEY)
-        .and_then(|smart| smart.get(PROFILES_SETTING));
-    let table = configured.unwrap_or(&defaults);
-    let Some(row) = table.get(agent).and_then(|rows| rows.get(difficulty)) else {
-        return Ok(None);
-    };
-    let profile: Profile = serde_json::from_value(row.clone()).map_err(|e| e.to_string())?;
+/// Whether `profile` can launch `agent` at all — the refusal a person's row
+/// gets before it runs, whatever the lineup says.
+pub fn launchable(agent: &str, profile: &Profile) -> Result<(), String> {
     if profile.model.trim().is_empty()
         || profile.effort.trim().is_empty()
         || profile.model.chars().any(char::is_whitespace)
@@ -70,10 +75,32 @@ pub fn profile(root: &Value, agent: &str, difficulty: &str) -> Result<Option<Pro
             "{PROFILES_SETTING}: model and effort must be nonempty"
         ));
     }
-    if crate::orchestration::native_agent(&profile.model).is_some_and(|native| native != agent) {
+    // An agent that runs any provider's model (zo) may name another CLI's
+    // model; one tied to its own provider may not.
+    if crate::orchestration::native_agent(&profile.model).is_some_and(|native| native != agent)
+        && !crate::orchestration::runs_model(agent, &profile.model)
+    {
         return Err(format!("{agent}: model belongs to another agent"));
     }
-    Ok(Some(profile))
+    Ok(())
+}
+
+/// An explicit settings entry replaces its default row, including invalid
+/// entries: a typo must not silently launch an unintended model.
+pub fn profile(root: &Value, agent: &str, difficulty: &str) -> Result<Option<Profile>, String> {
+    profile_in(root, agent, difficulty, None)
+}
+
+/// [`profile`] read against today's lineup ([`lineup::rows`]): a default row
+/// is the lineup's model for the difficulty, and the shipped table is the
+/// road back when no lineup was read.
+pub fn profile_in(
+    root: &Value,
+    agent: &str,
+    difficulty: &str,
+    lineup: Option<&lineup::Lineup>,
+) -> Result<Option<Profile>, String> {
+    Ok(lineup::row_at(root, agent, difficulty, lineup, None, 0)?.map(|row| row.profile()))
 }
 pub const SPEC_CHAR_CAP: usize = 400;
 pub const TITLE_CHAR_CAP: usize = crate::summon_choice::SUMMON_RECENT_BRIEF_CHAR_CAP;

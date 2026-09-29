@@ -43,6 +43,26 @@ pub fn connected_model_inventory(default_model: &str) -> ModelInventory {
     )
 }
 
+/// Every listed model's place in its provider's ladder: the tier classifier
+/// run over exactly the rows a report lists — shipped and discovered alike,
+/// including a release whose family alias discovery moved on, so an older
+/// release is ranked (superseded) beside its successor rather than left
+/// unranked — one assignment per id (t-14437). `zo models --json` prints it
+/// beside each row, so a launcher outside zo (the window's summons) reads the
+/// classifier's own answer instead of keeping a second.
+#[must_use]
+pub fn tier_assignments_of(
+    models: &[(ProviderKind, &str)],
+) -> Vec<crate::model_router::ModelTierAssignment> {
+    let mut named = std::collections::HashSet::new();
+    let descriptors: Vec<ModelDescriptor> = models
+        .iter()
+        .filter(|(_, id)| named.insert(*id))
+        .map(|(provider, id)| descriptor_for(id, *provider))
+        .collect();
+    crate::model_router::classify_model_tiers(&descriptors)
+}
+
 #[must_use]
 pub fn model_inventory_from_authorized_providers(
     default_model: &str,
@@ -81,8 +101,11 @@ fn model_inventory_from_authorized_providers_with_catalog(
 }
 
 fn descriptor_for_catalog_entry(entry: &api::ProviderCatalogEntry) -> ModelDescriptor {
-    let id = entry.canonical_model_id;
-    let provider = provider_key(entry.provider);
+    descriptor_for(entry.canonical_model_id, entry.provider)
+}
+
+fn descriptor_for(id: &str, kind: ProviderKind) -> ModelDescriptor {
+    let provider = provider_key(kind);
     let family = family_for_model(id);
     let class = class_for_model(id);
     let (tiers, tiers_provenance) = tiers_for_model(id);

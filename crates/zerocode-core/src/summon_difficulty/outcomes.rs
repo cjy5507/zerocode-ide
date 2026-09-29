@@ -156,8 +156,13 @@ pub fn evidence(rows: &[&Value]) -> (Agreement, Option<Line>) {
     let mut tasks = HashSet::new();
     let mut agreement = Agreement::default();
     for row in rows {
-        // Repeated attempts are reported, but do not multiply the sample size.
-        if row["attempt"].as_u64() != Some(0) || row["retryOf"].as_bool() != Some(false) {
+        // Repeated attempts are reported, but do not multiply the sample size;
+        // and a challenger's turn ran a model no answer named, so it grades
+        // neither the answer nor the default (t-14437).
+        if row["attempt"].as_u64() != Some(0)
+            || row["retryOf"].as_bool() != Some(false)
+            || row[crate::summon_model::CHALLENGE_KEY] == true
+        {
             continue;
         }
         let (Some(run), Some(task), Some(agent), Some(difficulty)) = (

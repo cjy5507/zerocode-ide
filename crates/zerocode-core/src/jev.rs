@@ -1938,6 +1938,54 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     ),
 };
 
+/// Which model a summons runs on when nobody named one: a closed choice over
+/// the agent's lineup today, with `abstain` (t-14437). Graded like the
+/// difficulty seat — by the work its answers launched — and, like it, it
+/// fills only a dial the coordinator left open.
+pub const SUMMON_MODEL: JevUse = JevUse {
+    id: crate::summon_model::QUESTION,
+    setting: "summonModel",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/title",
+            cap: Cap::Chars(crate::summon_difficulty::TITLE_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/spec",
+            cap: Cap::Chars(crate::summon_difficulty::SPEC_CHAR_CAP),
+        },
+    ],
+    ledger: "summon-model.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(crate::summon_difficulty::APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(crate::summon_difficulty::outcomes::MIN_EXECUTIONS),
+    agreement_kind: AgreementKind::Hindsight,
+    // What runs without the seat: the lineup's model for the difficulty.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(crate::summon_difficulty::outcomes::MIN_NEGATIVES),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
+    reads_act_line: true,
+    rubric_version: crate::summon_model::RUBRIC_VERSION,
+    request_name: &["dispatch"],
+    names: Naming::Request,
+    label_part: &[],
+    follows: None,
+    regrade: Regrade::AsWritten,
+    // It acts only on a model dial the coordinator left open, and its marks
+    // come only from answers that were carried out.
+    auto_starts: promote::Stand::Applying,
+    // Every model offered sits beside `abstain`, which leaves the ladder's
+    // default.
+    abstain: Abstain::Offered,
+};
+
 /// Characters of the repeated tool call one step-effort question carries —
 /// the call's name and target as the board draws them, one card line
 /// (`crate::transcript::clamp`), which is what the question is about: the
@@ -4420,7 +4468,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 30] = [
+pub static JEV_USES: [JevUse; 31] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -4433,6 +4481,7 @@ pub static JEV_USES: [JevUse; 30] = [
     PLACEMENT,
     SUMMON,
     SUMMON_DIFFICULTY,
+    SUMMON_MODEL,
     STEP_EFFORT,
     ZO_STEP_EFFORT,
     COMPACTION,

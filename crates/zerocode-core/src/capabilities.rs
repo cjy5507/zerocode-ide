@@ -250,6 +250,13 @@ pub const CLAUDE_EFFORT_LADDER: &[&str] = &["low", "medium", "high", "xhigh", "m
 pub const CODEX_EFFORT_LADDER: &[&str] =
     &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
+/// Every effort word an agent's picker offers, lowest first — the one order
+/// efforts are ranked in, wherever one is brought inside what a model accepts
+/// or the highest of several is taken. Codex's ladder is the widest and
+/// Claude Code's lies inside it in the same order; a ladder that names a
+/// word outside this order fails the test beside it.
+pub const EFFORT_ORDER: &[&str] = CODEX_EFFORT_LADDER;
+
 /// Which witness says whether a resumed conversation was cut mid-turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -664,6 +671,28 @@ mod tests {
             .filter(|caps| pick(caps))
             .map(|caps| caps.id)
             .collect()
+    }
+
+    /// One order ranks every effort: the two pickers' ladders lie inside it
+    /// whole, and the ranked words of every agent's ladder stand in it the
+    /// way round they stand on the ladder. (`off` and `smart`, on zo's, are
+    /// ways of running and not rungs; nothing ranks them.)
+    #[test]
+    fn every_ladder_stands_in_the_one_effort_order() {
+        let rank = |word: &str| EFFORT_ORDER.iter().position(|known| *known == word);
+        for ladder in [CLAUDE_EFFORT_LADDER, CODEX_EFFORT_LADDER] {
+            assert!(ladder.iter().all(|word| rank(word).is_some()), "{ladder:?}");
+        }
+        for spec in &AGENT_SPECS {
+            let ranks: Vec<usize> = spec
+                .harness
+                .moves
+                .ladder
+                .iter()
+                .filter_map(|word| rank(word))
+                .collect();
+            assert!(ranks.is_sorted(), "{}: {ranks:?}", spec.id);
+        }
     }
 
     #[test]
