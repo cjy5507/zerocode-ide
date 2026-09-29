@@ -974,4 +974,63 @@ mod tests {
         }
         assert_eq!(looks(&pump), ended, "the stall watch went on looking after everything had ended");
     }
+
+    /// The "no new output" notice still reaches the main conversation through
+    /// the stall watch (t-11354, t-17057): a background helper that has written
+    /// nothing past the bar and runs no tool is told to the main as a follow-up,
+    /// on the beat that finds it, and only once.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_background_helper_is_still_told_to_the_main_by_the_stall_watch() {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut pump = AgentCompletionPump::spawn(rx, "session-a".to_string());
+        let store = tempfile::tempdir().expect("store");
+        std::fs::write(
+            store.path().join("agent-quiet.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "agentId": "agent-quiet",
+                "parentSessionId": "session-a",
+                "name": "quiet one",
+                "status": "running",
+                "startedAt": "100",
+                "lastActivityAt": 100,
+            }))
+            .expect("manifest json"),
+        )
+        .expect("write manifest");
+        let _mark = BackgroundMark::new("agent-quiet");
+        let registry = tools::AgentRegistry::at_root_for_tests("session-a", store.path());
+        let activity = runtime::helper_activity::Activity::new();
+        activity.set(runtime::helper_activity::Count::Workers, 1);
+        pump.watch_stalls_on(registry, super::Pulse::over(activity.watch()));
+
+        // A scan is a blocking task that finishes in real time, so the clock
+        // moves a second at a time and the runtime gets the moments it needs.
+        let mut told = None;
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..60 {
+                tokio::task::yield_now().await;
+                std::thread::sleep(Duration::from_micros(500));
+            }
+            if let Some(followup) = pump.try_recv_followup() {
+                told = Some(followup);
+                break;
+            }
+        }
+        let followup = told.expect("the stall watch never told the main about the silent helper");
+        assert!(
+            followup.text.contains("agent-quiet") && followup.text.contains("may be stuck"),
+            "the notice does not say which helper may be stuck: {}",
+            followup.text
+        );
+
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..60 {
+                tokio::task::yield_now().await;
+                std::thread::sleep(Duration::from_micros(500));
+            }
+        }
+        assert!(pump.try_recv_followup().is_none(), "the same silence was told to the main twice");
+    }
 }

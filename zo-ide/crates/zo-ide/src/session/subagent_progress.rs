@@ -1528,4 +1528,31 @@ mod tests {
         advance(10).await;
         assert_eq!(watcher.scans(), ended, "the watcher went on looking after everything had ended");
     }
+
+    /// A helper another zo started — one this process holds no worker for, so
+    /// no event tells this watcher of it — is seen within the quiet interval
+    /// (t-17057): the bound on what the beat alone would never look at.
+    #[tokio::test(start_paused = true)]
+    async fn a_helper_another_zo_started_is_seen_within_the_quiet_interval() {
+        let activity = Activity::new();
+        let (store, watcher) = quiet_watcher(&activity);
+        settle().await;
+        assert!(watcher.receiver.borrow().agents.is_empty(), "a store with nobody in it showed a row");
+        fs::write(
+            store.path().join("agent-elsewhere.json"),
+            serde_json::to_vec(&json!({
+                "agentId": "agent-elsewhere",
+                "parentSessionId": "session-a",
+                "name": "elsewhere",
+                "status": "running",
+                "startedAt": epoch_seconds_now().to_string(),
+            }))
+            .expect("manifest json"),
+        )
+        .expect("write manifest");
+        advance(16).await;
+        let rows = watcher.receiver.borrow().agents.clone();
+        assert_eq!(rows.len(), 1, "a helper another zo started was not seen in sixteen seconds: {rows:?}");
+        assert_eq!(rows[0].agent_id, "agent-elsewhere");
+    }
 }
