@@ -211,3 +211,46 @@ fn a_window_that_is_not_all_three_of_the_pointer_still_covers() {
     assert_eq!(over, [97, 98, 96]);
     assert!(cover.centre_hidden);
 }
+
+/// 09-30 (m-16152): where WindowServer draws the pointer itself, the window
+/// list holds it as a window at the cursor level, 28 × 40 points right under
+/// the pointer. A person's pointer resting on the place — or a press at its
+/// centre with the pointer already there — does not cover it: the pointer's
+/// own image hides nothing, and no ladder can move it away. Another window at
+/// that level, of another app or larger than a cursor, still covers.
+#[test]
+fn the_pointers_own_image_covers_nothing() {
+    let image = DesktopWindow {
+        id: 4,
+        pid: 399,
+        app: "Window Server".to_string(),
+        rect: Rect::new(236.0, 180.0, 28.0, 40.0),
+        own: false,
+        layer: 2_147_483_630,
+        alpha: 1.0,
+        overlay: false,
+    };
+    let target = window(5, 10, 0, (100.0, 100.0, 300.0, 200.0));
+    let place = Some(Rect::new(130.0, 75.0, 40.0, 50.0));
+    let cover = cover_of(&[image.clone(), target.clone()], 5, place).expect("the target is listed");
+    assert!(
+        cover.coverers.is_empty() && cover.hidden_permille == 0 && !cover.blocks_a_press(),
+        "the pointer's own image covers the place: {cover:?}"
+    );
+    let another_app = DesktopWindow {
+        pid: 50,
+        app: "app-50".to_string(),
+        ..image.clone()
+    };
+    let larger = DesktopWindow {
+        rect: Rect::new(100.0, 100.0, 300.0, 200.0),
+        ..image
+    };
+    for over in [another_app, larger] {
+        let cover = cover_of(&[over, target.clone()], 5, place).expect("listed");
+        assert!(
+            cover.hides_any(),
+            "a window at the cursor level that is not the pointer's own covers"
+        );
+    }
+}
