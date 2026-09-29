@@ -6,6 +6,7 @@ use crate::jev::{Cap, choice};
 use serde_json::{Value, json};
 
 pub const RUBRIC_VERSION: u32 = 2;
+pub mod lineup;
 pub mod outcomes;
 pub const PROFILES_SETTING: &str = "summonProfiles";
 pub const DEFAULT_PROFILES: &str = include_str!("summon-profiles.json");
