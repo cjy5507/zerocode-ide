@@ -1,40 +1,83 @@
 # Changelog
 
-## [1.1.41] — 2026-09-29
+## [1.1.42] — 2026-09-29
 
-_since v1.1.40 (24 commits)_
+_since v1.1.40 (110 commits)_
 
 ### feat
+- feat(summon): Jev picks a model and its effort together, easy and ordinary work runs a tier down at its highest effort, and a summons says why (t-14437)
+- feat(pane): a summoned worker's turn starts with its likely files, and every pane's agent can ask zerocode-find (t-14869)
+- feat(hook): a pane turn's ruler counts its calls as the t-14656 baseline did (t-14869)
+- feat(artifacts): an annotation made on a page the tab followed away to is recorded too (t-14586)
+- feat(summon): zo's lineup is every provider zo lists, an agent with no lineup says why, and a launch left to its CLI says so (t-14437)
+- feat(settings): the summons table shows what runs today and picks from today's lineup; a new model is said once in a line of its own (t-14437)
+- feat(summon): Jev picks the model a summons runs on from today's lineup, and a new model takes a share of easy work first (t-14437)
+- feat(summon): today's lineup makes the summons choices — a new model is offered without anybody typing it (t-14437)
+- feat(zo): zo models --json rows carry the tier classifier's band and rungs and the efforts each model accepts (t-14437)
+- feat(jev): each use records what its choices offer for none of these (t-13096)
 - feat(bench): a measured covered round names the cover seat's word, counts an autopilot's end for the person, and times a person's own run (t-12979)
 
 ### fix
-- fix(computer-use): a move the helper refused is written down as not made (t-12979)
-- fix(bench): a run with no cover launches its fixture as before, and a round the hand never began is graded as that (t-12979)
-- fix(computer-use): a window the helper cannot move is raised with its app, and a refused move goes on to the next (t-12979)
-- fix(pty): an Enter is a send only when the pane says it took it — pressed once more when it does not, never retyped, one road for every door (t-14037)
-- fix(restart): the panes that were open come back where they stood, in every workspace (t-14036)
+- fix(probe): a child that ended before the kill is the state the kill was for
+- fix(zo): a helper's words reach the main once, and Esc hands a blocking helper's result to the background road (t-15207 = t-11459 + t-11460)
+- fix(board): the desk names the two idle reasons in four locales (t-15313)
+- fix(zo): an unattended turn that keeps writing is not ended at two hours, and the cut names its limit (t-15208)
+- fix(zo): SpawnMultiAgent's collection is a quiet window — a working helper is never cut for its age (t-15208)
+- fix(workflow): a phase has no wall clock unless somebody names one, and the wall that ends an agent says which (t-15208)
+- fix(zo): one age rule for every road that could end a helper, and a pane running a tool call is not quiet (t-15208)
+- fix(window): the folded-model notice says a newer version arrived, in plain Korean (t-14437)
+- fix(summon): a challenger's turn does not wait on the model seat's answer (t-14437)
+- fix(summon): efforts are ranked by one order, the widest ladder's, so an effort below low is ranked too (t-14437)
+- fix(orchestration): a taken-over worker's unread mail is told to its coordinator, once and named so, and nothing is typed into the person's pane (t-15313)
+- fix(orchestration): mail stays unread until it is acknowledged, a worker at rest with unread mail or in its own wait is told once, and a stall is one notice per episode (t-15313)
+- fix(zo): words a person types while a zo turn works are on disk when the model reads them, so a restart before the turn ends no longer resumes without them (t-11457)
+- fix(file-pick): a pane's candidates come from the task's own words, files ranked by how many they name (t-14869)
+- fix(summon): the lineup-less origin is a test's road only (t-14437)
+- fix(summon): every row zo lists is ranked, an older release included, and zo's fallback runs the provider its own settings run (t-14437)
+- fix(jev): the model seat is judged by the work its answers launched, like the difficulty seat, and a challenger's turn grades neither (t-14437)
+- fix(summon): the lineup reader has a name of its own beside zo's slash catalog, and the model seat's tests share the difficulty seat's deferred host (t-14437)
+- fix(jev): the model seat offers abstain beside every model, and says so in the abstain column (t-14437)
+- fix(knowledge): a galaxy wears its own colour cell and a star's centre keeps its edit colour in the universe (t-14081)
+- fix(orchestration): the pointer stops fighting a person's draft — one offer per watermark until the draft goes, and a collected pointer is not called uncollected (t-14585)
 - fix(window): a reported checkout takes the reclaim's one judgment, and one road at a time holds a checkout (t-12773)
-- fix(bench): a covered scene run under each cover word has a folder of its own (t-12979)
-- fix(reflex): an autopilot stops a run for a cover only from a tenth of its place hidden (t-12979)
+- … 10 more fix commits
+
+### perf
+- perf(summon): agent-list reads settings only for the agents that can launch a difficulty (t-14437)
+
+### refactor
+- refactor(summon): a model's three medians are taken by one loop (t-14437)
 
 ### test
-- test(window): the restart harness holds each delivery to its Enter and the one pressed again (t-14037)
-- test(window): the restart harness parks a second door's words the way the window does, and says how each restart went (t-14037)
-- test(computer-use): a move the helper refused is written down as not made (t-12979, red)
-- test(computer-use): a window the helper cannot move is raised with its app, and a refused move is not the end (t-12979, red)
-- test(pty): an Enter is a send only when the pane says it took it — red (t-14037)
-- test(restart): a restart opens the panes that were open, where they stood, in every workspace — red (t-14036)
-- test(window): a reported checkout takes the reclaim's one judgment, one road at a time (t-12773, red)
-- test(reflex): a sliver over the window's edge leaves a covered-window run standing (t-12979, red)
+- test(probe): a child that ended before the kill does not fail the run (red)
+- test(orchestration): two pinned pointer tests read the at-rest count of an unacknowledged batch (t-15313)
+- test(zo): a helper's words and a let-go helper's result reach the main (t-15207 = t-11459 + t-11460, red)
+- test(zo): the collection tests name their bindings apart and add no time subtraction (t-15208)
+- test(board): the desk says what a resting worker rests on (t-15313) — red
+- test(zo): the working-turn tests hold an async lock across the turn's awaits (t-15208)
+- test(summon): an effort below low is ranked like every other, and a challenger's turn does not wait on the acting seat (t-14437, red)
+- test(orchestration): a taken-over worker's unread mail reaches nobody (t-15313) — red
+- test(orchestration): a go-ahead leased into an unread output, a worker at rest beside its own wait, and an ordered wait told every five minutes (t-15313) — red
+- test(zo): a helper that is working is cut by its age on four roads — the tests that say it (red, t-15208)
+- test(runtime): words typed during a tool are on disk when the model reads them (t-11457, red)
+- test(pane): the red tests compile — the replay's pane says it is no worker, the endpoint owns its answer (t-14869)
+- test(orchestration): a worker briefing names zerocode-find before the task — red (t-14869)
+- test(hook): a turn start's road is the catalog's and a pane without one says why — red (t-14869)
+- test(pane): zerocode-find answers from the pane's search, is asked beside its answer and graded as asked — red (t-14869)
+- test(hookd): zerocode-find asks the window with the agent's words, folder and pane — red (t-14869)
+- test(find): zerocode-find reads the agent's words and prints each likely file with its first line — red (t-14869)
+- test(pane): a summoned worker's turn brief says the files its one question selected — red (t-14869)
+- test(settings): a new model is said once per set of models and a folded one in a line of its own (t-14437)
+- test(hookd): a turn's brief joins the prompt's context within the script's budget and carries nothing else — red (t-14869)
+- … 20 more test commits
+
+### style
+- style(settings): the two lineup fields stand as rustfmt writes them (t-14437)
+- style(pane): one condition shelves a turn's file pick (t-14869)
+- style(summon): a challenger's turn reads is_multiple_of (clippy) (t-14437)
 
 ### other
-- Merge branch 'wt/t-12979/computer-use' (4b07c5ee) — a covered window the helper cannot move is handed to the person, not ended in an error, and a sliver over the edge does not stop a run.
-- Merge branch 'wt/t-14036' (71b15e2b) — a restart opens the panes that were open, where they stood, in every workspace.
-- Merge branch 'wt/t-14037' (1501f1a2) — a message typed into a pane is sent only when the pane says it took it: Enter is pressed once more when it does not, and the words are never typed twice.
-- Merge remote-tracking branch 'origin/main' into wt/t-14037
-- Merge origin/main (12fdfc71) into wt/t-14036
-- Merge branch 'wt/t-12773/worktree-reclaim' (2c644574) — a finished worker's checkout now takes the same one judgment as the reclaim sweep, and only one road at a time may judge or remove a checkout.
-- Merge remote-tracking branch 'origin/main' into wt/t-12979/computer-use
+- … 1 more other commits
 
 ## [1.1.40] — 2026-09-29
 
