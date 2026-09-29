@@ -6,11 +6,11 @@
 //! 잠그려 들면 답이 턴을 기다리게 된다. 대신 프런트엔드가 상태 카드와
 //! 히스토리를 **밀어 넣고**, 소켓은 마지막으로 밀린 값만 읽는다.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use runtime::message_stream::PermissionDecision;
+use runtime::message_stream::{PermissionDecision, RenderBlock, ToolCallStatus};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch, Notify};
 
@@ -210,6 +210,11 @@ pub struct ChannelState {
     /// is the whole state of its kind.
     snapshots: Mutex<HashMap<&'static str, String>>,
     prompts: Mutex<HashMap<u64, PromptSlot>>,
+    /// The tool calls running now, by the id their blocks carry: counted from
+    /// the block that says a call started to the one that says it ended, and
+    /// cleared with the turn. `session.list` reports the count so a parent can
+    /// tell a pane running a build from one that stopped (t-12076).
+    running_calls: Mutex<HashSet<String>>,
     next_prompt_id: AtomicU64,
     commands: Mutex<VecDeque<Command>>,
     commands_arrived: Notify,
@@ -244,6 +249,7 @@ impl ChannelState {
             history: Mutex::new(Vec::new()),
             snapshots: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
+            running_calls: Mutex::new(HashSet::new()),
             next_prompt_id: AtomicU64::new(1),
             commands: Mutex::new(VecDeque::new()),
             commands_arrived: Notify::new(),
@@ -569,6 +575,40 @@ impl ChannelState {
             .collect()
     }
 
+    /// A render block went out: when it says a tool call started or ended,
+    /// the count of running calls follows it. A call is running from its
+    /// `Running` block — its arguments complete and the runtime executing it —
+    /// until its result block or an ending status; one still `Pending` has
+    /// only its arguments streaming, which is the model's time, not a tool's.
+    pub fn note_tool_block(&self, block: &RenderBlock) {
+        let (id, starts) = match block {
+            RenderBlock::ToolCall { tool_call_id, status, .. } => match status {
+                ToolCallStatus::Pending => return,
+                ToolCallStatus::Running => (&tool_call_id.0, true),
+                ToolCallStatus::Ok | ToolCallStatus::Errored | ToolCallStatus::Cancelled => {
+                    (&tool_call_id.0, false)
+                }
+            },
+            RenderBlock::ToolResult { tool_call_id, .. } => (&tool_call_id.0, false),
+            _ => return,
+        };
+        let mut held = self.running_calls.lock().unwrap_or_else(PoisonError::into_inner);
+        if starts {
+            held.insert(id.clone());
+        } else {
+            held.remove(id);
+        }
+    }
+
+    /// How many tool calls are running now — what `session.list` reports.
+    #[must_use]
+    pub fn running_tools(&self) -> usize {
+        self.running_calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
     /// 지금 등록돼 있는 프롬프트 수(테스트·진단용).
     #[must_use]
     pub fn live_prompts(&self) -> usize {
@@ -623,9 +663,14 @@ impl ChannelState {
         turn_id
     }
 
-    /// 도는 턴을 지운다.
+    /// 도는 턴을 지운다. 결과가 끝내 안 온 도구 호출도 함께 지운다 — 남겨 두면
+    /// 다음 턴까지 「일하는 중」으로 서서 멈춘 판이 영영 안 끊긴다(t-12076).
     pub fn end_turn(&self) {
         *self.turn.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.running_calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     /// 지금 도는 턴 번호.
@@ -638,6 +683,48 @@ impl ChannelState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime::message_stream::{BlockId, ToolCallId, ToolPreview, ToolResultBody};
+
+    fn call(id: &str, status: ToolCallStatus) -> RenderBlock {
+        RenderBlock::ToolCall {
+            id: BlockId(1),
+            tool_call_id: ToolCallId(id.to_string()),
+            name: "bash".to_string(),
+            summary: "cargo build".to_string(),
+            preview: ToolPreview::Bash { command: "cargo build".to_string() },
+            status,
+        }
+    }
+
+    fn result(id: &str) -> RenderBlock {
+        RenderBlock::ToolResult {
+            id: BlockId(2),
+            tool_call_id: ToolCallId(id.to_string()),
+            is_error: false,
+            body: ToolResultBody::Text { content: "Finished".to_string(), truncated: false },
+        }
+    }
+
+    /// A tool call is counted from its start block to its result or an ending
+    /// status, once however often it is announced, and the turn's end clears
+    /// what never returned (t-12076).
+    #[test]
+    fn running_tool_calls_are_counted_from_the_start_block_to_the_end() {
+        let state = ChannelState::new("endpoint".into());
+        state.note_tool_block(&call("a", ToolCallStatus::Pending));
+        assert_eq!(state.running_tools(), 0, "arguments still streaming is not a running call");
+        state.note_tool_block(&call("a", ToolCallStatus::Running));
+        state.note_tool_block(&call("b", ToolCallStatus::Running));
+        state.note_tool_block(&call("b", ToolCallStatus::Running));
+        assert_eq!(state.running_tools(), 2);
+        state.note_tool_block(&result("a"));
+        assert_eq!(state.running_tools(), 1);
+        state.note_tool_block(&call("b", ToolCallStatus::Errored));
+        assert_eq!(state.running_tools(), 0);
+        state.note_tool_block(&call("c", ToolCallStatus::Running));
+        state.end_turn();
+        assert_eq!(state.running_tools(), 0, "a turn that ends takes its unreturned calls with it");
+    }
 
     #[test]
     fn capability_revisions_dedupe_and_hydrate_after_the_legacy_trio() {

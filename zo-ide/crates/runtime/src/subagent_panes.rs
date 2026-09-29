@@ -628,10 +628,12 @@ pub struct Limits {
     /// How long a parent waits for one pane turn to show progress — a line
     /// more on the child's transcript — before it ends the pane. Time spent
     /// working does not count against it, nor does time spent waiting on a
-    /// person; time spent stuck does (t-11458).
+    /// person or on a tool call the child is running; time spent stuck does
+    /// (t-11458, t-12076).
     pub pane_quiet: Duration,
     /// While a pane child is quiet, how often its parent asks it whether it
-    /// is waiting on a person (the open questions on its `session.list`).
+    /// is waiting on a person or running a tool call (the open questions and
+    /// the running calls on its `session.list`).
     pub pane_ask_poll: Duration,
     /// A wall-clock limit on one pane turn, however the child is doing, when
     /// the person's settings name one (`paneBudgetMs` — the key that meant
@@ -698,12 +700,14 @@ impl Limits {
     /// turn runs as long as the child keeps making progress.
     #[must_use]
     pub fn pane_budget(&self, named: Option<Duration>) -> PaneBudget {
-        let quiet = PaneBudget::Quiet {
-            limit: self.pane_quiet,
-            ask_every: self.pane_ask_poll,
-            ask_timeout: self.channel_timeout,
-        };
-        named.or(self.pane_wall).map_or(quiet, PaneBudget::Wall)
+        match AgeRule::of(named.or(self.pane_wall), self.pane_quiet) {
+            AgeRule::Wall(limit) => PaneBudget::Wall(limit),
+            AgeRule::Quiet(limit) => PaneBudget::Quiet {
+                limit,
+                ask_every: self.pane_ask_poll,
+                ask_timeout: self.channel_timeout,
+            },
+        }
     }
 
     /// The table for this process: `settings.json` in the config home.
@@ -713,6 +717,63 @@ impl Limits {
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
         Self::from_settings(settings.as_ref())
+    }
+}
+
+/// The one rule every road that could end a helper by its age answers to
+/// (t-12076): while the helper shows progress nothing cuts it, and only a limit
+/// somebody named is a wall clock.
+///
+/// A pane's wait, a workflow phase, a fan-out's collection and an unattended
+/// turn's deadline each used to carry a wall of their own — twenty minutes
+/// and two pushes, two hours, an hour and two pushes — and each cut a helper
+/// that was still implementing. They read this now: [`Self::of`] picks the
+/// rule from what somebody named and the road's own quiet window,
+/// [`Self::reached`] says whether it is time to cut, and [`Self::words`] is
+/// how a cut names the limit that did it. What counts as progress is the
+/// road's own (a transcript that grew, a heartbeat, a file written) — with a
+/// tool call that is running counted as progress on every one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgeRule {
+    /// No clock runs while the helper shows progress; it is ended once it has
+    /// shown none for this long, however long it has been going in all.
+    Quiet(Duration),
+    /// A limit somebody named: this long after it began, working or not.
+    Wall(Duration),
+}
+
+impl AgeRule {
+    /// The rule for a road: the limit somebody named when one was named,
+    /// otherwise the road's own quiet window.
+    #[must_use]
+    pub fn of(named: Option<Duration>, quiet: Duration) -> Self {
+        named.map_or(Self::Quiet(quiet), Self::Wall)
+    }
+
+    /// Whether the helper has reached its limit: `ran` is how long it has been
+    /// going, `quiet_for` how long it has shown no progress.
+    #[must_use]
+    pub fn reached(self, ran: Duration, quiet_for: Duration) -> bool {
+        match self {
+            Self::Quiet(limit) => quiet_for >= limit,
+            Self::Wall(limit) => ran >= limit,
+        }
+    }
+
+    /// The limit as a clock reads it, with what kind it was: `no progress for
+    /// 1h 0m` or `its limit of 30m`.
+    #[must_use]
+    pub fn words(self) -> String {
+        match self {
+            Self::Quiet(limit) => format!(
+                "no progress for {}",
+                core_types::retry_signal::human_reset_wait(limit)
+            ),
+            Self::Wall(limit) => format!(
+                "its limit of {}",
+                core_types::retry_signal::human_reset_wait(limit)
+            ),
+        }
     }
 }
 
@@ -736,20 +797,28 @@ pub enum PaneBudget {
 }
 
 impl PaneBudget {
+    /// The rule this budget applies: the one every road answers to.
+    #[must_use]
+    pub fn rule(self) -> AgeRule {
+        match self {
+            Self::Quiet { limit, .. } => AgeRule::Quiet(limit),
+            Self::Wall(limit) => AgeRule::Wall(limit),
+        }
+    }
+
     /// Why the pane was ended, in words for the parent's model and whoever
     /// reads its answer — the limit as a clock reads it (`1h 0m`, `30m`).
     #[must_use]
     pub fn ended_because(self) -> String {
+        let words = self.rule().words();
         match self {
-            Self::Quiet { limit, .. } => format!(
-                "the sub-agent showed no progress for {} (its transcript did not grow and it was not \
-                 waiting on anyone), so its pane was closed",
-                core_types::retry_signal::human_reset_wait(limit)
+            Self::Quiet { .. } => format!(
+                "the sub-agent showed {words} (its transcript did not grow, and it was not waiting \
+                 on anyone or running a tool call), so its pane was closed"
             ),
-            Self::Wall(limit) => format!(
-                "the sub-agent's pane wrote no result within its limit of {}, so its pane was closed",
-                core_types::retry_signal::human_reset_wait(limit)
-            ),
+            Self::Wall(_) => {
+                format!("the sub-agent's pane wrote no result within {words}, so its pane was closed")
+            }
         }
     }
 }
@@ -780,6 +849,12 @@ pub mod channel_method {
 /// child waiting on a person from one that stopped (t-11458).
 pub const LIST_ASKING: &str = "asking";
 
+/// The field of a child's `session.list` entry that counts the tool calls it
+/// is running now. A call in flight writes nothing to the transcript until it
+/// returns, so a compile on a loaded machine reads as a child that stopped;
+/// the parent reads this field to tell it from one that did (t-12076).
+pub const LIST_RUNNING: &str = "running";
+
 /// The child's channel file inside its directory — the discovery record
 /// (address, token, session id) copied where the parent can find it without
 /// knowing the child's pid.
@@ -799,14 +874,34 @@ pub fn named_transcript(directory: &Path) -> Option<PathBuf> {
     (!named.is_empty()).then(|| PathBuf::from(named))
 }
 
-/// Whether the child in `directory` has a question to a person open now, by
-/// its channel. A child with no channel yet, or one that does not answer, is
-/// not waiting on anybody.
-fn waits_on_a_person(directory: &Path, timeout: Duration) -> bool {
+/// What a child's turn is being held open for, as its `session.list` says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChildStanding {
+    /// Questions to a person standing open — permission prompts and questions
+    /// it asked.
+    pub asking: u64,
+    /// Tool calls running now. A call in flight writes nothing to the
+    /// transcript until it returns.
+    pub running: u64,
+}
+
+impl ChildStanding {
+    /// Whether the child is doing something a quiet clock must not count
+    /// against it: waiting for a person's answer or for a tool's result.
+    #[must_use]
+    pub const fn is_occupied(self) -> bool {
+        self.asking > 0 || self.running > 0
+    }
+}
+
+/// Whether the child in `directory` is waiting on a person or running a tool
+/// call now, by its channel. A child with no channel yet, or one that does not
+/// answer, is not occupied with anything.
+fn is_occupied(directory: &Path, timeout: Duration) -> bool {
     ChannelCoordinates::read(&directory.join(CHANNEL_FILE))
         .ok()
-        .and_then(|coordinates| coordinates.open_questions(timeout))
-        .is_some_and(|open| open > 0)
+        .and_then(|coordinates| coordinates.standing(timeout))
+        .is_some_and(ChildStanding::is_occupied)
 }
 
 /// What the parent compares to see a child's work move: its transcript's
@@ -958,13 +1053,19 @@ impl ChannelCoordinates {
         }
     }
 
-    /// How many questions to a person the child has open, by its
-    /// `session.list` answer ([`LIST_ASKING`]). None when nobody answered or
-    /// the answer does not say — a child from before the field.
+    /// What the child holds its turn open for, by its `session.list` answer:
+    /// the questions to a person it has open ([`LIST_ASKING`]) and the tool
+    /// calls it is running ([`LIST_RUNNING`]). None when nobody answered or
+    /// the answer does not say how many questions stand — a child from before
+    /// the field; a child from before `running` has no call to report.
     #[must_use]
-    pub fn open_questions(&self, timeout: Duration) -> Option<u64> {
+    pub fn standing(&self, timeout: Duration) -> Option<ChildStanding> {
         let listed = self.call(channel_method::LIST, serde_json::json!({}), timeout).ok()?;
-        listed.get(0)?.get(LIST_ASKING)?.as_u64()
+        let entry = listed.get(0)?;
+        Some(ChildStanding {
+            asking: entry.get(LIST_ASKING)?.as_u64()?,
+            running: entry.get(LIST_RUNNING).and_then(serde_json::Value::as_u64).unwrap_or(0),
+        })
     }
 
     /// Does a process still answer here? Any answer — even a refusal — is a
@@ -1675,9 +1776,9 @@ pub fn wait_for_result(
 /// killed after it, so a child that ignored the door is not left standing.
 ///
 /// A [`PaneBudget::Quiet`] budget is counted from the last time the child's
-/// transcript was seen to change or the child was seen waiting on a person,
-/// or from the start of the wait before either — a transcript left from an
-/// earlier turn is not progress.
+/// transcript was seen to change or the child was seen waiting on a person or
+/// running a tool call, or from the start of the wait before any of them — a
+/// transcript left from an earlier turn is not progress.
 #[allow(clippy::too_many_arguments)] // one wait, one table of ways it ends
 pub fn wait_for_turn_result(
     tmux: &Tmux,
@@ -1724,9 +1825,9 @@ pub fn wait_for_turn_result_on(
             return answered().unwrap_or(PaneOutcome::Cancelled);
         }
         let now = clock.now();
-        let (counted, limit) = match budget {
-            PaneBudget::Wall(limit) => (now.duration_since(started), limit),
-            PaneBudget::Quiet { limit, ask_every, ask_timeout } => {
+        let quiet_for = match budget {
+            PaneBudget::Wall(_) => Duration::ZERO,
+            PaneBudget::Quiet { ask_every, ask_timeout, .. } => {
                 let stamp = transcript_stamp(directory);
                 if stamp.is_some() && stamp != seen {
                     seen = stamp;
@@ -1734,15 +1835,17 @@ pub fn wait_for_turn_result_on(
                 } else if now.duration_since(progressed.max(asked)) >= ask_every {
                     // Asked only of a child quiet for a while, and at most
                     // once an interval: a writing child is not asked at all.
+                    // One that is waiting on a person or running a tool call
+                    // is working, and its quiet clock starts over.
                     asked = now;
-                    if waits_on_a_person(directory, ask_timeout) {
+                    if is_occupied(directory, ask_timeout) {
                         progressed = now;
                     }
                 }
-                (now.duration_since(progressed), limit)
+                now.duration_since(progressed)
             }
         };
-        if counted >= limit {
+        if budget.rule().reached(now.duration_since(started), quiet_for) {
             close();
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::TimedOut);
@@ -2680,9 +2783,11 @@ mod tests {
 
     /// A child's channel that answers every `session.list` the way a child
     /// does, carrying how many questions to a person stand open now
-    /// (`asking`). Serves until the handle is dropped.
+    /// (`asking`) and how many tool calls it is running (`running`). Serves
+    /// until the handle is dropped.
     struct ListingChild {
         asking: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        running: std::sync::Arc<std::sync::atomic::AtomicU64>,
         done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
@@ -2700,8 +2805,9 @@ mod tests {
             .write(&child.join(CHANNEL_FILE))
             .expect("write channel file");
             let asking = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (serving, stop) = (asking.clone(), done.clone());
+            let (serving, calls, stop) = (asking.clone(), running.clone(), done.clone());
             std::thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
                     let Ok((stream, _)) = listener.accept() else {
@@ -2721,17 +2827,22 @@ mod tests {
                             "id": "child-session",
                             "messages": 3,
                             LIST_ASKING: serving.load(Ordering::SeqCst),
+                            LIST_RUNNING: calls.load(Ordering::SeqCst),
                         }],
                     });
                     let mut writer = stream;
                     let _ = writeln!(writer, "{response}");
                 }
             });
-            Self { asking, done }
+            Self { asking, running, done }
         }
 
         fn set_asking(&self, open: u64) {
             self.asking.store(open, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn set_running(&self, calls: u64) {
+            self.running.store(calls, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -2769,6 +2880,38 @@ mod tests {
             clock.elapsed(),
             asked_for + quiet,
             "the quiet budget counts from the last look that saw the question open"
+        );
+    }
+
+    /// A child running a tool call is working, however long the call takes.
+    /// The call writes nothing to the transcript until it returns — one
+    /// compile took seventeen minutes at load 150 — so a quiet clock that
+    /// reads only the transcript ends the child at the hour in the middle of
+    /// the build. The clock stands still while the call runs and counts again
+    /// from the moment it returns (t-12076).
+    #[test]
+    fn a_child_running_a_tool_call_is_not_quiet_however_long_the_call_runs() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-13");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        work_on_transcript(&child, r#"{"type":"tool_use","name":"bash"}"#);
+        let listing = ListingChild::stand(&child);
+        listing.set_running(1);
+        let quiet = Duration::from_secs(60 * 60);
+        let call_takes = Duration::from_secs(150 * 60);
+        let build = |elapsed: Duration| {
+            if elapsed > call_takes {
+                listing.set_running(0);
+            }
+        };
+        let clock = SteppedClock::new(Duration::from_secs(60), &build);
+        let outcome = wait_for_turn_result_on(&clock, &tmux, &child, "%9", 1, quiet_budget(quiet), &|| false, &|| {});
+        assert_eq!(outcome, PaneOutcome::TimedOut, "a child that never goes on is still ended");
+        assert_eq!(
+            clock.elapsed(),
+            call_takes + quiet,
+            "the quiet budget counts from the last look that saw the call running"
         );
     }
 
@@ -2839,8 +2982,69 @@ mod tests {
     fn an_ended_pane_says_which_limit_ended_it() {
         let quiet = quiet_budget(Duration::from_secs(60 * 60)).ended_because();
         assert!(quiet.contains("no progress for 1h 0m"), "{quiet}");
+        assert!(
+            quiet.contains("running a tool call"),
+            "a quiet pane says a running call would have counted: {quiet}"
+        );
         let wall = PaneBudget::Wall(Duration::from_secs(30 * 60)).ended_because();
         assert!(wall.contains("within its limit of 30m"), "{wall}");
+    }
+
+    /// The one rule (t-12076): a limit somebody named is the only wall clock;
+    /// otherwise the road's own quiet window applies, and it is progress that
+    /// resets it. Every road — the pane's wait, a workflow phase, a fan-out's
+    /// collection, an unattended turn — picks its rule here.
+    #[test]
+    fn the_one_age_rule_cuts_a_wall_by_age_and_a_quiet_window_by_silence() {
+        let hour = Duration::from_secs(60 * 60);
+        let day = Duration::from_secs(24 * 60 * 60);
+        assert_eq!(AgeRule::of(None, hour), AgeRule::Quiet(hour), "nobody named a limit");
+        assert_eq!(
+            AgeRule::of(Some(day), hour),
+            AgeRule::Wall(day),
+            "a named limit is a wall, whatever the quiet window is"
+        );
+
+        let quiet = AgeRule::Quiet(hour);
+        assert!(
+            !quiet.reached(day, Duration::from_secs(59 * 60)),
+            "a day of work is not a reason while progress keeps coming"
+        );
+        assert!(quiet.reached(Duration::from_secs(61 * 60), hour), "an hour of silence is");
+        let wall = AgeRule::Wall(hour);
+        assert!(!wall.reached(Duration::from_secs(59 * 60), hour), "a wall is not reached early");
+        assert!(wall.reached(hour, Duration::ZERO), "a wall is reached working or not");
+
+        assert_eq!(quiet.words(), "no progress for 1h 0m");
+        assert_eq!(wall.words(), "its limit of 1h 0m");
+        assert_eq!(AgeRule::Wall(Duration::from_secs(90)).words(), "its limit of 2m");
+    }
+
+    /// A child from before the `running` field still answers with `asking`;
+    /// one from before `asking` says nothing about either.
+    #[test]
+    fn a_childs_standing_reads_what_it_says_and_no_more() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let child = directory.path().join("agent-14");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let listing = ListingChild::stand(&child);
+        let coordinates = ChannelCoordinates::read(&child.join(CHANNEL_FILE)).expect("coordinates");
+        let timeout = Duration::from_secs(3);
+        assert_eq!(
+            coordinates.standing(timeout),
+            Some(ChildStanding { asking: 0, running: 0 })
+        );
+        assert!(!coordinates.standing(timeout).is_some_and(ChildStanding::is_occupied));
+        listing.set_asking(1);
+        listing.set_running(2);
+        let standing = coordinates.standing(timeout).expect("standing");
+        assert_eq!(standing, ChildStanding { asking: 1, running: 2 });
+        assert!(standing.is_occupied());
+        listing.set_asking(0);
+        assert!(
+            coordinates.standing(timeout).is_some_and(ChildStanding::is_occupied),
+            "a running call alone is enough"
+        );
     }
 
     /// A tmux that cannot be asked is not evidence a child died.

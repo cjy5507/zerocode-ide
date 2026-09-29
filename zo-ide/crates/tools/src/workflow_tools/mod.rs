@@ -851,9 +851,10 @@ impl LiveBackend {
             .unwrap_or_else(crate::misc_tools::AgentRegistry::unowned_from_cwd)
     }
 
-    /// Workflow-only wait loop with independent startup, inactivity, and hard
-    /// cap policies. Task progress resets the inactivity window; transport and
-    /// reasoning activity do not. The hard cap remains the final safety bound.
+    /// Workflow-only wait loop with independent startup, inactivity, and wall
+    /// clock policies. Task progress resets the inactivity window; transport
+    /// and reasoning activity do not. The wall clock exists only when somebody
+    /// named one: a phase whose agents keep working is not ended for its age.
     fn wait_with_startup_watchdog(
         registry: &crate::misc_tools::AgentRegistry,
         ids: &[String],
@@ -862,14 +863,14 @@ impl LiveBackend {
     ) -> Vec<AgentCompletion> {
         let mut watch = wait::WaitState::new(
             std::time::Instant::now(),
-            engine::phase_hard_timeout_from_env(timeout),
+            engine::phase_wall_limit_from_env(timeout),
         );
         Self::wait_with_watch(registry, ids, timeout, &mut watch, on_done, None)
     }
 
     #[expect(
         clippy::too_many_lines,
-        reason = "one wait loop owns completion races, startup, inactivity, and the hard cap"
+        reason = "one wait loop owns completion races, startup, inactivity, and the wall clock"
     )]
     fn wait_with_watch(
         registry: &crate::misc_tools::AgentRegistry,
@@ -984,13 +985,11 @@ impl LiveBackend {
 
         if hard_cap_reached && !pending.is_empty() {
             let hard_capped = std::mem::take(&mut pending);
+            // The stop names the limit that did it; a deadline only exists
+            // for a named one.
+            let error = engine::phase_wall_stop_error(watch.wall().unwrap_or_default());
             completions.extend(stop_agents_with_error(
-                registry,
-                &hard_capped,
-                engine::PHASE_HARD_TIMEOUT_STOP_ERROR,
-                engine::PHASE_HARD_TIMEOUT_STOP_ERROR,
-                on_done,
-                attempts,
+                registry, &hard_capped, &error, &error, on_done, attempts,
             ));
         }
 
@@ -1191,6 +1190,12 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, previous }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -1316,12 +1321,52 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_secs(2));
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0].status, engine::STATUS_STOPPED);
+        let limit = Duration::from_secs(2);
         assert_eq!(
             completions[0].error.as_deref(),
-            Some(engine::PHASE_HARD_TIMEOUT_STOP_ERROR),
+            Some(engine::phase_wall_stop_error(limit).as_str()),
             "an active tool must never be stopped as task inactivity"
         );
+        let error = completions[0].error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("2s") && error.contains("ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS"),
+            "a phase ended by a wall clock says which limit ended it: {error}"
+        );
         std::fs::remove_dir_all(store).ok();
+    }
+
+    /// Nobody named a limit for the phase, so no wall clock runs on it: agents
+    /// that keep working are not ended for the phase's age. The two hours that
+    /// used to end them were a limit nobody had asked for (t-12076). A limit
+    /// somebody names — the environment knob — is the only wall, and is never
+    /// shorter than the inactivity window it sits beside.
+    #[test]
+    fn a_phase_nobody_named_a_limit_for_has_no_wall_clock() {
+        let _env_lock = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = Duration::from_secs(20 * 60);
+        {
+            let _unnamed = EnvVarGuard::unset("ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS");
+            assert_eq!(
+                engine::phase_wall_limit_from_env(window),
+                None,
+                "an unnamed phase limit is not a wall clock"
+            );
+        }
+        let _named = EnvVarGuard::set("ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS", "7200");
+        assert_eq!(
+            engine::phase_wall_limit_from_env(window),
+            Some(Duration::from_secs(7200)),
+            "a named limit is a wall clock"
+        );
+        let shorter = EnvVarGuard::set("ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS", "30");
+        assert_eq!(
+            engine::phase_wall_limit_from_env(window),
+            Some(window),
+            "a named wall never ends a phase before its inactivity window would"
+        );
+        drop(shorter);
     }
 
     #[test]
@@ -1689,7 +1734,8 @@ mod tests {
         let mut backend = readonly_backend(crate::misc_tools::AgentRegistry::unowned_from_cwd());
         assert_eq!(backend.registry().manifest_by_id(id).unwrap().run_generation, 2);
         backend.attempts.insert(id.to_string(), 1);
-        let mut watch = wait::WaitState::new(std::time::Instant::now(), Duration::from_secs(1));
+        let mut watch =
+            wait::WaitState::new(std::time::Instant::now(), Some(Duration::from_secs(1)));
         let result = backend.wait_next(&[id.to_string()], Duration::from_secs(1), &mut watch);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status, engine::STATUS_FAILED);

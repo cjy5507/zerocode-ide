@@ -406,15 +406,17 @@ where
         self.deadline = None;
     }
 
-    /// Set (or clear) the progress-gated deadline-extension policy
-    /// `(max_extensions, step)`: when the wall-clock deadline passes but the
-    /// turn shows fresh objective progress (new successful edit/write/plan
-    /// tool results since the last window), the deadline is pushed out by
-    /// `step`, at most `max_extensions` times, instead of stopping mid-work.
-    /// Only the interactive host sets this — spawned sub-agents keep their
-    /// deadline as a hard straggler bound. Re-set at every turn entry (like
-    /// [`Self::set_deadline`]) so an env change takes effect next turn.
-    pub fn set_deadline_extension(&mut self, policy: Option<(u8, std::time::Duration)>) {
+    /// Set (or clear) the progress-gated deadline-extension policy: when the
+    /// deadline passes but the turn shows fresh objective progress (new
+    /// successful edit/write/plan tool results since the last window), the
+    /// deadline is pushed out by the policy's step instead of stopping
+    /// mid-work — at most the policy's count when somebody named one, with no
+    /// cap when nobody did (then the deadline is a quiet window, and time
+    /// inside a running tool call does not count against it). Only the
+    /// interactive host sets this — spawned sub-agents keep their deadline as
+    /// a wall. Re-set at every turn entry (like [`Self::set_deadline`]) so an
+    /// env change takes effect next turn.
+    pub fn set_deadline_extension(&mut self, policy: Option<DeadlineExtension>) {
         self.deadline_extension = policy;
     }
 
@@ -1452,11 +1454,15 @@ pub fn declared_classifier_fallback() -> Option<ClassifierFallback> {
         .and_then(|at| ClassifierFallback::ALL.get(at).copied())
 }
 
-/// Default wall-clock budget of an UNATTENDED turn: 60 minutes. Generous
-/// enough that an ordinary instruction (even a deep multi-agent
-/// orchestration) finishes well under it, tight enough that a non-converging
-/// agentic loop surfaces a checkpoint in an hour rather than running for a
-/// day. An attended turn has none — see [`Attendance`].
+/// Default quiet window of an UNATTENDED turn: 60 minutes. Generous enough
+/// that an ordinary instruction (even a deep multi-agent orchestration)
+/// finishes well under it, tight enough that a non-converging agentic loop
+/// surfaces a checkpoint in an hour rather than running for a day. It is where
+/// the turn is first asked whether it is still making progress, not a wall
+/// (t-12076): a turn that keeps writing files is pushed on
+/// ([`env_deadline_extension`]), and only a deadline the environment names
+/// (`ZO_TURN_DEADLINE_SECS`) is a wall clock. An attended turn has none — see
+/// [`Attendance`].
 pub const DEFAULT_TURN_DEADLINE_SECS: u64 = 60 * 60;
 /// Default cumulative-output-token budget of an UNATTENDED turn: 1.5M. An
 /// ordinary turn emits well under 100k; a runaway that keeps
@@ -1475,8 +1481,10 @@ pub const DEFAULT_TURN_OUTPUT_TOKEN_BUDGET: u32 = 1_500_000;
 /// status bar is the breaker there; see [`Attendance`].
 pub const DEFAULT_TURN_INPUT_TOKEN_BUDGET: u32 = 8_000_000;
 
-/// The per-turn `(wall_clock_deadline, output_token_budget, input_token_budget)`
-/// circuit breakers, each `None` when disabled. `ZO_TURN_DEADLINE_SECS`,
+/// The per-turn `(deadline, output_token_budget, input_token_budget)` circuit
+/// breakers, each `None` when disabled. The deadline is a wall clock when the
+/// environment named it and the quiet window's first look when it did not
+/// (see [`DEFAULT_TURN_DEADLINE_SECS`]). `ZO_TURN_DEADLINE_SECS`,
 /// `ZO_TURN_OUTPUT_TOKEN_BUDGET`, and `ZO_TURN_INPUT_TOKEN_BUDGET`
 /// override the defaults; `0` disables that bound (unbounded). A non-numeric
 /// value falls back to the default rather than silently disabling the safety
@@ -1506,35 +1514,65 @@ pub fn env_turn_budgets(
     (deadline, output_budget, input_budget)
 }
 
-/// Default number of progress-gated deadline extensions per turn. Two 30-minute
-/// extensions on top of the 60-minute base cap a healthy turn at 2 hours —
-/// long enough for a legitimate multi-agent audit or deploy pipeline, still a
-/// hard bound on a fake-progress grind (which the cross-turn escalation ladder
-/// then catches).
-pub const DEFAULT_DEADLINE_EXTENSIONS: u64 = 2;
 /// Default length of one progress-gated deadline extension: 30 minutes.
 pub const DEFAULT_DEADLINE_EXTENSION_SECS: u64 = 30 * 60;
 
-/// The progress-gated deadline-extension policy `(max_extensions, step)` for
-/// the interactive host, or `None` when disabled. `ZO_DEADLINE_EXTENSIONS`
-/// overrides the count (`0` disables); `ZO_DEADLINE_EXTENSION_SECS` the
-/// step length. Non-numeric values fall back to the defaults rather than
-/// silently disabling. Sub-agents never read this — their deadline stays a
-/// hard straggler bound (see
-/// [`ConversationRuntime::set_deadline_extension`]).
+/// How a turn's deadline is pushed on for progress (t-12076).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeadlineExtension {
+    /// How many pushes at most. `None` — nobody named a count — is no cap:
+    /// the deadline is a quiet window, and a turn that keeps making progress
+    /// is not ended for its age. Two 30-minute pushes on the 60-minute base
+    /// used to cap a healthy turn at two hours, and a zo worker still
+    /// implementing was stopped there.
+    pub max: Option<u8>,
+    /// How far each push moves the deadline.
+    pub step: std::time::Duration,
+}
+
+/// The progress-gated deadline-extension policy for the interactive host, or
+/// `None` when a wall is what is wanted (t-12076). Only a limit somebody named
+/// is wall-clock:
+///
+/// - Nothing named: the deadline is a quiet window, pushed on for progress
+///   without a count.
+/// - `ZO_TURN_DEADLINE_SECS` named a deadline: it is the wall its person asked
+///   for, and nothing pushes it unless `ZO_DEADLINE_EXTENSIONS` also names a
+///   count.
+/// - `ZO_DEADLINE_EXTENSIONS` named a count: that many pushes at most (`0`
+///   none); `ZO_DEADLINE_EXTENSION_SECS` the step length.
+///
+/// Non-numeric values fall back to nothing named rather than silently
+/// disabling. Sub-agents never read this — their deadline is a named budget
+/// and stays a wall (see [`ConversationRuntime::set_deadline_extension`]).
 #[must_use]
-pub fn env_deadline_extension() -> Option<(u8, std::time::Duration)> {
-    let count = env_budget_u64("ZO_DEADLINE_EXTENSIONS", DEFAULT_DEADLINE_EXTENSIONS);
-    let secs = env_budget_u64(
+pub fn env_deadline_extension() -> Option<DeadlineExtension> {
+    let step_secs = env_budget_u64(
         "ZO_DEADLINE_EXTENSION_SECS",
         DEFAULT_DEADLINE_EXTENSION_SECS,
     );
-    (count > 0 && secs > 0).then(|| {
-        (
-            u8::try_from(count).unwrap_or(u8::MAX),
-            std::time::Duration::from_secs(secs),
-        )
+    if step_secs == 0 {
+        return None;
+    }
+    let named_count = env_named_u64("ZO_DEADLINE_EXTENSIONS");
+    let named_deadline = env_named_u64("ZO_TURN_DEADLINE_SECS").is_some_and(|secs| secs > 0);
+    let max = match (named_deadline, named_count) {
+        (_, Some(0)) | (true, None) => return None,
+        (_, Some(count)) => Some(u8::try_from(count).unwrap_or(u8::MAX)),
+        (false, None) => None,
+    };
+    Some(DeadlineExtension {
+        max,
+        step: std::time::Duration::from_secs(step_secs),
     })
+}
+
+/// A non-negative integer the environment names in `var`, or `None` when it
+/// names nothing (unset or unparseable).
+fn env_named_u64(var: &str) -> Option<u64> {
+    std::env::var(var)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 /// Read a non-negative integer budget from `var`, using `default` when the

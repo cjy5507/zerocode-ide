@@ -72,6 +72,11 @@ pub(crate) struct AgentProgressSnapshot {
     /// so the heartbeat goes stale while the agent is perfectly healthy; the
     /// manifest's request bracket is what says the call itself is still open.
     pub awaiting_provider: bool,
+    /// Whether the helper runs where this process cannot read its progress —
+    /// a ledger worker or a pane child — and answers to a watcher of its own
+    /// (the ledger's stop and `time_budget`, the pane's quiet budget) rather
+    /// than to the manifest's heartbeat.
+    pub own_watcher: bool,
 }
 
 /// Read an agent's progress snapshot in a single manifest load, or `None` when
@@ -88,6 +93,10 @@ pub(crate) fn agent_progress_snapshot(
             .map(|stamped_at| now.saturating_sub(stamped_at)),
         inside_tool_call: manifest.current_tool.is_some(),
         awaiting_provider: manifest.awaiting_provider_since.is_some(),
+        own_watcher: matches!(
+            manifest.lifecycle.execution.as_deref(),
+            Some("ledger" | EXECUTION_PANE)
+        ),
     })
 }
 #[cfg(test)]

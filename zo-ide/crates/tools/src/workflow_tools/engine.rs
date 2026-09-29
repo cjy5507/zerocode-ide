@@ -36,6 +36,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use runtime::subagent_panes::AgeRule;
+
 use crate::misc_tools::{AgentActivitySnapshot, AgentCompletion, AgentInput};
 use crate::ToolError;
 
@@ -187,8 +189,6 @@ pub(crate) trait SemanticCache {
 /// Default phase inactivity window. Live workflow agents reset this window with
 /// task progress; simple/test backends retain the bounded barrier semantics.
 const DEFAULT_PHASE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-/// Absolute safety cap for a live phase even when task progress keeps arriving.
-const DEFAULT_PHASE_HARD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const DEFAULT_FIRST_ACTION_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 const DEFAULT_REASONING_EXTENSION: Duration = Duration::from_secs(4 * 60);
 
@@ -552,11 +552,6 @@ pub(super) const STATUS_STOPPED: &str = "stopped";
 /// exact marker; active work resets the window instead of being cancelled.
 pub(crate) const PHASE_TIMEOUT_STOP_ERROR: &str =
     "agent exceeded workflow phase timeout due to inactivity and was stopped";
-/// Absolute live-phase safety cap. Unlike inactivity, this does not earn an
-/// automatic retry because starting the same long phase over would repeat the
-/// failure and discard more work.
-pub(crate) const PHASE_HARD_TIMEOUT_STOP_ERROR: &str =
-    "agent exceeded workflow phase hard timeout and was stopped";
 /// A separate startup failure class: the provider/agent remained alive but no
 /// task action appeared before the effort-aware first-action deadline. Keeping
 /// this distinct from the 20-minute phase cap lets recovery exclude a stalled
@@ -643,7 +638,10 @@ pub(crate) fn phase_inactivity_exceeded(
         .unwrap_or(phase_started_at)
         .max(phase_started_at)
         .max(snapshot.started_at.unwrap_or(phase_started_at));
-    now_epoch_secs.saturating_sub(last_progress) >= inactivity_timeout.as_secs().max(1)
+    // The quiet limit of the one age rule (t-12076): the phase's inactivity
+    // window is reached by silence, never by how long the phase has run.
+    AgeRule::Quiet(Duration::from_secs(inactivity_timeout.as_secs().max(1)))
+        .reached(Duration::ZERO, Duration::from_secs(now_epoch_secs.saturating_sub(last_progress)))
 }
 
 /// Production startup watchdog, with narrow operational overrides for shadow
@@ -684,14 +682,33 @@ fn phase_timeout_from_env() -> Duration {
     positive_duration_env("ZO_WORKFLOW_PHASE_TIMEOUT_SECS", DEFAULT_PHASE_TIMEOUT)
 }
 
-/// Absolute live-phase safety cap. It is intentionally separate from the
-/// progress-resetting inactivity window, and never shorter than that window.
-pub(crate) fn phase_hard_timeout_from_env(inactivity_timeout: Duration) -> Duration {
-    positive_duration_env(
-        "ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS",
-        DEFAULT_PHASE_HARD_TIMEOUT,
+
+/// The environment knob that names a wall clock on a workflow phase.
+pub(crate) const PHASE_WALL_ENV: &str = "ZO_WORKFLOW_PHASE_HARD_TIMEOUT_SECS";
+
+/// The wall clock on a phase: the limit somebody named, and only that
+/// (t-12076). A phase whose agents keep making progress is not ended for its
+/// age — the two hours this used to default to were a limit nobody had asked
+/// for, and it ended agents that were still implementing. The inactivity
+/// window (`ZO_WORKFLOW_PHASE_TIMEOUT_SECS`) is the quiet limit beside it, and
+/// a named wall is never shorter than that window.
+pub(crate) fn phase_wall_limit_from_env(inactivity_timeout: Duration) -> Option<Duration> {
+    std::env::var(PHASE_WALL_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(|secs| Duration::from_secs(secs).max(inactivity_timeout))
+}
+
+/// What an agent stopped by the phase's wall clock is told: which limit ended
+/// it and how long it was, the way a pane's end says it. It does not earn an
+/// automatic retry, because starting the same long phase over would repeat the
+/// failure and discard more work.
+pub(crate) fn phase_wall_stop_error(limit: Duration) -> String {
+    format!(
+        "agent was stopped while still running: the workflow phase passed {} ({PHASE_WALL_ENV})",
+        AgeRule::Wall(limit).words()
     )
-    .max(inactivity_timeout)
 }
 
 /// `"$input"` fan-out sentinel: expand the workflow input (when an array) into

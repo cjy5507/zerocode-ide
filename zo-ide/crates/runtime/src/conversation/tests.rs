@@ -17133,6 +17133,54 @@ fn an_attended_turn_has_no_default_budget_and_an_unattended_one_keeps_the_net() 
     }
 }
 
+/// Only a limit somebody named is a wall clock (t-12076). With nothing named
+/// the turn's deadline is a quiet window pushed on for progress without a
+/// count; a deadline the environment names is the wall its person asked for; a
+/// count somebody names caps the pushes (`0` none), and a step of zero turns
+/// them off.
+#[test]
+fn the_deadline_extension_policy_follows_what_somebody_named() {
+    use super::env_deadline_extension;
+    const VARS: [&str; 3] = [
+        "ZO_TURN_DEADLINE_SECS",
+        "ZO_DEADLINE_EXTENSIONS",
+        "ZO_DEADLINE_EXTENSION_SECS",
+    ];
+    let _lock = crate::test_env_lock();
+    let saved: Vec<Option<String>> = VARS.iter().map(|var| std::env::var(var).ok()).collect();
+    for var in VARS {
+        std::env::remove_var(var);
+    }
+
+    let unnamed = env_deadline_extension().expect("a quiet window by default");
+    assert_eq!(unnamed.max, None, "nobody named a count: no cap");
+    assert_eq!(unnamed.step, std::time::Duration::from_secs(30 * 60));
+
+    std::env::set_var("ZO_TURN_DEADLINE_SECS", "3600");
+    assert!(
+        env_deadline_extension().is_none(),
+        "a deadline somebody named is a wall: nothing pushes it"
+    );
+    std::env::set_var("ZO_DEADLINE_EXTENSIONS", "3");
+    let capped = env_deadline_extension().expect("a named count is honored beside a named deadline");
+    assert_eq!(capped.max, Some(3));
+    std::env::remove_var("ZO_TURN_DEADLINE_SECS");
+    assert_eq!(env_deadline_extension().expect("a named count").max, Some(3));
+
+    std::env::set_var("ZO_DEADLINE_EXTENSIONS", "0");
+    assert!(env_deadline_extension().is_none(), "a named count of zero is no pushes");
+    std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
+    std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", "0");
+    assert!(env_deadline_extension().is_none(), "a step of zero is no pushes");
+
+    for (var, value) in VARS.iter().zip(saved) {
+        match value {
+            Some(value) => std::env::set_var(var, value),
+            None => std::env::remove_var(var),
+        }
+    }
+}
+
 /// A steer's receipt turns on the drain (t-2513 contract 2): the observer is
 /// told exactly what a boundary read, in order, and nothing when nothing was.
 #[test]
