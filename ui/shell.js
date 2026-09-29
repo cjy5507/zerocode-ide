@@ -13957,13 +13957,13 @@ function workerWhereNode(run, owner) {
  * with the first sentences of the instruction, the conditions the instruction
  * states in words that can be quoted, and the whole text one press away. WHAT a
  * person can do here: the footer says who directs the helper and offers the
- * one road that exists, speaking to that parent. Stopping one helper is not
- * offered: no agent the catalog voices has a road that ends ONE helper (Esc and
- * the session's cancel end the parent's whole turn), and a button that
- * promised it would stop something else. If an agent ever gets such a road, it
- * belongs in that agent's voice (`AgentVoice` in `zerocode-core`), read from the
- * catalog like the mark is; the footer would gain its button from there, and
- * still no name would be written here.
+ * one road this page has, speaking to that parent. Stopping one helper is not
+ * offered here yet: only a catalog row that names `helper_stop` (`AgentVoice`
+ * in `zerocode-core`; zo's today) has a road that ends ONE helper, and its
+ * button is a later piece. Esc and the session's cancel end the parent's whole
+ * turn, so a button that promised a helper's stop would end that instead. The
+ * later button is read from the row like the mark is, and still no name would
+ * be written here.
  *
  * The head is the same whatever agent ran the helper: the mark and its name
  * come from the catalog, and nothing below tells one agent from another. */
@@ -14360,9 +14360,9 @@ function paintHelperPageBrief(card, run) {
 /* The footer, where the composer stood: who directs this helper, and the one
  * thing a person can do from here. The press goes to the parent's page with
  * ITS input focused — the conversation's box when the parent is showing its
- * conversation, else the terminal's input. No stop: see the note above; the
- * group of controls is where a second one stands beside it the day a catalog
- * row names a road that ends one helper. */
+ * conversation, else the terminal's input. No stop yet: see the note above; the
+ * group of controls is where a second one stands beside it, for a row that
+ * names `helper_stop`. */
 function helperPageFootNode(run, owner) {
   const foot = document.createElement("footer");
   foot.className = "helper-foot";
