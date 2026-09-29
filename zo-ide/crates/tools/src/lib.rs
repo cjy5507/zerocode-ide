@@ -199,7 +199,7 @@ pub use misc_tools::{
     reap_orphaned_agents, stop_agent_for_session, stop_running_agents_since,
     stop_running_agents_since_for_session,
     stop_running_agents_since_for_strict_session, wait_for_agent_completions, AgentCompletion,
-    AgentStopOutcome,
+    AgentStopOutcome, StopReason,
     ConfigInput, ConfigOutput, ConfigValue, EnterPlanModeInput, ExitPlanModeInput, PlanModeOutput,
     AGENT_MESSAGE_STATUS, AGENT_STARVED_STATUS, provider_error_class_from_completion,
     provider_error_class_metadata,

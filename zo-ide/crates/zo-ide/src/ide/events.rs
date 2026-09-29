@@ -44,7 +44,7 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::net::TcpListener;
 
-use crate::ide::channel::{self, auth::TokenPolicy, state::ChannelState};
+use crate::ide::channel::{self, auth::TokenPolicy, state::{ChannelState, HelperOwner}};
 use crate::session::plain_session::{ReplayItem, StatusSnapshot};
 use crate::session::subagent_progress::SubagentProgressWatcher;
 use tools::AgentRegistry;
@@ -487,6 +487,11 @@ pub(crate) struct SubagentFrameRelay {
 impl Drop for SubagentFrameRelay {
     fn drop(&mut self) {
         self.task.abort();
+        // Its roster is over, so are its helpers' stops — only its own: a
+        // session switch may have started the next relay's owner already.
+        if let Some(registry) = self.registry.as_ref() {
+            self.sink.state.retire_helper_owner_of(registry);
+        }
         let mut active = self
             .sink
             .active
@@ -527,6 +532,14 @@ pub(crate) fn start_subagent_frame_relay(
     session_id: String,
 ) -> Option<SubagentFrameRelay> {
     let ide = ide?;
+    // The roster the window looks at and the helpers `helper.stop` may name
+    // are one thing: the same registry, under the same session id. Installed
+    // here — where a session switch starts its next relay — so a stop always
+    // resolves an id against the roster the window is showing (t-16031).
+    ide.state.set_helper_owner(Some(HelperOwner {
+        registry: Arc::clone(&registry),
+        session_id: session_id.clone(),
+    }));
     let watcher = SubagentProgressWatcher::start_for_session(Arc::clone(&registry), session_id);
     start_subagent_frame_relay_with_watcher(Some(ide), watcher, Some(registry))
 }
@@ -1467,6 +1480,49 @@ mod tests {
         assert_eq!(snapshot["registry"], "session-new");
         assert_eq!(snapshot["running"][0]["id"], "b1");
         drop(new_relay);
+    }
+
+    /// The relay that carries a session's roster to the window also tells the
+    /// channel whose helpers `helper.stop` may name (t-16031): installed when
+    /// it starts, retired when it ends — and a session switch that starts the
+    /// next relay before the last one is dropped keeps the next owner.
+    #[tokio::test]
+    async fn the_roster_relay_installs_and_retires_the_owner_of_helper_stops() {
+        let store = tempfile::tempdir().expect("store");
+        let old = AgentRegistry::at_root_for_tests("session-old", store.path());
+        let new = AgentRegistry::at_root_for_tests("session-new", store.path());
+        let channel = open_channel().await;
+        assert!(channel.state.helper_owner().is_none());
+
+        let old_relay = start_subagent_frame_relay(
+            Some(&channel),
+            Arc::clone(&old),
+            "session-old".to_string(),
+        )
+        .expect("old relay");
+        let owner = channel.state.helper_owner().expect("the relay installs its owner");
+        assert_eq!(owner.session_id, "session-old");
+        assert!(Arc::ptr_eq(&owner.registry, &old));
+
+        let new_relay = start_subagent_frame_relay(
+            Some(&channel),
+            Arc::clone(&new),
+            "session-new".to_string(),
+        )
+        .expect("new relay");
+        drop(old_relay);
+        let owner = channel
+            .state
+            .helper_owner()
+            .expect("the next relay's owner outlives the last one's end");
+        assert_eq!(owner.session_id, "session-new");
+        assert!(Arc::ptr_eq(&owner.registry, &new));
+
+        drop(new_relay);
+        assert!(
+            channel.state.helper_owner().is_none(),
+            "the last relay's end retires its owner"
+        );
     }
 
     /// A relay fed without a registry — the hand-driven seam — sends the

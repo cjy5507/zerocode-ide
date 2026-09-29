@@ -2758,9 +2758,10 @@ async fn e2e_esc_on_a_blocking_agent_call_keeps_the_helper_working_and_its_resul
 const HELPER_STOP: &str = "helper.stop";
 /// The key an answer names the words of a person's stop by.
 const STOPPED_BY_PERSON: &str = "stopped_by_person";
-/// The words that key stands for: what the stop leaves in the record and what
-/// the parent's notice says (`tools::StopReason::StoppedByPerson`).
-const STOPPED_BY_PERSON_WORDS: &str = "the person stopped this helper from its page";
+/// The words that key stands for — what the stop leaves in the record and what
+/// the parent's notice says — read from the table
+/// (`tools::StopReason::StoppedByPerson`), not copied out of it.
+const STOPPED_BY_PERSON_WORDS: &str = tools::StopReason::StoppedByPerson.words();
 
 /// The token the two-helper sessions' channel is opened with: an interactive
 /// session generates one of its own when none is given, and refuses a caller

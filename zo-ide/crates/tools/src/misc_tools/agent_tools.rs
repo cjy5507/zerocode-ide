@@ -2184,6 +2184,94 @@ pub enum AgentStopOutcome {
     Failed { name: String, error: String },
 }
 
+impl AgentStopOutcome {
+    /// The word a caller reports this outcome by — the model's stop tool says
+    /// it, and so does the channel's `helper.stop` answer, so the two never
+    /// spell one outcome two ways.
+    #[must_use]
+    pub fn status(&self) -> &'static str {
+        match self {
+            Self::Stopped { .. } => "stopped",
+            Self::Closed { .. } => "closed",
+            Self::AlreadyFinished { .. } => "already_finished",
+            Self::NotFound => "not_found",
+            Self::NotOwned { .. } => "not_owned",
+            Self::Unreachable { .. } => "unreachable",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    /// Whether the stop left its reason in the record: a live helper was
+    /// stopped, or an idle pane child released. Every other outcome changed
+    /// nothing, so there is nothing recorded to name.
+    #[must_use]
+    pub fn recorded_a_reason(&self) -> bool {
+        matches!(self, Self::Stopped { .. } | Self::Closed { .. })
+    }
+}
+
+/// Why a helper was stopped when the PERSON stopped it, not the model: the
+/// words the stop leaves in the record — the manifest's stop reason and the
+/// completion its parent reads — under a stable key the window reads back
+/// (`helper.stop` answers with it). One table, so the key that crosses the wire
+/// and the words a model reads are each spelled once. A stop from the model's
+/// own tool keeps the reason the model gave, and is not in this table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// The person pressed the stop button on the helper's page.
+    StoppedByPerson,
+}
+
+impl StopReason {
+    /// Every reason in the table, for the reader that finds a record's reason
+    /// by its words ([`Self::from_words`]).
+    pub const ALL: [Self; 1] = [Self::StoppedByPerson];
+
+    /// The stable key an answer names the words by.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StoppedByPerson => "stopped_by_person",
+        }
+    }
+
+    /// The words the record and the parent's notice carry. They read after
+    /// "was stopped:" in the notice's header, and hold nothing that header's
+    /// grammar takes for a cancellation of the parent's own turn.
+    #[must_use]
+    pub const fn words(self) -> &'static str {
+        match self {
+            Self::StoppedByPerson => "the person stopped this helper from its page",
+        }
+    }
+
+    /// The reason whose words a record carries, if it carries any of the
+    /// table's.
+    #[must_use]
+    pub fn from_words(words: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|reason| reason.words() == words.trim())
+    }
+}
+
+/// The reason a stopped manifest recorded, when it is one of the person's.
+///
+/// A stop writes its reason on the closing lane event before it aborts the
+/// worker, and that is where the worker that unwinds afterwards can find it:
+/// the worker reports only the runtime's own "agent cancelled", which says
+/// nothing about who stopped it.
+fn recorded_person_stop(manifest: &AgentOutput) -> Option<StopReason> {
+    if manifest.status != "stopped" {
+        return None;
+    }
+    manifest
+        .lane_events
+        .iter()
+        .rev()
+        .find(|event| matches!(event.event, core_types::lane_events::LaneEventName::Closed))
+        .and_then(|event| event.detail.as_deref())
+        .and_then(StopReason::from_words)
+}
+
 /// Stop exactly one live in-process agent owned by `session_id`.
 ///
 /// This deliberately fails closed for legacy manifests without ownership
@@ -2347,11 +2435,17 @@ fn external_stop_owns_completion(emit_completion: bool, transitioned: bool) -> b
 }
 
 fn stopped_completion(manifest: AgentOutput, reason: String) -> AgentCompletion {
+    // The person's stop hands its parent what the helper had done so far: the
+    // streamed tail is the only place that work lives once a helper is stopped
+    // (its output file holds status boilerplate). The stops the model and the
+    // turn's own Esc make keep the notice they always sent.
+    let result = StopReason::from_words(&reason)
+        .and_then(|_| agent_partial_result(&manifest.manifest_file));
     AgentCompletion {
         agent_id: manifest.agent_id,
         name: manifest.label.unwrap_or(manifest.name),
         status: String::from("stopped"),
-        result: None,
+        result,
         structured: None,
         error: Some(reason),
         run: HelperRun::default(),
@@ -3337,7 +3431,7 @@ mod agent_manifest_tests {
         steer_agent, stop_agent_for_session_in,
         stop_running_agents_in_store_since_for_strict_session_without_notify,
         unregister_agent_cancel_signal, unregister_agent_steering, AgentJob, AgentOutput,
-        AgentStopOutcome,
+        AgentStopOutcome, StopReason,
     };
     use crate::ToolError;
     use serde_json::json;
@@ -3494,6 +3588,142 @@ mod agent_manifest_tests {
             "running"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A running manifest this process owns, with `tail` streamed so far and a
+    /// live cancel signal — what `stop_agent_for_session_in` needs to stop it.
+    fn owned_running_agent(dir: &Path, id: &str, tail: &str) -> std::path::PathBuf {
+        let path = write_agent_for_stop_test(dir, id, Some("session-a"), "running", "200");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read manifest"))
+                .expect("parse manifest");
+        manifest["ownerPid"] = json!(std::process::id());
+        manifest["runGeneration"] = json!(1);
+        manifest["outputTail"] = json!(tail);
+        std::fs::write(&path, serde_json::to_vec(&manifest).expect("serialize manifest"))
+            .expect("stamp ownership");
+        register_agent_cancel_signal(id.to_string(), 1, runtime::HookAbortSignal::new());
+        path
+    }
+
+    /// A stop outcome is reported by one set of words — the model's stop tool
+    /// says them, and so does the channel's `helper.stop` answer — and only a
+    /// stop that changed the record says it recorded a reason (t-16031).
+    #[test]
+    fn a_stop_outcome_is_reported_by_one_set_of_words() {
+        let named = || "helper".to_string();
+        for (outcome, status, recorded) in [
+            (AgentStopOutcome::Stopped { name: named() }, "stopped", true),
+            (AgentStopOutcome::Closed { name: named() }, "closed", true),
+            (
+                AgentStopOutcome::AlreadyFinished { name: named(), status: "completed".to_string() },
+                "already_finished",
+                false,
+            ),
+            (AgentStopOutcome::NotFound, "not_found", false),
+            (AgentStopOutcome::NotOwned { name: named() }, "not_owned", false),
+            (AgentStopOutcome::Unreachable { name: named() }, "unreachable", false),
+            (
+                AgentStopOutcome::Failed { name: named(), error: "boom".to_string() },
+                "failed",
+                false,
+            ),
+        ] {
+            assert_eq!(outcome.status(), status);
+            assert_eq!(outcome.recorded_a_reason(), recorded, "{status}");
+        }
+    }
+
+    /// The table of a person's stop: a stable key, words the record and the
+    /// parent's notice carry, and a way back from the words to the key. The
+    /// words read after "was stopped:" in the notice's header and are not the
+    /// cancellation of a turn that header's grammar takes them for.
+    #[test]
+    fn a_persons_stop_has_one_key_and_one_set_of_words() {
+        let reason = StopReason::StoppedByPerson;
+        assert_eq!(reason.as_str(), "stopped_by_person");
+        assert_eq!(StopReason::from_words(reason.words()), Some(reason));
+        assert_eq!(StopReason::from_words(&format!("  {}\n", reason.words())), Some(reason));
+        assert_eq!(StopReason::from_words("stopped by user from agents overview"), None);
+        assert_eq!(StopReason::from_words("cancelled by foreground turn"), None);
+        assert_eq!(
+            crate::misc_tools::agent_terminal_summary("stopped", Some(reason.words())),
+            format!("was stopped: {}", reason.words())
+        );
+    }
+
+    /// A person's stop leaves the table's words in the record and hands the
+    /// parent the work the helper had streamed; the model's own stop keeps its
+    /// reason and the notice it always had (t-16031).
+    #[test]
+    fn a_persons_stop_records_its_words_and_carries_the_work_so_far() {
+        let dir = temp_dir("person-stop");
+        let words = StopReason::StoppedByPerson.words();
+        let person = format!("person-{}", std::process::id());
+        let model = format!("model-{}", std::process::id());
+        let person_path = owned_running_agent(&dir, &person, "read the first two files");
+        let model_path = owned_running_agent(&dir, &model, "read the first two files");
+
+        assert_eq!(
+            stop_agent_for_session_in(&dir, &person, "session-a", words, false),
+            AgentStopOutcome::Stopped { name: person.clone() }
+        );
+        assert_eq!(
+            stop_agent_for_session_in(&dir, &model, "session-a", "no longer needed", false),
+            AgentStopOutcome::Stopped { name: model.clone() }
+        );
+        let stopped = super::load_agent_manifest_from_scanned_path(&person_path).expect("manifest");
+        assert_eq!(super::recorded_person_stop(&stopped), Some(StopReason::StoppedByPerson));
+        let notice = super::stopped_completion(stopped, words.to_string());
+        assert_eq!(notice.status, "stopped");
+        assert_eq!(notice.error.as_deref(), Some(words));
+        assert_eq!(notice.result.as_deref(), Some("read the first two files"));
+
+        let other = super::load_agent_manifest_from_scanned_path(&model_path).expect("manifest");
+        assert_eq!(super::recorded_person_stop(&other), None, "the model's reason is not the person's");
+        let notice = super::stopped_completion(other, "no longer needed".to_string());
+        assert_eq!(notice.error.as_deref(), Some("no longer needed"));
+        assert!(notice.result.is_none(), "the model's stop carries no result");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The worker that unwinds after a person's stop reports only the runtime's
+    /// own "agent cancelled"; the completion the parent reads says what the
+    /// record says — the words of the stop, and the work streamed so far. A
+    /// stop with any other reason keeps the worker's own report (t-16031).
+    #[test]
+    fn a_workers_completion_after_a_persons_stop_carries_the_records_words() {
+        let dir = temp_dir("person-stop-worker");
+        for (tag, reason, by_person) in [
+            ("person", StopReason::StoppedByPerson.words(), true),
+            ("model", "no longer needed", false),
+        ] {
+            let id = format!("worker-{tag}-{}", std::process::id());
+            let path = owned_running_agent(&dir, &id, "read the first two files");
+            assert!(matches!(
+                stop_agent_for_session_in(&dir, &id, "session-a", reason, false),
+                AgentStopOutcome::Stopped { .. }
+            ));
+            let stopped = super::load_agent_manifest_from_scanned_path(&path).expect("manifest");
+            let mut completion = super::completion::AgentCompletion {
+                agent_id: id.clone(),
+                name: id.clone(),
+                status: "stopped".to_string(),
+                result: None,
+                structured: None,
+                error: Some("agent cancelled".to_string()),
+                run: core_types::helper_run::HelperRun::default(),
+            };
+            super::spawn::reconcile_completion_with_manifest(&stopped, &mut completion);
+            if by_person {
+                assert_eq!(completion.error.as_deref(), Some(StopReason::StoppedByPerson.words()));
+                assert_eq!(completion.result.as_deref(), Some("read the first two files"));
+            } else {
+                assert_eq!(completion.error.as_deref(), Some("agent cancelled"), "{tag}");
+                assert!(completion.result.is_none(), "{tag}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
