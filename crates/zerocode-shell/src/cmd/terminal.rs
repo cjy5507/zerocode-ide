@@ -936,9 +936,12 @@ impl PromptReadiness {
     fn guard(self, launch: Option<u64>) -> zerocode_pty::ready::Guard {
         match self {
             Self::Mounting | Self::Resting => zerocode_pty::ready::Guard::for_its_own_line(launch),
-            Self::RestingBesideADraft | Self::EnterAgain(_) => {
+            Self::RestingBesideADraft => {
                 zerocode_pty::ready::Guard::for_somebody_elses_line(launch)
             }
+            // Everything the draft-preserving readiness yields to, the Enter
+            // alone yields to as well (t-17037).
+            Self::EnterAgain(_) => zerocode_pty::ready::Guard::for_somebody_elses_line(launch),
         }
     }
 }
