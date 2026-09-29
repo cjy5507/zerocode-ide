@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -137,6 +138,16 @@ class Proxy:
                 connection.close()
 
 
+def end(child: subprocess.Popen) -> None:
+    """Kill the child's whole group. A child that ended between the look and
+    the kill leaves a group no signal may reach — macOS refuses it (EPERM),
+    Linux finds none (ESRCH) — and that is the state the kill was for."""
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except (PermissionError, ProcessLookupError):
+        pass
+
+
 def run(cli: str, argv: list[str], stdin: str, api: Api, proxy: Proxy, store: Path) -> dict:
     """One run of `cli` under the fake store, API and proxy; ended as soon as
     a model call lands, since the fake API never lets one finish."""
@@ -165,7 +176,7 @@ def run(cli: str, argv: list[str], stdin: str, api: Api, proxy: Proxy, store: Pa
             time.sleep(0.05)
         ended = child.poll() is not None
         if not ended:
-            os.killpg(child.pid, 9)
+            end(child)
         out = child.stdout.read().decode(errors="replace")
         child.wait()
     said: dict = {}
