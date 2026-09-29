@@ -435,13 +435,6 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       const tintAt = (rank) => Array.from(universe.map.gal.slice((rank * KNOWLEDGE_UNIVERSE_SHAPE.texels + 5) * 4,
         (rank * KNOWLEDGE_UNIVERSE_SHAPE.texels + 5) * 4 + 3)).map((value) => Math.round(value * 1000) / 1000);
       const quietRank = layout.communityHue.findIndex((hue, rank) => hue < 0 && rank < universe.map.rows);
-      /* 빛깔의 치우침(가장 큰 채널 − 가장 작은 채널) — v4의 옅은 아홉 색이 낸 가장 센 치우침 0.2를 넘지 않는다(m-12570). */
-      let tintSpread = 0;
-      for (const row of universe.map.galaxy) {
-        if (row.hue < 0) continue;
-        const tint = tintAt(row.rank);
-        tintSpread = Math.max(tintSpread, Math.max(...tint) - Math.min(...tint));
-      }
       const darkTints = { lit: tintAt(0), quiet: quietRank >= 0 ? tintAt(quietRank) : null };
       const darkComp = { dark: universe.post.comp.uniforms.uDark.value,
         exposure: universe.post.comp.uniforms.uExposure.value };
@@ -469,7 +462,7 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
       return { named: layout.namedCount, communities: layout.communityCount, sizes: Array.from(layout.communitySize),
         galaxies: map.galaxies, wantGalaxies, least, rowsCount: map.rows, rows, strays, strayRows,
         scale: map.scale, scaleWant,
-        lumWorst, capped, tempRange, unknownTemp, rebuilt, quietBelow, tintSpread, darkTints, lightTints, darkComp, lightComp,
+        lumWorst, capped, tempRange, unknownTemp, rebuilt, quietBelow, darkTints, lightTints, darkComp, lightComp,
         neutral: knowledgeUniverseInks(view, universe.probe ?? document.body).neutral, draws, sceneDraws, targets,
         bloomLevels: tune.bloomLevels };
     } catch (error) {
@@ -498,9 +491,9 @@ export async function testKnowledgeUniverseGalaxies(page, ok) {
     detail);
   ok("t-12443 ②: the same vault builds the same universe — every galaxy texel and every star seat",
     !seen.thrown && seen.rebuilt, detail);
-  ok("t-12443 ②: a galaxy's tint is the same in both themes — its hue's dark value, leaning no more than v4's palette (0.2), or the neutral tint for a cluster without a hue — while the composite turns to the light theme's exposure and paper",
+  /* 빛깔이 싣는 색의 몫은 ⑧이 묻는다(t-14081 — v4의 상한 0.2는 은하를 거의 모두 흰빛으로 두었다). */
+  ok("t-12443 ②: a galaxy's tint is the same in both themes — its hue's dark value, or the neutral tint for a cluster without a hue — while the composite turns to the light theme's exposure and paper",
     !seen.thrown && JSON.stringify(seen.darkTints) === JSON.stringify(seen.lightTints)
-      && seen.darkTints.lit.every((value) => value >= 0.7 && value <= 1) && seen.tintSpread <= 0.2 + 1e-3
       && (seen.darkTints.quiet === null || seen.darkTints.quiet.join(",") === seen.neutral.join(","))
       && seen.darkComp.dark === 1 && seen.darkComp.exposure === 1
       && seen.lightComp.dark === 0 && seen.lightComp.exposure === 1.25
@@ -1401,4 +1394,234 @@ export async function testKnowledgeUniverseMotion(page, ok) {
     detail);
   ok("t-12443 ⑦: in the light theme the labels are ink on paper — darker than in the dark theme",
     !seen.thrown && seen.dark > 0.6 && seen.light >= 0 && seen.light < 0.4, detail);
+}
+
+/* ---- ⑧ 빛깔 — 은하는 제 군집의 색으로, 별은 고친 때의 색으로 (t-14081) ---------------------------------------
+ *
+ * 사람의 말(09-29): 「은하의 색상 별의 색상이 조금 명확했으면」. v4의 은하 빛깔은 색 칸 색의 채도를 20%만 실어 거의
+ * 모두 흰빛이었고, 합성의 채널마다 ACES는 밝은 핵과 별의 가운데를 흰색으로 날리며 색상까지 돌렸고, 종이 위 먹빛의
+ * 색은 8%였다. 묻는 것: (가) 은하 빛깔이 범례 칩·이름표 점과 같은 색 칸 토큰의 색상을 그 채도의 반 넘게 싣고 밝기는
+ * 색 없는 은하와 같은가, (나) 합성이 밝은 색의 색상(10° 안)과 채도(6할)를 지키는가, (다) 종이 위에서 그 색이 제
+ * 색상(20° 안)과 채도(반)의 먹빛으로 남되 흰빛의 먹보다 옅지 않은가(글자·선의 대비), (라) 가장 밝은 별의 가운데가
+ * 가장 오래된 쪽은 붉게, 가장 최근 쪽은 푸르게 남는가. 볼트는 ②의 것이다(무리 9·12는 400일 전, 나머지는 오늘). */
+export async function testKnowledgeUniverseColour(page, ok) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const seen = await page.evaluate(async ({ sizes, alone, quiet, half }) => {
+    try {
+      const view = document.querySelector(".knowledge-view:not([hidden])");
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const until = async (wanted, rounds = 900) => {
+        for (let round = 0; round < rounds; round += 1) {
+          if (wanted()) return true;
+          await frame();
+        }
+        return false;
+      };
+      const heldDimension = knowledgeDimension;
+      const heldVault = secondBrainVault;
+      const heldPainter = knowledgePainterKind;
+      const heldTheme = document.documentElement.dataset.theme ?? "dark";
+      knowledgePainterKind = null;
+      knowledgeQuery = "";
+      knowledgeTagsPicked.clear();
+      knowledgeOrphansOnly = knowledgeGhostsOnly = knowledgeTypedOnly = false;
+      knowledgeAliveOnly = knowledgeColdOnly = knowledgeMergeOnly = false;
+      knowledgeShowSources = false;
+      knowledgeLintLens = knowledgeSelectedKey = knowledgePath = null;
+      knowledgeClusterPicked = -1;
+      knowledgeSlicerCutoff = 0;
+      const edges = [];
+      const starts = [];
+      let at = 0;
+      sizes.forEach((size) => { starts.push(at); at += size; });
+      sizes.forEach((size, group) => {
+        const first = starts[group];
+        for (let step = 1; step < size; step += 1) {
+          edges.push({ from: first + step, to: first + step - 1, kind: "mentions" });
+          if (step > 2) edges.push({ from: first + step, to: first + ((step * 7) % (step - 1)), kind: "mentions" });
+          if (step > 4) edges.push({ from: first + step, to: first + ((step * 13) % (step - 3)), kind: "related" });
+        }
+      });
+      for (let step = 2; step < sizes[0]; step += 1) edges.push({ from: 0, to: step, kind: "mentions" });
+      const nowMs = Date.now();
+      const modifiedMs = [];
+      sizes.forEach((size, group) => {
+        for (let step = 0; step < size; step += 1) {
+          const old = quiet.includes(group) || (group === half && step % 2 === 1);
+          modifiedMs.push(old ? nowMs - 400 * 86_400_000 : nowMs - (step % 5) * 3_600_000);
+        }
+      });
+      for (let one = 0; one < alone; one += 1) modifiedMs.push(0);
+      const answer = window.__buildVaultGraph__({ path: "/colours", sources: false },
+        { pages: at + alone, ghosts: 0, tags: [], customEdges: edges, modifiedMs });
+      noteKnowledgeExploreLines({});
+      secondBrainVault = answer.vault;
+      knowledgeDimension = "3d";
+      setKnowledgeMode(view, "global", { paint: false });
+      knowledgeReport = answer;
+      await paintKnowledgeView();
+      await until(() => (knowledgeLayouts.get(view)?.left ?? 1) === 0);
+      await paintKnowledgeView();
+      await until(() => knowledgeUniverses.get(view)?.tween?.on === false);
+      await frame();
+      const universe = knowledgeUniverses.get(view);
+      const layout = knowledgeLayouts.get(view);
+      /* 색의 잣대(선형 RGB): 색상(HSV의 각), 채도(1 − 가장 약한 채널 / 가장 센 채널), 휘도(Rec. 709). */
+      const hueOf = ([r, g, b]) => {
+        const most = Math.max(r, g, b);
+        const span = most - Math.min(r, g, b);
+        if (span < 1e-6) return 0;
+        const side = most === r ? ((g - b) / span + 6) % 6 : most === g ? (b - r) / span + 2 : (r - g) / span + 4;
+        return side * 60;
+      };
+      const satOf = (rgb) => (Math.max(...rgb) <= 0 ? 0 : 1 - Math.min(...rgb) / Math.max(...rgb));
+      const lumOf = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const turn = (one, two) => {
+        const apart = Math.abs(one - two) % 360;
+        return Math.min(apart, 360 - apart);
+      };
+      const round = (value, digits = 3) => Math.round(value * 10 ** digits) / 10 ** digits;
+      const fromBytes = (bytes, offset) => [0, 1, 2].map((channel) => knowledgeUniverseLinear(bytes[offset + channel] / 255));
+      /* (가) 빛깔과 그 토큰 — 범례 칩·이름표 점과 같은 색 칸(`--knowledge-hue-*`)이 원천이다. */
+      const probe = universe.probe;
+      const colourOf = (value) => {
+        probe.style.color = value;
+        return getComputedStyle(probe).color;
+      };
+      const hues = Array.from({ length: KNOWLEDGE_HUES }, (unused, hue) => hue);
+      const hueOfPlate = (plate) => universe.map.galaxy[plate.row].hue;
+      const dotsNow = () => universe.plates.filter((plate) => hueOfPlate(plate) >= 0).map((plate) => ({
+        hue: hueOfPlate(plate),
+        dot: getComputedStyle(plate.element.querySelector(".knowledge-universe-plate-name"), "::before").backgroundColor,
+      }));
+      const darkHue = hues.map((hue) => colourOf(`var(--knowledge-hue-${hue})`));
+      const darkTint = hues.map((hue) => colourOf(`var(--knowledge-3d-tint-${hue})`));
+      const darkDots = dotsNow();
+      const sourceOf = (hue) => Array.from(universe.inks.tints.slice(hue * 3, hue * 3 + 3));
+      const neutral = universe.inks.neutral;
+      const tints = universe.map.galaxy.filter((row) => row.hue >= 0).map((row) => {
+        const texel = (row.rank * KNOWLEDGE_UNIVERSE_SHAPE.texels + 5) * 4;
+        const tint = Array.from(universe.map.gal.slice(texel, texel + 3));
+        const source = sourceOf(row.hue);
+        return { rank: row.rank, hue: row.hue, turn: round(turn(hueOf(tint), hueOf(source)), 2),
+          share: round(satOf(tint) / satOf(source)), light: round(lumOf(tint) / lumOf(neutral)) };
+      });
+      /* (나)·(다) 합성 한 장 — 알려진 HDR 색의 줄(1 × n 텍셀)을 장면 목표 자리에 두고 합성만 그린다(번짐 0). 색은
+       * 색 칸 여덟, 가장 센 채널 4(밝은 핵과 별의 가운데 자리). */
+      const composite = (inputs) => {
+        const renderer = universe.renderer;
+        const post = universe.post;
+        const comp = post.comp.uniforms;
+        const data = new Float32Array(inputs.length * 4);
+        inputs.forEach((rgb, index) => data.set([...rgb, 1], index * 4));
+        const scene = new THREE.DataTexture(data, inputs.length, 1, THREE.RGBAFormat, THREE.FloatType);
+        scene.needsUpdate = true;
+        const target = new THREE.WebGLRenderTarget(inputs.length, 1, { depthBuffer: false, stencilBuffer: false });
+        const held = { scene: comp.tScene.value, bloom: comp.tBloom.value, strength: comp.uBloom.value,
+          material: post.quad.material };
+        comp.tScene.value = scene;
+        comp.tBloom.value = scene;
+        comp.uBloom.value = 0;
+        post.quad.material = post.comp;
+        renderer.setRenderTarget(target);
+        renderer.render(post.scene, post.lens);
+        const bytes = new Uint8Array(inputs.length * 4);
+        renderer.readRenderTargetPixels(target, 0, 0, inputs.length, 1, bytes);
+        renderer.setRenderTarget(null);
+        comp.tScene.value = held.scene;
+        comp.tBloom.value = held.bloom;
+        comp.uBloom.value = held.strength;
+        post.quad.material = held.material;
+        scene.dispose();
+        target.dispose();
+        return inputs.map((unused, index) => fromBytes(bytes, index * 4));
+      };
+      const bright = hues.map((hue) => {
+        const source = sourceOf(hue);
+        const peak = Math.max(...source);
+        return source.map((value) => (value / peak) * 4);
+      });
+      const shown = composite(bright);
+      const kept = bright.map((input, hue) => ({ hue, turn: round(turn(hueOf(shown[hue]), hueOf(input)), 1),
+        share: round(satOf(shown[hue]) / satOf(input), 2) }));
+      /* (라) 화면 안에 선 가장 밝은 별 둘의 가운데 — 장면에서 별만 남기고 한 장을 그려 투영한 자리의 가장 밝은 픽셀을 읽는다. */
+      const star = universe.starGeometry.attributes.aStar.array;
+      universe.project();
+      const onScreen = (seat) => universe.proj[seat * 4 + 3] > 0 && universe.proj[seat * 4] > 4
+        && universe.proj[seat * 4 + 1] > 4 && universe.proj[seat * 4] < universe.width - 4
+        && universe.proj[seat * 4 + 1] < universe.height - 4;
+      const brightest = (wanted) => {
+        let best = -1;
+        for (let seat = 0; seat < layout.count; seat += 1) {
+          if (wanted(seat) && onScreen(seat) && (best < 0 || star[seat * 4] > star[best * 4])) best = seat;
+        }
+        return best;
+      };
+      const newest = brightest((seat) => star[seat * 4 + 1] > 0.95);
+      const oldest = brightest((seat) => layout.model.modified[seat] > 0 && star[seat * 4 + 1] < 0.05);
+      const others = universe.scene.children.filter((object) => object.userData.key !== "stars");
+      const visible = others.map((object) => object.visible);
+      for (const object of others) object.visible = false;
+      universe.render();
+      const gl = universe.renderer.getContext();
+      const ratio = universe.canvas.width / Math.max(1, universe.width);
+      const coreOf = (seat) => {
+        const spot = universe.project(seat);
+        const x = Math.round(spot.x * ratio);
+        const y = universe.canvas.height - 1 - Math.round(spot.y * ratio);
+        const bytes = new Uint8Array(25 * 4);
+        gl.readPixels(x - 2, y - 2, 5, 5, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+        let best = [0, 0, 0];
+        for (let index = 0; index < bytes.length; index += 4) {
+          const rgb = fromBytes(bytes, index);
+          if (Math.max(...rgb) > Math.max(...best)) best = rgb;
+        }
+        return { seat, light: round(star[seat * 4], 2), rgb: best.map((value) => round(value)), hue: round(hueOf(best), 1),
+          sat: round(satOf(best), 2) };
+      };
+      const cores = { newest: coreOf(newest), oldest: coreOf(oldest) };
+      others.forEach((object, index) => { object.visible = visible[index]; });
+      universe.invalidate();
+      await frame();
+      /* 밝은 테마 — 빛깔의 원천은 같은 어두운 테마 값이고, 이름표 점은 종이 위의 색 칸이다. */
+      setTheme("light");
+      await frame();
+      await frame();
+      const lightHue = hues.map((hue) => colourOf(`var(--knowledge-hue-${hue})`));
+      const lightTint = hues.map((hue) => colourOf(`var(--knowledge-3d-tint-${hue})`));
+      const lightDots = dotsNow();
+      const printed = composite([...bright, [4, 4, 4]]);
+      const whiteInk = lumOf(printed[bright.length]);
+      const inks = bright.map((input, hue) => ({ hue, turn: round(turn(hueOf(printed[hue]), hueOf(input)), 1),
+        share: round(satOf(printed[hue]) / satOf(input), 2), light: round(lumOf(printed[hue]) / whiteInk) }));
+      setTheme(heldTheme);
+      await frame();
+      knowledgeDimension = heldDimension;
+      secondBrainVault = heldVault;
+      knowledgePainterKind = heldPainter;
+      await paintKnowledgeView();
+      return { tints, darkHue, darkTint, lightHue, lightTint, darkDots, lightDots, kept, inks, cores };
+    } catch (error) {
+      return { thrown: String(error?.stack ?? error) };
+    }
+  }, { sizes: GALAXY_SIZES, alone: GALAXY_ALONE, quiet: GALAXY_QUIET, half: GALAXY_HALF });
+  const detail = JSON.stringify(seen);
+  ok("t-14081 ⑧: a galaxy's tint is its colour cell's own hue (the token its legend chip and plate dot wear, in both themes) carrying at least half the cell's saturation, and it is as bright as a galaxy without a colour",
+    !seen.thrown && seen.tints.length >= 8
+      && seen.tints.every((row) => row.turn <= 1 && row.share >= 0.5 && Math.abs(row.light - 1) <= 0.01)
+      && seen.darkTint.every((colour, hue) => colour === seen.darkHue[hue])
+      && seen.lightTint.every((colour, hue) => colour === seen.darkHue[hue])
+      && seen.darkDots.length > 0 && seen.darkDots.every((row) => row.dot === seen.darkHue[row.hue])
+      && seen.lightDots.length === seen.darkDots.length && seen.lightDots.every((row) => row.dot === seen.lightHue[row.hue]),
+    detail);
+  ok("t-14081 ⑧: the composite keeps a bright colour's hue within 10° and at least 60% of its saturation — a bright core does not wash out to white",
+    !seen.thrown && seen.kept.length === 8 && seen.kept.every((row) => row.turn <= 10 && row.share >= 0.6), detail);
+  ok("t-14081 ⑧: on paper a bright colour prints as ink of its own hue (within 20°) with at least half its saturation, never lighter than the white ink",
+    !seen.thrown && seen.inks.length === 8 && seen.inks.every((row) => row.turn <= 20 && row.share >= 0.5 && row.light <= 1.02),
+    detail);
+  ok("t-14081 ⑧: the brightest stars' cores keep their edit colour — the oldest page red-orange, the newest page blue — not white",
+    !seen.thrown && seen.cores.oldest.seat >= 0 && seen.cores.newest.seat >= 0
+      && seen.cores.oldest.sat >= 0.35 && (seen.cores.oldest.hue <= 45 || seen.cores.oldest.hue >= 345)
+      && seen.cores.newest.sat >= 0.35 && seen.cores.newest.hue >= 190 && seen.cores.newest.hue <= 260,
+    detail);
 }

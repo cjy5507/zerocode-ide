@@ -10,9 +10,9 @@ import { KNOWLEDGE_SCENES, knowledgeSweepFor, measureKnowledgeGlParity, measureK
 import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { measureKnowledgeSupplyParity, measureKnowledgeSupplyScene, testKnowledgeSupply } from "./knowledge-supply.mjs";
-import { testKnowledgeUniverse, testKnowledgeUniverseBodies, testKnowledgeUniverseFilaments, testKnowledgeUniverseFocus,
-  testKnowledgeUniverseGalaxies, testKnowledgeUniverseInspector, testKnowledgeUniverseLabels, testKnowledgeUniverseMotion,
-  testKnowledgeUniverseUnable } from "./knowledge-universe.mjs";
+import { testKnowledgeUniverse, testKnowledgeUniverseBodies, testKnowledgeUniverseColour, testKnowledgeUniverseFilaments,
+  testKnowledgeUniverseFocus, testKnowledgeUniverseGalaxies, testKnowledgeUniverseInspector, testKnowledgeUniverseLabels,
+  testKnowledgeUniverseMotion, testKnowledgeUniverseUnable } from "./knowledge-universe.mjs";
 import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -6075,6 +6075,7 @@ if (skipped) {
  * 문맥 잃음·해제. 평면 지도의 계약이 다 끝난 뒤에 묻는다(그 계약들은 평면을 고른 판에서 돈다). */
 await testKnowledgeUniverse(glPage, ok);
 await testKnowledgeUniverseGalaxies(glPage, ok);
+await testKnowledgeUniverseColour(glPage, ok);
 await testKnowledgeUniverseBodies(glPage, ok);
 await testKnowledgeUniverseFilaments(glPage, ok);
 await testKnowledgeUniverseFocus(glPage, ok);
