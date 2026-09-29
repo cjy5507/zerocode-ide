@@ -55543,25 +55543,33 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       await settle(120);
       seen.codexHead = codexChat?.querySelector(".composer-slash-head")?.textContent ?? null;
       seen.wantCodexHead = `${agentName("codex")} 0.154.0 · ${t("composer.slash.sourceDocs", "문서 기준")}`;
-      // A helper's page keeps the door to its parent and speaks of the parent.
+      // A helper's page has no composer and so no door: its footer says which
+      // conversation directs it and speaks to that parent (t-15683; the `workers`
+      // suite holds the footer to its words).
       const owner = tabOfTerm(term);
       tell("hook:subagent", { term, rows: [{ id: "helper-1", name: "@helper", state: "done" }] });
       window.__ANSWER__.subagent_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
       await openHelperPage({ term, agent: "claude", worktree: owner.worktree, tab: owner }, { id: "helper-1", name: "@helper", state: "done" });
       await settle(120);
-      const helperComposer = document.querySelector("#worker-view .worker-composer");
-      seen.helperDoor = Boolean(helperComposer?.querySelector(".worker-composer-door"));
-      seen.helperPlaceholder = helperComposer?.querySelector(".worker-composer-box")?.placeholder;
-      seen.wantHelperPlaceholder = t("worker.say", "부모 에이전트에게 보내기…");
+      seen.helperStandsWithoutComposer = document.querySelectorAll(
+        "#worker-view .worker-composer, #worker-view .worker-composer-door, #worker-view .chat-dock",
+      ).length === 0 && document.querySelector("#worker-view .helper-foot .helper-foot-speak") !== null;
       // A page nobody has been answered on does not list `/copy` — a row
-      // that would do nothing when it is pressed is not drawn at all.
-      const helperBox = helperComposer?.querySelector(".worker-composer-box");
-      if (helperBox) { helperBox.value = "/"; helperBox.dispatchEvent(new Event("input", { bubbles: true })); }
+      // that would do nothing when it is pressed is not drawn at all. A pane's
+      // conversation that holds only the person's words is such a page.
+      const quietTerm = await openTermTab({ placement: "tab" });
+      tell("hook:agent", { term: quietTerm, state: "idle", agent: "claude", session: "s-quiet", resumable: false, model: "claude-fable-5-1" });
+      await window.__PAINTED__();
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
+      el("view-toggle-chat").click();
+      await settle(150);
+      const quietBox = document.querySelector(`.pane-slot[data-term="${quietTerm}"] .pane-chat .worker-composer-box`);
+      if (quietBox) { quietBox.value = "/"; quietBox.dispatchEvent(new Event("input", { bubbles: true })); }
       await settle(120);
-      const helperRows = [...document.querySelectorAll("#worker-view .composer-slash-row .composer-slash-name")]
+      const quietRows = [...document.querySelectorAll(`.pane-slot[data-term="${quietTerm}"] .pane-chat .composer-slash-row .composer-slash-name`)]
         .map((one) => one.textContent);
-      seen.helperRows = helperRows;
-      seen.copyUnlisted = helperRows.length > 0 && !helperRows.includes("/copy");
+      seen.helperRows = quietRows;
+      seen.copyUnlisted = quietRows.length > 0 && !quietRows.includes("/copy");
       delete window.__ANSWER__.term_paste; delete window.__ANSWER__.term_key;
       delete window.__ANSWER__.agent_models; delete window.__ANSWER__.slash_commands;
       delete window.__ANSWER__.pane_log; delete window.__ANSWER__.subagent_log;
@@ -55570,12 +55578,12 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       return seen;
     });
     ok(
-      "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page keeps its door and speaks of the parent",
+      "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page has no composer at all: its footer speaks to the parent instead",
       seen.placeholder === seen.wantPlaceholder && seen.noDoorOnOwnPane &&
         JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-mode", "worker-composer-context", "worker-composer-agents", "worker-composer-right"]) &&
         seen.agentsPillQuiet &&
         seen.chipMark === "✻" && seen.chipName === "Claude" && seen.chipModelRaw === " · claude-fable-5-1" &&
-        seen.helperDoor && seen.helperPlaceholder === seen.wantHelperPlaceholder,
+        seen.helperStandsWithoutComposer,
       JSON.stringify(seen),
     );
     ok(
