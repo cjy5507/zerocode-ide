@@ -2808,12 +2808,28 @@ async function stepsSpaceOnALine(browser, origin, ok) {
   try {
     await openConversation(page, paddedFixture(), { status: "idle" });
     await installStepsProbe(page);
-    const before = await page.evaluate(async () => {
-      const { list, steps, lineOf, settle } = window.__STEPS__;
+    // The reader gets a little above the foot the way a person does, by a wheel
+    // upward, which leaves at once. A place set from script is no such wish: the
+    // list reads an upward move under a list that changed size as the list's own.
+    const middle = await page.evaluate(async () => {
+      const { list, settle } = window.__STEPS__;
       const box = list();
-      // The reader a little above the foot, the keyboard on the last step's line.
-      box.scrollTop = box.scrollHeight - box.clientHeight - 30;
+      box.scrollTop = box.scrollHeight;
       await settle();
+      const rect = box.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    });
+    await page.mouse.move(middle.x, middle.y);
+    await page.mouse.wheel(0, -30);
+    const before = await page.evaluate(async () => {
+      const { list, steps, lineOf } = window.__STEPS__;
+      const box = list();
+      // The list has come to rest off its foot, the keyboard on the last step's line.
+      for (let last = -1, beat = 0; beat < 90; beat += 1) {
+        if (box.scrollHeight - box.scrollTop - box.clientHeight > 1 && box.scrollTop === last) break;
+        last = box.scrollTop;
+        await window.__PAINTED__();
+      }
       lineOf(steps().at(-1)).focus({ preventScroll: true });
       return {
         tall: box.scrollHeight > box.clientHeight + 200,
@@ -2844,7 +2860,7 @@ async function stepsSpaceOnALine(browser, origin, ok) {
     const shifted = await page.evaluate(() => ({ away: chatAway(window.__STEPS__.list()) }));
     ok(
       "C17: a Space on a step's line opens its row and does not count as a wish to go towards the foot — the reader a little above it is still away from it",
-      before.tall && before.away && before.gap < 50 && before.held && after.open && after.away,
+      before.tall && before.away && before.gap > 1 && before.gap < 50 && before.held && after.open && after.away,
       JSON.stringify({ before, after }),
     );
     ok(
