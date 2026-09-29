@@ -531,3 +531,159 @@ fn live_assign_moment_numbers() {
         json!({"samples": SAMPLES, "single": said(&single), "joint": said(&joint)})
     );
 }
+
+/// Synthetic work of every weight, for the comparison below: a title and the
+/// first words of a spec.
+const WEIGHED: [(&str, &str); 12] = [
+    (
+        "Fix a typo in the settings label",
+        "One label reads 'Langauge'. Correct the word in the five catalogs.",
+    ),
+    (
+        "Translate the onboarding page",
+        "Translate twelve strings of the onboarding page into five languages.",
+    ),
+    (
+        "Add a unit test for the date parser",
+        "The parser has no test for a leap day. Add one; change no product code.",
+    ),
+    (
+        "Update the README's install section",
+        "The install command changed. Rewrite the section and its two examples.",
+    ),
+    (
+        "A settings card for the update channel",
+        "Add a card with a picker of three channels, saved through the settings road, with tests.",
+    ),
+    (
+        "A benchmark for the file search",
+        "Measure the search over a synthetic tree of fifty thousand files; report p50 and p95.",
+    ),
+    (
+        "Port the task list to the terminal view",
+        "The window's task list, drawn in the terminal view with the same keys and states.",
+    ),
+    (
+        "A sidebar filter by worker state",
+        "Filter the sidebar's rows by state; the filter is remembered per workspace.",
+    ),
+    (
+        "Make the ledger survive a full disk",
+        "When the disk is full the ledger closes. Design and build a recovery that loses no row.",
+    ),
+    (
+        "A race between restore and account switch",
+        "Two roads seat one worker twice under load. Find the race, prove it, and close it.",
+    ),
+    (
+        "Replace the scheduler of the release lane",
+        "Phases run in order today. Design a scheduler that runs independent phases side by side.",
+    ),
+    (
+        "Migrate the transcript store's format",
+        "A new on-disk format, read and written by two versions at once, with a migration nobody waits on.",
+    ),
+];
+
+/// Eight models that name no efforts — what an agent's lineup was on the
+/// machine this was written on.
+fn eight() -> Lineup {
+    let models: Vec<Value> = ["a", "b", "c", "d", "e", "f", "g", "h"]
+        .into_iter()
+        .enumerate()
+        .map(|(at, name)| {
+            let (band, rungs) = match at {
+                0 => ("first", json!(["hard"])),
+                1 | 2 => ("second", json!(["medium", "hard"])),
+                _ => ("rest", json!(["easy", "medium"])),
+            };
+            json!({"provider": "claude", "id": format!("model-{name}"), "builtin": at < 2,
+                   "band": band, "rungs": rungs})
+        })
+        .collect();
+    Lineup::from_catalog(&json!({ "models": models }), "claude").unwrap()
+}
+
+/// Whether riding one request moves what the difficulty seat says: every
+/// task of [`WEIGHED`] asked alone and beside the model question (eight
+/// models at each effort of the ladder), the two answers side by side. The
+/// difficulty's rubric did not change; its state gained the models' keys,
+/// and this is how much that moved its answers. Live, as above — the key
+/// rides one command's environment and is never printed.
+#[test]
+#[ignore = "live Jev requests; requires a command-scoped key"]
+fn live_difficulty_answers_alone_and_joint() {
+    let key = std::env::var("TYPESAFE_API_KEY").expect("a command-scoped key");
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {
+            SUMMON_DIFFICULTY.setting: "on",
+            SUMMON_MODEL.setting: "on",
+            "jev": {"workspaces": ["*"]},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let wire = Wire::at(crate::systemone::SYSTEMONE_BASE_URL, &key, Some(settings));
+    let lineup = eight();
+    let records: std::collections::BTreeMap<String, ModelRecord> = lineup
+        .models
+        .iter()
+        .map(|model| {
+            (
+                model.id.clone(),
+                ModelRecord {
+                    ended: lineup::CHALLENGE_MIN_SAMPLES,
+                    ..ModelRecord::default()
+                },
+            )
+        })
+        .collect();
+    let ladder: Vec<&str> = LADDER.iter().map(|(_, _, effort)| *effort).collect();
+    let options = model::options("claude", &lineup, None, &records, &ladder, |_| None, 0);
+    let said = |row: Option<Value>| {
+        let row = row.unwrap_or_default();
+        json!({
+            "outcome": row["outcome"],
+            "chosen": row["chosen"],
+            "confidence": row["confidence"],
+        })
+    };
+    let mut same = 0;
+    let mut compared = 0;
+    let mut pairs = 0;
+    for (at, (title, spec)) in WEIGHED.into_iter().enumerate() {
+        let look = Look {
+            title: title.into(),
+            spec: spec.into(),
+            attempt: 0,
+            failures: 0,
+            retry_of: false,
+        };
+        let asked = AssignAsk {
+            difficulty: Some(look.clone()),
+            model: Some(model::ask(&look, &options).unwrap()),
+        };
+        let alone = said(ask(&wire, &asked.only(true, false), Some(home.path())).difficulty);
+        let joint = ask(&wire, &asked, Some(home.path()));
+        pairs += usize::from(
+            joint
+                .model
+                .as_ref()
+                .is_some_and(|row| row["outcome"] == "answered"),
+        );
+        let beside = said(joint.difficulty);
+        if alone["outcome"] == "answered" && beside["outcome"] == "answered" {
+            compared += 1;
+            same += usize::from(alone["chosen"] == beside["chosen"]);
+        }
+        println!("{}", json!({"task": at, "alone": alone, "joint": beside}));
+    }
+    println!(
+        "{}",
+        json!({"tasks": WEIGHED.len(), "compared": compared, "sameAnswer": same,
+               "modelAnswered": pairs, "options": options.len()})
+    );
+}
