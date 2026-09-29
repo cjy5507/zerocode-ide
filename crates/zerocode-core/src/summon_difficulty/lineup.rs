@@ -901,6 +901,32 @@ mod tests {
         assert!(row(&rows, HIGH).effort_clamped.is_some());
     }
 
+    /// The measurement a person reads (t-14437 criterion 8): today's rows
+    /// of every agent that takes a model at a difficulty, read against a
+    /// `zo models --json` answer this machine gave — named, never fetched
+    /// here.
+    #[test]
+    #[ignore = "live measurement: reads the zo models --json answer named by ZEROCODE_LINEUP_CATALOG"]
+    fn measure_todays_rows() {
+        let path = std::env::var("ZEROCODE_LINEUP_CATALOG").expect("a catalog path");
+        let catalog: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("the catalog")).unwrap();
+        for spec in crate::agent::AGENT_SPECS {
+            if crate::orchestration::difficulty_effort(spec.id, LOW).is_none() {
+                continue;
+            }
+            let lineup = match crate::agent::agent_voice(spec.id).models_provider {
+                Some(provider) => Lineup::from_catalog(&catalog, provider),
+                None => Lineup::from_catalog_all(&catalog),
+            };
+            let rows = rows(&Value::Null, spec.id, lineup.as_ref(), None, NOW).unwrap();
+            println!(
+                "{}",
+                json!({"agent": spec.id, "lineup": lineup.map(|held| held.models.len()), "rows": rows})
+            );
+        }
+    }
+
     impl M {
         fn into_live(self) -> LiveModel {
             let mut held = lineup(&[self]).models;
