@@ -714,7 +714,7 @@ fn the_pointer_on_the_marks_centre_does_not_make_a_refusal_a_cover() {
     desk.windows[0] = row(
         99,
         399,
-        "WindowServer",
+        "Window Server",
         2_147_483_630,
         (295.0, 245.0, 23.0, 22.0),
     );

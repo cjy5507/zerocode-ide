@@ -139,7 +139,7 @@ fn no_clear_place_when_the_screen_is_covered() {
 /// every other, wherever the pointer rests.
 fn pointer_picture(x: f64, y: f64) -> DesktopWindow {
     let mut pointer = window(99, 399, 2_147_483_630, (x, y, 23.0, 22.0));
-    pointer.app = "WindowServer".to_string();
+    pointer.app = "Window Server".to_string();
     pointer
 }
 

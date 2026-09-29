@@ -1067,16 +1067,16 @@ fn a_desktop_look_is_marked_only_when_its_windows_stood_still() {
     );
 }
 
-/// The pointer's own picture, as the window server lists it on some displays
-/// (09-30): its 23×22 window at the cursor's level, where the pointer rests.
+/// The pointer's own picture as read off the window list on 09-30: the
+/// window server's 23×22 window at the cursor's level, where the pointer rests.
 fn pointer_at(x: f64, y: f64) -> DesktopWindow {
     DesktopWindow {
         id: 99,
         pid: 399,
-        app: crate::computer_use_protocol::pointer::WINDOW_SERVER_OWNER.into(),
+        app: "Window Server".into(),
         rect: Rect::new(x, y, 23.0, 22.0),
         own: false,
-        layer: crate::computer_use_protocol::pointer::CURSOR_WINDOW_LAYER,
+        layer: 2_147_483_630,
         alpha: 1.0,
         overlay: false,
     }
