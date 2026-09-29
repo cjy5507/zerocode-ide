@@ -471,6 +471,7 @@ pub(crate) fn dispatch(
                         parent.as_deref(),
                         parent_lsp(ctx),
                         Some(ctx.hook_config()),
+                        ctx.turn_stop().as_ref(),
                     )
                 })
             }),

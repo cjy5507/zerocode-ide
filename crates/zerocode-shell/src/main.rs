@@ -177,6 +177,7 @@ mod stage_layout;
 mod standing_clock;
 mod state_migration;
 mod stats_events_store;
+mod summon_lineup;
 mod supply_chain;
 mod system_fonts;
 mod system_locale;
@@ -3261,6 +3262,12 @@ fn main() -> ExitCode {
             // and no other; until it is named, every door answers unknown.
             readiness_runtime::configure_root(managed.config_root());
             readiness_runtime::configure(readiness_runtime::limits_of(&boot_settings.readiness));
+            // Today's model lineup for the summons's choices (t-14437): read
+            // once now on a thread of its own, then whenever a reader finds
+            // it older than zo's refresh rule.
+            if let Some(home) = dirs::home_dir() {
+                summon_lineup::configure(handle.clone(), home, managed.config_root().to_path_buf());
+            }
             crumbs::record("boot", format_args!("settings"));
             if let Err(error) = managed.native_tray().sync_for_boot(
                 &handle,

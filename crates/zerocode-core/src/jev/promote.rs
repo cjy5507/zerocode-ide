@@ -834,7 +834,7 @@ pub fn judge_seat_at(
         apply_share: apply_share_of(held_with.iter().copied(), line),
     };
     let stand = standing(seat, rows);
-    let verdict = if seat.id == crate::summon_difficulty::QUESTION {
+    let verdict = if graded_by_executions(seat) {
         let current = crate::summon_difficulty::outcomes::latest(version.marks.iter().copied());
         let (outcome_agreement, broken) = crate::summon_difficulty::outcomes::evidence(&current);
         agreement = outcome_agreement;
@@ -860,6 +860,17 @@ pub fn judge_seat_at(
         cut: version.cut.map(str::to_string),
         act_line: line,
     })
+}
+
+/// The seats graded by the work their answers launched
+/// ([`crate::summon_difficulty::outcomes::evidence`]) rather than by marks
+/// alone: the summons's difficulty, and its model (t-14437).
+pub(crate) fn graded_by_executions(seat: &JevUse) -> bool {
+    [
+        crate::summon_difficulty::QUESTION,
+        crate::summon_model::QUESTION,
+    ]
+    .contains(&seat.id)
 }
 
 /// The share of a window's answered requests a seat acting from `line`
@@ -961,7 +972,7 @@ pub fn judgment_due(seat: &JevUse, rows: &[Value]) -> bool {
 /// [`judgment_due`] on a series already read ([`on_the_newest_version`]).
 #[must_use]
 pub fn judgment_due_on(seat: &JevUse, version: &OnVersion<'_>, rows: &[Value]) -> bool {
-    if seat.id == crate::summon_difficulty::QUESTION
+    if graded_by_executions(seat)
         && rows
             .last()
             .is_some_and(|row| row.get(crate::summon_difficulty::outcomes::KEY).is_some())

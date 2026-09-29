@@ -6411,10 +6411,19 @@ function initTypeSafeEvents() {
         : t("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 빠른 등급 모델에게 묻지 않습니다.");
     });
   });
+  /* Only the rows somebody filled are written (t-14437): an empty model
+   * field follows today's lineup, and a filled one keeps its own effort or
+   * the one that difficulty runs at now. */
   el("summon-profiles-save")?.addEventListener("click", () => {
-    const profiles = JSON.parse(JSON.stringify(typesafeState?.summonProfiles ?? {}));
-    el("summon-profiles-table")?.querySelectorAll("input").forEach((input) => {
-      profiles[input.dataset.agent][input.dataset.difficulty][input.dataset.field] = input.value.trim();
+    const profiles = {};
+    el("summon-profiles-table")?.querySelectorAll('input[data-field="model"]').forEach((input) => {
+      const model = input.value.trim();
+      if (!model) return;
+      const { agent, difficulty } = input.dataset;
+      const effortInput = el("summon-profiles-table").querySelector(
+        `input[data-field="effort"][data-agent="${agent}"][data-difficulty="${difficulty}"]`);
+      const effort = effortInput?.value.trim() || effortInput?.placeholder || "";
+      (profiles[agent] ??= {})[difficulty] = { model, effort };
     });
     void runTypeSafe(() => invoke("set_summon_profiles", { profiles }), () =>
       t("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
@@ -6442,33 +6451,79 @@ function paintTypeSafeModel(state) {
   input.disabled = typesafeBusy;
 }
 
+/* What each difficulty runs today, and what a person may write over it
+ * (t-14437). A field left empty follows the lineup — its placeholder is what
+ * runs now — and the model field picks from the models the agent takes
+ * today, the newly arrived marked; a model typed outside that list is said
+ * so beside the field, so a typo never launches unnoticed. */
 function paintSummonProfiles(state) {
   const table = el("summon-profiles-table");
   if (!table || table.contains(document.activeElement)) return;
   table.replaceChildren();
-  for (const [agent, levels] of Object.entries(state.summonProfiles ?? {})) {
-    for (const [difficulty, profile] of Object.entries(levels)) {
+  const written = state.summonProfiles ?? {};
+  for (const [agent, rows] of Object.entries(state.summonRows ?? {})) {
+    const picks = state.summonLineup?.[agent] ?? [];
+    const list = document.createElement("datalist");
+    list.id = `summon-lineup-${agent}`;
+    for (const pick of picks) {
+      const option = document.createElement("option");
+      option.value = pick.id;
+      if (pick.fresh) option.label = t("settings.typesafe.modelNew", "새로 들어옴");
+      list.append(option);
+    }
+    table.append(list);
+    for (const row of rows) {
+      const mine = written[agent]?.[row.difficulty];
+      const note = document.createElement("p");
+      note.className = "settings-row-desc";
+      note.textContent = summonRowNote(row);
       for (const field of ["model", "effort"]) {
         const label = document.createElement("label");
         label.className = "settings-field";
         label.dataset.field = "md";
         const name = document.createElement("span");
         name.className = "settings-field-copy";
-        name.textContent = `${agent} · ${difficulty} · ${field}`;
+        name.textContent = `${agent} · ${row.difficulty} · ${field}`;
         label.append(name);
         const input = document.createElement("input");
         input.className = "settings-input";
-        input.value = profile[field];
+        input.value = mine?.[field] ?? "";
+        input.placeholder = row[field];
         input.dataset.agent = agent;
-        input.dataset.difficulty = difficulty;
+        input.dataset.difficulty = row.difficulty;
         input.dataset.field = field;
         input.disabled = typesafeBusy;
+        if (field === "model") {
+          input.setAttribute("list", list.id);
+          input.addEventListener("input", () => {
+            const typed = input.value.trim();
+            note.textContent = typed && picks.length && !picks.some((pick) => pick.id === typed)
+              ? t("settings.typesafe.modelOutsideList", "오늘 목록에 없는 모델입니다 — 이름을 다시 확인하세요.")
+              : summonRowNote(row);
+          });
+        }
         label.append(input);
         table.append(label);
       }
+      table.append(note);
     }
   }
   el("summon-profiles-save").disabled = typesafeBusy;
+}
+
+/* One difficulty's line under its fields: who decided it, and the newly
+ * arrived models it could run instead. */
+function summonRowNote(row) {
+  const auto = t("settings.typesafe.rowAuto", "자동 — 지금은 {{model}} · {{effort}}로 뜹니다.", { model: row.model, effort: row.effort });
+  const said = row.from === "person"
+    ? t("settings.typesafe.rowWritten", "직접 적은 모델입니다. 비우면 자동으로 돌아갑니다.")
+    : row.effortRule === "highest"
+      ? `${auto} ${t("settings.typesafe.rowHighest", "쉬운 일과 보통 일은 한 등급 아래 모델을 그 모델의 가장 높은 사고 깊이로 씁니다.")}`
+      : auto;
+  const fresh = (row.candidates ?? []).filter((candidate) => candidate.fresh).map((candidate) => candidate.model);
+  return fresh.length
+    ? `${said} ${t("settings.typesafe.rowFresh", "새로 들어온 모델: {{models}}", { models: fresh.join(", ") })}`
+    : said;
 }
 
 /* One seat's row of the backend's answer, by the use's own name. The words a

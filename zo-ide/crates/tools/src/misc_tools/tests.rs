@@ -837,7 +837,7 @@ fn blocking_agent_timeout_detaches_and_delivers_completion_once() {
     )
     .into_iter()
     .find(|completion| completion.agent_id == manifest.agent_id);
-    let response = super::finish_blocking_agent_call(&manifest, completion)
+    let response = super::finish_blocking_agent_call(&manifest, completion, None)
         .expect("render timeout response");
     let response: serde_json::Value = serde_json::from_str(&response).expect("response json");
 
@@ -2745,11 +2745,14 @@ fn main_target_is_reserved_for_the_main_caller_too() {
 
 /// The upstream edge rides the SAME channel as completions, in FIFO order, so
 /// "the agent said something" can never overtake or trail "the agent finished".
+/// The sender is a background helper — the one kind whose words the main
+/// takes mid-run.
 #[test]
 fn agent_message_and_completion_keep_their_order_on_one_channel() {
     let _guard = env_lock();
     let mut rx = crate::register_agent_completion_channel();
     let caller = test_caller();
+    super::mark_background_agent(caller.agent_id.clone());
 
     let sent = super::run_send_message(
         None,
@@ -2792,6 +2795,7 @@ fn agent_message_and_completion_keep_their_order_on_one_channel() {
         }
     }
     super::agent_tools::clear_agent_completion_channel_for_tests();
+    super::clear_background_agent(&caller.agent_id);
 
     assert_eq!(ours.len(), 2, "message then completion, both on one channel");
     assert_eq!(ours[0].status, crate::AGENT_MESSAGE_STATUS);
@@ -2832,6 +2836,166 @@ fn upstream_send_reports_failure_when_no_host_consumes_the_channel() {
         sent["info"].as_str().unwrap_or_default().contains("final result"),
         "{sent}"
     );
+}
+
+/// A helper whose spawner is still blocked on its result — a blocking
+/// `Agent`, a fan-out member — cannot reach the main before that result does
+/// (t-11459). It used to be told "delivered" while the pump dropped the words;
+/// now nothing goes on the channel and the reply says where the words belong.
+#[test]
+fn a_helper_its_spawner_waits_on_is_told_its_message_went_nowhere() {
+    let _guard = env_lock();
+    let mut rx = crate::register_agent_completion_channel();
+    let caller = crate::SubagentIdentity {
+        agent_id: "agent-t11459-blocked".to_string(),
+        name: "fan-member".to_string(),
+    };
+    assert!(!super::is_background_agent(&caller.agent_id));
+    let sent = super::run_send_message(
+        None,
+        &super::SendMessageInput {
+            to: "main".to_string(),
+            message: "the flag lives in config.rs".to_string(),
+            attach_results: Vec::new(),
+            refresh_harness: false,
+            session_id: None,
+        },
+        Some(&caller),
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("upstream send still returns a result");
+    let mut ours = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if crate::agent_message_source_id(&event.agent_id) == caller.agent_id {
+            ours.push(event);
+        }
+    }
+    super::agent_tools::clear_agent_completion_channel_for_tests();
+
+    let sent: serde_json::Value = serde_json::from_str(&sent).expect("json result");
+    assert_eq!(sent["delivered"], serde_json::json!(false), "{sent}");
+    let info = sent["info"].as_str().unwrap_or_default();
+    assert!(info.contains("waiting on your result"), "{sent}");
+    assert!(info.contains("final result"), "{sent}");
+    assert!(ours.is_empty(), "words the main cannot take were put on its channel: {ours:?}");
+}
+
+/// Esc on a blocking `Agent` call stops the turn that waits (t-11460): the
+/// wait lets go at once instead of holding its 20-minute window, whose result
+/// the runtime would drop anyway.
+#[test]
+fn a_blocking_wait_lets_go_when_the_turn_waiting_on_it_stops() {
+    let stop = runtime::HookAbortSignal::new();
+    let esc = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            stop.abort();
+        })
+    };
+    let started = std::time::Instant::now();
+    let waited = super::agent_tools::wait_for_blocking_agent(
+        "agent-t11460-never-ends",
+        std::time::Duration::from_secs(5),
+        Some(&stop),
+    );
+    let held = started.elapsed();
+    esc.join().expect("esc thread");
+
+    assert!(
+        held < std::time::Duration::from_secs(2),
+        "the wait held on for {held:?} after its turn stopped"
+    );
+    assert_eq!(
+        waited.map(|completion| completion.status).as_deref(),
+        Some("still_running")
+    );
+}
+
+/// The race inside Esc (t-11460): the helper of a blocking call finished while
+/// the call was being let go, so its end went by on the channel before it had
+/// a background mark, and the pump passed it by. Handing it to the background
+/// road puts that end on the channel once more — and the mark, which the pump
+/// claims on the first copy it takes, keeps it to once.
+#[test]
+fn a_helper_that_ended_while_its_stopped_call_let_go_comes_back_once() {
+    let _guard = env_lock();
+    // The store must still hold the end when the call lets go: no sibling
+    // test may reset it in between.
+    let _store = super::agent_tools::lock_completion_store_for_tests();
+    let dir = temp_dir();
+    std::fs::create_dir_all(&dir).expect("create agent store");
+    let prior_store = std::env::var_os("ZO_AGENT_STORE");
+    std::env::set_var("ZO_AGENT_STORE", &dir);
+    let mut rx = super::register_agent_completion_channel();
+    let mut input: super::AgentInput = serde_json::from_value(serde_json::json!({
+        "description": "stopped blocking agent",
+        "prompt": "finish while the call is let go",
+        "background": false,
+    }))
+    .expect("agent input");
+    input.parent_session_id = Some("stop-session".to_string());
+    let manifest = super::agent_tools::execute_agent_with_spawn(input, |_job| Ok(()))
+        .expect("spawn the helper");
+    assert!(super::agent_tools::publish_agent_completion_for_tests(super::AgentCompletion {
+        agent_id: manifest.agent_id.clone(),
+        name: manifest.name.clone(),
+        status: "completed".to_string(),
+        result: Some("the answer".to_string()),
+        structured: None,
+        error: None,
+        run: HelperRun::default(),
+    }));
+    let ours = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<super::AgentCompletion>| {
+        let mut ours = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if event.agent_id == manifest.agent_id {
+                ours.push(event);
+            }
+        }
+        ours
+    };
+    assert_eq!(ours(&mut rx).len(), 1, "the helper's end went by once, unmarked");
+    assert!(!super::is_background_agent(&manifest.agent_id));
+
+    let stop = runtime::HookAbortSignal::new();
+    stop.abort();
+    let still_running = super::AgentCompletion {
+        agent_id: manifest.agent_id.clone(),
+        name: String::new(),
+        status: "still_running".to_string(),
+        result: None,
+        structured: None,
+        error: None,
+        run: HelperRun::default(),
+    };
+    let response = super::finish_blocking_agent_call(&manifest, Some(still_running), Some(&stop))
+        .expect("render the let-go response");
+    let again = ours(&mut rx);
+    let handed = super::is_background_agent(&manifest.agent_id);
+    super::clear_background_agent(&manifest.agent_id);
+    super::agent_tools::clear_agent_completion_channel_for_tests();
+    match prior_store {
+        Some(value) => std::env::set_var("ZO_AGENT_STORE", value),
+        None => std::env::remove_var("ZO_AGENT_STORE"),
+    }
+    let _ = std::fs::remove_dir_all(dir);
+
+    let response: serde_json::Value = serde_json::from_str(&response).expect("response json");
+    assert_eq!(response["status"], "running");
+    assert!(
+        response["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("turn that was waiting for it stopped")),
+        "{response}"
+    );
+    assert!(handed, "the helper was not handed to the background road");
+    assert_eq!(again.len(), 1, "its end was not put back on the channel once: {again:?}");
+    assert_eq!(again[0].status, "completed");
+    assert!(again[0].result.is_none(), "the same compact event the first publish sent");
 }
 
 /// The tool layer's own guards, ahead of the store: a stop that cannot name an

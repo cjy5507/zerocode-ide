@@ -961,17 +961,28 @@ const BACKGROUND_AGENT_NOTE: &str = "Agent is running in the background; you wil
     name (load the schema via ToolSearch if needed). If it stops being worth its remaining cost, end \
     it with StopAgent and this agentId rather than leaving it running unwatched.";
 
+/// Why an agent the model did not start in the background goes on there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockingHandoff {
+    /// The blocking wait's window closed first.
+    WaitTimedOut,
+    /// The turn that was waiting stopped (Esc, Stop) — t-11460.
+    TurnStopped,
+}
+
 fn running_background_agent_result(
     manifest: &AgentOutput,
-    blocking_wait_timed_out: bool,
+    handoff: Option<BlockingHandoff>,
 ) -> Result<String, ToolError> {
-    agent_tools::mark_background_agent(manifest.agent_id.clone());
-    let note = if blocking_wait_timed_out {
-        format!(
+    agent_tools::hand_agent_to_background(&manifest.agent_id);
+    let note = match handoff {
+        None => BACKGROUND_AGENT_NOTE.to_string(),
+        Some(BlockingHandoff::WaitTimedOut) => format!(
             "{BACKGROUND_AGENT_NOTE} The blocking wait timed out, but the agent keeps running."
-        )
-    } else {
-        BACKGROUND_AGENT_NOTE.to_string()
+        ),
+        Some(BlockingHandoff::TurnStopped) => format!(
+            "{BACKGROUND_AGENT_NOTE} The turn that was waiting for it stopped, but the agent keeps running."
+        ),
     };
     to_pretty_json(json!({
         "agentId": manifest.agent_id,
@@ -987,6 +998,7 @@ fn running_background_agent_result(
 fn finish_blocking_agent_call(
     manifest: &AgentOutput,
     completion: Option<AgentCompletion>,
+    turn_stop: Option<&runtime::HookAbortSignal>,
 ) -> Result<String, ToolError> {
     if completion
         .as_ref()
@@ -996,7 +1008,12 @@ fn finish_blocking_agent_call(
         // single-consumer channel. Marking this id is the only extra wiring a
         // detached spawn needs; `parent_session_id` already scopes the live
         // manifest consumed by the HUD and agents viewer.
-        return running_background_agent_result(manifest, true);
+        let handoff = if turn_stop.is_some_and(runtime::HookAbortSignal::is_aborted) {
+            BlockingHandoff::TurnStopped
+        } else {
+            BlockingHandoff::WaitTimedOut
+        };
+        return running_background_agent_result(manifest, Some(handoff));
     }
     to_pretty_json(match completion {
         Some(completion) => json!({
@@ -1038,6 +1055,7 @@ pub(crate) fn run_agent(
     parent_model: Option<&str>,
     parent_lsp: Option<&LspRegistry>,
     hook_config: Option<&RuntimeHookConfig>,
+    turn_stop: Option<&runtime::HookAbortSignal>,
 ) -> Result<String, ToolError> {
     // Background mode: detach and return AT spawn time so the main model can
     // keep working (and the user keep chatting) while the agent runs. The real
@@ -1056,7 +1074,7 @@ pub(crate) fn run_agent(
             parent_lsp,
             hook_config,
         )?;
-        return running_background_agent_result(&manifest, false);
+        return running_background_agent_result(&manifest, None);
     }
     // Block until the sub-agent finishes and return its result inline — like
     // `SpawnMultiAgent` and Claude Code's `Task`. The old behavior returned at
@@ -1064,9 +1082,14 @@ pub(crate) fn run_agent(
     // to poll the file with `sleep`+`cat`; that polling multiplied foreground
     // requests and tripped the shared provider rate limit even though the
     // sub-agent runs on the same account quota.
-    let (manifest, completion) =
-        agent_tools::execute_agent_blocking(input, parent_model, parent_lsp, hook_config)?;
-    finish_blocking_agent_call(&manifest, completion)
+    let (manifest, completion) = agent_tools::execute_agent_blocking(
+        input,
+        parent_model,
+        parent_lsp,
+        hook_config,
+        turn_stop,
+    )?;
+    finish_blocking_agent_call(&manifest, completion, turn_stop)
 }
 
 pub(crate) fn run_tool_search(
@@ -2954,7 +2977,7 @@ fn run_send_message_to_main(
     caller: &crate::context::SubagentIdentity,
     message: &str,
 ) -> Result<String, ToolError> {
-    let delivered = agent_tools::message_main_from_agent(
+    let receipt = agent_tools::message_main_from_agent(
         &caller.agent_id,
         caller.display(),
         message.to_string(),
@@ -2963,15 +2986,24 @@ fn run_send_message_to_main(
         "to": MAIN_CONVERSATION_TARGET,
         "agentId": caller.agent_id,
         "mode": "notify",
-        "delivered": delivered,
+        "delivered": receipt == agent_tools::MainMessageReceipt::Delivered,
         "sentAt": epoch_seconds_now(),
-        "info": if delivered {
-            "Delivered to the main conversation. If its turn is running it is folded in at the \
-             next tool boundary; otherwise it starts a follow-up turn. Any reply comes back as \
-             ordinary steering — keep working, do not wait or poll for it."
-        } else {
-            "This process has no live main conversation to receive the message (headless or \
-             detached run). Put anything the parent must see in your final result instead."
+        "info": match receipt {
+            agent_tools::MainMessageReceipt::Delivered => {
+                "Delivered to the main conversation. If its turn is running it is folded in at \
+                 the next tool boundary; otherwise it starts a follow-up turn. Any reply comes \
+                 back as ordinary steering — keep working, do not wait or poll for it."
+            }
+            agent_tools::MainMessageReceipt::NoLiveMain => {
+                "This process has no live main conversation to receive the message (headless \
+                 or detached run). Put anything the parent must see in your final result \
+                 instead."
+            }
+            agent_tools::MainMessageReceipt::AwaitsResult => {
+                "Not delivered: the conversation that spawned you is waiting on your result and \
+                 takes nothing from you before it. Put anything it must see in your final result \
+                 instead, and keep working."
+            }
         },
     }))
 }

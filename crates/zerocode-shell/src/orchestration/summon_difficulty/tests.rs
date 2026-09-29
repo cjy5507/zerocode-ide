@@ -134,19 +134,21 @@ fn replay_recorded_summonses() {
 
 /// A host that keeps the jobs it is handed off the beat until the test runs
 /// them, so a test sees what the summons did before any socket opened.
-struct Deferred {
-    wire: Wire,
+/// A host whose off-the-beat jobs wait to be run by hand — shared with the
+/// model seat's tests.
+pub(in crate::orchestration) struct Deferred {
+    pub(in crate::orchestration) wire: Wire,
     jobs: std::cell::RefCell<Vec<Box<dyn FnOnce() + Send>>>,
 }
 impl Deferred {
-    fn on(wire: &Wire) -> Self {
+    pub(in crate::orchestration) fn on(wire: &Wire) -> Self {
         Self {
             wire: wire.clone(),
             jobs: Default::default(),
         }
     }
     /// Run every job handed off the beat so far.
-    fn drain(&self) {
+    pub(in crate::orchestration) fn drain(&self) {
         let jobs: Vec<_> = self.jobs.borrow_mut().drain(..).collect();
         for job in jobs {
             job();
@@ -406,6 +408,50 @@ fn fresh_summonses_read_the_hosts_table_and_sealed_handovers_keep_their_tuning()
     drop(sealed);
 }
 
+/// t-14437: the window's lineup reaches a fresh summons — a model nobody
+/// typed launches the difficulty its rung serves — while a person's row
+/// stays theirs, and `agent-list`'s rows say "nobody looked" before any read.
+#[test]
+fn a_fresh_summons_reads_todays_lineup_and_keeps_the_persons_row() {
+    use zerocode_core::summon_difficulty::lineup::{Lineup, Seen};
+    let key = ["lineup-team", "%1", "lineup-request"];
+    let low = difficulty::LADDER[0].0;
+    let catalog = json!({"models": [
+        {"provider": "claude", "id": "model-a", "band": "second", "rungs": ["hard"]},
+        {"provider": "claude", "id": "model-b", "band": "rest", "rungs": ["easy", "medium"]},
+    ]});
+    let lineup = crate::summon_lineup::Snapshot {
+        lineups: std::collections::BTreeMap::from([(
+            "claude".to_string(),
+            Lineup::from_catalog(&catalog, "claude").unwrap(),
+        )]),
+        seen: Seen::default(),
+    };
+    let held = origin_with_lineup_for_tests(key, Value::Null, lineup.clone());
+    let row = profile("claude", low, key).unwrap().unwrap();
+    assert_eq!(row.model, "model-b", "the lineup's easy rung");
+    assert_eq!(row.from, difficulty::lineup::Source::Lineup);
+    drop(held);
+    let person = json!({"smart":{difficulty::PROFILES_SETTING:{"claude":{low:{"model":"model-x","effort":"high"}}}}});
+    let held = origin_with_lineup_for_tests(key, person.clone(), lineup.clone());
+    let row = profile("claude", low, key).unwrap().unwrap();
+    assert_eq!(
+        (row.model.as_str(), row.from),
+        ("model-x", difficulty::lineup::Source::Person)
+    );
+    drop(held);
+    assert!(
+        rows_in(
+            &Value::Null,
+            "claude",
+            &crate::summon_lineup::Snapshot::default()
+        )
+        .is_none()
+    );
+    let listed = rows_in(&person, "claude", &lineup).unwrap();
+    assert_eq!(listed.len(), difficulty::LADDER.len());
+}
+
 /* ---- the one switch (t-11989) ---- */
 
 /// Settings as a person who turned Jev on from the settings card holds them
@@ -453,7 +499,7 @@ impl zerocode_core::orchestration::Launcher for Seated<'_> {
         agent: &str,
         level: &str,
         origin: [&str; 3],
-    ) -> Result<Option<difficulty::Profile>, String> {
+    ) -> Result<Option<difficulty::lineup::Row>, String> {
         profile(agent, level, origin)
     }
 }
@@ -860,7 +906,7 @@ fn live_the_switch_carries_out_real_answers() {
             agent: &str,
             level: &str,
             origin: [&str; 3],
-        ) -> Result<Option<difficulty::Profile>, String> {
+        ) -> Result<Option<difficulty::lineup::Row>, String> {
             self.0.difficulty_profile(agent, level, origin)
         }
         fn presence(&self) -> Option<Vec<zerocode_core::agent::AgentPresence>> {

@@ -602,6 +602,8 @@ fn read_one(
         agent: envelope.agent,
         session: Some(session.to_string()),
         worktree: project.to_path_buf(),
+        worker: false,
+        prompt_key: None,
     };
     (
         count,

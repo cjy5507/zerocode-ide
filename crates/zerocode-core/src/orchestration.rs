@@ -8059,6 +8059,7 @@ impl Ledger {
             // person already has on their screen.
             summon_shadow: None,
             difficulty_shadow: None,
+            model_shadow: None,
             placement_shadow: None,
             prior_binding,
             prior_binding_revision,
@@ -13878,14 +13879,40 @@ pub trait Launcher {
         None
     }
 
-    /// The person's difficulty table, captured by the host for this launch.
+    /// The launch row for `difficulty` — the person's, else today's lineup's,
+    /// else the shipped table's — captured by the host for this launch, with
+    /// what else the lineup offers there (t-14437).
     fn difficulty_profile(
         &self,
         _agent: &str,
         _difficulty: &str,
         _origin: [&str; 3],
-    ) -> Result<Option<crate::summon_difficulty::Profile>, String> {
+    ) -> Result<Option<crate::summon_difficulty::lineup::Row>, String> {
         Ok(None)
+    }
+
+    /// Every difficulty's launch row for `agent` as the window's lineup
+    /// snapshot reads today — peeked, never fetched: this runs inside the
+    /// actor. `None` when nobody looked (t-14437).
+    fn summon_rows(&self, _agent: &str) -> Option<Vec<crate::summon_difficulty::lineup::Row>> {
+        None
+    }
+
+    /// What the model question reads for `agent` under this summons's origin
+    /// — lineup, book and records — or `None` when the host holds no lineup
+    /// or the launch was sealed (t-14437).
+    fn model_facts(&self, _agent: &str, _origin: [&str; 3]) -> Option<crate::summon_model::Facts> {
+        None
+    }
+
+    /// Ask the model seat `asked`: the receipt row, `applied` true only when
+    /// its answer is to run. `None` while the seat is off.
+    fn choose_model(
+        &self,
+        _asked: &crate::summon_model::ModelAsk,
+        _origin: [&str; 3],
+    ) -> Option<serde_json::Value> {
+        None
     }
 
     /// What this machine actually has, one row per agent the catalog knows.
@@ -16474,6 +16501,60 @@ const TUNABLE: &[(&str, &str, Option<EffortRide>, &str)] = &[
     ("cursor", "--model", None, ""),
 ];
 
+/// One model turn's facts, as [`dials_why`] reads them.
+type ModelTurn = (
+    Option<crate::summon_model::ModelAsk>,
+    Option<serde_json::Value>,
+    Option<crate::summon_difficulty::lineup::Candidate>,
+    crate::summon_model::Facts,
+);
+
+/// `dials.why` (t-14437): the chosen model's band, what set its effort
+/// (`jev` when the seat's pair ran, else the row's rule), how many of its
+/// summonses here have ended, and the seat's confidence when its answer ran.
+fn dials_why(
+    turn: Option<&ModelTurn>,
+    pick: Option<&(String, String, &str)>,
+    row: Option<&crate::summon_difficulty::lineup::Row>,
+) -> serde_json::Value {
+    let model = pick
+        .map(|(model, _, _)| model.as_str())
+        .or_else(|| row.map(|row| row.model.as_str()));
+    let facts = turn.map(|(_, _, _, facts)| facts);
+    let band = model
+        .and_then(|model| facts?.lineup.find(model)?.band)
+        .or_else(|| row.and_then(|row| row.band));
+    let jev = pick.is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
+    serde_json::json!({
+        "band": band,
+        "effortRule": if jev {
+            serde_json::json!(DIALS_FROM_JEV)
+        } else {
+            serde_json::json!(row.map(|row| row.effort_rule))
+        },
+        "samples": model
+            .and_then(|model| facts?.records.get(model))
+            .map_or(0, |record| record.ended),
+        "confidence": turn
+            .and_then(|(_, receipt, _, _)| receipt.as_ref())
+            .filter(|_| jev)
+            .map(|receipt| receipt["confidence"].clone()),
+    })
+}
+
+/// `dials.difficultyFrom`: the difficulty seat's applied answer chose it.
+const DIALS_FROM_JEV: &str = "jev";
+/// `dials.difficultyFrom`: nobody chose; the ladder's middle stood.
+const DIALS_FROM_FALLBACK: &str = "fallback";
+/// `dials.modelFrom`: the summons named its own `--model`.
+const DIALS_FROM_REQUEST: &str = "request";
+/// `dials.modelFrom`: a challenger's turn tried a model with too little
+/// record here (`summon_model::challenger`).
+const DIALS_FROM_CHALLENGE: &str = "challenge";
+/// `dials.modelFrom`: no row, no lineup and no answer named a model, so the
+/// agent's own CLI launched with its default.
+const DIALS_FROM_CLI_DEFAULT: &str = "cli-default";
+
 /// Translate the difficulty ladder through the measured launch table.
 /// Its last column is the highest effort this summons ladder may use.
 #[must_use]
@@ -16580,6 +16661,7 @@ fn agent_row(
     launched: &[serde_json::Value],
     headroom: Option<&Headroom>,
     readiness: Option<&crate::readiness::AgentReadinessSnapshot>,
+    summon: Option<&[crate::summon_difficulty::lineup::Row]>,
     now_ms: i64,
 ) -> serde_json::Value {
     let tuning = TUNABLE.iter().find(|(id, _, _, _)| *id == spec.id);
@@ -16619,8 +16701,32 @@ fn agent_row(
     // The binary and the login as the window's probe last saw them, with
     // the age on it; `unknown` where nobody has observed this agent.
     row["readiness"] = readiness_json(readiness, now_ms);
+    // What a summons that leaves the model open would launch with at each
+    // difficulty, where that came from (`person`, `lineup`, `table`), and
+    // what else today's lineup offers there, a newly arrived model marked
+    // `fresh` — so a coordinator can name one with `--model` (t-14437).
+    // `null` is "nobody read a lineup", never "no choices".
+    row["summon"] = summon.map_or(serde_json::Value::Null, |rows| serde_json::json!(rows));
+    // And when there are none, why — said, never left to a CLI's default.
+    row["summonUnavailable"] = match (tuning, summon) {
+        (None, _) => serde_json::json!(SUMMON_NO_MODEL_FLAG),
+        (Some((_, _, None, _)), _) => serde_json::json!(SUMMON_NO_EFFORT_FLAG),
+        (Some(_), Some(rows)) if !rows.is_empty() => serde_json::Value::Null,
+        (Some(_), _) => serde_json::json!(SUMMON_NO_LINEUP),
+    };
     row
 }
+
+/// `summonUnavailable`: the launch table has measured no `--model` for this
+/// agent's CLI, so a summons cannot name one.
+const SUMMON_NO_MODEL_FLAG: &str = "its CLI takes no measured --model at launch";
+/// `summonUnavailable`: a model can be named but no effort, so no difficulty
+/// row can be launched as a whole.
+const SUMMON_NO_EFFORT_FLAG: &str = "its CLI takes no measured effort at launch";
+/// `summonUnavailable`: the window read no lineup with models for it — its
+/// provider is not connected to zo, or zo's discovery for it failed.
+const SUMMON_NO_LINEUP: &str =
+    "no lineup today: its provider is not connected to zo, or zo could not list it";
 
 /// What this ledger has actually launched, per agent: every `(model, effort)`
 /// pair a summons here has carried, and how many times.
@@ -17179,6 +17285,8 @@ pub struct PreparedWorkerStart {
     pub placement_shadow: Option<PlacementShadow>,
     /// Difficulty evidence, recorded after this reservation really opens.
     pub difficulty_shadow: Option<crate::summon_difficulty::Shadow>,
+    /// The model question's receipt, recorded the same way (t-14437).
+    pub model_shadow: Option<crate::summon_model::Shadow>,
     prior_binding: Option<String>,
     prior_binding_revision: Option<u64>,
     binding_revision: u64,
@@ -17529,6 +17637,21 @@ bypass a safeguard or reach anything the person does not own.";
 
 const WORKER_GATE_CONTEXT: &str = "For code changes in a Rust workspace, the worker gate must include `cargo clippy --all-targets -- -D warnings` from the repository root, including test targets across the workspace. Report each gate exit code without hiding it behind a pipe.";
 
+/// The sentence that sends a worker to `zerocode-find` before it reads code
+/// it does not know (t-14869): the file pick seat, called by the agent
+/// itself, in place of the reads a worker spends finding its files — a
+/// note that only mentioned such a tool was used 0 times in 22 (t-14656).
+fn worker_find_context() -> String {
+    format!(
+        "Before your first read of code you do not know yet, run `{} <what you are about to change or debug>`: it lists the files most likely involved, each with its first comment line, so you start from them instead of searching.",
+        crate::file_find::SHIM
+    )
+}
+
+/// The words a worker's briefing ends on, before the task it carries — where
+/// a reader of the prompt finds the task's own words (t-14869).
+pub const BRIEFING_HANDS_OVER: &str = "Now do this:";
+
 /// What a summoned worker is told, ahead of its own instruction.
 ///
 /// Without this the loop does not close. A coordinator summons, the worker
@@ -17571,12 +17694,14 @@ with the same path named once in the summary. Say in the summary if that \
 file dies with your worktree, because the coordinator reads it before \
 anything is cleaned up. Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\nNow do this:\n\n",
+a new request. `zerocode-orc help` lists the rest. {find} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+        find = worker_find_context(),
         purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
         head = HANDED_IN_HEAD,
+        hands_over = BRIEFING_HANDS_OVER,
     )
 }
 
@@ -17614,12 +17739,13 @@ nobody on either side can answer one. Keep the summary short and carry a \
 longer answer as a path — `--payload '{{\"reportPath\":\"/abs/path\",\"lifetime\":\"ephemeral\"}}'` — \
 naming it once in the summary too, and say whether that file outlives your \
 worktree, because the home window is not on this machine. Every command that CHANGES anything needs --retry-request. \
-`zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\nNow do this:\n\n",
+`zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
         purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
         head = HANDED_IN_HEAD,
+        hands_over = BRIEFING_HANDS_OVER,
     )
 }
 
@@ -19653,12 +19779,14 @@ fn plan_inner(
                     // and a binary that arrived since the last look is a
                     // fact the snapshot's own `binary` carries.
                     let readiness = launcher.readiness(spec.id);
+                    let summon = launcher.summon_rows(spec.id);
                     agent_row(
                         spec,
                         seen,
                         history,
                         headroom.as_ref(),
                         readiness.as_ref(),
+                        summon.as_deref(),
                         now_ms,
                     )
                 })
@@ -19870,6 +19998,119 @@ fn plan_inner(
             } else {
                 None
             };
+            // The model dial nobody filled — no `--model`, no row the person
+            // wrote — is the model seat's (t-14437): asked over today's
+            // lineup whenever it can be; a challenger's turn tries a model
+            // with too little record first, and the seat's applied answer
+            // runs otherwise. The ladder's row is the road back.
+            let model_turn = if model.is_none()
+                && words.value("--on").is_none()
+                && !difficulty_look.spec.is_empty()
+                && profile
+                    .as_ref()
+                    .is_some_and(|row| row.from != crate::summon_difficulty::lineup::Source::Person)
+            {
+                launcher.model_facts(&agent, summons_origin).map(|facts| {
+                    let ladder = difficulty_effort(
+                        &agent,
+                        chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
+                    )
+                    .unwrap_or_default();
+                    let options = crate::summon_model::options(
+                        &agent,
+                        &facts.lineup,
+                        Some(&facts.seen),
+                        &facts.records,
+                        ladder,
+                        |offered| {
+                            launcher
+                                .provider_headroom(&agent, Some(offered))
+                                .map(|held| (held.used_percent, held.window.as_str()))
+                        },
+                        now_ms,
+                    );
+                    let asked = crate::summon_model::ask(&difficulty_look, &options);
+                    let summonses = ledger
+                        .runs()
+                        .iter()
+                        .flat_map(|run| run.workers.iter())
+                        .filter(|held| held.agent == agent)
+                        .count();
+                    let challenge = profile
+                        .as_ref()
+                        .and_then(|row| {
+                            crate::summon_model::challenger(row, &facts.records, summonses)
+                        })
+                        .cloned();
+                    // A challenger's turn runs whatever the seat would say,
+                    // so the launch does not wait for it to say it: the
+                    // question is kept, and asked once the pane is open.
+                    let receipt = asked
+                        .as_ref()
+                        .filter(|_| challenge.is_none())
+                        .and_then(|asked| launcher.choose_model(asked, summons_origin));
+                    (asked, receipt, challenge, facts)
+                })
+            } else {
+                None
+            };
+            let model_pick: Option<(String, String, &str)> = match &model_turn {
+                Some((_, _, Some(challenge), _)) => Some((
+                    challenge.model.clone(),
+                    challenge.effort.clone(),
+                    DIALS_FROM_CHALLENGE,
+                )),
+                Some((_, Some(receipt), None, _)) if receipt["applied"] == true => {
+                    receipt["chosen"]
+                        .as_str()
+                        .zip(receipt[crate::summon_model::EFFORT_KEY].as_str())
+                        .filter(|(chosen, _)| runs_model(&agent, chosen))
+                        .map(|(chosen, effort)| {
+                            (chosen.to_string(), effort.to_string(), DIALS_FROM_JEV)
+                        })
+                }
+                _ => None,
+            };
+            // What the reply says about the dials the coordinator left open:
+            // the difficulty and who chose it, where the model came from, and
+            // what else today's lineup offers at that difficulty (t-14437).
+            let dials = (model.is_none() || effort.is_none()).then(|| {
+                serde_json::json!({
+                    "difficulty": chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
+                    "difficultyFrom": if chosen.is_some() { DIALS_FROM_JEV } else { DIALS_FROM_FALLBACK },
+                    "modelFrom": match (&model, &model_pick, &profile) {
+                        (Some(_), _, _) => serde_json::json!(DIALS_FROM_REQUEST),
+                        (None, Some((_, _, from)), _) => serde_json::json!(from),
+                        (None, None, Some(row)) => serde_json::json!(row.from),
+                        // Nothing here chose: the agent's own CLI picks, and
+                        // the reply says so rather than leaving it unsaid.
+                        (None, None, None) => serde_json::json!(DIALS_FROM_CLI_DEFAULT),
+                    },
+                    "effortClamped": profile.as_ref().and_then(|row| row.effort_clamped.clone()),
+                    "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),
+                    // Why this pair, in the facts a person asks for: where the
+                    // model stands, what set its effort, how much finished
+                    // work here stands behind it, and the seat's confidence
+                    // when its answer ran (t-14437).
+                    "why": dials_why(model_turn.as_ref(), model_pick.as_ref(), profile.as_ref()),
+                })
+            });
+            let model_shadow = model_turn
+                .as_ref()
+                .and_then(|(asked, receipt, challenge, _)| {
+                    Some(crate::summon_model::Shadow {
+                        ask: asked.clone()?,
+                        receipt: receipt.clone(),
+                        challenge: challenge.is_some(),
+                    })
+                });
+            let effort = effort.or_else(|| {
+                model_pick
+                    .as_ref()
+                    .filter(|_| model.is_none())
+                    .map(|(_, effort, _)| effort.clone())
+            });
+            let model = model.or_else(|| model_pick.as_ref().map(|(picked, _, _)| picked.clone()));
             let model = model.or_else(|| profile.as_ref().map(|p| p.model.clone()));
             let effort = effort
                 .or_else(|| profile.as_ref().map(|p| p.effort.clone()))
@@ -20145,6 +20386,7 @@ fn plan_inner(
                     model.as_deref() == Some(profile.model.as_str())
                         && effort.as_deref() == Some(profile.effort.as_str())
                 });
+            prepared_worker_start.model_shadow = said.and(model_shadow);
             prepared_worker_start.difficulty_shadow =
                 said.map(|_| crate::summon_difficulty::Shadow {
                     look: difficulty_look,
@@ -20247,6 +20489,7 @@ fn plan_inner(
                         // carries, `null` where nothing was asked.
                         "model": model,
                         "effort": effort,
+                        "dials": dials,
                         "launchNotice": launch_notice,
                         // The disk's word on a `--worktree` cut: `null` when
                         // it had nothing to say, the arithmetic when live

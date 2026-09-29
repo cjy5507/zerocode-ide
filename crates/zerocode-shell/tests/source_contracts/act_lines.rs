@@ -27,6 +27,7 @@ const PLACEMENT: &str = include_str!("../../src/cmd/worker_room.rs");
 const STALL: &str = include_str!("../../src/orchestration/stall_cause.rs");
 const SUMMON: &str = include_str!("../../src/orchestration/summon_choice.rs");
 const SUMMON_DIFFICULTY: &str = include_str!("../../src/orchestration/summon_difficulty.rs");
+const SUMMON_MODEL: &str = include_str!("../../src/orchestration/summon_model.rs");
 const BROWSER_READ: &str = include_str!("../../src/browser_read.rs");
 const WALKS: &str = include_str!("../../src/agent_tools_runtime.rs");
 const ERRAND: &str = include_str!("../../src/computer_use/errand.rs");
@@ -111,6 +112,16 @@ const READS: &[(&str, &[(&str, &str)])] = &[
                 "crate::systemone::act_line(wire, &SUMMON_DIFFICULTY)",
             ),
             (SUMMON_DIFFICULTY, "SUMMON_DIFFICULTY.acts_on("),
+        ],
+    ),
+    (
+        "summon_model",
+        &[
+            (
+                SUMMON_MODEL,
+                "crate::systemone::act_line(wire, &SUMMON_MODEL)",
+            ),
+            (SUMMON_MODEL, "SUMMON_MODEL.acts_on("),
         ],
     ),
     (

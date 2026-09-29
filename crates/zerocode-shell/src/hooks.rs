@@ -251,6 +251,12 @@ pub fn start(local_data_root: &Path) -> Option<HookBridgeReceivers> {
      * actually offered a route is the catalog's measured answer, asked at the
      * moment of the knock. */
     let state = state.with_artifacts(std::sync::Arc::new(crate::artifact_runtime::ArtifactDoor));
+    // What the file pick seat says at a turn's start, where it acts for a
+    // summoned worker's pane, and its answer to the agent's own
+    // `zerocode-find` (t-14869).
+    let state = state
+        .with_turn_brief(std::sync::Arc::new(crate::pane_guard::PaneBrief))
+        .with_file_find(std::sync::Arc::new(crate::pane_guard::PaneFind));
     let state = state.with_pointer_mailbox(crate::orchestration_pointer_mailbox::mailbox());
     let computer_sender = state.computer_requests();
     let addr = tauri::async_runtime::block_on(async {
@@ -930,6 +936,24 @@ fn write_shim_dir(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o755))?;
     }
+    // The file pick seat, called by the agent itself (t-14869): the bridge's
+    // own token, like the artifact door's.
+    let find = dir.join(zerocode_core::file_find::SHIM);
+    std::fs::write(
+        &find,
+        shim_script_with_private_tokens(
+            zerocode_core::file_find::shim_script(
+                zerocode_hookd::env_var::PORT,
+                zerocode_hookd::env_var::TOKEN,
+            ),
+            &[],
+        ),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&find, std::fs::Permissions::from_mode(0o755))?;
+    }
     let computer = dir.join(zerocode_core::computer_use::COMPUTER_CLI);
     std::fs::write(
         &computer,
@@ -1048,10 +1072,15 @@ fn windows_door_scripts() -> Vec<(String, String)> {
     use zerocode_hookd::env_var::{
         BROWSER_TOKEN, BROWSER_TOKEN_FILE, COMPUTER_TOKEN, COMPUTER_TOKEN_FILE, PORT, TOKEN,
     };
-    let doors: [(&str, String, (&str, &str)); 5] = [
+    let doors: [(&str, String, (&str, &str)); 6] = [
         (
             zerocode_core::artifact_publish::SHIM,
             zerocode_core::artifact_publish::shim_script(PORT, TOKEN, true),
+            (TOKEN, ""),
+        ),
+        (
+            zerocode_core::file_find::SHIM,
+            zerocode_core::file_find::shim_script_powershell(PORT, TOKEN),
             (TOKEN, ""),
         ),
         (
@@ -1839,6 +1868,66 @@ pub struct SubagentRow {
     /// keeps the one-roster behaviour it always had. Provenance, off the wire.
     #[serde(skip_serializing)]
     pub registry: Option<String>,
+    /// The model this helper ITSELF runs on — flattened onto the row, so the
+    /// wire says `model`, `requestedModel` and `effort` beside the id. Empty
+    /// for a vendor that says none, which the window draws as the agent's name
+    /// alone; never filled from the pane the helper rides in.
+    #[serde(flatten)]
+    pub runs_on: HelperModel,
+}
+
+/// The model a helper runs on, in the words its vendor gave — the facts a
+/// helper's page, its sidebar row and its tip are drawn from.
+///
+/// A helper has no pane of its own: its page opens with its parent's terminal,
+/// and the model the window knows for that terminal is the PARENT's. A helper
+/// asked for one model and running on it was drawn as its parent's
+/// (2026-09-29), because the row carried nothing of the helper's own to draw
+/// instead. So whatever the window says about a helper's model is said here,
+/// on the row, by the vendor that knows it — zo's `subagents` frame and the
+/// record it keeps beside each helper's transcript — and a vendor that says
+/// none leaves all three empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct HelperModel {
+    /// The model that ran: the resolved one, which follows the helper if the
+    /// vendor moves it to another.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// What the helper was ASKED to run on, kept only where that is not the
+    /// model that ran (an alias the vendor resolved, a router that moved it, a
+    /// fallback that took over): the window's tip then says both.
+    #[serde(rename = "requestedModel", skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    /// How hard it thinks, in the vendor's own word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl HelperModel {
+    /// Take what `said` says and keep what it leaves unsaid. Answers whether
+    /// anything moved.
+    ///
+    /// Every frame refreshes a helper's row, and a frame that names no model —
+    /// a vendor that does not say, or a record that could not be read this
+    /// beat — is not the helper losing its model: the last word stands until
+    /// a newer one replaces it. A helper moved onto the very model it was
+    /// asked for has no second model to say, so the request is dropped then.
+    pub fn absorb(&mut self, said: HelperModel) -> bool {
+        let before = self.clone();
+        if said.model.is_some() {
+            self.model = said.model;
+        }
+        if said.requested_model.is_some() {
+            self.requested_model = said.requested_model;
+        }
+        if said.effort.is_some() {
+            self.effort = said.effort;
+        }
+        if self.requested_model == self.model {
+            self.requested_model = None;
+        }
+        *self != before
+    }
 }
 
 /// Whether a helper is still at work or has finished. Serialized in the
@@ -1975,6 +2064,11 @@ pub fn fold_helper_roster_from(
             row.registry = registry.map(str::to_string);
         }
         if let Some(seat) = held.iter_mut().find(|one| one.id == row.id) {
+            // What the vendor says the helper runs on is news even when
+            // nothing else about the row moved: a fallback that takes the
+            // helper to another model changes no name, no state and no count.
+            let moved_model = seat.runs_on.absorb(row.runs_on);
+            changed |= moved_model;
             let refreshed = seat.state != SubagentState::Running
                 || seat.name != row.name
                 || (row.transcript.is_some() && seat.transcript != row.transcript)
@@ -2053,6 +2147,7 @@ pub fn subagent_of(
             transcript: None,
             tool_calls: 0,
             registry: None,
+            runs_on: HelperModel::default(),
         },
     ))
 }
@@ -2126,6 +2221,7 @@ pub fn fold_background_tasks(
                     // is what moves it.
                     tool_calls: 0,
                     registry: None,
+                    runs_on: HelperModel::default(),
                 });
                 changed = true;
             }
@@ -3573,6 +3669,7 @@ mod tests {
             transcript: None,
             tool_calls: 4,
             registry: None,
+            runs_on: HelperModel::default(),
         }];
         assert!(fold_background_tasks(&mut running, &reading));
         assert_eq!(running.len(), 2, "the teammate entry is not a helper row");
@@ -3616,6 +3713,7 @@ mod tests {
             transcript: None,
             tool_calls: 0,
             registry: None,
+            runs_on: HelperModel::default(),
         });
         let mangled = zerocode_core::hook::background_agent_tasks(
             r#"{"background_tasks":[{"type":"subagent"}]}"#,
@@ -3657,6 +3755,7 @@ mod tests {
             transcript: None,
             tool_calls: 0,
             registry: None,
+            runs_on: HelperModel::default(),
         };
         let mut running = vec![spawn("call-1")];
         // The roll call the stop carries names the child by ITS id, running.
@@ -3730,6 +3829,7 @@ mod tests {
             transcript: None,
             tool_calls: 0,
             registry: registry.map(str::to_string),
+            runs_on: HelperModel::default(),
         };
         let mut held = Vec::new();
         // Session A lists a1 and a2; session B lists b1 — three rows, all up.
@@ -3795,6 +3895,47 @@ mod tests {
         assert!(mixed.iter().all(|one| one.state == SubagentState::Done));
     }
 
+    /// What a helper runs on is kept as a whole and moved by news alone: a
+    /// word the vendor says replaces the one held, a word it leaves out
+    /// stands, and a helper moved onto the very model it was asked for has
+    /// no second model to say. The synthetic names are the vendor's words,
+    /// not a table's.
+    #[test]
+    fn a_helpers_model_takes_news_keeps_silence_and_drops_a_request_it_now_meets() {
+        let said = |model: Option<&str>, asked: Option<&str>, effort: Option<&str>| HelperModel {
+            model: model.map(str::to_string),
+            requested_model: asked.map(str::to_string),
+            effort: effort.map(str::to_string),
+        };
+        let mut held = HelperModel::default();
+        assert!(!held.absorb(HelperModel::default()), "silence is not news");
+        assert!(held.absorb(said(Some("model-b"), Some("model-a"), Some("high"))));
+        assert_eq!(held, said(Some("model-b"), Some("model-a"), Some("high")));
+
+        // A frame that says only the model (its record unreadable this beat)
+        // leaves what was asked and how hard it thinks standing.
+        assert!(held.absorb(said(Some("model-c"), None, None)));
+        assert_eq!(held, said(Some("model-c"), Some("model-a"), Some("high")));
+        assert!(
+            !held.absorb(said(Some("model-c"), None, None)),
+            "the same word again moves nothing"
+        );
+
+        // Moved onto the model it was asked for: one model, not two words.
+        assert!(held.absorb(said(Some("model-a"), None, None)));
+        assert_eq!(held, said(Some("model-a"), None, Some("high")));
+
+        // And on the wire an empty word is not sent at all.
+        let wire = serde_json::to_value(said(Some("model-a"), None, None)).expect("wire-shaped");
+        assert_eq!(wire, serde_json::json!({ "model": "model-a" }));
+        let asked = serde_json::to_value(said(Some("model-b"), Some("model-a"), Some("low")))
+            .expect("wire-shaped");
+        assert_eq!(
+            asked,
+            serde_json::json!({ "model": "model-b", "requestedModel": "model-a", "effort": "low" })
+        );
+    }
+
     /// zo's frame names what is running and only that. Folding it keeps a
     /// helper it stopped naming as a finished row — name and transcript
     /// intact, so its page still opens — brings a re-listed id back to
@@ -3809,6 +3950,7 @@ mod tests {
             transcript: transcript.map(std::path::PathBuf::from),
             tool_calls: 0,
             registry: None,
+            runs_on: HelperModel::default(),
         };
         let mut held = vec![row("hook-born", false, None)];
         assert!(fold_helper_roster(
@@ -4185,6 +4327,7 @@ mod tests {
         std::fs::write(&mirror, "").unwrap();
         write_shim_dir(&dir.join("shims"), &mirror, &[]).unwrap();
         for door in [
+            zerocode_core::file_find::SHIM,
             "zerocode-browser",
             "zerocode-computer",
             "zerocode-emulator",
@@ -4470,8 +4613,9 @@ mod tests {
     #[test]
     fn the_windows_companions_of_every_door_are_pinned_everywhere() {
         let scripts = windows_door_scripts();
-        assert_eq!(scripts.len(), 10);
+        assert_eq!(scripts.len(), 12);
         for door in [
+            zerocode_core::file_find::SHIM,
             "zerocode-browser",
             "zerocode-computer",
             "zerocode-emulator",
@@ -4499,24 +4643,28 @@ mod tests {
             } else {
                 "ZEROCODE_COMPUTER_TOKEN_FILE"
             };
+            // The artifact and find doors ride the bridge's own token.
+            let hook_token_door =
+                door == "zerocode-artifact" || door == zerocode_core::file_find::SHIM;
             assert!(
-                door == "zerocode-artifact"
-                    || powershell.contains(&format!("$tokenFile = $env:{file_var}")),
+                hook_token_door || powershell.contains(&format!("$tokenFile = $env:{file_var}")),
                 "{door}.ps1 does not read its private token file"
             );
-            // The publishing pane and its folder ride the artifact door's
-            // argv, as its POSIX twin sends them; no other door names either.
+            // The asking pane and its folder ride the artifact and find
+            // doors' argv, as their POSIX twins send them; no other door
+            // names either.
             let names_its_pane = powershell.contains("@('--pane', $env:ZEROCODE_PANE_KEY)")
                 && powershell.contains("@('--cwd', (Get-Location).Path)");
             assert_eq!(
-                names_its_pane,
-                door == "zerocode-artifact",
+                names_its_pane, hook_token_door,
                 "{door}.ps1 pane and folder:\n{powershell}"
             );
             let route = if door == "zerocode-browser" {
                 "/browser"
             } else if door == "zerocode-artifact" {
                 "/artifact"
+            } else if door == zerocode_core::file_find::SHIM {
+                zerocode_core::file_find::ROUTE
             } else {
                 "/computer"
             };

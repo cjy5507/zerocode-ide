@@ -1571,3 +1571,357 @@ async fn artifact_route_authenticates_before_forwarding_and_returns_the_publicat
     assert_eq!(answer["version"], 2);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+/* ---- the turn's brief (t-14869) ------------------------------------------------ */
+
+/// A vault that has one block for every prompt.
+struct StandingVault;
+
+impl zerocode_hookd::PromptKnowledge for StandingVault {
+    fn related_block(&self, _session_key: &str, _pane_key: &str, _prompt: &str) -> Option<String> {
+        Some("the vault's pages".to_string())
+    }
+}
+
+/// A window whose brief answers `text` after `delay`, and counts what it
+/// was asked.
+struct StandingBrief {
+    text: Option<String>,
+    delay: Duration,
+    asked: std::sync::Mutex<Vec<zerocode_hookd::TurnBriefAsk>>,
+}
+
+impl StandingBrief {
+    fn answering(text: Option<&str>, delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            text: text.map(str::to_string),
+            delay,
+            asked: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn asked(&self) -> Vec<zerocode_hookd::TurnBriefAsk> {
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl zerocode_hookd::TurnBrief for StandingBrief {
+    fn brief(&self, ask: zerocode_hookd::TurnBriefAsk) -> Option<String> {
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ask);
+        std::thread::sleep(self.delay);
+        self.text.clone()
+    }
+}
+
+const BRIEF: &str = "[zo:file-pick] Likely files for this request: \"src/parser.rs\" (suggestions; verify or ignore).";
+
+fn prompt_body(pane: &str, event: &str, prompt: &str) -> String {
+    serde_json::json!({
+        "paneKey": pane,
+        "launchToken": "launch-3",
+        "worktreeId": "/w/project",
+        "payload": {
+            "hook_event_name": event,
+            "session_id": "s-brief",
+            "prompt": prompt,
+        }
+    })
+    .to_string()
+}
+
+/// The keys a reply of this road may carry, at every depth: context and the
+/// event it answers — never a decision, a permission or a changed input.
+fn keys_of(reply: &serde_json::Value) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(object) = reply.as_object() {
+        for (key, value) in object {
+            keys.push(key.clone());
+            keys.extend(
+                keys_of(value)
+                    .into_iter()
+                    .map(|inner| format!("{key}.{inner}")),
+            );
+        }
+    }
+    keys
+}
+
+/// A prompt a pane's brief speaks to is answered with the brief after the
+/// contract and the vault's block, in the one reply's context — whose keys
+/// are the event and the context and nothing else. The window is asked once,
+/// with the pane, the launch, the folder, the words and the wall.
+#[tokio::test]
+async fn a_brief_joins_the_prompts_context_after_the_vault_and_carries_nothing_else() {
+    let brief = StandingBrief::answering(Some(BRIEF), Duration::ZERO);
+    let (state, mut events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(
+        state
+            .with_prompt_knowledge(Arc::new(StandingVault))
+            .with_turn_brief(brief.clone()),
+    );
+    let response = service
+        .oneshot(post_json(
+            "/hook/claude",
+            Some(TOKEN),
+            &prompt_body("term-3", "UserPromptSubmit", "fix the parser"),
+        ))
+        .await
+        .expect("the prompt hook");
+    let reply = reply_of(response).await;
+    assert_eq!(
+        keys_of(&reply),
+        [
+            "hookSpecificOutput",
+            "hookSpecificOutput.hookEventName",
+            "hookSpecificOutput.additionalContext"
+        ]
+    );
+    assert_eq!(
+        reply["hookSpecificOutput"]["additionalContext"],
+        [
+            zerocode_core::delegation::AGENT_SELECTION_CONTEXT,
+            "the vault's pages",
+            BRIEF
+        ]
+        .join("\n\n")
+    );
+    assert_eq!(
+        brief.asked(),
+        [zerocode_hookd::TurnBriefAsk {
+            agent: AgentKind::Claude,
+            pane_key: "term-3".to_string(),
+            launch_token: "launch-3".to_string(),
+            worktree: "/w/project".to_string(),
+            prompt: "fix the parser".to_string(),
+            wall: zerocode_hookd::TURN_BRIEF_WALL,
+        }]
+    );
+    assert_eq!(events.recv().await.expect("envelope").pane_key, "term-3");
+}
+
+/// A brief later than its wall is left out, and the rest of the reply still
+/// arrives inside the script's budget; one the window has nothing for, or
+/// one longer than the cap, is left out the same way — the reply is what it
+/// was before any brief.
+#[tokio::test]
+async fn a_late_empty_or_overlong_brief_is_left_out_and_the_rest_arrives_in_time() {
+    let late = StandingBrief::answering(
+        Some(BRIEF),
+        zerocode_hookd::HOOK_REPLY_BUDGET + Duration::from_millis(500),
+    );
+    let overlong = "x".repeat(zerocode_hookd::TURN_BRIEF_CHAR_CAP + 1);
+    for (brief, bound) in [
+        (
+            late,
+            zerocode_hookd::HOOK_REPLY_BUDGET - zerocode_hookd::HOOK_CONNECT_BUDGET,
+        ),
+        (
+            StandingBrief::answering(None, Duration::ZERO),
+            Duration::from_secs(1),
+        ),
+        (
+            StandingBrief::answering(Some(&overlong), Duration::ZERO),
+            Duration::from_secs(1),
+        ),
+    ] {
+        let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+        let service = router(
+            state
+                .with_prompt_knowledge(Arc::new(StandingVault))
+                .with_turn_brief(brief.clone()),
+        );
+        let began = std::time::Instant::now();
+        let response = service
+            .oneshot(post_json(
+                "/hook/codex",
+                Some(TOKEN),
+                &prompt_body("term-4", "UserPromptSubmit", "fix the parser"),
+            ))
+            .await
+            .expect("the prompt hook");
+        let reply = reply_of(response).await;
+        assert!(began.elapsed() < bound, "{:?}", began.elapsed());
+        assert_eq!(brief.asked().len(), 1);
+        assert_eq!(
+            reply["hookSpecificOutput"]["additionalContext"],
+            [
+                zerocode_core::delegation::AGENT_SELECTION_CONTEXT,
+                "the vault's pages"
+            ]
+            .join("\n\n")
+        );
+    }
+}
+
+/// A brief is asked only at a turn's start, of a provider whose row has a
+/// prompt road: never on a tool's step, and never of an agent whose hooks
+/// take no context at a turn's start (Antigravity's row) — its turns are
+/// recorded, not briefed.
+#[tokio::test]
+async fn a_brief_is_asked_once_a_turn_and_only_where_a_turn_start_takes_context() {
+    let brief = StandingBrief::answering(Some(BRIEF), Duration::ZERO);
+    let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state.with_turn_brief(brief.clone()));
+    for (agent, event) in [
+        ("claude", "PreToolUse"),
+        ("claude", "PostToolUse"),
+        ("claude", "Stop"),
+        ("antigravity", "PreInvocation"),
+        ("antigravity", "PostToolUse"),
+    ] {
+        let reply = reply_of(
+            service
+                .clone()
+                .oneshot(post_json(
+                    &format!("/hook/{agent}"),
+                    Some(TOKEN),
+                    &prompt_body("term-5", event, "fix the parser"),
+                ))
+                .await
+                .expect("a hook"),
+        )
+        .await;
+        assert!(
+            !reply.to_string().contains(BRIEF),
+            "{agent} {event}: {reply}"
+        );
+    }
+    assert!(brief.asked().is_empty(), "{:?}", brief.asked());
+    let started = reply_of(
+        service
+            .oneshot(post_json(
+                "/hook/claude",
+                Some(TOKEN),
+                &prompt_body("term-5", "UserPromptSubmit", "fix the parser"),
+            ))
+            .await
+            .expect("the prompt hook"),
+    )
+    .await;
+    assert!(
+        started.to_string().contains("verify or ignore"),
+        "{started}"
+    );
+    assert_eq!(brief.asked().len(), 1);
+}
+
+/// The wall is the script's own budget less what it keeps back: the hook
+/// script's `curl` is written from the same numbers.
+#[test]
+fn the_briefs_wall_leaves_the_scripts_budget_its_margin() {
+    use zerocode_hookd::{
+        HOOK_CONNECT_BUDGET, HOOK_REPLY_BUDGET, HOOK_REPLY_MARGIN, TURN_BRIEF_WALL,
+    };
+    assert_eq!(
+        TURN_BRIEF_WALL + HOOK_CONNECT_BUDGET + HOOK_REPLY_MARGIN,
+        HOOK_REPLY_BUDGET
+    );
+    let script = zerocode_hookd::hook_script(AgentKind::Claude);
+    assert!(
+        script.contains(&format!(
+            "--connect-timeout {} --max-time {}",
+            HOOK_CONNECT_BUDGET.as_secs_f64(),
+            HOOK_REPLY_BUDGET.as_secs_f64()
+        )),
+        "{script}"
+    );
+}
+
+/* ---- zerocode-find (t-14869) ------------------------------------------------------- */
+
+/// A window whose file find answers `listing`, and keeps what it was asked.
+struct StandingFinder {
+    listing: String,
+    asked: std::sync::Mutex<Vec<zerocode_core::file_find::FindAsk>>,
+}
+
+impl zerocode_hookd::FileFind for StandingFinder {
+    fn find(&self, ask: zerocode_core::file_find::FindAsk) -> Result<String, String> {
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ask);
+        Ok(self.listing.clone())
+    }
+}
+
+/// `zerocode-find` rides the bridge with the hook token: the window is asked
+/// with the agent's words, the folder and the pane, and its listing is the
+/// command's output; without the token nothing is read, and without words
+/// the command is its usage.
+#[tokio::test]
+async fn zerocode_find_asks_the_window_with_the_agents_words_folder_and_pane() {
+    use zerocode_core::file_find::{CWD_FLAG, FindAsk, PANE_FLAG, ROUTE, USAGE};
+    let finder = Arc::new(StandingFinder {
+        listing: "src/parser.rs\n".to_string(),
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state.with_file_find(finder.clone()));
+    let body = |words: &[&str]| {
+        let mut body = String::new();
+        for word in words {
+            body.push_str(word);
+            body.push('\u{1f}');
+        }
+        body
+    };
+    let find = |token: Option<&str>, body: String| {
+        let mut builder = Request::post(ROUTE)
+            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream");
+        if let Some(token) = token {
+            builder = builder.header(HOOK_TOKEN_HEADER, token);
+        }
+        builder.body(Body::from(body)).expect("request")
+    };
+    let answered = service
+        .clone()
+        .oneshot(find(
+            Some(TOKEN),
+            body(&[
+                "fix",
+                "the parser",
+                CWD_FLAG,
+                "/w/project",
+                PANE_FLAG,
+                "term-2",
+            ]),
+        ))
+        .await
+        .expect("the find");
+    assert_eq!(answered.status(), StatusCode::OK);
+    let said = axum::body::to_bytes(answered.into_body(), 4096)
+        .await
+        .expect("the listing");
+    assert_eq!(&said[..], b"src/parser.rs\n");
+    assert_eq!(
+        *finder.asked.lock().expect("the asks"),
+        [FindAsk {
+            request: "fix the parser".to_string(),
+            cwd: Some("/w/project".to_string()),
+            pane: Some("term-2".to_string()),
+        }]
+    );
+    let refused = service
+        .clone()
+        .oneshot(find(None, body(&["fix"])))
+        .await
+        .expect("no token");
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    let usage = service
+        .oneshot(find(Some(TOKEN), body(&[CWD_FLAG, "/w"])))
+        .await
+        .expect("no words");
+    assert_eq!(usage.status(), StatusCode::CONFLICT);
+    let said = axum::body::to_bytes(usage.into_body(), 4096)
+        .await
+        .expect("the usage");
+    assert_eq!(&said[..], USAGE.as_bytes());
+    assert_eq!(finder.asked.lock().expect("the asks").len(), 1);
+}

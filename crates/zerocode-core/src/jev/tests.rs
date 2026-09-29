@@ -240,6 +240,7 @@ fn only_a_seat_that_fills_what_its_caller_left_open_starts_acting() {
     let acting = [
         SUMMON.id,
         SUMMON_DIFFICULTY.id,
+        SUMMON_MODEL.id,
         BROWSER.id,
         DESKTOP.id,
         EMULATOR.id,
@@ -668,6 +669,7 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
             COVER.id,
             PLACEMENT.id,
             SUMMON_DIFFICULTY.id,
+            SUMMON_MODEL.id,
             COMPACTION.id,
             PATCH_REVIEW.id,
             CLAIM.id,
@@ -681,11 +683,13 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
     for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert_eq!(
             row.agreement_rows_wanted,
-            Some(if row.id == SUMMON_DIFFICULTY.id {
-                crate::summon_difficulty::outcomes::MIN_EXECUTIONS
-            } else {
-                A_WINDOW_OF_COMPARISONS
-            }),
+            Some(
+                if row.id == SUMMON_DIFFICULTY.id || row.id == SUMMON_MODEL.id {
+                    crate::summon_difficulty::outcomes::MIN_EXECUTIONS
+                } else {
+                    A_WINDOW_OF_COMPARISONS
+                }
+            ),
             "{}",
             row.id
         );
@@ -703,7 +707,14 @@ fn the_placement_seats_line_sits_where_its_negatives_are() {
         Some(PLACEMENT_ANSWER_FLOOR_PERMILLE)
     );
     const { assert!(PLACEMENT_ANSWER_FLOOR_PERMILLE < ORCHESTRATION_ANSWER_FLOOR_PERMILLE) };
-    for row in [STALL, SUMMON, SUMMON_DIFFICULTY, STEP_EFFORT, REFLEX_DECIDE] {
+    for row in [
+        STALL,
+        SUMMON,
+        SUMMON_DIFFICULTY,
+        SUMMON_MODEL,
+        STEP_EFFORT,
+        REFLEX_DECIDE,
+    ] {
         assert_eq!(
             row.answer_floor_permille,
             Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
@@ -1698,7 +1709,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 30);
+    assert_eq!(JEV_USES.len(), 31);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -2000,7 +2011,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 30);
+    assert_eq!(JEV_USES.len(), 31);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 4), Some(&FILE_PICK));
 }
 
@@ -2551,7 +2562,7 @@ fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
         if let Some(wanted) = row.negatives_wanted {
             assert_eq!(
                 wanted,
-                if row.id == SUMMON_DIFFICULTY.id {
+                if row.id == SUMMON_DIFFICULTY.id || row.id == SUMMON_MODEL.id {
                     crate::summon_difficulty::outcomes::MIN_NEGATIVES
                 } else {
                     NEGATIVES_WANTED
@@ -3054,6 +3065,33 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
         id if id == SUMMON_DIFFICULTY.id => {
             vec![crate::summon_difficulty::questions()]
         }
+        id if id == SUMMON_MODEL.id => {
+            use crate::summon_model::{ModelOption, ModelRecord, ask};
+            let option = |id: &str| ModelOption {
+                id: id.to_string(),
+                band: None,
+                rungs: std::collections::BTreeSet::new(),
+                efforts: vec!["high".to_string()],
+                fresh: false,
+                quota_spent_percent: None,
+                quota_window: None,
+                record: ModelRecord::default(),
+            };
+            vec![
+                ask(
+                    &crate::summon_difficulty::Look {
+                        title: "task".into(),
+                        spec: "spec".into(),
+                        attempt: 0,
+                        failures: 0,
+                        retry_of: false,
+                    },
+                    &[option("model-a"), option("model-b")],
+                )
+                .expect("two models are a question")
+                .questions,
+            ]
+        }
         id if id == STEP_EFFORT.id => {
             use crate::step_effort::{Signals, Standing, StepLook, ask};
             vec![
@@ -3424,4 +3462,23 @@ fn the_cover_seat_is_a_row_of_its_own_that_sends_the_scenes_facts_alone() {
     // Another seat's word — the desktop's included — never switches it on.
     let desktop = json!({ SMART_SETTINGS_KEY: { DESKTOP.setting: "on" } });
     assert_eq!(COVER.mode_in(&desktop), JevMode::Off);
+}
+
+#[test]
+fn every_use_says_what_its_choices_offer_for_none_of_these() {
+    for row in &JEV_USES {
+        assert_ne!(
+            row.abstain,
+            Abstain::Unaudited,
+            "{} has not been audited for an abstain option",
+            row.id
+        );
+        if let Abstain::Lacks(why) = row.abstain {
+            assert!(
+                !why.trim().is_empty(),
+                "{} lacks an abstain option and does not say why",
+                row.id
+            );
+        }
+    }
 }

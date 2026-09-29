@@ -118,7 +118,7 @@ pub enum SubagentStep {
 /// hang on the near-miss between `stop` and `subagentstop`, and two copies of
 /// this rule are two chances for one of them to start folding a separator the
 /// other keeps.
-fn normalized_event(event_name: &str) -> String {
+pub(crate) fn normalized_event(event_name: &str) -> String {
     event_name
         .chars()
         .filter(char::is_ascii_alphanumeric)

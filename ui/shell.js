@@ -9422,6 +9422,9 @@ function agentRowsSaid(rows) {
         // 바꾼다. 원료를 적는다(사다리를 두 번 오르지 않기 위해).
         `:${panePrompts.get(row.term) ?? ""}:${paneSaid.get(row.term) ?? ""}` +
         `:${paneModels.get(row.term) ?? ""}:${restoredWorkers.get(row.term) ?? ""}` +
+        // A helper's own model — its words and the facts behind them — is
+        // what its row says about it; the pane's (above) is not.
+        `:${row.sub ? `${agentRowModelWords(row)}|${agentRowModelTip(row)}` : ""}` +
         `:${row.sub && row.subHost === undefined ? "" : JSON.stringify(paneAutonomyValue(row.term))}` +
         `:${agentRowHere(row) ? 1 : 0}`,
     )
@@ -9438,6 +9441,23 @@ function agentRowPane(row) {
   // 헬퍼를 접어 입은 판(t-3024)의 활동은 제 판의 것.
   if (row.sub && row.subHost === undefined) return `sub:${row.term}:${row.sub.id}`;
   return `term:${row.term}`;
+}
+
+/* The model a sidebar row wears, and the tip behind it.
+ *
+ * A pane's row wears its pane's model, the hook's word. A helper's row rides
+ * its parent's term but is NOT its parent: it wears the model the helper itself
+ * runs on — the roster row's, worded by the same function as the helper
+ * page's pill and the agents menu (`helperModelWords`) — and wears none when
+ * its vendor named none, because the parent's would be a claim nobody made
+ * (t-15625). Spelled once for the two roads that draw a row: the builder and
+ * the re-dress. */
+function agentRowModelWords(row) {
+  return row.sub ? helperModelWords(row.sub, row.agent) : (paneModels.get(row.term) ?? "");
+}
+
+function agentRowModelTip(row) {
+  return row.sub ? (helperModelTip(row.sub) || agentRowModelWords(row)) : (paneModels.get(row.term) ?? "");
 }
 
 /* 행이 툴팁으로 하는 말 — 원본의 title(`${primary}${secondary ? ` - ${secondary}` : ''}`)에
@@ -9838,7 +9858,7 @@ function fittedAgentRowWords(node, row) {
     fit.name = node.querySelector(".wt-agent-name");
     fit.said = node.querySelector(".wt-agent-said");
     if (fit.name === null || Boolean(fit.secondary) !== (fit.said !== null)) return null;
-    fit.model = row.sub ? null : paneModels.get(row.term);
+    fit.model = agentRowModelWords(row);
     fit.wears = node.querySelector(".wt-agent-model");
     if (Boolean(fit.model) !== (fit.wears !== null)) return null;
     // 도구 수가 처음 서거나 사라지는 것은 낱말이 아니라 모양이다 — 첫 도구를
@@ -9888,7 +9908,8 @@ function redressAgentRows(host, rows) {
     if (fit.said !== null) writeTextContent(fit.said, fit.secondary);
     if (fit.wears !== null) {
       writeTextContent(fit.wears, fit.model);
-      if (fit.wears.dataset.tip !== fit.model) fit.wears.dataset.tip = fit.model;
+      const modelTip = agentRowModelTip(row);
+      if (fit.wears.dataset.tip !== modelTip) fit.wears.dataset.tip = modelTip;
     }
     if (fit.usesNode !== null) writeTextContent(fit.usesNode, fit.uses);
     writeTextContent(fit.stateNode, fit.status);
@@ -10113,21 +10134,21 @@ function makeAgentRow(row, gutter = false) {
     said.textContent = secondary;
   }
   // The model chip, Orca's row exactly ("gpt-5.6-sol" — #33): muted mono,
-  // after the words, only when the pane's agent has SAID a model. A helper
-  // row carries its parent's term and would wear its parent's model as its
-  // own, so it stays bare.
-  const model = row.sub ? null : paneModels.get(row.term);
+  // after the words, only when the agent has SAID a model. A helper row
+  // carries its parent's term and would wear its parent's model as its own,
+  // so it wears the helper's own (`agentRowModelWords`) — or, when its vendor
+  // named none, stays bare rather than borrow one.
+  const model = agentRowModelWords(row);
   let wears = null;
   if (model) {
     wears = document.createElement("span");
     wears.className = "wt-agent-model";
     wears.textContent = model;
-    wears.dataset.tip = model;
+    wears.dataset.tip = agentRowModelTip(row);
   }
-  // 헬퍼는 모델 칩을 달지 않는다(부모의 모델을 제 것인 양 입게 되므로). 그
-  // 자리에 서는 것이 이 수다 — 도는 헬퍼가 무엇을 얼마나 했는지, Claude Code가
-  // 도는 Task 줄에 다는 그 낱말로. 아직 아무것도 집지 않았으면 아무것도 서지
-  // 않는다.
+  // 헬퍼 행에는 그 모델 칩 곁에 이 수가 선다 — 도는 헬퍼가 무엇을 얼마나
+  // 했는지, Claude Code가 도는 Task 줄에 다는 그 낱말로. 아직 아무것도
+  // 집지 않았으면 아무것도 서지 않는다.
   const usesWords = toolUsesWords(row.sub?.tool_calls ?? 0);
   let uses = null;
   if (usesWords) {
@@ -11498,6 +11519,10 @@ async function openHelperPage(row, sub) {
       command: "",
       status: sub.state === "done" ? "done" : "running",
       toolCalls: sub.tool_calls ?? 0,
+      // The roster row this page stands on — the helper's own model rides it
+      // (`composerHelperRow`), and the page keeps the last one it saw when
+      // the roster lets the helper go.
+      sub,
       startedAt: Date.now(),
       endedAt: sub.state === "done" ? Date.now() : null,
       output: null,
@@ -11806,6 +11831,9 @@ function syncHelperPagesWith(term, rows) {
   for (const tab of tabs) {
     if (tab.kind !== "worker" || !tab.worker.helper || tab.worker.term !== term) continue;
     const row = rows?.find((one) => one.id === tab.worker.helper.id);
+    // The page's row follows the roster, and stays when the roster lets go —
+    // a finished helper's page keeps saying the model it ran on.
+    if (row) tab.worker.sub = row;
     const status = row && row.state !== "done" ? "running" : "done";
     // 도구 수도 명부가 나르는 것이다. 상태는 한 번만 바뀌지만 이 수는 도구마다
     // 오르므로, 상태만 보고 있으면 페이지 머리가 처음 받은 수에 굳는다. 명부가
@@ -12201,8 +12229,11 @@ async function pollHelperPages() {
     : false;
   // The transcript names the model that wrote it. Only taken where nothing
   // has said yet: a hook that carries one is the pane's live word and this is
-  // the file's memory of it, which is a turn behind whenever both speak.
-  if (more.model && tab.worker.term !== undefined && !paneModels.get(tab.worker.term)) {
+  // the file's memory of it, which is a turn behind whenever both speak. And
+  // only from the PANE's own transcript: a helper's file names the helper's
+  // model, and `tab.worker.term` is its parent's — writing it down there made
+  // the parent's chip and row say a model the parent was not running.
+  if (held.id === PANE_LOG_ID && more.model && tab.worker.term !== undefined && !paneModels.get(tab.worker.term)) {
     paneModels.set(tab.worker.term, more.model);
     if (activeHelperPage() === tab) paintHelperSurface(tab);
   }

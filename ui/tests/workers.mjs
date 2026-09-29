@@ -777,6 +777,249 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       JSON.stringify(laneRowPeek),
     );
 
+    /* ---- 도우미의 페이지와 행은 도우미 자신의 모델을 말한다 (t-15625) --------
+     *
+     * 화면(사용자 스크린샷 09-29 16:3x): 모델을 sonnet으로 시켜 sonnet으로 돌고
+     * 있는 도우미의 페이지가 「ZO · opus」를 말했다. 도우미에게는 제 판이 없어
+     * 페이지가 부모 판과 함께 열리고, 입력줄의 칩은 부모 판의 모델을 읽었다.
+     * 명부의 행이 도우미의 모델을 나르지 않으니 페이지도 사이드바도 도우미의
+     * 것을 말할 방법이 없었다.
+     *
+     * 합성 이름만 쓴다: 부모 판은 model-o로 돌고, 도우미는 `sonnet`을 요청받아
+     * model-s로 돌았다. 세 자리 — 페이지의 칩, 사이드바의 행, 에이전트 알약의
+     * 메뉴 — 가 같은 말(model-s)을 해야 하고, 요청과 실행이 다르면 툴팁이 둘을
+     * 다 말하고, 벤더가 모델을 말하지 않은 도우미는 에이전트 이름만 말한다.
+     * 도우미의 칩은 모델을 바꾸자고 하지 않는다 — 도우미는 `/model`을 칠 수
+     * 있는 판이 아니다. */
+    const helperOwnModel = await page.evaluate(async () => {
+      const seen = {};
+      const term = await openTermTab({ placement: "tab" });
+      const owner = tabOfTerm(term);
+      const path = owner.worktree;
+      // The rows of THIS pane: a checkout's card holds every pane opened in it.
+      const rowsOf = (at) => [
+        ...(document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`)
+          ?.querySelectorAll(`.wt-agent[data-term="${at}"]`) ?? []),
+      ];
+      const rows = () => rowsOf(term);
+      const rowOf = (id) => rows().find((one) => one.dataset.sub === id) ?? null;
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const settle = (ms = 100) => new Promise((done) => setTimeout(done, ms));
+      const face = () => document.querySelector("#worker-view");
+      const chip = () => face()?.querySelector(".worker-composer-agent") ?? null;
+      const chipModel = () => chip()?.querySelector(".worker-composer-model-words")?.textContent ?? null;
+      const chipName = () => chip()?.querySelector(".worker-composer-pill-words")?.textContent ?? null;
+      const asked = { id: "h-s", name: "@reader", state: "running", model: "model-s", requestedModel: "sonnet", effort: "high" };
+      const blank = { id: "h-blank", name: "@blank", state: "running" };
+      const rosterOf = (first) => [first, blank];
+      window.__ANSWER__.subagent_log = () => ({
+        found: true,
+        next: 1,
+        turns: [{ role: "assistant", text: "reading" }],
+      });
+      const open = async (sub) => {
+        await openHelperPage({ term, agent: "claude", worktree: path, tab: owner }, sub);
+        await settle();
+      };
+
+      // 부모 판은 model-o로 돌고, 도우미 둘이 나가 있다.
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-own-model", model: "model-o" });
+      tell("hook:subagent", { term, rows: rosterOf(asked) });
+      await window.__PAINTED__();
+
+      // 사이드바: 부모 행은 제 모델을, 도우미 행은 도우미의 모델을, 말하지 않은
+      // 도우미 행은 아무것도 달지 않는다.
+      const wornBy = (node) => node?.querySelector(".wt-agent-model") ?? null;
+      seen.parentRow = wornBy(rows().find((one) => !one.dataset.sub))?.textContent ?? null;
+      seen.helperRow = wornBy(rowOf("h-s"))?.textContent ?? null;
+      seen.helperRowTip = wornBy(rowOf("h-s"))?.dataset.tip ?? "";
+      seen.blankRow = wornBy(rowOf("h-blank"))?.textContent ?? null;
+
+      // 페이지: 칩이 도우미의 모델을 말하고, 바꾸자고 하지 않고, 툴팁이 둘 다 말한다.
+      await open(asked);
+      seen.pageModel = chipModel();
+      seen.pageName = chipName();
+      seen.pageTip = chip()?.dataset.tip ?? "";
+      seen.pageOffersSwitch = chip()?.hasAttribute("aria-haspopup") === true ||
+        chip()?.querySelector(".worker-composer-chevron") !== null;
+      chip()?.click();
+      await settle();
+      seen.pageOpenedAMenu = document.querySelector(".composer-menu") !== null;
+      closeComposerMenu();
+
+      // 에이전트 알약의 메뉴: 같은 말.
+      face()?.querySelector(".worker-composer-agents")?.click();
+      await settle();
+      const menuRows = [...document.querySelectorAll(".composer-menu-item")];
+      const subOf = (name) => menuRows
+        .find((one) => one.querySelector(".composer-menu-name")?.textContent === name)
+        ?.querySelector(".composer-menu-sub")?.textContent ?? null;
+      seen.menuHelper = subOf("@reader");
+      seen.menuBlank = subOf("@blank");
+      closeComposerMenu();
+
+      // 모델을 말하지 않은 도우미의 페이지: 에이전트 이름만, 부모의 모델은 없다.
+      await open(blank);
+      seen.blankPageModel = chipModel();
+      seen.blankPageName = chipName();
+      seen.blankPageTip = chip()?.dataset.tip ?? "";
+
+      // 폴백이 돌던 도우미를 다른 모델로 옮기면 열린 페이지가 따라간다 — 요청은 그대로.
+      setActiveTab(`helper:${term}:h-s`);
+      tell("hook:subagent", { term, rows: rosterOf({ ...asked, model: "model-t" }) });
+      await settle();
+      seen.movedModel = chipModel();
+      seen.movedTip = chip()?.dataset.tip ?? "";
+      seen.movedRow = wornBy(rowOf("h-s"))?.textContent ?? null;
+
+      // 명부가 도우미를 놓아도(세션이 넘어갔다) 열린 페이지는 마지막으로 안 모델을 지킨다.
+      tell("hook:subagent", { term, rows: [] });
+      await settle();
+      seen.keptModel = chipModel();
+
+      // 카탈로그가 아는 모델은 카탈로그의 이름으로 — 세 자리가 같은 낱말로.
+      window.__ANSWER__.agent_models = () => [{ id: "model-s", display_name: "Model S", provider: "claude" }];
+      agentModelLists.clear();
+      await agentModelsFor("claude");
+      tell("hook:subagent", { term, rows: rosterOf(asked) });
+      await settle();
+      seen.namedPage = chipModel();
+      seen.namedRow = wornBy(rowOf("h-s"))?.textContent ?? null;
+      face()?.querySelector(".worker-composer-agents")?.click();
+      await settle();
+      seen.namedMenu = [...document.querySelectorAll(".composer-menu-item")]
+        .find((one) => one.querySelector(".composer-menu-name")?.textContent === "@reader")
+        ?.querySelector(".composer-menu-sub")?.textContent ?? null;
+      closeComposerMenu();
+
+      // 네 카탈로그: 요청→실행 문장과 "바꿀 수 없다"는 이유가 언어를 따라 바뀌고,
+      // 사이드바 행과 페이지 칩이 같은 문장을 쓴다. 모델 id는 벤더의 말 그대로다.
+      const wore = locale;
+      seen.tipsByLocale = {};
+      for (const code of ["en", "ja", "zh", "es"]) {
+        setLocale(code, { refresh: false, persist: false });
+        paintWorktreeAgents();
+        paintComposerChipsFor(term);
+        seen.tipsByLocale[code] = {
+          row: wornBy(rowOf("h-s"))?.dataset.tip ?? "",
+          chip: chip()?.dataset.tip ?? "",
+        };
+      }
+      setLocale(wore, { refresh: false, persist: false });
+      paintWorktreeAgents();
+      paintComposerChipsFor(term);
+
+      // 거꾸로도 새지 않는다: 도우미의 전사가 말한 모델은 부모 판의 모델이 아니다.
+      // 모델을 모르는 부모 판 밑의 도우미 페이지를 폴하면, 전사의 model-s가 그
+      // 부모의 표에 적히고 부모의 칩과 행이 도우미의 모델을 제 것인 양 말했다.
+      const lonely = await openTermTab({ placement: "tab" });
+      const lonelyOwner = tabOfTerm(lonely);
+      tell("hook:agent", { term: lonely, state: "working", agent: "claude", session: "s-lonely" });
+      tell("hook:subagent", { term: lonely, rows: [{ id: "h-leak", name: "@leak", state: "running" }] });
+      await window.__PAINTED__();
+      window.__ANSWER__.subagent_log = () => ({
+        found: true,
+        next: 2,
+        turns: [{ role: "assistant", text: "reading" }],
+        model: "model-s",
+      });
+      await openHelperPage(
+        { term: lonely, agent: "claude", worktree: lonelyOwner.worktree, tab: lonelyOwner },
+        { id: "h-leak", name: "@leak", state: "running" },
+      );
+      await pollHelperPages();
+      await window.__PAINTED__();
+      seen.parentModelFromHelperTranscript = paneModels.get(lonely) ?? null;
+      // The parent's own row must stand (or "wears none" is said of nothing).
+      const lonelyRows = rowsOf(lonely).filter((one) => !one.dataset.sub);
+      seen.lonelyParentRows = lonelyRows.length;
+      seen.leakedIntoParentRow = lonelyRows.map((one) => wornBy(one)?.textContent ?? null);
+
+      delete window.__ANSWER__.subagent_log;
+      delete window.__ANSWER__.agent_models;
+      agentModelLists.clear();
+      paneModels.delete(lonely);
+      tell("hook:subagent", { term: lonely, rows: [] });
+      tell("hook:subagent", { term, rows: [] });
+      tell("term:exited", { term: lonely });
+      tell("term:exited", { term });
+      window.__PANES__ = [];
+      for (const tab of [...tabs]) dropTab(tab.id);
+      for (const at of [...termViews.keys()]) dropTermView(at);
+      return seen;
+    });
+    ok(
+      "a helper's sidebar row wears the model the helper runs on, its parent's row keeps the parent's, and a helper whose vendor names none wears none",
+      helperOwnModel.parentRow === "model-o" &&
+        helperOwnModel.helperRow === "model-s" &&
+        helperOwnModel.blankRow === null,
+      JSON.stringify(helperOwnModel),
+    );
+    ok(
+      "a helper's page chip says the helper's model and the agent's name, never the pane's, and does not offer to switch it",
+      helperOwnModel.pageModel === " · model-s" &&
+        helperOwnModel.pageName === "Claude" &&
+        helperOwnModel.pageOffersSwitch === false &&
+        helperOwnModel.pageOpenedAMenu === false,
+      JSON.stringify(helperOwnModel),
+    );
+    ok(
+      "the tip on a helper's chip and row says what was asked and what ran, and how hard it thinks",
+      helperOwnModel.pageTip.includes("sonnet") && helperOwnModel.pageTip.includes("model-s") &&
+        helperOwnModel.pageTip.includes("high") &&
+        helperOwnModel.helperRowTip.includes("sonnet") && helperOwnModel.helperRowTip.includes("model-s"),
+      JSON.stringify(helperOwnModel),
+    );
+    ok(
+      "the agents menu says the helper's model in the same words, and a helper that names none says its state alone",
+      helperOwnModel.menuHelper?.includes("model-s") === true &&
+        helperOwnModel.menuBlank?.includes("model-o") === false &&
+        helperOwnModel.menuBlank?.includes("model-s") === false,
+      JSON.stringify(helperOwnModel),
+    );
+    ok(
+      "a helper whose vendor names no model shows the agent's name alone on its page, with no model and none of its parent's",
+      helperOwnModel.blankPageModel === "" &&
+        helperOwnModel.blankPageName === "Claude" &&
+        helperOwnModel.blankPageTip.includes("model-o") === false,
+      JSON.stringify(helperOwnModel),
+    );
+    ok(
+      "a helper moved to another model is followed by its open page and its row, the request stays in the tip, and a page outlives its roster row with the last model it knew",
+      helperOwnModel.movedModel === " · model-t" &&
+        helperOwnModel.movedTip.includes("sonnet") && helperOwnModel.movedTip.includes("model-t") &&
+        helperOwnModel.movedTip.includes("model-s") === false &&
+        helperOwnModel.movedRow === "model-t" &&
+        helperOwnModel.keptModel === " · model-t",
+      JSON.stringify(helperOwnModel),
+    );
+    ok(
+      "a model the catalog knows is worded by the catalog, the same on the page chip, the sidebar row and the agents menu",
+      helperOwnModel.namedPage === " · Model S" &&
+        helperOwnModel.namedRow === "Model S" &&
+        helperOwnModel.namedMenu?.includes("Model S") === true,
+      JSON.stringify(helperOwnModel),
+    );
+    ok(
+      "the tip on a helper's chip and row is worded by every catalog and says the same on both, with the vendor's ids untouched",
+      Object.values(helperOwnModel.tipsByLocale).length === 4 &&
+        new Set(Object.values(helperOwnModel.tipsByLocale).map((tip) => tip.row)).size === 4 &&
+        new Set(Object.values(helperOwnModel.tipsByLocale).map((tip) => tip.chip)).size === 4 &&
+        Object.values(helperOwnModel.tipsByLocale).every((tip) =>
+          [tip.row, tip.chip].every((words) => words.includes("sonnet") && words.includes("model-s")) &&
+          tip.chip.startsWith(tip.row) && !tip.chip.includes("helper.model") && !tip.chip.includes("composer.helperModel")),
+      JSON.stringify(helperOwnModel),
+    );
+    ok(
+      "the model a helper's transcript names is not written down as its parent pane's",
+      helperOwnModel.parentModelFromHelperTranscript === null &&
+        helperOwnModel.lonelyParentRows >= 1 &&
+        helperOwnModel.leakedIntoParentRow.every((worn) => worn === null),
+      JSON.stringify(helperOwnModel),
+    );
+
     /* ---- 그 다섯이 각각 무엇을 하고 있는가 (1-ey) ---------------------------
      *
      * 상태는 셋뿐이라, 다섯이 동시에 돌면 화면에는 "작업 중"이 다섯 줄 선다. 도구

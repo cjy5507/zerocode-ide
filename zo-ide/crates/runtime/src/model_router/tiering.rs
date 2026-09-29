@@ -35,6 +35,19 @@ pub enum ModelBand {
     Superseded,
 }
 
+impl ModelBand {
+    /// The word a report prints for the band (`zo models --json`).
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Second => "second",
+            Self::Rest => "rest",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
 /// The implementation rungs a task's complexity is routed through; a model
 /// may serve more than one (a provider with one non-top model serves all).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,6 +58,18 @@ pub enum ImplRung {
     Medium,
     /// Large work: the provider's second band.
     Hard,
+}
+
+impl ImplRung {
+    /// The word a report prints for the rung (`zo models --json`).
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Easy => "easy",
+            Self::Medium => "medium",
+            Self::Hard => "hard",
+        }
+    }
 }
 
 /// One model's classification, for audit and display.

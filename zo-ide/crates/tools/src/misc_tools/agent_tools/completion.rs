@@ -227,6 +227,33 @@ pub fn mark_background_agent(agent_id: String) {
         .insert(agent_id, BackgroundCompletionSource::Agent);
 }
 
+/// Put an agent the host's pump must bring back on that road: mark it, and
+/// when its terminal completion is already published, put that event on the
+/// channel once more (t-11460).
+///
+/// The mark can come after the end: a helper that finished while the call
+/// that started it was being let go — a blocking `Agent` whose turn stopped,
+/// or whose wait just timed out — published an event the pump passed by for
+/// want of the mark. The pump claims the mark on the first event it passes,
+/// so of the two copies exactly one reaches the main.
+pub(crate) fn hand_agent_to_background(agent_id: &str) {
+    mark_background_agent(agent_id.to_string());
+    let published = completion_store()
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entries
+        .get(agent_id)
+        .map(|stored| stored.completion.clone())
+        .filter(|completion| super::agent_output_status_is_terminal(&completion.status));
+    if let (Some(completion), Some(tx)) = (published, agent_completion_sender()) {
+        let _ = tx.send(AgentCompletion {
+            result: None,
+            ..completion
+        });
+    }
+}
+
 fn mark_background_task(task_id: String, session_id: Option<String>) {
     background_agent_ids()
         .lock()
@@ -308,13 +335,15 @@ pub fn background_agent_ids_snapshot() -> Vec<String> {
 /// retrying after sending it).
 pub const AGENT_STARVED_STATUS: &str = "starved";
 
+const AGENT_STARVED_ID_SUFFIX: &str = "#starved";
+
 /// Build the W9-3 starvation notice. Pure so the shape is testable: the
 /// `#starved` id suffix keeps it from ever matching an awaited agent id, and
 /// the message rides in `error` (the field the TUI renders for non-completed
 /// statuses).
 pub(super) fn starvation_notice(agent_id: &str, name: &str, message: String) -> AgentCompletion {
     AgentCompletion {
-        agent_id: format!("{agent_id}#starved"),
+        agent_id: format!("{agent_id}{AGENT_STARVED_ID_SUFFIX}"),
         name: name.to_string(),
         status: AGENT_STARVED_STATUS.to_string(),
         result: None,
@@ -365,13 +394,30 @@ pub(super) fn agent_message_notice(agent_id: &str, name: &str, text: String) -> 
 }
 
 /// The sending agent's REAL id for a notice built by `agent_message_notice`
-/// — what the host puts in the `SendMessage(to: …)` reply pointer. Idempotent
-/// on an unsuffixed id.
+/// or `starvation_notice` — what the host puts in the `SendMessage(to: …)`
+/// reply pointer, and the id whose background mark it reads. Idempotent on
+/// an unsuffixed id.
 #[must_use]
 pub fn agent_message_source_id(agent_id: &str) -> &str {
     agent_id
         .strip_suffix(AGENT_MESSAGE_ID_SUFFIX)
+        .or_else(|| agent_id.strip_suffix(AGENT_STARVED_ID_SUFFIX))
         .unwrap_or(agent_id)
+}
+
+/// Where a sub-agent's mid-run message to the main went — what its
+/// `SendMessage(to: "main")` answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MainMessageReceipt {
+    /// On the channel the interactive host's pump reads: the main takes it at
+    /// its running turn's next tool boundary, or as a follow-up turn.
+    Delivered,
+    /// No interactive consumer in this process (headless / serve).
+    NoLiveMain,
+    /// The call that spawned the agent is still waiting on its result — a
+    /// blocking `Agent`, a fan-out, a parent helper — and takes nothing from
+    /// it before then.
+    AwaitsResult,
 }
 
 /// Deliver a mid-run agent→main message to the parent host. Channel-only for
@@ -379,13 +425,25 @@ pub fn agent_message_source_id(agent_id: &str) -> &str {
 /// TERMINAL completions, and a mid-run message is not one — publishing it there
 /// would satisfy a workflow barrier waiting on this agent.
 ///
-/// Returns `false` when this process has no interactive consumer registered
-/// (headless / serve): the caller reports that honestly to the sub-agent rather
-/// than claiming a delivery that nobody will ever read.
-pub(super) fn notify_agent_message(notice: AgentCompletion) -> bool {
-    match agent_completion_sender() {
-        Some(tx) => tx.send(notice).is_ok(),
-        None => false,
+/// The receipt says `Delivered` only when the host's pump will put the words
+/// in front of the main: with no interactive consumer, or while the main is
+/// still blocked on the sender's result (it has no background mark), nothing
+/// is sent and the caller says so to the sub-agent rather than claiming a
+/// delivery that nobody will read.
+pub(super) fn notify_agent_message(notice: AgentCompletion) -> MainMessageReceipt {
+    let Some(tx) = agent_completion_sender() else {
+        return MainMessageReceipt::NoLiveMain;
+    };
+    // 표식 없는 도움이는 메인이 그 결과를 붙잡고 기다리는 중이다(blocking `Agent`·
+    // 팬아웃·부모 도움이) — 펌프가 넘겨도 결과보다 늦게 접히거나, 부모가 아닌
+    // 대화로 간다. 보내지 않고 그렇다고 답한다(t-11459).
+    if !is_background_agent(agent_message_source_id(&notice.agent_id)) {
+        return MainMessageReceipt::AwaitsResult;
+    }
+    if tx.send(notice).is_ok() {
+        MainMessageReceipt::Delivered
+    } else {
+        MainMessageReceipt::NoLiveMain
     }
 }
 
