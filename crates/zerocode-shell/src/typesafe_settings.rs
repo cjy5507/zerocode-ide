@@ -238,10 +238,12 @@ pub struct TypeSafeSettings {
     /// What each agent's summons runs at each difficulty today — the
     /// person's row, else the lineup's, else the shipped table's — and what
     /// else the lineup offers there.
-    pub summon_rows: std::collections::BTreeMap<String, Vec<zerocode_core::summon_difficulty::lineup::Row>>,
+    pub summon_rows:
+        std::collections::BTreeMap<String, Vec<zerocode_core::summon_difficulty::lineup::Row>>,
     /// Every model each agent's lineup offers today, the newly arrived
     /// marked: what a written row's model is picked from.
-    pub summon_lineup: std::collections::BTreeMap<String, Vec<zerocode_core::summon_difficulty::lineup::Pick>>,
+    pub summon_lineup:
+        std::collections::BTreeMap<String, Vec<zerocode_core::summon_difficulty::lineup::Pick>>,
     /// Every row of the use table, in the table's order — what the dashboard
     /// reads each feature's standing off.
     pub switches: Vec<SwitchRow>,
