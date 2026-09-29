@@ -15,7 +15,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use runtime::message_stream::{RenderBlock, SystemLevel};
@@ -31,12 +31,10 @@ use runtime::{
 };
 use tokio::sync::mpsc;
 
-/// The env knobs are the process's, and these tests read and set them.
-static ENV: Mutex<()> = Mutex::new(());
-
-fn env_lock() -> MutexGuard<'static, ()> {
-    ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+/// The env knobs are the process's, and these tests read and set them. An
+/// async mutex, held across the turn's awaits because the turn is the measured
+/// region; it has no poisoning, so one failing test cannot hide another.
+static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// One second is the shortest step the env can name.
 const STEP_SECS: &str = "1";
@@ -157,7 +155,7 @@ fn runtime_asked(runtime: &ConversationRuntime<ScriptedModel, StaticToolExecutor
 /// to do.
 #[tokio::test]
 async fn a_turn_that_keeps_writing_is_never_ended_for_its_age() {
-    let _env = env_lock();
+    let _env = ENV.lock().await;
     std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", STEP_SECS);
     std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
     std::env::remove_var("ZO_TURN_DEADLINE_SECS");
@@ -191,7 +189,7 @@ async fn a_turn_that_keeps_writing_is_never_ended_for_its_age() {
 /// — only the call's own time kept it alive.
 #[tokio::test]
 async fn a_tool_call_running_past_the_deadline_is_progress() {
-    let _env = env_lock();
+    let _env = ENV.lock().await;
     std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", STEP_SECS);
     std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
     std::env::remove_var("ZO_TURN_DEADLINE_SECS");
@@ -220,7 +218,7 @@ async fn a_tool_call_running_past_the_deadline_is_progress() {
 /// how long the window was — when nobody named a limit.
 #[tokio::test]
 async fn a_turn_ended_for_no_progress_says_so() {
-    let _env = env_lock();
+    let _env = ENV.lock().await;
     std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", STEP_SECS);
     std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
     std::env::remove_var("ZO_TURN_DEADLINE_SECS");
@@ -253,7 +251,7 @@ async fn a_turn_ended_for_no_progress_says_so() {
 /// `ZO_TURN_DEADLINE_SECS` is promised that limit, working or not.
 #[tokio::test]
 async fn a_deadline_somebody_named_is_a_wall_clock_that_says_so() {
-    let _env = env_lock();
+    let _env = ENV.lock().await;
     std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", STEP_SECS);
     std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
     std::env::set_var("ZO_TURN_DEADLINE_SECS", "1");
