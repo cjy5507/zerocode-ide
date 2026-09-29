@@ -33,3 +33,31 @@ fn a_window_short_of_any_of_the_three_is_not_the_pointer() {
         );
     }
 }
+
+/// The one table of rows read on this Mac and of guards
+/// (`fixtures/pointer-picture/examples.json`, w-12356 ef5b7702): the judgment
+/// answers each as the table does — the reflex bench answers the same table
+/// by the window server's process.
+#[test]
+fn every_example_of_the_shared_table_is_answered_as_the_table_says() {
+    let table: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/pointer-picture/examples.json"
+    ))
+    .expect("the table reads");
+    let examples = table["examples"].as_array().expect("examples");
+    assert!(examples.len() >= 7, "{}", examples.len());
+    for example in examples {
+        let answered = is_pointer_picture(
+            example["layer"].as_i64().expect("layer"),
+            example["owner"].as_str().expect("owner"),
+            example["width"].as_f64().expect("width"),
+            example["height"].as_f64().expect("height"),
+        );
+        assert_eq!(
+            Some(answered),
+            example["pointer"].as_bool(),
+            "{}",
+            example["what"]
+        );
+    }
+}

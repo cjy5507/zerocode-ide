@@ -1,0 +1,12 @@
+{
+  "about": "The pointer's own image in the window list: WindowServer lists it as a window at the cursor level where it draws the pointer itself (09-30, the built-in display closed). Each example is answered the same by the core's is_pointer_picture (by owner name) and by the bench's pointers_image (by WindowServer's process): all three of layer, owner and size, so another window at the cursor level stays a cover. Numbers and the owner's name only; never a title.",
+  "examples": [
+    {"what": "read 09-30 00:43, the pointer at (781.5, 533.2) on the main display", "layer": 2147483630, "owner": "Window Server", "width": 23, "height": 22, "pointer": true},
+    {"what": "read 09-30 00:37 by the q10 preflight over the fixture", "layer": 2147483630, "owner": "Window Server", "width": 28, "height": 40, "pointer": true},
+    {"what": "the side bound itself: the largest cursor window seen, 40 points, times the pointer-size slider's maximum, 4", "layer": 2147483630, "owner": "Window Server", "width": 160, "height": 160, "pointer": true},
+    {"what": "one point past the side bound", "layer": 2147483630, "owner": "Window Server", "width": 161, "height": 40, "pointer": false},
+    {"what": "another owner's window at the cursor level", "layer": 2147483630, "owner": "Finder", "width": 28, "height": 40, "pointer": false},
+    {"what": "a WindowServer window at the cursor level larger than a cursor", "layer": 2147483630, "owner": "Window Server", "width": 500, "height": 400, "pointer": false},
+    {"what": "a WindowServer window of a cursor's size at another level", "layer": 25, "owner": "Window Server", "width": 28, "height": 40, "pointer": false}
+  ]
+}
