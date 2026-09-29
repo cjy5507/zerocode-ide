@@ -1752,7 +1752,7 @@ async function openHelperConversation(page, turns, state) {
     await pollHelperPages();
     await window.__PAINTED__();
   }, { turns, state });
-  await page.waitForSelector("#worker-view .helper-turns .helper-turn");
+  await page.waitForSelector("#worker-view .helper-turns .helper-turn:not(.is-briefing)");
 }
 
 /* A pane whose agent has no wire, its conversation view open on `turns`. */
