@@ -689,7 +689,7 @@ fn judging() -> Endpoint {
 fn picking(any_yes: f64, hold_ms: u64) -> Endpoint {
     Endpoint::answering_each(
         "HTTP/1.1 200 OK",
-        |request| {
+        move |request| {
             let body: Value = request
                 .split("\r\n\r\n")
                 .nth(1)
