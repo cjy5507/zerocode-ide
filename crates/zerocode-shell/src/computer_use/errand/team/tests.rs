@@ -74,6 +74,58 @@ pub(in crate::computer_use::errand) fn judge_over(
     )
 }
 
+/// How many questions the two cases below ask of one process.
+const QUESTIONS_AT_ONCE: usize = 1_000;
+const READERS_AT_ONCE: usize = 8;
+
+/// Every question names a file of its own for its answer. The name was the
+/// process and a clock read twice in a row — a handful of nanoseconds, the
+/// same handful for two questions asked at one moment — so one question read
+/// the other's answer, or found its own removed before it was read.
+#[test]
+fn every_question_names_an_answer_file_of_its_own() {
+    let names: std::collections::BTreeSet<PathBuf> =
+        (0..QUESTIONS_AT_ONCE).map(|_| answer_file()).collect();
+    assert_eq!(
+        names.len(),
+        QUESTIONS_AT_ONCE,
+        "a name given twice is two questions reading one answer"
+    );
+}
+
+/// Readers asked side by side in one process each read their own answer.
+#[test]
+fn readers_asked_at_one_moment_each_read_their_own_answer() {
+    let root = tempfile::tempdir().expect("a root");
+    let asked = asked();
+    let read: Vec<(usize, Judged)> = std::thread::scope(|scope| {
+        let asking: Vec<_> = (0..READERS_AT_ONCE)
+            .map(|reader| {
+                let home = root.path().join(format!("reader-{reader}"));
+                std::fs::create_dir_all(&home).expect("a reader's folder");
+                let asked = &asked;
+                scope.spawn(move || {
+                    let (program, record) = fake_zo(&home, "", "0");
+                    let mark = reader % 2 + 1;
+                    let answer = format!(r#"{{"choice":"mark:{mark}","confidence":0.9}}"#);
+                    let mut judge = judge_over(program, &record, &answer, None);
+                    (mark, judge.choose(asked))
+                })
+            })
+            .collect();
+        asking
+            .into_iter()
+            .map(|reader| reader.join().expect("a reader"))
+            .collect()
+    });
+    for (mark, judged) in read {
+        let Judged::Chose(ActionRead { choice, .. }) = judged else {
+            panic!("a reader asked beside others still reads a choice");
+        };
+        assert_eq!(choice.chosen, Chosen::Mark(mark));
+    }
+}
+
 #[test]
 fn the_reader_is_started_headless_in_a_session_of_its_own_and_told_the_whole_question() {
     let root = tempfile::tempdir().expect("a root");

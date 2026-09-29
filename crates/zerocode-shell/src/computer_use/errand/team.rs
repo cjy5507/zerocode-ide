@@ -59,6 +59,15 @@ pub const FAST_ROLE: &str = "fast";
 pub const PROMPT_HEAD: &str = "You are the second reader of a closed choice that a screen walk's first reader could not decide with confidence. Read the state and the question below exactly as the first reader did.";
 pub const ANSWER_CONTRACT: &str = "Answer with ONE line of JSON and nothing else, of the shape {\"choice\":\"<one of the options>\",\"confidence\":<a number from 0 to 1>}. The choice must be one of the options listed; do not explain.";
 
+/// The file one question's reader is told to write its answer to.
+fn answer_file() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "zerocode-team-answer-{}-{}.txt",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ))
+}
+
 /// The second reader over zo, headless.
 pub struct TeamJudge {
     program: PathBuf,
@@ -191,11 +200,7 @@ impl TeamJudge {
     /// stdin, the answer read from the file it was told to write, the reader
     /// killed if it outlives the wall.
     fn run(&self, prompt: &str, deadline: Duration) -> Result<String, String> {
-        let last_message = std::env::temp_dir().join(format!(
-            "zerocode-team-answer-{}-{}.txt",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
+        let last_message = answer_file();
         let _ = std::fs::remove_file(&last_message);
         let mut command = crate::proc::quiet_command(&self.program);
         command
