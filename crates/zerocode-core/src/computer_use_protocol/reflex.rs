@@ -532,7 +532,7 @@ pub fn plan_hash(plan: &ReflexPlan) -> String {
 /// keeps insertion order — so the keys are sorted here, and the hash, the wire
 /// and the receiver's canonical check all read this one form. Swift writes the
 /// same bytes with `.sortedKeys`.
-fn canonical_json(value: &serde_json::Value) -> Vec<u8> {
+pub(crate) fn canonical_json(value: &serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&Canonical(value)).expect("a JSON value serializes")
 }
 

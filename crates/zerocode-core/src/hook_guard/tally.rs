@@ -12,12 +12,15 @@
 //! nothing the agent ran is kept. A row carries counts only: no command, no
 //! path, no words.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{SkillLoad, sight};
+use super::{Sight, SkillLoad, command_in, sight};
 use crate::agent::AgentKind;
 use crate::hook::{self, Phase, Tool};
+use crate::jev::fingerprint_of;
 use crate::payload::HookPayload;
 
 /// Where a pane's turns are counted: one ledger beside the seats' own.
@@ -83,25 +86,116 @@ pub enum Tallied {
 /// event.
 #[must_use]
 pub fn tallied_parsed(agent: AgentKind, event: &str, parsed: &HookPayload<'_>) -> Vec<Tallied> {
-    let _ = (agent, event, parsed);
-    Vec::new()
+    let row = sight(agent);
+    let mut told = Vec::new();
+    if !(row.before.yes() || row.after.yes()) {
+        return told;
+    }
+    let Some(activity) = hook::activity_of_parsed(event, parsed) else {
+        return told;
+    };
+    let tree = parsed.tree_or_null();
+    let named =
+        hook::tool_name_in_parsed(parsed).unwrap_or_else(|| activity.verb.as_str().to_string());
+    let key = || call_key(&named, hook::INPUT_KEYS.iter().find_map(|at| tree.get(*at)));
+    let called = || Tallied::Called {
+        key: key(),
+        kind: kind_of(&row, &activity.verb, &named, tree),
+    };
+    match activity.phase {
+        Phase::Started if row.before.yes() => told.push(called()),
+        Phase::Finished | Phase::Failed => {
+            if !row.before.yes() {
+                told.push(called());
+            }
+            if activity.phase == Phase::Failed {
+                told.push(Tallied::Failed { key: key() });
+            }
+        }
+        _ => {}
+    }
+    told
+}
+
+/// What kind of call a tool named `named` of verb `verb` is, off the agent's
+/// row: a read or a search looks around, as does a listing tool and a shell
+/// command whose program only reads; an edit or a write changes a file; a
+/// skill loads as the row says it shows.
+fn kind_of(row: &Sight, verb: &Tool, named: &str, tree: &Value) -> CallKind {
+    let command = (*verb == Tool::Bash).then(|| command_in(tree)).flatten();
+    let reduced = hook::normalized_event(named);
+    CallKind {
+        explore: matches!(verb, Tool::Read | Tool::Grep)
+            || EXPLORE_TOOL_NAMES.contains(&reduced.as_str())
+            || command.as_deref().is_some_and(explore_command),
+        edit: matches!(verb, Tool::Edit | Tool::Write),
+        skill: match row.skill_load {
+            SkillLoad::Tool(tool) => reduced == hook::normalized_event(tool),
+            SkillLoad::ReadsSkillFile => command.as_deref().is_some_and(|command| {
+                words_of(command).iter().any(|word| {
+                    word.trim_matches(['\'', '"'])
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|name| name == SKILL_FILE)
+                })
+            }),
+            SkillLoad::No(_) => false,
+        },
+    }
 }
 
 /// A call's name: its tool and its input, keys in order, less
 /// [`DROPPED_INPUT_KEYS`].
 #[must_use]
 pub fn call_key(tool: &str, input: Option<&Value>) -> String {
-    let _ = (tool, input);
-    String::new()
+    let kept = match input {
+        Some(Value::Object(fields)) => Value::Object(
+            fields
+                .iter()
+                .filter(|(key, _)| !DROPPED_INPUT_KEYS.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        Some(other) => other.clone(),
+        None => Value::Null,
+    };
+    let written = crate::computer_use_protocol::reflex::canonical_json(&kept);
+    fingerprint_of(&format!("{tool}\0{}", String::from_utf8_lossy(&written)))
 }
 
 /// Whether a shell command only looks around: its program, past a leading
 /// `cd … &&` and any `NAME=value` before it, is one of
-/// [`EXPLORE_COMMAND_WORDS`], or `git` reading ([`GIT_READ_WORDS`]).
+/// [`EXPLORE_COMMAND_WORDS`], `git` reading ([`GIT_READ_WORDS`]), or
+/// `zerocode-find` — counted as the looking it stands in for, so a turn that
+/// uses it is not measured as looking less than it did.
 #[must_use]
 pub fn explore_command(command: &str) -> bool {
-    let _ = command;
-    false
+    let words = words_of(command);
+    let Some(program) = words.first().and_then(|word| word.rsplit('/').next()) else {
+        return false;
+    };
+    EXPLORE_COMMAND_WORDS.contains(&program)
+        || program == crate::file_find::SHIM
+        || (program == "git" && words.get(1).is_some_and(|sub| GIT_READ_WORDS.contains(sub)))
+}
+
+/// A shell command's words past a leading `cd … &&` (or `;`), less every
+/// `NAME=value` — the baseline's own reading of which program runs.
+fn words_of(command: &str) -> Vec<&str> {
+    let mut command = command.trim();
+    for separator in ["&&", ";"] {
+        if command.starts_with("cd ")
+            && let Some((_, rest)) = command.split_once(separator)
+        {
+            command = rest.trim();
+        }
+    }
+    command
+        .split_whitespace()
+        .filter(|word| {
+            word.starts_with('-') || !word.split('/').next().unwrap_or_default().contains('=')
+        })
+        .collect()
 }
 
 /// One turn's calls, as they came.
@@ -118,7 +212,24 @@ pub struct TurnTally {
 impl TurnTally {
     /// Count one thing the hooks told.
     pub fn take(&mut self, tallied: Tallied) {
-        let _ = tallied;
+        match tallied {
+            Tallied::Called { key, kind } => {
+                if kind.edit && self.first_edit.is_none() {
+                    self.first_edit = Some(self.calls.len());
+                }
+                if kind.explore {
+                    self.explore += 1;
+                    if self.first_edit.is_none() {
+                        self.explore_before_edit += 1;
+                    }
+                }
+                if kind.skill {
+                    self.skills += 1;
+                }
+                self.calls.push(key);
+            }
+            Tallied::Failed { key } => self.failed.push(key),
+        }
     }
 
     /// Whether the turn made no call.
@@ -131,7 +242,7 @@ impl TurnTally {
     /// for a turn that edited nothing.
     #[must_use]
     pub fn explore_before_first_edit(&self) -> Option<usize> {
-        None
+        self.first_edit.map(|_| self.explore_before_edit)
     }
 
     /// The turn's row, made at `at` for the agent `from` in the folder
@@ -139,22 +250,36 @@ impl TurnTally {
     /// not count either.
     #[must_use]
     pub fn row(&self, at: u64, from: &str, pane: Option<String>) -> Option<PaneTurnRow> {
+        if self.is_empty() {
+            return None;
+        }
+        let runs = counted(&self.calls);
+        let repeats = || runs.values().filter(|count| **count >= REPEAT_RUN);
         Some(PaneTurnRow {
             at,
             from: from.to_string(),
             pane,
-            calls: 0,
-            explore_calls: 0,
-            calls_before_first_edit: None,
-            explore_before_first_edit: None,
-            duplicate_calls: 0,
-            repeat_runs: 0,
-            repeat_calls: 0,
-            failed_calls: 0,
-            same_failure_again: false,
-            skill_loads: 0,
+            calls: self.calls.len(),
+            explore_calls: self.explore,
+            calls_before_first_edit: self.first_edit,
+            explore_before_first_edit: self.explore_before_first_edit(),
+            duplicate_calls: runs.values().map(|count| count - 1).sum(),
+            repeat_runs: repeats().count(),
+            repeat_calls: repeats().map(|count| count - 1).sum(),
+            failed_calls: self.failed.len(),
+            same_failure_again: counted(&self.failed).values().any(|count| *count >= 2),
+            skill_loads: self.skills,
         })
     }
+}
+
+/// How many times each name comes.
+fn counted(names: &[String]) -> BTreeMap<&str, usize> {
+    let mut counts = BTreeMap::new();
+    for name in names {
+        *counts.entry(name.as_str()).or_default() += 1;
+    }
+    counts
 }
 
 /// One pane turn's counts.

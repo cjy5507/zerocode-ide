@@ -231,6 +231,7 @@ fn a_shell_command_looks_around_by_its_program() {
         "LANG=C grep -n foo src",
         "git log --oneline -3",
         "git diff",
+        "zerocode-find the parser crash",
     ] {
         assert!(explore_command(command), "{command}");
     }
@@ -294,7 +295,7 @@ fn a_row_carries_counts_only() {
     let row = tally.row(1, "codex", None).expect("one call");
     assert_eq!(row.calls_before_first_edit, None);
     let written = serde_json::to_value(&row).expect("a row serializes");
-    let keys: Vec<&str> = written
+    let keys: std::collections::BTreeSet<&str> = written
         .as_object()
         .expect("an object")
         .keys()
@@ -302,7 +303,7 @@ fn a_row_carries_counts_only() {
         .collect();
     assert_eq!(
         keys,
-        [
+        std::collections::BTreeSet::from([
             "at",
             "from",
             "calls",
@@ -313,7 +314,7 @@ fn a_row_carries_counts_only() {
             "failedCalls",
             "sameFailureAgain",
             "skillLoads"
-        ]
+        ])
     );
     assert!(!written.to_string().contains("secret"));
 }
