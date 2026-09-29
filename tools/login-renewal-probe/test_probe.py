@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -28,6 +29,12 @@ except Exception:
     pass
 print(json.dumps({"num_turns": 1, "usage": {"input_tokens": 9, "output_tokens": 1}}))
 """
+
+
+# The same CLI, still on its feet after the model call landed: the probe has
+# to end it, which is where a kill can be refused.
+LINGERING_CLI = FAKE_CLI.replace(
+    'print(json.dumps({"num_turns": 1,', 'import time; time.sleep(30)\nprint(json.dumps({"num_turns": 1,')
 
 
 class ProbeTest(unittest.TestCase):
@@ -53,6 +60,26 @@ class ProbeTest(unittest.TestCase):
             result = probe.probe(str(cli))
         self.assertEqual(result["row"]["messages"], 0)
         self.assertEqual(result["row"]["tokens"], 0)
+        self.assertGreaterEqual(result["control"]["messages"], 1)
+        self.assertTrue(result["ok"])
+
+    def test_a_child_that_ended_before_the_kill_does_not_fail_the_run(self) -> None:
+        """The control's child answers and is gone while the probe is still
+        reaching for it: its group then holds nothing a signal may reach, and
+        macOS refuses the kill (EPERM) where Linux finds no group (ESRCH). The
+        run has what it came for either way."""
+        kill = probe.os.killpg
+
+        def refused(group: int, signal_number: int) -> None:
+            kill(group, signal_number)  # nothing is left running behind the test
+            raise PermissionError(1, "Operation not permitted")
+
+        with tempfile.TemporaryDirectory() as bin_dir:
+            cli = Path(bin_dir) / "claude"
+            cli.write_text(LINGERING_CLI)
+            cli.chmod(0o755)
+            with mock.patch.object(probe.os, "killpg", refused):
+                result = probe.probe(str(cli))
         self.assertGreaterEqual(result["control"]["messages"], 1)
         self.assertTrue(result["ok"])
 
