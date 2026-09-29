@@ -936,7 +936,7 @@ mod tests {
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut pump = AgentCompletionPump::spawn(rx, "session-a".to_string());
         let store = tempfile::tempdir().expect("store");
-        let registry = Arc::new(tools::AgentRegistry::at_root_for_tests("session-a", store.path()));
+        let registry = tools::AgentRegistry::at_root_for_tests("session-a", store.path());
         let activity = runtime::helper_activity::Activity::new();
         pump.watch_stalls_on(registry, super::Pulse::over(activity.watch()));
         let looks = |pump: &AgentCompletionPump| pump.stall_looks.load(std::sync::atomic::Ordering::Relaxed);

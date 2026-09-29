@@ -3702,8 +3702,9 @@ mod tests {
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )] // a percentile index over a few dozen samples
+        clippy::cast_sign_loss,
+        clippy::too_many_lines
+    )] // a percentile index over a few dozen samples; one measurement, two phases
     fn pane_probe_three_helpers_at_work() {
         let Some(base) = std::env::var_os("PANE_PROBE_DIR").map(PathBuf::from) else {
             return;

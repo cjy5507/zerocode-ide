@@ -153,6 +153,7 @@ pub(crate) struct SubagentProgressWatcher {
     registry_id: Option<String>,
     /// Scans the poller has begun: what a test reads to see how often a watcher
     /// looks at a session that runs nothing.
+    #[cfg_attr(not(test), allow(dead_code))]
     scans: Arc<AtomicUsize>,
 }
 
@@ -839,7 +840,6 @@ fn epoch_seconds_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::Arc;
     use std::time::Duration;
 
     use runtime::helper_activity::{Activity, Count};
@@ -1456,7 +1456,7 @@ mod tests {
     /// Let what is ready run: a scan is a blocking task, and it finishes in real
     /// time while the clock stands still.
     async fn settle() {
-        for _ in 0..40 {
+        for _ in 0..60 {
             tokio::task::yield_now().await;
             std::thread::sleep(Duration::from_micros(500));
         }
@@ -1464,7 +1464,7 @@ mod tests {
 
     fn quiet_watcher(activity: &Activity) -> (tempfile::TempDir, SubagentProgressWatcher) {
         let store = tempfile::tempdir().expect("store");
-        let registry = Arc::new(AgentRegistry::at_root_for_tests("session-a", store.path()));
+        let registry = AgentRegistry::at_root_for_tests("session-a", store.path());
         let watcher = SubagentProgressWatcher::start_with(
             registry,
             "session-a".to_string(),

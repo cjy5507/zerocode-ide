@@ -11,7 +11,7 @@
 //! helpers and shell tasks whose end is to be brought back to the main
 //! conversation) — and it tells this module each time either changes, from
 //! under the lock that owns it, so two changes cannot arrive out of order. A
-//! looker reads the sum through [`watch`]: a channel it can sleep on until the
+//! looker reads the sum through [`watch()`]: a channel it can sleep on until the
 //! sum is above zero, instead of asking on a timer.
 
 use std::sync::{Mutex, OnceLock, PoisonError};
