@@ -403,6 +403,40 @@ pub fn occluders(windows: &[DesktopWindow], target: usize) -> Vec<Rect> {
         .collect()
 }
 
+/// The helper's verbs that press at a point, each with the parameters that
+/// name its points: the ones its own-window refusal reads (`pointedMethods`
+/// in the helper's dispatch).
+pub const POINTED_METHODS: [(&str, &[(&str, &str)]); 3] = [
+    ("mouseClick", &[("x", "y")]),
+    ("mouseScroll", &[("x", "y")]),
+    ("mouseDrag", &[("fromX", "fromY"), ("toX", "toY")]),
+];
+
+/// The points `params` presses at for `method`, as [`POINTED_METHODS`] names
+/// them: none for a verb that presses at no point; a point missing a number
+/// is left out (the helper refuses it).
+#[must_use]
+pub fn pointed_points(method: &str, params: &Value) -> Vec<(f64, f64)> {
+    POINTED_METHODS
+        .iter()
+        .filter(|(pointed, _)| *pointed == method)
+        .flat_map(|(_, keys)| keys.iter())
+        .filter_map(|(x, y)| Some((params.get(*x)?.as_f64()?, params.get(*y)?.as_f64()?)))
+        .collect()
+}
+
+/// The window a press at `(x, y)` lands on, `windows` front to back as
+/// `listAllWindows` answers with every layer: the frontmost at or above the
+/// document layer that hides what is under it ([`DesktopWindow::covers`] —
+/// neither an overlay, whose surfaces that take input are rows of their own,
+/// nor the pointer's own picture) and holds the point.
+#[must_use]
+pub fn window_under(windows: &[DesktopWindow], x: f64, y: f64) -> Option<&DesktopWindow> {
+    windows
+        .iter()
+        .find(|window| window.layer >= 0 && window.covers() && window.rect.contains_point(x, y))
+}
+
 /// Whether the windows from the front down to the target stood still
 /// between two lists — one before the picture, one after the walk: the same
 /// windows, in the same order, each where it was within the tolerance. The

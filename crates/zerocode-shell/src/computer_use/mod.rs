@@ -121,6 +121,22 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
         *held = Some(session);
     }
     let session = held.as_mut().expect("session stood");
+    // ZeroCode's own window under a point the request presses at is refused
+    // here first: the helper reads the pointer's own picture, where the
+    // window server lists one, as the window there (t-12979).
+    #[cfg(target_os = "macos")]
+    if let Some(refused) = own_window::own_window_first(method, &params, &mut || {
+        marks::desktop_windows(&mut |asked, with| {
+            session
+                .request(asked, with)
+                .map_err(|failure| match failure {
+                    SessionFailure::Provider(error) | SessionFailure::Transport(error) => error,
+                })
+        })
+        .ok()
+    }) {
+        return Err(refused);
+    }
     match session.request(method, params) {
         Ok(answer) => Ok(answer),
         Err(SessionFailure::Provider(error)) => Err(error),
