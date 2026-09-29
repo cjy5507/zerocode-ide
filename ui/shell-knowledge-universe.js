@@ -117,6 +117,9 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   starRatioCap: "--knowledge-3d-star-ratio-cap",
   starAgeScale: "--knowledge-3d-star-age-scale",
   starAgeSpan: "--knowledge-3d-star-age-span",
+  /* 이름 있는 별의 빛깔: 고친 때의 흑체 색을 제 휘도에서 벌리는 배수(1은 흑체 그대로), 속에 섞는 흰빛의 몫. */
+  starChroma: "--knowledge-3d-star-chroma",
+  starCoreWhite: "--knowledge-3d-star-core-white",
   /* 은하 짓기(시안 `universe`, 디자이너 답 m-12467의 1): 이름 있는 군집 중 순위 앞에서부터 은하가 되는 수의
    * 상한과 그 문턱(쪽 수 ≥ max(`galaxy-least`, `galaxy-share` × 쪽 / `world-pages`)), 성운을 두르는 성단의 수. */
   galaxyMax: "--knowledge-3d-galaxy-max",
@@ -171,7 +174,7 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   nebulaOuter: "--knowledge-3d-nebula-outer",
   nebulaMid: "--knowledge-3d-nebula-mid",
   nebulaInner: "--knowledge-3d-nebula-inner",
-  /* 은하 빛깔 = `galaxy-tint-base` + (1 − base) × 선형(색 칸의 어두운 테마 값). */
+  /* 은하 빛깔 = `galaxy-tint-base` + (1 − base) × 선형(색 칸의 어두운 테마 값)을 색 없는 군집의 휘도로 맞춘 것. */
   galaxyTintBase: "--knowledge-3d-galaxy-tint-base",
   /* 필라멘트(시안 `buildScene`): 두 은하 사이 선이 몇 개부터인가, 몇 쌍까지인가(셰이더 배열의 크기까지), 입자 수
    * = `filament-least-points` + `filament-grow-points` × √(n / 가장 굵은 n). */
@@ -179,9 +182,12 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   filamentMost: "--knowledge-3d-filament-most",
   filamentLeastPoints: "--knowledge-3d-filament-least-points",
   filamentGrowPoints: "--knowledge-3d-filament-grow-points",
-  /* 빛 번짐 사다리의 단 수와 세기(문턱 없음), 합성의 노출(테마마다). */
+  /* 빛 번짐 사다리의 단 수와 세기(문턱 없음), 합성의 노출(테마마다). 톤 매핑이 색 비율을 지키는 몫(0은 채널마다의
+   * ACES, 1은 가장 센 채널로 잰 ACES), 종이 위 먹빛에 싣는 색의 배수(1은 v4의 8%, 휘도는 그대로). */
   bloomLevels: "--knowledge-3d-bloom-levels",
   bloomStrength: "--knowledge-3d-bloom-strength",
+  toneKeep: "--knowledge-3d-tone-keep",
+  inkChroma: "--knowledge-3d-ink-chroma",
   /* 이름표(시안 `updateLabels`·`galaxyAnchor`·`showTip`, PORTING §2.7) — 들림이 이 값을 넘은 판에서만 선다. 명판:
    * 은하 가장자리 고리(반지름의 몫·점 수·보여야 할 점 수)의 화면에서 가장 낮은 곳 아래 틈만큼, 판 가장자리
    * 여백과 위·아래 띠, 둘레의 틈, 큰 명판을 입는 순위의 수, 가까이(처음 거리의 몫 밑) 가면 고른 것만. */
@@ -292,6 +298,11 @@ const KNOWLEDGE_UNIVERSE_CURVE = Object.freeze({
   up: 0.04,
   upright: 0.001,
 });
+
+/* 선형 빛의 휘도 무게(sRGB 원색, Rec. 709) — 은하 빛깔의 밝기를 맞출 때(`knowledgeUniverseTint`)와 셰이더가 별
+ * 빛깔·종이 위 먹빛의 색만 벌리고 휘도는 그대로 둘 때 같은 무게를 읽는다. */
+const KNOWLEDGE_UNIVERSE_LUMA = Object.freeze([0.2126, 0.7152, 0.0722]);
+const KNOWLEDGE_UNIVERSE_LUMA_GLSL = `vec3(${KNOWLEDGE_UNIVERSE_LUMA.map(knowledgeUniverseFloat).join(", ")})`;
 
 /* 쪽 이름 후보의 차례 — 초점의 별은 언제나 먼저, 쉴 때의 밝은 별은 제 차례대로(시안 `updateLabels`의 1e6·1e5). */
 const KNOWLEDGE_UNIVERSE_LABEL_FIRST = Object.freeze({ focus: 1e6, bright: 1e5 });
@@ -736,7 +747,9 @@ function appendKnowledgeUniverseLegend(list) {
  * 바뀐 것은 디자이너가 정한 자리뿐이다(PORTING.md §4, 우편 m-12467): 은하 줄 128, 장식 무리의 문턱(배경 별
  * 128·필라멘트 130부터), 초점 센티널 999 — 그 수는 `KNOWLEDGE_UNIVERSE_SHAPE` 한 곳에서 글자에 들어간다.
  * 필라멘트 곡선의 수(`KNOWLEDGE_UNIVERSE_CURVE`)와 별 크기의 수(`KNOWLEDGE_UNIVERSE_STAR`)도 같은 값을 표에서
- * 읽는다 — 이름표 자리와 고르기가 같은 표를 읽기 때문이다. */
+ * 읽는다 — 이름표 자리와 고르기가 같은 표를 읽기 때문이다. 사람이 색이 더 분명하기를 바라 네 자리가 토큰의
+ * 수를 읽는다(t-14081): 합성의 톤 매핑이 색 비율을 지키는 몫, 종이 위 먹빛의 색, 이름 있는 별의 채도와 속의 흰빛 —
+ * 그 토큰이 v4의 값(0 · 1 · 1 · 0.22)이면 글은 v4와 같게 그린다. */
 
 /* 은하 텍셀 읽기·정수 해시·별 색(Wikipedia 분광형 표의 D65 색을 선형으로)·나선 팔 밭 — 시안 `GAL`. */
 const KNOWLEDGE_UNIVERSE_GAL = `
@@ -988,11 +1001,11 @@ const KNOWLEDGE_UNIVERSE_DECOR_FRAG = `varying vec3 vCol; varying float vA; vary
         gl_FragColor = o * inside;
       }`;
 
-/* 이름 있는 별(쪽): 밝기 = 연결 수(등급 척도), 색 = 최근 고침(흑체 색), 밝은 별은 빛살, 찾은 별은
- * 조준 고리 — 시안 `materials.stars`. */
+/* 이름 있는 별(쪽): 밝기 = 연결 수(등급 척도), 색 = 최근 고침(흑체 색을 제 휘도에서 `star-chroma`배로 벌린 것),
+ * 밝은 별은 빛살, 찾은 별은 조준 고리 — 시안 `materials.stars`. */
 const KNOWLEDGE_UNIVERSE_STARS_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
       attribute vec3 aPos2; attribute vec4 aStar; attribute float aState;
-      uniform float uLift; uniform float uDpr; uniform float uRef; uniform float uFocus;
+      uniform float uLift; uniform float uDpr; uniform float uRef; uniform float uFocus; uniform float uStarChroma;
       varying vec3 vCol; varying float vI; varying float vS; varying float vState; varying float vSpike;
       void main(){
         vec3 w = mix(aPos2, position, uLift);
@@ -1009,11 +1022,12 @@ const KNOWLEDGE_UNIVERSE_STARS_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
         vI = min(flux, 6.0) * 0.55 * focus;
         vSpike = smoothstep(3.0, 9.0, flux) + ((st > 1.5 && st < 2.5) ? 0.8 : 0.0);
         vec3 c = starColor(aStar.y);
+        c = max(mix(vec3(dot(c, ${KNOWLEDGE_UNIVERSE_LUMA_GLSL})), c, uStarChroma), 0.0);
         if (uFocus > 0.5 && st < 0.5) c = mix(c, vec3(dot(c, vec3(0.3, 0.59, 0.11))), 0.7);
         vCol = c;
       }`;
 
-const KNOWLEDGE_UNIVERSE_STARS_FRAG = `uniform float uTime; uniform float uDpr;
+const KNOWLEDGE_UNIVERSE_STARS_FRAG = `uniform float uTime; uniform float uDpr; uniform float uStarWhite;
       varying vec3 vCol; varying float vI; varying float vS; varying float vState; varying float vSpike;
       void main(){
         vec2 p = (gl_PointCoord - 0.5) * vS;
@@ -1025,7 +1039,7 @@ const KNOWLEDGE_UNIVERSE_STARS_FRAG = `uniform float uTime; uniform float uDpr;
         float len = 0.2 * vS;
         float sp = (exp(-abs(q.y) / (0.55 * px)) * exp(-abs(q.x) / len) + exp(-abs(q.x) / (0.55 * px)) * exp(-abs(q.y) / len)) * vSpike;
         float ring = vState > 2.5 ? exp(-pow((r - 0.38 * vS) / (1.2 * px), 2.0)) * (0.65 + 0.35 * sin(uTime * 4.0)) : 0.0;
-        vec3 o = (mix(vCol, vec3(1.0), 0.22) * core * 1.6 + vCol * (halo * 0.5 + sp * 0.55)) * vI + vec3(0.6, 0.82, 1.0) * ring * 1.1;
+        vec3 o = (mix(vCol, vec3(1.0), uStarWhite) * core * 1.6 + vCol * (halo * 0.5 + sp * 0.55)) * vI + vec3(0.6, 0.82, 1.0) * ring * 1.1;
         gl_FragColor = vec4(o, 0.0);
       }`;
 
@@ -1064,7 +1078,9 @@ const KNOWLEDGE_UNIVERSE_LINES_FRAG = `uniform float uTime; uniform float uFlow;
       }`;
 
 /* 후처리: 빛 번짐 사다리(Jimenez 2014 — 13탭 내리기 + 3×3 텐트 올리기, 첫 단은 Karis 평균) → 톤 매핑 —
- * 시안 `FS_VERT`·`down`·`up`·`comp`. */
+ * 시안 `FS_VERT`·`down`·`up`·`comp`. 톤 매핑은 채널마다의 ACES와 가장 센 채널로 잰 ACES(색 비율 그대로) 사이를
+ * `tone-keep`만큼 섞고, 밝은 테마의 먹빛은 색만 `ink-chroma`배로 벌린 뒤 휘도를 v4의 먹빛에 돌려놓는다 — 종이와의
+ * 대비는 v4 그대로다(t-14081). */
 const KNOWLEDGE_UNIVERSE_POST_VERT = `varying vec2 vUv; void main(){ vUv = position.xy * 0.5 + 0.5; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
 const KNOWLEDGE_UNIVERSE_DOWN_FRAG = `uniform sampler2D tSrc; uniform vec2 uTexel; uniform float uKaris; varying vec2 vUv;
@@ -1089,19 +1105,24 @@ const KNOWLEDGE_UNIVERSE_UP_FRAG = `uniform sampler2D tSrc; uniform vec2 uTexel;
       gl_FragColor = vec4(o / 16.0, 0.0);
     }`;
 
-const KNOWLEDGE_UNIVERSE_COMP_FRAG = `uniform sampler2D tScene; uniform sampler2D tBloom; uniform float uBloom; uniform float uExposure; uniform float uDark; uniform vec3 uPaper; uniform float uTime; varying vec2 vUv;
+const KNOWLEDGE_UNIVERSE_COMP_FRAG = `uniform sampler2D tScene; uniform sampler2D tBloom; uniform float uBloom; uniform float uExposure; uniform float uDark; uniform vec3 uPaper; uniform float uTime; uniform float uKeep; uniform float uInk; varying vec2 vUv;
     vec3 aces(vec3 x){ return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
     vec3 srgb(vec3 c){ c = clamp(c, 0.0, 1.0); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c)); }
     float ign(vec2 p){ return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
     void main(){
       vec3 c = (texture2D(tScene, vUv).rgb + texture2D(tBloom, vUv).rgb * uBloom) * uExposure;
       vec2 d = vUv - 0.5;
-      vec3 m = aces(c) * (1.0 - 0.45 * dot(d, d));
+      float peak = max(max(c.r, c.g), c.b);
+      vec3 m = mix(aces(c), c * (aces(vec3(peak)).r / max(peak, 1e-4)), uKeep) * (1.0 - 0.45 * dot(d, d));
       vec3 o;
       if (uDark > 0.5) o = srgb(m);
       else {
         float L = max(max(m.r, m.g), m.b);
-        vec3 ink = vec3(0.07, 0.08, 0.11) + (m / max(L, 1e-4)) * 0.08;
+        vec3 tone = m / max(L, 1e-4);
+        float y = dot(tone, ${KNOWLEDGE_UNIVERSE_LUMA_GLSL});
+        vec3 black = vec3(0.07, 0.08, 0.11);
+        vec3 ink = max(black + mix(vec3(y), tone, uInk) * 0.08, 0.0);
+        ink *= (dot(black, ${KNOWLEDGE_UNIVERSE_LUMA_GLSL}) + y * 0.08) / max(dot(ink, ${KNOWLEDGE_UNIVERSE_LUMA_GLSL}), 1e-4);
         o = srgb(mix(uPaper, ink, clamp(L * 1.3, 0.0, 1.0)));
       }
       o += (ign(gl_FragCoord.xy + fract(uTime * 7.0) * 64.0) - 0.5) / 255.0;
@@ -1145,6 +1166,23 @@ function knowledgeUniverseScale(layout, pages) {
 
 function knowledgeUniverseLinear(value) {
   return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function knowledgeUniverseLuminance(rgb) {
+  return KNOWLEDGE_UNIVERSE_LUMA.reduce((sum, weight, channel) => sum + weight * rgb[channel], 0);
+}
+
+/* 은하 빛깔(텍셀 5) — 색 칸 토큰의 어두운 테마 값(선형, 가장 센 채널을 1로)을 흰빛과 `galaxy-tint-base`만큼 섞고, 그
+ * 휘도를 색 없는 군집의 고정값에 맞춘다(t-14081): 빛깔은 범례 칩·이름표 점과 같은 토큰의 색상에 그 채도의 (1 − base)를
+ * 싣고 — 색 칸마다 같은 몫이다 —, 밝기는 색과 상관없이 색 없는 은하와 같다(자홍·보라처럼 휘도가 낮은 색의 은하가
+ * 어두워지지 않는다). 색 칸이 없으면 고정값. */
+function knowledgeUniverseTint(U, inks, hue) {
+  if (hue < 0) return inks.neutral;
+  const source = inks.tints.subarray(hue * 3, hue * 3 + 3);
+  const peak = Math.max(1e-6, ...source);
+  const mixed = Array.from(source, (value) => U.galaxyTintBase + (1 - U.galaxyTintBase) * (value / peak));
+  const scale = knowledgeUniverseLuminance(inks.neutral) / Math.max(1e-6, knowledgeUniverseLuminance(mixed));
+  return mixed.map((value) => value * scale);
 }
 
 /* 색과 테마마다의 수 — CSS에게 묻는다(평면의 GL 손과 같은 문). 은하 빛깔의 원천 여덟은 계산된 색으로 읽고
@@ -1325,8 +1363,7 @@ function knowledgeUniverseMap(layout, inks) {
     const cx = communityHomeX[rank] * scale;
     const cz = communityHomeY[rank] * scale;
     const hue = communityHue[rank];
-    const tint = hue >= 0 ? [0, 1, 2].map((channel) => U.galaxyTintBase
-      + (1 - U.galaxyTintBase) * inks.tints[hue * 3 + channel]) : inks.neutral;
+    const tint = knowledgeUniverseTint(U, inks, hue);
     put(row, 0, cx, height, cz, radius);
     put(row, 1, nx, ny, nz, type);
     put(row, 2, ux, uy, uz, arms);
@@ -1604,6 +1641,7 @@ function makeKnowledgeUniverse(view) {
       this.uniforms = {
         uLift: { value: 1 }, uTime: { value: 0 }, uFocus: { value: 0 }, uFlow: { value: 1 }, uFocusGal: { value: -1 },
         uPx: { value: 800 }, uDpr: { value: 1 }, uRef: { value: 360 }, uDark: { value: 1 },
+        uStarChroma: { value: U.starChroma }, uStarWhite: { value: U.starCoreWhite },
         tGal: { value: null }, tNode3: { value: null }, tNode2: { value: null }, uTexW: { value: 1 },
         uBundle: { value: Array.from({ length: SHAPE.bundles }, () => new THREE.Vector4()) },
         uBundle2: { value: Array.from({ length: SHAPE.bundles }, () => new THREE.Vector4()) },
@@ -1654,7 +1692,8 @@ function makeKnowledgeUniverse(view) {
       });
       const comp = pass({
         uniforms: { tScene: { value: null }, tBloom: { value: null }, uBloom: { value: U.bloomStrength },
-          uExposure: { value: 1 }, uDark: { value: 1 }, uPaper: { value: new THREE.Vector3() }, uTime: { value: 0 } },
+          uExposure: { value: 1 }, uDark: { value: 1 }, uPaper: { value: new THREE.Vector3() }, uTime: { value: 0 },
+          uKeep: { value: U.toneKeep }, uInk: { value: U.inkChroma } },
         fragmentShader: KNOWLEDGE_UNIVERSE_COMP_FRAG,
       });
       const triangle = new THREE.BufferGeometry();
@@ -1708,10 +1747,8 @@ function makeKnowledgeUniverse(view) {
       const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
       for (const row of this.map.galaxy) {
         const at = (row.rank * SHAPE.texels + 5) * 4;
-        for (let channel = 0; channel < 3; channel += 1) {
-          this.map.gal[at + channel] = row.hue >= 0
-            ? U.galaxyTintBase + (1 - U.galaxyTintBase) * inks.tints[row.hue * 3 + channel] : inks.neutral[channel];
-        }
+        const tint = knowledgeUniverseTint(U, inks, row.hue);
+        for (let channel = 0; channel < 3; channel += 1) this.map.gal[at + channel] = tint[channel];
       }
       if (this.galTexture !== null) this.galTexture.needsUpdate = true;
     },

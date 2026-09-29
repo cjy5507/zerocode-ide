@@ -1577,6 +1577,11 @@
   --knowledge-3d-star-ratio-cap: 13.5;
   --knowledge-3d-star-age-scale: 3;
   --knowledge-3d-star-age-span: 365;
+  /* 이름 있는 별의 빛깔(t-14081, 사람의 말 09-29 「별의 색상이 조금 명확했으면」): 고친 때의 흑체 색을 제 휘도에서
+   * 벌리는 배수(1은 흑체 그대로 — 오래된 쪽은 더 붉게, 최근 쪽은 더 푸르게, 가운데의 흰빛은 그대로)와 별 속에
+   * 섞는 흰빛의 몫(v4 0.22 — 밝은 별의 가운데가 흰색으로 날았다). 범례의 뜻(푸를수록 최근)은 같다. */
+  --knowledge-3d-star-chroma: 1.6;
+  --knowledge-3d-star-core-white: 0.03;
   /* 우주의 무대 — 시안의 `.stage` 바탕. 밝은 테마는 아래 블록이 종이색으로. */
   --knowledge-3d-stage: rgb(2 3 6);
   /* 은하 짓기(시안 `universe`·`buildScene`, 디자이너 답 m-12467의 1·3). 은하 = 이름 있는 군집 중 앞에서부터
@@ -1630,11 +1635,12 @@
   --knowledge-3d-filament-most: 48;
   --knowledge-3d-filament-least-points: 60;
   --knowledge-3d-filament-grow-points: 900;
-  /* 은하 빛깔 = base + (1 − base) × 선형(원천). 원천은 색 칸의 어두운 테마 값이다 — 밝은 테마는 합성에서 음화로
-   * 뒤집으므로 두 테마에서 같은 빛깔을 쓴다(PORTING.md §4). v4는 옅은 아홉 색에 0.7을 썼고, 앱의 색 칸은 UI 색이라
-   * 채도가 높아 0.8이다 — 가장 센 치우침이 v4의 가장 센 것(0.2)과 같아진다(m-12570). 색 없는 군집은 회색 대신
-   * 고정값(선형, m-12493). */
-  --knowledge-3d-galaxy-tint-base: 0.8;
+  /* 은하 빛깔 = base + (1 − base) × 선형(원천)을 색 없는 군집의 고정값과 같은 휘도로 맞춘 것 — 색은 군집의 것이고
+   * 밝기는 색과 상관없이 같다. 원천은 색 칸의 어두운 테마 값이다 — 밝은 테마는 합성에서 음화로 뒤집으므로 두
+   * 테마에서 같은 빛깔을 쓴다(PORTING.md §4). v4는 치우침을 시안의 가장 센 것(0.2)에 맞춘 0.8이었고(m-12570), 은하가
+   * 거의 모두 흰빛이라 군집이 색으로 갈리지 않았다(사람의 말 09-29) — 이제 원천 색의 채도를 반 넘게 싣는다(t-14081).
+   * 색 없는 군집은 회색 대신 고정값(선형, m-12493). */
+  --knowledge-3d-galaxy-tint-base: 0.2;
   --knowledge-3d-galaxy-tint-neutral: 0.87 0.88 0.9;
   --knowledge-3d-tint-0: var(--knowledge-hue-0);
   --knowledge-3d-tint-1: var(--knowledge-hue-1);
@@ -1649,6 +1655,11 @@
   --knowledge-3d-bloom-strength: 0.16;
   --knowledge-3d-exposure: 1;
   --knowledge-3d-paper: rgb(231 227 218);
+  /* 톤 매핑이 색 비율을 지키는 몫(t-14081): 0은 채널마다의 ACES(v4 — 밝은 핵과 별의 가운데가 흰색으로 날았다),
+   * 1은 가장 센 채널로 잰 ACES를 세 채널에 같게 곱한 것(색상·채도 그대로). 종이 위 먹빛에 싣는 색의 배수: 1은 v4의
+   * 8%이고, 휘도는 그대로 두고 색만 벌린다 — 종이 위 글자·선의 대비는 v4와 같다. */
+  --knowledge-3d-tone-keep: 1;
+  --knowledge-3d-ink-chroma: 6;
   /* 이름표(시안 `updateLabels`·`galaxyAnchor`·`showTip`, PORTING §2.7) — 들림이 이 값을 넘은 판에서만 선다.
    * 명판: 은하 가장자리 고리(반지름의 몫 · 점 수 · 보여야 할 점 수)의 화면에서 가장 낮은 곳 아래 틈만큼, 판
    * 가장자리 여백과 위 · 아래 띠, 둘레의 틈, 큰 명판을 입는 순위의 수, 가까이(처음 거리의 몫 밑) 가면 고른 것만. */
@@ -1718,13 +1729,13 @@
   --knowledge-3d-name-fade: 250ms;
   --knowledge-3d-tip-fade: 150ms;
   /* 범례의 우주 기호(시안 CSS 41–54): 별빛(속 · 번짐 · 빛살), 고친 때의 빛깔(오래됨 → 가운데 → 최근), 필라멘트(흐름 ·
-   * 가운데 · 빛 머리), 올린 쪽의 선. */
+   * 가운데 · 빛 머리), 올린 쪽의 선. 고친 때의 빛깔은 합성이 그리는 가장 밝은 별의 색이다(`star-chroma`까지, t-14081). */
   --knowledge-3d-legend-star-core: rgb(255 255 255);
   --knowledge-3d-legend-star-glow: rgb(207 224 255 / 40%);
   --knowledge-3d-legend-star-ray: rgb(223 233 255);
-  --knowledge-3d-legend-old: rgb(255 185 113);
-  --knowledge-3d-legend-mid: rgb(255 239 228);
-  --knowledge-3d-legend-new: rgb(171 193 255);
+  --knowledge-3d-legend-old: rgb(255 160 0);
+  --knowledge-3d-legend-mid: rgb(255 231 214);
+  --knowledge-3d-legend-new: rgb(141 174 255);
   --knowledge-3d-legend-flow: rgb(157 182 255 / 53%);
   --knowledge-3d-legend-flow-mid: rgb(201 214 255);
   --knowledge-3d-legend-flow-head: rgb(255 255 255);
@@ -2854,9 +2865,9 @@
   --knowledge-3d-legend-star-core: rgb(28 33 48);
   --knowledge-3d-legend-star-glow: rgb(28 33 48 / 27%);
   --knowledge-3d-legend-star-ray: rgb(28 33 48);
-  --knowledge-3d-legend-old: rgb(138 75 29);
-  --knowledge-3d-legend-mid: rgb(76 74 72);
-  --knowledge-3d-legend-new: rgb(35 66 125);
+  --knowledge-3d-legend-old: rgb(159 70 0);
+  --knowledge-3d-legend-mid: rgb(128 101 89);
+  --knowledge-3d-legend-new: rgb(43 94 173);
   --knowledge-3d-legend-flow: rgb(28 33 48 / 33%);
   --knowledge-3d-legend-flow-mid: rgb(28 33 48 / 67%);
   --knowledge-3d-legend-flow-head: rgb(28 33 48);
