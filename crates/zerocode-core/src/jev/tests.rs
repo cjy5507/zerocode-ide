@@ -3425,3 +3425,22 @@ fn the_cover_seat_is_a_row_of_its_own_that_sends_the_scenes_facts_alone() {
     let desktop = json!({ SMART_SETTINGS_KEY: { DESKTOP.setting: "on" } });
     assert_eq!(COVER.mode_in(&desktop), JevMode::Off);
 }
+
+#[test]
+fn every_use_says_what_its_choices_offer_for_none_of_these() {
+    for row in &JEV_USES {
+        assert_ne!(
+            row.abstain,
+            Abstain::Unaudited,
+            "{} has not been audited for an abstain option",
+            row.id
+        );
+        if let Abstain::Lacks(why) = row.abstain {
+            assert!(
+                !why.trim().is_empty(),
+                "{} lacks an abstain option and does not say why",
+                row.id
+            );
+        }
+    }
+}

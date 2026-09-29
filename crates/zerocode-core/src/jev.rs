@@ -550,6 +550,12 @@ pub struct JevUse {
     /// from the start with no judge to stop it would be `on` under another
     /// name.
     pub auto_starts: promote::Stand,
+    /// Whether the closed choices this use asks offer a way to say none of
+    /// them fits (t-13096): a choice with no such option makes a question the
+    /// judgment cannot answer come back as a confident wrong one, so every
+    /// row says which it is, and a row that lacks one says why not
+    /// ([`Abstain`]). Recorded, not acted on: it changes no question.
+    pub abstain: Abstain,
 }
 
 impl JevUse {
@@ -564,6 +570,24 @@ impl JevUse {
             Regrade::NotifyFacts => rows.iter_mut().for_each(crate::notify_call::regrade),
         }
     }
+}
+
+/// What a use's closed choices offer for "none of these" ([`JevUse::abstain`],
+/// t-13096) — an option like `other`, `none` or `unknown` that a judgment can
+/// take when the question has no answer among the rest. A use's whole row:
+/// where it asks several choices, [`Self::Lacks`] says which one is short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Abstain {
+    /// Nobody has read this use's questions for it yet. No use stands here
+    /// once audited; a contract refuses it, so a new row must say.
+    Unaudited,
+    /// The use asks no closed choice: scores, yes/no questions or none.
+    NotAChoice,
+    /// Every closed choice the use asks offers a "none of these" option.
+    Offered,
+    /// A closed choice of this use offers none. The words say which question
+    /// and why — or that no reason was found, which is a fact as well.
+    Lacks(&'static str),
 }
 
 /// How a use's label rows are read ([`JevUse::regrade`], t-11010).
@@ -1075,6 +1099,7 @@ pub const ROUTING: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Offered,
 };
 
 /// The wall zo's routing waits for a judgment when the seat acts: the batch
@@ -1255,6 +1280,7 @@ pub const RECALL: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::NotAChoice,
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -1379,6 +1405,9 @@ pub const BROWSER: JevUse = JevUse {
     // A goal walk fills what its caller left open and is marked only on
     // its presses (t-13091).
     auto_starts: promote::Stand::Applying,
+    abstain: Abstain::Lacks(
+        "the type_target head offers none (the action head has give_up, the three observation heads have none); when another action is chosen the head is read and not used",
+    ),
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -1431,6 +1460,9 @@ pub const DESKTOP: JevUse = JevUse {
     // A goal walk fills what its caller left open and is marked only on
     // its presses (t-13091).
     auto_starts: promote::Stand::Applying,
+    abstain: Abstain::Lacks(
+        "the type_target head offers none (the action head has give_up, the three observation heads have none); when another action is chosen the head is read and not used",
+    ),
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -1480,6 +1512,9 @@ pub const EMULATOR: JevUse = JevUse {
     // A goal walk fills what its caller left open and is marked only on
     // its presses (t-13091).
     auto_starts: promote::Stand::Applying,
+    abstain: Abstain::Lacks(
+        "the type_target head offers none (the action head has give_up, the three observation heads have none); when another action is chosen the head is read and not used",
+    ),
 };
 
 /// How many windows over one place a cover question describes, front first:
@@ -1561,6 +1596,7 @@ pub const COVER: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Applying,
+    abstain: Abstain::Offered,
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -1610,6 +1646,7 @@ pub const STALL: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Offered,
 };
 
 /// What the placement seat's answers must bound above before `auto` rises to
@@ -1723,6 +1760,9 @@ pub const PLACEMENT: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "the room choice (tab, split, background) offers none; no reason was found in the code",
+    ),
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -1849,6 +1889,9 @@ pub const SUMMON: JevUse = JevUse {
     // It acts only on `--agent auto`, where recording refused the summons
     // (t-11989).
     auto_starts: promote::Stand::Applying,
+    abstain: Abstain::Lacks(
+        "the agent choice offers none; no reason was found in the code (under two agents the question is not asked)",
+    ),
 };
 
 /// Difficulty of new work, graded by completed executions at the same difficulty.
@@ -1890,6 +1933,9 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     // It acts only on a dial the coordinator left open, and its marks come
     // only from answers that were carried out (t-11989).
     auto_starts: promote::Stand::Applying,
+    abstain: Abstain::Lacks(
+        "low, mid and high offer none; no reason was found in the code (the instructions ask for the lowest rung that fits)",
+    ),
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
@@ -1967,6 +2013,9 @@ pub const STEP_EFFORT: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "the move choice offers none — hold means stay, not unknown; no reason was found in the code",
+    ),
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -2198,6 +2247,7 @@ pub const SKILLS: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::NotAChoice,
 };
 
 /// zo's turn-start skill suggestion (t-6347): the two-stage question asked
@@ -2249,6 +2299,7 @@ pub const SKILL_SUGGESTION: JevUse = JevUse {
     follows: Some(SKILLS.setting),
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Offered,
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -2334,6 +2385,9 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "complexity and risk are ordered rungs asked as choices and offer none (only intent has other); no reason was found in the code",
+    ),
 };
 
 /// Characters of the person's last request one compaction judgment reads
@@ -2519,6 +2573,9 @@ pub const COMPACTION: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "keep and drop offer none; no reason was found in the code (a drop is held by its own confidence line)",
+    ),
 };
 
 /// Characters of one text an agent's own question carries — the question,
@@ -2627,6 +2684,9 @@ pub const AGENT_TOOL: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "choose offers only what its caller wrote, so none unless the caller adds one; the no of ask takes a lack of grounds",
+    ),
 };
 
 /// Characters of a page's title one browser-read question carries — the head
@@ -2815,6 +2875,9 @@ pub const BROWSER_READ: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "content and chrome offer none; the wording of content takes a block that cannot be told apart",
+    ),
 };
 
 /// The closed answer every notify question offers, spelled once: ring now,
@@ -2995,6 +3058,9 @@ pub const NOTIFY: JevUse = JevUse {
     follows: None,
     regrade: Regrade::NotifyFacts,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "interrupt, batch and ignore offer none — ignore is a decision not to ring, not unknown",
+    ),
 };
 
 /// Characters of the sentence a person is writing that one mention
@@ -3134,6 +3200,9 @@ pub const MENTION_RERANK: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "the candidate choice offers none; no reason was found in the code (not_offered is a mark on the row, not an option)",
+    ),
 };
 
 /// How many of the emulator seat's candidates a forked phone step tries
@@ -3320,6 +3389,9 @@ pub const BRANCHING: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "the best-candidate choice offers none; no reason was found in the code",
+    ),
 };
 
 /// The judgment cache: a memo in front of the wire that answers a screen
@@ -3384,6 +3456,7 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::NotAChoice,
 };
 
 /// The wall one mail triage question waits for its answer, in milliseconds —
@@ -3476,6 +3549,9 @@ pub const MAIL_TRIAGE: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "answer_now, can_wait and no_need offer none — no_need is an answer, not unknown; no reason was found in the code",
+    ),
 };
 
 /// How many of a role's eligible attempts try the model nobody has evidence
@@ -3636,6 +3712,7 @@ pub const CHALLENGER: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Offered,
 };
 
 /// Characters of the person's words one patch review reads as the task the
@@ -3826,6 +3903,7 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::NotAChoice,
 };
 
 /// One turn's completion claims put beside the tool output that can support
@@ -3895,6 +3973,7 @@ pub const CLAIM: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Offered,
 };
 
 /// The vault pair seat only suggests relations for a person's weekly review.
@@ -3972,6 +4051,7 @@ pub const VAULT_PAIRS: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::NotAChoice,
 };
 
 /// Re-rank likely files for a code task, with one Noul for each candidate.
@@ -4029,6 +4109,7 @@ pub const FILE_PICK: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::NotAChoice,
 };
 
 /// Characters of a shell command one command-guard question carries (t-6348).
@@ -4149,6 +4230,7 @@ pub const COMMAND_GUARD: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::NotAChoice,
 };
 
 /// Characters of a tool block's head one tool-text question carries
@@ -4242,6 +4324,7 @@ pub const TOOL_TEXT_GUARD: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::NotAChoice,
 };
 
 /// The wall one reflex decision waits for its answer, in milliseconds: one
@@ -4331,6 +4414,9 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "continue, pause and replan offer none — pause is the safe stop, not unknown; no reason was found in the code",
+    ),
 };
 
 /// Every place this product asks Jev something.
