@@ -88,8 +88,8 @@ fn a_drag_ending_where_the_pointer_rests_on_zerocodes_window_is_refused_first() 
 
 /// What stays the helper's: a request that said `allowSelf` and one that
 /// presses at no point are not even read; another app's window under the
-/// pointer, another app's window in front of ZeroCode's at the point, and a
-/// list that cannot be read go to the helper as before.
+/// pointer and another app's window in front of ZeroCode's at the point go
+/// to the helper as before.
 #[test]
 fn what_is_not_zerocodes_window_under_the_point_is_left_to_the_helper() {
     let at = json!({ "x": 600, "y": 400 });
@@ -113,11 +113,41 @@ fn what_is_not_zerocodes_window_under_the_point_is_left_to_the_helper() {
         refused.is_none(),
         "another app's window in front of ZeroCode's"
     );
+}
+
+/// When whose window a point lands on cannot be read — the list does not
+/// come, or comes empty, as the window server's list does when it cannot be
+/// had — the press is refused by the window, closed: it may land on
+/// ZeroCode's own window, and the helper's own check reads the same list.
+/// A request that presses at no point, or said `allowSelf`, is not read.
+#[test]
+fn a_press_whose_point_cannot_be_read_is_refused_closed() {
+    let at = json!({ "x": 600, "y": 400 });
     let mut unreadable = || None;
-    assert!(
-        own_window_first("mouseClick", &at, &mut unreadable).is_none(),
-        "no list"
+    let empty = asked("mouseClick", &at, Vec::new()).0;
+    for (refused, why) in [
+        (
+            own_window_first("mouseClick", &at, &mut unreadable),
+            "no list",
+        ),
+        (empty, "an empty list"),
+    ] {
+        let refused = refused.unwrap_or_else(|| panic!("{why}: went to the helper"));
+        assert_eq!(refused.code, error_code::WINDOW_NOT_FOUND, "{why}");
+        assert!(
+            refused.message.contains("(600, 400)"),
+            "{why}: {}",
+            refused.message
+        );
+    }
+    let (refused, reads) = asked(
+        "mouseClick",
+        &json!({ "x": 600, "y": 400, "allowSelf": true }),
+        Vec::new(),
     );
+    assert!(refused.is_none() && reads == 0, "allowSelf");
+    let (refused, reads) = asked("key", &json!({ "key": "return" }), Vec::new());
+    assert!(refused.is_none() && reads == 0, "a key");
 }
 
 /// The verbs read for their points are the helper's own (`pointedMethods`
