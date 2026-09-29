@@ -57,16 +57,21 @@ pub enum Unseen {
     NoPromptEvent,
     /// Neither a call's nor a turn's end says the person stopped it.
     NoStopFlag,
+    /// Its hooks come, but no answer of theirs was measured to carry context
+    /// to the model at a turn's start (t-14869): a seat that speaks then is
+    /// recorded for its panes, never said.
+    NoContextRoad,
 }
 
 impl Unseen {
     /// Every reason, in the order a reader lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::OwnRuntime,
         Self::NoHooks,
         Self::NoEventBefore,
         Self::NoPromptEvent,
         Self::NoStopFlag,
+        Self::NoContextRoad,
     ];
 
     /// The word a row names this reason by.
@@ -78,6 +83,7 @@ impl Unseen {
             Self::NoEventBefore => "no_event_before",
             Self::NoPromptEvent => "no_prompt_event",
             Self::NoStopFlag => "no_stop_flag",
+            Self::NoContextRoad => "no_context_road",
         }
     }
 
@@ -132,6 +138,20 @@ pub struct Sight {
     /// Where a finished tool's text lives when the common readers do not find
     /// it: JSON pointers into the payload, tried first.
     pub result_at: &'static [&'static str],
+    /// How a skill's load shows in its hooks: only the turn's ruler reads it
+    /// ([`tally`]).
+    pub skill_load: SkillLoad,
+}
+
+/// How an agent's hooks show it loading a skill (t-14869).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillLoad {
+    /// A tool of its own, by its name as the agent spells it.
+    Tool(&'static str),
+    /// Its shell reads the skill's file ([`tally::SKILL_FILE`]).
+    ReadsSkillFile,
+    /// Nothing of it reaches the window.
+    No(Unseen),
 }
 
 /// Claude's family, as the hooks this window installs report it: every
@@ -148,6 +168,7 @@ const CLAUDE: Sight = Sight {
     turn_answer: Sees::Yes,
     edited_path: Sees::Yes,
     result_at: &["/tool_response/file/content"],
+    skill_load: SkillLoad::Tool("Skill"),
 };
 
 /// An agent whose installed hooks carry every moment in the Claude family's
@@ -156,6 +177,7 @@ const CLAUDE: Sight = Sight {
 const STOPS_ITS_TURN: Sight = Sight {
     stopped_call: Sees::Yes,
     result_at: &[],
+    skill_load: SkillLoad::ReadsSkillFile,
     ..CLAUDE
 };
 
@@ -177,6 +199,7 @@ const fn none(why: Unseen) -> Sight {
         turn_answer: Sees::No(why),
         edited_path: Sees::No(why),
         result_at: &[],
+        skill_load: SkillLoad::No(why),
     }
 }
 
@@ -209,6 +232,22 @@ pub const fn sight(agent: AgentKind) -> Sight {
             prompt: Sees::No(Unseen::NoPromptEvent),
             ..NO_STOP
         },
+    }
+}
+
+/// Whether a seat that speaks at a turn's start reaches `agent`'s model
+/// (t-14869): where the catalog measured its prompt hook to take context
+/// ([`AgentKind::hook_additional_context`]) — else why not: its row's own
+/// reason where the window asks it nothing, [`Unseen::NoContextRoad`] where
+/// its hooks come but carry no context there.
+#[must_use]
+pub const fn turn_start_road(agent: AgentKind) -> Sees {
+    if agent.hook_additional_context().is_some() {
+        return Sees::Yes;
+    }
+    match sight(agent).turn_end {
+        Sees::No(why) => Sees::No(why),
+        Sees::Yes => Sees::No(Unseen::NoContextRoad),
     }
 }
 
@@ -258,7 +297,10 @@ pub fn seat_sight(seat: &JevUse, agent: AgentKind) -> Option<SeatSight> {
     } else if seat.id == CLAIM.id {
         (row.turn_answer, vec![row.prompt, row.after])
     } else if seat.id == FILE_PICK.id {
-        (row.prompt, vec![row.edited_path, row.turn_end])
+        (
+            row.prompt,
+            vec![row.edited_path, row.turn_end, turn_start_road(agent)],
+        )
     } else {
         return None;
     };
@@ -390,6 +432,9 @@ pub enum Moment {
     /// while the claim seat is asked, where its answer is — the payload's own
     /// words, credentials scrubbed, or the transcript to read them from.
     TurnEnded { stopped: bool, said: Option<SaidAt> },
+    /// What the turn's ruler counts of a call ([`tally::tallied_parsed`]) —
+    /// no seat's question, filed beside the moments of the same event.
+    Tally(tally::Tallied),
 }
 
 /// The kind of text a finished tool handed back, told from its normalized
@@ -673,6 +718,8 @@ fn result_text(row: &Sight, tree: &Value) -> Option<String> {
     let scrubbed = crate::clone::scrub_credentials(text.trim());
     (!scrubbed.is_empty()).then(|| scrubbed.chars().take(hook::WORKER_OUTPUT_CHARS).collect())
 }
+
+pub mod tally;
 
 #[cfg(test)]
 mod tests;

@@ -14,6 +14,22 @@ fn worker_briefings_require_root_workspace_clippy() {
     }
 }
 
+/// A worker is told of `zerocode-find` before its task (t-14869): the file
+/// pick seat called by the agent itself replaces the reads a worker spends
+/// finding its files — a note elsewhere was used 0 times in 22 — and the
+/// sentence names the command as the window spells it.
+#[test]
+fn a_worker_briefing_names_zerocode_find_before_the_task() {
+    let briefing = worker_briefing("t-1", "lint");
+    let (before, _) = briefing
+        .split_once(BRIEFING_HANDS_OVER)
+        .expect("the briefing hands over");
+    assert!(
+        before.contains(&format!("`{} ", crate::file_find::SHIM)),
+        "{before}"
+    );
+}
+
 #[test]
 fn review_facts_read_only_what_a_coordinator_wrote() {
     let nothing = ReviewFacts::from_result("");

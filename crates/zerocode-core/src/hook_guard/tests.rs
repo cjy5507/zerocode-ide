@@ -768,3 +768,35 @@ fn the_claim_and_file_pick_seats_read_each_agents_row() {
         Sees::No(Unseen::NoHooks)
     );
 }
+
+/// A seat that speaks at a turn's start reaches an agent only where the
+/// catalog measured its prompt hook to take context (t-14869): Claude and
+/// Codex. Every other agent says why not — zo asks its own seats, OpenCode
+/// has no hook here, and the rest carry no context there, Antigravity among
+/// them — and the file pick seat's sight of those panes names it.
+#[test]
+fn a_turn_start_road_is_the_catalogs_and_a_pane_without_one_says_why() {
+    use crate::jev::FILE_PICK;
+    assert_eq!(turn_start_road(AgentKind::Claude), Sees::Yes);
+    assert_eq!(turn_start_road(AgentKind::Codex), Sees::Yes);
+    assert_eq!(turn_start_road(AgentKind::Zo), Sees::No(Unseen::OwnRuntime));
+    assert_eq!(
+        turn_start_road(AgentKind::Opencode),
+        Sees::No(Unseen::NoHooks)
+    );
+    for agent in [AgentKind::Antigravity, AgentKind::Cursor, AgentKind::Grok] {
+        assert_eq!(
+            turn_start_road(agent),
+            Sees::No(Unseen::NoContextRoad),
+            "{agent:?}"
+        );
+    }
+    assert_eq!(
+        seat_sight(&FILE_PICK, AgentKind::Cursor),
+        Some(SeatSight {
+            asked: Sees::Yes,
+            misses: vec![Unseen::NoContextRoad],
+        })
+    );
+    assert_eq!(Unseen::NoContextRoad.word(), "no_context_road");
+}

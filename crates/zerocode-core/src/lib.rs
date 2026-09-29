@@ -44,6 +44,7 @@ pub mod computer_use_protocol;
 pub mod conflict;
 pub mod credential;
 pub mod delegation;
+pub mod file_find;
 pub mod git_config;
 pub mod git_dir;
 pub mod git_graph;

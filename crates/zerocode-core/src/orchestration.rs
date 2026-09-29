@@ -17529,6 +17529,21 @@ bypass a safeguard or reach anything the person does not own.";
 
 const WORKER_GATE_CONTEXT: &str = "For code changes in a Rust workspace, the worker gate must include `cargo clippy --all-targets -- -D warnings` from the repository root, including test targets across the workspace. Report each gate exit code without hiding it behind a pipe.";
 
+/// The sentence that sends a worker to `zerocode-find` before it reads code
+/// it does not know (t-14869): the file pick seat, called by the agent
+/// itself, in place of the reads a worker spends finding its files — a
+/// note that only mentioned such a tool was used 0 times in 22 (t-14656).
+fn worker_find_context() -> String {
+    format!(
+        "Before your first read of code you do not know yet, run `{} <what you are about to change or debug>`: it lists the files most likely involved, each with its first comment line, so you start from them instead of searching.",
+        crate::file_find::SHIM
+    )
+}
+
+/// The words a worker's briefing ends on, before the task it carries — where
+/// a reader of the prompt finds the task's own words (t-14869).
+pub const BRIEFING_HANDS_OVER: &str = "Now do this:";
+
 /// What a summoned worker is told, ahead of its own instruction.
 ///
 /// Without this the loop does not close. A coordinator summons, the worker
@@ -17571,12 +17586,14 @@ with the same path named once in the summary. Say in the summary if that \
 file dies with your worktree, because the coordinator reads it before \
 anything is cleaned up. Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\nNow do this:\n\n",
+a new request. `zerocode-orc help` lists the rest. {find} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+        find = worker_find_context(),
         purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
         head = HANDED_IN_HEAD,
+        hands_over = BRIEFING_HANDS_OVER,
     )
 }
 
@@ -17614,12 +17631,13 @@ nobody on either side can answer one. Keep the summary short and carry a \
 longer answer as a path — `--payload '{{\"reportPath\":\"/abs/path\",\"lifetime\":\"ephemeral\"}}'` — \
 naming it once in the summary too, and say whether that file outlives your \
 worktree, because the home window is not on this machine. Every command that CHANGES anything needs --retry-request. \
-`zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\nNow do this:\n\n",
+`zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
         purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
         head = HANDED_IN_HEAD,
+        hands_over = BRIEFING_HANDS_OVER,
     )
 }
 

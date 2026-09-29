@@ -480,6 +480,11 @@ pub struct BridgeState {
     /// Where the window keeps the second brain's answer to a prompt — see
     /// [`PromptKnowledge`]. `None` until the window installs one.
     knowledge: Option<Arc<dyn PromptKnowledge>>,
+    /// Where the window keeps what the seats say at a turn's start — see
+    /// [`TurnBrief`]. `None` until the window installs one.
+    brief: Option<Arc<dyn TurnBrief>>,
+    /// Where the window answers `zerocode-find` — see [`FileFind`].
+    finder: Option<Arc<dyn FileFind>>,
     artifacts: Option<Arc<dyn ArtifactCommands>>,
     /// Where a fixed ledger pointer waits for a provider's own hook — see
     /// [`pointer_mailbox::PointerMailbox`]. `None` until the window installs
@@ -500,6 +505,81 @@ pub trait PromptKnowledge: Send + Sync {
     /// when the bridge did not know one — the recall trace names it so the
     /// graph can say which pane a page was shown to.
     fn related_block(&self, session_key: &str, pane_key: &str, prompt: &str) -> Option<String>;
+}
+
+/// The most a hook script waits for this bridge's reply: its `curl
+/// --max-time`, the connect counted in. A reply later than this is thrown
+/// away whole — the contract, the vault's block and the pointer with it.
+pub const HOOK_REPLY_BUDGET: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// The most of [`HOOK_REPLY_BUDGET`] a hook script spends reaching the
+/// bridge: its `curl --connect-timeout`.
+pub const HOOK_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// What a reply keeps back for writing itself once every part is in.
+pub const HOOK_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a turn's brief may take (t-14869): the reply's budget less the
+/// connect's and the reply's own margin, so a late brief is only a brief
+/// left out and never a reply thrown away. A seat whose own wall is shorter
+/// waits its own.
+pub const TURN_BRIEF_WALL: std::time::Duration = HOOK_REPLY_BUDGET
+    .saturating_sub(HOOK_CONNECT_BUDGET)
+    .saturating_sub(HOOK_REPLY_MARGIN);
+
+/// The most characters a turn's brief may carry: under the smallest context
+/// any measured provider takes from a hook — Codex's `additionalContextLimit`,
+/// about 2,500 tokens by default, which no tokenizer makes fewer than as
+/// many characters; Claude's is 10,000 characters. A longer brief is left
+/// out whole, never cut.
+pub const TURN_BRIEF_CHAR_CAP: usize = 2_000;
+
+/// What the seats say at a turn's start, for the providers whose prompt hook
+/// takes `hookSpecificOutput.additionalContext` (t-14869) — the file pick
+/// seat's likely files, while it acts for the pane.
+///
+/// The bridge does not know the seats, the ledger or which pane is a worker;
+/// the window does, and answers within [`TurnBriefAsk::wall`]. `None` says
+/// nothing — no seat acts, the answer abstained, came late or was refused —
+/// and the reply is what it was before this trait existed. The words are a
+/// fact the model may use or ignore, never an order, and the reply carries
+/// them as context only: no decision, no permission, no changed input.
+pub trait TurnBrief: Send + Sync {
+    fn brief(&self, ask: TurnBriefAsk) -> Option<String>;
+}
+
+/// The person's prompt as this bridge reads it for a turn's context — `None`
+/// for an event that is not the agent's prompt event, or an agent whose row
+/// takes no context at a turn's start. The window names a turn by it, so a
+/// brief and the books it waits on read the same words.
+#[must_use]
+pub fn turn_prompt(envelope: &HookEnvelope) -> Option<String> {
+    orchestration_contract::prompt_submission(envelope).map(|submission| submission.prompt)
+}
+
+/// One turn's start, as a brief is asked about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnBriefAsk {
+    pub agent: AgentKind,
+    /// The pane the prompt was typed in (`term-<n>`).
+    pub pane_key: String,
+    /// The launch the knock says it belongs to; empty from an older script.
+    pub launch_token: String,
+    /// The folder the pane works in.
+    pub worktree: String,
+    pub prompt: String,
+    /// How long the answer may take.
+    pub wall: std::time::Duration,
+}
+
+/// `zerocode-find`, answered by the window (t-14869): the files of the pane's
+/// project most likely involved in what the agent is about to change or
+/// debug — the bridge only authenticates, reads the argv and forwards. The
+/// answer is the command's output; an error is its refusal.
+pub trait FileFind: Send + Sync {
+    /// # Errors
+    /// Why the window could not look.
+    fn find(&self, ask: zerocode_core::file_find::FindAsk) -> Result<String, String>;
 }
 
 /// The window owns the catalog; the HTTP bridge only authenticates and forwards.
@@ -542,6 +622,20 @@ impl BridgeState {
     #[must_use]
     pub fn with_prompt_knowledge(mut self, source: Arc<dyn PromptKnowledge>) -> Self {
         self.knowledge = Some(source);
+        self
+    }
+
+    /// Install the window's turn brief as a further answer to prompt hooks.
+    #[must_use]
+    pub fn with_turn_brief(mut self, source: Arc<dyn TurnBrief>) -> Self {
+        self.brief = Some(source);
+        self
+    }
+
+    /// Install the window's answer to `zerocode-find`.
+    #[must_use]
+    pub fn with_file_find(mut self, finder: Arc<dyn FileFind>) -> Self {
+        self.finder = Some(finder);
         self
     }
 
@@ -595,6 +689,8 @@ impl BridgeState {
                 computer,
                 federation,
                 knowledge: None,
+                brief: None,
+                finder: None,
                 artifacts: None,
                 pointers: None,
                 selection_context: Arc::new(std::sync::Mutex::new(
@@ -699,6 +795,8 @@ pub fn router(state: BridgeState) -> Router {
             zerocode_core::artifact_publish::ROUTE,
             post(receive_artifact_command),
         )
+        // The file pick seat, called by the agent itself (t-14869).
+        .route(zerocode_core::file_find::ROUTE, post(receive_find_command))
         .layer(DefaultBodyLimit::max(MAX_HOOK_BODY_BYTES))
         // Outermost, so it runs before routing and before any extractor: an
         // unauthenticated request is turned away with its body still unread.
@@ -1007,6 +1105,29 @@ async fn receive_artifact_command(State(state): State<BridgeState>, request: Req
     }
 }
 
+/// Answer one `zerocode-find`: its argv read here, the window's listing sent
+/// back whole, a refusal the shim prints on stderr.
+async fn receive_find_command(State(state): State<BridgeState>, request: Request) -> Response {
+    let Some(finder) = state.finder else {
+        return refused("file find is unavailable");
+    };
+    let body = match axum::body::to_bytes(request.into_body(), MAX_HOOK_BODY_BYTES).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => return refused("unreadable file find"),
+    };
+    let ask = match zerocode_core::file_find::ask_from_argv(
+        &zerocode_core::agent_teams::unpack_argv(&body),
+    ) {
+        Ok(ask) => ask,
+        Err(usage) => return refused(usage),
+    };
+    match tokio::task::spawn_blocking(move || finder.find(ask)).await {
+        Ok(Ok(listing)) => (StatusCode::OK, listing).into_response(),
+        Ok(Err(error)) => refused(error),
+        Err(error) => refused(error.to_string()),
+    }
+}
+
 async fn receive_hook(
     UrlPath(agent): UrlPath<String>,
     State(state): State<BridgeState>,
@@ -1085,12 +1206,24 @@ async fn receive_hook(
     // may carry up to 1 MiB; unrelated agent inputs must not queue behind its
     // JSON parser when the critical section only owns a 256-key LRU update.
     let context_event = orchestration_contract::context_event(&envelope, selection_seeded);
-    // The prompt, for the second brain — read only when a source is installed
-    // and only on a provider's prompt event, before the delivery lock as well.
-    let submission = state
-        .knowledge
+    // The prompt, for the second brain and the turn's brief — read only when
+    // one of them is installed and only on a provider's prompt event, before
+    // the delivery lock as well.
+    let submission = (state.knowledge.is_some() || state.brief.is_some())
+        .then(|| orchestration_contract::prompt_submission(&envelope))
+        .flatten();
+    let brief_ask = state
+        .brief
         .as_ref()
-        .and_then(|_| orchestration_contract::prompt_submission(&envelope));
+        .zip(submission.as_ref())
+        .map(|(_, submission)| TurnBriefAsk {
+            agent: envelope.agent,
+            pane_key: envelope.pane_key.clone(),
+            launch_token: envelope.launch_token.clone(),
+            worktree: envelope.worktree_id.clone(),
+            prompt: submission.prompt.clone(),
+            wall: TURN_BRIEF_WALL,
+        });
 
     /* The pointer, decided BEFORE the envelope goes.
      *
@@ -1136,20 +1269,39 @@ async fn receive_hook(
     // The vault's answer is a scan of files on a blocking thread: the bridge
     // serves every agent's hooks from this runtime, and a warm scan is
     // milliseconds, a cold one of a large vault is not.
-    let knowledge = match (state.knowledge.as_ref().map(Arc::clone), submission) {
-        (Some(source), Some(submission)) => {
-            let event_name = submission.event_name.clone();
-            let pane = pane_key.clone();
-            tokio::task::spawn_blocking(move || {
-                source.related_block(&submission.session_key, &pane, &submission.prompt)
-            })
+    let event_name = submission
+        .as_ref()
+        .map(|submission| submission.event_name.clone());
+    let knowledge = async {
+        match (state.knowledge.as_ref().map(Arc::clone), submission) {
+            (Some(source), Some(submission)) => {
+                let pane = pane_key.clone();
+                tokio::task::spawn_blocking(move || {
+                    source.related_block(&submission.session_key, &pane, &submission.prompt)
+                })
+                .await
+                .ok()
+                .flatten()
+            }
+            _ => None,
+        }
+    };
+    // The turn's brief is asked beside the vault's scan, and waited for no
+    // longer than its wall: a brief that has not come by then is left out,
+    // and the rest of the reply still reaches the script inside its budget.
+    let brief = async {
+        let (source, ask) = state.brief.as_ref().map(Arc::clone).zip(brief_ask)?;
+        let wall = ask.wall;
+        tokio::time::timeout(wall, tokio::task::spawn_blocking(move || source.brief(ask)))
             .await
+            .ok()?
             .ok()
             .flatten()
-            .map(|block| (event_name, block))
-        }
-        _ => None,
+            .filter(|text| !text.trim().is_empty() && text.chars().count() <= TURN_BRIEF_CHAR_CAP)
     };
+    let (knowledge, brief) = tokio::join!(knowledge, brief);
+    let knowledge = event_name.clone().zip(knowledge);
+    let brief = event_name.zip(brief);
     /* The pointer's own moment. Decided above, before the envelope went, and
      * answered here ahead of the context reply.
      *
@@ -1177,7 +1329,7 @@ async fn receive_hook(
         Some(PointerAnswer::Context { event_name, text }) => Some((event_name, text)),
         _ => None,
     };
-    match compose_additional_context(additional_context, knowledge, pointer) {
+    match compose_additional_context(additional_context, knowledge, brief, pointer) {
         Some((event_name, context)) => (
             StatusCode::ACCEPTED,
             axum::Json(serde_json::json!({
@@ -1295,24 +1447,27 @@ fn normalized_hook_event(event: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// One `additionalContext` out of the two things a prompt hook may have to
-/// say: the orchestration contract (once per model context) and the second
-/// brain's block (whenever the vault has pages for the prompt). Either alone
-/// is the whole answer; both stand a blank line apart, contract first.
+/// One `additionalContext` out of the things a prompt hook may have to say:
+/// the orchestration contract (once per model context), the second brain's
+/// block (whenever the vault has pages for the prompt) and the turn's brief
+/// (whenever a seat acting for the pane has something to say, t-14869). Any
+/// alone is the whole answer; together they stand a blank line apart, in
+/// that order.
 fn compose_additional_context(
     selection: Option<orchestration_contract::ContextReply>,
     knowledge: Option<(String, String)>,
+    brief: Option<(String, String)>,
     pointer: Option<(&'static str, String)>,
 ) -> Option<(String, String)> {
-    let (event_name, mut blocks) = match (selection, knowledge) {
-        (None, None) => (None, Vec::new()),
-        (Some(reply), None) => (Some(reply.event_name), vec![reply.context.to_string()]),
-        (None, Some((event_name, block))) => (Some(event_name), vec![block]),
-        (Some(reply), Some((_, block))) => (
-            Some(reply.event_name),
-            vec![reply.context.to_string(), block],
-        ),
-    };
+    let mut event_name = selection.as_ref().map(|reply| reply.event_name.clone());
+    let mut blocks: Vec<String> = selection
+        .map(|reply| reply.context.to_string())
+        .into_iter()
+        .collect();
+    for (named, block) in [knowledge, brief].into_iter().flatten() {
+        event_name.get_or_insert(named);
+        blocks.push(block);
+    }
     /* The pointer goes LAST and never displaces anything.
      *
      * It is the shortest and the most immediate of the three — one sentence
@@ -1569,7 +1724,9 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
         " >nul 2>nul"
     };
     lines.push(format!(
-        "curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook/{slug}\" --connect-timeout 0.5 --max-time 1.5 -H \"Content-Type: application/x-www-form-urlencoded\" -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"tab_id=%{tab_id}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"worktree_id=%{worktree_id}%\" --data-urlencode \"selection_seeded=%{seeded}%\" --data-urlencode \"hook_event_name=%{event_var}%\" --data-urlencode \"env=%{agent_env}%\" --data-urlencode \"version={HOOK_CONTRACT_VERSION}\" --data-urlencode \"payload@-\"{quiet}"
+        "curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook/{slug}\" --connect-timeout {connect} --max-time {budget} -H \"Content-Type: application/x-www-form-urlencoded\" -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"tab_id=%{tab_id}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"worktree_id=%{worktree_id}%\" --data-urlencode \"selection_seeded=%{seeded}%\" --data-urlencode \"hook_event_name=%{event_var}%\" --data-urlencode \"env=%{agent_env}%\" --data-urlencode \"version={HOOK_CONTRACT_VERSION}\" --data-urlencode \"payload@-\"{quiet}",
+        connect = HOOK_CONNECT_BUDGET.as_secs_f64(),
+        budget = HOOK_REPLY_BUDGET.as_secs_f64(),
     ));
     lines.push("set \"curl_exit=%ERRORLEVEL%\"".into());
     lines.push(
@@ -1711,7 +1868,11 @@ pub fn hook_script(agent: AgentKind) -> String {
     lines.push(format!(
         r#"printf '%s' "$payload" | curl -fsS -X POST "http://127.0.0.1:${{{port}}}/hook/{slug}" \"#
     ));
-    lines.push("  --connect-timeout 0.5 --max-time 1.5 \\".into());
+    lines.push(format!(
+        "  --connect-timeout {} --max-time {} \\",
+        HOOK_CONNECT_BUDGET.as_secs_f64(),
+        HOOK_REPLY_BUDGET.as_secs_f64()
+    ));
     lines.push(r#"  -H "Content-Type: application/x-www-form-urlencoded" \"#.into());
     lines.push(format!(r#"  -H "{HOOK_TOKEN_HEADER}: ${{{token}}}" \"#));
     let (tab_id, launch_token) = (env_var::TAB_ID, env_var::LAUNCH_TOKEN);
@@ -1953,15 +2114,16 @@ mod prompt_knowledge_tests {
     /// agent for the rest of the session.
     #[test]
     fn the_contract_the_block_and_the_pointer_share_one_additional_context() {
-        assert_eq!(compose_additional_context(None, None, None), None);
+        assert_eq!(compose_additional_context(None, None, None, None), None);
         assert_eq!(
-            compose_additional_context(Some(contract()), None, None),
+            compose_additional_context(Some(contract()), None, None, None),
             Some(("UserPromptSubmit".to_string(), "contract".to_string()))
         );
         assert_eq!(
             compose_additional_context(
                 None,
                 Some(("UserPromptSubmit".to_string(), "## block".to_string())),
+                None,
                 None
             ),
             Some(("UserPromptSubmit".to_string(), "## block".to_string()))
@@ -1970,6 +2132,7 @@ mod prompt_knowledge_tests {
             compose_additional_context(
                 Some(contract()),
                 Some(("UserPromptSubmit".to_string(), "## block".to_string())),
+                None,
                 None
             ),
             Some((
@@ -1979,7 +2142,12 @@ mod prompt_knowledge_tests {
         );
         // A pointer alone names the one event it can be answering.
         assert_eq!(
-            compose_additional_context(None, None, Some(("SessionStart", "mail".to_string()))),
+            compose_additional_context(
+                None,
+                None,
+                None,
+                Some(("SessionStart", "mail".to_string()))
+            ),
             Some(("SessionStart".to_string(), "mail".to_string()))
         );
         // And with company it goes last, taking nothing away.
@@ -1987,12 +2155,36 @@ mod prompt_knowledge_tests {
             compose_additional_context(
                 Some(contract()),
                 Some(("UserPromptSubmit".to_string(), "## block".to_string())),
+                None,
                 Some(("UserPromptSubmit", "mail".to_string()))
             ),
             Some((
                 "UserPromptSubmit".to_string(),
                 "contract\n\n## block\n\nmail".to_string()
             ))
+        );
+        // The turn's brief stands after the vault's block and before the
+        // pointer, and alone it is the whole answer.
+        assert_eq!(
+            compose_additional_context(
+                Some(contract()),
+                Some(("UserPromptSubmit".to_string(), "## block".to_string())),
+                Some(("UserPromptSubmit".to_string(), "brief".to_string())),
+                Some(("UserPromptSubmit", "mail".to_string()))
+            ),
+            Some((
+                "UserPromptSubmit".to_string(),
+                "contract\n\n## block\n\nbrief\n\nmail".to_string()
+            ))
+        );
+        assert_eq!(
+            compose_additional_context(
+                None,
+                None,
+                Some(("UserPromptSubmit".to_string(), "brief".to_string())),
+                None
+            ),
+            Some(("UserPromptSubmit".to_string(), "brief".to_string()))
         );
     }
 }

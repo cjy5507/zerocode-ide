@@ -251,6 +251,12 @@ pub fn start(local_data_root: &Path) -> Option<HookBridgeReceivers> {
      * actually offered a route is the catalog's measured answer, asked at the
      * moment of the knock. */
     let state = state.with_artifacts(std::sync::Arc::new(crate::artifact_runtime::ArtifactDoor));
+    // What the file pick seat says at a turn's start, where it acts for a
+    // summoned worker's pane, and its answer to the agent's own
+    // `zerocode-find` (t-14869).
+    let state = state
+        .with_turn_brief(std::sync::Arc::new(crate::pane_guard::PaneBrief))
+        .with_file_find(std::sync::Arc::new(crate::pane_guard::PaneFind));
     let state = state.with_pointer_mailbox(crate::orchestration_pointer_mailbox::mailbox());
     let computer_sender = state.computer_requests();
     let addr = tauri::async_runtime::block_on(async {
@@ -930,6 +936,24 @@ fn write_shim_dir(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o755))?;
     }
+    // The file pick seat, called by the agent itself (t-14869): the bridge's
+    // own token, like the artifact door's.
+    let find = dir.join(zerocode_core::file_find::SHIM);
+    std::fs::write(
+        &find,
+        shim_script_with_private_tokens(
+            zerocode_core::file_find::shim_script(
+                zerocode_hookd::env_var::PORT,
+                zerocode_hookd::env_var::TOKEN,
+            ),
+            &[],
+        ),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&find, std::fs::Permissions::from_mode(0o755))?;
+    }
     let computer = dir.join(zerocode_core::computer_use::COMPUTER_CLI);
     std::fs::write(
         &computer,
@@ -1048,10 +1072,15 @@ fn windows_door_scripts() -> Vec<(String, String)> {
     use zerocode_hookd::env_var::{
         BROWSER_TOKEN, BROWSER_TOKEN_FILE, COMPUTER_TOKEN, COMPUTER_TOKEN_FILE, PORT, TOKEN,
     };
-    let doors: [(&str, String, (&str, &str)); 5] = [
+    let doors: [(&str, String, (&str, &str)); 6] = [
         (
             zerocode_core::artifact_publish::SHIM,
             zerocode_core::artifact_publish::shim_script(PORT, TOKEN, true),
+            (TOKEN, ""),
+        ),
+        (
+            zerocode_core::file_find::SHIM,
+            zerocode_core::file_find::shim_script_powershell(PORT, TOKEN),
             (TOKEN, ""),
         ),
         (
@@ -4185,6 +4214,7 @@ mod tests {
         std::fs::write(&mirror, "").unwrap();
         write_shim_dir(&dir.join("shims"), &mirror, &[]).unwrap();
         for door in [
+            zerocode_core::file_find::SHIM,
             "zerocode-browser",
             "zerocode-computer",
             "zerocode-emulator",
@@ -4470,8 +4500,9 @@ mod tests {
     #[test]
     fn the_windows_companions_of_every_door_are_pinned_everywhere() {
         let scripts = windows_door_scripts();
-        assert_eq!(scripts.len(), 10);
+        assert_eq!(scripts.len(), 12);
         for door in [
+            zerocode_core::file_find::SHIM,
             "zerocode-browser",
             "zerocode-computer",
             "zerocode-emulator",
@@ -4499,24 +4530,28 @@ mod tests {
             } else {
                 "ZEROCODE_COMPUTER_TOKEN_FILE"
             };
+            // The artifact and find doors ride the bridge's own token.
+            let hook_token_door =
+                door == "zerocode-artifact" || door == zerocode_core::file_find::SHIM;
             assert!(
-                door == "zerocode-artifact"
-                    || powershell.contains(&format!("$tokenFile = $env:{file_var}")),
+                hook_token_door || powershell.contains(&format!("$tokenFile = $env:{file_var}")),
                 "{door}.ps1 does not read its private token file"
             );
-            // The publishing pane and its folder ride the artifact door's
-            // argv, as its POSIX twin sends them; no other door names either.
+            // The asking pane and its folder ride the artifact and find
+            // doors' argv, as their POSIX twins send them; no other door
+            // names either.
             let names_its_pane = powershell.contains("@('--pane', $env:ZEROCODE_PANE_KEY)")
                 && powershell.contains("@('--cwd', (Get-Location).Path)");
             assert_eq!(
-                names_its_pane,
-                door == "zerocode-artifact",
+                names_its_pane, hook_token_door,
                 "{door}.ps1 pane and folder:\n{powershell}"
             );
             let route = if door == "zerocode-browser" {
                 "/browser"
             } else if door == "zerocode-artifact" {
                 "/artifact"
+            } else if door == zerocode_core::file_find::SHIM {
+                zerocode_core::file_find::ROUTE
             } else {
                 "/computer"
             };
