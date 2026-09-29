@@ -1981,6 +1981,9 @@ pub const SUMMON_MODEL: JevUse = JevUse {
     // It acts only on a model dial the coordinator left open, and its marks
     // come only from answers that were carried out.
     auto_starts: promote::Stand::Applying,
+    // Every model offered sits beside `abstain`, which leaves the ladder's
+    // default.
+    abstain: Abstain::Offered,
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
