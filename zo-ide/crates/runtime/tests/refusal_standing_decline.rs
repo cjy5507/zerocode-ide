@@ -9,6 +9,11 @@
 //! line on their screen) for every category on Opus 5.5. The registry is
 //! process-global, so this is a binary of its own: it installs those rows once
 //! and walks the person's turns on them — a `cyber` decline, then `continue`.
+//!
+//! The person's build reached this state because a discovery row shadowed the
+//! shipped routes (t-16493); this test sets the state explicitly — the rows
+//! carry a `refusal_routes` map that names no `cyber` — so it holds before and
+//! after that fix.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -29,13 +34,20 @@ use runtime::{
 };
 use tokio::sync::mpsc;
 
-/// The alias rows the person's `zo models --json` printed for Opus on 09-30:
-/// the discovered release, and nothing else a row can carry.
+/// The alias rows the person's `zo models --json` printed for Opus on 09-30 —
+/// the discovered release — with the one thing their runtime lacked, said
+/// outright: a `refusal_routes` map (the shipped catalog's key) that routes
+/// `bio` and names no `cyber`. A category a published row's map leaves out is
+/// routed nowhere, whatever the shipped row beneath it says.
 const PUBLISHED_OPUS_ALIASES: &str = r#"{"aliases": [
-    {"alias": "opus", "canonical": "claude-opus-5-5", "provider": "anthropic"},
-    {"alias": "opus[1m]", "canonical": "claude-opus-5-5", "provider": "anthropic"},
-    {"alias": "claude-opus", "canonical": "claude-opus-5-5", "provider": "anthropic"},
-    {"alias": "claude-opus[1m]", "canonical": "claude-opus-5-5", "provider": "anthropic"}
+    {"alias": "opus", "canonical": "claude-opus-5-5", "provider": "anthropic",
+     "refusal_routes": {"bio": ["claude-opus-5", "openai-latest"]}},
+    {"alias": "opus[1m]", "canonical": "claude-opus-5-5", "provider": "anthropic",
+     "refusal_routes": {"bio": ["claude-opus-5", "openai-latest"]}},
+    {"alias": "claude-opus", "canonical": "claude-opus-5-5", "provider": "anthropic",
+     "refusal_routes": {"bio": ["claude-opus-5", "openai-latest"]}},
+    {"alias": "claude-opus[1m]", "canonical": "claude-opus-5-5", "provider": "anthropic",
+     "refusal_routes": {"bio": ["claude-opus-5", "openai-latest"]}}
 ]}"#;
 
 /// What one request costs the fake provider — the number a person feels.
@@ -53,9 +65,10 @@ fn the_persons_catalog() -> std::sync::MutexGuard<'static, ()> {
     let guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_var("ZO_SHARED_RATE_COORD", "0");
     INSTALL.call_once(|| api::refresh_model_registry_from_json(PUBLISHED_OPUS_ALIASES));
+    assert!(!api::refusal_route_candidates("claude-opus-5-5", Some("bio")).is_empty());
     assert!(
         api::refusal_route_candidates("claude-opus-5-5", Some("cyber")).is_empty(),
-        "the premise: on these rows the provider routes `cyber` on Opus 5.5 nowhere"
+        "the premise: on these rows the provider routes `cyber` on Opus 5.5 nowhere, and `bio` somewhere"
     );
     guard
 }
