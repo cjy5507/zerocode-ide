@@ -10691,9 +10691,10 @@ impl Ledger {
     ///
     /// The hole this closes, measured on 2026-09-29 (run-11955, w-15216): a
     /// worker ended its turn at 14:36 to wait for 「빌드 가능」, which had been
-    /// in its inbox since 14:32 — leased by its own `check --ack <d>
-    /// >/dev/null`. Its own `check --wait` loop kept running, so the window
-    /// held its `Stop` back as work in progress (t-11233): the pane stayed
+    /// in its inbox since 14:32 — leased by its own
+    /// `check --ack <d> >/dev/null`. Its own `check --wait` loop kept
+    /// running, so the window held its `Stop` back as work in progress
+    /// (t-11233): the pane stayed
     /// `working`, no turn end reached this ledger, and the stall sweep skips
     /// a working pane. For seven minutes its coordinator was told nothing,
     /// and only the person noticed.
@@ -18105,8 +18106,9 @@ pub const HISTORY_MODE: &str = "all";
 /// answer — so it is unread mail, and a look that shows only the queue
 /// behind it shows less than the next `check` would hand over. That gap lost
 /// a go-ahead on 2026-09-29: a worker ran `check --ack <d> >/dev/null`, the
-/// same call leased the next batch into /dev/null, and its `check --wait
-/// --peek` then slept ten minutes beside the one message it was waiting for.
+/// same call leased the next batch into /dev/null, and its
+/// `check --wait --peek` then slept ten minutes beside the one message it was
+/// waiting for.
 /// The open batch comes first, oldest mail first as `check` would hand it,
 /// and is named under `unacked` so the reader knows a plain `check` replays
 /// it and which id retires it. A batch acknowledged is never shown again.
