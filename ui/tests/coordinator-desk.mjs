@@ -432,6 +432,20 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       declined.switched === "cyber → claude-opus-4-8 · 이 대화 끝까지" &&
       declined.local === "cyber → claude-opus-4-8 · 응답 하나만", JSON.stringify(declined));
 
+    /* 쉬는 워커의 알림(t-15313): 둘째 줄은 그 워커가 무엇을 두고 쉬는지다 — 안 읽은
+     * 편지, 또는 제 check --wait. 이유의 날것 낱말(unread_mail)은 사람에게 보이지
+     * 않는다. */
+    const resting = await page.evaluate(() => {
+      const now = Date.now();
+      return {
+        unread: deskLetterDetail({ kind: "went_quiet", reason: "unread_mail", notices: 1 }, now),
+        waiting: deskLetterDetail({ kind: "went_quiet", reason: "waiting_on_mail", notices: 1 }, now),
+      };
+    });
+    ok("a worker at rest says what it rests on: unread mail, or its own wait",
+      resting.unread === "안 읽은 편지를 둔 채 쉬고 있음" &&
+      resting.waiting === "제 check --wait에서 편지를 기다리며 쉬고 있음", JSON.stringify(resting));
+
     await page.click('#board-view [data-letter="run-desk/m-901"] .board-desk-letter-act');
     await page.fill('#board-view [data-letter="run-desk/m-901"] .board-desk-reply-field', "그대로 main에 올리세요.");
     const drafted = await page.evaluate(async () => {
