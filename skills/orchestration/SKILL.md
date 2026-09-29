@@ -916,10 +916,28 @@ So:
 - The coordinator writes no claims of effect into comments or docs; it writes
   what the code does and what was measured.
 
+### Find the files first — `zerocode-find`
+
+Every pane in this window has `zerocode-find` on its PATH. Before the first
+read of code you do not know yet, run it with what you are about to change or
+debug:
+
+```sh
+zerocode-find the parser crash on an empty line
+```
+
+It prints the files most likely involved, each with its first comment line —
+the window's search for the task's own words, ranked by the file pick
+judgment where that judgment acts for the pane. Start from those files
+instead of searching; they are suggestions, so verify them. In the last seven
+days before it existed, a Claude worker spent a median of 20 reads and
+searches before its first edit (t-14656).
+
 Copy into each implementation briefing:
 
 ```text
 Work in a worktree. Run the affected tests and cargo fmt --all --check.
+Before the first read of unfamiliar code: zerocode-find <what you are changing>
 Required root gate: cargo clippy --all-targets -- -D warnings
 Report command exit codes without pipes, commits, and anything left before worker_done.
 ```

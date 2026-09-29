@@ -242,8 +242,13 @@ pub const fn sight(agent: AgentKind) -> Sight {
 /// its hooks come but carry no context there.
 #[must_use]
 pub const fn turn_start_road(agent: AgentKind) -> Sees {
-    let _ = agent;
-    Sees::Yes
+    if agent.hook_additional_context().is_some() {
+        return Sees::Yes;
+    }
+    match sight(agent).turn_end {
+        Sees::No(why) => Sees::No(why),
+        Sees::Yes => Sees::No(Unseen::NoContextRoad),
+    }
 }
 
 /// Every agent with its row, in the catalog's order — what a dashboard lists.
@@ -292,7 +297,10 @@ pub fn seat_sight(seat: &JevUse, agent: AgentKind) -> Option<SeatSight> {
     } else if seat.id == CLAIM.id {
         (row.turn_answer, vec![row.prompt, row.after])
     } else if seat.id == FILE_PICK.id {
-        (row.prompt, vec![row.edited_path, row.turn_end])
+        (
+            row.prompt,
+            vec![row.edited_path, row.turn_end, turn_start_road(agent)],
+        )
     } else {
         return None;
     };

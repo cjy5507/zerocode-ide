@@ -416,6 +416,7 @@ const JEV_UNSEEN = Object.freeze({
   no_event_before: { key: "jev.unseen.noEventBefore", word: "실행 전에 알리지 않아 실행 뒤에 물음" },
   no_prompt_event: { key: "jev.unseen.noPromptEvent", word: "사람의 요청을 알리지 않음" },
   no_stop_flag: { key: "jev.unseen.noStopFlag", word: "멈춤을 알리지 않음" },
+  no_context_road: { key: "jev.unseen.noContextRoad", word: "턴 시작에 안내를 받지 않음" },
 });
 
 function jevUnseenWords(token) {

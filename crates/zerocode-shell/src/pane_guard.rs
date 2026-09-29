@@ -50,10 +50,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use zerocode_core::AgentKind;
+use zerocode_core::file_find::{self, FindAsk};
+use zerocode_core::hook_guard::tally::{self, TurnTally};
 use zerocode_core::hook_guard::{self, Asking, Moment, PANE_SEATS, Sees};
 use zerocode_core::jev::claim::{self, ClaimCheckRow, ClaimWaiting, CodeVerdict, Evidence};
 use zerocode_core::jev::door::{ANSWERED_OUTCOME, Memo};
-use zerocode_core::jev::file_pick::{self, CandidateBatch, FilePickAsk, FilePickRow};
+use zerocode_core::jev::file_pick::{
+    self, CandidateBatch, FilePickAsk, FilePickCandidate, FilePickRow,
+};
 use zerocode_core::jev::summary::CONTROL;
 use zerocode_core::jev::tool_guard::{
     ASKED_AFTER, ASKED_BEFORE, Asked, CommandGuardRow, CommandWaiting, HostFraming, TextSource,
@@ -62,8 +66,8 @@ use zerocode_core::jev::tool_guard::{
 };
 use zerocode_core::jev::{
     CLAIM, COMMAND_GUARD, COMMAND_GUARD_FLAG_FLOOR_PERMILLE, FILE_PICK, FILE_PICK_CANDIDATE_CAP,
-    JevMode, JevUse, ROUTE_USE_FALLBACK, Run, TOOL_TEXT_GUARD, TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE,
-    choice, fingerprint_of, memo, noul, task_fingerprint,
+    FILE_PICK_HINT_FILE_CAP, JevMode, JevUse, ROUTE_USE_FALLBACK, Run, TOOL_TEXT_GUARD,
+    TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE, choice, fingerprint_of, memo, noul, task_fingerprint,
 };
 use zerocode_core::transcript::SaidAt;
 
@@ -238,6 +242,9 @@ struct PickWaiting {
     asked: Option<(Value, PathBuf, PathBuf)>,
     /// The files its turn's edits wrote, once the turn ended.
     edited: Option<Vec<String>>,
+    /// The calls its turn looked around with before its first edit, once the
+    /// turn ended ([`TurnTally::explore_before_first_edit`]).
+    looked: Option<usize>,
 }
 
 impl PickWaiting {
@@ -250,7 +257,7 @@ impl PickWaiting {
             row,
             self.judged,
             &file_pick::edited_fingerprints(&[root.as_path(), handed], edited),
-            None,
+            self.looked,
             at,
         );
         Some(Filed {
@@ -301,7 +308,46 @@ struct PaneBook {
     claims: Vec<ClaimEntry>,
     /// Turns' file picks waiting on their answer and their turn's edits.
     picks: Vec<PickWaiting>,
+    /// The turn's calls, as its ruler counts them (t-14869).
+    tally: TurnTally,
+    /// What the turn's brief waits on, in a summoned worker's pane.
+    briefing: Option<Briefing>,
+    /// The pane as its hooks last said it: what `zerocode-find` asks from.
+    pane: Option<Pane>,
+    /// The picks `zerocode-find` asked this turn.
+    finds: u64,
+    /// Rows of the turns counted and not yet written.
+    counted: Vec<Value>,
 }
+
+/// A turn's file pick as its brief waits on it (t-14869): the prompt the
+/// bridge read, by [`prompt_key`], the pick it asked, when the waiting brief
+/// gives up, and what there is to say.
+#[derive(Debug)]
+struct Briefing {
+    key: String,
+    judged: u64,
+    until: Option<Instant>,
+    said: Said,
+}
+
+/// Where a turn's brief stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Said {
+    /// The question is out.
+    Asking,
+    /// Its line, offered to the waiting brief.
+    Ready(String),
+    /// The brief took the line.
+    Taken,
+    /// Nothing to say.
+    Nothing,
+}
+
+/// How often a brief and the question it waits on look at each other's
+/// word: a tenth of the pane's median trip from a prompt to its file pick's
+/// answer (96 ms over 102 rows, 2026-09-29).
+const BRIEF_POLL: Duration = Duration::from_millis(10);
 
 /// How the book names a call its payload named none, before its count.
 const UNNAMED: &str = "unnamed-";
@@ -418,7 +464,15 @@ fn read_hook(
     else {
         return;
     };
-    let moments = hook_guard::moments_parsed(envelope.agent, &event, &payload, asking);
+    let mut moments = hook_guard::moments_parsed(envelope.agent, &event, &payload, asking);
+    // The turn's ruler rides the file pick seat: its label reads the count.
+    if asking.file_pick {
+        moments.extend(
+            tally::tallied_parsed(envelope.agent, &event, &payload)
+                .into_iter()
+                .map(Moment::Tally),
+        );
+    }
     if moments.is_empty() {
         return;
     }
@@ -440,9 +494,7 @@ fn read_hook(
         agent: envelope.agent,
         session,
         worktree: PathBuf::from(&envelope.worktree_id),
-        worker: crate::orchestration::ledger_states_by_term()
-            .get(&term)
-            .is_some_and(|seated| seated.work_ended_ms.is_none()),
+        worker: summoned(term),
         prompt_key: zerocode_hookd::turn_prompt(envelope).map(|prompt| prompt_key(&prompt)),
     };
     drop(note(
@@ -479,6 +531,7 @@ pub(crate) fn note(
 ) -> Vec<JoinHandle<()>> {
     let mut questions = Vec::new();
     let mut labels: Vec<Filed> = Vec::new();
+    let counted;
     {
         let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
         let owner = pane.owner();
@@ -490,11 +543,14 @@ pub(crate) fn note(
             };
         }
         let at = u64::try_from(now_ms).unwrap_or_default();
+        book.pane = Some(pane.clone());
         for moment in moments {
             file(book, pane, asking, moment, at, &mut questions, &mut labels);
         }
+        counted = std::mem::take(&mut book.counted);
     }
     record_labels(wire, labels, now_ms);
+    record_turns(wire, counted);
     questions
         .into_iter()
         .filter_map(|question| {
@@ -524,14 +580,30 @@ fn file(
             // files its edits wrote so far, and the answer before this
             // prompt is graded by what the person opened it with.
             settle_picks(book, pane, at, labels);
+            count_turn(book, pane, at);
             if let Some(failure) = claim::next_person_failed(&words) {
                 grade_claims(book, failure, at, labels);
             }
             book.turn_edited.clear();
             book.evidence.clear();
-            if asking.file_pick && file_pick::is_code_edit_intent(&words) {
-                let attempt = book.attempt();
-                let judged = task_fingerprint(&attempt, FILE_PICK.id);
+            let asks_pick = asking.file_pick && file_pick::is_code_edit_intent(&words);
+            let attempt = book.attempt();
+            let judged = task_fingerprint(&attempt, FILE_PICK.id);
+            book.briefing = pane
+                .prompt_key
+                .clone()
+                .filter(|_| pane.worker)
+                .map(|key| Briefing {
+                    key,
+                    judged,
+                    until: None,
+                    said: if asks_pick {
+                        Said::Asking
+                    } else {
+                        Said::Nothing
+                    },
+                });
+            if asks_pick {
                 if !book.picks.iter().any(|pick| pick.judged == judged) {
                     shelve(
                         &mut book.picks,
@@ -539,6 +611,7 @@ fn file(
                             judged,
                             asked: None,
                             edited: None,
+                            looked: None,
                         },
                     );
                     questions.push(Question::FilePick {
@@ -734,10 +807,11 @@ fn file(
                 decide_step(book, step, at, labels);
             }
         }
-        Moment::Tally(_) => {}
+        Moment::Tally(told) => book.tally.take(told),
         Moment::TurnEnded { stopped, said } => {
             end_turn(book, stopped, at, labels);
             settle_picks(book, pane, at, labels);
+            count_turn(book, pane, at);
             book.turn_edited.clear();
             let evidence = std::mem::take(&mut book.evidence);
             if let Some(said) = said {
@@ -780,12 +854,25 @@ fn settle_picks(book: &mut PaneBook, pane: &Pane, at: u64, labels: &mut Vec<File
     for pick in &mut book.picks {
         if pick.edited.is_none() {
             pick.edited = Some(book.turn_edited.clone());
+            pick.looked = book.tally.explore_before_first_edit();
         }
     }
     for pick in extract(&mut book.picks, |pick| {
         pick.asked.is_some() && pick.edited.is_some()
     }) {
         labels.extend(pick.label(&pane.worktree, at));
+    }
+}
+
+/// A turn ended, or the next one began: its ruler's row is kept to be
+/// written, and the next turn is counted from nothing.
+fn count_turn(book: &mut PaneBook, pane: &Pane, at: u64) {
+    let tally = std::mem::take(&mut book.tally);
+    if let Some(row) = tally
+        .row(at, pane.agent.slug(), pane.place())
+        .and_then(|row| serde_json::to_value(row).ok())
+    {
+        book.counted.push(row);
     }
 }
 
@@ -938,11 +1025,53 @@ fn record_labels(wire: &Wire, labels: Vec<Filed>, now_ms: i64) {
     }));
 }
 
+/// Write the turns counted, off the hook loop, in the ledger beside the
+/// seats' ([`tally::PANE_TURNS_LEDGER`]).
+fn record_turns(wire: &Wire, rows: Vec<Value>) {
+    let Some(ledger) = rows
+        .first()
+        .and_then(|_| systemone::requests_file(wire, tally::PANE_TURNS_LEDGER))
+    else {
+        return;
+    };
+    drop(std::thread::spawn(move || {
+        systemone::append_rows(&ledger, &rows);
+    }));
+}
+
 /* ---- the turn's brief (t-14869) --------------------------------------------------- */
+
+/// The window's answer to a turn's brief, installed on the bridge.
+pub(crate) struct PaneBrief;
+
+impl zerocode_hookd::TurnBrief for PaneBrief {
+    fn brief(&self, ask: zerocode_hookd::TurnBriefAsk) -> Option<String> {
+        if !STANDING.asking().file_pick {
+            return None;
+        }
+        let term = crate::hooks::term_of_pane_key(&ask.pane_key)?;
+        brief_for(
+            &GUARDS,
+            &Wire::of_this_machine(),
+            term,
+            summoned(term),
+            &ask,
+        )
+    }
+}
+
+/// Whether `term`'s pane holds a worker the window summoned, its dispatch
+/// still open — read off the board's snapshot of the ledger, which takes no
+/// lock the ledger's actor holds and reads no file.
+fn summoned(term: u32) -> bool {
+    crate::orchestration::ledger_states_by_term()
+        .get(&term)
+        .is_some_and(|seated| seated.work_ended_ms.is_none())
+}
 
 /// The name a prompt goes by between the bridge and the books: the
 /// fingerprint of the words the bridge read for a turn's brief
-/// ([`zerocode_hookd::orchestration_contract::prompt_submission`]), which
+/// ([`zerocode_hookd::turn_prompt`]), which
 /// both read off the same envelope.
 pub(crate) fn prompt_key(prompt: &str) -> String {
     fingerprint_of(prompt)
@@ -960,23 +1089,93 @@ pub(crate) fn brief_for(
     worker: bool,
     ask: &zerocode_hookd::TurnBriefAsk,
 ) -> Option<String> {
-    let _ = (guards, wire, term, worker, ask);
-    None
+    if !worker {
+        return None;
+    }
+    let wall = ask.wall.min(deadline_of(&FILE_PICK));
+    let until = Instant::now() + wall;
+    let root = Path::new(&ask.worktree);
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if !systemone::applies_in_project(wire, &FILE_PICK, &root) {
+        return None;
+    }
+    let key = prompt_key(&ask.prompt);
+    loop {
+        {
+            let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(briefing) = held
+                .panes
+                .get_mut(&term)
+                .and_then(|book| book.briefing.as_mut())
+                .filter(|briefing| briefing.key == key)
+            {
+                briefing.until.get_or_insert(until);
+                match &briefing.said {
+                    Said::Ready(line) => {
+                        let line = line.clone();
+                        briefing.said = Said::Taken;
+                        return Some(line);
+                    }
+                    Said::Taken | Said::Nothing => return None,
+                    Said::Asking => {}
+                }
+            }
+        }
+        if Instant::now() >= until {
+            return None;
+        }
+        std::thread::sleep(BRIEF_POLL);
+    }
 }
 
-/* ---- zerocode-find (t-14869) ------------------------------------------------------ */
-
-/// Answer one `zerocode-find` from `ask`'s pane.
-///
-/// # Errors
-/// When neither the pane nor the shell says which folder to look in.
-pub(crate) fn find_in(
+/// Offer `line` — the turn's file pick, in the seat's words — to the brief
+/// waiting on the pick `judged` names in `pane`, and say whether it took it
+/// before giving up. Nothing to offer, or no brief waiting by the time the
+/// answer is in, and nothing is said.
+fn offer_brief(
     guards: &'static Mutex<Guards>,
-    wire: &Wire,
-    ask: &zerocode_core::file_find::FindAsk,
-) -> Result<String, String> {
-    let _ = (guards, wire, ask);
-    Ok(String::new())
+    pane: &Pane,
+    judged: u64,
+    line: Option<String>,
+) -> bool {
+    let until = {
+        let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(briefing) = briefing_of(&mut held, pane.term, judged) else {
+            return false;
+        };
+        match (line, briefing.until) {
+            (Some(line), Some(until)) if briefing.said == Said::Asking => {
+                briefing.said = Said::Ready(line);
+                until
+            }
+            _ => {
+                briefing.said = Said::Nothing;
+                return false;
+            }
+        }
+    };
+    loop {
+        std::thread::sleep(BRIEF_POLL);
+        let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(briefing) = briefing_of(&mut held, pane.term, judged) else {
+            return false;
+        };
+        if briefing.said == Said::Taken {
+            return true;
+        }
+        if Instant::now() >= until {
+            briefing.said = Said::Nothing;
+            return false;
+        }
+    }
+}
+
+/// The briefing of `term`'s pane that waits on the pick `judged` names.
+fn briefing_of(held: &mut Guards, term: u32, judged: u64) -> Option<&mut Briefing> {
+    held.panes
+        .get_mut(&term)
+        .and_then(|book| book.briefing.as_mut())
+        .filter(|briefing| briefing.judged == judged)
 }
 
 /* ---- the questions --------------------------------------------------------------- */
@@ -1211,7 +1410,9 @@ fn ask_claim(
 /// request's words, beside the files this session's edits wrote, put to the
 /// seat in one batch ([`file_pick::questions`]), and file what came of it —
 /// the row in the ledger zo keeps for the pane's folder, and, when it was
-/// answered, the request its turn's edits will grade.
+/// answered, the request its turn's edits will grade. In a summoned worker's
+/// pane, while the seat acts for its project, the files it selected are
+/// offered to the turn's brief.
 fn ask_file_pick(
     guards: &'static Mutex<Guards>,
     wire: &Wire,
@@ -1226,43 +1427,97 @@ fn ask_file_pick(
     let Some(ledger) =
         systemone::project_ledger_of(wire, &FILE_PICK, &root).filter(|_| mode.asks())
     else {
+        offer_brief(guards, pane, judged, None);
         settle_pick(guards, wire, pane, judged, None);
         return;
     };
+    let (batch, candidate_elapsed_ms) = candidates(&root, &request, edited);
+    let (mut row, selected) = put_pick(
+        wire,
+        pane,
+        mode,
+        &PickAsk {
+            judged,
+            attempt,
+            request,
+            batch: &batch,
+            candidate_elapsed_ms,
+        },
+    );
+    // Said at the turn's start only in a summoned worker's pane, while the
+    // seat acts for its project, and only when the brief took it in time.
+    let acting = pane.worker && systemone::applies_in_project(wire, &FILE_PICK, &root);
+    let line = selected
+        .filter(|_| acting)
+        .and_then(|selected| file_pick::hint(&selected))
+        .map(|hint| hint.text);
+    row.applied = offer_brief(guards, pane, judged, line);
+    row.noted = row.applied;
+    file_pick_row(guards, wire, pane, judged, &row, (root, ledger));
+}
+
+/// A pick to put to the seat: its name and turn, the words, and the
+/// candidates found for them.
+struct PickAsk<'a> {
+    judged: u64,
+    attempt: String,
+    request: String,
+    batch: &'a CandidateBatch,
+    candidate_elapsed_ms: u64,
+}
+
+/// The candidates for `request` in `root` — the window's own search for its
+/// words beside the files `edited` (this session's, newest first) that are
+/// still there — and how long finding them took.
+fn candidates(root: &Path, request: &str, edited: &[String]) -> (CandidateBatch, u64) {
     let began = Instant::now();
-    let search = searched(&root, &file_pick::search_terms(&request));
+    let search = searched(root, &file_pick::search_terms(request));
     let recent: Vec<String> = edited
         .iter()
-        .filter_map(|path| file_pick::workspace_relative_path(&root, Path::new(path)))
+        .filter_map(|path| file_pick::workspace_relative_path(root, Path::new(path)))
         .filter(|path| root.join(path).is_file())
         .collect();
     let batch = CandidateBatch {
-        files: file_pick::interleave(&root, &[&search, &recent]),
+        files: file_pick::interleave(root, &[&search, &recent]),
         recent_paths: recent,
         search_candidates: search.len(),
         graph_candidates: 0,
     };
-    let candidate_elapsed_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let now_ms = crate::usage_runtime::epoch_ms_now();
-    let ask = FilePickAsk {
-        attempt,
+    (
+        batch,
+        u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+    )
+}
+
+/// Put one pick to the seat, as `mode` reads it: its row, not yet written,
+/// and — when the reply read — the files it selected, most likely first.
+fn put_pick(
+    wire: &Wire,
+    pane: &Pane,
+    mode: JevMode,
+    ask: &PickAsk<'_>,
+) -> (FilePickRow, Option<Vec<String>>) {
+    let batch = ask.batch;
+    let asked = FilePickAsk {
+        attempt: ask.attempt.clone(),
         session_id: pane.owner(),
-        request,
+        request: ask.request.clone(),
     };
     let mut row = FilePickRow::of_batch(
-        u64::try_from(now_ms).unwrap_or_default(),
-        &ask,
-        &batch,
-        candidate_elapsed_ms,
+        u64::try_from(crate::usage_runtime::epoch_ms_now()).unwrap_or_default(),
+        &asked,
+        batch,
+        ask.candidate_elapsed_ms,
     );
+    row.judged = ask.judged;
     row.from = pane.asker();
     row.pane = pane.place();
     let questions = file_pick::questions(&batch.files, noul::question);
     let (trip, answered) = put(
         wire,
         &FILE_PICK,
-        &root,
-        file_pick::state(&ask.request, &batch.files),
+        &pane.root(),
+        file_pick::state(&asked.request, &batch.files),
         &questions,
         |answers| {
             file_pick::read_answers_naming(&batch.files, answers)
@@ -1279,54 +1534,190 @@ fn ask_file_pick(
     row.output_tokens = trip.output_tokens;
     row.cached = trip.cached;
     row.rejected = trip.rejected;
-    if let Some((value, readings)) = answered {
+    let selected = answered.map(|(value, readings)| {
         row.answers = Some(file_pick::probabilities(readings));
         row.ranked_paths = file_pick::rank_candidates(&batch.files, &value)
             .iter()
             .map(|path| fingerprint_of(path))
             .collect();
-        row.selected_paths = file_pick::select_candidates(&batch.files, &value)
-            .iter()
-            .map(|path| fingerprint_of(path))
-            .collect();
+        let selected = file_pick::select_candidates(&batch.files, &value);
+        row.selected_paths = selected.iter().map(|path| fingerprint_of(path)).collect();
         row.route_use = mode.key().to_string();
-    }
-    let Ok(value) = serde_json::to_value(&row) else {
+        selected
+    });
+    (row, selected)
+}
+
+/// Write a pick's row in the pane's project ledger (`at`: the folder it was
+/// asked from and the ledger), and hand the book what came of it: an
+/// answered pick waits on its turn's edits for its label.
+fn file_pick_row(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    pane: &Pane,
+    judged: u64,
+    row: &FilePickRow,
+    at: (PathBuf, PathBuf),
+) {
+    let Ok(value) = serde_json::to_value(row) else {
         settle_pick(guards, wire, pane, judged, None);
         return;
     };
-    systemone::record_rows(&FILE_PICK, &ledger, std::slice::from_ref(&value), now_ms);
+    let (root, ledger) = at;
+    systemone::record_rows(
+        &FILE_PICK,
+        &ledger,
+        std::slice::from_ref(&value),
+        crate::usage_runtime::epoch_ms_now(),
+    );
     let answered = (row.outcome == ANSWERED_OUTCOME).then_some((value, root, ledger));
     settle_pick(guards, wire, pane, judged, answered);
 }
 
-/// The files the window's own project search finds for `terms` in `root` —
-/// each file one of whose lines names a term — in the order it finds them,
-/// each once, at most the seat's candidate cap; under the search's own
-/// deadline (`ExplorerPolicy`), past which it finds nothing.
-fn searched(root: &Path, terms: &[String]) -> Vec<String> {
-    if terms.is_empty() {
-        return Vec::new();
+/* ---- zerocode-find (t-14869) ------------------------------------------------------ */
+
+/// The window's answer to `zerocode-find`.
+pub(crate) struct PaneFind;
+
+impl zerocode_hookd::FileFind for PaneFind {
+    fn find(&self, ask: FindAsk) -> Result<String, String> {
+        find_in(&GUARDS, &Wire::of_this_machine(), &ask)
     }
-    let policy = crate::explorer_policy::ExplorerPolicy::default();
-    // The terms are words — letters, digits and `_` ([`file_pick::search_terms`]),
-    // so they join as alternatives of one pattern.
-    let options = crate::project_search::SearchOptions {
-        regex: true,
-        ..crate::project_search::SearchOptions::default()
+}
+
+/// Answer one `zerocode-find` from `ask`'s pane (t-14869): the candidates a
+/// turn's start would find for its words, listed in today's order — or, in a
+/// summoned worker's pane while the seat acts for its project, the ones the
+/// seat selected. While the seat asks, the pick is put to it as a turn's is
+/// and its row names the agent and the moment ([`file_find::ASKED`]); a pick
+/// that does not act is asked beside the answer, never before it. The pick
+/// waits on its turn's edits for its label.
+///
+/// # Errors
+/// When neither the pane nor the shell says which folder to look in.
+pub(crate) fn find_in(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    ask: &FindAsk,
+) -> Result<String, String> {
+    let term = ask.pane.as_deref().and_then(crate::hooks::term_of_pane_key);
+    let held_pane = {
+        let held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+        term.and_then(|term| held.panes.get(&term))
+            .and_then(|book| Some((book.pane.clone()?, book.edited.clone())))
     };
-    let hits = crate::project_search::search(root, &terms.join("|"), Some(&options), &policy)
+    let root = match (&held_pane, &ask.cwd) {
+        (Some((pane, _)), _) => pane.root(),
+        (None, Some(cwd)) => Path::new(cwd)
+            .canonicalize()
+            .map_err(|error| error.to_string())?,
+        (None, None) => return Err(file_find::USAGE.to_string()),
+    };
+    let edited = held_pane
+        .as_ref()
+        .map(|(_, edited)| edited.clone())
         .unwrap_or_default();
-    let mut paths: Vec<String> = Vec::new();
-    for hit in hits {
-        if paths.len() == FILE_PICK_CANDIDATE_CAP {
-            break;
-        }
-        if !paths.contains(&hit.path) {
-            paths.push(hit.path);
-        }
+    let (batch, candidate_elapsed_ms) = candidates(&root, &ask.request, &edited);
+    let today: Vec<FilePickCandidate> = batch
+        .files
+        .iter()
+        .take(FILE_PICK_HINT_FILE_CAP)
+        .cloned()
+        .collect();
+    let mode = FILE_PICK.mode_in_run(&wire.settings_root(), Run::Fresh);
+    let Some((pane, ledger)) = held_pane.map(|(pane, _)| pane).and_then(|pane| {
+        let ledger = systemone::project_ledger_of(wire, &FILE_PICK, &root)
+            .filter(|_| mode.asks() && !batch.files.is_empty())?;
+        Some((pane, ledger))
+    }) else {
+        return Ok(file_find::listing(&today));
+    };
+    let Some((judged, attempt)) = shelve_find(guards, &pane) else {
+        return Ok(file_find::listing(&today));
+    };
+    let acting = pane.worker && systemone::applies_in_project(wire, &FILE_PICK, &root);
+    let pick = PickAsk {
+        judged,
+        attempt,
+        request: ask.request.clone(),
+        batch: &batch,
+        candidate_elapsed_ms,
+    };
+    if !acting {
+        let wire = wire.clone();
+        let files = batch.clone();
+        let request = pick.request.clone();
+        let attempt = pick.attempt.clone();
+        drop(
+            std::thread::Builder::new()
+                .name("jev-file-find".to_string())
+                .spawn(move || {
+                    let pick = PickAsk {
+                        judged,
+                        attempt,
+                        request,
+                        batch: &files,
+                        candidate_elapsed_ms,
+                    };
+                    let (mut row, _) = put_pick(&wire, &pane, mode, &pick);
+                    row.moment = Some(file_find::ASKED.to_string());
+                    file_pick_row(guards, &wire, &pane, judged, &row, (root, ledger));
+                }),
+        );
+        return Ok(file_find::listing(&today));
     }
-    paths
+    let (mut row, selected) = put_pick(wire, &pane, mode, &pick);
+    row.moment = Some(file_find::ASKED.to_string());
+    let chosen: Vec<FilePickCandidate> = selected
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|path| batch.files.iter().find(|file| file.path == *path).cloned())
+        .collect();
+    row.applied = !chosen.is_empty();
+    row.noted = row.applied;
+    file_pick_row(guards, wire, &pane, judged, &row, (root, ledger));
+    Ok(file_find::listing(if chosen.is_empty() {
+        &today
+    } else {
+        &chosen
+    }))
+}
+
+/// Shelve a pick asked by `zerocode-find` in `pane`'s book, named apart from
+/// its turn's own pick and from every other asked in the turn, to wait on
+/// the turn's edits: its name and its turn's.
+fn shelve_find(guards: &'static Mutex<Guards>, pane: &Pane) -> Option<(u64, String)> {
+    let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+    let book = held.panes.get_mut(&pane.term)?;
+    book.finds += 1;
+    let attempt = book.attempt();
+    let judged = task_fingerprint(
+        &format!("{attempt}{}{}", file_find::ASKED, book.finds),
+        FILE_PICK.id,
+    );
+    shelve(
+        &mut book.picks,
+        PickWaiting {
+            judged,
+            asked: None,
+            edited: None,
+            looked: None,
+        },
+    );
+    Some((judged, attempt))
+}
+
+/// The files the window's own project search finds for `terms` in `root` —
+/// each file that names a term, the ones that name more of them first
+/// ([`crate::project_search::files_naming`]), at most the seat's candidate
+/// cap; under the search's own deadline (`ExplorerPolicy`).
+fn searched(root: &Path, terms: &[String]) -> Vec<String> {
+    crate::project_search::files_naming(
+        root,
+        terms,
+        FILE_PICK_CANDIDATE_CAP,
+        &crate::explorer_policy::ExplorerPolicy::default(),
+    )
 }
 
 /// What one request's trip through the door came to — the facts every row

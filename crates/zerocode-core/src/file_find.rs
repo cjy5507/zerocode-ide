@@ -60,8 +60,25 @@ pub struct FindAsk {
 /// # Errors
 /// The usage, when no word was given.
 pub fn ask_from_argv(argv: &[String]) -> Result<FindAsk, &'static str> {
-    let _ = argv;
-    Err(USAGE)
+    let mut words = argv;
+    let (mut cwd, mut pane) = (None, None);
+    while let [rest @ .., flag, value] = words {
+        let held = match flag.as_str() {
+            CWD_FLAG => &mut cwd,
+            PANE_FLAG => &mut pane,
+            _ => break,
+        };
+        if held.is_some() {
+            break;
+        }
+        *held = Some(value.clone());
+        words = rest;
+    }
+    let request = words.join(" ").trim().to_string();
+    if request.is_empty() {
+        return Err(USAGE);
+    }
+    Ok(FindAsk { request, cwd, pane })
 }
 
 /// What the command prints for `files`, in their order: one line per file —
@@ -69,15 +86,44 @@ pub fn ask_from_argv(argv: &[String]) -> Result<FindAsk, &'static str> {
 /// that says what the list is. [`NOTHING_FOUND`] for none.
 #[must_use]
 pub fn listing(files: &[FilePickCandidate]) -> String {
-    let _ = (files, FILE_PICK_NOTE_PREFIX);
-    String::new()
+    if files.is_empty() {
+        return format!("{NOTHING_FOUND}\n");
+    }
+    let mut said = String::new();
+    for file in files {
+        let path: String = file.path.chars().filter(|c| !c.is_control()).collect();
+        said.push_str(FILE_PICK_NOTE_PREFIX);
+        said.push(' ');
+        said.push_str(&path);
+        if !file.about.is_empty() {
+            said.push_str("  ");
+            said.push_str(&file.about);
+        }
+        said.push('\n');
+    }
+    said.push_str(LISTING_NOTE);
+    said.push('\n');
+    said
 }
 
 /// The command's script: the window's bridge door, carrying the folder the
 /// shell stands in and the pane that asked
-/// ([`crate::computer_use::PowerShellBridgeShim`]).
+/// (`computer_use::PowerShellBridgeShim`).
 #[must_use]
 pub fn shim_script(port_var: &str, hook_token_var: &str) -> String {
+    door(port_var, hook_token_var).render_posix()
+}
+
+/// The same door for a shell that cannot read a shebang.
+#[must_use]
+pub fn shim_script_powershell(port_var: &str, hook_token_var: &str) -> String {
+    door(port_var, hook_token_var).render()
+}
+
+fn door<'a>(
+    port_var: &'a str,
+    hook_token_var: &'a str,
+) -> crate::computer_use::PowerShellBridgeShim<'a> {
     crate::computer_use::PowerShellBridgeShim {
         command: SHIM,
         manual: USAGE,
@@ -95,7 +141,6 @@ pub fn shim_script(port_var: &str, hook_token_var: &str) -> String {
         cwd_flag: Some(CWD_FLAG),
         pane_flag: Some(PANE_FLAG),
     }
-    .render_posix()
 }
 
 #[cfg(test)]
