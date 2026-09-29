@@ -307,6 +307,40 @@ struct AliasRow {
     refusal_routes: BTreeMap<String, AliasList>,
 }
 
+impl AliasRow {
+    /// Take `later`'s value for every duty this row leaves empty. `later` is a
+    /// row of the same `(provider, alias)` further down the document, the
+    /// shipped row last, so the first row to state a duty keeps it. Alias,
+    /// canonical and provider stay this row's — that is how a published row
+    /// moves an alias — while the duties belong to the lineup the name heads,
+    /// which a new release does not change: a discovered row that says only
+    /// where `opus` points now keeps the shipped `opus` row's lighter tier and
+    /// refusal routes (t-16493).
+    fn fill_from(&mut self, later: Self) {
+        if self.orchestration_rank.is_none() {
+            self.orchestration_rank = later.orchestration_rank;
+        }
+        if self.demotes_to.as_deref().is_none_or(|to| to.trim().is_empty()) {
+            self.demotes_to = later.demotes_to;
+        }
+        if clone_alias_list(self.refusal_fallback.as_ref()).is_empty() {
+            self.refusal_fallback = later.refusal_fallback;
+        }
+        if !self.states_routes() {
+            self.refusal_routes = later.refusal_routes;
+        }
+    }
+
+    /// Whether a route survives [`leak_refusal_routes`]: a named category with
+    /// at least one candidate. Routes that all read as empty are routes left
+    /// unstated.
+    fn states_routes(&self) -> bool {
+        self.refusal_routes
+            .iter()
+            .any(|(category, list)| !category.trim().is_empty() && !clone_alias_list(Some(list)).is_empty())
+    }
+}
+
 fn provider_kind_from_key(key: &str) -> Option<ProviderKind> {
     match key.trim().to_ascii_lowercase().as_str() {
         "anthropic" | "claude" => Some(ProviderKind::Anthropic),
@@ -1877,15 +1911,6 @@ fn alias_rows_of(raw: &str) -> Vec<AliasRow> {
         .unwrap_or_default()
 }
 
-/// Turn on-disk rows into the `&'static` entries the codebase consumes.
-///
-/// Rows are deduplicated by `(provider, alias)` keeping the FIRST occurrence,
-/// which is what makes an override authoritative: it is concatenated ahead of
-/// the built-ins, so an alias it names shadows the shipped row instead of
-/// colliding with it.
-/// Leak an owned alias list into the `&'static [&'static str]` the catalog
-/// entries hold. Empty in, empty (`&[]`) out — no allocation for the common
-/// row that declares no refusal fallback.
 /// A row's per-category routes as the static pairs an entry carries: the
 /// category word lowercased, each list trimmed, an empty list dropped.
 fn leak_refusal_routes(
@@ -1908,6 +1933,9 @@ fn leak_refusal_routes(
     )
 }
 
+/// Leak an owned alias list into the `&'static [&'static str]` the catalog
+/// entries hold. Empty in, empty (`&[]`) out — no allocation for the common
+/// row that declares no refusal fallback.
 fn leak_alias_list(aliases: &[String]) -> &'static [&'static str] {
     if aliases.is_empty() {
         return &[];
@@ -1919,34 +1947,46 @@ fn leak_alias_list(aliases: &[String]) -> &'static [&'static str] {
     Vec::leak(leaked)
 }
 
+/// Turn on-disk rows into the `&'static` entries the codebase consumes.
+///
+/// Rows are keyed by `(provider, alias)`, and the rows of one key MERGE
+/// ([`AliasRow::fill_from`]) instead of the first shadowing the rest. The
+/// first row keeps its canonical, which is what makes an override
+/// authoritative: it is concatenated ahead of the built-ins, so an alias it
+/// moves resolves where it says. Every duty it leaves empty comes from the
+/// rows of the same key after it, the shipped row last — the key is the name,
+/// never the canonical, because the shipped duties of a moved alias sit on a
+/// row whose canonical is the release it moved away from.
 fn leak_registry(rows: Vec<AliasRow>) -> &'static [ProviderCatalogEntry] {
-    let mut seen: Vec<(ProviderKind, String)> = Vec::new();
-    let mut entries = Vec::with_capacity(rows.len());
+    let mut merged: Vec<(ProviderKind, AliasRow)> = Vec::with_capacity(rows.len());
     for row in rows {
         let Some(provider) = provider_kind_from_key(&row.provider) else {
             continue;
         };
-        let alias = row.alias.trim();
-        let canonical = row.canonical.trim();
-        if alias.is_empty() || canonical.is_empty() {
+        if row.alias.trim().is_empty() || row.canonical.trim().is_empty() {
             continue;
         }
-        let key = (provider, alias.to_ascii_lowercase());
-        if seen.contains(&key) {
-            continue;
+        let same_key = merged.iter().position(|(kept_provider, kept)| {
+            *kept_provider == provider && kept.alias.trim().eq_ignore_ascii_case(row.alias.trim())
+        });
+        match same_key {
+            Some(index) => merged[index].1.fill_from(row),
+            None => merged.push((provider, row)),
         }
-        seen.push(key);
-        entries.push(ProviderCatalogEntry {
-            alias: String::leak(alias.to_string()),
-            canonical_model_id: String::leak(canonical.to_string()),
+    }
+    let entries: Vec<ProviderCatalogEntry> = merged
+        .into_iter()
+        .map(|(provider, row)| ProviderCatalogEntry {
+            alias: String::leak(row.alias.trim().to_string()),
+            canonical_model_id: String::leak(row.canonical.trim().to_string()),
             provider,
             fit_hint: None,
             orchestration_rank: row.orchestration_rank,
             demotes_to: row.demotes_to.map(|to| &*String::leak(to.trim().to_string())),
             refusal_fallback: leak_alias_list(&clone_alias_list(row.refusal_fallback.as_ref())),
             refusal_routes: leak_refusal_routes(&row.refusal_routes),
-        });
-    }
+        })
+        .collect();
     Vec::leak(entries)
 }
 
@@ -1966,7 +2006,10 @@ fn model_registry() -> &'static [ProviderCatalogEntry] {
     registry
 }
 
-/// Layer an override catalog's alias rows ahead of the built-in ones.
+/// Layer an override catalog's alias rows ahead of the built-in ones. A row
+/// naming a shipped alias decides where the alias resolves, and takes every
+/// shipped duty it leaves empty (the lighter tier, the rank, the refusal
+/// fallback and routes) instead of dropping it.
 ///
 /// The live companion to the startup env bridge, mirroring
 /// [`refresh_custom_providers_from_json`]: settings are written, then this is
