@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{LADDER, PROFILES_SETTING, Profile};
+use crate::capabilities::EFFORT_ORDER;
 use crate::jev::SMART_SETTINGS_KEY;
 
 /// How long a model counts as newly arrived after this window first saw it.
@@ -39,8 +40,6 @@ pub const CHALLENGE_MIN_SAMPLES: usize = 5;
 /// The difficulties whose summonses take a challenger's turn: the easy and
 /// the ordinary, where a model that falls short costs a retry, not a design.
 pub const CHALLENGED: [&str; 2] = [LADDER[0].0, LADDER[1].0];
-/// The effort words, lowest first — the order a clamp walks down.
-pub const EFFORT_SCALE: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 
 /// Where a model stands within its provider, as zo's tier classifier
 /// (`runtime::model_router::tiering`) put it on the `zo models --json` row.
@@ -138,7 +137,7 @@ impl LiveModel {
             .iter()
             .filter_map(|effort| {
                 Some((
-                    EFFORT_SCALE.iter().position(|known| known == effort)?,
+                    EFFORT_ORDER.iter().position(|known| known == effort)?,
                     effort,
                 ))
             })
@@ -182,7 +181,7 @@ impl LiveModel {
         if accepted.iter().any(|effort| effort == wanted) {
             return None;
         }
-        let rank = |effort: &str| EFFORT_SCALE.iter().position(|known| *known == effort);
+        let rank = |effort: &str| EFFORT_ORDER.iter().position(|known| *known == effort);
         let wanted_rank = rank(wanted)?;
         let mut known: Vec<(usize, &String)> = accepted
             .iter()
