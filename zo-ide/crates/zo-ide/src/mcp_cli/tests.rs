@@ -661,3 +661,70 @@ fn a_trust_record_the_gate_cannot_believe_is_written_and_reported_as_still_gated
         .servers()
         .contains_key("repo"));
 }
+
+/// Consent was given to the server a project `remove` takes away. Left in the
+/// record, the name would run whatever is added under it next without asking —
+/// so the name leaves with the server, and the names beside it stay.
+#[test]
+fn a_project_remove_takes_the_name_out_of_the_trust_record_and_a_later_add_is_gated_again() {
+    let scratch = Scratch::new();
+    for name in ["repo", "kept"] {
+        scratch
+            .run(&["add", name, "--project", "--trust", "--", "npx"])
+            .expect("add trusted");
+    }
+
+    let report = scratch.json(&["remove", "repo", "--project", "--json"]);
+    assert_eq!(report["edit"], "removed");
+    assert_eq!(report["trustEdit"], "removed");
+    assert_eq!(
+        report["trustPath"],
+        json!(scratch.trust_record().display().to_string())
+    );
+    let record: Value = serde_json::from_str(
+        &std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
+    )
+    .expect("the record is JSON");
+    assert_eq!(record, json!(["kept"]));
+
+    // The defect itself: the same name, added again without `--trust`, is not
+    // run on the consent given to the server that was removed.
+    let again = scratch.json(&["add", "repo", "--project", "--json", "--", "uvx", "other"]);
+    assert_eq!(again["gated"], json!(true));
+    let config = scratch.loader().load().expect("load");
+    assert!(!config.mcp().servers().contains_key("repo"));
+    assert!(config.mcp().servers().contains_key("kept"));
+}
+
+/// A name the record never held leaves the person's bytes alone, no record is
+/// made where none stood, and a user-scope `remove` has no record of its own —
+/// the project's is not its to edit.
+#[test]
+fn a_remove_leaves_the_trust_record_alone_when_the_name_was_never_trusted_there() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&["add", "plain", "--project", "--", "npx"])
+        .expect("add project");
+    let printed = scratch
+        .run(&["remove", "plain", "--project"])
+        .expect("remove project");
+    assert!(!scratch.trust_record().exists(), "{printed}");
+    assert!(!printed.contains("trust"), "{printed}");
+
+    std::fs::write(scratch.trust_record(), "[\"someone-elses\", \"user\"]\n")
+        .expect("seed trust record");
+    scratch
+        .run(&["add", "plain", "--project", "--", "npx"])
+        .expect("add project");
+    let report = scratch.json(&["remove", "plain", "--project", "--json"]);
+    assert_eq!(report["trustEdit"], "absent");
+
+    scratch.run(&["add", "user", "--", "npx"]).expect("add user");
+    let report = scratch.json(&["remove", "user", "--json"]);
+    assert_eq!(report["edit"], "removed");
+    assert_eq!(report["trustEdit"], Value::Null);
+    assert_eq!(
+        std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
+        "[\"someone-elses\", \"user\"]\n"
+    );
+}

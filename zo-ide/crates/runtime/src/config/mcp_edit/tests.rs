@@ -409,3 +409,82 @@ fn the_trust_record_is_owner_only() {
         .mode();
     assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
 }
+
+/// Consent was given to one server. When that server goes, its name goes with
+/// it — and only its name: the others stay in the person's order, and the
+/// record stays owner-only.
+#[test]
+fn untrusting_takes_out_exactly_that_name_and_keeps_the_rest_owner_only() {
+    let dir = tempfile::tempdir().expect("temporary project dir");
+    let record = dir
+        .path()
+        .join(".zo")
+        .join(mcp_keys::TRUSTED_SERVERS_FILE);
+    for name in ["first", "gone", "last"] {
+        trust_mcp_server(&record, name).expect("trust");
+    }
+
+    assert_eq!(
+        untrust_mcp_server(&record, "gone").expect("untrust"),
+        McpEdit::Removed
+    );
+
+    let names = parse_trusted_mcp_server_names(
+        &record,
+        &std::fs::read_to_string(&record).expect("trust record"),
+    )
+    .expect("parse");
+    assert_eq!(names, ["first", "last"]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&record)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+    }
+}
+
+/// A name that was never trusted leaves the person's bytes as they wrote them,
+/// and where there is no record there is nothing to take a name out of — so no
+/// record, and no `.zo`, appears.
+#[test]
+fn untrusting_a_name_never_trusted_writes_nothing_and_creates_no_record() {
+    let dir = tempfile::tempdir().expect("temporary project dir");
+    let zo = dir.path().join(".zo");
+    let record = zo.join(mcp_keys::TRUSTED_SERVERS_FILE);
+    assert_eq!(
+        untrust_mcp_server(&record, "ghost").expect("untrust"),
+        McpEdit::Absent
+    );
+    assert!(!zo.exists(), "untrusting created {}", zo.display());
+
+    std::fs::create_dir_all(&zo).expect("project config dir");
+    let handwritten = "[ \"kept\" ]\n";
+    std::fs::write(&record, handwritten).expect("a person writes the record");
+    assert_eq!(
+        untrust_mcp_server(&record, "ghost").expect("untrust"),
+        McpEdit::Absent
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("trust record"),
+        handwritten
+    );
+}
+
+/// The same grammar as `trust`: a record that is not an array of names is
+/// refused, not rewritten.
+#[test]
+fn untrusting_from_a_record_that_is_not_an_array_of_names_is_refused_before_anything_is_written() {
+    let dir = tempfile::tempdir().expect("temporary project dir");
+    let record = dir.path().join(mcp_keys::TRUSTED_SERVERS_FILE);
+    let seeded = r#"{"name":"name"}"#;
+    std::fs::write(&record, seeded).expect("seed record");
+    let error = untrust_mcp_server(&record, "name").expect_err("refusal");
+    assert!(error.to_string().contains("JSON array"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("trust record"),
+        seeded
+    );
+}
