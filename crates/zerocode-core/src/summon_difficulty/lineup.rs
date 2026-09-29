@@ -1033,6 +1033,25 @@ mod tests {
         assert!(row(&rows, HIGH).effort_clamped.is_some());
     }
 
+    /// An effort below `low` is ranked like every other: a model that
+    /// accepts it is brought down to it, never launched at an effort it does
+    /// not accept.
+    #[test]
+    fn an_effort_below_low_is_ranked_like_every_other() {
+        let mut two = m("model-a", "second", &["hard"]);
+        two.efforts = Some(&["minimal", "low"]);
+        assert_eq!(two.into_live().effort_for("medium"), "low");
+        let mut one = m("model-b", "second", &["hard"]);
+        one.efforts = Some(&["minimal"]);
+        let one = one.into_live();
+        assert_eq!(
+            one.effort_for("low"),
+            "minimal",
+            "the one effort it accepts"
+        );
+        assert_eq!(one.highest_effort(), Some("minimal"));
+    }
+
     /// The measurement a person reads (t-14437 criterion 8): today's rows
     /// of every agent that takes a model at a difficulty, read against a
     /// `zo models --json` answer this machine gave — named, never fetched

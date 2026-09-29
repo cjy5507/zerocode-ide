@@ -112,9 +112,27 @@ fn only_a_seat_that_applies_asks_on_the_launchs_path_and_abstain_never_acts() {
     }
 }
 
-/// A launcher whose summons reads a synthetic lineup, answers every
-/// difficulty `low`, and whose model seat only records.
-struct Lined;
+/// A launcher whose summons reads a synthetic lineup and answers every
+/// difficulty `low`. Its model seat only records, or acts — and then counts
+/// how often the launch's own path asked it.
+#[derive(Default)]
+struct Lined {
+    acts: bool,
+    asked_on_the_path: std::sync::atomic::AtomicUsize,
+}
+impl Lined {
+    fn acting() -> Self {
+        Self {
+            acts: true,
+            ..Self::default()
+        }
+    }
+
+    fn asked_on_the_path(&self) -> usize {
+        self.asked_on_the_path
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 impl zerocode_core::orchestration::Launcher for Lined {
     fn command_for(&self, _: &str, _: &str, _: &[String]) -> Result<String, String> {
         Ok("claude".into())
@@ -144,29 +162,38 @@ impl zerocode_core::orchestration::Launcher for Lined {
             records: Default::default(),
         })
     }
+    fn choose_model(&self, _: &ModelAsk, _: [&str; 3]) -> Option<Value> {
+        if !self.acts {
+            return None;
+        }
+        self.asked_on_the_path
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(json!({
+            "outcome": "answered", "chosen": "model-b", model::EFFORT_KEY: LADDER[0].2,
+            "confidence": 0.85, "applied": true,
+        }))
+    }
 }
 
-/// The first claude summons of a ledger is a challenger's turn at easy
-/// work: it launches a model with no record, and its row — asked after the
-/// pane opened — says so and grades no answer.
-#[test]
-fn a_challengers_turn_is_recorded_off_the_beat_and_marked() {
+/// A run with one claude summons after another under `launcher`: each
+/// summons's reply and what it prepared.
+fn summoned(
+    launcher: &Lined,
+    summonses: usize,
+) -> Vec<(Value, zerocode_core::orchestration::PreparedWorkerStart)> {
     let mut ledger = zerocode_core::orchestration::Ledger::new();
     let mut team = zerocode_core::agent_teams::Team::new("team-test", "test-token", 1);
-    let mut prepared = None;
-    let mut reply = Value::Null;
-    for (at, command) in [
-        (1, "run-create --name model --retry-request create"),
-        (
-            2,
-            "worker-start --agent claude --prompt translate --retry-request start",
-        ),
-    ] {
+    let mut commands = vec!["run-create --name model --retry-request create".to_string()];
+    commands.extend((0..summonses).map(|nth| {
+        format!("worker-start --agent claude --prompt translate --retry-request start-{nth}")
+    }));
+    let mut summoned = Vec::new();
+    for (at, command) in (1..).zip(commands) {
         let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
         let planned = zerocode_core::orchestration::plan(
             &mut ledger,
             &mut team,
-            &Lined,
+            launcher,
             &argv,
             "%1",
             at,
@@ -174,17 +201,27 @@ fn a_challengers_turn_is_recorded_off_the_beat_and_marked() {
         );
         assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
         ledger.file_receipt(&planned, at);
-        if planned.prepared_worker_start.is_some() {
-            reply = serde_json::from_str(&planned.reply.stdout).unwrap();
-            prepared = planned.prepared_worker_start;
+        if let Some(prepared) = planned.prepared_worker_start {
+            summoned.push((
+                serde_json::from_str(&planned.reply.stdout).unwrap(),
+                prepared,
+            ));
         }
     }
+    summoned
+}
+
+/// The first claude summons of a ledger is a challenger's turn at easy
+/// work: it launches a model with no record, and its row — asked after the
+/// pane opened — says so and grades no answer.
+#[test]
+fn a_challengers_turn_is_recorded_off_the_beat_and_marked() {
+    let (reply, prepared) = summoned(&Lined::default(), 1).remove(0);
     assert_eq!(reply["dials"]["modelFrom"], "challenge", "{reply}");
     assert_eq!(
         reply["model"], "model-c",
         "the low difficulty's untried model"
     );
-    let prepared = prepared.unwrap();
     let home = tempfile::tempdir().unwrap();
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(&pair("model-b")), 0);
     let host =
@@ -212,5 +249,32 @@ fn a_challengers_turn_is_recorded_off_the_beat_and_marked() {
     assert!(
         row.get("state").is_none() && row.get("spec").is_none(),
         "task words never enter this ledger"
+    );
+}
+
+/// A summons never waits on an answer nothing will act on: on a challenger's
+/// turn an acting seat is not asked on the launch's own path — its question
+/// is kept for the record, asked after the pane opens — and on every other
+/// turn it is asked once and its pair runs.
+#[test]
+fn a_challengers_turn_does_not_wait_on_the_acting_seat() {
+    let launcher = Lined::acting();
+    let mut summoned = summoned(&launcher, 2);
+    let (other, _) = summoned.remove(1);
+    let (challenge, prepared) = summoned.remove(0);
+    assert_eq!(challenge["dials"]["modelFrom"], "challenge", "{challenge}");
+    assert_eq!(challenge["model"], "model-c");
+    let shadow = prepared.model_shadow.expect("the question is kept");
+    assert!(shadow.challenge);
+    assert_eq!(
+        shadow.receipt, None,
+        "nothing was asked on the launch's path"
+    );
+    assert_eq!(other["dials"]["modelFrom"], "jev", "{other}");
+    assert_eq!(other["model"], "model-b");
+    assert_eq!(
+        launcher.asked_on_the_path(),
+        1,
+        "only the summons that acts on the answer waited for it"
     );
 }
