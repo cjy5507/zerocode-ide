@@ -1730,6 +1730,11 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.code === "Space" && !(event.target instanceof Element &&
       event.target.closest("input, textarea, [contenteditable='true']"))) {
+    // The hand tool is the Space of the graph's own view. A line, a button or
+    // a keyboard owner on another surface — a step's line on a conversation
+    // page in the next leaf — keeps the Space that is its own.
+    if (event.target instanceof Element && !view.contains(event.target) &&
+        event.target.closest("summary, button, [role='button'], [data-keyboard-owner]")) return;
     agentGraphSpaceHeld = true;
     event.preventDefault();
     return;

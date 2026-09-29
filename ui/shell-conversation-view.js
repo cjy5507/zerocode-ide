@@ -361,6 +361,10 @@ function revealStatusVerb(word, to, width) {
 const CHAT_FOLLOW = Object.freeze({ slack: 50, intent: 300, glide: 2000 });
 const CHAT_FOLLOW_KEYS = Object.freeze({ up: new Set(["ArrowUp", "PageUp", "Home"]), down: new Set(["ArrowDown", "PageDown", "End"]) });
 const CHAT_FOLLOW_CONTROL = "button, [role=\"button\"], input, textarea, [contenteditable]:not([contenteditable=\"false\"])";
+// Where this page parts from the panel's rule: its step rows are `details`, not
+// buttons, and a step's line (a `summary`) answers a Space by opening the row —
+// that is no wish to go towards the foot, nor to leave it.
+const CHAT_FOLLOW_SPACE = `${CHAT_FOLLOW_CONTROL}, summary`;
 
 /* Whether the page is asked for less motion. */
 function motionReduced() {
@@ -588,7 +592,7 @@ function keepToFoot(list) {
   list.addEventListener("keydown", (event) => {
     if (event.defaultPrevented) return;
     if (event.key === " ") {
-      if (event.target instanceof Element && event.target.closest(CHAT_FOLLOW_CONTROL)) return;
+      if (event.target instanceof Element && event.target.closest(CHAT_FOLLOW_SPACE)) return;
       if (event.shiftKey) leave();
       else toward();
     } else if (CHAT_FOLLOW_KEYS.up.has(event.key)) leave();
