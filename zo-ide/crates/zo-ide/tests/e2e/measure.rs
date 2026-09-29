@@ -138,7 +138,10 @@ const HSTOP_MAIN_WORK_SECS: u64 = 10;
 const HSTOP_BETA_STEP_SECS: u64 = 2;
 /// Seconds of the first helper's long step — never waited for: the stop kills
 /// it, and a run where the stop failed fails on the assertion, not on this.
-const HSTOP_ALPHA_STEP_SECS: u64 = 120;
+/// Under the minute a poll is put in the background at
+/// (`bash_redirect::WAIT_SLEEP_SECS`): a longer step would come back at once as
+/// a background task, and the helper would finish before anyone could stop it.
+const HSTOP_ALPHA_STEP_SECS: u64 = 45;
 const HSTOP_ALPHA_SPAWN_ID: &str = "toolu_hstop_alpha";
 const HSTOP_BETA_SPAWN_ID: &str = "toolu_hstop_beta";
 const HSTOP_MAIN_STEP_ID: &str = "toolu_hstop_main";
