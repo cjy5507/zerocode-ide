@@ -12,7 +12,7 @@ use zerocode_core::jev::SUMMON_MODEL;
 use zerocode_core::orchestration::PreparedWorkerStart;
 use zerocode_core::summon_model::{self as model, ModelAsk};
 
-fn ask(wire: &Wire, asked: &ModelAsk, checkout: Option<&Path>) -> Value {
+pub(super) fn ask(wire: &Wire, asked: &ModelAsk, checkout: Option<&Path>) -> Value {
     // The task's own attempt history, as the difficulty seat's rows carry
     // it: what the judge reads to count one sample per task.
     let mut row = json!({
@@ -70,11 +70,7 @@ fn ask(wire: &Wire, asked: &ModelAsk, checkout: Option<&Path>) -> Value {
 /// launch's own path only while the seat applies; a seat that only records
 /// asks after the pane opens ([`record`]), so a summons never waits on an
 /// answer nothing will act on.
-pub(super) fn choose(asked: &ModelAsk, origin: [&str; 3]) -> Option<Value> {
-    choose_with(&Wire::of_this_machine(), asked, origin)
-}
-
-fn choose_with(wire: &Wire, asked: &ModelAsk, origin: [&str; 3]) -> Option<Value> {
+pub(super) fn choose_with(wire: &Wire, asked: &ModelAsk, origin: [&str; 3]) -> Option<Value> {
     if !crate::systemone::applies(wire, &SUMMON_MODEL) {
         return None;
     }

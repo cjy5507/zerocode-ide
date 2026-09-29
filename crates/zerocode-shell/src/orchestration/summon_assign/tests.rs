@@ -1,0 +1,419 @@
+use super::*;
+use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
+use serde_json::{Map, Value, json};
+use std::time::{Duration, Instant};
+use zerocode_core::jev::{SUMMON_DIFFICULTY, SUMMON_MODEL};
+use zerocode_core::summon_assign::SHARED_REQUEST_KEY;
+use zerocode_core::summon_difficulty::lineup::{self, Lineup, Seen};
+use zerocode_core::summon_difficulty::{self as difficulty, APPLY_DEADLINE_MS, LADDER, Look};
+use zerocode_core::summon_model::{self as model, ModelAsk, ModelRecord};
+
+const SPEC: &str = "Translate the settings labels into five languages";
+
+fn look() -> Look {
+    Look {
+        title: "Translate labels".into(),
+        spec: SPEC.into(),
+        attempt: 0,
+        failures: 0,
+        retry_of: false,
+    }
+}
+
+/// Three models that name no efforts, as every live model on the machine
+/// this was written on does.
+fn lineup() -> Lineup {
+    Lineup::from_catalog(
+        &json!({"models": [
+            {"provider": "claude", "id": "model-a", "builtin": true, "band": "second", "rungs": ["hard"]},
+            {"provider": "claude", "id": "model-b", "builtin": false, "band": "rest", "rungs": ["easy", "medium"]},
+            {"provider": "claude", "id": "model-c", "builtin": false, "band": "rest", "rungs": []},
+        ]}),
+        "claude",
+    )
+    .unwrap()
+}
+
+/// Every model with a record: no summons is a challenger's turn.
+fn records() -> std::collections::BTreeMap<String, ModelRecord> {
+    ["model-a", "model-b", "model-c"]
+        .into_iter()
+        .map(|id| {
+            (
+                id.to_string(),
+                ModelRecord {
+                    ended: lineup::CHALLENGE_MIN_SAMPLES,
+                    ..ModelRecord::default()
+                },
+            )
+        })
+        .collect()
+}
+
+fn model_ask() -> ModelAsk {
+    let options = model::options(
+        "claude",
+        &lineup(),
+        None,
+        &records(),
+        &[LADDER[0].2],
+        |_| None,
+        0,
+    );
+    model::ask(&look(), &options).unwrap()
+}
+
+fn both() -> AssignAsk {
+    AssignAsk {
+        difficulty: Some(look()),
+        model: Some(model_ask()),
+    }
+}
+
+/// Settings with the difficulty seat at `difficulty` and the model seat at
+/// `model`, every folder consented.
+fn wire(home: &tempfile::TempDir, endpoint: &Endpoint, difficulty: &str, model: &str) -> Wire {
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {
+            SUMMON_DIFFICULTY.setting: difficulty,
+            SUMMON_MODEL.setting: model,
+            "jev": {"workspaces": ["*"]},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    Wire::at(&endpoint.base(), "test-key", Some(settings))
+}
+
+/// Jev as a loopback endpoint: every question the request carries answered —
+/// the difficulty `low`, the model `model-b` at the first effort offered for
+/// it — so one body serves a request of one question or of two.
+fn answer_every(request: &str) -> String {
+    let body: Value = request
+        .split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str(body).ok())
+        .unwrap_or_default();
+    let mut answers = Map::new();
+    for (question, asked) in body["questions"].as_object().into_iter().flatten() {
+        let words: Vec<&String> = asked["criteria"]
+            .as_object()
+            .map(|criteria| criteria.keys().collect())
+            .unwrap_or_default();
+        let Some(chosen) = words
+            .iter()
+            .find(|word| {
+                word.as_str() == LADDER[0].0
+                    || word.starts_with(&format!("model-b{}", model::PAIR_SEP))
+            })
+            .or(words.first())
+        else {
+            continue;
+        };
+        let rest = 0.1 / f64::from(u32::try_from(words.len() - 1).unwrap_or(1).max(1));
+        let probabilities: Map<String, Value> = words
+            .iter()
+            .map(|word| {
+                (
+                    (*word).clone(),
+                    json!(if word == chosen { 0.9 } else { rest }),
+                )
+            })
+            .collect();
+        answers.insert(
+            question.clone(),
+            json!({"type": "choice", "choice": chosen, "probabilities": probabilities, "confidence": 0.9}),
+        );
+    }
+    json!({"model": ANSWERING_VERSION, "answers": answers}).to_string()
+}
+
+/// How many requests the door counted today under `home`.
+fn counted_today(home: &tempfile::TempDir) -> u64 {
+    zerocode_core::jev::count::sent(&zerocode_core::jev::count::requests_path(
+        home.path(),
+        &crate::systemone::today(),
+    ))
+}
+
+/// A1, A2: two acting seats, one request — the state's words sent once, each
+/// seat's row in its own shape and rubric, both naming the request, and the
+/// day counting one.
+#[test]
+fn two_acting_seats_ride_one_request() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, 0);
+    let wire = wire(&home, &endpoint, "on", "on");
+    let key = ["assign-team", "%1", "both-on"];
+    let _origin = super::super::summon_difficulty::origin_with_for_tests(
+        key,
+        Some(home.path().to_path_buf()),
+        true,
+        wire.settings_root(),
+    );
+    let receipts = choose_with(&wire, &both(), key);
+    let heard = endpoint.asked();
+    assert_eq!(heard.len(), 1, "one request where there were two");
+    assert_eq!(heard[0].matches(SPEC).count(), 1, "the spec is sent once");
+    assert_eq!(counted_today(&home), 1, "the day counts one request");
+    let difficulty_row = receipts.difficulty.expect("the difficulty's row");
+    let model_row = receipts.model.expect("the model's row");
+    assert_eq!(difficulty_row["rubricVersion"], difficulty::RUBRIC_VERSION);
+    assert_eq!(model_row["rubricVersion"], model::RUBRIC_VERSION);
+    assert_eq!(difficulty_row["chosen"], LADDER[0].0);
+    assert_eq!(difficulty_row["applied"], true, "{difficulty_row}");
+    assert_eq!(model_row["chosen"], "model-b");
+    assert_eq!(model_row["applied"], true, "{model_row}");
+    let shared = &difficulty_row[SHARED_REQUEST_KEY];
+    assert!(shared.is_string(), "{difficulty_row}");
+    assert_eq!(&model_row[SHARED_REQUEST_KEY], shared);
+    assert_eq!(
+        (&difficulty_row["requests"], &model_row["requests"]),
+        (&json!(1), &json!(0)),
+        "the request is counted on one row"
+    );
+}
+
+/// The mixed case of the day the release lands (the coordinator, 23:07): the
+/// difficulty seat acts, the model seat only records — both ride the path's
+/// one request, and the recording seat's answer is written down, never run.
+#[test]
+fn a_recording_seat_rides_the_acting_seats_request() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, 0);
+    let wire = wire(&home, &endpoint, "on", "shadow");
+    let key = ["assign-team", "%1", "mixed"];
+    let _origin = super::super::summon_difficulty::origin_with_for_tests(
+        key,
+        Some(home.path().to_path_buf()),
+        true,
+        wire.settings_root(),
+    );
+    let receipts = choose_with(&wire, &both(), key);
+    assert_eq!(endpoint.asked().len(), 1);
+    assert_eq!(
+        receipts.difficulty.map(|row| row["applied"].clone()),
+        Some(json!(true))
+    );
+    let model_row = receipts.model.expect("the recording seat's row rode along");
+    assert_eq!(model_row["chosen"], "model-b");
+    assert_eq!(model_row["applied"], false, "{model_row}");
+}
+
+/// A4: a late answer leaves both rows unapplied, after one wall.
+#[test]
+fn a_late_answer_costs_one_wall_and_applies_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint =
+        Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, APPLY_DEADLINE_MS + 500);
+    let wire = wire(&home, &endpoint, "on", "on");
+    let key = ["assign-team", "%1", "late"];
+    let _origin = super::super::summon_difficulty::origin_with_for_tests(
+        key,
+        Some(home.path().to_path_buf()),
+        true,
+        wire.settings_root(),
+    );
+    let began = Instant::now();
+    let receipts = choose_with(&wire, &both(), key);
+    assert!(
+        began.elapsed() < Duration::from_millis(APPLY_DEADLINE_MS + 400),
+        "one wall, never two: {:?}",
+        began.elapsed()
+    );
+    for row in [receipts.difficulty, receipts.model] {
+        let row = row.expect("each seat's row");
+        assert_eq!(row["applied"], false, "{row}");
+        assert!(row.get("chosen").is_none(), "{row}");
+    }
+}
+
+/// A launcher whose seats are this window's own, on a test's wire, over the
+/// synthetic lineup.
+struct Wired<'a> {
+    wire: &'a Wire,
+}
+impl zerocode_core::orchestration::Launcher for Wired<'_> {
+    fn command_for(&self, _: &str, _: &str, _: &[String]) -> Result<String, String> {
+        Ok("claude".into())
+    }
+    fn choose_assign(&self, asked: &AssignAsk, origin: [&str; 3]) -> Receipts {
+        choose_with(self.wire, asked, origin)
+    }
+    fn difficulty_profile(
+        &self,
+        agent: &str,
+        level: &str,
+        _: [&str; 3],
+    ) -> Result<Option<lineup::Row>, String> {
+        lineup::row_at(&Value::Null, agent, level, Some(&lineup()), None, 0)
+    }
+    fn model_facts(&self, _: &str, _: [&str; 3]) -> Option<model::Facts> {
+        Some(model::Facts {
+            lineup: lineup(),
+            seen: Seen::default(),
+            records: records(),
+        })
+    }
+}
+
+/// One claude summons with every dial open, planned on `wire`'s seats from a
+/// checkout at `checkout`: the reply and what it prepared.
+fn summoned(
+    wire: &Wire,
+    checkout: &Path,
+    request: &str,
+) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
+    let mut ledger = zerocode_core::orchestration::Ledger::new();
+    let mut team = zerocode_core::agent_teams::Team::new("team-assign", "test-token", 1);
+    let _origin = super::super::summon_difficulty::origin_with_for_tests(
+        [team.id.as_str(), "%1", request],
+        Some(checkout.to_path_buf()),
+        true,
+        wire.settings_root(),
+    );
+    let launcher = Wired { wire };
+    let mut summoned = None;
+    for (at, command) in [
+        (
+            1,
+            "run-create --name assign --retry-request create".to_string(),
+        ),
+        (
+            2,
+            format!("worker-start --agent claude --prompt {SPEC_WORD} --retry-request {request}"),
+        ),
+    ] {
+        let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+        let planned = zerocode_core::orchestration::plan(
+            &mut ledger,
+            &mut team,
+            &launcher,
+            &argv,
+            "%1",
+            at,
+            Some("test-actor"),
+        );
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        ledger.file_receipt(&planned, at);
+        if let Some(prepared) = planned.prepared_worker_start {
+            summoned = Some((
+                serde_json::from_str(&planned.reply.stdout).unwrap(),
+                prepared,
+            ));
+        }
+    }
+    summoned.expect("a worker was reserved")
+}
+
+/// The summons's words, one word so the command line keeps it whole.
+const SPEC_WORD: &str = "translate-labels";
+
+/// A1, A4: a summons whose two seats act waits on one request and launches
+/// the pair it answered; recording afterwards asks nothing more.
+#[test]
+fn a_summons_with_two_acting_seats_waits_on_one_request() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, 0);
+    let wire = wire(&home, &endpoint, "on", "on");
+    let (reply, prepared) = summoned(&wire, home.path(), "both-acting");
+    assert_eq!(endpoint.asked().len(), 1, "one request on the path");
+    assert_eq!(reply["model"], "model-b", "{reply}");
+    assert_eq!(reply["dials"]["modelFrom"], "jev", "{reply}");
+    let host = super::super::summon_difficulty::tests::Deferred::on(&wire);
+    record(&host, &prepared, home.path().to_str(), 3);
+    host.drain();
+    assert_eq!(endpoint.asked().len(), 1, "receipts are not asked twice");
+    assert_shared_rows(&wire, true);
+}
+
+/// A5: two seats that only record are asked after the pane opens — one
+/// request for both, each row in its own ledger, neither applied.
+#[test]
+fn two_recording_seats_share_one_request_after_the_pane_opens() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, 0);
+    let wire = wire(&home, &endpoint, "shadow", "shadow");
+    let (_, prepared) = summoned(&wire, home.path(), "both-recording");
+    assert!(endpoint.asked().is_empty(), "nothing waits on the path");
+    let host = super::super::summon_difficulty::tests::Deferred::on(&wire);
+    record(&host, &prepared, home.path().to_str(), 3);
+    assert!(
+        endpoint.asked().is_empty(),
+        "recording returns before a socket opens"
+    );
+    host.drain();
+    assert_eq!(endpoint.asked().len(), 1, "one request for both");
+    assert_shared_rows(&wire, false);
+}
+
+/// Each seat's ledger holds one row of its own rubric, `applied` as said,
+/// and both name one shared request.
+fn assert_shared_rows(wire: &Wire, applied: bool) {
+    let rows =
+        |seat| crate::systemone::read_rows(&crate::systemone::ledger_of(wire, seat).unwrap());
+    let (difficulty_rows, model_rows) = (rows(&SUMMON_DIFFICULTY), rows(&SUMMON_MODEL));
+    assert_eq!((difficulty_rows.len(), model_rows.len()), (1, 1));
+    let (difficulty_row, model_row) = (&difficulty_rows[0], &model_rows[0]);
+    assert_eq!(difficulty_row["rubricVersion"], difficulty::RUBRIC_VERSION);
+    assert_eq!(model_row["rubricVersion"], model::RUBRIC_VERSION);
+    assert_eq!(difficulty_row["applied"], applied, "{difficulty_row}");
+    assert_eq!(model_row["applied"], applied, "{model_row}");
+    assert!(
+        difficulty_row[SHARED_REQUEST_KEY].is_string(),
+        "{difficulty_row}"
+    );
+    assert_eq!(
+        model_row[SHARED_REQUEST_KEY],
+        difficulty_row[SHARED_REQUEST_KEY]
+    );
+    for row in [difficulty_row, model_row] {
+        assert!(
+            row.get("state").is_none() && row.get("spec").is_none(),
+            "task words never enter a ledger"
+        );
+    }
+}
+
+/// A6: what a summons waits for Jev and sends, before and after, against a
+/// loopback endpoint that answers in a fixed 250 ms. Prints one JSON line;
+/// run by hand (`-- --ignored --nocapture assign_moment_numbers`).
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn assign_moment_numbers() {
+    const SAMPLES: usize = 30;
+    const HOLD_MS: u64 = 250;
+    let mut waits = Vec::new();
+    let mut requests = 0;
+    let mut bytes = 0;
+    for nth in 0..SAMPLES {
+        let home = tempfile::tempdir().unwrap();
+        let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, HOLD_MS);
+        let wire = wire(&home, &endpoint, "on", "on");
+        let began = Instant::now();
+        let _ = summoned(&wire, home.path(), &format!("measure-{nth}"));
+        waits.push(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
+        let heard = endpoint.asked();
+        requests += heard.len();
+        bytes += heard
+            .iter()
+            .map(|request| {
+                request
+                    .split_once("\r\n\r\n")
+                    .map_or(0, |(_, body)| body.len())
+            })
+            .sum::<usize>();
+    }
+    waits.sort_unstable();
+    let at = |share: f64| zerocode_core::jev::summary::percentile(&waits, share);
+    println!(
+        "{}",
+        json!({
+            "samples": SAMPLES, "holdMs": HOLD_MS,
+            "requestsPerSummons": requests as f64 / SAMPLES as f64,
+            "requestBytesPerSummons": bytes / SAMPLES,
+            "waitP50Ms": at(0.50), "waitP95Ms": at(0.95),
+        })
+    );
+}

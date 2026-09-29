@@ -31,7 +31,7 @@ fn asked() -> ModelAsk {
         &lineup(),
         None,
         &Default::default(),
-        LADDER[0].2,
+        &[LADDER[0].2],
         |_| None,
         0,
     );
@@ -137,9 +137,6 @@ impl zerocode_core::orchestration::Launcher for Lined {
     fn command_for(&self, _: &str, _: &str, _: &[String]) -> Result<String, String> {
         Ok("claude".into())
     }
-    fn choose_difficulty(&self, _: &Look, _: [&str; 3]) -> Option<Value> {
-        Some(json!({"chosen": LADDER[0].0, "applied": true}))
-    }
     fn difficulty_profile(
         &self,
         agent: &str,
@@ -162,16 +159,26 @@ impl zerocode_core::orchestration::Launcher for Lined {
             records: Default::default(),
         })
     }
-    fn choose_model(&self, _: &ModelAsk, _: [&str; 3]) -> Option<Value> {
-        if !self.acts {
-            return None;
+    fn choose_assign(
+        &self,
+        asked: &zerocode_core::summon_assign::AssignAsk,
+        _: [&str; 3],
+    ) -> zerocode_core::summon_assign::Receipts {
+        let model = asked.model.as_ref().filter(|_| self.acts).map(|_| {
+            self.asked_on_the_path
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            json!({
+                "outcome": "answered", "chosen": "model-b", model::EFFORT_KEY: LADDER[0].2,
+                "confidence": 0.85, "applied": true,
+            })
+        });
+        zerocode_core::summon_assign::Receipts {
+            difficulty: asked
+                .difficulty
+                .as_ref()
+                .map(|_| json!({"chosen": LADDER[0].0, "applied": true})),
+            model,
         }
-        self.asked_on_the_path
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Some(json!({
-            "outcome": "answered", "chosen": "model-b", model::EFFORT_KEY: LADDER[0].2,
-            "confidence": 0.85, "applied": true,
-        }))
     }
 }
 

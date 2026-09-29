@@ -13857,7 +13857,7 @@ pub trait Launcher {
     /// when nothing came back whole; the summons is then refused by name
     /// rather than landed on a guess. The default is a launcher with no seat.
     ///
-    /// `origin` names the summons the way [`Self::choose_difficulty`]'s does
+    /// `origin` names the summons the way [`Self::choose_assign`]'s does
     /// — the team, the summoning pane and its retry name — so the host asks
     /// under the workspace consent it observed for this very call.
     fn choose_agent(
@@ -13869,14 +13869,17 @@ pub trait Launcher {
         None
     }
 
-    /// An acting difficulty request's receipt, or no request while recording.
-    /// Fresh summonses can fill either omitted dial; sealed handovers decline.
-    fn choose_difficulty(
+    /// The assign moment's request (t-15554): the questions `asked` carries
+    /// — the difficulty, the model and its effort — and each riding seat's
+    /// receipt row, `applied` true only for an answer that is to run. No
+    /// receipt for a seat that asked nothing on the launch's path; fresh
+    /// summonses can fill either omitted dial, sealed handovers decline.
+    fn choose_assign(
         &self,
-        _look: &crate::summon_difficulty::Look,
+        _asked: &crate::summon_assign::AssignAsk,
         _origin: [&str; 3],
-    ) -> Option<serde_json::Value> {
-        None
+    ) -> crate::summon_assign::Receipts {
+        crate::summon_assign::Receipts::default()
     }
 
     /// The launch row for `difficulty` — the person's, else today's lineup's,
@@ -13902,16 +13905,6 @@ pub trait Launcher {
     /// — lineup, book and records — or `None` when the host holds no lineup
     /// or the launch was sealed (t-14437).
     fn model_facts(&self, _agent: &str, _origin: [&str; 3]) -> Option<crate::summon_model::Facts> {
-        None
-    }
-
-    /// Ask the model seat `asked`: the receipt row, `applied` true only when
-    /// its answer is to run. `None` while the seat is off.
-    fn choose_model(
-        &self,
-        _asked: &crate::summon_model::ModelAsk,
-        _origin: [&str; 3],
-    ) -> Option<serde_json::Value> {
         None
     }
 
@@ -19978,7 +19971,15 @@ fn plan_inner(
                 && !difficulty_look.spec.is_empty()
                 && difficulty_effort(&agent, crate::summon_difficulty::LADDER[0].0).is_some()
             {
-                launcher.choose_difficulty(&difficulty_look, summons_origin)
+                launcher
+                    .choose_assign(
+                        &crate::summon_assign::AssignAsk {
+                            difficulty: Some(difficulty_look.clone()),
+                            model: None,
+                        },
+                        summons_origin,
+                    )
+                    .difficulty
             } else {
                 None
             };
@@ -20021,7 +20022,7 @@ fn plan_inner(
                         &facts.lineup,
                         Some(&facts.seen),
                         &facts.records,
-                        ladder,
+                        &[ladder],
                         |offered| {
                             launcher
                                 .provider_headroom(&agent, Some(offered))
@@ -20045,10 +20046,21 @@ fn plan_inner(
                     // A challenger's turn runs whatever the seat would say,
                     // so the launch does not wait for it to say it: the
                     // question is kept, and asked once the pane is open.
-                    let receipt = asked
-                        .as_ref()
-                        .filter(|_| challenge.is_none())
-                        .and_then(|asked| launcher.choose_model(asked, summons_origin));
+                    let receipt =
+                        asked
+                            .as_ref()
+                            .filter(|_| challenge.is_none())
+                            .and_then(|asked| {
+                                launcher
+                                    .choose_assign(
+                                        &crate::summon_assign::AssignAsk {
+                                            difficulty: None,
+                                            model: Some(asked.clone()),
+                                        },
+                                        summons_origin,
+                                    )
+                                    .model
+                            });
                     (asked, receipt, challenge, facts)
                 })
             } else {

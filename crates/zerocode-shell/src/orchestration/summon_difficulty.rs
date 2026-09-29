@@ -9,7 +9,7 @@ use zerocode_core::jev::SUMMON_DIFFICULTY;
 use zerocode_core::orchestration::PreparedWorkerStart;
 use zerocode_core::summon_difficulty::{self as difficulty, Look};
 
-fn ask(wire: &Wire, look: &Look, checkout: Option<&Path>) -> Value {
+pub(super) fn ask(wire: &Wire, look: &Look, checkout: Option<&Path>) -> Value {
     let mut row = json!({
         "rubricVersion": difficulty::RUBRIC_VERSION,
         "attempt": look.attempt,
@@ -258,11 +258,7 @@ fn rows_in(
     .ok()
 }
 
-pub(super) fn choose(look: &Look, origin: [&str; 3]) -> Option<Value> {
-    choose_with(&Wire::of_this_machine(), look, origin)
-}
-
-fn choose_with(wire: &Wire, look: &Look, origin: [&str; 3]) -> Option<Value> {
+pub(super) fn choose_with(wire: &Wire, look: &Look, origin: [&str; 3]) -> Option<Value> {
     if !crate::systemone::applies(wire, &SUMMON_DIFFICULTY) {
         return None;
     }
