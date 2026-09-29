@@ -4378,7 +4378,10 @@ mod tests {
 
         // A page is not a document, and neither is a worker's report; the
         // refusal says what the row is.
-        touch(&project.join("index.html"), "<!doctype html><title>a</title>");
+        touch(
+            &project.join("index.html"),
+            "<!doctype html><title>a</title>",
+        );
         let page = register("index.html", 1_200);
         let refused = store
             .document_text(&page.id, None)
