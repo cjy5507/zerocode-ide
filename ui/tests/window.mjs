@@ -37,6 +37,7 @@ import { testBoardOrbit } from "./board-orbit.mjs";
 import { testAutonomyBoard } from "./autonomy-board.mjs";
 import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
+import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
 import { testStartupProjects } from "./startup-projects.mjs";
 import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
@@ -206,6 +207,8 @@ suite("board-orbit", ({ browser, origin, ok }) => testBoardOrbit(browser, origin
 suite("autonomy-board", ({ browser, origin, ok }) => testAutonomyBoard(browser, origin, ok));
 suite("connected-workbench", ({ browser, origin, ok }) => testConnectedWorkbench(browser, origin, ok));
 suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsive(browser, origin, ok));
+// The title bar's tab strip under sixty tabs at four widths (t-17078).
+suite("tabstrip-overflow", ({ browser, origin, ok }) => testTabstripOverflow(browser, origin, ok));
 suite("startup-projects", ({ browser, origin, ok }) => testStartupProjects(browser, origin, ok));
 suite("workspace-board", ({ browser, origin, ok }) => testWorkspaceBoard(browser, origin, ok));
 suite("flow-console", ({ browser, origin, ok }) => testFlowConsole(browser, origin, ok));
