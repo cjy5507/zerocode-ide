@@ -2007,12 +2007,9 @@ async fn a_5xx_on_the_lighter_tier_too_ends_the_turn_or_changes_provider() {
 /// site, and a spent 5xx ladder must not die there while the streaming turn lives.
 #[test]
 fn sync_run_turn_demotes_a_spent_5xx_ladder() {
-    struct ServerFaultingSyncApi {
-        seen_overrides: Vec<Option<String>>,
-    }
+    struct ServerFaultingSyncApi;
     impl ApiClient for ServerFaultingSyncApi {
         fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-            self.seen_overrides.push(request.model_override.clone());
             if request.model_override.is_none() {
                 return Err(RuntimeError::with_provider_error_class(
                     SPENT_API_ERROR_FRAME,
@@ -2030,9 +2027,7 @@ fn sync_run_turn_demotes_a_spent_5xx_ladder() {
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
-        ServerFaultingSyncApi {
-            seen_overrides: Vec::new(),
-        },
+        ServerFaultingSyncApi,
         StaticToolExecutor::new(),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
         vec!["system".to_string()],
