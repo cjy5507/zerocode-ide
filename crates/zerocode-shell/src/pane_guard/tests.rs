@@ -104,6 +104,8 @@ fn pane(agent: AgentKind, project: &Path) -> Pane {
         agent,
         session: Some("session-1".to_string()),
         worktree: project.to_path_buf(),
+        worker: false,
+        prompt_key: None,
     }
 }
 
@@ -679,6 +681,12 @@ fn write_seats(settings: &Path, project: &Path, asked: &[&JevUse], mode: JevMode
 /// candidates, `src/parser.rs` alone needed — reading the request as the
 /// door sent it — and counts what it was asked.
 fn judging() -> Endpoint {
+    picking(0.93, 0)
+}
+
+/// [`judging`], whose file pick says `any` with `any_yes` and answers after
+/// `hold_ms`.
+fn picking(any_yes: f64, hold_ms: u64) -> Endpoint {
     Endpoint::answering_each(
         "HTTP/1.1 200 OK",
         |request| {
@@ -704,7 +712,7 @@ fn judging() -> Endpoint {
                                     "probabilities": {"supports": 0.9, "contradicts": 0.05, "says_nothing": 0.05},
                                     "confidence": 0.9})
                             } else {
-                                let yes = if id == "any" || Some(id.as_str()) == needed { 0.93 } else { 0.2 };
+                                let yes = if id == "any" { any_yes } else if Some(id.as_str()) == needed { 0.93 } else { 0.2 };
                                 json!({"type": "noul", "noul": yes})
                             };
                             (id.clone(), answer)
@@ -715,7 +723,7 @@ fn judging() -> Endpoint {
             json!({"model": "jev-test", "answers": answers, "usage": {"input_tokens": 300, "output_tokens": 3}})
                 .to_string()
         },
-        0,
+        hold_ms,
     )
 }
 
@@ -1089,6 +1097,186 @@ fn a_panes_search_ranks_files_by_how_many_of_the_words_they_name() {
         assert!(found.iter().any(|path| path == name), "{name} in {found:?}");
     }
     assert!(!found.iter().any(|path| path == "m_silent.rs"), "{found:?}");
+}
+
+/* ---- the turn's brief (t-14869) --------------------------------------------------- */
+
+const BRIEFED: &str = "fix the parser crash on an empty line";
+
+/// A project whose parser the endpoints find needed.
+fn parser_project() -> tempfile::TempDir {
+    let project = tempfile::tempdir().expect("a project");
+    std::fs::create_dir(project.path().join("src")).expect("its sources");
+    std::fs::write(
+        project.path().join("src/parser.rs"),
+        "//! The parser, which turns a line into tokens.\npub fn parse() {}\n",
+    )
+    .expect("a source file");
+    std::fs::write(
+        project.path().join("src/lexer.rs"),
+        "//! Splits a line for the parser.\npub fn lex() {}\n",
+    )
+    .expect("another");
+    project
+}
+
+/// A Claude pane in `project`, summoned as a worker when `worker`, whose
+/// prompt the bridge read as [`BRIEFED`].
+fn briefed_pane(project: &Path, worker: bool) -> Pane {
+    Pane {
+        worker,
+        prompt_key: Some(prompt_key(BRIEFED)),
+        ..pane(AgentKind::Claude, project)
+    }
+}
+
+/// The bridge's ask for the pane's turn, with `wall`.
+fn brief_ask(project: &Path, wall: Duration) -> zerocode_hookd::TurnBriefAsk {
+    zerocode_hookd::TurnBriefAsk {
+        agent: AgentKind::Claude,
+        pane_key: crate::hooks::pane_key_of(7),
+        launch_token: String::new(),
+        worktree: project.to_string_lossy().into_owned(),
+        prompt: BRIEFED.to_string(),
+        wall,
+    }
+}
+
+/// Ask a turn's brief the way the bridge does — before the window has read
+/// the prompt — while the prompt reaches the books: what it said, and how
+/// long it took.
+fn brief_beside_the_prompt(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    pane: &Pane,
+    ask: zerocode_hookd::TurnBriefAsk,
+) -> (Option<String>, Duration) {
+    let (wire_for_brief, worker) = (wire.clone(), pane.worker);
+    let brief = std::thread::spawn(move || {
+        let began = Instant::now();
+        let said = brief_for(guards, &wire_for_brief, 7, worker, &ask);
+        (said, began.elapsed())
+    });
+    join(note(
+        guards,
+        wire,
+        pane,
+        Asking::of([&FILE_PICK]),
+        vec![Moment::Prompt(BRIEFED.to_string())],
+        1,
+    ));
+    brief.join().expect("the brief")
+}
+
+/// A summoned worker's pane, the seat acting: the turn's brief says the
+/// files the turn's one question selected, in the seat's fixed words — and
+/// the turn asks Jev once, at its start, and never again on its steps. The
+/// row says the answer was carried out and said.
+#[test]
+fn a_worker_panes_brief_says_the_files_its_turns_one_question_selected() {
+    let endpoint = judging();
+    let project = parser_project();
+    let (_home, wire) = home_with(&endpoint, project.path(), &[&FILE_PICK], JevMode::On);
+    let guards = fresh_guards();
+    let worker = briefed_pane(project.path(), true);
+    let (said, _) = brief_beside_the_prompt(
+        guards,
+        &wire,
+        &worker,
+        brief_ask(project.path(), zerocode_hookd::TURN_BRIEF_WALL),
+    );
+    assert_eq!(
+        said,
+        file_pick::hint(&["src/parser.rs".to_string()]).map(|hint| hint.text)
+    );
+    assert_eq!(endpoint.asked().len(), 1);
+    join(note(
+        guards,
+        &wire,
+        &worker,
+        Asking::of([&FILE_PICK]),
+        vec![
+            Moment::Tally(Tallied::Called {
+                key: tally::call_key("Read", Some(&json!({ "file_path": "src/parser.rs" }))),
+                kind: CallKind {
+                    explore: true,
+                    ..CallKind::default()
+                },
+            }),
+            Moment::TurnEnded {
+                stopped: false,
+                said: None,
+            },
+        ],
+        2,
+    ));
+    assert_eq!(endpoint.asked().len(), 1, "a step asked Jev again");
+    let held = project_rows(&wire, &FILE_PICK, project.path(), 1);
+    let asked = requests(&held);
+    assert_eq!(
+        (&asked[0]["applied"], &asked[0]["noted"]),
+        (&json!(true), &json!(true)),
+        "{held:?}"
+    );
+}
+
+/// The seat's `any` says the list has no match, the reply breaks its
+/// schema, or the answer comes after the wall: the brief says nothing — the
+/// turn starts as it did before any brief — and the row, still written, says
+/// nothing was carried out. Were the `any` question read past, the first
+/// case would speak.
+#[test]
+fn a_brief_says_nothing_when_the_seat_abstains_breaks_or_is_late() {
+    let refusing = Endpoint::answering_each(
+        "HTTP/1.1 200 OK",
+        |_| json!({"model": "jev-test", "answers": {}}).to_string(),
+        0,
+    );
+    for (endpoint, wall) in [
+        (picking(0.2, 0), zerocode_hookd::TURN_BRIEF_WALL),
+        (refusing, zerocode_hookd::TURN_BRIEF_WALL),
+        (picking(0.93, 600), Duration::from_millis(100)),
+    ] {
+        let project = parser_project();
+        let (_home, wire) = home_with(&endpoint, project.path(), &[&FILE_PICK], JevMode::On);
+        let guards = fresh_guards();
+        let worker = briefed_pane(project.path(), true);
+        let (said, took) =
+            brief_beside_the_prompt(guards, &wire, &worker, brief_ask(project.path(), wall));
+        assert_eq!(said, None);
+        assert!(took < wall + Duration::from_millis(250), "{took:?}");
+        let held = project_rows(&wire, &FILE_PICK, project.path(), 1);
+        assert_eq!(endpoint.asked().len(), 1);
+        assert_eq!(requests(&held)[0]["applied"], json!(false), "{held:?}");
+    }
+}
+
+/// The person's own pane is recorded, never briefed, and a seat that
+/// records — `shadow`, or `auto` its ledger has not raised — briefs no pane;
+/// neither waits on the question.
+#[test]
+fn a_brief_says_nothing_in_the_persons_pane_or_while_the_seat_records() {
+    for (mode, worker) in [
+        (JevMode::On, false),
+        (JevMode::Shadow, true),
+        (JevMode::Auto, true),
+    ] {
+        let endpoint = picking(0.93, 300);
+        let project = parser_project();
+        let (_home, wire) = home_with(&endpoint, project.path(), &[&FILE_PICK], mode);
+        let guards = fresh_guards();
+        let (said, took) = brief_beside_the_prompt(
+            guards,
+            &wire,
+            &briefed_pane(project.path(), worker),
+            brief_ask(project.path(), zerocode_hookd::TURN_BRIEF_WALL),
+        );
+        assert_eq!(said, None, "{mode:?} {worker}");
+        assert!(
+            took < Duration::from_millis(250),
+            "{mode:?} {worker}: {took:?}"
+        );
+    }
 }
 
 /// A question that is not a code task asks the file pick seat nothing, and a

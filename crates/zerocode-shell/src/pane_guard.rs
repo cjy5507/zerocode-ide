@@ -157,6 +157,14 @@ pub(crate) struct Pane {
     /// The folder the pane works in — the project a command's folder is
     /// judged against, and the name a row files its project under.
     pub worktree: PathBuf,
+    /// Whether the pane is a worker the window summoned, with its dispatch
+    /// open: where a seat that speaks at a turn's start may act first
+    /// (t-14869). The person's own panes are recorded only.
+    pub worker: bool,
+    /// The prompt as the bridge read it for a turn's brief, by fingerprint
+    /// ([`prompt_key`]) — `None` where the event carries no prompt the
+    /// bridge reads.
+    pub prompt_key: Option<String>,
 }
 
 impl Pane {
@@ -432,6 +440,10 @@ fn read_hook(
         agent: envelope.agent,
         session,
         worktree: PathBuf::from(&envelope.worktree_id),
+        worker: crate::orchestration::ledger_states_by_term()
+            .get(&term)
+            .is_some_and(|seated| seated.work_ended_ms.is_none()),
+        prompt_key: zerocode_hookd::turn_prompt(envelope).map(|prompt| prompt_key(&prompt)),
     };
     drop(note(
         &GUARDS,
@@ -924,6 +936,32 @@ fn record_labels(wire: &Wire, labels: Vec<Filed>, now_ms: i64) {
             systemone::record_rows(seat, &ledger, &rows, now_ms);
         }
     }));
+}
+
+/* ---- the turn's brief (t-14869) --------------------------------------------------- */
+
+/// The name a prompt goes by between the bridge and the books: the
+/// fingerprint of the words the bridge read for a turn's brief
+/// ([`zerocode_hookd::orchestration_contract::prompt_submission`]), which
+/// both read off the same envelope.
+pub(crate) fn prompt_key(prompt: &str) -> String {
+    fingerprint_of(prompt)
+}
+
+/// What a turn's start says of the file pick seat in `term`'s pane: the
+/// likely files its one question selected, while the seat acts for a
+/// summoned worker's pane (`worker`) — waited for within the ask's wall and
+/// the seat's own, whichever is shorter. Nothing for the person's panes, a
+/// seat that records, an answer that abstained, came late or was refused.
+pub(crate) fn brief_for(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    term: u32,
+    worker: bool,
+    ask: &zerocode_hookd::TurnBriefAsk,
+) -> Option<String> {
+    let _ = (guards, wire, term, worker, ask);
+    None
 }
 
 /* ---- the questions --------------------------------------------------------------- */

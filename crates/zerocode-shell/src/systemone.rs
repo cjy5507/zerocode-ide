@@ -267,13 +267,36 @@ pub fn standing_in(
     seat: &JevUse,
     run: zerocode_core::jev::Run,
 ) -> (zerocode_core::jev::JevMode, bool) {
+    standing_at(wire, seat, run, ledger_of(wire, seat).as_deref())
+}
+
+/// [`standing_in`], for a seat zo keeps per project ([`project_ledger_of`]):
+/// the mode the person set, and whether the seat acts for `workspace` — a
+/// person's `on`, or `auto` its project's own ledger raised (t-14869).
+#[must_use]
+pub fn applies_in_project(wire: &Wire, seat: &JevUse, workspace: &Path) -> bool {
+    standing_at(
+        wire,
+        seat,
+        zerocode_core::jev::Run::Fresh,
+        project_ledger_of(wire, seat, workspace).as_deref(),
+    )
+    .1
+}
+
+/// The mode `seat` is read under in `run`, and whether it acts given the
+/// standing the rows of `ledger` record.
+fn standing_at(
+    wire: &Wire,
+    seat: &JevUse,
+    run: zerocode_core::jev::Run,
+    ledger: Option<&Path>,
+) -> (zerocode_core::jev::JevMode, bool) {
     let mode = seat.mode_in_run(&wire.settings_root(), run);
-    let raised = ledger_of(wire, seat)
-        .map(|ledger| {
-            zerocode_core::jev::promote::standing(seat, &read_rows(&ledger))
-                == zerocode_core::jev::promote::Stand::Applying
-        })
-        .unwrap_or(false);
+    let raised = ledger.is_some_and(|ledger| {
+        zerocode_core::jev::promote::standing(seat, &read_rows(ledger))
+            == zerocode_core::jev::promote::Stand::Applying
+    });
     (mode, mode.applies_with(raised))
 }
 

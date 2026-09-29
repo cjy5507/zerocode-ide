@@ -546,6 +546,15 @@ pub trait TurnBrief: Send + Sync {
     fn brief(&self, ask: TurnBriefAsk) -> Option<String>;
 }
 
+/// The person's prompt as this bridge reads it for a turn's context — `None`
+/// for an event that is not the agent's prompt event, or an agent whose row
+/// takes no context at a turn's start. The window names a turn by it, so a
+/// brief and the books it waits on read the same words.
+#[must_use]
+pub fn turn_prompt(envelope: &HookEnvelope) -> Option<String> {
+    orchestration_contract::prompt_submission(envelope).map(|submission| submission.prompt)
+}
+
 /// One turn's start, as a brief is asked about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnBriefAsk {
