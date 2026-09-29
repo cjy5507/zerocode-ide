@@ -446,7 +446,7 @@ pub enum Moment {
 pub fn text_source(verb: &Tool, text: &str) -> Option<TextSource> {
     match verb {
         Tool::Read => Some(TextSource::File),
-        Tool::Web => Some(TextSource::Web),
+        Tool::Web | Tool::WebSearch => Some(TextSource::Web),
         Tool::Bash => text
             .contains(crate::untrusted::PHRASE)
             .then_some(TextSource::Browser),

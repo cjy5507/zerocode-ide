@@ -1120,6 +1120,7 @@ mod tests {
                 tool: Some(TranscriptTool {
                     call_id: format!("c{at}"),
                     name: "Bash".into(),
+                    kind: "bash".into(),
                     input: "i".repeat(TOOL_CHARS),
                     is_error: false,
                     edits: Vec::new(),
