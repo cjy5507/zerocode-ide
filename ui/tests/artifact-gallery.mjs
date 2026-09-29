@@ -2335,13 +2335,19 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
       setActiveTab(tab.id);
       await window.__PAINTED__();
       after.feedback = host.querySelector(".artifact-strip-feedback")?.textContent.trim() ?? "";
-      // 링크를 따라 아티팩트 밖으로 나간 페이지의 주석은 판에 넣되 기록하지 않는다.
+      // 링크를 따라 아티팩트 밖으로 나간 페이지의 주석도 떠나온 판에 그 주소를 붙여
+      // 기록한다(t-14586) — 스토어의 발행물이 아닌 주소라 스토어에 묻지 않는다.
       const was = tab.url;
       tab.url = "https://example.com/elsewhere";
       await deliver([{ intent: "change", comment: "바깥 페이지", selector: "h1", tag: "h1" }]);
       tab.url = was;
       delete window.__ANSWER__.agent_terms;
-      return { ...after, recordsAfterElsewhere: window.__BAND__.records.length, pastesAfterElsewhere: window.__BAND__.pastes.length };
+      return {
+        ...after,
+        recordsAfterElsewhere: window.__BAND__.records.length,
+        elsewhere: window.__BAND__.records.at(-1)?.feedback ?? null,
+        pastesAfterElsewhere: window.__BAND__.pastes.length,
+      };
     }, maker);
     const record = delivered.records[0]?.feedback ?? null;
     ok(
@@ -2357,8 +2363,11 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
         && delivered.feedback === "피드백 3 · v3",
       JSON.stringify(delivered),
     );
-    ok("annotations on a page the tab followed away from the artifact are pasted but not recorded",
-      delivered.pastesAfterElsewhere === 2 && delivered.recordsAfterElsewhere === 1, JSON.stringify(delivered));
+    ok("annotations on a page the tab followed away from the artifact are pasted and recorded on the version it left, with that page's address",
+      delivered.pastesAfterElsewhere === 2 && delivered.recordsAfterElsewhere === 2
+        && delivered.elsewhere?.id === "p-band" && delivered.elsewhere?.version === 3
+        && delivered.elsewhere?.page_url === "https://example.com/elsewhere",
+      JSON.stringify(delivered));
 
     /* ---- 4. 「내보내기」: 폴더를 묻고 본 판을 쓰며, 공개라고 말하지 않는다 ---------- */
     const exported = await page.evaluate(async () => {
@@ -2457,6 +2466,206 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
       JSON.stringify(menu),
     );
     await shoot("band-narrow", ".artifact-strip:not([hidden])");
+    ok("the window raised no errors", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
+/* 따라간 페이지의 주석(t-14586): 발행물 탭이 링크를 따라 다른 곳으로 가도 전달한
+ * 주석은 기록된다. 따라간 페이지가 스토어의 발행물이면 그 발행물의 그 판에, 아니면
+ * 떠나온 발행물의 떠날 때 보이던 판에 그 주소(`page_url`)를 붙여서. 초안은 어느
+ * 페이지에 단 주석인지 말한다. 아티팩트를 보인 적 없는 탭은 아무것도 적지 않는다.
+ * 스토어는 이 창 시험의 가짜다: `feedback.jsonl`은 발행물마다 JSON 줄의 배열로
+ * 서고, 기록 문은 청의 필드를 Rust의 `deny_unknown_fields`처럼 가린다. */
+export async function testArtifactFollowed(browser, origin, ok, outputDir) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  await mkdir(outputDir, { recursive: true });
+  const store = "/tmp/zerocode-window-test/artifacts/pages";
+  const plainUrl = "file:///tmp/zerocode-window-test/notes/plain.html";
+  const directUrl = "file:///tmp/zerocode-window-test/notes/direct.html";
+  try {
+    await page.setViewportSize({ width: 1440, height: 860 });
+    const maker = await page.evaluate(async (pages) => {
+      const now = Date.now();
+      const row = (id, version, count, last) => ({
+        id, kind: "page", title: `${id} 시안`, bytes: 10, created_ms: now, modified_ms: now, version,
+        path: `${pages}/${id}/index.html`, url: `file://${pages}/${id}/index.html`,
+        source_path: `/tmp/zerocode-window-test/${id}.html`,
+        origin: { pane: "term-1", agent: "claude", worktree: "/tmp/zerocode-window-test/orbit-card" },
+        feedback_count: count, feedback_version: last, tags: [], preview: { kind: "text", text: "" }, source: "manual",
+      });
+      const oldLine = JSON.stringify({ id: "p-origin", version: 2, sha256: null, source_path: null,
+        recipient: { pane: "term-2", agent: "claude" }, items: [{ selector: ".pin", comment: "옛 줄" }], at_ms: 1 });
+      window.__FOLLOW__ = {
+        rows: { "p-origin": row("p-origin", 3, 1, 2), "p-other": row("p-other", 2, 0, null) },
+        files: { "p-origin": [oldLine], "p-other": [] },
+        asks: [], refused: [], pastes: [], prompts: [], pageAt: [],
+      };
+      const held = window.__FOLLOW__;
+      let born = 0;
+      window.__ANSWER__.open_browser_pane = () => `browser-follow-${(born += 1)}`;
+      window.__ANSWER__.browser_zoom = () => null;
+      window.__ANSWER__.browser_navigate = () => null;
+      window.__ANSWER__.artifact_versions = (args) => Array.from({ length: held.rows[args.id]?.version ?? 0 }, (_, at) => ({
+        n: at + 1, path: `${pages}/${args.id}/v${at + 1}/index.html`, sha256: `sha-${args.id}-${at + 1}`,
+      }));
+      window.__ANSWER__.artifact_page_at = (args) => {
+        held.pageAt.push(args.path);
+        const found = new RegExp(`^${pages}/([^/]+)/(?:v(\\d+)/)?index\\.html$`).exec(args.path);
+        if (found === null || !held.rows[found[1]]) return null;
+        return { artifact: { ...held.rows[found[1]] }, version: found[2] ? Number(found[2]) : null };
+      };
+      window.__ANSWER__.artifact_feedback_record = (args) => {
+        const ask = JSON.parse(JSON.stringify(args.feedback));
+        const unknown = Object.keys(ask).filter((key) => !["id", "version", "items", "recipient", "page_url"].includes(key));
+        if (unknown.length > 0 || !held.rows[ask.id] || ask.version > held.rows[ask.id].version) {
+          held.refused.push(ask);
+          throw new Error(`refused ${unknown.join()}`);
+        }
+        held.asks.push(ask);
+        const line = { id: ask.id, version: ask.version, sha256: `sha-${ask.id}-${ask.version}`, source_path: held.rows[ask.id].source_path,
+          recipient: ask.recipient, items: ask.items, at_ms: Date.now() };
+        if (ask.page_url !== undefined) line.page_url = ask.page_url;
+        held.files[ask.id].push(JSON.stringify(line));
+        return { count: held.files[ask.id].length, version: ask.version };
+      };
+      window.__ANSWER__.term_paste = (args) => (held.pastes.push({ ...args }), null);
+      window.__ANSWER__.send_prompt = (args) => (held.prompts.push({ ...args }), null);
+      for (const tab of [...tabs]) dropTab(tab.id);
+      renderTabs();
+      updateStage();
+      const made = await openTermTab({ placement: "tab" });
+      paneAgents.set(made, "claude");
+      renderTabs();
+      return made;
+    }, store);
+    const settle = () => page.evaluate(() => new Promise((done) => setTimeout(done, 160)));
+    await settle();
+    // 둘째 발행물은 제 탭에도 서 있다 — 그 탭의 머리띠가 새 수를 받는지 본다.
+    await page.evaluate(async () => { await openArtifactPage(window.__FOLLOW__.rows["p-other"]); });
+    await settle();
+    await page.evaluate(async () => { await openArtifactPage(window.__FOLLOW__.rows["p-origin"]); });
+    await settle();
+
+    const follow = (url) => page.evaluate(async (next) => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-origin");
+      for (const speak of window.__LISTENERS__["browser:nav"] ?? []) {
+        speak({ payload: { label: tab.label, url: next, state: "finished" } });
+      }
+      await new Promise((done) => setTimeout(done, 60));
+      return tab.url;
+    }, url);
+    const deliver = (find, comment) => page.evaluate(async ({ term, find, comment }) => {
+      window.__ANSWER__.agent_terms = () => [[term, "claude"]];
+      const tab = find === "origin"
+        ? tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-origin")
+        : tabs.find((one) => one.kind === "browser" && one.url === find);
+      const host = docHost(tab.pane, "browser");
+      const held = window.__FOLLOW__;
+      const before = { asks: held.asks.length, pastes: held.pastes.length };
+      browserAnnotations.set(tab.label, [{ intent: "change", comment, selector: "main h1", tag: "h1" }]);
+      setActiveTab(tab.id);
+      await deliverAnnotations(host, tab);
+      await new Promise((done) => setTimeout(done, 80));
+      document.querySelector("#note-pop .note-pop-row")?.click();
+      await new Promise((done) => setTimeout(done, 160));
+      delete window.__ANSWER__.agent_terms;
+      setActiveTab(tab.id);
+      await window.__PAINTED__();
+      const bandOf = (one) => {
+        const node = docHost(one.pane, "browser").querySelector(".artifact-strip-feedback");
+        return node && !node.hidden ? node.textContent.trim() : "";
+      };
+      const band = bandOf(tab);
+      // 둘째 발행물의 탭은 앞으로 불러야 제 머리띠를 칠한다 — 읽고 나서 돌아온다.
+      const other = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-other"
+        && one.url.endsWith("/p-other/v2/index.html"));
+      let otherBand = null;
+      if (other) {
+        setActiveTab(other.id);
+        await window.__PAINTED__();
+        otherBand = bandOf(other);
+        setActiveTab(tab.id);
+        await window.__PAINTED__();
+      }
+      const paste = held.pastes.at(-1)?.text ?? "";
+      return {
+        url: tab.url,
+        asks: held.asks.slice(before.asks),
+        refused: held.refused.length,
+        pasted: held.pastes.length - before.pastes,
+        paste,
+        pasteEndsInEnter: /[\r\n]$/.test(paste),
+        prompts: held.prompts.length,
+        originFile: held.files["p-origin"].slice(),
+        otherFile: held.files["p-other"].slice(),
+        band,
+        otherBand,
+      };
+    }, { term: maker, find, comment });
+
+    /* ---- 1. 다른 발행물로 따라갔다: 그 발행물의 그 판에 기록한다 ---------------- */
+    const otherUrl = `file://${store}/p-other/v1/index.html`;
+    await follow(otherUrl);
+    const onOther = await deliver("origin", "둘째 시안의 제목이 잘립니다");
+    const otherLine = onOther.otherFile.at(-1) ? JSON.parse(onOther.otherFile.at(-1)) : null;
+    ok(
+      "annotations on another publication the tab followed to are recorded on that publication and that version, and its own tab's band says 「피드백 1 · v1」; the origin's count stays",
+      onOther.url === otherUrl && onOther.asks.length === 1 && onOther.otherFile.length === 1
+        && otherLine?.id === "p-other" && otherLine?.version === 1 && !("page_url" in (otherLine ?? {}))
+        && otherLine?.items?.[0]?.comment === "둘째 시안의 제목이 잘립니다"
+        && onOther.originFile.length === 1 && onOther.band === "피드백 1 · v2" && onOther.otherBand === "피드백 1 · v1",
+      JSON.stringify(onOther),
+    );
+    ok(
+      "the draft for another publication names that publication and its immutable version, not the origin",
+      onOther.paste.includes("p-other 시안") && onOther.paste.includes("(p-other)") && onOther.paste.includes("버전 1")
+        && onOther.paste.includes("sha-p-other-1") && !onOther.paste.includes("(p-origin)"),
+      onOther.paste,
+    );
+
+    /* ---- 2. 발행물이 아닌 로컬 파일로 따라갔다: 떠나온 판에 주소를 붙여 적는다 ---- */
+    await follow(plainUrl);
+    const onPlain = await deliver("origin", "따라간 노트의 표가 넘칩니다");
+    const plainLine = onPlain.originFile.at(-1) ? JSON.parse(onPlain.originFile.at(-1)) : null;
+    ok(
+      "annotations on a plain page the tab followed away to are recorded on the artifact it left, on the version it showed, with the page's address — and the band says 「피드백 2 · v3」",
+      onPlain.url === plainUrl && onPlain.asks.length === 1 && onPlain.originFile.length === 2
+        && plainLine?.id === "p-origin" && plainLine?.version === 3 && plainLine?.page_url === plainUrl
+        && plainLine?.items?.[0]?.comment === "따라간 노트의 표가 넘칩니다"
+        && JSON.parse(onPlain.originFile[0]).page_url === undefined
+        && onPlain.band === "피드백 2 · v3" && onPlain.refused === 0,
+      JSON.stringify(onPlain),
+    );
+    ok(
+      "the draft says which page the notes were made on and that it is not the artifact's file",
+      onPlain.paste.includes(`주석을 단 페이지: ${plainUrl}`) && onPlain.paste.includes("(p-origin)의 버전 3에서 링크를 따라간 페이지")
+        && !onPlain.paste.includes("고칠 원본"),
+      onPlain.paste,
+    );
+    ok(
+      "every followed-page delivery is pasted without Enter and nothing is sent",
+      onOther.pasted === 1 && onPlain.pasted === 1 && !onOther.pasteEndsInEnter && !onPlain.pasteEndsInEnter && onPlain.prompts === 0,
+      JSON.stringify({ onOther: onOther.pasted, onPlain: onPlain.pasted, prompts: onPlain.prompts }),
+    );
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate((next) => document.documentElement.setAttribute("data-theme", next), theme);
+      await new Promise((done) => setTimeout(done, 300));
+      await page.screenshot({ path: join(outputDir, `artifacts-followed-${theme}-band.png`) });
+    }
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+
+    /* ---- 3. 아티팩트를 보인 적 없는 탭: 판에는 넣되 아무것도 적지 않는다 --------- */
+    await page.evaluate(async (url) => { await openBrowserTab(url); }, directUrl);
+    await settle();
+    const direct = await deliver(directUrl, "직접 연 파일");
+    ok(
+      "a tab that never showed an artifact (a local HTML file opened directly) pastes its notes and records nothing",
+      direct.pasted === 1 && direct.asks.length === 0 && direct.originFile.length === 2 && direct.otherFile.length === 1
+        && !direct.paste.includes("아티팩트"),
+      JSON.stringify(direct),
+    );
     ok("the window raised no errors", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();

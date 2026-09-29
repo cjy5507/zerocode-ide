@@ -4670,6 +4670,75 @@ mod tests {
         assert_eq!(store.feedback_summary(&id).count, 2);
     }
 
+    /// 창이 보내는 그대로의 청(t-14586): 링크를 따라간 페이지에 단 주석은 떠난 판의
+    /// 번호에 그 페이지의 주소(`page_url`)를 붙여 기록되고, 그 페이지의 수에 든다.
+    /// R3가 쓴 줄(주소 없음)도 함께 세이고, 판에서 단 주석의 줄은 주소를 쓰지 않는다.
+    /// 청은 여전히 모르는 필드를 받지 않는다. 창이 쓰는 입구(JSON)로만 청한다.
+    #[test]
+    fn an_annotation_on_a_followed_page_is_recorded_with_its_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _) = published_twice(dir.path());
+        let file = feedback_file(&store, &id);
+        let old = format!(
+            r#"{{"id":"{id}","version":1,"sha256":null,"source_path":null,"recipient":{{"pane":"term-2","agent":"claude"}},"items":[{{"selector":".pin","comment":"옛 줄"}}],"at_ms":3}}"#
+        );
+        std::fs::write(&file, format!("{old}\n")).unwrap();
+        let followed = "file:///tmp/zerocode-test/notes/plain.html";
+        let ask = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "id": id, "version": 2,
+                "items": [{"selector": "main h1", "comment": "따라간 노트의 표가 넘칩니다"}],
+                "recipient": {"pane": "term-4", "agent": "claude"},
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<FeedbackAsk>(body)
+        };
+
+        let asked = ask(serde_json::json!({"page_url": followed}));
+        assert!(
+            asked.is_ok(),
+            "the ask refused a followed page's address: {asked:?}"
+        );
+        let recorded = asked
+            .map_err(|error| error.to_string())
+            .and_then(|ask| store.record_feedback(ask, 7));
+        assert_eq!(
+            recorded,
+            Ok(FeedbackSummary {
+                count: 2,
+                version: Some(2)
+            })
+        );
+        let on_version = ask(serde_json::json!({})).unwrap();
+        assert_eq!(store.record_feedback(on_version, 8).unwrap().count, 3);
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert_eq!(lines[0].get("page_url"), None);
+        assert_eq!(lines[1]["page_url"], followed);
+        assert_eq!(lines[1]["version"], 2);
+        assert_eq!(lines[1]["items"][0]["selector"], "main h1");
+        assert_eq!(
+            lines[2].get("page_url"),
+            None,
+            "a delivery on the version wrote an address"
+        );
+        assert_eq!(
+            store.list(&Filter::default()).rows[0].feedback_count,
+            Some(3)
+        );
+        assert!(
+            ask(serde_json::json!({"page": followed})).is_err(),
+            "the ask took a field it does not know"
+        );
+    }
+
     /// 한 줄이 깨져도 기록은 선다: 읽히지 않는 줄과 다른 페이지를 말하는 줄은 세지
     /// 않고, 끝이 잘린 줄 뒤의 다음 전달은 제 줄에서 시작한다 — 깨진 조각은 지우지
     /// 않는다(덧붙이기만).
