@@ -14360,7 +14360,9 @@ function paintHelperPageBrief(card, run) {
 /* The footer, where the composer stood: who directs this helper, and the one
  * thing a person can do from here. The press goes to the parent's page with
  * ITS input focused — the conversation's box when the parent is showing its
- * conversation, else the terminal's input. No stop: see the note above. */
+ * conversation, else the terminal's input. No stop: see the note above; the
+ * group of controls is where a second one stands beside it the day a catalog
+ * row names a road that ends one helper. */
 function helperPageFootNode(run, owner) {
   const foot = document.createElement("footer");
   foot.className = "helper-foot";
@@ -14368,12 +14370,15 @@ function helperPageFootNode(run, owner) {
   says.className = "helper-foot-says";
   foot.appendChild(says);
   if (owner) {
+    const actions = document.createElement("div");
+    actions.className = "helper-foot-actions";
     const speak = document.createElement("button");
     speak.type = "button";
     speak.className = "helper-foot-speak";
     speak.textContent = t("helper.foot.speak", "부모 대화에 말하기");
     speak.addEventListener("click", () => speakToHelperParent(run));
-    foot.appendChild(speak);
+    actions.appendChild(speak);
+    foot.appendChild(actions);
   }
   updateHelperPageFoot(foot, run, owner);
   return foot;

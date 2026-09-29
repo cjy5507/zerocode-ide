@@ -15888,6 +15888,14 @@ button.helper-sib:hover {
   overflow-wrap: anywhere;
 }
 
+.helper-foot-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .helper-foot-speak {
   flex: none;
   padding: var(--space-1) var(--space-3);
