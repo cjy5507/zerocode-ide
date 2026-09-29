@@ -831,7 +831,7 @@ where
             text: SERIAL_READS_NUDGE.to_string(),
         });
         self.serial_reads_nudged = true;
-        self.session.mark_transcript_dirty();
+        self.publish_folded_tail();
     }
 
     pub(super) fn append_tool_repetition_notice(
