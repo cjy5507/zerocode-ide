@@ -22,10 +22,12 @@
 //!
 //! | the request | the answer |
 //! |---|---|
-//! | the child's (first message names [`TALK_CHILD`]) | `bash` steps of `child_sleep_secs`, `child_steps` of them, then [`TALK_CHILD_DONE`] |
+//! | the child's (first message names [`TALK_CHILD`]) | `bash` steps of `child_sleep_secs`, `child_steps` of them, then [`TALK_CHILD_DONE`] — with `child_says_at`, one `SendMessage(to: "main")` of [`TALK_CHILD_SAYS`] at that step |
 //! | the last message asks ([`TALK_ASK`] n) | [`TALK_ANSWER`] n for each n asked |
 //! | the last message carries the child's result | [`TALK_NOTED`] |
+//! | the turn's user messages carry the child's words | [`TALK_HEARD`] (and [`TALK_NOTED`] when its result came too) |
 //! | the last message says [`TALK_DELEGATE`] | one background `Agent` |
+//! | the last message says [`TALK_WAIT`] | one blocking `Agent` (`background: false`) |
 //! | the last message says [`TALK_SLOW`] | one foreground `bash` of a few seconds — no wait |
 //! | the last message answers that `Agent` call | a reply that ends on "I'll …" |
 //! | the last message is the turn-end gate's | the poll the 2026-09-27 main ran: `bash` sleeping [`TALK_POLL_SECS`] |
@@ -72,6 +74,14 @@ pub const TALK_ASK: &str = "TALK_ASK";
 pub const TALK_ANSWER: &str = "TALK_ANSWER";
 /// The main's words once the agent's result has reached it.
 pub const TALK_NOTED: &str = "TALK_NOTED";
+/// What the delegated agent tells the main mid-run, with `SendMessage`.
+pub const TALK_CHILD_SAYS: &str = "TALK_CHILD_SAYS";
+/// The main's words once the agent's mid-run message has reached it.
+pub const TALK_HEARD: &str = "TALK_HEARD";
+/// The person hands the main a task it runs in a blocking `Agent` call.
+pub const TALK_WAIT: &str = "TALK_WAIT";
+/// The id of the child's `SendMessage` call, to find its answer by.
+pub const TALK_SAYS_ID: &str = "toolu_talk_says";
 /// The person asks for something the main does itself, in the foreground.
 pub const TALK_SLOW: &str = "TALK_SLOW";
 /// The foreground command [`TALK_SLOW`] runs: a few seconds, not a wait.
@@ -83,6 +93,7 @@ pub const TALK_PROMISE: &str = "I'll report once it passes.";
 pub const TALK_POLL_SECS: u64 = 60;
 const TALK_POLL_STEP_SECS: u64 = 2;
 const TALK_SPAWN_ID: &str = "toolu_talk_spawn";
+const TALK_WAIT_ID: &str = "toolu_talk_wait";
 
 /// What this server should do with a turn request.
 #[derive(Debug, Clone, Copy)]
@@ -111,6 +122,9 @@ pub struct Plan {
     pub latency_ms: u64,
     /// `bash` steps a [`TALK_CHILD`] agent takes before its final words.
     pub child_steps: usize,
+    /// The step at which a [`TALK_CHILD`] agent sends [`TALK_CHILD_SAYS`] to
+    /// the main with `SendMessage`, as one step more; `None` sends nothing.
+    pub child_says_at: Option<usize>,
 }
 
 impl Default for Plan {
@@ -123,6 +137,7 @@ impl Default for Plan {
             background: false,
             latency_ms: 0,
             child_steps: 0,
+            child_says_at: None,
         }
     }
 }
@@ -307,7 +322,12 @@ enum Answer {
     TalkPromise,
     TalkPoll,
     TalkChildStep(usize),
+    TalkChildSays,
     TalkChildDone,
+    /// The child's words reached the main — with its result, when that came
+    /// in the same turn.
+    TalkHeard(bool),
+    TalkWait,
     /// The asks to answer, and whether the child's result came with them.
     TalkReply(Vec<String>, bool),
     TalkNoted,
@@ -339,6 +359,17 @@ impl Answer {
                 input_tokens,
             ),
             Self::TalkSlow => talk_bash_sse("toolu_talk_slow", TALK_SLOW_COMMAND, 20_000, input_tokens),
+            Self::TalkChildSays => talk_says_sse(input_tokens),
+            Self::TalkHeard(noted) => text_sse(
+                "msg_talk_heard",
+                &if *noted {
+                    format!("### Heard\n\n- {TALK_HEARD}\n- {TALK_NOTED}\n")
+                } else {
+                    format!("### Heard\n\n- {TALK_HEARD}\n")
+                },
+                input_tokens,
+            ),
+            Self::TalkWait => talk_wait_sse(plan, input_tokens),
             Self::TalkChildDone => text_sse(
                 "msg_talk_child_done",
                 &format!("### Done\n\n- {TALK_CHILD_DONE}\n"),
@@ -453,6 +484,44 @@ fn talk_delegate_sse(plan: Plan, input_tokens: u32) -> String {
     body
 }
 
+/// The child's word to the main while it works (t-11459).
+fn talk_says_sse(input_tokens: u32) -> String {
+    let mut body = message_start("msg_talk_says", input_tokens);
+    append_tool_use(
+        &mut body,
+        0,
+        TALK_SAYS_ID,
+        "SendMessage",
+        &json!({
+            "to": "main",
+            "message": format!("{TALK_CHILD_SAYS}: the flag lives in config.rs"),
+        })
+        .to_string(),
+    );
+    finish_tool_message(&mut body, input_tokens);
+    body
+}
+
+/// The one blocking `Agent` the main runs its task in (t-11460).
+fn talk_wait_sse(plan: Plan, input_tokens: u32) -> String {
+    let mut body = message_start("msg_talk_wait", input_tokens);
+    append_tool_use(
+        &mut body,
+        0,
+        TALK_WAIT_ID,
+        "Agent",
+        &json!({
+            "description": "talk child",
+            "subagent_type": "general-purpose",
+            "background": false,
+            "prompt": format!("{TALK_CHILD}: take {} steps and report", plan.child_steps),
+        })
+        .to_string(),
+    );
+    finish_tool_message(&mut body, input_tokens);
+    body
+}
+
 /// One `bash` call of the t-11354 conversation.
 fn talk_bash_sse(id: &str, command: &str, timeout_ms: u64, input_tokens: u32) -> String {
     let mut body = message_start("msg_talk_bash", input_tokens);
@@ -493,7 +562,10 @@ fn talk_answer(value: &Value, last: &Value, plan: Plan) -> Option<Answer> {
             .flatten()
             .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
             .count();
-        return Some(if results < plan.child_steps {
+        let steps = plan.child_steps + usize::from(plan.child_says_at.is_some());
+        return Some(if plan.child_says_at == Some(results) {
+            Answer::TalkChildSays
+        } else if results < steps {
             Answer::TalkChildStep(results)
         } else {
             Answer::TalkChildDone
@@ -502,6 +574,18 @@ fn talk_answer(value: &Value, last: &Value, plan: Plan) -> Option<Answer> {
     let text = last.to_string();
     if text.contains(COMPACTION_MARKER) {
         return None;
+    }
+    // The host may put a reminder of its own after the words that opened the
+    // turn (a recall hint, for one), so the child's words are looked for in
+    // every user message since the main last spoke.
+    let turn = messages
+        .iter()
+        .rev()
+        .take_while(|message| message.get("role").and_then(Value::as_str) != Some("assistant"))
+        .map(Value::to_string)
+        .collect::<String>();
+    if turn.contains(TALK_CHILD_SAYS) {
+        return Some(Answer::TalkHeard(turn.contains(TALK_CHILD_DONE)));
     }
     let noted = text.contains(TALK_CHILD_DONE);
     let asks: Vec<String> = text
@@ -523,6 +607,9 @@ fn talk_answer(value: &Value, last: &Value, plan: Plan) -> Option<Answer> {
     }
     if text.contains(TALK_DELEGATE) {
         return Some(Answer::TalkDelegate);
+    }
+    if text.contains(TALK_WAIT) {
+        return Some(Answer::TalkWait);
     }
     if text.contains(TALK_SLOW) && !text.contains("tool_result") {
         return Some(Answer::TalkSlow);

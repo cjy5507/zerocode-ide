@@ -484,6 +484,18 @@ pub struct ToolContext {
     /// `Arc<Mutex<…>>` like the other cells so every registry clone (including
     /// the concurrent-dispatch closure) sees the value the CLI set at boot.
     pub background_agent_default: Arc<Mutex<bool>>,
+    /// The running turn's stop, installed by a host whose completion pump
+    /// brings a background agent's result back as its own message (t-11460).
+    /// A blocking `Agent` call takes the one in place when it starts, and when
+    /// that turn stops — Esc, Stop — it hands its helper to the background
+    /// road instead of holding a wait whose result the runtime drops.
+    ///
+    /// `Arc<Mutex<…>>` so every registry clone (the concurrent-dispatch
+    /// closure included) sees the turn's; a sub-agent's fresh
+    /// [`ToolContext::new`] has none, so a helper's own blocking call is never
+    /// let go by its parent's Esc. `None` elsewhere: headless hosts keep the
+    /// wait as it was.
+    turn_stop: Arc<Mutex<Option<runtime::HookAbortSignal>>>,
     /// 대화(세션) 스코프 read-before-edit 레지스트리 (CC 패리티).
     ///
     /// `read_file`/`write_file`/`edit_file` 성공 시 `path → (mtime, hash)`
@@ -644,6 +656,7 @@ impl ToolContext {
             hypothesis_sink: Arc::new(Mutex::new(Vec::new())),
             mcp_passthrough: Arc::new(Mutex::new(None)),
             background_agent_default: Arc::new(Mutex::new(false)),
+            turn_stop: Arc::new(Mutex::new(None)),
             file_reads: Arc::new(Mutex::new(runtime::FileReadRegistry::new())),
             workspace_checkpoints: Arc::new(Mutex::new(WorkspaceCheckpointStore::default())),
             workspace_hunk_attribution: Arc::new(Mutex::new(
@@ -1081,6 +1094,24 @@ impl ToolContext {
             .background_agent_default
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Install the stop of the turn about to run — `None` for a host with no
+    /// pump to bring a let-go helper's result back. See the field.
+    pub fn set_turn_stop(&self, stop: Option<runtime::HookAbortSignal>) {
+        *self
+            .turn_stop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stop;
+    }
+
+    /// The running turn's stop, when the host installed one.
+    #[must_use]
+    pub(crate) fn turn_stop(&self) -> Option<runtime::HookAbortSignal> {
+        self.turn_stop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Record the active foreground permission mode (shared cell, like

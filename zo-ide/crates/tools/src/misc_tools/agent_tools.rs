@@ -132,10 +132,11 @@ pub use self::completion::{
     provider_error_class_from_completion, provider_error_class_metadata,
 };
 pub(crate) use self::completion::{BackgroundTaskSession, background_task_session_id, wait_for_next_agent_completions};
+pub(crate) use self::completion::{hand_agent_to_background, MainMessageReceipt};
 #[cfg(test)]
 pub(crate) use self::completion::{
     clear_agent_completion_channel_for_tests, inject_completion_for_tests,
-    publish_agent_completion_for_tests,
+    lock_completion_store_for_tests, publish_agent_completion_for_tests,
 };
 pub(crate) use self::manifest::{
     AgentActivitySnapshot, agent_activity_snapshot_by_id, classify_lane_failure,
@@ -987,28 +988,46 @@ pub(crate) fn execute_agent_with_parent_model_and_hooks(
 }
 
 /// Spawn a sub-agent and **block until it finishes** (or the wait window
-/// elapses), returning the manifest plus its terminal completion. This makes a
-/// single `Agent` tool call synchronous — like `SpawnMultiAgent` and Claude
-/// Code's `Task` — so the model receives the result inline instead of polling
-/// the output file with `sleep`+`cat`. That polling multiplied foreground
-/// provider requests and, sharing the sub-agent's account quota, tripped the
-/// rate limit even though Claude Code runs the same work fine.
+/// elapses, or the turn waiting on it stops), returning the manifest plus its
+/// terminal completion. This makes a single `Agent` tool call synchronous —
+/// like `SpawnMultiAgent` and Claude Code's `Task` — so the model receives the
+/// result inline instead of polling the output file with `sleep`+`cat`. That
+/// polling multiplied foreground provider requests and, sharing the
+/// sub-agent's account quota, tripped the rate limit even though Claude Code
+/// runs the same work fine.
 pub(crate) fn execute_agent_blocking(
     input: AgentInput,
     parent_model: Option<&str>,
     parent_lsp: Option<&LspRegistry>,
     hook_config: Option<&RuntimeHookConfig>,
+    turn_stop: Option<&runtime::HookAbortSignal>,
 ) -> Result<(AgentOutput, Option<AgentCompletion>), ToolError> {
     let manifest =
         execute_agent_with_parent_model_and_hooks(input, parent_model, parent_lsp, hook_config)?;
-    let agent_id = manifest.agent_id.clone();
-    let completion = wait_for_agent_completions(
-        std::slice::from_ref(&agent_id),
+    let completion = wait_for_blocking_agent(
+        &manifest.agent_id,
         super::SPAWN_MULTI_AGENT_WAIT_TIMEOUT,
-    )
-    .into_iter()
-    .find(|completion| completion.agent_id == agent_id);
+        turn_stop,
+    );
     Ok((manifest, completion))
+}
+
+/// A blocking `Agent` call's wait for its helper: the helper's terminal
+/// completion, or a `still_running` stand-in when `timeout` passes first or
+/// the turn that waits stops (t-11460).
+pub(crate) fn wait_for_blocking_agent(
+    agent_id: &str,
+    timeout: std::time::Duration,
+    turn_stop: Option<&runtime::HookAbortSignal>,
+) -> Option<AgentCompletion> {
+    // 턴이 멈추면(Esc·Stop) 런타임은 이 도구의 결과를 버리고 제 길을 간다.
+    // 이 대기는 끊을 수 없는 blocking 스레드에서 돌아서, 멈춤을 보지 않으면 20분
+    // 창을 끝까지 붙잡고, 그 사이에 도움이가 끝내면 결과는 버려지는 반환값과
+    // 함께 사라진다. 멈춤을 보면 곧장 돌아가고, 호출자가 도움이를 배경 길로 넘긴다.
+    let ids = [agent_id.to_string()];
+    wait_for_agent_completions_cancellable(&ids, timeout, turn_stop.map(runtime::HookAbortSignal::flag))
+        .into_iter()
+        .find(|completion| completion.agent_id == agent_id)
 }
 
 // Test seam: lets unit tests inject a fake `spawn_fn` instead of launching
@@ -2909,10 +2928,9 @@ pub(crate) fn steer_agent(agent_id: &str, message: String) -> bool {
 /// [`steer_agent`], which carries the MAIN→AGENT direction: both live here
 /// because this module owns the process-global agent plumbing.
 ///
-/// Returns `false` when no interactive host is consuming the channel in this
-/// process, so the caller can tell the sub-agent its message went nowhere
-/// instead of silently dropping it.
-pub(crate) fn message_main_from_agent(agent_id: &str, name: &str, text: String) -> bool {
+/// The receipt says where the message went, so the caller can tell the
+/// sub-agent when it went nowhere instead of silently dropping it.
+pub(crate) fn message_main_from_agent(agent_id: &str, name: &str, text: String) -> MainMessageReceipt {
     completion::notify_agent_message(completion::agent_message_notice(agent_id, name, text))
 }
 
