@@ -132,6 +132,20 @@ pub struct Sight {
     /// Where a finished tool's text lives when the common readers do not find
     /// it: JSON pointers into the payload, tried first.
     pub result_at: &'static [&'static str],
+    /// How a skill's load shows in its hooks: only the turn's ruler reads it
+    /// ([`tally`]).
+    pub skill_load: SkillLoad,
+}
+
+/// How an agent's hooks show it loading a skill (t-14869).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillLoad {
+    /// A tool of its own, by its name as the agent spells it.
+    Tool(&'static str),
+    /// Its shell reads the skill's file ([`tally::SKILL_FILE`]).
+    ReadsSkillFile,
+    /// Nothing of it reaches the window.
+    No(Unseen),
 }
 
 /// Claude's family, as the hooks this window installs report it: every
@@ -148,6 +162,7 @@ const CLAUDE: Sight = Sight {
     turn_answer: Sees::Yes,
     edited_path: Sees::Yes,
     result_at: &["/tool_response/file/content"],
+    skill_load: SkillLoad::Tool("Skill"),
 };
 
 /// An agent whose installed hooks carry every moment in the Claude family's
@@ -156,6 +171,7 @@ const CLAUDE: Sight = Sight {
 const STOPS_ITS_TURN: Sight = Sight {
     stopped_call: Sees::Yes,
     result_at: &[],
+    skill_load: SkillLoad::ReadsSkillFile,
     ..CLAUDE
 };
 
@@ -177,6 +193,7 @@ const fn none(why: Unseen) -> Sight {
         turn_answer: Sees::No(why),
         edited_path: Sees::No(why),
         result_at: &[],
+        skill_load: SkillLoad::No(why),
     }
 }
 
@@ -673,6 +690,8 @@ fn result_text(row: &Sight, tree: &Value) -> Option<String> {
     let scrubbed = crate::clone::scrub_credentials(text.trim());
     (!scrubbed.is_empty()).then(|| scrubbed.chars().take(hook::WORKER_OUTPUT_CHARS).collect())
 }
+
+pub mod tally;
 
 #[cfg(test)]
 mod tests;
