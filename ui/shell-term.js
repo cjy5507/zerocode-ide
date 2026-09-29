@@ -6422,8 +6422,11 @@ function tabLayoutRecord(tab) {
     ...(Array.isArray(tab.owed) && tab.owed.length > 0 && { owed: tab.owed }),
     // Which tab the eye was on — Orca's `activeTabId`, kept in the same
     // record as the set. It is what decides, on the way back, which single
-    // tab of the set starts a shell.
-    focused: tab.id === activeTabId,
+    // tab of the set starts a shell. Asked of the tab's OWN workspace
+    // (t-14036): a set saved while another workspace is in front still knows
+    // where its eye was, and a set whose eye is on a document marks no
+    // terminal at all — the stage record holds that eye.
+    focused: tab.id === activeTabByWorktree.get(tab.worktree),
     terms,
   };
 }
@@ -6439,9 +6442,12 @@ function tabLayoutRecord(tab) {
  * agent's name. With it, the restore runs the agent's own resume command in
  * that leaf — Orca's cold restore, from its sleeping record
  * (index-ftls8Hg_.js:95637). */
+/* Which save of each workspace's set is the latest, for its answer. */
+const paneSaveTurns = new Map();
+
 function persistPaneLayouts(worktree) {
   if (restoringPanes || !worktree) return;
-  const layouts = tabs
+  const held = tabs
     .filter(
       (tab) =>
         tab.kind === "term" &&
@@ -6464,10 +6470,29 @@ function persistPaneLayouts(worktree) {
           paneLeaves(tab.layout).some(
             (term) => paneSessions.get(term)?.resumable || paneAgents.has(term),
           )),
-    )
-    .map(tabLayoutRecord);
-  invoke("save_pane_layouts", { worktree, layouts }).catch(() => {});
+    );
+  const turn = (paneSaveTurns.get(worktree) ?? 0) + 1;
+  paneSaveTurns.set(worktree, turn);
+  invoke("save_pane_layouts", { worktree, layouts: held.map(tabLayoutRecord) })
+    .then((names) => {
+      // The name the file gave each tab, in the order sent (t-14036). A tab
+      // born in this session had none, so the stage could not say where it
+      // stood; once it has one, the stage's record is written again with it.
+      // Only the latest save's answer: two saves in flight each name a
+      // nameless tab, and the file keeps the later one's name.
+      if (!Array.isArray(names) || paneSaveTurns.get(worktree) !== turn) return;
+      let named = false;
+      held.forEach((tab, at) => {
+        if (names[at] != null && tab.storedId !== names[at]) {
+          tab.storedId = names[at];
+          named = true;
+        }
+      });
+      if (named) persistStageLayouts({ worktree });
+    })
+    .catch(() => {});
 }
+
 
 /* ---- the stage itself, across the window closing ----
  *
@@ -6721,6 +6746,17 @@ function persistStageLayouts({ deferred = false, worktree = activeWorktreePath }
     const recent = (groupRecents.get(group) ?? [])
       .map((id) => docs.findIndex((tab) => tab.id === id))
       .filter((at) => at >= 0);
+    // The terminals of this group, each by the name the pane file gave it and
+    // its seat among what this record holds (t-14036). The pane file keeps
+    // what a terminal WAS; only the stage knows where it STOOD, and without
+    // this a group of terminals alone folded on the way back and every
+    // terminal came back beside the documents of one group.
+    const terms = [];
+    owned
+      .filter((tab) => STAGE_STORED_KINDS.has(tab.kind) || (tab.kind === "term" && tab.storedId != null))
+      .forEach((tab, at) => {
+        if (tab.kind === "term") terms.push({ id: tab.storedId, at });
+      });
     return {
       tabs: docs.map((tab) => ({
         kind: tab.kind,
@@ -6734,9 +6770,10 @@ function persistStageLayouts({ deferred = false, worktree = activeWorktreePath }
       })),
       active: Math.max(0, inFront ? docs.indexOf(activeTabIn(group)) : docs.includes(active) ? docs.indexOf(active) : recent.at(-1) ?? 0),
       ...(recent.length > 0 && { recent }),
+      ...(terms.length > 0 && { terms }),
     };
   });
-  const layout = groupsRecord.some((group) => group.tabs.length > 0)
+  const layout = groupsRecord.some((group) => group.tabs.length > 0 || group.terms)
     ? {
         root: stageNodeRecord(tree),
         groups: groupsRecord,
@@ -6807,6 +6844,13 @@ async function restoreStageLayout(worktree) {
       return id;
     });
     stageTrees.set(worktree, fillStageLeaves(record.root, [...ids]));
+    // Where each stored terminal stood, for the pane restore that follows —
+    // the group it was in and its seat among the group's stored tabs.
+    const seats = new Map();
+    for (const [at, group] of record.groups.entries()) {
+      for (const seat of group.terms ?? []) seats.set(seat.id, { pane: ids[at], at: seat.at });
+    }
+    if (seats.size > 0) storedTermSeats.set(worktree, seats);
     let focusTab = null;
     for (const [at, group] of record.groups.entries()) {
       for (const tab of group.tabs ?? []) {
@@ -6857,7 +6901,45 @@ async function restoreStageLayout(worktree) {
   } finally {
     restoringStage = false;
   }
-  return true;
+  // A document came back — a record of terminals' seats alone is not one: the
+  // terminals themselves are the pane restore's to bring.
+  return record.groups.some((group) => (group.tabs ?? []).length > 0);
+}
+
+/* Where the stage record says this workspace's terminals stood, by the name
+ * the pane file gave each — read by `restoreStageLayout`, spent by the pane
+ * restore that follows it (t-14036). */
+const storedTermSeats = new Map();
+
+/* This workspace's stored terminals, back in the groups and seats the stage
+ * record holds for them. The strip is the order of `tabs`, so a group's
+ * tabs are re-dealt into the same places of that list they already held:
+ * every other group and workspace keeps its order untouched. A tab the record
+ * does not seat keeps its place among the rest. */
+function seatStoredTerms(worktree) {
+  const seats = storedTermSeats.get(worktree);
+  if (!seats) return;
+  const seated = tabs.filter(
+    (tab) => tab.worktree === worktree && tab.kind === "term" && seats.has(tab.storedId),
+  );
+  if (seated.length === 0) return;
+  storedTermSeats.delete(worktree);
+  const seatOf = (tab) => seats.get(tab.storedId);
+  for (const tab of seated) tab.pane = seatOf(tab).pane;
+  for (const pane of new Set(seated.map((tab) => tab.pane))) {
+    const strip = tabs.filter((tab) => tab.worktree === worktree && tab.pane === pane);
+    const places = strip.map((tab) => tabs.indexOf(tab));
+    const bySeat = strip.filter((tab) => seated.includes(tab)).sort((a, b) => seatOf(a).at - seatOf(b).at);
+    const rest = strip.filter((tab) => !seated.includes(tab));
+    const order = [];
+    while (bySeat.length > 0 || rest.length > 0) {
+      const next = bySeat[0] && (rest.length === 0 || seatOf(bySeat[0]).at <= order.length);
+      order.push(next ? bySeat.shift() : rest.shift());
+    }
+    order.forEach((tab, at) => {
+      tabs[places[at]] = tab;
+    });
+  }
 }
 
 /* A stored tree with the minted group ids in its leaves, in walking order —
@@ -7541,6 +7623,12 @@ async function storedPaneLayouts(worktree) {
   return Array.isArray(records) ? records : [];
 }
 
+/* The workspaces whose stored set the boot put on the strip behind the one in
+ * front, until somebody steps into them — each with the tab its record says
+ * the eye was on, or null when the eye was on something the stage record
+ * holds (t-14036). */
+const paneSetsBehind = new Map();
+
 /* The tabs this worktree had when it was last looked at, back on the strip.
  *
  * Every one of them comes back ASLEEP — the whole set is drawn, and not one
@@ -7550,15 +7638,49 @@ async function storedPaneLayouts(worktree) {
  * workspace with nine stored tabs therefore opens nine tabs and one shell,
  * which is what Orca does and what makes opening a project cheap.
  *
+ * Each terminal goes back to the group and seat the stage record holds for it
+ * (`seatStoredTerms`), and an eye the stage record put back on a document
+ * stays there — a set with no terminal marked had its eye elsewhere
+ * (t-14036).
+ *
+ * `behind`: the boot putting back a workspace nobody is looking at. Nothing
+ * is handed the stage, the eye is only remembered for the visit, and the
+ * conversations woken are the ones the exit found running (`awake`).
+ *
  * Answers whether anything came back, so the caller knows whether the plain
  * first terminal is still needed. Takes the records when the caller has
  * already read them; asks for itself when nobody has. */
-async function restoreWorktreeLayouts(worktree, stored) {
+async function restoreWorktreeLayouts(worktree, stored, { behind = false } = {}) {
+  // Already on the strip — the boot put it there, and now somebody stepped
+  // in. Reading the file again would open every tab a second time; what a
+  // visit adds is the stage's seats, the eye, and the conversations that
+  // were left asleep.
+  if (paneSetsBehind.has(worktree)) {
+    if (behind) return true;
+    const owned = tabs.filter((tab) => tab.worktree === worktree && tab.kind === "term");
+    if (owned.length === 0) return false;
+    seatStoredTerms(worktree);
+    // The record's eye first: the stage restore that ran just before this
+    // put its own eye on a document of the group, which is right only when
+    // no terminal was marked.
+    const marked = paneSetsBehind.get(worktree);
+    paneSetsBehind.delete(worktree);
+    const eye =
+      tabs.find((tab) => tab.id === marked) ??
+      tabs.find((tab) => tab.id === activeTabByWorktree.get(worktree) && tab.worktree === worktree) ??
+      owned[owned.length - 1];
+    setActiveTab(eye.id);
+    wakeStoredConversations(worktree, owned, eye);
+    return true;
+  }
   // Only entries that are records. The backend hands over a typed list, so
   // this costs nothing — but it runs at boot, and a file somebody edited must
   // not be able to stop the window on its way up.
   const records = (stored ?? (await storedPaneLayouts(worktree))).filter(Boolean);
   if (records.length === 0) return false;
+  // Asked again after the read: somebody may have stepped into this workspace
+  // while it was in flight, and then the set is the visit's to put back.
+  if (behind && restoredWorkspaces.has(worktree)) return false;
   restoringPanes = true;
   let made = [];
   try {
@@ -7566,32 +7688,50 @@ async function restoreWorktreeLayouts(worktree, stored) {
   } finally {
     restoringPanes = false;
   }
-  // Which tab the eye was on. Nothing in the file says so only when the file
-  // was written before this window kept the answer — the last tab is where
-  // the restore used to leave somebody, and it stays the fallback.
   const looked = records.findIndex((record) => record?.focused);
-  const eye = made[looked >= 0 ? looked : made.length - 1];
-  setActiveTab(eye.id);
-  // A tab that held a CONVERSATION does not stay asleep.
-  //
-  // The lazy rule above is Orca's, and copying it produced a result Orca does
-  // not have: Orca's restored tabs are the running programs themselves,
-  // reattached, so every agent that was working is working the moment the
-  // window is back. Ours re-spawns from a record, and only the tab the eye was
-  // on was ever re-spawned — so an agent that was not in front simply never
-  // came back. Reported exactly that way, twice: "lotto세션은 코덱스가 켜있지
-  // 않음", then "claude는 복구되도 자동으로 뜨는데 codex는 안떠". Claude was
-  // the tab the eye was on. That is the whole of the asymmetry.
-  //
-  // Bounded on purpose. Only this workspace, only the tabs holding a
-  // conversation — a stored plain shell is a shape and stays lazy, which is
-  // what keeps opening a project of nine terminals cheap. One at a time and
-  // off the critical path, so the stage settles at the same moment it did
-  // before and the spawns arrive behind it.
+  // Behind the front: the eye is only remembered, for the visit and for the
+  // saves before it, and only the conversations the exit found running wake.
+  if (behind) {
+    const marked = made[looked] ?? null;
+    paneSetsBehind.set(worktree, marked?.id ?? null);
+    if (marked) activeTabByWorktree.set(worktree, marked.id);
+    wakeStoredConversations(worktree, made.filter((tab) => tab.asleep?.awake), null);
+    return true;
+  }
+  seatStoredTerms(worktree);
+  // Which tab the eye was on. A set that marks none had it on something the
+  // stage record holds — a document it has just put back in front — or was
+  // written before this window kept the answer, when the last tab is where
+  // the restore used to leave somebody.
+  const onDocument = tabs.some(
+    (tab) => tab.id === activeTabByWorktree.get(worktree) && tab.worktree === worktree && tab.kind !== "term",
+  );
+  const eye = looked >= 0 ? made[looked] : onDocument ? null : made[made.length - 1];
+  if (eye) setActiveTab(eye.id);
+  wakeStoredConversations(worktree, made, eye);
+  return true;
+}
+
+/* A tab that held a CONVERSATION does not stay asleep.
+ *
+ * The lazy rule is Orca's, and copying it produced a result Orca does not
+ * have: Orca's restored tabs are the running programs themselves, reattached,
+ * so every agent that was working is working the moment the window is back.
+ * Ours re-spawns from a record, and only the tab the eye was on was ever
+ * re-spawned — so an agent that was not in front simply never came back.
+ * Reported exactly that way, twice: "lotto세션은 코덱스가 켜있지 않음", then
+ * "claude는 복구되도 자동으로 뜨는데 codex는 안떠". Claude was the tab the eye
+ * was on. That is the whole of the asymmetry.
+ *
+ * Bounded on purpose. Only the tabs given, only the ones holding a
+ * conversation — a stored plain shell is a shape and stays lazy, which is what
+ * keeps opening a project of nine terminals cheap. One at a time and off the
+ * critical path, so the stage settles at the same moment it did before and
+ * the spawns arrive behind it. `staged` is the tab the stage itself wakes. */
+function wakeStoredConversations(worktree, sleeping, staged) {
   const eager = (async () => {
-    for (const [at, record] of records.entries()) {
-      const tab = made[at];
-      if (!tab || tab.id === eye.id || !storedLayoutsHoldProgram([record])) continue;
+    for (const tab of sleeping) {
+      if (tab.id === staged?.id || !tab.asleep || !storedLayoutsHoldProgram([tab.asleep])) continue;
       try {
         await wakeStoredTab(tab);
       } catch (error) {
@@ -7609,7 +7749,32 @@ async function restoreWorktreeLayouts(worktree, stored) {
   void eager.finally(() => {
     if (eagerWakes.get(worktree) === eager) eagerWakes.delete(worktree);
   });
-  return true;
+}
+
+/* The workspaces behind the one in front whose conversations were running
+ * when the window went, put back without anybody clicking them (t-14036).
+ *
+ * Asked for in so many words after the 2026-09-29 07:08 restart: the panes
+ * that were open come back the same. The front goes first and its own wakes
+ * settle before anything behind it starts; then one workspace at a time, each
+ * waiting for the last one's wakes, through the same restore and the same
+ * wake a click takes — so a conversation that cannot come back says so in its
+ * own pane (t-12063), and a workspace the person has already stepped into is
+ * theirs and is left alone. The backend names the workspaces: the ones whose
+ * sets the exit found running a conversation. */
+async function restoreStandingWorkspaces() {
+  let standing = [];
+  try {
+    standing = await invoke("standing_pane_worktrees");
+  } catch {
+    return;
+  }
+  await storedWakesSettled(activeWorktreePath);
+  for (const worktree of Array.isArray(standing) ? standing : []) {
+    if (worktree === activeWorktreePath || restoredWorkspaces.has(worktree)) continue;
+    await restoreWorktreeLayouts(worktree, null, { behind: true });
+    await storedWakesSettled(worktree);
+  }
 }
 
 /* Say the terminals' names again, in the language now in force.

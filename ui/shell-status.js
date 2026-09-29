@@ -4899,7 +4899,13 @@ function endTabDrag() {
   tabDrag = null;
   tabstrip.classList.remove("is-dragging");
   showDropZone(null);
-  if (!target) return;
+  // A drag that stayed in its own strip reordered it while it moved, and the
+  // order is part of what the stage looks like — terminals' seats included
+  // (t-14036).
+  if (!target) {
+    persistStageLayouts();
+    return;
+  }
   const tab = tabs.find((held) => held.id === id);
   if (!tab) return;
   const source = tab.pane;
@@ -4910,7 +4916,10 @@ function endTabDrag() {
   // Dropped in another group's middle: the tab joins that group — Orca's
   // `moveUnifiedTabToGroup` — and the group it left folds if it emptied.
   if (target.zone === "center") {
-    if (target.group === source) return;
+    if (target.group === source) {
+      persistStageLayouts();
+      return;
+    }
     tab.pane = target.group;
     collapseStageGroup(source);
     setActiveTab(tab.id);
@@ -5441,8 +5450,12 @@ function dropTab(id, { closed = false } = {}) {
     persistPaneLayouts(removed.worktree);
     scheduleAgentPaint(["cards"]);
   }
-  // A closed document the same — and a group that folded moved the tree.
+  // A closed document the same — and a group that folded moved the tree. A
+  // terminal the stage record seats is in that record too (t-14036).
   if (STAGE_STORED_KINDS.has(removed?.kind)) persistStageLayouts();
+  else if (removed?.kind === "term" && removed.storedId != null) {
+    persistStageLayouts({ worktree: removed.worktree });
+  }
 }
 
 /* ---- 도는 프로세스의 터미널은 닫기 전에 묻는다 (1-ft) ----

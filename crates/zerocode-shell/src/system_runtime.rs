@@ -650,23 +650,15 @@ pub(super) fn capture_scrollback_at_exit(app: &AppHandle) {
         // First the zo panes no saved tab holds (t-12063), so their screens
         // are captured below with everyone else's.
         pane_layout::file_unheld(layouts, live);
-        for tabs in layouts.values_mut() {
-            for layout in tabs.iter_mut() {
-                for (ordinal, term) in std::mem::take(&mut layout.terms) {
-                    let Some(held) = terminals.handle(term) else {
-                        continue;
-                    };
-                    let pty = lock_pty(&held);
-                    let written = zerocode_pty::serialize_tail(
-                        pty.terminal().grid(),
-                        zerocode_pty::SCROLLBACK_BUFFER_BYTE_LIMIT,
-                    );
-                    if !written.is_empty() {
-                        layout.buffers.insert(ordinal, written);
-                    }
-                }
-            }
-        }
+        // Every leaf's screen, and which tabs were standing (t-14036).
+        pane_layout::capture_exit(layouts, |term| {
+            let held = terminals.handle(term)?;
+            let pty = lock_pty(&held);
+            Some(zerocode_pty::serialize_tail(
+                pty.terminal().grid(),
+                zerocode_pty::SCROLLBACK_BUFFER_BYTE_LIMIT,
+            ))
+        });
         true
     });
 }

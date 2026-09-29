@@ -235,6 +235,14 @@ pub struct TabLayout {
     /// woken on their own: which conversation a pane holds is the person's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owed: Vec<WakeAgent>,
+    /// Whether this tab's shells were standing when the window went — the
+    /// exit's own word ([`capture_exit`]), never the window's: a save from the
+    /// window does not carry it (t-14036). The next boot puts back, behind the
+    /// workspace in front, every workspace whose conversations were running
+    /// ([`standing_worktrees`]); a conversation asleep at the exit stays asleep
+    /// until somebody steps into its workspace.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awake: bool,
 }
 
 /// How many owed conversations one tab keeps: the newest few, never a pile.
@@ -323,6 +331,7 @@ impl TabLayout {
             terms,
             buffers,
             owed,
+            awake: self.awake,
         })
     }
 }
@@ -411,23 +420,23 @@ pub(crate) fn rewrite(
 /// What the window saves after it describes the window dying: a shell that
 /// ended on the way out, and the tab the window pruned around it. Asked
 /// under the writer's own lock, so a save cannot land between the exit's own
-/// snapshot and the process ending. Answers whether the set was written.
+/// snapshot and the process ending. Answers the names the tabs were stored
+/// under ([`store`]), or `None` when the set was not written.
 pub(crate) fn save_window_set(
     file: &Path,
     worktree: String,
     tabs: Vec<TabLayout>,
     leaving: &dyn Fn() -> bool,
-) -> std::io::Result<bool> {
-    let mut saved = false;
+) -> std::io::Result<Option<Vec<Option<u64>>>> {
+    let mut named = None;
     rewrite(file, |held| {
         if leaving() {
             return false;
         }
-        store(held, worktree, tabs);
-        saved = true;
+        named = Some(store(held, worktree, tabs));
         true
     })?;
-    Ok(saved)
+    Ok(named)
 }
 
 /// Put one worktree's tabs into `layouts`, normalised, pruning as it goes.
@@ -436,7 +445,12 @@ pub(crate) fn save_window_set(
 /// must not resurrect it on the next visit. Entries for worktrees that no
 /// longer exist on disk go at the same time — this map is keyed by checkout
 /// paths, and checkouts are things people delete.
-pub fn store(layouts: &mut Layouts, worktree: String, tabs: Vec<TabLayout>) {
+///
+/// Answers the name each tab was stored under, in the order given — `None`
+/// for one not worth keeping (t-14036). A tab born in this session reaches
+/// here nameless; handed its name back, the window can say where it stands
+/// on the stage, and every later save names it the same.
+pub fn store(layouts: &mut Layouts, worktree: String, tabs: Vec<TabLayout>) -> Vec<Option<u64>> {
     layouts.retain(|path, _| Path::new(path).is_dir());
     let held = layouts.get(&worktree).cloned().unwrap_or_default();
     let mut next = held
@@ -448,8 +462,10 @@ pub fn store(layouts: &mut Layouts, worktree: String, tabs: Vec<TabLayout>) {
         + 1;
     let mut looked_at = false;
     let mut kept: Vec<TabLayout> = Vec::new();
+    let mut named: Vec<Option<u64>> = Vec::new();
     for tab in tabs {
         let Some(mut tab) = tab.normalized() else {
+            named.push(None);
             continue;
         };
         // A tab that comes back without its screens keeps the ones the file
@@ -476,6 +492,7 @@ pub fn store(layouts: &mut Layouts, worktree: String, tabs: Vec<TabLayout>) {
             tab.focused = !looked_at;
             looked_at = true;
         }
+        named.push(tab.id);
         kept.push(tab);
     }
     if kept.is_empty() {
@@ -483,6 +500,53 @@ pub fn store(layouts: &mut Layouts, worktree: String, tabs: Vec<TabLayout>) {
     } else {
         layouts.insert(worktree, kept);
     }
+    named
+}
+
+/// The exit's screens, and its word on which tabs were standing (t-14036).
+///
+/// Every leaf the session named by its pty id is asked for its screen, and
+/// the ids are spent — they die with this process, and a number left in the
+/// file would point the NEXT session's capture at somebody else's shell.
+/// `screen` answers `None` for a terminal that is already gone. A tab is
+/// `awake` when any of its leaves still had a terminal to ask; a tab this
+/// window never woke names no ids, keeps the screens it already had, and is
+/// not awake.
+pub(crate) fn capture_exit(layouts: &mut Layouts, screen: impl Fn(u32) -> Option<String>) {
+    for tabs in layouts.values_mut() {
+        for layout in tabs.iter_mut() {
+            let mut standing = false;
+            for (ordinal, term) in std::mem::take(&mut layout.terms) {
+                let Some(written) = screen(term) else {
+                    continue;
+                };
+                standing = true;
+                if !written.is_empty() {
+                    layout.buffers.insert(ordinal, written);
+                }
+            }
+            layout.awake = standing;
+        }
+    }
+}
+
+/// The workspaces the next boot puts back behind the one in front: those
+/// whose sets hold a tab the exit found standing with a conversation or an
+/// agent in it (t-14036). In path order, so two boots walk them alike; a
+/// checkout gone from the disk is not one.
+pub(crate) fn standing_worktrees(layouts: &Layouts) -> Vec<String> {
+    let mut standing: Vec<String> = layouts
+        .iter()
+        .filter(|(path, tabs)| {
+            Path::new(path).is_dir()
+                && tabs
+                    .iter()
+                    .any(|tab| tab.awake && (!tab.agents.is_empty() || !tab.running.is_empty()))
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    standing.sort();
+    standing
 }
 
 /// A pane the window found running a conversation as it went: its shell,
@@ -537,6 +601,7 @@ pub(crate) fn file_unheld(layouts: &mut Layouts, live: Vec<LivePane>) -> usize {
             terms: HashMap::from([(0, pane.term)]),
             buffers: HashMap::new(),
             owed: Vec::new(),
+            awake: false,
         });
         filed += 1;
     }
@@ -581,6 +646,7 @@ mod tests {
             terms: HashMap::new(),
             buffers: HashMap::new(),
             owed: Vec::new(),
+            awake: false,
         }
     }
 
@@ -971,7 +1037,7 @@ mod tests {
                             &|| false,
                         )
                         .expect("a save");
-                        assert!(saved, "a window that is not leaving was refused");
+                        assert!(saved.is_some(), "a window that is not leaving was refused");
                     }
                 });
             }
@@ -1004,11 +1070,16 @@ mod tests {
                 &|| false,
             )
             .expect("a save")
+            .is_some()
         );
         let before = std::fs::read(&file).expect("the list");
         // The last tab's shell ended on the way out; the window saves the
         // set without it.
-        assert!(!save_window_set(&file, tree.clone(), Vec::new(), &|| true).expect("a refusal"));
+        assert!(
+            save_window_set(&file, tree.clone(), Vec::new(), &|| true)
+                .expect("a refusal")
+                .is_none()
+        );
         assert_eq!(
             std::fs::read(&file).expect("the list"),
             before,
@@ -1134,5 +1205,123 @@ mod tests {
             1,
             "a conversation a tab names is that tab's"
         );
+    }
+
+    /// The file names every tab it keeps and hands the names back in the
+    /// order the tabs came (t-14036): a tab born in this session reaches the
+    /// file nameless, and the window can only seat a named tab on its stage.
+    /// A tab not worth keeping is answered with nothing, in its place.
+    #[test]
+    fn a_save_hands_back_the_name_each_tab_was_kept_under() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let here = dir.path().to_string_lossy().into_owned();
+        let mut layouts = Layouts::new();
+        let named = |id: Option<u64>| TabLayout {
+            id,
+            ..bare(PaneNode::Leaf)
+        };
+        let refused = TabLayout {
+            root: (0..=MAX_LEAVES).fold(PaneNode::Leaf, |tree, _| split_of(tree)),
+            ..bare(PaneNode::Leaf)
+        };
+        let names = store(
+            &mut layouts,
+            here.clone(),
+            vec![named(Some(7)), named(None), refused, named(None)],
+        );
+        assert_eq!(names, vec![Some(7), Some(8), None, Some(9)]);
+        // And the names stay: the same tabs saved again under the names they
+        // were handed keep them.
+        let again = store(
+            &mut layouts,
+            here.clone(),
+            vec![named(Some(7)), named(Some(8)), named(Some(9))],
+        );
+        assert_eq!(again, vec![Some(7), Some(8), Some(9)]);
+    }
+
+    fn split_of(first: PaneNode) -> PaneNode {
+        PaneNode::Split {
+            direction: SplitDirection::Vertical,
+            first: Box::new(first),
+            second: Box::new(PaneNode::Leaf),
+            ratio: None,
+        }
+    }
+
+    /// The exit says which tabs were standing, and nothing else does
+    /// (t-14036): a tab whose leaves still had a terminal is awake, a tab
+    /// this session never woke — no pty ids — is not, whatever an earlier
+    /// exit said, and keeps the screen it had. The next boot puts back the
+    /// workspaces that were running a conversation, in path order, and only
+    /// those still on the disk.
+    #[test]
+    fn the_exit_marks_the_tabs_that_were_standing_and_the_boot_finds_their_workspaces() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let trees = checkouts(root.path(), 3);
+        let conversation = TabLayout {
+            agents: HashMap::from([(0, zo("session-1790000000031-0"))]),
+            running: HashMap::from([(0, "zo".to_string())]),
+            ..bare(PaneNode::Leaf)
+        };
+        let mut layouts = Layouts::new();
+        // The first workspace ran its conversation; its terminal is live.
+        layouts.insert(
+            trees[0].clone(),
+            vec![TabLayout {
+                terms: HashMap::from([(0, 41)]),
+                ..conversation.clone()
+            }],
+        );
+        // The second held one asleep since an earlier exit that found it
+        // running, and a plain shell that was standing.
+        layouts.insert(
+            trees[1].clone(),
+            vec![
+                TabLayout {
+                    awake: true,
+                    buffers: HashMap::from([(0, "earlier screen".to_string())]),
+                    ..conversation.clone()
+                },
+                TabLayout {
+                    terms: HashMap::from([(0, 42)]),
+                    ..bare(PaneNode::Leaf)
+                },
+            ],
+        );
+        // The third's conversation had ended before the window went.
+        layouts.insert(
+            trees[2].clone(),
+            vec![TabLayout {
+                terms: HashMap::from([(0, 43)]),
+                ..conversation.clone()
+            }],
+        );
+        // And a checkout since deleted.
+        layouts.insert(
+            root.path().join("gone").to_string_lossy().into_owned(),
+            vec![TabLayout {
+                awake: true,
+                ..conversation
+            }],
+        );
+        capture_exit(&mut layouts, |term| {
+            (term != 43).then(|| format!("screen {term}"))
+        });
+
+        let tree = |at: usize| &layouts[&trees[at]];
+        assert!(tree(0)[0].awake && tree(0)[0].terms.is_empty());
+        assert_eq!(tree(0)[0].buffers[&0], "screen 41");
+        assert!(
+            !tree(1)[0].awake,
+            "a tab this session never woke was called standing"
+        );
+        assert_eq!(tree(1)[0].buffers[&0], "earlier screen");
+        assert!(tree(1)[1].awake);
+        assert!(
+            !tree(2)[0].awake,
+            "a tab whose terminal had ended was called standing"
+        );
+        assert_eq!(standing_worktrees(&layouts), vec![trees[0].clone()]);
     }
 }

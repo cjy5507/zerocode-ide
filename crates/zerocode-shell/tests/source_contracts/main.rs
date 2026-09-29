@@ -27795,9 +27795,13 @@ mod tests {
                 && shipped.contains("capture_scrollback_at_exit"),
             "nothing captures the screens on the way out"
         );
+        // The spending lives with the file's rules (t-14036), where the same
+        // walk says which tabs were standing.
         assert!(
             block_after(shipped, "fn capture_scrollback_at_exit(")
-                .contains("std::mem::take(&mut layout.terms)"),
+                .contains("pane_layout::capture_exit(")
+                && block_after(rules, "pub(crate) fn capture_exit(")
+                    .contains("std::mem::take(&mut layout.terms)"),
             "the capture no longer spends and clears the stored pty ids"
         );
         // The replay feeds the terminal's PARSER — never the child's stdin:

@@ -119,6 +119,21 @@ pub struct StageGroup {
     pub active: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent: Vec<usize>,
+    /// The terminal tabs this group held (t-14036). The pane file keeps what
+    /// a terminal WAS; only the stage knows where it STOOD, so each is named
+    /// here by the name the pane file gave it, with its seat among the
+    /// group's stored tabs. A group holding terminals alone is a group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<StageTerm>,
+}
+
+/// One terminal tab's place in its group: the pane file's name for it
+/// (`TabLayout::id`) and its seat among the group's stored tabs, documents
+/// and terminals counted together.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StageTerm {
+    pub id: u64,
+    pub at: usize,
 }
 
 /// One worktree's stage: the split tree, the groups by leaf ordinal, and
@@ -147,10 +162,19 @@ impl StageLayout {
         {
             return None;
         }
+        // One terminal, one seat: a name seated twice is a hand edit, and the
+        // first seat stands.
+        let mut seated = std::collections::HashSet::new();
         let kept_groups: Vec<Option<StageGroup>> = self
             .groups
             .into_iter()
             .map(|group| {
+                let terms: Vec<StageTerm> = group
+                    .terms
+                    .into_iter()
+                    .filter(|term| seated.insert(term.id))
+                    .take(MAX_TABS)
+                    .collect();
                 let held = group.active;
                 // Old index → new, so the recency order can follow the tabs
                 // it names through the drop.
@@ -176,7 +200,12 @@ impl StageLayout {
                     tabs.push(tab);
                 }
                 if tabs.is_empty() {
-                    return None;
+                    return (!terms.is_empty()).then(|| StageGroup {
+                        tabs,
+                        active: 0,
+                        recent: Vec::new(),
+                        terms,
+                    });
                 }
                 // The active tab is revalidated by IDENTITY, not clamped:
                 // Orca stores an id and checks it still exists. An ordinal
@@ -206,6 +235,7 @@ impl StageLayout {
                     tabs,
                     active,
                     recent,
+                    terms,
                 })
             })
             .collect();
@@ -213,8 +243,8 @@ impl StageLayout {
         let root = prune_leaves(self.root, &survivors, &mut 0)?;
         let groups: Vec<StageGroup> = kept_groups.into_iter().flatten().collect();
         // The stored focus, when its group survived WITH tabs — every kept
-        // group has tabs here, so surviving is the whole test — else the
-        // first group standing.
+        // group has documents or terminals here, so surviving is the whole
+        // test — else the first group standing.
         let focused = renumbered(&survivors, self.focused).unwrap_or(0);
         Some(StageLayout {
             root: root.normalized(),
@@ -334,6 +364,7 @@ mod tests {
                 }],
                 active: 0,
                 recent: Vec::new(),
+                terms: Vec::new(),
             }],
             focused: 0,
         };
@@ -363,6 +394,7 @@ mod tests {
                 ],
                 active: 4,
                 recent: Vec::new(),
+                terms: Vec::new(),
             }],
             focused: 0,
         };
@@ -392,16 +424,19 @@ mod tests {
                     tabs: vec![tab("diff", None)],
                     active: 0,
                     recent: Vec::new(),
+                    terms: Vec::new(),
                 },
                 StageGroup {
                     tabs: vec![tab("board", None)],
                     active: 0,
                     recent: Vec::new(),
+                    terms: Vec::new(),
                 },
                 StageGroup {
                     tabs: vec![tab("changes", None)],
                     active: 0,
                     recent: Vec::new(),
+                    terms: Vec::new(),
                 },
             ],
             focused: 2,
@@ -421,11 +456,13 @@ mod tests {
                     tabs: vec![tab("vault", None)],
                     active: 0,
                     recent: Vec::new(),
+                    terms: Vec::new(),
                 },
                 StageGroup {
                     tabs: vec![tab("diff", None)],
                     active: 0,
                     recent: Vec::new(),
+                    terms: Vec::new(),
                 },
             ],
             focused: 1,
@@ -445,6 +482,7 @@ mod tests {
                 tabs: vec![tab("board", None)],
                 active: 0,
                 recent: Vec::new(),
+                terms: Vec::new(),
             }],
             focused: 0,
         };
@@ -455,6 +493,7 @@ mod tests {
                 tabs: vec![tab("diff", None)],
                 active: 0,
                 recent: Vec::new(),
+                terms: Vec::new(),
             }],
             focused: 0,
         };
@@ -478,6 +517,7 @@ mod tests {
                     tabs: vec![tab("board", None)],
                     active: 0,
                     recent: Vec::new(),
+                    terms: Vec::new(),
                 }],
                 focused: 0,
             }),
@@ -511,6 +551,7 @@ mod tests {
                 // Mentions the pruned tab, mentions the board twice — the
                 // LATER mention wins — and never mentions the active vault.
                 recent: vec![1, 0, 2, 1],
+                terms: Vec::new(),
             }],
             focused: 0,
         };
@@ -535,6 +576,7 @@ mod tests {
                 tabs: vec![edited, drafted],
                 active: 0,
                 recent: Vec::new(),
+                terms: Vec::new(),
             }],
             focused: 0,
         };
@@ -572,6 +614,7 @@ mod tests {
                     tabs,
                     active: 0,
                     recent: Vec::new(),
+                    terms: Vec::new(),
                 }],
                 focused: 0,
             }),
@@ -632,11 +675,57 @@ mod tests {
                 ],
                 active: 0,
                 recent: Vec::new(),
+                terms: Vec::new(),
             }],
             focused: 0,
         };
 
         let held = layout.normalized().expect("the valid board remains");
         assert_eq!(held.groups[0].tabs, vec![tab("board", None)]);
+    }
+
+    /// A group holding only terminals is a group (t-14036). The record names
+    /// each terminal tab by the name the pane file gave it and its seat in
+    /// the strip; a stage divided into a board on one side and conversations
+    /// on the other folded to the board alone, and every terminal came back
+    /// on the board's side.
+    #[test]
+    fn a_group_of_terminals_alone_is_kept_with_its_seats() {
+        let written = serde_json::json!({
+            "root": {
+                "type": "split",
+                "direction": "vertical",
+                "first": { "type": "leaf" },
+                "second": { "type": "leaf" }
+            },
+            "groups": [
+                { "tabs": [{ "kind": "board" }], "active": 0, "terms": [{ "id": 3, "at": 0 }] },
+                { "tabs": [], "active": 0, "terms": [{ "id": 2, "at": 0 }, { "id": 1, "at": 1 }] }
+            ],
+            "focused": 1
+        });
+        let layout: StageLayout = serde_json::from_value(written).expect("a stage record");
+
+        let held = layout.normalized().expect("both groups hold something");
+        let back = serde_json::to_value(&held).expect("serialises");
+        assert_eq!(
+            back["groups"].as_array().map(Vec::len),
+            Some(2),
+            "the group of terminals folded away: {back}"
+        );
+        assert_eq!(
+            back["focused"], 1,
+            "the eye left the group of terminals: {back}"
+        );
+        assert_eq!(
+            back["groups"][1]["terms"],
+            serde_json::json!([{ "id": 2, "at": 0 }, { "id": 1, "at": 1 }]),
+            "the terminals lost their seats: {back}"
+        );
+        assert_eq!(
+            back["groups"][0]["terms"],
+            serde_json::json!([{ "id": 3, "at": 0 }]),
+            "a terminal beside a document lost its seat: {back}"
+        );
     }
 }
