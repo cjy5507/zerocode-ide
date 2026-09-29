@@ -14100,6 +14100,58 @@ fn a_vault_page_is_read_from_the_vault_and_anything_else_from_the_project() {
     assert!(resolve_in_project(&root, &stray.to_string_lossy()).is_err());
 }
 
+/// The gallery lists every project's documents. The window asks which door a
+/// document goes through: the project's own file door — an editable tab, as it
+/// always was — or the artifact store, as a tab nobody can write. The answer is
+/// the door's own, so it can never be wider than what `read_text_file` reads
+/// (t-16006).
+#[test]
+fn a_document_opens_through_the_project_door_only_where_that_door_would_read_it() {
+    let project = tempfile::tempdir().expect("project");
+    let another = tempfile::tempdir().expect("another project");
+    let vault = tempfile::tempdir().expect("vault");
+    std::fs::write(project.path().join("inside.md"), "in").expect("inside");
+    std::fs::write(another.path().join("outside.md"), "out").expect("outside");
+    std::fs::create_dir_all(vault.path().join("wiki")).expect("wiki");
+    let page = vault.path().join("wiki/page.md");
+    std::fs::write(&page, "# page").expect("page");
+    let vault_str = vault.path().to_string_lossy().into_owned();
+    let saved = Some(vault_str.as_str());
+    let opens = |vault: Option<&str>, path: &std::path::Path| {
+        crate::cmd::fs::opens_in_project(
+            project.path().to_path_buf(),
+            vault,
+            &path.to_string_lossy(),
+        )
+    };
+
+    assert!(opens(saved, &project.path().join("inside.md")));
+    assert!(
+        !opens(saved, &another.path().join("outside.md")),
+        "another project's document is read through the store, not this door"
+    );
+    assert!(
+        opens(saved, &page),
+        "the vault stays the door's one exception"
+    );
+    assert!(
+        !opens(None, &page),
+        "no vault saved: the page is outside the only root there is"
+    );
+    assert!(
+        !opens(None, &project.path().join("gone.md")),
+        "a file that is not there is not read by the door either"
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(another.path(), project.path().join("link")).expect("symlink");
+        assert!(
+            !opens(None, &project.path().join("link/outside.md")),
+            "a link inside the project that points out of it reads nothing"
+        );
+    }
+}
+
 #[test]
 fn a_session_is_shown_a_vault_page_once_and_another_session_is_shown_it_again() {
     let vault = tempfile::tempdir().expect("vault");

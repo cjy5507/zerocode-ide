@@ -252,7 +252,7 @@ pub(crate) use second_brain::{
 pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};
 
 pub(crate) use artifacts::{
-    artifact_copy_path, artifact_counts, artifact_delete, artifact_export,
+    artifact_copy_path, artifact_counts, artifact_delete, artifact_document, artifact_export,
     artifact_feedback_record, artifact_import_transcripts, artifact_open, artifact_page_at,
     artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_thumbnail,
     artifact_versions, artifacts_list,

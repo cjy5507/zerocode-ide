@@ -113,6 +113,13 @@ pub(crate) fn root_of(active: PathBuf, vault: Option<&str>, path: &str) -> PathB
     }
 }
 
+/// Whether the project's own file door would read `path` — the open project, or
+/// the saved vault — which is the door an editable tab goes through (t-16006).
+/// Red-stage stub: says yes to everything.
+pub(crate) fn opens_in_project(_active: PathBuf, _vault: Option<&str>, _path: &str) -> bool {
+    true
+}
+
 /// What a file is right now, without its text.
 ///
 /// The narrow half of [`read_text_file`], for asking "has this moved" when a
