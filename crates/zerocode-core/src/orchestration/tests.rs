@@ -12062,6 +12062,16 @@ fn agent_list_ranks_nothing_and_recommends_nothing() {
             // with its age — a measurement of the machine, like
             // `installed`, and `unknown` where nobody observed (t-3996).
             "readiness",
+            // What a summons that leaves the model open launches with at
+            // each difficulty and where that came from — the window's own
+            // launch path read against the lineup zo's live catalog gave
+            // today, typed by nobody, so it cannot go stale the day a
+            // vendor ships (t-14437). The launch itself, not advice about
+            // which is better: `null` where nobody read a lineup.
+            "summon",
+            // And, where there are no launch rows, why — so a coordinator
+            // is told rather than left to a CLI's default (t-14437).
+            "summonUnavailable",
             "takesEffort",
             "takesModel",
             "unsupportedHere",
