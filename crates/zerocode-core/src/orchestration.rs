@@ -10700,13 +10700,16 @@ impl Ledger {
     ///
     /// So the window hands over every lead it has seen come to rest, parked
     /// `Stop` or not, and the ledger decides with what it owns: a live
-    /// worker, not the person's, carrying an open attempt; mail at its
-    /// address nobody acknowledged ([`Run::unread`]) or a wait of its own on
-    /// that address; and [`IDLE_NOTICE_GRACE_MS`] past the later of the rest
+    /// worker carrying an open attempt; mail at its address nobody
+    /// acknowledged ([`Run::unread`]) or — for a worker the person has not
+    /// taken over — a wait of its own on that address; and
+    /// [`IDLE_NOTICE_GRACE_MS`] past the later of the rest
     /// and the oldest unread mail — the pointer's chance to put the mail in
     /// front of the model. A worker whose unanswered question stands and who
     /// has nothing unread is waiting on purpose, and its question is already
-    /// in the coordinator's inbox.
+    /// in the coordinator's inbox. A worker the person took over is never
+    /// typed into, so its unread mail is told and named as taken over — the
+    /// pointer's skip of a taken pane had left it with nobody told at all.
     ///
     /// Once per episode: the report-free interval `quiet_episode` reads,
     /// shared with the stall sweep, so neither road tells a silence the
@@ -10731,7 +10734,7 @@ impl Ledger {
             }
             let Some((run_id, body, subject, task, dispatch)) = self.runs.iter().find_map(|run| {
                 let worker = run.worker(&one.worker)?;
-                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                if !worker.state.is_live() || !worker.state.may_occupy_pane() {
                     return None;
                 }
                 let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
@@ -10744,7 +10747,16 @@ impl Ledger {
                     .into_iter()
                     .filter_map(|id| run.message(id))
                     .collect();
-                if unread.is_empty() && (!one.waiting_on_mail || awaiting_reply(run, &worker.id)) {
+                /* A pane the person took is theirs to wait in: nothing is
+                 * typed there, and with nothing unread there is nothing to
+                 * tell. Its unread mail IS news — the pointer's skip of a
+                 * taken pane left run-4275's w-14439 with six letters nobody
+                 * was told about (t-15313). */
+                if unread.is_empty()
+                    && (worker.taken_over
+                        || !one.waiting_on_mail
+                        || awaiting_reply(run, &worker.id))
+                {
                     return None;
                 }
                 let since = unread
@@ -10770,9 +10782,13 @@ impl Ledger {
                     true => IDLE_WAITING_REASON,
                 };
                 let rested_s = now_ms.saturating_sub(one.rested_ms) / 1000;
+                let taken = match worker.taken_over {
+                    true => ", taken over by the person,",
+                    false => ",",
+                };
                 let subject = match unread.is_empty() {
                     false => format!(
-                        "unread mail waiting: {} for {} ({}), at rest {rested_s} s",
+                        "unread mail waiting: {} for {} ({}){taken} at rest {rested_s} s",
                         named_ids(&unread_ids),
                         worker.id,
                         dispatch.task
@@ -10797,6 +10813,7 @@ impl Ledger {
                         "idleSinceMs": one.rested_ms,
                         "observedAtMs": now_ms,
                         "waitingOnMail": one.waiting_on_mail,
+                        "takenOver": worker.taken_over,
                         "lastStatus": last_status_json(run, &worker.id),
                         "episodeStartedMs": episode.map_or(one.rested_ms, |held| held.first_turn_ms),
                         "lastTurnEndedMs": episode.map(|held| held.last_turn_ms),
@@ -14277,9 +14294,10 @@ pub const IDLE_WAITING_REASON: &str = "waiting_on_mail";
 
 /// One worker the window found with its lead at rest (t-15313): its turn
 /// over, whether or not work it left running held its `Stop` back
-/// (t-11233), since `rested_ms` on the pane's own clock — and whether it
-/// sleeps in a `check --wait` on its own inbox, which only the window that
-/// runs the wait can see. Built only by the window's beat, read only by
+/// (t-11233) — or, in a pane the person took over, ended by their hand —
+/// since `rested_ms` on the pane's own clock, and whether it sleeps in a
+/// `check --wait` on its own inbox, which only the window that runs the
+/// wait can see. Built only by the window's beat, read only by
 /// [`Ledger::workers_idle`].
 ///
 /// Idle is not done. Nothing that ends, releases or cleans up a worker reads

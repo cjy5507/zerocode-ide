@@ -3822,19 +3822,22 @@ fn pane_turns() -> &'static Mutex<std::collections::HashMap<u32, PaneTurn>> {
     TURNS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// When each pane's LEAD came to rest, for as long as it stays there
-/// (t-15313): its turn ended, uninterrupted, on the pane's own clock.
+/// When each pane's LEAD came to rest, and whether a person's interrupt
+/// ended that turn, for as long as it stays there (t-15313) — on the pane's
+/// own clock.
 ///
 /// Beside [`pane_turns`] rather than inside [`PaneTurn::Ended`], whose shape a
 /// restart's note keeps on disk. Written by every rest — the one a finished
 /// turn reports and the one a `Stop` held back by work the lead left running
-/// reports ([`pane_lead_rested`]) — and struck by the next turn's first word,
-/// by a person's interrupt and by the terminal going. The beat reads it to
-/// tell the ledger which leads are at rest ([`notify_idle_workers`]); nothing
-/// that ends, releases or cleans up a worker reads it, because a lead at rest
-/// beside a running build is not a finished worker (t-11233).
-fn pane_rests() -> &'static Mutex<std::collections::HashMap<u32, i64>> {
-    static RESTS: OnceLock<Mutex<std::collections::HashMap<u32, i64>>> = OnceLock::new();
+/// reports ([`pane_lead_rested`]) — and struck by the next turn's first word
+/// and by the terminal going. The beat reads it to tell the ledger which
+/// leads are at rest ([`notify_idle_workers`]); nothing that ends, releases
+/// or cleans up a worker reads it, because a lead at rest beside a running
+/// build is not a finished worker (t-11233).
+type PaneRests = std::collections::HashMap<u32, (i64, bool)>;
+
+fn pane_rests() -> &'static Mutex<PaneRests> {
+    static RESTS: OnceLock<Mutex<PaneRests>> = OnceLock::new();
     RESTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -4516,7 +4519,7 @@ fn garnish_idle_since(verb: Option<&str>, reply: &mut zerocode_hookd::TeamAnswer
         else {
             return;
         };
-        worker["idleSinceMs"] = serde_json::json!(rests.get(&term));
+        worker["idleSinceMs"] = serde_json::json!(rests.get(&term).map(|(since, _)| since));
     };
     match answer["workers"].as_array_mut() {
         Some(workers) => workers.iter_mut().for_each(garnish),
@@ -5061,12 +5064,13 @@ pub(crate) fn pane_lead_rested(term: u32, turn_ended_ms: i64, interrupted: bool)
     /* The rest the beat reports to the ledger (t-15313) — both rests,
      * because a lead back at its prompt beside its own `check --wait` loop
      * is exactly the worker nobody was told about on 2026-09-29. A turn the
-     * person cut short is theirs, not a worker at rest. */
-    let mut rests = pane_rests().lock().unwrap_or_else(|held| held.into_inner());
-    match interrupted {
-        false => rests.insert(term, turn_ended_ms),
-        true => rests.remove(&term),
-    };
+     * person cut short is kept too, and marked: it is theirs, and it counts
+     * only for a worker they have taken over, whose unread mail nothing
+     * else will ever tell. */
+    pane_rests()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(term, (turn_ended_ms, interrupted));
 }
 
 /// A pane's turn ended. Tell the ledger, in case that pane is a worker's.
@@ -5528,7 +5532,7 @@ fn notify_idle_workers(now_ms: i64) {
     let teams = crate::agent_teams::teams();
     let seats = index_team_seats(&teams);
     drop(teams);
-    let rests: std::collections::HashMap<u32, i64> = pane_rests()
+    let rests: PaneRests = pane_rests()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .clone();
@@ -5543,7 +5547,7 @@ fn notify_idle_workers(now_ms: i64) {
         .iter()
         .flat_map(|run| {
             run.workers.iter().filter_map(|worker| {
-                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                if !worker.state.is_live() || !worker.state.may_occupy_pane() {
                     return None;
                 }
                 let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
@@ -5558,7 +5562,14 @@ fn notify_idle_workers(now_ms: i64) {
                     .get(worker.team.as_str())?
                     .get(worker.pane.as_str())
                     .copied()?;
-                let rested_ms = *rests.get(&term)?;
+                // A person's interrupt is their hand on the pane: a rest
+                // only for a worker they have taken over (its unread mail
+                // is told, and nothing is typed there), never news about a
+                // worker at work on its own.
+                let (rested_ms, interrupted) = *rests.get(&term)?;
+                if interrupted && !worker.taken_over {
+                    return None;
+                }
                 let address = zerocode_core::orchestration::worker_address(&worker.id);
                 Some(zerocode_core::orchestration::IdleWorker {
                     worker: worker.id.clone(),
