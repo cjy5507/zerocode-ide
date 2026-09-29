@@ -32,6 +32,7 @@ mod mail_triage;
 pub(crate) mod restart_census;
 mod stall_cause;
 mod step_effort;
+mod summon_assign;
 mod summon_choice;
 mod summon_difficulty;
 mod summon_model;
@@ -3027,20 +3028,12 @@ impl Launcher for LiveCatalog {
         summon_difficulty::model_facts(agent, origin)
     }
 
-    fn choose_model(
+    fn choose_assign(
         &self,
-        asked: &zerocode_core::summon_model::ModelAsk,
+        asked: &zerocode_core::summon_assign::AssignAsk,
         origin: [&str; 3],
-    ) -> Option<serde_json::Value> {
-        summon_model::choose(asked, origin)
-    }
-
-    fn choose_difficulty(
-        &self,
-        look: &zerocode_core::summon_difficulty::Look,
-        origin: [&str; 3],
-    ) -> Option<serde_json::Value> {
-        summon_difficulty::choose(look, origin)
+    ) -> zerocode_core::summon_assign::Receipts {
+        summon_assign::choose(asked, origin)
     }
 
     fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {
@@ -9313,8 +9306,7 @@ fn carried(
                      * beat, and nothing below waits on it. */
                     if let Some(prepared) = decided.prepared_worker_start.as_ref() {
                         summon_choice::record(host, prepared, seated.as_deref(), now_ms);
-                        summon_difficulty::record(host, prepared, seated.as_deref(), now_ms);
-                        summon_model::record(host, prepared, seated.as_deref(), now_ms);
+                        summon_assign::record(host, prepared, seated.as_deref(), now_ms);
                     }
                     /* The seat report lands beside the receipt, best-effort:
                      * the pane is open and the answer below stands whatever

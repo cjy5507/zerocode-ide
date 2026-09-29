@@ -139,7 +139,8 @@ pub use config::{
     RuntimeFeatureConfig, RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig,
     RuntimeSecondBrainConfig, RuntimeShipConfig, ScopedMcpServerConfig, UntrustedMcpServer,
     TRUSTED_MCP_SERVERS_FILE, ZO_SETTINGS_SCHEMA_NAME,
-    persist_allow_always_rules, remove_mcp_server, trust_mcp_server, write_mcp_server,
+    persist_allow_always_rules, remove_mcp_server, trust_mcp_server, untrust_mcp_server,
+    write_mcp_server,
 };
 pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{
