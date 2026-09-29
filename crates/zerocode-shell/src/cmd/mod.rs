@@ -239,7 +239,7 @@ pub(crate) use settings::{
 
 pub(crate) use session::{
     boot_report, launch_plan_for_action, launch_recipes, list_agents, list_claude_sessions,
-    save_launch_recipe, session_info, set_default_agent,
+    save_launch_recipe, session_info, set_default_agent, stop_pane_helper,
 };
 
 pub(crate) use second_brain::{

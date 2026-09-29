@@ -11419,7 +11419,7 @@ function workerStatusWords(run) {
     : run.status === "idle" ? t("worker.idle", "대기 중")
       : run.status === "failed" ? t("worker.endedFailed", "실패")
         : run.status === "orphaned" ? t("worker.endedOrphaned", "종료됨")
-          : t("worker.ended", "완료");
+          : helperStopRecordWords(run.helper?.stopRecord);
   const skipped = run.helper?.skipped ? t("worker.recordsSkipped", "") : "";
   return skipped ? `${state} ${skipped}`.trim() : state;
 }
@@ -13917,14 +13917,13 @@ function workerWhereNode(run, owner) {
  * conversation's other helpers, each with its state. WHAT it was asked: a card
  * with the first sentences of the instruction, the conditions the instruction
  * states in words that can be quoted, and the whole text one press away. WHAT a
- * person can do here: the footer says who directs the helper and offers the
- * one road this page has, speaking to that parent. Stopping one helper is not
- * offered here yet: only a catalog row that names `helper_stop` (`AgentVoice`
- * in `zerocode-core`; zo's today) has a road that ends ONE helper, and its
- * button is a later piece. Esc and the session's cancel end the parent's whole
- * turn, so a button that promised a helper's stop would end that instead. The
- * later button is read from the row like the mark is, and still no name would
- * be written here.
+ * person can do here: the footer says who directs the helper and offers
+ * speaking to that parent — and, while the helper runs, stopping it, where the
+ * agent's catalog row names a road that ends ONE helper (`helper_stop`,
+ * `AgentVoice` in `zerocode-core`). Esc and the session's cancel end the
+ * parent's whole turn, so no other road stands in for a missing one: a row
+ * without it has no stop button. The button is read from the row like the
+ * mark is, and no name is written here (t-16943).
  *
  * The head is the same whatever agent ran the helper: the mark and its name
  * come from the catalog, and nothing below tells one agent from another. */
@@ -14318,12 +14317,11 @@ function paintHelperPageBrief(card, run) {
   syncHelperPageBrief(card, run);
 }
 
-/* The footer, where the composer stood: who directs this helper, and the one
- * thing a person can do from here. The press goes to the parent's page with
- * ITS input focused — the conversation's box when the parent is showing its
- * conversation, else the terminal's input. No stop yet: see the note above; the
- * group of controls is where a second one stands beside it, for a row that
- * names `helper_stop`. */
+/* The footer, where the composer stood: who directs this helper, and what a
+ * person can do from here. Speaking goes to the parent's page with ITS input
+ * focused — the conversation's box when the parent is showing its
+ * conversation, else the terminal's input. The stop stands beside it in the
+ * same group, laid in and taken out by `syncHelperPageStop`. */
 function helperPageFootNode(run, owner) {
   const foot = document.createElement("footer");
   foot.className = "helper-foot";
@@ -14352,6 +14350,118 @@ function updateHelperPageFoot(foot, run, owner) {
       ? t("helper.foot.says", "이 도우미는 “{{parent}}” 대화가 지시합니다.", { parent: tabLabel(owner) })
       : t("helper.foot.orphan", "이 도우미를 지시하던 대화가 닫혔습니다."),
   );
+  syncHelperPageStop(foot.querySelector(".helper-foot-actions"), run);
+}
+
+/* ---- stopping this one helper (t-16943) ----
+ *
+ * The button stands while the helper runs and its agent's catalog row names a
+ * road (`agentVoice(agent).helper_stop`); the backend reads the method from
+ * the same row (`stop_pane_helper`) and the window never names it. A press
+ * says "stopping…" and takes no second press until the answer; the answer's
+ * word stands for a beat, and then the roster decides: nothing here guesses
+ * that the helper stopped — the head's state and the sidebar's row move when
+ * the roster says so. An answer that comes back after the page was left is
+ * dropped: the button it was for is gone with that page. */
+const HELPER_STOP_TOLD_MS = 2400;
+
+function syncHelperPageStop(actions, run) {
+  if (!actions) return;
+  const held = actions.querySelector(".helper-foot-stop");
+  const busy = held !== null && held.__stop.phase !== "idle";
+  const wanted = busy || (run.status === "running" && Boolean(agentVoice(run.agent).helper_stop));
+  if (!wanted) {
+    if (held) {
+      clearTimeout(held.__stop.timer);
+      held.remove();
+      actions.querySelector(".helper-foot-told")?.remove();
+    }
+    return;
+  }
+  if (held) {
+    paintHelperPageStop(held);
+    return;
+  }
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.className = "helper-foot-stop";
+  stop.__stop = { phase: "idle", said: "", detail: "", timer: 0 };
+  stop.addEventListener("click", () => void stopHelperFromPage(stop, run));
+  // What the answer said, read out once; the button's own words change too.
+  const told = document.createElement("span");
+  told.className = "helper-foot-told helper-sr sr";
+  told.setAttribute("role", "status");
+  actions.append(stop, told);
+  paintHelperPageStop(stop);
+}
+
+function paintHelperPageStop(stop) {
+  const { phase, said, detail } = stop.__stop;
+  writeTextContent(
+    stop,
+    phase === "asking" ? t("helper.foot.stopping", "멈추는 중…")
+      : phase === "told" ? said
+        : t("helper.foot.stop", "이 도우미 멈추기"),
+  );
+  writeAttribute(stop, "aria-disabled", phase === "idle" ? "false" : "true");
+  writeClass(stop, "is-busy", phase !== "idle");
+  const tip = phase === "told" ? detail : "";
+  if (tip) writeAttribute(stop, "data-tip", tip);
+  else stop.removeAttribute("data-tip");
+  const told = stop.parentElement?.querySelector(".helper-foot-told");
+  if (told) writeTextContent(told, phase === "told" ? [said, detail].filter(Boolean).join(" — ") : "");
+}
+
+async function stopHelperFromPage(stop, run) {
+  const state = stop.__stop;
+  if (state.phase !== "idle") return;
+  state.phase = "asking";
+  paintHelperPageStop(stop);
+  let answer;
+  try {
+    answer = await invoke("stop_pane_helper", {
+      session: paneSessions.get(run.term)?.session?.id ?? "",
+      agent: run.agent,
+      agentId: run.helper.id,
+    });
+  } catch (error) {
+    answer = { status: "failed", detail: String(error) };
+  }
+  // The record is this helper's whichever page is showing: the head's state
+  // words read it once the roster says the helper ended.
+  if (answer?.record_key) run.helper.stopRecord = answer.record_key;
+  if (!stop.isConnected) return;
+  state.phase = "told";
+  state.said = helperStopWords(answer?.status);
+  state.detail = typeof answer?.detail === "string" ? answer.detail : "";
+  paintHelperPageStop(stop);
+  state.timer = setTimeout(() => {
+    state.phase = "idle";
+    if (stop.isConnected) syncHelperPageStop(stop.parentElement, run);
+  }, HELPER_STOP_TOLD_MS);
+}
+
+/* A finished helper's word: the plain one, unless the person's stop is what
+ * its record says ended it. */
+function helperStopRecordWords(record) {
+  const ended = t("worker.ended", "완료");
+  return record ? helperStopWords(record, ended) : ended;
+}
+
+/* The one mapping from what the stop answered — its `status`, or the
+ * `record_key` it left — to the window's words. A status it does not know is a
+ * stop that did not happen; a record it does not know says `otherwise`. */
+function helperStopWords(said, otherwise = t("helper.stop.failed", "멈추지 못했습니다")) {
+  switch (said) {
+    case "stopped": return t("helper.stop.stopped", "멈췄습니다");
+    case "closed": return t("helper.stop.closed", "쉬던 도우미를 닫았습니다");
+    case "already_finished": return t("helper.stop.alreadyFinished", "이미 끝난 도우미입니다");
+    case "not_found": return t("helper.stop.notFound", "이 도우미를 찾지 못했습니다");
+    case "not_owned": return t("helper.stop.notOwned", "이 대화의 도우미가 아닙니다");
+    case "unreachable": return t("helper.stop.unreachable", "도우미에 닿지 못했습니다");
+    case "stopped_by_person": return t("helper.stop.byPerson", "직접 멈춤");
+    default: return otherwise;
+  }
 }
 
 function speakToHelperParent(run) {
