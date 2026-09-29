@@ -1,7 +1,8 @@
 /* 입력줄 옆 「+」 — 파일·폴더·이미지 첨부 (t-2993, docs/design/composer-attachments.md §3 핀)
  *
- * 헬퍼 페이지의 입력줄(t-2973)에 첨부 모듈(ui/shell-attach.js)이 붙었는가를
- * 실제 레이아웃 엔진에서 잰다: 「+」가 도구 줄 맨 왼쪽에 이름을 달고 서고,
+ * 판의 대화 페이지의 입력줄(t-2973)에 첨부 모듈(ui/shell-attach.js)이 붙었는가를
+ * 실제 레이아웃 엔진에서 잰다(도우미의 페이지에는 입력줄이 없다 — 그 자리에 푸터가
+ * 선다, t-15683): 「+」가 도구 줄 맨 왼쪽에 이름을 달고 서고,
  * 메뉴 세 행이 조건대로 열리고 닫히는가(키보드까지), 브라우저의 답·OS 드롭·
  * ⌘V 그림이 같은 칩이 되는가, 보내기가 `term_paste`에 「글 + 빈 줄 + 첨부: +
  * 절대 경로들」을 그대로 싣고 Enter를 치는가, 없는 경로는 표시만 남고 가지
@@ -22,24 +23,24 @@ export async function testComposerAttach(page, ok, limits) {
     const seen = {};
     window.__ATTACH_H__ = {
       settle: (ms = 60) => new Promise((done) => setTimeout(done, ms)),
-      composer: () => document.querySelector("#worker-view .worker-composer"),
-      box: () => document.querySelector("#worker-view .worker-composer-box"),
-      plus: () => document.querySelector("#worker-view .composer-attach-plus"),
+      composer: () => document.querySelector(".pane-chat .worker-composer"),
+      box: () => document.querySelector(".pane-chat .worker-composer-box"),
+      plus: () => document.querySelector(".pane-chat .composer-attach-plus"),
       menu: () => document.querySelector(".composer-attach-menu"),
       rows: () =>
         [...(document.querySelector(".composer-attach-menu")?.querySelectorAll('[role="menuitem"]') ?? [])],
-      chips: () => [...document.querySelectorAll("#worker-view .composer-attach-chip")],
+      chips: () => [...document.querySelectorAll(".pane-chat .composer-attach-chip")],
       names: () =>
-        [...document.querySelectorAll("#worker-view .composer-attach-chip")]
+        [...document.querySelectorAll(".pane-chat .composer-attach-chip")]
           .map((chip) => chip.querySelector(".composer-attach-name")?.textContent ?? null),
       glyphs: () =>
-        [...document.querySelectorAll("#worker-view .composer-attach-chip")]
+        [...document.querySelectorAll(".pane-chat .composer-attach-chip")]
           .map((chip) => chip.querySelector("use")?.getAttribute("href") ?? null),
       key: (target, init) =>
         target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init })),
       toasts: () => document.querySelectorAll(".toast").length,
       submit: () =>
-        document.querySelector("#worker-view .worker-composer")
+        document.querySelector(".pane-chat .worker-composer")
           ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
       // 손잡이로 곧장: 메뉴·드롭·붙여넣기가 모두 지나는 그 문.
       addPaths: async (paths, wait = 150) => {
@@ -71,25 +72,26 @@ export async function testComposerAttach(page, ok, limits) {
       for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
     };
     // Between turns: a send while the pane works waits in the window's queue
-    // (`composer-queue`), and these pins are about what a send carries.
-    tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-attach" });
-    tell("hook:subagent", { term, rows: [{ id: "chip", name: "@chip" }] });
+    // (`composer-queue`), and these pins are about what a send carries. The
+    // composer stands on the pane's own conversation page; zo has no wire, so
+    // that page stays the transcript view and a send rides the pane.
+    tell("hook:agent", { term, state: "idle", agent: "zo", session: "s-attach" });
     await window.__PAINTED__();
-    window.__ANSWER__.subagent_log = () => ({
+    window.__ANSWER__.pane_log = () => ({
       found: true,
       next: 2,
       turns: [{ role: "user", text: "briefing" }, { role: "assistant", text: "ready" }],
+      skipped: false,
+      more: false,
+      folded: false,
+      model: "claude-opus-5",
     });
-    await openHelperPage(
-      { term, agent: "claude", worktree: owner.worktree, tab: owner },
-      { id: "chip", name: "@chip" },
-    );
+    await setPaneChat(term, true);
     await H.settle(120);
     // 열린 파일의 절대 경로는 창이 보는 체크아웃 아래다 — 하네스에는 그 자리가
     // 비어 있을 수 있으니 하나 세우고, 끝나면 되돌린다.
     window.__ATTACH__ = {
       term,
-      helperId: `helper:${term}:chip`,
       ownerId: owner.id,
       worktree: typeof owner.worktree === "string" ? owner.worktree : null,
       heldWorktreePath: activeWorktreePath,
@@ -143,7 +145,7 @@ export async function testComposerAttach(page, ok, limits) {
     window.__ANSWER__.read_text_file = () => ({ text: "# plan", version: "1:1" });
     await openFile("docs/plan.md");
     await H.settle(100);
-    setActiveTab(window.__ATTACH__.helperId);
+    setActiveTab(window.__ATTACH__.ownerId);
     await H.settle(60);
     H.plus()?.click();
     await H.settle();
@@ -560,12 +562,12 @@ export async function testComposerAttach(page, ok, limits) {
     delete window.__ANSWER__.path_kinds;
     delete window.__ANSWER__.term_paste;
     delete window.__ANSWER__.term_key;
-    delete window.__ANSWER__.subagent_log;
+    delete window.__ANSWER__.pane_log;
     delete window.__ANSWER__.read_text_file;
     window.openPathBrowser = window.__ATTACH__.heldBrowser;
     activeWorktreePath = window.__ATTACH__.heldWorktreePath;
     closeTab("file:docs/plan.md");
-    closeTab(window.__ATTACH__.helperId);
+    await setPaneChat(window.__ATTACH__.term, false);
     closeTab(window.__ATTACH__.ownerId);
     await H.settle(120);
     return seen;
