@@ -81,6 +81,8 @@ pub mod slash;
 pub mod summary;
 pub mod strings;
 pub mod tables;
+#[cfg(test)]
+mod test_screen;
 pub mod thinking;
 pub mod tools;
 pub mod transcript;

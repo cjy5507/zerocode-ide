@@ -1075,6 +1075,10 @@ fn set_scroll_region(out: &mut String, top: u16, bottom: u16) {
 }
 
 #[cfg(test)]
+#[path = "painter_cell_tests.rs"]
+mod cell_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{Painter, SYNC_BEGIN};
     use crate::tui::ansi::{Line, Span, Style};
