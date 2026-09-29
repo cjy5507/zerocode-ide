@@ -52,10 +52,22 @@ fn clock_nanos() -> u64 {
 }
 
 /// The number an id is made of, given the clock's reading `nanos` and the last
-/// number issued (`last`, which this records).
+/// number issued (`last`, which this records): the reading, or one past the
+/// last number when the clock has not moved on. The `Agent` calls of one message
+/// start side by side, and the clock alone hands two of them the same reading
+/// whenever it counts whole microseconds (macOS) — the second spawn would die on
+/// the manifest the first created.
 fn issue(last: &std::sync::atomic::AtomicU64, nanos: u64) -> u64 {
-    let _ = last;
-    nanos
+    use std::sync::atomic::Ordering;
+
+    // The closure always answers, so `fetch_update` hands back the value it
+    // replaced; the number issued is the one it stored.
+    let replaced = last
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |issued| {
+            Some(nanos.max(issued.saturating_add(1)))
+        })
+        .unwrap_or_else(|issued| issued);
+    nanos.max(replaced.saturating_add(1))
 }
 
 pub(super) fn slugify_agent_name(description: &str) -> String {
