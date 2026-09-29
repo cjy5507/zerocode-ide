@@ -1163,7 +1163,7 @@ fn printable(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{match_end_after, parse_ps_time, terminal_command, Terminal, CHILD_EXIT_TIMEOUT};
+    use super::{match_end_after, parse_ps_time, slave_device_path, terminal_command, Terminal, CHILD_EXIT_TIMEOUT};
     use std::fs::File;
     use std::io::Read;
     use std::process::Stdio;
@@ -1179,13 +1179,13 @@ mod tests {
         let pair = nix::pty::openpty(Some(&size), None::<&nix::sys::termios::Termios>).unwrap();
         let mut master = File::from(pair.master);
         let slave = File::from(pair.slave);
-        let path = nix::unistd::ttyname(&slave).unwrap();
+        let path = slave_device_path(&slave).unwrap();
         let binary = std::env::current_exe().unwrap();
         let name = format!(
             "{}::pty_sessions_do_not_inherit_the_runners_terminal",
             module_path!().split_once("::").unwrap().1,
         );
-        let mut command = terminal_command(&binary, terminal, Some(&path)).unwrap();
+        let mut command = terminal_command(&binary, terminal, &path);
         command
             .args(["--exact", &name, "--nocapture"])
             .env("ZO_E2E_PTY_PROBE", stage)
