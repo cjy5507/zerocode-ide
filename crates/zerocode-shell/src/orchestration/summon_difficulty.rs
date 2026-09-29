@@ -229,6 +229,9 @@ pub(super) fn model_facts(
 /// `agent-list`'s peek (t-14437). `None` while no lineup has been read at
 /// all, which is "nobody looked" and not "no choices".
 pub(super) fn rows(agent: &str) -> Option<Vec<difficulty::lineup::Row>> {
+    // `agent-list` asks once per catalog agent; one that cannot launch a
+    // difficulty at all has no rows, and costs no settings read.
+    zerocode_core::orchestration::difficulty_effort(agent, difficulty::LADDER[0].0)?;
     rows_in(
         &Wire::of_this_machine().settings_root(),
         agent,
