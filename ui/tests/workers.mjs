@@ -2851,6 +2851,57 @@ async function testHelperPage(page, ok) {
     delete window.__HPK__;
   });
 
+  /* ---- 좁은 창: 머리와 띠와 카드와 푸터가 옆으로 밀리지 않고, 목록도 남는다 ---- */
+  await page.setViewportSize({ width: 360, height: 780 });
+  const narrow = await page.evaluate(async (brief) => {
+    const { settle, shown, parts, scene, open, cleanup } = window.__HP__;
+    const long = "@a-helper-with-a-name-that-goes-on-and-on-and-on-past-any-width";
+    const roster = [
+      { id: "h-a", name: long, state: "running", model: "a-model-with-a-long-name-s", requestedModel: "another-long-model-name", effort: "high", tool_calls: 12 },
+      { id: "h-b", name: "@mapper", state: "running" },
+      { id: "h-c", name: `${long}-2`, state: "done" },
+      { id: "h-d", name: "@linter", state: "done" },
+    ];
+    const at = await scene(roster);
+    let p = await open(at, roster[0], { brief });
+    Object.assign(p.host.style, { position: "fixed", inset: "0", zIndex: "100", width: "100vw", height: "100vh" });
+    const seen = {};
+    const measure = (key) => {
+      const q = parts();
+      const view = q.host.getBoundingClientRect();
+      const inside = (node) => {
+        const box = node.getBoundingClientRect();
+        return box.left >= view.left - 1 && box.right <= view.right + 1;
+      };
+      seen[key] = {
+        noSideScroll: q.host.scrollWidth <= q.host.clientWidth + 1,
+        blocksInside: [q.head, q.sibs, q.card, q.foot].every((node) => node !== null && inside(node)),
+        chipsInside: [...q.host.querySelectorAll(".helper-sib, .helper-brief-tag, .helper-model, .helper-state, .helper-foot-speak, .helper-crumb-back")]
+          .filter(shown).every(inside),
+        listHeight: Math.round(q.turns?.getBoundingClientRect().height ?? 0),
+        speakShown: shown(q.foot?.querySelector(".helper-foot-speak")),
+        saysShown: shown(q.foot?.querySelector(".helper-foot-says")),
+      };
+    };
+    await settle(120);
+    measure("shut");
+    p.sibs?.querySelector(".helper-sib-fold")?.click();
+    p.card?.querySelector(".helper-brief-more")?.click();
+    await settle(120);
+    measure("open");
+    await cleanup();
+    return seen;
+  }, HELPER_BRIEFS.stated);
+  await page.setViewportSize({ width: 1280, height: 860 });
+  ok(
+    "at 360px wide the page does not scroll sideways with a long name, a long model, the strip and the card open, its footer's sentence and button both show, and the list of turns keeps room to read",
+    ["shut", "open"].every((key) =>
+      narrow[key].noSideScroll && narrow[key].blocksInside && narrow[key].chipsInside &&
+      narrow[key].speakShown && narrow[key].saysShown) &&
+      narrow.shut.listHeight >= 200 && narrow.open.listHeight >= 100,
+    JSON.stringify(narrow),
+  );
+
   /* ---- 나머지 페이지는 그대로다: 판의 대화는 제 입력줄과 제 머리를 지키고, 첫 말도 여전히 보인다 ---- */
   const paneKeeps = await page.evaluate(async () => {
     const { settle, shown, scene, cleanup } = window.__HP__;
